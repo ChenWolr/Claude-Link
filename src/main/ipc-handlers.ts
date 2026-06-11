@@ -5,10 +5,18 @@ import { IPC_CHANNELS } from '../shared/constants';
 import { clearConfig, getConfig, saveConfig } from './modules/config-manager';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess } from './modules/process-manager';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess } from './modules/process-manager';
+import {
+  startQueue,
+  pauseQueue,
+  resumeQueue,
+  interruptTask,
+  getQueueState,
+} from './modules/task-queue-engine';
 import { logger } from './utils/logger';
 import * as sessionRepo from './database/repositories/session-repo';
 import * as messageRepo from './database/repositories/message-repo';
+import * as taskRepo from './database/repositories/task-repo';
 
 let mainWindow: BrowserWindow;
 
@@ -54,7 +62,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         throw new Error(`Session ${sessionId} not found`);
       }
 
-      const existingProcess = getActiveProcessForSession(sessionId);
+      const existingProcess = getActiveProcess(sessionId);
       if (existingProcess) {
         sendMessage(sessionId, message);
         messageRepo.createMessage(sessionId, 'user', message, 'message');
@@ -77,8 +85,51 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.CHAT_ABORT, async (_event, sessionId: string) => {
     killProcess(sessionId);
   });
-}
 
-function getActiveProcessForSession(_sessionId: string): null {
-  return null;
+  // Tasks
+  ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, prompt: string) => {
+    const tasks = taskRepo.getTasksBySession(sessionId);
+    const sortOrder = tasks.length;
+    return taskRepo.createTask(sessionId, prompt, sortOrder);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TASK_REMOVE, async (_event, taskId: string) => {
+    taskRepo.deleteTask(taskId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TASK_GET_ALL, async (_event, sessionId: string) => {
+    return taskRepo.getTasksBySession(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TASK_REORDER, async (_event, sessionId: string, taskIds: string[]) => {
+    taskRepo.reorderTasks(sessionId, taskIds);
+    return taskRepo.getTasksBySession(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TASK_INTERRUPT, async (_event, taskId: string) => {
+    const task = taskRepo.getTask(taskId);
+    if (task) {
+      interruptTask(taskId, task.sessionId, mainWindow);
+    }
+  });
+
+  // Queue
+  ipcMain.handle(IPC_CHANNELS.QUEUE_START, async (_event, sessionId: string) => {
+    startQueue(sessionId, mainWindow);
+    return getQueueState(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.QUEUE_PAUSE, async (_event, sessionId: string) => {
+    pauseQueue(sessionId, mainWindow);
+    return getQueueState(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.QUEUE_RESUME, async (_event, sessionId: string) => {
+    resumeQueue(sessionId, mainWindow);
+    return getQueueState(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.QUEUE_GET_STATE, async (_event, sessionId: string) => {
+    return getQueueState(sessionId);
+  });
 }
