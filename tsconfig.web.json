@@ -1,0 +1,14 @@
+{
+  "extends": "@electron-toolkit/tsconfig/tsconfig.web.json",
+  "include": [
+    "src/renderer/**/*",
+    "src/shared/**/*"
+  ],
+  "compilerOptions": {
+    "outDir": "./out/renderer",
+    "moduleResolution": "bundler",
+    "paths": {
+      "@/*": ["./src/renderer/*"]
+    }
+  }
+}

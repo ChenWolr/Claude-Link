@@ -1,0 +1,8 @@
+.idea/
+node_modules/
+out/
+dist-electron/
+.env
+*.db
+*.db-wal
+*.db-shm

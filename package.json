@@ -1,0 +1,43 @@
+{
+  "name": "claude-link",
+  "version": "0.1.0",
+  "description": "Claude Code CLI Task Manager - Schedule, queue and manage Claude Code tasks",
+  "main": "./out/main/index.js",
+  "author": "Claude Link",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "postinstall": "electron-builder install-app-deps",
+    "rebuild": "electron-rebuild -f -w better-sqlite3",
+    "package:win": "electron-builder --win --publish never",
+    "typecheck": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@electron-toolkit/preload": "^3.0.1",
+    "@electron-toolkit/utils": "^4.0.0",
+    "better-sqlite3": "^11.9.1",
+    "electron-store": "^10.0.0",
+    "highlight.js": "^11.11.1",
+    "markdown-it": "^14.1.0",
+    "pinia": "^3.0.2",
+    "uuid": "^11.1.0",
+    "vue": "^3.5.13",
+    "vue-draggable-plus": "^0.6.0",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@electron-toolkit/tsconfig": "^1.0.1",
+    "@electron/rebuild": "^3.7.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^22.15.0",
+    "@types/uuid": "^10.0.0",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "electron": "^35.2.1",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^3.1.0",
+    "typescript": "^5.8.3",
+    "vue-tsc": "^2.2.8"
+  }
+}
