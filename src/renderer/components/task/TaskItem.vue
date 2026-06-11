@@ -3,7 +3,7 @@ import { ref } from 'vue';
 import type { Task } from '../../../shared/types/task';
 import TaskStatusBadge from './TaskStatusBadge.vue';
 
-const props = defineProps<{ task: Task }>();
+defineProps<{ task: Task }>();
 const emit = defineEmits<{
   delete: [taskId: string];
   interrupt: [taskId: string];

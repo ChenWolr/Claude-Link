@@ -5,6 +5,8 @@ import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
 import { detectCli } from './modules/cli-detector';
+import { killAllProcesses } from './modules/process-manager';
+import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
 
 let mainWindow: BrowserWindow | null = null;
@@ -29,6 +31,10 @@ function createWindow(): void {
     mainWindow?.show();
   });
 
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logger.error(`Renderer process gone: ${details.reason} (${details.exitCode})`);
+  });
+
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
@@ -46,8 +52,17 @@ app.whenReady().then(async () => {
   });
 
   try {
+    // Initialize database
     runMigrations(getConnection());
+
+    // Reset any tasks that were running when app was closed
+    // (since their processes died with the app)
+    taskRepo.resetRunningTasks();
+
+    // Detect Claude Code CLI
     await detectCli();
+
+    logger.info('Application initialized successfully');
   } catch (error) {
     logger.error('Failed to initialize application services', error);
   }
@@ -62,6 +77,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  killAllProcesses();
   closeConnection();
 
   if (process.platform !== 'darwin') {
@@ -70,5 +86,15 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  killAllProcesses();
   closeConnection();
+});
+
+// Global error handlers
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled rejection', reason instanceof Error ? reason : new Error(String(reason)));
 });

@@ -14,6 +14,7 @@ let cleanup: (() => void) | null = null;
 
 onMounted(() => {
   cleanup = startListening();
+  loadTasks();
 });
 
 onUnmounted(() => {

@@ -34,28 +34,29 @@ export const useTaskStore = defineStore('task', {
     },
     async reorderTasks(sessionId: string, taskIds: string[]) {
       try {
-        this.tasks = await window.claudeLink.reorderTasks(sessionId, taskIds);
+        await window.claudeLink.reorderTasks(sessionId, taskIds);
+        this.tasks = await window.claudeLink.getTasks(sessionId);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '排序任务失败';
       }
     },
     async startQueue(sessionId: string) {
       try {
-        this.queueState = await window.claudeLink.startQueue(sessionId);
+        await window.claudeLink.startQueue(sessionId);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '启动队列失败';
       }
     },
     async pauseQueue(sessionId: string) {
       try {
-        this.queueState = await window.claudeLink.pauseQueue(sessionId);
+        await window.claudeLink.pauseQueue(sessionId);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '暂停队列失败';
       }
     },
     async resumeQueue(sessionId: string) {
       try {
-        this.queueState = await window.claudeLink.resumeQueue(sessionId);
+        await window.claudeLink.resumeQueue(sessionId);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '恢复队列失败';
       }
