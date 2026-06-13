@@ -102,6 +102,13 @@ function formatJson() {
     advancedJsonError.value = e instanceof Error ? e.message : 'JSON 格式错误';
   }
 }
+
+async function handleImportSettings() {
+  const filePath = await window.claudeLink.pickSettingsFile();
+  if (filePath) {
+    await store.importSettings(filePath);
+  }
+}
 </script>
 
 <template>
@@ -143,6 +150,7 @@ function formatJson() {
 
         <ProviderSelect v-model="store.config.provider" />
         <ApiKeyInput v-model="store.config.apiKey" />
+        <div v-if="store.importedFields.has('apiKey')" class="imported-mark">✓ 已从 settings.json 导入</div>
 
         <label class="field">
           <span>请求地址（API Base URL） <span class="required">*</span></span>
@@ -154,6 +162,7 @@ function formatJson() {
           <small class="field-hint">
             填写兼容 Claude API 的服务端点。官方直连模式应使用 https://api.anthropic.com
           </small>
+          <div v-if="store.importedFields.has('apiBaseUrl')" class="imported-mark">✓ 已从 settings.json 导入</div>
           <div v-if="urlValidation.message" :class="['url-validation', `url-validation--${urlValidation.status}`]">
             {{ urlValidation.message }}
           </div>
@@ -165,6 +174,7 @@ function formatJson() {
           :loading="store.fetchingModels"
           @refresh="handleFetchModels"
         />
+        <div v-if="store.importedFields.has('defaultModel')" class="imported-mark">✓ 已从 settings.json 导入</div>
       </div>
 
       <!-- Advanced JSON -->
@@ -177,6 +187,8 @@ function formatJson() {
           <p class="advanced-hint">
             此处可配置完整的 settings.json 内容，支持所有字段（如 model、alwaysThinkingEnabled、ccSwitchProviderId、codemossProviderId 等）
           </p>
+          <button type="button" class="import-btn" @click="handleImportSettings">导入 settings.json</button>
+          <div v-if="store.importedFields.has('advancedJson')" class="imported-mark">✓ 已从 settings.json 导入</div>
           <button type="button" class="format-btn" @click="formatJson">格式化</button>
           <textarea
             v-model="store.config.advancedJson"
@@ -451,5 +463,21 @@ input[type='number'] {
 
 .url-validation--empty {
   color: var(--color-text-muted);
+}
+
+.import-btn {
+  justify-self: start;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: rgba(58, 166, 117, 0.08);
+  color: var(--color-accent-strong);
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.imported-mark {
+  color: var(--color-accent-strong);
+  font-size: 12px;
 }
 </style>

@@ -8,7 +8,11 @@ interface CacheEntry {
 const cache = new Map<string, CacheEntry>();
 const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 
-export async function fetchAvailableModels(provider: AppConfig['provider'], apiKey: string): Promise<ModelInfo[]> {
+export async function fetchAvailableModels(
+  provider: AppConfig['provider'],
+  apiKey: string,
+  apiBaseUrl?: string,
+): Promise<ModelInfo[]> {
   const key = `${provider}:${apiKey.slice(-8)}`;
   const cached = cache.get(key);
 
@@ -20,7 +24,8 @@ export async function fetchAvailableModels(provider: AppConfig['provider'], apiK
     return [];
   }
 
-  const response = await fetch('https://api.anthropic.com/v1/models', {
+  const baseUrl = apiBaseUrl?.trim() || 'https://api.anthropic.com';
+  const response = await fetch(`${baseUrl}/v1/models`, {
     headers: {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',

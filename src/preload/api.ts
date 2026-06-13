@@ -12,6 +12,13 @@ export interface ClaudeLinkAPI {
   getConfig: () => Promise<AppConfig>;
   saveConfig: (config: Partial<AppConfig>) => Promise<AppConfig>;
   clearConfig: () => Promise<AppConfig>;
+  importSettings: (filePath: string) => Promise<{
+    apiKey?: string;
+    apiBaseUrl?: string;
+    defaultModel?: string;
+    advancedJson: string;
+  }>;
+  pickSettingsFile: () => Promise<string | null>;
   fetchModels: (provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) => Promise<ModelInfo[]>;
   listSessions: () => Promise<Session[]>;
   createSession: (name: string) => Promise<Session>;
@@ -47,6 +54,8 @@ export function createApi(): ClaudeLinkAPI {
     getConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET),
     saveConfig: (config) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SAVE, config),
     clearConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_CLEAR),
+    importSettings: (filePath) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, filePath),
+    pickSettingsFile: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE) as Promise<string | null>,
     fetchModels: (provider, apiKey, apiBaseUrl) => ipcRenderer.invoke(IPC_CHANNELS.MODELS_FETCH, provider, apiKey, apiBaseUrl),
     listSessions: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LIST),
     createSession: (name) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_CREATE, name),

@@ -6,6 +6,8 @@ export const IPC_CHANNELS = {
   CONFIG_GET: 'config:get',
   CONFIG_SAVE: 'config:save',
   CONFIG_CLEAR: 'config:clear',
+  CONFIG_IMPORT_SETTINGS: 'config:importSettings',
+  CONFIG_PICK_SETTINGS_FILE: 'config:pickSettingsFile',
   MODELS_FETCH: 'models:fetch',
   SESSION_LIST: 'session:list',
   SESSION_CREATE: 'session:create',

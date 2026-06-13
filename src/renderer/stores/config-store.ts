@@ -29,6 +29,7 @@ export const useConfigStore = defineStore('config', {
     detectingCli: false,
     fetchingModels: false,
     error: null as string | null,
+    importedFields: new Set<string>(),
   }),
   actions: {
     async loadConfig() {
@@ -81,6 +82,29 @@ export const useConfigStore = defineStore('config', {
         this.error = error instanceof Error ? error.message : '获取模型列表失败';
       } finally {
         this.fetchingModels = false;
+      }
+    },
+    async importSettings(filePath: string) {
+      try {
+        const extracted = await window.claudeLink.importSettings(filePath);
+        if (extracted.apiKey) {
+          this.config.apiKey = extracted.apiKey;
+          this.importedFields.add('apiKey');
+        }
+        if (extracted.apiBaseUrl) {
+          this.config.apiBaseUrl = extracted.apiBaseUrl;
+          this.importedFields.add('apiBaseUrl');
+        }
+        if (extracted.defaultModel) {
+          this.config.defaultModel = extracted.defaultModel;
+          this.importedFields.add('defaultModel');
+        }
+        if (extracted.advancedJson && extracted.advancedJson !== '{}') {
+          this.config.advancedJson = extracted.advancedJson;
+          this.importedFields.add('advancedJson');
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '导入失败';
       }
     },
   },

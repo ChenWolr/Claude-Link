@@ -1,8 +1,8 @@
-import { BrowserWindow, ipcMain } from 'electron';
+import { BrowserWindow, dialog, ipcMain } from 'electron';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { IPC_CHANNELS } from '../shared/constants';
-import { clearConfig, getConfig, saveConfig } from './modules/config-manager';
+import { clearConfig, getConfig, importSettingsFile, saveConfig } from './modules/config-manager';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
 import { spawnForChat, sendMessage, killProcess, getActiveProcess } from './modules/process-manager';
@@ -31,6 +31,18 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfig());
   ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => saveConfig(partial));
   ipcMain.handle(IPC_CHANNELS.CONFIG_CLEAR, async () => clearConfig());
+  ipcMain.handle(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, async (_event, filePath: string) => {
+    return importSettingsFile(filePath);
+  });
+  ipcMain.handle(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE, async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile'],
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+      title: '选择 Claude Code settings.json',
+    });
+    if (result.canceled || !result.filePaths.length) return null;
+    return result.filePaths[0];
+  });
   ipcMain.handle(
     IPC_CHANNELS.MODELS_FETCH,
     async (_event, provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) =>

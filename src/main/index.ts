@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron';
+import { app, BrowserWindow, Menu } from 'electron';
 import { join } from 'path';
 import { electronApp, is, optimizer } from '@electron-toolkit/utils';
 import { closeConnection, getConnection } from './database/connection';
@@ -29,6 +29,9 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show();
+    if (process.platform === 'win32') {
+      Menu.setApplicationMenu(null);
+    }
   });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
