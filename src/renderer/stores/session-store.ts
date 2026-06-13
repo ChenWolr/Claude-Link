@@ -51,6 +51,17 @@ export const useSessionStore = defineStore('session', {
         this.error = error instanceof Error ? error.message : '删除会话失败';
       }
     },
+    async searchSessions(query: string) {
+      if (!query.trim()) {
+        await this.loadSessions();
+        return;
+      }
+      try {
+        this.sessions = await window.claudeLink.searchSessions(query);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '搜索会话失败';
+      }
+    },
     addMessage(message: Message) {
       this.messages.push(message);
     },

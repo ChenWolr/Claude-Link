@@ -1,23 +1,46 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 
 const store = useSessionStore();
+const router = useRouter();
+const searchQuery = ref('');
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(() => {
   store.loadSessions();
 });
 
 async function handleNewSession() {
-  await store.createSession(`会话 ${store.sessions.length + 1}`);
+  const session = await store.createSession(`会话 ${store.sessions.length + 1}`);
+  if (session) {
+    await store.switchSession(session);
+    router.push('/');
+  }
 }
 
 async function openSession(session: { id: string }) {
   const found = store.sessions.find((s) => s.id === session.id);
   if (found) {
     await store.switchSession(found);
+    router.push('/');
   }
 }
+
+function handleSearchInput() {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    store.searchSessions(searchQuery.value);
+  }, 300);
+}
+
+function handleSearchClear() {
+  searchQuery.value = '';
+  store.loadSessions();
+}
+
+const sessionList = computed(() => store.sessions);
 </script>
 
 <template>
@@ -30,18 +53,27 @@ async function openSession(session: { id: string }) {
       </div>
     </div>
 
-    <input class="sidebar__search" type="search" placeholder="搜索会话" />
+    <input
+      v-model="searchQuery"
+      class="sidebar__search"
+      type="search"
+      placeholder="搜索会话"
+      @input="handleSearchInput"
+      @search="handleSearchClear"
+    />
 
     <nav class="sidebar__sessions">
       <div
-        v-for="session in store.sessions"
+        v-for="session in sessionList"
         :key="session.id"
         :class="['session-link', { active: store.activeSession?.id === session.id }]"
         @click="openSession(session)"
       >
         {{ session.name }}
       </div>
-      <div v-if="!store.sessions.length" class="sidebar__empty">暂无会话</div>
+      <div v-if="!sessionList.length" class="sidebar__empty">
+        {{ searchQuery ? '未找到匹配的会话' : '暂无会话' }}
+      </div>
     </nav>
 
     <div class="sidebar__footer">
