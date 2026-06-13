@@ -18,8 +18,6 @@ onMounted(async () => {
   await store.detectCli();
 });
 
-const modelKeys = computed(() => ['sonnet', 'opus', 'haiku']);
-
 const advancedJsonValid = computed(() => {
   if (!store.config.advancedJson || store.config.advancedJson === '{}') return true;
   try {
@@ -167,21 +165,6 @@ function formatJson() {
           :loading="store.fetchingModels"
           @refresh="handleFetchModels"
         />
-      </div>
-
-      <!-- Model Mapping -->
-      <div class="section">
-        <h3 class="section-title">模型映射（会注入到 JSON 的 env 里）</h3>
-        <div class="model-mapping-grid">
-          <label v-for="key in modelKeys" :key="key" class="field">
-            <span>{{ key.charAt(0).toUpperCase() + key.slice(1) }} 默认模型</span>
-            <input
-              v-model="store.config.modelMapping[key]"
-              type="text"
-              :placeholder="`例如：claude-${key}-4-6`"
-            />
-          </label>
-        </div>
       </div>
 
       <!-- Advanced JSON -->
@@ -372,11 +355,6 @@ input[type='number'] {
   color: var(--color-text);
   padding: 10px 12px;
   font-size: 13px;
-}
-
-.model-mapping-grid {
-  display: grid;
-  gap: 12px;
 }
 
 .accordion-toggle {

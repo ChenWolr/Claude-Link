@@ -1,7 +1,11 @@
 export interface AppConfig {
   provider: 'anthropic' | 'openrouter' | 'bedrock' | 'vertex';
+  providerName: string;
+  providerNote: string;
   apiKey: string;
+  apiBaseUrl: string;
   defaultModel: string;
+  advancedJson: string;
   cliPath: string | null;
   cliVersion: string | null;
   workingDirectory: string | null;

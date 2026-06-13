@@ -23,6 +23,38 @@ function getCliCommand(): string {
   return config.cliPath || 'claude';
 }
 
+function buildSpawnEnv(): Record<string, string> {
+  const config = getConfig();
+  const env: Record<string, string> = { ...process.env as Record<string, string> };
+
+  // Inject API Key so CLI can authenticate
+  if (config.apiKey) {
+    env.ANTHROPIC_API_KEY = config.apiKey;
+  }
+
+  // Inject custom API Base URL if not the official endpoint
+  const baseUrl = config.apiBaseUrl?.trim();
+  if (baseUrl && baseUrl !== 'https://api.anthropic.com') {
+    env.ANTHROPIC_BASE_URL = baseUrl;
+  }
+
+  // Inject advanced JSON as environment variables
+  if (config.advancedJson && config.advancedJson !== '{}') {
+    try {
+      const advanced = JSON.parse(config.advancedJson) as Record<string, unknown>;
+      for (const [key, value] of Object.entries(advanced)) {
+        if (typeof value === 'string') {
+          env[key] = value;
+        }
+      }
+    } catch {
+      logger.warn('Failed to parse advancedJson for env injection');
+    }
+  }
+
+  return env;
+}
+
 function buildCommonArgs(sessionId: string, opts: SpawnOptions): string[] {
   const config = getConfig();
   const args: string[] = [];
@@ -162,7 +194,7 @@ export function spawnForChat(
   const child = spawn(getCliCommand(), args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
+    env: buildSpawnEnv(),
   });
 
   processes.set(sessionId, child);
@@ -194,7 +226,7 @@ export function spawnForTask(
   const child = spawn(getCliCommand(), args, {
     cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...process.env },
+    env: buildSpawnEnv(),
   });
 
   processes.set(sessionId, child);

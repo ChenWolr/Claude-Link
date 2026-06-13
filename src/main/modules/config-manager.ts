@@ -4,9 +4,10 @@ import type { AppConfig } from '../../shared/types/config';
 import { DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
 import { logger } from '../utils/logger';
 
-interface StoredConfig extends Omit<AppConfig, 'apiKey'> {
+interface StoredConfig extends Omit<AppConfig, 'apiKey' | 'advancedJson'> {
   encryptedApiKey: string | null;
   apiKeyEncoding: 'safeStorage' | 'plain' | null;
+  advancedJson: string;
 }
 
 const ElectronStore =
@@ -27,9 +28,13 @@ const ElectronStoreCtor = ElectronStore as unknown as new (
 
 const defaultConfig: StoredConfig = {
   provider: 'anthropic',
+  providerName: 'Anthropic',
+  providerNote: '',
   encryptedApiKey: null,
   apiKeyEncoding: null,
+  apiBaseUrl: 'https://api.anthropic.com',
   defaultModel: 'claude-sonnet-4-6',
+  advancedJson: '{}',
   cliPath: null,
   cliVersion: null,
   workingDirectory: null,
@@ -77,10 +82,15 @@ function decryptApiKey(config: StoredConfig): string {
 
 export function getConfig(): AppConfig {
   const config = store.store;
+  const advancedJsonRaw = typeof config.advancedJson === 'string' && config.advancedJson ? config.advancedJson : '{}';
   return {
     provider: config.provider,
+    providerName: config.providerName ?? 'Anthropic',
+    providerNote: config.providerNote ?? '',
     apiKey: decryptApiKey(config),
+    apiBaseUrl: config.apiBaseUrl ?? 'https://api.anthropic.com',
     defaultModel: config.defaultModel,
+    advancedJson: advancedJsonRaw,
     cliPath: config.cliPath,
     cliVersion: config.cliVersion,
     workingDirectory: config.workingDirectory,
@@ -92,8 +102,8 @@ export function getConfig(): AppConfig {
 
 export function saveConfig(partial: Partial<AppConfig>): AppConfig {
   const { apiKey, ...rest } = partial;
-
-  store.set(rest as Partial<StoredConfig>);
+  const storage = { ...rest } as Partial<StoredConfig>;
+  store.set(storage);
 
   if (apiKey !== undefined) {
     const encrypted = encryptApiKey(apiKey);

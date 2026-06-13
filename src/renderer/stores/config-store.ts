@@ -5,8 +5,12 @@ import { DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
 
 const defaultConfig: AppConfig = {
   provider: 'anthropic',
+  providerName: 'Anthropic',
+  providerNote: '',
   apiKey: '',
+  apiBaseUrl: 'https://api.anthropic.com',
   defaultModel: 'claude-sonnet-4-6',
+  advancedJson: '{}',
   cliPath: null,
   cliVersion: null,
   workingDirectory: null,
@@ -72,7 +76,7 @@ export const useConfigStore = defineStore('config', {
       this.fetchingModels = true;
       this.error = null;
       try {
-        this.models = await window.claudeLink.fetchModels(this.config.provider, this.config.apiKey);
+        this.models = await window.claudeLink.fetchModels(this.config.provider, this.config.apiKey, this.config.apiBaseUrl);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '获取模型列表失败';
       } finally {
