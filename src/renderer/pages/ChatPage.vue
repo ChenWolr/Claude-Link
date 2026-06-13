@@ -6,6 +6,7 @@ import { useStream } from '../composables/use-stream';
 import { useTaskStore } from '../stores/task-store';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
+import CommandToolbar from '../components/chat/CommandToolbar.vue';
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
@@ -29,6 +30,15 @@ async function handleSend(text: string) {
   await sendMessage(text);
 }
 
+async function handleSendCommand(command: string) {
+  await sendMessage(command);
+}
+
+async function handleCompress() {
+  if (!store.activeSession) return;
+  await sendMessage('/compact');
+}
+
 async function handleNewSession() {
   const session = await store.createSession(`会话 ${store.sessions.length + 1}`);
   if (session) {
@@ -42,6 +52,7 @@ async function handleNewSession() {
   <section class="chat-page">
     <template v-if="store.activeSession">
       <MessageList :messages="store.messages" :streaming-content="displayContent" />
+      <CommandToolbar @send-command="handleSendCommand" @compress="handleCompress" />
       <ChatInput :disabled="sending" @send="handleSend" />
       <button v-if="sending" class="abort-button" type="button" @click="abort">中断</button>
     </template>
