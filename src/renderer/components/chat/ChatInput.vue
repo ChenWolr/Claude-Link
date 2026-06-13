@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { SLASH_COMMANDS } from '../../../shared/constants';
 
 defineProps<{
@@ -13,6 +13,7 @@ const emit = defineEmits<{
 const text = ref('');
 const showSlashMenu = ref(false);
 const selectedSlashIndex = ref(0);
+const wrapperRef = ref<HTMLElement | null>(null);
 
 const matchingCommands = computed(() => {
   if (!text.value.startsWith('/')) return [];
@@ -69,10 +70,24 @@ function submit(): void {
   text.value = '';
   showSlashMenu.value = false;
 }
+
+function handleClickOutside(event: MouseEvent) {
+  if (showSlashMenu.value && wrapperRef.value && !wrapperRef.value.contains(event.target as Node)) {
+    showSlashMenu.value = false;
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('click', handleClickOutside);
+});
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside);
+});
 </script>
 
 <template>
-  <div class="chat-input-wrapper">
+  <div ref="wrapperRef" class="chat-input-wrapper">
     <div v-if="showSlashMenu" class="slash-menu">
       <div
         v-for="(cmd, i) in matchingCommands"

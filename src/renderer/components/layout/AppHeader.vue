@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useConfigStore } from '../../stores/config-store';
 
@@ -7,6 +7,7 @@ const sessionStore = useSessionStore();
 const configStore = useConfigStore();
 const showModelDropdown = ref(false);
 const customModelInput = ref('');
+const dropdownRef = ref<HTMLElement | null>(null);
 
 const currentModel = computed(() => {
   if (sessionStore.activeSession?.modelOverride) {
@@ -48,9 +49,28 @@ async function applyCustomModel() {
   customModelInput.value = '';
 }
 
+function handleClickOutside(event: MouseEvent) {
+  if (showModelDropdown.value && dropdownRef.value && !dropdownRef.value.contains(event.target as Node)) {
+    showModelDropdown.value = false;
+  }
+}
+
+function handleEscape() {
+  if (showModelDropdown.value) {
+    showModelDropdown.value = false;
+  }
+}
+
 onMounted(async () => {
   await configStore.loadConfig();
   await configStore.fetchModels();
+  document.addEventListener('click', handleClickOutside);
+  document.addEventListener('keydown', handleEscape);
+});
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside);
+  document.removeEventListener('keydown', handleEscape);
 });
 </script>
 
@@ -60,7 +80,7 @@ onMounted(async () => {
       <p class="app-header__label">当前会话</p>
       <h2>{{ sessionStore.activeSession?.name ?? '未选择会话' }}</h2>
     </div>
-    <div class="model-selector">
+    <div ref="dropdownRef" class="model-selector">
       <button type="button" class="model-selector__button" @click="showModelDropdown = !showModelDropdown">
         {{ displayModel }}
       </button>

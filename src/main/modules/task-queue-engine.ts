@@ -222,7 +222,9 @@ export function continueWithUserMessage(
   sendMessage(sessionId, message);
 
   // When the continuation process exits, reset countdown for next task
-  child.on('exit', () => {
+  child.on('exit', (code) => {
+    state.currentTaskId = null;
+
     const remaining = taskRepo.getPendingTasks(sessionId);
     state.pendingCount = remaining.length;
 

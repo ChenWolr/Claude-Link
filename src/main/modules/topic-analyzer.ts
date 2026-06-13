@@ -18,8 +18,22 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
 
   const baseUrl = config.apiBaseUrl?.trim() || 'https://api.anthropic.com';
   const isAnthropic = baseUrl.includes('api.anthropic.com');
-  const endpoint = isAnthropic ? '/v1/messages' : (baseUrl.endsWith('/v1') ? '/messages' : '/v1/messages');
-  const url = new URL(endpoint, baseUrl);
+
+  // Build the full API URL using string concatenation to avoid
+  // new URL() path resolution that drops /v1 from base URLs.
+  let urlStr: string;
+  if (isAnthropic) {
+    urlStr = 'https://api.anthropic.com/v1/messages';
+  } else if (baseUrl.endsWith('/v1') || baseUrl.endsWith('/v1/')) {
+    // Third-party endpoint already has /v1 - just append /messages
+    const base = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
+    urlStr = base + 'messages';
+  } else {
+    // Third-party endpoint without /v1 - add /v1/messages
+    const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+    urlStr = base + '/v1/messages';
+  }
+  const url = new URL(urlStr);
 
   const requestBody = JSON.stringify({
     model: 'claude-haiku-4-6',

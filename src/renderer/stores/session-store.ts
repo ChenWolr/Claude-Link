@@ -71,12 +71,17 @@ export const useSessionStore = defineStore('session', {
         this.messages.filter((m) => m.role === 'user').length === 1 &&
         this.activeSession?.name.startsWith('会话')
       ) {
-        window.claudeLink.analyzeTopic(this.activeSession.id, message.content).then((topic) => {
-          if (topic && this.activeSession) {
-            this.activeSession.name = topic;
-            // Refresh sidebar session list
+        const sessionId = this.activeSession.id;
+        window.claudeLink.analyzeTopic(sessionId, message.content).then((topic) => {
+          if (topic) {
+            // Only update if still on the same session
+            if (this.activeSession?.id === sessionId) {
+              this.activeSession.name = topic;
+            }
             this.loadSessions();
           }
+        }).catch(() => {
+          // Silently ignore topic analysis failures (fallback is applied by main process)
         });
       }
     },

@@ -126,7 +126,12 @@ function attachStreamParser(
   });
 
   childProcess.on('exit', (code) => {
-    processes.delete(sessionId);
+    // Only remove from map if this is still the active process for the session.
+    // Avoids race: if a new process was spawned for the same session before
+    // this old one fully exited, we must not evict the new child.
+    if (processes.get(sessionId) === childProcess) {
+      processes.delete(sessionId);
+    }
     logger.info(`CLI process exited [${sessionId}] code=${code}`);
   });
 }
