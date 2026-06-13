@@ -1,5 +1,6 @@
 :root {
   color-scheme: dark;
+  /* Default theme — can be overridden by ThemePalette selection at runtime */
   --color-bg: #0f1115;
   --color-panel: #161a22;
   --color-panel-soft: #1d2330;

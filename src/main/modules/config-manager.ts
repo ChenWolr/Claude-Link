@@ -2,7 +2,7 @@ import ElectronStoreModule from 'electron-store';
 import { app, safeStorage } from 'electron';
 import * as fs from 'fs';
 import type { AppConfig } from '../../shared/types/config';
-import { DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
+import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID } from '../../shared/constants';
 import { logger } from '../utils/logger';
 
 interface StoredConfig extends Omit<AppConfig, 'apiKey' | 'advancedJson'> {
@@ -42,6 +42,7 @@ const defaultConfig: StoredConfig = {
   permissionMode: 'default',
   maxTurns: 200,
   taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
+  themePaletteId: DEFAULT_THEME_PALETTE_ID,
 };
 
 const store = new ElectronStoreCtor({
@@ -98,6 +99,7 @@ export function getConfig(): AppConfig {
     permissionMode: config.permissionMode,
     maxTurns: config.maxTurns,
     taskDelaySeconds: config.taskDelaySeconds,
+    themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,
   };
 }
 

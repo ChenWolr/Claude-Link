@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import type { AppConfig, ModelInfo } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
-import { DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
+import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID } from '../../shared/constants';
 
 const defaultConfig: AppConfig = {
   provider: 'anthropic',
@@ -17,6 +17,7 @@ const defaultConfig: AppConfig = {
   permissionMode: 'default',
   maxTurns: 200,
   taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
+  themePaletteId: DEFAULT_THEME_PALETTE_ID,
 };
 
 export const useConfigStore = defineStore('config', {

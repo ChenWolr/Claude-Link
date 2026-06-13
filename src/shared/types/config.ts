@@ -12,6 +12,7 @@ export interface AppConfig {
   permissionMode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
   maxTurns: number;
   taskDelaySeconds: number;
+  themePaletteId: string;
 }
 
 export interface ProviderInfo {

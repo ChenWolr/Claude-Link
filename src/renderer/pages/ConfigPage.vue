@@ -5,6 +5,8 @@ import { useConfigStore } from '../stores/config-store';
 import ProviderSelect from '../components/config/ProviderSelect.vue';
 import ApiKeyInput from '../components/config/ApiKeyInput.vue';
 import ModelSelect from '../components/config/ModelSelect.vue';
+import ThemeSelector from '../components/config/ThemeSelector.vue';
+import { THEME_PALETTES } from '../../shared/constants';
 
 const store = useConfigStore();
 const router = useRouter();
@@ -108,6 +110,26 @@ async function handleImportSettings() {
   if (filePath) {
     await store.importSettings(filePath);
   }
+}
+
+function handleThemeSelect(paletteId: string) {
+  store.config.themePaletteId = paletteId;
+  applyTheme(paletteId);
+}
+
+function applyTheme(paletteId: string) {
+  const palette = THEME_PALETTES.find((p) => p.id === paletteId);
+  if (!palette) return;
+  const root = document.documentElement;
+  root.style.setProperty('--color-bg', palette.colors.bg);
+  root.style.setProperty('--color-panel', palette.colors.panel);
+  root.style.setProperty('--color-panel-soft', palette.colors.panelSoft);
+  root.style.setProperty('--color-border', palette.colors.border);
+  root.style.setProperty('--color-text', palette.colors.text);
+  root.style.setProperty('--color-text-muted', palette.colors.textMuted);
+  root.style.setProperty('--color-accent', palette.colors.accent);
+  root.style.setProperty('--color-accent-strong', palette.colors.accentStrong);
+  root.style.setProperty('--color-danger', palette.colors.danger);
 }
 </script>
 
@@ -223,6 +245,12 @@ async function handleImportSettings() {
           <span>最大轮次</span>
           <input v-model.number="store.config.maxTurns" type="number" min="1" />
         </label>
+      </div>
+
+      <!-- Appearance Settings -->
+      <div class="section">
+        <h3 class="section-title">外观设置</h3>
+        <ThemeSelector :selected-id="store.config.themePaletteId" @select="handleThemeSelect" />
       </div>
 
       <button class="save-button" type="submit" :disabled="store.savingConfig">
