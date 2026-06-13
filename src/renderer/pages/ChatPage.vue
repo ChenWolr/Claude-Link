@@ -55,6 +55,7 @@ async function handleNewSession() {
   min-height: 0;
   flex: 1;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .empty-state {

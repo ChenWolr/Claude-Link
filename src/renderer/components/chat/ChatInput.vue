@@ -43,6 +43,8 @@ function submit(): void {
 .chat-input {
   display: flex;
   gap: 10px;
+  max-width: 800px;
+  margin: 0 auto;
   padding: 16px 24px;
   border-top: 1px solid var(--color-border);
   background: var(--color-panel);

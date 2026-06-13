@@ -39,7 +39,7 @@ const isTaskPanelOpen = ref(true);
 .workspace-main {
   min-height: 0;
   flex: 1;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .reopen-task-panel {
