@@ -1,5 +1,5 @@
-import Store from 'electron-store';
-import { safeStorage } from 'electron';
+import ElectronStoreModule from 'electron-store';
+import { app, safeStorage } from 'electron';
 import type { AppConfig } from '../../shared/types/config';
 import { DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
 import { logger } from '../utils/logger';
@@ -8,6 +8,22 @@ interface StoredConfig extends Omit<AppConfig, 'apiKey'> {
   encryptedApiKey: string | null;
   apiKeyEncoding: 'safeStorage' | 'plain' | null;
 }
+
+const ElectronStore =
+  (ElectronStoreModule as unknown as { default?: typeof ElectronStoreModule }).default ??
+  ElectronStoreModule;
+
+const ElectronStoreCtor = ElectronStore as unknown as new (
+  options?: {
+    name?: string;
+    projectName?: string;
+    defaults?: StoredConfig;
+  },
+) => {
+  store: StoredConfig;
+  set(value: Partial<StoredConfig>): void;
+  clear(): void;
+};
 
 const defaultConfig: StoredConfig = {
   provider: 'anthropic',
@@ -22,8 +38,9 @@ const defaultConfig: StoredConfig = {
   taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
 };
 
-const store = new Store<StoredConfig>({
+const store = new ElectronStoreCtor({
   name: 'claude-link-config',
+  projectName: app.getName(),
   defaults: defaultConfig,
 });
 

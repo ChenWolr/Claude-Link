@@ -34,8 +34,8 @@ export const useTaskStore = defineStore('task', {
     },
     async reorderTasks(sessionId: string, taskIds: string[]) {
       try {
-        await window.claudeLink.reorderTasks(sessionId, taskIds);
-        this.tasks = await window.claudeLink.getTasks(sessionId);
+        const reordered = await window.claudeLink.reorderTasks(sessionId, taskIds);
+        this.tasks = reordered;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '排序任务失败';
       }

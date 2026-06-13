@@ -34,7 +34,7 @@ export const useSessionStore = defineStore('session', {
       this.streamingContent = '';
       this.messages = [];
       try {
-        this.messages = await window.claudeLink.getSession(session.id) as unknown as Message[];
+        this.messages = await window.claudeLink.getSessionMessages(session.id);
       } catch {
         // session may have no messages yet
       }

@@ -25,10 +25,36 @@ watch(
 function isToolCall(msg: Message): boolean {
   return msg.eventType === 'tool_use' || msg.eventType === 'tool_result';
 }
+
+function handleCopyClick(event: MouseEvent): void {
+  const target = event.target as HTMLElement;
+  const button = target.closest<HTMLButtonElement>('.code-block__copy');
+  if (!button) return;
+
+  const code = button.dataset.code;
+  if (!code) return;
+
+  navigator.clipboard
+    .writeText(code)
+    .then(() => {
+      button.textContent = '已复制';
+      button.classList.add('code-block__copy--copied');
+      setTimeout(() => {
+        button.textContent = '复制';
+        button.classList.remove('code-block__copy--copied');
+      }, 1500);
+    })
+    .catch(() => {
+      button.textContent = '失败';
+      setTimeout(() => {
+        button.textContent = '复制';
+      }, 1500);
+    });
+}
 </script>
 
 <template>
-  <div ref="container" class="message-list">
+  <div ref="container" class="message-list" @click="handleCopyClick">
     <template v-for="msg in messages" :key="msg.id">
       <ToolCallBlock v-if="isToolCall(msg)" :message="msg" />
       <MessageBubble v-else :message="msg" />

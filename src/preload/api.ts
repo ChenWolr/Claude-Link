@@ -1,6 +1,6 @@
 import { ipcRenderer } from 'electron';
 import type { AppConfig, ModelInfo } from '../shared/types/config';
-import type { Session } from '../shared/types/session';
+import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
 import type { ChatEventPayload, QueueEventPayload } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
@@ -16,8 +16,12 @@ export interface ClaudeLinkAPI {
   listSessions: () => Promise<Session[]>;
   createSession: (name: string) => Promise<Session>;
   getSession: (id: string) => Promise<Session | null>;
+  getSessionMessages: (sessionId: string) => Promise<Message[]>;
   deleteSession: (id: string) => Promise<void>;
-  updateSession: (id: string, data: Partial<Session>) => Promise<Session | null>;
+  updateSession: (
+    id: string,
+    data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>,
+  ) => Promise<Session | null>;
   sendMessage: (sessionId: string, message: string) => Promise<void>;
   abortChat: (sessionId: string) => Promise<void>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
@@ -25,7 +29,7 @@ export interface ClaudeLinkAPI {
   addTask: (sessionId: string, prompt: string) => Promise<Task>;
   removeTask: (taskId: string) => Promise<void>;
   getTasks: (sessionId: string) => Promise<Task[]>;
-  reorderTasks: (sessionId: string, taskIds: string[]) => Promise<void>;
+  reorderTasks: (sessionId: string, taskIds: string[]) => Promise<Task[]>;
   interruptTask: (taskId: string) => Promise<void>;
   startQueue: (sessionId: string) => Promise<void>;
   pauseQueue: (sessionId: string) => Promise<void>;
@@ -46,6 +50,7 @@ export function createApi(): ClaudeLinkAPI {
     listSessions: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LIST),
     createSession: (name) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_CREATE, name),
     getSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_GET, id),
+    getSessionMessages: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, sessionId),
     deleteSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_DELETE, id),
     updateSession: (id, data) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE, id, data),
     sendMessage: (sessionId, message) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, message),
@@ -59,7 +64,8 @@ export function createApi(): ClaudeLinkAPI {
     addTask: (sessionId, prompt) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, prompt),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId),
     getTasks: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_GET_ALL, sessionId),
-    reorderTasks: (sessionId, taskIds) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REORDER, sessionId, taskIds),
+    reorderTasks: (sessionId, taskIds) =>
+      ipcRenderer.invoke(IPC_CHANNELS.TASK_REORDER, sessionId, taskIds) as Promise<Task[]>,
     interruptTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_INTERRUPT, taskId),
     startQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_START, sessionId),
     pauseQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_PAUSE, sessionId),

@@ -1,10 +1,20 @@
+<script setup lang="ts">
+import { computed } from 'vue';
+import { useSessionStore } from '../../stores/session-store';
+
+const store = useSessionStore();
+
+const sessionName = computed(() => store.activeSession?.name ?? '未选择会话');
+const modelName = computed(() => store.activeSession?.model ?? '—');
+</script>
+
 <template>
   <header class="app-header">
     <div>
       <p class="app-header__label">当前会话</p>
-      <h2>默认会话</h2>
+      <h2>{{ sessionName }}</h2>
     </div>
-    <div class="app-header__model">claude-sonnet-4-6</div>
+    <div class="app-header__model">{{ modelName }}</div>
   </header>
 </template>
 

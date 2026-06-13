@@ -26,8 +26,23 @@ export function renderMarkdown(text: string): string {
 }
 
 export function isDiffContent(text: string): boolean {
-  const lines = text.split('\n').slice(0, 12);
-  return lines.some((line) => /^(diff --git|--- |\+\+\+ |@@ )/.test(line));
+  if (!text) return false;
+
+  // 不再只看前 12 行：说明文本可能在 diff 之前，超出窗口就会漏判。
+  // 全文扫描结构标记，要求出现 diff --git 文件头，或至少 2 个结构标记，
+  // 既覆盖“前文 + diff”的场景，又避免普通文本误判。
+  const marker = /^(diff --git |--- |\+\+\+ |@@ )/;
+  let hasFileHeader = false;
+  let markers = 0;
+
+  for (const line of text.split('\n')) {
+    if (!marker.test(line)) continue;
+    if (line.startsWith('diff --git ')) hasFileHeader = true;
+    markers += 1;
+    if (hasFileHeader || markers >= 2) return true;
+  }
+
+  return false;
 }
 
 export function renderDiffHtml(diffText: string): string {

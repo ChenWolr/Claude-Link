@@ -1,9 +1,11 @@
 import { spawn, type ChildProcess } from 'child_process';
 import type { BrowserWindow } from 'electron';
-import type { CliInitEvent, CliEvent } from '../../shared/types/cli';
+import type { CliInitEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
 import { logger } from '../utils/logger';
+import * as messageRepo from '../database/repositories/message-repo';
+import * as sessionRepo from '../database/repositories/session-repo';
 
 const processes = new Map<string, ChildProcess>();
 const sessionCliIds = new Map<string, string>();
@@ -21,7 +23,7 @@ function getCliCommand(): string {
   return config.cliPath || 'claude';
 }
 
-function buildCommonArgs(opts: SpawnOptions): string[] {
+function buildCommonArgs(sessionId: string, opts: SpawnOptions): string[] {
   const config = getConfig();
   const args: string[] = [];
 
@@ -39,7 +41,8 @@ function buildCommonArgs(opts: SpawnOptions): string[] {
     args.push('--permission-mode', opts.permissionMode);
   }
 
-  const resumeId = opts.resumeSessionId || sessionCliIds.get(opts.resumeSessionId || '');
+  // Resolve resume id: explicit override > in-memory map > DB persisted value
+  const resumeId = opts.resumeSessionId || sessionCliIds.get(sessionId);
   if (resumeId) {
     args.push('--resume', resumeId);
   }
@@ -63,17 +66,22 @@ function attachStreamParser(
       const trimmed = line.trim();
       if (!trimmed) continue;
 
+      let event: CliEvent;
       try {
-        const event = JSON.parse(trimmed) as CliEvent;
-
-        if (event.type === 'init') {
-          const initEvent = event as CliInitEvent;
-          sessionCliIds.set(sessionId, initEvent.session_id);
-        }
-
-        mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
+        event = JSON.parse(trimmed) as CliEvent;
       } catch {
         logger.warn(`Failed to parse CLI output line: ${trimmed.slice(0, 200)}`);
+        continue;
+      }
+
+      // Forward event to renderer first
+      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
+
+      // Persist structured events to database
+      try {
+        persistCliEvent(sessionId, event);
+      } catch (err) {
+        logger.error(`Failed to persist CLI event [${sessionId}]`, err);
       }
     }
   });
@@ -88,6 +96,54 @@ function attachStreamParser(
   });
 }
 
+function persistCliEvent(sessionId: string, event: CliEvent): void {
+  switch (event.type) {
+    case 'init': {
+      const initEvent = event as CliInitEvent;
+      sessionCliIds.set(sessionId, initEvent.session_id);
+      sessionRepo.updateCliSessionId(sessionId, initEvent.session_id);
+      break;
+    }
+
+    case 'message': {
+      const msgEvent = event as CliMessageEvent;
+      persistMessageParts(sessionId, msgEvent.content, msgEvent.role);
+      break;
+    }
+
+    // stream_event and result are not persisted as individual messages;
+    // the renderer assembles the final text from stream deltas and
+    // the `message` event carries the complete content.
+    case 'stream_event':
+    case 'result':
+      break;
+  }
+}
+
+function persistMessageParts(
+  sessionId: string,
+  parts: CliMessageContentPart[],
+  role: 'user' | 'assistant',
+): void {
+  for (const part of parts) {
+    if (part.type === 'text' && 'text' in part) {
+      messageRepo.createMessage(sessionId, role, part.text, 'message');
+    } else if (part.type === 'tool_use') {
+      const content = JSON.stringify({
+        name: part.name,
+        input: part.input,
+        toolUseId: part.tool_use_id ?? null,
+      }, null, 2);
+      messageRepo.createMessage(sessionId, 'assistant', content, 'tool_use');
+    } else if (part.type === 'tool_result') {
+      const resultText = typeof (part as { content?: string }).content === 'string'
+        ? (part as { content: string }).content
+        : JSON.stringify((part as { content?: unknown }).content ?? '', null, 2);
+      messageRepo.createMessage(sessionId, 'tool', resultText, 'tool_result');
+    }
+  }
+}
+
 export function spawnForChat(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -96,7 +152,7 @@ export function spawnForChat(
   killProcess(sessionId);
 
   const config = getConfig();
-  const args = buildCommonArgs(opts);
+  const args = buildCommonArgs(sessionId, opts);
   args.push('--input-format', 'stream-json');
 
   const cwd = opts.workingDir || config.workingDirectory || process.cwd();
@@ -125,9 +181,11 @@ export function spawnForTask(
   killProcess(sessionId);
 
   const config = getConfig();
-  const args = buildCommonArgs(opts);
-  args.unshift(prompt);
-  args.unshift('-p');
+  // buildCommonArgs 的第一个参数是 ['-p', '--output-format', ...]，
+  // 把 '-p' 替换为 '-p <prompt>'，确保只有一个 -p。
+  const args = buildCommonArgs(sessionId, opts);
+  // args[0] === '-p'，在它后面插入 prompt
+  args.splice(1, 0, prompt);
 
   const cwd = opts.workingDir || config.workingDirectory || process.cwd();
 

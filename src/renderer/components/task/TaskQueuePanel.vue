@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { VueDraggable } from 'vue-draggable-plus';
 import { useTaskStore } from '../../stores/task-store';
 import { useSessionStore } from '../../stores/session-store';
 import { useTaskQueue } from '../../composables/use-task-queue';
@@ -11,6 +12,13 @@ const { startListening } = useTaskQueue();
 
 const newTaskPrompt = ref('');
 let cleanup: (() => void) | null = null;
+
+const queueStatus = computed(() => taskStore.queueState.status);
+
+// Queue is active (running or waiting) → disable drag reorder
+const dragDisabled = computed(
+  () => queueStatus.value === 'running' || queueStatus.value === 'waiting',
+);
 
 onMounted(() => {
   cleanup = startListening();
@@ -56,7 +64,11 @@ async function handleInterrupt(taskId: string) {
   await taskStore.interruptTask(taskId);
 }
 
-const queueStatus = taskStore.queueState.status;
+function handleDragReorder() {
+  if (!sessionStore.activeSession) return;
+  const taskIds = taskStore.tasks.map((t) => t.id);
+  taskStore.reorderTasks(sessionStore.activeSession.id, taskIds);
+}
 </script>
 
 <template>
@@ -78,15 +90,23 @@ const queueStatus = taskStore.queueState.status;
       下一个任务将在 {{ taskStore.queueState.countdownRemaining }}s 后开始
     </div>
 
-    <!-- Task List -->
+    <!-- Task List with drag reorder -->
     <div class="task-list">
-      <TaskItem
-        v-for="task in taskStore.tasks"
-        :key="task.id"
-        :task="task"
-        @delete="handleDelete"
-        @interrupt="handleInterrupt"
-      />
+      <VueDraggable
+        v-model="taskStore.tasks"
+        :disabled="dragDisabled"
+        handle=".task-item__drag"
+        item-key="id"
+        @end="handleDragReorder"
+      >
+        <template #item="{ element: task }">
+          <TaskItem
+            :task="task"
+            @delete="handleDelete"
+            @interrupt="handleInterrupt"
+          />
+        </template>
+      </VueDraggable>
       <div v-if="!taskStore.tasks.length" class="task-panel__empty">等待添加任务</div>
     </div>
 
