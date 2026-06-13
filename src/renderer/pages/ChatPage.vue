@@ -3,10 +3,12 @@ import { onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../stores/session-store';
 import { useChat } from '../composables/use-chat';
 import { useStream } from '../composables/use-stream';
+import { useTaskStore } from '../stores/task-store';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
 
 const store = useSessionStore();
+const taskStore = useTaskStore();
 const { sending, sendMessage, abort, startListening, stopListening } = useChat();
 const { displayContent } = useStream();
 
@@ -19,6 +21,11 @@ onUnmounted(() => {
 });
 
 async function handleSend(text: string) {
+  // If queue is in waiting state, continue current task instead of new message
+  if (taskStore.queueState.status === 'waiting' && store.activeSession) {
+    await taskStore.queueUserMessage(store.activeSession.id, text);
+    return;
+  }
   await sendMessage(text);
 }
 

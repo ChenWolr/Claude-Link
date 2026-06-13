@@ -1,7 +1,7 @@
 import type { BrowserWindow } from 'electron';
 import type { QueueState } from '../../shared/types/task';
 import { IPC_CHANNELS, DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
-import { spawnForTask, killProcess, getCliSessionId } from './process-manager';
+import { spawnForTask, killProcess, getCliSessionId, sendMessage } from './process-manager';
 import { getConfig } from './config-manager';
 import * as taskRepo from '../database/repositories/task-repo';
 
@@ -179,6 +179,39 @@ function startCountdown(sessionId: string, mainWindow: BrowserWindow, delaySecon
 
   // Store the main timer reference for cancellation
   timers.set(`${sessionId}__main`, mainTimer);
+}
+
+export function continueWithUserMessage(
+  sessionId: string,
+  message: string,
+  mainWindow: BrowserWindow,
+): void {
+  const state = queues.get(sessionId);
+  if (!state || state.status !== 'waiting') return;
+
+  // Cancel countdown timers
+  const countdownTimer = timers.get(sessionId);
+  const mainTimer = timers.get(`${sessionId}__main`);
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    timers.delete(sessionId);
+  }
+  if (mainTimer) {
+    clearTimeout(mainTimer);
+    timers.delete(`${sessionId}__main`);
+  }
+
+  // Send message to current CLI process (continuing same task)
+  state.status = 'continuing';
+  emitQueueEvent(mainWindow, sessionId, 'countdown_cancelled');
+  emitQueueEvent(mainWindow, sessionId, 'task_continuing', state.currentTaskId);
+
+  sendMessage(sessionId, message);
+
+  // The CLI process stays alive after receiving the message.
+  // When it eventually exits, the existing exit handler will
+  // detect completion and schedule the next countdown.
+  state.status = 'running';
 }
 
 export function skipCountdown(sessionId: string, mainWindow: BrowserWindow): void {

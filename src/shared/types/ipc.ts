@@ -30,6 +30,7 @@ export const IPC_CHANNELS = {
   QUEUE_RESUME: 'queue:resume',
   QUEUE_GET_STATE: 'queue:getState',
   QUEUE_EVENT: 'queue:event',
+  QUEUE_USER_MESSAGE: 'queue:userMessage',
 } as const;
 
 export const DEFAULT_TASK_DELAY_SECONDS = 60;
@@ -49,6 +50,7 @@ export type QueueEventType =
   | 'countdown_started'
   | 'countdown_tick'
   | 'countdown_cancelled'
+  | 'task_continuing'
   | 'queue_paused'
   | 'queue_completed';
 

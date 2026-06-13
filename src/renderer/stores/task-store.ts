@@ -68,6 +68,13 @@ export const useTaskStore = defineStore('task', {
         this.error = error instanceof Error ? error.message : '中断任务失败';
       }
     },
+    async queueUserMessage(sessionId: string, message: string) {
+      try {
+        this.queueState = await window.claudeLink.queueUserMessage(sessionId, message);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '继续任务失败';
+      }
+    },
     handleQueueEvent(payload: QueueEventPayload) {
       switch (payload.type) {
         case 'task_started': {
@@ -87,6 +94,14 @@ export const useTaskStore = defineStore('task', {
         case 'countdown_tick': {
           this.queueState.countdownRemaining = (payload.data?.remaining as number) ?? 0;
           this.queueState.status = 'waiting';
+          break;
+        }
+        case 'countdown_cancelled': {
+          this.queueState.countdownRemaining = 0;
+          break;
+        }
+        case 'task_continuing': {
+          this.queueState.status = 'continuing';
           break;
         }
         case 'queue_paused': {

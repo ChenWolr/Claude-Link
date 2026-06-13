@@ -16,7 +16,7 @@ export interface Task {
   updatedAt: string;
 }
 
-export type QueueStateStatus = 'idle' | 'running' | 'waiting' | 'paused';
+export type QueueStateStatus = 'idle' | 'running' | 'waiting' | 'paused' | 'continuing';
 
 export interface QueueState {
   sessionId: string;

@@ -44,6 +44,7 @@ export interface ClaudeLinkAPI {
   pauseQueue: (sessionId: string) => Promise<void>;
   resumeQueue: (sessionId: string) => Promise<void>;
   getQueueState: (sessionId: string) => Promise<QueueState>;
+  queueUserMessage: (sessionId: string, message: string) => Promise<QueueState>;
   onQueueEvent: (callback: (payload: QueueEventPayload) => void) => () => void;
   removeQueueListener: () => void;
 }
@@ -84,6 +85,7 @@ export function createApi(): ClaudeLinkAPI {
     pauseQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_PAUSE, sessionId),
     resumeQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME, sessionId),
     getQueueState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_STATE, sessionId),
+    queueUserMessage: (sessionId, message) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_USER_MESSAGE, sessionId, message),
     onQueueEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: QueueEventPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.QUEUE_EVENT, listener);

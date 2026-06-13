@@ -15,9 +15,9 @@ let cleanup: (() => void) | null = null;
 
 const queueStatus = computed(() => taskStore.queueState.status);
 
-// Queue is active (running or waiting) → disable drag reorder
+// Queue is active (running, waiting, or continuing) → disable drag reorder
 const dragDisabled = computed(
-  () => queueStatus.value === 'running' || queueStatus.value === 'waiting',
+  () => queueStatus.value === 'running' || queueStatus.value === 'waiting' || queueStatus.value === 'continuing',
 );
 
 onMounted(() => {
@@ -80,14 +80,19 @@ function handleDragReorder() {
       </div>
       <div class="task-panel__controls">
         <button v-if="queueStatus === 'idle' || queueStatus === 'paused'" type="button" class="btn btn--primary" @click="handleStart">开始</button>
-        <button v-if="queueStatus === 'running' || queueStatus === 'waiting'" type="button" class="btn btn--warn" @click="handlePause">暂停</button>
+        <button v-if="queueStatus === 'running' || queueStatus === 'waiting' || queueStatus === 'continuing'" type="button" class="btn btn--warn" @click="handlePause">暂停</button>
         <button v-if="queueStatus === 'paused'" type="button" class="btn btn--primary" @click="handleResume">恢复</button>
       </div>
     </header>
 
     <!-- Countdown -->
     <div v-if="queueStatus === 'waiting' && taskStore.queueState.countdownRemaining > 0" class="countdown">
-      下一个任务将在 {{ taskStore.queueState.countdownRemaining }}s 后开始
+      任务已完成，{{ taskStore.queueState.countdownRemaining }}s 内可继续追加指令
+    </div>
+
+    <!-- Continuing -->
+    <div v-if="queueStatus === 'continuing'" class="countdown countdown--continuing">
+      继续执行当前任务...
     </div>
 
     <!-- Task List with drag reorder -->
@@ -114,7 +119,7 @@ function handleDragReorder() {
     <div class="task-panel__add">
       <textarea
         v-model="newTaskPrompt"
-        placeholder="输入任务描述..."
+        placeholder="输入指令内容..."
         rows="2"
         @keydown.enter.prevent="handleAddTask"
       />
@@ -186,6 +191,11 @@ function handleDragReorder() {
   color: var(--color-accent-strong);
   font-size: 13px;
   text-align: center;
+}
+
+.countdown--continuing {
+  background: rgba(58, 166, 117, 0.12);
+  color: var(--color-accent-strong);
 }
 
 .task-list {

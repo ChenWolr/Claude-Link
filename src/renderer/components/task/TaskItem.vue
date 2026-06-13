@@ -1,15 +1,22 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
 import type { Task } from '../../../shared/types/task';
 import TaskStatusBadge from './TaskStatusBadge.vue';
 
-defineProps<{ task: Task }>();
+const props = defineProps<{ task: Task }>();
 const emit = defineEmits<{
   delete: [taskId: string];
   interrupt: [taskId: string];
 }>();
 
 const expanded = ref(false);
+
+// Auto-expand when task starts running
+watch(() => props.task.status, (newStatus) => {
+  if (newStatus === 'running') {
+    expanded.value = true;
+  }
+});
 </script>
 
 <template>
@@ -17,7 +24,7 @@ const expanded = ref(false);
     <div class="task-item__header">
       <span class="task-item__drag">⠿</span>
       <TaskStatusBadge :status="task.status" />
-      <span class="task-item__prompt">{{ task.prompt.slice(0, 60) }}{{ task.prompt.length > 60 ? '...' : '' }}</span>
+      <span class="task-item__prompt">{{ task.prompt.slice(0, 80) }}{{ task.prompt.length > 80 ? '...' : '' }}</span>
     </div>
     <div class="task-item__actions">
       <button v-if="task.status === 'running'" type="button" class="action action--danger" @click="emit('interrupt', task.id)">中断</button>
@@ -109,6 +116,8 @@ const expanded = ref(false);
   word-break: break-word;
   font-size: 13px;
   line-height: 1.5;
+  max-height: 200px;
+  overflow-y: auto;
 }
 
 .task-item__result {

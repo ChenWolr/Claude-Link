@@ -12,6 +12,7 @@ import {
   resumeQueue,
   interruptTask,
   getQueueState,
+  continueWithUserMessage,
 } from './modules/task-queue-engine';
 import { logger } from './utils/logger';
 import * as sessionRepo from './database/repositories/session-repo';
@@ -156,6 +157,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.QUEUE_GET_STATE, async (_event, sessionId: string) => {
+    return getQueueState(sessionId);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.QUEUE_USER_MESSAGE, async (_event, sessionId: string, message: string) => {
+    continueWithUserMessage(sessionId, message, mainWindow);
     return getQueueState(sessionId);
   });
 }
