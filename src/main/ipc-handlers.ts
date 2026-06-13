@@ -31,8 +31,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfig());
   ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => saveConfig(partial));
   ipcMain.handle(IPC_CHANNELS.CONFIG_CLEAR, async () => clearConfig());
-  ipcMain.handle(IPC_CHANNELS.MODELS_FETCH, async (_event, provider: AppConfig['provider'], apiKey: string) =>
-    fetchAvailableModels(provider, apiKey),
+  ipcMain.handle(
+    IPC_CHANNELS.MODELS_FETCH,
+    async (_event, provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) =>
+      fetchAvailableModels(provider, apiKey, apiBaseUrl),
   );
 
   // Sessions
@@ -47,6 +49,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     IPC_CHANNELS.SESSION_UPDATE,
     async (_event, id: string, data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>) =>
       sessionRepo.updateSession(id, data),
+  );
+  ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
+    sessionRepo.searchSessions(query),
   );
 
   // Messages

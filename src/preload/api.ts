@@ -12,7 +12,7 @@ export interface ClaudeLinkAPI {
   getConfig: () => Promise<AppConfig>;
   saveConfig: (config: Partial<AppConfig>) => Promise<AppConfig>;
   clearConfig: () => Promise<AppConfig>;
-  fetchModels: (provider: AppConfig['provider'], apiKey: string) => Promise<ModelInfo[]>;
+  fetchModels: (provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) => Promise<ModelInfo[]>;
   listSessions: () => Promise<Session[]>;
   createSession: (name: string) => Promise<Session>;
   getSession: (id: string) => Promise<Session | null>;
@@ -22,6 +22,7 @@ export interface ClaudeLinkAPI {
     id: string,
     data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>,
   ) => Promise<Session | null>;
+  searchSessions: (query: string) => Promise<Session[]>;
   sendMessage: (sessionId: string, message: string) => Promise<void>;
   abortChat: (sessionId: string) => Promise<void>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
@@ -46,13 +47,14 @@ export function createApi(): ClaudeLinkAPI {
     getConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET),
     saveConfig: (config) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SAVE, config),
     clearConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_CLEAR),
-    fetchModels: (provider, apiKey) => ipcRenderer.invoke(IPC_CHANNELS.MODELS_FETCH, provider, apiKey),
+    fetchModels: (provider, apiKey, apiBaseUrl) => ipcRenderer.invoke(IPC_CHANNELS.MODELS_FETCH, provider, apiKey, apiBaseUrl),
     listSessions: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LIST),
     createSession: (name) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_CREATE, name),
     getSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_GET, id),
     getSessionMessages: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, sessionId),
     deleteSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_DELETE, id),
     updateSession: (id, data) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE, id, data),
+    searchSessions: (query) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SEARCH, query),
     sendMessage: (sessionId, message) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, message),
     abortChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ABORT, sessionId),
     onChatEvent: (callback) => {

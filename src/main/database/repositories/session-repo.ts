@@ -99,6 +99,20 @@ export function updateSession(
   return getSession(id);
 }
 
+export function searchSessions(query: string): Session[] {
+  const db = getConnection();
+  const normalizedQuery = query.replace(/\s+/g, '').toLowerCase();
+
+  const rows = db.prepare(`
+    SELECT DISTINCT s.* FROM sessions s
+    LEFT JOIN messages m ON m.session_id = s.id
+    WHERE REPLACE(LOWER(s.name), ' ', '') LIKE ? OR LOWER(m.content) LIKE ?
+    ORDER BY s.updated_at DESC
+  `).all(`%${normalizedQuery}%`, `%${query.toLowerCase()}%`) as SessionRow[];
+
+  return rows.map(toSession);
+}
+
 export function deleteSession(id: string): void {
   getConnection().prepare('DELETE FROM sessions WHERE id = ?').run(id);
 }
