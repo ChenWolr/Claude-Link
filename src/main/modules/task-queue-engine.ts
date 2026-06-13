@@ -1,7 +1,7 @@
 import type { BrowserWindow } from 'electron';
 import type { QueueState } from '../../shared/types/task';
 import { IPC_CHANNELS, DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
-import { spawnForTask, killProcess, getCliSessionId, sendMessage } from './process-manager';
+import { spawnForChat, spawnForTask, killProcess, getCliSessionId, sendMessage } from './process-manager';
 import { getConfig } from './config-manager';
 import * as taskRepo from '../database/repositories/task-repo';
 
@@ -201,16 +201,39 @@ export function continueWithUserMessage(
     timers.delete(`${sessionId}__main`);
   }
 
-  // Send message to current CLI process (continuing same task)
   state.status = 'continuing';
   emitQueueEvent(mainWindow, sessionId, 'countdown_cancelled');
   emitQueueEvent(mainWindow, sessionId, 'task_continuing', state.currentTaskId);
 
+  // Re-spawn CLI with --resume to continue the previous conversation session.
+  // The original task process has already exited, so we need a new process.
+  const config = getConfig();
+  const cliSessionId = getCliSessionId(sessionId);
+  const child = spawnForChat(sessionId, mainWindow, {
+    model: config.defaultModel,
+    modelOverride: null,
+    workingDir: config.workingDirectory,
+    maxTurns: config.maxTurns,
+    permissionMode: config.permissionMode,
+    resumeSessionId: cliSessionId,
+  });
+
+  // Write the user's continuation message to stdin
   sendMessage(sessionId, message);
 
-  // The CLI process stays alive after receiving the message.
-  // When it eventually exits, the existing exit handler will
-  // detect completion and schedule the next countdown.
+  // When the continuation process exits, reset countdown for next task
+  child.on('exit', () => {
+    const remaining = taskRepo.getPendingTasks(sessionId);
+    state.pendingCount = remaining.length;
+
+    if (remaining.length > 0) {
+      startCountdown(sessionId, mainWindow, config.taskDelaySeconds || DEFAULT_TASK_DELAY_SECONDS);
+    } else {
+      state.status = 'idle';
+      emitQueueEvent(mainWindow, sessionId, 'queue_completed');
+    }
+  });
+
   state.status = 'running';
 }
 
