@@ -1,20 +1,79 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onMounted, ref, computed } from 'vue';
+import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config-store';
 import ProviderSelect from '../components/config/ProviderSelect.vue';
 import ApiKeyInput from '../components/config/ApiKeyInput.vue';
 import ModelSelect from '../components/config/ModelSelect.vue';
 
 const store = useConfigStore();
+const router = useRouter();
 const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
+const showAdvanced = ref(false);
+const advancedJsonError = ref<string | null>(null);
 
 onMounted(async () => {
   await store.loadConfig();
   await store.detectCli();
 });
 
+const modelKeys = computed(() => ['sonnet', 'opus', 'haiku']);
+
+const advancedJsonValid = computed(() => {
+  if (!store.config.advancedJson || store.config.advancedJson === '{}') return true;
+  try {
+    JSON.parse(store.config.advancedJson);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+const urlValidation = computed(() => {
+  const url = store.config.apiBaseUrl?.trim() || '';
+  if (!url) return { status: 'empty', message: '' };
+
+  // Check basic format
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    return { status: 'error', message: 'URL 必须以 http:// 或 https:// 开头' };
+  }
+
+  // Check double slashes in path
+  const pathPart = url.replace(/^https?:\/\//, '');
+  if (pathPart.includes('//')) {
+    return { status: 'error', message: 'URL 中包含多余的双斜杠' };
+  }
+
+  // Official endpoint doesn't need /v1
+  if (url === 'https://api.anthropic.com' || url === 'http://api.anthropic.com') {
+    return { status: 'ok', message: '官方端点，CLI 自动处理路径' };
+  }
+
+  if (url === 'https://api.anthropic.com/v1' || url === 'http://api.anthropic.com/v1') {
+    return { status: 'warn', message: '官方端点不需要 /v1 后缀，CLI 会自动添加' };
+  }
+
+  // Third-party endpoints usually need /v1
+  if (!url.includes('anthropic.com') && !url.endsWith('/v1') && !url.endsWith('/v1/')) {
+    return { status: 'warn', message: '第三方端点通常需要 /v1 后缀（如 https://example.com/v1）' };
+  }
+
+  // Trailing slash
+  if (url.endsWith('/') && !url.endsWith('/v1/')) {
+    return { status: 'warn', message: 'URL 末尾有多余斜杠，建议去掉' };
+  }
+
+  return { status: 'ok', message: 'URL 格式正常' };
+});
+
 async function handleSave() {
+  // Auto-trim trailing slashes from apiBaseUrl
+  const baseUrl = store.config.apiBaseUrl?.trim();
+  if (baseUrl && baseUrl.endsWith('/') && !baseUrl.endsWith('/v1/')) {
+    store.config.apiBaseUrl = baseUrl.slice(0, -1);
+  }
+
   try {
     await store.saveConfig();
     toastType.value = 'success';
@@ -35,6 +94,16 @@ async function handleFetchModels() {
     store.config.defaultModel = store.models[0].id;
   }
 }
+
+function formatJson() {
+  try {
+    const parsed = JSON.parse(store.config.advancedJson || '{}');
+    store.config.advancedJson = JSON.stringify(parsed, null, 2);
+    advancedJsonError.value = null;
+  } catch (e) {
+    advancedJsonError.value = e instanceof Error ? e.message : 'JSON 格式错误';
+  }
+}
 </script>
 
 <template>
@@ -44,6 +113,7 @@ async function handleFetchModels() {
         <p class="eyebrow">Settings</p>
         <h1>配置</h1>
       </div>
+      <button class="back-button" type="button" @click="router.push('/')">← 返回会话</button>
     </header>
 
     <!-- CLI Status Banner -->
@@ -59,34 +129,106 @@ async function handleFetchModels() {
     <div v-if="store.error && !toast" class="toast toast--error">{{ store.error }}</div>
 
     <form class="config-form" @submit.prevent="handleSave">
-      <ProviderSelect v-model="store.config.provider" />
-      <ApiKeyInput v-model="store.config.apiKey" />
-      <ModelSelect
-        v-model="store.config.defaultModel"
-        :models="store.models"
-        :loading="store.fetchingModels"
-        @refresh="handleFetchModels"
-      />
+      <!-- Provider Section -->
+      <div class="section">
+        <h3 class="section-title">供应商设置</h3>
 
-      <label class="field">
-        <span>权限模式</span>
-        <select v-model="store.config.permissionMode">
-          <option value="default">default</option>
-          <option value="acceptEdits">acceptEdits</option>
-          <option value="plan">plan</option>
-          <option value="bypassPermissions">bypassPermissions</option>
-        </select>
-      </label>
+        <label class="field">
+          <span>供应商名称 <span class="required">*</span></span>
+          <input v-model="store.config.providerName" type="text" placeholder="例如：sub2Api" />
+        </label>
 
-      <label class="field">
-        <span>任务间延迟（秒）</span>
-        <input v-model.number="store.config.taskDelaySeconds" type="number" min="0" />
-      </label>
+        <label class="field">
+          <span>备注</span>
+          <input v-model="store.config.providerNote" type="text" placeholder="可选" />
+        </label>
 
-      <label class="field">
-        <span>最大轮次</span>
-        <input v-model.number="store.config.maxTurns" type="number" min="1" />
-      </label>
+        <ProviderSelect v-model="store.config.provider" />
+        <ApiKeyInput v-model="store.config.apiKey" />
+
+        <label class="field">
+          <span>请求地址（API Base URL） <span class="required">*</span></span>
+          <input
+            v-model="store.config.apiBaseUrl"
+            type="text"
+            placeholder="https://api.anthropic.com"
+          />
+          <small class="field-hint">
+            填写兼容 Claude API 的服务端点。官方直连模式应使用 https://api.anthropic.com
+          </small>
+          <div v-if="urlValidation.message" :class="['url-validation', `url-validation--${urlValidation.status}`]">
+            {{ urlValidation.message }}
+          </div>
+        </label>
+
+        <ModelSelect
+          v-model="store.config.defaultModel"
+          :models="store.models"
+          :loading="store.fetchingModels"
+          @refresh="handleFetchModels"
+        />
+      </div>
+
+      <!-- Model Mapping -->
+      <div class="section">
+        <h3 class="section-title">模型映射（会注入到 JSON 的 env 里）</h3>
+        <div class="model-mapping-grid">
+          <label v-for="key in modelKeys" :key="key" class="field">
+            <span>{{ key.charAt(0).toUpperCase() + key.slice(1) }} 默认模型</span>
+            <input
+              v-model="store.config.modelMapping[key]"
+              type="text"
+              :placeholder="`例如：claude-${key}-4-6`"
+            />
+          </label>
+        </div>
+      </div>
+
+      <!-- Advanced JSON -->
+      <div class="section">
+        <button type="button" class="accordion-toggle" @click="showAdvanced = !showAdvanced">
+          <span>{{ showAdvanced ? '▼' : '▶' }}</span>
+          <span>高级 JSON</span>
+        </button>
+        <div v-if="showAdvanced" class="advanced-panel">
+          <p class="advanced-hint">
+            此处可配置完整的 settings.json 内容，支持所有字段（如 model、alwaysThinkingEnabled、ccSwitchProviderId、codemossProviderId 等）
+          </p>
+          <button type="button" class="format-btn" @click="formatJson">格式化</button>
+          <textarea
+            v-model="store.config.advancedJson"
+            class="json-editor"
+            rows="8"
+            placeholder='{"key": "value"}'
+          />
+          <div v-if="advancedJsonError" class="json-error">{{ advancedJsonError }}</div>
+          <div v-if="!advancedJsonValid" class="json-error">JSON 格式错误</div>
+        </div>
+      </div>
+
+      <!-- General Settings -->
+      <div class="section">
+        <h3 class="section-title">通用设置</h3>
+        <label class="field">
+          <span>权限模式</span>
+          <select v-model="store.config.permissionMode">
+            <option value="default">default</option>
+            <option value="acceptEdits">acceptEdits</option>
+            <option value="plan">plan</option>
+            <option value="bypassPermissions">bypassPermissions</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>任务间延迟（秒）</span>
+          <input v-model.number="store.config.taskDelaySeconds" type="number" min="0" />
+        </label>
+
+        <label class="field">
+          <span>最大轮次</span>
+          <input v-model.number="store.config.maxTurns" type="number" min="1" />
+        </label>
+      </div>
 
       <button class="save-button" type="submit" :disabled="store.savingConfig">
         {{ store.savingConfig ? '保存中...' : '保存配置' }}
@@ -102,12 +244,30 @@ async function handleFetchModels() {
 }
 
 .config-page__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 24px;
 }
 
 .config-page__header h1 {
   margin: 4px 0 0;
   font-size: 24px;
+}
+
+.back-button {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.back-button:hover {
+  background: var(--color-panel-soft);
 }
 
 .eyebrow {
@@ -166,6 +326,22 @@ async function handleFetchModels() {
   gap: 20px;
 }
 
+.section {
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+}
+
+.section-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--color-text);
+}
+
 .field {
   display: grid;
   gap: 8px;
@@ -176,7 +352,18 @@ async function handleFetchModels() {
   font-size: 13px;
 }
 
+.field .required {
+  color: var(--color-danger);
+}
+
+.field-hint {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 select,
+input[type='text'],
 input[type='number'] {
   width: 100%;
   border: 1px solid var(--color-border);
@@ -184,6 +371,70 @@ input[type='number'] {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 10px 12px;
+  font-size: 13px;
+}
+
+.model-mapping-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.accordion-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.advanced-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+}
+
+.advanced-hint {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.format-btn {
+  justify-self: start;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.json-editor {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+  color: var(--color-text);
+  padding: 10px 12px;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Consolas, monospace;
+  font-size: 13px;
+  resize: vertical;
+  min-height: 120px;
+}
+
+.json-error {
+  color: var(--color-danger);
+  font-size: 13px;
 }
 
 .save-button {
@@ -195,10 +446,32 @@ input[type='number'] {
   padding: 12px;
   font-size: 15px;
   font-weight: 700;
+  cursor: pointer;
 }
 
 .save-button:disabled {
   cursor: wait;
   opacity: 0.7;
+}
+
+.url-validation {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.url-validation--ok {
+  color: #5fd6a0;
+}
+
+.url-validation--warn {
+  color: #e0c36a;
+}
+
+.url-validation--error {
+  color: var(--color-danger);
+}
+
+.url-validation--empty {
+  color: var(--color-text-muted);
 }
 </style>
