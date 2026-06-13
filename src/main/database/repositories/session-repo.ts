@@ -7,6 +7,7 @@ interface SessionRow {
   name: string;
   cli_session_id: string | null;
   model: string;
+  model_override: string | null;
   working_dir: string | null;
   permission_mode: Session['permissionMode'];
   max_turns: number;
@@ -20,6 +21,7 @@ function toSession(row: SessionRow): Session {
     name: row.name,
     cliSessionId: row.cli_session_id,
     model: row.model,
+    modelOverride: row.model_override,
     workingDir: row.working_dir,
     permissionMode: row.permission_mode,
     maxTurns: row.max_turns,
@@ -121,5 +123,12 @@ export function updateCliSessionId(id: string, cliSessionId: string): Session | 
   getConnection()
     .prepare("UPDATE sessions SET cli_session_id = ?, updated_at = datetime('now') WHERE id = ?")
     .run(cliSessionId, id);
+  return getSession(id);
+}
+
+export function updateModelOverride(id: string, modelOverride: string | null): Session | null {
+  getConnection()
+    .prepare("UPDATE sessions SET model_override = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(modelOverride, id);
   return getSession(id);
 }

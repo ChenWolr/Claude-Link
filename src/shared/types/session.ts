@@ -3,6 +3,7 @@ export interface Session {
   name: string;
   cliSessionId: string | null;
   model: string;
+  modelOverride: string | null;
   workingDir: string | null;
   permissionMode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
   maxTurns: number;

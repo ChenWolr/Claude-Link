@@ -14,6 +14,7 @@ export const IPC_CHANNELS = {
   SESSION_GET: 'session:get',
   SESSION_DELETE: 'session:delete',
   SESSION_UPDATE: 'session:update',
+  SESSION_UPDATE_MODEL_OVERRIDE: 'session:updateModelOverride',
   SESSION_SEARCH: 'session:search',
   MESSAGE_GET_BY_SESSION: 'message:getBySession',
   CHAT_SEND: 'chat:send',

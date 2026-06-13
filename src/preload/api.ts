@@ -30,6 +30,7 @@ export interface ClaudeLinkAPI {
     data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>,
   ) => Promise<Session | null>;
   searchSessions: (query: string) => Promise<Session[]>;
+  updateModelOverride: (id: string, modelOverride: string | null) => Promise<Session | null>;
   sendMessage: (sessionId: string, message: string) => Promise<void>;
   abortChat: (sessionId: string) => Promise<void>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
@@ -64,6 +65,7 @@ export function createApi(): ClaudeLinkAPI {
     deleteSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_DELETE, id),
     updateSession: (id, data) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE, id, data),
     searchSessions: (query) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SEARCH, query),
+    updateModelOverride: (id, modelOverride) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE_MODEL_OVERRIDE, id, modelOverride),
     sendMessage: (sessionId, message) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, message),
     abortChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ABORT, sessionId),
     onChatEvent: (callback) => {

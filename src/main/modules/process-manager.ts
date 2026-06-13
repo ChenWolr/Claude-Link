@@ -12,6 +12,7 @@ const sessionCliIds = new Map<string, string>();
 
 export interface SpawnOptions {
   model?: string;
+  modelOverride?: string | null;
   workingDir?: string | null;
   maxTurns?: number;
   permissionMode?: string;
@@ -63,7 +64,9 @@ function buildCommonArgs(sessionId: string, opts: SpawnOptions): string[] {
   args.push('--output-format', 'stream-json');
   args.push('--verbose');
   args.push('--include-partial-messages');
-  args.push('--model', opts.model || config.defaultModel);
+  // modelOverride takes precedence over model/config.defaultModel
+  const effectiveModel = opts.modelOverride || opts.model || config.defaultModel;
+  args.push('--model', effectiveModel);
 
   if (opts.maxTurns && opts.maxTurns > 0) {
     args.push('--max-turns', String(opts.maxTurns));

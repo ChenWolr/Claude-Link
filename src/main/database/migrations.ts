@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -60,6 +60,12 @@ export function runMigrations(db: Database.Database): void {
       );
       CREATE INDEX IF NOT EXISTS idx_tasks_session_order ON tasks(session_id, sort_order);
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+    `);
+  }
+
+  if (currentVersion < 2) {
+    db.exec(`
+      ALTER TABLE sessions ADD COLUMN model_override TEXT DEFAULT NULL;
     `);
   }
 

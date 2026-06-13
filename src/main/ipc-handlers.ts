@@ -65,6 +65,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
     sessionRepo.searchSessions(query),
   );
+  ipcMain.handle(
+    IPC_CHANNELS.SESSION_UPDATE_MODEL_OVERRIDE,
+    async (_event, id: string, modelOverride: string | null) =>
+      sessionRepo.updateModelOverride(id, modelOverride),
+  );
 
   // Messages
   ipcMain.handle(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, async (_event, sessionId: string) =>
@@ -86,6 +91,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       } else {
         spawnForChat(sessionId, mainWindow, {
           model: session.model,
+          modelOverride: session.modelOverride,
           workingDir: session.workingDir,
           maxTurns: session.maxTurns,
           permissionMode: session.permissionMode,
