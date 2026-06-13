@@ -64,6 +64,21 @@ export const useSessionStore = defineStore('session', {
     },
     addMessage(message: Message) {
       this.messages.push(message);
+
+      // Trigger topic analysis for first user message if session name is auto-generated
+      if (
+        message.role === 'user' &&
+        this.messages.filter((m) => m.role === 'user').length === 1 &&
+        this.activeSession?.name.startsWith('会话')
+      ) {
+        window.claudeLink.analyzeTopic(this.activeSession.id, message.content).then((topic) => {
+          if (topic && this.activeSession) {
+            this.activeSession.name = topic;
+            // Refresh sidebar session list
+            this.loadSessions();
+          }
+        });
+      }
     },
     appendStream(text: string) {
       this.streamingContent += text;

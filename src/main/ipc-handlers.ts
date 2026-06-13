@@ -14,6 +14,7 @@ import {
   getQueueState,
   continueWithUserMessage,
 } from './modules/task-queue-engine';
+import { analyzeTopic } from './modules/topic-analyzer';
 import { logger } from './utils/logger';
 import * as sessionRepo from './database/repositories/session-repo';
 import * as messageRepo from './database/repositories/message-repo';
@@ -70,6 +71,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     IPC_CHANNELS.SESSION_UPDATE_MODEL_OVERRIDE,
     async (_event, id: string, modelOverride: string | null) =>
       sessionRepo.updateModelOverride(id, modelOverride),
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.SESSION_ANALYZE_TOPIC,
+    async (_event, sessionId: string, firstMessage: string) => {
+      const result = await analyzeTopic(sessionId, firstMessage);
+      return result;
+    },
   );
 
   // Messages
