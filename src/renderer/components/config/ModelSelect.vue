@@ -1,31 +1,18 @@
 <script setup lang="ts">
-import type { ModelInfo } from '../../../shared/types/config';
-
 const model = defineModel<string>({ required: true });
-defineProps<{
-  models: ModelInfo[];
-  loading: boolean;
-}>();
-
-defineEmits<{
-  refresh: [];
-}>();
 </script>
 
 <template>
   <label class="field">
     <span>模型</span>
-    <div class="input-row">
-      <select v-model="model">
-        <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
-        <option v-for="item in models" :key="item.id" :value="item.id">
-          {{ item.name }}
-        </option>
-      </select>
-      <button type="button" :disabled="loading" @click="$emit('refresh')">
-        {{ loading ? '刷新中' : '刷新' }}
-      </button>
-    </div>
+    <input
+      v-model="model"
+      type="text"
+      placeholder="直接输入模型 ID，例如 claude-sonnet-4-6"
+      autocomplete="off"
+      spellcheck="false"
+    />
+    <small class="field-hint">手动填写模型 ID；会话内仍可在顶栏临时切换模型。</small>
   </label>
 </template>
 
@@ -40,32 +27,19 @@ defineEmits<{
   font-size: 13px;
 }
 
-.input-row {
-  display: flex;
-  gap: 8px;
-}
-
-select {
+input {
   min-width: 0;
-  flex: 1;
+  width: 100%;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 10px 12px;
+  font-size: 13px;
 }
 
-button {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-accent);
-  color: #07120d;
-  padding: 0 14px;
-  font-weight: 700;
-}
-
-button:disabled {
-  cursor: wait;
-  opacity: 0.7;
+.field-hint {
+  color: var(--color-text-muted);
+  font-size: 12px;
 }
 </style>

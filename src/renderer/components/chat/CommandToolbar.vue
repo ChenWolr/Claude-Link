@@ -14,7 +14,12 @@ const quickCommands = computed(() =>
 
 <template>
   <div class="command-toolbar">
-    <button type="button" class="toolbar-btn toolbar-btn--compress" @click="emit('compress')">
+    <button
+      type="button"
+      class="toolbar-btn toolbar-btn--compress"
+      title="向 Claude Code 发送 /compact，压缩当前上下文"
+      @click="emit('compress')"
+    >
       压缩上下文
     </button>
     <button

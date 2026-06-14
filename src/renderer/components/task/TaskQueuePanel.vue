@@ -117,9 +117,10 @@ function handleDragReorder() {
 
     <!-- Add Task -->
     <div class="task-panel__add">
+      <p class="queue-hint">运行中的任务不会被新指令打断；新指令会在当前任务结束并等待倒计时后执行。</p>
       <textarea
         v-model="newTaskPrompt"
-        placeholder="输入指令内容..."
+        placeholder="输入要排队发送给 AI 的下一条指令"
         rows="2"
         @keydown.enter.prevent="handleAddTask"
       />
@@ -220,6 +221,13 @@ function handleDragReorder() {
   gap: 8px;
   padding: 12px;
   border-top: 1px solid var(--color-border);
+}
+
+.queue-hint {
+  margin: 0 0 4px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .task-panel__add textarea {

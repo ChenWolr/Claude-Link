@@ -88,13 +88,6 @@ async function handleSave() {
   }, 3000);
 }
 
-async function handleFetchModels() {
-  await store.fetchModels();
-  if (store.models.length > 0 && store.config.defaultModel === '') {
-    store.config.defaultModel = store.models[0].id;
-  }
-}
-
 function formatJson() {
   try {
     const parsed = JSON.parse(store.config.advancedJson || '{}');
@@ -110,6 +103,15 @@ async function handleImportSettings() {
   if (filePath) {
     await store.importSettings(filePath);
   }
+}
+
+function handleFillFromJson() {
+  const result = store.fillFromAdvancedJson();
+  toastType.value = result.ok ? 'success' : 'error';
+  toast.value = result.message;
+  setTimeout(() => {
+    toast.value = null;
+  }, 3000);
 }
 
 function handleThemeSelect(paletteId: string) {
@@ -190,12 +192,7 @@ function applyTheme(paletteId: string) {
           </div>
         </label>
 
-        <ModelSelect
-          v-model="store.config.defaultModel"
-          :models="store.models"
-          :loading="store.fetchingModels"
-          @refresh="handleFetchModels"
-        />
+        <ModelSelect v-model="store.config.defaultModel" />
         <div v-if="store.importedFields.has('defaultModel')" class="imported-mark">✓ 已从 settings.json 导入</div>
       </div>
 
@@ -207,9 +204,12 @@ function applyTheme(paletteId: string) {
         </button>
         <div v-if="showAdvanced" class="advanced-panel">
           <p class="advanced-hint">
-            此处可配置完整的 settings.json 内容，支持所有字段（如 model、alwaysThinkingEnabled、ccSwitchProviderId、codemossProviderId 等）
+            直接粘贴 Claude Code 的 settings.json 内容，点击"从 JSON 填充字段"即可自动回填 API Key / 请求地址 / 模型；其余字段保留在此处。运行 CLI 时仅字符串字段会作为环境变量注入。
           </p>
-          <button type="button" class="import-btn" @click="handleImportSettings">导入 settings.json</button>
+          <div class="advanced-actions">
+            <button type="button" class="import-btn" @click="handleImportSettings">导入 settings.json 文件</button>
+            <button type="button" class="fill-btn" @click="handleFillFromJson">从 JSON 填充字段</button>
+          </div>
           <div v-if="store.importedFields.has('advancedJson')" class="imported-mark">✓ 已从 settings.json 导入</div>
           <button type="button" class="format-btn" @click="formatJson">格式化</button>
           <textarea
@@ -501,6 +501,23 @@ input[type='number'] {
   color: var(--color-accent-strong);
   padding: 6px 12px;
   font-size: 12px;
+  cursor: pointer;
+}
+
+.advanced-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.fill-btn {
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  color: #07120d;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
 }
 

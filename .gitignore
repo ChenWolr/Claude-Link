@@ -6,3 +6,4 @@ dist-electron/
 *.db
 *.db-wal
 *.db-shm
+.claude/

@@ -3,6 +3,7 @@ import http from 'http';
 import { getConfig } from './config-manager';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { logger } from '../utils/logger';
+import { buildAnthropicApiUrl, isOfficialAnthropicBaseUrl } from './api-url';
 
 interface ClaudeApiResponse {
   content: Array<{ type: string; text?: string }>;
@@ -17,26 +18,11 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   }
 
   const baseUrl = config.apiBaseUrl?.trim() || 'https://api.anthropic.com';
-  const isAnthropic = baseUrl.includes('api.anthropic.com');
-
-  // Build the full API URL using string concatenation to avoid
-  // new URL() path resolution that drops /v1 from base URLs.
-  let urlStr: string;
-  if (isAnthropic) {
-    urlStr = 'https://api.anthropic.com/v1/messages';
-  } else if (baseUrl.endsWith('/v1') || baseUrl.endsWith('/v1/')) {
-    // Third-party endpoint already has /v1 - just append /messages
-    const base = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
-    urlStr = base + 'messages';
-  } else {
-    // Third-party endpoint without /v1 - add /v1/messages
-    const base = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
-    urlStr = base + '/v1/messages';
-  }
-  const url = new URL(urlStr);
+  const isAnthropic = isOfficialAnthropicBaseUrl(baseUrl);
+  const url = buildAnthropicApiUrl(baseUrl, 'messages');
 
   const requestBody = JSON.stringify({
-    model: 'claude-haiku-4-6',
+    model: 'claude-haiku-4-5',
     max_tokens: 50,
     messages: [
       {
@@ -52,18 +38,18 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
     'anthropic-version': '2023-06-01',
   };
 
-  // For third-party endpoints, might need different auth header
+  // 第三方兼容端点（OneAPI/openrouter 等）通常同时需要 Bearer 或保留 x-api-key，
+  // 这里两者都带上，避免删掉 x-api-key 导致 401。
   if (!isAnthropic) {
     headers['Authorization'] = `Bearer ${config.apiKey}`;
-    delete headers['x-api-key'];
   }
 
   try {
-    const response = await makeHttpRequest(url, requestBody, headers);
+    const response = await makeHttpRequest(url, requestBody, headers, 10000);
     const data = JSON.parse(response) as ClaudeApiResponse;
     const text = data.content?.find((c) => c.type === 'text')?.text;
     if (text) {
-      const topic = text.trim().slice(0, 20);
+      const topic = text.trim().replace(/\s+/g, ' ').slice(0, 20);
       sessionRepo.updateSession(sessionId, { name: topic });
       return topic;
     }
@@ -71,8 +57,8 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
     logger.warn('Topic analysis failed, using heuristic fallback', error);
   }
 
-  // Heuristic fallback: first 15 chars of message
-  const fallback = firstMessage.slice(0, 15).trim();
+  // 兜底：取首句前 15 个字符，压缩空白避免标题里出现换行
+  const fallback = firstMessage.replace(/\s+/g, ' ').trim().slice(0, 15);
   sessionRepo.updateSession(sessionId, { name: fallback });
   return fallback;
 }
@@ -81,6 +67,7 @@ function makeHttpRequest(
   url: URL,
   body: string,
   headers: Record<string, string>,
+  timeoutMs = 10000,
 ): Promise<string> {
   const lib = url.protocol === 'https:' ? https : http;
 
@@ -105,6 +92,11 @@ function makeHttpRequest(
         });
       },
     );
+
+    // 超时保护：避免慢请求导致标题永久不更新
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
 
     req.on('error', reject);
     req.write(body);

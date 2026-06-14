@@ -71,6 +71,7 @@ function handleCopyClick(event: MouseEvent): void {
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
+  justify-content: flex-end;
   gap: 16px;
 }
 </style>

@@ -62,6 +62,19 @@ export const useSessionStore = defineStore('session', {
         this.error = error instanceof Error ? error.message : '搜索会话失败';
       }
     },
+    async updateActiveSessionModelOverride(modelOverride: string | null) {
+      if (!this.activeSession) return;
+      try {
+        const normalized = modelOverride?.trim() || null;
+        const updated = await window.claudeLink.updateModelOverride(this.activeSession.id, normalized);
+        if (updated) {
+          this.activeSession = updated;
+          this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '更新会话模型失败';
+      }
+    },
     addMessage(message: Message) {
       this.messages.push(message);
 

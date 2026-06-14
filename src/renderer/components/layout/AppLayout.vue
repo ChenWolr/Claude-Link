@@ -37,8 +37,10 @@ const isTaskPanelOpen = ref(true);
 }
 
 .workspace-main {
+  display: flex;
   min-height: 0;
   flex: 1;
+  flex-direction: column;
   overflow: hidden;
 }
 

@@ -5,7 +5,7 @@ import type { QueueEventPayload } from '../../shared/types/ipc';
 export const useTaskStore = defineStore('task', {
   state: () => ({
     tasks: [] as Task[],
-    queueState: { status: 'idle', countdownRemaining: 0, pendingCount: 0, sessionId: '', currentTaskId: null } as QueueState,
+    queueState: { status: 'idle', countdownRemaining: 0, pendingCount: 0, sessionId: '', currentTaskId: null, lastCompletedTaskId: null } as QueueState,
     error: null as string | null,
   }),
   actions: {

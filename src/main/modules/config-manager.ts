@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import type { AppConfig } from '../../shared/types/config';
 import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID } from '../../shared/constants';
 import { logger } from '../utils/logger';
+import { parseClaudeSettings } from './settings-importer';
 
 interface StoredConfig extends Omit<AppConfig, 'apiKey' | 'advancedJson'> {
   encryptedApiKey: string | null;
@@ -138,44 +139,5 @@ export function importSettingsFile(filePath: string): {
   advancedJson: string;
 } {
   const content = fs.readFileSync(filePath, 'utf-8');
-  const settings = JSON.parse(content) as Record<string, unknown>;
-
-  const result: {
-    apiKey?: string;
-    apiBaseUrl?: string;
-    defaultModel?: string;
-    advancedJson: string;
-  } = { advancedJson: '{}' };
-
-  // Extract known fields
-  if (typeof settings.apiKey === 'string') {
-    result.apiKey = settings.apiKey;
-    delete settings.apiKey;
-  }
-  if (typeof settings.apiBaseUrl === 'string') {
-    result.apiBaseUrl = settings.apiBaseUrl;
-    delete settings.apiBaseUrl;
-  }
-  if (typeof settings.baseUrl === 'string') {
-    result.apiBaseUrl = settings.baseUrl;
-    delete settings.baseUrl;
-  }
-  if (typeof settings.model === 'string') {
-    result.defaultModel = settings.model;
-    delete settings.model;
-  }
-
-  // Remaining fields go into advancedJson
-  const remaining = Object.entries(settings).filter(
-    ([, value]) => typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean',
-  );
-  if (remaining.length > 0) {
-    const advancedObj: Record<string, unknown> = {};
-    for (const [key, value] of remaining) {
-      advancedObj[key] = value;
-    }
-    result.advancedJson = JSON.stringify(advancedObj, null, 2);
-  }
-
-  return result;
+  return parseClaudeSettings(content);
 }

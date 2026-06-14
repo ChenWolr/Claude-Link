@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Session } from '../../../shared/types/session';
 import { getConnection } from '../connection';
+import { normalizeSearchText } from '../../utils/search-normalizer';
 
 interface SessionRow {
   id: string;
@@ -102,17 +103,29 @@ export function updateSession(
 }
 
 export function searchSessions(query: string): Session[] {
-  const db = getConnection();
-  const normalizedQuery = query.replace(/\s+/g, '').toLowerCase();
+  const normalizedQuery = normalizeSearchText(query);
+  const sessions = listSessions();
+  if (!normalizedQuery) {
+    return sessions;
+  }
 
-  const rows = db.prepare(`
-    SELECT DISTINCT s.* FROM sessions s
-    LEFT JOIN messages m ON m.session_id = s.id
-    WHERE REPLACE(LOWER(s.name), ' ', '') LIKE ? OR LOWER(m.content) LIKE ?
-    ORDER BY s.updated_at DESC
-  `).all(`%${normalizedQuery}%`, `%${query.toLowerCase()}%`) as SessionRow[];
+  // 用与前端完全相同的 normalizeSearchText 函数做对称归一化，
+  // 避免 SQL REPLACE 与 TS 正则的归一化分歧导致漏匹配。
+  // 一次性取出每个会话的拼接消息内容用于内容匹配。
+  const contentMap = new Map<string, string>();
+  const contentRows = getConnection()
+    .prepare('SELECT session_id, GROUP_CONCAT(content, " ") AS text FROM messages GROUP BY session_id')
+    .all() as { session_id: string; text: string | null }[];
+  for (const row of contentRows) {
+    contentMap.set(row.session_id, row.text ?? '');
+  }
 
-  return rows.map(toSession);
+  return sessions.filter((session) => {
+    if (normalizeSearchText(session.name).includes(normalizedQuery)) return true;
+    const content = contentMap.get(session.id);
+    if (content && normalizeSearchText(content).includes(normalizedQuery)) return true;
+    return false;
+  });
 }
 
 export function deleteSession(id: string): void {

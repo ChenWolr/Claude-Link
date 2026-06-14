@@ -22,6 +22,7 @@ export interface QueueState {
   sessionId: string;
   status: QueueStateStatus;
   currentTaskId: string | null;
+  lastCompletedTaskId: string | null;
   countdownRemaining: number;
   pendingCount: number;
 }

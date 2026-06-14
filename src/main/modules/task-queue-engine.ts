@@ -4,6 +4,7 @@ import { IPC_CHANNELS, DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants
 import { spawnForChat, spawnForTask, killProcess, getCliSessionId, sendMessage } from './process-manager';
 import { getConfig } from './config-manager';
 import * as taskRepo from '../database/repositories/task-repo';
+import * as sessionRepo from '../database/repositories/session-repo';
 
 const queues = new Map<string, QueueState>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -30,6 +31,7 @@ function getOrCreateQueue(sessionId: string): QueueState {
       sessionId,
       status: 'idle',
       currentTaskId: null,
+      lastCompletedTaskId: null,
       countdownRemaining: 0,
       pendingCount: 0,
     };
@@ -56,10 +58,15 @@ export function pauseQueue(sessionId: string, mainWindow: BrowserWindow): void {
   const state = queues.get(sessionId);
   if (!state) return;
 
-  const timer = timers.get(sessionId);
-  if (timer) {
-    clearTimeout(timer);
+  const countdownTimer = timers.get(sessionId);
+  const mainTimer = timers.get(`${sessionId}__main`);
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
     timers.delete(sessionId);
+  }
+  if (mainTimer) {
+    clearTimeout(mainTimer);
+    timers.delete(`${sessionId}__main`);
   }
 
   state.status = 'paused';
@@ -114,9 +121,11 @@ function executeNextTask(sessionId: string, mainWindow: BrowserWindow): void {
   emitQueueEvent(mainWindow, sessionId, 'task_started', task.id);
 
   const cliSessionId = getCliSessionId(sessionId);
+  const session = sessionRepo.getSession(sessionId);
 
   const child = spawnForTask(task.id, sessionId, task.prompt, mainWindow, {
-    model: config.defaultModel,
+    model: session?.model ?? config.defaultModel,
+    modelOverride: session?.modelOverride ?? null,
     workingDir: config.workingDirectory,
     maxTurns: config.maxTurns,
     permissionMode: config.permissionMode,
@@ -134,6 +143,7 @@ function executeNextTask(sessionId: string, mainWindow: BrowserWindow): void {
       emitQueueEvent(mainWindow, sessionId, 'task_failed', task.id, { exitCode: code });
     }
 
+    state.lastCompletedTaskId = task.id;
     state.currentTaskId = null;
 
     // Schedule next task
@@ -203,15 +213,17 @@ export function continueWithUserMessage(
 
   state.status = 'continuing';
   emitQueueEvent(mainWindow, sessionId, 'countdown_cancelled');
-  emitQueueEvent(mainWindow, sessionId, 'task_continuing', state.currentTaskId);
+  const continuingTaskId = state.currentTaskId ?? state.lastCompletedTaskId ?? undefined;
+  emitQueueEvent(mainWindow, sessionId, 'task_continuing', continuingTaskId);
 
   // Re-spawn CLI with --resume to continue the previous conversation session.
   // The original task process has already exited, so we need a new process.
   const config = getConfig();
   const cliSessionId = getCliSessionId(sessionId);
+  const session = sessionRepo.getSession(sessionId);
   const child = spawnForChat(sessionId, mainWindow, {
-    model: config.defaultModel,
-    modelOverride: null,
+    model: session?.model ?? config.defaultModel,
+    modelOverride: session?.modelOverride ?? null,
     workingDir: config.workingDirectory,
     maxTurns: config.maxTurns,
     permissionMode: config.permissionMode,
@@ -221,8 +233,9 @@ export function continueWithUserMessage(
   // Write the user's continuation message to stdin
   sendMessage(sessionId, message);
 
-  // When the continuation process exits, reset countdown for next task
-  child.on('exit', (code) => {
+  // 保持 'continuing' 状态直到续写进程退出，让前端能展示"继续执行当前任务"。
+  // 进程退出后再由 exit handler 决定进入下一任务倒计时或回到 idle。
+  child.on('exit', () => {
     state.currentTaskId = null;
 
     const remaining = taskRepo.getPendingTasks(sessionId);
@@ -235,8 +248,6 @@ export function continueWithUserMessage(
       emitQueueEvent(mainWindow, sessionId, 'queue_completed');
     }
   });
-
-  state.status = 'running';
 }
 
 export function skipCountdown(sessionId: string, mainWindow: BrowserWindow): void {
@@ -260,6 +271,7 @@ export function getQueueState(sessionId: string): QueueState {
     sessionId,
     status: 'idle',
     currentTaskId: null,
+    lastCompletedTaskId: null,
     countdownRemaining: 0,
     pendingCount: 0,
   };
