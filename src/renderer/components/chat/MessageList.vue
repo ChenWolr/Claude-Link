@@ -4,16 +4,18 @@ import type { Message } from '../../../shared/types/session';
 import MessageBubble from './MessageBubble.vue';
 import StreamRenderer from './StreamRenderer.vue';
 import ToolCallBlock from './ToolCallBlock.vue';
+import ThinkingBlock from './ThinkingBlock.vue';
 
 const props = defineProps<{
   messages: Message[];
   streamingContent: string;
+  streamingThinking: string;
 }>();
 
 const container = ref<HTMLElement | null>(null);
 
 watch(
-  () => [props.messages.length, props.streamingContent],
+  () => [props.messages.length, props.streamingContent, props.streamingThinking],
   async () => {
     await nextTick();
     if (container.value) {
@@ -24,6 +26,10 @@ watch(
 
 function isToolCall(msg: Message): boolean {
   return msg.eventType === 'tool_use' || msg.eventType === 'tool_result';
+}
+
+function isThinking(msg: Message): boolean {
+  return msg.eventType === 'thinking';
 }
 
 function handleCopyClick(event: MouseEvent): void {
@@ -56,9 +62,11 @@ function handleCopyClick(event: MouseEvent): void {
 <template>
   <div ref="container" class="message-list" @click="handleCopyClick">
     <template v-for="msg in messages" :key="msg.id">
-      <ToolCallBlock v-if="isToolCall(msg)" :message="msg" />
+      <ThinkingBlock v-if="isThinking(msg)" :content="msg.content" />
+      <ToolCallBlock v-else-if="isToolCall(msg)" :message="msg" />
       <MessageBubble v-else :message="msg" />
     </template>
+    <ThinkingBlock v-if="streamingThinking" :content="streamingThinking" streaming />
     <StreamRenderer v-if="streamingContent" :content="streamingContent" />
   </div>
 </template>

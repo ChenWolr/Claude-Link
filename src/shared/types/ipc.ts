@@ -8,6 +8,8 @@ export const IPC_CHANNELS = {
   CONFIG_CLEAR: 'config:clear',
   CONFIG_IMPORT_SETTINGS: 'config:importSettings',
   CONFIG_PICK_SETTINGS_FILE: 'config:pickSettingsFile',
+  CONFIG_AUTO_DETECT: 'config:autoDetect',
+  CONFIG_TEST_CONNECTION: 'config:testConnection',
   MODELS_FETCH: 'models:fetch',
   SESSION_LIST: 'session:list',
   SESSION_CREATE: 'session:create',

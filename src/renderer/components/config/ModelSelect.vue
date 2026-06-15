@@ -1,5 +1,11 @@
 <script setup lang="ts">
+import { computed } from 'vue';
+
 const model = defineModel<string>({ required: true });
+const props = defineProps<{ mappings?: Record<string, string> }>();
+
+// 若当前 model 是有映射的别名，显示"→ 实际模型"提示
+const mappingHint = computed(() => (props.mappings && props.mappings[model.value]) || '');
 </script>
 
 <template>
@@ -8,11 +14,12 @@ const model = defineModel<string>({ required: true });
     <input
       v-model="model"
       type="text"
-      placeholder="直接输入模型 ID，例如 claude-sonnet-4-6"
+      placeholder="模型 ID 或别名 sonnet/haiku/opus/fable"
       autocomplete="off"
       spellcheck="false"
     />
-    <small class="field-hint">手动填写模型 ID；会话内仍可在顶栏临时切换模型。</small>
+    <small v-if="mappingHint" class="field-hint field-hint--mapped">→ {{ mappingHint }}</small>
+    <small v-else class="field-hint">手动填写模型 ID 或别名（sonnet/haiku/opus）；会话内可在顶栏切换。</small>
   </label>
 </template>
 
@@ -41,5 +48,9 @@ input {
 .field-hint {
   color: var(--color-text-muted);
   font-size: 12px;
+}
+
+.field-hint--mapped {
+  color: var(--color-accent-strong);
 }
 </style>

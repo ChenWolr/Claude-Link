@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { SLASH_COMMANDS } from '../../../shared/constants';
+import ModelSelector from './ModelSelector.vue';
 
 const emit = defineEmits<{
   sendCommand: [command: string];
@@ -14,41 +15,52 @@ const quickCommands = computed(() =>
 
 <template>
   <div class="command-toolbar">
-    <button
-      type="button"
-      class="toolbar-btn toolbar-btn--compress"
-      title="向 Claude Code 发送 /compact，压缩当前上下文"
-      @click="emit('compress')"
-    >
-      压缩上下文
-    </button>
-    <button
-      v-for="cmd in quickCommands"
-      :key="cmd.name"
-      type="button"
-      class="toolbar-btn"
-      @click="emit('sendCommand', cmd.name)"
-    >
-      {{ cmd.name }}
-    </button>
-    <button
-      type="button"
-      class="toolbar-btn toolbar-btn--more"
-      title="更多命令"
-      @click="emit('sendCommand', '/help')"
-    >
-      /更多
-    </button>
+    <div class="command-toolbar__left">
+      <button
+        type="button"
+        class="toolbar-btn toolbar-btn--compress"
+        title="向 Claude Code 发送 /compact，压缩当前上下文"
+        @click="emit('compress')"
+      >
+        压缩上下文
+      </button>
+      <button
+        v-for="cmd in quickCommands"
+        :key="cmd.name"
+        type="button"
+        class="toolbar-btn"
+        @click="emit('sendCommand', cmd.name)"
+      >
+        {{ cmd.name }}
+      </button>
+      <button
+        type="button"
+        class="toolbar-btn toolbar-btn--more"
+        title="更多命令"
+        @click="emit('sendCommand', '/help')"
+      >
+        /更多
+      </button>
+    </div>
+    <ModelSelector />
   </div>
 </template>
 
 <style scoped>
 .command-toolbar {
   display: flex;
+  justify-content: space-between;
+  align-items: center;
   gap: 6px;
   max-width: 800px;
   margin: 0 auto;
   padding: 4px 24px;
+}
+
+.command-toolbar__left {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .toolbar-btn {

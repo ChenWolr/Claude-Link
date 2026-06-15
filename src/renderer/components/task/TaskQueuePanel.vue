@@ -79,9 +79,9 @@ function handleDragReorder() {
         <h2>任务队列</h2>
       </div>
       <div class="task-panel__controls">
-        <button v-if="queueStatus === 'idle' || queueStatus === 'paused'" type="button" class="btn btn--primary" @click="handleStart">开始</button>
-        <button v-if="queueStatus === 'running' || queueStatus === 'waiting' || queueStatus === 'continuing'" type="button" class="btn btn--warn" @click="handlePause">暂停</button>
-        <button v-if="queueStatus === 'paused'" type="button" class="btn btn--primary" @click="handleResume">恢复</button>
+        <button v-if="queueStatus === 'idle' || queueStatus === 'paused'" type="button" class="btn btn--primary" title="开始执行队列中的任务" @click="handleStart">开始</button>
+        <button v-if="queueStatus === 'running' || queueStatus === 'waiting' || queueStatus === 'continuing'" type="button" class="btn btn--warn" title="暂停倒计时与队列执行" @click="handlePause">暂停</button>
+        <button v-if="queueStatus === 'paused'" type="button" class="btn btn--primary" title="恢复队列执行" @click="handleResume">恢复</button>
       </div>
     </header>
 
@@ -117,14 +117,21 @@ function handleDragReorder() {
 
     <!-- Add Task -->
     <div class="task-panel__add">
-      <p class="queue-hint">运行中的任务不会被新指令打断；新指令会在当前任务结束并等待倒计时后执行。</p>
+      <div class="add-row">
+        <span class="add-label">排队指令</span>
+        <span
+          class="add-info"
+          title="运行中的任务不会被新指令打断；新指令会在当前任务结束并等待倒计时后执行。倒计时（秒数可在配置页设置）内输入会作为对当前任务的补充继续执行。"
+        >ⓘ</span>
+      </div>
       <textarea
         v-model="newTaskPrompt"
         placeholder="输入要排队发送给 AI 的下一条指令"
-        rows="2"
+        rows="3"
+        title="输入要排队发送给 AI 的下一条指令（回车添加到队列末尾）"
         @keydown.enter.prevent="handleAddTask"
       />
-      <button type="button" :disabled="!newTaskPrompt.trim()" @click="handleAddTask">添加</button>
+      <button type="button" :disabled="!newTaskPrompt.trim()" title="添加到队列末尾" @click="handleAddTask">添加</button>
     </div>
   </aside>
 </template>
@@ -218,21 +225,42 @@ function handleDragReorder() {
 
 .task-panel__add {
   display: flex;
+  flex-direction: column;
   gap: 8px;
   padding: 12px;
   border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
 }
 
-.queue-hint {
-  margin: 0 0 4px;
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.add-label {
   color: var(--color-text-muted);
   font-size: 12px;
-  line-height: 1.4;
+  font-weight: 600;
+}
+
+.add-info {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  cursor: help;
+  user-select: none;
 }
 
 .task-panel__add textarea {
   min-width: 0;
-  flex: 1;
+  width: 100%;
+  min-height: 72px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);

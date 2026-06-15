@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../stores/session-store';
 import { useChat } from '../composables/use-chat';
 import { useStream } from '../composables/use-stream';
@@ -11,32 +11,7 @@ import CommandToolbar from '../components/chat/CommandToolbar.vue';
 const store = useSessionStore();
 const taskStore = useTaskStore();
 const { sending, sendMessage, abort, startListening, stopListening } = useChat();
-const { displayContent } = useStream();
-
-const modelOverrideDraft = ref('');
-
-const effectiveModel = computed(() => {
-  const session = store.activeSession;
-  if (!session) return '';
-  return session.modelOverride || session.model;
-});
-
-watch(
-  () => store.activeSession?.id,
-  () => {
-    modelOverrideDraft.value = store.activeSession?.modelOverride ?? '';
-  },
-  { immediate: true },
-);
-
-async function saveModelOverride() {
-  await store.updateActiveSessionModelOverride(modelOverrideDraft.value);
-}
-
-async function clearModelOverride() {
-  modelOverrideDraft.value = '';
-  await store.updateActiveSessionModelOverride(null);
-}
+const { displayContent, displayThinking } = useStream();
 
 onMounted(() => {
   store.loadSessions();
@@ -86,18 +61,7 @@ async function handleNewSession() {
 <template>
   <section class="chat-page">
     <template v-if="store.activeSession">
-      <div class="session-model-bar">
-        <span>当前模型：{{ effectiveModel }}</span>
-        <input
-          v-model="modelOverrideDraft"
-          type="text"
-          placeholder="会话模型 override，例如 claude-opus-4-8（留空用默认）"
-          @keydown.enter.prevent="saveModelOverride"
-        />
-        <button type="button" @click="saveModelOverride">应用</button>
-        <button type="button" @click="clearModelOverride">清空</button>
-      </div>
-      <MessageList :messages="store.messages" :streaming-content="displayContent" />
+      <MessageList :messages="store.messages" :streaming-content="displayContent" :streaming-thinking="displayThinking" />
       <CommandToolbar @send-command="handleSendCommand" @compress="handleCompress" />
       <ChatInput :disabled="sending" @send="handleSend" />
       <button v-if="sending" class="abort-button" type="button" @click="abort">中断</button>
@@ -120,44 +84,6 @@ async function handleNewSession() {
   flex: 1;
   flex-direction: column;
   overflow: hidden;
-}
-
-.session-model-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 800px;
-  margin: 0 auto;
-  border-bottom: 1px solid var(--color-border);
-  padding: 8px 24px;
-  color: var(--color-text-muted);
-  font-size: 12px;
-}
-
-.session-model-bar span {
-  white-space: nowrap;
-}
-
-.session-model-bar input {
-  min-width: 220px;
-  flex: 1;
-  max-width: 420px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-panel-soft);
-  color: var(--color-text);
-  padding: 6px 8px;
-  font-size: 12px;
-}
-
-.session-model-bar button {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-panel-soft);
-  color: var(--color-text);
-  padding: 6px 10px;
-  font-size: 12px;
-  cursor: pointer;
 }
 
 .empty-state {
