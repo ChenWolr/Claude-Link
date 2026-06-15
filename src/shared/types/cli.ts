@@ -21,10 +21,17 @@ export interface CliMessageContentToolResultPart {
   content?: string;
 }
 
+export interface CliMessageContentThinkingPart {
+  type: 'thinking';
+  thinking: string;
+  signature?: string;
+}
+
 export type CliMessageContentPart =
   | CliMessageContentTextPart
   | CliMessageContentToolUsePart
-  | CliMessageContentToolResultPart;
+  | CliMessageContentToolResultPart
+  | CliMessageContentThinkingPart;
 
 export interface CliMessageEvent {
   type: 'message';
@@ -35,10 +42,15 @@ export interface CliMessageEvent {
 export interface CliStreamEvent {
   type: 'stream_event';
   event: {
+    type?: string;
+    index?: number;
+    content_block?: { type: 'thinking' | 'text' | 'tool_use'; [k: string]: unknown };
     delta: {
-      type: 'text_delta' | 'input_json_delta';
+      type: 'text_delta' | 'input_json_delta' | 'thinking_delta' | 'signature_delta';
       text?: string;
       partial_json?: string;
+      thinking?: string;
+      signature?: string;
     };
   };
 }

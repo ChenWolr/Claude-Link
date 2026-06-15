@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 
 const store = useSessionStore();
 const router = useRouter();
 const searchQuery = ref('');
-let searchTimer: ReturnType<typeof setTimeout> | null = null;
+
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(() => {
   store.loadSessions();
+});
+
+onUnmounted(() => {
+  if (debounceTimer) clearTimeout(debounceTimer);
 });
 
 async function handleNewSession() {
@@ -28,11 +33,18 @@ async function openSession(session: { id: string }) {
   }
 }
 
-function handleSearchInput() {
-  if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = setTimeout(() => {
-    store.searchSessions(searchQuery.value);
-  }, 300);
+// 恢复 IPC 内容搜索：主进程 searchSessions 同时匹配会话名与消息内容，
+// 客户端只搜 name 会丢失"按对话内容找会话"的能力。250ms 防抖避免每键一次 IPC。
+function onSearchInput() {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  const q = searchQuery.value.trim();
+  if (!q) {
+    store.loadSessions();
+    return;
+  }
+  debounceTimer = setTimeout(() => {
+    store.searchSessions(q);
+  }, 250);
 }
 
 function handleSearchClear() {
@@ -58,7 +70,7 @@ const sessionList = computed(() => store.sessions);
       class="sidebar__search"
       type="search"
       placeholder="搜索会话"
-      @input="handleSearchInput"
+      @input="onSearchInput"
       @search="handleSearchClear"
     />
 

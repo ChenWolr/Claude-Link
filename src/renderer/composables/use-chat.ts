@@ -1,3 +1,11 @@
+// use-chat.ts
+// CLI 流事件处理：把 process-manager 转发的 stream-json 事件分流到 session-store。
+//
+// stream_event: thinking_delta → appendThinking（思考），text_delta → appendStream（正文），
+//   signature_delta 忽略；message: 清流 + 持久化各 part（text / tool_use / tool_result / thinking）；
+// result: 补 result 文本（防丢）+ 挂费用/耗时。
+// 这里是"Claude 思考/输入/输出原封不动接收展示"的核心实现（之前 thinking_delta 被完全丢弃）。
+
 import { ref } from 'vue';
 import { useSessionStore } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
@@ -29,19 +37,26 @@ export function useChat() {
   function handleCliEvent(event: CliEvent): void {
     switch (event.type) {
       case 'stream_event': {
-        const text = event.event?.delta?.text;
-        if (text) {
-          store.appendStream(text);
+        const delta = event.event?.delta;
+        if (!delta) break;
+        if (delta.type === 'thinking_delta' && delta.thinking) {
+          store.appendThinking(delta.thinking);
+        } else if (delta.type === 'signature_delta') {
+          // 思考签名不展示
+        } else if (delta.text) {
+          store.appendStream(delta.text);
         }
         break;
       }
       case 'message': {
         store.clearStream();
+        store.clearThinking();
         handleMessageParts(event.content ?? [], event.role);
         break;
       }
       case 'result': {
         store.clearStream();
+        store.clearThinking();
         ensureResultMessage(event);
         attachResultMetadata(event);
         sending.value = false;
@@ -55,6 +70,21 @@ export function useChat() {
 
   function handleMessageParts(parts: CliMessageContentPart[], role: 'user' | 'assistant'): void {
     for (const part of parts) {
+      if (part.type === 'thinking' && 'thinking' in part) {
+        store.addMessage({
+          id: crypto.randomUUID(),
+          sessionId: store.activeSession!.id,
+          role: 'assistant',
+          content: part.thinking,
+          rawEvent: null,
+          eventType: 'thinking',
+          costUsd: null,
+          durationMs: null,
+          parentTaskId: null,
+          createdAt: new Date().toISOString(),
+        });
+        continue;
+      }
       if (part.type === 'text' && 'text' in part) {
         store.addMessage({
           id: crypto.randomUUID(),

@@ -1,8 +1,16 @@
+// ipc-handlers.ts
+// IPC handler 注册中心：渲染进程 ↔ 主进程的桥梁。
+//
+// 注册 config / cli / session / message / chat / task / queue 全部 IPC handler。
+// 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
+
 import { BrowserWindow, dialog, ipcMain } from 'electron';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { IPC_CHANNELS } from '../shared/constants';
 import { clearConfig, getConfig, importSettingsFile, saveConfig } from './modules/config-manager';
+import { detectClaudeConfig } from './modules/claude-config-detector';
+import { testConnection } from './modules/connection-tester';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
 import { spawnForChat, sendMessage, killProcess, getActiveProcess } from './modules/process-manager';
@@ -45,6 +53,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if (result.canceled || !result.filePaths.length) return null;
     return result.filePaths[0];
   });
+  ipcMain.handle(IPC_CHANNELS.CONFIG_AUTO_DETECT, async () => detectClaudeConfig());
+  ipcMain.handle(IPC_CHANNELS.CONFIG_TEST_CONNECTION, async () => testConnection());
   ipcMain.handle(
     IPC_CHANNELS.MODELS_FETCH,
     async (_event, provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) =>

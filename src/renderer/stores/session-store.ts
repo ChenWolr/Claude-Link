@@ -1,3 +1,9 @@
+// session-store.ts
+// 会话与消息状态：sessions 列表、activeSession、messages（持久化历史）、
+// streamingContent（流式正文）/ streamingThinking（流式思考）。
+//
+// 流式状态由 use-chat 的 stream_event 填充，use-stream 防抖后驱动 MessageList 展示。
+
 import { defineStore } from 'pinia';
 import type { Session } from '../../shared/types/session';
 import type { Message } from '../../shared/types/session';
@@ -8,6 +14,7 @@ export const useSessionStore = defineStore('session', {
     activeSession: null as Session | null,
     messages: [] as Message[],
     streamingContent: '',
+    streamingThinking: '',
     sending: false,
     error: null as string | null,
   }),
@@ -103,6 +110,12 @@ export const useSessionStore = defineStore('session', {
     },
     clearStream() {
       this.streamingContent = '';
+    },
+    appendThinking(text: string) {
+      this.streamingThinking += text;
+    },
+    clearThinking() {
+      this.streamingThinking = '';
     },
     finalizeStream() {
       if (this.streamingContent) {

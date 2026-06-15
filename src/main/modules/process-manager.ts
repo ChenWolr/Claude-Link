@@ -1,3 +1,11 @@
+// process-manager.ts
+// Claude Code CLI 子进程管理：spawn claude + env 注入（buildSpawnEnv）+ stream-json 解析 + 持久化。
+//
+// 核心链路：spawnForChat / spawnForTask 启动 claude CLI（--include-partial-messages 流式输出），
+// buildSpawnEnv 注入 apiKey / baseUrl / 模型映射等 env（含 advancedJson.env 块展开），
+// attachStreamParser 逐行解析 stream-json（init / message / stream_event / result），
+// 持久化到 SQLite 并转发渲染进程。testConnection 也复用 buildSpawnEnv，保证测试结果代表真实会话。
+
 import { spawn, type ChildProcess } from 'child_process';
 import type { BrowserWindow } from 'electron';
 import type { CliInitEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
@@ -24,7 +32,7 @@ function getCliCommand(): string {
   return config.cliPath || 'claude';
 }
 
-function buildSpawnEnv(): Record<string, string> {
+export function buildSpawnEnv(): Record<string, string> {
   const config = getConfig();
   const env: Record<string, string> = { ...process.env as Record<string, string> };
 
@@ -39,13 +47,26 @@ function buildSpawnEnv(): Record<string, string> {
     env.ANTHROPIC_BASE_URL = baseUrl;
   }
 
-  // Inject advanced JSON as environment variables
+  // Inject advanced JSON as environment variables.
+  // 支持两种结构：
+  //   1) 扁平格式 { "KEY": "value" } —— 顶层字符串直接注入（向后兼容）
+  //   2) Claude Code settings.json 格式 { "env": { "KEY": "value" }, ... }
+  //      —— 必须展开 env 块，否则 ANTHROPIC_DEFAULT_*_MODEL 等模型映射丢失，
+  //        导致 --model sonnet 别名解析成默认 claude-sonnet-4-6 发给第三方端点被拒。
   if (config.advancedJson && config.advancedJson !== '{}') {
     try {
       const advanced = JSON.parse(config.advancedJson) as Record<string, unknown>;
       for (const [key, value] of Object.entries(advanced)) {
         if (typeof value === 'string') {
           env[key] = value;
+        }
+      }
+      const envBlock = advanced.env;
+      if (envBlock && typeof envBlock === 'object' && !Array.isArray(envBlock)) {
+        for (const [key, value] of Object.entries(envBlock as Record<string, unknown>)) {
+          if (typeof value === 'string') {
+            env[key] = value;
+          }
         }
       }
     } catch {
@@ -180,6 +201,8 @@ function persistMessageParts(
         ? (part as { content: string }).content
         : JSON.stringify((part as { content?: unknown }).content ?? '', null, 2);
       messageRepo.createMessage(sessionId, 'tool', resultText, 'tool_result');
+    } else if (part.type === 'thinking' && 'thinking' in part) {
+      messageRepo.createMessage(sessionId, 'assistant', part.thinking, 'thinking');
     }
   }
 }

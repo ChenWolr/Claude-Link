@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { onMounted, ref, computed } from 'vue';
+import { onMounted, ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config-store';
 import ProviderSelect from '../components/config/ProviderSelect.vue';
 import ApiKeyInput from '../components/config/ApiKeyInput.vue';
 import ModelSelect from '../components/config/ModelSelect.vue';
+import ModelMappingInputs from '../components/config/ModelMappingInputs.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import { THEME_PALETTES } from '../../shared/constants';
+import { parseClaudeSettings } from '../../shared/settings-parser';
 
 const store = useConfigStore();
 const router = useRouter();
@@ -19,6 +21,34 @@ onMounted(async () => {
   await store.loadConfig();
   await store.detectCli();
 });
+
+// 监听高级 JSON 文本框：粘贴 Claude Code settings.json 后自动回填字段（防抖 600ms）。
+// applyExtractedSettings 只在 JSON 含对应字段时覆盖，空字段不会清掉用户手填的值。
+let autoFillTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  () => store.config.advancedJson,
+  (val) => {
+    if (store.updatingFromJson) return;
+    if (autoFillTimer) clearTimeout(autoFillTimer);
+    if (!val || val.trim() === '' || val.trim() === '{}') return;
+    autoFillTimer = setTimeout(() => {
+      try {
+        const parsed = parseClaudeSettings(val);
+        store.applyExtractedSettings(parsed);
+      } catch {
+        // 静默：用户可能正在编辑不完整的 JSON
+      }
+    }, 600);
+  },
+);
+
+// 表单→JSON：apiKey/apiBaseUrl/permissionMode 改动同步进 advancedJson（完整双向）
+watch(
+  () => [store.config.apiKey, store.config.apiBaseUrl, store.config.permissionMode],
+  () => {
+    if (!store.updatingFromJson) store.syncFormToAdvanced();
+  },
+);
 
 const advancedJsonValid = computed(() => {
   if (!store.config.advancedJson || store.config.advancedJson === '{}') return true;
@@ -105,6 +135,33 @@ async function handleImportSettings() {
   }
 }
 
+const autoDetectInfo = ref<string | null>(null);
+
+async function handleAutoDetect() {
+  const detected = await store.autoDetectClaudeConfig();
+  if (!detected) {
+    autoDetectInfo.value = store.error;
+    return;
+  }
+  const parts = [`检测来源：${detected.sources.join('、') || '无'}`];
+  if (detected.hasOAuthCredentials) parts.push('检测到 OAuth 登录态（claude.ai 订阅）');
+  if (detected.oauthAccount?.email) parts.push(`账号：${detected.oauthAccount.email}`);
+  if (detected.apiKeyHelper) parts.push('检测到 apiKeyHelper（Claude Link 不执行动态密钥脚本，请改用静态 API Key）');
+  autoDetectInfo.value = parts.join('；');
+}
+
+const testResult = ref<{ success: boolean; message: string; responsePreview?: string } | null>(null);
+
+async function handleTestConnection() {
+  testResult.value = null;
+  const result = await store.testConnection();
+  if (result) {
+    testResult.value = { success: result.success, message: result.message, responsePreview: result.responsePreview };
+  } else {
+    testResult.value = { success: false, message: store.error ?? '测试连接失败' };
+  }
+}
+
 function handleFillFromJson() {
   const result = store.fillFromAdvancedJson();
   toastType.value = result.ok ? 'success' : 'error';
@@ -136,7 +193,8 @@ function applyTheme(paletteId: string) {
 </script>
 
 <template>
-  <section class="config-page">
+  <section class="config-scroll">
+    <section class="config-page">
     <header class="config-page__header">
       <div>
         <p class="eyebrow">Settings</p>
@@ -156,6 +214,19 @@ function applyTheme(paletteId: string) {
 
     <div v-if="toast" :class="['toast', `toast--${toastType}`]">{{ toast }}</div>
     <div v-if="store.error && !toast" class="toast toast--error">{{ store.error }}</div>
+
+    <!-- Config actions: auto-detect + test connection -->
+    <div class="autodetect-bar">
+      <button type="button" class="autodetect-btn" @click="handleAutoDetect">自动检测配置</button>
+      <button type="button" class="test-btn" :disabled="store.testingConnection" @click="handleTestConnection">
+        {{ store.testingConnection ? '测试中…' : '测试连接' }}
+      </button>
+      <p v-if="autoDetectInfo" class="autodetect-info">{{ autoDetectInfo }}</p>
+    </div>
+    <div v-if="testResult" :class="['test-result', testResult.success ? 'test-result--ok' : 'test-result--fail']">
+      <p class="test-result__msg">{{ testResult.message }}</p>
+      <p v-if="testResult.responsePreview" class="test-result__preview">CLI 响应：{{ testResult.responsePreview }}</p>
+    </div>
 
     <form class="config-form" @submit.prevent="handleSave">
       <!-- Provider Section -->
@@ -192,8 +263,9 @@ function applyTheme(paletteId: string) {
           </div>
         </label>
 
-        <ModelSelect v-model="store.config.defaultModel" />
+        <ModelSelect v-model="store.config.defaultModel" :mappings="store.modelMappings" />
         <div v-if="store.importedFields.has('defaultModel')" class="imported-mark">✓ 已从 settings.json 导入</div>
+        <ModelMappingInputs />
       </div>
 
       <!-- Advanced JSON -->
@@ -257,13 +329,22 @@ function applyTheme(paletteId: string) {
         {{ store.savingConfig ? '保存中...' : '保存配置' }}
       </button>
     </form>
+    </section>
   </section>
 </template>
 
 <style scoped>
+.config-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
+}
+
 .config-page {
   max-width: 640px;
-  padding: 32px;
+  margin: 0 auto;
+  padding: 32px 32px 64px;
 }
 
 .config-page__header {
@@ -342,6 +423,86 @@ function applyTheme(paletteId: string) {
   border: 1px solid #8a3b3b;
   background: rgba(239, 100, 97, 0.12);
   color: #f08887;
+}
+
+.autodetect-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.autodetect-btn {
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: #07120d;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.autodetect-info {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.autodetect-bar {
+  flex-wrap: wrap;
+}
+
+.test-btn {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.test-btn:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.test-result {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  font-size: 13px;
+}
+
+.test-result--ok {
+  border-color: #2a6e4a;
+  background: rgba(58, 166, 117, 0.12);
+  color: #5fd6a0;
+}
+
+.test-result--fail {
+  border-color: #8a3b3b;
+  background: rgba(239, 100, 97, 0.12);
+  color: #f08887;
+}
+
+.test-result__msg {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.test-result__preview {
+  margin: 8px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
 }
 
 .config-form {

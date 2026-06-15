@@ -1,5 +1,9 @@
+// api.ts
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（35 个方法）。
+// 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
+
 import { ipcRenderer } from 'electron';
-import type { AppConfig, ModelInfo } from '../shared/types/config';
+import type { AppConfig, ModelInfo, DetectedClaudeConfig, ConnectionTestResult } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
 import type { ChatEventPayload, QueueEventPayload } from '../shared/types/ipc';
@@ -19,6 +23,8 @@ export interface ClaudeLinkAPI {
     advancedJson: string;
   }>;
   pickSettingsFile: () => Promise<string | null>;
+  autoDetectClaudeConfig: () => Promise<DetectedClaudeConfig>;
+  testConnection: () => Promise<ConnectionTestResult>;
   fetchModels: (provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) => Promise<ModelInfo[]>;
   listSessions: () => Promise<Session[]>;
   createSession: (name: string) => Promise<Session>;
@@ -59,6 +65,8 @@ export function createApi(): ClaudeLinkAPI {
     clearConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_CLEAR),
     importSettings: (filePath) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, filePath),
     pickSettingsFile: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE) as Promise<string | null>,
+    autoDetectClaudeConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_AUTO_DETECT) as Promise<DetectedClaudeConfig>,
+    testConnection: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_TEST_CONNECTION) as Promise<ConnectionTestResult>,
     fetchModels: (provider, apiKey, apiBaseUrl) => ipcRenderer.invoke(IPC_CHANNELS.MODELS_FETCH, provider, apiKey, apiBaseUrl),
     listSessions: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LIST),
     createSession: (name) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_CREATE, name),

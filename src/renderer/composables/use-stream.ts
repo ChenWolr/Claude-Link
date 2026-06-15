@@ -4,19 +4,32 @@ import { useSessionStore } from '../stores/session-store';
 export function useStream() {
   const store = useSessionStore();
   const displayContent = ref('');
+  const displayThinking = ref('');
 
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let contentTimer: ReturnType<typeof setTimeout> | null = null;
+  let thinkingTimer: ReturnType<typeof setTimeout> | null = null;
 
   watch(
     () => store.streamingContent,
     (content) => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(() => {
+      if (contentTimer) clearTimeout(contentTimer);
+      contentTimer = setTimeout(() => {
         displayContent.value = content;
       }, 50);
     },
     { immediate: true },
   );
 
-  return { displayContent };
+  watch(
+    () => store.streamingThinking,
+    (content) => {
+      if (thinkingTimer) clearTimeout(thinkingTimer);
+      thinkingTimer = setTimeout(() => {
+        displayThinking.value = content;
+      }, 50);
+    },
+    { immediate: true },
+  );
+
+  return { displayContent, displayThinking };
 }
