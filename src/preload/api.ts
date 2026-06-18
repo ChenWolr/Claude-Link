@@ -3,10 +3,10 @@
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
-import type { AppConfig, ModelInfo, DetectedClaudeConfig, ConnectionTestResult } from '../shared/types/config';
+import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
-import type { ChatEventPayload, QueueEventPayload } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 
@@ -16,6 +16,7 @@ export interface ClaudeLinkAPI {
   getConfig: () => Promise<AppConfig>;
   saveConfig: (config: Partial<AppConfig>) => Promise<AppConfig>;
   clearConfig: () => Promise<AppConfig>;
+  getStorageInfo: () => Promise<{ userData: string; config: string; workspaces: string; db: string }>;
   importSettings: (filePath: string) => Promise<{
     apiKey?: string;
     apiBaseUrl?: string;
@@ -24,7 +25,13 @@ export interface ClaudeLinkAPI {
   }>;
   pickSettingsFile: () => Promise<string | null>;
   autoDetectClaudeConfig: () => Promise<DetectedClaudeConfig>;
-  testConnection: () => Promise<ConnectionTestResult>;
+  testConnection: (model: string | null) => Promise<void>;
+  abortTestConnection: () => Promise<void>;
+  onTestConnectionEvent: (callback: (payload: TestConnectionEventPayload) => void) => () => void;
+  removeTestConnectionListener: () => void;
+  pickWorkspaceDir: () => Promise<string | null>;
+  listRecentWorkspaces: () => Promise<string[]>;
+  addRecentWorkspace: (dir: string) => Promise<string[]>;
   fetchModels: (provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) => Promise<ModelInfo[]>;
   listSessions: () => Promise<Session[]>;
   createSession: (name: string) => Promise<Session>;
@@ -63,10 +70,27 @@ export function createApi(): ClaudeLinkAPI {
     getConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET),
     saveConfig: (config) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SAVE, config),
     clearConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_CLEAR),
+    getStorageInfo: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_STORAGE_INFO) as Promise<{
+        userData: string;
+        config: string;
+        workspaces: string;
+        db: string;
+      }>,
     importSettings: (filePath) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, filePath),
     pickSettingsFile: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE) as Promise<string | null>,
     autoDetectClaudeConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_AUTO_DETECT) as Promise<DetectedClaudeConfig>,
-    testConnection: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_TEST_CONNECTION) as Promise<ConnectionTestResult>,
+    testConnection: (model) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_TEST_CONNECTION, model ?? null),
+    abortTestConnection: () => ipcRenderer.invoke(IPC_CHANNELS.TEST_CONNECTION_ABORT),
+    pickWorkspaceDir: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_PICK_DIR) as Promise<string | null>,
+    listRecentWorkspaces: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_LIST_RECENT) as Promise<string[]>,
+    addRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_ADD_RECENT, dir) as Promise<string[]>,
+    onTestConnectionEvent: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: TestConnectionEventPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.TEST_CONNECTION_EVENT, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.TEST_CONNECTION_EVENT, listener);
+    },
+    removeTestConnectionListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.TEST_CONNECTION_EVENT),
     fetchModels: (provider, apiKey, apiBaseUrl) => ipcRenderer.invoke(IPC_CHANNELS.MODELS_FETCH, provider, apiKey, apiBaseUrl),
     listSessions: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LIST),
     createSession: (name) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_CREATE, name),

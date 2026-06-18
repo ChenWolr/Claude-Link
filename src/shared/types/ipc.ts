@@ -6,10 +6,16 @@ export const IPC_CHANNELS = {
   CONFIG_GET: 'config:get',
   CONFIG_SAVE: 'config:save',
   CONFIG_CLEAR: 'config:clear',
+  CONFIG_STORAGE_INFO: 'config:storageInfo',
   CONFIG_IMPORT_SETTINGS: 'config:importSettings',
   CONFIG_PICK_SETTINGS_FILE: 'config:pickSettingsFile',
   CONFIG_AUTO_DETECT: 'config:autoDetect',
   CONFIG_TEST_CONNECTION: 'config:testConnection',
+  TEST_CONNECTION_EVENT: 'testConnection:event',
+  TEST_CONNECTION_ABORT: 'testConnection:abort',
+  WORKSPACE_PICK_DIR: 'workspace:pickDir',
+  WORKSPACE_LIST_RECENT: 'workspace:listRecent',
+  WORKSPACE_ADD_RECENT: 'workspace:addRecent',
   MODELS_FETCH: 'models:fetch',
   SESSION_LIST: 'session:list',
   SESSION_CREATE: 'session:create',
@@ -62,6 +68,27 @@ export interface QueueEventPayload {
   type: QueueEventType;
   taskId?: string;
   data?: Record<string, unknown>;
+}
+
+// 流式测试连接事件：main 进程 spawn CLI 后，逐事件推送给渲染进程的弹框。
+// phase 状态机：connecting(已启动,等待端点) → connected(收到init,端点可达) →
+//   streaming(assistant 文本增量) → done(成功/失败判定) / error(spawn/超时错误)。
+export type TestConnectionPhase = 'connecting' | 'connected' | 'streaming' | 'done' | 'error';
+
+export interface TestConnectionEventPayload {
+  phase: TestConnectionPhase;
+  /** connected: CLI init 回显的实际模型 */
+  model?: string;
+  /** streaming: 本次增量文本 */
+  delta?: string;
+  /** done: 是否连接成功 */
+  success?: boolean;
+  /** done/error: 给用户看的结论文案 */
+  message?: string;
+  /** done/error: 排查用的详情（退出码/stderr/原始片段） */
+  detail?: string;
+  /** done: 耗时毫秒 */
+  durationMs?: number;
 }
 
 export type CliDetectionResultAlias = CliDetectionResult;
