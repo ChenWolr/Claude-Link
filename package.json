@@ -11,7 +11,8 @@
     "postinstall": "electron-builder install-app-deps",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "package:win": "electron-builder --win --publish never",
-    "typecheck": "vue-tsc --noEmit"
+    "typecheck": "vue-tsc --noEmit",
+    "selftest": "npx tsx scripts/selftest-settings-mapping.ts"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.1",
