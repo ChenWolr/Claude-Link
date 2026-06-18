@@ -13,7 +13,7 @@ export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
 import type { AppConfig, ModelInfo, DetectedClaudeConfig, ConnectionTestResult } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
 import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID } from '../../shared/constants';
-import { parseClaudeSettings } from '../../shared/settings-parser';
+import { parseClaudeSettings, extractModelMappings } from '../../shared/settings-parser';
 
 const defaultConfig: AppConfig = {
   provider: 'anthropic',
@@ -51,24 +51,7 @@ export const useConfigStore = defineStore('config', {
     // 从 advancedJson 的 env 提取 Claude Code 类型别名 → 实际模型映射
     // （ANTHROPIC_DEFAULT_SONNET_MODEL 等），供 ModelSelector 显示"类型 → 实际模型"。
     modelMappings(state): Record<string, string> {
-      try {
-        const adv = JSON.parse(state.config.advancedJson || '{}');
-        const env = adv && adv.env && typeof adv.env === 'object' ? (adv.env as Record<string, unknown>) : {};
-        const out: Record<string, string> = {};
-        const pairs: Array<[string, string]> = [
-          ['sonnet', 'ANTHROPIC_DEFAULT_SONNET_MODEL'],
-          ['haiku', 'ANTHROPIC_DEFAULT_HAIKU_MODEL'],
-          ['opus', 'ANTHROPIC_DEFAULT_OPUS_MODEL'],
-          ['fable', 'ANTHROPIC_DEFAULT_FABLE_MODEL'],
-        ];
-        for (const [alias, envKey] of pairs) {
-          const v = env[envKey];
-          if (typeof v === 'string' && v.trim()) out[alias] = v.trim();
-        }
-        return out;
-      } catch {
-        return {};
-      }
+      return extractModelMappings(state.config.advancedJson);
     },
   },
   actions: {
@@ -87,7 +70,11 @@ export const useConfigStore = defineStore('config', {
       this.savingConfig = true;
       this.error = null;
       try {
-        this.config = await window.claudeLink.saveConfig(this.config);
+        // this.config 是 Pinia/Vue 的 reactive proxy，无法被 Electron IPC 结构化克隆，
+        // 直接传输会抛 "An object could not be cloned."，保存失败、配置无法持久化。
+        // 必须先深拷贝成纯普通对象再过 IPC。
+        const plainConfig: AppConfig = JSON.parse(JSON.stringify(this.config));
+        this.config = await window.claudeLink.saveConfig(plainConfig);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '保存配置失败';
         throw error;
@@ -155,6 +142,9 @@ export const useConfigStore = defineStore('config', {
       this.testingConnection = true;
       this.error = null;
       try {
+        // 先从高级 JSON 同步回填 apiKey/apiBaseUrl 等字段，消除"贴完 JSON 立即点测试、
+        // 字段尚未被 600ms 防抖回填"导致保存空配置、测试报"未填写 API Key"的竞态。
+        this.fillFromAdvancedJson();
         await this.saveConfig();
         return await window.claudeLink.testConnection();
       } catch (error) {

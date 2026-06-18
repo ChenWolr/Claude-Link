@@ -4,7 +4,6 @@ import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config-store';
 import ProviderSelect from '../components/config/ProviderSelect.vue';
 import ApiKeyInput from '../components/config/ApiKeyInput.vue';
-import ModelSelect from '../components/config/ModelSelect.vue';
 import ModelMappingInputs from '../components/config/ModelMappingInputs.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import { THEME_PALETTES } from '../../shared/constants';
@@ -263,8 +262,6 @@ function applyTheme(paletteId: string) {
           </div>
         </label>
 
-        <ModelSelect v-model="store.config.defaultModel" :mappings="store.modelMappings" />
-        <div v-if="store.importedFields.has('defaultModel')" class="imported-mark">✓ 已从 settings.json 导入</div>
         <ModelMappingInputs />
       </div>
 

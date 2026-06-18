@@ -11,6 +11,7 @@ import { IPC_CHANNELS } from '../shared/constants';
 import { clearConfig, getConfig, importSettingsFile, saveConfig } from './modules/config-manager';
 import { detectClaudeConfig } from './modules/claude-config-detector';
 import { testConnection } from './modules/connection-tester';
+import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
 import { spawnForChat, sendMessage, killProcess, getActiveProcess } from './modules/process-manager';
@@ -65,7 +66,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => sessionRepo.listSessions());
   ipcMain.handle(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string) => {
     const config = getConfig();
-    return sessionRepo.createSession(name, config.defaultModel);
+    return sessionRepo.createSession(name, resolveDefaultModel(config.advancedJson));
   });
   ipcMain.handle(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => sessionRepo.getSession(id));
   ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, id: string) => sessionRepo.deleteSession(id));

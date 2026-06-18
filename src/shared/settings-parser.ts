@@ -108,3 +108,47 @@ export function parseClaudeSettings(content: string): ImportedSettings {
 
   return result;
 }
+
+// Claude Code 的模型类型别名（CLI 通过 env.ANTHROPIC_DEFAULT_<ALIAS>_MODEL 映射到实际模型）。
+// 顺序即"默认优先级"：sonnet 最常用，作为兜底默认。
+const MODEL_ALIASES = ['sonnet', 'haiku', 'opus', 'fable'] as const;
+
+function parseAdvancedEnv(advancedJson: string): Record<string, unknown> {
+  try {
+    const adv = JSON.parse(advancedJson || '{}');
+    if (adv && adv.env && typeof adv.env === 'object' && !Array.isArray(adv.env)) {
+      return adv.env as Record<string, unknown>;
+    }
+  } catch {
+    // ignore malformed JSON
+  }
+  return {};
+}
+
+// 从 advancedJson 的 env 块提取「类型别名 → 实际模型」映射，供 UI 显示与默认模型推导复用。
+export function extractModelMappings(advancedJson: string): Record<string, string> {
+  const env = parseAdvancedEnv(advancedJson);
+  const out: Record<string, string> = {};
+  for (const alias of MODEL_ALIASES) {
+    const v = env[`ANTHROPIC_DEFAULT_${alias.toUpperCase()}_MODEL`];
+    if (typeof v === 'string' && v.trim()) out[alias] = v.trim();
+  }
+  return out;
+}
+
+// 默认模型别名：取映射里第一个配好的（按 sonnet>haiku>opus>fable 优先级），都没有则 'sonnet'。
+// 设计意图：用户只需配映射（或贴 settings.json），claude-link 自动决定默认用哪个去连 CLI，
+// 不再需要单独的"模型"输入框。
+export function resolveDefaultModel(advancedJson: string): string {
+  const mappings = extractModelMappings(advancedJson);
+  for (const alias of MODEL_ALIASES) {
+    if (mappings[alias]) return alias;
+  }
+  return 'sonnet';
+}
+
+// 从 advancedJson 的 env 块读取单个值（不修改原 JSON），用于 apiKey/baseUrl 等字段的兜底。
+export function peekEnvValue(advancedJson: string, key: string): string | undefined {
+  const v = parseAdvancedEnv(advancedJson)[key];
+  return typeof v === 'string' && v.trim() ? v.trim() : undefined;
+}
