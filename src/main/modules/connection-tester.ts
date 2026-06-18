@@ -9,23 +9,34 @@ import { spawn } from 'child_process';
 import type { ConnectionTestResult } from '../../shared/types/config';
 import { getConfig } from './config-manager';
 import { buildSpawnEnv } from './process-manager';
+import { resolveDefaultModel, peekEnvValue } from '../../shared/settings-parser';
 import { logger } from '../utils/logger';
 
 const TEST_PROMPT = '你好';
-const TIMEOUT_MS = 45000;
+// Claude Code CLI 冷启动需加载 skills/MCP/agents，配置多时可达 20-30s；
+// 留足余量避免机器稍慢就误报"连接超时"。实际 API 响应通常 2-5s。
+const TIMEOUT_MS = 90000;
 
 export async function testConnection(): Promise<ConnectionTestResult> {
   const config = getConfig();
   const cliPath = config.cliPath || 'claude';
 
-  if (!config.apiKey?.trim()) {
-    return { success: false, message: '未填写 API Key' };
+  // apiKey / baseUrl 都允许从高级 JSON 的 env 块兜底，不依赖 UI 字段是否已被回填——
+  // 这样"贴完 JSON 立即点测试"也能直接取到配置，不会误报"未填写 API Key"。
+  const apiKey =
+    config.apiKey?.trim() ||
+    peekEnvValue(config.advancedJson, 'ANTHROPIC_API_KEY') ||
+    peekEnvValue(config.advancedJson, 'ANTHROPIC_AUTH_TOKEN');
+  if (!apiKey) {
+    return { success: false, message: '未填写 API Key（请在 API Key 字段或高级 JSON 的 env.ANTHROPIC_API_KEY 中至少填一个）' };
   }
-  if (!config.apiBaseUrl?.trim()) {
+  const baseUrl = config.apiBaseUrl?.trim() || peekEnvValue(config.advancedJson, 'ANTHROPIC_BASE_URL');
+  if (!baseUrl) {
     return { success: false, message: '未填写请求地址（API Base URL）' };
   }
 
-  const model = config.defaultModel?.trim() || 'sonnet';
+  // 默认模型从映射自动推导（sonnet 优先），用户无需单独指定"模型"。
+  const model = resolveDefaultModel(config.advancedJson);
   const startTime = Date.now();
 
   // print 模式单次调用：claude -p "你好" --output-format json --model X --verbose

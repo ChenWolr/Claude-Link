@@ -11,6 +11,7 @@ import type { BrowserWindow } from 'electron';
 import type { CliInitEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
+import { resolveDefaultModel } from '../../shared/settings-parser';
 import { logger } from '../utils/logger';
 import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
@@ -85,8 +86,8 @@ function buildCommonArgs(sessionId: string, opts: SpawnOptions): string[] {
   args.push('--output-format', 'stream-json');
   args.push('--verbose');
   args.push('--include-partial-messages');
-  // modelOverride takes precedence over model/config.defaultModel
-  const effectiveModel = opts.modelOverride || opts.model || config.defaultModel;
+  // 默认模型从映射自动推导（sonnet 优先）；会话顶栏的临时切换（opts.model/modelOverride）优先。
+  const effectiveModel = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
   args.push('--model', effectiveModel);
 
   if (opts.maxTurns && opts.maxTurns > 0) {
