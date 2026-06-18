@@ -28,8 +28,8 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
 
 .bubble--user {
   align-self: flex-end;
-  background: #2563eb;
-  color: #fff;
+  background: var(--color-accent);
+  color: #07120d;
 }
 
 .bubble--assistant {

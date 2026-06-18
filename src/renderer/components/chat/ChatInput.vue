@@ -14,12 +14,31 @@ const text = ref('');
 const showSlashMenu = ref(false);
 const selectedSlashIndex = ref(0);
 const wrapperRef = ref<HTMLElement | null>(null);
+const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
 const matchingCommands = computed(() => {
   if (!text.value.startsWith('/')) return [];
   const q = text.value.toLowerCase();
-  return SLASH_COMMANDS.filter((c) => c.name.toLowerCase().startsWith(q));
+  // 动态搜索：前缀匹配优先；无前缀命中时退化为包含匹配，提升可发现性。
+  const prefix = SLASH_COMMANDS.filter((c) => c.name.toLowerCase().startsWith(q));
+  if (prefix.length) return prefix;
+  return SLASH_COMMANDS.filter((c) => c.name.toLowerCase().includes(q));
 });
+
+// 显式触发命令联想：插入 '/' 并聚焦，让斜杠菜单立刻弹出。
+function insertSlash() {
+  if (!text.value.startsWith('/')) {
+    text.value = '/';
+  }
+  showSlashMenu.value = matchingCommands.value.length > 0;
+  selectedSlashIndex.value = 0;
+  textareaRef.value?.focus();
+}
+
+// 鼠标悬停与键盘选中保持同步，避免悬停高亮和回车选中不一致。
+function hoverCommand(i: number) {
+  selectedSlashIndex.value = i;
+}
 
 function handleKeydown(e: KeyboardEvent): void {
   if (showSlashMenu.value && matchingCommands.value.length > 0) {
@@ -94,16 +113,24 @@ onUnmounted(() => {
         :key="cmd.name"
         :class="['slash-menu__item', { active: i === selectedSlashIndex }]"
         @click="selectSlashCommand(cmd)"
+        @mouseenter="hoverCommand(i)"
       >
         <span class="slash-menu__name">{{ cmd.name }}</span>
         <span class="slash-menu__desc">{{ cmd.description }}</span>
       </div>
     </div>
     <div class="chat-input">
+      <button
+        type="button"
+        class="slash-trigger"
+        title="插入命令（/ 开头自动联想，↑↓ 选择，回车确认）"
+        @click="insertSlash"
+      >/</button>
       <textarea
+        ref="textareaRef"
         v-model="text"
         :disabled="disabled"
-        placeholder="输入消息（Enter 发送，Shift+Enter 换行）"
+        placeholder="输入消息；输入 / 联想命令（↑↓ 选择，回车确认）"
         rows="1"
         @keydown="handleKeydown"
         @input="handleInput"
@@ -197,5 +224,23 @@ button {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.slash-trigger {
+  align-self: flex-end;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+  padding: 10px 14px;
+  font-weight: 700;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.slash-trigger:hover {
+  color: var(--color-accent-strong);
+  border-color: var(--color-accent);
 }
 </style>
