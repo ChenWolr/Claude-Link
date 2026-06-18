@@ -9,37 +9,51 @@ const showModelDropdown = ref(false);
 const customModelInput = ref('');
 const dropdownRef = ref<HTMLElement | null>(null);
 
-const currentModel = computed(() => {
-  if (sessionStore.activeSession?.modelOverride) {
-    return sessionStore.activeSession.modelOverride;
+// Claude Code 类型别名优先级：sonnet 最常用作兜底默认。
+const ALIASES = ['sonnet', 'haiku', 'opus', 'fable'] as const;
+
+// 有效默认别名：取配置里首个已映射的别名，都没有则 'sonnet'。
+// （与主进程 resolveDefaultModel 同规则；不再用死的 config.defaultModel。）
+const effectiveDefault = computed(() => {
+  const mappings = configStore.modelMappings;
+  for (const a of ALIASES) {
+    if (mappings[a]) return a;
   }
-  return sessionStore.activeSession?.model ?? configStore.config.defaultModel;
+  return 'sonnet';
 });
+
+const currentModel = computed(
+  () => sessionStore.activeSession?.modelOverride || sessionStore.activeSession?.model || effectiveDefault.value,
+);
 
 const displayModel = computed(() => {
   const override = sessionStore.activeSession?.modelOverride;
-  const model = override || currentModel.value;
+  const model = override || sessionStore.activeSession?.model || effectiveDefault.value;
   const mapping = configStore.modelMappings[model];
-  // 显示"类型 → 实际模型"（如 sonnet → glm-5.2）；无映射时只显示类型
-  return mapping ? `${model} → ${mapping}` : override ? override : `默认: ${model}`;
+  if (override) return mapping ? `${override} → ${mapping}` : override;
+  return mapping ? `${model} → ${mapping}` : `默认: ${model}`;
 });
 
-// 当 fetchModels 拉不到列表（第三方/国产模型端点通常无 /models）时，
-// 提供 sonnet/haiku/opus 三个别名——CLI 原生支持，配合 advancedJson 里的
-// ANTHROPIC_DEFAULT_*_MODEL 映射 env 转成实际模型。
-const FALLBACK_MODELS: Array<{ id: string; name: string }> = [
-  { id: 'sonnet', name: 'Sonnet（默认 · 均衡）' },
-  { id: 'haiku', name: 'Haiku（快速）' },
-  { id: 'opus', name: 'Opus（强力）' },
-];
-
-const modelOptions = computed<Array<{ id: string; name: string }>>(() =>
-  configStore.models.length > 0 ? configStore.models : FALLBACK_MODELS,
-);
+// 可选项：用户在配置里映射过的别名优先展示（带"别名 → 实际模型"），
+// 未映射的标准别名也列出（CLI 走默认）。这是"选已配置模型"的核心。
+const modelOptions = computed<Array<{ id: string; name: string }>>(() => {
+  const mappings = configStore.modelMappings;
+  const opts: Array<{ id: string; name: string }> = [];
+  const seen = new Set<string>();
+  for (const alias of ALIASES) {
+    if (mappings[alias]) {
+      opts.push({ id: alias, name: `${alias} → ${mappings[alias]}` });
+      seen.add(alias);
+    }
+  }
+  for (const alias of ALIASES) {
+    if (!seen.has(alias)) opts.push({ id: alias, name: alias });
+  }
+  return opts;
+});
 
 async function selectModel(modelId: string) {
   if (!sessionStore.activeSession) return;
-  // 复用 store 封装：内部已处理 sessions 数组同步与 activeSession 刷新
   await sessionStore.updateActiveSessionModelOverride(modelId);
   showModelDropdown.value = false;
 }
@@ -70,7 +84,6 @@ function handleEscape() {
 
 onMounted(async () => {
   await configStore.loadConfig();
-  await configStore.fetchModels();
   document.addEventListener('click', handleClickOutside);
   document.addEventListener('keydown', handleEscape);
 });
@@ -88,7 +101,7 @@ onUnmounted(() => {
     </button>
     <div v-if="showModelDropdown" class="model-dropdown">
       <button type="button" class="model-dropdown__item model-dropdown__default" @click="clearModelOverride">
-        默认: {{ configStore.config.defaultModel }}
+        默认: {{ effectiveDefault }}{{ configStore.modelMappings[effectiveDefault] ? ` → ${configStore.modelMappings[effectiveDefault]}` : '' }}
       </button>
       <button
         v-for="model in modelOptions"
@@ -127,11 +140,11 @@ onUnmounted(() => {
   color: var(--color-text);
 }
 
-/* 下拉向上展开：ModelSelector 处于输入框上方工具栏，避免溢出窗口底部 */
+/* 下拉向上展开：ModelSelector 位于底部会话工具栏，避免溢出窗口底部 */
 .model-dropdown {
   position: absolute;
   right: 0;
-  bottom: 100%;
+  bottom: calc(100% + 4px);
   z-index: 100;
   min-width: 220px;
   margin-bottom: 4px;
@@ -142,6 +155,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
 
 .model-dropdown__item {

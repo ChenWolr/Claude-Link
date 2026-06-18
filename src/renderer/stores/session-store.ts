@@ -17,6 +17,7 @@ export const useSessionStore = defineStore('session', {
     streamingThinking: '',
     sending: false,
     error: null as string | null,
+    recentWorkspaces: [] as string[],
   }),
   actions: {
     async loadSessions() {
@@ -80,6 +81,55 @@ export const useSessionStore = defineStore('session', {
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '更新会话模型失败';
+      }
+    },
+    // 会话级工作空间：写入 session.workingDir，spawn 时生效；同时记入最近历史便于复用。
+    async setActiveSessionWorkingDir(dir: string | null) {
+      if (!this.activeSession) return;
+      try {
+        const updated = await window.claudeLink.updateSession(this.activeSession.id, { workingDir: dir });
+        if (updated) {
+          this.activeSession = updated;
+          this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+        }
+        if (dir) this.recentWorkspaces = await window.claudeLink.addRecentWorkspace(dir);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '更新工作空间失败';
+      }
+    },
+    // 会话级权限模式：写入 session.permissionMode，spawn 时通过 --permission-mode 生效。
+    async setActiveSessionPermissionMode(mode: Session['permissionMode']) {
+      if (!this.activeSession) return;
+      try {
+        const updated = await window.claudeLink.updateSession(this.activeSession.id, { permissionMode: mode });
+        if (updated) {
+          this.activeSession = updated;
+          this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '更新权限模式失败';
+      }
+    },
+    async loadRecentWorkspaces() {
+      try {
+        this.recentWorkspaces = await window.claudeLink.listRecentWorkspaces();
+      } catch {
+        // 静默：历史为空也能用
+      }
+    },
+    // 会话重命名：写入 session.name。默认名由首句 analyzeTopic 自动生成，此处供用户自定义。
+    async renameActiveSession(name: string) {
+      if (!this.activeSession) return;
+      const trimmed = name.trim();
+      if (!trimmed) return;
+      try {
+        const updated = await window.claudeLink.updateSession(this.activeSession.id, { name: trimmed });
+        if (updated) {
+          this.activeSession = updated;
+          this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '重命名失败';
       }
     },
     addMessage(message: Message) {

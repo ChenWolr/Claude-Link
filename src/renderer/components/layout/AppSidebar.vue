@@ -52,6 +52,12 @@ function handleSearchClear() {
   store.loadSessions();
 }
 
+// 删除会话：用浏览器原生确认，避免误删。会话及消息由主进程级联清理。
+async function confirmDelete(session: { id: string; name: string }) {
+  if (!window.confirm(`确定删除会话「${session.name}」？此操作不可撤销。`)) return;
+  await store.deleteSession(session.id);
+}
+
 const sessionList = computed(() => store.sessions);
 </script>
 
@@ -81,7 +87,15 @@ const sessionList = computed(() => store.sessions);
         :class="['session-link', { active: store.activeSession?.id === session.id }]"
         @click="openSession(session)"
       >
-        {{ session.name }}
+        <span class="session-link__name">{{ session.name }}</span>
+        <button
+          type="button"
+          class="session-link__delete"
+          title="删除会话"
+          @click.stop="confirmDelete(session)"
+        >
+          ×
+        </button>
       </div>
       <div v-if="!sessionList.length" class="sidebar__empty">
         {{ searchQuery ? '未找到匹配的会话' : '暂无会话' }}
@@ -157,14 +171,47 @@ const sessionList = computed(() => store.sessions);
 }
 
 .session-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   border-radius: var(--radius-md);
   padding: 10px 11px;
   color: var(--color-text);
   cursor: pointer;
   font-size: 13px;
+}
+
+.session-link__name {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.session-link__delete {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.session-link:hover .session-link__delete {
+  opacity: 0.8;
+}
+
+.session-link__delete:hover {
+  opacity: 1;
+  background: rgba(239, 100, 97, 0.18);
+  color: var(--color-danger);
 }
 
 .session-link:hover {

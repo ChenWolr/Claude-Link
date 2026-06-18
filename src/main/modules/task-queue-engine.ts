@@ -126,9 +126,9 @@ function executeNextTask(sessionId: string, mainWindow: BrowserWindow): void {
   const child = spawnForTask(task.id, sessionId, task.prompt, mainWindow, {
     model: session?.model ?? config.defaultModel,
     modelOverride: session?.modelOverride ?? null,
-    workingDir: config.workingDirectory,
+    workingDir: session?.workingDir ?? config.workingDirectory,
     maxTurns: config.maxTurns,
-    permissionMode: config.permissionMode,
+    permissionMode: session?.permissionMode ?? config.permissionMode,
     resumeSessionId: cliSessionId,
   });
 
@@ -224,9 +224,9 @@ export function continueWithUserMessage(
   const child = spawnForChat(sessionId, mainWindow, {
     model: session?.model ?? config.defaultModel,
     modelOverride: session?.modelOverride ?? null,
-    workingDir: config.workingDirectory,
+    workingDir: session?.workingDir ?? config.workingDirectory,
     maxTurns: config.maxTurns,
-    permissionMode: config.permissionMode,
+    permissionMode: session?.permissionMode ?? config.permissionMode,
     resumeSessionId: cliSessionId,
   });
 

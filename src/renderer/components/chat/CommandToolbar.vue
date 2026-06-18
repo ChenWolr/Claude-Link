@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { SLASH_COMMANDS } from '../../../shared/constants';
-import ModelSelector from './ModelSelector.vue';
 
 const emit = defineEmits<{
   sendCommand: [command: string];
@@ -42,14 +41,13 @@ const quickCommands = computed(() =>
         /更多
       </button>
     </div>
-    <ModelSelector />
   </div>
 </template>
 
 <style scoped>
 .command-toolbar {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
   gap: 6px;
   max-width: 800px;
