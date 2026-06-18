@@ -1,12 +1,13 @@
-// 测试连接：用当前配置（apiKey/apiBaseUrl/defaultModel/advancedJson）调用
-// Claude Code CLI，发送一条简单消息「你好」，有正常响应文本代表配置可用。
+// 测试连接（流式版）：spawn Claude Code CLI 发送「你好」，用 stream-json 输出，
+// 逐事件解析后通过 IPC 推送给渲染进程的测试弹框，实时展示「连接中→已连接→响应中→成功/失败」。
 //
-// 本质上和 spawnForChat 用同一套 env 注入（buildSpawnEnv），所以测试结果
-// 能代表真实会话能否跑通。这是"配置输送器"定位下的诊断能力——
-// Claude Link 不参与 CLI 逻辑，只验证"配置送进去 CLI 认不认"。
+// 与会话 spawnForChat 共用 buildSpawnEnv（同一套 env 注入），所以测试结果代表真实会话能否跑通。
+// Claude Link 不参与 CLI 逻辑，只验证「配置送进去 CLI 认不认」。
 
-import { spawn } from 'child_process';
-import type { ConnectionTestResult } from '../../shared/types/config';
+import { spawn, type ChildProcess } from 'child_process';
+import type { BrowserWindow } from 'electron';
+import type { TestConnectionEventPayload } from '../../shared/types/ipc';
+import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
 import { buildSpawnEnv } from './process-manager';
 import { resolveDefaultModel, peekEnvValue } from '../../shared/settings-parser';
@@ -17,147 +18,220 @@ const TEST_PROMPT = '你好';
 // 留足余量避免机器稍慢就误报"连接超时"。实际 API 响应通常 2-5s。
 const TIMEOUT_MS = 90000;
 
-export async function testConnection(): Promise<ConnectionTestResult> {
+// 当前正在进行的测试进程，供 abort 使用。同一时刻只允许一个测试。
+let currentChild: ChildProcess | null = null;
+let currentTimer: ReturnType<typeof setTimeout> | null = null;
+
+function emit(mainWindow: BrowserWindow, payload: TestConnectionEventPayload): void {
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.TEST_CONNECTION_EVENT, payload);
+  } catch (e) {
+    logger.warn('Failed to send test connection event', e);
+  }
+}
+
+function clearCurrent(): void {
+  if (currentTimer) {
+    clearTimeout(currentTimer);
+    currentTimer = null;
+  }
+  currentChild = null;
+}
+
+// 取消正在进行的测试（用户点"取消"或关闭弹框时调用）。
+export function abortTestConnection(): void {
+  if (currentChild && !currentChild.killed) {
+    try {
+      currentChild.kill();
+    } catch {
+      // ignore
+    }
+  }
+  clearCurrent();
+}
+
+// 流式测试连接。modelAlias 为用户在弹框里选择的别名（sonnet/haiku/opus/fable），
+// 为空时自动从映射推导。结果通过 TEST_CONNECTION_EVENT 事件推送，不通过返回值。
+export function runTestConnectionStream(modelAlias: string | null, mainWindow: BrowserWindow): void {
+  // 若上一个测试还在跑，先终止，避免并发 spawn。
+  abortTestConnection();
+
   const config = getConfig();
   const cliPath = config.cliPath || 'claude';
 
-  // apiKey / baseUrl 都允许从高级 JSON 的 env 块兜底，不依赖 UI 字段是否已被回填——
-  // 这样"贴完 JSON 立即点测试"也能直接取到配置，不会误报"未填写 API Key"。
+  // apiKey / baseUrl 都允许从高级 JSON 的 env 块兜底，不依赖 UI 字段是否已回填。
   const apiKey =
     config.apiKey?.trim() ||
     peekEnvValue(config.advancedJson, 'ANTHROPIC_API_KEY') ||
     peekEnvValue(config.advancedJson, 'ANTHROPIC_AUTH_TOKEN');
   if (!apiKey) {
-    return { success: false, message: '未填写 API Key（请在 API Key 字段或高级 JSON 的 env.ANTHROPIC_API_KEY 中至少填一个）' };
+    emit(mainWindow, {
+      phase: 'error',
+      message: '未填写 API Key',
+      detail: '请在 API Key 字段或高级 JSON 的 env.ANTHROPIC_API_KEY 中至少填一个。',
+    });
+    return;
   }
   const baseUrl = config.apiBaseUrl?.trim() || peekEnvValue(config.advancedJson, 'ANTHROPIC_BASE_URL');
   if (!baseUrl) {
-    return { success: false, message: '未填写请求地址（API Base URL）' };
+    emit(mainWindow, { phase: 'error', message: '未填写请求地址（API Base URL）' });
+    return;
   }
 
-  // 默认模型从映射自动推导（sonnet 优先），用户无需单独指定"模型"。
-  const model = resolveDefaultModel(config.advancedJson);
+  const model = modelAlias?.trim() || resolveDefaultModel(config.advancedJson);
   const startTime = Date.now();
 
-  // print 模式单次调用：claude -p "你好" --output-format json --model X --verbose
-  const args = ['-p', TEST_PROMPT, '--output-format', 'json', '--model', model, '--verbose'];
+  // print + stream-json：逐事件输出 init / message / stream_event / result。
+  const args = [
+    '-p', TEST_PROMPT,
+    '--output-format', 'stream-json',
+    '--include-partial-messages',
+    '--model', model,
+    '--verbose',
+  ];
 
-  return new Promise((resolve) => {
-    let stdout = '';
-    let stderr = '';
-    let settled = false;
+  emit(mainWindow, { phase: 'connecting', model });
 
-    const finish = (result: ConnectionTestResult) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
+  const spawnEnv = buildSpawnEnv();
+  logger.info(
+    `testConnection(stream): model=${model}, baseUrl=${spawnEnv.ANTHROPIC_BASE_URL || '(官方默认)'}, ` +
+      `SONNET映射=${spawnEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || '(无)'}, apiKey=${spawnEnv.ANTHROPIC_API_KEY ? 'SET' : '(无)'}`,
+  );
+
+  const child = spawn(cliPath, args, {
+    cwd: config.workingDirectory || process.cwd(),
+    env: spawnEnv,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    shell: process.platform === 'win32',
+  });
+  currentChild = child;
+
+  let buffer = '';
+  let stderr = '';
+  let assistantText = '';
+  let connected = false;
+
+  const finishWith = (payload: TestConnectionEventPayload): void => {
+    if (currentChild !== child) return; // 已被新测试取代或 abort，忽略本次回调
+    clearCurrent();
+    try {
+      child.kill();
+    } catch {
+      // ignore
+    }
+    emit(mainWindow, payload);
+  };
+
+  currentTimer = setTimeout(() => {
+    finishWith({
+      phase: 'error',
+      message: `连接超时（${TIMEOUT_MS / 1000}s 无响应）`,
+      detail: '请检查 URL / API Key / 模型名是否正确，以及网络是否可达。',
+      durationMs: Date.now() - startTime,
+    });
+  }, TIMEOUT_MS);
+
+  child.stdout?.on('data', (chunk: Buffer) => {
+    // 已被新测试取代或 abort 清空：丢弃本次缓冲，避免取消后仍向弹框推送 streaming 增量。
+    if (currentChild !== child) return;
+    buffer += chunk.toString('utf8');
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let evt: Record<string, unknown>;
       try {
-        child.kill();
+        evt = JSON.parse(trimmed) as Record<string, unknown>;
       } catch {
-        // ignore
+        continue;
       }
-      resolve(result);
-    };
 
-    const spawnEnv = buildSpawnEnv();
-    logger.info(`testConnection: model=${model}, baseUrl=${spawnEnv.ANTHROPIC_BASE_URL || '(官方默认)'}, SONNET映射=${spawnEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || '(无)'}, apiKey=${spawnEnv.ANTHROPIC_API_KEY ? 'SET' : '(无)'}`);
-    const child = spawn(cliPath, args, {
-      cwd: config.workingDirectory || process.cwd(),
-      env: spawnEnv,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      // Windows 上 claude 通常是 claude.cmd，需要 shell 解析
-      shell: process.platform === 'win32',
-    });
+      // init：CLI 已启动并连上端点。新版 stream-json 输出 {type:'system',subtype:'init'}，
+      // 类型定义/老版是 {type:'init'}，两种都兼容，用于驱动"已连接"状态。
+      const isInit =
+        evt.type === 'init' ||
+        (evt.type === 'system' && (evt as { subtype?: string }).subtype === 'init');
+      if (isInit) {
+        if (!connected) {
+          connected = true;
+          const evtModel = (evt as { model?: string }).model || model;
+          emit(mainWindow, { phase: 'connected', model: evtModel });
+        }
+        continue;
+      }
 
-    const timer = setTimeout(() => {
-      finish({
-        success: false,
-        message: `连接超时（${TIMEOUT_MS / 1000}s 无响应）。请检查 URL / API Key / 模型名是否正确，以及网络是否可达。`,
-        durationMs: Date.now() - startTime,
-      });
-    }, TIMEOUT_MS);
+      // stream_event：assistant 文本增量（逐字推送）
+      if (evt.type === 'stream_event') {
+        const inner = evt.event as { delta?: { type?: string; text?: string } } | undefined;
+        const delta = inner?.delta;
+        if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+          assistantText += delta.text;
+          emit(mainWindow, { phase: 'streaming', delta: delta.text });
+        }
+        continue;
+      }
 
-    child.stdout?.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8');
-    });
-
-    child.stderr?.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8');
-    });
-
-    child.on('error', (err) => {
-      logger.warn(`Connection test spawn error: ${err.message}`);
-      finish({
-        success: false,
-        message: `启动 CLI 失败：${err.message}（请确认 Claude Code CLI 已安装，路径：${cliPath}）`,
-        durationMs: Date.now() - startTime,
-      });
-    });
-
-    child.on('exit', (code) => {
-      const durationMs = Date.now() - startTime;
-      const trimmedStdout = stdout.trim();
-
-      if (code === 0 && trimmedStdout) {
-        // claude --output-format json：
-        //   新版(2.x)输出事件数组 [{type:system,init},{type:assistant,message:{content:[{type:text}]}},{type:result,result}]
-        //   老版输出单个 {type:result, result:"..."}
-        // 两种都要能取到实际回复文本，而不是把 init 事件当预览。
-        let responseText = '';
-        try {
-          const parsed: unknown = JSON.parse(trimmedStdout);
-          if (Array.isArray(parsed)) {
-            for (const evt of parsed) {
-              if (!evt || typeof evt !== 'object') continue;
-              const e = evt as Record<string, unknown>;
-              if (e.type === 'result' && typeof e.result === 'string') { responseText = e.result; break; }
-              if (e.type === 'assistant') {
-                const content = (e.message as { content?: unknown[] } | undefined)?.content;
-                const textPart = Array.isArray(content)
-                  ? content.find(
-                      (c): c is { type: string; text: string } =>
-                        typeof c === 'object' && c !== null && (c as { type?: string }).type === 'text' && typeof (c as { text?: string }).text === 'string',
-                    )
-                  : undefined;
-                if (textPart) { responseText = textPart.text; break; }
+      // 兜底：某些 CLI 版本不发 stream_event，用完整 assistant message 文本。
+      // 仅在尚未累积到文本时推送，避免与 stream_event 重复。
+      if (evt.type === 'message' && (evt as { role?: string }).role === 'assistant') {
+        if (assistantText.length === 0) {
+          const content = evt.content;
+          if (Array.isArray(content)) {
+            for (const part of content) {
+              if (part && typeof part === 'object' && (part as { type?: string }).type === 'text') {
+                const text = (part as { text?: string }).text;
+                if (typeof text === 'string' && text) {
+                  assistantText += text;
+                  emit(mainWindow, { phase: 'streaming', delta: text });
+                }
               }
-              if (e.type === 'text' && typeof e.text === 'string') { responseText = e.text; break; }
             }
-            if (!responseText) responseText = trimmedStdout;
-          } else if (parsed && typeof parsed === 'object') {
-            const r = (parsed as { result?: unknown }).result;
-            if (typeof r === 'string') responseText = r;
-            else if (typeof (parsed as { text?: unknown }).text === 'string') responseText = (parsed as { text: string }).text;
-            else responseText = trimmedStdout;
-          } else {
-            responseText = trimmedStdout;
           }
-        } catch {
-          responseText = trimmedStdout;
         }
-
-        if (responseText.replace(/\s/g, '').length > 0) {
-          finish({
-            success: true,
-            message: '✅ 配置成功！Claude Code CLI 已正常响应。',
-            responsePreview: responseText.slice(0, 200),
-            durationMs,
-          });
-        } else {
-          finish({
-            success: false,
-            message: 'CLI 返回为空内容，可能模型名不被端点识别。请检查模型映射（sonnet/haiku/opus → 实际模型）。',
-            durationMs,
-          });
-        }
-      } else {
-        const errorDetail = (stderr.trim() || trimmedStdout).slice(0, 300);
-        finish({
-          success: false,
-          message: `❌ CLI 调用失败（退出码 ${code}）${errorDetail ? '：' + errorDetail : '。请检查 API Key、URL、模型配置。'}`,
-          durationMs,
-        });
+        continue;
       }
+    }
+  });
+
+  child.stderr?.on('data', (chunk: Buffer) => {
+    stderr += chunk.toString('utf8');
+  });
+
+  child.on('error', (err) => {
+    logger.warn(`Connection test spawn error: ${err.message}`);
+    finishWith({
+      phase: 'error',
+      message: `启动 CLI 失败：${err.message}`,
+      detail: `请确认 Claude Code CLI 已安装，路径：${cliPath}`,
+      durationMs: Date.now() - startTime,
     });
+  });
+
+  child.on('exit', (code) => {
+    if (currentChild !== child) return;
+    const durationMs = Date.now() - startTime;
+    const hasText = assistantText.replace(/\s/g, '').length > 0;
+
+    if (code === 0 && hasText) {
+      finishWith({
+        phase: 'done',
+        success: true,
+        message: '连接成功：已收到 Claude Code 的响应。',
+        detail: assistantText.slice(0, 500),
+        durationMs,
+      });
+    } else {
+      const detail = (stderr.trim() || assistantText || `(退出码 ${code})`).slice(0, 500);
+      finishWith({
+        phase: 'done',
+        success: false,
+        message: hasText
+          ? 'CLI 返回了内容但可能不完整，请核对下方响应。'
+          : `连接失败（退出码 ${code}）`,
+        detail,
+        durationMs,
+      });
+    }
   });
 }
