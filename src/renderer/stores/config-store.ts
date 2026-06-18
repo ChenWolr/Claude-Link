@@ -10,10 +10,16 @@ import { defineStore } from 'pinia';
 import { nextTick } from 'vue';
 
 export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
-import type { AppConfig, ModelInfo, DetectedClaudeConfig, ConnectionTestResult } from '../../shared/types/config';
+import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
 import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID } from '../../shared/constants';
-import { parseClaudeSettings, extractModelMappings } from '../../shared/settings-parser';
+import {
+  parseClaudeSettings,
+  extractModelMappings,
+  syncFormToAdvancedJson,
+  setModelMappingInAdvancedJson,
+  stripConnectionFromAdvancedJson,
+} from '../../shared/settings-parser';
 
 const defaultConfig: AppConfig = {
   provider: 'anthropic',
@@ -41,11 +47,12 @@ export const useConfigStore = defineStore('config', {
     savingConfig: false,
     detectingCli: false,
     fetchingModels: false,
-    testingConnection: false,
     error: null as string | null,
     importedFields: new Set<string>(),
     // 防循环：setModelMapping 写 advancedJson 期间置 true，ConfigPage 的 watch 检测到则跳过回填
     updatingFromJson: false,
+    // 配置/数据落盘目录（点 4：让用户知道配置存在哪）
+    storageInfo: null as { userData: string; config: string; workspaces: string; db: string } | null,
   }),
   getters: {
     // 从 advancedJson 的 env 提取 Claude Code 类型别名 → 实际模型映射
@@ -65,6 +72,29 @@ export const useConfigStore = defineStore('config', {
       } finally {
         this.loadingConfig = false;
       }
+    },
+    async loadStorageInfo() {
+      try {
+        this.storageInfo = await window.claudeLink.getStorageInfo();
+      } catch {
+        // 静默
+      }
+    },
+    // 一键清空"连接"相关：重置供应商字段 + 从 advancedJson 移除 key/url/模型映射 env。
+    // 字段与 JSON 同步清空，确保连接 tab 全部可清。
+    clearConnectionConfig() {
+      this.updatingFromJson = true;
+      this.config.provider = 'anthropic';
+      this.config.providerName = '';
+      this.config.providerNote = '';
+      this.config.apiKey = '';
+      this.config.apiBaseUrl = 'https://api.anthropic.com';
+      this.config.advancedJson = stripConnectionFromAdvancedJson(this.config.advancedJson);
+      this.importedFields.delete('apiKey');
+      this.importedFields.delete('apiBaseUrl');
+      void nextTick(() => {
+        this.updatingFromJson = false;
+      });
     },
     async saveConfig() {
       this.savingConfig = true;
@@ -137,23 +167,6 @@ export const useConfigStore = defineStore('config', {
         return null;
       }
     },
-    // 测试连接：先保存当前配置，再用它调 CLI 发"你好"验证。返回结果供 UI 展示。
-    async testConnection(): Promise<ConnectionTestResult | null> {
-      this.testingConnection = true;
-      this.error = null;
-      try {
-        // 先从高级 JSON 同步回填 apiKey/apiBaseUrl 等字段，消除"贴完 JSON 立即点测试、
-        // 字段尚未被 600ms 防抖回填"导致保存空配置、测试报"未填写 API Key"的竞态。
-        this.fillFromAdvancedJson();
-        await this.saveConfig();
-        return await window.claudeLink.testConnection();
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '测试连接失败';
-        return null;
-      } finally {
-        this.testingConnection = false;
-      }
-    },
     // 直接从高级 JSON 文本框内容解析并回填字段。
     // 复用主进程同一个 parseClaudeSettings，确保规则一致（含 Claude Code 的 env.* 字段）。
     fillFromAdvancedJson(): { ok: boolean; message: string } {
@@ -198,26 +211,8 @@ export const useConfigStore = defineStore('config', {
     // 写入 advancedJson.env.ANTHROPIC_DEFAULT_*_MODEL。置 updatingFromJson 阻止
     // ConfigPage 的 watch 把这次程序写入又当成"用户改 JSON"去回填（防循环）。
     setModelMapping(alias: ModelAlias, value: string): void {
-      let adv: Record<string, unknown>;
-      try {
-        adv =
-          this.config.advancedJson && this.config.advancedJson.trim()
-            ? (JSON.parse(this.config.advancedJson) as Record<string, unknown>)
-            : {};
-      } catch {
-        adv = {};
-      }
-      if (!adv.env || typeof adv.env !== 'object' || Array.isArray(adv.env)) {
-        adv.env = {};
-      }
-      const env = adv.env as Record<string, unknown>;
-      const key = `ANTHROPIC_DEFAULT_${alias.toUpperCase()}_MODEL`;
-      const v = value.trim();
-      if (v) env[key] = v;
-      else delete env[key];
-      if (Object.keys(env).length === 0) delete adv.env;
       this.updatingFromJson = true;
-      this.config.advancedJson = JSON.stringify(adv, null, 2);
+      this.config.advancedJson = setModelMappingInAdvancedJson(this.config.advancedJson, alias, value);
       void nextTick(() => {
         this.updatingFromJson = false;
       });
@@ -226,31 +221,12 @@ export const useConfigStore = defineStore('config', {
     // 模型映射走 setModelMapping。JSON→表单回填期间（updatingFromJson）跳过，防循环。
     syncFormToAdvanced(): void {
       if (this.updatingFromJson) return;
-      let adv: Record<string, unknown>;
-      try {
-        adv = this.config.advancedJson && this.config.advancedJson.trim()
-          ? (JSON.parse(this.config.advancedJson) as Record<string, unknown>)
-          : {};
-      } catch {
-        adv = {};
-      }
-      if (!adv.env || typeof adv.env !== 'object' || Array.isArray(adv.env)) {
-        adv.env = {};
-      }
-      const env = adv.env as Record<string, unknown>;
-      if (this.config.apiKey) env.ANTHROPIC_API_KEY = this.config.apiKey;
-      else delete env.ANTHROPIC_API_KEY;
-      const url = this.config.apiBaseUrl?.trim();
-      if (url && url !== 'https://api.anthropic.com') env.ANTHROPIC_BASE_URL = url;
-      else delete env.ANTHROPIC_BASE_URL;
-      const permissions = (adv.permissions && typeof adv.permissions === 'object'
-        ? adv.permissions
-        : {}) as Record<string, unknown>;
-      permissions.defaultMode = this.config.permissionMode;
-      adv.permissions = permissions;
-      if (Object.keys(env).length === 0) delete adv.env;
       this.updatingFromJson = true;
-      this.config.advancedJson = JSON.stringify(adv, null, 2);
+      this.config.advancedJson = syncFormToAdvancedJson(this.config.advancedJson, {
+        apiKey: this.config.apiKey,
+        apiBaseUrl: this.config.apiBaseUrl,
+        permissionMode: this.config.permissionMode,
+      });
       void nextTick(() => {
         this.updatingFromJson = false;
       });
