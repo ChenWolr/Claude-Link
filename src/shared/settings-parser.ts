@@ -152,3 +152,104 @@ export function peekEnvValue(advancedJson: string, key: string): string | undefi
   const v = parseAdvancedEnv(advancedJson)[key];
   return typeof v === 'string' && v.trim() ? v.trim() : undefined;
 }
+
+// ── 表单字段 → advancedJson（纯函数，供 config-store 与自测共用）──────────────────────
+// 目的：把"输入框"（apiKey/apiBaseUrl/permissionMode/模型映射）写回 advancedJson，
+// 与 parseClaudeSettings（JSON→字段）构成完整双向映射。纯函数返回新 JSON 字符串。
+
+function cloneAdv(advancedJson: string): Record<string, unknown> {
+  try {
+    const adv = JSON.parse(advancedJson || '{}');
+    if (adv && typeof adv === 'object' && !Array.isArray(adv)) {
+      return adv as Record<string, unknown>;
+    }
+  } catch {
+    // 非法 JSON 当作空对象，避免把用户半成品 JSON 冲掉
+  }
+  return {};
+}
+
+function ensureObject(adv: Record<string, unknown>, key: string): Record<string, unknown> {
+  const existing = adv[key];
+  if (existing && typeof existing === 'object' && !Array.isArray(existing)) {
+    return existing as Record<string, unknown>;
+  }
+  const obj: Record<string, unknown> = {};
+  adv[key] = obj;
+  return obj;
+}
+
+function dropEmptyEnv(adv: Record<string, unknown>): void {
+  const env = adv.env;
+  if (env && typeof env === 'object' && !Array.isArray(env) && Object.keys(env).length === 0) {
+    delete adv.env;
+  }
+}
+
+// apiKey/apiBaseUrl/permissionMode → advancedJson.env / permissions
+export function syncFormToAdvancedJson(
+  advancedJson: string,
+  form: { apiKey: string; apiBaseUrl: string; permissionMode: string },
+): string {
+  const adv = cloneAdv(advancedJson);
+  const env = ensureObject(adv, 'env');
+
+  if (form.apiKey && form.apiKey.trim()) {
+    env.ANTHROPIC_API_KEY = form.apiKey.trim();
+  } else {
+    delete env.ANTHROPIC_API_KEY;
+  }
+
+  const url = form.apiBaseUrl?.trim();
+  // 官方端点不入 env（CLI 默认即官方），避免给 settings.json 留冗余键
+  if (url && url !== 'https://api.anthropic.com') {
+    env.ANTHROPIC_BASE_URL = url;
+  } else {
+    delete env.ANTHROPIC_BASE_URL;
+  }
+
+  const permissions = ensureObject(adv, 'permissions');
+  permissions.defaultMode = form.permissionMode;
+
+  dropEmptyEnv(adv);
+  return JSON.stringify(adv, null, 2);
+}
+
+// 单个类型别名 → 实际模型 的映射，写入 env.ANTHROPIC_DEFAULT_<ALIAS>_MODEL
+export function setModelMappingInAdvancedJson(
+  advancedJson: string,
+  alias: string,
+  value: string,
+): string {
+  const adv = cloneAdv(advancedJson);
+  const env = ensureObject(adv, 'env');
+  const key = `ANTHROPIC_DEFAULT_${alias.toUpperCase()}_MODEL`;
+  const v = value.trim();
+  if (v) {
+    env[key] = v;
+  } else {
+    delete env[key];
+  }
+  dropEmptyEnv(adv);
+  return JSON.stringify(adv, null, 2);
+}
+
+// 清空"连接"相关 env：apiKey / authToken / baseUrl / 四个类型别名映射。
+// 保留 env 里其它键（如 CLAUDE_CODE_*）。供"清空连接配置"使用，确保字段与 JSON 一并清空。
+export function stripConnectionFromAdvancedJson(advancedJson: string): string {
+  const adv = cloneAdv(advancedJson);
+  const envObj =
+    adv.env && typeof adv.env === 'object' && !Array.isArray(adv.env)
+      ? (adv.env as Record<string, unknown>)
+      : null;
+  if (envObj) {
+    delete envObj.ANTHROPIC_API_KEY;
+    delete envObj.ANTHROPIC_AUTH_TOKEN;
+    delete envObj.ANTHROPIC_BASE_URL;
+    for (const alias of ['SONNET', 'HAIKU', 'OPUS', 'FABLE']) {
+      delete envObj[`ANTHROPIC_DEFAULT_${alias}_MODEL`];
+    }
+    if (Object.keys(envObj).length === 0) delete adv.env;
+  }
+  return JSON.stringify(adv, null, 2);
+}
