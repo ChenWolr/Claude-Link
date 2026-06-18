@@ -4,13 +4,14 @@
 // 注册 config / cli / session / message / chat / task / queue 全部 IPC handler。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
-import { BrowserWindow, dialog, ipcMain } from 'electron';
+import { BrowserWindow, dialog, ipcMain, app } from 'electron';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { IPC_CHANNELS } from '../shared/constants';
 import { clearConfig, getConfig, importSettingsFile, saveConfig } from './modules/config-manager';
 import { detectClaudeConfig } from './modules/claude-config-detector';
-import { testConnection } from './modules/connection-tester';
+import { runTestConnectionStream, abortTestConnection } from './modules/connection-tester';
+import { listRecentWorkspaces, addRecentWorkspace } from './modules/workspace-history';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
@@ -42,6 +43,15 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfig());
   ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => saveConfig(partial));
   ipcMain.handle(IPC_CHANNELS.CONFIG_CLEAR, async () => clearConfig());
+  ipcMain.handle(IPC_CHANNELS.CONFIG_STORAGE_INFO, async () => {
+    const userData = app.getPath('userData');
+    return {
+      userData,
+      config: `${userData}/claude-link-config.json`,
+      workspaces: `${userData}/claude-link-workspaces.json`,
+      db: `${userData}/claude-link.db`,
+    };
+  });
   ipcMain.handle(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, async (_event, filePath: string) => {
     return importSettingsFile(filePath);
   });
@@ -55,7 +65,24 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return result.filePaths[0];
   });
   ipcMain.handle(IPC_CHANNELS.CONFIG_AUTO_DETECT, async () => detectClaudeConfig());
-  ipcMain.handle(IPC_CHANNELS.CONFIG_TEST_CONNECTION, async () => testConnection());
+  ipcMain.handle(IPC_CHANNELS.CONFIG_TEST_CONNECTION, async (_event, model: string | null) => {
+    runTestConnectionStream(model ?? null, mainWindow);
+  });
+  ipcMain.handle(IPC_CHANNELS.TEST_CONNECTION_ABORT, async () => abortTestConnection());
+
+  // Workspace（工作空间）：选目录 + 最近历史。Claude Code 基于某目录运行，会话可绑定并复用历史目录。
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_PICK_DIR, async () => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openDirectory'],
+      title: '选择 Claude Code 运行目录（工作空间）',
+    });
+    if (result.canceled || !result.filePaths.length) return null;
+    const dir = result.filePaths[0];
+    addRecentWorkspace(dir);
+    return dir;
+  });
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_LIST_RECENT, async () => listRecentWorkspaces());
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
   ipcMain.handle(
     IPC_CHANNELS.MODELS_FETCH,
     async (_event, provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) =>
