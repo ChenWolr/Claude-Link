@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { useSessionStore } from '../stores/session-store';
 import { useChat } from '../composables/use-chat';
 import { useStream } from '../composables/use-stream';
@@ -7,11 +7,23 @@ import { useTaskStore } from '../stores/task-store';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
 import CommandToolbar from '../components/chat/CommandToolbar.vue';
+import SessionToolbar from '../components/chat/SessionToolbar.vue';
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
 const { sending, sendMessage, abort, startListening, stopListening } = useChat();
 const { displayContent, displayThinking } = useStream();
+
+// 内联提示（如"未选择工作空间"），自动消失。
+const notice = ref<string | null>(null);
+let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+function showNotice(msg: string) {
+  notice.value = msg;
+  if (noticeTimer) clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => {
+    notice.value = null;
+  }, 4000);
+}
 
 onMounted(() => {
   store.loadSessions();
@@ -19,10 +31,20 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopListening();
+  if (noticeTimer) clearTimeout(noticeTimer);
 });
+
+// 工作空间必选：Claude Code 基于某目录运行，未选工作空间禁止发送。
+function ensureWorkspace(): boolean {
+  if (store.activeSession?.workingDir) return true;
+  showNotice('请先在底部选择「工作空间」目录，才能运行 Claude Code。');
+  return false;
+}
 
 async function handleSend(text: string) {
   if (!store.activeSession) return;
+  if (!ensureWorkspace()) return;
+
   const status = taskStore.queueState.status;
 
   // 倒计时期间补充输入 → 续写当前任务上下文，重置倒计时
@@ -41,11 +63,14 @@ async function handleSend(text: string) {
 }
 
 async function handleSendCommand(command: string) {
+  if (!store.activeSession) return;
+  if (!ensureWorkspace()) return;
   await sendMessage(command);
 }
 
 async function handleCompress() {
   if (!store.activeSession) return;
+  if (!ensureWorkspace()) return;
   await sendMessage('/compact');
 }
 
@@ -62,9 +87,14 @@ async function handleNewSession() {
   <section class="chat-page">
     <template v-if="store.activeSession">
       <MessageList :messages="store.messages" :streaming-content="displayContent" :streaming-thinking="displayThinking" />
+
+      <div v-if="notice" class="notice">
+        <span>⚠️ {{ notice }}</span>
+      </div>
+
       <CommandToolbar @send-command="handleSendCommand" @compress="handleCompress" />
       <ChatInput :disabled="sending" @send="handleSend" />
-      <button v-if="sending" class="abort-button" type="button" @click="abort">中断</button>
+      <SessionToolbar :sending="sending" @abort="abort" />
     </template>
     <template v-else>
       <div class="empty-state">
@@ -79,6 +109,7 @@ async function handleNewSession() {
 
 <style scoped>
 .chat-page {
+  position: relative;
   display: flex;
   min-height: 0;
   flex: 1;
@@ -121,17 +152,24 @@ async function handleNewSession() {
   color: #07120d;
   padding: 10px 24px;
   font-weight: 700;
+  cursor: pointer;
 }
 
-.abort-button {
-  position: fixed;
-  bottom: 90px;
-  right: 340px;
-  border: 1px solid var(--color-danger);
+.notice {
+  max-width: 800px;
+  margin: 0 auto;
+  width: 100%;
+  padding: 8px 24px;
+  box-sizing: border-box;
+}
+
+.notice span {
+  display: block;
+  border: 1px solid rgba(204, 163, 61, 0.5);
   border-radius: var(--radius-md);
-  background: rgba(239, 100, 97, 0.12);
-  color: var(--color-danger);
-  padding: 8px 16px;
+  background: rgba(204, 163, 61, 0.12);
+  color: #e0c36a;
+  padding: 8px 14px;
   font-size: 13px;
 }
 </style>

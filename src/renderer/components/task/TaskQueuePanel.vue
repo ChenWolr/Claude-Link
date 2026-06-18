@@ -43,6 +43,10 @@ async function handleAddTask() {
 
 async function handleStart() {
   if (!sessionStore.activeSession) return;
+  if (!sessionStore.activeSession.workingDir) {
+    window.alert('请先在底部选择「工作空间」目录，再启动任务队列。');
+    return;
+  }
   await taskStore.startQueue(sessionStore.activeSession.id);
 }
 
@@ -53,6 +57,10 @@ async function handlePause() {
 
 async function handleResume() {
   if (!sessionStore.activeSession) return;
+  if (!sessionStore.activeSession.workingDir) {
+    window.alert('请先在底部选择「工作空间」目录，再继续任务队列。');
+    return;
+  }
   await taskStore.resumeQueue(sessionStore.activeSession.id);
 }
 
