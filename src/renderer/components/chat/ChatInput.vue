@@ -188,9 +188,11 @@ onUnmounted(() => {
 .chat-input {
   display: flex;
   gap: 10px;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 16px 24px;
+  /* 占满聊天区宽度、内容左对齐，与 SessionToolbar 同宽（修 #1/#3）。
+     去掉 max-width+margin:auto（那是两行宽度不一致的根因：max-width≠width，
+     无 flex:1 子项的行会收缩）。 */
+  width: 100%;
+  padding: 16px var(--chat-bottom-pad-x);
   border-top: 1px solid var(--color-border);
   background: var(--color-panel);
 }

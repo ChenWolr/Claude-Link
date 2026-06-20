@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -67,6 +67,26 @@ export function runMigrations(db: Database.Database): void {
     db.exec(`
       ALTER TABLE sessions ADD COLUMN model_override TEXT DEFAULT NULL;
     `);
+  }
+
+  if (currentVersion < 3) {
+    db.exec(`
+      ALTER TABLE sessions ADD COLUMN last_context_tokens INTEGER DEFAULT NULL;
+      ALTER TABLE sessions ADD COLUMN last_context_updated_at TEXT DEFAULT NULL;
+    `);
+  }
+
+  // 幂等自愈：某些 DB 的 schema_version 已到 3 但这两列缺失（历史迁移把版本号推进了、
+  // 列却没加上）。按列是否存在补加，确保任何状态的 DB 都能修好，不阻塞启动。
+  {
+    const sessCols = db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[];
+    const hasCol = (n: string): boolean => sessCols.some((c) => c.name === n);
+    if (!hasCol('last_context_tokens')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_context_tokens INTEGER DEFAULT NULL');
+    }
+    if (!hasCol('last_context_updated_at')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_context_updated_at TEXT DEFAULT NULL');
+    }
   }
 
   const upsertVersion = versionRow

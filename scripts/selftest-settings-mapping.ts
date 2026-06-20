@@ -10,8 +10,10 @@ import {
   stripConnectionFromAdvancedJson,
   extractModelMappings,
   resolveDefaultModel,
+  resolveAliasToActualModel, // 新增
   peekEnvValue,
 } from '../src/shared/settings-parser';
+import { extractContextTokens, type CliUsage } from '../src/shared/context-usage';
 
 let pass = 0;
 let fail = 0;
@@ -182,6 +184,26 @@ console.log('\n=== 8) 一键清空连接：env 里 key/url/模型映射全删，
   check('清空后 sonnet 模型映射删除', env.ANTHROPIC_DEFAULT_SONNET_MODEL === undefined, cleared);
   check('保留非连接相关 env', env.CLAUDE_CODE_SUBAGENT_MODEL === 'should-keep', cleared);
   check('permissions 不受影响', JSON.parse(cleared).permissions?.defaultMode === 'default', cleared);
+}
+
+console.log('\n=== 9) 别名→实际模型解析（给 --model 用，CLI 参数压过 settings.json）===');
+{
+  let adv = setModelMappingInAdvancedJson('{}', 'sonnet', 'glm-5.1');
+  adv = setModelMappingInAdvancedJson(adv, 'haiku', 'glm-5.1-flash');
+  check('sonnet 别名解析为 glm-5.1', resolveAliasToActualModel('sonnet', adv) === 'glm-5.1', adv);
+  check('haiku 别名解析为 glm-5.1-flash', resolveAliasToActualModel('haiku', adv) === 'glm-5.1-flash', adv);
+  check('未映射的 opus 原样返回别名', resolveAliasToActualModel('opus', adv) === 'opus', adv);
+  check('自定义实际名原样返回', resolveAliasToActualModel('gpt-4o', adv) === 'gpt-4o', adv);
+  check('空 requested 回退到首个映射的实际值', resolveAliasToActualModel(null, adv) === 'glm-5.1', adv);
+  check('无任何映射时空 requested 回退 sonnet', resolveAliasToActualModel(null, '{}') === 'sonnet');
+}
+
+console.log('\n=== 10) 上下文 token 用量解析 ===');
+{
+  const u1: CliUsage = { input_tokens: 9000, cache_creation_input_tokens: 2000, cache_read_input_tokens: 1345, output_tokens: 500 };
+  check('input+cache 合计为上下文用量', extractContextTokens(u1) === 12345, String(extractContextTokens(u1)));
+  check('空 usage 返回 0', extractContextTokens(undefined) === 0);
+  check('缺 cache 字段只算 input', extractContextTokens({ input_tokens: 100 }) === 100);
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

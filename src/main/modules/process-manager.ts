@@ -12,9 +12,13 @@ import type { CliInitEvent, CliEvent, CliMessageEvent, CliMessageContentPart } f
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
 import { resolveDefaultModel } from '../../shared/settings-parser';
+import { resolveAliasToActualModel } from '../../shared/settings-parser';
+import { writeClaudeSettings, SKIP_NO_WORKDIR } from './settings-writer';
 import { logger } from '../utils/logger';
 import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
+import { extractContextTokens } from '../../shared/context-usage';
+import type { ContextStatsPayload } from '../../shared/types/ipc';
 
 const processes = new Map<string, ChildProcess>();
 const sessionCliIds = new Map<string, string>();
@@ -31,6 +35,20 @@ export interface SpawnOptions {
 function getCliCommand(): string {
   const config = getConfig();
   return config.cliPath || 'claude';
+}
+
+// spawn 前把 claude-link 完整配置投影到运行目录的 .claude/settings.local.json。
+// 项目级 settings.local.json 优先级 > 用户 ~/.claude/settings.json，使 claude-link 完全主导
+// （key/url/模型映射/权限全部覆盖 CC 自身配置）。失败只记日志，不阻塞 spawn（env 注入仍兜底）。
+function projectClaudeSettings(cwd: string): void {
+  try {
+    const result = writeClaudeSettings(cwd, getConfig());
+    if (!result.ok && result.error !== SKIP_NO_WORKDIR) {
+      logger.warn(`spawn 前 settings.local.json 投影跳过：${result.error}`);
+    }
+  } catch (e) {
+    logger.warn('spawn 前 settings.local.json 投影失败', e);
+  }
 }
 
 export function buildSpawnEnv(): Record<string, string> {
@@ -86,8 +104,10 @@ function buildCommonArgs(sessionId: string, opts: SpawnOptions): string[] {
   args.push('--output-format', 'stream-json');
   args.push('--verbose');
   args.push('--include-partial-messages');
-  // 默认模型从映射自动推导（sonnet 优先）；会话顶栏的临时切换（opts.model/modelOverride）优先。
-  const effectiveModel = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
+  // 解析成实际模型名再传 --model：CLI 参数优先级最高，确保 claude-link 的映射生效，
+  // 不被 ~/.claude/settings.json 覆盖（问题 3 根因）。
+  const requestedAlias = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
+  const effectiveModel = resolveAliasToActualModel(requestedAlias, config.advancedJson);
   args.push('--model', effectiveModel);
 
   if (opts.maxTurns && opts.maxTurns > 0) {
@@ -139,6 +159,33 @@ function attachStreamParser(
         persistCliEvent(sessionId, event);
       } catch (err) {
         logger.error(`Failed to persist CLI event [${sessionId}]`, err);
+      }
+
+      // 问题 4：提取真实上下文用量，推送 + 落库
+      const usage = (event as { usage?: { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number } }).usage;
+      if (usage && (event.type === 'message' || event.type === 'result')) {
+        const inputTokens = extractContextTokens(usage);
+        if (inputTokens > 0) {
+          // result 事件带 modelUsage.<model>.contextWindow —— 这是 CC 自己算出的
+          // 真实上下文窗口（与 CC 状态栏一致），优先用它，远胜猜测/默认 200k。
+          const modelUsage = (event as { modelUsage?: Record<string, { contextWindow?: number; maxOutputTokens?: number }> }).modelUsage;
+          const realWindow = modelUsage && typeof modelUsage === 'object'
+            ? (Object.values(modelUsage)[0]?.contextWindow ?? undefined)
+            : undefined;
+          const payload: ContextStatsPayload = {
+            sessionId,
+            inputTokens,
+            outputTokens: usage.output_tokens ?? 0,
+            windowSize: realWindow ?? readContextWindow(),
+            model: null,
+          };
+          mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+          try {
+            sessionRepo.updateLastContext(sessionId, inputTokens);
+          } catch (err) {
+            logger.warn(`Failed to persist last context [${sessionId}]`, err);
+          }
+        }
       }
     }
   });
@@ -208,6 +255,19 @@ function persistMessageParts(
   }
 }
 
+function readContextWindow(): number {
+  try {
+    const config = getConfig();
+    const adv = JSON.parse(config.advancedJson || '{}');
+    const w = adv?.env?.CLAUDE_LINK_CONTEXT_WINDOW;
+    if (typeof w === 'number' && w > 0) return w;
+    if (typeof w === 'string' && Number.isFinite(Number(w))) return Number(w);
+  } catch {
+    // ignore
+  }
+  return 200000;
+}
+
 export function spawnForChat(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -220,6 +280,8 @@ export function spawnForChat(
   args.push('--input-format', 'stream-json');
 
   const cwd = opts.workingDir || config.workingDirectory || process.cwd();
+
+  projectClaudeSettings(cwd);
 
   logger.info(`Spawning CLI for chat [${sessionId}] in ${cwd}`);
 
@@ -252,6 +314,8 @@ export function spawnForTask(
   args.splice(1, 0, prompt);
 
   const cwd = opts.workingDir || config.workingDirectory || process.cwd();
+
+  projectClaudeSettings(cwd);
 
   logger.info(`Spawning CLI for task [${taskId}] session [${sessionId}]`);
 

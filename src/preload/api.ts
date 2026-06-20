@@ -6,7 +6,7 @@ import { ipcRenderer } from 'electron';
 import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
-import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 
@@ -49,6 +49,8 @@ export interface ClaudeLinkAPI {
   abortChat: (sessionId: string) => Promise<void>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
   removeChatListener: () => void;
+  onContextUpdate: (callback: (payload: ContextStatsPayload) => void) => () => void;
+  removeContextListener: () => void;
   addTask: (sessionId: string, prompt: string) => Promise<Task>;
   removeTask: (taskId: string) => Promise<void>;
   getTasks: (sessionId: string) => Promise<Task[]>;
@@ -109,6 +111,12 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.CHAT_EVENT, listener);
     },
     removeChatListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.CHAT_EVENT),
+    onContextUpdate: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: ContextStatsPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.CONTEXT_UPDATE, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.CONTEXT_UPDATE, listener);
+    },
+    removeContextListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.CONTEXT_UPDATE),
     addTask: (sessionId, prompt) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, prompt),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId),
     getTasks: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_GET_ALL, sessionId),

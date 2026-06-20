@@ -6,7 +6,6 @@ import { useStream } from '../composables/use-stream';
 import { useTaskStore } from '../stores/task-store';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
-import CommandToolbar from '../components/chat/CommandToolbar.vue';
 import SessionToolbar from '../components/chat/SessionToolbar.vue';
 
 const store = useSessionStore();
@@ -27,6 +26,7 @@ function showNotice(msg: string) {
 
 onMounted(() => {
   store.loadSessions();
+  store.bindContextUpdates();
 });
 
 onUnmounted(() => {
@@ -62,12 +62,6 @@ async function handleSend(text: string) {
   await sendMessage(text);
 }
 
-async function handleSendCommand(command: string) {
-  if (!store.activeSession) return;
-  if (!ensureWorkspace()) return;
-  await sendMessage(command);
-}
-
 async function handleCompress() {
   if (!store.activeSession) return;
   if (!ensureWorkspace()) return;
@@ -92,9 +86,8 @@ async function handleNewSession() {
         <span>⚠️ {{ notice }}</span>
       </div>
 
-      <CommandToolbar @send-command="handleSendCommand" @compress="handleCompress" />
       <ChatInput :disabled="sending" @send="handleSend" />
-      <SessionToolbar :sending="sending" @abort="abort" />
+      <SessionToolbar :sending="sending" @abort="abort" @compress="handleCompress" />
     </template>
     <template v-else>
       <div class="empty-state">

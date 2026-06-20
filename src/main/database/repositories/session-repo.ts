@@ -14,6 +14,8 @@ interface SessionRow {
   max_turns: number;
   created_at: string;
   updated_at: string;
+  last_context_tokens: number | null;
+  last_context_updated_at: string | null;
 }
 
 function toSession(row: SessionRow): Session {
@@ -28,6 +30,8 @@ function toSession(row: SessionRow): Session {
     maxTurns: row.max_turns,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    lastContextTokens: row.last_context_tokens,
+    lastContextUpdatedAt: row.last_context_updated_at,
   };
 }
 
@@ -114,7 +118,7 @@ export function searchSessions(query: string): Session[] {
   // 一次性取出每个会话的拼接消息内容用于内容匹配。
   const contentMap = new Map<string, string>();
   const contentRows = getConnection()
-    .prepare('SELECT session_id, GROUP_CONCAT(content, " ") AS text FROM messages GROUP BY session_id')
+    .prepare("SELECT session_id, GROUP_CONCAT(content, ' ') AS text FROM messages GROUP BY session_id")
     .all() as { session_id: string; text: string | null }[];
   for (const row of contentRows) {
     contentMap.set(row.session_id, row.text ?? '');
@@ -143,5 +147,14 @@ export function updateModelOverride(id: string, modelOverride: string | null): S
   getConnection()
     .prepare("UPDATE sessions SET model_override = ?, updated_at = datetime('now') WHERE id = ?")
     .run(modelOverride, id);
+  return getSession(id);
+}
+
+export function updateLastContext(id: string, tokens: number): Session | null {
+  getConnection()
+    .prepare(
+      "UPDATE sessions SET last_context_tokens = ?, last_context_updated_at = datetime('now') WHERE id = ?",
+    )
+    .run(tokens, id);
   return getSession(id);
 }

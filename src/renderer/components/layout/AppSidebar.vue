@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 
@@ -7,14 +7,8 @@ const store = useSessionStore();
 const router = useRouter();
 const searchQuery = ref('');
 
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-
 onMounted(() => {
   store.loadSessions();
-});
-
-onUnmounted(() => {
-  if (debounceTimer) clearTimeout(debounceTimer);
 });
 
 async function handleNewSession() {
@@ -33,23 +27,17 @@ async function openSession(session: { id: string }) {
   }
 }
 
-// 恢复 IPC 内容搜索：主进程 searchSessions 同时匹配会话名与消息内容，
-// 客户端只搜 name 会丢失"按对话内容找会话"的能力。250ms 防抖避免每键一次 IPC。
-function onSearchInput() {
-  if (debounceTimer) clearTimeout(debounceTimer);
-  const q = searchQuery.value.trim();
-  if (!q) {
-    store.loadSessions();
-    return;
-  }
-  debounceTimer = setTimeout(() => {
-    store.searchSessions(q);
-  }, 250);
-}
+// 侧栏搜索：只按会话标题(name)过滤，纯前端、即时、不查消息内容。
+// （按聊天记录内容搜索是另一个功能，暂不做。）始终基于已加载的全量列表过滤，
+// 避免覆盖 store.sessions（会话管理页等也依赖它）。
+const sessionList = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase();
+  if (!q) return store.sessions;
+  return store.sessions.filter((s) => (s.name ?? '').toLowerCase().includes(q));
+});
 
-function handleSearchClear() {
-  searchQuery.value = '';
-  store.loadSessions();
+function onSearchInput() {
+  // sessionList 是 computed，随 searchQuery 即时变化，无需额外动作。
 }
 
 // 删除会话：用浏览器原生确认，避免误删。会话及消息由主进程级联清理。
@@ -57,8 +45,6 @@ async function confirmDelete(session: { id: string; name: string }) {
   if (!window.confirm(`确定删除会话「${session.name}」？此操作不可撤销。`)) return;
   await store.deleteSession(session.id);
 }
-
-const sessionList = computed(() => store.sessions);
 </script>
 
 <template>
@@ -75,9 +61,8 @@ const sessionList = computed(() => store.sessions);
       v-model="searchQuery"
       class="sidebar__search"
       type="search"
-      placeholder="搜索会话"
+      placeholder="搜索会话（名称或内容）"
       @input="onSearchInput"
-      @search="handleSearchClear"
     />
 
     <nav class="sidebar__sessions">

@@ -27,6 +27,11 @@ const result = ref<TestResult | null>(null);
 const aborted = ref(false);
 let cleanup: (() => void) | null = null;
 
+// —— 问题 3 明文回显（新增）——
+const requestedModel = ref('');
+const usedBaseUrl = ref('');
+const reportedModel = ref('');
+
 // 模型选项：来自当前配置的模型映射（别名 → 实际模型）；无映射时回退到内置别名。
 const modelOptions = computed(() => {
   const mappings = configStore.modelMappings;
@@ -66,15 +71,24 @@ const statusTone = computed(() => {
 
 const renderedText = computed(() => renderMarkdown(streamedText.value));
 
+const streamedEchoMatches = computed(() => {
+  if (!requestedModel.value || !reportedModel.value) return true;
+  return requestedModel.value.toLowerCase() === reportedModel.value.toLowerCase();
+});
+
 function handleEvent(payload: TestConnectionEventPayload): void {
   // 取消后到达的迟到的 streaming/done 事件一律丢弃。
   if (aborted.value) return;
   switch (payload.phase) {
     case 'connecting':
       phase.value = 'connecting';
+      requestedModel.value = payload.requestedModel ?? '';
+      usedBaseUrl.value = payload.usedBaseUrl ?? '';
       break;
     case 'connected':
       phase.value = 'connected';
+      // payload.model 为 CC init 上报的实际模型（reportedModel）
+      reportedModel.value = payload.model ?? reportedModel.value;
       break;
     case 'streaming':
       phase.value = 'streaming';
@@ -184,10 +198,24 @@ onUnmounted(() => {
             </span>
           </div>
 
+          <div v-if="requestedModel || usedBaseUrl" class="config-echo">
+            <span>本次请求：<code>--model {{ requestedModel }}</code></span>
+            <span>端点：<code>{{ usedBaseUrl || '(官方默认)' }}</code></span>
+          </div>
+
           <div v-if="streamedText || isRunning" class="stream-area">
             <div class="stream-area__label">Claude Code 响应</div>
             <div class="stream-area__content markdown-body" v-html="renderedText" />
             <span v-if="phase === 'streaming'" class="cursor">▊</span>
+          </div>
+
+          <div v-if="phase === 'done' && result" :class="['config-verdict', result.success && streamedEchoMatches ? 'ok' : 'warn']">
+            <template v-if="result.success && streamedEchoMatches">
+              ✅ 已用 claude-link 配置：模型 <code>{{ reportedModel || requestedModel }}</code>
+            </template>
+            <template v-else-if="phase === 'done' && result.success && !streamedEchoMatches">
+              ⚠️ CC 上报模型 <code>{{ reportedModel }}</code> 与配置 <code>{{ requestedModel }}</code> 不一致，疑似被 ~/.claude/settings.json 覆盖
+            </template>
           </div>
 
           <div v-if="result && !result.success && result.detail" class="error-detail">
@@ -351,6 +379,34 @@ onUnmounted(() => {
 
 .status-bar__duration {
   color: var(--color-text-muted);
+}
+
+.config-echo {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+.config-echo code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--color-text);
+}
+.config-verdict {
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+.config-verdict.ok {
+  background: rgba(58, 166, 117, 0.12);
+  color: #5fd6a0;
+}
+.config-verdict.warn {
+  background: rgba(204, 163, 61, 0.12);
+  color: #e0c36a;
+}
+.config-verdict code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .spinner {
