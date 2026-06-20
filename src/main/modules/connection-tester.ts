@@ -10,8 +10,12 @@ import type { TestConnectionEventPayload } from '../../shared/types/ipc';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
 import { buildSpawnEnv } from './process-manager';
-import { resolveDefaultModel, peekEnvValue } from '../../shared/settings-parser';
+import { writeClaudeSettings } from './settings-writer';
+import { resolveDefaultModel, resolveAliasToActualModel, peekEnvValue } from '../../shared/settings-parser';
 import { logger } from '../utils/logger';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 const TEST_PROMPT = '你好';
 // Claude Code CLI 冷启动需加载 skills/MCP/agents，配置多时可达 20-30s；
@@ -78,7 +82,8 @@ export function runTestConnectionStream(modelAlias: string | null, mainWindow: B
     return;
   }
 
-  const model = modelAlias?.trim() || resolveDefaultModel(config.advancedJson);
+  const requestedAlias = modelAlias?.trim() || resolveDefaultModel(config.advancedJson);
+  const model = resolveAliasToActualModel(requestedAlias, config.advancedJson);
   const startTime = Date.now();
 
   // print + stream-json：逐事件输出 init / message / stream_event / result。
@@ -90,7 +95,12 @@ export function runTestConnectionStream(modelAlias: string | null, mainWindow: B
     '--verbose',
   ];
 
-  emit(mainWindow, { phase: 'connecting', model });
+  emit(mainWindow, {
+    phase: 'connecting',
+    model,
+    requestedModel: model,
+    usedBaseUrl: config.apiBaseUrl?.trim() || peekEnvValue(config.advancedJson, 'ANTHROPIC_BASE_URL') || '',
+  });
 
   const spawnEnv = buildSpawnEnv();
   logger.info(
@@ -98,8 +108,20 @@ export function runTestConnectionStream(modelAlias: string | null, mainWindow: B
       `SONNET映射=${spawnEnv.ANTHROPIC_DEFAULT_SONNET_MODEL || '(无)'}, apiKey=${spawnEnv.ANTHROPIC_API_KEY ? 'SET' : '(无)'}`,
   );
 
+  // 测试 cwd：优先全局 workingDirectory；否则用专用临时目录，避免污染 process.cwd()。
+  let testCwd = config.workingDirectory || '';
+  if (!testCwd) {
+    testCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cl-test-'));
+  }
+  // 把 claude-link 完整配置写进该目录的 .claude/settings.local.json（项目级 > 用户级）。
+  try {
+    writeClaudeSettings(testCwd, config);
+  } catch (e) {
+    logger.warn('测试连接：settings.local.json 投影失败', e);
+  }
+
   const child = spawn(cliPath, args, {
-    cwd: config.workingDirectory || process.cwd(),
+    cwd: testCwd,
     env: spawnEnv,
     stdio: ['pipe', 'pipe', 'pipe'],
     shell: process.platform === 'win32',

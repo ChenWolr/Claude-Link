@@ -26,12 +26,12 @@ const currentModel = computed(
   () => sessionStore.activeSession?.modelOverride || sessionStore.activeSession?.model || effectiveDefault.value,
 );
 
+// 只显示实际模型名（如 glm-5.1），不显示"别名 → 实际"。
+// 动态读 configStore.modelMappings，用户改映射此处跟着变（非写死）。
 const displayModel = computed(() => {
   const override = sessionStore.activeSession?.modelOverride;
-  const model = override || sessionStore.activeSession?.model || effectiveDefault.value;
-  const mapping = configStore.modelMappings[model];
-  if (override) return mapping ? `${override} → ${mapping}` : override;
-  return mapping ? `${model} → ${mapping}` : `默认: ${model}`;
+  const alias = override || sessionStore.activeSession?.model || effectiveDefault.value;
+  return configStore.modelMappings[alias] || alias;
 });
 
 // 可选项：用户在配置里映射过的别名优先展示（带"别名 → 实际模型"），

@@ -9,6 +9,8 @@ export interface Session {
   maxTurns: number;
   createdAt: string;
   updatedAt: string;
+  lastContextTokens: number | null;
+  lastContextUpdatedAt: string | null;
 }
 
 export interface Message {

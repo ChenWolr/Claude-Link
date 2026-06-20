@@ -4,6 +4,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import ModelSelector from './ModelSelector.vue';
+import ContextButton from './ContextButton.vue';
 import type { Session } from '../../../shared/types/session';
 
 defineProps<{
@@ -12,6 +13,7 @@ defineProps<{
 
 const emit = defineEmits<{
   abort: [];
+  compress: [];
 }>();
 
 const sessionStore = useSessionStore();
@@ -57,24 +59,6 @@ async function onPermissionChange(e: Event) {
   await sessionStore.setActiveSessionPermissionMode(mode);
 }
 
-// 删除（二次确认）
-const confirmingDelete = ref(false);
-let confirmTimer: ReturnType<typeof setTimeout> | null = null;
-
-function askDelete() {
-  confirmingDelete.value = true;
-  if (confirmTimer) clearTimeout(confirmTimer);
-  confirmTimer = setTimeout(() => {
-    confirmingDelete.value = false;
-  }, 3000);
-}
-
-async function doDelete() {
-  if (!activeSession.value) return;
-  confirmingDelete.value = false;
-  await sessionStore.deleteSession(activeSession.value.id);
-}
-
 function handleClickOutside(event: MouseEvent) {
   if (showWorkspaceMenu.value && workspaceRef.value && !workspaceRef.value.contains(event.target as Node)) {
     showWorkspaceMenu.value = false;
@@ -88,12 +72,16 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside);
-  if (confirmTimer) clearTimeout(confirmTimer);
 });
 </script>
 
 <template>
   <div v-if="activeSession" class="session-toolbar">
+    <!-- 上下文（真实用量环 + 压缩）：放第一个，圆环自解释，不加文字标签 -->
+    <div class="ctl">
+      <ContextButton @compress="emit('compress')" />
+    </div>
+
     <!-- 工作空间 -->
     <div ref="workspaceRef" class="ctl">
       <span class="ctl__label">工作空间</span>
@@ -140,15 +128,9 @@ onUnmounted(() => {
       </select>
     </label>
 
-    <!-- 操作：发送中显示中断，否则显示删除 -->
-    <div class="ctl ctl--right">
-      <button v-if="sending" type="button" class="ctl__btn ctl__btn--abort" @click="emit('abort')">■ 中断</button>
-      <button v-else-if="!confirmingDelete" type="button" class="ctl__btn ctl__btn--danger" title="删除当前会话" @click="askDelete">
-        删除
-      </button>
-      <button v-else type="button" class="ctl__btn ctl__btn--danger-solid" title="再次点击确认" @click="doDelete">
-        确认删除？
-      </button>
+    <!-- 操作：仅发送中显示中断；删除会话走左侧栏 -->
+    <div v-if="sending" class="ctl ctl--right">
+      <button type="button" class="ctl__btn ctl__btn--abort" @click="emit('abort')">■ 中断</button>
     </div>
   </div>
 </template>
@@ -159,10 +141,11 @@ onUnmounted(() => {
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
-  max-width: 800px;
-  margin: 0 auto;
-  padding: 8px 24px 12px;
-  border-top: 1px solid var(--color-border);
+  /* 占满聊天区宽度、内容左对齐，与 ChatInput 同宽（修 #1/#3）。 */
+  width: 100%;
+  /* 与 ChatInput 融为一个连续底部面板：去掉中间 border-top，统一水平 padding，
+     仅保留较小上内边距衔接输入栏，底部留白收尾。 */
+  padding: 6px var(--chat-bottom-pad-x) 10px;
   background: var(--color-panel);
 }
 

@@ -18,6 +18,7 @@ export const useSessionStore = defineStore('session', {
     sending: false,
     error: null as string | null,
     recentWorkspaces: [] as string[],
+    contextStats: null as { inputTokens: number; outputTokens: number; windowSize: number; ratio: number } | null,
   }),
   actions: {
     async loadSessions() {
@@ -41,6 +42,9 @@ export const useSessionStore = defineStore('session', {
       this.activeSession = session;
       this.streamingContent = '';
       this.messages = [];
+      this.contextStats = session.lastContextTokens
+        ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize: 200000, ratio: session.lastContextTokens / 200000 }
+        : null;
       try {
         this.messages = await window.claudeLink.getSessionMessages(session.id);
       } catch {
@@ -68,6 +72,7 @@ export const useSessionStore = defineStore('session', {
         this.sessions = await window.claudeLink.searchSessions(query);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '搜索会话失败';
+        await this.loadSessions();
       }
     },
     async updateActiveSessionModelOverride(modelOverride: string | null) {
@@ -116,6 +121,17 @@ export const useSessionStore = defineStore('session', {
       } catch {
         // 静默：历史为空也能用
       }
+    },
+    bindContextUpdates() {
+      return window.claudeLink.onContextUpdate((payload) => {
+        if (this.activeSession?.id !== payload.sessionId) return;
+        this.contextStats = {
+          inputTokens: payload.inputTokens,
+          outputTokens: payload.outputTokens,
+          windowSize: payload.windowSize,
+          ratio: payload.windowSize > 0 ? payload.inputTokens / payload.windowSize : 0,
+        };
+      });
     },
     // 会话重命名：写入 session.name。默认名由首句 analyzeTopic 自动生成，此处供用户自定义。
     async renameActiveSession(name: string) {

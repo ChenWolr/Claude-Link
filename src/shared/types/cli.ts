@@ -33,10 +33,18 @@ export type CliMessageContentPart =
   | CliMessageContentToolResultPart
   | CliMessageContentThinkingPart;
 
+export interface CliUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+}
+
 export interface CliMessageEvent {
   type: 'message';
   role: 'user' | 'assistant';
   content: CliMessageContentPart[];
+  usage?: CliUsage;
 }
 
 export interface CliStreamEvent {
@@ -64,6 +72,7 @@ export interface CliResultEvent {
   num_turns: number;
   session_id: string;
   is_error: boolean;
+  usage?: CliUsage;
 }
 
 export type CliEvent = CliInitEvent | CliMessageEvent | CliStreamEvent | CliResultEvent;

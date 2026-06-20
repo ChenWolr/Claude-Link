@@ -147,6 +147,26 @@ export function resolveDefaultModel(advancedJson: string): string {
   return 'sonnet';
 }
 
+// 把「请求的模型」解析成传给 CLI --model 的实际值。
+// 设计意图（问题 3 根因修复）：CLI 参数优先级高于 ~/.claude/settings.json，
+// 所以 claude-link 自己把别名解析成实际模型名再用 --model 传入，确保 claude-link 的映射生效，
+// 不再依赖会被 CC settings.json 覆盖的子进程 env。
+// - requested 为已映射别名(sonnet/haiku/opus/fable) → 返回映射的实际模型名
+// - requested 为空 → 取首个有映射别名的实际值（同 resolveDefaultModel 思路），都没有则 'sonnet'
+// - 其它（用户填的自定义实际模型名 / 未映射别名）→ 原样返回
+export function resolveAliasToActualModel(requested: string | null, advancedJson: string): string {
+  const mappings = extractModelMappings(advancedJson);
+  const req = requested?.trim();
+  if (req && mappings[req]) return mappings[req];
+  if (!req) {
+    for (const alias of MODEL_ALIASES) {
+      if (mappings[alias]) return mappings[alias];
+    }
+    return 'sonnet';
+  }
+  return req;
+}
+
 // 从 advancedJson 的 env 块读取单个值（不修改原 JSON），用于 apiKey/baseUrl 等字段的兜底。
 export function peekEnvValue(advancedJson: string, key: string): string | undefined {
   const v = parseAdvancedEnv(advancedJson)[key];

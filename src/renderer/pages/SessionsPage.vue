@@ -1,14 +1,33 @@
 <script setup lang="ts">
-import { onMounted } from 'vue';
+import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../stores/session-store';
 
 const store = useSessionStore();
 const router = useRouter();
+const searchQuery = ref('');
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(() => {
   store.loadSessions();
 });
+
+function onSearchInput() {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  const q = searchQuery.value.trim();
+  if (!q) {
+    store.loadSessions();
+    return;
+  }
+  debounceTimer = setTimeout(() => {
+    store.searchSessions(q);
+  }, 250);
+}
+
+function handleSearchClear() {
+  searchQuery.value = '';
+  store.loadSessions();
+}
 
 async function createAndNavigate() {
   const session = await store.createSession(`会话 ${store.sessions.length + 1}`);
@@ -36,6 +55,14 @@ async function openSession(session: { id: string }) {
       </div>
       <button type="button" @click="createAndNavigate">+ 新建会话</button>
     </header>
+    <input
+      v-model="searchQuery"
+      class="sessions-page__search"
+      type="search"
+      placeholder="搜索会话（名称或对话内容）"
+      @input="onSearchInput"
+      @search="handleSearchClear"
+    />
     <div class="sessions-list">
       <div
         v-for="session in store.sessions"
@@ -55,7 +82,9 @@ async function openSession(session: { id: string }) {
           删除
         </button>
       </div>
-      <div v-if="!store.sessions.length" class="empty">暂无会话</div>
+      <div v-if="!store.sessions.length" class="empty">
+        {{ searchQuery.trim() ? '未找到匹配的会话' : '暂无会话' }}
+      </div>
     </div>
   </section>
 </template>
@@ -92,6 +121,17 @@ async function openSession(session: { id: string }) {
   color: #07120d;
   padding: 8px 16px;
   font-weight: 700;
+}
+
+.sessions-page__search {
+  width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+  padding: 9px 10px;
+  outline: none;
+  margin-bottom: 16px;
 }
 
 .sessions-list {

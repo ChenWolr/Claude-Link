@@ -15,4 +15,6 @@
   --radius-md: 8px;
   --sidebar-width: 240px;
   --task-panel-width: 320px;
+  --chat-bottom-max-width: 800px;
+  --chat-bottom-pad-x: 24px;
 }

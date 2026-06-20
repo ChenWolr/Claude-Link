@@ -29,6 +29,7 @@ export const IPC_CHANNELS = {
   CHAT_SEND: 'chat:send',
   CHAT_ABORT: 'chat:abort',
   CHAT_EVENT: 'chat:event',
+  CONTEXT_UPDATE: 'context:update',
   TASK_ADD: 'task:add',
   TASK_REMOVE: 'task:remove',
   TASK_GET_ALL: 'task:getAll',
@@ -49,6 +50,15 @@ export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 export interface ChatEventPayload {
   sessionId: string;
   event: CliEvent;
+}
+
+export interface ContextStatsPayload {
+  sessionId: string;
+  inputTokens: number;       // 上下文用量（input+cache）
+  outputTokens: number;      // 上一轮生成量（参考）
+  windowSize: number;        // 上下文窗口（默认 200000）
+  model: string | null;      // 当前会话模型
+  compactedJustNow?: boolean; // CC 自动压缩事件
 }
 
 export type QueueEventType =
@@ -89,6 +99,11 @@ export interface TestConnectionEventPayload {
   detail?: string;
   /** done: 耗时毫秒 */
   durationMs?: number;
+  // —— 问题 3 明文回显（新增）——
+  /** claude-link 本次解析出、写进 --model 与 settings.local.json 的实际模型名 */
+  requestedModel?: string;
+  /** claude-link 本次写入的端点 */
+  usedBaseUrl?: string;
 }
 
 export type CliDetectionResultAlias = CliDetectionResult;
