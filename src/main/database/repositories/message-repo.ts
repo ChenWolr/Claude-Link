@@ -47,15 +47,20 @@ export function createMessage(
     )
     .run({ id, sessionId, role, content, eventType, rawEvent, parentTaskId });
 
-  const message = getConnection()
-    .prepare('SELECT * FROM messages WHERE id = ?')
-    .get(id) as MessageRow | undefined;
-
-  if (!message) {
-    throw new Error(`Failed to create message ${id}`);
-  }
-
-  return toMessage(message);
+  // 不回读 SELECT（调用方不依赖返回值），直接用已知参数构造，省一次同步 DB 操作。
+  // 流式回复有多个 message 事件，每个都少一次同步查询，减轻主进程阻塞。
+  return {
+    id,
+    sessionId,
+    role,
+    content,
+    rawEvent,
+    eventType,
+    costUsd: null,
+    durationMs: null,
+    parentTaskId,
+    createdAt: new Date().toISOString(),
+  };
 }
 
 export function getMessagesBySession(sessionId: string): Message[] {
