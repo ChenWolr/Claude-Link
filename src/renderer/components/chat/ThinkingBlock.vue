@@ -2,9 +2,9 @@
 import { computed, ref } from 'vue';
 import { renderMarkdown } from '../../utils/markdown';
 
-const props = defineProps<{ content: string; streaming?: boolean }>();
+const props = defineProps<{ content: string; streaming?: boolean; defaultOpen?: boolean }>();
 
-const open = ref(false);
+const open = ref(props.defaultOpen ?? false);
 const rendered = computed(() => renderMarkdown(props.content));
 const preview = computed(() => props.content.replace(/\s+/g, ' ').trim().slice(0, 50));
 </script>

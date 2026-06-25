@@ -3,8 +3,8 @@ import { computed, ref } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isDiffContent, renderDiffHtml, renderMarkdown } from '../../utils/markdown';
 
-const props = defineProps<{ message: Message }>();
-const expanded = ref(false);
+const props = defineProps<{ message: Message; defaultOpen?: boolean }>();
+const expanded = ref(props.defaultOpen ?? false);
 
 const parsedJson = computed<Record<string, unknown> | null>(() => {
   try {
