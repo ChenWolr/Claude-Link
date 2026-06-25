@@ -15,6 +15,7 @@ export const useSessionStore = defineStore('session', {
     messages: [] as Message[],
     streamingContent: '',
     streamingThinking: '',
+    streamingTool: '',
     sending: false,
     error: null as string | null,
     recentWorkspaces: [] as string[],
@@ -40,7 +41,13 @@ export const useSessionStore = defineStore('session', {
     },
     async switchSession(session: Session) {
       this.activeSession = session;
+      // M2：切换会话必须重置所有发送/流式/错误状态，否则会话 B 会被会话 A 的
+      // sending(输入框锁死)/streaming/error 残留污染。
       this.streamingContent = '';
+      this.streamingThinking = '';
+      this.streamingTool = '';
+      this.sending = false;
+      this.error = null;
       this.messages = [];
       this.contextStats = session.lastContextTokens
         ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize: 200000, ratio: session.lastContextTokens / 200000 }
@@ -182,6 +189,12 @@ export const useSessionStore = defineStore('session', {
     },
     clearThinking() {
       this.streamingThinking = '';
+    },
+    appendToolStream(text: string) {
+      this.streamingTool += text;
+    },
+    clearToolStream() {
+      this.streamingTool = '';
     },
     finalizeStream() {
       if (this.streamingContent) {
