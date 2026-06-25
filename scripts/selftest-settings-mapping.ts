@@ -11,6 +11,8 @@ import {
   extractModelMappings,
   resolveDefaultModel,
   resolveAliasToActualModel, // 新增
+  resolveConfiguredActualModel,
+  resolveConfiguredDefaultModel,
   peekEnvValue,
 } from '../src/shared/settings-parser';
 import { extractContextTokens, type CliUsage } from '../src/shared/context-usage';
@@ -198,12 +200,152 @@ console.log('\n=== 9) 别名→实际模型解析（给 --model 用，CLI 参数
   check('无任何映射时空 requested 回退 sonnet', resolveAliasToActualModel(null, '{}') === 'sonnet');
 }
 
-console.log('\n=== 10) 上下文 token 用量解析 ===');
+console.log('\n=== 10) API 请求实际模型解析：不得把裸别名直接发给 Messages API ===');
+{
+  let adv = setModelMappingInAdvancedJson('{}', 'sonnet', 'glm-5.1');
+  adv = setModelMappingInAdvancedJson(adv, 'haiku', 'glm-5.1-flash');
+  check('默认 API 实际模型取首个映射实际值', resolveConfiguredDefaultModel(adv, 'claude-sonnet-4-6') === 'glm-5.1');
+  check('指定 haiku 时解析为实际值', resolveConfiguredActualModel('haiku', adv, 'claude-sonnet-4-6') === 'glm-5.1-flash');
+  check('无映射时默认回退 config.defaultModel', resolveConfiguredDefaultModel('{}', 'claude-opus-4-8') === 'claude-opus-4-8');
+  check('无映射且默认值是别名时回退标准模型 ID', resolveConfiguredDefaultModel('{}', 'sonnet') === 'claude-sonnet-4-6');
+}
+
+console.log('\n=== 11) 上下文 token 用量解析 ===');
 {
   const u1: CliUsage = { input_tokens: 9000, cache_creation_input_tokens: 2000, cache_read_input_tokens: 1345, output_tokens: 500 };
   check('input+cache 合计为上下文用量', extractContextTokens(u1) === 12345, String(extractContextTokens(u1)));
   check('空 usage 返回 0', extractContextTokens(undefined) === 0);
   check('缺 cache 字段只算 input', extractContextTokens({ input_tokens: 100 }) === 100);
+}
+
+console.log('\n=== 12) 回归：后台标题分析不得硬编码 Haiku，必须走配置模型解析 ===');
+{
+  const fs = await import('node:fs');
+  const source = fs.readFileSync(new URL('../src/main/modules/topic-analyzer.ts', import.meta.url), 'utf8');
+  // 不得出现任何 claude-haiku-4-5 字面量（无论 = 还是 : 写法），否则就是硬编码。
+  check('topic-analyzer 不再硬编码 claude-haiku-4-5', !source.includes('claude-haiku-4-5'));
+  check('topic-analyzer 使用 resolveConfiguredDefaultModel 解析配置模型', source.includes('resolveConfiguredDefaultModel'));
+}
+
+console.log('\n=== 13) 回归：聊天发送错误必须在 ChatPage 可见 ===');
+{
+  const fs = await import('node:fs');
+  const source = fs.readFileSync(new URL('../src/renderer/pages/ChatPage.vue', import.meta.url), 'utf8');
+  check('ChatPage 从 useChat 解构 error', /const \{[^}]*\berror\b[^}]*\} = useChat\(\)/s.test(source));
+  check('ChatPage 模板渲染聊天错误', source.includes('chat-error') && source.includes('error'));
+}
+
+console.log('\n=== 14) 回归：CLI 子进程异常退出必须推送到聊天界面 ===');
+{
+  const fs = await import('node:fs');
+  const cliTypes = fs.readFileSync(new URL('../src/shared/types/cli.ts', import.meta.url), 'utf8');
+  const processManager = fs.readFileSync(new URL('../src/main/modules/process-manager.ts', import.meta.url), 'utf8');
+  const useChat = fs.readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
+  check('CliEvent 包含 error 事件', cliTypes.includes("type: 'error'"));
+  check('process-manager 在非零退出时发送 error 事件', processManager.includes("type: 'error'") && processManager.includes('CLI 进程异常退出'));
+  check('use-chat 收到 error 事件后复位 sending', useChat.includes("case 'error'") && useChat.includes('sending.value = false'));
+}
+
+// ── 全链路审计修复回归（C1-C3, M1-M8）──────────────────────────────────
+function readRel(p: string): string {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require('node:fs');
+  return fs.readFileSync(new URL('../' + p, import.meta.url), 'utf8');
+}
+
+console.log('\n=== 15) C1: system/init 事件必须被识别并持久化 session_id ===');
+{
+  const cliTypes = readRel('src/shared/types/cli.ts');
+  const pm = readRel('src/main/modules/process-manager.ts');
+  check('CliEvent 联合包含 system 类型', cliTypes.includes("type: 'system'") && cliTypes.includes("subtype"));
+  check('process-manager persistCliEvent 识别 system+init', pm.includes("'system'") && pm.includes('subtype') && pm.includes('init'));
+}
+
+console.log('\n=== 16) C2: CLI 正常退出但无 result 时必须复位前端（防死锁）===');
+{
+  const pm = readRel('src/main/modules/process-manager.ts');
+  // code===0 但未 sawResult 时也必须向前端发事件复位
+  check('process-manager 在 0 退出无 result 时合成结束事件', /sawResult\s*===\s*false/.test(pm) || /!sawResult/.test(pm));
+  check('process-manager 区分中断与错误（interrupted 标志）', pm.includes('interrupted'));
+}
+
+console.log('\n=== 17) C3: 中断必须优先 SIGINT（nix 优雅中止），Windows 兜底硬杀 ===');
+{
+  const pm = readRel('src/main/modules/process-manager.ts');
+  check('process-manager 使用 SIGINT 优先', pm.includes("'SIGINT'") || pm.includes('"SIGINT"'));
+  check('killProcess 区分平台（Windows 硬杀兜底）', pm.includes('platform') && (pm.includes('win32') || pm.includes('isWindows')));
+}
+
+console.log('\n=== 18) M1: result 错误回合(subtype error/is_error)必须给前端可见提示 ===');
+{
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  check('use-chat 检查 result.is_error 或 subtype', uc.includes('is_error') || uc.includes("subtype === 'error'") || uc.includes("subtype === \"error\""));
+}
+
+console.log('\n=== 19) M2: 切换会话必须重置 sending/error/streaming ===');
+{
+  const ss = readRel('src/renderer/stores/session-store.ts');
+  const sw = ss.match(/switchSession[\s\S]{0,400}/)?.[0] ?? '';
+  check('switchSession 清空 streamingContent', sw.includes('streamingContent') || sw.includes('clearStream'));
+  check('switchSession 清空 streamingThinking', sw.includes('streamingThinking') || sw.includes('clearThinking'));
+}
+
+console.log('\n=== 20) M3: abort 不能立即丢弃尾部 result 元数据 ===');
+{
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const abortFn = uc.match(/async function abort[\s\S]{0,400}/)?.[0] ?? '';
+  // abort 后需保留监听直到收到结束事件或超时；不能 finally 里立刻 removeChatListener
+  check('abort 不立即 stopListening（等结束事件/超时）', !/finally\s*\{[\s\S]{0,120}stopListening\(\)/.test(abortFn) || abortFn.includes('setTimeout'));
+}
+
+console.log('\n=== 21) M4: 中断不应被合成 error 误报 ===');
+{
+  const pm = readRel('src/main/modules/process-manager.ts');
+  // exit handler 在 interrupted 时不走 error 合成分支
+  check('process-manager interrupted 时不发 error', /interrupted/.test(pm) && (/return/.test(pm.match(/childProcess\.on\('exit'[\s\S]{0,600}/)?.[0] ?? '') || pm.includes('aborted')));
+}
+
+console.log('\n=== 22) M5: redacted_thinking 必须可识别并占位渲染 ===');
+{
+  const cliTypes = readRel('src/shared/types/cli.ts');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  check('CliMessageContentPart 包含 redacted_thinking', cliTypes.includes('redacted_thinking'));
+  check('use-chat 处理 redacted_thinking', uc.includes('redacted_thinking'));
+}
+
+console.log('\n=== 23) M6: tool_result content 数组形态必须提取文本 ===');
+{
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  check('use-chat 对 tool_result 数组提取文本（非裸 JSON.stringify）', uc.includes('Array.isArray') || uc.includes('.map('));
+}
+
+console.log('\n=== 24) M7: 工具调用流式 input_json_delta 必须有反馈 ===');
+{
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  check('use-chat 处理 input_json_delta', uc.includes('input_json_delta') || uc.includes('partial_json'));
+}
+
+console.log('\n=== 25) M8: interruptTask 必须处理 continuing 状态 ===');
+{
+  const tq = readRel('src/main/modules/task-queue-engine.ts');
+  const fn = tq.match(/function interruptTask[\s\S]{0,500}/)?.[0] ?? '';
+  check('interruptTask 允许 continuing 状态中断', fn.includes('continuing') || fn.includes('running'));
+}
+
+console.log('\n=== 26) Review 修复：中断标记按 child、孤儿进程兜底、abort 跨回合串扰 ===');
+{
+  const pm = readRel('src/main/modules/process-manager.ts');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const ml = readRel('src/renderer/components/chat/MessageList.vue');
+  const cp = readRel('src/renderer/pages/ChatPage.vue');
+  const us = readRel('src/renderer/composables/use-stream.ts');
+  const tq = readRel('src/main/modules/task-queue-engine.ts');
+  check('中断标记按 child 实例（WeakSet 非 sessionId Set）', pm.includes('interruptedChildren') && pm.includes('WeakSet'));
+  check('killProcess SIGKILL 兜底防孤儿', pm.includes('SIGKILL'));
+  check('中断(error_during_execution)不弹错误', uc.includes('error_during_execution') && uc.includes('isUserInterrupt'));
+  check('streamingTool 有渲染消费链', ml.includes('streamingTool') && cp.includes('displayTool') && us.includes('displayTool'));
+  check('abort 定时器句柄化 + 清理', uc.includes('abortTimer') && uc.includes('clearAbortTimer'));
+  check('continueWithUserMessage exit 守卫 continuing', /child\.on\('exit'[\s\S]{0,200}status !== 'continuing'/.test(tq));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
