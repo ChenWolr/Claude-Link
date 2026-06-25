@@ -5,10 +5,19 @@
 // buildSpawnEnv 注入 apiKey / baseUrl / 模型映射等 env（含 advancedJson.env 块展开），
 // attachStreamParser 逐行解析 stream-json（init / message / stream_event / result），
 // 持久化到 SQLite 并转发渲染进程。testConnection 也复用 buildSpawnEnv，保证测试结果代表真实会话。
+//
+// @deprecated 本文件的自建 spawn 路径已不再是默认后端——claude-link 现在默认走 Claude Agent SDK
+// 适配器（sdk-backend.ts，经 chat-backend.ts 统一入口）。本文件保留作为代码级回退：
+//   - 公共工具函数（buildSpawnEnv / normalizeToolResultContent / persistCliEvent / persistMessageParts
+//     / SpawnOptions）仍被 sdk-backend 和 connection-tester 复用，不可删除。
+//   - 应急切回 spawn 路径：把 chat-backend.ts 的 `export * from './sdk-backend'` 改为
+//     `export * from './process-manager'` 即可（接口同形，一行改动）。
+// 待 SDK 路径稳定跑一段时间后，再移除本文件的 spawn 路径、把工具函数提为独立公共模块。
+
 
 import { spawn, type ChildProcess } from 'child_process';
 import type { BrowserWindow } from 'electron';
-import type { CliInitEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
+import type { CliInitEvent, CliSystemInitEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
 import { resolveDefaultModel } from '../../shared/settings-parser';
@@ -21,8 +30,21 @@ import { extractContextTokens } from '../../shared/context-usage';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 
 const processes = new Map<string, ChildProcess>();
-const sessionCliIds = new Map<string, string>();
+const sessionCliIds = new Map<string, string>();// 标记某个 child 进程是"被用户中断"而非"出错退出"。
+// 必须按 child 实例而非 sessionId：否则中断旧进程后，新 spawn 的同 session 进程
+// 在退出时会被旧标记误判为 interrupted（吞掉真正的错误）。WeakSet 随 child GC 自动清理。
+const interruptedChildren = new WeakSet<ChildProcess>();
 
+function isWindows(): boolean {
+  return process.platform === 'win32';
+}
+
+// 与 sdk-backend.markSessionDeleted 同名 no-op：回退到本 spawn 后端时，
+// ipc-handlers 仍会 import 此符号（保持接口同形），但 spawn 路径靠 killProcess
+// 直接杀进程即可，无需内存判活集合，故此处为空实现。
+export function markSessionDeleted(_sessionId: string): void {
+  /* no-op for spawn backend */
+}
 export interface SpawnOptions {
   model?: string;
   modelOverride?: string | null;
@@ -133,6 +155,8 @@ function attachStreamParser(
   mainWindow: BrowserWindow,
 ): void {
   let buffer = '';
+  let stderr = '';
+  let sawResult = false;
 
   childProcess.stdout?.on('data', (chunk: Buffer) => {
     buffer += chunk.toString('utf8');
@@ -159,6 +183,10 @@ function attachStreamParser(
         persistCliEvent(sessionId, event);
       } catch (err) {
         logger.error(`Failed to persist CLI event [${sessionId}]`, err);
+      }
+
+      if (event.type === 'result') {
+        sawResult = true;
       }
 
       // 问题 4：提取真实上下文用量，推送 + 落库
@@ -191,7 +219,9 @@ function attachStreamParser(
   });
 
   childProcess.stderr?.on('data', (chunk: Buffer) => {
-    logger.warn(`CLI stderr [${sessionId}]: ${chunk.toString('utf8').trim()}`);
+    const text = chunk.toString('utf8');
+    stderr += text;
+    logger.warn(`CLI stderr [${sessionId}]: ${text.trim()}`);
   });
 
   childProcess.on('exit', (code) => {
@@ -201,16 +231,55 @@ function attachStreamParser(
     if (processes.get(sessionId) === childProcess) {
       processes.delete(sessionId);
     }
-    logger.info(`CLI process exited [${sessionId}] code=${code}`);
+    const interrupted = interruptedChildren.has(childProcess);
+
+    if (interrupted) {
+      // 用户主动中断：不发 error（避免误报），但需复位前端 sending，否则输入框死锁。
+      // nix 上 SIGINT 后 CC 会先发 result(error_during_execution)，sawResult 已 true，这里不会进；
+      // Windows 硬杀会丢 result，靠这里兜底复位。
+      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+        sessionId,
+        event: { type: 'aborted', message: '已中断' },
+      });
+    } else if (!sawResult) {
+      // 进程退出但全程没收到 result 事件：
+      //  - 非 0 退出 → 报错误（含 stderr 详情）
+      //  - 0 退出但无 result（异常静默退出）→ 也需复位前端，否则 sending 永久 true
+      if (code) {
+        const detail = stderr.trim() || `退出码 ${code}`;
+        mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+          sessionId,
+          event: { type: 'error', message: `CLI 进程异常退出：${detail.slice(0, 500)}`, code },
+        });
+      } else {
+        mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+          sessionId,
+          event: { type: 'aborted', message: 'CLI 已结束' },
+        });
+      }
+    }
+
+    logger.info(`CLI process exited [${sessionId}] code=${code} interrupted=${interrupted}`);
   });
 }
 
-function persistCliEvent(sessionId: string, event: CliEvent): void {
+export function persistCliEvent(sessionId: string, event: CliEvent): void {
   switch (event.type) {
     case 'init': {
       const initEvent = event as CliInitEvent;
       sessionCliIds.set(sessionId, initEvent.session_id);
       sessionRepo.updateCliSessionId(sessionId, initEvent.session_id);
+      break;
+    }
+
+    case 'system': {
+      // 新版 CC 用 {type:'system',subtype:'init'} 携带 session_id。
+      // 与 connection-tester 保持一致，否则 --resume 拿不到真实 session id。
+      const sysEvent = event as CliSystemInitEvent;
+      if (sysEvent.subtype === 'init' && sysEvent.session_id) {
+        sessionCliIds.set(sessionId, sysEvent.session_id);
+        sessionRepo.updateCliSessionId(sessionId, sysEvent.session_id);
+      }
       break;
     }
 
@@ -229,7 +298,25 @@ function persistCliEvent(sessionId: string, event: CliEvent): void {
   }
 }
 
-function persistMessageParts(
+// tool_result.content 可能是 string，也可能是 [{type:'text',text}, {type:'image',...}, ...] 数组。
+// 归一化为可读文本：数组提取每项文本拼接，其它形态退化为 JSON。
+export function normalizeToolResultContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (item && typeof item === 'object' && 'text' in item && typeof (item as { text?: unknown }).text === 'string') {
+          return (item as { text: string }).text;
+        }
+        return JSON.stringify(item, null, 2);
+      })
+      .join('\n');
+  }
+  if (content === undefined || content === null) return '';
+  return JSON.stringify(content, null, 2);
+}
+
+export function persistMessageParts(
   sessionId: string,
   parts: CliMessageContentPart[],
   role: 'user' | 'assistant',
@@ -245,9 +332,7 @@ function persistMessageParts(
       }, null, 2);
       messageRepo.createMessage(sessionId, 'assistant', content, 'tool_use');
     } else if (part.type === 'tool_result') {
-      const resultText = typeof (part as { content?: string }).content === 'string'
-        ? (part as { content: string }).content
-        : JSON.stringify((part as { content?: unknown }).content ?? '', null, 2);
+      const resultText = normalizeToolResultContent((part as { content?: unknown }).content);
       messageRepo.createMessage(sessionId, 'tool', resultText, 'tool_result');
     } else if (part.type === 'thinking' && 'thinking' in part) {
       messageRepo.createMessage(sessionId, 'assistant', part.thinking, 'thinking');
@@ -346,12 +431,40 @@ export function sendMessage(sessionId: string, message: string): void {
   child.stdin.write(payload + '\n');
 }
 
+// 中断 Claude Code CLI 当前回合。
+// 设计要点（已修正 review 发现的孤儿进程 + 标记串扰）：
+//   - 标记按 child 实例（interruptedChildren WeakSet），避免跨同 session 的新进程误判。
+//   - 立即从 processes map 移除：让下一次消息走 spawnForChat（--resume 续聊），不写旧 stdin。
+//   - *nix：先发 SIGINT 让 CC 的 SIGINT handler 优雅 abort 正在进行的 HTTP 流（减少无谓 token），
+//     再给 800ms 优雅窗口；窗口内未退出则 SIGKILL 强杀，杜绝孤儿进程继续读写 stdio。
+//   - Windows：SIGINT 无效，直接 TerminateProcess 硬杀。
+//   - exit handler 据 child 标记决定发 aborted（中断）还是 error（异常），中断不弹错误。
 export function killProcess(sessionId: string): void {
   const child = processes.get(sessionId);
   if (child && !child.killed) {
-    child.kill();
-    processes.delete(sessionId);
-    logger.info(`Killed process for session ${sessionId}`);
+    interruptedChildren.add(child);
+    processes.delete(sessionId); // 立即移除：下次消息走新 spawn，绝不写旧 stdin
+    if (isWindows()) {
+      child.kill();
+    } else {
+      try {
+        child.kill('SIGINT');
+        // 优雅窗口：SIGINT 后 CC 可能保持存活（仅 abort 当前回合）。
+        // claude-link 不复用旧进程（每次中断后走新 spawn + --resume），故超时后强杀防孤儿。
+        setTimeout(() => {
+          if (!child.killed) {
+            try {
+              child.kill('SIGKILL');
+            } catch {
+              // 已退出则忽略
+            }
+          }
+        }, 800);
+      } catch {
+        child.kill('SIGKILL');
+      }
+    }
+    logger.info(`Interrupted process for session ${sessionId} (platform=${process.platform})`);
   }
 }
 
