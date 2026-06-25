@@ -15,6 +15,7 @@
     "selftest": "npx tsx scripts/selftest-settings-mapping.ts"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.191",
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^4.0.0",
     "better-sqlite3": "^11.9.1",
