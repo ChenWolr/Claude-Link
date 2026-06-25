@@ -4,6 +4,7 @@ import { getConfig } from './config-manager';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { logger } from '../utils/logger';
 import { buildAnthropicApiUrl, isOfficialAnthropicBaseUrl } from './api-url';
+import { resolveConfiguredDefaultModel } from '../../shared/settings-parser';
 
 interface ClaudeApiResponse {
   content: Array<{ type: string; text?: string }>;
@@ -21,8 +22,10 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   const isAnthropic = isOfficialAnthropicBaseUrl(baseUrl);
   const url = buildAnthropicApiUrl(baseUrl, 'messages');
 
+  const model = resolveConfiguredDefaultModel(config.advancedJson, config.defaultModel);
+
   const requestBody = JSON.stringify({
-    model: 'claude-haiku-4-5',
+    model,
     max_tokens: 50,
     messages: [
       {
