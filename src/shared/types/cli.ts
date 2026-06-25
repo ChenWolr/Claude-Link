@@ -3,6 +3,14 @@ export interface CliInitEvent {
   session_id: string;
 }
 
+// 新版 CC stream-json 用 {type:'system',subtype:'init'} 形态（带 model 等）。
+export interface CliSystemInitEvent {
+  type: 'system';
+  subtype: 'init';
+  session_id: string;
+  model?: string;
+}
+
 export interface CliMessageContentTextPart {
   type: 'text';
   text: string;
@@ -18,7 +26,8 @@ export interface CliMessageContentToolUsePart {
 export interface CliMessageContentToolResultPart {
   type: 'tool_result';
   tool_use_id?: string;
-  content?: string;
+  // CC 真实事件里 content 可能是 string，也可能是 [{type:'text',text}] 等数组
+  content?: string | Array<{ type: string; text?: string; [k: string]: unknown }>;
 }
 
 export interface CliMessageContentThinkingPart {
@@ -27,11 +36,17 @@ export interface CliMessageContentThinkingPart {
   signature?: string;
 }
 
+export interface CliMessageContentRedactedThinkingPart {
+  type: 'redacted_thinking';
+  data?: string;
+}
+
 export type CliMessageContentPart =
   | CliMessageContentTextPart
   | CliMessageContentToolUsePart
   | CliMessageContentToolResultPart
-  | CliMessageContentThinkingPart;
+  | CliMessageContentThinkingPart
+  | CliMessageContentRedactedThinkingPart;
 
 export interface CliUsage {
   input_tokens?: number;
@@ -65,7 +80,9 @@ export interface CliStreamEvent {
 
 export interface CliResultEvent {
   type: 'result';
-  subtype: 'success' | 'error';
+  // CC 真实 subtype：success / error_max_turns / error_during_execution（含中断）/
+  // error_max_budget_usd / error_max_structured_output_retries / error 等。
+  subtype: 'success' | 'error' | 'error_max_turns' | 'error_during_execution' | string;
   result: string;
   total_cost_usd: number;
   duration_ms: number;
@@ -75,7 +92,26 @@ export interface CliResultEvent {
   usage?: CliUsage;
 }
 
-export type CliEvent = CliInitEvent | CliMessageEvent | CliStreamEvent | CliResultEvent;
+export interface CliErrorEvent {
+  type: 'error';
+  message: string;
+  code?: number | null;
+}
+
+// 中断/结束的本地合成事件（process-manager 在 interrupted 或 0 退出无 result 时发出）。
+export interface CliAbortedEvent {
+  type: 'aborted';
+  message: string;
+}
+
+export type CliEvent =
+  | CliInitEvent
+  | CliSystemInitEvent
+  | CliMessageEvent
+  | CliStreamEvent
+  | CliResultEvent
+  | CliErrorEvent
+  | CliAbortedEvent;
 
 export interface CliDetectionResult {
   installed: boolean;

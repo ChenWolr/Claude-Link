@@ -167,6 +167,31 @@ export function resolveAliasToActualModel(requested: string | null, advancedJson
   return req;
 }
 
+const STANDARD_ALIAS_MODELS: Record<string, string> = {
+  sonnet: 'claude-sonnet-4-6',
+  haiku: 'claude-haiku-4-5',
+  opus: 'claude-opus-4-8',
+  fable: 'claude-fable-5',
+};
+
+// 面向 HTTP/API 请求的实际模型解析：Messages API 不接受裸别名（sonnet/haiku/...）。
+// 有映射时用映射值；无映射时用 config.defaultModel；若默认值本身仍是别名，则回落到标准 Claude 模型 ID。
+export function resolveConfiguredActualModel(
+  requested: string | null,
+  advancedJson: string,
+  fallbackModel: string,
+): string {
+  const resolved = resolveAliasToActualModel(requested, advancedJson).trim();
+  if (resolved && !MODEL_ALIASES.includes(resolved as (typeof MODEL_ALIASES)[number])) return resolved;
+
+  const fallback = fallbackModel.trim();
+  return STANDARD_ALIAS_MODELS[fallback] || fallback || STANDARD_ALIAS_MODELS.sonnet;
+}
+
+export function resolveConfiguredDefaultModel(advancedJson: string, fallbackModel: string): string {
+  return resolveConfiguredActualModel(resolveDefaultModel(advancedJson), advancedJson, fallbackModel);
+}
+
 // 从 advancedJson 的 env 块读取单个值（不修改原 JSON），用于 apiKey/baseUrl 等字段的兜底。
 export function peekEnvValue(advancedJson: string, key: string): string | undefined {
   const v = parseAdvancedEnv(advancedJson)[key];
