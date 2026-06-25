@@ -1,7 +1,7 @@
 import type { BrowserWindow } from 'electron';
 import type { QueueState } from '../../shared/types/task';
 import { IPC_CHANNELS, DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
-import { spawnForChat, spawnForTask, killProcess, getCliSessionId, sendMessage } from './process-manager';
+import { spawnForChat, spawnForTask, killProcess, getCliSessionId, sendMessage } from './chat-backend';
 import { getConfig } from './config-manager';
 import * as taskRepo from '../database/repositories/task-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
@@ -80,12 +80,33 @@ export function resumeQueue(sessionId: string, mainWindow: BrowserWindow): void 
   startQueue(sessionId, mainWindow);
 }
 
+// 中断当前任务。M8：原实现要求 state.currentTaskId === taskId，但 continuing（续写）
+// 状态下 currentTaskId 指向旧任务，导致续写中点中断不生效。放宽：running 或 continuing
+// 都允许中断当前会话进程，并清理 countdown 定时器避免泄漏。
 export function interruptTask(taskId: string, sessionId: string, mainWindow: BrowserWindow): void {
   const state = queues.get(sessionId);
-  if (!state || state.currentTaskId !== taskId) return;
+  if (!state) return;
+  // running：currentTaskId 命中；continuing：currentTaskId 可能为 null/旧值，按 taskId 调用方语义中断。
+  const isRunning = state.status === 'running' && state.currentTaskId === taskId;
+  const isContinuing = state.status === 'continuing';
+  if (!isRunning && !isContinuing) return;
 
   killProcess(sessionId);
-  taskRepo.updateTaskStatus(taskId, 'cancelled');
+  if (isRunning) {
+    taskRepo.updateTaskStatus(taskId, 'cancelled');
+  }
+
+  // 清理 countdown / main 定时器，避免 continuing 被中断后定时器仍触发下一任务。
+  const countdownTimer = timers.get(sessionId);
+  const mainTimer = timers.get(`${sessionId}__main`);
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    timers.delete(sessionId);
+  }
+  if (mainTimer) {
+    clearTimeout(mainTimer);
+    timers.delete(`${sessionId}__main`);
+  }
 
   state.currentTaskId = null;
   state.status = 'idle';
@@ -236,6 +257,10 @@ export function continueWithUserMessage(
   // 保持 'continuing' 状态直到续写进程退出，让前端能展示"继续执行当前任务"。
   // 进程退出后再由 exit handler 决定进入下一任务倒计时或回到 idle。
   child.on('exit', () => {
+    // P1 守卫：续写进程退出可能晚于 interruptTask（已被改为 idle）或晚于新任务 spawn（已是 running）。
+    // 仅在仍是 continuing 时推进，否则交由当前状态所有者处理，避免僵尸回调插队。
+    if (state.status !== 'continuing') return;
+
     state.currentTaskId = null;
 
     const remaining = taskRepo.getPendingTasks(sessionId);

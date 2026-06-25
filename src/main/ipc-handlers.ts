@@ -15,7 +15,7 @@ import { listRecentWorkspaces, addRecentWorkspace } from './modules/workspace-hi
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess } from './modules/process-manager';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted } from './modules/chat-backend';
 import {
   startQueue,
   pauseQueue,
@@ -96,7 +96,17 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return sessionRepo.createSession(name, resolveDefaultModel(config.advancedJson));
   });
   ipcMain.handle(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => sessionRepo.getSession(id));
-  ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, id: string) => sessionRepo.deleteSession(id));
+  ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, id: string) => {
+    // 删会话必须先让正在跑的 SDK query 停下来，否则它会变孤儿继续往已被级联删空的
+    // messages 表 INSERT，外键失败回滚同步阻塞主进程，导致所有输入框假死。
+    // 1) 先标记已删：runQuery 下轮迭代检测到立即自停（无需等 interrupt 生效）。
+    // 2) 再 interrupt + 给 SDK 一点时间响应（interrupt 是异步 stdin 帧，非立即）。
+    // 3) 最后删库。
+    markSessionDeleted(id);
+    killProcess(id);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return sessionRepo.deleteSession(id);
+  });
   ipcMain.handle(
     IPC_CHANNELS.SESSION_UPDATE,
     async (_event, id: string, data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>) =>
