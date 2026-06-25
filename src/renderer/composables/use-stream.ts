@@ -5,9 +5,11 @@ export function useStream() {
   const store = useSessionStore();
   const displayContent = ref('');
   const displayThinking = ref('');
+  const displayTool = ref('');
 
   let contentTimer: ReturnType<typeof setTimeout> | null = null;
   let thinkingTimer: ReturnType<typeof setTimeout> | null = null;
+  let toolTimer: ReturnType<typeof setTimeout> | null = null;
 
   watch(
     () => store.streamingContent,
@@ -31,5 +33,16 @@ export function useStream() {
     { immediate: true },
   );
 
-  return { displayContent, displayThinking };
+  watch(
+    () => store.streamingTool,
+    (content) => {
+      if (toolTimer) clearTimeout(toolTimer);
+      toolTimer = setTimeout(() => {
+        displayTool.value = content;
+      }, 50);
+    },
+    { immediate: true },
+  );
+
+  return { displayContent, displayThinking, displayTool };
 }
