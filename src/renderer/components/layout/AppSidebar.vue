@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
+import ConfirmDialog from '../common/ConfirmDialog.vue';
 
 const store = useSessionStore();
 const router = useRouter();
@@ -40,10 +41,28 @@ function onSearchInput() {
   // sessionList 是 computed，随 searchQuery 即时变化，无需额外动作。
 }
 
-// 删除会话：用浏览器原生确认，避免误删。会话及消息由主进程级联清理。
-async function confirmDelete(session: { id: string; name: string }) {
-  if (!window.confirm(`确定删除会话「${session.name}」？此操作不可撤销。`)) return;
-  await store.deleteSession(session.id);
+// 删除会话：用自定义 ConfirmDialog 确认（避免 window.confirm 导致 Electron 焦点丢失）。
+// 会话及消息由主进程级联清理。
+// 用独立的 visible ref 控制 v-model，pendingDelete 仅保存待删会话，
+// 确保 @confirm 触发时仍能读到 session（close 先 emit update:visible 再 emit confirm）。
+const deleteDialogVisible = ref(false);
+const pendingDelete = ref<{ id: string; name: string } | null>(null);
+
+function confirmDelete(session: { id: string; name: string }) {
+  pendingDelete.value = session;
+  deleteDialogVisible.value = true;
+}
+
+async function onConfirmDelete() {
+  const session = pendingDelete.value;
+  deleteDialogVisible.value = false;
+  pendingDelete.value = null;
+  if (session) await store.deleteSession(session.id);
+}
+
+function onCancelDelete() {
+  deleteDialogVisible.value = false;
+  pendingDelete.value = null;
 }
 </script>
 
@@ -91,6 +110,17 @@ async function confirmDelete(session: { id: string; name: string }) {
       <button class="new-button" type="button" @click="handleNewSession">+ 新会话</button>
       <RouterLink class="settings-link" to="/config">配置</RouterLink>
     </div>
+
+    <ConfirmDialog
+      v-model:visible="deleteDialogVisible"
+      title="删除会话"
+      :message="`确定删除会话「${pendingDelete?.name ?? ''}」？此操作不可撤销。`"
+      confirm-text="删除"
+      cancel-text="取消"
+      danger
+      @confirm="onConfirmDelete"
+      @cancel="onCancelDelete"
+    />
   </aside>
 </template>
 
