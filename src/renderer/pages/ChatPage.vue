@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
 import { useChat } from '../composables/use-chat';
 import { useStream } from '../composables/use-stream';
@@ -10,8 +10,8 @@ import SessionToolbar from '../components/chat/SessionToolbar.vue';
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
-const { sending, sendMessage, abort, startListening, stopListening } = useChat();
-const { displayContent, displayThinking } = useStream();
+const { sending, error, sendMessage, abort, startListening, stopListening } = useChat();
+const { displayContent, displayThinking, displayTool } = useStream();
 
 // 内联提示（如"未选择工作空间"），自动消失。
 const notice = ref<string | null>(null);
@@ -28,6 +28,16 @@ onMounted(() => {
   store.loadSessions();
   store.bindContextUpdates();
 });
+
+// 切换会话时清掉上一会话残留的错误横幅与提示。error 是 useChat 单例 ref，
+// switchSession 清不到它（只清 store.error），否则一次报错后切任何会话横幅都挂着。
+watch(
+  () => store.activeSession?.id,
+  () => {
+    error.value = null;
+    notice.value = null;
+  },
+);
 
 onUnmounted(() => {
   stopListening();
@@ -80,10 +90,13 @@ async function handleNewSession() {
 <template>
   <section class="chat-page">
     <template v-if="store.activeSession">
-      <MessageList :messages="store.messages" :streaming-content="displayContent" :streaming-thinking="displayThinking" />
+      <MessageList :messages="store.messages" :streaming-content="displayContent" :streaming-thinking="displayThinking" :streaming-tool="displayTool" :sending="sending" />
 
       <div v-if="notice" class="notice">
         <span>⚠️ {{ notice }}</span>
+      </div>
+      <div v-if="error" class="chat-error">
+        <span>❌ {{ error }}</span>
       </div>
 
       <ChatInput :disabled="sending" @send="handleSend" />
@@ -148,7 +161,8 @@ async function handleNewSession() {
   cursor: pointer;
 }
 
-.notice {
+.notice,
+.chat-error {
   max-width: 800px;
   margin: 0 auto;
   width: 100%;
@@ -156,13 +170,23 @@ async function handleNewSession() {
   box-sizing: border-box;
 }
 
-.notice span {
+.notice span,
+.chat-error span {
   display: block;
-  border: 1px solid rgba(204, 163, 61, 0.5);
   border-radius: var(--radius-md);
-  background: rgba(204, 163, 61, 0.12);
-  color: #e0c36a;
   padding: 8px 14px;
   font-size: 13px;
+}
+
+.notice span {
+  border: 1px solid rgba(204, 163, 61, 0.5);
+  background: rgba(204, 163, 61, 0.12);
+  color: #e0c36a;
+}
+
+.chat-error span {
+  border: 1px solid rgba(239, 100, 97, 0.5);
+  background: rgba(239, 100, 97, 0.12);
+  color: #f08887;
 }
 </style>
