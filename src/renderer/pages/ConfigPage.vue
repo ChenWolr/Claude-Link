@@ -7,6 +7,7 @@ import ApiKeyInput from '../components/config/ApiKeyInput.vue';
 import ModelMappingInputs from '../components/config/ModelMappingInputs.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import TestConnectionModal from '../components/config/TestConnectionModal.vue';
+import ConfirmDialog from '../components/common/ConfirmDialog.vue';
 import { THEME_PALETTES } from '../../shared/constants';
 import { parseClaudeSettings } from '../../shared/settings-parser';
 
@@ -235,10 +236,15 @@ function handleFillFromJson() {
 }
 
 // 一键清空连接配置：供应商/API Key/请求地址字段 + 高级 JSON 对应 env 键 + 模型映射。
+// 用 ConfirmDialog 确认，避免 window.confirm 导致 Electron 焦点丢失。
+const clearDialogVisible = ref(false);
+
 function handleClearConnection() {
-  if (!window.confirm('确定清空连接配置？供应商、API Key、请求地址会重置，高级 JSON 里对应的 env 键（含模型映射）也会一并移除。')) {
-    return;
-  }
+  clearDialogVisible.value = true;
+}
+
+function onConfirmClear() {
+  clearDialogVisible.value = false;
   store.clearConnectionConfig();
   toastType.value = 'success';
   toast.value = '已清空连接配置';
@@ -313,6 +319,15 @@ function applyTheme(paletteId: string) {
       <p v-if="autoDetectInfo" class="autodetect-info">{{ autoDetectInfo }}</p>
     </div>
     <TestConnectionModal v-model:visible="showTestModal" />
+    <ConfirmDialog
+      v-model:visible="clearDialogVisible"
+      title="清空连接配置"
+      message="确定清空连接配置？供应商、API Key、请求地址会重置，高级 JSON 里对应的 env 键（含模型映射）也会一并移除。"
+      confirm-text="清空"
+      cancel-text="取消"
+      danger
+      @confirm="onConfirmClear"
+    />
 
     <!-- 分类标签页 -->
     <nav class="tabs">
