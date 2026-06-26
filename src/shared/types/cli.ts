@@ -41,12 +41,36 @@ export interface CliMessageContentRedactedThinkingPart {
   data?: string;
 }
 
+// 服务端工具（由 API 侧执行，区别于客户端 tool_use）：web_search / web_fetch 等。
+// processKind 仍归 tool:<name>，与普通工具统一渲染。
+export interface CliMessageContentServerToolUsePart {
+  type: 'server_tool_use';
+  name: string;
+  input: Record<string, unknown>;
+  id?: string;
+}
+
+export interface CliMessageContentWebSearchToolResultPart {
+  type: 'web_search_tool_result';
+  tool_use_id?: string;
+  content?: unknown;
+}
+
+export interface CliMessageContentWebFetchToolResultPart {
+  type: 'web_fetch_tool_result';
+  tool_use_id?: string;
+  content?: unknown;
+}
+
 export type CliMessageContentPart =
   | CliMessageContentTextPart
   | CliMessageContentToolUsePart
   | CliMessageContentToolResultPart
   | CliMessageContentThinkingPart
-  | CliMessageContentRedactedThinkingPart;
+  | CliMessageContentRedactedThinkingPart
+  | CliMessageContentServerToolUsePart
+  | CliMessageContentWebSearchToolResultPart
+  | CliMessageContentWebFetchToolResultPart;
 
 export interface CliUsage {
   input_tokens?: number;
@@ -60,6 +84,9 @@ export interface CliMessageEvent {
   role: 'user' | 'assistant';
   content: CliMessageContentPart[];
   usage?: CliUsage;
+  // 子 agent（Task/Agent 工具）消息透传的 parent_tool_use_id：用于把子 agent 过程
+  // 归属到主流程的对应工具，抽到右侧"子Agent"Tab，主聊天流只留锚点。
+  parentToolUseId?: string;
 }
 
 export interface CliStreamEvent {
@@ -69,7 +96,7 @@ export interface CliStreamEvent {
     index?: number;
     content_block?: { type: 'thinking' | 'text' | 'tool_use'; [k: string]: unknown };
     delta: {
-      type: 'text_delta' | 'input_json_delta' | 'thinking_delta' | 'signature_delta';
+      type: 'text_delta' | 'input_json_delta' | 'thinking_delta' | 'signature_delta' | 'citations_delta';
       text?: string;
       partial_json?: string;
       thinking?: string;
@@ -104,9 +131,28 @@ export interface CliAbortedEvent {
   message: string;
 }
 
+// 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
+export interface CliSystemInfoEvent {
+  type: 'system';
+  subtype: 'informational' | 'compact_boundary' | 'plugin_install';
+  text?: string;
+  level?: 'info' | 'warn';
+}
+
+// 权限事件：自动拒绝 / 权限询问。落库 processKind = permission。
+export interface CliPermissionEvent {
+  type: 'system';
+  subtype: 'permission_denied';
+  tool_name?: string;
+  tool_use_id?: string;
+  message?: string;
+}
+
 export type CliEvent =
   | CliInitEvent
   | CliSystemInitEvent
+  | CliSystemInfoEvent
+  | CliPermissionEvent
   | CliMessageEvent
   | CliStreamEvent
   | CliResultEvent

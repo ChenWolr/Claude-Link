@@ -12,6 +12,10 @@ interface MessageRow {
   cost_usd: number | null;
   duration_ms: number | null;
   parent_task_id: string | null;
+  process_kind: string | null;
+  parent_agent_id: string | null;
+  tool_use_id: string | null;
+  title: string | null;
   created_at: string;
 }
 
@@ -26,26 +30,66 @@ function toMessage(row: MessageRow): Message {
     costUsd: row.cost_usd,
     durationMs: row.duration_ms,
     parentTaskId: row.parent_task_id,
+    processKind: row.process_kind,
+    parentAgentId: row.parent_agent_id,
+    toolUseId: row.tool_use_id,
+    title: row.title,
     createdAt: row.created_at,
   };
 }
 
-export function createMessage(
-  sessionId: string,
-  role: Message['role'],
-  content: string,
-  eventType: string | null = null,
-  rawEvent: string | null = null,
-  parentTaskId: string | null = null,
-): Message {
+export interface CreateMessageInput {
+  sessionId: string;
+  role: Message['role'];
+  content: string;
+  eventType?: string | null;
+  rawEvent?: string | null;
+  parentTaskId?: string | null;
+  // 过程类型分类键（见 src/shared/process-kind.ts）。
+  processKind?: string | null;
+  // 子 agent 归属（assistant 消息的 parent_tool_use_id）。
+  parentAgentId?: string | null;
+  // 工具调用 ID（tool_use / tool_result 配对）。
+  toolUseId?: string | null;
+  // 子 agent 友好标题。
+  title?: string | null;
+}
+
+export function createMessage(input: CreateMessageInput): Message {
+  const {
+    sessionId,
+    role,
+    content,
+    eventType = null,
+    rawEvent = null,
+    parentTaskId = null,
+    processKind = null,
+    parentAgentId = null,
+    toolUseId = null,
+    title = null,
+  } = input;
   const id = uuidv4();
 
   getConnection()
     .prepare(
-      `INSERT INTO messages (id, session_id, role, content, event_type, raw_event, parent_task_id)
-       VALUES (@id, @sessionId, @role, @content, @eventType, @rawEvent, @parentTaskId)`,
+      `INSERT INTO messages (id, session_id, role, content, event_type, raw_event, parent_task_id,
+                             process_kind, parent_agent_id, tool_use_id, title)
+       VALUES (@id, @sessionId, @role, @content, @eventType, @rawEvent, @parentTaskId,
+               @processKind, @parentAgentId, @toolUseId, @title)`,
     )
-    .run({ id, sessionId, role, content, eventType, rawEvent, parentTaskId });
+    .run({
+      id,
+      sessionId,
+      role,
+      content,
+      eventType,
+      rawEvent,
+      parentTaskId,
+      processKind,
+      parentAgentId,
+      toolUseId,
+      title,
+    });
 
   // 不回读 SELECT（调用方不依赖返回值），直接用已知参数构造，省一次同步 DB 操作。
   // 流式回复有多个 message 事件，每个都少一次同步查询，减轻主进程阻塞。
@@ -59,20 +103,28 @@ export function createMessage(
     costUsd: null,
     durationMs: null,
     parentTaskId,
+    processKind,
+    parentAgentId,
+    toolUseId,
+    title,
     createdAt: new Date().toISOString(),
   };
 }
 
 export function getMessagesBySession(sessionId: string): Message[] {
   const rows = getConnection()
-    .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC')
+    // created_at 是秒级精度（列默认 datetime('now')），同一回合的多个 part 常落在同一秒，
+    // 仅按 created_at 排序在历史回读时顺序不确定，会把 tool_result 排到 tool_use 之前/错位，
+    // 破坏连续同类合并与多段正文穿插。加 rowid（隐式自增，= 插入顺序）作确定性 tiebreaker，
+    // 保证回读顺序与实时落库顺序一致（计划验证 #5）。
+    .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC')
     .all(sessionId) as MessageRow[];
   return rows.map(toMessage);
 }
 
 export function getMessagesByTask(taskId: string): Message[] {
   const rows = getConnection()
-    .prepare('SELECT * FROM messages WHERE parent_task_id = ? ORDER BY created_at ASC')
+    .prepare('SELECT * FROM messages WHERE parent_task_id = ? ORDER BY created_at ASC, rowid ASC')
     .all(taskId) as MessageRow[];
   return rows.map(toMessage);
 }

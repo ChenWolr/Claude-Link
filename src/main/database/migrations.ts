@@ -38,6 +38,10 @@ export function runMigrations(db: Database.Database): void {
         cost_usd REAL,
         duration_ms INTEGER,
         parent_task_id TEXT,
+        process_kind TEXT,
+        parent_agent_id TEXT,
+        tool_use_id TEXT,
+        title TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at);
@@ -86,6 +90,26 @@ export function runMigrations(db: Database.Database): void {
     }
     if (!hasCol('last_context_updated_at')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_context_updated_at TEXT DEFAULT NULL');
+    }
+  }
+
+  // 幂等自愈（messages 过程化四列）：老 DB（plan 落地前建库）的 messages 表没有
+  // process_kind / parent_agent_id / tool_use_id / title。按列是否存在补加，老库升级后
+  // 即可支持过程分组 / 子 Agent Tab，不阻塞启动、不动现有数据。
+  {
+    const msgCols = db.prepare('PRAGMA table_info(messages)').all() as { name: string }[];
+    const hasMsgCol = (n: string): boolean => msgCols.some((c) => c.name === n);
+    if (!hasMsgCol('process_kind')) {
+      db.exec('ALTER TABLE messages ADD COLUMN process_kind TEXT');
+    }
+    if (!hasMsgCol('parent_agent_id')) {
+      db.exec('ALTER TABLE messages ADD COLUMN parent_agent_id TEXT');
+    }
+    if (!hasMsgCol('tool_use_id')) {
+      db.exec('ALTER TABLE messages ADD COLUMN tool_use_id TEXT');
+    }
+    if (!hasMsgCol('title')) {
+      db.exec('ALTER TABLE messages ADD COLUMN title TEXT');
     }
   }
 

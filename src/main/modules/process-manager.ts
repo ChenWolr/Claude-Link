@@ -17,7 +17,7 @@
 
 import { spawn, type ChildProcess } from 'child_process';
 import type { BrowserWindow } from 'electron';
-import type { CliInitEvent, CliSystemInitEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
+import type { CliInitEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliResultEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
 import { resolveDefaultModel } from '../../shared/settings-parser';
@@ -27,6 +27,7 @@ import { logger } from '../utils/logger';
 import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { extractContextTokens } from '../../shared/context-usage';
+import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 
 const processes = new Map<string, ChildProcess>();
@@ -273,29 +274,99 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
     }
 
     case 'system': {
-      // 新版 CC 用 {type:'system',subtype:'init'} 携带 session_id。
-      // 与 connection-tester 保持一致，否则 --resume 拿不到真实 session id。
-      const sysEvent = event as CliSystemInitEvent;
-      if (sysEvent.subtype === 'init' && sysEvent.session_id) {
-        sessionCliIds.set(sessionId, sysEvent.session_id);
-        sessionRepo.updateCliSessionId(sessionId, sysEvent.session_id);
+      // system 子类型分流：init 取 session_id；informational/compact_boundary/plugin_install
+      // 与 permission_denied 落库为过程消息（processKind = system:<subtype> / permission）。
+      const sysEvent = event as CliSystemInitEvent | CliSystemInfoEvent | CliPermissionEvent;
+      if (sysEvent.subtype === 'init') {
+        // 新版 CC 用 {type:'system',subtype:'init'} 携带 session_id。
+        // 与 connection-tester 保持一致，否则 --resume 拿不到真实 session id。
+        if (sysEvent.session_id) {
+          sessionCliIds.set(sessionId, sysEvent.session_id);
+          sessionRepo.updateCliSessionId(sessionId, sysEvent.session_id);
+        }
+        break;
       }
+      if (sysEvent.subtype === 'permission_denied') {
+        const p = event as CliPermissionEvent;
+        const toolName = p.tool_name ? `：${p.tool_name}` : '';
+        messageRepo.createMessage({
+          sessionId,
+          role: 'system',
+          content: p.message || `权限被拒绝${toolName}`,
+          eventType: 'system',
+          processKind: 'permission',
+          toolUseId: p.tool_use_id ?? null,
+        });
+        break;
+      }
+      const info = event as CliSystemInfoEvent;
+      const defaultText: Record<string, string> = {
+        informational: '系统提示',
+        compact_boundary: '上下文已达压缩边界',
+        plugin_install: '插件安装',
+      };
+      messageRepo.createMessage({
+        sessionId,
+        role: 'system',
+        content: info.text || defaultText[info.subtype] || '系统提示',
+        eventType: 'system',
+        processKind: `system:${info.subtype}`,
+      });
       break;
     }
 
     case 'message': {
       const msgEvent = event as CliMessageEvent;
-      persistMessageParts(sessionId, msgEvent.content, msgEvent.role);
+      persistMessageParts(
+        sessionId,
+        msgEvent.content,
+        msgEvent.role,
+        msgEvent.parentToolUseId ?? null,
+      );
       break;
     }
 
-    // stream_event and result are not persisted as individual messages;
-    // the renderer assembles the final text from stream deltas and
-    // the `message` event carries the complete content.
     case 'stream_event':
-    case 'result':
       break;
+
+    case 'result': {
+      // result.result 兜底落库：当本回合没有任何 assistant 正文（message 事件未带 text part，
+      // 某些端点/纯工具回合把最终结论只放在 result.result）时，把结论落库一条，否则
+      // 实时显示有、切走再切回（从 DB 回读）就整条丢失——违背「全过程不丢失」与计划验证 #5。
+      // 与渲染层 ensureResultMessage 同条件：错误回合（非中断）的 result 文本是失败原因，
+      // 只走前端错误横幅，不当 assistant 正文落库（避免污染历史 + 与横幅重复）；
+      // message 事件已落过正文则不重复（result.result 通常与最后一段 text 同内容）。
+      const r = event as CliResultEvent;
+      const text = r.result?.trim();
+      if (!text) break;
+      const subtype = r.subtype;
+      const isUserInterrupt = subtype === 'error_during_execution';
+      // 与渲染层 use-chat.ts 的 isErrResult 完全一致（含 subtype !== undefined 守卫）：
+      // spawn 路径下若端点返回 is_error:true 但缺省 subtype，两侧必须同判，否则一个落库一个
+      // 不落会导致 DB/内存分歧、切走再切回丢失该条。SDK 路径因 convertResultMessage 强制
+      // subtype 非 undefined 而免疫此分支。
+      const isErrResult = !!r.is_error && !isUserInterrupt && subtype !== 'success' && subtype !== undefined;
+      if (isErrResult) break;
+      if (currentTurnHasMainFlowText(sessionId)) break;
+      messageRepo.createMessage({
+        sessionId, role: 'assistant', content: r.result, eventType: 'message', processKind: null,
+      });
+      break;
+    }
   }
+}
+
+// 当前回合（最近一条 user 消息之后）主流程是否已有 assistant 正文（eventType='message'
+// 且 parentAgentId 为空）。result.result 兜底落库的去重依据，与渲染层 turnHasAssistantText 同义。
+// 排除子 Agent 正文：result.result 是主流程回答，不能因子 Agent 产出过文本就误判已有正文。
+function currentTurnHasMainFlowText(sessionId: string): boolean {
+  const rows = messageRepo.getMessagesBySession(sessionId);
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const m = rows[i];
+    if (m.role === 'user') break;
+    if (m.role === 'assistant' && m.eventType === 'message' && !m.parentAgentId) return true;
+  }
+  return false;
 }
 
 // tool_result.content 可能是 string，也可能是 [{type:'text',text}, {type:'image',...}, ...] 数组。
@@ -320,22 +391,58 @@ export function persistMessageParts(
   sessionId: string,
   parts: CliMessageContentPart[],
   role: 'user' | 'assistant',
+  parentAgentId: string | null = null,
 ): void {
   for (const part of parts) {
+    const processKind = processKindFromPart(part);
     if (part.type === 'text' && 'text' in part) {
-      messageRepo.createMessage(sessionId, role, part.text, 'message');
+      messageRepo.createMessage({
+        sessionId, role, content: part.text, eventType: 'message',
+        processKind, parentAgentId,
+      });
     } else if (part.type === 'tool_use') {
-      const content = JSON.stringify({
-        name: part.name,
-        input: part.input,
+      messageRepo.createMessage({
+        sessionId,
+        role: 'assistant',
+        content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
+        eventType: 'tool_use',
+        processKind,
+        parentAgentId,
         toolUseId: part.tool_use_id ?? null,
-      }, null, 2);
-      messageRepo.createMessage(sessionId, 'assistant', content, 'tool_use');
+        title: extractSubAgentTitle(part),
+      });
+    } else if (part.type === 'server_tool_use') {
+      messageRepo.createMessage({
+        sessionId,
+        role: 'assistant',
+        content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
+        eventType: 'tool_use',
+        processKind,
+        parentAgentId,
+        toolUseId: part.id ?? null,
+      });
     } else if (part.type === 'tool_result') {
       const resultText = normalizeToolResultContent((part as { content?: unknown }).content);
-      messageRepo.createMessage(sessionId, 'tool', resultText, 'tool_result');
+      messageRepo.createMessage({
+        sessionId, role: 'tool', content: resultText, eventType: 'tool_result',
+        processKind, parentAgentId, toolUseId: part.tool_use_id ?? null,
+      });
+    } else if (part.type === 'web_search_tool_result' || part.type === 'web_fetch_tool_result') {
+      const resultText = normalizeToolResultContent((part as { content?: unknown }).content);
+      messageRepo.createMessage({
+        sessionId, role: 'tool', content: resultText, eventType: 'tool_result',
+        processKind, parentAgentId, toolUseId: part.tool_use_id ?? null,
+      });
     } else if (part.type === 'thinking' && 'thinking' in part) {
-      messageRepo.createMessage(sessionId, 'assistant', part.thinking, 'thinking');
+      messageRepo.createMessage({
+        sessionId, role: 'assistant', content: part.thinking, eventType: 'thinking',
+        processKind, parentAgentId,
+      });
+    } else if (part.type === 'redacted_thinking') {
+      messageRepo.createMessage({
+        sessionId, role: 'assistant', content: '（此段思考已被安全策略隐藏）',
+        eventType: 'thinking', processKind, parentAgentId,
+      });
     }
   }
 }
