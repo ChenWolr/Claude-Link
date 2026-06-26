@@ -5,12 +5,8 @@ import MessageBubble from './MessageBubble.vue';
 import StreamRenderer from './StreamRenderer.vue';
 import ProcessGroup from './ProcessGroup.vue';
 import ThinkingBlock from './ThinkingBlock.vue';
-
-interface RenderGroup {
-  key: string;
-  type: 'message' | 'process';
-  messages: Message[];
-}
+import { groupMessagesForRender, computeStats, type RenderItem } from '../../utils/group-messages';
+import { useSessionStore } from '../../stores/session-store';
 
 const props = defineProps<{
   messages: Message[];
@@ -20,30 +16,58 @@ const props = defineProps<{
   sending?: boolean;
 }>();
 
+const sessionStore = useSessionStore();
 const container = ref<HTMLElement | null>(null);
 
-// 把连续的 thinking / tool_use / tool_result 合并为一个"过程组"，
-// 由 ProcessGroup 统一折叠展示，避免多条独立块堆叠成杂乱横线。
-// user / assistant 文本消息各自单独渲染。
-const renderGroups = computed<RenderGroup[]>(() => {
-  const groups: RenderGroup[] = [];
-  for (const msg of props.messages) {
-    const isProcess =
-      msg.eventType === 'thinking' ||
-      msg.eventType === 'tool_use' ||
-      msg.eventType === 'tool_result';
-    if (isProcess) {
-      const last = groups[groups.length - 1];
-      if (last && last.type === 'process') {
-        last.messages.push(msg);
-      } else {
-        groups.push({ key: msg.id, type: 'process', messages: [msg] });
-      }
-    } else {
-      groups.push({ key: msg.id, type: 'message', messages: [msg] });
-    }
+// 主聊天流：parentAgentId === null 的消息（子 agent 过程抽到右侧「子Agent」Tab）。
+// 分组规则（最小颗粒度 + 因果配对 + 正文独立气泡）见 utils/group-messages.ts。
+const mainFlowMessages = computed(() => props.messages.filter((m) => !m.parentAgentId));
+
+// 力度② turn-boundary 去重：发送中，若对应流式块非空（流式端点），隐藏本回合已落库的
+// text/thinking（message 事件已即时落库为唯一真相，流式块负责实时预览，二者不重复显示）；
+// 流式为空（非流式端点）则正常显示已落库内容。工具/系统组始终显示。回合结束(sending=false)
+// 流式清空，已落库 text/thinking 接管显示——多段正文按原位穿插呈现（设计决策 #6）。
+const renderItems = computed<RenderItem[]>(() => {
+  const all = groupMessagesForRender(mainFlowMessages.value);
+  if (!props.sending) return all;
+  const hideText = props.streamingContent !== '';
+  const hideThinking = props.streamingThinking !== '';
+  if (!hideText && !hideThinking) return all;
+  // 本回合消息 id 集合（基于 store.messages 的 turnStartIndex）。
+  const turnIds = new Set<string>();
+  const msgs = sessionStore.messages;
+  for (let i = sessionStore.turnStartIndex; i < msgs.length; i += 1) {
+    turnIds.add(msgs[i].id);
   }
-  return groups;
+  // 去重：流式正文非空时隐藏本回合已落库 text；流式思考非空时把 fold 内本回合 thinking
+  // 过滤掉（由 streamingThinking 实时显示），其余过程保留，重算 fold stats。
+  const out: RenderItem[] = [];
+  for (const item of all) {
+    if (item.type === 'message') {
+      if (!(hideText && turnIds.has(item.message.id))) out.push(item);
+      continue;
+    }
+    if (hideThinking) {
+      const filtered = item.messages.filter((m) => !(m.eventType === 'thinking' && turnIds.has(m.id)));
+      if (filtered.length === 0) continue;
+      if (filtered.length !== item.messages.length) {
+        out.push({ ...item, messages: filtered, stats: computeStats(filtered) });
+        continue;
+      }
+    }
+    out.push(item);
+  }
+  return out;
+});
+
+// 焦点跟随：发送中，最后一个 fold 自动展开（active）；用户手动展开过的保留。发送结束按 foldable 规则。
+const activeFoldId = computed<string | null>(() => {
+  if (!props.sending) return null;
+  for (let i = renderItems.value.length - 1; i >= 0; i -= 1) {
+    const it = renderItems.value[i];
+    if (it.type === 'fold') return it.key;
+  }
+  return null;
 });
 
 // 只在消息数量变化时自动滚底（新消息到达）。流式内容更新时不强制跳底，
@@ -88,9 +112,14 @@ function handleCopyClick(event: MouseEvent): void {
 <template>
   <div class="message-list">
     <div ref="container" class="message-list__scroller" @click="handleCopyClick">
-      <template v-for="group in renderGroups" :key="group.key">
-        <ProcessGroup v-if="group.type === 'process'" :messages="group.messages" />
-        <MessageBubble v-else :message="group.messages[0]" />
+      <template v-for="item in renderItems" :key="item.key">
+        <ProcessGroup
+          v-if="item.type === 'fold'"
+          :messages="item.messages"
+          :stats="item.stats"
+          :active="item.key === activeFoldId"
+        />
+        <MessageBubble v-else :message="item.message" />
       </template>
       <div v-if="sending && !streamingContent && !streamingThinking && !streamingTool" class="status-indicator">
         <span class="status-indicator__dots"><span></span><span></span><span></span></span>

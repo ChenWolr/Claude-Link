@@ -1,85 +1,111 @@
 <script setup lang="ts">
+// ThinkingBlock —— openhanako 风格的轻量思考行。
+// 一行「💭 思考完成 / 思考中 ···」，点击展开看内容。流式时默认展开。
 import { computed, ref } from 'vue';
 import { renderMarkdown } from '../../utils/markdown';
 
-const props = defineProps<{ content: string; streaming?: boolean; defaultOpen?: boolean }>();
+const props = defineProps<{ content: string; streaming?: boolean; sealed?: boolean; defaultOpen?: boolean }>();
 
-const open = ref(props.defaultOpen ?? false);
+const open = ref(props.defaultOpen ?? !!props.streaming);
 const rendered = computed(() => renderMarkdown(props.content));
-const preview = computed(() => props.content.replace(/\s+/g, ' ').trim().slice(0, 50));
+const preview = computed(() => props.content.replace(/\s+/g, ' ').trim().slice(0, 90));
+const active = computed(() => props.streaming || props.sealed === false);
 </script>
 
 <template>
-  <div class="thinking">
-    <button type="button" class="thinking__toggle" @click="open = !open">
-      <span class="thinking__icon">{{ open ? '▼' : '▶' }}</span>
-      <span class="thinking__label">{{ streaming ? '思考中…' : '思考过程' }}</span>
-      <span v-if="!open && preview" class="thinking__preview">{{ preview }}…</span>
+  <div class="think-row">
+    <button type="button" class="think-row__head" :class="{ 'think-row__head--open': open }" @click="open = !open">
+      <span class="think-row__icon">💭</span>
+      <span class="think-row__label">{{ active ? '思考中' : '思考完成' }}</span>
+      <span v-if="active" class="think-row__dots">···</span>
+      <span v-else-if="!open && preview" class="think-row__preview">{{ preview }}…</span>
+      <span class="think-row__arrow">›</span>
     </button>
-    <div v-if="open" class="thinking__content markdown-body" v-html="rendered" />
+    <div v-if="open" class="think-row__body markdown-body" v-html="rendered" />
   </div>
 </template>
 
 <style scoped>
-.thinking {
-  align-self: flex-start;
-  max-width: 80%;
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-panel);
-  overflow: hidden;
+.think-row {
+  width: 100%;
 }
 
-.thinking__toggle {
+.think-row__head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   width: 100%;
-  border: 0;
-  background: transparent;
+  padding: 4px 8px;
+  font-size: 13px;
   color: var(--color-text-muted);
-  padding: 8px 12px;
-  font-size: 12px;
+  background: transparent;
+  border: 0;
   cursor: pointer;
   text-align: left;
+  font-family: inherit;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s, color 0.15s;
 }
 
-.thinking__toggle:hover {
+.think-row__head:hover {
   color: var(--color-text);
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
 }
 
-.thinking__icon {
-  font-size: 10px;
+.think-row__icon {
+  font-size: 14px;
+  flex-shrink: 0;
 }
 
-.thinking__label {
-  font-weight: 600;
+.think-row__label {
+  font-weight: 500;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
-.thinking__preview {
-  color: var(--color-text-muted);
-  opacity: 0.7;
+.think-row__dots {
+  color: var(--color-accent-strong);
+  letter-spacing: 0.12em;
+  font-weight: 700;
+}
+
+.think-row__preview {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  min-width: 0;
+  font-size: 12px;
+  opacity: 0.7;
 }
 
-.thinking__content {
-  padding: 8px 12px 12px;
-  border-top: 1px dashed var(--color-border);
+.think-row__arrow {
+  margin-left: auto;
+  flex-shrink: 0;
   color: var(--color-text-muted);
   font-size: 12px;
-  line-height: 1.6;
+  transition: transform 0.15s;
+}
+
+.think-row__head--open .think-row__arrow {
+  transform: rotate(90deg);
+}
+
+.think-row__body {
+  padding: 8px 10px 10px;
+  margin: 2px 0 2px 6px;
+  border-left: 2px solid var(--color-border);
+  font-size: 13px;
+  color: var(--color-text);
+  line-height: 1.7;
   word-break: break-word;
 }
 
-.thinking__content :deep(p) {
-  margin: 0 0 6px;
+.think-row__body :deep(p) {
+  margin: 0 0 8px;
 }
 
-.thinking__content :deep(p:last-child) {
+.think-row__body :deep(p:last-child) {
   margin-bottom: 0;
 }
 </style>

@@ -1,119 +1,185 @@
 <script setup lang="ts">
+// ProcessGroup —— openhanako 风格的「过程折叠」。
+// 一整段连续过程（思考 + 工具）合并成一个 fold：折叠态是一行居中摘要
+// 「✨ Claude 忙活了一阵子 · N 个工具 · N 次思考 ›」，展开态是半透明 panel 内的行式列表。
+// 少于 MIN_FOLD 条过程不折叠（直接展开行式）。对齐 openhanako ProcessFoldBlock。
 import { ref, computed } from 'vue';
 import type { Message } from '../../../shared/types/session';
+import { isFoldable, type FoldStats } from '../../utils/group-messages';
 import ThinkingBlock from './ThinkingBlock.vue';
 import ToolCallBlock from './ToolCallBlock.vue';
 
-const props = defineProps<{ messages: Message[] }>();
-const open = ref(false);
+const props = defineProps<{
+  messages: Message[];
+  stats: FoldStats;
+  active?: boolean;
+}>();
 
-const thinkingCount = computed(() => props.messages.filter((m) => m.eventType === 'thinking').length);
+const foldable = computed(() => isFoldable(props.messages.length));
+// 焦点跟随：发送中末组 active 自动展开；不可折叠的 fold 强制展开行式。
+const manualOpen = ref<null | boolean>(null);
+const open = computed(() => manualOpen.value ?? (props.active || !foldable.value));
+function toggle(): void {
+  manualOpen.value = !open.value;
+}
 
-const toolUseMessages = computed(() => props.messages.filter((m) => m.eventType === 'tool_use'));
-
-// 提取去重的工具名，让摘要更有信息量（如"🔧 3 次调用（Read、Bash、Write）"）。
-const toolNames = computed(() => {
-  const names: string[] = [];
-  for (const m of toolUseMessages.value) {
-    try {
-      const parsed = JSON.parse(m.content) as { name?: string };
-      if (parsed.name && !names.includes(parsed.name)) names.push(parsed.name);
-    } catch {
-      /* ignore */
-    }
-  }
-  return names;
+// 居中摘要（对齐 openhanako buildProcessFoldSummary）。
+const summary = computed(() => {
+  const parts = ['✨ Claude 忙活了一阵子'];
+  if (props.stats.toolCount > 0) parts.push(`${props.stats.toolCount} 个工具`);
+  if (props.stats.thinkingCount > 0) parts.push(`${props.stats.thinkingCount} 次思考`);
+  return parts.join(' · ');
 });
 
-const summary = computed(() => {
-  const parts: string[] = [];
-  if (thinkingCount.value) parts.push(`💭 ${thinkingCount.value} 段思考`);
-  if (toolUseMessages.value.length) {
-    const names = toolNames.value.length ? `（${toolNames.value.join('、')}）` : '';
-    parts.push(`🔧 ${toolUseMessages.value.length} 次工具调用${names}`);
+interface GroupItem {
+  key: string;
+  type: 'thinking' | 'tool' | 'system';
+  msg?: Message;
+  use?: Message | null;
+  result?: Message | null;
+}
+
+// 按 toolUseId 把 tool_use 与 tool_result 配对成一项（行式合并）；保留原顺序。
+const items = computed<GroupItem[]>(() => {
+  const resultByToolUseId = new Map<string, Message>();
+  for (const m of props.messages) {
+    if (m.eventType === 'tool_result' && m.toolUseId) resultByToolUseId.set(m.toolUseId, m);
   }
-  return parts.join(' · ') || '中间过程';
+  const consumed = new Set<string>();
+  const out: GroupItem[] = [];
+  for (const m of props.messages) {
+    if (m.eventType === 'thinking') {
+      out.push({ key: m.id, type: 'thinking', msg: m });
+    } else if (m.eventType === 'tool_use') {
+      const result = m.toolUseId ? resultByToolUseId.get(m.toolUseId) ?? null : null;
+      if (result) consumed.add(result.id);
+      out.push({ key: m.id, type: 'tool', use: m, result });
+    } else if (m.eventType === 'system') {
+      out.push({ key: m.id, type: 'system', msg: m });
+    }
+  }
+  for (const m of props.messages) {
+    if (m.eventType === 'tool_result' && !consumed.has(m.id)) {
+      out.push({ key: m.id, type: 'tool', use: null, result: m });
+    }
+  }
+  return out;
 });
 </script>
 
 <template>
-  <div class="process-group">
-    <button type="button" class="process-group__header" @click="open = !open">
-      <span class="process-group__icon">{{ open ? '▾' : '▸' }}</span>
-      <span class="process-group__summary">{{ summary }}</span>
-      <span class="process-group__toggle">{{ open ? '收起' : '展开详情' }}</span>
+  <div class="process-fold">
+    <button
+      v-if="foldable"
+      type="button"
+      class="process-fold__summary"
+      :class="{ 'process-fold__summary--open': open }"
+      @click="toggle"
+    >
+      <span class="process-fold__title">
+        <span class="process-fold__text">{{ summary }}</span>
+        <span v-if="stats.running" class="process-fold__dots">···</span>
+        <span class="process-fold__arrow">›</span>
+      </span>
     </button>
-    <div v-if="open" class="process-group__body">
-      <template v-for="msg in messages" :key="msg.id">
-        <ThinkingBlock v-if="msg.eventType === 'thinking'" :content="msg.content" :default-open="true" />
-        <ToolCallBlock v-else :message="msg" :default-open="true" />
+    <div v-if="open" class="process-fold__panel">
+      <template v-for="item in items" :key="item.key">
+        <ThinkingBlock
+          v-if="item.type === 'thinking'"
+          :content="item.msg!.content"
+          :sealed="!stats.running"
+        />
+        <div v-else-if="item.type === 'system'" class="process-fold__system">
+          <span>ℹ️ {{ item.msg!.content }}</span>
+        </div>
+        <ToolCallBlock
+          v-else
+          :use="item.use ?? null"
+          :result="item.result ?? null"
+          :running="stats.running && !item.result"
+        />
       </template>
     </div>
   </div>
 </template>
 
 <style scoped>
-/* 左侧色条 + 低调背景，避免多条独立边框堆叠成"横线"感。 */
-.process-group {
-  align-self: flex-start;
+/* 居中、轻量的折叠摘要（对齐 openhanako processFoldSummary：justify-content:center）。 */
+.process-fold {
   width: 100%;
-  max-width: 90%;
-  border-left: 2px solid var(--color-border);
-  border-radius: 0 var(--radius-md) var(--radius-md) 0;
-  background: var(--color-panel);
-  overflow: hidden;
 }
 
-.process-group__header {
+.process-fold__summary {
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  border: 0;
+  justify-content: center;
+  margin: 18px 0;
+  padding: 6px 12px;
   background: transparent;
+  border: 0;
   color: var(--color-text-muted);
-  padding: 8px 12px;
-  font-size: 12px;
+  font-size: 13px;
   cursor: pointer;
-  text-align: left;
+  font-family: inherit;
+  border-radius: var(--radius-sm);
   transition: background 0.15s, color 0.15s;
 }
 
-.process-group__header:hover {
-  background: var(--color-panel-soft);
+.process-fold__summary:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
   color: var(--color-text);
 }
 
-.process-group__icon {
-  font-size: 10px;
-  flex-shrink: 0;
+.process-fold__summary--open {
+  margin-bottom: 0;
 }
 
-.process-group__summary {
-  flex: 1;
+.process-fold__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.process-fold__text {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  text-align: center;
 }
 
-.process-group__toggle {
-  flex-shrink: 0;
-  font-size: 11px;
-  opacity: 0.7;
+.process-fold__dots {
+  color: var(--color-accent-strong);
+  letter-spacing: 0.12em;
+  font-weight: 700;
 }
 
-.process-group__body {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 4px 12px 12px;
+.process-fold__arrow {
+  color: var(--color-text-muted);
+  font-size: 13px;
+  transition: transform 0.15s;
 }
 
-/* 内部块在过程组内占满宽度，不各自缩窄。 */
-.process-group__body :deep(.thinking),
-.process-group__body :deep(.tool-call) {
-  max-width: 100%;
-  align-self: stretch;
+.process-fold__summary--open .process-fold__arrow {
+  transform: rotate(90deg);
+}
+
+/* 展开态 panel：半透明背景（对齐 openhanako processFoldPanel overlay-subtle 62%）。 */
+.process-fold__panel {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-panel-soft) 62%, transparent);
+}
+
+.process-fold__system {
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--color-text-muted);
 }
 </style>

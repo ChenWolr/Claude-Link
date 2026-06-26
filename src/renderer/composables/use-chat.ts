@@ -9,7 +9,9 @@
 import { ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
-import type { CliEvent, CliMessageContentPart, CliResultEvent } from '../../shared/types/cli';
+import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent } from '../../shared/types/cli';
+import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
+import type { Message } from '../../shared/types/session';
 
 export function useChat() {
   const store = useSessionStore();
@@ -25,6 +27,51 @@ export function useChat() {
       clearTimeout(abortTimer);
       abortTimer = null;
     }
+  }
+
+  // 本回合缓存（力度②：message 事件为唯一真相）：
+  //  - turnHad* 标志：标记「主流程（parentAgentId === null）」是否已通过 message 事件落过
+  //    text/thinking/tool_use。必须只反映主流程：finalize 的流式兜底是为补主流程丢失的内容，
+  //    若被子 Agent 的 part 置位，会错误抑制主流程兜底（内容丢失）。
+  //    finalize 仅在「主流程没有 message 事件、只有流式」的边缘情况（中断/异常端点）兜底落库，
+  //    避免与已落内容重复。模型无关：流式端点与不发 delta 的端点都不丢过程。
+  let turnHadToolUse = false;
+  let turnHadText = false;
+  let turnHadThinking = false;
+  function resetTurnCache(): void {
+    turnHadToolUse = false;
+    turnHadText = false;
+    turnHadThinking = false;
+  }
+
+  // 统一构造并落库一条消息（带过程分类四字段）。渲染层 addMessage 纯内存，
+  // 与主进程 createMessage 落库各走一路；两者用同一 processKindFromPart 保证分类一致。
+  function persistMessage(partial: {
+    content: string;
+    role: Message['role'];
+    eventType: string;
+    processKind?: string | null;
+    parentAgentId?: string | null;
+    toolUseId?: string | null;
+    title?: string | null;
+  }): void {
+    if (!store.activeSession) return;
+    store.addMessage({
+      id: crypto.randomUUID(),
+      sessionId: store.activeSession.id,
+      role: partial.role,
+      content: partial.content,
+      rawEvent: null,
+      eventType: partial.eventType,
+      costUsd: null,
+      durationMs: null,
+      parentTaskId: null,
+      processKind: partial.processKind ?? null,
+      parentAgentId: partial.parentAgentId ?? null,
+      toolUseId: partial.toolUseId ?? null,
+      title: partial.title ?? null,
+      createdAt: new Date().toISOString(),
+    });
   }
 
   // 切换/删除会话时复位发送态。deleteSession 把 activeSession 置 null，若此时
@@ -75,22 +122,14 @@ export function useChat() {
         break;
       }
       case 'message': {
-        // ── 修复：从源头杜绝流式与持久化重复 ────────────────────────
-        // 背景：部分场景下 CLI 会先吐 `message`（完整内容）再吐 stream_event（增量 delta），
-        // 旧逻辑收到 `message` 就 clearStream + 添加持久化消息，导致：
-        //   1) 已积累的流式内容被立即清掉，用户看不到实时打字
-        //   2) 后续到达的 stream_event 把内容重新堆到流式块，与刚添加的持久化消息重复显示
-        // 新逻辑：assistant 的 text/thinking 永远只由流式块显示，`message` 只持久化
-        // tool_use / tool_result / redacted_thinking（不与流式重叠）。回合结束时
-        // `finalizeAssistantStream` 把流式累积的 text/thinking 转为持久化消息。
-        // 用户消息照原样落库。
+        // 力度②：`message` 事件是唯一真相——全量落库 text/thinking/tool_use/tool_result/
+        // redacted_thinking，保留多段正文原位（边说边做边说各自独立气泡穿插过程组）。
+        // streaming 仅作实时预览，不参与持久化。模型无关：不发 delta 的端点也靠 message
+        // 事件完整落库。与流式块的重复由 MessageList 的 turn-boundary 去重处理（发送中且
+        // 对应流式非空时隐藏本回合已落库 text/thinking，回合结束流式清空后接管显示）。
         const role = event.role;
-        console.log('[diag message] role=', role, 'parts=', (event.content ?? []).map((p) => p.type));
-        if (role === 'user') {
-          handleMessageParts(event.content ?? [], role);
-        } else {
-          handleMessagePartsPersistOnly(event.content ?? []);
-        }
+        const agentId = event.parentToolUseId ?? null;
+        handleMessagePartsFull(event.content ?? [], role, agentId);
         break;
       }
       case 'result': {
@@ -104,20 +143,22 @@ export function useChat() {
 
         // 回合结束：先把流式累积的 thinking / content 转为持久化消息，
         // 再清掉流式状态，让 MessageList 从流式块切回持久化消息显示。
-        console.log('[diag result] streamingThinking.len=', store.streamingThinking.length, 'streamingContent.len=', store.streamingContent.length);
         finalizeAssistantStream();
-        console.log('[diag finalize done] messages.len=', store.messages.length, 'lastTypes=', store.messages.slice(-3).map((m) => m.eventType));
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
 
-        ensureResultMessage(event);
+        // 错误回合（非中断）的 result 文本是失败原因：只走 error 横幅，不当 assistant 正文
+        // 落库（否则与横幅重复展示 + 把错误文案当成回答污染历史）。主进程 persistCliEvent
+        // 的 result 分支用同一 isErrResult 判断同步跳过，DB 与内存保持一致。
+        if (!isErrResult) ensureResultMessage(event);
         attachResultMetadata(event);
         if (isErrResult && event.result?.trim()) {
           error.value = event.result.trim();
         }
         sending.value = false;
         clearAbortTimer();
+        resetTurnCache();
         break;
       }
       case 'error': {
@@ -128,6 +169,7 @@ export function useChat() {
         error.value = event.message;
         sending.value = false;
         clearAbortTimer();
+        resetTurnCache();
         break;
       }
       case 'aborted': {
@@ -138,192 +180,83 @@ export function useChat() {
         store.clearToolStream();
         sending.value = false;
         clearAbortTimer();
+        resetTurnCache();
         break;
       }
-      case 'system':
+      case 'system': {
+        // system 子类型（非 init）：informational/compact_boundary/plugin_install/permission_denied
+        // 落库为过程消息（主进程同样落库，这里供本回合实时显示）。
+        persistSystemEvent(event);
+        break;
+      }
       case 'init': {
         break;
       }
     }
   }
 
-  // 回合中 message 事件的"部分落库"版本：只添加 user / tool_use / tool_result /
-  // redacted_thinking。跳过 assistant text 与 thinking（它们由流式块实时显示，
-  // 回合结束时由 finalizeAssistantStream 统一落库），避免与流式块重复显示同一段内容。
-  function handleMessagePartsPersistOnly(parts: CliMessageContentPart[]): void {
-    for (const part of parts) {
-      if (part.type === 'tool_use') {
-        store.addMessage({
-          id: crypto.randomUUID(),
-          sessionId: store.activeSession!.id,
-          role: 'assistant',
-          content: JSON.stringify({
-            name: part.name,
-            input: part.input,
-            toolUseId: part.tool_use_id ?? null,
-          }, null, 2),
-          rawEvent: null,
-          eventType: 'tool_use',
-          costUsd: null,
-          durationMs: null,
-          parentTaskId: null,
-          createdAt: new Date().toISOString(),
-        });
-        continue;
-      }
-      if (part.type === 'tool_result') {
-        const rawContent = (part as { content?: unknown }).content;
-        const resultText =
-          typeof rawContent === 'string'
-            ? rawContent
-            : Array.isArray(rawContent)
-              ? rawContent
-                  .map((item) =>
-                    item && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string'
-                      ? (item as { text: string }).text
-                      : JSON.stringify(item, null, 2),
-                  )
-                  .join('\n')
-              : JSON.stringify(rawContent ?? '', null, 2);
-        store.addMessage({
-          id: crypto.randomUUID(),
-          sessionId: store.activeSession!.id,
-          role: 'tool',
-          content: resultText,
-          rawEvent: null,
-          eventType: 'tool_result',
-          costUsd: null,
-          durationMs: null,
-          parentTaskId: null,
-          createdAt: new Date().toISOString(),
-        });
-        continue;
-      }
-      if (part.type === 'redacted_thinking') {
-        store.addMessage({
-          id: crypto.randomUUID(),
-          sessionId: store.activeSession!.id,
-          role: 'assistant',
-          content: '（此段思考已被安全策略隐藏）',
-          rawEvent: null,
-          eventType: 'thinking',
-          costUsd: null,
-          durationMs: null,
-          parentTaskId: null,
-          createdAt: new Date().toISOString(),
-        });
-      }
-      // assistant text / thinking：跳过，回合结束时由 finalizeAssistantStream 落库
-    }
-  }
-
-  // 回合结束时：把流式累积的 thinking / content 转为持久化消息（仅当回合内未通过
-  // message 事件落库）。这是修复"流式事件批量到达导致用户看不到实时打字"的关键：
-  // 流式块在回合期间实时可见，回合结束瞬间无缝切换为持久化消息。
-  function finalizeAssistantStream(): void {
-    if (!store.activeSession) return;
-    const now = new Date().toISOString();
-    if (store.streamingThinking) {
-      store.addMessage({
-        id: crypto.randomUUID(),
-        sessionId: store.activeSession.id,
-        role: 'assistant',
-        content: store.streamingThinking,
-        rawEvent: null,
-        eventType: 'thinking',
-        costUsd: null,
-        durationMs: null,
-        parentTaskId: null,
-        createdAt: now,
-      });
-    }
-    if (store.streamingContent) {
-      store.addMessage({
-        id: crypto.randomUUID(),
-        sessionId: store.activeSession.id,
-        role: 'assistant',
-        content: store.streamingContent,
-        rawEvent: null,
-        eventType: 'message',
-        costUsd: null,
-        durationMs: null,
-        parentTaskId: null,
-        createdAt: now,
-      });
-    }
-  }
-
-  function handleMessageParts(parts: CliMessageContentPart[], role: 'user' | 'assistant'): void {
+  // 全量落库一个 message 事件的 content（力度②：唯一真相）。user/assistant 共用。
+  // 保留 parts 原始顺序——多段 text 各自独立气泡、穿插在工具/thinking 过程组之间（设计决策 #6）。
+  // assistant 的 text/thinking/tool_use 落库时置 turnHad* 标志，供 finalize 兜底去重判断。
+  function handleMessagePartsFull(
+    parts: CliMessageContentPart[],
+    role: 'user' | 'assistant',
+    parentAgentId: string | null,
+  ): void {
+    const isAssistant = role === 'assistant';
+    // turnHad* 标志只反映主流程：finalize 的流式兜底是为补主流程内容，子 Agent 的 part 不应
+    // 置位（否则会抑制主流程兜底，造成主流程流式正文/思考/工具丢失）。
+    const isMainFlow = isAssistant && parentAgentId === null;
     for (const part of parts) {
       if (part.type === 'thinking' && 'thinking' in part) {
-        store.addMessage({
-          id: crypto.randomUUID(),
-          sessionId: store.activeSession!.id,
-          role: 'assistant',
-          content: part.thinking,
-          rawEvent: null,
-          eventType: 'thinking',
-          costUsd: null,
-          durationMs: null,
-          parentTaskId: null,
-          createdAt: new Date().toISOString(),
-        });
+        if (isMainFlow) turnHadThinking = true;
+        persistMessage({ role: 'assistant', eventType: 'thinking', content: part.thinking, processKind: 'thinking', parentAgentId });
         continue;
       }
-      // M5：思考被安全策略移除时 CC 发 redacted_thinking，给出占位提示而非静默丢弃。
       if (part.type === 'redacted_thinking') {
-        store.addMessage({
-          id: crypto.randomUUID(),
-          sessionId: store.activeSession!.id,
-          role: 'assistant',
-          content: '（此段思考已被安全策略隐藏）',
-          rawEvent: null,
-          eventType: 'thinking',
-          costUsd: null,
-          durationMs: null,
-          parentTaskId: null,
-          createdAt: new Date().toISOString(),
-        });
+        // redacted_thinking 也是 message 事件落库的思考，必须置位，否则 finalize 会把
+        // streamingThinking 再落一条，与 redacted 占位消息重复。
+        if (isMainFlow) turnHadThinking = true;
+        persistMessage({ role: 'assistant', eventType: 'thinking', content: '（此段思考已被安全策略隐藏）', processKind: 'redacted_thinking', parentAgentId });
         continue;
       }
       if (part.type === 'text' && 'text' in part) {
-        store.addMessage({
-          id: crypto.randomUUID(),
-          sessionId: store.activeSession!.id,
-          role,
-          content: part.text,
-          rawEvent: null,
-          eventType: 'message',
-          costUsd: null,
-          durationMs: null,
-          parentTaskId: null,
-          createdAt: new Date().toISOString(),
-        });
+        if (isMainFlow) turnHadText = true;
+        persistMessage({ role, eventType: 'message', content: part.text, processKind: null, parentAgentId });
         continue;
       }
-
       if (part.type === 'tool_use') {
-        store.addMessage({
-          id: crypto.randomUUID(),
-          sessionId: store.activeSession!.id,
+        if (isMainFlow) turnHadToolUse = true;
+        persistMessage({
           role: 'assistant',
-          content: JSON.stringify({
-            name: part.name,
-            input: part.input,
-            toolUseId: part.tool_use_id ?? null,
-          }, null, 2),
-          rawEvent: null,
           eventType: 'tool_use',
-          costUsd: null,
-          durationMs: null,
-          parentTaskId: null,
-          createdAt: new Date().toISOString(),
+          content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
+          processKind: processKindFromPart(part),
+          parentAgentId,
+          toolUseId: part.tool_use_id ?? null,
+          title: extractSubAgentTitle(part),
         });
+        // 工具入参流式预览（streamingTool）到此为止：message 事件带的是完整 tool_use，
+        // 已落库为 ProcessGroup（sending 期间不去重，会正常显示）。若不清空 streamingTool，
+        // 它会与已落库的工具组同时显示（重复），且多工具回合会把多个工具入参 JSON 串连。
+        // 这里清空，让"已落库工具组"接管显示；下一个工具的 input_json_delta 重新从空累积。
+        store.clearToolStream();
         continue;
       }
-
-      if (part.type === 'tool_result') {
-        // M6：content 可能是 string 或 [{type:'text',text}, ...]，数组需提取文本而非裸 JSON。
+      if (part.type === 'server_tool_use') {
+        if (isMainFlow) turnHadToolUse = true;
+        persistMessage({
+          role: 'assistant',
+          eventType: 'tool_use',
+          content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
+          processKind: processKindFromPart(part),
+          parentAgentId,
+          toolUseId: part.id ?? null,
+        });
+        store.clearToolStream();
+        continue;
+      }
+      if (part.type === 'tool_result' || part.type === 'web_search_tool_result' || part.type === 'web_fetch_tool_result') {
         const rawContent = (part as { content?: unknown }).content;
         const resultText =
           typeof rawContent === 'string'
@@ -337,21 +270,67 @@ export function useChat() {
                   )
                   .join('\n')
               : JSON.stringify(rawContent ?? '', null, 2);
-
-        store.addMessage({
-          id: crypto.randomUUID(),
-          sessionId: store.activeSession!.id,
+        persistMessage({
           role: 'tool',
-          content: resultText,
-          rawEvent: null,
           eventType: 'tool_result',
-          costUsd: null,
-          durationMs: null,
-          parentTaskId: null,
-          createdAt: new Date().toISOString(),
+          content: resultText,
+          processKind: processKindFromPart(part),
+          parentAgentId,
+          toolUseId: part.tool_use_id ?? null,
         });
       }
     }
+  }
+
+  // 回合结束兜底（力度②）：text/thinking/tool_use 已由 message 事件即时落库，这里只在
+  // 「主流程没有 message 事件、只有流式累积」的边缘情况（中断/异常端点不发 message 事件）
+  // 把残留流式落库，避免与已落内容重复（用 turnHad* 标志判断，仅反映主流程）。
+  // 兜底固定归属主流程（parentAgentId = null）：streaming 累加器主/子 Agent 共享、无法按来源
+  // 区分，但兜底语义就是补主流程内容；若用「最后一条 message 的 parentAgentId」会在子 Agent
+  // 最后到达时把主流程流式错配到子 Agent Tab（主流程内容丢失）。
+  function finalizeAssistantStream(): void {
+    if (!store.activeSession) return;
+
+    if (store.streamingThinking && !turnHadThinking) {
+      persistMessage({ role: 'assistant', eventType: 'thinking', content: store.streamingThinking, processKind: 'thinking', parentAgentId: null });
+    }
+    if (store.streamingContent && !turnHadText) {
+      persistMessage({ role: 'assistant', eventType: 'message', content: store.streamingContent, processKind: null, parentAgentId: null });
+    }
+    if (store.streamingTool && !turnHadToolUse) {
+      persistMessage({ role: 'assistant', eventType: 'tool_use', content: store.streamingTool, processKind: 'tool:unknown', parentAgentId: null });
+    }
+  }
+
+  // system 子类型事件（非 init）落库为过程消息：informational/compact_boundary/plugin_install
+  // → system:<subtype>；permission_denied → permission。主进程同样落库，这里供本回合实时显示。
+  function persistSystemEvent(event: CliEvent): void {
+    if (event.type !== 'system') return;
+    const e = event as CliSystemInitEvent | CliSystemInfoEvent | CliPermissionEvent;
+    if (e.subtype === 'init') return;
+    if (e.subtype === 'permission_denied') {
+      const p = e as CliPermissionEvent;
+      const toolName = p.tool_name ? `：${p.tool_name}` : '';
+      persistMessage({
+        role: 'system',
+        eventType: 'system',
+        content: p.message || `权限被拒绝${toolName}`,
+        processKind: 'permission',
+        toolUseId: p.tool_use_id ?? null,
+      });
+      return;
+    }
+    const info = e as CliSystemInfoEvent;
+    const defaultText =
+      info.subtype === 'compact_boundary' ? '上下文已达压缩边界'
+        : info.subtype === 'plugin_install' ? '插件安装'
+          : '系统提示';
+    persistMessage({
+      role: 'system',
+      eventType: 'system',
+      content: info.text || defaultText,
+      processKind: `system:${info.subtype}`,
+    });
   }
 
   // 当 Claude 把最终回答放在 result.result 而非前置 message 文本 part 时，
@@ -361,27 +340,25 @@ export function useChat() {
     if (!resultText) return;
     if (turnHasAssistantText()) return;
 
-    store.addMessage({
-      id: crypto.randomUUID(),
-      sessionId: store.activeSession!.id,
-      role: 'assistant',
-      content: resultText,
-      rawEvent: null,
-      eventType: 'message',
-      costUsd: null,
-      durationMs: null,
-      parentTaskId: null,
-      createdAt: new Date().toISOString(),
-    });
+    persistMessage({ role: 'assistant', eventType: 'message', content: resultText, processKind: null });
   }
 
-  // 从最新消息向前回溯，直到本回合的用户消息为止，判断是否已产生 assistant 文本。
+  // 从最新消息向前回溯，直到本回合的用户消息为止，判断主流程是否已产生 assistant 文本。
+  // 必须排除子 Agent 消息（parentAgentId !== null）：result.result 是主流程的回答，
+  // 若把子 Agent 产生的正文也算上，会在"主流程无正文、最终回答只在 result 里、且本回合
+  // 跑过子 Agent"时误判为已有正文，导致 ensureResultMessage 跳过补落、主流程回答丢失。
   function turnHasAssistantText(): boolean {
     const messages = store.messages;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const message = messages[i];
       if (message.role === 'user') return false;
-      if (message.role === 'assistant' && message.eventType === 'message') return true;
+      if (
+        message.role === 'assistant' &&
+        message.eventType === 'message' &&
+        !message.parentAgentId
+      ) {
+        return true;
+      }
     }
     return false;
   }
@@ -406,21 +383,14 @@ export function useChat() {
 
     // 新回合开始：作废上一回合 abort 残留的超时兜底，避免它把本次 sending 错误复位。
     clearAbortTimer();
+    resetTurnCache();
     error.value = null;
     sending.value = true;
 
-    store.addMessage({
-      id: crypto.randomUUID(),
-      sessionId: store.activeSession.id,
-      role: 'user',
-      content: text.trim(),
-      rawEvent: null,
-      eventType: 'message',
-      costUsd: null,
-      durationMs: null,
-      parentTaskId: null,
-      createdAt: new Date().toISOString(),
-    });
+    persistMessage({ role: 'user', eventType: 'message', content: text.trim(), processKind: null });
+    // 力度② turn 边界：本回合 assistant 消息从此索引开始。MessageList 据此在发送中
+    // （且对应流式非空）隐藏本回合已落库的 text/thinking，避免与流式块重复显示。
+    store.turnStartIndex = store.messages.length;
 
     try {
       startListening();
