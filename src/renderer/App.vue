@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted } from 'vue';
 import AppLayout from './components/layout/AppLayout.vue';
+import InteractionPrompt from './components/chat/InteractionPrompt.vue';
 import { useConfigStore } from './stores/config-store';
 import { THEME_PALETTES } from '../shared/constants';
 
@@ -27,5 +28,6 @@ onMounted(async () => {
 <template>
   <AppLayout>
     <router-view />
+    <InteractionPrompt />
   </AppLayout>
 </template>

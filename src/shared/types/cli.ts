@@ -134,15 +134,15 @@ export interface CliAbortedEvent {
 // 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
 export interface CliSystemInfoEvent {
   type: 'system';
-  subtype: 'informational' | 'compact_boundary' | 'plugin_install';
+  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request';
   text?: string;
   level?: 'info' | 'warn';
 }
 
-// 权限事件：自动拒绝 / 权限询问。落库 processKind = permission。
+// 权限事件：权限询问 / 自动拒绝。落库 processKind = permission。
 export interface CliPermissionEvent {
   type: 'system';
-  subtype: 'permission_denied';
+  subtype: 'permission_request' | 'permission_denied';
   tool_name?: string;
   tool_use_id?: string;
   message?: string;

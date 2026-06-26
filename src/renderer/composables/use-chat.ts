@@ -308,13 +308,13 @@ export function useChat() {
     if (event.type !== 'system') return;
     const e = event as CliSystemInitEvent | CliSystemInfoEvent | CliPermissionEvent;
     if (e.subtype === 'init') return;
-    if (e.subtype === 'permission_denied') {
+    if (e.subtype === 'permission_denied' || e.subtype === 'permission_request') {
       const p = e as CliPermissionEvent;
       const toolName = p.tool_name ? `：${p.tool_name}` : '';
       persistMessage({
         role: 'system',
         eventType: 'system',
-        content: p.message || `权限被拒绝${toolName}`,
+        content: p.message || (p.subtype === 'permission_request' ? `等待权限确认${toolName}` : `权限被拒绝${toolName}`),
         processKind: 'permission',
         toolUseId: p.tool_use_id ?? null,
       });

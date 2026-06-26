@@ -15,7 +15,8 @@ import { listRecentWorkspaces, addRecentWorkspace } from './modules/workspace-hi
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, respondToPermissionRequest } from './modules/chat-backend';
+import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
 import {
   startQueue,
   pauseQueue,
@@ -168,6 +169,16 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.CHAT_ABORT, async (_event, sessionId: string) => {
     killProcess(sessionId);
   });
+
+  ipcMain.handle(IPC_CHANNELS.PERMISSION_RESPOND, async (_event, response) => {
+    respondToPermissionRequest(response);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.INTERACTION_RESPOND, async (_event, response) => {
+    respondToInteractionPrompt(response);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.INTERACTION_GET_PENDING, async () => getPendingInteractionPrompts());
 
   // Tasks
   ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, prompt: string) => {

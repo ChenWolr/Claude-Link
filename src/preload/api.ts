@@ -6,7 +6,7 @@ import { ipcRenderer } from 'electron';
 import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
-import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, PermissionRequestPayload, PermissionResponsePayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 
@@ -49,6 +49,12 @@ export interface ClaudeLinkAPI {
   abortChat: (sessionId: string) => Promise<void>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
   removeChatListener: () => void;
+  onPermissionRequest: (callback: (payload: PermissionRequestPayload) => void) => () => void;
+  respondPermission: (response: PermissionResponsePayload) => Promise<void>;
+  onInteractionRequest: (callback: (payload: InteractionPromptPayload) => void) => () => void;
+  onInteractionCancel: (callback: (payload: InteractionPromptCancelPayload) => void) => () => void;
+  getPendingInteractions: () => Promise<InteractionPromptPayload[]>;
+  respondInteraction: (response: InteractionPromptResponsePayload) => Promise<void>;
   onContextUpdate: (callback: (payload: ContextStatsPayload) => void) => () => void;
   removeContextListener: () => void;
   addTask: (sessionId: string, prompt: string) => Promise<Task>;
@@ -111,6 +117,24 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.CHAT_EVENT, listener);
     },
     removeChatListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.CHAT_EVENT),
+    onPermissionRequest: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: PermissionRequestPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.PERMISSION_REQUEST, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.PERMISSION_REQUEST, listener);
+    },
+    respondPermission: (response) => ipcRenderer.invoke(IPC_CHANNELS.PERMISSION_RESPOND, response),
+    onInteractionRequest: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: InteractionPromptPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.INTERACTION_REQUEST, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.INTERACTION_REQUEST, listener);
+    },
+    onInteractionCancel: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: InteractionPromptCancelPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.INTERACTION_CANCEL, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.INTERACTION_CANCEL, listener);
+    },
+    getPendingInteractions: () => ipcRenderer.invoke(IPC_CHANNELS.INTERACTION_GET_PENDING) as Promise<InteractionPromptPayload[]>,
+    respondInteraction: (response) => ipcRenderer.invoke(IPC_CHANNELS.INTERACTION_RESPOND, response),
     onContextUpdate: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: ContextStatsPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.CONTEXT_UPDATE, listener);
