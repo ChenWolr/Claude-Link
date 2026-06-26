@@ -15,6 +15,12 @@ export function useStream() {
     () => store.streamingContent,
     (content) => {
       if (contentTimer) clearTimeout(contentTimer);
+      // 清空立即生效（不防抖）：回合结束/工具落库后流式归零，需立刻让出显示给已落库消息，
+      // 否则防抖 50ms 窗口内会出现「流式块 + 已落库消息」短暂重复。
+      if (content === '') {
+        displayContent.value = '';
+        return;
+      }
       contentTimer = setTimeout(() => {
         displayContent.value = content;
       }, 50);
@@ -26,6 +32,10 @@ export function useStream() {
     () => store.streamingThinking,
     (content) => {
       if (thinkingTimer) clearTimeout(thinkingTimer);
+      if (content === '') {
+        displayThinking.value = '';
+        return;
+      }
       thinkingTimer = setTimeout(() => {
         displayThinking.value = content;
       }, 50);
@@ -37,6 +47,10 @@ export function useStream() {
     () => store.streamingTool,
     (content) => {
       if (toolTimer) clearTimeout(toolTimer);
+      if (content === '') {
+        displayTool.value = '';
+        return;
+      }
       toolTimer = setTimeout(() => {
         displayTool.value = content;
       }, 50);

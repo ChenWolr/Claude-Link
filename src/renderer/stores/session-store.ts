@@ -19,6 +19,13 @@ export const useSessionStore = defineStore('session', {
     sending: false,
     error: null as string | null,
     recentWorkspaces: [] as string[],
+    // 右侧任务栏当前 Tab：'queue'（排队任务）/ 'subagent'（子Agent）。
+    rightTab: 'queue' as 'queue' | 'subagent',
+    // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
+    focusedSubAgentId: null as string | null,
+    // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
+    // 隐藏本回合已落库的 text/thinking（与流式块去重），回合结束/会话切换时复位。
+    turnStartIndex: 0,
     contextStats: null as { inputTokens: number; outputTokens: number; windowSize: number; ratio: number } | null,
   }),
   actions: {
@@ -49,6 +56,7 @@ export const useSessionStore = defineStore('session', {
       this.sending = false;
       this.error = null;
       this.messages = [];
+      this.turnStartIndex = 0;
       this.contextStats = session.lastContextTokens
         ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize: 200000, ratio: session.lastContextTokens / 200000 }
         : null;
@@ -195,6 +203,18 @@ export const useSessionStore = defineStore('session', {
     },
     clearToolStream() {
       this.streamingTool = '';
+    },
+    // 切换右侧任务栏 Tab。
+    setRightTab(tab: 'queue' | 'subagent') {
+      this.rightTab = tab;
+    },
+    // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。
+    focusSubAgent(parentAgentId: string) {
+      this.rightTab = 'subagent';
+      this.focusedSubAgentId = parentAgentId;
+    },
+    clearFocusedSubAgent() {
+      this.focusedSubAgentId = null;
     },
     finalizeStream() {
       if (this.streamingContent) {
