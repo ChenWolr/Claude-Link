@@ -136,7 +136,7 @@ export function deleteSession(id: string): void {
   getConnection().prepare('DELETE FROM sessions WHERE id = ?').run(id);
 }
 
-export function updateCliSessionId(id: string, cliSessionId: string): Session | null {
+export function updateCliSessionId(id: string, cliSessionId: string | null): Session | null {
   getConnection()
     .prepare("UPDATE sessions SET cli_session_id = ?, updated_at = datetime('now') WHERE id = ?")
     .run(cliSessionId, id);

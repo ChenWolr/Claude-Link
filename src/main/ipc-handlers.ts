@@ -144,7 +144,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       const existingProcess = getActiveProcess(sessionId);
       if (existingProcess) {
         sendMessage(sessionId, message);
-        messageRepo.createMessage(sessionId, 'user', message, 'message');
+        messageRepo.createMessage({ sessionId, role: 'user', content: message, eventType: 'message' });
       } else {
         spawnForChat(sessionId, mainWindow, {
           model: session.model,
@@ -157,7 +157,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         // CLI 以 stream-json 输入模式启动，进程不会自动读取本次提示；
         // 必须把首条消息写入 stdin，否则 Claude 收不到、界面表现为卡住。
         sendMessage(sessionId, message);
-        messageRepo.createMessage(sessionId, 'user', message, 'message');
+        messageRepo.createMessage({ sessionId, role: 'user', content: message, eventType: 'message' });
       }
     } catch (error) {
       logger.error('Failed to send message', error);

@@ -23,5 +23,14 @@ export interface Message {
   costUsd: number | null;
   durationMs: number | null;
   parentTaskId: string | null;
+  // 过程类型最小颗粒度分类键（见 src/shared/process-kind.ts）。text 正文为 null。
+  processKind: string | null;
+  // 子 agent 归属：来自 assistant 消息的 parent_tool_use_id。非空 → 该消息属子 agent，
+  // 不进主聊天流，抽到右侧「子Agent」Tab；主流程对应位置只留锚点。
+  parentAgentId: string | null;
+  // 工具调用 ID：tool_use 与其 tool_result 配对合并的依据。
+  toolUseId: string | null;
+  // 子 agent 的友好标题（Agent/Task 工具 input.description），用于 Tab 分组标题与锚点。
+  title: string | null;
   createdAt: string;
 }

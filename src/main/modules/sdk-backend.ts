@@ -19,7 +19,7 @@
 // 故用模块级缓存的动态 import() 加载 SDK，避免 CJS 静态 import ESM 的语法限制。
 
 import type { BrowserWindow } from 'electron';
-import { existsSync, appendFileSync } from 'fs';
+import { existsSync } from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
@@ -32,8 +32,11 @@ import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type {
   CliEvent,
   CliMessageContentPart,
+  CliMessageEvent,
   CliResultEvent,
   CliStreamEvent,
+  CliSystemInfoEvent,
+  CliPermissionEvent,
 } from '../../shared/types/cli';
 import type { SpawnOptions } from './process-manager';
 // 复用 process-manager 的纯函数（env 注入 / 落库）。normalizeToolResultContent/persistMessageParts
@@ -44,6 +47,7 @@ import {
   persistCliEvent,
   persistMessageParts,
 } from './process-manager';
+import { isMissingConversationResumeError } from './sdk-errors';
 
 // 显式标注上述工具被复用（避免 lint 误报未使用）；persistMessageParts/normalizeToolResultContent
 // 在 convertAssistantMessage 后落库路径会用到。
@@ -263,12 +267,6 @@ function buildSdkOptions(opts: SpawnOptions): Record<string, unknown> {
 
 // ── SDKMessage → CliEvent 转换 + 落库 + 推前端 ───────────────────────
 function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEvent): void {
-  // 临时诊断：记录所有转发到前端的事件类型，排查思考过程消失问题。
-  try {
-    let detail = `type=${event.type}`;
-    if (event.type === 'message') detail += ` role=${(event as { role?: string }).role}`;
-    appendFileSync(path.join(process.cwd(), 'claude-link-debug.log'), `[fwd] ${detail}\n`, 'utf8');
-  } catch { /* ignore */ }
   // 会话已删除：不再落库（messages 表已被级联删空，INSERT 会触发外键失败回滚，
   // 反复同步失败阻塞主进程事件循环，导致所有输入框失效）。事件也不必推前端
   //（前端 activeSession 已切走/置 null，handleEvent 守卫也会丢弃）。
@@ -310,18 +308,23 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
   }
 }
 
-// 把 SDK 的 assistant 消息（{type:'assistant', message:{role,content,usage}}）转成 CliMessageEvent。
-function convertAssistantMessage(sdkMsg: Record<string, unknown>): CliEvent | null {
+// 把 SDK 的 assistant 消息（{type:'assistant', message:{role,content,usage}, parent_tool_use_id?}）
+// 转成 CliMessageEvent。透传 parent_tool_use_id → parentToolUseId，让子 agent 过程能归属到
+// 主流程对应工具，抽到右侧「子Agent」Tab。
+function convertAssistantMessage(sdkMsg: Record<string, unknown>): CliMessageEvent | null {
   const message = sdkMsg.message as
     | { role?: string; content?: CliMessageContentPart[]; usage?: Record<string, unknown> }
     | undefined;
   if (!message || !Array.isArray(message.content)) return null;
+  const parentToolUseId =
+    typeof sdkMsg.parent_tool_use_id === 'string' ? sdkMsg.parent_tool_use_id : undefined;
   return {
     type: 'message',
     role: (message.role === 'user' ? 'user' : 'assistant') as 'user' | 'assistant',
     content: message.content,
-    usage: (message.usage as CliEvent extends { usage?: infer U } ? U : never) ?? undefined,
-  } as CliEvent;
+    usage: (message.usage as CliMessageEvent['usage']) ?? undefined,
+    ...(parentToolUseId ? { parentToolUseId } : {}),
+  };
 }
 
 // SDK result → CliResultEvent（字段一一对应）。
@@ -342,6 +345,21 @@ function convertResultMessage(sdkMsg: Record<string, unknown>): CliEvent {
 // SDK stream_event（SDKPartialAssistantMessage）已是 {type:'stream_event', event}，直接转发。
 function convertStreamEvent(sdkMsg: Record<string, unknown>): CliEvent {
   return { type: 'stream_event', event: sdkMsg.event as CliStreamEvent['event'] } as CliStreamEvent;
+}
+
+async function startSdkQuery(prompt: string, options: Record<string, unknown>): Promise<Query> {
+  const sdk = await importSdk();
+  return sdk.query({ prompt, options });
+}
+
+function clearResumeSessionId(sessionId: string): void {
+  sessionCliIds.delete(sessionId);
+  if (!isSessionActive(sessionId)) return;
+  try {
+    sessionRepo.updateCliSessionId(sessionId, null);
+  } catch (err) {
+    logger.warn(`Failed to clear cli session id [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 // ── 运行一个 query：消费 SDKMessage 流，转 CliEvent 推前端，结束后 emit exit ─
@@ -373,21 +391,41 @@ async function runQuery(
   if (resumeId) sdkOptions.resume = resumeId;
 
   let query: Query;
+  let resumedOnce = Boolean(resumeId);
   try {
-    const sdk = await importSdk();
-    query = sdk.query({ prompt, options: sdkOptions });
+    query = await startSdkQuery(prompt, sdkOptions);
   } catch (err) {
-    forwardEvent(sessionId, mainWindow, {
-      type: 'error',
-      message: `启动 SDK 失败：${err instanceof Error ? err.message : String(err)}`,
-    });
-    emitError(err instanceof Error ? err : new Error(String(err)));
-    emitExit(1);
-    if (entries.get(sessionId) === entry) entries.delete(sessionId);
-    return;
+    if (resumedOnce && isMissingConversationResumeError(err)) {
+      logger.warn(`Resume session ${resumeId} not found for app session ${sessionId}; clearing stale cli_session_id and starting a new SDK conversation.`);
+      clearResumeSessionId(sessionId);
+      delete sdkOptions.resume;
+      resumedOnce = false;
+      try {
+        query = await startSdkQuery(prompt, sdkOptions);
+      } catch (retryErr) {
+        forwardEvent(sessionId, mainWindow, {
+          type: 'error',
+          message: `启动 SDK 失败：${retryErr instanceof Error ? retryErr.message : String(retryErr)}`,
+        });
+        emitError(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
+        emitExit(1);
+        if (entries.get(sessionId) === entry) entries.delete(sessionId);
+        return;
+      }
+    } else {
+      forwardEvent(sessionId, mainWindow, {
+        type: 'error',
+        message: `启动 SDK 失败：${err instanceof Error ? err.message : String(err)}`,
+      });
+      emitError(err instanceof Error ? err : new Error(String(err)));
+      emitExit(1);
+      if (entries.get(sessionId) === entry) entries.delete(sessionId);
+      return;
+    }
   }
   entry.query = query;
 
+  while (true) {
   try {
     for await (const sdkMsg of query) {
       // 守卫：会话已被删除（SESSION_DELETE 调 markSessionDeleted）→ 立即停止消费流，
@@ -415,8 +453,39 @@ async function runQuery(
               logger.warn(`Failed to persist cli session id [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
             }
           }
+          continue;
         }
-        // 不转发 system 事件给前端（前端 use-chat 对 system/init 是 no-op）。
+        // 系统横幅（informational / compact_boundary / plugin_install）：转发并落库。
+        // SDK 的 'info' 子类型归一化为 'informational'。
+        const infoSubtype =
+          subtype === 'info' ? 'informational' : subtype;
+        if (
+          infoSubtype === 'informational' ||
+          infoSubtype === 'compact_boundary' ||
+          infoSubtype === 'plugin_install'
+        ) {
+          const sysInfo: CliSystemInfoEvent = {
+            type: 'system',
+            subtype: infoSubtype,
+            text: typeof sdkMsg.text === 'string' ? sdkMsg.text : undefined,
+            level: sdkMsg.level === 'warn' ? 'warn' : 'info',
+          };
+          forwardEvent(sessionId, mainWindow, sysInfo);
+          continue;
+        }
+        // 权限拒绝事件：转发并落库（processKind = permission）。
+        if (subtype === 'permission_denied') {
+          const perm: CliPermissionEvent = {
+            type: 'system',
+            subtype: 'permission_denied',
+            tool_name: typeof sdkMsg.tool_name === 'string' ? sdkMsg.tool_name : undefined,
+            tool_use_id: typeof sdkMsg.tool_use_id === 'string' ? sdkMsg.tool_use_id : undefined,
+            message: typeof sdkMsg.message === 'string' ? sdkMsg.message : undefined,
+          };
+          forwardEvent(sessionId, mainWindow, perm);
+          continue;
+        }
+        // 其它未知 system 子类型：暂不转发（前端不消费）。
         continue;
       }
       if (type === 'assistant') {
@@ -425,11 +494,6 @@ async function runQuery(
         continue;
       }
       if (type === 'stream_event') {
-        // 临时诊断：记录 stream_event 的 delta 类型，排查思考过程是否到达前端。
-        const deltaType = ((sdkMsg.event as { delta?: { type?: string } })?.delta)?.type;
-        try {
-          appendFileSync(path.join(process.cwd(), 'claude-link-debug.log'), `[stream_event] delta.type=${deltaType ?? 'none'}\n`, 'utf8');
-        } catch { /* ignore */ }
         forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg));
         continue;
       }
@@ -441,7 +505,24 @@ async function runQuery(
     }
     // 流正常结束。
     emitExit(0);
+    break;
   } catch (err) {
+    if (resumedOnce && isMissingConversationResumeError(err)) {
+      logger.warn(`Resume session ${resumeId} not found while streaming app session ${sessionId}; clearing stale cli_session_id and starting a new SDK conversation.`);
+      clearResumeSessionId(sessionId);
+      delete sdkOptions.resume;
+      resumedOnce = false;
+      try {
+        query = await startSdkQuery(prompt, sdkOptions);
+        entry.query = query;
+        continue;
+      } catch (retryErr) {
+        const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+        forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
+        emitExit(1);
+        break;
+      }
+    }
     if (interruptedQueries.has(query)) {
       // 用户中断：发 aborted（不弹错误，等价 M4）。
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
@@ -451,9 +532,10 @@ async function runQuery(
       forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
       emitExit(1);
     }
-  } finally {
-    if (entries.get(sessionId) === entry) entries.delete(sessionId);
+    break;
   }
+  }
+  if (entries.get(sessionId) === entry) entries.delete(sessionId);
 }
 
 // ── 同形公共接口（与 process-manager 签名一致）──────────────────────
