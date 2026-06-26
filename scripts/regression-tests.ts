@@ -1,6 +1,7 @@
 import { strict as assert } from 'node:assert';
 
 import { buildAnthropicApiUrl } from '../src/main/modules/api-url';
+import { isMissingConversationResumeError } from '../src/main/modules/sdk-errors';
 import { parseClaudeSettings } from '../src/main/modules/settings-importer';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 
@@ -36,6 +37,17 @@ function testSearchNormalizer(): void {
   assert.ok(normalizeSearchText('会话 1').includes(normalizeSearchText('会话1')));
 }
 
+function testMissingConversationResumeErrorDetection(): void {
+  assert.equal(
+    isMissingConversationResumeError(
+      new Error('Claude Code returned an error result: No conversation found with session ID: 026eb341-6b20-4c1e-a3f9-2fe659d37a6f'),
+    ),
+    true,
+  );
+  assert.equal(isMissingConversationResumeError(new Error('No active SDK query for session abc')), false);
+}
+
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testSearchNormalizer();
+testMissingConversationResumeErrorDetection();

@@ -12,7 +12,7 @@
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "package:win": "electron-builder --win --publish never",
     "typecheck": "vue-tsc --noEmit",
-    "selftest": "npx tsx scripts/selftest-settings-mapping.ts"
+    "selftest": "npx tsx scripts/selftest-settings-mapping.ts && npx tsx scripts/regression-tests.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.191",
