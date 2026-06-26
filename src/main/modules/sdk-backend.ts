@@ -23,6 +23,7 @@ import { existsSync } from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
+import type { PermissionResponsePayload } from '../../shared/types/ipc';
 import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { logger } from '../utils/logger';
@@ -48,6 +49,17 @@ import {
   persistMessageParts,
 } from './process-manager';
 import { isMissingConversationResumeError } from './sdk-errors';
+import { cancelInteractionsForSession, requestInteraction } from './interaction-prompts';
+import {
+  SUPPORTED_USER_DIALOG_KINDS,
+  buildPermissionInteractionPayload,
+  createUserDialogHandler,
+  isAskUserQuestionPayload,
+  mapPermissionInteractionResponse,
+  requestAskUserQuestionInteractions,
+  type CanUseToolOptions,
+  type PermissionResult,
+} from './sdk-interactions';
 
 // 显式标注上述工具被复用（避免 lint 误报未使用）；persistMessageParts/normalizeToolResultContent
 // 在 convertAssistantMessage 后落库路径会用到。
@@ -93,15 +105,59 @@ const interruptedQueries = new WeakSet<Query>();
 //      2) 反复同步 DB 操作阻塞主进程事件循环导致所有输入框失效。
 // 比 sessionRepo.getSession() 轻得多（内存 Set.has vs 索引查询）。
 const activeSessions = new Set<string>();
+const pendingPermissionRequests = new Map<string, (response: PermissionResponsePayload) => void>();
 // 标记会话已删除：runQuery 下轮迭代检测到即自停，forwardEvent 落库前也据此跳过。
 export function markSessionDeleted(sessionId: string): void {
   activeSessions.delete(sessionId);
+  cancelInteractionsForSession(sessionId);
+  for (const [id, resolve] of pendingPermissionRequests) {
+    pendingPermissionRequests.delete(id);
+    resolve({ id, optionId: 'deny' });
+  }
 }
 function markSessionActive(sessionId: string): void {
   activeSessions.add(sessionId);
 }
 function isSessionActive(sessionId: string): boolean {
   return activeSessions.has(sessionId);
+}
+
+export function respondToPermissionRequest(response: PermissionResponsePayload): void {
+  const resolve = pendingPermissionRequests.get(response.id);
+  if (!resolve) {
+    logger.warn(`Permission response ignored; request not found: ${response.id}`);
+    return;
+  }
+  pendingPermissionRequests.delete(response.id);
+  resolve(response);
+}
+
+function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
+  return async (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions): Promise<PermissionResult> => {
+    if (!isSessionActive(sessionId)) {
+      return { behavior: 'deny', message: '会话已关闭', interrupt: true, toolUseID: options.toolUseID };
+    }
+
+    if (toolName === 'AskUserQuestion' && isAskUserQuestionPayload(input)) {
+      const result = await requestAskUserQuestionInteractions(sessionId, mainWindow, input, options);
+      return result
+        ? { behavior: 'allow', updatedInput: result, toolUseID: options.toolUseID }
+        : { behavior: 'deny', message: '用户取消了选择题交互', toolUseID: options.toolUseID };
+    }
+
+    const payload = buildPermissionInteractionPayload(sessionId, toolName, input, options);
+
+    forwardEvent(sessionId, mainWindow, {
+      type: 'system',
+      subtype: 'permission_request',
+      tool_name: toolName,
+      tool_use_id: options.toolUseID,
+      message: payload.title,
+    });
+
+    const response = await requestInteraction(mainWindow, payload, options.signal);
+    return mapPermissionInteractionResponse(payload, response);
+  };
 }
 
 // ── 句柄：鸭子类型 ChildProcess 的 exit 语义 ────────────────────────
@@ -207,7 +263,7 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
 }
 
 // ── 组装 SDK Options ───────────────────────────────────────────────
-function buildSdkOptions(opts: SpawnOptions): Record<string, unknown> {
+function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow): Record<string, unknown> {
   const config = getConfig();
   const options: Record<string, unknown> = {
     // env：apiKey/baseUrl/模型映射全靠它（复用 buildSpawnEnv，第三方端点跑通的关键）。
@@ -219,9 +275,12 @@ function buildSdkOptions(opts: SpawnOptions): Record<string, unknown> {
     settingSources: [],
     // 拿流式增量（对应 stream_event），前端逐字/逐工具参数显示。
     includePartialMessages: true,
-    // 启用 extended thinking：SDK 默认只为支持 adaptive thinking 的 Claude 模型启用，
-    // 第三方模型（如 GLM-5.2）需显式开启，否则端点不返回 thinking_delta，前端看不到思考过程。
-    thinking: { type: 'enabled', budgetTokens: 16000 },
+    // 启用 adaptive thinking：交给 SDK/模型决定思考预算，避免新模型拒绝固定 budgetTokens。
+    thinking: { type: 'adaptive' },
+    canUseTool: createPermissionHandler(sessionId, mainWindow),
+    // SDK 只有同时声明 supportedDialogKinds 与 onUserDialog，才会把选择题交互交给宿主 UI。
+    supportedDialogKinds: SUPPORTED_USER_DIALOG_KINDS,
+    onUserDialog: createUserDialogHandler(sessionId, mainWindow),
   };
 
   // 模型：与 process-manager.buildCommonArgs 同规则——别名解析成实际模型名再传。
@@ -385,7 +444,7 @@ async function runQuery(
   }
   entries.set(sessionId, entry);
 
-  const sdkOptions = buildSdkOptions(opts);
+  const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow);
   // resume：优先显式传入，否则用已记录的 CLI session id（等价 process-manager 的 --resume）。
   const resumeId = opts.resumeSessionId || sessionCliIds.get(sessionId);
   if (resumeId) sdkOptions.resume = resumeId;
@@ -473,11 +532,11 @@ async function runQuery(
           forwardEvent(sessionId, mainWindow, sysInfo);
           continue;
         }
-        // 权限拒绝事件：转发并落库（processKind = permission）。
-        if (subtype === 'permission_denied') {
+        // 权限询问/拒绝事件：转发并落库（processKind = permission）。
+        if (subtype === 'permission_denied' || subtype === 'permission_request') {
           const perm: CliPermissionEvent = {
             type: 'system',
-            subtype: 'permission_denied',
+            subtype,
             tool_name: typeof sdkMsg.tool_name === 'string' ? sdkMsg.tool_name : undefined,
             tool_use_id: typeof sdkMsg.tool_use_id === 'string' ? sdkMsg.tool_use_id : undefined,
             message: typeof sdkMsg.message === 'string' ? sdkMsg.message : undefined,
@@ -595,6 +654,7 @@ export function sendMessage(sessionId: string, message: string): void {
 }
 
 export function killProcess(sessionId: string): void {
+  cancelInteractionsForSession(sessionId);
   const entry = entries.get(sessionId);
   if (entry && entry.query) {
     interruptedQueries.add(entry.query);

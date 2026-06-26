@@ -46,6 +46,11 @@ function isWindows(): boolean {
 export function markSessionDeleted(_sessionId: string): void {
   /* no-op for spawn backend */
 }
+
+export function respondToPermissionRequest(_response: unknown): void {
+  logger.warn('Permission response ignored; spawn backend does not use unified SDK permission prompts.');
+}
+
 export interface SpawnOptions {
   model?: string;
   modelOverride?: string | null;
@@ -286,13 +291,13 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
         }
         break;
       }
-      if (sysEvent.subtype === 'permission_denied') {
+      if (sysEvent.subtype === 'permission_denied' || sysEvent.subtype === 'permission_request') {
         const p = event as CliPermissionEvent;
         const toolName = p.tool_name ? `：${p.tool_name}` : '';
         messageRepo.createMessage({
           sessionId,
           role: 'system',
-          content: p.message || `权限被拒绝${toolName}`,
+          content: p.message || (p.subtype === 'permission_request' ? `等待权限确认${toolName}` : `权限被拒绝${toolName}`),
           eventType: 'system',
           processKind: 'permission',
           toolUseId: p.tool_use_id ?? null,

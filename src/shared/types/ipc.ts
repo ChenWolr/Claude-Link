@@ -29,6 +29,12 @@ export const IPC_CHANNELS = {
   CHAT_SEND: 'chat:send',
   CHAT_ABORT: 'chat:abort',
   CHAT_EVENT: 'chat:event',
+  PERMISSION_REQUEST: 'permission:request',
+  PERMISSION_RESPOND: 'permission:respond',
+  INTERACTION_REQUEST: 'interaction:request',
+  INTERACTION_RESPOND: 'interaction:respond',
+  INTERACTION_CANCEL: 'interaction:cancel',
+  INTERACTION_GET_PENDING: 'interaction:getPending',
   CONTEXT_UPDATE: 'context:update',
   TASK_ADD: 'task:add',
   TASK_REMOVE: 'task:remove',
@@ -50,6 +56,73 @@ export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 export interface ChatEventPayload {
   sessionId: string;
   event: CliEvent;
+}
+
+export interface PermissionOption {
+  id: string;
+  label: string;
+  description?: string;
+  primary?: boolean;
+  danger?: boolean;
+}
+
+export interface PermissionRequestPayload {
+  id: string;
+  sessionId: string;
+  toolName: string;
+  toolUseId: string;
+  title: string;
+  description?: string;
+  input: Record<string, unknown>;
+  options: PermissionOption[];
+  suggestions?: unknown[];
+}
+
+export interface PermissionResponsePayload {
+  id: string;
+  optionId: string;
+}
+
+export type InteractionPromptKind = 'permission' | 'single-choice' | 'multi-choice' | 'text' | 'confirm';
+
+export interface InteractionPromptOption {
+  id: string;
+  label: string;
+  description?: string;
+  value?: unknown;
+  primary?: boolean;
+  danger?: boolean;
+  preview?: string;
+}
+
+export interface InteractionPromptPayload {
+  id: string;
+  sessionId: string;
+  kind: InteractionPromptKind;
+  title: string;
+  description?: string;
+  source?: string;
+  toolName?: string;
+  toolUseId?: string;
+  input?: Record<string, unknown>;
+  options?: InteractionPromptOption[];
+  multiSelect?: boolean;
+  allowOther?: boolean;
+  otherLabel?: string;
+  defaultOptionIds?: string[];
+  suggestions?: unknown[];
+}
+
+export interface InteractionPromptResponsePayload {
+  id: string;
+  action: 'submit' | 'cancel';
+  selectedOptionIds?: string[];
+  otherText?: string;
+}
+
+export interface InteractionPromptCancelPayload {
+  id: string;
+  sessionId: string;
 }
 
 export interface ContextStatsPayload {
