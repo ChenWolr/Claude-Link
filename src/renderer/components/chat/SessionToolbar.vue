@@ -3,6 +3,8 @@
 // 按用户要求，所有"会话内容"相关的控件都放在底部（输入区附近），而非顶部。
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
+import { useConfigStore } from '../../stores/config-store';
+import { FONT_SCALE_SIZES } from '../../../shared/constants';
 import ModelSelector from './ModelSelector.vue';
 import ContextButton from './ContextButton.vue';
 import type { Session } from '../../../shared/types/session';
@@ -17,7 +19,15 @@ const emit = defineEmits<{
 }>();
 
 const sessionStore = useSessionStore();
+const configStore = useConfigStore();
 const activeSession = computed(() => sessionStore.activeSession);
+
+async function onFontScaleChange(e: Event) {
+  const scale = (e.target as HTMLSelectElement).value;
+  configStore.config.fontScale = scale as typeof configStore.config.fontScale;
+  document.documentElement.style.setProperty('--font-size-base', FONT_SCALE_SIZES[scale] ?? '16px');
+  await configStore.saveConfig();
+}
 
 // 工作空间下拉
 const showWorkspaceMenu = ref(false);
@@ -129,6 +139,16 @@ onUnmounted(() => {
       </select>
     </label>
 
+    <!-- 字号：全局字体大小三档切换 -->
+    <label class="ctl ctl--select" title="字体大小（全局）">
+      <span class="ctl__label">字号</span>
+      <select :value="configStore.config.fontScale" @change="onFontScaleChange">
+        <option value="small">小</option>
+        <option value="medium">中</option>
+        <option value="large">大</option>
+      </select>
+    </label>
+
     <!-- 操作：仅发送中显示中断；删除会话走左侧栏 -->
     <div v-if="sending" class="ctl ctl--right">
       <button type="button" class="ctl__btn ctl__btn--abort" @click="emit('abort')">■ 中断</button>
@@ -140,7 +160,7 @@ onUnmounted(() => {
 .session-toolbar {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 1rem;
   flex-wrap: wrap;
   /* 占满聊天区宽度、内容左对齐，与 ChatInput 同宽（修 #1/#3）。 */
   width: 100%;
@@ -164,7 +184,7 @@ onUnmounted(() => {
 
 .ctl__label {
   color: var(--color-text-muted);
-  font-size: 11px;
+  font-size: 0.6875rem;
   white-space: nowrap;
 }
 
@@ -178,7 +198,7 @@ onUnmounted(() => {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 5px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
   white-space: nowrap;
   overflow: hidden;
@@ -224,7 +244,7 @@ onUnmounted(() => {
 
 .caret {
   opacity: 0.6;
-  font-size: 10px;
+  font-size: 0.625rem;
 }
 
 .menu {
@@ -249,7 +269,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--color-text);
   padding: 7px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   text-align: left;
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -278,7 +298,7 @@ onUnmounted(() => {
 .menu__section {
   padding: 6px 10px 2px;
   color: var(--color-text-muted);
-  font-size: 10px;
+  font-size: 0.625rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -289,7 +309,7 @@ onUnmounted(() => {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 5px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
 }
 
