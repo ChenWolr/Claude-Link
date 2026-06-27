@@ -6,27 +6,34 @@
 // result: 补 result 文本（防丢）+ 挂费用/耗时。
 // 这里是"Claude 思考/输入/输出原封不动接收展示"的核心实现（之前 thinking_delta 被完全丢弃）。
 
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import type { Message } from '../../shared/types/session';
 
-export function useChat() {
+// 根因修复：全局单例。useChat 只初始化一次（在 App.vue），监听生命周期与 app 等长。
+// ChatPage 卸载/重挂载不影响监听——sending 从 store getter 派生，error 用 store.error。
+// sendMessage/abort 可在任意组件调（通过 useChat() 复用单例）。
+let chatSingleton: ReturnType<typeof createChat> | null = null;
+
+function createChat() {
   const store = useSessionStore();
-  const sending = ref(false);
+  // sending 改为从 store getter 派生（computed），不再用 local ref。
+  // 这样 ChatPage 卸载/重挂载时，sending 始终从 store.runningSessions 反映，不会丢失。
+  const sending = computed(() => store.sending);
   const error = ref<string | null>(null);
 
   let cleanup: (() => void) | null = null;
-  // abort 的软复位超时句柄。必须句柄化并在新回合/结束事件时清理，
-  // 否则旧回合的定时器会在 1.2s 后把新回合的 sending 错误复位（跨回合串扰）。
   let abortTimer: ReturnType<typeof setTimeout> | null = null;
+  let abortSessionId: string | null = null;
   function clearAbortTimer(): void {
     if (abortTimer) {
       clearTimeout(abortTimer);
       abortTimer = null;
     }
+    abortSessionId = null;
   }
 
   // 本回合缓存（力度②：message 事件为唯一真相）：
@@ -74,21 +81,20 @@ export function useChat() {
     });
   }
 
-  // 切换/删除会话时复位发送态。deleteSession 把 activeSession 置 null，若此时
-  // sending=true（回复进行中），handleEvent 守卫会丢弃后续 result/aborted 事件，
-  // 导致 sending 永不复位、输入框卡死。这里随 activeSession 变化强制复位。
+  // 根因修复：watcher 不再绑定到 ChatPage 生命周期（单例在 App.vue 初始化）。
+  // 切换会话时同步 error + resetTurnCache，sending 由 store getter 自动反映。
   watch(
     () => store.activeSession?.id,
-    () => {
+    (newId) => {
       clearAbortTimer();
-      sending.value = false;
-      store.clearStream();
-      store.clearThinking();
-      store.clearToolStream();
+      error.value = null;
+      resetTurnCache();
     },
   );
 
+  // 根因修复：全局监听，在 App.vue onMounted 调一次。生命周期与 app 等长。
   function startListening(): void {
+    window.claudeLink.removeChatListener();
     cleanup?.();
     cleanup = window.claudeLink.onChatEvent(handleEvent);
   }
@@ -99,9 +105,46 @@ export function useChat() {
     window.claudeLink.removeChatListener();
   }
 
+  // 问题 1：不再丢弃非当前会话的事件。后台执行的会话事件需要处理：
+  // - stream_event: 写入 sessionStreams 快照（切回时恢复流式预览）
+  // - result/error/aborted: markStopped + 清快照（如果是当前会话还走正常结束流程）
+  // - message/system: 主进程已落库，切回时 getSessionMessages 重载；渲染层只处理当前会话
   function handleEvent(payload: ChatEventPayload): void {
-    if (!store.activeSession || payload.sessionId !== store.activeSession.id) return;
+    const isCurrent = !!store.activeSession && payload.sessionId === store.activeSession.id;
+    if (!isCurrent) {
+      handleBackgroundEvent(payload);
+      return;
+    }
     handleCliEvent(payload.event);
+  }
+
+  // 问题 1：处理后台（非当前）会话的事件。只处理流式累积和结束标记，
+  // 不处理 message/system（主进程已落库，切回时重载）。
+  function handleBackgroundEvent(payload: ChatEventPayload): void {
+    const sid = payload.sessionId;
+    const event = payload.event;
+    switch (event.type) {
+      case 'stream_event': {
+        const delta = event.event?.delta;
+        if (!delta) break;
+        if (delta.type === 'thinking_delta' && delta.thinking) {
+          store.appendBackgroundStream(sid, 'thinking', delta.thinking);
+        } else if (delta.type === 'input_json_delta' && delta.partial_json) {
+          store.appendBackgroundStream(sid, 'tool', delta.partial_json);
+        } else if (delta.text) {
+          store.appendBackgroundStream(sid, 'content', delta.text);
+        }
+        break;
+      }
+      case 'result':
+      case 'error':
+      case 'aborted': {
+        // 后台会话执行结束：标记停止 + 清理快照
+        store.markStopped(sid);
+        break;
+      }
+      // message/system/init: 主进程已落库，切回时 getSessionMessages 重载，这里跳过
+    }
   }
 
   function handleCliEvent(event: CliEvent): void {
@@ -156,7 +199,8 @@ export function useChat() {
         if (isErrResult && event.result?.trim()) {
           error.value = event.result.trim();
         }
-        sending.value = false;
+        // 根因修复：markStopped 移除 runningSessions，sending getter 自动变 false。
+        if (store.activeSession) store.markStopped(store.activeSession.id);
         clearAbortTimer();
         resetTurnCache();
         break;
@@ -167,7 +211,7 @@ export function useChat() {
         store.clearThinking();
         store.clearToolStream();
         error.value = event.message;
-        sending.value = false;
+        if (store.activeSession) store.markStopped(store.activeSession.id);
         clearAbortTimer();
         resetTurnCache();
         break;
@@ -178,7 +222,7 @@ export function useChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
-        sending.value = false;
+        if (store.activeSession) store.markStopped(store.activeSession.id);
         clearAbortTimer();
         resetTurnCache();
         break;
@@ -386,7 +430,8 @@ export function useChat() {
     clearAbortTimer();
     resetTurnCache();
     error.value = null;
-    sending.value = true;
+    // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
+    store.markRunning(store.activeSession.id);
 
     persistMessage({ role: 'user', eventType: 'message', content: text.trim(), processKind: null });
     // 力度② turn 边界：本回合 assistant 消息从此索引开始。MessageList 据此在发送中
@@ -394,11 +439,11 @@ export function useChat() {
     store.turnStartIndex = store.messages.length;
 
     try {
-      startListening();
+      // 监听已在 App.vue 全局注册，这里不重复 startListening。
       await window.claudeLink.sendMessage(store.activeSession.id, text.trim());
     } catch (e) {
       error.value = e instanceof Error ? e.message : '发送失败';
-      sending.value = false;
+      if (store.activeSession) store.markStopped(store.activeSession.id);
     }
   }
 
@@ -408,6 +453,7 @@ export function useChat() {
   async function abort(): Promise<void> {
     if (!store.activeSession) return;
     clearAbortTimer();
+    abortSessionId = store.activeSession.id;
     try {
       await window.claudeLink.abortChat(store.activeSession.id);
     } catch {
@@ -417,8 +463,11 @@ export function useChat() {
     // 句柄化：结束事件到达或下一回合开始时会被 clearAbortTimer 清掉，杜绝跨回合串扰。
     abortTimer = setTimeout(() => {
       abortTimer = null;
-      if (sending.value) {
-        sending.value = false;
+      const sid = abortSessionId;
+      abortSessionId = null;
+      // 根因修复：markStopped 移除 runningSessions，sending getter 自动变 false。
+      if (sid && store.runningSessions.includes(sid)) {
+        store.markStopped(sid);
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
@@ -427,4 +476,13 @@ export function useChat() {
   }
 
   return { sending, error, sendMessage, abort, startListening, stopListening };
+}
+
+// 根因修复：useChat 返回全局单例。监听在 App.vue onMounted 注册一次，
+// 生命周期与 app 等长，ChatPage 卸载/重挂载不影响监听与 sending 状态。
+export function useChat() {
+  if (!chatSingleton) {
+    chatSingleton = createChat();
+  }
+  return chatSingleton;
 }
