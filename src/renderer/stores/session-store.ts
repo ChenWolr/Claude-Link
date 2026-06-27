@@ -21,8 +21,13 @@ export const useSessionStore = defineStore('session', {
     streamingContent: '',
     streamingThinking: '',
     streamingTool: '',
-    sending: false,
+    // sending 改为 getter（从 runningSessions 派生），这里不再存 state。
+    // 保留这个字段名是为了向后兼容（其他地方读 store.sending），但它是 getter 不是 state。
     error: null as string | null,
+    // 根因修复：per-session 执行状态隔离。监听全局化后，ChatPage 卸载不影响执行。
+    runningSessions: [] as string[],
+    // per-session 流式快照。切换会话时保存当前流式内容到快照，切回时恢复。
+    sessionStreams: {} as Record<string, { content: string; thinking: string; tool: string }>,
     recentWorkspaces: [] as string[],
     // 右侧任务栏当前 Tab：'queue'（排队任务）/ 'subagent'（子Agent）。
     rightTab: 'queue' as 'queue' | 'subagent',
@@ -40,6 +45,11 @@ export const useSessionStore = defineStore('session', {
     // 当前应展示的会话列表：搜索态下返回 searchResults，否则返回全量 sessions。
     displayedSessions(state): Session[] {
       return state.searchResults ?? state.sessions;
+    },
+    // 根因修复：sending 从 runningSessions 派生，不再依赖组件 local ref。
+    // ChatPage 卸载/重挂载不影响——只要 activeSession 在 runningSessions 里就是 true。
+    sending(state): boolean {
+      return !!state.activeSession && state.runningSessions.includes(state.activeSession.id);
     },
   },
   actions: {
@@ -64,13 +74,30 @@ export const useSessionStore = defineStore('session', {
       }
     },
     async switchSession(session: Session) {
+      // 问题 1：切换会话不再清空一切。保存当前会话的流式快照，恢复目标会话的快照。
+      // sending 不再无条件 false，而是根据目标会话是否在 runningSessions 中决定。
+      const oldId = this.activeSession?.id;
+      if (oldId && oldId !== session.id) {
+        this.sessionStreams[oldId] = {
+          content: this.streamingContent,
+          thinking: this.streamingThinking,
+          tool: this.streamingTool,
+        };
+      }
       this.activeSession = session;
-      // M2：切换会话必须重置所有发送/流式/错误状态，否则会话 B 会被会话 A 的
-      // sending(输入框锁死)/streaming/error 残留污染。
-      this.streamingContent = '';
-      this.streamingThinking = '';
-      this.streamingTool = '';
-      this.sending = false;
+      // 恢复目标会话的流式快照（如果有），否则清空
+      const snapshot = this.sessionStreams[session.id];
+      if (snapshot) {
+        this.streamingContent = snapshot.content;
+        this.streamingThinking = snapshot.thinking;
+        this.streamingTool = snapshot.tool;
+      } else {
+        this.streamingContent = '';
+        this.streamingThinking = '';
+        this.streamingTool = '';
+      }
+      // sending 现在是 getter（从 runningSessions 派生），无需手动设。
+      // switchSession 恢复流式快照 + 从 DB 重载 messages 即可。
       this.error = null;
       this.messages = [];
       this.turnStartIndex = 0;
@@ -97,6 +124,9 @@ export const useSessionStore = defineStore('session', {
           this.activeSession = null;
           this.messages = [];
         }
+        // 问题 1：清理已删会话的执行状态与流式快照
+        this.runningSessions = this.runningSessions.filter((sid) => sid !== id);
+        delete this.sessionStreams[id];
       } catch (error) {
         this.error = error instanceof Error ? error.message : '删除会话失败';
       }
@@ -183,6 +213,40 @@ export const useSessionStore = defineStore('session', {
     // 问题 4：ContextButton 横幅显示完毕后调用，复位标记以便下次压缩可再次触发。
     clearCompactedJustNow() {
       this.compactedJustNow = false;
+    },
+    // 根因修复：标记会话为执行中。sendMessage 时调用。
+    // sending 是 getter（从 runningSessions 派生），无需手动设 this.sending。
+    markRunning(sessionId: string) {
+      if (!this.runningSessions.includes(sessionId)) {
+        this.runningSessions.push(sessionId);
+      }
+    },
+    // 根因修复：标记会话执行结束。result/error/aborted 时调用。
+    markStopped(sessionId: string) {
+      this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
+      // 清理该会话的流式快照（执行结束，快照不再需要）
+      delete this.sessionStreams[sessionId];
+    },
+    // 问题 1：向非当前会话的流式快照追加内容（后台执行时累积流式，切回时恢复）。
+    appendBackgroundStream(sessionId: string, type: 'content' | 'thinking' | 'tool', text: string) {
+      if (!this.sessionStreams[sessionId]) {
+        this.sessionStreams[sessionId] = { content: '', thinking: '', tool: '' };
+      }
+      this.sessionStreams[sessionId][type] += text;
+    },
+    // 问题 1：清空非当前会话的流式快照（result/error/aborted 时）。
+    clearBackgroundStream(sessionId: string) {
+      delete this.sessionStreams[sessionId];
+    },
+    // 根因修复：ChatPage 重挂载（路由跳转回来）时重拉 messages + 同步状态。
+    // 不重新注册监听（监听已在 App.vue 全局注册），只刷新当前会话数据。
+    async refreshActiveSession() {
+      if (!this.activeSession) return;
+      try {
+        this.messages = await window.claudeLink.getSessionMessages(this.activeSession.id);
+      } catch {
+        // session may have no messages yet
+      }
     },
     // 会话重命名：写入 session.name。默认名由首句 analyzeTopic 自动生成，此处供用户自定义。
     async renameActiveSession(name: string) {

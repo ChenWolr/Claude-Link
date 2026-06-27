@@ -10,7 +10,7 @@ import SessionToolbar from '../components/chat/SessionToolbar.vue';
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
-const { sending, error, sendMessage, abort, startListening, stopListening } = useChat();
+const { sending, error, sendMessage, abort } = useChat();
 const { displayContent, displayThinking, displayTool } = useStream();
 
 // 内联提示（如"未选择工作空间"），自动消失。
@@ -26,11 +26,12 @@ function showNotice(msg: string) {
 
 onMounted(() => {
   store.loadSessions();
-  store.bindContextUpdates();
+  // 根因修复：监听已在 App.vue 全局注册，这里只刷新当前会话数据（重拉 messages）。
+  // bindContextUpdates 也在 App.vue 注册，不在这里调。
+  store.refreshActiveSession();
 });
 
-// 切换会话时清掉上一会话残留的错误横幅与提示。error 是 useChat 单例 ref，
-// switchSession 清不到它（只清 store.error），否则一次报错后切任何会话横幅都挂着。
+// 切换会话时清掉上一会话残留的错误横幅与提示。
 watch(
   () => store.activeSession?.id,
   () => {
@@ -40,7 +41,6 @@ watch(
 );
 
 onUnmounted(() => {
-  stopListening();
   if (noticeTimer) clearTimeout(noticeTimer);
 });
 
@@ -82,7 +82,7 @@ async function handleNewSession() {
   const session = await store.createSession(`会话 ${store.sessions.length + 1}`);
   if (session) {
     await store.switchSession(session);
-    startListening();
+    // 根因修复：监听已在 App.vue 全局注册，无需在新建会话时重新注册。
   }
 }
 </script>
