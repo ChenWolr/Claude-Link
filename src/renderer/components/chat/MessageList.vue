@@ -82,6 +82,26 @@ watch(
   },
 );
 
+// 发送者角色：fold（思考/工具过程）算 assistant 侧，message 按 role 判断。
+// 用于间距分组：同一发送者的连续消息间距收紧，发送者切换时间距加大。
+function getEffectiveRole(item: RenderItem): 'user' | 'assistant' {
+  if (item.type === 'fold') return 'assistant';
+  return item.message.role === 'user' ? 'user' : 'assistant';
+}
+
+function isSenderTransition(idx: number): boolean {
+  if (idx === 0) return false;
+  return getEffectiveRole(renderItems.value[idx - 1]) !== getEffectiveRole(renderItems.value[idx]);
+}
+
+// 流式元素（status/thinking/tool/stream）都是 assistant 侧。
+// 若上一条已落库消息来自 user，则此处发生发送者切换，需要加宽间距。
+function isStreamTransition(): boolean {
+  const items = renderItems.value;
+  if (items.length === 0) return false;
+  return getEffectiveRole(items[items.length - 1]) === 'user';
+}
+
 function handleCopyClick(event: MouseEvent): void {
   const target = event.target as HTMLElement;
   const button = target.closest<HTMLButtonElement>('.code-block__copy');
@@ -112,25 +132,28 @@ function handleCopyClick(event: MouseEvent): void {
 <template>
   <div class="message-list">
     <div ref="container" class="message-list__scroller" @click="handleCopyClick">
-      <template v-for="item in renderItems" :key="item.key">
+      <template v-for="(item, idx) in renderItems" :key="item.key">
         <ProcessGroup
           v-if="item.type === 'fold'"
+          :class="{ 'msg-transition': isSenderTransition(idx) }"
           :messages="item.messages"
           :stats="item.stats"
           :active="item.key === activeFoldId"
         />
-        <MessageBubble v-else :message="item.message" />
+        <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" />
       </template>
-      <div v-if="sending && !streamingContent && !streamingThinking && !streamingTool" class="status-indicator">
-        <span class="status-indicator__dots"><span></span><span></span><span></span></span>
-        <span class="status-indicator__text">Claude 正在思考…</span>
+      <div v-if="sending || streamingContent || streamingThinking || streamingTool" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
+        <div v-if="sending && !streamingContent && !streamingThinking && !streamingTool" class="status-indicator">
+          <span class="status-indicator__dots"><span></span><span></span><span></span></span>
+          <span class="status-indicator__text">Claude 正在思考…</span>
+        </div>
+        <ThinkingBlock v-if="streamingThinking" :content="streamingThinking" streaming />
+        <div v-if="streamingTool" class="tool-stream">
+          <span class="tool-stream__label">🔧 正在调用工具…</span>
+          <pre class="tool-stream__content">{{ streamingTool }}</pre>
+        </div>
+        <StreamRenderer v-if="streamingContent" :content="streamingContent" />
       </div>
-      <ThinkingBlock v-if="streamingThinking" :content="streamingThinking" streaming />
-      <div v-if="streamingTool" class="tool-stream">
-        <span class="tool-stream__label">🔧 正在调用工具…</span>
-        <pre class="tool-stream__content">{{ streamingTool }}</pre>
-      </div>
-      <StreamRenderer v-if="streamingContent" :content="streamingContent" />
     </div>
   </div>
 </template>
@@ -152,7 +175,23 @@ function handleCopyClick(event: MouseEvent): void {
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  /* 同一发送者的连续消息间距收紧（0.25rem = 4px@medium）；
+     发送者切换处由 :deep(.msg-transition) 叠加 margin-top 加宽至 1rem。 */
+  gap: 0.25rem;
+}
+
+/* 发送者切换（user→assistant / assistant→user）：额外加宽间距。
+   gap(0.25rem) + margin-top(0.75rem) = 1rem 总间距。 */
+:deep(.msg-transition) {
+  margin-top: 0.75rem;
+}
+
+/* 流式元素容器：思考/工具/正文流式渲染都在此容器内，内部间距紧凑。
+   容器本身的间距由 .msg-transition 控制（user→assistant 切换时加宽）。 */
+.stream-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
 }
 
 /* 消息少时贴底、消息多时可自由向上滚动。
@@ -173,7 +212,7 @@ function handleCopyClick(event: MouseEvent): void {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   border: 1px solid var(--color-border);
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--color-text-muted);
 }
 
@@ -219,7 +258,7 @@ function handleCopyClick(event: MouseEvent): void {
 
 .tool-stream__label {
   display: block;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 700;
   color: var(--color-accent-strong);
   text-transform: uppercase;
@@ -232,7 +271,7 @@ function handleCopyClick(event: MouseEvent): void {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
   max-height: 160px;
   overflow-y: auto;

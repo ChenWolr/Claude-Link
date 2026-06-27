@@ -8,7 +8,7 @@ import ModelMappingInputs from '../components/config/ModelMappingInputs.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import TestConnectionModal from '../components/config/TestConnectionModal.vue';
 import { useInteractionStore } from '../stores/interaction-store';
-import { THEME_PALETTES } from '../../shared/constants';
+import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { parseClaudeSettings } from '../../shared/settings-parser';
 
 const store = useConfigStore();
@@ -28,7 +28,7 @@ const activeTab = ref<TabId>('connection');
 // cliPath/cliVersion/workingDirectory 由系统维护（自动检测/未开放编辑），不纳入快照。
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
-  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId',
+  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale',
 ] as const;
 const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
 let initialized = false;
@@ -274,6 +274,17 @@ function applyTheme(paletteId: string) {
   root.style.setProperty('--color-accent-strong', palette.colors.accentStrong);
   root.style.setProperty('--color-danger', palette.colors.danger);
 }
+
+function applyFontScale(scale: string) {
+  const root = document.documentElement;
+  root.style.setProperty('--font-size-base', FONT_SCALE_SIZES[scale] ?? '16px');
+}
+
+function handleFontScaleChange(e: Event) {
+  const scale = (e.target as HTMLSelectElement).value;
+  store.config.fontScale = scale as typeof store.config.fontScale;
+  applyFontScale(scale);
+}
 </script>
 
 <template>
@@ -400,6 +411,14 @@ function applyTheme(paletteId: string) {
       <div v-show="activeTab === 'appearance'" class="section">
         <h3 class="section-title">外观</h3>
         <ThemeSelector :selected-id="store.config.themePaletteId" @select="handleThemeSelect" />
+        <label class="field">
+          <span>字号 <small class="field-hint">小/中/大三档，全局缩放所有文字与间距</small></span>
+          <select :value="store.config.fontScale" @change="handleFontScaleChange">
+            <option value="small">小</option>
+            <option value="medium">中</option>
+            <option value="large">大</option>
+          </select>
+        </label>
       </div>
 
       <!-- 保存：始终可见，与所在标签页无关 -->
@@ -440,7 +459,7 @@ function applyTheme(paletteId: string) {
 
 .config-page__header h1 {
   margin: 4px 0 0;
-  font-size: 24px;
+  font-size: 1.5rem;
 }
 
 .back-button {
@@ -449,7 +468,7 @@ function applyTheme(paletteId: string) {
   background: transparent;
   color: var(--color-text);
   padding: 8px 16px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
   transition: background 0.15s;
 }
@@ -461,7 +480,7 @@ function applyTheme(paletteId: string) {
 .eyebrow {
   margin: 0;
   color: var(--color-accent-strong);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 700;
 }
 
@@ -469,7 +488,7 @@ function applyTheme(paletteId: string) {
   border-radius: var(--radius-md);
   padding: 12px 16px;
   margin-bottom: 20px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .banner--ok {
@@ -494,7 +513,7 @@ function applyTheme(paletteId: string) {
   border-radius: var(--radius-md);
   padding: 10px 14px;
   margin-bottom: 16px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .toast--success {
@@ -522,7 +541,7 @@ function applyTheme(paletteId: string) {
   background: var(--color-accent);
   color: #07120d;
   padding: 8px 14px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
@@ -531,7 +550,7 @@ function applyTheme(paletteId: string) {
 .autodetect-info {
   margin: 0;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
 }
 
@@ -545,7 +564,7 @@ function applyTheme(paletteId: string) {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 8px 14px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
@@ -568,7 +587,7 @@ function applyTheme(paletteId: string) {
   background: transparent;
   color: var(--color-text-muted);
   padding: 10px 16px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
   border-bottom: 2px solid transparent;
@@ -591,7 +610,7 @@ function applyTheme(paletteId: string) {
   gap: 6px;
   padding: 4px 10px;
   border-radius: var(--radius-md);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .save-badge--saving {
@@ -639,7 +658,7 @@ function applyTheme(paletteId: string) {
   align-items: center;
   gap: 6px;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .test-result {
@@ -647,7 +666,7 @@ function applyTheme(paletteId: string) {
   padding: 12px 14px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .test-result--ok {
@@ -670,7 +689,7 @@ function applyTheme(paletteId: string) {
 .test-result__preview {
   margin: 8px 0 0;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
   word-break: break-all;
 }
@@ -699,7 +718,7 @@ function applyTheme(paletteId: string) {
   background: transparent;
   color: var(--color-danger);
   padding: 5px 12px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
 }
 
@@ -713,7 +732,7 @@ function applyTheme(paletteId: string) {
   border-radius: var(--radius-md);
   background: var(--color-panel);
   padding: 10px 14px;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .storage-info summary {
@@ -741,7 +760,7 @@ function applyTheme(paletteId: string) {
 
 .storage-info__body code {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text);
   word-break: break-all;
 }
@@ -757,7 +776,7 @@ function applyTheme(paletteId: string) {
 
 .section-title {
   margin: 0 0 4px;
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 650;
   color: var(--color-text);
 }
@@ -769,7 +788,7 @@ function applyTheme(paletteId: string) {
 
 .field span {
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .field .required {
@@ -778,7 +797,7 @@ function applyTheme(paletteId: string) {
 
 .field-hint {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
 }
 
@@ -791,7 +810,7 @@ input[type='number'] {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 10px 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .accordion-toggle {
@@ -801,7 +820,7 @@ input[type='number'] {
   border: none;
   background: transparent;
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
   padding: 0;
 }
@@ -819,7 +838,7 @@ input[type='number'] {
 .advanced-hint {
   margin: 0;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
 }
 
@@ -830,7 +849,7 @@ input[type='number'] {
   background: transparent;
   color: var(--color-text-muted);
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
 }
 
@@ -842,14 +861,14 @@ input[type='number'] {
   color: var(--color-text);
   padding: 10px 12px;
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Consolas, monospace;
-  font-size: 13px;
+  font-size: 0.8125rem;
   resize: vertical;
   min-height: 120px;
 }
 
 .json-error {
   color: var(--color-danger);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .save-button {
@@ -859,7 +878,7 @@ input[type='number'] {
   background: var(--color-accent);
   color: #07120d;
   padding: 12px;
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 700;
   cursor: pointer;
 }
@@ -870,7 +889,7 @@ input[type='number'] {
 }
 
 .url-validation {
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
 }
 
@@ -897,7 +916,7 @@ input[type='number'] {
   background: rgba(58, 166, 117, 0.08);
   color: var(--color-accent-strong);
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
 }
 
@@ -913,13 +932,13 @@ input[type='number'] {
   background: var(--color-accent);
   color: #07120d;
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
 }
 
 .imported-mark {
   color: var(--color-accent-strong);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 </style>
