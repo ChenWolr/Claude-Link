@@ -1,17 +1,14 @@
 // sdk-backend.ts
-// Claude Agent SDK 适配器：用 @anthropic-ai/claude-agent-sdk 的 query() 替代自建 spawn claude CLI。
+// Claude Agent SDK 适配器：用 @anthropic-ai/claude-agent-sdk 的 query() 接入 Claude Code。
 //
-// 这是 claude-link 的默认且唯一聊天/任务后端（chat-backend.ts re-export 自本模块）。
-// 保留 process-manager.ts 作为代码级回退：把 chat-backend.ts 的 re-export 来源改回
-// './process-manager' 即全量切回旧的 spawn 路径。
+// 这是 claude-link 的唯一聊天/任务后端（chat-backend.ts re-export 自本模块）。
 //
 // 设计要点：
-//  - 与 process-manager 同形接口（spawnForChat/spawnForTask/sendMessage/killProcess/...），
-//    ipc-handlers / task-queue-engine 仅改 import 来源，逻辑不动。
-//  - SDKMessage → CliEvent 转换（形态高度同构），转换出的事件复用 process-manager 的
+//  - SDKMessage → CliEvent 转换（形态高度同构），转换出的事件复用 cli-shared 的
 //    persistCliEvent / persistMessageParts 落库，并通过 CHAT_EVENT 推前端——前端零改。
 //  - Query.interrupt() 走 stdin 控制帧，跨平台（含 Windows）优雅中断当前回合。
-//  - buildSpawnEnv 复用：env（含 apiKey/baseUrl/模型映射）原样喂给 Options.env，第三方端点跑通。
+//  - buildSpawnEnv 复用（来自 cli-shared）：env（含 apiKey/baseUrl/模型映射）原样喂给
+//    Options.env，第三方端点跑通。
 //  - pathToClaudeCodeExecutable 取 getConfig().cliPath（cli-detector 发现的系统 claude），
 //    不依赖 SDK 自带二进制，规避 Electron 打包坑。
 //
@@ -39,15 +36,14 @@ import type {
   CliSystemInfoEvent,
   CliPermissionEvent,
 } from '../../shared/types/cli';
-import type { SpawnOptions } from './process-manager';
-// 复用 process-manager 的纯函数（env 注入 / 落库）。normalizeToolResultContent/persistMessageParts
-// 经 persistCliEvent 间接复用，这里显式 import 以备转换层直接落库。
+import type { SpawnOptions } from './cli-shared';
+// 复用 cli-shared 的纯函数（env 注入 / 落库）。
 import {
   buildSpawnEnv,
   normalizeToolResultContent,
   persistCliEvent,
   persistMessageParts,
-} from './process-manager';
+} from './cli-shared';
 import { isMissingConversationResumeError } from './sdk-errors';
 import { cancelInteractionsForSession, requestInteraction } from './interaction-prompts';
 import {

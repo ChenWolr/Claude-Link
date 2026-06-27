@@ -9,7 +9,7 @@ import type { BrowserWindow } from 'electron';
 import type { TestConnectionEventPayload } from '../../shared/types/ipc';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
-import { buildSpawnEnv } from './process-manager';
+import { buildSpawnEnv } from './cli-shared';
 import { writeClaudeSettings } from './settings-writer';
 import { resolveDefaultModel, resolveAliasToActualModel, peekEnvValue } from '../../shared/settings-parser';
 import { logger } from '../utils/logger';
