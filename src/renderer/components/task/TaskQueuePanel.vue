@@ -3,22 +3,20 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { VueDraggable } from 'vue-draggable-plus';
 import { useTaskStore } from '../../stores/task-store';
 import { useSessionStore } from '../../stores/session-store';
+import { useInteractionStore } from '../../stores/interaction-store';
 import { useTaskQueue } from '../../composables/use-task-queue';
 import type { Message } from '../../../shared/types/session';
 import { groupMessagesForRender } from '../../utils/group-messages';
 import TaskItem from './TaskItem.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
 import MessageBubble from '../chat/MessageBubble.vue';
-import ConfirmDialog from '../common/ConfirmDialog.vue';
 
 const taskStore = useTaskStore();
 const sessionStore = useSessionStore();
+const interactionStore = useInteractionStore();
 const { startListening } = useTaskQueue();
 
 const newTaskPrompt = ref('');
-// 提示型对话框（替代 window.alert，避免 Electron 焦点丢失）
-const alertDialogVisible = ref(false);
-const alertMessage = ref('');
 let cleanup: (() => void) | null = null;
 
 const queueStatus = computed(() => taskStore.queueState.status);
@@ -102,8 +100,12 @@ async function handleAddTask() {
 async function handleStart() {
   if (!sessionStore.activeSession) return;
   if (!sessionStore.activeSession.workingDir) {
-    alertMessage.value = '请先在底部选择「工作空间」目录，再启动任务队列。';
-    alertDialogVisible.value = true;
+    await interactionStore.requestConfirm({
+      title: '提示',
+      message: '请先在底部选择「工作空间」目录，再启动任务队列。',
+      confirmText: '知道了',
+      mode: 'alert',
+    });
     return;
   }
   await taskStore.startQueue(sessionStore.activeSession.id);
@@ -117,8 +119,12 @@ async function handlePause() {
 async function handleResume() {
   if (!sessionStore.activeSession) return;
   if (!sessionStore.activeSession.workingDir) {
-    alertMessage.value = '请先在底部选择「工作空间」目录，再继续任务队列。';
-    alertDialogVisible.value = true;
+    await interactionStore.requestConfirm({
+      title: '提示',
+      message: '请先在底部选择「工作空间」目录，再继续任务队列。',
+      confirmText: '知道了',
+      mode: 'alert',
+    });
     return;
   }
   await taskStore.resumeQueue(sessionStore.activeSession.id);
@@ -268,14 +274,6 @@ function handleDragReorder() {
         </div>
       </template>
     </div>
-
-    <ConfirmDialog
-      v-model:visible="alertDialogVisible"
-      title="提示"
-      :message="alertMessage"
-      mode="alert"
-      confirm-text="知道了"
-    />
   </aside>
 </template>
 

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
-import ConfirmDialog from '../common/ConfirmDialog.vue';
+import { useInteractionStore } from '../../stores/interaction-store';
 
 const store = useSessionStore();
 const router = useRouter();
+const interactionStore = useInteractionStore();
 const searchQuery = ref('');
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(() => {
   store.loadSessions();
@@ -28,41 +30,32 @@ async function openSession(session: { id: string }) {
   }
 }
 
-// 侧栏搜索：只按会话标题(name)过滤，纯前端、即时、不查消息内容。
-// （按聊天记录内容搜索是另一个功能，暂不做。）始终基于已加载的全量列表过滤，
-// 避免覆盖 store.sessions（会话管理页等也依赖它）。
-const sessionList = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase();
-  if (!q) return store.sessions;
-  return store.sessions.filter((s) => (s.name ?? '').toLowerCase().includes(q));
-});
-
+// 侧栏搜索与 SessionsPage 行为对齐：250ms 防抖 → store.searchSessions
+// （IPC 含消息内容匹配）。store 通过 searchResults 视图态隔离，不污染全量 sessions。
 function onSearchInput() {
-  // sessionList 是 computed，随 searchQuery 即时变化，无需额外动作。
+  if (debounceTimer) clearTimeout(debounceTimer);
+  const q = searchQuery.value.trim();
+  debounceTimer = setTimeout(() => {
+    store.searchSessions(q);
+  }, 250);
 }
 
-// 删除会话：用自定义 ConfirmDialog 确认（避免 window.confirm 导致 Electron 焦点丢失）。
+function handleSearchClear() {
+  searchQuery.value = '';
+  store.searchSessions('');
+}
+
+// 删除会话：用 interaction 队列的 requestConfirm 确认（避免 window.confirm 导致 Electron 焦点丢失）。
 // 会话及消息由主进程级联清理。
-// 用独立的 visible ref 控制 v-model，pendingDelete 仅保存待删会话，
-// 确保 @confirm 触发时仍能读到 session（close 先 emit update:visible 再 emit confirm）。
-const deleteDialogVisible = ref(false);
-const pendingDelete = ref<{ id: string; name: string } | null>(null);
-
-function confirmDelete(session: { id: string; name: string }) {
-  pendingDelete.value = session;
-  deleteDialogVisible.value = true;
-}
-
-async function onConfirmDelete() {
-  const session = pendingDelete.value;
-  deleteDialogVisible.value = false;
-  pendingDelete.value = null;
-  if (session) await store.deleteSession(session.id);
-}
-
-function onCancelDelete() {
-  deleteDialogVisible.value = false;
-  pendingDelete.value = null;
+async function confirmDelete(session: { id: string; name: string }) {
+  const ok = await interactionStore.requestConfirm({
+    title: '删除会话',
+    message: `确定删除会话「${session.name}」？此操作不可撤销。`,
+    confirmText: '删除',
+    cancelText: '取消',
+    danger: true,
+  });
+  if (ok) await store.deleteSession(session.id);
 }
 </script>
 
@@ -80,13 +73,14 @@ function onCancelDelete() {
       v-model="searchQuery"
       class="sidebar__search"
       type="search"
-      placeholder="搜索会话（名称或内容）"
+      placeholder="搜索会话（名称或对话内容）"
       @input="onSearchInput"
+      @search="handleSearchClear"
     />
 
     <nav class="sidebar__sessions">
       <div
-        v-for="session in sessionList"
+        v-for="session in store.displayedSessions"
         :key="session.id"
         :class="['session-link', { active: store.activeSession?.id === session.id }]"
         @click="openSession(session)"
@@ -101,8 +95,8 @@ function onCancelDelete() {
           ×
         </button>
       </div>
-      <div v-if="!sessionList.length" class="sidebar__empty">
-        {{ searchQuery ? '未找到匹配的会话' : '暂无会话' }}
+      <div v-if="!store.displayedSessions.length" class="sidebar__empty">
+        {{ store.searchQuery ? '未找到匹配的会话' : '暂无会话' }}
       </div>
     </nav>
 
@@ -110,17 +104,6 @@ function onCancelDelete() {
       <button class="new-button" type="button" @click="handleNewSession">+ 新会话</button>
       <RouterLink class="settings-link" to="/config">配置</RouterLink>
     </div>
-
-    <ConfirmDialog
-      v-model:visible="deleteDialogVisible"
-      title="删除会话"
-      :message="`确定删除会话「${pendingDelete?.name ?? ''}」？此操作不可撤销。`"
-      confirm-text="删除"
-      cancel-text="取消"
-      danger
-      @confirm="onConfirmDelete"
-      @cancel="onCancelDelete"
-    />
   </aside>
 </template>
 
