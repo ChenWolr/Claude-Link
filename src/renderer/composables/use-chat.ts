@@ -324,7 +324,8 @@ export function useChat() {
     const defaultText =
       info.subtype === 'compact_boundary' ? '上下文已达压缩边界'
         : info.subtype === 'plugin_install' ? '插件安装'
-          : '系统提示';
+          : info.subtype === 'interaction_response' ? '用户已完成交互选择'
+            : '系统提示';
     persistMessage({
       role: 'system',
       eventType: 'system',

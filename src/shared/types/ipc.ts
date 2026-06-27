@@ -35,6 +35,8 @@ export const IPC_CHANNELS = {
   INTERACTION_RESPOND: 'interaction:respond',
   INTERACTION_CANCEL: 'interaction:cancel',
   INTERACTION_GET_PENDING: 'interaction:getPending',
+  INTERACTION_HISTORY_GET: 'interaction:history:get',
+  INTERACTION_HISTORY_RECORD: 'interaction:history:record',
   CONTEXT_UPDATE: 'context:update',
   TASK_ADD: 'task:add',
   TASK_REMOVE: 'task:remove',
@@ -83,7 +85,32 @@ export interface PermissionResponsePayload {
   optionId: string;
 }
 
-export type InteractionPromptKind = 'permission' | 'single-choice' | 'multi-choice' | 'text' | 'confirm';
+export type InteractionPromptKind = 'permission' | 'single-choice' | 'multi-choice' | 'text' | 'long-text' | 'form' | 'confirm';
+export type InteractionPreviewKind = 'text' | 'markdown' | 'code' | 'diff' | 'table';
+
+export interface InteractionPromptAction {
+  id: string;
+  label: string;
+  description?: string;
+  primary?: boolean;
+  danger?: boolean;
+}
+
+export interface InteractionPromptPresentation {
+  layout?: 'dialog' | 'sidebar' | 'sheet';
+  density?: 'compact' | 'default' | 'comfortable';
+  size?: 'sm' | 'md' | 'lg' | 'xl';
+  accent?: string;
+  showPreview?: boolean;
+}
+
+export interface InteractionPromptPreview {
+  type: InteractionPreviewKind;
+  content?: string;
+  language?: string;
+  headers?: string[];
+  rows?: string[][];
+}
 
 export interface InteractionPromptOption {
   id: string;
@@ -92,7 +119,29 @@ export interface InteractionPromptOption {
   value?: unknown;
   primary?: boolean;
   danger?: boolean;
-  preview?: string;
+  preview?: string | InteractionPromptPreview;
+}
+
+export interface InteractionFormField {
+  id: string;
+  label: string;
+  type: 'text' | 'textarea' | 'select' | 'checkbox';
+  required?: boolean;
+  placeholder?: string;
+  defaultValue?: string | boolean;
+  options?: InteractionPromptOption[];
+}
+
+export interface InteractionPromptQuestion {
+  id: string;
+  title: string;
+  description?: string;
+  source?: string;
+  options: InteractionPromptOption[];
+  multiSelect?: boolean;
+  allowOther?: boolean;
+  otherLabel?: string;
+  defaultOptionIds?: string[];
 }
 
 export interface InteractionPromptPayload {
@@ -106,23 +155,47 @@ export interface InteractionPromptPayload {
   toolUseId?: string;
   input?: Record<string, unknown>;
   options?: InteractionPromptOption[];
+  questions?: InteractionPromptQuestion[];
+  fields?: InteractionFormField[];
   multiSelect?: boolean;
   allowOther?: boolean;
   otherLabel?: string;
   defaultOptionIds?: string[];
   suggestions?: unknown[];
+  presentation?: InteractionPromptPresentation;
 }
-
 export interface InteractionPromptResponsePayload {
   id: string;
   action: 'submit' | 'cancel';
   selectedOptionIds?: string[];
+  questionAnswers?: Record<string, { selectedOptionIds?: string[]; otherText?: string }>;
+  fieldValues?: Record<string, string | boolean>;
   otherText?: string;
 }
 
 export interface InteractionPromptCancelPayload {
   id: string;
   sessionId: string;
+}
+
+// V3-3：交互历史持久化。每次用户提交/取消交互弹窗落库一条，
+// 切换会话或重启后仍可在 InteractionPrompt 底部"交互历史"区回看。
+export interface InteractionHistoryEntry {
+  id: string;
+  sessionId: string;
+  title: string;
+  kind: string;
+  summary: string | null;
+  action: 'submit' | 'cancel';
+  createdAt: string;
+}
+
+export interface RecordInteractionHistoryInput {
+  sessionId: string;
+  title: string;
+  kind: string;
+  summary?: string | null;
+  action: 'submit' | 'cancel';
 }
 
 export interface ContextStatsPayload {

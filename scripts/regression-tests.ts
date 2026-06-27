@@ -8,7 +8,13 @@ import {
   buildAskUserQuestionInteractionPayload,
   buildAskUserQuestionResult,
   buildPermissionInteractionPayload,
+  buildGenericInteractionPayload,
+  buildWizardAskUserQuestionPayload,
+  dialogResultFromInteraction,
+  interactionHistoryEntryFromResponse,
   mapPermissionInteractionResponse,
+  normalizeInteractionPreview,
+  shouldUseVirtualOptions,
 } from '../src/main/modules/sdk-interactions';
 import { isMissingConversationResumeError } from '../src/main/modules/sdk-errors';
 import { parseClaudeSettings } from '../src/main/modules/settings-importer';
@@ -215,6 +221,108 @@ function testAskUserQuestionInteractionAdapter(): void {
   assert.deepEqual(result.annotations, { 'Which approach should we use?': { preview: 'Preview B' } });
 }
 
+function testInteractionPromptV2V3Contracts(): void {
+  const markdown = normalizeInteractionPreview('**Plan**\n\n- Ship it', 'markdown');
+  assert.deepEqual(markdown, { type: 'markdown', content: '**Plan**\n\n- Ship it' });
+  const code = normalizeInteractionPreview({ type: 'code', content: 'const x = 1;', language: 'ts' });
+  assert.deepEqual(code, { type: 'code', content: 'const x = 1;', language: 'ts' });
+  const table = normalizeInteractionPreview({ type: 'table', headers: ['A'], rows: [['B']] });
+  assert.deepEqual(table, { type: 'table', headers: ['A'], rows: [['B']] });
+
+  assert.equal(shouldUseVirtualOptions(Array.from({ length: 30 }, (_, index) => ({ id: String(index), label: String(index) }))), false);
+  assert.equal(shouldUseVirtualOptions(Array.from({ length: 80 }, (_, index) => ({ id: String(index), label: String(index) }))), true);
+}
+
+function testInteractionPromptWizardAndHistoryContracts(): void {
+  const questions = [
+    {
+      question: 'Pick a runtime?',
+      header: 'Runtime',
+      multiSelect: false,
+      options: [
+        { label: 'Node', description: 'Use Node.js' },
+        { label: 'Bun', description: 'Use Bun' },
+      ],
+    },
+    {
+      question: 'Pick checks?',
+      header: 'Checks',
+      multiSelect: true,
+      options: [
+        { label: 'Types', description: 'Run typecheck' },
+        { label: 'Tests', description: 'Run tests' },
+      ],
+    },
+  ];
+  const wizard = buildWizardAskUserQuestionPayload('session-1', questions, 'tool-wizard', 'fixed-id');
+  assert.equal(wizard.kind, 'form');
+  assert.equal(wizard.questions?.length, 2);
+  assert.equal(wizard.questions?.[1].multiSelect, true);
+  assert.equal(wizard.questions?.[0].options.at(-1)?.id, OTHER_INTERACTION_OPTION_ID);
+
+  const result = buildAskUserQuestionResult(questions, [{
+    payload: wizard,
+    response: {
+      id: wizard.id,
+      action: 'submit',
+      questionAnswers: {
+        q0: { selectedOptionIds: ['option-1'] },
+        q1: { selectedOptionIds: ['option-0', OTHER_INTERACTION_OPTION_ID], otherText: 'Lint' },
+      },
+    },
+  }]);
+  assert.deepEqual(result.answers, {
+    'Pick a runtime?': 'Bun',
+    'Pick checks?': 'Types, Lint',
+  });
+
+  const history = interactionHistoryEntryFromResponse(wizard, {
+    id: wizard.id,
+    action: 'submit',
+    fieldValues: { note: 'approved', urgent: true },
+  });
+  assert.equal(history.promptId, 'fixed-id');
+  assert.equal(history.kind, 'form');
+  assert.equal(history.action, 'submit');
+  assert.deepEqual(history.fieldValues, { note: 'approved', urgent: true });
+}
+
+function testGenericDialogTextAndFormContracts(): void {
+  const textPayload = buildGenericInteractionPayload('session-1', 'free_text', {
+    title: 'Explain why?',
+    inputType: 'text',
+  }, 'tool-text');
+  assert.equal(textPayload.kind, 'text');
+  assert.equal(textPayload.title, 'Explain why?');
+  assert.deepEqual(dialogResultFromInteraction({ id: textPayload.id, action: 'submit', otherText: 'Because it is safer' }), {
+    response: 'Because it is safer',
+  });
+
+  const formPayload = buildGenericInteractionPayload('session-1', 'collect_params', {
+    title: 'Collect params',
+    requestedSchema: {
+      type: 'object',
+      required: ['name'],
+      properties: {
+        name: { type: 'string', title: 'Name' },
+        dryRun: { type: 'boolean', title: 'Dry run' },
+        mode: { type: 'string', title: 'Mode', enum: ['fast', 'safe'] },
+      },
+    },
+  });
+  assert.equal(formPayload.kind, 'form');
+  assert.deepEqual(formPayload.fields?.map((field) => [field.id, field.type, field.required]), [
+    ['name', 'text', true],
+    ['dryRun', 'checkbox', false],
+    ['mode', 'select', false],
+  ]);
+  assert.deepEqual(dialogResultFromInteraction({ id: formPayload.id, action: 'submit', fieldValues: { name: 'Chen', dryRun: true, mode: 'safe' } }), {
+    name: 'Chen',
+    dryRun: true,
+    mode: 'safe',
+  });
+}
+
 function testAskUserQuestionMultiSelectAndOther(): void {
   const questions = [
     {
@@ -262,4 +370,7 @@ testMigrationsHandlePartiallyAppliedContextColumns();
 testPermissionPromptIntegration();
 testPermissionInteractionAdapter();
 testAskUserQuestionInteractionAdapter();
+testInteractionPromptV2V3Contracts();
+testInteractionPromptWizardAndHistoryContracts();
+testGenericDialogTextAndFormContracts();
 testAskUserQuestionMultiSelectAndOther();
