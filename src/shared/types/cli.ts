@@ -134,7 +134,7 @@ export interface CliAbortedEvent {
 // 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
 export interface CliSystemInfoEvent {
   type: 'system';
-  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request';
+  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response';
   text?: string;
   level?: 'info' | 'warn';
 }
