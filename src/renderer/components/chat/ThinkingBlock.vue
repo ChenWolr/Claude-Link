@@ -97,12 +97,12 @@ const active = computed(() => props.streaming || props.sealed === false);
   border-left: 2px solid var(--color-border);
   font-size: 13px;
   color: var(--color-text);
-  line-height: 1.7;
+  line-height: 1.5;
   word-break: break-word;
 }
 
 .think-row__body :deep(p) {
-  margin: 0 0 8px;
+  margin: 0 0 4px;
 }
 
 .think-row__body :deep(p:last-child) {

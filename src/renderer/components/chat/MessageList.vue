@@ -152,7 +152,7 @@ function handleCopyClick(event: MouseEvent): void {
   padding: 20px 24px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
 /* 消息少时贴底、消息多时可自由向上滚动。

@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 
+const props = withDefaults(defineProps<{ disabled?: boolean }>(), { disabled: false });
 const emit = defineEmits<{ compress: [] }>();
 const store = useSessionStore();
 
@@ -55,6 +56,7 @@ function fmt(n: number): string {
       type="button"
       class="ctx__btn"
       :class="{ 'ctx__btn--high': pct >= 80 }"
+      :disabled="props.disabled"
       :title="`上下文已用 ${pct}%，点击压缩`"
       @click="emit('compress')"
     >
@@ -99,6 +101,8 @@ function fmt(n: number): string {
   cursor: pointer;
 }
 .ctx__btn:hover { border-color: var(--color-accent); }
+.ctx__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ctx__btn:disabled:hover { border-color: var(--color-border); }
 .ctx__btn--high { border-color: rgba(204, 163, 61, 0.5); }
 .ctx__ring { width: 22px; height: 22px; display: block; transform: rotate(-90deg); }
 /* 周长 ≈ 2*π*15.915 ≈ 100，dasharray 用百分比即可表示扇形占用 */
