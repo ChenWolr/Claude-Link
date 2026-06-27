@@ -11,6 +11,12 @@ export const FONT_SCALE_SIZES: Record<string, string> = {
 export const STREAM_DEBOUNCE_MS = 50;
 export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 
+// 主窗口尺寸（主进程 createWindow 与 window-state 持久化共用，单一真相源）
+export const WINDOW_DEFAULT_WIDTH = 1200;
+export const WINDOW_DEFAULT_HEIGHT = 800;
+export const WINDOW_MIN_WIDTH = 900;
+export const WINDOW_MIN_HEIGHT = 640;
+
 export interface ThemePalette {
   id: string;
   name: string;
