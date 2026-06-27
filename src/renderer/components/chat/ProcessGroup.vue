@@ -119,7 +119,7 @@ const items = computed<GroupItem[]>(() => {
   background: transparent;
   border: 0;
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
   font-family: inherit;
   border-radius: var(--radius-sm);
@@ -159,7 +159,7 @@ const items = computed<GroupItem[]>(() => {
 
 .process-fold__arrow {
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   transition: transform 0.15s;
 }
 
@@ -179,7 +179,7 @@ const items = computed<GroupItem[]>(() => {
 
 .process-fold__system {
   padding: 4px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
 }
 </style>

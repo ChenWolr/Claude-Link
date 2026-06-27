@@ -132,7 +132,7 @@ onUnmounted(() => {
   background: var(--color-panel-soft);
   color: var(--color-text-muted);
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -173,7 +173,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--color-text);
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
   text-align: left;
 }
@@ -209,7 +209,7 @@ onUnmounted(() => {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 6px 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .model-dropdown__custom button {
@@ -218,7 +218,7 @@ onUnmounted(() => {
   background: var(--color-accent);
   color: #07120d;
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 </style>

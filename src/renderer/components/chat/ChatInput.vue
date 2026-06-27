@@ -176,13 +176,13 @@ onUnmounted(() => {
 
 .slash-menu__name {
   color: var(--color-accent-strong);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
 }
 
 .slash-menu__desc {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .chat-input {
@@ -207,7 +207,7 @@ textarea {
   padding: 10px 14px;
   resize: none;
   outline: none;
-  font-size: 14px;
+  font-size: 0.875rem;
   line-height: 1.5;
   min-height: 42px;
   max-height: 160px;
@@ -236,7 +236,7 @@ button:disabled {
   color: var(--color-text-muted);
   padding: 10px 14px;
   font-weight: 700;
-  font-size: 16px;
+  font-size: 1rem;
   line-height: 1;
   cursor: pointer;
 }

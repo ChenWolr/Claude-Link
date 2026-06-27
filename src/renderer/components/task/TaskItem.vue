@@ -67,14 +67,14 @@ watch(() => props.task.status, (newStatus) => {
 .task-item__drag {
   cursor: grab;
   color: var(--color-text-muted);
-  font-size: 14px;
+  font-size: 0.875rem;
   user-select: none;
 }
 
 .task-item__prompt {
   min-width: 0;
   flex: 1;
-  font-size: 13px;
+  font-size: 0.8125rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -92,7 +92,7 @@ watch(() => props.task.status, (newStatus) => {
   background: transparent;
   color: var(--color-text-muted);
   padding: 3px 8px;
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .action--danger {
@@ -114,7 +114,7 @@ watch(() => props.task.status, (newStatus) => {
 .task-item__full-prompt {
   white-space: pre-wrap;
   word-break: break-word;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.5;
   max-height: 200px;
   overflow-y: auto;
@@ -122,19 +122,19 @@ watch(() => props.task.status, (newStatus) => {
 
 .task-item__result {
   margin-top: 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
 }
 
 .task-item__error {
   margin-top: 8px;
   color: var(--color-danger);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .task-item__meta {
   margin-top: 6px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--color-text-muted);
 }
 </style>

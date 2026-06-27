@@ -102,13 +102,13 @@ async function openSession(session: { id: string }) {
 .eyebrow {
   margin: 0 0 4px;
   color: var(--color-accent-strong);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 700;
 }
 
 .sessions-page__header h1 {
   margin: 0;
-  font-size: 24px;
+  font-size: 1.5rem;
 }
 
 .sessions-page__header button {
@@ -158,7 +158,7 @@ async function openSession(session: { id: string }) {
 
 .session-card__meta {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .session-card__delete {
@@ -168,7 +168,7 @@ async function openSession(session: { id: string }) {
   background: transparent;
   color: var(--color-danger);
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .empty {

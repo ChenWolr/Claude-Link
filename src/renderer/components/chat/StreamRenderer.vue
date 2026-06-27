@@ -25,7 +25,7 @@ const renderedContent = computed(() => renderMarkdown(props.content));
 }
 
 .stream__role {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 700;
   color: var(--color-accent-strong);
   text-transform: uppercase;
@@ -39,7 +39,7 @@ const renderedContent = computed(() => renderMarkdown(props.content));
 }
 
 .stream__content :deep(p) {
-  margin: 0 0 4px;
+  margin: 0 0 0.25rem;
 }
 
 .stream__content :deep(p:last-child) {

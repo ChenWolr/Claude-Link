@@ -133,19 +133,19 @@ async function confirmDelete(session: { id: string; name: string }) {
   border-radius: var(--radius-md);
   background: var(--color-accent);
   color: #07120d;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 800;
 }
 
 .sidebar__brand h1 {
   margin: 0;
-  font-size: 15px;
+  font-size: 0.9375rem;
 }
 
 .sidebar__brand p {
   margin: 2px 0 0;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .sidebar__search {
@@ -176,7 +176,7 @@ async function confirmDelete(session: { id: string; name: string }) {
   padding: 10px 11px;
   color: var(--color-text);
   cursor: pointer;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .session-link__name {
@@ -195,7 +195,7 @@ async function confirmDelete(session: { id: string; name: string }) {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-muted);
-  font-size: 16px;
+  font-size: 1rem;
   line-height: 1;
   cursor: pointer;
   opacity: 0;
@@ -224,7 +224,7 @@ async function confirmDelete(session: { id: string; name: string }) {
 
 .sidebar__empty {
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   padding: 12px;
   text-align: center;
 }

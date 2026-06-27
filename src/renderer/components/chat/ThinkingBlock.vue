@@ -36,7 +36,7 @@ const active = computed(() => props.streaming || props.sealed === false);
   gap: 8px;
   width: 100%;
   padding: 4px 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--color-text-muted);
   background: transparent;
   border: 0;
@@ -53,7 +53,7 @@ const active = computed(() => props.streaming || props.sealed === false);
 }
 
 .think-row__icon {
-  font-size: 14px;
+  font-size: 0.875rem;
   flex-shrink: 0;
 }
 
@@ -75,7 +75,7 @@ const active = computed(() => props.streaming || props.sealed === false);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
+  font-size: 0.75rem;
   opacity: 0.7;
 }
 
@@ -83,7 +83,7 @@ const active = computed(() => props.streaming || props.sealed === false);
   margin-left: auto;
   flex-shrink: 0;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   transition: transform 0.15s;
 }
 
@@ -95,14 +95,14 @@ const active = computed(() => props.streaming || props.sealed === false);
   padding: 8px 10px 10px;
   margin: 2px 0 2px 6px;
   border-left: 2px solid var(--color-border);
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--color-text);
   line-height: 1.5;
   word-break: break-word;
 }
 
 .think-row__body :deep(p) {
-  margin: 0 0 4px;
+  margin: 0 0 0.25rem;
 }
 
 .think-row__body :deep(p:last-child) {

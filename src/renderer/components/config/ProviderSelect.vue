@@ -30,7 +30,7 @@ const providers: Array<{ value: AppConfig['provider']; label: string }> = [
 
 .field span {
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 select {

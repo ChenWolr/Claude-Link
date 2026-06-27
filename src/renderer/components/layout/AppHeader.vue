@@ -75,7 +75,7 @@ function cancelEdit() {
 .app-header__label {
   margin: 0;
   color: var(--color-text-muted);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .app-header__name {
@@ -87,7 +87,7 @@ function cancelEdit() {
 
 .app-header__title h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 650;
   white-space: nowrap;
   overflow: hidden;
@@ -96,7 +96,7 @@ function cancelEdit() {
 }
 
 .app-header__name-input {
-  font-size: 16px;
+  font-size: 1rem;
   font-weight: 650;
   color: var(--color-text);
   background: var(--color-panel-soft);
@@ -111,7 +111,7 @@ function cancelEdit() {
   border: 0;
   background: transparent;
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
   padding: 2px 4px;
   opacity: 0.6;

@@ -2,6 +2,12 @@ export { IPC_CHANNELS } from './types/ipc';
 
 export const DEFAULT_TASK_DELAY_SECONDS = 60;
 export const DEFAULT_THEME_PALETTE_ID = 'default-dark';
+export const DEFAULT_FONT_SCALE = 'medium';
+export const FONT_SCALE_SIZES: Record<string, string> = {
+  small: '14px',
+  medium: '16px',
+  large: '18px',
+};
 export const STREAM_DEBOUNCE_MS = 50;
 export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 

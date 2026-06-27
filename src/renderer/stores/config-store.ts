@@ -12,7 +12,7 @@ import { nextTick } from 'vue';
 export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
 import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
-import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID } from '../../shared/constants';
+import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import {
   parseClaudeSettings,
   extractModelMappings,
@@ -36,6 +36,7 @@ const defaultConfig: AppConfig = {
   maxTurns: 200,
   taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
+  fontScale: DEFAULT_FONT_SCALE,
 };
 
 export const useConfigStore = defineStore('config', {

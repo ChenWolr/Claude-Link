@@ -135,13 +135,13 @@ async function handleNewSession() {
 .empty-state__eyebrow {
   margin: 0 0 8px;
   color: var(--color-accent-strong);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 700;
 }
 
 .empty-state h1 {
   margin: 0;
-  font-size: 24px;
+  font-size: 1.5rem;
 }
 
 .empty-state p {
@@ -175,7 +175,7 @@ async function handleNewSession() {
   display: block;
   border-radius: var(--radius-md);
   padding: 8px 14px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .notice span {

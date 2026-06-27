@@ -23,7 +23,7 @@ defineProps<{ status: TaskStatus }>();
   gap: 4px;
   padding: 2px 8px;
   border-radius: 10px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   text-transform: uppercase;
 }

@@ -685,21 +685,21 @@ onBeforeUnmount(() => {
   display: inline-flex;
   margin-bottom: 8px;
   color: var(--color-accent-strong);
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 800;
   letter-spacing: 0.08em;
 }
 
 .interaction-dialog__header h3 {
   margin: 0;
-  font-size: 16px;
+  font-size: 1rem;
   line-height: 1.4;
 }
 
 .interaction-dialog__header p {
   margin: 8px 0 0;
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.55;
 }
 
@@ -717,7 +717,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-border);
   border-radius: 999px;
   color: var(--color-text-muted);
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 800;
 }
 
@@ -762,7 +762,7 @@ onBeforeUnmount(() => {
 .interaction-other span,
 .interaction-field span {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 750;
 }
 
@@ -808,13 +808,13 @@ onBeforeUnmount(() => {
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-md);
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   text-align: center;
 }
 
 .interaction-history {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .interaction-history summary {
@@ -839,7 +839,7 @@ onBeforeUnmount(() => {
 
 .interaction-history strong {
   color: var(--color-text);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .interaction-history small {
@@ -858,7 +858,7 @@ onBeforeUnmount(() => {
   border-radius: var(--interaction-btn-radius);
   padding: var(--interaction-btn-pad);
   font-family: inherit;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 750;
   cursor: pointer;
 }

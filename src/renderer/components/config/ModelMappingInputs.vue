@@ -52,14 +52,14 @@ const fable = bind('fable');
 
 .model-mapping__title {
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
 }
 
 .model-mapping__hint {
   margin: 0;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
 }
 
@@ -76,7 +76,7 @@ const fable = bind('fable');
 
 .model-mapping__field span {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .model-mapping__field input {
@@ -87,6 +87,6 @@ const fable = bind('fable');
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 8px 10px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 </style>

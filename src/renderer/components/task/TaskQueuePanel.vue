@@ -302,7 +302,7 @@ function handleDragReorder() {
   background: transparent;
   color: var(--color-text-muted);
   padding: 8px 14px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
@@ -339,7 +339,7 @@ function handleDragReorder() {
   border-radius: 999px;
   background: var(--color-accent);
   color: #07120d;
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 700;
 }
 
@@ -368,14 +368,14 @@ function handleDragReorder() {
 
 .task-panel__header h2 {
   margin: 2px 0 0;
-  font-size: 15px;
+  font-size: 0.9375rem;
   font-weight: 650;
 }
 
 .eyebrow {
   margin: 0;
   color: var(--color-text-muted);
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-transform: uppercase;
 }
 
@@ -387,7 +387,7 @@ function handleDragReorder() {
 .btn {
   border-radius: var(--radius-sm);
   padding: 5px 12px;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
@@ -408,7 +408,7 @@ function handleDragReorder() {
   border-bottom: 1px solid var(--color-border);
   background: rgba(58, 166, 117, 0.06);
   color: var(--color-accent-strong);
-  font-size: 13px;
+  font-size: 0.8125rem;
   text-align: center;
 }
 
@@ -429,7 +429,7 @@ function handleDragReorder() {
 
 .task-panel__empty {
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   padding: 18px 16px;
   text-align: center;
 }
@@ -451,7 +451,7 @@ function handleDragReorder() {
 
 .add-label {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 600;
 }
 
@@ -463,7 +463,7 @@ function handleDragReorder() {
   border-radius: 50%;
   border: 1px solid var(--color-border);
   color: var(--color-text-muted);
-  font-size: 11px;
+  font-size: 0.6875rem;
   cursor: help;
   user-select: none;
 }
@@ -479,7 +479,7 @@ function handleDragReorder() {
   padding: 8px 10px;
   resize: none;
   outline: none;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .task-panel__add button {
@@ -490,7 +490,7 @@ function handleDragReorder() {
   color: #07120d;
   padding: 8px 14px;
   font-weight: 700;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .task-panel__add button:disabled {
@@ -529,7 +529,7 @@ function handleDragReorder() {
   background: var(--color-panel);
   color: var(--color-text);
   padding: 4px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
   max-width: 160px;
   transition: border-color 0.15s, color 0.15s;
@@ -588,7 +588,7 @@ function handleDragReorder() {
 .subagent-group__title {
   flex: 1;
   min-width: 0;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 650;
   color: var(--color-text);
   overflow: hidden;
@@ -598,7 +598,7 @@ function handleDragReorder() {
 
 .subagent-group__status {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--color-text-muted);
   padding: 2px 8px;
   border-radius: 999px;
