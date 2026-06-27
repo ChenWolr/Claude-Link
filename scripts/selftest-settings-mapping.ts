@@ -510,5 +510,56 @@ console.log('\n=== 29) V3-3: 交互历史持久化契约（表/repo/IPC/preload/
     ip.includes('getInteractionHistory') || ip.includes('loadHistory'));
 }
 
+console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行中禁用 ===');
+{
+  const ss = readRel('src/renderer/stores/session-store.ts');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const cp = readRel('src/renderer/pages/ChatPage.vue');
+  const mb = readRel('src/renderer/components/chat/MessageBubble.vue');
+  const sr = readRel('src/renderer/components/chat/StreamRenderer.vue');
+  const tb = readRel('src/renderer/components/chat/ThinkingBlock.vue');
+  const ml = readRel('src/renderer/components/chat/MessageList.vue');
+  const cb = readRel('src/renderer/components/chat/ContextButton.vue');
+  const ms = readRel('src/renderer/components/chat/ModelSelector.vue');
+  const st = readRel('src/renderer/components/chat/SessionToolbar.vue');
+
+  // 问题 1：会话切换隔离
+  check('session-store 含 runningSessions state', ss.includes('runningSessions'));
+  check('session-store 含 sessionStreams state', ss.includes('sessionStreams'));
+  check('session-store 含 markRunning action', ss.includes('markRunning'));
+  check('session-store 含 markStopped action', ss.includes('markStopped'));
+  check('session-store 含 appendBackgroundStream action', ss.includes('appendBackgroundStream'));
+  check('switchSession 保存旧会话流式快照', ss.includes('sessionStreams[oldId]'));
+  check('switchSession 恢复目标会话快照', ss.includes('sessionStreams[session.id]') || ss.includes('snapshot'));
+  check('switchSession sending 依 runningSessions', ss.includes('runningSessions.includes(session.id)'));
+  check('deleteSession 清理 runningSessions', ss.includes('runningSessions.filter') && ss.includes('sid !== id'));
+  check('deleteSession 清理 sessionStreams', ss.includes('delete this.sessionStreams[id]'));
+
+  check('use-chat watcher 从 runningSessions 同步 sending', uc.includes('runningSessions.includes(newId)'));
+  check('use-chat 含 handleBackgroundEvent', uc.includes('handleBackgroundEvent'));
+  check('use-chat handleBackgroundEvent 写快照', uc.includes('appendBackgroundStream'));
+  check('use-chat handleBackgroundEvent 调 markStopped', uc.includes('markStopped(sid)'));
+  check('use-chat sendMessage 调 markRunning', uc.includes('store.markRunning'));
+  check('use-chat result/error/aborted 调 markStopped', uc.includes('markStopped(store.activeSession.id)'));
+  check('use-chat startListening 先 removeChatListener', uc.includes('removeChatListener()') && uc.includes('startListening'));
+  check('ChatPage onMounted 调 startListening', cp.includes('startListening()') && cp.includes('onMounted'));
+  check('ChatPage onUnmounted 不调 stopListening', !/onUnmounted\([\s\S]{0,80}stopListening/.test(cp));
+
+  // 问题 2：行间距
+  check('MessageBubble line-height:1.5', mb.includes('line-height: 1.5') || mb.includes('line-height:1.5'));
+  check('MessageBubble p margin 4px', mb.includes('0 0 4px'));
+  check('StreamRenderer line-height:1.5', sr.includes('line-height: 1.5') || sr.includes('line-height:1.5'));
+  check('ThinkingBlock line-height:1.5', tb.includes('line-height: 1.5') || tb.includes('line-height:1.5'));
+  check('MessageList gap:12px', ml.includes('gap: 12px') || ml.includes('gap:12px'));
+
+  // 问题 3：执行中禁用
+  check('ContextButton 含 disabled prop', cb.includes('disabled') && cb.includes('defineProps'));
+  check('ModelSelector 含 disabled prop', ms.includes('disabled') && ms.includes('defineProps'));
+  check('SessionToolbar ContextButton :disabled', st.includes('ContextButton :disabled="sending"'));
+  check('SessionToolbar 工作空间 button :disabled', /ctl__btn[\s\S]{0,120}:disabled="sending"/.test(st));
+  check('SessionToolbar ModelSelector :disabled', st.includes('ModelSelector :disabled="sending"'));
+  check('SessionToolbar 权限 select :disabled', /<select[\s\S]{0,80}:disabled="sending"/.test(st));
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
