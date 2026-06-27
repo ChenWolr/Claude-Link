@@ -30,6 +30,7 @@ import { logger } from './utils/logger';
 import * as sessionRepo from './database/repositories/session-repo';
 import * as messageRepo from './database/repositories/message-repo';
 import * as taskRepo from './database/repositories/task-repo';
+import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 
 let mainWindow: BrowserWindow;
 
@@ -179,6 +180,27 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.INTERACTION_GET_PENDING, async () => getPendingInteractionPrompts());
+
+  // V3-3：交互历史持久化。输入做最小校验，防止渲染进程传畸形数据撞 NOT NULL 约束。
+  ipcMain.handle(IPC_CHANNELS.INTERACTION_HISTORY_GET, async (_event, sessionId: string) => {
+    if (typeof sessionId !== 'string' || !sessionId) return [];
+    return getInteractionHistory(sessionId);
+  });
+  ipcMain.handle(IPC_CHANNELS.INTERACTION_HISTORY_RECORD, async (_event, input) => {
+    if (!input || typeof input !== 'object') return;
+    const { sessionId, title, kind, action } = input as Record<string, unknown>;
+    if (typeof sessionId !== 'string' || !sessionId) return;
+    if (typeof title !== 'string' || !title) return;
+    if (typeof kind !== 'string' || !kind) return;
+    if (action !== 'submit' && action !== 'cancel') return;
+    createInteractionHistory({
+      sessionId,
+      title,
+      kind,
+      summary: typeof (input as { summary?: unknown }).summary === 'string' ? (input as { summary: string }).summary : null,
+      action,
+    });
+  });
 
   // Tasks
   ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, prompt: string) => {

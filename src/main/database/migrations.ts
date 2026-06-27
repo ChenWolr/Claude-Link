@@ -106,6 +106,22 @@ export function runMigrations(db: Database.Database): void {
     }
   }
 
+  // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，
+  // 切换会话或重启后仍可在 InteractionPrompt 底部"交互历史"区回看。
+  // ON DELETE CASCADE 跟随会话删除清理。CREATE TABLE IF NOT EXISTS 本身幂等。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS interaction_history (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      title TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      summary TEXT,
+      action TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_interaction_history_session ON interaction_history(session_id, created_at DESC);
+  `);
+
   const upsertVersion = versionRow
     ? db.prepare('UPDATE schema_version SET version = ?')
     : db.prepare('INSERT INTO schema_version (version) VALUES (?)');
