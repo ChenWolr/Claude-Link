@@ -15,7 +15,7 @@
 // SDK 是纯 ESM（"type":"module"），项目 main 进程经 electron-vite 编译为 CJS，
 // 故用模块级缓存的动态 import() 加载 SDK，避免 CJS 静态 import ESM 的语法限制。
 
-import type { BrowserWindow } from 'electron';
+import { app, type BrowserWindow } from 'electron';
 import { existsSync } from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
@@ -282,6 +282,31 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
   return undefined;
 }
 
+// 打包后 SDK 经 require.resolve 把自带二进制定位成 app.asar 虚拟路径，spawn 该路径在
+// Windows 上 launch 失败（fs.exists 能过、但 child_process.spawn 跑不起来，SDK 误报成
+// "exists but failed to launch"）。开发时不走此分支（app.isPackaged=false 返回 undefined，
+// SDK 继续用 node_modules 真实路径，行为不变）；打包后显式指向 app.asar.unpacked 真实磁盘
+// 路径，让 SDK 直接 spawn 真实 exe，根治打包后 SDK 启动失败。
+function getBundledClaudeExecutable(): string | undefined {
+  if (!app.isPackaged) return undefined;
+  const plat =
+    process.platform === 'win32'
+      ? 'win32-x64'
+      : process.platform === 'darwin'
+        ? `darwin-${process.arch}`
+        : `linux-${process.arch}`;
+  const binName = process.platform === 'win32' ? 'claude.exe' : 'claude';
+  const p = path.join(
+    process.resourcesPath,
+    'app.asar.unpacked',
+    'node_modules',
+    '@anthropic-ai',
+    `claude-agent-sdk-${plat}`,
+    binName,
+  );
+  return existsSync(p) ? p : undefined;
+}
+
 // ── 组装 SDK Options ───────────────────────────────────────────────
 function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow): Record<string, unknown> {
   const config = getConfig();
@@ -290,7 +315,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     env: buildSpawnEnv(),
     // 复用系统已装的 claude（cli-detector 发现）。cliPath 可能是裸命令名，需解析成绝对路径，
     // 否则 SDK 报 "native binary not found"；解析失败回退 undefined 让 SDK 用自带二进制。
-    pathToClaudeCodeExecutable: resolveExecutable(config.cliPath),
+    pathToClaudeCodeExecutable: resolveExecutable(config.cliPath) ?? getBundledClaudeExecutable(),
     // 脱离磁盘 settings：完全由 claude-link 内联控制，避免 ~/.claude/settings.json 污染。
     settingSources: [],
     // 拿流式增量（对应 stream_event），前端逐字/逐工具参数显示。
