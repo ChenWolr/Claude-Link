@@ -79,7 +79,7 @@ onUnmounted(() => {
   <div v-if="activeSession" class="session-toolbar">
     <!-- 上下文（真实用量环 + 压缩）：放第一个，圆环自解释，不加文字标签 -->
     <div class="ctl">
-      <ContextButton @compress="emit('compress')" />
+      <ContextButton :disabled="sending" @compress="emit('compress')" />
     </div>
 
     <!-- 工作空间 -->
@@ -88,6 +88,7 @@ onUnmounted(() => {
       <button
         type="button"
         :class="['ctl__btn', { 'ctl__btn--warn': !activeSession.workingDir }]"
+        :disabled="sending"
         :title="activeSession.workingDir ?? '未选择工作空间（运行前必须选择）'"
         @click="showWorkspaceMenu = !showWorkspaceMenu"
       >
@@ -117,13 +118,13 @@ onUnmounted(() => {
     <!-- 模型 -->
     <div class="ctl">
       <span class="ctl__label">模型</span>
-      <ModelSelector />
+      <ModelSelector :disabled="sending" />
     </div>
 
     <!-- 权限 -->
     <label class="ctl ctl--select" title="本会话 Claude Code 权限模式（--permission-mode）">
       <span class="ctl__label">权限</span>
-      <select :value="activeSession.permissionMode" @change="onPermissionChange">
+      <select :value="activeSession.permissionMode" :disabled="sending" @change="onPermissionChange">
         <option v-for="p in PERMISSIONS" :key="p.value" :value="p.value">{{ p.label }}</option>
       </select>
     </label>
@@ -186,6 +187,15 @@ onUnmounted(() => {
 
 .ctl__btn:hover {
   border-color: var(--color-accent);
+}
+
+.ctl__btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ctl__btn:disabled:hover {
+  border-color: var(--color-border);
 }
 
 .ctl__btn--warn {
@@ -281,5 +291,10 @@ onUnmounted(() => {
   padding: 5px 8px;
   font-size: 12px;
   cursor: pointer;
+}
+
+.ctl--select select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

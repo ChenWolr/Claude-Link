@@ -35,11 +35,11 @@ const renderedContent = computed(() => renderMarkdown(props.content));
 
 .stream__content {
   word-break: break-word;
-  line-height: 1.6;
+  line-height: 1.5;
 }
 
 .stream__content :deep(p) {
-  margin: 0 0 8px;
+  margin: 0 0 4px;
 }
 
 .stream__content :deep(p:last-child) {

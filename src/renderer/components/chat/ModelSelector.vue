@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useConfigStore } from '../../stores/config-store';
 
+const props = withDefaults(defineProps<{ disabled?: boolean }>(), { disabled: false });
 const sessionStore = useSessionStore();
 const configStore = useConfigStore();
 const showModelDropdown = ref(false);
@@ -96,7 +97,7 @@ onUnmounted(() => {
 
 <template>
   <div ref="dropdownRef" class="model-selector">
-    <button type="button" class="model-selector__button" title="切换当前会话使用的模型" @click="showModelDropdown = !showModelDropdown">
+    <button type="button" class="model-selector__button" :disabled="props.disabled" title="切换当前会话使用的模型" @click="showModelDropdown = !showModelDropdown">
       {{ displayModel }}
     </button>
     <div v-if="showModelDropdown" class="model-dropdown">
@@ -138,6 +139,15 @@ onUnmounted(() => {
 
 .model-selector__button:hover {
   color: var(--color-text);
+}
+
+.model-selector__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.model-selector__button:disabled:hover {
+  color: var(--color-text-muted);
 }
 
 /* 下拉向上展开：ModelSelector 位于底部会话工具栏，避免溢出窗口底部 */
