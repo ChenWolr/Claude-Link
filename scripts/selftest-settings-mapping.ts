@@ -15,7 +15,8 @@ import {
   resolveConfiguredDefaultModel,
   peekEnvValue,
 } from '../src/shared/settings-parser';
-import { extractContextTokens, type CliUsage } from '../src/shared/context-usage';
+import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
+import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 
 let pass = 0;
 let fail = 0;
@@ -416,6 +417,97 @@ console.log('\n=== 27) 过程分组计划契约：类型/DB/透传/分组/子Age
   // B8 清理：无诊断日志残留
   check('无 claude-link-debug.log / [diag 诊断残留',
     !sb.includes('claude-link-debug.log') && !uc.includes('[diag'));
+}
+
+console.log('\n=== 28) 问题4: CC 自动压缩事件检测（detectCompaction）===');
+{
+  // 行为1: 非 system 事件返回 null（message / result / stream_event 都不应被误判为压缩）
+  const msgEvent: CliEvent = {
+    type: 'message', role: 'assistant', content: [{ type: 'text', text: 'hi' }],
+  } as CliMessageEvent;
+  check('message 事件不触发压缩检测', detectCompaction(msgEvent) === null,
+    `got ${JSON.stringify(detectCompaction(msgEvent))}`);
+
+  const resultEvent: CliEvent = {
+    type: 'result', subtype: 'success', result: 'ok',
+    total_cost_usd: 0, duration_ms: 0, num_turns: 1, session_id: 's', is_error: false,
+  } as CliResultEvent;
+  check('result 事件不触发压缩检测', detectCompaction(resultEvent) === null,
+    `got ${JSON.stringify(detectCompaction(resultEvent))}`);
+
+  // 行为2: system 但非 compact_boundary 子类型返回 null
+  const infoEvent: CliEvent = {
+    type: 'system', subtype: 'informational', text: 'some info',
+  } as CliSystemInfoEvent;
+  check('system/informational 不触发压缩', detectCompaction(infoEvent) === null,
+    `got ${JSON.stringify(detectCompaction(infoEvent))}`);
+
+  const pluginEvent: CliEvent = {
+    type: 'system', subtype: 'plugin_install', text: 'installed',
+  } as CliSystemInfoEvent;
+  check('system/plugin_install 不触发压缩', detectCompaction(pluginEvent) === null,
+    `got ${JSON.stringify(detectCompaction(pluginEvent))}`);
+
+  // 行为3: system + compact_boundary 返回 { compactedJustNow: true }
+  const compactEvent: CliEvent = {
+    type: 'system', subtype: 'compact_boundary', text: '上下文已压缩',
+  } as CliSystemInfoEvent;
+  const r3 = detectCompaction(compactEvent);
+  check('system/compact_boundary 触发压缩标记',
+    r3 !== null && r3.compactedJustNow === true,
+    `got ${JSON.stringify(r3)}`);
+
+  // 行为4: compact_boundary 事件即使无 text 字段也触发（CC 可能不携带 text）
+  const compactNoText: CliEvent = {
+    type: 'system', subtype: 'compact_boundary',
+  } as CliSystemInfoEvent;
+  const r4 = detectCompaction(compactNoText);
+  check('compact_boundary 无 text 仍触发压缩标记',
+    r4 !== null && r4.compactedJustNow === true,
+    `got ${JSON.stringify(r4)}`);
+}
+
+console.log('\n=== 29) V3-3: 交互历史持久化契约（表/repo/IPC/preload/接线）===');
+{
+  const mig = readRel('src/main/database/migrations.ts');
+  const repo = readRel('src/main/database/repositories/interaction-history-repo.ts');
+  const ipc = readRel('src/shared/types/ipc.ts');
+  const preload = readRel('src/preload/api.ts');
+  const handlers = readRel('src/main/ipc-handlers.ts');
+  const ip = readRel('src/renderer/components/chat/InteractionPrompt.vue');
+
+  // 1. 迁移：interaction_history 表（幂等自愈）
+  check('migrations 含 interaction_history 表定义',
+    mig.includes('interaction_history'));
+  check('migrations 幂等检查 interaction_history 表',
+    mig.includes('CREATE TABLE IF NOT EXISTS interaction_history'));
+
+  // 2. repo：createInteractionHistory + getInteractionHistory
+  check('interaction-history-repo 导出 createInteractionHistory',
+    repo.includes('export function createInteractionHistory') || repo.includes('export const createInteractionHistory'));
+  check('interaction-history-repo 导出 getInteractionHistory',
+    repo.includes('export function getInteractionHistory') || repo.includes('export const getInteractionHistory'));
+
+  // 3. IPC channel + 类型
+  check('ipc.ts 含 INTERACTION_HISTORY_GET channel',
+    ipc.includes('INTERACTION_HISTORY_GET'));
+  check('ipc.ts 含 InteractionHistoryEntry 类型',
+    ipc.includes('InteractionHistoryEntry'));
+
+  // 4. preload API
+  check('preload/api.ts 含 getInteractionHistory',
+    preload.includes('getInteractionHistory'));
+
+  // 5. ipc-handlers 注册
+  check('ipc-handlers 注册 INTERACTION_HISTORY_GET',
+    handlers.includes('INTERACTION_HISTORY_GET'));
+
+  // 6. InteractionPrompt 接线：pushHistory 落库 + onMounted 加载
+  check('InteractionPrompt pushHistory 调落库 IPC',
+    ip.includes('createInteractionHistory') || ip.includes('getInteractionHistory') ||
+    ip.includes('recordInteractionHistory') || ip.includes('claudeLink.recordInteraction'));
+  check('InteractionPrompt 初始化加载历史',
+    ip.includes('getInteractionHistory') || ip.includes('loadHistory'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
