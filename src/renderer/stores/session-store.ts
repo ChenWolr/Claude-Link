@@ -74,6 +74,8 @@ export const useSessionStore = defineStore('session', {
       this.error = null;
       this.messages = [];
       this.turnStartIndex = 0;
+      // 问题 4：切换会话时复位自动压缩横幅标记，避免会话 A 的横幅串扰到会话 B。
+      this.compactedJustNow = false;
       this.contextStats = session.lastContextTokens
         ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize: 200000, ratio: session.lastContextTokens / 200000 }
         : null;
@@ -172,7 +174,15 @@ export const useSessionStore = defineStore('session', {
           windowSize: payload.windowSize,
           ratio: payload.windowSize > 0 ? payload.inputTokens / payload.windowSize : 0,
         };
+        // 问题 4：CC 自动压缩事件 → 置标记，ContextButton 弹横幅回显。
+        if (payload.compactedJustNow) {
+          this.compactedJustNow = true;
+        }
       });
+    },
+    // 问题 4：ContextButton 横幅显示完毕后调用，复位标记以便下次压缩可再次触发。
+    clearCompactedJustNow() {
+      this.compactedJustNow = false;
     },
     // 会话重命名：写入 session.name。默认名由首句 analyzeTopic 自动生成，此处供用户自定义。
     async renameActiveSession(name: string) {

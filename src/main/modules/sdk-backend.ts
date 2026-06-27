@@ -28,7 +28,7 @@ import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
-import { extractContextTokens } from '../../shared/context-usage';
+import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type {
   CliEvent,
@@ -53,6 +53,7 @@ import { cancelInteractionsForSession, requestInteraction } from './interaction-
 import {
   SUPPORTED_USER_DIALOG_KINDS,
   buildPermissionInteractionPayload,
+  createElicitationHandler,
   createUserDialogHandler,
   isAskUserQuestionPayload,
   mapPermissionInteractionResponse,
@@ -105,11 +106,21 @@ const interruptedQueries = new WeakSet<Query>();
 //      2) 反复同步 DB 操作阻塞主进程事件循环导致所有输入框失效。
 // 比 sessionRepo.getSession() 轻得多（内存 Set.has vs 索引查询）。
 const activeSessions = new Set<string>();
+// 问题 4：缓存每会话最近一次上下文用量。CC 自动压缩事件（compact_boundary）不带
+// usage，emit CONTEXT_UPDATE 时沿用此缓存，避免前端收到压缩标记但占比回零闪烁。
+interface CachedContextStats {
+  inputTokens: number;
+  outputTokens: number;
+  windowSize: number;
+}
+const sessionContextStats = new Map<string, CachedContextStats>();
 const pendingPermissionRequests = new Map<string, (response: PermissionResponsePayload) => void>();
 // 标记会话已删除：runQuery 下轮迭代检测到即自停，forwardEvent 落库前也据此跳过。
 export function markSessionDeleted(sessionId: string): void {
   activeSessions.delete(sessionId);
   cancelInteractionsForSession(sessionId);
+  // 清理上下文用量缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
+  sessionContextStats.delete(sessionId);
   for (const [id, resolve] of pendingPermissionRequests) {
     pendingPermissionRequests.delete(id);
     resolve({ id, optionId: 'deny' });
@@ -132,6 +143,15 @@ export function respondToPermissionRequest(response: PermissionResponsePayload):
   resolve(response);
 }
 
+function recordInteractionResponse(sessionId: string, mainWindow: BrowserWindow, title: string, summary: string): void {
+  forwardEvent(sessionId, mainWindow, {
+    type: 'system',
+    subtype: 'interaction_response',
+    text: `${title}\n${summary}`,
+    level: 'info',
+  });
+}
+
 function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
   return async (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions): Promise<PermissionResult> => {
     if (!isSessionActive(sessionId)) {
@@ -140,9 +160,11 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
 
     if (toolName === 'AskUserQuestion' && isAskUserQuestionPayload(input)) {
       const result = await requestAskUserQuestionInteractions(sessionId, mainWindow, input, options);
-      return result
-        ? { behavior: 'allow', updatedInput: result, toolUseID: options.toolUseID }
-        : { behavior: 'deny', message: '用户取消了选择题交互', toolUseID: options.toolUseID };
+      if (result) {
+        recordInteractionResponse(sessionId, mainWindow, '用户完成选择题', Object.entries(result.answers).map(([question, answer]) => `${question}: ${answer}`).join('\n'));
+        return { behavior: 'allow', updatedInput: result, toolUseID: options.toolUseID };
+      }
+      return { behavior: 'deny', message: '用户取消了选择题交互', toolUseID: options.toolUseID };
     }
 
     const payload = buildPermissionInteractionPayload(sessionId, toolName, input, options);
@@ -156,7 +178,9 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
     });
 
     const response = await requestInteraction(mainWindow, payload, options.signal);
-    return mapPermissionInteractionResponse(payload, response);
+    const result = mapPermissionInteractionResponse(payload, response);
+    recordInteractionResponse(sessionId, mainWindow, payload.title, response.action === 'submit' ? `选择：${response.selectedOptionIds?.join(', ') ?? '提交'}` : '已取消');
+    return result;
   };
 }
 
@@ -278,6 +302,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     // 启用 adaptive thinking：交给 SDK/模型决定思考预算，避免新模型拒绝固定 budgetTokens。
     thinking: { type: 'adaptive' },
     canUseTool: createPermissionHandler(sessionId, mainWindow),
+    onElicitation: createElicitationHandler(sessionId, mainWindow),
     // SDK 只有同时声明 supportedDialogKinds 与 onUserDialog，才会把选择题交互交给宿主 UI。
     supportedDialogKinds: SUPPORTED_USER_DIALOG_KINDS,
     onUserDialog: createUserDialogHandler(sessionId, mainWindow),
@@ -358,11 +383,37 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
         model: null,
       };
       mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      // 缓存最近一次用量，供 compact_boundary 事件（无 usage）emit 时沿用。
+      sessionContextStats.set(sessionId, {
+        inputTokens,
+        outputTokens: (usage as { output_tokens?: number }).output_tokens ?? 0,
+        windowSize: payload.windowSize,
+      });
       try {
         sessionRepo.updateLastContext(sessionId, inputTokens);
       } catch (err) {
         logger.warn(`Failed to persist last context [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+  }
+  // 问题 4：检测 CC 自动压缩事件（system + subtype 'compact_boundary'）。
+  // 压缩事件本身不带 usage，emit CONTEXT_UPDATE 带 compactedJustNow:true 并沿用
+  // 缓存的最近用量作为载体。前端 ContextButton 据此弹横幅回显自动压缩。
+  const compaction = detectCompaction(event);
+  if (compaction) {
+    const lastStats = sessionContextStats.get(sessionId);
+    const payload: ContextStatsPayload = {
+      sessionId,
+      inputTokens: lastStats?.inputTokens ?? 0,
+      outputTokens: lastStats?.outputTokens ?? 0,
+      windowSize: lastStats?.windowSize ?? readContextWindow(),
+      model: null,
+      compactedJustNow: true,
+    };
+    try {
+      mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+    } catch {
+      // webContents 可能已销毁（窗口关闭），忽略
     }
   }
 }
