@@ -17,6 +17,7 @@
   ],
 
   win: {
+    icon: "resources/icon.ico",
     executableName: "claude-link",
     target: [
       { target: "nsis", arch: ["x64"] }
