@@ -8,15 +8,24 @@ import { detectCli } from './modules/cli-detector';
 import { killAllProcesses } from './modules/sdk-backend';
 import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
+import {
+  WINDOW_DEFAULT_WIDTH,
+  WINDOW_DEFAULT_HEIGHT,
+  WINDOW_MIN_WIDTH,
+  WINDOW_MIN_HEIGHT,
+} from '../shared/constants';
+import { loadWindowSize, trackWindowSize } from './modules/window-state';
 
 let mainWindow: BrowserWindow | null = null;
 
 function createWindow(): void {
+  const size = loadWindowSize();
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 900,
-    minHeight: 640,
+    width: size?.width ?? WINDOW_DEFAULT_WIDTH,
+    height: size?.height ?? WINDOW_DEFAULT_HEIGHT,
+    minWidth: WINDOW_MIN_WIDTH,
+    minHeight: WINDOW_MIN_HEIGHT,
+    center: true,
     show: false,
     autoHideMenuBar: true,
     webPreferences: {
@@ -45,6 +54,7 @@ function createWindow(): void {
   }
 
   registerIpcHandlers(mainWindow);
+  trackWindowSize(mainWindow);
 }
 
 app.whenReady().then(async () => {
