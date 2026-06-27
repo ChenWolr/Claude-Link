@@ -7,12 +7,13 @@ import ApiKeyInput from '../components/config/ApiKeyInput.vue';
 import ModelMappingInputs from '../components/config/ModelMappingInputs.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import TestConnectionModal from '../components/config/TestConnectionModal.vue';
-import ConfirmDialog from '../components/common/ConfirmDialog.vue';
+import { useInteractionStore } from '../stores/interaction-store';
 import { THEME_PALETTES } from '../../shared/constants';
 import { parseClaudeSettings } from '../../shared/settings-parser';
 
 const store = useConfigStore();
 const router = useRouter();
+const interactionStore = useInteractionStore();
 const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
 const advancedJsonError = ref<string | null>(null);
@@ -236,15 +237,16 @@ function handleFillFromJson() {
 }
 
 // 一键清空连接配置：供应商/API Key/请求地址字段 + 高级 JSON 对应 env 键 + 模型映射。
-// 用 ConfirmDialog 确认，避免 window.confirm 导致 Electron 焦点丢失。
-const clearDialogVisible = ref(false);
-
-function handleClearConnection() {
-  clearDialogVisible.value = true;
-}
-
-function onConfirmClear() {
-  clearDialogVisible.value = false;
+// 用 interaction 队列的 requestConfirm 确认，避免 window.confirm 导致 Electron 焦点丢失。
+async function handleClearConnection() {
+  const ok = await interactionStore.requestConfirm({
+    title: '清空连接配置',
+    message: '确定清空连接配置？供应商、API Key、请求地址会重置，高级 JSON 里对应的 env 键（含模型映射）也会一并移除。',
+    confirmText: '清空',
+    cancelText: '取消',
+    danger: true,
+  });
+  if (!ok) return;
   store.clearConnectionConfig();
   toastType.value = 'success';
   toast.value = '已清空连接配置';
@@ -319,15 +321,6 @@ function applyTheme(paletteId: string) {
       <p v-if="autoDetectInfo" class="autodetect-info">{{ autoDetectInfo }}</p>
     </div>
     <TestConnectionModal v-model:visible="showTestModal" />
-    <ConfirmDialog
-      v-model:visible="clearDialogVisible"
-      title="清空连接配置"
-      message="确定清空连接配置？供应商、API Key、请求地址会重置，高级 JSON 里对应的 env 键（含模型映射）也会一并移除。"
-      confirm-text="清空"
-      cancel-text="取消"
-      danger
-      @confirm="onConfirmClear"
-    />
 
     <!-- 分类标签页 -->
     <nav class="tabs">
