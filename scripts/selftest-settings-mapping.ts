@@ -125,7 +125,7 @@ console.log('\n=== 5) 端到端：JSON→字段→JSON 回写后，关键字段�
   check('默认模型解析为 sonnet（首个映射）', resolveDefaultModel(regen) === 'sonnet', resolveDefaultModel(regen));
 }
 
-// 模拟 process-manager.buildSpawnEnv 的 env 提取（顶层字符串 + env 块字符串），不依赖 electron。
+// 模拟 cli-shared.buildSpawnEnv 的 env 提取（顶层字符串 + env 块字符串），不依赖 electron。
 function simulateSpawnEnv(advancedJson: string): Record<string, string> {
   const env: Record<string, string> = {};
   try {
@@ -237,11 +237,9 @@ console.log('\n=== 13) 回归：聊天发送错误必须在 ChatPage 可见 ==='
 console.log('\n=== 14) 回归：CLI 子进程异常退出必须推送到聊天界面 ===');
 {
   const cliTypes = readRel('src/shared/types/cli.ts');
-  const processManager = readRel('src/main/modules/process-manager.ts');
   const useChat = readRel('src/renderer/composables/use-chat.ts');
   check('CliEvent 包含 error 事件', cliTypes.includes("type: 'error'"));
-  check('process-manager 在非零退出时发送 error 事件', processManager.includes("type: 'error'") && processManager.includes('CLI 进程异常退出'));
-  check('use-chat 收到 error 事件后复位 sending', useChat.includes("case 'error'") && useChat.includes('sending.value = false'));
+  check('use-chat 收到 error 事件后 markStopped', useChat.includes("case 'error'") && useChat.includes('markStopped'));
 }
 
 // ── 全链路审计修复回归（C1-C3, M1-M8）──────────────────────────────────
@@ -258,24 +256,25 @@ function readRel(p: string): string {
 console.log('\n=== 15) C1: system/init 事件必须被识别并持久化 session_id ===');
 {
   const cliTypes = readRel('src/shared/types/cli.ts');
-  const pm = readRel('src/main/modules/process-manager.ts');
+  const cs = readRel('src/main/modules/cli-shared.ts');
   check('CliEvent 联合包含 system 类型', cliTypes.includes("type: 'system'") && cliTypes.includes("subtype"));
-  check('process-manager persistCliEvent 识别 system+init', pm.includes("'system'") && pm.includes('subtype') && pm.includes('init'));
+  check('cli-shared persistCliEvent 识别 system+init', cs.includes("'system'") && cs.includes('subtype') && cs.includes('init'));
 }
 
-console.log('\n=== 16) C2: CLI 正常退出但无 result 时必须复位前端（防死锁）===');
+console.log('\n=== 16) C2: SDK query 异常结束必须复位前端（防死锁）===');
 {
-  const pm = readRel('src/main/modules/process-manager.ts');
-  // code===0 但未 sawResult 时也必须向前端发事件复位
-  check('process-manager 在 0 退出无 result 时合成结束事件', /sawResult\s*===\s*false/.test(pm) || /!sawResult/.test(pm));
-  check('process-manager 区分中断与错误（interrupted 标志）', pm.includes('interrupted'));
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  // SDK 路径：markSessionDeleted 标记会话删除，runQuery 检测 isSessionActive 后 interrupt。
+  // 异常结束靠 markStopped（移除 runningSessions，sending getter 自动 false）。
+  check('sdk-backend 含 markSessionDeleted', sb.includes('markSessionDeleted'));
+  check('sdk-backend runQuery 检测 isSessionActive', sb.includes('isSessionActive'));
 }
 
-console.log('\n=== 17) C3: 中断必须优先 SIGINT（nix 优雅中止），Windows 兜底硬杀 ===');
+console.log('\n=== 17) C3: 中断走 SDK Query.interrupt()（跨平台优雅中止）===');
 {
-  const pm = readRel('src/main/modules/process-manager.ts');
-  check('process-manager 使用 SIGINT 优先', pm.includes("'SIGINT'") || pm.includes('"SIGINT"'));
-  check('killProcess 区分平台（Windows 硬杀兜底）', pm.includes('platform') && (pm.includes('win32') || pm.includes('isWindows')));
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  check('sdk-backend 含 Query.interrupt', /interrupt\b/.test(sb));
+  check('sdk-backend killProcess 调 interrupt', /killProcess[\s\S]{0,200}interrupt/.test(sb));
 }
 
 console.log('\n=== 18) M1: result 错误回合(subtype error/is_error)必须给前端可见提示 ===');
@@ -302,9 +301,10 @@ console.log('\n=== 20) M3: abort 不能立即丢弃尾部 result 元数据 ===')
 
 console.log('\n=== 21) M4: 中断不应被合成 error 误报 ===');
 {
-  const pm = readRel('src/main/modules/process-manager.ts');
-  // exit handler 在 interrupted 时不走 error 合成分支
-  check('process-manager interrupted 时不发 error', /interrupted/.test(pm) && (/return/.test(pm.match(/childProcess\.on\('exit'[\s\S]{0,600}/)?.[0] ?? '') || pm.includes('aborted')));
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  // SDK 路径：中断走 abort() → markStopped，不产生 error 事件。
+  // use-chat 的 aborted case 调 markStopped 不设 error。
+  check('use-chat aborted case 调 markStopped 不设 error', uc.includes("case 'aborted'") && uc.includes('markStopped'));
 }
 
 console.log('\n=== 22) M5: redacted_thinking 必须可识别并占位渲染 ===');
@@ -334,20 +334,21 @@ console.log('\n=== 25) M8: interruptTask 必须处理 continuing 状态 ===');
   check('interruptTask 允许 continuing 状态中断', fn.includes('continuing') || fn.includes('running'));
 }
 
-console.log('\n=== 26) Review 修复：中断标记按 child、孤儿进程兜底、abort 跨回合串扰 ===');
+console.log('\n=== 26) Review 修复：中断标记按 query 实例、abort 跨回合串扰 ===');
 {
-  const pm = readRel('src/main/modules/process-manager.ts');
+  const sb = readRel('src/main/modules/sdk-backend.ts');
   const uc = readRel('src/renderer/composables/use-chat.ts');
   const ml = readRel('src/renderer/components/chat/MessageList.vue');
   const cp = readRel('src/renderer/pages/ChatPage.vue');
   const us = readRel('src/renderer/composables/use-stream.ts');
   const tq = readRel('src/main/modules/task-queue-engine.ts');
-  check('中断标记按 child 实例（WeakSet 非 sessionId Set）', pm.includes('interruptedChildren') && pm.includes('WeakSet'));
-  check('killProcess SIGKILL 兜底防孤儿', pm.includes('SIGKILL'));
+  // SDK 路径：中断标记按 query 实例（interruptedQueries WeakSet），非 sessionId。
+  check('中断标记按 query 实例（WeakSet）', sb.includes('interruptedQueries') && sb.includes('WeakSet'));
+  check('killProcess 调 query.interrupt', /killProcess[\s\S]{0,300}interrupt/.test(sb));
   check('中断(error_during_execution)不弹错误', uc.includes('error_during_execution') && uc.includes('isUserInterrupt'));
   check('streamingTool 有渲染消费链', ml.includes('streamingTool') && cp.includes('displayTool') && us.includes('displayTool'));
   check('abort 定时器句柄化 + 清理', uc.includes('abortTimer') && uc.includes('clearAbortTimer'));
-  check('continueWithUserMessage exit 守卫 continuing', /child\.on\('exit'[\s\S]{0,200}status !== 'continuing'/.test(tq));
+  check('continueWithUserMessage exit 守卫 continuing', /status !== 'continuing'/.test(tq));
 }
 
 console.log('\n=== 27) 过程分组计划契约：类型/DB/透传/分组/子AgentTab/无诊断日志 ===');
@@ -357,7 +358,7 @@ console.log('\n=== 27) 过程分组计划契约：类型/DB/透传/分组/子Age
   const repo = readRel('src/main/database/repositories/message-repo.ts');
   const cli = readRel('src/shared/types/cli.ts');
   const sb = readRel('src/main/modules/sdk-backend.ts');
-  const pm = readRel('src/main/modules/process-manager.ts');
+  const cs = readRel('src/main/modules/cli-shared.ts');
   const pkShared = readRel('src/shared/process-kind.ts');
   const pkRenderer = readRel('src/renderer/utils/process-kind.ts');
   const gm = readRel('src/renderer/utils/group-messages.ts');
@@ -386,7 +387,7 @@ console.log('\n=== 27) 过程分组计划契约：类型/DB/透传/分组/子Age
   check('runQuery 转发 system 子类型（informational/permission_denied）',
     sb.includes("'informational'") && sb.includes('permission_denied') && sb.includes('CliPermissionEvent'));
   check('persistMessageParts 计算 processKind + 接收 parentAgentId + 子Agent 标题',
-    pm.includes('processKindFromPart') && pm.includes('parentAgentId') && pm.includes('extractSubAgentTitle'));
+    cs.includes('processKindFromPart') && cs.includes('parentAgentId') && cs.includes('extractSubAgentTitle'));
 
   // B5 映射
   check('process-kind.ts（shared + renderer）存在',
@@ -531,18 +532,18 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
   check('session-store 含 appendBackgroundStream action', ss.includes('appendBackgroundStream'));
   check('switchSession 保存旧会话流式快照', ss.includes('sessionStreams[oldId]'));
   check('switchSession 恢复目标会话快照', ss.includes('sessionStreams[session.id]') || ss.includes('snapshot'));
-  check('switchSession sending 依 runningSessions', ss.includes('runningSessions.includes(session.id)'));
+  check('switchSession sending 依 runningSessions（getter 派生）', ss.includes('sending(state)') && ss.includes('runningSessions.includes'));
   check('deleteSession 清理 runningSessions', ss.includes('runningSessions.filter') && ss.includes('sid !== id'));
   check('deleteSession 清理 sessionStreams', ss.includes('delete this.sessionStreams[id]'));
 
-  check('use-chat watcher 从 runningSessions 同步 sending', uc.includes('runningSessions.includes(newId)'));
+  check('use-chat sending 从 store getter 派生（computed）', uc.includes('computed(() => store.sending)'));
   check('use-chat 含 handleBackgroundEvent', uc.includes('handleBackgroundEvent'));
   check('use-chat handleBackgroundEvent 写快照', uc.includes('appendBackgroundStream'));
   check('use-chat handleBackgroundEvent 调 markStopped', uc.includes('markStopped(sid)'));
   check('use-chat sendMessage 调 markRunning', uc.includes('store.markRunning'));
   check('use-chat result/error/aborted 调 markStopped', uc.includes('markStopped(store.activeSession.id)'));
   check('use-chat startListening 先 removeChatListener', uc.includes('removeChatListener()') && uc.includes('startListening'));
-  check('ChatPage onMounted 调 startListening', cp.includes('startListening()') && cp.includes('onMounted'));
+  check('ChatPage onMounted 调 refreshActiveSession', cp.includes('refreshActiveSession') && cp.includes('onMounted'));
   check('ChatPage onUnmounted 不调 stopListening', !/onUnmounted\([\s\S]{0,80}stopListening/.test(cp));
 
   // 问题 2：行间距
@@ -559,6 +560,41 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
   check('SessionToolbar 工作空间 button :disabled', /ctl__btn[\s\S]{0,120}:disabled="sending"/.test(st));
   check('SessionToolbar ModelSelector :disabled', st.includes('ModelSelector :disabled="sending"'));
   check('SessionToolbar 权限 select :disabled', /<select[\s\S]{0,80}:disabled="sending"/.test(st));
+}
+
+console.log('\n=== 31) 根因修复：chat:event 监听全局化 + sending 派生 ===');
+{
+  const app = readRel('src/renderer/App.vue');
+  const ss = readRel('src/renderer/stores/session-store.ts');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const cp = readRel('src/renderer/pages/ChatPage.vue');
+
+  // 1. 监听在 App.vue 全局注册（不在 ChatPage）
+  check('App.vue 含 startListening 全局监听', app.includes('startListening'));
+  check('App.vue 含 chat event cleanup（onUnmounted 或 returned cleanup）', app.includes('onBeforeUnmount') || app.includes('onUnmounted') || /return.*cleanup/.test(app));
+
+  // 2. sending 是 store getter（从 runningSessions 派生），不再是 state
+  check('session-store sending 是 getter', /getters[\s\S]{0,200}sending/.test(ss));
+  check('session-store sending getter 从 runningSessions 派生', /sending[\s\S]{0,100}runningSessions/.test(ss));
+
+  // 3. useChat 是全局单例（监听在 App.vue 注册一次，ChatPage 卸载不影响）
+  check('use-chat 含 createChat 内部工厂函数', uc.includes('function createChat'));
+  check('use-chat 含 chatSingleton 单例', uc.includes('chatSingleton'));
+  check('use-chat useChat 返回单例', /export function useChat[\s\S]{0,80}chatSingleton/.test(uc));
+
+  // 4. useChat 不再含 local sending ref（改为从 store 读）
+  check('use-chat 不含 const sending = ref', !uc.includes('const sending = ref(false)') && !uc.includes("const sending = ref<boolean>(false)"));
+  check('use-chat 不含 sending.value = ', !/sending\.value\s*=/.test(uc));
+
+  // 5. ChatPage 不再调 startListening/stopListening
+  check('ChatPage 不含 startListening', !cp.includes('startListening'));
+  check('ChatPage 不含 stopListening', !cp.includes('stopListening'));
+
+  // 6. ChatPage sending 从 useChat 单例读（单例 sending = computed(store.sending)）
+  check('ChatPage sending 从 useChat 单例读', cp.includes('useChat') && cp.includes('sending'));
+
+  // 7. store 含 refreshActiveSession（ChatPage 重挂载时重拉 messages + 同步状态）
+  check('session-store 含 refreshActiveSession action', ss.includes('refreshActiveSession'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
