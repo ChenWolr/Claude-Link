@@ -26,7 +26,7 @@ import { writeClaudeSettings, SKIP_NO_WORKDIR } from './settings-writer';
 import { logger } from '../utils/logger';
 import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
-import { extractContextTokens } from '../../shared/context-usage';
+import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 
@@ -35,6 +35,17 @@ const sessionCliIds = new Map<string, string>();// 标记某个 child 进程是"
 // 必须按 child 实例而非 sessionId：否则中断旧进程后，新 spawn 的同 session 进程
 // 在退出时会被旧标记误判为 interrupted（吞掉真正的错误）。WeakSet 随 child GC 自动清理。
 const interruptedChildren = new WeakSet<ChildProcess>();
+
+// 问题 4：缓存每个会话最近一次上下文用量。CC 自动压缩事件（compact_boundary）
+// 本身不带 usage，emit CONTEXT_UPDATE 时沿用此缓存作为载体，避免前端收到压缩
+// 标记但 inputTokens=0 导致占比回零闪烁。进程退出时不清除——下次 spawn 同 session
+// 仍可读到上次用量作为初始展示。
+interface CachedContextStats {
+  inputTokens: number;
+  outputTokens: number;
+  windowSize: number;
+}
+const sessionContextStats = new Map<string, CachedContextStats>();
 
 function isWindows(): boolean {
   return process.platform === 'win32';
@@ -214,12 +225,37 @@ function attachStreamParser(
             model: null,
           };
           mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+          // 缓存最近一次用量，供 compact_boundary 事件（无 usage）emit 时沿用。
+          sessionContextStats.set(sessionId, {
+            inputTokens,
+            outputTokens: usage.output_tokens ?? 0,
+            windowSize: payload.windowSize,
+          });
           try {
             sessionRepo.updateLastContext(sessionId, inputTokens);
           } catch (err) {
             logger.warn(`Failed to persist last context [${sessionId}]`, err);
           }
         }
+      }
+
+      // 问题 4：检测 CC 自动压缩事件（system + subtype 'compact_boundary'）。
+      // CC 在上下文接近上限时会自动压缩并发出 compact_boundary 事件。检测到后
+      // emit CONTEXT_UPDATE 带 compactedJustNow:true，前端 ContextButton 据此弹
+      // 横幅回显「Claude Code 已自动压缩上下文」。压缩事件本身不带 usage，沿用
+      // 最近一次已知的 inputTokens/windowSize（若尚无则 0/默认窗口）作为载体。
+      const compaction = detectCompaction(event);
+      if (compaction) {
+        const lastStats = sessionContextStats.get(sessionId);
+        const payload: ContextStatsPayload = {
+          sessionId,
+          inputTokens: lastStats?.inputTokens ?? 0,
+          outputTokens: lastStats?.outputTokens ?? 0,
+          windowSize: lastStats?.windowSize ?? readContextWindow(),
+          model: null,
+          compactedJustNow: true,
+        };
+        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
       }
     }
   });
@@ -309,6 +345,7 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
         informational: '系统提示',
         compact_boundary: '上下文已达压缩边界',
         plugin_install: '插件安装',
+        interaction_response: '用户已完成交互选择',
       };
       messageRepo.createMessage({
         sessionId,
