@@ -15,10 +15,7 @@ onMounted(() => {
 function onSearchInput() {
   if (debounceTimer) clearTimeout(debounceTimer);
   const q = searchQuery.value.trim();
-  if (!q) {
-    store.loadSessions();
-    return;
-  }
+  // 空查询也走 store.searchSessions('')，由 store 清空搜索态。
   debounceTimer = setTimeout(() => {
     store.searchSessions(q);
   }, 250);
@@ -26,7 +23,7 @@ function onSearchInput() {
 
 function handleSearchClear() {
   searchQuery.value = '';
-  store.loadSessions();
+  store.searchSessions('');
 }
 
 async function createAndNavigate() {
@@ -65,7 +62,7 @@ async function openSession(session: { id: string }) {
     />
     <div class="sessions-list">
       <div
-        v-for="session in store.sessions"
+        v-for="session in store.displayedSessions"
         :key="session.id"
         class="session-card"
         @click="openSession(session)"
@@ -82,7 +79,7 @@ async function openSession(session: { id: string }) {
           删除
         </button>
       </div>
-      <div v-if="!store.sessions.length" class="empty">
+      <div v-if="!store.displayedSessions.length" class="empty">
         {{ searchQuery.trim() ? '未找到匹配的会话' : '暂无会话' }}
       </div>
     </div>

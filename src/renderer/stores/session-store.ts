@@ -11,6 +11,11 @@ import type { Message } from '../../shared/types/session';
 export const useSessionStore = defineStore('session', {
   state: () => ({
     sessions: [] as Session[],
+    // 搜索视图态：null 表示无搜索（显示全量 sessions），非 null 表示显示搜索结果。
+    // 避免 searchSessions 直接覆盖 sessions 而污染会话管理页/侧栏等全局列表。
+    searchResults: null as Session[] | null,
+    // 当前搜索词，供 UI 同步空态判断。
+    searchQuery: '' as string,
     activeSession: null as Session | null,
     messages: [] as Message[],
     streamingContent: '',
@@ -27,7 +32,16 @@ export const useSessionStore = defineStore('session', {
     // 隐藏本回合已落库的 text/thinking（与流式块去重），回合结束/会话切换时复位。
     turnStartIndex: 0,
     contextStats: null as { inputTokens: number; outputTokens: number; windowSize: number; ratio: number } | null,
+    // 问题 4：CC 自动压缩事件标记。收到 compactedJustNow:true 的 CONTEXT_UPDATE 时置 true，
+    // ContextButton 据此弹短暂横幅回显。横幅显示后由 ContextButton 自行复位为 false。
+    compactedJustNow: false as boolean,
   }),
+  getters: {
+    // 当前应展示的会话列表：搜索态下返回 searchResults，否则返回全量 sessions。
+    displayedSessions(state): Session[] {
+      return state.searchResults ?? state.sessions;
+    },
+  },
   actions: {
     async loadSessions() {
       try {
@@ -35,6 +49,9 @@ export const useSessionStore = defineStore('session', {
       } catch (error) {
         this.error = error instanceof Error ? error.message : '加载会话失败';
       }
+      // 重新加载意味着退出搜索态，清空搜索视图。
+      this.searchResults = null;
+      this.searchQuery = '';
     },
     async createSession(name: string) {
       try {
@@ -70,6 +87,10 @@ export const useSessionStore = defineStore('session', {
       try {
         await window.claudeLink.deleteSession(id);
         this.sessions = this.sessions.filter((s) => s.id !== id);
+        // 搜索态下同步移除，保持搜索列表一致。
+        if (this.searchResults) {
+          this.searchResults = this.searchResults.filter((s) => s.id !== id);
+        }
         if (this.activeSession?.id === id) {
           this.activeSession = null;
           this.messages = [];
@@ -79,15 +100,20 @@ export const useSessionStore = defineStore('session', {
       }
     },
     async searchSessions(query: string) {
-      if (!query.trim()) {
-        await this.loadSessions();
+      const q = query.trim();
+      if (!q) {
+        // 空查询退出搜索态，全量列表已在 sessions 里，无需 IPC。
+        this.searchResults = null;
+        this.searchQuery = '';
         return;
       }
+      this.searchQuery = q;
       try {
-        this.sessions = await window.claudeLink.searchSessions(query);
+        this.searchResults = await window.claudeLink.searchSessions(q);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '搜索会话失败';
-        await this.loadSessions();
+        // 异常回退全量列表。
+        this.searchResults = null;
       }
     },
     async updateActiveSessionModelOverride(modelOverride: string | null) {
