@@ -15,8 +15,8 @@
 // SDK 是纯 ESM（"type":"module"），项目 main 进程经 electron-vite 编译为 CJS，
 // 故用模块级缓存的动态 import() 加载 SDK，避免 CJS 静态 import ESM 的语法限制。
 
-import { app, type BrowserWindow } from 'electron';
-import { existsSync } from 'fs';
+import type { BrowserWindow } from 'electron';
+import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
@@ -242,12 +242,13 @@ function readContextWindow(): number {
   return 200000;
 }
 
-// 把 config.cliPath（可能是裸命令名 'claude' 或 'npx claude'）解析成 SDK 能直接 spawn的绝对路径。
+// 把 config.cliPath（可能是裸命令名 'claude' 或 'npx claude'）解析成 SDK 能直接 spawn 的绝对路径。
 // SDK 的 pathToClaudeCodeExecutable 不走 shell，要求真正的可执行二进制：
-//  - Windows：只接受 .exe（npm 装的 claude 是 #!/bin/sh 脚本 shim 或 .cmd 批处理，SDK spawn 必败，
-//    会误报成 libc 不匹配）。所以 Windows 上必须在候选里挑 .exe。
+//  - Windows：只接受 .exe。npm 装的 claude 表面是 .cmd shim，但 shim 背后就是真正的
+//    bin/claude.exe（PE 二进制），解析 .cmd 内容即可拿到，SDK 直接 spawn 它。
 //  - *nix：which 返回的就是可执行文件。
-// 解析不到任何合法可执行文件时返回 undefined，让 SDK 回退到其自带的原生二进制（避免硬阻塞）。
+// 项目宗旨：要求用户本地安装 Claude Code，不内嵌二进制。解析不到则返回 undefined，
+// 由 runQuery 给出中文提示（本地没装 claude 即不可用）。
 function isLikelyExecutable(p: string): boolean {
   if (!p) return false;
   if (process.platform === 'win32') {
@@ -257,6 +258,27 @@ function isLikelyExecutable(p: string): boolean {
   }
   // *nix：which 返回的即可执行
   return true;
+}
+
+// 解析 Windows .cmd/.bat shim，提取它最终 spawn 的真正 .exe（.cmd 不能直接 spawn）。
+// 典型 npm shim 内容: "%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe" %*
+// %dp0% / %~dp0 是 shim 自身所在目录（含尾部分隔符）。
+function resolveFromCmdShim(cmdPath: string): string | undefined {
+  try {
+    const text = readFileSync(cmdPath, 'utf8');
+    const dir = path.dirname(cmdPath);
+    const m = text.match(/"[^"]*?\.exe"|[\w./\\:-]+\.exe/i);
+    if (!m) return undefined;
+    let p = m[0]
+      .replace(/"/g, '')
+      .replace(/%dp0%/gi, dir + path.sep)
+      .replace(/%~dp0/gi, dir + path.sep);
+    if (!path.isAbsolute(p)) p = path.join(dir, p);
+    p = path.normalize(p); // 清理 %dp0%\ 自带尾部分隔符与原 .cmd 后续 \ 叠加产生的双斜杠
+    return existsSync(p) && isLikelyExecutable(p) ? p : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function resolveExecutable(raw: string | null | undefined): string | undefined {
@@ -270,41 +292,28 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
   const lookup = process.platform === 'win32' ? 'where' : 'which';
   try {
     const out = execFileSync(lookup, [cmd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    // where/which 可能返回多个候选（Windows 上常同时有无扩展名 shim 和 .exe/.cmd），
-    // 只挑 SDK 能直接 spawn 的（Windows 上即 .exe）。
     const candidates = out.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && existsSync(l));
-    const good = candidates.find(isLikelyExecutable);
-    if (good) return good;
+    if (process.platform === 'win32') {
+      // Windows：候选里先挑直接 .exe；都没有则逐个解析 .cmd/.bat shim。where 常同时返回
+      // 多个 shim（有的指向另一个 .cmd——解析无 .exe 会跳过，有的直接指向 bin/claude.exe 命中）。
+      const direct = candidates.find((c) => isLikelyExecutable(c));
+      if (direct) return direct;
+      for (const c of candidates) {
+        const lower = c.toLowerCase();
+        if (lower.endsWith('.cmd') || lower.endsWith('.bat')) {
+          const exe = resolveFromCmdShim(c);
+          if (exe) return exe;
+        }
+      }
+    } else if (candidates[0]) {
+      // *nix：which 返回的即可执行。
+      return candidates[0];
+    }
   } catch {
-    // 命令不在 PATH，落到下方回退。
+    // 命令不在 PATH。
   }
-  logger.warn(`cliPath "${raw}" 无法解析为可直接执行的二进制，回退到 SDK 自带二进制`);
+  logger.warn(`cliPath "${raw}" 无法解析为本地 Claude Code 可执行文件`);
   return undefined;
-}
-
-// 打包后 SDK 经 require.resolve 把自带二进制定位成 app.asar 虚拟路径，spawn 该路径在
-// Windows 上 launch 失败（fs.exists 能过、但 child_process.spawn 跑不起来，SDK 误报成
-// "exists but failed to launch"）。开发时不走此分支（app.isPackaged=false 返回 undefined，
-// SDK 继续用 node_modules 真实路径，行为不变）；打包后显式指向 app.asar.unpacked 真实磁盘
-// 路径，让 SDK 直接 spawn 真实 exe，根治打包后 SDK 启动失败。
-function getBundledClaudeExecutable(): string | undefined {
-  if (!app.isPackaged) return undefined;
-  const plat =
-    process.platform === 'win32'
-      ? 'win32-x64'
-      : process.platform === 'darwin'
-        ? `darwin-${process.arch}`
-        : `linux-${process.arch}`;
-  const binName = process.platform === 'win32' ? 'claude.exe' : 'claude';
-  const p = path.join(
-    process.resourcesPath,
-    'app.asar.unpacked',
-    'node_modules',
-    '@anthropic-ai',
-    `claude-agent-sdk-${plat}`,
-    binName,
-  );
-  return existsSync(p) ? p : undefined;
 }
 
 // ── 组装 SDK Options ───────────────────────────────────────────────
@@ -313,9 +322,10 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   const options: Record<string, unknown> = {
     // env：apiKey/baseUrl/模型映射全靠它（复用 buildSpawnEnv，第三方端点跑通的关键）。
     env: buildSpawnEnv(),
-    // 复用系统已装的 claude（cli-detector 发现）。cliPath 可能是裸命令名，需解析成绝对路径，
-    // 否则 SDK 报 "native binary not found"；解析失败回退 undefined 让 SDK 用自带二进制。
-    pathToClaudeCodeExecutable: resolveExecutable(config.cliPath) ?? getBundledClaudeExecutable(),
+    // 复用本地安装的 claude（cli-detector 发现）。cliPath 可能是裸命令名，需解析成绝对路径
+    //（Windows 上还要穿透 .cmd shim 拿到真正 .exe），否则 SDK 报 "native binary not found"。
+    // 项目不内嵌二进制，解析失败留 undefined，由 runQuery 给中文提示。
+    pathToClaudeCodeExecutable: resolveExecutable(config.cliPath),
     // 脱离磁盘 settings：完全由 claude-link 内联控制，避免 ~/.claude/settings.json 污染。
     settingSources: [],
     // 拿流式增量（对应 stream_event），前端逐字/逐工具参数显示。
@@ -517,6 +527,18 @@ async function runQuery(
   entries.set(sessionId, entry);
 
   const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow);
+  // 项目宗旨：要求用户本地安装 Claude Code，不内嵌二进制。本地没装（pathToClaudeCodeExecutable
+  // 解析不到）时给出中文提示，而非把 SDK 的英文 "Native CLI binary not found" 直接甩给用户。
+  if (!sdkOptions.pathToClaudeCodeExecutable) {
+    forwardEvent(sessionId, mainWindow, {
+      type: 'error',
+      message: '未检测到本地 Claude Code，请先安装 Claude Code 后重试。',
+    });
+    emitError(new Error('claude code not found locally'));
+    emitExit(1);
+    if (entries.get(sessionId) === entry) entries.delete(sessionId);
+    return;
+  }
   // resume：优先显式传入，否则用已记录的 CLI session id（等价 process-manager 的 --resume）。
   const resumeId = opts.resumeSessionId || sessionCliIds.get(sessionId);
   if (resumeId) sdkOptions.resume = resumeId;

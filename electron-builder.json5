@@ -13,8 +13,21 @@
     "!src/*",
     "!electron.vite.config.*",
     "!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}",
-    "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}"
+    "!{tsconfig.json,tsconfig.node.json,tsconfig.web.json}",
+    // 不内嵌 SDK 自带 claude.exe（220MB）：项目要求用户本地安装 Claude Code，
+    // SDK 通过 pathToClaudeCodeExecutable 调用本地二进制，平台包无需打包。
+    "!**/node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**",
+    "!**/node_modules/@anthropic-ai/claude-agent-sdk-darwin-*/**",
+    "!**/node_modules/@anthropic-ai/claude-agent-sdk-linux-*/**",
+    // 运行时不需要的（瘦身）：
+    "!**/node_modules/better-sqlite3/{deps,src}/**",
+    "!**/node_modules/**/{*.md,README,readme,CHANGELOG}*",
+    "!**/node_modules/**/{test,tests,__tests__,docs,doc,examples,example}/**",
+    "!**/node_modules/**/*.d.ts"
   ],
+
+  // 应用是中文界面，Electron 语言包只保留中英（默认几十种语言 ~40MB）。
+  electronLanguages: ["zh-CN", "en-US"],
 
   win: {
     icon: "resources/icon.ico",
