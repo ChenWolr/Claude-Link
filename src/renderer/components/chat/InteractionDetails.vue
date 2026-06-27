@@ -22,7 +22,7 @@ const prettyInput = computed(() => {
 .interaction-details {
   margin-top: 4px;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .interaction-details summary {

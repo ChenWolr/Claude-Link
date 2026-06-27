@@ -123,7 +123,7 @@ async function copyPreview(): Promise<void> {
 
 .interaction-preview__label {
   color: var(--color-accent-strong);
-  font-size: 10px;
+  font-size: 0.625rem;
   font-weight: 850;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -131,7 +131,7 @@ async function copyPreview(): Promise<void> {
 
 .interaction-preview__bar small {
   color: var(--color-text-muted);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 .interaction-preview__copy {
@@ -141,7 +141,7 @@ async function copyPreview(): Promise<void> {
   background: var(--color-panel-soft);
   color: var(--color-text);
   font: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
 }
 
@@ -167,7 +167,7 @@ async function copyPreview(): Promise<void> {
   margin: 0;
   color: var(--color-text);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
@@ -180,12 +180,12 @@ async function copyPreview(): Promise<void> {
 .interaction-preview__diff {
   border-left: 3px solid var(--color-accent-strong);
   color: var(--color-text);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .interaction-preview__markdown {
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.6;
 }
 
@@ -217,7 +217,7 @@ async function copyPreview(): Promise<void> {
   width: 100%;
   border-collapse: collapse;
   color: var(--color-text);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .interaction-preview__table-wrap th,
@@ -235,7 +235,7 @@ async function copyPreview(): Promise<void> {
 .interaction-preview__empty {
   padding: 18px 12px;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: 1.5;
 }
 </style>

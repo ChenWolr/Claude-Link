@@ -100,7 +100,7 @@ const resultExpanded = ref(false);
   gap: 8px;
   min-width: 0;
   padding: 4px 8px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   color: var(--color-text);
   cursor: pointer;
   border-radius: var(--radius-sm);
@@ -112,7 +112,7 @@ const resultExpanded = ref(false);
 }
 
 .tool-row__icon {
-  font-size: 14px;
+  font-size: 0.875rem;
   flex-shrink: 0;
 }
 
@@ -127,7 +127,7 @@ const resultExpanded = ref(false);
 .tool-row__detail {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   overflow: hidden;
@@ -137,7 +137,7 @@ const resultExpanded = ref(false);
 
 .tool-row__anchor {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--color-accent-strong);
   cursor: pointer;
 }
@@ -171,7 +171,7 @@ const resultExpanded = ref(false);
 
 .tool-row__json pre {
   margin: 0 0 8px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
@@ -212,7 +212,7 @@ const resultExpanded = ref(false);
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 3px 12px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 600;
   cursor: pointer;
   font-family: inherit;
@@ -224,14 +224,14 @@ const resultExpanded = ref(false);
 }
 
 .tool-row__pending {
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
   font-style: italic;
 }
 
 .tool-row__meta {
   margin-top: 6px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   color: var(--color-text-muted);
 }
 

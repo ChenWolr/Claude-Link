@@ -5,7 +5,7 @@ import InteractionPrompt from './components/chat/InteractionPrompt.vue';
 import { useConfigStore } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useChat } from './composables/use-chat';
-import { THEME_PALETTES } from '../shared/constants';
+import { THEME_PALETTES, FONT_SCALE_SIZES } from '../shared/constants';
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
@@ -13,9 +13,9 @@ const { startListening, stopListening } = useChat();
 
 onMounted(async () => {
   await configStore.loadConfig();
+  const root = document.documentElement;
   const palette = THEME_PALETTES.find((p) => p.id === configStore.config.themePaletteId);
   if (palette) {
-    const root = document.documentElement;
     root.style.setProperty('--color-bg', palette.colors.bg);
     root.style.setProperty('--color-panel', palette.colors.panel);
     root.style.setProperty('--color-panel-soft', palette.colors.panelSoft);
@@ -26,6 +26,9 @@ onMounted(async () => {
     root.style.setProperty('--color-accent-strong', palette.colors.accentStrong);
     root.style.setProperty('--color-danger', palette.colors.danger);
   }
+  // 字体大小：根据 config.fontScale 动态设置 --font-size-base，所有 rem 单位随此缩放。
+  const fontSize = FONT_SCALE_SIZES[configStore.config.fontScale] ?? '16px';
+  root.style.setProperty('--font-size-base', fontSize);
   // 根因修复：chat:event 监听在 App.vue 全局注册，生命周期与 app 等长。
   // ChatPage 卸载（路由跳转到配置页/会话管理页）不影响监听，后台执行的会话事件不丢失。
   startListening();

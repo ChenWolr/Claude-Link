@@ -275,14 +275,14 @@ onUnmounted(() => {
 
 .modal__header h2 {
   margin: 0;
-  font-size: 16px;
+  font-size: 1rem;
 }
 
 .modal__close {
   border: 0;
   background: transparent;
   color: var(--color-text-muted);
-  font-size: 22px;
+  font-size: 1.375rem;
   line-height: 1;
   cursor: pointer;
 }
@@ -304,7 +304,7 @@ onUnmounted(() => {
 .control-label {
   display: block;
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
   margin-bottom: 8px;
 }
 
@@ -321,7 +321,7 @@ onUnmounted(() => {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 8px 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .btn {
@@ -330,7 +330,7 @@ onUnmounted(() => {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 8px 16px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   cursor: pointer;
   white-space: nowrap;
 }
@@ -354,7 +354,7 @@ onUnmounted(() => {
   gap: 8px;
   padding: 10px 14px;
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .status-bar--running {
@@ -385,7 +385,7 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text-muted);
 }
 .config-echo code {
@@ -395,7 +395,7 @@ onUnmounted(() => {
 .config-verdict {
   padding: 10px 14px;
   border-radius: var(--radius-md);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 .config-verdict.ok {
   background: rgba(58, 166, 117, 0.12);
@@ -436,7 +436,7 @@ onUnmounted(() => {
 }
 
 .stream-area__label {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 700;
   color: var(--color-accent-strong);
   text-transform: uppercase;
@@ -476,7 +476,7 @@ onUnmounted(() => {
 }
 
 .error-detail__label {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 700;
   color: var(--color-danger);
   text-transform: uppercase;
@@ -488,7 +488,7 @@ onUnmounted(() => {
   white-space: pre-wrap;
   word-break: break-word;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 12px;
+  font-size: 0.75rem;
   color: var(--color-text);
   max-height: 180px;
   overflow-y: auto;

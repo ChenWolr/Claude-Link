@@ -196,7 +196,7 @@ function onScroll(event: Event): void {
   border-radius: 6px;
   background: rgba(0, 0, 0, 0.1);
   color: transparent;
-  font-size: 13px;
+  font-size: 0.8125rem;
   font-weight: 900;
   transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s, transform 0.15s;
 }

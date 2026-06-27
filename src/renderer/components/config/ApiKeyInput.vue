@@ -23,7 +23,7 @@ const visible = ref(false);
 
 .field span {
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .input-row {

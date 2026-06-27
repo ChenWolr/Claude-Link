@@ -44,7 +44,7 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
   border: 1px solid var(--color-border);
   color: var(--color-text-muted);
   max-width: 90%;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .bubble--tool {
@@ -55,7 +55,7 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
 }
 
 .bubble__role {
-  font-size: 11px;
+  font-size: 0.6875rem;
   font-weight: 700;
   text-transform: uppercase;
   margin-bottom: 6px;
@@ -73,7 +73,7 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
 }
 
 .bubble__content :deep(p) {
-  margin: 0 0 4px;
+  margin: 0 0 0.25rem;
 }
 
 .bubble__content :deep(p:last-child) {
@@ -86,7 +86,7 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
 
 .bubble__meta {
   margin-top: 6px;
-  font-size: 11px;
+  font-size: 0.6875rem;
   opacity: 0.6;
 }
 </style>

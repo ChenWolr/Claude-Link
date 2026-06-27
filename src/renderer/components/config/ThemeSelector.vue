@@ -68,6 +68,6 @@ const emit = defineEmits<{
 
 .palette-name {
   color: var(--color-text);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 </style>

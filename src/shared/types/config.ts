@@ -13,6 +13,7 @@ export interface AppConfig {
   maxTurns: number;
   taskDelaySeconds: number;
   themePaletteId: string;
+  fontScale: 'small' | 'medium' | 'large';
 }
 
 export interface ProviderInfo {

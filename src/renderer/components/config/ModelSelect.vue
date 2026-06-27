@@ -31,7 +31,7 @@ const mappingHint = computed(() => (props.mappings && props.mappings[model.value
 
 .field span {
   color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 input {
@@ -42,12 +42,12 @@ input {
   background: var(--color-panel-soft);
   color: var(--color-text);
   padding: 10px 12px;
-  font-size: 13px;
+  font-size: 0.8125rem;
 }
 
 .field-hint {
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .field-hint--mapped {

@@ -136,13 +136,13 @@ function fmt(n: number): string {
   gap: 8px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
-.ctx__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--color-text-muted); }
+.ctx__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 0.75rem; color: var(--color-text-muted); }
 .ctx__row code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--color-text); font-variant-numeric: tabular-nums; }
 .ctx__btn--high ~ .ctx__popover .ctx__row--pct code,
 .ctx__row--pct code { color: var(--color-accent-strong); }
 .ctx__row--pct { color: var(--color-text); }
-.ctx__nums { font-size: 12px; color: var(--color-text); font-variant-numeric: tabular-nums; }
-.ctx__muted { font-size: 12px; color: var(--color-text-muted); }
+.ctx__nums { font-size: 0.75rem; color: var(--color-text); font-variant-numeric: tabular-nums; }
+.ctx__muted { font-size: 0.75rem; color: var(--color-text-muted); }
 
 /* 问题 4：CC 自动压缩横幅 */
 .ctx__banner {
@@ -156,7 +156,7 @@ function fmt(n: number): string {
   background: var(--color-panel);
   color: var(--color-text);
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: 0.75rem;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 .ctx-banner-enter-active, .ctx-banner-leave-active {
