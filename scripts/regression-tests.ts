@@ -177,16 +177,20 @@ function testPermissionInteractionAdapter(): void {
   assert.equal(payload.toolUseId, 'tool-1');
   assert.deepEqual(payload.options?.map((option) => option.id), ['allow', 'allow-session', 'deny']);
 
-  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'submit', selectedOptionIds: ['allow'] }), {
+  const permInput = { command: 'npm run typecheck' };
+  // P0：allow/allow-session 必须回传 updatedInput（原样 input），否则 SDK 运行时 ZodError 阻断所有工具。
+  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'submit', selectedOptionIds: ['allow'] }, permInput), {
     behavior: 'allow',
+    updatedInput: permInput,
     toolUseID: 'tool-1',
   });
-  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'submit', selectedOptionIds: ['allow-session'] }), {
+  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'submit', selectedOptionIds: ['allow-session'] }, permInput), {
     behavior: 'allow',
+    updatedInput: permInput,
     updatedPermissions: [{ tool: 'Bash' }],
     toolUseID: 'tool-1',
   });
-  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'cancel' }), {
+  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'cancel' }, permInput), {
     behavior: 'deny',
     message: '用户拒绝了该工具调用',
     toolUseID: 'tool-1',

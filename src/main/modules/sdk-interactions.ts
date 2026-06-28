@@ -12,6 +12,8 @@ export const SUPPORTED_USER_DIALOG_KINDS = [
   'plan_mode',
   'planMode',
   'choice',
+  // H3：SDK 文档明示的真实 dialog_kind（权限拒答回退对话框）。其余值为历史猜测，待真机抓完整列表后清理。
+  'refusal_fallback_prompt',
 ] as const;
 
 export const VIRTUAL_OPTION_THRESHOLD = 60;
@@ -219,13 +221,15 @@ export function buildPermissionInteractionPayload(
 export function mapPermissionInteractionResponse(
   payload: InteractionPromptPayload,
   response: InteractionPromptResponsePayload,
+  input: Record<string, unknown>,
 ): PermissionResult {
   const selectedId = response.action === 'submit' ? response.selectedOptionIds?.[0] : undefined;
   if (selectedId === 'allow') {
-    return { behavior: 'allow', toolUseID: payload.toolUseId };
+    // P0：allow 必须回传 updatedInput（原样 input），否则 SDK 运行时 ZodError 阻断所有工具。
+    return { behavior: 'allow', updatedInput: input, toolUseID: payload.toolUseId };
   }
   if (selectedId === 'allow-session') {
-    return { behavior: 'allow', updatedPermissions: payload.suggestions, toolUseID: payload.toolUseId };
+    return { behavior: 'allow', updatedInput: input, updatedPermissions: payload.suggestions, toolUseID: payload.toolUseId };
   }
   return { behavior: 'deny', message: '用户拒绝了该工具调用', toolUseID: payload.toolUseId };
 }
@@ -406,7 +410,8 @@ export function canRenderUserDialog(request: UserDialogRequest): boolean {
     || request.dialogKind === 'askUserQuestion'
     || request.dialogKind === 'plan_mode'
     || request.dialogKind === 'planMode'
-    || request.dialogKind === 'choice';
+    || request.dialogKind === 'choice'
+    || request.dialogKind === 'refusal_fallback_prompt';
 }
 
 function isOptionList(value: unknown): value is AskUserQuestionOption[] {

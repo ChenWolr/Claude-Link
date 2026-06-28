@@ -13,6 +13,8 @@ const props = defineProps<{
   use: Message | null;
   result: Message | null;
   running?: boolean;
+  elapsedSeconds?: number;
+  backgroundRunning?: boolean;
 }>();
 
 const store = useSessionStore();
@@ -62,7 +64,9 @@ const resultExpanded = ref(false);
       <span v-if="detail" class="tool-row__detail">{{ detail }}</span>
       <span v-if="isSubAgent && use?.toolUseId" class="tool-row__anchor" @click.stop="focusSubAgent">查看过程 →</span>
       <span class="tool-row__status">
-        <span v-if="running" class="tool-row__dots">···</span>
+        <span v-if="running && elapsedSeconds != null" class="tool-row__elapsed">⏱{{ elapsedSeconds.toFixed(1) }}s</span>
+        <span v-else-if="running" class="tool-row__dots"><span></span><span></span><span></span></span>
+        <span v-else-if="backgroundRunning" class="tool-row__bg">🔁后台</span>
         <span v-else-if="result && result.isError" class="tool-row__fail">✗</span>
         <span v-else-if="result" class="tool-row__done">✓</span>
       </span>
@@ -153,9 +157,32 @@ const resultExpanded = ref(false);
 }
 
 .tool-row__dots {
-  color: var(--color-accent-strong);
-  letter-spacing: 0.12em;
-  font-weight: 700;
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+.tool-row__dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--color-accent-strong);
+  animation: tool-dot-pulse 1.4s infinite ease-in-out both;
+}
+.tool-row__dots span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+.tool-row__dots span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+@keyframes tool-dot-pulse {
+  0%, 80%, 100% {
+    opacity: 0.3;
+    transform: scale(0.8);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .tool-row__done {
@@ -167,6 +194,19 @@ const resultExpanded = ref(false);
 .tool-row__fail {
   color: #f87171;
   font-weight: 700;
+}
+
+/* C：工具运行实时耗时（tool_progress）。 */
+.tool-row__elapsed {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* C：后台运行标注（后台 Bash 的 tool_result 已回但实际后台仍在跑，区别于 ✓）。 */
+.tool-row__bg {
+  font-size: 0.6875rem;
+  color: var(--color-accent-strong);
 }
 
 /* 展开态：左侧细引导线，缩进显示入参/结果。 */

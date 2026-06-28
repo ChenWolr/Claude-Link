@@ -8,6 +8,7 @@
 
 import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
+import type { BackgroundTask } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
@@ -17,6 +18,43 @@ import type { Message } from '../../shared/types/session';
 // ChatPage 卸载/重挂载不影响监听——sending 从 store getter 派生，error 用 store.error。
 // sendMessage/abort 可在任意组件调（通过 useChat() 复用单例）。
 let chatSingleton: ReturnType<typeof createChat> | null = null;
+
+// C：把进度类事件（tool_progress / compacting / task_*）映射到 store。纯函数（不依赖闭包），可单测。
+// task_notification 终态：先 upsert 终态卡片，4 秒后移除（淡出，避免列表残留已完成任务）。
+export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, event: CliEvent): void {
+  if (event.type === 'tool_progress') {
+    if (event.toolUseId) store.setToolProgress(event.toolUseId, event.elapsedSeconds);
+    return;
+  }
+  if (event.type === 'system') {
+    if (event.subtype === 'compacting') {
+      store.setCompacting(true);
+      return;
+    }
+    if (
+      event.subtype === 'task_started' ||
+      event.subtype === 'task_progress' ||
+      event.subtype === 'task_notification'
+    ) {
+      const task: BackgroundTask = {
+        taskId: event.taskId,
+        toolUseId: event.toolUseId,
+        description: event.description,
+        taskType: event.taskType,
+        status: event.status,
+        usage: event.usage,
+        lastToolName: event.lastToolName,
+        summary: event.summary,
+      };
+      store.upsertBackgroundTask(task);
+      if (event.subtype === 'task_notification') {
+        const tid = event.taskId;
+        setTimeout(() => store.removeBackgroundTask(tid), 4000);
+      }
+      return;
+    }
+  }
+}
 
 function createChat() {
   const store = useSessionStore();
@@ -229,9 +267,23 @@ function createChat() {
         resetTurnCache();
         break;
       }
+      case 'tool_progress': {
+        // C：工具运行进度 → store 瞬态状态（ToolCallBlock 显示实时耗时）。
+        applyProgressEvent(store, event);
+        break;
+      }
       case 'system': {
-        // system 子类型（非 init）：informational/compact_boundary/plugin_install/permission_denied
-        // 落库为过程消息（主进程同样落库，这里供本回合实时显示）。
+        // C：进度类 system 子类型（compacting/task_*）→ store 瞬态状态，不落库。
+        if (
+          event.subtype === 'compacting' ||
+          event.subtype === 'task_started' ||
+          event.subtype === 'task_progress' ||
+          event.subtype === 'task_notification'
+        ) {
+          applyProgressEvent(store, event);
+          break;
+        }
+        // 其余 system 子类型（informational/compact_boundary/permission_* 等）落库为过程消息。
         persistSystemEvent(event);
         break;
       }
@@ -321,15 +373,18 @@ function createChat() {
                   )
                   .join('\n')
               : JSON.stringify(rawContent ?? '', null, 2);
+        const toolUseId = part.tool_use_id ?? null;
         persistMessage({
           role: 'tool',
           eventType: 'tool_result',
           content: resultText,
           processKind: processKindFromPart(part),
           parentAgentId,
-          toolUseId: part.tool_use_id ?? null,
+          toolUseId,
           isError: part.type === 'tool_result' ? part.is_error === true : false,
         });
+        // C：工具结果到达，清除该工具的实时耗时（避免遗留）。
+        if (toolUseId) store.clearToolProgress(toolUseId);
       } else {
         // 兜底：未识别的 content block 类型不静默丢弃，记日志便于发现协议新形态。
         console.warn('[handleMessagePartsFull] 未识别的 content block 类型，已跳过：', (part as { type: string }).type);
