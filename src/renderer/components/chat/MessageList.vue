@@ -183,7 +183,7 @@ function handleCopyClick(event: MouseEvent): void {
 /* 发送者切换（user→assistant / assistant→user）：额外加宽间距。
    gap(0.25rem) + margin-top(0.75rem) = 1rem 总间距。 */
 :deep(.msg-transition) {
-  margin-top: 0.75rem;
+  margin-top: 1.25rem;
 }
 
 /* 流式元素容器：思考/工具/正文流式渲染都在此容器内，内部间距紧凑。

@@ -129,7 +129,7 @@ const items = computed<GroupItem[]>(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 18px 0;
+  margin: 8px 0;
   padding: 6px 12px;
   background: transparent;
   border: 0;
