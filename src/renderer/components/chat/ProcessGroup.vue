@@ -6,8 +6,21 @@
 import { ref, computed } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isFoldable, type FoldStats } from '../../utils/group-messages';
+import { useSessionStore } from '../../stores/session-store';
 import ThinkingBlock from './ThinkingBlock.vue';
 import ToolCallBlock from './ToolCallBlock.vue';
+
+const store = useSessionStore();
+
+// C：后台任务反查——该 toolUseId 是否有运行中的后台任务（task_* 的 toolUseId 匹配）。
+// 主流程工具行据此标注「后台运行中」（后台 Bash 的 tool_result 已回但实际后台仍在跑）。
+const backgroundToolUseIds = computed(() => {
+  const ids = new Set<string>();
+  for (const t of Object.values(store.backgroundTasks)) {
+    if (t.toolUseId && !t.status) ids.add(t.toolUseId);
+  }
+  return ids;
+});
 
 const props = defineProps<{
   messages: Message[];
@@ -97,6 +110,8 @@ const items = computed<GroupItem[]>(() => {
           :use="item.use ?? null"
           :result="item.result ?? null"
           :running="stats.running && !item.result"
+          :elapsedSeconds="item.use?.toolUseId ? store.toolProgress[item.use.toolUseId] : undefined"
+          :backgroundRunning="item.use?.toolUseId ? backgroundToolUseIds.has(item.use.toolUseId) : false"
         />
       </template>
     </div>

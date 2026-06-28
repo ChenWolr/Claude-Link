@@ -21,6 +21,15 @@ let cleanup: (() => void) | null = null;
 
 const queueStatus = computed(() => taskStore.queueState.status);
 
+// C：后台任务（task_*）列表与计数。
+const backgroundTaskList = computed(() => Object.values(sessionStore.backgroundTasks));
+const backgroundTaskCount = computed(() => backgroundTaskList.value.length);
+function taskIcon(taskType?: string): string {
+  if (taskType === 'local_bash') return '⌨️';
+  if (taskType === 'local_agent' || taskType === 'remote_agent') return '🤖';
+  return '🔁';
+}
+
 // Queue is active (running, waiting, or continuing) → disable drag reorder
 const dragDisabled = computed(
   () => queueStatus.value === 'running' || queueStatus.value === 'waiting' || queueStatus.value === 'continuing',
@@ -166,6 +175,15 @@ function handleDragReorder() {
         子Agent
         <span v-if="subAgentGroups.length" class="tab__badge">{{ subAgentGroups.length }}</span>
       </button>
+      <button
+        type="button"
+        class="tab"
+        :class="{ 'tab--active': sessionStore.rightTab === 'background' }"
+        @click="sessionStore.setRightTab('background')"
+      >
+        后台任务
+        <span v-if="backgroundTaskCount" class="tab__badge">{{ backgroundTaskCount }}</span>
+      </button>
     </div>
 
     <!-- 排队任务面板 -->
@@ -273,6 +291,28 @@ function handleDragReorder() {
         </div>
         </div>
       </template>
+    </div>
+
+    <!-- C：后台任务面板（task_* 编排：后台 Bash / Monitor / 后台子 Agent） -->
+    <div v-show="sessionStore.rightTab === 'background'" class="task-panel__pane task-panel__pane--subagent">
+      <div v-if="!backgroundTaskList.length" class="task-panel__empty">暂无后台任务</div>
+      <div v-else class="subagent-list">
+        <div v-for="t in backgroundTaskList" :key="t.taskId" class="subagent-group">
+          <div class="subagent-group__header">
+            <span class="subagent-group__icon">{{ taskIcon(t.taskType) }}</span>
+            <span class="subagent-group__title">{{ t.description || t.taskId }}</span>
+            <span class="subagent-group__status" :class="{ 'subagent-group__status--running': !t.status }">
+              {{ t.status ? t.status : '运行中' }}
+            </span>
+          </div>
+          <div class="subagent-group__body">
+            <div v-if="t.lastToolName" class="bg-task__row">最近工具：{{ t.lastToolName }}</div>
+            <div v-if="t.usage?.durationMs" class="bg-task__row">耗时：{{ (t.usage.durationMs / 1000).toFixed(1) }}s</div>
+            <div v-if="t.usage?.toolUses" class="bg-task__row">工具调用：{{ t.usage.toolUses }}</div>
+            <div v-if="t.summary" class="bg-task__row">{{ t.summary }}</div>
+          </div>
+        </div>
+      </div>
     </div>
   </aside>
 </template>
@@ -615,6 +655,13 @@ function handleDragReorder() {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
+}
+
+/* C：后台任务详情行 */
+.bg-task__row {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  padding: 2px 0;
 }
 
 .subagent-group__body :deep(.process-group),

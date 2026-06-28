@@ -26,6 +26,7 @@ import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/set
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
+import { convertToolProgress, convertTaskEvent } from '../../shared/progress-events';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type {
   CliEvent,
@@ -174,7 +175,7 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
     });
 
     const response = await requestInteraction(mainWindow, payload, options.signal);
-    const result = mapPermissionInteractionResponse(payload, response);
+    const result = mapPermissionInteractionResponse(payload, response, input);
     recordInteractionResponse(sessionId, mainWindow, payload.title, response.action === 'submit' ? `选择：${response.selectedOptionIds?.join(', ') ?? '提交'}` : '已取消');
     return result;
   };
@@ -449,6 +450,17 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
   }
 }
 
+// 瞬态事件（tool_progress / task_* / compacting）：只 IPC 推前端，不落库 messages 表
+// （它们是运行中进度，不是对话历史，落库会污染历史回看）。
+function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: CliEvent): void {
+  if (!isSessionActive(sessionId)) return;
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
+  } catch {
+    // webContents 可能已销毁（窗口关闭），忽略
+  }
+}
+
 // 把 SDK 的 assistant 消息（{type:'assistant', message:{role,content,usage}, parent_tool_use_id?}）
 // 转成 CliMessageEvent。透传 parent_tool_use_id → parentToolUseId，让子 agent 过程能归属到
 // 主流程对应工具，抽到右侧「子Agent」Tab。
@@ -480,6 +492,7 @@ function convertResultMessage(sdkMsg: Record<string, unknown>): CliEvent {
     session_id: (sdkMsg.session_id as string) ?? '',
     is_error: Boolean(sdkMsg.is_error),
     usage: (sdkMsg.usage as CliResultEvent['usage']) ?? undefined,
+    modelUsage: (sdkMsg.modelUsage as CliResultEvent['modelUsage']) ?? undefined,
   } as CliResultEvent;
 }
 
@@ -620,7 +633,7 @@ async function runQuery(
           const sysInfo: CliSystemInfoEvent = {
             type: 'system',
             subtype: infoSubtype,
-            text: typeof sdkMsg.text === 'string' ? sdkMsg.text : undefined,
+            text: typeof sdkMsg.content === 'string' ? sdkMsg.content : (typeof sdkMsg.text === 'string' ? sdkMsg.text : undefined),
             level: sdkMsg.level === 'warn' ? 'warn' : 'info',
           };
           forwardEvent(sessionId, mainWindow, sysInfo);
@@ -651,6 +664,21 @@ async function runQuery(
           forwardEvent(sessionId, mainWindow, perm);
           continue;
         }
+        // task_*：后台任务编排（后台 Bash / Monitor / 后台子 Agent）。瞬态转发不落库。
+        if (subtype === 'task_started' || subtype === 'task_progress' || subtype === 'task_notification') {
+          forwardTransient(
+            sessionId,
+            mainWindow,
+            convertTaskEvent(subtype as 'task_started' | 'task_progress' | 'task_notification', sdkMsg),
+          );
+          continue;
+        }
+        // status:compacting：实时压缩进行中（compact_boundary 是完成后的边界，由 forwardEvent 处理）。
+        if (subtype === 'status' && sdkMsg.status === 'compacting') {
+          const sysInfo: CliSystemInfoEvent = { type: 'system', subtype: 'compacting' };
+          forwardTransient(sessionId, mainWindow, sysInfo);
+          continue;
+        }
         // 其它未知 system 子类型：暂不转发（前端不消费）。
         continue;
       }
@@ -661,6 +689,10 @@ async function runQuery(
       }
       if (type === 'stream_event') {
         forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg));
+        continue;
+      }
+      if (type === 'tool_progress') {
+        forwardTransient(sessionId, mainWindow, convertToolProgress(sdkMsg));
         continue;
       }
       if (type === 'result') {

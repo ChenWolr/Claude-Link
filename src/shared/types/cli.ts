@@ -133,6 +133,8 @@ export interface CliResultEvent {
   session_id: string;
   is_error: boolean;
   usage?: CliUsage;
+  // H2：SDK result 的 modelUsage，含真实 contextWindow（供 ContextButton 占比，避免按默认 200000 失真）。
+  modelUsage?: Record<string, { contextWindow?: number }>;
 }
 
 export interface CliErrorEvent {
@@ -147,10 +149,33 @@ export interface CliAbortedEvent {
   message: string;
 }
 
+// tool_progress：工具运行中周期进度（SDK worker 本地计时器周期 emit）。瞬态不落库。
+export interface CliToolProgressEvent {
+  type: 'tool_progress';
+  toolUseId: string;
+  toolName?: string;
+  parentToolUseId?: string;
+  elapsedSeconds: number;
+}
+
+// task_*：后台任务编排（后台 Bash / Monitor / 后台子 Agent）。system 子类型，瞬态不落库。
+export interface CliTaskEvent {
+  type: 'system';
+  subtype: 'task_started' | 'task_progress' | 'task_notification';
+  taskId: string;
+  toolUseId?: string;
+  description?: string;
+  taskType?: 'local_bash' | 'local_agent' | 'remote_agent';
+  status?: 'completed' | 'failed' | 'stopped';
+  usage?: { totalTokens?: number; toolUses?: number; durationMs?: number };
+  lastToolName?: string;
+  summary?: string;
+}
+
 // 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
 export interface CliSystemInfoEvent {
   type: 'system';
-  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry';
+  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting';
   text?: string;
   level?: 'info' | 'warn';
   // api_retry 专属：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。
@@ -178,7 +203,9 @@ export type CliEvent =
   | CliStreamEvent
   | CliResultEvent
   | CliErrorEvent
-  | CliAbortedEvent;
+  | CliAbortedEvent
+  | CliToolProgressEvent
+  | CliTaskEvent;
 
 export interface CliDetectionResult {
   installed: boolean;

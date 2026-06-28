@@ -661,5 +661,33 @@ console.log('\n=== 33) 工具映射补全（A）+ 子 agent 标题扩展（B）=
   check('extractSubAgentTitle 认 Workflow', pkShared.includes("case 'Workflow':"));
 }
 
+console.log('\n=== 34) 进度状态层（C）：tool_progress / task_* / compacting 接入 ===');
+{
+  const cli = readRel('src/shared/types/cli.ts');
+  const pe = readRel('src/shared/progress-events.ts');
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  const ss = readRel('src/renderer/stores/session-store.ts');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const tcb = readRel('src/renderer/components/chat/ToolCallBlock.vue');
+  const pg = readRel('src/renderer/components/chat/ProcessGroup.vue');
+  const tqp = readRel('src/renderer/components/task/TaskQueuePanel.vue');
+  const cb = readRel('src/renderer/components/chat/ContextButton.vue');
+
+  check('cli.ts 含 CliToolProgressEvent / CliTaskEvent', cli.includes('CliToolProgressEvent') && cli.includes('CliTaskEvent'));
+  check('CliSystemInfoEvent.subtype 含 compacting', cli.includes("'compacting'"));
+  check('progress-events 含 convertToolProgress / convertTaskEvent', pe.includes('convertToolProgress') && pe.includes('convertTaskEvent'));
+  check('sdk-backend 转发 tool_progress（forwardTransient）', sb.includes("type === 'tool_progress'") && sb.includes('forwardTransient'));
+  check('sdk-backend 转发 task_*', sb.includes("'task_started'") && sb.includes('convertTaskEvent'));
+  check('sdk-backend 转发 status:compacting', sb.includes("sdkMsg.status === 'compacting'"));
+  check('session-store 含 toolProgress/backgroundTasks/compacting', ss.includes('toolProgress') && ss.includes('backgroundTasks') && ss.includes('compacting'));
+  check('session-store 含 setToolProgress/clearToolProgress/setCompacting', ss.includes('setToolProgress') && ss.includes('clearToolProgress') && ss.includes('setCompacting'));
+  check('use-chat applyProgressEvent 接线', uc.includes('applyProgressEvent'));
+  check('ToolCallBlock 显示耗时 ⏱', tcb.includes('elapsedSeconds') && tcb.includes('⏱'));
+  check('ToolCallBlock 主流程后台运行标注', tcb.includes('backgroundRunning') && tcb.includes('🔁后台'));
+  check('ProcessGroup 传 elapsedSeconds', pg.includes('store.toolProgress') && pg.includes('elapsedSeconds'));
+  check('TaskQueuePanel 后台任务 Tab', tqp.includes("rightTab === 'background'") && tqp.includes('backgroundTaskList'));
+  check('ContextButton 实时压缩态', cb.includes('store.compacting') && cb.includes('正在压缩'));
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);

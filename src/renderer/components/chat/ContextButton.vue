@@ -78,6 +78,13 @@ function fmt(n: number): string {
       <div class="ctx__row ctx__row--pct"><span>占比</span><code>{{ pct }}%</code></div>
     </div>
 
+    <!-- C：实时压缩进行中（status:compacting） -->
+    <transition name="ctx-banner">
+      <div v-if="store.compacting" class="ctx__banner ctx__banner--compacting" role="status" aria-live="polite">
+        正在压缩上下文…
+      </div>
+    </transition>
+
     <!-- 问题 4：CC 自动压缩横幅。收到 compactedJustNow 时弹出，3 秒后自动消失。 -->
     <transition name="ctx-banner">
       <div v-if="showCompactBanner" class="ctx__banner" role="status" aria-live="polite">
@@ -158,6 +165,11 @@ function fmt(n: number): string {
   padding: 6px 10px;
   font-size: 0.75rem;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+/* C：实时压缩态强调色 */
+.ctx__banner--compacting {
+  border-color: var(--color-accent-strong);
+  color: var(--color-accent-strong);
 }
 .ctx-banner-enter-active, .ctx-banner-leave-active {
   transition: opacity 0.25s ease, transform 0.25s ease;

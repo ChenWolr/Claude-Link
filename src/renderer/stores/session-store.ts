@@ -8,6 +8,18 @@ import { defineStore } from 'pinia';
 import type { Session } from '../../shared/types/session';
 import type { Message } from '../../shared/types/session';
 
+// C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
+export interface BackgroundTask {
+  taskId: string;
+  toolUseId?: string;
+  description?: string;
+  taskType?: string;
+  status?: string;
+  usage?: { totalTokens?: number; toolUses?: number; durationMs?: number };
+  lastToolName?: string;
+  summary?: string;
+}
+
 export const useSessionStore = defineStore('session', {
   state: () => ({
     sessions: [] as Session[],
@@ -30,7 +42,7 @@ export const useSessionStore = defineStore('session', {
     sessionStreams: {} as Record<string, { content: string; thinking: string; tool: string }>,
     recentWorkspaces: [] as string[],
     // 右侧任务栏当前 Tab：'queue'（排队任务）/ 'subagent'（子Agent）。
-    rightTab: 'queue' as 'queue' | 'subagent',
+    rightTab: 'queue' as 'queue' | 'subagent' | 'background',
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
@@ -40,6 +52,12 @@ export const useSessionStore = defineStore('session', {
     // 问题 4：CC 自动压缩事件标记。收到 compactedJustNow:true 的 CONTEXT_UPDATE 时置 true，
     // ContextButton 据此弹短暂横幅回显。横幅显示后由 ContextButton 自行复位为 false。
     compactedJustNow: false as boolean,
+    // C：工具运行实时耗时（tool_progress），按 toolUseId。瞬态，回合结束清。
+    toolProgress: {} as Record<string, number>,
+    // C：后台任务编排（task_*），按 taskId。task_notification 终态后移除。
+    backgroundTasks: {} as Record<string, BackgroundTask>,
+    // C：实时压缩进行中（status:compacting）。compact_boundary 复位为 false。
+    compacting: false as boolean,
   }),
   getters: {
     // 当前应展示的会话列表：搜索态下返回 searchResults，否则返回全量 sessions。
@@ -103,6 +121,10 @@ export const useSessionStore = defineStore('session', {
       this.turnStartIndex = 0;
       // 问题 4：切换会话时复位自动压缩横幅标记，避免会话 A 的横幅串扰到会话 B。
       this.compactedJustNow = false;
+      // C：切换会话清理瞬态进度状态，避免会话 A 的工具耗时/后台任务/压缩态串扰到会话 B。
+      this.toolProgress = {};
+      this.backgroundTasks = {};
+      this.compacting = false;
       this.contextStats = session.lastContextTokens
         ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize: 200000, ratio: session.lastContextTokens / 200000 }
         : null;
@@ -207,6 +229,7 @@ export const useSessionStore = defineStore('session', {
         // 问题 4：CC 自动压缩事件 → 置标记，ContextButton 弹横幅回显。
         if (payload.compactedJustNow) {
           this.compactedJustNow = true;
+          this.compacting = false; // C：压缩完成，复位实时态
         }
       });
     },
@@ -304,8 +327,26 @@ export const useSessionStore = defineStore('session', {
     clearToolStream() {
       this.streamingTool = '';
     },
+    // C：工具运行进度（tool_progress）。
+    setToolProgress(toolUseId: string, seconds: number) {
+      this.toolProgress[toolUseId] = seconds;
+    },
+    clearToolProgress(toolUseId: string) {
+      delete this.toolProgress[toolUseId];
+    },
+    // C：后台任务（task_*）。
+    upsertBackgroundTask(task: BackgroundTask) {
+      this.backgroundTasks[task.taskId] = task;
+    },
+    removeBackgroundTask(taskId: string) {
+      delete this.backgroundTasks[taskId];
+    },
+    // C：实时压缩态。
+    setCompacting(v: boolean) {
+      this.compacting = v;
+    },
     // 切换右侧任务栏 Tab。
-    setRightTab(tab: 'queue' | 'subagent') {
+    setRightTab(tab: 'queue' | 'subagent' | 'background') {
       this.rightTab = tab;
     },
     // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。
