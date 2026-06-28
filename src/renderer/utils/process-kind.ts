@@ -30,23 +30,28 @@ const TOOL_META: Record<string, ProcessKindMeta> = {
   Read: { icon: '📂', label: '读取', color: C.file },
   Write: { icon: '📝', label: '写入', color: C.file },
   Edit: { icon: '✏️', label: '编辑', color: C.file },
-  MultiEdit: { icon: '✏️', label: '编辑', color: C.file },
   NotebookEdit: { icon: '📓', label: '编辑笔记本', color: C.file },
   Bash: { icon: '⌨️', label: '执行命令', color: C.exec },
+  PowerShell: { icon: '⌨️', label: '执行命令', color: C.exec },
   Glob: { icon: '🔎', label: '查找文件', color: C.search },
   Grep: { icon: '🔍', label: '搜索内容', color: C.search },
   WebSearch: { icon: '🌐', label: '联网搜索', color: C.web },
   WebFetch: { icon: '🌐', label: '读取网页', color: C.web },
   web_search: { icon: '🌐', label: '联网搜索', color: C.web },
   web_fetch: { icon: '🌐', label: '读取网页', color: C.web },
+  code_execution: { icon: '🧮', label: '执行代码', color: C.exec },
   Skill: { icon: '✨', label: '技能', color: C.skill },
   Agent: { icon: '🤖', label: '子Agent', color: C.agent },
   Task: { icon: '🤖', label: '子Agent', color: C.agent },
+  Workflow: { icon: '🧩', label: '工作流', color: C.agent },
+  AskUserQuestion: { icon: '❓', label: '提问', color: C.skill },
   TodoWrite: { icon: '📋', label: '任务清单', color: C.task },
   TaskCreate: { icon: '📋', label: '任务', color: C.task },
   TaskUpdate: { icon: '📋', label: '任务', color: C.task },
   TaskGet: { icon: '📋', label: '任务', color: C.task },
   TaskList: { icon: '📋', label: '任务', color: C.task },
+  TaskStop: { icon: '📋', label: '停止任务', color: C.task },
+  EnterPlanMode: { icon: '📋', label: '进入计划', color: C.plan },
   ExitPlanMode: { icon: '📋', label: '计划', color: C.plan },
   result: { icon: '🔧', label: '工具结果', color: C.system },
 };
@@ -107,11 +112,11 @@ export function summarizeToolUse(useContent: string): string {
   const s = (v: unknown): string => (typeof v === 'string' ? v : v == null ? '' : String(v));
   switch (name) {
     case 'Bash':
+    case 'PowerShell':
       return s(input.command).split('\n')[0].trim().slice(0, 120);
     case 'Read':
     case 'Write':
     case 'Edit':
-    case 'MultiEdit':
     case 'NotebookEdit': {
       const p = s(input.file_path) || s(input.notebook_path) || s(input.path);
       return p ? basename(p) : '';

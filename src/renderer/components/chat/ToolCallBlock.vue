@@ -63,6 +63,7 @@ const resultExpanded = ref(false);
       <span v-if="isSubAgent && use?.toolUseId" class="tool-row__anchor" @click.stop="focusSubAgent">查看过程 →</span>
       <span class="tool-row__status">
         <span v-if="running" class="tool-row__dots">···</span>
+        <span v-else-if="result && result.isError" class="tool-row__fail">✗</span>
         <span v-else-if="result" class="tool-row__done">✓</span>
       </span>
     </div>
@@ -159,6 +160,12 @@ const resultExpanded = ref(false);
 
 .tool-row__done {
   color: var(--color-accent-strong);
+  font-weight: 700;
+}
+
+/* 工具失败（is_error）：红色 ✗，与成功的 ✓ 形成醒目对比。 */
+.tool-row__fail {
+  color: #f87171;
   font-weight: 700;
 }
 
