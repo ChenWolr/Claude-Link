@@ -8,3 +8,4 @@ dist-electron/
 *.db-shm
 .claude/
 docs/superpowers/
+.workbuddy/
