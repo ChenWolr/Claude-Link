@@ -548,10 +548,10 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
 
   // 问题 2：行间距
   check('MessageBubble line-height:1.5', mb.includes('line-height: 1.5') || mb.includes('line-height:1.5'));
-  check('MessageBubble p margin 4px', mb.includes('0 0 4px'));
+  check('MessageBubble p margin 0.25rem', mb.includes('0 0 0.25rem'));
   check('StreamRenderer line-height:1.5', sr.includes('line-height: 1.5') || sr.includes('line-height:1.5'));
   check('ThinkingBlock line-height:1.5', tb.includes('line-height: 1.5') || tb.includes('line-height:1.5'));
-  check('MessageList gap:12px', ml.includes('gap: 12px') || ml.includes('gap:12px'));
+  check('MessageList gap:0.25rem', ml.includes('gap: 0.25rem') || ml.includes('gap:0.25rem'));
 
   // 问题 3：执行中禁用
   check('ContextButton 含 disabled prop', cb.includes('disabled') && cb.includes('defineProps'));
