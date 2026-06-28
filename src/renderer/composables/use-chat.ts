@@ -61,6 +61,7 @@ function createChat() {
     parentAgentId?: string | null;
     toolUseId?: string | null;
     title?: string | null;
+    isError?: boolean;
   }): void {
     if (!store.activeSession) return;
     store.addMessage({
@@ -77,6 +78,7 @@ function createChat() {
       parentAgentId: partial.parentAgentId ?? null,
       toolUseId: partial.toolUseId ?? null,
       title: partial.title ?? null,
+      isError: partial.isError === true,
       createdAt: new Date().toISOString(),
     });
   }
@@ -300,7 +302,12 @@ function createChat() {
         store.clearToolStream();
         continue;
       }
-      if (part.type === 'tool_result' || part.type === 'web_search_tool_result' || part.type === 'web_fetch_tool_result') {
+      if (
+        part.type === 'tool_result' ||
+        part.type === 'web_search_tool_result' ||
+        part.type === 'web_fetch_tool_result' ||
+        part.type === 'code_execution_tool_result'
+      ) {
         const rawContent = (part as { content?: unknown }).content;
         const resultText =
           typeof rawContent === 'string'
@@ -321,7 +328,11 @@ function createChat() {
           processKind: processKindFromPart(part),
           parentAgentId,
           toolUseId: part.tool_use_id ?? null,
+          isError: part.type === 'tool_result' ? part.is_error === true : false,
         });
+      } else {
+        // 兜底：未识别的 content block 类型不静默丢弃，记日志便于发现协议新形态。
+        console.warn('[handleMessagePartsFull] 未识别的 content block 类型，已跳过：', (part as { type: string }).type);
       }
     }
   }
@@ -365,6 +376,14 @@ function createChat() {
       return;
     }
     const info = e as CliSystemInfoEvent;
+    // api_retry：SDK 不带 text，需自己拼「重试中（第 N/M 次）」动态文案。
+    let text = info.text;
+    if (!text && info.subtype === 'api_retry') {
+      const attempt = info.attempt ?? '?';
+      const max = info.max_retries ?? '?';
+      const err = info.error ? `（${info.error}）` : '';
+      text = `API 重试中（第 ${attempt}/${max} 次）${err}`;
+    }
     const defaultText =
       info.subtype === 'compact_boundary' ? '上下文已达压缩边界'
         : info.subtype === 'plugin_install' ? '插件安装'
@@ -373,7 +392,7 @@ function createChat() {
     persistMessage({
       role: 'system',
       eventType: 'system',
-      content: info.text || defaultText,
+      content: text || defaultText,
       processKind: `system:${info.subtype}`,
     });
   }

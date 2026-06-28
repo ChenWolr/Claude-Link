@@ -104,6 +104,10 @@ export function runMigrations(db: Database.Database): void {
     if (!hasMsgCol('title')) {
       db.exec('ALTER TABLE messages ADD COLUMN title TEXT');
     }
+    // V4：tool_result 失败标记（is_error）。INTEGER 0/1，幂等自愈补加，老库升级不阻塞。
+    if (!hasMsgCol('is_error')) {
+      db.exec('ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0');
+    }
   }
 
   // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，

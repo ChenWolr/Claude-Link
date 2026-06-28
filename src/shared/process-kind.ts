@@ -12,6 +12,7 @@
 //                       否则由渲染层按 toolUseId 回查配对的 tool_use 合并到同组）
 //   web_search_tool_result → 'tool:web_search'
 //   web_fetch_tool_result  → 'tool:web_fetch'
+//   code_execution_tool_result → 'tool:code_execution'
 
 import type { CliMessageContentPart } from './types/cli';
 
@@ -33,16 +34,34 @@ export function processKindFromPart(part: CliMessageContentPart): string | null 
       return 'tool:web_search';
     case 'web_fetch_tool_result':
       return 'tool:web_fetch';
+    case 'code_execution_tool_result':
+      return 'tool:code_execution';
     default:
       return null;
   }
 }
 
-// tool_use 且为子 agent（Agent/Task 工具）时，从 input.description 提取友好标题。
-// 用于右侧「子Agent」Tab 的分组标题与主流程锚点，避免出现「子任务1/子任务2」。
+// tool_use 且为「会派生子 agent」的工具时，提取友好标题，用于右侧「子Agent」Tab 的分组标题
+// 与主流程锚点，避免出现「子任务1/子任务2」。Agent/Task 必然派生子 agent；Skill 在 context:fork、
+// Workflow 在多 agent 编排时也会派生（其 tool_use_id 被子 agent 事件的 parent_tool_use_id 引用），
+// 一并提取标题。title 字段只在产生子 agent 时被消费，不产生时设置也无副作用。
 export function extractSubAgentTitle(part: CliMessageContentPart): string | null {
   if (part.type !== 'tool_use') return null;
-  if (part.name !== 'Agent' && part.name !== 'Task') return null;
-  const desc = (part.input as { description?: unknown }).description;
-  return typeof desc === 'string' && desc.trim() ? desc.trim() : null;
+  const input = part.input as Record<string, unknown>;
+  let raw: unknown;
+  switch (part.name) {
+    case 'Agent':
+    case 'Task':
+      raw = input.description;
+      break;
+    case 'Skill':
+      raw = input.name;
+      break;
+    case 'Workflow':
+      raw = input.description ?? input.name;
+      break;
+    default:
+      return null;
+  }
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
 }

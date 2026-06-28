@@ -32,5 +32,7 @@ export interface Message {
   toolUseId: string | null;
   // 子 agent 的友好标题（Agent/Task 工具 input.description），用于 Tab 分组标题与锚点。
   title: string | null;
+  // 工具结果是否失败（tool_result.is_error）。仅 tool 角色消息有意义，其余恒为 false。
+  isError: boolean;
   createdAt: string;
 }

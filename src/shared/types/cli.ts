@@ -14,6 +14,9 @@ export interface CliSystemInitEvent {
 export interface CliMessageContentTextPart {
   type: 'text';
   text: string;
+  // web search 等服务端工具返回的引用来源（依赖后端实现 server tools；当前代理端点不触发）。
+  // 仅保留类型，渲染后置——避免引用信息无处承载。对应流式 CliStreamEvent.delta.citation。
+  citations?: Array<{ type: string; url?: string; title?: string; [k: string]: unknown }>;
 }
 
 export interface CliMessageContentToolUsePart {
@@ -28,6 +31,8 @@ export interface CliMessageContentToolResultPart {
   tool_use_id?: string;
   // CC 真实事件里 content 可能是 string，也可能是 [{type:'text',text}] 等数组
   content?: string | Array<{ type: string; text?: string; [k: string]: unknown }>;
+  // 工具执行失败标记（Bash 非零退出、Edit 未命中、权限拒绝等）。用于 UI 标红失败工具。
+  is_error?: boolean;
 }
 
 export interface CliMessageContentThinkingPart {
@@ -62,6 +67,14 @@ export interface CliMessageContentWebFetchToolResultPart {
   content?: unknown;
 }
 
+// 服务端 code execution（沙箱执行代码）结果块，与 web_search_tool_result 同族。
+// 依赖后端实现 Anthropic server tools；当前代理端点不触发，补全类型避免静默丢弃。
+export interface CliMessageContentCodeExecutionToolResultPart {
+  type: 'code_execution_tool_result';
+  tool_use_id?: string;
+  content?: unknown;
+}
+
 export type CliMessageContentPart =
   | CliMessageContentTextPart
   | CliMessageContentToolUsePart
@@ -70,7 +83,8 @@ export type CliMessageContentPart =
   | CliMessageContentRedactedThinkingPart
   | CliMessageContentServerToolUsePart
   | CliMessageContentWebSearchToolResultPart
-  | CliMessageContentWebFetchToolResultPart;
+  | CliMessageContentWebFetchToolResultPart
+  | CliMessageContentCodeExecutionToolResultPart;
 
 export interface CliUsage {
   input_tokens?: number;
@@ -101,6 +115,8 @@ export interface CliStreamEvent {
       partial_json?: string;
       thinking?: string;
       signature?: string;
+      // citations_delta 携带的单条引用增量（依赖 web search 后端）。当前仅保留类型，渲染后置。
+      citation?: { type: string; url?: string; title?: string; [k: string]: unknown };
     };
   };
 }
@@ -134,9 +150,14 @@ export interface CliAbortedEvent {
 // 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
 export interface CliSystemInfoEvent {
   type: 'system';
-  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response';
+  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry';
   text?: string;
   level?: 'info' | 'warn';
+  // api_retry 专属：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。
+  // error 取值：authentication_failed / rate_limit / overloaded / invalid_request / server_error 等。
+  attempt?: number;
+  max_retries?: number;
+  error?: string;
 }
 
 // 权限事件：权限询问 / 自动拒绝。落库 processKind = permission。

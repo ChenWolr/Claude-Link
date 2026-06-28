@@ -16,6 +16,7 @@ interface MessageRow {
   parent_agent_id: string | null;
   tool_use_id: string | null;
   title: string | null;
+  is_error: number;
   created_at: string;
 }
 
@@ -34,6 +35,7 @@ function toMessage(row: MessageRow): Message {
     parentAgentId: row.parent_agent_id,
     toolUseId: row.tool_use_id,
     title: row.title,
+    isError: !!row.is_error,
     createdAt: row.created_at,
   };
 }
@@ -53,6 +55,8 @@ export interface CreateMessageInput {
   toolUseId?: string | null;
   // 子 agent 友好标题。
   title?: string | null;
+  // 工具结果是否失败（tool_result.is_error）。
+  isError?: boolean;
 }
 
 export function createMessage(input: CreateMessageInput): Message {
@@ -67,15 +71,16 @@ export function createMessage(input: CreateMessageInput): Message {
     parentAgentId = null,
     toolUseId = null,
     title = null,
+    isError = false,
   } = input;
   const id = uuidv4();
 
   getConnection()
     .prepare(
       `INSERT INTO messages (id, session_id, role, content, event_type, raw_event, parent_task_id,
-                             process_kind, parent_agent_id, tool_use_id, title)
+                             process_kind, parent_agent_id, tool_use_id, title, is_error)
        VALUES (@id, @sessionId, @role, @content, @eventType, @rawEvent, @parentTaskId,
-               @processKind, @parentAgentId, @toolUseId, @title)`,
+               @processKind, @parentAgentId, @toolUseId, @title, @isError)`,
     )
     .run({
       id,
@@ -89,6 +94,7 @@ export function createMessage(input: CreateMessageInput): Message {
       parentAgentId,
       toolUseId,
       title,
+      isError: isError ? 1 : 0,
     });
 
   // 不回读 SELECT（调用方不依赖返回值），直接用已知参数构造，省一次同步 DB 操作。
@@ -107,6 +113,7 @@ export function createMessage(input: CreateMessageInput): Message {
     parentAgentId,
     toolUseId,
     title,
+    isError,
     createdAt: new Date().toISOString(),
   };
 }

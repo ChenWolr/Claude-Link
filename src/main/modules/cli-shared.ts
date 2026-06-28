@@ -203,8 +203,13 @@ export function persistMessageParts(
       messageRepo.createMessage({
         sessionId, role: 'tool', content: resultText, eventType: 'tool_result',
         processKind, parentAgentId, toolUseId: part.tool_use_id ?? null,
+        isError: part.is_error === true,
       });
-    } else if (part.type === 'web_search_tool_result' || part.type === 'web_fetch_tool_result') {
+    } else if (
+      part.type === 'web_search_tool_result' ||
+      part.type === 'web_fetch_tool_result' ||
+      part.type === 'code_execution_tool_result'
+    ) {
       const resultText = normalizeToolResultContent((part as { content?: unknown }).content);
       messageRepo.createMessage({
         sessionId, role: 'tool', content: resultText, eventType: 'tool_result',
@@ -220,6 +225,10 @@ export function persistMessageParts(
         sessionId, role: 'assistant', content: '（此段思考已被安全策略隐藏）',
         eventType: 'thinking', processKind, parentAgentId,
       });
+    } else {
+      // 兜底：未识别的 content block 类型不静默丢弃，记日志便于发现协议新形态
+      // （当前不会出现；若未来 CC 新增 block 类型，这里留痕而非无声吞掉）。
+      logger.warn(`[persistMessageParts] 未识别的 content block 类型，已跳过：${(part as { type: string }).type}`);
     }
   }
 }

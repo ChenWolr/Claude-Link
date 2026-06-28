@@ -626,6 +626,19 @@ async function runQuery(
           forwardEvent(sessionId, mainWindow, sysInfo);
           continue;
         }
+        // api_retry：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。转发供前端显示「重试中」。
+        if (infoSubtype === 'api_retry') {
+          const sysInfo: CliSystemInfoEvent = {
+            type: 'system',
+            subtype: 'api_retry',
+            attempt: typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined,
+            max_retries: typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined,
+            error: typeof sdkMsg.error === 'string' ? sdkMsg.error : undefined,
+            level: 'warn',
+          };
+          forwardEvent(sessionId, mainWindow, sysInfo);
+          continue;
+        }
         // 权限询问/拒绝事件：转发并落库（processKind = permission）。
         if (subtype === 'permission_denied' || subtype === 'permission_request') {
           const perm: CliPermissionEvent = {

@@ -597,5 +597,69 @@ console.log('\n=== 31) 根因修复：chat:event 监听全局化 + sending 派�
   check('session-store 含 refreshActiveSession action', ss.includes('refreshActiveSession'));
 }
 
+console.log('\n=== 32) CC 回复形态补全：code_execution / is_error / api_retry / 兜底日志 ===');
+{
+  const cli = readRel('src/shared/types/cli.ts');
+  const pkShared = readRel('src/shared/process-kind.ts');
+  const pkRenderer = readRel('src/renderer/utils/process-kind.ts');
+  const cs = readRel('src/main/modules/cli-shared.ts');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const mig = readRel('src/main/database/migrations.ts');
+  const repo = readRel('src/main/database/repositories/message-repo.ts');
+  const sess = readRel('src/shared/types/session.ts');
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  const tcb = readRel('src/renderer/components/chat/ToolCallBlock.vue');
+
+  // 1. code_execution_tool_result：服务端代码执行结果不再静默丢弃（类型→分类→双路解析→图标）
+  check('cli.ts 含 code_execution_tool_result 类型', cli.includes('code_execution_tool_result'));
+  check('processKindFromPart 分类 code_execution_tool_result → tool:code_execution',
+    pkShared.includes("case 'code_execution_tool_result'") && pkShared.includes("'tool:code_execution'"));
+  check('persistMessageParts 解析 code_execution_tool_result', cs.includes("'code_execution_tool_result'"));
+  check('handleMessagePartsFull 解析 code_execution_tool_result', uc.includes("'code_execution_tool_result'"));
+  check('TOOL_META 含 code_execution 图标映射', pkRenderer.includes('code_execution'));
+
+  // 2. 未知 content block 兜底日志（协议新形态不再被无声吞掉）
+  check('persistMessageParts 兜底日志未知 part', cs.includes('未识别的 content block 类型'));
+  check('handleMessagePartsFull 兜底日志未知 part', uc.includes('未识别的 content block 类型'));
+
+  // 3. tool_result.is_error 全链路（类型→DB→repo→双路解析→UI 标红）
+  check('cli.ts tool_result 含 is_error 字段', cli.includes('is_error?: boolean'));
+  check('Message 含 isError 字段', sess.includes('isError'));
+  check('messages 表幂等加 is_error 列', mig.includes('ALTER TABLE messages ADD COLUMN is_error'));
+  check('repo MessageRow/toMessage/createMessage 贯穿 is_error', repo.includes('is_error') && repo.includes('isError'));
+  check('persistMessageParts 提取 is_error 落库', cs.includes('part.is_error === true'));
+  check('handleMessagePartsFull 提取 is_error', uc.includes('part.is_error === true'));
+  check('ToolCallBlock 失败状态行 ✗ 红色', tcb.includes('result.isError') && tcb.includes('tool-row__fail'));
+
+  // 4. system/api_retry 事件解析与展示（API 重试可见反馈，不再被「未知 subtype」吞掉）
+  check('cli.ts CliSystemInfoEvent 含 api_retry subtype', cli.includes("'api_retry'"));
+  check('sdk-backend 转发 api_retry system 事件',
+    sb.includes("infoSubtype === 'api_retry'") && sb.includes('attempt') && sb.includes('max_retries'));
+  check('persistSystemEvent 构造 api_retry 重试文案', uc.includes('API 重试中'));
+
+  // 5. citations 类型字段（web search 引用，未来就绪；当前代理端点不触发）
+  check('cli.ts text part 含 citations + stream delta 含 citation', cli.includes('citations?') && cli.includes('citation?'));
+}
+
+console.log('\n=== 33) 工具映射补全（A）+ 子 agent 标题扩展（B）===');
+{
+  const pkRenderer = readRel('src/renderer/utils/process-kind.ts');
+  const pkShared = readRel('src/shared/process-kind.ts');
+
+  // A：高频工具补专属图标 + 中文标签（原仅 ⚙️ 原名兜底，照样显示但不美化）
+  check('TOOL_META 含 Workflow 工作流', pkRenderer.includes("Workflow: { icon: '🧩'"));
+  check('TOOL_META 含 AskUserQuestion 提问', pkRenderer.includes('AskUserQuestion:'));
+  check('TOOL_META 含 EnterPlanMode 进入计划', pkRenderer.includes('EnterPlanMode:'));
+  check('TOOL_META 含 TaskStop 停止任务', pkRenderer.includes('TaskStop:'));
+  check('TOOL_META 含 PowerShell 执行命令', pkRenderer.includes('PowerShell:'));
+  check('summarizeToolUse PowerShell 复用 Bash 摘要', pkRenderer.includes("case 'PowerShell':"));
+  // 清死映射：MultiEdit 非真实独立工具（已折叠进 Edit 的 replace_all），不应残留
+  check('TOOL_META 已清除 MultiEdit 死映射', !pkRenderer.includes('MultiEdit'));
+
+  // B：extractSubAgentTitle 认 Skill(fork)/Workflow，子 agent Tab 标题不再为空/兜底
+  check('extractSubAgentTitle 认 Skill', pkShared.includes("case 'Skill':"));
+  check('extractSubAgentTitle 认 Workflow', pkShared.includes("case 'Workflow':"));
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
