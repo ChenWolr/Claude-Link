@@ -5,8 +5,7 @@ import { useTaskStore } from '../../stores/task-store';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { useTaskQueue } from '../../composables/use-task-queue';
-import type { Message } from '../../../shared/types/session';
-import { groupMessagesForRender } from '../../utils/group-messages';
+import { aggregateSubAgentGroups, buildTitleByToolUseId } from '../../utils/subagent-groups';
 import TaskItem from './TaskItem.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
 import MessageBubble from '../chat/MessageBubble.vue';
@@ -17,6 +16,7 @@ const interactionStore = useInteractionStore();
 const { startListening } = useTaskQueue();
 
 const newTaskPrompt = ref('');
+const expandedGroups = ref<Set<string>>(new Set());
 let cleanup: (() => void) | null = null;
 
 const queueStatus = computed(() => taskStore.queueState.status);
@@ -35,38 +35,29 @@ const dragDisabled = computed(
   () => queueStatus.value === 'running' || queueStatus.value === 'waiting' || queueStatus.value === 'continuing',
 );
 
-// 子 Agent 分组：把 parentAgentId !== null 的消息按 parentAgentId 聚合，标题取自主流程对应
-// Agent/Task 工具组（toolUseId === parentAgentId）的 title（即 description），禁用"子任务N"编号。
-// 每组内部复用主流程的分组规则（连续同类 / 因果配对 / 正文独立气泡）。
-const subAgentGroups = computed(() => {
-  const map = new Map<string, Message[]>();
-  const order: string[] = [];
-  for (const m of sessionStore.messages) {
-    if (!m.parentAgentId) continue;
-    if (!map.has(m.parentAgentId)) {
-      map.set(m.parentAgentId, []);
-      order.push(m.parentAgentId);
-    }
-    map.get(m.parentAgentId)!.push(m);
-  }
-  // 主流程 Agent/Task 工具组（tool_use + title）→ 子 agent 标题。
-  const titleByToolUseId = new Map<string, string>();
-  for (const m of sessionStore.messages) {
-    if (m.eventType === 'tool_use' && m.toolUseId && m.title) {
-      titleByToolUseId.set(m.toolUseId, m.title);
-    }
-  }
-  return order.map((id, idx) => {
-    const msgs = map.get(id)!;
-    return {
-      parentAgentId: id,
-      title: titleByToolUseId.get(id) || '子Agent',
-      items: groupMessagesForRender(msgs),
-      // 进行中：当前会话在发送，且这是最后出现的子 agent 组。
-      running: sessionStore.sending && idx === order.length - 1,
-    };
-  });
-});
+function isSubAgentGroupExpanded(id: string, running: boolean): boolean {
+  return expandedGroups.value.has(id) || running;
+}
+
+function toggleSubAgentGroup(id: string): void {
+  const next = new Set(expandedGroups.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedGroups.value = next;
+}
+
+// 子 Agent 分组：纯逻辑抽到 subagent-groups.ts（由 tdd-subagent-verify.ts 行为测试覆盖）。
+// 方案 A：只聚合 turnStartIndex 之后的子 agent 消息（保留 DB 历史，仅控制 Tab 显示当前回合）。
+const subAgentGroups = computed(() =>
+  aggregateSubAgentGroups(sessionStore.messages, {
+    turnStartIndex: sessionStore.turnStartIndex,
+    sending: sessionStore.sending,
+    hideText: sessionStore.streamingContent !== '',
+    hideThinking: sessionStore.streamingThinking !== '',
+    toolProgress: sessionStore.toolProgress,
+    titleByToolUseId: buildTitleByToolUseId(sessionStore.messages),
+  }),
+);
 
 // 主流程锚点点击 → 切到子Agent Tab 并定位：滚动 + 短暂高亮目标组。
 watch(
@@ -254,41 +245,38 @@ function handleDragReorder() {
     <div v-show="sessionStore.rightTab === 'subagent'" class="task-panel__pane task-panel__pane--subagent">
       <div v-if="!subAgentGroups.length" class="task-panel__empty">暂无子 Agent 过程</div>
       <template v-else>
-        <!-- 快速跳转：多个并行子 agent 时，点具体某个直接定位到对应组 -->
-        <div v-if="subAgentGroups.length > 1" class="subagent-jump">
-          <button
-            v-for="g in subAgentGroups"
-            :key="`jump-${g.parentAgentId}`"
-            type="button"
-            class="subagent-jump__chip"
-            :title="`定位到「${g.title}」`"
-            @click="sessionStore.focusSubAgent(g.parentAgentId)"
-          >
-            <span class="subagent-jump__dot" :class="{ 'subagent-jump__dot--running': g.running }"></span>
-            <span class="subagent-jump__name">{{ g.title }}</span>
-          </button>
-        </div>
         <div class="subagent-list">
-        <div
-          v-for="g in subAgentGroups"
-          :id="`subagent-${g.parentAgentId}`"
-          :key="g.parentAgentId"
-          class="subagent-group"
-        >
-          <div class="subagent-group__header">
-            <span class="subagent-group__icon">🤖</span>
-            <span class="subagent-group__title">{{ g.title }}</span>
-            <span class="subagent-group__status" :class="{ 'subagent-group__status--running': g.running }">
-              {{ g.running ? '进行中' : '已完成' }}
-            </span>
+          <div
+            v-for="g in subAgentGroups"
+            :id="`subagent-${g.parentAgentId}`"
+            :key="g.parentAgentId"
+            class="subagent-group"
+          >
+            <button
+              type="button"
+              class="subagent-group__header"
+              :class="{ 'subagent-group__header--open': isSubAgentGroupExpanded(g.parentAgentId, g.running) }"
+              @click="toggleSubAgentGroup(g.parentAgentId)"
+            >
+              <span class="subagent-group__icon">🤖</span>
+              <span class="subagent-group__title">{{ g.title }}</span>
+              <span class="subagent-group__duration">⏱{{ g.durationText }}</span>
+              <span class="subagent-group__status" :class="{ 'subagent-group__status--running': g.running }">
+                {{ g.running ? '进行中' : '已完成' }}
+                <span v-if="g.running" class="subagent-running-dots" aria-hidden="true">
+                  <span></span><span></span><span></span>
+                </span>
+              </span>
+              <span class="subagent-group__arrow">›</span>
+            </button>
+            <div v-if="isSubAgentGroupExpanded(g.parentAgentId, g.running)" class="subagent-group__body">
+              <div class="subagent-group__meta">耗时：{{ g.durationText }}</div>
+              <template v-for="item in g.items" :key="item.key">
+                <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
+                <MessageBubble v-else :message="item.message" />
+              </template>
+            </div>
           </div>
-          <div class="subagent-group__body">
-            <template v-for="item in g.items" :key="item.key">
-              <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" />
-              <MessageBubble v-else :message="item.message" />
-            </template>
-          </div>
-        </div>
         </div>
       </template>
     </div>
@@ -545,59 +533,6 @@ function handleDragReorder() {
   gap: 12px;
 }
 
-/* 快速跳转条（多个并行子 agent 时出现） */
-.subagent-jump {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 10px;
-  margin-bottom: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-panel-soft);
-  position: sticky;
-  top: 0;
-  z-index: 1;
-}
-
-.subagent-jump__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  background: var(--color-panel);
-  color: var(--color-text);
-  padding: 4px 10px;
-  font-size: 0.75rem;
-  cursor: pointer;
-  max-width: 160px;
-  transition: border-color 0.15s, color 0.15s;
-}
-
-.subagent-jump__chip:hover {
-  border-color: var(--color-accent-strong);
-  color: var(--color-accent-strong);
-}
-
-.subagent-jump__dot {
-  flex-shrink: 0;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--color-text-muted);
-}
-
-.subagent-jump__dot--running {
-  background: var(--color-accent-strong);
-}
-
-.subagent-jump__name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .subagent-group {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -613,12 +548,22 @@ function handleDragReorder() {
 }
 
 .subagent-group__header {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--color-border);
+  border: 0;
+  border-bottom: 1px solid transparent;
   background: var(--color-panel-soft);
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.subagent-group__header--open {
+  border-bottom-color: var(--color-border);
 }
 
 .subagent-group__icon {
@@ -636,7 +581,17 @@ function handleDragReorder() {
   white-space: nowrap;
 }
 
+.subagent-group__duration,
+.subagent-group__meta {
+  flex-shrink: 0;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
 .subagent-group__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   flex-shrink: 0;
   font-size: 0.6875rem;
   color: var(--color-text-muted);
@@ -650,11 +605,53 @@ function handleDragReorder() {
   border-color: var(--color-accent-strong);
 }
 
+.subagent-running-dots {
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+
+.subagent-running-dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: subagent-dot-pulse 1.4s infinite ease-in-out both;
+}
+
+.subagent-running-dots span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.subagent-running-dots span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+.subagent-group__arrow {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  transition: transform 0.15s;
+}
+
+.subagent-group__header--open .subagent-group__arrow {
+  transform: rotate(90deg);
+}
+
 .subagent-group__body {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
+}
+
+.subagent-group__meta {
+  align-self: flex-end;
+}
+
+@keyframes subagent-dot-pulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
 }
 
 /* C：后台任务详情行 */
