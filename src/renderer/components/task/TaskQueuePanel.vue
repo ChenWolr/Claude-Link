@@ -5,7 +5,8 @@ import { useTaskStore } from '../../stores/task-store';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { useTaskQueue } from '../../composables/use-task-queue';
-import { aggregateSubAgentGroups, buildTitleByToolUseId } from '../../utils/subagent-groups';
+import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
+import { useNow } from '../../composables/use-now';
 import TaskItem from './TaskItem.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
 import MessageBubble from '../chat/MessageBubble.vue';
@@ -17,6 +18,21 @@ const { startListening } = useTaskQueue();
 
 const newTaskPrompt = ref('');
 const expandedGroups = ref<Set<string>>(new Set());
+// 问题 7：用户显式折叠的组（优先级最高，运行中也保持收起）。
+const collapsedGroups = ref<Set<string>>(new Set());
+// 问题 6：客户端实时计时——sending 期间每 100ms 跳动，子 Agent 运行中耗时实时更新。
+const { now } = useNow(() => sessionStore.sending);
+// R3（二次修复）：实时判定改用回合级 sessionStore.sending（而非 g.running）—— g.running 只对
+// 「末组」恒真，多子 Agent 并发时非末组 running=false 会回退冻结值，给人「时间提前固定」的错觉。
+// 改成回合级后，主回合 sending 期间所有组都实时跳动到主回合结束，契合「主消息没回完，子 Agent
+// 就还在干活」。g.running 仍用于状态徽标「进行中/已完成」与外层自动展开（per-group 语义不变）。
+function subAgentDurationText(g: SubAgentGroup): string {
+  if (sessionStore.sending && g.startMs) {
+    const live = (now.value - g.startMs) / 1000;
+    return formatDuration(Math.max(live, g.frozenSeconds ?? 0));
+  }
+  return g.durationText;
+}
 let cleanup: (() => void) | null = null;
 
 const queueStatus = computed(() => taskStore.queueState.status);
@@ -36,14 +52,24 @@ const dragDisabled = computed(
 );
 
 function isSubAgentGroupExpanded(id: string, running: boolean): boolean {
+  // 问题 7：用户显式折叠优先——即使运行中也保持收起。
+  if (collapsedGroups.value.has(id)) return false;
   return expandedGroups.value.has(id) || running;
 }
 
-function toggleSubAgentGroup(id: string): void {
-  const next = new Set(expandedGroups.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  expandedGroups.value = next;
+function toggleSubAgentGroup(id: string, running: boolean): void {
+  const open = isSubAgentGroupExpanded(id, running);
+  const nextExp = new Set(expandedGroups.value);
+  const nextCol = new Set(collapsedGroups.value);
+  if (open) {
+    nextExp.delete(id);
+    nextCol.add(id);
+  } else {
+    nextCol.delete(id);
+    nextExp.add(id);
+  }
+  expandedGroups.value = nextExp;
+  collapsedGroups.value = nextCol;
 }
 
 // 子 Agent 分组：纯逻辑抽到 subagent-groups.ts（由 tdd-subagent-verify.ts 行为测试覆盖）。
@@ -256,11 +282,11 @@ function handleDragReorder() {
               type="button"
               class="subagent-group__header"
               :class="{ 'subagent-group__header--open': isSubAgentGroupExpanded(g.parentAgentId, g.running) }"
-              @click="toggleSubAgentGroup(g.parentAgentId)"
+              @click="toggleSubAgentGroup(g.parentAgentId, g.running)"
             >
               <span class="subagent-group__icon">🤖</span>
               <span class="subagent-group__title">{{ g.title }}</span>
-              <span class="subagent-group__duration">⏱{{ g.durationText }}</span>
+              <span class="subagent-group__duration">⏱{{ subAgentDurationText(g) }}</span>
               <span class="subagent-group__status" :class="{ 'subagent-group__status--running': g.running }">
                 {{ g.running ? '进行中' : '已完成' }}
                 <span v-if="g.running" class="subagent-running-dots" aria-hidden="true">
@@ -270,7 +296,7 @@ function handleDragReorder() {
               <span class="subagent-group__arrow">›</span>
             </button>
             <div v-if="isSubAgentGroupExpanded(g.parentAgentId, g.running)" class="subagent-group__body">
-              <div class="subagent-group__meta">耗时：{{ g.durationText }}</div>
+              <div class="subagent-group__meta">耗时：{{ subAgentDurationText(g) }}</div>
               <template v-for="item in g.items" :key="item.key">
                 <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
                 <MessageBubble v-else :message="item.message" />

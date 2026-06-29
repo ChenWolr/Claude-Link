@@ -27,6 +27,7 @@ import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
 import { convertToolProgress, convertTaskEvent } from '../../shared/progress-events';
+import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type {
   CliEvent,
@@ -630,10 +631,14 @@ async function runQuery(
           infoSubtype === 'compact_boundary' ||
           infoSubtype === 'plugin_install'
         ) {
+          const text =
+            typeof sdkMsg.content === 'string' ? sdkMsg.content : (typeof sdkMsg.text === 'string' ? sdkMsg.text : undefined);
+          // 问题 5：空文本的 informational 横幅不转发/落库（每回合噪音「ℹ️ 系统提示」）。
+          if (!isDisplayableSystemInfo(infoSubtype, text)) continue;
           const sysInfo: CliSystemInfoEvent = {
             type: 'system',
             subtype: infoSubtype,
-            text: typeof sdkMsg.content === 'string' ? sdkMsg.content : (typeof sdkMsg.text === 'string' ? sdkMsg.text : undefined),
+            text,
             level: sdkMsg.level === 'warn' ? 'warn' : 'info',
           };
           forwardEvent(sessionId, mainWindow, sysInfo);

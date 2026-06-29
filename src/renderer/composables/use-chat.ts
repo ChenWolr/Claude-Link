@@ -12,6 +12,7 @@ import type { BackgroundTask } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
+import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { Message } from '../../shared/types/session';
 
 // 根因修复：全局单例。useChat 只初始化一次（在 App.vue），监听生命周期与 app 等长。
@@ -478,6 +479,8 @@ function createChat() {
       const err = info.error ? `（${info.error}）` : '';
       text = `API 重试中（第 ${attempt}/${max} 次）${err}`;
     }
+    // 问题 5：空文本的 informational 横幅不展示（每回合噪音「ℹ️ 系统提示」）。
+    if (!isDisplayableSystemInfo(info.subtype, text)) return;
     const defaultText =
       info.subtype === 'compact_boundary' ? '上下文已达压缩边界'
         : info.subtype === 'plugin_install' ? '插件安装'
@@ -525,12 +528,22 @@ function createChat() {
   // 这样纯工具回合也能展示 cost/duration；回溯到上一回合的用户消息即停止。
   function attachResultMetadata(event: CliResultEvent): void {
     const messages = store.messages;
+    // 问题 2：第三方端点（如 glm-5.2）可能不回报 duration_ms，用客户端计时（本回合开始→现在）
+    // 兜底，保证气泡始终能展示「花了多少时间」。result 到达时 turnStartedAt 尚未清除。
+    const sid = store.activeSession?.id;
+    const startedAt = sid ? store.turnStartedAt[sid] : null;
+    const clientMs = startedAt ? Date.now() - startedAt : null;
+    // R1（二次修复）：sdk-backend 把缺失的 total_cost_usd/duration_ms 补成 0（非 undefined），
+    // `??` 对 0 不生效会屏蔽客户端兜底。改用真值判断：>0 用端点值，否则 cost 置 null（不显示
+    // $0.0000）、duration 回落客户端计时（用户「把最终时间映射到耗时」诉求）。
+    const cost = event.total_cost_usd;
+    const duration = event.duration_ms;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const message = messages[i];
       if (message.role === 'user') break;
       if (message.role === 'assistant') {
-        message.costUsd = event.total_cost_usd ?? null;
-        message.durationMs = event.duration_ms ?? null;
+        message.costUsd = typeof cost === 'number' && cost > 0 ? cost : null;
+        message.durationMs = typeof duration === 'number' && duration > 0 ? duration : clientMs;
         break;
       }
     }

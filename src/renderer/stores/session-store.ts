@@ -58,6 +58,9 @@ export const useSessionStore = defineStore('session', {
     backgroundTasks: {} as Record<string, BackgroundTask>,
     // C：实时压缩进行中（status:compacting）。compact_boundary 复位为 false。
     compacting: false as boolean,
+    // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
+    // 渲染层据此 + useNow 跳动时钟算实时耗时，整个 sending 期间常驻显示「⏱ X.Xs」。
+    turnStartedAt: {} as Record<string, number>,
   }),
   getters: {
     // 当前应展示的会话列表：搜索态下返回 searchResults，否则返回全量 sessions。
@@ -68,6 +71,11 @@ export const useSessionStore = defineStore('session', {
     // ChatPage 卸载/重挂载不影响——只要 activeSession 在 runningSessions 里就是 true。
     sending(state): boolean {
       return !!state.activeSession && state.runningSessions.includes(state.activeSession.id);
+    },
+    // 问题 2：当前活动会话的本回合开始时间戳（无则 null）。MessageList 实时计时器据此算耗时。
+    activeTurnStartedAt(state): number | null {
+      if (!state.activeSession) return null;
+      return state.turnStartedAt[state.activeSession.id] ?? null;
     },
   },
   actions: {
@@ -242,6 +250,8 @@ export const useSessionStore = defineStore('session', {
     markRunning(sessionId: string) {
       if (!this.runningSessions.includes(sessionId)) {
         this.runningSessions.push(sessionId);
+        // 问题 2：记录本回合开始时间（仅新加入时置位，避免重复 send 覆盖）。
+        this.turnStartedAt[sessionId] = Date.now();
       }
     },
     // 根因修复：标记会话执行结束。result/error/aborted 时调用。
@@ -249,6 +259,8 @@ export const useSessionStore = defineStore('session', {
       this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
       // 清理该会话的流式快照（执行结束，快照不再需要）
       delete this.sessionStreams[sessionId];
+      // 问题 2：清理本回合开始时间戳（执行结束，计时器随之隐藏）。
+      delete this.turnStartedAt[sessionId];
     },
     // 问题 1：向非当前会话的流式快照追加内容（后台执行时累积流式，切回时恢复）。
     appendBackgroundStream(sessionId: string, type: 'content' | 'thinking' | 'tool', text: string) {

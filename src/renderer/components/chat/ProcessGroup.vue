@@ -31,9 +31,18 @@ const props = defineProps<{
 const foldable = computed(() => isFoldable(props.messages.length));
 // 焦点跟随：发送中末组 active 自动展开；不可折叠的 fold 强制展开行式。
 const manualOpen = ref<null | boolean>(null);
-const open = computed(() => manualOpen.value ?? (props.active || !foldable.value));
+// R4（问题 7）：用户显式收起标志，优先级高于 active。原 open = manualOpen ?? (active || !foldable)
+// 在 active=true（运行中）时，点击只能把 manualOpen 设成 false，但 false ?? (true) 仍为 true，
+// 被 active 钉死无法收起。manualClosed 让用户显式折叠后即便 active 也保持收起。
+const manualClosed = ref(false);
+const open = computed(() => {
+  if (manualClosed.value) return false;
+  return manualOpen.value ?? (props.active || !foldable.value);
+});
 function toggle(): void {
-  manualOpen.value = !open.value;
+  const next = !open.value;
+  manualOpen.value = next;
+  manualClosed.value = !next;
 }
 
 // 居中摘要（对齐 openhanako buildProcessFoldSummary）。
@@ -129,7 +138,8 @@ const items = computed<GroupItem[]>(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 8px 0;
+  /* R-issue3：过程摘要与相邻回复气泡收紧到近贴合（仅留容器 gap）。原 margin: 2px 0。 */
+  margin: 0;
   padding: 6px 12px;
   background: transparent;
   border: 0;
@@ -186,7 +196,8 @@ const items = computed<GroupItem[]>(() => {
 .process-fold__panel {
   width: 100%;
   box-sizing: border-box;
-  margin: 0 0 16px;
+  /* R-issue3：展开态 panel 与下方回复收紧（原 margin: 0 0 8px）。 */
+  margin: 0 0 3px;
   padding: 10px 12px;
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--color-panel-soft) 62%, transparent);
