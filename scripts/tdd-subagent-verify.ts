@@ -199,5 +199,27 @@ check('running 工具的实时耗时进入 durationText', () => {
   assert.equal(groups[0].running, true);
 });
 
+console.log('\n=== startMs / frozenSeconds（问题 6：客户端实时计时基准） ===');
+check('startMs = 组内最早 createdAt；frozenSeconds = 耗时计算结果', () => {
+  const all = [
+    msg({ id: 'sa1', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tu1', content: '{}', createdAt: '2026-06-29T00:00:05.000Z' }),
+    msg({ id: 'sa2', parentAgentId: 'agentA', eventType: 'tool_result', processKind: 'tool:Bash', toolUseId: 'tu1', content: 'ok', createdAt: '2026-06-29T00:00:02.000Z' }),
+  ];
+  const groups = aggregateSubAgentGroups(all, {
+    turnStartIndex: 0, sending: false, hideText: false, hideThinking: false,
+    toolProgress: {}, titleByToolUseId: new Map(),
+  });
+  assert.equal(groups[0].startMs, new Date('2026-06-29T00:00:02.000Z').getTime());
+  assert.equal(groups[0].frozenSeconds, 3); // 时间戳首尾差 3s
+});
+check('无效 createdAt → startMs=null', () => {
+  const all = [msg({ id: 'sa1', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tu1', content: '{}', createdAt: 'not-a-date' })];
+  const groups = aggregateSubAgentGroups(all, {
+    turnStartIndex: 0, sending: false, hideText: false, hideThinking: false,
+    toolProgress: {}, titleByToolUseId: new Map(),
+  });
+  assert.equal(groups[0].startMs, null);
+});
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);

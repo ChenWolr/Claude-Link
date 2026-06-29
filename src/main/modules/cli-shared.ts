@@ -11,6 +11,7 @@ import { logger } from '../utils/logger';
 import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
+import { isDisplayableSystemInfo } from '../../shared/system-info';
 
 export interface SpawnOptions {
   model?: string;
@@ -91,6 +92,8 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
         break;
       }
       const info = event as CliSystemInfoEvent;
+      // 问题 5：空文本 informational 不落库（每回合噪音「ℹ️ 系统提示」）。
+      if (!isDisplayableSystemInfo(info.subtype, info.text)) break;
       const defaultText: Record<string, string> = {
         informational: '系统提示',
         compact_boundary: '上下文已达压缩边界',

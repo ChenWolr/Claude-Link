@@ -11,6 +11,7 @@
 //   - 调用方负责先按 parentAgentId 过滤（主流程只取 null，子 Agent 面板只取非 null）。
 
 import type { Message } from '../../shared/types/session';
+import { isRedundantSystemProcessKind } from '../../shared/system-info';
 
 export interface FoldStats {
   toolCount: number;
@@ -57,6 +58,9 @@ export function groupMessagesForRender(messages: Message[]): RenderItem[] {
     }
   };
   for (const msg of messages) {
+    // R2（问题 5）：权限询问 + 交互回执已由交互弹窗承载，不在聊天流重复渲染（仍落库留审计）。
+    // 在此单一瓶颈过滤，同时覆盖主流程（MessageList）与子 Agent 面板（TaskQueuePanel→ProcessGroup）。
+    if (isRedundantSystemProcessKind(msg.processKind)) continue;
     if (msg.processKind === null) {
       close();
       items.push({ key: msg.id, type: 'message', message: msg });

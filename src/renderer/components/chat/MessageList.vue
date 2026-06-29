@@ -7,6 +7,7 @@ import ProcessGroup from './ProcessGroup.vue';
 import ThinkingBlock from './ThinkingBlock.vue';
 import { groupMessagesForRender, computeStats, type RenderItem } from '../../utils/group-messages';
 import { useSessionStore } from '../../stores/session-store';
+import { useNow } from '../../composables/use-now';
 
 const props = defineProps<{
   messages: Message[];
@@ -18,6 +19,22 @@ const props = defineProps<{
 
 const sessionStore = useSessionStore();
 const container = ref<HTMLElement | null>(null);
+
+// 问题 1+2：实时计时器。sending 期间 useNow 每 100ms 跳动，整个回复过程常驻显示「⏱ X.Xs」，
+// 让用户始终明确「正在回复」（取代只在首个 token 前一闪而过的「正在思考」）。
+const { now } = useNow(() => !!props.sending);
+const elapsedMs = computed(() => {
+  const start = sessionStore.activeTurnStartedAt;
+  if (!start) return 0;
+  return Math.max(0, now.value - start);
+});
+function formatElapsed(ms: number): string {
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const rs = Math.floor(s % 60);
+  return `${m}:${String(rs).padStart(2, '0')}`;
+}
 
 // 主聊天流：parentAgentId === null 的消息（子 agent 过程抽到右侧「子Agent」Tab）。
 // 分组规则（最小颗粒度 + 因果配对 + 正文独立气泡）见 utils/group-messages.ts。
@@ -143,9 +160,15 @@ function handleCopyClick(event: MouseEvent): void {
         <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" />
       </template>
       <div v-if="sending || streamingContent || streamingThinking || streamingTool" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
-        <div v-if="sending && !streamingContent && !streamingThinking && !streamingTool" class="status-indicator">
-          <span class="status-indicator__dots"><span></span><span></span><span></span></span>
-          <span class="status-indicator__text">Claude 正在思考…</span>
+        <!-- 问题 1+2：实时计时器——整个 sending 期间常驻；动画点在整个工作阶段跳动。 -->
+        <div v-if="sending" class="turn-timer">
+          <span class="turn-timer__time">⏱ {{ formatElapsed(elapsedMs) }}</span>
+          <!-- R5（问题 1）：动画点在整个「工作阶段」（最终正文未流出时）常驻跳动，不再只在一闪而过的
+               pre-token 窗口显示——让用户始终看到「正在回复」的动态反馈。「正在思考…」文字仅 pre-token。 -->
+          <span v-if="!streamingContent" class="turn-timer__working">
+            <span class="turn-timer__dots"><span></span><span></span><span></span></span>
+            <span v-if="!streamingThinking && !streamingTool" class="turn-timer__label">Claude 正在思考…</span>
+          </span>
         </div>
         <ThinkingBlock v-if="streamingThinking" :content="streamingThinking" streaming />
         <div v-if="streamingTool" class="tool-stream">
@@ -180,10 +203,10 @@ function handleCopyClick(event: MouseEvent): void {
   gap: 0.25rem;
 }
 
-/* 发送者切换（user→assistant / assistant→user）：额外加宽间距。
-   gap(0.25rem) + margin-top(0.75rem) = 1rem 总间距。 */
+/* 发送者切换（user→assistant / assistant→user）：额外加宽间距（问题 4）。
+   gap(0.25rem) + margin-top(2.25rem) ≈ 2.5rem 总间距（二次修复：用户反馈再大一点）。 */
 :deep(.msg-transition) {
-  margin-top: 1.25rem;
+  margin-top: 2.25rem;
 }
 
 /* 流式元素容器：思考/工具/正文流式渲染都在此容器内，内部间距紧凑。
@@ -203,12 +226,13 @@ function handleCopyClick(event: MouseEvent): void {
   margin-bottom: auto;
 }
 
-.status-indicator {
+/* 问题 1+2：实时计时器胶囊——左对齐（assistant 侧），整个回复期间常驻。 */
+.turn-timer {
   align-self: flex-start;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 16px;
+  gap: 10px;
+  padding: 6px 14px;
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   border: 1px solid var(--color-border);
@@ -216,12 +240,24 @@ function handleCopyClick(event: MouseEvent): void {
   color: var(--color-text-muted);
 }
 
-.status-indicator__dots {
+.turn-timer__time {
+  color: var(--color-accent-strong);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-timer__working {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.turn-timer__dots {
   display: inline-flex;
   gap: 3px;
 }
 
-.status-indicator__dots span {
+.turn-timer__dots span {
   width: 5px;
   height: 5px;
   border-radius: 50%;
@@ -229,11 +265,11 @@ function handleCopyClick(event: MouseEvent): void {
   animation: status-dot-pulse 1.4s infinite ease-in-out both;
 }
 
-.status-indicator__dots span:nth-child(2) {
+.turn-timer__dots span:nth-child(2) {
   animation-delay: 0.16s;
 }
 
-.status-indicator__dots span:nth-child(3) {
+.turn-timer__dots span:nth-child(3) {
   animation-delay: 0.32s;
 }
 

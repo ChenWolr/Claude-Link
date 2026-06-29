@@ -84,6 +84,10 @@ export interface SubAgentGroup {
   title: string;
   items: RenderItem[];
   durationText: string;
+  /** 问题 6：组内最早消息 createdAt（ms），供客户端实时计时基准。 */
+  startMs: number | null;
+  /** 问题 6：computeElapsedSeconds 的冻结值（运行结束后展示用）。 */
+  frozenSeconds: number | null;
   running: boolean;
 }
 
@@ -133,11 +137,19 @@ export function aggregateSubAgentGroups(allMessages: Message[], opts: SubAgentGr
       allMessages,
     });
     const running = opts.sending && (idx === order.length - 1 || items.some((item) => item.type === 'fold' && item.stats.running));
+    // 问题 6：startMs 取组内最早 createdAt（客户端实时计时基准）；frozenSeconds 为现有计算结果（冻结值）。
+    const timestamps = msgs
+      .map((m) => new Date(m.createdAt).getTime())
+      .filter((t) => Number.isFinite(t));
+    const startMs = timestamps.length ? Math.min(...timestamps) : null;
+    const frozenSeconds = computeElapsedSeconds(msgs, opts.toolProgress);
     return {
       parentAgentId: id,
       title: opts.titleByToolUseId.get(id) || '子Agent',
       items,
-      durationText: formatDuration(computeElapsedSeconds(msgs, opts.toolProgress)),
+      durationText: formatDuration(frozenSeconds),
+      startMs,
+      frozenSeconds,
       running,
     };
   });

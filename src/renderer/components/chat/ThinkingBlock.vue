@@ -17,7 +17,7 @@ const active = computed(() => props.streaming || props.sealed === false);
     <button type="button" class="think-row__head" :class="{ 'think-row__head--open': open }" @click="open = !open">
       <span class="think-row__icon">💭</span>
       <span class="think-row__label">{{ active ? '思考中' : '思考完成' }}</span>
-      <span v-if="active" class="think-row__dots">···</span>
+      <span v-if="active" class="think-row__dots" aria-hidden="true"><span></span><span></span><span></span></span>
       <span v-else-if="!open && preview" class="think-row__preview">{{ preview }}…</span>
       <span class="think-row__arrow">›</span>
     </button>
@@ -63,10 +63,32 @@ const active = computed(() => props.streaming || props.sealed === false);
   flex-shrink: 0;
 }
 
+/* R5（问题 1）：「思考中」用 3 个脉冲动画点取代静态「···」，让用户看到动态反馈。 */
 .think-row__dots {
-  color: var(--color-accent-strong);
-  letter-spacing: 0.12em;
-  font-weight: 700;
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.think-row__dots span {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--color-accent-strong);
+  animation: think-dot-pulse 1.4s infinite ease-in-out both;
+}
+
+.think-row__dots span:nth-child(2) {
+  animation-delay: 0.16s;
+}
+
+.think-row__dots span:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+@keyframes think-dot-pulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
 }
 
 .think-row__preview {

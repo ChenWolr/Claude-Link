@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import type { Task, QueueState } from '../../shared/types/task';
 import type { QueueEventPayload } from '../../shared/types/ipc';
+import { useSessionStore } from './session-store';
 
 export const useTaskStore = defineStore('task', {
   state: () => ({
@@ -76,12 +77,17 @@ export const useTaskStore = defineStore('task', {
       }
     },
     handleQueueEvent(payload: QueueEventPayload) {
+      // R6（问题 1+2 健壮性）：队列驱动的回合不经 use-chat.sendMessage，渲染层不会 markRunning，
+      // 导致 sending 恒 false、计时器/动画不显示。在队列事件边界同步执行态：开始/续写置 running，
+      // 队列结束置 stopped。markRunning/markStopped 均幂等、per-session，安全。
+      const sessionStore = useSessionStore();
       switch (payload.type) {
         case 'task_started': {
           const task = this.tasks.find((t) => t.id === payload.taskId);
           if (task) task.status = 'running';
           this.queueState.status = 'running';
           this.queueState.currentTaskId = payload.taskId ?? null;
+          sessionStore.markRunning(payload.sessionId);
           break;
         }
         case 'task_completed':
@@ -102,6 +108,7 @@ export const useTaskStore = defineStore('task', {
         }
         case 'task_continuing': {
           this.queueState.status = 'continuing';
+          sessionStore.markRunning(payload.sessionId);
           break;
         }
         case 'queue_paused': {
@@ -111,6 +118,7 @@ export const useTaskStore = defineStore('task', {
         case 'queue_completed': {
           this.queueState.status = 'idle';
           this.queueState.countdownRemaining = 0;
+          sessionStore.markStopped(payload.sessionId);
           break;
         }
       }

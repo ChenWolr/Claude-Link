@@ -17,6 +17,7 @@ import {
 } from '../src/shared/settings-parser';
 import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
+import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
 
 let pass = 0;
 let fail = 0;
@@ -730,6 +731,78 @@ console.log('\n=== 34) 进度状态层（C）：tool_progress / task_* / compact
     tqp.includes('turnStartIndex') && tqp.includes('aggregateSubAgentGroups') &&
     readRel('src/renderer/utils/subagent-groups.ts').includes('currentTurnMessages'));
   check('ContextButton 实时压缩态', cb.includes('store.compacting') && cb.includes('正在压缩'));
+}
+
+console.log('\n=== 35) system-info 过滤契约（问题 5）：空 informational 不展示 ===');
+{
+  // 行为契约：informational 必须有非空文本；其余子类型一律放行（有专用文案/语义）。
+  check('空文本 informational → 不展示', isDisplayableSystemInfo('informational', undefined) === false);
+  check('空白 informational → 不展示', isDisplayableSystemInfo('informational', '   ') === false);
+  check('有文本 informational → 展示', isDisplayableSystemInfo('informational', '上下文已压缩') === true);
+  check('permission_request 无文本 → 仍展示', isDisplayableSystemInfo('permission_request', undefined) === true);
+  check('compact_boundary 无文本 → 仍展示', isDisplayableSystemInfo('compact_boundary', undefined) === true);
+  check('api_retry 无文本 → 仍展示', isDisplayableSystemInfo('api_retry', undefined) === true);
+
+  // 结构契约：三处（发射点 / 落库 / 渲染）统一调用同一判定。
+  check('sdk-backend 发射点过滤空 informational', readRel('src/main/modules/sdk-backend.ts').includes('isDisplayableSystemInfo'));
+  check('cli-shared 落库过滤空 informational', readRel('src/main/modules/cli-shared.ts').includes('isDisplayableSystemInfo'));
+  check('use-chat 渲染过滤空 informational', readRel('src/renderer/composables/use-chat.ts').includes('isDisplayableSystemInfo'));
+}
+
+console.log('\n=== 36) 实时计时器 + 子 Agent 折叠（问题 1/2/6/7）===');
+{
+  const ss = readRel('src/renderer/stores/session-store.ts');
+  const ml = readRel('src/renderer/components/chat/MessageList.vue');
+  const mb = readRel('src/renderer/components/chat/MessageBubble.vue');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const sg = readRel('src/renderer/utils/subagent-groups.ts');
+  const tqp = readRel('src/renderer/components/task/TaskQueuePanel.vue');
+  const un = readRel('src/renderer/composables/use-now.ts');
+  check('use-now 提供 useNow（100ms 跳动）', un.includes('useNow') && un.includes('setInterval'));
+  check('session-store 含 turnStartedAt + activeTurnStartedAt', ss.includes('turnStartedAt') && ss.includes('activeTurnStartedAt'));
+  check('markRunning 记录 turnStartedAt', ss.includes('this.turnStartedAt[sessionId] = Date.now()'));
+  check('MessageList 实时计时器（turn-timer + formatElapsed + useNow）', ml.includes('turn-timer') && ml.includes('formatElapsed') && ml.includes('useNow'));
+  check('MessageBubble duration 与 cost 解耦', mb.includes('message.costUsd != null || message.durationMs'));
+  check('use-chat 客户端时长兜底（clientMs）', uc.includes('clientMs'));
+  check('subagent-groups 含 startMs / frozenSeconds', sg.includes('startMs') && sg.includes('frozenSeconds'));
+  check('TaskQueuePanel 实时计时 + 运行中可折叠', tqp.includes('subAgentDurationText') && tqp.includes('collapsedGroups'));
+}
+
+console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/7）===');
+{
+  const gm = readRel('src/renderer/utils/group-messages.ts');
+  const pg = readRel('src/renderer/components/chat/ProcessGroup.vue');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const tqp = readRel('src/renderer/components/task/TaskQueuePanel.vue');
+  const ts = readRel('src/renderer/stores/task-store.ts');
+  const tb = readRel('src/renderer/components/chat/ThinkingBlock.vue');
+  const ml = readRel('src/renderer/components/chat/MessageList.vue');
+
+  // R2（问题 5）：渲染层过滤 permission / interaction_response（首轮误诊为空 informational）。
+  check('permission 视为冗余（不渲染）', isRedundantSystemProcessKind('permission') === true);
+  check('system:interaction_response 视为冗余', isRedundantSystemProcessKind('system:interaction_response') === true);
+  check('thinking 非冗余（保留渲染）', isRedundantSystemProcessKind('thinking') === false);
+  check('tool:* 非冗余', isRedundantSystemProcessKind('tool:bash') === false);
+  check('compact_boundary 非冗余', isRedundantSystemProcessKind('system:compact_boundary') === false);
+  check('null 非冗余', isRedundantSystemProcessKind(null) === false);
+  check('group-messages 渲染层过滤冗余 system', gm.includes('isRedundantSystemProcessKind'));
+
+  // R1（问题 2）：sdk-backend 把缺失值补 0，?? 对 0 不生效 → 改真值判断 + clientMs 兜底。
+  check('use-chat 时长真值判断（>0 回落 clientMs）', uc.includes('event.duration_ms') && uc.includes('> 0') && uc.includes('clientMs'));
+
+  // R3（问题 6）：子 Agent 实时计时改回合级 sending（首轮仅末组 g.running 实时，非末组冻结）。
+  check('TaskQueuePanel 子Agent 计时用回合级 sending', tqp.includes('sessionStore.sending && g.startMs'));
+
+  // R4（问题 7）：内层 ProcessGroup manualClosed 覆盖 active，运行中可折叠。
+  check('ProcessGroup manualClosed 运行中可折叠', pg.includes('manualClosed'));
+
+  // R5（问题 1）：动画点工作阶段常驻 + ThinkingBlock 脉冲动画点（首轮 pre-token 一闪即逝 + 静态 ··· ）。
+  check('MessageList 动画点工作阶段常驻（turn-timer__working）', ml.includes('turn-timer__working') && ml.includes("v-if=\"!streamingContent\""));
+  check('ThinkingBlock 脉冲动画点', tb.includes('think-dot-pulse'));
+
+  // R6（问题 1+2 健壮性）：队列驱动回合同步执行态（不经 sendMessage → 否则 sending 恒 false）。
+  check('task-store 队列事件同步 markRunning/markStopped',
+    ts.includes('sessionStore.markRunning(payload.sessionId)') && ts.includes('sessionStore.markStopped(payload.sessionId)'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

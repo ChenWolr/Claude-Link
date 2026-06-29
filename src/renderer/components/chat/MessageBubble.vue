@@ -12,9 +12,9 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
   <div :class="['bubble', `bubble--${message.role}`]">
     <div class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
     <div class="bubble__content markdown-body" v-html="renderedContent" />
-    <div v-if="message.costUsd != null" class="bubble__meta">
-      ${{ message.costUsd.toFixed(4) }}
-      <span v-if="message.durationMs"> · {{ (message.durationMs / 1000).toFixed(1) }}s</span>
+    <div v-if="message.costUsd != null || message.durationMs" class="bubble__meta">
+      <template v-if="message.costUsd != null">${{ message.costUsd.toFixed(4) }}</template>
+      <template v-if="message.durationMs">{{ message.costUsd != null ? ' · ' : '' }}{{ (message.durationMs / 1000).toFixed(1) }}s</template>
     </div>
   </div>
 </template>
