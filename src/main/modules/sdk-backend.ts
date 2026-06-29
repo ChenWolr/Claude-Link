@@ -679,6 +679,23 @@ async function runQuery(
           forwardTransient(sessionId, mainWindow, sysInfo);
           continue;
         }
+        // M5：status 的其它取值同样可见。compact_result/compact_error 让压缩结果可见
+        // （之前只有 compacting，压缩失败时用户无感知）；requesting 视作轻量进度。均为瞬态。
+        if (subtype === 'status') {
+          if (sdkMsg.compact_result !== undefined) {
+            const sysInfo: CliSystemInfoEvent = {
+              type: 'system',
+              subtype: 'compact_result',
+              compactResult: sdkMsg.compact_result === 'success' ? 'success' : 'failed',
+              compactError: typeof sdkMsg.compact_error === 'string' ? sdkMsg.compact_error : undefined,
+            };
+            forwardTransient(sessionId, mainWindow, sysInfo);
+          } else if (sdkMsg.status === 'requesting') {
+            const sysInfo: CliSystemInfoEvent = { type: 'system', subtype: 'requesting' };
+            forwardTransient(sessionId, mainWindow, sysInfo);
+          }
+          continue;
+        }
         // 其它未知 system 子类型：暂不转发（前端不消费）。
         continue;
       }
