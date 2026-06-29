@@ -215,6 +215,26 @@ export function persistMessageParts(
         sessionId, role: 'tool', content: resultText, eventType: 'tool_result',
         processKind, parentAgentId, toolUseId: part.tool_use_id ?? null,
       });
+    } else if (part.type === 'mcp_tool_use') {
+      // L6：MCP 工具调用（name 形如 mcp__<server>__<tool>）。与 tool_use 同形落库。
+      messageRepo.createMessage({
+        sessionId,
+        role: 'assistant',
+        content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
+        eventType: 'tool_use',
+        processKind,
+        parentAgentId,
+        toolUseId: part.tool_use_id ?? null,
+        title: extractSubAgentTitle(part),
+      });
+    } else if (part.type === 'mcp_tool_result') {
+      // L6：MCP 工具结果。与 tool_result 同形落库（含 is_error）。
+      const resultText = normalizeToolResultContent((part as { content?: unknown }).content);
+      messageRepo.createMessage({
+        sessionId, role: 'tool', content: resultText, eventType: 'tool_result',
+        processKind, parentAgentId, toolUseId: part.tool_use_id ?? null,
+        isError: part.is_error === true,
+      });
     } else if (part.type === 'thinking' && 'thinking' in part) {
       messageRepo.createMessage({
         sessionId, role: 'assistant', content: part.thinking, eventType: 'thinking',

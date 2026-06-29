@@ -385,6 +385,45 @@ function createChat() {
         });
         // C：工具结果到达，清除该工具的实时耗时（避免遗留）。
         if (toolUseId) store.clearToolProgress(toolUseId);
+      } else if (part.type === 'mcp_tool_use') {
+        // L6：MCP 工具调用（与 tool_use 同形）。
+        if (isMainFlow) turnHadToolUse = true;
+        persistMessage({
+          role: 'assistant',
+          eventType: 'tool_use',
+          content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
+          processKind: processKindFromPart(part),
+          parentAgentId,
+          toolUseId: part.tool_use_id ?? null,
+          title: extractSubAgentTitle(part),
+        });
+        store.clearToolStream();
+      } else if (part.type === 'mcp_tool_result') {
+        // L6：MCP 工具结果（与 tool_result 同形，含 is_error）。
+        const rawContent = (part as { content?: unknown }).content;
+        const resultText =
+          typeof rawContent === 'string'
+            ? rawContent
+            : Array.isArray(rawContent)
+              ? rawContent
+                  .map((item) =>
+                    item && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string'
+                      ? (item as { text: string }).text
+                      : JSON.stringify(item, null, 2),
+                  )
+                  .join('\n')
+              : JSON.stringify(rawContent ?? '', null, 2);
+        const toolUseId = part.tool_use_id ?? null;
+        persistMessage({
+          role: 'tool',
+          eventType: 'tool_result',
+          content: resultText,
+          processKind: processKindFromPart(part),
+          parentAgentId,
+          toolUseId,
+          isError: part.is_error === true,
+        });
+        if (toolUseId) store.clearToolProgress(toolUseId);
       } else {
         // 兜底：未识别的 content block 类型不静默丢弃，记日志便于发现协议新形态。
         console.warn('[handleMessagePartsFull] 未识别的 content block 类型，已跳过：', (part as { type: string }).type);

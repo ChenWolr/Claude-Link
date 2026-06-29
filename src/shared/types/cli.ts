@@ -75,6 +75,23 @@ export interface CliMessageContentCodeExecutionToolResultPart {
   content?: unknown;
 }
 
+// L6：MCP 工具调用/结果块。MCP 工具名形如 mcp__<server>__<tool>，与普通 tool_use 同族。
+// 当前代理端点不触发，补全类型避免静默丢弃；persistMessageParts 已有兜底日志兜住新形态。
+export interface CliMessageContentMcpToolUsePart {
+  type: 'mcp_tool_use';
+  name: string;
+  input: Record<string, unknown>;
+  tool_use_id?: string;
+  server_name?: string;
+}
+
+export interface CliMessageContentMcpToolResultPart {
+  type: 'mcp_tool_result';
+  tool_use_id?: string;
+  content?: string | Array<{ type: string; text?: string; [k: string]: unknown }>;
+  is_error?: boolean;
+}
+
 export type CliMessageContentPart =
   | CliMessageContentTextPart
   | CliMessageContentToolUsePart
@@ -84,7 +101,9 @@ export type CliMessageContentPart =
   | CliMessageContentServerToolUsePart
   | CliMessageContentWebSearchToolResultPart
   | CliMessageContentWebFetchToolResultPart
-  | CliMessageContentCodeExecutionToolResultPart;
+  | CliMessageContentCodeExecutionToolResultPart
+  | CliMessageContentMcpToolUsePart
+  | CliMessageContentMcpToolResultPart;
 
 export interface CliUsage {
   input_tokens?: number;
@@ -108,9 +127,10 @@ export interface CliStreamEvent {
   event: {
     type?: string;
     index?: number;
-    content_block?: { type: 'thinking' | 'text' | 'tool_use'; [k: string]: unknown };
+    content_block?: { type: 'thinking' | 'text' | 'tool_use' | 'redacted_thinking'; [k: string]: unknown };
     delta: {
-      type: 'text_delta' | 'input_json_delta' | 'thinking_delta' | 'signature_delta' | 'citations_delta';
+      // L7：补 compaction_content_delta（CC 自动压缩摘要的流式增量），其余为已知 delta。
+      type: 'text_delta' | 'input_json_delta' | 'thinking_delta' | 'signature_delta' | 'citations_delta' | 'compaction_content_delta';
       text?: string;
       partial_json?: string;
       thinking?: string;
@@ -175,7 +195,7 @@ export interface CliTaskEvent {
 // 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
 export interface CliSystemInfoEvent {
   type: 'system';
-  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting';
+  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting' | 'compact_result' | 'compact_error' | 'requesting';
   text?: string;
   level?: 'info' | 'warn';
   // api_retry 专属：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。
@@ -183,6 +203,10 @@ export interface CliSystemInfoEvent {
   attempt?: number;
   max_retries?: number;
   error?: string;
+  // M5：压缩结果（status.compact_result）。'success' | 'failed'。
+  compactResult?: 'success' | 'failed';
+  // M5：压缩失败原因（status.compact_error）。
+  compactError?: string;
 }
 
 // 权限事件：权限询问 / 自动拒绝。落库 processKind = permission。

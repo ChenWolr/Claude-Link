@@ -7,10 +7,12 @@ import {
   SUPPORTED_USER_DIALOG_KINDS,
   buildAskUserQuestionInteractionPayload,
   buildAskUserQuestionResult,
+  buildElicitationInteractionPayload,
   buildPermissionInteractionPayload,
   buildGenericInteractionPayload,
   buildWizardAskUserQuestionPayload,
   dialogResultFromInteraction,
+  elicitationResultFromInteraction,
   interactionHistoryEntryFromResponse,
   mapPermissionInteractionResponse,
   normalizeInteractionPreview,
@@ -366,6 +368,77 @@ function testAskUserQuestionMultiSelectAndOther(): void {
   assert.ok(SUPPORTED_USER_DIALOG_KINDS.includes('plan_mode'));
 }
 
+// T13/M4：onElicitation 的 url 模式（MCP 浏览器 OAuth）。
+function testElicitationUrlMode(): void {
+  // url 模式 → confirm 框，input 带 url，用户复制去浏览器完成授权。
+  const urlPayload = buildElicitationInteractionPayload('session-1', {
+    serverName: 'github',
+    message: 'Authorize GitHub',
+    mode: 'url',
+    url: 'https://github.com/login/oauth/authorize?client_id=abc',
+    elicitationId: 'elicit-1',
+  });
+  assert.equal(urlPayload.kind, 'confirm');
+  assert.equal(urlPayload.toolUseId, 'elicit-1');
+  assert.equal((urlPayload.input as { url?: string }).url, 'https://github.com/login/oauth/authorize?client_id=abc');
+  assert.deepEqual(urlPayload.options?.map((option) => option.id), ['confirm']);
+
+  // form 模式 → 通用表单（不退化为 url 确认框）。
+  const formPayload = buildElicitationInteractionPayload('session-1', {
+    serverName: 'db',
+    message: 'Configure DB',
+    mode: 'form',
+    requestedSchema: {
+      type: 'object',
+      required: ['host'],
+      properties: { host: { type: 'string', title: 'Host' } },
+    },
+  });
+  assert.equal(formPayload.kind, 'form');
+  assert.deepEqual(formPayload.fields?.map((field) => [field.id, field.required]), [['host', true]]);
+
+  // text 模式（无 mode）→ 通用文本输入。
+  const textPayload = buildElicitationInteractionPayload('session-1', {
+    serverName: 'notes',
+    message: 'Enter a note',
+  });
+  assert.equal(textPayload.kind, 'text');
+}
+
+// T12/M3：onElicitation submit → accept，非 submit → cancel。
+// （decline 语义保留给将来 UI 增加「拒绝」按钮时再放开——先写失败测试再放开，不测不可达分支。）
+function testElicitationCancelMapping(): void {
+  // submit → accept（带 content：fieldValues 优先，否则 otherText）。
+  const accepted = elicitationResultFromInteraction({ id: 'r1', action: 'submit', fieldValues: { answer: 'yes' } });
+  assert.equal(accepted.action, 'accept');
+  assert.deepEqual(accepted.content, { answer: 'yes' });
+
+  const acceptedOther = elicitationResultFromInteraction({ id: 'r1b', action: 'submit', otherText: 'typed' });
+  assert.deepEqual(acceptedOther.content, { response: 'typed' });
+
+  // 非 submit（用户关闭/中断）→ cancel。
+  assert.equal(elicitationResultFromInteraction({ id: 'r3', action: 'cancel' }).action, 'cancel');
+}
+
+// T14/M5：status 子类型扩展（compact_result/compact_error/requesting 不再静默丢弃）。
+function testStatusSubtypeCoverage(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const cliTypes = fs.readFileSync(new URL('../src/shared/types/cli.ts', import.meta.url), 'utf8');
+  const sb = fs.readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+
+  // cli.ts 类型覆盖新增三个 status 相关 subtype。
+  assert.ok(cliTypes.includes("'compact_result'"));
+  assert.ok(cliTypes.includes("'compact_error'"));
+  assert.ok(cliTypes.includes("'requesting'"));
+  assert.ok(cliTypes.includes('compactResult?'));
+  assert.ok(cliTypes.includes('compactError?'));
+
+  // sdk-backend 转发 compact_result / compact_error / requesting。
+  assert.ok(sb.includes("subtype: 'compact_result'"));
+  assert.ok(sb.includes('compact_result !== undefined'));
+  assert.ok(sb.includes("sdkMsg.status === 'requesting'"));
+}
+
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testSearchNormalizer();
@@ -378,3 +451,6 @@ testInteractionPromptV2V3Contracts();
 testInteractionPromptWizardAndHistoryContracts();
 testGenericDialogTextAndFormContracts();
 testAskUserQuestionMultiSelectAndOther();
+testElicitationUrlMode();
+testElicitationCancelMapping();
+testStatusSubtypeCoverage();

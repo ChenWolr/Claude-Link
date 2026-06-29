@@ -406,6 +406,15 @@ console.log('\n=== 27) 过程分组计划契约：类型/DB/透传/分组/子Age
   // B7 子Agent Tab
   check('TaskQueuePanel Tab + 子Agent 面板 + 锚点定位',
     tqp.includes('subAgentGroups') && tqp.includes('focusedSubAgentId') && tqp.includes('subagent-group'));
+  check('TaskQueuePanel 子Agent 卡片折叠 + 耗时 + 运行动画 + 去跳转条',
+    tqp.includes('expandedGroups') && tqp.includes('toggleSubAgentGroup') &&
+    tqp.includes('aggregateSubAgentGroups') && tqp.includes('subagent-running-dots') &&
+    !tqp.includes('class="subagent-jump"'));
+  // 纯逻辑抽到 util（不再内联组件），由 tdd-subagent-verify.ts 行为测试覆盖。
+  check('subagent-groups.ts 含耗时/回合过滤/聚合纯逻辑',
+    readRel('src/renderer/utils/subagent-groups.ts').includes('computeElapsedSeconds') &&
+    readRel('src/renderer/utils/subagent-groups.ts').includes('filterCurrentTurnItems') &&
+    readRel('src/renderer/utils/subagent-groups.ts').includes('aggregateSubAgentGroups'));
   check('session-store 右侧 Tab 状态 + focusSubAgent',
     ss.includes('rightTab') && ss.includes('focusSubAgent'));
 
@@ -641,6 +650,37 @@ console.log('\n=== 32) CC 回复形态补全：code_execution / is_error / api_r
   check('cli.ts text part 含 citations + stream delta 含 citation', cli.includes('citations?') && cli.includes('citation?'));
 }
 
+console.log('\n=== 32b) L6/L7 类型精度：MCP content block + compaction stream delta + status 子类型 ===');
+{
+  const cli = readRel('src/shared/types/cli.ts');
+  const pkShared = readRel('src/shared/process-kind.ts');
+  const cs = readRel('src/main/modules/cli-shared.ts');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  const sdkInteractions = readRel('src/main/modules/sdk-interactions.ts');
+
+  // L6：MCP content block 类型 + processKind 分类 + 双路解析（不再静默丢弃）
+  check('cli.ts 含 mcp_tool_use / mcp_tool_result 类型', cli.includes('mcp_tool_use') && cli.includes('mcp_tool_result'));
+  check('processKindFromPart 分类 mcp_tool_use/mcp_tool_result', pkShared.includes("case 'mcp_tool_use'") && pkShared.includes("case 'mcp_tool_result'"));
+  check('persistMessageParts 解析 mcp_tool_use/mcp_tool_result', cs.includes("part.type === 'mcp_tool_use'") && cs.includes("part.type === 'mcp_tool_result'"));
+  check('handleMessagePartsFull 解析 mcp_tool_use/mcp_tool_result', uc.includes("part.type === 'mcp_tool_use'") && uc.includes("part.type === 'mcp_tool_result'"));
+
+  // L7：stream delta 枚举补 compaction_content_delta
+  check('cli.ts stream delta 含 compaction_content_delta', cli.includes('compaction_content_delta'));
+
+  // M5：status 子类型扩展（compact_result/compact_error/requesting）
+  check('cli.ts CliSystemInfoEvent 含 compact_result/compact_error/requesting', cli.includes("'compact_result'") && cli.includes("'compact_error'") && cli.includes("'requesting'"));
+  check('sdk-backend 转发 status compact_result/requesting', sb.includes("subtype: 'compact_result'") && sb.includes("sdkMsg.status === 'requesting'"));
+
+  // L2/L3：PermissionUpdate 类型收紧（不再 unknown[]）
+  check('sdk-interactions 含 PermissionUpdate 类型定义', sdkInteractions.includes('export type PermissionUpdate'));
+  check('PermissionResult.updatedPermissions 用 PermissionUpdate[]', sdkInteractions.includes('updatedPermissions?: PermissionUpdate[]'));
+  // M3/M4：onElicitation 辅助纯函数
+  check('sdk-interactions 含 buildElicitationInteractionPayload（url 模式）', sdkInteractions.includes('buildElicitationInteractionPayload') && sdkInteractions.includes("request.mode === 'url'"));
+  check('sdk-interactions 含 elicitationResultFromInteraction（submit→accept / 非 submit→cancel）',
+    sdkInteractions.includes('elicitationResultFromInteraction') && sdkInteractions.includes("action: 'cancel'"));
+}
+
 console.log('\n=== 33) 工具映射补全（A）+ 子 agent 标题扩展（B）===');
 {
   const pkRenderer = readRel('src/renderer/utils/process-kind.ts');
@@ -686,6 +726,9 @@ console.log('\n=== 34) 进度状态层（C）：tool_progress / task_* / compact
   check('ToolCallBlock 主流程后台运行标注', tcb.includes('backgroundRunning') && tcb.includes('🔁后台'));
   check('ProcessGroup 传 elapsedSeconds', pg.includes('store.toolProgress') && pg.includes('elapsedSeconds'));
   check('TaskQueuePanel 后台任务 Tab', tqp.includes("rightTab === 'background'") && tqp.includes('backgroundTaskList'));
+  check('TaskQueuePanel 子Agent 本回合过滤（util 纯逻辑 + 组件接线）',
+    tqp.includes('turnStartIndex') && tqp.includes('aggregateSubAgentGroups') &&
+    readRel('src/renderer/utils/subagent-groups.ts').includes('currentTurnMessages'));
   check('ContextButton 实时压缩态', cb.includes('store.compacting') && cb.includes('正在压缩'));
 }
 

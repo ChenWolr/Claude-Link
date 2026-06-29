@@ -36,6 +36,10 @@ export function processKindFromPart(part: CliMessageContentPart): string | null 
       return 'tool:web_fetch';
     case 'code_execution_tool_result':
       return 'tool:code_execution';
+    case 'mcp_tool_use':
+      return `tool:${part.name}`;
+    case 'mcp_tool_result':
+      return 'tool:result';
     default:
       return null;
   }

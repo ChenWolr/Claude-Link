@@ -33,7 +33,9 @@ export interface InteractionHistoryEntry {
 export type PermissionResult = {
   behavior: 'allow';
   updatedInput?: Record<string, unknown>;
-  updatedPermissions?: unknown[];
+  // L2/L3：SDK 的 PermissionUpdate 联合（addRules/replaceRules/removeRules/setMode/addDirectories/removeDirectories）。
+  // 这里用宽松记录类型承载（claude-link 不构造具体 rule，只透传 suggestions 给 SDK）。
+  updatedPermissions?: PermissionUpdate[];
   toolUseID?: string;
 } | {
   behavior: 'deny';
@@ -41,6 +43,15 @@ export type PermissionResult = {
   interrupt?: boolean;
   toolUseID?: string;
 };
+
+// L2/L3：PermissionUpdate 宽松类型（对齐 SDK sdk.d.ts:2048，6 种变体）。
+export type PermissionUpdate =
+  | { type: 'addRules'; rules: { toolName: string; ruleContent?: string }[]; behavior: 'allow' | 'deny'; destination: string }
+  | { type: 'replaceRules'; rules: { toolName: string; ruleContent?: string }[]; behavior: 'allow' | 'deny'; destination: string }
+  | { type: 'removeRules'; rules: { toolName: string; ruleContent?: string }[]; behavior: 'allow' | 'deny'; destination: string }
+  | { type: 'setMode'; mode: string; destination: string }
+  | { type: 'addDirectories'; directories: string[]; destination: string }
+  | { type: 'removeDirectories'; directories: string[]; destination: string };
 
 export type CanUseToolOptions = {
   signal: AbortSignal;
@@ -229,7 +240,7 @@ export function mapPermissionInteractionResponse(
     return { behavior: 'allow', updatedInput: input, toolUseID: payload.toolUseId };
   }
   if (selectedId === 'allow-session') {
-    return { behavior: 'allow', updatedInput: input, updatedPermissions: payload.suggestions, toolUseID: payload.toolUseId };
+    return { behavior: 'allow', updatedInput: input, updatedPermissions: (payload.suggestions ?? []) as PermissionUpdate[], toolUseID: payload.toolUseId };
   }
   return { behavior: 'deny', message: '用户拒绝了该工具调用', toolUseID: payload.toolUseId };
 }
@@ -484,6 +495,63 @@ export function dialogResultFromInteraction(response: InteractionPromptResponseP
   return { acknowledged: true };
 }
 
+// M4：把 ElicitationRequest 构造成交互 payload。url 模式（浏览器认证）SDK 不带 schema，
+// 不回落成文本输入（那会让用户无处完成认证），改成一个只读的 URL 确认框：用户复制 URL
+// 去浏览器完成 OAuth 后回来确认。form/text 走通用表单/文本。
+//
+// 注意：SDK 真实的 url-elicit 完成信号是 elicitation_complete 事件；claude-link 目前简化为
+// 「用户点确认即视为完成」（resolve OnElicitation Promise 为 accept）。这是有意的 UX 兜底，
+// 未来可改为监听 elicitation_complete 再 resolve。
+export function buildElicitationInteractionPayload(
+  sessionId: string,
+  request: ElicitationRequest,
+  requestId = randomUUID(),
+): InteractionPromptPayload {
+  if (request.mode === 'url' && typeof request.url === 'string') {
+    return {
+      id: requestId,
+      sessionId,
+      kind: 'confirm',
+      source: 'elicitation',
+      toolName: 'elicitation',
+      toolUseId: request.elicitationId,
+      title: request.title ?? request.displayName ?? `${request.serverName} 请求授权`,
+      description: request.description ?? request.message ?? '请在浏览器完成授权后，回到此处确认。',
+      input: { url: request.url, mode: 'url', serverName: request.serverName },
+      options: [
+        { id: 'confirm', label: '已在浏览器完成授权', description: '确认已在外部浏览器完成 OAuth 授权。', primary: true },
+      ],
+      defaultOptionIds: ['confirm'],
+      presentation: buildPresentation({ size: 'md', showPreview: false }),
+    };
+  }
+
+  return buildGenericInteractionPayload(sessionId, 'elicitation', {
+    title: request.title ?? request.displayName,
+    message: request.message,
+    description: request.description,
+    requestedSchema: request.requestedSchema,
+    inputType: request.mode === 'form' ? 'form' : 'text',
+  }, request.elicitationId);
+}
+
+// M3：onElicitation 非 submit → cancel（关闭/中断）。submit → accept（带 content）。
+// 注意：SDK 的 OnElicitation 支持返回 decline（明确拒绝，区别于 cancel 中断），但 SDK 的
+// ElicitationRequest 不带「是否可拒绝」信号，claude-link 的交互弹窗也无「拒绝」按钮，故
+// 当前一律把非 submit 映射为 cancel。若将来 UI 增加「拒绝」按钮，先为此函数补一个先失败
+// 的测试（declineable 分支），再放开语义——避免测不可达分支。
+export function elicitationResultFromInteraction(
+  response: InteractionPromptResponsePayload,
+): ElicitationResult {
+  if (response.action === 'submit') {
+    return {
+      action: 'accept',
+      content: (response.fieldValues ?? (response.otherText ? { response: response.otherText } : {})) as Record<string, string | number | boolean | string[]>,
+    };
+  }
+  return { action: 'cancel' };
+}
+
 function buildGenericChoiceQuestion(payload: Record<string, unknown>): AskUserQuestion | null {
   const candidate = payload as GenericChoicePayload;
   const options = isOptionList(candidate.options) ? candidate.options : isOptionList(candidate.choices) ? candidate.choices : null;
@@ -529,19 +597,9 @@ export async function requestAskUserQuestionInteractions(
 
 export function createElicitationHandler(sessionId: string, mainWindow: BrowserWindow) {
   return async (request: ElicitationRequest, options: UserDialogOptions): Promise<ElicitationResult> => {
-    const payload = buildGenericInteractionPayload(sessionId, 'elicitation', {
-      title: request.title ?? request.displayName,
-      message: request.message,
-      description: request.description,
-      requestedSchema: request.requestedSchema,
-      inputType: request.mode === 'form' ? 'form' : 'text',
-    }, request.elicitationId);
+    const payload = buildElicitationInteractionPayload(sessionId, request);
     const response = await requestInteraction(mainWindow, payload, options.signal);
-    if (response.action !== 'submit') return { action: 'cancel' };
-    return {
-      action: 'accept',
-      content: (response.fieldValues ?? (response.otherText ? { response: response.otherText } : {})) as Record<string, string | number | boolean | string[]>,
-    };
+    return elicitationResultFromInteraction(response);
   };
 }
 
