@@ -112,7 +112,7 @@ const items = computed<GroupItem[]>(() => {
           :sealed="!stats.running"
         />
         <div v-else-if="item.type === 'system'" class="process-fold__system">
-          <span>ℹ️ {{ item.msg!.content }}</span>
+          <span>{{ item.msg!.content }}</span>
         </div>
         <ToolCallBlock
           v-else
