@@ -758,6 +758,7 @@ console.log('\n=== 36) 实时计时器 + 子 Agent 折叠（问题 1/2/6/7）===
   const sg = readRel('src/renderer/utils/subagent-groups.ts');
   const tqp = readRel('src/renderer/components/task/TaskQueuePanel.vue');
   const un = readRel('src/renderer/composables/use-now.ts');
+  const pg = readRel('src/renderer/components/chat/ProcessGroup.vue');
   check('use-now 提供 useNow（100ms 跳动）', un.includes('useNow') && un.includes('setInterval'));
   check('session-store 含 turnStartedAt + activeTurnStartedAt', ss.includes('turnStartedAt') && ss.includes('activeTurnStartedAt'));
   check('markRunning 记录 turnStartedAt', ss.includes('this.turnStartedAt[sessionId] = Date.now()'));
@@ -766,6 +767,8 @@ console.log('\n=== 36) 实时计时器 + 子 Agent 折叠（问题 1/2/6/7）===
   check('use-chat 客户端时长兜底（clientMs）', uc.includes('clientMs'));
   check('subagent-groups 含 startMs / frozenSeconds', sg.includes('startMs') && sg.includes('frozenSeconds'));
   check('TaskQueuePanel 实时计时 + 运行中可折叠', tqp.includes('subAgentDurationText') && tqp.includes('collapsedGroups'));
+  check('ProcessGroup 不再硬编码 ℹ️ 系统提示', pg.includes('ℹ️') === false);
+  check('TaskQueuePanel 子Agent body 不再重复显示耗时', !tqp.includes('耗时：{{ subAgentDurationText(g) }}'));
 }
 
 console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/7）===');
@@ -792,6 +795,9 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
 
   // R3（问题 6）：子 Agent 实时计时改回合级 sending（首轮仅末组 g.running 实时，非末组冻结）。
   check('TaskQueuePanel 子Agent 计时用回合级 sending', tqp.includes('sessionStore.sending && g.startMs'));
+  // 计时偏短根因修正：回合结束冻结在 live 最终值，不回退到偏短的 createdAt 首尾差。
+  check('TaskQueuePanel 子Agent 计时回合结束冻结 live（lastLiveByGroup）',
+    tqp.includes('lastLiveByGroup') && tqp.includes('frozenLive') && tqp.includes('Date.now()'));
 
   // R4（问题 7）：内层 ProcessGroup manualClosed 覆盖 active，运行中可折叠。
   check('ProcessGroup manualClosed 运行中可折叠', pg.includes('manualClosed'));

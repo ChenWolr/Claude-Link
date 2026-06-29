@@ -2,6 +2,7 @@
 // T08/T10 行为测试：子 Agent Tab 的纯聚合/过滤/耗时逻辑（subagent-groups.ts）。
 // 项目无 jest/vitest，沿用 tdd-*-verify.ts 的 node:assert + 自统计模式。
 // 运行：npx tsx scripts/tdd-subagent-verify.ts
+import { readFileSync } from 'node:fs';
 import { strict as assert } from 'node:assert';
 import {
   aggregateSubAgentGroups,
@@ -12,6 +13,7 @@ import {
   formatDuration,
   isInCurrentTurn,
 } from '../src/renderer/utils/subagent-groups';
+import { computeStats } from '../src/renderer/utils/group-messages';
 import type { Message } from '../src/shared/types/session';
 
 let pass = 0;
@@ -219,6 +221,95 @@ check('无效 createdAt → startMs=null', () => {
     toolProgress: {}, titleByToolUseId: new Map(),
   });
   assert.equal(groups[0].startMs, null);
+});
+
+console.log('\n=== 计时展示契约 ===');
+check('TaskQueuePanel 只保留一处子Agent耗时文本', () => {
+  const tqp = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');
+  assert.equal(tqp.includes('subagent-group__meta'), false);
+  assert.equal(tqp.includes('subAgentDurationText(g)'), true);
+});
+
+console.log('\n=== computeStats 工具统计边界（问题：联网搜索/无结果工具是否计入） ===');
+check('多次联网搜索（WebSearch tool_use）全部计入 toolCount', () => {
+  // 用户场景：一轮 5-6 次联网搜索，统计不应少算。
+  const ms = [
+    msg({ id: 'w1', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu1', content: '{}' }),
+    msg({ id: 'w2', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu2', content: '{}' }),
+    msg({ id: 'w3', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu3', content: '{}' }),
+    msg({ id: 'w4', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu4', content: '{}' }),
+    msg({ id: 'w5', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu5', content: '{}' }),
+  ];
+  assert.equal(computeStats(ms).toolCount, 5);
+});
+check('服务端工具（server_tool_use 落库 eventType=tool_use）计入 toolCount', () => {
+  // server_tool_use 在 handleMessagePartsFull 落库为 eventType 'tool_use'，须计入。
+  const ms = [
+    msg({ id: 's1', eventType: 'tool_use', processKind: 'tool:web_search', toolUseId: 'tu1', content: '{}' }),
+    msg({ id: 's2', eventType: 'tool_use', processKind: 'tool:web_fetch', toolUseId: 'tu2', content: '{}' }),
+  ];
+  assert.equal(computeStats(ms).toolCount, 2);
+});
+check('tool_result 不重复计入 toolCount', () => {
+  // 1 个 tool_use + 1 个配对 tool_result → toolCount 仍为 1（只数调用，不数结果）。
+  const ms = [
+    msg({ id: 'u1', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tu1', content: '{}' }),
+    msg({ id: 'r1', eventType: 'tool_result', processKind: 'tool:result', toolUseId: 'tu1', content: 'ok' }),
+  ];
+  assert.equal(computeStats(ms).toolCount, 1);
+});
+check('无结果工具（tool_use 无配对 tool_result）计入 toolCount 且 running=true', () => {
+  // 用户担心「子任务工具不显示等待结果」：即便无结果，调用本身也要计数并标进行中。
+  const ms = [
+    msg({ id: 'u1', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu1', content: '{}' }),
+    msg({ id: 'u2', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu2', content: '{}' }),
+  ];
+  const stats = computeStats(ms);
+  assert.equal(stats.toolCount, 2);
+  assert.equal(stats.running, true);
+});
+check('全部配对结果 → running=false', () => {
+  const ms = [
+    msg({ id: 'u1', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tu1', content: '{}' }),
+    msg({ id: 'r1', eventType: 'tool_result', processKind: 'tool:result', toolUseId: 'tu1', content: 'ok' }),
+  ];
+  assert.equal(computeStats(ms).running, false);
+});
+check('混合思考 + 工具（含联网搜索）计数互不干扰', () => {
+  // 子 Agent 常见形态：1 思考 + 4 工具（其中联网搜索）→ toolCount=4, thinkingCount=1。
+  const ms = [
+    msg({ id: 't1', eventType: 'thinking', processKind: 'thinking', content: '想' }),
+    msg({ id: 'u1', eventType: 'tool_use', processKind: 'tool:Read', toolUseId: 'tu1', content: '{}' }),
+    msg({ id: 'u2', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu2', content: '{}' }),
+    msg({ id: 'u3', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu3', content: '{}' }),
+    msg({ id: 'u4', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tu4', content: '{}' }),
+  ];
+  const stats = computeStats(ms);
+  assert.equal(stats.toolCount, 4);
+  assert.equal(stats.thinkingCount, 1);
+});
+check('子 Agent 内工具聚合到对应组且计数正确', () => {
+  // 主流程 + 两个子 Agent（agentA 3 工具、agentB 2 工具），各组独立计数不串扰。
+  const all = [
+    msg({ id: 'main_u', eventType: 'tool_use', processKind: 'tool:Agent', toolUseId: 'agentA', content: '{}' }),
+    msg({ id: 'a1', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu1', content: '{}' }),
+    msg({ id: 'a2', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:WebSearch', toolUseId: 'tu2', content: '{}' }),
+    msg({ id: 'a3', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:Read', toolUseId: 'tu3', content: '{}' }),
+    msg({ id: 'b1', parentAgentId: 'agentB', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tu4', content: '{}' }),
+    msg({ id: 'b2', parentAgentId: 'agentB', eventType: 'tool_use', processKind: 'tool:Grep', toolUseId: 'tu5', content: '{}' }),
+  ];
+  const groups = aggregateSubAgentGroups(all, {
+    turnStartIndex: 0, sending: false, hideText: false, hideThinking: false,
+    toolProgress: {}, titleByToolUseId: new Map([['agentA', '调研'], ['agentB', '实现']]),
+  });
+  assert.equal(groups.length, 2);
+  const a = groups.find((g) => g.parentAgentId === 'agentA')!;
+  const b = groups.find((g) => g.parentAgentId === 'agentB')!;
+  // 每组的 fold stats 应正确反映组内工具数。
+  const aFold = a.items.find((it) => it.type === 'fold');
+  const bFold = b.items.find((it) => it.type === 'fold');
+  assert.ok(aFold && aFold.type === 'fold' && aFold.stats.toolCount === 3, `agentA toolCount=${aFold && aFold.type === 'fold' ? aFold.stats.toolCount : '?'}`);
+  assert.ok(bFold && bFold.type === 'fold' && bFold.stats.toolCount === 2, `agentB toolCount=${bFold && bFold.type === 'fold' ? bFold.stats.toolCount : '?'}`);
 });
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
