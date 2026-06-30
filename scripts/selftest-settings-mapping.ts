@@ -784,6 +784,7 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
   // R2（问题 5）：渲染层过滤 permission / interaction_response（首轮误诊为空 informational）。
   check('permission 视为冗余（不渲染）', isRedundantSystemProcessKind('permission') === true);
   check('system:interaction_response 视为冗余', isRedundantSystemProcessKind('system:interaction_response') === true);
+  check('system:informational 视为冗余（问题 2：彻底删行不渲染）', isRedundantSystemProcessKind('system:informational') === true);
   check('thinking 非冗余（保留渲染）', isRedundantSystemProcessKind('thinking') === false);
   check('tool:* 非冗余', isRedundantSystemProcessKind('tool:bash') === false);
   check('compact_boundary 非冗余', isRedundantSystemProcessKind('system:compact_boundary') === false);

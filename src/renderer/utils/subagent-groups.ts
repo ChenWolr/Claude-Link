@@ -84,10 +84,13 @@ export interface SubAgentGroup {
   title: string;
   items: RenderItem[];
   durationText: string;
-  /** 问题 6：组内最早消息 createdAt（ms），供客户端实时计时基准。 */
+  /** 组内最早消息 createdAt（ms），客户端实时计时基准。 */
   startMs: number | null;
-  /** 问题 6：computeElapsedSeconds 的冻结值（运行结束后展示用）。 */
+  /** 冻结耗时（秒）：已完成组 = 父 Task 工具 tool_result.createdAt − startMs（真实完成跨度）；
+   *  未完成组 = computeElapsedSeconds 兜底（实时 tool_progress / durationMs / 首尾差）。 */
   frozenSeconds: number | null;
+  /** 该子 Agent 是否已完成：父 Task 工具的 tool_result（toolUseId === parentAgentId）已到达。 */
+  completed: boolean;
   running: boolean;
 }
 
@@ -112,7 +115,10 @@ export function buildTitleByToolUseId(allMessages: Message[]): Map<string, strin
 }
 
 // 方案 A：只聚合 turnStartIndex 之后的子 agent 消息成组（保留 DB 历史，仅控制 Tab 显示当前回合）。
-// 每组复用主流程分组规则；发送中按 hideText/hideThinking 过滤本回合已落库内容；running 取末组或 fold.running。
+// 每组复用主流程分组规则；发送中按 hideText/hideThinking 过滤本回合已落库内容。
+// 问题 4（彻底修复）：每组「是否完成 + 真实完成时刻」由其父 Task 工具的 tool_result 决定
+// （toolUseId === parentAgentId），而非主回合结束。冻结耗时 = 完成 tool_result.createdAt − startMs，
+// 既不偏短（不像旧首尾差漏算收尾）也不偏长（不像主回合结束多算等待）。
 export function aggregateSubAgentGroups(allMessages: Message[], opts: SubAgentGroupOptions): SubAgentGroup[] {
   const map = new Map<string, Message[]>();
   const order: string[] = [];
@@ -126,7 +132,18 @@ export function aggregateSubAgentGroups(allMessages: Message[], opts: SubAgentGr
     map.get(m.parentAgentId)!.push(m);
   }
 
-  return order.map((id, idx) => {
+  // 问题 4：父 Task 工具 tool_result 的 createdAt = 子 Agent 真正完成时刻。只扫描当前 turn，
+  // 与上方分组范围保持一致，避免历史 toolUseId（极端复用/脏数据）误把本轮子 Agent 标记完成。
+  const completionMsByAgent = new Map<string, number>();
+  for (let i = opts.turnStartIndex; i < allMessages.length; i += 1) {
+    const m = allMessages[i];
+    if (m.eventType === 'tool_result' && m.toolUseId && !m.parentAgentId) {
+      const ms = new Date(m.createdAt).getTime();
+      if (Number.isFinite(ms)) completionMsByAgent.set(m.toolUseId, ms);
+    }
+  }
+
+  return order.map((id) => {
     const msgs = map.get(id)!;
     const rawItems = groupMessagesForRender(msgs);
     const items = filterCurrentTurnItems(rawItems, {
@@ -136,13 +153,21 @@ export function aggregateSubAgentGroups(allMessages: Message[], opts: SubAgentGr
       turnStartIndex: opts.turnStartIndex,
       allMessages,
     });
-    const running = opts.sending && (idx === order.length - 1 || items.some((item) => item.type === 'fold' && item.stats.running));
-    // 问题 6：startMs 取组内最早 createdAt（客户端实时计时基准）；frozenSeconds 为现有计算结果（冻结值）。
-    const timestamps = msgs
-      .map((m) => new Date(m.createdAt).getTime())
-      .filter((t) => Number.isFinite(t));
-    const startMs = timestamps.length ? Math.min(...timestamps) : null;
-    const frozenSeconds = computeElapsedSeconds(msgs, opts.toolProgress);
+    const startMs = (() => {
+      const ts = msgs
+        .map((m) => new Date(m.createdAt).getTime())
+        .filter((t) => Number.isFinite(t));
+      return ts.length ? Math.min(...ts) : null;
+    })();
+    const completionMs = completionMsByAgent.get(id) ?? null;
+    const completed = completionMs !== null;
+    // 已完成：真实完成跨度（完成 tool_result.createdAt − startMs）；否则 computeElapsedSeconds 兜底。
+    const frozenSeconds =
+      completed && startMs !== null
+        ? Math.max(0, (completionMs - startMs) / 1000)
+        : computeElapsedSeconds(msgs, opts.toolProgress);
+    // 问题 4：running 改为「逐组」语义——回合发送中且自身未完成才算运行；一旦父 tool_result 到达即停。
+    const running = opts.sending && !completed;
     return {
       parentAgentId: id,
       title: opts.titleByToolUseId.get(id) || '子Agent',
@@ -150,6 +175,7 @@ export function aggregateSubAgentGroups(allMessages: Message[], opts: SubAgentGr
       durationText: formatDuration(frozenSeconds),
       startMs,
       frozenSeconds,
+      completed,
       running,
     };
   });

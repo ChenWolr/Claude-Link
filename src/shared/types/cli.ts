@@ -23,6 +23,10 @@ export interface CliMessageContentToolUsePart {
   type: 'tool_use';
   name: string;
   input: Record<string, unknown>;
+  // Anthropic ToolUseBlock 的主键字段是 id（见 @anthropic-ai/sdk messages.d.ts ToolUseBlock.id），
+  // 不是 tool_use_id（tool_use_id 仅出现在配对的 tool_result 块上）。落库时取 id 为 toolUseId。
+  id?: string;
+  // 兜底：个别非标准来源可能用 tool_use_id，保留以兼容（优先用 id）。
   tool_use_id?: string;
 }
 
@@ -53,6 +57,8 @@ export interface CliMessageContentServerToolUsePart {
   name: string;
   input: Record<string, unknown>;
   id?: string;
+  // 兼容非标准代理端点：若服务端工具调用也用 tool_use_id，落库同样可配对。
+  tool_use_id?: string;
 }
 
 export interface CliMessageContentWebSearchToolResultPart {
@@ -81,6 +87,8 @@ export interface CliMessageContentMcpToolUsePart {
   type: 'mcp_tool_use';
   name: string;
   input: Record<string, unknown>;
+  // 问题 6：与 tool_use 同理，主键 id 优先（兼容 tool_use_id）。
+  id?: string;
   tool_use_id?: string;
   server_name?: string;
 }

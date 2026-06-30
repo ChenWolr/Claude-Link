@@ -332,7 +332,8 @@ function createChat() {
           content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
           processKind: processKindFromPart(part),
           parentAgentId,
-          toolUseId: part.tool_use_id ?? null,
+          // 问题 6：Anthropic ToolUseBlock 主键是 id（非 tool_use_id）；优先取 id，否则 tool_use_id 兜底。
+          toolUseId: part.id ?? part.tool_use_id ?? null,
           title: extractSubAgentTitle(part),
         });
         // 工具入参流式预览（streamingTool）到此为止：message 事件带的是完整 tool_use，
@@ -350,7 +351,8 @@ function createChat() {
           content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
           processKind: processKindFromPart(part),
           parentAgentId,
-          toolUseId: part.id ?? null,
+          // 问题 6：标准 server_tool_use 主键是 id；兼容少数代理端点用 tool_use_id。
+          toolUseId: part.id ?? part.tool_use_id ?? null,
         });
         store.clearToolStream();
         continue;
@@ -395,7 +397,8 @@ function createChat() {
           content: JSON.stringify({ name: part.name, input: part.input }, null, 2),
           processKind: processKindFromPart(part),
           parentAgentId,
-          toolUseId: part.tool_use_id ?? null,
+          // 问题 6：与 tool_use 同理，主键取 id（兼容 tool_use_id）。
+          toolUseId: part.id ?? part.tool_use_id ?? null,
           title: extractSubAgentTitle(part),
         });
         store.clearToolStream();

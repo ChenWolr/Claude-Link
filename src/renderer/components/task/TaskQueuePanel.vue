@@ -22,22 +22,21 @@ const expandedGroups = ref<Set<string>>(new Set());
 const collapsedGroups = ref<Set<string>>(new Set());
 // 问题 6：客户端实时计时——sending 期间每 100ms 跳动，子 Agent 运行中耗时实时更新。
 const { now } = useNow(() => sessionStore.sending);
-// 计时偏短根因修正：实时阶段 live = now - startMs（≈真实流逝时间）；但回合结束（sending=false）
-// 瞬间若回退到 g.durationText（= frozenSeconds，无 tool_progress/durationMs 时取 createdAt 首尾差），
-// 会显著偏短——子 Agent 最后一条消息到达往往早于主回合真正结束（主流程还在收尾/合并），故首尾差
-// < 真实执行时长（用户实测 180s 跳到 89s）。修法：在 sending 由 true→false 的瞬间把每组的 live
-// 最终值快照下来作冻结值；下一回合 sending=true 时清空，避免跨回合串扰。
+// 问题 4（彻底修复）兜底：仅当回合结束却「未完成」（未收到父 Task 工具 tool_result，如中断/异常端点）
+// 时，才把该组的 live 最终值快照下来冻结——避免回退到偏短的 createdAt 首尾差。正常完成的组用
+// frozenSeconds（= 完成 tool_result.createdAt − startMs，真实跨度），不走这里。下一回合清空防串扰。
 const lastLiveByGroup = ref<Record<string, number>>({});
-// R3（二次修复）：实时判定改用回合级 sessionStore.sending（而非 g.running）—— g.running 只对
-// 「末组」恒真，多子 Agent 并发时非末组 running=false 会回退冻结值，给人「时间提前固定」的错觉。
-// 改成回合级后，主回合 sending 期间所有组都实时跳动到主回合结束，契合「主消息没回完，子 Agent
-// 就还在干活」。g.running 仍用于状态徽标「进行中/已完成」与外层自动展开（per-group 语义不变）。
+// 计时展示：已完成组 → 真实完成跨度（frozenSeconds）；运行中组 → 客户端实时跳动；
+// 回合结束但未完成（中断）→ 兜底冻结 live。逐组判定，并发子 Agent 各自在自身完成时停表，互不串扰。
 function subAgentDurationText(g: SubAgentGroup): string {
+  // 已完成（父 Task 工具 tool_result 已到达）：真实完成跨度，稳定且准确。
+  if (g.completed && g.frozenSeconds != null) return formatDuration(g.frozenSeconds);
+  // 运行中（回合 sending 且未完成）：客户端实时跳动到自身完成。
   if (sessionStore.sending && g.startMs) {
     const live = (now.value - g.startMs) / 1000;
     return formatDuration(Math.max(live, g.frozenSeconds ?? 0));
   }
-  // 回合结束：优先用冻结的 live 最终值（createdAt 首尾差会偏短，不可回退到 durationText）。
+  // 回合结束但未收到父 tool_result（中断/异常）：用冻结的 live 最终值，避免回退偏短。
   const frozenLive = lastLiveByGroup.value[g.parentAgentId];
   if (frozenLive != null) return formatDuration(frozenLive);
   return g.durationText;
@@ -64,6 +63,11 @@ function isSubAgentGroupExpanded(id: string, running: boolean): boolean {
   // 问题 7：用户显式折叠优先——即使运行中也保持收起。
   if (collapsedGroups.value.has(id)) return false;
   return expandedGroups.value.has(id) || running;
+}
+
+function subAgentStatusText(g: SubAgentGroup): string {
+  if (g.running) return '进行中';
+  return g.completed ? '已完成' : '未完成';
 }
 
 function toggleSubAgentGroup(id: string, running: boolean): void {
@@ -94,9 +98,9 @@ const subAgentGroups = computed(() =>
   }),
 );
 
-// 计时偏短根因修正的 watch（须在 subAgentGroups 定义之后注册，回调里读取其值）：
-// sending 由 true→false 的瞬间，用 Date.now() 把各组的 live 最终值冻结，避免回退到偏短的
-// createdAt 首尾差（见上方 lastLiveByGroup 注释）。sending 重新 true 时清空，防跨回合串扰。
+// 问题 4 watch（须在 subAgentGroups 定义之后注册，回调里读取其值）：回合 sending 由 true→false
+// 瞬间，仅对「未完成」的组（未收到父 tool_result，如中断/异常）快照 live 最终值。已完成的组用
+// frozenSeconds，无需快照。sending 重新 true 时清空，防跨回合串扰。
 watch(
   () => sessionStore.sending,
   (sending) => {
@@ -107,10 +111,9 @@ watch(
     const end = Date.now();
     const snap: Record<string, number> = {};
     for (const g of subAgentGroups.value) {
-      if (g.startMs) {
-        const live = (end - g.startMs) / 1000;
-        snap[g.parentAgentId] = Math.max(live, g.frozenSeconds ?? 0);
-      }
+      if (g.completed || !g.startMs) continue;
+      const live = (end - g.startMs) / 1000;
+      snap[g.parentAgentId] = Math.max(live, g.frozenSeconds ?? 0);
     }
     lastLiveByGroup.value = snap;
   },
@@ -319,7 +322,7 @@ function handleDragReorder() {
               <span class="subagent-group__title">{{ g.title }}</span>
               <span class="subagent-group__duration">⏱{{ subAgentDurationText(g) }}</span>
               <span class="subagent-group__status" :class="{ 'subagent-group__status--running': g.running }">
-                {{ g.running ? '进行中' : '已完成' }}
+                {{ subAgentStatusText(g) }}
                 <span v-if="g.running" class="subagent-running-dots" aria-hidden="true">
                   <span></span><span></span><span></span>
                 </span>

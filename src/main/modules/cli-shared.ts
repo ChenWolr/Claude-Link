@@ -188,7 +188,8 @@ export function persistMessageParts(
         eventType: 'tool_use',
         processKind,
         parentAgentId,
-        toolUseId: part.tool_use_id ?? null,
+        // 问题 6：Anthropic ToolUseBlock 主键是 id（非 tool_use_id）；优先取 id，否则 tool_use_id 兜底。
+        toolUseId: part.id ?? part.tool_use_id ?? null,
         title: extractSubAgentTitle(part),
       });
     } else if (part.type === 'server_tool_use') {
@@ -199,7 +200,8 @@ export function persistMessageParts(
         eventType: 'tool_use',
         processKind,
         parentAgentId,
-        toolUseId: part.id ?? null,
+        // 问题 6：标准 server_tool_use 主键是 id；兼容少数代理端点用 tool_use_id。
+        toolUseId: part.id ?? part.tool_use_id ?? null,
       });
     } else if (part.type === 'tool_result') {
       const resultText = normalizeToolResultContent((part as { content?: unknown }).content);
@@ -227,7 +229,8 @@ export function persistMessageParts(
         eventType: 'tool_use',
         processKind,
         parentAgentId,
-        toolUseId: part.tool_use_id ?? null,
+        // 问题 6：与 tool_use 同理，主键取 id（兼容 tool_use_id）。
+        toolUseId: part.id ?? part.tool_use_id ?? null,
         title: extractSubAgentTitle(part),
       });
     } else if (part.type === 'mcp_tool_result') {
