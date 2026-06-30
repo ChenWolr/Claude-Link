@@ -167,6 +167,19 @@ function cleanupSessionStall(sessionId: string): void {
   pendingToolUseIds.delete(sessionId);
 }
 
+// 活动刷新原语：更新最后活动时间/类型并清卡死标记。touchActivityFromEvent 与
+// keep_alive 分支共用，避免两处「活跃即清 stalledSince/stallNotified」语义漂移。
+function touchActivity(sessionId: string, kind: string): void {
+  const t = stallTrackers.get(sessionId);
+  if (!t) return;
+  t.lastActivityAt = Date.now();
+  t.lastKind = kind;
+  if (t.stalledSince !== null) {
+    t.stalledSince = null;
+    t.stallNotified = false;
+  }
+}
+
 // 从一个 CliEvent 推导并刷新活动状态。合成/终态事件（stalled/error/aborted/result）
 // 不计入「上游活跃」——否则发 stalled 会自我复位卡死时钟。
 function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
@@ -203,13 +216,7 @@ function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
     if (event.parentToolUseId) t.lastParentAgentId = event.parentToolUseId;
   }
   t.pendingToolUse = set.size > 0;
-  t.lastActivityAt = Date.now();
-  t.lastKind = event.type;
-  // 活跃 → 清卡死标记，下次再卡可再次通知（连续卡死计 stallCount）。
-  if (t.stalledSince !== null) {
-    t.stalledSince = null;
-    t.stallNotified = false;
-  }
+  touchActivity(sessionId, event.type);
 }
 
 const pendingPermissionRequests = new Map<string, (response: PermissionResponsePayload) => void>();
@@ -855,15 +862,7 @@ async function runQuery(
       // SDK 内置心跳：子进程还活着（只是在等响应/跑工具）。刷新活动时钟，防误判卡死。
       // 不转发前端（纯噪音）。
       if (type === 'keep_alive') {
-        const t = stallTrackers.get(sessionId);
-        if (t) {
-          t.lastActivityAt = Date.now();
-          t.lastKind = 'keep_alive';
-          if (t.stalledSince !== null) {
-            t.stalledSince = null;
-            t.stallNotified = false;
-          }
-        }
+        touchActivity(sessionId, 'keep_alive');
         continue;
       }
       if (type === 'result') {
