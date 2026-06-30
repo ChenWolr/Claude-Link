@@ -29,15 +29,40 @@ export interface StallThresholds {
   modelGapMs: number;
   /** TOOL 区阈值：有待决 tool_use 时（长工具合法），用更长阈值。默认 300s。 */
   toolPendingMs: number;
-  /** 硬中断阈值：纯模型空隙累计超过此值，看门狗自动 killProcess。默认 600s。 */
+  /** MODEL 区硬中断阈值：纯模型空隙累计超过此值，看门狗自动 killProcess。默认 600s。 */
   hardAutoAbortMs: number;
+  /** TOOL 区硬中断阈值（绝对上限）：有待决工具且持续静默超过此值也自动 killProcess。
+   *  长工具合法，故比 model 区更长；但子 Agent 死锁/死连接/api_retry 风暴不能无限等，
+   *  到此绝对上限即硬杀。默认 900s。合法长工具会持续发 tool_progress 刷新计时，不会误触。 */
+  toolHardAbortMs: number;
 }
 
 export const DEFAULT_STALL_THRESHOLDS: StallThresholds = {
   modelGapMs: 120_000,
   toolPendingMs: 300_000,
   hardAutoAbortMs: 600_000,
+  toolHardAbortMs: 900_000,
 };
+
+/**
+ * 判断某类事件是否应重置「业务静默」计时。
+ * keep_alive 只证明 SDK/子进程还活着，不代表模型/API/工具有真实进展；若把它当活动，
+ * 代理网关死等但仍心跳时会永远不触发 stalled。
+ * api_retry 同理：它证明 SDK 正在重试一次失败的 API 调用（如空/畸形响应），是失败信号而非
+ * 进展；若当活动，重试风暴会持续刷新计时，永远判不出卡死（子 agent 卡死不退、计时器不关）。
+ * 注意：此处 kind 由调用方传入事件 type（如 'system'）；api_retry 是 system 的子类型，
+ * 主进程 touchActivityFromEvent 需在 system 事件里按子类型识别并提前 return，不走到本函数。
+ */
+export function isBusinessStallActivityKind(kind: string): boolean {
+  return (
+    kind !== 'keep_alive' &&
+    kind !== 'stalled' &&
+    kind !== 'error' &&
+    kind !== 'aborted' &&
+    kind !== 'result' &&
+    kind !== 'api_retry'
+  );
+}
 
 /**
  * 纯函数：根据「最后活动时间 + 当前时间 + 是否有待决工具 + 阈值」判定卡死状态。
@@ -58,7 +83,12 @@ export function classifyStall(
   const zone: 'model' | 'tool' = pendingToolUse ? 'tool' : 'model';
   const threshold = zone === 'tool' ? thresholds.toolPendingMs : thresholds.modelGapMs;
   const stalled = gapMs >= threshold;
-  // 仅「纯模型空隙」允许硬中断：tool 区可能是合法的长任务（编译/大查询/长 bash），绝不自动杀。
-  const hardAbort = stalled && zone === 'model' && gapMs >= thresholds.hardAutoAbortMs;
+  // 硬中断分 zone：model 区纯静默到 hardAutoAbortMs 即杀；tool 区到 toolHardAbortMs 绝对上限才杀
+  //（长工具会持续发 tool_progress 刷新计时，正常不会触；只兜子 Agent 死锁/死连接/重试风暴）。
+  const hardAbort =
+    stalled &&
+    (zone === 'model'
+      ? gapMs >= thresholds.hardAutoAbortMs
+      : gapMs >= thresholds.toolHardAbortMs);
   return { stalled, zone, gapMs, hardAbort };
 }

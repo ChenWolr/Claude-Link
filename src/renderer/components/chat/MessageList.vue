@@ -62,11 +62,12 @@ const renderItems = computed<RenderItem[]>(() => {
   const out: RenderItem[] = [];
   for (const item of all) {
     if (item.type === 'message') {
-      if (!(hideText && turnIds.has(item.message.id))) out.push(item);
+      const isMainAssistantText = item.message.role === 'assistant' && item.message.eventType === 'message' && !item.message.parentAgentId;
+      if (!(hideText && isMainAssistantText && turnIds.has(item.message.id))) out.push(item);
       continue;
     }
     if (hideThinking) {
-      const filtered = item.messages.filter((m) => !(m.eventType === 'thinking' && turnIds.has(m.id)));
+      const filtered = item.messages.filter((m) => !(m.role === 'assistant' && m.eventType === 'thinking' && !m.parentAgentId && turnIds.has(m.id)));
       if (filtered.length === 0) continue;
       if (filtered.length !== item.messages.length) {
         out.push({ ...item, messages: filtered, stats: computeStats(filtered) });
@@ -160,7 +161,7 @@ function handleCopyClick(event: MouseEvent): void {
         />
         <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" />
       </template>
-      <div v-if="sending || streamingContent || streamingThinking || streamingTool" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
+      <div v-if="sending || streamingContent || streamingThinking || streamingTool || sessionStore.activeStalledInfo" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
         <!-- 问题 1+2：实时计时器——整个 sending 期间常驻；动画点在整个工作阶段跳动。 -->
         <div v-if="sending" class="turn-timer">
           <span class="turn-timer__time">⏱ {{ formatElapsed(elapsedMs) }}</span>

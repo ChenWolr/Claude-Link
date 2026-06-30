@@ -19,6 +19,7 @@ function onWait(): void {
   if (sessionStore.activeSession) sessionStore.clearStalled(sessionStore.activeSession.id);
 }
 function onAbort(): void {
+  if (sessionStore.activeSession) sessionStore.clearStalled(sessionStore.activeSession.id);
   void chat.abort();
 }
 function onRetry(): void {

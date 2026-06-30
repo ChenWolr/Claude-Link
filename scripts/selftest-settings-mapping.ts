@@ -18,7 +18,7 @@ import {
 import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
-import { classifyStall, DEFAULT_STALL_THRESHOLDS } from '../src/shared/stall-watchdog';
+import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
 
 let pass = 0;
 let fail = 0;
@@ -826,28 +826,47 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
   check('TOOL 区在 model 阈值上不卡死（用更长阈值）', classifyStall(0, T.modelGapMs, true).stalled === false);
   check('TOOL 区到 tool 阈值判定卡死', classifyStall(0, T.toolPendingMs, true).stalled === true);
   check('MODEL 区到硬中断阈值触发 hardAbort', classifyStall(0, T.hardAutoAbortMs, false).hardAbort === true);
-  check('TOOL 区到硬中断阈值也不 hardAbort（长工具合法）', classifyStall(0, T.hardAutoAbortMs, true).hardAbort === false);
+  check('TOOL 区在 model 硬中断阈值不 hardAbort（未到 tool 绝对上限）', classifyStall(0, T.hardAutoAbortMs, true).hardAbort === false);
+  check('TOOL 区到 toolHardAbortMs 绝对上限触发 hardAbort（兜死锁/死连接）', classifyStall(0, T.toolHardAbortMs, true).hardAbort === true);
+  check('DEFAULT_STALL_THRESHOLDS.toolHardAbortMs 存在且 > toolPendingMs', typeof T.toolHardAbortMs === 'number' && T.toolHardAbortMs > T.toolPendingMs);
   check('MODEL 区未到硬中断阈值不 hardAbort', classifyStall(0, T.modelGapMs, false).hardAbort === false);
   check('classifyStall 报告 zone=model', classifyStall(0, T.modelGapMs, false).zone === 'model');
   check('classifyStall 报告 zone=tool', classifyStall(0, T.toolPendingMs, true).zone === 'tool');
   check('gapMs 恒非负（now 早于 lastActivityAt 时钳为 0）', classifyStall(100, 50, false).gapMs === 0);
+  // api_retry 不算业务活动：重试是失败不是进展，否则空/畸形响应重试风暴会持续刷新计时、永判不出卡死。
+  check('isBusinessStallActivityKind(api_retry) === false', isBusinessStallActivityKind('api_retry') === false);
+  check('isBusinessStallActivityKind(message/stream_event) === true', isBusinessStallActivityKind('message') && isBusinessStallActivityKind('stream_event'));
 
   // 接线存在性（防止后续 Task 漏接）—— Task 2-6 完成前为红，属预期。
   const cli = readRel('src/shared/types/cli.ts');
   const sb = readRel('src/main/modules/sdk-backend.ts');
   const ss = readRel('src/renderer/stores/session-store.ts');
   const uc = readRel('src/renderer/composables/use-chat.ts');
+  const pk = readRel('src/shared/process-kind.ts');
+  const pkg = readRel('package.json');
   const banner = readRel('src/renderer/components/chat/StalledBanner.vue');
   const ml = readRel('src/renderer/components/chat/MessageList.vue');
   check('cli.ts 含 stalled 事件类型', cli.includes("type: 'stalled'"));
   check('sdk-backend 接 keep_alive 心跳', sb.includes("'keep_alive'"));
+  check('sdk-backend keep_alive 不刷新业务活动', sb.includes('touchKeepAlive(sessionId)') && !sb.includes("touchActivity(sessionId, 'keep_alive')"));
   check('sdk-backend 传 abortController 并 .abort()', sb.includes('abortController') && sb.includes('.abort()'));
   check('sdk-backend 看门狗 setInterval + classifyStall', sb.includes('setInterval') && sb.includes('classifyStall'));
   check('sdk-backend 发 stalled 事件', sb.includes("type: 'stalled'"));
+  // api_retry 重试风暴快速中断 + tool 区绝对硬中断接线（#1/#4/#6）
+  check('sdk-backend 追踪连续 api_retry 次数', sb.includes('consecutiveApiRetries'));
+  check('sdk-backend touchActivityFromEvent 识别 api_retry 子类型', sb.includes("subtype === 'api_retry'"));
+  check('sdk-backend 读 CLAUDE_LINK_STALL_TOOL_HARD_MS', sb.includes('CLAUDE_LINK_STALL_TOOL_HARD_MS'));
+  check('sdk-backend 读 CLAUDE_LINK_MAX_API_RETRIES', sb.includes('CLAUDE_LINK_MAX_API_RETRIES'));
+  check('sdk-backend MAX_API_RETRIES 快速中断文案', sb.includes('API 连续重试'));
+  check('sdk-backend toolHardAbortMs 接入 STALL_THRESHOLDS', sb.includes('toolHardAbortMs'));
+  check('sdk-backend aborting entry 不算 active', sb.includes('state: \'pending\' | \'running\' | \'aborting\' | \'finished\'') && sb.includes('isEntryActive') && sb.includes("entry.state !== 'aborting'"));
+  check('sdk-backend 使用子 Agent tool_use 判断', sb.includes('isSubAgentToolUse(part)'));
+  check('process-kind 暴露 isSubAgentToolUse', pk.includes('export function isSubAgentToolUse'));
   check('session-store 含 stalledInfo + activeStalledInfo', ss.includes('stalledInfo') && ss.includes('activeStalledInfo'));
-  check('use-chat 处理 stalled + retryLastTurn', uc.includes("case 'stalled'") && uc.includes('retryLastTurn'));
+  check('use-chat 处理当前/后台 stalled + retryLastTurn', uc.includes("case 'stalled'") && uc.includes('applyStalledEvent(store, sid, event)') && uc.includes('retryLastTurn'));
   check('StalledBanner 三动作', banner.includes('继续等待') && banner.includes('重试') && banner.includes('中断'));
-  check('MessageList 挂载 StalledBanner', ml.includes('StalledBanner'));
+  check('MessageList 挂载 StalledBanner 且 stalledInfo 可显形', ml.includes('StalledBanner') && ml.includes('activeStalledInfo'));
+  check('selftest 串联 tdd-stall-watchdog-verify', pkg.includes('tdd-stall-watchdog-verify.ts'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

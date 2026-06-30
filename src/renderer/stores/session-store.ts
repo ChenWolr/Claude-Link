@@ -146,6 +146,17 @@ export const useSessionStore = defineStore('session', {
         : null;
       try {
         this.messages = await window.claudeLink.getSessionMessages(session.id);
+        // 运行中会话切回时，不能把 turnStartIndex 固定成 0；否则 MessageList 会把全量历史
+        // 都当成本回合流式重复内容隐藏，造成「主过程/思考消失但计时还在跳」。
+        if (this.runningSessions.includes(session.id)) {
+          const lastUserIndex = (() => {
+            for (let i = this.messages.length - 1; i >= 0; i -= 1) {
+              if (this.messages[i].role === 'user') return i;
+            }
+            return -1;
+          })();
+          this.turnStartIndex = lastUserIndex >= 0 ? lastUserIndex + 1 : this.messages.length;
+        }
       } catch {
         // session may have no messages yet
       }
