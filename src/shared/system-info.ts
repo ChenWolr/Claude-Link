@@ -19,7 +19,16 @@ export function isDisplayableSystemInfo(subtype: string | undefined, text: strin
 // system:interaction_response（交互回执）—— 每次工具调用 1:1 落库两条、content 非空。
 // 这两类信息已由 InteractionPrompt 弹窗 + interaction_history 表承载，在消息流里再渲染一遍
 // 「ℹ️ Claude 想要执行 X」纯属噪音。故渲染层（group-messages）跳过它们，但**仍落库**留审计。
+//
+// 问题 2（彻底修复）：把 system:informational 也纳入冗余集。informational 是 CC 的通用信息横幅，
+// 即便带非空文本，在聊天流里也是一行来历不明的灰字、与思考/工具混排在同一 fold，无用户可读语义
+// （权限询问/交互回执/压缩边界/插件安装各有专用承载或专用 processKind，不在此列）。落库仍保留审计，
+// 渲染层跳过——兑现「要么解释要么删掉」的「删掉」一支。compact_boundary/plugin_install 有展示价值，保留。
 // 纯函数，由 selftest 覆盖契约。
 export function isRedundantSystemProcessKind(processKind: string | null | undefined): boolean {
-  return processKind === 'permission' || processKind === 'system:interaction_response';
+  return (
+    processKind === 'permission' ||
+    processKind === 'system:interaction_response' ||
+    processKind === 'system:informational'
+  );
 }

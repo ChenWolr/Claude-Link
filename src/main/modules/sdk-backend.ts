@@ -462,7 +462,11 @@ function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: C
   }
 }
 
-// 把 SDK 的 assistant 消息（{type:'assistant', message:{role,content,usage}, parent_tool_use_id?}）
+function isToolResultPart(part: CliMessageContentPart): boolean {
+  return part.type === 'tool_result' || part.type.endsWith('_tool_result');
+}
+
+// 把 SDK 的 assistant/user 消息（{type:'assistant'|'user', message:{role,content,usage}, parent_tool_use_id?}）
 // 转成 CliMessageEvent。透传 parent_tool_use_id → parentToolUseId，让子 agent 过程能归属到
 // 主流程对应工具，抽到右侧「子Agent」Tab。
 function convertAssistantMessage(sdkMsg: Record<string, unknown>): CliMessageEvent | null {
@@ -709,6 +713,21 @@ async function runQuery(
         if (cliEvent) forwardEvent(sessionId, mainWindow, cliEvent);
         continue;
       }
+      if (type === 'user') {
+        // 问题 6（根因）：SDK 的 user 消息是回传「工具执行结果」的通道——content 含 tool_result /
+        // *_tool_result 等结果块。原先整类 user 消息「暂不转发」，导致 tool_result 永不落库：主/子 Agent
+        // 的工具结果都显示不出来（DB 实测 tool_result 0 行、子 Agent 联网搜索「全部没有结果」即此所致）。
+        // 这里仅取出结果类 part 转发（convertAssistantMessage 已透传 parent_tool_use_id，子 Agent 的结果能归到对应组）；
+        // 纯文本 user 消息（初始 prompt 回显）无结果 part → 跳过，避免与本地已落库的用户输入重复。
+        const cliEvent = convertAssistantMessage(sdkMsg);
+        if (cliEvent) {
+          const resultParts = cliEvent.content.filter(isToolResultPart);
+          if (resultParts.length > 0) {
+            forwardEvent(sessionId, mainWindow, { ...cliEvent, content: resultParts });
+          }
+        }
+        continue;
+      }
       if (type === 'stream_event') {
         forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg));
         continue;
@@ -721,7 +740,7 @@ async function runQuery(
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
         continue;
       }
-      // user 回显 / 其它 system 子类型 / hook / task 等暂不转发（前端不消费）。
+      // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。
     }
     // 流正常结束。
     emitExit(0);

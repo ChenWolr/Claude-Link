@@ -223,11 +223,69 @@ check('无效 createdAt → startMs=null', () => {
   assert.equal(groups[0].startMs, null);
 });
 
+console.log('\n=== completed / 逐组完成（问题 4：按自身完成冻结，非主回合结束）===');
+check('父 Task tool_result 到达 → completed=true，frozenSeconds=完成跨度，running 立即停', () => {
+  // 子 Agent 首条消息 00:00；父 Task 工具 tool_result（主流程，toolUseId === parentAgentId）于 00:03 完成。
+  const all = [
+    msg({ id: 'sa1', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tuInner', content: '{}', createdAt: '2026-06-29T00:00:00.000Z' }),
+    msg({ id: 'pr1', eventType: 'tool_result', processKind: 'tool:Agent', toolUseId: 'agentA', content: 'done', createdAt: '2026-06-29T00:00:03.000Z' }),
+  ];
+  const groups = aggregateSubAgentGroups(all, {
+    turnStartIndex: 0, sending: true, hideText: false, hideThinking: false,
+    toolProgress: {}, titleByToolUseId: new Map(),
+  });
+  assert.equal(groups[0].completed, true);
+  assert.equal(groups[0].frozenSeconds, 3); // 完成 tool_result.createdAt − startMs（真实跨度）
+  assert.equal(groups[0].running, false);   // 已完成即停，即使主回合 sending=true
+});
+check('未到达父 tool_result → completed=false，running 随主回合 sending', () => {
+  const all = [
+    msg({ id: 'sa1', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tuInner', content: '{}', createdAt: '2026-06-29T00:00:00.000Z' }),
+  ];
+  const groups = aggregateSubAgentGroups(all, {
+    turnStartIndex: 0, sending: true, hideText: false, hideThinking: false,
+    toolProgress: {}, titleByToolUseId: new Map(),
+  });
+  assert.equal(groups[0].completed, false);
+  assert.equal(groups[0].running, true);
+});
+check('子 Agent 内部工具结果（toolUseId ≠ parentAgentId）不算完成', () => {
+  // 内部 tool_result 的 toolUseId 是 tuInner，不等于 agentA → 不触发完成。
+  const all = [
+    msg({ id: 'sa1', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tuInner', content: '{}' }),
+    msg({ id: 'sa2', parentAgentId: 'agentA', eventType: 'tool_result', processKind: 'tool:Bash', toolUseId: 'tuInner', content: 'ok' }),
+  ];
+  const groups = aggregateSubAgentGroups(all, {
+    turnStartIndex: 0, sending: true, hideText: false, hideThinking: false,
+    toolProgress: {}, titleByToolUseId: new Map(),
+  });
+  assert.equal(groups[0].completed, false);
+  assert.equal(groups[0].running, true);
+});
+check('历史 turn 的同名 tool_result 不会误标当前子 Agent 完成', () => {
+  const all = [
+    msg({ id: 'old_done', eventType: 'tool_result', processKind: 'tool:Agent', toolUseId: 'agentA', content: 'old', createdAt: '2026-06-29T00:00:01.000Z' }),
+    msg({ id: 'main', eventType: 'message', processKind: null, content: 'new turn' }),
+    msg({ id: 'sa1', parentAgentId: 'agentA', eventType: 'tool_use', processKind: 'tool:Bash', toolUseId: 'tuInner', content: '{}', createdAt: '2026-06-29T00:01:00.000Z' }),
+  ];
+  const groups = aggregateSubAgentGroups(all, {
+    turnStartIndex: 2, sending: true, hideText: false, hideThinking: false,
+    toolProgress: {}, titleByToolUseId: new Map(),
+  });
+  assert.equal(groups[0].completed, false);
+  assert.equal(groups[0].running, true);
+});
+
 console.log('\n=== 计时展示契约 ===');
 check('TaskQueuePanel 只保留一处子Agent耗时文本', () => {
   const tqp = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');
   assert.equal(tqp.includes('subagent-group__meta'), false);
   assert.equal(tqp.includes('subAgentDurationText(g)'), true);
+});
+check('TaskQueuePanel 未完成组不误显示「已完成」', () => {
+  const tqp = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');
+  assert.equal(tqp.includes('subAgentStatusText(g)'), true);
+  assert.equal(tqp.includes("g.completed ? '已完成' : '未完成'"), true);
 });
 
 console.log('\n=== computeStats 工具统计边界（问题：联网搜索/无结果工具是否计入） ===');
@@ -310,6 +368,29 @@ check('子 Agent 内工具聚合到对应组且计数正确', () => {
   const bFold = b.items.find((it) => it.type === 'fold');
   assert.ok(aFold && aFold.type === 'fold' && aFold.stats.toolCount === 3, `agentA toolCount=${aFold && aFold.type === 'fold' ? aFold.stats.toolCount : '?'}`);
   assert.ok(bFold && bFold.type === 'fold' && bFold.stats.toolCount === 2, `agentB toolCount=${bFold && bFold.type === 'fold' ? bFold.stats.toolCount : '?'}`);
+});
+
+console.log('\n=== 工具结果落库根因（问题 6：SDK user 消息转发 + tool_use 主键取 id）===');
+check('cli-shared tool_use 主键取 part.id（兼容 tool_use_id）', () => {
+  const cs = readFileSync(new URL('../src/main/modules/cli-shared.ts', import.meta.url), 'utf8');
+  // Anthropic ToolUseBlock 主键是 id（非 tool_use_id）；落库必须优先取 part.id。
+  assert.equal(cs.includes('part.id ?? part.tool_use_id'), true);
+});
+check('server_tool_use 同样兼容 tool_use_id 兜底', () => {
+  const cs = readFileSync(new URL('../src/main/modules/cli-shared.ts', import.meta.url), 'utf8');
+  const uc = readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
+  assert.equal(cs.includes('标准 server_tool_use 主键是 id；兼容少数代理端点用 tool_use_id'), true);
+  assert.equal(uc.includes('标准 server_tool_use 主键是 id；兼容少数代理端点用 tool_use_id'), true);
+});
+check('use-chat tool_use 主键取 part.id（渲染层镜像同修）', () => {
+  const uc = readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
+  assert.equal(uc.includes('part.id ?? part.tool_use_id'), true);
+});
+check('sdk-backend 转发泛化 *_tool_result 的 user 消息（不再整类丢弃）', () => {
+  const sb = readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+  assert.equal(sb.includes("type === 'user'"), true);
+  assert.equal(sb.includes("part.type === 'tool_result' || part.type.endsWith('_tool_result')"), true);
+  assert.equal(sb.includes('cliEvent.content.filter(isToolResultPart)'), true);
 });
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
