@@ -54,9 +54,10 @@ function onRetry(): void {
   gap: 12px;
   margin: 8px 0 4px;
   padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--color-surface-warn, rgba(255, 180, 0, 0.12));
-  border: 1px solid var(--color-border-warn, rgba(255, 180, 0, 0.4));
+  border-radius: var(--radius-md);
+  /* 项目无 warn token：用 color-mix 把琥珀色混入主题面板色，随 ThemePalette 自适应。 */
+  background: color-mix(in srgb, #f5a623 12%, var(--color-panel-soft));
+  border: 1px solid color-mix(in srgb, #f5a623 38%, transparent);
   font-size: 13px;
 }
 .stall-banner__main {
@@ -76,13 +77,13 @@ function onRetry(): void {
 }
 .stall-banner__tag {
   padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--color-surface-raised, rgba(255, 255, 255, 0.06));
-  color: var(--color-text-muted, inherit);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+  color: var(--color-text-muted);
   font-size: 12px;
 }
 .stall-banner__tag--warn {
-  color: var(--color-danger, #e06c75);
+  color: var(--color-danger);
 }
 .stall-banner__actions {
   display: flex;
@@ -91,21 +92,21 @@ function onRetry(): void {
 }
 .stall-btn {
   padding: 4px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--color-border, rgba(255, 255, 255, 0.14));
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
   background: transparent;
-  color: var(--color-text, inherit);
+  color: var(--color-text);
   font-size: 12px;
   cursor: pointer;
 }
 .stall-btn:hover {
-  background: var(--color-surface-hover, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
 }
 .stall-btn--danger {
-  border-color: var(--color-danger, #e06c75);
-  color: var(--color-danger, #e06c75);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 .stall-btn--danger:hover {
-  background: rgba(224, 108, 117, 0.12);
+  background: color-mix(in srgb, var(--color-danger) 14%, transparent);
 }
 </style>
