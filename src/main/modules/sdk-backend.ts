@@ -59,6 +59,7 @@ import {
   type CanUseToolOptions,
   type PermissionResult,
 } from './sdk-interactions';
+import { classifyStall, DEFAULT_STALL_THRESHOLDS, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
 
 // 显式标注上述工具被复用（避免 lint 误报未使用）；persistMessageParts/normalizeToolResultContent
 // 在 convertAssistantMessage 后落库路径会用到。
@@ -115,6 +116,102 @@ interface CachedContextStats {
   windowSize: number;
 }
 const sessionContextStats = new Map<string, CachedContextStats>();
+
+// ── 卡死检测：每会话活动追踪 ────────────────────────────────────────
+// 任何真实上游事件（assistant/user/stream_event/tool_progress/system/api_retry/keep_alive）
+// 都刷新 lastActivityAt；看门狗 setInterval(5s) 扫描，距上次活动超阈值 → 发 stalled。
+interface StallTracker {
+  lastActivityAt: number;
+  lastKind: string;
+  lastParentAgentId: string | null;
+  pendingToolUse: boolean;
+  stalledSince: number | null;
+  stallNotified: boolean;
+  stallCount: number;
+  hardAbortFired: boolean;
+}
+const stallTrackers = new Map<string, StallTracker>();
+// 待决 tool_use id 集合（判定 zone：有无工具在跑）。add on tool_use，delete on tool_result。
+const pendingToolUseIds = new Map<string, Set<string>>();
+function envInt(name: string, dflt: number): number {
+  const v = process.env[name];
+  const n = v ? Number(v) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : dflt;
+}
+// 阈值可用环境变量覆盖（CLAUDE_LINK_STALL_MODEL_MS / _TOOL_MS / _HARD_MS），默认见 stall-watchdog.ts。
+const STALL_THRESHOLDS: StallThresholds = {
+  modelGapMs: envInt('CLAUDE_LINK_STALL_MODEL_MS', DEFAULT_STALL_THRESHOLDS.modelGapMs),
+  toolPendingMs: envInt('CLAUDE_LINK_STALL_TOOL_MS', DEFAULT_STALL_THRESHOLDS.toolPendingMs),
+  hardAutoAbortMs: envInt('CLAUDE_LINK_STALL_HARD_MS', DEFAULT_STALL_THRESHOLDS.hardAutoAbortMs),
+};
+const STALL_TICK_MS = 5_000;
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;
+let watchdogWindow: BrowserWindow | null = null;
+
+function resetStallTracker(sessionId: string): void {
+  stallTrackers.set(sessionId, {
+    lastActivityAt: Date.now(),
+    lastKind: 'query_start',
+    lastParentAgentId: null,
+    pendingToolUse: false,
+    stalledSince: null,
+    stallNotified: false,
+    stallCount: 0,
+    hardAbortFired: false,
+  });
+  pendingToolUseIds.delete(sessionId);
+}
+
+function cleanupSessionStall(sessionId: string): void {
+  stallTrackers.delete(sessionId);
+  pendingToolUseIds.delete(sessionId);
+}
+
+// 从一个 CliEvent 推导并刷新活动状态。合成/终态事件（stalled/error/aborted/result）
+// 不计入「上游活跃」——否则发 stalled 会自我复位卡死时钟。
+function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
+  if (
+    event.type === 'stalled' ||
+    event.type === 'error' ||
+    event.type === 'aborted' ||
+    event.type === 'result'
+  ) {
+    return;
+  }
+  const t = stallTrackers.get(sessionId);
+  if (!t) return;
+  let set = pendingToolUseIds.get(sessionId);
+  if (!set) {
+    set = new Set();
+    pendingToolUseIds.set(sessionId, set);
+  }
+  if (event.type === 'message') {
+    for (const part of event.content) {
+      if (part.type === 'tool_use' || part.type === 'server_tool_use' || part.type === 'mcp_tool_use') {
+        const id = part.id ?? part.tool_use_id;
+        if (id) set.add(id);
+      } else if (
+        part.type === 'tool_result' ||
+        part.type === 'web_search_tool_result' ||
+        part.type === 'web_fetch_tool_result' ||
+        part.type === 'code_execution_tool_result' ||
+        part.type === 'mcp_tool_result'
+      ) {
+        if (part.tool_use_id) set.delete(part.tool_use_id);
+      }
+    }
+    if (event.parentToolUseId) t.lastParentAgentId = event.parentToolUseId;
+  }
+  t.pendingToolUse = set.size > 0;
+  t.lastActivityAt = Date.now();
+  t.lastKind = event.type;
+  // 活跃 → 清卡死标记，下次再卡可再次通知（连续卡死计 stallCount）。
+  if (t.stalledSince !== null) {
+    t.stalledSince = null;
+    t.stallNotified = false;
+  }
+}
+
 const pendingPermissionRequests = new Map<string, (response: PermissionResponsePayload) => void>();
 // 标记会话已删除：runQuery 下轮迭代检测到即自停，forwardEvent 落库前也据此跳过。
 export function markSessionDeleted(sessionId: string): void {
@@ -122,6 +219,7 @@ export function markSessionDeleted(sessionId: string): void {
   cancelInteractionsForSession(sessionId);
   // 清理上下文用量缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
   sessionContextStats.delete(sessionId);
+  cleanupSessionStall(sessionId);
   for (const [id, resolve] of pendingPermissionRequests) {
     pendingPermissionRequests.delete(id);
     resolve({ id, optionId: 'deny' });
@@ -232,6 +330,12 @@ function createEntry(): SessionEntry {
       }
     },
   };
+}
+
+// 统一 entry + 卡死 tracker 清理（runQuery 的多个退出点共用，防泄漏）。
+function deleteEntry(sessionId: string, entry: SessionEntry): void {
+  if (entries.get(sessionId) === entry) entries.delete(sessionId);
+  cleanupSessionStall(sessionId);
 }
 
 // ── 读取真实上下文窗口（与 process-manager.readContextWindow 同逻辑）────
@@ -392,6 +496,7 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
   // 反复同步失败阻塞主进程事件循环，导致所有输入框失效）。事件也不必推前端
   //（前端 activeSession 已切走/置 null，handleEvent 守卫也会丢弃）。
   if (!isSessionActive(sessionId)) return;
+  touchActivityFromEvent(sessionId, event);
   try {
     mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
@@ -459,6 +564,7 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
 // （它们是运行中进度，不是对话历史，落库会污染历史回看）。
 function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: CliEvent): void {
   if (!isSessionActive(sessionId)) return;
+  touchActivityFromEvent(sessionId, event);
   try {
     mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
@@ -547,6 +653,8 @@ async function runQuery(
     }
   }
   entries.set(sessionId, entry);
+  // 每个新 query 重置卡死追踪（per-turn stallCount / hardAbortFired）。
+  resetStallTracker(sessionId);
 
   const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow);
   // 卡死检测/硬杀：每会话一个 AbortController，传入 Options.abortController。
@@ -562,7 +670,7 @@ async function runQuery(
     });
     emitError(new Error('claude code not found locally'));
     emitExit(1);
-    if (entries.get(sessionId) === entry) entries.delete(sessionId);
+    deleteEntry(sessionId, entry);
     return;
   }
   // resume：优先显式传入，否则用已记录的 CLI session id（等价 process-manager 的 --resume）。
@@ -588,7 +696,7 @@ async function runQuery(
         });
         emitError(retryErr instanceof Error ? retryErr : new Error(String(retryErr)));
         emitExit(1);
-        if (entries.get(sessionId) === entry) entries.delete(sessionId);
+        deleteEntry(sessionId, entry);
         return;
       }
     } else {
@@ -598,7 +706,7 @@ async function runQuery(
       });
       emitError(err instanceof Error ? err : new Error(String(err)));
       emitExit(1);
-      if (entries.get(sessionId) === entry) entries.delete(sessionId);
+      deleteEntry(sessionId, entry);
       return;
     }
   }
@@ -744,6 +852,20 @@ async function runQuery(
         forwardTransient(sessionId, mainWindow, convertToolProgress(sdkMsg));
         continue;
       }
+      // SDK 内置心跳：子进程还活着（只是在等响应/跑工具）。刷新活动时钟，防误判卡死。
+      // 不转发前端（纯噪音）。
+      if (type === 'keep_alive') {
+        const t = stallTrackers.get(sessionId);
+        if (t) {
+          t.lastActivityAt = Date.now();
+          t.lastKind = 'keep_alive';
+          if (t.stalledSince !== null) {
+            t.stalledSince = null;
+            t.stallNotified = false;
+          }
+        }
+        continue;
+      }
       if (type === 'result') {
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
         continue;
@@ -782,7 +904,7 @@ async function runQuery(
     break;
   }
   }
-  if (entries.get(sessionId) === entry) entries.delete(sessionId);
+  deleteEntry(sessionId, entry);
 }
 
 // ── 同形公共接口（与 process-manager 签名一致）──────────────────────
