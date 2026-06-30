@@ -296,7 +296,7 @@ function createChat() {
             sinceMs: event.sinceMs,
             gapMs: event.gapMs,
             lastKind: event.lastKind,
-            pendingAgentId: event.pendingAgentId ?? null,
+            pendingAgentId: event.pendingAgentId,
             zone: event.zone,
             stallCount: event.stallCount,
           });
@@ -620,8 +620,14 @@ function createChat() {
   }
 
   // 卡死恢复：重发最后一条用户消息（abort 旧 query → 新 query + resume）。
-  // 复用既有 sendMessage/abortChat IPC，无需新通道。200ms 缓冲让主进程 killProcess
-  // + 旧 query 走完 aborted 清理（否则 sendMessage 会被「仍有活 query」丢弃）。
+  // 复用既有 sendMessage/abortChat IPC，无需新通道。
+  // 已知特性（设计取舍，非 bug）：
+  //  1) sendMessage 会再持久化一条 user 消息 → 历史里出现重复的同一提问气泡。
+  //     这是「显式重问」语义（stall 后重新发起一回合），而非静默续传，保留可见性。
+  //  2) 200ms 缓冲是经验值：让主进程 killProcess + 旧 query 走完 aborted 清理，
+  //     否则 sendMessage 可能被「仍有活 query」丢弃。极端慢机器上偶发丢弃时，
+  //     用户再点一次即可（上方重入锁已放行，因 clearStalled 在重入锁之后）。
+  //  3) lastUserText 假定「卡死的回合已持久化自己的 user 消息」——sendMessage 始终如此。
   function lastUserText(): string | null {
     const msgs = store.messages;
     for (let i = msgs.length - 1; i >= 0; i -= 1) {
@@ -632,6 +638,9 @@ function createChat() {
   async function retryLastTurn(): Promise<void> {
     if (!store.activeSession) return;
     const sid = store.activeSession.id;
+    // 重入锁：仅在确有卡死标记时重试（横幅可见 ⟺ stalledInfo[sid] 已置）。
+    // 防止用户连点重试导致多次 abortChat + 多次 sendMessage（重复用户气泡 + 重复 query）。
+    if (!store.stalledInfo[sid]) return;
     const last = lastUserText();
     store.clearStalled(sid);
     if (!last) return;
