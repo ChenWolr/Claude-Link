@@ -288,6 +288,21 @@ function createChat() {
         persistSystemEvent(event);
         break;
       }
+      case 'stalled': {
+        // 主进程看门狗判定无响应：记录卡死信息，StalledBanner 显形。
+        // 不动 sending（回合仍在「运行」，只是无响应）；markStopped 时横幅自动消失。
+        if (store.activeSession) {
+          store.markStalled(store.activeSession.id, {
+            sinceMs: event.sinceMs,
+            gapMs: event.gapMs,
+            lastKind: event.lastKind,
+            pendingAgentId: event.pendingAgentId ?? null,
+            zone: event.zone,
+            stallCount: event.stallCount,
+          });
+        }
+        break;
+      }
       case 'init': {
         break;
       }
@@ -604,7 +619,32 @@ function createChat() {
     }, 1200);
   }
 
-  return { sending, error, sendMessage, abort, startListening, stopListening };
+  // 卡死恢复：重发最后一条用户消息（abort 旧 query → 新 query + resume）。
+  // 复用既有 sendMessage/abortChat IPC，无需新通道。200ms 缓冲让主进程 killProcess
+  // + 旧 query 走完 aborted 清理（否则 sendMessage 会被「仍有活 query」丢弃）。
+  function lastUserText(): string | null {
+    const msgs = store.messages;
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      if (msgs[i].role === 'user') return msgs[i].content;
+    }
+    return null;
+  }
+  async function retryLastTurn(): Promise<void> {
+    if (!store.activeSession) return;
+    const sid = store.activeSession.id;
+    const last = lastUserText();
+    store.clearStalled(sid);
+    if (!last) return;
+    try {
+      await window.claudeLink.abortChat(sid);
+    } catch {
+      // ignore
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    await sendMessage(last);
+  }
+
+  return { sending, error, sendMessage, abort, retryLastTurn, startListening, stopListening };
 }
 
 // 根因修复：useChat 返回全局单例。监听在 App.vue onMounted 注册一次，
