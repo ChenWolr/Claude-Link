@@ -10,7 +10,7 @@ import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
 import type { BackgroundTask } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
-import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent } from '../../shared/types/cli';
+import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { Message } from '../../shared/types/session';
@@ -22,6 +22,17 @@ let chatSingleton: ReturnType<typeof createChat> | null = null;
 
 // C：把进度类事件（tool_progress / compacting / task_*）映射到 store。纯函数（不依赖闭包），可单测。
 // task_notification 终态：先 upsert 终态卡片，4 秒后移除（淡出，避免列表残留已完成任务）。
+export function applyStalledEvent(store: ReturnType<typeof useSessionStore>, sessionId: string, event: CliStalledEvent): void {
+  store.markStalled(sessionId, {
+    sinceMs: event.sinceMs,
+    gapMs: event.gapMs,
+    lastKind: event.lastKind,
+    pendingAgentId: event.pendingAgentId,
+    zone: event.zone,
+    stallCount: event.stallCount,
+  });
+}
+
 export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, event: CliEvent): void {
   if (event.type === 'tool_progress') {
     if (event.toolUseId) store.setToolProgress(event.toolUseId, event.elapsedSeconds);
@@ -146,12 +157,22 @@ function createChat() {
     window.claudeLink.removeChatListener();
   }
 
+  function isStallRecoveryEvent(event: CliEvent): boolean {
+    if (event.type === 'stream_event' || event.type === 'message' || event.type === 'tool_progress') return true;
+    if (event.type === 'system') return event.subtype !== 'init';
+    return false;
+  }
+  function clearStalledForSession(sessionId: string, event: CliEvent): void {
+    if (isStallRecoveryEvent(event)) store.clearStalled(sessionId);
+  }
+
   // 问题 1：不再丢弃非当前会话的事件。后台执行的会话事件需要处理：
   // - stream_event: 写入 sessionStreams 快照（切回时恢复流式预览）
   // - result/error/aborted: markStopped + 清快照（如果是当前会话还走正常结束流程）
   // - message/system: 主进程已落库，切回时 getSessionMessages 重载；渲染层只处理当前会话
   function handleEvent(payload: ChatEventPayload): void {
     const isCurrent = !!store.activeSession && payload.sessionId === store.activeSession.id;
+    clearStalledForSession(payload.sessionId, payload.event);
     if (!isCurrent) {
       handleBackgroundEvent(payload);
       return;
@@ -175,6 +196,11 @@ function createChat() {
         } else if (delta.text) {
           store.appendBackgroundStream(sid, 'content', delta.text);
         }
+        break;
+      }
+      case 'stalled': {
+        // 后台会话卡死也要记录；用户切回该会话时 StalledBanner 可立即显形。
+        applyStalledEvent(store, sid, event);
         break;
       }
       case 'result':
@@ -237,8 +263,8 @@ function createChat() {
         // 的 result 分支用同一 isErrResult 判断同步跳过，DB 与内存保持一致。
         if (!isErrResult) ensureResultMessage(event);
         attachResultMetadata(event);
-        if (isErrResult && event.result?.trim()) {
-          error.value = event.result.trim();
+        if (isErrResult) {
+          error.value = resultErrorText(event);
         }
         // 根因修复：markStopped 移除 runningSessions，sending getter 自动变 false。
         if (store.activeSession) store.markStopped(store.activeSession.id);
@@ -291,16 +317,7 @@ function createChat() {
       case 'stalled': {
         // 主进程看门狗判定无响应：记录卡死信息，StalledBanner 显形。
         // 不动 sending（回合仍在「运行」，只是无响应）；markStopped 时横幅自动消失。
-        if (store.activeSession) {
-          store.markStalled(store.activeSession.id, {
-            sinceMs: event.sinceMs,
-            gapMs: event.gapMs,
-            lastKind: event.lastKind,
-            pendingAgentId: event.pendingAgentId,
-            zone: event.zone,
-            stallCount: event.stallCount,
-          });
-        }
+        if (store.activeSession) applyStalledEvent(store, store.activeSession.id, event);
         break;
       }
       case 'init': {
@@ -448,6 +465,18 @@ function createChat() {
         console.warn('[handleMessagePartsFull] 未识别的 content block 类型，已跳过：', (part as { type: string }).type);
       }
     }
+  }
+
+  function resultErrorText(event: CliResultEvent): string {
+    const resultText = event.result?.trim();
+    if (resultText) return resultText;
+    if (event.errors && event.errors.length > 0) return event.errors.join('\n');
+    const parts: string[] = [];
+    if (event.terminalReason) parts.push(`终止原因：${event.terminalReason}`);
+    if (event.apiErrorStatus != null) parts.push(`API 状态：HTTP ${event.apiErrorStatus}`);
+    else if (event.apiErrorStatus === null) parts.push('API 状态：连接错误或无状态码');
+    if (event.stopReason) parts.push(`停止原因：${event.stopReason}`);
+    return parts.join('\n') || 'SDK 执行失败，但未返回具体错误内容。';
   }
 
   // 回合结束兜底（力度②）：text/thinking/tool_use 已由 message 事件即时落库，这里只在
@@ -624,9 +653,8 @@ function createChat() {
   // 已知特性（设计取舍，非 bug）：
   //  1) sendMessage 会再持久化一条 user 消息 → 历史里出现重复的同一提问气泡。
   //     这是「显式重问」语义（stall 后重新发起一回合），而非静默续传，保留可见性。
-  //  2) 200ms 缓冲是经验值：让主进程 killProcess + 旧 query 走完 aborted 清理，
-  //     否则 sendMessage 可能被「仍有活 query」丢弃。极端慢机器上偶发丢弃时，
-  //     用户再点一次即可（上方重入锁已放行，因 clearStalled 在重入锁之后）。
+  //  2) 主进程 killProcess 会立即把旧 entry 标为 aborting 并移出 active entries，
+  //     因此重试不再依赖固定等待来避免 message dropped；这里的短延迟只用于事件排序缓冲。
   //  3) lastUserText 假定「卡死的回合已持久化自己的 user 消息」——sendMessage 始终如此。
   function lastUserText(): string | null {
     const msgs = store.messages;

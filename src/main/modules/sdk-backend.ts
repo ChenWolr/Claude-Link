@@ -59,7 +59,8 @@ import {
   type CanUseToolOptions,
   type PermissionResult,
 } from './sdk-interactions';
-import { classifyStall, DEFAULT_STALL_THRESHOLDS, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
+import { isSubAgentToolUse } from '../../shared/process-kind';
+import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
 
 // 显式标注上述工具被复用（避免 lint 误报未使用）；persistMessageParts/normalizeToolResultContent
 // 在 convertAssistantMessage 后落库路径会用到。
@@ -93,6 +94,7 @@ async function importSdk(): Promise<SdkModule> {
 interface SessionEntry {
   query: Query | null;
   handle: SdkQueryHandle;
+  state: 'pending' | 'running' | 'aborting' | 'finished';
   emitExit: (code: number | null) => void;
   emitError: (err: Error) => void;
   // 官方 Options.abortController：query() 传入后，abort() 会在 Windows 上经 SDK
@@ -118,32 +120,44 @@ interface CachedContextStats {
 const sessionContextStats = new Map<string, CachedContextStats>();
 
 // ── 卡死检测：每会话活动追踪 ────────────────────────────────────────
-// 任何真实上游事件（assistant/user/stream_event/tool_progress/system/api_retry/keep_alive）
-// 都刷新 lastActivityAt；看门狗 setInterval(5s) 扫描，距上次活动超阈值 → 发 stalled。
+// 任何真实上游业务事件（assistant/user/stream_event/tool_progress/system/api_retry）
+// 都刷新 lastActivityAt；keep_alive 仅记录诊断，不重置业务静默计时。
+// 看门狗 setInterval(5s) 扫描，距上次业务活动超阈值 → 发 stalled。
 interface StallTracker {
   lastActivityAt: number;
   lastKind: string;
+  lastKeepAliveAt: number | null;
   lastParentAgentId: string | null;
   pendingToolUse: boolean;
   stalledSince: number | null;
   stallNotified: boolean;
   stallCount: number;
   hardAbortFired: boolean;
+  // 连续 api_retry 次数：每次 api_retry 自增，任何真实业务活动（touchActivity）清零。
+  // 达 MAX_API_RETRIES 即快速硬中断，专治空/畸形响应重试风暴。
+  consecutiveApiRetries: number;
 }
 const stallTrackers = new Map<string, StallTracker>();
 // 待决 tool_use id 集合（判定 zone：有无工具在跑）。add on tool_use，delete on tool_result。
 const pendingToolUseIds = new Map<string, Set<string>>();
+// 待决子 Agent/Workflow tool_use id 集合（用于横幅定位疑似卡住的子 Agent）。
+const pendingSubAgentUseIds = new Map<string, Set<string>>();
 function envInt(name: string, dflt: number): number {
   const v = process.env[name];
   const n = v ? Number(v) : NaN;
   return Number.isFinite(n) && n > 0 ? n : dflt;
 }
-// 阈值可用环境变量覆盖（CLAUDE_LINK_STALL_MODEL_MS / _TOOL_MS / _HARD_MS），默认见 stall-watchdog.ts。
+// 阈值可用环境变量覆盖（CLAUDE_LINK_STALL_MODEL_MS / _TOOL_MS / _HARD_MS / _TOOL_HARD_MS），默认见 stall-watchdog.ts。
 const STALL_THRESHOLDS: StallThresholds = {
   modelGapMs: envInt('CLAUDE_LINK_STALL_MODEL_MS', DEFAULT_STALL_THRESHOLDS.modelGapMs),
   toolPendingMs: envInt('CLAUDE_LINK_STALL_TOOL_MS', DEFAULT_STALL_THRESHOLDS.toolPendingMs),
   hardAutoAbortMs: envInt('CLAUDE_LINK_STALL_HARD_MS', DEFAULT_STALL_THRESHOLDS.hardAutoAbortMs),
+  // TOOL 区绝对硬中断上限（兜子 Agent 死锁/死连接；合法长工具持续发 tool_progress 不会误触）。
+  toolHardAbortMs: envInt('CLAUDE_LINK_STALL_TOOL_HARD_MS', DEFAULT_STALL_THRESHOLDS.toolHardAbortMs),
 };
+// 连续 api_retry 达此次数（期间无任何真实业务进展）即快速硬中断——专治「空/畸形响应」重试风暴，
+// 不必死等 toolHardAbortMs（默认 900s）。SDK 正常限流重试几次后会成功并清零本计数，不会误触。
+const MAX_API_RETRIES = envInt('CLAUDE_LINK_MAX_API_RETRIES', 10);
 const STALL_TICK_MS = 5_000;
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 let watchdogWindow: BrowserWindow | null = null;
@@ -152,57 +166,100 @@ function resetStallTracker(sessionId: string): void {
   stallTrackers.set(sessionId, {
     lastActivityAt: Date.now(),
     lastKind: 'query_start',
+    lastKeepAliveAt: null,
     lastParentAgentId: null,
     pendingToolUse: false,
     stalledSince: null,
     stallNotified: false,
     stallCount: 0,
     hardAbortFired: false,
+    consecutiveApiRetries: 0,
   });
   pendingToolUseIds.delete(sessionId);
+  pendingSubAgentUseIds.delete(sessionId);
 }
 
 function cleanupSessionStall(sessionId: string): void {
   stallTrackers.delete(sessionId);
   pendingToolUseIds.delete(sessionId);
+  pendingSubAgentUseIds.delete(sessionId);
 }
 
-// 活动刷新原语：更新最后活动时间/类型并清卡死标记。touchActivityFromEvent 与
-// keep_alive 分支共用，避免两处「活跃即清 stalledSince/stallNotified」语义漂移。
+// 活动刷新原语：更新最后业务活动时间/类型并清卡死标记。
 function touchActivity(sessionId: string, kind: string): void {
+  if (!isBusinessStallActivityKind(kind)) return;
   const t = stallTrackers.get(sessionId);
   if (!t) return;
   t.lastActivityAt = Date.now();
   t.lastKind = kind;
+  // 真实业务进展到达 → 清零连续重试计数（之前累积的 api_retry 风暴已过去）。
+  t.consecutiveApiRetries = 0;
   if (t.stalledSince !== null) {
     t.stalledSince = null;
     t.stallNotified = false;
   }
 }
 
+// keep_alive 只证明 SDK/子进程还活着，不代表 API/模型/工具有业务进展；只记诊断时间，
+// 不刷新 lastActivityAt，否则代理网关死等但持续心跳时会永远不触发 stalled。
+function touchKeepAlive(sessionId: string): void {
+  const t = stallTrackers.get(sessionId);
+  if (!t) return;
+  t.lastKeepAliveAt = Date.now();
+}
+
 // 从一个 CliEvent 推导并刷新活动状态。合成/终态事件（stalled/error/aborted/result）
 // 不计入「上游活跃」——否则发 stalled 会自我复位卡死时钟。
 function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
-  if (
-    event.type === 'stalled' ||
-    event.type === 'error' ||
-    event.type === 'aborted' ||
-    event.type === 'result'
-  ) {
+  if (!isBusinessStallActivityKind(event.type)) {
     return;
   }
   const t = stallTrackers.get(sessionId);
   if (!t) return;
+  // api_retry：SDK 正在重试一次失败的 API 调用（如空/畸形响应）——是失败信号而非业务进展。
+  // 只累加连续重试计数，不刷新 lastActivityAt（否则重试风暴永远判不出卡死）。
+  // 事件本身仍由 forwardEvent 正常转发+落库（前端显示「API 重试中（第 N/M 次）」）。
+  if (event.type === 'system' && (event as CliSystemInfoEvent).subtype === 'api_retry') {
+    t.consecutiveApiRetries += 1;
+    return;
+  }
   let set = pendingToolUseIds.get(sessionId);
   if (!set) {
     set = new Set();
     pendingToolUseIds.set(sessionId, set);
   }
+  let subAgentSet = pendingSubAgentUseIds.get(sessionId);
+  if (!subAgentSet) {
+    subAgentSet = new Set();
+    pendingSubAgentUseIds.set(sessionId, subAgentSet);
+  }
+  if (event.type === 'tool_progress') {
+    if (event.toolUseId) set.add(event.toolUseId);
+    if (event.parentToolUseId) t.lastParentAgentId = event.parentToolUseId;
+  }
+  if (event.type === 'system') {
+    if ((event.subtype === 'task_started' || event.subtype === 'task_progress') && event.toolUseId) {
+      set.add(event.toolUseId);
+      t.lastParentAgentId = event.toolUseId;
+    } else if (event.subtype === 'task_notification' && event.toolUseId) {
+      set.delete(event.toolUseId);
+      subAgentSet.delete(event.toolUseId);
+      if (t.lastParentAgentId === event.toolUseId) t.lastParentAgentId = Array.from(subAgentSet).at(-1) ?? null;
+    }
+  }
   if (event.type === 'message') {
     for (const part of event.content) {
       if (part.type === 'tool_use' || part.type === 'server_tool_use' || part.type === 'mcp_tool_use') {
         const id = part.id ?? part.tool_use_id;
-        if (id) set.add(id);
+        if (id) {
+          set.add(id);
+          // 主流程刚发出 Agent/Task/Workflow/Skill tool_use 后，子 Agent 可能还没吐出
+          // parentToolUseId 事件就卡住；先记录该 tool_use id，横幅即可定位疑似卡住的子 Agent。
+          if (!event.parentToolUseId && isSubAgentToolUse(part)) {
+            subAgentSet.add(id);
+            t.lastParentAgentId = id;
+          }
+        }
       } else if (
         part.type === 'tool_result' ||
         part.type === 'web_search_tool_result' ||
@@ -210,7 +267,13 @@ function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
         part.type === 'code_execution_tool_result' ||
         part.type === 'mcp_tool_result'
       ) {
-        if (part.tool_use_id) set.delete(part.tool_use_id);
+        if (part.tool_use_id) {
+          set.delete(part.tool_use_id);
+          subAgentSet.delete(part.tool_use_id);
+          if (t.lastParentAgentId === part.tool_use_id) {
+            t.lastParentAgentId = Array.from(subAgentSet).at(-1) ?? null;
+          }
+        }
       }
     }
     if (event.parentToolUseId) t.lastParentAgentId = event.parentToolUseId;
@@ -235,6 +298,18 @@ function watchdogTick(): void {
   const now = Date.now();
   for (const [sessionId, t] of stallTrackers) {
     if (!isSessionActive(sessionId)) continue;
+    // 连续 api_retry 快速中断：API 反复空/畸形响应（重试风暴）时不必死等 toolHardAbortMs，
+    // 直接判定代理/模型服务故障硬杀，让用户在 ~1-2 分钟内得到反馈而非无限等待。
+    if (!t.hardAbortFired && t.consecutiveApiRetries >= MAX_API_RETRIES) {
+      t.hardAbortFired = true;
+      forwardEvent(sessionId, mw, {
+        type: 'error',
+        message: `API 连续重试 ${t.consecutiveApiRetries} 次仍失败（疑似空/畸形响应或代理网关异常），已自动中断。可点击「重试」重新发送。`,
+      });
+      logger.error(`[stall] api-retry abort session ${sessionId}: ${t.consecutiveApiRetries} consecutive retries`);
+      killProcess(sessionId, 'watchdog');
+      continue;
+    }
     const verdict = classifyStall(t.lastActivityAt, now, t.pendingToolUse, STALL_THRESHOLDS);
     if (!verdict.stalled) {
       // 活跃：清标记，下次再卡可再次通知。
@@ -263,16 +338,18 @@ function watchdogTick(): void {
       forwardTransient(sessionId, mw, { type: 'stalled', ...info });
       logger.warn(`[stall] session ${sessionId} 无响应 ${Math.round(verdict.gapMs / 1000)}s（zone=${verdict.zone}, lastKind=${t.lastKind}, agent=${t.lastParentAgentId ?? '-'}, count=${t.stallCount}）`);
     }
-    // 硬中断：纯模型空隙累计极久 → killProcess（abortController 真硬杀）。每回合只发一次。
+    // 硬中断：静默累计到 zone 上限 → killProcess（abortController 真硬杀）。每回合只发一次。
+    // model 区=模型服务卡死；tool 区=子任务/工具死锁或死连接（长工具会持续发 tool_progress，不会到这）。
     if (verdict.hardAbort && !t.hardAbortFired) {
       t.hardAbortFired = true;
       const secs = Math.round(verdict.gapMs / 1000);
-      forwardEvent(sessionId, mw, {
-        type: 'error',
-        message: `已 ${secs} 秒无响应，判定模型服务卡死，已自动中断。可点击「重试」重新发送。`,
-      });
-      logger.error(`[stall] hard auto-abort session ${sessionId}: ${secs}s model-zone silence`);
-      killProcess(sessionId);
+      const reason =
+        verdict.zone === 'tool'
+          ? `子任务/工具已 ${secs} 秒无进展，判定卡死（死连接/死锁），已自动中断。可点击「重试」重新发送。`
+          : `已 ${secs} 秒无响应，判定模型服务卡死，已自动中断。可点击「重试」重新发送。`;
+      forwardEvent(sessionId, mw, { type: 'error', message: reason });
+      logger.error(`[stall] hard auto-abort session ${sessionId}: ${secs}s ${verdict.zone}-zone silence`);
+      killProcess(sessionId, 'watchdog');
     }
   }
 }
@@ -282,6 +359,12 @@ const pendingPermissionRequests = new Map<string, (response: PermissionResponseP
 export function markSessionDeleted(sessionId: string): void {
   activeSessions.delete(sessionId);
   cancelInteractionsForSession(sessionId);
+  pendingFirstPrompt.delete(sessionId);
+  const entry = entries.get(sessionId);
+  if (entry) {
+    abortEntry(entry);
+    removeEntryIfCurrent(sessionId, entry);
+  }
   // 清理上下文用量缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
   sessionContextStats.delete(sessionId);
   cleanupSessionStall(sessionId);
@@ -371,12 +454,14 @@ function createEntry(): SessionEntry {
       handle.killed = true;
     },
   };
-  return {
+  const entry: SessionEntry = {
     query: null,
     handle,
+    state: 'pending',
     abortController: null,
     emitExit: (code) => {
       handle.killed = true;
+      if (entry.state !== 'aborting') entry.state = 'finished';
       for (const cb of exitCbs) {
         try {
           cb(code);
@@ -395,12 +480,43 @@ function createEntry(): SessionEntry {
       }
     },
   };
+  return entry;
+}
+
+// 统一 entry + 卡死 tracker 清理（runQuery 的多个退出点共用，防泄漏）。
+function isEntryActive(entry: SessionEntry | undefined): entry is SessionEntry {
+  return !!entry && entry.state !== 'aborting' && entry.state !== 'finished' && !entry.handle.killed;
+}
+
+function markEntryAborting(entry: SessionEntry): void {
+  entry.state = 'aborting';
+  entry.handle.interrupt();
+}
+
+function abortEntry(entry: SessionEntry): void {
+  markEntryAborting(entry);
+  try {
+    entry.abortController?.abort();
+  } catch {
+    // abort 已触发过等异常忽略
+  }
+}
+
+function isCurrentEntry(sessionId: string, entry: SessionEntry): boolean {
+  return entries.get(sessionId) === entry && entry.state !== 'aborting';
+}
+
+function removeEntryIfCurrent(sessionId: string, entry: SessionEntry): void {
+  if (entries.get(sessionId) === entry) entries.delete(sessionId);
 }
 
 // 统一 entry + 卡死 tracker 清理（runQuery 的多个退出点共用，防泄漏）。
 function deleteEntry(sessionId: string, entry: SessionEntry): void {
-  if (entries.get(sessionId) === entry) entries.delete(sessionId);
-  cleanupSessionStall(sessionId);
+  const isCurrent = entries.get(sessionId) === entry;
+  if (isCurrent) {
+    entries.delete(sessionId);
+    cleanupSessionStall(sessionId);
+  }
 }
 
 // ── 读取真实上下文窗口（与 process-manager.readContextWindow 同逻辑）────
@@ -662,6 +778,10 @@ function convertAssistantMessage(sdkMsg: Record<string, unknown>): CliMessageEve
 
 // SDK result → CliResultEvent（字段一一对应）。
 function convertResultMessage(sdkMsg: Record<string, unknown>): CliEvent {
+  const rawErrors = Array.isArray(sdkMsg.errors) ? sdkMsg.errors : [];
+  const errors = rawErrors
+    .map((item) => (typeof item === 'string' ? item : item && typeof item === 'object' && typeof (item as { message?: unknown }).message === 'string' ? (item as { message: string }).message : ''))
+    .filter((item) => item.trim().length > 0);
   return {
     type: 'result',
     subtype: (sdkMsg.subtype as string) ?? 'success',
@@ -671,6 +791,10 @@ function convertResultMessage(sdkMsg: Record<string, unknown>): CliEvent {
     num_turns: (sdkMsg.num_turns as number) ?? 0,
     session_id: (sdkMsg.session_id as string) ?? '',
     is_error: Boolean(sdkMsg.is_error),
+    ...(errors.length > 0 ? { errors } : {}),
+    terminalReason: typeof sdkMsg.terminal_reason === 'string' ? sdkMsg.terminal_reason : undefined,
+    apiErrorStatus: typeof sdkMsg.api_error_status === 'number' ? sdkMsg.api_error_status : null,
+    stopReason: typeof sdkMsg.stop_reason === 'string' ? sdkMsg.stop_reason : null,
     usage: (sdkMsg.usage as CliResultEvent['usage']) ?? undefined,
     modelUsage: (sdkMsg.modelUsage as CliResultEvent['modelUsage']) ?? undefined,
   } as CliResultEvent;
@@ -709,14 +833,19 @@ async function runQuery(
 
   // spawn 前若已有旧 query（同 session），先中断并移除——与 process-manager 的 killProcess 一致。
   const prev = entries.get(sessionId);
-  if (prev && prev.query && prev !== entry) {
-    interruptedQueries.add(prev.query);
-    try {
-      await prev.query.interrupt();
-    } catch {
-      // ignore
+  if (prev && prev !== entry) {
+    if (prev.query) interruptedQueries.add(prev.query);
+    abortEntry(prev);
+    if (prev.query) {
+      try {
+        await prev.query.interrupt();
+      } catch {
+        // ignore
+      }
     }
+    removeEntryIfCurrent(sessionId, prev);
   }
+  entry.state = 'running';
   entries.set(sessionId, entry);
   // 每个新 query 重置卡死追踪（per-turn stallCount / hardAbortFired）。
   resetStallTracker(sessionId);
@@ -748,6 +877,10 @@ async function runQuery(
   try {
     query = await startSdkQuery(prompt, sdkOptions);
   } catch (err) {
+    if (!isCurrentEntry(sessionId, entry)) {
+      emitExit(null);
+      return;
+    }
     if (resumedOnce && isMissingConversationResumeError(err)) {
       logger.warn(`Resume session ${resumeId} not found for app session ${sessionId}; clearing stale cli_session_id and starting a new SDK conversation.`);
       clearResumeSessionId(sessionId);
@@ -776,11 +909,26 @@ async function runQuery(
       return;
     }
   }
+  if (!isCurrentEntry(sessionId, entry)) {
+    interruptedQueries.add(query);
+    void query.interrupt().catch(() => {
+      // 启动过程中已被 abort/替换，query 刚返回即补发 interrupt，避免旧流继续运行。
+    });
+    try {
+      entry.abortController?.abort();
+    } catch {
+      // ignore
+    }
+    emitExit(null);
+    return;
+  }
   entry.query = query;
 
   while (true) {
   try {
     for await (const sdkMsg of query) {
+      // 旧 query 被 abort/替换后可能稍后才吐出事件；只允许当前 running entry 继续转发。
+      if (!isCurrentEntry(sessionId, entry)) break;
       // 守卫：会话已被删除（SESSION_DELETE 调 markSessionDeleted）→ 立即停止消费流，
       // 不再落库/转发。否则孤儿 query 会继续往已级联删空的 messages 表 INSERT，外键失败回滚阻塞主进程。
       if (!isSessionActive(sessionId)) {
@@ -797,6 +945,7 @@ async function runQuery(
         const subtype = sdkMsg.subtype as string | undefined;
         if (subtype === 'init' && sdkMsg.session_id) {
           const sid = sdkMsg.session_id as string;
+          touchActivity(sessionId, 'system:init');
           sessionCliIds.set(sessionId, sid);
           // 会话已删则不写库（避免外键失败）。
           if (isSessionActive(sessionId)) {
@@ -918,10 +1067,10 @@ async function runQuery(
         forwardTransient(sessionId, mainWindow, convertToolProgress(sdkMsg));
         continue;
       }
-      // SDK 内置心跳：子进程还活着（只是在等响应/跑工具）。刷新活动时钟，防误判卡死。
-      // 不转发前端（纯噪音）。
+      // SDK 内置心跳：只证明子进程还活着，不代表模型/API/工具有业务进展。
+      // 因此只记录诊断时间，不刷新 lastActivityAt，避免代理死等但持续心跳时永远不触发 stalled。
       if (type === 'keep_alive') {
-        touchActivity(sessionId, 'keep_alive');
+        touchKeepAlive(sessionId);
         continue;
       }
       if (type === 'result') {
@@ -930,10 +1079,14 @@ async function runQuery(
       }
       // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。
     }
-    // 流正常结束。
-    emitExit(0);
+    // 流正常结束。若旧 query 已被 abort/替换，按中断收尾，避免误报成功退出。
+    emitExit(isCurrentEntry(sessionId, entry) ? 0 : null);
     break;
   } catch (err) {
+    if (!isCurrentEntry(sessionId, entry)) {
+      emitExit(null);
+      break;
+    }
     if (resumedOnce && isMissingConversationResumeError(err)) {
       logger.warn(`Resume session ${resumeId} not found while streaming app session ${sessionId}; clearing stale cli_session_id and starting a new SDK conversation.`);
       clearResumeSessionId(sessionId);
@@ -1021,24 +1174,28 @@ export function sendMessage(sessionId: string, message: string): void {
   }
 }
 
-export function killProcess(sessionId: string): void {
+export function killProcess(sessionId: string, reason: 'user' | 'watchdog' = 'user'): void {
   cancelInteractionsForSession(sessionId);
+  pendingFirstPrompt.delete(sessionId);
   const entry = entries.get(sessionId);
-  if (entry && entry.query) {
-    interruptedQueries.add(entry.query);
-    entry.handle.interrupt();
-    void entry.query.interrupt().catch(() => {
-      // 软中断失败不阻塞；query 会因迭代抛错走 aborted 分支。
-    });
+  if (entry) {
+    // user 与 watchdog 中断都记入 interruptedQueries：让 runQuery 的 catch 走 aborted 分支
+    //（干净收尾），避免 watchdog 已发友好 error 后又叠一条「SDK 执行出错」。
+    if (entry.query) interruptedQueries.add(entry.query);
+    abortEntry(entry);
+    // 立即从 active entries 移除：retryLastTurn 后续 CHAT_SEND 才能走 spawnForChat + resume，
+    // 不会被 getActiveProcess 误判为仍有活 query 而把消息 drop 掉。旧 query 退出时靠 identity guard 清理。
+    removeEntryIfCurrent(sessionId, entry);
+    cleanupSessionStall(sessionId);
+    if (entry.query) {
+      void entry.query.interrupt().catch(() => {
+        // 软中断失败不阻塞；query 会因迭代抛错走 aborted 分支。
+      });
+    }
     // 硬杀兜底：query.interrupt() 是 stdin 控制帧（软），子进程卡死在死 socket 上时
     // 根本读不到。abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
     //（瞬时不可捕获），真能打死。两条都发，软的先给优雅退出机会。
-    try {
-      entry.abortController?.abort();
-    } catch {
-      // abort 已触发过等异常忽略
-    }
-    logger.info(`Interrupted SDK query for session ${sessionId} (abort signaled)`);
+    logger.info(`Interrupted SDK query for session ${sessionId} (reason=${reason}, abort signaled)`);
   }
 }
 
@@ -1049,7 +1206,8 @@ export function killAllProcesses(): void {
 }
 
 export function getActiveProcess(sessionId: string): SdkQueryHandle | undefined {
-  return entries.get(sessionId)?.handle;
+  const entry = entries.get(sessionId);
+  return isEntryActive(entry) ? entry.handle : undefined;
 }
 
 export function getCliSessionId(sessionId: string): string | undefined {

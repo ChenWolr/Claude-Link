@@ -163,6 +163,11 @@ export interface CliResultEvent {
   session_id: string;
   is_error: boolean;
   usage?: CliUsage;
+  // SDK error result 细节：第三方端点 malformed/empty response 可能 result 为空，需用这些字段兜底展示错误。
+  errors?: string[];
+  terminalReason?: string;
+  apiErrorStatus?: number | null;
+  stopReason?: string | null;
   // H2：SDK result 的 modelUsage，含真实 contextWindow（供 ContextButton 占比，避免按默认 200000 失真）。
   modelUsage?: Record<string, { contextWindow?: number }>;
 }
