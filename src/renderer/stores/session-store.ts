@@ -7,6 +7,7 @@
 import { defineStore } from 'pinia';
 import type { Session } from '../../shared/types/session';
 import type { Message } from '../../shared/types/session';
+import type { StallInfo } from '../../shared/stall-watchdog';
 
 // C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
 export interface BackgroundTask {
@@ -61,6 +62,8 @@ export const useSessionStore = defineStore('session', {
     // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
     // 渲染层据此 + useNow 跳动时钟算实时耗时，整个 sending 期间常驻显示「⏱ X.Xs」。
     turnStartedAt: {} as Record<string, number>,
+    // 卡死检测：per-session 卡死信息（主进程看门狗 stalled 事件下发）。getter activeStalledInfo 读当前会话。
+    stalledInfo: {} as Record<string, StallInfo>,
   }),
   getters: {
     // 当前应展示的会话列表：搜索态下返回 searchResults，否则返回全量 sessions。
@@ -76,6 +79,11 @@ export const useSessionStore = defineStore('session', {
     activeTurnStartedAt(state): number | null {
       if (!state.activeSession) return null;
       return state.turnStartedAt[state.activeSession.id] ?? null;
+    },
+    // 当前活动会话的卡死信息（无则 null）。StalledBanner 据此显隐。
+    activeStalledInfo(state): StallInfo | null {
+      if (!state.activeSession) return null;
+      return state.stalledInfo[state.activeSession.id] ?? null;
     },
   },
   actions: {
@@ -157,6 +165,7 @@ export const useSessionStore = defineStore('session', {
         // 问题 1：清理已删会话的执行状态与流式快照
         this.runningSessions = this.runningSessions.filter((sid) => sid !== id);
         delete this.sessionStreams[id];
+        delete this.stalledInfo[id];
       } catch (error) {
         this.error = error instanceof Error ? error.message : '删除会话失败';
       }
@@ -261,6 +270,8 @@ export const useSessionStore = defineStore('session', {
       delete this.sessionStreams[sessionId];
       // 问题 2：清理本回合开始时间戳（执行结束，计时器随之隐藏）。
       delete this.turnStartedAt[sessionId];
+      // 卡死横幅随回合结束消失。
+      delete this.stalledInfo[sessionId];
     },
     // 问题 1：向非当前会话的流式快照追加内容（后台执行时累积流式，切回时恢复）。
     appendBackgroundStream(sessionId: string, type: 'content' | 'thinking' | 'tool', text: string) {
@@ -272,6 +283,13 @@ export const useSessionStore = defineStore('session', {
     // 问题 1：清空非当前会话的流式快照（result/error/aborted 时）。
     clearBackgroundStream(sessionId: string) {
       delete this.sessionStreams[sessionId];
+    },
+    // 卡死检测：主进程 stalled 事件 → 记录；用户「继续等待」/重试/中断 → 清除。
+    markStalled(sessionId: string, info: StallInfo) {
+      this.stalledInfo[sessionId] = info;
+    },
+    clearStalled(sessionId: string) {
+      delete this.stalledInfo[sessionId];
     },
     // 根因修复：ChatPage 重挂载（路由跳转回来）时重拉 messages + 同步状态。
     // 不重新注册监听（监听已在 App.vue 全局注册），只刷新当前会话数据。
