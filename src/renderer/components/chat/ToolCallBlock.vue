@@ -7,6 +7,7 @@ import { computed, ref } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isDiffContent, renderDiffHtml, renderMarkdown } from '../../utils/markdown';
 import { getProcessKindMeta, summarizeToolUse } from '../../utils/process-kind';
+import { SUB_AGENT_TOOL_NAMES } from '../../../shared/process-kind';
 import { useSessionStore } from '../../stores/session-store';
 
 const props = defineProps<{
@@ -33,7 +34,9 @@ const toolName = computed(() => useParsed.value?.name ?? '工具');
 const meta = computed(() => getProcessKindMeta(`tool:${toolName.value}`));
 // 行内 mono 细节（对齐 openhanako extractToolDetail：read→文件名、bash→命令…）。
 const detail = computed(() => (props.use ? summarizeToolUse(props.use.content) : ''));
-const isSubAgent = computed(() => toolName.value === 'Agent' || toolName.value === 'Task');
+// 与 process-kind.isSubAgentToolUse 共用同一份工具名清单：Agent/Task/Workflow/Skill 派生的
+// 子 agent 都显示「查看过程」锚点（原先只认 Agent/Task，Workflow/Skill 漏掉）。
+const isSubAgent = computed(() => (SUB_AGENT_TOOL_NAMES as readonly string[]).includes(toolName.value));
 
 function focusSubAgent(): void {
   if (props.use?.toolUseId) store.focusSubAgent(props.use.toolUseId);

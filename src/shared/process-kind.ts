@@ -45,12 +45,20 @@ export function processKindFromPart(part: CliMessageContentPart): string | null 
   }
 }
 
+// 会派生子 agent 的工具名集合（右侧「子Agent」Tab 分组、主流程「查看过程」锚点共用）。
+// Agent/Task 必然派生子 agent；Skill 在 context:fork、Workflow 在多 agent 编排时也会派生
+//（其 tool_use_id 被子 agent 事件的 parent_tool_use_id 引用）。
+export const SUB_AGENT_TOOL_NAMES = ['Agent', 'Task', 'Workflow', 'Skill'] as const;
+
 // tool_use 且为「会派生子 agent」的工具时，提取友好标题，用于右侧「子Agent」Tab 的分组标题
-// 与主流程锚点，避免出现「子任务1/子任务2」。Agent/Task 必然派生子 agent；Skill 在 context:fork、
-// Workflow 在多 agent 编排时也会派生（其 tool_use_id 被子 agent 事件的 parent_tool_use_id 引用），
-// 一并提取标题。title 字段只在产生子 agent 时被消费，不产生时设置也无副作用。
+// 与主流程锚点，避免出现「子任务1/子任务2」。title 字段只在产生子 agent 时被消费，不产生时设置也无副作用。
+export function isSubAgentToolUse(part: CliMessageContentPart): boolean {
+  if (part.type !== 'tool_use') return false;
+  return (SUB_AGENT_TOOL_NAMES as readonly string[]).includes(part.name);
+}
+
 export function extractSubAgentTitle(part: CliMessageContentPart): string | null {
-  if (part.type !== 'tool_use') return null;
+  if (!isSubAgentToolUse(part)) return null;
   const input = part.input as Record<string, unknown>;
   let raw: unknown;
   switch (part.name) {

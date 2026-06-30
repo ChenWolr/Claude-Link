@@ -91,8 +91,10 @@ const subAgentGroups = computed(() =>
   aggregateSubAgentGroups(sessionStore.messages, {
     turnStartIndex: sessionStore.turnStartIndex,
     sending: sessionStore.sending,
-    hideText: sessionStore.streamingContent !== '',
-    hideThinking: sessionStore.streamingThinking !== '',
+    // 子 Agent Tab 没有对应的全局流式预览；不能用主流程 streamingContent/thinking 去重，
+    // 否则会把子 Agent 已落库的错误/文本隐藏，只剩 running dots。
+    hideText: false,
+    hideThinking: false,
     toolProgress: sessionStore.toolProgress,
     titleByToolUseId: buildTitleByToolUseId(sessionStore.messages),
   }),

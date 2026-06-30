@@ -132,12 +132,17 @@ export function aggregateSubAgentGroups(allMessages: Message[], opts: SubAgentGr
     map.get(m.parentAgentId)!.push(m);
   }
 
-  // 问题 4：父 Task 工具 tool_result 的 createdAt = 子 Agent 真正完成时刻。只扫描当前 turn，
+  // 父 Task 工具 tool_result 的 createdAt = 子 Agent 真正完成时刻。只扫描当前 turn，
   // 与上方分组范围保持一致，避免历史 toolUseId（极端复用/脏数据）误把本轮子 Agent 标记完成。
+  // 嵌套修复：L2 子 agent（A 内部再派 B）的完成 tool_result 带 parentAgentId（=A 的 id），
+  // 旧逻辑用 !m.parentAgentId 只数主流程 tool_result → 嵌套子 agent 永远标「未完成」。
+  // 改为：只要 tool_result 的 toolUseId 命中本回合任一子 agent 派生 id（即 order 里的 parentAgentId），
+  // 就记完成——L1（parentAgentId=null）与 L2（parentAgentId=A）都能正确标 completed + 真实跨度。
+  const subAgentIds = new Set(order);
   const completionMsByAgent = new Map<string, number>();
   for (let i = opts.turnStartIndex; i < allMessages.length; i += 1) {
     const m = allMessages[i];
-    if (m.eventType === 'tool_result' && m.toolUseId && !m.parentAgentId) {
+    if (m.eventType === 'tool_result' && m.toolUseId && subAgentIds.has(m.toolUseId)) {
       const ms = new Date(m.createdAt).getTime();
       if (Number.isFinite(ms)) completionMsByAgent.set(m.toolUseId, ms);
     }
