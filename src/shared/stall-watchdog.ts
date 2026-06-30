@@ -1,0 +1,64 @@
+// stall-watchdog.ts
+// 卡死检测的纯逻辑层（不依赖 Electron / Vue / SDK，可单测、可复用）。
+//
+// 背景：SDK query 的 for-await 是唯一咽喉，主+子所有事件都过这一条。
+// 当 API/模型服务挂掉（死 socket）或子 Agent 内部报错不回 tool_result 时，
+// 该咽喉既不 throw 也不返回 → sending 永真、计时器永远跳。本模块提供「双区
+// 空闲判定」：等模型首字节用短阈值，有待决工具用长阈值（长工具合法），纯模型
+// 空隙累计极久才允许硬中断。判定结果驱动主进程看门狗 tick。
+
+/** 一次卡死的诊断信息（随 stalled 事件下发，渲染层原样展示）。 */
+export interface StallInfo {
+  /** 自首次判定卡死至今的毫秒数（用于横幅「已 Ns 无响应」）。 */
+  sinceMs: number;
+  /** 本次 tick 测得的、距上次活动的毫秒数。 */
+  gapMs: number;
+  /** 最后一次活动的事件类型（stream_event / message / tool_progress / keep_alive …），诊断用。 */
+  lastKind: string;
+  /** 最后一条带 parentToolUseId 的消息所属子 Agent（定位「哪个子 Agent 卡住」），无则 null。 */
+  pendingAgentId: string | null;
+  /** 卡死区域：model=等模型首字节/回合间；tool=有待决 tool_use。 */
+  zone: 'model' | 'tool';
+  /** 本回合连续卡死次数（>1 时横幅标注「第 N 次」）。 */
+  stallCount: number;
+}
+
+/** 双区阈值（毫秒）。主进程可用环境变量覆盖默认值。 */
+export interface StallThresholds {
+  /** MODEL 区阈值：无待决工具时，距上次活动超过此值判卡死。默认 120s。 */
+  modelGapMs: number;
+  /** TOOL 区阈值：有待决 tool_use 时（长工具合法），用更长阈值。默认 300s。 */
+  toolPendingMs: number;
+  /** 硬中断阈值：纯模型空隙累计超过此值，看门狗自动 killProcess。默认 600s。 */
+  hardAutoAbortMs: number;
+}
+
+export const DEFAULT_STALL_THRESHOLDS: StallThresholds = {
+  modelGapMs: 120_000,
+  toolPendingMs: 300_000,
+  hardAutoAbortMs: 600_000,
+};
+
+/**
+ * 纯函数：根据「最后活动时间 + 当前时间 + 是否有待决工具 + 阈值」判定卡死状态。
+ *
+ * 返回：
+ *  - stalled：是否达到卡死阈值。
+ *  - zone：卡死区域（决定阈值与是否允许硬中断）。
+ *  - gapMs：距上次活动的毫秒数（≥0）。
+ *  - hardAbort：是否达到硬中断条件（仅 model 区且超 hardAutoAbortMs；tool 区长工具合法，永不硬中断）。
+ */
+export function classifyStall(
+  lastActivityAt: number,
+  now: number,
+  pendingToolUse: boolean,
+  thresholds: StallThresholds = DEFAULT_STALL_THRESHOLDS,
+): { stalled: boolean; zone: 'model' | 'tool'; gapMs: number; hardAbort: boolean } {
+  const gapMs = Math.max(0, now - lastActivityAt);
+  const zone: 'model' | 'tool' = pendingToolUse ? 'tool' : 'model';
+  const threshold = zone === 'tool' ? thresholds.toolPendingMs : thresholds.modelGapMs;
+  const stalled = gapMs >= threshold;
+  // 仅「纯模型空隙」允许硬中断：tool 区可能是合法的长任务（编译/大查询/长 bash），绝不自动杀。
+  const hardAbort = stalled && zone === 'model' && gapMs >= thresholds.hardAutoAbortMs;
+  return { stalled, zone, gapMs, hardAbort };
+}
