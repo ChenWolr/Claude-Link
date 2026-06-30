@@ -5,6 +5,7 @@ import MessageBubble from './MessageBubble.vue';
 import StreamRenderer from './StreamRenderer.vue';
 import ProcessGroup from './ProcessGroup.vue';
 import ThinkingBlock from './ThinkingBlock.vue';
+import StalledBanner from './StalledBanner.vue';
 import { groupMessagesForRender, computeStats, type RenderItem } from '../../utils/group-messages';
 import { useSessionStore } from '../../stores/session-store';
 import { useNow } from '../../composables/use-now';
@@ -170,6 +171,8 @@ function handleCopyClick(event: MouseEvent): void {
             <span v-if="!streamingThinking && !streamingTool" class="turn-timer__label">Claude 正在思考…</span>
           </span>
         </div>
+        <!-- 卡死检测横幅：主进程看门狗判定无响应时显形，提供 继续等待/重试/中断。 -->
+        <StalledBanner />
         <ThinkingBlock v-if="streamingThinking" :content="streamingThinking" streaming />
         <div v-if="streamingTool" class="tool-stream">
           <span class="tool-stream__label">🔧 正在调用工具…</span>
