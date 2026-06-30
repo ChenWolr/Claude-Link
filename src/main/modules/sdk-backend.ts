@@ -94,6 +94,9 @@ interface SessionEntry {
   handle: SdkQueryHandle;
   emitExit: (code: number | null) => void;
   emitError: (err: Error) => void;
+  // 官方 Options.abortController：query() 传入后，abort() 会在 Windows 上经 SDK
+  // → TerminateProcess（瞬时不可捕获），打不死卡死在死 socket 上的子进程时兜底硬杀。
+  abortController: AbortController | null;
 }
 const entries = new Map<string, SessionEntry>();
 const sessionCliIds = new Map<string, string>();
@@ -208,6 +211,7 @@ function createEntry(): SessionEntry {
   return {
     query: null,
     handle,
+    abortController: null,
     emitExit: (code) => {
       handle.killed = true;
       for (const cb of exitCbs) {
@@ -545,6 +549,10 @@ async function runQuery(
   entries.set(sessionId, entry);
 
   const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow);
+  // 卡死检测/硬杀：每会话一个 AbortController，传入 Options.abortController。
+  // killProcess 在软中断之外调 .abort()，Windows 上 → TerminateProcess 真硬杀。
+  entry.abortController = new AbortController();
+  sdkOptions.abortController = entry.abortController;
   // 项目宗旨：要求用户本地安装 Claude Code，不内嵌二进制。本地没装（pathToClaudeCodeExecutable
   // 解析不到）时给出中文提示，而非把 SDK 的英文 "Native CLI binary not found" 直接甩给用户。
   if (!sdkOptions.pathToClaudeCodeExecutable) {
@@ -840,9 +848,17 @@ export function killProcess(sessionId: string): void {
     interruptedQueries.add(entry.query);
     entry.handle.interrupt();
     void entry.query.interrupt().catch(() => {
-      // 中断失败不阻塞；query 会因迭代抛错走 aborted 分支。
+      // 软中断失败不阻塞；query 会因迭代抛错走 aborted 分支。
     });
-    logger.info(`Interrupted SDK query for session ${sessionId}`);
+    // 硬杀兜底：query.interrupt() 是 stdin 控制帧（软），子进程卡死在死 socket 上时
+    // 根本读不到。abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
+    //（瞬时不可捕获），真能打死。两条都发，软的先给优雅退出机会。
+    try {
+      entry.abortController?.abort();
+    } catch {
+      // abort 已触发过等异常忽略
+    }
+    logger.info(`Interrupted SDK query for session ${sessionId} (abort signaled)`);
   }
 }
 
