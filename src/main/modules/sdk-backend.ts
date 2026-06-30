@@ -223,6 +223,10 @@ function ensureWatchdog(mainWindow: BrowserWindow): void {
   watchdogWindow = mainWindow;
   if (watchdogTimer) return;
   watchdogTimer = setInterval(watchdogTick, STALL_TICK_MS);
+  // unref：看门狗计时器不得阻止 Electron 退出（app.quit() 仍会终止进程，此为卫生性兜底）。
+  if (watchdogTimer && typeof watchdogTimer.unref === 'function') {
+    watchdogTimer.unref();
+  }
 }
 
 function watchdogTick(): void {
@@ -240,8 +244,10 @@ function watchdogTick(): void {
       }
       continue;
     }
-    if (t.stalledSince === null) t.stalledSince = t.lastActivityAt;
-    const sinceMs = now - (t.stalledSince ?? t.lastActivityAt);
+    // stalledSince = 首次判定卡死的时刻（非 lastActivityAt）：sinceMs = 自卡死判定至今
+    //（与 gapMs=总静默 区分：gapMs 给横幅「已 Ns 无响应」，sinceMs 表卡死已持续多久）。
+    if (t.stalledSince === null) t.stalledSince = now;
+    const sinceMs = now - (t.stalledSince ?? now);
     // 首次到达阈值：发一次 stalled（forwardTransient 不落库，纯状态横幅）。
     if (!t.stallNotified) {
       t.stallNotified = true;
