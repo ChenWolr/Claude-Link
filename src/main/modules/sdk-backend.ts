@@ -219,6 +219,58 @@ function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
   touchActivity(sessionId, event.type);
 }
 
+function ensureWatchdog(mainWindow: BrowserWindow): void {
+  watchdogWindow = mainWindow;
+  if (watchdogTimer) return;
+  watchdogTimer = setInterval(watchdogTick, STALL_TICK_MS);
+}
+
+function watchdogTick(): void {
+  const mw = watchdogWindow;
+  if (!mw || mw.isDestroyed()) return;
+  const now = Date.now();
+  for (const [sessionId, t] of stallTrackers) {
+    if (!isSessionActive(sessionId)) continue;
+    const verdict = classifyStall(t.lastActivityAt, now, t.pendingToolUse, STALL_THRESHOLDS);
+    if (!verdict.stalled) {
+      // 活跃：清标记，下次再卡可再次通知。
+      if (t.stallNotified) {
+        t.stallNotified = false;
+        t.stalledSince = null;
+      }
+      continue;
+    }
+    if (t.stalledSince === null) t.stalledSince = t.lastActivityAt;
+    const sinceMs = now - (t.stalledSince ?? t.lastActivityAt);
+    // 首次到达阈值：发一次 stalled（forwardTransient 不落库，纯状态横幅）。
+    if (!t.stallNotified) {
+      t.stallNotified = true;
+      t.stallCount += 1;
+      const info: StallInfo = {
+        sinceMs,
+        gapMs: verdict.gapMs,
+        lastKind: t.lastKind,
+        pendingAgentId: t.lastParentAgentId,
+        zone: verdict.zone,
+        stallCount: t.stallCount,
+      };
+      forwardTransient(sessionId, mw, { type: 'stalled', ...info });
+      logger.warn(`[stall] session ${sessionId} 无响应 ${Math.round(verdict.gapMs / 1000)}s（zone=${verdict.zone}, lastKind=${t.lastKind}, agent=${t.lastParentAgentId ?? '-'}, count=${t.stallCount}）`);
+    }
+    // 硬中断：纯模型空隙累计极久 → killProcess（abortController 真硬杀）。每回合只发一次。
+    if (verdict.hardAbort && !t.hardAbortFired) {
+      t.hardAbortFired = true;
+      const secs = Math.round(verdict.gapMs / 1000);
+      forwardEvent(sessionId, mw, {
+        type: 'error',
+        message: `已 ${secs} 秒无响应，判定模型服务卡死，已自动中断。可点击「重试」重新发送。`,
+      });
+      logger.error(`[stall] hard auto-abort session ${sessionId}: ${secs}s model-zone silence`);
+      killProcess(sessionId);
+    }
+  }
+}
+
 const pendingPermissionRequests = new Map<string, (response: PermissionResponsePayload) => void>();
 // 标记会话已删除：runQuery 下轮迭代检测到即自停，forwardEvent 落库前也据此跳过。
 export function markSessionDeleted(sessionId: string): void {
@@ -662,6 +714,7 @@ async function runQuery(
   entries.set(sessionId, entry);
   // 每个新 query 重置卡死追踪（per-turn stallCount / hardAbortFired）。
   resetStallTracker(sessionId);
+  ensureWatchdog(mainWindow);
 
   const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow);
   // 卡死检测/硬杀：每会话一个 AbortController，传入 Options.abortController。
