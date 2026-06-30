@@ -18,6 +18,7 @@ import {
 import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
+import { classifyStall, DEFAULT_STALL_THRESHOLDS } from '../src/shared/stall-watchdog';
 
 let pass = 0;
 let fail = 0;
@@ -251,7 +252,11 @@ function readRel(p: string): string {
   const nodePath = require('node:path');
   // 脚本位于 scripts/，相对路径 ../xxx 解析到项目根下。用 __dirname（cjs 可用）替代
   // import.meta.url（仅 ESM 可用，tsx 以 cjs 输出时不可用）。
-  return fs.readFileSync(nodePath.resolve(__dirname, '..', p), 'utf8');
+  const abs = nodePath.resolve(__dirname, '..', p);
+  // 文件尚不存在时返回空串而非抛错：接线契约在对应 Task 完成前文件可能缺失，
+  // 此时断言应记为 ❌（红），而非让整个 selftest 崩溃漏掉后续断言与最终汇总。
+  if (!fs.existsSync(abs)) return '';
+  return fs.readFileSync(abs, 'utf8');
 }
 
 console.log('\n=== 15) C1: system/init 事件必须被识别并持久化 session_id ===');
@@ -810,6 +815,39 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
   // R6（问题 1+2 健壮性）：队列驱动回合同步执行态（不经 sendMessage → 否则 sending 恒 false）。
   check('task-store 队列事件同步 markRunning/markStopped',
     ts.includes('sessionStore.markRunning(payload.sessionId)') && ts.includes('sessionStore.markStopped(payload.sessionId)'));
+}
+
+console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/硬中断）===');
+{
+  const T = DEFAULT_STALL_THRESHOLDS;
+  // 纯函数 classifyStall 行为
+  check('MODEL 区刚到阈值判定卡死', classifyStall(0, T.modelGapMs, false).stalled === true);
+  check('MODEL 区差 1ms 未到阈值不卡死', classifyStall(0, T.modelGapMs - 1, false).stalled === false);
+  check('TOOL 区在 model 阈值上不卡死（用更长阈值）', classifyStall(0, T.modelGapMs, true).stalled === false);
+  check('TOOL 区到 tool 阈值判定卡死', classifyStall(0, T.toolPendingMs, true).stalled === true);
+  check('MODEL 区到硬中断阈值触发 hardAbort', classifyStall(0, T.hardAutoAbortMs, false).hardAbort === true);
+  check('TOOL 区到硬中断阈值也不 hardAbort（长工具合法）', classifyStall(0, T.hardAutoAbortMs, true).hardAbort === false);
+  check('MODEL 区未到硬中断阈值不 hardAbort', classifyStall(0, T.modelGapMs, false).hardAbort === false);
+  check('classifyStall 报告 zone=model', classifyStall(0, T.modelGapMs, false).zone === 'model');
+  check('classifyStall 报告 zone=tool', classifyStall(0, T.toolPendingMs, true).zone === 'tool');
+  check('gapMs 恒非负（now 早于 lastActivityAt 时钳为 0）', classifyStall(100, 50, false).gapMs === 0);
+
+  // 接线存在性（防止后续 Task 漏接）—— Task 2-6 完成前为红，属预期。
+  const cli = readRel('src/shared/types/cli.ts');
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  const ss = readRel('src/renderer/stores/session-store.ts');
+  const uc = readRel('src/renderer/composables/use-chat.ts');
+  const banner = readRel('src/renderer/components/chat/StalledBanner.vue');
+  const ml = readRel('src/renderer/components/chat/MessageList.vue');
+  check('cli.ts 含 stalled 事件类型', cli.includes("type: 'stalled'"));
+  check('sdk-backend 接 keep_alive 心跳', sb.includes("'keep_alive'"));
+  check('sdk-backend 传 abortController 并 .abort()', sb.includes('abortController') && sb.includes('.abort()'));
+  check('sdk-backend 看门狗 setInterval + classifyStall', sb.includes('setInterval') && sb.includes('classifyStall'));
+  check('sdk-backend 发 stalled 事件', sb.includes("type: 'stalled'"));
+  check('session-store 含 stalledInfo + activeStalledInfo', ss.includes('stalledInfo') && ss.includes('activeStalledInfo'));
+  check('use-chat 处理 stalled + retryLastTurn', uc.includes("case 'stalled'") && uc.includes('retryLastTurn'));
+  check('StalledBanner 三动作', banner.includes('继续等待') && banner.includes('重试') && banner.includes('中断'));
+  check('MessageList 挂载 StalledBanner', ml.includes('StalledBanner'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

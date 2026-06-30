@@ -1,3 +1,5 @@
+import type { StallInfo } from '../stall-watchdog';
+
 export interface CliInitEvent {
   type: 'init';
   session_id: string;
@@ -177,6 +179,12 @@ export interface CliAbortedEvent {
   message: string;
 }
 
+// 卡死检测事件（主进程看门狗合成，非 SDK 原生）。当 SDK 流既不 throw 也不返回、
+// 距上次活动超过阈值时发出。瞬态——仅 IPC 推前端展示横幅，不落库（非对话历史）。
+export interface CliStalledEvent extends StallInfo {
+  type: 'stalled';
+}
+
 // tool_progress：工具运行中周期进度（SDK worker 本地计时器周期 emit）。瞬态不落库。
 export interface CliToolProgressEvent {
   type: 'tool_progress';
@@ -236,6 +244,7 @@ export type CliEvent =
   | CliResultEvent
   | CliErrorEvent
   | CliAbortedEvent
+  | CliStalledEvent
   | CliToolProgressEvent
   | CliTaskEvent;
 
