@@ -409,20 +409,20 @@ function handleFontScaleChange(e: Event) {
 }
 
 .config-page {
-  max-width: 640px;
+  max-width: 40rem;
   margin: 0 auto;
-  padding: 32px 32px 64px;
+  padding: 2rem 2rem 4rem;
 }
 
 .config-page__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 24px;
+  margin-bottom: 1.5rem;
 }
 
 .config-page__header h1 {
-  margin: 4px 0 0;
+  margin: 0.25rem 0 0;
   font-size: 1.5rem;
 }
 
@@ -431,7 +431,7 @@ function handleFontScaleChange(e: Event) {
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text);
-  padding: 8px 16px;
+  padding: 0.5rem 1rem;
   font-size: 0.8125rem;
   cursor: pointer;
   transition: background 0.15s;
@@ -450,8 +450,8 @@ function handleFontScaleChange(e: Event) {
 
 .banner {
   border-radius: var(--radius-md);
-  padding: 12px 16px;
-  margin-bottom: 20px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1.25rem;
   font-size: 0.8125rem;
 }
 
@@ -475,8 +475,8 @@ function handleFontScaleChange(e: Event) {
 
 .toast {
   border-radius: var(--radius-md);
-  padding: 10px 14px;
-  margin-bottom: 16px;
+  padding: 0.625rem 0.875rem;
+  margin-bottom: 1rem;
   font-size: 0.8125rem;
 }
 
@@ -495,8 +495,8 @@ function handleFontScaleChange(e: Event) {
 .autodetect-bar {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
 }
 
 .autodetect-btn {
@@ -504,7 +504,7 @@ function handleFontScaleChange(e: Event) {
   border-radius: var(--radius-md);
   background: var(--color-accent);
   color: #07120d;
-  padding: 8px 14px;
+  padding: 0.5rem 0.875rem;
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
@@ -527,7 +527,7 @@ function handleFontScaleChange(e: Event) {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 8px 14px;
+  padding: 0.5rem 0.875rem;
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
@@ -541,8 +541,8 @@ function handleFontScaleChange(e: Event) {
 
 .tabs {
   display: flex;
-  gap: 4px;
-  margin-bottom: 16px;
+  gap: 0.25rem;
+  margin-bottom: 1rem;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -550,7 +550,7 @@ function handleFontScaleChange(e: Event) {
   border: 0;
   background: transparent;
   color: var(--color-text-muted);
-  padding: 10px 16px;
+  padding: 0.625rem 1rem;
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
@@ -571,8 +571,8 @@ function handleFontScaleChange(e: Event) {
 .save-badge {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
   border-radius: var(--radius-md);
   font-size: 0.75rem;
 }
@@ -612,22 +612,22 @@ function handleFontScaleChange(e: Event) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 0.75rem;
   flex-wrap: wrap;
-  margin-top: 8px;
+  margin-top: 0.5rem;
 }
 
 .save-bar__status {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 0.375rem;
   color: var(--color-text-muted);
   font-size: 0.75rem;
 }
 
 .test-result {
-  margin-bottom: 16px;
-  padding: 12px 14px;
+  margin-bottom: 1rem;
+  padding: 0.75rem 0.875rem;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   font-size: 0.8125rem;
@@ -651,7 +651,7 @@ function handleFontScaleChange(e: Event) {
 }
 
 .test-result__preview {
-  margin: 8px 0 0;
+  margin: 0.5rem 0 0;
   color: var(--color-text-muted);
   font-size: 0.75rem;
   line-height: 1.5;
@@ -660,19 +660,19 @@ function handleFontScaleChange(e: Event) {
 
 .config-form {
   display: grid;
-  gap: 20px;
+  gap: 1.25rem;
 }
 
 .connection-stack {
   display: grid;
-  gap: 20px;
+  gap: 1.25rem;
 }
 
 .section-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 0.75rem;
 }
 
 .clear-btn {
@@ -681,7 +681,7 @@ function handleFontScaleChange(e: Event) {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-danger);
-  padding: 5px 12px;
+  padding: 0.3125rem 0.75rem;
   font-size: 0.75rem;
   cursor: pointer;
 }
@@ -691,11 +691,11 @@ function handleFontScaleChange(e: Event) {
 }
 
 .storage-info {
-  margin-bottom: 20px;
+  margin-bottom: 1.25rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel);
-  padding: 10px 14px;
+  padding: 0.625rem 0.875rem;
   font-size: 0.75rem;
 }
 
@@ -706,19 +706,19 @@ function handleFontScaleChange(e: Event) {
 
 .storage-info__body {
   display: grid;
-  gap: 4px;
-  margin-top: 10px;
+  gap: 0.25rem;
+  margin-top: 0.625rem;
 }
 
 .storage-info__body div {
   display: flex;
-  gap: 10px;
+  gap: 0.625rem;
   align-items: baseline;
 }
 
 .storage-info__body span {
   color: var(--color-text-muted);
-  min-width: 96px;
+  min-width: 6rem;
   flex-shrink: 0;
 }
 
@@ -731,15 +731,15 @@ function handleFontScaleChange(e: Event) {
 
 .section {
   display: grid;
-  gap: 16px;
-  padding: 20px;
+  gap: 1rem;
+  padding: 1.25rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel);
 }
 
 .section-title {
-  margin: 0 0 4px;
+  margin: 0 0 0.25rem;
   font-size: 0.9375rem;
   font-weight: 650;
   color: var(--color-text);
@@ -747,7 +747,7 @@ function handleFontScaleChange(e: Event) {
 
 .field {
   display: grid;
-  gap: 8px;
+  gap: 0.5rem;
 }
 
 .field span {
@@ -773,14 +773,14 @@ input[type='number'] {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 10px 12px;
+  padding: 0.625rem 0.75rem;
   font-size: 0.8125rem;
 }
 
 .accordion-toggle {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 0.5rem;
   border: none;
   background: transparent;
   color: var(--color-text-muted);
@@ -791,9 +791,9 @@ input[type='number'] {
 
 .advanced-panel {
   display: grid;
-  gap: 12px;
-  margin-top: 12px;
-  padding: 16px;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding: 1rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
@@ -806,7 +806,7 @@ input[type='number'] {
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-text-muted);
-  padding: 6px 12px;
+  padding: 0.375rem 0.75rem;
   font-size: 0.75rem;
   cursor: pointer;
 }
@@ -817,11 +817,11 @@ input[type='number'] {
   border-radius: var(--radius-md);
   background: var(--color-panel);
   color: var(--color-text);
-  padding: 10px 12px;
+  padding: 0.625rem 0.75rem;
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Consolas, monospace;
   font-size: 0.8125rem;
   resize: vertical;
-  min-height: 120px;
+  min-height: 7.5rem;
 }
 
 .json-error {
@@ -830,12 +830,12 @@ input[type='number'] {
 }
 
 .save-button {
-  margin-top: 8px;
+  margin-top: 0.5rem;
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-accent);
   color: #07120d;
-  padding: 12px;
+  padding: 0.75rem;
   font-size: 0.9375rem;
   font-weight: 700;
   cursor: pointer;
@@ -873,14 +873,14 @@ input[type='number'] {
   border-radius: var(--radius-sm);
   background: rgba(58, 166, 117, 0.08);
   color: var(--color-accent-strong);
-  padding: 6px 12px;
+  padding: 0.375rem 0.75rem;
   font-size: 0.75rem;
   cursor: pointer;
 }
 
 .advanced-actions {
   display: flex;
-  gap: 8px;
+  gap: 0.5rem;
   flex-wrap: wrap;
 }
 
@@ -889,7 +889,7 @@ input[type='number'] {
   border-radius: var(--radius-sm);
   background: var(--color-accent);
   color: #07120d;
-  padding: 6px 12px;
+  padding: 0.375rem 0.75rem;
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;

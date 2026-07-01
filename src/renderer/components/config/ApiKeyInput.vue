@@ -18,7 +18,7 @@ const visible = ref(false);
 <style scoped>
 .field {
   display: grid;
-  gap: 8px;
+  gap: 0.5rem;
 }
 
 .field span {
@@ -28,7 +28,7 @@ const visible = ref(false);
 
 .input-row {
   display: flex;
-  gap: 8px;
+  gap: 0.5rem;
 }
 
 input {
@@ -38,7 +38,7 @@ input {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 10px 12px;
+  padding: 0.625rem 0.75rem;
 }
 
 button {
@@ -46,6 +46,6 @@ button {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 0 12px;
+  padding: 0 0.75rem;
 }
 </style>
