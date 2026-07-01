@@ -20,9 +20,6 @@ const fable = bind('fable');
 <template>
   <div class="model-mapping">
     <div class="model-mapping__title">模型类型映射</div>
-    <p class="model-mapping__hint">
-      Claude Code 用 sonnet / haiku / opus / fable 四个类型别名，通过下方映射指向实际模型（如 glm-5.2、deepseek-chat）。会话里选类型，CLI 自动走映射；留空则该类型用默认。
-    </p>
     <div class="model-mapping__grid">
       <label class="model-mapping__field">
         <span>sonnet（默认 · 均衡）</span>

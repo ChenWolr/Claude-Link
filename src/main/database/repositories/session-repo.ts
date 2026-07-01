@@ -16,6 +16,7 @@ interface SessionRow {
   updated_at: string;
   last_context_tokens: number | null;
   last_context_updated_at: string | null;
+  last_context_window: number | null;
 }
 
 function toSession(row: SessionRow): Session {
@@ -32,6 +33,7 @@ function toSession(row: SessionRow): Session {
     updatedAt: row.updated_at,
     lastContextTokens: row.last_context_tokens,
     lastContextUpdatedAt: row.last_context_updated_at,
+    lastContextWindow: row.last_context_window,
   };
 }
 
@@ -150,11 +152,11 @@ export function updateModelOverride(id: string, modelOverride: string | null): S
   return getSession(id);
 }
 
-export function updateLastContext(id: string, tokens: number): Session | null {
+export function updateLastContext(id: string, tokens: number, windowSize?: number): Session | null {
   getConnection()
     .prepare(
-      "UPDATE sessions SET last_context_tokens = ?, last_context_updated_at = datetime('now') WHERE id = ?",
+      "UPDATE sessions SET last_context_tokens = ?, last_context_window = ?, last_context_updated_at = datetime('now') WHERE id = ?",
     )
-    .run(tokens, id);
+    .run(tokens, windowSize ?? null, id);
   return getSession(id);
 }

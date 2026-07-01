@@ -13,6 +13,7 @@ export interface ImportedSettings {
   apiBaseUrl?: string;
   defaultModel?: string;
   apiKeyHelper?: string;
+  contextWindowOverride?: number | null;
   advancedJson: string;
 }
 
@@ -82,17 +83,29 @@ export function parseClaudeSettings(content: string): ImportedSettings {
     (env ? peekString(env, ['ANTHROPIC_BASE_URL']) : undefined);
   if (apiBaseUrl) result.apiBaseUrl = apiBaseUrl;
 
-  // Default model：优先用 Claude Code 的【类型别名】（sonnet/haiku/opus），
-  // 让 CLI 通过 env 映射（ANTHROPIC_DEFAULT_SONNET_MODEL 等）转到实际模型。
-  // 会话里选的是"类型"，CLI 自动映射到国产模型（如 glm-5.2）——这是官方机制
-  // （aliases + ANTHROPIC_DEFAULT_*_MODEL）。仅当没有任何映射时，才 fallback
+  // Default model：优先用 Claude Code 的【类型别名】（sonnet/haiku/opus/fable），
+  // 让 CLI 通过 env 映射（ANTHROPIC_DEFAULT_*_MODEL）转到实际模型。会话里选的是"类型"，
+  // CLI 自动映射到国产模型（如 glm-5.2）——这是官方机制（aliases + ANTHROPIC_DEFAULT_*_MODEL）。
+  // 取首个有映射的别名（与 resolveDefaultModel 同优先级 sonnet>haiku>opus>fable）：
+  // 这样只配 fable 时 defaultModel='fable'，不再丢空。仅当无任何映射时，才 fallback
   // 到顶层 model / ANTHROPIC_MODEL 的实际值。
   // (Peek only — keep the model-mapping env vars intact in advancedJson.)
-  const hasSonnetMapping = env ? peekString(env, ['ANTHROPIC_DEFAULT_SONNET_MODEL']) : undefined;
+  const mappedAlias = env
+    ? MODEL_ALIASES.find((a) => peekString(env, [`ANTHROPIC_DEFAULT_${a.toUpperCase()}_MODEL`]))
+    : undefined;
   const defaultModel =
     takeString(remaining, 'model') ??
-    (hasSonnetMapping ? 'sonnet' : (env ? peekString(env, ['ANTHROPIC_MODEL']) : undefined));
+    mappedAlias ??
+    (env ? peekString(env, ['ANTHROPIC_MODEL']) : undefined);
   if (defaultModel) result.defaultModel = defaultModel;
+
+  // 上下文窗口覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW）：peek 转 number 回填到表单字段。
+  // peek 不删——保留在 env，与 apiKey/baseUrl/model-mapping 一致（advancedJson 是完整 settings.json）。
+  const ctxWinRaw = env ? env['CLAUDE_LINK_CONTEXT_WINDOW'] : undefined;
+  let contextWindowOverride: number | null = null;
+  if (typeof ctxWinRaw === 'number' && ctxWinRaw > 0) contextWindowOverride = ctxWinRaw;
+  else if (typeof ctxWinRaw === 'string' && Number.isFinite(Number(ctxWinRaw)) && Number(ctxWinRaw) > 0) contextWindowOverride = Number(ctxWinRaw);
+  if (contextWindowOverride !== null) result.contextWindowOverride = contextWindowOverride;
 
   if (envOriginal) {
     if (env && Object.keys(env).length > 0) {
@@ -234,7 +247,7 @@ function dropEmptyEnv(adv: Record<string, unknown>): void {
 // apiKey/apiBaseUrl/permissionMode → advancedJson.env / permissions
 export function syncFormToAdvancedJson(
   advancedJson: string,
-  form: { apiKey: string; apiBaseUrl: string; permissionMode: string },
+  form: { apiKey: string; apiBaseUrl: string; permissionMode: string; contextWindowOverride?: number | null },
 ): string {
   const adv = cloneAdv(advancedJson);
   const env = ensureObject(adv, 'env');
@@ -251,6 +264,14 @@ export function syncFormToAdvancedJson(
     env.ANTHROPIC_BASE_URL = url;
   } else {
     delete env.ANTHROPIC_BASE_URL;
+  }
+
+  // 上下文窗口覆盖：有正值写 env.CLAUDE_LINK_CONTEXT_WINDOW（字符串，与其它 env 一致），
+  // 留空/非正数则删 key（回落到模型查表 / 200k 兜底）。
+  if (typeof form.contextWindowOverride === 'number' && form.contextWindowOverride > 0) {
+    env.CLAUDE_LINK_CONTEXT_WINDOW = String(form.contextWindowOverride);
+  } else {
+    delete env.CLAUDE_LINK_CONTEXT_WINDOW;
   }
 
   const permissions = ensureObject(adv, 'permissions');

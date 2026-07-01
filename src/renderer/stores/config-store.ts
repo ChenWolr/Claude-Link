@@ -37,6 +37,7 @@ const defaultConfig: AppConfig = {
   taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
+  contextWindowOverride: null,
 };
 
 export const useConfigStore = defineStore('config', {
@@ -185,6 +186,7 @@ export const useConfigStore = defineStore('config', {
       apiBaseUrl?: string;
       defaultModel?: string;
       advancedJson?: string;
+      contextWindowOverride?: number | null;
     }): void {
       // JSON→表单回填：置标志阻止 ConfigPage 表单 watch 反向同步（防循环）
       this.updatingFromJson = true;
@@ -203,6 +205,10 @@ export const useConfigStore = defineStore('config', {
       if (extracted.advancedJson && extracted.advancedJson !== '{}') {
         this.config.advancedJson = extracted.advancedJson;
         this.importedFields.add('advancedJson');
+      }
+      if (extracted.contextWindowOverride !== undefined) {
+        this.config.contextWindowOverride = extracted.contextWindowOverride;
+        this.importedFields.add('contextWindowOverride');
       }
       void nextTick(() => {
         this.updatingFromJson = false;
@@ -227,6 +233,7 @@ export const useConfigStore = defineStore('config', {
         apiKey: this.config.apiKey,
         apiBaseUrl: this.config.apiBaseUrl,
         permissionMode: this.config.permissionMode,
+        contextWindowOverride: this.config.contextWindowOverride,
       });
       void nextTick(() => {
         this.updatingFromJson = false;

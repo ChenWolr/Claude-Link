@@ -8,6 +8,8 @@ import { defineStore } from 'pinia';
 import type { Session } from '../../shared/types/session';
 import type { Message } from '../../shared/types/session';
 import type { StallInfo } from '../../shared/stall-watchdog';
+import { resolveContextWindow } from '../../shared/model-context-windows';
+import { useConfigStore } from './config-store';
 
 // C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
 export interface BackgroundTask {
@@ -141,8 +143,15 @@ export const useSessionStore = defineStore('session', {
       this.toolProgress = {};
       this.backgroundTasks = {};
       this.compacting = false;
+      // 上下文窗口 fallback 链：优先该会话持久化的真实窗口（连通后缓存），其次按当前模型
+      // 查内置表（解决未连接时 1M 模型被当成 200k），再次用户全局覆盖，最后 200k。
+      const windowSize = resolveContextWindow({
+        lastContextWindow: session.lastContextWindow,
+        model: session.modelOverride || session.model,
+        override: useConfigStore().contextWindowOverride,
+      });
       this.contextStats = session.lastContextTokens
-        ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize: 200000, ratio: session.lastContextTokens / 200000 }
+        ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize, ratio: windowSize > 0 ? session.lastContextTokens / windowSize : 0 }
         : null;
       try {
         this.messages = await window.claudeLink.getSessionMessages(session.id);

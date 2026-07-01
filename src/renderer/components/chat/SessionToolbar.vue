@@ -3,8 +3,6 @@
 // 按用户要求，所有"会话内容"相关的控件都放在底部（输入区附近），而非顶部。
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
-import { useConfigStore } from '../../stores/config-store';
-import { FONT_SCALE_SIZES } from '../../../shared/constants';
 import ModelSelector from './ModelSelector.vue';
 import ContextButton from './ContextButton.vue';
 import type { Session } from '../../../shared/types/session';
@@ -19,15 +17,7 @@ const emit = defineEmits<{
 }>();
 
 const sessionStore = useSessionStore();
-const configStore = useConfigStore();
 const activeSession = computed(() => sessionStore.activeSession);
-
-async function onFontScaleChange(e: Event) {
-  const scale = (e.target as HTMLSelectElement).value;
-  configStore.config.fontScale = scale as typeof configStore.config.fontScale;
-  document.documentElement.style.setProperty('--font-size-base', FONT_SCALE_SIZES[scale] ?? '16px');
-  await configStore.saveConfig();
-}
 
 // 工作空间下拉
 const showWorkspaceMenu = ref(false);
@@ -136,16 +126,6 @@ onUnmounted(() => {
       <span class="ctl__label">权限</span>
       <select :value="activeSession.permissionMode" :disabled="sending" @change="onPermissionChange">
         <option v-for="p in PERMISSIONS" :key="p.value" :value="p.value">{{ p.label }}</option>
-      </select>
-    </label>
-
-    <!-- 字号：全局字体大小三档切换 -->
-    <label class="ctl ctl--select" title="字体大小（全局）">
-      <span class="ctl__label">字号</span>
-      <select :value="configStore.config.fontScale" @change="onFontScaleChange">
-        <option value="small">小</option>
-        <option value="medium">中</option>
-        <option value="large">大</option>
       </select>
     </label>
 

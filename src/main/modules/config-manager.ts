@@ -53,6 +53,7 @@ const defaultConfig: StoredConfig = {
   taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
+  contextWindowOverride: null,
 };
 
 const store = new ElectronStoreCtor({
@@ -111,6 +112,7 @@ export function getConfig(): AppConfig {
     taskDelaySeconds: config.taskDelaySeconds,
     themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,
     fontScale: config.fontScale ?? DEFAULT_FONT_SCALE,
+    contextWindowOverride: config.contextWindowOverride ?? null,
   };
 }
 
@@ -157,6 +159,7 @@ export function importSettingsFile(filePath: string): {
   apiKey?: string;
   apiBaseUrl?: string;
   defaultModel?: string;
+  contextWindowOverride?: number | null;
   advancedJson: string;
 } {
   const content = fs.readFileSync(filePath, 'utf-8');

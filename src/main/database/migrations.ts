@@ -84,6 +84,11 @@ export function runMigrations(db: Database.Database): void {
     if (!hasCol('last_context_updated_at')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_context_updated_at TEXT DEFAULT NULL');
     }
+    // 上下文窗口持久化：缓存 SDK result.modelUsage.contextWindow 的真实值，
+    // 切换会话重建 contextStats 时直接复用，避免一律回到 200k 兜底（内置模型表/fallback 顶不住真实值）。
+    if (!hasCol('last_context_window')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_context_window INTEGER DEFAULT NULL');
+    }
   }
 
   // 幂等自愈（messages 过程化四列）：老 DB（plan 落地前建库）的 messages 表没有

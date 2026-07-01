@@ -2,7 +2,6 @@
 import { onMounted, ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config-store';
-import ProviderSelect from '../components/config/ProviderSelect.vue';
 import ApiKeyInput from '../components/config/ApiKeyInput.vue';
 import ModelMappingInputs from '../components/config/ModelMappingInputs.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
@@ -18,7 +17,7 @@ const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
 const advancedJsonError = ref<string | null>(null);
 
-// 分类标签页：连接（含供应商/端点/模型映射/高级 JSON）/ 行为 / 外观。
+// 分类标签页：连接（含端点/模型映射/高级 JSON）/ 行为 / 外观。
 // 连接、模型、高级同属"如何接入 API"，合并在一页用子卡片分隔。
 type TabId = 'connection' | 'behavior' | 'appearance';
 const activeTab = ref<TabId>('connection');
@@ -28,8 +27,15 @@ const activeTab = ref<TabId>('connection');
 // cliPath/cliVersion/workingDirectory 由系统维护（自动检测/未开放编辑），不纳入快照。
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
-  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale',
+  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale', 'contextWindowOverride',
 ] as const;
+
+// 上下文窗口覆盖输入：input 清空时给空串/NaN，这里统一规范成 number|null。
+// null = 不覆盖（未连接按模型查表，连通后用真实值）；正整数 = 写 env.CLAUDE_LINK_CONTEXT_WINDOW。
+function onContextWindowInput(raw: string): void {
+  const n = Number(raw);
+  store.config.contextWindowOverride = Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
 const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
 let initialized = false;
 let lastSavedSnapshot = '';
@@ -96,7 +102,7 @@ watch(
 
 // 表单→JSON：apiKey/apiBaseUrl/permissionMode 改动同步进 advancedJson（完整双向）
 watch(
-  () => [store.config.apiKey, store.config.apiBaseUrl, store.config.permissionMode],
+  () => [store.config.apiKey, store.config.apiBaseUrl, store.config.permissionMode, store.config.contextWindowOverride],
   () => {
     if (!store.updatingFromJson) store.syncFormToAdvanced();
   },
@@ -112,42 +118,6 @@ const advancedJsonValid = computed(() => {
   }
 });
 
-const urlValidation = computed(() => {
-  const url = store.config.apiBaseUrl?.trim() || '';
-  if (!url) return { status: 'empty', message: '' };
-
-  // Check basic format
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    return { status: 'error', message: 'URL 必须以 http:// 或 https:// 开头' };
-  }
-
-  // Check double slashes in path
-  const pathPart = url.replace(/^https?:\/\//, '');
-  if (pathPart.includes('//')) {
-    return { status: 'error', message: 'URL 中包含多余的双斜杠' };
-  }
-
-  // Official endpoint doesn't need /v1
-  if (url === 'https://api.anthropic.com' || url === 'http://api.anthropic.com') {
-    return { status: 'ok', message: '官方端点，CLI 自动处理路径' };
-  }
-
-  if (url === 'https://api.anthropic.com/v1' || url === 'http://api.anthropic.com/v1') {
-    return { status: 'warn', message: '官方端点不需要 /v1 后缀，CLI 会自动添加' };
-  }
-
-  // Third-party endpoints usually need /v1
-  if (!url.includes('anthropic.com') && !url.endsWith('/v1') && !url.endsWith('/v1/')) {
-    return { status: 'warn', message: '第三方端点通常需要 /v1 后缀（如 https://example.com/v1）' };
-  }
-
-  // Trailing slash
-  if (url.endsWith('/') && !url.endsWith('/v1/')) {
-    return { status: 'warn', message: 'URL 末尾有多余斜杠，建议去掉' };
-  }
-
-  return { status: 'ok', message: 'URL 格式正常' };
-});
 
 async function handleSave() {
   // 立即落盘（不等防抖），并修正 URL 尾部斜杠
@@ -341,14 +311,13 @@ function handleFontScaleChange(e: Event) {
     </nav>
 
     <form class="config-form" @submit.prevent="handleSave">
-      <!-- 连接：供应商与端点 / 模型映射 / 高级 JSON（同属"如何接入 API"，合并一页）-->
+      <!-- 连接：端点 / 模型映射 / 高级 JSON（同属"如何接入 API"，合并一页）-->
       <div v-show="activeTab === 'connection'" class="connection-stack">
         <div class="section">
           <div class="section-head">
-            <h3 class="section-title">供应商与端点</h3>
+            <h3 class="section-title">连接配置</h3>
             <button type="button" class="clear-btn" @click="handleClearConnection">清空连接配置</button>
           </div>
-          <ProviderSelect v-model="store.config.provider" />
           <label class="field">
             <span>供应商名称 <span class="required">*</span></span>
             <input v-model="store.config.providerName" type="text" placeholder="例如：sub2Api" />
@@ -362,24 +331,19 @@ function handleFontScaleChange(e: Event) {
           <label class="field">
             <span>请求地址（API Base URL） <span class="required">*</span></span>
             <input v-model="store.config.apiBaseUrl" type="text" placeholder="https://api.anthropic.com" />
-            <small class="field-hint">填写兼容 Claude API 的服务端点。官方直连模式应使用 https://api.anthropic.com</small>
-            <div v-if="store.importedFields.has('apiBaseUrl')" class="imported-mark">✓ 已从 settings.json 导入</div>
-            <div v-if="urlValidation.message" :class="['url-validation', `url-validation--${urlValidation.status}`]">
-              {{ urlValidation.message }}
-            </div>
           </label>
-        </div>
-
-        <div class="section">
-          <h3 class="section-title">模型映射</h3>
-          <small class="field-hint">这就是"模型"配置：填入实际模型名（如 glm-5.2），会自动写入下方高级 JSON 的 env（ANTHROPIC_DEFAULT_*_MODEL）并双向同步。会话里选 sonnet/haiku 等别名，CLI 自动走映射。</small>
+          <label class="field">
+            <span>上下文窗口</span>
+            <input
+              type="number"
+              min="1"
+              placeholder="如 1000000（留空自动识别）"
+              :value="store.config.contextWindowOverride ?? ''"
+              @input="onContextWindowInput(($event.target as HTMLInputElement).value)"
+            />
+          </label>
           <ModelMappingInputs />
-        </div>
-
-        <div class="section">
-          <h3 class="section-title">高级 JSON</h3>
           <div class="advanced-panel">
-            <p class="advanced-hint">直接粘贴 Claude Code 的 settings.json，点"从 JSON 填充字段"可自动回填 API Key / 请求地址 / 模型；反之，改上面的字段也会实时同步回这里的 env。运行 CLI 时仅字符串字段会作为环境变量注入。</p>
             <div class="advanced-actions">
               <button type="button" class="import-btn" @click="handleImportSettings">导入 settings.json 文件</button>
               <button type="button" class="fill-btn" @click="handleFillFromJson">从 JSON 填充字段</button>
@@ -835,12 +799,6 @@ input[type='number'] {
   background: var(--color-panel-soft);
 }
 
-.advanced-hint {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-  line-height: 1.5;
-}
 
 .format-btn {
   justify-self: start;
