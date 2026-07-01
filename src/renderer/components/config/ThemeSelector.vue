@@ -33,13 +33,13 @@ const emit = defineEmits<{
 .theme-selector {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
-  gap: 12px;
+  gap: 0.75rem;
 }
 
 .palette-card {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 12px;
+  padding: 0.75rem;
   cursor: pointer;
   text-align: center;
 }
@@ -55,15 +55,15 @@ const emit = defineEmits<{
 
 .palette-swatch {
   display: flex;
-  gap: 4px;
+  gap: 0.25rem;
   justify-content: center;
-  margin-bottom: 8px;
+  margin-bottom: 0.5rem;
 }
 
 .swatch {
-  width: 20px;
-  height: 20px;
-  border-radius: 4px;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 0.25rem;
 }
 
 .palette-name {

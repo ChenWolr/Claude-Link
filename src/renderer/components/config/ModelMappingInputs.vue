@@ -44,7 +44,7 @@ const fable = bind('fable');
 <style scoped>
 .model-mapping {
   display: grid;
-  gap: 8px;
+  gap: 0.5rem;
 }
 
 .model-mapping__title {
@@ -63,12 +63,12 @@ const fable = bind('fable');
 .model-mapping__grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 12px;
+  gap: 0.75rem;
 }
 
 .model-mapping__field {
   display: grid;
-  gap: 6px;
+  gap: 0.375rem;
 }
 
 .model-mapping__field span {
@@ -83,7 +83,7 @@ const fable = bind('fable');
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 8px 10px;
+  padding: 0.5rem 0.625rem;
   font-size: 0.8125rem;
 }
 </style>
