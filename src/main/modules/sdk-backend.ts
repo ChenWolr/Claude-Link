@@ -713,7 +713,9 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
         windowSize: payload.windowSize,
       });
       try {
-        sessionRepo.updateLastContext(sessionId, inputTokens);
+        // 连同真实窗口一起持久化：payload.windowSize 已是 realWindow ?? readContextWindow()
+        // 的值，切换会话重建时直接复用，不再回到 200k 兜底。
+        sessionRepo.updateLastContext(sessionId, inputTokens, payload.windowSize);
       } catch (err) {
         logger.warn(`Failed to persist last context [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
       }

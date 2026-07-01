@@ -11,6 +11,9 @@ export interface Session {
   updatedAt: string;
   lastContextTokens: number | null;
   lastContextUpdatedAt: string | null;
+  // 该会话从 SDK result.modelUsage.contextWindow 拿到的真实上下文窗口（持久化）。
+  // 切换会话重建 contextStats 时优先用它，避免回落到 200k 兜底。null 表示尚未连通过。
+  lastContextWindow: number | null;
 }
 
 export interface Message {

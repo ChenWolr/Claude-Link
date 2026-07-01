@@ -16,6 +16,7 @@ import {
   peekEnvValue,
 } from '../src/shared/settings-parser';
 import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
+import { lookupModelWindow, resolveContextWindow } from '../src/shared/model-context-windows';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
@@ -867,6 +868,67 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
   check('StalledBanner 三动作', banner.includes('继续等待') && banner.includes('重试') && banner.includes('中断'));
   check('MessageList 挂载 StalledBanner 且 stalledInfo 可显形', ml.includes('StalledBanner') && ml.includes('activeStalledInfo'));
   check('selftest 串联 tdd-stall-watchdog-verify', pkg.includes('tdd-stall-watchdog-verify.ts'));
+}
+
+console.log('\n=== 39) 上下文窗口 fallback + fable 映射契约 ===');
+{
+  // A. fable 映射双向（此前为测试盲区）
+  let adv = setModelMappingInAdvancedJson('{}', 'fable', 'glm-5.2');
+  let parsed = JSON.parse(adv);
+  check('fable 映射写入 env.ANTHROPIC_DEFAULT_FABLE_MODEL', parsed.env?.ANTHROPIC_DEFAULT_FABLE_MODEL === 'glm-5.2', adv);
+  const maps = extractModelMappings(adv);
+  check('extractModelMappings 反提取 fable', maps.fable === 'glm-5.2', JSON.stringify(maps));
+  check('resolveAliasToActualModel(fable) 解析为实际模型', resolveAliasToActualModel('fable', adv) === 'glm-5.2', adv);
+
+  // B. fable 默认模型推导（修复前：只配 fable 时 defaultModel 丢空）
+  check('只配 fable 时 resolveDefaultModel=fable', resolveDefaultModel(adv) === 'fable', resolveDefaultModel(adv));
+  const onlyFable = JSON.stringify({ env: { ANTHROPIC_DEFAULT_FABLE_MODEL: 'glm-5.2' } }, null, 2);
+  const pf = parseClaudeSettings(onlyFable);
+  check('parseClaudeSettings 只配 fable → defaultModel=fable（不再丢空）', pf.defaultModel === 'fable', `got ${pf.defaultModel}`);
+  check('parseClaudeSettings 保留 fable 映射在 advancedJson', pf.advancedJson.includes('ANTHROPIC_DEFAULT_FABLE_MODEL'));
+
+  // C. contextWindowOverride 双向（表单 ↔ env.CLAUDE_LINK_CONTEXT_WINDOW）
+  const advWith = syncFormToAdvancedJson('{}', { apiKey: '', apiBaseUrl: 'https://api.anthropic.com', permissionMode: 'default', contextWindowOverride: 1000000 });
+  check('contextWindowOverride=1000000 写入 env.CLAUDE_LINK_CONTEXT_WINDOW',
+    JSON.parse(advWith).env?.CLAUDE_LINK_CONTEXT_WINDOW === '1000000', advWith);
+  const advCleared = syncFormToAdvancedJson(advWith, { apiKey: '', apiBaseUrl: 'https://api.anthropic.com', permissionMode: 'default', contextWindowOverride: null });
+  check('contextWindowOverride=null 删除 env.CLAUDE_LINK_CONTEXT_WINDOW',
+    JSON.parse(advCleared).env?.CLAUDE_LINK_CONTEXT_WINDOW === undefined, advCleared);
+  const peeked = parseClaudeSettings(JSON.stringify({ env: { CLAUDE_LINK_CONTEXT_WINDOW: '1000000' } }, null, 2));
+  check('parseClaudeSettings 反向回填 contextWindowOverride=1000000', peeked.contextWindowOverride === 1000000, `got ${peeked.contextWindowOverride}`);
+
+  // D. lookupModelWindow 内置表（最长前缀匹配 + 标准化）
+  check('lookupModelWindow(glm-5.2)=1M', lookupModelWindow('glm-5.2') === 1000000, String(lookupModelWindow('glm-5.2')));
+  check('lookupModelWindow 大小写/后缀容错(GLM-5.2-1m)=1M', lookupModelWindow('GLM-5.2-1m') === 1000000);
+  check('lookupModelWindow(claude-fable-5)=1M', lookupModelWindow('claude-fable-5') === 1000000);
+  check('lookupModelWindow(claude-sonnet-4-6)=200k', lookupModelWindow('claude-sonnet-4-6') === 200000);
+  check('lookupModelWindow(deepseek-chat)=64k', lookupModelWindow('deepseek-chat') === 64000);
+  check('lookupModelWindow(未知模型)=null', lookupModelWindow('some-unknown-model') === null);
+  check('lookupModelWindow(null/空)=null', lookupModelWindow(null) === null && lookupModelWindow('') === null);
+
+  // E. resolveContextWindow fallback 优先级
+  check('优先 lastContextWindow', resolveContextWindow({ lastContextWindow: 500000, model: 'glm-5.2', override: 200000 }) === 500000);
+  check('无 lastContextWindow 走模型查表', resolveContextWindow({ model: 'glm-5.2', override: 200000 }) === 1000000);
+  check('无 lastContextWindow/无模型命中 走 override', resolveContextWindow({ model: 'unknown-model', override: 300000 }) === 300000);
+  check('全无 → 200000 兜底', resolveContextWindow({ model: 'unknown-model' }) === 200000);
+  check('lastContextWindow 非正数跳过', resolveContextWindow({ lastContextWindow: 0, model: 'glm-5.2' }) === 1000000);
+}
+
+console.log('\n=== 40) UI 简化：连接配置单卡片 + 会话内不调字号 ===');
+{
+  const cp = readRel('src/renderer/pages/ConfigPage.vue');
+  const mm = readRel('src/renderer/components/config/ModelMappingInputs.vue');
+  const st = readRel('src/renderer/components/chat/SessionToolbar.vue');
+  const connectionBlock = cp.match(/<div v-show="activeTab === 'connection'"[\s\S]*?<!-- 行为：/)?.[0] ?? '';
+  check('ConfigPage 不再导入 ProviderSelect', !cp.includes('ProviderSelect from'));
+  check('ConfigPage 不再渲染 ProviderSelect 下拉', !cp.includes('<ProviderSelect'));
+  check('连接区标题改为中性的连接配置', cp.includes('连接配置') && !cp.includes('<h3 class="section-title">供应商与端点</h3>'));
+  check('连接区只保留一个 section 卡片', (connectionBlock.match(/<div class="section">/g) ?? []).length === 1);
+  check('上下文窗口和模型映射不再作为独立标题', !connectionBlock.includes('<h3 class="section-title">上下文窗口和模型映射</h3>'));
+  check('高级 JSON 不再作为独立标题', !connectionBlock.includes('<h3 class="section-title">高级 JSON</h3>'));
+  check('ModelMappingInputs 不再展示长别名说明', !mm.includes('Claude Code 用 sonnet / haiku / opus / fable'));
+  check('SessionToolbar 不再导入 FONT_SCALE_SIZES', !st.includes('FONT_SCALE_SIZES'));
+  check('SessionToolbar 不再含会话内字号控件', !st.includes('onFontScaleChange') && !st.includes('<span class="ctl__label">字号</span>'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

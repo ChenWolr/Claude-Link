@@ -14,6 +14,9 @@ export interface AppConfig {
   taskDelaySeconds: number;
   themePaletteId: string;
   fontScale: 'small' | 'medium' | 'large';
+  // 上下文窗口全局覆盖（token 数）。写入 env.CLAUDE_LINK_CONTEXT_WINDOW，对所有模型生效。
+  // null 表示不覆盖——未连接时按当前模型查内置表（model-context-windows），连通后用真实值。
+  contextWindowOverride: number | null;
 }
 
 export interface ProviderInfo {
