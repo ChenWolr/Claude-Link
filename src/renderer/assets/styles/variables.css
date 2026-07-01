@@ -15,10 +15,11 @@
      所有 rem 单位相对此值，px→rem 转换后全局文字+间距随档位缩放。 */
   --font-size-base: 16px;
   font-size: var(--font-size-base);
-  --radius-sm: 6px;
-  --radius-md: 8px;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  /* 侧栏/任务面板宽度保持 px：布局骨架恒定，仅内部内容随字号缩放（迁移决策 D1）。 */
   --sidebar-width: 240px;
   --task-panel-width: 320px;
-  --chat-bottom-max-width: 800px;
-  --chat-bottom-pad-x: 24px;
+  --chat-bottom-max-width: 50rem;
+  --chat-bottom-pad-x: 1.5rem;
 }
