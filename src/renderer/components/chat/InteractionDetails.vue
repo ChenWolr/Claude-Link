@@ -20,7 +20,7 @@ const prettyInput = computed(() => {
 
 <style scoped>
 .interaction-details {
-  margin-top: 4px;
+  margin-top: 0.25rem;
   color: var(--color-text-muted);
   font-size: 0.75rem;
 }
@@ -30,10 +30,10 @@ const prettyInput = computed(() => {
 }
 
 .interaction-details pre {
-  max-height: 180px;
-  margin: 8px 0 0;
+  max-height: 11.25rem;
+  margin: 0.5rem 0 0;
   overflow: auto;
-  padding: 10px;
+  padding: 0.625rem;
   border-radius: var(--radius-sm);
   background: rgba(0, 0, 0, 0.18);
   color: var(--color-text-muted);

@@ -1,10 +1,20 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import type { InteractionPromptOption } from '../../../shared/types/ipc';
 
-const ITEM_HEIGHT = 68;
-const VIEWPORT_HEIGHT = 390;
+const ITEM_HEIGHT_REM = 4.25;
+const VIEWPORT_HEIGHT_REM = 24.375;
 const BUFFER = 4;
+
+const rootFontSize = ref(16);
+let rootObserver: MutationObserver | null = null;
+
+function syncRootFontSize(): void {
+  rootFontSize.value = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+}
+
+const itemHeightPx = computed(() => ITEM_HEIGHT_REM * rootFontSize.value);
+const viewportHeightPx = computed(() => VIEWPORT_HEIGHT_REM * rootFontSize.value);
 
 const props = defineProps<{
   options: InteractionPromptOption[];
@@ -22,13 +32,13 @@ const emit = defineEmits<{
 
 const scrollTop = ref(0);
 
-const startIndex = computed(() => props.virtual ? Math.max(0, Math.floor(scrollTop.value / ITEM_HEIGHT) - BUFFER) : 0);
-const visibleCount = computed(() => props.virtual ? Math.ceil(VIEWPORT_HEIGHT / ITEM_HEIGHT) + BUFFER * 2 : props.options.length);
+const startIndex = computed(() => props.virtual ? Math.max(0, Math.floor(scrollTop.value / itemHeightPx.value) - BUFFER) : 0);
+const visibleCount = computed(() => props.virtual ? Math.ceil(viewportHeightPx.value / itemHeightPx.value) + BUFFER * 2 : props.options.length);
 const visibleEntries = computed(() => props.options
   .map((option, index) => ({ option, index }))
   .slice(startIndex.value, startIndex.value + visibleCount.value));
-const totalHeight = computed(() => props.virtual ? props.options.length * ITEM_HEIGHT : undefined);
-const offsetY = computed(() => props.virtual ? startIndex.value * ITEM_HEIGHT : 0);
+const totalHeight = computed(() => props.virtual ? props.options.length * itemHeightPx.value : undefined);
+const offsetY = computed(() => props.virtual ? startIndex.value * itemHeightPx.value : 0);
 
 function isSelected(id: string): boolean {
   return props.selectedIds.includes(id);
@@ -37,6 +47,17 @@ function isSelected(id: string): boolean {
 function onScroll(event: Event): void {
   scrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
 }
+
+onMounted(() => {
+  syncRootFontSize();
+  rootObserver = new MutationObserver(syncRootFontSize);
+  rootObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
+});
+
+onUnmounted(() => {
+  rootObserver?.disconnect();
+  rootObserver = null;
+});
 </script>
 
 <template>
@@ -113,9 +134,9 @@ function onScroll(event: Event): void {
 
 .interaction-options--virtual {
   display: block;
-  max-height: 390px;
+  max-height: 24.375rem;
   overflow: auto;
-  padding-right: 4px;
+  padding-right: 0.25rem;
   contain: content;
 }
 
@@ -134,10 +155,10 @@ function onScroll(event: Event): void {
   position: relative;
   display: flex;
   width: 100%;
-  min-height: 58px;
-  gap: 10px;
+  min-height: 3.625rem;
+  gap: 0.625rem;
   align-items: flex-start;
-  padding: 12px;
+  padding: 0.75rem;
   border: 1px solid color-mix(in srgb, var(--color-border) 78%, var(--color-accent-strong));
   border-radius: var(--radius-md);
   background: var(--interaction-option-bg);
@@ -151,8 +172,8 @@ function onScroll(event: Event): void {
 .interaction-option::before {
   content: '';
   position: absolute;
-  inset: 8px auto 8px 0;
-  width: 4px;
+  inset: 0.5rem auto 0.5rem 0;
+  width: 0.25rem;
   border-radius: 0 999px 999px 0;
   background: transparent;
 }
@@ -187,13 +208,13 @@ function onScroll(event: Event): void {
 
 .interaction-option__marker {
   display: grid;
-  flex: 0 0 20px;
-  width: 20px;
-  height: 20px;
+  flex: 0 0 1.25rem;
+  width: 1.25rem;
+  height: 1.25rem;
   margin-top: 0;
   place-items: center;
   border: 1px solid color-mix(in srgb, var(--color-accent-strong) 65%, var(--color-border));
-  border-radius: 6px;
+  border-radius: 0.375rem;
   background: rgba(0, 0, 0, 0.1);
   color: transparent;
   font-size: 0.8125rem;
@@ -222,7 +243,7 @@ function onScroll(event: Event): void {
 
 .interaction-option__content {
   display: grid;
-  gap: 3px;
+  gap: 0.1875rem;
   min-width: 0;
 }
 

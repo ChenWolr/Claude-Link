@@ -269,7 +269,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 20px;
+  padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -294,10 +294,10 @@ onUnmounted(() => {
 .modal__body {
   flex: 1;
   min-height: 0;
-  padding: 20px;
+  padding: 1.25rem;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 1rem;
   overflow: hidden;
 }
 
@@ -305,12 +305,12 @@ onUnmounted(() => {
   display: block;
   color: var(--color-text-muted);
   font-size: 0.8125rem;
-  margin-bottom: 8px;
+  margin-bottom: 0.5rem;
 }
 
 .test-controls__row {
   display: flex;
-  gap: 8px;
+  gap: 0.5rem;
 }
 
 .model-select {
@@ -320,7 +320,7 @@ onUnmounted(() => {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 8px 12px;
+  padding: 0.5rem 0.75rem;
   font-size: 0.8125rem;
 }
 
@@ -329,7 +329,7 @@ onUnmounted(() => {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 8px 16px;
+  padding: 0.5rem 1rem;
   font-size: 0.8125rem;
   cursor: pointer;
   white-space: nowrap;
@@ -351,8 +351,8 @@ onUnmounted(() => {
 .status-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
+  gap: 0.5rem;
+  padding: 0.625rem 0.875rem;
   border-radius: var(--radius-md);
   font-size: 0.8125rem;
 }
@@ -384,7 +384,7 @@ onUnmounted(() => {
 .config-echo {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 0.75rem;
   font-size: 0.75rem;
   color: var(--color-text-muted);
 }
@@ -393,7 +393,7 @@ onUnmounted(() => {
   color: var(--color-text);
 }
 .config-verdict {
-  padding: 10px 14px;
+  padding: 0.625rem 0.875rem;
   border-radius: var(--radius-md);
   font-size: 0.8125rem;
 }
@@ -427,11 +427,11 @@ onUnmounted(() => {
 
 .stream-area {
   flex: 1 1 auto;
-  min-height: 120px;
+  min-height: 7.5rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
-  padding: 12px 14px;
+  padding: 0.75rem 0.875rem;
   overflow-y: auto;
 }
 
@@ -440,7 +440,7 @@ onUnmounted(() => {
   font-weight: 700;
   color: var(--color-accent-strong);
   text-transform: uppercase;
-  margin-bottom: 6px;
+  margin-bottom: 0.375rem;
   opacity: 0.7;
 }
 
@@ -450,7 +450,7 @@ onUnmounted(() => {
 }
 
 .stream-area__content :deep(p) {
-  margin: 0 0 8px;
+  margin: 0 0 0.5rem;
 }
 
 .stream-area__content :deep(p:last-child) {
@@ -472,7 +472,7 @@ onUnmounted(() => {
   border: 1px solid var(--color-danger);
   border-radius: var(--radius-md);
   background: rgba(239, 100, 97, 0.06);
-  padding: 12px 14px;
+  padding: 0.75rem 0.875rem;
 }
 
 .error-detail__label {
@@ -480,7 +480,7 @@ onUnmounted(() => {
   font-weight: 700;
   color: var(--color-danger);
   text-transform: uppercase;
-  margin-bottom: 6px;
+  margin-bottom: 0.375rem;
 }
 
 .error-detail pre {
@@ -490,15 +490,15 @@ onUnmounted(() => {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 0.75rem;
   color: var(--color-text);
-  max-height: 180px;
+  max-height: 11.25rem;
   overflow-y: auto;
 }
 
 .modal__footer {
   display: flex;
   justify-content: flex-end;
-  gap: 8px;
-  padding: 14px 20px;
+  gap: 0.5rem;
+  padding: 0.875rem 1.25rem;
   border-top: 1px solid var(--color-border);
 }
 </style>

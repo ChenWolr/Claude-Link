@@ -109,15 +109,15 @@ async function copyPreview(): Promise<void> {
 .interaction-preview--compact .interaction-preview__markdown,
 .interaction-preview--compact .interaction-preview__diff,
 .interaction-preview--compact .interaction-preview__table-wrap {
-  max-height: 260px;
+  max-height: 16.25rem;
 }
 
 .interaction-preview__bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px 8px;
+  gap: 0.75rem;
+  padding: 0.625rem 0.75rem 0.5rem;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -137,7 +137,7 @@ async function copyPreview(): Promise<void> {
 .interaction-preview__copy {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 5px 9px;
+  padding: 0.3125rem 0.5625rem;
   background: var(--color-panel-soft);
   color: var(--color-text);
   font: inherit;
@@ -158,9 +158,9 @@ async function copyPreview(): Promise<void> {
 .interaction-preview__markdown,
 .interaction-preview__diff,
 .interaction-preview__table-wrap {
-  max-height: 360px;
+  max-height: 22.5rem;
   overflow: auto;
-  padding: 12px;
+  padding: 0.75rem;
 }
 
 .interaction-preview__content {
@@ -190,22 +190,22 @@ async function copyPreview(): Promise<void> {
 }
 
 .interaction-preview__markdown :deep(code) {
-  border-radius: 4px;
-  padding: 1px 5px;
+  border-radius: 0.25rem;
+  padding: 0.0625rem 0.3125rem;
   background: rgba(0, 0, 0, 0.24);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .interaction-preview__markdown :deep(pre code) {
   display: block;
-  padding: 10px;
+  padding: 0.625rem;
 }
 
 .interaction-preview__markdown :deep(h1),
 .interaction-preview__markdown :deep(h2),
 .interaction-preview__markdown :deep(h3),
 .interaction-preview__markdown :deep(h4) {
-  margin: 8px 0;
+  margin: 0.5rem 0;
   color: var(--color-accent-strong);
 }
 
@@ -222,7 +222,7 @@ async function copyPreview(): Promise<void> {
 
 .interaction-preview__table-wrap th,
 .interaction-preview__table-wrap td {
-  padding: 7px 8px;
+  padding: 0.4375rem 0.5rem;
   border: 1px solid var(--color-border);
   text-align: left;
 }
@@ -233,7 +233,7 @@ async function copyPreview(): Promise<void> {
 }
 
 .interaction-preview__empty {
-  padding: 18px 12px;
+  padding: 1.125rem 0.75rem;
   color: var(--color-text-muted);
   font-size: 0.75rem;
   line-height: 1.5;
