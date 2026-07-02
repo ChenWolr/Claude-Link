@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Task, TaskStatus } from '../../../shared/types/task';
 import { getConnection } from '../connection';
+import { normalizeDbTime } from '../../../shared/time';
 
 interface TaskRow {
   id: string;
@@ -29,10 +30,10 @@ function toTask(row: TaskRow): Task {
     costUsd: row.cost_usd,
     durationMs: row.duration_ms,
     errorMessage: row.error_message,
-    startedAt: row.started_at,
-    completedAt: row.completed_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    startedAt: normalizeDbTime(row.started_at),
+    completedAt: normalizeDbTime(row.completed_at),
+    createdAt: normalizeDbTime(row.created_at),
+    updatedAt: normalizeDbTime(row.updated_at),
   };
 }
 

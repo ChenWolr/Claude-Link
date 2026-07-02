@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Message } from '../../../shared/types/session';
 import { getConnection } from '../connection';
+import { normalizeDbTime } from '../../../shared/time';
 
 interface MessageRow {
   id: string;
@@ -36,7 +37,7 @@ function toMessage(row: MessageRow): Message {
     toolUseId: row.tool_use_id,
     title: row.title,
     isError: !!row.is_error,
-    createdAt: row.created_at,
+    createdAt: normalizeDbTime(row.created_at),
   };
 }
 

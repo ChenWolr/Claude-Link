@@ -7,6 +7,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { getConnection } from '../connection';
+import { normalizeDbTime } from '../../../shared/time';
 
 export interface InteractionHistoryEntry {
   id: string;
@@ -36,7 +37,7 @@ function toEntry(row: InteractionHistoryRow): InteractionHistoryEntry {
     kind: row.kind,
     summary: row.summary,
     action: row.action === 'cancel' ? 'cancel' : 'submit',
-    createdAt: row.created_at,
+    createdAt: normalizeDbTime(row.created_at),
   };
 }
 
