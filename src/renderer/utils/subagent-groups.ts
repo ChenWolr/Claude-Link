@@ -102,6 +102,10 @@ export interface SubAgentGroupOptions {
   toolProgress: Record<string, number>;
   /** 主流程 tool_use → title 映射（子 agent 分组标题来源）。 */
   titleByToolUseId: Map<string, string>;
+  /** Bug2：子 agent 实时思考快照（agentId → 文本）。子 agent 第一条消息要等它思考完一整轮才到达，
+   * 此前 parentAgentId 消息为空、组不存在，思考中的 ThinkingBlock 无处挂载（Tab 空白）。用此快照预建组，
+   * 让思考从第一秒起就可见；落库消息到达后自然并入同一组。 */
+  liveThinkingByAgent?: Record<string, string>;
 }
 
 export function buildTitleByToolUseId(allMessages: Message[]): Map<string, string> {
@@ -130,6 +134,18 @@ export function aggregateSubAgentGroups(allMessages: Message[], opts: SubAgentGr
       order.push(m.parentAgentId);
     }
     map.get(m.parentAgentId)!.push(m);
+  }
+
+  // Bug2：为「已有实时思考但尚无落库消息」的子 agent 预建组。子 agent 第一条 message 要等它思考完一整轮
+  // 才到达，在此之前组不存在，思考中的 ThinkingBlock 无处挂载 → Tab 空白。用实时思考快照补建空组，
+  // 让思考从第一秒起可见；后续落库消息到达后并入同一组（key 相同）。
+  if (opts.liveThinkingByAgent) {
+    for (const id of Object.keys(opts.liveThinkingByAgent)) {
+      if (!map.has(id)) {
+        map.set(id, []);
+        order.push(id);
+      }
+    }
   }
 
   // 父 Task 工具 tool_result 的 createdAt = 子 Agent 真正完成时刻。只扫描当前 turn，

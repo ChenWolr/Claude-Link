@@ -43,6 +43,13 @@ export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, ev
       store.setCompacting(true);
       return;
     }
+    // Bug4：压缩结束（compact_result，compactResult=success/failed）→ 复位压缩指示；
+    // 之前 setCompacting(true) 后从无 reset。同时避免它落库成「系统提示」。
+    if (event.subtype === 'compact_result') {
+      store.setCompacting(false);
+      return;
+    }
+    // requesting（SDK 发起 API 请求）：纯瞬态心跳式信号，无需展示也无需状态，落到此 no-op。
     if (
       event.subtype === 'task_started' ||
       event.subtype === 'task_progress' ||
@@ -76,14 +83,45 @@ function createChat() {
   const error = ref<string | null>(null);
 
   let cleanup: (() => void) | null = null;
-  let abortTimer: ReturnType<typeof setTimeout> | null = null;
-  let abortSessionId: string | null = null;
-  function clearAbortTimer(): void {
-    if (abortTimer) {
-      clearTimeout(abortTimer);
-      abortTimer = null;
+  // try-finally 兜底：按 sessionId 记录“中断强制复位”定时器（替代原单例 timer）。
+  // 与单例的本质区别：
+  //  1) per-session：每个会话独立兜底，切会话不会丢掉别的会话的 finally。
+  //  2) 不被切会话清掉：watch(activeSession) 不再触碰它——修复“中断后切走→兜底丢失→永久 sending”。
+  //  3) 幂等：finally 内先查 runningSessions，已停则 no-op，多路径清理也安全。
+  // 语义：try = 等 SDK 发回 result/error/aborted（到达即 clearAbortTimer = finally 提前满足）；
+  //      finally = 超时强制 markStopped（无论 SDK 中断信号是否真生效、结束事件是否回来、是否切会话）。
+  const abortTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const ABORT_FINALLY_MS = 1200;
+  function clearAbortTimer(sessionId: string): void {
+    const t = abortTimers.get(sessionId);
+    if (t) {
+      clearTimeout(t);
+      abortTimers.delete(sessionId);
     }
-    abortSessionId = null;
+  }
+  function clearAllAbortTimers(): void {
+    for (const t of abortTimers.values()) clearTimeout(t);
+    abortTimers.clear();
+  }
+  // finally 兜底：到点必然把该会话复位为已停止。
+  // 当前会话额外清全局流式 + finalize 保留已生成内容；后台会话的 per-session 快照由 markStopped 自带清理。
+  function ensureAbortFinally(sid: string): void {
+    if (abortTimers.has(sid)) return; // 已在兜底窗口内，不重复
+    const timer = setTimeout(() => {
+      abortTimers.delete(sid);
+      // 幂等守卫：正常路径已清过 runningSessions，这里 no-op。
+      if (!store.runningSessions.includes(sid)) return;
+      const isCurrent = !!store.activeSession && store.activeSession.id === sid;
+      if (isCurrent) {
+        finalizeAssistantStream();
+        store.clearStream();
+        store.clearThinking();
+        store.clearToolStream();
+        resetTurnCache();
+      }
+      store.markStopped(sid);
+    }, ABORT_FINALLY_MS);
+    abortTimers.set(sid, timer);
   }
 
   // 本回合缓存（力度②：message 事件为唯一真相）：
@@ -138,7 +176,9 @@ function createChat() {
   watch(
     () => store.activeSession?.id,
     (newId) => {
-      clearAbortTimer();
+      // 故意不清 abortTimers：中断兜底按 sessionId 绑定，切会话不得丢弃别的会话的 finally
+      //（否则中断后切走 → 兜底丢失 → 该会话永久 sending）。仅同步当前视图的 error/回合缓存。
+      void newId;
       error.value = null;
       resetTurnCache();
     },
@@ -155,6 +195,7 @@ function createChat() {
     cleanup?.();
     cleanup = null;
     window.claudeLink.removeChatListener();
+    clearAllAbortTimers();
   }
 
   function isStallRecoveryEvent(event: CliEvent): boolean {
@@ -163,7 +204,13 @@ function createChat() {
     return false;
   }
   function clearStalledForSession(sessionId: string, event: CliEvent): void {
-    if (isStallRecoveryEvent(event)) store.clearStalled(sessionId);
+    if (!isStallRecoveryEvent(event)) return;
+    store.clearStalled(sessionId);
+    // Bug4/Bug5：真实业务事件（流式/消息/工具进度/非 init system）= API 已恢复，清掉重试指示器；
+    // api_retry 自身是要计数的对象，不清自己。
+    if (!(event.type === 'system' && event.subtype === 'api_retry')) {
+      store.clearApiRetrying(sessionId);
+    }
   }
 
   // 问题 1：不再丢弃非当前会话的事件。后台执行的会话事件需要处理：
@@ -203,14 +250,24 @@ function createChat() {
         applyStalledEvent(store, sid, event);
         break;
       }
+      case 'system': {
+        // Bug4/Bug5：api_retry 不再落库，后台会话也要计数，切回时 ApiRetryBanner 能显示。
+        // 其余 system 子类型主进程已落库，切回时重载，这里跳过。
+        if (event.subtype === 'api_retry') {
+          const r = event as CliSystemInfoEvent;
+          store.markApiRetrying(sid, { max: r.max_retries, error: r.error });
+        }
+        break;
+      }
       case 'result':
       case 'error':
       case 'aborted': {
-        // 后台会话执行结束：标记停止 + 清理快照
+        // 后台会话执行结束：清该会话中断兜底（try 成功 = finally 提前满足）+ 标记停止 + 清理快照
+        clearAbortTimer(sid);
         store.markStopped(sid);
         break;
       }
-      // message/system/init: 主进程已落库，切回时 getSessionMessages 重载，这里跳过
+      // message/init: 主进程已落库，切回时 getSessionMessages 重载，这里跳过
     }
   }
 
@@ -220,7 +277,13 @@ function createChat() {
         const delta = event.event?.delta;
         if (!delta) break;
         if (delta.type === 'thinking_delta' && delta.thinking) {
-          store.appendThinking(delta.thinking);
+          // Bug2：带 parentToolUseId 的是子 agent 思考，路由到对应「子Agent」Tab 实时快照；
+          // 主流程思考仍进全局 streamingThinking。
+          if (event.parentToolUseId && store.activeSession) {
+            store.appendSubAgentThinking(store.activeSession.id, event.parentToolUseId, delta.thinking);
+          } else {
+            store.appendThinking(delta.thinking);
+          }
         } else if (delta.type === 'signature_delta') {
           // 思考签名不展示
         } else if (delta.type === 'input_json_delta') {
@@ -240,6 +303,8 @@ function createChat() {
         const role = event.role;
         const agentId = event.parentToolUseId ?? null;
         handleMessagePartsFull(event.content ?? [], role, agentId);
+        // Bug2：子 agent 的完整 message 已落库（含思考/正文），清掉它的实时思考快照，避免与落库重复。
+        if (agentId && store.activeSession) store.clearSubAgentThinking(store.activeSession.id, agentId);
         break;
       }
       case 'result': {
@@ -267,8 +332,10 @@ function createChat() {
           error.value = resultErrorText(event);
         }
         // 根因修复：markStopped 移除 runningSessions，sending getter 自动变 false。
-        if (store.activeSession) store.markStopped(store.activeSession.id);
-        clearAbortTimer();
+        if (store.activeSession) {
+          clearAbortTimer(store.activeSession.id);
+          store.markStopped(store.activeSession.id);
+        }
         resetTurnCache();
         break;
       }
@@ -278,8 +345,10 @@ function createChat() {
         store.clearThinking();
         store.clearToolStream();
         error.value = event.message;
-        if (store.activeSession) store.markStopped(store.activeSession.id);
-        clearAbortTimer();
+        if (store.activeSession) {
+          clearAbortTimer(store.activeSession.id);
+          store.markStopped(store.activeSession.id);
+        }
         resetTurnCache();
         break;
       }
@@ -289,8 +358,10 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
-        if (store.activeSession) store.markStopped(store.activeSession.id);
-        clearAbortTimer();
+        if (store.activeSession) {
+          clearAbortTimer(store.activeSession.id);
+          store.markStopped(store.activeSession.id);
+        }
         resetTurnCache();
         break;
       }
@@ -300,9 +371,21 @@ function createChat() {
         break;
       }
       case 'system': {
-        // C：进度类 system 子类型（compacting/task_*）→ store 瞬态状态，不落库。
+        // Bug4/Bug5：api_retry 走瞬态重试指示器（不落库、不进聊天流），用本回合累计计数原地递增。
+        if (event.subtype === 'api_retry') {
+          const r = event as CliSystemInfoEvent;
+          if (store.activeSession) {
+            store.markApiRetrying(store.activeSession.id, { max: r.max_retries, error: r.error });
+          }
+          break;
+        }
+        // C：进度类/瞬态 system 子类型（compacting/task_*/requesting/compact_result）→ store 瞬态状态，不落库。
+        // Bug4：requesting（SDK 每回合发起 API 请求时发）和 compact_result 原本落到 persistSystemEvent，
+        // 这两个 subtype 无专用 defaultText → fallback「系统提示」+ processKind 未过滤 → 每回合冒无意义系统消息。
         if (
           event.subtype === 'compacting' ||
+          event.subtype === 'compact_result' ||
+          event.subtype === 'requesting' ||
           event.subtype === 'task_started' ||
           event.subtype === 'task_progress' ||
           event.subtype === 'task_notification'
@@ -599,8 +682,8 @@ function createChat() {
   async function sendMessage(text: string): Promise<void> {
     if (!store.activeSession || !text.trim()) return;
 
-    // 新回合开始：作废上一回合 abort 残留的超时兜底，避免它把本次 sending 错误复位。
-    clearAbortTimer();
+    // 新回合开始：作废上一回合 abort 残留的超时兜底，避免它到点把本次 sending 错误复位。
+    clearAbortTimer(store.activeSession.id);
     resetTurnCache();
     error.value = null;
     // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
@@ -620,32 +703,21 @@ function createChat() {
     }
   }
 
-  // 中断当前回合。M3：不立即 stopListening——nix 上 SIGINT 后 CC 会发回
-  // result(error_during_execution)，含费用/耗时元数据，应让它到达而非丢弃。
-  // 保留监听，直到收到 result/error/aborted 或超时兜底复位。
+  // 中断当前回合（try-finally 兜底确保最终停止）。
+  // try：不立即 stopListening——*nix 上 SIGINT 后 CC 会发回 result(error_during_execution)，
+  //   含费用/耗时元数据，应让它到达而非丢弃；收到 result/error/aborted 即 clearAbortTimer（finally 提前满足）。
+  // finally：ensureAbortFinally 到点强制 markStopped——无论 SDK 中断信号是否真生效、
+  //   结束事件是否回来（Windows 硬杀会丢 result）、用户是否切会话，都必然复位为已停止。
   async function abort(): Promise<void> {
     if (!store.activeSession) return;
-    clearAbortTimer();
-    abortSessionId = store.activeSession.id;
+    const sid = store.activeSession.id;
+    clearAbortTimer(sid); // 清旧兜底（防重复 / 上一回合残留）
     try {
-      await window.claudeLink.abortChat(store.activeSession.id);
+      await window.claudeLink.abortChat(sid);
     } catch {
-      // ignore abort 失败
+      // ignore：finally 不依赖 abortChat 成功
     }
-    // 软复位窗口：给 CLI ~1.2s 发回结束事件；超时则强制复位（Windows 硬杀会丢 result）。
-    // 句柄化：结束事件到达或下一回合开始时会被 clearAbortTimer 清掉，杜绝跨回合串扰。
-    abortTimer = setTimeout(() => {
-      abortTimer = null;
-      const sid = abortSessionId;
-      abortSessionId = null;
-      // 根因修复：markStopped 移除 runningSessions，sending getter 自动变 false。
-      if (sid && store.runningSessions.includes(sid)) {
-        store.markStopped(sid);
-        store.clearStream();
-        store.clearThinking();
-        store.clearToolStream();
-      }
-    }, 1200);
+    ensureAbortFinally(sid);
   }
 
   // 卡死恢复：重发最后一条用户消息（abort 旧 query → 新 query + resume）。

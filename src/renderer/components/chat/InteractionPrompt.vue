@@ -660,6 +660,8 @@ onBeforeUnmount(() => {
 }
 
 .interaction-dialog {
+  display: flex;
+  flex-direction: column;
   width: var(--interaction-panel-width);
   max-height: min(86vh, 760px);
   overflow: hidden;
@@ -731,7 +733,11 @@ onBeforeUnmount(() => {
 .interaction-dialog__body {
   display: grid;
   gap: 12px;
-  max-height: calc(86vh - 150px);
+  /* Bug（计划模式确定按钮点不到）：原 max-height: calc(86vh - 150px) 是魔数，header+footer 一旦
+   * 超过 150px（长计划标题/描述，或字号缩放放大 chrome），外层 overflow:hidden 就会裁掉 footer 按钮。
+   * 改 flex 列布局：body flex:1 + min-height:0 自适应剩余空间并滚动，footer 永远不被裁。 */
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: var(--interaction-body-pad);
 }
@@ -848,6 +854,7 @@ onBeforeUnmount(() => {
 
 .interaction-dialog__footer {
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   gap: 8px;
   padding: var(--interaction-footer-pad);

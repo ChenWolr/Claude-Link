@@ -3,7 +3,7 @@
 // 默认一行：图标 + 标签 + mono 细节（summarizeToolUse 提取的文件名/命令/查询）+ ✓/✗/···；
 // 点击展开看完整入参与结果（保留 claude-link 的详情能力 + 长结果渐进披露）。
 // 子 Agent（Agent/Task）行带「查看过程 →」锚点，点击定位右侧子Agent Tab。
-import { computed, ref } from 'vue';
+import { computed, ref, watch, nextTick } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isDiffContent, renderDiffHtml, renderMarkdown } from '../../utils/markdown';
 import { getProcessKindMeta, summarizeToolUse } from '../../utils/process-kind';
@@ -54,9 +54,24 @@ const costMsg = computed<Message | null>(() => {
 });
 
 // 长结果渐进披露（参考 openhanako #786）。
+// Bug1：是否需要「展开全部」以真实 DOM 溢出为准（scrollHeight > 预览高度），不再只按行数判断。
+// 旧行数 >30 才出按钮 → 单行/少行但超长内容（长 URL、压缩文本、minified 代码、14~30 行段落）
+// 被 max-height:220px + overflow:hidden 永久裁断却无展开入口，后半段看不到。改用 DOM 实测后还天然
+// 适配字号缩放（rem 迁移），不再与行数/字符阈值耦合。resultLineCount 仅用于按钮文案。
+const RESULT_PREVIEW_PX = 220;
 const resultLineCount = computed(() => (resultContent.value ? resultContent.value.split('\n').length : 0));
-const isLongResult = computed(() => resultLineCount.value > 30);
 const resultExpanded = ref(false);
+const resultInnerRef = ref<HTMLElement | null>(null);
+const resultOverflow = ref(false);
+function measureResultOverflow(): void {
+  const el = resultInnerRef.value;
+  // scrollHeight 不受 max-height/overflow:hidden 裁剪影响，恒为完整内容高度。
+  resultOverflow.value = !!el && el.scrollHeight > RESULT_PREVIEW_PX + 2;
+}
+// 工具行展开后、或结果到达后，等 DOM 渲染完再测是否溢出。
+watch([expanded, resultContent], () => {
+  if (expanded.value) nextTick(measureResultOverflow);
+});
 </script>
 
 <template>
@@ -79,13 +94,13 @@ const resultExpanded = ref(false);
         <pre>{{ JSON.stringify(useParsed.input ?? {}, null, 2) }}</pre>
       </div>
       <div v-if="resultContent" class="tool-row__result" :class="{ 'tool-row__result--expanded': resultExpanded }">
-        <div class="tool-row__result-inner">
+        <div ref="resultInnerRef" class="tool-row__result-inner">
           <div v-if="isDiff" class="markdown-body" v-html="renderedDiff" />
           <div v-else class="markdown-body" v-html="renderedMarkdown" />
         </div>
-        <div v-if="isLongResult" class="tool-row__result-fade">
+        <div v-if="resultOverflow" class="tool-row__result-fade">
           <button type="button" class="tool-row__expand" @click.stop="resultExpanded = !resultExpanded">
-            {{ resultExpanded ? '收起 ▴' : `展开全部（${resultLineCount} 行）▾` }}
+            {{ resultExpanded ? '收起 ▴' : (resultLineCount > 1 ? `展开全部（${resultLineCount} 行）▾` : '展开全部 ▾') }}
           </button>
         </div>
       </div>
