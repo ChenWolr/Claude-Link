@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Session } from '../../../shared/types/session';
 import { getConnection } from '../connection';
 import { normalizeSearchText } from '../../utils/search-normalizer';
+import { normalizeDbTime } from '../../../shared/time';
 
 interface SessionRow {
   id: string;
@@ -29,10 +30,10 @@ function toSession(row: SessionRow): Session {
     workingDir: row.working_dir,
     permissionMode: row.permission_mode,
     maxTurns: row.max_turns,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: normalizeDbTime(row.created_at),
+    updatedAt: normalizeDbTime(row.updated_at),
     lastContextTokens: row.last_context_tokens,
-    lastContextUpdatedAt: row.last_context_updated_at,
+    lastContextUpdatedAt: normalizeDbTime(row.last_context_updated_at),
     lastContextWindow: row.last_context_window,
   };
 }
