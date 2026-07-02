@@ -24,11 +24,16 @@ export function isDisplayableSystemInfo(subtype: string | undefined, text: strin
 // 即便带非空文本，在聊天流里也是一行来历不明的灰字、与思考/工具混排在同一 fold，无用户可读语义
 // （权限询问/交互回执/压缩边界/插件安装各有专用承载或专用 processKind，不在此列）。落库仍保留审计，
 // 渲染层跳过——兑现「要么解释要么删掉」的「删掉」一支。compact_boundary/plugin_install 有展示价值，保留。
+//
+// Bug4/Bug5：system:api_retry 也纳入冗余集。api_retry 现已改走 forwardTransient（不落库、不进聊天流），
+// 由专门的瞬态「API 重试中」指示器承载（见 ApiRetryBanner）。此处仅作兜底：修复前老库可能残留
+// system:api_retry 行，切回旧会话重载时不让它再冒成「ℹ️ 系统」噪音。
 // 纯函数，由 selftest 覆盖契约。
 export function isRedundantSystemProcessKind(processKind: string | null | undefined): boolean {
   return (
     processKind === 'permission' ||
     processKind === 'system:interaction_response' ||
-    processKind === 'system:informational'
+    processKind === 'system:informational' ||
+    processKind === 'system:api_retry'
   );
 }

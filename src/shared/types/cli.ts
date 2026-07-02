@@ -134,6 +134,9 @@ export interface CliMessageEvent {
 
 export interface CliStreamEvent {
   type: 'stream_event';
+  // Bug2：SDK 的 SDKPartialAssistantMessage 带 parent_tool_use_id（sdk.d.ts:3788），透传后渲染层可把
+  // 子 agent 的 thinking_delta 路由到对应「子Agent」Tab 的实时思考，而不是无脑塞进主流程。
+  parentToolUseId?: string;
   event: {
     type?: string;
     index?: number;

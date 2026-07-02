@@ -10,6 +10,7 @@ import { useNow } from '../../composables/use-now';
 import TaskItem from './TaskItem.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
 import MessageBubble from '../chat/MessageBubble.vue';
+import ThinkingBlock from '../chat/ThinkingBlock.vue';
 
 const taskStore = useTaskStore();
 const sessionStore = useSessionStore();
@@ -26,6 +27,11 @@ const { now } = useNow(() => sessionStore.sending);
 // 时，才把该组的 live 最终值快照下来冻结——避免回退到偏短的 createdAt 首尾差。正常完成的组用
 // frozenSeconds（= 完成 tool_result.createdAt − startMs，真实跨度），不走这里。下一回合清空防串扰。
 const lastLiveByGroup = ref<Record<string, number>>({});
+// Bug2：取某子 agent 的实时思考文本（stream_event thinking_delta 按 parentToolUseId 路由来的）。
+// 思考中在组体顶部显 ThinkingBlock；子 agent message 落库后由 store 清空，回落到落库思考气泡。
+function subAgentThinkingText(agentId: string): string {
+  return sessionStore.activeSubAgentThinking[agentId] ?? '';
+}
 // 计时展示：已完成组 → 真实完成跨度（frozenSeconds）；运行中组 → 客户端实时跳动；
 // 回合结束但未完成（中断）→ 兜底冻结 live。逐组判定，并发子 Agent 各自在自身完成时停表，互不串扰。
 function subAgentDurationText(g: SubAgentGroup): string {
@@ -97,6 +103,8 @@ const subAgentGroups = computed(() =>
     hideThinking: false,
     toolProgress: sessionStore.toolProgress,
     titleByToolUseId: buildTitleByToolUseId(sessionStore.messages),
+    // Bug2：实时思考快照——让尚无落库消息的子 agent 也建组，思考中即可见 ThinkingBlock。
+    liveThinkingByAgent: sessionStore.activeSubAgentThinking,
   }),
 );
 
@@ -332,6 +340,7 @@ function handleDragReorder() {
               <span class="subagent-group__arrow">›</span>
             </button>
             <div v-if="isSubAgentGroupExpanded(g.parentAgentId, g.running)" class="subagent-group__body">
+              <ThinkingBlock v-if="subAgentThinkingText(g.parentAgentId)" :content="subAgentThinkingText(g.parentAgentId)" streaming />
               <template v-for="item in g.items" :key="item.key">
                 <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
                 <MessageBubble v-else :message="item.message" />

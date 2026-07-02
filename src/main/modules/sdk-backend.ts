@@ -133,7 +133,7 @@ interface StallTracker {
   stallNotified: boolean;
   stallCount: number;
   hardAbortFired: boolean;
-  // 连续 api_retry 次数：每次 api_retry 自增，任何真实业务活动（touchActivity）清零。
+  // 连续 api_retry 次数：每次 api_retry 自增，仅模型级活动（message/stream_event，见 touchActivity）清零。
   // 达 MAX_API_RETRIES 即快速硬中断，专治空/畸形响应重试风暴。
   consecutiveApiRetries: number;
 }
@@ -192,8 +192,14 @@ function touchActivity(sessionId: string, kind: string): void {
   if (!t) return;
   t.lastActivityAt = Date.now();
   t.lastKind = kind;
-  // 真实业务进展到达 → 清零连续重试计数（之前累积的 api_retry 风暴已过去）。
-  t.consecutiveApiRetries = 0;
+  // Bug3：consecutiveApiRetries 只在「模型级」活动（message/stream_event）清零。api_retry 是模型 API
+  // 失败信号，唯有模型恢复并真正产出（消息/流式）才代表重试风暴已过；tool_progress/system 是工具执行
+  // 与编排活动，与模型健康无关。旧逻辑一概清零 → subagent 跑工具时 api_retry 风暴被反复清零，永远爬不到
+  // MAX_API_RETRIES，第二轮 API 死亡时既不硬中断也不再弹横幅，陷入无限等待。改为仅模型级清零后，
+  // 风暴能正常累加至阈值触发硬中断（出口）。
+  if (kind === 'message' || kind === 'stream_event') {
+    t.consecutiveApiRetries = 0;
+  }
   if (t.stalledSince !== null) {
     t.stalledSince = null;
     t.stallNotified = false;
@@ -218,7 +224,8 @@ function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
   if (!t) return;
   // api_retry：SDK 正在重试一次失败的 API 调用（如空/畸形响应）——是失败信号而非业务进展。
   // 只累加连续重试计数，不刷新 lastActivityAt（否则重试风暴永远判不出卡死）。
-  // 事件本身仍由 forwardEvent 正常转发+落库（前端显示「API 重试中（第 N/M 次）」）。
+  // 事件本身经 forwardTransient 转发（不落库、不进聊天流），渲染层作瞬态「API 重试中」指示器，
+  // 用本回合累计计数（而非 SDK 单次 attempt 字段，第三方端点常恒为 1）原地递增显示「第 N 次」。
   if (event.type === 'system' && (event as CliSystemInfoEvent).subtype === 'api_retry') {
     t.consecutiveApiRetries += 1;
     return;
@@ -621,6 +628,10 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     settingSources: [],
     // 拿流式增量（对应 stream_event），前端逐字/逐工具参数显示。
     includePartialMessages: true,
+    // Bug2：转发子 agent 的 text/thinking 为带 parent_tool_use_id 的消息（sdk.d.ts 的 forwardSubagentText，
+    // 默认 false 只转发 tool_use/tool_result）。开启后子 Agent Tab 能看到子 agent 完整思考/正文，
+    // 配合 stream_event 透传的 parent_tool_use_id，思考中也实时可见，不再只有「开启subagent」锚点。
+    forwardSubagentText: true,
     // 启用 adaptive thinking：交给 SDK/模型决定思考预算，避免新模型拒绝固定 budgetTokens。
     thinking: { type: 'adaptive' },
     canUseTool: createPermissionHandler(sessionId, mainWindow),
@@ -803,8 +814,16 @@ function convertResultMessage(sdkMsg: Record<string, unknown>): CliEvent {
 }
 
 // SDK stream_event（SDKPartialAssistantMessage）已是 {type:'stream_event', event}，直接转发。
+// Bug2：透传 parent_tool_use_id（sdk.d.ts:3788 SDKPartialAssistantMessage 带），让渲染层把子 agent 的
+// thinking_delta 路由到对应「子Agent」Tab 的实时思考，而非无脑塞进主流程（致思考中 Tab 空白）。
 function convertStreamEvent(sdkMsg: Record<string, unknown>): CliEvent {
-  return { type: 'stream_event', event: sdkMsg.event as CliStreamEvent['event'] } as CliStreamEvent;
+  const parentToolUseId =
+    typeof sdkMsg.parent_tool_use_id === 'string' ? sdkMsg.parent_tool_use_id : undefined;
+  return {
+    type: 'stream_event',
+    event: sdkMsg.event as CliStreamEvent['event'],
+    ...(parentToolUseId ? { parentToolUseId } : {}),
+  } as CliStreamEvent;
 }
 
 async function startSdkQuery(prompt: string, options: Record<string, unknown>): Promise<Query> {
@@ -981,7 +1000,11 @@ async function runQuery(
           forwardEvent(sessionId, mainWindow, sysInfo);
           continue;
         }
-        // api_retry：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。转发供前端显示「重试中」。
+        // api_retry：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。
+        // Bug4/Bug5：改走 forwardTransient——不落库、不进聊天流（不再是「系统消息」噪音）。
+        // 渲染层把它当瞬态「API 重试中」指示器，并用本回合累计计数原地递增（而非下方的 attempt 字段——
+        // 第三方端点常恒报 1）。consecutiveApiRetries 仍由上面 touchActivityFromEvent（经 forwardTransient）
+        // 累加，供看门狗硬中断判定，不受此处通道切换影响。
         if (infoSubtype === 'api_retry') {
           const sysInfo: CliSystemInfoEvent = {
             type: 'system',
@@ -991,7 +1014,7 @@ async function runQuery(
             error: typeof sdkMsg.error === 'string' ? sdkMsg.error : undefined,
             level: 'warn',
           };
-          forwardEvent(sessionId, mainWindow, sysInfo);
+          forwardTransient(sessionId, mainWindow, sysInfo);
           continue;
         }
         // 权限询问/拒绝事件：转发并落库（processKind = permission）。

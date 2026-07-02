@@ -66,6 +66,13 @@ export const useSessionStore = defineStore('session', {
     turnStartedAt: {} as Record<string, number>,
     // 卡死检测：per-session 卡死信息（主进程看门狗 stalled 事件下发）。getter activeStalledInfo 读当前会话。
     stalledInfo: {} as Record<string, StallInfo>,
+    // Bug4/Bug5：per-session API 重试瞬态（api_retry 事件下发，不再落库）。attempt 为本回合累计计数
+    //（每条 api_retry 自增，真实业务事件清零），由 ApiRetryBanner 显示「API 重试中（第 N 次）」。
+    apiRetryInfo: {} as Record<string, { attempt: number; max?: number; error?: string }>,
+    // Bug2：per-session 子 agent 实时思考快照（stream_event thinking_delta 按 parentToolUseId 路由）。
+    // 外层 key=sessionId，内层 key=parentAgentId → 累积思考文本。子 Agent Tab 据此在思考中显示
+    // ThinkingBlock；该子 agent 的 message 到达（完整思考落库）或回合结束时清除，避免与落库重复。
+    subAgentStreamingThinking: {} as Record<string, Record<string, string>>,
   }),
   getters: {
     // 当前应展示的会话列表：搜索态下返回 searchResults，否则返回全量 sessions。
@@ -86,6 +93,16 @@ export const useSessionStore = defineStore('session', {
     activeStalledInfo(state): StallInfo | null {
       if (!state.activeSession) return null;
       return state.stalledInfo[state.activeSession.id] ?? null;
+    },
+    // Bug4/Bug5：当前活动会话的 API 重试瞬态（无则 null）。ApiRetryBanner 据此显隐。
+    activeApiRetryInfo(state): { attempt: number; max?: number; error?: string } | null {
+      if (!state.activeSession) return null;
+      return state.apiRetryInfo[state.activeSession.id] ?? null;
+    },
+    // Bug2：当前活动会话的子 agent 实时思考映射（agentId → 文本）。TaskQueuePanel 据此显 ThinkingBlock。
+    activeSubAgentThinking(state): Record<string, string> {
+      if (!state.activeSession) return {};
+      return state.subAgentStreamingThinking[state.activeSession.id] ?? {};
     },
   },
   actions: {
@@ -186,6 +203,8 @@ export const useSessionStore = defineStore('session', {
         this.runningSessions = this.runningSessions.filter((sid) => sid !== id);
         delete this.sessionStreams[id];
         delete this.stalledInfo[id];
+        delete this.apiRetryInfo[id];
+        delete this.subAgentStreamingThinking[id];
       } catch (error) {
         this.error = error instanceof Error ? error.message : '删除会话失败';
       }
@@ -292,6 +311,10 @@ export const useSessionStore = defineStore('session', {
       delete this.turnStartedAt[sessionId];
       // 卡死横幅随回合结束消失。
       delete this.stalledInfo[sessionId];
+      // API 重试指示器随回合结束消失。
+      delete this.apiRetryInfo[sessionId];
+      // 子 agent 实时思考快照随回合结束清除。
+      delete this.subAgentStreamingThinking[sessionId];
     },
     // 问题 1：向非当前会话的流式快照追加内容（后台执行时累积流式，切回时恢复）。
     appendBackgroundStream(sessionId: string, type: 'content' | 'thinking' | 'tool', text: string) {
@@ -310,6 +333,31 @@ export const useSessionStore = defineStore('session', {
     },
     clearStalled(sessionId: string) {
       delete this.stalledInfo[sessionId];
+    },
+    // Bug4/Bug5：记录一次 api_retry（attempt 本回合累计自增），供 ApiRetryBanner 原地递增显示「第 N 次」。
+    markApiRetrying(sessionId: string, info: { max?: number; error?: string }) {
+      const prev = this.apiRetryInfo[sessionId];
+      this.apiRetryInfo[sessionId] = {
+        attempt: prev ? prev.attempt + 1 : 1,
+        max: info.max,
+        error: info.error,
+      };
+    },
+    clearApiRetrying(sessionId: string) {
+      delete this.apiRetryInfo[sessionId];
+    },
+    // Bug2：累加某子 agent 的实时思考（thinking_delta 按 parentToolUseId 路由进来）。
+    appendSubAgentThinking(sessionId: string, agentId: string, text: string) {
+      if (!this.subAgentStreamingThinking[sessionId]) this.subAgentStreamingThinking[sessionId] = {};
+      this.subAgentStreamingThinking[sessionId][agentId] =
+        (this.subAgentStreamingThinking[sessionId][agentId] ?? '') + text;
+    },
+    // Bug2：清除子 agent 实时思考——传 agentId 清单个（其 message 已落库，完整思考接管）；
+    // 不传则清该会话全部（回合结束）。
+    clearSubAgentThinking(sessionId: string, agentId?: string) {
+      if (!this.subAgentStreamingThinking[sessionId]) return;
+      if (agentId) delete this.subAgentStreamingThinking[sessionId][agentId];
+      else delete this.subAgentStreamingThinking[sessionId];
     },
     // 根因修复：ChatPage 重挂载（路由跳转回来）时重拉 messages + 同步状态。
     // 不重新注册监听（监听已在 App.vue 全局注册），只刷新当前会话数据。
