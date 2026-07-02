@@ -17,6 +17,7 @@ import {
 } from '../src/shared/settings-parser';
 import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
 import { lookupModelWindow, resolveContextWindow } from '../src/shared/model-context-windows';
+import { normalizeDbTime } from '../src/shared/time';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
@@ -354,7 +355,12 @@ console.log('\n=== 26) Review 修复：中断标记按 query 实例、abort 跨�
   check('killProcess 调 query.interrupt', /killProcess[\s\S]{0,300}interrupt/.test(sb));
   check('中断(error_during_execution)不弹错误', uc.includes('error_during_execution') && uc.includes('isUserInterrupt'));
   check('streamingTool 有渲染消费链', ml.includes('streamingTool') && cp.includes('displayTool') && us.includes('displayTool'));
-  check('abort 定时器句柄化 + 清理', uc.includes('abortTimer') && uc.includes('clearAbortTimer'));
+  // try-finally 兜底：abortTimer 单例已改为 per-session Map + ensureAbortFinally。
+  // try = 收到结束事件清兜底；finally = 超时强制 markStopped（不依赖 SDK 中断信号是否真生效）。
+  check('abort 兜底 per-session + ensureAbortFinally', uc.includes('abortTimers') && uc.includes('ensureAbortFinally'));
+  check('abort try-finally：ensureAbortFinally 强制 markStopped', /function ensureAbortFinally[\s\S]{0,600}store\.markStopped\(sid\)/.test(uc));
+  check('abort 兜底全部按 sessionId 清理（无单例残留 clearAbortTimer()）', !uc.includes('clearAbortTimer()'));
+  check('watch 切会话不清 abort 兜底（中断后切走仍保 finally）', !/activeSession\?\.id[\s\S]{0,120}clearAbortTimer/.test(uc));
   check('continueWithUserMessage exit 守卫 continuing', /status !== 'continuing'/.test(tq));
 }
 
@@ -575,7 +581,9 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
   check('SessionToolbar ContextButton :disabled', st.includes('ContextButton :disabled="sending"'));
   check('SessionToolbar 工作空间 button :disabled', /ctl__btn[\s\S]{0,120}:disabled="sending"/.test(st));
   check('SessionToolbar ModelSelector :disabled', st.includes('ModelSelector :disabled="sending"'));
-  check('SessionToolbar 权限 select :disabled', /<select[\s\S]{0,80}:disabled="sending"/.test(st));
+  // 权限控件已由 <select> 改为卡片式（触发按钮 + 弹出 perm-menu，commit d396477）：校验权限触发按钮在 sending 时禁用。
+  // :disabled="sending" 后跟权限图标 ctl__perm-icon 可唯一定位权限按钮（工作空间/模型按钮无此图标）。
+  check('SessionToolbar 权限触发按钮 :disabled（卡片式）', /:disabled="sending"[\s\S]{0,200}ctl__perm-icon/.test(st));
 }
 
 console.log('\n=== 31) 根因修复：chat:event 监听全局化 + sending 派生 ===');
@@ -791,11 +799,28 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
   check('permission 视为冗余（不渲染）', isRedundantSystemProcessKind('permission') === true);
   check('system:interaction_response 视为冗余', isRedundantSystemProcessKind('system:interaction_response') === true);
   check('system:informational 视为冗余（问题 2：彻底删行不渲染）', isRedundantSystemProcessKind('system:informational') === true);
+  check('system:api_retry 视为冗余（Bug4：改瞬态，旧库残留行不渲染成「系统」）', isRedundantSystemProcessKind('system:api_retry') === true);
   check('thinking 非冗余（保留渲染）', isRedundantSystemProcessKind('thinking') === false);
   check('tool:* 非冗余', isRedundantSystemProcessKind('tool:bash') === false);
   check('compact_boundary 非冗余', isRedundantSystemProcessKind('system:compact_boundary') === false);
   check('null 非冗余', isRedundantSystemProcessKind(null) === false);
   check('group-messages 渲染层过滤冗余 system', gm.includes('isRedundantSystemProcessKind'));
+
+  // Bug4：api_retry 改走 forwardTransient（不落库、不进聊天流），不再冒「系统消息」。
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  check('api_retry 走 forwardTransient（不落库）', /subtype: 'api_retry'[\s\S]{0,500}forwardTransient/.test(sb));
+  check('MessageList 挂载 ApiRetryBanner', ml.includes('ApiRetryBanner'));
+  // Bug2：SDK 转发子 agent text/thinking + stream_event 透传 parent_tool_use_id → 子 Agent Tab 思考中可见。
+  check('sdk-backend 开启 forwardSubagentText', sb.includes('forwardSubagentText: true'));
+  check('convertStreamEvent 透传 parent_tool_use_id', /convertStreamEvent[\s\S]{0,300}parent_tool_use_id/.test(sb));
+  check('TaskQueuePanel 引入 ThinkingBlock（子 agent 实时思考）', tqp.includes('ThinkingBlock'));
+  // Bug3：consecutiveApiRetries 仅模型级（message/stream_event）清零，tool_progress 不再清零。
+  check('touchActivity 仅模型级清零重试计数', /kind === 'message' \|\| kind === 'stream_event'[\s\S]{0,80}consecutiveApiRetries = 0/.test(sb));
+  // Bug4（二次）：requesting/compact_result 是 forwardTransient 但原渲染层落到 persistSystemEvent → 无 defaultText → 「系统提示」。
+  check('use-chat 把 requesting/compact_result 当瞬态（不再冒「系统提示」）', uc.includes("event.subtype === 'compact_result'") && uc.includes("event.subtype === 'requesting'") && uc.includes('setCompacting(false)'));
+  // 计划模式确定按钮点不到：interaction-dialog 改 flex 列布局，body 用 flex:1+min-height:0 取代魔数 max-height，footer 不再被裁。
+  const ip = readRel('src/renderer/components/chat/InteractionPrompt.vue');
+  check('InteractionPrompt 对话框 flex 列布局（footer 不被裁）', ip.includes('flex-direction: column') && /interaction-dialog__body\s*\{[\s\S]*?flex: 1/.test(ip) && ip.includes('flex-shrink: 0'));
 
   // R1（问题 2）：sdk-backend 把缺失值补 0，?? 对 0 不生效 → 改真值判断 + clientMs 兜底。
   check('use-chat 时长真值判断（>0 回落 clientMs）', uc.includes('event.duration_ms') && uc.includes('> 0') && uc.includes('clientMs'));
@@ -929,6 +954,25 @@ console.log('\n=== 40) UI 简化：连接配置单卡片 + 会话内不调字号
   check('ModelMappingInputs 不再展示长别名说明', !mm.includes('Claude Code 用 sonnet / haiku / opus / fable'));
   check('SessionToolbar 不再导入 FONT_SCALE_SIZES', !st.includes('FONT_SCALE_SIZES'));
   check('SessionToolbar 不再含会话内字号控件', !st.includes('onFontScaleChange') && !st.includes('<span class="ctl__label">字号</span>'));
+}
+
+console.log('\n=== 41) DB 时间规范化 normalizeDbTime（治子 Agent 计时 8h 时区偏移）===');
+{
+  const mr = readRel('src/main/database/repositories/message-repo.ts');
+  const tr = readRel('src/main/database/repositories/task-repo.ts');
+  const sr = readRel('src/main/database/repositories/session-repo.ts');
+  const ih = readRel('src/main/database/repositories/interaction-history-repo.ts');
+  // 行为测试（shared/time 纯函数，无 db 依赖，可直接 import）
+  check('normalizeDbTime 无 Z SQLite datetime → 补 Z', normalizeDbTime('2026-07-03 04:43:00') === '2026-07-03T04:43:00Z');
+  check('normalizeDbTime 已带 Z 原样', normalizeDbTime('2026-07-03T04:43:00.000Z') === '2026-07-03T04:43:00.000Z');
+  check('normalizeDbTime 带毫秒补 Z', normalizeDbTime('2026-07-03 04:43:00.123') === '2026-07-03T04:43:00.123Z');
+  check('normalizeDbTime null 原样返回', normalizeDbTime(null) === null);
+  check('normalizeDbTime 已带偏移原样', normalizeDbTime('2026-07-03T04:43:00+08:00') === '2026-07-03T04:43:00+08:00');
+  // 各 repo 读回时间字段统一走 normalizeDbTime
+  check('message-repo toMessage 用 normalizeDbTime', /createdAt:\s*normalizeDbTime\(row\.created_at\)/.test(mr));
+  check('task-repo toTask 用 normalizeDbTime', tr.includes('normalizeDbTime(row.started_at)') && tr.includes('normalizeDbTime(row.completed_at)'));
+  check('session-repo toSession 用 normalizeDbTime', sr.includes('normalizeDbTime(row.created_at)') && sr.includes('normalizeDbTime(row.last_context_updated_at)'));
+  check('interaction-history toEntry 用 normalizeDbTime', /createdAt:\s*normalizeDbTime\(row\.created_at\)/.test(ih));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
