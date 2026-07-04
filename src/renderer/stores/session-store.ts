@@ -164,8 +164,8 @@ export const useSessionStore = defineStore('session', {
       // 查内置表（解决未连接时 1M 模型被当成 200k），再次用户全局覆盖，最后 200k。
       const windowSize = resolveContextWindow({
         lastContextWindow: session.lastContextWindow,
-        model: session.modelOverride || session.model,
-        override: useConfigStore().contextWindowOverride,
+        alias: session.modelOverride || session.model,
+        contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
       });
       this.contextStats = session.lastContextTokens
         ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize, ratio: windowSize > 0 ? session.lastContextTokens / windowSize : 0 }
@@ -188,24 +188,32 @@ export const useSessionStore = defineStore('session', {
       }
     },
     async deleteSession(id: string) {
+      // 乐观更新：先从 UI 移除（列表/搜索态/activeSession/执行状态），让会话瞬间从侧栏消失，
+      // 避免「confirm 弹窗已消失但列表刷新滞后」致用户反复点删除触发新 confirm。IPC 失败时回滚。
+      const prevSessions = this.sessions;
+      const prevSearch = this.searchResults;
+      const prevActive = this.activeSession;
+      this.sessions = this.sessions.filter((s) => s.id !== id);
+      if (this.searchResults) {
+        this.searchResults = this.searchResults.filter((s) => s.id !== id);
+      }
+      if (this.activeSession?.id === id) {
+        this.activeSession = null;
+        this.messages = [];
+      }
+      // 问题 1：清理已删会话的执行状态与流式快照
+      this.runningSessions = this.runningSessions.filter((sid) => sid !== id);
+      delete this.sessionStreams[id];
+      delete this.stalledInfo[id];
+      delete this.apiRetryInfo[id];
+      delete this.subAgentStreamingThinking[id];
       try {
         await window.claudeLink.deleteSession(id);
-        this.sessions = this.sessions.filter((s) => s.id !== id);
-        // 搜索态下同步移除，保持搜索列表一致。
-        if (this.searchResults) {
-          this.searchResults = this.searchResults.filter((s) => s.id !== id);
-        }
-        if (this.activeSession?.id === id) {
-          this.activeSession = null;
-          this.messages = [];
-        }
-        // 问题 1：清理已删会话的执行状态与流式快照
-        this.runningSessions = this.runningSessions.filter((sid) => sid !== id);
-        delete this.sessionStreams[id];
-        delete this.stalledInfo[id];
-        delete this.apiRetryInfo[id];
-        delete this.subAgentStreamingThinking[id];
       } catch (error) {
+        // IPC 失败回滚——恢复列表与活动会话
+        this.sessions = prevSessions;
+        this.searchResults = prevSearch;
+        this.activeSession = prevActive;
         this.error = error instanceof Error ? error.message : '删除会话失败';
       }
     },
@@ -276,11 +284,19 @@ export const useSessionStore = defineStore('session', {
     bindContextUpdates() {
       return window.claudeLink.onContextUpdate((payload) => {
         if (this.activeSession?.id !== payload.sessionId) return;
+        // 上下文窗口经 resolveContextWindow 过滤：用户按别名设置优先（「以设置为准」），
+        // 否则用 SDK 上报的真实窗口（payload.windowSize）。避免 SDK 误报 200k 覆盖用户设置的 1M。
+        const alias = this.activeSession.modelOverride || this.activeSession.model;
+        const windowSize = resolveContextWindow({
+          lastContextWindow: payload.windowSize,
+          alias,
+          contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
+        });
         this.contextStats = {
           inputTokens: payload.inputTokens,
           outputTokens: payload.outputTokens,
-          windowSize: payload.windowSize,
-          ratio: payload.windowSize > 0 ? payload.inputTokens / payload.windowSize : 0,
+          windowSize,
+          ratio: windowSize > 0 ? payload.inputTokens / windowSize : 0,
         };
         // 问题 4：CC 自动压缩事件 → 置标记，ContextButton 弹横幅回显。
         if (payload.compactedJustNow) {

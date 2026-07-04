@@ -148,14 +148,14 @@ onUnmounted(() => {
 .slash-menu {
   position: absolute;
   bottom: 100%;
-  left: 24px;
-  right: 24px;
-  max-width: 752px;
+  left: 1.5rem;
+  right: 1.5rem;
+  max-width: 47rem;
   z-index: 50;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel);
-  padding: 8px 0;
+  padding: 0.5rem 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -164,8 +164,8 @@ onUnmounted(() => {
 .slash-menu__item {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 14px;
+  gap: 0.75rem;
+  padding: 0.5rem 0.875rem;
   cursor: pointer;
 }
 
