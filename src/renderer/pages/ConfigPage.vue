@@ -27,15 +27,9 @@ const activeTab = ref<TabId>('connection');
 // cliPath/cliVersion/workingDirectory 由系统维护（自动检测/未开放编辑），不纳入快照。
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
-  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale', 'contextWindowOverride',
+  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale', 'contextWindowByAlias',
 ] as const;
 
-// 上下文窗口覆盖输入：input 清空时给空串/NaN，这里统一规范成 number|null。
-// null = 不覆盖（未连接按模型查表，连通后用真实值）；正整数 = 写 env.CLAUDE_LINK_CONTEXT_WINDOW。
-function onContextWindowInput(raw: string): void {
-  const n = Number(raw);
-  store.config.contextWindowOverride = Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
-}
 const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
 let initialized = false;
 let lastSavedSnapshot = '';
@@ -102,7 +96,7 @@ watch(
 
 // 表单→JSON：apiKey/apiBaseUrl/permissionMode 改动同步进 advancedJson（完整双向）
 watch(
-  () => [store.config.apiKey, store.config.apiBaseUrl, store.config.permissionMode, store.config.contextWindowOverride],
+  () => [store.config.apiKey, store.config.apiBaseUrl, store.config.permissionMode],
   () => {
     if (!store.updatingFromJson) store.syncFormToAdvanced();
   },
@@ -331,16 +325,6 @@ function handleFontScaleChange(e: Event) {
           <label class="field">
             <span>请求地址（API Base URL） <span class="required">*</span></span>
             <input v-model="store.config.apiBaseUrl" type="text" placeholder="https://api.anthropic.com" />
-          </label>
-          <label class="field">
-            <span>上下文窗口</span>
-            <input
-              type="number"
-              min="1"
-              placeholder="如 1000000（留空自动识别）"
-              :value="store.config.contextWindowOverride ?? ''"
-              @input="onContextWindowInput(($event.target as HTMLInputElement).value)"
-            />
           </label>
           <ModelMappingInputs />
           <div class="advanced-panel">

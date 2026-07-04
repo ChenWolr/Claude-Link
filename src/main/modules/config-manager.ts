@@ -8,7 +8,7 @@
 import ElectronStoreModule from 'electron-store';
 import { app, safeStorage } from 'electron';
 import * as fs from 'fs';
-import type { AppConfig } from '../../shared/types/config';
+import type { AppConfig, ModelAlias } from '../../shared/types/config';
 import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { logger } from '../utils/logger';
 import { parseClaudeSettings } from './settings-importer';
@@ -53,7 +53,7 @@ const defaultConfig: StoredConfig = {
   taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
-  contextWindowOverride: null,
+  contextWindowByAlias: {},
 };
 
 const store = new ElectronStoreCtor({
@@ -112,7 +112,7 @@ export function getConfig(): AppConfig {
     taskDelaySeconds: config.taskDelaySeconds,
     themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,
     fontScale: config.fontScale ?? DEFAULT_FONT_SCALE,
-    contextWindowOverride: config.contextWindowOverride ?? null,
+    contextWindowByAlias: config.contextWindowByAlias ?? {},
   };
 }
 
@@ -159,7 +159,7 @@ export function importSettingsFile(filePath: string): {
   apiKey?: string;
   apiBaseUrl?: string;
   defaultModel?: string;
-  contextWindowOverride?: number | null;
+  contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
   advancedJson: string;
 } {
   const content = fs.readFileSync(filePath, 'utf-8');

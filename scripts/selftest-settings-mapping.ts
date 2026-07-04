@@ -14,9 +14,10 @@ import {
   resolveConfiguredActualModel,
   resolveConfiguredDefaultModel,
   peekEnvValue,
+  setContextWindowInAdvancedJson,
 } from '../src/shared/settings-parser';
 import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
-import { lookupModelWindow, resolveContextWindow } from '../src/shared/model-context-windows';
+import { lookupModelWindow, resolveContextWindow, resolveContextWindowForSession } from '../src/shared/model-context-windows';
 import { normalizeDbTime } from '../src/shared/time';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
@@ -912,15 +913,18 @@ console.log('\n=== 39) 上下文窗口 fallback + fable 映射契约 ===');
   check('parseClaudeSettings 只配 fable → defaultModel=fable（不再丢空）', pf.defaultModel === 'fable', `got ${pf.defaultModel}`);
   check('parseClaudeSettings 保留 fable 映射在 advancedJson', pf.advancedJson.includes('ANTHROPIC_DEFAULT_FABLE_MODEL'));
 
-  // C. contextWindowOverride 双向（表单 ↔ env.CLAUDE_LINK_CONTEXT_WINDOW）
-  const advWith = syncFormToAdvancedJson('{}', { apiKey: '', apiBaseUrl: 'https://api.anthropic.com', permissionMode: 'default', contextWindowOverride: 1000000 });
-  check('contextWindowOverride=1000000 写入 env.CLAUDE_LINK_CONTEXT_WINDOW',
-    JSON.parse(advWith).env?.CLAUDE_LINK_CONTEXT_WINDOW === '1000000', advWith);
-  const advCleared = syncFormToAdvancedJson(advWith, { apiKey: '', apiBaseUrl: 'https://api.anthropic.com', permissionMode: 'default', contextWindowOverride: null });
-  check('contextWindowOverride=null 删除 env.CLAUDE_LINK_CONTEXT_WINDOW',
-    JSON.parse(advCleared).env?.CLAUDE_LINK_CONTEXT_WINDOW === undefined, advCleared);
-  const peeked = parseClaudeSettings(JSON.stringify({ env: { CLAUDE_LINK_CONTEXT_WINDOW: '1000000' } }, null, 2));
-  check('parseClaudeSettings 反向回填 contextWindowOverride=1000000', peeked.contextWindowOverride === 1000000, `got ${peeked.contextWindowOverride}`);
+  // C. contextWindowByAlias 按别名双向（setContextWindowInAdvancedJson ↔ parseClaudeSettings peek）
+  const advSonnet = setContextWindowInAdvancedJson('{}', 'sonnet', 1000000);
+  check('setContextWindowInAdvancedJson(sonnet,1M) 写 env.CLAUDE_LINK_CONTEXT_WINDOW_SONNET',
+    JSON.parse(advSonnet).env?.CLAUDE_LINK_CONTEXT_WINDOW_SONNET === '1000000', advSonnet);
+  const advCleared = setContextWindowInAdvancedJson(advSonnet, 'sonnet', null);
+  check('setContextWindowInAdvancedJson(sonnet,null) 删除该 key',
+    JSON.parse(advCleared).env?.CLAUDE_LINK_CONTEXT_WINDOW_SONNET === undefined, advCleared);
+  const advTwo = setContextWindowInAdvancedJson(setContextWindowInAdvancedJson('{}', 'sonnet', 200000), 'fable', 1000000);
+  check('sonnet 与 fable 各自独立写入', JSON.parse(advTwo).env?.CLAUDE_LINK_CONTEXT_WINDOW_SONNET === '200000' && JSON.parse(advTwo).env?.CLAUDE_LINK_CONTEXT_WINDOW_FABLE === '1000000', advTwo);
+  const peeked = parseClaudeSettings(JSON.stringify({ env: { CLAUDE_LINK_CONTEXT_WINDOW_HAIKU: '64000' } }, null, 2));
+  check('parseClaudeSettings 反向回填 contextWindowByAlias.haiku=64000', peeked.contextWindowByAlias?.haiku === 64000, JSON.stringify(peeked.contextWindowByAlias));
+  check('parseClaudeSettings 未设别名不出现在 contextWindowByAlias', peeked.contextWindowByAlias?.sonnet === undefined);
 
   // D. lookupModelWindow 内置表（最长前缀匹配 + 标准化）
   check('lookupModelWindow(glm-5.2)=1M', lookupModelWindow('glm-5.2') === 1000000, String(lookupModelWindow('glm-5.2')));
@@ -931,12 +935,21 @@ console.log('\n=== 39) 上下文窗口 fallback + fable 映射契约 ===');
   check('lookupModelWindow(未知模型)=null', lookupModelWindow('some-unknown-model') === null);
   check('lookupModelWindow(null/空)=null', lookupModelWindow(null) === null && lookupModelWindow('') === null);
 
-  // E. resolveContextWindow fallback 优先级
-  check('优先 lastContextWindow', resolveContextWindow({ lastContextWindow: 500000, model: 'glm-5.2', override: 200000 }) === 500000);
-  check('无 lastContextWindow 走模型查表', resolveContextWindow({ model: 'glm-5.2', override: 200000 }) === 1000000);
-  check('无 lastContextWindow/无模型命中 走 override', resolveContextWindow({ model: 'unknown-model', override: 300000 }) === 300000);
-  check('全无 → 200000 兜底', resolveContextWindow({ model: 'unknown-model' }) === 200000);
-  check('lastContextWindow 非正数跳过', resolveContextWindow({ lastContextWindow: 0, model: 'glm-5.2' }) === 1000000);
+  // E. resolveContextWindow 优先级（用户别名设置 > lastContextWindow > 200k）
+  check('用户设置优先于 lastContextWindow', resolveContextWindow({ lastContextWindow: 500000, alias: 'sonnet', contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
+  check('无用户设置 走 lastContextWindow', resolveContextWindow({ lastContextWindow: 500000, alias: 'sonnet', contextWindowByAlias: {} }) === 500000);
+  check('无用户设置/无 lastContextWindow → 200k', resolveContextWindow({ alias: 'sonnet', contextWindowByAlias: {} }) === 200000);
+  check('全无 → 200000 兜底', resolveContextWindow({}) === 200000);
+  check('别名未在设置中 走 lastContextWindow', resolveContextWindow({ lastContextWindow: 300000, alias: 'sonnet', contextWindowByAlias: { fable: 1000000 } }) === 300000);
+  check('alias 为 null 但有 lastContextWindow → lastContextWindow', resolveContextWindow({ lastContextWindow: 400000, alias: null, contextWindowByAlias: { sonnet: 1000000 } }) === 400000);
+  check('alias 为 null 且无 lastContextWindow → 200k', resolveContextWindow({ alias: null, contextWindowByAlias: { sonnet: 1000000 } }) === 200000);
+
+  // F. resolveContextWindowForSession（主进程用：真实模型名按 modelMappings 反查别名）
+  const advWithMap = JSON.stringify({ env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2', CLAUDE_LINK_CONTEXT_WINDOW_SONNET: '1000000' } }, null, 2);
+  check('别名直传命中', resolveContextWindowForSession({ aliasOrModel: 'sonnet', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
+  check('真实模型名反查别名命中(glm-5.2→sonnet)', resolveContextWindowForSession({ aliasOrModel: 'glm-5.2', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
+  check('未知真实模型名 → 200k', resolveContextWindowForSession({ aliasOrModel: 'unknown-model', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 200000);
+  check('无 aliasOrModel → 200k', resolveContextWindowForSession({ aliasOrModel: null, advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 200000);
 }
 
 console.log('\n=== 40) UI 简化：连接配置单卡片 + 会话内不调字号 ===');

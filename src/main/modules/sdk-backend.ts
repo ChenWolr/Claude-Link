@@ -23,6 +23,7 @@ import { IPC_CHANNELS } from '../../shared/constants';
 import type { PermissionResponsePayload } from '../../shared/types/ipc';
 import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
+import { resolveContextWindowForSession } from '../../shared/model-context-windows';
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
@@ -100,6 +101,9 @@ interface SessionEntry {
   // 官方 Options.abortController：query() 传入后，abort() 会在 Windows 上经 SDK
   // → TerminateProcess（瞬时不可捕获），打不死卡死在死 socket 上的子进程时兜底硬杀。
   abortController: AbortController | null;
+  // 启动时解析出的模型类型别名(sonnet/haiku/opus/fable)或自定义真实模型名。
+  // persistCliEvent 推送初始 windowSize 时，按它查用户设的按别名上下文覆盖。
+  requestedAlias: string | null;
 }
 const entries = new Map<string, SessionEntry>();
 const sessionCliIds = new Map<string, string>();
@@ -466,6 +470,7 @@ function createEntry(): SessionEntry {
     handle,
     state: 'pending',
     abortController: null,
+    requestedAlias: null,
     emitExit: (code) => {
       handle.killed = true;
       if (entry.state !== 'aborting') entry.state = 'finished';
@@ -526,14 +531,18 @@ function deleteEntry(sessionId: string, entry: SessionEntry): void {
   }
 }
 
-// ── 读取真实上下文窗口（与 process-manager.readContextWindow 同逻辑）────
-function readContextWindow(): number {
+// ── 读取初始上下文窗口（SDK 未上报真实值时的兜底）────────────────────
+// 按当前会话请求的别名/真实模型名查用户设的覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>），
+// 命中则返回，否则 200k。与渲染层 resolveContextWindow 共享优先级语义，避免主进程推送的
+// 初始值覆盖前端 switchSession 已算出的正确分母。aliasOrModel 来自 entry.requestedAlias。
+function readContextWindow(aliasOrModel?: string | null): number {
   try {
     const config = getConfig();
-    const adv = JSON.parse(config.advancedJson || '{}');
-    const w = adv?.env?.CLAUDE_LINK_CONTEXT_WINDOW;
-    if (typeof w === 'number' && w > 0) return w;
-    if (typeof w === 'string' && Number.isFinite(Number(w))) return Number(w);
+    return resolveContextWindowForSession({
+      aliasOrModel: aliasOrModel ?? null,
+      advancedJson: config.advancedJson,
+      contextWindowByAlias: config.contextWindowByAlias,
+    });
   } catch {
     // ignore
   }
@@ -615,7 +624,7 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
 }
 
 // ── 组装 SDK Options ───────────────────────────────────────────────
-function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow): Record<string, unknown> {
+function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow, entry: SessionEntry): Record<string, unknown> {
   const config = getConfig();
   const options: Record<string, unknown> = {
     // env：apiKey/baseUrl/模型映射全靠它（复用 buildSpawnEnv，第三方端点跑通的关键）。
@@ -643,6 +652,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
 
   // 模型：与 process-manager.buildCommonArgs 同规则——别名解析成实际模型名再传。
   const requestedAlias = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
+  entry.requestedAlias = requestedAlias;
   options.model = resolveAliasToActualModel(requestedAlias, config.advancedJson);
 
   if (opts.workingDir) options.cwd = opts.workingDir;
@@ -713,7 +723,7 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
         sessionId,
         inputTokens,
         outputTokens: (usage as { output_tokens?: number }).output_tokens ?? 0,
-        windowSize: realWindow ?? readContextWindow(),
+        windowSize: realWindow ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null),
         model: null,
       };
       mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
@@ -742,7 +752,7 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
       sessionId,
       inputTokens: lastStats?.inputTokens ?? 0,
       outputTokens: lastStats?.outputTokens ?? 0,
-      windowSize: lastStats?.windowSize ?? readContextWindow(),
+      windowSize: lastStats?.windowSize ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null),
       model: null,
       compactedJustNow: true,
     };
@@ -872,7 +882,7 @@ async function runQuery(
   resetStallTracker(sessionId);
   ensureWatchdog(mainWindow);
 
-  const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow);
+  const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow, entry);
   // 卡死检测/硬杀：每会话一个 AbortController，传入 Options.abortController。
   // killProcess 在软中断之外调 .abort()，Windows 上 → TerminateProcess 真硬杀。
   entry.abortController = new AbortController();

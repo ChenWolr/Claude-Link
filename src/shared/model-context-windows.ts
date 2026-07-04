@@ -11,6 +11,9 @@
 // 数值按各家官方文档；新模型按需补充。宁可少放，不要放错——命中错误的窗口比
 // 落到 fallback 更误导。
 
+import { extractModelMappings } from './settings-parser';
+import type { ModelAlias } from './types/config';
+
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
 // [前缀, 窗口大小]。前缀已小写；匹配时对模型名做 toLowerCase + trim。
@@ -51,19 +54,50 @@ export function lookupModelWindow(model: string | null | undefined): number | nu
 }
 
 // 上下文窗口 fallback 链（优先级从高到低）：
-//   1. lastContextWindow —— 该会话从 SDK result.modelUsage 拿到的真实值（已持久化）
-//   2. model 查表        —— 内置表按当前模型查（解决「未连接时初始化」显示）
-//   3. override          —— 用户在配置页填的全局覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW）
-//   4. DEFAULT_CONTEXT_WINDOW（200000）
+//   1. lastContextWindow           —— 该会话从 SDK result.modelUsage 拿到的真实值（已持久化）
+//   2. contextWindowByAlias[alias] —— 用户在配置页按当前别名设的覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>）
+//   3. DEFAULT_CONTEXT_WINDOW（200000）
+// 注：内置 MODEL_CONTEXT_WINDOWS 表不再参与 fallback（用户要求「未设置严格默认 200k」），
+//     lookupModelWindow 仅保留为查表工具，供 selftest 与未来可能的复用。
 export function resolveContextWindow(opts: {
   lastContextWindow?: number | null;
-  model?: string | null;
-  override?: number | null;
+  alias?: string | null;
+  contextWindowByAlias?: Partial<Record<string, number>> | null;
 }): number {
-  const { lastContextWindow, model, override } = opts;
+  const { lastContextWindow, alias, contextWindowByAlias } = opts;
+  // 1. 用户按别名显式设置（最高优先级，「以设置为准」）——即使 SDK 上报了真实窗口，
+  //    用户强制设置的值也覆盖之（解决端点误报 200k、但用户已知模型实际为 1M 的场景）。
+  const byAlias = alias ? contextWindowByAlias?.[alias] : undefined;
+  if (typeof byAlias === 'number' && byAlias > 0) return byAlias;
+  // 2. SDK 真实上报（连通后）
   if (typeof lastContextWindow === 'number' && lastContextWindow > 0) return lastContextWindow;
-  const fromModel = lookupModelWindow(model);
-  if (fromModel !== null && fromModel > 0) return fromModel;
-  if (typeof override === 'number' && override > 0) return override;
+  // 3. 默认 200k
+  return DEFAULT_CONTEXT_WINDOW;
+}
+
+// 主进程用：会话启动时（SDK 尚未上报真实窗口）按当前别名/真实模型名解析初始窗口。
+// aliasOrModel 可能是别名(sonnet)或真实模型名(glm-5.2)；真实模型名时按 modelMappings
+// 反查别名再查 contextWindowByAlias。命中用户按别名设的覆盖则返回，否则 200k。
+// 与渲染层 resolveContextWindow 共享优先级语义（用户设置 > 200k），避免主进程推送的初始
+// windowSize 覆盖前端 switchSession 已算出的正确分母。
+export function resolveContextWindowForSession(opts: {
+  aliasOrModel?: string | null;
+  advancedJson: string;
+  contextWindowByAlias?: Partial<Record<ModelAlias, number>> | null;
+}): number {
+  const { aliasOrModel, advancedJson, contextWindowByAlias } = opts;
+  const byAlias = contextWindowByAlias ?? {};
+  if (aliasOrModel) {
+    const direct = byAlias[aliasOrModel as ModelAlias];
+    if (typeof direct === 'number' && direct > 0) return direct;
+    const mappings = extractModelMappings(advancedJson);
+    const target = aliasOrModel.toLowerCase();
+    for (const [alias, mapped] of Object.entries(mappings)) {
+      if (mapped && mapped.toLowerCase() === target) {
+        const v = byAlias[alias as ModelAlias];
+        if (typeof v === 'number' && v > 0) return v;
+      }
+    }
+  }
   return DEFAULT_CONTEXT_WINDOW;
 }
