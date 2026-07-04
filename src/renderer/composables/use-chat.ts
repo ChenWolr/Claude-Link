@@ -712,11 +712,21 @@ function createChat() {
     if (!store.activeSession) return;
     const sid = store.activeSession.id;
     clearAbortTimer(sid); // 清旧兜底（防重复 / 上一回合残留）
+    // 乐观更新：点击中断瞬间立即复位 running + 清当前流式，UI 立即停止"执行中"。
+    // Windows 硬杀时 SDK 的 result/aborted 事件常丢失，不能再等 1200ms 兜底才反馈。
+    // 后续 result/aborted 若到达，markStopped 幂等 no-op。
+    finalizeAssistantStream();
+    store.clearStream();
+    store.clearThinking();
+    store.clearToolStream();
+    resetTurnCache();
+    store.markStopped(sid);
     try {
       await window.claudeLink.abortChat(sid);
     } catch {
       // ignore：finally 不依赖 abortChat 成功
     }
+    // 兜底保留作为最终保险（乐观路径已 markStopped，这里 no-op）
     ensureAbortFinally(sid);
   }
 

@@ -293,14 +293,14 @@ onUnmounted(() => {
 .menu {
   position: absolute;
   left: 0;
-  bottom: calc(100% + 4px);
+  bottom: calc(100% + 0.25rem);
   z-index: 100;
-  min-width: 240px;
-  max-width: 360px;
+  min-width: 15rem;
+  max-width: 22.5rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel);
-  padding: 6px;
+  padding: 0.375rem;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -311,7 +311,7 @@ onUnmounted(() => {
   border: 0;
   background: transparent;
   color: var(--color-text);
-  padding: 7px 10px;
+  padding: 0.4375rem 0.625rem;
   font-size: 0.75rem;
   text-align: left;
   cursor: pointer;

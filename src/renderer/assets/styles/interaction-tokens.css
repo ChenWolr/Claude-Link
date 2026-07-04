@@ -8,13 +8,15 @@
   --interaction-overlay-bg: rgba(0, 0, 0, 0.58);
   --interaction-z-index: 1200;
 
-  /* 面板尺寸 */
-  --interaction-panel-width: min(560px, 94vw);
-  --interaction-panel-width-wide: min(920px, 94vw);
+  /* 面板尺寸：宽度用 rem 随字号等比缩放（35rem=560px / 57.5rem=920px，medium 档视觉不变；
+     large/small 档宽度随字号同比例放缩，消除「字大容器窄」的失真）。shadow 偏移保留 px
+     （属例外清单：box-shadow 不随字号缩放，视觉影响可忽略）。 */
+  --interaction-panel-width: min(35rem, 94vw);
+  --interaction-panel-width-wide: min(57.5rem, 94vw);
   --interaction-panel-radius: 1rem;
   --interaction-shadow: 0 18px 60px rgba(0, 0, 0, 0.46);
 
-  /* 面板内边距（随字号缩放；--interaction-panel-width 的 min(560px,94vw) 按决策 D2 保留 px） */
+  /* 面板内边距（随字号缩放） */
   --interaction-header-pad: 1.125rem 1.375rem 0.75rem;
   --interaction-body-pad: 1rem 1.125rem;
   --interaction-footer-pad: 0 1.125rem 1.125rem;

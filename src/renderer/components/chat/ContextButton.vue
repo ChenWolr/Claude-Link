@@ -104,14 +104,14 @@ function fmt(n: number): string {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text-muted);
-  padding: 3px;
+  padding: 0.1875rem;
   cursor: pointer;
 }
 .ctx__btn:hover { border-color: var(--color-accent); }
 .ctx__btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .ctx__btn:disabled:hover { border-color: var(--color-border); }
 .ctx__btn--high { border-color: rgba(204, 163, 61, 0.5); }
-.ctx__ring { width: 22px; height: 22px; display: block; transform: rotate(-90deg); }
+.ctx__ring { width: 1.375rem; height: 1.375rem; display: block; transform: rotate(-90deg); }
 /* 周长 ≈ 2*π*15.915 ≈ 100，dasharray 用百分比即可表示扇形占用 */
 .ctx__ring-bg {
   fill: none;
@@ -131,19 +131,19 @@ function fmt(n: number): string {
 .ctx__popover {
   position: absolute;
   left: 0;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 0.375rem);
   z-index: 100;
-  min-width: 220px;
+  min-width: 13.75rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel);
-  padding: 12px;
+  padding: 0.75rem;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 0.5rem;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 }
-.ctx__row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 0.75rem; color: var(--color-text-muted); }
+.ctx__row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; font-size: 0.75rem; color: var(--color-text-muted); }
 .ctx__row code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--color-text); font-variant-numeric: tabular-nums; }
 .ctx__btn--high ~ .ctx__popover .ctx__row--pct code,
 .ctx__row--pct code { color: var(--color-accent-strong); }
@@ -155,14 +155,14 @@ function fmt(n: number): string {
 .ctx__banner {
   position: absolute;
   left: 0;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + 0.375rem);
   z-index: 101;
   white-space: nowrap;
   border: 1px solid var(--color-accent);
   border-radius: var(--radius-md);
   background: var(--color-panel);
   color: var(--color-text);
-  padding: 6px 10px;
+  padding: 0.375rem 0.625rem;
   font-size: 0.75rem;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }

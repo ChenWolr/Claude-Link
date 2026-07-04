@@ -13,7 +13,6 @@ import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 
 const OTHER_OPTION_ID = '__other__';
-const POSITION_KEY = 'claude-link:interaction-prompt-position';
 const VIRTUAL_OPTION_THRESHOLD = 60;
 
 type QuestionAnswer = { selectedOptionIds?: string[]; otherText?: string };
@@ -30,6 +29,16 @@ const interactionStore = useInteractionStore();
 // V3-2：requests 改由 interaction-store 统一管理（远程 IPC + 本地 confirm 同一队列）。
 // InteractionPrompt 只读 store.requests，UI 副作用（initSelection/restoreFocus）留本地。
 const requests = computed<InteractionPromptPayload[]>(() => interactionStore.requests);
+// 交互队列按会话过滤：只显示当前 activeSession 的请求（本地 confirm 的 sessionId='' 视为当前）。
+// 防串扰——会话 A 思考时发起的交互不会在会话 B 的界面上弹出，避免「在 B 操作了 A 的弹窗、
+// 提交结果回到 A、B 永远轮不到」。
+const currentRequests = computed<InteractionPromptPayload[]>(() => {
+  const sid = sessionStore.activeSession?.id;
+  // 无活动会话时只显示本地 confirm（sessionId=''），不显示任何远程交互——
+  // 避免删除 activeSession 时它短暂为 null，别的会话的远程交互冒泡成新弹窗（用户以为"没删又弹窗"）。
+  if (!sid) return requests.value.filter((r) => !r.sessionId);
+  return requests.value.filter((r) => !r.sessionId || r.sessionId === sid);
+});
 const focusedIndex = ref(0);
 const selectedIds = ref<Set<string>>(new Set());
 const otherText = ref('');
@@ -42,13 +51,13 @@ const showHistory = ref(false);
 const submittingId = ref<string | null>(null);
 const otherInput = ref<HTMLInputElement | HTMLTextAreaElement | null>(null);
 const dialogRef = ref<HTMLElement | null>(null);
-const position = ref(loadPosition());
+const position = ref<{ x: number; y: number }>({ x: 0, y: 0 });
 let cleanupRequest: (() => void) | null = null;
 let cleanupCancel: (() => void) | null = null;
 let triggerEl: HTMLElement | null = null;
 let dragging: { startX: number; startY: number; baseX: number; baseY: number } | null = null;
 
-const activeRequest = computed(() => requests.value[0] ?? null);
+const activeRequest = computed(() => currentRequests.value[0] ?? null);
 const wizardQuestions = computed(() => activeRequest.value?.questions ?? []);
 const activeQuestion = computed(() => wizardQuestions.value[wizardIndex.value] ?? null);
 const isWizard = computed(() => wizardQuestions.value.length > 0);
@@ -111,24 +120,6 @@ const canSubmit = computed(() => {
   return selectedIds.value.size > 0 || request.kind === 'confirm';
 });
 
-function loadPosition(): { x: number; y: number } {
-  try {
-    const raw = window.localStorage.getItem(POSITION_KEY);
-    if (!raw) return { x: 0, y: 0 };
-    const parsed = JSON.parse(raw) as { x?: unknown; y?: unknown };
-    return {
-      x: typeof parsed.x === 'number' ? parsed.x : 0,
-      y: typeof parsed.y === 'number' ? parsed.y : 0,
-    };
-  } catch {
-    return { x: 0, y: 0 };
-  }
-}
-
-function savePosition(): void {
-  window.localStorage.setItem(POSITION_KEY, JSON.stringify(position.value));
-}
-
 function isTextEntryTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement
     || target instanceof HTMLTextAreaElement
@@ -155,6 +146,26 @@ function initFields(request: InteractionPromptPayload): void {
   }
 }
 
+// 计算请求/当前问题的默认选中选项集合：
+// - 请求方提供 defaultOptionIds 时，取其中在 options 里存在的；
+// - 无显式默认则返回空集，由用户主动选择（避免预选导致回车误提交，尤其 permission 类）。
+// multiSelect 保留以匹配调用签名，当前不影响默认值（多选本来就不该预选）。
+function optionDefaults(
+  options: ReadonlyArray<InteractionPromptOption>,
+  defaultOptionIds: string[] | undefined,
+  multiSelect: boolean | undefined,
+): Set<string> {
+  void multiSelect;
+  const result = new Set<string>();
+  const validIds = new Set(options.map((o) => o.id));
+  if (defaultOptionIds) {
+    for (const id of defaultOptionIds) {
+      if (validIds.has(id)) result.add(id);
+    }
+  }
+  return result;
+}
+
 function initSelection(request: InteractionPromptPayload): void {
   wizardIndex.value = 0;
   questionAnswers.value = {};
@@ -173,11 +184,12 @@ function initSelection(request: InteractionPromptPayload): void {
 }
 
 function enqueue(request: InteractionPromptPayload): void {
-  const wasEmpty = requests.value.length === 0;
   const enqueued = interactionStore.enqueueRemote(request);
   // 去重跳过（二次入队同 id）时不重置 UI，避免清空用户正在填的选择/表单。
   if (!enqueued) return;
-  if (wasEmpty || requests.value[0]?.id === request.id) {
+  // 只有当新请求属于当前会话（成为 currentRequests[0]）时才弹窗 + 记录触发元素；
+  // 非当前会话的请求入队但不显示，切回该会话时由 watch activeRequest.id 初始化 UI。
+  if (currentRequests.value[0]?.id === request.id) {
     triggerEl = document.activeElement as HTMLElement | null;
     initSelection(request);
   }
@@ -195,7 +207,7 @@ function restoreFocus(): void {
 // V3-2：队列前进的 UI 副作用。数据移除已在 store.respondAndRemove 完成，
 // 这里只负责初始化下一个请求的选择态或归还焦点。
 function advanceQueueUI(): void {
-  const next = requests.value[0];
+  const next = currentRequests.value[0];
   if (next) initSelection(next);
   else restoreFocus();
 }
@@ -225,6 +237,11 @@ function toggleOption(optionId: string): void {
   }
 
   updateSelected(new Set([optionId]));
+}
+
+// 当前 wizard 问题的 id（用于把本题答案存进 questionAnswers）。非 wizard / 无当前题时返回 undefined。
+function currentQuestionId(): string | undefined {
+  return activeQuestion.value?.id;
 }
 
 function persistCurrentQuestionAnswer(): boolean {
@@ -325,8 +342,14 @@ async function submit(optionId?: string): Promise<void> {
       id: request.id,
       action: 'submit',
       selectedOptionIds: isWizard.value ? undefined : ids,
-      questionAnswers: isWizard.value ? questionAnswers.value : undefined,
-      fieldValues: hasStructuredForm.value ? fieldValues.value : undefined,
+      // questionAnswers / fieldValues 是 Vue reactive proxy，Electron IPC 结构化克隆不支持 proxy
+      // （会抛 "An object could not be cloned"），必须深拷贝成 plain object 再过 IPC。
+      questionAnswers: isWizard.value
+        ? JSON.parse(JSON.stringify(questionAnswers.value)) as Record<string, QuestionAnswer>
+        : undefined,
+      fieldValues: hasStructuredForm.value
+        ? JSON.parse(JSON.stringify(fieldValues.value)) as Record<string, string | boolean>
+        : undefined,
       otherText: otherText.value.trim() || undefined,
     });
     pushHistory(request, 'submit', ids);
@@ -426,7 +449,7 @@ function optionPreview(option: InteractionPromptOption | null) {
 function removeRequest(id: string): void {
   interactionStore.removeRequest(id);
   if (submittingId.value === id) submittingId.value = null;
-  const next = requests.value[0];
+  const next = currentRequests.value[0];
   if (next) initSelection(next);
 }
 
@@ -454,12 +477,10 @@ function onDragMove(event: PointerEvent): void {
 function onDragEnd(): void {
   dragging = null;
   window.removeEventListener('pointermove', onDragMove);
-  savePosition();
 }
 
 function resetPosition(): void {
   position.value = { x: 0, y: 0 };
-  savePosition();
 }
 
 cleanupRequest = window.claudeLink.onInteractionRequest(enqueue);
@@ -495,6 +516,14 @@ async function loadHistory(sessionId: string | null): Promise<void> {
     }
   }
 }
+// activeRequest 变化（新请求 / 切换会话导致 currentRequests 重算）时的统一 UI 副作用：
+//  ① position 归零——新弹窗默认居中，拖拽只对当前弹窗临时有效，不持久化、不跨弹窗串扰。
+//  ② initSelection 重置选择态——切会话时前一会话的请求被过滤掉、当前会话的请求浮现，
+//     必须重置 selectedIds/表单，避免显示上一个请求残留的选择。
+watch(() => activeRequest.value?.id ?? null, (newId, oldId) => {
+  position.value = { x: 0, y: 0 };
+  if (newId && newId !== oldId && activeRequest.value) initSelection(activeRequest.value);
+});
 watch(() => sessionStore.activeSession?.id ?? null, (id) => { void loadHistory(id); }, { immediate: true });
 
 watch(filteredOptionEntries, (entries) => {
@@ -530,7 +559,7 @@ onBeforeUnmount(() => {
       <section
         ref="dialogRef"
         class="interaction-dialog"
-        :class="{ 'interaction-dialog--wide': hasPreview }"
+        :class="{ 'interaction-dialog--wide': hasPreview, 'interaction-dialog--narrow': activeRequest.kind === 'confirm' }"
         role="dialog"
         aria-modal="true"
         :aria-label="activeRequest.title"
@@ -655,7 +684,7 @@ onBeforeUnmount(() => {
   z-index: var(--interaction-z-index);
   display: grid;
   place-items: center;
-  padding: 20px;
+  padding: 1.25rem;
   background: var(--interaction-overlay-bg);
 }
 
@@ -663,7 +692,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   width: var(--interaction-panel-width);
-  max-height: min(86vh, 760px);
+  max-height: min(86vh, 47.5rem);
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--color-accent-strong) 35%, var(--color-border));
   border-radius: var(--interaction-panel-radius);
@@ -673,6 +702,12 @@ onBeforeUnmount(() => {
 
 .interaction-dialog--wide {
   width: var(--interaction-panel-width-wide);
+}
+
+/* 简单确认弹窗（kind:'confirm' / alert）：无预览无选项列表，用窄宽度避免「一句话撑满屏宽」。
+   24rem 随字号等比缩放（medium=384px / large=432px / small=336px）。 */
+.interaction-dialog--narrow {
+  width: min(24rem, 94vw);
 }
 
 .interaction-dialog__header {
@@ -685,7 +720,7 @@ onBeforeUnmount(() => {
 
 .interaction-dialog__eyebrow {
   display: inline-flex;
-  margin-bottom: 8px;
+  margin-bottom: 0.5rem;
   color: var(--color-accent-strong);
   font-size: 0.6875rem;
   font-weight: 800;
@@ -699,7 +734,7 @@ onBeforeUnmount(() => {
 }
 
 .interaction-dialog__header p {
-  margin: 8px 0 0;
+  margin: 0.5rem 0 0;
   color: var(--color-text-muted);
   font-size: 0.8125rem;
   line-height: 1.55;
@@ -707,14 +742,14 @@ onBeforeUnmount(() => {
 
 .interaction-steps {
   display: flex;
-  gap: 6px;
-  margin-top: 12px;
+  gap: 0.375rem;
+  margin-top: 0.75rem;
 }
 
 .interaction-step {
   display: grid;
-  width: 20px;
-  height: 20px;
+  width: 1.25rem;
+  height: 1.25rem;
   place-items: center;
   border: 1px solid var(--color-border);
   border-radius: 999px;
@@ -732,7 +767,7 @@ onBeforeUnmount(() => {
 
 .interaction-dialog__body {
   display: grid;
-  gap: 12px;
+  gap: 0.75rem;
   /* Bug（计划模式确定按钮点不到）：原 max-height: calc(86vh - 150px) 是魔数，header+footer 一旦
    * 超过 150px（长计划标题/描述，或字号缩放放大 chrome），外层 overflow:hidden 就会裁掉 footer 按钮。
    * 改 flex 列布局：body flex:1 + min-height:0 自适应剩余空间并滚动，footer 永远不被裁。 */
@@ -743,13 +778,14 @@ onBeforeUnmount(() => {
 }
 
 .interaction-dialog__body--preview {
+  /* grid 列宽阈值保留 px（与 @media max-width:720px 折叠联动，属像素级响应断点，不随字号缩放）。 */
   grid-template-columns: minmax(280px, 0.9fr) minmax(320px, 1.1fr);
   align-items: start;
 }
 
 .interaction-dialog__choices {
   display: grid;
-  gap: 10px;
+  gap: 0.625rem;
   min-width: 0;
 }
 
@@ -757,8 +793,8 @@ onBeforeUnmount(() => {
 .interaction-other,
 .interaction-field {
   display: grid;
-  gap: 6px;
-  padding: 12px;
+  gap: 0.375rem;
+  padding: 0.75rem;
   border: 1px dashed color-mix(in srgb, var(--color-accent-strong) 45%, var(--color-border));
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft));
@@ -774,7 +810,7 @@ onBeforeUnmount(() => {
 
 .interaction-field b {
   color: var(--color-danger);
-  margin-left: 3px;
+  margin-left: 0.1875rem;
 }
 
 .interaction-search input,
@@ -787,7 +823,7 @@ onBeforeUnmount(() => {
   box-sizing: border-box;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
-  padding: 9px 10px;
+  padding: 0.5625rem 0.625rem;
   background: rgba(0, 0, 0, 0.2);
   color: var(--color-text);
   font: inherit;
@@ -810,7 +846,7 @@ onBeforeUnmount(() => {
 }
 
 .interaction-empty {
-  padding: 18px 12px;
+  padding: 1.125rem 0.75rem;
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-md);
   color: var(--color-text-muted);
@@ -829,16 +865,16 @@ onBeforeUnmount(() => {
 
 .interaction-history ol {
   display: grid;
-  gap: 8px;
-  margin: 8px 0 0;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
   padding: 0;
   list-style: none;
 }
 
 .interaction-history li {
   display: grid;
-  gap: 2px;
-  padding: 8px 10px;
+  gap: 0.125rem;
+  padding: 0.5rem 0.625rem;
   border-radius: var(--radius-sm);
   background: var(--interaction-history-bg);
 }
@@ -856,7 +892,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-shrink: 0;
   justify-content: flex-end;
-  gap: 8px;
+  gap: 0.5rem;
   padding: var(--interaction-footer-pad);
 }
 
