@@ -9,7 +9,9 @@
 import { defineStore } from 'pinia';
 import { nextTick } from 'vue';
 
-export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
+// ModelAlias 类型定义在 shared/types/config（供 shared 层 AppConfig 与渲染层共用）。
+import type { ModelAlias } from '../../shared/types/config';
+export type { ModelAlias };
 import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
 import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
@@ -18,6 +20,7 @@ import {
   extractModelMappings,
   syncFormToAdvancedJson,
   setModelMappingInAdvancedJson,
+  setContextWindowInAdvancedJson,
   stripConnectionFromAdvancedJson,
 } from '../../shared/settings-parser';
 
@@ -37,7 +40,7 @@ const defaultConfig: AppConfig = {
   taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
-  contextWindowOverride: null,
+  contextWindowByAlias: {},
 };
 
 export const useConfigStore = defineStore('config', {
@@ -186,7 +189,7 @@ export const useConfigStore = defineStore('config', {
       apiBaseUrl?: string;
       defaultModel?: string;
       advancedJson?: string;
-      contextWindowOverride?: number | null;
+      contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
     }): void {
       // JSON→表单回填：置标志阻止 ConfigPage 表单 watch 反向同步（防循环）
       this.updatingFromJson = true;
@@ -206,9 +209,9 @@ export const useConfigStore = defineStore('config', {
         this.config.advancedJson = extracted.advancedJson;
         this.importedFields.add('advancedJson');
       }
-      if (extracted.contextWindowOverride !== undefined) {
-        this.config.contextWindowOverride = extracted.contextWindowOverride;
-        this.importedFields.add('contextWindowOverride');
+      if (extracted.contextWindowByAlias !== undefined) {
+        this.config.contextWindowByAlias = extracted.contextWindowByAlias;
+        this.importedFields.add('contextWindowByAlias');
       }
       void nextTick(() => {
         this.updatingFromJson = false;
@@ -224,6 +227,23 @@ export const useConfigStore = defineStore('config', {
         this.updatingFromJson = false;
       });
     },
+    // 表单→JSON：设置某别名的上下文窗口覆盖（token 数）。写 env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>
+    // + 同步顶层 contextWindowByAlias（触发自动保存与 resolveContextWindow 重算）。
+    // value 为 null/非正数时清掉该别名覆盖（回落 200k）。与 setModelMapping 对称。
+    setContextWindowForAlias(alias: ModelAlias, value: number | null): void {
+      this.updatingFromJson = true;
+      this.config.advancedJson = setContextWindowInAdvancedJson(this.config.advancedJson, alias, value);
+      if (typeof value === 'number' && value > 0) {
+        this.config.contextWindowByAlias = { ...this.config.contextWindowByAlias, [alias]: value };
+      } else {
+        const next = { ...this.config.contextWindowByAlias };
+        delete next[alias];
+        this.config.contextWindowByAlias = next;
+      }
+      void nextTick(() => {
+        this.updatingFromJson = false;
+      });
+    },
     // 表单→JSON：把 apiKey/apiBaseUrl/permissionMode 同步进 advancedJson（settings 结构）。
     // 模型映射走 setModelMapping。JSON→表单回填期间（updatingFromJson）跳过，防循环。
     syncFormToAdvanced(): void {
@@ -233,7 +253,6 @@ export const useConfigStore = defineStore('config', {
         apiKey: this.config.apiKey,
         apiBaseUrl: this.config.apiBaseUrl,
         permissionMode: this.config.permissionMode,
-        contextWindowOverride: this.config.contextWindowOverride,
       });
       void nextTick(() => {
         this.updatingFromJson = false;

@@ -12,6 +12,7 @@ import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
+import { resolveContextWindowForSession } from '../../shared/model-context-windows';
 
 export interface SpawnOptions {
   model?: string;
@@ -259,13 +260,16 @@ export function persistMessageParts(
   }
 }
 
-export function readContextWindow(): number {
+// 与 sdk-backend.readContextWindow 同逻辑：按别名/真实模型名查用户设的覆盖，否则 200k。
+// 本函数当前无调用者（process-manager spawn 路径已移除），保留 export 供未来 spawn CLI 路径复用。
+export function readContextWindow(aliasOrModel?: string | null): number {
   try {
     const config = getConfig();
-    const adv = JSON.parse(config.advancedJson || '{}');
-    const w = adv?.env?.CLAUDE_LINK_CONTEXT_WINDOW;
-    if (typeof w === 'number' && w > 0) return w;
-    if (typeof w === 'string' && Number.isFinite(Number(w))) return Number(w);
+    return resolveContextWindowForSession({
+      aliasOrModel: aliasOrModel ?? null,
+      advancedJson: config.advancedJson,
+      contextWindowByAlias: config.contextWindowByAlias,
+    });
   } catch {
     // ignore
   }

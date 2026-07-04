@@ -8,12 +8,14 @@
 // shapes may also use top-level apiKey / apiBaseUrl / baseUrl / model — we accept
 // both. Everything not extracted is preserved verbatim in advancedJson.
 
+import type { ModelAlias } from './types/config';
+
 export interface ImportedSettings {
   apiKey?: string;
   apiBaseUrl?: string;
   defaultModel?: string;
   apiKeyHelper?: string;
-  contextWindowOverride?: number | null;
+  contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
   advancedJson: string;
 }
 
@@ -99,13 +101,19 @@ export function parseClaudeSettings(content: string): ImportedSettings {
     (env ? peekString(env, ['ANTHROPIC_MODEL']) : undefined);
   if (defaultModel) result.defaultModel = defaultModel;
 
-  // 上下文窗口覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW）：peek 转 number 回填到表单字段。
+  // 上下文窗口按别名覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>）：peek 转 number 回填。
   // peek 不删——保留在 env，与 apiKey/baseUrl/model-mapping 一致（advancedJson 是完整 settings.json）。
-  const ctxWinRaw = env ? env['CLAUDE_LINK_CONTEXT_WINDOW'] : undefined;
-  let contextWindowOverride: number | null = null;
-  if (typeof ctxWinRaw === 'number' && ctxWinRaw > 0) contextWindowOverride = ctxWinRaw;
-  else if (typeof ctxWinRaw === 'string' && Number.isFinite(Number(ctxWinRaw)) && Number(ctxWinRaw) > 0) contextWindowOverride = Number(ctxWinRaw);
-  if (contextWindowOverride !== null) result.contextWindowOverride = contextWindowOverride;
+  const contextWindowByAlias: Partial<Record<ModelAlias, number>> = {};
+  if (env) {
+    for (const alias of MODEL_ALIASES) {
+      const raw = env[`CLAUDE_LINK_CONTEXT_WINDOW_${alias.toUpperCase()}`];
+      let n: number | null = null;
+      if (typeof raw === 'number' && raw > 0) n = raw;
+      else if (typeof raw === 'string' && Number.isFinite(Number(raw)) && Number(raw) > 0) n = Number(raw);
+      if (n !== null) contextWindowByAlias[alias] = n;
+    }
+  }
+  if (Object.keys(contextWindowByAlias).length > 0) result.contextWindowByAlias = contextWindowByAlias;
 
   if (envOriginal) {
     if (env && Object.keys(env).length > 0) {
@@ -247,7 +255,7 @@ function dropEmptyEnv(adv: Record<string, unknown>): void {
 // apiKey/apiBaseUrl/permissionMode → advancedJson.env / permissions
 export function syncFormToAdvancedJson(
   advancedJson: string,
-  form: { apiKey: string; apiBaseUrl: string; permissionMode: string; contextWindowOverride?: number | null },
+  form: { apiKey: string; apiBaseUrl: string; permissionMode: string },
 ): string {
   const adv = cloneAdv(advancedJson);
   const env = ensureObject(adv, 'env');
@@ -264,14 +272,6 @@ export function syncFormToAdvancedJson(
     env.ANTHROPIC_BASE_URL = url;
   } else {
     delete env.ANTHROPIC_BASE_URL;
-  }
-
-  // 上下文窗口覆盖：有正值写 env.CLAUDE_LINK_CONTEXT_WINDOW（字符串，与其它 env 一致），
-  // 留空/非正数则删 key（回落到模型查表 / 200k 兜底）。
-  if (typeof form.contextWindowOverride === 'number' && form.contextWindowOverride > 0) {
-    env.CLAUDE_LINK_CONTEXT_WINDOW = String(form.contextWindowOverride);
-  } else {
-    delete env.CLAUDE_LINK_CONTEXT_WINDOW;
   }
 
   const permissions = ensureObject(adv, 'permissions');
@@ -300,6 +300,26 @@ export function setModelMappingInAdvancedJson(
   return JSON.stringify(adv, null, 2);
 }
 
+// 单个类型别名 → 上下文窗口（token 数）覆盖，写入 env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>。
+// 与 setModelMappingInAdvancedJson 对称：表单字段即时写回 advancedJson（单一真相源）。
+// value 为 null/undefined/非正数时删 key（回落 200k 兜底）。
+export function setContextWindowInAdvancedJson(
+  advancedJson: string,
+  alias: string,
+  value: number | null | undefined,
+): string {
+  const adv = cloneAdv(advancedJson);
+  const env = ensureObject(adv, 'env');
+  const key = `CLAUDE_LINK_CONTEXT_WINDOW_${alias.toUpperCase()}`;
+  if (typeof value === 'number' && value > 0) {
+    env[key] = String(value);
+  } else {
+    delete env[key];
+  }
+  dropEmptyEnv(adv);
+  return JSON.stringify(adv, null, 2);
+}
+
 // 清空"连接"相关 env：apiKey / authToken / baseUrl / 四个类型别名映射。
 // 保留 env 里其它键（如 CLAUDE_CODE_*）。供"清空连接配置"使用，确保字段与 JSON 一并清空。
 export function stripConnectionFromAdvancedJson(advancedJson: string): string {
@@ -314,6 +334,7 @@ export function stripConnectionFromAdvancedJson(advancedJson: string): string {
     delete envObj.ANTHROPIC_BASE_URL;
     for (const alias of ['SONNET', 'HAIKU', 'OPUS', 'FABLE']) {
       delete envObj[`ANTHROPIC_DEFAULT_${alias}_MODEL`];
+      delete envObj[`CLAUDE_LINK_CONTEXT_WINDOW_${alias}`];
     }
     if (Object.keys(envObj).length === 0) delete adv.env;
   }

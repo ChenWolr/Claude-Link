@@ -1,3 +1,6 @@
+// Claude Code 的模型类型别名（CLI 通过 env.ANTHROPIC_DEFAULT_<ALIAS>_MODEL 映射到实际模型）。
+export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
+
 export interface AppConfig {
   provider: 'anthropic' | 'openrouter' | 'bedrock' | 'vertex';
   providerName: string;
@@ -14,9 +17,10 @@ export interface AppConfig {
   taskDelaySeconds: number;
   themePaletteId: string;
   fontScale: 'small' | 'medium' | 'large';
-  // 上下文窗口全局覆盖（token 数）。写入 env.CLAUDE_LINK_CONTEXT_WINDOW，对所有模型生效。
-  // null 表示不覆盖——未连接时按当前模型查内置表（model-context-windows），连通后用真实值。
-  contextWindowOverride: number | null;
+  // 按模型类型别名单独设置的上下文窗口（token 数）。写入 env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>。
+  // 未列出的别名 = 未设置，圆环分母回落 DEFAULT_CONTEXT_WINDOW（200k）。仅 claude-link 内部
+  // 用于 ContextButton 占比分母；CC 自身不消费此 env。连通后仍以 SDK 上报的真实窗口为准。
+  contextWindowByAlias: Partial<Record<ModelAlias, number>>;
 }
 
 export interface ProviderInfo {
