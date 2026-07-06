@@ -439,6 +439,26 @@ function testStatusSubtypeCoverage(): void {
   assert.ok(sb.includes("sdkMsg.status === 'requesting'"));
 }
 
+function testAllowSessionPermissionsSurviveNextSdkQuery(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const sb = fs.readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+
+  // allow-session 返回的 updatedPermissions 不能只交给当前 query；claude-link 后续消息会新建 query + resume，
+  // 必须按 app session 缓存并在下一次 buildSdkOptions 的 settings.permissions 中重新注入。
+  assert.ok(sb.includes('sessionPermissionUpdates'));
+  assert.ok(sb.includes('rememberSessionPermissionUpdates(sessionId'));
+  assert.ok(sb.includes('applySessionPermissionUpdates(sessionId'));
+  assert.ok(sb.includes('sessionPermissionUpdates.delete(sessionId)'));
+}
+
+function testThinkingDisplaySummarizedEnabled(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const sb = fs.readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+
+  // 新模型默认可能 omitted；显式 summarized 才能尽可能稳定收到可展示的 thinking 摘要。
+  assert.ok(sb.includes("thinking: { type: 'adaptive', display: 'summarized' }"));
+}
+
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testSearchNormalizer();
@@ -454,3 +474,5 @@ testAskUserQuestionMultiSelectAndOther();
 testElicitationUrlMode();
 testElicitationCancelMapping();
 testStatusSubtypeCoverage();
+testAllowSessionPermissionsSurviveNextSdkQuery();
+testThinkingDisplaySummarizedEnabled();

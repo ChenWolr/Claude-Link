@@ -59,6 +59,7 @@ import {
   requestAskUserQuestionInteractions,
   type CanUseToolOptions,
   type PermissionResult,
+  type PermissionUpdate,
 } from './sdk-interactions';
 import { isSubAgentToolUse } from '../../shared/process-kind';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
@@ -122,6 +123,82 @@ interface CachedContextStats {
   windowSize: number;
 }
 const sessionContextStats = new Map<string, CachedContextStats>();
+// allow-session 权限更新是 SDK query 内状态；claude-link 后续消息会新建 query + resume，
+// 因此按 app session 暂存 destination:'session' 的规则，并在下一次 buildSdkOptions 注入 settings.permissions。
+const sessionPermissionUpdates = new Map<string, PermissionUpdate[]>();
+
+type PermissionRuleBucket = 'allow' | 'deny' | 'ask';
+
+type SdkPermissionSettings = {
+  defaultMode?: string;
+  allow?: string[];
+  deny?: string[];
+  ask?: string[];
+  additionalDirectories?: string[];
+  [key: string]: unknown;
+};
+
+function permissionRuleToString(rule: { toolName: string; ruleContent?: string }): string {
+  return rule.ruleContent ? `${rule.toolName}(${rule.ruleContent})` : rule.toolName;
+}
+
+function uniquePush(target: string[], values: string[]): void {
+  for (const value of values) {
+    if (!target.includes(value)) target.push(value);
+  }
+}
+
+function removeValues(target: string[] | undefined, values: string[]): string[] | undefined {
+  if (!target) return undefined;
+  const removeSet = new Set(values);
+  const next = target.filter((value) => !removeSet.has(value));
+  return next.length ? next : undefined;
+}
+
+function rememberSessionPermissionUpdates(sessionId: string, updates: PermissionUpdate[] | undefined): void {
+  if (!updates?.length) return;
+  const sessionUpdates = updates.filter((update) => update.destination === 'session');
+  if (!sessionUpdates.length) return;
+  sessionPermissionUpdates.set(sessionId, [...(sessionPermissionUpdates.get(sessionId) ?? []), ...sessionUpdates]);
+}
+
+function applySessionPermissionUpdates(sessionId: string, permissions: SdkPermissionSettings): SdkPermissionSettings {
+  const updates = sessionPermissionUpdates.get(sessionId);
+  if (!updates?.length) return permissions;
+
+  const next: SdkPermissionSettings = { ...permissions };
+  for (const update of updates) {
+    if (update.destination !== 'session') continue;
+
+    if (update.type === 'setMode') {
+      next.defaultMode = update.mode;
+      continue;
+    }
+    if (update.type === 'addDirectories') {
+      const dirs = [...(next.additionalDirectories ?? [])];
+      uniquePush(dirs, update.directories);
+      next.additionalDirectories = dirs;
+      continue;
+    }
+    if (update.type === 'removeDirectories') {
+      next.additionalDirectories = removeValues(next.additionalDirectories, update.directories);
+      continue;
+    }
+
+    const bucket = update.behavior as PermissionRuleBucket;
+    const rules = update.rules.map(permissionRuleToString);
+    if (update.type === 'addRules') {
+      const existing = [...(next[bucket] ?? [])];
+      uniquePush(existing, rules);
+      next[bucket] = existing;
+    } else if (update.type === 'replaceRules') {
+      next[bucket] = rules;
+    } else if (update.type === 'removeRules') {
+      next[bucket] = removeValues(next[bucket], rules);
+    }
+  }
+  return next;
+}
 
 // ── 卡死检测：每会话活动追踪 ────────────────────────────────────────
 // 任何真实上游业务事件（assistant/user/stream_event/tool_progress/system/api_retry）
@@ -376,8 +453,9 @@ export function markSessionDeleted(sessionId: string): void {
     abortEntry(entry);
     removeEntryIfCurrent(sessionId, entry);
   }
-  // 清理上下文用量缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
+  // 清理上下文/权限缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
   sessionContextStats.delete(sessionId);
+  sessionPermissionUpdates.delete(sessionId);
   cleanupSessionStall(sessionId);
   for (const [id, resolve] of pendingPermissionRequests) {
     pendingPermissionRequests.delete(id);
@@ -437,6 +515,9 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
 
     const response = await requestInteraction(mainWindow, payload, options.signal);
     const result = mapPermissionInteractionResponse(payload, response, input);
+    if (result.behavior === 'allow') {
+      rememberSessionPermissionUpdates(sessionId, result.updatedPermissions);
+    }
     recordInteractionResponse(sessionId, mainWindow, payload.title, response.action === 'submit' ? `选择：${response.selectedOptionIds?.join(', ') ?? '提交'}` : '已取消');
     return result;
   };
@@ -641,8 +722,8 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     // 默认 false 只转发 tool_use/tool_result）。开启后子 Agent Tab 能看到子 agent 完整思考/正文，
     // 配合 stream_event 透传的 parent_tool_use_id，思考中也实时可见，不再只有「开启subagent」锚点。
     forwardSubagentText: true,
-    // 启用 adaptive thinking：交给 SDK/模型决定思考预算，避免新模型拒绝固定 budgetTokens。
-    thinking: { type: 'adaptive' },
+    // 启用 adaptive thinking，并显式请求摘要展示；否则新模型默认可能 omitted，思考中无可展示内容。
+    thinking: { type: 'adaptive', display: 'summarized' },
     canUseTool: createPermissionHandler(sessionId, mainWindow),
     onElicitation: createElicitationHandler(sessionId, mainWindow),
     // SDK 只有同时声明 supportedDialogKinds 与 onUserDialog，才会把选择题交互交给宿主 UI。
@@ -685,7 +766,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     /* advancedJson 非法时忽略 */
   }
   options.settings = {
-    permissions: { defaultMode: config.permissionMode },
+    permissions: applySessionPermissionUpdates(sessionId, { defaultMode: config.permissionMode }),
     env: settingsEnv,
   };
 
