@@ -18,7 +18,9 @@ import {
   normalizeInteractionPreview,
   shouldUseVirtualOptions,
 } from '../src/main/modules/sdk-interactions';
+import { buildClaudeSettingsProjection } from '../src/main/modules/claude-settings-projection';
 import { isMissingConversationResumeError } from '../src/main/modules/sdk-errors';
+import { applyPermissionUpdates, buildPermissionSettings, coercePermissionUpdatesToSession, isToolSessionAllowed, withToolSessionAllow } from '../src/main/modules/sdk-permissions';
 import { parseClaudeSettings } from '../src/main/modules/settings-importer';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 
@@ -46,6 +48,29 @@ function testSettingsImportPreservesNestedJson(): void {
     permissions: { allow: ['Bash(npm run typecheck)'] },
     hooks: [{ event: 'Stop', command: 'notify' }],
     alwaysThinkingEnabled: true,
+  });
+}
+
+function testClaudeSettingsProjectionPreservesAdvancedSettings(): void {
+  const settings = buildClaudeSettingsProjection({
+    apiKey: 'sk-test',
+    apiBaseUrl: 'https://example.com/v1',
+    permissionMode: 'plan',
+    advancedJson: JSON.stringify({
+      env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2', NUMERIC_IGNORED: 123 },
+      permissions: { allow: ['Read'] },
+      hooks: [{ event: 'Stop', command: 'notify' }],
+      alwaysThinkingEnabled: true,
+    }),
+  } as never);
+
+  assert.deepEqual(settings.hooks, [{ event: 'Stop', command: 'notify' }]);
+  assert.equal(settings.alwaysThinkingEnabled, true);
+  assert.deepEqual(settings.permissions, { defaultMode: 'plan', allow: ['Read'] });
+  assert.deepEqual(settings.env, {
+    ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2',
+    ANTHROPIC_API_KEY: 'sk-test',
+    ANTHROPIC_BASE_URL: 'https://example.com/v1',
   });
 }
 
@@ -167,10 +192,12 @@ function testPermissionPromptIntegration(): void {
 }
 
 function testPermissionInteractionAdapter(): void {
+  const sdkSuggestion = { type: 'addRules' as const, rules: [{ toolName: 'Bash' }], behavior: 'allow' as const, destination: 'localSettings' as const };
+  const sessionSuggestion = { ...sdkSuggestion, destination: 'session' as const };
   const payload = buildPermissionInteractionPayload('session-1', 'Bash', { command: 'npm run typecheck' }, {
     toolUseID: 'tool-1',
     signal: new AbortController().signal,
-    suggestions: [{ tool: 'Bash' }],
+    suggestions: [sdkSuggestion],
     description: '需要运行类型检查',
   });
 
@@ -178,6 +205,23 @@ function testPermissionInteractionAdapter(): void {
   assert.equal(payload.toolName, 'Bash');
   assert.equal(payload.toolUseId, 'tool-1');
   assert.deepEqual(payload.options?.map((option) => option.id), ['allow', 'allow-session', 'deny']);
+  assert.deepEqual(payload.suggestions, [sessionSuggestion]);
+  assert.deepEqual(payload.defaultOptionIds, []);
+
+  const invalidSuggestionPayload = buildPermissionInteractionPayload('session-1', 'Bash', { command: 'npm run typecheck' }, {
+    toolUseID: 'tool-invalid',
+    signal: new AbortController().signal,
+    suggestions: [{ tool: 'Bash' }],
+  });
+  assert.deepEqual(invalidSuggestionPayload.options?.map((option) => option.id), ['allow', 'allow-session', 'deny']);
+  assert.deepEqual(invalidSuggestionPayload.suggestions, [{ type: 'addRules', rules: [{ toolName: 'Bash' }], behavior: 'allow', destination: 'session' }]);
+
+  const noSuggestionPayload = buildPermissionInteractionPayload('session-1', 'WebFetch', { url: 'https://example.com' }, {
+    toolUseID: 'tool-webfetch',
+    signal: new AbortController().signal,
+  });
+  assert.deepEqual(noSuggestionPayload.options?.map((option) => option.id), ['allow', 'allow-session', 'deny']);
+  assert.deepEqual(noSuggestionPayload.suggestions, [{ type: 'addRules', rules: [{ toolName: 'WebFetch' }], behavior: 'allow', destination: 'session' }]);
 
   const permInput = { command: 'npm run typecheck' };
   // P0：allow/allow-session 必须回传 updatedInput（原样 input），否则 SDK 运行时 ZodError 阻断所有工具。
@@ -189,14 +233,59 @@ function testPermissionInteractionAdapter(): void {
   assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'submit', selectedOptionIds: ['allow-session'] }, permInput), {
     behavior: 'allow',
     updatedInput: permInput,
-    updatedPermissions: [{ tool: 'Bash' }],
+    updatedPermissions: [sessionSuggestion],
     toolUseID: 'tool-1',
+  });
+  assert.deepEqual(mapPermissionInteractionResponse(noSuggestionPayload, { id: noSuggestionPayload.id, action: 'submit', selectedOptionIds: ['allow-session'] }, { url: 'https://example.com' }), {
+    behavior: 'allow',
+    updatedInput: { url: 'https://example.com' },
+    updatedPermissions: [{ type: 'addRules', rules: [{ toolName: 'WebFetch' }], behavior: 'allow', destination: 'session' }],
+    toolUseID: 'tool-webfetch',
   });
   assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'cancel' }, permInput), {
     behavior: 'deny',
     message: '用户拒绝了该工具调用',
     toolUseID: 'tool-1',
   });
+}
+
+function testPermissionSettingsMergeAndSessionCoercion(): void {
+  const base = buildPermissionSettings({
+    permissionMode: 'default',
+    advancedJson: JSON.stringify({ permissions: { allow: ['Read'], ask: ['Bash(git status)'], additionalDirectories: ['D:/work'] } }),
+  });
+  assert.deepEqual(base, { defaultMode: 'default', allow: ['Read'], ask: ['Bash(git status)'], additionalDirectories: ['D:/work'] });
+
+  assert.deepEqual(applyPermissionUpdates(base, [
+    { type: 'addRules', rules: [{ toolName: 'WebSearch' }], behavior: 'allow', destination: 'localSettings' },
+  ]).allow, ['Read']);
+
+  const normalized = coercePermissionUpdatesToSession([
+    { type: 'addRules', rules: [{ toolName: 'WebSearch' }], behavior: 'allow', destination: 'localSettings' },
+    { type: 'addRules', rules: [{ toolName: 'WebFetch', ruleContent: 'domain:example.com' }], behavior: 'allow', destination: 'session' },
+    { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'git push*' }], behavior: 'ask', destination: 'session' },
+    { type: 'removeRules', rules: [{ toolName: 'Bash', ruleContent: 'git status' }], behavior: 'ask', destination: 'session' },
+    { type: 'setMode', mode: 'dontAsk', destination: 'session' },
+    { type: 'addDirectories', directories: ['D:/tmp'], destination: 'session' },
+    { type: 'removeDirectories', directories: ['D:/work'], destination: 'session' },
+  ]);
+  assert.deepEqual(normalized.map((update) => update.destination), ['session', 'session', 'session', 'session', 'session', 'session', 'session']);
+
+  const merged = applyPermissionUpdates(base, normalized);
+  assert.equal(merged.defaultMode, 'dontAsk');
+  assert.deepEqual(merged.allow, ['Read', 'WebSearch', 'WebFetch(domain:example.com)']);
+  assert.deepEqual(merged.ask, ['Bash(git push*)']);
+  assert.deepEqual(merged.additionalDirectories, ['D:/tmp']);
+
+  const replaced = applyPermissionUpdates(base, [{ type: 'replaceRules', rules: [{ toolName: 'Glob' }], behavior: 'allow', destination: 'session' }]);
+  assert.deepEqual(replaced.allow, ['Glob']);
+
+  assert.deepEqual(withToolSessionAllow('WebFetch', [
+    { type: 'addRules', rules: [{ toolName: 'WebFetch', ruleContent: 'domain:example.com' }], behavior: 'allow', destination: 'session' },
+  ]), [
+    { type: 'addRules', rules: [{ toolName: 'WebFetch', ruleContent: 'domain:example.com' }], behavior: 'allow', destination: 'session' },
+    { type: 'addRules', rules: [{ toolName: 'WebFetch' }], behavior: 'allow', destination: 'session' },
+  ]);
 }
 
 function testAskUserQuestionInteractionAdapter(): void {
@@ -213,10 +302,19 @@ function testAskUserQuestionInteractionAdapter(): void {
 
   assert.equal(payload.kind, 'single-choice');
   assert.equal(payload.source, 'Approach');
-  assert.equal(payload.defaultOptionIds?.[0], 'option-0');
+  assert.deepEqual(payload.defaultOptionIds, []);
   assert.equal(payload.allowOther, true);
   assert.equal(payload.options?.at(-1)?.id, OTHER_INTERACTION_OPTION_ID);
   assert.equal(payload.options?.[1].preview, 'Preview B');
+
+  const recommendedPayload = buildAskUserQuestionInteractionPayload('session-1', {
+    ...question,
+    options: [
+      { label: 'A', description: 'First option' },
+      { label: 'B (Recommended)', description: 'Second option' },
+    ],
+  }, 0, 'tool-ask-recommended');
+  assert.deepEqual(recommendedPayload.defaultOptionIds, ['option-1']);
 
   const result = buildAskUserQuestionResult([question], [{
     payload,
@@ -451,6 +549,50 @@ function testAllowSessionPermissionsSurviveNextSdkQuery(): void {
   assert.ok(sb.includes('sessionPermissionUpdates.delete(sessionId)'));
 }
 
+function testToolSessionAllowedShortCircuit(): void {
+  // 根因：CLI 在 --permission-prompt-tool stdio（headless）模式下，不据 canUseTool 返回的
+  // updatedPermissions(destination:'session') 跳过后续同工具 prompt，导致同一会话同一工具反复弹窗。
+  // claude-link 须在 canUseTool 弹窗前本地短路已授权工具。本测试锁定短路判定语义。
+
+  // 1) allow-session 路径（withToolSessionAllow 保证补一条裸 allow + coerce 成 session）产出的规则，
+  //    必须能被 isToolSessionAllowed 识别为「整工具已授权」，否则短路永不触发 = bug 复现。
+  const allowSessionUpdates = coercePermissionUpdatesToSession(
+    withToolSessionAllow('Bash', [
+      { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }], behavior: 'allow', destination: 'localSettings' },
+    ]),
+  );
+  assert.equal(isToolSessionAllowed(allowSessionUpdates, 'Bash'), true);
+  // 未授权的工具不被短路。
+  assert.equal(isToolSessionAllowed(allowSessionUpdates, 'Read'), false);
+
+  // 2) 仅细粒度规则（带 ruleContent）不构成整工具放行——避免对同工具其它输入误放行。
+  assert.equal(isToolSessionAllowed([
+    { type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'npm install:*' }], behavior: 'allow', destination: 'session' },
+  ], 'Bash'), false);
+
+  // 3) 非 session 目的地（如 localSettings）不计入会话短路。
+  assert.equal(isToolSessionAllowed([
+    { type: 'addRules', rules: [{ toolName: 'Bash' }], behavior: 'allow', destination: 'localSettings' },
+  ], 'Bash'), false);
+
+  // 4) deny 规则不算授权。
+  assert.equal(isToolSessionAllowed([
+    { type: 'addRules', rules: [{ toolName: 'Bash' }], behavior: 'deny', destination: 'session' },
+  ], 'Bash'), false);
+
+  // 5) 空/undefined 不短路。
+  assert.equal(isToolSessionAllowed(undefined, 'Bash'), false);
+  assert.equal(isToolSessionAllowed([], 'Bash'), false);
+
+  // 6) 短路确实接入 createPermissionHandler（弹窗前调用 isToolSessionAllowed）。
+  const fs = require('node:fs') as typeof import('node:fs');
+  const sb = fs.readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+  assert.ok(
+    sb.includes('isToolSessionAllowed(sessionBook, toolName)'),
+    'createPermissionHandler 必须在弹窗前用 isToolSessionAllowed 短路本会话已授权工具',
+  );
+}
+
 function testThinkingDisplaySummarizedEnabled(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const sb = fs.readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
@@ -461,11 +603,13 @@ function testThinkingDisplaySummarizedEnabled(): void {
 
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
+testClaudeSettingsProjectionPreservesAdvancedSettings();
 testSearchNormalizer();
 testMissingConversationResumeErrorDetection();
 testMigrationsHandlePartiallyAppliedContextColumns();
 testPermissionPromptIntegration();
 testPermissionInteractionAdapter();
+testPermissionSettingsMergeAndSessionCoercion();
 testAskUserQuestionInteractionAdapter();
 testInteractionPromptV2V3Contracts();
 testInteractionPromptWizardAndHistoryContracts();
@@ -475,4 +619,5 @@ testElicitationUrlMode();
 testElicitationCancelMapping();
 testStatusSubtypeCoverage();
 testAllowSessionPermissionsSurviveNextSdkQuery();
+testToolSessionAllowedShortCircuit();
 testThinkingDisplaySummarizedEnabled();
