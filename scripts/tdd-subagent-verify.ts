@@ -287,6 +287,10 @@ check('TaskQueuePanel 未完成组不误显示「已完成」', () => {
   assert.equal(tqp.includes('subAgentStatusText(g)'), true);
   assert.equal(tqp.includes("g.completed ? '已完成' : '未完成'"), true);
 });
+check('子Agent 正文/总结气泡在右侧栏内横向撑满', () => {
+  const tqp = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');
+  assert.match(tqp, /\.subagent-group__body\s+:deep\(\.bubble\)\s*\{[^}]*width:\s*100%;[^}]*align-self:\s*stretch;/s);
+});
 
 console.log('\n=== computeStats 工具统计边界（问题：联网搜索/无结果工具是否计入） ===');
 check('多次联网搜索（WebSearch tool_use）全部计入 toolCount', () => {
