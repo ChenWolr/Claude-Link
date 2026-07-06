@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import type { BrowserWindow } from 'electron';
 import type { InteractionFormField, InteractionPromptOption, InteractionPromptPayload, InteractionPromptPreview, InteractionPromptQuestion, InteractionPromptResponsePayload } from '../../shared/types/ipc';
 import { requestInteraction } from './interaction-prompts';
+import { coercePermissionUpdatesToSession, withToolSessionAllow, type PermissionUpdate } from './sdk-permissions';
 
 export const OTHER_INTERACTION_OPTION_ID = '__other__';
 export const SUPPORTED_USER_DIALOG_KINDS = [
@@ -44,14 +45,7 @@ export type PermissionResult = {
   toolUseID?: string;
 };
 
-// L2/L3：PermissionUpdate 宽松类型（对齐 SDK sdk.d.ts:2048，6 种变体）。
-export type PermissionUpdate =
-  | { type: 'addRules'; rules: { toolName: string; ruleContent?: string }[]; behavior: 'allow' | 'deny'; destination: string }
-  | { type: 'replaceRules'; rules: { toolName: string; ruleContent?: string }[]; behavior: 'allow' | 'deny'; destination: string }
-  | { type: 'removeRules'; rules: { toolName: string; ruleContent?: string }[]; behavior: 'allow' | 'deny'; destination: string }
-  | { type: 'setMode'; mode: string; destination: string }
-  | { type: 'addDirectories'; directories: string[]; destination: string }
-  | { type: 'removeDirectories'; directories: string[]; destination: string };
+export type { PermissionUpdate };
 
 export type CanUseToolOptions = {
   signal: AbortSignal;
@@ -207,6 +201,8 @@ export function buildPermissionInteractionPayload(
   const askPayload = isAskUserQuestionPayload(input) ? buildAskUserQuestionInteractionPayload(sessionId, input.questions[0], 0, options.toolUseID, requestId) : null;
   if (askPayload) return askPayload;
 
+  const sessionSuggestions = withToolSessionAllow(toolName, options.suggestions);
+
   return {
     id: requestId,
     sessionId,
@@ -217,11 +213,11 @@ export function buildPermissionInteractionPayload(
     title: buildPermissionTitle(toolName, input, options),
     description: options.description || options.decisionReason,
     input,
-    suggestions: options.suggestions,
-    defaultOptionIds: ['allow'],
+    suggestions: sessionSuggestions,
+    defaultOptionIds: [],
     options: [
       { id: 'allow', label: '允许本次', description: '只允许当前这一次工具调用。', primary: true },
-      ...(options.suggestions?.length
+      ...(sessionSuggestions.length
         ? [{ id: 'allow-session', label: '本会话总是允许', description: '接受 Claude Code 给出的会话级权限建议。' }]
         : []),
       { id: 'deny', label: '拒绝', description: '拒绝当前工具调用，并把原因反馈给 Claude。', danger: true },
@@ -240,7 +236,7 @@ export function mapPermissionInteractionResponse(
     return { behavior: 'allow', updatedInput: input, toolUseID: payload.toolUseId };
   }
   if (selectedId === 'allow-session') {
-    return { behavior: 'allow', updatedInput: input, updatedPermissions: (payload.suggestions ?? []) as PermissionUpdate[], toolUseID: payload.toolUseId };
+    return { behavior: 'allow', updatedInput: input, updatedPermissions: coercePermissionUpdatesToSession(payload.suggestions), toolUseID: payload.toolUseId };
   }
   return { behavior: 'deny', message: '用户拒绝了该工具调用', toolUseID: payload.toolUseId };
 }
@@ -264,7 +260,7 @@ export function isAskUserQuestionPayload(payload: Record<string, unknown>): payl
 function findDefaultOptionId(question: AskUserQuestion): string[] {
   if (question.multiSelect) return [];
   const recommendedIndex = question.options.findIndex((option) => /recommended|推荐/i.test(option.label));
-  return [`option-${recommendedIndex >= 0 ? recommendedIndex : 0}`];
+  return recommendedIndex >= 0 ? [`option-${recommendedIndex}`] : [];
 }
 
 function interactionOptionsFromQuestion(question: AskUserQuestion): InteractionPromptOption[] {

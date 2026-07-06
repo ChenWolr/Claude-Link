@@ -59,8 +59,15 @@ import {
   requestAskUserQuestionInteractions,
   type CanUseToolOptions,
   type PermissionResult,
-  type PermissionUpdate,
 } from './sdk-interactions';
+import { buildClaudeSettingsProjection } from './claude-settings-projection';
+import {
+  applyPermissionUpdates,
+  coercePermissionUpdatesToSession,
+  isToolSessionAllowed,
+  type PermissionUpdate,
+  type SdkPermissionSettings,
+} from './sdk-permissions';
 import { isSubAgentToolUse } from '../../shared/process-kind';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
 
@@ -127,77 +134,14 @@ const sessionContextStats = new Map<string, CachedContextStats>();
 // 因此按 app session 暂存 destination:'session' 的规则，并在下一次 buildSdkOptions 注入 settings.permissions。
 const sessionPermissionUpdates = new Map<string, PermissionUpdate[]>();
 
-type PermissionRuleBucket = 'allow' | 'deny' | 'ask';
-
-type SdkPermissionSettings = {
-  defaultMode?: string;
-  allow?: string[];
-  deny?: string[];
-  ask?: string[];
-  additionalDirectories?: string[];
-  [key: string]: unknown;
-};
-
-function permissionRuleToString(rule: { toolName: string; ruleContent?: string }): string {
-  return rule.ruleContent ? `${rule.toolName}(${rule.ruleContent})` : rule.toolName;
-}
-
-function uniquePush(target: string[], values: string[]): void {
-  for (const value of values) {
-    if (!target.includes(value)) target.push(value);
-  }
-}
-
-function removeValues(target: string[] | undefined, values: string[]): string[] | undefined {
-  if (!target) return undefined;
-  const removeSet = new Set(values);
-  const next = target.filter((value) => !removeSet.has(value));
-  return next.length ? next : undefined;
-}
-
 function rememberSessionPermissionUpdates(sessionId: string, updates: PermissionUpdate[] | undefined): void {
-  if (!updates?.length) return;
-  const sessionUpdates = updates.filter((update) => update.destination === 'session');
+  const sessionUpdates = coercePermissionUpdatesToSession(updates);
   if (!sessionUpdates.length) return;
   sessionPermissionUpdates.set(sessionId, [...(sessionPermissionUpdates.get(sessionId) ?? []), ...sessionUpdates]);
 }
 
 function applySessionPermissionUpdates(sessionId: string, permissions: SdkPermissionSettings): SdkPermissionSettings {
-  const updates = sessionPermissionUpdates.get(sessionId);
-  if (!updates?.length) return permissions;
-
-  const next: SdkPermissionSettings = { ...permissions };
-  for (const update of updates) {
-    if (update.destination !== 'session') continue;
-
-    if (update.type === 'setMode') {
-      next.defaultMode = update.mode;
-      continue;
-    }
-    if (update.type === 'addDirectories') {
-      const dirs = [...(next.additionalDirectories ?? [])];
-      uniquePush(dirs, update.directories);
-      next.additionalDirectories = dirs;
-      continue;
-    }
-    if (update.type === 'removeDirectories') {
-      next.additionalDirectories = removeValues(next.additionalDirectories, update.directories);
-      continue;
-    }
-
-    const bucket = update.behavior as PermissionRuleBucket;
-    const rules = update.rules.map(permissionRuleToString);
-    if (update.type === 'addRules') {
-      const existing = [...(next[bucket] ?? [])];
-      uniquePush(existing, rules);
-      next[bucket] = existing;
-    } else if (update.type === 'replaceRules') {
-      next[bucket] = rules;
-    } else if (update.type === 'removeRules') {
-      next[bucket] = removeValues(next[bucket], rules);
-    }
-  }
-  return next;
+  return applyPermissionUpdates(permissions, sessionPermissionUpdates.get(sessionId));
 }
 
 // ── 卡死检测：每会话活动追踪 ────────────────────────────────────────
@@ -488,6 +432,13 @@ function recordInteractionResponse(sessionId: string, mainWindow: BrowserWindow,
   });
 }
 
+// 诊断用：列出会话小本本里「裸 allow」的工具名（整工具放行）。定位权限重复弹窗后可移除。
+function bookToolNames(updates: PermissionUpdate[] | undefined): string[] {
+  return (updates ?? [])
+    .filter((u) => u.destination === 'session' && (u.type === 'addRules' || u.type === 'replaceRules') && u.behavior === 'allow')
+    .flatMap((u) => u.rules.filter((r) => !r.ruleContent).map((r) => r.toolName));
+}
+
 function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
   return async (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions): Promise<PermissionResult> => {
     if (!isSessionActive(sessionId)) {
@@ -501,6 +452,18 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
         return { behavior: 'allow', updatedInput: result, toolUseID: options.toolUseID };
       }
       return { behavior: 'deny', message: '用户取消了选择题交互', toolUseID: options.toolUseID };
+    }
+
+    // 本会话已授权的工具直接放行（本地短路）：用户点过「本会话总是允许」后，allow-session 经
+    // withToolSessionAllow 在 sessionPermissionUpdates 写入该工具的裸 allow 规则。CLI 在 headless
+    // (stdio) 模式下不会据此自动跳过后续同工具 prompt，故 claude-link 自行短路，避免同一会话同一工具
+    // 反复弹窗。短路跨 query 生效（sessionPermissionUpdates 按 app session 缓存，新 query 复用）。
+    // 不发 permission_request 系统消息、不入交互历史——用户已授权，无需再留痕。
+    const sessionBook = sessionPermissionUpdates.get(sessionId);
+    const sessionAllowed = isToolSessionAllowed(sessionBook, toolName);
+    logger.info(`[canUseTool] tool=${toolName} shortCircuit=${sessionAllowed} bookTools=[${bookToolNames(sessionBook).join(',')}]`);
+    if (sessionAllowed) {
+      return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID };
     }
 
     const payload = buildPermissionInteractionPayload(sessionId, toolName, input, options);
@@ -518,6 +481,7 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
     if (result.behavior === 'allow') {
       rememberSessionPermissionUpdates(sessionId, result.updatedPermissions);
     }
+    logger.info(`[canUseTool-resp] tool=${toolName} action=${response.action} selected=${JSON.stringify(response.selectedOptionIds ?? null)} wrotePerm=${result.updatedPermissions?.length ?? 0} bookToolsAfter=[${bookToolNames(sessionPermissionUpdates.get(sessionId)).join(',')}]`);
     recordInteractionResponse(sessionId, mainWindow, payload.title, response.action === 'submit' ? `选择：${response.selectedOptionIds?.join(', ') ?? '提交'}` : '已取消');
     return result;
   };
@@ -748,26 +712,12 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     }
   }
 
-  // 内联 settings（permissions/env）——脱离磁盘（settingSources:[]），由 claude-link 完全主导。
-  // 与 settings-writer.writeClaudeSettings 投影内容一致，但不写盘。
-  const settingsEnv: Record<string, string> = {};
-  try {
-    const adv = JSON.parse(config.advancedJson || '{}');
-    const envBlock =
-      adv && adv.env && typeof adv.env === 'object' && !Array.isArray(adv.env)
-        ? (adv.env as Record<string, unknown>)
-        : null;
-    if (envBlock) {
-      for (const [k, v] of Object.entries(envBlock)) {
-        if (typeof v === 'string') settingsEnv[k] = v;
-      }
-    }
-  } catch {
-    /* advancedJson 非法时忽略 */
-  }
+  // 内联 settings——脱离磁盘（settingSources:[]），由 claude-link 完全主导。
+  // 与 settings-writer.writeClaudeSettings 共用完整投影，避免 SDK 路径丢 hooks 等 advancedJson 顶层设置。
+  const settings = buildClaudeSettingsProjection(config);
   options.settings = {
-    permissions: applySessionPermissionUpdates(sessionId, { defaultMode: config.permissionMode }),
-    env: settingsEnv,
+    ...settings,
+    permissions: applySessionPermissionUpdates(sessionId, settings.permissions as SdkPermissionSettings),
   };
 
   return options;

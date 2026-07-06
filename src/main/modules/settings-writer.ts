@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type { AppConfig } from '../../shared/types/config';
 import { logger } from '../utils/logger';
+import { buildClaudeSettingsProjection } from './claude-settings-projection';
 
 export interface WriteSettingsResult {
   ok: boolean;
@@ -22,30 +23,7 @@ export function writeClaudeSettings(workingDir: string | null, config: AppConfig
   const dir = path.join(workingDir, '.claude');
   const file = path.join(dir, 'settings.local.json');
 
-  // 从 advancedJson.env 提取字符串字段（模型映射、CLAUDE_CODE_* 等）
-  const env: Record<string, string> = {};
-  try {
-    const adv = JSON.parse(config.advancedJson || '{}');
-    const envBlock =
-      adv && adv.env && typeof adv.env === 'object' && !Array.isArray(adv.env) ? (adv.env as Record<string, unknown>) : null;
-    if (envBlock) {
-      for (const [k, v] of Object.entries(envBlock)) {
-        if (typeof v === 'string') env[k] = v;
-      }
-    }
-  } catch {
-    /* advancedJson 非法时忽略，env 仅含下方显式字段 */
-  }
-
-  // apiKey/baseUrl 显式写入 env（对标 CC GUI，让 settings.local.json 独立可用）
-  if (config.apiKey) env.ANTHROPIC_API_KEY = config.apiKey;
-  const baseUrl = config.apiBaseUrl?.trim();
-  if (baseUrl && baseUrl !== 'https://api.anthropic.com') env.ANTHROPIC_BASE_URL = baseUrl;
-
-  const settings: Record<string, unknown> = {
-    permissions: { defaultMode: config.permissionMode },
-    env,
-  };
+  const settings = buildClaudeSettingsProjection(config);
 
   try {
     fs.mkdirSync(dir, { recursive: true });
