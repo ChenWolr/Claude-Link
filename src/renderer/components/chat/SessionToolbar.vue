@@ -205,12 +205,10 @@ onUnmounted(() => {
   align-items: center;
   gap: 1rem;
   flex-wrap: wrap;
-  /* 占满聊天区宽度、内容左对齐，与 ChatInput 同宽（修 #1/#3）。 */
+  /* 浮岛内部工具栏行：宽度由外层 .chat-composer 统一约束（与 ChatInput 同宽）。
+     去掉自带背景融入卡片；保留较小上内边距衔接输入行，底部留白收尾。 */
   width: 100%;
-  /* 与 ChatInput 融为一个连续底部面板：去掉中间 border-top，统一水平 padding，
-     仅保留较小上内边距衔接输入栏，底部留白收尾。 */
   padding: 6px var(--chat-bottom-pad-x) 10px;
-  background: var(--color-panel);
 }
 
 .ctl {

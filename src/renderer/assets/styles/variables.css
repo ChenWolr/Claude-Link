@@ -20,6 +20,6 @@
   /* 侧栏/任务面板宽度保持 px：布局骨架恒定，仅内部内容随字号缩放（迁移决策 D1）。 */
   --sidebar-width: 240px;
   --task-panel-width: 320px;
-  --chat-bottom-max-width: 50rem;
+  --chat-bottom-max-width: 800px; /* 会话列宽固定 px：字号档位变化时字体缩放、列宽恒定（同 D1 布局骨架） */
   --chat-bottom-pad-x: 1.5rem;
 }
