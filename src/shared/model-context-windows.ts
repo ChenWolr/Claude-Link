@@ -101,3 +101,29 @@ export function resolveContextWindowForSession(opts: {
   }
   return DEFAULT_CONTEXT_WINDOW;
 }
+
+// 与 resolveContextWindowForSession 同样的反查逻辑（别名直查 → 真实模型名反查别名），
+// 但未命中用户配置时返回 undefined（而非 200k 默认）。供 buildSdkOptions 注入
+// CLAUDE_CODE_MAX_CONTEXT_TOKENS 用：仅当用户显式配置了该别名的窗口才注入，没配则不注入
+// （让 CC 自决），避免把未配置的官方模型（如 fable 5 的 1M）误降级到 200k。
+export function lookupUserContextWindow(opts: {
+  aliasOrModel?: string | null;
+  advancedJson: string;
+  contextWindowByAlias?: Partial<Record<ModelAlias, number>> | null;
+}): number | undefined {
+  const { aliasOrModel, advancedJson, contextWindowByAlias } = opts;
+  const byAlias = contextWindowByAlias ?? {};
+  if (aliasOrModel) {
+    const direct = byAlias[aliasOrModel as ModelAlias];
+    if (typeof direct === 'number' && direct > 0) return direct;
+    const mappings = extractModelMappings(advancedJson);
+    const target = aliasOrModel.toLowerCase();
+    for (const [alias, mapped] of Object.entries(mappings)) {
+      if (mapped && mapped.toLowerCase() === target) {
+        const v = byAlias[alias as ModelAlias];
+        if (typeof v === 'number' && v > 0) return v;
+      }
+    }
+  }
+  return undefined;
+}
