@@ -202,7 +202,9 @@ function handleCopyClick(event: MouseEvent): void {
 .message-list__scroller {
   height: 100%;
   overflow-y: auto;
-  padding: 20px 24px;
+  /* 水平 padding 动态：宽窗口撑开使消息内容限宽居中（≈800px），窄窗口回退 24px。
+     scroller 全宽 → 垂直滚动条贴右侧边栏（任务面板），不再被挤到限宽列中央。 */
+  padding: 20px max(24px, calc((100% - var(--chat-bottom-max-width)) / 2));
   display: flex;
   flex-direction: column;
   /* 同一发送者的连续消息间距收紧（0.25rem = 4px@medium）；

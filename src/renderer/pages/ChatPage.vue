@@ -99,8 +99,10 @@ async function handleNewSession() {
         <span>❌ {{ error }}</span>
       </div>
 
-      <ChatInput :disabled="sending" @send="handleSend" />
-      <SessionToolbar :sending="sending" @abort="abort" @compress="handleCompress" />
+      <div class="chat-composer">
+        <ChatInput :disabled="sending" @send="handleSend" />
+        <SessionToolbar :sending="sending" @abort="abort" @compress="handleCompress" />
+      </div>
     </template>
     <template v-else>
       <div class="empty-state">
@@ -121,6 +123,23 @@ async function handleNewSession() {
   flex: 1;
   flex-direction: column;
   overflow: hidden;
+  /* 全宽：让垂直滚动条贴右侧边栏（任务面板）。内容限宽下放到 MessageList scroller
+     的动态 padding 与 .chat-composer 的 max-width，避免此处限宽把滚动条挤到列中央。 */
+}
+
+/* 底部浮岛：圆角卡片包住输入+工具栏，替代原贯穿色带（参考 openhanako .input-wrapper）。
+   自身 max-width 限宽居中、对齐上方消息内容列；上下留白让卡片浮起。 */
+.chat-composer {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 100%;
+  max-width: var(--chat-bottom-max-width);
+  margin: 0.5rem auto var(--chat-bottom-pad-x);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
 }
 
 .empty-state {

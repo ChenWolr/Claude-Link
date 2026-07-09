@@ -188,13 +188,10 @@ onUnmounted(() => {
 .chat-input {
   display: flex;
   gap: 10px;
-  /* 占满聊天区宽度、内容左对齐，与 SessionToolbar 同宽（修 #1/#3）。
-     去掉 max-width+margin:auto（那是两行宽度不一致的根因：max-width≠width，
-     无 flex:1 子项的行会收缩）。 */
+  /* 浮岛内部输入行：宽度与 padding 由外层 .chat-composer 统一约束（两行天然同宽，
+     规避历史上 max-width≠width 导致的错位）。去掉自带背景与 border-top，融入卡片。 */
   width: 100%;
   padding: 16px var(--chat-bottom-pad-x);
-  border-top: 1px solid var(--color-border);
-  background: var(--color-panel);
 }
 
 textarea {
