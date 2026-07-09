@@ -32,10 +32,17 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
   color: #07120d;
 }
 
+/* 助手消息：左对齐气泡（微信式分层）。panel-soft 底 + 边框与 bg 拉开层次；
+   左侧 accent 色条作为「Claude 回复」强标识，让每条回复边界一眼可辨（claude-link
+   无头像行，需靠色条+容器替代 openhanako 的头像锚点）。 */
 .bubble--assistant {
   align-self: flex-start;
+  max-width: 85%;
+  padding: 12px 16px;
   background: var(--color-panel-soft);
   border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-accent);
+  border-radius: var(--radius-md);
 }
 
 .bubble--system {
@@ -70,6 +77,11 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
 .bubble__content {
   word-break: break-word;
   line-height: 1.5;
+}
+
+/* 助手正文行高加大到 1.75，长回复阅读更舒展（对齐 openhanako）。 */
+.bubble--assistant .bubble__content {
+  line-height: 1.75;
 }
 
 .bubble__content :deep(p) {
