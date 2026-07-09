@@ -51,7 +51,13 @@ export const useSessionStore = defineStore('session', {
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
     // 隐藏本回合已落库的 text/thinking（与流式块去重），回合结束/会话切换时复位。
     turnStartIndex: 0,
-    contextStats: null as { inputTokens: number; outputTokens: number; windowSize: number; ratio: number } | null,
+    // 真实上下文用量（来自 SDK usage）。windowSize/ratio 不在此存，改由 contextStats getter
+    // 派生——使切换模型（modelOverride）或改设置（contextWindowByAlias）时即时重算，
+    // 无需等下一回合 CONTEXT_UPDATE。修复「切了模型上下文窗口不刷新」。
+    contextUsage: null as { inputTokens: number; outputTokens: number } | null,
+    // 当前活动会话最近一次 SDK 上报的真实窗口（作 resolveContextWindow 的 lastContextWindow）。
+    // 切会话时从 session.lastContextWindow 初始化，收 usage 回调时用 payload.windowSize 覆盖。
+    contextLastWindow: null as number | null,
     // 问题 4：CC 自动压缩事件标记。收到 compactedJustNow:true 的 CONTEXT_UPDATE 时置 true，
     // ContextButton 据此弹短暂横幅回显。横幅显示后由 ContextButton 自行复位为 false。
     compactedJustNow: false as boolean,
@@ -103,6 +109,22 @@ export const useSessionStore = defineStore('session', {
     activeSubAgentThinking(state): Record<string, string> {
       if (!state.activeSession) return {};
       return state.subAgentStreamingThinking[state.activeSession.id] ?? {};
+    },
+    // 上下文统计：windowSize/ratio 派生而非写入。依赖 activeSession.modelOverride/model +
+    // contextLastWindow + configStore.contextWindowByAlias，任一变化即时重算。
+    // 原先 contextStats 是切会话/收 usage 回调时写入的快照，切模型不触发重算，要等下一回合
+    // CONTEXT_UPDATE 才刷新——此 getter 从根上消除该滞后。
+    contextStats(state): { inputTokens: number; outputTokens: number; windowSize: number; ratio: number } | null {
+      if (!state.activeSession) return null;
+      const alias = state.activeSession.modelOverride || state.activeSession.model;
+      const windowSize = resolveContextWindow({
+        lastContextWindow: state.contextLastWindow,
+        alias,
+        contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
+      });
+      const inputTokens = state.contextUsage?.inputTokens ?? 0;
+      const outputTokens = state.contextUsage?.outputTokens ?? 0;
+      return { inputTokens, outputTokens, windowSize, ratio: windowSize > 0 ? inputTokens / windowSize : 0 };
     },
   },
   actions: {
@@ -160,15 +182,11 @@ export const useSessionStore = defineStore('session', {
       this.toolProgress = {};
       this.backgroundTasks = {};
       this.compacting = false;
-      // 上下文窗口 fallback 链：优先该会话持久化的真实窗口（连通后缓存），其次按当前模型
-      // 查内置表（解决未连接时 1M 模型被当成 200k），再次用户全局覆盖，最后 200k。
-      const windowSize = resolveContextWindow({
-        lastContextWindow: session.lastContextWindow,
-        alias: session.modelOverride || session.model,
-        contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
-      });
-      this.contextStats = session.lastContextTokens
-        ? { inputTokens: session.lastContextTokens, outputTokens: 0, windowSize, ratio: windowSize > 0 ? session.lastContextTokens / windowSize : 0 }
+      // 真实用量 + 上次连通的真实窗口交给 state；windowSize/ratio 由 contextStats getter 派生，
+      // 切模型/改设置时即时重算。lastContextWindow 为该会话持久化的 SDK 真实窗口（连通后缓存）。
+      this.contextLastWindow = session.lastContextWindow;
+      this.contextUsage = session.lastContextTokens
+        ? { inputTokens: session.lastContextTokens, outputTokens: 0 }
         : null;
       try {
         this.messages = await window.claudeLink.getSessionMessages(session.id);
@@ -284,20 +302,11 @@ export const useSessionStore = defineStore('session', {
     bindContextUpdates() {
       return window.claudeLink.onContextUpdate((payload) => {
         if (this.activeSession?.id !== payload.sessionId) return;
-        // 上下文窗口经 resolveContextWindow 过滤：用户按别名设置优先（「以设置为准」），
-        // 否则用 SDK 上报的真实窗口（payload.windowSize）。避免 SDK 误报 200k 覆盖用户设置的 1M。
-        const alias = this.activeSession.modelOverride || this.activeSession.model;
-        const windowSize = resolveContextWindow({
-          lastContextWindow: payload.windowSize,
-          alias,
-          contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
-        });
-        this.contextStats = {
-          inputTokens: payload.inputTokens,
-          outputTokens: payload.outputTokens,
-          windowSize,
-          ratio: windowSize > 0 ? payload.inputTokens / windowSize : 0,
-        };
+        // 真实用量 + SDK 上报的真实窗口交给 state；windowSize/ratio 由 contextStats getter 派生。
+        // 用户按别名设置（contextWindowByAlias）优先级高于 payload.windowSize，由 getter 内
+        // resolveContextWindow 处理，避免 SDK 误报 200k 覆盖用户设置的 1M。
+        this.contextLastWindow = payload.windowSize;
+        this.contextUsage = { inputTokens: payload.inputTokens, outputTokens: payload.outputTokens };
         // 问题 4：CC 自动压缩事件 → 置标记，ContextButton 弹横幅回显。
         if (payload.compactedJustNow) {
           this.compactedJustNow = true;

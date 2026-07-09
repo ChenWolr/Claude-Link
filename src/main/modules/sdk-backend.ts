@@ -23,7 +23,7 @@ import { IPC_CHANNELS } from '../../shared/constants';
 import type { PermissionResponsePayload } from '../../shared/types/ipc';
 import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
-import { resolveContextWindowForSession } from '../../shared/model-context-windows';
+import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
@@ -684,6 +684,26 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   } catch {
     /* advancedJson 非法时忽略 */
   }
+  // 按当前模型别名动态注入 CC 的真实窗口 override（CLAUDE_CODE_MAX_CONTEXT_TOKENS）。
+  // CC 对第三方/未知模型名（如 glm-5.2，非 claude- 开头）默认回退 200k → 提前压缩丢上下文。
+  // 用户在配置页按别名设的窗口在此注入，让 CC 按该窗口处理。仅当用户显式配置该别名时注入
+  // （lookupUserContextWindow 返 undefined 则不注入），避免把未配的官方模型（如 fable 5 的 1M）降级。
+  // 优先级：flag settings.env（此处）> options.env（buildSpawnEnv）；MAX_CONTEXT_TOKENS > [1m] 后缀。
+  // v2.1.193+ 对未知模型名直接生效，无需 DISABLE_COMPACT；若日后改回 claude-* 官方名需配合 DISABLE_COMPACT。
+  const userWindow = lookupUserContextWindow({
+    aliasOrModel: requestedAlias,
+    advancedJson: config.advancedJson,
+    contextWindowByAlias: config.contextWindowByAlias,
+  });
+  if (typeof userWindow === 'number' && userWindow > 0) {
+    // 钳制 [1e5, 1e6]：与 SDK autoCompactWindow zod 范围对齐，超界 CC 行为未定义。
+    const clamped = Math.max(100000, Math.min(1000000, userWindow));
+    if (clamped !== userWindow) {
+      logger.warn(`[${sessionId}] contextWindowByAlias[${requestedAlias}]=${userWindow} 越界 [1e5,1e6]，注入钳制为 ${clamped}`);
+    }
+    settingsEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(clamped);
+    logger.info(`[${sessionId}] 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS=${clamped} (alias=${requestedAlias})`);
+  }
   options.settings = {
     permissions: { defaultMode: config.permissionMode },
     env: settingsEnv,
@@ -851,6 +871,9 @@ function clearResumeSessionId(sessionId: string): void {
   }
 }
 
+// 每会话只诊断一次（首回合 result 后调 query.getContextUsage），避免每 turn 重复调用。
+const contextUsageDiagnosed = new Set<string>();
+
 // ── 运行一个 query：消费 SDKMessage 流，转 CliEvent 推前端，结束后 emit exit ─
 async function runQuery(
   sessionId: string,
@@ -985,6 +1008,25 @@ async function runQuery(
             } catch (err) {
               logger.warn(`Failed to persist cli session id [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
             }
+          }
+          // 诊断：init 后 CC 已连通且 query 仍活着，读 CC 实际认定的窗口/阈值/auto-compact 开关，
+          // 验证 CLAUDE_CODE_MAX_CONTEXT_TOKENS 注入是否生效 + 第三方端点 auto-compact 是否启用（#65585）。
+          // 不能在 result 事件后调——result 是流末事件，query 随即关闭，getContextUsage 会
+          // "Query closed before response received"。fire-and-forget，每会话只诊断一次。
+          if (!contextUsageDiagnosed.has(sessionId)) {
+            contextUsageDiagnosed.add(sessionId);
+            void query.getContextUsage()
+              .then((cu) => {
+                logger.info(
+                  `[${sessionId}] getContextUsage 诊断：maxTokens=${cu.maxTokens} rawMaxTokens=${cu.rawMaxTokens}` +
+                  ` totalTokens=${cu.totalTokens} percentage=${cu.percentage}` +
+                  ` autoCompactThreshold=${cu.autoCompactThreshold ?? 'n/a'} isAutoCompactEnabled=${cu.isAutoCompactEnabled}` +
+                  ` | 注入别名=${entry.requestedAlias ?? 'n/a'}`,
+                );
+              })
+              .catch((e) => {
+                logger.warn(`[${sessionId}] getContextUsage 诊断失败：${e instanceof Error ? e.message : String(e)}`);
+              });
           }
           continue;
         }

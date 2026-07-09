@@ -17,7 +17,7 @@ import {
   setContextWindowInAdvancedJson,
 } from '../src/shared/settings-parser';
 import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
-import { lookupModelWindow, resolveContextWindow, resolveContextWindowForSession } from '../src/shared/model-context-windows';
+import { lookupModelWindow, resolveContextWindow, resolveContextWindowForSession, lookupUserContextWindow } from '../src/shared/model-context-windows';
 import { normalizeDbTime } from '../src/shared/time';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
@@ -950,6 +950,17 @@ console.log('\n=== 39) 上下文窗口 fallback + fable 映射契约 ===');
   check('真实模型名反查别名命中(glm-5.2→sonnet)', resolveContextWindowForSession({ aliasOrModel: 'glm-5.2', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
   check('未知真实模型名 → 200k', resolveContextWindowForSession({ aliasOrModel: 'unknown-model', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 200000);
   check('无 aliasOrModel → 200k', resolveContextWindowForSession({ aliasOrModel: null, advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 200000);
+
+  // G. lookupUserContextWindow（注入 MAX_CONTEXT_TOKENS 用：只返用户显式配置，未命中返 undefined）
+  check('lookupUserContextWindow 别名直传命中', lookupUserContextWindow({ aliasOrModel: 'sonnet', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
+  check('lookupUserContextWindow 真实模型名反查命中(glm-5.2→sonnet)', lookupUserContextWindow({ aliasOrModel: 'glm-5.2', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
+  check('lookupUserContextWindow 未配置别名 → undefined（不注入，避免降级）', lookupUserContextWindow({ aliasOrModel: 'haiku', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === undefined);
+  check('lookupUserContextWindow 未知真实模型名 → undefined', lookupUserContextWindow({ aliasOrModel: 'unknown-model', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === undefined);
+  check('lookupUserContextWindow 无 aliasOrModel → undefined', lookupUserContextWindow({ aliasOrModel: null, advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === undefined);
+  check('lookupUserContextWindow 空配置 → undefined', lookupUserContextWindow({ aliasOrModel: 'sonnet', advancedJson: advWithMap, contextWindowByAlias: {} }) === undefined);
+  // [1m] 后缀真实模型名反查（用户实际配置 sonnet→glm-5.2[1m]）
+  const advWith1m = JSON.stringify({ env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2[1m]', CLAUDE_LINK_CONTEXT_WINDOW_SONNET: '1000000' } }, null, 2);
+  check('lookupUserContextWindow [1m]后缀真实名反查命中(glm-5.2[1m]→sonnet)', lookupUserContextWindow({ aliasOrModel: 'glm-5.2[1m]', advancedJson: advWith1m, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
 }
 
 console.log('\n=== 40) UI 简化：连接配置单卡片 + 会话内不调字号 ===');
@@ -986,6 +997,23 @@ console.log('\n=== 41) DB 时间规范化 normalizeDbTime（治子 Agent 计时 
   check('task-repo toTask 用 normalizeDbTime', tr.includes('normalizeDbTime(row.started_at)') && tr.includes('normalizeDbTime(row.completed_at)'));
   check('session-repo toSession 用 normalizeDbTime', sr.includes('normalizeDbTime(row.created_at)') && sr.includes('normalizeDbTime(row.last_context_updated_at)'));
   check('interaction-history toEntry 用 normalizeDbTime', /createdAt:\s*normalizeDbTime\(row\.created_at\)/.test(ih));
+}
+
+console.log('\n=== 42) contextStats getter 化（切模型/改设置即时重算上下文窗口）===');
+{
+  const ss = readRel('src/renderer/stores/session-store.ts');
+  // 防回归：contextStats 不再是写入式 state，而是派生 getter。原先 updateActiveSessionModelOverride
+  // 切模型不重算 contextStats，ContextButton「最大上下文」停在旧模型窗口，要等下一回合 CONTEXT_UPDATE 才刷新。
+  check('contextStats 已从 state 移除（不再写入式快照）', !/contextStats:\s*null as/.test(ss));
+  check('contextStats 改为 getter（派生 windowSize/ratio）', /getters:\s*\{[\s\S]*?\bcontextStats\(state\)/.test(ss));
+  check('新增 contextUsage state（真实用量）', ss.includes('contextUsage: null as'));
+  check('新增 contextLastWindow state（SDK 真实窗口）', ss.includes('contextLastWindow: null as'));
+  check('switchSession/onContextUpdate 不再直接赋值 contextStats', !/this\.contextStats\s*=/.test(ss));
+  check('switchSession 改写 contextLastWindow', ss.includes('this.contextLastWindow = session.lastContextWindow'));
+  check('onContextUpdate 改写 contextLastWindow（payload.windowSize）', ss.includes('this.contextLastWindow = payload.windowSize'));
+  check('getter 用 modelOverride||model 作 alias', /contextStats\(state\)[\s\S]*?modelOverride\s*\|\|\s*state\.activeSession\.model/.test(ss));
+  check('getter 调 resolveContextWindow', /contextStats\(state\)[\s\S]*?resolveContextWindow\(/.test(ss));
+  check('getter 读 configStore.contextWindowByAlias', /contextStats\(state\)[\s\S]*?useConfigStore\(\)\.config\.contextWindowByAlias/.test(ss));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
