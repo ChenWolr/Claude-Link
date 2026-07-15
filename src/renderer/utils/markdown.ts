@@ -20,6 +20,29 @@ const md = new MarkdownIt({
     return wrapCodeBlock(highlighted, normalizedLanguage, code);
   },
 });
+applyExternalLinkTarget(md);
+
+export function applyExternalLinkTarget(instance: MarkdownIt): void {
+  const defaultLinkOpen = instance.renderer.rules.link_open;
+
+  instance.renderer.rules.link_open = (tokens, index, options, env, renderer) => {
+    const token = tokens[index];
+    // 仅对 http(s) 网页链接加 target=_blank：这些才会走 setWindowOpenHandler → 系统浏览器。
+    // 页内锚点(#)、mailto/tel、相对路径不加，避免锚点被静默 deny、协议链接走 window.open。
+    if (token.attrIndex('target') < 0 && /^https?:/i.test(token.attrGet('href') ?? '')) {
+      token.attrSet('target', '_blank');
+    }
+
+    const relValues = new Set((token.attrGet('rel') ?? '').split(/\s+/).filter(Boolean));
+    relValues.add('noopener');
+    relValues.add('noreferrer');
+    token.attrSet('rel', Array.from(relValues).join(' '));
+
+    return defaultLinkOpen
+      ? defaultLinkOpen(tokens, index, options, env, renderer)
+      : renderer.renderToken(tokens, index, options);
+  };
+}
 
 export function renderMarkdown(text: string): string {
   return md.render(text);

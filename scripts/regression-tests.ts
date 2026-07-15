@@ -1,4 +1,5 @@
 import { strict as assert } from 'node:assert';
+import MarkdownIt from 'markdown-it';
 
 import { runMigrations } from '../src/main/database/migrations';
 import { buildAnthropicApiUrl } from '../src/main/modules/api-url';
@@ -21,6 +22,12 @@ import {
 import { isMissingConversationResumeError } from '../src/main/modules/sdk-errors';
 import { parseClaudeSettings } from '../src/main/modules/settings-importer';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
+import { applyExternalLinkTarget, renderMarkdown } from '../src/renderer/utils/markdown';
+import {
+  getNavigationDisposition,
+  isAllowedAppNavigation,
+  shouldOpenExternally,
+} from '../src/shared/external-links';
 
 function testApiUrlBuilder(): void {
   assert.equal(buildAnthropicApiUrl('https://api.anthropic.com', 'models').toString(), 'https://api.anthropic.com/v1/models');
@@ -52,6 +59,98 @@ function testSettingsImportPreservesNestedJson(): void {
 function testSearchNormalizer(): void {
   assert.equal(normalizeSearchText('会 话\n1\t'), '会话1');
   assert.ok(normalizeSearchText('会话 1').includes(normalizeSearchText('会话1')));
+}
+
+function testMarkdownExternalLinks(): void {
+  const markdownLink = renderMarkdown('[Example](https://example.com)');
+  assert.ok(markdownLink.includes('target="_blank"'));
+  assert.ok(markdownLink.includes('rel="noopener noreferrer"'));
+
+  const linkifiedUrl = renderMarkdown('https://example.com');
+  assert.ok(linkifiedUrl.includes('target="_blank"'));
+  assert.ok(linkifiedUrl.includes('rel="noopener noreferrer"'));
+
+  // 页内锚点 / mailto / 相对路径不应加 target=_blank：
+  // 锚点加 _blank 会被 setWindowOpenHandler 静默 deny，破坏页内滚动；
+  // mailto/tel 应走系统协议处理器，而非 window.open 路径。
+  const anchorLink = renderMarkdown('[锚点](#section)');
+  assert.ok(!anchorLink.includes('target="_blank"'));
+  const mailtoLink = renderMarkdown('[联系](mailto:test@example.com)');
+  assert.ok(!mailtoLink.includes('target="_blank"'));
+  const relativeLink = renderMarkdown('[相对](./other)');
+  assert.ok(!relativeLink.includes('target="_blank"'));
+
+  const customMarkdown = new MarkdownIt();
+  customMarkdown.core.ruler.after('inline', 'existing-link-attributes', (state) => {
+    const linkOpen = state.tokens
+      .flatMap((token) => token.children ?? [])
+      .find((token) => token.type === 'link_open');
+    linkOpen?.attrSet('target', '');
+    linkOpen?.attrSet('rel', 'author noopener author');
+  });
+  customMarkdown.renderer.rules.link_open = (tokens, index, options, _env, renderer) => {
+    tokens[index].attrSet('data-existing-rule', 'called');
+    return renderer.renderToken(tokens, index, options);
+  };
+  applyExternalLinkTarget(customMarkdown);
+  const customLink = customMarkdown.render('[Example](https://example.com)');
+  assert.ok(customLink.includes('target=""'));
+  assert.ok(customLink.includes('rel="author noopener noreferrer"'));
+  assert.ok(customLink.includes('data-existing-rule="called"'));
+}
+
+function testInteractionPreviewMarkdownLinkTargetWiring(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const preview = fs.readFileSync(new URL('../src/renderer/components/chat/InteractionPreview.vue', import.meta.url), 'utf8');
+
+  assert.ok(preview.includes("import { applyExternalLinkTarget } from '../../utils/markdown';"));
+  const markdownInstanceIndex = preview.indexOf('const markdown = new MarkdownIt');
+  const applyHelperIndex = preview.indexOf('applyExternalLinkTarget(markdown);');
+  assert.ok(markdownInstanceIndex >= 0);
+  assert.ok(applyHelperIndex > markdownInstanceIndex);
+}
+
+function testExternalLinks(): void {
+  assert.equal(shouldOpenExternally('https://example.com'), true);
+  assert.equal(shouldOpenExternally('http://example.com'), true);
+  assert.equal(shouldOpenExternally('mailto:test@example.com'), true);
+  assert.equal(shouldOpenExternally('HTTPS://example.com'), true);
+  assert.equal(shouldOpenExternally('MAILTO:test@example.com'), true);
+  assert.equal(shouldOpenExternally('ftp://example.com/file'), false);
+  assert.equal(shouldOpenExternally('custom:payload'), false);
+  assert.equal(shouldOpenExternally('javascript:alert(1)'), false);
+  assert.equal(shouldOpenExternally('data:text/html,x'), false);
+  assert.equal(shouldOpenExternally('file:///D:/secret.txt'), false);
+  assert.equal(shouldOpenExternally('not a url'), false);
+  assert.equal(shouldOpenExternally('/settings'), false);
+  assert.equal(shouldOpenExternally('https://'), false);
+  assert.equal(shouldOpenExternally('https://[::1'), false);
+  assert.equal(shouldOpenExternally(''), false);
+
+  const devRendererUrl = 'http://localhost:5173/';
+  assert.equal(isAllowedAppNavigation('http://localhost:5173/settings', devRendererUrl), true);
+  assert.equal(isAllowedAppNavigation('HTTP://LOCALHOST:5173/settings', devRendererUrl), true);
+  assert.equal(isAllowedAppNavigation('http://localhost.evil.example:5173/', devRendererUrl), false);
+  assert.equal(isAllowedAppNavigation('http://localhost:5174/settings', devRendererUrl), false);
+  assert.equal(isAllowedAppNavigation('https://localhost:5173/settings', devRendererUrl), false);
+  assert.equal(isAllowedAppNavigation('http://[::1', devRendererUrl), false);
+  assert.equal(isAllowedAppNavigation('javascript:alert(1)', devRendererUrl), false);
+  assert.equal(isAllowedAppNavigation('blob:http://localhost:5173/id', devRendererUrl), false);
+  assert.equal(isAllowedAppNavigation('http://localhost:5173/settings', 'http://[::1'), false);
+  assert.equal(isAllowedAppNavigation('http://localhost:5173/settings', ''), false);
+
+  assert.equal(getNavigationDisposition('http://localhost:5173/settings', devRendererUrl), 'allow');
+  assert.equal(getNavigationDisposition('https://example.com', devRendererUrl), 'open-external');
+  assert.equal(getNavigationDisposition('mailto:test@example.com', devRendererUrl), 'open-external');
+  assert.equal(getNavigationDisposition('blob:http://localhost:5173/id', devRendererUrl), 'block');
+  assert.equal(getNavigationDisposition('file:///D:/app/index.html'), 'block');
+  assert.equal(getNavigationDisposition('javascript:alert(1)', devRendererUrl), 'block');
+
+  const customRendererUrl = 'https://127.0.0.1:4312/';
+  assert.equal(isAllowedAppNavigation('https://127.0.0.1:4312/another?x=1#part', customRendererUrl), true);
+  assert.equal(isAllowedAppNavigation('http://127.0.0.1:4312/another', customRendererUrl), false);
+  assert.equal(isAllowedAppNavigation('file:///D:/app/index.html'), false);
+  assert.equal(isAllowedAppNavigation('https://example.com'), false);
 }
 
 function testMissingConversationResumeErrorDetection(): void {
@@ -442,6 +541,9 @@ function testStatusSubtypeCoverage(): void {
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testSearchNormalizer();
+testMarkdownExternalLinks();
+testInteractionPreviewMarkdownLinkTargetWiring();
+testExternalLinks();
 testMissingConversationResumeErrorDetection();
 testMigrationsHandlePartiallyAppliedContextColumns();
 testPermissionPromptIntegration();
