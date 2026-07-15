@@ -15,6 +15,7 @@ import {
   WINDOW_MIN_HEIGHT,
 } from '../shared/constants';
 import { loadWindowSize, trackWindowSize } from './modules/window-state';
+import { setupLinkGuard } from './modules/link-guard';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -46,6 +47,8 @@ function createWindow(): void {
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     logger.error(`Renderer process gone: ${details.reason} (${details.exitCode})`);
   });
+
+  setupLinkGuard(mainWindow, is.dev ? process.env.ELECTRON_RENDERER_URL : undefined);
 
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
