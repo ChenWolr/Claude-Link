@@ -60,6 +60,7 @@ function onRetry(): void {
   background: color-mix(in srgb, #f5a623 12%, var(--color-panel-soft));
   border: 1px solid color-mix(in srgb, #f5a623 38%, transparent);
   font-size: 13px;
+  box-shadow: var(--ring-light);
 }
 .stall-banner__main {
   display: flex;

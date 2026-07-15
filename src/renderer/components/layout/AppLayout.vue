@@ -136,6 +136,7 @@ onUnmounted(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-panel-soft);
+  box-shadow: var(--elevation-2), var(--ring-light);
   color: var(--color-text);
   padding: 8px 10px;
 }

@@ -115,7 +115,8 @@ async function openSession(session: { id: string }) {
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent);
   padding: 8px 16px;
   font-weight: 700;
 }
@@ -145,11 +146,13 @@ async function openSession(session: { id: string }) {
   background: var(--color-panel-soft);
   padding: 14px 16px;
   cursor: pointer;
-  transition: border-color 0.15s;
+  box-shadow: var(--ring-light), var(--elevation-1);
+  transition: border-color var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .session-card:hover {
   border-color: var(--color-accent);
+  box-shadow: var(--ring-light), var(--elevation-2);
 }
 
 .session-card__name {

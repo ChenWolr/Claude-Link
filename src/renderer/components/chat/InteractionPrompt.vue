@@ -835,16 +835,6 @@ onBeforeUnmount(() => {
   resize: vertical;
 }
 
-.interaction-search input:focus,
-.interaction-other input:focus,
-.interaction-other textarea:focus,
-.interaction-field input:focus,
-.interaction-field textarea:focus,
-.interaction-field select:focus {
-  border-color: var(--color-accent-strong);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 18%, transparent);
-}
-
 .interaction-empty {
   padding: 1.125rem 0.75rem;
   border: 1px dashed var(--color-border);
@@ -906,10 +896,6 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.interaction-btn:active {
-  transform: scale(0.96);
-}
-
 .interaction-btn:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -923,7 +909,7 @@ onBeforeUnmount(() => {
 
 .interaction-btn--primary {
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
 }
 
 .interaction-btn--danger {

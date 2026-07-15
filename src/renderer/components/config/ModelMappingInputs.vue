@@ -306,12 +306,9 @@ function fmtTokens(n: number): string {
   cursor: pointer;
 }
 
-.ctx-modal__btn:active {
-  transform: scale(0.96);
-}
-
 .ctx-modal__btn--primary {
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent);
 }
 </style>

@@ -51,11 +51,13 @@ watch(() => props.task.status, (newStatus) => {
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   padding: 10px 12px;
+  box-shadow: var(--ring-light), var(--elevation-1);
+  transition: border-color var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .task-item--running {
   border-color: var(--color-accent);
-  background: rgba(58, 166, 117, 0.06);
+  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
 }
 
 .task-item__header {

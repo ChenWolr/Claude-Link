@@ -148,7 +148,7 @@ const items = computed<GroupItem[]>(() => {
   cursor: pointer;
   font-family: inherit;
   border-radius: var(--radius-sm);
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, transform var(--duration-fast) var(--ease-out);
 }
 
 .process-fold__summary:hover {
@@ -201,6 +201,7 @@ const items = computed<GroupItem[]>(() => {
   padding: 10px 12px;
   border-radius: var(--radius-sm);
   background: color-mix(in srgb, var(--color-panel-soft) 62%, transparent);
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 .process-fold__system {

@@ -302,7 +302,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--elevation-3), var(--ring-light);
 }
 
 .menu__item {
@@ -372,7 +372,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.125rem;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--elevation-3), var(--ring-light);
 }
 
 .perm-item {
@@ -387,7 +387,7 @@ onUnmounted(() => {
   color: var(--color-text);
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.12s ease;
+  transition: background-color 0.12s ease, transform var(--duration-fast) var(--ease-out);
 }
 
 .perm-item:hover,

@@ -50,7 +50,7 @@ const emit = defineEmits<{
 
 .palette-card.active {
   border-color: var(--color-accent);
-  background: rgba(58, 166, 117, 0.06);
+  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
 }
 
 .palette-swatch {
@@ -63,7 +63,7 @@ const emit = defineEmits<{
 .swatch {
   width: 1.25rem;
   height: 1.25rem;
-  border-radius: 0.25rem;
+  border-radius: var(--radius-xs);
 }
 
 .palette-name {
