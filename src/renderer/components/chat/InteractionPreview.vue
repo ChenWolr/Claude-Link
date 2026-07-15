@@ -4,6 +4,7 @@ import { html as diffToHtml } from 'diff2html';
 import hljs from 'highlight.js';
 import MarkdownIt from 'markdown-it';
 import type { InteractionPromptPreview } from '../../../shared/types/ipc';
+import { applyExternalLinkTarget } from '../../utils/markdown';
 
 const props = defineProps<{
   preview?: string | InteractionPromptPreview;
@@ -20,6 +21,7 @@ const markdown = new MarkdownIt({
     return hljs.highlight(code, { language: lang }).value;
   },
 });
+applyExternalLinkTarget(markdown);
 
 const normalized = computed<InteractionPromptPreview | null>(() => {
   if (!props.preview) return null;
