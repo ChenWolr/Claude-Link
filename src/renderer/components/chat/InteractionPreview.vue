@@ -145,10 +145,6 @@ async function copyPreview(): Promise<void> {
   cursor: pointer;
 }
 
-.interaction-preview__copy:active {
-  transform: scale(0.96);
-}
-
 .interaction-preview__copy:disabled {
   cursor: not-allowed;
   opacity: 0.5;
@@ -190,7 +186,7 @@ async function copyPreview(): Promise<void> {
 }
 
 .interaction-preview__markdown :deep(code) {
-  border-radius: 0.25rem;
+  border-radius: var(--radius-xs);
   padding: 0.0625rem 0.3125rem;
   background: rgba(0, 0, 0, 0.24);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;

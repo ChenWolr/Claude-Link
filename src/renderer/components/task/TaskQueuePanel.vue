@@ -382,7 +382,7 @@ function handleDragReorder() {
   min-width: var(--task-panel-width);
   flex-direction: column;
   background: var(--color-panel);
-  border-left: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-border-strong);
 }
 
 /* Tab 切换条 */
@@ -404,7 +404,7 @@ function handleDragReorder() {
   font-weight: 600;
   cursor: pointer;
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  transition: color 0.15s, background 0.15s;
+  transition: color 0.15s, background 0.15s, transform var(--duration-fast) var(--ease-out);
 }
 
 .tab:hover {
@@ -436,7 +436,7 @@ function handleDragReorder() {
   padding: 0 4px;
   border-radius: 999px;
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
   font-size: 0.625rem;
   font-weight: 700;
 }
@@ -492,7 +492,8 @@ function handleDragReorder() {
 .btn--primary {
   border: 0;
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent);
 }
 
 .btn--warn {
@@ -504,14 +505,14 @@ function handleDragReorder() {
 .countdown {
   padding: 10px 16px;
   border-bottom: 1px solid var(--color-border);
-  background: rgba(58, 166, 117, 0.06);
+  background: color-mix(in srgb, var(--color-accent) 6%, transparent);
   color: var(--color-accent-strong);
   font-size: 0.8125rem;
   text-align: center;
 }
 
 .countdown--continuing {
-  background: rgba(58, 166, 117, 0.12);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
   color: var(--color-accent-strong);
 }
 
@@ -585,7 +586,8 @@ function handleDragReorder() {
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent);
   padding: 8px 14px;
   font-weight: 700;
   font-size: 0.8125rem;
@@ -609,12 +611,13 @@ function handleDragReorder() {
   background: var(--color-panel);
   overflow: hidden;
   scroll-margin-top: 12px;
+  box-shadow: var(--ring-light), var(--elevation-1);
   transition: box-shadow 0.3s, border-color 0.3s;
 }
 
 .subagent-group--focused {
   border-color: var(--color-accent-strong);
-  box-shadow: 0 0 0 2px rgba(var(--color-accent-rgb, 58, 166, 117), 0.25);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 25%, transparent);
 }
 
 .subagent-group__header {

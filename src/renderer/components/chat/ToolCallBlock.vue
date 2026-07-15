@@ -241,6 +241,7 @@ watch([expanded, resultContent], () => {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-word;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
 }
 
 .tool-row__result {

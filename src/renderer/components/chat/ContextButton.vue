@@ -141,7 +141,7 @@ function fmt(n: number): string {
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--elevation-3), var(--ring-light);
 }
 .ctx__row { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; font-size: 0.75rem; color: var(--color-text-muted); }
 .ctx__row code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; color: var(--color-text); font-variant-numeric: tabular-nums; }
@@ -164,7 +164,7 @@ function fmt(n: number): string {
   color: var(--color-text);
   padding: 0.375rem 0.625rem;
   font-size: 0.75rem;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--elevation-2), var(--ring-light);
 }
 /* C：实时压缩态强调色 */
 .ctx__banner--compacting {

@@ -29,7 +29,8 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
 .bubble--user {
   align-self: flex-end;
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent), var(--elevation-1);
 }
 
 /* 助手消息：左对齐气泡（微信式分层）。panel-soft 底 + 边框与 bg 拉开层次；
@@ -43,6 +44,7 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
   border: 1px solid var(--color-border);
   border-left: 3px solid var(--color-accent);
   border-radius: var(--radius-md);
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 .bubble--system {
@@ -59,6 +61,7 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
   background: var(--color-panel);
   border: 1px solid var(--color-border);
   max-width: 90%;
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 .bubble__role {

@@ -113,8 +113,8 @@ async function confirmDelete(session: { id: string; name: string }) {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
   flex-direction: column;
-  border-right: 1px solid var(--color-border);
-  background: #11151d;
+  border-right: 1px solid var(--color-border-strong);
+  background: var(--color-panel);
   padding: 16px 12px;
 }
 
@@ -132,7 +132,8 @@ async function confirmDelete(session: { id: string; name: string }) {
   place-items: center;
   border-radius: var(--radius-md);
   background: var(--color-accent);
-  color: #07120d;
+  box-shadow: var(--ring-light-accent), var(--elevation-1);
+  color: var(--color-on-accent);
   font-size: 0.8125rem;
   font-weight: 800;
 }
@@ -168,6 +169,30 @@ async function confirmDelete(session: { id: string; name: string }) {
   overflow-y: auto;
 }
 
+/* 列表 stagger 入场（Layered Console 签名动效）：前 8 项 35ms 阶梯淡入上移，超出无延迟。
+   尊重 prefers-reduced-motion（variables.css 已把动效时长压到 1ms，此处再显式关掉位移）。 */
+.session-link {
+  animation: session-enter var(--duration-base) var(--ease-out) both;
+}
+.session-link:nth-child(2) { animation-delay: 35ms; }
+.session-link:nth-child(3) { animation-delay: 70ms; }
+.session-link:nth-child(4) { animation-delay: 105ms; }
+.session-link:nth-child(5) { animation-delay: 140ms; }
+.session-link:nth-child(6) { animation-delay: 175ms; }
+.session-link:nth-child(7) { animation-delay: 210ms; }
+.session-link:nth-child(8) { animation-delay: 245ms; }
+
+@keyframes session-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-link {
+    animation: none;
+  }
+}
+
 .session-link {
   display: flex;
   align-items: center;
@@ -177,6 +202,7 @@ async function confirmDelete(session: { id: string; name: string }) {
   color: var(--color-text);
   cursor: pointer;
   font-size: 0.8125rem;
+  transition: background var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out);
 }
 
 .session-link__name {
@@ -199,7 +225,7 @@ async function confirmDelete(session: { id: string; name: string }) {
   line-height: 1;
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s, background 0.12s, color 0.12s;
+  transition: opacity 0.12s, background 0.12s, color 0.12s, transform var(--duration-fast) var(--ease-out);
 }
 
 .session-link:hover .session-link__delete {
@@ -217,9 +243,16 @@ async function confirmDelete(session: { id: string; name: string }) {
 }
 
 .session-link.active {
-  background: var(--color-panel-soft);
+  background: color-mix(in srgb, var(--color-accent) 14%, var(--color-panel-soft));
+  box-shadow: var(--ring-light);
   border-left: 3px solid var(--color-accent);
   padding-left: 8px;
+}
+
+/* active 项的 hover 反馈：.active 与 :hover 同特异性，靠源序 active 在后胜出会吃掉 hover。
+   此复合选择器特异性更高，让活动项仍能感知悬停（比 active 的 14% 更深）。 */
+.session-link.active:hover {
+  background: color-mix(in srgb, var(--color-accent) 22%, var(--color-panel-soft));
 }
 
 .sidebar__empty {
@@ -244,7 +277,8 @@ async function confirmDelete(session: { id: string; name: string }) {
 .new-button {
   border: 0;
   background: var(--color-accent);
-  color: #07120d;
+  box-shadow: var(--ring-light-accent);
+  color: var(--color-on-accent);
   font-weight: 700;
 }
 

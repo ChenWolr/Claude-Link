@@ -48,6 +48,7 @@ const errorLabel = computed(() => {
   border: 1px solid color-mix(in srgb, var(--color-accent-strong) 28%, transparent);
   color: var(--color-text);
   font-size: 12px;
+  box-shadow: var(--ring-light);
 }
 .retry-banner__icon {
   font-size: 13px;
@@ -60,5 +61,9 @@ const errorLabel = computed(() => {
 @keyframes retry-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .retry-banner__icon { animation: none; }
 }
 </style>

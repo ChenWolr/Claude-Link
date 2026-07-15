@@ -247,6 +247,7 @@ function handleCopyClick(event: MouseEvent): void {
   border: 1px solid var(--color-border);
   font-size: 0.8125rem;
   color: var(--color-text-muted);
+  box-shadow: var(--ring-light);
 }
 
 .turn-timer__time {
@@ -299,6 +300,7 @@ function handleCopyClick(event: MouseEvent): void {
   background: var(--color-panel-soft);
   padding: 10px 14px;
   max-width: 752px;
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
 }
 
 .tool-stream__label {

@@ -166,6 +166,7 @@ onUnmounted(() => {
   font-family: inherit;
   text-align: left;
   cursor: pointer;
+  box-shadow: var(--ring-light);
   transition: border-color 0.15s, transform 0.15s, background 0.15s, box-shadow 0.15s, color 0.15s;
 }
 
@@ -197,6 +198,16 @@ onUnmounted(() => {
   background: linear-gradient(180deg, var(--color-accent-strong), color-mix(in srgb, var(--color-accent-strong) 68%, #ffffff));
 }
 
+/* 选中+聚焦同时存在时（单选默认聚焦跟随选中）：--selected 与 --focused 同特异性，
+   --selected 源序在后会覆盖 --focused 的焦点环，导致键盘焦点指示器丢失（WCAG 2.4.7）。
+   此复合规则特异性更高 (0,3,0)，叠加保留：1px 选中环 + 投影 + 2px 焦点环（最外层）。 */
+.interaction-option--selected.interaction-option--focused {
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--color-accent-strong) 50%, transparent),
+    0 8px 18px rgba(0, 0, 0, 0.12),
+    0 0 0 2px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
 .interaction-option--danger.interaction-option--selected {
   border-color: color-mix(in srgb, var(--color-danger) 88%, #ffffff 12%);
   background: var(--interaction-option-danger-bg);
@@ -214,7 +225,7 @@ onUnmounted(() => {
   margin-top: 0;
   place-items: center;
   border: 1px solid color-mix(in srgb, var(--color-accent-strong) 65%, var(--color-border));
-  border-radius: 0.375rem;
+  border-radius: var(--radius-xs);
   background: rgba(0, 0, 0, 0.1);
   color: transparent;
   font-size: 0.8125rem;
@@ -225,7 +236,7 @@ onUnmounted(() => {
 .interaction-option--selected .interaction-option__marker {
   border-color: color-mix(in srgb, var(--color-accent-strong) 90%, #ffffff 10%);
   background: var(--color-accent-strong);
-  color: #05110a;
+  color: var(--color-on-accent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent-strong) 36%, transparent), 0 3px 10px rgba(0, 0, 0, 0.18);
   transform: scale(1.06);
 }

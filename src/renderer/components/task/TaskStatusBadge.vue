@@ -41,7 +41,7 @@ defineProps<{ status: TaskStatus }>();
 .badge--running {
   border: 1px solid var(--color-accent);
   color: var(--color-accent-strong);
-  background: rgba(58, 166, 117, 0.08);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
 }
 
 .badge--completed {

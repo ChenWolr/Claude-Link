@@ -227,7 +227,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 0.125rem;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--elevation-3), var(--ring-light);
 }
 
 .model-item {
@@ -242,7 +242,7 @@ onUnmounted(() => {
   color: var(--color-text);
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.12s ease;
+  transition: background-color 0.12s ease, transform var(--duration-fast) var(--ease-out);
 }
 
 .model-item:hover,
@@ -343,13 +343,15 @@ onUnmounted(() => {
 .model-custom input:focus {
   outline: none;
   border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 18%, transparent);
 }
 
 .model-custom button {
   border: 0;
   border-radius: var(--radius-sm);
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent);
   padding: 0.375rem 0.625rem;
   font-size: 0.75rem;
   font-weight: 600;

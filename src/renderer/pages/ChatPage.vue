@@ -138,8 +138,9 @@ async function handleNewSession() {
   margin: 0.5rem auto var(--chat-bottom-pad-x);
   background: var(--color-panel);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.22);
+  border-radius: var(--radius-lg);
+  /* 浮岛：最强投影 + 顶部高光，真正"浮"在消息流之上（Layered Console 浮层范式）。 */
+  box-shadow: var(--elevation-3), var(--ring-light);
 }
 
 .empty-state {
@@ -174,7 +175,8 @@ async function handleNewSession() {
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent);
   padding: 10px 24px;
   font-weight: 700;
   cursor: pointer;
@@ -195,6 +197,7 @@ async function handleNewSession() {
   border-radius: var(--radius-md);
   padding: 8px 14px;
   font-size: 0.8125rem;
+  box-shadow: var(--ring-light);
 }
 
 .notice span {

@@ -418,7 +418,7 @@ function handleFontScaleChange(e: Event) {
   padding: 0.5rem 1rem;
   font-size: 0.8125rem;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background 0.15s, transform var(--duration-fast) var(--ease-out);
 }
 
 .back-button:hover {
@@ -440,9 +440,9 @@ function handleFontScaleChange(e: Event) {
 }
 
 .banner--ok {
-  border: 1px solid #2a6e4a;
-  background: rgba(58, 166, 117, 0.12);
-  color: #5fd6a0;
+  border: 1px solid var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent-strong);
 }
 
 .banner--warn {
@@ -465,9 +465,9 @@ function handleFontScaleChange(e: Event) {
 }
 
 .toast--success {
-  border: 1px solid #2a6e4a;
-  background: rgba(58, 166, 117, 0.12);
-  color: #5fd6a0;
+  border: 1px solid var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent-strong);
 }
 
 .toast--error {
@@ -487,12 +487,13 @@ function handleFontScaleChange(e: Event) {
   border: 1px solid var(--color-accent);
   border-radius: var(--radius-md);
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
   padding: 0.5rem 0.875rem;
   font-size: 0.8125rem;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
+  box-shadow: var(--ring-light-accent);
 }
 
 .autodetect-info {
@@ -540,7 +541,7 @@ function handleFontScaleChange(e: Event) {
   cursor: pointer;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, border-color 0.15s, transform var(--duration-fast) var(--ease-out);
 }
 
 .tab:hover {
@@ -567,8 +568,8 @@ function handleFontScaleChange(e: Event) {
 }
 
 .save-badge--saved {
-  background: rgba(58, 166, 117, 0.12);
-  color: #5fd6a0;
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent-strong);
 }
 
 .save-badge--error {
@@ -618,9 +619,9 @@ function handleFontScaleChange(e: Event) {
 }
 
 .test-result--ok {
-  border-color: #2a6e4a;
-  background: rgba(58, 166, 117, 0.12);
-  color: #5fd6a0;
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent-strong);
 }
 
 .test-result--fail {
@@ -681,6 +682,7 @@ function handleFontScaleChange(e: Event) {
   background: var(--color-panel);
   padding: 0.625rem 0.875rem;
   font-size: 0.75rem;
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 .storage-info summary {
@@ -720,6 +722,7 @@ function handleFontScaleChange(e: Event) {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel);
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 .section-title {
@@ -781,6 +784,7 @@ input[type='number'] {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
+  box-shadow: var(--ring-light);
 }
 
 
@@ -818,11 +822,12 @@ input[type='number'] {
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
   padding: 0.75rem;
   font-size: 0.9375rem;
   font-weight: 700;
   cursor: pointer;
+  box-shadow: var(--ring-light-accent);
 }
 
 .save-button:disabled {
@@ -836,7 +841,7 @@ input[type='number'] {
 }
 
 .url-validation--ok {
-  color: #5fd6a0;
+  color: var(--color-accent-strong);
 }
 
 .url-validation--warn {
@@ -855,7 +860,7 @@ input[type='number'] {
   justify-self: start;
   border: 1px solid var(--color-accent);
   border-radius: var(--radius-sm);
-  background: rgba(58, 166, 117, 0.08);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
   color: var(--color-accent-strong);
   padding: 0.375rem 0.75rem;
   font-size: 0.75rem;
@@ -872,11 +877,12 @@ input[type='number'] {
   border: 1px solid var(--color-accent);
   border-radius: var(--radius-sm);
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
   padding: 0.375rem 0.75rem;
   font-size: 0.75rem;
   font-weight: 600;
   cursor: pointer;
+  box-shadow: var(--ring-light-accent);
 }
 
 .imported-mark {

@@ -64,7 +64,7 @@ function cancelEdit() {
   align-items: center;
   height: 56px;
   padding: 0 24px;
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border-strong);
   background: var(--color-panel);
 }
 

@@ -22,6 +22,7 @@ const renderedContent = computed(() => renderMarkdown(props.content));
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   border: 1px solid var(--color-border);
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 .stream__role {

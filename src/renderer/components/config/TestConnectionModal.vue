@@ -263,6 +263,7 @@ onUnmounted(() => {
   background: var(--color-panel);
   overflow: hidden;
   margin: auto;
+  box-shadow: var(--elevation-3), var(--ring-light);
 }
 
 .modal__header {
@@ -338,8 +339,9 @@ onUnmounted(() => {
 .btn--primary {
   border-color: var(--color-accent);
   background: var(--color-accent);
-  color: #07120d;
+  color: var(--color-on-accent);
   font-weight: 600;
+  box-shadow: var(--ring-light-accent);
 }
 
 .btn--danger {
@@ -363,13 +365,13 @@ onUnmounted(() => {
 }
 
 .status-bar--success {
-  background: rgba(58, 166, 117, 0.12);
-  color: #5fd6a0;
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent-strong);
 }
 
 .status-bar--fail {
-  background: rgba(239, 100, 97, 0.12);
-  color: #f08887;
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  color: var(--color-danger);
 }
 
 .status-bar--idle {
@@ -398,8 +400,8 @@ onUnmounted(() => {
   font-size: 0.8125rem;
 }
 .config-verdict.ok {
-  background: rgba(58, 166, 117, 0.12);
-  color: #5fd6a0;
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent-strong);
 }
 .config-verdict.warn {
   background: rgba(204, 163, 61, 0.12);
@@ -433,6 +435,7 @@ onUnmounted(() => {
   background: var(--color-panel-soft);
   padding: 0.75rem 0.875rem;
   overflow-y: auto;
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 .stream-area__label {
@@ -473,6 +476,7 @@ onUnmounted(() => {
   border-radius: var(--radius-md);
   background: rgba(239, 100, 97, 0.06);
   padding: 0.75rem 0.875rem;
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 .error-detail__label {
@@ -500,5 +504,10 @@ onUnmounted(() => {
   gap: 0.5rem;
   padding: 0.875rem 1.25rem;
   border-top: 1px solid var(--color-border);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation: none; }
+  .cursor { animation: none; }
 }
 </style>

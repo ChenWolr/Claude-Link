@@ -155,6 +155,7 @@ onUnmounted(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel);
+  box-shadow: var(--elevation-2), var(--ring-light);
   padding: 0.5rem 0;
   display: flex;
   flex-direction: column;
@@ -215,7 +216,8 @@ button {
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-accent);
-  color: #07120d;
+  box-shadow: var(--ring-light-accent);
+  color: var(--color-on-accent);
   padding: 10px 20px;
   font-weight: 700;
 }
