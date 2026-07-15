@@ -56,7 +56,7 @@ async function openSession(session: { id: string }) {
       v-model="searchQuery"
       class="sessions-page__search"
       type="search"
-      placeholder="搜索会话（名称或对话内容）"
+      placeholder="搜索会话"
       @input="onSearchInput"
       @search="handleSearchClear"
     />
