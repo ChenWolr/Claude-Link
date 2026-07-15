@@ -201,14 +201,14 @@ async function handleNewSession() {
 }
 
 .notice span {
-  border: 1px solid rgba(204, 163, 61, 0.5);
-  background: rgba(204, 163, 61, 0.12);
-  color: #e0c36a;
+  border: 1px solid color-mix(in srgb, var(--color-warn) 50%, transparent);
+  background: color-mix(in srgb, var(--color-warn) 12%, transparent);
+  color: var(--color-warn-strong);
 }
 
 .chat-error span {
-  border: 1px solid rgba(239, 100, 97, 0.5);
-  background: rgba(239, 100, 97, 0.12);
-  color: #f08887;
+  border: 1px solid color-mix(in srgb, var(--color-fail) 50%, transparent);
+  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
+  color: var(--color-fail-strong);
 }
 </style>

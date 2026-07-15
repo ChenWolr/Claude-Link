@@ -110,7 +110,7 @@ function fmt(n: number): string {
 .ctx__btn:hover { border-color: var(--color-accent); }
 .ctx__btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .ctx__btn:disabled:hover { border-color: var(--color-border); }
-.ctx__btn--high { border-color: rgba(204, 163, 61, 0.5); }
+.ctx__btn--high { border-color: color-mix(in srgb, var(--color-warn) 50%, transparent); }
 .ctx__ring { width: 1.375rem; height: 1.375rem; display: block; transform: rotate(-90deg); }
 /* 周长 ≈ 2*π*15.915 ≈ 100，dasharray 用百分比即可表示扇形占用 */
 .ctx__ring-bg {
@@ -126,7 +126,7 @@ function fmt(n: number): string {
   stroke-linecap: round;
   transition: stroke-dasharray 0.3s;
 }
-.ctx__btn--high .ctx__ring-fg { stroke: #e0c36a; }
+.ctx__btn--high .ctx__ring-fg { stroke: var(--color-warn-strong); }
 
 .ctx__popover {
   position: absolute;

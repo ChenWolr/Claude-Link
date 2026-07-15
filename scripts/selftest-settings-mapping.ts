@@ -22,6 +22,7 @@ import { normalizeDbTime } from '../src/shared/time';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
+import { THEME_PALETTES, DEFAULT_THEME_PALETTE_ID } from '../src/shared/constants';
 
 let pass = 0;
 let fail = 0;
@@ -1014,6 +1015,90 @@ console.log('\n=== 42) contextStats getter 化（切模型/改设置即时重算
   check('getter 用 modelOverride||model 作 alias', /contextStats\(state\)[\s\S]*?modelOverride\s*\|\|\s*state\.activeSession\.model/.test(ss));
   check('getter 调 resolveContextWindow', /contextStats\(state\)[\s\S]*?resolveContextWindow\(/.test(ss));
   check('getter 读 configStore.contextWindowByAlias', /contextStats\(state\)[\s\S]*?useConfigStore\(\)\.config\.contextWindowByAlias/.test(ss));
+}
+
+console.log('\n=== 43) 浅色主题系统契约（openhanako 真实浅色色板替代深色）===');
+{
+  // —— 色板数量与结构 ——
+  check('色板共 9 套（替代旧 11 套深色）', THEME_PALETTES.length === 9, `实际 ${THEME_PALETTES.length}`);
+  check('全部 isDark=false（纯浅色）', THEME_PALETTES.every((p) => p.isDark === false));
+  check('默认色板 id 为 warm-paper', DEFAULT_THEME_PALETTE_ID === 'warm-paper', `实际 ${DEFAULT_THEME_PALETTE_ID}`);
+  check('第一套色板 id 为 warm-paper', THEME_PALETTES[0]?.id === 'warm-paper');
+  check('无旧深色 default-dark 残留', !THEME_PALETTES.some((p) => p.id === 'default-dark'));
+
+  // —— onAccent 新字段 ——
+  check('每套色板都有 onAccent 字段', THEME_PALETTES.every((p) => typeof p.colors.onAccent === 'string'));
+  check('onAccent 按 accent 亮度选黑/白（中亮度 accent 用深色文字过 AA）', THEME_PALETTES.every((p) => {
+    const midAccent = ['grass-aroma', 'contemplation', 'absolutely'];
+    return midAccent.includes(p.id) ? p.colors.onAccent === '#1A1A1A' : p.colors.onAccent === '#FFFFFF';
+  }));
+
+  // —— 色值原样搬运自 openhanako 源码（抽查 3 套用户指定的）——
+  const wp = THEME_PALETTES.find((p) => p.id === 'warm-paper');
+  check('暖纸 bg=#F8F4ED', wp?.colors.bg === '#F8F4ED', `实际 ${wp?.colors.bg}`);
+  check('暖纸 panel=#F4F0EA', wp?.colors.panel === '#F4F0EA');
+  check('暖纸 panelSoft=#FCFAF5', wp?.colors.panelSoft === '#FCFAF5');
+  check('暖纸 accent=#537D96 钢蓝', wp?.colors.accent === '#537D96');
+  check('暖纸 danger=#8B3A3A', wp?.colors.danger === '#8B3A3A');
+
+  const ga = THEME_PALETTES.find((p) => p.id === 'grass-aroma');
+  check('草香 bg=#F5F8F3', ga?.colors.bg === '#F5F8F3');
+  check('草香 accent=#5BA88C 鼠尾草绿', ga?.colors.accent === '#5BA88C');
+
+  const co = THEME_PALETTES.find((p) => p.id === 'coral');
+  check('珊瑚 bg=#FDF6EC', co?.colors.bg === '#FDF6EC');
+  check('珊瑚 accent=#1A3049 墨蓝', co?.colors.accent === '#1A3049');
+
+  // —— variables.css 浅色化 ——
+  const vars = readRel('src/renderer/assets/styles/variables.css');
+  check('variables.css color-scheme 为 light', /color-scheme:\s*light/.test(vars));
+  check('variables.css 无 color-scheme:dark', !/color-scheme:\s*dark/.test(vars));
+  check('variables.css 默认 bg 为浅色暖纸', /--color-bg:\s*#F8F4ED/i.test(vars));
+  check('影阶 elevation-1 浅色化（alpha<0.15）', /--elevation-1:\s*0 1px 2px rgba\(0,\s*0,\s*0,\s*0\.0[0-9]\)/.test(vars));
+  check('ring-light 改为底部暗边（非白色顶光）', /--ring-light:\s*inset 0 -1px 0/.test(vars));
+
+  // —— App.vue 注入逻辑 ——
+  const app = readRel('src/renderer/App.vue');
+  check('App.vue 注入 onAccent', app.includes("setProperty('--color-on-accent'"));
+  check('App.vue 绑定 colorScheme 到 isDark', /colorScheme\s*=\s*palette\.isDark/.test(app));
+
+  // —— ConfigPage.vue 注入逻辑 ——
+  const cp = readRel('src/renderer/pages/ConfigPage.vue');
+  check('ConfigPage.vue 注入 onAccent', cp.includes("setProperty('--color-on-accent'"));
+  check('ConfigPage.vue 绑定 colorScheme 到 isDark', /colorScheme\s*=\s*palette\.isDark/.test(cp));
+
+  // —— main.css 代码块浅色适配 ——
+  const mc = readRel('src/renderer/assets/styles/main.css');
+  check('main.css 代码块 inset 阴影浅色化（alpha≤0.1）', /inset 0 1px 2px rgba\(0,\s*0,\s*0,\s*0\.0[0-9]\)/.test(mc));
+
+  // —— 状态色 token 化（P1-1）——
+  check('variables.css 有 8 个状态色 token', /--color-warn:/.test(vars) && /--color-warn-strong:/.test(vars) && /--color-fail:/.test(vars) && /--color-fail-strong:/.test(vars) && /--color-info:/.test(vars) && /--color-info-strong:/.test(vars) && /--color-success:/.test(vars) && /--color-success-strong:/.test(vars));
+
+  // —— hljs 语法高亮主题（P0-3）——
+  check('main.css 有 hljs 浅色主题', mc.includes('.hljs-keyword') && mc.includes('.hljs-string') && mc.includes('.hljs-comment'));
+
+  // —— 全局浅色适配（P2-1）——
+  check('main.css 有 ::selection 浅色样式', /::selection/.test(mc));
+  check('main.css 有 ::placeholder 样式', /::placeholder/.test(mc));
+  check('main.css 有 Markdown 链接样式', /\.markdown-body a/.test(mc));
+
+  // —— 交互弹窗凹陷深底清零（P0-2）——
+  const id = readRel('src/renderer/components/chat/InteractionDetails.vue');
+  const ip = readRel('src/renderer/components/chat/InteractionPrompt.vue');
+  const mm = readRel('src/renderer/components/config/ModelMappingInputs.vue');
+  check('InteractionDetails 无 rgba(0,0,0,≥0.14) 背景', !/rgba\(0,\s*0,\s*0,\s*0\.(1[4-9]|[2-9])/.test(id));
+  check('InteractionPrompt 无 rgba(0,0,0,≥0.14) 背景', !/rgba\(0,\s*0,\s*0,\s*0\.(1[4-9]|[2-9])/.test(ip));
+  check('ModelMappingInputs 无 rgba(0,0,0,≥0.14) 背景', !/rgba\(0,\s*0,\s*0,\s*0\.(1[4-9]|[2-9])/.test(mm));
+
+  // —— 复核报告修复（P1-A/B 选中/聚焦态白字 + P2-D 遮罩 + P2-E 历史底 + textMuted 加深）——
+  const iol = readRel('src/renderer/components/chat/InteractionOptionList.vue');
+  check('InteractionOptionList 选中态标题用 text（非白字/on-accent，浅底可达性）', /--selected.*?content strong\s*\{[^}]*color:\s*var\(--color-text\)/.test(iol));
+  check('InteractionOptionList 聚焦态标题用 accent-strong（非 #fff，键盘导航可见）', /--focused.*?content strong\s*\{[^}]*color:\s*var\(--color-accent-strong\)/.test(iol));
+  check('warm-paper textMuted 已加深（#6A6C70 非 #8E9196）', wp?.colors.textMuted === '#6A6C70');
+  const it = readRel('src/renderer/assets/styles/interaction-tokens.css');
+  check('interaction-history-bg 走 token（非 rgba 黑底）', !/rgba\(0,\s*0,\s*0,\s*0\.1[2-9]/.test(it));
+  const tcm = readRel('src/renderer/components/config/TestConnectionModal.vue');
+  check('TestConnectionModal 遮罩走 interaction-overlay-bg token', /background:\s*var\(--interaction-overlay-bg\)/.test(tcm));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

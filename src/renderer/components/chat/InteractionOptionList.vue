@@ -237,7 +237,7 @@ onUnmounted(() => {
   border-color: color-mix(in srgb, var(--color-accent-strong) 90%, #ffffff 10%);
   background: var(--color-accent-strong);
   color: var(--color-on-accent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent-strong) 36%, transparent), 0 3px 10px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent-strong) 36%, transparent), var(--elevation-1);
   transform: scale(1.06);
 }
 
@@ -245,7 +245,7 @@ onUnmounted(() => {
   border-color: color-mix(in srgb, var(--color-danger) 90%, #ffffff 10%);
   background: var(--color-danger);
   color: #fff;
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-danger) 36%, transparent), 0 3px 10px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-danger) 36%, transparent), var(--elevation-1);
 }
 
 .interaction-option:not(.interaction-option--selected) .interaction-option__marker {
@@ -259,15 +259,15 @@ onUnmounted(() => {
 }
 
 .interaction-option--selected .interaction-option__content strong {
-  color: #ffffff;
+  color: var(--color-text);
 }
 
 .interaction-option--selected .interaction-option__content small {
-  color: color-mix(in srgb, var(--color-text-muted) 58%, #ffffff 42%);
+  color: var(--color-text-muted);
 }
 
 .interaction-option--focused .interaction-option__content strong {
-  color: #ffffff;
+  color: var(--color-accent-strong);
 }
 
 .interaction-option--focused .interaction-option__marker {

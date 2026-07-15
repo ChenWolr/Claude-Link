@@ -56,9 +56,9 @@ function onRetry(): void {
   margin: 8px 0 4px;
   padding: 8px 12px;
   border-radius: var(--radius-md);
-  /* 项目无 warn token：用 color-mix 把琥珀色混入主题面板色，随 ThemePalette 自适应。 */
-  background: color-mix(in srgb, #f5a623 12%, var(--color-panel-soft));
-  border: 1px solid color-mix(in srgb, #f5a623 38%, transparent);
+  /* 警告金混入主题面板色，随 ThemePalette 自适应。 */
+  background: color-mix(in srgb, var(--color-warn) 12%, var(--color-panel-soft));
+  border: 1px solid color-mix(in srgb, var(--color-warn) 38%, transparent);
   font-size: 13px;
   box-shadow: var(--ring-light);
 }

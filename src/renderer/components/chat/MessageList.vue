@@ -300,7 +300,7 @@ function handleCopyClick(event: MouseEvent): void {
   background: var(--color-panel-soft);
   padding: 10px 14px;
   max-width: 752px;
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.08);
 }
 
 .tool-stream__label {

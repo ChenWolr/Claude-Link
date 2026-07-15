@@ -236,7 +236,9 @@ function applyTheme(paletteId: string) {
   root.style.setProperty('--color-text-muted', palette.colors.textMuted);
   root.style.setProperty('--color-accent', palette.colors.accent);
   root.style.setProperty('--color-accent-strong', palette.colors.accentStrong);
+  root.style.setProperty('--color-on-accent', palette.colors.onAccent);
   root.style.setProperty('--color-danger', palette.colors.danger);
+  root.style.colorScheme = palette.isDark ? 'dark' : 'light';
 }
 
 function applyFontScale(scale: string) {
@@ -446,9 +448,9 @@ function handleFontScaleChange(e: Event) {
 }
 
 .banner--warn {
-  border: 1px solid #8a6d2b;
-  background: rgba(204, 163, 61, 0.12);
-  color: #e0c36a;
+  border: 1px solid var(--color-warn-strong);
+  background: color-mix(in srgb, var(--color-warn) 12%, transparent);
+  color: var(--color-warn-strong);
 }
 
 .banner--info {
@@ -471,9 +473,9 @@ function handleFontScaleChange(e: Event) {
 }
 
 .toast--error {
-  border: 1px solid #8a3b3b;
-  background: rgba(239, 100, 97, 0.12);
-  color: #f08887;
+  border: 1px solid var(--color-fail-strong);
+  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
+  color: var(--color-fail-strong);
 }
 
 .autodetect-bar {
@@ -573,8 +575,8 @@ function handleFontScaleChange(e: Event) {
 }
 
 .save-badge--error {
-  background: rgba(239, 100, 97, 0.12);
-  color: #f08887;
+  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
+  color: var(--color-fail-strong);
 }
 
 .save-badge__dot {
@@ -625,9 +627,9 @@ function handleFontScaleChange(e: Event) {
 }
 
 .test-result--fail {
-  border-color: #8a3b3b;
-  background: rgba(239, 100, 97, 0.12);
-  color: #f08887;
+  border-color: var(--color-fail-strong);
+  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
+  color: var(--color-fail-strong);
 }
 
 .test-result__msg {
@@ -662,7 +664,7 @@ function handleFontScaleChange(e: Event) {
 
 .clear-btn {
   justify-self: end;
-  border: 1px solid rgba(239, 100, 97, 0.4);
+  border: 1px solid color-mix(in srgb, var(--color-fail) 50%, transparent);
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--color-danger);
@@ -672,7 +674,7 @@ function handleFontScaleChange(e: Event) {
 }
 
 .clear-btn:hover {
-  background: rgba(239, 100, 97, 0.12);
+  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
 }
 
 .storage-info {
@@ -845,7 +847,7 @@ input[type='number'] {
 }
 
 .url-validation--warn {
-  color: #e0c36a;
+  color: var(--color-warn-strong);
 }
 
 .url-validation--error {
