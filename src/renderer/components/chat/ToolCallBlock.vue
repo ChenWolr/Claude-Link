@@ -210,7 +210,7 @@ watch([expanded, resultContent], () => {
 
 /* 工具失败（is_error）：红色 ✗，与成功的 ✓ 形成醒目对比。 */
 .tool-row__fail {
-  color: #f87171;
+  color: var(--color-fail-strong);
   font-weight: 700;
 }
 
@@ -241,7 +241,7 @@ watch([expanded, resultContent], () => {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-word;
-  box-shadow: inset 0 1px 2px rgba(0,0,0,0.4);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.08);
 }
 
 .tool-row__result {

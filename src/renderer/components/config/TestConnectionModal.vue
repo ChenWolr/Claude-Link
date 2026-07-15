@@ -248,7 +248,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.55);
+  background: var(--interaction-overlay-bg);
 }
 
 .modal {
@@ -360,7 +360,7 @@ onUnmounted(() => {
 }
 
 .status-bar--running {
-  background: rgba(83, 125, 150, 0.12);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
   color: var(--color-text);
 }
 
@@ -404,8 +404,8 @@ onUnmounted(() => {
   color: var(--color-accent-strong);
 }
 .config-verdict.warn {
-  background: rgba(204, 163, 61, 0.12);
-  color: #e0c36a;
+  background: color-mix(in srgb, var(--color-warn) 12%, transparent);
+  color: var(--color-warn-strong);
 }
 .config-verdict code {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
@@ -474,7 +474,7 @@ onUnmounted(() => {
 .error-detail {
   border: 1px solid var(--color-danger);
   border-radius: var(--radius-md);
-  background: rgba(239, 100, 97, 0.06);
+  background: color-mix(in srgb, var(--color-fail) 6%, transparent);
   padding: 0.75rem 0.875rem;
   box-shadow: var(--ring-light), var(--elevation-1);
 }

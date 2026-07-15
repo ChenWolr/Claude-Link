@@ -102,7 +102,7 @@ async function copyPreview(): Promise<void> {
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--color-accent-strong) 18%, var(--color-border));
   border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--color-panel-soft) 82%, #000);
+  background: var(--color-panel-soft);
 }
 
 .interaction-preview--compact .interaction-preview__content,
@@ -170,7 +170,7 @@ async function copyPreview(): Promise<void> {
 }
 
 .interaction-preview__content--code {
-  background: rgba(0, 0, 0, 0.14);
+  background: color-mix(in srgb, var(--color-accent) 6%, var(--color-panel-soft));
 }
 
 .interaction-preview__diff {
@@ -188,7 +188,7 @@ async function copyPreview(): Promise<void> {
 .interaction-preview__markdown :deep(code) {
   border-radius: var(--radius-xs);
   padding: 0.0625rem 0.3125rem;
-  background: rgba(0, 0, 0, 0.24);
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft));
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
@@ -225,7 +225,7 @@ async function copyPreview(): Promise<void> {
 
 .interaction-preview__table-wrap th {
   color: var(--color-accent-strong);
-  background: rgba(0, 0, 0, 0.16);
+  background: color-mix(in srgb, var(--color-accent) 6%, var(--color-panel-soft));
 }
 
 .interaction-preview__empty {

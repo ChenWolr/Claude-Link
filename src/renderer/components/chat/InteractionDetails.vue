@@ -35,7 +35,7 @@ const prettyInput = computed(() => {
   overflow: auto;
   padding: 0.625rem;
   border-radius: var(--radius-sm);
-  background: rgba(0, 0, 0, 0.18);
+  background: var(--color-panel-soft);
   color: var(--color-text-muted);
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   white-space: pre-wrap;

@@ -34,8 +34,8 @@ defineProps<{ status: TaskStatus }>();
 }
 
 .badge--queued {
-  border: 1px solid #3b82f6;
-  color: #60a5fa;
+  border: 1px solid var(--color-info-strong);
+  color: var(--color-info-strong);
 }
 
 .badge--running {
@@ -45,13 +45,13 @@ defineProps<{ status: TaskStatus }>();
 }
 
 .badge--completed {
-  border: 1px solid #22c55e;
-  color: #4ade80;
+  border: 1px solid var(--color-success-strong);
+  color: var(--color-success-strong);
 }
 
 .badge--failed {
   border: 1px solid var(--color-danger);
-  color: #f87171;
+  color: var(--color-fail-strong);
 }
 
 .badge--cancelled {

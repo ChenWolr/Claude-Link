@@ -42,6 +42,28 @@ a {
   text-decoration: none;
 }
 
+/* ── 全局浅色适配：选区/占位符/Markdown 链接 ────────────────── */
+::selection {
+  background: color-mix(in srgb, var(--color-accent) 22%, transparent);
+  color: var(--color-text);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-text-muted);
+  opacity: 0.7;
+}
+
+.markdown-body a {
+  color: var(--color-accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.markdown-body a:hover {
+  color: var(--color-accent);
+}
+
 /* ── 键盘焦点环（无障碍 · ui-ux-pro-max §1 focus-states）──────────────────
    :focus-visible 仅键盘聚焦时显形，鼠标点击不出现，兼顾可达性与整洁。 */
 input:focus-visible,
@@ -69,10 +91,10 @@ a:focus-visible,
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   overflow: hidden;
-  /* 主题化深底（取代硬编码 GitHub 色）：body 用最深 bg 产生"凹陷"感，
+  /* 主题化底色：body 用 --color-bg 产生层级感，
      叠加 inset 阴影强化内嵌纵深（Layered Console：光影而非边框承载深度）。 */
   background: var(--color-bg);
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 .markdown-body .code-block__header {
@@ -133,7 +155,20 @@ a:focus-visible,
   word-break: break-word;
 }
 
-/* ── 全局滚动条：细、低调、hover 加深，贴合暗色主题 ─────────── */
+/* ── 全局滚动条：细、低调、hover 加深 ─────────────────── */
+
+/* ── 代码块语法高亮（浅色 hljs 主题，用语义 token 着色，随主题自适应）── */
+.hljs { color: var(--color-text); background: transparent; }
+.hljs-keyword, .hljs-selector-tag, .hljs-type, .hljs-built_in { color: var(--color-accent-strong); font-weight: 600; }
+.hljs-string, .hljs-attr, .hljs-meta-string { color: var(--color-danger); }
+.hljs-comment, .hljs-quote { color: var(--color-text-muted); font-style: italic; }
+.hljs-number, .hljs-literal, .hljs-symbol { color: var(--color-accent); }
+.hljs-title, .hljs-section, .hljs-name { color: var(--color-accent-strong); }
+.hljs-tag { color: var(--color-text-muted); }
+.hljs-attribute { color: var(--color-danger); }
+.hljs-variable, .hljs-template-variable { color: var(--color-text); }
+.hljs-deletion { color: var(--color-danger); }
+.hljs-addition { color: var(--color-accent); }
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

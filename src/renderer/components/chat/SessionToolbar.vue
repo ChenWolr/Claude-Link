@@ -260,13 +260,13 @@ onUnmounted(() => {
 }
 
 .ctl__btn--warn {
-  border-color: rgba(204, 163, 61, 0.5);
-  color: #e0c36a;
+  border-color: color-mix(in srgb, var(--color-warn) 50%, transparent);
+  color: var(--color-warn-strong);
 }
 
 .ctl__btn--danger {
   color: var(--color-danger);
-  border-color: rgba(239, 100, 97, 0.4);
+  border-color: color-mix(in srgb, var(--color-fail) 50%, transparent);
 }
 
 .ctl__btn--danger-solid {

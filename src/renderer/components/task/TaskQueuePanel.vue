@@ -497,9 +497,9 @@ function handleDragReorder() {
 }
 
 .btn--warn {
-  border: 1px solid #eab308;
-  background: rgba(234, 179, 8, 0.1);
-  color: #facc15;
+  border: 1px solid var(--color-warn-strong);
+  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
+  color: var(--color-warn-strong);
 }
 
 .countdown {

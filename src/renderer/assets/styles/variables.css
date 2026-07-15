@@ -1,19 +1,26 @@
 :root {
-  color-scheme: dark;
-  /* ── 色板（Layered Console · 默认深色；运行时由 App.vue 注入 THEME_PALETTES 覆盖）────────
-     深蓝黑底 + 3 级冷调表面台阶 + 透光描边 + 唯一翠绿强调（开发者工具/AI 接口类产品的正解，
-     经 ui-ux-pro-max 验证）。色值与 constants.ts 的 default-dark 保持一致，确保注入前后视觉不跳变。 */
-  --color-bg: #0b0e14;
-  --color-panel: #141925;
-  --color-panel-soft: #1c2333;
-  --color-border: rgba(255, 255, 255, 0.08); /* 透光描边：替代旧实色硬边，"光在边缘"的现代质感 */
-  --color-border-strong: rgba(255, 255, 255, 0.13); /* 大区分隔（侧栏/表头）用，结构更明确 */
-  --color-text: #e8edf6;
-  --color-text-muted: #8a94a6; /* 默认深色：对 bg/panel/panel-soft 约 6.3/5.7/5.1，均过 AA。注意各 THEME_PALETTE 的 textMuted 需独立保证对比，midnight 已调到 ≥4.5 */
-  --color-accent: #3ddc84; /* 唯一锐利信号：翠绿 */
-  --color-accent-strong: #5fe89b;
-  --color-on-accent: #07120d; /* 强调色上的深色文字 */
-  --color-danger: #f0616e;
+  color-scheme: light;
+  /* ── 色板（openhanako warm-paper · 默认浅色；运行时由 App.vue 注入 THEME_PALETTES 覆盖）────
+     和纸白底 + 暖色表面台阶 + 钢蓝强调。色值与 constants.ts 的 warm-paper 一致（openhanako 真实源值）。 */
+  --color-bg: #F8F4ED;
+  --color-panel: #F4F0EA;
+  --color-panel-soft: #FCFAF5;
+  --color-border: rgba(122, 96, 88, 0.18); /* 暖色染边 */
+  --color-border-strong: rgba(0, 0, 0, 0.12); /* 大区分隔（侧栏/表头）用 */
+  --color-text: #3B3D3F;
+  --color-text-muted: #6A6C70; /* warm-paper 默认：对 bg 约 4.8:1 过 AA（openhanako 原值 #8E9196 仅 2.9:1 已加深） */
+  --color-accent: #537D96; /* 钢蓝 */
+  --color-accent-strong: #456A80;
+  --color-on-accent: #FFFFFF; /* 强调色上的白色文字（按钮用，粗体过 AA 大字号） */
+  --color-danger: #8B3A3A;
+  --color-warn: #C9A227;
+  --color-warn-strong: #8A6D2B;
+  --color-fail: #C05656;
+  --color-fail-strong: #8B3A3A;
+  --color-info: #3B7DD8;
+  --color-info-strong: #2563EB;
+  --color-success: #4A9E5E;
+  --color-success-strong: #2E7D46;
 
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, "Liberation Mono", monospace;
@@ -29,17 +36,16 @@
   --radius-lg: 16px; /* 浮层、模态、浮岛 */
   --radius-pill: 999px;
 
-  /* ── 纵深影阶（Layered Console 核心升级：替代"平贴背景台阶 + 1px 硬描边"）─────────────
-     抬升表面叠加 inset 顶部高光（--ring-light），模拟自上而下的环境光，立体感来自光影而非边框。
-     · resting 表面（侧栏/表头/列表项）：背景台阶 + 透光描边，不打投影
-     · raised 表面（气泡/卡片/弹出层）：--elevation-1/2 + 顶部高光
-     · floating 表面（模态/浮岛输入）：--elevation-3（最强）
-     shadow 偏移保留 px（box-shadow 不随字号缩放，视觉影响可忽略，同 interaction-tokens 例外清单）。 */
-  --ring-light: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-  --ring-light-accent: inset 0 1px 0 rgba(255, 255, 255, 0.16); /* 强调色表面的更亮高光 */
-  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.30); /* 卡片贴在面板上 */
-  --elevation-2: 0 6px 18px rgba(0, 0, 0, 0.38); /* 气泡浮起 / 下拉弹出层 */
-  --elevation-3: 0 18px 48px rgba(0, 0, 0, 0.50); /* 模态 / 浮岛输入 */
+  /* ── 纵深影阶（浅色版：柔灰阴影 + 底部细暗边，替代深色的黑阴影+白顶光）─────────────
+     浅色界面里：阴影用低 alpha 黑色（柔灰），顶部白高光无意义故改为底部细暗边。
+     · resting 表面：背景台阶 + 染色描边，不打投影
+     · raised 表面：--elevation-1/2 + 底部暗边
+     · floating 表面：--elevation-3（最强） */
+  --ring-light: inset 0 -1px 0 rgba(0, 0, 0, 0.04); /* 底部细暗边，浅色版的"边缘光" */
+  --ring-light-accent: inset 0 -1px 0 rgba(0, 0, 0, 0.06); /* 强调色表面 */
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.06); /* 卡片贴在面板上 */
+  --elevation-2: 0 4px 12px rgba(0, 0, 0, 0.08); /* 气泡浮起 / 下拉弹出层 */
+  --elevation-3: 0 12px 32px rgba(0, 0, 0, 0.12); /* 模态 / 浮岛输入 */
 
   /* ── 动效（expo-out 进场 + spring 回弹；ui-ux-pro-max 推荐曲线）── */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);

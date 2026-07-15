@@ -824,7 +824,7 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   padding: 0.5625rem 0.625rem;
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--color-panel-soft);
   color: var(--color-text);
   font: inherit;
   outline: none;

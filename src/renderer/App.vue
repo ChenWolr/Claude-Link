@@ -24,7 +24,9 @@ onMounted(async () => {
     root.style.setProperty('--color-text-muted', palette.colors.textMuted);
     root.style.setProperty('--color-accent', palette.colors.accent);
     root.style.setProperty('--color-accent-strong', palette.colors.accentStrong);
+    root.style.setProperty('--color-on-accent', palette.colors.onAccent);
     root.style.setProperty('--color-danger', palette.colors.danger);
+    root.style.colorScheme = palette.isDark ? 'dark' : 'light';
   }
   // 字体大小：根据 config.fontScale 动态设置 --font-size-base，所有 rem 单位随此缩放。
   const fontSize = FONT_SCALE_SIZES[configStore.config.fontScale] ?? '16px';
