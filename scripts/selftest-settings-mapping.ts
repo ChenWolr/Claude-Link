@@ -675,6 +675,9 @@ console.log('\n=== 32b) L6/L7 类型精度：MCP content block + compaction stre
   const uc = readRel('src/renderer/composables/use-chat.ts');
   const sb = readRel('src/main/modules/sdk-backend.ts');
   const sdkInteractions = readRel('src/main/modules/sdk-interactions.ts');
+  const sdkPermissions = readRel('src/main/modules/sdk-permissions.ts');
+  const settingsProjection = readRel('src/main/modules/claude-settings-projection.ts');
+  const settingsWriter = readRel('src/main/modules/settings-writer.ts');
 
   // L6：MCP content block 类型 + processKind 分类 + 双路解析（不再静默丢弃）
   check('cli.ts 含 mcp_tool_use / mcp_tool_result 类型', cli.includes('mcp_tool_use') && cli.includes('mcp_tool_result'));
@@ -690,8 +693,12 @@ console.log('\n=== 32b) L6/L7 类型精度：MCP content block + compaction stre
   check('sdk-backend 转发 status compact_result/requesting', sb.includes("subtype: 'compact_result'") && sb.includes("sdkMsg.status === 'requesting'"));
 
   // L2/L3：PermissionUpdate 类型收紧（不再 unknown[]）
-  check('sdk-interactions 含 PermissionUpdate 类型定义', sdkInteractions.includes('export type PermissionUpdate'));
+  check('sdk-permissions 含 PermissionUpdate 类型定义', sdkPermissions.includes('export type PermissionUpdate'));
+  check('sdk-interactions 复用 PermissionUpdate 类型', sdkInteractions.includes("type PermissionUpdate } from './sdk-permissions'") && sdkInteractions.includes('export type { PermissionUpdate }'));
   check('PermissionResult.updatedPermissions 用 PermissionUpdate[]', sdkInteractions.includes('updatedPermissions?: PermissionUpdate[]'));
+  check('settings projection 保留 advancedJson 顶层设置', settingsProjection.includes('...advanced') && settingsProjection.includes('buildPermissionSettings'));
+  check('settings-writer 复用完整 settings projection', settingsWriter.includes('buildClaudeSettingsProjection(config)'));
+  check('sdk-backend 复用完整 settings projection', sb.includes('buildClaudeSettingsProjection(config)') && sb.includes('...settings'));
   // M3/M4：onElicitation 辅助纯函数
   check('sdk-interactions 含 buildElicitationInteractionPayload（url 模式）', sdkInteractions.includes('buildElicitationInteractionPayload') && sdkInteractions.includes("request.mode === 'url'"));
   check('sdk-interactions 含 elicitationResultFromInteraction（submit→accept / 非 submit→cancel）',

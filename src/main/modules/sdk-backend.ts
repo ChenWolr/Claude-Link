@@ -60,6 +60,14 @@ import {
   type CanUseToolOptions,
   type PermissionResult,
 } from './sdk-interactions';
+import { buildClaudeSettingsProjection } from './claude-settings-projection';
+import {
+  applyPermissionUpdates,
+  coercePermissionUpdatesToSession,
+  isToolSessionAllowed,
+  type PermissionUpdate,
+  type SdkPermissionSettings,
+} from './sdk-permissions';
 import { isSubAgentToolUse } from '../../shared/process-kind';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
 
@@ -122,6 +130,19 @@ interface CachedContextStats {
   windowSize: number;
 }
 const sessionContextStats = new Map<string, CachedContextStats>();
+// allow-session 权限更新是 SDK query 内状态；claude-link 后续消息会新建 query + resume，
+// 因此按 app session 暂存 destination:'session' 的规则，并在下一次 buildSdkOptions 注入 settings.permissions。
+const sessionPermissionUpdates = new Map<string, PermissionUpdate[]>();
+
+function rememberSessionPermissionUpdates(sessionId: string, updates: PermissionUpdate[] | undefined): void {
+  const sessionUpdates = coercePermissionUpdatesToSession(updates);
+  if (!sessionUpdates.length) return;
+  sessionPermissionUpdates.set(sessionId, [...(sessionPermissionUpdates.get(sessionId) ?? []), ...sessionUpdates]);
+}
+
+function applySessionPermissionUpdates(sessionId: string, permissions: SdkPermissionSettings): SdkPermissionSettings {
+  return applyPermissionUpdates(permissions, sessionPermissionUpdates.get(sessionId));
+}
 
 // ── 卡死检测：每会话活动追踪 ────────────────────────────────────────
 // 任何真实上游业务事件（assistant/user/stream_event/tool_progress/system/api_retry）
@@ -376,8 +397,9 @@ export function markSessionDeleted(sessionId: string): void {
     abortEntry(entry);
     removeEntryIfCurrent(sessionId, entry);
   }
-  // 清理上下文用量缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
+  // 清理上下文/权限缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
   sessionContextStats.delete(sessionId);
+  sessionPermissionUpdates.delete(sessionId);
   cleanupSessionStall(sessionId);
   for (const [id, resolve] of pendingPermissionRequests) {
     pendingPermissionRequests.delete(id);
@@ -410,6 +432,13 @@ function recordInteractionResponse(sessionId: string, mainWindow: BrowserWindow,
   });
 }
 
+// 诊断用：列出会话小本本里「裸 allow」的工具名（整工具放行）。定位权限重复弹窗后可移除。
+function bookToolNames(updates: PermissionUpdate[] | undefined): string[] {
+  return (updates ?? [])
+    .filter((u) => u.destination === 'session' && (u.type === 'addRules' || u.type === 'replaceRules') && u.behavior === 'allow')
+    .flatMap((u) => u.rules.filter((r) => !r.ruleContent).map((r) => r.toolName));
+}
+
 function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
   return async (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions): Promise<PermissionResult> => {
     if (!isSessionActive(sessionId)) {
@@ -425,6 +454,18 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
       return { behavior: 'deny', message: '用户取消了选择题交互', toolUseID: options.toolUseID };
     }
 
+    // 本会话已授权的工具直接放行（本地短路）：用户点过「本会话总是允许」后，allow-session 经
+    // withToolSessionAllow 在 sessionPermissionUpdates 写入该工具的裸 allow 规则。CLI 在 headless
+    // (stdio) 模式下不会据此自动跳过后续同工具 prompt，故 claude-link 自行短路，避免同一会话同一工具
+    // 反复弹窗。短路跨 query 生效（sessionPermissionUpdates 按 app session 缓存，新 query 复用）。
+    // 不发 permission_request 系统消息、不入交互历史——用户已授权，无需再留痕。
+    const sessionBook = sessionPermissionUpdates.get(sessionId);
+    const sessionAllowed = isToolSessionAllowed(sessionBook, toolName);
+    logger.info(`[canUseTool] tool=${toolName} shortCircuit=${sessionAllowed} bookTools=[${bookToolNames(sessionBook).join(',')}]`);
+    if (sessionAllowed) {
+      return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID };
+    }
+
     const payload = buildPermissionInteractionPayload(sessionId, toolName, input, options);
 
     forwardEvent(sessionId, mainWindow, {
@@ -437,6 +478,10 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow) {
 
     const response = await requestInteraction(mainWindow, payload, options.signal);
     const result = mapPermissionInteractionResponse(payload, response, input);
+    if (result.behavior === 'allow') {
+      rememberSessionPermissionUpdates(sessionId, result.updatedPermissions);
+    }
+    logger.info(`[canUseTool-resp] tool=${toolName} action=${response.action} selected=${JSON.stringify(response.selectedOptionIds ?? null)} wrotePerm=${result.updatedPermissions?.length ?? 0} bookToolsAfter=[${bookToolNames(sessionPermissionUpdates.get(sessionId)).join(',')}]`);
     recordInteractionResponse(sessionId, mainWindow, payload.title, response.action === 'submit' ? `选择：${response.selectedOptionIds?.join(', ') ?? '提交'}` : '已取消');
     return result;
   };
@@ -641,8 +686,8 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     // 默认 false 只转发 tool_use/tool_result）。开启后子 Agent Tab 能看到子 agent 完整思考/正文，
     // 配合 stream_event 透传的 parent_tool_use_id，思考中也实时可见，不再只有「开启subagent」锚点。
     forwardSubagentText: true,
-    // 启用 adaptive thinking：交给 SDK/模型决定思考预算，避免新模型拒绝固定 budgetTokens。
-    thinking: { type: 'adaptive' },
+    // 启用 adaptive thinking，并显式请求摘要展示；否则新模型默认可能 omitted，思考中无可展示内容。
+    thinking: { type: 'adaptive', display: 'summarized' },
     canUseTool: createPermissionHandler(sessionId, mainWindow),
     onElicitation: createElicitationHandler(sessionId, mainWindow),
     // SDK 只有同时声明 supportedDialogKinds 与 onUserDialog，才会把选择题交互交给宿主 UI。
@@ -667,23 +712,14 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     }
   }
 
-  // 内联 settings（permissions/env）——脱离磁盘（settingSources:[]），由 claude-link 完全主导。
-  // 与 settings-writer.writeClaudeSettings 投影内容一致，但不写盘。
-  const settingsEnv: Record<string, string> = {};
-  try {
-    const adv = JSON.parse(config.advancedJson || '{}');
-    const envBlock =
-      adv && adv.env && typeof adv.env === 'object' && !Array.isArray(adv.env)
-        ? (adv.env as Record<string, unknown>)
-        : null;
-    if (envBlock) {
-      for (const [k, v] of Object.entries(envBlock)) {
-        if (typeof v === 'string') settingsEnv[k] = v;
-      }
-    }
-  } catch {
-    /* advancedJson 非法时忽略 */
-  }
+  // 内联 settings——脱离磁盘（settingSources:[]），由 claude-link 完全主导。
+  // 与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），避免 SDK 路径丢
+  // hooks 等 advancedJson 顶层设置；投影内含 env（apiKey/baseUrl/advancedJson.env 字符串项）。
+  const settings = buildClaudeSettingsProjection(config);
+  // buildClaudeSettingsProjection 返回类型宽化为 Record<string,unknown>，但 env 运行时实为 Record<string,string>；
+  // 取别名供下方按会话别名补注入 MAX_CONTEXT_TOKENS（投影不含该项，需在此按会话补）。
+  const settingsEnv = settings.env as Record<string, string>;
+
   // 按当前模型别名动态注入 CC 的真实窗口 override（CLAUDE_CODE_MAX_CONTEXT_TOKENS）。
   // CC 对第三方/未知模型名（如 glm-5.2，非 claude- 开头）默认回退 200k → 提前压缩丢上下文。
   // 用户在配置页按别名设的窗口在此注入，让 CC 按该窗口处理。仅当用户显式配置该别名时注入
@@ -705,8 +741,8 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     logger.info(`[${sessionId}] 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS=${clamped} (alias=${requestedAlias})`);
   }
   options.settings = {
-    permissions: { defaultMode: config.permissionMode },
-    env: settingsEnv,
+    ...settings,
+    permissions: applySessionPermissionUpdates(sessionId, settings.permissions as SdkPermissionSettings),
   };
 
   return options;
