@@ -729,8 +729,14 @@ function handleDragReorder() {
   padding: 2px 0;
 }
 
-.subagent-group__body :deep(.process-group),
-.subagent-group__body :deep(.message-bubble) {
+.subagent-group__body :deep(.process-fold) {
   max-width: 100%;
+}
+
+.subagent-group__body :deep(.bubble) {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  align-self: stretch;
 }
 </style>
