@@ -7,6 +7,8 @@
   /* 遮罩 */
   --interaction-overlay-bg: rgba(0, 0, 0, 0.58);
   --interaction-z-index: 1200;
+  /* 顶层媒体遮罩（图片灯箱）：集中管理，避免散落裸魔法数；高于交互弹窗 1200。 */
+  --overlay-z-index: 9999;
 
   /* 面板尺寸：宽度用 rem 随字号等比缩放（35rem=560px / 57.5rem=920px，medium 档视觉不变；
      large/small 档宽度随字号同比例放缩，消除「字大容器窄」的失真）。shadow 偏移保留 px
