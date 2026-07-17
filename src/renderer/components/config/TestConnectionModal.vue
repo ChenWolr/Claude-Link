@@ -69,7 +69,22 @@ const statusTone = computed(() => {
   return 'running';
 });
 
-const renderedText = computed(() => renderMarkdown(streamedText.value));
+const renderedText = computed(() => renderMarkdown(streamedText.value, 'static'));
+
+function handleMarkdownCopy(event: MouseEvent): void {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const button = target.closest<HTMLButtonElement>('.code-block__copy');
+  const code = button?.dataset.code;
+  if (!button || !code) return;
+  navigator.clipboard.writeText(code).then(() => {
+    button.textContent = '已复制';
+    window.setTimeout(() => { button.textContent = '复制'; }, 1500);
+  }).catch(() => {
+    button.textContent = '失败';
+    window.setTimeout(() => { button.textContent = '复制'; }, 1500);
+  });
+}
 
 const streamedEchoMatches = computed(() => {
   if (!requestedModel.value || !reportedModel.value) return true;
@@ -205,7 +220,7 @@ onUnmounted(() => {
 
           <div v-if="streamedText || isRunning" class="stream-area">
             <div class="stream-area__label">Claude Code 响应</div>
-            <div class="stream-area__content markdown-body" v-html="renderedText" />
+            <div class="stream-area__content markdown-body" v-html="renderedText" @click="handleMarkdownCopy" />
             <span v-if="phase === 'streaming'" class="cursor">▊</span>
           </div>
 

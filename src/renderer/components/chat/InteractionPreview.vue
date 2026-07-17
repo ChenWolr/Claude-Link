@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { html as diffToHtml } from 'diff2html';
 import hljs from 'highlight.js';
-import MarkdownIt from 'markdown-it';
 import type { InteractionPromptPreview } from '../../../shared/types/ipc';
-import { applyExternalLinkTarget } from '../../utils/markdown';
+import { createPreviewMarkdownRenderer, renderDiffHtml } from '../../utils/markdown';
 
 const props = defineProps<{
   preview?: string | InteractionPromptPreview;
@@ -12,16 +10,7 @@ const props = defineProps<{
 }>();
 
 const copied = ref(false);
-const markdown = new MarkdownIt({
-  html: false,
-  linkify: true,
-  breaks: true,
-  highlight(code, language) {
-    const lang = language && hljs.getLanguage(language) ? language : 'plaintext';
-    return hljs.highlight(code, { language: lang }).value;
-  },
-});
-applyExternalLinkTarget(markdown);
+const markdown = createPreviewMarkdownRenderer();
 
 const normalized = computed<InteractionPromptPreview | null>(() => {
   if (!props.preview) return null;
@@ -49,11 +38,7 @@ const renderedCode = computed(() => {
   const language = preview?.language && hljs.getLanguage(preview.language) ? preview.language : 'plaintext';
   return hljs.highlight(code, { language }).value;
 });
-const renderedDiff = computed(() => diffToHtml(normalized.value?.content ?? '', {
-  drawFileList: false,
-  matching: 'lines',
-  outputFormat: 'line-by-line',
-}));
+const renderedDiff = computed(() => renderDiffHtml(normalized.value?.content ?? '', { matching: 'lines' }));
 
 async function copyPreview(): Promise<void> {
   if (!copyText.value) return;

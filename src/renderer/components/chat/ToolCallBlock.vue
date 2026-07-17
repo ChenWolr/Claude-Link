@@ -3,7 +3,7 @@
 // 默认一行：图标 + 标签 + mono 细节（summarizeToolUse 提取的文件名/命令/查询）+ ✓/✗/···；
 // 点击展开看完整入参与结果（保留 claude-link 的详情能力 + 长结果渐进披露）。
 // 子 Agent（Agent/Task）行带「查看过程 →」锚点，点击定位右侧子Agent Tab。
-import { computed, ref, watch, nextTick } from 'vue';
+import { computed, ref, watch, nextTick, useId } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isDiffContent, renderDiffHtml, renderMarkdown } from '../../utils/markdown';
 import { getProcessKindMeta, summarizeToolUse } from '../../utils/process-kind';
@@ -20,6 +20,7 @@ const props = defineProps<{
 
 const store = useSessionStore();
 const expanded = ref(false);
+const bodyId = useId();
 
 const useParsed = computed<{ name?: string; input?: unknown } | null>(() => {
   if (!props.use) return null;
@@ -45,7 +46,7 @@ function focusSubAgent(): void {
 const resultContent = computed(() => props.result?.content ?? '');
 const isDiff = computed(() => !!props.result && isDiffContent(props.result.content));
 const renderedDiff = computed(() => (isDiff.value ? renderDiffHtml(props.result!.content) : ''));
-const renderedMarkdown = computed(() => (resultContent.value ? renderMarkdown(resultContent.value) : ''));
+const renderedMarkdown = computed(() => (resultContent.value ? renderMarkdown(resultContent.value, 'static') : ''));
 
 const costMsg = computed<Message | null>(() => {
   if (props.use && props.use.costUsd != null) return props.use;
@@ -76,20 +77,22 @@ watch([expanded, resultContent], () => {
 
 <template>
   <div class="tool-row">
-    <div class="tool-row__head" @click="expanded = !expanded">
-      <span class="tool-row__icon">{{ meta.icon }}</span>
-      <span class="tool-row__desc">{{ meta.label }}</span>
-      <span v-if="detail" class="tool-row__detail">{{ detail }}</span>
-      <span v-if="isSubAgent && use?.toolUseId" class="tool-row__anchor" @click.stop="focusSubAgent">查看过程 →</span>
-      <span class="tool-row__status">
-        <span v-if="running && elapsedSeconds != null" class="tool-row__elapsed">⏱{{ elapsedSeconds.toFixed(1) }}s</span>
-        <span v-else-if="running" class="tool-row__dots"><span></span><span></span><span></span></span>
-        <span v-else-if="backgroundRunning" class="tool-row__bg">🔁后台</span>
-        <span v-else-if="result && result.isError" class="tool-row__fail">✗</span>
-        <span v-else-if="result" class="tool-row__done">✓</span>
-      </span>
+    <div class="tool-row__controls">
+      <button type="button" class="tool-row__head" :aria-expanded="expanded" :aria-controls="bodyId" @click="expanded = !expanded">
+        <span class="tool-row__icon">{{ meta.icon }}</span>
+        <span class="tool-row__desc">{{ meta.label }}</span>
+        <span v-if="detail" class="tool-row__detail">{{ detail }}</span>
+        <span class="tool-row__status">
+          <span v-if="running && elapsedSeconds != null" class="tool-row__elapsed">⏱{{ elapsedSeconds.toFixed(1) }}s</span>
+          <span v-else-if="running" class="tool-row__dots"><span></span><span></span><span></span></span>
+          <span v-else-if="backgroundRunning" class="tool-row__bg">🔁后台</span>
+          <span v-else-if="result && result.isError" class="tool-row__fail">✗</span>
+          <span v-else-if="result" class="tool-row__done">✓</span>
+        </span>
+      </button>
+      <button v-if="isSubAgent && use?.toolUseId" type="button" class="tool-row__anchor" @click="focusSubAgent">查看过程 →</button>
     </div>
-    <div v-if="expanded" class="tool-row__body">
+    <div v-show="expanded" :id="bodyId" class="tool-row__body">
       <div v-if="useParsed" class="tool-row__json">
         <pre>{{ JSON.stringify(useParsed.input ?? {}, null, 2) }}</pre>
       </div>
@@ -117,14 +120,26 @@ watch([expanded, resultContent], () => {
   width: 100%;
 }
 
+.tool-row__controls {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+}
+
 .tool-row__head {
   display: flex;
   align-items: center;
+  flex: 1;
   gap: 8px;
   min-width: 0;
   padding: 4px 8px;
+  font: inherit;
   font-size: 0.8125rem;
   color: var(--color-text);
+  text-align: left;
+  background: transparent;
+  border: 0;
   cursor: pointer;
   border-radius: var(--radius-sm);
   transition: background 0.15s;
@@ -160,13 +175,23 @@ watch([expanded, resultContent], () => {
 
 .tool-row__anchor {
   flex-shrink: 0;
+  padding: 4px 0;
+  font: inherit;
   font-size: 0.6875rem;
   color: var(--color-accent-strong);
+  background: transparent;
+  border: 0;
   cursor: pointer;
 }
 
 .tool-row__anchor:hover {
   text-decoration: underline;
+}
+
+.tool-row__head:focus-visible,
+.tool-row__anchor:focus-visible {
+  outline: 2px solid var(--color-accent-strong);
+  outline-offset: 2px;
 }
 
 .tool-row__status {
@@ -302,6 +327,6 @@ watch([expanded, resultContent], () => {
 }
 
 .tool-row__body :deep(.markdown-body p) {
-  margin: 0 0 6px;
+  margin: 0 0 0.375rem;
 }
 </style>
