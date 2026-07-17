@@ -1,26 +1,156 @@
-import MarkdownIt from 'markdown-it';
+import MarkdownIt, { type Token } from 'markdown-it';
 import hljs from 'highlight.js';
 import { html as diff2htmlHtml } from 'diff2html';
+import taskLists from 'markdown-it-task-lists';
+import markdownItKatex from '@traptitech/markdown-it-katex';
+import { isAllowedMarkdownImageUrl } from '../../shared/external-links';
+
+export type MarkdownProfile = 'rich' | 'static';
+
+type MarkdownEnv = { profile?: MarkdownProfile };
 
 const md = new MarkdownIt({
   html: false,
   linkify: true,
   typographer: false,
-  highlight(code: string, language: string): string {
-    if (language === 'diff' || language === 'patch') {
-      return renderDiffBlock(code, language || 'diff');
-    }
-
-    const normalizedLanguage = language && hljs.getLanguage(language) ? language : 'plaintext';
-    const highlighted =
-      normalizedLanguage === 'plaintext'
-        ? escapeHtml(code)
-        : hljs.highlight(code, { language: normalizedLanguage }).value;
-
-    return wrapCodeBlock(highlighted, normalizedLanguage, code);
-  },
 });
+// 任务列表：把 - [ ] / - [x] 渲染成只读勾选框（disabled，仅展示，不可交互勾选）。
+md.use(taskLists);
+// 数学公式：$...$ 行内 / $$...$$ 块级经 KaTeX 渲染（CSS 与字体在 main.ts 引入）。
+md.use(markdownItKatex);
+// 修正 @traptitech/markdown-it-katex 的 math_block：原实现遇到行首 $$ 即使未找到闭合 $$，
+// 仍会把到消息结尾的整段正文吞成一个 math_block（KaTeX 乱码 + 控制台 unicodeTextInMathMode 警告）。
+// 这里覆盖为：未找到闭合 $$ 时 return false，让该行按普通段落渲染（$$ 成为字面文本），保留合法 $$...$$。
+md.block.ruler.at('math_block', (state, start, end, silent) => {
+  const startPos = state.bMarks[start] + state.tShift[start];
+  const startMax = state.eMarks[start];
+  if (startPos + 2 > startMax) return false;
+  if (state.src.slice(startPos, startPos + 2) !== '$$') return false;
+
+  let pos = startPos + 2;
+  let firstLine = state.src.slice(pos, startMax);
+  let lastLine = '';
+  let found = false;
+
+  if (silent) return true;
+  if (firstLine.trim().slice(-2) === '$$') {
+    firstLine = firstLine.trim().slice(0, -2);
+    found = true;
+  }
+
+  let next = start;
+  while (!found) {
+    next++;
+    if (next >= end) break;
+    const linePos = state.bMarks[next] + state.tShift[next];
+    const lineMax = state.eMarks[next];
+    if (linePos < lineMax && state.tShift[next] < state.blkIndent) break;
+    if (state.src.slice(linePos, lineMax).trim().slice(-2) === '$$') {
+      const lastPos = state.src.slice(0, lineMax).lastIndexOf('$$');
+      lastLine = state.src.slice(linePos, lastPos);
+      found = true;
+    }
+  }
+
+  // 关键修正：未找到闭合 $$，回退普通文本，绝不吞正文。
+  if (!found) return false;
+
+  state.line = next + 1;
+  const token = state.push('math_block', 'math', 0);
+  token.block = true;
+  token.content = (firstLine && firstLine.trim() ? firstLine + '\n' : '')
+    + state.getLines(start + 1, next, state.tShift[start], true)
+    + (lastLine && lastLine.trim() ? lastLine : '');
+  token.map = [start, state.line];
+  token.markup = '$$';
+  return true;
+}, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
 applyExternalLinkTarget(md);
+
+export function createPreviewMarkdownRenderer(): MarkdownIt {
+  const previewMarkdown = new MarkdownIt({
+    html: false,
+    linkify: true,
+    breaks: true,
+    highlight(code, language) {
+      const lang = language && hljs.getLanguage(language) ? language : 'plaintext';
+      return hljs.highlight(code, { language: lang }).value;
+    },
+  });
+  applyImageProtocolFilter(previewMarkdown);
+  applyExternalLinkTarget(previewMarkdown);
+  return previewMarkdown;
+}
+
+// 代码围栏由一个 renderer 统一决定最终 DOM，避免 markdown-it 再包一层 <pre><code>。
+md.renderer.rules.fence = (tokens, idx, options, env) => {
+  const token = tokens[idx];
+  const language = token.info.trim().split(/\s+/)[0].toLowerCase();
+  const code = token.content;
+  const profile = (env as MarkdownEnv | undefined)?.profile ?? 'rich';
+
+  if (language === 'diff' || language === 'patch') {
+    return renderDiffBlock(code, language || 'diff');
+  }
+  if (language === 'mermaid' && profile === 'rich') {
+    return renderMermaidBlock(code);
+  }
+
+  const normalizedLanguage = language && hljs.getLanguage(language) ? language : 'plaintext';
+  const highlighted =
+    normalizedLanguage === 'plaintext'
+      ? escapeHtml(code)
+      : hljs.highlight(code, { language: normalizedLanguage }).value;
+  return wrapCodeBlock(highlighted, normalizedLanguage, code);
+};
+
+// 4 空格缩进代码块走 code_block 规则（markdown-it 默认输出裸 <pre><code>），统一复用 .code-block 容器。
+md.renderer.rules.code_block = (tokens, idx) => {
+  const code = tokens[idx].content;
+  return wrapCodeBlock(escapeHtml(code), 'plaintext', code);
+};
+
+// 判断当前 image token 是否位于 link_open/link_close 之间：反向扫描同段 inline children，depth 计数
+// 处理「同段已闭合链接后的图片」与嵌套链接。
+function isImageInsideLink(tokens: Token[], idx: number): boolean {
+  let depth = 0;
+  for (let i = idx - 1; i >= 0; i--) {
+    const t = tokens[i];
+    if (t.type === 'link_close') depth++;
+    else if (t.type === 'link_open') {
+      if (depth === 0) return true;
+      depth--;
+    }
+  }
+  return false;
+}
+
+export function applyImageProtocolFilter(instance: MarkdownIt): void {
+  const defaultImageRule = instance.renderer.rules.image;
+  instance.renderer.rules.image = (tokens, idx, options, env, self) => {
+    const token = tokens[idx];
+    if (!isAllowedMarkdownImageUrl(token.attrGet('src') ?? '')) {
+      return escapeHtml(token.content || token.attrGet('src') || '');
+    }
+    return defaultImageRule
+      ? defaultImageRule(tokens, idx, options, env, self)
+      : self.renderToken(tokens, idx, options);
+  };
+}
+
+applyImageProtocolFilter(md);
+// 图片：md-img 钩子（供灯箱点击放大）+ 懒加载。
+const defaultImageRule = md.renderer.rules.image;
+md.renderer.rules.image = (tokens, idx, options, env, self) => {
+  const token = tokens[idx];
+  const profile = (env as MarkdownEnv | undefined)?.profile ?? 'rich';
+  // 链接内图片不加 md-img：避免 <a> 内嵌按钮化（role=button）+ 点击 preventDefault 劫持链接导航。
+  if (profile === 'rich' && !isImageInsideLink(tokens, idx)) token.attrSet('class', 'md-img');
+  token.attrSet('loading', 'lazy');
+  return defaultImageRule
+    ? defaultImageRule(tokens, idx, options, env, self)
+    : self.renderToken(tokens, idx, options);
+};
 
 export function applyExternalLinkTarget(instance: MarkdownIt): void {
   const defaultLinkOpen = instance.renderer.rules.link_open;
@@ -44,47 +174,66 @@ export function applyExternalLinkTarget(instance: MarkdownIt): void {
   };
 }
 
-export function renderMarkdown(text: string): string {
-  return md.render(text);
+export function renderMarkdown(text: string, profile: MarkdownProfile = 'rich'): string {
+  return md.render(text, { profile } satisfies MarkdownEnv);
 }
 
 export function isDiffContent(text: string): boolean {
   if (!text) return false;
-
-  // 不再只看前 12 行：说明文本可能在 diff 之前，超出窗口就会漏判。
-  // 全文扫描结构标记，要求出现 diff --git 文件头，或至少 2 个结构标记，
-  // 既覆盖“前文 + diff”的场景，又避免普通文本误判。
-  const marker = /^(diff --git |--- |\+\+\+ |@@ )/;
-  let hasFileHeader = false;
-  let markers = 0;
-
-  for (const line of text.split('\n')) {
-    if (!marker.test(line)) continue;
-    if (line.startsWith('diff --git ')) hasFileHeader = true;
-    markers += 1;
-    if (hasFileHeader || markers >= 2) return true;
+  const lines = text.split('\n');
+  if (lines.some((line) => line.startsWith('diff --git '))) return true;
+  let hasOldHeader = false;
+  let hasNewHeader = false;
+  let hasHunk = false;
+  for (const line of lines) {
+    if (line.startsWith('--- ') && line.slice(4).trim()) hasOldHeader = true;
+    if (line.startsWith('+++ ') && line.slice(4).trim()) hasNewHeader = true;
+    if (/^@@\s+[-+\d, ]+@@/.test(line)) hasHunk = true;
   }
-
-  return false;
+  return hasOldHeader && hasNewHeader && hasHunk;
 }
 
-export function renderDiffHtml(diffText: string): string {
+export type DiffHtmlRenderer = typeof diff2htmlHtml;
+
+export function renderDiffHtmlWithRenderer(
+  diffText: string,
+  renderer: DiffHtmlRenderer,
+  options?: { matching?: 'none' | 'lines' },
+): string {
   try {
-    return diff2htmlHtml(diffText, {
+    const rendered = renderer(diffText, {
       drawFileList: false,
       outputFormat: 'line-by-line',
-      matching: 'none',
+      matching: options?.matching ?? 'none',
     });
+    return rendered.includes('d2h-file-wrapper')
+      ? rendered
+      : `<pre><code>${escapeHtml(diffText)}</code></pre>`;
   } catch {
     return `<pre><code>${escapeHtml(diffText)}</code></pre>`;
   }
+}
+
+export function renderDiffHtml(diffText: string, options?: { matching?: 'none' | 'lines' }): string {
+  return renderDiffHtmlWithRenderer(diffText, diff2htmlHtml, options);
 }
 
 function renderDiffBlock(code: string, language: string): string {
   return [
     '<div class="code-block code-block--diff">',
     renderCodeBlockHeader(language, code),
-    `<div class="d2h-wrapper">${renderDiffHtml(code)}</div>`,
+    renderDiffHtml(code),
+    '</div>',
+  ].join('');
+}
+
+// mermaid 占位容器：源码同时放 data-mermaid 属性（供前端读取渲染）与可见文本（渲染前/失败时的回退）。
+function renderMermaidBlock(code: string): string {
+  return [
+    '<div class="mermaid-block">',
+    `<div class="mermaid-block__source" data-mermaid="${escapeAttribute(code)}">`,
+    escapeHtml(code),
+    '</div>',
     '</div>',
   ].join('');
 }
