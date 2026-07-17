@@ -1298,11 +1298,24 @@ function testToolDiffSynthesisContracts(): void {
   assert.ok(html.includes('d2h-file-wrapper'), '合成 diff 须被 diff2html 正常渲染');
   assert.ok(!html.includes('<pre><code>'), '合成 diff 不应回退到裸 <pre><code>');
 
-  // ToolCallBlock 接线契约：须导入并调用 synthesizeToolDiff
+  // 工具结果以 side-by-side（左改前 / 右改后）展示：默认 inline 不得带两栏结构，
+  // sideBySide:true 须产 d2h-file-side-diff 两栏。
+  assert.ok(!html.includes('d2h-file-side-diff'), '默认 inline 不得带两栏结构');
+  const sbs = renderDiffHtml(edit!.diff, { sideBySide: true });
+  assert.ok(sbs.includes('d2h-file-side-diff'), 'sideBySide 须产两栏结构 d2h-file-side-diff');
+  assert.ok(sbs.includes('d2h-file-wrapper'), 'side-by-side 仍须正常渲染（含 d2h-file-wrapper）');
+
+  // ToolCallBlock 接线契约：须导入并调用 synthesizeToolDiff，工具结果 diff 用 side-by-side
   const fs = require('node:fs') as typeof import('node:fs');
   const src = fs.readFileSync(new URL('../src/renderer/components/chat/ToolCallBlock.vue', import.meta.url), 'utf8');
   assert.ok(src.includes('synthesizeToolDiff'), 'ToolCallBlock 须导入 synthesizeToolDiff');
   assert.ok(/synthesizeToolDiff\([^)]*\)/.test(src), 'ToolCallBlock 须调用 synthesizeToolDiff');
+  assert.ok(src.includes('{ sideBySide: true }'), 'ToolCallBlock 工具结果 diff 须用 side-by-side');
+
+  // diff2html 基础 CSS 须引入（两栏布局 + 红绿底色全靠它），且在 main.css 之前以利主题覆盖
+  const main = fs.readFileSync(new URL('../src/renderer/main.ts', import.meta.url), 'utf8');
+  assert.ok(main.includes('diff2html/bundles/css/diff2html.min.css'), 'main.ts 须引入 diff2html 基础 CSS');
+  assert.ok(main.indexOf('diff2html.min.css') < main.indexOf('assets/styles/main.css'), 'diff2html CSS 须在 main.css 之前引入');
 }
 
 testApiUrlBuilder();

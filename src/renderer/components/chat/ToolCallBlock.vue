@@ -52,8 +52,8 @@ const toolDiff = computed(() =>
   useParsed.value ? synthesizeToolDiff(useParsed.value.name ?? '', useParsed.value.input ?? {}) : null,
 );
 const renderedDiff = computed(() => {
-  if (isDiff.value) return renderDiffHtml(props.result!.content);
-  if (toolDiff.value) return renderDiffHtml(toolDiff.value.diff);
+  if (isDiff.value) return renderDiffHtml(props.result!.content, { sideBySide: true });
+  if (toolDiff.value) return renderDiffHtml(toolDiff.value.diff, { sideBySide: true });
   return '';
 });
 const hasDiffView = computed(() => renderedDiff.value !== '');

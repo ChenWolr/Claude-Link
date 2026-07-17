@@ -198,12 +198,12 @@ export type DiffHtmlRenderer = typeof diff2htmlHtml;
 export function renderDiffHtmlWithRenderer(
   diffText: string,
   renderer: DiffHtmlRenderer,
-  options?: { matching?: 'none' | 'lines' },
+  options?: { matching?: 'none' | 'lines'; sideBySide?: boolean },
 ): string {
   try {
     const rendered = renderer(diffText, {
       drawFileList: false,
-      outputFormat: 'line-by-line',
+      outputFormat: options?.sideBySide ? 'side-by-side' : 'line-by-line',
       matching: options?.matching ?? 'none',
     });
     return rendered.includes('d2h-file-wrapper')
