@@ -1,15 +1,15 @@
-// 从 Edit / MultiEdit / Write 的 tool_use 入参合成 unified diff，供 ToolCallBlock 复用
+// 从 Edit / MultiEdit / Write 的 tool_use 入参合成「片段意图」unified diff，供 ToolCallBlock 复用
 // markdown.ts 的 renderDiffHtml 显示。
 //
 // 背景：Claude Code 的 Write/Edit tool_result 只是一句成功提示
-// （"The file X has been updated successfully. (file state is current…)"），
-// 不含 diff；官方 TUI 的 diff 是客户端拍快照对比算出来的，不随 stream-json 下发。
+// （"The file X has been updated successfully. (file state is current…)"），不含 diff；
+// 但 tool_use 入参本身已携带 old_string/new_string（Edit/MultiEdit）或 content（Write），
+// 足以反推一段意图 diff。
 //
-// 两层信息源：
-//  1. tool_use 入参本身（old_string/new_string 或 content）——总能拿到，合成「片段 diff」；
-//  2. 主进程 canUseTool 拍的改前文件快照（fileSnapshot，经专用 IPC 送达，按 toolUseId 关联）——
-//     有则升级为「全文件 diff」：真实行号、真实上下文、Write 新建/覆盖自然区分、MultiEdit 顺序应用
-//     成一张连贯 diff。无快照（历史会话回看 / 读取失败 / 非 SDK 后端）则静默回退片段 diff。
+// 这是「片段意图 diff」：表达本次工具想改什么，不是文件相对 git 的真实净改动。
+// 真实全文件 diff 由右侧「改动」面板按需 git diff 提供（不在此处抓改前快照，避免时序竞态）。
+
+import { TOOL_DIFF_TOOL_NAMES, MAX_DIFF_LINES } from '../../shared/process-kind';
 
 export type ToolDiffKind = 'edit' | 'multiedit' | 'write';
 
@@ -27,16 +27,10 @@ export interface ToolDiffResult {
   truncated: boolean;
 }
 
-export interface ToolDiffOptions {
-  /** 改前文件内容快照；提供则走全文件 diff。新文件传空串。 */
-  fileSnapshot?: { before: string };
-}
-
 interface EditLikeInput {
   file_path?: unknown;
   old_string?: unknown;
   new_string?: unknown;
-  replace_all?: unknown;
 }
 
 interface MultiEditInput {
@@ -52,12 +46,11 @@ interface WriteInput {
 const EDIT_TOOL_NAMES = new Set(['Edit', 'edit']);
 const MULTIEDIT_TOOL_NAMES = new Set(['MultiEdit', 'multiedit', 'multi_edit']);
 const WRITE_TOOL_NAMES = new Set(['Write', 'write']);
+// 入口过滤：与右侧改动面板的触碰集采集共用同一份工具名集合（src/shared/process-kind）。
+const TOOL_DIFF_NAMES = new Set(TOOL_DIFF_TOOL_NAMES);
 
 // 行级 LCS 的 DP 表单元数上限。经前缀/后缀裁剪后只对差异中段跑 DP，此上限仅兜底极端情况。
 const LCS_CELL_CAP = 200_000;
-// 生成的 diff 体（hunk 内容行）最多保留这么多行，超出截断并标 truncated，避免 diff2html 一次性
-// 解析万行级 Write 造成瞬时卡顿。header/spans 按实际保留的体重新计算，保证 unified diff 仍合法。
-const MAX_DIFF_LINES = 2000;
 
 type DiffOp = 'context' | 'add' | 'del';
 interface DiffLine {
@@ -88,15 +81,6 @@ function toLines(text: string): string[] {
   if (text === '') return [];
   const stripped = text.endsWith('\n') ? text.slice(0, -1) : text;
   return stripped.split('\n');
-}
-
-// 模拟 CC Edit/MultiEdit 的字符串替换语义：首次匹配替换（replace_all 时全部）。
-// 空 old_string 防御（CC 不允许，且 ''.includes 恒真会拆字符）→ 视作未找到，调用方据此回退。
-function applyReplace(text: string, oldStr: string, newStr: string, all: boolean): { result: string; found: boolean } {
-  if (oldStr === '' || !text.includes(oldStr)) return { result: text, found: false };
-  if (all) return { result: text.split(oldStr).join(newStr), found: true };
-  const idx = text.indexOf(oldStr);
-  return { result: text.slice(0, idx) + newStr + text.slice(idx + oldStr.length), found: true };
 }
 
 // 行级最长公共子序列 diff。返回带 op 标记的行序列（add=新侧，del=旧侧，context=公共）。
@@ -169,7 +153,7 @@ interface PatchResult {
 // 把 old/new 文本合成单文件的 unified diff（含 @@ hunk、最多 context 行上下文）。
 // 先裁公共前缀/后缀，只对差异中段跑 LCS——大文件小改动时 DP 规模从 O(n*m) 降到差异区域。
 // 生成体超过 MAX_DIFF_LINES 时按 hunk/行截断，spans 按保留体重算，保持 unified diff 合法。
-// 无变更返回 { diff: '', changeCount: 0, truncated: false }。
+// 无变更返回 { diff: '', changeCount: 0, additions: 0, deletions: 0, truncated: false }。
 function buildTwoFilePatch(filePath: string, oldText: string, newText: string, context = 3): PatchResult {
   const a = toLines(oldText);
   const b = toLines(newText);
@@ -256,57 +240,28 @@ function buildTwoFilePatch(filePath: string, oldText: string, newText: string, c
   return { diff: out.join('\n'), changeCount: totalChanges, additions, deletions, truncated: emitted < totalBodyLines };
 }
 
-// 从 Edit/MultiEdit/Write 的 tool_use 入参合成 unified diff。
-// 提供 options.fileSnapshot 则走全文件 diff（真实行号/上下文/新建覆盖区分/MultiEdit 顺序合并），
-// 否则回退片段 diff。返回 null：非这三类工具、入参非对象、或无变化。
-export function synthesizeToolDiff(toolName: string, input: unknown, options: ToolDiffOptions = {}): ToolDiffResult | null {
+// 从 Edit/MultiEdit/Write 的 tool_use 入参合成「片段意图」unified diff。
+// 返回 null：非这三类工具、入参非对象、或无变化（old===new / 空 Write）。
+export function synthesizeToolDiff(toolName: string, input: unknown): ToolDiffResult | null {
   if (input == null || typeof input !== 'object') return null;
   const name = toolName.trim();
+  if (!TOOL_DIFF_NAMES.has(name)) return null;
   const fields = input as EditLikeInput & MultiEditInput & WriteInput;
   const filePath = asString(fields.file_path);
-  const snapshot = options.fileSnapshot;
 
   if (EDIT_TOOL_NAMES.has(name)) {
-    const oldStr = asString(fields.old_string);
-    const newStr = asString(fields.new_string);
-    // 有快照且 old_string 在改前文件命中 → 全文件 diff（真实行号 + 真实上下文）。
-    if (snapshot) {
-      const { result: after, found } = applyReplace(snapshot.before, oldStr, newStr, fields.replace_all === true);
-      if (found) {
-        const patch = buildTwoFilePatch(filePath, snapshot.before, after);
-        if (patch.diff) return { kind: 'edit', filePath, ...patch };
-      }
-    }
-    // 回退：片段 diff（old_string → new_string）。
-    const patch = buildTwoFilePatch(filePath, oldStr, newStr);
+    const patch = buildTwoFilePatch(filePath, asString(fields.old_string), asString(fields.new_string));
     return patch.diff ? { kind: 'edit', filePath, ...patch } : null;
   }
 
   if (MULTIEDIT_TOOL_NAMES.has(name)) {
-    const edits = asEdits(fields.edits);
-    // 有快照 → 顺序应用到改前文件，成一张连贯全文件 diff（消除各 edit 独立建 patch 的语义错配）。
-    if (snapshot) {
-      let current = snapshot.before;
-      let any = false;
-      for (const edit of edits) {
-        const { result, found } = applyReplace(current, edit.old_string, edit.new_string, false);
-        if (found) {
-          current = result;
-          any = true;
-        }
-      }
-      if (any) {
-        const patch = buildTwoFilePatch(filePath, snapshot.before, current);
-        if (patch.diff) return { kind: 'multiedit', filePath, ...patch };
-      }
-    }
-    // 回退：逐条 edit 各成一段 patch 拼接（无文件内偏移无法合并），diff2html 渲染为多张卡片。
+    // 无文件内偏移，逐条 edit 各成一段 patch 拼接，diff2html 渲染为同名文件多张卡片。
     const parts: string[] = [];
     let changeCount = 0;
     let additions = 0;
     let deletions = 0;
     let truncated = false;
-    for (const edit of edits) {
+    for (const edit of asEdits(fields.edits)) {
       const patch = buildTwoFilePatch(filePath, edit.old_string, edit.new_string);
       if (patch.diff) {
         parts.push(patch.diff);
@@ -321,10 +276,8 @@ export function synthesizeToolDiff(toolName: string, input: unknown, options: To
   }
 
   if (WRITE_TOOL_NAMES.has(name)) {
-    const content = asString(fields.content);
-    // 有快照 → 真实 before/after（新建 before='' 自然全增；覆盖则真实 diff）。
-    const before = snapshot ? snapshot.before : '';
-    const patch = buildTwoFilePatch(filePath, before, content);
+    // Write 无旧内容，整段按新增展示（片段意图；真实新建/覆盖区分见右侧「改动」面板的 git diff）。
+    const patch = buildTwoFilePatch(filePath, '', asString(fields.content));
     return patch.diff ? { kind: 'write', filePath, ...patch } : null;
   }
 

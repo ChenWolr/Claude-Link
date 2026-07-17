@@ -26,6 +26,8 @@ import { parseClaudeSettings } from '../src/main/modules/settings-importer';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdownRenderer, isDiffContent, renderDiffHtml, renderDiffHtmlWithRenderer, renderMarkdown } from '../src/renderer/utils/markdown';
 import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';
+import { TOOL_DIFF_TOOL_NAMES } from '../src/shared/process-kind';
+import { parseStatusPorcelainV1Z, parseNumstatZ, normalizeStatus, truncateDiff } from '../src/main/modules/changes-panel';
 import { shouldSkipMermaidErrorRetry, summarizeMermaidAccessibleTitle } from '../src/renderer/directives/enrich-markdown';
 import {
   getNavigationDisposition,
@@ -1293,37 +1295,10 @@ function testToolDiffSynthesisContracts(): void {
   const win = synthesizeToolDiff('Edit', { file_path: 'D:\\dir\\f.txt', old_string: 'a', new_string: 'b' });
   assert.ok(win!.diff.includes('a/D:/dir/f.txt'), '反斜杠路径须归一为正斜杠');
 
-  // ── 快照增强（P0）：有 fileSnapshot 走全文件 diff，无则回退片段 diff ──
-  const fileBefore = ['line 1', 'line 2', 'target', 'line 4', 'line 5'].join('\n');
-  // Edit 有快照：old_string 定位回真实文件 → 整文件 hunk + 真实行号 + 真实上下文
-  const editSnap = synthesizeToolDiff('Edit', { file_path: 'f.txt', old_string: 'target', new_string: 'CHANGED' }, { fileSnapshot: { before: fileBefore } });
-  assert.ok(editSnap!.diff.includes('@@ -1,5 +1,5 @@'), 'Edit 快照须整文件 hunk（5 行，真实行号）');
-  assert.ok(editSnap!.diff.includes(' line 2'), 'Edit 快照须带文件真实上下文');
-  assert.ok(editSnap!.diff.includes('-target') && editSnap!.diff.includes('+CHANGED'));
-  // Edit 无快照：仅片段，hunk 行号相对片段（1,1），无文件上下文
-  const editFrag = synthesizeToolDiff('Edit', { file_path: 'f.txt', old_string: 'target', new_string: 'CHANGED' });
-  assert.ok(/@@ -1,1 \+1,1 @@/.test(editFrag!.diff), 'Edit 无快照须片段 hunk（1 行）');
-  assert.ok(!editFrag!.diff.includes('line 2'), 'Edit 无快照不含文件上下文');
-  // Edit 快照未命中 old_string → 回退片段 diff（陈旧快照不破坏体验）
-  const editMiss = synthesizeToolDiff('Edit', { file_path: 'f.txt', old_string: 'NOPE', new_string: 'X' }, { fileSnapshot: { before: fileBefore } });
-  assert.ok(editMiss && /@@ -1,1 \+1,1 @@/.test(editMiss.diff), '快照未命中 old_string 须回退片段');
-  // Write 新文件（before=''）vs 覆盖（before 非空）：自然区分
-  const wNew = synthesizeToolDiff('Write', { file_path: 'n.txt', content: 'hi\n' }, { fileSnapshot: { before: '' } });
-  assert.ok(wNew!.diff.includes('-0,0'), 'Write 新文件快照须 -0,0 全增');
-  const wOver = synthesizeToolDiff('Write', { file_path: 'o.txt', content: 'NEW\n' }, { fileSnapshot: { before: 'OLD\n' } });
-  assert.ok(wOver!.diff.includes('-OLD') && wOver!.diff.includes('+NEW'), 'Write 覆盖快照须真实 before/after');
-  assert.ok(!wOver!.diff.includes('-0,0'), 'Write 覆盖不得是 -0,0');
-  // MultiEdit 有快照：顺序应用成一张连贯 diff（单文件头，体现净效果 A→C）
-  const meSnap = synthesizeToolDiff('MultiEdit', {
-    file_path: 'm.txt',
-    edits: [{ old_string: 'A', new_string: 'B' }, { old_string: 'B', new_string: 'C' }],
-  }, { fileSnapshot: { before: 'A\n' } });
-  assert.equal((meSnap!.diff.match(/^--- a\/m\.txt$/gm) ?? []).length, 1, 'MultiEdit 快照须合并成单文件头');
-  assert.ok(meSnap!.diff.includes('-A') && meSnap!.diff.includes('+C') && !meSnap!.diff.includes('+B'), 'MultiEdit 快照须体现顺序应用净效果 A→C');
-  // changeCount 字段（变更行数 -/+ 合计）
-  assert.equal(editSnap!.changeCount, 2, 'changeCount 须为变更行数');
-  assert.equal(editSnap!.additions, 1, 'additions 须为新增行数');
-  assert.equal(editSnap!.deletions, 1, 'deletions 须为删除行数');
+  // 片段 diff 的计数字段（变更行数 -/+ 合计；含截断部分，供折叠态 +/− 徽标）。
+  assert.equal(edit!.changeCount, 2, 'changeCount 须为变更行数');
+  assert.equal(edit!.additions, 1, 'additions 须为新增行数');
+  assert.equal(edit!.deletions, 1, 'deletions 须为删除行数');
 
   // ── 截断（P3）：超 MAX_DIFF_LINES 标 truncated，changeCount 仍计全量，diff 仍可渲染 ──
   const huge = Array.from({ length: 3000 }, (_, i) => `row ${i}`).join('\n');
@@ -1369,41 +1344,93 @@ function testToolDiffSynthesisContracts(): void {
   assert.ok(/var\(--color-danger\)/.test(css) && /var\(--color-accent\)/.test(css), '+/- 底色须接入 danger/accent token');
 }
 
-// P0 文件快照通道：主进程 canUseTool 拍改前文件快照 → 专用 IPC → 渲染层 store → ToolCallBlock
-// 消费。锁定整条链路的接线（运行时正确性由内核契约 + 端到端目视覆盖）。
-function testToolFileSnapshotPlumbing(): void {
+// 会话改动面板：纯解析函数 + 共享工具名集合契约（git 运行时行为靠端到端目视覆盖）。
+function testChangesPanelContracts(): void {
+  // status --porcelain=v1 -z 解析：普通改动 / 未跟踪 / 含空格路径 / 重命名（含第二段 oldPath）
+  const status = parseStatusPorcelainV1Z('M  src/a.ts\0?? new.txt\0A  my file.ts\0R  renamed.ts\0old.ts\0');
+  assert.equal(status.length, 4, '须解析出 4 条 status');
+  assert.equal(normalizeStatus(status[0].xy), 'M');
+  assert.equal(status[0].path, 'src/a.ts');
+  assert.equal(normalizeStatus(status[1].xy), '??');
+  assert.equal(status[1].path, 'new.txt');
+  assert.equal(status[2].path, 'my file.ts', '含空格路径须完整保留');
+  assert.equal(normalizeStatus(status[3].xy), 'R');
+  assert.equal(status[3].path, 'renamed.ts');
+  assert.equal(status[3].oldPath, 'old.ts', '重命名须读出第二段 oldPath');
+
+  // numstat -z 解析：正常计数 + 二进制（-\t-）
+  const numstat = parseNumstatZ('5\t3\ta.ts\0-\t-\tb.bin\0');
+  assert.equal(numstat.get('a.ts')?.additions, 5);
+  assert.equal(numstat.get('a.ts')?.deletions, 3);
+  assert.equal(numstat.get('a.ts')?.binary, false);
+  assert.equal(numstat.get('b.bin')?.binary, true, '-\t- 须判二进制');
+
+  // 截断：超 maxLines 标 truncated 且输出行数受限
+  const big = Array.from({ length: 100 }, (_, i) => `line ${i}`).join('\n');
+  const t = truncateDiff(big, 10);
+  assert.equal(t.truncated, true, '超限须截断');
+  assert.ok(t.diff.split('\n').length <= 10, '截断后行数不超 maxLines');
+  assert.equal(truncateDiff('short', 10).truncated, false, '未超限不得截断');
+  // 截断须在 hunk 边界（@@），不在 hunk 中段产残缺 span：两 hunk 切到 6 行保留首个完整 hunk
+  const twoHunks = '--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-old\n+new\n@@ -5,1 +5,1 @@\n-old2\n+new2\n';
+  const t2 = truncateDiff(twoHunks, 6);
+  assert.equal(t2.truncated, true, '两 hunk 超限须截断');
+  assert.ok(t2.diff.includes('+new') && !t2.diff.includes('+new2'), '截断须在 hunk 边界保留首个完整 hunk');
+
+  // 共享工具名集合（触碰集采集与片段 diff 入口过滤共用）
+  assert.deepEqual(
+    [...TOOL_DIFF_TOOL_NAMES].sort(),
+    ['Edit', 'MultiEdit', 'Write', 'edit', 'multi_edit', 'multiedit', 'write'].sort(),
+    'TOOL_DIFF_TOOL_NAMES 须覆盖两种大小写与 MultiEdit 别名',
+  );
+}
+
+function testChangesPanelPlumbing(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const read = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
 
   const ipc = read('../src/shared/types/ipc.ts');
-  assert.ok(ipc.includes("TOOL_FILE_SNAPSHOT: 'tool:fileSnapshot'"), '须定义 TOOL_FILE_SNAPSHOT 专用通道');
-  assert.ok(ipc.includes('export interface ToolFileSnapshotPayload'), '须定义 ToolFileSnapshotPayload 载荷');
+  assert.ok(ipc.includes("CHANGES_LIST: 'changes:list'"), '须定义 CHANGES_LIST 通道');
+  assert.ok(ipc.includes("CHANGES_DIFF: 'changes:diff'"), '须定义 CHANGES_DIFF 通道');
+  assert.ok(!ipc.includes('TOOL_FILE_SNAPSHOT'), '快照通道须已退役');
+
+  const handlers = read('../src/main/ipc-handlers.ts');
+  assert.ok(handlers.includes('IPC_CHANNELS.CHANGES_LIST') && handlers.includes('listChanges'), '须注册 CHANGES_LIST handler');
+  assert.ok(handlers.includes('IPC_CHANNELS.CHANGES_DIFF') && handlers.includes('getChangeDiff'), '须注册 CHANGES_DIFF handler');
 
   const preload = read('../src/preload/api.ts');
-  assert.ok(preload.includes('onToolFileSnapshot'), 'preload 须暴露 onToolFileSnapshot');
-  assert.ok(preload.includes('removeToolFileSnapshotListener'), 'preload 须暴露 removeToolFileSnapshotListener');
-  assert.ok(preload.includes('IPC_CHANNELS.TOOL_FILE_SNAPSHOT'), 'preload 须绑专用通道');
+  assert.ok(preload.includes('listChanges') && preload.includes('getChangeDiff'), 'preload 须暴露 listChanges/getChangeDiff');
+  assert.ok(!preload.includes('onToolFileSnapshot'), 'preload 快照方法须已移除');
 
-  const backend = read('../src/main/modules/sdk-backend.ts');
-  assert.ok(backend.includes('function maybeForwardFileSnapshot'), 'sdk-backend 须有 maybeForwardFileSnapshot');
-  assert.ok(backend.includes('IPC_CHANNELS.TOOL_FILE_SNAPSHOT'), '快照须走专用通道发送（不经 forwardEvent/不落库）');
-  assert.ok(backend.includes("'ENOENT'"), 'ENOENT 须视作新建文件（before 空串）');
-  assert.ok(backend.includes('FILE_SNAPSHOT_MAX_BYTES'), '须有文件大小上限保护主进程内存');
-  assert.ok(/function\s+createPermissionHandler\([^)]*workingDir/.test(backend), 'createPermissionHandler 须接收 workingDir');
-  assert.ok(/canUseTool:\s*createPermissionHandler\([^)]*workingDir/.test(backend), 'canUseTool 接线须把 workingDir 传入');
+  const panel = read('../src/main/modules/changes-panel.ts');
+  assert.ok(panel.includes('GIT_TERMINAL_PROMPT') && panel.includes('timeout'), 'git 调用须禁用凭证交互并带超时');
+  assert.ok(panel.includes('touchedPaths'), 'listChanges 须接收本会话 touchedPaths 标注编辑文件');
+  assert.ok(panel.includes("'--', '/dev/null'"), '未跟踪 diff 须用 -- 终止选项防路径注入');
+  // 二进制检测须锚行首（^Binary files），防文本 diff 内容行含该子串被误判二进制
+  assert.ok(panel.includes('^(?:Binary files'), '二进制检测须锚行首，不得用裸子串匹配');
+  // listChanges 须对 git 超时/maxBuffer 失败降级为 ok:false（不抛出），让面板显可读错误而非静默
+  assert.ok(panel.includes('扫描改动失败'), 'listChanges 须对 git 失败返回 ok:false 带可读文案');
+  // F：listChanges 的 status/numstat 须统一带 --no-pager（与 getChangeDiff 一致，防 pager 介入）
+  assert.ok(/'--no-pager',\s*'status'/.test(panel), 'listChanges 的 status 须带 --no-pager');
+  assert.ok(/'--no-pager',\s*'diff',\s*'HEAD',\s*'--numstat'/.test(panel), 'listChanges 的 numstat 须带 --no-pager');
+  // G：MAX_DIFF_LINES 须为 shared 单一定义，main 与 renderer 都从 shared 取，不得本地 const 再定义
+  assert.ok(panel.includes('MAX_DIFF_LINES') && panel.includes("from '../../shared/process-kind'"), 'changes-panel 须从 shared 取 MAX_DIFF_LINES');
+  const toolDiff = read('../src/renderer/utils/tool-diff.ts');
+  assert.ok(toolDiff.includes('MAX_DIFF_LINES') && toolDiff.includes("from '../../shared/process-kind'"), 'tool-diff 须从 shared 取 MAX_DIFF_LINES');
+  assert.ok(!/\bconst\s+MAX_DIFF_LINES\b/.test(panel) && !/\bconst\s+MAX_DIFF_LINES\b/.test(toolDiff), 'MAX_DIFF_LINES 不得本地 const 再定义，须统一从 shared 取');
 
-  const comp = read('../src/renderer/composables/use-tool-file-snapshots.ts');
-  assert.ok(comp.includes('export function bindToolFileSnapshots'), '快照 composable 须导出 bindToolFileSnapshots');
-  assert.ok(comp.includes('getSnapshot'), '快照 composable 须提供 getSnapshot');
+  const store = read('../src/renderer/stores/session-store.ts');
+  assert.ok(store.includes("'changes'"), "rightTab 须含 'changes'");
 
-  const app = read('../src/renderer/App.vue');
-  assert.ok(app.includes('bindToolFileSnapshots()'), 'App.vue 启动须注册快照监听（早于工具执行）');
+  const taskPanel = read('../src/renderer/components/task/TaskQueuePanel.vue');
+  assert.ok(taskPanel.includes("rightTab === 'changes'") && taskPanel.includes('<ChangesPanel'), '右侧任务栏须接入 改动 Tab 与 ChangesPanel');
 
-  const tool = read('../src/renderer/components/chat/ToolCallBlock.vue');
-  assert.ok(tool.includes('useToolFileSnapshots'), 'ToolCallBlock 须消费快照 store');
-  assert.ok(tool.includes('fileSnapshot: getSnapshot'), 'ToolCallBlock 须把快照传给 synthesizeToolDiff');
+  // 快照链路须已彻底退役（文件已删除）
+  assert.ok(!fs.existsSync(new URL('../src/main/modules/file-snapshot.ts', import.meta.url)), 'file-snapshot.ts 须已删除');
+  assert.ok(!fs.existsSync(new URL('../src/renderer/composables/use-tool-file-snapshots.ts', import.meta.url)), 'use-tool-file-snapshots.ts 须已删除');
 }
 
+async function main(): Promise<void> {
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testClaudeSettingsProjectionPreservesAdvancedSettings();
@@ -1443,7 +1470,8 @@ testMarkdownBlockMathDoesNotSwallowUnclosed();
 testImageLightboxAccessibilityWiring();
 testDiffContentDetectionContracts();
 testToolDiffSynthesisContracts();
-testToolFileSnapshotPlumbing();
+testChangesPanelContracts();
+testChangesPanelPlumbing();
 testReducedMotionStopsInfiniteAnimations();
 testMermaidLifecycleGuards();
 testTestConnectionMarkdownCopyWiring();
@@ -1457,3 +1485,9 @@ testMermaidDeadPreRuleRemoved();
 testTestConnectionCopyFailureResets();
 testImageLightboxZIndexTokenized();
 testChatBlockKeyboardAccessibility();
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

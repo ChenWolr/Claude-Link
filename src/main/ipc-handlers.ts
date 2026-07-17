@@ -31,6 +31,7 @@ import * as sessionRepo from './database/repositories/session-repo';
 import * as messageRepo from './database/repositories/message-repo';
 import * as taskRepo from './database/repositories/task-repo';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
+import { listChanges, getChangeDiff } from './modules/changes-panel';
 
 let mainWindow: BrowserWindow;
 
@@ -40,6 +41,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // CLI
   ipcMain.handle(IPC_CHANNELS.CLI_DETECT, async () => detectCli(true));
   ipcMain.handle(IPC_CHANNELS.CLI_GET_STATUS, async () => getCachedCliStatus() ?? detectCli());
+
+  // 会话改动面板：列出 workingDir 的 git 改动 + 按需取单文件 diff（不抓快照，按需 git diff）。
+  ipcMain.handle(IPC_CHANNELS.CHANGES_LIST, async (_event, workingDir: string | null, touchedPaths: string[]) =>
+    listChanges(workingDir, touchedPaths));
+  ipcMain.handle(IPC_CHANNELS.CHANGES_DIFF, async (_event, workingDir: string | null, path: string) =>
+    getChangeDiff(workingDir, path));
 
   // Config
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfig());

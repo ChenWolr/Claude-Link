@@ -38,9 +38,9 @@ export const IPC_CHANNELS = {
   INTERACTION_HISTORY_GET: 'interaction:history:get',
   INTERACTION_HISTORY_RECORD: 'interaction:history:record',
   CONTEXT_UPDATE: 'context:update',
-  // 改前文件快照：主进程 canUseTool 拍快照后直发渲染层（不经 forwardEvent，不落库），
-  // 按 toolUseId 关联到 ToolCallBlock，让 Edit/Write/MultiEdit 渲染真实全文件 diff。
-  TOOL_FILE_SNAPSHOT: 'tool:fileSnapshot',
+  // 会话改动面板：列出 workingDir 的 git 改动 + 按需取单文件 diff（不抓快照，按需 git diff）。
+  CHANGES_LIST: 'changes:list',
+  CHANGES_DIFF: 'changes:diff',
   TASK_ADD: 'task:add',
   TASK_REMOVE: 'task:remove',
   TASK_GET_ALL: 'task:getAll',
@@ -61,14 +61,6 @@ export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 export interface ChatEventPayload {
   sessionId: string;
   event: CliEvent;
-}
-
-// 改前文件快照载荷。before 为改前文件内容（新文件为空串）；读取失败时不发送，
-// 渲染层无快照则回退片段 diff（历史会话回看 / 非 SDK 后端同样回退）。
-export interface ToolFileSnapshotPayload {
-  sessionId: string;
-  toolUseId: string;
-  before: string;
 }
 
 export interface PermissionOption {
