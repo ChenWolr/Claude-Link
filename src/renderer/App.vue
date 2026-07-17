@@ -2,6 +2,7 @@
 import { onMounted, onBeforeUnmount } from 'vue';
 import AppLayout from './components/layout/AppLayout.vue';
 import InteractionPrompt from './components/chat/InteractionPrompt.vue';
+import ImageLightbox from './components/chat/ImageLightbox.vue';
 import { useConfigStore } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useChat } from './composables/use-chat';
@@ -47,5 +48,6 @@ onBeforeUnmount(() => {
   <AppLayout>
     <router-view />
     <InteractionPrompt />
+    <ImageLightbox />
   </AppLayout>
 </template>
