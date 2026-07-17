@@ -1293,6 +1293,43 @@ function testToolDiffSynthesisContracts(): void {
   const win = synthesizeToolDiff('Edit', { file_path: 'D:\\dir\\f.txt', old_string: 'a', new_string: 'b' });
   assert.ok(win!.diff.includes('a/D:/dir/f.txt'), '反斜杠路径须归一为正斜杠');
 
+  // ── 快照增强（P0）：有 fileSnapshot 走全文件 diff，无则回退片段 diff ──
+  const fileBefore = ['line 1', 'line 2', 'target', 'line 4', 'line 5'].join('\n');
+  // Edit 有快照：old_string 定位回真实文件 → 整文件 hunk + 真实行号 + 真实上下文
+  const editSnap = synthesizeToolDiff('Edit', { file_path: 'f.txt', old_string: 'target', new_string: 'CHANGED' }, { fileSnapshot: { before: fileBefore } });
+  assert.ok(editSnap!.diff.includes('@@ -1,5 +1,5 @@'), 'Edit 快照须整文件 hunk（5 行，真实行号）');
+  assert.ok(editSnap!.diff.includes(' line 2'), 'Edit 快照须带文件真实上下文');
+  assert.ok(editSnap!.diff.includes('-target') && editSnap!.diff.includes('+CHANGED'));
+  // Edit 无快照：仅片段，hunk 行号相对片段（1,1），无文件上下文
+  const editFrag = synthesizeToolDiff('Edit', { file_path: 'f.txt', old_string: 'target', new_string: 'CHANGED' });
+  assert.ok(/@@ -1,1 \+1,1 @@/.test(editFrag!.diff), 'Edit 无快照须片段 hunk（1 行）');
+  assert.ok(!editFrag!.diff.includes('line 2'), 'Edit 无快照不含文件上下文');
+  // Edit 快照未命中 old_string → 回退片段 diff（陈旧快照不破坏体验）
+  const editMiss = synthesizeToolDiff('Edit', { file_path: 'f.txt', old_string: 'NOPE', new_string: 'X' }, { fileSnapshot: { before: fileBefore } });
+  assert.ok(editMiss && /@@ -1,1 \+1,1 @@/.test(editMiss.diff), '快照未命中 old_string 须回退片段');
+  // Write 新文件（before=''）vs 覆盖（before 非空）：自然区分
+  const wNew = synthesizeToolDiff('Write', { file_path: 'n.txt', content: 'hi\n' }, { fileSnapshot: { before: '' } });
+  assert.ok(wNew!.diff.includes('-0,0'), 'Write 新文件快照须 -0,0 全增');
+  const wOver = synthesizeToolDiff('Write', { file_path: 'o.txt', content: 'NEW\n' }, { fileSnapshot: { before: 'OLD\n' } });
+  assert.ok(wOver!.diff.includes('-OLD') && wOver!.diff.includes('+NEW'), 'Write 覆盖快照须真实 before/after');
+  assert.ok(!wOver!.diff.includes('-0,0'), 'Write 覆盖不得是 -0,0');
+  // MultiEdit 有快照：顺序应用成一张连贯 diff（单文件头，体现净效果 A→C）
+  const meSnap = synthesizeToolDiff('MultiEdit', {
+    file_path: 'm.txt',
+    edits: [{ old_string: 'A', new_string: 'B' }, { old_string: 'B', new_string: 'C' }],
+  }, { fileSnapshot: { before: 'A\n' } });
+  assert.equal((meSnap!.diff.match(/^--- a\/m\.txt$/gm) ?? []).length, 1, 'MultiEdit 快照须合并成单文件头');
+  assert.ok(meSnap!.diff.includes('-A') && meSnap!.diff.includes('+C') && !meSnap!.diff.includes('+B'), 'MultiEdit 快照须体现顺序应用净效果 A→C');
+  // changeCount 字段（变更行数 -/+ 合计）
+  assert.equal(editSnap!.changeCount, 2, 'changeCount 须为变更行数');
+
+  // ── 截断（P3）：超 MAX_DIFF_LINES 标 truncated，changeCount 仍计全量，diff 仍可渲染 ──
+  const huge = Array.from({ length: 3000 }, (_, i) => `row ${i}`).join('\n');
+  const trunc = synthesizeToolDiff('Write', { file_path: 'h.txt', content: huge });
+  assert.equal(trunc!.truncated, true, '巨型 Write 须标 truncated');
+  assert.equal(trunc!.changeCount, 3000, '截断后 changeCount 仍计全量');
+  assert.ok(trunc!.diff.split('\n').length <= 2010, '截断后 diff 行数须受限（≤2000 体 + 文件头）');
+
   // round-trip：合成 diff 经 renderDiffHtml 须被 diff2html 正常渲染，不回退裸源码
   const html = renderDiffHtml(edit!.diff);
   assert.ok(html.includes('d2h-file-wrapper'), '合成 diff 须被 diff2html 正常渲染');
