@@ -133,6 +133,16 @@ a:focus-visible,
 
 .markdown-body .d2h-wrapper {
   overflow-x: auto;
+  /* diff2html 读这些变量给 +/- 行上底色/边框（其规则写死浅色 #fee8e9/#dfd，定义在 :root）。
+     在此用主题 token 覆盖：级联就近胜出（.markdown-body .d2h-wrapper 比 :root 更近），与 CSS
+     加载顺序无关。当前 9 套主题全浅色仍兼容；未来加深色主题时 +/- 自动跟随 token，不成刺眼亮补丁。
+     增=accent、删=danger，与折叠态 +/− 徽标配色一致。 */
+  --d2h-del-bg-color: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  --d2h-ins-bg-color: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  --d2h-del-border-color: color-mix(in srgb, var(--color-danger) 30%, transparent);
+  --d2h-ins-border-color: color-mix(in srgb, var(--color-accent) 32%, transparent);
+  --d2h-change-del-color: color-mix(in srgb, var(--color-danger) 14%, transparent);
+  --d2h-change-ins-color: color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
 
 .markdown-body .d2h-file-wrapper {

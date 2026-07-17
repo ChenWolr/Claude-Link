@@ -1359,10 +1359,14 @@ function testToolDiffSynthesisContracts(): void {
   // §3.3：截断提示
   assert.ok(src.includes('tool-row__truncated') && src.includes('toolDiff?.truncated'), '截断须有提示');
 
-  // diff2html 基础 CSS 须引入（两栏布局 + 红绿底色全靠它），且在 main.css 之前以利主题覆盖
+  // diff2html 基础 CSS 须引入（两栏布局 + +/- 底色全靠它）；main.css 用更高特异性覆盖主题化部分
   const main = fs.readFileSync(new URL('../src/renderer/main.ts', import.meta.url), 'utf8');
   assert.ok(main.includes('diff2html/bundles/css/diff2html.min.css'), 'main.ts 须引入 diff2html 基础 CSS');
-  assert.ok(main.indexOf('diff2html.min.css') < main.indexOf('assets/styles/main.css'), 'diff2html CSS 须在 main.css 之前引入');
+  // §3.4：+/- 行底色须 token 化（覆盖 diff2html 的 --d2h-*-bg-color 变量），为深色主题前置兜底
+  const css = fs.readFileSync(new URL('../src/renderer/assets/styles/main.css', import.meta.url), 'utf8');
+  assert.ok(css.includes('--d2h-del-bg-color') && css.includes('--d2h-ins-bg-color'), 'main.css 须 token 化 +/- 行底色');
+  assert.ok(/--d2h-del-bg-color:\s*color-mix/.test(css), '+/- 底色须经 color-mix 接入主题 token');
+  assert.ok(/var\(--color-danger\)/.test(css) && /var\(--color-accent\)/.test(css), '+/- 底色须接入 danger/accent token');
 }
 
 // P0 文件快照通道：主进程 canUseTool 拍改前文件快照 → 专用 IPC → 渲染层 store → ToolCallBlock
