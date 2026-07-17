@@ -3,7 +3,7 @@
 // 默认一行：图标 + 标签 + mono 细节（summarizeToolUse 提取的文件名/命令/查询）+ ✓/✗/···；
 // 点击展开看完整入参与结果（保留 claude-link 的详情能力 + 长结果渐进披露）。
 // 子 Agent（Agent/Task）行带「查看过程 →」锚点，点击定位右侧子Agent Tab。
-import { computed, ref, watch, nextTick, useId } from 'vue';
+import { computed, ref, watch, nextTick, useId, onMounted, onBeforeUnmount } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isDiffContent, renderDiffHtml, renderMarkdown } from '../../utils/markdown';
 import { synthesizeToolDiff } from '../../utils/tool-diff';
@@ -48,7 +48,6 @@ function focusSubAgent(): void {
 const resultContent = computed(() => props.result?.content ?? '');
 const isDiff = computed(() => !!props.result && isDiffContent(props.result.content));
 // Edit/Write/MultiEdit 的 tool_result 只是一句成功提示（无 diff），从 tool_use 入参合成 diff 反推显示。
-// 优先级：result 自带真 diff（如 Bash 跑 git diff）> 入参合成 diff > 普通结果 markdown。
 const { getSnapshot } = useToolFileSnapshots();
 // 优先用改前文件快照（真实全文件 diff）；无快照（历史回看/读取失败）回退片段 diff。
 const toolDiff = computed(() => {
@@ -57,17 +56,40 @@ const toolDiff = computed(() => {
     fileSnapshot: getSnapshot(props.use?.toolUseId),
   });
 });
+// 折叠态 +/− 徽标：用内核给的 additions/deletions（含截断部分，准确）。
+const diffCounts = computed(() =>
+  toolDiff.value ? { additions: toolDiff.value.additions, deletions: toolDiff.value.deletions } : null,
+);
+// 窄宽度回退 line-by-line：观测根元素宽度，低于阈值时两栏太挤改单栏（阈值需 app 目视微调）。
+const rootRef = ref<HTMLElement | null>(null);
+const containerWidth = ref(Number.POSITIVE_INFINITY);
+const SIDE_BY_SIDE_MIN_WIDTH = 520;
+const useSideBySide = computed(() => containerWidth.value >= SIDE_BY_SIDE_MIN_WIDTH);
+let resizeObserver: ResizeObserver | null = null;
+onMounted(() => {
+  if (typeof ResizeObserver === 'undefined' || !rootRef.value) return;
+  resizeObserver = new ResizeObserver((entries) => {
+    containerWidth.value = entries[0]?.contentRect.width ?? Number.POSITIVE_INFINITY;
+  });
+  resizeObserver.observe(rootRef.value);
+});
+onBeforeUnmount(() => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
+});
+// 优先级：Edit/Write/MultiEdit 的合成 diff（其 result 恒为成功提示，绝不可能是真 diff，
+// 且 result 文本若恰含 ---/+++/@@ 会误判 isDiff 压制合成 diff）> 其它工具的真 diff（如 Bash git diff）。
 const renderedDiff = computed(() => {
-  if (isDiff.value) return renderDiffHtml(props.result!.content, { sideBySide: true });
-  if (toolDiff.value) return renderDiffHtml(toolDiff.value.diff, { sideBySide: true });
+  if (toolDiff.value) return renderDiffHtml(toolDiff.value.diff, { sideBySide: useSideBySide.value });
+  if (isDiff.value) return renderDiffHtml(props.result!.content, { sideBySide: useSideBySide.value });
   return '';
 });
 const hasDiffView = computed(() => renderedDiff.value !== '');
 const renderedMarkdown = computed(() => (resultContent.value ? renderMarkdown(resultContent.value, 'static') : ''));
 // 实际展示源（行数计数与溢出测量用）：diff 文本或结果原文。
 const displayedSource = computed(() => {
-  if (isDiff.value) return props.result?.content ?? '';
   if (toolDiff.value) return toolDiff.value.diff;
+  if (isDiff.value) return props.result?.content ?? '';
   return resultContent.value;
 });
 
@@ -99,12 +121,16 @@ watch([expanded, displayedSource], () => {
 </script>
 
 <template>
-  <div class="tool-row">
+  <div ref="rootRef" class="tool-row">
     <div class="tool-row__controls">
       <button type="button" class="tool-row__head" :aria-expanded="expanded" :aria-controls="bodyId" @click="expanded = !expanded">
         <span class="tool-row__icon">{{ meta.icon }}</span>
         <span class="tool-row__desc">{{ meta.label }}</span>
         <span v-if="detail" class="tool-row__detail">{{ detail }}</span>
+        <span v-if="diffCounts" class="tool-row__diffcounts" :title="`新增 +${diffCounts.additions} · 删除 −${diffCounts.deletions}`">
+          <span class="tool-row__diffcounts-add">+{{ diffCounts.additions }}</span>
+          <span class="tool-row__diffcounts-del">−{{ diffCounts.deletions }}</span>
+        </span>
         <span class="tool-row__status">
           <span v-if="running && elapsedSeconds != null" class="tool-row__elapsed">⏱{{ elapsedSeconds.toFixed(1) }}s</span>
           <span v-else-if="running" class="tool-row__dots"><span></span><span></span><span></span></span>
@@ -123,6 +149,9 @@ watch([expanded, displayedSource], () => {
         <div ref="resultInnerRef" class="tool-row__result-inner">
           <div v-if="hasDiffView" class="markdown-body" v-html="renderedDiff" />
           <div v-else class="markdown-body" v-html="renderedMarkdown" />
+        </div>
+        <div v-if="toolDiff?.truncated" class="tool-row__truncated">
+          差异过大（{{ toolDiff.changeCount }} 行变更），仅显示前部分
         </div>
         <div v-if="resultOverflow" class="tool-row__result-fade">
           <button type="button" class="tool-row__expand" @click.stop="resultExpanded = !resultExpanded">
@@ -194,6 +223,32 @@ watch([expanded, displayedSource], () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 折叠态 +/− 行数徽标：一眼看出改动规模（additions/deletions 由内核统计，含截断部分）。 */
+.tool-row__diffcounts {
+  flex-shrink: 0;
+  display: inline-flex;
+  gap: 6px;
+  font-size: 0.6875rem;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+.tool-row__diffcounts-add {
+  color: var(--color-accent-strong);
+}
+.tool-row__diffcounts-del {
+  color: var(--color-danger);
+}
+
+/* 巨型 diff 截断提示。 */
+.tool-row__truncated {
+  margin-top: 4px;
+  padding: 3px 8px;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  background: var(--color-panel-soft);
+  border-radius: var(--radius-sm);
 }
 
 .tool-row__anchor {

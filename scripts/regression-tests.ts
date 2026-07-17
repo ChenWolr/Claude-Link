@@ -1322,6 +1322,8 @@ function testToolDiffSynthesisContracts(): void {
   assert.ok(meSnap!.diff.includes('-A') && meSnap!.diff.includes('+C') && !meSnap!.diff.includes('+B'), 'MultiEdit 快照须体现顺序应用净效果 A→C');
   // changeCount 字段（变更行数 -/+ 合计）
   assert.equal(editSnap!.changeCount, 2, 'changeCount 须为变更行数');
+  assert.equal(editSnap!.additions, 1, 'additions 须为新增行数');
+  assert.equal(editSnap!.deletions, 1, 'deletions 须为删除行数');
 
   // ── 截断（P3）：超 MAX_DIFF_LINES 标 truncated，changeCount 仍计全量，diff 仍可渲染 ──
   const huge = Array.from({ length: 3000 }, (_, i) => `row ${i}`).join('\n');
@@ -1342,12 +1344,20 @@ function testToolDiffSynthesisContracts(): void {
   assert.ok(sbs.includes('d2h-file-side-diff'), 'sideBySide 须产两栏结构 d2h-file-side-diff');
   assert.ok(sbs.includes('d2h-file-wrapper'), 'side-by-side 仍须正常渲染（含 d2h-file-wrapper）');
 
-  // ToolCallBlock 接线契约：须导入并调用 synthesizeToolDiff，工具结果 diff 用 side-by-side
+  // ToolCallBlock 接线契约：须导入并调用 synthesizeToolDiff
   const fs = require('node:fs') as typeof import('node:fs');
   const src = fs.readFileSync(new URL('../src/renderer/components/chat/ToolCallBlock.vue', import.meta.url), 'utf8');
   assert.ok(src.includes('synthesizeToolDiff'), 'ToolCallBlock 须导入 synthesizeToolDiff');
   assert.ok(/synthesizeToolDiff\([^)]*\)/.test(src), 'ToolCallBlock 须调用 synthesizeToolDiff');
-  assert.ok(src.includes('{ sideBySide: true }'), 'ToolCallBlock 工具结果 diff 须用 side-by-side');
+  // §3.1：side-by-side 经 useSideBySide 控制（窄宽度回退 line-by-line）
+  assert.ok(src.includes('sideBySide: useSideBySide.value'), '工具结果 diff 须 side-by-side，窄宽度回退 line-by-line');
+  assert.ok(src.includes('ResizeObserver') && src.includes('SIDE_BY_SIDE_MIN_WIDTH'), '须经 ResizeObserver 测宽');
+  // §4.1：Edit/Write/MultiEdit 合成 diff 优先于 isDiff 真分支（renderedDiff 里 toolDiff 在 isDiff 之前）
+  assert.ok(/renderedDiff[\s\S]*?if \(toolDiff\.value\)[\s\S]*?if \(isDiff\.value\)/.test(src), '合成 diff 须优先于 isDiff 真分支');
+  // §3.2：折叠态 +/− 行数徽标
+  assert.ok(src.includes('tool-row__diffcounts') && src.includes('diffCounts'), '折叠态须有 +/− 行数徽标');
+  // §3.3：截断提示
+  assert.ok(src.includes('tool-row__truncated') && src.includes('toolDiff?.truncated'), '截断须有提示');
 
   // diff2html 基础 CSS 须引入（两栏布局 + 红绿底色全靠它），且在 main.css 之前以利主题覆盖
   const main = fs.readFileSync(new URL('../src/renderer/main.ts', import.meta.url), 'utf8');
