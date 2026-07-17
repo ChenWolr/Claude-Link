@@ -11,10 +11,14 @@ import TaskItem from './TaskItem.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
 import MessageBubble from '../chat/MessageBubble.vue';
 import ThinkingBlock from '../chat/ThinkingBlock.vue';
+import ChangesPanel from '../changes/ChangesPanel.vue';
+import { useChangesStore } from '../../stores/changes-store';
 
 const taskStore = useTaskStore();
 const sessionStore = useSessionStore();
 const interactionStore = useInteractionStore();
+const changesStore = useChangesStore();
+const changesCount = computed(() => changesStore.changedCount);
 const { startListening } = useTaskQueue();
 
 const newTaskPrompt = ref('');
@@ -245,6 +249,15 @@ function handleDragReorder() {
         后台任务
         <span v-if="backgroundTaskCount" class="tab__badge">{{ backgroundTaskCount }}</span>
       </button>
+      <button
+        type="button"
+        class="tab"
+        :class="{ 'tab--active': sessionStore.rightTab === 'changes' }"
+        @click="sessionStore.setRightTab('changes')"
+      >
+        改动
+        <span v-if="changesCount" class="tab__badge">{{ changesCount }}</span>
+      </button>
     </div>
 
     <!-- 排队任务面板 -->
@@ -371,6 +384,11 @@ function handleDragReorder() {
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- 会话改动面板：列出 workingDir 的 git 改动 + 按需 git diff -->
+    <div v-show="sessionStore.rightTab === 'changes'" class="task-panel__pane">
+      <ChangesPanel />
     </div>
   </aside>
 </template>

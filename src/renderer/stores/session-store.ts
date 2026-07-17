@@ -45,7 +45,7 @@ export const useSessionStore = defineStore('session', {
     sessionStreams: {} as Record<string, { content: string; thinking: string; tool: string }>,
     recentWorkspaces: [] as string[],
     // 右侧任务栏当前 Tab：'queue'（排队任务）/ 'subagent'（子Agent）。
-    rightTab: 'queue' as 'queue' | 'subagent' | 'background',
+    rightTab: 'queue' as 'queue' | 'subagent' | 'background' | 'changes',
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
@@ -469,7 +469,7 @@ export const useSessionStore = defineStore('session', {
       this.compacting = v;
     },
     // 切换右侧任务栏 Tab。
-    setRightTab(tab: 'queue' | 'subagent' | 'background') {
+    setRightTab(tab: 'queue' | 'subagent' | 'background' | 'changes') {
       this.rightTab = tab;
     },
     // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。

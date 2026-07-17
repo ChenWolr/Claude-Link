@@ -16,7 +16,7 @@
 // 故用模块级缓存的动态 import() 加载 SDK，避免 CJS 静态 import ESM 的语法限制。
 
 import type { BrowserWindow } from 'electron';
-import { existsSync, readFileSync, statSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
@@ -439,51 +439,11 @@ function bookToolNames(updates: PermissionUpdate[] | undefined): string[] {
     .flatMap((u) => u.rules.filter((r) => !r.ruleContent).map((r) => r.toolName));
 }
 
-// 拍改前快照的工具集合（与 tool-diff.ts 的合成覆盖范围对齐）。
-const FILE_SNAPSHOT_TOOLS = new Set(['Edit', 'edit', 'MultiEdit', 'multiedit', 'multi_edit', 'Write', 'write']);
-// 超过此大小的文件不拍快照（避免主进程读巨型文件占用内存），渲染层回退片段 diff。
-const FILE_SNAPSHOT_MAX_BYTES = 2_000_000;
-
-// 工具执行前读取 file_path 的改前内容，经专用 IPC 通道直发渲染层。相对路径按 workingDir 解析；
-// ENOENT 视作新建文件（before=''）；其他读错误 / 文件过大 / 窗口已销毁一律静默跳过。
-function maybeForwardFileSnapshot(
-  sessionId: string,
-  mainWindow: BrowserWindow,
-  toolName: string,
-  input: Record<string, unknown>,
-  toolUseId: string | undefined,
-  workingDir: string | null,
-): void {
-  if (!toolUseId || !FILE_SNAPSHOT_TOOLS.has(toolName)) return;
-  const filePath = typeof input?.file_path === 'string' ? input.file_path : '';
-  if (!filePath || mainWindow.isDestroyed()) return;
-  try {
-    const resolved = path.resolve(workingDir ?? '.', filePath);
-    let before = '';
-    try {
-      const stat = statSync(resolved);
-      if (stat.size > FILE_SNAPSHOT_MAX_BYTES) return;
-      before = readFileSync(resolved, 'utf8');
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return;
-      before = ''; // 新文件
-    }
-    mainWindow.webContents.send(IPC_CHANNELS.TOOL_FILE_SNAPSHOT, { sessionId, toolUseId, before });
-  } catch {
-    // 任何意外都不影响权限流
-  }
-}
-
 function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, workingDir: string | null) {
   return async (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions): Promise<PermissionResult> => {
     if (!isSessionActive(sessionId)) {
       return { behavior: 'deny', message: '会话已关闭', interrupt: true, toolUseID: options.toolUseID };
     }
-
-    // 工具执行前拍改前文件快照，直发渲染层（专用通道，不落库）。Edit/Write/MultiEdit 据此渲染
-    // 真实全文件 diff（真实行号/上下文、新建覆盖区分、MultiEdit 顺序合并）。任何失败都静默跳过，
-    // 渲染层无快照则回退片段 diff——绝不影响权限流。
-    maybeForwardFileSnapshot(sessionId, mainWindow, toolName, input, options.toolUseID, workingDir);
 
     if (toolName === 'AskUserQuestion' && isAskUserQuestionPayload(input)) {
       const result = await requestAskUserQuestionInteractions(sessionId, mainWindow, input, options);
@@ -502,6 +462,7 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
     const sessionBook = sessionPermissionUpdates.get(sessionId);
     const sessionAllowed = isToolSessionAllowed(sessionBook, toolName);
     logger.info(`[canUseTool] tool=${toolName} shortCircuit=${sessionAllowed} bookTools=[${bookToolNames(sessionBook).join(',')}]`);
+
     if (sessionAllowed) {
       return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID };
     }
