@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { renderMarkdown } from '../../utils/markdown';
+import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 
 const props = defineProps<{ content: string }>();
 
@@ -10,7 +11,7 @@ const renderedContent = computed(() => renderMarkdown(props.content));
 <template>
   <div class="stream">
     <div class="stream__role">Claude</div>
-    <div class="stream__content markdown-body" v-html="renderedContent" /><span class="cursor">▊</span>
+    <div class="stream__content markdown-body" v-html="renderedContent" v-enrich /><span class="cursor">▊</span>
   </div>
 </template>
 

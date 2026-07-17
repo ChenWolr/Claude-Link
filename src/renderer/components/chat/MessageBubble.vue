@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { renderMarkdown } from '../../utils/markdown';
+import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 
 const props = defineProps<{ message: Message }>();
 
@@ -11,7 +12,7 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
 <template>
   <div :class="['bubble', `bubble--${message.role}`]">
     <div class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
-    <div class="bubble__content markdown-body" v-html="renderedContent" />
+    <div class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
     <div v-if="message.costUsd != null || message.durationMs" class="bubble__meta">
       <template v-if="message.costUsd != null">${{ message.costUsd.toFixed(4) }}</template>
       <template v-if="message.durationMs">{{ message.costUsd != null ? ' · ' : '' }}{{ (message.durationMs / 1000).toFixed(1) }}s</template>

@@ -1,27 +1,33 @@
 <script setup lang="ts">
 // ThinkingBlock —— openhanako 风格的轻量思考行。
 // 一行「💭 思考完成 / 思考中 ···」，点击展开看内容。流式时默认展开。
-import { computed, ref } from 'vue';
+import { computed, ref, useId } from 'vue';
 import { renderMarkdown } from '../../utils/markdown';
 
 const props = defineProps<{ content: string; streaming?: boolean; sealed?: boolean; defaultOpen?: boolean }>();
 
 const open = ref(props.defaultOpen ?? !!props.streaming);
-const rendered = computed(() => renderMarkdown(props.content));
-const preview = computed(() => props.content.replace(/\s+/g, ' ').trim().slice(0, 90));
+// 思考正文唯一 id，供 aria-controls 指向（多实例不能硬编码）。
+const bodyId = useId();
+const rendered = computed(() => renderMarkdown(props.content, 'static'));
+const preview = computed(() => {
+  const summary = props.content.replace(/\s+/g, ' ').trim();
+  const codePoints = Array.from(summary);
+  return codePoints.slice(0, 90).join('');
+});
 const active = computed(() => props.streaming || props.sealed === false);
 </script>
 
 <template>
   <div class="think-row">
-    <button type="button" class="think-row__head" :class="{ 'think-row__head--open': open }" @click="open = !open">
+    <button type="button" class="think-row__head" :class="{ 'think-row__head--open': open }" :aria-expanded="open" :aria-controls="bodyId" @click="open = !open">
       <span class="think-row__icon">💭</span>
       <span class="think-row__label">{{ active ? '思考中' : '思考完成' }}</span>
       <span v-if="active" class="think-row__dots" aria-hidden="true"><span></span><span></span><span></span></span>
       <span v-else-if="!open && preview" class="think-row__preview">{{ preview }}…</span>
       <span class="think-row__arrow">›</span>
     </button>
-    <div v-if="open" class="think-row__body markdown-body" v-html="rendered" />
+    <div v-show="open" :id="bodyId" class="think-row__body markdown-body" v-html="rendered" />
   </div>
 </template>
 

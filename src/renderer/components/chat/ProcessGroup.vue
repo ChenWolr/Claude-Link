@@ -3,7 +3,7 @@
 // 一整段连续过程（思考 + 工具）合并成一个 fold：折叠态是一行居中摘要
 // 「✨ Claude 忙活了一阵子 · N 个工具 · N 次思考 ›」，展开态是半透明 panel 内的行式列表。
 // 少于 MIN_FOLD 条过程不折叠（直接展开行式）。对齐 openhanako ProcessFoldBlock。
-import { ref, computed } from 'vue';
+import { ref, computed, useId } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isFoldable, type FoldStats } from '../../utils/group-messages';
 import { useSessionStore } from '../../stores/session-store';
@@ -11,6 +11,8 @@ import ThinkingBlock from './ThinkingBlock.vue';
 import ToolCallBlock from './ToolCallBlock.vue';
 
 const store = useSessionStore();
+// 折叠面板唯一 id，供 aria-controls 指向（多实例不能硬编码）。
+const panelId = useId();
 
 // C：后台任务反查——该 toolUseId 是否有运行中的后台任务（task_* 的 toolUseId 匹配）。
 // 主流程工具行据此标注「后台运行中」（后台 Bash 的 tool_result 已回但实际后台仍在跑）。
@@ -96,6 +98,8 @@ const items = computed<GroupItem[]>(() => {
       type="button"
       class="process-fold__summary"
       :class="{ 'process-fold__summary--open': open }"
+      :aria-expanded="open"
+      :aria-controls="panelId"
       @click="toggle"
     >
       <span class="process-fold__title">
@@ -104,7 +108,7 @@ const items = computed<GroupItem[]>(() => {
         <span class="process-fold__arrow">›</span>
       </span>
     </button>
-    <div v-if="open" class="process-fold__panel">
+    <div v-if="open" :id="panelId" class="process-fold__panel">
       <template v-for="item in items" :key="item.key">
         <ThinkingBlock
           v-if="item.type === 'thinking'"
