@@ -20,6 +20,9 @@ export interface ToolDiffResult {
   diff: string;
   /** 变更行数（-/+ 合计，含被截断部分），供折叠态徽标与截断提示用。 */
   changeCount: number;
+  /** 新增 / 删除行数（含被截断部分，供折叠态 +/− 徽标，不受截断影响）。 */
+  additions: number;
+  deletions: number;
   /** 是否因超过 MAX_DIFF_LINES 被截断（仅展示前部分）。 */
   truncated: boolean;
 }
@@ -158,6 +161,8 @@ function lineDiff(oldLines: string[], newLines: string[]): DiffLine[] {
 interface PatchResult {
   diff: string;
   changeCount: number;
+  additions: number;
+  deletions: number;
   truncated: boolean;
 }
 
@@ -177,7 +182,13 @@ function buildTwoFilePatch(filePath: string, oldText: string, newText: string, c
 
   const midOps = lineDiff(a.slice(prefix, a.length - suffix), b.slice(prefix, b.length - suffix));
   const totalChanges = midOps.filter((o) => o.op !== 'context').length;
-  if (totalChanges === 0) return { diff: '', changeCount: 0, truncated: false };
+  if (totalChanges === 0) return { diff: '', changeCount: 0, additions: 0, deletions: 0, truncated: false };
+  let additions = 0;
+  let deletions = 0;
+  for (const op of midOps) {
+    if (op.op === 'add') additions++;
+    else if (op.op === 'del') deletions++;
+  }
 
   // 前后各取最多 context 行（来自被裁掉的公共 prefix 尾 / suffix 头）作展示上下文。
   const preContext = a.slice(Math.max(0, prefix - context), prefix);
@@ -242,7 +253,7 @@ function buildTwoFilePatch(filePath: string, oldText: string, newText: string, c
     if (emitted >= MAX_DIFF_LINES) break;
   }
 
-  return { diff: out.join('\n'), changeCount: totalChanges, truncated: emitted < totalBodyLines };
+  return { diff: out.join('\n'), changeCount: totalChanges, additions, deletions, truncated: emitted < totalBodyLines };
 }
 
 // 从 Edit/MultiEdit/Write 的 tool_use 入参合成 unified diff。
@@ -292,17 +303,21 @@ export function synthesizeToolDiff(toolName: string, input: unknown, options: To
     // 回退：逐条 edit 各成一段 patch 拼接（无文件内偏移无法合并），diff2html 渲染为多张卡片。
     const parts: string[] = [];
     let changeCount = 0;
+    let additions = 0;
+    let deletions = 0;
     let truncated = false;
     for (const edit of edits) {
       const patch = buildTwoFilePatch(filePath, edit.old_string, edit.new_string);
       if (patch.diff) {
         parts.push(patch.diff);
         changeCount += patch.changeCount;
+        additions += patch.additions;
+        deletions += patch.deletions;
         truncated = truncated || patch.truncated;
       }
     }
     if (parts.length === 0) return null;
-    return { kind: 'multiedit', filePath, diff: parts.join('\n'), changeCount, truncated };
+    return { kind: 'multiedit', filePath, diff: parts.join('\n'), changeCount, additions, deletions, truncated };
   }
 
   if (WRITE_TOOL_NAMES.has(name)) {
