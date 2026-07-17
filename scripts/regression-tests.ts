@@ -25,6 +25,7 @@ import { applyPermissionUpdates, buildPermissionSettings, coercePermissionUpdate
 import { parseClaudeSettings } from '../src/main/modules/settings-importer';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdownRenderer, isDiffContent, renderDiffHtml, renderDiffHtmlWithRenderer, renderMarkdown } from '../src/renderer/utils/markdown';
+import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';
 import { shouldSkipMermaidErrorRetry, summarizeMermaidAccessibleTitle } from '../src/renderer/directives/enrich-markdown';
 import {
   getNavigationDisposition,
@@ -1227,6 +1228,83 @@ function testTestConnectionMarkdownCopyWiring(): void {
   assert.ok(src.includes('@click="handleMarkdownCopy"'), '测试连接流式 Markdown 容器应挂复制委托');
 }
 
+// Edit/Write/MultiEdit 的 tool_result 只是一句成功提示（无 diff），ToolCallBlock 改为
+// 从 tool_use 入参（old_string/new_string 或 content）合成 unified diff 反推显示。
+// 这里锁定合成逻辑契约 + ToolCallBlock 接线。
+function testToolDiffSynthesisContracts(): void {
+  // Edit：old_string→new_string 合成 diff
+  const edit = synthesizeToolDiff('Edit', { file_path: 'aaaa.txt', old_string: 'aaaa', new_string: 'bbb' });
+  assert.ok(edit, 'Edit 须合成 diff');
+  assert.equal(edit!.kind, 'edit');
+  assert.ok(edit!.diff.includes('--- a/aaaa.txt'), 'Edit diff 须带 a/ 头');
+  assert.ok(edit!.diff.includes('+++ b/aaaa.txt'), 'Edit diff 须带 b/ 头');
+  assert.ok(edit!.diff.includes('-aaaa'), 'Edit diff 须含删除的 old_string');
+  assert.ok(edit!.diff.includes('+bbb'), 'Edit diff 须含新增的 new_string');
+  assert.ok(/@@\s+-1,1\s+\+1,1\s+@@/.test(edit!.diff), 'Edit diff 须带 hunk 头');
+
+  // Edit 含公共行：行级 LCS 把公共行作为 context（前导空格），只标红改动的 aaa→bbb
+  const ctx = synthesizeToolDiff('Edit', {
+    file_path: 'f.txt',
+    old_string: 'line1\naaa\nline3',
+    new_string: 'line1\nbbb\nline3',
+  });
+  assert.ok(ctx!.diff.includes(' line1'), '公共行须作为 context 保留');
+  assert.ok(ctx!.diff.includes('-aaa') && ctx!.diff.includes('+bbb'), '只标注改动的行');
+  assert.ok(!ctx!.diff.includes('-line1') && !ctx!.diff.includes('+line1'), '公共行不得标成增删');
+
+  // Write：旧侧空（无快照），整段按新增展示，对应 git「新建文件」-0,0 头
+  const write = synthesizeToolDiff('Write', { file_path: 'new.txt', content: 'hello\nworld\n' });
+  assert.ok(write, 'Write 须合成 diff');
+  assert.equal(write!.kind, 'write');
+  assert.ok(write!.diff.includes('-0,0'), 'Write 须以空旧侧（-0,0）表示新增');
+  assert.ok(write!.diff.includes('+hello') && write!.diff.includes('+world'), 'Write 内容须全为新增行');
+
+  // MultiEdit：多条 edit 各成一段 patch（无文件内偏移无法合并）
+  const multi = synthesizeToolDiff('MultiEdit', {
+    file_path: 'm.txt',
+    edits: [
+      { old_string: 'a', new_string: 'b' },
+      { old_string: 'c', new_string: 'd' },
+    ],
+  });
+  assert.ok(multi, 'MultiEdit 须合成 diff');
+  assert.equal(multi!.kind, 'multiedit');
+  assert.equal((multi!.diff.match(/^--- a\/m\.txt$/gm) ?? []).length, 2, '两条 edit 须各带文件头');
+  assert.ok(multi!.diff.includes('-a') && multi!.diff.includes('+b') && multi!.diff.includes('-c') && multi!.diff.includes('+d'));
+
+  // MultiEdit：无变化的 edit 被跳过，仅保留有变化的
+  const multiPartial = synthesizeToolDiff('MultiEdit', {
+    file_path: 'm.txt',
+    edits: [
+      { old_string: 'a', new_string: 'b' },
+      { old_string: 'same', new_string: 'same' },
+    ],
+  });
+  assert.equal((multiPartial!.diff.match(/^--- a\/m\.txt$/gm) ?? []).length, 1, '无变化的 edit 须跳过');
+
+  // 无变化 / 空 / 非编辑类工具 → null
+  assert.equal(synthesizeToolDiff('Edit', { file_path: 'x', old_string: 'same', new_string: 'same' }), null, 'old===new 须返回 null');
+  assert.equal(synthesizeToolDiff('Write', { file_path: 'x', content: '' }), null, '空 content 须返回 null');
+  assert.equal(synthesizeToolDiff('Bash', { command: 'ls' }), null, '非编辑工具须返回 null');
+  assert.equal(synthesizeToolDiff('Read', { file_path: 'x' }), null, 'Read 须返回 null');
+  assert.equal(synthesizeToolDiff('Edit', null), null, '入参为 null 须返回 null');
+
+  // 反斜杠路径归一为正斜杠（diff 头更整洁，diff2html 文件名显示正常）
+  const win = synthesizeToolDiff('Edit', { file_path: 'D:\\dir\\f.txt', old_string: 'a', new_string: 'b' });
+  assert.ok(win!.diff.includes('a/D:/dir/f.txt'), '反斜杠路径须归一为正斜杠');
+
+  // round-trip：合成 diff 经 renderDiffHtml 须被 diff2html 正常渲染，不回退裸源码
+  const html = renderDiffHtml(edit!.diff);
+  assert.ok(html.includes('d2h-file-wrapper'), '合成 diff 须被 diff2html 正常渲染');
+  assert.ok(!html.includes('<pre><code>'), '合成 diff 不应回退到裸 <pre><code>');
+
+  // ToolCallBlock 接线契约：须导入并调用 synthesizeToolDiff
+  const fs = require('node:fs') as typeof import('node:fs');
+  const src = fs.readFileSync(new URL('../src/renderer/components/chat/ToolCallBlock.vue', import.meta.url), 'utf8');
+  assert.ok(src.includes('synthesizeToolDiff'), 'ToolCallBlock 须导入 synthesizeToolDiff');
+  assert.ok(/synthesizeToolDiff\([^)]*\)/.test(src), 'ToolCallBlock 须调用 synthesizeToolDiff');
+}
+
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testClaudeSettingsProjectionPreservesAdvancedSettings();
@@ -1265,6 +1343,7 @@ testTaskListReadOnlyContract();
 testMarkdownBlockMathDoesNotSwallowUnclosed();
 testImageLightboxAccessibilityWiring();
 testDiffContentDetectionContracts();
+testToolDiffSynthesisContracts();
 testReducedMotionStopsInfiniteAnimations();
 testMermaidLifecycleGuards();
 testTestConnectionMarkdownCopyWiring();
