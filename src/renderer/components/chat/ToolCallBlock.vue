@@ -7,6 +7,7 @@ import { computed, ref, watch, nextTick, useId } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isDiffContent, renderDiffHtml, renderMarkdown } from '../../utils/markdown';
 import { synthesizeToolDiff } from '../../utils/tool-diff';
+import { useToolFileSnapshots } from '../../composables/use-tool-file-snapshots';
 import { getProcessKindMeta, summarizeToolUse } from '../../utils/process-kind';
 import { SUB_AGENT_TOOL_NAMES } from '../../../shared/process-kind';
 import { useSessionStore } from '../../stores/session-store';
@@ -48,9 +49,14 @@ const resultContent = computed(() => props.result?.content ?? '');
 const isDiff = computed(() => !!props.result && isDiffContent(props.result.content));
 // Edit/Write/MultiEdit 的 tool_result 只是一句成功提示（无 diff），从 tool_use 入参合成 diff 反推显示。
 // 优先级：result 自带真 diff（如 Bash 跑 git diff）> 入参合成 diff > 普通结果 markdown。
-const toolDiff = computed(() =>
-  useParsed.value ? synthesizeToolDiff(useParsed.value.name ?? '', useParsed.value.input ?? {}) : null,
-);
+const { getSnapshot } = useToolFileSnapshots();
+// 优先用改前文件快照（真实全文件 diff）；无快照（历史回看/读取失败）回退片段 diff。
+const toolDiff = computed(() => {
+  if (!useParsed.value) return null;
+  return synthesizeToolDiff(useParsed.value.name ?? '', useParsed.value.input ?? {}, {
+    fileSnapshot: getSnapshot(props.use?.toolUseId),
+  });
+});
 const renderedDiff = computed(() => {
   if (isDiff.value) return renderDiffHtml(props.result!.content, { sideBySide: true });
   if (toolDiff.value) return renderDiffHtml(toolDiff.value.diff, { sideBySide: true });

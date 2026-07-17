@@ -6,7 +6,7 @@ import { ipcRenderer } from 'electron';
 import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
-import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, PermissionRequestPayload, PermissionResponsePayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, PermissionRequestPayload, PermissionResponsePayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, ToolFileSnapshotPayload } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 
@@ -59,6 +59,8 @@ export interface ClaudeLinkAPI {
   recordInteractionHistory: (input: RecordInteractionHistoryInput) => Promise<void>;
   onContextUpdate: (callback: (payload: ContextStatsPayload) => void) => () => void;
   removeContextListener: () => void;
+  onToolFileSnapshot: (callback: (payload: ToolFileSnapshotPayload) => void) => () => void;
+  removeToolFileSnapshotListener: () => void;
   addTask: (sessionId: string, prompt: string) => Promise<Task>;
   removeTask: (taskId: string) => Promise<void>;
   getTasks: (sessionId: string) => Promise<Task[]>;
@@ -145,6 +147,12 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.CONTEXT_UPDATE, listener);
     },
     removeContextListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.CONTEXT_UPDATE),
+    onToolFileSnapshot: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: ToolFileSnapshotPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.TOOL_FILE_SNAPSHOT, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.TOOL_FILE_SNAPSHOT, listener);
+    },
+    removeToolFileSnapshotListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.TOOL_FILE_SNAPSHOT),
     addTask: (sessionId, prompt) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, prompt),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId),
     getTasks: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_GET_ALL, sessionId),
