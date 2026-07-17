@@ -287,7 +287,7 @@ function testPermissionPromptIntegration(): void {
   assert.ok(preloadApi.includes('onInteractionCancel'));
   assert.ok(preloadApi.includes('respondInteraction'));
   assert.ok(ipcHandlers.includes('respondToInteractionPrompt'));
-  assert.ok(sdkBackend.includes('canUseTool: createPermissionHandler(sessionId, mainWindow)'));
+  assert.ok(/canUseTool:\s*createPermissionHandler\(sessionId,\s*mainWindow,\s*opts\.workingDir/.test(sdkBackend), 'canUseTool 须接线 createPermissionHandler 并传 workingDir（供改前快照解析相对路径）');
   assert.ok(sdkBackend.includes('supportedDialogKinds'));
   assert.ok(sdkBackend.includes('onUserDialog'));
   assert.ok(sdkBackend.includes('requestInteraction'));
@@ -1355,6 +1355,41 @@ function testToolDiffSynthesisContracts(): void {
   assert.ok(main.indexOf('diff2html.min.css') < main.indexOf('assets/styles/main.css'), 'diff2html CSS 须在 main.css 之前引入');
 }
 
+// P0 文件快照通道：主进程 canUseTool 拍改前文件快照 → 专用 IPC → 渲染层 store → ToolCallBlock
+// 消费。锁定整条链路的接线（运行时正确性由内核契约 + 端到端目视覆盖）。
+function testToolFileSnapshotPlumbing(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const read = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+
+  const ipc = read('../src/shared/types/ipc.ts');
+  assert.ok(ipc.includes("TOOL_FILE_SNAPSHOT: 'tool:fileSnapshot'"), '须定义 TOOL_FILE_SNAPSHOT 专用通道');
+  assert.ok(ipc.includes('export interface ToolFileSnapshotPayload'), '须定义 ToolFileSnapshotPayload 载荷');
+
+  const preload = read('../src/preload/api.ts');
+  assert.ok(preload.includes('onToolFileSnapshot'), 'preload 须暴露 onToolFileSnapshot');
+  assert.ok(preload.includes('removeToolFileSnapshotListener'), 'preload 须暴露 removeToolFileSnapshotListener');
+  assert.ok(preload.includes('IPC_CHANNELS.TOOL_FILE_SNAPSHOT'), 'preload 须绑专用通道');
+
+  const backend = read('../src/main/modules/sdk-backend.ts');
+  assert.ok(backend.includes('function maybeForwardFileSnapshot'), 'sdk-backend 须有 maybeForwardFileSnapshot');
+  assert.ok(backend.includes('IPC_CHANNELS.TOOL_FILE_SNAPSHOT'), '快照须走专用通道发送（不经 forwardEvent/不落库）');
+  assert.ok(backend.includes("'ENOENT'"), 'ENOENT 须视作新建文件（before 空串）');
+  assert.ok(backend.includes('FILE_SNAPSHOT_MAX_BYTES'), '须有文件大小上限保护主进程内存');
+  assert.ok(/function\s+createPermissionHandler\([^)]*workingDir/.test(backend), 'createPermissionHandler 须接收 workingDir');
+  assert.ok(/canUseTool:\s*createPermissionHandler\([^)]*workingDir/.test(backend), 'canUseTool 接线须把 workingDir 传入');
+
+  const comp = read('../src/renderer/composables/use-tool-file-snapshots.ts');
+  assert.ok(comp.includes('export function bindToolFileSnapshots'), '快照 composable 须导出 bindToolFileSnapshots');
+  assert.ok(comp.includes('getSnapshot'), '快照 composable 须提供 getSnapshot');
+
+  const app = read('../src/renderer/App.vue');
+  assert.ok(app.includes('bindToolFileSnapshots()'), 'App.vue 启动须注册快照监听（早于工具执行）');
+
+  const tool = read('../src/renderer/components/chat/ToolCallBlock.vue');
+  assert.ok(tool.includes('useToolFileSnapshots'), 'ToolCallBlock 须消费快照 store');
+  assert.ok(tool.includes('fileSnapshot: getSnapshot'), 'ToolCallBlock 须把快照传给 synthesizeToolDiff');
+}
+
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testClaudeSettingsProjectionPreservesAdvancedSettings();
@@ -1394,6 +1429,7 @@ testMarkdownBlockMathDoesNotSwallowUnclosed();
 testImageLightboxAccessibilityWiring();
 testDiffContentDetectionContracts();
 testToolDiffSynthesisContracts();
+testToolFileSnapshotPlumbing();
 testReducedMotionStopsInfiniteAnimations();
 testMermaidLifecycleGuards();
 testTestConnectionMarkdownCopyWiring();

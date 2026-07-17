@@ -6,6 +6,7 @@ import ImageLightbox from './components/chat/ImageLightbox.vue';
 import { useConfigStore } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useChat } from './composables/use-chat';
+import { bindToolFileSnapshots } from './composables/use-tool-file-snapshots';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../shared/constants';
 
 const configStore = useConfigStore();
@@ -37,6 +38,8 @@ onMounted(async () => {
   startListening();
   // bindContextUpdates 也在全局注册，避免 ChatPage 卸载后 context:update 监听丢失。
   sessionStore.bindContextUpdates();
+  // 改前文件快照监听同样全局注册（早于工具执行），让 Edit/Write/MultiEdit 渲染真实全文件 diff。
+  bindToolFileSnapshots();
 });
 
 onBeforeUnmount(() => {
