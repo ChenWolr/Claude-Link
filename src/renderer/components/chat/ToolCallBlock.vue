@@ -6,6 +6,7 @@
 import { computed, ref, watch, nextTick, useId } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { isDiffContent, renderDiffHtml, renderMarkdown } from '../../utils/markdown';
+import { synthesizeToolDiff } from '../../utils/tool-diff';
 import { getProcessKindMeta, summarizeToolUse } from '../../utils/process-kind';
 import { SUB_AGENT_TOOL_NAMES } from '../../../shared/process-kind';
 import { useSessionStore } from '../../stores/session-store';
@@ -45,8 +46,24 @@ function focusSubAgent(): void {
 
 const resultContent = computed(() => props.result?.content ?? '');
 const isDiff = computed(() => !!props.result && isDiffContent(props.result.content));
-const renderedDiff = computed(() => (isDiff.value ? renderDiffHtml(props.result!.content) : ''));
+// Edit/Write/MultiEdit 的 tool_result 只是一句成功提示（无 diff），从 tool_use 入参合成 diff 反推显示。
+// 优先级：result 自带真 diff（如 Bash 跑 git diff）> 入参合成 diff > 普通结果 markdown。
+const toolDiff = computed(() =>
+  useParsed.value ? synthesizeToolDiff(useParsed.value.name ?? '', useParsed.value.input ?? {}) : null,
+);
+const renderedDiff = computed(() => {
+  if (isDiff.value) return renderDiffHtml(props.result!.content);
+  if (toolDiff.value) return renderDiffHtml(toolDiff.value.diff);
+  return '';
+});
+const hasDiffView = computed(() => renderedDiff.value !== '');
 const renderedMarkdown = computed(() => (resultContent.value ? renderMarkdown(resultContent.value, 'static') : ''));
+// 实际展示源（行数计数与溢出测量用）：diff 文本或结果原文。
+const displayedSource = computed(() => {
+  if (isDiff.value) return props.result?.content ?? '';
+  if (toolDiff.value) return toolDiff.value.diff;
+  return resultContent.value;
+});
 
 const costMsg = computed<Message | null>(() => {
   if (props.use && props.use.costUsd != null) return props.use;
@@ -60,7 +77,7 @@ const costMsg = computed<Message | null>(() => {
 // 被 max-height:220px + overflow:hidden 永久裁断却无展开入口，后半段看不到。改用 DOM 实测后还天然
 // 适配字号缩放（rem 迁移），不再与行数/字符阈值耦合。resultLineCount 仅用于按钮文案。
 const RESULT_PREVIEW_PX = 220;
-const resultLineCount = computed(() => (resultContent.value ? resultContent.value.split('\n').length : 0));
+const resultLineCount = computed(() => (displayedSource.value ? displayedSource.value.split('\n').length : 0));
 const resultExpanded = ref(false);
 const resultInnerRef = ref<HTMLElement | null>(null);
 const resultOverflow = ref(false);
@@ -70,7 +87,7 @@ function measureResultOverflow(): void {
   resultOverflow.value = !!el && el.scrollHeight > RESULT_PREVIEW_PX + 2;
 }
 // 工具行展开后、或结果到达后，等 DOM 渲染完再测是否溢出。
-watch([expanded, resultContent], () => {
+watch([expanded, displayedSource], () => {
   if (expanded.value) nextTick(measureResultOverflow);
 });
 </script>
@@ -96,9 +113,9 @@ watch([expanded, resultContent], () => {
       <div v-if="useParsed" class="tool-row__json">
         <pre>{{ JSON.stringify(useParsed.input ?? {}, null, 2) }}</pre>
       </div>
-      <div v-if="resultContent" class="tool-row__result" :class="{ 'tool-row__result--expanded': resultExpanded }">
+      <div v-if="hasDiffView || resultContent" class="tool-row__result" :class="{ 'tool-row__result--expanded': resultExpanded }">
         <div ref="resultInnerRef" class="tool-row__result-inner">
-          <div v-if="isDiff" class="markdown-body" v-html="renderedDiff" />
+          <div v-if="hasDiffView" class="markdown-body" v-html="renderedDiff" />
           <div v-else class="markdown-body" v-html="renderedMarkdown" />
         </div>
         <div v-if="resultOverflow" class="tool-row__result-fade">
