@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import type { Message } from '../../../shared/types/session';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
@@ -7,6 +7,18 @@ import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 const props = defineProps<{ message: Message }>();
 
 const renderedContent = computed(() => renderMarkdown(props.message.content));
+
+// 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）
+const copied = ref(false);
+async function copyMessage(): Promise<void> {
+  const text = props.message.content;
+  if (!text) return;
+  await navigator.clipboard?.writeText(text);
+  copied.value = true;
+  window.setTimeout(() => {
+    copied.value = false;
+  }, 1200);
+}
 </script>
 
 <template>
@@ -17,6 +29,22 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
       <template v-if="message.costUsd != null">${{ message.costUsd.toFixed(4) }}</template>
       <template v-if="message.durationMs">{{ message.costUsd != null ? ' · ' : '' }}{{ (message.durationMs / 1000).toFixed(1) }}s</template>
     </div>
+    <!-- 仅 user / assistant 消息提供复制按钮；tool / system 不需要。
+         流式布局放在内容正下方独立一行，避免与正文重叠。 -->
+    <button
+      v-if="message.role === 'user' || message.role === 'assistant'"
+      type="button"
+      class="bubble__copy"
+      :title="copied ? '已复制' : '复制消息'"
+      @click="copyMessage"
+    >
+      <svg v-if="!copied" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M16 1H4a2 2 0 0 0-2 2v12h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z" />
+      </svg>
+      <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
+      </svg>
+    </button>
   </div>
 </template>
 
@@ -104,5 +132,71 @@ const renderedContent = computed(() => renderMarkdown(props.message.content));
   margin-top: 6px;
   font-size: 0.6875rem;
   opacity: 0.6;
+}
+
+/* 复制按钮：定位到气泡右下角外侧（贴近消息但浮在背景区上）。
+   纯图标小尺寸，默认隐藏，hover 气泡才浮现。
+   配色全部走主题 token（--color-accent / --color-text-muted / --color-border），
+   9 套主题切换时由 App.vue 重写根 CSS 变量，按钮自动跟随，无需逐主题适配。 */
+.bubble {
+  position: relative;
+}
+
+.bubble__copy {
+  position: absolute;
+  right: 0;
+  bottom: -26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.bubble__copy svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+  display: block;
+}
+
+/* hover 气泡时按钮显现：用主题 panel-soft 做底 + border 做边框，
+   保证在 9 套主题的 bg 上都有清晰边界（暖纸/草香/珊瑚等都不会糊在一起）。 */
+.bubble:hover .bubble__copy,
+.bubble__copy:focus-visible {
+  opacity: 0.9;
+  pointer-events: auto;
+  background: var(--color-panel-soft);
+  border-color: var(--color-border);
+}
+
+/* hover 按钮自身：切到主题 accent 色，给明确「可点」反馈 */
+.bubble__copy:hover {
+  opacity: 1;
+  color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-soft));
+  border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border));
+}
+
+/* 用户气泡（深色 accent 背景）：按钮已在气泡外，hover 时背景区相对气泡是浅色，
+   故用 on-accent 概念不再适用——统一走 accent-strong 即可。
+   但保留 hover 底色更柔：用 panel（比 panel-soft 略深一档）拉开层次。 */
+.bubble--user:hover .bubble__copy {
+  background: var(--color-panel);
+}
+
+/* 复制成功瞬间：accent 强色 + 拉满不透明度，给明确反馈 */
+.bubble__copy[title='已复制'] {
+  opacity: 1;
+  color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent) 18%, var(--color-panel-soft));
+  border-color: color-mix(in srgb, var(--color-accent) 50%, var(--color-border));
 }
 </style>
