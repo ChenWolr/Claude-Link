@@ -55,11 +55,17 @@ async function copyMessage(): Promise<void> {
   border-radius: var(--radius-md);
 }
 
+/* 用户气泡：accent 染色卡片——淡彩底 + 右侧 3px accent 色条 + accent 派生描边。
+   color-mix 跟随主题变量，9 套主题自动适配；不再写死 accent 实心填充，避免饱和
+   纯色块在暖纸/草香等柔和主题上突兀廉价。右色条镜像助手气泡左色条，共享卡片语言。 */
 .bubble--user {
   align-self: flex-end;
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  box-shadow: var(--ring-light-accent), var(--elevation-1);
+  max-width: 80%;
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-soft));
+  color: var(--color-text);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+  border-right: 3px solid var(--color-accent);
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 /* 助手消息：左对齐气泡（微信式分层）。panel-soft 底 + 边框与 bg 拉开层次；
@@ -101,6 +107,7 @@ async function copyMessage(): Promise<void> {
   opacity: 0.7;
 }
 
+.bubble--user .bubble__role,
 .bubble--assistant .bubble__role,
 .bubble--tool .bubble__role {
   color: var(--color-accent-strong);
@@ -183,13 +190,6 @@ async function copyMessage(): Promise<void> {
   color: var(--color-accent-strong);
   background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-soft));
   border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border));
-}
-
-/* 用户气泡（深色 accent 背景）：按钮已在气泡外，hover 时背景区相对气泡是浅色，
-   故用 on-accent 概念不再适用——统一走 accent-strong 即可。
-   但保留 hover 底色更柔：用 panel（比 panel-soft 略深一档）拉开层次。 */
-.bubble--user:hover .bubble__copy {
-  background: var(--color-panel);
 }
 
 /* 复制成功瞬间：accent 强色 + 拉满不透明度，给明确反馈 */
