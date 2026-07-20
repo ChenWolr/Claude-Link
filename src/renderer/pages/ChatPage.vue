@@ -7,6 +7,7 @@ import { useTaskStore } from '../stores/task-store';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
 import SessionToolbar from '../components/chat/SessionToolbar.vue';
+import ExportImageOverlay from '../components/chat/ExportImageOverlay.vue';
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
@@ -91,6 +92,7 @@ async function handleNewSession() {
   <section class="chat-page">
     <template v-if="store.activeSession">
       <MessageList :messages="store.messages" :streaming-content="displayContent" :streaming-thinking="displayThinking" :streaming-tool="displayTool" :sending="sending" />
+      <ExportImageOverlay />
 
       <div v-if="notice" class="notice">
         <span>⚠️ {{ notice }}</span>
