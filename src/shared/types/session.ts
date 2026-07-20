@@ -1,3 +1,5 @@
+import type { RenderableMessage } from './export-image';
+
 export interface Session {
   id: string;
   name: string;
@@ -16,26 +18,10 @@ export interface Session {
   lastContextWindow: number | null;
 }
 
-export interface Message {
-  id: string;
-  sessionId: string;
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string;
+export interface Message extends RenderableMessage {
+  // 数据库专用字段（导出图片渲染不需要，不进 RenderableMessage）：
+  // 原始 CLI/SDK 事件 JSON（审计用，体积大）。
   rawEvent: string | null;
-  eventType: string | null;
-  costUsd: number | null;
-  durationMs: number | null;
+  // 任务队列发起的消息所属 taskId（任务执行链路用）。
   parentTaskId: string | null;
-  // 过程类型最小颗粒度分类键（见 src/shared/process-kind.ts）。text 正文为 null。
-  processKind: string | null;
-  // 子 agent 归属：来自 assistant 消息的 parent_tool_use_id。非空 → 该消息属子 agent，
-  // 不进主聊天流，抽到右侧「子Agent」Tab；主流程对应位置只留锚点。
-  parentAgentId: string | null;
-  // 工具调用 ID：tool_use 与其 tool_result 配对合并的依据。
-  toolUseId: string | null;
-  // 子 agent 的友好标题（Agent/Task 工具 input.description），用于 Tab 分组标题与锚点。
-  title: string | null;
-  // 工具结果是否失败（tool_result.is_error）。仅 tool 角色消息有意义，其余恒为 false。
-  isError: boolean;
-  createdAt: string;
 }

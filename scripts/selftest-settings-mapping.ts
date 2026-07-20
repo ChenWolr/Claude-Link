@@ -369,6 +369,7 @@ console.log('\n=== 26) Review 修复：中断标记按 query 实例、abort 跨�
 console.log('\n=== 27) 过程分组计划契约：类型/DB/透传/分组/子AgentTab/无诊断日志 ===');
 {
   const sess = readRel('src/shared/types/session.ts');
+  const ei = readRel('src/shared/types/export-image.ts');
   const mig = readRel('src/main/database/migrations.ts');
   const repo = readRel('src/main/database/repositories/message-repo.ts');
   const cli = readRel('src/shared/types/cli.ts');
@@ -384,9 +385,9 @@ console.log('\n=== 27) 过程分组计划契约：类型/DB/透传/分组/子Age
   const ss = readRel('src/renderer/stores/session-store.ts');
   const uc = readRel('src/renderer/composables/use-chat.ts');
 
-  // B2 数据模型 + DB
-  check('Message 含 processKind/parentAgentId/toolUseId/title',
-    sess.includes('processKind') && sess.includes('parentAgentId') && sess.includes('toolUseId') && sess.includes('title'));
+  // B2 数据模型 + DB（v3 导出：渲染字段迁入 RenderableMessage，Message extends 它）
+  check('RenderableMessage 含 processKind/parentAgentId/toolUseId/title 且 Message 扩展它',
+    ei.includes('processKind') && ei.includes('parentAgentId') && ei.includes('toolUseId') && ei.includes('title') && sess.includes('extends RenderableMessage'));
   check('messages 表增量加 4 列迁移（幂等自愈）',
     mig.includes('ALTER TABLE messages ADD COLUMN process_kind') && mig.includes('parent_agent_id') && mig.includes('tool_use_id'));
   check('createMessage 用 options 对象 + 读写 4 列',
@@ -633,6 +634,7 @@ console.log('\n=== 32) CC 回复形态补全：code_execution / is_error / api_r
   const mig = readRel('src/main/database/migrations.ts');
   const repo = readRel('src/main/database/repositories/message-repo.ts');
   const sess = readRel('src/shared/types/session.ts');
+  const ei = readRel('src/shared/types/export-image.ts');
   const sb = readRel('src/main/modules/sdk-backend.ts');
   const tcb = readRel('src/renderer/components/chat/ToolCallBlock.vue');
 
@@ -650,7 +652,7 @@ console.log('\n=== 32) CC 回复形态补全：code_execution / is_error / api_r
 
   // 3. tool_result.is_error 全链路（类型→DB→repo→双路解析→UI 标红）
   check('cli.ts tool_result 含 is_error 字段', cli.includes('is_error?: boolean'));
-  check('Message 含 isError 字段', sess.includes('isError'));
+  check('Message 含 isError 字段', ei.includes('isError') && sess.includes('extends RenderableMessage'));
   check('messages 表幂等加 is_error 列', mig.includes('ALTER TABLE messages ADD COLUMN is_error'));
   check('repo MessageRow/toMessage/createMessage 贯穿 is_error', repo.includes('is_error') && repo.includes('isError'));
   check('persistMessageParts 提取 is_error 落库', cs.includes('part.is_error === true'));
@@ -1064,10 +1066,11 @@ console.log('\n=== 43) 浅色主题系统契约（openhanako 真实浅色色板�
   check('影阶 elevation-1 浅色化（alpha<0.15）', /--elevation-1:\s*0 1px 2px rgba\(0,\s*0,\s*0,\s*0\.0[0-9]\)/.test(vars));
   check('ring-light 改为底部暗边（非白色顶光）', /--ring-light:\s*inset 0 -1px 0/.test(vars));
 
-  // —— App.vue 注入逻辑 ——
+  // —— 主题注入逻辑（v3 抽到共享 apply-theme.ts，App.vue 复用）——
   const app = readRel('src/renderer/App.vue');
-  check('App.vue 注入 onAccent', app.includes("setProperty('--color-on-accent'"));
-  check('App.vue 绑定 colorScheme 到 isDark', /colorScheme\s*=\s*palette\.isDark/.test(app));
+  const applyTheme = readRel('src/renderer/utils/apply-theme.ts');
+  check('apply-theme 注入 onAccent（App.vue 复用）', applyTheme.includes("setProperty('--color-on-accent'") && app.includes('applyThemePalette'));
+  check('apply-theme 绑定 colorScheme 到 isDark', /colorScheme\s*=\s*palette\.isDark/.test(applyTheme));
 
   // —— ConfigPage.vue 注入逻辑 ——
   const cp = readRel('src/renderer/pages/ConfigPage.vue');
