@@ -52,6 +52,14 @@ export const IPC_CHANNELS = {
   QUEUE_GET_STATE: 'queue:getState',
   QUEUE_EVENT: 'queue:event',
   QUEUE_USER_MESSAGE: 'queue:userMessage',
+  // 会话导出 JPEG 长图（v3）。可见 renderer ↔ 主进程 ↔ 隐藏 export renderer。
+  EXPORT_IMAGE_START: 'export-image:start',
+  EXPORT_IMAGE_PROGRESS: 'export-image:progress',
+  EXPORT_RENDER_GET_JOB: 'export-render:getJob',
+  EXPORT_RENDER_CAPTURE_SELF: 'export-render:captureSelf',
+  EXPORT_RENDER_PROGRESS: 'export-render:progress',
+  EXPORT_RENDER_WRITE_PAGE_CHUNK: 'export-render:writePageChunk',
+  EXPORT_RENDER_FINISH: 'export-render:finish',
 } as const;
 
 export const DEFAULT_TASK_DELAY_SECONDS = 60;

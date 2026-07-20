@@ -16,6 +16,8 @@ import {
 } from '../shared/constants';
 import { loadWindowSize, trackWindowSize } from './modules/window-state';
 import { setupLinkGuard } from './modules/link-guard';
+import { cleanupStaleTempDirs, disposeExportImageOnQuit } from './modules/export-image-manager';
+import { runExportSmokeIfRequested } from './modules/export-image-smoke';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -75,6 +77,9 @@ app.whenReady().then(async () => {
     // (since their processes died with the app)
     taskRepo.resetRunningTasks();
 
+    // 清理上次强退残留的导出临时目录（> 24h）。
+    cleanupStaleTempDirs().catch((e) => logger.error('cleanupStaleTempDirs failed', e));
+
     // Detect Claude Code CLI
     await detectCli();
 
@@ -84,6 +89,17 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+
+  // 阶段二 fixture smoke：env CLAUDE_LINK_EXPORT_SMOKE 指定会话种子消息条数时自动跑一次导出。
+  if (process.env.CLAUDE_LINK_EXPORT_SMOKE) {
+    logger.info('[smoke] hook scheduled');
+    setTimeout(() => {
+      logger.info('[smoke] hook firing');
+      runExportSmokeIfRequested(mainWindow?.webContents).catch((e) =>
+        logger.error('export smoke failed', e),
+      );
+    }, 1500);
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -103,6 +119,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   killAllProcesses();
+  void disposeExportImageOnQuit();
   closeConnection();
 });
 
