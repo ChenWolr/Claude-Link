@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Message } from '../../../shared/types/session';
+import type { RenderableMessage } from '../../../shared/types/export-image';
 import { getConnection } from '../connection';
 import { normalizeDbTime } from '../../../shared/time';
 
@@ -135,4 +136,53 @@ export function getMessagesByTask(taskId: string): Message[] {
     .prepare('SELECT * FROM messages WHERE parent_task_id = ? ORDER BY created_at ASC, rowid ASC')
     .all(taskId) as MessageRow[];
   return rows.map(toMessage);
+}
+
+// —— 导出专用 projection ——
+// 只选择 RenderableMessage 字段（不含 raw_event / parent_task_id 等图片渲染不需要的大列），
+// 沿用与聊天历史一致的 ORDER BY created_at, rowid 稳定顺序。仅主流程（parent_agent_id IS NULL）
+// 由调用方过滤；此处返回全部，让 snapshot 组装统一处理。
+interface ExportMessageRow {
+  id: string;
+  session_id: string;
+  role: Message['role'];
+  content: string;
+  event_type: string | null;
+  cost_usd: number | null;
+  duration_ms: number | null;
+  process_kind: string | null;
+  parent_agent_id: string | null;
+  tool_use_id: string | null;
+  title: string | null;
+  is_error: number;
+  created_at: string;
+}
+
+function toRenderable(row: ExportMessageRow): RenderableMessage {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    role: row.role,
+    content: row.content,
+    eventType: row.event_type,
+    costUsd: row.cost_usd,
+    durationMs: row.duration_ms,
+    processKind: row.process_kind,
+    parentAgentId: row.parent_agent_id,
+    toolUseId: row.tool_use_id,
+    title: row.title,
+    isError: !!row.is_error,
+    createdAt: normalizeDbTime(row.created_at),
+  };
+}
+
+export function getRenderableMessagesBySession(sessionId: string): RenderableMessage[] {
+  const rows = getConnection()
+    .prepare(
+      `SELECT id, session_id, role, content, event_type, cost_usd, duration_ms,
+              process_kind, parent_agent_id, tool_use_id, title, is_error, created_at
+       FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`,
+    )
+    .all(sessionId) as ExportMessageRow[];
+  return rows.map(toRenderable);
 }
