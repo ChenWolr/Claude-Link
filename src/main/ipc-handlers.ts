@@ -32,6 +32,7 @@ import * as messageRepo from './database/repositories/message-repo';
 import * as taskRepo from './database/repositories/task-repo';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { listChanges, getChangeDiff } from './modules/changes-panel';
+import { registerExportImageHandlers } from './modules/export-image-manager';
 
 let mainWindow: BrowserWindow;
 
@@ -260,4 +261,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     continueWithUserMessage(sessionId, message, mainWindow);
     return getQueueState(sessionId);
   });
+
+  // 会话导出 JPEG 长图（v3）：注册主窗口开始 + 隐藏 renderer 专用 IPC。
+  registerExportImageHandlers();
 }
