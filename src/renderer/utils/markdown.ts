@@ -5,7 +5,7 @@ import taskLists from 'markdown-it-task-lists';
 import markdownItKatex from '@traptitech/markdown-it-katex';
 import { isAllowedMarkdownImageUrl } from '../../shared/external-links';
 
-export type MarkdownProfile = 'rich' | 'static';
+export type MarkdownProfile = 'rich' | 'static' | 'export';
 
 type MarkdownEnv = { profile?: MarkdownProfile };
 
@@ -92,7 +92,8 @@ md.renderer.rules.fence = (tokens, idx, options, env) => {
   if (language === 'diff' || language === 'patch') {
     return renderDiffBlock(code, language || 'diff');
   }
-  if (language === 'mermaid' && profile === 'rich') {
+  if (language === 'mermaid' && profile !== 'static') {
+    // rich 与 export 都渲染 Mermaid；仅 static 把它当代码块。
     return renderMermaidBlock(code);
   }
 
@@ -145,8 +146,9 @@ md.renderer.rules.image = (tokens, idx, options, env, self) => {
   const token = tokens[idx];
   const profile = (env as MarkdownEnv | undefined)?.profile ?? 'rich';
   // 链接内图片不加 md-img：避免 <a> 内嵌按钮化（role=button）+ 点击 preventDefault 劫持链接导航。
+  // export profile 不加 md-img（导出窗口无灯箱），并 eager 加载保证捕获前就绪。
   if (profile === 'rich' && !isImageInsideLink(tokens, idx)) token.attrSet('class', 'md-img');
-  token.attrSet('loading', 'lazy');
+  token.attrSet('loading', profile === 'export' ? 'eager' : 'lazy');
   return defaultImageRule
     ? defaultImageRule(tokens, idx, options, env, self)
     : self.renderToken(tokens, idx, options);

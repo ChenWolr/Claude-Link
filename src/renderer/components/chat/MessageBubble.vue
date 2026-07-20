@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import type { Message } from '../../../shared/types/session';
+import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 
-const props = defineProps<{ message: Message }>();
+const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>();
 
-const renderedContent = computed(() => renderMarkdown(props.message.content));
+// 导出模式用 export profile：Mermaid 渲染、代码换行、图片 eager、无灯箱按钮化。
+const renderedContent = computed(() => renderMarkdown(props.message.content, props.exportMode ? 'export' : 'rich'));
 
 // 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）
 const copied = ref(false);
@@ -32,7 +33,7 @@ async function copyMessage(): Promise<void> {
     <!-- 仅 user / assistant 消息提供复制按钮；tool / system 不需要。
          流式布局放在内容正下方独立一行，避免与正文重叠。 -->
     <button
-      v-if="message.role === 'user' || message.role === 'assistant'"
+      v-if="!exportMode && (message.role === 'user' || message.role === 'assistant')"
       type="button"
       class="bubble__copy"
       :title="copied ? '已复制' : '复制消息'"

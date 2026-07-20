@@ -1188,7 +1188,7 @@ function testChatBlockKeyboardAccessibility(): void {
   assert.ok(headTag.startsWith('<button'), 'ToolCallBlock head 须是原生 button');
   assert.ok(hasAttribute(headTag, ':aria-expanded', 'expanded'), 'ToolCallBlock head 须暴露 aria-expanded');
   assert.ok(hasAttribute(headTag, ':aria-controls', 'bodyId'), 'ToolCallBlock head 须用 aria-controls 指向 body');
-  assert.ok(hasAttribute(headTag, '@click', 'expanded = !expanded'), 'ToolCallBlock head 须切换 expanded');
+  assert.ok(hasAttribute(headTag, '@click', 'toggleExpand'), 'ToolCallBlock head 须切换 expanded（toggleExpand，导出模式守卫）');
   assert.ok(anchorTag.startsWith('<button'), '子 Agent anchor 须是原生 button');
   assert.ok(hasAttribute(anchorTag, '@click', 'focusSubAgent'), '子 Agent anchor 须调用 focusSubAgent');
   assert.equal((controls.match(/<button\b/g) ?? []).length, 2, 'ToolCallBlock 控件 wrapper 内须恰有 head 与子 Agent 两个 button');

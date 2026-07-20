@@ -10,7 +10,7 @@
 //   - 少于 MIN_FOLD 条过程的 fold 不折叠（直接展开行式），避免很短也收起；
 //   - 调用方负责先按 parentAgentId 过滤（主流程只取 null，子 Agent 面板只取非 null）。
 
-import type { Message } from '../../shared/types/session';
+import type { RenderableMessage } from '../../shared/types/export-image';
 import { isRedundantSystemProcessKind } from '../../shared/system-info';
 
 export interface FoldStats {
@@ -20,14 +20,15 @@ export interface FoldStats {
   running: boolean;
 }
 
+// RenderItem 基于 RenderableMessage 最小契约；完整 Message 是其超集，调用方传 Message[] 仍兼容。
 export type RenderItem =
-  | { key: string; type: 'message'; message: Message }
-  | { key: string; type: 'fold'; messages: Message[]; stats: FoldStats };
+  | { key: string; type: 'message'; message: RenderableMessage }
+  | { key: string; type: 'fold'; messages: RenderableMessage[]; stats: FoldStats };
 
 /** 连续多少条过程才折叠成居中摘要（少于则直接展开行式）。对齐 openhanako MIN_PROCESS_MESSAGES_TO_FOLD。 */
 export const MIN_FOLD = 3;
 
-export function computeStats(messages: Message[]): FoldStats {
+export function computeStats(messages: RenderableMessage[]): FoldStats {
   let toolCount = 0;
   let thinkingCount = 0;
   const uses = new Set<string>();
@@ -47,7 +48,7 @@ export function computeStats(messages: Message[]): FoldStats {
   return { toolCount, thinkingCount, running };
 }
 
-export function groupMessagesForRender(messages: Message[]): RenderItem[] {
+export function groupMessagesForRender(messages: RenderableMessage[]): RenderItem[] {
   const items: RenderItem[] = [];
   let fold: Extract<RenderItem, { type: 'fold' }> | null = null;
   const close = () => {
