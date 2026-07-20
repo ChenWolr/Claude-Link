@@ -22,6 +22,16 @@ export default defineConfig({
         '@shared': resolve('src/shared'),
         '@': resolve('src/renderer')
       }
+    },
+    build: {
+      rollupOptions: {
+        // 双 renderer HTML 入口：主窗口 index.html + 隐藏导出窗口 export.html。
+        // preload 仍为单入口（见 preload 配置），在两种 surface 下自包含加载。
+        input: {
+          index: resolve('src/renderer/index.html'),
+          export: resolve('src/renderer/export.html')
+        }
+      }
     }
   }
 })
