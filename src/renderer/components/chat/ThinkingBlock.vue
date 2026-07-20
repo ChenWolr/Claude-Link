@@ -4,9 +4,14 @@
 import { computed, ref, useId } from 'vue';
 import { renderMarkdown } from '../../utils/markdown';
 
-const props = defineProps<{ content: string; streaming?: boolean; sealed?: boolean; defaultOpen?: boolean }>();
+const props = defineProps<{ content: string; streaming?: boolean; sealed?: boolean; defaultOpen?: boolean; exportMode?: boolean }>();
 
-const open = ref(props.defaultOpen ?? !!props.streaming);
+// 导出模式：思考详情保持默认闭合、不可展开。
+const open = ref(props.exportMode ? false : (props.defaultOpen ?? !!props.streaming));
+function toggle(): void {
+  if (props.exportMode) return;
+  open.value = !open.value;
+}
 // 思考正文唯一 id，供 aria-controls 指向（多实例不能硬编码）。
 const bodyId = useId();
 const rendered = computed(() => renderMarkdown(props.content, 'static'));
@@ -20,7 +25,7 @@ const active = computed(() => props.streaming || props.sealed === false);
 
 <template>
   <div class="think-row">
-    <button type="button" class="think-row__head" :class="{ 'think-row__head--open': open }" :aria-expanded="open" :aria-controls="bodyId" @click="open = !open">
+    <button type="button" class="think-row__head" :class="{ 'think-row__head--open': open, 'think-row__head--readonly': exportMode }" :aria-expanded="open" :aria-controls="bodyId" @click="toggle">
       <span class="think-row__icon">💭</span>
       <span class="think-row__label">{{ active ? '思考中' : '思考完成' }}</span>
       <span v-if="active" class="think-row__dots" aria-hidden="true"><span></span><span></span><span></span></span>

@@ -17,6 +17,10 @@ const props = defineProps<{
   streamingThinking: string;
   streamingTool: string;
   sending?: boolean;
+  // 导出模式：直接渲染稳定 RenderItem 切片（隐藏 renderer 预分组好），不重复分组、不流式去重、
+  // 不自动滚底、不短会话贴底、关闭交互。exportItems 存在时优先用它。
+  exportMode?: boolean;
+  exportItems?: RenderItem[];
 }>();
 
 const sessionStore = useSessionStore();
@@ -47,6 +51,8 @@ const mainFlowMessages = computed(() => props.messages.filter((m) => !m.parentAg
 // 流式为空（非流式端点）则正常显示已落库内容。工具/系统组始终显示。回合结束(sending=false)
 // 流式清空，已落库 text/thinking 接管显示——多段正文按原位穿插呈现（设计决策 #6）。
 const renderItems = computed<RenderItem[]>(() => {
+  // 导出模式：渲染隐藏 renderer 预分组好的稳定切片，不重复分组、不流式去重。
+  if (props.exportItems) return props.exportItems;
   const all = groupMessagesForRender(mainFlowMessages.value);
   if (!props.sending) return all;
   const hideText = props.streamingContent !== '';
@@ -91,10 +97,11 @@ const activeFoldId = computed<string | null>(() => {
 });
 
 // 只在消息数量变化时自动滚底（新消息到达）。流式内容更新时不强制跳底，
-// 让用户可以手动向上滚动查看历史。
+// 让用户可以手动向上滚动查看历史。导出模式禁用（隐藏窗口不滚底）。
 watch(
   () => props.messages.length,
   async () => {
+    if (props.exportMode) return;
     await nextTick();
     if (container.value) {
       container.value.scrollTop = container.value.scrollHeight;
@@ -150,7 +157,7 @@ function handleCopyClick(event: MouseEvent): void {
 </script>
 
 <template>
-  <div class="message-list">
+  <div class="message-list" :class="{ 'message-list--export': exportMode }">
     <div ref="container" class="message-list__scroller" @click="handleCopyClick">
       <template v-for="(item, idx) in renderItems" :key="item.key">
         <ProcessGroup
@@ -159,8 +166,9 @@ function handleCopyClick(event: MouseEvent): void {
           :messages="item.messages"
           :stats="item.stats"
           :active="item.key === activeFoldId"
+          :exportMode="exportMode"
         />
-        <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" />
+        <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" :exportMode="exportMode" />
       </template>
       <div v-if="sending || streamingContent || streamingThinking || streamingTool || sessionStore.activeStalledInfo" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
         <!-- 问题 1+2：实时计时器——整个 sending 期间常驻；动画点在整个工作阶段跳动。 -->
@@ -233,6 +241,31 @@ function handleCopyClick(event: MouseEvent): void {
 .message-list__scroller::before {
   content: '';
   margin-bottom: auto;
+}
+
+/* 导出模式：自然文档高度、不滚底、不贴底伪元素、关闭动画/光标/选择。
+ * 覆盖主聊天样式（height:100%/overflow:hidden → 自然高度），由隐藏 export renderer 复用同一组件。 */
+.message-list--export {
+  flex: none;
+  min-height: 0;
+}
+.message-list--export .message-list__scroller {
+  height: auto;
+  overflow: visible;
+  padding: 0;
+  gap: 0.25rem;
+}
+.message-list--export .message-list__scroller::before {
+  display: none;
+}
+.message-list--export :deep(*) {
+  animation: none !important;
+  transition: none !important;
+  caret-color: transparent;
+}
+.message-list--export :deep(.code-block pre) {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* 问题 1+2：实时计时器胶囊——左对齐（assistant 侧），整个回复期间常驻。 */

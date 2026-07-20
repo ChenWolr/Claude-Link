@@ -4,7 +4,7 @@
 // 「✨ Claude 忙活了一阵子 · N 个工具 · N 次思考 ›」，展开态是半透明 panel 内的行式列表。
 // 少于 MIN_FOLD 条过程不折叠（直接展开行式）。对齐 openhanako ProcessFoldBlock。
 import { ref, computed, useId } from 'vue';
-import type { Message } from '../../../shared/types/session';
+import type { RenderableMessage } from '../../../shared/types/export-image';
 import { isFoldable, type FoldStats } from '../../utils/group-messages';
 import { useSessionStore } from '../../stores/session-store';
 import ThinkingBlock from './ThinkingBlock.vue';
@@ -25,9 +25,10 @@ const backgroundToolUseIds = computed(() => {
 });
 
 const props = defineProps<{
-  messages: Message[];
+  messages: RenderableMessage[];
   stats: FoldStats;
   active?: boolean;
+  exportMode?: boolean;
 }>();
 
 const foldable = computed(() => isFoldable(props.messages.length));
@@ -42,6 +43,7 @@ const open = computed(() => {
   return manualOpen.value ?? (props.active || !foldable.value);
 });
 function toggle(): void {
+  if (props.exportMode) return; // 导出模式不可折叠/展开，保持默认可见态。
   const next = !open.value;
   manualOpen.value = next;
   manualClosed.value = !next;
@@ -58,14 +60,14 @@ const summary = computed(() => {
 interface GroupItem {
   key: string;
   type: 'thinking' | 'tool' | 'system';
-  msg?: Message;
-  use?: Message | null;
-  result?: Message | null;
+  msg?: RenderableMessage;
+  use?: RenderableMessage | null;
+  result?: RenderableMessage | null;
 }
 
 // 按 toolUseId 把 tool_use 与 tool_result 配对成一项（行式合并）；保留原顺序。
 const items = computed<GroupItem[]>(() => {
-  const resultByToolUseId = new Map<string, Message>();
+  const resultByToolUseId = new Map<string, RenderableMessage>();
   for (const m of props.messages) {
     if (m.eventType === 'tool_result' && m.toolUseId) resultByToolUseId.set(m.toolUseId, m);
   }
@@ -114,6 +116,7 @@ const items = computed<GroupItem[]>(() => {
           v-if="item.type === 'thinking'"
           :content="item.msg!.content"
           :sealed="!stats.running"
+          :exportMode="exportMode"
         />
         <div v-else-if="item.type === 'system'" class="process-fold__system">
           <span>{{ item.msg!.content }}</span>
@@ -125,6 +128,7 @@ const items = computed<GroupItem[]>(() => {
           :running="stats.running && !item.result"
           :elapsedSeconds="item.use?.toolUseId ? store.toolProgress[item.use.toolUseId] : undefined"
           :backgroundRunning="item.use?.toolUseId ? backgroundToolUseIds.has(item.use.toolUseId) : false"
+          :exportMode="exportMode"
         />
       </template>
     </div>

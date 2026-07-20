@@ -4,7 +4,7 @@
 // 点击展开看完整入参与结果（保留 claude-link 的详情能力 + 长结果渐进披露）。
 // 子 Agent（Agent/Task）行带「查看过程 →」锚点，点击定位右侧子Agent Tab。
 import { computed, ref, watch, nextTick, useId, onMounted, onBeforeUnmount } from 'vue';
-import type { Message } from '../../../shared/types/session';
+import type { RenderableMessage } from '../../../shared/types/export-image';
 import { isDiffContent, renderDiffHtml, renderMarkdown } from '../../utils/markdown';
 import { synthesizeToolDiff } from '../../utils/tool-diff';
 import { getProcessKindMeta, summarizeToolUse } from '../../utils/process-kind';
@@ -12,15 +12,21 @@ import { SUB_AGENT_TOOL_NAMES } from '../../../shared/process-kind';
 import { useSessionStore } from '../../stores/session-store';
 
 const props = defineProps<{
-  use: Message | null;
-  result: Message | null;
+  use: RenderableMessage | null;
+  result: RenderableMessage | null;
   running?: boolean;
   elapsedSeconds?: number;
   backgroundRunning?: boolean;
+  exportMode?: boolean;
 }>();
 
 const store = useSessionStore();
+// 导出模式：工具详情保持默认闭合、不可展开。
 const expanded = ref(false);
+function toggleExpand(): void {
+  if (props.exportMode) return;
+  expanded.value = !expanded.value;
+}
 const bodyId = useId();
 
 const useParsed = computed<{ name?: string; input?: unknown } | null>(() => {
@@ -60,7 +66,8 @@ const diffCounts = computed(() =>
 const rootRef = ref<HTMLElement | null>(null);
 const containerWidth = ref(Number.POSITIVE_INFINITY);
 const SIDE_BY_SIDE_MIN_WIDTH = 520;
-const useSideBySide = computed(() => containerWidth.value >= SIDE_BY_SIDE_MIN_WIDTH);
+// 导出模式强制 line-by-line 单栏（800px 列不会触发 520px 回退）。
+const useSideBySide = computed(() => !props.exportMode && containerWidth.value >= SIDE_BY_SIDE_MIN_WIDTH);
 let resizeObserver: ResizeObserver | null = null;
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !rootRef.value) return;
@@ -89,7 +96,7 @@ const displayedSource = computed(() => {
   return resultContent.value;
 });
 
-const costMsg = computed<Message | null>(() => {
+const costMsg = computed<RenderableMessage | null>(() => {
   if (props.use && props.use.costUsd != null) return props.use;
   if (props.result && props.result.costUsd != null) return props.result;
   return null;
@@ -119,7 +126,7 @@ watch([expanded, displayedSource], () => {
 <template>
   <div ref="rootRef" class="tool-row">
     <div class="tool-row__controls">
-      <button type="button" class="tool-row__head" :aria-expanded="expanded" :aria-controls="bodyId" @click="expanded = !expanded">
+      <button type="button" class="tool-row__head" :aria-expanded="expanded" :aria-controls="bodyId" @click="toggleExpand">
         <span class="tool-row__icon">{{ meta.icon }}</span>
         <span class="tool-row__desc">{{ meta.label }}</span>
         <span v-if="detail" class="tool-row__detail">{{ detail }}</span>
@@ -135,7 +142,7 @@ watch([expanded, displayedSource], () => {
           <span v-else-if="result" class="tool-row__done">✓</span>
         </span>
       </button>
-      <button v-if="isSubAgent && use?.toolUseId" type="button" class="tool-row__anchor" @click="focusSubAgent">查看过程 →</button>
+      <button v-if="!exportMode && isSubAgent && use?.toolUseId" type="button" class="tool-row__anchor" @click="focusSubAgent">查看过程 →</button>
     </div>
     <div v-show="expanded" :id="bodyId" class="tool-row__body">
       <div v-if="useParsed" class="tool-row__json">
@@ -149,7 +156,7 @@ watch([expanded, displayedSource], () => {
         <div v-if="toolDiff?.truncated" class="tool-row__truncated">
           差异过大（{{ toolDiff.changeCount }} 行变更），仅显示前部分
         </div>
-        <div v-if="resultOverflow" class="tool-row__result-fade">
+        <div v-if="resultOverflow && !exportMode" class="tool-row__result-fade">
           <button type="button" class="tool-row__expand" @click.stop="resultExpanded = !resultExpanded">
             {{ resultExpanded ? '收起 ▴' : (resultLineCount > 1 ? `展开全部（${resultLineCount} 行）▾` : '展开全部 ▾') }}
           </button>
