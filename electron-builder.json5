@@ -34,6 +34,9 @@
   // 解包后 worker 的 __dirname 自动指向 app.asar.unpacked/main，require('pngjs') 从 app.asar.unpacked/node_modules 解析。
   asarUnpack: [
     "**/exportImageCodecWorker.js",
+    // worker 入口由 Rollup 复用 shared/export-image 的 chunk；worker 位于 app.asar.unpacked 后，
+    // 相对 require('./chunks/*.js') 也必须同目录解包，避免 packaged 下 MODULE_NOT_FOUND。
+    "**/out/main/chunks/**",
     "node_modules/pngjs/**",
   ],
 

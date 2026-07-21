@@ -149,8 +149,11 @@ function resetWatchdog(reason: string): void {
 let pendingWorkerReply: { resolve: (m: CodecWorkerMessage) => void; reject: (e: Error) => void } | null = null;
 
 function workerEntryPath(): string {
-  // dev: out/main；packaged: app.asar.unpacked/main（asarUnpack 后 __dirname 自动指向解包路径）。
-  return join(__dirname, 'exportImageCodecWorker.js');
+  // dev: __dirname=out/main，worker 同目录真实文件。
+  // packaged: __dirname=.../resources/app.asar/out/main。new Worker() 不一定走 Electron 的 asar
+  // 重定向（electron/electron#18540），故显式指向 asarUnpack 解包出的真实文件 app.asar.unpacked。
+  // dev 路径无 'app.asar' 字段，replace 为 no-op。
+  return join(__dirname, 'exportImageCodecWorker.js').replace('app.asar', 'app.asar.unpacked');
 }
 
 function ensureCodecWorker(): Worker | null {
