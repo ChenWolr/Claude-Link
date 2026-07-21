@@ -7,7 +7,13 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        external: ['better-sqlite3']
+        external: ['better-sqlite3'],
+        // v4.1 PNG codec worker：作为独立 rollup input 产出单独文件，供主进程 new Worker(path) 加载。
+        // packaged 内 worker 无法从 asar 加载（electron#18540）→ electron-builder.json5 asarUnpack 解包。
+        input: {
+          index: resolve('src/main/index.ts'),
+          exportImageCodecWorker: resolve('src/main/modules/export-image-codec-worker.ts')
+        }
       }
     }
   },

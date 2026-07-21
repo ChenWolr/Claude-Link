@@ -63,16 +63,16 @@ export const useExportImageStore = defineStore('export-image', {
         this.scheduleReset();
       }
     },
-    /** 主动发起导出（来自 AppHeader 分享按钮）。 */
-    async start(sessionId: string, sessionName: string): Promise<void> {
+    /** 主动发起导出（来自 AppHeader 分享按钮，格式由 ExportImageFormatDialog 选定）。 */
+    async start(sessionId: string, sessionName: string, format: 'jpeg' | 'png'): Promise<void> {
       if (this.running) return; // 全局只允许一个导出 job
       this.$reset();
       this.phase = 'preparing';
       this.sessionId = sessionId;
       this.sessionName = sessionName;
-      this.message = '正在准备会话…';
+      this.message = format === 'png' ? '正在准备会话（PNG 长图）…' : '正在准备会话…';
       try {
-        const r = await window.claudeLink.startImageExport(sessionId);
+        const r = await window.claudeLink.startImageExport(sessionId, format);
         if (!r.ok) {
           this.phase = 'error';
           this.message = r.message;

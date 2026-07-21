@@ -5,26 +5,42 @@
 
 import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import { mkdtemp, readdir, stat, rm } from 'fs/promises';
-import { constants as fsConstants, openSync, closeSync, writeSync, copyFileSync, unlinkSync, existsSync } from 'fs';
+import { constants as fsConstants, openSync, closeSync, writeSync, copyFileSync, unlinkSync, existsSync, statSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
+import { Worker } from 'worker_threads';
 import type { WebContents } from 'electron';
 import { IPC_CHANNELS, THEME_PALETTES } from '../../shared/constants';
 import {
   JPEG_PAGE_MAX_BYTES,
   buildExportFilename,
+  buildSegmentCopyGeometry,
+  checkPngMemoryBudget,
   checkSnapshotBudget,
   computeProgressPercent,
+  validatePngCaptureRequest,
+  validatePngFinishRequest,
 } from '../../shared/export-image';
 import type {
   CaptureSelfRequest,
   CaptureSelfResponse,
+  CodecMessage,
+  CodecWorkerMessage,
+  ExportImageFormat,
   ExportImagePhase,
   ExportImageProgressPayload,
   ExportImageResult,
   ExportJobSnapshot,
+  ExportPageBeginRequest,
+  ExportPageBeginResponse,
+  ExportPageFinishRequest,
+  ExportPageFinishResponse,
   ExportRenderFinishPayload,
   PageChunkPayload,
+  PngCaptureSelfRequest,
+  PngCaptureSelfResponse,
+  PngProbeSelfRequest,
+  PngProbeSelfResponse,
   RenderableMessage,
 } from '../../shared/types/export-image';
 import { getConfig } from './config-manager';
@@ -35,6 +51,9 @@ import { logger } from '../utils/logger';
 const SEGMENT_PNG_MAX_BYTES = 64 * 1024 * 1024; // 单段 PNG 字节上限
 const TEMP_PREFIX = 'claude-link-export-';
 const STALE_DIR_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+// R3 看门狗：JPEG 沿用固定 90s；PNG 长图按段 ack/页保存重置（慢但有进展不误杀），绝对硬顶防真死循环。
+const WATCHDOG_RESET_MS = 90 * 1000;       // 每次段 ack/页保存后重置的窗口
+const WATCHDOG_ABSOLUTE_MS = 5 * 60 * 1000; // 单 job 绝对硬顶（5 分钟）
 
 interface PageFile {
   path: string;
@@ -44,6 +63,20 @@ interface PageFile {
   lastSequence: number;
 }
 
+// PNG 单页进行态：主进程冻结的几何/段推进状态，worker 只接收已校验几何。
+interface PngPageState {
+  page: number;
+  pageHeightCss: number;
+  viewportWidthCss: number;
+  viewportHeightCss: number;
+  expectedCursorCss: number;   // 期望的下一段 cursor（容差 ±1/100 CSS px）
+  nextSegment: number;         // 期望的下一段 segment 号
+  outputPath: string;          // 主进程生成的 page-XXXX.png 路径
+  bitmapWidthPx: number;       // probe 冻结物理宽（首段须一致）
+  scaleY: number;              // probe 冻结比例
+  totalHeightPx: number;       // round(pageHeightCss × scaleY)
+}
+
 interface ActiveJob {
   jobId: string;
   origin: WebContents;
@@ -51,11 +84,16 @@ interface ActiveJob {
   tempDir: string;
   phase: ExportImagePhase;
   snapshot: ExportJobSnapshot;
+  format: ExportImageFormat;
   pageFiles: Map<number, PageFile>;
+  // v4.1 PNG：worker 句柄 + 当前页状态（仅 PNG 路径用，JPEG 为 null）。
+  codecWorker: Worker | null;
+  currentPngPage: PngPageState | null;
   terminal: boolean;
   doneResolve?: (result: ExportImageResult) => void;
   doneReject?: (e: Error) => void;
-  finishTimer: NodeJS.Timeout;
+  finishTimer: NodeJS.Timeout;   // R3：reset 看门狗；超时触发 failJob
+  absoluteDeadlineMs: number;    // R3：绝对硬顶时间戳
 }
 
 let active: ActiveJob | null = null;
@@ -93,6 +131,253 @@ function isOriginSender(sender: WebContents): boolean {
 
 function isExportSender(sender: WebContents): boolean {
   return !!active && active.exportWindow.webContents === sender && !sender.isDestroyed();
+}
+
+// —— R3 看门狗：reset（段 ack/页保存触发）+ 绝对硬顶 ——
+function resetWatchdog(reason: string): void {
+  if (!active || active.terminal) return;
+  if (Date.now() >= active.absoluteDeadlineMs) {
+    void failJob(`导出超过绝对时限（${WATCHDOG_ABSOLUTE_MS / 1000}s）`);
+    return;
+  }
+  clearTimeout(active.finishTimer);
+  active.finishTimer = setTimeout(() => { void failJob(`导出段超时（${reason}后 ${WATCHDOG_RESET_MS / 1000}s 无进展）`); }, WATCHDOG_RESET_MS);
+}
+
+// —— codec worker 生命周期 ——
+// 单 slot 请求/回复配对：capture 单飞，主进程一次只发一个 segment/finish，worker 每消息必回一个。
+let pendingWorkerReply: { resolve: (m: CodecWorkerMessage) => void; reject: (e: Error) => void } | null = null;
+
+function workerEntryPath(): string {
+  // dev: out/main；packaged: app.asar.unpacked/main（asarUnpack 后 __dirname 自动指向解包路径）。
+  return join(__dirname, 'exportImageCodecWorker.js');
+}
+
+function ensureCodecWorker(): Worker | null {
+  if (!active) return null;
+  if (active.codecWorker) return active.codecWorker;
+  let w: Worker;
+  try {
+    w = new Worker(workerEntryPath());
+  } catch (e) {
+    void failJob(`codec worker 启动失败：${String((e as Error)?.message || e)}`);
+    return null;
+  }
+  w.on('message', (m: CodecWorkerMessage) => {
+    if (pendingWorkerReply) { const p = pendingWorkerReply; pendingWorkerReply = null; p.resolve(m); }
+    if (m.type === 'error') {
+      void failJob(`codec worker 错误：${m.code} — ${m.message}`);
+    } else if (m.type === 'segment-accepted' || m.type === 'page-saved') {
+      resetWatchdog(m.type);
+    }
+  });
+  w.on('error', (e) => {
+    if (pendingWorkerReply) { pendingWorkerReply.reject(e); pendingWorkerReply = null; }
+    void failJob(`codec worker error：${String((e as Error)?.message || e)}`);
+  });
+  w.on('exit', (code) => {
+    if (pendingWorkerReply) { pendingWorkerReply.reject(new Error(`worker exit ${code}`)); pendingWorkerReply = null; }
+    if (active && !active.terminal && code !== 0) {
+      void failJob(`codec worker 异常退出 code=${code}`);
+    }
+  });
+  active.codecWorker = w;
+  return w;
+}
+
+function terminateCodecWorker(): void {
+  if (!active?.codecWorker) return;
+  const w = active.codecWorker;
+  active.codecWorker = null;
+  pendingWorkerReply = null;
+  try { w.postMessage({ type: 'abort', jobId: active.jobId, page: active.currentPngPage?.page ?? 0, reason: 'cleanup' } satisfies CodecMessage); } catch { /* ignore */ }
+  setTimeout(() => { try { void w.terminate(); } catch { /* ignore */ } }, 200);
+}
+
+async function sendToWorker(msg: CodecMessage): Promise<CodecWorkerMessage> {
+  const w = ensureCodecWorker();
+  if (!w) throw new Error('codec worker 不可用');
+  return new Promise((resolve, reject) => {
+    pendingWorkerReply = { resolve, reject };
+    try { w.postMessage(msg); }
+    catch (e) { pendingWorkerReply = null; reject(e as Error); }
+  });
+}
+
+// —— 受控 DOM 几何读取：固定脚本字符串，不接受 renderer 传入 ——
+const DOM_GEOMETRY_SCRIPT = `(() => ({
+  scrollY: window.scrollY,
+  innerWidth: window.innerWidth,
+  innerHeight: window.innerHeight,
+  totalHeight: Math.max(
+    document.body.scrollHeight, document.body.offsetHeight,
+    document.documentElement.scrollHeight, document.documentElement.offsetHeight
+  )
+}))()`;
+
+interface DomGeometry { scrollY: number; innerWidth: number; innerHeight: number; totalHeight: number; }
+
+async function readExportDomGeometry(win: BrowserWindow): Promise<DomGeometry | { error: string }> {
+  if (win.isDestroyed()) return { error: 'window-gone' };
+  try {
+    const g = await win.webContents.executeJavaScript(DOM_GEOMETRY_SCRIPT, true) as DomGeometry;
+    if (![g.scrollY, g.innerWidth, g.innerHeight, g.totalHeight].every(Number.isFinite)) {
+      return { error: 'geometry 非有限' };
+    }
+    if (g.innerWidth <= 0 || g.innerHeight <= 0 || g.totalHeight <= 0) return { error: 'geometry 非正' };
+    return g;
+  } catch (e) {
+    return { error: String((e as Error)?.message || e) };
+  }
+}
+
+// —— PNG probe：渲染完整页 + 稳定后，读真实视口/位图比例（预算反推用）——
+async function pngProbeSelfImpl(_request: PngProbeSelfRequest): Promise<PngProbeSelfResponse> {
+  if (!active) return { ok: false, code: 'no-job', message: '没有进行中的导出任务' };
+  if (active.format !== 'png') return { ok: false, code: 'wrong-format', message: 'probe 仅 PNG 模式' };
+  const win = active.exportWindow;
+  if (win.isDestroyed()) return { ok: false, code: 'window-gone', message: '导出窗口已销毁' };
+  const g = await readExportDomGeometry(win);
+  if ('error' in g) return { ok: false, code: 'geometry', message: g.error };
+  const [w, h] = win.getContentSize();
+  const img = await win.webContents.capturePage({ x: 0, y: 0, width: w, height: h }, { stayHidden: true, stayAwake: true });
+  if (!img || img.isEmpty()) return { ok: false, code: 'empty-capture', message: 'probe capturePage 返回空图' };
+  const bmp = img.getSize();
+  const scaleY = bmp.height / g.innerHeight;
+  return { ok: true, viewportWidthCss: g.innerWidth, viewportHeightCss: g.innerHeight, bitmapWidthPx: bmp.width, bitmapHeightPx: bmp.height, scaleY };
+}
+
+// —— PNG begin page：读几何 + 建 outputPath + 起 worker + 下 begin ——
+async function pngBeginPageImpl(request: ExportPageBeginRequest): Promise<ExportPageBeginResponse> {
+  if (!active) return { ok: false, code: 'no-job', message: '没有进行中的导出任务' };
+  if (active.format !== 'png') return { ok: false, code: 'wrong-format', message: 'beginPage 仅 PNG 模式' };
+  if (request.format !== 'png') return { ok: false, code: 'bad-format', message: 'beginPage 请求格式非 png' };
+  if (!Number.isInteger(request.page) || request.page < 1) return { ok: false, code: 'bad-page', message: '非法页码' };
+  const win = active.exportWindow;
+  if (win.isDestroyed()) return { ok: false, code: 'window-gone', message: '导出窗口已销毁' };
+  const g = await readExportDomGeometry(win);
+  if ('error' in g) return { ok: false, code: 'geometry', message: g.error };
+
+  // 比例由本页 probe 冻结（若调用方未先 probe，则用 capturePage 一次实测兜底）。
+  const [cw, ch] = win.getContentSize();
+  const probe = await win.webContents.capturePage({ x: 0, y: 0, width: cw, height: ch }, { stayHidden: true, stayAwake: true });
+  if (!probe || probe.isEmpty()) return { ok: false, code: 'empty-capture', message: 'begin capturePage 返回空图' };
+  const bmp = probe.getSize();
+  const scaleY = bmp.height / g.innerHeight;
+  const totalHeightPx = Math.round(g.totalHeight * scaleY);
+  // 主进程权威执行 PNG 内存预算（不信任 renderer）。
+  const pngBudget = checkPngMemoryBudget(bmp.width, totalHeightPx);
+  if (!pngBudget.ok) {
+    return { ok: false, code: 'png-over-budget', message: `PNG 单页超内存预算：${pngBudget.reason}` } satisfies ExportPageBeginResponse;
+  }
+
+  const outputPath = join(active.tempDir, `page-${String(request.page).padStart(4, '0')}.png`);
+  active.currentPngPage = {
+    page: request.page,
+    pageHeightCss: g.totalHeight,
+    viewportWidthCss: g.innerWidth,
+    viewportHeightCss: g.innerHeight,
+    expectedCursorCss: 0,
+    nextSegment: 1,
+    outputPath,
+    bitmapWidthPx: bmp.width,
+    scaleY,
+    totalHeightPx,
+  };
+  resetWatchdog('beginPage');
+  const reply = await sendToWorker({
+    type: 'begin', jobId: active.jobId, page: request.page, outputPath,
+    pageHeightCss: g.totalHeight, viewportWidthCss: g.innerWidth, viewportHeightCss: g.innerHeight,
+    bitmapWidthPx: bmp.width, totalHeightPx,
+  });
+  if (reply.type !== 'begun') {
+    return { ok: false, code: reply.type === 'error' ? reply.code : 'worker', message: reply.type === 'error' ? reply.message : 'worker 未 begun' };
+  }
+  return { ok: true, page: request.page, pageHeightCss: g.totalHeight, viewportWidthCss: g.innerWidth, viewportHeightCss: g.innerHeight };
+}
+
+// —— PNG capture：主进程捕获 + toPNG + 几何 + 送 worker（不回 PNG bytes）——
+async function pngCaptureSelfImpl(request: PngCaptureSelfRequest): Promise<PngCaptureSelfResponse> {
+  if (!active) return { ok: false, code: 'no-job', message: '没有进行中的导出任务' };
+  const pg = active.currentPngPage;
+  if (!pg) return { ok: false, code: 'no-page', message: '当前无 PNG 页（未 beginPage）' };
+  const guard = validatePngCaptureRequest(request, pg);
+  if (!guard.ok) return { ok: false, code: guard.code, message: guard.message };
+  const win = active.exportWindow;
+  if (win.isDestroyed()) return { ok: false, code: 'window-gone', message: '导出窗口已销毁' };
+
+  // 读真实 scrollY（renderer scrollTo 后的实际位置，可能被 clamp）。
+  const g = await readExportDomGeometry(win);
+  if ('error' in g) return { ok: false, code: 'geometry', message: g.error };
+  const actualScrollY = g.scrollY;
+
+  const [cw, ch] = win.getContentSize();
+  const img = await win.webContents.capturePage({ x: 0, y: 0, width: cw, height: ch }, { stayHidden: true, stayAwake: true });
+  if (!img || img.isEmpty()) return { ok: false, code: 'empty-capture', message: 'capturePage 返回空图' };
+  const bmp = img.getSize();
+  if (bmp.width !== pg.bitmapWidthPx) {
+    return { ok: false, code: 'width-changed', message: `段宽 ${bmp.width} != 冻结 ${pg.bitmapWidthPx}` };
+  }
+  const pngBuf = img.toPNG();
+  if (pngBuf.length > SEGMENT_PNG_MAX_BYTES) {
+    return { ok: false, code: 'segment-too-large', message: `单段 PNG ${pngBuf.length} 超上限` };
+  }
+  const geomRes = buildSegmentCopyGeometry({
+    cursorCss: request.cursorCss,
+    actualScrollYCss: actualScrollY,
+    viewportWidthCss: pg.viewportWidthCss,
+    viewportHeightCss: pg.viewportHeightCss,
+    totalHeightCss: pg.pageHeightCss,
+    bitmapWidthPx: bmp.width,
+    bitmapHeightPx: bmp.height,
+  });
+  if (!geomRes.ok) return { ok: false, code: 'placement', message: geomRes.reason };
+
+  // byteOffset-safe transfer：拷成独立 ArrayBuffer 再转移。
+  const ab = pngBuf.buffer.slice(pngBuf.byteOffset, pngBuf.byteOffset + pngBuf.length);
+  const reply = await sendToWorker({
+    type: 'segment', jobId: active.jobId, page: pg.page, segment: request.segment, png: ab, geometry: geomRes.geometry,
+  });
+  if (reply.type !== 'segment-accepted') {
+    return { ok: false, code: reply.type === 'error' ? reply.code : 'worker', message: reply.type === 'error' ? reply.message : 'worker 未 ack' };
+  }
+  // 推进 cursor/段号：下一段期望 cursor = 本段 destEndPx 回 CSS。
+  pg.expectedCursorCss = geomRes.geometry.destEndPx / pg.scaleY;
+  pg.nextSegment += 1;
+  return {
+    ok: true,
+    segment: request.segment,
+    nextCursorCss: pg.expectedCursorCss,
+    actualScrollYCss: actualScrollY,
+    bitmapWidthPx: bmp.width,
+    bitmapHeightPx: bmp.height,
+  };
+}
+
+// —— PNG finish page：送 worker finish + 校验落盘 ——
+async function pngFinishPageImpl(request: ExportPageFinishRequest): Promise<ExportPageFinishResponse> {
+  if (!active) return { ok: false, code: 'no-job', message: '没有进行中的导出任务' };
+  const pg = active.currentPngPage;
+  if (!pg) return { ok: false, code: 'no-page', message: '当前无 PNG 页' };
+  const guard = validatePngFinishRequest(request, pg);
+  if (!guard.ok) return { ok: false, code: guard.code, message: guard.message };
+  resetWatchdog('finishPage-pre');
+  const reply = await sendToWorker({ type: 'finish', jobId: active.jobId, page: pg.page });
+  if (reply.type !== 'page-saved') {
+    return { ok: false, code: reply.type === 'error' ? reply.code : 'worker', message: reply.type === 'error' ? reply.message : 'worker 未 page-saved' };
+  }
+  // 校验文件存在 + 非空 + 扩展名。
+  try {
+    const st = statSync(pg.outputPath);
+    if (!st.isFile() || st.size === 0) return { ok: false, code: 'bad-output', message: '输出文件空或非文件' };
+  } catch (e) {
+    return { ok: false, code: 'output-missing', message: String((e as Error)?.message || e) };
+  }
+  resetWatchdog('finishPage-post');
+  // 记入 pageFiles 以便 finish 时统一保存（复用 JPEG 的 performSave 路径）。
+  active.pageFiles.set(pg.page, { path: pg.outputPath, fd: -1, writtenBytes: reply.bytes, expectedTotal: reply.bytes, lastSequence: 0 });
+  active.currentPngPage = null;
+  return { ok: true, page: pg.page, widthPx: reply.widthPx, heightPx: reply.heightPx, bytes: reply.bytes };
 }
 
 // —— 启动残留清理：删除 > 24h 的 claude-link-export-* 目录 ——
@@ -211,7 +496,7 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
     // 关闭所有页文件句柄，校验写入完整性。
     const pages: { page: number; path: string; bytes: number }[] = [];
     for (const [page, pf] of active.pageFiles) {
-      try { closeSync(pf.fd); } catch { /* ignore */ }
+      if (pf.fd >= 0) { try { closeSync(pf.fd); } catch { /* ignore */ } }
       if (pf.expectedTotal !== null && pf.writtenBytes !== pf.expectedTotal) {
         await failJob(`第 ${page} 页字节数不匹配：写入 ${pf.writtenBytes} / 期望 ${pf.expectedTotal}`);
         return;
@@ -246,9 +531,13 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
 
 // —— 保存：单张另存为 / 多张目录选择；排他移动（不覆盖）；smoke 用 CLAUDE_LINK_EXPORT_SMOKE_DEST 绕过对话框 ——
 async function performSave(job: ActiveJob, pages: { page: number; path: string; bytes: number }[]): Promise<ExportImageResult> {
-  const { sessionName, exportedAt } = job.snapshot;
+  const { sessionName, exportedAt, format } = job.snapshot;
   const smokeDest = process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST;
   const originWin = BrowserWindow.fromWebContents(job.origin) ?? undefined;
+  const extRe = format === 'png' ? /\.(png)$/i : /\.(jpe?g)$/i;
+  const filterName = format === 'png' ? 'PNG' : 'JPEG';
+  const filterExts = format === 'png' ? ['png'] : ['jpg', 'jpeg'];
+  const defaultExt = format === 'png' ? 'png' : 'jpg';
 
   // 多张：目录选择；单张：另存为。
   const multi = pages.length > 1;
@@ -267,8 +556,8 @@ async function performSave(job: ActiveJob, pages: { page: number; path: string; 
   } else {
     const r = await dialog.showSaveDialog(originWin, {
       title: '保存导出图片',
-      defaultPath: buildExportFilename(sessionName, exportedAt),
-      filters: [{ name: 'JPEG', extensions: ['jpg', 'jpeg'] }],
+      defaultPath: buildExportFilename(sessionName, exportedAt, undefined, undefined, format),
+      filters: [{ name: filterName, extensions: filterExts }],
     });
     if (r.canceled || !r.filePath) return { status: 'cancelled' };
     singleTarget = r.filePath;
@@ -279,14 +568,14 @@ async function performSave(job: ActiveJob, pages: { page: number; path: string; 
 
   try {
     if (!multi) {
-      let target = smokeDest ? join(targetDir, buildExportFilename(sessionName, exportedAt)) : singleTarget!;
-      if (!/\.(jpe?g)$/i.test(target)) target += '.jpg';
+      let target = smokeDest ? join(targetDir, buildExportFilename(sessionName, exportedAt, undefined, undefined, format)) : singleTarget!;
+      if (!extRe.test(target)) target += '.' + defaultExt;
       await moveExclusive(pages[0].path, target);
       return { status: 'saved', paths: [target] };
     }
     const saved: string[] = [];
     for (let i = 0; i < pages.length; i++) {
-      const fn = buildExportFilename(sessionName, exportedAt, i + 1, pages.length);
+      const fn = buildExportFilename(sessionName, exportedAt, i + 1, pages.length, format);
       const target = join(targetDir, fn);
       try {
         await moveExclusive(pages[i].path, target);
@@ -328,9 +617,17 @@ async function cleanup(_reason: string): Promise<void> {
   if (!active) return;
   const job = active;
   active = null;
-  // 关闭页文件句柄。
+  // 终止 codec worker（PNG 路径）。
+  if (job.codecWorker) {
+    const w = job.codecWorker;
+    job.codecWorker = null;
+    pendingWorkerReply = null;
+    try { w.postMessage({ type: 'abort', jobId: job.jobId, page: job.currentPngPage?.page ?? 0, reason: 'cleanup' } satisfies CodecMessage); } catch { /* ignore */ }
+    try { void w.terminate(); } catch { /* ignore */ }
+  }
+  // 关闭页文件句柄（JPEG 真实 fd；PNG 页 fd=-1 跳过）。
   for (const pf of job.pageFiles.values()) {
-    try { closeSync(pf.fd); } catch { /* ignore */ }
+    if (pf.fd >= 0) { try { closeSync(pf.fd); } catch { /* ignore */ } }
   }
   job.pageFiles.clear();
   // 销毁隐藏窗口。
@@ -362,6 +659,7 @@ export type StartExportResult =
 export async function startImageExport(
   origin: WebContents,
   sessionId: string,
+  format: ExportImageFormat = 'jpeg',
   options: StartExportOptions = {},
 ): Promise<StartExportResult> {
   if (isActive()) {
@@ -411,6 +709,8 @@ export async function startImageExport(
     themePaletteId,
     themePalette,
     fontScale,
+    // v4.1：格式由主进程在 start 时冻结，全链路不可被 renderer 改写。
+    format,
     messages,
   };
 
@@ -461,9 +761,13 @@ export async function startImageExport(
     tempDir,
     phase: 'preparing',
     snapshot,
+    format: snapshot.format,
     pageFiles: new Map(),
+    codecWorker: null,
+    currentPngPage: null,
     terminal: false,
-    finishTimer: setTimeout(() => { void failJob('导出超时（90 秒）'); }, 90 * 1000),
+    absoluteDeadlineMs: Date.now() + WATCHDOG_ABSOLUTE_MS,
+    finishTimer: setTimeout(() => { void failJob(`导出超时（${WATCHDOG_RESET_MS / 1000} 秒无进展）`); }, WATCHDOG_RESET_MS),
   };
 
   // 完成 promise：resolve 终态结果（saved/cancelled/failed）。
@@ -509,13 +813,16 @@ async function loadExportPage(win: BrowserWindow): Promise<string | null> {
 
 // —— IPC handler 注册（由 ipc-handlers 调用） ——
 export function registerExportImageHandlers(): void {
-  // EXPORT_IMAGE_START：来自可见 renderer 顶层 frame。
-  ipcMain.handle(IPC_CHANNELS.EXPORT_IMAGE_START, async (event, sessionId: string) => {
+  // EXPORT_IMAGE_START：来自可见 renderer 顶层 frame。format 白名单仅 jpeg|png。
+  ipcMain.handle(IPC_CHANNELS.EXPORT_IMAGE_START, async (event, sessionId: string, format: unknown) => {
     if (!event.senderFrame || event.senderFrame.parent !== null) {
       return { ok: false, code: 'bad-frame', message: '非法 frame' };
     }
+    if (format !== 'jpeg' && format !== 'png') {
+      return { ok: false, code: 'bad-format', message: `非法导出格式：${String(format)}（仅 jpeg|png）` };
+    }
     // 注意：smoke 模式由主进程内部直接调用 startImageExport（带 smoke:true），不经此 handler。
-    const r = await startImageExport(event.sender, sessionId);
+    const r = await startImageExport(event.sender, sessionId, format);
     if (!r.ok) return r;
     return { ok: true, jobId: r.jobId };
   });
@@ -527,16 +834,39 @@ export function registerExportImageHandlers(): void {
     return active?.snapshot ?? null;
   });
 
-  // EXPORT_RENDER_CAPTURE_SELF：单飞，仅 capturing 阶段。
-  ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_CAPTURE_SELF, async (event, request: CaptureSelfRequest) => {
+  // EXPORT_RENDER_CAPTURE_SELF：单飞，仅 capturing 阶段。JPEG 走 v3 captureSelfImpl；PNG 走 pngCaptureSelfImpl。
+  ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_CAPTURE_SELF, async (event, request: CaptureSelfRequest | PngCaptureSelfRequest) => {
     if (!isExportSender(event.sender)) {
-      return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies CaptureSelfResponse;
+      return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies CaptureSelfResponse | PngCaptureSelfResponse;
     }
     if (!request || typeof request.jobId !== 'string' || !Number.isInteger(request.page) || !Number.isInteger(request.segment)) {
-      return { ok: false, code: 'bad-request', message: '非法请求参数' } satisfies CaptureSelfResponse;
+      return { ok: false, code: 'bad-request', message: '非法请求参数' } satisfies CaptureSelfResponse | PngCaptureSelfResponse;
     }
-    const r = await captureSelfImpl(request);
-    return r;
+    if (active?.format === 'png') {
+      return await pngCaptureSelfImpl(request as PngCaptureSelfRequest);
+    }
+    return await captureSelfImpl(request as CaptureSelfRequest);
+  });
+
+  // v4.1 PNG 页协议（仅 PNG 模式生效，handler 内校验 format）。
+  ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_PROBE_SELF, async (event, request: PngProbeSelfRequest) => {
+    if (!isExportSender(event.sender)) return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies PngProbeSelfResponse;
+    if (!request || typeof request.jobId !== 'string') return { ok: false, code: 'bad-request', message: '非法请求参数' } satisfies PngProbeSelfResponse;
+    return await pngProbeSelfImpl(request);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_BEGIN_PAGE, async (event, request: ExportPageBeginRequest) => {
+    if (!isExportSender(event.sender)) return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies ExportPageBeginResponse;
+    if (!request || typeof request.jobId !== 'string' || !Number.isInteger(request.page)) return { ok: false, code: 'bad-request', message: '非法请求参数' } satisfies ExportPageBeginResponse;
+    if (active && active.jobId !== request.jobId) return { ok: false, code: 'stale', message: '迟到 job' } satisfies ExportPageBeginResponse;
+    return await pngBeginPageImpl(request);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_FINISH_PAGE, async (event, request: ExportPageFinishRequest) => {
+    if (!isExportSender(event.sender)) return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies ExportPageFinishResponse;
+    if (!request || typeof request.jobId !== 'string' || !Number.isInteger(request.page)) return { ok: false, code: 'bad-request', message: '非法请求参数' } satisfies ExportPageFinishResponse;
+    if (active && active.jobId !== request.jobId) return { ok: false, code: 'stale', message: '迟到 job' } satisfies ExportPageFinishResponse;
+    return await pngFinishPageImpl(request);
   });
 
   // EXPORT_RENDER_WRITE_PAGE_CHUNK：顺序写临时文件。

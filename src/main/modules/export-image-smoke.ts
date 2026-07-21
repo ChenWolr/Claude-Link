@@ -1,12 +1,15 @@
 // 阶段二 fixture smoke（仅 env CLAUDE_LINK_EXPORT_SMOKE=<消息条数> 时运行，不进正常启动路径）。
-// 种子一个会话 + N 条消息，调用真实 startImageExport（smoke:true），等 done，校验临时 JPEG，
-// 写结果 JSON 到 D:\software\Cache，清理后退出。验证主进程管理器 + 隐藏窗口 + IPC + 捕获/拼接/编码全链路。
+// 种子一个会话 + N 条消息，依次跑 JPEG 与 PNG 两个真实 job（smoke:true），等 done，校验临时产物，
+// 写结果 JSON 到 D:\software\Cache，清理后退出。验证主进程管理器 + 隐藏窗口 + IPC + 捕获/拼接/编码全链路（含 v4.1 PNG worker 路径）。
+// v4.1：PNG 路径校验 PNG magic / .png 扩展名 / pngjs 可解码 / 尺寸非零；JPEG 沿用 v3 校验。
 
 import { app } from 'electron';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import type { WebContents } from 'electron';
+import { PNG } from 'pngjs';
 import { cleanupActiveJob, startImageExport } from './export-image-manager';
+import type { ExportImageFormat } from '../../shared/types/export-image';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
 import { logger } from '../utils/logger';
@@ -20,12 +23,7 @@ export async function runExportSmokeIfRequested(origin: WebContents | undefined)
   logger.info(`[smoke] runExportSmokeIfRequested count=${count} hasOrigin=${!!origin}`);
   if (!count || !origin) return;
 
-  // 阶段四：设置 smoke 保存目录，绕过系统对话框，验证排他移动 + 结果联合。
-  const smokeDest = join(RESULT_DIR, `phase4-save-${Date.now()}`);
-  process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST = smokeDest;
-  await fs.mkdir(smokeDest, { recursive: true });
-
-  const result: Record<string, unknown> = { count, started: true, ts: new Date().toISOString(), smokeDest };
+  const result: Record<string, unknown> = { count, started: true, ts: new Date().toISOString() };
   try {
     // 种子会话 + N 条消息（user/assistant 交替，制造多轮）。
     const session = sessionRepo.createSession('导出smoke会话', 'sonnet');
@@ -36,39 +34,10 @@ export async function runExportSmokeIfRequested(origin: WebContents | undefined)
     }
     result.sessionId = session.id;
 
-    const start = await startImageExport(origin, session.id, { smoke: true });
-    if (!start.ok) {
-      result.ok = false;
-      result.startResult = start;
-      await writeResult(result);
-      app.quit();
-      return;
-    }
-    result.jobId = start.jobId;
-
-    const done = await start.done;
-    result.exportStatus = done.status;
-    // 校验终态：saved 时 smokeDest 下应有合法 JPEG 文件。
-    if (done.status === 'saved') {
-      const files = await fs.readdir(smokeDest);
-      let allValid = true;
-      const details: Record<string, unknown>[] = [];
-      for (const f of files) {
-        const buf = await fs.readFile(join(smokeDest, f));
-        const valid = buf.length > 0 && buf[0] === 0xff && buf[1] === 0xd8 && buf[buf.length - 2] === 0xff && buf[buf.length - 1] === 0xd9;
-        if (!valid) allValid = false;
-        details.push({ name: f, bytes: buf.length, validJpeg: valid });
-      }
-      result.savedFiles = details;
-      result.allValidJpeg = allValid;
-      result.ok = allValid && files.length > 0 && files.length === done.paths.length;
-      result.savedPaths = done.paths;
-    } else {
-      result.ok = false;
-      result.result = done;
-    }
-    await cleanupActiveJob();
-    result.cleanedTempDir = true;
+    // 依次跑 JPEG 与 PNG（单飞，前一个 cleanup 后再跑下一个）。
+    result.jpeg = await runOneFormat(origin, session.id, 'jpeg');
+    result.png = await runOneFormat(origin, session.id, 'png');
+    result.ok = !!(result.jpeg as { ok?: boolean }).ok && !!(result.png as { ok?: boolean }).ok;
   } catch (e) {
     result.ok = false;
     result.error = String((e as Error)?.stack || e);
@@ -77,6 +46,62 @@ export async function runExportSmokeIfRequested(origin: WebContents | undefined)
   } finally {
     await writeResult(result);
     app.quit();
+  }
+}
+
+async function runOneFormat(origin: WebContents, sessionId: string, format: ExportImageFormat): Promise<Record<string, unknown>> {
+  const smokeDest = join(RESULT_DIR, `${format}-save-${Date.now()}`);
+  process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST = smokeDest;
+  await fs.mkdir(smokeDest, { recursive: true });
+
+  const out: Record<string, unknown> = { format, smokeDest };
+  try {
+    const start = await startImageExport(origin, sessionId, format, { smoke: true });
+    if (!start.ok) { out.ok = false; out.startResult = start; await cleanupActiveJob(); return out; }
+    out.jobId = start.jobId;
+    const done = await start.done;
+    out.exportStatus = done.status;
+    if (done.status === 'saved') {
+      const files = await fs.readdir(smokeDest);
+      const details: Record<string, unknown>[] = [];
+      let allValid = true;
+      for (const f of files) {
+        const buf = await fs.readFile(join(smokeDest, f));
+        const v = format === 'png' ? validatePng(buf) : validateJpeg(buf);
+        if (!v.valid) allValid = false;
+        details.push({ name: f, bytes: buf.length, ...v });
+      }
+      out.savedFiles = details;
+      out.allValid = allValid;
+      out.ok = allValid && files.length > 0 && files.length === done.paths.length;
+      out.savedPaths = done.paths;
+    } else {
+      out.ok = false;
+      out.result = done;
+    }
+    await cleanupActiveJob();
+    out.cleanedTempDir = true;
+  } catch (e) {
+    out.ok = false;
+    out.error = String((e as Error)?.stack || e);
+    try { await cleanupActiveJob(); } catch { /* ignore */ }
+  }
+  return out;
+}
+
+function validateJpeg(buf: Buffer): { valid: boolean; kind: 'jpeg' } {
+  const valid = buf.length > 0 && buf[0] === 0xff && buf[1] === 0xd8 && buf[buf.length - 2] === 0xff && buf[buf.length - 1] === 0xd9;
+  return { valid, kind: 'jpeg' };
+}
+
+function validatePng(buf: Buffer): { valid: boolean; kind: 'png'; width?: number; height?: number; decodeError?: string } {
+  const magicOk = buf.length > 0 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+  if (!magicOk) return { valid: false, kind: 'png', decodeError: 'PNG magic 错误' };
+  try {
+    const dec = PNG.sync.read(buf);
+    return { valid: dec.width > 0 && dec.height > 0, kind: 'png', width: dec.width, height: dec.height };
+  } catch (e) {
+    return { valid: false, kind: 'png', decodeError: String((e as Error)?.message || e) };
   }
 }
 

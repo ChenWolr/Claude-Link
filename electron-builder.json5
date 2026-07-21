@@ -29,6 +29,14 @@
   // 应用是中文界面，Electron 语言包只保留中英（默认几十种语言 ~40MB）。
   electronLanguages: ["zh-CN", "en-US"],
 
+  // v4.1 PNG codec worker：packaged 内 new Worker() 不能从 asar 加载（electron/electron#18540），
+  // 必须解包 worker 入口 + 其运行时依赖 pngjs（pngjs 零传递依赖）。
+  // 解包后 worker 的 __dirname 自动指向 app.asar.unpacked/main，require('pngjs') 从 app.asar.unpacked/node_modules 解析。
+  asarUnpack: [
+    "**/exportImageCodecWorker.js",
+    "node_modules/pngjs/**",
+  ],
+
   win: {
     icon: "resources/icon.ico",
     executableName: "claude-link",

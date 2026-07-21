@@ -68,6 +68,8 @@ export interface ExportJobSnapshot {
   themePaletteId: string;
   themePalette: ThemePalette;   // 冻结完整色板
   fontScale: string;            // 字号档位 small/medium/large
+  // v4.1：导出格式由主进程在 start 时冻结，renderer 不可改。JPEG 走 v3 Canvas 路径，PNG 走 pngjs+worker。
+  format: ExportImageFormat;
   // 主流程消息（parentAgentId===null），不含 rawEvent/parentTaskId；
   // 子 Agent 详情不进主聊天长图。
   messages: RenderableMessage[];
@@ -200,3 +202,127 @@ export interface CaptureSelfRequest {
 export type CaptureSelfResponse =
   | { ok: true; png: Uint8Array; bitmapWidth: number; bitmapHeight: number }
   | { ok: false; code: string; message: string };
+
+// =====================================================================
+// v4.1：PNG 长图（Node/pngjs + worker_threads）共享类型
+// JPEG 继续沿用 v3 的 CaptureSelfResponse / PageChunkPayload；PNG 走下列页协议。
+// 设计依据：docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md §3 Task 5。
+// =====================================================================
+
+/** 导出格式。主进程在 start 时冻结，全链路不可被 renderer 改写。 */
+export type ExportImageFormat = 'jpeg' | 'png';
+
+/** PNG 页开始请求（renderer → 主进程 EXPORT_RENDER_BEGIN_PAGE）。 */
+export interface ExportPageBeginRequest {
+  jobId: string;
+  page: number;        // 1-based
+  totalPages: number;
+  format: ExportImageFormat;
+}
+
+/** PNG 页开始响应：主进程读 DOM 几何后回传，renderer 据此驱动滚动捕获循环。 */
+export type ExportPageBeginResponse =
+  | {
+      ok: true;
+      page: number;
+      pageHeightCss: number;
+      viewportWidthCss: number;
+      viewportHeightCss: number;
+    }
+  | { ok: false; code: string; message: string };
+
+/** PNG 探测：渲染完整页内容并稳定后，主进程读真实视口/位图比例，用于预算反推。 */
+export interface PngProbeSelfRequest {
+  jobId: string;
+}
+export type PngProbeSelfResponse =
+  | {
+      ok: true;
+      viewportWidthCss: number;
+      viewportHeightCss: number;
+      bitmapWidthPx: number;
+      bitmapHeightPx: number;
+      scaleY: number;
+    }
+  | { ok: false; code: string; message: string };
+
+/**
+ * PNG 分支的 captureSelf：主进程捕获一段后**直接送 worker**，不把 PNG bytes 回 renderer。
+ * 只回几何 + 推进后的 cursor，renderer 据此继续滚动。
+ */
+export interface PngCaptureSelfRequest {
+  jobId: string;
+  page: number;
+  segment: number;
+  cursorCss: number;
+}
+export type PngCaptureSelfResponse =
+  | {
+      ok: true;
+      segment: number;
+      nextCursorCss: number;
+      actualScrollYCss: number;
+      bitmapWidthPx: number;
+      bitmapHeightPx: number;
+    }
+  | { ok: false; code: string; message: string };
+
+/** PNG 页完成请求（renderer → 主进程 EXPORT_RENDER_FINISH_PAGE）：触发 worker 最终编码 + 写临时文件。 */
+export interface ExportPageFinishRequest {
+  jobId: string;
+  page: number;
+}
+export type ExportPageFinishResponse =
+  | { ok: true; page: number; widthPx: number; heightPx: number; bytes: number }
+  | { ok: false; code: string; message: string };
+
+/**
+ * worker 行拷贝几何。由主进程用 placeSegment() 算好并校验后下发给 worker，worker 不重算、只按行 copy。
+ * 半开区间：源 [sourceStartPx, sourceStartPx+drawHeightPx)，目的 [destStartPx, destEndPx)。
+ */
+export interface SegmentCopyGeometry {
+  sourceStartPx: number;
+  sourceEndPx: number;
+  destStartPx: number;
+  destEndPx: number;
+  drawHeightPx: number;
+  bitmapWidthPx: number;
+  bitmapHeightPx: number;
+}
+
+// =====================================================================
+// v4.1 codec worker 消息协议（主进程 ↔ worker，内部；不暴露给 renderer）
+// worker 只接受主进程生成的内部消息，outputPath 必须是主进程生成的当前页临时路径。
+// 依据：docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md §4 Task 7。
+// =====================================================================
+
+/** 主进程 → worker。begin 的 totalHeightPx/bitmapWidthPx 由主进程据 probe 实测比例预算并冻结。 */
+export type CodecMessage =
+  | {
+      type: 'begin';
+      jobId: string;
+      page: number;
+      outputPath: string;          // 主进程生成的当前页最终路径（worker 写 .tmp 再 rename）
+      pageHeightCss: number;
+      viewportWidthCss: number;
+      viewportHeightCss: number;
+      bitmapWidthPx: number;       // probe 冻结的物理宽（首段须一致）
+      totalHeightPx: number;       // round(pageHeightCss × scaleY)，预分配整页 RGBA
+    }
+  | {
+      type: 'segment';
+      jobId: string;
+      page: number;
+      segment: number;             // 1-based，严格递增
+      png: ArrayBuffer;            // transferable；主进程保证独立 ArrayBuffer（byteOffset 安全）
+      geometry: SegmentCopyGeometry;
+    }
+  | { type: 'finish'; jobId: string; page: number }
+  | { type: 'abort'; jobId: string; page: number; reason: string };
+
+/** worker → 主进程。 */
+export type CodecWorkerMessage =
+  | { type: 'begun'; jobId: string; page: number; bitmapWidthPx: number; totalHeightPx: number }
+  | { type: 'segment-accepted'; jobId: string; page: number; segment: number; nextDestEndPx: number }
+  | { type: 'page-saved'; jobId: string; page: number; widthPx: number; heightPx: number; bytes: number }
+  | { type: 'error'; jobId: string; page: number; code: string; message: string };
