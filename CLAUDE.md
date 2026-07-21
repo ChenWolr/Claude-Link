@@ -109,10 +109,11 @@ SDK canUseTool / onUserDialog / onElicitation
 
 ## 前端设计参考
 
-- UI / 设计灵感参考以下两个开源项目：
-  - https://github.com/zhukunpenglinyutong/desktop-cc-gui
-  - https://github.com/liliMozi/openhanako
-- 做前端界面 / 设计时可参考这两个项目的 UI 布局、交互模式与视觉风格；需要时直接在 GitHub 浏览（README 截图 / 源码 / demo），提炼要点再落地，不必 clone。
+- UI / 设计灵感参考以下三个开源项目，源码已 clone 到本地 `D:\software\code`，**优先读本地源码**，不再上 GitHub 浏览（LobsterAI / openhanako 各套一层同名 `-main` 子目录，desktop-cc-gui-main 直接是项目根）：
+  - **LobsterAI**：`D:\software\code\LobsterAI\LobsterAI-main`（Electron + Vue/TS，网易出品；前端在 `src/renderer`）
+  - **openhanako**（HanaAgent）：`D:\software\code\openhanako\openhanako-main`（Electron，作者 liliMozi；主题在 `desktop/src/themes/*.css` + `desktop/src/shared/theme-registry-data.json`）
+  - **desktop-cc-gui**（ccgui）：`D:\software\code\desktop-cc-gui-main`（**Tauri + React + Vite**，非 Electron、前端 React 非 Vue；只借 UX/视觉/交互，不可照搬技术栈）
+- 参考它们的 UI 布局、交互模式与视觉风格时，**必须先读本地真实源码（theme/token/组件源文件）再落地，严禁凭印象脑补**。
 - 主题色板（`src/shared/constants.ts` 的 `THEME_PALETTES`）灵感源自 openhanako。
 
 ## 工作流约定
