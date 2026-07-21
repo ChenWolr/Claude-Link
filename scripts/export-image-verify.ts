@@ -6,15 +6,20 @@
 import { strict as assert } from 'node:assert';
 import {
   buildExportFilename,
+  buildSegmentCopyGeometry,
   buildStableUnits,
   checkPixelBudget,
+  checkPngMemoryBudget,
   checkSnapshotBudget,
   computeProgressPercent,
   computeSegmentHeight,
+  copySegmentRows,
   DEFAULT_EXPORT_BUDGET,
+  deriveMaxPageHeightByMemory,
   deriveMaxPageHeightCss,
   estimateMessageWeight,
   ExportResults,
+  finalizeSegmentCopyGeometry,
   flattenPageUnitIds,
   isStaleEvent,
   paginate,
@@ -23,6 +28,8 @@ import {
   sanitizeSessionName,
   splitTurnIndices,
   toRenderable,
+  validatePngCaptureRequest,
+  validatePngFinishRequest,
   verifyPagePlan,
   verifyStableUnitIds,
 } from '../src/shared/export-image';
@@ -378,6 +385,139 @@ console.log('\n=== 7) 进度 + 结果联合 ===');
   check('toRenderable 保留 content', r.content === 'hi');
   check('toRenderable 无 rawEvent', !('rawEvent' in r));
   check('toRenderable 无 parentTaskId', !('parentTaskId' in r));
+}
+
+// =====================================================================
+// v4.1 Task 6：PNG worker 行拷贝几何（buildSegmentCopyGeometry / finalize / copySegmentRows）
+// 半开区间不变量：段间连续、末段 clamp 后无重复无漏、源不越界、失败分支。
+// =====================================================================
+{
+  console.log('\n--- Task 6: PNG copy geometry ---');
+  // 三段连续：viewport 100×100，bitmap 100×100（scaleY=1），totalHeight 250。
+  const geo = (cursor: number, actualScrollY: number) =>
+    buildSegmentCopyGeometry({
+      cursorCss: cursor, actualScrollYCss: actualScrollY,
+      viewportWidthCss: 100, viewportHeightCss: 100, totalHeightCss: 250,
+      bitmapWidthPx: 100, bitmapHeightPx: 100,
+    });
+  const s1 = geo(0, 0);
+  const s2 = geo(100, 100);
+  // 末段 clamp：maxScroll = 250-100 = 150；cursor 200 → actualScrollY 被 clamp 到 150。
+  const s3 = geo(200, 150);
+  check('首段 ok 且 sourceStartPx=0/destStartPx=0', !!s1.ok && s1.geometry.sourceStartPx === 0 && s1.geometry.destStartPx === 0);
+  check('首段 drawHeightPx=100（整视口）', !!s1.ok && s1.geometry.drawHeightPx === 100);
+  check('中段 destStartPx == 前段 destEndPx（连续无漏）', !!s1.ok && !!s2.ok && s2.geometry.destStartPx === s1.geometry.destEndPx);
+  check('末段 clamp → sourceStartPx>0（视口内偏移）', !!s3.ok && s3.geometry.sourceStartPx > 0);
+  check('末段 destEndPx == round(totalH*scaleY) = 250（绝对边界）', !!s3.ok && s3.geometry.destEndPx === 250);
+  check('末段 sourceEndPx <= bitmapHeightPx（不越界）', !!s3.ok && s3.geometry.sourceStartPx + s3.geometry.drawHeightPx <= 100);
+  check('末段 nextCursorCss 覆盖到 totalHeight', placeSegment({
+    cursorCss: 200, actualScrollYCss: 150, viewportWidthCss: 100, viewportHeightCss: 100,
+    totalHeightCss: 250, bitmapWidthPx: 100, bitmapHeightPx: 100,
+  }).nextCursorCss === 250);
+
+  // 失败分支
+  check('cursor 超文档 → fail（nextCursor<=cursor）', !geo(260, 150).ok);
+  check('空位图 → fail', !buildSegmentCopyGeometry({
+    cursorCss: 0, actualScrollYCss: 0, viewportWidthCss: 100, viewportHeightCss: 100,
+    totalHeightCss: 250, bitmapWidthPx: 0, bitmapHeightPx: 0,
+  }).ok);
+
+  // 直接测 finalizeSegmentCopyGeometry 的守卫（喂构造的 placement）
+  const ok95 = (extra: Record<string, number>) => ({ ok: true as const, sourceOffsetCss: 0, drawHeightCss: 10, nextCursorCss: 10, scaleX: 1, scaleY: 1, sourceStartPx: 0, destStartPx: 0, destEndPx: 10, drawHeightPx: 10, ...extra });
+  check('source 越界 → fail', !finalizeSegmentCopyGeometry(ok95({ sourceStartPx: 95, drawHeightPx: 10 }), 100, 100).ok); // 95+10=105>100
+  check('drawHeightPx<=0 → fail', !finalizeSegmentCopyGeometry(ok95({ drawHeightPx: 0, destEndPx: 0 }), 100, 100).ok);
+  check('destEnd-destStart != drawHeightPx → fail', !finalizeSegmentCopyGeometry(ok95({ destEndPx: 9 }), 100, 100).ok); // 9-0 != 10
+  check('sourceStartPx 为负 → fail', !finalizeSegmentCopyGeometry(ok95({ sourceStartPx: -1 }), 100, 100).ok);
+
+  // 行拷贝纯函数：3 段各自纯色（R=段号），拼成 100×250，验证每段行范围颜色唯一、无重叠无漏。
+  const W = 100, FULL_H = 250, SEG_H = 100;
+  const full = Buffer.alloc(W * FULL_H * 4);
+  const seg = (color: number, h: number) => {
+    const b = Buffer.alloc(W * h * 4);
+    for (let i = 0; i < W * h; i++) { b[i * 4] = color; b[i * 4 + 1] = 0; b[i * 4 + 2] = 0; b[i * 4 + 3] = 255; }
+    return b;
+  };
+  // s1: src[0,100)→dst[0,100) 色10；s2: src[0,100)→dst[100,200) 色20；
+  // s3(末段 clamp): part 是完整视口位图(100 行)，src[50,100)→dst[200,250) 色30（rows[0,50) 不被拷贝）
+  copySegmentRows(full, seg(10, SEG_H), s1.ok ? s1.geometry : (null as never));
+  copySegmentRows(full, seg(20, SEG_H), s2.ok ? s2.geometry : (null as never));
+  const part3 = Buffer.alloc(W * SEG_H * 4);
+  for (let y = 50; y < SEG_H; y++) {
+    for (let x = 0; x < W; x++) { const o = (y * W + x) * 4; part3[o] = 30; part3[o + 1] = 0; part3[o + 2] = 0; part3[o + 3] = 255; }
+  }
+  copySegmentRows(full, part3, s3.ok ? s3.geometry : (null as never));
+  const rowColor = (y: number) => full[y * W * 4];
+  check('行拷贝：第 0 行=段1 色', rowColor(0) === 10);
+  check('行拷贝：第 99 行=段1 色', rowColor(99) === 10);
+  check('行拷贝：第 100 行=段2 色（无重叠）', rowColor(100) === 20);
+  check('行拷贝：第 199 行=段2 色', rowColor(199) === 20);
+  check('行拷贝：第 200 行=段3 色（末段起）', rowColor(200) === 30);
+  check('行拷贝：第 249 行=段3 色（末边界）', rowColor(249) === 30);
+  // 无漏行：alloc 初始化为 0，三段覆盖 [0,100)∪[100,200)∪[200,250) = 全部 250 行；
+  // 任一未覆盖行的 R 会保持 0。验证所有行 R ∈ {10,20,30}。
+  let noGap = true;
+  for (let y = 0; y < FULL_H; y++) { if (![10, 20, 30].includes(rowColor(y))) { noGap = false; break; } }
+  check('行拷贝：250 行全覆盖无漏', noGap);
+  check('行拷贝：full 长度正确', full.length === W * FULL_H * 4);
+}
+
+// =====================================================================
+// v4.1 Task 11：PNG 内存预算（deriveMaxPageHeightByMemory / checkPngMemoryBudget）
+// =====================================================================
+{
+  console.log('\n--- Task 11: PNG memory budget ---');
+  // 100% DPI：scaleY=1，宽 896 → 单页 CSS 上限应远超 canvas 32767。
+  const h100 = deriveMaxPageHeightByMemory(1, 896);
+  check('PNG 100% 单页 CSS 上限 > 32767（破 canvas）', h100 > 32767);
+  check('PNG 100% 单页 CSS 上限合理（>30000 <50000）', h100 > 30000 && h100 < 50000);
+  // 150% DPI：scaleY=1.5，宽 896 → 物理宽 1344，上限收紧。
+  const h150 = deriveMaxPageHeightByMemory(1.5, 896);
+  check('PNG 150% 上限 < 100% 上限（宽放大收紧）', h150 < h100);
+  check('PNG 150% 上限仍 > 10000（够用）', h150 > 10000);
+  check('PNG 非法入参回退默认', deriveMaxPageHeightByMemory(0, 896) === DEFAULT_EXPORT_BUDGET.maxPageHeightCss);
+
+  // checkPngMemoryBudget：896×40000 RGBA=143MB 超 128MB → fail。
+  check('PNG 896×40000 超预算 → fail', !checkPngMemoryBudget(896, 40000).ok);
+  // 896×30000 RGBA=107MB < 128MB，peak=590MB < 1GiB → ok。
+  check('PNG 896×30000 在预算内 → ok', checkPngMemoryBudget(896, 30000).ok);
+  // 非法 → fail
+  check('PNG 非法尺寸 → fail', !checkPngMemoryBudget(0, 100).ok && !checkPngMemoryBudget(100, 0).ok);
+}
+
+// =====================================================================
+// v4.1 Task 13：格式感知文件名（buildExportFilename format 分支）
+// =====================================================================
+{
+  console.log('\n--- Task 13: format-aware filename ---');
+  const ts = '20260101-120000';
+  check('JPEG 单张 .jpg', buildExportFilename('s', ts) === `s-${ts}.jpg`);
+  check('JPEG 默认 format=undefined → .jpg', buildExportFilename('s', ts, undefined, undefined, undefined) === `s-${ts}.jpg`);
+  check('PNG 单张 .png', buildExportFilename('s', ts, undefined, undefined, 'png') === `s-${ts}.png`);
+  check('PNG 多张 -01-of-03.png', buildExportFilename('s', ts, 1, 3, 'png') === `s-${ts}-01-of-03.png`);
+  check('JPEG 多张 -02-of-10.jpg（两位扩宽）', buildExportFilename('s', ts, 2, 10, 'jpeg') === `s-${ts}-02-of-10.jpg`);
+}
+
+// =====================================================================
+// v4.1 Task 14 Step 4（IPC 边界守卫纯逻辑）：validatePngCaptureRequest / validatePngFinishRequest
+// 覆盖：错页 / 乱序段 / 重复捕获 / cursor 不匹配 / 未完成 finish / 正常通过。
+// =====================================================================
+{
+  console.log('\n--- Task 14 guard: PNG request validation ---');
+  const st = { page: 2, pageHeightCss: 5000, expectedCursorCss: 1000, nextSegment: 3 };
+  check('capture 正常通过', validatePngCaptureRequest({ page: 2, segment: 3, cursorCss: 1000 }, st).ok);
+  check('capture 错页 → bad-page', !validatePngCaptureRequest({ page: 3, segment: 3, cursorCss: 1000 }, st).ok);
+  check('capture 乱序段 → bad-segment', validatePngCaptureRequest({ page: 2, segment: 4, cursorCss: 1000 }, st).code === 'bad-segment');
+  check('capture 重复段（同段号）→ bad-segment', validatePngCaptureRequest({ page: 2, segment: 2, cursorCss: 1000 }, st).code === 'bad-segment');
+  check('capture cursor 不匹配 → bad-cursor', validatePngCaptureRequest({ page: 2, segment: 3, cursorCss: 999 }, st).code === 'bad-cursor');
+  check('capture cursor 容差内通过（±0.01）', validatePngCaptureRequest({ page: 2, segment: 3, cursorCss: 1000.005 }, st).ok);
+  check('capture 非整数页 → bad-request', validatePngCaptureRequest({ page: 2.5, segment: 3, cursorCss: 1000 } as never, st).code === 'bad-request');
+
+  // finish：未覆盖到 pageHeight → incomplete
+  const stIncomplete = { page: 2, pageHeightCss: 5000, expectedCursorCss: 2000, nextSegment: 3 };
+  check('finish 未完整 → incomplete', validatePngFinishRequest({ page: 2 }, stIncomplete).code === 'incomplete');
+  const stComplete = { page: 2, pageHeightCss: 5000, expectedCursorCss: 5000, nextSegment: 3 };
+  check('finish 完整 → ok', validatePngFinishRequest({ page: 2 }, stComplete).ok);
+  check('finish 错页 → bad-page', validatePngFinishRequest({ page: 3 }, stComplete).code === 'bad-page');
 }
 
 console.log(`\n=== export-image-verify 结果：${pass} 通过 / ${fail} 失败 ===`);

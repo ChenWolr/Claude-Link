@@ -75,7 +75,7 @@ export interface ClaudeLinkAPI {
   queueUserMessage: (sessionId: string, message: string) => Promise<QueueState>;
   onQueueEvent: (callback: (payload: QueueEventPayload) => void) => () => void;
   removeQueueListener: () => void;
-  startImageExport: (sessionId: string) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
+  startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
   onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => () => void;
 }
 
@@ -171,7 +171,7 @@ export function createApi(): ClaudeLinkAPI {
     },
     removeQueueListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.QUEUE_EVENT),
     // 会话导出 JPEG 长图（v3）：可见 renderer 请求开始 + 接收进度。图片数据不经过可见 renderer。
-    startImageExport: (sessionId: string) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId),
+    startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId, format),
     onImageExportProgress: (callback: (payload: ExportImageProgressPayload) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: ExportImageProgressPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
@@ -189,8 +189,16 @@ import type {
   CaptureSelfResponse,
   ExportImageProgressPayload,
   ExportJobSnapshot,
+  ExportPageBeginRequest,
+  ExportPageBeginResponse,
+  ExportPageFinishRequest,
+  ExportPageFinishResponse,
   ExportRenderFinishPayload,
   PageChunkPayload,
+  PngCaptureSelfRequest,
+  PngCaptureSelfResponse,
+  PngProbeSelfRequest,
+  PngProbeSelfResponse,
 } from '../shared/types/export-image';
 import { IPC_CHANNELS } from '../shared/constants';
 
@@ -198,10 +206,16 @@ export interface ExportLinkAPI {
   surface: () => 'export';
   /** 取得与本窗口绑定的 job 快照（主进程按 sender 匹配当前 job）。 */
   getJob: () => Promise<ExportJobSnapshot | null>;
-  /** 请求主进程捕获本窗口当前视口（rect 由主进程自取，不接受 renderer 自定义）。 */
-  captureSelf: (request: CaptureSelfRequest) => Promise<CaptureSelfResponse>;
-  /** 顺序发送单页 JPEG 分块（2 MiB，有背压）。 */
+  /** 请求主进程捕获本窗口当前视口。JPEG 返回 PNG bytes；PNG 只回几何（段直接送 worker）。 */
+  captureSelf: (request: CaptureSelfRequest | PngCaptureSelfRequest) => Promise<CaptureSelfResponse | PngCaptureSelfResponse>;
+  /** 顺序发送单页 JPEG 分块（2 MiB，有背压）。仅 JPEG 路径。 */
   writePageChunk: (payload: Omit<PageChunkPayload, 'bytes'> & { bytes: Uint8Array }) => Promise<void>;
+  /** v4.1 PNG：探测真实视口/位图比例（预算反推用）。仅 PNG 路径。 */
+  probeSelf: (request: PngProbeSelfRequest) => Promise<PngProbeSelfResponse>;
+  /** v4.1 PNG：开始一页（主进程建 outputPath + 起 worker + 下 begin）。仅 PNG 路径。 */
+  beginPage: (request: ExportPageBeginRequest) => Promise<ExportPageBeginResponse>;
+  /** v4.1 PNG：完成一页（worker 最终编码 + 写临时文件）。仅 PNG 路径。 */
+  finishPage: (request: ExportPageFinishRequest) => Promise<ExportPageFinishResponse>;
   /** 上报排版/捕获/编码进度（renderer → 主进程）。 */
   reportProgress: (payload: ExportImageProgressPayload) => void;
   /** 完成报告（done/failed 判别联合，只能调用一次）。 */
@@ -214,6 +228,9 @@ export function createExportApi(): ExportLinkAPI {
     getJob: () => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_GET_JOB),
     captureSelf: (request) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_CAPTURE_SELF, request),
     writePageChunk: (payload) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_WRITE_PAGE_CHUNK, payload),
+    probeSelf: (request) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_PROBE_SELF, request),
+    beginPage: (request) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_BEGIN_PAGE, request),
+    finishPage: (request) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_FINISH_PAGE, request),
     reportProgress: (payload) => {
       // 单向推送，fire-and-forget；主进程做背压与限频。
       ipcRenderer.send(IPC_CHANNELS.EXPORT_RENDER_PROGRESS, payload);

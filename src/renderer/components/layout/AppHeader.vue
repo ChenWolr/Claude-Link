@@ -4,6 +4,8 @@ import { useRoute } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 import { useTaskStore } from '../../stores/task-store';
 import { useExportImageStore } from '../../stores/export-image-store';
+import ExportImageFormatDialog from '../export/ExportImageFormatDialog.vue';
+import type { ExportImageFormat } from '@shared/types/export-image';
 
 const route = useRoute();
 const sessionStore = useSessionStore();
@@ -58,7 +60,18 @@ const exportBusyTooltip = computed(() => {
 
 async function handleExport() {
   if (!canExport.value || !activeSession.value) return;
-  await exportStore.start(activeSession.value.id, activeSession.value.name);
+  // v4.1：分享先开格式选择弹窗，确认后再 start。
+  fmtDialogOpen.value = true;
+}
+
+const fmtDialogOpen = ref(false);
+async function onFormatConfirm(format: ExportImageFormat): Promise<void> {
+  fmtDialogOpen.value = false;
+  if (!activeSession.value) return;
+  await exportStore.start(activeSession.value.id, activeSession.value.name, format);
+}
+function onFormatCancel(): void {
+  fmtDialogOpen.value = false;
 }
 </script>
 
@@ -100,6 +113,12 @@ async function handleExport() {
         <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
       </svg>
     </button>
+    <ExportImageFormatDialog
+      :open="fmtDialogOpen"
+      :busy="exportStore.running"
+      @confirm="onFormatConfirm"
+      @cancel="onFormatCancel"
+    />
   </header>
 </template>
 

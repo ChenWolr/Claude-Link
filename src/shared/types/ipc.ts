@@ -60,6 +60,10 @@ export const IPC_CHANNELS = {
   EXPORT_RENDER_PROGRESS: 'export-render:progress',
   EXPORT_RENDER_WRITE_PAGE_CHUNK: 'export-render:writePageChunk',
   EXPORT_RENDER_FINISH: 'export-render:finish',
+  // v4.1 PNG 长图页协议（renderer → 主进程）。JPEG 路径沿用上面 4 个通道不变。
+  EXPORT_RENDER_PROBE_SELF: 'export-render:probeSelf',
+  EXPORT_RENDER_BEGIN_PAGE: 'export-render:beginPage',
+  EXPORT_RENDER_FINISH_PAGE: 'export-render:finishPage',
 } as const;
 
 export const DEFAULT_TASK_DELAY_SECONDS = 60;

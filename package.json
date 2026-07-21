@@ -12,7 +12,7 @@
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "package:win": "electron-builder --win --publish never",
     "typecheck": "vue-tsc --noEmit",
-    "selftest": "npx tsx scripts/selftest-settings-mapping.ts && npx tsx scripts/regression-tests.ts && npx tsx scripts/tdd-stall-watchdog-verify.ts && npx tsx scripts/export-image-verify.ts"
+    "selftest": "npx tsx scripts/selftest-settings-mapping.ts && npx tsx scripts/regression-tests.ts && npx tsx scripts/tdd-stall-watchdog-verify.ts && npx tsx scripts/export-image-verify.ts && npx tsx scripts/export-image-codec-verify.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.191",
@@ -28,6 +28,7 @@
     "markdown-it-task-lists": "^2.1.1",
     "mermaid": "^11.16.0",
     "pinia": "^3.0.2",
+    "pngjs": "^5.0.0",
     "uuid": "^11.1.0",
     "vue": "^3.5.13",
     "vue-draggable-plus": "^0.6.0",
@@ -39,6 +40,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/markdown-it": "^14.1.2",
     "@types/node": "^22.15.0",
+    "@types/pngjs": "^6.0.5",
     "@types/uuid": "^10.0.0",
     "@vitejs/plugin-vue": "^5.2.3",
     "electron": "^35.7.5",

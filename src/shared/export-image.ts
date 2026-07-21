@@ -12,6 +12,7 @@ import type {
   PaginationBudget,
   PixelBudgetInput,
   PixelBudgetResult,
+  SegmentCopyGeometry,
   SegmentHeightInput,
   SegmentHeightResult,
   SegmentPlacementInput,
@@ -46,6 +47,13 @@ export const SNAPSHOT_IMAGE_MAX = 2000;
 export const JPEG_QUALITY = 0.92;
 export const JPEG_CHUNK_BYTES = 2 * 1024 * 1024; // 2 MiB
 export const JPEG_PAGE_MAX_BYTES = 64 * 1024 * 1024; // 单页 JPEG 64 MiB
+
+// v4.1 PNG 内存预算（阶段零 Task 4 冻结；实测峰值因子 5.49→保守 5.5）。
+// 最终 RGBA 上限 = 峰值天花板 1GiB / 5.5 × 70% 安全 ≈ 128 MiB。
+// 真实物理宽以 Task 1 三档 DPI 实测为准；本表为 100% 基线，Task 1 回填后可收紧。
+export const PNG_PEAK_FACTOR = 5.5;
+export const PNG_MAX_FINAL_RGBA_BYTES = 128 * 1024 * 1024;   // 单页最终 RGBA 上限
+export const PNG_MAX_PEAK_RSS_BYTES = 1 * 1024 * 1024 * 1024; // worker 峰值 RSS 硬顶
 
 // =====================================================================
 // 1. RenderableMessage 投影
@@ -100,14 +108,17 @@ export function sanitizeSessionName(rawName: string): string {
 
 const FILENAME_TS = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/;
 
-/** 生成导出文件名。单张：会话名-YYYYMMDD-HHmmss.jpg；多张：-01-of-N.jpg（至少两位）。 */
+/** 生成导出文件名。单张：会话名-YYYYMMDD-HHmmss.<ext>；多张：-01-of-N.<ext>（至少两位）。
+ *  ext 由 format 决定：jpeg→jpg，png→png。 */
 export function buildExportFilename(
   sessionName: string,
   timestamp: string,
   page?: number,
   totalPages?: number,
+  format?: 'jpeg' | 'png',
 ): string {
   const base = sanitizeSessionName(sessionName);
+  const ext = format === 'png' ? 'png' : 'jpg';
   if (!FILENAME_TS.test(timestamp)) {
     throw new Error(`buildExportFilename: 非法时间戳 ${timestamp}（期望 YYYYMMDD-HHmmss）`);
   }
@@ -116,9 +127,9 @@ export function buildExportFilename(
     const width = Math.max(2, String(totalPages).length);
     const pageStr = String(page).padStart(width, '0');
     const totalStr = String(totalPages).padStart(width, '0');
-    return `${base}-${timestamp}-${pageStr}-of-${totalStr}.jpg`;
+    return `${base}-${timestamp}-${pageStr}-of-${totalStr}.${ext}`;
   }
-  return `${base}-${timestamp}.jpg`;
+  return `${base}-${timestamp}.${ext}`;
 }
 
 // =====================================================================
@@ -385,6 +396,29 @@ export function deriveMaxPageHeightCss(scaleY: number, contentWidthCss: number):
   return Math.max(480, Math.min(heightByPixels, heightByDim));
 }
 
+/** v4.1 PNG：按内存预算反推单页 CSS 高度上限（替代 canvas 像素预算）。 */
+export function deriveMaxPageHeightByMemory(scaleY: number, contentWidthCss: number): number {
+  if (!(scaleY > 0) || !(contentWidthCss > 0)) return DEFAULT_EXPORT_BUDGET.maxPageHeightCss;
+  const physicalWidth = Math.round(contentWidthCss * scaleY);
+  if (physicalWidth <= 0) return DEFAULT_EXPORT_BUDGET.maxPageHeightCss;
+  const maxPhysicalHeight = Math.floor(PNG_MAX_FINAL_RGBA_BYTES / (physicalWidth * 4));
+  return Math.floor(maxPhysicalHeight / scaleY);
+}
+
+/** v4.1 PNG：校验单页内存预算（最终 RGBA + 估算峰值）。任一超限不通过。 */
+export function checkPngMemoryBudget(physicalWidth: number, physicalHeight: number): { ok: boolean; reason?: string } {
+  if (!(physicalWidth > 0) || !(physicalHeight > 0)) return { ok: false, reason: '物理宽高非正' };
+  const finalRgba = physicalWidth * physicalHeight * 4;
+  if (finalRgba > PNG_MAX_FINAL_RGBA_BYTES) {
+    return { ok: false, reason: `最终 RGBA ${finalRgba} 超过 ${PNG_MAX_FINAL_RGBA_BYTES}` };
+  }
+  const estimatedPeak = finalRgba * PNG_PEAK_FACTOR;
+  if (estimatedPeak > PNG_MAX_PEAK_RSS_BYTES) {
+    return { ok: false, reason: `估算峰值 ${estimatedPeak} 超过 ${PNG_MAX_PEAK_RSS_BYTES}` };
+  }
+  return { ok: true };
+}
+
 // =====================================================================
 // 7. 快照预算（v3 第 11.3 节）
 // =====================================================================
@@ -450,6 +484,110 @@ export function placeSegment(input: SegmentPlacementInput): SegmentPlacementResu
   const drawHeightPx = destEndPx - destStartPx;
 
   return { ok: true, sourceOffsetCss, drawHeightCss, nextCursorCss, scaleX, scaleY, sourceStartPx, destStartPx, destEndPx, drawHeightPx };
+}
+
+// =====================================================================
+// 8.5 PNG worker 行拷贝几何（v4.1 第 6 节 Task 6）
+// placeSegment 的 CSS→物理半开区间映射保持不变（JPEG 沿用）；下列函数把它冻结为
+// 可下发给 worker 的 SegmentCopyGeometry，并校验源区间不越界、目的区间连续自洽。
+// worker 只按行 memcpy，不重算几何。依据：v4.1 §3 Task 6 Step 2/3。
+// =====================================================================
+
+/** 把 placeSegment 的成功结果冻结并校验为 worker 行拷贝几何。导出以便测试直接喂构造的 placement。 */
+export function finalizeSegmentCopyGeometry(
+  p: SegmentPlacementResult,
+  bitmapWidthPx: number,
+  bitmapHeightPx: number,
+): { ok: true; geometry: SegmentCopyGeometry } | { ok: false; reason: string } {
+  if (!p.ok) return { ok: false, reason: p.reason ?? 'placement 未 ok' };
+  const { sourceStartPx, destStartPx, destEndPx, drawHeightPx } = p;
+  if (![sourceStartPx, destStartPx, destEndPx, drawHeightPx, bitmapWidthPx, bitmapHeightPx].every(Number.isFinite)) {
+    return { ok: false, reason: '几何含非有限值' };
+  }
+  if (drawHeightPx <= 0) return { ok: false, reason: 'drawHeightPx 非正' };
+  if (destEndPx - destStartPx !== drawHeightPx) return { ok: false, reason: 'destEnd-destStart != drawHeightPx' };
+  if (sourceStartPx < 0) return { ok: false, reason: 'sourceStartPx 为负' };
+  if (destStartPx < 0 || destEndPx < 0) return { ok: false, reason: 'dest 为负' };
+  const sourceEndPx = sourceStartPx + drawHeightPx;
+  if (sourceEndPx > bitmapHeightPx) {
+    return { ok: false, reason: `source 越界 ${sourceEndPx} > bitmapHeightPx ${bitmapHeightPx}` };
+  }
+  return {
+    ok: true,
+    geometry: { sourceStartPx, sourceEndPx, destStartPx, destEndPx, drawHeightPx, bitmapWidthPx, bitmapHeightPx },
+  };
+}
+
+/** 一步：placeSegment + finalize，输入 CSS 几何 + 位图尺寸，输出校验过的 worker 几何。 */
+export function buildSegmentCopyGeometry(
+  input: SegmentPlacementInput,
+): { ok: true; geometry: SegmentCopyGeometry } | { ok: false; reason: string } {
+  if (!Number.isFinite(input.bitmapWidthPx) || !Number.isFinite(input.bitmapHeightPx)) {
+    return { ok: false, reason: '位图尺寸非有限' };
+  }
+  if (input.bitmapWidthPx <= 0 || input.bitmapHeightPx <= 0) {
+    return { ok: false, reason: '空位图' };
+  }
+  const placement = placeSegment(input);
+  if (!placement.ok) return { ok: false, reason: placement.reason ?? 'placeSegment 失败' };
+  return finalizeSegmentCopyGeometry(placement, input.bitmapWidthPx, input.bitmapHeightPx);
+}
+
+/**
+ * 把一段已解码 RGBA（part，宽 = geom.bitmapWidthPx）按 geometry 行拷贝进整页 full（宽 = geom.bitmapWidthPx）。
+ * 半开区间：源 [sourceStartPx, sourceEndPx)，目的 [destStartPx, destEndPx)，每行 bitmapWidthPx*4 字节。
+ * 纯 Node Buffer 操作，worker 与 selftest 共用。依据：v4.1 §3 Task 6 Step 3。
+ */
+export function copySegmentRows(full: Buffer, part: Buffer, geom: SegmentCopyGeometry): void {
+  const rowBytes = geom.bitmapWidthPx * 4;
+  for (let row = 0; row < geom.drawHeightPx; row += 1) {
+    const srcStart = (geom.sourceStartPx + row) * rowBytes;
+    const dstStart = (geom.destStartPx + row) * rowBytes;
+    part.copy(full, dstStart, srcStart, srcStart + rowBytes);
+  }
+}
+
+// =====================================================================
+// 8.6 PNG 页请求守卫（v4.1 §5 Task 9 Step 2 的 phase guard 纯逻辑）
+// 主进程在每个 PNG IPC handler 里调用，校验 page/segment/cursor/finish 连续性。
+// 抽成纯函数以便 selftest 直接覆盖（错页/乱序段/重复捕获/未完成 finish）。
+// =====================================================================
+
+/** PNG 单页推进态的纯投影（不含窗口/worker 句柄），供守卫校验。 */
+export interface PngPageGuardState {
+  page: number;
+  pageHeightCss: number;
+  expectedCursorCss: number;
+  nextSegment: number;
+}
+
+/** 校验 PNG captureSelf 请求：页/段连续 + cursor 匹配（±0.01 CSS px 容差）。 */
+export function validatePngCaptureRequest(
+  req: { page: number; segment: number; cursorCss: number },
+  st: PngPageGuardState,
+): { ok: true } | { ok: false; code: string; message: string } {
+  if (!Number.isInteger(req.page) || !Number.isInteger(req.segment) || !Number.isFinite(req.cursorCss)) {
+    return { ok: false, code: 'bad-request', message: '非法请求参数' };
+  }
+  if (req.page !== st.page) return { ok: false, code: 'bad-page', message: `页不匹配：期望 ${st.page}，收到 ${req.page}` };
+  if (req.segment !== st.nextSegment) return { ok: false, code: 'bad-segment', message: `段不连续：期望 ${st.nextSegment}，收到 ${req.segment}` };
+  if (Math.abs(req.cursorCss - st.expectedCursorCss) > 0.01) {
+    return { ok: false, code: 'bad-cursor', message: `cursor 不匹配：期望 ${st.expectedCursorCss}，收到 ${req.cursorCss}` };
+  }
+  return { ok: true };
+}
+
+/** 校验 PNG finishPage 请求：页匹配 + 页已捕获完整（cursor 覆盖到 pageHeight）。 */
+export function validatePngFinishRequest(
+  req: { page: number },
+  st: PngPageGuardState,
+): { ok: true } | { ok: false; code: string; message: string } {
+  if (!Number.isInteger(req.page)) return { ok: false, code: 'bad-request', message: '非法请求参数' };
+  if (req.page !== st.page) return { ok: false, code: 'bad-page', message: '页不匹配' };
+  if (st.expectedCursorCss + 0.5 < st.pageHeightCss) {
+    return { ok: false, code: 'incomplete', message: `页未捕获完整：cursor ${st.expectedCursorCss} < pageHeight ${st.pageHeightCss}` };
+  }
+  return { ok: true };
 }
 
 // =====================================================================
