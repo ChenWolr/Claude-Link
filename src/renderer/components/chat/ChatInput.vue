@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { SLASH_COMMANDS } from '../../../shared/constants';
 
 defineProps<{
@@ -82,6 +82,19 @@ function handleInput(): void {
   selectedSlashIndex.value = 0;
 }
 
+// 输入框自适应高度：随内容增高，最多约 4 行（CSS max-height 封顶），超出则内部滚动。
+// 模式参考 openhanako FloatingInput——先置 auto 再读 scrollHeight，由 max-height + overflow-y 兜底。
+// 覆盖键盘输入、斜杠命令注入、发送后清空、窗口缩放（换行重排）等所有高度变化路径。
+function autoResize(): void {
+  const el = textareaRef.value;
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = `${el.scrollHeight}px`;
+}
+
+// flush:'post' 确保 DOM 已反映最新 text，scrollHeight 读数准确。
+watch(text, () => autoResize(), { flush: 'post' });
+
 function submit(): void {
   const value = text.value.trim();
   if (!value) return;
@@ -98,10 +111,12 @@ function handleClickOutside(event: MouseEvent) {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside);
+  window.addEventListener('resize', autoResize);
 });
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside);
+  window.removeEventListener('resize', autoResize);
 });
 </script>
 
@@ -192,7 +207,8 @@ onUnmounted(() => {
   /* 浮岛内部输入行：宽度与 padding 由外层 .chat-composer 统一约束（两行天然同宽，
      规避历史上 max-width≠width 导致的错位）。去掉自带背景与 border-top，融入卡片。 */
   width: 100%;
-  padding: 16px var(--chat-bottom-pad-x);
+  /* 底部 padding 收窄到 8px，缩短与下方工具栏（工作空间/模型/权限）的间距。 */
+  padding: 16px var(--chat-bottom-pad-x) 8px;
 }
 
 textarea {
@@ -208,7 +224,10 @@ textarea {
   font-size: 0.875rem;
   line-height: 1.5;
   min-height: 42px;
-  max-height: 160px;
+  /* 约 4 行封顶（line-height 1.5 × 14px × 4 + 上下 padding ≈ 104px）；超出由 overflow-y 滚动查看。
+     高度自增由 autoResize() 驱动，max-height 在此兜底封顶。 */
+  max-height: 104px;
+  overflow-y: auto;
 }
 
 button {
