@@ -1111,5 +1111,44 @@ console.log('\n=== 43) 浅色主题系统契约（openhanako 真实浅色色板�
   check('TestConnectionModal 遮罩走 interaction-overlay-bg token', /background:\s*var\(--interaction-overlay-bg\)/.test(tcm));
 }
 
+console.log('\n=== 44) 右侧活动栏方案 B：图标轨 + 总览/筛选 + 状态指标网格 ===');
+{
+  const ss = readRel('src/renderer/stores/session-store.ts');
+  const tqp = readRel('src/renderer/components/task/TaskQueuePanel.vue');
+  const al = readRel('src/renderer/components/layout/AppLayout.vue');
+
+  // —— 状态字段演进：rightTab 扩展 'all' 默认（保留字段名与旧字面量，既有契约不破）——
+  check('rightTab 默认 all（四类总览同屏）', ss.includes("rightTab: 'all'"));
+  check('rightTab 枚举五态齐全', ss.includes("'all'") && ss.includes("'queue'") && ss.includes("'subagent'") && ss.includes("'background'") && ss.includes("'changes'"));
+  check('setRightTab 入参含 all', /setRightTab\([^)]*'all'/.test(ss));
+  check('保留 focusSubAgent（主流程锚点跳子Agent）', ss.includes('focusSubAgent'));
+
+  // —— 图标轨：SVG stroke 结构图标 + badge + 激活态 ——
+  check('图标轨容器与按钮', tqp.includes('class="rail"') && tqp.includes('rail__btn'));
+  check('轨用 SVG stroke 图标（禁止 emoji 作结构图标）', tqp.includes('<svg') && tqp.includes('stroke="currentColor"'));
+  check('轨按钮 aria-pressed 反映筛选态', tqp.includes(':aria-pressed'));
+  check('轨 badge 计数', tqp.includes('rail__badge'));
+
+  // —— 筛选交互：点单类、再点同类回 all、清除筛选 pill ——
+  check('筛选切换（再点同类回 all）', tqp.includes('setFilter') && tqp.includes("setFilter('all')"));
+  check('清除筛选 pill 仅非总览显示', tqp.includes('clear-pill') && tqp.includes('v-if="!isAll"'));
+  check('总览态判定 isAll', tqp.includes('isAll'));
+
+  // —— 状态指标条：2×2 网格，禁 · 串句换行 ——
+  check('指标网格两列', tqp.includes('status-metrics') && /grid-template-columns:\s*repeat\(2/.test(tqp));
+  check('指标格标签/值分行 + tabular-nums', tqp.includes('status-metric__label') && tqp.includes('status-metric__value') && tqp.includes('tabular-nums'));
+
+  // —— 排队 composer 仅 queue 筛选可见（总览/其他类不出现）——
+  check('排队控制条/composer 仅 queue 可见', tqp.includes("v-if=\"sessionStore.rightTab === 'queue'\""));
+  check('总览排队 section 渲染任务列表（isAll 或 queue）', tqp.includes("isAll || sessionStore.rightTab === 'queue'"));
+
+  // —— 保留既有契约：后台/改动 section 字面量与组件 ——
+  check('后台 section 保留 rightTab === background + backgroundTaskList', tqp.includes("rightTab === 'background'") && tqp.includes('backgroundTaskList'));
+  check('改动 section 保留 rightTab === changes + ChangesPanel', tqp.includes("rightTab === 'changes'") && tqp.includes('<ChangesPanel'));
+
+  // —— 右侧栏默认宽度补偿图标轨（320→340）——
+  check('AppLayout 右侧栏默认 340', /taskWidth\s*=\s*ref\(340\)/.test(al));
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
