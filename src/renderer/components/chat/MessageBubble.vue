@@ -150,6 +150,23 @@ async function copyMessage(): Promise<void> {
   position: relative;
 }
 
+/* hover 命中桥（不可删——删了复制按钮会重新闪退）：
+   复制按钮定位在气泡外部（bottom:-26px），与气泡本体之间留有 ~3px 死区；而按钮只在
+   .bubble:hover 时才拿到 pointer-events:auto。鼠标从正文移向按钮、越过死区的瞬间
+   .bubble:hover 失效 → 按钮在命中前就回退到 opacity:0 / pointer-events:none 而消失（旧 bug）。
+   这条全透明 ::after 把命中区从气泡底边连续延伸到按钮下方，鼠标全程都在 .bubble 命中区内，
+   按钮稳定可达。无任何视觉影响（全透明、脱离文档流不占布局）。按钮靠 z-index:1 压在桥之上
+   保持可点。若改动按钮位置/尺寸，须同步调整此处覆盖范围。 */
+.bubble::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  bottom: -30px;
+  width: 40px;
+  height: 30px;
+  z-index: 0;
+}
+
 .bubble__copy {
   position: absolute;
   right: 0;
@@ -165,6 +182,7 @@ async function copyMessage(): Promise<void> {
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
+  z-index: 1;
   transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
 
