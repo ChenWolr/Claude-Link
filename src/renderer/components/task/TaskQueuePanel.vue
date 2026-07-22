@@ -150,9 +150,83 @@ watch(
   },
 );
 
+// —— 方案 B：右侧活动栏（图标轨 + 总览/筛选）——
+// rightTab 扩展 'all'（默认四类总览同屏）；点轨按钮切单类，再点同类回 all。
+type RightFilter = 'all' | 'queue' | 'subagent' | 'background' | 'changes';
+const isAll = computed(() => sessionStore.rightTab === 'all');
+
+function setFilter(f: RightFilter): void {
+  // 再点当前激活的同类 → 回 all（与预览一致）；点「全部」恒回 all。
+  if (f === 'all' || sessionStore.rightTab === f) {
+    sessionStore.setRightTab('all');
+  } else {
+    sessionStore.setRightTab(f);
+  }
+}
+
+const headTitle = computed(() => {
+  switch (sessionStore.rightTab) {
+    case 'queue': return '排队任务';
+    case 'subagent': return '子Agent';
+    case 'background': return '后台任务';
+    case 'changes': return '改动';
+    default: return '活动总览';
+  }
+});
+const headEyebrow = computed(() => {
+  switch (sessionStore.rightTab) {
+    case 'queue': return 'Queue';
+    case 'subagent': return 'Sub-agents';
+    case 'background': return 'Background';
+    case 'changes': return 'Changes';
+    default: return 'Overview';
+  }
+});
+
+// 运行中的子 Agent 数（指标强调 + 轨 badge live 态）。
+const runningSubAgentCount = computed(() => subAgentGroups.value.filter((g) => g.running).length);
+
+// 状态指标条（§4）：四格始终占位，标签与值分行，禁用 · 串句换行。
+const queueMetric = computed<{ text: string; active: boolean }>(() => {
+  switch (queueStatus.value) {
+    case 'running': return { text: '执行中', active: true };
+    case 'waiting': {
+      const cd = taskStore.queueState.countdownRemaining;
+      return { text: cd > 0 ? `等待 ${cd}s` : '等待中', active: true };
+    }
+    case 'paused': return { text: '已暂停', active: true };
+    case 'continuing': return { text: '续写中', active: true };
+    default: return { text: '空闲', active: false };
+  }
+});
+const subAgentMetric = computed<{ text: string; active: boolean }>(() => {
+  const total = subAgentGroups.value.length;
+  if (!total) return { text: '无', active: false };
+  const running = runningSubAgentCount.value;
+  return { text: running > 0 ? `${running} 运行中` : `${total} 组`, active: running > 0 };
+});
+const backgroundMetric = computed<{ text: string; active: boolean }>(() => {
+  const n = backgroundTaskCount.value;
+  return { text: n > 0 ? `${n} 个任务` : '无', active: n > 0 };
+});
+const changesMetric = computed<{ text: string; active: boolean }>(() => {
+  const n = changesCount.value;
+  return { text: n > 0 ? `${n} 个文件` : '无', active: n > 0 };
+});
+
+// 总览改动摘要：复用 changesStore；单类才挂载完整 ChangesPanel。
+const CHANGES_SUMMARY_CAP = 5;
+const changesSummaryFiles = computed(() => changesStore.files.slice(0, CHANGES_SUMMARY_CAP));
+function changeStatusLabel(status: string): string {
+  const map: Record<string, string> = { M: '改', A: '增', D: '删', R: '移', '??': '新', U: '冲' };
+  return map[status] ?? status;
+}
+
 onMounted(() => {
   cleanup = startListening();
   loadTasks();
+  // 面板常驻（默认 all 总览），改动数据须随挂载即拉，供轨 badge / 指标格 / 总览摘要。
+  void changesStore.refresh();
 });
 
 onUnmounted(() => {
@@ -221,91 +295,173 @@ function handleDragReorder() {
 
 <template>
   <aside class="task-panel">
-    <!-- Tab 切换：排队任务 / 子Agent -->
-    <div class="task-panel__tabs">
-      <button
-        type="button"
-        class="tab"
-        :class="{ 'tab--active': sessionStore.rightTab === 'queue' }"
-        @click="sessionStore.setRightTab('queue')"
-      >
-        排队任务
-      </button>
-      <button
-        type="button"
-        class="tab"
-        :class="{ 'tab--active': sessionStore.rightTab === 'subagent' }"
-        @click="sessionStore.setRightTab('subagent')"
-      >
-        子Agent
-        <span v-if="subAgentGroups.length" class="tab__badge">{{ subAgentGroups.length }}</span>
-      </button>
-      <button
-        type="button"
-        class="tab"
-        :class="{ 'tab--active': sessionStore.rightTab === 'background' }"
-        @click="sessionStore.setRightTab('background')"
-      >
-        后台任务
-        <span v-if="backgroundTaskCount" class="tab__badge">{{ backgroundTaskCount }}</span>
-      </button>
-      <button
-        type="button"
-        class="tab"
-        :class="{ 'tab--active': sessionStore.rightTab === 'changes' }"
-        @click="sessionStore.setRightTab('changes')"
-      >
-        改动
-        <span v-if="changesCount" class="tab__badge">{{ changesCount }}</span>
-      </button>
-    </div>
-
-    <!-- 排队任务面板 -->
-    <div v-show="sessionStore.rightTab === 'queue'" class="task-panel__pane">
-      <header class="task-panel__header">
-        <div>
-          <p class="eyebrow">Queue</p>
-          <h2>任务队列</h2>
+    <div class="task-panel__main">
+      <!-- 顶栏：标题随筛选变化 + 清除筛选（仅非总览） -->
+      <header class="task-panel__head">
+        <div class="task-panel__heading">
+          <p class="eyebrow">{{ headEyebrow }}</p>
+          <h2>{{ headTitle }}</h2>
         </div>
+        <button v-if="!isAll" type="button" class="clear-pill" title="回到全部总览" @click="setFilter('all')">清除筛选</button>
+      </header>
+
+      <!-- 状态指标条（2×2 网格，禁用 · 串句换行） -->
+      <div class="status-metrics">
+        <button type="button" class="status-metric" :class="{ 'status-metric--active': queueMetric.active }" :title="`只看队列（${queueMetric.text}）`" @click="setFilter('queue')">
+          <span class="status-metric__label">队列</span>
+          <span class="status-metric__value">{{ queueMetric.text }}</span>
+        </button>
+        <button type="button" class="status-metric" :class="{ 'status-metric--active': subAgentMetric.active }" :title="`只看子Agent（${subAgentMetric.text}）`" @click="setFilter('subagent')">
+          <span class="status-metric__label">子Agent</span>
+          <span class="status-metric__value">{{ subAgentMetric.text }}</span>
+        </button>
+        <button type="button" class="status-metric" :class="{ 'status-metric--active': backgroundMetric.active }" :title="`只看后台（${backgroundMetric.text}）`" @click="setFilter('background')">
+          <span class="status-metric__label">后台</span>
+          <span class="status-metric__value">{{ backgroundMetric.text }}</span>
+        </button>
+        <button type="button" class="status-metric" :class="{ 'status-metric--active': changesMetric.active }" :title="`只看改动（${changesMetric.text}）`" @click="setFilter('changes')">
+          <span class="status-metric__label">改动</span>
+          <span class="status-metric__value">{{ changesMetric.text }}</span>
+        </button>
+      </div>
+
+      <!-- 排队控制条 + 倒计时（仅 queue 筛选） -->
+      <div v-if="sessionStore.rightTab === 'queue'" class="queue-bar">
         <div class="task-panel__controls">
           <button v-if="queueStatus === 'idle' || queueStatus === 'paused'" type="button" class="btn btn--primary" title="开始执行队列中的任务" @click="handleStart">开始</button>
           <button v-if="queueStatus === 'running' || queueStatus === 'waiting' || queueStatus === 'continuing'" type="button" class="btn btn--warn" title="暂停倒计时与队列执行" @click="handlePause">暂停</button>
           <button v-if="queueStatus === 'paused'" type="button" class="btn btn--primary" title="恢复队列执行" @click="handleResume">恢复</button>
         </div>
-      </header>
-
-      <!-- Countdown -->
-      <div v-if="queueStatus === 'waiting' && taskStore.queueState.countdownRemaining > 0" class="countdown">
-        任务已完成，{{ taskStore.queueState.countdownRemaining }}s 内可继续追加指令
+        <div v-if="queueStatus === 'waiting' && taskStore.queueState.countdownRemaining > 0" class="countdown">
+          任务已完成，{{ taskStore.queueState.countdownRemaining }}s 内可继续追加指令
+        </div>
+        <div v-if="queueStatus === 'continuing'" class="countdown countdown--continuing">
+          继续执行当前任务...
+        </div>
       </div>
 
-      <!-- Continuing -->
-      <div v-if="queueStatus === 'continuing'" class="countdown countdown--continuing">
-        继续执行当前任务...
+      <!-- 内容区：总览四类纵向堆叠，单类只渲染对应数据源 -->
+      <div class="task-panel__scroll">
+        <!-- § 排队任务 -->
+        <section v-if="isAll || sessionStore.rightTab === 'queue'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
+          <div v-if="isAll" class="tp-section__head">
+            <span class="tp-section__title">排队任务</span>
+            <span v-if="taskStore.tasks.length" class="tp-section__count">{{ taskStore.tasks.length }}</span>
+            <button type="button" class="tp-section__goto" @click="setFilter('queue')">只看此类</button>
+          </div>
+          <div class="task-list">
+            <VueDraggable
+              v-model="taskStore.tasks"
+              :disabled="dragDisabled"
+              handle=".task-item__drag"
+              item-key="id"
+              @end="handleDragReorder"
+            >
+              <template #item="{ element: task }">
+                <TaskItem
+                  :task="task"
+                  @delete="handleDelete"
+                  @interrupt="handleInterrupt"
+                />
+              </template>
+            </VueDraggable>
+            <div v-if="!taskStore.tasks.length" class="task-panel__empty">等待添加任务</div>
+          </div>
+        </section>
+
+        <!-- § 子Agent -->
+        <section v-if="isAll || sessionStore.rightTab === 'subagent'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
+          <div v-if="isAll" class="tp-section__head">
+            <span class="tp-section__title">子Agent</span>
+            <span v-if="subAgentGroups.length" class="tp-section__count">{{ subAgentGroups.length }}</span>
+            <button type="button" class="tp-section__goto" @click="setFilter('subagent')">只看此类</button>
+          </div>
+          <div v-if="!subAgentGroups.length" class="task-panel__empty">暂无子 Agent 过程</div>
+          <div v-else class="subagent-list">
+            <div
+              v-for="g in subAgentGroups"
+              :id="`subagent-${g.parentAgentId}`"
+              :key="g.parentAgentId"
+              class="subagent-group"
+            >
+              <button
+                type="button"
+                class="subagent-group__header"
+                :class="{ 'subagent-group__header--open': isSubAgentGroupExpanded(g.parentAgentId, g.running) }"
+                @click="toggleSubAgentGroup(g.parentAgentId, g.running)"
+              >
+                <span class="subagent-group__icon">🤖</span>
+                <span class="subagent-group__title">{{ g.title }}</span>
+                <span class="subagent-group__duration">⏱{{ subAgentDurationText(g) }}</span>
+                <span class="subagent-group__status" :class="{ 'subagent-group__status--running': g.running }">
+                  {{ subAgentStatusText(g) }}
+                  <span v-if="g.running" class="subagent-running-dots" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
+                </span>
+                <span class="subagent-group__arrow">›</span>
+              </button>
+              <div v-if="isSubAgentGroupExpanded(g.parentAgentId, g.running)" class="subagent-group__body">
+                <ThinkingBlock v-if="subAgentThinkingText(g.parentAgentId)" :content="subAgentThinkingText(g.parentAgentId)" streaming />
+                <template v-for="item in g.items" :key="item.key">
+                  <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
+                  <MessageBubble v-else :message="item.message" />
+                </template>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- § 后台任务（task_* 编排：后台 Bash / Monitor / 后台子 Agent） -->
+        <section v-if="isAll || sessionStore.rightTab === 'background'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
+          <div v-if="isAll" class="tp-section__head">
+            <span class="tp-section__title">后台任务</span>
+            <span v-if="backgroundTaskCount" class="tp-section__count">{{ backgroundTaskCount }}</span>
+            <button type="button" class="tp-section__goto" @click="setFilter('background')">只看此类</button>
+          </div>
+          <div v-if="!backgroundTaskList.length" class="task-panel__empty">暂无后台任务</div>
+          <div v-else class="subagent-list">
+            <div v-for="t in backgroundTaskList" :key="t.taskId" class="subagent-group">
+              <div class="subagent-group__header">
+                <span class="subagent-group__icon">{{ taskIcon(t.taskType) }}</span>
+                <span class="subagent-group__title">{{ t.description || t.taskId }}</span>
+                <span class="subagent-group__status" :class="{ 'subagent-group__status--running': !t.status }">
+                  {{ t.status ? t.status : '运行中' }}
+                </span>
+              </div>
+              <div class="subagent-group__body">
+                <div v-if="t.lastToolName" class="bg-task__row">最近工具：{{ t.lastToolName }}</div>
+                <div v-if="t.usage?.durationMs" class="bg-task__row">耗时：{{ (t.usage.durationMs / 1000).toFixed(1) }}s</div>
+                <div v-if="t.usage?.toolUses" class="bg-task__row">工具调用：{{ t.usage.toolUses }}</div>
+                <div v-if="t.summary" class="bg-task__row">{{ t.summary }}</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- § 改动：总览精简摘要，单类完整 ChangesPanel -->
+        <section v-if="isAll || sessionStore.rightTab === 'changes'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
+          <div v-if="isAll" class="tp-section__head">
+            <span class="tp-section__title">改动</span>
+            <span v-if="changesCount" class="tp-section__count">{{ changesCount }}</span>
+            <button type="button" class="tp-section__goto" @click="setFilter('changes')">只看此类</button>
+          </div>
+          <ChangesPanel v-if="!isAll" />
+          <ul v-else-if="changesCount" class="tp-changes-summary">
+            <li v-for="f in changesSummaryFiles" :key="f.path" class="tp-changes-row">
+              <span class="tp-changes-status" :data-status="f.status">{{ changeStatusLabel(f.status) }}</span>
+              <span class="tp-changes-path" :title="f.path">{{ f.path }}</span>
+            </li>
+            <li v-if="changesCount > changesSummaryFiles.length" class="tp-changes-more">
+              还有 {{ changesCount - changesSummaryFiles.length }} 个，<button type="button" class="tp-changes-goto" @click="setFilter('changes')">查看全部</button>
+            </li>
+          </ul>
+          <div v-else class="task-panel__empty">工作目录无改动</div>
+        </section>
       </div>
 
-      <!-- Task List with drag reorder -->
-      <div class="task-list">
-        <VueDraggable
-          v-model="taskStore.tasks"
-          :disabled="dragDisabled"
-          handle=".task-item__drag"
-          item-key="id"
-          @end="handleDragReorder"
-        >
-          <template #item="{ element: task }">
-            <TaskItem
-              :task="task"
-              @delete="handleDelete"
-              @interrupt="handleInterrupt"
-            />
-          </template>
-        </VueDraggable>
-        <div v-if="!taskStore.tasks.length" class="task-panel__empty">等待添加任务</div>
-      </div>
-
-      <!-- Add Task -->
-      <div class="task-panel__add">
+      <!-- 排队 composer（仅 queue 筛选；newTaskPrompt 为 setup ref，切换筛选不丢草稿） -->
+      <div v-if="sessionStore.rightTab === 'queue'" class="task-panel__add">
         <div class="add-row">
           <span class="add-label">排队指令</span>
           <span
@@ -324,165 +480,121 @@ function handleDragReorder() {
       </div>
     </div>
 
-    <!-- 子Agent 面板 -->
-    <div v-show="sessionStore.rightTab === 'subagent'" class="task-panel__pane task-panel__pane--subagent">
-      <div v-if="!subAgentGroups.length" class="task-panel__empty">暂无子 Agent 过程</div>
-      <template v-else>
-        <div class="subagent-list">
-          <div
-            v-for="g in subAgentGroups"
-            :id="`subagent-${g.parentAgentId}`"
-            :key="g.parentAgentId"
-            class="subagent-group"
-          >
-            <button
-              type="button"
-              class="subagent-group__header"
-              :class="{ 'subagent-group__header--open': isSubAgentGroupExpanded(g.parentAgentId, g.running) }"
-              @click="toggleSubAgentGroup(g.parentAgentId, g.running)"
-            >
-              <span class="subagent-group__icon">🤖</span>
-              <span class="subagent-group__title">{{ g.title }}</span>
-              <span class="subagent-group__duration">⏱{{ subAgentDurationText(g) }}</span>
-              <span class="subagent-group__status" :class="{ 'subagent-group__status--running': g.running }">
-                {{ subAgentStatusText(g) }}
-                <span v-if="g.running" class="subagent-running-dots" aria-hidden="true">
-                  <span></span><span></span><span></span>
-                </span>
-              </span>
-              <span class="subagent-group__arrow">›</span>
-            </button>
-            <div v-if="isSubAgentGroupExpanded(g.parentAgentId, g.running)" class="subagent-group__body">
-              <ThinkingBlock v-if="subAgentThinkingText(g.parentAgentId)" :content="subAgentThinkingText(g.parentAgentId)" streaming />
-              <template v-for="item in g.items" :key="item.key">
-                <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
-                <MessageBubble v-else :message="item.message" />
-              </template>
-            </div>
-          </div>
-        </div>
-      </template>
-    </div>
-
-    <!-- C：后台任务面板（task_* 编排：后台 Bash / Monitor / 后台子 Agent） -->
-    <div v-show="sessionStore.rightTab === 'background'" class="task-panel__pane task-panel__pane--subagent">
-      <div v-if="!backgroundTaskList.length" class="task-panel__empty">暂无后台任务</div>
-      <div v-else class="subagent-list">
-        <div v-for="t in backgroundTaskList" :key="t.taskId" class="subagent-group">
-          <div class="subagent-group__header">
-            <span class="subagent-group__icon">{{ taskIcon(t.taskType) }}</span>
-            <span class="subagent-group__title">{{ t.description || t.taskId }}</span>
-            <span class="subagent-group__status" :class="{ 'subagent-group__status--running': !t.status }">
-              {{ t.status ? t.status : '运行中' }}
-            </span>
-          </div>
-          <div class="subagent-group__body">
-            <div v-if="t.lastToolName" class="bg-task__row">最近工具：{{ t.lastToolName }}</div>
-            <div v-if="t.usage?.durationMs" class="bg-task__row">耗时：{{ (t.usage.durationMs / 1000).toFixed(1) }}s</div>
-            <div v-if="t.usage?.toolUses" class="bg-task__row">工具调用：{{ t.usage.toolUses }}</div>
-            <div v-if="t.summary" class="bg-task__row">{{ t.summary }}</div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 会话改动面板：列出 workingDir 的 git 改动 + 按需 git diff -->
-    <div v-show="sessionStore.rightTab === 'changes'" class="task-panel__pane">
-      <ChangesPanel />
-    </div>
+    <!-- 图标轨：贴面板最右侧；SVG stroke 结构图标，禁止 emoji 作结构图标 -->
+    <nav class="rail" aria-label="活动分类">
+      <button
+        type="button"
+        class="rail__btn"
+        :class="{ 'rail__btn--active': isAll }"
+        :aria-pressed="sessionStore.rightTab === 'all'"
+        aria-label="全部四类"
+        title="全部四类"
+        @click="setFilter('all')"
+      >
+        <svg class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2.5" y="2.5" width="4.2" height="4.2" rx="1" />
+          <rect x="9.3" y="2.5" width="4.2" height="4.2" rx="1" />
+          <rect x="2.5" y="9.3" width="4.2" height="4.2" rx="1" />
+          <rect x="9.3" y="9.3" width="4.2" height="4.2" rx="1" />
+        </svg>
+      </button>
+      <span class="rail__divider" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="rail__btn"
+        :class="{ 'rail__btn--active': sessionStore.rightTab === 'queue' }"
+        :aria-pressed="sessionStore.rightTab === 'queue'"
+        aria-label="排队任务"
+        title="排队任务"
+        @click="setFilter('queue')"
+      >
+        <svg class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5.4 4h8M5.4 8h8M5.4 12h8" />
+          <circle cx="2.6" cy="4" r="0.9" fill="currentColor" stroke="none" />
+          <circle cx="2.6" cy="8" r="0.9" fill="currentColor" stroke="none" />
+          <circle cx="2.6" cy="12" r="0.9" fill="currentColor" stroke="none" />
+        </svg>
+        <span v-if="taskStore.tasks.length" class="rail__badge">{{ taskStore.tasks.length }}</span>
+      </button>
+      <button
+        type="button"
+        class="rail__btn"
+        :class="{ 'rail__btn--active': sessionStore.rightTab === 'subagent' }"
+        :aria-pressed="sessionStore.rightTab === 'subagent'"
+        aria-label="子Agent"
+        title="子Agent"
+        @click="setFilter('subagent')"
+      >
+        <svg class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="8" cy="5.6" r="2.4" />
+          <path d="M3.2 13.6c0-2.6 2.2-4.2 4.8-4.2s4.8 1.6 4.8 4.2" />
+        </svg>
+        <span v-if="subAgentGroups.length" class="rail__badge" :class="{ 'rail__badge--live': runningSubAgentCount > 0 }">{{ subAgentGroups.length }}</span>
+      </button>
+      <button
+        type="button"
+        class="rail__btn"
+        :class="{ 'rail__btn--active': sessionStore.rightTab === 'background' }"
+        :aria-pressed="sessionStore.rightTab === 'background'"
+        aria-label="后台任务"
+        title="后台任务"
+        @click="setFilter('background')"
+      >
+        <svg class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M2 8h2.8l1.8-4.4 2.8 8.8L11.2 8H14" />
+        </svg>
+        <span v-if="backgroundTaskCount" class="rail__badge">{{ backgroundTaskCount }}</span>
+      </button>
+      <button
+        type="button"
+        class="rail__btn"
+        :class="{ 'rail__btn--active': sessionStore.rightTab === 'changes' }"
+        :aria-pressed="sessionStore.rightTab === 'changes'"
+        aria-label="改动"
+        title="改动"
+        @click="setFilter('changes')"
+      >
+        <svg class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M4.5 2h4.8l3.2 3.2V14H4.5z" />
+          <path d="M9.3 2v3.2h3.2" />
+          <path d="M8 8.6v3.4M6.3 10.3h3.4" />
+        </svg>
+        <span v-if="changesCount" class="rail__badge">{{ changesCount }}</span>
+      </button>
+    </nav>
   </aside>
 </template>
 
 <style scoped>
 .task-panel {
   display: flex;
+  flex-direction: row;
   width: var(--task-panel-width);
   min-width: var(--task-panel-width);
-  flex-direction: column;
   background: var(--color-panel);
   border-left: 1px solid var(--color-border-strong);
 }
 
-/* Tab 切换条 */
-.task-panel__tabs {
-  display: flex;
-  gap: 4px;
-  padding: 8px 12px 0;
-  border-bottom: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.tab {
-  position: relative;
-  border: 0;
-  background: transparent;
-  color: var(--color-text-muted);
-  padding: 8px 14px;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-  transition: color 0.15s, background 0.15s, transform var(--duration-fast) var(--ease-out);
-}
-
-.tab:hover {
-  color: var(--color-text);
-}
-
-.tab--active {
-  color: var(--color-accent-strong);
-  background: var(--color-panel-soft);
-}
-
-.tab--active::after {
-  content: '';
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: -1px;
-  height: 2px;
-  background: var(--color-accent-strong);
-  border-radius: 2px;
-}
-
-.tab__badge {
-  display: inline-grid;
-  place-items: center;
-  min-width: 16px;
-  height: 16px;
-  margin-left: 4px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  font-size: 0.625rem;
-  font-weight: 700;
-}
-
-/* 面板容器：占满剩余高度，内部各自滚动 */
-.task-panel__pane {
+/* 主区：内容在左 */
+.task-panel__main {
   flex: 1;
-  min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
 
-.task-panel__pane--subagent {
-  overflow-y: auto;
-  padding: 12px;
-}
-
-.task-panel__header {
+/* 顶栏 */
+.task-panel__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 60px;
-  padding: 0 16px;
+  gap: 8px;
+  padding: 10px 12px 8px;
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
 }
 
-.task-panel__header h2 {
+.task-panel__heading h2 {
   margin: 2px 0 0;
   font-size: 0.9375rem;
   font-weight: 650;
@@ -493,11 +605,93 @@ function handleDragReorder() {
   color: var(--color-text-muted);
   font-size: 0.6875rem;
   text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.clear-pill {
+  flex-shrink: 0;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.clear-pill:hover {
+  color: var(--color-accent-strong);
+  border-color: var(--color-accent-strong);
+}
+
+/* 状态指标条：2×2 网格，绝不用 · 串句换行 */
+.status-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-accent) 5%, transparent);
+  flex-shrink: 0;
+}
+
+.status-metric {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.status-metric:hover {
+  border-color: var(--color-accent-strong);
+}
+
+.status-metric--active {
+  border-color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+
+.status-metric__label {
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.status-metric__value {
+  font-size: 0.75rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-metric--active .status-metric__value {
+  color: var(--color-accent-strong);
+}
+
+/* 排队控制条（仅 queue） */
+.queue-bar {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--color-border);
 }
 
 .task-panel__controls {
   display: flex;
   gap: 6px;
+  padding: 8px 12px;
 }
 
 .btn {
@@ -522,7 +716,6 @@ function handleDragReorder() {
 
 .countdown {
   padding: 10px 16px;
-  border-bottom: 1px solid var(--color-border);
   background: color-mix(in srgb, var(--color-accent) 6%, transparent);
   color: var(--color-accent-strong);
   font-size: 0.8125rem;
@@ -534,23 +727,155 @@ function handleDragReorder() {
   color: var(--color-accent-strong);
 }
 
-.task-list {
-  min-height: 0;
+/* 内容滚动区：总览四类纵向堆叠，单类只渲染对应数据源 */
+.task-panel__scroll {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 12px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.tp-section {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
+.tp-section--overview {
+  padding-bottom: 4px;
+}
+
+.tp-section__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 2px;
+}
+
+.tp-section__title {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.tp-section__count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-text) 10%, transparent);
+  color: var(--color-text);
+  font-size: 0.625rem;
+  font-weight: 700;
+}
+
+.tp-section__goto {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-accent-strong);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+}
+
+.tp-section__goto:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.task-list {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 2px 4px;
+}
+
 .task-panel__empty {
   color: var(--color-text-muted);
   font-size: 0.8125rem;
-  padding: 18px 16px;
+  padding: 14px 12px;
   text-align: center;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
 }
 
+/* 总览改动摘要（精简列表，进单类看完整 diff） */
+.tp-changes-summary {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tp-changes-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.tp-changes-row:hover {
+  background: var(--color-panel-soft);
+}
+
+.tp-changes-status {
+  flex-shrink: 0;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-text) 10%, transparent);
+  color: var(--color-text);
+  font-size: 0.625rem;
+  font-weight: 700;
+}
+
+.tp-changes-path {
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.tp-changes-more {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 6px;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+.tp-changes-goto {
+  border: 0;
+  background: transparent;
+  color: var(--color-accent-strong);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+}
+
+/* 排队 composer */
 .task-panel__add {
   display: flex;
   flex-direction: column;
@@ -614,6 +939,78 @@ function handleDragReorder() {
 .task-panel__add button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+/* 图标轨：贴面板最右侧 */
+.rail {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 4px;
+  width: 48px;
+  border-left: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+}
+
+.rail__divider {
+  width: 24px;
+  height: 1px;
+  margin: 2px 0;
+  background: var(--color-border);
+}
+
+.rail__btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.rail__btn:hover {
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+
+.rail__btn--active {
+  color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  border-color: var(--color-accent-strong);
+}
+
+.rail__icon {
+  width: 20px;
+  height: 20px;
+}
+
+.rail__badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 0.625rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.rail__badge--live {
+  background: var(--color-warn-strong);
+  color: #fff;
 }
 
 /* 子 Agent 分组 */
@@ -756,5 +1153,11 @@ function handleDragReorder() {
   max-width: 100%;
   box-sizing: border-box;
   align-self: stretch;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-running-dots span {
+    animation: none;
+  }
 }
 </style>

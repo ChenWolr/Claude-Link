@@ -44,8 +44,9 @@ export const useSessionStore = defineStore('session', {
     // per-session 流式快照。切换会话时保存当前流式内容到快照，切回时恢复。
     sessionStreams: {} as Record<string, { content: string; thinking: string; tool: string }>,
     recentWorkspaces: [] as string[],
-    // 右侧任务栏当前 Tab：'queue'（排队任务）/ 'subagent'（子Agent）。
-    rightTab: 'queue' as 'queue' | 'subagent' | 'background' | 'changes',
+    // 右侧活动栏筛选：'all'（默认，四类总览同屏）/ 'queue' / 'subagent' / 'background' / 'changes'。
+    // 演进自旧 rightTab 互斥 Tab——保留字段名与 'changes'/'background' 等字面量，仅新增 'all' 默认。
+    rightTab: 'all' as 'all' | 'queue' | 'subagent' | 'background' | 'changes',
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
@@ -468,8 +469,8 @@ export const useSessionStore = defineStore('session', {
     setCompacting(v: boolean) {
       this.compacting = v;
     },
-    // 切换右侧任务栏 Tab。
-    setRightTab(tab: 'queue' | 'subagent' | 'background' | 'changes') {
+    // 切换右侧活动栏筛选（含 'all' 总览）。
+    setRightTab(tab: 'all' | 'queue' | 'subagent' | 'background' | 'changes') {
       this.rightTab = tab;
     },
     // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。

@@ -14,7 +14,8 @@ const SIDEBAR_MAX = 460;
 const TASK_MIN = 240;
 const TASK_MAX = 560;
 const sidebarWidth = ref(240);
-const taskWidth = ref(320);
+// 右侧栏新增 ~48px 图标轨，默认宽度 320→340 补偿内容区横向空间。
+const taskWidth = ref(340);
 
 // 拖拽逻辑：在手柄上 mousedown 记录起点，document 上 mousemove 更新宽度，mouseup 解绑。
 let dragging: 'sidebar' | 'task' | null = null;
