@@ -3,6 +3,7 @@ import type { Message } from '../../../shared/types/session';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { getConnection } from '../connection';
 import { normalizeDbTime } from '../../../shared/time';
+import * as attachmentRepo from './attachment-repo';
 
 interface MessageRow {
   id: string;
@@ -42,6 +43,19 @@ function toMessage(row: MessageRow): Message {
   };
 }
 
+/** 批量填充消息附件（无附件的消息赋空数组，避免消费处再 ?? []）。 */
+function fillMessageAttachments(messages: Message[]): void {
+  if (messages.length === 0) return;
+  const map = attachmentRepo.getAttachmentsByMessageIds(messages.map((m) => m.id));
+  for (const m of messages) m.attachments = map.get(m.id) ?? [];
+}
+
+function fillRenderableAttachments(messages: RenderableMessage[]): void {
+  if (messages.length === 0) return;
+  const map = attachmentRepo.getAttachmentsByMessageIds(messages.map((m) => m.id));
+  for (const m of messages) m.attachments = map.get(m.id) ?? [];
+}
+
 export interface CreateMessageInput {
   sessionId: string;
   role: Message['role'];
@@ -59,9 +73,23 @@ export interface CreateMessageInput {
   title?: string | null;
   // 工具结果是否失败（tool_result.is_error）。
   isError?: boolean;
+  /** 受校验的消息 ID（renderer 乐观消息与 DB 消息共用同一 ID）；缺省则生成 uuid。 */
+  id?: string;
+  /** 按显示顺序的草稿附件 ID；非空时在同一事务内关联并置 message 状态。 */
+  attachments?: string[];
 }
 
+// createMessage 委托 createMessageWithAttachments：无附件时事务内 link 跳过，行为与历史一致，
+// 但统一支持受校验 id 与附件关联，避免发送链路绕过附件事务。
 export function createMessage(input: CreateMessageInput): Message {
+  return createMessageWithAttachments(input);
+}
+
+export function createMessageWithAttachments(input: CreateMessageInput): Message {
+  const db = getConnection();
+  const id = input.id ?? uuidv4();
+  const attachmentIds = input.attachments ?? [];
+
   const {
     sessionId,
     role,
@@ -75,16 +103,16 @@ export function createMessage(input: CreateMessageInput): Message {
     title = null,
     isError = false,
   } = input;
-  const id = uuidv4();
 
-  getConnection()
-    .prepare(
-      `INSERT INTO messages (id, session_id, role, content, event_type, raw_event, parent_task_id,
-                             process_kind, parent_agent_id, tool_use_id, title, is_error)
-       VALUES (@id, @sessionId, @role, @content, @eventType, @rawEvent, @parentTaskId,
-               @processKind, @parentAgentId, @toolUseId, @title, @isError)`,
-    )
-    .run({
+  const insert = db.prepare(
+    `INSERT INTO messages (id, session_id, role, content, event_type, raw_event, parent_task_id,
+                           process_kind, parent_agent_id, tool_use_id, title, is_error)
+     VALUES (@id, @sessionId, @role, @content, @eventType, @rawEvent, @parentTaskId,
+             @processKind, @parentAgentId, @toolUseId, @title, @isError)`,
+  );
+
+  const transaction = db.transaction(() => {
+    insert.run({
       id,
       sessionId,
       role,
@@ -98,9 +126,18 @@ export function createMessage(input: CreateMessageInput): Message {
       title,
       isError: isError ? 1 : 0,
     });
+    if (attachmentIds.length > 0) {
+      attachmentRepo.linkAttachmentsToMessage(id, attachmentIds);
+      attachmentRepo.markAttachmentsStatus(attachmentIds, 'message');
+    }
+  });
+  transaction();
 
-  // 不回读 SELECT（调用方不依赖返回值），直接用已知参数构造，省一次同步 DB 操作。
-  // 流式回复有多个 message 事件，每个都少一次同步查询，减轻主进程阻塞。
+  // 无附件时不额外查询（流式回复高频路径）；有附件时回读摘要供调用方返回。
+  const attachments = attachmentIds.length > 0
+    ? (attachmentRepo.getAttachmentsByMessageIds([id]).get(id) ?? [])
+    : [];
+
   return {
     id,
     sessionId,
@@ -117,6 +154,7 @@ export function createMessage(input: CreateMessageInput): Message {
     title,
     isError,
     createdAt: new Date().toISOString(),
+    attachments,
   };
 }
 
@@ -128,20 +166,24 @@ export function getMessagesBySession(sessionId: string): Message[] {
     // 保证回读顺序与实时落库顺序一致（计划验证 #5）。
     .prepare('SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC')
     .all(sessionId) as MessageRow[];
-  return rows.map(toMessage);
+  const messages = rows.map(toMessage);
+  fillMessageAttachments(messages);
+  return messages;
 }
 
 export function getMessagesByTask(taskId: string): Message[] {
   const rows = getConnection()
     .prepare('SELECT * FROM messages WHERE parent_task_id = ? ORDER BY created_at ASC, rowid ASC')
     .all(taskId) as MessageRow[];
-  return rows.map(toMessage);
+  const messages = rows.map(toMessage);
+  fillMessageAttachments(messages);
+  return messages;
 }
 
 // —— 导出专用 projection ——
 // 只选择 RenderableMessage 字段（不含 raw_event / parent_task_id 等图片渲染不需要的大列），
 // 沿用与聊天历史一致的 ORDER BY created_at, rowid 稳定顺序。仅主流程（parent_agent_id IS NULL）
-// 由调用方过滤；此处返回全部，让 snapshot 组装统一处理。
+// 由调用方过滤；此处返回全部，让 snapshot 组装统一处理。附件摘要一并填充供导出快照使用。
 interface ExportMessageRow {
   id: string;
   session_id: string;
@@ -184,5 +226,7 @@ export function getRenderableMessagesBySession(sessionId: string): RenderableMes
        FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`,
     )
     .all(sessionId) as ExportMessageRow[];
-  return rows.map(toRenderable);
+  const list = rows.map(toRenderable);
+  fillRenderableAttachments(list);
+  return list;
 }

@@ -1,0 +1,179 @@
+// 附件物理文件存储边界：原子写入、SHA-256、缩略图/预览读取、物理删除、孤儿键枚举。
+// 只负责文件系统操作，不访问 SQLite（元数据由 attachment-repo 管理）。
+// 图片解码/缩略图用 Electron nativeImage，不引入 sharp 等额外依赖。
+// 注意：本模块依赖 electron（nativeImage），只能在主进程运行，不可被 regression 脚本导入。
+import { createHash } from 'node:crypto';
+import { promises as fsp, type Dirent } from 'node:fs';
+import path from 'node:path';
+import { nativeImage } from 'electron';
+
+import {
+  detectDirectImageFormat,
+  isSupportedDirectImage,
+  sanitizeAttachmentFilename,
+} from './attachment-policy';
+import type {
+  AttachmentPreviewResponse,
+  AttachmentRecord,
+  StoredAttachmentFile,
+} from '../../shared/types/attachment';
+import { getAttachmentsDir } from '../utils/paths';
+
+export interface StagedAttachmentInput {
+  /** 附件 ID（由 service 生成并复用于 repo 记录，组成 storageKey 的中间段）。 */
+  id: string;
+  sessionId: string;
+  filename: string;
+  mimeType?: string;
+  bytes: Uint8Array;
+}
+
+/** 缩略图最长边固定 512px。 */
+const THUMBNAIL_LONG_EDGE = 512;
+
+/** storageKey 为相对附件根的 POSIX 风格键：<sessionId>/<attachmentId>/<safeFilename>，由主进程生成。 */
+function buildStorageKey(sessionId: string, attachmentId: string, safeFilename: string): string {
+  return [sessionId, attachmentId, safeFilename].join('/');
+}
+
+/** 把 storageKey 解析为绝对路径，并校验仍在附件根目录下（防越界/穿越）。 */
+export function resolveAbsolutePath(storageKey: string): string {
+  const root = path.resolve(getAttachmentsDir());
+  const abs = path.resolve(root, storageKey);
+  if (abs !== root && !abs.startsWith(root + path.sep)) {
+    throw new Error(`附件存储键越界: ${storageKey}`);
+  }
+  return abs;
+}
+
+function inferMimeType(mimeType: string | undefined, bytes: Uint8Array): string {
+  const detected = detectDirectImageFormat(bytes);
+  if (detected) return detected;
+  if (mimeType && mimeType.trim()) return mimeType.trim().toLowerCase();
+  return 'application/octet-stream';
+}
+
+/**
+ * 原子写入附件文件：先写 .part 临时文件再 rename，避免半文件进入 DB。
+ * 用户原始路径上的符号链接在调用方 readFile 阶段已被解引用，落盘的是真实内容。
+ * 不在此处解码图片尺寸（由 probeImageDimensions 独立完成，避免与写入耦合）。
+ */
+export async function writeAttachmentFile(input: StagedAttachmentInput): Promise<StoredAttachmentFile> {
+  const { id, sessionId, filename, bytes } = input;
+  const safeFilename = sanitizeAttachmentFilename(filename);
+  const storageKey = buildStorageKey(sessionId, id, safeFilename);
+  const absolutePath = resolveAbsolutePath(storageKey);
+
+  await fsp.mkdir(path.dirname(absolutePath), { recursive: true });
+  const tmpPath = `${absolutePath}.part`;
+  await fsp.writeFile(tmpPath, bytes);
+  await fsp.rename(tmpPath, absolutePath);
+
+  // 写后重读计算 SHA-256（以落盘真实内容为准，而非内存 bytes）。
+  const reread = await fsp.readFile(absolutePath);
+  const sha256 = createHash('sha256').update(reread).digest('hex');
+
+  return {
+    storageKey,
+    absolutePath,
+    sizeBytes: reread.byteLength,
+    sha256,
+  };
+}
+
+/** 解码图片拿像素尺寸；非受支持图片或 nativeImage 返回空尺寸时返回 null（由调用方按不支持图片处理）。 */
+export function probeImageDimensions(bytes: Uint8Array): { width: number; height: number } | null {
+  if (!detectDirectImageFormat(bytes)) return null;
+  const img = nativeImage.createFromBuffer(bytes);
+  const size = img.getSize();
+  if (size.width <= 0 || size.height <= 0) return null;
+  return { width: size.width, height: size.height };
+}
+
+/** 读取受控预览：图片缩略图（最长边 512px，转 PNG）或原图有界 bytes；绝不返回绝对路径。 */
+export async function readStoredAttachmentPreview(
+  record: AttachmentRecord,
+  thumbnail: boolean,
+): Promise<AttachmentPreviewResponse> {
+  const absolutePath = resolveAbsolutePath(record.storageKey);
+  const bytes = await fsp.readFile(absolutePath);
+  const mime = inferMimeType(record.mimeType, bytes);
+
+  if (thumbnail && isSupportedDirectImage(mime)) {
+    const img = nativeImage.createFromBuffer(bytes);
+    const size = img.getSize();
+    if (size.width > 0 && size.height > 0) {
+      const longest = Math.max(size.width, size.height);
+      const scale = longest > THUMBNAIL_LONG_EDGE ? THUMBNAIL_LONG_EDGE / longest : 1;
+      const tw = Math.max(1, Math.round(size.width * scale));
+      const th = Math.max(1, Math.round(size.height * scale));
+      const png = img.resize({ width: tw, height: th }).toPNG();
+      return {
+        attachmentId: record.id,
+        mimeType: 'image/png',
+        bytes: new Uint8Array(png),
+        width: tw,
+        height: th,
+        isThumbnail: true,
+      };
+    }
+  }
+
+  return {
+    attachmentId: record.id,
+    mimeType: mime,
+    bytes: new Uint8Array(bytes),
+    width: record.width,
+    height: record.height,
+    isThumbnail: false,
+  };
+}
+
+/** 删除物理文件，并尝试回收空的上层目录（attachmentId / session 目录）。 */
+export async function removeAttachmentFile(storageKey: string): Promise<void> {
+  const absolutePath = resolveAbsolutePath(storageKey);
+  await fsp.rm(absolutePath, { force: true });
+
+  const root = path.resolve(getAttachmentsDir());
+  let dir = path.dirname(absolutePath);
+  for (let i = 0; i < 2; i += 1) {
+    if (path.resolve(dir) === root) break;
+    try {
+      const entries = await fsp.readdir(dir);
+      if (entries.length === 0) {
+        await fsp.rmdir(dir);
+        dir = path.dirname(dir);
+      } else {
+        break;
+      }
+    } catch {
+      break;
+    }
+  }
+}
+
+/** 枚举附件根下所有已落盘文件的 storageKey（孤儿清理用，跳过 .part 临时文件）。 */
+export async function listStoredAttachmentKeys(): Promise<string[]> {
+  const root = getAttachmentsDir();
+  const keys: string[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    let entries: Dirent[];
+    try {
+      entries = await fsp.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile() && !entry.name.endsWith('.part')) {
+        keys.push(path.relative(root, full).split(path.sep).join('/'));
+      }
+    }
+  }
+
+  await walk(root);
+  return keys;
+}

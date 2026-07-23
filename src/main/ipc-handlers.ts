@@ -30,6 +30,8 @@ import { logger } from './utils/logger';
 import * as sessionRepo from './database/repositories/session-repo';
 import * as messageRepo from './database/repositories/message-repo';
 import * as taskRepo from './database/repositories/task-repo';
+import * as attachmentRepo from './database/repositories/attachment-repo';
+import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { listChanges, getChangeDiff } from './modules/changes-panel';
 import { registerExportImageHandlers } from './modules/export-image-manager';
@@ -112,10 +114,17 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 1) 先标记已删：runQuery 下轮迭代检测到立即自停（无需等 interrupt 生效）。
     // 2) 再 interrupt + 给 SDK 一点时间响应（interrupt 是异步 stdin 帧，非立即）。
     // 3) 最后删库。
+    // 附件：先收集 storageKey（删库后级联清 attachments 行，物理文件需另行清理）。
+    const attachmentStorageKeys = attachmentRepo.listStorageKeysBySession(id);
     markSessionDeleted(id);
     killProcess(id);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    return sessionRepo.deleteSession(id);
+    const result = sessionRepo.deleteSession(id);
+    // DB 级联删除完成后清理物理文件；失败只记警告，由下次 orphan cleanup 重试。
+    await cleanupSessionAttachments(id, attachmentStorageKeys).catch((e) =>
+      logger.error(`cleanupSessionAttachments for ${id} failed`, e),
+    );
+    return result;
   });
   ipcMain.handle(
     IPC_CHANNELS.SESSION_UPDATE,

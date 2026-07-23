@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Task, TaskStatus } from '../../../shared/types/task';
 import { getConnection } from '../connection';
 import { normalizeDbTime } from '../../../shared/time';
+import * as attachmentRepo from './attachment-repo';
 
 interface TaskRow {
   id: string;
@@ -37,15 +38,39 @@ function toTask(row: TaskRow): Task {
   };
 }
 
+/** 批量填充任务附件（无附件的任务赋空数组）。 */
+function fillTaskAttachments(tasks: Task[]): void {
+  if (tasks.length === 0) return;
+  const map = attachmentRepo.getAttachmentsByTaskIds(tasks.map((t) => t.id));
+  for (const t of tasks) t.attachments = map.get(t.id) ?? [];
+}
+
 export function createTask(sessionId: string, prompt: string, sortOrder: number): Task {
+  return createTaskWithAttachments(sessionId, prompt, sortOrder, []);
+}
+
+export function createTaskWithAttachments(
+  sessionId: string,
+  prompt: string,
+  sortOrder: number,
+  attachmentIds: string[],
+): Task {
+  const db = getConnection();
   const id = uuidv4();
 
-  getConnection()
-    .prepare(
-      `INSERT INTO tasks (id, session_id, prompt, sort_order)
-       VALUES (@id, @sessionId, @prompt, @sortOrder)`,
-    )
-    .run({ id, sessionId, prompt, sortOrder });
+  const insert = db.prepare(
+    `INSERT INTO tasks (id, session_id, prompt, sort_order)
+     VALUES (@id, @sessionId, @prompt, @sortOrder)`,
+  );
+
+  const transaction = db.transaction(() => {
+    insert.run({ id, sessionId, prompt, sortOrder });
+    if (attachmentIds.length > 0) {
+      attachmentRepo.linkAttachmentsToTask(id, attachmentIds);
+      attachmentRepo.markAttachmentsStatus(attachmentIds, 'task');
+    }
+  });
+  transaction();
 
   const task = getTask(id);
   if (!task) {
@@ -57,21 +82,28 @@ export function createTask(sessionId: string, prompt: string, sortOrder: number)
 
 export function getTask(id: string): Task | null {
   const row = getConnection().prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined;
-  return row ? toTask(row) : null;
+  if (!row) return null;
+  const task = toTask(row);
+  task.attachments = attachmentRepo.getAttachmentsByTaskIds([id]).get(id) ?? [];
+  return task;
 }
 
 export function getTasksBySession(sessionId: string): Task[] {
   const rows = getConnection()
     .prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY sort_order ASC')
     .all(sessionId) as TaskRow[];
-  return rows.map(toTask);
+  const tasks = rows.map(toTask);
+  fillTaskAttachments(tasks);
+  return tasks;
 }
 
 export function getPendingTasks(sessionId: string): Task[] {
   const rows = getConnection()
     .prepare("SELECT * FROM tasks WHERE session_id = ? AND status = 'pending' ORDER BY sort_order ASC")
     .all(sessionId) as TaskRow[];
-  return rows.map(toTask);
+  const tasks = rows.map(toTask);
+  fillTaskAttachments(tasks);
+  return tasks;
 }
 
 export function updateTaskStatus(id: string, status: TaskStatus): Task | null {
@@ -147,8 +179,14 @@ export function reorderTasks(sessionId: string, taskIds: string[]): void {
   transaction(taskIds);
 }
 
-export function deleteTask(id: string): void {
+/**
+ * 删除任务：先解除 task_attachments 关联（拿回附件 ID 供 handler 按引用计数删文件），
+ * 再 DELETE tasks（DB 级联也会清 task_attachments，显式先取避免丢失列表）。
+ */
+export function deleteTask(id: string): string[] {
+  const attachmentIds = attachmentRepo.deleteTaskAttachmentLinks(id);
   getConnection().prepare('DELETE FROM tasks WHERE id = ?').run(id);
+  return attachmentIds;
 }
 
 export function resetRunningTasks(sessionId?: string): void {

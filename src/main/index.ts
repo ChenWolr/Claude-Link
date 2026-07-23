@@ -18,6 +18,7 @@ import { loadWindowSize, trackWindowSize } from './modules/window-state';
 import { setupLinkGuard } from './modules/link-guard';
 import { cleanupStaleTempDirs, disposeExportImageOnQuit } from './modules/export-image-manager';
 import { runExportSmokeIfRequested } from './modules/export-image-smoke';
+import { cleanupDraftAttachments, cleanupOrphanAttachments } from './modules/attachment-service';
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -79,6 +80,10 @@ app.whenReady().then(async () => {
 
     // 清理上次强退残留的导出临时目录（> 24h）。
     cleanupStaleTempDirs().catch((e) => logger.error('cleanupStaleTempDirs failed', e));
+
+    // 附件清理：未发送的 draft 草稿 + 数据库无记录的孤儿物理文件。不阻塞窗口启动，失败只记日志。
+    cleanupDraftAttachments().catch((e) => logger.error('cleanupDraftAttachments failed', e));
+    cleanupOrphanAttachments().catch((e) => logger.error('cleanupOrphanAttachments failed', e));
 
     // Detect Claude Code CLI
     await detectCli();
