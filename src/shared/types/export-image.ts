@@ -3,6 +3,7 @@
 // 本文件只放类型，无运行时逻辑、无 Vue/Electron/DOM 副作用，Node selftest 可直接导入。
 
 import type { ThemePalette } from '../constants';
+import type { AttachmentSummary } from './attachment';
 
 // —— 最小渲染契约 ——
 // 完整数据库 Message 是它的超集（多 rawEvent / parentTaskId 等图片渲染不需要的字段）。
@@ -21,6 +22,8 @@ export interface RenderableMessage {
   title: string | null;
   isError: boolean;
   createdAt: string;
+  // 附件摘要（图片/文件）。老消息无附件时为 undefined，消费处用 ?? [] 兜底。
+  attachments?: AttachmentSummary[];
 }
 
 // —— 进度状态机（判别联合，不使用多个松散 boolean）——
