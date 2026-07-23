@@ -14,6 +14,7 @@ import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEven
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { Message } from '../../shared/types/session';
+import type { ChatSendPayload } from '../../shared/types/attachment';
 
 // 根因修复：全局单例。useChat 只初始化一次（在 App.vue），监听生命周期与 app 等长。
 // ChatPage 卸载/重挂载不影响监听——sending 从 store getter 派生，error 用 store.error。
@@ -696,7 +697,14 @@ function createChat() {
 
     try {
       // 监听已在 App.vue 全局注册，这里不重复 startListening。
-      await window.claudeLink.sendMessage(store.activeSession.id, text.trim());
+      // Task 3：发送统一为 ChatSendPayload。附件草稿在 Task 5 接入前恒为空；
+      // clientMessageId 由 renderer 生成，Task 6 用它统一乐观消息与主进程数据库消息（避免双 ID）。
+      const payload: ChatSendPayload = {
+        text: text.trim(),
+        attachmentIds: [],
+        clientMessageId: crypto.randomUUID(),
+      };
+      await window.claudeLink.sendMessage(store.activeSession.id, payload);
     } catch (e) {
       error.value = e instanceof Error ? e.message : '发送失败';
       if (store.activeSession) store.markStopped(store.activeSession.id);

@@ -1150,5 +1150,35 @@ console.log('\n=== 44) 右侧活动栏方案 B：图标轨 + 总览/筛选 + 状
   check('AppLayout 右侧栏默认 340', /taskWidth\s*=\s*ref\(340\)/.test(al));
 }
 
+console.log('\n=== 45) 附件 IPC + preload 桥（Task 3）：通道/方法/ChatSendPayload/安全边界 ===');
+{
+  const ipc = readRel('src/shared/types/ipc.ts');
+  const api = readRel('src/preload/api.ts');
+  const handlers = readRel('src/main/ipc-handlers.ts');
+
+  // 通道与入参类型
+  check('4 个附件通道', ipc.includes('ATTACHMENT_PICK') && ipc.includes('ATTACHMENT_STAGE_BYTES') && ipc.includes('ATTACHMENT_PREVIEW') && ipc.includes('ATTACHMENT_REMOVE_DRAFT'));
+  check('附件入参类型', ipc.includes('StageAttachmentBytesInput') && ipc.includes('AttachmentPreviewRequest'));
+
+  // preload 暴露
+  check('preload pickAttachments', api.includes('pickAttachments:'));
+  check('preload stageAttachmentBytes', api.includes('stageAttachmentBytes:'));
+  check('preload getAttachmentPreview', api.includes('getAttachmentPreview:'));
+  check('preload removeDraftAttachment', api.includes('removeDraftAttachment:'));
+  check('sendMessage 接收 ChatSendPayload', /sendMessage:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(api));
+  check('addTask 接收 ChatSendPayload', /addTask:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(api));
+  check('queueUserMessage 接收 ChatSendPayload', /queueUserMessage:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(api));
+
+  // 三发送 handler 共用形状 + 归属/draft 校验
+  check('三发送 handler 形状校验', (handlers.match(/validateChatSendPayloadShape\(payload\)/g) || []).length >= 3);
+  check('三发送 handler 归属+draft 校验', (handlers.match(/assertAttachmentsReadyForSend\(sessionId, payload\.attachmentIds\)/g) || []).length >= 3);
+
+  // 安全边界：主进程读文件、不泄露路径、魔数探测、受控预览/移除
+  check('ATTACHMENT_PICK 用主进程 dialog', handlers.includes('dialog.showOpenDialog'));
+  check('只取 basename 不泄露完整路径', /path\.basename\(filePath\)/.test(handlers));
+  check('据魔数探测真实图片格式', handlers.includes('detectDirectImageFormat(bytes)'));
+  check('preview/remove 作用于受控附件', handlers.includes('getAttachmentPreview(request)') && handlers.includes('removeDraftAttachment(sessionId, attachmentId)'));
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);

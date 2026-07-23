@@ -1,7 +1,7 @@
 // 附件校验纯策略：MIME + 魔数 + 扩展名 + 大小 + 图片尺寸 + 总传输预算。
 // 纯函数，无 Electron/Node 副作用；regression 脚本与主进程 IPC/service 共用同一份判定逻辑。
 // 附件数量、大小、MIME 常量统一在此定义，避免跨层重复（见 CLAUDE.md「关键设计决策」）。
-import type { AttachmentKind } from '../../shared/types/attachment';
+import type { AttachmentKind, ChatSendPayload } from '../../shared/types/attachment';
 
 export const MAX_ATTACHMENTS_PER_SEND = 10;
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -231,4 +231,42 @@ export function sanitizeAttachmentFilename(filename: string): string {
 /** 判定一次提交是否完全为空（无文字且无附件）——空提交应被发送链路拒绝。 */
 export function isEmptySubmission(text: string, attachmentIds: readonly string[]): boolean {
   return (text ?? '').trim() === '' && attachmentIds.length === 0;
+}
+
+/** clientMessageId 必须是 UUID（renderer 用 crypto.randomUUID() 生成，v4）。 */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * 统一发送载荷的形状校验（CHAT_SEND / TASK_ADD / QUEUE_USER_MESSAGE 共用）。
+ * 纯函数、不触达 DB：只保证载荷本身合法。附件归属与 draft 状态由 attachment-service 在主进程再校验。
+ * 失败信息面向用户，不暴露内部路径/键。
+ */
+export function validateChatSendPayloadShape(
+  payload: unknown,
+): { ok: true } | { ok: false; message: string } {
+  if (!payload || typeof payload !== 'object') return { ok: false, message: '发送载荷格式错误。' };
+  const p = payload as Record<string, unknown>;
+  if (typeof p.text !== 'string') return { ok: false, message: '发送载荷缺少有效的文字字段。' };
+  if (!Array.isArray(p.attachmentIds)) return { ok: false, message: '发送载荷缺少附件列表。' };
+  if (p.attachmentIds.some((id) => typeof id !== 'string')) {
+    return { ok: false, message: '附件 ID 列表含非字符串项。' };
+  }
+  if (p.attachmentIds.length > MAX_ATTACHMENTS_PER_SEND) {
+    return { ok: false, message: `一次最多发送 ${MAX_ATTACHMENTS_PER_SEND} 个附件。` };
+  }
+  if (new Set(p.attachmentIds as string[]).size !== (p.attachmentIds as string[]).length) {
+    return { ok: false, message: '附件 ID 列表含重复项。' };
+  }
+  if (typeof p.clientMessageId !== 'string' || !UUID_RE.test(p.clientMessageId)) {
+    return { ok: false, message: '发送载荷缺少有效的消息 ID。' };
+  }
+  if (isEmptySubmission(p.text, p.attachmentIds as string[])) {
+    return { ok: false, message: '请输入文字或添加附件后再发送。' };
+  }
+  return { ok: true };
+}
+
+/** 类型守卫形式：供需要窄化 unknown 为 ChatSendPayload 的调用方使用。 */
+export function isChatSendPayloadShape(payload: unknown): payload is ChatSendPayload {
+  return validateChatSendPayloadShape(payload).ok;
 }

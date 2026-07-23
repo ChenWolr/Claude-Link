@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia';
 import type { Task, QueueState } from '../../shared/types/task';
 import type { QueueEventPayload } from '../../shared/types/ipc';
+import type { ChatSendPayload } from '../../shared/types/attachment';
 import { useSessionStore } from './session-store';
 
 export const useTaskStore = defineStore('task', {
@@ -19,7 +20,13 @@ export const useTaskStore = defineStore('task', {
     },
     async addTask(sessionId: string, prompt: string) {
       try {
-        const task = await window.claudeLink.addTask(sessionId, prompt);
+        // Task 3：发送统一为 ChatSendPayload。附件草稿在 Task 7 接入前恒为空。
+        const payload: ChatSendPayload = {
+          text: prompt.trim(),
+          attachmentIds: [],
+          clientMessageId: crypto.randomUUID(),
+        };
+        const task = await window.claudeLink.addTask(sessionId, payload);
         this.tasks.push(task);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '添加任务失败';
@@ -71,7 +78,13 @@ export const useTaskStore = defineStore('task', {
     },
     async queueUserMessage(sessionId: string, message: string) {
       try {
-        this.queueState = await window.claudeLink.queueUserMessage(sessionId, message);
+        // Task 3：续接统一为 ChatSendPayload。附件在 Task 7 接入前恒为空。
+        const payload: ChatSendPayload = {
+          text: message.trim(),
+          attachmentIds: [],
+          clientMessageId: crypto.randomUUID(),
+        };
+        this.queueState = await window.claudeLink.queueUserMessage(sessionId, payload);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '继续任务失败';
       }

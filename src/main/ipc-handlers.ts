@@ -5,6 +5,9 @@
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
 import { BrowserWindow, dialog, ipcMain, app } from 'electron';
+import { randomUUID } from 'node:crypto';
+import { promises as fsp } from 'node:fs';
+import path from 'node:path';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { IPC_CHANNELS } from '../shared/constants';
@@ -35,6 +38,15 @@ import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { listChanges, getChangeDiff } from './modules/changes-panel';
 import { registerExportImageHandlers } from './modules/export-image-manager';
+import { detectDirectImageFormat, validateChatSendPayloadShape } from './modules/attachment-policy';
+import {
+  stageAttachment,
+  getAttachmentPreview,
+  removeDraftAttachment,
+  assertAttachmentsReadyForSend,
+} from './modules/attachment-service';
+import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
+import type { StageAttachmentBytesInput, AttachmentPreviewRequest } from '../shared/types/ipc';
 
 let mainWindow: BrowserWindow;
 
@@ -153,17 +165,27 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   );
 
   // Chat
-  ipcMain.handle(IPC_CHANNELS.CHAT_SEND, async (_event, sessionId: string, message: string) => {
+  ipcMain.handle(IPC_CHANNELS.CHAT_SEND, async (_event, sessionId: string, payload: ChatSendPayload) => {
     try {
+      // Task 3：发送载荷统一为 ChatSendPayload（text + attachmentIds + clientMessageId）。
+      // 附件输入构造（图片内容块 / Read 路径）在 Task 4 接入；此处先按纯文本走既有链路。
+      // attachmentIds 在 Task 3 阶段恒为空，仍做归属 + draft 校验，供 Task 4/7 复用。
+      const shape = validateChatSendPayloadShape(payload);
+      if (!shape.ok) throw new Error(shape.message);
+
       const session = sessionRepo.getSession(sessionId);
       if (!session) {
         throw new Error(`Session ${sessionId} not found`);
       }
+      assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
+      const message = payload.text.trim();
 
       const existingProcess = getActiveProcess(sessionId);
+      let createdMessageId = '';
       if (existingProcess) {
         sendMessage(sessionId, message);
-        messageRepo.createMessage({ sessionId, role: 'user', content: message, eventType: 'message' });
+        const created = messageRepo.createMessage({ sessionId, role: 'user', content: message, eventType: 'message' });
+        createdMessageId = created.id;
       } else {
         spawnForChat(sessionId, mainWindow, {
           model: session.model,
@@ -176,8 +198,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         // CLI 以 stream-json 输入模式启动，进程不会自动读取本次提示；
         // 必须把首条消息写入 stdin，否则 Claude 收不到、界面表现为卡住。
         sendMessage(sessionId, message);
-        messageRepo.createMessage({ sessionId, role: 'user', content: message, eventType: 'message' });
+        const created = messageRepo.createMessage({ sessionId, role: 'user', content: message, eventType: 'message' });
+        createdMessageId = created.id;
       }
+      // attachments 在 Task 3 阶段恒空；Task 6 由 clientMessageId 统一乐观消息与数据库消息。
+      const result: SendMessageResult = { messageId: createdMessageId, attachments: [] };
+      return result;
     } catch (error) {
       logger.error('Failed to send message', error);
       throw error;
@@ -220,10 +246,15 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // Tasks
-  ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, prompt: string) => {
+  ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, payload: ChatSendPayload) => {
+    // Task 3：任务载荷统一为 ChatSendPayload；附件关联（task_attachments）在 Task 7 接入，
+    // 此处先按纯文本 prompt 建任务。attachmentIds 恒空，仍做归属 + draft 校验。
+    const shape = validateChatSendPayloadShape(payload);
+    if (!shape.ok) throw new Error(shape.message);
+    assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
     const tasks = taskRepo.getTasksBySession(sessionId);
     const sortOrder = tasks.length;
-    return taskRepo.createTask(sessionId, prompt, sortOrder);
+    return taskRepo.createTask(sessionId, payload.text.trim(), sortOrder);
   });
 
   ipcMain.handle(IPC_CHANNELS.TASK_REMOVE, async (_event, taskId: string) => {
@@ -266,9 +297,87 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return getQueueState(sessionId);
   });
 
-  ipcMain.handle(IPC_CHANNELS.QUEUE_USER_MESSAGE, async (_event, sessionId: string, message: string) => {
-    continueWithUserMessage(sessionId, message, mainWindow);
+  ipcMain.handle(IPC_CHANNELS.QUEUE_USER_MESSAGE, async (_event, sessionId: string, payload: ChatSendPayload) => {
+    // Task 3：续接载荷统一为 ChatSendPayload；附件 prompt 构造在 Task 7 接入，
+    // 此处先按纯文本续接。attachmentIds 恒空，仍做归属 + draft 校验。
+    const shape = validateChatSendPayloadShape(payload);
+    if (!shape.ok) throw new Error(shape.message);
+    assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
+    continueWithUserMessage(sessionId, payload.text.trim(), mainWindow);
     return getQueueState(sessionId);
+  });
+
+  // 附件 IPC：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
+  // 文件读取与校验全部在主进程；renderer 只拿不透明附件 ID 与受控预览 bytes。
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PICK, async (_event, sessionId: string): Promise<AttachmentSummary[]> => {
+    const session = sessionRepo.getSession(sessionId);
+    if (!session) throw new Error('会话不存在');
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ['openFile', 'multiSelections'],
+      title: '选择附件（图片 / 文档 / 文件）',
+    });
+    if (result.canceled || !result.filePaths.length) return [];
+
+    const summaries: AttachmentSummary[] = [];
+    const errors: string[] = [];
+    for (const filePath of result.filePaths) {
+      const filename = path.basename(filePath);
+      try {
+        const buf = await fsp.readFile(filePath);
+        const bytes = new Uint8Array(buf);
+        // 据魔数识别真实图片格式，避免靠扩展名把伪装图片当 image 直传。
+        const detected = detectDirectImageFormat(bytes);
+        const summary = await stageAttachment({
+          id: randomUUID(),
+          sessionId,
+          filename,
+          mimeType: detected ?? '',
+          bytes,
+        });
+        summaries.push(summary);
+      } catch (e) {
+        errors.push(`${filename}：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    // 全部失败才抛错；部分成功则返回成功项（失败项已在主进程日志可查，Task 5 UI 接入后集中提示）。
+    if (!summaries.length && errors.length) {
+      throw new Error(`附件添加失败：\n${errors.join('\n')}`);
+    }
+    return summaries;
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.ATTACHMENT_STAGE_BYTES,
+    async (_event, input: StageAttachmentBytesInput): Promise<AttachmentSummary> => {
+      if (
+        !input ||
+        typeof input.sessionId !== 'string' ||
+        typeof input.filename !== 'string' ||
+        !(input.bytes instanceof Uint8Array)
+      ) {
+        throw new Error('附件暂存参数无效');
+      }
+      const session = sessionRepo.getSession(input.sessionId);
+      if (!session) throw new Error('会话不存在');
+      // 主进程重新校验：不信任 renderer 传来的大小/MIME，由 policy 二次裁定。
+      const detected = detectDirectImageFormat(input.bytes);
+      return stageAttachment({
+        id: randomUUID(),
+        sessionId: input.sessionId,
+        filename: input.filename,
+        mimeType: detected ?? input.mimeType ?? '',
+        bytes: input.bytes,
+      });
+    },
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.ATTACHMENT_PREVIEW,
+    async (_event, request: AttachmentPreviewRequest) => getAttachmentPreview(request),
+  );
+
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, async (_event, sessionId: string, attachmentId: string) => {
+    await removeDraftAttachment(sessionId, attachmentId);
   });
 
   // 会话导出 JPEG 长图（v3）：注册主窗口开始 + 隐藏 renderer 专用 IPC。

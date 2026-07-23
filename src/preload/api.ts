@@ -6,7 +6,8 @@ import { ipcRenderer } from 'electron';
 import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
-import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, PermissionRequestPayload, PermissionResponsePayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput } from '../shared/types/ipc';
+import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
+import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, PermissionRequestPayload, PermissionResponsePayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult } from '../shared/types/changes';
@@ -47,7 +48,7 @@ export interface ClaudeLinkAPI {
   searchSessions: (query: string) => Promise<Session[]>;
   analyzeTopic: (sessionId: string, firstMessage: string) => Promise<string | null>;
   updateModelOverride: (id: string, modelOverride: string | null) => Promise<Session | null>;
-  sendMessage: (sessionId: string, message: string) => Promise<void>;
+  sendMessage: (sessionId: string, payload: ChatSendPayload) => Promise<SendMessageResult>;
   abortChat: (sessionId: string) => Promise<void>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
   removeChatListener: () => void;
@@ -63,7 +64,7 @@ export interface ClaudeLinkAPI {
   removeContextListener: () => void;
   listChanges: (workingDir: string | null, touchedPaths: string[]) => Promise<ChangesListResult>;
   getChangeDiff: (workingDir: string | null, path: string) => Promise<ChangesDiffResult>;
-  addTask: (sessionId: string, prompt: string) => Promise<Task>;
+  addTask: (sessionId: string, payload: ChatSendPayload) => Promise<Task>;
   removeTask: (taskId: string) => Promise<void>;
   getTasks: (sessionId: string) => Promise<Task[]>;
   reorderTasks: (sessionId: string, taskIds: string[]) => Promise<Task[]>;
@@ -72,7 +73,11 @@ export interface ClaudeLinkAPI {
   pauseQueue: (sessionId: string) => Promise<void>;
   resumeQueue: (sessionId: string) => Promise<void>;
   getQueueState: (sessionId: string) => Promise<QueueState>;
-  queueUserMessage: (sessionId: string, message: string) => Promise<QueueState>;
+  queueUserMessage: (sessionId: string, payload: ChatSendPayload) => Promise<QueueState>;
+  pickAttachments: (sessionId: string) => Promise<AttachmentSummary[]>;
+  stageAttachmentBytes: (input: StageAttachmentBytesInput) => Promise<AttachmentSummary>;
+  getAttachmentPreview: (request: AttachmentPreviewRequest) => Promise<AttachmentPreviewResponse>;
+  removeDraftAttachment: (sessionId: string, attachmentId: string) => Promise<void>;
   onQueueEvent: (callback: (payload: QueueEventPayload) => void) => () => void;
   removeQueueListener: () => void;
   startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
@@ -117,7 +122,7 @@ export function createApi(): ClaudeLinkAPI {
     searchSessions: (query) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SEARCH, query),
     analyzeTopic: (sessionId, firstMessage) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_ANALYZE_TOPIC, sessionId, firstMessage),
     updateModelOverride: (id, modelOverride) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE_MODEL_OVERRIDE, id, modelOverride),
-    sendMessage: (sessionId, message) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, message),
+    sendMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, payload),
     abortChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ABORT, sessionId),
     onChatEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: ChatEventPayload) => callback(payload);
@@ -153,7 +158,7 @@ export function createApi(): ClaudeLinkAPI {
     removeContextListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.CONTEXT_UPDATE),
     listChanges: (workingDir, touchedPaths) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_LIST, workingDir, touchedPaths),
     getChangeDiff: (workingDir, path) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_DIFF, workingDir, path),
-    addTask: (sessionId, prompt) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, prompt),
+    addTask: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, payload),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId),
     getTasks: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_GET_ALL, sessionId),
     reorderTasks: (sessionId, taskIds) =>
@@ -163,7 +168,11 @@ export function createApi(): ClaudeLinkAPI {
     pauseQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_PAUSE, sessionId),
     resumeQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME, sessionId),
     getQueueState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_STATE, sessionId),
-    queueUserMessage: (sessionId, message) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_USER_MESSAGE, sessionId, message),
+    queueUserMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_USER_MESSAGE, sessionId, payload),
+    pickAttachments: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PICK, sessionId) as Promise<AttachmentSummary[]>,
+    stageAttachmentBytes: (input) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_STAGE_BYTES, input) as Promise<AttachmentSummary>,
+    getAttachmentPreview: (request) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PREVIEW, request) as Promise<AttachmentPreviewResponse>,
+    removeDraftAttachment: (sessionId, attachmentId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, sessionId, attachmentId),
     onQueueEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: QueueEventPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.QUEUE_EVENT, listener);
