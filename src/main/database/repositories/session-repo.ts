@@ -127,10 +127,21 @@ export function searchSessions(query: string): Session[] {
     contentMap.set(row.session_id, row.text ?? '');
   }
 
+  // 附件文件名参与搜索（按会话聚合）。不纳入 storage_key / MIME / 哈希 / 文件内容。
+  const attachmentNameMap = new Map<string, string>();
+  const attachmentNameRows = getConnection()
+    .prepare("SELECT session_id, GROUP_CONCAT(filename, ' ') AS text FROM attachments GROUP BY session_id")
+    .all() as { session_id: string; text: string | null }[];
+  for (const row of attachmentNameRows) {
+    attachmentNameMap.set(row.session_id, row.text ?? '');
+  }
+
   return sessions.filter((session) => {
     if (normalizeSearchText(session.name).includes(normalizedQuery)) return true;
     const content = contentMap.get(session.id);
     if (content && normalizeSearchText(content).includes(normalizedQuery)) return true;
+    const attachmentNames = attachmentNameMap.get(session.id);
+    if (attachmentNames && normalizeSearchText(attachmentNames).includes(normalizedQuery)) return true;
     return false;
   });
 }

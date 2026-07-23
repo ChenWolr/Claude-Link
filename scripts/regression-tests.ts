@@ -407,9 +407,77 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 3);
+  assert.equal(schemaVersion, 4);
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
+}
+
+// Task2：附件三表迁移契约（attachments / message_attachments / task_attachments）。
+// 模拟 schemaVersion=3 老库，跑迁移后须新建附件三表与索引、升到 v4、DDL 带 ON DELETE CASCADE，重复跑幂等。
+function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
+  const createdTables = new Set<string>();
+  const createdIndexes = new Set<string>();
+  const allExecSql: string[] = [];
+  // 预填 v3 老库已有列，模拟升级前的真实状态（自愈块据此跳过 ADD COLUMN）。
+  const sessionsColumns = new Set([
+    'id', 'name', 'cli_session_id', 'model', 'working_dir', 'permission_mode', 'max_turns',
+    'model_override', 'last_context_tokens', 'last_context_updated_at', 'last_context_window',
+    'created_at', 'updated_at',
+  ]);
+  const messagesColumns = new Set([
+    'id', 'session_id', 'role', 'content', 'raw_event', 'event_type', 'cost_usd', 'duration_ms',
+    'parent_task_id', 'process_kind', 'parent_agent_id', 'tool_use_id', 'title', 'is_error', 'created_at',
+  ]);
+  let schemaVersion = 3;
+
+  const db = {
+    exec(sql: string) {
+      allExecSql.push(sql);
+      for (const [, tbl] of sql.matchAll(/CREATE TABLE IF NOT EXISTS\s+(\w+)/g)) createdTables.add(tbl);
+      for (const [, idx] of sql.matchAll(/CREATE INDEX IF NOT EXISTS\s+(\w+)/g)) createdIndexes.add(idx);
+      for (const [, tbl, col] of sql.matchAll(/ALTER TABLE (sessions|messages) ADD COLUMN (\w+)/g)) {
+        (tbl === 'sessions' ? sessionsColumns : messagesColumns).add(col);
+      }
+    },
+    prepare(sql: string) {
+      return {
+        get() {
+          if (sql.includes('SELECT version FROM schema_version')) return { version: schemaVersion };
+          throw new Error(`Unexpected get SQL: ${sql}`);
+        },
+        all() {
+          if (sql.includes('PRAGMA table_info(sessions)')) return [...sessionsColumns].map((name) => ({ name }));
+          if (sql.includes('PRAGMA table_info(messages)')) return [...messagesColumns].map((name) => ({ name }));
+          throw new Error(`Unexpected all SQL: ${sql}`);
+        },
+        run(version: number) {
+          schemaVersion = version;
+        },
+      };
+    },
+  };
+
+  assert.doesNotThrow(() => runMigrations(db as never));
+  assert.equal(schemaVersion, 4, '迁移后 schema version 须升到 4');
+  assert.ok(createdTables.has('attachments'), '须建 attachments 表');
+  assert.ok(createdTables.has('message_attachments'), '须建 message_attachments 关联表');
+  assert.ok(createdTables.has('task_attachments'), '须建 task_attachments 关联表');
+  assert.ok(createdIndexes.has('idx_attachments_session'));
+  assert.ok(createdIndexes.has('idx_message_attachments_attachment'));
+  assert.ok(createdIndexes.has('idx_task_attachments_attachment'));
+
+  const execText = allExecSql.join('\n');
+  assert.ok(execText.includes('ON DELETE CASCADE'), '附件表 DDL 须含 ON DELETE CASCADE');
+  assert.ok(
+    /attachments[\s\S]*REFERENCES\s+sessions\s*\(\s*id\s*\)\s+ON DELETE CASCADE/i.test(execText),
+    'attachments 须外键引用 sessions 并 CASCADE',
+  );
+
+  // 重复迁移不抛错（CREATE TABLE IF NOT EXISTS 幂等）。
+  assert.doesNotThrow(() => runMigrations(db as never));
+  // 老库原有列仍存在（自愈块不破坏既有列）。
+  assert.ok(sessionsColumns.has('last_context_window'));
+  assert.ok(messagesColumns.has('process_kind'));
 }
 
 function testPermissionPromptIntegration(): void {
@@ -1586,6 +1654,7 @@ testInteractionPreviewMarkdownLinkTargetWiring();
 testExternalLinks();
 testMissingConversationResumeErrorDetection();
 testMigrationsHandlePartiallyAppliedContextColumns();
+testAttachmentMigrationsCreateTablesAndAreIdempotent();
 testPermissionPromptIntegration();
 testPermissionInteractionAdapter();
 testPermissionSettingsMergeAndSessionCoercion();

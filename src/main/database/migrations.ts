@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -129,6 +129,45 @@ export function runMigrations(db: Database.Database): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE INDEX IF NOT EXISTS idx_interaction_history_session ON interaction_history(session_id, created_at DESC);
+  `);
+
+  // V4：会话附件（图片直传模型；文档与普通文件交给 Claude Code Read）。
+  // 无条件 CREATE TABLE IF NOT EXISTS（不放进 currentVersion<1 初始块），保证 v3 老库升级也能拿到新表。
+  // ON DELETE CASCADE：附件跟随 session/message/task 删除清理关联记录；物理文件由 attachment-service
+  // 按引用计数清理（DB 级联只删行，不删文件）。storage_key UNIQUE 便于去重与孤儿清理定位。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS attachments (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      filename TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('image','document','file')),
+      size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+      sha256 TEXT NOT NULL,
+      storage_key TEXT NOT NULL UNIQUE,
+      width INTEGER,
+      height INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('draft','message','task','failed')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_attachments_session ON attachments(session_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS message_attachments (
+      message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+      attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      PRIMARY KEY(message_id, attachment_id),
+      UNIQUE(message_id, ordinal)
+    );
+    CREATE TABLE IF NOT EXISTS task_attachments (
+      task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      attachment_id TEXT NOT NULL REFERENCES attachments(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      PRIMARY KEY(task_id, attachment_id),
+      UNIQUE(task_id, ordinal)
+    );
+    CREATE INDEX IF NOT EXISTS idx_message_attachments_attachment ON message_attachments(attachment_id);
+    CREATE INDEX IF NOT EXISTS idx_task_attachments_attachment ON task_attachments(attachment_id);
   `);
 
   const upsertVersion = versionRow
