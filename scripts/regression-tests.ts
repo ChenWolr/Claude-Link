@@ -35,6 +35,152 @@ import {
   isAllowedMarkdownImageUrl,
   shouldOpenExternally,
 } from '../src/shared/external-links';
+import {
+  ATTACHMENT_DEFAULT_INSTRUCTION,
+  MAX_FILE_BYTES,
+  MAX_IMAGE_BYTES,
+  MAX_TOTAL_BYTES,
+  classifyAttachment,
+  computeBase64Bytes,
+  isEmptySubmission,
+  isPathReadableDocument,
+  isSupportedDirectImage,
+  sanitizeAttachmentFilename,
+  validateAttachmentBytes,
+  validateAttachmentSize,
+  validateImageDimensions,
+  validateSendBudget,
+} from '../src/main/modules/attachment-policy';
+
+// Task1：附件策略纯函数契约（MIME/魔数/归类/大小/总预算/Base64/文件名安全化/空提交）。
+function testAttachmentPolicyContracts(): void {
+  // —— 1. 直接图片 MIME：四类通过，SVG/BMP/TIFF 等不进直传 ——
+  for (const m of ['image/jpeg', 'image/png', 'image/gif', 'image/webp']) {
+    assert.equal(isSupportedDirectImage(m), true, `应支持直传图片 MIME: ${m}`);
+  }
+  for (const m of ['image/svg+xml', 'image/bmp', 'image/tiff', 'image/x-icon', 'application/pdf']) {
+    assert.equal(isSupportedDirectImage(m), false, `不应作为直传图片 MIME: ${m}`);
+  }
+
+  // —— 2. 魔数：正确魔数通过，错误魔数（伪装图片）失败 ——
+  const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+  const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0]);
+  const gifBytes = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0]);
+  const webpBytes = new Uint8Array([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0]);
+  const imageFixtures: Array<{ name: string; bytes: Uint8Array; mime: string }> = [
+    { name: 'png', bytes: pngBytes, mime: 'image/png' },
+    { name: 'jpeg', bytes: jpegBytes, mime: 'image/jpeg' },
+    { name: 'gif', bytes: gifBytes, mime: 'image/gif' },
+    { name: 'webp', bytes: webpBytes, mime: 'image/webp' },
+  ];
+  for (const f of imageFixtures) {
+    const ok = validateAttachmentBytes({ filename: `a.${f.name}`, mimeType: f.mime, bytes: f.bytes });
+    assert.equal(ok.ok, true, `${f.name} 正确魔数应通过`);
+  }
+  const fakeImage = new Uint8Array([0x00, 0x11, 0x22, 0x33, 0x44]);
+  const fakeResult = validateAttachmentBytes({ filename: 'a.png', mimeType: 'image/png', bytes: fakeImage });
+  if (!fakeResult.ok) {
+    assert.ok(fakeResult.message.includes('a.png'), '失败信息须含可展示文件名');
+  } else {
+    assert.fail('错误魔数伪装 png 应失败');
+  }
+
+  // —— 3. 可读文档扩展名 / MIME ——
+  for (const ext of ['.txt', '.md', '.ts', '.js', '.vue', '.json', '.yaml', '.yml', '.csv', '.ipynb', '.pdf']) {
+    assert.equal(isPathReadableDocument('application/octet-stream', `report${ext}`), true, `扩展名 ${ext} 应为可读文档`);
+  }
+  assert.equal(isPathReadableDocument('application/pdf', 'doc'), true, 'application/pdf 应为可读文档');
+  for (const ext of ['.exe', '.zip', '.docx', '.dll', '.so']) {
+    assert.equal(isPathReadableDocument('application/octet-stream', `bin${ext}`), false, `扩展名 ${ext} 不应为可读文档`);
+  }
+
+  // —— 4. 分类：图片/文档/普通文件 ——
+  assert.equal(classifyAttachment('a.png', 'image/png'), 'image');
+  assert.equal(classifyAttachment('a.jpg', 'image/jpeg'), 'image');
+  assert.equal(classifyAttachment('report.pdf', 'application/pdf'), 'document');
+  assert.equal(classifyAttachment('notes.txt', 'text/plain'), 'document');
+  assert.equal(classifyAttachment('App.ts', 'application/octet-stream'), 'document');
+  assert.equal(classifyAttachment('logo.svg', 'image/svg+xml'), 'document', 'svg 归 document（可 Read），不进直传');
+  assert.equal(classifyAttachment('arch.zip', 'application/zip'), 'file');
+  assert.equal(classifyAttachment('setup.exe', 'application/octet-stream'), 'file');
+
+  // —— 5. 数量上限：10 通过，第 11 个失败 ——
+  const ten = Array.from({ length: 10 }, () => ({ kind: 'file' as const, sizeBytes: 100 }));
+  assert.equal(validateSendBudget(ten).ok, true, '10 个附件应通过');
+  const eleven = Array.from({ length: 11 }, () => ({ kind: 'file' as const, sizeBytes: 100 }));
+  assert.equal(validateSendBudget(eleven).ok, false, '11 个附件应失败');
+
+  // —— 6. 单文件大小边界 ——
+  assert.equal(validateAttachmentSize('image', MAX_IMAGE_BYTES, 'a.png').ok, true, '图片至上限应通过');
+  assert.equal(validateAttachmentSize('image', MAX_IMAGE_BYTES + 1, 'a.png').ok, false, '图片超上限应失败');
+  assert.equal(validateAttachmentSize('file', MAX_FILE_BYTES, 'a.bin').ok, true, '文件至上限应通过');
+  assert.equal(validateAttachmentSize('file', MAX_FILE_BYTES + 1, 'a.bin').ok, false, '文件超上限应失败');
+
+  // —— 7. 总字节预算失败返回可读中文 ——
+  const over = validateSendBudget([
+    { kind: 'file', sizeBytes: MAX_FILE_BYTES },
+    { kind: 'file', sizeBytes: MAX_FILE_BYTES },
+  ]);
+  if (!over.ok) {
+    assert.ok(over.message.length > 0, '总字节超限须返回可读中文');
+  } else {
+    assert.fail('总字节超限应失败');
+  }
+
+  // —— 8. 图片预算按 Base64 编码后长度（而非原始字节）——
+  const rawBytes = 12 * 1024 * 1024;
+  const encoded = computeBase64Bytes(rawBytes);
+  assert.equal(encoded, Math.ceil(rawBytes / 3) * 4);
+  assert.equal(
+    validateSendBudget([{ kind: 'image', sizeBytes: rawBytes, encodedImageBytes: encoded }]).ok,
+    true,
+    '提供 encodedImageBytes 时应以编码后长度为准且可通过',
+  );
+  // 原始 sizeBytes 极小，但 encodedImageBytes 巨大 → 必须失败，证明用的是编码后长度。
+  const encodedOver = validateSendBudget([
+    { kind: 'image', sizeBytes: 1, encodedImageBytes: MAX_TOTAL_BYTES + 1 },
+  ]);
+  if (!encodedOver.ok) {
+    assert.ok(encodedOver.message.length > 0);
+  } else {
+    assert.fail('图片预算须按编码后长度判定，而非原始字节');
+  }
+
+  // —— 9. 文件名安全化：basename / .. / 斜杠 / 控制字符 / 空兜底 ——
+  assert.equal(sanitizeAttachmentFilename('dir/sub/a.png'), 'a.png', '须只保留 basename');
+  assert.equal(sanitizeAttachmentFilename('..\\evil.txt'), 'evil.txt', '须剔除路径分隔符与 ..');
+  assert.equal(sanitizeAttachmentFilename('a\x00b\x01c.png'), 'abc.png', '须剔除控制字符');
+  assert.equal(sanitizeAttachmentFilename('..'), 'attachment', '.. 单独须兜底');
+  assert.equal(sanitizeAttachmentFilename(''), 'attachment', '空文件名须兜底');
+  assert.equal(sanitizeAttachmentFilename('   '), 'attachment', '全空白须兜底');
+
+  // —— 10. 空提交判定：有附件允许，二者皆空拒绝 ——
+  assert.equal(isEmptySubmission('', ['att-1']), false, '有附件不算空提交');
+  assert.equal(isEmptySubmission('', []), true, '无文字无附件为空提交');
+  assert.equal(isEmptySubmission('   ', []), true, '纯空白为空提交');
+  assert.equal(isEmptySubmission('hi', []), false, '有文字不为空');
+
+  // —— 图片尺寸最长边上限 ——
+  assert.equal(validateImageDimensions({ width: 8000, height: 6000 }).ok, true, '最长边 8000 应通过');
+  assert.equal(validateImageDimensions({ width: 8001, height: 100 }).ok, false, '最长边超 8000 应失败');
+
+  // —— 默认指令常量 ——
+  assert.equal(ATTACHMENT_DEFAULT_INSTRUCTION, '请阅读并分析这些附件。');
+
+  // —— PDF 魔数复核：真 PDF 通过，伪装 PDF 失败 ——
+  const realPdf = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0]);
+  assert.equal(
+    validateAttachmentBytes({ filename: 'a.pdf', mimeType: 'application/pdf', bytes: realPdf }).ok,
+    true,
+    '真 PDF 魔数应通过',
+  );
+  const fakePdf = new Uint8Array([0x00, 0x01, 0x02, 0x03]);
+  assert.equal(
+    validateAttachmentBytes({ filename: 'a.pdf', mimeType: 'application/pdf', bytes: fakePdf }).ok,
+    false,
+    '伪装 PDF 应失败',
+  );
+}
 
 function testApiUrlBuilder(): void {
   assert.equal(buildAnthropicApiUrl('https://api.anthropic.com', 'models').toString(), 'https://api.anthropic.com/v1/models');
@@ -1485,6 +1631,7 @@ testMermaidDeadPreRuleRemoved();
 testTestConnectionCopyFailureResets();
 testImageLightboxZIndexTokenized();
 testChatBlockKeyboardAccessibility();
+testAttachmentPolicyContracts();
 }
 
 main().catch((error) => {
