@@ -52,6 +52,12 @@ export const IPC_CHANNELS = {
   QUEUE_GET_STATE: 'queue:getState',
   QUEUE_EVENT: 'queue:event',
   QUEUE_USER_MESSAGE: 'queue:userMessage',
+  // 附件：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
+  // 统一发送载荷 ChatSendPayload 经 CHAT_SEND / TASK_ADD / QUEUE_USER_MESSAGE 透传，不另设通道。
+  ATTACHMENT_PICK: 'attachment:pick',
+  ATTACHMENT_STAGE_BYTES: 'attachment:stageBytes',
+  ATTACHMENT_PREVIEW: 'attachment:preview',
+  ATTACHMENT_REMOVE_DRAFT: 'attachment:removeDraft',
   // 会话导出 JPEG 长图（v3）。可见 renderer ↔ 主进程 ↔ 隐藏 export renderer。
   EXPORT_IMAGE_START: 'export-image:start',
   EXPORT_IMAGE_PROGRESS: 'export-image:progress',
@@ -69,6 +75,21 @@ export const IPC_CHANNELS = {
 export const DEFAULT_TASK_DELAY_SECONDS = 60;
 export const STREAM_DEBOUNCE_MS = 50;
 export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/** 粘贴/拖放入参：把 renderer 的 Blob bytes 交给主进程暂存（不传文件路径）。 */
+export interface StageAttachmentBytesInput {
+  sessionId: string;
+  filename: string;
+  mimeType: string;
+  bytes: Uint8Array;
+}
+
+/** 受控预览请求：主进程校验会话归属后返回有界缩略图/原图 bytes，不返回路径。 */
+export interface AttachmentPreviewRequest {
+  sessionId: string;
+  attachmentId: string;
+  thumbnail: boolean;
+}
 
 export interface ChatEventPayload {
   sessionId: string;

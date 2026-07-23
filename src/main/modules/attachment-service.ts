@@ -88,6 +88,24 @@ export function resolveAttachmentRecords(
   return { records, paths };
 }
 
+/**
+ * 发送前附件就绪校验：归属当前会话 + 必须为 draft 状态（已发送附件不可重复发送）。
+ * 空列表为 no-op（Task 3 阶段 renderer 恒传空，Task 4/7 复用此函数接入真实附件）。
+ * 复用 resolveAttachmentRecords（其内部 getAttachmentsByIdsForSession 已拒绝缺失/跨会话/重复 ID）。
+ */
+export function assertAttachmentsReadyForSend(
+  sessionId: string,
+  ids: string[],
+): { records: AttachmentRecord[]; paths: Record<string, string> } {
+  const resolved = resolveAttachmentRecords(sessionId, ids);
+  for (const record of resolved.records) {
+    if (record.status !== 'draft') {
+      throw new AttachmentInputError(`附件「${record.filename}」不是草稿状态，无法发送。`);
+    }
+  }
+  return resolved;
+}
+
 /** 移除草稿附件：校验会话归属与 draft 状态后，先删 DB 记录再删物理文件。 */
 export async function removeDraftAttachment(sessionId: string, attachmentId: string): Promise<void> {
   const record = attachmentRepo.getAttachment(attachmentId);

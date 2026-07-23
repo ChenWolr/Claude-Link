@@ -50,6 +50,7 @@ import {
   validateAttachmentSize,
   validateImageDimensions,
   validateSendBudget,
+  validateChatSendPayloadShape,
 } from '../src/main/modules/attachment-policy';
 
 // Task1：附件策略纯函数契约（MIME/魔数/归类/大小/总预算/Base64/文件名安全化/空提交）。
@@ -180,6 +181,78 @@ function testAttachmentPolicyContracts(): void {
     false,
     '伪装 PDF 应失败',
   );
+}
+
+// Task3：统一发送载荷 ChatSendPayload 形状校验（CHAT_SEND/TASK_ADD/QUEUE_USER_MESSAGE 共用）。
+// 纯函数行为契约：合法通过；缺字段/超限/重复/坏 UUID/空提交拒绝；附件-only（空文字）允许。
+function testChatSendPayloadShapeContracts(): void {
+  const check = (p: unknown) => validateChatSendPayloadShape(p);
+  // 合法 v4 UUID（version nibble=4，variant nibble∈8/9/a/b）。
+  const UUID = '11111111-1111-4111-8111-111111111111';
+
+  assert.equal(check({ text: 'hi', attachmentIds: [], clientMessageId: UUID }).ok, true, '合法载荷应通过');
+  assert.equal(check({ text: '', attachmentIds: ['a', 'b'], clientMessageId: UUID }).ok, true, '附件-only（空文字）应允许');
+
+  assert.equal(check(null).ok, false, 'null 应拒绝');
+  assert.equal(check(undefined).ok, false, 'undefined 应拒绝');
+  assert.equal(check('str').ok, false, '非对象应拒绝');
+  assert.equal(check({ attachmentIds: [], clientMessageId: UUID }).ok, false, '缺 text 应拒绝');
+  assert.equal(check({ text: 'hi', clientMessageId: UUID }).ok, false, '缺 attachmentIds 应拒绝');
+  assert.equal(check({ text: 'hi', attachmentIds: 'x', clientMessageId: UUID }).ok, false, 'attachmentIds 非数组应拒绝');
+  assert.equal(check({ text: 'hi', attachmentIds: [1, 2], clientMessageId: UUID }).ok, false, 'attachmentIds 含非字符串应拒绝');
+  assert.equal(check({ text: 'hi', attachmentIds: Array(11).fill('a'), clientMessageId: UUID }).ok, false, '附件超 10 应拒绝');
+  assert.equal(check({ text: 'hi', attachmentIds: ['a', 'a'], clientMessageId: UUID }).ok, false, '重复附件 ID 应拒绝');
+  assert.equal(check({ text: 'hi', attachmentIds: [], clientMessageId: 'not-a-uuid' }).ok, false, '非法 clientMessageId 应拒绝');
+  assert.equal(check({ text: 'hi', attachmentIds: [], clientMessageId: '' }).ok, false, '空 clientMessageId 应拒绝');
+  assert.equal(check({ text: '', attachmentIds: [], clientMessageId: UUID }).ok, false, '文字与附件均空应拒绝');
+
+  // 附件 IPC + preload + handler 源码接线契约。
+  const fs = require('node:fs') as typeof import('node:fs');
+  const ipcTypes = fs.readFileSync(new URL('../src/shared/types/ipc.ts', import.meta.url), 'utf8');
+  const preloadApi = fs.readFileSync(new URL('../src/preload/api.ts', import.meta.url), 'utf8');
+  const ipcHandlers = fs.readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
+  const useChat = fs.readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
+  const taskStore = fs.readFileSync(new URL('../src/renderer/stores/task-store.ts', import.meta.url), 'utf8');
+
+  // 4 个附件通道
+  assert.ok(ipcTypes.includes("ATTACHMENT_PICK: 'attachment:pick'"), '须有 ATTACHMENT_PICK 通道');
+  assert.ok(ipcTypes.includes("ATTACHMENT_STAGE_BYTES: 'attachment:stageBytes'"), '须有 ATTACHMENT_STAGE_BYTES 通道');
+  assert.ok(ipcTypes.includes("ATTACHMENT_PREVIEW: 'attachment:preview'"), '须有 ATTACHMENT_PREVIEW 通道');
+  assert.ok(ipcTypes.includes("ATTACHMENT_REMOVE_DRAFT: 'attachment:removeDraft'"), '须有 ATTACHMENT_REMOVE_DRAFT 通道');
+  assert.ok(ipcTypes.includes('StageAttachmentBytesInput') && ipcTypes.includes('AttachmentPreviewRequest'), '须定义两个附件入参类型');
+
+  // preload 暴露 4 方法 + 3 发送改 ChatSendPayload
+  assert.ok(preloadApi.includes('pickAttachments:'), 'preload 须暴露 pickAttachments');
+  assert.ok(preloadApi.includes('stageAttachmentBytes:'), 'preload 须暴露 stageAttachmentBytes');
+  assert.ok(preloadApi.includes('getAttachmentPreview:'), 'preload 须暴露 getAttachmentPreview');
+  assert.ok(preloadApi.includes('removeDraftAttachment:'), 'preload 须暴露 removeDraftAttachment');
+  assert.ok(/sendMessage:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(preloadApi), 'sendMessage 须接收 ChatSendPayload');
+  assert.ok(/addTask:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(preloadApi), 'addTask 须接收 ChatSendPayload');
+  assert.ok(/queueUserMessage:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(preloadApi), 'queueUserMessage 须接收 ChatSendPayload');
+
+  // 三发送 handler 改 ChatSendPayload 并做形状 + 归属校验
+  assert.ok(/CHAT_SEND, async \(_event, sessionId: string, payload: ChatSendPayload\)/.test(ipcHandlers), 'CHAT_SEND handler 须接收 ChatSendPayload');
+  assert.ok(/TASK_ADD, async \(_event, sessionId: string, payload: ChatSendPayload\)/.test(ipcHandlers), 'TASK_ADD handler 须接收 ChatSendPayload');
+  assert.ok(/QUEUE_USER_MESSAGE, async \(_event, sessionId: string, payload: ChatSendPayload\)/.test(ipcHandlers), 'QUEUE_USER_MESSAGE handler 须接收 ChatSendPayload');
+  const sendHandlerCount = (ipcHandlers.match(/validateChatSendPayloadShape\(payload\)/g) || []).length;
+  assert.ok(sendHandlerCount >= 3, `三发送 handler 须各调 validateChatSendPayloadShape（实际 ${sendHandlerCount}）`);
+  const readyCheckCount = (ipcHandlers.match(/assertAttachmentsReadyForSend\(sessionId, payload\.attachmentIds\)/g) || []).length;
+  assert.ok(readyCheckCount >= 3, `三发送 handler 须各调 assertAttachmentsReadyForSend（实际 ${readyCheckCount}）`);
+
+  // 4 附件 handler 注册（按源码字面量匹配，与既有 changes 测试一致）
+  assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_PICK'), '须注册 ATTACHMENT_PICK handler');
+  assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_STAGE_BYTES'), '须注册 ATTACHMENT_STAGE_BYTES handler');
+  assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_PREVIEW'), '须注册 ATTACHMENT_PREVIEW handler');
+  assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT'), '须注册 ATTACHMENT_REMOVE_DRAFT handler');
+  // 选择器用 dialog + 主进程读字节 + 魔数探测，不把路径返回 renderer
+  assert.ok(ipcHandlers.includes('dialog.showOpenDialog'), 'ATTACHMENT_PICK 须用主进程 dialog');
+  assert.ok(/path\.basename\(filePath\)/.test(ipcHandlers), '须只取 basename，不泄露完整路径');
+  assert.ok(ipcHandlers.includes('detectDirectImageFormat(bytes)'), '须据魔数探测真实图片格式');
+
+  // renderer 三调用点构造 ChatSendPayload（attachmentIds 在 Task 5/7 接入前恒为空）
+  assert.ok(/const payload: ChatSendPayload = \{/.test(useChat), 'use-chat sendMessage 须构造 ChatSendPayload');
+  assert.ok(/const payload: ChatSendPayload = \{/.test(taskStore), 'task-store 须构造 ChatSendPayload');
+  assert.ok((taskStore.match(/const payload: ChatSendPayload = \{/g) || []).length >= 2, 'task-store addTask 与 queueUserMessage 须各构造一次');
 }
 
 function testApiUrlBuilder(): void {
@@ -1701,6 +1774,7 @@ testTestConnectionCopyFailureResets();
 testImageLightboxZIndexTokenized();
 testChatBlockKeyboardAccessibility();
 testAttachmentPolicyContracts();
+testChatSendPayloadShapeContracts();
 }
 
 main().catch((error) => {
