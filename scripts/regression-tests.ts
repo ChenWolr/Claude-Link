@@ -734,6 +734,56 @@ function pasteTextSwallowsText(block: string): boolean {
   return !/files\.length\s*>\s*0/.test(before);
 }
 
+// Task6：历史附件渲染 + clientMessageId 统一契约（源码结构断言）。
+function testAttachmentHistoryContracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const msgBubble = readFileSync(new URL('../src/renderer/components/chat/MessageBubble.vue', import.meta.url), 'utf8');
+  const msgAttachments = readFileSync(new URL('../src/renderer/components/chat/MessageAttachments.vue', import.meta.url), 'utf8');
+  const useChat = readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
+  const sessionStore = readFileSync(new URL('../src/renderer/stores/session-store.ts', import.meta.url), 'utf8');
+  const msgRepo = readFileSync(new URL('../src/main/database/repositories/message-repo.ts', import.meta.url), 'utf8');
+
+  // 1) RenderableMessage.content 仍是 string（附件走独立关联，不进正文）
+  const renderableType = readFileSync(new URL('../src/shared/types/export-image.ts', import.meta.url), 'utf8');
+  assert.ok(/content: string;/.test(renderableType), 'RenderableMessage.content 须为 string');
+  assert.ok(/attachments\?: AttachmentSummary\[\]/.test(renderableType), 'RenderableMessage 须有可选 attachments');
+
+  // 2) MessageBubble：正文 markdown + 附件组件（文字后附件）；空 content 不渲染空 markdown 容器
+  assert.ok(msgBubble.includes('MessageAttachments'), 'MessageBubble 须渲染 MessageAttachments');
+  const contentIdx = msgBubble.indexOf('v-html="renderedContent"');
+  const attIdx = msgBubble.indexOf('<MessageAttachments');
+  assert.ok(contentIdx >= 0 && attIdx > contentIdx, '附件须渲染在正文之后');
+  assert.ok(msgBubble.includes('hasContent'), '空 content 须有 hasContent 守卫（不渲染空 markdown）');
+  // copy 包含文件名，不含路径/Base64/ID
+  assert.ok(msgBubble.includes('[附件]'), 'copy 须含附件文件名标记');
+  assert.ok(!msgBubble.includes('sha256') && !msgBubble.includes('storageKey'), 'copy 不得含路径/哈希/ID');
+
+  // 3) MessageAttachments：Blob URL 生命周期 + 不可用占位 + 灯箱复用
+  assert.ok(msgAttachments.includes('URL.revokeObjectURL'), 'MessageAttachments 须 revoke Blob URL');
+  assert.ok(msgAttachments.includes('onBeforeUnmount'), '卸载时须清理');
+  assert.ok(msgAttachments.includes('getAttachmentPreview'), '预览须经 IPC');
+  assert.ok(msgAttachments.includes('openImageLightbox'), '图片须复用现有灯箱');
+  assert.ok(msgAttachments.includes('附件不可用'), '须含「附件不可用」占位分支');
+  assert.ok(msgAttachments.includes('errorByAttachmentId'), '须维护 error map（预览失败占位）');
+
+  // 4) use-chat：乐观消息 id = clientMessageId（统一乐观/DB，避免双气泡）
+  assert.ok(/persistMessage\(\{[\s\S]*?id: payload\.clientMessageId/.test(useChat), '乐观 user 消息 id 须用 clientMessageId');
+  assert.ok(useChat.includes('useChatDraftStore'), 'sendMessage 须取草稿摘要做乐观附件渲染');
+  // 成功时不再重复添加主进程返回的 user 消息（沿用乐观消息）
+  const sendBlock = useChat.slice(useChat.indexOf('async function sendMessage'), useChat.indexOf('async function sendMessage') + 1800);
+  assert.ok(!sendBlock.includes('result.attachments.forEach'), '成功后不得重复插入返回的 user 附件消息');
+
+  // 5) session-store：有文字走 LLM 概括；附件-only 直接用文件名作标题（不喂 LLM，避免误回复客套话）
+  assert.ok(sessionStore.includes('attachments?.[0]?.filename'), '附件-only 须取首个 filename');
+  assert.ok(/else if \(firstName\)/.test(sessionStore), '附件-only 须分支处理');
+  assert.ok(/updateSession\(sessionId, \{ name: topic \}/.test(sessionStore), '附件-only 须直接更新标题不经 LLM');
+  assert.ok(/analyzeTopic\(sessionId, textContent\)/.test(sessionStore), '有文字时才走 LLM 概括');
+
+  // 6) message-repo：批量填充附件（getMessagesBySession/getRenderableMessagesBySession 无 N+1）
+  const fillCount = (msgRepo.match(/getAttachmentsByMessageIds/g) || []).length;
+  assert.ok(fillCount >= 2, `历史加载须批量填充附件（实际 ${fillCount} 处）`);
+}
+
 function testApiUrlBuilder(): void {
   assert.equal(buildAnthropicApiUrl('https://api.anthropic.com', 'models').toString(), 'https://api.anthropic.com/v1/models');
   assert.equal(buildAnthropicApiUrl('https://api.anthropic.com/v1', 'models').toString(), 'https://api.anthropic.com/v1/models');
@@ -2256,6 +2306,7 @@ testAttachmentPolicyContracts();
 testChatSendPayloadShapeContracts();
 await testAttachmentPromptBuilderContracts();
 testAttachmentDraftUiContracts();
+testAttachmentHistoryContracts();
 }
 
 main().catch((error) => {
