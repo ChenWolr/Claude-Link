@@ -420,17 +420,34 @@ export const useSessionStore = defineStore('session', {
         this.activeSession?.name.startsWith('会话')
       ) {
         const sessionId = this.activeSession.id;
-        window.claudeLink.analyzeTopic(sessionId, message.content).then((topic) => {
-          if (topic) {
-            // Only update if still on the same session
-            if (this.activeSession?.id === sessionId) {
-              this.activeSession.name = topic;
+        const textContent = message.content.trim();
+        const firstName = message.attachments?.[0]?.filename?.trim();
+        if (textContent) {
+          // 有文字：LLM 概括主题（仅传正文文字，不传附件 bytes/路径）。
+          window.claudeLink.analyzeTopic(sessionId, textContent).then((topic) => {
+            if (topic) {
+              // Only update if still on the same session
+              if (this.activeSession?.id === sessionId) {
+                this.activeSession.name = topic;
+              }
+              this.loadSessions();
+            }
+          }).catch(() => {
+            // Silently ignore topic analysis failures (fallback is applied by main process)
+          });
+        } else if (firstName) {
+          // 附件-only：文件名即标题素材，直接截断使用，不喂 LLM——
+          // 孤立文件名会被 LLM 误判为「没有对话内容」而回复客套话，反而劣化标题。
+          const topic = firstName.replace(/\s+/g, ' ').slice(0, 15);
+          window.claudeLink.updateSession(sessionId, { name: topic }).then((updated) => {
+            if (updated && this.activeSession?.id === sessionId) {
+              this.activeSession.name = updated.name;
             }
             this.loadSessions();
-          }
-        }).catch(() => {
-          // Silently ignore topic analysis failures (fallback is applied by main process)
-        });
+          }).catch(() => {
+            // ignore
+          });
+        }
       }
     },
     appendStream(text: string) {

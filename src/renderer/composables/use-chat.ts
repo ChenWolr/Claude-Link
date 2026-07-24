@@ -8,6 +8,7 @@
 
 import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
+import { useChatDraftStore } from '../stores/chat-draft-store';
 import type { BackgroundTask } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
@@ -151,10 +152,14 @@ function createChat() {
     toolUseId?: string | null;
     title?: string | null;
     isError?: boolean;
+    // Task 6：乐观 user 消息的 id 用 clientMessageId（与主进程 DB 消息同一 ID，避免双气泡）；
+    // attachments 用草稿摘要让乐观消息立即渲染附件卡片，不必等 DB 回读。
+    id?: string;
+    attachments?: Message['attachments'];
   }): void {
     if (!store.activeSession) return;
     store.addMessage({
-      id: crypto.randomUUID(),
+      id: partial.id ?? crypto.randomUUID(),
       sessionId: store.activeSession.id,
       role: partial.role,
       content: partial.content,
@@ -169,6 +174,7 @@ function createChat() {
       title: partial.title ?? null,
       isError: partial.isError === true,
       createdAt: new Date().toISOString(),
+      attachments: partial.attachments,
     });
   }
 
@@ -680,10 +686,9 @@ function createChat() {
     }
   }
 
-  // Task 5：sendMessage 收 ChatSendPayload（text + attachmentIds + clientMessageId）。
-  // 乐观消息仍用 payload.text（附件-only 时 content=''），与主进程 displayText 一致。
+  // Task 6：乐观 user 消息 id = payload.clientMessageId（与主进程 DB 消息同一 ID，消除双气泡/双 ID）。
+  // content 仍用 payload.text（附件-only 时 ''），与主进程 displayText 一致；attachments 用草稿摘要即时渲染。
   // 成功返回 true；失败置 error 横幅并返回 false（供调用方决定是否清草稿）。
-  // 注：乐观消息 ID 与 clientMessageId 的统一属 Task 6，本阶段仍各自生成。
   async function sendMessage(payload: ChatSendPayload): Promise<boolean> {
     if (!store.activeSession) return false;
     const text = payload.text.trim();
@@ -696,7 +701,21 @@ function createChat() {
     // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
     store.markRunning(store.activeSession.id);
 
-    persistMessage({ role: 'user', eventType: 'message', content: text, processKind: null });
+    // 草稿摘要用于乐观渲染附件卡片；仅取当前会话草稿里属于本 payload 的附件。
+    const draftAttachments = payload.attachmentIds.length > 0
+      ? (useChatDraftStore().getAttachments(store.activeSession.id) ?? []).filter((a) =>
+          payload.attachmentIds.includes(a.id),
+        )
+      : [];
+
+    persistMessage({
+      id: payload.clientMessageId,
+      role: 'user',
+      eventType: 'message',
+      content: text,
+      processKind: null,
+      attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
+    });
     // 力度② turn 边界：本回合 assistant 消息从此索引开始。MessageList 据此在发送中
     // （且对应流式非空）隐藏本回合已落库的 text/thinking，避免与流式块重复显示。
     store.turnStartIndex = store.messages.length;
