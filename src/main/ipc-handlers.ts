@@ -45,10 +45,14 @@ import {
   removeDraftAttachment,
   assertAttachmentsReadyForSend,
 } from './modules/attachment-service';
+import { prepareAttachmentPrompt } from './modules/attachment-prompt-builder';
 import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
 import type { StageAttachmentBytesInput, AttachmentPreviewRequest } from '../shared/types/ipc';
 
 let mainWindow: BrowserWindow;
+
+/** 会话级发送互斥：防止并发 CHAT_SEND 双落库/覆盖 pending。 */
+const chatSendLocks = new Set<string>();
 
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   mainWindow = mainWindowRef;
@@ -166,10 +170,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // Chat
   ipcMain.handle(IPC_CHANNELS.CHAT_SEND, async (_event, sessionId: string, payload: ChatSendPayload) => {
+    // Task 4：校验 → prepare → 落库（附件保持 draft）→ spawn/send → 成功后升格 message。
+    // spawn/send 同步失败则回滚消息关联，附件仍 draft，可原样重试（禁止再插第二条用户消息）。
+    let locked = false;
+    let createdMessageId: string | null = null;
+    let attachmentIdsForRollback: string[] = [];
     try {
-      // Task 3：发送载荷统一为 ChatSendPayload（text + attachmentIds + clientMessageId）。
-      // 附件输入构造（图片内容块 / Read 路径）在 Task 4 接入；此处先按纯文本走既有链路。
-      // attachmentIds 在 Task 3 阶段恒为空，仍做归属 + draft 校验，供 Task 4/7 复用。
       const shape = validateChatSendPayloadShape(payload);
       if (!shape.ok) throw new Error(shape.message);
 
@@ -177,36 +183,85 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (!session) {
         throw new Error(`Session ${sessionId} not found`);
       }
-      assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
-      const message = payload.text.trim();
 
-      const existingProcess = getActiveProcess(sessionId);
-      let createdMessageId = '';
-      if (existingProcess) {
-        sendMessage(sessionId, message);
-        const created = messageRepo.createMessage({ sessionId, role: 'user', content: message, eventType: 'message' });
-        createdMessageId = created.id;
-      } else {
-        spawnForChat(sessionId, mainWindow, {
-          model: session.model,
-          modelOverride: session.modelOverride,
-          workingDir: session.workingDir,
-          maxTurns: session.maxTurns,
-          permissionMode: session.permissionMode,
-          resumeSessionId: session.cliSessionId,
-        });
-        // CLI 以 stream-json 输入模式启动，进程不会自动读取本次提示；
-        // 必须把首条消息写入 stdin，否则 Claude 收不到、界面表现为卡住。
-        sendMessage(sessionId, message);
-        const created = messageRepo.createMessage({ sessionId, role: 'user', content: message, eventType: 'message' });
-        createdMessageId = created.id;
+      // 会话级互斥 + 活 query 拒绝，均在落库前。
+      if (chatSendLocks.has(sessionId) || getActiveProcess(sessionId)) {
+        throw new Error('当前回合仍在执行，请等待结束或中断后重试');
       }
-      // attachments 在 Task 3 阶段恒空；Task 6 由 clientMessageId 统一乐观消息与数据库消息。
-      const result: SendMessageResult = { messageId: createdMessageId, attachments: [] };
+      chatSendLocks.add(sessionId);
+      locked = true;
+
+      const resolved = assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
+      const prepared = await prepareAttachmentPrompt({
+        sessionId,
+        payload,
+        attachments: resolved.records,
+        attachmentPaths: resolved.paths,
+      });
+      attachmentIdsForRollback = prepared.attachmentIds;
+
+      // 落库时不升格附件 status，等 query 入口真正占坑成功后再 mark message。
+      const created = messageRepo.createMessageWithAttachments({
+        id: payload.clientMessageId,
+        sessionId,
+        role: 'user',
+        content: prepared.displayText,
+        eventType: 'message',
+        attachments: prepared.attachmentIds,
+        promoteAttachments: false,
+      });
+      createdMessageId = created.id;
+
+      // spawn 占坑；若已有 pending/active 会抛错 → 走回滚。
+      spawnForChat(sessionId, mainWindow, {
+        model: session.model,
+        modelOverride: session.modelOverride,
+        workingDir: session.workingDir,
+        maxTurns: session.maxTurns,
+        permissionMode: session.permissionMode,
+        resumeSessionId: session.cliSessionId,
+        additionalDirectories: prepared.additionalDirectories,
+      });
+      // sendMessage 同步路径只负责把 pending 交给 runQuery；真正 SDK 失败走事件流，不在此 IPC 回滚。
+      sendMessage(sessionId, prepared.prompt);
+
+      // query 入口已建立：附件升格为 message。
+      if (prepared.attachmentIds.length > 0) {
+        attachmentRepo.markAttachmentsStatus(prepared.attachmentIds, 'message');
+      }
+
+      // 返回最新摘要（status 已升格）。
+      const attachments =
+        prepared.attachmentIds.length > 0
+          ? (attachmentRepo.getAttachmentsByMessageIds([created.id]).get(created.id) ?? created.attachments ?? [])
+          : [];
+      const result: SendMessageResult = {
+        messageId: created.id,
+        attachments,
+      };
       return result;
     } catch (error) {
+      // 同步失败回滚：删消息（级联 message_attachments），附件行保持 draft，允许同 ID 外的新 clientMessageId 重试。
+      // 注意：不在此复用 clientMessageId 重插——renderer 重试应生成新 clientMessageId（Task 6 对齐乐观 ID）。
+      if (createdMessageId) {
+        try {
+          messageRepo.deleteMessage(createdMessageId);
+        } catch (rollbackErr) {
+          logger.error('Failed to rollback message after chat send failure', rollbackErr);
+        }
+        // 关联已随消息级联删除；显式确保附件仍为 draft（create 时本就未升格）。
+        if (attachmentIdsForRollback.length > 0) {
+          try {
+            attachmentRepo.markAttachmentsStatus(attachmentIdsForRollback, 'draft');
+          } catch (statusErr) {
+            logger.error('Failed to restore attachment draft status after rollback', statusErr);
+          }
+        }
+      }
       logger.error('Failed to send message', error);
       throw error;
+    } finally {
+      if (locked) chatSendLocks.delete(sessionId);
     }
   });
 
@@ -247,10 +302,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // Tasks
   ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, payload: ChatSendPayload) => {
-    // Task 3：任务载荷统一为 ChatSendPayload；附件关联（task_attachments）在 Task 7 接入，
-    // 此处先按纯文本 prompt 建任务。attachmentIds 恒空，仍做归属 + draft 校验。
+    // Task 7 前：非空附件显式拒绝，禁止静默丢附件只存 text。
     const shape = validateChatSendPayloadShape(payload);
     if (!shape.ok) throw new Error(shape.message);
+    if (payload.attachmentIds.length > 0) {
+      throw new Error('任务队列附件尚未支持，请先发送普通聊天或清空附件后再添加任务。');
+    }
     assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
     const tasks = taskRepo.getTasksBySession(sessionId);
     const sortOrder = tasks.length;
@@ -298,10 +355,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.QUEUE_USER_MESSAGE, async (_event, sessionId: string, payload: ChatSendPayload) => {
-    // Task 3：续接载荷统一为 ChatSendPayload；附件 prompt 构造在 Task 7 接入，
-    // 此处先按纯文本续接。attachmentIds 恒空，仍做归属 + draft 校验。
+    // Task 7 前：非空附件显式拒绝，禁止 waiting 续接静默丢附件。
     const shape = validateChatSendPayloadShape(payload);
     if (!shape.ok) throw new Error(shape.message);
+    if (payload.attachmentIds.length > 0) {
+      throw new Error('等待续接附件尚未支持，请先清空附件或等待 Task 7 完成后再试。');
+    }
     assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
     continueWithUserMessage(sessionId, payload.text.trim(), mainWindow);
     return getQueueState(sessionId);

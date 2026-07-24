@@ -21,6 +21,8 @@ export interface SpawnOptions {
   maxTurns?: number;
   permissionMode?: string;
   resumeSessionId?: string | null;
+  /** 当前会话附件根目录等受控路径；合并进 SDK options.additionalDirectories，不覆盖 cwd。 */
+  additionalDirectories?: string[];
 }
 
 // 构造注入子进程/SDK 的 env：apiKey + baseUrl + advancedJson.env 块展开。
