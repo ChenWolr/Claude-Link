@@ -52,6 +52,8 @@ import {
   validateSendBudget,
   validateChatSendPayloadShape,
 } from '../src/main/modules/attachment-policy';
+import { prepareAttachmentPrompt } from '../src/main/modules/attachment-prompt-builder';
+import type { AttachmentRecord, ChatSendPayload } from '../src/shared/types/attachment';
 
 // Task1：附件策略纯函数契约（MIME/魔数/归类/大小/总预算/Base64/文件名安全化/空提交）。
 function testAttachmentPolicyContracts(): void {
@@ -253,6 +255,393 @@ function testChatSendPayloadShapeContracts(): void {
   assert.ok(/const payload: ChatSendPayload = \{/.test(useChat), 'use-chat sendMessage 须构造 ChatSendPayload');
   assert.ok(/const payload: ChatSendPayload = \{/.test(taskStore), 'task-store 须构造 ChatSendPayload');
   assert.ok((taskStore.match(/const payload: ChatSendPayload = \{/g) || []).length >= 2, 'task-store addTask 与 queueUserMessage 须各构造一次');
+}
+
+// Task4：prepareAttachmentPrompt 构造契约 + CHAT_SEND / sdk-backend 接线。
+async function testAttachmentPromptBuilderContracts(): Promise<void> {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const os = await import('node:os');
+  const { readFileSync } = await import('node:fs');
+
+  const UUID = '22222222-2222-4222-8222-222222222222';
+  const sessionId = 'sess-attachment-prompt-1';
+  const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'claude-link-att-prompt-'));
+  const sessionRoot = path.join(tmpRoot, sessionId);
+
+  const pngBytes = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41,
+    0x54, 0x08, 0xd7, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
+    0x00, 0x00, 0x03, 0x00, 0x01, 0x00, 0x05, 0xfe,
+    0xd4, 0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+  ]);
+
+  function makeRecord(partial: Partial<AttachmentRecord> & Pick<AttachmentRecord, 'id' | 'kind' | 'filename' | 'mimeType'>): AttachmentRecord {
+    return {
+      id: partial.id,
+      sessionId,
+      kind: partial.kind,
+      filename: partial.filename,
+      mimeType: partial.mimeType,
+      sizeBytes: partial.sizeBytes ?? 32,
+      width: partial.width,
+      height: partial.height,
+      previewAvailable: partial.previewAvailable ?? partial.kind === 'image',
+      status: partial.status ?? 'draft',
+      sha256: partial.sha256 ?? 'abc',
+      storageKey: partial.storageKey ?? `${sessionId}/${partial.id}/${partial.filename}`,
+    };
+  }
+
+  async function writeFixture(attachmentId: string, filename: string, bytes: Buffer): Promise<string> {
+    const abs = path.join(sessionRoot, attachmentId, filename);
+    await fs.mkdir(path.dirname(abs), { recursive: true });
+    await fs.writeFile(abs, bytes);
+    return abs;
+  }
+
+  try {
+    // 1) 纯文字 → string prompt，无 additionalDirectories
+    {
+      const payload: ChatSendPayload = { text: '  只发文字  ', attachmentIds: [], clientMessageId: UUID };
+      const prepared = await prepareAttachmentPrompt({
+        sessionId,
+        payload,
+        attachments: [],
+        attachmentPaths: {},
+      });
+      assert.equal(typeof prepared.prompt, 'string', '纯文字须返回 string prompt');
+      assert.equal(prepared.prompt, '只发文字');
+      assert.equal(prepared.displayText, '只发文字');
+      assert.deepEqual(prepared.additionalDirectories, []);
+      assert.deepEqual(prepared.attachmentIds, []);
+    }
+
+    // 2) 文档路径型：string prompt，含受控路径说明 + additionalDirectories
+    {
+      const docId = 'att-doc-1';
+      const abs = await writeFixture(docId, 'report.pdf', Buffer.from('%PDF-1.4 fixture'));
+      const record = makeRecord({
+        id: docId,
+        kind: 'document',
+        filename: 'report.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 16,
+      });
+      const prepared = await prepareAttachmentPrompt({
+        sessionId,
+        payload: { text: '请总结', attachmentIds: [docId], clientMessageId: UUID },
+        attachments: [record],
+        attachmentPaths: { [docId]: abs },
+      });
+      assert.equal(typeof prepared.prompt, 'string', '无图片时须返回 string prompt');
+      const promptText = prepared.prompt as string;
+      assert.ok(promptText.includes('report.pdf'), '须含展示文件名');
+      assert.ok(promptText.includes(abs), '须含受控绝对路径');
+      assert.ok(promptText.includes('Read'), '须提示使用 Read 工具');
+      assert.ok(promptText.includes('请总结'), '用户文字不得丢失');
+      assert.equal(prepared.displayText, '请总结', 'displayText 仅为用户文字');
+      assert.ok(!prepared.displayText.includes(abs), 'displayText 不得含路径');
+      assert.ok(!prepared.displayText.includes(ATTACHMENT_DEFAULT_INSTRUCTION), 'displayText 不得含默认指令');
+      assert.deepEqual(prepared.additionalDirectories, [sessionRoot]);
+      assert.ok(!promptText.includes(record.storageKey) || promptText.includes(abs), '不得单独泄露 storageKey 语义以外的键');
+    }
+
+    // 3) 附件-only 文档：SDK 文本含默认指令，displayText 仍为空
+    {
+      const docId = 'att-doc-2';
+      const abs = await writeFixture(docId, 'notes.txt', Buffer.from('hello notes'));
+      const record = makeRecord({
+        id: docId,
+        kind: 'document',
+        filename: 'notes.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 11,
+      });
+      const prepared = await prepareAttachmentPrompt({
+        sessionId,
+        payload: { text: '   ', attachmentIds: [docId], clientMessageId: UUID },
+        attachments: [record],
+        attachmentPaths: { [docId]: abs },
+      });
+      assert.equal(typeof prepared.prompt, 'string');
+      assert.ok((prepared.prompt as string).includes(ATTACHMENT_DEFAULT_INSTRUCTION), '附件-only 须在 SDK 文本块使用默认说明');
+      assert.equal(prepared.displayText, '', '附件-only 的 displayText 须为空串');
+    }
+
+    // 4) 图片：AsyncIterable，仅一条 user message；image 在 text 前；parent_tool_use_id=null
+    {
+      const imgId = 'att-img-1';
+      const abs = await writeFixture(imgId, 'shot.png', pngBytes);
+      const record = makeRecord({
+        id: imgId,
+        kind: 'image',
+        filename: 'shot.png',
+        mimeType: 'image/png',
+        sizeBytes: pngBytes.byteLength,
+        width: 1,
+        height: 1,
+      });
+      const prepared = await prepareAttachmentPrompt({
+        sessionId,
+        payload: { text: '图里有什么', attachmentIds: [imgId], clientMessageId: UUID },
+        attachments: [record],
+        attachmentPaths: { [imgId]: abs },
+      });
+      assert.equal(typeof prepared.prompt, 'object', '有图片时须返回 AsyncIterable');
+      assert.equal(prepared.displayText, '图里有什么');
+      assert.ok(!prepared.displayText.includes(ATTACHMENT_DEFAULT_INSTRUCTION));
+
+      const messages: unknown[] = [];
+      for await (const msg of prepared.prompt as AsyncIterable<unknown>) {
+        messages.push(msg);
+      }
+      assert.equal(messages.length, 1, '异步流只能 yield 一条 user message');
+      const userMsg = messages[0] as {
+        type: string;
+        parent_tool_use_id: string | null;
+        message: { role: string; content: Array<Record<string, unknown>> };
+      };
+      assert.equal(userMsg.type, 'user');
+      assert.equal(userMsg.parent_tool_use_id, null, 'parent_tool_use_id 须为 null');
+      assert.equal(userMsg.message.role, 'user');
+      const content = userMsg.message.content;
+      assert.ok(Array.isArray(content) && content.length >= 2, '须至少有 image + text 块');
+      assert.equal(content[0]?.type, 'image', 'image 块须在 text 块之前');
+      const imageSource = (content[0] as { source?: { type?: string; media_type?: string; data?: string } }).source;
+      assert.equal(imageSource?.type, 'base64');
+      assert.equal(imageSource?.media_type, 'image/png');
+      assert.ok(typeof imageSource?.data === 'string' && imageSource.data.length > 0, '须有 base64 data');
+      assert.ok(!imageSource?.data?.startsWith('data:'), 'Base64 不得带 data: 前缀');
+      const textBlock = content.find((part) => part.type === 'text') as { text?: string } | undefined;
+      assert.ok(textBlock?.text?.includes('图里有什么'), '文字与图片同时存在时文字不得丢失');
+      assert.ok(!textBlock?.text?.includes(imageSource?.data ?? '___'), '文本块不得内嵌图片 Base64');
+      assert.deepEqual(prepared.additionalDirectories, [sessionRoot]);
+    }
+
+    // 5) 图片-only：SDK 文本用默认说明，displayText 为空
+    {
+      const imgId = 'att-img-2';
+      const abs = await writeFixture(imgId, 'only.png', pngBytes);
+      const record = makeRecord({
+        id: imgId,
+        kind: 'image',
+        filename: 'only.png',
+        mimeType: 'image/png',
+        sizeBytes: pngBytes.byteLength,
+      });
+      const prepared = await prepareAttachmentPrompt({
+        sessionId,
+        payload: { text: '', attachmentIds: [imgId], clientMessageId: UUID },
+        attachments: [record],
+        attachmentPaths: { [imgId]: abs },
+      });
+      assert.equal(prepared.displayText, '');
+      const messages: Array<{ message: { content: Array<{ type: string; text?: string }> } }> = [];
+      for await (const msg of prepared.prompt as AsyncIterable<(typeof messages)[number]>) {
+        messages.push(msg);
+      }
+      const text = messages[0]?.message.content.find((part) => part.type === 'text')?.text ?? '';
+      assert.equal(text, ATTACHMENT_DEFAULT_INSTRUCTION);
+    }
+
+    // 6) 空提交拒绝
+    {
+      let threw = false;
+      try {
+        await prepareAttachmentPrompt({
+          sessionId,
+          payload: { text: '  ', attachmentIds: [], clientMessageId: UUID },
+          attachments: [],
+          attachmentPaths: {},
+        });
+      } catch {
+        threw = true;
+      }
+      assert.equal(threw, true, '空文字且无附件须抛错');
+    }
+
+    // 7) 路径越出会话根目录须拒绝
+    {
+      const docId = 'att-doc-escape';
+      const outside = path.join(tmpRoot, 'other-session', 'x.txt');
+      await fs.mkdir(path.dirname(outside), { recursive: true });
+      await fs.writeFile(outside, 'nope');
+      const record = makeRecord({
+        id: docId,
+        kind: 'file',
+        filename: 'x.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 4,
+      });
+      let threw = false;
+      try {
+        await prepareAttachmentPrompt({
+          sessionId,
+          payload: { text: '读一下', attachmentIds: [docId], clientMessageId: UUID },
+          attachments: [record],
+          attachmentPaths: { [docId]: outside },
+        });
+      } catch {
+        threw = true;
+      }
+      assert.equal(threw, true, '非会话受控路径须拒绝');
+    }
+
+    // 8) 图片+文档混合：AsyncIterable，image 在前，文本含路径说明与用户文字
+    {
+      const imgId = 'att-mix-img';
+      const docId = 'att-mix-doc';
+      const imgAbs = await writeFixture(imgId, 'mix.png', pngBytes);
+      const docAbs = await writeFixture(docId, 'mix.md', Buffer.from('# mix'));
+      const imgRec = makeRecord({
+        id: imgId,
+        kind: 'image',
+        filename: 'mix.png',
+        mimeType: 'image/png',
+        sizeBytes: pngBytes.byteLength,
+      });
+      const docRec = makeRecord({
+        id: docId,
+        kind: 'document',
+        filename: 'mix.md',
+        mimeType: 'text/markdown',
+        sizeBytes: 5,
+      });
+      const prepared = await prepareAttachmentPrompt({
+        sessionId,
+        payload: { text: '混合分析', attachmentIds: [imgId, docId], clientMessageId: UUID },
+        attachments: [imgRec, docRec],
+        attachmentPaths: { [imgId]: imgAbs, [docId]: docAbs },
+      });
+      assert.equal(typeof prepared.prompt, 'object', '混合含图须走 AsyncIterable');
+      assert.equal(prepared.displayText, '混合分析');
+      const messages: Array<{ message: { content: Array<Record<string, unknown>> } }> = [];
+      for await (const msg of prepared.prompt as AsyncIterable<(typeof messages)[number]>) {
+        messages.push(msg);
+      }
+      assert.equal(messages.length, 1);
+      const content = messages[0]!.message.content;
+      assert.equal(content[0]?.type, 'image', '混合时 image 仍须在前');
+      const text = (content.find((p) => p.type === 'text') as { text?: string } | undefined)?.text ?? '';
+      assert.ok(text.includes('混合分析'), '混合时用户文字不得丢');
+      assert.ok(text.includes('mix.md') && text.includes(docAbs), '混合时路径说明须在文本块');
+      assert.ok(!text.includes(ATTACHMENT_DEFAULT_INSTRUCTION), '有用户文字时不需默认指令');
+    }
+
+    // 9) payload.ids 与 attachments 不一致须拒绝
+    {
+      const docId = 'att-id-mismatch';
+      const abs = await writeFixture(docId, 'm.txt', Buffer.from('x'));
+      const record = makeRecord({
+        id: docId,
+        kind: 'document',
+        filename: 'm.txt',
+        mimeType: 'text/plain',
+        sizeBytes: 1,
+      });
+      let threw = false;
+      try {
+        await prepareAttachmentPrompt({
+          sessionId,
+          payload: { text: 'x', attachmentIds: ['other-id'], clientMessageId: UUID },
+          attachments: [record],
+          attachmentPaths: { [docId]: abs },
+        });
+      } catch {
+        threw = true;
+      }
+      assert.equal(threw, true, 'payload.attachmentIds 与 attachments 不一致须拒绝');
+    }
+
+    // 10) path-only 文件缺失须拒绝
+    {
+      const docId = 'att-missing-file';
+      const abs = path.join(sessionRoot, docId, 'gone.pdf');
+      // 故意不写文件，只给路径
+      const record = makeRecord({
+        id: docId,
+        kind: 'document',
+        filename: 'gone.pdf',
+        mimeType: 'application/pdf',
+        sizeBytes: 10,
+      });
+      let threw = false;
+      try {
+        await prepareAttachmentPrompt({
+          sessionId,
+          payload: { text: '读', attachmentIds: [docId], clientMessageId: UUID },
+          attachments: [record],
+          attachmentPaths: { [docId]: abs },
+        });
+      } catch {
+        threw = true;
+      }
+      assert.equal(threw, true, 'path-only 文件不存在须拒绝');
+    }
+
+    // 11) 源码接线：CHAT_SEND 状态机 / 互斥 / 并集目录 / 队列显式拒绝
+    {
+      const ipcHandlers = readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
+      const sdkBackend = readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+      const cliShared = readFileSync(new URL('../src/main/modules/cli-shared.ts', import.meta.url), 'utf8');
+      const builder = readFileSync(new URL('../src/main/modules/attachment-prompt-builder.ts', import.meta.url), 'utf8');
+      const messageRepo = readFileSync(new URL('../src/main/database/repositories/message-repo.ts', import.meta.url), 'utf8');
+
+      assert.ok(ipcHandlers.includes('prepareAttachmentPrompt'), 'CHAT_SEND 须调用 prepareAttachmentPrompt');
+      assert.ok(ipcHandlers.includes('createMessageWithAttachments'), 'CHAT_SEND 须用 createMessageWithAttachments 落库');
+      assert.ok(ipcHandlers.includes('payload.clientMessageId'), '落库 id 须使用 clientMessageId');
+      assert.ok(ipcHandlers.includes('prepared.displayText'), '落库 content 须使用 displayText');
+      assert.ok(ipcHandlers.includes('当前回合仍在执行'), '活 query 时须在持久化前拒绝');
+      assert.ok(/getActiveProcess\(sessionId\)/.test(ipcHandlers), '须检测 active process');
+      assert.ok(ipcHandlers.includes('chatSendLocks'), '须有会话级发送互斥');
+      assert.ok(ipcHandlers.includes('promoteAttachments: false'), '落库时附件不得立刻升格 message');
+      assert.ok(ipcHandlers.includes("markAttachmentsStatus(prepared.attachmentIds, 'message')"), 'spawn/send 成功后才升格 message');
+      assert.ok(ipcHandlers.includes('deleteMessage'), '同步失败须回滚消息');
+      assert.ok(ipcHandlers.includes('任务队列附件尚未支持'), 'TASK_ADD 非空附件须显式拒绝');
+      assert.ok(ipcHandlers.includes('等待续接附件尚未支持'), 'QUEUE_USER_MESSAGE 非空附件须显式拒绝');
+
+      // 顺序：在 CHAT_SEND handler 体内检查（避免 indexOf 命中 import 行）
+      const chatSendStart = ipcHandlers.indexOf('IPC_CHANNELS.CHAT_SEND');
+      assert.ok(chatSendStart >= 0, '须注册 CHAT_SEND');
+      const chatSendBody = ipcHandlers.slice(chatSendStart, chatSendStart + 4500);
+      const idxActive = chatSendBody.indexOf('getActiveProcess(sessionId)');
+      const idxPrepare = chatSendBody.indexOf('prepareAttachmentPrompt');
+      const idxCreate = chatSendBody.indexOf('createMessageWithAttachments');
+      const idxSpawn = chatSendBody.indexOf('spawnForChat(sessionId');
+      const idxPromote = chatSendBody.indexOf("markAttachmentsStatus(prepared.attachmentIds, 'message')");
+      assert.ok(idxActive >= 0 && idxPrepare > idxActive, 'prepare 须在 active 检查之后');
+      assert.ok(idxCreate > idxPrepare, '落库须在 prepare 之后');
+      assert.ok(idxSpawn > idxCreate, 'spawn 须在落库之后');
+      assert.ok(idxPromote > idxSpawn, '升格 message 须在 spawn/send 成功之后');
+
+      assert.ok(messageRepo.includes('promoteAttachments'), 'message-repo 须支持 promoteAttachments');
+      assert.ok(messageRepo.includes('export function deleteMessage'), 'message-repo 须提供 deleteMessage 回滚');
+
+      assert.ok(cliShared.includes('additionalDirectories?: string[]'), 'SpawnOptions 须含 additionalDirectories');
+      assert.ok(sdkBackend.includes('opts.additionalDirectories'), 'buildSdkOptions 须合并 opts.additionalDirectories');
+      assert.ok(sdkBackend.includes('permissions.additionalDirectories'), 'buildSdkOptions 须并集用户 permissions 目录');
+      assert.ok(sdkBackend.includes('pendingFirstPrompt.has(sessionId)'), 'spawnForChat 须拒绝覆盖已有 pending');
+      assert.ok(sdkBackend.includes('没有待发送的 SDK 入口') || sdkBackend.includes('请先 spawnForChat'), 'sendMessage 无 pending 须抛错');
+      assert.ok(sdkBackend.includes('prompt: SdkPrompt') || sdkBackend.includes('prompt: string | AsyncIterable'), 'sdk-backend 须接受 SdkPrompt');
+      assert.ok(/export function sendMessage\(sessionId: string, message: SdkPrompt\)/.test(sdkBackend), 'sendMessage 须接受 SdkPrompt');
+      assert.ok(/export function spawnForTask\([\s\S]*prompt: SdkPrompt/.test(sdkBackend), 'spawnForTask 须接受 SdkPrompt');
+      assert.ok(builder.includes("parent_tool_use_id: null"), '构造的 user message 须 parent_tool_use_id=null');
+      assert.ok(builder.includes('ATTACHMENT_DEFAULT_INSTRUCTION'), 'builder 须使用默认指令常量');
+      assert.ok(builder.includes('MAX_ENCODED_IMAGE_REQUEST_BYTES') || builder.includes('30 * 1024 * 1024'), '须有图片编码请求预算');
+      assert.ok(builder.includes('assertPayloadAttachmentIdsMatch') || builder.includes('附件列表与发送载荷'), '须校验 payload ids 与 attachments');
+      // user 回显过滤仍在：只转发 tool_result part，避免与本地用户消息重复
+      assert.ok(sdkBackend.includes("type === 'user'"), '须保留 user 消息分支');
+      assert.ok(sdkBackend.includes('isToolResultPart'), 'user 回显仍只转发 tool_result');
+    }
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true });
+  }
 }
 
 function testApiUrlBuilder(): void {
@@ -1775,6 +2164,7 @@ testImageLightboxZIndexTokenized();
 testChatBlockKeyboardAccessibility();
 testAttachmentPolicyContracts();
 testChatSendPayloadShapeContracts();
+await testAttachmentPromptBuilderContracts();
 }
 
 main().catch((error) => {

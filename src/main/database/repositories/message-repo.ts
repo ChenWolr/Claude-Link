@@ -75,8 +75,14 @@ export interface CreateMessageInput {
   isError?: boolean;
   /** 受校验的消息 ID（renderer 乐观消息与 DB 消息共用同一 ID）；缺省则生成 uuid。 */
   id?: string;
-  /** 按显示顺序的草稿附件 ID；非空时在同一事务内关联并置 message 状态。 */
+  /** 按显示顺序的草稿附件 ID；非空时在同一事务内关联。 */
   attachments?: string[];
+  /**
+   * 是否在关联后把附件 status 升为 message。
+   * 默认 true（流式 assistant 等路径无附件时无影响）。
+   * CHAT_SEND 传 false：等 SDK query 真正启动成功后再升格，失败可保持 draft 重试。
+   */
+  promoteAttachments?: boolean;
 }
 
 // createMessage 委托 createMessageWithAttachments：无附件时事务内 link 跳过，行为与历史一致，
@@ -89,6 +95,7 @@ export function createMessageWithAttachments(input: CreateMessageInput): Message
   const db = getConnection();
   const id = input.id ?? uuidv4();
   const attachmentIds = input.attachments ?? [];
+  const promoteAttachments = input.promoteAttachments !== false;
 
   const {
     sessionId,
@@ -128,7 +135,9 @@ export function createMessageWithAttachments(input: CreateMessageInput): Message
     });
     if (attachmentIds.length > 0) {
       attachmentRepo.linkAttachmentsToMessage(id, attachmentIds);
-      attachmentRepo.markAttachmentsStatus(attachmentIds, 'message');
+      if (promoteAttachments) {
+        attachmentRepo.markAttachmentsStatus(attachmentIds, 'message');
+      }
     }
   });
   transaction();
@@ -156,6 +165,11 @@ export function createMessageWithAttachments(input: CreateMessageInput): Message
     createdAt: new Date().toISOString(),
     attachments,
   };
+}
+
+/** 删除单条消息（message_attachments 级联删；attachments 行与物理文件保留，供失败重试）。 */
+export function deleteMessage(id: string): void {
+  getConnection().prepare('DELETE FROM messages WHERE id = ?').run(id);
 }
 
 export function getMessagesBySession(sessionId: string): Message[] {

@@ -48,6 +48,8 @@ import {
   persistMessageParts,
 } from './cli-shared';
 import { isMissingConversationResumeError } from './sdk-errors';
+import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SdkPrompt } from './attachment-prompt-builder';
 import { cancelInteractionsForSession, requestInteraction } from './interaction-prompts';
 import {
   SUPPORTED_USER_DIALOG_KINDS,
@@ -79,12 +81,13 @@ void persistMessageParts;
 // ── SDK 动态加载（ESM）─────────────────────────────────────────────
 // query() 返回 Query（AsyncGenerator<SDKMessage> + interrupt()/setPermissionMode()）。
 // 这里只引 type，运行时值由 importSdk() 动态获取。
+// prompt 与 Agent SDK 对齐：纯文字 string；含图片时 AsyncIterable<SDKUserMessage>。
 type Query = AsyncGenerator<Record<string, unknown>, void> & {
   interrupt(): Promise<void>;
 };
 
 interface SdkModule {
-  query: (params: { prompt: string | unknown; options?: Record<string, unknown> }) => Query;
+  query: (params: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Record<string, unknown> }) => Query;
 }
 
 let sdkPromise: Promise<SdkModule> | null = null;
@@ -741,9 +744,29 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     settingsEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(clamped);
     logger.info(`[${sessionId}] 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS=${clamped} (alias=${requestedAlias})`);
   }
+
+  // permissions 先应用 session 级更新，再并集 additionalDirectories（用户配置 + 附件目录）。
+  const permissions = applySessionPermissionUpdates(
+    sessionId,
+    settings.permissions as SdkPermissionSettings,
+  );
+  const mergedDirs = new Set<string>();
+  for (const dir of permissions.additionalDirectories ?? []) {
+    if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
+  }
+  for (const dir of opts.additionalDirectories ?? []) {
+    if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
+  }
+  if (mergedDirs.size > 0) {
+    const dirs = [...mergedDirs];
+    // 双写同一集合：顶层 options 与 settings.permissions，避免 SDK/CLI 只读一侧时丢目录。
+    options.additionalDirectories = dirs;
+    permissions.additionalDirectories = dirs;
+  }
+
   options.settings = {
     ...settings,
-    permissions: applySessionPermissionUpdates(sessionId, settings.permissions as SdkPermissionSettings),
+    permissions,
   };
 
   return options;
@@ -893,7 +916,7 @@ function convertStreamEvent(sdkMsg: Record<string, unknown>): CliEvent {
   } as CliStreamEvent;
 }
 
-async function startSdkQuery(prompt: string, options: Record<string, unknown>): Promise<Query> {
+async function startSdkQuery(prompt: SdkPrompt, options: Record<string, unknown>): Promise<Query> {
   const sdk = await importSdk();
   return sdk.query({ prompt, options });
 }
@@ -914,7 +937,7 @@ const contextUsageDiagnosed = new Set<string>();
 // ── 运行一个 query：消费 SDKMessage 流，转 CliEvent 推前端，结束后 emit exit ─
 async function runQuery(
   sessionId: string,
-  prompt: string,
+  prompt: SdkPrompt,
   mainWindow: BrowserWindow,
   opts: SpawnOptions,
   entry: SessionEntry,
@@ -1241,6 +1264,10 @@ export function spawnForChat(
   // 创建 entry（handle + emit 一次成型）。不立即起 query——等 sendMessage 带首条消息再 query()。
   // pendingFirstPrompt 记住 mainWindow/opts，sendMessage 时用同 entry 起 query，
   // 这样 spawn 时返回的 handle 就是 runQuery 要 emit 的那个，on('exit') 回调不丢失。
+  // 若已有 pending 或 active entry，拒绝覆盖，防止并发 CHAT_SEND 后写吃掉先写的 prompt。
+  if (pendingFirstPrompt.has(sessionId) || isEntryActive(entries.get(sessionId))) {
+    throw new Error('当前回合仍在执行，请等待结束或中断后重试');
+  }
   const entry = createEntry();
   entries.set(sessionId, entry);
   markSessionActive(sessionId);
@@ -1257,7 +1284,7 @@ const pendingFirstPrompt = new Map<
 export function spawnForTask(
   taskId: string,
   sessionId: string,
-  prompt: string,
+  prompt: SdkPrompt,
   mainWindow: BrowserWindow,
   opts: SpawnOptions = {},
 ): SdkQueryHandle {
@@ -1270,7 +1297,7 @@ export function spawnForTask(
   return entry.handle;
 }
 
-export function sendMessage(sessionId: string, message: string): void {
+export function sendMessage(sessionId: string, message: SdkPrompt): void {
   // 首条消息（pendingFirstPrompt 存在）：用同一 entry 起新 query，message 即 prompt。
   const pending = pendingFirstPrompt.get(sessionId);
   if (pending) {
@@ -1280,12 +1307,12 @@ export function sendMessage(sessionId: string, message: string): void {
   }
   // 后续消息：SDK 单 query 模式下不能往已运行的 query 追加 prompt
   // （需 streaming input + AsyncIterable；当前架构每次消息起新 query + resume）。
-  // 若有活 query 则记为待续写（下一条会走 spawnForChat+resume）；无活 query 则 warn。
-  // 实际聊天续写由 ipc-handlers 的 getActiveProcess 分支判断走 spawnForChat 新 query。
+  // 误用（未 spawn / 活 query 中途追加）一律抛错，禁止静默 drop。
   const entry = entries.get(sessionId);
-  if (!entry || !entry.query) {
-    logger.warn(`No active SDK query for session ${sessionId}; message dropped.`);
+  if (entry?.query) {
+    throw new Error('当前回合仍在执行，请等待结束或中断后重试');
   }
+  throw new Error(`会话 ${sessionId} 没有待发送的 SDK 入口，请先 spawnForChat。`);
 }
 
 export function killProcess(sessionId: string, reason: 'user' | 'watchdog' = 'user'): void {
