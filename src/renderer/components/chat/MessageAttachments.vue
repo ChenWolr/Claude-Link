@@ -6,6 +6,7 @@
 import { onBeforeUnmount, reactive, watch } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { openImageLightbox } from '../../composables/useImageLightbox';
+import { attachmentBadge } from '../../utils/attachment';
 import type { AttachmentSummary } from '../../../shared/types/attachment';
 
 const props = defineProps<{
@@ -25,14 +26,6 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function fileBadge(mimeType: string): string {
-  const mime = mimeType.toLowerCase();
-  if (mime === 'application/pdf') return 'PDF';
-  if (mime.startsWith('text/') || mime.includes('markdown') || mime.includes('json') || mime.includes('csv') || mime.includes('yaml') || mime.includes('xml')) return 'TXT';
-  if (mime.startsWith('image/')) return 'IMG';
-  return 'FILE';
 }
 
 function revokeAll(): void {
@@ -126,7 +119,7 @@ onBeforeUnmount(() => {
         :aria-label="`预览图片 ${att.filename}`"
         @click="openPreview(att, $event.currentTarget as HTMLElement)"
       >
-        <span class="msg-att__icon" aria-hidden="true">🖼</span>
+        <span class="msg-att__badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
         <span class="msg-att__meta">
           <span class="msg-att__name">{{ att.filename }}</span>
           <span class="msg-att__size">{{ formatSize(att.sizeBytes) }}<template v-if="att.width && att.height"> · {{ att.width }}×{{ att.height }}</template></span>
@@ -135,7 +128,7 @@ onBeforeUnmount(() => {
       </button>
       <!-- 文件卡片（含导出模式下的图片退化展示）：仅显示类型/名称/大小，不调系统程序打开。 -->
       <div v-else class="msg-att msg-att--file">
-        <span class="msg-att__badge" aria-hidden="true">{{ fileBadge(att.mimeType) }}</span>
+        <span class="msg-att__badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
         <span class="msg-att__meta">
           <span class="msg-att__name" :title="att.filename">{{ att.filename }}</span>
           <span class="msg-att__size">{{ formatSize(att.sizeBytes) }}</span>
@@ -178,12 +171,6 @@ onBeforeUnmount(() => {
 .msg-att--unavailable {
   opacity: 0.72;
   border-style: dashed;
-}
-
-.msg-att__icon {
-  flex-shrink: 0;
-  font-size: 1rem;
-  line-height: 1;
 }
 
 .msg-att__badge {

@@ -53,6 +53,7 @@ import {
   validateChatSendPayloadShape,
 } from '../src/main/modules/attachment-policy';
 import { prepareAttachmentPrompt } from '../src/main/modules/attachment-prompt-builder';
+import { attachmentBadge } from '../src/renderer/utils/attachment';
 import type { AttachmentRecord, ChatSendPayload } from '../src/shared/types/attachment';
 
 // Task1：附件策略纯函数契约（MIME/魔数/归类/大小/总预算/Base64/文件名安全化/空提交）。
@@ -782,6 +783,36 @@ function testAttachmentHistoryContracts(): void {
   // 6) message-repo：批量填充附件（getMessagesBySession/getRenderableMessagesBySession 无 N+1）
   const fillCount = (msgRepo.match(/getAttachmentsByMessageIds/g) || []).length;
   assert.ok(fillCount >= 2, `历史加载须批量填充附件（实际 ${fillCount} 处）`);
+}
+
+// 附件徽标：按文件名后缀（用户期望"对应后缀格式"），mimeType 仅无后缀时兜底。
+function testAttachmentBadgeContracts(): void {
+  assert.equal(attachmentBadge('a.pdf'), 'PDF');
+  assert.equal(attachmentBadge('a.txt'), 'TXT');
+  assert.equal(attachmentBadge('notes.md'), 'MD');
+  assert.equal(attachmentBadge('shot.png'), 'PNG');
+  assert.equal(attachmentBadge('photo.jpg'), 'JPG');
+  assert.equal(attachmentBadge('photo.jpeg'), 'JPG');
+  assert.equal(attachmentBadge('anim.gif'), 'GIF');
+  assert.equal(attachmentBadge('img.webp'), 'WEBP');
+  assert.equal(attachmentBadge('data.json'), 'JSON');
+  assert.equal(attachmentBadge('sheet.csv'), 'CSV');
+  assert.equal(attachmentBadge('App.ts'), 'TS');
+  assert.equal(attachmentBadge('main.tsx'), 'TSX');
+  assert.equal(attachmentBadge('index.js'), 'JS');
+  assert.equal(attachmentBadge('config.yaml'), 'YAML');
+  assert.equal(attachmentBadge('App.vue'), 'VUE');
+  assert.equal(attachmentBadge('book.ipynb'), 'NB');
+  // 未知后缀：原样大写截断
+  assert.equal(attachmentBadge('weird.xyz'), 'XYZ');
+  // 大小写不敏感
+  assert.equal(attachmentBadge('A.PDF'), 'PDF');
+  assert.equal(attachmentBadge('B.Jpg'), 'JPG');
+  // 无后缀：按 mimeType 兜底
+  assert.equal(attachmentBadge('noext', 'text/plain'), 'TXT');
+  assert.equal(attachmentBadge('noext', 'application/pdf'), 'PDF');
+  assert.equal(attachmentBadge('noext', 'image/png'), 'IMG');
+  assert.equal(attachmentBadge('noext'), 'FILE');
 }
 
 function testApiUrlBuilder(): void {
@@ -2307,6 +2338,7 @@ testChatSendPayloadShapeContracts();
 await testAttachmentPromptBuilderContracts();
 testAttachmentDraftUiContracts();
 testAttachmentHistoryContracts();
+testAttachmentBadgeContracts();
 }
 
 main().catch((error) => {

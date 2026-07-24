@@ -6,6 +6,7 @@ import { onBeforeUnmount, reactive, watch } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useChatDraftStore } from '../../stores/chat-draft-store';
 import { closeImageLightbox, openImageLightbox, useImageLightbox } from '../../composables/useImageLightbox';
+import { attachmentBadge } from '../../utils/attachment';
 import type { AttachmentSummary } from '../../../shared/types/attachment';
 
 const props = defineProps<{
@@ -28,15 +29,6 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-// 文件类型徽标（首版不调系统程序打开，仅展示类型）。
-function fileBadge(mimeType: string, _kind: string): string {
-  const mime = mimeType.toLowerCase();
-  if (mime === 'application/pdf') return 'PDF';
-  if (mime.startsWith('text/') || mime.includes('markdown') || mime.includes('json') || mime.includes('csv') || mime.includes('yaml') || mime.includes('xml')) return 'TXT';
-  if (mime.startsWith('image/')) return 'IMG';
-  return 'FILE';
 }
 
 function revokeAll(): void {
@@ -134,12 +126,12 @@ onBeforeUnmount(() => {
         :aria-label="`预览图片 ${att.filename}`"
         @click="previewImage(att, $event.currentTarget as HTMLElement)"
       >
-        <span class="att-card__img-icon" aria-hidden="true">🖼</span>
+        <span class="att-card__file-badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
         <span class="att-card__name">{{ att.filename }}</span>
         <span v-if="loading[att.id]" class="att-card__hint">读取中…</span>
       </button>
       <div v-else class="att-card__file">
-        <span class="att-card__file-badge" aria-hidden="true">{{ fileBadge(att.mimeType, att.kind) }}</span>
+        <span class="att-card__file-badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
         <span class="att-card__file-meta">
           <span class="att-card__name" :title="att.filename">{{ att.filename }}</span>
           <span class="att-card__size">{{ formatSize(att.sizeBytes) }}</span>
@@ -197,12 +189,6 @@ onBeforeUnmount(() => {
 
 .att-card__thumb:hover {
   color: var(--color-accent-strong);
-}
-
-.att-card__img-icon {
-  flex-shrink: 0;
-  font-size: 1rem;
-  line-height: 1;
 }
 
 .att-card__file {
