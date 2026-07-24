@@ -18,18 +18,17 @@ export const useTaskStore = defineStore('task', {
         this.error = error instanceof Error ? error.message : '加载任务失败';
       }
     },
-    async addTask(sessionId: string, prompt: string) {
+    // Task 5：addTask 收 ChatSendPayload（附件草稿由 draftStore 提供）。
+    // 成功返回 true 并清旧错误；失败置 error 并返回 false（供调用方决定是否清草稿）。
+    async addTask(sessionId: string, payload: ChatSendPayload): Promise<boolean> {
       try {
-        // Task 3：发送统一为 ChatSendPayload。附件草稿在 Task 7 接入前恒为空。
-        const payload: ChatSendPayload = {
-          text: prompt.trim(),
-          attachmentIds: [],
-          clientMessageId: crypto.randomUUID(),
-        };
+        this.error = null;
         const task = await window.claudeLink.addTask(sessionId, payload);
         this.tasks.push(task);
+        return true;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '添加任务失败';
+        return false;
       }
     },
     async removeTask(taskId: string) {
@@ -76,17 +75,16 @@ export const useTaskStore = defineStore('task', {
         this.error = error instanceof Error ? error.message : '中断任务失败';
       }
     },
-    async queueUserMessage(sessionId: string, message: string) {
+    // Task 5：续接收 ChatSendPayload（附件草稿由 draftStore 提供）。
+    // 成功返回 true 并清旧错误；失败置 error 并返回 false。
+    async queueUserMessage(sessionId: string, payload: ChatSendPayload): Promise<boolean> {
       try {
-        // Task 3：续接统一为 ChatSendPayload。附件在 Task 7 接入前恒为空。
-        const payload: ChatSendPayload = {
-          text: message.trim(),
-          attachmentIds: [],
-          clientMessageId: crypto.randomUUID(),
-        };
+        this.error = null;
         this.queueState = await window.claudeLink.queueUserMessage(sessionId, payload);
+        return true;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '继续任务失败';
+        return false;
       }
     },
     handleQueueEvent(payload: QueueEventPayload) {

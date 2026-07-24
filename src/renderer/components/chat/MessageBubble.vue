@@ -8,6 +8,11 @@ const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>(
 
 // 导出模式用 export profile：Mermaid 渲染、代码换行、图片 eager、无灯箱按钮化。
 const renderedContent = computed(() => renderMarkdown(props.message.content, props.exportMode ? 'export' : 'rich'));
+// 附件-only 用户消息（无正文）：历史附件卡片渲染属 Task 6，此处先占位避免空气泡，
+// 让用户对"发了什么"有最低视觉确认。
+const isAttachmentOnly = computed(
+  () => props.message.role === 'user' && !props.message.content.trim(),
+);
 
 // 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）
 const copied = ref(false);
@@ -26,6 +31,7 @@ async function copyMessage(): Promise<void> {
   <div :class="['bubble', `bubble--${message.role}`]">
     <div class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
     <div class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
+    <div v-if="isAttachmentOnly" class="bubble__attachment-placeholder">📎 附件消息</div>
     <div v-if="message.costUsd != null || message.durationMs" class="bubble__meta">
       <template v-if="message.costUsd != null">${{ message.costUsd.toFixed(4) }}</template>
       <template v-if="message.durationMs">{{ message.costUsd != null ? ' · ' : '' }}{{ (message.durationMs / 1000).toFixed(1) }}s</template>
@@ -54,6 +60,13 @@ async function copyMessage(): Promise<void> {
   max-width: 75%;
   padding: 12px 16px;
   border-radius: var(--radius-md);
+}
+
+/* 附件-only 用户消息占位（完整附件卡片渲染见 Task 6）。 */
+.bubble__attachment-placeholder {
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  font-style: italic;
 }
 
 /* 用户气泡：accent 染色卡片——淡彩底 + 右侧 3px accent 色条 + accent 派生描边。
