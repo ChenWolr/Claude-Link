@@ -14,6 +14,7 @@ defineProps<{
 const emit = defineEmits<{
   abort: [];
   compress: [];
+  addAttachment: [];
 }>();
 
 const sessionStore = useSessionStore();
@@ -192,7 +193,25 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 操作：仅发送中显示中断；删除会话走左侧栏 -->
+    <!-- 添加文件：权限控件右侧，位置固定紧靠权限；只发事件，粘贴/拖放由 ChatPage 容器处理。
+         DOM 序在「中断」之前：中断的 ctl--right(margin-left:auto) 只把自身推到最右，
+         不会把添加文件一起带走（否则发送时添加文件会跑到中断右边）。 -->
+    <div class="ctl">
+      <button
+        type="button"
+        class="ctl__btn attachment-add-btn"
+        :disabled="sending"
+        title="添加文件、图片；也支持粘贴和拖入"
+        @click="emit('addAttachment')"
+      >
+        <svg class="ctl__add-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+        </svg>
+        添加文件
+      </button>
+    </div>
+
+    <!-- 操作：仅发送中显示中断；ctl--right 推到最右，不影响左侧添加文件位置。 -->
     <div v-if="sending" class="ctl ctl--right">
       <button type="button" class="ctl__btn ctl__btn--abort" @click="emit('abort')">■ 中断</button>
     </div>
@@ -346,6 +365,19 @@ onUnmounted(() => {
 
 /* 触发按钮内的小图标（当前模式） */
 .ctl__perm-icon {
+  flex-shrink: 0;
+  width: 0.875rem;
+  height: 0.875rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
+}
+
+/* 添加文件按钮内的小图标（回形针），与权限图标同 stroke 风格 */
+.ctl__add-icon {
   flex-shrink: 0;
   width: 0.875rem;
   height: 0.875rem;

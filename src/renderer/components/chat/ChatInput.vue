@@ -2,23 +2,27 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { SLASH_COMMANDS } from '../../../shared/constants';
 
-defineProps<{
+// 受控输入：modelValue 由父组件（草稿 store）持有；附件-only 也允许发送。
+// 拖放/粘贴由 ChatPage 在 .chat-page 容器统一处理（不依赖 textarea 焦点、落点更大）。
+const props = defineProps<{
   disabled?: boolean;
+  modelValue: string;
+  hasAttachments?: boolean;
 }>();
 
 const emit = defineEmits<{
-  send: [text: string];
+  'update:modelValue': [value: string];
+  send: [];
 }>();
 
-const text = ref('');
 const showSlashMenu = ref(false);
 const selectedSlashIndex = ref(0);
 const wrapperRef = ref<HTMLElement | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
 const matchingCommands = computed(() => {
-  if (!text.value.startsWith('/')) return [];
-  const q = text.value.toLowerCase();
+  if (!props.modelValue.startsWith('/')) return [];
+  const q = props.modelValue.toLowerCase();
   // 动态搜索：前缀匹配优先；无前缀命中时退化为包含匹配，提升可发现性。
   const prefix = SLASH_COMMANDS.filter((c) => c.name.toLowerCase().startsWith(q));
   if (prefix.length) return prefix;
@@ -27,8 +31,8 @@ const matchingCommands = computed(() => {
 
 // 显式触发命令联想：插入 '/' 并聚焦，让斜杠菜单立刻弹出。
 function insertSlash() {
-  if (!text.value.startsWith('/')) {
-    text.value = '/';
+  if (!props.modelValue.startsWith('/')) {
+    emit('update:modelValue', '/');
   }
   showSlashMenu.value = matchingCommands.value.length > 0;
   selectedSlashIndex.value = 0;
@@ -72,13 +76,15 @@ function handleKeydown(e: KeyboardEvent): void {
 }
 
 function selectSlashCommand(cmd: { name: string }): void {
-  text.value = cmd.name + ' ';
+  emit('update:modelValue', cmd.name + ' ');
   showSlashMenu.value = false;
   selectedSlashIndex.value = 0;
 }
 
-function handleInput(): void {
-  showSlashMenu.value = text.value.startsWith('/') && matchingCommands.value.length > 0;
+function handleInput(e: Event): void {
+  const value = (e.target as HTMLTextAreaElement).value;
+  emit('update:modelValue', value);
+  showSlashMenu.value = value.startsWith('/') && matchingCommands.value.length > 0;
   selectedSlashIndex.value = 0;
 }
 
@@ -92,15 +98,14 @@ function autoResize(): void {
   el.style.height = `${el.scrollHeight}px`;
 }
 
-// flush:'post' 确保 DOM 已反映最新 text，scrollHeight 读数准确。
-watch(text, () => autoResize(), { flush: 'post' });
+// flush:'post' 确保 DOM 已反映最新 modelValue，scrollHeight 读数准确。
+watch(() => props.modelValue, () => autoResize(), { flush: 'post' });
 
+// 发送：文字或附件至少一项即可（附件-only）。不清 modelValue——由父组件在主进程接受后清空草稿。
 function submit(): void {
-  const value = text.value.trim();
-  if (!value) return;
-  emit('send', value);
-  text.value = '';
-  showSlashMenu.value = false;
+  if (props.disabled) return;
+  if (!props.modelValue.trim() && !props.hasAttachments) return;
+  emit('send');
 }
 
 function handleClickOutside(event: MouseEvent) {
@@ -112,6 +117,8 @@ function handleClickOutside(event: MouseEvent) {
 onMounted(() => {
   document.addEventListener('click', handleClickOutside);
   window.addEventListener('resize', autoResize);
+  // 首次挂载若已恢复非空多行草稿（watch 非 immediate 不会触发），主动撑高一次。
+  autoResize();
 });
 
 onUnmounted(() => {
@@ -143,14 +150,14 @@ onUnmounted(() => {
       >/</button>
       <textarea
         ref="textareaRef"
-        v-model="text"
+        :value="modelValue"
         :disabled="disabled"
         placeholder="输入消息；输入 / 联想命令（↑↓ 选择，回车确认）"
         rows="1"
         @keydown="handleKeydown"
         @input="handleInput"
       />
-      <button type="button" :disabled="disabled || !text.trim()" @click="submit">发送</button>
+      <button type="button" :disabled="disabled || (!modelValue.trim() && !hasAttachments)" @click="submit">发送</button>
     </div>
   </div>
 </template>

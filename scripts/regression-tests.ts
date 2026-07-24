@@ -251,10 +251,11 @@ function testChatSendPayloadShapeContracts(): void {
   assert.ok(/path\.basename\(filePath\)/.test(ipcHandlers), '须只取 basename，不泄露完整路径');
   assert.ok(ipcHandlers.includes('detectDirectImageFormat(bytes)'), '须据魔数探测真实图片格式');
 
-  // renderer 三调用点构造 ChatSendPayload（attachmentIds 在 Task 5/7 接入前恒为空）
-  assert.ok(/const payload: ChatSendPayload = \{/.test(useChat), 'use-chat sendMessage 须构造 ChatSendPayload');
-  assert.ok(/const payload: ChatSendPayload = \{/.test(taskStore), 'task-store 须构造 ChatSendPayload');
-  assert.ok((taskStore.match(/const payload: ChatSendPayload = \{/g) || []).length >= 2, 'task-store addTask 与 queueUserMessage 须各构造一次');
+  // Task 5：use-chat.sendMessage / task-store.addTask / queueUserMessage 改为接收 ChatSendPayload；
+  // payload 由 ChatPage 统一构造（见 testAttachmentDraftUiContracts）。
+  assert.ok(/sendMessage\(payload: ChatSendPayload\)/.test(useChat), 'use-chat sendMessage 须接收 ChatSendPayload');
+  assert.ok(/addTask\(sessionId: string, payload: ChatSendPayload\)/.test(taskStore), 'task-store addTask 须接收 ChatSendPayload');
+  assert.ok(/queueUserMessage\(sessionId: string, payload: ChatSendPayload\)/.test(taskStore), 'task-store queueUserMessage 须接收 ChatSendPayload');
 }
 
 // Task4：prepareAttachmentPrompt 构造契约 + CHAT_SEND / sdk-backend 接线。
@@ -642,6 +643,95 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
   } finally {
     await fs.rm(tmpRoot, { recursive: true, force: true });
   }
+}
+
+// Task5：第四版附件 UI 接线契约（源码结构断言）。
+function testAttachmentDraftUiContracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const chatPage = readFileSync(new URL('../src/renderer/pages/ChatPage.vue', import.meta.url), 'utf8');
+  const chatInput = readFileSync(new URL('../src/renderer/components/chat/ChatInput.vue', import.meta.url), 'utf8');
+  const toolbar = readFileSync(new URL('../src/renderer/components/chat/SessionToolbar.vue', import.meta.url), 'utf8');
+  const draftList = readFileSync(new URL('../src/renderer/components/chat/AttachmentDraftList.vue', import.meta.url), 'utf8');
+  const draftStore = readFileSync(new URL('../src/renderer/stores/chat-draft-store.ts', import.meta.url), 'utf8');
+  const appVue = readFileSync(new URL('../src/renderer/App.vue', import.meta.url), 'utf8');
+
+  // 1) AttachmentDraftList 出现在 .chat-composer 之前
+  const idxList = chatPage.indexOf('<AttachmentDraftList');
+  const idxComposer = chatPage.indexOf('class="chat-composer"');
+  assert.ok(idxList >= 0, 'ChatPage 须挂载 AttachmentDraftList');
+  assert.ok(idxComposer >= 0, 'ChatPage 须有 .chat-composer');
+  assert.ok(idxList < idxComposer, '附件草稿列表须在 .chat-composer 之前');
+
+  // 2) 拖放高亮 class（非常驻边框）
+  assert.ok(chatPage.includes("'chat-composer--drag'"), '须有拖放高亮 class');
+
+  // 3) ChatPage 构造 ChatSendPayload + 三路径路由
+  assert.ok(/function buildPayload\(\)/.test(chatPage), 'ChatPage 须有 buildPayload 构造载荷');
+  assert.ok(/clientMessageId: crypto\.randomUUID\(\)/.test(chatPage), 'payload 须带 clientMessageId');
+  assert.ok(chatPage.includes('taskStore.queueUserMessage(sessionId, payload)'), 'waiting 须走 queueUserMessage(payload)');
+  assert.ok(chatPage.includes('taskStore.addTask(sessionId, payload)'), 'running/continuing 须走 addTask(payload)');
+  assert.ok(chatPage.includes('sendMessage(payload)'), 'idle 须走 sendMessage(payload)');
+  assert.ok(chatPage.includes('draftStore.clearAfterAccepted(sessionId)'), '成功后才清草稿');
+  // 失败路径不清草稿：clearAfterAccepted 必须在 ok 分支内（在其后无无条件调用）
+  const clearIdx = chatPage.indexOf('draftStore.clearAfterAccepted(sessionId)');
+  const okIdx = chatPage.indexOf('if (ok)');
+  assert.ok(okIdx >= 0 && clearIdx > okIdx, '清草稿须在 ok 分支内（失败保留）');
+
+  // 4) ChatInput 受控 + 附件-only 发送（拖放/粘贴已上移到 ChatPage 容器）
+  assert.ok(/modelValue: string/.test(chatInput), 'ChatInput 须受控 modelValue');
+  assert.ok(/hasAttachments\?: boolean/.test(chatInput), 'ChatInput 须有 hasAttachments');
+  assert.ok(/send: \[\]/.test(chatInput), 'send 须为无参事件（父清草稿）');
+  assert.ok(/disabled \|\| \(!modelValue\.trim\(\) && !hasAttachments\)/.test(chatInput), '发送条件须允许附件-only');
+
+  // 4b) 拖放/粘贴在 ChatPage 容器级（不依赖 textarea 焦点，落点覆盖整个聊天区）
+  assert.ok(chatPage.includes('onPageDrop'), 'ChatPage 须有 onPageDrop');
+  assert.ok(chatPage.includes('onPagePaste'), 'ChatPage 须有 onPagePaste');
+  assert.ok(chatPage.includes('dragCounter'), 'ChatPage 须有拖放计数 dragCounter');
+  assert.ok(/@drop="onPageDrop"/.test(chatPage), '.chat-page 须绑 @drop');
+  assert.ok(/@paste="onPagePaste"/.test(chatPage), '.chat-page 须绑 @paste');
+  // 粘贴截取所有 file 项（不卡 image/*），交主进程校验；有 file 才 preventDefault，文本透传
+  const pasteBlock = chatPage.slice(chatPage.indexOf('onPagePaste'), chatPage.indexOf('onPagePaste') + 700);
+  assert.ok(pasteBlock.includes("item.kind === 'file'"), '粘贴须截取所有 file 项');
+  assert.ok(!/startsWith\('image\/'\)/.test(pasteBlock), '粘贴不得只限 image/*');
+  assert.ok(pasteBlock.includes('e.preventDefault()'), '有 file 项时须 preventDefault');
+  assert.ok(!pasteTextSwallowsText(pasteBlock), '粘贴不应无条件 preventDefault 吞文本');
+  // 拖放仅 Files 类型才高亮/拦截
+  assert.ok(/includes\('Files'\)/.test(chatPage), '拖放判断须限定 Files 类型');
+
+  // 4c) App.vue 全局 dragover/drop 兜底（防 Electron 把窗口导航到 file:///）
+  assert.ok(appVue.includes('dragover') && appVue.includes('drop'), 'App.vue 须注册全局 dragover/drop 兜底');
+  assert.ok(/addEventListener\('dragover'/.test(appVue), 'App.vue 须 addEventListener dragover');
+  assert.ok(/addEventListener\('drop'/.test(appVue), 'App.vue 须 addEventListener drop');
+  assert.ok(/preventDefault\(\)/.test(appVue), 'App.vue 须 preventDefault 屏蔽文件导航');
+
+  // 5) SessionToolbar 添加按钮在权限控件之后
+  const permIdx = toolbar.indexOf('permissionRef') >= 0 ? toolbar.indexOf('权限') : toolbar.indexOf('权限');
+  const addIdx = toolbar.indexOf('attachment-add-btn');
+  assert.ok(addIdx >= 0, 'SessionToolbar 须有添加文件按钮');
+  assert.ok(permIdx >= 0 && addIdx > permIdx, '添加文件须在权限控件之后');
+  assert.ok(toolbar.includes("addAttachment: []"), 'SessionToolbar 须 emit addAttachment');
+
+  // 6) AttachmentDraftList：删除 stop propagation + 复用 lightbox + revoke
+  assert.ok(draftList.includes('@click.stop'), '删除按钮须 stop propagation');
+  assert.ok(draftList.includes('openImageLightbox'), '须复用现有灯箱');
+  assert.ok(draftList.includes('URL.revokeObjectURL'), '须 revoke Blob URL');
+  assert.ok(draftList.includes('getAttachmentPreview'), '缩略图经 IPC 取有界预览');
+  // 列表自身不设满宽 border/background 包住全部附件（仅限 .attachment-draft-list 规则块内）
+  assert.ok(!/\.attachment-draft-list\s*\{[^}]*border:/.test(draftList), '列表容器不得有自身 border');
+
+  // 7) draft store：按会话隔离 + 成功才清 + 不存 bytes
+  assert.ok(draftStore.includes('textBySession') && draftStore.includes('attachmentsBySession'), '草稿须按会话隔离');
+  assert.ok(draftStore.includes('clearAfterAccepted'), '须有成功后清空');
+  assert.ok(!draftStore.includes('arrayBuffer'), 'draft store 不得保存 bytes');
+}
+
+// 粘贴块若「无条件 e.preventDefault()」（在截取图片判断之前就 preventDefault）则判为吞文本。
+function pasteTextSwallowsText(block: string): boolean {
+  const preventIdx = block.indexOf('e.preventDefault()');
+  if (preventIdx < 0) return false;
+  const before = block.slice(0, preventIdx);
+  // preventDefault 必须出现在「确认有图片文件」分支内（出现 files.length > 0 之类判断之后）。
+  return !/files\.length\s*>\s*0/.test(before);
 }
 
 function testApiUrlBuilder(): void {
@@ -2165,6 +2255,7 @@ testChatBlockKeyboardAccessibility();
 testAttachmentPolicyContracts();
 testChatSendPayloadShapeContracts();
 await testAttachmentPromptBuilderContracts();
+testAttachmentDraftUiContracts();
 }
 
 main().catch((error) => {

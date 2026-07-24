@@ -680,8 +680,14 @@ function createChat() {
     }
   }
 
-  async function sendMessage(text: string): Promise<void> {
-    if (!store.activeSession || !text.trim()) return;
+  // Task 5：sendMessage 收 ChatSendPayload（text + attachmentIds + clientMessageId）。
+  // 乐观消息仍用 payload.text（附件-only 时 content=''），与主进程 displayText 一致。
+  // 成功返回 true；失败置 error 横幅并返回 false（供调用方决定是否清草稿）。
+  // 注：乐观消息 ID 与 clientMessageId 的统一属 Task 6，本阶段仍各自生成。
+  async function sendMessage(payload: ChatSendPayload): Promise<boolean> {
+    if (!store.activeSession) return false;
+    const text = payload.text.trim();
+    if (!text && payload.attachmentIds.length === 0) return false;
 
     // 新回合开始：作废上一回合 abort 残留的超时兜底，避免它到点把本次 sending 错误复位。
     clearAbortTimer(store.activeSession.id);
@@ -690,24 +696,18 @@ function createChat() {
     // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
     store.markRunning(store.activeSession.id);
 
-    persistMessage({ role: 'user', eventType: 'message', content: text.trim(), processKind: null });
+    persistMessage({ role: 'user', eventType: 'message', content: text, processKind: null });
     // 力度② turn 边界：本回合 assistant 消息从此索引开始。MessageList 据此在发送中
     // （且对应流式非空）隐藏本回合已落库的 text/thinking，避免与流式块重复显示。
     store.turnStartIndex = store.messages.length;
 
     try {
-      // 监听已在 App.vue 全局注册，这里不重复 startListening。
-      // Task 3：发送统一为 ChatSendPayload。附件草稿在 Task 5 接入前恒为空；
-      // clientMessageId 由 renderer 生成，Task 6 用它统一乐观消息与主进程数据库消息（避免双 ID）。
-      const payload: ChatSendPayload = {
-        text: text.trim(),
-        attachmentIds: [],
-        clientMessageId: crypto.randomUUID(),
-      };
       await window.claudeLink.sendMessage(store.activeSession.id, payload);
+      return true;
     } catch (e) {
       error.value = e instanceof Error ? e.message : '发送失败';
       if (store.activeSession) store.markStopped(store.activeSession.id);
+      return false;
     }
   }
 
@@ -768,7 +768,8 @@ function createChat() {
       // ignore
     }
     await new Promise((r) => setTimeout(r, 200));
-    await sendMessage(last);
+    // 卡死重试：重发最后一条用户文字（不带附件，新回合新 clientMessageId）。
+    await sendMessage({ text: last, attachmentIds: [], clientMessageId: crypto.randomUUID() });
   }
 
   return { sending, error, sendMessage, abort, retryLastTurn, startListening, stopListening };
