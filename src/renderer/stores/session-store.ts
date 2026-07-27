@@ -411,10 +411,19 @@ export const useSessionStore = defineStore('session', {
       }
     },
     addMessage(message: Message) {
-      this.messages.push(message);
+      // Task 7B：按 id upsert——task 执行/waiting 续接经 queue event 回传同一 id 的 user message 时，
+      // 替换而非追加，避免重复气泡（retry/重放也复用同一稳定 id）。
+      const existingIdx = this.messages.findIndex((m) => m.id === message.id);
+      const isNew = existingIdx < 0;
+      if (isNew) {
+        this.messages.push(message);
+      } else {
+        this.messages.splice(existingIdx, 1, message);
+      }
 
       // Trigger topic analysis for first user message if session name is auto-generated
       if (
+        isNew &&
         message.role === 'user' &&
         this.messages.filter((m) => m.role === 'user').length === 1 &&
         this.activeSession?.name.startsWith('会话')

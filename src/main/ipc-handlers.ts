@@ -45,6 +45,7 @@ import {
   removeDraftAttachment,
   assertAttachmentsReadyForSend,
   cloneMessageAttachmentsToDraft,
+  cleanupDetachedAttachments,
 } from './modules/attachment-service';
 import { prepareAttachmentPrompt } from './modules/attachment-prompt-builder';
 import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
@@ -303,20 +304,27 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // Tasks
   ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, payload: ChatSendPayload) => {
-    // Task 7 前：非空附件显式拒绝，禁止静默丢附件只存 text。
+    // Task 7B：任务附件接入。落库 task + 稳定 clientMessageId + 附件 links（status→task）。
+    // 执行时由 executeNextTask 按 clientMessageId 创建/复用 user message、prepare 带附件的 prompt。
     const shape = validateChatSendPayloadShape(payload);
     if (!shape.ok) throw new Error(shape.message);
-    if (payload.attachmentIds.length > 0) {
-      throw new Error('任务队列附件尚未支持，请先发送普通聊天或清空附件后再添加任务。');
-    }
     assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
     const tasks = taskRepo.getTasksBySession(sessionId);
     const sortOrder = tasks.length;
-    return taskRepo.createTask(sessionId, payload.text.trim(), sortOrder);
+    return taskRepo.createTaskWithAttachments(
+      sessionId,
+      payload.text.trim(),
+      sortOrder,
+      payload.attachmentIds,
+      payload.clientMessageId,
+    );
   });
 
   ipcMain.handle(IPC_CHANNELS.TASK_REMOVE, async (_event, taskId: string) => {
-    taskRepo.deleteTask(taskId);
+    // Task 7B：解除 task_attachments 后，零引用附件（未执行的 pending task）删 row+文件；
+    // 已升格为 message 的附件仍有引用，保留。
+    const attachmentIds = taskRepo.deleteTask(taskId);
+    await cleanupDetachedAttachments(attachmentIds);
   });
 
   ipcMain.handle(IPC_CHANNELS.TASK_GET_ALL, async (_event, sessionId: string) => {
@@ -333,6 +341,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if (task) {
       interruptTask(taskId, task.sessionId, mainWindow);
     }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.TASK_RETRY, async (_event, taskId: string) => {
+    // Task 7B：failed/cancelled → pending，清结果字段，保留附件 links + 稳定 clientMessageId。
+    const task = taskRepo.retryTask(taskId);
+    if (!task) throw new Error('任务不存在或当前状态不支持重试');
+    return task;
   });
 
   // Queue
@@ -356,14 +371,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.QUEUE_USER_MESSAGE, async (_event, sessionId: string, payload: ChatSendPayload) => {
-    // Task 7 前：非空附件显式拒绝，禁止 waiting 续接静默丢附件。
+    // Task 7B：waiting 续接支持附件。边界先校验（与 CHAT_SEND/TASK_ADD 对齐），
+    // 预检/prepare/落库/spawn 全在 continueWithUserMessage 内；任一同步失败抛错（renderer 保留草稿）。
     const shape = validateChatSendPayloadShape(payload);
     if (!shape.ok) throw new Error(shape.message);
-    if (payload.attachmentIds.length > 0) {
-      throw new Error('等待续接附件尚未支持，请先清空附件或等待 Task 7 完成后再试。');
-    }
     assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
-    continueWithUserMessage(sessionId, payload.text.trim(), mainWindow);
+    await continueWithUserMessage(sessionId, payload, mainWindow);
     return getQueueState(sessionId);
   });
 

@@ -1,10 +1,25 @@
 import type { BrowserWindow } from 'electron';
+import type { Message } from '../../shared/types/session';
+import type { ChatSendPayload } from '../../shared/types/attachment';
 import type { QueueState } from '../../shared/types/task';
 import { IPC_CHANNELS, DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
-import { spawnForChat, spawnForTask, killProcess, getCliSessionId, sendMessage } from './chat-backend';
+import {
+  spawnForChat,
+  spawnForTask,
+  killProcess,
+  resolveCliSessionId,
+  sendMessage,
+  getActiveProcess,
+} from './chat-backend';
+import type { PreparedAttachmentPrompt } from './attachment-prompt-builder';
+import { prepareAttachmentPrompt } from './attachment-prompt-builder';
+import { resolveAttachmentRecords, assertAttachmentsReadyForSend } from './attachment-service';
 import { getConfig } from './config-manager';
 import * as taskRepo from '../database/repositories/task-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
+import * as messageRepo from '../database/repositories/message-repo';
+import { randomUUID } from 'node:crypto';
+import { logger } from '../utils/logger';
 
 const queues = new Map<string, QueueState>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -51,7 +66,7 @@ export function startQueue(sessionId: string, mainWindow: BrowserWindow): void {
     return;
   }
 
-  executeNextTask(sessionId, mainWindow);
+  runNextTask(sessionId, mainWindow);
 }
 
 export function pauseQueue(sessionId: string, mainWindow: BrowserWindow): void {
@@ -116,11 +131,36 @@ export function interruptTask(taskId: string, sessionId: string, mainWindow: Bro
   // Continue with next pending task
   const pending = taskRepo.getPendingTasks(sessionId);
   if (pending.length > 0) {
-    executeNextTask(sessionId, mainWindow);
+    runNextTask(sessionId, mainWindow);
   }
 }
 
-function executeNextTask(sessionId: string, mainWindow: BrowserWindow): void {
+/** 任务结束后推进队列：仍有 pending 则倒计时下一个，否则置 idle。 */
+function advanceAfterTask(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  config: ReturnType<typeof getConfig>,
+): void {
+  const state = queues.get(sessionId);
+  if (!state) return;
+  const remaining = taskRepo.getPendingTasks(sessionId);
+  state.pendingCount = remaining.length;
+  if (remaining.length > 0) {
+    startCountdown(sessionId, mainWindow, config.taskDelaySeconds || DEFAULT_TASK_DELAY_SECONDS);
+  } else {
+    state.status = 'idle';
+    emitQueueEvent(mainWindow, sessionId, 'queue_completed');
+  }
+}
+
+/** fire-and-forget 包装：executeNextTask 改 async 后，所有定时器/事件调用点用此避免 unhandled rejection。 */
+function runNextTask(sessionId: string, mainWindow: BrowserWindow): void {
+  void executeNextTask(sessionId, mainWindow).catch((e) => {
+    logger.error(`executeNextTask threw (session ${sessionId})`, e);
+  });
+}
+
+async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Promise<void> {
   const state = getOrCreateQueue(sessionId);
   const config = getConfig();
 
@@ -141,16 +181,64 @@ function executeNextTask(sessionId: string, mainWindow: BrowserWindow): void {
   taskRepo.updateTaskStatus(task.id, 'running');
   emitQueueEvent(mainWindow, sessionId, 'task_started', task.id);
 
-  const cliSessionId = getCliSessionId(sessionId);
   const session = sessionRepo.getSession(sessionId);
 
-  const child = spawnForTask(task.id, sessionId, task.prompt, mainWindow, {
+  // Task 7B：稳定 clientMessageId（老任务首次执行时生成并持久化，retry/重启复用同一 ID）。
+  let clientMessageId = task.clientMessageId;
+  if (!clientMessageId) {
+    clientMessageId = randomUUID();
+    taskRepo.setTaskClientMessageId(task.id, clientMessageId);
+  }
+
+  // 解析附件 → prepare 带图片/文件路径的 SDK prompt（可重复迭代，支持 stale-resume 后二次 query）。
+  let prepared: PreparedAttachmentPrompt;
+  try {
+    const { records, paths } = resolveAttachmentRecords(sessionId, task.attachments.map((a) => a.id));
+    prepared = await prepareAttachmentPrompt({
+      sessionId,
+      payload: { text: task.prompt, attachmentIds: records.map((r) => r.id), clientMessageId },
+      attachments: records,
+      attachmentPaths: paths,
+    });
+  } catch (err) {
+    // 构造失败：task→failed，保留 task link（附件状态不动，仍可 retry）；推进队列继续下一个。
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`executeNextTask prepare failed (task ${task.id}): ${msg}`);
+    taskRepo.updateTaskError(task.id, msg);
+    emitQueueEvent(mainWindow, sessionId, 'task_failed', task.id);
+    state.lastCompletedTaskId = task.id;
+    state.currentTaskId = null;
+    advanceAfterTask(sessionId, mainWindow, config);
+    return;
+  }
+
+  // 创建或复用 user message（按 parent_task_id 查；幂等，retry/重启不翻倍消息/links）。
+  const existing = messageRepo.getMessagesByTask(task.id).find((m) => m.role === 'user');
+  let userMessage: Message;
+  if (existing) {
+    userMessage = existing;
+  } else {
+    userMessage = messageRepo.createMessageWithAttachments({
+      id: clientMessageId,
+      sessionId,
+      role: 'user',
+      content: prepared.displayText,
+      eventType: 'message',
+      parentTaskId: task.id,
+      attachments: prepared.attachmentIds,
+      promoteAttachments: true,
+    });
+    emitQueueEvent(mainWindow, sessionId, 'user_message_created', task.id, { message: userMessage });
+  }
+
+  const child = spawnForTask(task.id, sessionId, prepared.prompt, mainWindow, {
     model: session?.model ?? config.defaultModel,
     modelOverride: session?.modelOverride ?? null,
     workingDir: session?.workingDir ?? config.workingDirectory,
     maxTurns: config.maxTurns,
     permissionMode: session?.permissionMode ?? config.permissionMode,
-    resumeSessionId: cliSessionId,
+    resumeSessionId: resolveCliSessionId(sessionId),
+    additionalDirectories: prepared.additionalDirectories,
   });
 
   child.on('exit', (code) => {
@@ -166,17 +254,7 @@ function executeNextTask(sessionId: string, mainWindow: BrowserWindow): void {
 
     state.lastCompletedTaskId = task.id;
     state.currentTaskId = null;
-
-    // Schedule next task
-    const remaining = taskRepo.getPendingTasks(sessionId);
-    state.pendingCount = remaining.length;
-
-    if (remaining.length > 0) {
-      startCountdown(sessionId, mainWindow, config.taskDelaySeconds || DEFAULT_TASK_DELAY_SECONDS);
-    } else {
-      state.status = 'idle';
-      emitQueueEvent(mainWindow, sessionId, 'queue_completed');
-    }
+    advanceAfterTask(sessionId, mainWindow, config);
   });
 }
 
@@ -205,22 +283,38 @@ function startCountdown(sessionId: string, mainWindow: BrowserWindow, delaySecon
   const mainTimer = setTimeout(() => {
     clearInterval(countdownInterval);
     timers.delete(sessionId);
-    executeNextTask(sessionId, mainWindow);
+    runNextTask(sessionId, mainWindow);
   }, delaySeconds * 1000);
 
   // Store the main timer reference for cancellation
   timers.set(`${sessionId}__main`, mainTimer);
 }
 
-export function continueWithUserMessage(
+export async function continueWithUserMessage(
   sessionId: string,
-  message: string,
+  payload: ChatSendPayload,
   mainWindow: BrowserWindow,
-): void {
+): Promise<Message> {
   const state = queues.get(sessionId);
-  if (!state || state.status !== 'waiting') return;
+  if (!state || state.status !== 'waiting') {
+    throw new Error('当前不在等待续接状态，无法提交消息');
+  }
+  const session = sessionRepo.getSession(sessionId);
+  if (!session) throw new Error('会话不存在');
 
-  // Cancel countdown timers
+  // 预检（全通过后才动状态）：无 active query + 附件就绪（draft）+ prepare prompt。
+  if (getActiveProcess(sessionId)) {
+    throw new Error('当前回合仍在执行，请等待结束或中断后重试');
+  }
+  const { records, paths } = assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
+  const prepared = await prepareAttachmentPrompt({
+    sessionId,
+    payload,
+    attachments: records,
+    attachmentPaths: paths,
+  });
+
+  // 取消 countdown（预检通过后才取消，避免非法提交误清倒计时/误清草稿）。
   const countdownTimer = timers.get(sessionId);
   const mainTimer = timers.get(`${sessionId}__main`);
   if (countdownTimer) {
@@ -237,25 +331,33 @@ export function continueWithUserMessage(
   const continuingTaskId = state.currentTaskId ?? state.lastCompletedTaskId ?? undefined;
   emitQueueEvent(mainWindow, sessionId, 'task_continuing', continuingTaskId);
 
-  // Re-spawn CLI with --resume to continue the previous conversation session.
-  // The original task process has already exited, so we need a new process.
   const config = getConfig();
-  const cliSessionId = getCliSessionId(sessionId);
-  const session = sessionRepo.getSession(sessionId);
+  // 创建稳定 user message（attachments 升格为 message）；经 queue event 交 renderer upsert。
+  const userMessage = messageRepo.createMessageWithAttachments({
+    id: payload.clientMessageId,
+    sessionId,
+    role: 'user',
+    content: prepared.displayText,
+    eventType: 'message',
+    attachments: prepared.attachmentIds,
+    promoteAttachments: true,
+  });
+  emitQueueEvent(mainWindow, sessionId, 'user_message_created', continuingTaskId, { message: userMessage });
+
   const child = spawnForChat(sessionId, mainWindow, {
-    model: session?.model ?? config.defaultModel,
-    modelOverride: session?.modelOverride ?? null,
-    workingDir: session?.workingDir ?? config.workingDirectory,
+    model: session.model ?? config.defaultModel,
+    modelOverride: session.modelOverride ?? null,
+    workingDir: session.workingDir ?? config.workingDirectory,
     maxTurns: config.maxTurns,
-    permissionMode: session?.permissionMode ?? config.permissionMode,
-    resumeSessionId: cliSessionId,
+    permissionMode: session.permissionMode ?? config.permissionMode,
+    resumeSessionId: resolveCliSessionId(sessionId),
+    additionalDirectories: prepared.additionalDirectories,
   });
 
-  // Write the user's continuation message to stdin
-  sendMessage(sessionId, message);
+  // SDK prompt（含图片时为可重复迭代 AsyncIterable，支持 stale-resume 重试）；sendMessage 触发 runQuery。
+  sendMessage(sessionId, prepared.prompt);
 
-  // 保持 'continuing' 状态直到续写进程退出，让前端能展示"继续执行当前任务"。
-  // 进程退出后再由 exit handler 决定进入下一任务倒计时或回到 idle。
+  // 保持 'continuing' 直到续写进程退出；退出后推进下一任务或回 idle。
   child.on('exit', () => {
     // P1 守卫：续写进程退出可能晚于 interruptTask（已被改为 idle）或晚于新任务 spawn（已是 running）。
     // 仅在仍是 continuing 时推进，否则交由当前状态所有者处理，避免僵尸回调插队。
@@ -273,6 +375,8 @@ export function continueWithUserMessage(
       emitQueueEvent(mainWindow, sessionId, 'queue_completed');
     }
   });
+
+  return userMessage;
 }
 
 export function skipCountdown(sessionId: string, mainWindow: BrowserWindow): void {
@@ -288,7 +392,7 @@ export function skipCountdown(sessionId: string, mainWindow: BrowserWindow): voi
     timers.delete(`${sessionId}__main`);
   }
 
-  executeNextTask(sessionId, mainWindow);
+  runNextTask(sessionId, mainWindow);
 }
 
 export function getQueueState(sessionId: string): QueueState {

@@ -16,8 +16,10 @@ export interface Task {
   completedAt: string | null;
   createdAt: string;
   updatedAt: string;
-  // 任务附件摘要（图片/文件）。老任务无附件时为 undefined，消费处用 ?? [] 兜底。
-  attachments?: AttachmentSummary[];
+  // 任务附件摘要（图片/文件）。repo 恒定为数组（老任务填 []），消费处无需 ?? 兜底。
+  attachments: AttachmentSummary[];
+  // 稳定消息身份：入队时写入，执行/重试/重启复用同一 ID 创建 user message，避免重复消息。
+  clientMessageId: string | null;
 }
 
 export type QueueStateStatus = 'idle' | 'running' | 'waiting' | 'paused' | 'continuing';

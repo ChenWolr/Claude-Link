@@ -47,6 +47,7 @@ export const IPC_CHANNELS = {
   TASK_GET_ALL: 'task:getAll',
   TASK_REORDER: 'task:reorder',
   TASK_INTERRUPT: 'task:interrupt',
+  TASK_RETRY: 'task:retry',
   QUEUE_START: 'queue:start',
   QUEUE_PAUSE: 'queue:pause',
   QUEUE_RESUME: 'queue:resume',

@@ -982,8 +982,8 @@ async function runQuery(
     deleteEntry(sessionId, entry);
     return;
   }
-  // resume：优先显式传入，否则用已记录的 CLI session id（等价 process-manager 的 --resume）。
-  const resumeId = opts.resumeSessionId || sessionCliIds.get(sessionId);
+  // resume：优先显式传入，否则统一解析（内存 → DB 回填缓存），让重启/崩溃后仍能续接（Task 7B）。
+  const resumeId = opts.resumeSessionId || resolveCliSessionId(sessionId);
   if (resumeId) sdkOptions.resume = resumeId;
 
   let query: Query;
@@ -1353,6 +1353,19 @@ export function getActiveProcess(sessionId: string): SdkQueryHandle | undefined 
 
 export function getCliSessionId(sessionId: string): string | undefined {
   return sessionCliIds.get(sessionId);
+}
+
+/**
+ * 统一 resume ID 解析（Task 7B）：内存优先，未命中查 DB 并回填缓存，再无则 undefined。
+ * 让 task 执行 / waiting 续接 / 应用重启路径在内存丢失（重启/崩溃）后仍能从 DB 恢复 resume，
+ * 避免 stale transcript 或 resume 丢失导致图片/消息重发。
+ */
+export function resolveCliSessionId(sessionId: string): string | undefined {
+  const cached = sessionCliIds.get(sessionId);
+  if (cached) return cached;
+  const persisted = sessionRepo.getSession(sessionId)?.cliSessionId ?? undefined;
+  if (persisted) sessionCliIds.set(sessionId, persisted);
+  return persisted;
 }
 
 export function setCliSessionId(sessionId: string, cliSessionId: string): void {

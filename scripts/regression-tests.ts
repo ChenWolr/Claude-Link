@@ -424,6 +424,15 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       assert.ok(textBlock?.text?.includes('图里有什么'), '文字与图片同时存在时文字不得丢失');
       assert.ok(!textBlock?.text?.includes(imageSource?.data ?? '___'), '文本块不得内嵌图片 Base64');
       assert.deepEqual(prepared.additionalDirectories, [sessionRoot]);
+
+      // Task 7B：prompt 须可重复迭代（runQuery resume 重试会二次消费，不可丢图）
+      const secondRun: unknown[] = [];
+      for await (const msg of prepared.prompt as AsyncIterable<unknown>) {
+        secondRun.push(msg);
+      }
+      assert.equal(secondRun.length, 1, 'Task 7B：同一 prompt 二次迭代仍须 yield 一条');
+      const secondMsg = secondRun[0] as { message: { content: Array<Record<string, unknown>> } };
+      assert.equal((secondMsg.message.content[0] as { type?: string }).type, 'image', '二次迭代的图片块仍须在首位');
     }
 
     // 5) 图片-only：SDK 文本用默认说明，displayText 为空
@@ -605,8 +614,9 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       assert.ok(ipcHandlers.includes('promoteAttachments: false'), '落库时附件不得立刻升格 message');
       assert.ok(ipcHandlers.includes("markAttachmentsStatus(prepared.attachmentIds, 'message')"), 'spawn/send 成功后才升格 message');
       assert.ok(ipcHandlers.includes('deleteMessage'), '同步失败须回滚消息');
-      assert.ok(ipcHandlers.includes('任务队列附件尚未支持'), 'TASK_ADD 非空附件须显式拒绝');
-      assert.ok(ipcHandlers.includes('等待续接附件尚未支持'), 'QUEUE_USER_MESSAGE 非空附件须显式拒绝');
+      // Task 7B：TASK_ADD / QUEUE_USER_MESSAGE 已支持附件（旧的"尚未支持"反向断言移除）。
+      // 详细契约见 testAttachmentTask7BContracts。
+      assert.ok(ipcHandlers.includes('createTaskWithAttachments'), 'TASK_ADD 须用 createTaskWithAttachments 落库带附件任务');
 
       // 顺序：在 CHAT_SEND handler 体内检查（避免 indexOf 命中 import 行）
       const chatSendStart = ipcHandlers.indexOf('IPC_CHANNELS.CHAT_SEND');
@@ -875,15 +885,92 @@ function testAttachmentTask7AContracts(): void {
   assert.ok(ipcTypes.includes('ATTACHMENT_CLONE_MESSAGE'), 'ipc.ts 须有 ATTACHMENT_CLONE_MESSAGE 通道');
   assert.ok(preloadApi.includes('cloneMessageAttachments'), 'preload 须暴露 cloneMessageAttachments');
   assert.ok(ipcHandlers.includes('ATTACHMENT_CLONE_MESSAGE'), 'handler 须注册 ATTACHMENT_CLONE_MESSAGE');
-  assert.ok(useChat.includes('lastSentBySession'), 'use-chat 须按会话记录最近发送消息');
+  assert.ok(useChat.includes('lastFailedBySession'), 'use-chat 须按会话记录失败消息（lastFailedBySession）');
+  assert.ok(useChat.includes('captureFailedMessage'), 'error 置位时须捕获失败消息（覆盖队列任务/waiting 续接路径）');
+  assert.ok(!useChat.includes('lastSentBySession'), 'Task 7B 修复：旧的 lastSentBySession（仅主发送写入）须移除');
   assert.ok(chatPage.includes('重新编辑发送'), '错误横幅须有「重新编辑发送」按钮');
   const retryStart = chatPage.indexOf('async function retryLastFailed');
   const retryEnd = chatPage.indexOf('async function handleCompress', retryStart);
   const retryBody = retryStart >= 0 && retryEnd > retryStart ? chatPage.slice(retryStart, retryEnd) : '';
   assert.ok(retryBody.includes('cloneMessageAttachments'), '重新编辑须克隆附件');
   assert.ok(retryBody.includes('draftStore.setText'), '重新编辑须回填文字到草稿');
-  assert.ok(retryBody.includes('delete lastSentBySession.value'), '重新编辑后须清当前会话的 lastSentBySession');
+  assert.ok(retryBody.includes('delete lastFailedBySession.value'), '重新编辑后须清当前会话的 lastFailedBySession');
   assert.ok(!retryBody.includes('sendMessage'), '重新编辑不得自动重发（须用户手动发送）');
+}
+
+// Task 7B：任务队列附件 + waiting 续接附件 + 稳定 clientMessageId + retry 的接线契约（源码结构断言）。
+function testAttachmentTask7BContracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const ipcHandlers = readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
+  const ipcTypes = readFileSync(new URL('../src/shared/types/ipc.ts', import.meta.url), 'utf8');
+  const preloadApi = readFileSync(new URL('../src/preload/api.ts', import.meta.url), 'utf8');
+  const engine = readFileSync(new URL('../src/main/modules/task-queue-engine.ts', import.meta.url), 'utf8');
+  const sdkBackend = readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+  const taskRepo = readFileSync(new URL('../src/main/database/repositories/task-repo.ts', import.meta.url), 'utf8');
+  const attService = readFileSync(new URL('../src/main/modules/attachment-service.ts', import.meta.url), 'utf8');
+  const builder = readFileSync(new URL('../src/main/modules/attachment-prompt-builder.ts', import.meta.url), 'utf8');
+  const taskStore = readFileSync(new URL('../src/renderer/stores/task-store.ts', import.meta.url), 'utf8');
+  const taskDraftStore = readFileSync(new URL('../src/renderer/stores/task-draft-store.ts', import.meta.url), 'utf8');
+  const queuePanel = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');
+  const taskTypes = readFileSync(new URL('../src/shared/types/task.ts', import.meta.url), 'utf8');
+
+  // 1) TASK_ADD 落库带附件 + 稳定 clientMessageId；TASK_REMOVE 零引用清理；TASK_RETRY 全链路
+  assert.ok(ipcHandlers.includes('createTaskWithAttachments'), 'TASK_ADD 须用 createTaskWithAttachments 落库');
+  assert.ok(/createTaskWithAttachments\([\s\S]*payload\.clientMessageId/.test(ipcHandlers), 'TASK_ADD 须透传 payload.clientMessageId');
+  assert.ok(ipcHandlers.includes('cleanupDetachedAttachments'), 'TASK_REMOVE 须用 cleanupDetachedAttachments 清理零引用附件');
+  assert.ok(ipcTypes.includes('TASK_RETRY'), 'ipc.ts 须有 TASK_RETRY 通道');
+  assert.ok(ipcHandlers.includes('TASK_RETRY'), 'handler 须注册 TASK_RETRY');
+  assert.ok(ipcHandlers.includes('taskRepo.retryTask'), 'TASK_RETRY 须调 taskRepo.retryTask');
+  assert.ok(preloadApi.includes('retryTask'), 'preload 须暴露 retryTask');
+
+  // 2) QUEUE_USER_MESSAGE 改收 payload + await continueWithUserMessage（不再裸 string / 不再拒绝附件）
+  assert.ok(/continueWithUserMessage\(sessionId, payload, mainWindow\)/.test(ipcHandlers), 'QUEUE_USER_MESSAGE 须把 payload 透传给 continueWithUserMessage');
+  assert.ok(!ipcHandlers.includes('等待续接附件尚未支持'), 'Task 7B：QUEUE_USER_MESSAGE 不再拒绝附件');
+  assert.ok(!ipcHandlers.includes('任务队列附件尚未支持'), 'Task 7B：TASK_ADD 不再拒绝附件');
+
+  // 3) 引擎：executeNextTask async + prepare + 稳定 ID + 幂等 user message；continueWithUserMessage async + payload
+  assert.ok(/async function executeNextTask/.test(engine), 'executeNextTask 须为 async');
+  assert.ok(engine.includes('prepareAttachmentPrompt'), 'executeNextTask 须 prepare 带附件 prompt');
+  assert.ok(engine.includes('setTaskClientMessageId'), '老任务首执行须生成并持久化 clientMessageId');
+  assert.ok(engine.includes('getMessagesByTask'), '须按 parent_task_id 查已有 user message 实现幂等');
+  assert.ok(/spawnForTask\([\s\S]*prepared\.prompt/.test(engine), 'executeNextTask 须把 prepared.prompt 传给 spawnForTask');
+  assert.ok(engine.includes('prepared.additionalDirectories'), 'executeNextTask 须透传 additionalDirectories');
+  assert.ok(/async function continueWithUserMessage[\s\S]*payload: ChatSendPayload/.test(engine), 'continueWithUserMessage 须 async + 收 ChatSendPayload');
+  assert.ok(engine.includes('user_message_created'), '引擎创建 user message 后须 emit user_message_created 事件');
+  assert.ok(engine.includes('runNextTask'), 'executeNextTask 改 async 后须有 runNextTask 包装防 unhandled rejection');
+
+  // 4) resume 统一：resolveCliSessionId（内存优先 + DB fallback）
+  assert.ok(sdkBackend.includes('export function resolveCliSessionId'), 'sdk-backend 须导出 resolveCliSessionId');
+  assert.ok(/resumeSessionId \|\| resolveCliSessionId\(sessionId\)/.test(sdkBackend), 'runQuery 须用 resolveCliSessionId 兜底');
+
+  // 5) 图片 prompt 可重复迭代（[Symbol.asyncIterator]，支持 stale-resume 二次消费）
+  assert.ok(builder.includes('[Symbol.asyncIterator]'), 'prompt 须为可重复迭代对象（[Symbol.asyncIterator]）');
+
+  // 6) task-repo：retryTask（仅 failed/cancelled）+ setTaskClientMessageId
+  assert.ok(taskRepo.includes('export function retryTask'), 'task-repo 须导出 retryTask');
+  assert.ok(/retryTask[\s\S]*status IN \('failed', 'cancelled'\)/.test(taskRepo), 'retryTask 须仅对 failed/cancelled 生效');
+  assert.ok(taskRepo.includes('export function setTaskClientMessageId'), 'task-repo 须导出 setTaskClientMessageId');
+
+  // 7) attachment-service：cleanupDetachedAttachments（零引用才删）
+  assert.ok(attService.includes('export async function cleanupDetachedAttachments'), 'attachment-service 须导出 cleanupDetachedAttachments');
+  assert.ok(/cleanupDetachedAttachments[\s\S]*getAttachmentReferenceCount/.test(attService), 'cleanupDetachedAttachments 须按引用计数判定');
+
+  // 8) renderer：task-store retry + user_message_created upsert；task-draft-store 独立
+  assert.ok(taskStore.includes('async retryTask'), 'task-store 须有 retryTask action');
+  assert.ok(taskStore.includes("case 'user_message_created'"), 'task-store 须处理 user_message_created 事件');
+  assert.ok(taskStore.includes('sessionStore.addMessage(msg)'), 'user_message_created 须 upsert 进会话消息');
+  assert.ok(taskDraftStore.includes("defineStore('taskDraft'"), '须有独立 task-draft-store（按会话隔离任务草稿）');
+
+  // 9) TaskQueuePanel：构造完整 payload（不再裸 string）+ 附件 composer + retry 接线
+  assert.ok(/clientMessageId: crypto\.randomUUID\(\)/.test(queuePanel), 'TaskQueuePanel 须构造带 clientMessageId 的 payload');
+  assert.ok(queuePanel.includes('taskDraft.clearAfterAccepted'), 'TaskQueuePanel 成功后才清草稿');
+  assert.ok(queuePanel.includes('AttachmentDraftList'), 'TaskQueuePanel 须挂载 AttachmentDraftList');
+  assert.ok(queuePanel.includes('pickTaskAttachments'), 'TaskQueuePanel 须有附件选择入口');
+  assert.ok(queuePanel.includes('@retry="handleRetry"'), 'TaskItem 须接 retry 事件');
+
+  // 10) Task 类型：clientMessageId + attachments 必需数组
+  assert.ok(taskTypes.includes('clientMessageId: string | null'), 'Task 类型须有 clientMessageId');
+  assert.ok(/attachments: AttachmentSummary\[\]/.test(taskTypes), 'Task.attachments 须为必需数组');
 }
 
 function testApiUrlBuilder(): void {
@@ -1101,6 +1188,10 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
           if (sql.includes('PRAGMA table_info(messages)')) {
             return Array.from(messageColumns, (name) => ({ name }));
           }
+          if (sql.includes('PRAGMA table_info(tasks)')) {
+            // tasks 已含 client_message_id（v5），自愈块跳过 ALTER。
+            return ['id', 'session_id', 'prompt', 'status', 'sort_order', 'client_message_id', 'created_at', 'updated_at'].map((name) => ({ name }));
+          }
           throw new Error(`Unexpected all SQL: ${sql}`);
         },
         run(version: number) {
@@ -1111,7 +1202,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 4);
+  assert.equal(schemaVersion, 5);
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
 }
@@ -1132,15 +1223,22 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
     'id', 'session_id', 'role', 'content', 'raw_event', 'event_type', 'cost_usd', 'duration_ms',
     'parent_task_id', 'process_kind', 'parent_agent_id', 'tool_use_id', 'title', 'is_error', 'created_at',
   ]);
+  // Task 7B：tasks 老库（v3/v4）无 client_message_id，迁移须自愈补加。
+  const tasksColumns = new Set([
+    'id', 'session_id', 'prompt', 'status', 'sort_order', 'result', 'cost_usd', 'duration_ms',
+    'error_message', 'started_at', 'completed_at', 'created_at', 'updated_at',
+  ]);
   let schemaVersion = 3;
 
   const db = {
     exec(sql: string) {
       allExecSql.push(sql);
       for (const [, tbl] of sql.matchAll(/CREATE TABLE IF NOT EXISTS\s+(\w+)/g)) createdTables.add(tbl);
-      for (const [, idx] of sql.matchAll(/CREATE INDEX IF NOT EXISTS\s+(\w+)/g)) createdIndexes.add(idx);
-      for (const [, tbl, col] of sql.matchAll(/ALTER TABLE (sessions|messages) ADD COLUMN (\w+)/g)) {
-        (tbl === 'sessions' ? sessionsColumns : messagesColumns).add(col);
+      for (const [, idx] of sql.matchAll(/CREATE (?:UNIQUE )?INDEX IF NOT EXISTS\s+(\w+)/g)) createdIndexes.add(idx);
+      for (const [, tbl, col] of sql.matchAll(/ALTER TABLE (sessions|messages|tasks) ADD COLUMN (\w+)/g)) {
+        if (tbl === 'sessions') sessionsColumns.add(col);
+        else if (tbl === 'messages') messagesColumns.add(col);
+        else if (tbl === 'tasks') tasksColumns.add(col);
       }
     },
     prepare(sql: string) {
@@ -1152,6 +1250,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
         all() {
           if (sql.includes('PRAGMA table_info(sessions)')) return [...sessionsColumns].map((name) => ({ name }));
           if (sql.includes('PRAGMA table_info(messages)')) return [...messagesColumns].map((name) => ({ name }));
+          if (sql.includes('PRAGMA table_info(tasks)')) return [...tasksColumns].map((name) => ({ name }));
           throw new Error(`Unexpected all SQL: ${sql}`);
         },
         run(version: number) {
@@ -1162,13 +1261,14 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 4, '迁移后 schema version 须升到 4');
+  assert.equal(schemaVersion, 5, 'Task 7B：迁移后 schema version 须升到 5');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');
   assert.ok(createdTables.has('message_attachments'), '须建 message_attachments 关联表');
   assert.ok(createdTables.has('task_attachments'), '须建 task_attachments 关联表');
   assert.ok(createdIndexes.has('idx_attachments_session'));
   assert.ok(createdIndexes.has('idx_message_attachments_attachment'));
   assert.ok(createdIndexes.has('idx_task_attachments_attachment'));
+  assert.ok(createdIndexes.has('idx_tasks_client_message_id'), 'Task 7B：须建 tasks.client_message_id 部分唯一索引');
 
   const execText = allExecSql.join('\n');
   assert.ok(execText.includes('ON DELETE CASCADE'), '附件表 DDL 须含 ON DELETE CASCADE');
@@ -1182,6 +1282,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   // 老库原有列仍存在（自愈块不破坏既有列）。
   assert.ok(sessionsColumns.has('last_context_window'));
   assert.ok(messagesColumns.has('process_kind'));
+  assert.ok(tasksColumns.has('client_message_id'), 'Task 7B：tasks 须自愈补 client_message_id 列');
 }
 
 function testPermissionPromptIntegration(): void {
@@ -2411,6 +2512,7 @@ testAttachmentDraftUiContracts();
 testAttachmentHistoryContracts();
 testAttachmentBadgeContracts();
 testAttachmentTask7AContracts();
+testAttachmentTask7BContracts();
 }
 
 main().catch((error) => {

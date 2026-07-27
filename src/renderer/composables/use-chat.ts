@@ -83,9 +83,10 @@ function createChat() {
   // 这样 ChatPage 卸载/重挂载时，sending 始终从 store.runningSessions 反映，不会丢失。
   const sending = computed(() => store.sending);
   const error = ref<string | null>(null);
-  // 每会话最近一次发送的用户消息（id+正文）：按会话隔离，避免切会话后误用别会话的 messageId
-  // 去克隆（触发跨会话防护「消息不属于当前会话」）。
-  const lastSentBySession = ref<Record<string, { id: string; content: string }>>({});
+  // 每会话【失败】的 user 消息（id+正文）：error 置位瞬间抓"会话最后一条 user 消息"= 刚跑失败的提问。
+  // 重新编辑发送据此克隆附件 + 回填文字到主草稿。覆盖主发送 / 队列任务 / waiting 续接三条路径
+  //（队列任务执行也产生 user 消息，故失败时能正确命中，不会误用陈旧的"上次主发送"）。
+  const lastFailedBySession = ref<Record<string, { id: string; content: string }>>({});
 
   let cleanup: (() => void) | null = null;
   // try-finally 兜底：按 sessionId 记录“中断强制复位”定时器（替代原单例 timer）。
@@ -340,6 +341,7 @@ function createChat() {
         attachResultMetadata(event);
         if (isErrResult) {
           error.value = resultErrorText(event);
+          captureFailedMessage();
         }
         // 根因修复：markStopped 移除 runningSessions，sending getter 自动变 false。
         if (store.activeSession) {
@@ -355,6 +357,7 @@ function createChat() {
         store.clearThinking();
         store.clearToolStream();
         error.value = event.message;
+        captureFailedMessage();
         if (store.activeSession) {
           clearAbortTimer(store.activeSession.id);
           store.markStopped(store.activeSession.id);
@@ -701,7 +704,6 @@ function createChat() {
     clearAbortTimer(store.activeSession.id);
     resetTurnCache();
     error.value = null;
-    lastSentBySession.value[store.activeSession.id] = { id: payload.clientMessageId, content: text };
     // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
     store.markRunning(store.activeSession.id);
 
@@ -769,6 +771,22 @@ function createChat() {
   //  2) 主进程 killProcess 会立即把旧 entry 标为 aborting 并移出 active entries，
   //     因此重试不再依赖固定等待来避免 message dropped；这里的短延迟只用于事件排序缓冲。
   //  3) lastUserText 假定「卡死的回合已持久化自己的 user 消息」——sendMessage 始终如此。
+  // 失败捕获：error 置位瞬间，把"会话最后一条 user 消息"记为待恢复对象。
+  // 覆盖主发送 / 队列任务 / waiting 续接三条路径——只要该回合在主会话跑过并失败即命中，
+  // pending 队列任务（未跑）不产生 error，故不会误触发重新编辑。
+  function captureFailedMessage(): void {
+    if (!store.activeSession) return;
+    const msg = lastFailedUserMessage();
+    if (msg) lastFailedBySession.value[store.activeSession.id] = msg;
+  }
+  function lastFailedUserMessage(): { id: string; content: string } | null {
+    const msgs = store.messages;
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      if (msgs[i].role === 'user') return { id: msgs[i].id, content: msgs[i].content };
+    }
+    return null;
+  }
+
   function lastUserText(): string | null {
     const msgs = store.messages;
     for (let i = msgs.length - 1; i >= 0; i -= 1) {
@@ -795,7 +813,7 @@ function createChat() {
     await sendMessage({ text: last, attachmentIds: [], clientMessageId: crypto.randomUUID() });
   }
 
-  return { sending, error, lastSentBySession, sendMessage, abort, retryLastTurn, startListening, stopListening };
+  return { sending, error, lastFailedBySession, sendMessage, abort, retryLastTurn, startListening, stopListening };
 }
 
 // 根因修复：useChat 返回全局单例。监听在 App.vue onMounted 注册一次，

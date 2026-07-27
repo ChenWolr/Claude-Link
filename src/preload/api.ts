@@ -69,6 +69,7 @@ export interface ClaudeLinkAPI {
   getTasks: (sessionId: string) => Promise<Task[]>;
   reorderTasks: (sessionId: string, taskIds: string[]) => Promise<Task[]>;
   interruptTask: (taskId: string) => Promise<void>;
+  retryTask: (taskId: string) => Promise<Task>;
   startQueue: (sessionId: string) => Promise<void>;
   pauseQueue: (sessionId: string) => Promise<void>;
   resumeQueue: (sessionId: string) => Promise<void>;
@@ -165,6 +166,7 @@ export function createApi(): ClaudeLinkAPI {
     reorderTasks: (sessionId, taskIds) =>
       ipcRenderer.invoke(IPC_CHANNELS.TASK_REORDER, sessionId, taskIds) as Promise<Task[]>,
     interruptTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_INTERRUPT, taskId),
+    retryTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_RETRY, taskId) as Promise<Task>,
     startQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_START, sessionId),
     pauseQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_PAUSE, sessionId),
     resumeQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME, sessionId),

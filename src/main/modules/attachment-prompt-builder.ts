@@ -297,12 +297,17 @@ export async function prepareAttachmentPrompt(input: {
     },
   };
 
-  async function* singleUserMessage(): AsyncGenerator<SDKUserMessage, void, unknown> {
-    yield userMessage;
-  }
+  // 可重复迭代的 AsyncIterable：每次 [Symbol.asyncIterator]() 都新建一个生成器，
+  // 确保 runQuery 的 resume 失败重试二次消费 prompt 时（sdk-backend.ts）不丢图片。
+  // Task 7B：task/waiting 路径与 stale-resume 后第二次 query 都依赖此可重复性。
+  const repeatablePrompt: AsyncIterable<SDKUserMessage> = {
+    async *[Symbol.asyncIterator]() {
+      yield userMessage;
+    },
+  };
 
   return {
-    prompt: singleUserMessage(),
+    prompt: repeatablePrompt,
     additionalDirectories,
     attachmentIds,
     displayText,
