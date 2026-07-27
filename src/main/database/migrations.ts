@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -114,6 +114,20 @@ export function runMigrations(db: Database.Database): void {
       db.exec('ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0');
     }
   }
+
+  // V5：任务稳定消息身份 client_message_id。入队时写入，执行/失败重试/应用重启都复用同一 ID
+  // 创建 user message，禁止执行时重新生成（避免重复消息）。幂等自愈补列；部分唯一索引（NULL 不参与）。
+  {
+    const taskCols = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    const hasTaskCol = (n: string): boolean => taskCols.some((c) => c.name === n);
+    if (!hasTaskCol('client_message_id')) {
+      db.exec('ALTER TABLE tasks ADD COLUMN client_message_id TEXT');
+    }
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_client_message_id
+      ON tasks(client_message_id) WHERE client_message_id IS NOT NULL;
+  `);
 
   // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，
   // 切换会话或重启后仍可在 InteractionPrompt 底部"交互历史"区回看。

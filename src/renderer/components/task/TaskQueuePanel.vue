@@ -2,12 +2,14 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { VueDraggable } from 'vue-draggable-plus';
 import { useTaskStore } from '../../stores/task-store';
+import { useTaskDraftStore } from '../../stores/task-draft-store';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { useTaskQueue } from '../../composables/use-task-queue';
 import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
 import { useNow } from '../../composables/use-now';
 import TaskItem from './TaskItem.vue';
+import AttachmentDraftList from '../chat/AttachmentDraftList.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
 import MessageBubble from '../chat/MessageBubble.vue';
 import ThinkingBlock from '../chat/ThinkingBlock.vue';
@@ -15,13 +17,21 @@ import ChangesPanel from '../changes/ChangesPanel.vue';
 import { useChangesStore } from '../../stores/changes-store';
 
 const taskStore = useTaskStore();
+const taskDraft = useTaskDraftStore();
 const sessionStore = useSessionStore();
 const interactionStore = useInteractionStore();
 const changesStore = useChangesStore();
 const changesCount = computed(() => changesStore.changedCount);
 const { startListening } = useTaskQueue();
 
-const newTaskPrompt = ref('');
+// Task 7B：任务 composer 草稿按会话隔离（文字 + 附件）。切会话/切筛选不丢草稿。
+const activeSessionId = computed(() => sessionStore.activeSession?.id ?? '');
+const taskText = computed(() => (activeSessionId.value ? taskDraft.getText(activeSessionId.value) : ''));
+const taskAttachments = computed(() => (activeSessionId.value ? taskDraft.getAttachments(activeSessionId.value) : []));
+const canSendTask = computed(() => !!activeSessionId.value && taskDraft.getCanSend(activeSessionId.value));
+function onTaskTextInput(e: Event): void {
+  if (activeSessionId.value) taskDraft.setText(activeSessionId.value, (e.target as HTMLTextAreaElement).value);
+}
 const expandedGroups = ref<Set<string>>(new Set());
 // 问题 7：用户显式折叠的组（优先级最高，运行中也保持收起）。
 const collapsedGroups = ref<Set<string>>(new Set());
@@ -239,10 +249,45 @@ function loadTasks() {
   }
 }
 
+// Task 7B：构造完整 ChatSendPayload（text + attachmentIds + clientMessageId）；成功才清草稿，失败保留。
 async function handleAddTask() {
-  if (!sessionStore.activeSession || !newTaskPrompt.value.trim()) return;
-  await taskStore.addTask(sessionStore.activeSession.id, newTaskPrompt.value.trim());
-  newTaskPrompt.value = '';
+  const sessionId = activeSessionId.value;
+  if (!sessionId || !taskDraft.getCanSend(sessionId)) return;
+  const ok = await taskStore.addTask(sessionId, {
+    text: taskDraft.getText(sessionId).trim(),
+    attachmentIds: taskDraft.getAttachments(sessionId).map((a) => a.id),
+    clientMessageId: crypto.randomUUID(),
+  });
+  if (ok) taskDraft.clearAfterAccepted(sessionId);
+}
+
+// 任务附件选择：主进程选文件 + 暂存 + 返回 {attachments, errors}；成功项入草稿，失败项集中提示。
+async function pickTaskAttachments() {
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  try {
+    const { attachments, errors } = await window.claudeLink.pickAttachments(sessionId);
+    if (attachments.length > 0) taskDraft.addAttachments(sessionId, attachments);
+    if (errors.length > 0) {
+      taskStore.error = `部分文件未能添加：${errors.map((e) => `${e.filename}：${e.message}`).join('；')}`;
+    }
+  } catch (e) {
+    taskStore.error = e instanceof Error ? e.message : '添加附件失败';
+  }
+}
+
+async function onRemoveTaskAttachment(attachmentId: string) {
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  try {
+    await taskDraft.removeAttachment(sessionId, attachmentId);
+  } catch (e) {
+    taskStore.error = e instanceof Error ? e.message : '移除附件失败';
+  }
+}
+
+async function handleRetry(taskId: string) {
+  await taskStore.retryTask(taskId);
 }
 
 async function handleStart() {
@@ -362,6 +407,7 @@ function handleDragReorder() {
                   :task="task"
                   @delete="handleDelete"
                   @interrupt="handleInterrupt"
+                  @retry="handleRetry"
                 />
               </template>
             </VueDraggable>
@@ -460,23 +506,32 @@ function handleDragReorder() {
         </section>
       </div>
 
-      <!-- 排队 composer（仅 queue 筛选；newTaskPrompt 为 setup ref，切换筛选不丢草稿） -->
+      <!-- 排队 composer（仅 queue 筛选；草稿按会话隔离，切换会话/筛选不丢） -->
       <div v-if="sessionStore.rightTab === 'queue'" class="task-panel__add">
         <div class="add-row">
           <span class="add-label">排队指令</span>
           <span
             class="add-info"
-            title="运行中的任务不会被新指令打断；新指令会在当前任务结束并等待倒计时后执行。倒计时（秒数可在配置页设置）内输入会作为对当前任务的补充继续执行。"
+            title="运行中的任务不会被新指令打断；新指令会在当前任务结束并等待倒计时后执行。倒计时（秒数可在配置页设置）内输入会作为对当前任务的补充继续执行。支持附件（图片/文件）。"
           >ⓘ</span>
         </div>
+        <AttachmentDraftList
+          v-if="taskAttachments.length > 0"
+          :attachments="taskAttachments"
+          @remove="onRemoveTaskAttachment"
+        />
         <textarea
-          v-model="newTaskPrompt"
-          placeholder="输入要排队发送给 AI 的下一条指令"
+          :value="taskText"
+          placeholder="输入要排队发送给 AI 的下一条指令（附件-only 也可）"
           rows="3"
           title="输入要排队发送给 AI 的下一条指令（回车添加到队列末尾）"
+          @input="onTaskTextInput"
           @keydown.enter.prevent="handleAddTask"
         />
-        <button type="button" :disabled="!newTaskPrompt.trim()" title="添加到队列末尾" @click="handleAddTask">添加</button>
+        <div class="task-add-actions">
+          <button type="button" class="task-attach-btn" title="添加附件（图片 / 文件）" @click="pickTaskAttachments">📎 附件</button>
+          <button type="button" :disabled="!canSendTask" title="添加到队列末尾" @click="handleAddTask">添加</button>
+        </div>
       </div>
     </div>
 
@@ -939,6 +994,30 @@ function handleDragReorder() {
 .task-panel__add button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.task-add-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 附件按钮：次级样式（覆盖 .task-panel__add button 的 accent 默认，用更高特异性） */
+.task-panel__add .task-attach-btn {
+  align-self: stretch;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+  box-shadow: none;
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+
+.task-panel__add .task-attach-btn:hover {
+  color: var(--color-accent-strong);
+  border-color: var(--color-accent-strong);
 }
 
 /* 图标轨：贴面板最右侧 */

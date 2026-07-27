@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import type { Task, QueueState } from '../../shared/types/task';
+import type { Message } from '../../shared/types/session';
 import type { QueueEventPayload } from '../../shared/types/ipc';
 import type { ChatSendPayload } from '../../shared/types/attachment';
 import { useSessionStore } from './session-store';
@@ -75,6 +76,25 @@ export const useTaskStore = defineStore('task', {
         this.error = error instanceof Error ? error.message : '中断任务失败';
       }
     },
+    // Task 7B：重试 failed/cancelled 任务 → pending；本地同步清结果字段（附件 links + 稳定 ID 由主进程保留）。
+    async retryTask(taskId: string) {
+      try {
+        this.error = null;
+        await window.claudeLink.retryTask(taskId);
+        const t = this.tasks.find((x) => x.id === taskId);
+        if (t) {
+          t.status = 'pending';
+          t.errorMessage = null;
+          t.result = null;
+          t.costUsd = null;
+          t.durationMs = null;
+          t.startedAt = null;
+          t.completedAt = null;
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '重试任务失败';
+      }
+    },
     // Task 5：续接收 ChatSendPayload（附件草稿由 draftStore 提供）。
     // 成功返回 true 并清旧错误；失败置 error 并返回 false。
     async queueUserMessage(sessionId: string, payload: ChatSendPayload): Promise<boolean> {
@@ -120,6 +140,13 @@ export const useTaskStore = defineStore('task', {
         case 'task_continuing': {
           this.queueState.status = 'continuing';
           sessionStore.markRunning(payload.sessionId);
+          break;
+        }
+        case 'user_message_created': {
+          // Task 7B：task 执行/waiting 续接在主进程创建稳定 user message 后经此事件回传，
+          // 按 id upsert 进会话消息（不重复落 DB），让用户看到任务对应的提问气泡。
+          const msg = payload.data?.message as Message | undefined;
+          if (msg) sessionStore.addMessage(msg);
           break;
         }
         case 'queue_paused': {

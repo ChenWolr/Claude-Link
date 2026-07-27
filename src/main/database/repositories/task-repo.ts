@@ -18,6 +18,7 @@ interface TaskRow {
   completed_at: string | null;
   created_at: string;
   updated_at: string;
+  client_message_id: string | null;
 }
 
 function toTask(row: TaskRow): Task {
@@ -35,6 +36,8 @@ function toTask(row: TaskRow): Task {
     completedAt: normalizeDbTime(row.completed_at),
     createdAt: normalizeDbTime(row.created_at),
     updatedAt: normalizeDbTime(row.updated_at),
+    attachments: [],
+    clientMessageId: row.client_message_id ?? null,
   };
 }
 
@@ -46,7 +49,7 @@ function fillTaskAttachments(tasks: Task[]): void {
 }
 
 export function createTask(sessionId: string, prompt: string, sortOrder: number): Task {
-  return createTaskWithAttachments(sessionId, prompt, sortOrder, []);
+  return createTaskWithAttachments(sessionId, prompt, sortOrder, [], null);
 }
 
 export function createTaskWithAttachments(
@@ -54,17 +57,18 @@ export function createTaskWithAttachments(
   prompt: string,
   sortOrder: number,
   attachmentIds: string[],
+  clientMessageId: string | null,
 ): Task {
   const db = getConnection();
   const id = uuidv4();
 
   const insert = db.prepare(
-    `INSERT INTO tasks (id, session_id, prompt, sort_order)
-     VALUES (@id, @sessionId, @prompt, @sortOrder)`,
+    `INSERT INTO tasks (id, session_id, prompt, sort_order, client_message_id)
+     VALUES (@id, @sessionId, @prompt, @sortOrder, @clientMessageId)`,
   );
 
   const transaction = db.transaction(() => {
-    insert.run({ id, sessionId, prompt, sortOrder });
+    insert.run({ id, sessionId, prompt, sortOrder, clientMessageId });
     if (attachmentIds.length > 0) {
       attachmentRepo.linkAttachmentsToTask(id, attachmentIds);
       attachmentRepo.markAttachmentsStatus(attachmentIds, 'task');
@@ -187,6 +191,33 @@ export function deleteTask(id: string): string[] {
   const attachmentIds = attachmentRepo.deleteTaskAttachmentLinks(id);
   getConnection().prepare('DELETE FROM tasks WHERE id = ?').run(id);
   return attachmentIds;
+}
+
+/** 老任务（clientMessageId 为 null）首次执行时生成并持久化一次稳定 ID，后续重试/重启复用。
+ *  WHERE client_message_id IS NULL 保证幂等：已设置的不覆盖。 */
+export function setTaskClientMessageId(id: string, clientMessageId: string): void {
+  getConnection()
+    .prepare(
+      `UPDATE tasks SET client_message_id = @clientMessageId, updated_at = datetime('now')
+       WHERE id = @id AND client_message_id IS NULL`,
+    )
+    .run({ id, clientMessageId });
+}
+
+/** Task 7B：重试失败/取消的任务 → pending，清空执行结果字段，保留附件 links 与稳定 clientMessageId。
+ *  WHERE status IN ('failed','cancelled') 保证只对终态失败任务生效，running/pending 不受影响。 */
+export function retryTask(id: string): Task | null {
+  getConnection()
+    .prepare(
+      `UPDATE tasks
+       SET status = 'pending',
+           result = NULL, cost_usd = NULL, duration_ms = NULL,
+           error_message = NULL, started_at = NULL, completed_at = NULL,
+           updated_at = datetime('now')
+       WHERE id = @id AND status IN ('failed', 'cancelled')`,
+    )
+    .run({ id });
+  return getTask(id);
 }
 
 export function resetRunningTasks(sessionId?: string): void {

@@ -118,6 +118,24 @@ export async function removeDraftAttachment(sessionId: string, attachmentId: str
   await removeAttachmentFile(record.storageKey).catch((e) => logger.error('removeAttachmentFile failed', e));
 }
 
+/**
+ * 删除任务/消息解除关联后【零引用】的附件（DB 记录 + 物理文件）。
+ * 用于 TASK_REMOVE：deleteTask 已解除 task_attachments，若该附件既无 message 也无 task 引用
+ * （getAttachmentReferenceCount===0，即未执行的 pending task 附件）则彻底删除；
+ * 已被执行升格为 message 的附件仍有 message 引用，保留。物理删除失败交 orphan cleanup 重试。
+ */
+export async function cleanupDetachedAttachments(ids: string[]): Promise<void> {
+  for (const id of ids) {
+    const record = attachmentRepo.getAttachment(id);
+    if (!record) continue;
+    if (attachmentRepo.getAttachmentReferenceCount(id) > 0) continue;
+    attachmentRepo.deleteAttachment(id);
+    await removeAttachmentFile(record.storageKey).catch((e) =>
+      logger.error('cleanupDetachedAttachments removeAttachmentFile failed', e),
+    );
+  }
+}
+
 /** 受控预览：校验会话归属后返回有界缩略图/原图 bytes，不返回路径。 */
 export async function getAttachmentPreview(request: {
   sessionId: string;
