@@ -16,10 +16,13 @@ const props = defineProps<{
 
 const sessionStore = useSessionStore();
 
-// attachmentId -> Blob URL。卸载/列表变化/会话切换时 revoke。
+// 原图 Blob URL（attachmentId -> url）：点击缩略图时按需取原图进灯箱。非响应式（不参与模板渲染）。
 const urlByAttachmentId = new Map<string, string>();
+// 缩略图 Blob URL（响应式，模板 <img> 绑定）。挂载/附件出现时取 thumbnail=true；导出模式不加载。
+const thumbByAttachmentId = reactive<Record<string, string>>({});
 const errorByAttachmentId = reactive<Record<string, string>>({});
-const loading = reactive<Record<string, boolean>>({});
+const loading = reactive<Record<string, boolean>>({});       // 原图灯箱读取态
+const thumbLoading = reactive<Record<string, boolean>>({});   // 缩略图读取态（静默，失败退化 badge）
 let alive = true;
 
 function formatSize(bytes: number): string {
@@ -28,24 +31,52 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// IPC 跨 realm 传来的 bytes 类型为 Uint8Array<ArrayBufferLike>，不能直接当 BlobPart（可能 SharedArrayBuffer）。
+// 复制成当前 realm 的 ArrayBuffer 再交给 Blob，规避 TS/DOM 类型与跨 realm 风险。
+function toBlobPart(bytes: Uint8Array): ArrayBuffer {
+  return Uint8Array.from(bytes).buffer;
+}
+
 function revokeAll(): void {
   for (const url of urlByAttachmentId.values()) URL.revokeObjectURL(url);
+  for (const id of Object.keys(thumbByAttachmentId)) {
+    URL.revokeObjectURL(thumbByAttachmentId[id]);
+    delete thumbByAttachmentId[id];
+  }
   urlByAttachmentId.clear();
 }
 
 // 预览：thumbnail=false 取原图进灯箱（灯箱支持缩放，缩略图会糊）；预览失败进入「不可用」占位。
-async function previewAttachment(att: AttachmentSummary, thumbnail: boolean): Promise<string | null> {
+async function fetchPreviewUrl(att: AttachmentSummary, thumbnail: boolean): Promise<string | null> {
   const sid = sessionStore.activeSession?.id;
   if (!sid) return null;
   try {
     const res = await window.claudeLink.getAttachmentPreview({ sessionId: sid, attachmentId: att.id, thumbnail });
-    return URL.createObjectURL(new Blob([res.bytes], { type: res.mimeType }));
+    return URL.createObjectURL(new Blob([toBlobPart(res.bytes)], { type: res.mimeType }));
   } catch {
     return null;
   }
 }
 
-// 图片缩略图：优先取缩略图展示；点击进入灯箱时按需取原图。导出模式不加载（隐藏 renderer 复用文件卡片）。
+// 缩略图：挂载/附件出现时取 thumbnail=true 渲染 <img>。导出模式不加载（隐藏 renderer 复用文件卡片）。
+// 失败静默退化 badge（不占位为「不可用」——只有点击取原图失败才占位，避免缩略图抖动到错误态）。
+async function loadThumb(att: AttachmentSummary): Promise<void> {
+  if (props.exportMode || thumbByAttachmentId[att.id] || thumbLoading[att.id]) return;
+  const sid = sessionStore.activeSession?.id;
+  if (!sid) return;
+  thumbLoading[att.id] = true;
+  try {
+    const url = await fetchPreviewUrl(att, true);
+    if (!alive || sessionStore.activeSession?.id !== sid || !url) return;
+    thumbByAttachmentId[att.id] = url;
+  } catch {
+    // 静默退化
+  } finally {
+    thumbLoading[att.id] = false;
+  }
+}
+
+// 图片缩略图：点击进入灯箱时按需取原图。导出模式不加载（隐藏 renderer 复用文件卡片）。
 async function openPreview(att: AttachmentSummary, trigger: HTMLElement): Promise<void> {
   if (errorByAttachmentId[att.id]) return;
   let url = urlByAttachmentId.get(att.id);
@@ -53,7 +84,7 @@ async function openPreview(att: AttachmentSummary, trigger: HTMLElement): Promis
     if (loading[att.id]) return;
     loading[att.id] = true;
     try {
-      url = (await previewAttachment(att, false)) ?? undefined;
+      url = (await fetchPreviewUrl(att, false)) ?? undefined;
       if (!url) {
         errorByAttachmentId[att.id] = '附件不可用';
         return;
@@ -70,9 +101,10 @@ async function openPreview(att: AttachmentSummary, trigger: HTMLElement): Promis
   openImageLightbox(url, att.filename, trigger);
 }
 
-// 附件列表变化：撤销已不在列表的 URL。
+// 附件列表变化（immediate：历史加载即取缩略图）：
+// 撤销已不在列表的 URL（原图 + 缩略图），并为新出现的非导出图片加载缩略图。
 watch(
-  () => props.attachments.map((a) => a.id).join('\n'),
+  () => props.attachments.map((a) => `${a.id}:${a.kind}`).join('\n'),
   () => {
     const ids = new Set(props.attachments.map((a) => a.id));
     for (const [id, url] of [...urlByAttachmentId]) {
@@ -81,7 +113,17 @@ watch(
         urlByAttachmentId.delete(id);
       }
     }
+    for (const id of Object.keys(thumbByAttachmentId)) {
+      if (!ids.has(id)) {
+        URL.revokeObjectURL(thumbByAttachmentId[id]);
+        delete thumbByAttachmentId[id];
+      }
+    }
+    for (const att of props.attachments) {
+      if (att.kind === 'image' && !thumbByAttachmentId[att.id]) void loadThumb(att);
+    }
   },
+  { immediate: true },
 );
 // 会话切换：撤销全部 URL 与错误态。
 watch(
@@ -90,6 +132,19 @@ watch(
     revokeAll();
     for (const k of Object.keys(errorByAttachmentId)) delete errorByAttachmentId[k];
     for (const k of Object.keys(loading)) delete loading[k];
+    for (const k of Object.keys(thumbLoading)) delete thumbLoading[k];
+  },
+);
+
+// 导出模式开关：退出导出模式后补加载此前跳过的缩略图。
+watch(
+  () => props.exportMode,
+  (isExport) => {
+    if (!isExport) {
+      for (const att of props.attachments) {
+        if (att.kind === 'image' && !thumbByAttachmentId[att.id]) void loadThumb(att);
+      }
+    }
   },
 );
 
@@ -119,7 +174,13 @@ onBeforeUnmount(() => {
         :aria-label="`预览图片 ${att.filename}`"
         @click="openPreview(att, $event.currentTarget as HTMLElement)"
       >
-        <span class="msg-att__badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
+        <img
+          v-if="thumbByAttachmentId[att.id]"
+          class="msg-att__thumb-img"
+          :src="thumbByAttachmentId[att.id]"
+          :alt="att.filename"
+        />
+        <span v-else class="msg-att__badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
         <span class="msg-att__meta">
           <span class="msg-att__name">{{ att.filename }}</span>
           <span class="msg-att__size">{{ formatSize(att.sizeBytes) }}<template v-if="att.width && att.height"> · {{ att.width }}×{{ att.height }}</template></span>
@@ -171,6 +232,15 @@ onBeforeUnmount(() => {
 .msg-att--unavailable {
   opacity: 0.72;
   border-style: dashed;
+}
+
+.msg-att__thumb-img {
+  width: 3rem;
+  height: 3rem;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  background: var(--color-panel);
 }
 
 .msg-att__badge {

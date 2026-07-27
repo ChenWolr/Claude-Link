@@ -1,4 +1,5 @@
 import type { CliEvent, CliDetectionResult } from './cli';
+import type { AttachmentSummary } from './attachment';
 
 export const IPC_CHANNELS = {
   CLI_DETECT: 'cli:detect',
@@ -89,6 +90,12 @@ export interface AttachmentPreviewRequest {
   sessionId: string;
   attachmentId: string;
   thumbnail: boolean;
+}
+
+/** 文件选择结果：逐项返回成功摘要与失败原因（部分成功不丢错误，便于 UI 集中提示）。 */
+export interface PickAttachmentsResult {
+  attachments: AttachmentSummary[];
+  errors: Array<{ filename: string; message: string }>;
 }
 
 export interface ChatEventPayload {

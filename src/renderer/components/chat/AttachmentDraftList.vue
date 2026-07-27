@@ -17,11 +17,14 @@ const sessionStore = useSessionStore();
 const draftStore = useChatDraftStore();
 const { state: lightboxState } = useImageLightbox();
 
-// attachmentId -> Blob URL（图片原图预览用）。卸载/列表变化/切换会话时 revoke。
-const objectUrls = new Map<string, string>();
-const loading = reactive<Record<string, boolean>>({});
-const errors = reactive<Record<string, string>>({});
-// 组件存活标志：previewImage 的 IPC 在飞期间组件可能卸载（如发送清空草稿致 v-if=false），
+// 原图 Blob URL（attachmentId -> url）：点击缩略图时按需取原图进灯箱。非响应式（不参与模板渲染）。
+const fullUrls = new Map<string, string>();
+// 缩略图 Blob URL（响应式，模板 <img> 直接绑定）。挂载/附件出现时取 thumbnail=true。
+const thumbUrls = reactive<Record<string, string>>({});
+const loading = reactive<Record<string, boolean>>({});   // 原图灯箱读取态
+const errors = reactive<Record<string, string>>({});     // 移除/原图预览失败
+const thumbLoading = reactive<Record<string, boolean>>({}); // 缩略图读取态（静默，失败退化 badge）
+// 组件存活标志：IPC 在飞期间组件可能卸载（如发送清空草稿致 v-if=false），
 // 卸载后回到的 promise 不应再开灯箱/建 URL（否则跨组件幽灵灯箱 + URL 泄漏）。
 let alive = true;
 
@@ -31,17 +34,44 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function revokeAll(): void {
-  for (const url of objectUrls.values()) URL.revokeObjectURL(url);
-  objectUrls.clear();
+// IPC 跨 realm 传来的 bytes 类型为 Uint8Array<ArrayBufferLike>，不能直接当 BlobPart（可能 SharedArrayBuffer）。
+// 复制成当前 realm 的 ArrayBuffer 再交给 Blob，规避 TS/DOM 类型与跨 realm 风险。
+function toBlobPart(bytes: Uint8Array): ArrayBuffer {
+  return Uint8Array.from(bytes).buffer;
 }
 
-// revoke 单个 URL，但跳过灯箱正在显示的那张（否则灯箱变 broken image）。
+function revokeAll(): void {
+  for (const url of fullUrls.values()) URL.revokeObjectURL(url);
+  for (const id of Object.keys(thumbUrls)) {
+    URL.revokeObjectURL(thumbUrls[id]);
+    delete thumbUrls[id];
+  }
+  fullUrls.clear();
+}
+
+// revoke 单个原图 URL，但跳过灯箱正在显示的那张（否则灯箱变 broken image）。
 // 被跳过的 URL 由切会话（session-watch 先关灯箱再 revokeAll）/ 组件卸载兜底回收。
-function safeRevoke(id: string, url: string): void {
+function safeRevokeFull(id: string, url: string): void {
   if (lightboxState.value?.src === url) return;
   URL.revokeObjectURL(url);
-  objectUrls.delete(id);
+  fullUrls.delete(id);
+}
+
+// 缩略图：挂载/附件出现时取 thumbnail=true 渲染 <img>。失败静默退化（卡片仍显示 badge+name）。
+async function loadThumb(att: AttachmentSummary): Promise<void> {
+  if (thumbUrls[att.id] || thumbLoading[att.id]) return;
+  const sid = sessionStore.activeSession?.id;
+  if (!sid) return;
+  thumbLoading[att.id] = true;
+  try {
+    const res = await window.claudeLink.getAttachmentPreview({ sessionId: sid, attachmentId: att.id, thumbnail: true });
+    if (!alive || sessionStore.activeSession?.id !== sid) return;
+    thumbUrls[att.id] = URL.createObjectURL(new Blob([toBlobPart(res.bytes)], { type: res.mimeType }));
+  } catch {
+    // 静默：卡片退化为 badge+name，不打扰用户
+  } finally {
+    thumbLoading[att.id] = false;
+  }
 }
 
 // 图片缩略图点击：经 IPC 取原图 → Blob URL → 复用现有灯箱（含焦点陷阱/Esc/遮罩关闭/缩放）。
@@ -50,7 +80,7 @@ async function previewImage(att: AttachmentSummary, trigger: HTMLElement): Promi
   const sid = sessionStore.activeSession?.id;
   if (!sid) return;
   if (loading[att.id]) return; // 防双击：避免 IPC 在飞时重复请求 + 首个 Blob URL 泄漏
-  let url = objectUrls.get(att.id);
+  let url = fullUrls.get(att.id);
   if (!url) {
     loading[att.id] = true;
     delete errors[att.id]; // 清旧错误，允许失败后再次点击重试
@@ -59,8 +89,8 @@ async function previewImage(att: AttachmentSummary, trigger: HTMLElement): Promi
       // await 期间可能已切会话或组件已卸载（发送清空草稿致 v-if=false）：丢弃过期结果，
       // 避免跨会话幽灵灯箱与卸载后 URL 泄漏。
       if (!alive || sessionStore.activeSession?.id !== sid) return;
-      url = URL.createObjectURL(new Blob([res.bytes], { type: res.mimeType }));
-      objectUrls.set(att.id, url);
+      url = URL.createObjectURL(new Blob([toBlobPart(res.bytes)], { type: res.mimeType }));
+      fullUrls.set(att.id, url);
     } catch {
       errors[att.id] = '预览不可用';
       return;
@@ -77,7 +107,7 @@ async function removeAttachment(att: AttachmentSummary): Promise<void> {
   try {
     await draftStore.removeAttachment(sid, att.id);
     delete errors[att.id];
-    // objectUrls 的回收交给 list-watch（safeRevoke，跳过灯箱占用）。
+    // fullUrls 的回收交给 list-watch（safeRevokeFull，跳过灯箱占用）。
   } catch (err) {
     errors[att.id] = err instanceof Error ? err.message : '移除失败';
   }
@@ -91,17 +121,30 @@ watch(
     revokeAll();
     for (const k of Object.keys(errors)) delete errors[k];
     for (const k of Object.keys(loading)) delete loading[k];
+    for (const k of Object.keys(thumbLoading)) delete thumbLoading[k];
   },
 );
-// 附件列表变化：撤销已不在列表的 URL（safeRevoke 跳过灯箱占用，保留仍有效的避免重复请求）。
+
+// 附件列表变化（immediate：挂载即加载当前会话草稿缩略图）：
+// 撤销已不在列表的 URL（原图 safeRevokeFull 跳过灯箱占用、缩略图直接 revoke），并为新出现的图片加载缩略图。
 watch(
-  () => props.attachments.map((a) => a.id).join('\n'),
+  () => props.attachments.map((a) => `${a.id}:${a.kind}`).join('\n'),
   () => {
     const ids = new Set(props.attachments.map((a) => a.id));
-    for (const [id, url] of [...objectUrls]) {
-      if (!ids.has(id)) safeRevoke(id, url);
+    for (const [id, url] of [...fullUrls]) {
+      if (!ids.has(id)) safeRevokeFull(id, url);
+    }
+    for (const id of Object.keys(thumbUrls)) {
+      if (!ids.has(id)) {
+        URL.revokeObjectURL(thumbUrls[id]);
+        delete thumbUrls[id];
+      }
+    }
+    for (const att of props.attachments) {
+      if (att.kind === 'image' && !thumbUrls[att.id]) void loadThumb(att);
     }
   },
+  { immediate: true },
 );
 
 onBeforeUnmount(() => {
@@ -126,7 +169,13 @@ onBeforeUnmount(() => {
         :aria-label="`预览图片 ${att.filename}`"
         @click="previewImage(att, $event.currentTarget as HTMLElement)"
       >
-        <span class="att-card__file-badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
+        <img
+          v-if="thumbUrls[att.id]"
+          class="att-card__thumb-img"
+          :src="thumbUrls[att.id]"
+          :alt="att.filename"
+        />
+        <span v-else class="att-card__file-badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
         <span class="att-card__name">{{ att.filename }}</span>
         <span v-if="loading[att.id]" class="att-card__hint">读取中…</span>
       </button>
@@ -189,6 +238,15 @@ onBeforeUnmount(() => {
 
 .att-card__thumb:hover {
   color: var(--color-accent-strong);
+}
+
+.att-card__thumb-img {
+  width: 2.5rem;
+  height: 2.5rem;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+  background: var(--color-panel-soft);
 }
 
 .att-card__file {

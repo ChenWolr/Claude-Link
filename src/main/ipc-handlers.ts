@@ -47,7 +47,7 @@ import {
 } from './modules/attachment-service';
 import { prepareAttachmentPrompt } from './modules/attachment-prompt-builder';
 import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
-import type { StageAttachmentBytesInput, AttachmentPreviewRequest } from '../shared/types/ipc';
+import type { StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult } from '../shared/types/ipc';
 
 let mainWindow: BrowserWindow;
 
@@ -368,17 +368,17 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // 附件 IPC：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
   // 文件读取与校验全部在主进程；renderer 只拿不透明附件 ID 与受控预览 bytes。
-  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PICK, async (_event, sessionId: string): Promise<AttachmentSummary[]> => {
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PICK, async (_event, sessionId: string): Promise<PickAttachmentsResult> => {
     const session = sessionRepo.getSession(sessionId);
     if (!session) throw new Error('会话不存在');
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openFile', 'multiSelections'],
       title: '选择附件（图片 / 文档 / 文件）',
     });
-    if (result.canceled || !result.filePaths.length) return [];
+    if (result.canceled || !result.filePaths.length) return { attachments: [], errors: [] };
 
-    const summaries: AttachmentSummary[] = [];
-    const errors: string[] = [];
+    const attachments: AttachmentSummary[] = [];
+    const errors: Array<{ filename: string; message: string }> = [];
     for (const filePath of result.filePaths) {
       const filename = path.basename(filePath);
       try {
@@ -393,16 +393,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
           mimeType: detected ?? '',
           bytes,
         });
-        summaries.push(summary);
+        attachments.push(summary);
       } catch (e) {
-        errors.push(`${filename}：${e instanceof Error ? e.message : String(e)}`);
+        // 逐项收集失败：部分成功时 UI 仍展示成功项 + 集中提示失败项（错误文案来自业务校验，不含内部路径）。
+        errors.push({ filename, message: e instanceof Error ? e.message : String(e) });
       }
     }
-    // 全部失败才抛错；部分成功则返回成功项（失败项已在主进程日志可查，Task 5 UI 接入后集中提示）。
-    if (!summaries.length && errors.length) {
-      throw new Error(`附件添加失败：\n${errors.join('\n')}`);
-    }
-    return summaries;
+    return { attachments, errors };
   });
 
   ipcMain.handle(

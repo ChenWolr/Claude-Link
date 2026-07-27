@@ -11,7 +11,9 @@
     "postinstall": "electron-builder install-app-deps",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
     "package:win": "electron-builder --win --publish never",
-    "typecheck": "vue-tsc --noEmit",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
+    "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "selftest": "npx tsx scripts/selftest-settings-mapping.ts && npx tsx scripts/regression-tests.ts && npx tsx scripts/tdd-stall-watchdog-verify.ts && npx tsx scripts/export-image-verify.ts && npx tsx scripts/export-image-codec-verify.ts"
   },
   "dependencies": {

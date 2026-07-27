@@ -17,10 +17,13 @@ const { startListening, stopListening } = useChat();
 let stopExportProgress: (() => void) | null = null;
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
-// 在 document 上无条件 preventDefault dragover/drop 压住该默认动作（不消费文件，仅屏蔽导航）。
-// 业务消费由 ChatPage 在 .chat-page 容器上处理。条件式门控会让非 Files 类型漏掉，故无条件。
+// 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
+// （让浏览器插入文本），故不再无条件 preventDefault。业务消费由 ChatPage 在 .chat-page 容器上处理。
 function suppressDragNavigation(e: DragEvent): void {
-  e.preventDefault();
+  const types = e.dataTransfer?.types;
+  if (types && Array.from(types).includes('Files')) {
+    e.preventDefault();
+  }
 }
 
 onMounted(async () => {
