@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed, watch } from 'vue';
+import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config-store';
 import ApiKeyInput from '../components/config/ApiKeyInput.vue';
@@ -73,6 +73,17 @@ async function performInit() {
 }
 
 onMounted(performInit);
+
+// 切页卸载时立即落盘 pending 的自动保存：原 700ms 防抖期间若用户填完即切走（去会话发消息），
+// pending 保存不保证在发消息前执行，导致"填了没生效、需手动点保存"。卸载时强制 flush 修复此时序缺陷。
+onBeforeUnmount(() => {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    lastSavedSnapshot = configSnapshot();
+    void store.saveConfig();
+  }
+});
 
 // 监听高级 JSON 文本框：粘贴 Claude Code settings.json 后自动回填字段（防抖 600ms）。
 // applyExtractedSettings 只在 JSON 含对应字段时覆盖，空字段不会清掉用户手填的值。
