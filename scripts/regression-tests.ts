@@ -827,6 +827,8 @@ function testAttachmentTask7AContracts(): void {
   const preloadApi = readFileSync(new URL('../src/preload/api.ts', import.meta.url), 'utf8');
   const ipcHandlers = readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
   const ipcTypes = readFileSync(new URL('../src/shared/types/ipc.ts', import.meta.url), 'utf8');
+  const attachmentService = readFileSync(new URL('../src/main/modules/attachment-service.ts', import.meta.url), 'utf8');
+  const useChat = readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
 
   // 1) 图片卡片真实渲染 <img> 缩略图（非仅徽标）
   assert.ok(draftList.includes('att-card__thumb-img'), 'AttachmentDraftList 图片卡片须渲染 <img> 缩略图');
@@ -864,6 +866,24 @@ function testAttachmentTask7AContracts(): void {
   const pickBlock = chatPage.slice(chatPage.indexOf('onPickAttachments'), chatPage.indexOf('onPickAttachments') + 600);
   assert.ok(pickBlock.includes('attachments') && pickBlock.includes('errors'), 'ChatPage 须解构 attachments/errors');
   assert.ok(pickBlock.includes('showNotice'), '部分失败须集中提示');
+
+  // 7) Step 5 异步失败恢复：从历史消息克隆附件为草稿 + 回填文字，不自动重发/切模型
+  assert.ok(attachmentService.includes('cloneMessageAttachmentsToDraft'), 'attachment-service 须有 cloneMessageAttachmentsToDraft');
+  assert.ok(attachmentService.includes('readStoredAttachmentBytes'), '克隆须读原文件 bytes');
+  assert.ok(attachmentService.includes('sum.sessionId !== sessionId'), '克隆须校验附件归属当前会话（跨会话防护）');
+  assert.ok(attachmentService.includes('removeDraftAttachment'), '克隆任一失败须回滚已产生的 draft');
+  assert.ok(ipcTypes.includes('ATTACHMENT_CLONE_MESSAGE'), 'ipc.ts 须有 ATTACHMENT_CLONE_MESSAGE 通道');
+  assert.ok(preloadApi.includes('cloneMessageAttachments'), 'preload 须暴露 cloneMessageAttachments');
+  assert.ok(ipcHandlers.includes('ATTACHMENT_CLONE_MESSAGE'), 'handler 须注册 ATTACHMENT_CLONE_MESSAGE');
+  assert.ok(useChat.includes('lastSentBySession'), 'use-chat 须按会话记录最近发送消息');
+  assert.ok(chatPage.includes('重新编辑发送'), '错误横幅须有「重新编辑发送」按钮');
+  const retryStart = chatPage.indexOf('async function retryLastFailed');
+  const retryEnd = chatPage.indexOf('async function handleCompress', retryStart);
+  const retryBody = retryStart >= 0 && retryEnd > retryStart ? chatPage.slice(retryStart, retryEnd) : '';
+  assert.ok(retryBody.includes('cloneMessageAttachments'), '重新编辑须克隆附件');
+  assert.ok(retryBody.includes('draftStore.setText'), '重新编辑须回填文字到草稿');
+  assert.ok(retryBody.includes('delete lastSentBySession.value'), '重新编辑后须清当前会话的 lastSentBySession');
+  assert.ok(!retryBody.includes('sendMessage'), '重新编辑不得自动重发（须用户手动发送）');
 }
 
 function testApiUrlBuilder(): void {

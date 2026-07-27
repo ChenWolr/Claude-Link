@@ -59,6 +59,8 @@ export const IPC_CHANNELS = {
   ATTACHMENT_STAGE_BYTES: 'attachment:stageBytes',
   ATTACHMENT_PREVIEW: 'attachment:preview',
   ATTACHMENT_REMOVE_DRAFT: 'attachment:removeDraft',
+  // 克隆历史消息附件为草稿（异步发送失败后重新编辑用）。
+  ATTACHMENT_CLONE_MESSAGE: 'attachment:cloneMessage',
   // 会话导出 JPEG 长图（v3）。可见 renderer ↔ 主进程 ↔ 隐藏 export renderer。
   EXPORT_IMAGE_START: 'export-image:start',
   EXPORT_IMAGE_PROGRESS: 'export-image:progress',

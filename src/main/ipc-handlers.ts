@@ -44,6 +44,7 @@ import {
   getAttachmentPreview,
   removeDraftAttachment,
   assertAttachmentsReadyForSend,
+  cloneMessageAttachmentsToDraft,
 } from './modules/attachment-service';
 import { prepareAttachmentPrompt } from './modules/attachment-prompt-builder';
 import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
@@ -435,6 +436,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, async (_event, sessionId: string, attachmentId: string) => {
     await removeDraftAttachment(sessionId, attachmentId);
   });
+
+  // 克隆历史消息附件为草稿：异步发送失败后「重新编辑发送」用；跨会话防护在 service 内。
+  ipcMain.handle(
+    IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE,
+    async (_event, sessionId: string, messageId: string): Promise<AttachmentSummary[]> =>
+      cloneMessageAttachmentsToDraft(sessionId, messageId),
+  );
 
   // 会话导出 JPEG 长图（v3）：注册主窗口开始 + 隐藏 renderer 专用 IPC。
   registerExportImageHandlers();

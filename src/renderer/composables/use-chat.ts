@@ -83,6 +83,9 @@ function createChat() {
   // 这样 ChatPage 卸载/重挂载时，sending 始终从 store.runningSessions 反映，不会丢失。
   const sending = computed(() => store.sending);
   const error = ref<string | null>(null);
+  // 每会话最近一次发送的用户消息（id+正文）：按会话隔离，避免切会话后误用别会话的 messageId
+  // 去克隆（触发跨会话防护「消息不属于当前会话」）。
+  const lastSentBySession = ref<Record<string, { id: string; content: string }>>({});
 
   let cleanup: (() => void) | null = null;
   // try-finally 兜底：按 sessionId 记录“中断强制复位”定时器（替代原单例 timer）。
@@ -698,6 +701,7 @@ function createChat() {
     clearAbortTimer(store.activeSession.id);
     resetTurnCache();
     error.value = null;
+    lastSentBySession.value[store.activeSession.id] = { id: payload.clientMessageId, content: text };
     // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
     store.markRunning(store.activeSession.id);
 
@@ -791,7 +795,7 @@ function createChat() {
     await sendMessage({ text: last, attachmentIds: [], clientMessageId: crypto.randomUUID() });
   }
 
-  return { sending, error, sendMessage, abort, retryLastTurn, startListening, stopListening };
+  return { sending, error, lastSentBySession, sendMessage, abort, retryLastTurn, startListening, stopListening };
 }
 
 // 根因修复：useChat 返回全局单例。监听在 App.vue onMounted 注册一次，
