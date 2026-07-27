@@ -90,6 +90,13 @@ export function probeImageDimensions(bytes: Uint8Array): { width: number; height
   return { width: size.width, height: size.height };
 }
 
+/** 读取附件原始 bytes（克隆用；不做缩略图/mime 推断，按落盘原样读）。 */
+export async function readStoredAttachmentBytes(record: AttachmentRecord): Promise<Uint8Array> {
+  const absolutePath = resolveAbsolutePath(record.storageKey);
+  const buf = await fsp.readFile(absolutePath);
+  return new Uint8Array(buf);
+}
+
 /** 读取受控预览：图片缩略图（最长边 512px，转 PNG）或原图有界 bytes；绝不返回绝对路径。 */
 export async function readStoredAttachmentPreview(
   record: AttachmentRecord,

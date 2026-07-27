@@ -15,7 +15,12 @@ import type { ChatSendPayload, AttachmentSummary } from '../../shared/types/atta
 const store = useSessionStore();
 const taskStore = useTaskStore();
 const draftStore = useChatDraftStore();
-const { sending, error, sendMessage, abort } = useChat();
+const { sending, error, lastSentBySession, sendMessage, abort } = useChat();
+// 当前会话的最近发送消息（按会话隔离）：切会话后不会误用别会话的 messageId 去克隆。
+const lastSentCurrent = computed(() => {
+  const sid = store.activeSession?.id;
+  return sid ? lastSentBySession.value[sid] ?? null : null;
+});
 const { displayContent, displayThinking, displayTool } = useStream();
 
 // 内联提示（如"未选择工作空间"/附件暂存失败），自动消失。
@@ -235,6 +240,29 @@ async function handleSend() {
   }
 }
 
+// 异步发送失败（provider 拒图等）后「重新编辑发送」：从历史消息克隆附件为新草稿 + 回填文字，
+// 清错误交给用户改模型/编辑后手动发送（新 clientMessageId）。不自动重发、不切模型。
+async function retryLastFailed() {
+  const last = lastSentCurrent.value;
+  const sessionId = store.activeSession?.id;
+  if (!last || !sessionId) return;
+  // 文字回填独立于附件恢复：即使附件恢复失败或无附件，也先把文字放回草稿。
+  if (last.content) draftStore.setText(sessionId, last.content);
+  let recovered = 0;
+  try {
+    const cloned = await window.claudeLink.cloneMessageAttachments(sessionId, last.id);
+    recovered = cloned.length;
+    if (recovered > 0) draftStore.addAttachments(sessionId, cloned);
+  } catch (e) {
+    showNotice(`附件恢复失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+  error.value = null;
+  delete lastSentBySession.value[sessionId];
+  if (recovered === 0 && !last.content) {
+    showNotice('该消息没有可恢复的文字或附件');
+  }
+}
+
 async function handleCompress() {
   if (!store.activeSession) return;
   if (!ensureWorkspace()) return;
@@ -268,7 +296,7 @@ async function handleNewSession() {
         <span>⚠️ {{ notice }}</span>
       </div>
       <div v-if="error" class="chat-error">
-        <span>❌ {{ error }}</span>
+        <span>❌ {{ error }}<button v-if="lastSentCurrent" type="button" class="chat-error__retry" @click="retryLastFailed">重新编辑发送</button></span>
       </div>
 
       <!-- 附件草稿：位于 .chat-composer 上方，自身无横向外层边框 -->
@@ -386,6 +414,21 @@ async function handleNewSession() {
   padding: 8px 14px;
   font-size: 0.8125rem;
   box-shadow: var(--ring-light);
+}
+
+.chat-error__retry {
+  margin-left: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 50%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  color: var(--color-accent-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.chat-error__retry:hover {
+  background: color-mix(in srgb, var(--color-accent) 24%, transparent);
 }
 
 .notice span {

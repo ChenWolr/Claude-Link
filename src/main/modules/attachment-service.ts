@@ -11,11 +11,13 @@ import {
   type StagedAttachmentInput,
   listStoredAttachmentKeys,
   probeImageDimensions,
+  readStoredAttachmentBytes,
   readStoredAttachmentPreview,
   removeAttachmentFile,
   resolveAbsolutePath,
   writeAttachmentFile,
 } from './attachment-storage';
+import { randomUUID } from 'node:crypto';
 import * as attachmentRepo from '../database/repositories/attachment-repo';
 import type {
   AttachmentPreviewResponse,
@@ -126,6 +128,57 @@ export async function getAttachmentPreview(request: {
   if (!record) throw new AttachmentInputError('附件不存在');
   if (record.sessionId !== request.sessionId) throw new AttachmentInputError('附件不属于当前会话');
   return readStoredAttachmentPreview(record, request.thumbnail);
+}
+
+/**
+ * 克隆历史消息附件为草稿：异步发送失败（provider 拒图等）后，让用户基于已落库附件重新编辑发送。
+ * 逐个读原文件 → 写新 draft（新 id/文件）；任一失败回滚整组（删已产生的 draft 记录+文件），不返回半组。
+ * 跨会话防护：消息附件必须属于当前会话（getAttachmentsByMessageIds 不校验 session）。
+ * 不自动重发、不切模型；调用方拿到草稿后由用户编辑并手动发送（新 clientMessageId）。
+ */
+export async function cloneMessageAttachmentsToDraft(
+  sessionId: string,
+  messageId: string,
+): Promise<AttachmentSummary[]> {
+  const summaries = attachmentRepo.getAttachmentsByMessageIds([messageId]).get(messageId) ?? [];
+  logger.info(`cloneMessageAttachmentsToDraft: sessionId=${sessionId} messageId=${messageId} 消息附件数=${summaries.length}`);
+  for (const sum of summaries) {
+    if (sum.sessionId !== sessionId) {
+      throw new AttachmentInputError('消息不属于当前会话');
+    }
+  }
+  if (summaries.length === 0) return [];
+
+  const created: AttachmentSummary[] = [];
+  const createdIds: string[] = [];
+  try {
+    for (const sum of summaries) {
+      const record = attachmentRepo.getAttachment(sum.id);
+      if (!record) throw new AttachmentInputError(`附件「${sum.filename}」记录缺失`);
+      const bytes = await readStoredAttachmentBytes(record);
+      const staged = await stageAttachment({
+        id: randomUUID(),
+        sessionId,
+        filename: sum.filename,
+        mimeType: sum.mimeType,
+        bytes,
+      });
+      created.push(staged);
+      createdIds.push(staged.id);
+    }
+    logger.info(`cloneMessageAttachmentsToDraft: 成功克隆 ${created.length} 个附件为草稿`);
+    return created;
+  } catch (err) {
+    // 任一失败：清理已产生的 draft 副本（record + file），整组不返回。
+    for (const id of createdIds) {
+      try {
+        await removeDraftAttachment(sessionId, id);
+      } catch (e) {
+        logger.error(`clone cleanup ${id} failed`, e);
+      }
+    }
+    throw err;
+  }
 }
 
 /** 启动清理：删除遗留的 draft 附件（未发送草稿）。 */
