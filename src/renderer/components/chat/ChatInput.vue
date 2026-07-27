@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { SLASH_COMMANDS } from '../../../shared/constants';
 
 // 受控输入：modelValue 由父组件（草稿 store）持有；附件-only 也允许发送。
@@ -107,6 +107,28 @@ function submit(): void {
   if (!props.modelValue.trim() && !props.hasAttachments) return;
   emit('send');
 }
+
+// 父组件（ChatPage）粘贴混合剪贴板时调用：图片进附件后，把同一次 paste 的文字插入当前选区。
+// 不能让图片处理器 preventDefault() 后吞掉文字。插入后恢复光标到插入末尾并重算高度。
+function insertTextAtSelection(text: string): void {
+  if (!text) return;
+  const el = textareaRef.value;
+  const value = props.modelValue;
+  const start = el?.selectionStart ?? value.length;
+  const end = el?.selectionEnd ?? value.length;
+  const next = value.slice(0, start) + text + value.slice(end);
+  emit('update:modelValue', next);
+  const pos = start + text.length;
+  nextTick(() => {
+    const ta = textareaRef.value;
+    if (!ta) return;
+    ta.focus();
+    ta.setSelectionRange(pos, pos);
+    autoResize();
+  });
+}
+
+defineExpose({ insertTextAtSelection });
 
 function handleClickOutside(event: MouseEvent) {
   if (showSlashMenu.value && wrapperRef.value && !wrapperRef.value.contains(event.target as Node)) {

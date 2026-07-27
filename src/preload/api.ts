@@ -7,7 +7,7 @@ import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
-import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, PermissionRequestPayload, PermissionResponsePayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, PermissionRequestPayload, PermissionResponsePayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult } from '../shared/types/changes';
@@ -74,7 +74,7 @@ export interface ClaudeLinkAPI {
   resumeQueue: (sessionId: string) => Promise<void>;
   getQueueState: (sessionId: string) => Promise<QueueState>;
   queueUserMessage: (sessionId: string, payload: ChatSendPayload) => Promise<QueueState>;
-  pickAttachments: (sessionId: string) => Promise<AttachmentSummary[]>;
+  pickAttachments: (sessionId: string) => Promise<PickAttachmentsResult>;
   stageAttachmentBytes: (input: StageAttachmentBytesInput) => Promise<AttachmentSummary>;
   getAttachmentPreview: (request: AttachmentPreviewRequest) => Promise<AttachmentPreviewResponse>;
   removeDraftAttachment: (sessionId: string, attachmentId: string) => Promise<void>;
@@ -169,7 +169,7 @@ export function createApi(): ClaudeLinkAPI {
     resumeQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME, sessionId),
     getQueueState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_STATE, sessionId),
     queueUserMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_USER_MESSAGE, sessionId, payload),
-    pickAttachments: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PICK, sessionId) as Promise<AttachmentSummary[]>,
+    pickAttachments: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PICK, sessionId) as Promise<PickAttachmentsResult>,
     stageAttachmentBytes: (input) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_STAGE_BYTES, input) as Promise<AttachmentSummary>,
     getAttachmentPreview: (request) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PREVIEW, request) as Promise<AttachmentPreviewResponse>,
     removeDraftAttachment: (sessionId, attachmentId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, sessionId, attachmentId),

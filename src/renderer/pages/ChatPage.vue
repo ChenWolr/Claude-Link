@@ -45,6 +45,9 @@ const draftAttachments = computed<AttachmentSummary[]>(() =>
 // 拖放高亮：文件拖入聊天区时，给 .chat-composer 加一条临时 accent 描边（非常驻边框）。
 const dragActive = ref(false);
 
+// ChatInput 实例引用：粘贴混合剪贴板时，把文字插入 textarea 选区（图片进附件、文字不吞）。
+const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null);
+
 onMounted(() => {
   store.loadSessions();
   // 根因修复：监听已在 App.vue 全局注册，这里只刷新当前会话数据（重拉 messages）。
@@ -79,9 +82,13 @@ async function onPickAttachments() {
   if (!store.activeSession) return;
   const sessionId = store.activeSession.id;
   try {
-    const atts = await window.claudeLink.pickAttachments(sessionId);
-    if (atts.length > 0) {
-      draftStore.addAttachments(sessionId, atts);
+    const { attachments, errors } = await window.claudeLink.pickAttachments(sessionId);
+    if (attachments.length > 0) {
+      draftStore.addAttachments(sessionId, attachments);
+    }
+    // 部分失败：成功项已入草稿，失败项集中提示（错误文案来自主进程业务校验，不含内部路径）。
+    if (errors.length > 0) {
+      showNotice(`部分文件未能添加：${errors.map((err) => `${err.filename}：${err.message}`).join('；')}`);
     }
   } catch (e) {
     showNotice(e instanceof Error ? e.message : '添加文件失败');
@@ -172,6 +179,9 @@ function onPagePaste(e: ClipboardEvent): void {
   if (files.length > 0) {
     e.preventDefault();
     void stageFiles(files);
+    // 同一次剪贴板里的文字也要保留：图片进附件，文字仍插入 textarea，避免被图片处理器吞掉。
+    const text = e.clipboardData?.getData('text/plain') ?? '';
+    if (text) chatInputRef.value?.insertTextAtSelection(text);
   }
 }
 
@@ -266,6 +276,7 @@ async function handleNewSession() {
 
       <div class="chat-composer" :class="{ 'chat-composer--drag': dragActive }">
         <ChatInput
+          ref="chatInputRef"
           :model-value="draftText"
           :has-attachments="draftAttachments.length > 0"
           :disabled="sending"

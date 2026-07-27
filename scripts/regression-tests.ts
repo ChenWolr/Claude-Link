@@ -815,6 +815,57 @@ function testAttachmentBadgeContracts(): void {
   assert.equal(attachmentBadge('noext'), 'FILE');
 }
 
+// Task 7A：真实缩略图 <img>、Blob bytes 复制成 ArrayBuffer、混合粘贴不吞文字、
+// document 级 drop 仅拦 Files、批量选择逐项结果（成功项 + 安全错误）。
+function testAttachmentTask7AContracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const draftList = readFileSync(new URL('../src/renderer/components/chat/AttachmentDraftList.vue', import.meta.url), 'utf8');
+  const msgAttachments = readFileSync(new URL('../src/renderer/components/chat/MessageAttachments.vue', import.meta.url), 'utf8');
+  const chatPage = readFileSync(new URL('../src/renderer/pages/ChatPage.vue', import.meta.url), 'utf8');
+  const chatInput = readFileSync(new URL('../src/renderer/components/chat/ChatInput.vue', import.meta.url), 'utf8');
+  const appVue = readFileSync(new URL('../src/renderer/App.vue', import.meta.url), 'utf8');
+  const preloadApi = readFileSync(new URL('../src/preload/api.ts', import.meta.url), 'utf8');
+  const ipcHandlers = readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
+  const ipcTypes = readFileSync(new URL('../src/shared/types/ipc.ts', import.meta.url), 'utf8');
+
+  // 1) 图片卡片真实渲染 <img> 缩略图（非仅徽标）
+  assert.ok(draftList.includes('att-card__thumb-img'), 'AttachmentDraftList 图片卡片须渲染 <img> 缩略图');
+  assert.ok(/<img[\s\S]*?att-card__thumb-img/.test(draftList), 'AttachmentDraftList 须有 <img> 缩略图元素');
+  assert.ok(msgAttachments.includes('msg-att__thumb-img'), 'MessageAttachments 图片卡片须渲染 <img> 缩略图');
+  assert.ok(/<img[\s\S]*?msg-att__thumb-img/.test(msgAttachments), 'MessageAttachments 须有 <img> 缩略图元素');
+
+  // 2) Blob bytes 经复制成当前 realm ArrayBuffer 构造（规避 Uint8Array<ArrayBufferLike> 不能直接当 BlobPart）
+  assert.ok(draftList.includes('toBlobPart'), 'AttachmentDraftList 须用 toBlobPart 复制 bytes');
+  assert.ok(msgAttachments.includes('toBlobPart'), 'MessageAttachments 须用 toBlobPart 复制 bytes');
+  assert.ok(/Uint8Array\.from\(bytes\)\.buffer/.test(draftList), 'toBlobPart 须复制成当前 realm ArrayBuffer');
+
+  // 3) 缩略图与原图分两套 URL 管理（thumbnail:true 卡片 / thumbnail:false 灯箱），各自 revoke
+  assert.ok(/thumbnail:\s*true/.test(draftList) && /thumbnail:\s*false/.test(draftList), 'AttachmentDraftList 须区分缩略图与原图请求');
+  assert.ok(msgAttachments.includes('fetchPreviewUrl(att, true)') && msgAttachments.includes('fetchPreviewUrl(att, false)'), 'MessageAttachments 须区分缩略图与原图请求');
+  assert.ok(draftList.includes('thumbUrls'), 'AttachmentDraftList 须独立管理缩略图 URL');
+  assert.ok(msgAttachments.includes('thumbByAttachmentId'), 'MessageAttachments 须独立管理缩略图 URL');
+
+  // 4) 混合剪贴板：图片进附件后，同一次 paste 的文字仍插入 textarea（不吞文字）
+  assert.ok(chatInput.includes('insertTextAtSelection'), 'ChatInput 须暴露 insertTextAtSelection');
+  assert.ok(chatInput.includes('defineExpose'), 'ChatInput 须 defineExpose insertTextAtSelection');
+  const pasteBlock = chatPage.slice(chatPage.indexOf('onPagePaste'), chatPage.indexOf('onPagePaste') + 700);
+  assert.ok(pasteBlock.includes("getData('text/plain')"), '粘贴有图片时须读取 text/plain');
+  assert.ok(pasteBlock.includes('insertTextAtSelection'), '粘贴有图片时须把文字插入 textarea');
+  assert.ok(chatPage.includes('chatInputRef'), 'ChatPage 须持有 ChatInput 实例引用');
+
+  // 5) document 级 drop 守卫仅对 Files preventDefault（文本拖放保留默认行为，可落入 textarea）
+  assert.ok(/Array\.from\(types\)\.includes\('Files'\)/.test(appVue), 'App.vue drop 守卫须仅 Files 时 preventDefault');
+
+  // 6) 批量选择逐项结果：成功项 + 失败项（错误文案来自业务校验，不带内部路径）
+  assert.ok(ipcTypes.includes('PickAttachmentsResult'), 'ipc.ts 须定义 PickAttachmentsResult');
+  assert.ok(/PickAttachmentsResult\b/.test(preloadApi), 'preload pickAttachments 须返回 PickAttachmentsResult');
+  assert.ok(ipcHandlers.includes('PickAttachmentsResult'), 'ATTACHMENT_PICK handler 须返回逐项结果');
+  assert.ok(ipcHandlers.includes('errors.push({ filename,'), 'handler 须逐项收集失败原因');
+  const pickBlock = chatPage.slice(chatPage.indexOf('onPickAttachments'), chatPage.indexOf('onPickAttachments') + 600);
+  assert.ok(pickBlock.includes('attachments') && pickBlock.includes('errors'), 'ChatPage 须解构 attachments/errors');
+  assert.ok(pickBlock.includes('showNotice'), '部分失败须集中提示');
+}
+
 function testApiUrlBuilder(): void {
   assert.equal(buildAnthropicApiUrl('https://api.anthropic.com', 'models').toString(), 'https://api.anthropic.com/v1/models');
   assert.equal(buildAnthropicApiUrl('https://api.anthropic.com/v1', 'models').toString(), 'https://api.anthropic.com/v1/models');
@@ -2339,6 +2390,7 @@ await testAttachmentPromptBuilderContracts();
 testAttachmentDraftUiContracts();
 testAttachmentHistoryContracts();
 testAttachmentBadgeContracts();
+testAttachmentTask7AContracts();
 }
 
 main().catch((error) => {

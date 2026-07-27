@@ -84,7 +84,7 @@ export async function writeAttachmentFile(input: StagedAttachmentInput): Promise
 /** 解码图片拿像素尺寸；非受支持图片或 nativeImage 返回空尺寸时返回 null（由调用方按不支持图片处理）。 */
 export function probeImageDimensions(bytes: Uint8Array): { width: number; height: number } | null {
   if (!detectDirectImageFormat(bytes)) return null;
-  const img = nativeImage.createFromBuffer(bytes);
+  const img = nativeImage.createFromBuffer(Buffer.from(bytes));
   const size = img.getSize();
   if (size.width <= 0 || size.height <= 0) return null;
   return { width: size.width, height: size.height };
