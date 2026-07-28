@@ -56,11 +56,17 @@ const defaultConfig: StoredConfig = {
   contextWindowByAlias: {},
 };
 
-const store = new ElectronStoreCtor({
-  name: 'claude-link-config',
-  projectName: app.getName(),
-  defaults: defaultConfig,
-});
+type ConfigStore = InstanceType<typeof ElectronStoreCtor>;
+let store: ConfigStore | null = null;
+
+function getStore(): ConfigStore {
+  store ??= new ElectronStoreCtor({
+    name: 'claude-link-config',
+    projectName: app.getName(),
+    defaults: defaultConfig,
+  });
+  return store;
+}
 
 function encryptApiKey(apiKey: string): Pick<StoredConfig, 'encryptedApiKey' | 'apiKeyEncoding'> {
   if (!apiKey) {
@@ -94,7 +100,7 @@ function decryptApiKey(config: StoredConfig): string {
 }
 
 export function getConfig(): AppConfig {
-  const config = store.store;
+  const config = getStore().store;
   const advancedJsonRaw = typeof config.advancedJson === 'string' && config.advancedJson ? config.advancedJson : '{}';
   return {
     provider: config.provider,
@@ -119,11 +125,11 @@ export function getConfig(): AppConfig {
 export function saveConfig(partial: Partial<AppConfig>): AppConfig {
   const { apiKey, ...rest } = partial;
   const storage = { ...rest } as Partial<StoredConfig>;
-  store.set(storage);
+  getStore().set(storage);
 
   if (apiKey !== undefined) {
     const encrypted = encryptApiKey(apiKey);
-    store.set(encrypted);
+    getStore().set(encrypted);
   }
 
   const config = getConfig();
@@ -135,13 +141,13 @@ export function saveConfig(partial: Partial<AppConfig>): AppConfig {
       logger.warn(`settings.local.json 写入跳过：${result.error}`);
     }
   } catch (e) {
-    logger.warn('settings.local.json 写入跳过', e);
+    logger.warn(`settings.local.json 写入跳过：${e instanceof Error ? e.message : String(e)}`);
   }
   return config;
 }
 
 export function getDecryptedApiKey(): string | null {
-  const apiKey = decryptApiKey(store.store);
+  const apiKey = decryptApiKey(getStore().store);
   return apiKey || null;
 }
 
@@ -150,8 +156,8 @@ export function hasApiKey(): boolean {
 }
 
 export function clearConfig(): AppConfig {
-  store.clear();
-  store.set(defaultConfig);
+  getStore().clear();
+  getStore().set(defaultConfig);
   return getConfig();
 }
 

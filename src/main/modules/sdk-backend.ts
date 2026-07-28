@@ -84,6 +84,14 @@ void persistMessageParts;
 // prompt 与 Agent SDK 对齐：纯文字 string；含图片时 AsyncIterable<SDKUserMessage>。
 type Query = AsyncGenerator<Record<string, unknown>, void> & {
   interrupt(): Promise<void>;
+  getContextUsage(): Promise<{
+    maxTokens: number;
+    rawMaxTokens: number;
+    totalTokens: number;
+    percentage: number;
+    autoCompactThreshold?: number;
+    isAutoCompactEnabled: boolean;
+  }>;
 };
 
 interface SdkModule {
@@ -437,12 +445,16 @@ function recordInteractionResponse(sessionId: string, mainWindow: BrowserWindow,
 
 // 诊断用：列出会话小本本里「裸 allow」的工具名（整工具放行）。定位权限重复弹窗后可移除。
 function bookToolNames(updates: PermissionUpdate[] | undefined): string[] {
-  return (updates ?? [])
-    .filter((u) => u.destination === 'session' && (u.type === 'addRules' || u.type === 'replaceRules') && u.behavior === 'allow')
-    .flatMap((u) => u.rules.filter((r) => !r.ruleContent).map((r) => r.toolName));
+  return (updates ?? []).flatMap((update) => {
+    if (update.destination !== 'session' || (update.type !== 'addRules' && update.type !== 'replaceRules') || update.behavior !== 'allow') {
+      return [];
+    }
+    return update.rules.filter((rule) => !rule.ruleContent).map((rule) => rule.toolName);
+  });
 }
 
 function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, workingDir: string | null) {
+  void workingDir;
   return async (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions): Promise<PermissionResult> => {
     if (!isSessionActive(sessionId)) {
       return { behavior: 'deny', message: '会话已关闭', interrupt: true, toolUseID: options.toolUseID };
@@ -452,7 +464,7 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
       const result = await requestAskUserQuestionInteractions(sessionId, mainWindow, input, options);
       if (result) {
         recordInteractionResponse(sessionId, mainWindow, '用户完成选择题', Object.entries(result.answers).map(([question, answer]) => `${question}: ${answer}`).join('\n'));
-        return { behavior: 'allow', updatedInput: result, toolUseID: options.toolUseID };
+        return { behavior: 'allow', updatedInput: { ...result }, toolUseID: options.toolUseID };
       }
       return { behavior: 'deny', message: '用户取消了选择题交互', toolUseID: options.toolUseID };
     }
@@ -482,10 +494,11 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
 
     const response = await requestInteraction(mainWindow, payload, options.signal);
     const result = mapPermissionInteractionResponse(payload, response, input);
-    if (result.behavior === 'allow') {
-      rememberSessionPermissionUpdates(sessionId, result.updatedPermissions);
+    const updatedPermissions = result.behavior === 'allow' ? result.updatedPermissions : undefined;
+    if (updatedPermissions) {
+      rememberSessionPermissionUpdates(sessionId, updatedPermissions);
     }
-    logger.info(`[canUseTool-resp] tool=${toolName} action=${response.action} selected=${JSON.stringify(response.selectedOptionIds ?? null)} wrotePerm=${result.updatedPermissions?.length ?? 0} bookToolsAfter=[${bookToolNames(sessionPermissionUpdates.get(sessionId)).join(',')}]`);
+    logger.info(`[canUseTool-resp] tool=${toolName} action=${response.action} selected=${JSON.stringify(response.selectedOptionIds ?? null)} wrotePerm=${updatedPermissions?.length ?? 0} bookToolsAfter=[${bookToolNames(sessionPermissionUpdates.get(sessionId)).join(',')}]`);
     recordInteractionResponse(sessionId, mainWindow, payload.title, response.action === 'submit' ? `选择：${response.selectedOptionIds?.join(', ') ?? '提交'}` : '已取消');
     return result;
   };

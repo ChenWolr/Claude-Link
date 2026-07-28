@@ -8,6 +8,7 @@
 //   - aggregateSubAgentGroups：从 turnStartIndex 之后聚合 parentAgentId 消息成组（方案 A：保留 DB 历史，仅控制 Tab 显示）
 
 import type { Message } from '../../shared/types/session';
+import type { RenderableMessage } from '../../shared/types/export-image';
 import { computeStats, groupMessagesForRender, type RenderItem } from './group-messages';
 
 export function formatDuration(seconds: number | null): string {
@@ -18,7 +19,7 @@ export function formatDuration(seconds: number | null): string {
 // 耗时来源优先级：running 工具的实时 tool_progress（最高优先，秒级整数）→ 已完成消息 durationMs 累加 →
 // 消息 createdAt 时间戳首尾差（兜底，无 usage 时）。三者皆无 → null（显示「—」）。
 export function computeElapsedSeconds(
-  messages: Message[],
+  messages: RenderableMessage[],
   toolProgress: Record<string, number>,
 ): number | null {
   const liveSeconds = messages
@@ -38,11 +39,11 @@ export function computeElapsedSeconds(
   return null;
 }
 
-export function currentTurnMessages(allMessages: Message[], turnStartIndex: number): Message[] {
+export function currentTurnMessages(allMessages: RenderableMessage[], turnStartIndex: number): RenderableMessage[] {
   return allMessages.slice(turnStartIndex);
 }
 
-export function isInCurrentTurn(message: Message, allMessages: Message[], turnStartIndex: number): boolean {
+export function isInCurrentTurn(message: RenderableMessage, allMessages: RenderableMessage[], turnStartIndex: number): boolean {
   return currentTurnMessages(allMessages, turnStartIndex).some((m) => m.id === message.id);
 }
 
@@ -51,7 +52,7 @@ export interface CurrentTurnFilterOptions {
   hideText: boolean;
   hideThinking: boolean;
   turnStartIndex: number;
-  allMessages: Message[];
+  allMessages: RenderableMessage[];
 }
 
 // 发送中且对应流式非空时，隐藏本回合已落库的 text/thinking，避免与流式块重复显示。

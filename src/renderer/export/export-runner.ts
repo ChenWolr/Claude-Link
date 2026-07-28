@@ -11,8 +11,8 @@ import { JPEG_CHUNK_BYTES, JPEG_QUALITY, placeSegment, checkPixelBudget, deriveM
 import type {
   ExportImagePhase,
   PngCaptureSelfResponse,
-  ThemePalette,
 } from '@shared/types/export-image';
+import type { ThemePalette } from '@shared/constants';
 import { groupMessagesForRender, type RenderItem } from '../utils/group-messages';
 import { applyThemePalette } from '../utils/apply-theme';
 import { FONT_SCALE_SIZES } from '@shared/constants';
@@ -44,6 +44,16 @@ async function waitStable(): Promise<void> {
   if (document.fonts && document.fonts.ready) {
     try { await document.fonts.ready; } catch { /* ignore */ }
   }
+  const images = [...document.images];
+  await Promise.all(images.map(async (image) => {
+    try {
+      if (!image.complete) await new Promise<void>((resolve) => {
+        image.addEventListener('load', () => resolve(), { once: true });
+        image.addEventListener('error', () => resolve(), { once: true });
+      });
+      if (image.decode) await image.decode();
+    } catch { /* keep capture alive; renderer shows its fallback state */ }
+  }));
   let prev = -1;
   for (let i = 0; i < 8; i++) {
     await twoFrames();
@@ -112,7 +122,7 @@ export async function runExport(): Promise<void> {
   runnerState.exportedAt = job.exportedAt;
   applyTheme(job.themePalette, job.fontScale);
 
-  const items = groupMessagesForRender(job.messages);
+  const items = groupMessagesForRender(job.messages as never);
   if (items.length === 0) {
     await api.finish({ kind: 'failed', jobId: job.jobId, code: 'empty', message: '无可导出内容' });
     return;
@@ -121,6 +131,26 @@ export async function runExport(): Promise<void> {
   runnerState.items = items;
   report(api, job.jobId, { phase: 'planning', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, message: '正在排版长图…' });
   await waitStable();
+  if (Object.prototype.hasOwnProperty.call(window, 'claudeLink')) {
+    await api.finish({ kind: 'failed', jobId: job.jobId, code: 'surface-leak', message: '隐藏导出窗口错误暴露了完整 preload API' });
+    return;
+  }
+  const expectedAttachments = job.messages.flatMap((message) => message.attachments ?? []);
+  if (expectedAttachments.length > 0) {
+    const renderedAttachmentCount = document.querySelectorAll('.msg-att').length;
+    const expectsImage = expectedAttachments.some((attachment) => attachment.kind === 'image' && attachment.preview);
+    const expectsFile = expectedAttachments.some((attachment) => attachment.kind !== 'image');
+    const expectsUnavailable = expectedAttachments.some((attachment) => attachment.previewUnavailable);
+    if (
+      renderedAttachmentCount !== expectedAttachments.length ||
+      (expectsImage && !document.querySelector('.msg-att__thumb-img')) ||
+      (expectsFile && !document.querySelector('.msg-att--file')) ||
+      (expectsUnavailable && !document.querySelector('.msg-att--unavailable'))
+    ) {
+      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'attachment-render-mismatch', message: '导出附件未完整进入隐藏渲染页面' });
+      return;
+    }
+  }
   const itemHeights = measureItemHeights();
   const docHeightAll = document.documentElement.scrollHeight;
   const itemsContentHeight = itemHeights.reduce((s, h) => s + h, 0);
@@ -223,7 +253,7 @@ async function captureJpegPage(
       return false;
     }
     const ctx = canvas.getContext('2d')!;
-    const bmp = await createImageBitmap(new Blob([cap.png as Uint8Array], { type: 'image/png' }));
+    const bmp = await createImageBitmap(new Blob([Uint8Array.from(cap.png).buffer], { type: 'image/png' }));
     ctx.drawImage(bmp, 0, placement.sourceStartPx, cap.bitmapWidth, placement.drawHeightPx, 0, placement.destStartPx, cap.bitmapWidth, placement.drawHeightPx);
     cursor = placement.nextCursorCss;
     segIdx += 1;

@@ -198,7 +198,9 @@ export function buildPermissionInteractionPayload(
   options: CanUseToolOptions,
   requestId = randomUUID(),
 ): InteractionPromptPayload {
-  const askPayload = isAskUserQuestionPayload(input) ? buildAskUserQuestionInteractionPayload(sessionId, input.questions[0], 0, options.toolUseID, requestId) : null;
+  const askPayload = isAskUserQuestionPayload(input) && input.questions?.[0]
+    ? buildAskUserQuestionInteractionPayload(sessionId, input.questions[0], 0, options.toolUseID, requestId)
+    : null;
   if (askPayload) return askPayload;
 
   const sessionSuggestions = withToolSessionAllow(toolName, options.suggestions);
@@ -575,20 +577,21 @@ export async function requestAskUserQuestionInteractions(
   input: AskUserQuestionPayload,
   options: { signal: AbortSignal; toolUseID?: string },
 ): Promise<AskUserQuestionOutput | null> {
-  if (!isAskUserQuestionPayload(input)) return null;
+  if (!isAskUserQuestionPayload(input) || !input.questions?.length) return null;
+  const questions = input.questions;
 
-  if (input.questions.length > 1) {
-    const payload = buildWizardAskUserQuestionPayload(sessionId, input.questions, options.toolUseID);
+  if (questions.length > 1) {
+    const payload = buildWizardAskUserQuestionPayload(sessionId, questions, options.toolUseID);
     const response = await requestInteraction(mainWindow, payload, options.signal);
     if (response.action === 'cancel') return null;
-    return buildAskUserQuestionResult(input.questions, [{ payload, response }]);
+    return buildAskUserQuestionResult(questions, [{ payload, response }]);
   }
 
-  const question = input.questions[0];
+  const question = questions[0];
   const payload = buildAskUserQuestionInteractionPayload(sessionId, question, 0, options.toolUseID);
   const response = await requestInteraction(mainWindow, payload, options.signal);
   if (response.action === 'cancel') return null;
-  return buildAskUserQuestionResult(input.questions, [{ payload, response }]);
+  return buildAskUserQuestionResult(questions, [{ payload, response }]);
 }
 
 export function createElicitationHandler(sessionId: string, mainWindow: BrowserWindow) {

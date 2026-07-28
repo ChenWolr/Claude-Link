@@ -127,10 +127,16 @@ export function searchSessions(query: string): Session[] {
     contentMap.set(row.session_id, row.text ?? '');
   }
 
-  // 附件文件名参与搜索（按会话聚合）。不纳入 storage_key / MIME / 哈希 / 文件内容。
+  // 仅历史消息附件文件名参与搜索；草稿、失败和仅任务引用的附件不应命中。
+  // 不纳入 storage_key / MIME / 哈希 / 文件内容。
   const attachmentNameMap = new Map<string, string>();
   const attachmentNameRows = getConnection()
-    .prepare("SELECT session_id, GROUP_CONCAT(filename, ' ') AS text FROM attachments GROUP BY session_id")
+    .prepare(
+      `SELECT a.session_id, GROUP_CONCAT(a.filename, ' ') AS text
+       FROM message_attachments ma
+       JOIN attachments a ON a.id = ma.attachment_id
+       GROUP BY a.session_id`,
+    )
     .all() as { session_id: string; text: string | null }[];
   for (const row of attachmentNameRows) {
     attachmentNameMap.set(row.session_id, row.text ?? '');

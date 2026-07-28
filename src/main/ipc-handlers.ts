@@ -27,6 +27,7 @@ import {
   interruptTask,
   getQueueState,
   continueWithUserMessage,
+  cleanupQueue,
 } from './modules/task-queue-engine';
 import { analyzeTopic } from './modules/topic-analyzer';
 import { logger } from './utils/logger';
@@ -134,6 +135,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 3) 最后删库。
     // 附件：先收集 storageKey（删库后级联清 attachments 行，物理文件需另行清理）。
     const attachmentStorageKeys = attachmentRepo.listStorageKeysBySession(id);
+    cleanupQueue(id);
     markSessionDeleted(id);
     killProcess(id);
     await new Promise((resolve) => setTimeout(resolve, 50));

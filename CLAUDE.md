@@ -4,7 +4,7 @@
 
 ## 项目概览
 
-Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本地安装的 Claude Code CLI 的图形化前端。它**不直接调用 Anthropic API**，而是通过 Claude Agent SDK（默认）或 spawn `claude` CLI 子进程（回退）方式接入，注入配置（env + `.claude/settings.local.json`），解析 stream-json 输出并展示。
+Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本地安装的 Claude Code CLI 的图形化前端。它**不直接调用 Anthropic API**；生产聊天统一通过 Claude Agent SDK 接入，注入配置（env + `.claude/settings.local.json`）并解析流式事件。spawn `claude` CLI 实现只保留兼容与测试用途，不作为生产聊天回退。
 
 ## 前置条件
 
@@ -16,8 +16,8 @@ Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本�
 | 命令 | 说明 |
 |------|------|
 | `npm run dev` | 启动开发模式（热重载） |
-| `npm run typecheck` | 类型检查（`vue-tsc --noEmit`），**主要正确性门禁**；无 jest/vitest，无 `npm test` |
-| `npm run selftest` | 自测：`selftest-settings-mapping.ts && regression-tests.ts`（含 settings↔JSON 映射、模型别名解析、上下文用量、交互契约等） |
+| `npm run typecheck` | 依次检查 node（`tsc`）和 web（`vue-tsc`）两个 TypeScript project，**主要正确性门禁**；无 jest/vitest，无 `npm test` |
+| `npm run selftest` | 自测五段：settings↔JSON 映射、regression 契约（含附件/Task 8）、stall watchdog、export-image 纯逻辑、PNG codec；使用本地 `tsx` |
 | `npx tsx scripts/regression-tests.ts` | 回归测试（selftest 已串联，可单独跑） |
 | `npm run rebuild` | 重编译 `better-sqlite3` 原生 ABI；**拉代码后若启动报 `NODE_MODULE_VERSION` 错误必跑** |
 | `npm run build` / `npm run package:win` | 构建 / 打包 Windows 安装包 |
@@ -37,11 +37,11 @@ src/shared/      主进程与渲染进程共享的类型与纯逻辑（settings-
 
 路径别名：`@shared` → `src/shared`，`@` → `src/renderer`（仅渲染层）。
 
-### 后端接入（双路径）
+### 后端接入
 
-- **默认：Claude Agent SDK**（`src/main/modules/sdk-backend.ts`）——通过 `canUseTool` / `onElicitation` / `onUserDialog` / `supportedDialogKinds` 四个 SDK 正式 hook 接入交互。
-- **回退：spawn CLI**（`src/main/modules/process-manager.ts`）——`chat-backend.ts` 的 re-export 一行切换。
-- 公共工具函数（`buildSpawnEnv` / `normalizeToolResultContent` / `persistCliEvent` / `persistMessageParts`）被两路径共用，不可删除。
+- **生产聊天唯一入口：`chat-backend.ts → sdk-backend.ts`**，通过 Claude Agent SDK 的 `canUseTool` / `onElicitation` / `onUserDialog` / `supportedDialogKinds` 四个正式 hook 接入交互。
+- `process-manager.ts` 只保留兼容/测试所需的 spawn CLI 实现，不得恢复为生产聊天 fallback。
+- 公共工具函数（`buildSpawnEnv` / `normalizeToolResultContent` / `persistCliEvent` / `persistMessageParts`）被现有调用共用，不可删除。
 
 ### 统一交互弹窗系统
 
@@ -80,6 +80,13 @@ SDK canUseTool / onUserDialog / onElicitation
 - `sessionContextStats` Map 缓存最近用量（压缩事件无 usage 时沿用），`markSessionDeleted` 清理
 - 前端 `ContextButton.vue`：圆环占比 + hover 弹层 + 自动压缩横幅（3 秒）
 - `session-store.compactedJustNow` 标记，`switchSession` 复位防串扰
+
+### 会话附件
+
+- 附件由主进程复制并管理，物理文件位于 Electron `userData/attachments/<sessionId>/...`；renderer 只持有附件 ID/摘要，不能接收或拼接绝对路径。
+- 图片通过 Agent SDK image block 发送；文档/普通文件通过会话附件目录和 `additionalDirectories` 交给 Claude Code `Read` 工具。
+- 导出图片使用不含 ID、路径、storage key、哈希的最小附件快照；隐藏 renderer 只消费 snapshot，不调用 `window.claudeLink`。
+- 附件 IPC 是现有“应用不直接调用 Anthropic API”原则的例外说明：它只访问本地 Electron 主进程的存储/预览服务，不是外部 API。
 
 ### 会话搜索（视图态）
 

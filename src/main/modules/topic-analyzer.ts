@@ -57,7 +57,7 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
       return topic;
     }
   } catch (error) {
-    logger.warn('Topic analysis failed, using heuristic fallback', error);
+    logger.warn(`Topic analysis failed, using heuristic fallback: ${error instanceof Error ? error.message : String(error)}`);
   }
 
   // 兜底：取首句前 15 个字符，压缩空白避免标题里出现换行

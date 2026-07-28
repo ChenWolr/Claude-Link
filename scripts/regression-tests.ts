@@ -26,7 +26,7 @@ import { parseClaudeSettings } from '../src/main/modules/settings-importer';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdownRenderer, isDiffContent, renderDiffHtml, renderDiffHtmlWithRenderer, renderMarkdown } from '../src/renderer/utils/markdown';
 import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';
-import { TOOL_DIFF_TOOL_NAMES } from '../src/shared/process-kind';
+import { extractSubAgentTitle, TOOL_DIFF_TOOL_NAMES } from '../src/shared/process-kind';
 import { parseStatusPorcelainV1Z, parseNumstatZ, normalizeStatus, truncateDiff } from '../src/main/modules/changes-panel';
 import { shouldSkipMermaidErrorRetry, summarizeMermaidAccessibleTitle } from '../src/renderer/directives/enrich-markdown';
 import {
@@ -935,6 +935,7 @@ function testAttachmentTask7BContracts(): void {
   assert.ok(engine.includes('getMessagesByTask'), '须按 parent_task_id 查已有 user message 实现幂等');
   assert.ok(/spawnForTask\([\s\S]*prepared\.prompt/.test(engine), 'executeNextTask 须把 prepared.prompt 传给 spawnForTask');
   assert.ok(engine.includes('prepared.additionalDirectories'), 'executeNextTask 须透传 additionalDirectories');
+  assert.ok(/const executionGeneration = generation[\s\S]*child\.on\('exit'[\s\S]*isQueueGenerationActive\(sessionId, executionGeneration\)/.test(engine), 'task retry/interrupt 后旧 child exit 不得覆盖新执行状态');
   assert.ok(/async function continueWithUserMessage[\s\S]*payload: ChatSendPayload/.test(engine), 'continueWithUserMessage 须 async + 收 ChatSendPayload');
   assert.ok(engine.includes('user_message_created'), '引擎创建 user message 后须 emit user_message_created 事件');
   assert.ok(engine.includes('runNextTask'), 'executeNextTask 改 async 后须有 runNextTask 包装防 unhandled rejection');
@@ -971,6 +972,79 @@ function testAttachmentTask7BContracts(): void {
   // 10) Task 类型：clientMessageId + attachments 必需数组
   assert.ok(taskTypes.includes('clientMessageId: string | null'), 'Task 类型须有 clientMessageId');
   assert.ok(/attachments: AttachmentSummary\[\]/.test(taskTypes), 'Task.attachments 须为必需数组');
+}
+
+function testProcessKindSubAgentTitleNarrowing(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const processKind = fs.readFileSync(new URL('../src/shared/process-kind.ts', import.meta.url), 'utf8');
+  assert.ok(
+    /isSubAgentToolUse\([^)]*\):\s*part is Extract<[^>]+\{ type: 'tool_use' \}/.test(processKind),
+    'isSubAgentToolUse 须声明 tool_use 类型谓词再访问 input/name',
+  );
+  assert.equal(
+    extractSubAgentTitle({ type: 'tool_use', name: 'Agent', input: { description: '检查附件导出' } }),
+    '检查附件导出',
+    'tool_use 子 Agent 须从 input 提取标题',
+  );
+  assert.equal(
+    extractSubAgentTitle({ type: 'text', text: '普通正文' }),
+    null,
+    '非 tool_use part 不得读取 name/input',
+  );
+}
+
+function testExportAttachmentSmokeContracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const smoke = readFileSync(new URL('../src/main/modules/export-image-smoke.ts', import.meta.url), 'utf8');
+  const mainIndex = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+  const viteConfig = readFileSync(new URL('../electron.vite.config.ts', import.meta.url), 'utf8');
+  assert.ok(mainIndex.includes("app.setPath('userData', smokeUserDataDir)"), 'export smoke 须在主入口隔离 userData');
+  assert.ok(mainIndex.includes('claude-link-smoke-${process.pid}-${randomUUID()}'), 'export smoke 须使用进程唯一缓存目录，禁止递归删除固定用户目录');
+  assert.ok(mainIndex.indexOf('app.setPath') < mainIndex.indexOf('app.whenReady()'), 'export smoke userData 须在业务初始化前配置');
+  assert.ok(viteConfig.includes("index: resolve('src/main/index.ts')"), 'Electron 主进程须保持稳定入口目录，避免 __dirname 资源路径漂移');
+  for (const relative of ['config-manager.ts', 'workspace-history.ts', 'window-state.ts']) {
+    const source = readFileSync(new URL(`../src/main/modules/${relative}`, import.meta.url), 'utf8');
+    assert.ok(/function getStore\(\)/.test(source), `${relative} 须延迟创建 electron-store`);
+    assert.ok(!/const store = new ElectronStoreCtor/.test(source), `${relative} 不得在静态 import 阶段创建 electron-store`);
+  }
+  const manager = readFileSync(new URL('../src/main/modules/export-image-manager.ts', import.meta.url), 'utf8');
+  assert.ok(/smokeDest[\s\S]*job\.smoke/.test(manager), '普通导出不得信任 smoke 保存目录环境变量');
+  assert.ok(smoke.includes('smoke-image.png') && smoke.includes('smoke-note.txt') && smoke.includes('attachmentOnly'), 'export smoke 须覆盖图片、文件和附件-only fixture');
+  assert.ok(smoke.includes('missing-preview.png') && smoke.includes('previewUnavailable'), 'export smoke 须覆盖缺失 preview 且不失败');
+  assert.ok(smoke.includes('validateExportSnapshot(start.snapshot)'), 'export smoke 须校验实际送入 hidden renderer 的快照');
+  assert.ok(smoke.includes('width: 640') && smoke.includes('height: 320'), 'export smoke 须用长边超过 512 的图片覆盖真实缩放');
+  assert.ok(!smoke.includes('snapshotContract = {'), 'export smoke 不得用写死布尔值冒充快照断言');
+  const exportRunner = readFileSync(new URL('../src/renderer/export/export-runner.ts', import.meta.url), 'utf8');
+  assert.ok(exportRunner.includes("hasOwnProperty.call(window, 'claudeLink')"), 'hidden renderer smoke 须运行时确认完整 preload API 未暴露');
+  assert.ok(exportRunner.includes('.msg-att__thumb-img') && exportRunner.includes('.msg-att--file') && exportRunner.includes('.msg-att--unavailable'), 'hidden renderer smoke 须确认三类附件 DOM 已进入捕获页面');
+  assert.ok(smoke.includes('validatePng') && smoke.includes('validateJpeg'), 'export smoke 须验证 PNG/JPEG 可解码');
+  assert.ok(smoke.includes('preview.width !== 512') && smoke.includes('preview.height !== 256'), 'export smoke 须验证大图实际缩放到 512 长边 PNG');
+  assert.ok(smoke.includes('storageKey') && smoke.includes('sha256'), 'export smoke 须检查内部字段未进入快照');
+}
+
+function testAttachmentTask8Contracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const sessionRepo = readFileSync(new URL('../src/main/database/repositories/session-repo.ts', import.meta.url), 'utf8');
+  const attachmentService = readFileSync(new URL('../src/main/modules/attachment-service.ts', import.meta.url), 'utf8');
+  const attachmentStorage = readFileSync(new URL('../src/main/modules/attachment-storage.ts', import.meta.url), 'utf8');
+  const mainIndex = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+  const ipcHandlers = readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
+  const exportAttachments = readFileSync(new URL('../src/main/modules/export-attachment-snapshot.ts', import.meta.url), 'utf8');
+  const messageAttachments = readFileSync(new URL('../src/renderer/components/chat/MessageAttachments.vue', import.meta.url), 'utf8');
+
+  assert.ok(/FROM message_attachments ma[\s\S]*JOIN attachments a/.test(sessionRepo), '搜索须只聚合历史消息附件');
+  assert.ok(!/FROM attachments GROUP BY session_id/.test(sessionRepo), '搜索不得聚合 draft/task-only 附件');
+  assert.ok(/refs\.message > 0[\s\S]*'message'[\s\S]*refs\.task > 0[\s\S]*'task'/.test(attachmentService), 'draft reconcile 须消息引用优先、任务引用其次');
+  assert.ok(/reconcileDraftAttachments[\s\S]*cleanupOrphanAttachments/.test(mainIndex), '启动清理须先 reconcile 后 orphan');
+  assert.ok(/catch \(error\)[\s\S]*rm\(tmpPath, \{ force: true \}\)/.test(attachmentStorage), '写入失败须自行删除 .part');
+  assert.ok(attachmentStorage.includes('lstat') && attachmentStorage.includes('symbolic link'), '附件存储须拒绝符号链接路径');
+  assert.ok(attachmentStorage.includes('cleanupStalePartFiles'), 'orphan 清理须处理过期 .part 和空目录');
+  assert.ok(/cleanupQueue\(id\)[\s\S]*markSessionDeleted\(id\)[\s\S]*deleteSession/.test(ipcHandlers), '会话删除须先 cleanupQueue 并保留迟到写入守卫');
+  assert.ok(exportAttachments.includes('previewUnavailable: true'), '导出 preview 失败须形成占位而非中断');
+  assert.ok(!exportAttachments.includes('storageKey') && !exportAttachments.includes('sha256'), '导出最小投影不得携带路径或哈希');
+  assert.ok(/props\.exportMode[\s\S]*isSnapshotAttachment[\s\S]*att\.preview/.test(messageAttachments), 'hidden renderer 须只读 snapshot preview');
+  assert.ok(/att\.previewUnavailable[\s\S]*附件不可用/.test(messageAttachments), '导出 snapshot 缺失 preview 须显示附件不可用占位');
+  assert.ok(/isSnapshotAttachment\(att\)[\s\S]*:\s*att\.id/.test(messageAttachments), '普通历史附件 key 须直接返回 att.id，禁止递归 attachmentKey');
 }
 
 function testApiUrlBuilder(): void {
@@ -2513,6 +2587,9 @@ testAttachmentHistoryContracts();
 testAttachmentBadgeContracts();
 testAttachmentTask7AContracts();
 testAttachmentTask7BContracts();
+testProcessKindSubAgentTitleNarrowing();
+testExportAttachmentSmokeContracts();
+testAttachmentTask8Contracts();
 }
 
 main().catch((error) => {

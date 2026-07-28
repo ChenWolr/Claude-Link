@@ -23,6 +23,15 @@ import { logger } from '../utils/logger';
 
 const queues = new Map<string, QueueState>();
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
+const queueGenerations = new Map<string, number>();
+
+function getQueueGeneration(sessionId: string): number {
+  return queueGenerations.get(sessionId) ?? 0;
+}
+
+function isQueueGenerationActive(sessionId: string, generation: number): boolean {
+  return getQueueGeneration(sessionId) === generation && sessionRepo.getSession(sessionId) !== null;
+}
 
 function emitQueueEvent(
   mainWindow: BrowserWindow,
@@ -106,6 +115,9 @@ export function interruptTask(taskId: string, sessionId: string, mainWindow: Bro
   const isContinuing = state.status === 'continuing';
   if (!isRunning && !isContinuing) return;
 
+  // 使当前执行实例失效：retry 可能很快把同一 task 再设为 currentTaskId，
+  // 旧 child 的迟到 exit 不能据此覆盖新一轮 pending/running 状态。
+  queueGenerations.set(sessionId, getQueueGeneration(sessionId) + 1);
   killProcess(sessionId);
   if (isRunning) {
     taskRepo.updateTaskStatus(taskId, 'cancelled');
@@ -161,6 +173,7 @@ function runNextTask(sessionId: string, mainWindow: BrowserWindow): void {
 }
 
 async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Promise<void> {
+  const generation = getQueueGeneration(sessionId);
   const state = getOrCreateQueue(sessionId);
   const config = getConfig();
 
@@ -182,6 +195,7 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
   emitQueueEvent(mainWindow, sessionId, 'task_started', task.id);
 
   const session = sessionRepo.getSession(sessionId);
+  if (!isQueueGenerationActive(sessionId, generation)) return;
 
   // Task 7B：稳定 clientMessageId（老任务首次执行时生成并持久化，retry/重启复用同一 ID）。
   let clientMessageId = task.clientMessageId;
@@ -200,6 +214,7 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
       attachments: records,
       attachmentPaths: paths,
     });
+    if (!isQueueGenerationActive(sessionId, generation)) return;
   } catch (err) {
     // 构造失败：task→failed，保留 task link（附件状态不动，仍可 retry）；推进队列继续下一个。
     const msg = err instanceof Error ? err.message : String(err);
@@ -213,6 +228,7 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
   }
 
   // 创建或复用 user message（按 parent_task_id 查；幂等，retry/重启不翻倍消息/links）。
+  if (!isQueueGenerationActive(sessionId, generation)) return;
   const existing = messageRepo.getMessagesByTask(task.id).find((m) => m.role === 'user');
   let userMessage: Message;
   if (existing) {
@@ -231,6 +247,8 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
     emitQueueEvent(mainWindow, sessionId, 'user_message_created', task.id, { message: userMessage });
   }
 
+  if (!isQueueGenerationActive(sessionId, generation)) return;
+  const executionGeneration = generation;
   const child = spawnForTask(task.id, sessionId, prepared.prompt, mainWindow, {
     model: session?.model ?? config.defaultModel,
     modelOverride: session?.modelOverride ?? null,
@@ -242,7 +260,7 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
   });
 
   child.on('exit', (code) => {
-    if (state.currentTaskId !== task.id) return;
+    if (state.currentTaskId !== task.id || !isQueueGenerationActive(sessionId, executionGeneration)) return;
 
     if (code === 0) {
       taskRepo.updateTaskStatus(task.id, 'completed');
@@ -407,6 +425,7 @@ export function getQueueState(sessionId: string): QueueState {
 }
 
 export function cleanupQueue(sessionId: string): void {
+  queueGenerations.set(sessionId, getQueueGeneration(sessionId) + 1);
   const countdownTimer = timers.get(sessionId);
   const mainTimer = timers.get(`${sessionId}__main`);
   if (countdownTimer) clearInterval(countdownTimer);

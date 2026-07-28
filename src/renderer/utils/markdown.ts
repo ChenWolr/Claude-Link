@@ -1,4 +1,5 @@
-import MarkdownIt, { type Token } from 'markdown-it';
+import MarkdownIt from 'markdown-it';
+import type Token from 'markdown-it/lib/token.mjs';
 import hljs from 'highlight.js';
 import { html as diff2htmlHtml } from 'diff2html';
 import taskLists from 'markdown-it-task-lists';
@@ -83,7 +84,7 @@ export function createPreviewMarkdownRenderer(): MarkdownIt {
 }
 
 // 代码围栏由一个 renderer 统一决定最终 DOM，避免 markdown-it 再包一层 <pre><code>。
-md.renderer.rules.fence = (tokens, idx, options, env) => {
+md.renderer.rules.fence = (tokens, idx, _options, env) => {
   const token = tokens[idx];
   const language = token.info.trim().split(/\s+/)[0].toLowerCase();
   const code = token.content;
@@ -216,7 +217,7 @@ export function renderDiffHtmlWithRenderer(
   }
 }
 
-export function renderDiffHtml(diffText: string, options?: { matching?: 'none' | 'lines' }): string {
+export function renderDiffHtml(diffText: string, options?: { matching?: 'none' | 'lines'; sideBySide?: boolean }): string {
   return renderDiffHtmlWithRenderer(diffText, diff2htmlHtml, options);
 }
 

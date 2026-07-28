@@ -34,17 +34,23 @@ const ElectronStoreCtor = ElectronStore as unknown as new (options?: {
   set(value: Partial<PersistedSize>): void;
 };
 
-const store = new ElectronStoreCtor({
-  name: 'claude-link-window-state',
-  projectName: app.getName(),
-  defaults: {},
-});
+type WindowStateStore = InstanceType<typeof ElectronStoreCtor>;
+let store: WindowStateStore | null = null;
+
+function getStore(): WindowStateStore {
+  store ??= new ElectronStoreCtor({
+    name: 'claude-link-window-state',
+    projectName: app.getName(),
+    defaults: {},
+  });
+  return store;
+}
 
 const SAVE_DEBOUNCE_MS = 500;
 
 /** 读取持久化尺寸；不存在或非法返回 null。读出后 clamp 到最小尺寸（防御脏值）。 */
 export function loadWindowSize(): WindowSize | null {
-  const raw = store.store;
+  const raw = getStore().store;
   const width = typeof raw.width === 'number' && Number.isFinite(raw.width) ? raw.width : NaN;
   const height = typeof raw.height === 'number' && Number.isFinite(raw.height) ? raw.height : NaN;
   if (!Number.isFinite(width) || !Number.isFinite(height)) {
@@ -66,14 +72,14 @@ export function trackWindowSize(window: BrowserWindow): void {
       return;
     }
     const bounds = window.getNormalBounds();
-    store.set({ width: bounds.width, height: bounds.height });
+    getStore().set({ width: bounds.width, height: bounds.height });
   };
 
   const flush = (): void => {
     try {
       save();
     } catch (error) {
-      logger.warn('保存窗口大小失败', error);
+      logger.warn(`保存窗口大小失败：${error instanceof Error ? error.message : String(error)}`);
     }
   };
 

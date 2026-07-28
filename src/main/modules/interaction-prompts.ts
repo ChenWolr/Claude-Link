@@ -54,9 +54,9 @@ export function requestInteraction(
       abortCleanup = () => signal.removeEventListener('abort', onAbort);
     }
 
-    const onWindowClosed = (): void => finish({ id: payload.id, action: 'cancel' });
+    const onWindowClosed = (): void => { finish({ id: payload.id, action: 'cancel' }); };
     mainWindow.once('closed', onWindowClosed);
-    const windowCleanup = (): void => mainWindow.off('closed', onWindowClosed);
+    const windowCleanup = (): void => { mainWindow.off('closed', onWindowClosed); };
 
     pendingInteractionRequests.set(payload.id, {
       sessionId: payload.sessionId,
