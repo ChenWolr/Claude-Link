@@ -4,12 +4,9 @@ Guidance for AI agents working in this repository. The longer-form `CLAUDE.md` c
 
 ## Project overview
 
-Claude Link is an Electron 35 + Vue 3.5 + TypeScript desktop app that acts as a graphical frontend for the locally-installed Claude Code CLI. It does NOT call the Anthropic API directly. Two backends, switchable by re-export in `src/main/modules/chat-backend.ts`:
+Claude Link is an Electron 35 + Vue 3.5 + TypeScript desktop app that acts as a graphical frontend for the locally-installed Claude Code CLI. It does NOT call the Anthropic API directly. Production chat has one backend path: `src/main/modules/chat-backend.ts` re-exports `sdk-backend.ts`, which uses the Claude Agent SDK hooks `canUseTool` / `onElicitation` / `onUserDialog` / `supportedDialogKinds`. `process-manager.ts` remains only for compatibility/tests; do not restore it as a production chat fallback.
 
-- **Default: Claude Agent SDK** (`src/main/modules/sdk-backend.ts`) — hooks `canUseTool` / `onElicitation` / `onUserDialog` / `supportedDialogKinds`.
-- **Fallback: spawn `claude` CLI** (`src/main/modules/process-manager.ts`) — env + `.claude/settings.local.json` injected, stream-json parsed.
-
-Both share helpers like `buildSpawnEnv` / `normalizeToolResultContent` / `persistCliEvent` / `persistMessageParts` — do not delete them.
+Shared helpers such as `buildSpawnEnv` / `normalizeToolResultContent` / `persistCliEvent` / `persistMessageParts` still have callers — do not delete them.
 
 ## Prerequisites
 
@@ -19,8 +16,8 @@ Both share helpers like `buildSpawnEnv` / `normalizeToolResultContent` / `persis
 ## Commands
 
 - `npm run dev` — start dev with hot reload (renderer only; main/preload changes need an app restart).
-- `npm run typecheck` — `vue-tsc --noEmit`; the **hard correctness gate**. Any change must pass with zero errors. There is no jest/vitest and no `npm test` script.
-- `npm run selftest` — chains three tsx scripts: `selftest-settings-mapping.ts && regression-tests.ts && tdd-stall-watchdog-verify.ts`. Covers settings↔JSON mapping, model alias resolution, context usage, interaction contracts.
+- `npm run typecheck` — runs the node and web TypeScript projects; the **hard correctness gate**. Any change must pass with zero errors. There is no jest/vitest and no `npm test` script.
+- `npm run selftest` — chains five local `tsx` scripts: settings↔JSON mapping, regression contracts (including attachments/Task 8), stall watchdog, export-image logic, and PNG codec.
 - `npx tsx scripts/regression-tests.ts` — run regression tests alone.
 - `npm run rebuild` — recompile the `better-sqlite3` native ABI. **Run this after pulling code or bumping the electron version if startup fails with `NODE_MODULE_VERSION` errors.**
 - `npm run build` / `npm run package:win` — build / package Windows installer.
@@ -29,8 +26,7 @@ Both share helpers like `buildSpawnEnv` / `normalizeToolResultContent` / `persis
 
 - **Restart the Electron app after main/preload changes** — dev hot reload only covers the renderer.
 - **typecheck is the hard gate; selftest is the contract gate.** New features should add assertions to `scripts/selftest-settings-mapping.ts` (append a new `=== N) ... ===` section).
-- **GUI pixel-level details can't be auto-verified.** Hover/animation/alignment of the interaction dialogs must be eyeballed in a real Electron app; logic/structure/CLI behavior is covered by selftest + regression.
-
+- **GUI pixel-level details can't be auto-verified.** Hover/animation/alignment of the interaction dialogs and attachment composer/export layout must be eyeballed in a real Electron app; logic/structure/CLI behavior is covered by selftest + regression.
 ## Architecture
 
 Three-process Electron model:
@@ -49,6 +45,7 @@ Path aliases (see `electron.vite.config.ts` + `tsconfig.web.json`): `@shared` �
 - **Unified interaction queue**: SDK `canUseTool` / `onUserDialog` / `onElicitation` are adapted in `sdk-interactions.ts` to `InteractionPromptPayload`, queued in `interaction-prompts.ts` (main) + `interaction-store.ts` (renderer), rendered by `InteractionPrompt.vue`. Local confirm dialogs also use the same queue (`kind:'confirm'`, no IPC, resolved in `respondAndRemove`). Persisted in the `interaction_history` table (CASCADE-delete with session).
 - **Real context usage & auto-compaction**: `src/shared/context-usage.ts` — `extractContextTokens` sums input + cache_creation + cache_read; `detectCompaction` flags `system + compact_boundary` events. `sessionContextStats` Map caches the last seen usage; `markSessionDeleted` cleans it.
 - **Process grouping**: messages fold into `ProcessGroup` by turn; sub-agent (Task/Agent tool) processes are pulled to the right-side "子Agent" tab via `parentToolUseId`. The `messages` table carries `process_kind` / `parent_agent_id` / `tool_use_id` / `title` columns.
+- **Attachments**: main process owns copies under Electron `userData/attachments/<sessionId>/...`; renderer receives only IDs/summaries through local IPC. Images use SDK image blocks; documents/files use the controlled attachment directory plus `additionalDirectories` for the Claude Code `Read` tool. Export uses a minimal snapshot without IDs, paths, storage keys, or hashes.
 - **Changes panel**: right-side "改动" Tab — `changes-panel.ts` (main) + `changes-store.ts` / `components/changes/ChangesPanel.vue` (renderer).
 
 ## Key design decisions

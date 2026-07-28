@@ -60,7 +60,9 @@ export const PNG_MAX_PEAK_RSS_BYTES = 1 * 1024 * 1024 * 1024; // worker 峰值 R
 // =====================================================================
 
 /** 把完整 Message（或同形对象）投影为最小 RenderableMessage，剥离 rawEvent / parentTaskId。 */
-export function toRenderable<T extends RenderableMessage>(msg: T): RenderableMessage {
+export function toRenderable<T extends RenderableMessage<import('./types/export-image').ExportAttachmentSnapshot>>(
+  msg: T,
+): RenderableMessage<import('./types/export-image').ExportAttachmentSnapshot> {
   return {
     id: msg.id,
     sessionId: msg.sessionId,
@@ -75,6 +77,23 @@ export function toRenderable<T extends RenderableMessage>(msg: T): RenderableMes
     title: msg.title,
     isError: msg.isError,
     createdAt: msg.createdAt,
+    attachments: msg.attachments?.map((attachment) => ({
+      kind: attachment.kind,
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      width: attachment.width,
+      height: attachment.height,
+      preview: attachment.preview
+        ? {
+            mimeType: 'image/png',
+            bytes: Uint8Array.from(attachment.preview.bytes),
+            width: attachment.preview.width,
+            height: attachment.preview.height,
+          }
+        : undefined,
+      previewUnavailable: attachment.previewUnavailable,
+    })),
   };
 }
 
@@ -141,10 +160,11 @@ const IMG_TAG_RE = /!\[[^\]]*\]\([^)]+\)/g;
 /** 估算单条消息的可见权重：可见字符数 + 图片数 × imageWeight。 */
 export function estimateMessageWeight(msg: RenderableMessage, imageWeight: number): number {
   const text = msg.content ?? '';
-  const imgCount = (text.match(IMG_TAG_RE) || []).length;
+  const markdownImageCount = (text.match(IMG_TAG_RE) || []).length;
+  const attachmentImageCount = (msg.attachments ?? []).filter((attachment) => attachment.kind === 'image').length;
   // 去掉 markdown 图片语法本身的字符噪声，按可见正文长度计。
   const stripped = text.replace(IMG_TAG_RE, '');
-  return stripped.length + imgCount * imageWeight;
+  return stripped.length + (markdownImageCount + attachmentImageCount) * imageWeight;
 }
 
 /** 主流程（parentAgentId===null）按 user 消息边界划分对话轮。
@@ -437,8 +457,10 @@ export function checkSnapshotBudget(input: SnapshotBudgetInput): SnapshotBudgetR
     }
     total += b;
   }
+  for (const b of input.attachmentUtf8Bytes) total += b;
+  for (const b of input.previewBytes) total += b;
   if (total > SNAPSHOT_TOTAL_BYTES_MAX) {
-    return { ok: false, reason: `总文本字节 ${total} 超过 ${SNAPSHOT_TOTAL_BYTES_MAX}` };
+    return { ok: false, reason: `快照总字节 ${total} 超过 ${SNAPSHOT_TOTAL_BYTES_MAX}` };
   }
   if (input.imageCount > SNAPSHOT_IMAGE_MAX) {
     return { ok: false, reason: `图片数 ${input.imageCount} 超过 ${SNAPSHOT_IMAGE_MAX}` };

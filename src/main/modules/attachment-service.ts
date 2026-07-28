@@ -9,6 +9,7 @@ import {
 } from './attachment-policy';
 import {
   type StagedAttachmentInput,
+  cleanupStalePartFiles,
   listStoredAttachmentKeys,
   probeImageDimensions,
   readStoredAttachmentBytes,
@@ -199,21 +200,35 @@ export async function cloneMessageAttachmentsToDraft(
   }
 }
 
-/** 启动清理：删除遗留的 draft 附件（未发送草稿）。 */
-export async function cleanupDraftAttachments(): Promise<void> {
+/**
+ * 启动时按真实引用修正附件状态，避免崩溃窗口留下的 draft 被误删。
+ * 消息引用优先于任务引用；均无引用才删除记录和物理文件。
+ */
+export async function reconcileDraftAttachments(): Promise<void> {
   const drafts = attachmentRepo.listDraftAttachments();
   for (const draft of drafts) {
     try {
-      attachmentRepo.deleteAttachment(draft.id);
-      await removeAttachmentFile(draft.storageKey);
+      const refs = attachmentRepo.getAttachmentReferenceCounts(draft.id);
+      if (refs.message > 0) {
+        attachmentRepo.markAttachmentsStatus([draft.id], 'message');
+      } else if (refs.task > 0) {
+        attachmentRepo.markAttachmentsStatus([draft.id], 'task');
+      } else {
+        attachmentRepo.deleteAttachment(draft.id);
+        await removeAttachmentFile(draft.storageKey);
+      }
     } catch (e) {
-      logger.error(`cleanup draft attachment ${draft.id} failed`, e);
+      logger.error(`reconcile draft attachment ${draft.id} failed`, e);
     }
   }
 }
 
-/** 启动清理：删除数据库无记录的孤儿物理文件。 */
+/** 兼容旧调用名；语义已改为引用 reconcile。 */
+export const cleanupDraftAttachments = reconcileDraftAttachments;
+
+/** 启动清理：删除数据库无记录的孤儿物理文件和过期临时文件。 */
 export async function cleanupOrphanAttachments(): Promise<void> {
+  await cleanupStalePartFiles();
   const dbKeys = new Set(attachmentRepo.listAllStorageKeys());
   const storedKeys = await listStoredAttachmentKeys();
   for (const key of storedKeys) {

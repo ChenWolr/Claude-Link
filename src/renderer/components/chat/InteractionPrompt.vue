@@ -1,10 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type {
-  InteractionFormField,
   InteractionPromptOption,
   InteractionPromptPayload,
-  InteractionPromptQuestion,
 } from '../../../shared/types/ipc';
 import InteractionDetails from './InteractionDetails.vue';
 import InteractionOptionList from './InteractionOptionList.vue';
@@ -63,7 +61,6 @@ const activeQuestion = computed(() => wizardQuestions.value[wizardIndex.value] ?
 const isWizard = computed(() => wizardQuestions.value.length > 0);
 const activeOptions = computed(() => activeQuestion.value?.options ?? activeRequest.value?.options ?? []);
 const currentMultiSelect = computed(() => Boolean(activeQuestion.value?.multiSelect ?? activeRequest.value?.multiSelect));
-const currentAllowOther = computed(() => Boolean(activeQuestion.value?.allowOther ?? activeRequest.value?.allowOther ?? activeOptions.value.some((option) => option.id === OTHER_OPTION_ID)));
 const selectedIdList = computed(() => Array.from(selectedIds.value));
 const filteredOptionEntries = computed<OptionEntry[]>(() => {
   const needle = searchText.value.trim().toLowerCase();

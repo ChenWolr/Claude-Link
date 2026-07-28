@@ -262,6 +262,7 @@ export type QueueEventType =
   | 'countdown_tick'
   | 'countdown_cancelled'
   | 'task_continuing'
+  | 'user_message_created'
   | 'queue_paused'
   | 'queue_completed';
 

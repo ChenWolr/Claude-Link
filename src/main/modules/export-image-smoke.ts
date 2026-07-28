@@ -6,12 +6,16 @@
 import { app } from 'electron';
 import { promises as fs } from 'fs';
 import { join } from 'path';
+import { randomUUID } from 'crypto';
 import type { WebContents } from 'electron';
 import { PNG } from 'pngjs';
 import { cleanupActiveJob, startImageExport } from './export-image-manager';
-import type { ExportImageFormat } from '../../shared/types/export-image';
+import type { ExportImageFormat, ExportJobSnapshot } from '../../shared/types/export-image';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
+import * as attachmentRepo from '../database/repositories/attachment-repo';
+import { stageAttachment } from './attachment-service';
+import { removeAttachmentFile } from './attachment-storage';
 import { logger } from '../utils/logger';
 
 const RESULT_DIR = 'D:\\software\\Cache\\claude-link-spike';
@@ -27,6 +31,70 @@ export async function runExportSmokeIfRequested(origin: WebContents | undefined)
   try {
     // 种子会话 + N 条消息（user/assistant 交替，制造多轮）。
     const session = sessionRepo.createSession('导出smoke会话', 'sonnet');
+    const png = new PNG({ width: 640, height: 320 });
+    for (let y = 0; y < png.height; y++) {
+      for (let x = 0; x < png.width; x++) {
+        const offset = (y * png.width + x) * 4;
+        png.data[offset] = x < png.width / 2 ? 0xe5 : 0x2f;
+        png.data[offset + 1] = y < png.height / 2 ? 0x4b : 0xb3;
+        png.data[offset + 2] = x < png.width / 2 ? 0x64 : 0xd4;
+        png.data[offset + 3] = 0xff;
+      }
+    }
+    const pngBytes = PNG.sync.write(png);
+    const image = await stageAttachment({
+      id: randomUUID(),
+      sessionId: session.id,
+      filename: 'smoke-image.png',
+      mimeType: 'image/png',
+      bytes: new Uint8Array(pngBytes),
+    });
+    const document = await stageAttachment({
+      id: randomUUID(),
+      sessionId: session.id,
+      filename: 'smoke-note.txt',
+      mimeType: 'text/plain',
+      bytes: new TextEncoder().encode('Task 9 export attachment smoke fixture'),
+    });
+    const imageMessage = messageRepo.createMessageWithAttachments({
+      sessionId: session.id,
+      role: 'user',
+      content: '文字与图片附件 smoke',
+      eventType: 'message',
+      attachments: [image.id],
+    });
+    messageRepo.createMessageWithAttachments({
+      sessionId: session.id,
+      role: 'user',
+      content: '',
+      eventType: 'message',
+      attachments: [document.id],
+    });
+    // 独立图片 fixture 再复制为消息附件；缺失 preview 由删除物理文件后的预览失败路径覆盖。
+    const missingImage = await stageAttachment({
+      id: randomUUID(),
+      sessionId: session.id,
+      filename: 'missing-preview.png',
+      mimeType: 'image/png',
+      bytes: new Uint8Array(pngBytes),
+    });
+    messageRepo.createMessageWithAttachments({
+      sessionId: session.id,
+      role: 'user',
+      content: '缺失预览附件 smoke',
+      eventType: 'message',
+      attachments: [missingImage.id],
+    });
+    const missingRecord = attachmentRepo.getAttachment(missingImage.id);
+    if (!missingRecord) throw new Error('missing preview fixture record not found');
+    await removeAttachmentFile(missingRecord.storageKey);
+    result.fixture = {
+      imageMessageId: imageMessage.id,
+      attachmentOnly: true,
+      imageFilename: image.filename,
+      documentFilename: document.filename,
+      missingPreviewFilename: missingImage.filename,
+    };
     for (let i = 0; i < count; i++) {
       const role = i % 2 === 0 ? 'user' : 'assistant';
       const content = role === 'user' ? `用户提问 ${i}：请详细介绍。` : `助手回答 ${i}：` + '这是一段较长的回答内容，用于撑高页面触发分段与多页。'.repeat(8);
@@ -49,6 +117,33 @@ export async function runExportSmokeIfRequested(origin: WebContents | undefined)
   }
 }
 
+function validateExportSnapshot(snapshot: ExportJobSnapshot | undefined): Record<string, unknown> {
+  if (!snapshot) throw new Error('smoke export snapshot unavailable');
+  const attachments = snapshot.messages.flatMap((message) => message.attachments ?? []);
+  const serializedAttachments = JSON.stringify(attachments);
+  if (/storageKey|sha256|attachmentId|sessionId|data:image\//.test(serializedAttachments)) {
+    throw new Error('export attachment snapshot contains internal fields or Base64 data URL');
+  }
+
+  const image = attachments.find((attachment) => attachment.filename === 'smoke-image.png');
+  if (!image?.preview) throw new Error('smoke image preview missing from export snapshot');
+  if (image.preview.mimeType !== 'image/png' || image.preview.width !== 512 || image.preview.height !== 256) {
+    throw new Error(`smoke image preview was not resized to bounded PNG: ${image.preview.mimeType} ${image.preview.width}x${image.preview.height}`);
+  }
+  const document = attachments.find((attachment) => attachment.filename === 'smoke-note.txt');
+  if (!document || document.preview) throw new Error('document metadata card is missing or contains preview bytes');
+  const missing = attachments.find((attachment) => attachment.filename === 'missing-preview.png');
+  if (!missing?.previewUnavailable || missing.preview) throw new Error('missing preview placeholder is not represented safely');
+
+  return {
+    minimalMetadata: true,
+    previewUnavailable: true,
+    noBase64OrPath: true,
+    previewMaxLongEdge: Math.max(image.preview.width, image.preview.height),
+    attachmentNames: attachments.map((attachment) => attachment.filename),
+  };
+}
+
 async function runOneFormat(origin: WebContents, sessionId: string, format: ExportImageFormat): Promise<Record<string, unknown>> {
   const smokeDest = join(RESULT_DIR, `${format}-save-${Date.now()}`);
   process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST = smokeDest;
@@ -59,6 +154,7 @@ async function runOneFormat(origin: WebContents, sessionId: string, format: Expo
     const start = await startImageExport(origin, sessionId, format, { smoke: true });
     if (!start.ok) { out.ok = false; out.startResult = start; await cleanupActiveJob(); return out; }
     out.jobId = start.jobId;
+    out.snapshot = validateExportSnapshot(start.snapshot);
     const done = await start.done;
     out.exportStatus = done.status;
     if (done.status === 'saved') {

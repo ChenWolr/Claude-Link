@@ -17,27 +17,33 @@ const ElectronStoreCtor = ElectronStore as unknown as new (options?: {
   defaults?: { recentDirs: string[] };
 }) => { store: { recentDirs: string[] }; set: (v: { recentDirs: string[] }) => void };
 
-const store = new ElectronStoreCtor({
-  name: 'claude-link-workspaces',
-  projectName: app.getName(),
-  defaults: { recentDirs: [] },
-});
+type WorkspaceStore = InstanceType<typeof ElectronStoreCtor>;
+let store: WorkspaceStore | null = null;
+
+function getStore(): WorkspaceStore {
+  store ??= new ElectronStoreCtor({
+    name: 'claude-link-workspaces',
+    projectName: app.getName(),
+    defaults: { recentDirs: [] },
+  });
+  return store;
+}
 
 export function listRecentWorkspaces(): string[] {
-  return [...store.store.recentDirs];
+  return [...getStore().store.recentDirs];
 }
 
 export function addRecentWorkspace(dir: string | null | undefined): string[] {
   if (!dir || !dir.trim()) return listRecentWorkspaces();
   const normalized = dir.trim();
   // 去重并置顶
-  const next = [normalized, ...store.store.recentDirs.filter((d) => d !== normalized)].slice(0, MAX_ENTRIES);
-  store.set({ recentDirs: next });
+  const next = [normalized, ...getStore().store.recentDirs.filter((d) => d !== normalized)].slice(0, MAX_ENTRIES);
+  getStore().set({ recentDirs: next });
   return next;
 }
 
 export function removeRecentWorkspace(dir: string): string[] {
-  const next = store.store.recentDirs.filter((d) => d !== dir);
-  store.set({ recentDirs: next });
+  const next = getStore().store.recentDirs.filter((d) => d !== dir);
+  getStore().set({ recentDirs: next });
   return next;
 }

@@ -11,7 +11,6 @@ import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, C
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult } from '../shared/types/changes';
-import type { ExportImageProgressPayload } from '../shared/types/export-image';
 
 export interface ClaudeLinkAPI {
   detectCli: () => Promise<CliDetectionResult>;
@@ -185,8 +184,8 @@ export function createApi(): ClaudeLinkAPI {
     removeQueueListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.QUEUE_EVENT),
     // 会话导出 JPEG 长图（v3）：可见 renderer 请求开始 + 接收进度。图片数据不经过可见 renderer。
     startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId, format),
-    onImageExportProgress: (callback: (payload: ExportImageProgressPayload) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: ExportImageProgressPayload) => callback(payload);
+    onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: import('../shared/types/export-image').ExportImageProgressPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
     },
@@ -200,7 +199,6 @@ export function createApi(): ClaudeLinkAPI {
 import type {
   CaptureSelfRequest,
   CaptureSelfResponse,
-  ExportImageProgressPayload,
   ExportJobSnapshot,
   ExportPageBeginRequest,
   ExportPageBeginResponse,
@@ -213,8 +211,6 @@ import type {
   PngProbeSelfRequest,
   PngProbeSelfResponse,
 } from '../shared/types/export-image';
-import { IPC_CHANNELS } from '../shared/constants';
-
 export interface ExportLinkAPI {
   surface: () => 'export';
   /** 取得与本窗口绑定的 job 快照（主进程按 sender 匹配当前 job）。 */
@@ -230,7 +226,7 @@ export interface ExportLinkAPI {
   /** v4.1 PNG：完成一页（worker 最终编码 + 写临时文件）。仅 PNG 路径。 */
   finishPage: (request: ExportPageFinishRequest) => Promise<ExportPageFinishResponse>;
   /** 上报排版/捕获/编码进度（renderer → 主进程）。 */
-  reportProgress: (payload: ExportImageProgressPayload) => void;
+  reportProgress: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void;
   /** 完成报告（done/failed 判别联合，只能调用一次）。 */
   finish: (payload: ExportRenderFinishPayload) => Promise<void>;
 }

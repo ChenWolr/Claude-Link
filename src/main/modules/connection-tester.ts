@@ -30,7 +30,7 @@ function emit(mainWindow: BrowserWindow, payload: TestConnectionEventPayload): v
   try {
     mainWindow.webContents.send(IPC_CHANNELS.TEST_CONNECTION_EVENT, payload);
   } catch (e) {
-    logger.warn('Failed to send test connection event', e);
+    logger.warn(`Failed to send test connection event: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
@@ -117,7 +117,7 @@ export function runTestConnectionStream(modelAlias: string | null, mainWindow: B
   try {
     writeClaudeSettings(testCwd, config);
   } catch (e) {
-    logger.warn('测试连接：settings.local.json 投影失败', e);
+    logger.warn(`测试连接：settings.local.json 投影失败：${e instanceof Error ? e.message : String(e)}`);
   }
 
   const child = spawn(cliPath, args, {

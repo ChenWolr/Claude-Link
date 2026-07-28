@@ -8,13 +8,28 @@ import { useSessionStore } from '../../stores/session-store';
 import { openImageLightbox } from '../../composables/useImageLightbox';
 import { attachmentBadge } from '../../utils/attachment';
 import type { AttachmentSummary } from '../../../shared/types/attachment';
+import type { ExportAttachmentSnapshot } from '../../../shared/types/export-image';
+
+type DisplayAttachment = AttachmentSummary | ExportAttachmentSnapshot;
 
 const props = defineProps<{
-  attachments: AttachmentSummary[];
+  attachments: DisplayAttachment[];
   exportMode?: boolean;
 }>();
 
 const sessionStore = useSessionStore();
+const isSnapshotAttachment = (att: DisplayAttachment): att is ExportAttachmentSnapshot => !('id' in att);
+const snapshotKeys = new WeakMap<object, string>();
+let nextSnapshotKey = 0;
+const attachmentKey = (att: DisplayAttachment): string => {
+  if (!isSnapshotAttachment(att)) return att.id;
+  let key = snapshotKeys.get(att);
+  if (!key) {
+    key = `export:${nextSnapshotKey++}`;
+    snapshotKeys.set(att, key);
+  }
+  return key;
+};
 
 // 原图 Blob URL（attachmentId -> url）：点击缩略图时按需取原图进灯箱。非响应式（不参与模板渲染）。
 const urlByAttachmentId = new Map<string, string>();
@@ -47,9 +62,9 @@ function revokeAll(): void {
 }
 
 // 预览：thumbnail=false 取原图进灯箱（灯箱支持缩放，缩略图会糊）；预览失败进入「不可用」占位。
-async function fetchPreviewUrl(att: AttachmentSummary, thumbnail: boolean): Promise<string | null> {
+async function fetchPreviewUrl(att: DisplayAttachment, thumbnail: boolean): Promise<string | null> {
   const sid = sessionStore.activeSession?.id;
-  if (!sid) return null;
+  if (!sid || isSnapshotAttachment(att)) return null;
   try {
     const res = await window.claudeLink.getAttachmentPreview({ sessionId: sid, attachmentId: att.id, thumbnail });
     return URL.createObjectURL(new Blob([toBlobPart(res.bytes)], { type: res.mimeType }));
@@ -60,42 +75,43 @@ async function fetchPreviewUrl(att: AttachmentSummary, thumbnail: boolean): Prom
 
 // 缩略图：挂载/附件出现时取 thumbnail=true 渲染 <img>。导出模式不加载（隐藏 renderer 复用文件卡片）。
 // 失败静默退化 badge（不占位为「不可用」——只有点击取原图失败才占位，避免缩略图抖动到错误态）。
-async function loadThumb(att: AttachmentSummary): Promise<void> {
-  if (props.exportMode || thumbByAttachmentId[att.id] || thumbLoading[att.id]) return;
+async function loadThumb(att: DisplayAttachment): Promise<void> {
+  if (props.exportMode || isSnapshotAttachment(att) || thumbByAttachmentId[attachmentKey(att)] || thumbLoading[attachmentKey(att)]) return;
   const sid = sessionStore.activeSession?.id;
   if (!sid) return;
-  thumbLoading[att.id] = true;
+  thumbLoading[attachmentKey(att)] = true;
   try {
     const url = await fetchPreviewUrl(att, true);
     if (!alive || sessionStore.activeSession?.id !== sid || !url) return;
-    thumbByAttachmentId[att.id] = url;
+    thumbByAttachmentId[attachmentKey(att)] = url;
   } catch {
     // 静默退化
   } finally {
-    thumbLoading[att.id] = false;
+    thumbLoading[attachmentKey(att)] = false;
   }
 }
 
 // 图片缩略图：点击进入灯箱时按需取原图。导出模式不加载（隐藏 renderer 复用文件卡片）。
-async function openPreview(att: AttachmentSummary, trigger: HTMLElement): Promise<void> {
-  if (errorByAttachmentId[att.id]) return;
-  let url = urlByAttachmentId.get(att.id);
+async function openPreview(att: DisplayAttachment, trigger: HTMLElement): Promise<void> {
+  if (isSnapshotAttachment(att)) return;
+  if (errorByAttachmentId[attachmentKey(att)]) return;
+  let url = urlByAttachmentId.get(attachmentKey(att));
   if (!url) {
-    if (loading[att.id]) return;
-    loading[att.id] = true;
+    if (loading[attachmentKey(att)]) return;
+    loading[attachmentKey(att)] = true;
     try {
       url = (await fetchPreviewUrl(att, false)) ?? undefined;
       if (!url) {
-        errorByAttachmentId[att.id] = '附件不可用';
+        errorByAttachmentId[attachmentKey(att)] = '附件不可用';
         return;
       }
       if (!alive) {
         URL.revokeObjectURL(url);
         return;
       }
-      urlByAttachmentId.set(att.id, url);
+      urlByAttachmentId.set(attachmentKey(att), url);
     } finally {
-      loading[att.id] = false;
+      loading[attachmentKey(att)] = false;
     }
   }
   openImageLightbox(url, att.filename, trigger);
@@ -104,9 +120,9 @@ async function openPreview(att: AttachmentSummary, trigger: HTMLElement): Promis
 // 附件列表变化（immediate：历史加载即取缩略图）：
 // 撤销已不在列表的 URL（原图 + 缩略图），并为新出现的非导出图片加载缩略图。
 watch(
-  () => props.attachments.map((a) => `${a.id}:${a.kind}`).join('\n'),
+  () => props.attachments.map((att) => `${attachmentKey(att)}:${att.kind}`).join('\n'),
   () => {
-    const ids = new Set(props.attachments.map((a) => a.id));
+    const ids = new Set(props.attachments.filter((a): a is AttachmentSummary => !isSnapshotAttachment(a)).map((a) => a.id));
     for (const [id, url] of [...urlByAttachmentId]) {
       if (!ids.has(id)) {
         URL.revokeObjectURL(url);
@@ -120,7 +136,14 @@ watch(
       }
     }
     for (const att of props.attachments) {
-      if (att.kind === 'image' && !thumbByAttachmentId[att.id]) void loadThumb(att);
+      const key = attachmentKey(att);
+      if (props.exportMode && isSnapshotAttachment(att) && att.kind === 'image' && att.preview && !thumbByAttachmentId[key]) {
+        thumbByAttachmentId[key] = URL.createObjectURL(
+          new Blob([toBlobPart(att.preview.bytes)], { type: att.preview.mimeType }),
+        );
+      } else if (att.kind === 'image' && !thumbByAttachmentId[key]) {
+        void loadThumb(att);
+      }
     }
   },
   { immediate: true },
@@ -142,7 +165,7 @@ watch(
   (isExport) => {
     if (!isExport) {
       for (const att of props.attachments) {
-        if (att.kind === 'image' && !thumbByAttachmentId[att.id]) void loadThumb(att);
+        if (att.kind === 'image' && !thumbByAttachmentId[attachmentKey(att)]) void loadThumb(att);
       }
     }
   },
@@ -156,16 +179,27 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-if="attachments.length" class="msg-attachments">
-    <template v-for="att in attachments" :key="att.id">
+    <template v-for="att in attachments" :key="attachmentKey(att)">
       <!-- 附件不可用占位：文件丢失/预览失败时保留消息、明确状态，不抛错。 -->
-      <div v-if="errorByAttachmentId[att.id]" class="msg-att msg-att--unavailable">
+      <div
+        v-if="errorByAttachmentId[attachmentKey(att)] || (isSnapshotAttachment(att) && att.previewUnavailable)"
+        class="msg-att msg-att--unavailable"
+      >
         <span class="msg-att__icon" aria-hidden="true">⚠️</span>
         <span class="msg-att__meta">
           <span class="msg-att__name msg-att__name--dim" :title="att.filename">{{ att.filename }}</span>
-          <span class="msg-att__unavail">{{ errorByAttachmentId[att.id] }}</span>
+          <span class="msg-att__unavail">{{ errorByAttachmentId[attachmentKey(att)] || '附件不可用' }}</span>
         </span>
       </div>
-      <!-- 图片缩略图：点击进灯箱取原图放大。导出模式退化为文件卡片（不加载原图、不弹灯箱）。 -->
+      <!-- 导出模式只读 snapshot 里的 PNG bytes，不调用 preload。 -->
+      <div v-else-if="exportMode && att.kind === 'image' && thumbByAttachmentId[attachmentKey(att)]" class="msg-att msg-att--image">
+        <img class="msg-att__thumb-img" :src="thumbByAttachmentId[attachmentKey(att)]" :alt="att.filename" />
+        <span class="msg-att__meta">
+          <span class="msg-att__name">{{ att.filename }}</span>
+          <span class="msg-att__size">{{ formatSize(att.sizeBytes) }}</span>
+        </span>
+      </div>
+      <!-- 图片缩略图：点击进灯箱取原图放大。 -->
       <button
         v-else-if="att.kind === 'image' && !exportMode"
         type="button"
@@ -175,9 +209,9 @@ onBeforeUnmount(() => {
         @click="openPreview(att, $event.currentTarget as HTMLElement)"
       >
         <img
-          v-if="thumbByAttachmentId[att.id]"
+          v-if="thumbByAttachmentId[attachmentKey(att)]"
           class="msg-att__thumb-img"
-          :src="thumbByAttachmentId[att.id]"
+          :src="thumbByAttachmentId[attachmentKey(att)]"
           :alt="att.filename"
         />
         <span v-else class="msg-att__badge" aria-hidden="true">{{ attachmentBadge(att.filename, att.mimeType) }}</span>
@@ -185,7 +219,7 @@ onBeforeUnmount(() => {
           <span class="msg-att__name">{{ att.filename }}</span>
           <span class="msg-att__size">{{ formatSize(att.sizeBytes) }}<template v-if="att.width && att.height"> · {{ att.width }}×{{ att.height }}</template></span>
         </span>
-        <span v-if="loading[att.id]" class="msg-att__hint">读取中…</span>
+        <span v-if="loading[attachmentKey(att)]" class="msg-att__hint">读取中…</span>
       </button>
       <!-- 文件卡片（含导出模式下的图片退化展示）：仅显示类型/名称/大小，不调系统程序打开。 -->
       <div v-else class="msg-att msg-att--file">

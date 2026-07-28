@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { THEME_PALETTES } from '../../../shared/constants';
 
-const props = defineProps<{
+defineProps<{
   selectedId: string;
 }>();
 
