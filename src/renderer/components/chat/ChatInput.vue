@@ -169,7 +169,11 @@ onUnmounted(() => {
         class="slash-trigger"
         title="插入命令（/ 开头自动联想，↑↓ 选择，回车确认）"
         @click="insertSlash"
-      >/</button>
+      >
+        <svg class="slash-trigger__icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 5l6 6-6 6 M13 17h6" />
+        </svg>
+      </button>
       <textarea
         ref="textareaRef"
         :value="modelValue"
@@ -179,7 +183,16 @@ onUnmounted(() => {
         @keydown="handleKeydown"
         @input="handleInput"
       />
-      <button type="button" :disabled="disabled || (!modelValue.trim() && !hasAttachments)" @click="submit">发送</button>
+      <button
+        type="button"
+        :disabled="disabled || (!modelValue.trim() && !hasAttachments)"
+        title="发送消息（Enter）"
+        @click="submit"
+      >
+        <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M22 2 11 13 M22 2l-7 20-4-9-9-4z" />
+        </svg>
+      </button>
     </div>
   </div>
 </template>
@@ -260,14 +273,16 @@ textarea {
 }
 
 button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   align-self: flex-end;
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-accent);
   box-shadow: var(--ring-light-accent);
   color: var(--color-on-accent);
-  padding: 10px 20px;
-  font-weight: 700;
+  padding: 8px 12px;
 }
 
 button:disabled {
@@ -276,20 +291,31 @@ button:disabled {
 }
 
 .slash-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   align-self: flex-end;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text-muted);
-  padding: 10px 14px;
-  font-weight: 700;
-  font-size: 1rem;
-  line-height: 1;
+  padding: 8px 10px;
   cursor: pointer;
 }
 
 .slash-trigger:hover {
   color: var(--color-accent-strong);
   border-color: var(--color-accent);
+}
+
+.slash-trigger__icon,
+.send-icon {
+  width: 1rem;
+  height: 1rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 </style>
