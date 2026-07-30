@@ -25,6 +25,13 @@ const activeSession = computed(() => sessionStore.activeSession);
 const showWorkspaceMenu = ref(false);
 const workspaceRef = ref<HTMLElement | null>(null);
 
+const workspaceLabel = computed(() => {
+  const dir = activeSession.value?.workingDir;
+  if (!dir) return '未选择';
+  const parts = dir.replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts[parts.length - 1] || dir;
+});
+
 async function pickDirectory() {
   const dir = await window.claudeLink.pickWorkspaceDir();
   showWorkspaceMenu.value = false;
@@ -108,16 +115,15 @@ onUnmounted(() => {
 
     <!-- 工作空间 -->
     <div ref="workspaceRef" class="ctl">
+      <span class="ctl__label">工作空间</span>
       <button
         type="button"
         :class="['ctl__btn', { 'ctl__btn--warn': !activeSession.workingDir }]"
         :disabled="sending"
-        :title="`工作空间：${activeSession.workingDir ?? '未选择（运行前必须选择）'}`"
+        :title="activeSession.workingDir ?? '未选择工作空间（运行前必须选择）'"
         @click="showWorkspaceMenu = !showWorkspaceMenu"
       >
-        <svg class="ctl__ws-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M3 6l2-2h5l2 2h9v12H3z" />
-        </svg>
+        {{ workspaceLabel }} <span class="caret">▾</span>
       </button>
       <div v-if="showWorkspaceMenu" class="menu">
         <button type="button" class="menu__item menu__item--accent" @click="pickDirectory">📁 选择目录…</button>
@@ -142,6 +148,7 @@ onUnmounted(() => {
 
     <!-- 模型 -->
     <div class="ctl">
+      <span class="ctl__label">模型</span>
       <ModelSelector :disabled="sending" />
     </div>
 
@@ -152,16 +159,18 @@ onUnmounted(() => {
 
     <!-- 权限：触发按钮显示当前模式，点击向上展开卡片面板 -->
     <div ref="permissionRef" class="ctl">
+      <span class="ctl__label">权限</span>
       <button
         type="button"
         class="ctl__btn"
         :disabled="sending"
-        :title="`权限模式：${activePermission.label}（${activePermission.desc}）`"
+        :title="`本会话 Claude Code 权限模式（${activePermission.value}）`"
         @click="showPermissionMenu = !showPermissionMenu"
       >
         <svg class="ctl__perm-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path :d="PERM_ICON_PATHS[activePermission.icon]" />
         </svg>
+        {{ activePermission.label }} <span class="caret">▾</span>
       </button>
       <div v-if="showPermissionMenu" class="perm-menu">
         <button
@@ -204,16 +213,13 @@ onUnmounted(() => {
         <svg class="ctl__add-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48" />
         </svg>
+        添加文件
       </button>
     </div>
 
     <!-- 操作：仅发送中显示中断；ctl--right 推到最右，不影响左侧添加文件位置。 -->
     <div v-if="sending" class="ctl ctl--right">
-      <button type="button" class="ctl__btn ctl__btn--abort" title="中断当前会话" @click="emit('abort')">
-        <svg class="ctl__abort-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M6 6h12v12H6z" />
-        </svg>
-      </button>
+      <button type="button" class="ctl__btn ctl__btn--abort" @click="emit('abort')">■ 中断</button>
     </div>
   </div>
 </template>
@@ -387,28 +393,6 @@ onUnmounted(() => {
   stroke-linecap: round;
   stroke-linejoin: round;
   opacity: 0.85;
-}
-
-/* 工作空间按钮内的小图标（文件夹），与权限图标同 stroke 风格 */
-.ctl__ws-icon {
-  flex-shrink: 0;
-  width: 0.875rem;
-  height: 0.875rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.85;
-}
-
-/* 中断按钮内的小图标（实心停止方块），fill 风格 */
-.ctl__abort-icon {
-  flex-shrink: 0;
-  width: 0.875rem;
-  height: 0.875rem;
-  fill: currentColor;
-  stroke: none;
 }
 
 /* 权限弹出面板：尺寸用 rem，随字号档位等比缩放（迁移批次 2） */
