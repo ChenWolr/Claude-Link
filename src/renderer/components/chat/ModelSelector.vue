@@ -125,12 +125,10 @@ onUnmounted(() => {
       type="button"
       class="model-selector__button"
       :disabled="props.disabled"
-      :title="`模型：${displayModel}（点击切换）`"
+      title="切换当前会话使用的模型"
       @click="showModelDropdown = !showModelDropdown"
     >
-      <svg class="model-selector__icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M5 5h14v14H5z M9 9h6v6H9z" />
-      </svg>
+      {{ displayModel }} <span class="caret">▾</span>
     </button>
     <div v-if="showModelDropdown" class="model-menu">
       <!-- 恢复默认 -->
@@ -185,27 +183,18 @@ onUnmounted(() => {
 .model-selector__button {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 0.25rem;
+  max-width: 12.5rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 0.3125rem 0.5rem;
+  padding: 0.3125rem 0.625rem;
   font-size: 0.75rem;
   cursor: pointer;
-}
-
-.model-selector__icon {
-  flex-shrink: 0;
-  width: 0.875rem;
-  height: 0.875rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.85;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .model-selector__button:hover {
