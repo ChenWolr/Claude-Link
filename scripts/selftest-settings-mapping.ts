@@ -23,6 +23,8 @@ import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } fr
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
 import { THEME_PALETTES, DEFAULT_THEME_PALETTE_ID } from '../src/shared/constants';
+import { resolveThinkingConfig, resolveEffectiveThinkingLevel } from '../src/shared/thinking-resolver';
+import { THINKING_LEVELS, isValidThinkingLevel } from '../src/shared/types/thinking';
 
 let pass = 0;
 let fail = 0;
@@ -1222,7 +1224,7 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
 
   // DB migration + repo
   check('migrations.ts 有 claude_plan_state 表', migrations.includes('claude_plan_state'));
-  check('migrations.ts 版本升为 6', migrations.includes('CURRENT_SCHEMA_VERSION = 6'));
+  check('migrations.ts 版本升为 7', migrations.includes('CURRENT_SCHEMA_VERSION = 7'));
   check('claude-plan-repo.ts 有 getPlanState', repo.includes('export function getPlanState'));
   check('claude-plan-repo.ts 有 replaceTodos', repo.includes('export function replaceTodos'));
   check('claude-plan-repo.ts 有 upsertTask', repo.includes('export function upsertTask'));
@@ -1315,6 +1317,137 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
   check('ClaudePlanCard 无 --color-warning（F3）', !planCard.includes('--color-warning'));
   check('ClaudePlanCard 用 --color-text-muted（F3）', planCard.includes('--color-text-muted'));
   check('ClaudePlanCard 用 --color-panel-soft 或 color-mix（F3）', planCard.includes('--color-panel-soft') || planCard.includes('color-mix'));
+}
+
+console.log('\n=== 47) 思考强度映射：ThinkingLevel → thinking/effort/settingsPatch ===');
+{
+  // 类型 + 校验
+  check('THINKING_LEVELS 含七档（auto/low/medium/high/xhigh/max/ultracode）',
+    THINKING_LEVELS.length === 7 &&
+    ['auto', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'].every((l) => THINKING_LEVELS.includes(l as never)));
+  check('isValidThinkingLevel("ultracode")=true', isValidThinkingLevel('ultracode') === true);
+  check('isValidThinkingLevel("max")=true', isValidThinkingLevel('max') === true);
+  check('isValidThinkingLevel("invalid")=false', isValidThinkingLevel('invalid') === false);
+  check('isValidThinkingLevel(undefined)=false', isValidThinkingLevel(undefined) === false);
+  check('isValidThinkingLevel(null)=false', isValidThinkingLevel(null) === false);
+
+  // resolveEffectiveThinkingLevel：null/auto 回落全局默认，否则用会话档
+  check('resolveEffective(null,"high")="high"', resolveEffectiveThinkingLevel(null, 'high') === 'high');
+  check('resolveEffective("auto","high")="high"', resolveEffectiveThinkingLevel('auto', 'high') === 'high');
+  check('resolveEffective("low","high")="low"', resolveEffectiveThinkingLevel('low', 'high') === 'low');
+  check('resolveEffective("ultracode","medium")="ultracode"', resolveEffectiveThinkingLevel('ultracode', 'medium') === 'ultracode');
+
+  // resolveThinkingConfig：thinking 一律 adaptive+summarized
+  const low = resolveThinkingConfig('low');
+  check('low thinking adaptive summarized', low.thinking.type === 'adaptive' && low.thinking.display === 'summarized');
+  check('low effort=low', low.effort === 'low');
+  check('low settingsPatch 关闭关键字触发器', low.settingsPatch?.workflowKeywordTriggerEnabled === false);
+  check('low settingsPatch 开思考摘要', low.settingsPatch?.showThinkingSummaries === true);
+  check('low settingsPatch 常驻思考', low.settingsPatch?.alwaysThinkingEnabled === true);
+
+  // medium：只关关键字触发器，不投影思考字段（尊重 ~/.claude）
+  const med = resolveThinkingConfig('medium');
+  check('medium effort=medium', med.effort === 'medium');
+  check('medium settingsPatch 关关键字触发器', med.settingsPatch?.workflowKeywordTriggerEnabled === false);
+  check('medium settingsPatch 不投影 showThinkingSummaries', med.settingsPatch?.showThinkingSummaries === undefined);
+  check('medium settingsPatch 不投影 alwaysThinkingEnabled', med.settingsPatch?.alwaysThinkingEnabled === undefined);
+
+  // high/xhigh/max：通用 baseSettings
+  check('high effort=high', resolveThinkingConfig('high').effort === 'high');
+  check('xhigh effort=xhigh', resolveThinkingConfig('xhigh').effort === 'xhigh');
+  check('max effort=max（运行时补偿；settings.effortLevel 降级 xhigh 由投影层处理）', resolveThinkingConfig('max').effort === 'max');
+  check('high settingsPatch 关关键字触发器', resolveThinkingConfig('high').settingsPatch?.workflowKeywordTriggerEnabled === false);
+
+  // ultracode：effort 锁死 xhigh（非 max），投影 ultracode/enableWorkflows，保留关键字触发器
+  const ultra = resolveThinkingConfig('ultracode');
+  check('ultracode effort=xhigh（非 max）', ultra.effort === 'xhigh');
+  check('ultracode settingsPatch.ultracode=true', ultra.settingsPatch?.ultracode === true);
+  check('ultracode settingsPatch.enableWorkflows=true', ultra.settingsPatch?.enableWorkflows === true);
+  check('ultracode settingsPatch.alwaysThinkingEnabled=true', ultra.settingsPatch?.alwaysThinkingEnabled === true);
+  check('ultracode settingsPatch.showThinkingSummaries=true', ultra.settingsPatch?.showThinkingSummaries === true);
+  check('ultracode 保留关键字触发器（未显式关闭）', ultra.settingsPatch?.workflowKeywordTriggerEnabled === undefined);
+
+  // 类型层落位（Task 1 同步改动）
+  const configType = readRel('src/shared/types/config.ts');
+  const sessionType = readRel('src/shared/types/session.ts');
+  check('AppConfig 有 defaultThinkingLevel 字段', configType.includes('defaultThinkingLevel:'));
+  check('Session 有 thinkingLevel 字段', sessionType.includes('thinkingLevel:'));
+}
+
+console.log('\n=== 48) 思考强度接线：持久化层 + 注入层 + IPC 通道契约 ===');
+{
+  const migrations = readRel('src/main/database/migrations.ts');
+  const repo = readRel('src/main/database/repositories/session-repo.ts');
+  const api = readRel('src/preload/api.ts');
+  const handlers = readRel('src/main/ipc-handlers.ts');
+  const cliShared = readRel('src/main/modules/cli-shared.ts');
+  const sdkBackend = readRel('src/main/modules/sdk-backend.ts');
+  const taskQueue = readRel('src/main/modules/task-queue-engine.ts');
+  const configManager = readRel('src/main/modules/config-manager.ts');
+  const projection = readRel('src/main/modules/claude-settings-projection.ts');
+
+  // 持久化层（Task 4）
+  check('migrations.ts schema 版本升为 7', migrations.includes('CURRENT_SCHEMA_VERSION = 7'));
+  check('migrations.ts 补 thinking_level 列', migrations.includes("ADD COLUMN thinking_level TEXT DEFAULT NULL"));
+  check('session-repo.ts SessionRow 有 thinking_level', repo.includes('thinking_level: string | null'));
+  check('session-repo.ts toSession 映射 thinkingLevel（脏值兜底）', repo.includes('isValidThinkingLevel(row.thinking_level)'));
+  check('session-repo.ts updateSession 类型联合含 thinkingLevel', repo.includes("'maxTurns' | 'thinkingLevel'"));
+  check('session-repo.ts updateSession SQL 分支 thinking_level', repo.includes("'thinking_level = @thinkingLevel'"));
+
+  // IPC 通道（Task 4）
+  check('preload api.ts updateSession 类型联合含 thinkingLevel', api.includes("'maxTurns' | 'thinkingLevel'"));
+  check('ipc-handlers SESSION_UPDATE 类型联合含 thinkingLevel', handlers.includes("'maxTurns' | 'thinkingLevel'"));
+  check('ipc-handlers SESSION_UPDATE 白名单校验 isValidThinkingLevel', handlers.includes('isValidThinkingLevel(data.thinkingLevel)'));
+  check('ipc-handlers 非法 thinkingLevel 丢弃', handlers.includes('delete data.thinkingLevel'));
+
+  // 注入层（Task 3）
+  check('cli-shared SpawnOptions 有 thinkingLevel', cliShared.includes('thinkingLevel?: ThinkingLevel | null'));
+  check('cli-shared buildSpawnEnv 注入 CLAUDE_EFFORT（best-effort）', cliShared.includes('env.CLAUDE_EFFORT'));
+  check('sdk-backend import resolveThinkingConfig', sdkBackend.includes('resolveThinkingConfig'));
+  check('sdk-backend import resolveEffectiveThinkingLevel', sdkBackend.includes('resolveEffectiveThinkingLevel'));
+  check('sdk-backend 用 thinkingConfig.thinking（替换硬编码）', sdkBackend.includes('thinking: thinkingConfig.thinking'));
+  check('sdk-backend 运行时注入 options.effort', sdkBackend.includes('options.effort = thinkingConfig.effort'));
+  check('sdk-backend settingsPatch Object.assign 覆盖全局投影', sdkBackend.includes('Object.assign(options.settings as Record<string, unknown>, thinkingConfig.settingsPatch)'));
+  check('task-queue spawnForTask 传 thinkingLevel', taskQueue.includes('thinkingLevel: session?.thinkingLevel ?? null'));
+  check('task-queue spawnForChat(续接) 传 thinkingLevel', taskQueue.includes('thinkingLevel: session.thinkingLevel'));
+  check('ipc-handlers CHAT_SEND spawnForChat 传 thinkingLevel', handlers.includes('thinkingLevel: session.thinkingLevel'));
+
+  // 配置层 + 投影（Task 2）
+  check('config-manager defaultConfig 默认 medium', configManager.includes("defaultThinkingLevel: 'medium'"));
+  check('config-manager getConfig 脏值清洗', configManager.includes('isValidThinkingLevel(rawThinkingLevel)'));
+  check('claude-settings-projection import resolveThinkingConfig', projection.includes('resolveThinkingConfig'));
+  check('projection selector > advancedJson（Object.assign）', projection.includes('Object.assign(projection, result.settingsPatch)'));
+  check('projection max 降级 xhigh 持久化', projection.includes("result.effort === 'max' ? 'xhigh'"));
+}
+
+console.log('\n=== 49) 思考强度 UI 层：ThinkingLevelSelector + session-store action + 挂载契约 ===');
+{
+  const selector = readRel('src/renderer/components/chat/ThinkingLevelSelector.vue');
+  const sessionStore = readRel('src/renderer/stores/session-store.ts');
+  const toolbar = readRel('src/renderer/components/chat/SessionToolbar.vue');
+  const configPage = readRel('src/renderer/pages/ConfigPage.vue');
+
+  // ThinkingLevelSelector 组件（Task 5）
+  check('ThinkingLevelSelector 调 setActiveSessionThinkingLevel', selector.includes('setActiveSessionThinkingLevel'));
+  check('ThinkingLevelSelector 含七档（含 auto/ultracode）', selector.includes("'auto'") && selector.includes("'ultracode'"));
+  check('ThinkingLevelSelector ultracode 标 danger', selector.includes('danger: true'));
+  check('ThinkingLevelSelector click outside 关闭', selector.includes('handleClickOutside'));
+  check('ThinkingLevelSelector Escape 关闭', selector.includes('handleEscape'));
+  check('ThinkingLevelSelector 向上展开（bottom: calc(100%）', selector.includes('bottom: calc(100% + 0.25rem)'));
+  check('ThinkingLevelSelector 选中勾号', selector.includes('CHECK_PATH') || selector.includes('tl-item__check'));
+
+  // session-store action（Task 5）
+  check('session-store 有 setActiveSessionThinkingLevel action', sessionStore.includes('async setActiveSessionThinkingLevel'));
+  check('session-store import ThinkingLevel 类型', sessionStore.includes("import type { ThinkingLevel }"));
+
+  // SessionToolbar 挂载（Task 5）
+  check('SessionToolbar import ThinkingLevelSelector', toolbar.includes('ThinkingLevelSelector.vue'));
+  check('SessionToolbar 挂载 <ThinkingLevelSelector', toolbar.includes('<ThinkingLevelSelector'));
+
+  // ConfigPage 全局默认选择器（Task 2）
+  check('ConfigPage PERSISTED_FIELDS 含 defaultThinkingLevel', configPage.includes("'defaultThinkingLevel'"));
+  check('ConfigPage 有 handleThinkingLevelChange', configPage.includes('handleThinkingLevelChange'));
+  check('ConfigPage 行为 tab 有默认思考强度选择器', configPage.includes('默认思考强度'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
