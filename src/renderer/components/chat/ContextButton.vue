@@ -44,6 +44,9 @@ const eff = computed(() =>
   stats.value ?? { inputTokens: 0, outputTokens: 0, windowSize: DEFAULT_WINDOW, ratio: 0 },
 );
 const pct = computed(() => Math.min(100, Math.round(eff.value.ratio * 100)));
+// 批次 B：思考进行中时按钮加克制 accent 呼吸提示（thinking_tokens.estimated_tokens > 0 即触发）。
+// 仅作「正在思考」可视提示，不在 hover popover 展示数值（按用户要求移除）。
+const thinking = computed(() => typeof store.thinkingTokens === 'number' && store.thinkingTokens > 0);
 
 function fmt(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
@@ -55,7 +58,7 @@ function fmt(n: number): string {
     <button
       type="button"
       class="ctx__btn"
-      :class="{ 'ctx__btn--high': pct >= 80 }"
+      :class="{ 'ctx__btn--high': pct >= 80, 'ctx__btn--thinking': thinking }"
       :disabled="props.disabled"
       :title="`上下文已用 ${pct}%，点击压缩`"
       @click="emit('compress')"
@@ -111,6 +114,19 @@ function fmt(n: number): string {
 .ctx__btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .ctx__btn:disabled:hover { border-color: var(--color-border); }
 .ctx__btn--high { border-color: color-mix(in srgb, var(--color-warn) 50%, transparent); }
+.ctx__btn--thinking {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  animation: ctx-thinking 1.6s ease-in-out infinite;
+}
+@keyframes ctx-thinking {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 0%, transparent); }
+  50% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 22%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ctx__btn--thinking {
+    animation: none;
+  }
+}
 .ctx__ring { width: 1.375rem; height: 1.375rem; display: block; transform: rotate(-90deg); }
 /* 周长 ≈ 2*π*15.915 ≈ 100，dasharray 用百分比即可表示扇形占用 */
 .ctx__ring-bg {

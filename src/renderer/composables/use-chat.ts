@@ -125,6 +125,7 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
+        store.setThinkingTokens(null);
         resetTurnCache();
       }
       store.markStopped(sid);
@@ -340,6 +341,7 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
+        store.setThinkingTokens(null);
 
         // 错误回合（非中断）的 result 文本是失败原因：只走 error 横幅，不当 assistant 正文
         // 落库（否则与横幅重复展示 + 把错误文案当成回答污染历史）。主进程 persistCliEvent
@@ -363,6 +365,7 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
+        store.setThinkingTokens(null);
         error.value = event.message;
         captureFailedMessage();
         if (store.activeSession) {
@@ -378,6 +381,7 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
+        store.setThinkingTokens(null);
         if (store.activeSession) {
           clearAbortTimer(store.activeSession.id);
           store.markStopped(store.activeSession.id);
@@ -397,6 +401,13 @@ function createChat() {
           if (store.activeSession) {
             store.markApiRetrying(store.activeSession.id, { max: r.max_retries, error: r.error });
           }
+          break;
+        }
+        // 批次 B：thinking_tokens——思考 token 实时估算，瞬态写 store（ContextButton hover 展示），不落库。
+        // 后台会话不走此分支（handleBackgroundEvent 跳过），仅前台实时（review-v2 F8）。
+        if (event.subtype === 'thinking_tokens') {
+          const t = event as CliSystemInfoEvent;
+          if (typeof t.estimatedTokens === 'number') store.setThinkingTokens(t.estimatedTokens);
           break;
         }
         // C：进度类/瞬态 system 子类型（compacting/task_*/requesting/compact_result）→ store 瞬态状态，不落库。
@@ -764,6 +775,7 @@ function createChat() {
     store.clearStream();
     store.clearThinking();
     store.clearToolStream();
+    store.setThinkingTokens(null);
     resetTurnCache();
     store.markStopped(sid);
     try {
