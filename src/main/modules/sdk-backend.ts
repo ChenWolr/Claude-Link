@@ -1349,6 +1349,12 @@ async function runQuery(
   }
   entry.state = 'running';
   entries.set(sessionId, entry);
+  // 回合终态追踪：SDK 正常应在流末 yield 一条 result。但第三方端点（如 glm-5.2）
+  // 或 Windows 下 result 常丢失 → for-await 跑完却没终态事件 → 前端 sending 永久卡死
+  //（后端 entry 已 deleteEntry 变空闲，故仍能发新消息——状态解耦）。gotResult 标记本回合
+  // 是否真收到 result；未收到则在流末合成一条，恢复 process-manager 时代「0 退出无 result
+  // 合成 aborted」的兜底（见 cli.ts CliAbortedEvent 注释）。
+  let gotResult = false;
   // 每个新 query 重置卡死追踪（per-turn stallCount / hardAbortFired）。
   resetStallTracker(sessionId);
   ensureWatchdog(mainWindow);
@@ -1630,6 +1636,7 @@ async function runQuery(
         continue;
       }
       if (type === 'result') {
+        gotResult = true;
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
         // F15: result 是回合终态，清理本回合的 toolUse 缓存和 orphan patches
         cleanupToolUseCache(sessionId);
@@ -1638,6 +1645,13 @@ async function runQuery(
       // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。
     }
     // 流正常结束。若旧 query 已被 abort/替换，按中断收尾，避免误报成功退出。
+    // 终态兜底：本回合未收到 result（第三方端点/Windows 丢包）→ 合成一条 aborted，
+    // 保证前端 sending 必复位。前端 aborted 处理器幂等 markStopped；persistCliEvent 对
+    // aborted 无 case，不落库、不污染历史（与既有中断路径同形，见下方 catch 的 aborted）。
+    // 仅对当前 entry 合成——已被替换的旧 entry 由新 entry 负责发终态，这里跳过避免重复。
+    if (isCurrentEntry(sessionId, entry) && !gotResult) {
+      forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
+    }
     emitExit(isCurrentEntry(sessionId, entry) ? 0 : null);
     break;
   } catch (err) {
@@ -1653,6 +1667,7 @@ async function runQuery(
       try {
         query = await startSdkQuery(prompt, sdkOptions);
         entry.query = query;
+        gotResult = false; // 新 query = 新回合，重置终态追踪
         continue;
       } catch (retryErr) {
         const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
