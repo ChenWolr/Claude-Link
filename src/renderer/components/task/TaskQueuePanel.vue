@@ -169,6 +169,8 @@ type RightFilter = 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'chang
 const isAll = computed(() => sessionStore.rightTab === 'all');
 
 function setFilter(f: RightFilter): void {
+  // 折叠态下点 rail 分类图标 → 先展开总览再切筛选，避免"点了没反应"。
+  if (sessionStore.overviewCollapsed) sessionStore.overviewCollapsed = false;
   // 再点当前激活的同类 → 回 all（与预览一致）；点「全部」恒回 all。
   if (f === 'all' || sessionStore.rightTab === f) {
     sessionStore.setRightTab('all');
@@ -358,7 +360,7 @@ function handleDragReorder() {
 </script>
 
 <template>
-  <aside class="task-panel">
+  <aside class="task-panel" :class="{ 'task-panel--collapsed': sessionStore.overviewCollapsed }">
     <div class="task-panel__main">
       <!-- 顶栏：标题随筛选变化 + 清除筛选（仅非总览） -->
       <header class="task-panel__head">
@@ -666,6 +668,25 @@ function handleDragReorder() {
         </svg>
         <span v-if="changesCount" class="rail__badge">{{ changesCount }}</span>
       </button>
+      <!-- 折叠活动总览（保留 rail 图标轨）：» 向右折叠 / « 向左展开 -->
+      <button
+        type="button"
+        class="rail__btn rail__btn--collapse"
+        :class="{ 'rail__btn--active': sessionStore.overviewCollapsed }"
+        :aria-expanded="!sessionStore.overviewCollapsed"
+        :aria-label="sessionStore.overviewCollapsed ? '展开活动总览' : '折叠活动总览'"
+        :title="sessionStore.overviewCollapsed ? '展开活动总览' : '向右折叠活动总览'"
+        @click="sessionStore.toggleOverviewCollapsed()"
+      >
+        <!-- 展开态：» 双箭头指右 = 把总览向右收起 -->
+        <svg v-if="!sessionStore.overviewCollapsed" class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5.5 4 9 8l-3.5 4M9.5 4 13 8l-3.5 4" />
+        </svg>
+        <!-- 折叠态：« 双箭头指左 = 把总览向左展开 -->
+        <svg v-else class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10.5 4 7 8l3.5 4M6.5 4 3 8l3.5 4" />
+        </svg>
+      </button>
     </nav>
   </aside>
 </template>
@@ -678,6 +699,17 @@ function handleDragReorder() {
   min-width: var(--task-panel-width);
   background: var(--color-panel);
   border-left: 1px solid var(--color-border-strong);
+}
+
+/* 折叠态：仅保留 rail 图标轨（48px），隐藏活动总览主体。
+   不加 width 过渡——否则会拖慢 AppLayout resize 手柄的实时调宽。 */
+.task-panel--collapsed {
+  width: 48px;
+  min-width: 48px;
+}
+
+.task-panel--collapsed .task-panel__main {
+  display: none;
 }
 
 /* 主区：内容在左 */
@@ -1113,6 +1145,11 @@ function handleDragReorder() {
   color: var(--color-accent-strong);
   background: color-mix(in srgb, var(--color-accent) 14%, transparent);
   border-color: var(--color-accent-strong);
+}
+
+/* 折叠按钮：顶到 rail 底部（侧栏右下角） */
+.rail__btn--collapse {
+  margin-top: auto;
 }
 
 .rail__icon {
