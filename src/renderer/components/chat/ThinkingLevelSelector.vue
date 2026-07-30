@@ -13,36 +13,24 @@ const configStore = useConfigStore();
 const showMenu = ref(false);
 const menuRef = ref<HTMLElement | null>(null);
 
-// 档位元信息：value 对齐 ThinkingLevel 联合；label/desc/icon 仅 UI 展示。
+// 档位元信息：value 对齐 ThinkingLevel 联合；label/desc 仅 UI 展示。
 // desc 文案为中性描述（§1.6：effort 对 thinking_tokens 的实际影响待批次 B 实测后再细化）。
-type ThinkingIconKey = 'auto' | 'bolt' | 'scale' | 'bulb' | 'sparkles' | 'rocket' | 'workflow';
 interface ThinkingOption {
   value: ThinkingLevel;
   label: string;
   desc: string;
-  icon: ThinkingIconKey;
   danger?: boolean;
 }
 const LEVELS: ThinkingOption[] = [
-  { value: 'auto',      label: '自动',   desc: '跟随全局默认档位',                 icon: 'auto' },
-  { value: 'low',       label: '低',     desc: '快速响应，成本最低',               icon: 'bolt' },
-  { value: 'medium',    label: '中',     desc: '平衡（默认推荐）',                 icon: 'scale' },
-  { value: 'high',      label: '高',     desc: '更深入分析',                        icon: 'bulb' },
-  { value: 'xhigh',     label: '超高',   desc: '复杂推理',                          icon: 'sparkles' },
-  { value: 'max',       label: '极限',   desc: '最高强度，成本最高',               icon: 'rocket' },
-  { value: 'ultracode', label: '工作流', desc: 'xhigh + 动态工作流编排（Beta）',    icon: 'workflow', danger: true },
+  { value: 'auto',      label: '自动',   desc: '跟随全局默认档位' },
+  { value: 'low',       label: '低',     desc: '快速响应，成本最低' },
+  { value: 'medium',    label: '中',     desc: '平衡（默认推荐）' },
+  { value: 'high',      label: '高',     desc: '更深入分析' },
+  { value: 'xhigh',     label: '超高',   desc: '复杂推理' },
+  { value: 'max',       label: '极限',   desc: '最高强度，成本最高' },
+  { value: 'ultracode', label: '工作流', desc: 'xhigh + 动态工作流编排（Beta）', danger: true },
 ];
 
-// 图标 SVG path（24×24，stroke 风格，与权限/模型面板统一）。
-const ICON_PATHS: Record<ThinkingIconKey, string> = {
-  auto:      'M3 12a9 9 0 1 0 3-6.7L3 8 M3 3v5h5',
-  bolt:      'M13 2L3 14h9l-1 8 10-12h-9l1-8z',
-  scale:     'M12 3v18 M7 7h10 M7 7 4 13h6L7 7z M17 7l3 6h-6l3-6z',
-  bulb:      'M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5',
-  sparkles:  'M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z',
-  rocket:    'M4.5 16.5 5 19l2.5-.5 M14.5 4.5 18 8 M12 2c3.5 2 6 5.5 6 10 0 2-1 4-1 4H7s-1-2-1-4c0-4.5 2.5-8 6-10z',
-  workflow:  'M3 4h6v6H3z M15 14h6v6h-6z M6 10v2a3 3 0 0 0 3 3h3 M15 17H9',
-};
 const CHECK_PATH = 'M20 6 9 17l-5-5';
 
 // 当前档位：会话 thinkingLevel（null→'auto'）。'auto' 时 tooltip 追加全局默认档名。
@@ -97,9 +85,6 @@ onUnmounted(() => {
       :title="triggerTitle"
       @click="showMenu = !showMenu"
     >
-      <svg class="tl-btn__icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path :d="ICON_PATHS[activeOption.icon]" />
-      </svg>
       {{ activeOption.label }} <span class="tl-caret">▾</span>
     </button>
     <div v-if="showMenu" class="tl-menu">
@@ -110,9 +95,6 @@ onUnmounted(() => {
         :class="['tl-item', { 'tl-item--active': opt.value === activeValue, 'tl-item--danger': opt.danger }]"
         @click="onSelect(opt.value)"
       >
-        <span class="tl-item__icon">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="ICON_PATHS[opt.icon]" /></svg>
-        </span>
         <span class="tl-item__text">
           <span class="tl-item__label">
             {{ opt.label }}
@@ -172,18 +154,6 @@ onUnmounted(() => {
   color: var(--color-accent-strong);
 }
 
-.tl-btn__icon {
-  flex-shrink: 0;
-  width: 0.875rem;
-  height: 0.875rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.85;
-}
-
 /* 下拉向上展开（与权限/模型面板一致），尺寸用 rem 随字号档位等比缩放 */
 .tl-menu {
   position: absolute;
@@ -225,33 +195,6 @@ onUnmounted(() => {
 /* ultracode 危险态：warn 边框提示成本最高 / Beta */
 .tl-item--danger {
   border: 1px solid color-mix(in srgb, var(--color-warn) 45%, transparent);
-}
-
-.tl-item__icon {
-  flex-shrink: 0;
-  width: 2rem;
-  height: 2rem;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--color-text) 12%, var(--color-panel));
-  color: var(--color-text);
-}
-
-.tl-item--danger .tl-item__icon {
-  background: color-mix(in srgb, var(--color-warn) 18%, var(--color-panel));
-  color: var(--color-warn-strong);
-}
-
-.tl-item__icon svg {
-  width: 1rem;
-  height: 1rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
 }
 
 .tl-item__text {
