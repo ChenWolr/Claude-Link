@@ -6,7 +6,9 @@
 // 已删除（SDK 路径完全取代），但工具函数被 SDK 路径复用，故独立到此模块。
 
 import type { CliInitEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliResultEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
+import type { ThinkingLevel } from '../../shared/types/thinking';
 import { getConfig } from './config-manager';
+import { resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { logger } from '../utils/logger';
 import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
@@ -23,6 +25,8 @@ export interface SpawnOptions {
   resumeSessionId?: string | null;
   /** 当前会话附件根目录等受控路径；合并进 SDK options.additionalDirectories，不覆盖 cwd。 */
   additionalDirectories?: string[];
+  /** 每会话思考强度覆盖；null/未设=回落全局默认（config.defaultThinkingLevel）。 */
+  thinkingLevel?: ThinkingLevel | null;
 }
 
 // 构造注入子进程/SDK 的 env：apiKey + baseUrl + advancedJson.env 块展开。
@@ -58,6 +62,17 @@ export function buildSpawnEnv(): Record<string, string> {
       }
     } catch {
       logger.warn('Failed to parse advancedJson for env injection');
+    }
+  }
+
+  // 全局默认思考强度 env 冗余注入（best-effort）：SDK 路径的可靠通道是 inline options.settings +
+  // options.effort（buildSdkOptions 内），此处 env 仅服务保留兼容的 spawn CLI fallback，且可能被
+  // ~/.claude/settings.json 的 env 块覆盖。medium 不注入以尊重用户配置。effort 值严格匹配 EffortLevel 枚举。
+  const level = config.defaultThinkingLevel;
+  if (level !== 'medium') {
+    const result = resolveThinkingConfig(level);
+    if (result.effort) {
+      env.CLAUDE_EFFORT = result.effort;
     }
   }
 

@@ -10,6 +10,7 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
+import { isValidThinkingLevel } from '../shared/types/thinking';
 import { IPC_CHANNELS } from '../shared/constants';
 import { clearConfig, getConfig, importSettingsFile, saveConfig } from './modules/config-manager';
 import { detectClaudeConfig } from './modules/claude-config-detector';
@@ -149,8 +150,19 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   ipcMain.handle(
     IPC_CHANNELS.SESSION_UPDATE,
-    async (_event, id: string, data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>) =>
-      sessionRepo.updateSession(id, data),
+    async (
+      _event,
+      id: string,
+      data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel'>>,
+    ) => {
+      // 白名单校验（review-v2 F11）：不信任 renderer 传值，非法 thinkingLevel 丢弃，
+      // 合法 null（跟随默认）/ 有效档位放行。
+      if (data.thinkingLevel !== undefined && data.thinkingLevel !== null && !isValidThinkingLevel(data.thinkingLevel)) {
+        logger.warn(`[thinking] invalid thinkingLevel, discarding: ${String(data.thinkingLevel)}`);
+        delete data.thinkingLevel;
+      }
+      return sessionRepo.updateSession(id, data);
+    },
   );
   ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
     sessionRepo.searchSessions(query),
@@ -230,6 +242,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         workingDir: session.workingDir,
         maxTurns: session.maxTurns,
         permissionMode: session.permissionMode,
+        thinkingLevel: session.thinkingLevel,
         resumeSessionId: session.cliSessionId,
         additionalDirectories: prepared.additionalDirectories,
       });
