@@ -8,6 +8,7 @@
 
 import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
+import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useChatDraftStore } from '../stores/chat-draft-store';
 import type { BackgroundTask } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
@@ -79,6 +80,7 @@ export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, ev
 
 function createChat() {
   const store = useSessionStore();
+  const planStore = useClaudePlanStore();
   // sending 改为从 store getter 派生（computed），不再用 local ref。
   // 这样 ChatPage 卸载/重挂载时，sending 始终从 store.runningSessions 反映，不会丢失。
   const sending = computed(() => store.sending);
@@ -270,6 +272,11 @@ function createChat() {
         }
         break;
       }
+      case 'claude_plan': {
+        // 后台会话的计划更新仍写入对应 session，切回时可见最新状态。
+        planStore.applyPlanState(sid, event.state);
+        break;
+      }
       case 'result':
       case 'error':
       case 'aborted': {
@@ -417,6 +424,11 @@ function createChat() {
         break;
       }
       case 'init': {
+        break;
+      }
+      case 'claude_plan': {
+        // Claude 计划快照更新（TodoWrite / Task 工具）。只读——不写入 messages 表。
+        planStore.applyPlanState(event.sessionId, event.state);
         break;
       }
     }

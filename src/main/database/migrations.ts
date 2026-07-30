@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -182,6 +182,19 @@ export function runMigrations(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_message_attachments_attachment ON message_attachments(attachment_id);
     CREATE INDEX IF NOT EXISTS idx_task_attachments_attachment ON task_attachments(attachment_id);
+  `);
+
+  // V6：Claude 计划状态快照表。TodoWrite（完整替换）与 TaskCreate/Update/List/Get（ID-keyed patch）
+  // 的按会话隔离快照。独立于手动排队 tasks 表，不复用其 schema。ON DELETE CASCADE 跟随会话删除。
+  // 无条件 CREATE TABLE IF NOT EXISTS（不放进 currentVersion<1 初始块），保证老库升级也能拿到新表。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS claude_plan_state (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      todos_json TEXT NOT NULL DEFAULT '[]',
+      tasks_json TEXT NOT NULL DEFAULT '[]',
+      revision INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const upsertVersion = versionRow

@@ -37,6 +37,7 @@ import * as taskRepo from './database/repositories/task-repo';
 import * as attachmentRepo from './database/repositories/attachment-repo';
 import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
+import { getPlanState as getClaudePlanState } from './database/repositories/claude-plan-repo';
 import { listChanges, getChangeDiff } from './modules/changes-panel';
 import { registerExportImageHandlers } from './modules/export-image-manager';
 import { detectDirectImageFormat, validateChatSendPayloadShape } from './modules/attachment-policy';
@@ -170,6 +171,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // Messages
   ipcMain.handle(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, async (_event, sessionId: string) =>
     messageRepo.getMessagesBySession(sessionId),
+  );
+
+  // Claude 计划快照：按会话读取 TodoWrite / Task 工具的计划状态。
+  // 独立于手动排队 tasks 表——不复用 task-repo。
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLAN_GET, async (_event, sessionId: string) =>
+    getClaudePlanState(sessionId),
   );
 
   // Chat

@@ -10,6 +10,7 @@ import type { Message } from '../../shared/types/session';
 import type { StallInfo } from '../../shared/stall-watchdog';
 import { resolveContextWindow } from '../../shared/model-context-windows';
 import { useConfigStore } from './config-store';
+import { useClaudePlanStore } from './claude-plan-store';
 
 // C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
 export interface BackgroundTask {
@@ -46,7 +47,7 @@ export const useSessionStore = defineStore('session', {
     recentWorkspaces: [] as string[],
     // 右侧活动栏筛选：'all'（默认，四类总览同屏）/ 'queue' / 'subagent' / 'background' / 'changes'。
     // 演进自旧 rightTab 互斥 Tab——保留字段名与 'changes'/'background' 等字面量，仅新增 'all' 默认。
-    rightTab: 'all' as 'all' | 'queue' | 'subagent' | 'background' | 'changes',
+    rightTab: 'all' as 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes',
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
@@ -226,6 +227,8 @@ export const useSessionStore = defineStore('session', {
       delete this.stalledInfo[id];
       delete this.apiRetryInfo[id];
       delete this.subAgentStreamingThinking[id];
+      // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
+      useClaudePlanStore().clearSession(id);
       try {
         await window.claudeLink.deleteSession(id);
       } catch (error) {
@@ -496,7 +499,7 @@ export const useSessionStore = defineStore('session', {
       this.compacting = v;
     },
     // 切换右侧活动栏筛选（含 'all' 总览）。
-    setRightTab(tab: 'all' | 'queue' | 'subagent' | 'background' | 'changes') {
+    setRightTab(tab: 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes') {
       this.rightTab = tab;
     },
     // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。

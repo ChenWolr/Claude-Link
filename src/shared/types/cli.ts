@@ -216,6 +216,15 @@ export interface CliTaskEvent {
   summary?: string;
 }
 
+// Claude 计划事件：TodoWrite / TaskCreate/Update/List/Get / system/task_updated 经纯函数
+// 解析、repo 原子更新后，通过 CHAT_EVENT 推前端的瞬态事件。不落库 messages 表
+// （计划快照存在独立 claude_plan_state 表，工具调用本身仍按现有逻辑保留在聊天历史）。
+export type ClaudePlanCliEvent = {
+  type: 'claude_plan';
+  sessionId: string;
+  state: import('./claude-plan').ClaudePlanState;
+};
+
 // 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
 export interface CliSystemInfoEvent {
   type: 'system';
@@ -254,7 +263,8 @@ export type CliEvent =
   | CliAbortedEvent
   | CliStalledEvent
   | CliToolProgressEvent
-  | CliTaskEvent;
+  | CliTaskEvent
+  | ClaudePlanCliEvent;
 
 export interface CliDetectionResult {
   installed: boolean;

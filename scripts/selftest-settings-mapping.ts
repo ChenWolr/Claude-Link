@@ -1180,5 +1180,104 @@ console.log('\n=== 45) 附件 IPC + preload 桥（Task 3）：通道/方法/Chat
   check('preview/remove 作用于受控附件', handlers.includes('getAttachmentPreview(request)') && handlers.includes('removeDraftAttachment(sessionId, attachmentId)'));
 }
 
+console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：类型/repo/IPC/store/UI 契约 ===');
+{
+  const plan = readRel('src/shared/types/claude-plan.ts');
+  const repo = readRel('src/main/database/repositories/claude-plan-repo.ts');
+  const cli = readRel('src/shared/types/cli.ts');
+  const ipc = readRel('src/shared/types/ipc.ts');
+  const api = readRel('src/preload/api.ts');
+  const handlers = readRel('src/main/ipc-handlers.ts');
+  const backend = readRel('src/main/modules/sdk-backend.ts');
+  const store = readRel('src/renderer/stores/claude-plan-store.ts');
+  const useChat = readRel('src/renderer/composables/use-chat.ts');
+  const sessionStore = readRel('src/renderer/stores/session-store.ts');
+  const tqPanel = readRel('src/renderer/components/task/TaskQueuePanel.vue');
+  const planCard = readRel('src/renderer/components/task/ClaudePlanCard.vue');
+  const chatPage = readRel('src/renderer/pages/ChatPage.vue');
+  const migrations = readRel('src/main/database/migrations.ts');
+
+  // 类型定义
+  check('claude-plan.ts 定义 ClaudePlanState', plan.includes('ClaudePlanState'));
+  check('claude-plan.ts 定义 ClaudeTodoItem', plan.includes('ClaudeTodoItem'));
+  check('claude-plan.ts 定义 ClaudePlanTask', plan.includes('ClaudePlanTask'));
+  check('claude-plan.ts 定义 ClaudePlanEvent', plan.includes('ClaudePlanEvent'));
+  check('claude-plan.ts 纯解析 parseTodoWriteInput', plan.includes('export function parseTodoWriteInput'));
+  check('claude-plan.ts 纯解析 parseTaskCreateOutput', plan.includes('export function parseTaskCreateOutput'));
+  check('claude-plan.ts 纯解析 parseTaskUpdateInput', plan.includes('export function parseTaskUpdateInput'));
+  check('claude-plan.ts 纯解析 parseTaskListOutput', plan.includes('export function parseTaskListOutput'));
+  check('claude-plan.ts task_updated 解析 parseTaskUpdatedPatch', plan.includes('export function parseTaskUpdatedPatch'));
+  check('claude-plan.ts 纯 reducer applyPlanEvent', plan.includes('export function applyPlanEvent'));
+  check('claude-plan.ts 纯 reducer createEmptyPlanState', plan.includes('export function createEmptyPlanState'));
+
+  // CLI 事件类型
+  check('cli.ts 有 ClaudePlanCliEvent', cli.includes('ClaudePlanCliEvent'));
+  check('cli.ts ClaudePlanCliEvent 在 CliEvent 联合中', cli.includes('| ClaudePlanCliEvent'));
+
+  // DB migration + repo
+  check('migrations.ts 有 claude_plan_state 表', migrations.includes('claude_plan_state'));
+  check('migrations.ts 版本升为 6', migrations.includes('CURRENT_SCHEMA_VERSION = 6'));
+  check('claude-plan-repo.ts 有 getPlanState', repo.includes('export function getPlanState'));
+  check('claude-plan-repo.ts 有 replaceTodos', repo.includes('export function replaceTodos'));
+  check('claude-plan-repo.ts 有 upsertTask', repo.includes('export function upsertTask'));
+  check('claude-plan-repo.ts 有 patchTask', repo.includes('export function patchTask'));
+  check('claude-plan-repo.ts 有 replaceTasks', repo.includes('export function replaceTasks'));
+  check('claude-plan-repo.ts 有 removeTask', repo.includes('export function removeTask'));
+
+  // IPC 通道 + preload + handler
+  check('ipc.ts 有 CLAUDE_PLAN_GET 通道', ipc.includes('CLAUDE_PLAN_GET'));
+  check('preload api 有 getClaudePlanState', api.includes('getClaudePlanState'));
+  check('ipc-handlers 有 CLAUDE_PLAN_GET handler', handlers.includes('CLAUDE_PLAN_GET'));
+  check('ipc-handlers import claude-plan-repo', handlers.includes('claude-plan-repo'));
+
+  // sdk-backend 接入
+  check('sdk-backend import claude-plan 解析函数', backend.includes('parseTodoWriteInput'));
+  check('sdk-backend import claude-plan-repo', backend.includes('claudePlanRepo'));
+  check('sdk-backend 有 processAssistantToolUseForPlan', backend.includes('function processAssistantToolUseForPlan'));
+  check('sdk-backend 有 processToolResultForPlan', backend.includes('function processToolResultForPlan'));
+  check('sdk-backend 有 processTaskUpdatedForPlan', backend.includes('function processTaskUpdatedForPlan'));
+  check('sdk-backend 有 forwardClaudePlanState', backend.includes('function forwardClaudePlanState'));
+  check('sdk-backend task_updated 在 dispatch 中处理', backend.includes("subtype === 'task_updated'"));
+  check('sdk-backend assistant 处理调 processAssistantToolUseForPlan', backend.includes('processAssistantToolUseForPlan(sessionId, mainWindow, cliEvent.content)'));
+  check('sdk-backend user 处理调 processToolResultForPlan', backend.includes('processToolResultForPlan(sessionId, mainWindow, resultParts)'));
+  check('sdk-backend markSessionDeleted 清理 toolUseCache', backend.includes('cleanupToolUseCache(sessionId)'));
+
+  // renderer store
+  check('claude-plan-store.ts 有 planBySession', store.includes('planBySession'));
+  check('claude-plan-store.ts 有 loadPlan', store.includes('async loadPlan'));
+  check('claude-plan-store.ts 有 applyPlanState', store.includes('applyPlanState'));
+  check('claude-plan-store.ts 有 clearSession', store.includes('clearSession'));
+  check('claude-plan-store.ts 有 activePlan getter', store.includes('activePlan'));
+  check('claude-plan-store.ts 有 revision 保护', store.includes('state.revision < existing.revision'));
+
+  // use-chat 接入
+  check('use-chat import useClaudePlanStore', useChat.includes('useClaudePlanStore'));
+  check('use-chat handleCliEvent 有 claude_plan 分支', useChat.includes("case 'claude_plan'"));
+  check('use-chat handleBackgroundEvent 有 claude_plan 分支', useChat.includes('applyPlanState(sid, event.state)'));
+
+  // session-store 接入
+  check('session-store rightTab 包含 plan', sessionStore.includes("'plan'"));
+  check('session-store deleteSession 调 planStore.clearSession', sessionStore.includes('clearSession(id)'));
+  check('session-store setRightTab 包含 plan', sessionStore.includes("'plan'") && sessionStore.includes('setRightTab'));
+
+  // ChatPage 接入
+  check('ChatPage import useClaudePlanStore', chatPage.includes('useClaudePlanStore'));
+  check('ChatPage onMounted 调 loadPlan', chatPage.includes('planStore.loadPlan'));
+
+  // TaskQueuePanel 接入
+  check('TaskQueuePanel RightFilter 包含 plan', tqPanel.includes("'plan'"));
+  check('TaskQueuePanel 有 ClaudePlanCard 组件', tqPanel.includes('ClaudePlanCard'));
+  check('TaskQueuePanel rail 有 plan 按钮', tqPanel.includes("setFilter('plan')"));
+  check('TaskQueuePanel 有 planMetric', tqPanel.includes('planMetric'));
+  check('TaskQueuePanel 有 plan section', tqPanel.includes("rightTab === 'plan'"));
+
+  // ClaudePlanCard 只读 + 删除线
+  check('ClaudePlanCard 存在', planCard.length > 0);
+  check('ClaudePlanCard 只读无 checkbox', !planCard.includes('type="checkbox"'));
+  check('ClaudePlanCard 无 v-html', !planCard.includes('v-html'));
+  check('ClaudePlanCard 完成项删除线限 text span', planCard.includes('text--done') && planCard.includes('text-decoration: line-through'));
+  check('ClaudePlanCard 无 emoji 作结构图标', !planCard.includes('📋') && !planCard.includes('✓'));
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);

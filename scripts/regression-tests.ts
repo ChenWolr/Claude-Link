@@ -1276,7 +1276,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 5);
+  assert.equal(schemaVersion, 6);
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
 }
@@ -1335,7 +1335,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 5, 'Task 7B：迁移后 schema version 须升到 5');
+  assert.equal(schemaVersion, 6, 'Task 7B：迁移后 schema version 须升到 6');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');
   assert.ok(createdTables.has('message_attachments'), '须建 message_attachments 关联表');
   assert.ok(createdTables.has('task_attachments'), '须建 task_attachments 关联表');

@@ -54,6 +54,8 @@ export const IPC_CHANNELS = {
   QUEUE_GET_STATE: 'queue:getState',
   QUEUE_EVENT: 'queue:event',
   QUEUE_USER_MESSAGE: 'queue:userMessage',
+  // Claude 计划快照：按会话读取 TodoWrite / Task 工具的计划状态。
+  CLAUDE_PLAN_GET: 'claude-plan:get',
   // 附件：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
   // 统一发送载荷 ChatSendPayload 经 CHAT_SEND / TASK_ADD / QUEUE_USER_MESSAGE 透传，不另设通道。
   ATTACHMENT_PICK: 'attachment:pick',

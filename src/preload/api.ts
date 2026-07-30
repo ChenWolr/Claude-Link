@@ -74,6 +74,7 @@ export interface ClaudeLinkAPI {
   resumeQueue: (sessionId: string) => Promise<void>;
   getQueueState: (sessionId: string) => Promise<QueueState>;
   queueUserMessage: (sessionId: string, payload: ChatSendPayload) => Promise<QueueState>;
+  getClaudePlanState: (sessionId: string) => Promise<import('../shared/types/claude-plan').ClaudePlanState | null>;
   pickAttachments: (sessionId: string) => Promise<PickAttachmentsResult>;
   stageAttachmentBytes: (input: StageAttachmentBytesInput) => Promise<AttachmentSummary>;
   getAttachmentPreview: (request: AttachmentPreviewRequest) => Promise<AttachmentPreviewResponse>;
@@ -171,6 +172,7 @@ export function createApi(): ClaudeLinkAPI {
     resumeQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME, sessionId),
     getQueueState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_STATE, sessionId),
     queueUserMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_USER_MESSAGE, sessionId, payload),
+    getClaudePlanState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_PLAN_GET, sessionId) as Promise<import('../shared/types/claude-plan').ClaudePlanState | null>,
     pickAttachments: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PICK, sessionId) as Promise<PickAttachmentsResult>,
     stageAttachmentBytes: (input) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_STAGE_BYTES, input) as Promise<AttachmentSummary>,
     getAttachmentPreview: (request) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PREVIEW, request) as Promise<AttachmentPreviewResponse>,
