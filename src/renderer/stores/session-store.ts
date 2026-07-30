@@ -49,6 +49,8 @@ export const useSessionStore = defineStore('session', {
     // 右侧活动栏筛选：'all'（默认，四类总览同屏）/ 'queue' / 'subagent' / 'background' / 'changes'。
     // 演进自旧 rightTab 互斥 Tab——保留字段名与 'changes'/'background' 等字面量，仅新增 'all' 默认。
     rightTab: 'all' as 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes',
+    // 活动总览折叠态：true=只留 rail 图标轨、隐藏主体内容（rail 底部双箭头按钮切换）。
+    overviewCollapsed: false,
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
@@ -531,6 +533,10 @@ export const useSessionStore = defineStore('session', {
     // 切换右侧活动栏筛选（含 'all' 总览）。
     setRightTab(tab: 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes') {
       this.rightTab = tab;
+    },
+    // 折叠/展开活动总览主体（保留 rail 图标轨）。
+    toggleOverviewCollapsed() {
+      this.overviewCollapsed = !this.overviewCollapsed;
     },
     // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。
     focusSubAgent(parentAgentId: string) {
