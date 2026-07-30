@@ -161,7 +161,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 }
 
 .claude-plan-card__empty {
-  color: var(--color-text-secondary);
+  color: var(--color-text-muted);
   font-size: 0.85em;
   padding: 12px 4px;
   text-align: center;
@@ -180,7 +180,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 .plan-tasks__icon {
   width: 14px;
   height: 14px;
-  color: var(--color-text-secondary);
+  color: var(--color-text-muted);
   flex-shrink: 0;
 }
 
@@ -188,7 +188,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 .plan-tasks__title {
   font-size: 0.8em;
   font-weight: 600;
-  color: var(--color-text-secondary);
+  color: var(--color-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -196,7 +196,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 .plan-todos__count,
 .plan-tasks__count {
   font-size: 0.75em;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-muted);
   margin-left: auto;
 }
 
@@ -220,7 +220,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 }
 
 .plan-todo-item:hover {
-  background: var(--color-hover);
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
 }
 
 .plan-todo-item__icon {
@@ -239,15 +239,15 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 }
 
 .plan-todo-item--completed .plan-todo-item__icon {
-  color: var(--color-success, #4caf50);
+  color: var(--color-success);
 }
 
 .plan-todo-item--in_progress .plan-todo-item__icon {
-  color: var(--color-accent, #2196f3);
+  color: var(--color-accent);
 }
 
 .plan-todo-item--pending .plan-todo-item__icon {
-  color: var(--color-text-tertiary);
+  color: var(--color-text-muted);
 }
 
 .plan-todo-item__text {
@@ -260,7 +260,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 /* 完成项删除线：只作用于直属文本 span，不划过图标和徽章 */
 .plan-todo-item__text--done {
   text-decoration: line-through;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-muted);
 }
 
 /* Task 条目 */
@@ -280,7 +280,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 }
 
 .plan-task__header:hover {
-  background: var(--color-hover);
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
 }
 
 .plan-task__dot {
@@ -288,25 +288,25 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--color-text-tertiary);
+  background: var(--color-text-muted);
 }
 
 .plan-task__dot--in_progress {
-  background: var(--color-accent, #2196f3);
+  background: var(--color-accent);
   animation: plan-dot-pulse 1.5s ease-in-out infinite;
 }
 
 .plan-task__dot--completed {
-  background: var(--color-success, #4caf50);
+  background: var(--color-success);
 }
 
 .plan-task__dot--failed,
 .plan-task__dot--killed {
-  background: var(--color-danger, #f44336);
+  background: var(--color-danger);
 }
 
 .plan-task__dot--paused {
-  background: var(--color-warning, #ff9800);
+  background: var(--color-warn);
 }
 
 @keyframes plan-dot-pulse {
@@ -331,42 +331,42 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 
 .plan-task__subject--done {
   text-decoration: line-through;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-muted);
 }
 
 .plan-task__status {
   font-size: 0.7em;
   padding: 1px 6px;
   border-radius: var(--radius-sm);
-  background: var(--color-bg-secondary);
-  color: var(--color-text-secondary);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
   white-space: nowrap;
   flex-shrink: 0;
 }
 
 .plan-task__status--running {
-  background: var(--color-accent-bg, rgba(33, 150, 243, 0.12));
-  color: var(--color-accent, #2196f3);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent-strong);
 }
 
 .plan-task__status--done {
-  background: var(--color-success-bg, rgba(76, 175, 80, 0.12));
-  color: var(--color-success, #4caf50);
+  background: color-mix(in srgb, var(--color-success) 10%, transparent);
+  color: var(--color-success-strong);
 }
 
 .plan-task__status--error {
-  background: var(--color-danger-bg, rgba(244, 67, 54, 0.12));
-  color: var(--color-danger, #f44336);
+  background: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  color: var(--color-danger);
 }
 
 .plan-task__status--paused {
-  background: var(--color-warning-bg, rgba(255, 152, 0, 0.12));
-  color: var(--color-warning, #ff9800);
+  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
+  color: var(--color-warn-strong);
 }
 
 .plan-task__arrow {
   flex-shrink: 0;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-muted);
   font-size: 0.85em;
   transition: transform 0.15s ease;
 }
@@ -384,7 +384,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 
 .plan-task__row {
   font-size: 0.78em;
-  color: var(--color-text-secondary);
+  color: var(--color-text-muted);
   line-height: 1.4;
   word-break: break-word;
 }

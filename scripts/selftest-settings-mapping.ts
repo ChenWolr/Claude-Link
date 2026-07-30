@@ -1209,6 +1209,12 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
   check('claude-plan.ts task_updated 解析 parseTaskUpdatedPatch', plan.includes('export function parseTaskUpdatedPatch'));
   check('claude-plan.ts 纯 reducer applyPlanEvent', plan.includes('export function applyPlanEvent'));
   check('claude-plan.ts 纯 reducer createEmptyPlanState', plan.includes('export function createEmptyPlanState'));
+  // F7: add/merge 语义类型
+  check('claude-plan.ts 定义 ClaudePlanTaskPatch（F7）', plan.includes('ClaudePlanTaskPatch'));
+  check('claude-plan.ts 定义 TaskListEntry（F4）', plan.includes('TaskListEntry'));
+  check('claude-plan.ts 有 applyTaskPatch helper（F7 add/merge）', plan.includes('export function applyTaskPatch'));
+  check('claude-plan.ts tasks_merge 操作（替代 tasks_replace）', plan.includes("operation: 'tasks_merge'"));
+  check('claude-plan.ts 无 tasks_replace 操作（已移除）', !plan.includes("operation: 'tasks_replace'"));
 
   // CLI 事件类型
   check('cli.ts 有 ClaudePlanCliEvent', cli.includes('ClaudePlanCliEvent'));
@@ -1221,7 +1227,9 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
   check('claude-plan-repo.ts 有 replaceTodos', repo.includes('export function replaceTodos'));
   check('claude-plan-repo.ts 有 upsertTask', repo.includes('export function upsertTask'));
   check('claude-plan-repo.ts 有 patchTask', repo.includes('export function patchTask'));
-  check('claude-plan-repo.ts 有 replaceTasks', repo.includes('export function replaceTasks'));
+  check('claude-plan-repo.ts 有 mergeTasks（F4 替代 replaceTasks）', repo.includes('export function mergeTasks'));
+  check('claude-plan-repo.ts 有 upsertPatch（F5 TaskGet 用）', repo.includes('export function upsertPatch'));
+  check('claude-plan-repo.ts 无 replaceTasks（已移除）', !repo.includes('export function replaceTasks'));
   check('claude-plan-repo.ts 有 removeTask', repo.includes('export function removeTask'));
 
   // IPC 通道 + preload + handler
@@ -1233,13 +1241,28 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
   // sdk-backend 接入
   check('sdk-backend import claude-plan 解析函数', backend.includes('parseTodoWriteInput'));
   check('sdk-backend import claude-plan-repo', backend.includes('claudePlanRepo'));
+  check('sdk-backend import ClaudePlanTaskPatch（F7）', backend.includes('ClaudePlanTaskPatch'));
   check('sdk-backend 有 processAssistantToolUseForPlan', backend.includes('function processAssistantToolUseForPlan'));
   check('sdk-backend 有 processToolResultForPlan', backend.includes('function processToolResultForPlan'));
   check('sdk-backend 有 processTaskUpdatedForPlan', backend.includes('function processTaskUpdatedForPlan'));
   check('sdk-backend 有 forwardClaudePlanState', backend.includes('function forwardClaudePlanState'));
   check('sdk-backend task_updated 在 dispatch 中处理', backend.includes("subtype === 'task_updated'"));
-  check('sdk-backend assistant 处理调 processAssistantToolUseForPlan', backend.includes('processAssistantToolUseForPlan(sessionId, mainWindow, cliEvent.content)'));
-  check('sdk-backend user 处理调 processToolResultForPlan', backend.includes('processToolResultForPlan(sessionId, mainWindow, resultParts)'));
+  // F9: parentToolUseId 隔离子 Agent
+  check('sdk-backend processAssistantToolUseForPlan 接收 parentToolUseId（F9）', backend.includes('parentToolUseId?: string'));
+  check('sdk-backend assistant 调 processAssistantToolUseForPlan 传 parentToolUseId', backend.includes('processAssistantToolUseForPlan(sessionId, mainWindow, cliEvent.content, cliEvent.parentToolUseId)'));
+  // F1: tool_use_result 结构化结果
+  check('sdk-backend 有 extractStructuredResult（F1）', backend.includes('function extractStructuredResult'));
+  check('sdk-backend user 调 processToolResultForPlan 传 toolUseResult', backend.includes('processToolResultForPlan(sessionId, mainWindow, resultParts, sdkMsg.tool_use_result)'));
+  // F8: orphan patch 缓存
+  check('sdk-backend 有 sessionOrphanPatches（F8）', backend.includes('sessionOrphanPatches'));
+  check('sdk-backend 有 replayOrphanPatches（F8）', backend.includes('function replayOrphanPatches'));
+  // F2: TaskUpdate 推迟到 result 阶段
+  check('sdk-backend processAssistantToolUseForPlan 注释 TaskUpdate 推迟', backend.includes('result 阶段在 processToolResultForPlan 中处理'));
+  // F6: patch 非空即转发
+  check('sdk-backend patch 转发门禁用 Object.keys（F6）', backend.includes('Object.keys(patch).length'));
+  // F13: TodoWrite 幂等标记
+  check('sdk-backend cache entry 有 applied 标记（F13）', backend.includes('applied'));
+  // F15: markSessionDeleted 清理 toolUseCache
   check('sdk-backend markSessionDeleted 清理 toolUseCache', backend.includes('cleanupToolUseCache(sessionId)'));
 
   // renderer store
@@ -1259,6 +1282,9 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
   check('session-store rightTab 包含 plan', sessionStore.includes("'plan'"));
   check('session-store deleteSession 调 planStore.clearSession', sessionStore.includes('clearSession(id)'));
   check('session-store setRightTab 包含 plan', sessionStore.includes("'plan'") && sessionStore.includes('setRightTab'));
+  // F11: deleteSession 回滚恢复 plan store
+  check('session-store deleteSession 保存 prevPlan（F11）', sessionStore.includes('prevPlan'));
+  check('session-store deleteSession catch 恢复 planBySession（F11）', sessionStore.includes('planStore.planBySession[id] = prevPlan'));
 
   // ChatPage 接入
   check('ChatPage import useClaudePlanStore', chatPage.includes('useClaudePlanStore'));
@@ -1270,6 +1296,9 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
   check('TaskQueuePanel rail 有 plan 按钮', tqPanel.includes("setFilter('plan')"));
   check('TaskQueuePanel 有 planMetric', tqPanel.includes('planMetric'));
   check('TaskQueuePanel 有 plan section', tqPanel.includes("rightTab === 'plan'"));
+  // F10: 计划完成指标包含 task 完成
+  check('TaskQueuePanel 有 planTaskCompleted（F10）', tqPanel.includes('planTaskCompleted'));
+  check('TaskQueuePanel 有 planDone 合并指标（F10）', tqPanel.includes('planDone'));
 
   // ClaudePlanCard 只读 + 删除线
   check('ClaudePlanCard 存在', planCard.length > 0);
@@ -1277,6 +1306,15 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
   check('ClaudePlanCard 无 v-html', !planCard.includes('v-html'));
   check('ClaudePlanCard 完成项删除线限 text span', planCard.includes('text--done') && planCard.includes('text-decoration: line-through'));
   check('ClaudePlanCard 无 emoji 作结构图标', !planCard.includes('📋') && !planCard.includes('✓'));
+  // F3: 设计 token 合规（无废弃 token，用真实 variables.css token）
+  check('ClaudePlanCard 无 --color-text-secondary（F3）', !planCard.includes('--color-text-secondary'));
+  check('ClaudePlanCard 无 --color-text-tertiary（F3）', !planCard.includes('--color-text-tertiary'));
+  check('ClaudePlanCard 无 --color-hover（F3）', !planCard.includes('--color-hover'));
+  check('ClaudePlanCard 无 --color-bg-secondary（F3）', !planCard.includes('--color-bg-secondary'));
+  check('ClaudePlanCard 无 --color-accent-bg（F3）', !planCard.includes('--color-accent-bg'));
+  check('ClaudePlanCard 无 --color-warning（F3）', !planCard.includes('--color-warning'));
+  check('ClaudePlanCard 用 --color-text-muted（F3）', planCard.includes('--color-text-muted'));
+  check('ClaudePlanCard 用 --color-panel-soft 或 color-mix（F3）', planCard.includes('--color-panel-soft') || planCard.includes('color-mix'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

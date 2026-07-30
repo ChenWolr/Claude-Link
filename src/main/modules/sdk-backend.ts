@@ -38,7 +38,7 @@ import {
   parseTaskGetOutput,
   parseTaskUpdatedPatch,
 } from '../../shared/types/claude-plan';
-import type { ClaudePlanTask, ClaudePlanState } from '../../shared/types/claude-plan';
+import type { ClaudePlanTask, ClaudePlanState, ClaudePlanTaskPatch } from '../../shared/types/claude-plan';
 import * as claudePlanRepo from '../database/repositories/claude-plan-repo';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
@@ -604,6 +604,8 @@ function deleteEntry(sessionId: string, entry: SessionEntry): void {
   if (isCurrent) {
     entries.delete(sessionId);
     cleanupSessionStall(sessionId);
+    // F15: 回合结束清理 toolUse 缓存，防止中断/崩溃后泄漏
+    cleanupToolUseCache(sessionId);
   }
 }
 
@@ -891,12 +893,16 @@ function isToolResultPart(part: CliMessageContentPart): boolean {
 // 独立于手动排队 tasks 表。tool_use → 即时/缓存解析 → repo 原子更新 → IPC 推送。
 // 计划快照不写入 messages 表（工具调用本身仍按现有逻辑保留在聊天历史）。
 
-// 按会话隔离的 toolUseId → { toolName, input } 缓存，用于配对 tool_use 与 tool_result。
+// 按会话隔离的 toolUseId → { toolName, input, applied? } 缓存，用于配对 tool_use 与 tool_result。
 // 仅缓存计划相关工具（TodoWrite/TaskCreate/TaskUpdate/TaskList/TaskGet）。
+// applied 标记：TodoWrite input 阶段已处理 → output 阶段跳过（F13 幂等）。
 // 会话删除时在 markSessionDeleted 清理；重启后不依赖此缓存（依赖已持久化快照）。
-const sessionToolUseCache = new Map<string, Map<string, { toolName: string; input: Record<string, unknown> }>>();
+const sessionToolUseCache = new Map<string, Map<string, { toolName: string; input: Record<string, unknown>; applied?: boolean }>>();
 
-function getToolUseCache(sessionId: string): Map<string, { toolName: string; input: Record<string, unknown> }> {
+// 按会话隔离的 orphan patch 缓存：task_updated 到达但 taskId 未知时暂存，待 TaskCreate/List/Get 建立后重放（F8）。
+const sessionOrphanPatches = new Map<string, Map<string, ClaudePlanTaskPatch[]>>();
+
+function getToolUseCache(sessionId: string): Map<string, { toolName: string; input: Record<string, unknown>; applied?: boolean }> {
   let cache = sessionToolUseCache.get(sessionId);
   if (!cache) {
     cache = new Map();
@@ -905,8 +911,18 @@ function getToolUseCache(sessionId: string): Map<string, { toolName: string; inp
   return cache;
 }
 
+function getOrphanPatches(sessionId: string): Map<string, ClaudePlanTaskPatch[]> {
+  let orphans = sessionOrphanPatches.get(sessionId);
+  if (!orphans) {
+    orphans = new Map();
+    sessionOrphanPatches.set(sessionId, orphans);
+  }
+  return orphans;
+}
+
 function cleanupToolUseCache(sessionId: string): void {
   sessionToolUseCache.delete(sessionId);
+  sessionOrphanPatches.delete(sessionId);
 }
 
 // 推送计划快照到渲染进程（瞬态：不落库 messages，不调 persistCliEvent）。
@@ -922,8 +938,23 @@ function forwardClaudePlanState(sessionId: string, mainWindow: BrowserWindow, st
   }
 }
 
-// 从 tool_result 的 content 字段提取 JSON 对象（SDK 内置工具的结果通常是 JSON）。
-function extractToolResultObject(part: CliMessageContentPart): Record<string, unknown> | null {
+// F1: 从 SDK user 消息提取结构化工具结果。优先用顶层 tool_use_result（SDK 类型 sdk.d.ts:4198），
+// 因为 SDK 内置工具（Skill/TaskCreate/TaskList/TaskGet/TodoWrite）的结构化结果是放在
+// user 消息顶层 tool_use_result 字段，而 tool_result.content 是人类可读文本。
+function extractStructuredResult(
+  toolUseResult: unknown,
+  part: CliMessageContentPart,
+): Record<string, unknown> | null {
+  // 优先用顶层 tool_use_result（对象则直接用；数组取第一个对象元素）
+  if (toolUseResult && typeof toolUseResult === 'object') {
+    if (Array.isArray(toolUseResult)) {
+      const first = toolUseResult.find((e) => e && typeof e === 'object' && !Array.isArray(e));
+      if (first) return first as Record<string, unknown>;
+    } else {
+      return toolUseResult as Record<string, unknown>;
+    }
+  }
+  // 回退：从 tool_result.content 解析 JSON（某些工具可能在 content 里放 JSON 文本）
   if (part.type !== 'tool_result') return null;
   const content = (part as { content?: unknown }).content;
   if (typeof content === 'string') {
@@ -940,14 +971,20 @@ function extractToolResultObject(part: CliMessageContentPart): Record<string, un
   return null;
 }
 
-// 处理 assistant 消息中的 tool_use 块：TodoWrite 即时替换，TaskUpdate 即时 patch，
-// TaskCreate/TaskList/TaskGet 缓存 input 等待对应 tool_result。
+// 处理 assistant 消息中的 tool_use 块：
+// - TodoWrite：即时完整替换快照（input.todos 是新状态），标记 applied（F13 幂等）
+// - TaskUpdate：只缓存，不立即写库（F2 推迟到 result 确认 success）
+// - TaskCreate/TaskList/TaskGet：缓存 input 等待对应 tool_result
+// F9：parentToolUseId 非空 = 子 Agent 消息 → 跳过（不污染父会话主计划）
 function processAssistantToolUseForPlan(
   sessionId: string,
   mainWindow: BrowserWindow,
   content: CliMessageContentPart[],
+  parentToolUseId?: string,
 ): void {
   if (!isSessionActive(sessionId)) return;
+  // F9：子 Agent 的 plan 工具不影响父会话主计划
+  if (parentToolUseId) return;
   const cache = getToolUseCache(sessionId);
   for (const part of content) {
     if (part.type !== 'tool_use') continue;
@@ -964,55 +1001,42 @@ function processAssistantToolUseForPlan(
       cache.set(toolUseId, { toolName, input });
     }
 
-    // TodoWrite：即时完整替换快照（input.todos 是新状态）
+    // TodoWrite：即时完整替换快照（input.todos 是新状态），标记 applied 实现 F13 幂等
     if (toolName === 'TodoWrite') {
       const todos = parseTodoWriteInput(input);
       if (todos) {
         try {
           const state = claudePlanRepo.replaceTodos(sessionId, todos);
           if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+          // 标记 input 阶段已处理，output 阶段跳过避免双写 revision 翻倍（F13）
+          cache.set(toolUseId, { toolName, input, applied: true });
         } catch (err) {
           logger.warn(`[plan] replaceTodos failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     }
 
-    // TaskUpdate：即时 patch（status=deleted → 删除）
-    if (toolName === 'TaskUpdate') {
-      const parsed = parseTaskUpdateInput(input);
-      if (parsed) {
-        if ('delete' in parsed) {
-          try {
-            const state = claudePlanRepo.removeTask(sessionId, parsed.taskId);
-            if (state) forwardClaudePlanState(sessionId, mainWindow, state);
-          } catch (err) {
-            logger.warn(`[plan] removeTask failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
-          }
-        } else {
-          const patch = parsed.patch;
-          if (patch.status || patch.subject || patch.description || patch.activeForm) {
-            try {
-              const state = claudePlanRepo.patchTask(sessionId, parsed.taskId, patch);
-              if (state) forwardClaudePlanState(sessionId, mainWindow, state);
-            } catch (err) {
-              logger.warn(`[plan] patchTask failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
-            }
-          }
-        }
-      }
-    }
+    // F2：TaskUpdate 不在 tool_use 阶段立即写库——推迟到 tool_result 确认 success
+    // 只缓存 input（已缓存），result 阶段在 processToolResultForPlan 中处理
   }
 }
 
 // 处理 user 消息中的 tool_result 块：配对缓存的 toolUseId，
-// 解析 TaskCreate/TaskList/TaskGet/TodoWrite 的结构化输出。
+// F1: 从 sdkMsg.tool_use_result 顶层取结构化结果（而非 content JSON.parse）。
+// F2: TaskUpdate 在此确认 success 后才写库（失败则丢弃 provisional patch）。
+// F4: TaskList 用 mergeTasks（保留本地详情）。
+// F5: TaskGet 用 upsertPatch（patch 语义，保留本地未返回字段）。
+// F8: 任务建立后重放 orphan patch。
+// F13: TodoWrite input 已处理 → output 跳过（幂等）。
 function processToolResultForPlan(
   sessionId: string,
   mainWindow: BrowserWindow,
   content: CliMessageContentPart[],
+  toolUseResult: unknown,
 ): void {
   if (!isSessionActive(sessionId)) return;
   const cache = getToolUseCache(sessionId);
+  const orphans = getOrphanPatches(sessionId);
   for (const part of content) {
     if (!isToolResultPart(part)) continue;
     const toolUseId = (part as { tool_use_id?: string }).tool_use_id ?? '';
@@ -1020,13 +1044,11 @@ function processToolResultForPlan(
     const cached = cache.get(toolUseId);
     if (!cached) continue;
 
-    const resultObj = extractToolResultObject(part);
-    if (!resultObj) {
-      cache.delete(toolUseId);
-      continue;
-    }
+    // F1: 优先从顶层 tool_use_result 取结构化结果
+    const resultObj = extractStructuredResult(toolUseResult, part);
 
     if (cached.toolName === 'TaskCreate') {
+      if (!resultObj) { cache.delete(toolUseId); continue; }
       const taskResult = parseTaskCreateOutput(resultObj);
       if (taskResult) {
         const inputParsed = parseTaskCreateInput(cached.input);
@@ -1043,41 +1065,97 @@ function processToolResultForPlan(
           };
           try {
             const state = claudePlanRepo.upsertTask(sessionId, task);
-            if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+            if (state) {
+              forwardClaudePlanState(sessionId, mainWindow, state);
+              // F8: 重放该 taskId 的 orphan patches
+              replayOrphanPatches(sessionId, mainWindow, taskResult.id, orphans);
+            }
           } catch (err) {
             logger.warn(`[plan] upsertTask (TaskCreate) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
           }
         }
       }
-    } else if (cached.toolName === 'TaskList') {
-      const tasks = parseTaskListOutput(resultObj);
-      if (tasks) {
+    } else if (cached.toolName === 'TaskUpdate') {
+      // F2: 推迟到 result 确认 success 后才写库
+      const parsed = parseTaskUpdateInput(cached.input);
+      if (!parsed) { cache.delete(toolUseId); continue; }
+      // 检查 success（结构化结果可能含 success 字段）
+      const success = resultObj?.success;
+      // success === false → 丢弃 provisional patch（SDK 拒绝了更新）
+      if (success === false) {
+        cache.delete(toolUseId);
+        continue;
+      }
+      // success === true 或无 success 字段 → 执行更新
+      if ('delete' in parsed) {
         try {
-          const state = claudePlanRepo.replaceTasks(sessionId, tasks);
+          const state = claudePlanRepo.removeTask(sessionId, parsed.taskId);
           if (state) forwardClaudePlanState(sessionId, mainWindow, state);
         } catch (err) {
-          logger.warn(`[plan] replaceTasks (TaskList) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+          logger.warn(`[plan] removeTask (TaskUpdate) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        const patch = parsed.patch;
+        // F6: patch 非空即转发（含 owner/blocks/blockedBy/metadata）
+        if (Object.keys(patch).length > 0) {
+          try {
+            const state = claudePlanRepo.patchTask(sessionId, parsed.taskId, patch);
+            if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+          } catch (err) {
+            logger.warn(`[plan] patchTask (TaskUpdate) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+    } else if (cached.toolName === 'TaskList') {
+      if (!resultObj) { cache.delete(toolUseId); continue; }
+      // F4: merge 而非 replace——保留本地 description/activeForm/metadata/blocks
+      const entries = parseTaskListOutput(resultObj);
+      if (entries) {
+        try {
+          const state = claudePlanRepo.mergeTasks(sessionId, entries);
+          if (state) {
+            forwardClaudePlanState(sessionId, mainWindow, state);
+            // F8: 对每个 entry taskId 重放 orphan patches
+            for (const entry of entries) {
+              replayOrphanPatches(sessionId, mainWindow, entry.id, orphans);
+            }
+          }
+        } catch (err) {
+          logger.warn(`[plan] mergeTasks (TaskList) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     } else if (cached.toolName === 'TaskGet') {
-      const task = parseTaskGetOutput(resultObj);
-      if (task) {
+      if (!resultObj) { cache.delete(toolUseId); continue; }
+      // F5: upsertPatch（patch 语义）而非全量 upsert——保留本地未返回字段
+      const result = parseTaskGetOutput(resultObj);
+      if (result) {
         try {
-          const state = claudePlanRepo.upsertTask(sessionId, task);
-          if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+          const state = claudePlanRepo.upsertPatch(sessionId, result.id, result.patch);
+          if (state) {
+            forwardClaudePlanState(sessionId, mainWindow, state);
+            // F8: 重放该 taskId 的 orphan patches
+            replayOrphanPatches(sessionId, mainWindow, result.id, orphans);
+          }
         } catch (err) {
-          logger.warn(`[plan] upsertTask (TaskGet) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+          logger.warn(`[plan] upsertPatch (TaskGet) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     } else if (cached.toolName === 'TodoWrite') {
-      // 用 newTodos 确认/修正（同一 toolUseId 幂等：repo 已递增 revision）
-      const todos = parseTodoWriteOutput(resultObj);
-      if (todos) {
-        try {
-          const state = claudePlanRepo.replaceTodos(sessionId, todos);
-          if (state) forwardClaudePlanState(sessionId, mainWindow, state);
-        } catch (err) {
-          logger.warn(`[plan] replaceTodos (output confirm) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+      // F13: input 阶段已处理 → output 跳过（避免双写 revision 翻倍）
+      if (cached.applied) {
+        cache.delete(toolUseId);
+        continue;
+      }
+      // input 阶段未处理（parseTodoWriteInput 返回 null 等）→ 用 output 确认
+      if (resultObj) {
+        const todos = parseTodoWriteOutput(resultObj);
+        if (todos) {
+          try {
+            const state = claudePlanRepo.replaceTodos(sessionId, todos);
+            if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+          } catch (err) {
+            logger.warn(`[plan] replaceTodos (output confirm) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       }
     }
@@ -1086,7 +1164,28 @@ function processToolResultForPlan(
   }
 }
 
+// F8: 重放 orphan patches（task_updated 在任务建立前到达时缓存的 patch）
+function replayOrphanPatches(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  taskId: string,
+  orphans: Map<string, ClaudePlanTaskPatch[]>,
+): void {
+  const patches = orphans.get(taskId);
+  if (!patches || patches.length === 0) return;
+  orphans.delete(taskId);
+  for (const patch of patches) {
+    try {
+      const state = claudePlanRepo.patchTask(sessionId, taskId, patch);
+      if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+    } catch (err) {
+      logger.warn(`[plan] orphan replay patchTask failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
 // 处理 SDK system/task_updated 消息：归一化 running → in_progress，patch 已知任务。
+// F8: 若 taskId 未知（patchTask no-op），把 patch 缓存为 orphan，待 TaskCreate/List/Get 建立后重放。
 function processTaskUpdatedForPlan(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -1099,7 +1198,20 @@ function processTaskUpdatedForPlan(
   if (Object.keys(parsed.patch).length === 0) return;
   try {
     const state = claudePlanRepo.patchTask(sessionId, parsed.taskId, parsed.patch);
-    if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+    if (state) {
+      forwardClaudePlanState(sessionId, mainWindow, state);
+      // F8: 检查任务是否存在——不存在则缓存为 orphan
+      const taskExists = state.tasks.some((t) => t.id === parsed.taskId);
+      if (!taskExists) {
+        const orphans = getOrphanPatches(sessionId);
+        const existing = orphans.get(parsed.taskId);
+        if (existing) {
+          existing.push(parsed.patch);
+        } else {
+          orphans.set(parsed.taskId, [parsed.patch]);
+        }
+      }
+    }
   } catch (err) {
     logger.warn(`[plan] patchTask (task_updated) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -1434,7 +1546,8 @@ async function runQuery(
           forwardEvent(sessionId, mainWindow, cliEvent);
           // Claude 计划：扫描 tool_use 块，处理 TodoWrite/TaskCreate/TaskUpdate 等。
           // 不写入 messages 表——计划快照存在独立 claude_plan_state 表。
-          processAssistantToolUseForPlan(sessionId, mainWindow, cliEvent.content);
+          // F9：传 parentToolUseId，子 Agent 的 plan 工具不影响父会话主计划。
+          processAssistantToolUseForPlan(sessionId, mainWindow, cliEvent.content, cliEvent.parentToolUseId);
         }
         continue;
       }
@@ -1450,7 +1563,8 @@ async function runQuery(
           if (resultParts.length > 0) {
             forwardEvent(sessionId, mainWindow, { ...cliEvent, content: resultParts });
             // Claude 计划：配对 tool_result 与缓存的 tool_use，解析 TaskCreate/TaskList/TaskGet 输出。
-            processToolResultForPlan(sessionId, mainWindow, resultParts);
+            // F1: 传 sdkMsg.tool_use_result（SDK 顶层结构化结果，非 content 文本）。
+            processToolResultForPlan(sessionId, mainWindow, resultParts, sdkMsg.tool_use_result);
           }
         }
         continue;
@@ -1471,6 +1585,8 @@ async function runQuery(
       }
       if (type === 'result') {
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
+        // F15: result 是回合终态，清理本回合的 toolUse 缓存和 orphan patches
+        cleanupToolUseCache(sessionId);
         continue;
       }
       // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。

@@ -228,7 +228,9 @@ export const useSessionStore = defineStore('session', {
       delete this.apiRetryInfo[id];
       delete this.subAgentStreamingThinking[id];
       // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
-      useClaudePlanStore().clearSession(id);
+      const planStore = useClaudePlanStore();
+      const prevPlan = planStore.planBySession[id];
+      planStore.clearSession(id);
       try {
         await window.claudeLink.deleteSession(id);
       } catch (error) {
@@ -236,6 +238,10 @@ export const useSessionStore = defineStore('session', {
         this.sessions = prevSessions;
         this.searchResults = prevSearch;
         this.activeSession = prevActive;
+        // F11: 恢复 plan store 状态（clearSession 已删除）
+        if (prevPlan) {
+          planStore.planBySession[id] = prevPlan;
+        }
         this.error = error instanceof Error ? error.message : '删除会话失败';
       }
     },
