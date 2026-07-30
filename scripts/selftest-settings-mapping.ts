@@ -1450,5 +1450,39 @@ console.log('\n=== 49) 思考强度 UI 层：ThinkingLevelSelector + session-sto
   check('ConfigPage 行为 tab 有默认思考强度选择器', configPage.includes('默认思考强度'));
 }
 
+console.log('\n=== 50) 批次 B：thinking_tokens 实时思考 token 估算链路契约 ===');
+{
+  const cli = readRel('src/shared/types/cli.ts');
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  const store = readRel('src/renderer/stores/session-store.ts');
+  const useChat = readRel('src/renderer/composables/use-chat.ts');
+  const ctx = readRel('src/renderer/components/chat/ContextButton.vue');
+
+  // 类型（B-1）
+  check('cli.ts CliSystemInfoEvent subtype 含 thinking_tokens', cli.includes("'thinking_tokens'"));
+  check('cli.ts CliSystemInfoEvent 有 estimatedTokens 字段', cli.includes('estimatedTokens?: number'));
+
+  // 主进程：分支 + 节流 + 清理（B-2）
+  check('sdk-backend 有 thinking_tokens 分支', sb.includes("subtype === 'thinking_tokens'"));
+  check('sdk-backend 有 shouldForwardThinkingTokens 节流', sb.includes('function shouldForwardThinkingTokens'));
+  check('sdk-backend 有 THINKING_TOKENS_THROTTLE_MS 限频常量', sb.includes('THINKING_TOKENS_THROTTLE_MS'));
+  check('sdk-backend thinking_tokens 走 forwardTransient（不落库）', sb.includes("subtype: 'thinking_tokens'") && sb.includes('estimatedTokens: estimated'));
+  check('sdk-backend markSessionDeleted 清理节流状态', sb.includes('sessionThinkingTokenThrottle.delete(sessionId)'));
+
+  // store（B-3）
+  check('session-store 有 thinkingTokens 瞬态字段', store.includes('thinkingTokens: null as number | null'));
+  check('session-store 有 setThinkingTokens action', store.includes('setThinkingTokens(v: number | null)'));
+  check('session-store switchSession 复位 thinkingTokens', store.includes('this.thinkingTokens = null'));
+
+  // use-chat（B-4）
+  check('use-chat 处理 thinking_tokens → setThinkingTokens', useChat.includes("event.subtype === 'thinking_tokens'") && useChat.includes('store.setThinkingTokens(t.estimatedTokens)'));
+  check('use-chat 回合结束清零 setThinkingTokens(null)', useChat.includes('store.setThinkingTokens(null)'));
+
+  // ContextButton（B-5）：保留思考态呼吸提示，但按用户要求移除 hover 数值行
+  check('ContextButton 思考态 class ctx__btn--thinking', ctx.includes('ctx__btn--thinking'));
+  check('ContextButton 思考态呼吸读 store.thinkingTokens', ctx.includes('store.thinkingTokens'));
+  check('ContextButton 已移除 hover 思考 token 数值行', !ctx.includes('（估算）'));
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
