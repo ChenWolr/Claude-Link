@@ -7,6 +7,7 @@
 import { defineStore } from 'pinia';
 import type { Session } from '../../shared/types/session';
 import type { Message } from '../../shared/types/session';
+import type { ThinkingLevel } from '../../shared/types/thinking';
 import type { StallInfo } from '../../shared/stall-watchdog';
 import { resolveContextWindow } from '../../shared/model-context-windows';
 import { useConfigStore } from './config-store';
@@ -300,6 +301,20 @@ export const useSessionStore = defineStore('session', {
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '更新权限模式失败';
+      }
+    },
+    // 会话级思考强度：写入 session.thinkingLevel（null/'auto' = 跟随全局默认），下次 spawn 注入生效。
+    // 与 setActiveSessionPermissionMode 同构（通用 updateSession 通道）。
+    async setActiveSessionThinkingLevel(level: ThinkingLevel | null) {
+      if (!this.activeSession) return;
+      try {
+        const updated = await window.claudeLink.updateSession(this.activeSession.id, { thinkingLevel: level });
+        if (updated) {
+          this.activeSession = updated;
+          this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '更新思考强度失败';
       }
     },
     async loadRecentWorkspaces() {
