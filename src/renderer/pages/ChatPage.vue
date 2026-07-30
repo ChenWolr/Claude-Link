@@ -5,6 +5,7 @@ import { useChat } from '../composables/use-chat';
 import { useStream } from '../composables/use-stream';
 import { useTaskStore } from '../stores/task-store';
 import { useChatDraftStore } from '../stores/chat-draft-store';
+import { useClaudePlanStore } from '../stores/claude-plan-store';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
 import SessionToolbar from '../components/chat/SessionToolbar.vue';
@@ -15,6 +16,7 @@ import type { ChatSendPayload, AttachmentSummary } from '../../shared/types/atta
 const store = useSessionStore();
 const taskStore = useTaskStore();
 const draftStore = useChatDraftStore();
+const planStore = useClaudePlanStore();
 const { sending, error, lastFailedBySession, sendMessage, abort } = useChat();
 // 当前会话最近一次【失败】的 user 消息（按会话隔离）：error 置位时抓取，重新编辑据此恢复到主草稿。
 const lastFailedCurrent = computed(() => {
@@ -57,16 +59,20 @@ onMounted(() => {
   store.loadSessions();
   // 根因修复：监听已在 App.vue 全局注册，这里只刷新当前会话数据（重拉 messages）。
   store.refreshActiveSession();
+  // 加载 Claude 计划快照（独立于手动排队 tasks 表）。
+  if (store.activeSession?.id) planStore.loadPlan(store.activeSession.id);
 });
 
 // 切换会话时清掉上一会话残留的错误横幅与提示、复位拖放态与计数（草稿视图由 computed 自动切换）。
 watch(
   () => store.activeSession?.id,
-  () => {
+  (newId) => {
     error.value = null;
     notice.value = null;
     dragActive.value = false;
     dragCounter = 0;
+    // 切换会话时加载该会话的 Claude 计划快照。
+    if (newId) planStore.loadPlan(newId);
   },
 );
 

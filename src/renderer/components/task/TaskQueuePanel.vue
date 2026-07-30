@@ -15,12 +15,15 @@ import MessageBubble from '../chat/MessageBubble.vue';
 import ThinkingBlock from '../chat/ThinkingBlock.vue';
 import ChangesPanel from '../changes/ChangesPanel.vue';
 import { useChangesStore } from '../../stores/changes-store';
+import ClaudePlanCard from './ClaudePlanCard.vue';
+import { useClaudePlanStore } from '../../stores/claude-plan-store';
 
 const taskStore = useTaskStore();
 const taskDraft = useTaskDraftStore();
 const sessionStore = useSessionStore();
 const interactionStore = useInteractionStore();
 const changesStore = useChangesStore();
+const planStore = useClaudePlanStore();
 const changesCount = computed(() => changesStore.changedCount);
 const { startListening } = useTaskQueue();
 
@@ -162,7 +165,7 @@ watch(
 
 // —— 方案 B：右侧活动栏（图标轨 + 总览/筛选）——
 // rightTab 扩展 'all'（默认四类总览同屏）；点轨按钮切单类，再点同类回 all。
-type RightFilter = 'all' | 'queue' | 'subagent' | 'background' | 'changes';
+type RightFilter = 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes';
 const isAll = computed(() => sessionStore.rightTab === 'all');
 
 function setFilter(f: RightFilter): void {
@@ -176,6 +179,7 @@ function setFilter(f: RightFilter): void {
 
 const headTitle = computed(() => {
   switch (sessionStore.rightTab) {
+    case 'plan': return 'Claude 计划';
     case 'queue': return '排队任务';
     case 'subagent': return '子Agent';
     case 'background': return '后台任务';
@@ -185,6 +189,7 @@ const headTitle = computed(() => {
 });
 const headEyebrow = computed(() => {
   switch (sessionStore.rightTab) {
+    case 'plan': return 'Plan';
     case 'queue': return 'Queue';
     case 'subagent': return 'Sub-agents';
     case 'background': return 'Background';
@@ -195,6 +200,18 @@ const headEyebrow = computed(() => {
 
 // 运行中的子 Agent 数（指标强调 + 轨 badge live 态）。
 const runningSubAgentCount = computed(() => subAgentGroups.value.filter((g) => g.running).length);
+
+// Claude 计划指标：TodoWrite 完成数/总数 + Task 数。
+const planTodoCount = computed(() => planStore.activePlan?.todos.length ?? 0);
+const planTodoCompleted = computed(() => planStore.activePlan?.todos.filter((t) => t.status === 'completed').length ?? 0);
+const planTaskCount = computed(() => planStore.activePlan?.tasks.length ?? 0);
+const planTotalCount = computed(() => planTodoCount.value + planTaskCount.value);
+const planMetric = computed<{ text: string; active: boolean }>(() => {
+  const n = planTotalCount.value;
+  if (n === 0) return { text: '无', active: false };
+  const done = planTodoCompleted.value;
+  return { text: `${done}/${n}`, active: done < n };
+});
 
 // 状态指标条（§4）：四格始终占位，标签与值分行，禁用 · 串句换行。
 const queueMetric = computed<{ text: string; active: boolean }>(() => {
@@ -350,8 +367,12 @@ function handleDragReorder() {
         <button v-if="!isAll" type="button" class="clear-pill" title="回到全部总览" @click="setFilter('all')">清除筛选</button>
       </header>
 
-      <!-- 状态指标条（2×2 网格，禁用 · 串句换行） -->
+      <!-- 状态指标条（2×N 网格，禁用 · 串句换行） -->
       <div class="status-metrics">
+        <button type="button" class="status-metric" :class="{ 'status-metric--active': planMetric.active }" :title="`只看计划（${planMetric.text}）`" @click="setFilter('plan')">
+          <span class="status-metric__label">计划</span>
+          <span class="status-metric__value">{{ planMetric.text }}</span>
+        </button>
         <button type="button" class="status-metric" :class="{ 'status-metric--active': queueMetric.active }" :title="`只看队列（${queueMetric.text}）`" @click="setFilter('queue')">
           <span class="status-metric__label">队列</span>
           <span class="status-metric__value">{{ queueMetric.text }}</span>
@@ -385,8 +406,19 @@ function handleDragReorder() {
         </div>
       </div>
 
-      <!-- 内容区：总览四类纵向堆叠，单类只渲染对应数据源 -->
+      <!-- 内容区：总览各类纵向堆叠，单类只渲染对应数据源 -->
       <div class="task-panel__scroll">
+        <!-- § Claude 计划（TodoWrite / Task 工具） -->
+        <section v-if="isAll || sessionStore.rightTab === 'plan'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
+          <div v-if="isAll" class="tp-section__head">
+            <span class="tp-section__title">Claude 计划</span>
+            <span v-if="planTotalCount" class="tp-section__count">{{ planTodoCompleted }}/{{ planTotalCount }}</span>
+            <button type="button" class="tp-section__goto" @click="setFilter('plan')">只看此类</button>
+          </div>
+          <ClaudePlanCard v-if="planTotalCount" />
+          <div v-else class="task-panel__empty">Claude 尚未创建计划</div>
+        </section>
+
         <!-- § 排队任务 -->
         <section v-if="isAll || sessionStore.rightTab === 'queue'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
           <div v-if="isAll" class="tp-section__head">
@@ -554,6 +586,22 @@ function handleDragReorder() {
         </svg>
       </button>
       <span class="rail__divider" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="rail__btn"
+        :class="{ 'rail__btn--active': sessionStore.rightTab === 'plan' }"
+        :aria-pressed="sessionStore.rightTab === 'plan'"
+        aria-label="Claude 计划"
+        title="Claude 计划"
+        @click="setFilter('plan')"
+      >
+        <svg class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />
+          <path d="M5.5 7l1.5 1.5L10.5 5.5" />
+          <path d="M5.5 11h5" />
+        </svg>
+        <span v-if="planTotalCount" class="rail__badge" :class="{ 'rail__badge--live': planMetric.active }">{{ planTodoCompleted }}/{{ planTotalCount }}</span>
+      </button>
       <button
         type="button"
         class="rail__btn"
