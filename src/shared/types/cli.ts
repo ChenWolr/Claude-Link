@@ -228,7 +228,7 @@ export type ClaudePlanCliEvent = {
 // 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
 export interface CliSystemInfoEvent {
   type: 'system';
-  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting' | 'compact_result' | 'compact_error' | 'requesting';
+  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting' | 'compact_result' | 'compact_error' | 'requesting' | 'thinking_tokens';
   text?: string;
   level?: 'info' | 'warn';
   // api_retry 专属：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。
@@ -240,6 +240,9 @@ export interface CliSystemInfoEvent {
   compactResult?: 'success' | 'failed';
   // M5：压缩失败原因（status.compact_error）。
   compactError?: string;
+  // 批次 B：思考 token 实时估算（SDK thinking_tokens.estimated_tokens，思考块累计，单调递增）。
+  // 瞬态信号——不落库，仅 ContextButton hover 实时展示；回合结束清零。
+  estimatedTokens?: number;
 }
 
 // 权限事件：权限询问 / 自动拒绝。落库 processKind = permission。

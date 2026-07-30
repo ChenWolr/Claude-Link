@@ -155,6 +155,21 @@ interface CachedContextStats {
   windowSize: number;
 }
 const sessionContextStats = new Map<string, CachedContextStats>();
+// 批次 B：thinking_tokens 限频状态（per-session）。estimated_tokens 是思考阶段高频流式帧，
+// 仅当「值变化 且 距上次转发 ≥ THINKING_TOKENS_THROTTLE_MS」才转发，防 IPC 淹没（review-v2 F9）。
+// estimated_tokens 在一个思考块内单调递增，丢中间帧不影响最终峰值被后续帧追平。
+const THINKING_TOKENS_THROTTLE_MS = 100;
+const sessionThinkingTokenThrottle = new Map<string, { lastSentAt: number; lastValue: number }>();
+function shouldForwardThinkingTokens(sessionId: string, value: number): boolean {
+  const now = Date.now();
+  const t = sessionThinkingTokenThrottle.get(sessionId);
+  if (t) {
+    if (t.lastValue === value) return false; // 值未变：丢弃
+    if (now - t.lastSentAt < THINKING_TOKENS_THROTTLE_MS) return false; // 限频窗口内：丢弃
+  }
+  sessionThinkingTokenThrottle.set(sessionId, { lastSentAt: now, lastValue: value });
+  return true;
+}
 // allow-session 权限更新是 SDK query 内状态；claude-link 后续消息会新建 query + resume，
 // 因此按 app session 暂存 destination:'session' 的规则，并在下一次 buildSdkOptions 注入 settings.permissions。
 const sessionPermissionUpdates = new Map<string, PermissionUpdate[]>();
@@ -427,6 +442,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionPermissionUpdates.delete(sessionId);
   cleanupToolUseCache(sessionId);
   cleanupSessionStall(sessionId);
+  sessionThinkingTokenThrottle.delete(sessionId);
   for (const [id, resolve] of pendingPermissionRequests) {
     pendingPermissionRequests.delete(id);
     resolve({ id, optionId: 'deny' });
@@ -1548,6 +1564,21 @@ async function runQuery(
             forwardTransient(sessionId, mainWindow, sysInfo);
           } else if (sdkMsg.status === 'requesting') {
             const sysInfo: CliSystemInfoEvent = { type: 'system', subtype: 'requesting' };
+            forwardTransient(sessionId, mainWindow, sysInfo);
+          }
+          continue;
+        }
+        // 批次 B：thinking_tokens——思考 token 实时估算（SDK 思考阶段高频流式）。
+        // 限频转发（shouldForwardThinkingTokens），瞬态不落库；前端 ContextButton hover 实时展示，
+        // 回合结束由 use-chat 清零。estimated_tokens 是思考块累计估算，非计费 output_tokens。
+        if (subtype === 'thinking_tokens') {
+          const estimated = typeof sdkMsg.estimated_tokens === 'number' ? sdkMsg.estimated_tokens : undefined;
+          if (estimated !== undefined && shouldForwardThinkingTokens(sessionId, estimated)) {
+            const sysInfo: CliSystemInfoEvent = {
+              type: 'system',
+              subtype: 'thinking_tokens',
+              estimatedTokens: estimated,
+            };
             forwardTransient(sessionId, mainWindow, sysInfo);
           }
           continue;
