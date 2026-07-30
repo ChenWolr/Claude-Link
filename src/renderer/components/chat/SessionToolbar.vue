@@ -4,6 +4,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import ModelSelector from './ModelSelector.vue';
+import ThinkingLevelSelector from './ThinkingLevelSelector.vue';
 import ContextButton from './ContextButton.vue';
 import type { Session } from '../../../shared/types/session';
 
@@ -142,6 +143,11 @@ onUnmounted(() => {
     <!-- 模型 -->
     <div class="ctl">
       <ModelSelector :disabled="sending" />
+    </div>
+
+    <!-- 思考强度：每会话切档（低=快速响应 … 工作流=xhigh+动态编排）；默认跟随全局配置 -->
+    <div class="ctl">
+      <ThinkingLevelSelector :disabled="sending" />
     </div>
 
     <!-- 权限：触发按钮显示当前模式，点击向上展开卡片面板 -->
