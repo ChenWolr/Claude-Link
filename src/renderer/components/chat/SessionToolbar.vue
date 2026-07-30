@@ -115,7 +115,9 @@ onUnmounted(() => {
 
     <!-- 工作空间 -->
     <div ref="workspaceRef" class="ctl">
-      <span class="ctl__label">工作空间</span>
+      <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M3 6l2-2h5l2 2h9v12H3z" />
+      </svg>
       <button
         type="button"
         :class="['ctl__btn', { 'ctl__btn--warn': !activeSession.workingDir }]"
@@ -148,19 +150,25 @@ onUnmounted(() => {
 
     <!-- 模型 -->
     <div class="ctl">
-      <span class="ctl__label">模型</span>
+      <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 5h14v14H5z M9 9h6v6H9z" />
+      </svg>
       <ModelSelector :disabled="sending" />
     </div>
 
     <!-- 思考强度：每会话切档（低=快速响应 … 工作流=xhigh+动态编排）；默认跟随全局配置 -->
     <div class="ctl">
-      <span class="ctl__label">思考强度</span>
+      <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" />
+      </svg>
       <ThinkingLevelSelector :disabled="sending" />
     </div>
 
     <!-- 权限：触发按钮显示当前模式，点击向上展开卡片面板 -->
     <div ref="permissionRef" class="ctl">
-      <span class="ctl__label">权限</span>
+      <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M5 11h14v10H5z M8 11V7a4 4 0 0 1 8 0v4" />
+      </svg>
       <button
         type="button"
         class="ctl__btn"
@@ -168,9 +176,6 @@ onUnmounted(() => {
         :title="`本会话 Claude Code 权限模式（${activePermission.value}）`"
         @click="showPermissionMenu = !showPermissionMenu"
       >
-        <svg class="ctl__perm-icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path :d="PERM_ICON_PATHS[activePermission.icon]" />
-        </svg>
         {{ activePermission.label }} <span class="caret">▾</span>
       </button>
       <div v-if="showPermissionMenu" class="perm-menu">
@@ -214,7 +219,6 @@ onUnmounted(() => {
         <svg class="ctl__add-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M21.44 11.05 12.25 20.24a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.41 17.41a2 2 0 0 1-2.83-2.83l8.49-8.48" />
         </svg>
-        添加文件
       </button>
     </div>
 
@@ -249,10 +253,16 @@ onUnmounted(() => {
   margin-left: auto;
 }
 
-.ctl__label {
-  color: var(--color-text-muted);
-  font-size: 0.6875rem;
-  white-space: nowrap;
+.ctl__label-icon {
+  flex-shrink: 0;
+  width: 0.875rem;
+  height: 0.875rem;
+  fill: none;
+  stroke: var(--color-text-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
 }
 
 .ctl__btn {
@@ -368,19 +378,6 @@ onUnmounted(() => {
   font-size: 0.625rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-}
-
-/* 触发按钮内的小图标（当前模式） */
-.ctl__perm-icon {
-  flex-shrink: 0;
-  width: 0.875rem;
-  height: 0.875rem;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.85;
 }
 
 /* 添加文件按钮内的小图标（回形针），与权限图标同 stroke 风格 */
