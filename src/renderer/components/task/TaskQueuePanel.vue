@@ -201,16 +201,18 @@ const headEyebrow = computed(() => {
 // 运行中的子 Agent 数（指标强调 + 轨 badge live 态）。
 const runningSubAgentCount = computed(() => subAgentGroups.value.filter((g) => g.running).length);
 
-// Claude 计划指标：TodoWrite 完成数/总数 + Task 数。
+// Claude 计划指标：TodoWrite + Task 完成数/总数。
 const planTodoCount = computed(() => planStore.activePlan?.todos.length ?? 0);
 const planTodoCompleted = computed(() => planStore.activePlan?.todos.filter((t) => t.status === 'completed').length ?? 0);
 const planTaskCount = computed(() => planStore.activePlan?.tasks.length ?? 0);
+const planTaskCompleted = computed(() => planStore.activePlan?.tasks.filter((t) => t.status === 'completed').length ?? 0);
 const planTotalCount = computed(() => planTodoCount.value + planTaskCount.value);
+// F10: 合计完成数（todos + tasks），用于指标/徽章一致
+const planDone = computed(() => planTodoCompleted.value + planTaskCompleted.value);
 const planMetric = computed<{ text: string; active: boolean }>(() => {
   const n = planTotalCount.value;
   if (n === 0) return { text: '无', active: false };
-  const done = planTodoCompleted.value;
-  return { text: `${done}/${n}`, active: done < n };
+  return { text: `${planDone.value}/${n}`, active: planDone.value < n };
 });
 
 // 状态指标条（§4）：四格始终占位，标签与值分行，禁用 · 串句换行。
@@ -412,7 +414,7 @@ function handleDragReorder() {
         <section v-if="isAll || sessionStore.rightTab === 'plan'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
           <div v-if="isAll" class="tp-section__head">
             <span class="tp-section__title">Claude 计划</span>
-            <span v-if="planTotalCount" class="tp-section__count">{{ planTodoCompleted }}/{{ planTotalCount }}</span>
+            <span v-if="planTotalCount" class="tp-section__count">{{ planDone }}/{{ planTotalCount }}</span>
             <button type="button" class="tp-section__goto" @click="setFilter('plan')">只看此类</button>
           </div>
           <ClaudePlanCard v-if="planTotalCount" />
@@ -600,7 +602,7 @@ function handleDragReorder() {
           <path d="M5.5 7l1.5 1.5L10.5 5.5" />
           <path d="M5.5 11h5" />
         </svg>
-        <span v-if="planTotalCount" class="rail__badge" :class="{ 'rail__badge--live': planMetric.active }">{{ planTodoCompleted }}/{{ planTotalCount }}</span>
+        <span v-if="planTotalCount" class="rail__badge" :class="{ 'rail__badge--live': planMetric.active }">{{ planDone }}/{{ planTotalCount }}</span>
       </button>
       <button
         type="button"
