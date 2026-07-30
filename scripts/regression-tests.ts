@@ -1276,9 +1276,10 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 6);
+  assert.equal(schemaVersion, 7);
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
+  assert.ok(sessionColumns.has('thinking_level'), 'V7：迁移后须补 thinking_level 列');
 }
 
 // Task2：附件三表迁移契约（attachments / message_attachments / task_attachments）。
@@ -1335,7 +1336,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 6, 'Task 7B：迁移后 schema version 须升到 6');
+  assert.equal(schemaVersion, 7, '迁移后 schema version 须升到 7（V7 思考强度）');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');
   assert.ok(createdTables.has('message_attachments'), '须建 message_attachments 关联表');
   assert.ok(createdTables.has('task_attachments'), '须建 task_attachments 关联表');
@@ -1794,9 +1795,15 @@ function testToolSessionAllowedShortCircuit(): void {
 function testThinkingDisplaySummarizedEnabled(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const sb = fs.readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+  const resolver = fs.readFileSync(new URL('../src/shared/thinking-resolver.ts', import.meta.url), 'utf8');
 
-  // 新模型默认可能 omitted；显式 summarized 才能尽可能稳定收到可展示的 thinking 摘要。
-  assert.ok(sb.includes("thinking: { type: 'adaptive', display: 'summarized' }"));
+  // 思考强度档位经 resolveThinkingConfig 注入 Options.thinking（替换原硬编码）。
+  // 每档统一 adaptive + summarized：新模型默认可能 omitted，显式 summarized 才能稳定收到可展示的 thinking 摘要。
+  assert.ok(sb.includes('thinking: thinkingConfig.thinking'), 'buildSdkOptions 用 thinkingConfig 注入 thinking');
+  assert.ok(
+    resolver.includes("type: 'adaptive'") && resolver.includes("display: 'summarized'"),
+    'resolver 各档统一 adaptive + summarized',
+  );
 }
 
 // ── Markdown 排版契约 ────────────────────────────────────────────────
