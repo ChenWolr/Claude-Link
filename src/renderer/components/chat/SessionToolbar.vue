@@ -154,6 +154,7 @@ onUnmounted(() => {
 
     <!-- 思考强度：每会话切档（低=快速响应 … 工作流=xhigh+动态编排）；默认跟随全局配置 -->
     <div class="ctl">
+      <span class="ctl__label">思考强度</span>
       <ThinkingLevelSelector :disabled="sending" />
     </div>
 

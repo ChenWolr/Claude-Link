@@ -100,6 +100,7 @@ onUnmounted(() => {
       <svg class="tl-btn__icon" viewBox="0 0 24 24" aria-hidden="true">
         <path :d="ICON_PATHS[activeOption.icon]" />
       </svg>
+      {{ activeOption.label }} <span class="tl-caret">▾</span>
     </button>
     <div v-if="showMenu" class="tl-menu">
       <button
@@ -140,15 +141,15 @@ onUnmounted(() => {
 .tl-btn {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 0.25rem;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 0.3125rem 0.5rem;
+  padding: 0.3125rem 0.625rem;
   font-size: 0.75rem;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .tl-btn:hover {
@@ -158,6 +159,11 @@ onUnmounted(() => {
 .tl-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.tl-caret {
+  opacity: 0.6;
+  font-size: 0.625rem;
 }
 
 /* 非自动档：触发按钮加 accent 边框，提示本会话已设自定义思考强度 */
