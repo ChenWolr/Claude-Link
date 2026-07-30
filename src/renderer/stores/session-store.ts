@@ -70,6 +70,9 @@ export const useSessionStore = defineStore('session', {
     backgroundTasks: {} as Record<string, BackgroundTask>,
     // C：实时压缩进行中（status:compacting）。compact_boundary 复位为 false。
     compacting: false as boolean,
+    // 批次 B：当前会话思考 token 实时估算（thinking_tokens.estimated_tokens）。全局瞬态字段，
+    // 切会话/回合结束清零；ContextButton hover 展示。null=无（未在思考或回合已结束）。
+    thinkingTokens: null as number | null,
     // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
     // 渲染层据此 + useNow 跳动时钟算实时耗时，整个 sending 期间常驻显示「⏱ X.Xs」。
     turnStartedAt: {} as Record<string, number>,
@@ -185,6 +188,8 @@ export const useSessionStore = defineStore('session', {
       this.toolProgress = {};
       this.backgroundTasks = {};
       this.compacting = false;
+      // 批次 B：清思考 token 估算，避免会话 A 的思考峰值串扰到会话 B 的 ContextButton。
+      this.thinkingTokens = null;
       // 真实用量 + 上次连通的真实窗口交给 state；windowSize/ratio 由 contextStats getter 派生，
       // 切模型/改设置时即时重算。lastContextWindow 为该会话持久化的 SDK 真实窗口（连通后缓存）。
       this.contextLastWindow = session.lastContextWindow;
@@ -518,6 +523,10 @@ export const useSessionStore = defineStore('session', {
     // C：实时压缩态。
     setCompacting(v: boolean) {
       this.compacting = v;
+    },
+    // 批次 B：思考 token 实时估算（瞬态）。null=清零（回合结束/切会话）。
+    setThinkingTokens(v: number | null) {
+      this.thinkingTokens = v;
     },
     // 切换右侧活动栏筛选（含 'all' 总览）。
     setRightTab(tab: 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes') {
