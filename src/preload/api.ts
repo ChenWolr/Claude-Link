@@ -42,7 +42,7 @@ export interface ClaudeLinkAPI {
   deleteSession: (id: string) => Promise<void>;
   updateSession: (
     id: string,
-    data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>,
+    data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel'>>,
   ) => Promise<Session | null>;
   searchSessions: (query: string) => Promise<Session[]>;
   analyzeTopic: (sessionId: string, firstMessage: string) => Promise<string | null>;

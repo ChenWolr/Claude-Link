@@ -24,6 +24,7 @@ import type { PermissionResponsePayload } from '../../shared/types/ipc';
 import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
+import { resolveEffectiveThinkingLevel, resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
@@ -704,6 +705,11 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
 // ── 组装 SDK Options ───────────────────────────────────────────────
 function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow, entry: SessionEntry): Record<string, unknown> {
   const config = getConfig();
+  // 思考强度：会话 override（null/auto）回落全局默认，再映射成 thinking/effort/settingsPatch。
+  // thinking → Options.thinking（adaptive + 摘要展示）；effort → Options.effort（含 max，运行时补偿）；
+  // settingsPatch → 合并进 Options.settings，覆盖全局投影（query 级 > 全局 > advancedJson）。
+  const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
+  const thinkingConfig = resolveThinkingConfig(effectiveLevel);
   const options: Record<string, unknown> = {
     // env：apiKey/baseUrl/模型映射全靠它（复用 buildSpawnEnv，第三方端点跑通的关键）。
     env: buildSpawnEnv(),
@@ -719,8 +725,8 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     // 默认 false 只转发 tool_use/tool_result）。开启后子 Agent Tab 能看到子 agent 完整思考/正文，
     // 配合 stream_event 透传的 parent_tool_use_id，思考中也实时可见，不再只有「开启subagent」锚点。
     forwardSubagentText: true,
-    // 启用 adaptive thinking，并显式请求摘要展示；否则新模型默认可能 omitted，思考中无可展示内容。
-    thinking: { type: 'adaptive', display: 'summarized' },
+    // adaptive thinking + 摘要展示；具体档位由思考强度 selector 决定（thinkingConfig）。
+    thinking: thinkingConfig.thinking,
     canUseTool: createPermissionHandler(sessionId, mainWindow, opts.workingDir || config.workingDirectory || null),
     onElicitation: createElicitationHandler(sessionId, mainWindow),
     // SDK 只有同时声明 supportedDialogKinds 与 onUserDialog，才会把选择题交互交给宿主 UI。
@@ -744,6 +750,9 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
       options.allowDangerouslySkipPermissions = true;
     }
   }
+
+  // effort（运行时补偿）：Options.effort 含 max，是思考力度的运行时权威通道（§1.6）。
+  if (thinkingConfig.effort) options.effort = thinkingConfig.effort;
 
   // 内联 settings——脱离磁盘（settingSources:[]），由 claude-link 完全主导。
   // 与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），避免 SDK 路径丢
@@ -797,6 +806,12 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     ...settings,
     permissions,
   };
+
+  // 每会话思考强度 settingsPatch 覆盖全局投影：opts.thinkingLevel 已过 resolveEffectiveThinkingLevel
+  // 解析为实际生效档，故此处覆盖优先级最高（query 级 > 全局投影 > advancedJson）。
+  if (thinkingConfig.settingsPatch) {
+    Object.assign(options.settings as Record<string, unknown>, thinkingConfig.settingsPatch);
+  }
 
   return options;
 }

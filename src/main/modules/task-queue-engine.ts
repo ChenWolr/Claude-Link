@@ -255,6 +255,7 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
     workingDir: session?.workingDir ?? config.workingDirectory,
     maxTurns: config.maxTurns,
     permissionMode: session?.permissionMode ?? config.permissionMode,
+    thinkingLevel: session?.thinkingLevel ?? null,
     resumeSessionId: resolveCliSessionId(sessionId),
     additionalDirectories: prepared.additionalDirectories,
   });
@@ -368,6 +369,7 @@ export async function continueWithUserMessage(
     workingDir: session.workingDir ?? config.workingDirectory,
     maxTurns: config.maxTurns,
     permissionMode: session.permissionMode ?? config.permissionMode,
+    thinkingLevel: session.thinkingLevel,
     resumeSessionId: resolveCliSessionId(sessionId),
     additionalDirectories: prepared.additionalDirectories,
   });
