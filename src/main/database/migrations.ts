@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 6;
+const CURRENT_SCHEMA_VERSION = 7;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -88,6 +88,11 @@ export function runMigrations(db: Database.Database): void {
     // 切换会话重建 contextStats 时直接复用，避免一律回到 200k 兜底（内置模型表/fallback 顶不住真实值）。
     if (!hasCol('last_context_window')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_context_window INTEGER DEFAULT NULL');
+    }
+    // 思考强度档位（V7）：null = 回落全局默认（AppConfig.defaultThinkingLevel）。
+    // 脏值清洗在 session-repo.toSession / ipc-handlers 入参校验双层兜底。
+    if (!hasCol('thinking_level')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN thinking_level TEXT DEFAULT NULL');
     }
   }
 
