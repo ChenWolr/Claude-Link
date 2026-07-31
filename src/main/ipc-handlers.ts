@@ -39,7 +39,7 @@ import * as attachmentRepo from './database/repositories/attachment-repo';
 import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { getPlanState as getClaudePlanState } from './database/repositories/claude-plan-repo';
-import { listChanges, getChangeDiff } from './modules/changes-panel';
+import { listChanges, getChangeDiff, openChangeFile } from './modules/changes-panel';
 import { registerExportImageHandlers } from './modules/export-image-manager';
 import { detectDirectImageFormat, validateChatSendPayloadShape } from './modules/attachment-policy';
 import {
@@ -71,6 +71,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     listChanges(workingDir, touchedPaths));
   ipcMain.handle(IPC_CHANNELS.CHANGES_DIFF, async (_event, workingDir: string | null, path: string) =>
     getChangeDiff(workingDir, path));
+  // 点文件「打开」：shell.openPath 走系统默认程序（仓库根解析 + 越界守卫在 openChangeFile 内）。
+  ipcMain.handle(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) =>
+    openChangeFile(workingDir, p));
 
   // Config
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfig());

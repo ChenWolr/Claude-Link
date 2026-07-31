@@ -40,6 +40,8 @@ export const IPC_CHANNELS = {
   // 会话改动面板：列出 workingDir 的 git 改动 + 按需取单文件 diff（不抓快照，按需 git diff）。
   CHANGES_LIST: 'changes:list',
   CHANGES_DIFF: 'changes:diff',
+  // 点文件「打开」：走 shell.openPath 用系统默认程序打开（仓库根解析 + 越界守卫，绝不 resolve(workingDir, rel)）。
+  CHANGES_OPEN_FILE: 'changes:openFile',
   TASK_ADD: 'task:add',
   TASK_REMOVE: 'task:remove',
   TASK_GET_ALL: 'task:getAll',
