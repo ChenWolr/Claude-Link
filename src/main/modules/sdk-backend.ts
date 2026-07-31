@@ -20,7 +20,6 @@ import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
-import type { PermissionResponsePayload } from '../../shared/types/ipc';
 import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
@@ -426,7 +425,6 @@ function watchdogTick(): void {
   }
 }
 
-const pendingPermissionRequests = new Map<string, (response: PermissionResponsePayload) => void>();
 // 标记会话已删除：runQuery 下轮迭代检测到即自停，forwardEvent 落库前也据此跳过。
 export function markSessionDeleted(sessionId: string): void {
   activeSessions.delete(sessionId);
@@ -443,26 +441,12 @@ export function markSessionDeleted(sessionId: string): void {
   cleanupToolUseCache(sessionId);
   cleanupSessionStall(sessionId);
   sessionThinkingTokenThrottle.delete(sessionId);
-  for (const [id, resolve] of pendingPermissionRequests) {
-    pendingPermissionRequests.delete(id);
-    resolve({ id, optionId: 'deny' });
-  }
 }
 function markSessionActive(sessionId: string): void {
   activeSessions.add(sessionId);
 }
 function isSessionActive(sessionId: string): boolean {
   return activeSessions.has(sessionId);
-}
-
-export function respondToPermissionRequest(response: PermissionResponsePayload): void {
-  const resolve = pendingPermissionRequests.get(response.id);
-  if (!resolve) {
-    logger.warn(`Permission response ignored; request not found: ${response.id}`);
-    return;
-  }
-  pendingPermissionRequests.delete(response.id);
-  resolve(response);
 }
 
 function recordInteractionResponse(sessionId: string, mainWindow: BrowserWindow, title: string, summary: string): void {

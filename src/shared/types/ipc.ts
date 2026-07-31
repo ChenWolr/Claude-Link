@@ -30,8 +30,6 @@ export const IPC_CHANNELS = {
   CHAT_SEND: 'chat:send',
   CHAT_ABORT: 'chat:abort',
   CHAT_EVENT: 'chat:event',
-  PERMISSION_REQUEST: 'permission:request',
-  PERMISSION_RESPOND: 'permission:respond',
   INTERACTION_REQUEST: 'interaction:request',
   INTERACTION_RESPOND: 'interaction:respond',
   INTERACTION_CANCEL: 'interaction:cancel',
@@ -106,31 +104,6 @@ export interface PickAttachmentsResult {
 export interface ChatEventPayload {
   sessionId: string;
   event: CliEvent;
-}
-
-export interface PermissionOption {
-  id: string;
-  label: string;
-  description?: string;
-  primary?: boolean;
-  danger?: boolean;
-}
-
-export interface PermissionRequestPayload {
-  id: string;
-  sessionId: string;
-  toolName: string;
-  toolUseId: string;
-  title: string;
-  description?: string;
-  input: Record<string, unknown>;
-  options: PermissionOption[];
-  suggestions?: unknown[];
-}
-
-export interface PermissionResponsePayload {
-  id: string;
-  optionId: string;
 }
 
 export type InteractionPromptKind = 'permission' | 'single-choice' | 'multi-choice' | 'text' | 'long-text' | 'form' | 'confirm';

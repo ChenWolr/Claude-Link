@@ -1369,16 +1369,18 @@ function testPermissionPromptIntegration(): void {
   const ipcHandlers = fs.readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
   const appVue = fs.readFileSync(new URL('../src/renderer/App.vue', import.meta.url), 'utf8');
 
-  assert.ok(ipcTypes.includes('PERMISSION_REQUEST'));
-  assert.ok(ipcTypes.includes('PERMISSION_RESPOND'));
-  assert.ok(ipcTypes.includes('PermissionRequestPayload'));
+  // 统一交互弹窗是唯一权限/交互通道；遗留 PERMISSION_REQUEST/PERMISSION_RESPOND 通道、
+  // PermissionRequestPayload、preload onPermissionRequest/respondPermission 已作为死代码清理（plan-v1 §5 阶段3）。
+  assert.ok(!ipcTypes.includes('PERMISSION_REQUEST'), '遗留 PERMISSION_REQUEST 通道须已清理');
+  assert.ok(!ipcTypes.includes('PERMISSION_RESPOND'), '遗留 PERMISSION_RESPOND 通道须已清理');
+  assert.ok(!ipcTypes.includes('PermissionRequestPayload'), '遗留 PermissionRequestPayload 须已清理');
+  assert.ok(!preloadApi.includes('onPermissionRequest'), '遗留 preload onPermissionRequest 须已清理');
+  assert.ok(!preloadApi.includes('respondPermission'), '遗留 preload respondPermission 须已清理');
   assert.ok(ipcTypes.includes('INTERACTION_REQUEST'));
   assert.ok(ipcTypes.includes('INTERACTION_RESPOND'));
   assert.ok(ipcTypes.includes('INTERACTION_CANCEL'));
   assert.ok(ipcTypes.includes('InteractionPromptPayload'));
   assert.ok(cliTypes.includes("'permission_request' | 'permission_denied'"));
-  assert.ok(preloadApi.includes('onPermissionRequest'));
-  assert.ok(preloadApi.includes('respondPermission'));
   assert.ok(preloadApi.includes('onInteractionRequest'));
   assert.ok(preloadApi.includes('onInteractionCancel'));
   assert.ok(preloadApi.includes('respondInteraction'));
