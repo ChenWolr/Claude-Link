@@ -1441,9 +1441,23 @@ function testPermissionInteractionAdapter(): void {
     updatedPermissions: [{ type: 'addRules', rules: [{ toolName: 'WebFetch' }], behavior: 'allow', destination: 'session' }],
     toolUseID: 'tool-webfetch',
   });
-  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'cancel' }, permInput), {
+  // cancel 按来源分映（plan-v1 §3.2）：用户主动拒绝 → 「用户拒绝」；系统取消/缺省 → 中性「已取消」。
+  // 系统取消不能记成「用户拒绝」喂给模型——否则 resume 时模型读到这条 is_error tool_result 会认定用户
+  // 拒绝过该工具，本会话后续不再调用（并发会话权限误 deny 的根因）。
+  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'cancel', reason: 'user' }, permInput), {
     behavior: 'deny',
     message: '用户拒绝了该工具调用',
+    toolUseID: 'tool-1',
+  });
+  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'cancel', reason: 'abort' }, permInput), {
+    behavior: 'deny',
+    message: '工具调用已取消',
+    toolUseID: 'tool-1',
+  });
+  // 缺省 reason 防御性按中性处理：宁可不指控用户，也不把非用户意图错记为用户拒绝。
+  assert.deepEqual(mapPermissionInteractionResponse(payload, { id: payload.id, action: 'cancel' }, permInput), {
+    behavior: 'deny',
+    message: '工具调用已取消',
     toolUseID: 'tool-1',
   });
 }

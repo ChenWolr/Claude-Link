@@ -215,6 +215,11 @@ export interface InteractionPromptPayload {
 export interface InteractionPromptResponsePayload {
   id: string;
   action: 'submit' | 'cancel';
+  // cancel 的来源：'user' = 用户主动拒绝（Esc/拒绝按钮）；'abort' = 系统取消（signal abort/窗口关闭/会话删除/IPC 失败）。
+  // permission 映射据此区分——系统取消不能记成「用户拒绝该工具」喂给模型，否则模型在 resume 时读到该
+  // tool_result(is_error) 会认定用户拒绝过该工具，本会话后续不再调用（并发误 deny 根因，见 plan-v1 §2-3）。
+  // 缺省按 'abort'（中性）处理：宁可不指控用户，也不把非用户意图错记为用户拒绝。
+  reason?: 'user' | 'abort';
   selectedOptionIds?: string[];
   questionAnswers?: Record<string, { selectedOptionIds?: string[]; otherText?: string }>;
   fieldValues?: Record<string, string | boolean>;
