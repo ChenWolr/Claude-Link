@@ -10,6 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 2. **缓存统一目录**：所有依赖下载、安装、构建中间产物、临时文件，如非必要一律生成在 `D:\software\Cache` 下（npm/pnpm 缓存、临时目录、打包中间产物等），不污染项目目录与系统盘。
 3. **沟通使用中文**：与用户的所有沟通必须使用中文。
 4. **禁止私自提交**：未经用户确认不得 `git commit` / `git push`；每次提交前说明范围并获确认。
+5. **提交按单一操作原子化拆分（接口隔离原则·铁训）**：代码获准提交后，每个 commit 只承载一种逻辑修改操作。先标注每处改动属于哪类操作（新增 / 修改 / 重构 / 修复 / 删除）；同一文件内若同时含多种性质改动（如「新增」+「修改既有逻辑」，或多个不相关问题点），必须用 `git add -p` 按 hunk 拆开、分多次提交，不得混入同一 commit。自检：一个 commit 能否用一句话、单一动词准确描述——需要“和”连接两件事时就该拆。
 
 ## 项目概览
 
@@ -131,7 +132,7 @@ SDK canUseTool / onUserDialog / onElicitation
 - **所有提交主题和正文使用中文**（运行环境强制追加的固定署名行除外）。
 - Conventional-commit 前缀（`feat:` / `fix:` / `refactor:` / `docs:`）+ 中文 scope 可接受，如 `feat(配置页): ...`。
 - 工作分支 `dev`；PR 目标 **`master`**。
-- 按问题点隔离提交：跨问题点文件用 `git add -p` 拆 hunk，让每个提交 typecheck 自洽。
+- **提交原子化（铁训）**：按“单一改动操作”隔离提交——同文件内不同性质改动（新增 / 修改 / 多个问题点）也要用 `git add -p` 按 hunk 拆成多个 commit，每个 commit 单一动词可描述、且 typecheck 自洽。
 
 ## 前端设计参考
 
