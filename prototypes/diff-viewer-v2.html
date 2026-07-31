@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Diff 弹窗实现真相源 · cc-haha/contrast 风格</title>
+<!--
+  本文件是 diff 对比弹窗「当前实现」的 1:1 视觉/行为真相源（自包含，浏览器直接打开）。
+  精确复刻 src/renderer/utils/{diff-words,diff-parser,diff-render}.ts + DiffBody/DiffLine.vue 的渲染逻辑：
+    - 手写 unified diff 解析（parsePatch + classifyRun：mod 恒 1:1，M:N 退化 del+add）
+    - 自写 LCS 词级引擎（Uint16Array DP + 三道护栏 + 降级保 segs 恒非空）
+    - 成对行数组（数据层对齐，null 占位）+ box-shadow chunk 边框 + 透明占位框
+    - 三档色（行 bg < gutter < word）+ sticky 行号
+    - pane-scroll 双向滚动（横向条常驻视口底，Bug 1 修复）+ width:max-content（行背景铺满，Bug 2 修复）
+    - 两栏 scrollLeft/scrollTop 同步（源标志 + rAF 防回环）+ wrap 覆盖
+  对照 prototypes/diff-viewer.html（旧原型，ghunk+SVG 三角，已弃用）。
+-->
+<style>
+  :root {
+    --color-success: #4A9E5E; --color-success-strong: #2F7A42;
+    --color-danger: #8B3A3A; --color-warn: #C9A227; --color-warn-strong: #9A7A1C;
+    --color-text: #3A3530; --color-text-muted: #8A8278;
+    --color-border: #E8E0D2; --color-border-strong: #D6CBB8;
+    --color-panel: #FFFFFF; --color-panel-soft: #FCFAF5;
+    --color-accent: #6B8FD6; --color-accent-strong: #4A6FB0;
+    --font-mono: 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+    --font-sans: -apple-system, 'Segoe UI', sans-serif;
+    --diff-line-h: 22px; --diff-font: 12.5px;
+
+    /* 三档色 token（DiffDialog .diff-overlay 衍生） */
+    --add-bg: color-mix(in srgb, var(--color-success) 14%, transparent);
+    --add-gutter: color-mix(in srgb, var(--color-success) 22%, var(--color-panel-soft));
+    --add-word: color-mix(in srgb, var(--color-success) 34%, transparent);
+    --add-edge: var(--color-success); --add-text: var(--color-success-strong);
+    --del-bg: color-mix(in srgb, var(--color-danger) 11%, transparent);
+    --del-gutter: color-mix(in srgb, var(--color-danger) 19%, var(--color-panel-soft));
+    --del-word: color-mix(in srgb, var(--color-danger) 28%, transparent);
+    --del-edge: var(--color-danger); --del-text: var(--color-danger);
+    --mod-bg: color-mix(in srgb, var(--color-warn) 12%, transparent);
+    --mod-edge: var(--color-warn-strong);
+    --diff-chunk-border: color-mix(in srgb, var(--color-border-strong) 65%, transparent);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--color-panel-soft); color: var(--color-text); font-family: var(--font-sans); }
+  .page { display: flex; flex-direction: column; height: 100vh; }
+  .topbar { display: flex; align-items: center; gap: 10px; padding: 8px 14px; background: var(--color-panel); border-bottom: 1px solid var(--color-border); flex-wrap: wrap; }
+  .topbar h1 { font-size: 13px; margin: 0; font-weight: 700; }
+  .topbar .hint { font-size: 11px; color: var(--color-text-muted); }
+  .seg { display: inline-flex; background: color-mix(in srgb, var(--color-text) 6%, transparent); border-radius: 6px; padding: 2px; }
+  .seg button { border: 0; cursor: pointer; padding: 4px 10px; font-size: 12px; font-weight: 600; color: var(--color-text-muted); background: transparent; border-radius: 4px; }
+  .seg button.active { background: var(--color-panel); color: var(--color-accent-strong); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .tbtn { padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--color-text); background: var(--color-panel); border: 1px solid var(--color-border); border-radius: 6px; cursor: pointer; }
+  .tbtn.active { background: color-mix(in srgb, var(--color-accent) 16%, transparent); border-color: color-mix(in srgb, var(--color-accent) 45%, transparent); color: var(--color-accent-strong); }
+  .navbox { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--color-border); border-radius: 6px; background: var(--color-panel); }
+  .navbox button { width: 28px; height: 28px; border: 0; background: transparent; cursor: pointer; color: var(--color-text-muted); font-size: 14px; }
+  .navbox button:hover:not(:disabled) { color: var(--color-text); }
+  .navbox .count { font-size: 11.5px; color: var(--color-text-muted); min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+  .spacer { flex: 1; }
+  .colheads { display: flex; border-bottom: 1px solid var(--color-border-strong); background: var(--color-panel); }
+  .colhead { flex: 1; min-width: 0; padding: 7px 14px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--color-text-muted); }
+  .colhead code { text-transform: none; font-family: var(--font-mono); font-size: 11px; color: var(--color-text); font-weight: 600; }
+
+  /* === DiffBody === */
+  .diff-body {
+    flex: 1; min-height: 0;
+    /* Bug 1 修复：垂直滚动下放到 pane-scroll，.diff-body 不滚（避免内层水平条被推到内容末行下） */
+    overflow: hidden; display: flex; flex-direction: column;
+    background: var(--color-panel-soft); position: relative;
+  }
+  .diff-row { display: flex; align-items: stretch; min-width: 100%; flex: 1; min-height: 0; }
+  .pane { flex: 1; min-width: 0; display: flex; min-height: 0; }
+  .pane-scroll {
+    flex: 1; min-width: 0;
+    /* Bug 1：双向滚动，高度被 flex 链夹在视口内 → 水平条常驻视口底 */
+    overflow: auto;
+  }
+  .pane-scroll::-webkit-scrollbar { width: 12px; height: 12px; }
+  .pane-scroll::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-text) 18%, transparent); border-radius: 8px; border: 3px solid var(--color-panel-soft); }
+  .pane-scroll::-webkit-scrollbar-track { background: transparent; }
+  .pane-scroll::-webkit-scrollbar-corner { background: var(--color-panel-soft); }
+  .col--split, .col--inline {
+    min-width: 100%; display: block;
+    /* Bug 2 修复：扩展到最宽行，行背景铺满内容区（长行水平滚动后右侧不露白） */
+    width: max-content;
+  }
+  .diff-body.is-wrap .col--split, .diff-body.is-wrap .col--inline { width: auto; } /* wrap 覆盖回 auto */
+
+  /* split-cell：box-shadow 画 chunk 上下边框（伪元素，不影响行高） */
+  .split-cell { position: relative; }
+  .split-cell[data-cs="1"]::before, .split-cell[data-ce="1"]::after {
+    content: ''; position: absolute; left: 0; right: 0; height: 0; pointer-events: none; z-index: 2;
+  }
+  .split-cell[data-cs="1"]::before { top: 0; border-top: 1px solid var(--diff-chunk-border); }
+  .split-cell[data-ce="1"]::after { bottom: 0; border-top: 1px solid var(--diff-chunk-border); }
+  .split-cell.is-current { box-shadow: inset 3px 0 0 var(--color-accent); }
+  .split-cell.flash { animation: df 0.7s ease-out; }
+  @keyframes df { 0% { background: color-mix(in srgb, var(--color-accent) 18%, transparent); } 100% { background: transparent; } }
+  .line--placeholder { display: flex; min-width: 100%; height: var(--diff-line-h); background: color-mix(in srgb, var(--color-text) 2.5%, transparent); }
+  .hunk-block { position: relative; }
+  .hunk-block.is-current { box-shadow: inset 2px 0 0 var(--color-accent); }
+  .hunk-block.flash { animation: df 0.7s ease-out; }
+  .ctx-gap {
+    display: block; width: 100%; border: 0; cursor: pointer; text-align: center;
+    height: var(--diff-line-h); line-height: var(--diff-line-h);
+    background: color-mix(in srgb, var(--color-panel) 65%, var(--color-panel-soft));
+    color: var(--color-text-muted); font-size: 11px; font-family: var(--font-sans);
+    border-top: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
+  }
+  .ctx-gap:hover { color: var(--add-text); background: color-mix(in srgb, var(--color-success) 7%, transparent); }
+  .ctx-gap__range { opacity: .65; margin-left: 8px; }
+  .ctx-gap--mute { cursor: default; pointer-events: none; }
+  .ctx-gap--skip { cursor: default; pointer-events: none; background: color-mix(in srgb, var(--color-panel) 80%, var(--color-panel-soft)); border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent); }
+
+  /* contrast 中缝 river：连接左右改动 chunk 的彩色色带（add 绿 / del 红 / mod 琥珀），same 透明 */
+  .diff-river { flex: 0 0 14px; min-width: 14px; display: flex; min-height: 0; background: var(--color-panel-soft); border-left: 1px solid var(--color-border); border-right: 1px solid var(--color-border); }
+  .pane-scroll--river { overflow-y: auto; overflow-x: hidden; scrollbar-width: none; }
+  .pane-scroll--river::-webkit-scrollbar { display: none; }
+  .col--river { min-width: 100%; display: block; }
+  .river-cell { height: var(--diff-line-h); background: transparent; }
+  .river-cell--fold { background: color-mix(in srgb, var(--color-panel) 65%, var(--color-panel-soft)); border-top: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); }
+  .river-cell--add { background: color-mix(in srgb, var(--add-edge) 55%, transparent); }
+  .river-cell--del { background: color-mix(in srgb, var(--del-edge) 55%, transparent); }
+  .river-cell--mod { background: color-mix(in srgb, var(--mod-edge) 55%, transparent); }
+  .river-cell.is-current { box-shadow: inset 0 0 0 2px var(--color-accent); }
+
+  /* === DiffLine === */
+  .line { display: flex; align-items: stretch; min-width: 100%; height: var(--diff-line-h); line-height: var(--diff-line-h); font-family: var(--font-mono); font-size: var(--diff-font); white-space: pre; }
+  .line .ln { flex: 0 0 46px; min-width: 46px; padding: 0 8px; text-align: right; color: var(--color-text-muted); opacity: .75; user-select: none; font-size: 11px; position: sticky; left: 0; z-index: 1; background: var(--color-panel-soft); }
+  .line .sign { flex: 0 0 18px; text-align: center; user-select: none; opacity: .55; }
+  .line code { flex: 0 0 auto; padding: 0 14px 0 6px; color: var(--color-text); }
+  .line--add { background: var(--add-bg); } .line--add .ln { background: var(--add-gutter); color: var(--add-text); opacity: 1; } .line--add .sign { color: var(--add-text); opacity: 1; }
+  .line--del { background: var(--del-bg); } .line--del .ln { background: var(--del-gutter); color: var(--del-text); opacity: 1; } .line--del .sign { color: var(--del-text); opacity: 1; }
+  .line--modl { background: var(--del-bg); } .line--modl .ln { background: var(--del-gutter); color: var(--del-text); opacity: 1; } .line--modl .sign { color: var(--del-text); opacity: .9; }
+  .line--modr { background: var(--add-bg); } .line--modr .ln { background: var(--add-gutter); color: var(--add-text); opacity: 1; } .line--modr .sign { color: var(--add-text); opacity: .9; }
+  .line--ws { background: var(--mod-bg); } .line--ws .sign { color: var(--mod-edge); opacity: .9; }
+  .wd { border-radius: 3px; padding: 1px 0; }
+  .wd-del { background: var(--del-word); color: var(--del-text); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--color-danger) 55%, transparent); }
+  .wd-ins { background: var(--add-word); color: var(--add-text); font-weight: 600; }
+  .diff-body.is-wrap .line { height: auto; min-height: var(--diff-line-h); white-space: pre-wrap; word-break: break-word; }
+  .diff-body.is-wrap .line code { flex: 1 1 auto; }
+  .diff-body.is-wrap .pane-scroll { overflow-x: hidden; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="topbar">
+    <h1>Diff 弹窗实现真相源</h1>
+    <span class="hint">cc-haha 内联 / contrast 并排 · LCS 词级 · Bug 1+2 已修</span>
+    <span class="spacer"></span>
+    <div class="seg" id="segMode">
+      <button data-mode="split" class="active">并排</button>
+      <button data-mode="inline">内联</button>
+    </div>
+    <div id="ctxGroup" style="display:none; align-items:center; gap:6px;">
+      <span style="font-size:11px; color:var(--color-text-muted); font-weight:600;">上下文</span>
+      <div class="seg" id="segCtx"><button data-ctx="3" class="active">3</button><button data-ctx="5">5</button><button data-ctx="10">10</button><button data-ctx="20">20</button></div>
+    </div>
+    <span class="spacer"></span>
+    <div class="navbox"><button id="navPrev" aria-label="上一处">‹</button><span class="count" id="navCount">1 / 0</span><button id="navNext" aria-label="下一处">›</button></div>
+    <button class="tbtn" id="btnWs">忽略空白</button>
+    <button class="tbtn" id="btnWrap">换行</button>
+    <button class="tbtn active" id="btnOnly">仅改动</button>
+  </div>
+  <div class="colheads" id="colheads">
+    <div class="colhead">改动前 <code>· HEAD</code></div>
+    <div class="colhead">改动后 <code>· 工作区</code></div>
+  </div>
+  <div class="diff-body" id="diffBody"></div>
+</div>
+
+<script>
+// ============ 样例数据：覆盖 ctx / mod(词级) / add / del / M:N 退化 / ws / 长行 ============
+const SAMPLE_DIFF = `--- a/src/renderer/components/widgets/TodoList.vue
++++ b/src/renderer/components/widgets/TodoList.vue
+@@ -1,9 +1,12 @@
+ import { ref, computed } from 'vue';
+-import OldList from './OldList.vue';
++import TodoList from './TodoList.vue';
++import { useDragSort } from '../composables/useDragSort';
+ 
+ export default {
+-  name: 'OldList',
++  name: 'TodoList',
+   props: {
+-    items: { type: Array, default: () => [] },
++    items: { type: Array as PropType<TodoItem[]>, default: () => [] },
+   },
++  setup(props) {
++    const sorted = useDragSort(props.items);
+ };
+@@ -12,5 +15,8 @@
+   toggle(id) {
+     this.$emit('toggle', id);
+   },
+-old_a();
+-old_b();
++new_one();
++new_two();
++new_three();
+   },
+ };
+@@ -20,2 +26,3 @@
+   const veryLongIdentifierName = someUtilityFunction(argumentOne, argumentTwo, argumentThree, argumentFour, argumentFive, argumentSix, argumentSeven, argumentEight);
+-const x=1;
++const  x = 1;
+@@ -30,12 +37,12 @@
+ function init() {
+   setupListeners();
+   loadConfig();
+   parseArgs();
+   connectDatabase();
+   warmUpCache();
+   validateEnv();
+   buildIndex();
+   registerHooks();
+   finalize();
+-oldMethod();
++newMethod();
+ }
+`;
+
+// ============ parsePatch（手写，等价 jsdiff parsePatch）============
+function parsePatch(text) {
+  const patches = [];
+  const lines = text.split('\n');
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i].startsWith('--- ')) {
+      const oldFn = lines[i].slice(4).split('\t')[0];
+      const newFn = (lines[i+1] || '').startsWith('+++ ') ? lines[i+1].slice(4).split('\t')[0] : oldFn;
+      i += 2;
+      const hunks = [];
+      while (i < lines.length && lines[i].startsWith('@@')) {
+        const m = lines[i].match(/@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+        const hunk = { oldStart: +m[1], oldLines: m[2] != null ? +m[2] : 1, newStart: +m[3], newLines: m[4] != null ? +m[4] : 1, lines: [] };
+        i++;
+        while (i < lines.length && /^[ +-\\]/.test(lines[i]) && !lines[i].startsWith('@@') && !lines[i].startsWith('--- ')) {
+          hunk.lines.push(lines[i]);
+          i++;
+        }
+        hunks.push(hunk);
+      }
+      patches.push({ oldFileName: oldFn, newFileName: newFn, hunks });
+    } else {
+      i++;
+    }
+  }
+  return patches;
+}
+
+// ============ parseUnifiedDiff（移植 diff-parser.ts）============
+function diffWordsOrFlat(oldText, newText) {
+  return diffWordRanges(oldText, newText) || { left: [{ s: 'eq', x: oldText }], right: [{ s: 'eq', x: newText }] };
+}
+function makeModGroup(d, a) {
+  const isWs = d.t.trim() === a.t.trim() && d.t !== a.t;
+  const r = diffWordsOrFlat(d.t, a.t);
+  return { k: isWs ? 'ws' : 'mod', L: [{ n: d.n, t: d.t, segs: r.left }], R: [{ n: a.n, t: a.t, segs: r.right }] };
+}
+function classifyRun(dels, adds) {
+  if (dels.length && !adds.length) return [{ k: 'del', L: dels, R: [] }];
+  if (!dels.length && adds.length) return [{ k: 'add', L: [], R: adds }];
+  if (dels.length === adds.length) { const o = []; for (let i = 0; i < dels.length; i++) o.push(makeModGroup(dels[i], adds[i])); return o; }
+  return [{ k: 'del', L: dels, R: [] }, { k: 'add', L: [], R: adds }]; // M:N 退化
+}
+function parseUnifiedDiff(text) {
+  if (!text || !text.trim()) return null;
+  const patches = parsePatch(text);
+  if (!patches.length) return null;
+  const head = patches[0];
+  const filePath = (head.newFileName || head.oldFileName || '').replace(/^[ab]\//, '');
+  if (!head.hunks || !head.hunks.length) return { path: filePath, groups: [], binary: false };
+  const groups = [];
+  let prevOldEnd = 0;
+  for (const hunk of head.hunks) {
+    if (prevOldEnd > 0 && hunk.oldStart > prevOldEnd) {
+      groups.push({ k: 'skip', L: [], R: [], skipCount: hunk.oldStart - prevOldEnd });
+    }
+    prevOldEnd = hunk.oldStart + hunk.oldLines;
+    let oldN = hunk.oldStart, newN = hunk.newStart, delRun = [], addRun = [], curCtx = { L: [], R: [] };
+    const flushCtx = () => { if (curCtx.L.length) { groups.push({ k: 'ctx', L: curCtx.L, R: curCtx.R }); curCtx = { L: [], R: [] }; } };
+    const flushRun = () => {
+      if (!delRun.length && !addRun.length) return;
+      flushCtx();
+      for (const g of classifyRun(delRun, addRun)) groups.push(g);
+      delRun = []; addRun = [];
+    };
+    for (const raw of hunk.lines) {
+      const c = raw[0];
+      if (c === '\\') continue;
+      const t = raw.slice(1);
+      if (c === ' ') { flushRun(); curCtx.L.push({ n: oldN, t }); curCtx.R.push({ n: newN, t }); oldN++; newN++; }
+      else if (c === '-') { flushCtx(); delRun.push({ n: oldN, t }); oldN++; }
+      else if (c === '+') { flushCtx(); addRun.push({ n: newN, t }); newN++; }
+    }
+    flushRun(); flushCtx();
+  }
+  return { path: filePath, groups, binary: false };
+}
+
+// ============ LCS 词级引擎（移植 diff-words.ts）============
+const MAX_LINE = 1000, MAX_SEG = 240, MIN_SIM = 0.6;
+const TOKEN_RE = /\s+|[\p{L}\p{N}_$]+|[^\s\p{L}\p{N}_$]+/gu;
+function tokenize(text) { const o = []; TOKEN_RE.lastIndex = 0; let m; while ((m = TOKEN_RE.exec(text))) { const t = m[0]; o.push({ text: t, ws: /\s/.test(t[0]) }); } return o; }
+function lcsMatches(a, b) {
+  const n = a.length, mm = b.length; const dp = Array.from({ length: n + 1 }, () => new Uint16Array(mm + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = mm - 1; j >= 0; j--) dp[i][j] = a[i].text === b[j].text ? dp[i+1][j+1] + 1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const mo = new Set(), mn = new Set(); let i = 0, j = 0;
+  while (i < n && j < mm) { if (a[i].text === b[j].text) { mo.add(i); mn.add(j); i++; j++; } else if (dp[i+1][j] >= dp[i][j+1]) i++; else j++; }
+  return [mo, mn];
+}
+function emitSegs(toks, matched, changed) { const o = []; for (let k = 0; k < toks.length; k++) { const tok = toks[k]; const kind = tok.ws || matched.has(k) ? 'eq' : changed; const last = o[o.length - 1]; if (last && last.s === kind) last.x += tok.text; else o.push({ s: kind, x: tok.text }); } return o; }
+function diffWordRanges(oldText, newText) {
+  if (oldText === newText) return null;
+  if (oldText.length > MAX_LINE || newText.length > MAX_LINE) return null;
+  const a = tokenize(oldText), b = tokenize(newText);
+  if (a.length > MAX_SEG || b.length > MAX_SEG) return null;
+  const [mo, mn] = lcsMatches(a, b);
+  const om = a.reduce((s, t) => s + (t.ws ? 0 : 1), 0), nm = b.reduce((s, t) => s + (t.ws ? 0 : 1), 0);
+  const mm = [...mo].filter(k => !a[k].ws).length; const den = om + nm; const sim = den === 0 ? 1 : (2 * mm) / den;
+  if (sim < MIN_SIM) return null;
+  return { left: emitSegs(a, mo, 'del'), right: emitSegs(b, mn, 'ins') };
+}
+
+// ============ diff-render（buildSplitRows / planSplitVisible / buildInlineRows / inlineVisiblePlan）============
+function isHunkGroup(g, ignoreWs) { return g.k !== 'ctx' && !(g.k === 'ws' && ignoreWs); }
+function buildSplitRows(f, ignoreWs) {
+  const rows = []; let nav = 0;
+  f.groups.forEach((g, gi) => {
+    const isHunk = isHunkGroup(g, ignoreWs); const navIndex = isHunk ? nav++ : null;
+    const wrap = ln => ln ? { n: ln.n, t: ln.t, segs: ln.segs } : null;
+    const push = (kind, l, r, cs, ce) => rows.push({ kind, groupIndex: gi, navIndex, chunkStart: cs, chunkEnd: ce, left: wrap(l), right: wrap(r) });
+    if (g.k === 'skip') { rows.push({ kind: 'skip', groupIndex: gi, navIndex: null, chunkStart: false, chunkEnd: false, left: null, right: null, skipCount: g.skipCount || 0 }); }
+    else if (g.k === 'ctx') { const n = Math.max(g.L.length, g.R.length); for (let i = 0; i < n; i++) push('same', g.L[i] || null, g.R[i] || null, false, false); }
+    else if (g.k === 'add') { g.R.forEach((r, i) => push('add', null, r, i === 0, i === g.R.length - 1)); }
+    else if (g.k === 'del') { g.L.forEach((l, i) => push('del', l, null, i === 0, i === g.L.length - 1)); }
+    else push('mod', g.L[0], g.R[0], true, true);
+  });
+  return rows;
+}
+function planSplitVisible(rows, onlyChanges, expanded) {
+  if (!onlyChanges) return rows.map(row => ({ kind: 'row', row }));
+  const out = []; let foldId = 0, i = 0;
+  while (i < rows.length) {
+    const row = rows[i];
+    if (row.kind !== 'same') { out.push({ kind: 'row', row }); i++; continue; }
+    const start = i; while (i < rows.length && rows[i].kind === 'same') i++;
+    const slice = rows.slice(start, i); const touched = start > 0 && i < rows.length;
+    if (touched && !expanded.has(foldId)) { const last = slice[slice.length - 1]; out.push({ kind: 'fold', count: slice.length, foldId: foldId++, firstN: (slice[0].left || slice[0].right || {}).n ?? null, lastN: (last.left || last.right || {}).n ?? null }); }
+    else { if (touched) foldId++; for (const r of slice) out.push({ kind: 'row', row: r }); }
+  }
+  return out;
+}
+function buildInlineRows(f, ignoreWs) {
+  const rows = [];
+  for (const g of f.groups) {
+    if (g.k === 'skip') { rows.push({ type: 'skip', n: null, line: { n: null, t: '' }, changed: false, skipCount: g.skipCount || 0 }); continue; }
+    if (g.k === 'ctx' || (g.k === 'ws' && ignoreWs)) g.R.forEach((rl, i) => rows.push({ type: 'ctx', n: rl ? rl.n : (g.L[i] || {}).n, line: rl || g.L[i], changed: false }));
+    else if (g.k === 'add') for (const r of g.R) rows.push({ type: 'add', n: r.n, line: r, changed: true });
+    else if (g.k === 'del') for (const l of g.L) rows.push({ type: 'del', n: l.n, line: l, changed: true });
+    else if (g.k === 'mod' || g.k === 'ws') { rows.push({ type: 'del', n: g.L[0].n, line: g.L[0], changed: true }); rows.push({ type: 'add', n: g.R[0].n, line: g.R[0], changed: true }); }
+  }
+  return rows;
+}
+function inlineVisiblePlan(rows, n) {
+  const len = rows.length; const dL = new Array(len).fill(Infinity); let d = Infinity;
+  for (let i = 0; i < len; i++) { if (rows[i].type === 'skip') { d = Infinity; dL[i] = Infinity; continue; } d = rows[i].changed ? 0 : d + 1; dL[i] = d; }
+  const dR = new Array(len).fill(Infinity); d = Infinity;
+  for (let i = len - 1; i >= 0; i--) { if (rows[i].type === 'skip') { d = Infinity; dR[i] = Infinity; continue; } d = rows[i].changed ? 0 : d + 1; dR[i] = d; }
+  return rows.map((r, i) => r.type === 'skip' || r.changed || Math.min(dL[i], dR[i]) <= n);
+}
+
+// ============ 渲染 ============
+const state = { mode: 'split', context: 3, ignoreWs: false, wrap: false, onlyChanges: true, curChange: 0, expandedGaps: new Set(), expandedFolds: new Set() };
+const parsed = parseUnifiedDiff(SAMPLE_DIFF);
+
+function space(x) { return x === '' ? ' ' : x; }
+function leftKind(row) { return row.kind === 'del' ? 'del' : row.kind === 'mod' ? 'modl' : 'ctx'; }
+function rightKind(row) { return row.kind === 'add' ? 'add' : row.kind === 'mod' ? 'modr' : 'ctx'; }
+
+function lineHTML(line, kind, variant) {
+  const sign = kind === 'add' ? '+' : kind === 'del' ? '−' : (kind === 'modl' || kind === 'modr' || kind === 'ws') ? '~' : '';
+  let code;
+  if (line.segs) {
+    code = line.segs.map(s => `<span class="${s.s === 'del' ? 'wd wd-del' : s.s === 'ins' ? 'wd wd-ins' : ''}">${esc(space(s.x))}</span>`).join('');
+  } else {
+    code = esc(line.t === '' ? ' ' : line.t);
+  }
+  const signSpan = variant === 'inline' ? `<span class="sign">${sign}</span>` : '';
+  return `<div class="line line--${kind}"><span class="ln">${line.n ?? ''}</span>${signSpan}<code>${code}</code></div>`;
+}
+function esc(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+function splitCellHTML(cell, row, side) {
+  if (!cell) return `<div class="line line--placeholder"></div>`;
+  const kind = side === 'left' ? leftKind(row) : rightKind(row);
+  return lineHTML(cell, kind, 'split');
+}
+function renderSplit() {
+  const rows = buildSplitRows(parsed, state.ignoreWs);
+  const items = planSplitVisible(rows, state.onlyChanges, state.expandedFolds);
+  let leftHTML = '', rightHTML = '', riverHTML = '';
+  let nav = 0;
+  for (const item of items) {
+    if (item.kind === 'fold') {
+      leftHTML += `<button class="ctx-gap" data-fold="${item.foldId}">⋯ ${item.count} 行未变更<span class="ctx-gap__range">第 ${item.firstN}–${item.lastN} 行</span></button>`;
+      rightHTML += `<div class="ctx-gap ctx-gap--mute" aria-hidden="true"></div>`;
+      riverHTML += `<div class="river-cell river-cell--fold"></div>`;
+    } else if (item.row.kind === 'skip') {
+      const skipDiv = `<div class="ctx-gap ctx-gap--skip" aria-hidden="true">⋯ ${item.row.skipCount} 行未变更</div>`;
+      leftHTML += skipDiv; rightHTML += skipDiv; riverHTML += `<div class="river-cell river-cell--fold"></div>`;
+    } else {
+      const row = item.row;
+      const isCur = row.navIndex === state.curChange, isFlash = row.navIndex === state.flashNav;
+      const cs = row.chunkStart ? '1' : null, ce = row.chunkEnd ? '1' : null;
+      const cls = `split-cell ${isCur ? 'is-current' : ''} ${isFlash ? 'flash' : ''}`;
+      const navAttr = row.navIndex != null ? `data-nav="${row.navIndex}"` : '';
+      leftHTML += `<div class="${cls}" data-cs="${cs || ''}" data-ce="${ce || ''}" ${navAttr}>${splitCellHTML(row.left, row, 'left')}</div>`;
+      rightHTML += `<div class="${cls}" data-cs="${cs || ''}" data-ce="${ce || ''}">${splitCellHTML(row.right, row, 'right')}</div>`;
+      riverHTML += `<div class="river-cell river-cell--${row.kind} ${isCur ? 'is-current' : ''}"></div>`;
+    }
+  }
+  return `<div class="diff-row diff-row--split">
+    <div class="pane pane--left"><div class="pane-scroll" id="leftScroll"><div class="col col--split">${leftHTML}</div></div></div>
+    <div class="diff-river"><div class="pane-scroll pane-scroll--river" id="riverScroll"><div class="col col--river">${riverHTML}</div></div></div>
+    <div class="pane pane--right"><div class="pane-scroll" id="rightScroll"><div class="col col--split">${rightHTML}</div></div></div>
+  </div>`;
+}
+function renderInline() {
+  const rows = buildInlineRows(parsed, state.ignoreWs);
+  const vis = inlineVisiblePlan(rows, state.context);
+  let html = ''; let i = 0; let nav = 0; let gapId = 0;
+  while (i < rows.length) {
+    if (rows[i].type === 'skip') {
+      html += `<div class="ctx-gap ctx-gap--skip" aria-hidden="true">⋯ ${rows[i].skipCount} 行未变更</div>`;
+      i++; continue;
+    }
+    const v = vis[i]; const start = i;
+    while (i < rows.length && vis[i] === v && rows[i].type !== 'skip') i++;
+    const slice = rows.slice(start, i);
+    if (v) {
+      const hasChange = slice.some(r => r.changed);
+      const navIdx = hasChange ? nav++ : null;
+      const isCur = navIdx === state.curChange, isFlash = navIdx === state.flashNav;
+      const inner = slice.map(r => lineHTML(r.line, r.type === 'ctx' ? 'ctx' : r.type, 'inline')).join('');
+      if (hasChange) html += `<div class="hunk-block ${isCur ? 'is-current' : ''} ${isFlash ? 'flash' : ''}" data-nav="${navIdx}">${inner}</div>`;
+      else html += inner;
+    } else {
+      const firstN = slice[0].n, lastN = slice[slice.length - 1].n;
+      if (state.expandedGaps.has(gapId)) {
+        html += `<button class="ctx-gap" data-gap="${gapId}">⋯ 收起 · ${slice.length} 行</button>`;
+        html += slice.map(r => lineHTML(r.line, r.type === 'ctx' ? 'ctx' : r.type, 'inline')).join('');
+      } else {
+        html += `<button class="ctx-gap" data-gap="${gapId}">⋯ ${slice.length} 行未变更<span class="ctx-gap__range">第 ${firstN}–${lastN} 行</span></button>`;
+      }
+      gapId++;
+    }
+  }
+  return `<div class="diff-row"><div class="pane" style="flex:1"><div class="pane-scroll"><div class="col col--inline">${html}</div></div></div></div>`;
+}
+function navTotal() {
+  if (!parsed) return 0;
+  if (state.mode === 'split') return parsed.groups.filter(g => isHunkGroup(g, state.ignoreWs)).length;
+  const rows = buildInlineRows(parsed, state.ignoreWs); const vis = inlineVisiblePlan(rows, state.context); let c = 0, i = 0;
+  while (i < rows.length) { const v = vis[i]; const s = i; while (i < rows.length && vis[i] === v) i++; if (v && rows.slice(s, i).some(r => r.changed)) c++; }
+  return c;
+}
+
+// ============ 同步滚动（源标志 + rAF）============
+let syncSource = null, leftEl = null, rightEl = null, riverEl = null;
+function onScroll(side) {
+  if (syncSource !== null && syncSource !== side) return;
+  const map = { left: leftEl, river: riverEl, right: rightEl };
+  const src = map[side];
+  if (!src) return;
+  syncSource = side;
+  for (const k of ['left', 'river', 'right']) {
+    if (k === side) continue;
+    const dst = map[k];
+    if (!dst) continue;
+    dst.scrollTop = src.scrollTop;
+    if (k !== 'river') dst.scrollLeft = src.scrollLeft;
+  }
+  requestAnimationFrame(() => { syncSource = null; });
+}
+
+// ============ 主渲染 + 事件 ============
+function rerender() {
+  const body = document.getElementById('diffBody');
+  body.className = 'diff-body' + (state.wrap ? ' is-wrap' : '') + (state.onlyChanges ? ' only-changes' : '');
+  body.innerHTML = state.mode === 'split' ? renderSplit() : renderInline();
+  leftEl = document.getElementById('leftScroll'); rightEl = document.getElementById('rightScroll'); riverEl = document.getElementById('riverScroll');
+  if (leftEl) leftEl.addEventListener('scroll', () => onScroll('left'));
+  if (riverEl) riverEl.addEventListener('scroll', () => onScroll('river'));
+  if (rightEl) rightEl.addEventListener('scroll', () => onScroll('right'));
+  // 折叠按钮
+  body.querySelectorAll('[data-fold]').forEach(b => b.addEventListener('click', () => {
+    const id = +b.dataset.fold; const s = new Set(state.expandedFolds); s.has(id) ? s.delete(id) : s.add(id); state.expandedFolds = s; rerender();
+  }));
+  body.querySelectorAll('[data-gap]').forEach(b => b.addEventListener('click', () => {
+    const id = +b.dataset.gap; const s = new Set(state.expandedGaps); s.has(id) ? s.delete(id) : s.add(id); state.expandedGaps = s; rerender();
+  }));
+  // 点击改动行跳转
+  body.querySelectorAll('[data-nav]').forEach(el => el.addEventListener('click', () => {
+    const n = +el.dataset.nav; if (n !== state.curChange) { state.curChange = n; updateNav(); flashAndScroll(); }
+  }));
+  updateNav();
+  flashAndScroll();
+}
+function updateNav() {
+  const total = navTotal();
+  if (state.curChange > total - 1) state.curChange = Math.max(0, total - 1);
+  document.getElementById('navCount').textContent = total ? `${state.curChange + 1} / ${total}` : '0 / 0';
+  document.querySelectorAll('.split-cell.is-current, .hunk-block.is-current').forEach(e => e.classList.remove('is-current'));
+  const cur = document.querySelector(`[data-nav="${state.curChange}"]`);
+  if (cur) cur.classList.add('is-current');
+}
+let flashTimer = null;
+function flashAndScroll() {
+  if (flashTimer) clearTimeout(flashTimer);
+  state.flashNav = state.curChange;
+  flashTimer = setTimeout(() => { state.flashNav = null; document.querySelectorAll('.split-cell.flash, .hunk-block.flash').forEach(e => e.classList.remove('flash')); }, 700);
+  const el = document.querySelector(`[data-nav="${state.curChange}"]`);
+  if (!el) return;
+  const pane = el.closest('.pane-scroll');
+  if (!pane) return;
+  const pr = pane.getBoundingClientRect(), er = el.getBoundingClientRect();
+  const target = er.top - pr.top + pane.scrollTop - (pane.clientHeight - er.height) / 2;
+  pane.scrollTo({ top: target, behavior: 'smooth' });
+  const other = pane === leftEl ? rightEl : pane === rightEl ? leftEl : null;
+  if (other) other.scrollTo({ top: target, behavior: 'smooth' });
+  if (riverEl) riverEl.scrollTo({ top: target, behavior: 'smooth' });
+}
+
+// toolbar 事件
+document.getElementById('segMode').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.mode = b.dataset.mode; state.curChange = 0; state.expandedGaps = new Set(); state.expandedFolds = new Set();
+  document.querySelectorAll('#segMode button').forEach(x => x.classList.toggle('active', x === b));
+  document.getElementById('ctxGroup').style.display = state.mode === 'inline' ? 'inline-flex' : 'none';
+  document.getElementById('colheads').style.display = state.mode === 'split' ? 'flex' : 'none';
+  document.getElementById('btnOnly').style.display = state.mode === 'split' ? '' : 'none';
+  rerender();
+});
+document.getElementById('segCtx').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  state.context = +b.dataset.ctx; state.expandedGaps = new Set();
+  document.querySelectorAll('#segCtx button').forEach(x => x.classList.toggle('active', x === b));
+  rerender();
+});
+document.getElementById('navPrev').addEventListener('click', () => { const t = navTotal(); if (!t) return; state.curChange = (state.curChange - 1 + t) % t; updateNav(); flashAndScroll(); });
+document.getElementById('navNext').addEventListener('click', () => { const t = navTotal(); if (!t) return; state.curChange = (state.curChange + 1) % t; updateNav(); flashAndScroll(); });
+document.getElementById('btnWs').addEventListener('click', e => { state.ignoreWs = !state.ignoreWs; state.expandedGaps = new Set(); state.expandedFolds = new Set(); e.target.classList.toggle('active', state.ignoreWs); rerender(); });
+document.getElementById('btnWrap').addEventListener('click', e => { state.wrap = !state.wrap; e.target.classList.toggle('active', state.wrap); rerender(); });
+document.getElementById('btnOnly').addEventListener('click', e => { state.onlyChanges = !state.onlyChanges; state.expandedFolds = new Set(); e.target.classList.toggle('active', state.onlyChanges); rerender(); });
+
+// 初始化
+document.getElementById('btnOnly').style.display = '';
+rerender();
+</script>
+</body>
+</html>

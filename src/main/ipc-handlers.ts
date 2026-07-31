@@ -39,7 +39,7 @@ import * as attachmentRepo from './database/repositories/attachment-repo';
 import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { getPlanState as getClaudePlanState } from './database/repositories/claude-plan-repo';
-import { listChanges, getChangeDiff } from './modules/changes-panel';
+import { listChanges, getChangeDiff, openChangeFile } from './modules/changes-panel';
 import { registerExportImageHandlers } from './modules/export-image-manager';
 import { detectDirectImageFormat, validateChatSendPayloadShape } from './modules/attachment-policy';
 import {
@@ -69,8 +69,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 会话改动面板：列出 workingDir 的 git 改动 + 按需取单文件 diff（不抓快照，按需 git diff）。
   ipcMain.handle(IPC_CHANNELS.CHANGES_LIST, async (_event, workingDir: string | null, touchedPaths: string[]) =>
     listChanges(workingDir, touchedPaths));
-  ipcMain.handle(IPC_CHANNELS.CHANGES_DIFF, async (_event, workingDir: string | null, path: string) =>
-    getChangeDiff(workingDir, path));
+  ipcMain.handle(IPC_CHANNELS.CHANGES_DIFF, async (_event, workingDir: string | null, path: string, context: number) =>
+    getChangeDiff(workingDir, path, context));
+  // 点文件「打开」：shell.openPath 走系统默认程序（仓库根解析 + 越界守卫在 openChangeFile 内）。
+  ipcMain.handle(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) =>
+    openChangeFile(workingDir, p));
 
   // Config
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfig());

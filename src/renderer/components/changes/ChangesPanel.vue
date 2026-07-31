@@ -1,48 +1,21 @@
 <script setup lang="ts">
 // ChangesPanel —— 右侧「改动」Tab 的面板体。
 // 列出 workingDir 的 git 改动文件（状态码 + 路径 + +/- 计数 + 本次会话编辑标注），
-// 点文件 inline 展开按需 git diff（复用 renderDiffHtml / diff2html，side-by-side 两栏）。
-// diff 真值与内联「片段意图 diff」独立：这里给文件相对 git 基线的真实净改动。
+// 点文件 → 弹出 DiffDialog 并排对比（取代旧的内联 diff2html 展开）。
 import { computed, onMounted } from 'vue';
 import { useChangesStore } from '../../stores/changes-store';
-import { renderDiffHtml } from '../../utils/markdown';
+import { openDiffDialog } from '../../composables/useDiffDialog';
 
 const store = useChangesStore();
-
-const expandedHtml = computed(() => {
-  const path = store.expandedPath;
-  if (!path) return '';
-  const cached = store.diffCache[path];
-  if (!cached || !cached.ok || cached.binary) return '';
-  return renderDiffHtml(cached.diff, { sideBySide: true });
-});
-
-const expandedBinary = computed(() => {
-  const path = store.expandedPath;
-  if (!path) return false;
-  const cached = store.diffCache[path];
-  return !!cached && cached.ok && cached.binary;
-});
-
-const expandedTruncated = computed(() => {
-  const path = store.expandedPath;
-  if (!path) return false;
-  const cached = store.diffCache[path];
-  return !!cached && cached.ok && cached.truncated;
-});
-
-// 展开 diff 取失败（超时/读取错误）→ 显主进程返回的具体 message，而非笼统的「无可显示差异」。
-const expandedError = computed(() => {
-  const path = store.expandedPath;
-  if (!path) return '';
-  const cached = store.diffCache[path];
-  return cached && !cached.ok ? cached.message : '';
-});
 
 const statusLabel: Record<string, string> = { M: '改', A: '增', D: '删', R: '移', '??': '新', U: '冲' };
 
 // diff 对比基线 HEAD 的短 SHA（明文回显「这 diff 是跟谁比的」，契合项目明文回显偏好）。
 const baselineShort = computed(() => (store.baselineRef ? store.baselineRef.slice(0, 7) : ''));
+
+function openFile(path: string, e: MouseEvent): void {
+  openDiffDialog(path, e.currentTarget instanceof HTMLElement ? e.currentTarget : null);
+}
 
 onMounted(() => {
   void store.refresh();
@@ -71,7 +44,7 @@ onMounted(() => {
       class="changes__row"
       :class="{ 'changes__row--touched': f.touchedThisSession }"
     >
-      <button type="button" class="changes__row-main" @click="store.toggleExpand(f.path)">
+      <button type="button" class="changes__row-main" :title="`查看 ${f.path} 的对比`" @click="openFile(f.path, $event)">
         <span class="changes__status" :data-status="f.status">{{ statusLabel[f.status] ?? f.status }}</span>
         <span class="changes__path" :title="f.path">{{ f.path }}</span>
         <span v-if="f.additions != null" class="changes__counts">
@@ -80,14 +53,6 @@ onMounted(() => {
         </span>
         <span v-if="f.touchedThisSession" class="changes__touched" title="本次会话编辑过">●</span>
       </button>
-
-      <div v-if="store.expandedPath === f.path" class="changes__diff">
-        <div v-if="expandedBinary" class="changes__binary">二进制文件</div>
-        <div v-else-if="expandedHtml" class="markdown-body" v-html="expandedHtml" />
-        <div v-else-if="expandedError" class="changes__diff-error">{{ expandedError }}</div>
-        <div v-else class="changes__diff-empty">（无可显示差异）</div>
-        <div v-if="expandedTruncated" class="changes__truncated">差异过大，仅显示前部分</div>
-      </div>
     </li>
   </ul>
 </template>
@@ -228,28 +193,5 @@ onMounted(() => {
   flex-shrink: 0;
   font-size: 0.6rem;
   color: var(--color-accent-strong);
-}
-
-.changes__diff {
-  padding: 0 8px 8px;
-}
-.changes__diff :deep(.d2h-wrapper) {
-  overflow-x: auto;
-  font-size: 0.72rem;
-}
-.changes__binary,
-.changes__diff-empty,
-.changes__truncated {
-  font-size: 0.72rem;
-  color: var(--color-text-muted);
-  padding: 6px 4px;
-}
-.changes__truncated {
-  font-style: italic;
-}
-.changes__diff-error {
-  font-size: 0.72rem;
-  color: var(--color-danger);
-  padding: 6px 4px;
 }
 </style>

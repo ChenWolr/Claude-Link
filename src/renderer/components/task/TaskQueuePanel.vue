@@ -15,6 +15,7 @@ import MessageBubble from '../chat/MessageBubble.vue';
 import ThinkingBlock from '../chat/ThinkingBlock.vue';
 import ChangesPanel from '../changes/ChangesPanel.vue';
 import { useChangesStore } from '../../stores/changes-store';
+import { openDiffDialog } from '../../composables/useDiffDialog';
 import ClaudePlanCard from './ClaudePlanCard.vue';
 import { useClaudePlanStore } from '../../stores/claude-plan-store';
 
@@ -251,6 +252,10 @@ const changesSummaryFiles = computed(() => changesStore.files.slice(0, CHANGES_S
 function changeStatusLabel(status: string): string {
   const map: Record<string, string> = { M: '改', A: '增', D: '删', R: '移', '??': '新', U: '冲' };
   return map[status] ?? status;
+}
+// 总览摘要行点击 → 弹出 DiffDialog（与 ChangesPanel 行点击走同一弹窗）。
+function openSummaryFile(path: string, e: Event): void {
+  openDiffDialog(path, e.currentTarget instanceof HTMLElement ? e.currentTarget : null);
 }
 
 onMounted(() => {
@@ -530,9 +535,11 @@ function handleDragReorder() {
           </div>
           <ChangesPanel v-if="!isAll" />
           <ul v-else-if="changesCount" class="tp-changes-summary">
-            <li v-for="f in changesSummaryFiles" :key="f.path" class="tp-changes-row">
-              <span class="tp-changes-status" :data-status="f.status">{{ changeStatusLabel(f.status) }}</span>
-              <span class="tp-changes-path" :title="f.path">{{ f.path }}</span>
+            <li v-for="f in changesSummaryFiles" :key="f.path">
+              <button type="button" class="tp-changes-row" :title="`查看 ${f.path} 的对比`" @click="openSummaryFile(f.path, $event)">
+                <span class="tp-changes-status" :data-status="f.status">{{ changeStatusLabel(f.status) }}</span>
+                <span class="tp-changes-path">{{ f.path }}</span>
+              </button>
             </li>
             <li v-if="changesCount > changesSummaryFiles.length" class="tp-changes-more">
               还有 {{ changesCount - changesSummaryFiles.length }} 个，<button type="button" class="tp-changes-goto" @click="setFilter('changes')">查看全部</button>
@@ -962,12 +969,24 @@ function handleDragReorder() {
   display: flex;
   align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 4px 6px;
+  border: 0;
   border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
 .tp-changes-row:hover {
   background: var(--color-panel-soft);
+}
+
+.tp-changes-row:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
 }
 
 .tp-changes-status {
