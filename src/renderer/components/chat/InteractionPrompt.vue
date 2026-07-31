@@ -365,7 +365,9 @@ async function cancel(): Promise<void> {
   if (!request || submittingId.value === request.id) return;
   submittingId.value = request.id;
   try {
-    await interactionStore.respondAndRemove({ id: request.id, action: 'cancel' });
+    // reason:'user' 区分「用户主动拒绝」与系统取消（signal abort/窗口关闭/会话删除）。
+    // permission 映射据此决定是否记成「用户拒绝该工具」（见 mapPermissionInteractionResponse）。
+    await interactionStore.respondAndRemove({ id: request.id, action: 'cancel', reason: 'user' });
     pushHistory(request, 'cancel', []);
     advanceQueueUI();
   } catch (err) {

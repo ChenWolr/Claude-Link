@@ -240,7 +240,16 @@ export function mapPermissionInteractionResponse(
   if (selectedId === 'allow-session') {
     return { behavior: 'allow', updatedInput: input, updatedPermissions: coercePermissionUpdatesToSession(payload.suggestions), toolUseID: payload.toolUseId };
   }
-  return { behavior: 'deny', message: '用户拒绝了该工具调用', toolUseID: payload.toolUseId };
+  // cancel 路径按来源分映（见 plan-v1 §3.2 / §5 阶段1）：
+  //   reason:'user'  —— 用户主动拒绝（Esc/拒绝按钮），记成 deny「用户拒绝」语义正确。
+  //   reason:'abort' / 缺省 —— signal abort/窗口关闭/会话删除/IPC 失败等系统取消，**不是用户意图**。
+  // SDK 的 PermissionResult 只有 allow/deny，工具未获授权只能 deny；但 message 必须中性——
+  // 否则 CLI 把这条 tool_result(is_error) 记入 transcript，下一回合 resume 时模型读到「用户拒绝」，
+  // 会认定用户拒绝过该工具，本会话后续不再调用（并发误 deny 根因）。缺省按中性处理（防御性不指控用户）。
+  if (response.reason === 'user') {
+    return { behavior: 'deny', message: '用户拒绝了该工具调用', toolUseID: payload.toolUseId };
+  }
+  return { behavior: 'deny', message: '工具调用已取消', toolUseID: payload.toolUseId };
 }
 
 export function isAskUserQuestionPayload(payload: Record<string, unknown>): payload is AskUserQuestionPayload {

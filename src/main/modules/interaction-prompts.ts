@@ -20,7 +20,7 @@ export function requestInteraction(
   signal?: AbortSignal,
 ): Promise<InteractionPromptResponsePayload> {
   if (signal?.aborted) {
-    return Promise.resolve({ id: payload.id, action: 'cancel' });
+    return Promise.resolve({ id: payload.id, action: 'cancel', reason: 'abort' });
   }
 
   return new Promise((resolve) => {
@@ -48,13 +48,13 @@ export function requestInteraction(
     if (signal) {
       const onAbort = (): void => {
         notifyCancel({ id: payload.id, sessionId: payload.sessionId });
-        finish({ id: payload.id, action: 'cancel' });
+        finish({ id: payload.id, action: 'cancel', reason: 'abort' });
       };
       signal.addEventListener('abort', onAbort, { once: true });
       abortCleanup = () => signal.removeEventListener('abort', onAbort);
     }
 
-    const onWindowClosed = (): void => { finish({ id: payload.id, action: 'cancel' }); };
+    const onWindowClosed = (): void => { finish({ id: payload.id, action: 'cancel', reason: 'abort' }); };
     mainWindow.once('closed', onWindowClosed);
     const windowCleanup = (): void => { mainWindow.off('closed', onWindowClosed); };
 
@@ -71,7 +71,7 @@ export function requestInteraction(
       mainWindow.webContents.send(IPC_CHANNELS.INTERACTION_REQUEST, payload);
     } catch (err) {
       logger.warn(`Interaction request send failed: ${err instanceof Error ? err.message : String(err)}`);
-      finish({ id: payload.id, action: 'cancel' });
+      finish({ id: payload.id, action: 'cancel', reason: 'abort' });
     }
   });
 }
@@ -93,7 +93,7 @@ export function cancelInteractionsForSession(sessionId: string): void {
   for (const [id, pending] of pendingInteractionRequests) {
     if (pending.sessionId === sessionId) {
       pending.notifyCancel?.({ id, sessionId });
-      pending.resolve({ id, action: 'cancel' });
+      pending.resolve({ id, action: 'cancel', reason: 'abort' });
     }
   }
 }
