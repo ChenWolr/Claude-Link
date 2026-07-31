@@ -587,8 +587,9 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
   check('SessionToolbar 工作空间 button :disabled', /ctl__btn[\s\S]{0,120}:disabled="sending"/.test(st));
   check('SessionToolbar ModelSelector :disabled', st.includes('ModelSelector :disabled="sending"'));
   // 权限控件已由 <select> 改为卡片式（触发按钮 + 弹出 perm-menu，commit d396477）：校验权限触发按钮在 sending 时禁用。
-  // :disabled="sending" 后跟权限图标 ctl__perm-icon 可唯一定位权限按钮（工作空间/模型按钮无此图标）。
-  check('SessionToolbar 权限触发按钮 :disabled（卡片式）', /:disabled="sending"[\s\S]{0,200}ctl__perm-icon/.test(st));
+  // ctl__perm-icon 已随卡片化重构移除；改用「:disabled="sending" 后跟 perm-menu 卡片面板」唯一定位权限按钮
+  // （工作空间按钮后跟 workspaceMenu、模型是 ModelSelector，均无 perm-menu）。
+  check('SessionToolbar 权限触发按钮 :disabled（卡片式）', /:disabled="sending"[\s\S]{0,400}perm-menu/.test(st));
 }
 
 console.log('\n=== 31) 根因修复：chat:event 监听全局化 + sending 派生 ===');
