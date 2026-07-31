@@ -28,6 +28,15 @@ import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdow
 import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';
 import { extractSubAgentTitle, TOOL_DIFF_TOOL_NAMES } from '../src/shared/process-kind';
 import { parseStatusPorcelainV1Z, parseNumstatZ, normalizeStatus, truncateDiff } from '../src/main/modules/changes-panel';
+import { parseUnifiedDiff } from '../src/renderer/utils/diff-parser';
+import {
+  diffWordRanges,
+  diffWordsOrFlat,
+  DIFF_WORD_MAX_LINE_LENGTH,
+  DIFF_WORD_MAX_SEGMENTS,
+  DIFF_WORD_MIN_SIMILARITY,
+} from '../src/renderer/utils/diff-words';
+import { buildSplitRows, planSplitVisible } from '../src/renderer/utils/diff-render';
 import { shouldSkipMermaidErrorRetry, summarizeMermaidAccessibleTitle } from '../src/renderer/directives/enrich-markdown';
 import {
   getNavigationDisposition,
@@ -2499,6 +2508,86 @@ function testChangesPanelContracts(): void {
     ['Edit', 'MultiEdit', 'Write', 'edit', 'multi_edit', 'multiedit', 'write'].sort(),
     'TOOL_DIFF_TOOL_NAMES 须覆盖两种大小写与 MultiEdit 别名',
   );
+
+  // === unified-diff 纯解析器契约（diff-parser）===
+  // fixture：ctx / 1:1 mod(词级 segs) / 不等长 M:N→del+add / 末尾 \ No newline
+  const UNI = '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,5 +1,7 @@\n line1\n-foo = 1;\n+foo = 2;\n ctx2\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx3\n\\ No newline at end of file\n';
+  const parsed = parseUnifiedDiff(UNI);
+  assert.ok(parsed, '有效 unified diff 须解析出 ParsedDiffFile');
+  assert.equal(parsed!.binary, false, '文本 diff 不得标二进制');
+  assert.equal(parsed!.path, 'src/x.ts', '路径须去 a// b// 前缀');
+
+  const joinSegs = (segs: { x: string }[] | undefined): string => (segs ?? []).map((s) => s.x).join('');
+  const kinds = parsed!.groups.map((g) => g.k);
+  assert.deepEqual(kinds, ['ctx', 'mod', 'ctx', 'del', 'add', 'ctx'], '分组顺序与类型须为 ctx→mod→ctx→del→add→ctx');
+
+  // ctx 行号：L 旧 / R 新；首段无前置改动，二者同号
+  assert.equal(parsed!.groups[0].L[0].n, 1);
+  assert.equal(parsed!.groups[0].R[0].n, 1);
+  assert.equal(parsed!.groups[0].L[0].t, 'line1');
+
+  // mod 恒 1:1 + 词级 segs 重组回原文 + L 侧无 ins / R 侧无 del
+  const mod = parsed!.groups[1];
+  assert.equal(mod.L.length, 1, 'mod 组 L 须恒 1 行');
+  assert.equal(mod.R.length, 1, 'mod 组 R 须恒 1 行');
+  assert.ok(mod.L[0].segs && mod.R[0].segs, 'mod 组行须带词级 segs');
+  assert.equal(joinSegs(mod.L[0].segs), 'foo = 1;', 'L segs 须重组回旧行原文');
+  assert.equal(joinSegs(mod.R[0].segs), 'foo = 2;', 'R segs 须重组回新行原文');
+  assert.ok(!mod.L[0].segs!.some((s) => s.s === 'ins'), 'L 侧 segs 不得含 ins');
+  assert.ok(!mod.R[0].segs!.some((s) => s.s === 'del'), 'R 侧 segs 不得含 del');
+
+  // 不等长 M:N(2 del : 3 add) → 退化为 del 组 + add 组（保序，牺牲词级）
+  const delG = parsed!.groups[3];
+  const addG = parsed!.groups[4];
+  assert.equal(delG.k, 'del');
+  assert.equal(delG.L.length, 2);
+  assert.equal(delG.R.length, 0);
+  assert.equal(delG.L[0].t, 'old1');
+  assert.equal(delG.L[1].n, 5);
+  assert.equal(addG.k, 'add');
+  assert.equal(addG.R.length, 3);
+  assert.equal(addG.L.length, 0);
+  assert.equal(addG.R.map((l) => l.t).join('|'), 'new1|new2|new3');
+
+  // 末尾 \ No newline 须跳过：最后 ctx 只含 ctx3 一行，旧=6 新=7（前置 del2/add3 错位）
+  const last = parsed!.groups[5];
+  assert.equal(last.k, 'ctx');
+  assert.equal(last.L.length, 1);
+  assert.equal(last.L[0].t, 'ctx3');
+  assert.equal(last.L[0].n, 6);
+  assert.equal(last.R[0].n, 7);
+
+  // 仅空白差异 → ws 组（trim 相等但原文不等），仍恒 1:1
+  const ws = parseUnifiedDiff('--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-a \n+a\n')!;
+  assert.equal(ws.groups[0].k, 'ws', 'trim 等原文不等须判 ws');
+  assert.equal(ws.groups[0].L.length, 1);
+  assert.equal(ws.groups[0].R.length, 1);
+  assert.ok(!ws.groups[0].L[0].segs!.some((s) => s.s === 'ins'), 'ws L 侧不得含 ins');
+
+  // 全 add（新建文件，旧侧 /dev/null）→ 单 add 组，旧侧空
+  const created = parseUnifiedDiff('--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n')!;
+  assert.equal(created.path, 'new.txt', '/dev/null 旧侧须取 newFileName 去前缀');
+  assert.equal(created.groups[0].k, 'add');
+  assert.equal(created.groups[0].L.length, 0);
+  assert.equal(created.groups[0].R.map((l) => l.t).join('|'), 'hello|world');
+  assert.equal(created.groups[0].R[0].n, 1);
+
+  // 全 del（删除文件，新侧 /dev/null）→ 单 del 组，新侧空
+  const removed = parseUnifiedDiff('--- a/gone.ts\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-deleted\n')!;
+  assert.equal(removed.path, 'gone.ts');
+  assert.equal(removed.groups[0].k, 'del');
+  assert.equal(removed.groups[0].R.length, 0);
+  assert.equal(removed.groups[0].L[0].t, 'deleted');
+
+  // 空输入 / 非 diff 纯文本 → null
+  assert.equal(parseUnifiedDiff(''), null);
+  assert.equal(parseUnifiedDiff('   \n  '), null);
+  assert.equal(parseUnifiedDiff('just some plain text\nno diff here'), null);
+
+  // 二进制哨兵（无 hunk + Binary files differ）→ binary:true
+  const bin = parseUnifiedDiff('Binary files a/x.png and b/x.png differ')!;
+  assert.equal(bin.binary, true);
+  assert.equal(bin.groups.length, 0);
 }
 
 function testChangesPanelPlumbing(): void {
@@ -2540,6 +2629,30 @@ function testChangesPanelPlumbing(): void {
 
   const taskPanel = read('../src/renderer/components/task/TaskQueuePanel.vue');
   assert.ok(taskPanel.includes("rightTab === 'changes'") && taskPanel.includes('<ChangesPanel'), '右侧任务栏须接入 改动 Tab 与 ChangesPanel');
+
+  // === CHANGES_OPEN_FILE 通道三处同步 + 越界守卫（点文件「打开」走 shell.openPath）===
+  assert.ok(ipc.includes("CHANGES_OPEN_FILE: 'changes:openFile'"), '须定义 CHANGES_OPEN_FILE 通道');
+  assert.ok(handlers.includes('IPC_CHANNELS.CHANGES_OPEN_FILE') && handlers.includes('openChangeFile'), '须注册 CHANGES_OPEN_FILE handler');
+  assert.ok(preload.includes('openChangeFile'), 'preload 须暴露 openChangeFile');
+  // openChangeFile 须定义在 changes-panel.ts 内（复用未导出的 ensureRepo），import shell 用 openPath
+  assert.ok(panel.includes(`import { shell } from 'electron'`), 'openChangeFile 须 import electron shell 用 openPath');
+  assert.ok(panel.includes('export async function openChangeFile'), 'changes-panel 须导出 openChangeFile');
+  assert.ok(panel.includes('startsWith(root + path.sep)'), 'openChangeFile 须经仓库根 + startsWith(root+sep) 越界守卫');
+  assert.ok(!panel.includes('path.resolve(workingDir, relPath)'), '不得 resolve(workingDir, relPath)（workingDir 可能是仓库子目录）');
+  // ChangesOpenResult 判别联合须定义（ok 分支类型安全）
+  const changesTypes = read('../src/shared/types/changes.ts');
+  assert.ok(changesTypes.includes('export type ChangesOpenResult'), '须定义 ChangesOpenResult 类型');
+
+  // === DiffDialog 接线（点文件 → 弹窗，取代内联展开）===
+  assert.ok(fs.existsSync(new URL('../src/renderer/composables/useDiffDialog.ts', import.meta.url)), 'useDiffDialog 组合式须存在');
+  const useDiffDialogSrc = read('../src/renderer/composables/useDiffDialog.ts');
+  assert.ok(useDiffDialogSrc.includes('openDiffDialog') && useDiffDialogSrc.includes('requests.length'), 'openDiffDialog 须在交互弹窗并存时 no-op（requests.length>0）');
+  const appVue = read('../src/renderer/App.vue');
+  assert.ok(appVue.includes('<DiffDialog'), 'App.vue 须挂载 <DiffDialog />');
+  const changesPanelSrc = read('../src/renderer/components/changes/ChangesPanel.vue');
+  assert.ok(changesPanelSrc.includes('openDiffDialog'), 'ChangesPanel 行点击须接 openDiffDialog');
+  assert.ok(!changesPanelSrc.includes('toggleExpand') && !changesPanelSrc.includes('expandedHtml'), 'ChangesPanel 须移除内联展开（toggleExpand/expandedHtml）');
+  assert.ok(taskPanel.includes('openDiffDialog'), 'TaskQueuePanel 概览摘要须接 openDiffDialog');
 
   // 快照链路须已彻底退役（文件已删除）
   assert.ok(!fs.existsSync(new URL('../src/main/modules/file-snapshot.ts', import.meta.url)), 'file-snapshot.ts 须已删除');
@@ -2587,8 +2700,118 @@ testMarkdownBlockMathDoesNotSwallowUnclosed();
 testImageLightboxAccessibilityWiring();
 testDiffContentDetectionContracts();
 testToolDiffSynthesisContracts();
+// 词级 LCS 引擎契约（diff-words.ts，纯函数行为）。
+function testDiffWordLcsContracts(): void {
+  const join = (segs: { x: string }[] | undefined): string => (segs ?? []).map((s) => s.x).join('');
+
+  // 1. LCS 正确性：foo = 1; → foo = 2; 只 1/2 不同
+  const r1 = diffWordRanges('foo = 1;', 'foo = 2;')!;
+  assert.ok(r1, '常规改动应返回结果');
+  assert.equal(join(r1.left), 'foo = 1;', 'left segs 须重组回旧行');
+  assert.equal(join(r1.right), 'foo = 2;', 'right segs 须重组回新行');
+  assert.ok(!r1.left.some((s) => s.s === 'ins'), 'left 不得含 ins');
+  assert.ok(!r1.right.some((s) => s.s === 'del'), 'right 不得含 del');
+  assert.ok(r1.left.some((s) => s.s === 'del'), 'left 须有 del(1)');
+  assert.ok(r1.right.some((s) => s.s === 'ins'), 'right 须有 ins(2)');
+
+  // 2. 相似度护栏：< 0.6 返回 null（宁可整行纯背景也别高亮错）
+  assert.equal(diffWordRanges('abc', 'xyz'), null, '完全不同字符串相似度 0 → null');
+  assert.equal(diffWordRanges('hello world', 'goodbye universe'), null, '低相似度 → null');
+
+  // 3. 单行字符护栏：> 1000 → null
+  const longA = 'a'.repeat(DIFF_WORD_MAX_LINE_LENGTH + 1);
+  assert.equal(diffWordRanges(longA, longA + 'b'), null, '超长行护栏触发 → null');
+
+  // 4. 段数护栏：> 240 → null
+  const manySegs = Array.from({ length: DIFF_WORD_MAX_SEGMENTS + 1 }, (_, i) => `v${i}`).join(' ');
+  assert.equal(diffWordRanges(manySegs, manySegs + ' extra'), null, '超段护栏触发 → null');
+
+  // 5. 边界：空文本 / 纯空白差异（空白段恒 eq，不产 del/ins）
+  const empty = diffWordsOrFlat('', '');
+  assert.equal(join(empty.left), '', '空文本重组仍为空');
+  assert.equal(join(empty.right), '', '空文本重组仍为空');
+  const ws = diffWordRanges('a ', 'a')!;
+  assert.ok(ws, '纯空白差异（相似度 1.0）应返回结果');
+  assert.equal(join(ws.left), 'a ', '空白段须保留以重组原文');
+  assert.equal(join(ws.right), 'a');
+  assert.ok(!ws.left.some((s) => s.s === 'del'), '空白段恒 eq，不产 del');
+
+  // 6. diffWordsOrFlat 降级：护栏命中 → 整行单 eq 段（segs 恒非空，避免空数组塌陷）
+  const flat = diffWordsOrFlat('abc', 'xyz');
+  assert.equal(flat.left.length, 1, '降级为单段');
+  assert.equal(flat.left[0]!.s, 'eq', '降级段为 eq（无高亮）');
+  assert.equal(join(flat.left), 'abc', '降级仍重组原文');
+
+  // 7. 全等 → null（无差异不高亮）
+  assert.equal(diffWordRanges('same', 'same'), null, '全等无差异 → null');
+}
+
+// 并排成对行数组契约（buildSplitRows / planSplitVisible，纯函数行为）。
+function testSplitRowsContracts(): void {
+  const UNI =
+    '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,5 +1,7 @@\n line1\n-foo = 1;\n+foo = 2;\n ctx2\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx3\n';
+  const parsed = parseUnifiedDiff(UNI)!;
+  const rows = buildSplitRows(parsed, false);
+
+  // 1. 占位契约：left===null 当且仅当 add 行；right===null 当且仅当 del 行（成对行槽位一一对应）
+  assert.ok(rows.every((r) => (r.left === null) === (r.kind === 'add')), 'left===null 当且仅当 add 行');
+  assert.ok(rows.every((r) => (r.right === null) === (r.kind === 'del')), 'right===null 当且仅当 del 行');
+
+  // 2. kind 四态齐备
+  const kinds = new Set(rows.map((r) => r.kind));
+  assert.ok(kinds.has('mod') && kinds.has('add') && kinds.has('del') && kinds.has('same'), '四态齐备');
+
+  // 3. mod 行两侧带 segs（LCS 结果）
+  const modRow = rows.find((r) => r.kind === 'mod')!;
+  assert.ok(modRow.left?.segs && modRow.right?.segs, 'mod 行两侧须带 segs');
+
+  // 4. add/del 占位方向
+  const addRow = rows.find((r) => r.kind === 'add')!;
+  assert.equal(addRow.left, null, 'add 行左侧须为 null 占位');
+  assert.ok(addRow.right, 'add 行右侧须有内容');
+  const delRow = rows.find((r) => r.kind === 'del')!;
+  assert.equal(delRow.right, null, 'del 行右侧须为 null 占位');
+  assert.ok(delRow.left, 'del 行左侧须有内容');
+
+  // 5. onlyChanges 折叠：夹在两段改动间的连续 same 段收成 fold 分隔条
+  const visible = planSplitVisible(rows, true, new Set<number>());
+  const folds = visible.filter((v) => v.kind === 'fold');
+  assert.ok(folds.length >= 1, 'onlyChanges 须把夹在改动间的 same 段折叠');
+  // 首尾贴边的 same 段不折叠
+  assert.ok(visible[0]?.kind === 'row', '首行不应是 fold（首个 same 段贴边不折叠）');
+
+  // 6. M:N 不等长 → 退化成 del + add（无 mod，牺牲词级；classifyRun 最后分支，文档化行为须有契约）
+  const mn = parseUnifiedDiff('--- a/x\n+++ b/x\n@@ -1,4 +1,5 @@\n ctx\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx2\n')!;
+  const mnRows = buildSplitRows(mn, false);
+  assert.ok(!mnRows.some((r) => r.kind === 'mod'), 'M:N 不等长不得产 mod（退化为 del+add）');
+  assert.ok(
+    mnRows.some((r) => r.kind === 'del') && mnRows.some((r) => r.kind === 'add'),
+    'M:N 退化须同时有 del 和 add',
+  );
+}
+
+// 词级引擎与 jsdiff 解除耦合的源码文本契约。
+function testDiffWordsDecouplesJsdiff(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const read = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const parser = read('../src/renderer/utils/diff-parser.ts');
+  assert.ok(!/diffWordsWithSpace/.test(parser), 'parser 不得再 import jsdiff 的 diffWordsWithSpace（词级已迁出）');
+  assert.ok(/import \{ parsePatch \} from 'diff'/.test(parser), 'parser 仍须 import parsePatch（行级解析保留）');
+  assert.ok(/from ['"]\.\/diff-words['"]/.test(parser), 'parser 须经 ./diff-words 引入词级引擎');
+
+  const engine = read('../src/renderer/utils/diff-words.ts');
+  assert.ok(/Uint16Array/.test(engine), 'LCS 须用 Uint16Array DP');
+  assert.ok(
+    /DIFF_WORD_MAX_LINE_LENGTH|DIFF_WORD_MAX_SEGMENTS|DIFF_WORD_MIN_SIMILARITY/.test(engine),
+    '三道护栏常量须导出',
+  );
+}
+
 testChangesPanelContracts();
 testChangesPanelPlumbing();
+testDiffWordLcsContracts();
+testSplitRowsContracts();
+testDiffWordsDecouplesJsdiff();
 testReducedMotionStopsInfiniteAnimations();
 testMermaidLifecycleGuards();
 testTestConnectionMarkdownCopyWiring();
