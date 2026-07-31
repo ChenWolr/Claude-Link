@@ -86,16 +86,26 @@ export const useChangesStore = defineStore('changes', () => {
     }
   }
 
-  // 取（并在缺失时按需拉取）某文件的 diff，带代际守卫：await 期间切会话则丢弃，不污染新会话缓存。
+  // 取（并在缺失时按需拉取）某文件的 diff，带代际守卫 + in-flight 去重：
+  // 连续触发同文件（如 watch(state.path) 与侧栏 select 撞一起）复用在途 Promise，只发一次 getChangeDiff。
   // DiffDialog 打开文件时调它按需填充缓存。
-  async function ensureDiff(p: string): Promise<void> {
-    if (diffCache.value[p]) return; // 已缓存直接用
-    // 抓代际：await 期间若切会话，丢弃结果——否则旧会话 diff 会被写回新会话已清空的缓存。
-    const gen = sessionGen;
-    const wd = sessionStore.activeSession?.workingDir ?? null;
-    const res = await window.claudeLink.getChangeDiff(wd, p);
-    if (gen !== sessionGen) return;
-    diffCache.value = { ...diffCache.value, [p]: res };
+  const inflightDiffs = new Map<string, Promise<void>>();
+  function ensureDiff(p: string, context: number): Promise<void> {
+    const cached = diffCache.value[p];
+    if (cached && cached.ok && cached.context === context) return Promise.resolve(); // 同 context 已缓存
+    const inflightKey = `${p}@${context}`;
+    const existing = inflightDiffs.get(inflightKey);
+    if (existing) return existing; // 去重：复用在途请求
+    const promise = (async () => {
+      // 抓代际：await 期间若切会话，丢弃结果——否则旧会话 diff 会被写回新会话已清空的缓存。
+      const gen = sessionGen;
+      const wd = sessionStore.activeSession?.workingDir ?? null;
+      const res = await window.claudeLink.getChangeDiff(wd, p, context);
+      if (gen !== sessionGen) return;
+      diffCache.value = { ...diffCache.value, [p]: res };
+    })().finally(() => inflightDiffs.delete(inflightKey));
+    inflightDiffs.set(inflightKey, promise);
+    return promise;
   }
 
   // 切会话 → 自增代际（作废所有在途请求）+ 清状态并重拉（workingDir 可能不同）。
@@ -111,6 +121,7 @@ export const useChangesStore = defineStore('changes', () => {
         refreshTimer = null;
       }
       diffCache.value = {};
+      inflightDiffs.clear(); // 清旧会话在途请求引用（其 Promise 自行 finally 丢弃结果）
       void refresh();
     },
   );

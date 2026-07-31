@@ -192,7 +192,7 @@ export async function listChanges(workingDir: string | null, touchedPaths: strin
   return { ok: true, files, baselineRef };
 }
 
-export async function getChangeDiff(workingDir: string | null, path: string): Promise<ChangesDiffResult> {
+export async function getChangeDiff(workingDir: string | null, path: string, context = 3): Promise<ChangesDiffResult> {
   if (!path) return { ok: false, reason: 'no-such-file', message: '未指定文件' };
   const cwd = await ensureRepo(workingDir);
   if (!cwd) {
@@ -204,7 +204,9 @@ export async function getChangeDiff(workingDir: string | null, path: string): Pr
   let diffText = '';
   try {
     // 已跟踪文件：相对 HEAD 的净改动（含已暂存+未暂存）。
-    const tracked = await runGitRaw(cwd, ['--no-pager', 'diff', 'HEAD', '--', path]);
+    // -U{context}：上下文行数由弹窗「上下文 3/5/10/20」选择器决定 —— git 直接给 N 行 ctx，
+    // inline 不再二次折叠（避免 -U 固定大值时边界 ctx 被拆成碎 gap）；hunk 间距 >2N 时 git 自然跳过 → skip 分隔。
+    const tracked = await runGitRaw(cwd, ['--no-pager', 'diff', 'HEAD', `-U${context}`, '--', path]);
     if (tracked.stdout.trim()) {
       diffText = tracked.stdout;
     } else {
@@ -219,12 +221,12 @@ export async function getChangeDiff(workingDir: string | null, path: string): Pr
   // 文本 diff 内容行带前缀（如 `+Binary files ...`），不匹配 ^，避免文本文件被子串误判为二进制。
   const binary = /^(?:Binary files .+ differ|GIT binary patch)$/m.test(diffText);
   if (binary) {
-    return { ok: true, diff: '二进制文件，无法显示行级 diff', truncated: false, binary: true };
+    return { ok: true, diff: '二进制文件，无法显示行级 diff', truncated: false, binary: true, context };
   }
 
   const t = truncateDiff(diffText, MAX_DIFF_LINES);
   if (!t.diff.trim()) return { ok: false, reason: 'no-such-file', message: '无可显示差异' };
-  return { ok: true, diff: t.diff, truncated: t.truncated, binary: false };
+  return { ok: true, diff: t.diff, truncated: t.truncated, binary: false, context };
 }
 
 // 「打开」文件：走 shell.openPath 用系统默认程序打开（无默认程序则系统弹「打开方式」）。

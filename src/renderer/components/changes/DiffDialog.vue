@@ -35,6 +35,11 @@ const curChange = ref(0);
 const rect = ref<{ l: number; t: number; w: number; h: number } | null>(null);
 const sidebarW = ref(212);
 const sidebarStyle = computed(() => ({ '--diff-sidebar-w': `${sidebarW.value}px` }) as Record<string, string>);
+// dialog 几何走 computed 绑模板 :style（取代命令式 applyRect）：rect 变 → 模板自动响应，无漏调风险。
+const dialogStyle = computed<Record<string, string>>(() => {
+  if (!rect.value) return {} as Record<string, string>;
+  return { left: `${rect.value.l}px`, top: `${rect.value.t}px`, width: `${rect.value.w}px`, height: `${rect.value.h}px` };
+});
 
 const overlayEl = ref<HTMLElement | null>(null);
 const dialogEl = ref<HTMLElement | null>(null);
@@ -94,7 +99,6 @@ watch(state, async (s) => {
     lastFocus = s.trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     await nextTick();
     ensureRect();
-    applyRect();
     closeBtn.value?.focus();
   } else {
     await nextTick();
@@ -110,13 +114,17 @@ watch(
   (p) => {
     if (!p) return;
     curChange.value = 0;
-    void changesStore.ensureDiff(p);
+    void changesStore.ensureDiff(p, context.value);
   },
 );
 
 // nav 总数变化（切模式 / 忽略空白 / 上下文 / 文件）时钳制 curChange 入界。
 watch(navTotal, (n) => {
   if (curChange.value > n - 1) curChange.value = Math.max(0, n - 1);
+});
+// 切上下文档位 → 按 context 重新拉 diff（git -U=context 直接给 N 行 ctx，避免 inline 二次折叠碎成多个 gap）
+watch(context, (c) => {
+  if (state.value?.path) void changesStore.ensureDiff(state.value.path, c);
 });
 
 // 防残留：切会话 / 当前文件从列表消失 → 关弹窗（sessionGen 守卫 + 清 diffCache 在 store，此为第三层）。
@@ -179,24 +187,25 @@ function ensureRect(): void {
   const pad = 8;
   const w = Math.min(1280, window.innerWidth - pad * 2);
   const h = Math.min(840, window.innerHeight - pad * 2);
-  rect.value = { l: Math.round((window.innerWidth - w) / 2), t: Math.round((window.innerHeight - h) / 2), w, h };
+  rect.value = clampRect({
+    l: Math.round((window.innerWidth - w) / 2),
+    t: Math.round((window.innerHeight - h) / 2),
+    w,
+    h,
+  });
 }
-function applyRect(): void {
-  if (!rect.value || !dialogEl.value) return;
-  clampRect(rect.value);
-  dialogEl.value.style.left = `${rect.value.l}px`;
-  dialogEl.value.style.top = `${rect.value.t}px`;
-  dialogEl.value.style.width = `${rect.value.w}px`;
-  dialogEl.value.style.height = `${rect.value.h}px`;
-}
-function clampRect(r: { l: number; t: number; w: number; h: number }): void {
+function clampRect(r: { l: number; t: number; w: number; h: number }): { l: number; t: number; w: number; h: number } {
   const pad = 8;
   const MINW = 680;
   const MINH = 360;
-  r.w = Math.max(MINW, Math.min(r.w, window.innerWidth - pad * 2));
-  r.h = Math.max(MINH, Math.min(r.h, window.innerHeight - pad * 2));
-  r.l = Math.max(pad, Math.min(r.l, window.innerWidth - r.w - pad));
-  r.t = Math.max(pad, Math.min(r.t, window.innerHeight - r.h - pad));
+  const w = Math.max(MINW, Math.min(r.w, window.innerWidth - pad * 2));
+  const h = Math.max(MINH, Math.min(r.h, window.innerHeight - pad * 2));
+  return {
+    w,
+    h,
+    l: Math.max(pad, Math.min(r.l, window.innerWidth - w - pad)),
+    t: Math.max(pad, Math.min(r.t, window.innerHeight - h - pad)),
+  };
 }
 function clampSidebar(): void {
   const max = Math.max(120, (rect.value ? rect.value.w : 680) - 140);
@@ -246,8 +255,7 @@ function startResize(e: MouseEvent, dir: string): void {
       if (dir.includes('n')) t = start.t + (start.h - MINH);
       h = MINH;
     }
-    rect.value = { l, t, w, h };
-    applyRect();
+    rect.value = clampRect({ l, t, w, h });
   };
   const up = (): void => {
     document.removeEventListener('mousemove', move);
@@ -286,7 +294,7 @@ function onWindowResize(): void {
   if (!state.value) return;
   if (resizeTimer) clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => {
-    applyRect();
+    if (rect.value) rect.value = clampRect(rect.value);
     clampSidebar();
   }, 80);
 }
@@ -360,7 +368,7 @@ onBeforeUnmount(() => {
         role="dialog"
         aria-modal="true"
         :aria-label="`文件对比 ${currentFile?.path ?? ''}`"
-        :style="sidebarStyle"
+        :style="[sidebarStyle, dialogStyle]"
       >
         <!-- 八向缩放手柄（四边 + 四角） -->
         <div
@@ -514,13 +522,13 @@ onBeforeUnmount(() => {
 .diff-overlay {
   --add-bg: color-mix(in srgb, var(--color-success) 14%, transparent);
   --add-bg-strong: color-mix(in srgb, var(--color-success) 28%, transparent);
-  --add-gutter: color-mix(in srgb, var(--color-success) 20%, transparent);
+  --add-gutter: color-mix(in srgb, var(--color-success) 22%, var(--color-panel-soft));
   --add-word: color-mix(in srgb, var(--color-success) 34%, transparent);
   --add-edge: var(--color-success);
   --add-text: var(--color-success-strong);
   --del-bg: color-mix(in srgb, var(--color-danger) 11%, transparent);
   --del-bg-strong: color-mix(in srgb, var(--color-danger) 22%, transparent);
-  --del-gutter: color-mix(in srgb, var(--color-danger) 17%, transparent);
+  --del-gutter: color-mix(in srgb, var(--color-danger) 19%, var(--color-panel-soft));
   --del-word: color-mix(in srgb, var(--color-danger) 28%, transparent);
   --del-edge: var(--color-danger);
   --del-text: var(--color-danger);

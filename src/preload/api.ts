@@ -60,7 +60,7 @@ export interface ClaudeLinkAPI {
   onContextUpdate: (callback: (payload: ContextStatsPayload) => void) => () => void;
   removeContextListener: () => void;
   listChanges: (workingDir: string | null, touchedPaths: string[]) => Promise<ChangesListResult>;
-  getChangeDiff: (workingDir: string | null, path: string) => Promise<ChangesDiffResult>;
+  getChangeDiff: (workingDir: string | null, path: string, context: number) => Promise<ChangesDiffResult>;
   openChangeFile: (workingDir: string | null, path: string) => Promise<ChangesOpenResult>;
   addTask: (sessionId: string, payload: ChatSendPayload) => Promise<Task>;
   removeTask: (taskId: string) => Promise<void>;
@@ -152,7 +152,7 @@ export function createApi(): ClaudeLinkAPI {
     },
     removeContextListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.CONTEXT_UPDATE),
     listChanges: (workingDir, touchedPaths) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_LIST, workingDir, touchedPaths),
-    getChangeDiff: (workingDir, path) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_DIFF, workingDir, path),
+    getChangeDiff: (workingDir, path, context) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_DIFF, workingDir, path, context),
     openChangeFile: (workingDir, path) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_OPEN_FILE, workingDir, path),
     addTask: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, payload),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId),
