@@ -58,7 +58,7 @@ export const MAX_DIFF_LINES = 2000;
 
 // tool_use 且为「会派生子 agent」的工具时，提取友好标题，用于右侧「子Agent」Tab 的分组标题
 // 与主流程锚点，避免出现「子任务1/子任务2」。title 字段只在产生子 agent 时被消费，不产生时设置也无副作用。
-export function isSubAgentToolUse(part: CliMessageContentPart): boolean {
+export function isSubAgentToolUse(part: CliMessageContentPart): part is Extract<CliMessageContentPart, { type: 'tool_use' }> {
   if (part.type !== 'tool_use') return false;
   return (SUB_AGENT_TOOL_NAMES as readonly string[]).includes(part.name);
 }

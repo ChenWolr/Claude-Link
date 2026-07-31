@@ -196,6 +196,7 @@ export async function getChangeDiff(workingDir: string | null, path: string): Pr
   const cwd = await ensureRepo(workingDir);
   if (!cwd) {
     const r = await detectReason(workingDir ?? '.');
+    if (r.ok) return { ok: false, reason: 'not-a-repo', message: '当前工作目录不是 git 仓库' };
     return { ok: false, reason: r.reason === 'git-unavailable' ? 'error' : 'not-a-repo', message: r.message };
   }
 

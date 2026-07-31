@@ -1,5 +1,6 @@
 // Claude Code 的模型类型别名（CLI 通过 env.ANTHROPIC_DEFAULT_<ALIAS>_MODEL 映射到实际模型）。
 export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
+import type { NonAutoThinkingLevel } from './thinking';
 
 export interface AppConfig {
   provider: 'anthropic' | 'openrouter' | 'bedrock' | 'vertex';
@@ -21,6 +22,9 @@ export interface AppConfig {
   // 未列出的别名 = 未设置，圆环分母回落 DEFAULT_CONTEXT_WINDOW（200k）。仅 claude-link 内部
   // 用于 ContextButton 占比分母；CC 自身不消费此 env。连通后仍以 SDK 上报的真实窗口为准。
   contextWindowByAlias: Partial<Record<ModelAlias, number>>;
+  // 默认思考强度档位（新会话与未单独设档的会话回落到此值）。
+  // 'auto' 在全局层无意义（全局默认本身就是 auto 的回落目标），用 NonAutoThinkingLevel 编译期拦截。
+  defaultThinkingLevel: NonAutoThinkingLevel;
 }
 
 export interface ProviderInfo {

@@ -46,6 +46,9 @@ import type {
 import { getConfig } from './config-manager';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
+import * as attachmentRepo from '../database/repositories/attachment-repo';
+import { readStoredAttachmentPreview } from './attachment-storage';
+import { buildExportAttachmentSnapshots } from './export-attachment-snapshot';
 import { logger } from '../utils/logger';
 
 const SEGMENT_PNG_MAX_BYTES = 64 * 1024 * 1024; // 单段 PNG 字节上限
@@ -94,6 +97,8 @@ interface ActiveJob {
   doneReject?: (e: Error) => void;
   finishTimer: NodeJS.Timeout;   // R3：reset 看门狗；超时触发 failJob
   absoluteDeadlineMs: number;    // R3：绝对硬顶时间戳
+  smoke: boolean;
+  removeOriginListener: () => void;
 }
 
 let active: ActiveJob | null = null;
@@ -124,11 +129,6 @@ function makeProgress(partial: Omit<ExportImageProgressPayload, 'percent' | 'job
 }
 
 // —— 运行时校验 ——
-function isOriginSender(sender: WebContents): boolean {
-  // origin 必须是当前 job 的 origin WebContents（顶层 frame 由 invoke 保证）。
-  return !!active && active.origin === sender && !sender.isDestroyed();
-}
-
 function isExportSender(sender: WebContents): boolean {
   return !!active && active.exportWindow.webContents === sender && !sender.isDestroyed();
 }
@@ -186,15 +186,6 @@ function ensureCodecWorker(): Worker | null {
   });
   active.codecWorker = w;
   return w;
-}
-
-function terminateCodecWorker(): void {
-  if (!active?.codecWorker) return;
-  const w = active.codecWorker;
-  active.codecWorker = null;
-  pendingWorkerReply = null;
-  try { w.postMessage({ type: 'abort', jobId: active.jobId, page: active.currentPngPage?.page ?? 0, reason: 'cleanup' } satisfies CodecMessage); } catch { /* ignore */ }
-  setTimeout(() => { try { void w.terminate(); } catch { /* ignore */ } }, 200);
 }
 
 async function sendToWorker(msg: CodecMessage): Promise<CodecWorkerMessage> {
@@ -337,7 +328,7 @@ async function pngCaptureSelfImpl(request: PngCaptureSelfRequest): Promise<PngCa
   if (!geomRes.ok) return { ok: false, code: 'placement', message: geomRes.reason };
 
   // byteOffset-safe transfer：拷成独立 ArrayBuffer 再转移。
-  const ab = pngBuf.buffer.slice(pngBuf.byteOffset, pngBuf.byteOffset + pngBuf.length);
+  const ab = Uint8Array.from(pngBuf).buffer;
   const reply = await sendToWorker({
     type: 'segment', jobId: active.jobId, page: pg.page, segment: request.segment, png: ab, geometry: geomRes.geometry,
   });
@@ -535,8 +526,8 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
 // —— 保存：单张另存为 / 多张目录选择；排他移动（不覆盖）；smoke 用 CLAUDE_LINK_EXPORT_SMOKE_DEST 绕过对话框 ——
 async function performSave(job: ActiveJob, pages: { page: number; path: string; bytes: number }[]): Promise<ExportImageResult> {
   const { sessionName, exportedAt, format } = job.snapshot;
-  const smokeDest = process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST;
-  const originWin = BrowserWindow.fromWebContents(job.origin) ?? undefined;
+  const smokeDest = job.smoke ? process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST : undefined;
+  const originWin = BrowserWindow.fromWebContents(job.origin);
   const extRe = format === 'png' ? /\.(png)$/i : /\.(jpe?g)$/i;
   const filterName = format === 'png' ? 'PNG' : 'JPEG';
   const filterExts = format === 'png' ? ['png'] : ['jpg', 'jpeg'];
@@ -550,18 +541,24 @@ async function performSave(job: ActiveJob, pages: { page: number; path: string; 
   if (smokeDest) {
     targetDir = smokeDest;
   } else if (multi) {
-    const r = await dialog.showOpenDialog(originWin, {
+    const dialogOptions: Electron.OpenDialogOptions = {
       title: '选择导出图片保存目录',
       properties: ['openDirectory', 'createDirectory'],
-    });
+    };
+    const r = originWin
+      ? await dialog.showOpenDialog(originWin, dialogOptions)
+      : await dialog.showOpenDialog(dialogOptions);
     if (r.canceled || !r.filePaths.length) return { status: 'cancelled' };
     targetDir = r.filePaths[0];
   } else {
-    const r = await dialog.showSaveDialog(originWin, {
+    const dialogOptions: Electron.SaveDialogOptions = {
       title: '保存导出图片',
       defaultPath: buildExportFilename(sessionName, exportedAt, undefined, undefined, format),
       filters: [{ name: filterName, extensions: filterExts }],
-    });
+    };
+    const r = originWin
+      ? await dialog.showSaveDialog(originWin, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions);
     if (r.canceled || !r.filePath) return { status: 'cancelled' };
     singleTarget = r.filePath;
   }
@@ -633,6 +630,7 @@ async function cleanup(_reason: string): Promise<void> {
     if (pf.fd >= 0) { try { closeSync(pf.fd); } catch { /* ignore */ } }
   }
   job.pageFiles.clear();
+  job.removeOriginListener();
   // 销毁隐藏窗口。
   try {
     if (!job.exportWindow.isDestroyed()) job.exportWindow.destroy();
@@ -656,14 +654,14 @@ export interface StartExportOptions {
 }
 
 export type StartExportResult =
-  | { ok: true; jobId: string; done: Promise<ExportImageResult> }
+  | { ok: true; jobId: string; done: Promise<ExportImageResult>; snapshot?: ExportJobSnapshot }
   | { ok: false; code: string; message: string };
 
 export async function startImageExport(
   origin: WebContents,
   sessionId: string,
   format: ExportImageFormat = 'jpeg',
-  options: StartExportOptions = {},
+  _options: StartExportOptions = {},
 ): Promise<StartExportResult> {
   if (isActive()) {
     return { ok: false, code: 'busy', message: '已有导出任务正在运行' };
@@ -678,17 +676,43 @@ export async function startImageExport(
   if (!sessionRow) {
     return { ok: false, code: 'no-session', message: '会话不存在或已删除' };
   }
-  const allMessages = messageRepo.getRenderableMessagesBySession(sessionId);
+  const allMessages = messageRepo.getRenderableMessagesBySession(sessionId) as RenderableMessage<import('../../shared/types/attachment').AttachmentSummary>[];
   // 主流程：parentAgentId === null。子 Agent 详情不进主聊天长图。
-  const messages: RenderableMessage[] = allMessages.filter((m) => m.parentAgentId === null);
-  if (messages.length === 0) {
+  const mainMessages = allMessages.filter((m) => m.parentAgentId === null);
+  if (mainMessages.length === 0) {
     return { ok: false, code: 'empty', message: '当前会话没有可导出的消息' };
   }
+  const messages: RenderableMessage<import('../../shared/types/export-image').ExportAttachmentSnapshot>[] = await buildExportAttachmentSnapshots(
+    mainMessages,
+    async (attachment) => {
+      const record = attachmentRepo.getAttachment(attachment.id);
+      if (!record || record.sessionId !== sessionId) throw new Error('附件不存在');
+      return readStoredAttachmentPreview(record, true);
+    },
+  );
 
-  // 快照预算校验。
+  // 快照预算校验：正文、附件 metadata 与缩略图真实 bytes 均计入。
   const utf8Bytes = messages.map((m) => Buffer.byteLength(m.content ?? '', 'utf8'));
-  const imageCount = messages.reduce((s, m) => s + (m.content?.match(/!\[[^\]]*\]\([^)]+\)/g)?.length ?? 0), 0);
-  const snapshotBudget = checkSnapshotBudget({ messageCount: messages.length, messageUtf8Bytes: utf8Bytes, imageCount });
+  const attachmentUtf8Bytes = messages.flatMap((message) =>
+    (message.attachments ?? []).map((attachment) =>
+      Buffer.byteLength(attachment.filename, 'utf8') + Buffer.byteLength(attachment.mimeType, 'utf8'),
+    ),
+  );
+  const previewBytes = messages.flatMap((message) =>
+    (message.attachments ?? []).flatMap((attachment) => attachment.preview ? [attachment.preview.bytes.byteLength] : []),
+  );
+  const imageCount = messages.reduce((sum, message) => {
+    const markdownImages = message.content?.match(/!\[[^\]]*\]\([^)]+\)/g)?.length ?? 0;
+    const attachmentImages = (message.attachments ?? []).filter((attachment) => attachment.kind === 'image').length;
+    return sum + markdownImages + attachmentImages;
+  }, 0);
+  const snapshotBudget = checkSnapshotBudget({
+    messageCount: messages.length,
+    messageUtf8Bytes: utf8Bytes,
+    attachmentUtf8Bytes,
+    previewBytes,
+    imageCount,
+  });
   if (!snapshotBudget.ok) {
     return { ok: false, code: 'snapshot-budget', message: snapshotBudget.reason ?? '快照超预算' };
   }
@@ -732,7 +756,6 @@ export async function startImageExport(
       contextIsolation: true,
       nodeIntegration: false,
       backgroundThrottling: false,
-      paintWhenInitiallyHidden: true,
       additionalArguments: ['--claude-link-surface=export'],
       session: exportSession,
     },
@@ -747,15 +770,17 @@ export async function startImageExport(
   exportWindow.webContents.on('console-message', (_e, _level, message) => {
     logger.info(`[export-renderer] ${message}`);
   });
-  exportWindow.webContents.on('did-finish-loading', () => {
-    logger.info(`[export] 隐藏窗口 did-finish-loading`);
-  });
   exportWindow.webContents.on('did-fail-load', (_e, code, desc) => {
     logger.error(`[export] 隐藏窗口 did-fail-load ${code} ${desc}`);
   });
   exportWindow.webContents.on('preload-error', (_e, p, err) => {
     logger.error(`[export] preload-error ${p}: ${String(err && (err as Error).message || err)}`);
   });
+
+  // origin 关闭 → 终止 job；cleanup 会移除监听器，避免重复导出累积闭包。
+  const onOriginDestroyed = (): void => { void failJob('发起窗口已关闭'); };
+  origin.once('destroyed', onOriginDestroyed);
+  const removeOriginListener = (): void => { origin.removeListener('destroyed', onOriginDestroyed); };
 
   active = {
     jobId,
@@ -770,6 +795,8 @@ export async function startImageExport(
     currentPngPage: null,
     terminal: false,
     absoluteDeadlineMs: Date.now() + WATCHDOG_ABSOLUTE_MS,
+    smoke: _options.smoke === true,
+    removeOriginListener,
     finishTimer: setTimeout(() => { void failJob(`导出超时（${WATCHDOG_RESET_MS / 1000} 秒无进展）`); }, WATCHDOG_RESET_MS),
   };
 
@@ -778,9 +805,6 @@ export async function startImageExport(
     active!.doneResolve = res;
     active!.doneReject = rej;
   });
-
-  // origin 关闭 → 终止 job。
-  origin.once('destroyed', () => { void failJob('发起窗口已关闭'); });
 
   // 加载 export 页。
   const loadErr = await loadExportPage(exportWindow);
@@ -793,7 +817,7 @@ export async function startImageExport(
 
   makeProgress({ phase: 'preparing', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, message: '正在准备会话…' });
 
-  return { ok: true, jobId, done };
+  return { ok: true, jobId, done, snapshot: _options.smoke ? snapshot : undefined };
 }
 
 function pad2(n: number): string {

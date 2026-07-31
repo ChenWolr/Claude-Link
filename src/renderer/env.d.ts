@@ -1,8 +1,9 @@
-import type { ClaudeLinkAPI } from '../preload/api';
+import type { ClaudeLinkAPI, ExportLinkAPI } from '../preload/api';
 
 declare global {
   interface Window {
     claudeLink: ClaudeLinkAPI;
+    exportLink?: ExportLinkAPI;
   }
 }
 

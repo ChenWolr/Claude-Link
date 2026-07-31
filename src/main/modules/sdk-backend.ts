@@ -20,14 +20,26 @@ import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
-import type { PermissionResponsePayload } from '../../shared/types/ipc';
 import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
+import { resolveEffectiveThinkingLevel, resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
 import { convertToolProgress, convertTaskEvent } from '../../shared/progress-events';
+import {
+  parseTodoWriteInput,
+  parseTodoWriteOutput,
+  parseTaskCreateInput,
+  parseTaskCreateOutput,
+  parseTaskUpdateInput,
+  parseTaskListOutput,
+  parseTaskGetOutput,
+  parseTaskUpdatedPatch,
+} from '../../shared/types/claude-plan';
+import type { ClaudePlanTask, ClaudePlanState, ClaudePlanTaskPatch } from '../../shared/types/claude-plan';
+import * as claudePlanRepo from '../database/repositories/claude-plan-repo';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type {
@@ -38,6 +50,7 @@ import type {
   CliStreamEvent,
   CliSystemInfoEvent,
   CliPermissionEvent,
+  ClaudePlanCliEvent,
 } from '../../shared/types/cli';
 import type { SpawnOptions } from './cli-shared';
 // 复用 cli-shared 的纯函数（env 注入 / 落库）。
@@ -48,6 +61,8 @@ import {
   persistMessageParts,
 } from './cli-shared';
 import { isMissingConversationResumeError } from './sdk-errors';
+import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SdkPrompt } from './attachment-prompt-builder';
 import { cancelInteractionsForSession, requestInteraction } from './interaction-prompts';
 import {
   SUPPORTED_USER_DIALOG_KINDS,
@@ -79,12 +94,21 @@ void persistMessageParts;
 // ── SDK 动态加载（ESM）─────────────────────────────────────────────
 // query() 返回 Query（AsyncGenerator<SDKMessage> + interrupt()/setPermissionMode()）。
 // 这里只引 type，运行时值由 importSdk() 动态获取。
+// prompt 与 Agent SDK 对齐：纯文字 string；含图片时 AsyncIterable<SDKUserMessage>。
 type Query = AsyncGenerator<Record<string, unknown>, void> & {
   interrupt(): Promise<void>;
+  getContextUsage(): Promise<{
+    maxTokens: number;
+    rawMaxTokens: number;
+    totalTokens: number;
+    percentage: number;
+    autoCompactThreshold?: number;
+    isAutoCompactEnabled: boolean;
+  }>;
 };
 
 interface SdkModule {
-  query: (params: { prompt: string | unknown; options?: Record<string, unknown> }) => Query;
+  query: (params: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Record<string, unknown> }) => Query;
 }
 
 let sdkPromise: Promise<SdkModule> | null = null;
@@ -130,6 +154,21 @@ interface CachedContextStats {
   windowSize: number;
 }
 const sessionContextStats = new Map<string, CachedContextStats>();
+// 批次 B：thinking_tokens 限频状态（per-session）。estimated_tokens 是思考阶段高频流式帧，
+// 仅当「值变化 且 距上次转发 ≥ THINKING_TOKENS_THROTTLE_MS」才转发，防 IPC 淹没（review-v2 F9）。
+// estimated_tokens 在一个思考块内单调递增，丢中间帧不影响最终峰值被后续帧追平。
+const THINKING_TOKENS_THROTTLE_MS = 100;
+const sessionThinkingTokenThrottle = new Map<string, { lastSentAt: number; lastValue: number }>();
+function shouldForwardThinkingTokens(sessionId: string, value: number): boolean {
+  const now = Date.now();
+  const t = sessionThinkingTokenThrottle.get(sessionId);
+  if (t) {
+    if (t.lastValue === value) return false; // 值未变：丢弃
+    if (now - t.lastSentAt < THINKING_TOKENS_THROTTLE_MS) return false; // 限频窗口内：丢弃
+  }
+  sessionThinkingTokenThrottle.set(sessionId, { lastSentAt: now, lastValue: value });
+  return true;
+}
 // allow-session 权限更新是 SDK query 内状态；claude-link 后续消息会新建 query + resume，
 // 因此按 app session 暂存 destination:'session' 的规则，并在下一次 buildSdkOptions 注入 settings.permissions。
 const sessionPermissionUpdates = new Map<string, PermissionUpdate[]>();
@@ -386,7 +425,6 @@ function watchdogTick(): void {
   }
 }
 
-const pendingPermissionRequests = new Map<string, (response: PermissionResponsePayload) => void>();
 // 标记会话已删除：runQuery 下轮迭代检测到即自停，forwardEvent 落库前也据此跳过。
 export function markSessionDeleted(sessionId: string): void {
   activeSessions.delete(sessionId);
@@ -400,27 +438,15 @@ export function markSessionDeleted(sessionId: string): void {
   // 清理上下文/权限缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
   sessionContextStats.delete(sessionId);
   sessionPermissionUpdates.delete(sessionId);
+  cleanupToolUseCache(sessionId);
   cleanupSessionStall(sessionId);
-  for (const [id, resolve] of pendingPermissionRequests) {
-    pendingPermissionRequests.delete(id);
-    resolve({ id, optionId: 'deny' });
-  }
+  sessionThinkingTokenThrottle.delete(sessionId);
 }
 function markSessionActive(sessionId: string): void {
   activeSessions.add(sessionId);
 }
 function isSessionActive(sessionId: string): boolean {
   return activeSessions.has(sessionId);
-}
-
-export function respondToPermissionRequest(response: PermissionResponsePayload): void {
-  const resolve = pendingPermissionRequests.get(response.id);
-  if (!resolve) {
-    logger.warn(`Permission response ignored; request not found: ${response.id}`);
-    return;
-  }
-  pendingPermissionRequests.delete(response.id);
-  resolve(response);
 }
 
 function recordInteractionResponse(sessionId: string, mainWindow: BrowserWindow, title: string, summary: string): void {
@@ -434,12 +460,16 @@ function recordInteractionResponse(sessionId: string, mainWindow: BrowserWindow,
 
 // 诊断用：列出会话小本本里「裸 allow」的工具名（整工具放行）。定位权限重复弹窗后可移除。
 function bookToolNames(updates: PermissionUpdate[] | undefined): string[] {
-  return (updates ?? [])
-    .filter((u) => u.destination === 'session' && (u.type === 'addRules' || u.type === 'replaceRules') && u.behavior === 'allow')
-    .flatMap((u) => u.rules.filter((r) => !r.ruleContent).map((r) => r.toolName));
+  return (updates ?? []).flatMap((update) => {
+    if (update.destination !== 'session' || (update.type !== 'addRules' && update.type !== 'replaceRules') || update.behavior !== 'allow') {
+      return [];
+    }
+    return update.rules.filter((rule) => !rule.ruleContent).map((rule) => rule.toolName);
+  });
 }
 
 function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, workingDir: string | null) {
+  void workingDir;
   return async (toolName: string, input: Record<string, unknown>, options: CanUseToolOptions): Promise<PermissionResult> => {
     if (!isSessionActive(sessionId)) {
       return { behavior: 'deny', message: '会话已关闭', interrupt: true, toolUseID: options.toolUseID };
@@ -449,7 +479,7 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
       const result = await requestAskUserQuestionInteractions(sessionId, mainWindow, input, options);
       if (result) {
         recordInteractionResponse(sessionId, mainWindow, '用户完成选择题', Object.entries(result.answers).map(([question, answer]) => `${question}: ${answer}`).join('\n'));
-        return { behavior: 'allow', updatedInput: result, toolUseID: options.toolUseID };
+        return { behavior: 'allow', updatedInput: { ...result }, toolUseID: options.toolUseID };
       }
       return { behavior: 'deny', message: '用户取消了选择题交互', toolUseID: options.toolUseID };
     }
@@ -479,10 +509,11 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
 
     const response = await requestInteraction(mainWindow, payload, options.signal);
     const result = mapPermissionInteractionResponse(payload, response, input);
-    if (result.behavior === 'allow') {
-      rememberSessionPermissionUpdates(sessionId, result.updatedPermissions);
+    const updatedPermissions = result.behavior === 'allow' ? result.updatedPermissions : undefined;
+    if (updatedPermissions) {
+      rememberSessionPermissionUpdates(sessionId, updatedPermissions);
     }
-    logger.info(`[canUseTool-resp] tool=${toolName} action=${response.action} selected=${JSON.stringify(response.selectedOptionIds ?? null)} wrotePerm=${result.updatedPermissions?.length ?? 0} bookToolsAfter=[${bookToolNames(sessionPermissionUpdates.get(sessionId)).join(',')}]`);
+    logger.info(`[canUseTool-resp] tool=${toolName} action=${response.action} selected=${JSON.stringify(response.selectedOptionIds ?? null)} wrotePerm=${updatedPermissions?.length ?? 0} bookToolsAfter=[${bookToolNames(sessionPermissionUpdates.get(sessionId)).join(',')}]`);
     recordInteractionResponse(sessionId, mainWindow, payload.title, response.action === 'submit' ? `选择：${response.selectedOptionIds?.join(', ') ?? '提交'}` : '已取消');
     return result;
   };
@@ -574,6 +605,8 @@ function deleteEntry(sessionId: string, entry: SessionEntry): void {
   if (isCurrent) {
     entries.delete(sessionId);
     cleanupSessionStall(sessionId);
+    // F15: 回合结束清理 toolUse 缓存，防止中断/崩溃后泄漏
+    cleanupToolUseCache(sessionId);
   }
 }
 
@@ -672,6 +705,11 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
 // ── 组装 SDK Options ───────────────────────────────────────────────
 function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow, entry: SessionEntry): Record<string, unknown> {
   const config = getConfig();
+  // 思考强度：会话 override（null/auto）回落全局默认，再映射成 thinking/effort/settingsPatch。
+  // thinking → Options.thinking（adaptive + 摘要展示）；effort → Options.effort（含 max，运行时补偿）；
+  // settingsPatch → 合并进 Options.settings，覆盖全局投影（query 级 > 全局 > advancedJson）。
+  const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
+  const thinkingConfig = resolveThinkingConfig(effectiveLevel);
   const options: Record<string, unknown> = {
     // env：apiKey/baseUrl/模型映射全靠它（复用 buildSpawnEnv，第三方端点跑通的关键）。
     env: buildSpawnEnv(),
@@ -687,8 +725,8 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     // 默认 false 只转发 tool_use/tool_result）。开启后子 Agent Tab 能看到子 agent 完整思考/正文，
     // 配合 stream_event 透传的 parent_tool_use_id，思考中也实时可见，不再只有「开启subagent」锚点。
     forwardSubagentText: true,
-    // 启用 adaptive thinking，并显式请求摘要展示；否则新模型默认可能 omitted，思考中无可展示内容。
-    thinking: { type: 'adaptive', display: 'summarized' },
+    // adaptive thinking + 摘要展示；具体档位由思考强度 selector 决定（thinkingConfig）。
+    thinking: thinkingConfig.thinking,
     canUseTool: createPermissionHandler(sessionId, mainWindow, opts.workingDir || config.workingDirectory || null),
     onElicitation: createElicitationHandler(sessionId, mainWindow),
     // SDK 只有同时声明 supportedDialogKinds 与 onUserDialog，才会把选择题交互交给宿主 UI。
@@ -712,6 +750,9 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
       options.allowDangerouslySkipPermissions = true;
     }
   }
+
+  // effort（运行时补偿）：Options.effort 含 max，是思考力度的运行时权威通道（§1.6）。
+  if (thinkingConfig.effort) options.effort = thinkingConfig.effort;
 
   // 内联 settings——脱离磁盘（settingSources:[]），由 claude-link 完全主导。
   // 与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），避免 SDK 路径丢
@@ -741,10 +782,36 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     settingsEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(clamped);
     logger.info(`[${sessionId}] 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS=${clamped} (alias=${requestedAlias})`);
   }
+
+  // permissions 先应用 session 级更新，再并集 additionalDirectories（用户配置 + 附件目录）。
+  const permissions = applySessionPermissionUpdates(
+    sessionId,
+    settings.permissions as SdkPermissionSettings,
+  );
+  const mergedDirs = new Set<string>();
+  for (const dir of permissions.additionalDirectories ?? []) {
+    if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
+  }
+  for (const dir of opts.additionalDirectories ?? []) {
+    if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
+  }
+  if (mergedDirs.size > 0) {
+    const dirs = [...mergedDirs];
+    // 双写同一集合：顶层 options 与 settings.permissions，避免 SDK/CLI 只读一侧时丢目录。
+    options.additionalDirectories = dirs;
+    permissions.additionalDirectories = dirs;
+  }
+
   options.settings = {
     ...settings,
-    permissions: applySessionPermissionUpdates(sessionId, settings.permissions as SdkPermissionSettings),
+    permissions,
   };
+
+  // 每会话思考强度 settingsPatch 覆盖全局投影：opts.thinkingLevel 已过 resolveEffectiveThinkingLevel
+  // 解析为实际生效档，故此处覆盖优先级最高（query 级 > 全局投影 > advancedJson）。
+  if (thinkingConfig.settingsPatch) {
+    Object.assign(options.settings as Record<string, unknown>, thinkingConfig.settingsPatch);
+  }
 
   return options;
 }
@@ -837,6 +904,334 @@ function isToolResultPart(part: CliMessageContentPart): boolean {
   return part.type === 'tool_result' || part.type.endsWith('_tool_result');
 }
 
+// ── Claude 计划（TodoWrite / Task 工具）处理 ───────────────────────
+// 独立于手动排队 tasks 表。tool_use → 即时/缓存解析 → repo 原子更新 → IPC 推送。
+// 计划快照不写入 messages 表（工具调用本身仍按现有逻辑保留在聊天历史）。
+
+// 按会话隔离的 toolUseId → { toolName, input, applied? } 缓存，用于配对 tool_use 与 tool_result。
+// 仅缓存计划相关工具（TodoWrite/TaskCreate/TaskUpdate/TaskList/TaskGet）。
+// applied 标记：TodoWrite input 阶段已处理 → output 阶段跳过（F13 幂等）。
+// 会话删除时在 markSessionDeleted 清理；重启后不依赖此缓存（依赖已持久化快照）。
+const sessionToolUseCache = new Map<string, Map<string, { toolName: string; input: Record<string, unknown>; applied?: boolean }>>();
+
+// 按会话隔离的 orphan patch 缓存：task_updated 到达但 taskId 未知时暂存，待 TaskCreate/List/Get 建立后重放（F8）。
+const sessionOrphanPatches = new Map<string, Map<string, ClaudePlanTaskPatch[]>>();
+
+function getToolUseCache(sessionId: string): Map<string, { toolName: string; input: Record<string, unknown>; applied?: boolean }> {
+  let cache = sessionToolUseCache.get(sessionId);
+  if (!cache) {
+    cache = new Map();
+    sessionToolUseCache.set(sessionId, cache);
+  }
+  return cache;
+}
+
+function getOrphanPatches(sessionId: string): Map<string, ClaudePlanTaskPatch[]> {
+  let orphans = sessionOrphanPatches.get(sessionId);
+  if (!orphans) {
+    orphans = new Map();
+    sessionOrphanPatches.set(sessionId, orphans);
+  }
+  return orphans;
+}
+
+function cleanupToolUseCache(sessionId: string): void {
+  sessionToolUseCache.delete(sessionId);
+  sessionOrphanPatches.delete(sessionId);
+}
+
+// 推送计划快照到渲染进程（瞬态：不落库 messages，不调 persistCliEvent）。
+function forwardClaudePlanState(sessionId: string, mainWindow: BrowserWindow, state: ClaudePlanState): void {
+  if (!isSessionActive(sessionId)) return;
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: { type: 'claude_plan', sessionId, state } as ClaudePlanCliEvent,
+    } as { sessionId: string; event: CliEvent });
+  } catch {
+    // webContents 可能已销毁（窗口关闭），忽略
+  }
+}
+
+// F1: 从 SDK user 消息提取结构化工具结果。优先用顶层 tool_use_result（SDK 类型 sdk.d.ts:4198），
+// 因为 SDK 内置工具（Skill/TaskCreate/TaskList/TaskGet/TodoWrite）的结构化结果是放在
+// user 消息顶层 tool_use_result 字段，而 tool_result.content 是人类可读文本。
+function extractStructuredResult(
+  toolUseResult: unknown,
+  part: CliMessageContentPart,
+): Record<string, unknown> | null {
+  // 优先用顶层 tool_use_result（对象则直接用；数组取第一个对象元素）
+  if (toolUseResult && typeof toolUseResult === 'object') {
+    if (Array.isArray(toolUseResult)) {
+      const first = toolUseResult.find((e) => e && typeof e === 'object' && !Array.isArray(e));
+      if (first) return first as Record<string, unknown>;
+    } else {
+      return toolUseResult as Record<string, unknown>;
+    }
+  }
+  // 回退：从 tool_result.content 解析 JSON（某些工具可能在 content 里放 JSON 文本）
+  if (part.type !== 'tool_result') return null;
+  const content = (part as { content?: unknown }).content;
+  if (typeof content === 'string') {
+    try { return JSON.parse(content) as Record<string, unknown>; } catch { return null; }
+  }
+  if (Array.isArray(content)) {
+    const textItem = content.find(
+      (c) => c && typeof c === 'object' && (c as { type?: string }).type === 'text' && typeof (c as { text?: unknown }).text === 'string',
+    );
+    if (textItem) {
+      try { return JSON.parse((textItem as { text: string }).text) as Record<string, unknown>; } catch { return null; }
+    }
+  }
+  return null;
+}
+
+// 处理 assistant 消息中的 tool_use 块：
+// - TodoWrite：即时完整替换快照（input.todos 是新状态），标记 applied（F13 幂等）
+// - TaskUpdate：只缓存，不立即写库（F2 推迟到 result 确认 success）
+// - TaskCreate/TaskList/TaskGet：缓存 input 等待对应 tool_result
+// F9：parentToolUseId 非空 = 子 Agent 消息 → 跳过（不污染父会话主计划）
+function processAssistantToolUseForPlan(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  content: CliMessageContentPart[],
+  parentToolUseId?: string,
+): void {
+  if (!isSessionActive(sessionId)) return;
+  // F9：子 Agent 的 plan 工具不影响父会话主计划
+  if (parentToolUseId) return;
+  const cache = getToolUseCache(sessionId);
+  for (const part of content) {
+    if (part.type !== 'tool_use') continue;
+    const toolName = part.name;
+    const input = part.input;
+    const toolUseId = part.id ?? part.tool_use_id ?? '';
+    if (!toolUseId) continue;
+
+    // 仅缓存计划相关工具
+    if (
+      toolName === 'TodoWrite' || toolName === 'TaskCreate' ||
+      toolName === 'TaskUpdate' || toolName === 'TaskList' || toolName === 'TaskGet'
+    ) {
+      cache.set(toolUseId, { toolName, input });
+    }
+
+    // TodoWrite：即时完整替换快照（input.todos 是新状态），标记 applied 实现 F13 幂等
+    if (toolName === 'TodoWrite') {
+      const todos = parseTodoWriteInput(input);
+      if (todos) {
+        try {
+          const state = claudePlanRepo.replaceTodos(sessionId, todos);
+          if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+          // 标记 input 阶段已处理，output 阶段跳过避免双写 revision 翻倍（F13）
+          cache.set(toolUseId, { toolName, input, applied: true });
+        } catch (err) {
+          logger.warn(`[plan] replaceTodos failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+
+    // F2：TaskUpdate 不在 tool_use 阶段立即写库——推迟到 tool_result 确认 success
+    // 只缓存 input（已缓存），result 阶段在 processToolResultForPlan 中处理
+  }
+}
+
+// 处理 user 消息中的 tool_result 块：配对缓存的 toolUseId，
+// F1: 从 sdkMsg.tool_use_result 顶层取结构化结果（而非 content JSON.parse）。
+// F2: TaskUpdate 在此确认 success 后才写库（失败则丢弃 provisional patch）。
+// F4: TaskList 用 mergeTasks（保留本地详情）。
+// F5: TaskGet 用 upsertPatch（patch 语义，保留本地未返回字段）。
+// F8: 任务建立后重放 orphan patch。
+// F13: TodoWrite input 已处理 → output 跳过（幂等）。
+function processToolResultForPlan(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  content: CliMessageContentPart[],
+  toolUseResult: unknown,
+): void {
+  if (!isSessionActive(sessionId)) return;
+  const cache = getToolUseCache(sessionId);
+  const orphans = getOrphanPatches(sessionId);
+  for (const part of content) {
+    if (!isToolResultPart(part)) continue;
+    const toolUseId = (part as { tool_use_id?: string }).tool_use_id ?? '';
+    if (!toolUseId) continue;
+    const cached = cache.get(toolUseId);
+    if (!cached) continue;
+
+    // F1: 优先从顶层 tool_use_result 取结构化结果
+    const resultObj = extractStructuredResult(toolUseResult, part);
+
+    if (cached.toolName === 'TaskCreate') {
+      if (!resultObj) { cache.delete(toolUseId); continue; }
+      const taskResult = parseTaskCreateOutput(resultObj);
+      if (taskResult) {
+        const inputParsed = parseTaskCreateInput(cached.input);
+        if (inputParsed) {
+          const task: ClaudePlanTask = {
+            id: taskResult.id,
+            subject: taskResult.subject || inputParsed.subject,
+            description: inputParsed.description,
+            ...(inputParsed.activeForm ? { activeForm: inputParsed.activeForm } : {}),
+            status: 'pending',
+            blocks: [],
+            blockedBy: [],
+            ...(inputParsed.metadata ? { metadata: inputParsed.metadata } : {}),
+          };
+          try {
+            const state = claudePlanRepo.upsertTask(sessionId, task);
+            if (state) {
+              forwardClaudePlanState(sessionId, mainWindow, state);
+              // F8: 重放该 taskId 的 orphan patches
+              replayOrphanPatches(sessionId, mainWindow, taskResult.id, orphans);
+            }
+          } catch (err) {
+            logger.warn(`[plan] upsertTask (TaskCreate) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+    } else if (cached.toolName === 'TaskUpdate') {
+      // F2: 推迟到 result 确认 success 后才写库
+      const parsed = parseTaskUpdateInput(cached.input);
+      if (!parsed) { cache.delete(toolUseId); continue; }
+      // 检查 success（结构化结果可能含 success 字段）
+      const success = resultObj?.success;
+      // success === false → 丢弃 provisional patch（SDK 拒绝了更新）
+      if (success === false) {
+        cache.delete(toolUseId);
+        continue;
+      }
+      // success === true 或无 success 字段 → 执行更新
+      if ('delete' in parsed) {
+        try {
+          const state = claudePlanRepo.removeTask(sessionId, parsed.taskId);
+          if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+        } catch (err) {
+          logger.warn(`[plan] removeTask (TaskUpdate) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+        }
+      } else {
+        const patch = parsed.patch;
+        // F6: patch 非空即转发（含 owner/blocks/blockedBy/metadata）
+        if (Object.keys(patch).length > 0) {
+          try {
+            const state = claudePlanRepo.patchTask(sessionId, parsed.taskId, patch);
+            if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+          } catch (err) {
+            logger.warn(`[plan] patchTask (TaskUpdate) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+    } else if (cached.toolName === 'TaskList') {
+      if (!resultObj) { cache.delete(toolUseId); continue; }
+      // F4: merge 而非 replace——保留本地 description/activeForm/metadata/blocks
+      const entries = parseTaskListOutput(resultObj);
+      if (entries) {
+        try {
+          const state = claudePlanRepo.mergeTasks(sessionId, entries);
+          if (state) {
+            forwardClaudePlanState(sessionId, mainWindow, state);
+            // F8: 对每个 entry taskId 重放 orphan patches
+            for (const entry of entries) {
+              replayOrphanPatches(sessionId, mainWindow, entry.id, orphans);
+            }
+          }
+        } catch (err) {
+          logger.warn(`[plan] mergeTasks (TaskList) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    } else if (cached.toolName === 'TaskGet') {
+      if (!resultObj) { cache.delete(toolUseId); continue; }
+      // F5: upsertPatch（patch 语义）而非全量 upsert——保留本地未返回字段
+      const result = parseTaskGetOutput(resultObj);
+      if (result) {
+        try {
+          const state = claudePlanRepo.upsertPatch(sessionId, result.id, result.patch);
+          if (state) {
+            forwardClaudePlanState(sessionId, mainWindow, state);
+            // F8: 重放该 taskId 的 orphan patches
+            replayOrphanPatches(sessionId, mainWindow, result.id, orphans);
+          }
+        } catch (err) {
+          logger.warn(`[plan] upsertPatch (TaskGet) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    } else if (cached.toolName === 'TodoWrite') {
+      // F13: input 阶段已处理 → output 跳过（避免双写 revision 翻倍）
+      if (cached.applied) {
+        cache.delete(toolUseId);
+        continue;
+      }
+      // input 阶段未处理（parseTodoWriteInput 返回 null 等）→ 用 output 确认
+      if (resultObj) {
+        const todos = parseTodoWriteOutput(resultObj);
+        if (todos) {
+          try {
+            const state = claudePlanRepo.replaceTodos(sessionId, todos);
+            if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+          } catch (err) {
+            logger.warn(`[plan] replaceTodos (output confirm) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+      }
+    }
+
+    cache.delete(toolUseId);
+  }
+}
+
+// F8: 重放 orphan patches（task_updated 在任务建立前到达时缓存的 patch）
+function replayOrphanPatches(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  taskId: string,
+  orphans: Map<string, ClaudePlanTaskPatch[]>,
+): void {
+  const patches = orphans.get(taskId);
+  if (!patches || patches.length === 0) return;
+  orphans.delete(taskId);
+  for (const patch of patches) {
+    try {
+      const state = claudePlanRepo.patchTask(sessionId, taskId, patch);
+      if (state) forwardClaudePlanState(sessionId, mainWindow, state);
+    } catch (err) {
+      logger.warn(`[plan] orphan replay patchTask failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+}
+
+// 处理 SDK system/task_updated 消息：归一化 running → in_progress，patch 已知任务。
+// F8: 若 taskId 未知（patchTask no-op），把 patch 缓存为 orphan，待 TaskCreate/List/Get 建立后重放。
+function processTaskUpdatedForPlan(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  sdkMsg: Record<string, unknown>,
+): void {
+  if (!isSessionActive(sessionId)) return;
+  const parsed = parseTaskUpdatedPatch(sdkMsg);
+  if (!parsed) return;
+  // patch 为空对象时不推送（无实质变更）
+  if (Object.keys(parsed.patch).length === 0) return;
+  try {
+    const state = claudePlanRepo.patchTask(sessionId, parsed.taskId, parsed.patch);
+    if (state) {
+      forwardClaudePlanState(sessionId, mainWindow, state);
+      // F8: 检查任务是否存在——不存在则缓存为 orphan
+      const taskExists = state.tasks.some((t) => t.id === parsed.taskId);
+      if (!taskExists) {
+        const orphans = getOrphanPatches(sessionId);
+        const existing = orphans.get(parsed.taskId);
+        if (existing) {
+          existing.push(parsed.patch);
+        } else {
+          orphans.set(parsed.taskId, [parsed.patch]);
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn(`[plan] patchTask (task_updated) failed [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 // 把 SDK 的 assistant/user 消息（{type:'assistant'|'user', message:{role,content,usage}, parent_tool_use_id?}）
 // 转成 CliMessageEvent。透传 parent_tool_use_id → parentToolUseId，让子 agent 过程能归属到
 // 主流程对应工具，抽到右侧「子Agent」Tab。
@@ -893,7 +1288,7 @@ function convertStreamEvent(sdkMsg: Record<string, unknown>): CliEvent {
   } as CliStreamEvent;
 }
 
-async function startSdkQuery(prompt: string, options: Record<string, unknown>): Promise<Query> {
+async function startSdkQuery(prompt: SdkPrompt, options: Record<string, unknown>): Promise<Query> {
   const sdk = await importSdk();
   return sdk.query({ prompt, options });
 }
@@ -914,7 +1309,7 @@ const contextUsageDiagnosed = new Set<string>();
 // ── 运行一个 query：消费 SDKMessage 流，转 CliEvent 推前端，结束后 emit exit ─
 async function runQuery(
   sessionId: string,
-  prompt: string,
+  prompt: SdkPrompt,
   mainWindow: BrowserWindow,
   opts: SpawnOptions,
   entry: SessionEntry,
@@ -938,6 +1333,12 @@ async function runQuery(
   }
   entry.state = 'running';
   entries.set(sessionId, entry);
+  // 回合终态追踪：SDK 正常应在流末 yield 一条 result。但第三方端点（如 glm-5.2）
+  // 或 Windows 下 result 常丢失 → for-await 跑完却没终态事件 → 前端 sending 永久卡死
+  //（后端 entry 已 deleteEntry 变空闲，故仍能发新消息——状态解耦）。gotResult 标记本回合
+  // 是否真收到 result；未收到则在流末合成一条，恢复 process-manager 时代「0 退出无 result
+  // 合成 aborted」的兜底（见 cli.ts CliAbortedEvent 注释）。
+  let gotResult = false;
   // 每个新 query 重置卡死追踪（per-turn stallCount / hardAbortFired）。
   resetStallTracker(sessionId);
   ensureWatchdog(mainWindow);
@@ -959,8 +1360,8 @@ async function runQuery(
     deleteEntry(sessionId, entry);
     return;
   }
-  // resume：优先显式传入，否则用已记录的 CLI session id（等价 process-manager 的 --resume）。
-  const resumeId = opts.resumeSessionId || sessionCliIds.get(sessionId);
+  // resume：优先显式传入，否则统一解析（内存 → DB 回填缓存），让重启/崩溃后仍能续接（Task 7B）。
+  const resumeId = opts.resumeSessionId || resolveCliSessionId(sessionId);
   if (resumeId) sdkOptions.resume = resumeId;
 
   let query: Query;
@@ -1127,6 +1528,13 @@ async function runQuery(
           );
           continue;
         }
+        // task_updated：Claude 计划任务的系统级状态更新（区别于后台 task_*）。
+        // patch.status 的 'running' 归一化为 'in_progress'，patch 已知任务。
+        // 瞬态转发不落库——计划快照存在独立 claude_plan_state 表。
+        if (subtype === 'task_updated') {
+          processTaskUpdatedForPlan(sessionId, mainWindow, sdkMsg);
+          continue;
+        }
         // status:compacting：实时压缩进行中（compact_boundary 是完成后的边界，由 forwardEvent 处理）。
         if (subtype === 'status' && sdkMsg.status === 'compacting') {
           const sysInfo: CliSystemInfoEvent = { type: 'system', subtype: 'compacting' };
@@ -1150,12 +1558,33 @@ async function runQuery(
           }
           continue;
         }
+        // 批次 B：thinking_tokens——思考 token 实时估算（SDK 思考阶段高频流式）。
+        // 限频转发（shouldForwardThinkingTokens），瞬态不落库；前端 ContextButton hover 实时展示，
+        // 回合结束由 use-chat 清零。estimated_tokens 是思考块累计估算，非计费 output_tokens。
+        if (subtype === 'thinking_tokens') {
+          const estimated = typeof sdkMsg.estimated_tokens === 'number' ? sdkMsg.estimated_tokens : undefined;
+          if (estimated !== undefined && shouldForwardThinkingTokens(sessionId, estimated)) {
+            const sysInfo: CliSystemInfoEvent = {
+              type: 'system',
+              subtype: 'thinking_tokens',
+              estimatedTokens: estimated,
+            };
+            forwardTransient(sessionId, mainWindow, sysInfo);
+          }
+          continue;
+        }
         // 其它未知 system 子类型：暂不转发（前端不消费）。
         continue;
       }
       if (type === 'assistant') {
         const cliEvent = convertAssistantMessage(sdkMsg);
-        if (cliEvent) forwardEvent(sessionId, mainWindow, cliEvent);
+        if (cliEvent) {
+          forwardEvent(sessionId, mainWindow, cliEvent);
+          // Claude 计划：扫描 tool_use 块，处理 TodoWrite/TaskCreate/TaskUpdate 等。
+          // 不写入 messages 表——计划快照存在独立 claude_plan_state 表。
+          // F9：传 parentToolUseId，子 Agent 的 plan 工具不影响父会话主计划。
+          processAssistantToolUseForPlan(sessionId, mainWindow, cliEvent.content, cliEvent.parentToolUseId);
+        }
         continue;
       }
       if (type === 'user') {
@@ -1169,6 +1598,9 @@ async function runQuery(
           const resultParts = cliEvent.content.filter(isToolResultPart);
           if (resultParts.length > 0) {
             forwardEvent(sessionId, mainWindow, { ...cliEvent, content: resultParts });
+            // Claude 计划：配对 tool_result 与缓存的 tool_use，解析 TaskCreate/TaskList/TaskGet 输出。
+            // F1: 传 sdkMsg.tool_use_result（SDK 顶层结构化结果，非 content 文本）。
+            processToolResultForPlan(sessionId, mainWindow, resultParts, sdkMsg.tool_use_result);
           }
         }
         continue;
@@ -1188,12 +1620,22 @@ async function runQuery(
         continue;
       }
       if (type === 'result') {
+        gotResult = true;
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
+        // F15: result 是回合终态，清理本回合的 toolUse 缓存和 orphan patches
+        cleanupToolUseCache(sessionId);
         continue;
       }
       // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。
     }
     // 流正常结束。若旧 query 已被 abort/替换，按中断收尾，避免误报成功退出。
+    // 终态兜底：本回合未收到 result（第三方端点/Windows 丢包）→ 合成一条 aborted，
+    // 保证前端 sending 必复位。前端 aborted 处理器幂等 markStopped；persistCliEvent 对
+    // aborted 无 case，不落库、不污染历史（与既有中断路径同形，见下方 catch 的 aborted）。
+    // 仅对当前 entry 合成——已被替换的旧 entry 由新 entry 负责发终态，这里跳过避免重复。
+    if (isCurrentEntry(sessionId, entry) && !gotResult) {
+      forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
+    }
     emitExit(isCurrentEntry(sessionId, entry) ? 0 : null);
     break;
   } catch (err) {
@@ -1209,6 +1651,7 @@ async function runQuery(
       try {
         query = await startSdkQuery(prompt, sdkOptions);
         entry.query = query;
+        gotResult = false; // 新 query = 新回合，重置终态追踪
         continue;
       } catch (retryErr) {
         const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
@@ -1241,6 +1684,10 @@ export function spawnForChat(
   // 创建 entry（handle + emit 一次成型）。不立即起 query——等 sendMessage 带首条消息再 query()。
   // pendingFirstPrompt 记住 mainWindow/opts，sendMessage 时用同 entry 起 query，
   // 这样 spawn 时返回的 handle 就是 runQuery 要 emit 的那个，on('exit') 回调不丢失。
+  // 若已有 pending 或 active entry，拒绝覆盖，防止并发 CHAT_SEND 后写吃掉先写的 prompt。
+  if (pendingFirstPrompt.has(sessionId) || isEntryActive(entries.get(sessionId))) {
+    throw new Error('当前回合仍在执行，请等待结束或中断后重试');
+  }
   const entry = createEntry();
   entries.set(sessionId, entry);
   markSessionActive(sessionId);
@@ -1257,7 +1704,7 @@ const pendingFirstPrompt = new Map<
 export function spawnForTask(
   taskId: string,
   sessionId: string,
-  prompt: string,
+  prompt: SdkPrompt,
   mainWindow: BrowserWindow,
   opts: SpawnOptions = {},
 ): SdkQueryHandle {
@@ -1270,7 +1717,7 @@ export function spawnForTask(
   return entry.handle;
 }
 
-export function sendMessage(sessionId: string, message: string): void {
+export function sendMessage(sessionId: string, message: SdkPrompt): void {
   // 首条消息（pendingFirstPrompt 存在）：用同一 entry 起新 query，message 即 prompt。
   const pending = pendingFirstPrompt.get(sessionId);
   if (pending) {
@@ -1280,12 +1727,12 @@ export function sendMessage(sessionId: string, message: string): void {
   }
   // 后续消息：SDK 单 query 模式下不能往已运行的 query 追加 prompt
   // （需 streaming input + AsyncIterable；当前架构每次消息起新 query + resume）。
-  // 若有活 query 则记为待续写（下一条会走 spawnForChat+resume）；无活 query 则 warn。
-  // 实际聊天续写由 ipc-handlers 的 getActiveProcess 分支判断走 spawnForChat 新 query。
+  // 误用（未 spawn / 活 query 中途追加）一律抛错，禁止静默 drop。
   const entry = entries.get(sessionId);
-  if (!entry || !entry.query) {
-    logger.warn(`No active SDK query for session ${sessionId}; message dropped.`);
+  if (entry?.query) {
+    throw new Error('当前回合仍在执行，请等待结束或中断后重试');
   }
+  throw new Error(`会话 ${sessionId} 没有待发送的 SDK 入口，请先 spawnForChat。`);
 }
 
 export function killProcess(sessionId: string, reason: 'user' | 'watchdog' = 'user'): void {
@@ -1326,6 +1773,19 @@ export function getActiveProcess(sessionId: string): SdkQueryHandle | undefined 
 
 export function getCliSessionId(sessionId: string): string | undefined {
   return sessionCliIds.get(sessionId);
+}
+
+/**
+ * 统一 resume ID 解析（Task 7B）：内存优先，未命中查 DB 并回填缓存，再无则 undefined。
+ * 让 task 执行 / waiting 续接 / 应用重启路径在内存丢失（重启/崩溃）后仍能从 DB 恢复 resume，
+ * 避免 stale transcript 或 resume 丢失导致图片/消息重发。
+ */
+export function resolveCliSessionId(sessionId: string): string | undefined {
+  const cached = sessionCliIds.get(sessionId);
+  if (cached) return cached;
+  const persisted = sessionRepo.getSession(sessionId)?.cliSessionId ?? undefined;
+  if (persisted) sessionCliIds.set(sessionId, persisted);
+  return persisted;
 }
 
 export function setCliSessionId(sessionId: string, cliSessionId: string): void {

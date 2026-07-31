@@ -2,26 +2,39 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { VueDraggable } from 'vue-draggable-plus';
 import { useTaskStore } from '../../stores/task-store';
+import { useTaskDraftStore } from '../../stores/task-draft-store';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { useTaskQueue } from '../../composables/use-task-queue';
 import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
 import { useNow } from '../../composables/use-now';
 import TaskItem from './TaskItem.vue';
+import AttachmentDraftList from '../chat/AttachmentDraftList.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
 import MessageBubble from '../chat/MessageBubble.vue';
 import ThinkingBlock from '../chat/ThinkingBlock.vue';
 import ChangesPanel from '../changes/ChangesPanel.vue';
 import { useChangesStore } from '../../stores/changes-store';
+import ClaudePlanCard from './ClaudePlanCard.vue';
+import { useClaudePlanStore } from '../../stores/claude-plan-store';
 
 const taskStore = useTaskStore();
+const taskDraft = useTaskDraftStore();
 const sessionStore = useSessionStore();
 const interactionStore = useInteractionStore();
 const changesStore = useChangesStore();
+const planStore = useClaudePlanStore();
 const changesCount = computed(() => changesStore.changedCount);
 const { startListening } = useTaskQueue();
 
-const newTaskPrompt = ref('');
+// Task 7B：任务 composer 草稿按会话隔离（文字 + 附件）。切会话/切筛选不丢草稿。
+const activeSessionId = computed(() => sessionStore.activeSession?.id ?? '');
+const taskText = computed(() => (activeSessionId.value ? taskDraft.getText(activeSessionId.value) : ''));
+const taskAttachments = computed(() => (activeSessionId.value ? taskDraft.getAttachments(activeSessionId.value) : []));
+const canSendTask = computed(() => !!activeSessionId.value && taskDraft.getCanSend(activeSessionId.value));
+function onTaskTextInput(e: Event): void {
+  if (activeSessionId.value) taskDraft.setText(activeSessionId.value, (e.target as HTMLTextAreaElement).value);
+}
 const expandedGroups = ref<Set<string>>(new Set());
 // 问题 7：用户显式折叠的组（优先级最高，运行中也保持收起）。
 const collapsedGroups = ref<Set<string>>(new Set());
@@ -152,10 +165,12 @@ watch(
 
 // —— 方案 B：右侧活动栏（图标轨 + 总览/筛选）——
 // rightTab 扩展 'all'（默认四类总览同屏）；点轨按钮切单类，再点同类回 all。
-type RightFilter = 'all' | 'queue' | 'subagent' | 'background' | 'changes';
+type RightFilter = 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes';
 const isAll = computed(() => sessionStore.rightTab === 'all');
 
 function setFilter(f: RightFilter): void {
+  // 折叠态下点 rail 分类图标 → 先展开总览再切筛选，避免"点了没反应"。
+  if (sessionStore.overviewCollapsed) sessionStore.overviewCollapsed = false;
   // 再点当前激活的同类 → 回 all（与预览一致）；点「全部」恒回 all。
   if (f === 'all' || sessionStore.rightTab === f) {
     sessionStore.setRightTab('all');
@@ -166,6 +181,7 @@ function setFilter(f: RightFilter): void {
 
 const headTitle = computed(() => {
   switch (sessionStore.rightTab) {
+    case 'plan': return 'Claude 计划';
     case 'queue': return '排队任务';
     case 'subagent': return '子Agent';
     case 'background': return '后台任务';
@@ -175,6 +191,7 @@ const headTitle = computed(() => {
 });
 const headEyebrow = computed(() => {
   switch (sessionStore.rightTab) {
+    case 'plan': return 'Plan';
     case 'queue': return 'Queue';
     case 'subagent': return 'Sub-agents';
     case 'background': return 'Background';
@@ -185,6 +202,20 @@ const headEyebrow = computed(() => {
 
 // 运行中的子 Agent 数（指标强调 + 轨 badge live 态）。
 const runningSubAgentCount = computed(() => subAgentGroups.value.filter((g) => g.running).length);
+
+// Claude 计划指标：TodoWrite + Task 完成数/总数。
+const planTodoCount = computed(() => planStore.activePlan?.todos.length ?? 0);
+const planTodoCompleted = computed(() => planStore.activePlan?.todos.filter((t) => t.status === 'completed').length ?? 0);
+const planTaskCount = computed(() => planStore.activePlan?.tasks.length ?? 0);
+const planTaskCompleted = computed(() => planStore.activePlan?.tasks.filter((t) => t.status === 'completed').length ?? 0);
+const planTotalCount = computed(() => planTodoCount.value + planTaskCount.value);
+// F10: 合计完成数（todos + tasks），用于指标/徽章一致
+const planDone = computed(() => planTodoCompleted.value + planTaskCompleted.value);
+const planMetric = computed<{ text: string; active: boolean }>(() => {
+  const n = planTotalCount.value;
+  if (n === 0) return { text: '无', active: false };
+  return { text: `${planDone.value}/${n}`, active: planDone.value < n };
+});
 
 // 状态指标条（§4）：四格始终占位，标签与值分行，禁用 · 串句换行。
 const queueMetric = computed<{ text: string; active: boolean }>(() => {
@@ -239,10 +270,45 @@ function loadTasks() {
   }
 }
 
+// Task 7B：构造完整 ChatSendPayload（text + attachmentIds + clientMessageId）；成功才清草稿，失败保留。
 async function handleAddTask() {
-  if (!sessionStore.activeSession || !newTaskPrompt.value.trim()) return;
-  await taskStore.addTask(sessionStore.activeSession.id, newTaskPrompt.value.trim());
-  newTaskPrompt.value = '';
+  const sessionId = activeSessionId.value;
+  if (!sessionId || !taskDraft.getCanSend(sessionId)) return;
+  const ok = await taskStore.addTask(sessionId, {
+    text: taskDraft.getText(sessionId).trim(),
+    attachmentIds: taskDraft.getAttachments(sessionId).map((a) => a.id),
+    clientMessageId: crypto.randomUUID(),
+  });
+  if (ok) taskDraft.clearAfterAccepted(sessionId);
+}
+
+// 任务附件选择：主进程选文件 + 暂存 + 返回 {attachments, errors}；成功项入草稿，失败项集中提示。
+async function pickTaskAttachments() {
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  try {
+    const { attachments, errors } = await window.claudeLink.pickAttachments(sessionId);
+    if (attachments.length > 0) taskDraft.addAttachments(sessionId, attachments);
+    if (errors.length > 0) {
+      taskStore.error = `部分文件未能添加：${errors.map((e) => `${e.filename}：${e.message}`).join('；')}`;
+    }
+  } catch (e) {
+    taskStore.error = e instanceof Error ? e.message : '添加附件失败';
+  }
+}
+
+async function onRemoveTaskAttachment(attachmentId: string) {
+  const sessionId = activeSessionId.value;
+  if (!sessionId) return;
+  try {
+    await taskDraft.removeAttachment(sessionId, attachmentId);
+  } catch (e) {
+    taskStore.error = e instanceof Error ? e.message : '移除附件失败';
+  }
+}
+
+async function handleRetry(taskId: string) {
+  await taskStore.retryTask(taskId);
 }
 
 async function handleStart() {
@@ -294,7 +360,7 @@ function handleDragReorder() {
 </script>
 
 <template>
-  <aside class="task-panel">
+  <aside class="task-panel" :class="{ 'task-panel--collapsed': sessionStore.overviewCollapsed }">
     <div class="task-panel__main">
       <!-- 顶栏：标题随筛选变化 + 清除筛选（仅非总览） -->
       <header class="task-panel__head">
@@ -305,8 +371,12 @@ function handleDragReorder() {
         <button v-if="!isAll" type="button" class="clear-pill" title="回到全部总览" @click="setFilter('all')">清除筛选</button>
       </header>
 
-      <!-- 状态指标条（2×2 网格，禁用 · 串句换行） -->
+      <!-- 状态指标条（2×N 网格，禁用 · 串句换行） -->
       <div class="status-metrics">
+        <button type="button" class="status-metric" :class="{ 'status-metric--active': planMetric.active }" :title="`只看计划（${planMetric.text}）`" @click="setFilter('plan')">
+          <span class="status-metric__label">计划</span>
+          <span class="status-metric__value">{{ planMetric.text }}</span>
+        </button>
         <button type="button" class="status-metric" :class="{ 'status-metric--active': queueMetric.active }" :title="`只看队列（${queueMetric.text}）`" @click="setFilter('queue')">
           <span class="status-metric__label">队列</span>
           <span class="status-metric__value">{{ queueMetric.text }}</span>
@@ -340,8 +410,19 @@ function handleDragReorder() {
         </div>
       </div>
 
-      <!-- 内容区：总览四类纵向堆叠，单类只渲染对应数据源 -->
+      <!-- 内容区：总览各类纵向堆叠，单类只渲染对应数据源 -->
       <div class="task-panel__scroll">
+        <!-- § Claude 计划（TodoWrite / Task 工具） -->
+        <section v-if="isAll || sessionStore.rightTab === 'plan'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
+          <div v-if="isAll" class="tp-section__head">
+            <span class="tp-section__title">Claude 计划</span>
+            <span v-if="planTotalCount" class="tp-section__count">{{ planDone }}/{{ planTotalCount }}</span>
+            <button type="button" class="tp-section__goto" @click="setFilter('plan')">只看此类</button>
+          </div>
+          <ClaudePlanCard v-if="planTotalCount" />
+          <div v-else class="task-panel__empty">Claude 尚未创建计划</div>
+        </section>
+
         <!-- § 排队任务 -->
         <section v-if="isAll || sessionStore.rightTab === 'queue'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
           <div v-if="isAll" class="tp-section__head">
@@ -362,6 +443,7 @@ function handleDragReorder() {
                   :task="task"
                   @delete="handleDelete"
                   @interrupt="handleInterrupt"
+                  @retry="handleRetry"
                 />
               </template>
             </VueDraggable>
@@ -460,23 +542,32 @@ function handleDragReorder() {
         </section>
       </div>
 
-      <!-- 排队 composer（仅 queue 筛选；newTaskPrompt 为 setup ref，切换筛选不丢草稿） -->
+      <!-- 排队 composer（仅 queue 筛选；草稿按会话隔离，切换会话/筛选不丢） -->
       <div v-if="sessionStore.rightTab === 'queue'" class="task-panel__add">
         <div class="add-row">
           <span class="add-label">排队指令</span>
           <span
             class="add-info"
-            title="运行中的任务不会被新指令打断；新指令会在当前任务结束并等待倒计时后执行。倒计时（秒数可在配置页设置）内输入会作为对当前任务的补充继续执行。"
+            title="运行中的任务不会被新指令打断；新指令会在当前任务结束并等待倒计时后执行。倒计时（秒数可在配置页设置）内输入会作为对当前任务的补充继续执行。支持附件（图片/文件）。"
           >ⓘ</span>
         </div>
+        <AttachmentDraftList
+          v-if="taskAttachments.length > 0"
+          :attachments="taskAttachments"
+          @remove="onRemoveTaskAttachment"
+        />
         <textarea
-          v-model="newTaskPrompt"
-          placeholder="输入要排队发送给 AI 的下一条指令"
+          :value="taskText"
+          placeholder="输入要排队发送给 AI 的下一条指令（附件-only 也可）"
           rows="3"
           title="输入要排队发送给 AI 的下一条指令（回车添加到队列末尾）"
+          @input="onTaskTextInput"
           @keydown.enter.prevent="handleAddTask"
         />
-        <button type="button" :disabled="!newTaskPrompt.trim()" title="添加到队列末尾" @click="handleAddTask">添加</button>
+        <div class="task-add-actions">
+          <button type="button" class="task-attach-btn" title="添加附件（图片 / 文件）" @click="pickTaskAttachments">📎 附件</button>
+          <button type="button" :disabled="!canSendTask" title="添加到队列末尾" @click="handleAddTask">添加</button>
+        </div>
       </div>
     </div>
 
@@ -499,6 +590,22 @@ function handleDragReorder() {
         </svg>
       </button>
       <span class="rail__divider" aria-hidden="true"></span>
+      <button
+        type="button"
+        class="rail__btn"
+        :class="{ 'rail__btn--active': sessionStore.rightTab === 'plan' }"
+        :aria-pressed="sessionStore.rightTab === 'plan'"
+        aria-label="Claude 计划"
+        title="Claude 计划"
+        @click="setFilter('plan')"
+      >
+        <svg class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect x="2.5" y="2.5" width="11" height="11" rx="1.5" />
+          <path d="M5.5 7l1.5 1.5L10.5 5.5" />
+          <path d="M5.5 11h5" />
+        </svg>
+        <span v-if="planTotalCount" class="rail__badge" :class="{ 'rail__badge--live': planMetric.active }">{{ planDone }}/{{ planTotalCount }}</span>
+      </button>
       <button
         type="button"
         class="rail__btn"
@@ -561,6 +668,25 @@ function handleDragReorder() {
         </svg>
         <span v-if="changesCount" class="rail__badge">{{ changesCount }}</span>
       </button>
+      <!-- 折叠活动总览（保留 rail 图标轨）：» 向右折叠 / « 向左展开 -->
+      <button
+        type="button"
+        class="rail__btn rail__btn--collapse"
+        :class="{ 'rail__btn--active': sessionStore.overviewCollapsed }"
+        :aria-expanded="!sessionStore.overviewCollapsed"
+        :aria-label="sessionStore.overviewCollapsed ? '展开活动总览' : '折叠活动总览'"
+        :title="sessionStore.overviewCollapsed ? '展开活动总览' : '向右折叠活动总览'"
+        @click="sessionStore.toggleOverviewCollapsed()"
+      >
+        <!-- 展开态：» 双箭头指右 = 把总览向右收起 -->
+        <svg v-if="!sessionStore.overviewCollapsed" class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5.5 4 9 8l-3.5 4M9.5 4 13 8l-3.5 4" />
+        </svg>
+        <!-- 折叠态：« 双箭头指左 = 把总览向左展开 -->
+        <svg v-else class="rail__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10.5 4 7 8l3.5 4M6.5 4 3 8l3.5 4" />
+        </svg>
+      </button>
     </nav>
   </aside>
 </template>
@@ -573,6 +699,17 @@ function handleDragReorder() {
   min-width: var(--task-panel-width);
   background: var(--color-panel);
   border-left: 1px solid var(--color-border-strong);
+}
+
+/* 折叠态：仅保留 rail 图标轨（48px），隐藏活动总览主体。
+   不加 width 过渡——否则会拖慢 AppLayout resize 手柄的实时调宽。 */
+.task-panel--collapsed {
+  width: 48px;
+  min-width: 48px;
+}
+
+.task-panel--collapsed .task-panel__main {
+  display: none;
 }
 
 /* 主区：内容在左 */
@@ -941,6 +1078,30 @@ function handleDragReorder() {
   opacity: 0.5;
 }
 
+.task-add-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 附件按钮：次级样式（覆盖 .task-panel__add button 的 accent 默认，用更高特异性） */
+.task-panel__add .task-attach-btn {
+  align-self: stretch;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+  box-shadow: none;
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+
+.task-panel__add .task-attach-btn:hover {
+  color: var(--color-accent-strong);
+  border-color: var(--color-accent-strong);
+}
+
 /* 图标轨：贴面板最右侧 */
 .rail {
   flex-shrink: 0;
@@ -984,6 +1145,11 @@ function handleDragReorder() {
   color: var(--color-accent-strong);
   background: color-mix(in srgb, var(--color-accent) 14%, transparent);
   border-color: var(--color-accent-strong);
+}
+
+/* 折叠按钮：顶到 rail 底部（侧栏右下角） */
+.rail__btn--collapse {
+  margin-top: auto;
 }
 
 .rail__icon {

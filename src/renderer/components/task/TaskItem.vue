@@ -7,6 +7,7 @@ const props = defineProps<{ task: Task }>();
 const emit = defineEmits<{
   delete: [taskId: string];
   interrupt: [taskId: string];
+  retry: [taskId: string];
 }>();
 
 const expanded = ref(false);
@@ -28,11 +29,15 @@ watch(() => props.task.status, (newStatus) => {
     </div>
     <div class="task-item__actions">
       <button v-if="task.status === 'running'" type="button" class="action action--danger" @click="emit('interrupt', task.id)">中断</button>
+      <button v-if="task.status === 'failed' || task.status === 'cancelled'" type="button" class="action action--accent" @click="emit('retry', task.id)">重试</button>
       <button v-if="task.status === 'pending'" type="button" class="action action--muted" @click="emit('delete', task.id)">删除</button>
       <button type="button" class="action" @click="expanded = !expanded">{{ expanded ? '收起' : '详情' }}</button>
     </div>
     <div v-if="expanded" class="task-item__detail">
       <div class="task-item__full-prompt">{{ task.prompt }}</div>
+      <div v-if="task.attachments.length > 0" class="task-item__atts">
+        <strong>附件:</strong> {{ task.attachments.length }} 个 · {{ task.attachments[0]?.filename }}{{ task.attachments.length > 1 ? ' 等' : '' }}
+      </div>
       <div v-if="task.result" class="task-item__result">
         <strong>结果:</strong> {{ task.result.slice(0, 300) }}
       </div>
@@ -105,6 +110,17 @@ watch(() => props.task.status, (newStatus) => {
 .action--muted {
   color: var(--color-text-muted);
   opacity: 0.6;
+}
+
+.action--accent {
+  border-color: var(--color-accent);
+  color: var(--color-accent-strong);
+}
+
+.task-item__atts {
+  margin-top: 6px;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
 }
 
 .task-item__detail {

@@ -1,5 +1,6 @@
 import { app, BrowserWindow, Menu } from 'electron';
 import { join } from 'path';
+import { randomUUID } from 'node:crypto';
 import { electronApp, is, optimizer } from '@electron-toolkit/utils';
 import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
@@ -18,7 +19,12 @@ import { loadWindowSize, trackWindowSize } from './modules/window-state';
 import { setupLinkGuard } from './modules/link-guard';
 import { cleanupStaleTempDirs, disposeExportImageOnQuit } from './modules/export-image-manager';
 import { runExportSmokeIfRequested } from './modules/export-image-smoke';
-import { cleanupDraftAttachments, cleanupOrphanAttachments } from './modules/attachment-service';
+import { cleanupOrphanAttachments, reconcileDraftAttachments } from './modules/attachment-service';
+
+if (process.env.CLAUDE_LINK_EXPORT_SMOKE) {
+  const smokeUserDataDir = join('D:\\software\\Cache', `claude-link-smoke-${process.pid}-${randomUUID()}`);
+  app.setPath('userData', smokeUserDataDir);
+}
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -81,9 +87,17 @@ app.whenReady().then(async () => {
     // 清理上次强退残留的导出临时目录（> 24h）。
     cleanupStaleTempDirs().catch((e) => logger.error('cleanupStaleTempDirs failed', e));
 
-    // 附件清理：未发送的 draft 草稿 + 数据库无记录的孤儿物理文件。不阻塞窗口启动，失败只记日志。
-    cleanupDraftAttachments().catch((e) => logger.error('cleanupDraftAttachments failed', e));
-    cleanupOrphanAttachments().catch((e) => logger.error('cleanupOrphanAttachments failed', e));
+    // 附件清理必须串行：先按 DB 引用修正 draft，再清数据库无记录的孤儿文件。
+    try {
+      await reconcileDraftAttachments();
+    } catch (e) {
+      logger.error('reconcileDraftAttachments failed', e);
+    }
+    try {
+      await cleanupOrphanAttachments();
+    } catch (e) {
+      logger.error('cleanupOrphanAttachments failed', e);
+    }
 
     // Detect Claude Code CLI
     await detectCli();

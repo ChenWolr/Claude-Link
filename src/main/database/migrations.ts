@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 7;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -89,6 +89,11 @@ export function runMigrations(db: Database.Database): void {
     if (!hasCol('last_context_window')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_context_window INTEGER DEFAULT NULL');
     }
+    // 思考强度档位（V7）：null = 回落全局默认（AppConfig.defaultThinkingLevel）。
+    // 脏值清洗在 session-repo.toSession / ipc-handlers 入参校验双层兜底。
+    if (!hasCol('thinking_level')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN thinking_level TEXT DEFAULT NULL');
+    }
   }
 
   // 幂等自愈（messages 过程化四列）：老 DB（plan 落地前建库）的 messages 表没有
@@ -114,6 +119,20 @@ export function runMigrations(db: Database.Database): void {
       db.exec('ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0');
     }
   }
+
+  // V5：任务稳定消息身份 client_message_id。入队时写入，执行/失败重试/应用重启都复用同一 ID
+  // 创建 user message，禁止执行时重新生成（避免重复消息）。幂等自愈补列；部分唯一索引（NULL 不参与）。
+  {
+    const taskCols = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    const hasTaskCol = (n: string): boolean => taskCols.some((c) => c.name === n);
+    if (!hasTaskCol('client_message_id')) {
+      db.exec('ALTER TABLE tasks ADD COLUMN client_message_id TEXT');
+    }
+  }
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_client_message_id
+      ON tasks(client_message_id) WHERE client_message_id IS NOT NULL;
+  `);
 
   // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，
   // 切换会话或重启后仍可在 InteractionPrompt 底部"交互历史"区回看。
@@ -168,6 +187,19 @@ export function runMigrations(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_message_attachments_attachment ON message_attachments(attachment_id);
     CREATE INDEX IF NOT EXISTS idx_task_attachments_attachment ON task_attachments(attachment_id);
+  `);
+
+  // V6：Claude 计划状态快照表。TodoWrite（完整替换）与 TaskCreate/Update/List/Get（ID-keyed patch）
+  // 的按会话隔离快照。独立于手动排队 tasks 表，不复用其 schema。ON DELETE CASCADE 跟随会话删除。
+  // 无条件 CREATE TABLE IF NOT EXISTS（不放进 currentVersion<1 初始块），保证老库升级也能拿到新表。
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS claude_plan_state (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      todos_json TEXT NOT NULL DEFAULT '[]',
+      tasks_json TEXT NOT NULL DEFAULT '[]',
+      revision INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   const upsertVersion = versionRow

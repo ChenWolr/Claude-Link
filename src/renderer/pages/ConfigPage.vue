@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref, computed, watch } from 'vue';
+import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config-store';
 import ApiKeyInput from '../components/config/ApiKeyInput.vue';
@@ -27,7 +27,7 @@ const activeTab = ref<TabId>('connection');
 // cliPath/cliVersion/workingDirectory 由系统维护（自动检测/未开放编辑），不纳入快照。
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
-  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale', 'contextWindowByAlias',
+  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale', 'contextWindowByAlias', 'defaultThinkingLevel',
 ] as const;
 
 const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -73,6 +73,17 @@ async function performInit() {
 }
 
 onMounted(performInit);
+
+// 切页卸载时立即落盘 pending 的自动保存：原 700ms 防抖期间若用户填完即切走（去会话发消息），
+// pending 保存不保证在发消息前执行，导致"填了没生效、需手动点保存"。卸载时强制 flush 修复此时序缺陷。
+onBeforeUnmount(() => {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    lastSavedSnapshot = configSnapshot();
+    void store.saveConfig();
+  }
+});
 
 // 监听高级 JSON 文本框：粘贴 Claude Code settings.json 后自动回填字段（防抖 600ms）。
 // applyExtractedSettings 只在 JSON 含对应字段时覆盖，空字段不会清掉用户手填的值。
@@ -251,6 +262,12 @@ function handleFontScaleChange(e: Event) {
   store.config.fontScale = scale as typeof store.config.fontScale;
   applyFontScale(scale);
 }
+
+// 默认思考强度：写 config.defaultThinkingLevel，走 PERSISTED_FIELDS 自动保存（700ms 防抖）。
+function handleThinkingLevelChange(e: Event) {
+  const level = (e.target as HTMLSelectElement).value;
+  store.config.defaultThinkingLevel = level as typeof store.config.defaultThinkingLevel;
+}
 </script>
 
 <template>
@@ -343,7 +360,7 @@ function handleFontScaleChange(e: Event) {
         </div>
       </div>
 
-      <!-- 行为：轮次 / 队列间隔（权限模式已移至会话内调整）-->
+      <!-- 行为：轮次 / 队列间隔 / 默认思考强度（权限模式已移至会话内调整）-->
       <div v-show="activeTab === 'behavior'" class="section">
         <h3 class="section-title">行为</h3>
         <label class="field">
@@ -353,6 +370,17 @@ function handleFontScaleChange(e: Event) {
         <label class="field">
           <span>队列任务间隔（秒） <small class="field-hint">Claude Link 自身功能：任务队列里两条任务之间的等待时间。<strong>非</strong> Claude Code 配置。</small></span>
           <input v-model.number="store.config.taskDelaySeconds" type="number" min="0" />
+        </label>
+        <label class="field">
+          <span>默认思考强度 <small class="field-hint">新会话与未单独设档的会话回落到此值。低=快速响应、高=深入分析、超高/极限=最强推理；「工作流」档为 xhigh + 动态工作流编排（Beta，成本最高）。也可在<strong>会话内</strong>按需单独调整。</small></span>
+          <select :value="store.config.defaultThinkingLevel" @change="handleThinkingLevelChange">
+            <option value="low">低（快速响应）</option>
+            <option value="medium">中（平衡，默认）</option>
+            <option value="high">高（深入分析）</option>
+            <option value="xhigh">超高（复杂推理）</option>
+            <option value="max">极限（最高强度，成本最高）</option>
+            <option value="ultracode">工作流（xhigh + 动态工作流，Beta）</option>
+          </select>
         </label>
         <p class="field-hint">权限模式（default / acceptEdits / plan / bypassPermissions）已改为在<strong>会话内</strong>按需调整，不再放在这里。</p>
       </div>

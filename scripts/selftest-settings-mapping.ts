@@ -23,6 +23,8 @@ import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } fr
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
 import { THEME_PALETTES, DEFAULT_THEME_PALETTE_ID } from '../src/shared/constants';
+import { resolveThinkingConfig, resolveEffectiveThinkingLevel } from '../src/shared/thinking-resolver';
+import { THINKING_LEVELS, isValidThinkingLevel } from '../src/shared/types/thinking';
 
 let pass = 0;
 let fail = 0;
@@ -1178,6 +1180,308 @@ console.log('\n=== 45) 附件 IPC + preload 桥（Task 3）：通道/方法/Chat
   check('只取 basename 不泄露完整路径', /path\.basename\(filePath\)/.test(handlers));
   check('据魔数探测真实图片格式', handlers.includes('detectDirectImageFormat(bytes)'));
   check('preview/remove 作用于受控附件', handlers.includes('getAttachmentPreview(request)') && handlers.includes('removeDraftAttachment(sessionId, attachmentId)'));
+}
+
+console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：类型/repo/IPC/store/UI 契约 ===');
+{
+  const plan = readRel('src/shared/types/claude-plan.ts');
+  const repo = readRel('src/main/database/repositories/claude-plan-repo.ts');
+  const cli = readRel('src/shared/types/cli.ts');
+  const ipc = readRel('src/shared/types/ipc.ts');
+  const api = readRel('src/preload/api.ts');
+  const handlers = readRel('src/main/ipc-handlers.ts');
+  const backend = readRel('src/main/modules/sdk-backend.ts');
+  const store = readRel('src/renderer/stores/claude-plan-store.ts');
+  const useChat = readRel('src/renderer/composables/use-chat.ts');
+  const sessionStore = readRel('src/renderer/stores/session-store.ts');
+  const tqPanel = readRel('src/renderer/components/task/TaskQueuePanel.vue');
+  const planCard = readRel('src/renderer/components/task/ClaudePlanCard.vue');
+  const chatPage = readRel('src/renderer/pages/ChatPage.vue');
+  const migrations = readRel('src/main/database/migrations.ts');
+
+  // 类型定义
+  check('claude-plan.ts 定义 ClaudePlanState', plan.includes('ClaudePlanState'));
+  check('claude-plan.ts 定义 ClaudeTodoItem', plan.includes('ClaudeTodoItem'));
+  check('claude-plan.ts 定义 ClaudePlanTask', plan.includes('ClaudePlanTask'));
+  check('claude-plan.ts 定义 ClaudePlanEvent', plan.includes('ClaudePlanEvent'));
+  check('claude-plan.ts 纯解析 parseTodoWriteInput', plan.includes('export function parseTodoWriteInput'));
+  check('claude-plan.ts 纯解析 parseTaskCreateOutput', plan.includes('export function parseTaskCreateOutput'));
+  check('claude-plan.ts 纯解析 parseTaskUpdateInput', plan.includes('export function parseTaskUpdateInput'));
+  check('claude-plan.ts 纯解析 parseTaskListOutput', plan.includes('export function parseTaskListOutput'));
+  check('claude-plan.ts task_updated 解析 parseTaskUpdatedPatch', plan.includes('export function parseTaskUpdatedPatch'));
+  check('claude-plan.ts 纯 reducer applyPlanEvent', plan.includes('export function applyPlanEvent'));
+  check('claude-plan.ts 纯 reducer createEmptyPlanState', plan.includes('export function createEmptyPlanState'));
+  // F7: add/merge 语义类型
+  check('claude-plan.ts 定义 ClaudePlanTaskPatch（F7）', plan.includes('ClaudePlanTaskPatch'));
+  check('claude-plan.ts 定义 TaskListEntry（F4）', plan.includes('TaskListEntry'));
+  check('claude-plan.ts 有 applyTaskPatch helper（F7 add/merge）', plan.includes('export function applyTaskPatch'));
+  check('claude-plan.ts tasks_merge 操作（替代 tasks_replace）', plan.includes("operation: 'tasks_merge'"));
+  check('claude-plan.ts 无 tasks_replace 操作（已移除）', !plan.includes("operation: 'tasks_replace'"));
+
+  // CLI 事件类型
+  check('cli.ts 有 ClaudePlanCliEvent', cli.includes('ClaudePlanCliEvent'));
+  check('cli.ts ClaudePlanCliEvent 在 CliEvent 联合中', cli.includes('| ClaudePlanCliEvent'));
+
+  // DB migration + repo
+  check('migrations.ts 有 claude_plan_state 表', migrations.includes('claude_plan_state'));
+  check('migrations.ts 版本升为 7', migrations.includes('CURRENT_SCHEMA_VERSION = 7'));
+  check('claude-plan-repo.ts 有 getPlanState', repo.includes('export function getPlanState'));
+  check('claude-plan-repo.ts 有 replaceTodos', repo.includes('export function replaceTodos'));
+  check('claude-plan-repo.ts 有 upsertTask', repo.includes('export function upsertTask'));
+  check('claude-plan-repo.ts 有 patchTask', repo.includes('export function patchTask'));
+  check('claude-plan-repo.ts 有 mergeTasks（F4 替代 replaceTasks）', repo.includes('export function mergeTasks'));
+  check('claude-plan-repo.ts 有 upsertPatch（F5 TaskGet 用）', repo.includes('export function upsertPatch'));
+  check('claude-plan-repo.ts 无 replaceTasks（已移除）', !repo.includes('export function replaceTasks'));
+  check('claude-plan-repo.ts 有 removeTask', repo.includes('export function removeTask'));
+
+  // IPC 通道 + preload + handler
+  check('ipc.ts 有 CLAUDE_PLAN_GET 通道', ipc.includes('CLAUDE_PLAN_GET'));
+  check('preload api 有 getClaudePlanState', api.includes('getClaudePlanState'));
+  check('ipc-handlers 有 CLAUDE_PLAN_GET handler', handlers.includes('CLAUDE_PLAN_GET'));
+  check('ipc-handlers import claude-plan-repo', handlers.includes('claude-plan-repo'));
+
+  // sdk-backend 接入
+  check('sdk-backend import claude-plan 解析函数', backend.includes('parseTodoWriteInput'));
+  check('sdk-backend import claude-plan-repo', backend.includes('claudePlanRepo'));
+  check('sdk-backend import ClaudePlanTaskPatch（F7）', backend.includes('ClaudePlanTaskPatch'));
+  check('sdk-backend 有 processAssistantToolUseForPlan', backend.includes('function processAssistantToolUseForPlan'));
+  check('sdk-backend 有 processToolResultForPlan', backend.includes('function processToolResultForPlan'));
+  check('sdk-backend 有 processTaskUpdatedForPlan', backend.includes('function processTaskUpdatedForPlan'));
+  check('sdk-backend 有 forwardClaudePlanState', backend.includes('function forwardClaudePlanState'));
+  check('sdk-backend task_updated 在 dispatch 中处理', backend.includes("subtype === 'task_updated'"));
+  // F9: parentToolUseId 隔离子 Agent
+  check('sdk-backend processAssistantToolUseForPlan 接收 parentToolUseId（F9）', backend.includes('parentToolUseId?: string'));
+  check('sdk-backend assistant 调 processAssistantToolUseForPlan 传 parentToolUseId', backend.includes('processAssistantToolUseForPlan(sessionId, mainWindow, cliEvent.content, cliEvent.parentToolUseId)'));
+  // F1: tool_use_result 结构化结果
+  check('sdk-backend 有 extractStructuredResult（F1）', backend.includes('function extractStructuredResult'));
+  check('sdk-backend user 调 processToolResultForPlan 传 toolUseResult', backend.includes('processToolResultForPlan(sessionId, mainWindow, resultParts, sdkMsg.tool_use_result)'));
+  // F8: orphan patch 缓存
+  check('sdk-backend 有 sessionOrphanPatches（F8）', backend.includes('sessionOrphanPatches'));
+  check('sdk-backend 有 replayOrphanPatches（F8）', backend.includes('function replayOrphanPatches'));
+  // F2: TaskUpdate 推迟到 result 阶段
+  check('sdk-backend processAssistantToolUseForPlan 注释 TaskUpdate 推迟', backend.includes('result 阶段在 processToolResultForPlan 中处理'));
+  // F6: patch 非空即转发
+  check('sdk-backend patch 转发门禁用 Object.keys（F6）', backend.includes('Object.keys(patch).length'));
+  // F13: TodoWrite 幂等标记
+  check('sdk-backend cache entry 有 applied 标记（F13）', backend.includes('applied'));
+  // F15: markSessionDeleted 清理 toolUseCache
+  check('sdk-backend markSessionDeleted 清理 toolUseCache', backend.includes('cleanupToolUseCache(sessionId)'));
+
+  // renderer store
+  check('claude-plan-store.ts 有 planBySession', store.includes('planBySession'));
+  check('claude-plan-store.ts 有 loadPlan', store.includes('async loadPlan'));
+  check('claude-plan-store.ts 有 applyPlanState', store.includes('applyPlanState'));
+  check('claude-plan-store.ts 有 clearSession', store.includes('clearSession'));
+  check('claude-plan-store.ts 有 activePlan getter', store.includes('activePlan'));
+  check('claude-plan-store.ts 有 revision 保护', store.includes('state.revision < existing.revision'));
+
+  // use-chat 接入
+  check('use-chat import useClaudePlanStore', useChat.includes('useClaudePlanStore'));
+  check('use-chat handleCliEvent 有 claude_plan 分支', useChat.includes("case 'claude_plan'"));
+  check('use-chat handleBackgroundEvent 有 claude_plan 分支', useChat.includes('applyPlanState(sid, event.state)'));
+
+  // session-store 接入
+  check('session-store rightTab 包含 plan', sessionStore.includes("'plan'"));
+  check('session-store deleteSession 调 planStore.clearSession', sessionStore.includes('clearSession(id)'));
+  check('session-store setRightTab 包含 plan', sessionStore.includes("'plan'") && sessionStore.includes('setRightTab'));
+  // F11: deleteSession 回滚恢复 plan store
+  check('session-store deleteSession 保存 prevPlan（F11）', sessionStore.includes('prevPlan'));
+  check('session-store deleteSession catch 恢复 planBySession（F11）', sessionStore.includes('planStore.planBySession[id] = prevPlan'));
+
+  // ChatPage 接入
+  check('ChatPage import useClaudePlanStore', chatPage.includes('useClaudePlanStore'));
+  check('ChatPage onMounted 调 loadPlan', chatPage.includes('planStore.loadPlan'));
+
+  // TaskQueuePanel 接入
+  check('TaskQueuePanel RightFilter 包含 plan', tqPanel.includes("'plan'"));
+  check('TaskQueuePanel 有 ClaudePlanCard 组件', tqPanel.includes('ClaudePlanCard'));
+  check('TaskQueuePanel rail 有 plan 按钮', tqPanel.includes("setFilter('plan')"));
+  check('TaskQueuePanel 有 planMetric', tqPanel.includes('planMetric'));
+  check('TaskQueuePanel 有 plan section', tqPanel.includes("rightTab === 'plan'"));
+  // F10: 计划完成指标包含 task 完成
+  check('TaskQueuePanel 有 planTaskCompleted（F10）', tqPanel.includes('planTaskCompleted'));
+  check('TaskQueuePanel 有 planDone 合并指标（F10）', tqPanel.includes('planDone'));
+
+  // ClaudePlanCard 只读 + 删除线
+  check('ClaudePlanCard 存在', planCard.length > 0);
+  check('ClaudePlanCard 只读无 checkbox', !planCard.includes('type="checkbox"'));
+  check('ClaudePlanCard 无 v-html', !planCard.includes('v-html'));
+  check('ClaudePlanCard 完成项删除线限 text span', planCard.includes('text--done') && planCard.includes('text-decoration: line-through'));
+  check('ClaudePlanCard 无 emoji 作结构图标', !planCard.includes('📋') && !planCard.includes('✓'));
+  // F3: 设计 token 合规（无废弃 token，用真实 variables.css token）
+  check('ClaudePlanCard 无 --color-text-secondary（F3）', !planCard.includes('--color-text-secondary'));
+  check('ClaudePlanCard 无 --color-text-tertiary（F3）', !planCard.includes('--color-text-tertiary'));
+  check('ClaudePlanCard 无 --color-hover（F3）', !planCard.includes('--color-hover'));
+  check('ClaudePlanCard 无 --color-bg-secondary（F3）', !planCard.includes('--color-bg-secondary'));
+  check('ClaudePlanCard 无 --color-accent-bg（F3）', !planCard.includes('--color-accent-bg'));
+  check('ClaudePlanCard 无 --color-warning（F3）', !planCard.includes('--color-warning'));
+  check('ClaudePlanCard 用 --color-text-muted（F3）', planCard.includes('--color-text-muted'));
+  check('ClaudePlanCard 用 --color-panel-soft 或 color-mix（F3）', planCard.includes('--color-panel-soft') || planCard.includes('color-mix'));
+}
+
+console.log('\n=== 47) 思考强度映射：ThinkingLevel → thinking/effort/settingsPatch ===');
+{
+  // 类型 + 校验
+  check('THINKING_LEVELS 含七档（auto/low/medium/high/xhigh/max/ultracode）',
+    THINKING_LEVELS.length === 7 &&
+    ['auto', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'].every((l) => THINKING_LEVELS.includes(l as never)));
+  check('isValidThinkingLevel("ultracode")=true', isValidThinkingLevel('ultracode') === true);
+  check('isValidThinkingLevel("max")=true', isValidThinkingLevel('max') === true);
+  check('isValidThinkingLevel("invalid")=false', isValidThinkingLevel('invalid') === false);
+  check('isValidThinkingLevel(undefined)=false', isValidThinkingLevel(undefined) === false);
+  check('isValidThinkingLevel(null)=false', isValidThinkingLevel(null) === false);
+
+  // resolveEffectiveThinkingLevel：null/auto 回落全局默认，否则用会话档
+  check('resolveEffective(null,"high")="high"', resolveEffectiveThinkingLevel(null, 'high') === 'high');
+  check('resolveEffective("auto","high")="high"', resolveEffectiveThinkingLevel('auto', 'high') === 'high');
+  check('resolveEffective("low","high")="low"', resolveEffectiveThinkingLevel('low', 'high') === 'low');
+  check('resolveEffective("ultracode","medium")="ultracode"', resolveEffectiveThinkingLevel('ultracode', 'medium') === 'ultracode');
+
+  // resolveThinkingConfig：thinking 一律 adaptive+summarized
+  const low = resolveThinkingConfig('low');
+  check('low thinking adaptive summarized', low.thinking.type === 'adaptive' && low.thinking.display === 'summarized');
+  check('low effort=low', low.effort === 'low');
+  check('low settingsPatch 关闭关键字触发器', low.settingsPatch?.workflowKeywordTriggerEnabled === false);
+  check('low settingsPatch 开思考摘要', low.settingsPatch?.showThinkingSummaries === true);
+  check('low settingsPatch 常驻思考', low.settingsPatch?.alwaysThinkingEnabled === true);
+
+  // medium：只关关键字触发器，不投影思考字段（尊重 ~/.claude）
+  const med = resolveThinkingConfig('medium');
+  check('medium effort=medium', med.effort === 'medium');
+  check('medium settingsPatch 关关键字触发器', med.settingsPatch?.workflowKeywordTriggerEnabled === false);
+  check('medium settingsPatch 不投影 showThinkingSummaries', med.settingsPatch?.showThinkingSummaries === undefined);
+  check('medium settingsPatch 不投影 alwaysThinkingEnabled', med.settingsPatch?.alwaysThinkingEnabled === undefined);
+
+  // high/xhigh/max：通用 baseSettings
+  check('high effort=high', resolveThinkingConfig('high').effort === 'high');
+  check('xhigh effort=xhigh', resolveThinkingConfig('xhigh').effort === 'xhigh');
+  check('max effort=max（运行时补偿；settings.effortLevel 降级 xhigh 由投影层处理）', resolveThinkingConfig('max').effort === 'max');
+  check('high settingsPatch 关关键字触发器', resolveThinkingConfig('high').settingsPatch?.workflowKeywordTriggerEnabled === false);
+
+  // ultracode：effort 锁死 xhigh（非 max），投影 ultracode/enableWorkflows，保留关键字触发器
+  const ultra = resolveThinkingConfig('ultracode');
+  check('ultracode effort=xhigh（非 max）', ultra.effort === 'xhigh');
+  check('ultracode settingsPatch.ultracode=true', ultra.settingsPatch?.ultracode === true);
+  check('ultracode settingsPatch.enableWorkflows=true', ultra.settingsPatch?.enableWorkflows === true);
+  check('ultracode settingsPatch.alwaysThinkingEnabled=true', ultra.settingsPatch?.alwaysThinkingEnabled === true);
+  check('ultracode settingsPatch.showThinkingSummaries=true', ultra.settingsPatch?.showThinkingSummaries === true);
+  check('ultracode 保留关键字触发器（未显式关闭）', ultra.settingsPatch?.workflowKeywordTriggerEnabled === undefined);
+
+  // 类型层落位（Task 1 同步改动）
+  const configType = readRel('src/shared/types/config.ts');
+  const sessionType = readRel('src/shared/types/session.ts');
+  check('AppConfig 有 defaultThinkingLevel 字段', configType.includes('defaultThinkingLevel:'));
+  check('Session 有 thinkingLevel 字段', sessionType.includes('thinkingLevel:'));
+}
+
+console.log('\n=== 48) 思考强度接线：持久化层 + 注入层 + IPC 通道契约 ===');
+{
+  const migrations = readRel('src/main/database/migrations.ts');
+  const repo = readRel('src/main/database/repositories/session-repo.ts');
+  const api = readRel('src/preload/api.ts');
+  const handlers = readRel('src/main/ipc-handlers.ts');
+  const cliShared = readRel('src/main/modules/cli-shared.ts');
+  const sdkBackend = readRel('src/main/modules/sdk-backend.ts');
+  const taskQueue = readRel('src/main/modules/task-queue-engine.ts');
+  const configManager = readRel('src/main/modules/config-manager.ts');
+  const projection = readRel('src/main/modules/claude-settings-projection.ts');
+
+  // 持久化层（Task 4）
+  check('migrations.ts schema 版本升为 7', migrations.includes('CURRENT_SCHEMA_VERSION = 7'));
+  check('migrations.ts 补 thinking_level 列', migrations.includes("ADD COLUMN thinking_level TEXT DEFAULT NULL"));
+  check('session-repo.ts SessionRow 有 thinking_level', repo.includes('thinking_level: string | null'));
+  check('session-repo.ts toSession 映射 thinkingLevel（脏值兜底）', repo.includes('isValidThinkingLevel(row.thinking_level)'));
+  check('session-repo.ts updateSession 类型联合含 thinkingLevel', repo.includes("'maxTurns' | 'thinkingLevel'"));
+  check('session-repo.ts updateSession SQL 分支 thinking_level', repo.includes("'thinking_level = @thinkingLevel'"));
+
+  // IPC 通道（Task 4）
+  check('preload api.ts updateSession 类型联合含 thinkingLevel', api.includes("'maxTurns' | 'thinkingLevel'"));
+  check('ipc-handlers SESSION_UPDATE 类型联合含 thinkingLevel', handlers.includes("'maxTurns' | 'thinkingLevel'"));
+  check('ipc-handlers SESSION_UPDATE 白名单校验 isValidThinkingLevel', handlers.includes('isValidThinkingLevel(data.thinkingLevel)'));
+  check('ipc-handlers 非法 thinkingLevel 丢弃', handlers.includes('delete data.thinkingLevel'));
+
+  // 注入层（Task 3）
+  check('cli-shared SpawnOptions 有 thinkingLevel', cliShared.includes('thinkingLevel?: ThinkingLevel | null'));
+  check('cli-shared buildSpawnEnv 注入 CLAUDE_EFFORT（best-effort）', cliShared.includes('env.CLAUDE_EFFORT'));
+  check('sdk-backend import resolveThinkingConfig', sdkBackend.includes('resolveThinkingConfig'));
+  check('sdk-backend import resolveEffectiveThinkingLevel', sdkBackend.includes('resolveEffectiveThinkingLevel'));
+  check('sdk-backend 用 thinkingConfig.thinking（替换硬编码）', sdkBackend.includes('thinking: thinkingConfig.thinking'));
+  check('sdk-backend 运行时注入 options.effort', sdkBackend.includes('options.effort = thinkingConfig.effort'));
+  check('sdk-backend settingsPatch Object.assign 覆盖全局投影', sdkBackend.includes('Object.assign(options.settings as Record<string, unknown>, thinkingConfig.settingsPatch)'));
+  check('task-queue spawnForTask 传 thinkingLevel', taskQueue.includes('thinkingLevel: session?.thinkingLevel ?? null'));
+  check('task-queue spawnForChat(续接) 传 thinkingLevel', taskQueue.includes('thinkingLevel: session.thinkingLevel'));
+  check('ipc-handlers CHAT_SEND spawnForChat 传 thinkingLevel', handlers.includes('thinkingLevel: session.thinkingLevel'));
+
+  // 配置层 + 投影（Task 2）
+  check('config-manager defaultConfig 默认 medium', configManager.includes("defaultThinkingLevel: 'medium'"));
+  check('config-manager getConfig 脏值清洗', configManager.includes('isValidThinkingLevel(rawThinkingLevel)'));
+  check('claude-settings-projection import resolveThinkingConfig', projection.includes('resolveThinkingConfig'));
+  check('projection selector > advancedJson（Object.assign）', projection.includes('Object.assign(projection, result.settingsPatch)'));
+  check('projection max 降级 xhigh 持久化', projection.includes("result.effort === 'max' ? 'xhigh'"));
+}
+
+console.log('\n=== 49) 思考强度 UI 层：ThinkingLevelSelector + session-store action + 挂载契约 ===');
+{
+  const selector = readRel('src/renderer/components/chat/ThinkingLevelSelector.vue');
+  const sessionStore = readRel('src/renderer/stores/session-store.ts');
+  const toolbar = readRel('src/renderer/components/chat/SessionToolbar.vue');
+  const configPage = readRel('src/renderer/pages/ConfigPage.vue');
+
+  // ThinkingLevelSelector 组件（Task 5）
+  check('ThinkingLevelSelector 调 setActiveSessionThinkingLevel', selector.includes('setActiveSessionThinkingLevel'));
+  check('ThinkingLevelSelector 含七档（含 auto/ultracode）', selector.includes("'auto'") && selector.includes("'ultracode'"));
+  check('ThinkingLevelSelector ultracode 标 danger', selector.includes('danger: true'));
+  check('ThinkingLevelSelector click outside 关闭', selector.includes('handleClickOutside'));
+  check('ThinkingLevelSelector Escape 关闭', selector.includes('handleEscape'));
+  check('ThinkingLevelSelector 向上展开（bottom: calc(100%）', selector.includes('bottom: calc(100% + 0.25rem)'));
+  check('ThinkingLevelSelector 选中勾号', selector.includes('CHECK_PATH') || selector.includes('tl-item__check'));
+
+  // session-store action（Task 5）
+  check('session-store 有 setActiveSessionThinkingLevel action', sessionStore.includes('async setActiveSessionThinkingLevel'));
+  check('session-store import ThinkingLevel 类型', sessionStore.includes("import type { ThinkingLevel }"));
+
+  // SessionToolbar 挂载（Task 5）
+  check('SessionToolbar import ThinkingLevelSelector', toolbar.includes('ThinkingLevelSelector.vue'));
+  check('SessionToolbar 挂载 <ThinkingLevelSelector', toolbar.includes('<ThinkingLevelSelector'));
+
+  // ConfigPage 全局默认选择器（Task 2）
+  check('ConfigPage PERSISTED_FIELDS 含 defaultThinkingLevel', configPage.includes("'defaultThinkingLevel'"));
+  check('ConfigPage 有 handleThinkingLevelChange', configPage.includes('handleThinkingLevelChange'));
+  check('ConfigPage 行为 tab 有默认思考强度选择器', configPage.includes('默认思考强度'));
+}
+
+console.log('\n=== 50) 批次 B：thinking_tokens 实时思考 token 估算链路契约 ===');
+{
+  const cli = readRel('src/shared/types/cli.ts');
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  const store = readRel('src/renderer/stores/session-store.ts');
+  const useChat = readRel('src/renderer/composables/use-chat.ts');
+  const ctx = readRel('src/renderer/components/chat/ContextButton.vue');
+
+  // 类型（B-1）
+  check('cli.ts CliSystemInfoEvent subtype 含 thinking_tokens', cli.includes("'thinking_tokens'"));
+  check('cli.ts CliSystemInfoEvent 有 estimatedTokens 字段', cli.includes('estimatedTokens?: number'));
+
+  // 主进程：分支 + 节流 + 清理（B-2）
+  check('sdk-backend 有 thinking_tokens 分支', sb.includes("subtype === 'thinking_tokens'"));
+  check('sdk-backend 有 shouldForwardThinkingTokens 节流', sb.includes('function shouldForwardThinkingTokens'));
+  check('sdk-backend 有 THINKING_TOKENS_THROTTLE_MS 限频常量', sb.includes('THINKING_TOKENS_THROTTLE_MS'));
+  check('sdk-backend thinking_tokens 走 forwardTransient（不落库）', sb.includes("subtype: 'thinking_tokens'") && sb.includes('estimatedTokens: estimated'));
+  check('sdk-backend markSessionDeleted 清理节流状态', sb.includes('sessionThinkingTokenThrottle.delete(sessionId)'));
+
+  // store（B-3）
+  check('session-store 有 thinkingTokens 瞬态字段', store.includes('thinkingTokens: null as number | null'));
+  check('session-store 有 setThinkingTokens action', store.includes('setThinkingTokens(v: number | null)'));
+  check('session-store switchSession 复位 thinkingTokens', store.includes('this.thinkingTokens = null'));
+
+  // use-chat（B-4）
+  check('use-chat 处理 thinking_tokens → setThinkingTokens', useChat.includes("event.subtype === 'thinking_tokens'") && useChat.includes('store.setThinkingTokens(t.estimatedTokens)'));
+  check('use-chat 回合结束清零 setThinkingTokens(null)', useChat.includes('store.setThinkingTokens(null)'));
+
+  // ContextButton（B-5）：保留思考态呼吸提示，但按用户要求移除 hover 数值行
+  check('ContextButton 思考态 class ctx__btn--thinking', ctx.includes('ctx__btn--thinking'));
+  check('ContextButton 思考态呼吸读 store.thinkingTokens', ctx.includes('store.thinkingTokens'));
+  check('ContextButton 已移除 hover 思考 token 数值行', !ctx.includes('（估算）'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

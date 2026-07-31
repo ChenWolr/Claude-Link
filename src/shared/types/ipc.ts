@@ -1,4 +1,5 @@
 import type { CliEvent, CliDetectionResult } from './cli';
+import type { AttachmentSummary } from './attachment';
 
 export const IPC_CHANNELS = {
   CLI_DETECT: 'cli:detect',
@@ -29,8 +30,6 @@ export const IPC_CHANNELS = {
   CHAT_SEND: 'chat:send',
   CHAT_ABORT: 'chat:abort',
   CHAT_EVENT: 'chat:event',
-  PERMISSION_REQUEST: 'permission:request',
-  PERMISSION_RESPOND: 'permission:respond',
   INTERACTION_REQUEST: 'interaction:request',
   INTERACTION_RESPOND: 'interaction:respond',
   INTERACTION_CANCEL: 'interaction:cancel',
@@ -46,18 +45,23 @@ export const IPC_CHANNELS = {
   TASK_GET_ALL: 'task:getAll',
   TASK_REORDER: 'task:reorder',
   TASK_INTERRUPT: 'task:interrupt',
+  TASK_RETRY: 'task:retry',
   QUEUE_START: 'queue:start',
   QUEUE_PAUSE: 'queue:pause',
   QUEUE_RESUME: 'queue:resume',
   QUEUE_GET_STATE: 'queue:getState',
   QUEUE_EVENT: 'queue:event',
   QUEUE_USER_MESSAGE: 'queue:userMessage',
+  // Claude 计划快照：按会话读取 TodoWrite / Task 工具的计划状态。
+  CLAUDE_PLAN_GET: 'claude-plan:get',
   // 附件：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
   // 统一发送载荷 ChatSendPayload 经 CHAT_SEND / TASK_ADD / QUEUE_USER_MESSAGE 透传，不另设通道。
   ATTACHMENT_PICK: 'attachment:pick',
   ATTACHMENT_STAGE_BYTES: 'attachment:stageBytes',
   ATTACHMENT_PREVIEW: 'attachment:preview',
   ATTACHMENT_REMOVE_DRAFT: 'attachment:removeDraft',
+  // 克隆历史消息附件为草稿（异步发送失败后重新编辑用）。
+  ATTACHMENT_CLONE_MESSAGE: 'attachment:cloneMessage',
   // 会话导出 JPEG 长图（v3）。可见 renderer ↔ 主进程 ↔ 隐藏 export renderer。
   EXPORT_IMAGE_START: 'export-image:start',
   EXPORT_IMAGE_PROGRESS: 'export-image:progress',
@@ -91,34 +95,15 @@ export interface AttachmentPreviewRequest {
   thumbnail: boolean;
 }
 
+/** 文件选择结果：逐项返回成功摘要与失败原因（部分成功不丢错误，便于 UI 集中提示）。 */
+export interface PickAttachmentsResult {
+  attachments: AttachmentSummary[];
+  errors: Array<{ filename: string; message: string }>;
+}
+
 export interface ChatEventPayload {
   sessionId: string;
   event: CliEvent;
-}
-
-export interface PermissionOption {
-  id: string;
-  label: string;
-  description?: string;
-  primary?: boolean;
-  danger?: boolean;
-}
-
-export interface PermissionRequestPayload {
-  id: string;
-  sessionId: string;
-  toolName: string;
-  toolUseId: string;
-  title: string;
-  description?: string;
-  input: Record<string, unknown>;
-  options: PermissionOption[];
-  suggestions?: unknown[];
-}
-
-export interface PermissionResponsePayload {
-  id: string;
-  optionId: string;
 }
 
 export type InteractionPromptKind = 'permission' | 'single-choice' | 'multi-choice' | 'text' | 'long-text' | 'form' | 'confirm';
@@ -203,6 +188,11 @@ export interface InteractionPromptPayload {
 export interface InteractionPromptResponsePayload {
   id: string;
   action: 'submit' | 'cancel';
+  // cancel 的来源：'user' = 用户主动拒绝（Esc/拒绝按钮）；'abort' = 系统取消（signal abort/窗口关闭/会话删除/IPC 失败）。
+  // permission 映射据此区分——系统取消不能记成「用户拒绝该工具」喂给模型，否则模型在 resume 时读到该
+  // tool_result(is_error) 会认定用户拒绝过该工具，本会话后续不再调用（并发误 deny 根因，见 plan-v1 §2-3）。
+  // 缺省按 'abort'（中性）处理：宁可不指控用户，也不把非用户意图错记为用户拒绝。
+  reason?: 'user' | 'abort';
   selectedOptionIds?: string[];
   questionAnswers?: Record<string, { selectedOptionIds?: string[]; otherText?: string }>;
   fieldValues?: Record<string, string | boolean>;
@@ -252,6 +242,7 @@ export type QueueEventType =
   | 'countdown_tick'
   | 'countdown_cancelled'
   | 'task_continuing'
+  | 'user_message_created'
   | 'queue_paused'
   | 'queue_completed';
 

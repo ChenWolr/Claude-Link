@@ -41,6 +41,7 @@ const defaultConfig: AppConfig = {
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
   contextWindowByAlias: {},
+  defaultThinkingLevel: 'medium',
 };
 
 export const useConfigStore = defineStore('config', {

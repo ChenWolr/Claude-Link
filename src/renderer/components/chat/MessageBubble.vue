@@ -3,18 +3,27 @@ import { computed, ref } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
+import MessageAttachments from './MessageAttachments.vue';
 
 const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>();
 
 // 导出模式用 export profile：Mermaid 渲染、代码换行、图片 eager、无灯箱按钮化。
 const renderedContent = computed(() => renderMarkdown(props.message.content, props.exportMode ? 'export' : 'rich'));
+const hasContent = computed(() => props.message.content.trim().length > 0);
+const attachments = computed(() => props.message.attachments ?? []);
 
-// 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）
+// 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）。
+// 复制内容 = 正文 + 附件文件名列表；不含绝对路径/Base64/附件 ID。
 const copied = ref(false);
 async function copyMessage(): Promise<void> {
   const text = props.message.content;
-  if (!text) return;
-  await navigator.clipboard?.writeText(text);
+  const names = attachments.value.map((a) => a.filename);
+  const parts: string[] = [];
+  if (text.trim()) parts.push(text);
+  if (names.length > 0) parts.push(`[附件] ${names.join('、')}`);
+  const out = parts.join('\n');
+  if (!out.trim()) return;
+  await navigator.clipboard?.writeText(out);
   copied.value = true;
   window.setTimeout(() => {
     copied.value = false;
@@ -25,7 +34,8 @@ async function copyMessage(): Promise<void> {
 <template>
   <div :class="['bubble', `bubble--${message.role}`]">
     <div class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
-    <div class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
+    <div v-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
+    <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
     <div v-if="message.costUsd != null || message.durationMs" class="bubble__meta">
       <template v-if="message.costUsd != null">${{ message.costUsd.toFixed(4) }}</template>
       <template v-if="message.durationMs">{{ message.costUsd != null ? ' · ' : '' }}{{ (message.durationMs / 1000).toFixed(1) }}s</template>

@@ -47,7 +47,6 @@ const EDIT_TOOL_NAMES = new Set(['Edit', 'edit']);
 const MULTIEDIT_TOOL_NAMES = new Set(['MultiEdit', 'multiedit', 'multi_edit']);
 const WRITE_TOOL_NAMES = new Set(['Write', 'write']);
 // 入口过滤：与右侧改动面板的触碰集采集共用同一份工具名集合（src/shared/process-kind）。
-const TOOL_DIFF_NAMES = new Set(TOOL_DIFF_TOOL_NAMES);
 
 // 行级 LCS 的 DP 表单元数上限。经前缀/后缀裁剪后只对差异中段跑 DP，此上限仅兜底极端情况。
 const LCS_CELL_CAP = 200_000;
@@ -245,7 +244,7 @@ function buildTwoFilePatch(filePath: string, oldText: string, newText: string, c
 export function synthesizeToolDiff(toolName: string, input: unknown): ToolDiffResult | null {
   if (input == null || typeof input !== 'object') return null;
   const name = toolName.trim();
-  if (!TOOL_DIFF_NAMES.has(name)) return null;
+  if (!(TOOL_DIFF_TOOL_NAMES as readonly string[]).includes(name)) return null;
   const fields = input as EditLikeInput & MultiEditInput & WriteInput;
   const filePath = asString(fields.file_path);
 

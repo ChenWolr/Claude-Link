@@ -202,11 +202,16 @@ export function getAttachmentsByTaskIds(taskIds: string[]): Map<string, Attachme
 }
 
 /** 附件被消息/任务引用的总次数（决定物理文件是否可删）。 */
-export function getAttachmentReferenceCount(id: string): number {
+export function getAttachmentReferenceCounts(id: string): { message: number; task: number } {
   const db = getConnection();
-  const m = db.prepare('SELECT COUNT(*) AS n FROM message_attachments WHERE attachment_id = ?').get(id) as { n: number };
-  const t = db.prepare('SELECT COUNT(*) AS n FROM task_attachments WHERE attachment_id = ?').get(id) as { n: number };
-  return m.n + t.n;
+  const message = db.prepare('SELECT COUNT(*) AS n FROM message_attachments WHERE attachment_id = ?').get(id) as { n: number };
+  const task = db.prepare('SELECT COUNT(*) AS n FROM task_attachments WHERE attachment_id = ?').get(id) as { n: number };
+  return { message: message.n, task: task.n };
+}
+
+export function getAttachmentReferenceCount(id: string): number {
+  const counts = getAttachmentReferenceCounts(id);
+  return counts.message + counts.task;
 }
 
 /** 删除任务-附件关联，返回被解除的附件 ID（供 handler 按引用计数决定是否删文件）。 */

@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia';
 import type { Task, QueueState } from '../../shared/types/task';
+import type { Message } from '../../shared/types/session';
 import type { QueueEventPayload } from '../../shared/types/ipc';
 import type { ChatSendPayload } from '../../shared/types/attachment';
 import { useSessionStore } from './session-store';
@@ -18,18 +19,17 @@ export const useTaskStore = defineStore('task', {
         this.error = error instanceof Error ? error.message : '加载任务失败';
       }
     },
-    async addTask(sessionId: string, prompt: string) {
+    // Task 5：addTask 收 ChatSendPayload（附件草稿由 draftStore 提供）。
+    // 成功返回 true 并清旧错误；失败置 error 并返回 false（供调用方决定是否清草稿）。
+    async addTask(sessionId: string, payload: ChatSendPayload): Promise<boolean> {
       try {
-        // Task 3：发送统一为 ChatSendPayload。附件草稿在 Task 7 接入前恒为空。
-        const payload: ChatSendPayload = {
-          text: prompt.trim(),
-          attachmentIds: [],
-          clientMessageId: crypto.randomUUID(),
-        };
+        this.error = null;
         const task = await window.claudeLink.addTask(sessionId, payload);
         this.tasks.push(task);
+        return true;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '添加任务失败';
+        return false;
       }
     },
     async removeTask(taskId: string) {
@@ -76,17 +76,35 @@ export const useTaskStore = defineStore('task', {
         this.error = error instanceof Error ? error.message : '中断任务失败';
       }
     },
-    async queueUserMessage(sessionId: string, message: string) {
+    // Task 7B：重试 failed/cancelled 任务 → pending；本地同步清结果字段（附件 links + 稳定 ID 由主进程保留）。
+    async retryTask(taskId: string) {
       try {
-        // Task 3：续接统一为 ChatSendPayload。附件在 Task 7 接入前恒为空。
-        const payload: ChatSendPayload = {
-          text: message.trim(),
-          attachmentIds: [],
-          clientMessageId: crypto.randomUUID(),
-        };
+        this.error = null;
+        await window.claudeLink.retryTask(taskId);
+        const t = this.tasks.find((x) => x.id === taskId);
+        if (t) {
+          t.status = 'pending';
+          t.errorMessage = null;
+          t.result = null;
+          t.costUsd = null;
+          t.durationMs = null;
+          t.startedAt = null;
+          t.completedAt = null;
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '重试任务失败';
+      }
+    },
+    // Task 5：续接收 ChatSendPayload（附件草稿由 draftStore 提供）。
+    // 成功返回 true 并清旧错误；失败置 error 并返回 false。
+    async queueUserMessage(sessionId: string, payload: ChatSendPayload): Promise<boolean> {
+      try {
+        this.error = null;
         this.queueState = await window.claudeLink.queueUserMessage(sessionId, payload);
+        return true;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '继续任务失败';
+        return false;
       }
     },
     handleQueueEvent(payload: QueueEventPayload) {
@@ -122,6 +140,13 @@ export const useTaskStore = defineStore('task', {
         case 'task_continuing': {
           this.queueState.status = 'continuing';
           sessionStore.markRunning(payload.sessionId);
+          break;
+        }
+        case 'user_message_created': {
+          // Task 7B：task 执行/waiting 续接在主进程创建稳定 user message 后经此事件回传，
+          // 按 id upsert 进会话消息（不重复落 DB），让用户看到任务对应的提问气泡。
+          const msg = payload.data?.message as Message | undefined;
+          if (msg) sessionStore.addMessage(msg);
           break;
         }
         case 'queue_paused': {
