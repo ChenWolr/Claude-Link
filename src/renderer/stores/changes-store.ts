@@ -17,7 +17,6 @@ export const useChangesStore = defineStore('changes', () => {
   const loading = ref(false);
   const error = ref<string | null>(null);
   const baselineRef = ref('');
-  const expandedPath = ref<string | null>(null);
   const diffCache = ref<Record<string, ChangesDiffResult>>({});
 
   const changedCount = computed(() => files.value.length);
@@ -45,7 +44,7 @@ export const useChangesStore = defineStore('changes', () => {
     return arr;
   });
 
-  // 代际计数器：切会话时自增。refresh/toggleExpand 在发起 git 请求前抓当前值，
+  // 代际计数器：切会话时自增。refresh/ensureDiff 在发起 git 请求前抓当前值，
   // await 返回后若已变（期间切了会话）→ 丢弃结果，不把旧会话数据写进新会话状态。
   let sessionGen = 0;
 
@@ -55,7 +54,6 @@ export const useChangesStore = defineStore('changes', () => {
       files.value = [];
       error.value = '当前没有活动会话或工作目录';
       baselineRef.value = '';
-      expandedPath.value = null;
       diffCache.value = {};
       return;
     }
@@ -69,33 +67,18 @@ export const useChangesStore = defineStore('changes', () => {
         files.value = [];
         error.value = res.message;
         baselineRef.value = '';
-        expandedPath.value = null;
         diffCache.value = {};
       } else {
         files.value = res.files;
         baselineRef.value = res.baselineRef;
         error.value = null;
-        // 列表已变：丢弃已不在列表的旧 diff 缓存；保留当前展开项的旧值直到新结果到达，
-        // 避免刷新期间一闪「无可显示差异」。
+        // 列表已变：只保留仍在 files 列表里的 diff 缓存项（展开态改由 DiffDialog 自管，不再此处收尾）。
         const newPathSet = new Set(res.files.map((f) => f.path));
         const preserved: Record<string, ChangesDiffResult> = {};
-        if (expandedPath.value && diffCache.value[expandedPath.value]) {
-          preserved[expandedPath.value] = diffCache.value[expandedPath.value];
+        for (const [k, v] of Object.entries(diffCache.value)) {
+          if (newPathSet.has(k)) preserved[k] = v;
         }
         diffCache.value = preserved;
-        if (expandedPath.value && !newPathSet.has(expandedPath.value)) {
-          // 展开的文件已不在列表 → 收起。
-          expandedPath.value = null;
-          diffCache.value = {};
-        } else if (expandedPath.value) {
-          // 仍展开的文件 → 重新取它的 diff 并覆盖（旧值在新结果到达前继续显示）。
-          // 抓快照键 p：await 期间用户可能点了别的文件使 expandedPath 变化，
-          // 必须按「为谁取的」落键，否则会把 A 的 diff 写进 B 的键（持久错显）。
-          const p = expandedPath.value;
-          const r = await window.claudeLink.getChangeDiff(wd, p);
-          if (gen !== sessionGen) return; // 第二段 await 期间切会话 → 同样丢弃
-          diffCache.value = { ...diffCache.value, [p]: r };
-        }
       }
     } finally {
       // 仅最新一次 refresh 复位 loading，避免陈旧 refresh 提前清掉在途刷新的 spinner。
@@ -103,19 +86,16 @@ export const useChangesStore = defineStore('changes', () => {
     }
   }
 
-  async function toggleExpand(path: string): Promise<void> {
-    if (expandedPath.value === path) {
-      expandedPath.value = null;
-      return;
-    }
-    expandedPath.value = path;
-    if (diffCache.value[path]) return; // 已缓存直接用
+  // 取（并在缺失时按需拉取）某文件的 diff，带代际守卫：await 期间切会话则丢弃，不污染新会话缓存。
+  // DiffDialog 打开文件时调它按需填充缓存。
+  async function ensureDiff(p: string): Promise<void> {
+    if (diffCache.value[p]) return; // 已缓存直接用
     // 抓代际：await 期间若切会话，丢弃结果——否则旧会话 diff 会被写回新会话已清空的缓存。
     const gen = sessionGen;
     const wd = sessionStore.activeSession?.workingDir ?? null;
-    const res = await window.claudeLink.getChangeDiff(wd, path);
+    const res = await window.claudeLink.getChangeDiff(wd, p);
     if (gen !== sessionGen) return;
-    diffCache.value = { ...diffCache.value, [path]: res };
+    diffCache.value = { ...diffCache.value, [p]: res };
   }
 
   // 切会话 → 自增代际（作废所有在途请求）+ 清状态并重拉（workingDir 可能不同）。
@@ -130,7 +110,6 @@ export const useChangesStore = defineStore('changes', () => {
         clearTimeout(refreshTimer);
         refreshTimer = null;
       }
-      expandedPath.value = null;
       diffCache.value = {};
       void refresh();
     },
@@ -151,5 +130,5 @@ export const useChangesStore = defineStore('changes', () => {
     },
   );
 
-  return { files, loading, error, baselineRef, expandedPath, diffCache, changedCount, refresh, toggleExpand };
+  return { files, loading, error, baselineRef, diffCache, changedCount, refresh, ensureDiff };
 });

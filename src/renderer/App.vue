@@ -3,6 +3,7 @@ import { onMounted, onBeforeUnmount } from 'vue';
 import AppLayout from './components/layout/AppLayout.vue';
 import InteractionPrompt from './components/chat/InteractionPrompt.vue';
 import ImageLightbox from './components/chat/ImageLightbox.vue';
+import DiffDialog from './components/changes/DiffDialog.vue';
 import { useConfigStore } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useExportImageStore } from './stores/export-image-store';
@@ -57,5 +58,6 @@ onBeforeUnmount(() => {
     <router-view />
     <InteractionPrompt />
     <ImageLightbox />
+    <DiffDialog />
   </AppLayout>
 </template>
