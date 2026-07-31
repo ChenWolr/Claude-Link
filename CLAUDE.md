@@ -1,10 +1,20 @@
-# Claude Link 项目指令
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 > 本文件供 Claude Code CLI 在本仓库工作时读取。与 `AGENTS.md` 内容互补，后者面向 IDE agent。
 
+## 核心准则（必须遵守）
+
+1. **记忆写入需授权**：未经用户明确允许，一律禁止编辑 / 写入任何记忆文件（用户级或项目级）；仅在用户明确授权本次写入时才可写入或修改记忆。
+2. **缓存统一目录**：所有依赖下载、安装、构建中间产物、临时文件，如非必要一律生成在 `D:\software\Cache` 下（npm/pnpm 缓存、临时目录、打包中间产物等），不污染项目目录与系统盘。
+3. **沟通使用中文**：与用户的所有沟通必须使用中文。
+4. **禁止私自提交**：未经用户确认不得 `git commit` / `git push`；每次提交前说明范围并获确认。
+5. **提交按单一操作原子化拆分（接口隔离原则·铁训）**：代码获准提交后，每个 commit 只承载一种逻辑修改操作。先标注每处改动属于哪类操作（新增 / 修改 / 重构 / 修复 / 删除）；同一文件内若同时含多种性质改动（如「新增」+「修改既有逻辑」，或多个不相关问题点），必须用 `git add -p` 按 hunk 拆开、分多次提交，不得混入同一 commit。自检：一个 commit 能否用一句话、单一动词准确描述——需要“和”连接两件事时就该拆。
+
 ## 项目概览
 
-Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本地安装的 Claude Code CLI 的图形化前端。它**不直接调用 Anthropic API**，而是通过 Claude Agent SDK（默认）或 spawn `claude` CLI 子进程（回退）方式接入，注入配置（env + `.claude/settings.local.json`），解析 stream-json 输出并展示。
+Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本地安装的 Claude Code CLI 的图形化前端。它**不直接调用 Anthropic API**；所有生产聊天统一通过 **Claude Agent SDK** 接入，注入配置（env + `.claude/settings.local.json`）并解析流式事件。`child_process.spawn` 仅 `connection-tester.ts` 一次性连通性探测在用，不作为生产聊天入口。
 
 ## 前置条件
 
@@ -15,111 +25,129 @@ Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本�
 
 | 命令 | 说明 |
 |------|------|
-| `npm run dev` | 启动开发模式（热重载） |
-| `npm run typecheck` | 类型检查（`vue-tsc --noEmit`），**主要正确性门禁**；无 jest/vitest，无 `npm test` |
-| `npm run selftest` | 自测：`selftest-settings-mapping.ts && regression-tests.ts`（含 settings↔JSON 映射、模型别名解析、上下文用量、交互契约等） |
-| `npx tsx scripts/regression-tests.ts` | 回归测试（selftest 已串联，可单独跑） |
+| `npm run dev` | 启动开发模式（热重载，仅覆盖渲染层） |
+| `npm run typecheck` | 依次检查 node（`tsc`）和 web（`vue-tsc`）两个 TS project，**主要正确性门禁**；无 jest/vitest、无 `npm test` |
+| `npm run selftest` | 自测六段（`&&` 串联，全过才算过）：settings↔JSON 映射 / claude-plan / regression / stall-watchdog / export-image / PNG codec；本地 `tsx` 执行，不启动 Electron |
+| `npx tsx scripts/regression-tests.ts` | 最大那段回归，selftest 已串联，可单独跑 |
 | `npm run rebuild` | 重编译 `better-sqlite3` 原生 ABI；**拉代码后若启动报 `NODE_MODULE_VERSION` 错误必跑** |
 | `npm run build` / `npm run package:win` | 构建 / 打包 Windows 安装包 |
 
-**改完代码必须重启 Electron app 才生效**（dev 热重载只覆盖渲染层，主进程改动需重启）。
+> **改完主进程或 preload 必须重启 Electron app 才生效**（dev 热重载只覆盖渲染层）。
 
 ## 架构
 
-三进程 Electron 模型：
+三进程 Electron 模型 + 两个渲染入口：
 
 ```
-src/main/        主进程（Node）：CLI/SDK 接入、IPC handler、SQLite、配置存储
-src/preload/     contextBridge 暴露 window.claudeLink API（35+ 方法）
-src/renderer/    Vue 前端（Pinia stores、composables、pages、components）
-src/shared/      主进程与渲染进程共享的类型与纯逻辑（settings-parser、context-usage、types）
+src/main/        主进程（Node，CJS bundle）：SDK 接入、IPC handler、SQLite、配置存储、导出引擎
+src/preload/     contextBridge：主窗口暴露 window.claudeLink（~60 方法），隐藏导出窗口暴露 window.exportLink（~9 方法）
+src/renderer/    Vue 前端（Pinia stores / composables / pages / components）+ 独立 export.html（隐藏导出窗口的第二个 Vue app）
+src/shared/      主进程与渲染进程共享的类型与纯逻辑（settings-parser、context-usage、stall-watchdog、types）
 ```
 
-路径别名：`@shared` → `src/shared`，`@` → `src/renderer`（仅渲染层）。
+路径别名：`@shared` → `src/shared`，`@` → `src/renderer`（仅渲染层）。主进程的 `main` / `preload` / `renderer.export` 在 `electron.vite.config.ts` 各为独立 rollup input；PNG 编码 worker 是独立 input，打包时 `asarUnpack` 解包（asar 内无法 `new Worker`）。
 
-### 后端接入（双路径）
+### 后端接入（核心）
 
-- **默认：Claude Agent SDK**（`src/main/modules/sdk-backend.ts`）——通过 `canUseTool` / `onElicitation` / `onUserDialog` / `supportedDialogKinds` 四个 SDK 正式 hook 接入交互。
-- **回退：spawn CLI**（`src/main/modules/process-manager.ts`）——`chat-backend.ts` 的 re-export 一行切换。
-- 公共工具函数（`buildSpawnEnv` / `normalizeToolResultContent` / `persistCliEvent` / `persistMessageParts`）被两路径共用，不可删除。
+- **生产聊天唯一入口：`chat-backend.ts`（6 行 re-export）→ `sdk-backend.ts`**，通过 Claude Agent SDK 的 `canUseTool` / `onElicitation` / `onUserDialog` / `supportedDialogKinds` 四个 hook 接入交互。
+- SDK 是纯 ESM，而主进程是 CJS bundle —— 经 `importSdk()` 模块级缓存的动态 `import()` 加载（`sdk-backend.ts`）。
+- **`pathToClaudeCodeExecutable` 必填**（无内置二进制）：`resolveExecutable` 用 `execFileSync` 跑 `which`/`where`，Windows 下解析 `.cmd` shim 拿到真实 `claude.exe`，传给 SDK `Options.pathToClaudeCodeExecutable`。
+- 原 `process-manager.ts` 已删除；其纯工具函数（`buildSpawnEnv` / `normalizeToolResultContent` / `persistCliEvent` / `persistMessageParts`）迁到 **`cli-shared.ts`**，被 SDK 路径与测试共用，**不可删除**。
+
+### 回合生命周期与关键不变量（`sdk-backend.ts`）
+
+- 每条用户消息 = 一次全新 `query()` + resume，不是往运行中的 query 追加。`for await` 按 `sdkMsg.type` 分流：`system/init`（持久化 CC `session_id`）、`assistant`（`convertAssistantMessage`→转发+落库+计划扫描）、`user`（只透传 tool_result 类）、`stream_event`（增量 delta 原样转发）、`tool_progress`/`task_*`/`api_retry`/`compacting`/`thinking_tokens`（`forwardTransient`，**只 IPC 不落库**）、`result`（终态落库）。
+- **流末未收到 `result` 时合成 `{type:'aborted'}`**（国产端点/Windows 常见），保证前端 `sending` 必复位；`aborted` 不落库。
+- **`markSessionDeleted` 是单一收口**：清 `activeSessions`、entries、stall 追踪、toolUse 缓存、权限/上下文缓存、pending interactions —— 新增任何 per-session Map 都必须在此登记。
+- **`forwardEvent` 每次落库前查 `isSessionActive`**：避免会话已删后 FK 违例回滚阻塞主循环（会让所有输入卡死）。
+- 中断：`killProcess` 先取消 interactions → 加入 `interruptedQueries` WeakSet → `abortEntry`（state 置 `aborting` + `abortController.abort()`，Windows 下走 `TerminateProcess` 硬杀）→ `query.interrupt()`（stdin 控制帧，软中断）。`AbortController` 是硬杀，`interrupt()` 是软杀。
+- `consecutiveApiRetries` **只由模型级活动（`message`/`stream_event`）清零**，`tool_progress`/`system` 不清 —— 否则重试风暴永不收敛。
+- `keep_alive` 心跳**不刷新 stall 计时**（代理常对死连接发心跳）。`forwardSubagentText:true` + stream event 透传 `parent_tool_use_id` 是子 Agent Tab 能看到实时思考的前提，关掉即坏。
 
 ### 统一交互弹窗系统
 
-权限确认 + AskUserQuestion 选择题 + 本地 confirm 都纳入同一队列：
+权限确认 + AskUserQuestion 选择题 + 本地 confirm 走**同一队列**：
 
 ```
 SDK canUseTool / onUserDialog / onElicitation
   → sdk-interactions.ts 适配为 InteractionPromptPayload
-  → interaction-prompts.ts 主进程 pending Map + IPC
+  → interaction-prompts.ts 主进程 pending Map + IPC（按 promptId 索引）
   → INTERACTION_REQUEST → InteractionPrompt.vue 展示
-  → 用户选择 → INTERACTION_RESPOND
-  → 适配层转回 SDK 返回值
+  → 用户选择 → INTERACTION_RESPOND → 适配层转回 SDK 返回值
 ```
 
-渲染进程本地 confirm（替代原 ConfirmDialog.vue）走 `interaction-store.ts` 的 `requestConfirm()`，生成 `kind:'confirm'` payload 入同一队列，不经主进程 IPC，Promise 在 `respondAndRemove` 里 resolve。
+- **`canUseTool` 返回 `allow` 必须带 `updatedInput`**，否则 SDK ZodError 封死所有工具。
+- **cancel 与 deny 解耦**（`mapPermissionInteractionResponse`）：`reason:'user'`→deny「用户拒绝」；`reason:'abort'`/默认→中性 deny「工具调用已取消」。否则恶意 transcript 里的"user refused"会让模型整场回避该工具。
+- 渲染进程本地 confirm（替代原 ConfirmDialog.vue）走 `interaction-store.ts` 的 `requestConfirm()`，生成 `kind:'confirm'` payload 入同一队列，**不经主进程 IPC**，Promise 在 `respondAndRemove` 里 resolve。
+- `interaction_history` 表（ON DELETE CASCADE 跟随会话删）每次 submit/cancel 落库一条，切会话加载最近 8 条。
 
-关键文件：
-- `src/main/modules/interaction-prompts.ts`：主进程 pending resolver Map
-- `src/main/modules/sdk-interactions.ts`：SDK 请求 ↔ Interaction payload 适配
-- `src/renderer/stores/interaction-store.ts`：渲染进程统一队列（远程 IPC + 本地 confirm）
-- `src/renderer/components/chat/InteractionPrompt.vue`：主弹窗（含 wizard、虚拟滚动、拖拽、位置记忆、焦点陷阱、历史回看）
-- 子组件：`InteractionOptionList` / `InteractionPreview`（Markdown+高亮+copy）/ `InteractionDetails`
+### IPC 契约（主↔渲染边界）
 
-### 交互历史持久化
+- 通道名 `domain:action`，全部集中在 `IPC_CHANNELS`（`src/shared/types/ipc.ts`，由 `src/shared/constants.ts` re-export），约 70 个。
+- **新增一个 IPC 通道需三处同步**：① `IPC_CHANNELS` 加字符串常量 → ② `ClaudeLinkAPI` 加方法 + `preload/api.ts` 加 `ipcRenderer.invoke` 实现 → ③ `ipc-handlers.ts` 的 `registerIpcHandlers` 里 `ipcMain.handle(IPC_CHANNELS.X, …)`。
+- 主→渲染推送用 `ipcRenderer.on` 并返回 unsubscribe（`onChatEvent` / `onQueueEvent` / `onContextUpdate` / `onImageExportProgress` / `onTestConnectionEvent`）。
+- **导出窗口的 surface 拆分**：`preload/index.ts` 按 `process.argv` 的 `--claude-link-surface=export` 决定只暴露 `window.exportLink`（最小集），主进程仍对每次调用复核 sender/frame/URL/job。
 
-`interaction_history` 表（ON DELETE CASCADE 跟随会话删除）。每次 submit/cancel 落库一条，切换会话时加载最近 8 条回看。
-- repo：`src/main/database/repositories/interaction-history-repo.ts`
-- IPC：`INTERACTION_HISTORY_GET` / `INTERACTION_HISTORY_RECORD`（输入做最小校验）
+### 渲染层要点
 
-### 真实上下文用量与自动压缩
+- `use-chat.ts` 是**全局单例**（`createChat` 工厂 + `chatSingleton`），在 `App.vue` `onMounted` 注册一次 `chat:event` 监听；`ChatPage` 卸载不影响监听。`handleEvent` 分流 `thinking_delta`/`text_delta`/`input_json_delta`/`message`/`result`/`error`/`aborted`，靠 `turnHad*` 标志避免流式兜底与已落库内容重复。
+- `sending` 是 `session-store` 的**派生 getter**（从 `runningSessions` 算），不是 state；per-session 的 `runningSessions`/`sessionStreams`/`stalledInfo`/`apiRetryInfo`/`subAgentStreamingThinking` 全按 sessionId 索引，切会话不串扰。
+- 流式防抖在 `use-stream.ts`（`STREAM_DEBOUNCE_MS`，per-channel `setTimeout`；清空立即触发不防抖，让已落库消息无缝替换流式）。
+- 后台（非活动）会话的流式累积进 `sessionStreams[id]` 快照，`switchSession` 恢复。
+- `config-store`：`saveConfig` 用 `JSON.parse(JSON.stringify(this.config))` 脱响应式代理（Pinia proxy 过不了 IPC 结构化克隆）；`updatingFromJson` 标志 gates JSON→表单回填，防 `watch` 再写回 JSON 形成循环。
 
-- `src/shared/context-usage.ts`：
-  - `extractContextTokens(usage)`：input + cache_creation + cache_read
-  - `detectCompaction(event)`：识别 `system + compact_boundary` 事件
-- 双后端在 usage 推送后调 `detectCompaction`，命中则 emit `CONTEXT_UPDATE` 带 `compactedJustNow:true`
-- `sessionContextStats` Map 缓存最近用量（压缩事件无 usage 时沿用），`markSessionDeleted` 清理
-- 前端 `ContextButton.vue`：圆环占比 + hover 弹层 + 自动压缩横幅（3 秒）
-- `session-store.compactedJustNow` 标记，`switchSession` 复位防串扰
+### 配置注入与模型映射
 
-### 会话搜索（视图态）
+- **双通道注入**：env 注入子进程 + `<工作目录>/.claude/settings.local.json` 写盘（后者带权限/hooks，优先级最高，覆盖 CC 自身 `~/.claude/settings.json` 的 env 块）。`claude-settings-projection.ts` 合并 `advancedJson` + 计算后的 `permissions` + `env`（apiKey→`ANTHROPIC_API_KEY`，仅非官方端点写 `ANTHROPIC_BASE_URL`）+ thinking 级别 patch。
+- **模型别名映射**：CC 用 `sonnet/haiku/opus/fable` 别名；claude-link 通过 `ANTHROPIC_DEFAULT_*_MODEL` env 映射到真实模型（如 `glm-5.2`），从不直接用真实模型名；`resolveAliasToActualModel` 解析后传 `--model` 双保险。
+- **表单 ↔ JSON 双向**：`advancedJson` 是单一真相源，表单字段是它的视图。`parseClaudeSettings` peek 不删，`updatingFromJson` 防循环。
+- apiKey 经 electron-store + safeStorage 加密；`TestConnectionModal` 明文回显 `requestedModel` vs CC 上报 `model` + 端点，不一致标红。
 
-`session-store` 用 `searchResults: Session[] | null` + `searchQuery` 视图态 + `displayedSessions` getter，`searchSessions` 写 `searchResults` 不覆盖全量 `sessions`。侧栏与会话管理页都走 `store.displayedSessions` + 250ms 防抖。
+### 数据库（`src/main/database/`）
 
-### 过程分组展示
+- 单例 better-sqlite3（`getConnection()` 每语句同步调用），`journal_mode=WAL` + `PRAGMA foreign_keys=ON`。DB 文件在 `userData/claude-link.db`，附件在同级 `attachments/`（不在工作树内）。
+- 迁移幂等自愈：`CURRENT_SCHEMA_VERSION = 7`；V3+ 用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 守卫的 `ALTER TABLE ADD COLUMN`，老库/半应用库升级不阻塞。
+- 核心表：`sessions`（含 `model_override`、缓存上下文）、`messages`（FK CASCADE，含过程分组列 `process_kind`/`parent_agent_id`/`tool_use_id`/`title`/`is_error`）、`tasks`（含幂等 `client_message_id` 偏索引）、`attachments` + `message_attachments`/`task_attachments` 连接表、`claude_plan_state`（带单调 `revision`）、`interaction_history`。
+- 各 repo 是 `getConnection()` 之上的薄函数模块；`createMessageWithAttachments` 在单事务内 insert+link+promote。
 
-消息按 turn 折叠成 `ProcessGroup`（居中摘要 fold），子 Agent（Task/Agent 工具）过程透传 `parentToolUseId` 抽到右侧「子Agent」Tab。`messages` 表有 `process_kind` / `parent_agent_id` / `tool_use_id` / `title` 四列支持。
+### 其它子系统（`src/main/modules/`）
 
-## 关键设计决策
+- **附件**：主进程复制管理，物理文件在 `userData/attachments/<sessionId>/`；renderer 只持附件 ID/摘要，**不能收绝对路径**。图片走 SDK image block；文档/普通文件走会话附件目录 + `additionalDirectories` 交给 CC `Read`。`attachment-policy.ts`（纯：MIME/magic-byte/size/预算/文件名净化）+ `attachment-storage.ts`（原子 `.part`→rename、symlink 拒绝）+ `attachment-prompt-builder.ts`（图片生成可重复 AsyncIterable，图先文后）。
+- **changes-panel**：git diff 面板，`git status --porcelain=v1 -z` + `diff HEAD --numstat -z`，3s 超时、`GIT_TERMINAL_PROMPT=0`、`--` 防注入；按需算 vs HEAD 的净 diff，无预快照。
+- **export-image**：把会话导成长图。单飞（`active`）+ 隐藏 `BrowserWindow`（sandbox/隔离 partition）+ `capturePage` 分段；PNG 走 `worker_threads` 编码（`export-image-codec-worker.ts`，主线程外拼 RGBA 行）。隐藏 renderer 只消费最小附件快照（不含 ID/路径/storage key/哈希），不调 `window.claudeLink`。
+- **task-queue-engine**：per-session 队列，任务间倒计时串行；`interruptTask` 处理 `continuing` 态；generation 计数废掉过期子进程退出。
+- **stall-watchdog**（`src/shared/stall-watchdog.ts` 纯函数 `classifyStall`）：model/tool 双区阈值，5s tick；命中发 `stalled` 横幅，到 `hardAutoAbortMs`/`toolHardAbortMs` 或连续 `MAX_API_RETRIES`(10) 次 `api_retry` 经 `killProcess('watchdog')` 硬中断。
+- **context-usage**：`extractContextTokens` = input + cache_creation + cache_read（不含 output）；`detectCompaction` 识别 `compact_boundary` → emit `CONTEXT_UPDATE` 带 `compactedJustNow`。
+- **link-guard**：拦 `will-navigate`/`will-redirect`/`window.open` 走 `getNavigationDisposition`（拦截或交 `shell.openExternal`），`window.open` 一律拒。
 
-- **配置注入双通道**：env 注入子进程 + `settings.local.json` 写工作目录（后者携带权限/hooks）。**CC 自身 `~/.claude/settings.json` 的 env 块会覆盖子进程 env**，故 claude-link 在 spawn 前把完整配置投影到会话工作目录的 `.claude/settings.local.json`（优先级最高），并用 `resolveAliasToActualModel` 解析后传 `--model`（CLI 参数双保险）。
-- **模型别名映射**：CC 用 `sonnet/haiku/opus/fable` 别名；claude-link 通过 `ANTHROPIC_DEFAULT_*_MODEL` env 映射到真实模型（如 `glm-5.2`），从不直接用真实模型名。
-- **表单 ↔ JSON 双向绑定**：`advancedJson` 是单一真相源，表单字段是它的视图。`parseClaudeSettings` peek 不删，`updatingFromJson` 标志防更新循环。
-- **stream-json 解析**：`thinking_delta` / `text_delta` / `signature_delta` 分开解析；thinking 折叠展示。
-- **apiKey 加密**：electron-store + safeStorage。
-- **测试连接明文回显**：`TestConnectionModal` 回显 `requestedModel` vs CC 上报 `model` + 端点，不一致标红，消除"配置 vs 实际生效"疑虑。
-- **DB 迁移幂等自愈**：`migrations.ts` 按 `PRAGMA table_info` 检查列是否存在再补加，老库升级不阻塞。`PRAGMA foreign_keys = ON` 已开，CASCADE 生效。
-- **设计 token**：`variables.css`（通用色板/圆角/字体）+ `interaction-tokens.css`（交互弹窗 16 个 `--interaction-*` token）。
+## 测试约定
+
+- 无 jest/vitest，Vue 组件不做单测。`npm run selftest` 用 `tsx` 直接跑 Node，**不启动 Electron、不 build**。
+- 两类断言：① 导入 `src/shared/*` 纯函数做**行为测试**；② `readFileSync` 读主进程/渲染层源码做**结构文本契约**（`.includes`/regex），专门钉住「一个功能横跨多文件」的接线不变量。
+- **新增功能必须在 selftest 补契约断言**（按节追加，如 `=== 30) ... ===`）。`scripts/` 里的 `tdd-*-verify.ts` / `export-image-*-verify.ts` 同此风格；只有进入 `package.json` `selftest` 的 `&&` 链才算门禁，其余可单跑。
+- 新脚本约定：纯 `node:assert`/自定义 `check()` 计数、不 import Electron、失败 `process.exit(1)`、优先测纯函数行为而非脆弱的源码文本匹配（除非在记录接线契约）。
 
 ## Git 提交规范
 
-- **所有提交主题和正文使用中文**。不写英文提交说明；如运行环境强制追加固定署名行，则该署名行除外。
+- **所有提交主题和正文使用中文**（运行环境强制追加的固定署名行除外）。
 - Conventional-commit 前缀（`feat:` / `fix:` / `refactor:` / `docs:`）+ 中文 scope 可接受，如 `feat(配置页): ...`。
-- 工作分支 `dev`；PR 目标 `master`。
-- 按问题点隔离提交（接口隔离原则）：跨问题点文件用 `git add -p` 拆 hunk，让每个提交 typecheck 自洽。
+- 工作分支 `dev`；PR 目标 **`master`**。
+- **提交原子化（铁训）**：按“单一改动操作”隔离提交——同文件内不同性质改动（新增 / 修改 / 多个问题点）也要用 `git add -p` 按 hunk 拆成多个 commit，每个 commit 单一动词可描述、且 typecheck 自洽。
 
 ## 前端设计参考
 
-- UI / 设计灵感参考以下三个开源项目，源码已 clone 到本地 `D:\software\code`，**优先读本地源码**，不再上 GitHub 浏览（LobsterAI / openhanako 各套一层同名 `-main` 子目录，desktop-cc-gui-main 直接是项目根）：
-  - **LobsterAI**：`D:\software\code\LobsterAI\LobsterAI-main`（Electron + Vue/TS，网易出品；前端在 `src/renderer`）
-  - **openhanako**（HanaAgent）：`D:\software\code\openhanako\openhanako-main`（Electron，作者 liliMozi；主题在 `desktop/src/themes/*.css` + `desktop/src/shared/theme-registry-data.json`）
-  - **desktop-cc-gui**（ccgui）：`D:\software\code\desktop-cc-gui-main`（**Tauri + React + Vite**，非 Electron、前端 React 非 Vue；只借 UX/视觉/交互，不可照搬技术栈）
-- 参考它们的 UI 布局、交互模式与视觉风格时，**必须先读本地真实源码（theme/token/组件源文件）再落地，严禁凭印象脑补**。
-- 主题色板（`src/shared/constants.ts` 的 `THEME_PALETTES`）灵感源自 openhanako。
+UI/设计灵感参考以下三个开源项目，源码已 clone 到本地 `D:\software\code`，**优先读本地源码**，不再上 GitHub 浏览：
+
+- **LobsterAI**：`D:\software\code\LobsterAI\LobsterAI-main`（Electron + Vue/TS，网易出品；前端在 `src/renderer`）
+- **openhanako**（HanaAgent）：`D:\software\code\openhanako\openhanako-main`（Electron，作者 liliMozi；主题在 `desktop/src/themes/*.css` + `desktop/src/shared/theme-registry-data.json`）
+- **desktop-cc-gui**（ccgui）：`D:\software\code\desktop-cc-gui-main`（**Tauri + React + Vite**，非 Electron、前端 React 非 Vue；只借 UX/视觉/交互，不可照搬技术栈）
+
+参考布局/交互/视觉时**必须先读本地真实源码（theme/token/组件源文件）再落地，严禁凭印象脑补**。主题色板（`src/shared/constants.ts` 的 `THEME_PALETTES`，9 套浅色，默认 `warm-paper`）灵感源自 openhanako。
 
 ## 工作流约定
 
-- **改代码后重启 app 验证**：dev 热重载不覆盖主进程与 preload 改动。
+- **改代码后重启 app 验证**：dev 热重载不覆盖主进程与 preload。
 - **typecheck 是硬门禁**：任何改动 `npm run typecheck` 必须零错误。
-- **selftest 是契约门禁**：新增功能在 `scripts/selftest-settings-mapping.ts` 补契约断言（按节追加，如 `=== 30) ... ===`）。
-- **GUI 像素层无法自动化验证**：交互弹窗 hover/横幅/对齐等需真实 Electron app 目视确认；逻辑/结构/真实 CLI 行为由 selftest + regression 覆盖。
-- **docs/superpowers 被 .gitignore 忽略**：已跟踪文件用 `git add -f` 强制更新；新文件不入库（设计/计划/审计文档不进 git）。
+- **selftest 是契约门禁**：新增功能补对应契约断言。
+- **GUI 像素层无法自动化验证**：弹窗 hover/横幅/对齐等需真实 Electron app 目视确认；逻辑/结构/真实 CLI 行为由 selftest + regression 覆盖。
+- `docs/superpowers` 被 `.gitignore` 忽略：已跟踪文件用 `git add -f` 强制更新；新文件不入库（设计/计划/审计文档不进 git）。

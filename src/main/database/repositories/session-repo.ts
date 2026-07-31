@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Session } from '../../../shared/types/session';
+import { isValidThinkingLevel } from '../../../shared/types/thinking';
 import { getConnection } from '../connection';
 import { normalizeSearchText } from '../../utils/search-normalizer';
 import { normalizeDbTime } from '../../../shared/time';
@@ -13,6 +14,7 @@ interface SessionRow {
   working_dir: string | null;
   permission_mode: Session['permissionMode'];
   max_turns: number;
+  thinking_level: string | null;
   created_at: string;
   updated_at: string;
   last_context_tokens: number | null;
@@ -30,6 +32,8 @@ function toSession(row: SessionRow): Session {
     workingDir: row.working_dir,
     permissionMode: row.permission_mode,
     maxTurns: row.max_turns,
+    // 脏值兜底：DB 值非法（手改/历史脏数据）时回落 null（= 跟随全局默认）。
+    thinkingLevel: isValidThinkingLevel(row.thinking_level) ? row.thinking_level : null,
     createdAt: normalizeDbTime(row.created_at),
     updatedAt: normalizeDbTime(row.updated_at),
     lastContextTokens: row.last_context_tokens,
@@ -71,7 +75,7 @@ export function listSessions(): Session[] {
 
 export function updateSession(
   id: string,
-  partial: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>,
+  partial: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel'>>,
 ): Session | null {
   const updates: string[] = [];
   const values: Record<string, unknown> = { id };
@@ -95,6 +99,10 @@ export function updateSession(
   if (partial.maxTurns !== undefined) {
     updates.push('max_turns = @maxTurns');
     values.maxTurns = partial.maxTurns;
+  }
+  if (partial.thinkingLevel !== undefined) {
+    updates.push('thinking_level = @thinkingLevel');
+    values.thinkingLevel = partial.thinkingLevel;
   }
 
   if (!updates.length) {
@@ -127,10 +135,16 @@ export function searchSessions(query: string): Session[] {
     contentMap.set(row.session_id, row.text ?? '');
   }
 
-  // 附件文件名参与搜索（按会话聚合）。不纳入 storage_key / MIME / 哈希 / 文件内容。
+  // 仅历史消息附件文件名参与搜索；草稿、失败和仅任务引用的附件不应命中。
+  // 不纳入 storage_key / MIME / 哈希 / 文件内容。
   const attachmentNameMap = new Map<string, string>();
   const attachmentNameRows = getConnection()
-    .prepare("SELECT session_id, GROUP_CONCAT(filename, ' ') AS text FROM attachments GROUP BY session_id")
+    .prepare(
+      `SELECT a.session_id, GROUP_CONCAT(a.filename, ' ') AS text
+       FROM message_attachments ma
+       JOIN attachments a ON a.id = ma.attachment_id
+       GROUP BY a.session_id`,
+    )
     .all() as { session_id: string; text: string | null }[];
   for (const row of attachmentNameRows) {
     attachmentNameMap.set(row.session_id, row.text ?? '');

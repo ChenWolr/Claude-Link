@@ -9,6 +9,7 @@ import ElectronStoreModule from 'electron-store';
 import { app, safeStorage } from 'electron';
 import * as fs from 'fs';
 import type { AppConfig, ModelAlias } from '../../shared/types/config';
+import { isValidThinkingLevel } from '../../shared/types/thinking';
 import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { logger } from '../utils/logger';
 import { parseClaudeSettings } from './settings-importer';
@@ -54,13 +55,22 @@ const defaultConfig: StoredConfig = {
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
   contextWindowByAlias: {},
+  // 默认思考强度：medium 是五级中位，最接近原硬编码 adaptive 的「平衡」档，
+  // 避免默认开高带来成本/延迟意外。投影层对 medium 不投影以尊重 ~/.claude 配置。
+  defaultThinkingLevel: 'medium',
 };
 
-const store = new ElectronStoreCtor({
-  name: 'claude-link-config',
-  projectName: app.getName(),
-  defaults: defaultConfig,
-});
+type ConfigStore = InstanceType<typeof ElectronStoreCtor>;
+let store: ConfigStore | null = null;
+
+function getStore(): ConfigStore {
+  store ??= new ElectronStoreCtor({
+    name: 'claude-link-config',
+    projectName: app.getName(),
+    defaults: defaultConfig,
+  });
+  return store;
+}
 
 function encryptApiKey(apiKey: string): Pick<StoredConfig, 'encryptedApiKey' | 'apiKeyEncoding'> {
   if (!apiKey) {
@@ -94,8 +104,13 @@ function decryptApiKey(config: StoredConfig): string {
 }
 
 export function getConfig(): AppConfig {
-  const config = store.store;
+  const config = getStore().store;
   const advancedJsonRaw = typeof config.advancedJson === 'string' && config.advancedJson ? config.advancedJson : '{}';
+  // 脏值清洗：老版本无 defaultThinkingLevel 字段、或脏值/误存 'auto' 时回落 medium。
+  // 存储层类型把该字段声明为非空非 auto，但运行时（旧库/手改 JSON）可能任意，故按 unknown 读取再校验。
+  const rawThinkingLevel = config.defaultThinkingLevel as unknown;
+  const defaultThinkingLevel =
+    isValidThinkingLevel(rawThinkingLevel) && rawThinkingLevel !== 'auto' ? rawThinkingLevel : 'medium';
   return {
     provider: config.provider,
     providerName: config.providerName ?? 'Anthropic',
@@ -113,17 +128,18 @@ export function getConfig(): AppConfig {
     themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,
     fontScale: config.fontScale ?? DEFAULT_FONT_SCALE,
     contextWindowByAlias: config.contextWindowByAlias ?? {},
+    defaultThinkingLevel,
   };
 }
 
 export function saveConfig(partial: Partial<AppConfig>): AppConfig {
   const { apiKey, ...rest } = partial;
   const storage = { ...rest } as Partial<StoredConfig>;
-  store.set(storage);
+  getStore().set(storage);
 
   if (apiKey !== undefined) {
     const encrypted = encryptApiKey(apiKey);
-    store.set(encrypted);
+    getStore().set(encrypted);
   }
 
   const config = getConfig();
@@ -135,13 +151,13 @@ export function saveConfig(partial: Partial<AppConfig>): AppConfig {
       logger.warn(`settings.local.json 写入跳过：${result.error}`);
     }
   } catch (e) {
-    logger.warn('settings.local.json 写入跳过', e);
+    logger.warn(`settings.local.json 写入跳过：${e instanceof Error ? e.message : String(e)}`);
   }
   return config;
 }
 
 export function getDecryptedApiKey(): string | null {
-  const apiKey = decryptApiKey(store.store);
+  const apiKey = decryptApiKey(getStore().store);
   return apiKey || null;
 }
 
@@ -150,8 +166,8 @@ export function hasApiKey(): boolean {
 }
 
 export function clearConfig(): AppConfig {
-  store.clear();
-  store.set(defaultConfig);
+  getStore().clear();
+  getStore().set(defaultConfig);
   return getConfig();
 }
 

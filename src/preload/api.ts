@@ -7,11 +7,10 @@ import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
-import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, PermissionRequestPayload, PermissionResponsePayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult } from '../shared/types/changes';
-import type { ExportImageProgressPayload } from '../shared/types/export-image';
 
 export interface ClaudeLinkAPI {
   detectCli: () => Promise<CliDetectionResult>;
@@ -43,7 +42,7 @@ export interface ClaudeLinkAPI {
   deleteSession: (id: string) => Promise<void>;
   updateSession: (
     id: string,
-    data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns'>>,
+    data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel'>>,
   ) => Promise<Session | null>;
   searchSessions: (query: string) => Promise<Session[]>;
   analyzeTopic: (sessionId: string, firstMessage: string) => Promise<string | null>;
@@ -52,8 +51,6 @@ export interface ClaudeLinkAPI {
   abortChat: (sessionId: string) => Promise<void>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
   removeChatListener: () => void;
-  onPermissionRequest: (callback: (payload: PermissionRequestPayload) => void) => () => void;
-  respondPermission: (response: PermissionResponsePayload) => Promise<void>;
   onInteractionRequest: (callback: (payload: InteractionPromptPayload) => void) => () => void;
   onInteractionCancel: (callback: (payload: InteractionPromptCancelPayload) => void) => () => void;
   getPendingInteractions: () => Promise<InteractionPromptPayload[]>;
@@ -69,15 +66,18 @@ export interface ClaudeLinkAPI {
   getTasks: (sessionId: string) => Promise<Task[]>;
   reorderTasks: (sessionId: string, taskIds: string[]) => Promise<Task[]>;
   interruptTask: (taskId: string) => Promise<void>;
+  retryTask: (taskId: string) => Promise<Task>;
   startQueue: (sessionId: string) => Promise<void>;
   pauseQueue: (sessionId: string) => Promise<void>;
   resumeQueue: (sessionId: string) => Promise<void>;
   getQueueState: (sessionId: string) => Promise<QueueState>;
   queueUserMessage: (sessionId: string, payload: ChatSendPayload) => Promise<QueueState>;
-  pickAttachments: (sessionId: string) => Promise<AttachmentSummary[]>;
+  getClaudePlanState: (sessionId: string) => Promise<import('../shared/types/claude-plan').ClaudePlanState | null>;
+  pickAttachments: (sessionId: string) => Promise<PickAttachmentsResult>;
   stageAttachmentBytes: (input: StageAttachmentBytesInput) => Promise<AttachmentSummary>;
   getAttachmentPreview: (request: AttachmentPreviewRequest) => Promise<AttachmentPreviewResponse>;
   removeDraftAttachment: (sessionId: string, attachmentId: string) => Promise<void>;
+  cloneMessageAttachments: (sessionId: string, messageId: string) => Promise<AttachmentSummary[]>;
   onQueueEvent: (callback: (payload: QueueEventPayload) => void) => () => void;
   removeQueueListener: () => void;
   startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
@@ -130,12 +130,6 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.CHAT_EVENT, listener);
     },
     removeChatListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.CHAT_EVENT),
-    onPermissionRequest: (callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: PermissionRequestPayload) => callback(payload);
-      ipcRenderer.on(IPC_CHANNELS.PERMISSION_REQUEST, listener);
-      return () => ipcRenderer.off(IPC_CHANNELS.PERMISSION_REQUEST, listener);
-    },
-    respondPermission: (response) => ipcRenderer.invoke(IPC_CHANNELS.PERMISSION_RESPOND, response),
     onInteractionRequest: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: InteractionPromptPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.INTERACTION_REQUEST, listener);
@@ -164,15 +158,18 @@ export function createApi(): ClaudeLinkAPI {
     reorderTasks: (sessionId, taskIds) =>
       ipcRenderer.invoke(IPC_CHANNELS.TASK_REORDER, sessionId, taskIds) as Promise<Task[]>,
     interruptTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_INTERRUPT, taskId),
+    retryTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_RETRY, taskId) as Promise<Task>,
     startQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_START, sessionId),
     pauseQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_PAUSE, sessionId),
     resumeQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME, sessionId),
     getQueueState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_STATE, sessionId),
     queueUserMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_USER_MESSAGE, sessionId, payload),
-    pickAttachments: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PICK, sessionId) as Promise<AttachmentSummary[]>,
+    getClaudePlanState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_PLAN_GET, sessionId) as Promise<import('../shared/types/claude-plan').ClaudePlanState | null>,
+    pickAttachments: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PICK, sessionId) as Promise<PickAttachmentsResult>,
     stageAttachmentBytes: (input) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_STAGE_BYTES, input) as Promise<AttachmentSummary>,
     getAttachmentPreview: (request) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PREVIEW, request) as Promise<AttachmentPreviewResponse>,
     removeDraftAttachment: (sessionId, attachmentId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, sessionId, attachmentId),
+    cloneMessageAttachments: (sessionId, messageId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE, sessionId, messageId) as Promise<AttachmentSummary[]>,
     onQueueEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: QueueEventPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.QUEUE_EVENT, listener);
@@ -181,8 +178,8 @@ export function createApi(): ClaudeLinkAPI {
     removeQueueListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.QUEUE_EVENT),
     // 会话导出 JPEG 长图（v3）：可见 renderer 请求开始 + 接收进度。图片数据不经过可见 renderer。
     startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId, format),
-    onImageExportProgress: (callback: (payload: ExportImageProgressPayload) => void) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: ExportImageProgressPayload) => callback(payload);
+    onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: import('../shared/types/export-image').ExportImageProgressPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
     },
@@ -196,7 +193,6 @@ export function createApi(): ClaudeLinkAPI {
 import type {
   CaptureSelfRequest,
   CaptureSelfResponse,
-  ExportImageProgressPayload,
   ExportJobSnapshot,
   ExportPageBeginRequest,
   ExportPageBeginResponse,
@@ -209,8 +205,6 @@ import type {
   PngProbeSelfRequest,
   PngProbeSelfResponse,
 } from '../shared/types/export-image';
-import { IPC_CHANNELS } from '../shared/constants';
-
 export interface ExportLinkAPI {
   surface: () => 'export';
   /** 取得与本窗口绑定的 job 快照（主进程按 sender 匹配当前 job）。 */
@@ -226,7 +220,7 @@ export interface ExportLinkAPI {
   /** v4.1 PNG：完成一页（worker 最终编码 + 写临时文件）。仅 PNG 路径。 */
   finishPage: (request: ExportPageFinishRequest) => Promise<ExportPageFinishResponse>;
   /** 上报排版/捕获/编码进度（renderer → 主进程）。 */
-  reportProgress: (payload: ExportImageProgressPayload) => void;
+  reportProgress: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void;
   /** 完成报告（done/failed 判别联合，只能调用一次）。 */
   finish: (payload: ExportRenderFinishPayload) => Promise<void>;
 }

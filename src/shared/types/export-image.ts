@@ -3,12 +3,29 @@
 // 本文件只放类型，无运行时逻辑、无 Vue/Electron/DOM 副作用，Node selftest 可直接导入。
 
 import type { ThemePalette } from '../constants';
+// —— 导出专用附件最小投影 ——
+export interface ExportAttachmentSnapshot {
+  kind: 'image' | 'document' | 'file';
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  width?: number;
+  height?: number;
+  preview?: {
+    mimeType: 'image/png';
+    bytes: Uint8Array;
+    width: number;
+    height: number;
+  };
+  previewUnavailable?: boolean;
+}
+
 import type { AttachmentSummary } from './attachment';
 
 // —— 最小渲染契约 ——
 // 完整数据库 Message 是它的超集（多 rawEvent / parentTaskId 等图片渲染不需要的字段）。
 // store、group-messages、复用组件只要求 RenderableMessage，不伪造缺失字段，也不发送 rawEvent。
-export interface RenderableMessage {
+export interface RenderableMessage<A = AttachmentSummary> {
   id: string;
   sessionId: string;
   role: 'user' | 'assistant' | 'system' | 'tool';
@@ -22,8 +39,9 @@ export interface RenderableMessage {
   title: string | null;
   isError: boolean;
   createdAt: string;
-  // 附件摘要（图片/文件）。老消息无附件时为 undefined，消费处用 ?? [] 兜底。
-  attachments?: AttachmentSummary[];
+  // 导出专用最小附件快照。老消息无附件时为 undefined，消费处用 ?? [] 兜底。
+  // attachments?: AttachmentSummary[]
+  attachments?: A[];
 }
 
 // —— 进度状态机（判别联合，不使用多个松散 boolean）——
@@ -75,7 +93,7 @@ export interface ExportJobSnapshot {
   format: ExportImageFormat;
   // 主流程消息（parentAgentId===null），不含 rawEvent/parentTaskId；
   // 子 Agent 详情不进主聊天长图。
-  messages: RenderableMessage[];
+  messages: RenderableMessage<ExportAttachmentSnapshot>[];
 }
 
 // —— 分页 ——
@@ -136,9 +154,13 @@ export interface PixelBudgetResult {
 // —— 快照预算（v3 第 11.3 节，创建隐藏窗口前检查）——
 export interface SnapshotBudgetInput {
   messageCount: number;
-  // 每条消息的 UTF-8 字节数
+  // 每条消息正文的 UTF-8 字节数
   messageUtf8Bytes: number[];
-  // 估算图片张数
+  // 附件 filename/MIME 元数据的 UTF-8 字节数
+  attachmentUtf8Bytes: number[];
+  // 附件缩略图真实字节数
+  previewBytes: number[];
+  // Markdown 与附件图片总数
   imageCount: number;
 }
 export interface SnapshotBudgetResult {

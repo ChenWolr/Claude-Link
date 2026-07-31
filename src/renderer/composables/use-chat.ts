@@ -8,6 +8,8 @@
 
 import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
+import { useClaudePlanStore } from '../stores/claude-plan-store';
+import { useChatDraftStore } from '../stores/chat-draft-store';
 import type { BackgroundTask } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
@@ -78,10 +80,15 @@ export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, ev
 
 function createChat() {
   const store = useSessionStore();
+  const planStore = useClaudePlanStore();
   // sending 改为从 store getter 派生（computed），不再用 local ref。
   // 这样 ChatPage 卸载/重挂载时，sending 始终从 store.runningSessions 反映，不会丢失。
   const sending = computed(() => store.sending);
   const error = ref<string | null>(null);
+  // 每会话【失败】的 user 消息（id+正文）：error 置位瞬间抓"会话最后一条 user 消息"= 刚跑失败的提问。
+  // 重新编辑发送据此克隆附件 + 回填文字到主草稿。覆盖主发送 / 队列任务 / waiting 续接三条路径
+  //（队列任务执行也产生 user 消息，故失败时能正确命中，不会误用陈旧的"上次主发送"）。
+  const lastFailedBySession = ref<Record<string, { id: string; content: string }>>({});
 
   let cleanup: (() => void) | null = null;
   // try-finally 兜底：按 sessionId 记录“中断强制复位”定时器（替代原单例 timer）。
@@ -118,6 +125,7 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
+        store.setThinkingTokens(null);
         resetTurnCache();
       }
       store.markStopped(sid);
@@ -151,10 +159,14 @@ function createChat() {
     toolUseId?: string | null;
     title?: string | null;
     isError?: boolean;
+    // Task 6：乐观 user 消息的 id 用 clientMessageId（与主进程 DB 消息同一 ID，避免双气泡）；
+    // attachments 用草稿摘要让乐观消息立即渲染附件卡片，不必等 DB 回读。
+    id?: string;
+    attachments?: Message['attachments'];
   }): void {
     if (!store.activeSession) return;
     store.addMessage({
-      id: crypto.randomUUID(),
+      id: partial.id ?? crypto.randomUUID(),
       sessionId: store.activeSession.id,
       role: partial.role,
       content: partial.content,
@@ -169,6 +181,7 @@ function createChat() {
       title: partial.title ?? null,
       isError: partial.isError === true,
       createdAt: new Date().toISOString(),
+      attachments: partial.attachments,
     });
   }
 
@@ -260,6 +273,11 @@ function createChat() {
         }
         break;
       }
+      case 'claude_plan': {
+        // 后台会话的计划更新仍写入对应 session，切回时可见最新状态。
+        planStore.applyPlanState(sid, event.state);
+        break;
+      }
       case 'result':
       case 'error':
       case 'aborted': {
@@ -323,6 +341,7 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
+        store.setThinkingTokens(null);
 
         // 错误回合（非中断）的 result 文本是失败原因：只走 error 横幅，不当 assistant 正文
         // 落库（否则与横幅重复展示 + 把错误文案当成回答污染历史）。主进程 persistCliEvent
@@ -331,6 +350,7 @@ function createChat() {
         attachResultMetadata(event);
         if (isErrResult) {
           error.value = resultErrorText(event);
+          captureFailedMessage();
         }
         // 根因修复：markStopped 移除 runningSessions，sending getter 自动变 false。
         if (store.activeSession) {
@@ -345,7 +365,9 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
+        store.setThinkingTokens(null);
         error.value = event.message;
+        captureFailedMessage();
         if (store.activeSession) {
           clearAbortTimer(store.activeSession.id);
           store.markStopped(store.activeSession.id);
@@ -359,6 +381,7 @@ function createChat() {
         store.clearStream();
         store.clearThinking();
         store.clearToolStream();
+        store.setThinkingTokens(null);
         if (store.activeSession) {
           clearAbortTimer(store.activeSession.id);
           store.markStopped(store.activeSession.id);
@@ -378,6 +401,13 @@ function createChat() {
           if (store.activeSession) {
             store.markApiRetrying(store.activeSession.id, { max: r.max_retries, error: r.error });
           }
+          break;
+        }
+        // 批次 B：thinking_tokens——思考 token 实时估算，瞬态写 store（ContextButton hover 展示），不落库。
+        // 后台会话不走此分支（handleBackgroundEvent 跳过），仅前台实时（review-v2 F8）。
+        if (event.subtype === 'thinking_tokens') {
+          const t = event as CliSystemInfoEvent;
+          if (typeof t.estimatedTokens === 'number') store.setThinkingTokens(t.estimatedTokens);
           break;
         }
         // C：进度类/瞬态 system 子类型（compacting/task_*/requesting/compact_result）→ store 瞬态状态，不落库。
@@ -405,6 +435,11 @@ function createChat() {
         break;
       }
       case 'init': {
+        break;
+      }
+      case 'claude_plan': {
+        // Claude 计划快照更新（TodoWrite / Task 工具）。只读——不写入 messages 表。
+        planStore.applyPlanState(event.sessionId, event.state);
         break;
       }
     }
@@ -680,8 +715,13 @@ function createChat() {
     }
   }
 
-  async function sendMessage(text: string): Promise<void> {
-    if (!store.activeSession || !text.trim()) return;
+  // Task 6：乐观 user 消息 id = payload.clientMessageId（与主进程 DB 消息同一 ID，消除双气泡/双 ID）。
+  // content 仍用 payload.text（附件-only 时 ''），与主进程 displayText 一致；attachments 用草稿摘要即时渲染。
+  // 成功返回 true；失败置 error 横幅并返回 false（供调用方决定是否清草稿）。
+  async function sendMessage(payload: ChatSendPayload): Promise<boolean> {
+    if (!store.activeSession) return false;
+    const text = payload.text.trim();
+    if (!text && payload.attachmentIds.length === 0) return false;
 
     // 新回合开始：作废上一回合 abort 残留的超时兜底，避免它到点把本次 sending 错误复位。
     clearAbortTimer(store.activeSession.id);
@@ -690,24 +730,32 @@ function createChat() {
     // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
     store.markRunning(store.activeSession.id);
 
-    persistMessage({ role: 'user', eventType: 'message', content: text.trim(), processKind: null });
+    // 草稿摘要用于乐观渲染附件卡片；仅取当前会话草稿里属于本 payload 的附件。
+    const draftAttachments = payload.attachmentIds.length > 0
+      ? (useChatDraftStore().getAttachments(store.activeSession.id) ?? []).filter((a) =>
+          payload.attachmentIds.includes(a.id),
+        )
+      : [];
+
+    persistMessage({
+      id: payload.clientMessageId,
+      role: 'user',
+      eventType: 'message',
+      content: text,
+      processKind: null,
+      attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
+    });
     // 力度② turn 边界：本回合 assistant 消息从此索引开始。MessageList 据此在发送中
     // （且对应流式非空）隐藏本回合已落库的 text/thinking，避免与流式块重复显示。
     store.turnStartIndex = store.messages.length;
 
     try {
-      // 监听已在 App.vue 全局注册，这里不重复 startListening。
-      // Task 3：发送统一为 ChatSendPayload。附件草稿在 Task 5 接入前恒为空；
-      // clientMessageId 由 renderer 生成，Task 6 用它统一乐观消息与主进程数据库消息（避免双 ID）。
-      const payload: ChatSendPayload = {
-        text: text.trim(),
-        attachmentIds: [],
-        clientMessageId: crypto.randomUUID(),
-      };
       await window.claudeLink.sendMessage(store.activeSession.id, payload);
+      return true;
     } catch (e) {
       error.value = e instanceof Error ? e.message : '发送失败';
       if (store.activeSession) store.markStopped(store.activeSession.id);
+      return false;
     }
   }
 
@@ -727,6 +775,7 @@ function createChat() {
     store.clearStream();
     store.clearThinking();
     store.clearToolStream();
+    store.setThinkingTokens(null);
     resetTurnCache();
     store.markStopped(sid);
     try {
@@ -746,6 +795,22 @@ function createChat() {
   //  2) 主进程 killProcess 会立即把旧 entry 标为 aborting 并移出 active entries，
   //     因此重试不再依赖固定等待来避免 message dropped；这里的短延迟只用于事件排序缓冲。
   //  3) lastUserText 假定「卡死的回合已持久化自己的 user 消息」——sendMessage 始终如此。
+  // 失败捕获：error 置位瞬间，把"会话最后一条 user 消息"记为待恢复对象。
+  // 覆盖主发送 / 队列任务 / waiting 续接三条路径——只要该回合在主会话跑过并失败即命中，
+  // pending 队列任务（未跑）不产生 error，故不会误触发重新编辑。
+  function captureFailedMessage(): void {
+    if (!store.activeSession) return;
+    const msg = lastFailedUserMessage();
+    if (msg) lastFailedBySession.value[store.activeSession.id] = msg;
+  }
+  function lastFailedUserMessage(): { id: string; content: string } | null {
+    const msgs = store.messages;
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      if (msgs[i].role === 'user') return { id: msgs[i].id, content: msgs[i].content };
+    }
+    return null;
+  }
+
   function lastUserText(): string | null {
     const msgs = store.messages;
     for (let i = msgs.length - 1; i >= 0; i -= 1) {
@@ -768,10 +833,11 @@ function createChat() {
       // ignore
     }
     await new Promise((r) => setTimeout(r, 200));
-    await sendMessage(last);
+    // 卡死重试：重发最后一条用户文字（不带附件，新回合新 clientMessageId）。
+    await sendMessage({ text: last, attachmentIds: [], clientMessageId: crypto.randomUUID() });
   }
 
-  return { sending, error, sendMessage, abort, retryLastTurn, startListening, stopListening };
+  return { sending, error, lastFailedBySession, sendMessage, abort, retryLastTurn, startListening, stopListening };
 }
 
 // 根因修复：useChat 返回全局单例。监听在 App.vue onMounted 注册一次，

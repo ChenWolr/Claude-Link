@@ -88,7 +88,7 @@ async function renderOneMermaidBlock(root: HTMLElement, block: HTMLElement, raw:
   const previousRaw = block.getAttribute('data-mermaid-error-source');
   if (block.dataset.mermaidState === 'rendered' && block.getAttribute('data-mermaid-source') === raw) return;
   if (block.dataset.mermaidState === 'loading' && block.getAttribute('data-mermaid-source') === raw) return;
-  if (block.dataset.mermaidState === 'error' && shouldSkipMermaidErrorRetry(block.dataset.mermaidState, previousRaw, raw)) return;
+  if (block.dataset.mermaidState === 'error' && shouldSkipMermaidErrorRetry(block.dataset.mermaidState, previousRaw ?? undefined, raw)) return;
   if (block.dataset.mermaidState === 'loading') mermaidJobs.delete(block);
   // 错误态对相同源码不重试是有意为之：语法错误重渲染必失败，避免每次 mounted/updated 重跑 parse。
   // ensureMermaid 的 mermaidPromise=null 仅服务 chunk 首次加载失败后的重试（对未进入 error 态、或源码已变的块生效）。

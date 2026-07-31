@@ -9,13 +9,16 @@ import {
 } from './attachment-policy';
 import {
   type StagedAttachmentInput,
+  cleanupStalePartFiles,
   listStoredAttachmentKeys,
   probeImageDimensions,
+  readStoredAttachmentBytes,
   readStoredAttachmentPreview,
   removeAttachmentFile,
   resolveAbsolutePath,
   writeAttachmentFile,
 } from './attachment-storage';
+import { randomUUID } from 'node:crypto';
 import * as attachmentRepo from '../database/repositories/attachment-repo';
 import type {
   AttachmentPreviewResponse,
@@ -116,6 +119,24 @@ export async function removeDraftAttachment(sessionId: string, attachmentId: str
   await removeAttachmentFile(record.storageKey).catch((e) => logger.error('removeAttachmentFile failed', e));
 }
 
+/**
+ * 删除任务/消息解除关联后【零引用】的附件（DB 记录 + 物理文件）。
+ * 用于 TASK_REMOVE：deleteTask 已解除 task_attachments，若该附件既无 message 也无 task 引用
+ * （getAttachmentReferenceCount===0，即未执行的 pending task 附件）则彻底删除；
+ * 已被执行升格为 message 的附件仍有 message 引用，保留。物理删除失败交 orphan cleanup 重试。
+ */
+export async function cleanupDetachedAttachments(ids: string[]): Promise<void> {
+  for (const id of ids) {
+    const record = attachmentRepo.getAttachment(id);
+    if (!record) continue;
+    if (attachmentRepo.getAttachmentReferenceCount(id) > 0) continue;
+    attachmentRepo.deleteAttachment(id);
+    await removeAttachmentFile(record.storageKey).catch((e) =>
+      logger.error('cleanupDetachedAttachments removeAttachmentFile failed', e),
+    );
+  }
+}
+
 /** 受控预览：校验会话归属后返回有界缩略图/原图 bytes，不返回路径。 */
 export async function getAttachmentPreview(request: {
   sessionId: string;
@@ -128,21 +149,86 @@ export async function getAttachmentPreview(request: {
   return readStoredAttachmentPreview(record, request.thumbnail);
 }
 
-/** 启动清理：删除遗留的 draft 附件（未发送草稿）。 */
-export async function cleanupDraftAttachments(): Promise<void> {
+/**
+ * 克隆历史消息附件为草稿：异步发送失败（provider 拒图等）后，让用户基于已落库附件重新编辑发送。
+ * 逐个读原文件 → 写新 draft（新 id/文件）；任一失败回滚整组（删已产生的 draft 记录+文件），不返回半组。
+ * 跨会话防护：消息附件必须属于当前会话（getAttachmentsByMessageIds 不校验 session）。
+ * 不自动重发、不切模型；调用方拿到草稿后由用户编辑并手动发送（新 clientMessageId）。
+ */
+export async function cloneMessageAttachmentsToDraft(
+  sessionId: string,
+  messageId: string,
+): Promise<AttachmentSummary[]> {
+  const summaries = attachmentRepo.getAttachmentsByMessageIds([messageId]).get(messageId) ?? [];
+  logger.info(`cloneMessageAttachmentsToDraft: sessionId=${sessionId} messageId=${messageId} 消息附件数=${summaries.length}`);
+  for (const sum of summaries) {
+    if (sum.sessionId !== sessionId) {
+      throw new AttachmentInputError('消息不属于当前会话');
+    }
+  }
+  if (summaries.length === 0) return [];
+
+  const created: AttachmentSummary[] = [];
+  const createdIds: string[] = [];
+  try {
+    for (const sum of summaries) {
+      const record = attachmentRepo.getAttachment(sum.id);
+      if (!record) throw new AttachmentInputError(`附件「${sum.filename}」记录缺失`);
+      const bytes = await readStoredAttachmentBytes(record);
+      const staged = await stageAttachment({
+        id: randomUUID(),
+        sessionId,
+        filename: sum.filename,
+        mimeType: sum.mimeType,
+        bytes,
+      });
+      created.push(staged);
+      createdIds.push(staged.id);
+    }
+    logger.info(`cloneMessageAttachmentsToDraft: 成功克隆 ${created.length} 个附件为草稿`);
+    return created;
+  } catch (err) {
+    // 任一失败：清理已产生的 draft 副本（record + file），整组不返回。
+    for (const id of createdIds) {
+      try {
+        await removeDraftAttachment(sessionId, id);
+      } catch (e) {
+        logger.error(`clone cleanup ${id} failed`, e);
+      }
+    }
+    throw err;
+  }
+}
+
+/**
+ * 启动时按真实引用修正附件状态，避免崩溃窗口留下的 draft 被误删。
+ * 消息引用优先于任务引用；均无引用才删除记录和物理文件。
+ */
+export async function reconcileDraftAttachments(): Promise<void> {
   const drafts = attachmentRepo.listDraftAttachments();
   for (const draft of drafts) {
     try {
-      attachmentRepo.deleteAttachment(draft.id);
-      await removeAttachmentFile(draft.storageKey);
+      const refs = attachmentRepo.getAttachmentReferenceCounts(draft.id);
+      if (refs.message > 0) {
+        attachmentRepo.markAttachmentsStatus([draft.id], 'message');
+      } else if (refs.task > 0) {
+        attachmentRepo.markAttachmentsStatus([draft.id], 'task');
+      } else {
+        attachmentRepo.deleteAttachment(draft.id);
+        await removeAttachmentFile(draft.storageKey);
+      }
     } catch (e) {
-      logger.error(`cleanup draft attachment ${draft.id} failed`, e);
+      logger.error(`reconcile draft attachment ${draft.id} failed`, e);
     }
   }
 }
 
-/** 启动清理：删除数据库无记录的孤儿物理文件。 */
+/** 兼容旧调用名；语义已改为引用 reconcile。 */
+export const cleanupDraftAttachments = reconcileDraftAttachments;
+
+/** 启动清理：删除数据库无记录的孤儿物理文件和过期临时文件。 */
 export async function cleanupOrphanAttachments(): Promise<void> {
+  await cleanupStalePartFiles();
   const dbKeys = new Set(attachmentRepo.listAllStorageKeys());
   const storedKeys = await listStoredAttachmentKeys();
   for (const key of storedKeys) {

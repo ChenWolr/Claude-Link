@@ -7,9 +7,11 @@
 import { defineStore } from 'pinia';
 import type { Session } from '../../shared/types/session';
 import type { Message } from '../../shared/types/session';
+import type { ThinkingLevel } from '../../shared/types/thinking';
 import type { StallInfo } from '../../shared/stall-watchdog';
 import { resolveContextWindow } from '../../shared/model-context-windows';
 import { useConfigStore } from './config-store';
+import { useClaudePlanStore } from './claude-plan-store';
 
 // C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
 export interface BackgroundTask {
@@ -46,7 +48,9 @@ export const useSessionStore = defineStore('session', {
     recentWorkspaces: [] as string[],
     // 右侧活动栏筛选：'all'（默认，四类总览同屏）/ 'queue' / 'subagent' / 'background' / 'changes'。
     // 演进自旧 rightTab 互斥 Tab——保留字段名与 'changes'/'background' 等字面量，仅新增 'all' 默认。
-    rightTab: 'all' as 'all' | 'queue' | 'subagent' | 'background' | 'changes',
+    rightTab: 'all' as 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes',
+    // 活动总览折叠态：true=只留 rail 图标轨、隐藏主体内容（rail 底部双箭头按钮切换）。
+    overviewCollapsed: false,
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
@@ -68,6 +72,9 @@ export const useSessionStore = defineStore('session', {
     backgroundTasks: {} as Record<string, BackgroundTask>,
     // C：实时压缩进行中（status:compacting）。compact_boundary 复位为 false。
     compacting: false as boolean,
+    // 批次 B：当前会话思考 token 实时估算（thinking_tokens.estimated_tokens）。全局瞬态字段，
+    // 切会话/回合结束清零；ContextButton hover 展示。null=无（未在思考或回合已结束）。
+    thinkingTokens: null as number | null,
     // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
     // 渲染层据此 + useNow 跳动时钟算实时耗时，整个 sending 期间常驻显示「⏱ X.Xs」。
     turnStartedAt: {} as Record<string, number>,
@@ -183,6 +190,8 @@ export const useSessionStore = defineStore('session', {
       this.toolProgress = {};
       this.backgroundTasks = {};
       this.compacting = false;
+      // 批次 B：清思考 token 估算，避免会话 A 的思考峰值串扰到会话 B 的 ContextButton。
+      this.thinkingTokens = null;
       // 真实用量 + 上次连通的真实窗口交给 state；windowSize/ratio 由 contextStats getter 派生，
       // 切模型/改设置时即时重算。lastContextWindow 为该会话持久化的 SDK 真实窗口（连通后缓存）。
       this.contextLastWindow = session.lastContextWindow;
@@ -226,6 +235,10 @@ export const useSessionStore = defineStore('session', {
       delete this.stalledInfo[id];
       delete this.apiRetryInfo[id];
       delete this.subAgentStreamingThinking[id];
+      // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
+      const planStore = useClaudePlanStore();
+      const prevPlan = planStore.planBySession[id];
+      planStore.clearSession(id);
       try {
         await window.claudeLink.deleteSession(id);
       } catch (error) {
@@ -233,6 +246,10 @@ export const useSessionStore = defineStore('session', {
         this.sessions = prevSessions;
         this.searchResults = prevSearch;
         this.activeSession = prevActive;
+        // F11: 恢复 plan store 状态（clearSession 已删除）
+        if (prevPlan) {
+          planStore.planBySession[id] = prevPlan;
+        }
         this.error = error instanceof Error ? error.message : '删除会话失败';
       }
     },
@@ -291,6 +308,20 @@ export const useSessionStore = defineStore('session', {
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '更新权限模式失败';
+      }
+    },
+    // 会话级思考强度：写入 session.thinkingLevel（null/'auto' = 跟随全局默认），下次 spawn 注入生效。
+    // 与 setActiveSessionPermissionMode 同构（通用 updateSession 通道）。
+    async setActiveSessionThinkingLevel(level: ThinkingLevel | null) {
+      if (!this.activeSession) return;
+      try {
+        const updated = await window.claudeLink.updateSession(this.activeSession.id, { thinkingLevel: level });
+        if (updated) {
+          this.activeSession = updated;
+          this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '更新思考强度失败';
       }
     },
     async loadRecentWorkspaces() {
@@ -411,26 +442,52 @@ export const useSessionStore = defineStore('session', {
       }
     },
     addMessage(message: Message) {
-      this.messages.push(message);
+      // Task 7B：按 id upsert——task 执行/waiting 续接经 queue event 回传同一 id 的 user message 时，
+      // 替换而非追加，避免重复气泡（retry/重放也复用同一稳定 id）。
+      const existingIdx = this.messages.findIndex((m) => m.id === message.id);
+      const isNew = existingIdx < 0;
+      if (isNew) {
+        this.messages.push(message);
+      } else {
+        this.messages.splice(existingIdx, 1, message);
+      }
 
       // Trigger topic analysis for first user message if session name is auto-generated
       if (
+        isNew &&
         message.role === 'user' &&
         this.messages.filter((m) => m.role === 'user').length === 1 &&
         this.activeSession?.name.startsWith('会话')
       ) {
         const sessionId = this.activeSession.id;
-        window.claudeLink.analyzeTopic(sessionId, message.content).then((topic) => {
-          if (topic) {
-            // Only update if still on the same session
-            if (this.activeSession?.id === sessionId) {
-              this.activeSession.name = topic;
+        const textContent = message.content.trim();
+        const firstName = message.attachments?.[0]?.filename?.trim();
+        if (textContent) {
+          // 有文字：LLM 概括主题（仅传正文文字，不传附件 bytes/路径）。
+          window.claudeLink.analyzeTopic(sessionId, textContent).then((topic) => {
+            if (topic) {
+              // Only update if still on the same session
+              if (this.activeSession?.id === sessionId) {
+                this.activeSession.name = topic;
+              }
+              this.loadSessions();
+            }
+          }).catch(() => {
+            // Silently ignore topic analysis failures (fallback is applied by main process)
+          });
+        } else if (firstName) {
+          // 附件-only：文件名即标题素材，直接截断使用，不喂 LLM——
+          // 孤立文件名会被 LLM 误判为「没有对话内容」而回复客套话，反而劣化标题。
+          const topic = firstName.replace(/\s+/g, ' ').slice(0, 15);
+          window.claudeLink.updateSession(sessionId, { name: topic }).then((updated) => {
+            if (updated && this.activeSession?.id === sessionId) {
+              this.activeSession.name = updated.name;
             }
             this.loadSessions();
-          }
-        }).catch(() => {
-          // Silently ignore topic analysis failures (fallback is applied by main process)
-        });
+          }).catch(() => {
+            // ignore
+          });
+        }
       }
     },
     appendStream(text: string) {
@@ -469,9 +526,17 @@ export const useSessionStore = defineStore('session', {
     setCompacting(v: boolean) {
       this.compacting = v;
     },
+    // 批次 B：思考 token 实时估算（瞬态）。null=清零（回合结束/切会话）。
+    setThinkingTokens(v: number | null) {
+      this.thinkingTokens = v;
+    },
     // 切换右侧活动栏筛选（含 'all' 总览）。
-    setRightTab(tab: 'all' | 'queue' | 'subagent' | 'background' | 'changes') {
+    setRightTab(tab: 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes') {
       this.rightTab = tab;
+    },
+    // 折叠/展开活动总览主体（保留 rail 图标轨）。
+    toggleOverviewCollapsed() {
+      this.overviewCollapsed = !this.overviewCollapsed;
     },
     // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。
     focusSubAgent(parentAgentId: string) {

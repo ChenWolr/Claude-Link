@@ -1,4 +1,5 @@
 import type { RenderableMessage } from './export-image';
+import type { ThinkingLevel } from './thinking';
 
 export interface Session {
   id: string;
@@ -9,6 +10,9 @@ export interface Session {
   workingDir: string | null;
   permissionMode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
   maxTurns: number;
+  // 该会话的思考强度档位。null = 回落全局默认（AppConfig.defaultThinkingLevel）。
+  // 'auto' 与 null 同义（UI 用 'auto' 显式表达「跟随默认」，注入层统一按回落处理）。
+  thinkingLevel: ThinkingLevel | null;
   createdAt: string;
   updatedAt: string;
   lastContextTokens: number | null;

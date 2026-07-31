@@ -33,7 +33,9 @@ import {
   verifyPagePlan,
   verifyStableUnitIds,
 } from '../src/shared/export-image';
+import { buildExportAttachmentSnapshots } from '../src/main/modules/export-attachment-snapshot';
 import type {
+  ExportAttachmentSnapshot,
   ExportImagePhase,
   PageRange,
   PaginationBudget,
@@ -139,6 +141,14 @@ console.log('\n=== 2) turn 划分 + 可见权重 ===');
 {
   check('纯文本权重 = 字符数', estimateMessageWeight(msg('x', { content: 'abcde' }), 6000) === 5);
   check('图片按 imageWeight 计', estimateMessageWeight(msg('x', { content: '![](http://a.png)![](b)' }), 6000) === 6000 * 2);
+  const imageAttachment: ExportAttachmentSnapshot = {
+    kind: 'image',
+    filename: 'preview.png',
+    mimeType: 'image/png',
+    sizeBytes: 100,
+    preview: { mimeType: 'image/png', bytes: new Uint8Array([1]), width: 1, height: 1 },
+  };
+  check('附件图片按 imageWeight 计', estimateMessageWeight(msg('x', { attachments: [imageAttachment] }), 6000) === 6000);
   check('空内容权重 0', estimateMessageWeight(msg('x', {}), 6000) === 0);
 }
 
@@ -258,14 +268,39 @@ console.log('\n=== 4) 像素预算 ===');
 // =====================================================================
 console.log('\n=== 5) 快照预算 ===');
 {
-  check('正常通过', checkSnapshotBudget({ messageCount: 2, messageUtf8Bytes: [10, 20], imageCount: 1 }).ok);
-  check('消息数超限', !checkSnapshotBudget({ messageCount: 50001, messageUtf8Bytes: [], imageCount: 0 }).ok);
-  check('单条字节超限', !checkSnapshotBudget({ messageCount: 1, messageUtf8Bytes: [17 * 1024 * 1024], imageCount: 0 }).ok);
-  check('总字节超限', !checkSnapshotBudget({ messageCount: 2, messageUtf8Bytes: [33 * 1024 * 1024, 32 * 1024 * 1024], imageCount: 0 }).ok);
-  check('图片数超限', !checkSnapshotBudget({ messageCount: 1, messageUtf8Bytes: [10], imageCount: 2001 }).ok);
-  check('utf8 长度不一致', !checkSnapshotBudget({ messageCount: 2, messageUtf8Bytes: [10], imageCount: 0 }).ok);
+  check('正常通过', checkSnapshotBudget({ messageCount: 2, messageUtf8Bytes: [10, 20], attachmentUtf8Bytes: [3, 4], previewBytes: [5], imageCount: 1 }).ok);
+  check('消息数超限', !checkSnapshotBudget({ messageCount: 50001, messageUtf8Bytes: [], attachmentUtf8Bytes: [], previewBytes: [], imageCount: 0 }).ok);
+  check('单条字节超限', !checkSnapshotBudget({ messageCount: 1, messageUtf8Bytes: [17 * 1024 * 1024], attachmentUtf8Bytes: [], previewBytes: [], imageCount: 0 }).ok);
+  check('总字节超限', !checkSnapshotBudget({ messageCount: 2, messageUtf8Bytes: [32 * 1024 * 1024, 31 * 1024 * 1024], attachmentUtf8Bytes: [1024 * 1024], previewBytes: [1], imageCount: 0 }).ok);
+  check('图片数超限', !checkSnapshotBudget({ messageCount: 1, messageUtf8Bytes: [10], attachmentUtf8Bytes: [], previewBytes: [], imageCount: 2001 }).ok);
+  check('utf8 长度不一致', !checkSnapshotBudget({ messageCount: 2, messageUtf8Bytes: [10], attachmentUtf8Bytes: [], previewBytes: [], imageCount: 0 }).ok);
 }
 
+async function testExportAttachmentSnapshots(): Promise<void> {
+  const source = msg('snapshot', {
+    attachments: [{
+      id: 'internal-id',
+      sessionId: 's1',
+      kind: 'image',
+      filename: 'photo.png',
+      mimeType: 'image/png',
+      sizeBytes: 3,
+      previewAvailable: true,
+      status: 'message',
+    }],
+  });
+  const snapshots = await buildExportAttachmentSnapshots([source], async () => ({
+    mimeType: 'image/png',
+    bytes: new Uint8Array([1, 2, 3]),
+    width: 1,
+    height: 1,
+  }));
+  const exported = snapshots[0].attachments?.[0];
+  check('导出附件最小投影保留 PNG preview', exported?.preview?.bytes.byteLength === 3);
+  check('导出附件最小投影不含内部 ID/路径/哈希', !!exported && !('id' in exported) && !('sessionId' in exported) && !('storageKey' in exported) && !('sha256' in exported));
+  const unavailable = await buildExportAttachmentSnapshots([source], async () => { throw new Error('missing'); });
+  check('预览失败只标记占位', unavailable[0].attachments?.[0]?.previewUnavailable === true);
+}
 // =====================================================================
 console.log('\n=== 6) 单段几何（尾段裁剪）===');
 {
@@ -379,10 +414,17 @@ console.log('\n=== 7) 进度 + 结果联合 ===');
   check('三种结果互不混淆', saved.status !== cancelled.status && cancelled.status !== failed.status);
 }
 {
-  // toRenderable 剥离 rawEvent/parentTaskId
-  const full = { ...msg('x', { content: 'hi' }), rawEvent: '{}', parentTaskId: 't1' } as never;
+  // toRenderable 剥离 rawEvent/parentTaskId，但保留导出专用附件快照。
+  const attachment: ExportAttachmentSnapshot = {
+    kind: 'document',
+    filename: 'report.pdf',
+    mimeType: 'application/pdf',
+    sizeBytes: 12,
+  };
+  const full = { ...msg('x', { content: 'hi', attachments: [attachment] }), rawEvent: '{}', parentTaskId: 't1' } as never;
   const r = toRenderable(full);
   check('toRenderable 保留 content', r.content === 'hi');
+  check('toRenderable 保留最小附件快照', r.attachments?.[0]?.filename === 'report.pdf');
   check('toRenderable 无 rawEvent', !('rawEvent' in r));
   check('toRenderable 无 parentTaskId', !('parentTaskId' in r));
 }
@@ -520,5 +562,12 @@ console.log('\n=== 7) 进度 + 结果联合 ===');
   check('finish 错页 → bad-page', validatePngFinishRequest({ page: 3 }, stComplete).code === 'bad-page');
 }
 
-console.log(`\n=== export-image-verify 结果：${pass} 通过 / ${fail} 失败 ===`);
-if (fail > 0) process.exit(1);
+testExportAttachmentSnapshots()
+  .catch((error) => {
+    fail++;
+    console.error('  ❌ 导出附件快照异步契约', error);
+  })
+  .finally(() => {
+    console.log(`\n=== export-image-verify 结果：${pass} 通过 / ${fail} 失败 ===`);
+    if (fail > 0) process.exit(1);
+  });
