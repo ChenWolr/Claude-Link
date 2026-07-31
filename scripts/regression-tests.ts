@@ -2588,6 +2588,13 @@ function testChangesPanelContracts(): void {
   const bin = parseUnifiedDiff('Binary files a/x.png and b/x.png differ')!;
   assert.equal(bin.binary, true);
   assert.equal(bin.groups.length, 0);
+
+  // 多 hunk → 相邻 hunk 间产 skip 组（git 跳过的未输出行，渲染「⋯ N 行」分隔，多处改动明确分块）
+  const MULTI = '--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n-old\n+new\n b\n@@ -20,3 +20,3 @@\n c\n-old2\n+new2\n d\n';
+  const multi = parseUnifiedDiff(MULTI)!;
+  const skips = multi.groups.filter((g) => g.k === 'skip');
+  assert.equal(skips.length, 1, '两 hunk 间须产 1 个 skip 组');
+  assert.ok((skips[0]!.skipCount ?? 0) > 0, 'skip 组须记录跳过行数');
 }
 
 function testChangesPanelPlumbing(): void {
