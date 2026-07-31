@@ -9,8 +9,9 @@
 
 import { execFile } from 'child_process';
 import * as path from 'path';
+import { shell } from 'electron';
 import { MAX_DIFF_LINES } from '../../shared/process-kind';
-import type { ChangedFile, ChangeStatusCode, ChangesDiffResult, ChangesListResult } from '../../shared/types/changes';
+import type { ChangedFile, ChangeStatusCode, ChangesDiffResult, ChangesListResult, ChangesOpenResult } from '../../shared/types/changes';
 
 const GIT_TIMEOUT_MS = 3000;
 const GIT_MAX_BUFFER = 8 * 1024 * 1024;
@@ -224,4 +225,29 @@ export async function getChangeDiff(workingDir: string | null, path: string): Pr
   const t = truncateDiff(diffText, MAX_DIFF_LINES);
   if (!t.diff.trim()) return { ok: false, reason: 'no-such-file', message: '无可显示差异' };
   return { ok: true, diff: t.diff, truncated: t.truncated, binary: false };
+}
+
+// 「打开」文件：走 shell.openPath 用系统默认程序打开（无默认程序则系统弹「打开方式」）。
+// 安全要点：ChangedFile.path 是仓库根相对（正斜杠），workingDir 可能是仓库子目录 →
+// 绝不能 path.resolve(workingDir, rel)，必须经仓库根 resolve，并 startsWith(root+sep)
+// 防 .. 越界逃逸。openPath 成功返回空串，失败返回 ErrorDescription 字符串。
+export async function openChangeFile(workingDir: string | null, relPath: string): Promise<ChangesOpenResult> {
+  if (!relPath) return { ok: false, reason: 'no-such-file', message: '未指定文件' };
+  const root = await ensureRepo(workingDir);
+  if (!root) {
+    const r = await detectReason(workingDir ?? '.');
+    if (r.ok) return { ok: false, reason: 'not-a-repo', message: '当前工作目录不是 git 仓库' };
+    return { ok: false, reason: r.reason === 'git-unavailable' ? 'git-unavailable' : 'not-a-repo', message: r.message };
+  }
+  const abs = path.resolve(root, relPath);
+  if (abs !== root && !abs.startsWith(root + path.sep)) {
+    return { ok: false, reason: 'no-such-file', message: '文件不在仓库目录内' };
+  }
+  try {
+    const err = await shell.openPath(abs);
+    if (err) return { ok: false, reason: 'error', message: `无法打开：${err}` };
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: 'error', message: '打开文件失败' };
+  }
 }
