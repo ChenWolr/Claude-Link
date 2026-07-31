@@ -27,7 +27,7 @@ export interface DiffSeg {
   x: string;
 }
 
-export type DiffGroupKind = 'ctx' | 'mod' | 'add' | 'del' | 'ws';
+export type DiffGroupKind = 'ctx' | 'mod' | 'add' | 'del' | 'ws' | 'skip';
 
 /**
  * Diff 行。**不可变契约**：DiffBody 用 v-memo 锁 line 对象 identity 来跳过重渲，
@@ -46,6 +46,8 @@ export interface DiffGroup {
   k: DiffGroupKind;
   L: DiffLine[];
   R: DiffLine[];
+  /** 仅 skip 组：相邻 hunk 间 git 跳过未输出的行数（渲染为「⋯ N 行」分隔，多处改动明确分块） */
+  skipCount?: number;
 }
 
 export interface ParsedDiffFile {
@@ -121,7 +123,13 @@ export function parseUnifiedDiff(text: string): ParsedDiffFile | null {
   }
 
   const groups: DiffGroup[] = [];
+  let prevOldEnd = 0;
   for (const hunk of head.hunks) {
+    // 相邻 hunk 间 git 跳过未输出的行 → skip 组（渲染为「⋯ N 行」分隔，让多处改动明确分块）
+    if (prevOldEnd > 0 && hunk.oldStart > prevOldEnd) {
+      groups.push({ k: 'skip', L: [], R: [], skipCount: hunk.oldStart - prevOldEnd });
+    }
+    prevOldEnd = hunk.oldStart + hunk.oldLines;
     // oldStart/newStart 是该 hunk 首行的旧行号/新行号（1-based，jsdiff 已解析）。
     let oldN = hunk.oldStart;
     let newN = hunk.newStart;

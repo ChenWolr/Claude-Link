@@ -9,7 +9,7 @@ import type { DiffGroup, DiffLine, DiffSeg, ParsedDiffFile } from './diff-parser
 
 /** 该组是否算「改动」（参与改动导航 nav 与高亮）。ctx 永远不算；ws 在忽略空白时不算。 */
 export function isHunkGroup(g: DiffGroup, ignoreWs: boolean): boolean {
-  return g.k !== 'ctx' && !(g.k === 'ws' && ignoreWs);
+  return g.k !== 'ctx' && g.k !== 'skip' && !(g.k === 'ws' && ignoreWs);
 }
 
 /** 统计 +/- 行数（header 摘要与侧栏计数用）。ws 总算改动（与原型 countChanges 一致，不受 ignoreWs 影响）。 */
@@ -28,10 +28,12 @@ export function countChanges(f: ParsedDiffFile): { add: number; del: number } {
 }
 
 export interface InlineRow {
-  type: 'ctx' | 'add' | 'del';
+  type: 'ctx' | 'add' | 'del' | 'skip';
   n: number | null;
   line: DiffLine;
   changed: boolean;
+  /** 仅 skip 行：相邻 hunk 间 git 跳过的行数（渲染「⋯ N 行」分隔） */
+  skipCount?: number;
 }
 
 /**
@@ -43,7 +45,10 @@ export interface InlineRow {
 export function buildInlineRows(f: ParsedDiffFile, ignoreWs: boolean): InlineRow[] {
   const rows: InlineRow[] = [];
   for (const g of f.groups) {
-    if (g.k === 'ctx' || (g.k === 'ws' && ignoreWs)) {
+    if (g.k === 'skip') {
+      // 相邻 hunk 间跳过的行 → skip 行（始终可见 + 阻断 context 距离，渲染「⋯ N 行」分隔）
+      rows.push({ type: 'skip', n: null, line: { n: null, t: '' }, changed: false, skipCount: g.skipCount ?? 0 });
+    } else if (g.k === 'ctx' || (g.k === 'ws' && ignoreWs)) {
       const L = g.L;
       g.R.forEach((rl, i) => rows.push({ type: 'ctx', n: rl ? rl.n : L[i] ? L[i].n : null, line: rl ?? L[i], changed: false }));
     } else if (g.k === 'add') {
@@ -68,16 +73,18 @@ export function inlineVisiblePlan(rows: InlineRow[], n: number): boolean[] {
   const dL = new Array<number>(len).fill(Infinity);
   let d = Infinity;
   for (let i = 0; i < len; i++) {
+    if (rows[i].type === 'skip') { d = Infinity; dL[i] = Infinity; continue; } // skip 阻断跨 hunk 距离
     d = rows[i].changed ? 0 : d + 1;
     dL[i] = d;
   }
   const dR = new Array<number>(len).fill(Infinity);
   d = Infinity;
   for (let i = len - 1; i >= 0; i--) {
+    if (rows[i].type === 'skip') { d = Infinity; dR[i] = Infinity; continue; }
     d = rows[i].changed ? 0 : d + 1;
     dR[i] = d;
   }
-  return rows.map((r, i) => r.changed || Math.min(dL[i], dR[i]) <= n);
+  return rows.map((r, i) => r.type === 'skip' || r.changed || Math.min(dL[i], dR[i]) <= n);
 }
 
 /** 并排模式改动组数 = 改动导航总数（split 的 nav 上限）。 */
@@ -94,9 +101,10 @@ export function countInlineHunks(f: ParsedDiffFile, ignoreWs: boolean, context: 
   let c = 0;
   let i = 0;
   while (i < rows.length) {
+    if (rows[i].type === 'skip') { i++; continue; } // skip 推进，不算改动段（否则内层断开但外层不推进 → 死循环）
     const v = vis[i];
     const s = i;
-    while (i < rows.length && vis[i] === v) i++;
+    while (i < rows.length && vis[i] === v && rows[i].type !== 'skip') i++; // skip 断开分段
     if (v && rows.slice(s, i).some((r) => r.changed)) c++;
   }
   return c;
@@ -111,8 +119,8 @@ export interface SplitSide {
 }
 
 export interface SplitRow {
-  /** same=未改(ctx) / add / del / mod（mod 与 ws 合并配色，按 mod） */
-  kind: 'same' | 'add' | 'del' | 'mod';
+  /** same=未改(ctx) / add / del / mod（mod 与 ws 合并配色，按 mod）/ skip（hunk 间分隔） */
+  kind: 'same' | 'add' | 'del' | 'mod' | 'skip';
   /** 所属 group 在 f.groups 中的下标 */
   groupIndex: number;
   /** 改动导航序号（仅改动行有）；same 行为 null */
@@ -125,6 +133,8 @@ export interface SplitRow {
   left: SplitSide | null;
   /** null = 右栏占位（对侧纯删时） */
   right: SplitSide | null;
+  /** 仅 skip 行：相邻 hunk 间跳过的行数（渲染「⋯ N 行」分隔） */
+  skipCount?: number;
 }
 
 /**
@@ -152,7 +162,9 @@ export function buildSplitRows(f: ParsedDiffFile, ignoreWs: boolean): SplitRow[]
       rows.push({ kind, groupIndex: gi, navIndex, chunkStart, chunkEnd, left: wrap(l), right: wrap(r) });
     };
 
-    if (g.k === 'ctx') {
+    if (g.k === 'skip') {
+      rows.push({ kind: 'skip', groupIndex: gi, navIndex: null, chunkStart: false, chunkEnd: false, left: null, right: null, skipCount: g.skipCount ?? 0 });
+    } else if (g.k === 'ctx') {
       const n = Math.max(g.L.length, g.R.length);
       for (let i = 0; i < n; i++) push('same', g.L[i] ?? null, g.R[i] ?? null, false, false);
     } else if (g.k === 'add') {

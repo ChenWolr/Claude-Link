@@ -36,6 +36,7 @@ const emit = defineEmits<{ (e: 'goto-nav', nav: number): void }>();
 const bodyEl = ref<HTMLElement | null>(null);
 const leftScroll = ref<HTMLElement | null>(null);
 const rightScroll = ref<HTMLElement | null>(null);
+const riverScroll = ref<HTMLElement | null>(null);
 
 // —— split：成对行数组 + onlyChanges 折叠 ——
 const splitRows = computed(() => (props.parsed ? buildSplitRows(props.parsed, props.ignoreWs) : []));
@@ -63,12 +64,13 @@ function clickRow(navIndex: number | null): void {
 
 // —— inline：扁平行流 + 上下文规划 + gap 折叠 ——
 interface InlineSeg {
-  kind: 'change' | 'ctx' | 'gap';
+  kind: 'change' | 'ctx' | 'gap' | 'skip';
   rows: InlineRow[];
   navIndex: number | null;
   gapIndex: number | null;
   firstN: number | null;
   lastN: number | null;
+  skipCount?: number;
 }
 const inlineSegs = computed<InlineSeg[]>(() => {
   if (!props.parsed || props.mode !== 'inline') return [];
@@ -79,9 +81,15 @@ const inlineSegs = computed<InlineSeg[]>(() => {
   let nav = 0;
   let gapId = 0;
   while (i < rows.length) {
+    if (rows[i].type === 'skip') {
+      // 相邻 hunk 间跳过的行 → 独立分隔段（「⋯ N 行」，不可展开：内容不在 diff 内）
+      out.push({ kind: 'skip', rows: [rows[i]], navIndex: null, gapIndex: null, firstN: null, lastN: null, skipCount: rows[i].skipCount ?? 0 });
+      i++;
+      continue;
+    }
     const v = vis[i];
     const start = i;
-    while (i < rows.length && vis[i] === v) i++;
+    while (i < rows.length && vis[i] === v && rows[i].type !== 'skip') i++;
     const slice = rows.slice(start, i);
     if (v) {
       const hasChange = slice.some((r) => r.changed);
@@ -125,15 +133,19 @@ watch(
 // —— 同步左右栏滚动（水平 + 垂直）——
 // 用「源标志 + rAF 释放」防回环：程序化同步 dst 会触发 dst 的 scroll 事件，此时 syncSource 仍是原 src，
 // dst 侧 onPaneScroll 早返回。rAF 释放比 queueMicrotask 稳（scroll 事件常跨帧，microtask 在当前任务尾释放过早）。
-let syncSource: 'left' | 'right' | null = null;
-function onPaneScroll(side: 'left' | 'right'): void {
+let syncSource: 'left' | 'river' | 'right' | null = null;
+function onPaneScroll(side: 'left' | 'river' | 'right'): void {
   if (syncSource !== null && syncSource !== side) return;
-  const src = side === 'left' ? leftScroll.value : rightScroll.value;
-  const dst = side === 'left' ? rightScroll.value : leftScroll.value;
-  if (!src || !dst) return;
+  const src = side === 'left' ? leftScroll.value : side === 'river' ? riverScroll.value : rightScroll.value;
+  if (!src) return;
   syncSource = side;
-  dst.scrollLeft = src.scrollLeft;
-  dst.scrollTop = src.scrollTop;
+  for (const k of ['left', 'river', 'right'] as const) {
+    if (k === side) continue;
+    const dst = k === 'left' ? leftScroll.value : k === 'river' ? riverScroll.value : rightScroll.value;
+    if (!dst) continue;
+    dst.scrollTop = src.scrollTop;
+    if (k !== 'river') dst.scrollLeft = src.scrollLeft; // river 固定窄列，不参与水平滚动
+  }
   requestAnimationFrame(() => {
     syncSource = null;
   });
@@ -188,6 +200,11 @@ onBeforeUnmount(() => {
                 ⋯ {{ item.count }} 行未变更<span class="ctx-gap__range">第 {{ item.firstN }}–{{ item.lastN }} 行</span>
               </button>
               <div
+                v-else-if="item.row.kind === 'skip'"
+                class="ctx-gap ctx-gap--skip"
+                aria-hidden="true"
+              >⋯ {{ item.row.skipCount }} 行未变更</div>
+              <div
                 v-else
                 class="split-cell"
                 :class="{ 'is-current': item.row.navIndex === curChange, flash: item.row.navIndex === flashNav }"
@@ -211,18 +228,28 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
+      <div class="diff-river">
+        <div ref="riverScroll" class="pane-scroll pane-scroll--river" @scroll.passive="onPaneScroll('river')">
+          <div class="col col--river">
+            <template v-for="(item, vi) in splitVisible" :key="vi">
+              <div v-if="item.kind === 'fold'" class="river-cell river-cell--fold"></div>
+              <div v-else-if="item.row.kind === 'skip'" class="river-cell river-cell--fold"></div>
+              <div
+                v-else
+                class="river-cell"
+                :class="[`river-cell--${item.row.kind}`, { 'is-current': item.row.navIndex === curChange, flash: item.row.navIndex === flashNav }]"
+              ></div>
+            </template>
+          </div>
+        </div>
+      </div>
+
       <div class="pane pane--right">
         <div ref="rightScroll" class="pane-scroll" @scroll.passive="onPaneScroll('right')">
           <div class="col col--split">
             <template v-for="(item, vi) in splitVisible" :key="vi">
-              <button
-                v-if="item.kind === 'fold'"
-                type="button"
-                class="ctx-gap"
-                @click="toggleSplitFold(item.foldId)"
-              >
-                ⋯ {{ item.count }} 行未变更
-              </button>
+              <div v-if="item.kind === 'fold'" class="ctx-gap ctx-gap--mute" aria-hidden="true"></div>
+              <div v-else-if="item.row.kind === 'skip'" class="ctx-gap ctx-gap--skip" aria-hidden="true">⋯ {{ item.row.skipCount }} 行未变更</div>
               <div
                 v-else
                 class="split-cell"
@@ -276,6 +303,11 @@ onBeforeUnmount(() => {
                   ⋯ {{ seg.rows.length }} 行未变更<span v-if="seg.firstN != null && seg.lastN != null" class="ctx-gap__range">第 {{ seg.firstN }}–{{ seg.lastN }} 行</span>
                 </button>
               </template>
+              <div
+                v-else-if="seg.kind === 'skip'"
+                class="ctx-gap ctx-gap--skip"
+                aria-hidden="true"
+              >⋯ {{ seg.skipCount }} 行未变更</div>
               <div
                 v-else-if="seg.kind === 'change'"
                 class="hunk-block"
@@ -423,6 +455,50 @@ onBeforeUnmount(() => {
   }
 }
 
+/* contrast 风格中缝 river：连接左右改动 chunk 的彩色色带（add 绿 / del 红 / mod 琥珀），same 透明 */
+.diff-river {
+  flex: 0 0 14px;
+  min-width: 14px;
+  display: flex;
+  min-height: 0;
+  background: var(--color-panel-soft);
+  border-left: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+}
+.pane-scroll--river {
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+}
+.pane-scroll--river::-webkit-scrollbar {
+  display: none;
+}
+.col--river {
+  min-width: 100%;
+  display: block;
+}
+.river-cell {
+  height: var(--diff-line-h);
+  background: transparent;
+}
+.river-cell--fold {
+  background: color-mix(in srgb, var(--color-panel) 65%, var(--color-panel-soft));
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
+}
+.river-cell--add {
+  background: color-mix(in srgb, var(--add-edge) 55%, transparent);
+}
+.river-cell--del {
+  background: color-mix(in srgb, var(--del-edge) 55%, transparent);
+}
+.river-cell--mod {
+  background: color-mix(in srgb, var(--mod-edge) 55%, transparent);
+}
+.river-cell.is-current {
+  box-shadow: inset 0 0 0 2px var(--color-accent);
+}
+
 /* 占位框：一侧 null（纯增的左 / 纯删的右）。浅灰提示此处无对应行 */
 .line--placeholder {
   display: flex;
@@ -442,7 +518,7 @@ onBeforeUnmount(() => {
   animation: diff-flash 0.7s var(--ease-out);
 }
 
-/* inline 上下文断层 + split onlyChanges fold 共用折叠条 */
+/* inline 上下文断层 + split onlyChanges fold + hunk 间 skip 共用折叠条 */
 .ctx-gap {
   display: block;
   width: 100%;
@@ -451,12 +527,14 @@ onBeforeUnmount(() => {
   text-align: center;
   height: var(--diff-line-h);
   line-height: var(--diff-line-h);
-  background: color-mix(in srgb, var(--color-panel) 65%, var(--color-panel-soft));
-  color: var(--color-text-muted);
-  font-size: 11px;
+  background: color-mix(in srgb, var(--color-panel) 50%, var(--color-panel-soft));
+  color: var(--color-text);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
   font-family: var(--font-sans);
-  border-top: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent);
+  border-top: 1px solid var(--color-border-strong);
+  border-bottom: 1px solid var(--color-border-strong);
 }
 .ctx-gap:hover {
   color: var(--add-text);
@@ -468,6 +546,19 @@ onBeforeUnmount(() => {
 }
 .ctx-gap--open {
   color: var(--add-text);
+}
+/* split 右栏 fold 占位：对齐左栏 fold 高度，无文字/不可点（左栏 fold 负责展开，避免左右视觉重复） */
+.ctx-gap--mute {
+  cursor: default;
+  pointer-events: none;
+}
+/* hunk 间分隔条（git 跳过的未输出行）：显示「⋯ N 行」，不可展开（内容不在 diff 内） */
+.ctx-gap--skip {
+  cursor: default;
+  pointer-events: none;
+  background: color-mix(in srgb, var(--color-panel) 80%, var(--color-panel-soft));
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
 }
 
 /* 自动换行：穿透到 DiffLine 的 .line（行高自适应；split 无三角标记，不再有漂移问题） */
