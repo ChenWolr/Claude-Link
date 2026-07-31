@@ -1,0 +1,1089 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>改动对比弹窗 · Diff Viewer 原型</title>
+<style>
+/* ═══════════════════════════════════════════════════════════════════════
+   设计 token —— 复刻 claude-link warm-paper 浅色主题
+   约定（按用户要求）：增 = 绿 success（浅 tint）、删 = 红 danger（浅 tint）、改 = 琥珀 warn
+   ═══════════════════════════════════════════════════════════════════════ */
+:root {
+  color-scheme: light;
+  --color-bg: #F8F4ED;
+  --color-panel: #F4F0EA;
+  --color-panel-soft: #FCFAF5;
+  --color-border: rgba(122, 96, 88, 0.18);
+  --color-border-strong: rgba(0, 0, 0, 0.12);
+  --color-text: #3B3D3F;
+  --color-text-muted: #6A6C70;
+  --color-accent: #537D96;
+  --color-accent-strong: #456A80;
+  --color-on-accent: #FFFFFF;
+  --color-danger: #8B3A3A;
+  --color-danger-strong: #6E2A2A;
+  --color-success: #4A9E5E;          /* 新增 · 绿 */
+  --color-success-strong: #2E7D46;
+  --color-warn: #C9A227;             /* 修改 · 琥珀 */
+  --color-warn-strong: #8A6D2B;
+
+  --radius-xs: 4px; --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px; --radius-pill: 999px;
+  --ring-light: inset 0 -1px 0 rgba(0, 0, 0, 0.04);
+  --ring-light-accent: inset 0 -1px 0 rgba(0, 0, 0, 0.06);
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --elevation-2: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --elevation-3: 0 12px 32px rgba(0, 0, 0, 0.12);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 120ms; --duration-base: 200ms; --duration-slow: 320ms;
+  --interaction-overlay-bg: rgba(0, 0, 0, 0.58);
+  --interaction-shadow: 0 18px 60px rgba(0, 0, 0, 0.46);
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+
+  /* diff 衍生色 —— 一律浅 tint，避免过深 */
+  --add-bg: color-mix(in srgb, var(--color-success) 14%, transparent);
+  --add-bg-strong: color-mix(in srgb, var(--color-success) 28%, transparent);
+  --add-edge: var(--color-success);
+  --add-text: var(--color-success-strong);
+  --del-bg: color-mix(in srgb, var(--color-danger) 11%, transparent);
+  --del-bg-strong: color-mix(in srgb, var(--color-danger) 22%, transparent);
+  --del-edge: var(--color-danger);
+  --del-text: var(--color-danger-strong);
+  --mod-bg: color-mix(in srgb, var(--color-warn) 12%, transparent);
+  --mod-edge: var(--color-warn-strong);
+
+  --diff-line-h: 22px;
+  --diff-font: 12.5px;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --duration-fast: 1ms; --duration-base: 1ms; --duration-slow: 1ms; --ease-spring: var(--ease-out); }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { font-family: var(--font-sans); background: var(--color-bg); color: var(--color-text); font-size: 14px; -webkit-font-smoothing: antialiased; }
+button { font-family: inherit; }
+code, pre, .mono { font-family: var(--font-mono); }
+
+/* ── 顶部提示 ── */
+.proto-hint {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%); z-index: 2000;
+  display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px;
+  background: color-mix(in srgb, var(--color-accent) 92%, #000); color: #fff;
+  font-size: 12px; font-weight: 600; border-radius: var(--radius-pill); box-shadow: var(--elevation-2);
+}
+.proto-hint kbd { font-family: var(--font-mono); font-size: 11px; background: rgba(255,255,255,0.2); padding: 1px 6px; border-radius: 4px; }
+
+/* ═══ MOCK APP ═══ */
+.app { display: grid; grid-template-columns: 56px 1fr 340px; height: 100vh; overflow: hidden; }
+.rail { background: var(--color-panel); border-right: 1px solid var(--color-border); display: flex; flex-direction: column; align-items: center; padding: 12px 0; gap: 6px; }
+.rail__logo { width: 30px; height: 30px; border-radius: 8px; background: linear-gradient(135deg, var(--color-accent), var(--color-accent-strong)); color: #fff; display: grid; place-items: center; font-weight: 800; font-size: 14px; margin-bottom: 8px; }
+.rail__btn { width: 36px; height: 36px; border-radius: 8px; border: 0; background: transparent; color: var(--color-text-muted); display: grid; place-items: center; cursor: pointer; font-size: 16px; }
+.rail__btn:hover { background: color-mix(in srgb, var(--color-text) 6%, transparent); color: var(--color-text); }
+.rail__btn.is-active { background: color-mix(in srgb, var(--color-accent) 16%, transparent); color: var(--color-accent-strong); }
+
+.main { display: flex; flex-direction: column; min-width: 0; background: var(--color-bg); }
+.main__topbar { height: 44px; flex: 0 0 auto; border-bottom: 1px solid var(--color-border); display: flex; align-items: center; gap: 10px; padding: 0 16px; background: var(--color-panel-soft); }
+.main__topbar .crumb { font-size: 13px; color: var(--color-text-muted); }
+.main__topbar .crumb b { color: var(--color-text); font-weight: 600; }
+.chat { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 24px; display: flex; flex-direction: column; gap: 14px; }
+.bubble { max-width: 72%; padding: 10px 14px; border-radius: var(--radius-md); font-size: 13.5px; line-height: 1.6; box-shadow: var(--ring-light); }
+.bubble--ai { align-self: flex-start; background: var(--color-panel); border: 1px solid var(--color-border); }
+.bubble--me { align-self: flex-end; background: var(--color-accent); color: var(--color-on-accent); }
+.bubble code { font-size: 12.5px; background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 4px; }
+.bubble--me code { background: rgba(255,255,255,0.22); }
+.composer { flex: 0 0 auto; margin: 0 24px 18px; padding: 10px 14px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-panel-soft); color: var(--color-text-muted); font-size: 13px; box-shadow: var(--elevation-1); }
+
+/* —— 右侧「改动」面板 —— */
+.changes { background: var(--color-panel-soft); border-left: 1px solid var(--color-border); display: flex; flex-direction: column; min-height: 0; }
+.changes__header { padding: 10px 14px 8px; }
+.changes__eyebrow { margin: 0; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-text-muted); }
+.changes__title { display: flex; align-items: center; gap: 8px; margin: 2px 0 0; font-size: 14px; font-weight: 600; }
+.changes__count { font-size: 11px; color: var(--color-text-muted); font-weight: 600; background: color-mix(in srgb, var(--color-text) 8%, transparent); border-radius: var(--radius-pill); padding: 1px 8px; }
+.changes__baseline { margin: 3px 0 0; font-size: 10.5px; color: var(--color-text-muted); font-family: var(--font-mono); }
+.changes__list { list-style: none; margin: 0; padding: 0 8px 10px; overflow-y: auto; flex: 1; }
+.changes__row { border-bottom: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent); }
+.changes__row--touched { background: color-mix(in srgb, var(--color-accent) 6%, transparent); }
+.changes__row-main { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 8px; background: transparent; border: 0; cursor: pointer; text-align: left; border-radius: var(--radius-sm); transition: background var(--duration-fast) var(--ease-out); }
+.changes__row-main:hover { background: color-mix(in srgb, var(--color-text) 5%, transparent); }
+.changes__row-main:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.changes__status { flex-shrink: 0; width: 18px; height: 18px; display: inline-grid; place-items: center; font-size: 11px; font-weight: 700; border-radius: var(--radius-xs); color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 8%, transparent); }
+.changes__status[data-status='M'] { color: var(--color-warn-strong); background: color-mix(in srgb, var(--color-warn) 18%, transparent); }
+.changes__status[data-status='A'], .changes__status[data-status='??'] { color: var(--add-text); background: color-mix(in srgb, var(--color-success) 16%, transparent); }
+.changes__status[data-status='D'] { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 14%, transparent); }
+.changes__path { flex: 1; min-width: 0; font-size: 12px; font-family: var(--font-mono); color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.changes__path b { direction: ltr; unicode-bidi: plaintext; font-weight: 600; }
+.changes__counts { flex-shrink: 0; display: inline-flex; gap: 6px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.changes__add { color: var(--add-text); }
+.changes__del { color: var(--color-danger); }
+.changes__touched { flex-shrink: 0; font-size: 9px; color: var(--color-accent-strong); }
+.changes__hint { padding: 8px 16px; font-size: 10.5px; color: var(--color-text-muted); border-top: 1px dashed var(--color-border); }
+
+/* ═══ DIFF DIALOG ═══ */
+.diff-overlay { position: fixed; inset: 0; z-index: 1200; background: var(--interaction-overlay-bg); backdrop-filter: blur(3px); opacity: 0; visibility: hidden; transition: opacity var(--duration-base) var(--ease-out), visibility 0s linear var(--duration-base); }
+.diff-overlay.is-open { opacity: 1; visibility: visible; transition: opacity var(--duration-base) var(--ease-out); }
+.diff-dialog { position: absolute; display: flex; flex-direction: row; overflow: hidden; border: 1px solid color-mix(in srgb, var(--color-accent-strong) 35%, var(--color-border)); border-radius: var(--radius-lg); background: var(--color-panel); box-shadow: var(--interaction-shadow), var(--ring-light); transform: translateY(8px) scale(0.97); opacity: 0; transition: transform var(--duration-slow) var(--ease-spring), opacity var(--duration-base) var(--ease-out); }
+.diff-overlay.is-open .diff-dialog { transform: translateY(0) scale(1); opacity: 1; }
+
+/* ── 八向缩放手柄（四边 + 四角） ── */
+.rz { position: absolute; z-index: 6; }
+.rz-n { top: 0; left: 12px; right: 12px; height: 7px; cursor: ns-resize; }
+.rz-s { bottom: 0; left: 12px; right: 12px; height: 7px; cursor: ns-resize; }
+.rz-e { top: 12px; bottom: 12px; right: 0; width: 7px; cursor: ew-resize; }
+.rz-w { top: 12px; bottom: 12px; left: 0; width: 7px; cursor: ew-resize; }
+.rz-ne { top: 0; right: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+.rz-nw { top: 0; left: 0; width: 14px; height: 14px; cursor: nwse-resize; }
+.rz-se { bottom: 0; right: 0; width: 16px; height: 16px; cursor: nwse-resize; }
+.rz-sw { bottom: 0; left: 0; width: 14px; height: 14px; cursor: nesw-resize; }
+.rz-n:hover, .rz-s:hover, .rz-e:hover, .rz-w:hover { background: color-mix(in srgb, var(--color-accent) 24%, transparent); }
+.rz-ne:hover, .rz-nw:hover, .rz-se:hover, .rz-sw:hover { background: color-mix(in srgb, var(--color-accent) 24%, transparent); border-radius: 3px; }
+body.rz-busy { user-select: none; }
+body.rz-busy .rz { pointer-events: none; }
+
+/* ── 左侧改动文件列表（内联/外联均显示） ── */
+.diff-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.diff-sidebar { flex: 0 0 212px; min-width: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; background: var(--color-panel); }
+.diff-splitter { flex: 0 0 7px; cursor: col-resize; position: relative; z-index: 4; background: transparent; }
+.diff-splitter::after { content: ''; position: absolute; top: 0; bottom: 0; left: 3px; width: 1px; background: var(--color-border); }
+.diff-splitter:hover::after, .diff-splitter.is-drag::after { background: var(--color-accent); left: 2.5px; width: 2px; }
+.diff-sidebar__header { padding: 12px 14px 10px; border-bottom: 1px solid var(--color-border); flex: 0 0 auto; }
+.diff-sidebar__eyebrow { margin: 0; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-text-muted); }
+.diff-sidebar__title { display: flex; align-items: center; gap: 8px; margin: 3px 0 0; font-size: 13px; font-weight: 600; }
+.diff-sidebar__count { font-size: 11px; color: var(--color-text-muted); font-weight: 600; background: color-mix(in srgb, var(--color-text) 8%, transparent); border-radius: var(--radius-pill); padding: 1px 8px; }
+.diff-sidebar__list { list-style: none; margin: 0; padding: 6px 8px; overflow-x: hidden; overflow-y: auto; flex: 1; min-height: 0; min-width: 0; }
+.diff-sidebar__list li { padding: 1px 0; }
+.sf-row { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; padding: 6px 8px; background: transparent; border: 0; border-radius: var(--radius-sm); cursor: pointer; text-align: left; font: inherit; overflow: hidden; transition: background var(--duration-fast) var(--ease-out); }
+.sf-row:hover { background: color-mix(in srgb, var(--color-text) 5%, transparent); }
+.sf-row:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.sf-row.is-active { background: color-mix(in srgb, var(--color-accent) 14%, transparent); box-shadow: inset 2px 0 0 var(--color-accent); }
+.sf-row.is-active .sf-path b { color: var(--color-accent-strong); }
+.sf-status { flex-shrink: 0; width: 18px; height: 18px; display: inline-grid; place-items: center; font-size: 11px; font-weight: 700; border-radius: var(--radius-xs); color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 8%, transparent); }
+.sf-status[data-status='M'] { color: var(--color-warn-strong); background: color-mix(in srgb, var(--color-warn) 18%, transparent); }
+.sf-status[data-status='A'], .sf-status[data-status='??'] { color: var(--add-text); background: color-mix(in srgb, var(--color-success) 16%, transparent); }
+.sf-status[data-status='D'] { color: var(--color-danger); background: color-mix(in srgb, var(--color-danger) 14%, transparent); }
+.sf-path { flex: 1; min-width: 0; font-size: 11.5px; font-family: var(--font-mono); color: var(--color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.sf-path b { direction: ltr; unicode-bidi: plaintext; font-weight: 600; }
+.sf-counts { flex-shrink: 0; display: inline-flex; gap: 5px; font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.sf-add { color: var(--add-text); }
+.sf-del { color: var(--color-danger); }
+.sf-dot { flex-shrink: 0; font-size: 8px; color: var(--color-accent-strong); }
+
+.diff-header { user-select: none; flex: 0 0 auto; padding: 14px 18px 12px; border-bottom: 1px solid var(--color-border); background: linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 12%, transparent), transparent 72%); display: flex; align-items: flex-start; gap: 14px; }
+.diff-header__main { flex: 1; min-width: 0; }
+.diff-eyebrow { display: inline-flex; align-items: center; gap: 6px; margin-bottom: 5px; color: var(--color-accent-strong); font-size: 10.5px; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+.diff-eyebrow .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--color-warn-strong); }
+.diff-title { display: flex; align-items: center; gap: 8px; margin: 0; font-family: var(--font-mono); font-size: 14.5px; font-weight: 600; line-height: 1.35; color: var(--color-text); overflow: hidden; }
+.diff-title .stat { font-family: var(--font-sans); font-weight: 700; }
+.diff-title .stat-add { color: var(--add-text); }
+.diff-title .stat-del { color: var(--color-danger); }
+.diff-meta { margin: 5px 0 0; font-size: 12px; color: var(--color-text-muted); display: flex; flex-wrap: wrap; gap: 6px 12px; }
+.diff-meta code { font-family: var(--font-mono); color: var(--color-text); font-size: 11.5px; }
+.diff-header__actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+
+.iconbtn { display: inline-grid; place-items: center; width: 30px; height: 30px; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--color-text-muted); cursor: pointer; transition: background var(--duration-fast) var(--ease-out), color var(--duration-fast); }
+.iconbtn:hover:not(:disabled) { background: color-mix(in srgb, var(--color-text) 6%, transparent); color: var(--color-text); }
+.iconbtn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.iconbtn:disabled { opacity: 0.4; cursor: not-allowed; }
+.iconbtn svg { width: 16px; height: 16px; }
+.iconbtn--close { width: 32px; height: 32px; }
+.fileswitch { display: inline-flex; align-items: center; margin-right: 4px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; background: var(--color-panel-soft); }
+.fileswitch .iconbtn { width: 28px; height: 28px; border: 0; border-radius: 0; }
+.fileswitch__count { font-size: 11px; color: var(--color-text-muted); padding: 0 6px; font-variant-numeric: tabular-nums; min-width: 38px; text-align: center; }
+
+/* ── TOOLBAR ── */
+.diff-toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--color-border); background: var(--color-panel-soft); flex-wrap: wrap; }
+.seg { display: inline-flex; background: color-mix(in srgb, var(--color-text) 6%, transparent); border-radius: var(--radius-sm); padding: 2px; }
+.seg button { display: inline-flex; align-items: center; gap: 5px; border: 0; cursor: pointer; padding: 4px 10px; font-size: 12px; font-weight: 600; color: var(--color-text-muted); background: transparent; border-radius: calc(var(--radius-sm) - 2px); transition: background var(--duration-fast) var(--ease-out), color var(--duration-fast); }
+.seg button svg { width: 14px; height: 14px; }
+.seg button.is-active { background: var(--color-panel); color: var(--color-accent-strong); box-shadow: var(--ring-light), var(--elevation-1); }
+.seg button:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.ctx-group { display: none; align-items: center; gap: 6px; }
+.diff-overlay.is-inline .ctx-group { display: inline-flex; }
+.ctx-group__label { font-size: 11px; color: var(--color-text-muted); font-weight: 600; }
+.ctx-group .seg button { min-width: 30px; justify-content: center; padding: 4px 8px; }
+.tbtn { display: none; align-items: center; gap: 6px; padding: 5px 10px; font-size: 12px; font-weight: 600; color: var(--color-text); background: var(--color-panel); border: 1px solid var(--color-border); border-radius: var(--radius-sm); cursor: pointer; white-space: nowrap; transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast), color var(--duration-fast); }
+.diff-overlay.is-inline .tbtn--only { display: none; }
+.diff-overlay:not(.is-inline) .tbtn--only { display: none; }
+.tbtn svg { width: 14px; height: 14px; opacity: 0.8; }
+.tbtn:hover { border-color: var(--color-accent-strong); color: var(--color-accent-strong); }
+.tbtn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.tbtn.is-active { background: color-mix(in srgb, var(--color-accent) 16%, transparent); border-color: color-mix(in srgb, var(--color-accent) 45%, transparent); color: var(--color-accent-strong); }
+.tbtn:disabled { opacity: 0.45; cursor: not-allowed; }
+.toolbar__spacer { flex: 1; }
+.navchange { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-panel); }
+.navchange .iconbtn { width: 28px; height: 28px; }
+.navchange__count { font-size: 11.5px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; min-width: 44px; text-align: center; }
+
+/* ── 列头 ── */
+.diff-colheads { flex: 0 0 auto; display: flex; border-bottom: 1px solid var(--color-border-strong); background: var(--color-panel); }
+.colhead { flex: 1; min-width: 0; padding: 7px 14px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--color-text-muted); display: flex; align-items: center; gap: 7px; }
+.colhead code { text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--color-text); font-weight: 600; }
+.colhead--gutter { flex: 0 0 86px; padding: 7px 0; justify-content: center; font-size: 9px; gap: 4px; }
+
+/* ── BODY ── */
+.diff-body { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; background: var(--color-panel-soft); position: relative; }
+.diff-body::-webkit-scrollbar { width: 12px; height: 12px; }
+.diff-body::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-text) 18%, transparent); border-radius: 8px; border: 3px solid var(--color-panel-soft); }
+.diff-body::-webkit-scrollbar-corner { background: var(--color-panel-soft); }
+.diff-row { display: flex; align-items: stretch; min-width: 100%; }
+.pane { flex: 1; min-width: 0; display: flex; }
+.pane-scroll { flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+.pane-scroll::-webkit-scrollbar { height: 10px; }
+.pane-scroll::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--color-text) 16%, transparent); border-radius: 8px; }
+.pane-scroll::-webkit-scrollbar-track { background: transparent; }
+.col-left, .col-right, .col-inline { min-width: 100%; display: block; }
+
+.gutter-connectors { flex: 0 0 86px; min-width: 86px; position: relative; background: var(--color-panel); border-left: 1px solid var(--color-border); border-right: 1px solid var(--color-border); overflow: hidden; }
+.gutter-connectors.has-wrap .gutter-svg { opacity: 0; }
+.gutter-flow { position: relative; }
+.gutter-row { display: flex; height: var(--diff-line-h); line-height: var(--diff-line-h); padding: 0 19px; font-family: var(--font-mono); font-size: 10.5px; color: var(--color-text-muted); }
+.gutter-row .g-old { flex: 1; text-align: right; padding-right: 4px; opacity: 0.7; }
+.gutter-row .g-new { flex: 1; text-align: right; padding: 0 4px; opacity: 0.7; border-left: 1px solid color-mix(in srgb, var(--color-border) 70%, transparent); }
+.gutter-row .g-old.emp { color: var(--del-text); opacity: 1; font-weight: 700; }
+.gutter-row .g-new.emp { color: var(--add-text); opacity: 1; font-weight: 700; }
+.gutter-svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; z-index: 1; }
+.ghunk { position: relative; cursor: pointer; }
+.gmark { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.gm, .gm-ln { stroke: none; }
+.gm--add, .gm-ln--add { fill: var(--add-edge); }
+.gm--del, .gm-ln--del { fill: var(--del-edge); }
+.gm--mod { fill: var(--mod-edge); }
+.gm--ws  { fill: var(--color-text-muted); }
+.ghunk.is-current .gmark { filter: drop-shadow(0 0 2px var(--color-accent)); }
+.mk { stroke-width: 1; opacity: 0.9; pointer-events: all; cursor: pointer; }
+.mk--add { fill: var(--add-edge); }
+.mk--del { fill: var(--del-edge); }
+.mk--mod { fill: var(--mod-edge); }
+.mk--ws  { fill: var(--color-text-muted); }
+.mk-span { stroke-width: 1; pointer-events: all; cursor: pointer; }
+.mk-span--add { fill: color-mix(in srgb, var(--add-edge) 13%, transparent); stroke: color-mix(in srgb, var(--add-edge) 48%, transparent); }
+.mk-span--del { fill: color-mix(in srgb, var(--del-edge) 13%, transparent); stroke: color-mix(in srgb, var(--del-edge) 48%, transparent); }
+.mk-span.is-current { stroke-width: 2; }
+.gline { position: absolute; left: 0; right: 0; top: 50%; height: 2px; transform: translateY(-1px); pointer-events: none; z-index: 1; }
+.gline--add { background: var(--add-edge); }
+.gline--del { background: var(--del-edge); }
+.mk-ln { fill: none; stroke-width: 2.5; stroke-linecap: round; opacity: 0.9; pointer-events: stroke; cursor: pointer; }
+.mk-ln--add { stroke: var(--add-edge); }
+.mk-ln--del { stroke: var(--del-edge); }
+.mk-ln--mod { stroke: var(--mod-edge); }
+.mk-ln--ws  { stroke: var(--color-text-muted); }
+.mk.is-current { stroke: var(--color-accent); stroke-width: 1.5; opacity: 1; }
+.mk-ln.is-current { stroke-width: 4; opacity: 1; }
+
+/* ── 行 ── */
+.line { display: flex; align-items: stretch; min-width: 100%; height: var(--diff-line-h); line-height: var(--diff-line-h); font-family: var(--font-mono); font-size: var(--diff-font); white-space: pre; }
+.line .ln { flex: 0 0 46px; min-width: 46px; padding: 0 8px; text-align: right; color: var(--color-text-muted); opacity: 0.7; user-select: none; font-size: 11px; background: var(--color-panel-soft); z-index: 1; }
+.line .ln--L { position: sticky; left: 0; border-right: 1px solid var(--color-border); }
+.line .ln--R { position: sticky; right: 0; border-left: 1px solid var(--color-border); }
+.line .sign { flex: 0 0 18px; text-align: center; user-select: none; opacity: 0.55; }
+.line code { flex: 0 0 auto; padding: 0 14px 0 6px; color: var(--color-text); }
+
+.line--add { background: var(--add-bg); }
+.line--add .sign { color: var(--add-text); opacity: 1; }
+.line--add .ln { color: var(--add-text); }
+.line--del { background: var(--del-bg); }
+.line--del .sign { color: var(--del-text); opacity: 1; }
+.line--del .ln { color: var(--del-text); }
+.line--modl { background: var(--del-bg); }
+.line--modl .sign { color: var(--del-text); opacity: 0.9; }
+.line--modr { background: var(--add-bg); }
+.line--modr .sign { color: var(--add-text); opacity: 0.9; }
+.line--ws { background: var(--mod-bg); }
+.line--ws .sign { color: var(--mod-edge); opacity: 0.9; }
+.line--fill { background: color-mix(in srgb, var(--color-text) 3.5%, transparent); }
+.line--fill .sign, .line--fill code { color: transparent; }
+.hunk-block[data-kind='add'] .line--fill { background: color-mix(in srgb, var(--color-success) 4%, transparent); }
+.hunk-block[data-kind='del'] .line--fill { background: color-mix(in srgb, var(--color-danger) 4%, transparent); }
+.hunk-block { position: relative; }
+.hunk-block.is-current { box-shadow: inset 2px 0 0 var(--color-accent); }
+.hunk-block.flash > .line { animation: flash 0.7s var(--ease-out); }
+@keyframes flash { 0% { background: color-mix(in srgb, var(--color-accent) 18%, transparent); } 100% { background: transparent; } }
+
+/* word-level 内联高亮 */
+.wd { border-radius: 3px; padding: 1px 0; }
+.wd-del { background: var(--del-bg-strong); color: var(--del-text); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--color-danger) 55%, transparent); }
+.wd-ins { background: var(--add-bg-strong); color: var(--add-text); font-weight: 600; }
+
+/* 内联模式：未改动上下文折叠条（可点开/收起） */
+.ctx-gap { display: block; width: 100%; border: 0; cursor: pointer; text-align: center; height: var(--diff-line-h); line-height: var(--diff-line-h); background: color-mix(in srgb, var(--color-panel) 65%, var(--color-panel-soft)); color: var(--color-text-muted); font-size: 11px; font-family: var(--font-sans); border-top: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); }
+.ctx-gap:hover { color: var(--add-text); background: color-mix(in srgb, var(--color-success) 7%, transparent); }
+.ctx-gap__range { opacity: 0.65; margin-left: 8px; }
+.ctx-gap--open { color: var(--add-text); }
+
+/* 并排模式：仅看改动的折叠 */
+.ctx-fold { display: none; width: 100%; border: 0; cursor: pointer; height: var(--diff-line-h); line-height: var(--diff-line-h); padding: 0 14px; text-align: left; background: color-mix(in srgb, var(--color-panel) 65%, var(--color-panel-soft)); color: var(--color-text-muted); font-size: 11px; font-family: var(--font-sans); border-top: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent); }
+.ctx-fold:hover { color: var(--color-accent-strong); background: color-mix(in srgb, var(--color-accent) 8%, transparent); }
+.ctx-fold::before { content: '⋯  '; font-weight: 700; }
+.only-changes .ctx-fold { display: block; }
+.only-changes .ctx-block { display: none; }
+.only-changes .ctx-block.is-expanded { display: block; }
+.ctx-fold.is-hidden { display: none !important; }
+
+/* 自动换行 */
+.diff-body.is-wrap .line { height: auto; min-height: var(--diff-line-h); white-space: pre-wrap; word-break: break-word; }
+.diff-body.is-wrap .pane-scroll { overflow-x: hidden; }
+.diff-body.is-wrap .line code { flex: 1 1 auto; }
+
+/* 空态 / 二进制 */
+.diff-state { flex: 1; min-height: 0; display: grid; place-items: center; padding: 40px; text-align: center; }
+.diff-state__icon { width: 56px; height: 56px; border-radius: var(--radius-lg); display: grid; place-items: center; margin: 0 0 14px; background: color-mix(in srgb, var(--color-accent) 12%, transparent); color: var(--color-accent-strong); }
+.diff-state__icon svg { width: 28px; height: 28px; }
+.diff-state h3 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.diff-state p { margin: 0; color: var(--color-text-muted); font-size: 13px; max-width: 420px; line-height: 1.6; }
+.diff-state code { font-size: 12px; color: var(--color-text); }
+
+/* ── FOOTER ── */
+.diff-footer { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-top: 1px solid var(--color-border); background: var(--color-panel); }
+.legend { display: inline-flex; align-items: center; gap: 14px; font-size: 11.5px; color: var(--color-text-muted); flex-wrap: wrap; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 12px; height: 12px; border-radius: 3px; display: inline-block; border: 1px solid color-mix(in srgb, #000 8%, transparent); }
+.legend .lg-add { background: var(--add-bg-strong); }
+.legend .lg-del { background: var(--del-bg-strong); }
+.legend .lg-mod { background: var(--mod-bg); }
+.diff-footer__actions { margin-left: auto; display: flex; gap: 8px; }
+.btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-panel-soft); color: var(--color-text); padding: 7px 14px; font-size: 12.5px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast), color var(--duration-fast); }
+.btn svg { width: 14px; height: 14px; opacity: 0.8; }
+.btn:hover { border-color: var(--color-accent-strong); color: var(--color-accent-strong); }
+.btn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+.btn--primary { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); box-shadow: var(--ring-light-accent); }
+.btn--primary:hover { background: var(--color-accent-strong); border-color: var(--color-accent-strong); color: var(--color-on-accent); }
+
+.toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px); z-index: 1300; opacity: 0; pointer-events: none; background: color-mix(in srgb, var(--color-text) 92%, #000); color: #fff; padding: 9px 16px; border-radius: var(--radius-md); font-size: 12.5px; font-weight: 600; box-shadow: var(--elevation-3); display: inline-flex; align-items: center; gap: 8px; transition: opacity var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-spring); }
+.toast.is-show { opacity: 1; transform: translateX(-50%) translateY(0); }
+.toast svg { width: 15px; height: 15px; color: var(--color-success); }
+
+@media (max-width: 720px) {
+  .app { grid-template-columns: 56px 1fr; }
+  .changes { display: none; }
+  .diff-dialog { width: 100vw; height: 100vh; border-radius: 0; }
+  .diff-sidebar { flex-basis: 150px; }
+}
+</style>
+</head>
+<body>
+
+<div class="proto-hint">左侧列表点文件自由切换 · 顶部「上下文 3/5/10/20」调未改动行数 · <kbd>↑</kbd><kbd>↓</kbd> 跳转改动 · <kbd>Esc</kbd> 关闭</div>
+
+<!-- ═══ MOCK APP ═══ -->
+<div class="app" id="app">
+  <aside class="rail">
+    <div class="rail__logo">C</div>
+    <button class="rail__btn is-active" title="会话">≡</button>
+    <button class="rail__btn" title="设置">⚙</button>
+  </aside>
+  <main class="main">
+    <div class="main__topbar"><span class="crumb"><b>claude-link</b> / diff-viewer 原型</span></div>
+    <div class="chat">
+      <div class="bubble bubble--ai">内联视图已加「上下文行数」选择器（3 / 5 / 10 / 20）：调整后即时重排，重叠的上下文会自动合并成一块，中间断层显示为可点击的「⋯ K 行」。</div>
+      <div class="bubble bubble--me">颜色改成 <code>删除=红、新增=绿</code>，浅一点别太深。</div>
+      <div class="bubble bubble--ai">已改。→ 点右侧文件，切到「内联」视图，试上下文选择器。</div>
+    </div>
+    <div class="composer">说点什么…（模拟主窗口，仅用于演示弹窗触发上下文）</div>
+  </main>
+  <aside class="changes">
+    <div class="changes__header">
+      <p class="changes__eyebrow">Changes</p>
+      <h2 class="changes__title">改动 <span class="changes__count" id="chg-count">0</span></h2>
+      <p class="changes__baseline">对比 HEAD <span id="chg-baseline">a1b2c3d</span></p>
+    </div>
+    <ul class="changes__list" id="chg-list"></ul>
+    <div class="changes__hint">提示：点击任意文件 → 打开对比弹窗</div>
+  </aside>
+</div>
+
+<!-- ═══ DIFF DIALOG ═══ -->
+<div class="diff-overlay" id="overlay" role="dialog" aria-modal="true" aria-labelledby="diff-title" aria-hidden="true">
+  <div class="diff-dialog" id="dialog" role="document">
+    <div class="rz rz-n" data-rz="n"></div><div class="rz rz-s" data-rz="s"></div>
+    <div class="rz rz-e" data-rz="e"></div><div class="rz rz-w" data-rz="w"></div>
+    <div class="rz rz-ne" data-rz="ne"></div><div class="rz rz-nw" data-rz="nw"></div>
+    <div class="rz rz-se" data-rz="se"></div><div class="rz rz-sw" data-rz="sw"></div>
+    <aside class="diff-sidebar" id="sidebar" aria-label="改动文件列表">
+      <div class="diff-sidebar__header">
+        <p class="diff-sidebar__eyebrow">Changes</p>
+        <h3 class="diff-sidebar__title">改动文件 <span class="diff-sidebar__count" id="sb-count">0</span></h3>
+      </div>
+      <ul class="diff-sidebar__list" id="sb-list"></ul>
+    </aside>
+    <div class="diff-splitter" id="splitter" title="拖动调整列表宽度"></div>
+    <div class="diff-main">
+    <header class="diff-header">
+      <div class="diff-header__main">
+        <div class="diff-eyebrow"><span class="dot" id="status-dot"></span><span id="status-label">改动</span> · 文件对比</div>
+        <h2 class="diff-title" id="diff-title"><span class="path" id="title-path">—</span></h2>
+        <p class="diff-meta">
+          <span>对比 <code>HEAD <span id="meta-baseline">a1b2c3d</span></code></span>
+          <span class="stat stat-add" id="meta-add">+0</span>
+          <span class="stat stat-del" id="meta-del">−0</span>
+          <span id="meta-hunks">0 处改动</span>
+          <span id="meta-truncated" hidden style="color:var(--color-warn-strong)">· 差异过大仅显示前部分</span>
+        </p>
+      </div>
+      <div class="diff-header__actions">
+        <div class="fileswitch" title="切换文件（[ / ]）">
+          <button class="iconbtn" id="prev-file" aria-label="上一个文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <span class="fileswitch__count" id="fileswitch-count">1 / 1</span>
+          <button class="iconbtn" id="next-file" aria-label="下一个文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
+        </div>
+        <button class="iconbtn iconbtn--close" id="close-btn" aria-label="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+    </header>
+
+    <div class="diff-toolbar">
+      <div class="seg" role="tablist" aria-label="视图模式">
+        <button id="mode-split" class="is-active" role="tab" aria-selected="true" title="并排对比"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="8" height="16" rx="1"/><rect x="13" y="4" width="8" height="16" rx="1"/></svg>并排</button>
+        <button id="mode-inline" role="tab" aria-selected="false" title="内联合并"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="14" y2="17"/></svg>内联</button>
+      </div>
+
+      <div class="ctx-group" id="ctx-group" title="上下文行数：每处改动周围显示多少未变更行（重叠则合并）">
+        <span class="ctx-group__label">上下文</span>
+        <div class="seg">
+          <button data-ctx="3" class="is-active">3</button>
+          <button data-ctx="5">5</button>
+          <button data-ctx="10">10</button>
+          <button data-ctx="20">20</button>
+        </div>
+      </div>
+
+      <div class="toolbar__spacer"></div>
+
+      <div class="navchange" title="上一处 / 下一处改动（↑ / ↓）">
+        <button class="iconbtn" id="prev-change" aria-label="上一处改动"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"/></svg></button>
+        <span class="navchange__count" id="change-count">0 / 0</span>
+        <button class="iconbtn" id="next-change" aria-label="下一处改动"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button>
+      </div>
+
+      <button class="tbtn" id="toggle-ws" title="忽略空白差异"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7h4M3 12h7M3 17h5"/><circle cx="18" cy="12" r="3" stroke-dasharray="2 2"/></svg>忽略空白</button>
+      <button class="tbtn" id="toggle-wrap" title="自动换行"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 12 8 12"/><path d="M20 17v-5a4 4 0 0 0-4-4H8"/><polyline points="16 19 20 17 16 15"/></svg>换行</button>
+      <button class="tbtn tbtn--only" id="toggle-only" title="仅显示改动（折叠未改动行）"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>仅改动</button>
+    </div>
+
+    <div class="diff-colheads" id="colheads">
+      <div class="colhead">改动前 <code>· HEAD</code></div>
+      <div class="colhead colhead--gutter" aria-hidden="true">旧<span style="opacity:.35">·</span>新</div>
+      <div class="colhead">改动后 <code>· 工作区</code></div>
+    </div>
+
+    <div class="diff-body" id="diff-body"></div>
+
+    <footer class="diff-footer">
+      <div class="legend">
+        <span><i class="lg-add"></i>新增</span>
+        <span><i class="lg-del"></i>删除</span>
+        <span><i class="lg-mod"></i>修改</span>
+      </div>
+      <div class="diff-footer__actions">
+        <button class="btn btn--primary" id="open-editor"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>打开</button>
+      </div>
+    </footer>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span id="toast-text">已复制</span></div>
+
+<script>
+"use strict";
+/* ═══════════════════════════════════════════════════════════════════════
+   数据 —— 形态对齐 src/shared/types/changes.ts（unified diff → 结构化分组）
+   分组：ctx 未改动 / mod 1:1 修改(词级 segs) / add 纯增 / del 纯删 / ws 仅空白
+   seg: {s:'eq'|'del'|'ins', x}
+   注：文件 1 刻意加长（含 13 行、9 行的未改动函数体），以演示上下文 3/5/10/20 的折叠与合并
+   ═══════════════════════════════════════════════════════════════════════ */
+const BASELINE = 'a1b2c3d';
+const FILES = [
+  {
+    path: 'src/renderer/stores/changes-store.ts', status: 'M', touched: true, binary: false, truncated: false,
+    groups: [
+      { k:'ctx', L:[
+        {n:1,t:"import { defineStore } from 'pinia';"},
+        {n:2,t:"import { ref, computed } from 'vue';"},
+        {n:3,t:"import { renderDiffHtml } from '../utils/markdown';"},
+        {n:4,t:""},
+        {n:5,t:"export const useChangesStore = defineStore('changes', () => {"},
+        {n:6,t:"  const loading = ref(false);"},
+      ], R:[
+        {n:1,t:"import { defineStore } from 'pinia';"},
+        {n:2,t:"import { ref, computed } from 'vue';"},
+        {n:3,t:"import { renderDiffHtml } from '../utils/markdown';"},
+        {n:4,t:""},
+        {n:5,t:"export const useChangesStore = defineStore('changes', () => {"},
+        {n:6,t:"  const loading = ref(false);"},
+      ] },
+      { k:'mod',
+        L:[{n:7,t:"  const MAX_DIFF_LINES = 400;", segs:[{s:'eq',x:"  const MAX_DIFF_LINES = "},{s:'del',x:"400"},{s:'eq',x:";"}]}],
+        R:[{n:7,t:"  const MAX_DIFF_LINES = 800;", segs:[{s:'eq',x:"  const MAX_DIFF_LINES = "},{s:'ins',x:"800"},{s:'eq',x:";"}]}] },
+      { k:'ctx', L:[{n:8,t:"  const expandedPath = ref<string | null>(null);"},{n:9,t:"  const diffCache = ref<Record<string, CachedDiff>>({});"}],
+                    R:[{n:8,t:"  const expandedPath = ref<string | null>(null);"},{n:9,t:"  const diffCache = ref<Record<string, CachedDiff>>({});"}] },
+      { k:'add', L:[], R:[
+          {n:10,t:"  /** 点文件改为弹出 DiffDialog：并排对比取代内联展开 */"},
+          {n:11,t:"  const diffDialog = ref<{ path: string; open: boolean } | null>(null);"},
+      ] },
+      { k:'ctx', L:[
+        {n:10,t:"  async function refresh() {"},{n:11,t:"    if (loading.value) return;"},
+        {n:12,t:"    loading.value = true;"},{n:13,t:"    try {"},
+        {n:14,t:"      const res = await window.claudeLink.listChanges(workingDir, touched);"},
+        {n:15,t:"      if (!res.ok) { error.value = res.message; return; }"},
+        {n:16,t:"      files.value = res.files;"},{n:17,t:"      baselineRef.value = res.baselineRef;"},
+        {n:18,t:"    } catch (e) {"},{n:19,t:"      error.value = String(e);"},
+        {n:20,t:"    } finally {"},{n:21,t:"      loading.value = false;"},
+        {n:22,t:"    }"},{n:23,t:"  }"},
+      ], R:[
+        {n:12,t:"  async function refresh() {"},{n:13,t:"    if (loading.value) return;"},
+        {n:14,t:"    loading.value = true;"},{n:15,t:"    try {"},
+        {n:16,t:"      const res = await window.claudeLink.listChanges(workingDir, touched);"},
+        {n:17,t:"      if (!res.ok) { error.value = res.message; return; }"},
+        {n:18,t:"      files.value = res.files;"},{n:19,t:"      baselineRef.value = res.baselineRef;"},
+        {n:20,t:"    } catch (e) {"},{n:21,t:"      error.value = String(e);"},
+        {n:22,t:"    } finally {"},{n:23,t:"      loading.value = false;"},
+        {n:24,t:"    }"},{n:25,t:"  }"},
+      ] },
+      { k:'del', L:[{n:24,t:"  // 旧的内联展开逻辑（已迁移至 DiffDialog）"}], R:[] },
+      { k:'ctx', L:[
+        {n:25,t:"  function toggleExpand(path: string) {"},{n:26,t:"    expandedPath.value = expandedPath.value === path ? null : path;"},
+        {n:27,t:"    void ensureDiff(path);"},{n:28,t:"  }"},
+        {n:29,t:"  async function ensureDiff(path: string) {"},{n:30,t:"    if (diffCache.value[path]) return;"},
+        {n:31,t:"    const d = await window.claudeLink.getChangeDiff(workingDir, path);"},
+        {n:32,t:"    diffCache.value[path] = d;"},{n:33,t:"  }"},
+      ], R:[
+        {n:26,t:"  function toggleExpand(path: string) {"},{n:27,t:"    expandedPath.value = expandedPath.value === path ? null : path;"},
+        {n:28,t:"    void ensureDiff(path);"},{n:29,t:"  }"},
+        {n:30,t:"  async function ensureDiff(path: string) {"},{n:31,t:"    if (diffCache.value[path]) return;"},
+        {n:32,t:"    const d = await window.claudeLink.getChangeDiff(workingDir, path);"},
+        {n:33,t:"    diffCache.value[path] = d;"},{n:34,t:"  }"},
+      ] },
+      { k:'mod',
+        L:[{n:34,t:"  return { files, expandedPath, toggleExpand };", segs:[{s:'eq',x:"  return { files, expandedPath, toggleExpand"},{s:'eq',x:" };"}]}],
+        R:[{n:35,t:"  return { files, expandedPath, toggleExpand, openDiffDialog };", segs:[{s:'eq',x:"  return { files, expandedPath, toggleExpand"},{s:'ins',x:", openDiffDialog"},{s:'eq',x:" };"}]}] },
+      { k:'ctx', L:[
+        {n:35,t:""},{n:36,t:"  function openDiffDialog(path: string) {"},
+        {n:37,t:"    diffDialog.value = { path, open: true };"},{n:38,t:"    void ensureDiff(path);"},
+        {n:39,t:"  }"},{n:40,t:"});"},
+      ], R:[
+        {n:36,t:""},{n:37,t:"  function openDiffDialog(path: string) {"},
+        {n:38,t:"    diffDialog.value = { path, open: true };"},{n:39,t:"    void ensureDiff(path);"},
+        {n:40,t:"  }"},{n:41,t:"});"},
+      ] },
+    ]
+  },
+  {
+    path: 'src/renderer/components/changes/ChangesPanel.vue', status: 'M', touched: false, binary: false, truncated: false,
+    groups: [
+      { k:'ctx', L:[{n:1,t:"<script setup lang=\"ts\">"}], R:[{n:1,t:"<script setup lang=\"ts\">"}] },
+      { k:'ctx', L:[{n:2,t:"import { useChangesStore } from '../../stores/changes-store';"}], R:[{n:2,t:"import { useChangesStore } from '../../stores/changes-store';"}] },
+      { k:'mod',
+        L:[{n:3,t:"import { renderDiffHtml } from '../../utils/markdown';", segs:[{s:'eq',x:"import "},{s:'del',x:"{ renderDiffHtml } from '../../utils/markdown'"},{s:'eq',x:";"}]}],
+        R:[{n:3,t:"import DiffDialog from './DiffDialog.vue';", segs:[{s:'eq',x:"import "},{s:'ins',x:"DiffDialog from './DiffDialog.vue'"},{s:'eq',x:";"}]}] },
+      { k:'ctx', L:[{n:4,t:""}], R:[{n:4,t:""}] },
+      { k:'del', L:[{n:42,t:"      <div v-if=\"store.expandedPath === f.path\" class=\"changes__diff\">"}], R:[] },
+      { k:'del', L:[{n:43,t:"        <div class=\"markdown-body\" v-html=\"expandedHtml\" />"}], R:[] },
+      { k:'add', L:[], R:[{n:42,t:"      <DiffDialog v-model:open=\"dialogOpen\" :path=\"f.path\" />"}] },
+      { k:'ctx', L:[{n:44,t:"    </li>"}], R:[{n:43,t:"    </li>"}] },
+    ]
+  },
+  {
+    path: 'src/main/modules/changes-panel.ts', status: 'M', touched: true, binary: false, truncated: false,
+    groups: [
+      { k:'ctx', L:[{n:88,t:"export async function getChangeDiff(wd, path) {"}], R:[{n:88,t:"export async function getChangeDiff(wd, path) {"}] },
+      { k:'ctx', L:[{n:89,t:"  const raw = await runGit(wd, ['diff', 'HEAD', '--', path]);"}], R:[{n:89,t:"  const raw = await runGit(wd, ['diff', 'HEAD', '--', path]);"}] },
+      { k:'add', L:[], R:[
+          {n:90,t:"  // 截断到 MAX_DIFF_LINES 完整 hunk 边界，避免超大 diff 卡渲染"},
+          {n:91,t:"  const { diff, truncated } = truncateDiff(raw, MAX_DIFF_LINES);"},
+          {n:92,t:"  return { ok: true, diff, truncated, binary: isBinary(raw) };"},
+      ] },
+      { k:'ctx', L:[{n:90,t:"}"}], R:[{n:93,t:"}"}] },
+    ]
+  },
+  { path: 'assets/promo/screenshot.png', status: 'A', touched: false, binary: true, truncated: false, groups: [] },
+];
+
+const STATUS_LABEL = { M:'改', A:'增', D:'删', R:'移', '??':'新', U:'冲' };
+const state = { fileIdx:0, mode:'split', context:3, ignoreWs:false, wrap:false, onlyChanges:false, curChange:0, expandedGaps:new Set(), rect:null, sidebarW:212, lastFocus:null };
+
+const $  = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => [...r.querySelectorAll(s)];
+const esc = s => (s==null?'':String(s)).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+
+const file = () => FILES[state.fileIdx];
+const isHunkGroup = g => g.k!=='ctx' && !(g.k==='ws' && state.ignoreWs);
+function visibleHunks() { return file().groups.map((g,i)=>({g,i})).filter(({g})=>isHunkGroup(g)); }
+function countChanges(f) {
+  let add=0, del=0;
+  for (const g of f.groups) {
+    if (g.k==='add') add += g.R.length;
+    else if (g.k==='del') del += g.L.length;
+    else if (g.k==='mod'||g.k==='ws') { del += g.L.length; add += g.R.length; }
+  }
+  return {add, del};
+}
+
+/* ── 右侧列表 ── */
+function renderChangesList() {
+  $('#chg-count').textContent = FILES.length;
+  $('#chg-baseline').textContent = BASELINE;
+  $('#chg-list').innerHTML = FILES.map((f,i)=>{
+    const c = f.binary ? {add:0,del:0} : countChanges(f);
+    const segs = f.path.split('/'); const name = segs.pop(); const dir = segs.join('/');
+    return `<li class="changes__row${f.touched?' changes__row--touched':''}">
+      <button type="button" class="changes__row-main" data-i="${i}">
+        <span class="changes__status" data-status="${f.status}">${STATUS_LABEL[f.status]||f.status}</span>
+        <span class="changes__path" title="${esc(f.path)}">${dir?esc(dir)+'/':''}<b>${esc(name)}</b></span>
+        ${f.binary ? `<span class="changes__counts"><span style="color:var(--color-text-muted)">二进制</span></span>` : `<span class="changes__counts"><span class="changes__add">+${c.add}</span><span class="changes__del">−${c.del}</span></span>`}
+        ${f.touched?'<span class="changes__touched" title="本次会话编辑过">●</span>':''}
+      </button></li>`;
+  }).join('');
+  $$('#chg-list .changes__row-main').forEach(b => b.addEventListener('click', () => openDialog(+b.dataset.i)));
+}
+
+/* ── 头部 / 工具栏 ── */
+function renderHeader() {
+  const f = file();
+  const segs = f.path.split('/'); const name = segs.pop(); const dir = segs.join('/');
+  $('#title-path').innerHTML = (dir?`<span style="opacity:.55">${esc(dir)}/</span>`:'') + `<b style="font-weight:700">${esc(name)}</b>`;
+  $('#status-label').textContent = STATUS_LABEL[f.status] || f.status;
+  $('#status-dot').style.background = f.status==='D' ? 'var(--color-danger)' : f.status==='A' ? 'var(--color-success)' : 'var(--color-warn-strong)';
+  $('#meta-baseline').textContent = BASELINE;
+  $('#meta-truncated').hidden = !f.truncated;
+  if (f.binary) { $('#meta-add').textContent=''; $('#meta-del').textContent=''; $('#meta-hunks').textContent='二进制文件'; }
+  else { const c=countChanges(f); $('#meta-add').textContent=`+${c.add}`; $('#meta-del').textContent=`−${c.del}`; $('#meta-hunks').textContent=`${navCount()} 处改动`; }
+  $('#fileswitch-count').textContent = `${state.fileIdx+1} / ${FILES.length}`;
+}
+function renderToolbar() {
+  state.curChange = Math.min(state.curChange, Math.max(navCount()-1, 0));
+  const ov = $('#overlay');
+  ov.classList.toggle('is-inline', state.mode==='inline');
+  $('#mode-split').classList.toggle('is-active', state.mode==='split');
+  $('#mode-inline').classList.toggle('is-active', state.mode==='inline');
+  $('#mode-split').setAttribute('aria-selected', state.mode==='split');
+  $('#mode-inline').setAttribute('aria-selected', state.mode==='inline');
+  $('#toggle-ws').classList.toggle('is-active', state.ignoreWs);
+  $('#toggle-wrap').classList.toggle('is-active', state.wrap);
+  $('#toggle-only').classList.toggle('is-active', state.onlyChanges);
+  $$('#ctx-group .seg button').forEach(b => b.classList.toggle('is-active', +b.dataset.ctx === state.context));
+  const n = navCount();
+  $('#change-count').textContent = n ? `${Math.min(state.curChange+1,n)} / ${n}` : `0 / 0`;
+  $('#prev-change').disabled = !n;
+  $('#next-change').disabled = !n;
+}
+
+/* ── 行渲染 ── */
+function segsHTML(segs) {
+  return segs.map(s => {
+    const x = s.x === '' ? ' ' : esc(s.x);
+    if (s.s==='del') return `<span class="wd wd-del">${x}</span>`;
+    if (s.s==='ins') return `<span class="wd wd-ins">${x}</span>`;
+    return x;
+  }).join('');
+}
+const codeOf = line => line.segs ? segsHTML(line.segs) : (line.t === '' ? ' ' : esc(line.t));
+function lineHTML(line, kind, side) {
+  const ln = line.n!=null ? `<span class="ln ln--${side}">${line.n}</span>` : `<span class="ln ln--${side}"></span>`;
+  const sign = kind==='add'?'+':kind==='del'?'−':(kind==='modl'||kind==='modr'||kind==='ws')?'~':'';
+  const signEl = `<span class="sign">${sign}</span>`;
+  const codeEl = `<code>${codeOf(line)}</code>`;
+  const inner = side==='R' ? `${codeEl}${signEl}${ln}` : `${ln}${signEl}${codeEl}`;
+  return `<div class="line line--${kind}">${inner}</div>`;
+}
+function fillerHTML(side) {
+  const ln = `<span class="ln ln--${side}"></span>`;
+  const signEl = `<span class="sign"></span>`;
+  const codeEl = `<code>·</code>`;
+  const inner = side==='R' ? `${codeEl}${signEl}${ln}` : `${ln}${signEl}${codeEl}`;
+  return `<div class="line line--fill">${inner}</div>`;
+}
+function ctxBlockHTML(lines, gi, side) {
+  const inner = lines.map(l => lineHTML(l, 'ctx', side)).join('');
+  return `<button class="ctx-fold" data-i="${gi}">${lines.length} 行未改动</button><div class="ctx-block" data-i="${gi}">${inner}</div>`;
+}
+
+/* ── 内联：摊平 → 上下文规划 → 合并/折叠 ── */
+function buildInlineRows(f) {
+  const rows = [];
+  f.groups.forEach(g => {
+    if (g.k==='ctx' || (g.k==='ws' && state.ignoreWs)) {
+      const R = g.R || [], L = g.L || [];
+      R.forEach((rl, i) => rows.push({ type:'ctx', n: rl?rl.n:(L[i]?L[i].n:null), line: rl||L[i], changed:false }));
+    } else if (g.k==='add') { g.R.forEach(r => rows.push({type:'add', n:r.n, line:r, changed:true})); }
+    else if (g.k==='del') { g.L.forEach(l => rows.push({type:'del', n:l.n, line:l, changed:true})); }
+    else if (g.k==='mod' || g.k==='ws') {
+      rows.push({type:'del', n:g.L[0].n, line:g.L[0], changed:true});
+      rows.push({type:'add', n:g.R[0].n, line:g.R[0], changed:true});
+    }
+  });
+  return rows;
+}
+function inlineVisiblePlan(rows, N) {
+  const n = rows.length;
+  const dL = new Array(n).fill(Infinity); let d = Infinity;
+  for (let i=0;i<n;i++){ d = rows[i].changed ? 0 : d+1; dL[i]=d; }
+  const dR = new Array(n).fill(Infinity); d = Infinity;
+  for (let i=n-1;i>=0;i--){ d = rows[i].changed ? 0 : d+1; dR[i]=d; }
+  return rows.map((r,i) => r.changed || Math.min(dL[i], dR[i]) <= N);
+}
+function renderInline(f) {
+  const rows = buildInlineRows(f);
+  const vis = inlineVisiblePlan(rows, state.context);
+  let html = `<div class="diff-row"><div class="pane" style="flex:1"><div class="pane-scroll" id="scroll-left"><div class="col-inline">`;
+  let i = 0, gapId = 0, nav = 0;
+  while (i < rows.length) {
+    const v = vis[i]; const start = i;
+    while (i < rows.length && vis[i] === v) i++;
+    const slice = rows.slice(start, i);
+    if (v) {
+      const hasChange = slice.some(r => r.changed);
+      const open = hasChange ? `<div class="hunk-block" data-kind="inline" data-nav="${nav++}">` : '';
+      const close = hasChange ? `</div>` : '';
+      html += open + slice.map(r => lineHTML(r.line, r.type==='ctx'?'ctx':r.type, 'L')).join('') + close;
+    } else {
+      const a = slice[0].n, b = slice[slice.length-1].n;
+      if (state.expandedGaps.has(gapId)) {
+        html += `<button class="ctx-gap ctx-gap--open" data-gap="${gapId}">⋯ 收起 · ${slice.length} 行</button>`;
+        html += slice.map(r => lineHTML(r.line, 'ctx', 'L')).join('');
+      } else {
+        const range = (a!=null && b!=null) ? `<span class="ctx-gap__range">第 ${a}–${b} 行</span>` : '';
+        html += `<button class="ctx-gap" data-gap="${gapId}">⋯ ${slice.length} 行未变更${range}</button>`;
+      }
+      gapId++;
+    }
+  }
+  return html + `</div></div></div></div>`;
+}
+
+/* ── 并排：左代码 | 中缝(旧行号·新行号 + 囊括括号) | 右代码 ── */
+function codeLineHTML(line, kind) {
+  return `<div class="line line--${kind}"><code>${codeOf(line)}</code></div>`;
+}
+function fillerCodeHTML() {
+  return `<div class="line line--fill"><code>·</code></div>`;
+}
+function gutterRowHTML(oldN, newN, oldEmp, newEmp) {
+  return `<div class="gutter-row"><span class="g-old${oldEmp?' emp':''}">${oldN!=null?oldN:''}</span><span class="g-new${newEmp?' emp':''}">${newN!=null?newN:''}</span></div>`;
+}
+function markSVG(kind) {
+  if (kind === 'add') return `<svg class="gmark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect class="gm-ln gm-ln--add" x="2" y="47" width="20" height="6"></rect><path class="gm gm--add" d="M 78 50 L 98 1 L 98 99 Z"></path></svg>`;
+  if (kind === 'del') return `<svg class="gmark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><rect class="gm-ln gm-ln--del" x="78" y="47" width="20" height="6"></rect><path class="gm gm--del" d="M 22 50 L 2 1 L 2 99 Z"></path></svg>`;
+  return `<svg class="gmark" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path class="gm gm--${kind}" d="M 22 50 L 2 1 L 2 99 Z"></path><path class="gm gm--${kind}" d="M 78 50 L 98 1 L 98 99 Z"></path></svg>`;
+}
+function renderSplit(f) {
+  let L = '', R = '', G = '', nav = 0;
+  f.groups.forEach((g, gi) => {
+    if (!isHunkGroup(g)) {
+      let lb = '', rb = '', gb = '';
+      g.L.forEach((ll, i) => {
+        const rl = g.R[i];
+        lb += codeLineHTML(ll, 'ctx');
+        rb += codeLineHTML(rl, 'ctx');
+        gb += gutterRowHTML(ll.n, rl.n, false, false);
+      });
+      L += `<div class="ctx-block" data-i="${gi}">${lb}</div>`;
+      R += `<div class="ctx-block" data-i="${gi}">${rb}</div>`;
+      G += gb;
+    } else {
+      const ll = g.L || [], rl = g.R || [];
+      const pad = Math.max(ll.length, rl.length);
+      const lReal = g.k === 'del' || g.k === 'mod' || g.k === 'ws';
+      const rReal = g.k === 'add' || g.k === 'mod' || g.k === 'ws';
+      let lb = '', rb = '', gb = '';
+      for (let i = 0; i < pad; i++) {
+        const l = ll[i], r = rl[i];
+        const lKind = g.k === 'del' ? 'del' : g.k === 'mod' ? 'modl' : g.k === 'ws' ? 'ws' : 'fill';
+        const rKind = g.k === 'add' ? 'add' : g.k === 'mod' ? 'modr' : g.k === 'ws' ? 'ws' : 'fill';
+        lb += l ? codeLineHTML(l, lKind) : fillerCodeHTML();
+        rb += r ? codeLineHTML(r, rKind) : fillerCodeHTML();
+        gb += gutterRowHTML(l ? l.n : null, r ? r.n : null, !!l && lReal, !!r && rReal);
+      }
+      const navAttr = `data-nav="${nav++}"`;
+      const lExtra = g.k === 'add' ? `<div class="gline gline--add"></div>` : '';
+      const rExtra = g.k === 'del' ? `<div class="gline gline--del"></div>` : '';
+      L += `<div class="hunk-block" data-kind="${g.k}" data-i="${gi}" ${navAttr}>${lb}${lExtra}</div>`;
+      R += `<div class="hunk-block" data-kind="${g.k}" data-i="${gi}" ${navAttr}>${rb}${rExtra}</div>`;
+      G += `<div class="ghunk ghunk--${g.k}" data-i="${gi}" ${navAttr}>${gb}${markSVG(g.k)}</div>`;
+    }
+  });
+  return `<div class="diff-row">
+    <div class="pane pane--left"><div class="pane-scroll" id="scroll-left"><div class="col-left">${L}</div></div></div>
+    <div class="gutter-connectors" id="gutter"><div class="gutter-flow">${G}</div></div>
+    <div class="pane pane--right"><div class="pane-scroll" id="scroll-right"><div class="col-right">${R}</div></div></div>
+  </div>`;
+}
+
+/* ── 导航计数 ── */
+function navCount() {
+  if (state.mode==='split') return visibleHunks().length;
+  const rows = buildInlineRows(file());
+  const vis = inlineVisiblePlan(rows, state.context);
+  let c = 0, i = 0;
+  while (i < rows.length) { const v = vis[i]; const s = i; while (i < rows.length && vis[i] === v) i++; if (v && rows.slice(s, i).some(r => r.changed)) c++; }
+  return c;
+}
+
+/* ── 主体 ── */
+function renderBody() {
+  const f = file();
+  const body = $('#diff-body');
+  body.classList.toggle('is-wrap', state.wrap);
+  body.classList.toggle('only-changes', state.onlyChanges);
+  $('#colheads').style.display = state.mode==='split' ? '' : 'none';
+
+  if (f.binary) {
+    body.innerHTML = `<div class="diff-state">
+      <div class="diff-state__icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></div>
+      <h3>二进制文件</h3>
+      <p>该文件为二进制资源（图片 / 字体 / 压缩包等），无法进行文本行级对比。可在编辑器或外部工具中查看。</p>
+      <p style="margin-top:10px"><code>${esc(f.path)}</code></p>
+    </div>`;
+    return;
+  }
+
+  body.innerHTML = state.mode==='split' ? renderSplit(f) : renderInline(f);
+  if (state.mode==='split') bindMarks();
+  else { bindGaps(); }
+  applyCurrentHighlight();
+}
+
+/* ── 中缝标记：跟着文档流走（ghunk 高度 = 改动行数 × 行高），缩放/滚动自动对齐，无需坐标计算 ── */
+function bindMarks() {
+  $$('.ghunk').forEach(el => el.addEventListener('click', () => flashByNav(+el.dataset.nav)));
+}
+
+/* ── 折叠（并排：仅改动） ── */
+function bindFolds() {
+  $$('.ctx-fold').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const i = btn.dataset.i;
+      const blocks = $$(`.ctx-block[data-i="${i}"]`);
+      const folds = $$(`.ctx-fold[data-i="${i}"]`);
+      const expand = blocks[0] ? !blocks[0].classList.contains('is-expanded') : true;
+      blocks.forEach(b => b.classList.toggle('is-expanded', expand));
+      folds.forEach(fn => fn.classList.toggle('is-hidden', expand));
+    });
+  });
+}
+/* ── 折叠（内联：上下文断层） ── */
+function bindGaps() {
+  $$('.ctx-gap').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const g = +btn.dataset.gap;
+      if (state.expandedGaps.has(g)) state.expandedGaps.delete(g); else state.expandedGaps.add(g);
+      renderBody();
+    });
+  });
+}
+
+/* ── 当前改动高亮 / 跳转 ── */
+function applyCurrentHighlight() {
+  $$('[data-nav]').forEach(el => el.classList.remove('is-current'));
+  $$(`[data-nav="${state.curChange}"]`).forEach(el => el.classList.add('is-current'));
+}
+function flashByNav(nav) {
+  renderToolbar();
+  applyCurrentHighlight();
+  const el = document.querySelector(`[data-nav="${nav}"]`);
+  if (el) {
+    el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash');
+    el.scrollIntoView({ block:'center', behavior:'smooth' });
+  }
+}
+function gotoChange(delta) {
+  const n = navCount(); if (!n) return;
+  state.curChange = (state.curChange + delta + n) % n;
+  flashByNav(state.curChange);
+}
+
+/* ── 开关 ── */
+function setMode(m) {
+  if (state.mode === m) return;
+  state.mode = m; state.expandedGaps.clear();
+  renderToolbar(); renderHeader(); renderBody();
+}
+function setContext(n) {
+  state.context = n; state.expandedGaps.clear();
+  renderToolbar(); renderHeader(); renderBody();
+}
+function toggleWs() { state.ignoreWs = !state.ignoreWs; state.expandedGaps.clear(); renderToolbar(); renderHeader(); renderBody(); }
+function toggleWrap() { state.wrap = !state.wrap; renderToolbar(); renderBody(); }
+function toggleOnly() { state.onlyChanges = !state.onlyChanges; renderToolbar(); renderBody(); }
+
+/* ── 开 / 关弹窗 ── */
+function renderSidebar() {
+  $('#sb-count').textContent = FILES.length;
+  $('#sb-list').innerHTML = FILES.map((f,i)=>{
+    const c = f.binary ? {add:0,del:0} : countChanges(f);
+    const segs = f.path.split('/'); const name = segs.pop(); const dir = segs.join('/');
+    return `<li><button type="button" class="sf-row${i===state.fileIdx?' is-active':''}" data-i="${i}" title="${esc(f.path)}">
+        <span class="sf-status" data-status="${f.status}">${STATUS_LABEL[f.status]||f.status}</span>
+        <span class="sf-path">${dir?esc(dir)+'/':''}<b>${esc(name)}</b></span>
+        ${f.binary?'':`<span class="sf-counts"><span class="sf-add">+${c.add}</span><span class="sf-del">−${c.del}</span></span>`}
+        ${f.touched?'<span class="sf-dot" title="本次会话编辑过">●</span>':''}
+      </button></li>`;
+  }).join('');
+  $$('#sb-list .sf-row').forEach(b => b.addEventListener('click', () => selectFile(+b.dataset.i)));
+  const active = $('#sb-list .sf-row.is-active');
+  if (active) active.scrollIntoView({ block:'nearest' });
+}
+function selectFile(idx) {
+  state.fileIdx = idx; state.curChange = 0; state.expandedGaps.clear();
+  renderSidebar(); renderHeader(); renderToolbar(); renderBody();
+}
+function ensureRect() {
+  if (state.rect) { clampRect(state.rect); return; }
+  const pad = 8;
+  const w = Math.min(1280, window.innerWidth - pad * 2);
+  const h = Math.min(840, window.innerHeight - pad * 2);
+  state.rect = { l: Math.round((window.innerWidth - w) / 2), t: Math.round((window.innerHeight - h) / 2), w, h };
+}
+function applyRect() {
+  const r = state.rect, d = $('#dialog'); if (!r || !d) return;
+  d.style.left = r.l + 'px'; d.style.top = r.t + 'px';
+  d.style.width = r.w + 'px'; d.style.height = r.h + 'px';
+}
+function clampRect(r) {
+  const pad = 8, MINW = 680, MINH = 360;
+  r.w = Math.max(MINW, Math.min(r.w, window.innerWidth - pad * 2));
+  r.h = Math.max(MINH, Math.min(r.h, window.innerHeight - pad * 2));
+  r.l = Math.max(pad, Math.min(r.l, window.innerWidth - r.w - pad));
+  r.t = Math.max(pad, Math.min(r.t, window.innerHeight - r.h - pad));
+}
+function cursorFor(dir) {
+  if (dir === 'n' || dir === 's') return 'ns-resize';
+  if (dir === 'e' || dir === 'w') return 'ew-resize';
+  if (dir === 'ne' || dir === 'sw') return 'nesw-resize';
+  return 'nwse-resize';
+}
+function startResize(e, dir) {
+  e.preventDefault(); e.stopPropagation();
+  const start = { ...state.rect };
+  const sx = e.clientX, sy = e.clientY;
+  const MINW = 680, MINH = 360;
+  document.body.classList.add('rz-busy');
+  document.body.style.cursor = cursorFor(dir);
+  function move(ev) {
+    const dx = ev.clientX - sx, dy = ev.clientY - sy;
+    let { l, t, w, h } = start;
+    if (dir.includes('e')) w = start.w + dx;
+    if (dir.includes('s')) h = start.h + dy;
+    if (dir.includes('w')) { l = start.l + dx; w = start.w - dx; }
+    if (dir.includes('n')) { t = start.t + dy; h = start.h - dy; }
+    if (w < MINW) { if (dir.includes('w')) l = start.l + (start.w - MINW); w = MINW; }
+    if (h < MINH) { if (dir.includes('n')) t = start.t + (start.h - MINH); h = MINH; }
+    state.rect = { l, t, w, h };
+    clampRect(state.rect);
+    applyRect();
+  }
+  function up() {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    document.body.classList.remove('rz-busy');
+    document.body.style.cursor = '';
+  }
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+}
+function clampSidebar() {
+  const max = Math.max(120, (state.rect ? state.rect.w : 680) - 140);
+  state.sidebarW = Math.max(60, Math.min(state.sidebarW, max));
+}
+function applySidebar() { const s = $('#sidebar'); if (s) s.style.flexBasis = state.sidebarW + 'px'; }
+function startSplitter(e) {
+  e.preventDefault(); e.stopPropagation();
+  const startW = state.sidebarW, sx = e.clientX;
+  const sp = $('#splitter'); if (sp) sp.classList.add('is-drag');
+  document.body.classList.add('rz-busy');
+  document.body.style.cursor = 'col-resize';
+  function move(ev) {
+    const max = Math.max(120, (state.rect ? state.rect.w : 680) - 140);
+    state.sidebarW = Math.max(60, Math.min(startW + (ev.clientX - sx), max));
+    applySidebar();
+  }
+  function up() {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    document.body.classList.remove('rz-busy');
+    document.body.style.cursor = '';
+    if (sp) sp.classList.remove('is-drag');
+  }
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+}
+function openDialog(idx) {
+  state.lastFocus = document.activeElement;
+  ensureRect(); applyRect(); clampSidebar(); applySidebar();
+  selectFile(idx);
+  const ov = $('#overlay');
+  ov.classList.add('is-open'); ov.setAttribute('aria-hidden','false');
+  setTimeout(() => $('#close-btn').focus(), 60);
+}
+function closeDialog() {
+  const ov = $('#overlay');
+  ov.classList.remove('is-open'); ov.setAttribute('aria-hidden','true');
+  if (state.lastFocus && state.lastFocus.focus) state.lastFocus.focus();
+}
+
+/* ── 打开（落地后用 shell.openPath 走系统默认程序，无默认则系统弹「打开方式」） ── */
+function openEditor() { toast(`用默认程序打开 ${file().path.split('/').pop()}`); }
+
+let toastTimer = null;
+function toast(msg) {
+  $('#toast-text').textContent = msg;
+  const t = $('#toast'); t.classList.add('is-show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('is-show'), 1800);
+}
+
+/* ── 同步滚动（并排） ── */
+function syncScroll() {
+  if (state.mode!=='split' || state.wrap) return;
+  const l = $('#scroll-left'), r = $('#scroll-right'); if (!l || !r) return;
+  const a = document.activeElement;
+  if (a && a.closest && a.closest('.pane-scroll') === r) l.scrollLeft = r.scrollLeft;
+  else r.scrollLeft = l.scrollLeft;
+}
+const typedInField = e => { const t = e.target; return t && (t.tagName==='INPUT'||t.tagName==='TEXTAREA'||t.isContentEditable); };
+
+function bind() {
+  $('#close-btn').addEventListener('click', closeDialog);
+  $('#overlay').addEventListener('click', e => { if (e.target === $('#overlay')) closeDialog(); });
+  $('#prev-file').addEventListener('click', () => selectFile((state.fileIdx - 1 + FILES.length) % FILES.length));
+  $('#next-file').addEventListener('click', () => selectFile((state.fileIdx + 1) % FILES.length));
+  $('#mode-split').addEventListener('click', () => setMode('split'));
+  $('#mode-inline').addEventListener('click', () => setMode('inline'));
+  $('#prev-change').addEventListener('click', () => gotoChange(-1));
+  $('#next-change').addEventListener('click', () => gotoChange(1));
+  $$('#ctx-group .seg button').forEach(b => b.addEventListener('click', () => setContext(+b.dataset.ctx)));
+  $('#toggle-ws').addEventListener('click', toggleWs);
+  $('#toggle-wrap').addEventListener('click', toggleWrap);
+  $('#toggle-only').addEventListener('click', toggleOnly);
+  $('#open-editor').addEventListener('click', openEditor);
+  $$('.rz').forEach(h => h.addEventListener('mousedown', e => startResize(e, h.dataset.rz)));
+  $('#splitter').addEventListener('mousedown', startSplitter);
+
+  $('#diff-body').addEventListener('scroll', syncScroll, true);
+
+  document.addEventListener('keydown', e => {
+    if (!$('#overlay').classList.contains('is-open')) return;
+    if (e.key==='Escape') { e.preventDefault(); closeDialog(); }
+    else if (e.key==='ArrowDown' && !typedInField(e)) { e.preventDefault(); gotoChange(1); }
+    else if (e.key==='ArrowUp' && !typedInField(e)) { e.preventDefault(); gotoChange(-1); }
+    else if (e.key==='[') selectFile((state.fileIdx - 1 + FILES.length) % FILES.length);
+    else if (e.key===']') selectFile((state.fileIdx + 1) % FILES.length);
+  });
+
+  let rTimer = null;
+  window.addEventListener('resize', () => {
+    if (!$('#overlay').classList.contains('is-open')) return;
+    clearTimeout(rTimer); rTimer = setTimeout(() => {
+      clampRect(state.rect); applyRect();
+      clampSidebar(); applySidebar();
+    }, 80);
+  });
+}
+
+renderChangesList();
+renderSidebar();
+bind();
+// 默认以内联模式打开第一个文件，便于直接查看上下文选择器效果
+setTimeout(() => openDialog(0), 350);
+</script>
+</body>
+</html>
