@@ -162,25 +162,28 @@ function statusLabel(s: string): string {
 .sf-path {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: row-reverse; /* HTML(dir,b) → 视觉：文件名(b)靠左，路径(dir)靠右 */
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 6px; /* 文件名与路径间空隙 */
   font-size: 11.5px;
   font-family: var(--font-mono);
   color: var(--color-text);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* rtl：文件名(b)靠左保留可见，目录前缀溢出右侧被截（保留文件名这一最关键信息） */
-  direction: rtl;
-  text-align: left;
 }
 .sf-path__dir {
-  direction: ltr;
-  unicode-bidi: isolate;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   opacity: 0.6;
 }
 .sf-path b {
-  direction: ltr;
-  unicode-bidi: isolate;
+  flex-shrink: 0; /* 文件名不收缩，溢出时路径截断、文件名始终完整可见 */
   font-weight: 600;
+  white-space: nowrap;
 }
 .sf-counts {
   flex-shrink: 0;
