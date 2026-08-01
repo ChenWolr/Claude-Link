@@ -176,6 +176,18 @@ const rightChunkEnd = computed<boolean[]>(() => {
   }
   return out;
 });
+// 插入点标记线（contrast 占位侧 box-shadow 移植）：add chunk 在左栏插入位置、del chunk 在右栏
+// 插入位置画一条该色横线——三角形桥左尖/右尖在栏内的对应标记（claude-link 无占位行，单独画）。
+const leftInserts = computed<number[]>(() => {
+  const lay = splitLayout.value;
+  if (!lay) return [];
+  return lay.chunks.filter((c) => c.kind === 'add').map((c) => c.leftStart * LH);
+});
+const rightInserts = computed<number[]>(() => {
+  const lay = splitLayout.value;
+  if (!lay) return [];
+  return lay.chunks.filter((c) => c.kind === 'del').map((c) => c.rightStart * LH);
+});
 // 点击改动 chunk → 跳转导航（按 chunk navIndex）
 function clickChunk(navIndex: number | null): void {
   if (navIndex != null && navIndex !== props.curChange) emit('goto-nav', navIndex);
@@ -325,6 +337,7 @@ onBeforeUnmount(() => {
                 :data-nav="leftNav[i] != null ? leftNav[i] : null"
                 @click="clickChunk(leftNav[i] ?? null)"
               />
+              <div v-for="(y, i) in leftInserts" :key="'ins-l-' + i" class="insert-line insert-line--add" :style="{ top: y + 'px' }"></div>
             </div>
           </div>
           <!-- river：SVG 桥 -->
@@ -358,6 +371,7 @@ onBeforeUnmount(() => {
                 :data-nav="rightNav[i] != null ? rightNav[i] : null"
                 @click="clickChunk(rightNav[i] ?? null)"
               />
+              <div v-for="(y, i) in rightInserts" :key="'ins-r-' + i" class="insert-line insert-line--del" :style="{ top: y + 'px' }"></div>
             </div>
           </div>
         </div>
@@ -639,6 +653,19 @@ onBeforeUnmount(() => {
 .diff-row--split :deep(.line--del.chunk-end)::after,
 .diff-row--split :deep(.line--modl.chunk-start)::before,
 .diff-row--split :deep(.line--modl.chunk-end)::after {
+  border-top-color: var(--del-edge);
+}
+/* 插入点标记线：add 左栏 / del 右栏插入位置画该色横线（三角形桥尖在栏内的对应标记） */
+.diff-row--split .insert-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 2px solid var(--add-edge);
+  z-index: 2;
+  pointer-events: none;
+}
+.diff-row--split .insert-line--del {
   border-top-color: var(--del-edge);
 }
 
