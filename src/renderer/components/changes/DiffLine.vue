@@ -30,13 +30,12 @@ const sign = computed(() =>
 );
 
 // split + 有 language → 语法高亮（与词级 diff 叠加）；否则用原整行/segs 渲染。
-// 阶段 1：split 只上语法色（mergeTokensWithDiff 无 segs 时全 eq，即纯语法色）；
-// Task 2c 才把 line.segs 传入做字符级 diff 叠加。
+// 字符级叠加：语法 token × 该行词级 segs（mod/modl/modr 行有 segs；add/del 无 segs → 全 eq，
+// 仅靠行背景色 + 语法色，符合预期）。mod 行 segs → 字符级 wd-del/wd-ins 叠加在语法色上。
 const splitTokens = computed<MergedToken[] | null>(() => {
   if (props.variant !== 'split' || !props.language) return null;
   const toks = highlightLineToTokens(props.line.t, props.language);
-  // 阶段 1：不传 segs（纯语法色）；Task 2c 改为 mergeTokensWithDiff(toks, props.line.segs)
-  return mergeTokensWithDiff(toks, undefined);
+  return mergeTokensWithDiff(toks, props.line.segs);
 });
 </script>
 
