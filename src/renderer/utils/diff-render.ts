@@ -3,16 +3,16 @@
 // 全部基于 ParsedDiffFile（diff-parser 输出）做派生计算，无 DOM/Vue 依赖。
 //
 // 这些函数对应 prototypes/diff-viewer.html 里的 buildInlineRows / inlineVisiblePlan /
-// countChanges / isHunkGroup / navCount，逐段搬过来并参数化（ignoreWs/context 由调用方传）。
+// countChanges / isHunkGroup / navCount，逐段搬过来并参数化（context 由调用方传）。
 
 import type { DiffGroup, DiffLine, DiffSeg, ParsedDiffFile } from './diff-parser';
 
-/** 该组是否算「改动」（参与改动导航 nav 与高亮）。ctx 永远不算；ws 在忽略空白时不算。 */
-export function isHunkGroup(g: DiffGroup, ignoreWs: boolean): boolean {
-  return g.k !== 'ctx' && g.k !== 'skip' && !(g.k === 'ws' && ignoreWs);
+/** 该组是否算「改动」（参与改动导航 nav 与高亮）。ctx/skip 永远不算；ws 算改动。 */
+export function isHunkGroup(g: DiffGroup): boolean {
+  return g.k !== 'ctx' && g.k !== 'skip';
 }
 
-/** 统计 +/- 行数（header 摘要与侧栏计数用）。ws 总算改动（与原型 countChanges 一致，不受 ignoreWs 影响）。 */
+/** 统计 +/- 行数（header 摘要与侧栏计数用）。ws 总算改动（与原型 countChanges 一致）。 */
 export function countChanges(f: ParsedDiffFile): { add: number; del: number } {
   let add = 0;
   let del = 0;
@@ -38,17 +38,17 @@ export interface InlineRow {
 
 /**
  * 把分组结构摊平为内联模式的单栏行序列。
- * - ctx /（忽略空白时的 ws）→ 各行原样，未改动。
+ * - ctx → 各行原样，未改动。
  * - add → 其 R 行，改动；del → 其 L 行，改动。
  * - mod/ws（1:1）→ 先旧行(del)后新行(add)，两行都改动。
  */
-export function buildInlineRows(f: ParsedDiffFile, ignoreWs: boolean): InlineRow[] {
+export function buildInlineRows(f: ParsedDiffFile): InlineRow[] {
   const rows: InlineRow[] = [];
   for (const g of f.groups) {
     if (g.k === 'skip') {
       // 相邻 hunk 间跳过的行 → skip 行（始终可见 + 阻断 context 距离，渲染「⋯ N 行」分隔）
       rows.push({ type: 'skip', n: null, line: { n: null, t: '' }, changed: false, skipCount: g.skipCount ?? 0 });
-    } else if (g.k === 'ctx' || (g.k === 'ws' && ignoreWs)) {
+    } else if (g.k === 'ctx') {
       const L = g.L;
       g.R.forEach((rl, i) => rows.push({ type: 'ctx', n: rl ? rl.n : L[i] ? L[i].n : null, line: rl ?? L[i], changed: false }));
     } else if (g.k === 'add') {
@@ -88,15 +88,15 @@ export function inlineVisiblePlan(rows: InlineRow[], n: number): boolean[] {
 }
 
 /** 并排模式改动组数 = 改动导航总数（split 的 nav 上限）。 */
-export function countSplitHunks(f: ParsedDiffFile, ignoreWs: boolean): number {
+export function countSplitHunks(f: ParsedDiffFile): number {
   let n = 0;
-  for (const g of f.groups) if (isHunkGroup(g, ignoreWs)) n++;
+  for (const g of f.groups) if (isHunkGroup(g)) n++;
   return n;
 }
 
 /** 内联模式改动段数 = 改动导航总数（含改动的可见连续段数）。 */
-export function countInlineHunks(f: ParsedDiffFile, ignoreWs: boolean, context: number): number {
-  const rows = buildInlineRows(f, ignoreWs);
+export function countInlineHunks(f: ParsedDiffFile, context: number): number {
+  const rows = buildInlineRows(f);
   const vis = inlineVisiblePlan(rows, context);
   let c = 0;
   let i = 0;
@@ -144,11 +144,11 @@ export interface SplitRow {
  * - mod/ws（恒 1:1）→ 左右各一行，带 LCS segs（同时 chunkStart+chunkEnd）
  * 替代 DiffBody 模板里的 pad=Math.max(L,R) 循环 + 占位逻辑。
  */
-export function buildSplitRows(f: ParsedDiffFile, ignoreWs: boolean): SplitRow[] {
+export function buildSplitRows(f: ParsedDiffFile): SplitRow[] {
   const rows: SplitRow[] = [];
   let nav = 0;
   f.groups.forEach((g, gi) => {
-    const isHunk = isHunkGroup(g, ignoreWs);
+    const isHunk = isHunkGroup(g);
     const navIndex = isHunk ? nav++ : null;
     const push = (
       kind: SplitRow['kind'],
