@@ -28,8 +28,8 @@ export type ChangesDiffResult =
   | { ok: true; diff: string; truncated: boolean; binary: boolean; context: number }
   | { ok: false; reason: 'not-a-repo' | 'no-such-file' | 'error'; message: string };
 
-// 「打开」文件（shell.openPath 走系统默认程序）结果。失败分支类型安全：
-// 非 git 仓库 / git 缺失 / 文件不在仓库内（越界） / 打开失败（无默认程序等）。
+// 「打开」文件结果：shell.openPath 走系统默认程序，失败时 Windows 降级弹「打开方式」对话框。失败分支类型安全：
+// 非 git 仓库 / git 缺失 / 文件不在仓库内（越界） / 打开失败（无默认程序且降级不可用等）。
 export type ChangesOpenResult =
   | { ok: true }
   | { ok: false; reason: 'not-a-repo' | 'git-unavailable' | 'no-such-file' | 'error'; message: string };
