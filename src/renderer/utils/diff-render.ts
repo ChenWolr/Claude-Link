@@ -373,22 +373,41 @@ export function computeOffsets(
 }
 
 /**
- * 单个桥的几何（随 offsets 变化）。移植 contrast drawBridge L380-420（去掉 1px 微调）。
- * 返回 SVG polygon 的 4 点 + 容器 top/height。viewBox=0 0 100 100，preserveAspectRatio=none 横向拉伸。
+ * 单个桥的几何（随 offsets 变化）。忠实移植 contrast drawBridge L380-420：
+ * - top 减 1 / bottom 加 2 对齐 2px ruler；
+ * - 一侧 size=0 时该侧 top-bottom 保持 2px（Math.max），形成三角形（左尖右宽），不是 1 行梯形；
+ * - polygon 之外返回上下边线坐标（contrast 用 2 条 <line> 描边，让「顶部往左插入」的斜线清晰可见）。
+ * viewBox=0 0 100 height，preserveAspectRatio=none 横向拉伸。
  */
 export function bridgePolygon(
   c: SplitChunk,
   offsets: Offsets,
   lineHeight: number,
-): { kind: SplitChunk['kind']; top: number; height: number; points: string } {
-  const leftTop = c.leftStart * lineHeight + offsets.left;
-  const rightTop = c.rightStart * lineHeight + offsets.right;
-  const leftBottom = leftTop + Math.max(c.leftSize, 1) * lineHeight;
-  const rightBottom = rightTop + Math.max(c.rightSize, 1) * lineHeight;
+): {
+  kind: SplitChunk['kind'];
+  top: number;
+  height: number;
+  points: string;
+  topLine: { y1: number; y2: number };
+  bottomLine: { y1: number; y2: number };
+} {
+  const leftTop = c.leftStart * lineHeight + offsets.left - 1;
+  const rightTop = c.rightStart * lineHeight + offsets.right - 1;
+  const leftBottom = Math.max(leftTop + c.leftSize * lineHeight + 2, leftTop + 2);
+  const rightBottom = Math.max(rightTop + c.rightSize * lineHeight + 2, rightTop + 2);
   const top = Math.min(leftTop, rightTop);
   const bottom = Math.max(leftBottom, rightBottom);
   const height = Math.max(bottom - top, 2);
   const p = (x: number, y: number) => `${x},${Math.round((y - top) * 10) / 10}`;
   const points = [p(0, leftTop), p(100, rightTop), p(100, rightBottom), p(0, leftBottom)].join(' ');
-  return { kind: c.kind, top, height, points };
+  // 上下边线（contrast L418-420：±1px offset 防 viewBox 裁剪）
+  const topLine = {
+    y1: Math.round((leftTop - top + 1) * 10) / 10,
+    y2: Math.round((rightTop - top + 1) * 10) / 10,
+  };
+  const bottomLine = {
+    y1: Math.round((leftBottom - top - 1) * 10) / 10,
+    y2: Math.round((rightBottom - top - 1) * 10) / 10,
+  };
+  return { kind: c.kind, top, height, points, topLine, bottomLine };
 }
