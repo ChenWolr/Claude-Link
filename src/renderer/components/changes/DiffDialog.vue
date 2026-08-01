@@ -436,7 +436,7 @@ onBeforeUnmount(() => {
             </div>
 
             <button v-if="mode === 'inline'" class="tbtn" type="button" :class="{ active: wrap }" title="自动换行" @click="wrap = !wrap">换行</button>
-            <button v-if="mode === 'split'" class="tbtn" type="button" :class="{ active: onlyChanges }" title="仅显示改动（折叠未改动行）" @click="onlyChanges = !onlyChanges">仅改动</button>
+            <button v-if="mode === 'inline'" class="tbtn" type="button" :class="{ active: onlyChanges }" title="仅显示改动（折叠未改动行）" @click="onlyChanges = !onlyChanges">仅改动</button>
           </div>
 
           <div v-if="mode === 'split'" class="diff-colheads">
