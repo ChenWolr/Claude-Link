@@ -133,6 +133,49 @@ const rightKindArr = computed<string[]>(() => {
   }
   return out;
 });
+// chunk 上下边界标记（contrast chunk-start/chunk-end box-shadow 移植）：
+// 改动块首行画上边线、末行画下边线——恰在相邻行之间形成彩色分隔线（未改动行无线，对齐 contrast）。
+// 预计算每行是否 chunk 首行/末行，模板 :class 用，CSS 伪元素画线（不碰 box-shadow，与 is-current 零冲突）。
+const leftChunkStart = computed<boolean[]>(() => {
+  const lay = splitLayout.value;
+  if (!lay) return [];
+  const out = new Array(lay.leftLines.length).fill(false);
+  for (const c of lay.chunks) {
+    if (c.kind === 'same' || c.leftSize === 0) continue;
+    out[c.leftStart] = true;
+  }
+  return out;
+});
+const leftChunkEnd = computed<boolean[]>(() => {
+  const lay = splitLayout.value;
+  if (!lay) return [];
+  const out = new Array(lay.leftLines.length).fill(false);
+  for (const c of lay.chunks) {
+    if (c.kind === 'same' || c.leftSize === 0) continue;
+    out[c.leftStart + c.leftSize - 1] = true;
+  }
+  return out;
+});
+const rightChunkStart = computed<boolean[]>(() => {
+  const lay = splitLayout.value;
+  if (!lay) return [];
+  const out = new Array(lay.rightLines.length).fill(false);
+  for (const c of lay.chunks) {
+    if (c.kind === 'same' || c.rightSize === 0) continue;
+    out[c.rightStart] = true;
+  }
+  return out;
+});
+const rightChunkEnd = computed<boolean[]>(() => {
+  const lay = splitLayout.value;
+  if (!lay) return [];
+  const out = new Array(lay.rightLines.length).fill(false);
+  for (const c of lay.chunks) {
+    if (c.kind === 'same' || c.rightSize === 0) continue;
+    out[c.rightStart + c.rightSize - 1] = true;
+  }
+  return out;
+});
 // 点击改动 chunk → 跳转导航（按 chunk navIndex）
 function clickChunk(navIndex: number | null): void {
   if (navIndex != null && navIndex !== props.curChange) emit('goto-nav', navIndex);
@@ -278,7 +321,7 @@ onBeforeUnmount(() => {
                 :line="ln"
                 :kind="leftKindArr[i] ?? 'ctx'"
                 :language="language"
-                :class="{ 'is-current': leftNav[i] === curChange, flash: leftNav[i] === flashNav }"
+                :class="{ 'is-current': leftNav[i] === curChange, flash: leftNav[i] === flashNav, 'chunk-start': leftChunkStart[i], 'chunk-end': leftChunkEnd[i] }"
                 :data-nav="leftNav[i] != null ? leftNav[i] : null"
                 @click="clickChunk(leftNav[i] ?? null)"
               />
@@ -309,7 +352,7 @@ onBeforeUnmount(() => {
                 :line="ln"
                 :kind="rightKindArr[i] ?? 'ctx'"
                 :language="language"
-                :class="{ 'is-current': rightNav[i] === curChange, flash: rightNav[i] === flashNav }"
+                :class="{ 'is-current': rightNav[i] === curChange, flash: rightNav[i] === flashNav, 'chunk-start': rightChunkStart[i], 'chunk-end': rightChunkEnd[i] }"
                 :data-nav="rightNav[i] != null ? rightNav[i] : null"
                 @click="clickChunk(rightNav[i] ?? null)"
               />
@@ -549,6 +592,38 @@ onBeforeUnmount(() => {
 }
 .diff-row--split :deep(.line.flash) {
   animation: diff-flash 0.7s var(--ease-out);
+}
+/* chunk 上下边界线（contrast chunk-start/chunk-end box-shadow 移植）：
+   改动块首行画上边线、末行画下边线——恰在相邻行之间形成彩色分隔线（未改动行无线）。
+   伪元素画线，不碰 box-shadow，与上方 is-current 左侧 accent 条零冲突。 */
+.diff-row--split :deep(.line) {
+  position: relative;
+}
+.diff-row--split :deep(.line.chunk-start)::before,
+.diff-row--split :deep(.line.chunk-end)::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px solid transparent;
+  pointer-events: none;
+  z-index: 2;
+}
+.diff-row--split :deep(.line.chunk-start)::before { top: 0; }
+.diff-row--split :deep(.line.chunk-end)::after { bottom: 0; }
+/* 颜色随 kind：add/modr 用 add 配色；del/modl 用 del 配色（与行背景同源） */
+.diff-row--split :deep(.line--add.chunk-start)::before,
+.diff-row--split :deep(.line--add.chunk-end)::after,
+.diff-row--split :deep(.line--modr.chunk-start)::before,
+.diff-row--split :deep(.line--modr.chunk-end)::after {
+  border-top-color: var(--add-edge);
+}
+.diff-row--split :deep(.line--del.chunk-start)::before,
+.diff-row--split :deep(.line--del.chunk-end)::after,
+.diff-row--split :deep(.line--modl.chunk-start)::before,
+.diff-row--split :deep(.line--modl.chunk-end)::after {
+  border-top-color: var(--del-edge);
 }
 
 /* inline change 包裹层 */
