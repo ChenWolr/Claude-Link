@@ -14,7 +14,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
-    "selftest": "tsx scripts/selftest-settings-mapping.ts && tsx scripts/tdd-claude-plan-verify.ts && tsx scripts/regression-tests.ts && tsx scripts/tdd-stall-watchdog-verify.ts && tsx scripts/export-image-verify.ts && tsx scripts/export-image-codec-verify.ts && tsx scripts/tdd-open-with-fallback-verify.ts"
+    "selftest": "tsx scripts/selftest-settings-mapping.ts && tsx scripts/tdd-claude-plan-verify.ts && tsx scripts/regression-tests.ts && tsx scripts/tdd-stall-watchdog-verify.ts && tsx scripts/export-image-verify.ts && tsx scripts/export-image-codec-verify.ts && tsx scripts/tdd-open-with-fallback-verify.ts && tsx scripts/tdd-diff-highlight-verify.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.191",
