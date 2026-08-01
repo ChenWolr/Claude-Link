@@ -4,17 +4,20 @@
 // （仅 fold/gap 展开态这种纯局部 UI 在内部）。改动导航 curChange 变化时滚到中心 + 闪一下。
 //
 // split（contrast 风格）：消费 buildSplitChunks 的 SplitLayout（左右各自完整行 + 对齐 chunk + SVG 桥），
-//   单滚动容器 .diff-scroll；阶段 1 offset 恒 0（静态桥，无 magic scrolling），Task 2b 接入动态偏移。
-//   行背景由 chunkAtLine 查所属 chunk kind；curChange 高亮/flash/data-nav 绑在 DiffLine 根。
+//   单滚动容器 .diff-scroll；scroll handler rAF 节流调 computeOffsets 算焦点偏移套到 .file-offset
+//   translateY（magic scrolling：焦点 chunk 左右对齐，非焦点错位靠桥连接），桥随偏移动态重算。
+//   行背景由预计算 leftKindArr/rightKindArr 查所属 chunk kind；curChange 高亮/flash/data-nav 绑在 DiffLine 根。
 // inline（cc-haha 风格）：buildInlineRows 摊平 + 上下文规划 + gap 折叠，行号 sticky、三档色。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import {
   buildInlineRows,
   buildSplitChunks,
+  computeOffsets,
+  bridgePolygon,
   inlineVisiblePlan,
   type InlineRow,
-  type SplitChunk,
+  type Offsets,
   type SplitLayout,
 } from '../../utils/diff-render';
 import DiffLine from './DiffLine.vue';
@@ -39,32 +42,37 @@ const LH = 22; // 与 CSS --diff-line-h 一致
 const splitLayout = computed<SplitLayout | null>(() =>
   props.parsed ? buildSplitChunks(props.parsed, LH) : null,
 );
-// 静态桥（offset=0，阶段 1）。每个非 same chunk 一座桥。
+
+// 焦点对齐偏移（magic scrolling）。scroll handler rAF 节流调 computeOffsets 更新；
+// 切文件/切模式时复位 {0,0}。offsets 套到 .file-offset 的 translateY（GPU 合成）。
+const offsets = ref<Offsets>({ left: 0, right: 0 });
+let scrollRaf = 0;
+function onSplitScroll(): void {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => {
+    scrollRaf = 0;
+    const el = splitScroll.value;
+    if (!el) return;
+    offsets.value = computeOffsets(
+      splitLayout.value?.chunks ?? [],
+      el.scrollTop,
+      el.clientHeight,
+      LH,
+    );
+  });
+}
+
+// 桥随 offsets 重算（动态桥，contrast drawBridge 移植）。
 const splitBridges = computed(() => {
   const lay = splitLayout.value;
   if (!lay) return [];
   return lay.chunks
     .filter((c) => c.kind !== 'same')
-    .map((c) => bridgePolygonStatic(c, LH));
+    .map((c) => bridgePolygon(c, offsets.value, LH));
 });
 
-// 阶段 1 静态桥几何（offset=0）。Task 2b 换成随 offsets 变化的版本。
-function bridgePolygonStatic(c: SplitChunk, lh: number): {
-  kind: SplitChunk['kind']; top: number; height: number; points: string;
-} {
-  const leftTop = c.leftStart * lh;
-  const rightTop = c.rightStart * lh;
-  const leftBottom = leftTop + Math.max(c.leftSize, 1) * lh;
-  const rightBottom = rightTop + Math.max(c.rightSize, 1) * lh;
-  const top = Math.min(leftTop, rightTop);
-  const height = Math.max(leftBottom, rightBottom) - top;
-  const p = (x: number, y: number) => `${x},${Math.round((y - top) * 10) / 10}`;
-  const points = [p(0, leftTop), p(100, rightTop), p(100, rightBottom), p(0, leftBottom)].join(' ');
-  return { kind: c.kind, top, height: Math.max(height, 2), points };
-}
-
 // 预计算每行的 navIndex + kind（O(chunks) 一次，splitLayout 变时重算；curChange 变化时 O(1) 查询，
-// 避免模板每行 O(chunks) × 3 调用导致的 curChange 卡顿——P1 Step A，Task 2c review-v1）。
+// 避免模板每行 O(chunks) × 3 调用导致的 curChange 卡顿——P1 Step A，Task 1c review-v1）。
 const leftNav = computed<(number | null)[]>(() => {
   const lay = splitLayout.value;
   if (!lay) return [];
@@ -111,7 +119,6 @@ const rightKindArr = computed<string[]>(() => {
 function clickChunk(navIndex: number | null): void {
   if (navIndex != null && navIndex !== props.curChange) emit('goto-nav', navIndex);
 }
-function onSplitScroll(): void { /* 阶段 1 空实现，Task 2b 接入偏移计算 */ }
 
 // —— inline：扁平行流 + 上下文规划 + gap 折叠 ——
 interface InlineSeg {
@@ -172,11 +179,12 @@ function toggleGap(idx: number): void {
   else next.add(idx);
   expandedGaps.value = next;
 }
-// 切规划输入 → 展开 id 失效，清空（防 stale）
+// 切规划输入 → 展开 id 失效 + split 偏移复位（防 stale offsets 跨文件残留）
 watch(
   [() => props.mode, () => props.context, () => props.onlyChanges, () => props.parsed],
   () => {
     expandedGaps.value = new Set();
+    offsets.value = { left: 0, right: 0 };
   },
 );
 
@@ -208,6 +216,7 @@ watch(
 
 onBeforeUnmount(() => {
   if (flashTimer) clearTimeout(flashTimer);
+  if (scrollRaf) cancelAnimationFrame(scrollRaf);
 });
 </script>
 
@@ -219,7 +228,7 @@ onBeforeUnmount(() => {
         <div class="split-track" :style="{ height: splitLayout ? splitLayout.riverHeight + 'px' : '0' }">
           <!-- 左栏 -->
           <div class="pane pane--left">
-            <div class="file-offset" :style="{ transform: 'translateY(0px)' }">
+            <div class="file-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
               <DiffLine
                 v-for="(ln, i) in (splitLayout?.leftLines ?? [])"
                 :key="'l' + i"
@@ -250,7 +259,7 @@ onBeforeUnmount(() => {
           </div>
           <!-- 右栏 -->
           <div class="pane pane--right">
-            <div class="file-offset" :style="{ transform: 'translateY(0px)' }">
+            <div class="file-offset" :style="{ transform: `translateY(${offsets.right}px)` }">
               <DiffLine
                 v-for="(ln, i) in (splitLayout?.rightLines ?? [])"
                 :key="'r' + i"
