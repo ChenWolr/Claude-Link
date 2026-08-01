@@ -162,12 +162,16 @@ function nextFile(): void {
   selectPath(files.value[idx].path);
 }
 
-// 「打开」文件：shell.openPath 走系统默认程序（无默认则系统弹「打开方式」）。
+// 「打开」文件：shell.openPath 走系统默认程序；失败时主进程 Windows 降级弹「打开方式」对话框。
 async function openExternally(): Promise<void> {
   if (!currentFile.value) return;
   const wd = sessionStore.activeSession?.workingDir ?? null;
-  const res = await window.claudeLink.openChangeFile(wd, currentFile.value.path);
-  showToast(res.ok ? `已用默认程序打开 ${pathParts.value.name}` : res.message);
+  try {
+    const res = await window.claudeLink.openChangeFile(wd, currentFile.value.path);
+    showToast(res.ok ? `已用默认程序打开 ${pathParts.value.name}` : res.message);
+  } catch (e) {
+    showToast(`打开失败：${(e as Error).message ?? e}`);
+  }
 }
 
 const toastText = ref('');
@@ -179,7 +183,7 @@ function showToast(msg: string): void {
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     toastShow.value = false;
-  }, 1800);
+  }, 4000);
 }
 
 // ── 几何 ──
@@ -499,7 +503,7 @@ onBeforeUnmount(() => {
               <span><i class="lg-mod"></i>修改</span>
             </div>
             <div class="diff-footer__actions">
-              <button class="btn btn--primary" type="button" :disabled="!currentFile" @click="openExternally">
+              <button class="btn btn--primary" type="button" :disabled="!currentFile || currentFile.status === 'D'" :title="currentFile && currentFile.status === 'D' ? '已删除文件无法打开' : ''" @click="openExternally">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>打开
               </button>
             </div>
