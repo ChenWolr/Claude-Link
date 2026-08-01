@@ -224,3 +224,109 @@ export function planSplitVisible(
   }
   return out;
 }
+
+// ===== split chunk 模型（contrast 风格：左右各自完整渲染 + chunk 对齐 + 偏移 + 桥）=====
+// 与上方 buildSplitRows（null 占位静态对齐）并存；split 渲染层切到本模型。inline 不受影响。
+
+export type SplitChunkKind = 'same' | 'add' | 'del' | 'edit';
+
+export interface SplitChunk {
+  kind: SplitChunkKind;
+  leftStart: number;
+  rightStart: number;
+  leftSize: number;
+  rightSize: number;
+  size: number;
+  navIndex: number | null;
+}
+
+export interface SplitLayout {
+  leftLines: DiffLine[];
+  rightLines: DiffLine[];
+  chunks: SplitChunk[];
+  /** river 总高度（px）。lineHeight 由调用方传（DiffBody 传 --diff-line-h，默认 22）。 */
+  riverHeight: number;
+}
+
+/**
+ * 把 ParsedDiffFile.groups 拍成 SplitLayout：左右栏各自完整行序列 + 对齐块。
+ * - ctx → same（leftSize=rightSize=L.length）
+ * - add → add（leftSize=0）
+ * - del → del（rightSize=0）
+ * - mod/ws → edit（1:1，恒 leftSize=rightSize=1）
+ * - **相邻 del group + add group（中间无 ctx/skip/mod）→ 合并为单个 edit chunk（M:N）**
+ *   （classifyRun 已把不等长改动拆成相邻 del+add；此处把它们在渲染层重新识别为一个 edit）
+ * - skip → 不产出 chunk（hunk 间分隔由 DiffBody 另行渲染「⋯ N 行」）
+ * navIndex 仅对改动块（add/del/edit）递增；same 为 null。
+ */
+export function buildSplitChunks(
+  f: ParsedDiffFile,
+  lineHeight = 22,
+): SplitLayout {
+  const leftLines: DiffLine[] = [];
+  const rightLines: DiffLine[] = [];
+  const chunks: SplitChunk[] = [];
+  let nav = 0;
+
+  const pushLines = (L: DiffLine[], R: DiffLine[]): { l0: number; r0: number } => {
+    const l0 = leftLines.length;
+    const r0 = rightLines.length;
+    for (const x of L) leftLines.push(x);
+    for (const x of R) rightLines.push(x);
+    return { l0, r0 };
+  };
+
+  for (let i = 0; i < f.groups.length; i++) {
+    const g = f.groups[i]!;
+    if (g.k === 'skip') continue;
+
+    // 相邻 del+add → 合并 edit（M:N）
+    if (g.k === 'del' && i + 1 < f.groups.length && f.groups[i + 1]!.k === 'add') {
+      const next = f.groups[i + 1]!;
+      const { l0, r0 } = pushLines(g.L, next.R);
+      chunks.push({
+        kind: 'edit',
+        leftStart: l0,
+        rightStart: r0,
+        leftSize: g.L.length,
+        rightSize: next.R.length,
+        size: Math.max(g.L.length, next.R.length),
+        navIndex: nav++,
+      });
+      i++; // 消费掉相邻的 add
+      continue;
+    }
+
+    if (g.k === 'ctx') {
+      const { l0, r0 } = pushLines(g.L, g.R);
+      chunks.push({
+        kind: 'same', leftStart: l0, rightStart: r0,
+        leftSize: g.L.length, rightSize: g.R.length,
+        size: Math.max(g.L.length, g.R.length), navIndex: null,
+      });
+    } else if (g.k === 'add') {
+      const { l0, r0 } = pushLines([], g.R);
+      chunks.push({
+        kind: 'add', leftStart: l0, rightStart: r0,
+        leftSize: 0, rightSize: g.R.length, size: g.R.length, navIndex: nav++,
+      });
+    } else if (g.k === 'del') {
+      const { l0, r0 } = pushLines(g.L, []);
+      chunks.push({
+        kind: 'del', leftStart: l0, rightStart: r0,
+        leftSize: g.L.length, rightSize: 0, size: g.L.length, navIndex: nav++,
+      });
+    } else {
+      // mod/ws（恒 1:1）
+      const { l0, r0 } = pushLines(g.L, g.R);
+      chunks.push({
+        kind: 'edit', leftStart: l0, rightStart: r0,
+        leftSize: g.L.length, rightSize: g.R.length,
+        size: Math.max(g.L.length, g.R.length), navIndex: nav++,
+      });
+    }
+  }
+
+  const totalRows = chunks.reduce((a, c) => a + c.size, 0);
+  return { leftLines, rightLines, chunks, riverHeight: totalRows * lineHeight };
+}
