@@ -2511,7 +2511,7 @@ function testChangesPanelContracts(): void {
 
   // === unified-diff 纯解析器契约（diff-parser）===
   // fixture：ctx / 1:1 mod(词级 segs) / 不等长 M:N→del+add / 末尾 \ No newline
-  const UNI = '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,5 +1,7 @@\n line1\n-foo = 1;\n+foo = 2;\n ctx2\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx3\n\\ No newline at end of file\n';
+  const UNI = '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,6 +1,7 @@\n line1\n-foo = 1;\n+foo = 2;\n ctx2\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx3\n\\ No newline at end of file\n';
   const parsed = parseUnifiedDiff(UNI);
   assert.ok(parsed, '有效 unified diff 须解析出 ParsedDiffFile');
   assert.equal(parsed!.binary, false, '文本 diff 不得标二进制');
@@ -2777,7 +2777,7 @@ function testDiffWordLcsContracts(): void {
 // 并排成对行数组契约（buildSplitRows / planSplitVisible，纯函数行为）。
 function testSplitRowsContracts(): void {
   const UNI =
-    '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,5 +1,7 @@\n line1\n-foo = 1;\n+foo = 2;\n ctx2\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx3\n';
+    '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,6 +1,7 @@\n line1\n-foo = 1;\n+foo = 2;\n ctx2\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx3\n';
   const parsed = parseUnifiedDiff(UNI)!;
   const rows = buildSplitRows(parsed);
 
