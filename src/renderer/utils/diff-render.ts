@@ -330,3 +330,65 @@ export function buildSplitChunks(
   const totalRows = chunks.reduce((a, c) => a + c.size, 0);
   return { leftLines, rightLines, chunks, riverHeight: totalRows * lineHeight };
 }
+
+// ===== 焦点对齐偏移 + 动态桥几何（阶段 2：magic scrolling）=====
+
+export interface Offsets { left: number; right: number; }
+
+/**
+ * 移植 contrast scrollY 的焦点 1/3 对齐：焦点 = 视口顶部下 1/3 处。
+ * 找焦点所在 chunk，让该 chunk 左右两侧在 river 空间对齐——
+ *   base = (riverStart - sideStart) × lineHeight  （让侧顶部对齐 river 顶部）
+ *   + percent × (size - sideSize) × lineHeight     （按 chunk 内进度，较窄侧往下推）
+ * 焦点超出范围 → {0,0}。
+ */
+export function computeOffsets(
+  chunks: SplitChunk[],
+  scrollTop: number,
+  viewportH: number,
+  lineHeight: number,
+): Offsets {
+  const focalPoint = Math.floor(viewportH / 3) + scrollTop;
+  const focalLine = Math.floor(Math.max(0, focalPoint) / lineHeight);
+
+  let riverLine = 0;
+  let target: SplitChunk | null = null;
+  let riverStart = 0;
+  for (const c of chunks) {
+    if (focalLine >= riverLine && focalLine < riverLine + c.size) {
+      target = c; riverStart = riverLine; break;
+    }
+    riverLine += c.size;
+  }
+  if (!target) return { left: 0, right: 0 };
+
+  const size = target.size || 1;
+  const percent = (focalPoint / lineHeight - riverStart) / size;
+
+  const left = (riverStart - target.leftStart) * lineHeight
+             + percent * (size - target.leftSize) * lineHeight;
+  const right = (riverStart - target.rightStart) * lineHeight
+              + percent * (size - target.rightSize) * lineHeight;
+  return { left, right };
+}
+
+/**
+ * 单个桥的几何（随 offsets 变化）。移植 contrast drawBridge L380-420（去掉 1px 微调）。
+ * 返回 SVG polygon 的 4 点 + 容器 top/height。viewBox=0 0 100 100，preserveAspectRatio=none 横向拉伸。
+ */
+export function bridgePolygon(
+  c: SplitChunk,
+  offsets: Offsets,
+  lineHeight: number,
+): { kind: SplitChunk['kind']; top: number; height: number; points: string } {
+  const leftTop = c.leftStart * lineHeight + offsets.left;
+  const rightTop = c.rightStart * lineHeight + offsets.right;
+  const leftBottom = leftTop + Math.max(c.leftSize, 1) * lineHeight;
+  const rightBottom = rightTop + Math.max(c.rightSize, 1) * lineHeight;
+  const top = Math.min(leftTop, rightTop);
+  const bottom = Math.max(leftBottom, rightBottom);
+  const height = Math.max(bottom - top, 2);
+  const p = (x: number, y: number) => `${x},${Math.round((y - top) * 10) / 10}`;
+  const points = [p(0, leftTop), p(100, rightTop), p(100, rightBottom), p(0, leftBottom)].join(' ');
+  return { kind: c.kind, top, height, points };
+}
