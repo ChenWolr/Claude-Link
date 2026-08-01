@@ -7,7 +7,7 @@
 // 所有 git 调用走 execFile（非 shell，路径作独立参数 + `--` 防注入），带 timeout/maxBuffer，
 // 并设 GIT_TERMINAL_PROMPT=0 杜绝凭证交互挂起。解析逻辑为纯函数并导出，便于回归测试。
 
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import * as path from 'path';
 import { shell } from 'electron';
 import { MAX_DIFF_LINES } from '../../shared/process-kind';
@@ -229,7 +229,41 @@ export async function getChangeDiff(workingDir: string | null, path: string, con
   return { ok: true, diff: t.diff, truncated: t.truncated, binary: false, context };
 }
 
-// 「打开」文件：走 shell.openPath 用系统默认程序打开（无默认程序则系统弹「打开方式」）。
+/** 给定绝对路径与平台，返回弹原生「打开方式」对话框的命令；平台不支持返回 null。
+ *  Windows 用 rundll32 shell32.dll,OpenAs_RunDLL；macOS/Linux 暂不支持（返回 null，由调用方决定回退）。 */
+export function openWithCommand(absPath: string, platform: string = process.platform): { command: string; args: string[] } | null {
+  if (platform === 'win32') {
+    return { command: 'rundll32.exe', args: ['shell32.dll,OpenAs_RunDLL', absPath] };
+  }
+  return null;
+}
+
+/** 判断 absPath 是否在 root 目录内（含 root 自身）。
+ *  关键：git rev-parse --show-toplevel 在 Windows 输出正斜杠（D:/...），而 path.resolve 把 abs 规范化成反斜杠，
+ *  字符串 startsWith 会因分隔符不匹配误判越界 → 两边都 normalize 统一为平台分隔符后再比。 */
+export function isPathInsideRoot(absPath: string, root: string): boolean {
+  const nr = path.normalize(root);
+  const na = path.normalize(absPath);
+  return na === nr || na.startsWith(nr + path.sep);
+}
+
+// 启动外部程序弹原生「打开方式」对话框：detached 不等退出（对话框是模态 UI，由用户操作关闭）；
+// 仅在 spawn 立即失败（如 rundll32 缺失）时 reject，给调用方回退原错误的机会。
+function spawnOpenWithDialog(command: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { detached: true, stdio: 'ignore' });
+    child.once('error', reject);
+    child.unref();
+    // spawn 同步失败（ENOENT 等）会近立即抛 error；留 120ms 窗口捕获，无 error 视为对话框已弹出。
+    setTimeout(() => {
+      child.removeListener('error', reject);
+      resolve();
+    }, 120);
+  });
+}
+
+// 「打开」文件：优先走 shell.openPath 用系统默认程序打开；失败时（无默认程序 / 文件不存在等）
+// 在 Windows 降级用 rundll32 弹原生「打开方式」对话框让用户选程序，其他平台无等价 API 直接返回错误。
 // 安全要点：ChangedFile.path 是仓库根相对（正斜杠），workingDir 可能是仓库子目录 →
 // 绝不能 path.resolve(workingDir, rel)，必须经仓库根 resolve，并 startsWith(root+sep)
 // 防 .. 越界逃逸。openPath 成功返回空串，失败返回 ErrorDescription 字符串。
@@ -242,13 +276,23 @@ export async function openChangeFile(workingDir: string | null, relPath: string)
     return { ok: false, reason: r.reason === 'git-unavailable' ? 'git-unavailable' : 'not-a-repo', message: r.message };
   }
   const abs = path.resolve(root, relPath);
-  if (abs !== root && !abs.startsWith(root + path.sep)) {
+  if (!isPathInsideRoot(abs, root)) {
     return { ok: false, reason: 'no-such-file', message: '文件不在仓库目录内' };
   }
   try {
     const err = await shell.openPath(abs);
-    if (err) return { ok: false, reason: 'error', message: `无法打开：${err}` };
-    return { ok: true };
+    if (!err) return { ok: true };
+    // shell.openPath 失败：Windows 降级弹「打开方式」对话框；其他平台无等价 API，回退原错误。
+    const fallback = openWithCommand(abs);
+    if (fallback) {
+      try {
+        await spawnOpenWithDialog(fallback.command, fallback.args);
+        return { ok: true };
+      } catch {
+        return { ok: false, reason: 'error', message: `无法打开：${err}` };
+      }
+    }
+    return { ok: false, reason: 'error', message: `无法打开：${err}` };
   } catch {
     return { ok: false, reason: 'error', message: '打开文件失败' };
   }
