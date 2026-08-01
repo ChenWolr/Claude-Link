@@ -36,6 +36,8 @@ const emit = defineEmits<{ (e: 'goto-nav', nav: number): void }>();
 
 const bodyEl = ref<HTMLElement | null>(null);
 const splitScroll = ref<HTMLElement | null>(null);
+const leftPane = ref<HTMLElement | null>(null);
+const rightPane = ref<HTMLElement | null>(null);
 
 // —— split：chunk 模型（contrast 风格：左右各自完整行 + 对齐块 + SVG 桥）——
 const LH = 22; // 与 CSS --diff-line-h 一致
@@ -59,6 +61,22 @@ function onSplitScroll(): void {
       el.clientHeight,
       LH,
     );
+  });
+}
+
+// 水平滚动同步：左右栏 .pane 各自 overflow-x，拉一栏另一栏跟随（contrast scrollX master/slave）。
+// syncSourceX 标志 + rAF 释放防回环：同步 dst 会触发 dst 的 scroll 事件，此时 syncSourceX 仍是 src，
+// dst 侧 onPaneScrollX 早返回（scroll 事件常跨帧，rAF 在下帧释放比 microtask 稳）。
+let syncSourceX: 'left' | 'right' | null = null;
+function onPaneScrollX(side: 'left' | 'right'): void {
+  if (syncSourceX !== null && syncSourceX !== side) return;
+  const src = side === 'left' ? leftPane.value : rightPane.value;
+  if (!src) return;
+  syncSourceX = side;
+  const dst = side === 'left' ? rightPane.value : leftPane.value;
+  if (dst && dst.scrollLeft !== src.scrollLeft) dst.scrollLeft = src.scrollLeft;
+  requestAnimationFrame(() => {
+    syncSourceX = null;
   });
 }
 
@@ -250,7 +268,7 @@ onBeforeUnmount(() => {
       <div ref="splitScroll" class="diff-scroll" @scroll.passive="onSplitScroll">
         <div class="split-track" :style="{ height: splitLayout ? splitLayout.riverHeight + 'px' : '0' }">
           <!-- 左栏 -->
-          <div class="pane pane--left">
+          <div ref="leftPane" class="pane pane--left" @scroll.passive="onPaneScrollX('left')">
             <div class="file-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
               <DiffLine
                 v-for="(ln, i) in (splitLayout?.leftLines ?? [])"
@@ -281,7 +299,7 @@ onBeforeUnmount(() => {
             </svg>
           </div>
           <!-- 右栏 -->
-          <div class="pane pane--right">
+          <div ref="rightPane" class="pane pane--right" @scroll.passive="onPaneScrollX('right')">
             <div class="file-offset" :style="{ transform: `translateY(${offsets.right}px)` }">
               <DiffLine
                 v-for="(ln, i) in (splitLayout?.rightLines ?? [])"
