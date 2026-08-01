@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // DiffBody —— diff 渲染器。消费 ParsedDiffFile（diff-parser 输出）渲染并排/内联两种视图。
-// 所有 UI 状态（mode/context/ignoreWs/wrap/onlyChanges/curChange）由父 DiffDialog 传入，本组件无状态持有
+// 所有 UI 状态（mode/context/wrap/onlyChanges/curChange）由父 DiffDialog 传入，本组件无状态持有
 // （仅 fold/gap 展开态这种纯局部 UI 在内部）。改动导航 curChange 变化时滚到中心 + 闪一下。
 //
 // split（contrast 风格）：消费 buildSplitRows 的成对行数组（左右等长，数据层对齐，无运行时偏移），
@@ -26,7 +26,6 @@ const props = defineProps<{
   parsed: ParsedDiffFile | null;
   mode: 'split' | 'inline';
   context: number;
-  ignoreWs: boolean;
   wrap: boolean;
   onlyChanges: boolean;
   curChange: number;
@@ -39,7 +38,7 @@ const rightScroll = ref<HTMLElement | null>(null);
 const riverScroll = ref<HTMLElement | null>(null);
 
 // —— split：成对行数组 + onlyChanges 折叠 ——
-const splitRows = computed(() => (props.parsed ? buildSplitRows(props.parsed, props.ignoreWs) : []));
+const splitRows = computed(() => (props.parsed ? buildSplitRows(props.parsed) : []));
 const expandedSplitFolds = ref<Set<number>>(new Set());
 const splitVisible = computed<SplitVisibleItem[]>(() =>
   planSplitVisible(splitRows.value, props.onlyChanges, expandedSplitFolds.value),
@@ -74,7 +73,7 @@ interface InlineSeg {
 }
 const inlineSegs = computed<InlineSeg[]>(() => {
   if (!props.parsed || props.mode !== 'inline') return [];
-  const rows = buildInlineRows(props.parsed, props.ignoreWs);
+  const rows = buildInlineRows(props.parsed);
   const vis = inlineVisiblePlan(rows, props.context);
   const out: InlineSeg[] = [];
   let i = 0;
@@ -123,7 +122,7 @@ function toggleGap(idx: number): void {
 }
 // 切规划输入 → 展开 id 失效，清空（防 stale）
 watch(
-  [() => props.mode, () => props.context, () => props.ignoreWs, () => props.onlyChanges, () => props.parsed],
+  [() => props.mode, () => props.context, () => props.onlyChanges, () => props.parsed],
   () => {
     expandedGaps.value = new Set();
     expandedSplitFolds.value = new Set();

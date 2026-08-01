@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// DiffDialog —— 改动对比弹窗的壳。持有全部视图状态（mode/context/ignoreWs/wrap/onlyChanges/curChange）
+// DiffDialog —— 改动对比弹窗的壳。持有全部视图状态（mode/context/wrap/onlyChanges/curChange）
 // 与弹窗几何（rect/sidebarW），组装 DiffSidebar + DiffBody，处理键盘 / 焦点 / 缩放 / 「打开」/ toast。
 //
 // 显隐由 useDiffDialog 的模块级 state 驱动（openDiffDialog/closeDiffDialog）。组件在 App.vue 单例常驻，
@@ -26,7 +26,6 @@ const CONTEXT_OPTIONS = [3, 5, 10, 20] as const;
 // 视图状态
 const mode = ref<'split' | 'inline'>('split');
 const context = ref(3);
-const ignoreWs = ref(false);
 const wrap = ref(false);
 const onlyChanges = ref(false);
 const curChange = ref(0);
@@ -64,8 +63,8 @@ const counts = computed(() => (parsed.value ? countChanges(parsed.value) : { add
 const navTotal = computed(() => {
   if (!parsed.value) return 0;
   return mode.value === 'split'
-    ? countSplitHunks(parsed.value, ignoreWs.value)
-    : countInlineHunks(parsed.value, ignoreWs.value, context.value);
+    ? countSplitHunks(parsed.value)
+    : countInlineHunks(parsed.value, context.value);
 });
 const baselineShort = computed(() => (changesStore.baselineRef ? changesStore.baselineRef.slice(0, 7) : ''));
 const pathParts = computed(() => {
@@ -84,14 +83,11 @@ const statusText = computed(() => {
   const s = currentFile.value?.status;
   return s ? STATUS_LABEL[s] ?? s : '改动';
 });
-const filePos = computed(() => `${fileIdx.value >= 0 ? fileIdx.value + 1 : 0} / ${files.value.length}`);
-
 // 打开 / 关闭：复位视图、几何居中、记焦点；关闭还原焦点。
 watch(state, async (s) => {
   if (s) {
     mode.value = 'split';
     context.value = 3;
-    ignoreWs.value = false;
     wrap.value = false;
     onlyChanges.value = false;
     curChange.value = 0;
@@ -107,7 +103,7 @@ watch(state, async (s) => {
   }
 });
 
-// path 变化（打开 + 侧栏切换 + 上/下一文件）→ 取 diff + 复位 curChange。
+// path 变化（打开 + 侧栏切换）→ 取 diff + 复位 curChange。
 // 用 watch(state.path) 而非 watch(state)：切换文件只改 path 属性不重新赋值 state，避免触发「打开」复位逻辑。
 watch(
   () => state.value?.path,
@@ -118,7 +114,7 @@ watch(
   },
 );
 
-// nav 总数变化（切模式 / 忽略空白 / 上下文 / 文件）时钳制 curChange 入界。
+// nav 总数变化（切模式 / 上下文 / 文件）时钳制 curChange 入界。
 watch(navTotal, (n) => {
   if (curChange.value > n - 1) curChange.value = Math.max(0, n - 1);
 });
@@ -151,17 +147,6 @@ function setMode(m: 'split' | 'inline'): void {
   mode.value = m;
   curChange.value = 0;
 }
-function prevFile(): void {
-  if (!files.value.length) return;
-  const idx = fileIdx.value <= 0 ? files.value.length - 1 : fileIdx.value - 1;
-  selectPath(files.value[idx].path);
-}
-function nextFile(): void {
-  if (!files.value.length) return;
-  const idx = fileIdx.value >= files.value.length - 1 ? 0 : fileIdx.value + 1;
-  selectPath(files.value[idx].path);
-}
-
 // 「打开」文件：shell.openPath 走系统默认程序；失败时主进程 Windows 降级弹「打开方式」对话框。
 async function openExternally(): Promise<void> {
   if (!currentFile.value) return;
@@ -340,10 +325,6 @@ function onKey(e: KeyboardEvent): void {
   } else if (e.key === 'ArrowUp') {
     e.preventDefault();
     gotoChange(-1);
-  } else if (e.key === '[') {
-    prevFile();
-  } else if (e.key === ']') {
-    nextFile();
   } else if (e.key === 'Tab') {
     trapTab(e);
   }
@@ -408,15 +389,6 @@ onBeforeUnmount(() => {
               </p>
             </div>
             <div class="diff-header__actions">
-              <div class="fileswitch" title="切换文件（[ / ]）">
-                <button class="iconbtn" type="button" aria-label="上一个文件" :disabled="files.length < 2" @click="prevFile">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6" /></svg>
-                </button>
-                <span class="fileswitch__count">{{ filePos }}</span>
-                <button class="iconbtn" type="button" aria-label="下一个文件" :disabled="files.length < 2" @click="nextFile">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6" /></svg>
-                </button>
-              </div>
               <button ref="closeBtn" class="iconbtn iconbtn--close" type="button" aria-label="关闭" @click="close">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
@@ -452,7 +424,6 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <button class="tbtn" type="button" :class="{ active: ignoreWs }" title="忽略空白差异" @click="ignoreWs = !ignoreWs">忽略空白</button>
             <button class="tbtn" type="button" :class="{ active: wrap }" title="自动换行" @click="wrap = !wrap">换行</button>
             <button v-if="mode === 'split'" class="tbtn" type="button" :class="{ active: onlyChanges }" title="仅显示改动（折叠未改动行）" @click="onlyChanges = !onlyChanges">仅改动</button>
           </div>
@@ -467,7 +438,6 @@ onBeforeUnmount(() => {
             :parsed="parsed"
             :mode="mode"
             :context="context"
-            :ignore-ws="ignoreWs"
             :wrap="wrap"
             :only-changes="onlyChanges"
             :cur-change="curChange"
@@ -757,30 +727,6 @@ onBeforeUnmount(() => {
   width: 32px;
   height: 32px;
 }
-.fileswitch {
-  display: inline-flex;
-  align-items: center;
-  margin-right: 4px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  background: var(--color-panel-soft);
-}
-.fileswitch .iconbtn {
-  width: 28px;
-  height: 28px;
-  border: 0;
-  border-radius: 0;
-}
-.fileswitch__count {
-  font-size: 11px;
-  color: var(--color-text-muted);
-  padding: 0 6px;
-  font-variant-numeric: tabular-nums;
-  min-width: 38px;
-  text-align: center;
-}
-
 /* TOOLBAR */
 .diff-toolbar {
   flex: 0 0 auto;

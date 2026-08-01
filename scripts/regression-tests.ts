@@ -2779,7 +2779,7 @@ function testSplitRowsContracts(): void {
   const UNI =
     '--- a/src/x.ts\n+++ b/src/x.ts\n@@ -1,5 +1,7 @@\n line1\n-foo = 1;\n+foo = 2;\n ctx2\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx3\n';
   const parsed = parseUnifiedDiff(UNI)!;
-  const rows = buildSplitRows(parsed, false);
+  const rows = buildSplitRows(parsed);
 
   // 1. 占位契约：left===null 当且仅当 add 行；right===null 当且仅当 del 行（成对行槽位一一对应）
   assert.ok(rows.every((r) => (r.left === null) === (r.kind === 'add')), 'left===null 当且仅当 add 行');
@@ -2810,7 +2810,7 @@ function testSplitRowsContracts(): void {
 
   // 6. M:N 不等长 → 退化成 del + add（无 mod，牺牲词级；classifyRun 最后分支，文档化行为须有契约）
   const mn = parseUnifiedDiff('--- a/x\n+++ b/x\n@@ -1,4 +1,5 @@\n ctx\n-old1\n-old2\n+new1\n+new2\n+new3\n ctx2\n')!;
-  const mnRows = buildSplitRows(mn, false);
+  const mnRows = buildSplitRows(mn);
   assert.ok(!mnRows.some((r) => r.kind === 'mod'), 'M:N 不等长不得产 mod（退化为 del+add）');
   assert.ok(
     mnRows.some((r) => r.kind === 'del') && mnRows.some((r) => r.kind === 'add'),
