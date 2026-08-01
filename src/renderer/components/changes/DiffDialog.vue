@@ -12,6 +12,7 @@ import { useSessionStore } from '../../stores/session-store';
 import { parseUnifiedDiff } from '../../utils/diff-parser';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import { countChanges, countInlineHunks, countSplitHunks } from '../../utils/diff-render';
+import { extToLang } from '../../utils/diff-highlight';
 import DiffSidebar from './DiffSidebar.vue';
 import DiffBody from './DiffBody.vue';
 
@@ -49,6 +50,8 @@ let lastFocus: HTMLElement | null = null;
 const files = computed(() => changesStore.files);
 const fileIdx = computed(() => files.value.findIndex((f) => f.path === state.value?.path));
 const currentFile = computed(() => (fileIdx.value >= 0 ? files.value[fileIdx.value] : null));
+// 当前文件语言（split 语法高亮用）。path 变 → extToLang 重新推断。
+const language = computed(() => extToLang(currentFile.value?.path ?? ''));
 const cached = computed(() => (state.value ? changesStore.diffCache[state.value.path] : undefined));
 const isLoading = computed(() => !!state.value && !cached.value);
 const errorMsg = computed(() => (cached.value && !cached.value.ok ? cached.value.message : ''));
@@ -424,7 +427,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <button class="tbtn" type="button" :class="{ active: wrap }" title="自动换行" @click="wrap = !wrap">换行</button>
+            <button v-if="mode === 'inline'" class="tbtn" type="button" :class="{ active: wrap }" title="自动换行" @click="wrap = !wrap">换行</button>
             <button v-if="mode === 'split'" class="tbtn" type="button" :class="{ active: onlyChanges }" title="仅显示改动（折叠未改动行）" @click="onlyChanges = !onlyChanges">仅改动</button>
           </div>
 
@@ -441,6 +444,7 @@ onBeforeUnmount(() => {
             :wrap="wrap"
             :only-changes="onlyChanges"
             :cur-change="curChange"
+            :language="language"
             @goto-nav="curChange = $event"
           />
           <div v-else-if="errorMsg" class="diff-state">
