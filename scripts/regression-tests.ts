@@ -2644,7 +2644,8 @@ function testChangesPanelPlumbing(): void {
   // openChangeFile 须定义在 changes-panel.ts 内（复用未导出的 ensureRepo），import shell 用 openPath
   assert.ok(panel.includes(`import { shell } from 'electron'`), 'openChangeFile 须 import electron shell 用 openPath');
   assert.ok(panel.includes('export async function openChangeFile'), 'changes-panel 须导出 openChangeFile');
-  assert.ok(panel.includes('startsWith(root + path.sep)'), 'openChangeFile 须经仓库根 + startsWith(root+sep) 越界守卫');
+  assert.ok(panel.includes('isPathInsideRoot(abs, root)'), 'openChangeFile 越界守卫须经 isPathInsideRoot（normalize 统一分隔符防正斜杠 root 误判）');
+  assert.ok(panel.includes('export function isPathInsideRoot'), 'changes-panel 须导出 isPathInsideRoot 纯函数');
   assert.ok(!panel.includes('path.resolve(workingDir, relPath)'), '不得 resolve(workingDir, relPath)（workingDir 可能是仓库子目录）');
   // ChangesOpenResult 判别联合须定义（ok 分支类型安全）
   const changesTypes = read('../src/shared/types/changes.ts');
@@ -2666,7 +2667,27 @@ function testChangesPanelPlumbing(): void {
   assert.ok(!fs.existsSync(new URL('../src/renderer/composables/use-tool-file-snapshots.ts', import.meta.url)), 'use-tool-file-snapshots.ts 须已删除');
 }
 
+function testOpenWithFallbackContracts(): void {
+  // 「打开」降级：shell.openPath 失败时 Windows 须弹原生「打开方式」对话框（修复注释空头承诺的 bug）
+  const fs = require('node:fs') as typeof import('node:fs');
+  const read = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const panel = read('../src/main/modules/changes-panel.ts');
+  assert.ok(panel.includes('export function openWithCommand'), 'changes-panel 须导出 openWithCommand 纯函数（降级决策）');
+  assert.ok(panel.includes('shell32.dll,OpenAs_RunDLL'), 'openWithCommand 须用 rundll32 OpenAs_RunDLL 弹打开方式');
+  assert.ok(/openWithCommand\(abs\)/.test(panel), 'openChangeFile 须在 shell.openPath 失败时调 openWithCommand 降级');
+  assert.ok(panel.includes('spawnOpenWithDialog'), 'openChangeFile 降级须经 spawnOpenWithDialog detached 启动');
+  assert.ok(panel.includes("import { execFile, spawn } from 'child_process'"), 'changes-panel 须 import spawn 供降级启动');
+  assert.ok(!/无默认.*系统弹.*打开方式/.test(panel), 'changes-panel 注释不得再含"无默认则系统弹打开方式"空头承诺');
+  const diffDialogSrc = read('../src/renderer/components/changes/DiffDialog.vue');
+  assert.ok(!/无默认.*系统弹.*打开方式/.test(diffDialogSrc), 'DiffDialog 注释不得再含"无默认则系统弹打开方式"空头承诺');
+  assert.ok(/disabled.*currentFile\.status\s*===\s*'D'/.test(diffDialogSrc), 'DiffDialog 打开按钮须对 status=D 禁用');
+  assert.ok(/},\s*4\d{3}\)/.test(diffDialogSrc), 'DiffDialog toast 时长须 ≥ 4000ms（失败反馈不得一闪而过）');
+  assert.ok(panel.includes('export function isPathInsideRoot'), 'changes-panel 须导出 isPathInsideRoot（normalize 统一分隔符防正斜杠 root 误判）');
+  assert.ok(/isPathInsideRoot\(abs,\s*root\)/.test(panel), 'openChangeFile 越界守卫须经 isPathInsideRoot');
+}
+
 async function main(): Promise<void> {
+testOpenWithFallbackContracts();
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testClaudeSettingsProjectionPreservesAdvancedSettings();
