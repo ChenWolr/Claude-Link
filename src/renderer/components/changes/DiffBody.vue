@@ -335,10 +335,12 @@ onBeforeUnmount(() => {
               class="bridge"
               :class="['bridge--' + b.kind, { 'is-current': bridgeNavIndex(bi) === curChange, flash: bridgeNavIndex(bi) === flashNav }]"
               :style="{ top: b.top + 'px', height: b.height + 'px' }"
-              viewBox="0 0 100 100"
+              :viewBox="'0 0 100 ' + b.height"
               preserveAspectRatio="none"
             >
               <polygon :points="b.points" />
+              <line x1="0" :y1="b.topLine.y1" x2="100" :y2="b.topLine.y2" />
+              <line x1="0" :y1="b.bottomLine.y1" x2="100" :y2="b.bottomLine.y2" />
             </svg>
           </div>
           <!-- 右栏 -->
@@ -550,14 +552,14 @@ onBeforeUnmount(() => {
 .diff-body.is-wrap .diff-row--split .file-offset {
   width: auto;
 }
-/* river 绝对定位覆盖在左右栏之间 */
+/* river 绝对定位覆盖在左右栏之间（桥的画布；越宽桥越显眼） */
 .diff-row--split .diff-river {
   position: absolute;
   top: 0;
   bottom: 0;
   left: 50%;
-  width: 14px;
-  margin-left: -7px;
+  width: 40px;
+  margin-left: -20px;
   pointer-events: none;
   z-index: 3;
   background: transparent;
@@ -571,14 +573,28 @@ onBeforeUnmount(() => {
 .bridge polygon {
   stroke: none;
 }
+.bridge line {
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  opacity: 0.85;
+}
 .bridge--add polygon {
-  fill: color-mix(in srgb, var(--add-edge) 40%, transparent);
+  fill: color-mix(in srgb, var(--add-edge) 60%, transparent);
 }
 .bridge--del polygon {
-  fill: color-mix(in srgb, var(--del-edge) 40%, transparent);
+  fill: color-mix(in srgb, var(--del-edge) 60%, transparent);
 }
 .bridge--edit polygon {
-  fill: color-mix(in srgb, var(--mod-edge) 40%, transparent);
+  fill: color-mix(in srgb, var(--mod-edge) 60%, transparent);
+}
+.bridge--add line {
+  stroke: var(--add-edge);
+}
+.bridge--del line {
+  stroke: var(--del-edge);
+}
+.bridge--edit line {
+  stroke: var(--mod-edge);
 }
 .bridge.is-current polygon {
   fill-opacity: 0.7;

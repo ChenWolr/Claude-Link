@@ -63,13 +63,15 @@ check('M:N edit chunk 焦点居中 → 左右偏移方向相反（对齐到 rive
   assert.ok(o.right > 0, `M:N edit 右栏（窄侧）须正偏移，实际 ${o.right}`);
 });
 
-check('bridgePolygon: add chunk 梯形 4 点 + size=0 占位 1 行', () => {
+check('bridgePolygon: add chunk 三角形（左 size=0 收 2px）+ 上下边线', () => {
   const c: SplitChunk = { kind: 'add', leftStart: 10, rightStart: 10, leftSize: 0, rightSize: 3, size: 3, navIndex: 0 };
   const b = bridgePolygon(c, { left: 0, right: 0 }, LH);
   assert.equal(b.kind, 'add');
-  assert.equal(b.top, 220);      // 10×22
-  assert.equal(b.height, 66);    // 3 行
-  assert.equal(b.points, '0,0 100,0 100,66 0,22');  // 左占位1行(22) 右3行(66)
+  assert.equal(b.top, 219);      // 10×22 - 1（top 减 1 对齐 2px ruler）
+  assert.equal(b.height, 68);    // rightBottom(287) - top(219)
+  assert.equal(b.points, '0,0 100,0 100,68 0,2');  // 左 2px 尖 / 右 68px → 三角形（非 1 行梯形）
+  assert.deepEqual(b.topLine, { y1: 1, y2: 1 });      // 上边线水平（左尖=右顶，同高）
+  assert.deepEqual(b.bottomLine, { y1: 1, y2: 67 });  // 下边线斜（左尖 → 右底）
 });
 
 check('bridgePolygon: 随 offset 变形（offset 变 → points 变）', () => {
