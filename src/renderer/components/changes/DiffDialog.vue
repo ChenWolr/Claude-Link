@@ -11,7 +11,7 @@ import { useChangesStore } from '../../stores/changes-store';
 import { useSessionStore } from '../../stores/session-store';
 import { parseUnifiedDiff } from '../../utils/diff-parser';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
-import { countChanges, countInlineHunks, countSplitHunks } from '../../utils/diff-render';
+import { buildSplitChunks, countChanges, countInlineHunks } from '../../utils/diff-render';
 import { extToLang } from '../../utils/diff-highlight';
 import DiffSidebar from './DiffSidebar.vue';
 import DiffBody from './DiffBody.vue';
@@ -65,9 +65,11 @@ const parsed = computed<ParsedDiffFile | null>(() => {
 const counts = computed(() => (parsed.value ? countChanges(parsed.value) : { add: 0, del: 0 }));
 const navTotal = computed(() => {
   if (!parsed.value) return 0;
-  return mode.value === 'split'
-    ? countSplitHunks(parsed.value)
-    : countInlineHunks(parsed.value, context.value);
+  if (mode.value === 'inline') return countInlineHunks(parsed.value, context.value);
+  // split：chunk 模型下改动块数 = navIndex 非 null 的 chunk 数（buildSplitChunks 已编 navIndex）。
+  // I1 修复：countSplitHunks 数 groups，相邻 del+add 合并为 1 个 edit chunk 后会偏大 → 导航跳号。
+  const lay = buildSplitChunks(parsed.value);
+  return lay.chunks.reduce((a, c) => a + (c.navIndex != null ? 1 : 0), 0);
 });
 const baselineShort = computed(() => (changesStore.baselineRef ? changesStore.baselineRef.slice(0, 7) : ''));
 const pathParts = computed(() => {
