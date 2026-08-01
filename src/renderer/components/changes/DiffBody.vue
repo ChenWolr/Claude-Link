@@ -119,6 +119,13 @@ const rightKindArr = computed<string[]>(() => {
 function clickChunk(navIndex: number | null): void {
   if (navIndex != null && navIndex !== props.curChange) emit('goto-nav', navIndex);
 }
+// 桥索引 → 对应改动 chunk 的 navIndex（splitBridges 按 chunks 里非 same 顺序，一一对应）
+function bridgeNavIndex(bridgeIdx: number): number | null {
+  const lay = splitLayout.value;
+  if (!lay) return null;
+  const changed = lay.chunks.filter((c) => c.kind !== 'same');
+  return changed[bridgeIdx]?.navIndex ?? null;
+}
 
 // —— inline：扁平行流 + 上下文规划 + gap 折叠 ——
 interface InlineSeg {
@@ -189,7 +196,8 @@ watch(
 );
 
 // curChange 变化 → 闪一下 + 滚到中心。flash 用响应式 flashNav 驱动（避免直接 classList 与 Vue :class 冲突）。
-// split 单滚动容器 .diff-scroll；inline 单栏 .pane-scroll。otherPane 同步已移除（split 单滚动、inline 单栏）。
+// split：按 navIndex 找 chunk 的 river 中线行，滚 splitScroll 居中（chunk 模型下行高不齐，querySelector 定位不准）。
+// inline：保留原 querySelector([data-nav]) 居中逻辑。
 const flashNav = ref<number | null>(null);
 let flashTimer: ReturnType<typeof setTimeout> | null = null;
 watch(
@@ -201,16 +209,31 @@ watch(
     flashTimer = setTimeout(() => {
       flashNav.value = null;
     }, 700);
-    const el = bodyEl.value?.querySelector(`[data-nav="${props.curChange}"]`) as HTMLElement | null;
-    if (!el) return;
-    const pane =
-      (el.closest('.diff-scroll') as HTMLElement | null) ??
-      (el.closest('.pane-scroll') as HTMLElement | null);
-    if (!pane) return;
-    const paneRect = pane.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const target = elRect.top - paneRect.top + pane.scrollTop - (pane.clientHeight - elRect.height) / 2;
-    pane.scrollTo({ top: target, behavior: 'smooth' });
+
+    if (props.mode !== 'split') {
+      // inline：querySelector([data-nav]) 居中
+      const el = bodyEl.value?.querySelector(`[data-nav="${props.curChange}"]`) as HTMLElement | null;
+      if (!el) return;
+      const pane = el.closest('.pane-scroll') as HTMLElement | null;
+      if (!pane) return;
+      const pr = pane.getBoundingClientRect(), er = el.getBoundingClientRect();
+      pane.scrollTo({ top: er.top - pr.top + pane.scrollTop - (pane.clientHeight - er.height) / 2, behavior: 'smooth' });
+      return;
+    }
+    // split：按 navIndex 找 chunk 的 river 中线行，滚 splitScroll 居中
+    const lay = splitLayout.value;
+    const sc = splitScroll.value;
+    if (!lay || !sc) return;
+    let riverLine = 0;
+    for (const c of lay.chunks) {
+      if (c.navIndex === props.curChange) {
+        const midRiverLine = riverLine + c.size / 2;
+        const target = midRiverLine * LH - sc.clientHeight / 2;
+        sc.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+        break;
+      }
+      riverLine += c.size;
+    }
   },
 );
 
@@ -249,7 +272,7 @@ onBeforeUnmount(() => {
               v-for="(b, bi) in splitBridges"
               :key="'br' + bi"
               class="bridge"
-              :class="'bridge--' + b.kind"
+              :class="['bridge--' + b.kind, { 'is-current': bridgeNavIndex(bi) === curChange, flash: bridgeNavIndex(bi) === flashNav }]"
               :style="{ top: b.top + 'px', height: b.height + 'px' }"
               viewBox="0 0 100 100"
               preserveAspectRatio="none"
@@ -495,6 +518,12 @@ onBeforeUnmount(() => {
 }
 .bridge--edit polygon {
   fill: color-mix(in srgb, var(--mod-edge) 40%, transparent);
+}
+.bridge.is-current polygon {
+  fill-opacity: 0.7;
+}
+.bridge.flash polygon {
+  animation: diff-flash 0.7s var(--ease-out);
 }
 /* curChange 高亮 + flash（split：绑在 DiffLine 根 .line 上，:deep 穿透 scoped） */
 .diff-row--split :deep(.line.is-current) {
