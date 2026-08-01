@@ -7,6 +7,7 @@
 // null 占位侧由 DiffBody 直接渲染 .line--placeholder，不走本组件（保留「行内容静态」契约）。
 import { computed } from 'vue';
 import type { DiffLine as ParsedDiffLine } from '../../utils/diff-parser';
+import { highlightLineToTokens, mergeTokensWithDiff, type MergedToken } from '../../utils/diff-highlight';
 
 const props = defineProps<{
   line: ParsedDiffLine;
@@ -15,6 +16,8 @@ const props = defineProps<{
   variant: 'split' | 'inline';
   /** split 用：左右栏标记（配色微调保留） */
   side?: 'left' | 'right';
+  /** split 语法高亮用：hljs language，由 DiffBody 按扩展名推断下传 */
+  language?: string;
 }>();
 
 // white-space:pre 下空 <code> 会塌陷成 0 高度 → 空行/空段一律渲染单空格保高。
@@ -25,6 +28,16 @@ const codeText = computed(() => (props.line.t === '' ? ' ' : props.line.t));
 const sign = computed(() =>
   props.kind === 'add' ? '+' : props.kind === 'del' ? '−' : props.kind === 'modl' || props.kind === 'modr' || props.kind === 'ws' ? '~' : '',
 );
+
+// split + 有 language → 语法高亮（与词级 diff 叠加）；否则用原整行/segs 渲染。
+// 阶段 1：split 只上语法色（mergeTokensWithDiff 无 segs 时全 eq，即纯语法色）；
+// Task 2c 才把 line.segs 传入做字符级 diff 叠加。
+const splitTokens = computed<MergedToken[] | null>(() => {
+  if (props.variant !== 'split' || !props.language) return null;
+  const toks = highlightLineToTokens(props.line.t, props.language);
+  // 阶段 1：不传 segs（纯语法色）；Task 2c 改为 mergeTokensWithDiff(toks, props.line.segs)
+  return mergeTokensWithDiff(toks, undefined);
+});
 </script>
 
 <template>
@@ -32,7 +45,14 @@ const sign = computed(() =>
     <span class="ln">{{ line.n ?? '' }}</span>
     <span v-if="variant === 'inline'" class="sign">{{ sign }}</span>
     <code>
-      <template v-if="line.segs">
+      <template v-if="splitTokens">
+        <span
+          v-for="(tok, i) in splitTokens"
+          :key="i"
+          :class="[tok.cls, { 'wd wd-del': tok.diff === 'del', 'wd wd-ins': tok.diff === 'ins' }]"
+        >{{ space(tok.text) }}</span>
+      </template>
+      <template v-else-if="line.segs">
         <span
           v-for="(seg, i) in line.segs"
           :key="i"
