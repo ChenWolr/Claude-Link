@@ -30,6 +30,13 @@ const context = ref(3);
 const wrap = ref(false);
 const onlyChanges = ref(false);
 const curChange = ref(0);
+// 全文开关（与并排/内联独立）：开启后以极大上下文（FULL_CONTEXT）拉取 diff，
+// 让 git 输出整个文件为 context（无 skip 段）。并排/内联各自照常渲染，但全部行可见。
+// inline 路径在 DiffBody 跳过 inlineVisiblePlan（不折叠 gap）；split 路径大上下文自然无 skip。
+const fullText = ref(false);
+const FULL_CONTEXT = 100000;
+// 实际用于拉取/渲染的上下文：fullText 开启时恒为 FULL_CONTEXT，其余跟随用户选择。
+const effectiveContext = computed(() => (fullText.value ? FULL_CONTEXT : context.value));
 
 // 弹窗几何
 const rect = ref<{ l: number; t: number; w: number; h: number } | null>(null);
@@ -59,7 +66,14 @@ const language = computed(() => {
   return totalLines > SPLIT_HL_MAX_LINES ? '' : extToLang(currentFile.value?.path ?? '');
 });
 const cached = computed(() => (state.value ? changesStore.diffCache[state.value.path] : undefined));
-const isLoading = computed(() => !!state.value && !cached.value);
+const isLoading = computed(() => {
+  if (!state.value) return false;
+  const c = cached.value;
+  if (!c) return true; // 无缓存
+  if (!c.ok) return false; // 错误态，非加载
+  // 上下文不匹配（如开全文，旧缓存 context=3 vs 需要 100000）→ 视为加载中
+  return c.context !== effectiveContext.value;
+});
 const errorMsg = computed(() => (cached.value && !cached.value.ok ? cached.value.message : ''));
 const isBinary = computed(() => !!cached.value && cached.value.ok && cached.value.binary);
 const isTruncated = computed(() => !!cached.value && cached.value.ok && cached.value.truncated);
@@ -71,7 +85,7 @@ const parsed = computed<ParsedDiffFile | null>(() => {
 const counts = computed(() => (parsed.value ? countChanges(parsed.value) : { add: 0, del: 0 }));
 const navTotal = computed(() => {
   if (!parsed.value) return 0;
-  if (mode.value === 'inline') return countInlineHunks(parsed.value, context.value);
+  if (mode.value === 'inline') return countInlineHunks(parsed.value, effectiveContext.value);
   // split：chunk 模型下改动块数 = navIndex 非 null 的 chunk 数（buildSplitChunks 已编 navIndex）。
   // I1 修复：countSplitHunks 数 groups，相邻 del+add 合并为 1 个 edit chunk 后会偏大 → 导航跳号。
   const lay = buildSplitChunks(parsed.value);
@@ -101,6 +115,7 @@ watch(state, async (s) => {
     context.value = 3;
     wrap.value = false;
     onlyChanges.value = false;
+    fullText.value = false;
     curChange.value = 0;
     rect.value = null;
     lastFocus = s.trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
@@ -121,7 +136,7 @@ watch(
   (p) => {
     if (!p) return;
     curChange.value = 0;
-    void changesStore.ensureDiff(p, context.value);
+    void changesStore.ensureDiff(p, effectiveContext.value);
   },
 );
 
@@ -129,8 +144,8 @@ watch(
 watch(navTotal, (n) => {
   if (curChange.value > n - 1) curChange.value = Math.max(0, n - 1);
 });
-// 切上下文档位 → 按 context 重新拉 diff（git -U=context 直接给 N 行 ctx，避免 inline 二次折叠碎成多个 gap）
-watch(context, (c) => {
+// 切上下文档位 → 按 effectiveContext 重新拉 diff（fullText 开启时恒为 FULL_CONTEXT，不重复拉）
+watch(effectiveContext, (c) => {
   if (state.value?.path) void changesStore.ensureDiff(state.value.path, c);
 });
 
@@ -157,6 +172,10 @@ function setMode(m: 'split' | 'inline'): void {
   if (mode.value === m) return;
   mode.value = m;
   curChange.value = 0;
+}
+function setContext(n: number): void {
+  fullText.value = false;
+  context.value = n;
 }
 // 「打开」文件：shell.openPath 走系统默认程序；失败时主进程 Windows 降级弹「打开方式」对话框。
 async function openExternally(): Promise<void> {
@@ -419,7 +438,8 @@ onBeforeUnmount(() => {
             <div class="ctx-group" title="上下文行数：每处改动周围显示多少未变更行">
               <span class="ctx-group__label">上下文</span>
               <div class="seg">
-                <button v-for="n in CONTEXT_OPTIONS" :key="n" type="button" :class="{ active: context === n }" @click="context = n">{{ n }}</button>
+                <button v-for="n in CONTEXT_OPTIONS" :key="n" type="button" :class="{ active: context === n && !fullText }" @click="setContext(n)">{{ n }}</button>
+                <button type="button" :class="{ active: fullText }" title="展示文件完整内容" @click="fullText = true">全文</button>
               </div>
             </div>
 
@@ -436,7 +456,7 @@ onBeforeUnmount(() => {
             </div>
 
             <button v-if="mode === 'inline'" class="tbtn" type="button" :class="{ active: wrap }" title="自动换行" @click="wrap = !wrap">换行</button>
-            <button v-if="mode === 'inline'" class="tbtn" type="button" :class="{ active: onlyChanges }" title="仅显示改动（折叠未改动行）" @click="onlyChanges = !onlyChanges">仅改动</button>
+            <button v-if="mode === 'inline' && !fullText" class="tbtn" type="button" :class="{ active: onlyChanges }" title="仅显示改动（折叠未改动行）" @click="onlyChanges = !onlyChanges">仅改动</button>
           </div>
 
           <div v-if="mode === 'split'" class="diff-colheads">
@@ -448,9 +468,10 @@ onBeforeUnmount(() => {
             v-if="!errorMsg && !isBinary && !isLoading"
             :parsed="parsed"
             :mode="mode"
-            :context="context"
+            :context="effectiveContext"
             :wrap="wrap"
             :only-changes="onlyChanges"
+            :full-text="fullText"
             :cur-change="curChange"
             :language="language"
             @goto-nav="curChange = $event"
