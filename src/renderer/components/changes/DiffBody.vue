@@ -706,16 +706,20 @@ onBeforeUnmount(() => {
   height: 10px;
   width: 0;
 }
-/* 左右栏内容列：inline-block 撑开（对齐 contrast 的 pre），长行水平滚动后右侧不露白。
-   不用 width:max-content + .line width:100%：百分比宽度与 max-content 循环依赖，
-   Chromium 求解后内容层未真正撑到最宽行 → 较窄改动行背景只画到自身内容宽，滚到右侧掉色。
-   inline-block 天然「按内容撑开 + 不少于 min-width」，无循环依赖，背景始终铺满。 */
+/* 左右栏内容列：block + width:max-content 取最宽行内容宽（不少于视口宽），与 inline 模式
+   .col--inline 同源（已验证铺满不露白）。
+   旧方案用 inline-block 期望被 block-level flex 子元素 .line 反向撑开，但 .line 是 block-level
+   默认填满父元素、不撑开 inline-block 父元素 → .file-offset 退回 100%视口宽 → 短改动行背景
+   只铺到视口宽，横向滚动后右侧掉色（拖动横向滚动条改动行右侧变白；弹窗拉宽 100% 变大又重新上色）。
+   改 block+max-content 后 .file-offset 真正取最宽行宽，.line 的 min-width:100% 解析为最宽行宽，
+   所有行等宽铺满，背景不再露白。max-content 不考虑子元素 min-width 约束，故无循环依赖。 */
 .diff-row--split .file-offset {
   position: relative;
   will-change: transform;
   min-width: 100%;
-  display: inline-block;
-  vertical-align: top;
+  display: block;
+  width: max-content;
+  flex-shrink: 0;
 }
 .diff-body.is-wrap .diff-row--split .file-offset {
   width: auto;

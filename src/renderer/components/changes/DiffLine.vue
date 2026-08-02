@@ -67,7 +67,7 @@ const splitTokens = computed<MergedToken[] | null>(() => {
 .line {
   display: flex;
   align-items: stretch;
-  min-width: 100%;
+  width: 100%;
   height: var(--diff-line-h);
   line-height: var(--diff-line-h);
   font-family: var(--font-mono);
