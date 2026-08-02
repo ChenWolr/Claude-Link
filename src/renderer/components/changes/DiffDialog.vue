@@ -416,7 +416,7 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
-            <div v-if="mode === 'inline'" class="ctx-group" title="上下文行数：每处改动周围显示多少未变更行">
+            <div class="ctx-group" title="上下文行数：每处改动周围显示多少未变更行">
               <span class="ctx-group__label">上下文</span>
               <div class="seg">
                 <button v-for="n in CONTEXT_OPTIONS" :key="n" type="button" :class="{ active: context === n }" @click="context = n">{{ n }}</button>
