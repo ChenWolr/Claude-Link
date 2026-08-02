@@ -228,7 +228,7 @@ export function planSplitVisible(
 // ===== split chunk 模型（contrast 风格：左右各自完整渲染 + chunk 对齐 + 偏移 + 桥）=====
 // 与上方 buildSplitRows（null 占位静态对齐）并存；split 渲染层切到本模型。inline 不受影响。
 
-export type SplitChunkKind = 'same' | 'add' | 'del' | 'edit';
+export type SplitChunkKind = 'same' | 'add' | 'del' | 'edit' | 'skip';
 
 export interface SplitChunk {
   kind: SplitChunkKind;
@@ -238,6 +238,8 @@ export interface SplitChunk {
   rightSize: number;
   size: number;
   navIndex: number | null;
+  /** 仅 skip chunk：相邻 hunk 间 git 跳过的行数（渲染为左右栏各一条「⋯ N 行」分隔条） */
+  skipCount?: number;
 }
 
 export interface SplitLayout {
@@ -256,7 +258,7 @@ export interface SplitLayout {
  * - mod/ws → edit（1:1，恒 leftSize=rightSize=1）
  * - **相邻 del group + add group（中间无 ctx/skip/mod）→ 合并为单个 edit chunk（M:N）**
  *   （classifyRun 已把不等长改动拆成相邻 del+add；此处把它们在渲染层重新识别为一个 edit）
- * - skip → 不产出 chunk（hunk 间分隔由 DiffBody 另行渲染「⋯ N 行」）
+ * - skip → 哨兵 chunk（左右栏各占 1 行，渲染「⋯ N 行」分隔条；占位让后续 chunk 的 Y 计算自然正确）
  * navIndex 仅对改动块（add/del/edit）递增；same 为 null。
  */
 export function buildSplitChunks(
@@ -278,7 +280,18 @@ export function buildSplitChunks(
 
   for (let i = 0; i < f.groups.length; i++) {
     const g = f.groups[i]!;
-    if (g.k === 'skip') continue;
+    if (g.k === 'skip') {
+      // hunk 间跳过的行 → 哨兵 chunk：左右栏各占 1 行（DiffBody 渲染「⋯ N 行」分隔条）。
+      // 占一行让后续 chunk 的 leftStart/rightStart 索引自然包含它，所有基于 leftStart×LH
+      // 的 Y 计算（computeOffsets / insert-line / 桥 / curChange 滚动）无需改动即保持正确。
+      const { l0, r0 } = pushLines([{ n: null, t: '' }], [{ n: null, t: '' }]);
+      chunks.push({
+        kind: 'skip', leftStart: l0, rightStart: r0,
+        leftSize: 1, rightSize: 1, size: 1, navIndex: null,
+        skipCount: g.skipCount ?? 0,
+      });
+      continue;
+    }
 
     // 相邻 del+add → 合并 edit（M:N）
     if (g.k === 'del' && i + 1 < f.groups.length && f.groups[i + 1]!.k === 'add') {

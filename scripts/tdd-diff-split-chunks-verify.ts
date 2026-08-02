@@ -114,14 +114,28 @@ check('leftStart/rightStart 在多块场景累进正确', () => {
   assert.equal(lay.chunks[1]!.rightStart, 2);
 });
 
-check('skip group → 不产出 chunk（hunk 间分隔，渲染层另行处理）', () => {
+check('skip group → 哨兵 chunk（左右栏各占 1 行，带 skipCount，让后续 chunk 的 Y 计算自然正确）', () => {
   const f = mkFile([
     { k: 'ctx', L: [{ n: 1, t: 'a' }], R: [{ n: 1, t: 'a' }] },
     { k: 'skip', L: [], R: [], skipCount: 5 },
     { k: 'add', L: [], R: [{ n: 7, t: 'b' }] },
   ]);
   const lay = buildSplitChunks(f);
-  assert.equal(lay.chunks.length, 2); // skip 不算块
+  assert.equal(lay.chunks.length, 3, 'ctx + skip 哨兵 + add = 3 块');
+  const skip = lay.chunks[1]!;
+  assert.equal(skip.kind, 'skip');
+  assert.equal(skip.size, 1, '哨兵占 1 行高');
+  assert.equal(skip.leftSize, 1);
+  assert.equal(skip.rightSize, 1);
+  assert.equal(skip.navIndex, null);
+  assert.equal(skip.skipCount, 5);
+  // 哨兵占位：左栏 = ctx1 + 哨兵1（add 不加左）；右栏 = ctx1 + 哨兵1 + add1
+  assert.equal(lay.leftLines.length, 2);
+  assert.equal(lay.rightLines.length, 3);
+  // 哨兵占位让 add chunk 的 rightStart 跳过哨兵（=2）→ rightStart×LH 仍是其真实 Y
+  assert.equal(lay.chunks[2]!.rightStart, 2);
+  // riverHeight 含哨兵：same(1) + skip(1) + add(1) = 3 行
+  assert.equal(lay.riverHeight, 3 * LH);
 });
 
 check('连续多对 del+add → 多个独立 edit chunk（验证 i++ 消费）', () => {

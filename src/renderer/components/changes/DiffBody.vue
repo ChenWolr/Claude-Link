@@ -8,7 +8,7 @@
 //   translateY（magic scrolling：焦点 chunk 左右对齐，非焦点错位靠桥连接），桥随偏移动态重算。
 //   行背景由预计算 leftKindArr/rightKindArr 查所属 chunk kind；curChange 高亮/flash/data-nav 绑在 DiffLine 根。
 // inline（cc-haha 风格）：buildInlineRows 摊平 + 上下文规划 + gap 折叠，行号 sticky、三档色。
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import {
   buildInlineRows,
@@ -45,23 +45,94 @@ const splitLayout = computed<SplitLayout | null>(() =>
   props.parsed ? buildSplitChunks(props.parsed, LH) : null,
 );
 
-// 焦点对齐偏移（magic scrolling）。scroll handler rAF 节流调 computeOffsets 更新；
-// 切文件/切模式时复位 {0,0}。offsets 套到 .file-offset 的 translateY（GPU 合成）。
+// 垂直滚动 JS 化（对齐 contrast）：.diff-scroll overflow:hidden 不原生滚，wheel 驱动 scrollTop，
+// .file-offset translateY = -scrollTop + magic 焦点偏移。换来的关键收益：.pane 高度 = 视口高
+// （随 .split-track height:100% 而非内容全高）→ 水平滚动条常驻视口底、不盖最后一行、
+// 行背景随 .file-offset inline-block 撑满铺到最宽行末尾（滚到最右不露白）。
+const scrollTop = ref(0);
+// maxScrollTop 用 ref：自定义垂直滚动条的 thumb 几何依赖它（响应式重算）。
+const maxScrollTop = ref(0);
 const offsets = ref<Offsets>({ left: 0, right: 0 });
 let scrollRaf = 0;
-function onSplitScroll(): void {
+function scheduleOffset(): void {
   if (scrollRaf) return;
   scrollRaf = requestAnimationFrame(() => {
     scrollRaf = 0;
-    const el = splitScroll.value;
-    if (!el) return;
-    offsets.value = computeOffsets(
-      splitLayout.value?.chunks ?? [],
-      el.scrollTop,
-      el.clientHeight,
-      LH,
-    );
+    const st = scrollTop.value;
+    // 用 .pane 的 clientHeight（已扣除底部水平滚动条高），滚到底时最后一行不被滚动条盖。
+    const vh = leftPane.value?.clientHeight ?? splitScroll.value?.clientHeight ?? 0;
+    const magic = computeOffsets(splitLayout.value?.chunks ?? [], st, vh, LH);
+    offsets.value = { left: magic.left - st, right: magic.right - st };
   });
+}
+// wheel：水平为主（deltaX 占优）→ 交给 .pane 原生水平滚动；垂直 → JS 驱动 scrollTop。
+// preventDefault 需 passive:false，故用 addEventListener（onMounted 注册），不用 @wheel。
+function onWheel(e: WheelEvent): void {
+  if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
+  const next = Math.max(0, Math.min(maxScrollTop.value, scrollTop.value + e.deltaY));
+  if (next === scrollTop.value) return;
+  e.preventDefault();
+  scrollTop.value = next;
+  scheduleOffset();
+}
+// riverHeight 或视口高变化 → 重算 maxScrollTop 并把越界 scrollTop 钳回。
+function recomputeMaxScroll(): void {
+  const lay = splitLayout.value;
+  const vh = leftPane.value?.clientHeight ?? splitScroll.value?.clientHeight ?? 0;
+  maxScrollTop.value = lay ? Math.max(0, lay.riverHeight - vh) : 0;
+  if (scrollTop.value > maxScrollTop.value) {
+    scrollTop.value = maxScrollTop.value;
+    scheduleOffset();
+  }
+}
+// 自定义垂直滚动条：.diff-scroll overflow:hidden 无原生条，故自绘 thumb 反映 scrollTop。
+const showVscroll = computed(() => maxScrollTop.value > 0);
+const vthumbH = computed(() => {
+  const lay = splitLayout.value;
+  if (!lay || lay.riverHeight === 0) return 100;
+  const vh = lay.riverHeight - maxScrollTop.value;
+  return Math.max(8, Math.min(100, (vh / lay.riverHeight) * 100));
+});
+const vthumbTop = computed(() => {
+  if (maxScrollTop.value <= 0) return 0;
+  return (scrollTop.value / maxScrollTop.value) * (100 - vthumbH.value);
+});
+// 拖 thumb：thumb 在 track 内可移动 (trackH - thumbPx)，映射到 maxScrollTop 滚动量。
+function onVthumbDown(e: MouseEvent): void {
+  e.preventDefault();
+  e.stopPropagation();
+  const startY = e.clientY;
+  const startScroll = scrollTop.value;
+  const trackH = (e.currentTarget as HTMLElement).parentElement?.clientHeight ?? 1;
+  const thumbPx = (vthumbH.value / 100) * trackH;
+  const movable = trackH - thumbPx;
+  const move = (ev: MouseEvent): void => {
+    if (movable <= 0) return;
+    const ratio = (ev.clientY - startY) / movable;
+    const next = Math.max(0, Math.min(maxScrollTop.value, startScroll + ratio * maxScrollTop.value));
+    if (next !== scrollTop.value) {
+      scrollTop.value = next;
+      scheduleOffset();
+    }
+  };
+  const up = (): void => {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+}
+// 点 track（非 thumb）：跳到点击位置对齐 thumb 顶。
+function onVtrackDown(e: MouseEvent): void {
+  if (e.target !== e.currentTarget) return;
+  const trackH = (e.currentTarget as HTMLElement).clientHeight;
+  const clickY = e.offsetY;
+  const thumbPx = (vthumbH.value / 100) * trackH;
+  const movable = trackH - thumbPx;
+  if (movable <= 0) return;
+  const ratio = Math.max(0, Math.min(1, (clickY - thumbPx / 2) / movable));
+  scrollTop.value = Math.max(0, Math.min(maxScrollTop.value, ratio * maxScrollTop.value));
+  scheduleOffset();
 }
 
 // 水平滚动同步：左右栏 .pane 各自 overflow-x，拉一栏另一栏跟随（contrast scrollX master/slave）。
@@ -85,7 +156,7 @@ const splitBridges = computed(() => {
   const lay = splitLayout.value;
   if (!lay) return [];
   return lay.chunks
-    .filter((c) => c.kind !== 'same')
+    .filter((c) => c.kind !== 'same' && c.kind !== 'skip')
     .map((c) => bridgePolygon(c, offsets.value, LH));
 });
 
@@ -96,7 +167,7 @@ const leftNav = computed<(number | null)[]>(() => {
   if (!lay) return [];
   const out: (number | null)[] = new Array(lay.leftLines.length).fill(null);
   for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.leftSize === 0) continue;
+    if (c.kind === 'same' || c.kind === 'skip' || c.leftSize === 0) continue;
     for (let i = 0; i < c.leftSize; i++) out[c.leftStart + i] = c.navIndex;
   }
   return out;
@@ -106,9 +177,21 @@ const leftKindArr = computed<string[]>(() => {
   if (!lay) return [];
   const out: string[] = new Array(lay.leftLines.length).fill('ctx');
   for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.leftSize === 0) continue;
+    if (c.kind === 'same') continue;
+    if (c.kind === 'skip') { out[c.leftStart] = 'skip'; continue; }
+    if (c.leftSize === 0) continue;
     const kind = c.kind === 'del' ? 'del' : c.kind === 'edit' ? 'modl' : 'add';
     for (let i = 0; i < c.leftSize; i++) out[c.leftStart + i] = kind;
+  }
+  return out;
+});
+// 哨兵行（skip chunk）的跳过行数，供「⋯ N 行未变更」分隔条显示（与 inline 的 skip 分隔条一致）。
+const leftSkipCount = computed<number[]>(() => {
+  const lay = splitLayout.value;
+  if (!lay) return [];
+  const out: number[] = new Array(lay.leftLines.length).fill(0);
+  for (const c of lay.chunks) {
+    if (c.kind === 'skip') out[c.leftStart] = c.skipCount ?? 0;
   }
   return out;
 });
@@ -117,7 +200,7 @@ const rightNav = computed<(number | null)[]>(() => {
   if (!lay) return [];
   const out: (number | null)[] = new Array(lay.rightLines.length).fill(null);
   for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.rightSize === 0) continue;
+    if (c.kind === 'same' || c.kind === 'skip' || c.rightSize === 0) continue;
     for (let i = 0; i < c.rightSize; i++) out[c.rightStart + i] = c.navIndex;
   }
   return out;
@@ -127,9 +210,20 @@ const rightKindArr = computed<string[]>(() => {
   if (!lay) return [];
   const out: string[] = new Array(lay.rightLines.length).fill('ctx');
   for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.rightSize === 0) continue;
+    if (c.kind === 'same') continue;
+    if (c.kind === 'skip') { out[c.rightStart] = 'skip'; continue; }
+    if (c.rightSize === 0) continue;
     const kind = c.kind === 'add' ? 'add' : c.kind === 'edit' ? 'modr' : 'del';
     for (let i = 0; i < c.rightSize; i++) out[c.rightStart + i] = kind;
+  }
+  return out;
+});
+const rightSkipCount = computed<number[]>(() => {
+  const lay = splitLayout.value;
+  if (!lay) return [];
+  const out: number[] = new Array(lay.rightLines.length).fill(0);
+  for (const c of lay.chunks) {
+    if (c.kind === 'skip') out[c.rightStart] = c.skipCount ?? 0;
   }
   return out;
 });
@@ -141,7 +235,7 @@ const leftChunkStart = computed<boolean[]>(() => {
   if (!lay) return [];
   const out = new Array(lay.leftLines.length).fill(false);
   for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.leftSize === 0) continue;
+    if (c.kind === 'same' || c.kind === 'skip' || c.leftSize === 0) continue;
     out[c.leftStart] = true;
   }
   return out;
@@ -151,7 +245,7 @@ const leftChunkEnd = computed<boolean[]>(() => {
   if (!lay) return [];
   const out = new Array(lay.leftLines.length).fill(false);
   for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.leftSize === 0) continue;
+    if (c.kind === 'same' || c.kind === 'skip' || c.leftSize === 0) continue;
     out[c.leftStart + c.leftSize - 1] = true;
   }
   return out;
@@ -161,7 +255,7 @@ const rightChunkStart = computed<boolean[]>(() => {
   if (!lay) return [];
   const out = new Array(lay.rightLines.length).fill(false);
   for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.rightSize === 0) continue;
+    if (c.kind === 'same' || c.kind === 'skip' || c.rightSize === 0) continue;
     out[c.rightStart] = true;
   }
   return out;
@@ -171,7 +265,7 @@ const rightChunkEnd = computed<boolean[]>(() => {
   if (!lay) return [];
   const out = new Array(lay.rightLines.length).fill(false);
   for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.rightSize === 0) continue;
+    if (c.kind === 'same' || c.kind === 'skip' || c.rightSize === 0) continue;
     out[c.rightStart + c.rightSize - 1] = true;
   }
   return out;
@@ -196,7 +290,7 @@ function clickChunk(navIndex: number | null): void {
 function bridgeNavIndex(bridgeIdx: number): number | null {
   const lay = splitLayout.value;
   if (!lay) return null;
-  const changed = lay.chunks.filter((c) => c.kind !== 'same');
+  const changed = lay.chunks.filter((c) => c.kind !== 'same' && c.kind !== 'skip');
   return changed[bridgeIdx]?.navIndex ?? null;
 }
 
@@ -264,9 +358,12 @@ watch(
   [() => props.mode, () => props.context, () => props.onlyChanges, () => props.parsed],
   () => {
     expandedGaps.value = new Set();
+    scrollTop.value = 0;
     offsets.value = { left: 0, right: 0 };
   },
 );
+// splitLayout（riverHeight）变化 → 重算 maxScrollTop。flush:post 确保 DOM 已更新拿准 clientHeight。
+watch(splitLayout, () => nextTick(recomputeMaxScroll));
 
 // curChange 变化 → 闪一下 + 滚到中心。flash 用响应式 flashNav 驱动（避免直接 classList 与 Vue :class 冲突）。
 // split：按 navIndex 找 chunk 的 river 中线行，滚 splitScroll 居中（chunk 模型下行高不齐，querySelector 定位不准）。
@@ -293,7 +390,7 @@ watch(
       pane.scrollTo({ top: er.top - pr.top + pane.scrollTop - (pane.clientHeight - er.height) / 2, behavior: 'smooth' });
       return;
     }
-    // split：按 navIndex 找 chunk 的 river 中线行，滚 splitScroll 居中
+    // split：按 navIndex 找 chunk 的 river 中线行，scrollTop 居中（JS 滚动，无原生 scrollTo）
     const lay = splitLayout.value;
     const sc = splitScroll.value;
     if (!lay || !sc) return;
@@ -301,8 +398,10 @@ watch(
     for (const c of lay.chunks) {
       if (c.navIndex === props.curChange) {
         const midRiverLine = riverLine + c.size / 2;
-        const target = midRiverLine * LH - sc.clientHeight / 2;
-        sc.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+        const vh = leftPane.value?.clientHeight ?? sc.clientHeight;
+        const target = midRiverLine * LH - vh / 2;
+        scrollTop.value = Math.max(0, Math.min(maxScrollTop.value, target));
+        scheduleOffset();
         break;
       }
       riverLine += c.size;
@@ -310,9 +409,20 @@ watch(
   },
 );
 
+let resizeObserver: ResizeObserver | null = null;
+onMounted(() => {
+  // wheel 需 passive:false 才能 preventDefault（垂直滚动）；水平 wheel 不 prevent，交 .pane 原生。
+  splitScroll.value?.addEventListener('wheel', onWheel, { passive: false });
+  // 弹窗缩放 → .diff-scroll clientHeight 变 → 重算 maxScrollTop。
+  resizeObserver = new ResizeObserver(() => recomputeMaxScroll());
+  if (splitScroll.value) resizeObserver.observe(splitScroll.value);
+  recomputeMaxScroll();
+});
 onBeforeUnmount(() => {
   if (flashTimer) clearTimeout(flashTimer);
   if (scrollRaf) cancelAnimationFrame(scrollRaf);
+  splitScroll.value?.removeEventListener('wheel', onWheel);
+  resizeObserver?.disconnect();
 });
 </script>
 
@@ -320,23 +430,28 @@ onBeforeUnmount(() => {
   <div ref="bodyEl" class="diff-body" :class="{ 'is-wrap': wrap, 'only-changes': onlyChanges }">
     <!-- 并排：左栏 | river(桥) | 右栏。单滚动容器 .diff-scroll 同步垂直滚动；水平各栏独立。 -->
     <div v-if="parsed && mode === 'split'" class="diff-row diff-row--split">
-      <div ref="splitScroll" class="diff-scroll" @scroll.passive="onSplitScroll">
-        <div class="split-track" :style="{ height: splitLayout ? splitLayout.riverHeight + 'px' : '0' }">
-          <!-- 左栏 -->
+      <div ref="splitScroll" class="diff-scroll">
+        <div class="split-track">
           <div ref="leftPane" class="pane pane--left" @scroll.passive="onPaneScrollX('left')">
             <div class="file-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
-              <DiffLine
-                v-for="(ln, i) in (splitLayout?.leftLines ?? [])"
-                :key="'l' + i"
-                variant="split"
-                side="left"
-                :line="ln"
-                :kind="leftKindArr[i] ?? 'ctx'"
-                :language="language"
-                :class="{ 'is-current': leftNav[i] === curChange, flash: leftNav[i] === flashNav, 'chunk-start': leftChunkStart[i], 'chunk-end': leftChunkEnd[i] }"
-                :data-nav="leftNav[i] != null ? leftNav[i] : null"
-                @click="clickChunk(leftNav[i] ?? null)"
-              />
+              <template v-for="(ln, i) in (splitLayout?.leftLines ?? [])" :key="'l' + i">
+                <div
+                  v-if="leftKindArr[i] === 'skip'"
+                  class="ctx-gap ctx-gap--skip"
+                  aria-hidden="true"
+                >⋯ {{ leftSkipCount[i] }} 行未变更</div>
+                <DiffLine
+                  v-else
+                  variant="split"
+                  side="left"
+                  :line="ln"
+                  :kind="leftKindArr[i] ?? 'ctx'"
+                  :language="language"
+                  :class="{ 'is-current': leftNav[i] === curChange, flash: leftNav[i] === flashNav, 'chunk-start': leftChunkStart[i], 'chunk-end': leftChunkEnd[i] }"
+                  :data-nav="leftNav[i] != null ? leftNav[i] : null"
+                  @click="clickChunk(leftNav[i] ?? null)"
+                />
+              </template>
               <div v-for="(y, i) in leftInserts" :key="'ins-l-' + i" class="insert-line insert-line--add" :style="{ top: y + 'px' }"></div>
             </div>
           </div>
@@ -359,21 +474,31 @@ onBeforeUnmount(() => {
           <!-- 右栏 -->
           <div ref="rightPane" class="pane pane--right" @scroll.passive="onPaneScrollX('right')">
             <div class="file-offset" :style="{ transform: `translateY(${offsets.right}px)` }">
-              <DiffLine
-                v-for="(ln, i) in (splitLayout?.rightLines ?? [])"
-                :key="'r' + i"
-                variant="split"
-                side="right"
-                :line="ln"
-                :kind="rightKindArr[i] ?? 'ctx'"
-                :language="language"
-                :class="{ 'is-current': rightNav[i] === curChange, flash: rightNav[i] === flashNav, 'chunk-start': rightChunkStart[i], 'chunk-end': rightChunkEnd[i] }"
-                :data-nav="rightNav[i] != null ? rightNav[i] : null"
-                @click="clickChunk(rightNav[i] ?? null)"
-              />
+              <template v-for="(ln, i) in (splitLayout?.rightLines ?? [])" :key="'r' + i">
+                <div
+                  v-if="rightKindArr[i] === 'skip'"
+                  class="ctx-gap ctx-gap--skip"
+                  aria-hidden="true"
+                >⋯ {{ rightSkipCount[i] }} 行未变更</div>
+                <DiffLine
+                  v-else
+                  variant="split"
+                  side="right"
+                  :line="ln"
+                  :kind="rightKindArr[i] ?? 'ctx'"
+                  :language="language"
+                  :class="{ 'is-current': rightNav[i] === curChange, flash: rightNav[i] === flashNav, 'chunk-start': rightChunkStart[i], 'chunk-end': rightChunkEnd[i] }"
+                  :data-nav="rightNav[i] != null ? rightNav[i] : null"
+                  @click="clickChunk(rightNav[i] ?? null)"
+                />
+              </template>
               <div v-for="(y, i) in rightInserts" :key="'ins-r-' + i" class="insert-line insert-line--del" :style="{ top: y + 'px' }"></div>
             </div>
           </div>
+        </div>
+        <!-- 自定义垂直滚动条（.diff-scroll overflow:hidden 无原生条，自绘 thumb 反映 scrollTop） -->
+        <div v-if="showVscroll" class="vscroll" @mousedown="onVtrackDown">
+          <div class="vthumb" :style="{ height: vthumbH + '%', top: vthumbTop + '%' }" @mousedown.stop="onVthumbDown"></div>
         </div>
       </div>
     </div>
@@ -519,10 +644,33 @@ onBeforeUnmount(() => {
 /* ===== split chunk 模型（contrast 风格：单滚动容器 + 左右 .file-offset + river 桥）===== */
 .diff-row--split { overflow: hidden; }
 .diff-scroll {
+  position: relative; /* 自定义垂直滚动条 .vscroll 绝对定位相对此 */
   flex: 1;
   min-width: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  /* 不原生滚：垂直靠 JS wheel + .file-offset translateY（对齐 contrast），换 .pane 视口高 →
+     水平滚动条常驻视口底、不盖最后一行、行背景铺满到最宽行末尾。 */
+  overflow: hidden;
+}
+/* 自定义垂直滚动条：thumb 高度/位置由 vthumbH/vthumbTop（%）驱动，反映 scrollTop/maxScrollTop。
+   拖 thumb 或点 track 跳转（onVthumbDown/onVtrackDown）。内容不溢出时 showVscroll=false 隐藏。 */
+.vscroll {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 12px;
+  z-index: 5;
+}
+.vthumb {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-text) 18%, transparent);
+  cursor: grab;
+}
+.vthumb:hover {
+  background: color-mix(in srgb, var(--color-text) 30%, transparent);
 }
 .diff-scroll::-webkit-scrollbar {
   width: 12px;
@@ -543,7 +691,9 @@ onBeforeUnmount(() => {
   position: relative;
   display: flex;
   min-width: 100%;
-  /* 让左右栏内容撑开水平滚动：每个 pane 内部 width:max-content */
+  /* 视口高（非内容全高）：让 .pane 撑满视口 → 水平滚动条在视口底而非内容底。
+     垂直内容（.file-offset 行数×LH）超出视口，靠 translateY = -scrollTop 滚动。 */
+  height: 100%;
 }
 .diff-row--split .pane {
   flex: 1;
@@ -556,12 +706,16 @@ onBeforeUnmount(() => {
   height: 10px;
   width: 0;
 }
-/* 左右栏内容列：max-content 撑开，长行水平滚动后右侧不露白 */
+/* 左右栏内容列：inline-block 撑开（对齐 contrast 的 pre），长行水平滚动后右侧不露白。
+   不用 width:max-content + .line width:100%：百分比宽度与 max-content 循环依赖，
+   Chromium 求解后内容层未真正撑到最宽行 → 较窄改动行背景只画到自身内容宽，滚到右侧掉色。
+   inline-block 天然「按内容撑开 + 不少于 min-width」，无循环依赖，背景始终铺满。 */
 .diff-row--split .file-offset {
   position: relative;
   will-change: transform;
   min-width: 100%;
-  width: max-content;
+  display: inline-block;
+  vertical-align: top;
 }
 .diff-body.is-wrap .diff-row--split .file-offset {
   width: auto;
