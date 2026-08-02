@@ -859,6 +859,14 @@ onBeforeUnmount(() => {
   border-top: 1px solid var(--color-border-strong);
   border-bottom: 1px solid var(--color-border-strong);
 }
+/* split 上下文：.file-offset 是 width:max-content，.ctx-gap 的 width:100%（百分比）
+   在 max-content 父容器内对 block 子元素可能解析为文本宽而非父宽 → 分隔条变窄不可见。
+   改 width:max-content（取文本固有宽）+ min-width:100%（至少撑满父宽）修复。
+   max-content 计算不考虑子元素 min-width 约束（与 .line 同理），无循环依赖。 */
+.diff-row--split .ctx-gap {
+  width: max-content;
+  min-width: 100%;
+}
 .ctx-gap:hover {
   color: var(--add-text);
   background: color-mix(in srgb, var(--color-success) 7%, transparent);
