@@ -28,6 +28,8 @@ const props = defineProps<{
   context: number;
   wrap: boolean;
   onlyChanges: boolean;
+  /** 全文开关：inline 路径跳过 inlineVisiblePlan（全部行可见不折叠），展示文件完整内容。 */
+  fullText: boolean;
   curChange: number;
   /** hljs language，由 DiffDialog 按扩展名推断下传（Task 1d 接入；未传时 split 不上语法色） */
   language?: string;
@@ -307,7 +309,8 @@ interface InlineSeg {
 const inlineSegs = computed<InlineSeg[]>(() => {
   if (!props.parsed || props.mode !== 'inline') return [];
   const rows = buildInlineRows(props.parsed);
-  const vis = inlineVisiblePlan(rows, props.context);
+  // 全文开关：全部行可见（不折叠 gap），让用户看到文件完整内容。
+  const vis = props.fullText ? rows.map(() => true) : inlineVisiblePlan(rows, props.context);
   const out: InlineSeg[] = [];
   let i = 0;
   let nav = 0;
@@ -355,7 +358,7 @@ function toggleGap(idx: number): void {
 }
 // 切规划输入 → 展开 id 失效 + split 偏移复位（防 stale offsets 跨文件残留）
 watch(
-  [() => props.mode, () => props.context, () => props.onlyChanges, () => props.parsed],
+  [() => props.mode, () => props.context, () => props.onlyChanges, () => props.fullText, () => props.parsed],
   () => {
     expandedGaps.value = new Set();
     scrollTop.value = 0;
@@ -503,7 +506,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 内联：摊平 → 上下文规划 → 不可见段折叠成「⋯ K 行」可点开 -->
+    <!-- 内联：摊平 → 上下文规划 → 不可见段折叠成「⋯ K 行」可点开（全文开关开启时不折叠） -->
     <div v-else-if="parsed && mode === 'inline'" class="diff-row">
       <div class="pane" style="flex: 1">
         <div class="pane-scroll">

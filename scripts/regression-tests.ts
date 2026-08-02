@@ -2684,6 +2684,19 @@ function testOpenWithFallbackContracts(): void {
   assert.ok(/},\s*4\d{3}\)/.test(diffDialogSrc), 'DiffDialog toast 时长须 ≥ 4000ms（失败反馈不得一闪而过）');
   assert.ok(panel.includes('export function isPathInsideRoot'), 'changes-panel 须导出 isPathInsideRoot（normalize 统一分隔符防正斜杠 root 误判）');
   assert.ok(/isPathInsideRoot\(abs,\s*root\)/.test(panel), 'openChangeFile 越界守卫须经 isPathInsideRoot');
+
+  // === 全文选项（fullText）：上下文选择器的第五个选项（3/5/10/20/全文），开启后以极大上下文拉取整文件 diff，
+  // 并排/内联各自照常渲染但全部行可见（inline 跳过 inlineVisiblePlan 不折叠）===
+  assert.ok(diffDialogSrc.includes('fullText'), 'DiffDialog 须有 fullText 布尔开关');
+  assert.ok(diffDialogSrc.includes('effectiveContext'), 'DiffDialog 须有 effectiveContext 计算属性（fullText 开启时用极大上下文拉取整文件）');
+  assert.ok(diffDialogSrc.includes('FULL_CONTEXT'), 'DiffDialog 须定义 FULL_CONTEXT 常量');
+  assert.ok(/fullText.*\?.*FULL_CONTEXT.*context\.value/.test(diffDialogSrc), 'effectiveContext 须在 fullText 开启时返回 FULL_CONTEXT');
+  assert.ok(diffDialogSrc.includes('setContext'), 'DiffDialog 须有 setContext 函数（选数字时关闭全文）');
+  assert.ok(diffDialogSrc.includes('全文'), 'DiffDialog 上下文选择器须有「全文」选项');
+  assert.ok(/full-text/.test(diffDialogSrc), 'DiffDialog 须向 DiffBody 传 fullText prop');
+  const diffBodySrc = read('../src/renderer/components/changes/DiffBody.vue');
+  assert.ok(diffBodySrc.includes('fullText'), 'DiffBody 须有 fullText prop');
+  assert.ok(/fullText.*\?.*rows\.map.*true/.test(diffBodySrc), 'DiffBody 须在 fullText 开启时跳过 inlineVisiblePlan（全部行可见，不折叠）');
 }
 
 async function main(): Promise<void> {
