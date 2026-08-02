@@ -3,8 +3,9 @@
 // 关键：相邻 del+add 识别为 edit（M:N）；纯增 leftSize=0；纯删 rightSize=0；same 等长。
 // 运行：npx tsx scripts/tdd-diff-split-chunks-verify.ts
 import { strict as assert } from 'node:assert';
+import { readFileSync } from 'node:fs';
 import { buildSplitChunks } from '../src/renderer/utils/diff-render';
-import type { ParsedDiffFile } from '../src/renderer/utils/diff-parser';
+import { parseUnifiedDiff, type ParsedDiffFile } from '../src/renderer/utils/diff-parser';
 
 let pass = 0; let fail = 0;
 function check(name: string, fn: () => void): void {
@@ -136,6 +137,41 @@ check('skip group → 哨兵 chunk（左右栏各占 1 行，带 skipCount，让
   assert.equal(lay.chunks[2]!.rightStart, 2);
   // riverHeight 含哨兵：same(1) + skip(1) + add(1) = 3 行
   assert.equal(lay.riverHeight, 3 * LH);
+});
+
+check('真实双 hunk diff → parser 与 split chunk 透传精确 skipCount', () => {
+  const parsed = parseUnifiedDiff(`diff --git a/x.ts b/x.ts
+index 1111111..2222222 100644
+--- a/x.ts
++++ b/x.ts
+@@ -1,2 +1,2 @@
+-old1
++new1
+ context1
+@@ -10,2 +10,2 @@
+-old2
++new2
+ context2
+`);
+  assert.ok(parsed, '真实 unified diff 须可解析');
+  const skipGroup = parsed.groups.find((g) => g.k === 'skip');
+  assert.equal(skipGroup?.skipCount, 7, '第二 hunk oldStart 10 - 前一 hunk oldEnd 3 = 7');
+
+  const lay = buildSplitChunks(parsed);
+  const skip = lay.chunks.find((c) => c.kind === 'skip');
+  assert.ok(skip, 'split layout 须保留 parser 的 skip');
+  assert.equal(skip.skipCount, 7);
+  assert.equal(skip.leftSize, 1);
+  assert.equal(skip.rightSize, 1);
+  assert.equal(skip.navIndex, null);
+});
+
+check('split 左右提示文字须锚定横向可视区', () => {
+  const source = readFileSync('src/renderer/components/changes/DiffBody.vue', 'utf8');
+  assert.match(source, /leftKindArr\[i\] === 'skip'[\s\S]*leftSkipCount\[i\][\s\S]*行未变更/, '左栏须渲染 skipCount 文案');
+  assert.match(source, /rightKindArr\[i\] === 'skip'[\s\S]*rightSkipCount\[i\][\s\S]*行未变更/, '右栏须渲染 skipCount 文案');
+  assert.equal(source.match(/class="ctx-gap__label"/g)?.length, 2, 'split 左右提示文字须各有一个独立内层标签');
+  assert.match(source, /\.diff-row--split \.ctx-gap__label\s*\{[\s\S]*position:\s*sticky;[\s\S]*left:\s*0;/, 'split 提示文字须 sticky 锚定 pane 可视区');
 });
 
 check('连续多对 del+add → 多个独立 edit chunk（验证 i++ 消费）', () => {

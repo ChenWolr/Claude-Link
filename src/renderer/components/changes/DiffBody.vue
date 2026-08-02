@@ -442,7 +442,7 @@ onBeforeUnmount(() => {
                   v-if="leftKindArr[i] === 'skip'"
                   class="ctx-gap ctx-gap--skip"
                   aria-hidden="true"
-                >⋯ {{ leftSkipCount[i] }} 行未变更</div>
+                ><span class="ctx-gap__label">⋯ {{ leftSkipCount[i] }} 行未变更</span></div>
                 <DiffLine
                   v-else
                   variant="split"
@@ -482,7 +482,7 @@ onBeforeUnmount(() => {
                   v-if="rightKindArr[i] === 'skip'"
                   class="ctx-gap ctx-gap--skip"
                   aria-hidden="true"
-                >⋯ {{ rightSkipCount[i] }} 行未变更</div>
+                ><span class="ctx-gap__label">⋯ {{ rightSkipCount[i] }} 行未变更</span></div>
                 <DiffLine
                   v-else
                   variant="split"
@@ -704,6 +704,7 @@ onBeforeUnmount(() => {
   position: relative;
   overflow-x: auto;
   overflow-y: hidden;
+  container-type: inline-size;
 }
 .diff-row--split .pane::-webkit-scrollbar {
   height: 10px;
@@ -866,6 +867,16 @@ onBeforeUnmount(() => {
 .diff-row--split .ctx-gap {
   width: max-content;
   min-width: 100%;
+  text-align: left;
+}
+/* 左右栏由各自最长代码行撑成不同的 max-content 宽；直接居中会把较宽一侧文字推到
+   pane 可视区外。sticky 标签跟随各自 pane 的水平滚动视口，初始及横向滚动后均可见。 */
+.diff-row--split .ctx-gap__label {
+  position: sticky;
+  left: 0;
+  display: inline-block;
+  width: min(100%, 100cqw);
+  text-align: center;
 }
 .ctx-gap:hover {
   color: var(--add-text);
