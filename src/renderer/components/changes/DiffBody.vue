@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // DiffBody —— diff 渲染器。消费 ParsedDiffFile（diff-parser 输出）渲染并排/内联两种视图。
-// 所有 UI 状态（mode/context/wrap/curChange/language）由父 DiffDialog 传入，本组件无状态持有
+// 所有 UI 状态（mode/context/curChange/language）由父 DiffDialog 传入，本组件无状态持有
 // （仅 fold/gap 展开态这种纯局部 UI 在内部）。改动导航 curChange 变化时滚到中心 + 闪一下。
 //
 // split（contrast 风格）：消费 buildSplitChunks 的 SplitLayout（左右各自完整行 + 对齐 chunk + SVG 桥），
@@ -32,7 +32,6 @@ const props = defineProps<{
   parsed: ParsedDiffFile | null;
   mode: 'split' | 'inline';
   context: number;
-  wrap: boolean;
   /** 全文开关：inline 路径跳过 inlineVisiblePlan（全部行可见不折叠），展示文件完整内容。 */
   fullText: boolean;
   curChange: number;
@@ -573,7 +572,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="bodyEl" class="diff-body" :class="{ 'is-wrap': wrap }">
+  <div ref="bodyEl" class="diff-body">
     <!-- 并排：左栏 | river(桥) | 右栏。单滚动容器 .diff-scroll 同步垂直滚动；水平各栏独立。 -->
     <div v-if="parsed && mode === 'split'" class="diff-row diff-row--split">
       <div ref="splitScroll" class="diff-scroll">
@@ -797,11 +796,6 @@ onBeforeUnmount(() => {
   width: max-content;
   display: block;
 }
-/* wrap 必须覆盖回 auto：max-content 容器宽=最宽行，pre-wrap 会失去换行边界 → 换行失效 */
-.diff-body.is-wrap .col--inline {
-  width: auto;
-}
-
 /* ===== split chunk 模型（contrast 风格：单滚动容器 + 左右 .file-offset + river 桥）===== */
 .diff-row--split { overflow: hidden; }
 .diff-scroll {
@@ -882,9 +876,6 @@ onBeforeUnmount(() => {
   display: block;
   width: max-content;
   flex-shrink: 0;
-}
-.diff-body.is-wrap .diff-row--split .file-offset {
-  width: auto;
 }
 /* river 绝对定位覆盖在左右栏之间（桥的画布；越宽桥越显眼） */
 .diff-row--split .diff-river {
@@ -1054,21 +1045,6 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--color-panel) 80%, var(--color-panel-soft));
   border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
   border-bottom: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
-}
-
-/* 自动换行：穿透到 DiffLine 的 .line（行高自适应） */
-.diff-body.is-wrap :deep(.line) {
-  height: auto;
-  min-height: var(--diff-line-h);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.diff-body.is-wrap :deep(.line code) {
-  flex: 1 1 auto;
-}
-.diff-body.is-wrap .pane-scroll,
-.diff-body.is-wrap .diff-scroll {
-  overflow-x: hidden;
 }
 
 /* 空态 */
