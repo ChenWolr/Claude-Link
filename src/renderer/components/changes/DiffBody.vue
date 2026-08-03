@@ -8,7 +8,7 @@
 //   translateY（magic scrolling：焦点 chunk 左右对齐，非焦点错位靠桥连接），桥随偏移动态重算。
 //   行背景由预计算 leftKindArr/rightKindArr 查所属 chunk kind；curChange 高亮/flash/data-nav 绑在 DiffLine 根。
 // inline（cc-haha 风格）：buildInlineRows 摊平 + 上下文规划 + gap 折叠，行号 sticky、三档色。
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import {
   groupSearchMatchesByLine,
@@ -88,10 +88,12 @@ function recomputeMaxScroll(): void {
   const lay = splitLayout.value;
   const vh = leftPane.value?.clientHeight ?? splitScroll.value?.clientHeight ?? 0;
   maxScrollTop.value = lay ? Math.max(0, lay.riverHeight - vh) : 0;
-  if (scrollTop.value > maxScrollTop.value) {
-    scrollTop.value = maxScrollTop.value;
-    scheduleOffset();
-  }
+  if (scrollTop.value > maxScrollTop.value) scrollTop.value = maxScrollTop.value;
+}
+function recomputeSplitGeometry(): void {
+  if (!splitScroll.value) return;
+  recomputeMaxScroll();
+  scheduleOffset();
 }
 // 自定义垂直滚动条：.diff-scroll overflow:hidden 无原生条，故自绘 thumb 反映 scrollTop。
 const showVscroll = computed(() => maxScrollTop.value > 0);
@@ -106,9 +108,12 @@ const vthumbTop = computed(() => {
   return (scrollTop.value / maxScrollTop.value) * (100 - vthumbH.value);
 });
 // 拖 thumb：thumb 在 track 内可移动 (trackH - thumbPx)，映射到 maxScrollTop 滚动量。
+// cleanup 句柄跨出闭包保存，切模式或卸载时也能移除 document 监听，不必等待 mouseup。
+let stopVthumbDrag: (() => void) | null = null;
 function onVthumbDown(e: MouseEvent): void {
   e.preventDefault();
   e.stopPropagation();
+  stopVthumbDrag?.();
   const startY = e.clientY;
   const startScroll = scrollTop.value;
   const trackH = (e.currentTarget as HTMLElement).parentElement?.clientHeight ?? 1;
@@ -123,12 +128,14 @@ function onVthumbDown(e: MouseEvent): void {
       scheduleOffset();
     }
   };
-  const up = (): void => {
+  const cleanup = (): void => {
     document.removeEventListener('mousemove', move);
-    document.removeEventListener('mouseup', up);
+    document.removeEventListener('mouseup', cleanup);
+    if (stopVthumbDrag === cleanup) stopVthumbDrag = null;
   };
+  stopVthumbDrag = cleanup;
   document.addEventListener('mousemove', move);
-  document.addEventListener('mouseup', up);
+  document.addEventListener('mouseup', cleanup);
 }
 // 点 track（非 thumb）：跳到点击位置对齐 thumb 顶。
 function onVtrackDown(e: MouseEvent): void {
@@ -506,8 +513,9 @@ watch(
     offsets.value = { left: 0, right: 0 };
   },
 );
-// splitLayout（riverHeight）变化 → 重算 maxScrollTop。flush:post 确保 DOM 已更新拿准 clientHeight。
-watch(splitLayout, () => nextTick(recomputeMaxScroll));
+// splitLayout（riverHeight）变化 → 等 DOM 更新后统一重算滚动范围和 magic offsets。
+// inline 模式没有 split DOM，入口守卫避免以 0 视口高写入伪 maxScrollTop。
+watch(splitLayout, recomputeSplitGeometry, { flush: 'post' });
 
 // curChange 变化 → 闪一下 + 滚到中心。flash 用响应式 flashNav 驱动（避免直接 classList 与 Vue :class 冲突）。
 // split：按 navIndex 找 chunk 的 river 中线行，滚 splitScroll 居中（chunk 模型下行高不齐，querySelector 定位不准）。
@@ -553,21 +561,36 @@ watch(
   },
 );
 
-let resizeObserver: ResizeObserver | null = null;
-onMounted(() => {
-  // wheel 需 passive:false 才能 preventDefault（垂直滚动）；水平 wheel 不 prevent，交 .pane 原生。
-  splitScroll.value?.addEventListener('wheel', onWheel, { passive: false });
-  // 弹窗缩放 → .diff-scroll clientHeight 变 → 重算 maxScrollTop。
-  resizeObserver = new ResizeObserver(() => recomputeMaxScroll());
-  if (splitScroll.value) resizeObserver.observe(splitScroll.value);
-  recomputeMaxScroll();
-});
+// .diff-scroll 位于 v-if 分支，切模式会销毁并重建节点；资源必须跟随模板 ref，不能只在组件 onMounted 时绑定一次。
+watch(
+  splitScroll,
+  (el, _oldEl, onCleanup) => {
+    if (!el) {
+      maxScrollTop.value = 0;
+      return;
+    }
+    // wheel 需 passive:false 才能 preventDefault（垂直滚动）；水平 wheel 不 prevent，交 .pane 原生。
+    el.addEventListener('wheel', onWheel, { passive: false });
+    const observer = new ResizeObserver(recomputeSplitGeometry);
+    observer.observe(el);
+    recomputeSplitGeometry();
+    onCleanup(() => {
+      el.removeEventListener('wheel', onWheel);
+      observer.disconnect();
+      stopVthumbDrag?.();
+      if (scrollRaf) {
+        cancelAnimationFrame(scrollRaf);
+        scrollRaf = 0;
+      }
+    });
+  },
+  { flush: 'post' },
+);
 onBeforeUnmount(() => {
   if (flashTimer) clearTimeout(flashTimer);
   if (scrollRaf) cancelAnimationFrame(scrollRaf);
   if (searchScrollRaf) cancelAnimationFrame(searchScrollRaf);
-  splitScroll.value?.removeEventListener('wheel', onWheel);
-  resizeObserver?.disconnect();
+  stopVthumbDrag?.();
 });
 </script>
 
