@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// DiffDialog —— 改动对比弹窗的壳。持有全部视图状态（mode/context/wrap/curChange）
+// DiffDialog —— 改动对比弹窗的壳。持有全部视图状态（mode/context/curChange）
 // 与弹窗几何（rect/sidebarW），组装 DiffSidebar + DiffBody，处理键盘 / 焦点 / 缩放 / 「打开」/ toast。
 //
 // 显隐由 useDiffDialog 的模块级 state 驱动（openDiffDialog/closeDiffDialog）。组件在 App.vue 单例常驻，
@@ -29,7 +29,6 @@ type SearchScope = 'full' | 'context';
 // 视图状态
 const mode = ref<'split' | 'inline'>('split');
 const context = ref(3);
-const wrap = ref(false);
 const curChange = ref(0);
 // 全文开关（与并排/内联独立）：开启后以极大上下文（FULL_CONTEXT）拉取 diff，
 // 让 git 输出整个文件为 context（无 skip 段）。并排/内联各自照常渲染，但全部行可见。
@@ -125,7 +124,6 @@ watch(state, async (s) => {
   if (s) {
     mode.value = 'split';
     context.value = 3;
-    wrap.value = false;
     fullText.value = false;
     curChange.value = 0;
     searchOpen.value = false;
@@ -534,8 +532,6 @@ onBeforeUnmount(() => {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
               </button>
             </div>
-
-            <button v-if="mode === 'inline'" class="tbtn" type="button" :class="{ active: wrap }" title="自动换行" @click="wrap = !wrap">换行</button>
           </div>
 
           <div v-if="searchOpen" class="diff-searchbar" role="search">
@@ -586,7 +582,6 @@ onBeforeUnmount(() => {
             :parsed="parsed"
             :mode="mode"
             :context="effectiveContext"
-            :wrap="wrap"
             :full-text="fullText"
             :cur-change="curChange"
             :language="language"

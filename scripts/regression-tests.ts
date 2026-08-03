@@ -2685,6 +2685,28 @@ function testDiffDialogSearchUiContracts(): void {
   assert.doesNotMatch(diffDialogSrc + diffBodySrc, /findInPage|TreeWalker|surroundContents/, 'diff 搜索不得使用页面级或命令式 DOM 高亮');
 }
 
+function testDiffDialogNoWrapContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const diffDialogSrc = fs.readFileSync(
+    new URL('../src/renderer/components/changes/DiffDialog.vue', import.meta.url),
+    'utf8',
+  );
+  const diffBodySrc = fs.readFileSync(
+    new URL('../src/renderer/components/changes/DiffBody.vue', import.meta.url),
+    'utf8',
+  );
+  const dialogScript = diffDialogSrc.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)?.[1] ?? '';
+  const dialogTemplate = diffDialogSrc.match(/<template>([\s\S]*)<\/template>/)?.[1] ?? '';
+  const bodyScript = diffBodySrc.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)?.[1] ?? '';
+  const bodyTemplate = diffBodySrc.match(/<template>([\s\S]*)<\/template>/)?.[1] ?? '';
+
+  assert.doesNotMatch(dialogScript, /const\s+wrap\s*=\s*ref\(/, 'DiffDialog 不得保留换行状态');
+  assert.doesNotMatch(dialogTemplate, /自动换行|>换行<|:wrap=/, 'DiffDialog 不得展示或下传换行功能');
+  assert.doesNotMatch(bodyScript, /\bwrap:\s*boolean;/, 'DiffBody 不得接收换行 prop');
+  assert.doesNotMatch(bodyTemplate, /is-wrap/, 'DiffBody 根节点不得绑定换行 class');
+  assert.doesNotMatch(diffBodySrc, /\.diff-body\.is-wrap/, 'DiffBody 不得保留失效的换行样式');
+}
+
 function testDiffDialogSearchStateContracts(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const diffDialogSrc = fs.readFileSync(
@@ -2890,6 +2912,7 @@ function testOpenWithFallbackContracts(): void {
 
 async function main(): Promise<void> {
 testDiffDialogSearchUiContracts();
+testDiffDialogNoWrapContracts();
 testDiffDialogSearchStateContracts();
 testDiffBodySearchProjectionContracts();
 testDiffBodySearchScrollContracts();
