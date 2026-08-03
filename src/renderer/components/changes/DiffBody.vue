@@ -11,11 +11,17 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import {
+  groupSearchMatchesByLine,
+  type DiffSearchMatch,
+  type DiffSearchRange,
+} from '../../utils/diff-search';
+import {
   buildInlineRows,
   buildSplitChunks,
   computeOffsets,
   bridgePolygon,
   inlineVisiblePlan,
+  resolveSearchScrollTop,
   type InlineRow,
   type Offsets,
   type SplitLayout,
@@ -32,6 +38,8 @@ const props = defineProps<{
   curChange: number;
   /** hljs language，由 DiffDialog 按扩展名推断下传（Task 1d 接入；未传时 split 不上语法色） */
   language?: string;
+  searchMatches?: DiffSearchMatch[];
+  currentSearchMatchId?: string | null;
 }>();
 const emit = defineEmits<{ (e: 'goto-nav', nav: number): void }>();
 
@@ -228,6 +236,26 @@ const rightSkipCount = computed<number[]>(() => {
   }
   return out;
 });
+
+const searchLineIndex = computed(() => groupSearchMatchesByLine(props.searchMatches ?? []));
+function leftSearchRanges(n: number | null): DiffSearchRange[] {
+  return n == null ? [] : searchLineIndex.value.left.get(`old:${n}`) ?? [];
+}
+function rightSearchRanges(n: number | null): DiffSearchRange[] {
+  return n == null ? [] : searchLineIndex.value.right.get(`new:${n}`) ?? [];
+}
+function inlineSearchRanges(row: InlineRow): DiffSearchRange[] {
+  if (row.n == null) return [];
+  return row.type === 'del' ? leftSearchRanges(row.n) : rightSearchRanges(row.n);
+}
+function currentSearchForRanges(ranges: DiffSearchRange[]): string | null {
+  return ranges.some((range) => range.matchId === props.currentSearchMatchId)
+    ? props.currentSearchMatchId ?? null
+    : null;
+}
+function searchMemoKey(ranges: DiffSearchRange[]): string {
+  return `${ranges.map((range) => range.matchId).join(',')}|${currentSearchForRanges(ranges) ?? ''}`;
+}
 // chunk 上下边界标记（contrast chunk-start/chunk-end box-shadow 移植）：
 // 改动块首行画上边线、末行画下边线——恰在相邻行之间形成彩色分隔线（未改动行无线，对齐 contrast）。
 // 预计算每行是否 chunk 首行/末行，模板 :class 用，CSS 伪元素画线（不碰 box-shadow，与 is-current 零冲突）。
@@ -355,6 +383,121 @@ function toggleGap(idx: number): void {
   else next.add(idx);
   expandedGaps.value = next;
 }
+
+function rowContainsMatch(row: InlineRow, match: DiffSearchMatch): boolean {
+  return (row.type === 'del' && match.side === 'left' && row.n === match.oldLine)
+    || (row.type === 'ctx' && match.side === 'both' && row.n === match.newLine)
+    || (row.type === 'add' && match.side === 'right' && row.n === match.newLine);
+}
+function revealInlineMatch(match: DiffSearchMatch): void {
+  for (const seg of inlineSegs.value) {
+    if (seg.kind !== 'gap' || seg.gapIndex === null || expandedGaps.value.has(seg.gapIndex)) continue;
+    if (!seg.rows.some((row) => rowContainsMatch(row, match))) continue;
+    const next = new Set(expandedGaps.value);
+    next.add(seg.gapIndex);
+    expandedGaps.value = next;
+    return;
+  }
+}
+function matchSelector(matchId: string): string {
+  return `[data-search-match="${CSS.escape(matchId)}"]`;
+}
+function findSearchTarget(match: DiffSearchMatch): HTMLElement | null {
+  if (props.mode === 'inline') {
+    return bodyEl.value?.querySelector(matchSelector(match.id)) as HTMLElement | null;
+  }
+  const pane = match.side === 'left' ? leftPane.value : rightPane.value;
+  return pane?.querySelector(matchSelector(match.id)) as HTMLElement | null;
+}
+function ensureHorizontalVisible(pane: HTMLElement, target: HTMLElement): void {
+  const margin = 12;
+  const paneRect = pane.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  if (targetRect.left < paneRect.left + margin) {
+    pane.scrollLeft += targetRect.left - paneRect.left - margin;
+  } else if (targetRect.right > paneRect.right - margin) {
+    pane.scrollLeft += targetRect.right - paneRect.right + margin;
+  }
+}
+
+let searchScrollRaf = 0;
+async function scrollCurrentSearchMatch(): Promise<void> {
+  const match = props.searchMatches?.find((candidate) => candidate.id === props.currentSearchMatchId);
+  if (!match) return;
+  if (searchScrollRaf) {
+    cancelAnimationFrame(searchScrollRaf);
+    searchScrollRaf = 0;
+  }
+
+  if (props.mode === 'inline') revealInlineMatch(match);
+  await nextTick();
+  const target = findSearchTarget(match);
+  if (!target) return;
+  const line = target.closest('.line') as HTMLElement | null;
+  if (!line) return;
+
+  if (props.mode === 'inline') {
+    const pane = line.closest('.pane-scroll') as HTMLElement | null;
+    if (!pane) return;
+    const paneRect = pane.getBoundingClientRect();
+    const lineRect = line.getBoundingClientRect();
+    pane.scrollTo({
+      top: lineRect.top - paneRect.top + pane.scrollTop - (pane.clientHeight - lineRect.height) / 2,
+      behavior: 'smooth',
+    });
+    ensureHorizontalVisible(pane, target);
+    return;
+  }
+
+  const pane = line.closest('.pane') as HTMLElement | null;
+  const side = match.side === 'left' ? 'left' : 'right';
+  const lineNumber = side === 'left' ? match.oldLine : match.newLine;
+  const lines = side === 'left' ? splitLayout.value?.leftLines : splitLayout.value?.rightLines;
+  const sideLineIndex = lines?.findIndex((candidate) => candidate.n === lineNumber) ?? -1;
+  if (!pane || !splitLayout.value || sideLineIndex < 0) return;
+  recomputeMaxScroll();
+  scrollTop.value = resolveSearchScrollTop(
+    splitLayout.value.chunks,
+    side,
+    sideLineIndex,
+    pane.clientHeight,
+    LH,
+    maxScrollTop.value,
+    scrollTop.value,
+  );
+  scheduleOffset();
+
+  searchScrollRaf = requestAnimationFrame(async () => {
+    searchScrollRaf = 0;
+    await nextTick();
+    if (props.mode !== 'split' || props.currentSearchMatchId !== match.id) return;
+    const liveTarget = findSearchTarget(match);
+    const liveLine = liveTarget?.closest('.line') as HTMLElement | null;
+    const livePane = liveTarget?.closest('.pane') as HTMLElement | null;
+    if (!liveTarget || !liveLine || !livePane) return;
+    const livePaneRect = livePane.getBoundingClientRect();
+    const liveLineRect = liveLine.getBoundingClientRect();
+    const correction = liveLineRect.top - livePaneRect.top
+      - (livePane.clientHeight - liveLineRect.height) / 2;
+    const correctedScrollTop = Math.max(
+      0,
+      Math.min(maxScrollTop.value, scrollTop.value + correction),
+    );
+    if (correctedScrollTop !== scrollTop.value) {
+      scrollTop.value = correctedScrollTop;
+      scheduleOffset();
+    }
+    ensureHorizontalVisible(livePane, liveTarget);
+  });
+}
+watch(
+  [() => props.currentSearchMatchId, () => props.mode, () => props.parsed],
+  () => {
+    void scrollCurrentSearchMatch();
+  },
+  { flush: 'post' },
+);
+
 // 切规划输入 → 展开 id 失效 + split 偏移复位（防 stale offsets 跨文件残留）
 watch(
   [() => props.mode, () => props.context, () => props.fullText, () => props.parsed],
@@ -423,6 +566,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   if (flashTimer) clearTimeout(flashTimer);
   if (scrollRaf) cancelAnimationFrame(scrollRaf);
+  if (searchScrollRaf) cancelAnimationFrame(searchScrollRaf);
   splitScroll.value?.removeEventListener('wheel', onWheel);
   resizeObserver?.disconnect();
 });
@@ -449,8 +593,11 @@ onBeforeUnmount(() => {
                   :line="ln"
                   :kind="leftKindArr[i] ?? 'ctx'"
                   :language="language"
+                  :search-ranges="leftSearchRanges(ln.n)"
+                  :current-search-match-id="currentSearchForRanges(leftSearchRanges(ln.n))"
                   :class="{ 'is-current': leftNav[i] === curChange, flash: leftNav[i] === flashNav, 'chunk-start': leftChunkStart[i], 'chunk-end': leftChunkEnd[i] }"
                   :data-nav="leftNav[i] != null ? leftNav[i] : null"
+                  :data-search-line="ln.n != null ? `old:${ln.n}` : null"
                   @click="clickChunk(leftNav[i] ?? null)"
                 />
               </template>
@@ -489,8 +636,11 @@ onBeforeUnmount(() => {
                   :line="ln"
                   :kind="rightKindArr[i] ?? 'ctx'"
                   :language="language"
+                  :search-ranges="rightSearchRanges(ln.n)"
+                  :current-search-match-id="currentSearchForRanges(rightSearchRanges(ln.n))"
                   :class="{ 'is-current': rightNav[i] === curChange, flash: rightNav[i] === flashNav, 'chunk-start': rightChunkStart[i], 'chunk-end': rightChunkEnd[i] }"
                   :data-nav="rightNav[i] != null ? rightNav[i] : null"
+                  :data-search-line="ln.n != null ? `new:${ln.n}` : null"
                   @click="clickChunk(rightNav[i] ?? null)"
                 />
               </template>
@@ -519,10 +669,13 @@ onBeforeUnmount(() => {
                   <DiffLine
                     v-for="(r, i) in seg.rows"
                     :key="i"
-                    v-memo="[r.line, r.type]"
+                    v-memo="[r.line, r.type, searchMemoKey(inlineSearchRanges(r))]"
                     variant="inline"
                     :line="r.line"
                     :kind="r.type"
+                    :search-ranges="inlineSearchRanges(r)"
+                    :current-search-match-id="currentSearchForRanges(inlineSearchRanges(r))"
+                    :data-search-line="r.n != null ? `${r.type === 'del' ? 'old' : 'new'}:${r.n}` : null"
                   />
                 </template>
                 <button
@@ -549,20 +702,26 @@ onBeforeUnmount(() => {
                 <DiffLine
                   v-for="(r, i) in seg.rows"
                   :key="i"
-                  v-memo="[r.line, r.type]"
+                  v-memo="[r.line, r.type, searchMemoKey(inlineSearchRanges(r))]"
                   variant="inline"
                   :line="r.line"
                   :kind="r.type"
+                  :search-ranges="inlineSearchRanges(r)"
+                  :current-search-match-id="currentSearchForRanges(inlineSearchRanges(r))"
+                  :data-search-line="r.n != null ? `${r.type === 'del' ? 'old' : 'new'}:${r.n}` : null"
                 />
               </div>
               <template v-else>
                 <DiffLine
                   v-for="(r, i) in seg.rows"
                   :key="i"
-                  v-memo="[r.line, r.type]"
+                  v-memo="[r.line, r.type, searchMemoKey(inlineSearchRanges(r))]"
                   variant="inline"
                   :line="r.line"
                   :kind="r.type"
+                  :search-ranges="inlineSearchRanges(r)"
+                  :current-search-match-id="currentSearchForRanges(inlineSearchRanges(r))"
+                  :data-search-line="r.n != null ? `${r.type === 'del' ? 'old' : 'new'}:${r.n}` : null"
                 />
               </template>
             </template>
