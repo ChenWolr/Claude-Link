@@ -385,6 +385,50 @@ export function computeOffsets(
   return { left, right };
 }
 
+/** 求出能让指定侧行在 magic offset 下最接近视口中心的自定义 scrollTop。 */
+export function resolveSearchScrollTop(
+  chunks: SplitChunk[],
+  side: 'left' | 'right',
+  sideLineIndex: number,
+  viewportH: number,
+  lineHeight: number,
+  maxScrollTop: number,
+  initialScrollTop: number,
+): number {
+  const clamp = (value: number): number => Math.max(0, Math.min(maxScrollTop, value));
+  const errorAt = (value: number): number => {
+    const scroll = clamp(value);
+    const offset = computeOffsets(chunks, scroll, viewportH, lineHeight)[side];
+    return sideLineIndex * lineHeight + offset - scroll + lineHeight / 2 - viewportH / 2;
+  };
+  let best = clamp(initialScrollTop);
+  let bestError = Math.abs(errorAt(best));
+  const consider = (value: number): void => {
+    const candidate = clamp(value);
+    const error = Math.abs(errorAt(candidate));
+    if (error < bestError) {
+      best = candidate;
+      bestError = error;
+    }
+  };
+
+  let low = 0;
+  let high = maxScrollTop;
+  consider(low);
+  consider(high);
+  if (errorAt(low) <= 0) return low;
+  if (errorAt(high) >= 0) return high;
+
+  for (let i = 0; i < 48 && bestError >= 0.5; i++) {
+    const mid = (low + high) / 2;
+    const error = errorAt(mid);
+    consider(mid);
+    if (error > 0) low = mid;
+    else high = mid;
+  }
+  return best;
+}
+
 /**
  * 单个桥的几何（随 offsets 变化）。忠实移植 contrast drawBridge L380-420：
  * - top 减 1 / bottom 加 2 对齐 2px ruler；

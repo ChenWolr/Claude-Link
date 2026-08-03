@@ -2,7 +2,7 @@
 // computeOffsets 契约：移植 contrast scrollY 焦点 1/3 对齐算法。
 // 运行：npx tsx scripts/tdd-diff-offsets-verify.ts
 import { strict as assert } from 'node:assert';
-import { computeOffsets, bridgePolygon } from '../src/renderer/utils/diff-render';
+import { computeOffsets, bridgePolygon, resolveSearchScrollTop } from '../src/renderer/utils/diff-render';
 import type { SplitChunk } from '../src/renderer/utils/diff-render';
 
 let pass = 0; let fail = 0;
@@ -89,6 +89,51 @@ check('computeOffsets: 前置不等 chunk → 后续 same base 非 0（magic scr
   const o = computeOffsets(chunks, 0, VP, LH);  // focalPoint=220 在 same（river 2..32）
   assert.equal(o.left, 0);    // 左 leftStart=riverStart=2 → base=0
   assert.equal(o.right, 44);  // 右 rightStart=0, riverStart=2 → base=(2-0)×22=44
+});
+
+function centerError(
+  chunks: SplitChunk[],
+  side: 'left' | 'right',
+  sideLineIndex: number,
+  scrollTop: number,
+  viewportH: number,
+): number {
+  const offsets = computeOffsets(chunks, scrollTop, viewportH, LH);
+  return sideLineIndex * LH + offsets[side] - scrollTop + LH / 2 - viewportH / 2;
+}
+
+check('搜索定位：前置 same + M:N edit 的短侧首尾从远距离滚动均收敛到中心', () => {
+  const chunks: SplitChunk[] = [
+    { kind: 'same', leftStart: 0, rightStart: 0, leftSize: 40, rightSize: 40, size: 40, navIndex: null },
+    { kind: 'edit', leftStart: 40, rightStart: 40, leftSize: 9, rightSize: 3, size: 9, navIndex: 0 },
+    { kind: 'same', leftStart: 49, rightStart: 43, leftSize: 40, rightSize: 40, size: 40, navIndex: null },
+  ];
+  const viewportH = 220;
+  const maxScrollTop = chunks.reduce((sum, chunk) => sum + chunk.size, 0) * LH - viewportH;
+  for (const initial of [0, maxScrollTop]) {
+    for (const sideLineIndex of [40, 42]) {
+      const resolved = resolveSearchScrollTop(
+        chunks, 'right', sideLineIndex, viewportH, LH, maxScrollTop, initial,
+      );
+      const error = centerError(chunks, 'right', sideLineIndex, resolved, viewportH);
+      assert.ok(Math.abs(error) < 1, `initial=${initial}, line=${sideLineIndex}, error=${error}, scrollTop=${resolved}`);
+    }
+  }
+});
+
+check('搜索定位：目标无法居中时 clamp 到边界并保持在视口内', () => {
+  const chunks: SplitChunk[] = [
+    { kind: 'same', leftStart: 0, rightStart: 0, leftSize: 20, rightSize: 20, size: 20, navIndex: null },
+  ];
+  const viewportH = 220;
+  const maxScrollTop = 220;
+  for (const [line, expected] of [[0, 0], [19, maxScrollTop]] as const) {
+    const resolved = resolveSearchScrollTop(chunks, 'left', line, viewportH, LH, maxScrollTop, expected ? 0 : maxScrollTop);
+    const offsets = computeOffsets(chunks, resolved, viewportH, LH);
+    const center = line * LH + offsets.left - resolved + LH / 2;
+    assert.equal(resolved, expected);
+    assert.ok(center >= 0 && center <= viewportH, `line=${line}, center=${center}`);
+  }
 });
 
 console.log(`\ndiff-offsets: ${pass} pass, ${fail} fail`);

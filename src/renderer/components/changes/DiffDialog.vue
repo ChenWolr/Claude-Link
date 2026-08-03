@@ -13,6 +13,7 @@ import { parseUnifiedDiff } from '../../utils/diff-parser';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import { buildSplitChunks, countChanges, countInlineHunks } from '../../utils/diff-render';
 import { extToLang } from '../../utils/diff-highlight';
+import { buildDiffSearchMatches, moveSearchIndex } from '../../utils/diff-search';
 import DiffSidebar from './DiffSidebar.vue';
 import DiffBody from './DiffBody.vue';
 
@@ -23,6 +24,7 @@ const sessionStore = useSessionStore();
 const STATUS_LABEL: Record<string, string> = { M: '改', A: '增', D: '删', R: '移', '??': '新', U: '冲' };
 const RESIZE_DIRS = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as const;
 const CONTEXT_OPTIONS = [3, 5, 10, 20] as const;
+type SearchScope = 'full' | 'context';
 
 // 视图状态
 const mode = ref<'split' | 'inline'>('split');
@@ -36,6 +38,11 @@ const fullText = ref(false);
 const FULL_CONTEXT = 100000;
 // 实际用于拉取/渲染的上下文：fullText 开启时恒为 FULL_CONTEXT，其余跟随用户选择。
 const effectiveContext = computed(() => (fullText.value ? FULL_CONTEXT : context.value));
+const searchOpen = ref(false);
+const searchQuery = ref('');
+const searchScope = ref<SearchScope>('full');
+const currentSearchIndex = ref(0);
+const searchInput = ref<HTMLInputElement | null>(null);
 
 // 弹窗几何
 const rect = ref<{ l: number; t: number; w: number; h: number } | null>(null);
@@ -78,8 +85,14 @@ const isBinary = computed(() => !!cached.value && cached.value.ok && cached.valu
 const isTruncated = computed(() => !!cached.value && cached.value.ok && cached.value.truncated);
 const parsed = computed<ParsedDiffFile | null>(() => {
   const c = cached.value;
-  if (!c || !c.ok || c.binary) return null;
+  if (!c || !c.ok || c.binary || c.context !== effectiveContext.value) return null;
   return parseUnifiedDiff(c.diff);
+});
+const searchMatches = computed(() => buildDiffSearchMatches(parsed.value, searchQuery.value));
+const currentSearchMatch = computed(() => searchMatches.value[currentSearchIndex.value] ?? null);
+const searchCountText = computed(() => {
+  const total = searchMatches.value.length;
+  return total ? `${currentSearchIndex.value + 1} / ${total}` : '0 / 0';
 });
 const counts = computed(() => (parsed.value ? countChanges(parsed.value) : { add: 0, del: 0 }));
 const navTotal = computed(() => {
@@ -115,6 +128,10 @@ watch(state, async (s) => {
     wrap.value = false;
     fullText.value = false;
     curChange.value = 0;
+    searchOpen.value = false;
+    searchQuery.value = '';
+    searchScope.value = 'full';
+    currentSearchIndex.value = 0;
     rect.value = null;
     lastFocus = s.trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     await nextTick();
@@ -141,6 +158,16 @@ watch(
 // nav 总数变化（切模式 / 上下文 / 文件）时钳制 curChange 入界。
 watch(navTotal, (n) => {
   if (curChange.value > n - 1) curChange.value = Math.max(0, n - 1);
+});
+watch([searchQuery, parsed, searchScope], () => {
+  currentSearchIndex.value = 0;
+});
+watch(searchMatches, (matches) => {
+  if (!matches.length) {
+    currentSearchIndex.value = 0;
+  } else if (currentSearchIndex.value >= matches.length) {
+    currentSearchIndex.value = matches.length - 1;
+  }
 });
 // 切上下文档位 → 按 effectiveContext 重新拉 diff（fullText 开启时恒为 FULL_CONTEXT，不重复拉）
 watch(effectiveContext, (c) => {
@@ -173,7 +200,39 @@ function setMode(m: 'split' | 'inline'): void {
 }
 function setContext(n: number): void {
   fullText.value = false;
+  if (searchOpen.value) searchScope.value = 'context';
   context.value = n;
+}
+function setFullText(): void {
+  fullText.value = true;
+  if (searchOpen.value) searchScope.value = 'full';
+}
+async function openSearch(): Promise<void> {
+  searchOpen.value = true;
+  if (searchScope.value === 'full') fullText.value = true;
+  await nextTick();
+  searchInput.value?.focus();
+  searchInput.value?.select();
+}
+function closeSearch(): void {
+  searchOpen.value = false;
+}
+function setSearchScope(scope: SearchScope): void {
+  searchScope.value = scope;
+  fullText.value = scope === 'full';
+}
+function gotoSearch(delta: number): void {
+  currentSearchIndex.value = moveSearchIndex(currentSearchIndex.value, delta, searchMatches.value.length);
+}
+function onSearchKeydown(e: KeyboardEvent): void {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    e.stopPropagation();
+    closeSearch();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    gotoSearch(e.shiftKey ? -1 : 1);
+  }
 }
 // 「打开」文件：shell.openPath 走系统默认程序；失败时主进程 Windows 降级弹「打开方式」对话框。
 async function openExternally(): Promise<void> {
@@ -327,7 +386,9 @@ function isTextTarget(t: EventTarget | null): boolean {
 function trapTab(e: KeyboardEvent): void {
   const dlg = dialogEl.value;
   if (!dlg) return;
-  const focusables = Array.from(dlg.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex]:not([tabindex="-1"])'));
+  const focusables = Array.from(dlg.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])',
+  ));
   if (!focusables.length) return;
   const first = focusables[0];
   const last = focusables[focusables.length - 1];
@@ -341,9 +402,15 @@ function trapTab(e: KeyboardEvent): void {
 }
 function onKey(e: KeyboardEvent): void {
   if (!state.value) return; // 弹窗未开不响应，避免与 InteractionPrompt 的 ESC 抢
+  if (e.ctrlKey && e.key.toLowerCase() === 'f') {
+    e.preventDefault();
+    void openSearch();
+    return;
+  }
   if (e.key === 'Escape') {
     e.preventDefault();
-    close();
+    if (searchOpen.value) closeSearch();
+    else close();
     return;
   }
   if (isTextTarget(e.target)) return;
@@ -437,11 +504,26 @@ onBeforeUnmount(() => {
               <span class="ctx-group__label">上下文</span>
               <div class="seg">
                 <button v-for="n in CONTEXT_OPTIONS" :key="n" type="button" :class="{ active: context === n && !fullText }" @click="setContext(n)">{{ n }}</button>
-                <button type="button" :class="{ active: fullText }" title="展示文件完整内容" @click="fullText = true">全文</button>
+                <button type="button" :class="{ active: fullText }" title="展示文件完整内容" @click="setFullText">全文</button>
               </div>
             </div>
 
             <div class="toolbar__spacer"></div>
+
+            <button
+              class="tbtn"
+              type="button"
+              :class="{ active: searchOpen }"
+              :disabled="isBinary"
+              title="搜索 diff 内容（Ctrl+F）"
+              @click="openSearch"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-4-4" />
+              </svg>
+              搜索
+            </button>
 
             <div class="navchange" title="上一处 / 下一处改动（↑ / ↓）">
               <button class="iconbtn" type="button" aria-label="上一处改动" :disabled="!navTotal" @click="gotoChange(-1)">
@@ -454,6 +536,44 @@ onBeforeUnmount(() => {
             </div>
 
             <button v-if="mode === 'inline'" class="tbtn" type="button" :class="{ active: wrap }" title="自动换行" @click="wrap = !wrap">换行</button>
+          </div>
+
+          <div v-if="searchOpen" class="diff-searchbar" role="search">
+            <label class="diff-searchbar__field">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-4-4" />
+              </svg>
+              <input
+                ref="searchInput"
+                v-model="searchQuery"
+                type="search"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="搜索改动内容"
+                aria-label="搜索 diff 内容"
+                @keydown="onSearchKeydown"
+              />
+            </label>
+
+            <div class="seg diff-searchbar__scope" aria-label="搜索范围">
+              <button type="button" :class="{ active: searchScope === 'full' }" @click="setSearchScope('full')">全文</button>
+              <button type="button" :class="{ active: searchScope === 'context' }" @click="setSearchScope('context')">当前上下文</button>
+            </div>
+
+            <span v-if="isLoading" class="diff-searchbar__status">正在加载…</span>
+            <span v-else-if="isTruncated" class="diff-searchbar__warning">差异过大，仅搜索已加载部分</span>
+            <span class="diff-searchbar__count" aria-live="polite">{{ searchCountText }}</span>
+
+            <button class="iconbtn" type="button" aria-label="上一个搜索结果" :disabled="!searchMatches.length" @click="gotoSearch(-1)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15" /></svg>
+            </button>
+            <button class="iconbtn" type="button" aria-label="下一个搜索结果" :disabled="!searchMatches.length" @click="gotoSearch(1)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9" /></svg>
+            </button>
+            <button class="iconbtn" type="button" aria-label="关闭搜索" @click="closeSearch">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+            </button>
           </div>
 
           <div v-if="mode === 'split'" class="diff-colheads">
@@ -470,6 +590,8 @@ onBeforeUnmount(() => {
             :full-text="fullText"
             :cur-change="curChange"
             :language="language"
+            :search-matches="searchMatches"
+            :current-search-match-id="currentSearchMatch?.id ?? null"
             @goto-nav="curChange = $event"
           />
           <div v-else-if="errorMsg" class="diff-state">
@@ -870,6 +992,82 @@ onBeforeUnmount(() => {
   border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
   color: var(--color-accent-strong);
 }
+.tbtn svg {
+  width: 14px;
+  height: 14px;
+}
+.diff-searchbar {
+  flex: 0 0 auto;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-panel-soft) 82%, var(--color-accent) 4%);
+}
+.diff-searchbar__field {
+  min-width: 180px;
+  max-width: 420px;
+  flex: 1 1 320px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel);
+}
+.diff-searchbar__field:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+.diff-searchbar__field svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--color-text-muted);
+}
+.diff-searchbar__field input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  outline: 0;
+  color: var(--color-text);
+  background: transparent;
+  font: 12.5px/1.4 var(--font-sans);
+}
+.diff-searchbar__field input::-webkit-search-cancel-button {
+  display: none;
+}
+.diff-searchbar__scope {
+  flex: 0 0 auto;
+}
+.diff-searchbar__status,
+.diff-searchbar__warning {
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.diff-searchbar__status {
+  color: var(--color-text-muted);
+}
+.diff-searchbar__warning {
+  color: var(--color-warn-strong);
+}
+.diff-searchbar__count {
+  min-width: 52px;
+  margin-left: auto;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.diff-searchbar .iconbtn {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+}
 
 /* 列头 */
 .diff-colheads {
@@ -1077,6 +1275,16 @@ onBeforeUnmount(() => {
   .split-cell.flash,
   .hunk-block.flash {
     animation: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .diff-searchbar {
+    flex-wrap: wrap;
+  }
+  .diff-searchbar__field {
+    max-width: none;
+    flex-basis: calc(100% - 8px);
   }
 }
 

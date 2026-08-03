@@ -2667,6 +2667,195 @@ function testChangesPanelPlumbing(): void {
   assert.ok(!fs.existsSync(new URL('../src/renderer/composables/use-tool-file-snapshots.ts', import.meta.url)), 'use-tool-file-snapshots.ts 须已删除');
 }
 
+function testDiffDialogSearchUiContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const diffDialogSrc = fs.readFileSync(
+    new URL('../src/renderer/components/changes/DiffDialog.vue', import.meta.url),
+    'utf8',
+  );
+  const diffBodySrc = fs.readFileSync(
+    new URL('../src/renderer/components/changes/DiffBody.vue', import.meta.url),
+    'utf8',
+  );
+  assert.match(diffDialogSrc, /ctrlKey[\s\S]*key\.toLowerCase\(\) === 'f'/, 'DiffDialog 须支持 Ctrl+F');
+  assert.match(diffDialogSrc, /querySelectorAll<HTMLElement>\([\s\S]{0,160}input:not\(:disabled\)/, 'Tab trap 须包含搜索 input');
+  assert.ok(diffDialogSrc.includes('class="diff-searchbar"'), 'DiffDialog 须有独立第二行搜索栏');
+  assert.ok(diffDialogSrc.includes('差异过大，仅搜索已加载部分'), '截断时须明确搜索范围不完整');
+  assert.match(diffDialogSrc, /@keydown="onSearchKeydown"/, '搜索输入须处理 Enter/Shift+Enter/Esc');
+  assert.doesNotMatch(diffDialogSrc + diffBodySrc, /findInPage|TreeWalker|surroundContents/, 'diff 搜索不得使用页面级或命令式 DOM 高亮');
+}
+
+function testDiffDialogSearchStateContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const diffDialogSrc = fs.readFileSync(
+    new URL('../src/renderer/components/changes/DiffDialog.vue', import.meta.url),
+    'utf8',
+  );
+  const script = diffDialogSrc.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)?.[1] ?? '';
+  const template = diffDialogSrc.match(/<template>([\s\S]*)<\/template>/)?.[1] ?? '';
+
+  assert.match(script, /import\s*\{\s*buildDiffSearchMatches,\s*moveSearchIndex\s*\}\s*from '\.\.\/\.\.\/utils\/diff-search';/, 'DiffDialog 须导入搜索结果构建与循环索引函数');
+  assert.match(script, /type SearchScope = 'full' \| 'context';/, 'DiffDialog 须定义全文与当前上下文搜索范围');
+  assert.match(script, /const searchOpen = ref\(false\);/, '搜索面板默认须关闭');
+  assert.match(script, /const searchQuery = ref\(''\);/, '搜索词默认须为空');
+  assert.match(script, /const searchScope = ref<SearchScope>\('full'\);/, '搜索范围默认须为全文');
+  assert.match(script, /const currentSearchIndex = ref\(0\);/, '搜索索引须独立于改动导航索引');
+  assert.match(script, /const searchInput = ref<HTMLInputElement \| null>\(null\);/, '须持有搜索输入框引用');
+  assert.match(script, /const searchMatches = computed\(\(\) => buildDiffSearchMatches\(parsed\.value, searchQuery\.value\)\);/, '搜索结果须由当前 parsed 与 query 计算');
+  assert.match(script, /const currentSearchMatch = computed\(\(\) => searchMatches\.value\[currentSearchIndex\.value\] \?\? null\);/, '当前搜索项须由独立索引取得');
+  assert.match(script, /const searchCountText = computed\([\s\S]{0,240}'0 \/ 0'[\s\S]{0,240}\);/, '须提供搜索结果计数文本');
+
+  assert.match(script, /watch\(\[searchQuery, parsed, searchScope\], \(\) => \{\s*currentSearchIndex\.value = 0;\s*\}\);/, '搜索词、diff 或范围变化时须复位索引');
+  assert.match(script, /watch\(searchMatches, \(matches\) => \{[\s\S]{0,300}currentSearchIndex\.value[\s\S]{0,300}\}\);/, '搜索结果变化时须校正空结果与越界索引');
+
+  assert.match(script, /async function openSearch\(\): Promise<void>[\s\S]{0,400}searchOpen\.value = true;[\s\S]{0,200}searchScope\.value === 'full'[\s\S]{0,120}fullText\.value = true;[\s\S]{0,160}await nextTick\(\);[\s\S]{0,120}searchInput\.value\?\.focus\(\);[\s\S]{0,120}searchInput\.value\?\.select\(\);/, '打开搜索须按全文范围切换 diff，并在 nextTick 后聚焦全选');
+  assert.match(script, /function closeSearch\(\): void \{\s*searchOpen\.value = false;\s*\}/, '关闭搜索须只关闭面板，不清搜索词');
+  assert.match(script, /function setSearchScope\(scope: SearchScope\): void[\s\S]{0,240}searchScope\.value = scope;[\s\S]{0,160}fullText\.value = scope === 'full';/, '切换搜索范围须同步全文 diff 状态');
+  assert.match(script, /function gotoSearch\(delta: number\): void[\s\S]{0,240}moveSearchIndex\(currentSearchIndex\.value, delta, searchMatches\.value\.length\)/, '搜索导航须通过 moveSearchIndex 循环');
+  assert.match(script, /function onSearchKeydown\(e: KeyboardEvent\): void[\s\S]{0,500}e\.key === 'Escape'[\s\S]{0,160}e\.preventDefault\(\);[\s\S]{0,120}e\.stopPropagation\(\);[\s\S]{0,120}closeSearch\(\);[\s\S]{0,240}e\.key === 'Enter'[\s\S]{0,160}e\.preventDefault\(\);[\s\S]{0,160}gotoSearch\(e\.shiftKey \? -1 : 1\);/, '搜索输入须支持 Esc 关闭与 Enter/Shift+Enter 循环导航');
+
+  assert.match(script, /function setContext\(n: number\): void[\s\S]{0,240}fullText\.value = false;[\s\S]{0,160}searchOpen\.value[\s\S]{0,120}searchScope\.value = 'context';/, '用户选择上下文行数时，已打开搜索须同步为当前上下文');
+  assert.match(script, /function setFullText\(\): void[\s\S]{0,240}fullText\.value = true;[\s\S]{0,160}searchOpen\.value[\s\S]{0,120}searchScope\.value = 'full';/, '用户选择全文时，已打开搜索须同步为全文范围');
+  assert.match(template, /@click="setFullText"[^>]*>全文<\/button>/, '全文按钮须通过 setFullText 同步搜索范围');
+
+  assert.match(script, /watch\(state, async \(s\) => \{[\s\S]{0,600}searchOpen\.value = false;[\s\S]{0,200}searchQuery\.value = '';[\s\S]{0,200}searchScope\.value = 'full';[\s\S]{0,200}currentSearchIndex\.value = 0;/, '每次打开弹窗须复位搜索状态');
+  assert.match(template, /:search-matches="searchMatches"/, 'DiffDialog 须向 DiffBody 下传搜索结果');
+  assert.match(template, /:current-search-match-id="currentSearchMatch\?\.id \?\? null"/, 'DiffDialog 须向 DiffBody 下传当前搜索 id');
+}
+
+function testDiffBodySearchProjectionContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const diffBodySrc = fs.readFileSync(
+    new URL('../src/renderer/components/changes/DiffBody.vue', import.meta.url),
+    'utf8',
+  );
+
+  const script = diffBodySrc.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)?.[1] ?? '';
+  const template = diffBodySrc.match(/<template>([\s\S]*)<\/template>/)?.[1] ?? '';
+  assert.match(
+    script,
+    /import\s*\{\s*groupSearchMatchesByLine,\s*type DiffSearchMatch,\s*type DiffSearchRange,?\s*\}\s*from '\.\.\/\.\.\/utils\/diff-search';/,
+    'DiffBody 须导入搜索分组函数与匹配/范围类型',
+  );
+  assert.match(script, /searchMatches\?:\s*DiffSearchMatch\[\];/, 'DiffBody 须接收可选 searchMatches');
+  assert.match(script, /currentSearchMatchId\?:\s*string\s*\|\s*null;/, 'DiffBody 须接收可选 currentSearchMatchId');
+  assert.match(
+    script,
+    /const searchLineIndex = computed\(\(\) =>[\s\S]{0,700}(?:const matches = props\.searchMatches \?\? \[\];[\s\S]{0,200})?groupSearchMatchesByLine\((?:props\.searchMatches \?\? \[\]|matches)\)[\s\S]{0,700}\);/,
+    'DiffBody 须从 props 搜索结果计算行索引',
+  );
+  assert.match(
+    script,
+    /function leftSearchRanges\(n: number \| null\): DiffSearchRange\[\][\s\S]{0,300}searchLineIndex\.value\.left\.get\(`old:\$\{n\}`\)/,
+    '左栏须按 old:行号读取搜索范围',
+  );
+  assert.match(
+    script,
+    /function rightSearchRanges\(n: number \| null\): DiffSearchRange\[\][\s\S]{0,300}searchLineIndex\.value\.right\.get\(`new:\$\{n\}`\)/,
+    '右栏须按 new:行号读取搜索范围',
+  );
+  assert.match(
+    script,
+    /function inlineSearchRanges\(row: InlineRow\): DiffSearchRange\[\][\s\S]{0,300}row\.type === 'del'[\s\S]{0,160}leftSearchRanges\(row\.n\)[\s\S]{0,160}rightSearchRanges\(row\.n\)/,
+    'inline 须让 del 读旧行、add/ctx 读新行',
+  );
+  assert.match(
+    script,
+    /function currentSearchForRanges\(ranges: DiffSearchRange\[\]\): string \| null[\s\S]{0,300}ranges\.some\([\s\S]{0,120}matchId === props\.currentSearchMatchId[\s\S]{0,120}props\.currentSearchMatchId[\s\S]{0,80}null/,
+    '须只向命中当前项的行返回 currentSearchMatchId',
+  );
+  assert.match(
+    script,
+    /function searchMemoKey\(ranges: DiffSearchRange\[\]\): string[\s\S]{0,400}ranges\.map\([\s\S]{0,120}matchId[\s\S]{0,200}currentSearchForRanges\(ranges\)/,
+    '搜索 memo key 须包含全部 matchId 与行级当前项状态',
+  );
+
+  const leftSplit = template.match(/<DiffLine\s+v-else[\s\S]{0,120}variant="split"\s+side="left"[\s\S]*?\/>/)?.[0] ?? '';
+  assert.match(leftSplit, /:search-ranges="leftSearchRanges\(ln\.n\)"/, 'split 左栏须下传旧行搜索范围');
+  assert.match(leftSplit, /:current-search-match-id="currentSearchForRanges\(leftSearchRanges\(ln\.n\)\)"/, 'split 左栏须只下传行级当前搜索项');
+  assert.match(leftSplit, /:data-search-line="ln\.n != null \? `old:\$\{ln\.n\}` : null"/, 'split 左栏须标记稳定 old:行号');
+
+  const rightSplit = template.match(/<DiffLine\s+v-else[\s\S]{0,120}variant="split"\s+side="right"[\s\S]*?\/>/)?.[0] ?? '';
+  assert.match(rightSplit, /:search-ranges="rightSearchRanges\(ln\.n\)"/, 'split 右栏须下传新行搜索范围');
+  assert.match(rightSplit, /:current-search-match-id="currentSearchForRanges\(rightSearchRanges\(ln\.n\)\)"/, 'split 右栏须只下传行级当前搜索项');
+  assert.match(rightSplit, /:data-search-line="ln\.n != null \? `new:\$\{ln\.n\}` : null"/, 'split 右栏须标记稳定 new:行号');
+
+  const inlineLines = [...template.matchAll(/<DiffLine\s+v-for="\(r, i\) in seg\.rows"[\s\S]*?\/>/g)].map((match) => match[0]);
+  assert.equal(inlineLines.length, 3, 'inline 展开 gap、change、ctx 三处 DiffLine 均须保留');
+  inlineLines.forEach((line, index) => {
+    const location = ['展开 gap', 'change', 'ctx'][index];
+    assert.match(line, /:search-ranges="inlineSearchRanges\(r\)"/, `inline ${location} 须下传搜索范围`);
+    assert.match(line, /:current-search-match-id="currentSearchForRanges\(inlineSearchRanges\(r\)\)"/, `inline ${location} 须只下传行级当前搜索项`);
+    assert.match(line, /:data-search-line="r\.n != null \? `\$\{r\.type === 'del' \? 'old' : 'new'\}:\$\{r\.n\}` : null"/, `inline ${location} 须标记稳定侧别与行号`);
+    assert.match(line, /v-memo="\[r\.line, r\.type, searchMemoKey\(inlineSearchRanges\(r\)\)\]"/, `inline ${location} memo 须纳入搜索状态`);
+  });
+}
+
+function testDiffBodySearchScrollContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const diffBodySrc = fs.readFileSync(
+    new URL('../src/renderer/components/changes/DiffBody.vue', import.meta.url),
+    'utf8',
+  );
+  const script = diffBodySrc.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)?.[1] ?? '';
+  const functionBlock = (name: string): string => {
+    const start = script.indexOf(`function ${name}(`);
+    assert.notEqual(start, -1, `DiffBody 须定义 ${name}`);
+    const bodyStart = script.indexOf('{', start);
+    assert.notEqual(bodyStart, -1, `${name} 须有函数体`);
+    let depth = 0;
+    for (let i = bodyStart; i < script.length; i++) {
+      if (script[i] === '{') depth++;
+      else if (script[i] === '}' && --depth === 0) return script.slice(start, i + 1);
+    }
+    assert.fail(`${name} 函数体未闭合`);
+  };
+
+  const rowContains = functionBlock('rowContainsMatch');
+  assert.match(rowContains, /row\.type === 'del'\s*&&\s*match\.side === 'left'\s*&&\s*row\.n === match\.oldLine/, 'inline del 须用 left + oldLine 定位');
+  assert.match(rowContains, /row\.type === 'ctx'\s*&&\s*match\.side === 'both'\s*&&\s*row\.n === match\.newLine/, 'inline ctx 须用 both + newLine 定位');
+  assert.match(rowContains, /row\.type === 'add'\s*&&\s*match\.side === 'right'\s*&&\s*row\.n === match\.newLine/, 'inline add 须用 right + newLine 定位');
+
+  const revealInline = functionBlock('revealInlineMatch');
+  assert.match(revealInline, /inlineSegs\.value[\s\S]*seg\.kind !== 'gap'[\s\S]*seg\.rows\.some\(\(row\) => rowContainsMatch\(row, match\)\)/, 'inline 须只检查 gap 内是否包含当前命中');
+  assert.match(revealInline, /const next = new Set\(expandedGaps\.value\);[\s\S]*next\.add\(seg\.gapIndex\);[\s\S]*expandedGaps\.value = next;/, '展开命中 gap 须保留已有集合并仅 add 对应 id');
+  assert.doesNotMatch(revealInline, /expandedGaps\.value\s*=\s*new Set\(\)/, '搜索定位不得清空已展开 gap');
+
+  const selector = functionBlock('matchSelector');
+  assert.match(selector, /`\[data-search-match="\$\{CSS\.escape\(matchId\)\}"\]`/, '搜索命中 selector 须用 CSS.escape 转义 id');
+  const findTarget = functionBlock('findSearchTarget');
+  assert.match(findTarget, /const pane = match\.side === 'left' \? leftPane\.value : rightPane\.value;[\s\S]*pane\?\.querySelector\(matchSelector\(match\.id\)\)/, 'split 须固定 left 查左 pane，right/both 查右 pane');
+
+  const horizontal = functionBlock('ensureHorizontalVisible');
+  assert.match(horizontal, /const margin = 12;/, '横向定位须保留 12px 可视边距');
+  assert.match(horizontal, /targetRect\.left < paneRect\.left \+ margin[\s\S]*pane\.scrollLeft \+= targetRect\.left - paneRect\.left - margin;/, '命中越过左边界时须向左调整 scrollLeft');
+  assert.match(horizontal, /targetRect\.right > paneRect\.right - margin[\s\S]*pane\.scrollLeft \+= targetRect\.right - paneRect\.right \+ margin;/, '命中越过右边界时须向右调整 scrollLeft');
+
+  const scrollCurrent = functionBlock('scrollCurrentSearchMatch');
+  assert.match(scrollCurrent, /const match = props\.searchMatches\?\.find\(\(candidate\) => candidate\.id === props\.currentSearchMatchId\);\s*if \(!match\) return;/, '自动定位须按 currentSearchMatchId 找当前 match，无命中即返回');
+  const revealAt = scrollCurrent.indexOf('revealInlineMatch(match)');
+  const tickAt = scrollCurrent.indexOf('await nextTick()');
+  assert.ok(revealAt !== -1 && tickAt !== -1 && revealAt < tickAt, 'inline 须先展开命中 gap，再等待 DOM 更新');
+  assert.match(scrollCurrent, /target\.closest\('\.line'\)[\s\S]*line\.closest\('\.pane-scroll'\)[\s\S]*pane\.scrollTo\(\{[\s\S]*top:[\s\S]*\}\);/, 'inline 须以原生 scrollTo 将命中行垂直居中');
+  assert.match(scrollCurrent, /ensureHorizontalVisible\(pane, target\)/, 'inline 与 split 定位后须保证长行命中横向可见');
+  assert.match(scrollCurrent, /const side = match\.side === 'left' \? 'left' : 'right';\s*const lineNumber = side === 'left' \? match\.oldLine : match\.newLine;\s*const lines = side === 'left' \? splitLayout\.value\?\.leftLines : splitLayout\.value\?\.rightLines;\s*const sideLineIndex = lines\?\.findIndex\(\(candidate\) => candidate\.n === lineNumber\) \?\? -1;/, 'split 须让 both 选右侧，并按 old/new 行号定位 layout 侧行索引');
+  assert.match(scrollCurrent, /if \(!pane \|\| !splitLayout\.value \|\| sideLineIndex < 0\) return;\s*recomputeMaxScroll\(\);\s*scrollTop\.value = resolveSearchScrollTop\(\s*splitLayout\.value\.chunks,\s*side,\s*sideLineIndex,\s*pane\.clientHeight,\s*LH,\s*maxScrollTop\.value,\s*scrollTop\.value,\s*\);\s*scheduleOffset\(\);/, 'split 须先按新 DOM 刷新 maxScrollTop，再调用纯几何 helper 一次求解并调度 offset');
+  assert.match(scrollCurrent, /searchScrollRaf = requestAnimationFrame\(async \(\) =>[\s\S]*await nextTick\(\);[\s\S]*props\.mode !== 'split' \|\| props\.currentSearchMatchId !== match\.id[\s\S]*findSearchTarget\(match\)[\s\S]*liveTarget\?\.closest\('\.line'\)[\s\S]*liveTarget\?\.closest\('\.pane'\)/, 'split 须在 offset 生效帧防 stale 后重新取 live target/line/pane');
+  assert.match(scrollCurrent, /const correction = liveLineRect\.top - livePaneRect\.top\s*- \(livePane\.clientHeight - liveLineRect\.height\) \/ 2;/, 'split 二次校正须按真实 DOM 行中心与 pane 中心的偏差计算');
+  assert.match(scrollCurrent, /Math\.min\(maxScrollTop\.value, scrollTop\.value \+ correction\)[\s\S]*scrollTop\.value = correctedScrollTop;[\s\S]*scheduleOffset\(\);[\s\S]*ensureHorizontalVisible\(livePane, liveTarget\);/, 'split 须钳制二次校正 scrollTop、重新调度 offset，并校正横向可见性');
+  assert.doesNotMatch(scrollCurrent, /scrollIntoView/, 'split 自定义滚动不得调用 scrollIntoView');
+
+  assert.match(
+    script,
+    /watch\(\s*\[\(\) => props\.currentSearchMatchId, \(\) => props\.mode, \(\) => props\.parsed\],\s*\(\) => \{\s*void scrollCurrentSearchMatch\(\);\s*\},\s*\{ flush: 'post' \},\s*\);/,
+    '须 post-flush 监听当前搜索 id、mode 与 parsed 后触发自动定位',
+  );
+  assert.match(script, /import[\s\S]{0,500}resolveSearchScrollTop[\s\S]{0,300}from '\.\.\/\.\.\/utils\/diff-render';/, 'DiffBody 须从纯渲染辅助模块导入搜索滚动求解器');
+  assert.match(script, /let searchScrollRaf = 0;/, '须持有搜索校正帧句柄');
+  const unmount = script.slice(script.indexOf('onBeforeUnmount(() => {'));
+  assert.match(unmount, /if \(searchScrollRaf\) cancelAnimationFrame\(searchScrollRaf\);/, '卸载时须取消搜索校正帧');
+}
+
 function testOpenWithFallbackContracts(): void {
   // 「打开」降级：shell.openPath 失败时 Windows 须弹原生「打开方式」对话框（修复注释空头承诺的 bug）
   const fs = require('node:fs') as typeof import('node:fs');
@@ -2700,6 +2889,10 @@ function testOpenWithFallbackContracts(): void {
 }
 
 async function main(): Promise<void> {
+testDiffDialogSearchUiContracts();
+testDiffDialogSearchStateContracts();
+testDiffBodySearchProjectionContracts();
+testDiffBodySearchScrollContracts();
 testOpenWithFallbackContracts();
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();

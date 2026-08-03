@@ -8,6 +8,11 @@
 import { computed } from 'vue';
 import type { DiffLine as ParsedDiffLine } from '../../utils/diff-parser';
 import { highlightLineToTokens, mergeTokensWithDiff, type MergedToken } from '../../utils/diff-highlight';
+import {
+  applySearchRanges,
+  type DiffSearchRange,
+  type SearchableToken,
+} from '../../utils/diff-search';
 
 const props = defineProps<{
   line: ParsedDiffLine;
@@ -18,13 +23,14 @@ const props = defineProps<{
   side?: 'left' | 'right';
   /** split 语法高亮用：hljs language，由 DiffBody 按扩展名推断下传 */
   language?: string;
+  searchRanges?: DiffSearchRange[];
+  currentSearchMatchId?: string | null;
 }>();
 
 // white-space:pre 下空 <code> 会塌陷成 0 高度 → 空行/空段一律渲染单空格保高。
 function space(x: string): string {
   return x === '' ? ' ' : x;
 }
-const codeText = computed(() => (props.line.t === '' ? ' ' : props.line.t));
 const sign = computed(() =>
   props.kind === 'add' ? '+' : props.kind === 'del' ? '−' : props.kind === 'modl' || props.kind === 'modr' || props.kind === 'ws' ? '~' : '',
 );
@@ -32,11 +38,20 @@ const sign = computed(() =>
 // split + 有 language → 语法高亮（与词级 diff 叠加）；否则用原整行/segs 渲染。
 // 字符级叠加：语法 token × 该行词级 segs（mod/modl/modr 行有 segs；add/del 无 segs → 全 eq，
 // 仅靠行背景色 + 语法色，符合预期）。mod 行 segs → 字符级 wd-del/wd-ins 叠加在语法色上。
-const splitTokens = computed<MergedToken[] | null>(() => {
-  if (props.variant !== 'split' || !props.language) return null;
-  const toks = highlightLineToTokens(props.line.t, props.language);
-  return mergeTokensWithDiff(toks, props.line.segs);
+const baseTokens = computed<SearchableToken[]>(() => {
+  if (props.variant === 'split' && props.language) {
+    const tokens = highlightLineToTokens(props.line.t, props.language);
+    return mergeTokensWithDiff(tokens, props.line.segs);
+  }
+  if (props.line.segs) {
+    return props.line.segs.map<MergedToken>((seg) => ({ text: seg.x, cls: '', diff: seg.s }));
+  }
+  return [{ text: props.line.t, cls: '', diff: 'eq' }];
 });
+
+const renderedTokens = computed(() =>
+  applySearchRanges(baseTokens.value, props.searchRanges ?? [], props.currentSearchMatchId ?? null),
+);
 </script>
 
 <template>
@@ -44,21 +59,20 @@ const splitTokens = computed<MergedToken[] | null>(() => {
     <span class="ln">{{ line.n ?? '' }}</span>
     <span v-if="variant === 'inline'" class="sign">{{ sign }}</span>
     <code>
-      <template v-if="splitTokens">
-        <span
-          v-for="(tok, i) in splitTokens"
-          :key="i"
-          :class="[tok.cls, { 'wd wd-del': tok.diff === 'del', 'wd wd-ins': tok.diff === 'ins' }]"
-        >{{ space(tok.text) }}</span>
-      </template>
-      <template v-else-if="line.segs">
-        <span
-          v-for="(seg, i) in line.segs"
-          :key="i"
-          :class="{ 'wd wd-del': seg.s === 'del', 'wd wd-ins': seg.s === 'ins' }"
-        >{{ space(seg.x) }}</span>
-      </template>
-      <template v-else>{{ codeText }}</template>
+      <span
+        v-for="(tok, i) in renderedTokens"
+        :key="i"
+        :class="[
+          tok.cls,
+          {
+            'wd wd-del': tok.diff === 'del',
+            'wd wd-ins': tok.diff === 'ins',
+            'search-hit': tok.matchId,
+            'search-hit--current': tok.current,
+          },
+        ]"
+        :data-search-match="tok.matchId"
+      >{{ space(tok.text) }}</span>
     </code>
   </div>
 </template>
@@ -132,5 +146,14 @@ const splitTokens = computed<MergedToken[] | null>(() => {
   background: var(--add-word);
   color: var(--add-text);
   font-weight: 600;
+}
+
+.search-hit {
+  background: color-mix(in srgb, var(--color-warn) 28%, transparent);
+}
+.search-hit--current {
+  background: color-mix(in srgb, var(--color-warn) 52%, transparent);
+  outline: 1px solid var(--color-warn-strong);
+  outline-offset: -1px;
 }
 </style>
