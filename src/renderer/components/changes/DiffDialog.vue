@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// DiffDialog —— 改动对比弹窗的壳。持有全部视图状态（mode/context/wrap/onlyChanges/curChange）
+// DiffDialog —— 改动对比弹窗的壳。持有全部视图状态（mode/context/wrap/curChange）
 // 与弹窗几何（rect/sidebarW），组装 DiffSidebar + DiffBody，处理键盘 / 焦点 / 缩放 / 「打开」/ toast。
 //
 // 显隐由 useDiffDialog 的模块级 state 驱动（openDiffDialog/closeDiffDialog）。组件在 App.vue 单例常驻，
@@ -28,7 +28,6 @@ const CONTEXT_OPTIONS = [3, 5, 10, 20] as const;
 const mode = ref<'split' | 'inline'>('split');
 const context = ref(3);
 const wrap = ref(false);
-const onlyChanges = ref(false);
 const curChange = ref(0);
 // 全文开关（与并排/内联独立）：开启后以极大上下文（FULL_CONTEXT）拉取 diff，
 // 让 git 输出整个文件为 context（无 skip 段）。并排/内联各自照常渲染，但全部行可见。
@@ -114,7 +113,6 @@ watch(state, async (s) => {
     mode.value = 'split';
     context.value = 3;
     wrap.value = false;
-    onlyChanges.value = false;
     fullText.value = false;
     curChange.value = 0;
     rect.value = null;
@@ -456,7 +454,6 @@ onBeforeUnmount(() => {
             </div>
 
             <button v-if="mode === 'inline'" class="tbtn" type="button" :class="{ active: wrap }" title="自动换行" @click="wrap = !wrap">换行</button>
-            <button v-if="mode === 'inline' && !fullText" class="tbtn" type="button" :class="{ active: onlyChanges }" title="仅显示改动（折叠未改动行）" @click="onlyChanges = !onlyChanges">仅改动</button>
           </div>
 
           <div v-if="mode === 'split'" class="diff-colheads">
@@ -470,7 +467,6 @@ onBeforeUnmount(() => {
             :mode="mode"
             :context="effectiveContext"
             :wrap="wrap"
-            :only-changes="onlyChanges"
             :full-text="fullText"
             :cur-change="curChange"
             :language="language"

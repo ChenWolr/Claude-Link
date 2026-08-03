@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // DiffBody —— diff 渲染器。消费 ParsedDiffFile（diff-parser 输出）渲染并排/内联两种视图。
-// 所有 UI 状态（mode/context/wrap/onlyChanges/curChange/language）由父 DiffDialog 传入，本组件无状态持有
+// 所有 UI 状态（mode/context/wrap/curChange/language）由父 DiffDialog 传入，本组件无状态持有
 // （仅 fold/gap 展开态这种纯局部 UI 在内部）。改动导航 curChange 变化时滚到中心 + 闪一下。
 //
 // split（contrast 风格）：消费 buildSplitChunks 的 SplitLayout（左右各自完整行 + 对齐 chunk + SVG 桥），
@@ -27,7 +27,6 @@ const props = defineProps<{
   mode: 'split' | 'inline';
   context: number;
   wrap: boolean;
-  onlyChanges: boolean;
   /** 全文开关：inline 路径跳过 inlineVisiblePlan（全部行可见不折叠），展示文件完整内容。 */
   fullText: boolean;
   curChange: number;
@@ -358,7 +357,7 @@ function toggleGap(idx: number): void {
 }
 // 切规划输入 → 展开 id 失效 + split 偏移复位（防 stale offsets 跨文件残留）
 watch(
-  [() => props.mode, () => props.context, () => props.onlyChanges, () => props.fullText, () => props.parsed],
+  [() => props.mode, () => props.context, () => props.fullText, () => props.parsed],
   () => {
     expandedGaps.value = new Set();
     scrollTop.value = 0;
@@ -430,7 +429,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="bodyEl" class="diff-body" :class="{ 'is-wrap': wrap, 'only-changes': onlyChanges }">
+  <div ref="bodyEl" class="diff-body" :class="{ 'is-wrap': wrap }">
     <!-- 并排：左栏 | river(桥) | 右栏。单滚动容器 .diff-scroll 同步垂直滚动；水平各栏独立。 -->
     <div v-if="parsed && mode === 'split'" class="diff-row diff-row--split">
       <div ref="splitScroll" class="diff-scroll">
