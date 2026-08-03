@@ -2813,6 +2813,57 @@ function testDiffBodySearchProjectionContracts(): void {
   });
 }
 
+function testDiffBodySplitNodeLifecycleContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const diffBodySrc = fs.readFileSync(
+    new URL('../src/renderer/components/changes/DiffBody.vue', import.meta.url),
+    'utf8',
+  );
+  const script = diffBodySrc.match(/<script setup lang="ts">([\s\S]*?)<\/script>/)?.[1] ?? '';
+
+  assert.match(
+    script,
+    /watch\(\s*splitScroll,[\s\S]{0,1600}\{\s*flush:\s*'post'\s*\},\s*\);/,
+    'split 条件节点资源须由 post-flush ref watcher 管理',
+  );
+  assert.match(
+    script,
+    /el\.addEventListener\('wheel', onWheel, \{ passive: false \}\)[\s\S]{0,900}observer\.observe\(el\)/,
+    '每次创建 split 节点须绑定 wheel 并观察同一节点',
+  );
+  assert.match(
+    script,
+    /onCleanup\(\(\) => \{[\s\S]{0,600}el\.removeEventListener\('wheel', onWheel\)[\s\S]{0,300}observer\.disconnect\(\)/,
+    'split 节点销毁时须清理实际绑定节点及其 observer',
+  );
+  assert.doesNotMatch(
+    script,
+    /onMounted\([\s\S]{0,800}splitScroll\.value\?\.addEventListener\('wheel'/,
+    '不得只在组件首次挂载时绑定条件 split 节点',
+  );
+  assert.match(
+    script,
+    /function recomputeSplitGeometry\(\): void \{[\s\S]{0,500}if \(!splitScroll\.value\) return;[\s\S]{0,500}recomputeMaxScroll\(\);[\s\S]{0,300}scheduleOffset\(\);/,
+    'split 几何重算须要求真实节点，并同时刷新滚动范围与偏移',
+  );
+  assert.match(
+    script,
+    /watch\(splitLayout,\s*recomputeSplitGeometry,\s*\{\s*flush:\s*'post'\s*\}\);/,
+    'layout 更新须在 DOM 刷新后通过统一入口重算 split 几何',
+  );
+  assert.match(script, /let stopVthumbDrag:\s*\(\(\) => void\) \| null = null;/, '须保存自定义滚动条拖动清理句柄');
+  assert.match(
+    script,
+    /onCleanup\(\(\) => \{[\s\S]{0,500}stopVthumbDrag\?\.\(\);/,
+    'split 节点销毁时须清理自定义滚动条拖动监听',
+  );
+  assert.match(
+    script,
+    /onBeforeUnmount\(\(\) => \{[\s\S]{0,400}stopVthumbDrag\?\.\(\);/,
+    '组件卸载时须兜底清理自定义滚动条拖动监听',
+  );
+}
+
 function testDiffBodySearchScrollContracts(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const diffBodySrc = fs.readFileSync(
@@ -2915,6 +2966,7 @@ testDiffDialogSearchUiContracts();
 testDiffDialogNoWrapContracts();
 testDiffDialogSearchStateContracts();
 testDiffBodySearchProjectionContracts();
+testDiffBodySplitNodeLifecycleContracts();
 testDiffBodySearchScrollContracts();
 testOpenWithFallbackContracts();
 testApiUrlBuilder();
