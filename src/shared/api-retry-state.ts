@@ -19,6 +19,8 @@ export interface ApiRetryState {
 
 export interface ApiRetryInput {
   now: number;
+  retryAttempt?: number;
+  retryLimit?: number;
   retryDelayMs?: number;
   error?: string;
   errorStatus?: number | null;
@@ -64,24 +66,51 @@ export function recordApiRetry(
     typeof input.retryDelayMs === 'number' && Number.isFinite(input.retryDelayMs) && input.retryDelayMs >= 0
       ? input.retryDelayMs
       : 0;
-  const retryCount = state.retryCount + 1;
-  const becameExhausted = retryCount >= state.retryLimit;
+  const retryAttempt =
+    typeof input.retryAttempt === 'number' && Number.isInteger(input.retryAttempt) && input.retryAttempt > 0
+      ? input.retryAttempt
+      : state.retryCount + 1;
+  const retryLimit =
+    typeof input.retryLimit === 'number' && Number.isInteger(input.retryLimit) && input.retryLimit > 0
+      ? input.retryLimit
+      : state.retryLimit;
+  const retryCount = Math.min(retryAttempt, retryLimit);
 
   return {
     state: {
       ...state,
-      phase: becameExhausted ? 'terminal' : 'retrying',
+      phase: 'retrying',
       retryCount,
+      retryLimit,
       startedAt: state.startedAt ?? input.now,
       lastRetryAt: input.now,
       nextRetryAt: retryDelayMs > 0 ? input.now + retryDelayMs : null,
       accumulatedDelayMs: state.accumulatedDelayMs + retryDelayMs,
       lastError: input.error ?? state.lastError,
       lastErrorStatus: input.errorStatus !== undefined ? input.errorStatus : state.lastErrorStatus,
-      terminalKind: becameExhausted ? 'exhausted' : null,
-      endedAt: becameExhausted ? input.now : null,
+      terminalKind: null,
+      endedAt: null,
     },
-    becameExhausted,
+    becameExhausted: false,
+  };
+}
+
+export function recordApiRetryExhausted(
+  state: ApiRetryState,
+  now: number,
+): { state: ApiRetryState; becameExhausted: boolean } {
+  if (state.phase !== 'retrying' || state.retryCount < state.retryLimit) {
+    return { state, becameExhausted: false };
+  }
+  return {
+    state: {
+      ...state,
+      phase: 'terminal',
+      nextRetryAt: null,
+      terminalKind: 'exhausted',
+      endedAt: now,
+    },
+    becameExhausted: true,
   };
 }
 
