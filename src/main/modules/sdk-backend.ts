@@ -90,6 +90,7 @@ import {
   apiRetrySummary,
   createApiRetryState,
   recordApiRetry,
+  recordApiRetryExhausted,
   recordApiRetryRecovery,
   recordApiRetryUserStop,
   toApiRetryTerminalDetails,
@@ -147,7 +148,11 @@ interface SessionEntry {
   // 启动时解析出的模型类型别名(sonnet/haiku/opus/fable)或自定义真实模型名。
   // persistCliEvent 推送初始 windowSize 时，按它查用户设的按别名上下文覆盖。
   requestedAlias: string | null;
+  // 仅用于日志区分同一 Query 内部重试与 stale resume 重建的新 Query。
+  queryInstance: number;
 }
+const nextQueryInstance = { value: 1 };
+
 const entries = new Map<string, SessionEntry>();
 const sessionCliIds = new Map<string, string>();
 // 中断标记按 query 实例（与 process-manager 的 interruptedChildren 思路一致，避免跨回合串扰）。
@@ -537,6 +542,7 @@ function createEntry(): SessionEntry {
     state: 'pending',
     abortController: null,
     requestedAlias: null,
+    queryInstance: nextQueryInstance.value++,
     emitExit: (code) => {
       if (exitEmitted) return;
       exitEmitted = true;
@@ -702,9 +708,11 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // settingsPatch → 合并进 Options.settings，覆盖全局投影（query 级 > 全局 > advancedJson）。
   const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
   const thinkingConfig = resolveThinkingConfig(effectiveLevel);
+  const queryEnv = buildSpawnEnv();
+  queryEnv.CLAUDE_CODE_MAX_RETRIES = String(MAX_API_RETRIES);
   const options: Record<string, unknown> = {
     // env：apiKey/baseUrl/模型映射全靠它（复用 buildSpawnEnv，第三方端点跑通的关键）。
-    env: buildSpawnEnv(),
+    env: queryEnv,
     // 复用本地安装的 claude（cli-detector 发现）。cliPath 可能是裸命令名，需解析成绝对路径
     //（Windows 上还要穿透 .cmd shim 拿到真正 .exe），否则 SDK 报 "native binary not found"。
     // 项目不内嵌二进制，解析失败留 undefined，由 runQuery 给中文提示。
@@ -753,6 +761,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // buildClaudeSettingsProjection 返回类型宽化为 Record<string,unknown>，但 env 运行时实为 Record<string,string>；
   // 取别名供下方按会话别名补注入 MAX_CONTEXT_TOKENS（投影不含该项，需在此按会话补）。
   const settingsEnv = settings.env as Record<string, string>;
+  settingsEnv.CLAUDE_CODE_MAX_RETRIES = String(MAX_API_RETRIES);
 
   // 按当前模型别名动态注入 CC 的真实窗口 override（CLAUDE_CODE_MAX_CONTEXT_TOKENS）。
   // CC 对第三方/未知模型名（如 glm-5.2，非 claude- 开头）默认回退 200k → 提前压缩丢上下文。
@@ -947,14 +956,27 @@ function persistApiRetryTerminal(
   }
 }
 
-function finishApiRetryRecovery(sessionId: string, mainWindow: BrowserWindow): void {
+function finishApiRetryRecovery(sessionId: string, mainWindow: BrowserWindow, queryInstance?: number): void {
   const current = apiRetryStates.get(sessionId);
   if (!current) return;
   const recovered = recordApiRetryRecovery(current, Date.now());
   apiRetryStates.set(sessionId, recovered.state);
   if (recovered.becameRecovered && recovered.terminalState) {
+    logger.info(`[retry-trace] recovered session=${sessionId} query=${queryInstance ?? 'unknown'} retries=${recovered.terminalState.retryCount}`);
     persistApiRetryTerminal(sessionId, mainWindow, recovered.terminalState);
   }
+}
+
+function finishApiRetryExhausted(sessionId: string, mainWindow: BrowserWindow, queryInstance?: number): boolean {
+  const current = apiRetryStates.get(sessionId);
+  if (!current) return false;
+  const exhausted = recordApiRetryExhausted(current, Date.now());
+  apiRetryStates.set(sessionId, exhausted.state);
+  if (exhausted.becameExhausted) {
+    logger.warn(`[retry-trace] exhausted session=${sessionId} query=${queryInstance ?? 'unknown'} retries=${exhausted.state.retryCount}`);
+    persistApiRetryTerminal(sessionId, mainWindow, exhausted.state);
+  }
+  return exhausted.becameExhausted;
 }
 
 function isToolResultPart(part: CliMessageContentPart): boolean {
@@ -1550,37 +1572,38 @@ async function runQuery(
           forwardEvent(sessionId, mainWindow, sysInfo);
           continue;
         }
-        // api_retry：主进程按当前 Query 独立计数。SDK attempt/max_retries 只保留诊断，
-        // 不参与应用级阈值；第 1～9 次瞬态下发，第 10 次先写唯一终态再立即中断。
+        // api_retry 仅表示 Claude Code 已安排随后的一次真实重试；SDK 的 attempt/max_retries
+        // 是当前请求链的权威序号。通知阶段绝不能提前耗尽或中断 Query。
         if (infoSubtype === 'api_retry') {
           const current = apiRetryStates.get(sessionId) ?? createApiRetryState(MAX_API_RETRIES);
           const retryDelayMs = typeof sdkMsg.retry_delay_ms === 'number' ? sdkMsg.retry_delay_ms : undefined;
           const errorStatus = typeof sdkMsg.error_status === 'number' ? sdkMsg.error_status : null;
+          const sdkAttempt = typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined;
+          const sdkMaxRetries = typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined;
           const next = recordApiRetry(current, {
             now: Date.now(),
+            retryAttempt: sdkAttempt,
+            retryLimit: sdkMaxRetries,
             retryDelayMs,
             error: typeof sdkMsg.error === 'string' ? sdkMsg.error : undefined,
             errorStatus,
           });
           apiRetryStates.set(sessionId, next.state);
-
-          if (next.becameExhausted) {
-            persistApiRetryTerminal(sessionId, mainWindow, next.state);
-            killProcess(sessionId, 'api_retry_exhausted', mainWindow);
-            continue;
-          }
+          logger.warn(
+            `[retry-trace] retry_scheduled session=${sessionId} query=${entry.queryInstance} attempt=${sdkAttempt ?? 'unknown'}/${sdkMaxRetries ?? MAX_API_RETRIES} delayMs=${retryDelayMs ?? 'unknown'} status=${errorStatus ?? 'network'}`,
+          );
 
           const sysInfo: CliSystemInfoEvent = {
             type: 'system',
             subtype: 'api_retry',
             retryCount: next.state.retryCount,
-            retryLimit: next.state.retryLimit,
+            retryLimit: sdkMaxRetries ?? next.state.retryLimit,
             nextRetryAt: next.state.nextRetryAt ?? undefined,
             retryDelayMs,
             errorStatus,
             error: next.state.lastError ?? undefined,
-            sdkAttempt: typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined,
-            sdkMaxRetries: typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined,
+            sdkAttempt,
+            sdkMaxRetries,
             level: 'warn',
           };
           forwardTransient(sessionId, mainWindow, sysInfo);
@@ -1656,8 +1679,12 @@ async function runQuery(
         continue;
       }
       if (type === 'assistant') {
-        // assistant 是模型级活动；即使 SDK 事件内容异常、无法转换，也必须先收口 retry recovery。
-        finishApiRetryRecovery(sessionId, mainWindow);
+        // assistant 带 error 表示最后一次真实尝试失败；正常 assistant 才表示重试恢复。
+        if (typeof sdkMsg.error === 'string') {
+          finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
+        } else {
+          finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance);
+        }
         const cliEvent = convertAssistantMessage(sdkMsg);
         if (cliEvent) {
           forwardEvent(sessionId, mainWindow, cliEvent);
@@ -1687,7 +1714,7 @@ async function runQuery(
         continue;
       }
       if (type === 'stream_event') {
-        finishApiRetryRecovery(sessionId, mainWindow);
+        finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance);
         forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg));
         continue;
       }
@@ -1703,6 +1730,9 @@ async function runQuery(
       }
       if (type === 'result') {
         gotResult = true;
+        if (sdkMsg.is_error === true) {
+          finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
+        }
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
         // result 已明确结束当前回合：先释放 active entry，再通知队列退出。
         // renderer 收到 result 后可立即发送下一回合，不再撞上尚未走到函数 finally 的旧 entry。

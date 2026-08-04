@@ -682,10 +682,11 @@ console.log('\n=== 32) CC 回复形态补全：code_execution / is_error / api_r
     cli.includes('kind: ApiRetryTerminalKind') && cli.includes('details: ApiRetryTerminalDetailsV1'));
   check('cli.ts 新终态事件加入 CliEvent 联合',
     cli.includes('| CliPersistedMessageEvent') && cli.includes('| CliApiRetryTerminalFallbackEvent'));
-  check('sdk-backend 转发 api_retry system 事件',
+  check('sdk-backend 转发 api_retry system 事件并保留 SDK 诊断字段',
     sb.includes("infoSubtype === 'api_retry'") &&
-    sb.includes("sdkAttempt: typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined") &&
-    sb.includes("sdkMaxRetries: typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined") &&
+    sb.includes("const sdkAttempt = typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined") &&
+    sb.includes("const sdkMaxRetries = typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined") &&
+    sb.includes('sdkAttempt,') && sb.includes('sdkMaxRetries,') &&
     !sb.includes("attempt: typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined") &&
     !sb.includes("max_retries: typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined"));
   check('use-chat 用应用级权威字段驱动 api_retry UI',
@@ -929,24 +930,29 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
   check('sdk backend 使用独立 apiRetryStates 且不再让 StallTracker 重复计数',
     sb.includes('const apiRetryStates = new Map<string, ApiRetryState>()') &&
     !sb.includes('consecutiveApiRetries: number'));
-  check('SDK api_retry 提取 delay/status 并下发权威 count/limit',
+  check('SDK api_retry 使用原始 attempt/max_retries 投影权威 count/limit',
     sb.includes('sdkMsg.retry_delay_ms') &&
     sb.includes('sdkMsg.error_status') &&
+    sb.includes('const sdkAttempt = typeof sdkMsg.attempt') &&
+    sb.includes('const sdkMaxRetries = typeof sdkMsg.max_retries') &&
+    sb.includes('retryAttempt: sdkAttempt') &&
+    sb.includes('retryLimit: sdkMaxRetries') &&
     sb.includes('retryCount: next.state.retryCount') &&
-    sb.includes('retryLimit: next.state.retryLimit'));
-  check('第十次事件边沿使用 api_retry_exhausted 立即中断',
-    sb.includes("killProcess(sessionId, 'api_retry_exhausted', mainWindow)"));
+    sb.includes('retryLimit: sdkMaxRetries ?? next.state.retryLimit'));
+  check('Claude Code 重试上限双通道注入 SDK env 和内联 settings.env',
+    sb.includes('queryEnv.CLAUDE_CODE_MAX_RETRIES = String(MAX_API_RETRIES)') &&
+    sb.includes('settingsEnv.CLAUDE_CODE_MAX_RETRIES = String(MAX_API_RETRIES)'));
   check('CLAUDE_LINK_MAX_API_RETRIES 仅接受正整数',
     /function envInt\([\s\S]*?Number\.isInteger\(n\)[\s\S]*?n > 0/.test(sb));
-  check('异常 assistant 事件也先收口 retry recovery',
-    /if \(type === 'assistant'\)[\s\S]*?finishApiRetryRecovery\(sessionId, mainWindow\);[\s\S]*?const cliEvent = convertAssistantMessage\(sdkMsg\)/.test(sb));
+  check('assistant 事件按真实结果分别收口 exhausted 或 recovery',
+    /if \(type === 'assistant'\)[\s\S]*?typeof sdkMsg\.error === 'string'[\s\S]*?finishApiRetryExhausted\(sessionId, mainWindow, entry\.queryInstance\)[\s\S]*?finishApiRetryRecovery\(sessionId, mainWindow, entry\.queryInstance\)[\s\S]*?const cliEvent = convertAssistantMessage\(sdkMsg\)/.test(sb));
 
   // Task8：模型恢复必须先持久化唯一 retry 终态，再转发恢复该状态的模型活动。
   const assistantBranch = sb.slice(
     sb.indexOf("if (type === 'assistant')"),
     sb.indexOf("if (type === 'user')"),
   );
-  const assistantRecoveryIndex = assistantBranch.indexOf('finishApiRetryRecovery(sessionId, mainWindow)');
+  const assistantRecoveryIndex = assistantBranch.indexOf('finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance)');
   const assistantForwardIndex = assistantBranch.indexOf('forwardEvent(sessionId, mainWindow, cliEvent)');
   check('assistant 模型活动先写恢复记录再 forwardEvent',
     assistantRecoveryIndex >= 0 && assistantForwardIndex > assistantRecoveryIndex);
@@ -954,7 +960,7 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     sb.indexOf("if (type === 'stream_event')"),
     sb.indexOf("if (type === 'tool_progress')"),
   );
-  const streamRecoveryIndex = streamEventBranch.indexOf('finishApiRetryRecovery(sessionId, mainWindow)');
+  const streamRecoveryIndex = streamEventBranch.indexOf('finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance)');
   const streamForwardIndex = streamEventBranch.indexOf('forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg))');
   check('stream_event 模型活动先写恢复记录再 forwardEvent',
     streamRecoveryIndex >= 0 && streamForwardIndex > streamRecoveryIndex);
@@ -995,11 +1001,31 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     sb.indexOf("if (infoSubtype === 'api_retry')"),
     sb.indexOf('// 权限询问/拒绝事件', sb.indexOf("if (infoSubtype === 'api_retry')")),
   );
-  const exhaustedBranch = retryBranch.slice(retryBranch.indexOf('if (next.becameExhausted)'));
-  check('第 10 次 api_retry 先持久化 exhausted 终态再 kill',
-    exhaustedBranch.indexOf('persistApiRetryTerminal(sessionId, mainWindow, next.state)') >= 0 &&
-    exhaustedBranch.indexOf("killProcess(sessionId, 'api_retry_exhausted', mainWindow)") >
-      exhaustedBranch.indexOf('persistApiRetryTerminal(sessionId, mainWindow, next.state)'));
+  check('api_retry 排期通知只瞬态转发，不提前持久化或 kill Query',
+    retryBranch.includes('forwardTransient(sessionId, mainWindow, sysInfo)') &&
+    !retryBranch.includes('persistApiRetryTerminal(') &&
+    !retryBranch.includes("killProcess(sessionId, 'api_retry_exhausted', mainWindow)"));
+  const exhaustedHelperStart = sb.indexOf('function finishApiRetryExhausted(');
+  const exhaustedHelperEnd = sb.indexOf('function isToolResultPart(', exhaustedHelperStart);
+  const exhaustedHelper = sb.slice(exhaustedHelperStart, exhaustedHelperEnd);
+  check('最终真实错误通过 finishApiRetryExhausted 显式收口',
+    exhaustedHelper.includes('recordApiRetryExhausted') &&
+    exhaustedHelper.includes('persistApiRetryTerminal'));
+  const assistantRetryBranch = sb.slice(
+    sb.indexOf("if (type === 'assistant')"),
+    sb.indexOf("if (type === 'user')"),
+  );
+  check('assistant error 耗尽、正常 assistant 恢复',
+    assistantRetryBranch.includes("typeof sdkMsg.error === 'string'") &&
+    assistantRetryBranch.includes('finishApiRetryExhausted') &&
+    assistantRetryBranch.includes('finishApiRetryRecovery'));
+  const resultRetryBranch = sb.slice(
+    sb.indexOf("if (type === 'result')"),
+    sb.indexOf('// 其它 system 子类型 / hook 等暂不转发'),
+  );
+  check('错误 result 触发 exhausted 收口',
+    resultRetryBranch.includes('sdkMsg.is_error === true') &&
+    resultRetryBranch.includes('finishApiRetryExhausted'));
 
   // Task4：回复中断来源必须显式传递，只有用户从聊天页停止才写 user_stopped 终态。
   const ipcHandlers = readRel('src/main/ipc-handlers.ts');
@@ -1632,7 +1658,9 @@ console.log('\n=== 51) API 自动重试状态卡：进度/倒计时/停止与流
   check('ApiRetryBanner 复用共享错误标签映射', banner.includes('apiRetryErrorLabel'));
   check('ApiRetryBanner 有 retry-progress 进度条', banner.includes('retry-progress'));
   check('ApiRetryBanner 展示预计重试倒计时', banner.includes('预计'));
-  check('ApiRetryBanner 说明等待 Claude Code 自动重试', banner.includes('等待 Claude Code 自动重试'));
+  check('ApiRetryBanner 说明 Claude Code 将发起下一次真实重试请求',
+    banner.includes('等待 Claude Code 发起下一次重试请求') &&
+    banner.includes('准备第 {{ info.retryCount }}/{{ info.retryLimit }} 次重试'));
   check('ApiRetryBanner 提供立即停止按钮', banner.includes('立即停止'));
   check('ApiRetryBanner 停止前标记 stopping 并保留重试态',
     /markApiRetryStopping\(session\.id\)[\s\S]*?await chat\.abort\(\{ preserveApiRetry: true \}\)/.test(banner));

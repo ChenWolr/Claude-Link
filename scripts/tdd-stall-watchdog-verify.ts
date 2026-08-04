@@ -9,6 +9,7 @@ import {
   apiRetrySummary,
   createApiRetryState,
   recordApiRetry,
+  recordApiRetryExhausted,
   recordApiRetryRecovery,
   recordApiRetryUserStop,
   toApiRetryTerminalDetails,
@@ -146,11 +147,12 @@ check('初始状态为空闲且没有重试或终态', () => {
   });
 });
 
-check('第 1～9 次保持 retrying，第 10 次只首次耗尽', () => {
+check('SDK 第 1～10 次 retryAttempt 都保持 retrying，第 10 次仍保留下一次重试排期', () => {
   let state = retryState();
-  for (let i = 1; i <= 9; i += 1) {
+  for (let i = 1; i <= 10; i += 1) {
     const result = recordApiRetry(state, {
       now: i * 1_000,
+      retryAttempt: i,
       retryDelayMs: 2_000,
       error: 'server_error',
       errorStatus: 529,
@@ -158,16 +160,64 @@ check('第 1～9 次保持 retrying，第 10 次只首次耗尽', () => {
     state = result.state;
     assert.equal(state.phase, 'retrying');
     assert.equal(state.retryCount, i);
+    assert.equal(state.nextRetryAt, i * 1_000 + 2_000);
+    assert.equal(state.terminalKind, null);
+    assert.equal(state.endedAt, null);
     assert.equal(result.becameExhausted, false);
   }
-  const tenth = recordApiRetry(state, { now: 10_000, retryDelayMs: 2_000 });
-  assert.equal(tenth.state.phase, 'terminal');
-  assert.equal(tenth.state.terminalKind, 'exhausted');
-  assert.equal(tenth.state.retryCount, 10);
-  assert.equal(tenth.becameExhausted, true);
-  const late = recordApiRetry(tenth.state, { now: 11_000, retryDelayMs: 2_000 });
-  assert.equal(late.becameExhausted, false);
-  assert.strictEqual(late.state, tenth.state);
+});
+
+check('最终错误确认后才耗尽，二次确认幂等', () => {
+  const retrying = recordApiRetry(retryState(), {
+    now: 10_000,
+    retryAttempt: 10,
+    retryDelayMs: 2_000,
+  }).state;
+  const exhausted = recordApiRetryExhausted(retrying, 11_000);
+  assert.equal(exhausted.becameExhausted, true);
+  assert.equal(exhausted.state.phase, 'terminal');
+  assert.equal(exhausted.state.terminalKind, 'exhausted');
+  assert.equal(exhausted.state.retryCount, 10);
+  assert.equal(exhausted.state.nextRetryAt, null);
+  assert.equal(exhausted.state.endedAt, 11_000);
+  const repeated = recordApiRetryExhausted(exhausted.state, 12_000);
+  assert.equal(repeated.becameExhausted, false);
+  assert.strictEqual(repeated.state, exhausted.state);
+});
+
+check('SDK retryAttempt 可跳号投影，无效或缺失时回退为递增计数', () => {
+  const jumped = recordApiRetry(retryState(), {
+    now: 1_000,
+    retryAttempt: 7,
+    retryDelayMs: 2_000,
+  }).state;
+  assert.equal(jumped.retryCount, 7);
+  const invalid = recordApiRetry(jumped, { now: 2_000, retryAttempt: 0 }).state;
+  assert.equal(invalid.retryCount, 8);
+  const missing = recordApiRetry(invalid, { now: 3_000 }).state;
+  assert.equal(missing.retryCount, 9);
+  const fractional = recordApiRetry(missing, { now: 4_000, retryAttempt: 9.5 }).state;
+  assert.equal(fractional.retryCount, 10);
+});
+
+check('SDK retryLimit 覆盖本地默认并同时决定计数钳制与最终耗尽', () => {
+  const smaller = recordApiRetry(retryState(10), {
+    now: 1_000,
+    retryAttempt: 3,
+    retryLimit: 3,
+  }).state;
+  assert.equal(smaller.retryCount, 3);
+  assert.equal(smaller.retryLimit, 3);
+  assert.equal(recordApiRetryExhausted(smaller, 2_000).becameExhausted, true);
+
+  const larger = recordApiRetry(retryState(10), {
+    now: 1_000,
+    retryAttempt: 20,
+    retryLimit: 20,
+  }).state;
+  assert.equal(larger.retryCount, 20);
+  assert.equal(larger.retryLimit, 20);
+  assert.equal(recordApiRetryExhausted(larger, 2_000).becameExhausted, true);
 });
 
 check('真实模型活动恢复一次，普通 idle 不产生恢复', () => {
@@ -232,7 +282,10 @@ check('停止/耗尽终态幂等，恢复后允许同一 Query 开启新 retry e
   assert.equal(recoveredNext.becameExhausted, false);
   const terminals = [
     recordApiRetryUserStop(retrying, 1_500).state,
-    recordApiRetry(retryState(1), { now: 1_000, retryDelayMs: 2_000 }).state,
+    recordApiRetryExhausted(
+      recordApiRetry(retryState(1), { now: 1_000, retryDelayMs: 2_000 }).state,
+      1_500,
+    ).state,
   ];
 
   for (const terminal of terminals) {
@@ -249,17 +302,20 @@ check('停止/耗尽终态幂等，恢复后允许同一 Query 开启新 retry e
   }
 });
 
-check('竞态：耗尽后迟到 recovery 不覆盖 exhausted 终态', () => {
-  const exhausted = recordApiRetry(retryState(1), {
-    now: 1_000,
-    retryDelayMs: 2_000,
-    error: 'overloaded',
-    errorStatus: 529,
-  }).state;
-  const lateRecovery = recordApiRetryRecovery(exhausted, 1_500);
+check('竞态：显式耗尽后迟到 recovery 不覆盖 exhausted 终态', () => {
+  const exhausted = recordApiRetryExhausted(
+    recordApiRetry(retryState(1), {
+      now: 1_000,
+      retryDelayMs: 2_000,
+      error: 'overloaded',
+      errorStatus: 529,
+    }).state,
+    1_500,
+  ).state;
+  const lateRecovery = recordApiRetryRecovery(exhausted, 2_000);
   assert.strictEqual(lateRecovery.state, exhausted);
   assert.equal(lateRecovery.state.terminalKind, 'exhausted');
-  assert.equal(lateRecovery.state.endedAt, 1_000);
+  assert.equal(lateRecovery.state.endedAt, 1_500);
   assert.equal(lateRecovery.terminalState, null);
   assert.equal(lateRecovery.becameRecovered, false);
 });

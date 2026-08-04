@@ -233,7 +233,7 @@ export interface CliSystemInfoEvent {
   subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting' | 'compact_result' | 'compact_error' | 'requesting' | 'thinking_tokens';
   text?: string;
   level?: 'info' | 'warn';
-  // api_retry 专属：应用级权威重试状态。
+  // api_retry 专属：Claude Code 当前请求链的权威重试排期；一次事件对应随后一次真实请求。
   // error 取值：authentication_failed / rate_limit / overloaded / invalid_request / server_error 等。
   retryCount?: number;
   retryLimit?: number;
@@ -241,7 +241,7 @@ export interface CliSystemInfoEvent {
   retryDelayMs?: number;
   error?: string;
   errorStatus?: number | null;
-  // SDK 原始字段仅供诊断，不参与应用级状态计算。
+  // SDK 原始字段是请求链序号来源，同时保留给诊断展示。
   sdkAttempt?: number;
   sdkMaxRetries?: number;
   // M5：压缩结果（status.compact_result）。'success' | 'failed'。

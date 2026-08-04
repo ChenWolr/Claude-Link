@@ -20,10 +20,10 @@ const progress = computed(() => {
 });
 const countdownText = computed(() => {
   const target = info.value?.nextRetryAt;
-  if (!target) return '等待 Claude Code 自动重试';
+  if (!target) return '等待 Claude Code 发起下一次重试请求';
   const remainingMs = target - now.value;
-  if (remainingMs <= 0) return '正在再次尝试';
-  return `预计 ${Math.ceil(remainingMs / 1000)} 秒后再次尝试`;
+  if (remainingMs <= 0) return '正在发起本次重试请求';
+  return `预计 ${Math.ceil(remainingMs / 1000)} 秒后发起本次重试请求`;
 });
 
 async function stopRetrying(): Promise<void> {
@@ -40,7 +40,7 @@ async function stopRetrying(): Promise<void> {
     <div class="retry-card__body">
       <strong>上游服务暂时不可达，正在自动重试</strong>
       <span class="retry-card__meta">
-        已重试 {{ info.retryCount }}/{{ info.retryLimit }} 次 · {{ errorLabel }}
+        准备第 {{ info.retryCount }}/{{ info.retryLimit }} 次重试 · {{ errorLabel }}
       </span>
       <div class="retry-progress" aria-hidden="true">
         <span :style="{ width: `${progress}%` }"></span>
