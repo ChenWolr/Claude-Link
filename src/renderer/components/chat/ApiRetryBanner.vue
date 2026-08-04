@@ -1,62 +1,138 @@
 <script setup lang="ts">
-// ApiRetryBanner.vue
-// Bug4/Bug5：API 重试瞬态指示器。api_retry 事件改走 forwardTransient（不落库、不进聊天流）后，
-// 由它承载「API 重试中（第 N 次）」。计数来自 session-store 的本回合累计（每条 api_retry 自增，
-// 真实业务事件清零），不再用 SDK 单次 attempt 字段（第三方端点常恒为 1）——故能正确显示 1→2→3。
-// 自包含：直接读 session-store.activeApiRetryInfo，无需父组件传 props。无动作按钮——它是信息性
-// 指示；若重试风暴持续触发卡死，StalledBanner 会接管并提供「继续等待/重试/中断」。
+// 上游 API 重试持续状态卡：只展示主进程下发的权威计数与截止时间。
+// renderer 仅负责倒计时和用户停止，不自行累计重试次数。
 import { computed } from 'vue';
+import { apiRetryErrorLabel } from '../../../shared/api-retry-state';
+import { useChat } from '../../composables/use-chat';
+import { useNow } from '../../composables/use-now';
 import { useSessionStore } from '../../stores/session-store';
 
 const sessionStore = useSessionStore();
+const chat = useChat();
 const info = computed(() => sessionStore.activeApiRetryInfo);
+const fallback = computed(() => sessionStore.activeApiRetryTerminalFallback);
+const { now } = useNow(() => !!info.value?.nextRetryAt && !info.value?.stopping);
 
-// 给 SDK 报的 error 一个简短中文（限流/过载/鉴权失败等），无则空。
-const errorLabel = computed(() => {
-  const e = info.value?.error;
-  if (!e) return '';
-  const map: Record<string, string> = {
-    rate_limit: '限流',
-    overloaded: '过载',
-    authentication_failed: '鉴权失败',
-    invalid_request: '请求非法',
-    server_error: '服务端错误',
-  };
-  return map[e] ? `（${map[e]}）` : `（${e}）`;
+const errorLabel = computed(() => apiRetryErrorLabel(info.value?.error));
+const progress = computed(() => {
+  if (!info.value || info.value.retryLimit <= 0) return 0;
+  return Math.min(100, Math.max(0, (info.value.retryCount / info.value.retryLimit) * 100));
 });
+const countdownText = computed(() => {
+  const target = info.value?.nextRetryAt;
+  if (!target) return '等待 Claude Code 自动重试';
+  const remainingMs = target - now.value;
+  if (remainingMs <= 0) return '正在再次尝试';
+  return `预计 ${Math.ceil(remainingMs / 1000)} 秒后再次尝试`;
+});
+
+async function stopRetrying(): Promise<void> {
+  const session = sessionStore.activeSession;
+  if (!session || info.value?.stopping) return;
+  sessionStore.markApiRetryStopping(session.id);
+  await chat.abort({ preserveApiRetry: true });
+}
 </script>
 
 <template>
-  <div v-if="info" class="retry-banner" role="status" aria-live="polite">
-    <span class="retry-banner__icon">⟳</span>
-    <span class="retry-banner__text">
-      API 重试中（第 {{ info.attempt }}<template v-if="info.max">/{{ info.max }}</template> 次）{{ errorLabel }}
-    </span>
-  </div>
+  <section v-if="info" class="retry-card" role="status" aria-live="polite">
+    <span class="retry-card__icon" aria-hidden="true">⟳</span>
+    <div class="retry-card__body">
+      <strong>上游服务暂时不可达，正在自动重试</strong>
+      <span class="retry-card__meta">
+        已重试 {{ info.retryCount }}/{{ info.retryLimit }} 次 · {{ errorLabel }}
+      </span>
+      <div class="retry-progress" aria-hidden="true">
+        <span :style="{ width: `${progress}%` }"></span>
+      </div>
+      <div class="retry-card__footer">
+        <span class="retry-card__countdown" aria-hidden="true">{{ countdownText }}</span>
+        <button
+          type="button"
+          class="retry-card__stop"
+          :disabled="info.stopping"
+          @click="stopRetrying"
+        >
+          {{ info.stopping ? '正在停止…' : '立即停止' }}
+        </button>
+      </div>
+    </div>
+  </section>
+  <section
+    v-else-if="fallback"
+    class="retry-card retry-card--terminal"
+    role="status"
+    aria-live="polite"
+  >
+    <span class="retry-card__terminal-icon" aria-hidden="true">!</span>
+    <div class="retry-card__body">
+      <strong>{{ fallback.summary }}</strong>
+      <span class="retry-card__meta">该记录未能保存，重启应用后将不再显示。</span>
+    </div>
+  </section>
 </template>
 
 <style scoped>
-.retry-banner {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin: 6px 0 2px;
-  padding: 4px 10px;
+.retry-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 8px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--color-warn) 38%, transparent);
   border-radius: var(--radius-md);
-  /* 信息性指示（非告警）：用 color-mix 把强调色淡混入面板，随 ThemePalette 自适应。 */
-  background: color-mix(in srgb, var(--color-accent-strong) 10%, var(--color-panel-soft));
-  border: 1px solid color-mix(in srgb, var(--color-accent-strong) 28%, transparent);
+  background: color-mix(in srgb, var(--color-warn) 12%, var(--color-panel-soft));
   color: var(--color-text);
-  font-size: 12px;
-  box-shadow: var(--ring-light);
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
-.retry-banner__icon {
-  font-size: 13px;
-  color: var(--color-accent-strong);
+.retry-card__icon,
+.retry-card__terminal-icon {
+  color: var(--color-warn);
+  font-size: 20px;
+}
+.retry-card__icon {
   animation: retry-spin 1.4s linear infinite;
 }
-.retry-banner__text {
-  font-variant-numeric: tabular-nums;
+.retry-card__body {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 5px;
+}
+.retry-card__meta,
+.retry-card__footer {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+.retry-progress {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-warn) 18%, transparent);
+}
+.retry-progress > span {
+  display: block;
+  height: 100%;
+  background: var(--color-warn);
+  transition: width var(--duration-fast) var(--ease-out);
+}
+.retry-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.retry-card__stop {
+  padding: 4px 10px;
+  border: 1px solid var(--color-warn);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+}
+.retry-card__stop:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 @keyframes retry-spin {
   from { transform: rotate(0deg); }
@@ -64,6 +140,7 @@ const errorLabel = computed(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .retry-banner__icon { animation: none; }
+  .retry-card__icon { animation: none; }
+  .retry-progress > span { transition: none; }
 }
 </style>

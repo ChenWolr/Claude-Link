@@ -664,9 +664,34 @@ console.log('\n=== 32) CC 回复形态补全：code_execution / is_error / api_r
 
   // 4. system/api_retry 事件解析与展示（API 重试可见反馈，不再被「未知 subtype」吞掉）
   check('cli.ts CliSystemInfoEvent 含 api_retry subtype', cli.includes("'api_retry'"));
+  check('cli.ts api_retry 含应用级权威重试字段',
+    cli.includes('retryCount?: number') && cli.includes('retryLimit?: number') &&
+    cli.includes('nextRetryAt?: number') && !cli.includes('nextRetryAt?: number | null') &&
+    cli.includes('retryDelayMs?: number') && cli.includes('error?: string') &&
+    cli.includes('errorStatus?: number | null'));
+  check('cli.ts api_retry 保留 SDK 原始重试诊断字段',
+    cli.includes('sdkAttempt?: number') && cli.includes('sdkMaxRetries?: number'));
+  check('cli.ts api_retry 已移除旧 SDK 字段名',
+    !cli.includes('attempt?: number') && !cli.includes('max_retries?: number'));
+  check('cli.ts 含持久化消息与 API 重试终态事件',
+    cli.includes('CliPersistedMessageEvent') && cli.includes("type: 'persisted_message'") &&
+    cli.includes('message: Message') &&
+    cli.includes('CliApiRetryTerminalFallbackEvent') && cli.includes("type: 'api_retry_terminal'") &&
+    cli.includes('summary: string') && cli.includes('persisted: false'));
+  check('cli.ts API 重试终态事件复用 Task 1 详情与种类类型',
+    cli.includes('kind: ApiRetryTerminalKind') && cli.includes('details: ApiRetryTerminalDetailsV1'));
+  check('cli.ts 新终态事件加入 CliEvent 联合',
+    cli.includes('| CliPersistedMessageEvent') && cli.includes('| CliApiRetryTerminalFallbackEvent'));
   check('sdk-backend 转发 api_retry system 事件',
-    sb.includes("infoSubtype === 'api_retry'") && sb.includes('attempt') && sb.includes('max_retries'));
-  check('persistSystemEvent 构造 api_retry 重试文案', uc.includes('API 重试中'));
+    sb.includes("infoSubtype === 'api_retry'") &&
+    sb.includes("sdkAttempt: typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined") &&
+    sb.includes("sdkMaxRetries: typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined") &&
+    !sb.includes("attempt: typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined") &&
+    !sb.includes("max_retries: typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined"));
+  check('use-chat 用应用级权威字段驱动 api_retry UI',
+    uc.includes('retryCount: event.retryCount') && uc.includes('retryLimit: event.retryLimit') &&
+    !uc.includes('r.sdkMaxRetries') && !uc.includes('info.attempt') && !uc.includes('info.max_retries'));
+  check('persistSystemEvent 构造 api_retry 诊断文案', uc.includes('API 重试中'));
 
   // 5. citations 类型字段（web search 引用，未来就绪；当前代理端点不触发）
   check('cli.ts text part 含 citations + stream delta 含 citation', cli.includes('citations?') && cli.includes('citation?'));
@@ -820,16 +845,24 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
   check('null 非冗余', isRedundantSystemProcessKind(null) === false);
   check('group-messages 渲染层过滤冗余 system', gm.includes('isRedundantSystemProcessKind'));
 
-  // Bug4：api_retry 改走 forwardTransient（不落库、不进聊天流），不再冒「系统消息」。
+  // Bug4：api_retry 的第 1～9 次走 forwardTransient（不落库、不进聊天流），不再冒「系统消息」。
   const sb = readRel('src/main/modules/sdk-backend.ts');
-  check('api_retry 走 forwardTransient（不落库）', /subtype: 'api_retry'[\s\S]{0,500}forwardTransient/.test(sb));
+  const apiRetryBranch = sb.slice(
+    sb.indexOf("if (infoSubtype === 'api_retry')"),
+    sb.indexOf('// 权限询问/拒绝事件'),
+  );
+  check('api_retry 走 forwardTransient（不落库）',
+    apiRetryBranch.includes('forwardTransient(sessionId, mainWindow, sysInfo)') &&
+    !apiRetryBranch.includes('persistCliEvent(sessionId, sysInfo)'));
   check('MessageList 挂载 ApiRetryBanner', ml.includes('ApiRetryBanner'));
   // Bug2：SDK 转发子 agent text/thinking + stream_event 透传 parent_tool_use_id → 子 Agent Tab 思考中可见。
   check('sdk-backend 开启 forwardSubagentText', sb.includes('forwardSubagentText: true'));
   check('convertStreamEvent 透传 parent_tool_use_id', /convertStreamEvent[\s\S]{0,300}parent_tool_use_id/.test(sb));
   check('TaskQueuePanel 引入 ThinkingBlock（子 agent 实时思考）', tqp.includes('ThinkingBlock'));
-  // Bug3：consecutiveApiRetries 仅模型级（message/stream_event）清零，tool_progress 不再清零。
-  check('touchActivity 仅模型级清零重试计数', /kind === 'message' \|\| kind === 'stream_event'[\s\S]{0,80}consecutiveApiRetries = 0/.test(sb));
+  // Task3：重试次数只由 apiRetryStates 维护；StallTracker 仍识别 system/api_retry 并提前返回，避免刷新静默计时。
+  check('touchActivityFromEvent 对 api_retry 仅早退且不重复计数',
+    /subtype === 'api_retry'\) \{\s*return;\s*\}/.test(sb) &&
+    !sb.includes('consecutiveApiRetries'));
   // Bug4（二次）：requesting/compact_result 是 forwardTransient 但原渲染层落到 persistSystemEvent → 无 defaultText → 「系统提示」。
   check('use-chat 把 requesting/compact_result 当瞬态（不再冒「系统提示」）', uc.includes("event.subtype === 'compact_result'") && uc.includes("event.subtype === 'requesting'") && uc.includes('setCompacting(false)'));
   // 计划模式确定按钮点不到：interaction-dialog 改 flex 列布局，body 用 flex:1+min-height:0 取代魔数 max-height，footer 不再被裁。
@@ -892,12 +925,117 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
   check('sdk-backend 传 abortController 并 .abort()', sb.includes('abortController') && sb.includes('.abort()'));
   check('sdk-backend 看门狗 setInterval + classifyStall', sb.includes('setInterval') && sb.includes('classifyStall'));
   check('sdk-backend 发 stalled 事件', sb.includes("type: 'stalled'"));
-  // api_retry 重试风暴快速中断 + tool 区绝对硬中断接线（#1/#4/#6）
-  check('sdk-backend 追踪连续 api_retry 次数', sb.includes('consecutiveApiRetries'));
+  // api_retry 由独立的 per-Query 状态机权威计数；StallTracker 只负责 model/tool 静默。
+  check('sdk backend 使用独立 apiRetryStates 且不再让 StallTracker 重复计数',
+    sb.includes('const apiRetryStates = new Map<string, ApiRetryState>()') &&
+    !sb.includes('consecutiveApiRetries: number'));
+  check('SDK api_retry 提取 delay/status 并下发权威 count/limit',
+    sb.includes('sdkMsg.retry_delay_ms') &&
+    sb.includes('sdkMsg.error_status') &&
+    sb.includes('retryCount: next.state.retryCount') &&
+    sb.includes('retryLimit: next.state.retryLimit'));
+  check('第十次事件边沿使用 api_retry_exhausted 立即中断',
+    sb.includes("killProcess(sessionId, 'api_retry_exhausted', mainWindow)"));
+  check('CLAUDE_LINK_MAX_API_RETRIES 仅接受正整数',
+    /function envInt\([\s\S]*?Number\.isInteger\(n\)[\s\S]*?n > 0/.test(sb));
+  check('异常 assistant 事件也先收口 retry recovery',
+    /if \(type === 'assistant'\)[\s\S]*?finishApiRetryRecovery\(sessionId, mainWindow\);[\s\S]*?const cliEvent = convertAssistantMessage\(sdkMsg\)/.test(sb));
+
+  // Task8：模型恢复必须先持久化唯一 retry 终态，再转发恢复该状态的模型活动。
+  const assistantBranch = sb.slice(
+    sb.indexOf("if (type === 'assistant')"),
+    sb.indexOf("if (type === 'user')"),
+  );
+  const assistantRecoveryIndex = assistantBranch.indexOf('finishApiRetryRecovery(sessionId, mainWindow)');
+  const assistantForwardIndex = assistantBranch.indexOf('forwardEvent(sessionId, mainWindow, cliEvent)');
+  check('assistant 模型活动先写恢复记录再 forwardEvent',
+    assistantRecoveryIndex >= 0 && assistantForwardIndex > assistantRecoveryIndex);
+  const streamEventBranch = sb.slice(
+    sb.indexOf("if (type === 'stream_event')"),
+    sb.indexOf("if (type === 'tool_progress')"),
+  );
+  const streamRecoveryIndex = streamEventBranch.indexOf('finishApiRetryRecovery(sessionId, mainWindow)');
+  const streamForwardIndex = streamEventBranch.indexOf('forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg))');
+  check('stream_event 模型活动先写恢复记录再 forwardEvent',
+    streamRecoveryIndex >= 0 && streamForwardIndex > streamRecoveryIndex);
+
+  const persistRetryStart = sb.indexOf('function persistApiRetryTerminal(');
+  const persistRetryEnd = sb.indexOf('function finishApiRetryRecovery(', persistRetryStart);
+  const persistRetryBody = sb.slice(persistRetryStart, persistRetryEnd);
+  const createMessageIndex = persistRetryBody.indexOf('messageRepo.createMessage');
+  const persistedMessageSendIndex = persistRetryBody.indexOf("type: 'persisted_message'");
+  const dbCatchIndex = persistRetryBody.indexOf('catch (err)', createMessageIndex);
+  const fallbackEventIndex = persistRetryBody.indexOf("type: 'api_retry_terminal'", dbCatchIndex);
+  check('retry 终态 DB catch 发送 persisted:false fallback 且不伪造消息 id',
+    dbCatchIndex > createMessageIndex && fallbackEventIndex > dbCatchIndex &&
+    persistRetryBody.indexOf('persisted: false', fallbackEventIndex) > fallbackEventIndex &&
+    !persistRetryBody.slice(dbCatchIndex, persistRetryEnd).includes("id: '"));
+  check('retry 终态 DB create 与 persisted_message IPC send 使用独立 try/catch',
+    persistedMessageSendIndex > dbCatchIndex &&
+    (persistRetryBody.match(/\btry\s*\{/g)?.length ?? 0) >= 3);
+
+  const markDeletedBody = sb.slice(
+    sb.indexOf('export function markSessionDeleted('),
+    sb.indexOf('function markSessionActive('),
+  );
+  const deleteEntryBody = sb.slice(
+    sb.indexOf('function deleteEntry('),
+    sb.indexOf('// ── 读取初始上下文窗口'),
+  );
+  check('markSessionDeleted 清理当前会话 apiRetryStates',
+    markDeletedBody.includes('apiRetryStates.delete(sessionId)'));
+  check('markSessionDeleted 清理 CLI session 与 context 诊断缓存',
+    markDeletedBody.includes('sessionCliIds.delete(sessionId)') &&
+    markDeletedBody.includes('contextUsageDiagnosed.delete(sessionId)'));
+  check('deleteEntry 仅 current entry 清理 apiRetryStates',
+    /if \(isCurrent\) \{[\s\S]*apiRetryStates\.delete\(sessionId\)[\s\S]*\}/.test(deleteEntryBody) &&
+    deleteEntryBody.indexOf('apiRetryStates.delete(sessionId)') > deleteEntryBody.indexOf('if (isCurrent)'));
+
+  const retryBranch = sb.slice(
+    sb.indexOf("if (infoSubtype === 'api_retry')"),
+    sb.indexOf('// 权限询问/拒绝事件', sb.indexOf("if (infoSubtype === 'api_retry')")),
+  );
+  const exhaustedBranch = retryBranch.slice(retryBranch.indexOf('if (next.becameExhausted)'));
+  check('第 10 次 api_retry 先持久化 exhausted 终态再 kill',
+    exhaustedBranch.indexOf('persistApiRetryTerminal(sessionId, mainWindow, next.state)') >= 0 &&
+    exhaustedBranch.indexOf("killProcess(sessionId, 'api_retry_exhausted', mainWindow)") >
+      exhaustedBranch.indexOf('persistApiRetryTerminal(sessionId, mainWindow, next.state)'));
+
+  // Task4：回复中断来源必须显式传递，只有用户从聊天页停止才写 user_stopped 终态。
+  const ipcHandlers = readRel('src/main/ipc-handlers.ts');
+  const queueEngine = readRel('src/main/modules/task-queue-engine.ts');
+  check('sdk-backend 导出完整 KillReason 联合',
+    /export type KillReason\s*=\s*[\s\S]{0,200}'user'[\s\S]{0,200}'api_retry_exhausted'[\s\S]{0,200}'watchdog'[\s\S]{0,200}'queue'[\s\S]{0,200}'session_cleanup'/.test(sb));
+  check('CHAT_ABORT 以 user reason 且携带 mainWindowRef 中断',
+    ipcHandlers.includes("killProcess(sessionId, 'user', mainWindowRef)"));
+  check('删除会话以 session_cleanup reason 中断',
+    ipcHandlers.includes("killProcess(id, 'session_cleanup')"));
+  check('任务队列以 queue reason 中断',
+    queueEngine.includes("killProcess(sessionId, 'queue')"));
+  const killProcessBody = sb.slice(
+    sb.indexOf('export function killProcess('),
+    sb.indexOf('export function killAllProcesses()'),
+  );
+  const userStopIndex = killProcessBody.indexOf('recordApiRetryUserStop');
+  const persistUserStopIndex = killProcessBody.indexOf('persistApiRetryTerminal');
+  const cancelInteractionsIndex = killProcessBody.indexOf('cancelInteractionsForSession');
+  const retryStateDeleteIndex = killProcessBody.lastIndexOf('apiRetryStates.delete(sessionId)');
+  const userStopBranch = killProcessBody.slice(
+    killProcessBody.indexOf("if (reason === 'user' && mainWindow)"),
+    cancelInteractionsIndex,
+  );
+  check('用户停止在取消交互和状态删除前生成并持久化 API retry 终态',
+    userStopBranch.includes('recordApiRetryUserStop') &&
+    userStopBranch.includes('persistApiRetryTerminal') &&
+    userStopIndex >= 0 && persistUserStopIndex > userStopIndex &&
+    cancelInteractionsIndex > persistUserStopIndex &&
+    retryStateDeleteIndex > cancelInteractionsIndex);
+  check('killProcess 仅 user 分支生成 API retry 用户停止终态',
+    killProcessBody.match(/recordApiRetryUserStop/g)?.length === 1 &&
+    userStopBranch.includes('recordApiRetryUserStop'));
   check('sdk-backend touchActivityFromEvent 识别 api_retry 子类型', sb.includes("subtype === 'api_retry'"));
   check('sdk-backend 读 CLAUDE_LINK_STALL_TOOL_HARD_MS', sb.includes('CLAUDE_LINK_STALL_TOOL_HARD_MS'));
   check('sdk-backend 读 CLAUDE_LINK_MAX_API_RETRIES', sb.includes('CLAUDE_LINK_MAX_API_RETRIES'));
-  check('sdk-backend MAX_API_RETRIES 快速中断文案', sb.includes('API 连续重试'));
   check('sdk-backend toolHardAbortMs 接入 STALL_THRESHOLDS', sb.includes('toolHardAbortMs'));
   check('sdk-backend aborting entry 不算 active', sb.includes('state: \'pending\' | \'running\' | \'aborting\' | \'finished\'') && sb.includes('isEntryActive') && sb.includes("entry.state !== 'aborting'"));
   check('sdk-backend 使用子 Agent tool_use 判断', sb.includes('isSubAgentToolUse(part)'));
@@ -1483,6 +1621,70 @@ console.log('\n=== 50) 批次 B：thinking_tokens 实时思考 token 估算链�
   check('ContextButton 思考态 class ctx__btn--thinking', ctx.includes('ctx__btn--thinking'));
   check('ContextButton 思考态呼吸读 store.thinkingTokens', ctx.includes('store.thinkingTokens'));
   check('ContextButton 已移除 hover 思考 token 数值行', !ctx.includes('（估算）'));
+}
+
+console.log('\n=== 51) API 自动重试状态卡：进度/倒计时/停止与流式容器保活 ===');
+{
+  const banner = readRel('src/renderer/components/chat/ApiRetryBanner.vue');
+  const ml = readRel('src/renderer/components/chat/MessageList.vue');
+
+  check('ApiRetryBanner 展示权威 retryCount/retryLimit', banner.includes('info.retryCount') && banner.includes('info.retryLimit'));
+  check('ApiRetryBanner 复用共享错误标签映射', banner.includes('apiRetryErrorLabel'));
+  check('ApiRetryBanner 有 retry-progress 进度条', banner.includes('retry-progress'));
+  check('ApiRetryBanner 展示预计重试倒计时', banner.includes('预计'));
+  check('ApiRetryBanner 说明等待 Claude Code 自动重试', banner.includes('等待 Claude Code 自动重试'));
+  check('ApiRetryBanner 提供立即停止按钮', banner.includes('立即停止'));
+  check('ApiRetryBanner 停止前标记 stopping 并保留重试态',
+    /markApiRetryStopping\(session\.id\)[\s\S]*?await chat\.abort\(\{ preserveApiRetry: true \}\)/.test(banner));
+  check('停止 IPC 失败时清除保留的 retry 卡片',
+    /catch[\s\S]*clearApiRetrying\(sid\)/.test(readRel('src/renderer/composables/use-chat.ts')));
+  check('ApiRetryBanner 状态区可礼貌播报且逐秒倒计时不进入 live region',
+    banner.includes('role="status"') && banner.includes('aria-live="polite"') &&
+    /retry-card__countdown" aria-hidden="true"/.test(banner));
+  check('ApiRetryBanner 使用原生禁用按钮并尊重减少动画',
+    banner.includes(':disabled="info.stopping"') && banner.includes('@click="stopRetrying"') &&
+    banner.includes('prefers-reduced-motion: reduce'));
+  check('API retry 落库失败 fallback 在运行期可见',
+    banner.includes('activeApiRetryTerminalFallback') && banner.includes('fallback.summary') &&
+    /v-if="[^"]*activeApiRetryTerminalFallback/.test(ml));
+  check('MessageList API 重试期间保持 stream-group',
+    /v-if="[^"]*activeApiRetryInfo/.test(ml));
+}
+
+console.log('\n=== 52) API 重试终态专用折叠记录 ===');
+{
+  const processGroup = readRel('src/renderer/components/chat/ProcessGroup.vue');
+  const systemInfo = readRel('src/shared/system-info.ts');
+  const apiRetryRecordSrc = readRel('src/renderer/components/chat/ApiRetryRecord.vue');
+
+  check('retry 三种终态使用专用折叠记录',
+    processGroup.includes("import ApiRetryRecord from './ApiRetryRecord.vue'") &&
+    processGroup.includes("type: 'api_retry'") &&
+    processGroup.includes("'system:api_retry_recovered'") &&
+    processGroup.includes("'system:api_retry_stopped'") &&
+    processGroup.includes("'system:api_retry_exhausted'") &&
+    processGroup.includes('<ApiRetryRecord'));
+  check('retry 终态不被旧噪声过滤规则吞掉',
+    systemInfo.includes("processKind === 'system:api_retry'") &&
+    !systemInfo.includes("startsWith('system:api_retry')") &&
+    !systemInfo.includes("processKind === 'system:api_retry_recovered'") &&
+    !systemInfo.includes("processKind === 'system:api_retry_stopped'") &&
+    !systemInfo.includes("processKind === 'system:api_retry_exhausted'"));
+
+  check('retry 记录解析 rawEvent 失败或无详情时保留摘要',
+    apiRetryRecordSrc.includes('JSON.parse') &&
+    apiRetryRecordSrc.includes('catch') &&
+    apiRetryRecordSrc.includes('message.content') &&
+    apiRetryRecordSrc.includes('open && details'));
+  check('retry 记录只显示存在且有限的时间字段',
+    apiRetryRecordSrc.includes('Number.isFinite(details.value.elapsedMs)') &&
+    apiRetryRecordSrc.includes('Number.isFinite(details.value.accumulatedDelayMs)') &&
+    apiRetryRecordSrc.includes('v-if="elapsed"') && apiRetryRecordSrc.includes('v-if="delay"'));
+  check('retry 记录包含恢复与仅停止当前回复结果文案',
+    apiRetryRecordSrc.includes('上游已恢复，本次回复继续') &&
+    apiRetryRecordSrc.includes('仅终止本次回复，会话仍可继续'));
+  check('图片导出强制展开过程组以保留 retry 终态摘要',
+    processGroup.includes('if (props.exportMode) return true'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

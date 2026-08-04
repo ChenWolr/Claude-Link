@@ -62,7 +62,8 @@ src/shared/      主进程与渲染进程共享的类型与纯逻辑（settings-
 - **`markSessionDeleted` 是单一收口**：清 `activeSessions`、entries、stall 追踪、toolUse 缓存、权限/上下文缓存、pending interactions —— 新增任何 per-session Map 都必须在此登记。
 - **`forwardEvent` 每次落库前查 `isSessionActive`**：避免会话已删后 FK 违例回滚阻塞主循环（会让所有输入卡死）。
 - 中断：`killProcess` 先取消 interactions → 加入 `interruptedQueries` WeakSet → `abortEntry`（state 置 `aborting` + `abortController.abort()`，Windows 下走 `TerminateProcess` 硬杀）→ `query.interrupt()`（stdin 控制帧，软中断）。`AbortController` 是硬杀，`interrupt()` 是软杀。
-- `consecutiveApiRetries` **只由模型级活动（`message`/`stream_event`）清零**，`tool_progress`/`system` 不清 —— 否则重试风暴永不收敛。
+- `api_retry` 由主进程 per-session/per-turn 权威状态机累计；只有模型级活动（`message`/`stream_event`）进入恢复终态，`tool_progress`/普通 `system`/`keep_alive` 不清零。第 `CLAUDE_LINK_MAX_API_RETRIES` 次（默认 10）事件到达时立即生成 `system:api_retry_exhausted` 并只中断当前 Query，不再等待 5s watchdog tick。
+- 第 1～9 次重试经 `forwardTransient` 只展示状态卡、不落库；恢复、用户停止、耗尽由主进程写一条 `messages` system 记录并以 `persisted_message` 推前端，renderer 只按 ID upsert，不二次持久化。
 - `keep_alive` 心跳**不刷新 stall 计时**（代理常对死连接发心跳）。`forwardSubagentText:true` + stream event 透传 `parent_tool_use_id` 是子 Agent Tab 能看到实时思考的前提，关掉即坏。
 
 ### 统一交互弹窗系统
@@ -93,6 +94,7 @@ SDK canUseTool / onUserDialog / onElicitation
 
 - `use-chat.ts` 是**全局单例**（`createChat` 工厂 + `chatSingleton`），在 `App.vue` `onMounted` 注册一次 `chat:event` 监听；`ChatPage` 卸载不影响监听。`handleEvent` 分流 `thinking_delta`/`text_delta`/`input_json_delta`/`message`/`result`/`error`/`aborted`，靠 `turnHad*` 标志避免流式兜底与已落库内容重复。
 - `sending` 是 `session-store` 的**派生 getter**（从 `runningSessions` 算），不是 state；per-session 的 `runningSessions`/`sessionStreams`/`stalledInfo`/`apiRetryInfo`/`subAgentStreamingThinking` 全按 sessionId 索引，切会话不串扰。
+- `apiRetryInfo` 保存主进程下发的权威 `retryCount/retryLimit/nextRetryAt`，renderer 不自行加一；状态卡只提供“立即停止”。三个 retry 终态使用 `ApiRetryRecord` 单条折叠显示，详情来自可见窗口 `Message.rawEvent`，隐藏导出窗口仍只拿摘要。
 - 流式防抖在 `use-stream.ts`（`STREAM_DEBOUNCE_MS`，per-channel `setTimeout`；清空立即触发不防抖，让已落库消息无缝替换流式）。
 - 后台（非活动）会话的流式累积进 `sessionStreams[id]` 快照，`switchSession` 恢复。
 - `config-store`：`saveConfig` 用 `JSON.parse(JSON.stringify(this.config))` 脱响应式代理（Pinia proxy 过不了 IPC 结构化克隆）；`updatingFromJson` 标志 gates JSON→表单回填，防 `watch` 再写回 JSON 形成循环。
@@ -117,7 +119,7 @@ SDK canUseTool / onUserDialog / onElicitation
 - **changes-panel**：git diff 面板，`git status --porcelain=v1 -z` + `diff HEAD --numstat -z`，3s 超时、`GIT_TERMINAL_PROMPT=0`、`--` 防注入；按需算 vs HEAD 的净 diff，无预快照。
 - **export-image**：把会话导成长图。单飞（`active`）+ 隐藏 `BrowserWindow`（sandbox/隔离 partition）+ `capturePage` 分段；PNG 走 `worker_threads` 编码（`export-image-codec-worker.ts`，主线程外拼 RGBA 行）。隐藏 renderer 只消费最小附件快照（不含 ID/路径/storage key/哈希），不调 `window.claudeLink`。
 - **task-queue-engine**：per-session 队列，任务间倒计时串行；`interruptTask` 处理 `continuing` 态；generation 计数废掉过期子进程退出。
-- **stall-watchdog**（`src/shared/stall-watchdog.ts` 纯函数 `classifyStall`）：model/tool 双区阈值，5s tick；命中发 `stalled` 横幅，到 `hardAutoAbortMs`/`toolHardAbortMs` 或连续 `MAX_API_RETRIES`(10) 次 `api_retry` 经 `killProcess('watchdog')` 硬中断。
+- **stall-watchdog**（`src/shared/stall-watchdog.ts` 纯函数 `classifyStall`）：继续负责 model/tool 双区静默超时，5s tick 命中发 `stalled` 横幅，到 `hardAutoAbortMs`/`toolHardAbortMs` 经 `killProcess('watchdog')` 硬中断；连续 API retry 的精确阈值由事件边沿状态机处理，watchdog 不再维护第二套 retry 计数。
 - **context-usage**：`extractContextTokens` = input + cache_creation + cache_read（不含 output）；`detectCompaction` 识别 `compact_boundary` → emit `CONTEXT_UPDATE` 带 `compactedJustNow`。
 - **link-guard**：拦 `will-navigate`/`will-redirect`/`window.open` 走 `getNavigationDisposition`（拦截或交 `shell.openExternal`），`window.open` 一律拒。
 

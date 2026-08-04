@@ -610,6 +610,7 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       const ipcHandlers = readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
       const sdkBackend = readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
       const cliShared = readFileSync(new URL('../src/main/modules/cli-shared.ts', import.meta.url), 'utf8');
+      const taskQueue = readFileSync(new URL('../src/main/modules/task-queue-engine.ts', import.meta.url), 'utf8');
       const builder = readFileSync(new URL('../src/main/modules/attachment-prompt-builder.ts', import.meta.url), 'utf8');
       const messageRepo = readFileSync(new URL('../src/main/database/repositories/message-repo.ts', import.meta.url), 'utf8');
 
@@ -652,6 +653,20 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       assert.ok(sdkBackend.includes('prompt: SdkPrompt') || sdkBackend.includes('prompt: string | AsyncIterable'), 'sdk-backend 须接受 SdkPrompt');
       assert.ok(/export function sendMessage\(sessionId: string, message: SdkPrompt\)/.test(sdkBackend), 'sendMessage 须接受 SdkPrompt');
       assert.ok(/export function spawnForTask\([\s\S]*prompt: SdkPrompt/.test(sdkBackend), 'spawnForTask 须接受 SdkPrompt');
+      // 回合启动/流消费的所有异常都必须经过统一收口，不能让 entries 永久占坑。
+      assert.ok(/async function runQuery\([\s\S]*?finally\s*\{[\s\S]*?deleteEntry\(sessionId, entry\)/.test(sdkBackend), 'runQuery 须用 finally 清理当前 entry');
+      assert.ok(sdkBackend.includes('buildSdkOptions(opts, sessionId, mainWindow, entry)'), 'runQuery 须构建 SDK options');
+      assert.ok(ipcHandlers.includes("killProcess(sessionId, 'session_cleanup')"), 'CHAT_SEND 启动链同步失败须清理 entry');
+      assert.ok(ipcHandlers.includes('spawned'), 'CHAT_SEND 须记录 spawn 是否已占坑');
+      assert.ok(/if \(type === 'result'\)[\s\S]*?deleteEntry\(sessionId, entry\);[\s\S]*?emitExit\(0\);[\s\S]*?return;/.test(sdkBackend), 'result 终态须先释放 entry 再通知退出');
+      assert.ok(/if \(isCurrentEntry\(sessionId, entry\) && !gotResult\)[\s\S]*?deleteEntry\(sessionId, entry\);[\s\S]*?emitExit/.test(sdkBackend), '流末合成终态须先释放 entry 再通知退出');
+      assert.ok(sdkBackend.includes('let exitEmitted = false'), 'SDK query exit 回调须幂等');
+      assert.ok(/executeNextTask\([\s\S]*?spawnForTask\([\s\S]*?catch \(err\)[\s\S]*?task_failed/.test(taskQueue), '队列 spawn 同步失败须转为 task_failed');
+      assert.ok(/continueWithUserMessage\([\s\S]*?let spawned = false[\s\S]*?killProcess\(sessionId, 'queue'\)/.test(taskQueue), '队列续接 spawn/send 同步失败须清理 entry');
+      assert.ok(/continueWithUserMessage\([\s\S]*?promoteAttachments: false[\s\S]*?deleteMessage\(userMessage\.id\)[\s\S]*?markAttachmentsStatus\(prepared\.attachmentIds, 'draft'\)/.test(taskQueue), '队列续接失败须回滚消息并恢复附件草稿');
+      const continueBody = taskQueue.slice(taskQueue.indexOf('export async function continueWithUserMessage'), taskQueue.indexOf('export function skipCountdown'));
+      assert.ok(continueBody.indexOf("sendMessage(sessionId, prepared.prompt)") < continueBody.indexOf("state.status = 'continuing'"), '队列续接须在 query 接收后才切 continuing');
+      assert.ok(continueBody.indexOf("sendMessage(sessionId, prepared.prompt)") < continueBody.indexOf("emitQueueEvent(mainWindow, sessionId, 'countdown_cancelled')"), '队列续接须在 query 接收后才通知取消倒计时');
       assert.ok(builder.includes("parent_tool_use_id: null"), '构造的 user message 须 parent_tool_use_id=null');
       assert.ok(builder.includes('ATTACHMENT_DEFAULT_INSTRUCTION'), 'builder 须使用默认指令常量');
       assert.ok(builder.includes('MAX_ENCODED_IMAGE_REQUEST_BYTES') || builder.includes('30 * 1024 * 1024'), '须有图片编码请求预算');

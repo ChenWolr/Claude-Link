@@ -142,7 +142,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     const attachmentStorageKeys = attachmentRepo.listStorageKeysBySession(id);
     cleanupQueue(id);
     markSessionDeleted(id);
-    killProcess(id);
+    killProcess(id, 'session_cleanup');
     await new Promise((resolve) => setTimeout(resolve, 50));
     const result = sessionRepo.deleteSession(id);
     // DB 级联删除完成后清理物理文件；失败只记警告，由下次 orphan cleanup 重试。
@@ -199,6 +199,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // Task 4：校验 → prepare → 落库（附件保持 draft）→ spawn/send → 成功后升格 message。
     // spawn/send 同步失败则回滚消息关联，附件仍 draft，可原样重试（禁止再插第二条用户消息）。
     let locked = false;
+    let spawned = false;
     let createdMessageId: string | null = null;
     let attachmentIdsForRollback: string[] = [];
     try {
@@ -249,6 +250,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         resumeSessionId: session.cliSessionId,
         additionalDirectories: prepared.additionalDirectories,
       });
+      spawned = true;
       // sendMessage 同步路径只负责把 pending 交给 runQuery；真正 SDK 失败走事件流，不在此 IPC 回滚。
       sendMessage(sessionId, prepared.prompt);
 
@@ -285,6 +287,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
           }
         }
       }
+      if (spawned) {
+        // spawn 已登记 entry/pending 后，后续同步步骤失败也必须收口，
+        // 否则下一次发送会被误判为仍有活动回合。
+        killProcess(sessionId, 'session_cleanup');
+      }
       logger.error('Failed to send message', error);
       throw error;
     } finally {
@@ -293,7 +300,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.CHAT_ABORT, async (_event, sessionId: string) => {
-    killProcess(sessionId);
+    killProcess(sessionId, 'user', mainWindowRef);
   });
 
   ipcMain.handle(IPC_CHANNELS.INTERACTION_RESPOND, async (_event, response) => {
