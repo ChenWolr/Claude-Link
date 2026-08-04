@@ -9,6 +9,7 @@ import type { Session } from '../../shared/types/session';
 import type { Message } from '../../shared/types/session';
 import type { ThinkingLevel } from '../../shared/types/thinking';
 import type { StallInfo } from '../../shared/stall-watchdog';
+import type { ApiRetryTerminalDetailsV1, ApiRetryTerminalKind } from '../../shared/api-retry-state';
 import { resolveContextWindow } from '../../shared/model-context-windows';
 import { useConfigStore } from './config-store';
 import { useClaudePlanStore } from './claude-plan-store';
@@ -23,6 +24,22 @@ export interface BackgroundTask {
   usage?: { totalTokens?: number; toolUses?: number; durationMs?: number };
   lastToolName?: string;
   summary?: string;
+}
+
+export interface ApiRetryInfo {
+  retryCount: number;
+  retryLimit: number;
+  nextRetryAt?: number;
+  retryDelayMs?: number;
+  errorStatus?: number | null;
+  error?: string;
+  stopping: boolean;
+}
+
+interface ApiRetryTerminalFallback {
+  kind: ApiRetryTerminalKind;
+  summary: string;
+  details: ApiRetryTerminalDetailsV1;
 }
 
 export const useSessionStore = defineStore('session', {
@@ -80,9 +97,10 @@ export const useSessionStore = defineStore('session', {
     turnStartedAt: {} as Record<string, number>,
     // 卡死检测：per-session 卡死信息（主进程看门狗 stalled 事件下发）。getter activeStalledInfo 读当前会话。
     stalledInfo: {} as Record<string, StallInfo>,
-    // Bug4/Bug5：per-session API 重试瞬态（api_retry 事件下发，不再落库）。attempt 为本回合累计计数
-    //（每条 api_retry 自增，真实业务事件清零），由 ApiRetryBanner 显示「API 重试中（第 N 次）」。
-    apiRetryInfo: {} as Record<string, { attempt: number; max?: number; error?: string }>,
+    // per-session API 重试瞬态：直接投影主进程下发的权威 count/limit，不在 renderer 自行累计。
+    apiRetryInfo: {} as Record<string, ApiRetryInfo>,
+    // 主进程终态消息落库失败时的运行期兜底；新回合、删除会话或显式关闭时清理。
+    apiRetryTerminalFallback: {} as Record<string, ApiRetryTerminalFallback>,
     // Bug2：per-session 子 agent 实时思考快照（stream_event thinking_delta 按 parentToolUseId 路由）。
     // 外层 key=sessionId，内层 key=parentAgentId → 累积思考文本。子 Agent Tab 据此在思考中显示
     // ThinkingBlock；该子 agent 的 message 到达（完整思考落库）或回合结束时清除，避免与落库重复。
@@ -108,10 +126,14 @@ export const useSessionStore = defineStore('session', {
       if (!state.activeSession) return null;
       return state.stalledInfo[state.activeSession.id] ?? null;
     },
-    // Bug4/Bug5：当前活动会话的 API 重试瞬态（无则 null）。ApiRetryBanner 据此显隐。
-    activeApiRetryInfo(state): { attempt: number; max?: number; error?: string } | null {
+    // 当前活动会话的 API 重试瞬态（无则 null）。ApiRetryBanner 据此显隐。
+    activeApiRetryInfo(state): ApiRetryInfo | null {
       if (!state.activeSession) return null;
       return state.apiRetryInfo[state.activeSession.id] ?? null;
+    },
+    activeApiRetryTerminalFallback(state): ApiRetryTerminalFallback | null {
+      if (!state.activeSession) return null;
+      return state.apiRetryTerminalFallback[state.activeSession.id] ?? null;
     },
     // Bug2：当前活动会话的子 agent 实时思考映射（agentId → 文本）。TaskQueuePanel 据此显 ThinkingBlock。
     activeSubAgentThinking(state): Record<string, string> {
@@ -234,6 +256,7 @@ export const useSessionStore = defineStore('session', {
       delete this.sessionStreams[id];
       delete this.stalledInfo[id];
       delete this.apiRetryInfo[id];
+      delete this.apiRetryTerminalFallback[id];
       delete this.subAgentStreamingThinking[id];
       // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
       const planStore = useClaudePlanStore();
@@ -353,6 +376,8 @@ export const useSessionStore = defineStore('session', {
     // 根因修复：标记会话为执行中。sendMessage 时调用。
     // sending 是 getter（从 runningSessions 派生），无需手动设 this.sending。
     markRunning(sessionId: string) {
+      // 新回合开始时，上一回合仅运行期可见的终态兜底失效。
+      delete this.apiRetryTerminalFallback[sessionId];
       if (!this.runningSessions.includes(sessionId)) {
         this.runningSessions.push(sessionId);
         // 问题 2：记录本回合开始时间（仅新加入时置位，避免重复 send 覆盖）。
@@ -360,7 +385,7 @@ export const useSessionStore = defineStore('session', {
       }
     },
     // 根因修复：标记会话执行结束。result/error/aborted 时调用。
-    markStopped(sessionId: string) {
+    markStopped(sessionId: string, options: { preserveApiRetry?: boolean } = {}) {
       this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
       // 清理该会话的流式快照（执行结束，快照不再需要）
       delete this.sessionStreams[sessionId];
@@ -368,8 +393,7 @@ export const useSessionStore = defineStore('session', {
       delete this.turnStartedAt[sessionId];
       // 卡死横幅随回合结束消失。
       delete this.stalledInfo[sessionId];
-      // API 重试指示器随回合结束消失。
-      delete this.apiRetryInfo[sessionId];
+      if (!options.preserveApiRetry) delete this.apiRetryInfo[sessionId];
       // 子 agent 实时思考快照随回合结束清除。
       delete this.subAgentStreamingThinking[sessionId];
     },
@@ -391,17 +415,23 @@ export const useSessionStore = defineStore('session', {
     clearStalled(sessionId: string) {
       delete this.stalledInfo[sessionId];
     },
-    // Bug4/Bug5：记录一次 api_retry（attempt 本回合累计自增），供 ApiRetryBanner 原地递增显示「第 N 次」。
-    markApiRetrying(sessionId: string, info: { max?: number; error?: string }) {
-      const prev = this.apiRetryInfo[sessionId];
-      this.apiRetryInfo[sessionId] = {
-        attempt: prev ? prev.attempt + 1 : 1,
-        max: info.max,
-        error: info.error,
-      };
+    // 直接替换为主进程权威状态；不得在 renderer 自行 +1。
+    markApiRetrying(sessionId: string, info: Omit<ApiRetryInfo, 'stopping'>) {
+      this.apiRetryInfo[sessionId] = { ...info, stopping: false };
+    },
+    markApiRetryStopping(sessionId: string) {
+      const info = this.apiRetryInfo[sessionId];
+      if (info) info.stopping = true;
     },
     clearApiRetrying(sessionId: string) {
       delete this.apiRetryInfo[sessionId];
+    },
+    setApiRetryTerminalFallback(sessionId: string, fallback: ApiRetryTerminalFallback) {
+      this.apiRetryTerminalFallback[sessionId] = fallback;
+      delete this.apiRetryInfo[sessionId];
+    },
+    clearApiRetryTerminalFallback(sessionId: string) {
+      delete this.apiRetryTerminalFallback[sessionId];
     },
     // Bug2：累加某子 agent 的实时思考（thinking_delta 按 parentToolUseId 路由进来）。
     appendSubAgentThinking(sessionId: string, agentId: string, text: string) {

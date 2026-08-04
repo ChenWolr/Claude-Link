@@ -12,7 +12,7 @@ import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useChatDraftStore } from '../stores/chat-draft-store';
 import type { BackgroundTask } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
-import type { CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
+import type { CliApiRetryTerminalFallbackEvent, CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { Message } from '../../shared/types/session';
@@ -34,6 +34,51 @@ export function applyStalledEvent(store: ReturnType<typeof useSessionStore>, ses
     zone: event.zone,
     stallCount: event.stallCount,
   });
+}
+
+export function applyApiRetryEvent(
+  store: ReturnType<typeof useSessionStore>,
+  sessionId: string,
+  event: CliSystemInfoEvent,
+): void {
+  if (event.subtype !== 'api_retry' || event.retryCount === undefined || event.retryLimit === undefined) return;
+  store.markApiRetrying(sessionId, {
+    retryCount: event.retryCount,
+    retryLimit: event.retryLimit,
+    nextRetryAt: event.nextRetryAt,
+    retryDelayMs: event.retryDelayMs,
+    errorStatus: event.errorStatus,
+    error: event.error,
+  });
+}
+
+export function applyPersistedMessageEvent(
+  store: ReturnType<typeof useSessionStore>,
+  sessionId: string,
+  message: Message,
+): void {
+  const isApiRetryTerminal =
+    message.processKind === 'system:api_retry_recovered' ||
+    message.processKind === 'system:api_retry_stopped' ||
+    message.processKind === 'system:api_retry_exhausted';
+  if (isApiRetryTerminal) store.clearApiRetrying(sessionId);
+  if (store.activeSession?.id === sessionId) store.addMessage(message);
+  if (message.processKind === 'system:api_retry_exhausted' || message.processKind === 'system:api_retry_stopped') {
+    store.markStopped(sessionId);
+  }
+}
+
+export function applyApiRetryTerminalFallbackEvent(
+  store: ReturnType<typeof useSessionStore>,
+  sessionId: string,
+  event: CliApiRetryTerminalFallbackEvent,
+): void {
+  store.setApiRetryTerminalFallback(sessionId, {
+    kind: event.kind,
+    summary: event.summary,
+    details: event.details,
+  });
+  if (event.kind === 'exhausted' || event.kind === 'user_stopped') store.markStopped(sessionId);
 }
 
 export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, event: CliEvent): void {
@@ -218,13 +263,7 @@ function createChat() {
     return false;
   }
   function clearStalledForSession(sessionId: string, event: CliEvent): void {
-    if (!isStallRecoveryEvent(event)) return;
-    store.clearStalled(sessionId);
-    // Bug4/Bug5：真实业务事件（流式/消息/工具进度/非 init system）= API 已恢复，清掉重试指示器；
-    // api_retry 自身是要计数的对象，不清自己。
-    if (!(event.type === 'system' && event.subtype === 'api_retry')) {
-      store.clearApiRetrying(sessionId);
-    }
+    if (isStallRecoveryEvent(event)) store.clearStalled(sessionId);
   }
 
   // 问题 1：不再丢弃非当前会话的事件。后台执行的会话事件需要处理：
@@ -232,6 +271,27 @@ function createChat() {
   // - result/error/aborted: markStopped + 清快照（如果是当前会话还走正常结束流程）
   // - message/system: 主进程已落库，切回时 getSessionMessages 重载；渲染层只处理当前会话
   function handleEvent(payload: ChatEventPayload): void {
+    if (payload.event.type === 'persisted_message' || payload.event.type === 'api_retry_terminal') {
+      const isCurrent = !!store.activeSession && payload.sessionId === store.activeSession.id;
+      const isExhausted = payload.event.type === 'persisted_message'
+        ? payload.event.message.processKind === 'system:api_retry_exhausted'
+        : payload.event.kind === 'exhausted';
+      if (isCurrent && isExhausted) {
+        finalizeAssistantStream();
+        store.clearStream();
+        store.clearThinking();
+        store.clearToolStream();
+        store.setThinkingTokens(null);
+        clearAbortTimer(payload.sessionId);
+        resetTurnCache();
+      }
+      if (payload.event.type === 'persisted_message') {
+        applyPersistedMessageEvent(store, payload.sessionId, payload.event.message);
+      } else {
+        applyApiRetryTerminalFallbackEvent(store, payload.sessionId, payload.event);
+      }
+      return;
+    }
     const isCurrent = !!store.activeSession && payload.sessionId === store.activeSession.id;
     clearStalledForSession(payload.sessionId, payload.event);
     if (!isCurrent) {
@@ -268,8 +328,7 @@ function createChat() {
         // Bug4/Bug5：api_retry 不再落库，后台会话也要计数，切回时 ApiRetryBanner 能显示。
         // 其余 system 子类型主进程已落库，切回时重载，这里跳过。
         if (event.subtype === 'api_retry') {
-          const r = event as CliSystemInfoEvent;
-          store.markApiRetrying(sid, { max: r.max_retries, error: r.error });
+          applyApiRetryEvent(store, sid, event);
         }
         break;
       }
@@ -397,10 +456,7 @@ function createChat() {
       case 'system': {
         // Bug4/Bug5：api_retry 走瞬态重试指示器（不落库、不进聊天流），用本回合累计计数原地递增。
         if (event.subtype === 'api_retry') {
-          const r = event as CliSystemInfoEvent;
-          if (store.activeSession) {
-            store.markApiRetrying(store.activeSession.id, { max: r.max_retries, error: r.error });
-          }
+          if (store.activeSession) applyApiRetryEvent(store, store.activeSession.id, event);
           break;
         }
         // 批次 B：thinking_tokens——思考 token 实时估算，瞬态写 store（ContextButton hover 展示），不落库。
@@ -440,6 +496,11 @@ function createChat() {
       case 'claude_plan': {
         // Claude 计划快照更新（TodoWrite / Task 工具）。只读——不写入 messages 表。
         planStore.applyPlanState(event.sessionId, event.state);
+        break;
+      }
+      case 'persisted_message':
+      case 'api_retry_terminal': {
+        // handleEvent 已在前后台分流前统一消费；显式保留以明确 CliEvent 联合的处理边界。
         break;
       }
     }
@@ -640,8 +701,8 @@ function createChat() {
     // api_retry：SDK 不带 text，需自己拼「重试中（第 N/M 次）」动态文案。
     let text = info.text;
     if (!text && info.subtype === 'api_retry') {
-      const attempt = info.attempt ?? '?';
-      const max = info.max_retries ?? '?';
+      const attempt = info.sdkAttempt ?? '?';
+      const max = info.sdkMaxRetries ?? '?';
       const err = info.error ? `（${info.error}）` : '';
       text = `API 重试中（第 ${attempt}/${max} 次）${err}`;
     }
@@ -764,7 +825,7 @@ function createChat() {
   //   含费用/耗时元数据，应让它到达而非丢弃；收到 result/error/aborted 即 clearAbortTimer（finally 提前满足）。
   // finally：ensureAbortFinally 到点强制 markStopped——无论 SDK 中断信号是否真生效、
   //   结束事件是否回来（Windows 硬杀会丢 result）、用户是否切会话，都必然复位为已停止。
-  async function abort(): Promise<void> {
+  async function abort(options: { preserveApiRetry?: boolean } = {}): Promise<void> {
     if (!store.activeSession) return;
     const sid = store.activeSession.id;
     clearAbortTimer(sid); // 清旧兜底（防重复 / 上一回合残留）
@@ -777,11 +838,13 @@ function createChat() {
     store.clearToolStream();
     store.setThinkingTokens(null);
     resetTurnCache();
-    store.markStopped(sid);
+    store.markStopped(sid, { preserveApiRetry: options.preserveApiRetry });
     try {
       await window.claudeLink.abortChat(sid);
     } catch {
-      // ignore：finally 不依赖 abortChat 成功
+      // 状态卡停止依赖主进程终态事件清掉保留态；IPC 失败时不会有该事件，
+      // 必须本地收口，避免永久停在 disabled 的「正在停止…」。
+      if (options.preserveApiRetry) store.clearApiRetrying(sid);
     }
     // 兜底保留作为最终保险（乐观路径已 markStopped，这里 no-op）
     ensureAbortFinally(sid);

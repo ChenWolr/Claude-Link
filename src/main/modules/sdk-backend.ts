@@ -26,6 +26,7 @@ import { resolveContextWindowForSession, lookupUserContextWindow } from '../../s
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
+import * as messageRepo from '../database/repositories/message-repo';
 import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
 import { convertToolProgress, convertTaskEvent } from '../../shared/progress-events';
 import {
@@ -85,6 +86,16 @@ import {
 } from './sdk-permissions';
 import { isSubAgentToolUse } from '../../shared/process-kind';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
+import {
+  apiRetrySummary,
+  createApiRetryState,
+  recordApiRetry,
+  recordApiRetryRecovery,
+  recordApiRetryUserStop,
+  toApiRetryTerminalDetails,
+  type ApiRetryState,
+  type ApiRetryTerminalKind,
+} from '../../shared/api-retry-state';
 
 // 显式标注上述工具被复用（避免 lint 误报未使用）；persistMessageParts/normalizeToolResultContent
 // 在 convertAssistantMessage 后落库路径会用到。
@@ -197,9 +208,6 @@ interface StallTracker {
   stallNotified: boolean;
   stallCount: number;
   hardAbortFired: boolean;
-  // 连续 api_retry 次数：每次 api_retry 自增，仅模型级活动（message/stream_event，见 touchActivity）清零。
-  // 达 MAX_API_RETRIES 即快速硬中断，专治空/畸形响应重试风暴。
-  consecutiveApiRetries: number;
 }
 const stallTrackers = new Map<string, StallTracker>();
 // 待决 tool_use id 集合（判定 zone：有无工具在跑）。add on tool_use，delete on tool_result。
@@ -209,7 +217,7 @@ const pendingSubAgentUseIds = new Map<string, Set<string>>();
 function envInt(name: string, dflt: number): number {
   const v = process.env[name];
   const n = v ? Number(v) : NaN;
-  return Number.isFinite(n) && n > 0 ? n : dflt;
+  return Number.isInteger(n) && n > 0 ? n : dflt;
 }
 // 阈值可用环境变量覆盖（CLAUDE_LINK_STALL_MODEL_MS / _TOOL_MS / _HARD_MS / _TOOL_HARD_MS），默认见 stall-watchdog.ts。
 const STALL_THRESHOLDS: StallThresholds = {
@@ -219,9 +227,10 @@ const STALL_THRESHOLDS: StallThresholds = {
   // TOOL 区绝对硬中断上限（兜子 Agent 死锁/死连接；合法长工具持续发 tool_progress 不会误触）。
   toolHardAbortMs: envInt('CLAUDE_LINK_STALL_TOOL_HARD_MS', DEFAULT_STALL_THRESHOLDS.toolHardAbortMs),
 };
-// 连续 api_retry 达此次数（期间无任何真实业务进展）即快速硬中断——专治「空/畸形响应」重试风暴，
-// 不必死等 toolHardAbortMs（默认 900s）。SDK 正常限流重试几次后会成功并清零本计数，不会误触。
+// 单个 SDK Query 最多允许的上游 API 重试次数。计数由 apiRetryStates 独占，
+// StallTracker 不重复维护第二套计数，避免第十次终态出现竞态或双写。
 const MAX_API_RETRIES = envInt('CLAUDE_LINK_MAX_API_RETRIES', 10);
+const apiRetryStates = new Map<string, ApiRetryState>();
 const STALL_TICK_MS = 5_000;
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 let watchdogWindow: BrowserWindow | null = null;
@@ -237,7 +246,6 @@ function resetStallTracker(sessionId: string): void {
     stallNotified: false,
     stallCount: 0,
     hardAbortFired: false,
-    consecutiveApiRetries: 0,
   });
   pendingToolUseIds.delete(sessionId);
   pendingSubAgentUseIds.delete(sessionId);
@@ -256,14 +264,6 @@ function touchActivity(sessionId: string, kind: string): void {
   if (!t) return;
   t.lastActivityAt = Date.now();
   t.lastKind = kind;
-  // Bug3：consecutiveApiRetries 只在「模型级」活动（message/stream_event）清零。api_retry 是模型 API
-  // 失败信号，唯有模型恢复并真正产出（消息/流式）才代表重试风暴已过；tool_progress/system 是工具执行
-  // 与编排活动，与模型健康无关。旧逻辑一概清零 → subagent 跑工具时 api_retry 风暴被反复清零，永远爬不到
-  // MAX_API_RETRIES，第二轮 API 死亡时既不硬中断也不再弹横幅，陷入无限等待。改为仅模型级清零后，
-  // 风暴能正常累加至阈值触发硬中断（出口）。
-  if (kind === 'message' || kind === 'stream_event') {
-    t.consecutiveApiRetries = 0;
-  }
   if (t.stalledSince !== null) {
     t.stalledSince = null;
     t.stallNotified = false;
@@ -286,12 +286,9 @@ function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
   }
   const t = stallTrackers.get(sessionId);
   if (!t) return;
-  // api_retry：SDK 正在重试一次失败的 API 调用（如空/畸形响应）——是失败信号而非业务进展。
-  // 只累加连续重试计数，不刷新 lastActivityAt（否则重试风暴永远判不出卡死）。
-  // 事件本身经 forwardTransient 转发（不落库、不进聊天流），渲染层作瞬态「API 重试中」指示器，
-  // 用本回合累计计数（而非 SDK 单次 attempt 字段，第三方端点常恒为 1）原地递增显示「第 N 次」。
+  // api_retry 是失败信号而非业务进展：权威次数由 apiRetryStates 维护；
+  // 这里仍须按 system 子类型提前返回，避免重试风暴刷新 stall 时间。
   if (event.type === 'system' && (event as CliSystemInfoEvent).subtype === 'api_retry') {
-    t.consecutiveApiRetries += 1;
     return;
   }
   let set = pendingToolUseIds.get(sessionId);
@@ -369,18 +366,6 @@ function watchdogTick(): void {
   const now = Date.now();
   for (const [sessionId, t] of stallTrackers) {
     if (!isSessionActive(sessionId)) continue;
-    // 连续 api_retry 快速中断：API 反复空/畸形响应（重试风暴）时不必死等 toolHardAbortMs，
-    // 直接判定代理/模型服务故障硬杀，让用户在 ~1-2 分钟内得到反馈而非无限等待。
-    if (!t.hardAbortFired && t.consecutiveApiRetries >= MAX_API_RETRIES) {
-      t.hardAbortFired = true;
-      forwardEvent(sessionId, mw, {
-        type: 'error',
-        message: `API 连续重试 ${t.consecutiveApiRetries} 次仍失败（疑似空/畸形响应或代理网关异常），已自动中断。可点击「重试」重新发送。`,
-      });
-      logger.error(`[stall] api-retry abort session ${sessionId}: ${t.consecutiveApiRetries} consecutive retries`);
-      killProcess(sessionId, 'watchdog');
-      continue;
-    }
     const verdict = classifyStall(t.lastActivityAt, now, t.pendingToolUse, STALL_THRESHOLDS);
     if (!verdict.stalled) {
       // 活跃：清标记，下次再卡可再次通知。
@@ -420,7 +405,7 @@ function watchdogTick(): void {
           : `已 ${secs} 秒无响应，判定模型服务卡死，已自动中断。可点击「重试」重新发送。`;
       forwardEvent(sessionId, mw, { type: 'error', message: reason });
       logger.error(`[stall] hard auto-abort session ${sessionId}: ${secs}s ${verdict.zone}-zone silence`);
-      killProcess(sessionId, 'watchdog');
+      killProcess(sessionId, 'watchdog', mw);
     }
   }
 }
@@ -435,11 +420,14 @@ export function markSessionDeleted(sessionId: string): void {
     abortEntry(entry);
     removeEntryIfCurrent(sessionId, entry);
   }
-  // 清理上下文/权限缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
+  // 清理上下文/权限/CLI resume 缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
   sessionContextStats.delete(sessionId);
   sessionPermissionUpdates.delete(sessionId);
+  sessionCliIds.delete(sessionId);
+  contextUsageDiagnosed.delete(sessionId);
   cleanupToolUseCache(sessionId);
   cleanupSessionStall(sessionId);
+  apiRetryStates.delete(sessionId);
   sessionThinkingTokenThrottle.delete(sessionId);
 }
 function markSessionActive(sessionId: string): void {
@@ -532,6 +520,7 @@ interface SdkQueryHandle {
 function createEntry(): SessionEntry {
   const exitCbs: Array<(code: number | null) => void> = [];
   const errorCbs: Array<(err: Error) => void> = [];
+  let exitEmitted = false;
   const handle: SdkQueryHandle = {
     killed: false,
     on(event, cb) {
@@ -549,6 +538,8 @@ function createEntry(): SessionEntry {
     abortController: null,
     requestedAlias: null,
     emitExit: (code) => {
+      if (exitEmitted) return;
+      exitEmitted = true;
       handle.killed = true;
       if (entry.state !== 'aborting') entry.state = 'finished';
       for (const cb of exitCbs) {
@@ -605,6 +596,7 @@ function deleteEntry(sessionId: string, entry: SessionEntry): void {
   if (isCurrent) {
     entries.delete(sessionId);
     cleanupSessionStall(sessionId);
+    apiRetryStates.delete(sessionId);
     // F15: 回合结束清理 toolUse 缓存，防止中断/崩溃后泄漏
     cleanupToolUseCache(sessionId);
   }
@@ -897,6 +889,71 @@ function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: C
     mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
+  }
+}
+
+const RETRY_PROCESS_KIND: Record<ApiRetryTerminalKind, string> = {
+  recovered: 'system:api_retry_recovered',
+  user_stopped: 'system:api_retry_stopped',
+  exhausted: 'system:api_retry_exhausted',
+};
+
+function persistApiRetryTerminal(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  state: ApiRetryState,
+): void {
+  if (!isSessionActive(sessionId) || state.phase !== 'terminal' || !state.terminalKind) return;
+  const details = toApiRetryTerminalDetails(state);
+  if (!details) return;
+  const summary = apiRetrySummary(state.terminalKind, state.retryCount);
+  let message: ReturnType<typeof messageRepo.createMessage>;
+  try {
+    message = messageRepo.createMessage({
+      sessionId,
+      role: 'system',
+      content: summary,
+      eventType: 'system',
+      rawEvent: JSON.stringify(details),
+      processKind: RETRY_PROCESS_KIND[state.terminalKind],
+      title: '上游服务重试',
+      isError: state.terminalKind === 'exhausted',
+    });
+  } catch (err) {
+    logger.error(`Failed to persist API retry terminal [${sessionId}]`, err);
+    try {
+      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+        sessionId,
+        event: {
+          type: 'api_retry_terminal',
+          kind: state.terminalKind,
+          summary,
+          details,
+          persisted: false,
+        },
+      });
+    } catch {
+      // webContents 可能已销毁。
+    }
+    return;
+  }
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: { type: 'persisted_message', message },
+    });
+  } catch {
+    // DB 已成功写入；窗口关闭时不伪报落库失败，也不发送 fallback。
+  }
+}
+
+function finishApiRetryRecovery(sessionId: string, mainWindow: BrowserWindow): void {
+  const current = apiRetryStates.get(sessionId);
+  if (!current) return;
+  const recovered = recordApiRetryRecovery(current, Date.now());
+  apiRetryStates.set(sessionId, recovered.state);
+  if (recovered.becameRecovered && recovered.terminalState) {
+    persistApiRetryTerminal(sessionId, mainWindow, recovered.terminalState);
   }
 }
 
@@ -1315,7 +1372,8 @@ async function runQuery(
   entry: SessionEntry,
 ): Promise<void> {
   const { emitExit, emitError } = entry;
-  entry.query = null;
+  try {
+    entry.query = null;
 
   // spawn 前若已有旧 query（同 session），先中断并移除——与 process-manager 的 killProcess 一致。
   const prev = entries.get(sessionId);
@@ -1339,8 +1397,9 @@ async function runQuery(
   // 是否真收到 result；未收到则在流末合成一条，恢复 process-manager 时代「0 退出无 result
   // 合成 aborted」的兜底（见 cli.ts CliAbortedEvent 注释）。
   let gotResult = false;
-  // 每个新 query 重置卡死追踪（per-turn stallCount / hardAbortFired）。
+  // 每个新 Query 重置本回合卡死追踪与 API retry 状态。
   resetStallTracker(sessionId);
+  apiRetryStates.set(sessionId, createApiRetryState(MAX_API_RETRIES));
   ensureWatchdog(mainWindow);
 
   const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow, entry);
@@ -1380,6 +1439,7 @@ async function runQuery(
       resumedOnce = false;
       try {
         query = await startSdkQuery(prompt, sdkOptions);
+        apiRetryStates.set(sessionId, createApiRetryState(MAX_API_RETRIES));
       } catch (retryErr) {
         forwardEvent(sessionId, mainWindow, {
           type: 'error',
@@ -1490,18 +1550,37 @@ async function runQuery(
           forwardEvent(sessionId, mainWindow, sysInfo);
           continue;
         }
-        // api_retry：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。
-        // Bug4/Bug5：改走 forwardTransient——不落库、不进聊天流（不再是「系统消息」噪音）。
-        // 渲染层把它当瞬态「API 重试中」指示器，并用本回合累计计数原地递增（而非下方的 attempt 字段——
-        // 第三方端点常恒报 1）。consecutiveApiRetries 仍由上面 touchActivityFromEvent（经 forwardTransient）
-        // 累加，供看门狗硬中断判定，不受此处通道切换影响。
+        // api_retry：主进程按当前 Query 独立计数。SDK attempt/max_retries 只保留诊断，
+        // 不参与应用级阈值；第 1～9 次瞬态下发，第 10 次先写唯一终态再立即中断。
         if (infoSubtype === 'api_retry') {
+          const current = apiRetryStates.get(sessionId) ?? createApiRetryState(MAX_API_RETRIES);
+          const retryDelayMs = typeof sdkMsg.retry_delay_ms === 'number' ? sdkMsg.retry_delay_ms : undefined;
+          const errorStatus = typeof sdkMsg.error_status === 'number' ? sdkMsg.error_status : null;
+          const next = recordApiRetry(current, {
+            now: Date.now(),
+            retryDelayMs,
+            error: typeof sdkMsg.error === 'string' ? sdkMsg.error : undefined,
+            errorStatus,
+          });
+          apiRetryStates.set(sessionId, next.state);
+
+          if (next.becameExhausted) {
+            persistApiRetryTerminal(sessionId, mainWindow, next.state);
+            killProcess(sessionId, 'api_retry_exhausted', mainWindow);
+            continue;
+          }
+
           const sysInfo: CliSystemInfoEvent = {
             type: 'system',
             subtype: 'api_retry',
-            attempt: typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined,
-            max_retries: typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined,
-            error: typeof sdkMsg.error === 'string' ? sdkMsg.error : undefined,
+            retryCount: next.state.retryCount,
+            retryLimit: next.state.retryLimit,
+            nextRetryAt: next.state.nextRetryAt ?? undefined,
+            retryDelayMs,
+            errorStatus,
+            error: next.state.lastError ?? undefined,
+            sdkAttempt: typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined,
+            sdkMaxRetries: typeof sdkMsg.max_retries === 'number' ? sdkMsg.max_retries : undefined,
             level: 'warn',
           };
           forwardTransient(sessionId, mainWindow, sysInfo);
@@ -1577,6 +1656,8 @@ async function runQuery(
         continue;
       }
       if (type === 'assistant') {
+        // assistant 是模型级活动；即使 SDK 事件内容异常、无法转换，也必须先收口 retry recovery。
+        finishApiRetryRecovery(sessionId, mainWindow);
         const cliEvent = convertAssistantMessage(sdkMsg);
         if (cliEvent) {
           forwardEvent(sessionId, mainWindow, cliEvent);
@@ -1606,6 +1687,7 @@ async function runQuery(
         continue;
       }
       if (type === 'stream_event') {
+        finishApiRetryRecovery(sessionId, mainWindow);
         forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg));
         continue;
       }
@@ -1622,9 +1704,11 @@ async function runQuery(
       if (type === 'result') {
         gotResult = true;
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
-        // F15: result 是回合终态，清理本回合的 toolUse 缓存和 orphan patches
-        cleanupToolUseCache(sessionId);
-        continue;
+        // result 已明确结束当前回合：先释放 active entry，再通知队列退出。
+        // renderer 收到 result 后可立即发送下一回合，不再撞上尚未走到函数 finally 的旧 entry。
+        deleteEntry(sessionId, entry);
+        emitExit(0);
+        return;
       }
       // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。
     }
@@ -1635,8 +1719,11 @@ async function runQuery(
     // 仅对当前 entry 合成——已被替换的旧 entry 由新 entry 负责发终态，这里跳过避免重复。
     if (isCurrentEntry(sessionId, entry) && !gotResult) {
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
+      deleteEntry(sessionId, entry);
+      emitExit(0);
+      return;
     }
-    emitExit(isCurrentEntry(sessionId, entry) ? 0 : null);
+    emitExit(null);
     break;
   } catch (err) {
     if (!isCurrentEntry(sessionId, entry)) {
@@ -1652,6 +1739,7 @@ async function runQuery(
         query = await startSdkQuery(prompt, sdkOptions);
         entry.query = query;
         gotResult = false; // 新 query = 新回合，重置终态追踪
+        apiRetryStates.set(sessionId, createApiRetryState(MAX_API_RETRIES));
         continue;
       } catch (retryErr) {
         const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
@@ -1672,7 +1760,20 @@ async function runQuery(
     break;
   }
   }
-  deleteEntry(sessionId, entry);
+  } catch (err) {
+    // buildSdkOptions / 其它启动阶段异常不在内部 startSdkQuery catch 覆盖范围内；
+    // 必须发终态并交给 finally 清理 entry，否则 fire-and-forget runQuery 会永久占坑。
+    if (isCurrentEntry(sessionId, entry)) {
+      const message = err instanceof Error ? err.message : String(err);
+      forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${message}` });
+      emitError(err instanceof Error ? err : new Error(message));
+      emitExit(1);
+    } else {
+      emitExit(null);
+    }
+  } finally {
+    deleteEntry(sessionId, entry);
+  }
 }
 
 // ── 同形公共接口（与 process-manager 签名一致）──────────────────────
@@ -1735,7 +1836,28 @@ export function sendMessage(sessionId: string, message: SdkPrompt): void {
   throw new Error(`会话 ${sessionId} 没有待发送的 SDK 入口，请先 spawnForChat。`);
 }
 
-export function killProcess(sessionId: string, reason: 'user' | 'watchdog' = 'user'): void {
+export type KillReason =
+  | 'user'
+  | 'api_retry_exhausted'
+  | 'watchdog'
+  | 'queue'
+  | 'session_cleanup';
+
+export function killProcess(
+  sessionId: string,
+  reason: KillReason,
+  mainWindow?: BrowserWindow,
+): void {
+  if (reason === 'user' && mainWindow) {
+    const current = apiRetryStates.get(sessionId);
+    if (current) {
+      const stopped = recordApiRetryUserStop(current, Date.now());
+      apiRetryStates.set(sessionId, stopped.state);
+      if (stopped.becameStopped) {
+        persistApiRetryTerminal(sessionId, mainWindow, stopped.state);
+      }
+    }
+  }
   cancelInteractionsForSession(sessionId);
   pendingFirstPrompt.delete(sessionId);
   const entry = entries.get(sessionId);
@@ -1758,11 +1880,14 @@ export function killProcess(sessionId: string, reason: 'user' | 'watchdog' = 'us
     //（瞬时不可捕获），真能打死。两条都发，软的先给优雅退出机会。
     logger.info(`Interrupted SDK query for session ${sessionId} (reason=${reason}, abort signaled)`);
   }
+  // killProcess 会先移除当前 entry，迟到的 deleteEntry 因 identity guard 不再清理；
+  // 因此在终态已由调用方写入后同步收口，避免被中断 Query 的状态滞留。
+  apiRetryStates.delete(sessionId);
 }
 
 export function killAllProcesses(): void {
   for (const [sessionId] of entries) {
-    killProcess(sessionId);
+    killProcess(sessionId, 'session_cleanup');
   }
 }
 

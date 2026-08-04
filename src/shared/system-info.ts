@@ -28,6 +28,7 @@ export function isDisplayableSystemInfo(subtype: string | undefined, text: strin
 // Bug4/Bug5：system:api_retry 也纳入冗余集。api_retry 现已改走 forwardTransient（不落库、不进聊天流），
 // 由专门的瞬态「API 重试中」指示器承载（见 ApiRetryBanner）。此处仅作兜底：修复前老库可能残留
 // system:api_retry 行，切回旧会话重载时不让它再冒成「ℹ️ 系统」噪音。
+// 三个 system:api_retry_* 终态是用户选择保留的审计记录，不属于冗余集合。
 // 纯函数，由 selftest 覆盖契约。
 export function isRedundantSystemProcessKind(processKind: string | null | undefined): boolean {
   return (

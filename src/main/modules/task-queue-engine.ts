@@ -18,6 +18,7 @@ import { getConfig } from './config-manager';
 import * as taskRepo from '../database/repositories/task-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
+import * as attachmentRepo from '../database/repositories/attachment-repo';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../utils/logger';
 
@@ -118,7 +119,7 @@ export function interruptTask(taskId: string, sessionId: string, mainWindow: Bro
   // 使当前执行实例失效：retry 可能很快把同一 task 再设为 currentTaskId，
   // 旧 child 的迟到 exit 不能据此覆盖新一轮 pending/running 状态。
   queueGenerations.set(sessionId, getQueueGeneration(sessionId) + 1);
-  killProcess(sessionId);
+  killProcess(sessionId, 'queue');
   if (isRunning) {
     taskRepo.updateTaskStatus(taskId, 'cancelled');
   }
@@ -249,16 +250,28 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
 
   if (!isQueueGenerationActive(sessionId, generation)) return;
   const executionGeneration = generation;
-  const child = spawnForTask(task.id, sessionId, prepared.prompt, mainWindow, {
-    model: session?.model ?? config.defaultModel,
-    modelOverride: session?.modelOverride ?? null,
-    workingDir: session?.workingDir ?? config.workingDirectory,
-    maxTurns: config.maxTurns,
-    permissionMode: session?.permissionMode ?? config.permissionMode,
-    thinkingLevel: session?.thinkingLevel ?? null,
-    resumeSessionId: resolveCliSessionId(sessionId),
-    additionalDirectories: prepared.additionalDirectories,
-  });
+  let child: ReturnType<typeof spawnForTask>;
+  try {
+    child = spawnForTask(task.id, sessionId, prepared.prompt, mainWindow, {
+      model: session?.model ?? config.defaultModel,
+      modelOverride: session?.modelOverride ?? null,
+      workingDir: session?.workingDir ?? config.workingDirectory,
+      maxTurns: config.maxTurns,
+      permissionMode: session?.permissionMode ?? config.permissionMode,
+      thinkingLevel: session?.thinkingLevel ?? null,
+      resumeSessionId: resolveCliSessionId(sessionId),
+      additionalDirectories: prepared.additionalDirectories,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(`executeNextTask spawn failed (task ${task.id}): ${message}`);
+    taskRepo.updateTaskError(task.id, message);
+    emitQueueEvent(mainWindow, sessionId, 'task_failed', task.id);
+    state.lastCompletedTaskId = task.id;
+    state.currentTaskId = null;
+    advanceAfterTask(sessionId, mainWindow, config);
+    return;
+  }
 
   child.on('exit', (code) => {
     if (state.currentTaskId !== task.id || !isQueueGenerationActive(sessionId, executionGeneration)) return;
@@ -345,13 +358,9 @@ export async function continueWithUserMessage(
     timers.delete(`${sessionId}__main`);
   }
 
-  state.status = 'continuing';
-  emitQueueEvent(mainWindow, sessionId, 'countdown_cancelled');
   const continuingTaskId = state.currentTaskId ?? state.lastCompletedTaskId ?? undefined;
-  emitQueueEvent(mainWindow, sessionId, 'task_continuing', continuingTaskId);
-
   const config = getConfig();
-  // 创建稳定 user message（attachments 升格为 message）；经 queue event 交 renderer upsert。
+  // query 真正接收前保持附件 draft；同步启动失败时可删除消息并原样重试。
   const userMessage = messageRepo.createMessageWithAttachments({
     id: payload.clientMessageId,
     sessionId,
@@ -359,23 +368,42 @@ export async function continueWithUserMessage(
     content: prepared.displayText,
     eventType: 'message',
     attachments: prepared.attachmentIds,
-    promoteAttachments: true,
+    promoteAttachments: false,
   });
+
+  let spawned = false;
+  let child: ReturnType<typeof spawnForChat>;
+  try {
+    child = spawnForChat(sessionId, mainWindow, {
+      model: session.model ?? config.defaultModel,
+      modelOverride: session.modelOverride ?? null,
+      workingDir: session.workingDir ?? config.workingDirectory,
+      maxTurns: config.maxTurns,
+      permissionMode: session.permissionMode ?? config.permissionMode,
+      thinkingLevel: session.thinkingLevel,
+      resumeSessionId: resolveCliSessionId(sessionId),
+      additionalDirectories: prepared.additionalDirectories,
+    });
+    spawned = true;
+
+    // SDK prompt（含图片时为可重复迭代 AsyncIterable，支持 stale-resume 重试）；sendMessage 触发 runQuery。
+    sendMessage(sessionId, prepared.prompt);
+  } catch (err) {
+    if (spawned) killProcess(sessionId, 'queue');
+    messageRepo.deleteMessage(userMessage.id);
+    if (prepared.attachmentIds.length > 0) {
+      attachmentRepo.markAttachmentsStatus(prepared.attachmentIds, 'draft');
+    }
+    throw err;
+  }
+
+  if (prepared.attachmentIds.length > 0) {
+    attachmentRepo.markAttachmentsStatus(prepared.attachmentIds, 'message');
+  }
+  state.status = 'continuing';
+  emitQueueEvent(mainWindow, sessionId, 'countdown_cancelled');
+  emitQueueEvent(mainWindow, sessionId, 'task_continuing', continuingTaskId);
   emitQueueEvent(mainWindow, sessionId, 'user_message_created', continuingTaskId, { message: userMessage });
-
-  const child = spawnForChat(sessionId, mainWindow, {
-    model: session.model ?? config.defaultModel,
-    modelOverride: session.modelOverride ?? null,
-    workingDir: session.workingDir ?? config.workingDirectory,
-    maxTurns: config.maxTurns,
-    permissionMode: session.permissionMode ?? config.permissionMode,
-    thinkingLevel: session.thinkingLevel,
-    resumeSessionId: resolveCliSessionId(sessionId),
-    additionalDirectories: prepared.additionalDirectories,
-  });
-
-  // SDK prompt（含图片时为可重复迭代 AsyncIterable，支持 stale-resume 重试）；sendMessage 触发 runQuery。
-  sendMessage(sessionId, prepared.prompt);
 
   // 保持 'continuing' 直到续写进程退出；退出后推进下一任务或回 idle。
   child.on('exit', () => {

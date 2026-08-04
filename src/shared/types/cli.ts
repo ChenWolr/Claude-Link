@@ -1,4 +1,6 @@
+import type { ApiRetryTerminalDetailsV1, ApiRetryTerminalKind } from '../api-retry-state';
 import type { StallInfo } from '../stall-watchdog';
+import type { Message } from './session';
 
 export interface CliInitEvent {
   type: 'init';
@@ -231,11 +233,17 @@ export interface CliSystemInfoEvent {
   subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting' | 'compact_result' | 'compact_error' | 'requesting' | 'thinking_tokens';
   text?: string;
   level?: 'info' | 'warn';
-  // api_retry 专属：API 重试进度（限流/过载/鉴权失败等，每次重试前发出）。
+  // api_retry 专属：应用级权威重试状态。
   // error 取值：authentication_failed / rate_limit / overloaded / invalid_request / server_error 等。
-  attempt?: number;
-  max_retries?: number;
+  retryCount?: number;
+  retryLimit?: number;
+  nextRetryAt?: number;
+  retryDelayMs?: number;
   error?: string;
+  errorStatus?: number | null;
+  // SDK 原始字段仅供诊断，不参与应用级状态计算。
+  sdkAttempt?: number;
+  sdkMaxRetries?: number;
   // M5：压缩结果（status.compact_result）。'success' | 'failed'。
   compactResult?: 'success' | 'failed';
   // M5：压缩失败原因（status.compact_error）。
@@ -254,6 +262,19 @@ export interface CliPermissionEvent {
   message?: string;
 }
 
+export interface CliPersistedMessageEvent {
+  type: 'persisted_message';
+  message: Message;
+}
+
+export interface CliApiRetryTerminalFallbackEvent {
+  type: 'api_retry_terminal';
+  kind: ApiRetryTerminalKind;
+  summary: string;
+  details: ApiRetryTerminalDetailsV1;
+  persisted: false;
+}
+
 export type CliEvent =
   | CliInitEvent
   | CliSystemInitEvent
@@ -267,7 +288,9 @@ export type CliEvent =
   | CliStalledEvent
   | CliToolProgressEvent
   | CliTaskEvent
-  | ClaudePlanCliEvent;
+  | ClaudePlanCliEvent
+  | CliPersistedMessageEvent
+  | CliApiRetryTerminalFallbackEvent;
 
 export interface CliDetectionResult {
   installed: boolean;

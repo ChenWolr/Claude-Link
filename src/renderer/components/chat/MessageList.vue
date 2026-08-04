@@ -170,7 +170,7 @@ function handleCopyClick(event: MouseEvent): void {
         />
         <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" :exportMode="exportMode" />
       </template>
-      <div v-if="sending || streamingContent || streamingThinking || streamingTool || sessionStore.activeStalledInfo" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
+      <div v-if="sending || streamingContent || streamingThinking || streamingTool || sessionStore.activeStalledInfo || sessionStore.activeApiRetryInfo || sessionStore.activeApiRetryTerminalFallback" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
         <!-- 问题 1+2：实时计时器——整个 sending 期间常驻；动画点在整个工作阶段跳动。 -->
         <div v-if="sending" class="turn-timer">
           <span class="turn-timer__time">⏱ {{ formatElapsed(elapsedMs) }}</span>

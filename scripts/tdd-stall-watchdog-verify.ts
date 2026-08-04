@@ -4,10 +4,25 @@
 import { strict as assert } from 'node:assert';
 import { setActivePinia, createPinia } from 'pinia';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
+import {
+  apiRetryErrorLabel,
+  apiRetrySummary,
+  createApiRetryState,
+  recordApiRetry,
+  recordApiRetryRecovery,
+  recordApiRetryUserStop,
+  toApiRetryTerminalDetails,
+  type ApiRetryState,
+} from '../src/shared/api-retry-state';
 import { isSubAgentToolUse } from '../src/shared/process-kind';
-import type { CliMessageContentPart, CliStalledEvent } from '../src/shared/types/cli';
+import type { CliApiRetryTerminalFallbackEvent, CliMessageContentPart, CliStalledEvent, CliSystemInfoEvent } from '../src/shared/types/cli';
 import { useSessionStore } from '../src/renderer/stores/session-store';
-import { applyStalledEvent } from '../src/renderer/composables/use-chat';
+import {
+  applyApiRetryEvent,
+  applyApiRetryTerminalFallbackEvent,
+  applyPersistedMessageEvent,
+  applyStalledEvent,
+} from '../src/renderer/composables/use-chat';
 import type { Message, Session } from '../src/shared/types/session';
 
 setActivePinia(createPinia());
@@ -39,6 +54,7 @@ function session(id: string): Session {
     updatedAt: '2026-06-30T00:00:00.000Z',
     lastContextTokens: null,
     lastContextUpdatedAt: null,
+    lastContextWindow: null,
   };
 }
 
@@ -108,6 +124,244 @@ check('终态/合成事件不算业务活动', () => {
   assert.equal(isBusinessStallActivityKind('result'), false);
 });
 
+console.log('\n=== API retry：权威状态机 ===');
+
+function retryState(limit = 10): ApiRetryState {
+  return createApiRetryState(limit);
+}
+
+check('初始状态为空闲且没有重试或终态', () => {
+  assert.deepEqual(retryState(), {
+    phase: 'idle',
+    retryCount: 0,
+    retryLimit: 10,
+    startedAt: null,
+    lastRetryAt: null,
+    nextRetryAt: null,
+    accumulatedDelayMs: 0,
+    lastError: null,
+    lastErrorStatus: null,
+    terminalKind: null,
+    endedAt: null,
+  });
+});
+
+check('第 1～9 次保持 retrying，第 10 次只首次耗尽', () => {
+  let state = retryState();
+  for (let i = 1; i <= 9; i += 1) {
+    const result = recordApiRetry(state, {
+      now: i * 1_000,
+      retryDelayMs: 2_000,
+      error: 'server_error',
+      errorStatus: 529,
+    });
+    state = result.state;
+    assert.equal(state.phase, 'retrying');
+    assert.equal(state.retryCount, i);
+    assert.equal(result.becameExhausted, false);
+  }
+  const tenth = recordApiRetry(state, { now: 10_000, retryDelayMs: 2_000 });
+  assert.equal(tenth.state.phase, 'terminal');
+  assert.equal(tenth.state.terminalKind, 'exhausted');
+  assert.equal(tenth.state.retryCount, 10);
+  assert.equal(tenth.becameExhausted, true);
+  const late = recordApiRetry(tenth.state, { now: 11_000, retryDelayMs: 2_000 });
+  assert.equal(late.becameExhausted, false);
+  assert.strictEqual(late.state, tenth.state);
+});
+
+check('真实模型活动恢复一次，普通 idle 不产生恢复', () => {
+  const idle = retryState();
+  const idleRecovery = recordApiRetryRecovery(idle, 500);
+  assert.equal(idleRecovery.becameRecovered, false);
+  assert.strictEqual(idleRecovery.state, idle);
+  assert.equal(idleRecovery.terminalState, null);
+
+  const retrying = recordApiRetry(idle, {
+    now: 1_000,
+    retryDelayMs: 3_000,
+    error: 'overloaded',
+    errorStatus: 529,
+  }).state;
+  const recovered = recordApiRetryRecovery(retrying, 2_500);
+  assert.equal(recovered.becameRecovered, true);
+  assert.notStrictEqual(recovered.terminalState, recovered.state);
+  assert.equal(recovered.terminalState?.phase, 'terminal');
+  assert.equal(recovered.terminalState?.terminalKind, 'recovered');
+  assert.equal(recovered.terminalState?.retryCount, 1);
+  assert.equal(recovered.terminalState?.endedAt, 2_500);
+  assert.equal(recovered.state.phase, 'idle');
+  assert.equal(recovered.state.retryCount, 0);
+  assert.equal(recovered.state.terminalKind, null);
+
+  const nextEpisode = recordApiRetry(recovered.state, { now: 3_000, retryDelayMs: 1_000 });
+  assert.equal(nextEpisode.state.phase, 'retrying');
+  assert.equal(nextEpisode.state.retryCount, 1);
+  assert.equal(nextEpisode.becameExhausted, false);
+});
+
+check('用户停止只在 retrying 生效', () => {
+  const idle = retryState();
+  const idleStop = recordApiRetryUserStop(idle, 500);
+  assert.equal(idleStop.becameStopped, false);
+  assert.strictEqual(idleStop.state, idle);
+
+  const retrying = recordApiRetry(idle, {
+    now: 1_000,
+    retryDelayMs: undefined,
+    error: undefined,
+    errorStatus: null,
+  }).state;
+  const stopped = recordApiRetryUserStop(retrying, 1_500);
+  assert.equal(stopped.becameStopped, true);
+  assert.equal(stopped.state.phase, 'terminal');
+  assert.equal(stopped.state.terminalKind, 'user_stopped');
+  assert.equal(stopped.state.endedAt, 1_500);
+});
+
+check('停止/耗尽终态幂等，恢复后允许同一 Query 开启新 retry episode', () => {
+  const retrying = recordApiRetry(retryState(), { now: 1_000, retryDelayMs: 2_000 }).state;
+  const recoveredTerminal = recordApiRetryRecovery(retrying, 1_500).terminalState;
+  assert.ok(recoveredTerminal);
+  const recoveredNext = recordApiRetry(createApiRetryState(retrying.retryLimit), {
+    now: 2_000,
+    retryDelayMs: 1_000,
+  });
+  assert.equal(recoveredNext.state.phase, 'retrying');
+  assert.equal(recoveredNext.state.retryCount, 1);
+  assert.equal(recoveredNext.becameExhausted, false);
+  const terminals = [
+    recordApiRetryUserStop(retrying, 1_500).state,
+    recordApiRetry(retryState(1), { now: 1_000, retryDelayMs: 2_000 }).state,
+  ];
+
+  for (const terminal of terminals) {
+    const lateRetry = recordApiRetry(terminal, { now: 2_000, retryDelayMs: 4_000 });
+    const lateRecovery = recordApiRetryRecovery(terminal, 2_500);
+    const lateStop = recordApiRetryUserStop(terminal, 3_000);
+    assert.strictEqual(lateRetry.state, terminal);
+    assert.equal(lateRetry.becameExhausted, false);
+    assert.strictEqual(lateRecovery.state, terminal);
+    assert.equal(lateRecovery.terminalState, null);
+    assert.equal(lateRecovery.becameRecovered, false);
+    assert.strictEqual(lateStop.state, terminal);
+    assert.equal(lateStop.becameStopped, false);
+  }
+});
+
+check('竞态：耗尽后迟到 recovery 不覆盖 exhausted 终态', () => {
+  const exhausted = recordApiRetry(retryState(1), {
+    now: 1_000,
+    retryDelayMs: 2_000,
+    error: 'overloaded',
+    errorStatus: 529,
+  }).state;
+  const lateRecovery = recordApiRetryRecovery(exhausted, 1_500);
+  assert.strictEqual(lateRecovery.state, exhausted);
+  assert.equal(lateRecovery.state.terminalKind, 'exhausted');
+  assert.equal(lateRecovery.state.endedAt, 1_000);
+  assert.equal(lateRecovery.terminalState, null);
+  assert.equal(lateRecovery.becameRecovered, false);
+});
+
+check('竞态：用户停止后迟到 retry 不增加次数', () => {
+  const retrying = recordApiRetry(retryState(), {
+    now: 1_000,
+    retryDelayMs: 2_000,
+    error: 'rate_limit',
+    errorStatus: 429,
+  }).state;
+  const stopped = recordApiRetryUserStop(retrying, 1_500).state;
+  const lateRetry = recordApiRetry(stopped, {
+    now: 2_000,
+    retryDelayMs: 4_000,
+    error: 'overloaded',
+    errorStatus: 529,
+  });
+  assert.strictEqual(lateRetry.state, stopped);
+  assert.equal(lateRetry.state.terminalKind, 'user_stopped');
+  assert.equal(lateRetry.state.retryCount, 1);
+  assert.equal(lateRetry.becameExhausted, false);
+});
+
+check('缺失字段不阻塞计数，负延迟不累计，正延迟持续累计', () => {
+  const first = recordApiRetry(retryState(), {
+    now: 1_000,
+    retryDelayMs: -1,
+    error: undefined,
+    errorStatus: undefined,
+  }).state;
+  assert.equal(first.retryCount, 1);
+  assert.equal(first.accumulatedDelayMs, 0);
+  assert.equal(first.nextRetryAt, null);
+  assert.equal(first.lastError, null);
+  assert.equal(first.lastErrorStatus, null);
+
+  const second = recordApiRetry(first, {
+    now: 2_000,
+    retryDelayMs: 4_000,
+    error: 'rate_limit',
+    errorStatus: 429,
+  }).state;
+  const third = recordApiRetry(second, {
+    now: 7_000,
+    retryDelayMs: 1_500,
+  }).state;
+  assert.equal(third.accumulatedDelayMs, 5_500);
+  assert.equal(third.nextRetryAt, 8_500);
+  assert.equal(third.lastError, 'rate_limit');
+  assert.equal(third.lastErrorStatus, 429);
+});
+
+check('errorStatus 的 null 清除旧状态，undefined 保留旧状态', () => {
+  const withStatus = recordApiRetry(retryState(), {
+    now: 1_000,
+    errorStatus: 529,
+  }).state;
+  const clearedStatus = recordApiRetry(withStatus, {
+    now: 2_000,
+    errorStatus: null,
+  }).state;
+  assert.equal(clearedStatus.lastErrorStatus, null);
+
+  const preservedStatus = recordApiRetry(withStatus, {
+    now: 2_000,
+    errorStatus: undefined,
+  }).state;
+  assert.equal(preservedStatus.lastErrorStatus, 529);
+});
+
+check('终态详情、摘要和错误标签保持稳定', () => {
+  const retrying = recordApiRetry(retryState(), {
+    now: 1_000,
+    retryDelayMs: 2_000,
+    error: 'rate_limit',
+    errorStatus: 429,
+  }).state;
+  assert.equal(toApiRetryTerminalDetails(retrying), null);
+  const recovered = recordApiRetryRecovery(retrying, 4_000).terminalState;
+  assert.ok(recovered);
+  assert.deepEqual(toApiRetryTerminalDetails(recovered), {
+    version: 1,
+    kind: 'recovered',
+    retryCount: 1,
+    retryLimit: 10,
+    startedAt: 1_000,
+    endedAt: 4_000,
+    elapsedMs: 3_000,
+    accumulatedDelayMs: 2_000,
+    lastError: 'rate_limit',
+    lastErrorStatus: 429,
+    currentReplyOnly: true,
+  });
+  assert.equal(apiRetrySummary('recovered', 1), '上游服务已恢复，共自动重试 1 次，正在继续生成回复。');
+  assert.equal(apiRetrySummary('user_stopped', 2), '上游服务连接异常，用户在第 2 次重试后停止了本次回复。');
+  assert.equal(apiRetrySummary('exhausted', 10), '上游服务连续重试 10 次仍不可用，本次回复已停止。');
+  assert.equal(apiRetryErrorLabel('rate_limit'), '请求受限');
+  assert.equal(apiRetryErrorLabel('unknown'), '连接异常');
+  assert.equal(apiRetryErrorLabel(undefined), '连接异常');
+});
+
 console.log('\n=== 子 Agent tool_use 识别 ===');
 check('识别 Agent/Task/Workflow/Skill', () => {
   const names = ['Agent', 'Task', 'Workflow', 'Skill'];
@@ -152,6 +406,175 @@ check('后台会话 stalled 可先记录，切回后 getter 显示', () => {
   assert.equal(store.activeStalledInfo, null);
   store.activeSession = s2;
   assert.equal(store.activeStalledInfo?.pendingAgentId, 'toolu_bg');
+});
+
+console.log('\n=== session-store / renderer：API retry 权威投影 ===');
+
+function apiRetryEvent(overrides: Partial<CliSystemInfoEvent> = {}): CliSystemInfoEvent {
+  return {
+    type: 'system',
+    subtype: 'api_retry',
+    retryCount: 1,
+    retryLimit: 10,
+    nextRetryAt: 5_000,
+    retryDelayMs: 2_000,
+    errorStatus: 529,
+    error: 'overloaded',
+    ...overrides,
+  };
+}
+
+check('applyApiRetryEvent 直接采用权威 count，7 后收到 3 显示 3', () => {
+  const store = useSessionStore();
+  store.$reset();
+  store.activeSession = session('s1');
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 7 }));
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 3, retryDelayMs: 1_000 }));
+  assert.equal(store.activeApiRetryInfo?.retryCount, 3);
+  assert.equal(store.activeApiRetryInfo?.retryLimit, 10);
+  assert.equal(store.activeApiRetryInfo?.retryDelayMs, 1_000);
+});
+
+check('后台 session 的 retry 状态与前台隔离，切回后 getter 显示', () => {
+  const store = useSessionStore();
+  store.$reset();
+  const s1 = session('s1');
+  const s2 = session('s2');
+  store.activeSession = s1;
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 2 }));
+  applyApiRetryEvent(store, 's2', apiRetryEvent({ retryCount: 6, error: 'rate_limit' }));
+  assert.equal(store.activeApiRetryInfo?.retryCount, 2);
+  assert.equal(store.apiRetryInfo['s2']?.retryCount, 6);
+  store.activeSession = s2;
+  assert.equal(store.activeApiRetryInfo?.retryCount, 6);
+  assert.equal(store.activeApiRetryInfo?.error, 'rate_limit');
+});
+
+check('persisted_message exhausted 按 id 幂等插入当前会话、清 retry 并停止回合', () => {
+  const store = useSessionStore();
+  store.$reset();
+  store.activeSession = session('s1');
+  store.markRunning('s1');
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 10 }));
+  const persisted = {
+    ...message('retry-terminal'),
+    sessionId: 's1',
+    role: 'system' as const,
+    processKind: 'system:api_retry_exhausted',
+  };
+  applyPersistedMessageEvent(store, 's1', persisted);
+  applyPersistedMessageEvent(store, 's1', { ...persisted, content: 'updated terminal' });
+  assert.equal(store.messages.filter((item) => item.id === persisted.id).length, 1);
+  assert.equal(store.messages.find((item) => item.id === persisted.id)?.content, 'updated terminal');
+  assert.equal(store.apiRetryInfo['s1'], undefined);
+  assert.equal(store.runningSessions.includes('s1'), false);
+});
+
+check('persisted_message recovered 与 user_stopped 都清 retry，只有 stopped 结束当前回合', () => {
+  for (const processKind of ['system:api_retry_recovered', 'system:api_retry_stopped'] as const) {
+    const store = useSessionStore();
+    store.$reset();
+    store.activeSession = session('s1');
+    store.markRunning('s1');
+    applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 3 }));
+    applyPersistedMessageEvent(store, 's1', {
+      ...message(`terminal-${processKind}`),
+      sessionId: 's1',
+      role: 'system' as const,
+      processKind,
+    });
+    assert.equal(store.apiRetryInfo['s1'], undefined);
+    assert.equal(store.runningSessions.includes('s1'), processKind === 'system:api_retry_recovered');
+  }
+});
+
+check('普通 persisted_message 不清除进行中的 API retry', () => {
+  const store = useSessionStore();
+  store.$reset();
+  store.activeSession = session('s1');
+  store.markRunning('s1');
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 3 }));
+  applyPersistedMessageEvent(store, 's1', {
+    ...message('ordinary-system'),
+    sessionId: 's1',
+    role: 'system' as const,
+    processKind: 'system:informational',
+  });
+  assert.equal(store.apiRetryInfo['s1']?.retryCount, 3);
+  assert.equal(store.runningSessions.includes('s1'), true);
+});
+
+function apiRetryTerminalFallbackEvent(
+  kind: CliApiRetryTerminalFallbackEvent['kind'],
+): CliApiRetryTerminalFallbackEvent {
+  return {
+    type: 'api_retry_terminal',
+    kind,
+    summary: `terminal:${kind}`,
+    details: {
+      version: 1,
+      kind,
+      retryCount: kind === 'exhausted' ? 10 : 2,
+      retryLimit: 10,
+      startedAt: 1_000,
+      endedAt: 4_000,
+      elapsedMs: 3_000,
+      accumulatedDelayMs: 2_000,
+      lastError: 'overloaded',
+      lastErrorStatus: 529,
+      currentReplyOnly: true,
+    },
+    persisted: false,
+  };
+}
+
+check('api_retry_terminal fallback exhausted 保留兜底并停止回合', () => {
+  const store = useSessionStore();
+  store.$reset();
+  store.activeSession = session('s1');
+  store.markRunning('s1');
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 10 }));
+  applyApiRetryTerminalFallbackEvent(store, 's1', apiRetryTerminalFallbackEvent('exhausted'));
+  assert.equal(store.apiRetryTerminalFallback['s1']?.kind, 'exhausted');
+  assert.equal(store.apiRetryInfo['s1'], undefined);
+  assert.equal(store.runningSessions.includes('s1'), false);
+});
+
+check('api_retry_terminal fallback recovered 保留兜底但不停止回合', () => {
+  const store = useSessionStore();
+  store.$reset();
+  store.activeSession = session('s1');
+  store.markRunning('s1');
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 2 }));
+  applyApiRetryTerminalFallbackEvent(store, 's1', apiRetryTerminalFallbackEvent('recovered'));
+  assert.equal(store.apiRetryTerminalFallback['s1']?.kind, 'recovered');
+  assert.equal(store.apiRetryInfo['s1'], undefined);
+  assert.equal(store.runningSessions.includes('s1'), true);
+});
+
+check('api_retry_terminal fallback user_stopped 保留兜底并停止当前回合', () => {
+  const store = useSessionStore();
+  store.$reset();
+  store.activeSession = session('s1');
+  store.markRunning('s1');
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 2 }));
+  applyApiRetryTerminalFallbackEvent(store, 's1', apiRetryTerminalFallbackEvent('user_stopped'));
+  assert.equal(store.apiRetryTerminalFallback['s1']?.kind, 'user_stopped');
+  assert.equal(store.apiRetryInfo['s1'], undefined);
+  assert.equal(store.runningSessions.includes('s1'), false);
+});
+
+check('停止 IPC 失败时可显式清除保留的 retry 状态', () => {
+  const store = useSessionStore();
+  store.$reset();
+  store.activeSession = session('s1');
+  store.markRunning('s1');
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 2 }));
+  store.markApiRetryStopping('s1');
+  store.markStopped('s1', { preserveApiRetry: true });
+  assert.equal(store.apiRetryInfo['s1']?.stopping, true);
+  store.clearApiRetrying('s1');
+  assert.equal(store.apiRetryInfo['s1'], undefined);
 });
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

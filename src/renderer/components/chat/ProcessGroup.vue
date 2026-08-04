@@ -5,10 +5,12 @@
 // 少于 MIN_FOLD 条过程不折叠（直接展开行式）。对齐 openhanako ProcessFoldBlock。
 import { ref, computed, useId } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
+import type { Message } from '../../../shared/types/session';
 import { isFoldable, type FoldStats } from '../../utils/group-messages';
 import { useSessionStore } from '../../stores/session-store';
 import ThinkingBlock from './ThinkingBlock.vue';
 import ToolCallBlock from './ToolCallBlock.vue';
+import ApiRetryRecord from './ApiRetryRecord.vue';
 
 const store = useSessionStore();
 // 折叠面板唯一 id，供 aria-controls 指向（多实例不能硬编码）。
@@ -39,6 +41,7 @@ const manualOpen = ref<null | boolean>(null);
 // 被 active 钉死无法收起。manualClosed 让用户显式折叠后即便 active 也保持收起。
 const manualClosed = ref(false);
 const open = computed(() => {
+  if (props.exportMode) return true;
   if (manualClosed.value) return false;
   return manualOpen.value ?? (props.active || !foldable.value);
 });
@@ -57,9 +60,15 @@ const summary = computed(() => {
   return parts.join(' · ');
 });
 
+const API_RETRY_TERMINAL_KINDS = new Set([
+  'system:api_retry_recovered',
+  'system:api_retry_stopped',
+  'system:api_retry_exhausted',
+]);
+
 interface GroupItem {
   key: string;
-  type: 'thinking' | 'tool' | 'system';
+  type: 'thinking' | 'tool' | 'system' | 'api_retry';
   msg?: RenderableMessage;
   use?: RenderableMessage | null;
   result?: RenderableMessage | null;
@@ -80,6 +89,8 @@ const items = computed<GroupItem[]>(() => {
       const result = m.toolUseId ? resultByToolUseId.get(m.toolUseId) ?? null : null;
       if (result) consumed.add(result.id);
       out.push({ key: m.id, type: 'tool', use: m, result });
+    } else if (m.eventType === 'system' && API_RETRY_TERMINAL_KINDS.has(m.processKind ?? '')) {
+      out.push({ key: m.id, type: 'api_retry', msg: m });
     } else if (m.eventType === 'system') {
       out.push({ key: m.id, type: 'system', msg: m });
     }
@@ -117,6 +128,10 @@ const items = computed<GroupItem[]>(() => {
           :content="item.msg!.content"
           :sealed="!stats.running"
           :exportMode="exportMode"
+        />
+        <ApiRetryRecord
+          v-else-if="item.type === 'api_retry'"
+          :message="item.msg as Message"
         />
         <div v-else-if="item.type === 'system'" class="process-fold__system">
           <span>{{ item.msg!.content }}</span>
