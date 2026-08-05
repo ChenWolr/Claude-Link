@@ -939,11 +939,16 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     sb.includes('retryLimit: sdkMaxRetries') &&
     sb.includes('retryCount: next.state.retryCount') &&
     sb.includes('retryLimit: sdkMaxRetries ?? next.state.retryLimit'));
-  check('Claude Code 重试上限双通道注入 SDK env 和内联 settings.env',
-    sb.includes('queryEnv.CLAUDE_CODE_MAX_RETRIES = String(MAX_API_RETRIES)') &&
-    sb.includes('settingsEnv.CLAUDE_CODE_MAX_RETRIES = String(MAX_API_RETRIES)'));
-  check('CLAUDE_LINK_MAX_API_RETRIES 仅接受正整数',
-    /function envInt\([\s\S]*?Number\.isInteger\(n\)[\s\S]*?n > 0/.test(sb));
+  check('Claude Link 不覆盖 Claude Code 的 API 重试上限，仍转发权威 retry 事件',
+    !sb.includes('CLAUDE_CODE_MAX_RETRIES') &&
+    sb.includes("infoSubtype === 'api_retry'") &&
+    sb.includes('retryAttempt: sdkAttempt') &&
+    sb.includes('retryLimit: sdkMaxRetries') &&
+    sb.includes('forwardTransient(sessionId, mainWindow, sysInfo)'));
+  check('SDK max_retries 缺失时仅用本地回退值维持状态机数值完整',
+    sb.includes('const API_RETRY_LIMIT_FALLBACK = 10') &&
+    !sb.includes('CLAUDE_LINK_MAX_API_RETRIES') &&
+    sb.includes('createApiRetryState(API_RETRY_LIMIT_FALLBACK)'));
   check('assistant 事件按真实结果分别收口 exhausted 或 recovery',
     /if \(type === 'assistant'\)[\s\S]*?typeof sdkMsg\.error === 'string'[\s\S]*?finishApiRetryExhausted\(sessionId, mainWindow, entry\.queryInstance\)[\s\S]*?finishApiRetryRecovery\(sessionId, mainWindow, entry\.queryInstance\)[\s\S]*?const cliEvent = convertAssistantMessage\(sdkMsg\)/.test(sb));
 
@@ -1061,7 +1066,7 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     userStopBranch.includes('recordApiRetryUserStop'));
   check('sdk-backend touchActivityFromEvent 识别 api_retry 子类型', sb.includes("subtype === 'api_retry'"));
   check('sdk-backend 读 CLAUDE_LINK_STALL_TOOL_HARD_MS', sb.includes('CLAUDE_LINK_STALL_TOOL_HARD_MS'));
-  check('sdk-backend 读 CLAUDE_LINK_MAX_API_RETRIES', sb.includes('CLAUDE_LINK_MAX_API_RETRIES'));
+  check('sdk-backend 不读 CLAUDE_LINK_MAX_API_RETRIES', !sb.includes('CLAUDE_LINK_MAX_API_RETRIES'));
   check('sdk-backend toolHardAbortMs 接入 STALL_THRESHOLDS', sb.includes('toolHardAbortMs'));
   check('sdk-backend aborting entry 不算 active', sb.includes('state: \'pending\' | \'running\' | \'aborting\' | \'finished\'') && sb.includes('isEntryActive') && sb.includes("entry.state !== 'aborting'"));
   check('sdk-backend 使用子 Agent tool_use 判断', sb.includes('isSubAgentToolUse(part)'));

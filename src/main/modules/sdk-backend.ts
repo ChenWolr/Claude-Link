@@ -232,9 +232,9 @@ const STALL_THRESHOLDS: StallThresholds = {
   // TOOL 区绝对硬中断上限（兜子 Agent 死锁/死连接；合法长工具持续发 tool_progress 不会误触）。
   toolHardAbortMs: envInt('CLAUDE_LINK_STALL_TOOL_HARD_MS', DEFAULT_STALL_THRESHOLDS.toolHardAbortMs),
 };
-// 单个 SDK Query 最多允许的上游 API 重试次数。计数由 apiRetryStates 独占，
-// StallTracker 不重复维护第二套计数，避免第十次终态出现竞态或双写。
-const MAX_API_RETRIES = envInt('CLAUDE_LINK_MAX_API_RETRIES', 10);
+// SDK 未携带 max_retries 时，供本地状态机与 UI 保持数值完整性的展示回退值。
+// 不写入 Claude Code 环境变量，因此不影响其实际重试策略。
+const API_RETRY_LIMIT_FALLBACK = 10;
 const apiRetryStates = new Map<string, ApiRetryState>();
 const STALL_TICK_MS = 5_000;
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -709,7 +709,6 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
   const thinkingConfig = resolveThinkingConfig(effectiveLevel);
   const queryEnv = buildSpawnEnv();
-  queryEnv.CLAUDE_CODE_MAX_RETRIES = String(MAX_API_RETRIES);
   const options: Record<string, unknown> = {
     // env：apiKey/baseUrl/模型映射全靠它（复用 buildSpawnEnv，第三方端点跑通的关键）。
     env: queryEnv,
@@ -761,7 +760,6 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // buildClaudeSettingsProjection 返回类型宽化为 Record<string,unknown>，但 env 运行时实为 Record<string,string>；
   // 取别名供下方按会话别名补注入 MAX_CONTEXT_TOKENS（投影不含该项，需在此按会话补）。
   const settingsEnv = settings.env as Record<string, string>;
-  settingsEnv.CLAUDE_CODE_MAX_RETRIES = String(MAX_API_RETRIES);
 
   // 按当前模型别名动态注入 CC 的真实窗口 override（CLAUDE_CODE_MAX_CONTEXT_TOKENS）。
   // CC 对第三方/未知模型名（如 glm-5.2，非 claude- 开头）默认回退 200k → 提前压缩丢上下文。
@@ -1421,7 +1419,7 @@ async function runQuery(
   let gotResult = false;
   // 每个新 Query 重置本回合卡死追踪与 API retry 状态。
   resetStallTracker(sessionId);
-  apiRetryStates.set(sessionId, createApiRetryState(MAX_API_RETRIES));
+  apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
   ensureWatchdog(mainWindow);
 
   const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow, entry);
@@ -1461,7 +1459,7 @@ async function runQuery(
       resumedOnce = false;
       try {
         query = await startSdkQuery(prompt, sdkOptions);
-        apiRetryStates.set(sessionId, createApiRetryState(MAX_API_RETRIES));
+        apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
       } catch (retryErr) {
         forwardEvent(sessionId, mainWindow, {
           type: 'error',
@@ -1575,7 +1573,7 @@ async function runQuery(
         // api_retry 仅表示 Claude Code 已安排随后的一次真实重试；SDK 的 attempt/max_retries
         // 是当前请求链的权威序号。通知阶段绝不能提前耗尽或中断 Query。
         if (infoSubtype === 'api_retry') {
-          const current = apiRetryStates.get(sessionId) ?? createApiRetryState(MAX_API_RETRIES);
+          const current = apiRetryStates.get(sessionId) ?? createApiRetryState(API_RETRY_LIMIT_FALLBACK);
           const retryDelayMs = typeof sdkMsg.retry_delay_ms === 'number' ? sdkMsg.retry_delay_ms : undefined;
           const errorStatus = typeof sdkMsg.error_status === 'number' ? sdkMsg.error_status : null;
           const sdkAttempt = typeof sdkMsg.attempt === 'number' ? sdkMsg.attempt : undefined;
@@ -1590,7 +1588,7 @@ async function runQuery(
           });
           apiRetryStates.set(sessionId, next.state);
           logger.warn(
-            `[retry-trace] retry_scheduled session=${sessionId} query=${entry.queryInstance} attempt=${sdkAttempt ?? 'unknown'}/${sdkMaxRetries ?? MAX_API_RETRIES} delayMs=${retryDelayMs ?? 'unknown'} status=${errorStatus ?? 'network'}`,
+            `[retry-trace] retry_scheduled session=${sessionId} query=${entry.queryInstance} attempt=${sdkAttempt ?? 'unknown'}/${sdkMaxRetries ?? API_RETRY_LIMIT_FALLBACK} delayMs=${retryDelayMs ?? 'unknown'} status=${errorStatus ?? 'network'}`,
           );
 
           const sysInfo: CliSystemInfoEvent = {
@@ -1769,7 +1767,7 @@ async function runQuery(
         query = await startSdkQuery(prompt, sdkOptions);
         entry.query = query;
         gotResult = false; // 新 query = 新回合，重置终态追踪
-        apiRetryStates.set(sessionId, createApiRetryState(MAX_API_RETRIES));
+        apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
         continue;
       } catch (retryErr) {
         const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);

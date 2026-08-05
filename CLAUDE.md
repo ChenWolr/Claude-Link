@@ -62,8 +62,8 @@ src/shared/      主进程与渲染进程共享的类型与纯逻辑（settings-
 - **`markSessionDeleted` 是单一收口**：清 `activeSessions`、entries、stall 追踪、toolUse 缓存、权限/上下文缓存、pending interactions —— 新增任何 per-session Map 都必须在此登记。
 - **`forwardEvent` 每次落库前查 `isSessionActive`**：避免会话已删后 FK 违例回滚阻塞主循环（会让所有输入卡死）。
 - 中断：`killProcess` 先取消 interactions → 加入 `interruptedQueries` WeakSet → `abortEntry`（state 置 `aborting` + `abortController.abort()`，Windows 下走 `TerminateProcess` 硬杀）→ `query.interrupt()`（stdin 控制帧，软中断）。`AbortController` 是硬杀，`interrupt()` 是软杀。
-- `api_retry` 使用 Claude Code 原始 `attempt/max_retries` 作为当前请求链的权威序号；通知表示“等待后将发起第 N 次真实重试”，不能在通知阶段提前判耗尽。固定上限 10 同时注入 `CLAUDE_CODE_MAX_RETRIES` 并驱动主进程状态机；正常模型活动进入恢复终态，最后一次真实重试的 assistant/result 错误才进入耗尽终态。
-- 第 1～10 次重试通知经 `forwardTransient` 只更新一张状态卡、不落库；恢复、用户停止、耗尽由主进程写一条 `messages` system 记录并以 `persisted_message` 推前端，renderer 只按 ID upsert，不二次持久化。
+- `api_retry` 使用 Claude Code 原始 `attempt/max_retries` 作为当前请求链的权威序号；claude-link 不注入 `CLAUDE_CODE_MAX_RETRIES`，实际重试节奏和上限由本机 Claude Code 默认策略决定。通知表示“等待后将发起第 N 次真实重试”，不能在通知阶段提前判耗尽。SDK 未回传 `max_retries` 时，本地状态机仅使用展示回退值；正常模型活动进入恢复终态，最后一次真实重试的 assistant/result 错误才进入耗尽终态。
+- 各次重试通知经 `forwardTransient` 只更新一张状态卡、不落库；恢复、用户停止、耗尽由主进程写一条 `messages` system 记录并以 `persisted_message` 推前端，renderer 只按 ID upsert，不二次持久化。
 - `keep_alive` 心跳**不刷新 stall 计时**（代理常对死连接发心跳）。`forwardSubagentText:true` + stream event 透传 `parent_tool_use_id` 是子 Agent Tab 能看到实时思考的前提，关掉即坏。
 
 ### 统一交互弹窗系统
