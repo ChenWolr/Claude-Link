@@ -14,6 +14,7 @@ import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
+import { isErrorCliResult } from '../../shared/session-completion';
 import { resolveContextWindowForSession } from '../../shared/model-context-windows';
 
 export interface SpawnOptions {
@@ -146,10 +147,9 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
       const r = event as CliResultEvent;
       const text = r.result?.trim();
       if (!text) break;
-      const subtype = r.subtype;
-      const isUserInterrupt = subtype === 'error_during_execution';
-      const isErrResult = !!r.is_error && !isUserInterrupt && subtype !== 'success' && subtype !== undefined;
-      if (isErrResult) break;
+      // F1：与 renderer 共用 isErrorCliResult 权威判定——错误 result（含缺失 subtype）不落库，
+      // 避免把错误文案当成正常回答污染历史；error_during_execution（用户中断）跳过。
+      if (isErrorCliResult(r)) break;
       if (currentTurnHasMainFlowText(sessionId)) break;
       messageRepo.createMessage({
         sessionId, role: 'assistant', content: r.result, eventType: 'message', processKind: null,

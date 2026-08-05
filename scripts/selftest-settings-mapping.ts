@@ -354,10 +354,13 @@ console.log('\n=== 26) Review 修复：中断标记按 query 实例、abort 跨�
   const cp = readRel('src/renderer/pages/ChatPage.vue');
   const us = readRel('src/renderer/composables/use-stream.ts');
   const tq = readRel('src/main/modules/task-queue-engine.ts');
+  const sc = readRel('src/shared/session-completion.ts');
   // SDK 路径：中断标记按 query 实例（interruptedQueries WeakSet），非 sessionId。
   check('中断标记按 query 实例（WeakSet）', sb.includes('interruptedQueries') && sb.includes('WeakSet'));
   check('killProcess 调 query.interrupt', /killProcess[\s\S]{0,300}interrupt/.test(sb));
-  check('中断(error_during_execution)不弹错误', uc.includes('error_during_execution') && uc.includes('isUserInterrupt'));
+  // M4 + F1：error_during_execution 由共享 isErrorCliResult 显式排除（不弹错误），
+  // use-chat 错误展示必须走该统一判定（旧内联 isUserInterrupt 局部变量已移除）。
+  check('中断(error_during_execution)不弹错误', sc.includes("event.subtype === 'error_during_execution'") && uc.includes('isErrorCliResult'));
   check('streamingTool 有渲染消费链', ml.includes('streamingTool') && cp.includes('displayTool') && us.includes('displayTool'));
   // try-finally 兜底：abortTimer 单例已改为 per-session Map + ensureAbortFinally。
   // try = 收到结束事件清兜底；finally = 超时强制 markStopped（不依赖 SDK 中断信号是否真生效）。

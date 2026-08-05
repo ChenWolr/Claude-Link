@@ -160,7 +160,9 @@ export interface CliResultEvent {
   type: 'result';
   // CC 真实 subtype：success / error_max_turns / error_during_execution（含中断）/
   // error_max_budget_usd / error_max_structured_output_retries / error 等。
-  subtype: 'success' | 'error' | 'error_max_turns' | 'error_during_execution' | string;
+  // 可选：第三方端点可能缺失，此时保持 undefined 而非无条件补 success（F1），
+  // 终态语义由 isSuccessfulCliResult / isErrorCliResult 结合 is_error 判定。
+  subtype?: 'success' | 'error' | 'error_max_turns' | 'error_during_execution' | string;
   result: string;
   total_cost_usd: number;
   duration_ms: number;

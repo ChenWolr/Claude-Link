@@ -105,6 +105,11 @@ export const useSessionStore = defineStore('session', {
     // 外层 key=sessionId，内层 key=parentAgentId → 累积思考文本。子 Agent Tab 据此在思考中显示
     // ThinkingBlock；该子 agent 的 message 到达（完整思考落库）或回合结束时清除，避免与落库重复。
     subAgentStreamingThinking: {} as Record<string, Record<string, string>>,
+    // 会话侧栏状态灯：'running'（闪烁黄灯）| 'completed'（静态绿灯），按 sessionId。
+    // 未出现在映射中的会话为 idle（无状态点）——已有会话首次加载不会错误亮灯。
+    // 只保留内存态是有意设计：绿灯表示「本次应用运行期间最近一次成功完成」，
+    // 不把旧历史误显示为本次启动后的完成（跨重启保留需另开数据库字段/迁移）。
+    sessionStatus: {} as Record<string, 'running' | 'completed'>,
   }),
   getters: {
     // 当前应展示的会话列表：搜索态下返回 searchResults，否则返回全量 sessions。
@@ -258,6 +263,9 @@ export const useSessionStore = defineStore('session', {
       delete this.apiRetryInfo[id];
       delete this.apiRetryTerminalFallback[id];
       delete this.subAgentStreamingThinking[id];
+      // 状态灯与回合计时随会话删除一并清理，避免迟到的完成态串到其它会话。
+      delete this.sessionStatus[id];
+      delete this.turnStartedAt[id];
       // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
       const planStore = useClaudePlanStore();
       const prevPlan = planStore.planBySession[id];
@@ -378,13 +386,29 @@ export const useSessionStore = defineStore('session', {
     markRunning(sessionId: string) {
       // 新回合开始时，上一回合仅运行期可见的终态兜底失效。
       delete this.apiRetryTerminalFallback[sessionId];
+      // 新回合开始：上一回合的完成态失效（绿灯回到黄灯/执行中）。
+      delete this.sessionStatus[sessionId];
       if (!this.runningSessions.includes(sessionId)) {
         this.runningSessions.push(sessionId);
         // 问题 2：记录本回合开始时间（仅新加入时置位，避免重复 send 覆盖）。
         this.turnStartedAt[sessionId] = Date.now();
       }
+      // 侧栏黄灯：无论重复 send 与否都保持 running 状态。
+      this.sessionStatus[sessionId] = 'running';
     },
-    // 根因修复：标记会话执行结束。result/error/aborted 时调用。
+    // 根因修复：标记会话成功完成。成功 result 时调用。
+    // 与 markStopped 同构清理运行期数据，但额外写入 sessionStatus 'completed'（侧栏绿灯）。
+    markCompleted(sessionId: string) {
+      this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
+      delete this.sessionStreams[sessionId];
+      delete this.turnStartedAt[sessionId];
+      delete this.stalledInfo[sessionId];
+      delete this.apiRetryInfo[sessionId];
+      delete this.subAgentStreamingThinking[sessionId];
+      this.sessionStatus[sessionId] = 'completed';
+    },
+    // 根因修复：标记会话执行结束。失败 result / error / aborted 时调用。
+    // 只删除运行态数据，不写 completed——错误、用户中断、aborted 不得亮绿灯。
     markStopped(sessionId: string, options: { preserveApiRetry?: boolean } = {}) {
       this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
       // 清理该会话的流式快照（执行结束，快照不再需要）
@@ -396,6 +420,8 @@ export const useSessionStore = defineStore('session', {
       if (!options.preserveApiRetry) delete this.apiRetryInfo[sessionId];
       // 子 agent 实时思考快照随回合结束清除。
       delete this.subAgentStreamingThinking[sessionId];
+      // 错误/中断/aborted：不保留运行态也不亮绿灯 → 回 idle（无状态点）。
+      delete this.sessionStatus[sessionId];
     },
     // 问题 1：向非当前会话的流式快照追加内容（后台执行时累积流式，切回时恢复）。
     appendBackgroundStream(sessionId: string, type: 'content' | 'thinking' | 'tool', text: string) {
