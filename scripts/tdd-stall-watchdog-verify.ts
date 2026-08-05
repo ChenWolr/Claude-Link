@@ -294,6 +294,7 @@ check('停止/耗尽终态幂等，恢复后允许同一 Query 开启新 retry e
     const lateStop = recordApiRetryUserStop(terminal, 3_000);
     assert.strictEqual(lateRetry.state, terminal);
     assert.equal(lateRetry.becameExhausted, false);
+    assert.equal(lateRetry.state.phase, 'terminal', 'v2-F2：terminal 后迟到 retry 必须保持 terminal（主进程据此丢弃）');
     assert.strictEqual(lateRecovery.state, terminal);
     assert.equal(lateRecovery.terminalState, null);
     assert.equal(lateRecovery.becameRecovered, false);
@@ -484,6 +485,7 @@ check('applyApiRetryEvent 直接采用权威 count，7 后收到 3 显示 3', ()
   const store = useSessionStore();
   store.$reset();
   store.activeSession = session('s1');
+  store.markRunning('s1'); // retry 事件属于运行中回合（v2-F2 守卫要求）
   applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 7 }));
   applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 3, retryDelayMs: 1_000 }));
   assert.equal(store.activeApiRetryInfo?.retryCount, 3);
@@ -497,6 +499,8 @@ check('后台 session 的 retry 状态与前台隔离，切回后 getter 显示'
   const s1 = session('s1');
   const s2 = session('s2');
   store.activeSession = s1;
+  store.markRunning('s1');
+  store.markRunning('s2');
   applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 2 }));
   applyApiRetryEvent(store, 's2', apiRetryEvent({ retryCount: 6, error: 'rate_limit' }));
   assert.equal(store.activeApiRetryInfo?.retryCount, 2);
@@ -506,7 +510,7 @@ check('后台 session 的 retry 状态与前台隔离，切回后 getter 显示'
   assert.equal(store.activeApiRetryInfo?.error, 'rate_limit');
 });
 
-check('persisted_message exhausted 按 id 幂等插入当前会话、清 retry 并停止回合', () => {
+check('persisted_message exhausted 按 id 幂等插入当前会话、清 retry 并进入常红', () => {
   const store = useSessionStore();
   store.$reset();
   store.activeSession = session('s1');
@@ -524,9 +528,11 @@ check('persisted_message exhausted 按 id 幂等插入当前会话、清 retry �
   assert.equal(store.messages.find((item) => item.id === persisted.id)?.content, 'updated terminal');
   assert.equal(store.apiRetryInfo['s1'], undefined);
   assert.equal(store.runningSessions.includes('s1'), false);
+  assert.equal(store.sessionStatus['s1'], 'network_interrupted', 'exhausted 必须进入常红');
+  assert.equal(store.sessionDisplayStatus('s1'), 'network_interrupted');
 });
 
-check('persisted_message recovered 与 user_stopped 都清 retry，只有 stopped 结束当前回合', () => {
+check('persisted_message recovered 与 user_stopped 都清 retry，recovered 继续 running、stopped 回 idle', () => {
   for (const processKind of ['system:api_retry_recovered', 'system:api_retry_stopped'] as const) {
     const store = useSessionStore();
     store.$reset();
@@ -541,6 +547,13 @@ check('persisted_message recovered 与 user_stopped 都清 retry，只有 stoppe
     });
     assert.equal(store.apiRetryInfo['s1'], undefined);
     assert.equal(store.runningSessions.includes('s1'), processKind === 'system:api_retry_recovered');
+    // recovered 不是完成：基础状态仍是 running（黄闪）；user_stopped 回 idle（不常红）。
+    if (processKind === 'system:api_retry_recovered') {
+      assert.equal(store.sessionStatus['s1'], 'running');
+      assert.equal(store.sessionDisplayStatus('s1'), 'running');
+    } else {
+      assert.equal(store.sessionStatus['s1'], undefined);
+    }
   }
 });
 
@@ -584,7 +597,7 @@ function apiRetryTerminalFallbackEvent(
   };
 }
 
-check('api_retry_terminal fallback exhausted 保留兜底并停止回合', () => {
+check('api_retry_terminal fallback exhausted 保留兜底并进入常红（与 persisted 路径同义）', () => {
   const store = useSessionStore();
   store.$reset();
   store.activeSession = session('s1');
@@ -594,9 +607,10 @@ check('api_retry_terminal fallback exhausted 保留兜底并停止回合', () =>
   assert.equal(store.apiRetryTerminalFallback['s1']?.kind, 'exhausted');
   assert.equal(store.apiRetryInfo['s1'], undefined);
   assert.equal(store.runningSessions.includes('s1'), false);
+  assert.equal(store.sessionStatus['s1'], 'network_interrupted', 'fallback exhausted 必须常红');
 });
 
-check('api_retry_terminal fallback recovered 保留兜底但不停止回合', () => {
+check('api_retry_terminal fallback recovered 保留兜底但不停止回合（回黄闪）', () => {
   const store = useSessionStore();
   store.$reset();
   store.activeSession = session('s1');
@@ -606,9 +620,10 @@ check('api_retry_terminal fallback recovered 保留兜底但不停止回合', ()
   assert.equal(store.apiRetryTerminalFallback['s1']?.kind, 'recovered');
   assert.equal(store.apiRetryInfo['s1'], undefined);
   assert.equal(store.runningSessions.includes('s1'), true);
+  assert.equal(store.sessionStatus['s1'], 'running', 'fallback recovered 继续 running');
 });
 
-check('api_retry_terminal fallback user_stopped 保留兜底并停止当前回合', () => {
+check('api_retry_terminal fallback user_stopped 保留兜底并停止当前回合（回 idle）', () => {
   const store = useSessionStore();
   store.$reset();
   store.activeSession = session('s1');
@@ -618,6 +633,24 @@ check('api_retry_terminal fallback user_stopped 保留兜底并停止当前回�
   assert.equal(store.apiRetryTerminalFallback['s1']?.kind, 'user_stopped');
   assert.equal(store.apiRetryInfo['s1'], undefined);
   assert.equal(store.runningSessions.includes('s1'), false);
+  assert.equal(store.sessionStatus['s1'], undefined, 'fallback user_stopped 回 idle 不常红');
+});
+
+check('exhausted 常红抗迟到：markStopped 不清、markRunning 回黄灯', () => {
+  const store = useSessionStore();
+  store.$reset();
+  store.activeSession = session('s1');
+  store.markRunning('s1');
+  applyApiRetryEvent(store, 's1', apiRetryEvent({ retryCount: 10 }));
+  applyApiRetryTerminalFallbackEvent(store, 's1', apiRetryTerminalFallbackEvent('exhausted'));
+  assert.equal(store.sessionStatus['s1'], 'network_interrupted');
+  // exhausted 后迟到的失败 result / error / aborted / 中断 finally 都走 markStopped。
+  store.markStopped('s1');
+  assert.equal(store.sessionStatus['s1'], 'network_interrupted', '迟到 markStopped 不得清常红');
+  // 下一次新回合 markRunning 清除常红回黄灯。
+  store.markRunning('s1');
+  assert.equal(store.sessionStatus['s1'], 'running');
+  assert.equal(store.sessionDisplayStatus('s1'), 'running');
 });
 
 check('停止 IPC 失败时可显式清除保留的 retry 状态', () => {

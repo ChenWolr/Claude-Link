@@ -365,7 +365,9 @@ console.log('\n=== 26) Review 修复：中断标记按 query 实例、abort 跨�
   // try-finally 兜底：abortTimer 单例已改为 per-session Map + ensureAbortFinally。
   // try = 收到结束事件清兜底；finally = 超时强制 markStopped（不依赖 SDK 中断信号是否真生效）。
   check('abort 兜底 per-session + ensureAbortFinally', uc.includes('abortTimers') && uc.includes('ensureAbortFinally'));
-  check('abort try-finally：ensureAbortFinally 强制 markStopped', /function ensureAbortFinally[\s\S]{0,600}store\.markStopped\(sid\)/.test(uc));
+  check('abort try-finally：ensureAbortFinally 强制 markStopped（v2-F3 generation 守卫之后）',
+    /function ensureAbortFinally[\s\S]{0,900}store\.markStopped\(sid\)/.test(uc) &&
+    uc.indexOf('store.markStopped(sid)') > uc.indexOf('(store.turnGeneration[sid] ?? 0) !== generation'));
   check('abort 兜底全部按 sessionId 清理（无单例残留 clearAbortTimer()）', !uc.includes('clearAbortTimer()'));
   check('watch 切会话不清 abort 兜底（中断后切走仍保 finally）', !/activeSession\?\.id[\s\S]{0,120}clearAbortTimer/.test(uc));
   check('continueWithUserMessage exit 守卫 continuing', /status !== 'continuing'/.test(tq));
@@ -1009,16 +1011,40 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     sb.indexOf("if (infoSubtype === 'api_retry')"),
     sb.indexOf('// 权限询问/拒绝事件', sb.indexOf("if (infoSubtype === 'api_retry')")),
   );
-  check('api_retry 排期通知只瞬态转发，不提前持久化或 kill Query',
+  check('api_retry 排期通知只瞬态转发，不提前持久化、不提前 terminal、不触发网络中断通知',
     retryBranch.includes('forwardTransient(sessionId, mainWindow, sysInfo)') &&
     !retryBranch.includes('persistApiRetryTerminal(') &&
+    !retryBranch.includes('notifySessionNetworkInterrupted(') &&
     !retryBranch.includes("killProcess(sessionId, 'api_retry_exhausted', mainWindow)"));
+  check('v2-F2：terminal 后迟到 api_retry 丢弃（仅 phase===retrying 才构造/转发瞬态）',
+    retryBranch.includes("next.state.phase !== 'retrying'") &&
+    retryBranch.indexOf("next.state.phase !== 'retrying'") < retryBranch.indexOf('forwardTransient(sessionId, mainWindow, sysInfo)') &&
+    retryBranch.includes('late_api_retry_dropped') &&
+    retryBranch.includes('continue'));
   const exhaustedHelperStart = sb.indexOf('function finishApiRetryExhausted(');
   const exhaustedHelperEnd = sb.indexOf('function isToolResultPart(', exhaustedHelperStart);
   const exhaustedHelper = sb.slice(exhaustedHelperStart, exhaustedHelperEnd);
   check('最终真实错误通过 finishApiRetryExhausted 显式收口',
     exhaustedHelper.includes('recordApiRetryExhausted') &&
     exhaustedHelper.includes('persistApiRetryTerminal'));
+  check('finishApiRetryExhausted 中 persistApiRetryTerminal 位于网络中断通知之前',
+    exhaustedHelper.includes('persistApiRetryTerminal(sessionId, mainWindow, exhausted.state)') &&
+    exhaustedHelper.indexOf('notifySessionNetworkInterrupted(mainWindow, sessionId)') >
+      exhaustedHelper.indexOf('persistApiRetryTerminal(sessionId, mainWindow, exhausted.state)'));
+  check('网络中断通知只出现在 becameExhausted 唯一边沿',
+    /if \(exhausted\.becameExhausted\) \{[\s\S]*?persistApiRetryTerminal\(sessionId, mainWindow, exhausted\.state\)[\s\S]*?notifySessionNetworkInterrupted\(mainWindow, sessionId\)/.test(exhaustedHelper) &&
+    sb.split('notifySessionNetworkInterrupted(mainWindow, sessionId)').length - 1 === 1);
+  check('finishApiRetryRecovery 与 killProcess（user/watchdog/queue）不调用网络中断通知',
+    (() => {
+      const recoveryFn = sb.slice(sb.indexOf('function finishApiRetryRecovery('), sb.indexOf('function finishApiRetryExhausted('));
+      const killFn = sb.slice(sb.indexOf('export function killProcess('), sb.indexOf('export function killAllProcesses('));
+      return !recoveryFn.includes('notifySessionNetworkInterrupted(') && !killFn.includes('notifySessionNetworkInterrupted(');
+    })());
+  check('普通失败 result 不直接触发网络中断通知（仅经 finishApiRetryExhausted 边沿）',
+    (() => {
+      const resultOnly = sb.slice(sb.indexOf("if (type === 'result')"), sb.indexOf('// 其它 system 子类型 / hook 等暂不转发'));
+      return !resultOnly.includes('notifySessionNetworkInterrupted(');
+    })());
   const assistantRetryBranch = sb.slice(
     sb.indexOf("if (type === 'assistant')"),
     sb.indexOf("if (type === 'user')"),
