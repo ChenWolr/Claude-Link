@@ -3,10 +3,20 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
+import { sessionDisplayStatusMeta, type SessionDisplayStatus } from '../../../shared/session-display-status';
 
 const store = useSessionStore();
 const router = useRouter();
 const interactionStore = useInteractionStore();
+
+// 侧栏展示状态统一经 store.sessionDisplayStatus 解析（completed > network_interrupted
+// > retrying > running > idle），此处只做投影，供模板绑定 class 与可访问文案。
+function displayStatus(sessionId: string): SessionDisplayStatus {
+  return store.sessionDisplayStatus(sessionId);
+}
+function statusLabel(sessionId: string): string {
+  return sessionDisplayStatusMeta(displayStatus(sessionId)).label;
+}
 const searchQuery = ref('');
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -84,18 +94,20 @@ async function confirmDelete(session: { id: string; name: string }) {
         :key="session.id"
         :class="['session-link', {
           active: store.activeSession?.id === session.id,
-          'session-link--running': store.sessionStatus[session.id] === 'running',
-          'session-link--completed': store.sessionStatus[session.id] === 'completed',
+          'session-link--running': displayStatus(session.id) === 'running',
+          'session-link--retrying': displayStatus(session.id) === 'retrying',
+          'session-link--completed': displayStatus(session.id) === 'completed',
+          'session-link--network-interrupted': displayStatus(session.id) === 'network_interrupted',
         }]"
         @click="openSession(session)"
       >
         <span
-          v-if="store.sessionStatus[session.id]"
+          v-if="displayStatus(session.id) !== 'idle'"
           class="session-link__status"
-          :class="{ 'session-link__status--completed': store.sessionStatus[session.id] === 'completed' }"
+          :class="[`session-link__status--${displayStatus(session.id)}`]"
           role="img"
-          :aria-label="store.sessionStatus[session.id] === 'completed' ? '任务已完成' : '执行中'"
-          :title="store.sessionStatus[session.id] === 'completed' ? '任务已完成' : '执行中'"
+          :aria-label="statusLabel(session.id)"
+          :title="statusLabel(session.id)"
         ></span>
         <span class="session-link__name">{{ session.name }}</span>
         <button
@@ -224,15 +236,27 @@ async function confirmDelete(session: { id: string; name: string }) {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--color-warn);
-  box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-warn) 55%, transparent);
+  background: var(--session-status-color, var(--color-warn));
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--session-status-color, var(--color-warn)) 55%, transparent);
   animation: session-status-pulse 1.2s ease-in-out infinite;
 }
-/* 会话状态灯：running = 黄灯呼吸闪烁（pulse），completed = 静态绿灯（--completed）。
+/* 会话状态灯四态（颜色经 --session-status-color 继承，圆点/pulse 阴影共用变量）：
+   running = 黄灯呼吸闪烁；retrying = 红灯呼吸闪烁（同一条 pulse keyframes）；
+   completed = 静态绿灯；network_interrupted = 静态红灯（显式 animation: none）。
    idle 不渲染（无状态点）；颜色不只依赖颜色本身——状态点带 role="img" +
-   aria-label/title 供辅助技术读取。 */
-.session-link__status--completed {
-  background: var(--color-success);
+   aria-label/title 供辅助技术读取（reduced-motion 下红闪/黄闪会停动画，文案不可省）。 */
+.session-link--running {
+  --session-status-color: var(--color-warn);
+}
+.session-link--retrying,
+.session-link--network-interrupted {
+  --session-status-color: var(--color-danger);
+}
+.session-link--completed {
+  --session-status-color: var(--color-success);
+}
+.session-link__status--completed,
+.session-link__status--network-interrupted {
   box-shadow: none;
   animation: none;
 }
@@ -241,7 +265,7 @@ async function confirmDelete(session: { id: string; name: string }) {
   0%,
   100% {
     opacity: 1;
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-warn) 55%, transparent);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--session-status-color, var(--color-warn)) 55%, transparent);
   }
   50% {
     opacity: 0.55;

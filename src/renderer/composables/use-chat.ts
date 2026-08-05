@@ -58,13 +58,23 @@ export function applyPersistedMessageEvent(
   sessionId: string,
   message: Message,
 ): void {
+  const processKind = message.processKind;
   const isApiRetryTerminal =
-    message.processKind === 'system:api_retry_recovered' ||
-    message.processKind === 'system:api_retry_stopped' ||
-    message.processKind === 'system:api_retry_exhausted';
+    processKind === 'system:api_retry_recovered' ||
+    processKind === 'system:api_retry_stopped' ||
+    processKind === 'system:api_retry_exhausted';
   if (isApiRetryTerminal) store.clearApiRetrying(sessionId);
   if (store.activeSession?.id === sessionId) store.addMessage(message);
-  if (message.processKind === 'system:api_retry_exhausted' || message.processKind === 'system:api_retry_stopped') {
+  // 按 retry 终态明确分流（recovered 不结束回合，基础状态仍为 running）：
+  //  - recovered：清 retry 后继续 running → 侧栏回黄灯闪烁；
+  //  - user_stopped：markStopped → 回 idle，不常红、不发送网络中断通知；
+  //  - exhausted：markNetworkInterrupted → 红灯常亮。
+  if (processKind === 'system:api_retry_recovered') return;
+  if (processKind === 'system:api_retry_exhausted') {
+    store.markNetworkInterrupted(sessionId);
+    return;
+  }
+  if (processKind === 'system:api_retry_stopped') {
     store.markStopped(sessionId);
   }
 }
@@ -79,7 +89,15 @@ export function applyApiRetryTerminalFallbackEvent(
     summary: event.summary,
     details: event.details,
   });
-  if (event.kind === 'exhausted' || event.kind === 'user_stopped') store.markStopped(sessionId);
+  // DB 写终态消息失败时与正常 persisted_message 路径完全同义：
+  //  - recovered：保持 running，回黄闪；
+  //  - user_stopped：markStopped，回 idle；
+  //  - exhausted：markNetworkInterrupted，常红。
+  if (event.kind === 'exhausted') {
+    store.markNetworkInterrupted(sessionId);
+  } else if (event.kind === 'user_stopped') {
+    store.markStopped(sessionId);
+  }
 }
 
 export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, event: CliEvent): void {
@@ -159,12 +177,18 @@ function createChat() {
   }
   // finally 兜底：到点必然把该会话复位为已停止。
   // 当前会话额外清全局流式 + finalize 保留已生成内容；后台会话的 per-session 快照由 markStopped 自带清理。
+  // v2-F3：绑定回合 generation——捕获发起中断那一代的 turnGeneration；若 timer 触发时该会话
+  // 已开启新回合（markRunning 已递增 generation），说明是旧中断的迟到 finally，no-op，
+  // 绝不误停随后启动的新回合。
   function ensureAbortFinally(sid: string): void {
     if (abortTimers.has(sid)) return; // 已在兜底窗口内，不重复
+    const generation = store.turnGeneration[sid] ?? 0;
     const timer = setTimeout(() => {
       abortTimers.delete(sid);
       // 幂等守卫：正常路径已清过 runningSessions，这里 no-op。
       if (!store.runningSessions.includes(sid)) return;
+      // v2-F3 generation 守卫：新回合已开始（generation 变化），旧 finally 不得误停。
+      if ((store.turnGeneration[sid] ?? 0) !== generation) return;
       const isCurrent = !!store.activeSession && store.activeSession.id === sid;
       if (isCurrent) {
         finalizeAssistantStream();
@@ -848,6 +872,10 @@ function createChat() {
     if (!store.activeSession) return;
     const sid = store.activeSession.id;
     clearAbortTimer(sid); // 清旧兜底（防重复 / 上一回合残留）
+    // v2-F3：在 await abortChat IPC 之前注册 generation 兜底——若旧 abort IPC 返回前用户
+    // 已开启新回合，timer 捕获的是旧 generation，到点检测到 generation 变化即 no-op，
+    // 不会误停新回合（不能依赖「timer 已创建」的时序巧合）。
+    ensureAbortFinally(sid);
     // 乐观更新：点击中断瞬间立即复位 running + 清当前流式，UI 立即停止"执行中"。
     // Windows 硬杀时 SDK 的 result/aborted 事件常丢失，不能再等 1200ms 兜底才反馈。
     // 后续 result/aborted 若到达，markStopped 幂等 no-op。
@@ -865,8 +893,7 @@ function createChat() {
       // 必须本地收口，避免永久停在 disabled 的「正在停止…」。
       if (options.preserveApiRetry) store.clearApiRetrying(sid);
     }
-    // 兜底保留作为最终保险（乐观路径已 markStopped，这里 no-op）
-    ensureAbortFinally(sid);
+    // 兜底已在开头注册；到点 no-op 或已由终态事件 clearAbortTimer 提前满足。
   }
 
   // 卡死恢复：重发最后一条用户消息（abort 旧 query → 新 query + resume）。
