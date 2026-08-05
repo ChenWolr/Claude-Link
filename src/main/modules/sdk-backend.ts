@@ -26,7 +26,7 @@ import { resolveContextWindowForSession, lookupUserContextWindow } from '../../s
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { isSuccessfulCliResult } from '../../shared/session-completion';
 import { convertResultMessage } from '../../shared/result-converter';
-import { notifySessionCompleted } from './session-completion-notifier';
+import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
@@ -981,7 +981,13 @@ function finishApiRetryExhausted(sessionId: string, mainWindow: BrowserWindow, q
   apiRetryStates.set(sessionId, exhausted.state);
   if (exhausted.becameExhausted) {
     logger.warn(`[retry-trace] exhausted session=${sessionId} query=${queryInstance ?? 'unknown'} retries=${exhausted.state.retryCount}`);
+    // 顺序固定：先 persistApiRetryTerminal（renderer 的 persisted/fallback 终态先发出，
+    // UI 常红先行），再发失焦网络中断通知。通知只位于 becameExhausted === true 分支——
+    // assistant error 后再到 error result 时第二次耗尽调用返回 false，不重复通知；
+    // DB 写终态失败时 fallback 已发出，随后仍可通知。recovered/user_stopped/普通
+    // error/result、killProcess 均不在此发网络中断通知。
     persistApiRetryTerminal(sessionId, mainWindow, exhausted.state);
+    notifySessionNetworkInterrupted(mainWindow, sessionId);
   }
   return exhausted.becameExhausted;
 }
@@ -1576,6 +1582,15 @@ async function runQuery(
             errorStatus,
           });
           apiRetryStates.set(sessionId, next.state);
+          // v2-F2：terminal（exhausted/recovered/user_stopped）收口后迟到的 api_retry 直接丢弃——
+          // recordApiRetry 对 terminal 状态返回原 state（phase 保持 terminal），query 已终止，
+          // 前端不得重新显示“正在自动重试”卡片。仅真正排期（phase === 'retrying'）才构造转发。
+          if (next.state.phase !== 'retrying') {
+            logger.warn(
+              `[retry-trace] late_api_retry_dropped session=${sessionId} phase=${next.state.phase} attempt=${sdkAttempt ?? 'unknown'}`,
+            );
+            continue;
+          }
           logger.warn(
             `[retry-trace] retry_scheduled session=${sessionId} query=${entry.queryInstance} attempt=${sdkAttempt ?? 'unknown'}/${sdkMaxRetries ?? API_RETRY_LIMIT_FALLBACK} delayMs=${retryDelayMs ?? 'unknown'} status=${errorStatus ?? 'network'}`,
           );
