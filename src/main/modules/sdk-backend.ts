@@ -24,6 +24,9 @@ import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig } from '../../shared/thinking-resolver';
+import { isSuccessfulCliResult } from '../../shared/session-completion';
+import { convertResultMessage } from '../../shared/result-converter';
+import { notifySessionCompleted } from './session-completion-notifier';
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
@@ -47,7 +50,6 @@ import type {
   CliEvent,
   CliMessageContentPart,
   CliMessageEvent,
-  CliResultEvent,
   CliStreamEvent,
   CliSystemInfoEvent,
   CliPermissionEvent,
@@ -832,6 +834,13 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
   } catch (err) {
     logger.error(`Failed to persist SDK event [${sessionId}]`, err);
   }
+  // 失焦完成通知：仅真实成功 result 触发（isSuccessfulCliResult 与 renderer 绿灯同一判定）。
+  // 放在事件已推送并尝试落库之后，避免通知先于聊天内容出现；同步快速返回、不 await、
+  // 不触碰 activeSessions 生命周期。窗口聚焦/已销毁、错误/中断/aborted/API retry 终态均不通知。
+  // 已删除会话因上方 isSessionActive 守卫提前 return，不会弹陈旧通知。
+  if (event.type === 'result' && isSuccessfulCliResult(event)) {
+    notifySessionCompleted(mainWindow, sessionId);
+  }
   // 上下文用量：message/result 的 usage（与 process-manager.attachStreamParser 同逻辑）。
   const usage = (event as { usage?: Record<string, unknown> }).usage;
   if (usage && (event.type === 'message' || event.type === 'result')) {
@@ -1328,29 +1337,9 @@ function convertAssistantMessage(sdkMsg: Record<string, unknown>): CliMessageEve
   };
 }
 
-// SDK result → CliResultEvent（字段一一对应）。
-function convertResultMessage(sdkMsg: Record<string, unknown>): CliEvent {
-  const rawErrors = Array.isArray(sdkMsg.errors) ? sdkMsg.errors : [];
-  const errors = rawErrors
-    .map((item) => (typeof item === 'string' ? item : item && typeof item === 'object' && typeof (item as { message?: unknown }).message === 'string' ? (item as { message: string }).message : ''))
-    .filter((item) => item.trim().length > 0);
-  return {
-    type: 'result',
-    subtype: (sdkMsg.subtype as string) ?? 'success',
-    result: (sdkMsg.result as string) ?? '',
-    total_cost_usd: (sdkMsg.total_cost_usd as number) ?? 0,
-    duration_ms: (sdkMsg.duration_ms as number) ?? 0,
-    num_turns: (sdkMsg.num_turns as number) ?? 0,
-    session_id: (sdkMsg.session_id as string) ?? '',
-    is_error: Boolean(sdkMsg.is_error),
-    ...(errors.length > 0 ? { errors } : {}),
-    terminalReason: typeof sdkMsg.terminal_reason === 'string' ? sdkMsg.terminal_reason : undefined,
-    apiErrorStatus: typeof sdkMsg.api_error_status === 'number' ? sdkMsg.api_error_status : null,
-    stopReason: typeof sdkMsg.stop_reason === 'string' ? sdkMsg.stop_reason : null,
-    usage: (sdkMsg.usage as CliResultEvent['usage']) ?? undefined,
-    modelUsage: (sdkMsg.modelUsage as CliResultEvent['modelUsage']) ?? undefined,
-  } as CliResultEvent;
-}
+// SDK result → CliResultEvent 转换已提取至共享层（src/shared/result-converter.ts，F1）：
+// 保留真实 subtype（缺失保持 undefined），由 isSuccessfulCliResult 结合 is_error 判定终态，
+// 避免第三方端点 is_error=true 且无 subtype 时被无条件补成 success 而错误亮绿灯/发完成通知。
 
 // SDK stream_event（SDKPartialAssistantMessage）已是 {type:'stream_event', event}，直接转发。
 // Bug2：透传 parent_tool_use_id（sdk.d.ts:3788 SDKPartialAssistantMessage 带），让渲染层把子 agent 的

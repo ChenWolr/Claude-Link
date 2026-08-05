@@ -82,9 +82,21 @@ async function confirmDelete(session: { id: string; name: string }) {
       <div
         v-for="session in store.displayedSessions"
         :key="session.id"
-        :class="['session-link', { active: store.activeSession?.id === session.id }]"
+        :class="['session-link', {
+          active: store.activeSession?.id === session.id,
+          'session-link--running': store.sessionStatus[session.id] === 'running',
+          'session-link--completed': store.sessionStatus[session.id] === 'completed',
+        }]"
         @click="openSession(session)"
       >
+        <span
+          v-if="store.sessionStatus[session.id]"
+          class="session-link__status"
+          :class="{ 'session-link__status--completed': store.sessionStatus[session.id] === 'completed' }"
+          role="img"
+          :aria-label="store.sessionStatus[session.id] === 'completed' ? '任务已完成' : '执行中'"
+          :title="store.sessionStatus[session.id] === 'completed' ? '任务已完成' : '执行中'"
+        ></span>
         <span class="session-link__name">{{ session.name }}</span>
         <button
           type="button"
@@ -187,12 +199,6 @@ async function confirmDelete(session: { id: string; name: string }) {
   to { opacity: 1; transform: none; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .session-link {
-    animation: none;
-  }
-}
-
 .session-link {
   display: flex;
   align-items: center;
@@ -211,6 +217,47 @@ async function confirmDelete(session: { id: string; name: string }) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.session-link__status {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-warn);
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-warn) 55%, transparent);
+  animation: session-status-pulse 1.2s ease-in-out infinite;
+}
+/* 会话状态灯：running = 黄灯呼吸闪烁（pulse），completed = 静态绿灯（--completed）。
+   idle 不渲染（无状态点）；颜色不只依赖颜色本身——状态点带 role="img" +
+   aria-label/title 供辅助技术读取。 */
+.session-link__status--completed {
+  background: var(--color-success);
+  box-shadow: none;
+  animation: none;
+}
+
+@keyframes session-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-warn) 55%, transparent);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+/* F4：reduced-motion 块必须位于状态灯基础动画声明与 keyframes 之后——媒体查询与基础规则
+   同特异性时后声明的规则胜出，放前面会让 pulse 动画覆盖 animation: none，降级失效。 */
+@media (prefers-reduced-motion: reduce) {
+  .session-link {
+    animation: none;
+  }
+  .session-link__status {
+    animation: none;
+  }
 }
 
 .session-link__delete {

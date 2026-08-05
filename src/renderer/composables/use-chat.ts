@@ -15,6 +15,7 @@ import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliApiRetryTerminalFallbackEvent, CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
+import { isErrorCliResult, isSuccessfulCliResult } from '../../shared/session-completion';
 import type { Message } from '../../shared/types/session';
 import type { ChatSendPayload } from '../../shared/types/attachment';
 
@@ -337,10 +338,19 @@ function createChat() {
         planStore.applyPlanState(sid, event.state);
         break;
       }
-      case 'result':
+      case 'result': {
+        // 后台会话成功完成：清中断兜底 + 标记完成（侧栏绿灯）。失败 result 走 markStopped。
+        clearAbortTimer(sid);
+        if (isSuccessfulCliResult(event)) {
+          store.markCompleted(sid);
+        } else {
+          store.markStopped(sid);
+        }
+        break;
+      }
       case 'error':
       case 'aborted': {
-        // 后台会话执行结束：清该会话中断兜底（try 成功 = finally 提前满足）+ 标记停止 + 清理快照
+        // 后台会话错误/中断结束：清该会话中断兜底 + 标记停止 + 清理快照（不亮绿灯）。
         clearAbortTimer(sid);
         store.markStopped(sid);
         break;
@@ -387,12 +397,10 @@ function createChat() {
       }
       case 'result': {
         // M1：错误回合（is_error 且非中断）不当作正常回答静默展示，把错误文本以 error 提示。
-        // 注意：error_during_execution 在 *nix 上是"用户 SIGINT 中断"的正常收尾，
-        // 绝不能当错误弹窗（否则违背 M4——中断被误报）。只有真正的失败 subtype 才报错。
-        const subtype = event.subtype;
-        const isUserInterrupt = subtype === 'error_during_execution';
-        const isErrResult =
-          !!event.is_error && !isUserInterrupt && subtype !== 'success' && subtype !== undefined;
+        // error_during_execution 是"用户 SIGINT 中断"的正常收尾，不报错；
+        // 缺失 subtype 的错误 result 由 isErrorCliResult 统一判失败（F1：旧 isErrResult
+        // 对 subtype===undefined 误判非错误，导致错误文本被当正常回答展示）。
+        const isErrResult = isErrorCliResult(event);
 
         // 回合结束：先把流式累积的 thinking / content 转为持久化消息，
         // 再清掉流式状态，让 MessageList 从流式块切回持久化消息显示。
@@ -411,10 +419,15 @@ function createChat() {
           error.value = resultErrorText(event);
           captureFailedMessage();
         }
-        // 根因修复：markStopped 移除 runningSessions，sending getter 自动变 false。
+        // 根因修复：markStopped/markCompleted 移除 runningSessions，sending getter 自动变 false。
+        // 成功 result → markCompleted（侧栏绿灯）；失败/中断 result → markStopped（不亮灯）。
         if (store.activeSession) {
           clearAbortTimer(store.activeSession.id);
-          store.markStopped(store.activeSession.id);
+          if (isSuccessfulCliResult(event)) {
+            store.markCompleted(store.activeSession.id);
+          } else {
+            store.markStopped(store.activeSession.id);
+          }
         }
         resetTurnCache();
         break;
@@ -781,19 +794,24 @@ function createChat() {
   // 成功返回 true；失败置 error 横幅并返回 false（供调用方决定是否清草稿）。
   async function sendMessage(payload: ChatSendPayload): Promise<boolean> {
     if (!store.activeSession) return false;
+    // F3：校验后立即捕获稳定 sessionId——await IPC 期间用户可能切换会话，
+    // 本次发送的所有会话相关操作（含 catch 的 markStopped）必须归属本次发送的会话，
+    // 而不是当时的 activeSession，否则切换后发送失败会停止错误的会话。
+    const sessionId = store.activeSession.id;
     const text = payload.text.trim();
     if (!text && payload.attachmentIds.length === 0) return false;
 
     // 新回合开始：作废上一回合 abort 残留的超时兜底，避免它到点把本次 sending 错误复位。
-    clearAbortTimer(store.activeSession.id);
+    clearAbortTimer(sessionId);
     resetTurnCache();
     error.value = null;
     // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
-    store.markRunning(store.activeSession.id);
+    store.markRunning(sessionId);
 
     // 草稿摘要用于乐观渲染附件卡片；仅取当前会话草稿里属于本 payload 的附件。
+    // 同步段（无 await）内 activeSession 恒为本次发送的会话，取草稿归属安全。
     const draftAttachments = payload.attachmentIds.length > 0
-      ? (useChatDraftStore().getAttachments(store.activeSession.id) ?? []).filter((a) =>
+      ? (useChatDraftStore().getAttachments(sessionId) ?? []).filter((a) =>
           payload.attachmentIds.includes(a.id),
         )
       : [];
@@ -811,11 +829,12 @@ function createChat() {
     store.turnStartIndex = store.messages.length;
 
     try {
-      await window.claudeLink.sendMessage(store.activeSession.id, payload);
+      await window.claudeLink.sendMessage(sessionId, payload);
       return true;
     } catch (e) {
       error.value = e instanceof Error ? e.message : '发送失败';
-      if (store.activeSession) store.markStopped(store.activeSession.id);
+      // F3：必须用稳定 sessionId，不能用 store.activeSession（await 期间可能已切走）。
+      store.markStopped(sessionId);
       return false;
     }
   }
