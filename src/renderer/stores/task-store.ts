@@ -157,10 +157,13 @@ export const useTaskStore = defineStore('task', {
           this.queueState.status = 'idle';
           this.queueState.countdownRemaining = 0;
           // F2：队列收口只负责自己的 queueState，不得覆盖真实聊天终态——
-          // 最后一次成功 result 已置 completed（绿灯）时保留；否则（失败/中断/无 result
-          // 的队列耗尽）按既有语义 markStopped 回 idle。不能反过来无条件 markCompleted：
-          // 队列也可能因 prepare/spawn/task 失败而耗尽，完成灯必须由成功 result 驱动。
-          if (sessionStore.sessionStatus[payload.sessionId] !== 'completed') {
+          // 最后一次成功 result 已置 completed（绿灯）时保留；retry 真正耗尽的
+          // network_interrupted（常红）同样保留（exhausted 后迟到的 queue_completed
+          // 不得清常红）；否则（失败/中断/无 result 的队列耗尽）按既有语义
+          // markStopped 回 idle。不能反过来无条件 markCompleted：队列也可能因
+          // prepare/spawn/task 失败而耗尽，完成灯必须由成功 result 驱动。
+          const current = sessionStore.sessionStatus[payload.sessionId];
+          if (current !== 'completed' && current !== 'network_interrupted') {
             sessionStore.markStopped(payload.sessionId);
           }
           break;

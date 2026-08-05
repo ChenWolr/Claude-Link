@@ -10,6 +10,11 @@ import type { Message } from '../../shared/types/session';
 import type { ThinkingLevel } from '../../shared/types/thinking';
 import type { StallInfo } from '../../shared/stall-watchdog';
 import type { ApiRetryTerminalDetailsV1, ApiRetryTerminalKind } from '../../shared/api-retry-state';
+import {
+  resolveSessionDisplayStatus,
+  type SessionDisplayStatus,
+  type SessionStatus,
+} from '../../shared/session-display-status';
 import { resolveContextWindow } from '../../shared/model-context-windows';
 import { useConfigStore } from './config-store';
 import { useClaudePlanStore } from './claude-plan-store';
@@ -95,6 +100,10 @@ export const useSessionStore = defineStore('session', {
     // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
     // 渲染层据此 + useNow 跳动时钟算实时耗时，整个 sending 期间常驻显示「⏱ X.Xs」。
     turnStartedAt: {} as Record<string, number>,
+    // v2-F3：回合 generation（按 sessionId）。每次 markRunning（新回合开始）递增；
+    // use-chat 的 abort finally 兜底捕获发起中断时的 generation，到点若已开启新回合
+    //（generation 变化）则 no-op，绝不误停随后启动的新回合。deleteSession 一并清理。
+    turnGeneration: {} as Record<string, number>,
     // 卡死检测：per-session 卡死信息（主进程看门狗 stalled 事件下发）。getter activeStalledInfo 读当前会话。
     stalledInfo: {} as Record<string, StallInfo>,
     // per-session API 重试瞬态：直接投影主进程下发的权威 count/limit，不在 renderer 自行累计。
@@ -105,11 +114,14 @@ export const useSessionStore = defineStore('session', {
     // 外层 key=sessionId，内层 key=parentAgentId → 累积思考文本。子 Agent Tab 据此在思考中显示
     // ThinkingBlock；该子 agent 的 message 到达（完整思考落库）或回合结束时清除，避免与落库重复。
     subAgentStreamingThinking: {} as Record<string, Record<string, string>>,
-    // 会话侧栏状态灯：'running'（闪烁黄灯）| 'completed'（静态绿灯），按 sessionId。
+    // 会话侧栏状态灯基础终态：'running'（闪烁黄灯）| 'completed'（静态绿灯）|
+    // 'network_interrupted'（静态红灯，retry 真正耗尽）。按 sessionId。
     // 未出现在映射中的会话为 idle（无状态点）——已有会话首次加载不会错误亮灯。
-    // 只保留内存态是有意设计：绿灯表示「本次应用运行期间最近一次成功完成」，
+    // 只保留内存态是有意设计：绿灯/常红表示「本次应用运行期间最近一次成功完成/网络中断」，
     // 不把旧历史误显示为本次启动后的完成（跨重启保留需另开数据库字段/迁移）。
-    sessionStatus: {} as Record<string, 'running' | 'completed'>,
+    // retrying（红闪）不写入 sessionStatus：apiRetryInfo 是 retry 瞬态的唯一真相源，
+    // 侧栏展示由 sessionDisplayStatus getter 统一解析两者。
+    sessionStatus: {} as Record<string, SessionStatus>,
   }),
   getters: {
     // 当前应展示的会话列表：搜索态下返回 searchResults，否则返回全量 sessions。
@@ -135,6 +147,13 @@ export const useSessionStore = defineStore('session', {
     activeApiRetryInfo(state): ApiRetryInfo | null {
       if (!state.activeSession) return null;
       return state.apiRetryInfo[state.activeSession.id] ?? null;
+    },
+    // 侧栏展示状态：统一解析基础终态（sessionStatus）+ retry 瞬态（apiRetryInfo），
+    // 按固定优先级 completed > network_interrupted > retrying > running > idle。
+    // 侧栏只能通过这个统一入口解析状态，避免模板分别拼基础状态和 retry 瞬态。
+    sessionDisplayStatus(state) {
+      return (sessionId: string): SessionDisplayStatus =>
+        resolveSessionDisplayStatus(state.sessionStatus[sessionId], Boolean(state.apiRetryInfo[sessionId]));
     },
     activeApiRetryTerminalFallback(state): ApiRetryTerminalFallback | null {
       if (!state.activeSession) return null;
@@ -248,6 +267,7 @@ export const useSessionStore = defineStore('session', {
       const prevSessions = this.sessions;
       const prevSearch = this.searchResults;
       const prevActive = this.activeSession;
+      const prevMessages = this.messages;
       this.sessions = this.sessions.filter((s) => s.id !== id);
       if (this.searchResults) {
         this.searchResults = this.searchResults.filter((s) => s.id !== id);
@@ -256,7 +276,13 @@ export const useSessionStore = defineStore('session', {
         this.activeSession = null;
         this.messages = [];
       }
-      // 问题 1：清理已删会话的执行状态与流式快照
+      // 问题 1：清理已删会话的执行状态与流式快照。
+      // v2-F1：删除前仅快照「静态、仍真实」的展示终态（completed/network_interrupted 及
+      // 对应 fallback）。主进程 SESSION_DELETE 在 DB DELETE 前已不可逆地 cleanupQueue /
+      // markSessionDeleted / killProcess 终止 query/queue/retry——运行中/重试中/流式/计时
+      // 等活状态已不存在于主进程，失败回滚不得恢复（否则形成幽灵运行态）。
+      const prevSessionStatus = this.sessionStatus[id];
+      const prevFallback = this.apiRetryTerminalFallback[id];
       this.runningSessions = this.runningSessions.filter((sid) => sid !== id);
       delete this.sessionStreams[id];
       delete this.stalledInfo[id];
@@ -266,6 +292,7 @@ export const useSessionStore = defineStore('session', {
       // 状态灯与回合计时随会话删除一并清理，避免迟到的完成态串到其它会话。
       delete this.sessionStatus[id];
       delete this.turnStartedAt[id];
+      delete this.turnGeneration[id];
       // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
       const planStore = useClaudePlanStore();
       const prevPlan = planStore.planBySession[id];
@@ -273,10 +300,22 @@ export const useSessionStore = defineStore('session', {
       try {
         await window.claudeLink.deleteSession(id);
       } catch (error) {
-        // IPC 失败回滚——恢复列表与活动会话
+        // IPC 失败回滚——只恢复静态、仍然真实的状态：列表/搜索/活动会话与其消息、
+        // plan、completed/network_interrupted 终态（及常红对应 fallback）。
+        // 活状态（runningSessions、sessionStatus='running'、apiRetryInfo、sessionStreams、
+        // turnStartedAt、stalledInfo、subAgentStreamingThinking）一律不恢复——主进程已
+        // 不可逆终止对应 query，恢复只会显示不存在的幽灵运行态；删除前 running/retrying
+        // 的会话回 idle 并提示删除失败，历史 messages 可恢复。
         this.sessions = prevSessions;
         this.searchResults = prevSearch;
         this.activeSession = prevActive;
+        this.messages = prevMessages;
+        if (prevSessionStatus === 'completed' || prevSessionStatus === 'network_interrupted') {
+          this.sessionStatus[id] = prevSessionStatus;
+        }
+        if (prevSessionStatus === 'network_interrupted' && prevFallback !== undefined) {
+          this.apiRetryTerminalFallback[id] = prevFallback;
+        }
         // F11: 恢复 plan store 状态（clearSession 已删除）
         if (prevPlan) {
           planStore.planBySession[id] = prevPlan;
@@ -386,18 +425,26 @@ export const useSessionStore = defineStore('session', {
     markRunning(sessionId: string) {
       // 新回合开始时，上一回合仅运行期可见的终态兜底失效。
       delete this.apiRetryTerminalFallback[sessionId];
-      // 新回合开始：上一回合的完成态失效（绿灯回到黄灯/执行中）。
+      // 新回合开始：上一回合的完成态（绿灯）与网络中断常红一起失效
+      // （绿灯/常红回到黄灯/执行中）——这是常红会话恢复为可运行黄灯的唯一入口。
       delete this.sessionStatus[sessionId];
+      // 新回合开始：清旧 retry 瞬态，避免上一回合残留的红闪串到新回合。
+      delete this.apiRetryInfo[sessionId];
       if (!this.runningSessions.includes(sessionId)) {
         this.runningSessions.push(sessionId);
         // 问题 2：记录本回合开始时间（仅新加入时置位，避免重复 send 覆盖）。
         this.turnStartedAt[sessionId] = Date.now();
       }
+      // v2-F3：每次 markRunning 递增回合 generation（新回合边界）。abort finally 兜底
+      // 据此识别「被中断的那一代」，旧 finally 不会误停新回合。
+      this.turnGeneration[sessionId] = (this.turnGeneration[sessionId] ?? 0) + 1;
       // 侧栏黄灯：无论重复 send 与否都保持 running 状态。
       this.sessionStatus[sessionId] = 'running';
     },
     // 根因修复：标记会话成功完成。成功 result 时调用。
     // 与 markStopped 同构清理运行期数据，但额外写入 sessionStatus 'completed'（侧栏绿灯）。
+    // 常红防覆盖守卫：已确认 network_interrupted 的会话，迟到/异常排序的 success result
+    // 不得把常红覆盖成绿灯，只做幂等清理。
     markCompleted(sessionId: string) {
       this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
       delete this.sessionStreams[sessionId];
@@ -405,10 +452,28 @@ export const useSessionStore = defineStore('session', {
       delete this.stalledInfo[sessionId];
       delete this.apiRetryInfo[sessionId];
       delete this.subAgentStreamingThinking[sessionId];
-      this.sessionStatus[sessionId] = 'completed';
+      if (this.sessionStatus[sessionId] !== 'network_interrupted') {
+        this.sessionStatus[sessionId] = 'completed';
+      }
+    },
+    // retry 真正耗尽（network interrupted）：专门处理 retry exhausted 终态。
+    // 与 markStopped 同构清理运行期数据，但额外写入 sessionStatus 'network_interrupted'
+    //（侧栏红灯常亮）。不清除 apiRetryTerminalFallback——DB 写终态失败时 fallback
+    // 卡片仍需可见。下一次 markRunning（新回合/下一项任务）是清除常红回黄灯的唯一入口。
+    markNetworkInterrupted(sessionId: string) {
+      this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
+      delete this.sessionStreams[sessionId];
+      delete this.turnStartedAt[sessionId];
+      delete this.stalledInfo[sessionId];
+      delete this.apiRetryInfo[sessionId];
+      delete this.subAgentStreamingThinking[sessionId];
+      this.sessionStatus[sessionId] = 'network_interrupted';
     },
     // 根因修复：标记会话执行结束。失败 result / error / aborted 时调用。
     // 只删除运行态数据，不写 completed——错误、用户中断、aborted 不得亮绿灯。
+    // 基础状态按规则处理：running 删除回 idle；undefined 保持 idle；
+    // completed 保留绿灯；network_interrupted 保留常红——exhausted 后迟到的
+    // 失败 result/error/aborted 不得清掉已确认的常红。
     markStopped(sessionId: string, options: { preserveApiRetry?: boolean } = {}) {
       this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
       // 清理该会话的流式快照（执行结束，快照不再需要）
@@ -421,7 +486,9 @@ export const useSessionStore = defineStore('session', {
       // 子 agent 实时思考快照随回合结束清除。
       delete this.subAgentStreamingThinking[sessionId];
       // 错误/中断/aborted：不保留运行态也不亮绿灯 → 回 idle（无状态点）。
-      delete this.sessionStatus[sessionId];
+      if (this.sessionStatus[sessionId] === 'running') {
+        delete this.sessionStatus[sessionId];
+      }
     },
     // 问题 1：向非当前会话的流式快照追加内容（后台执行时累积流式，切回时恢复）。
     appendBackgroundStream(sessionId: string, type: 'content' | 'thinking' | 'tool', text: string) {
@@ -442,8 +509,21 @@ export const useSessionStore = defineStore('session', {
       delete this.stalledInfo[sessionId];
     },
     // 直接替换为主进程权威状态；不得在 renderer 自行 +1。
+    // 每个新 retry episode 的首个 api_retry 都会经过此 action：同时使上一 episode 的
+    // 运行期 terminal fallback 失效（recovered 后同一 Query 可开启新 episode，旧 fallback
+    // 不得在新 episode 的 persisted 终态落库后重新出现）。删除幂等，连续多次
+    // api_retry 通知安全，不影响权威 retry count/limit。
+    // v2-F2：terminal 后迟到的 api_retry 直接忽略——基础终态已确认（completed/
+    // network_interrupted）或回合已不在运行，写回只会让聊天区重新出现“正在自动重试”
+    // 卡片，而 query 已终止。新回合先经过 markRunning（清终态、加回 runningSessions），
+    // 合法 retry 不会被挡住；忽略时也不得清 terminal fallback。
     markApiRetrying(sessionId: string, info: Omit<ApiRetryInfo, 'stopping'>) {
+      if (this.sessionStatus[sessionId] === 'completed' || this.sessionStatus[sessionId] === 'network_interrupted') {
+        return;
+      }
+      if (!this.runningSessions.includes(sessionId)) return;
       this.apiRetryInfo[sessionId] = { ...info, stopping: false };
+      delete this.apiRetryTerminalFallback[sessionId];
     },
     markApiRetryStopping(sessionId: string) {
       const info = this.apiRetryInfo[sessionId];
