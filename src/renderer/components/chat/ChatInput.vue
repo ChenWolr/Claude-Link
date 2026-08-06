@@ -102,10 +102,10 @@ function handleKeydown(e: KeyboardEvent): void {
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault();
+      // 已到首项则保持不动（与 ↓ 到末项不循环对称）；从后续页首项返回上一页末项
+      // 由 selectedSlashIndex > 0 的简单 -1 自然完成（如索引 5 → 4 即上一页末项）。
       if (selectedSlashIndex.value > 0) {
         selectedSlashIndex.value -= 1;
-      } else if (loadedCommandCount.value > COMMANDS_PAGE_SIZE) {
-        selectedSlashIndex.value = Math.max(0, loadedCommandCount.value - COMMANDS_PAGE_SIZE - 1);
       }
       ensureSelectedCommandVisible();
       return;
@@ -133,7 +133,7 @@ function handleKeydown(e: KeyboardEvent): void {
 function selectSlashCommand(cmd: SdkCommand): void {
   emit('update:modelValue', `/${cmd.name} `);
   showSlashMenu.value = false;
-  selectedSlashIndex.value = 0;
+  resetCommandPagination();
 }
 
 function handleInput(e: Event): void {
@@ -157,6 +157,13 @@ function autoResize(): void {
 
 // flush:'post' 确保 DOM 已反映最新 modelValue，scrollHeight 读数准确。
 watch(() => props.modelValue, () => autoResize(), { flush: 'post' });
+
+// 命令数据源变化（commands_changed 全量替换 / re-probe）时回到第一页：
+// 否则旧 selectedSlashIndex 可能越过变短后的 visibleCommands 末端，
+// Enter 选中 undefined → `/${cmd.name}` 崩溃。输入变化由 handleInput 单独 reset。
+watch(() => props.commands, () => {
+  resetCommandPagination();
+});
 
 // 发送：文字或附件至少一项即可（附件-only）。不清 modelValue——由父组件在主进程接受后清空草稿。
 function submit(): void {
@@ -190,6 +197,7 @@ defineExpose({ insertTextAtSelection });
 function handleClickOutside(event: MouseEvent) {
   if (showSlashMenu.value && wrapperRef.value && !wrapperRef.value.contains(event.target as Node)) {
     showSlashMenu.value = false;
+    resetCommandPagination();
   }
 }
 
