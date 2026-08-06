@@ -491,6 +491,11 @@ check('ChatInput 支持滚动触底和键盘跨页', () => {
   assert.ok(src.includes("e.key === 'ArrowUp'"), '应保留 ArrowUp 跨页返回');
 });
 
+check('ChatInput 命令数据源变化时重置分页（防 selectedSlashIndex 越界崩溃）', () => {
+  const src = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'ChatInput.vue'), 'utf8');
+  assert.ok(/watch\(\(\) => props\.commands/.test(src), '应 watch props.commands 变化重置分页');
+});
+
 console.log('=== 12) Task 7 原样发送契约（prepareAttachmentPrompt 纯函数）===');
 // 无附件时 prepareAttachmentPrompt 原样返回 trim 后的用户文字（line 173-180），不加自然语言前缀；
 // 参数内部空白/引号/中文不被改写；alias 手写不被 canonicalize。
