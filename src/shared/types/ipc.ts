@@ -1,6 +1,15 @@
 import type { CliEvent, CliDetectionResult } from './cli';
 import type { AttachmentSummary } from './attachment';
 
+// 命令快照类型 re-export：payload/快照在 ./command 定义，这里对外统一出口（main/preload/renderer 共用）。
+export type {
+  CommandChangedPayload,
+  SessionCommandSnapshot,
+  SdkCommand,
+  CommandSnapshotStatus,
+  CommandSnapshotSource,
+} from './command';
+
 export const IPC_CHANNELS = {
   CLI_DETECT: 'cli:detect',
   CLI_GET_STATUS: 'cli:getStatus',
@@ -76,6 +85,10 @@ export const IPC_CHANNELS = {
   EXPORT_RENDER_PROBE_SELF: 'export-render:probeSelf',
   EXPORT_RENDER_BEGIN_PAGE: 'export-render:beginPage',
   EXPORT_RENDER_FINISH_PAGE: 'export-render:finishPage',
+  // 原生 Slash Commands 命令快照：主进程按 sessionId 维护并清洗；renderer 拉取 + 监听全量替换。
+  // 独立于 CHAT_EVENT——命令能力是 transient 状态，不被当成聊天消息持久化。
+  COMMANDS_GET: 'commands:get',
+  COMMANDS_CHANGED: 'commands:changed',
 } as const;
 
 export const DEFAULT_TASK_DELAY_SECONDS = 60;
