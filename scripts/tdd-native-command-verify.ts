@@ -463,6 +463,34 @@ check('constants 删除静态 SLASH_COMMANDS（SDK 命令为真相源）', () =>
   assert.ok(!src.includes('SLASH_COMMANDS'), 'constants 不应再有 SLASH_COMMANDS');
 });
 
+// Slash Command 菜单分页需求（2026-08-06）：移除独立 / 按钮 + 仅前缀匹配 + 每页 5 项分页 + 滚动/键盘跨页。
+check('ChatInput 移除独立 slash trigger，/ 由输入触发', () => {
+  const src = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'ChatInput.vue'), 'utf8');
+  assert.ok(!src.includes('class="slash-trigger"'), '不应保留独立 slash trigger 按钮');
+  assert.ok(!src.includes('insertSlash'), '不应保留 insertSlash 触发函数');
+});
+
+check('ChatInput 仅按命令名和 alias 前缀匹配', () => {
+  const src = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'ChatInput.vue'), 'utf8');
+  assert.ok(src.includes('startsWith(q)'), '命令名/alias 应使用 startsWith 前缀匹配');
+  assert.ok(!src.includes('.includes(q)'), '不应保留 includes 中间匹配兜底');
+});
+
+check('ChatInput 使用每页 5 项的分页渲染', () => {
+  const src = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'ChatInput.vue'), 'utf8');
+  assert.ok(src.includes('COMMANDS_PAGE_SIZE = 5'), '页面大小应为 5');
+  assert.ok(src.includes('visibleCommands'), '模板应使用分页后的 visibleCommands');
+  assert.ok(src.includes('slice(0, loadedCommandCount'), '可见命令应按 loadedCommandCount 截取');
+});
+
+check('ChatInput 支持滚动触底和键盘跨页', () => {
+  const src = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'ChatInput.vue'), 'utf8');
+  assert.ok(src.includes('@scroll="handleSlashMenuScroll"'), '菜单应监听滚动触底');
+  assert.ok(src.includes('loadNextCommandPage'), '应存在下一页加载函数');
+  assert.ok(src.includes("e.key === 'ArrowDown'"), '应保留 ArrowDown 分页导航');
+  assert.ok(src.includes("e.key === 'ArrowUp'"), '应保留 ArrowUp 跨页返回');
+});
+
 console.log('=== 12) Task 7 原样发送契约（prepareAttachmentPrompt 纯函数）===');
 // 无附件时 prepareAttachmentPrompt 原样返回 trim 后的用户文字（line 173-180），不加自然语言前缀；
 // 参数内部空白/引号/中文不被改写；alias 手写不被 canonicalize。

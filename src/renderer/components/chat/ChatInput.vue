@@ -24,33 +24,60 @@ const showSlashMenu = ref(false);
 const selectedSlashIndex = ref(0);
 const wrapperRef = ref<HTMLElement | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+const slashMenuRef = ref<HTMLElement | null>(null);
 
 // 动态命令菜单：数据源来自父组件传入的当前会话 SDK 命令（command-store active snapshot），
 // 不再依赖静态 SLASH_COMMANDS。仅 / 开头且无参数时联想命令名；alias 与 canonical 都参与匹配。
+const COMMANDS_PAGE_SIZE = 5;
+const loadedCommandCount = ref(COMMANDS_PAGE_SIZE);
+
 const matchingCommands = computed<SdkCommand[]>(() => {
   const parsed = parseSlashInvocation(props.modelValue);
   if (parsed.kind !== 'slash' || parsed.argumentsText.length > 0) return [];
   const q = parsed.commandName.toLowerCase();
   const cmds = filterRenderableCommands(props.commands ?? []);
-  if (!q) return cmds; // 纯 /：列出全部
-  const prefix = cmds.filter(
-    (c) => c.name.toLowerCase().startsWith(q) || c.aliases.some((a) => a.toLowerCase().startsWith(q)),
-  );
-  if (prefix.length) return prefix;
-  return cmds.filter(
-    (c) => c.name.toLowerCase().includes(q) || c.aliases.some((a) => a.toLowerCase().includes(q)),
-  );
+  return q
+    ? cmds.filter(
+        (c) =>
+          c.name.toLowerCase().startsWith(q) ||
+          c.aliases.some((alias) => alias.toLowerCase().startsWith(q)),
+      )
+    : cmds;
 });
 
-// 显式触发命令联想：插入 '/' 并聚焦，让斜杠菜单立刻弹出。
-function insertSlash() {
-  if (!props.modelValue.startsWith('/')) {
-    emit('update:modelValue', '/');
-  }
-  // 始终弹出菜单：有命令显示列表，loading/empty 显示状态提示（普通文本仍可发送）。
-  showSlashMenu.value = true;
+const visibleCommands = computed(() => matchingCommands.value.slice(0, loadedCommandCount.value));
+const hasMoreCommands = computed(() => loadedCommandCount.value < matchingCommands.value.length);
+
+// 分页重置：输入变化或菜单重新打开时回到第一页，并复位选中索引。
+function resetCommandPagination(): void {
+  loadedCommandCount.value = COMMANDS_PAGE_SIZE;
   selectedSlashIndex.value = 0;
-  textareaRef.value?.focus();
+}
+
+// 触底/跨页时追加下一页（每页 5 项），并以完整匹配结果长度封顶，不发起 IPC、不改命令 store。
+function loadNextCommandPage(): void {
+  if (!hasMoreCommands.value) return;
+  loadedCommandCount.value = Math.min(
+    loadedCommandCount.value + COMMANDS_PAGE_SIZE,
+    matchingCommands.value.length,
+  );
+}
+
+// 键盘跨页后把新选中项滚入菜单可视区域（block:'nearest' 不强制整体滚动）。
+function ensureSelectedCommandVisible(): void {
+  nextTick(() => {
+    const menu = slashMenuRef.value;
+    const item = menu?.querySelector<HTMLElement>('.slash-menu__item.active');
+    item?.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+// 菜单滚动触底（容差 8px）时追加下一页；不一次性把完整结果复制到模板。
+function handleSlashMenuScroll(e: Event): void {
+  const menu = e.currentTarget as HTMLElement;
+  if (menu.scrollTop + menu.clientHeight >= menu.scrollHeight - 8) {
+    loadNextCommandPage();
+  }
 }
 
 // 鼠标悬停与键盘选中保持同步，避免悬停高亮和回车选中不一致。
@@ -59,26 +86,39 @@ function hoverCommand(i: number) {
 }
 
 function handleKeydown(e: KeyboardEvent): void {
-  if (showSlashMenu.value && matchingCommands.value.length > 0) {
+  if (showSlashMenu.value && visibleCommands.value.length > 0) {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      selectedSlashIndex.value = (selectedSlashIndex.value + 1) % matchingCommands.value.length;
+      const lastVisibleIndex = visibleCommands.value.length - 1;
+      if (selectedSlashIndex.value < lastVisibleIndex) {
+        selectedSlashIndex.value += 1;
+      } else if (hasMoreCommands.value) {
+        const previousCount = loadedCommandCount.value;
+        loadNextCommandPage();
+        selectedSlashIndex.value = previousCount;
+      }
+      ensureSelectedCommandVisible();
       return;
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault();
-      selectedSlashIndex.value =
-        (selectedSlashIndex.value - 1 + matchingCommands.value.length) % matchingCommands.value.length;
+      if (selectedSlashIndex.value > 0) {
+        selectedSlashIndex.value -= 1;
+      } else if (loadedCommandCount.value > COMMANDS_PAGE_SIZE) {
+        selectedSlashIndex.value = Math.max(0, loadedCommandCount.value - COMMANDS_PAGE_SIZE - 1);
+      }
+      ensureSelectedCommandVisible();
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      selectSlashCommand(matchingCommands.value[selectedSlashIndex.value]);
+      selectSlashCommand(visibleCommands.value[selectedSlashIndex.value]);
       return;
     }
     if (e.key === 'Escape') {
       e.preventDefault();
       showSlashMenu.value = false;
+      resetCommandPagination();
       return;
     }
   }
@@ -102,7 +142,7 @@ function handleInput(e: Event): void {
   // 菜单：仅 / 开头且无参数（参数输入阶段关闭联想）。loading/empty 仍显示状态提示。
   const parsed = parseSlashInvocation(value);
   showSlashMenu.value = parsed.kind === 'slash' && parsed.argumentsText.length === 0;
-  selectedSlashIndex.value = 0;
+  resetCommandPagination();
 }
 
 // 输入框自适应高度：随内容增高，最多约 4 行（CSS max-height 封顶），超出则内部滚动。
@@ -168,9 +208,14 @@ onUnmounted(() => {
 
 <template>
   <div ref="wrapperRef" class="chat-input-wrapper">
-    <div v-if="showSlashMenu" class="slash-menu">
+    <div
+      v-if="showSlashMenu"
+      ref="slashMenuRef"
+      class="slash-menu"
+      @scroll="handleSlashMenuScroll"
+    >
       <div
-        v-for="(cmd, i) in matchingCommands"
+        v-for="(cmd, i) in visibleCommands"
         :key="cmd.name"
         :class="['slash-menu__item', { active: i === selectedSlashIndex }]"
         @click="selectSlashCommand(cmd)"
@@ -186,12 +231,6 @@ onUnmounted(() => {
       <div v-else-if="commandStatus === 'stale'" class="slash-menu__hint">可能不是最新</div>
     </div>
     <div class="chat-input">
-      <button
-        type="button"
-        class="slash-trigger"
-        title="插入命令（/ 开头自动联想，↑↓ 选择，回车确认）"
-        @click="insertSlash"
-      >/</button>
       <textarea
         ref="textareaRef"
         :value="modelValue"
@@ -214,9 +253,12 @@ onUnmounted(() => {
 .slash-menu {
   position: absolute;
   bottom: 100%;
-  left: 1.5rem;
-  right: 1.5rem;
-  max-width: 28rem;
+  left: 0;
+  right: 0;
+  /* 最多容纳 5 项（每项约 2.5rem + 4 个 2px gap + 上下 0.5rem padding）后内部滚动，
+     触底由 handleSlashMenuScroll 追加下一页。 */
+  max-height: calc((0.5rem * 2) + (2px * 4) + (2.5rem * 5));
+  overflow-y: auto;
   z-index: 50;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -303,23 +345,5 @@ button {
 button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
-}
-
-.slash-trigger {
-  align-self: flex-end;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-panel-soft);
-  color: var(--color-text-muted);
-  padding: 10px 14px;
-  font-weight: 700;
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.slash-trigger:hover {
-  color: var(--color-accent-strong);
-  border-color: var(--color-accent);
 }
 </style>
