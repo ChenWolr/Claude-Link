@@ -46,6 +46,7 @@ import type { ClaudePlanTask, ClaudePlanState, ClaudePlanTaskPatch } from '../..
 import * as claudePlanRepo from '../database/repositories/claude-plan-repo';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
+import type { CommandChangedPayload, SessionCommandSnapshot } from '../../shared/types/command';
 import type {
   CliEvent,
   CliMessageContentPart,
@@ -86,6 +87,8 @@ import {
   type PermissionUpdate,
   type SdkPermissionSettings,
 } from './sdk-permissions';
+import { sdkCommandRegistry } from './sdk-command-registry';
+import { mergeSpawnOptions } from './sdk-command-options';
 import { isSubAgentToolUse } from '../../shared/process-kind';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
 import {
@@ -111,6 +114,9 @@ void persistMessageParts;
 // prompt 与 Agent SDK 对齐：纯文字 string；含图片时 AsyncIterable<SDKUserMessage>。
 type Query = AsyncGenerator<Record<string, unknown>, void> & {
   interrupt(): Promise<void>;
+  // 原生 Slash Commands：init 后调用，返回当前 SDK 可用 SlashCommand[]（sdk.d.ts:2294）。
+  // 可选——调用前判断函数存在；不存在时回退 init 名称级快照，不让聊天失败（Task 4 Step 1）。
+  supportedCommands?: () => Promise<unknown[]>;
   getContextUsage(): Promise<{
     maxTokens: number;
     rawMaxTokens: number;
@@ -432,12 +438,16 @@ export function markSessionDeleted(sessionId: string): void {
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
   contextUsageDiagnosed.delete(sessionId);
+  // 原生 Slash Commands：会话删除时取消正在进行的命令探测并清理快照，避免 stale 命令堆积与 A/B 串扰。
+  // cancelCommandProbeInternal 用 0 超时 fire-and-forget（abort 同步触发，probe 异步自行退出）。
+  void cancelCommandProbeInternal(sessionId, 0);
+  sdkCommandRegistry.clear(sessionId);
   cleanupToolUseCache(sessionId);
   cleanupSessionStall(sessionId);
   apiRetryStates.delete(sessionId);
   sessionThinkingTokenThrottle.delete(sessionId);
 }
-function markSessionActive(sessionId: string): void {
+export function markSessionActive(sessionId: string): void {
   activeSessions.add(sessionId);
 }
 function isSessionActive(sessionId: string): boolean {
@@ -908,6 +918,45 @@ function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: C
   }
 }
 
+// 原生 Slash Commands：把 registry 快照经独立 COMMANDS_CHANGED IPC 推前端（不落库、不进 CHAT_EVENT）。
+// 带 isSessionActive 守卫——迟到事件对已删除会话无效（计划 Task 4 §3/§7）。
+function emitCommandChanged(sessionId: string, mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
+  if (!isSessionActive(sessionId)) return;
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.COMMANDS_CHANGED, { sessionId, snapshot } as CommandChangedPayload);
+  } catch {
+    // webContents 可能已销毁（窗口关闭），忽略
+  }
+}
+
+// Task 8：本地命令输出（local_command_output）主进程单一落库。参照 persistApiRetryTerminal：
+// createMessage（role:system, processKind 'system:local_command_output'）+ 推 persisted_message 让 renderer upsert。
+// renderer 不二次落库；result.result 走现有 result 终态兜底（两者并存）。
+function persistLocalCommandOutput(sessionId: string, mainWindow: BrowserWindow, content: string): void {
+  if (!isSessionActive(sessionId)) return;
+  let message: ReturnType<typeof messageRepo.createMessage>;
+  try {
+    message = messageRepo.createMessage({
+      sessionId,
+      role: 'system',
+      content,
+      eventType: 'system',
+      processKind: 'system:local_command_output',
+    });
+  } catch (err) {
+    logger.error(`Failed to persist local_command_output [${sessionId}]`, err);
+    return;
+  }
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: { type: 'persisted_message', message },
+    });
+  } catch {
+    // webContents 可能已销毁（窗口关闭），忽略
+  }
+}
+
 const RETRY_PROCESS_KIND: Record<ApiRetryTerminalKind, string> = {
   recovered: 'system:api_retry_recovered',
   user_stopped: 'system:api_retry_stopped',
@@ -1365,6 +1414,515 @@ async function startSdkQuery(prompt: SdkPrompt, options: Record<string, unknown>
   return sdk.query({ prompt, options });
 }
 
+// ── 原生 Slash Commands 命令发现（Task 4）─────────────────────────────
+// 新会话创建后立即在后台独立 probe（Task 1 实测可行：shouldQuery:false 单条消息收到 init +
+// supportedCommands 返回 29 命令，无真实模型回合）。不写 sessionCliIds、不进聊天 entries、不落库、
+// 不发真实用户 prompt；有自己的 AbortController/超时/cleanup。CHAT_SEND 触发真实 query 前取消。
+
+// control-only prompt：单条 shouldQuery:false 的 SDKUserMessage——追加到 transcript 但不触发 assistant
+// 回合（sdk.d.ts:4206）。Task 1 probe B 路径已验证可行。
+function controlPromptIterable(): AsyncIterable<SDKUserMessage> {
+  return (async function* () {
+    yield {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text: 'claude-link command discovery probe' }] },
+      parent_tool_use_id: null,
+      shouldQuery: false,
+    } as SDKUserMessage;
+    // 不再 yield：保持 query 存活到 supportedCommands 返回，由 finally / cancelCommandProbe 收尾。
+  })();
+}
+
+// probe 用的 SDK options：复用 buildSdkOptions 的会话上下文（F2 修复）——model override / settings 投影 /
+// permissions（含会话级权限更新）/ additionalDirectories / thinking / effort / cwd / contextWindow，
+// 保证 supportedCommands 返回与「用户随后真实聊天 query」一致的命令集合。control-only 不触发回合，
+// 因此不注入 canUseTool / onElicitation / onUserDialog（无交互）。
+function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options: Record<string, unknown>; exe: string | undefined } {
+  const config = getConfig();
+  const exe = resolveExecutable(config.cliPath);
+  const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
+  const thinkingConfig = resolveThinkingConfig(effectiveLevel);
+  const options: Record<string, unknown> = {
+    env: buildSpawnEnv(),
+    pathToClaudeCodeExecutable: exe,
+    settingSources: [],
+    thinking: thinkingConfig.thinking,
+  };
+  if (thinkingConfig.effort) options.effort = thinkingConfig.effort;
+
+  const requestedAlias = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
+  options.model = resolveAliasToActualModel(requestedAlias, config.advancedJson);
+
+  if (opts.workingDir) options.cwd = opts.workingDir;
+  else if (config.workingDirectory) options.cwd = config.workingDirectory;
+
+  if (opts.maxTurns && opts.maxTurns > 0) options.maxTurns = opts.maxTurns;
+
+  if (opts.permissionMode && opts.permissionMode !== 'default') {
+    options.permissionMode = opts.permissionMode;
+    if (opts.permissionMode === 'bypassPermissions') {
+      options.allowDangerouslySkipPermissions = true;
+    }
+  }
+
+  // 内联 settings 完整投影（含 hooks/env/permissions），与 buildSdkOptions 一致（F2）。
+  const settings = buildClaudeSettingsProjection(config);
+  const settingsEnv = settings.env as Record<string, string>;
+  const userWindow = lookupUserContextWindow({
+    aliasOrModel: requestedAlias,
+    advancedJson: config.advancedJson,
+    contextWindowByAlias: config.contextWindowByAlias,
+  });
+  if (typeof userWindow === 'number' && userWindow > 0) {
+    const clamped = Math.max(100000, Math.min(1000000, userWindow));
+    settingsEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(clamped);
+  }
+
+  const permissions = applySessionPermissionUpdates(sessionId, settings.permissions as SdkPermissionSettings);
+  const mergedDirs = new Set<string>();
+  for (const dir of permissions.additionalDirectories ?? []) {
+    if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
+  }
+  for (const dir of opts.additionalDirectories ?? []) {
+    if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
+  }
+  if (mergedDirs.size > 0) {
+    const dirs = [...mergedDirs];
+    options.additionalDirectories = dirs;
+    permissions.additionalDirectories = dirs;
+  }
+  options.settings = { ...settings, permissions };
+
+  if (thinkingConfig.settingsPatch) {
+    Object.assign(options.settings as Record<string, unknown>, thinkingConfig.settingsPatch);
+  }
+
+  return { options, exe };
+}
+
+interface CommandProbeEntry {
+  query: Query | null;
+  abortController: AbortController;
+  aborted: boolean;
+  queryInstance: number;
+  donePromise: Promise<void>;
+  resolveDone: () => void;
+}
+const commandProbes = new Map<string, CommandProbeEntry>();
+const nextProbeInstance = { value: 1 };
+
+function isCurrentProbe(sessionId: string, entry: CommandProbeEntry): boolean {
+  return commandProbes.get(sessionId) === entry;
+}
+
+/**
+ * 新会话创建后立即在后台发起命令发现。成功 → registry 全量写入 source:'probe' 快照并推 COMMANDS_CHANGED；
+ * 失败/无 exe → degraded（保留缓存命令）；SDK 无 supportedCommands → degraded（由真实 query init 兜底）。
+ * 不阻塞普通聊天；返回的 Promise 在 probe 结束后 resolve。
+ */
+export async function startCommandProbe(sessionId: string, mainWindow: BrowserWindow, opts: SpawnOptions = {}): Promise<void> {
+  // N3：先等待已有 probe 取消结束（有限超时），避免两个 probe 并发创建/退出 Claude Code 进程。
+  await cancelCommandProbeInternal(sessionId, 1000);
+  // N5：重启后打开已有会话时 activeSessions 为空（markSessionActive 只在 SESSION_CREATE / spawnForChat /
+  // spawnForTask 调用），probe 不应因此被拦截。会话存活的判据是「内存活跃 或 DB 中真实存在（未删除）」；
+  // 删除会话会同时撤销 activeSessions 登记与 DB 记录。getSession 结果同时供下方 N1 配置合并复用。
+  let sessionFromDb: ReturnType<typeof sessionRepo.getSession> = null;
+  try {
+    sessionFromDb = sessionRepo.getSession(sessionId);
+  } catch (e) {
+    logger.warn(`[${sessionId}] 读取会话失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!isSessionActive(sessionId) && !sessionFromDb) return;
+  // N3：活跃聊天 query 时不并发启动 probe——只标 stale（真实 query init 会兜底发现命令）。
+  if (isEntryActive(entries.get(sessionId))) {
+    emitCommandChanged(sessionId, mainWindow, sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'stale'));
+    return;
+  }
+  // N1：增量 opts（SESSION_UPDATE 只传 patch）用完整 Session 配置补全，保证探测上下文与会话一致。
+  const fullOpts = mergeSpawnOptions(sessionFromDb, opts);
+  // O1：buildProbeSdkOptions 内部（模型映射/settings 投影/权限更新）异常时兜底 degraded，
+  // fire-and-forget 不允许 unhandled rejection。
+  let probeSdk: { options: Record<string, unknown>; exe: string | undefined };
+  try {
+    probeSdk = buildProbeSdkOptions(fullOpts, sessionId);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    const snap = sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'degraded', `命令探测失败：${message}`);
+    emitCommandChanged(sessionId, mainWindow, snap);
+    return;
+  }
+  const { options, exe } = probeSdk;
+  if (!exe) {
+    const snap = sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'degraded', '未检测到本地 Claude Code，无法发现 Slash 命令');
+    emitCommandChanged(sessionId, mainWindow, snap);
+    return;
+  }
+  // F3：工作目录/会话设置变化导致的重新探测——已有 ready/degraded 快照标 stale（保留旧命令供本地
+  // 过滤，UI 显示“可能不是最新”），无快照则 loading。
+  if (!sdkCommandRegistry.has(sessionId)) {
+    emitCommandChanged(sessionId, mainWindow, sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'loading'));
+  } else if (
+    sdkCommandRegistry.get(sessionId).status === 'ready' ||
+    sdkCommandRegistry.get(sessionId).status === 'degraded'
+  ) {
+    emitCommandChanged(sessionId, mainWindow, sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'stale'));
+  }
+  let resolveDone!: () => void;
+  const donePromise = new Promise<void>((r) => {
+    resolveDone = r;
+  });
+  const entry: CommandProbeEntry = {
+    query: null,
+    abortController: new AbortController(),
+    aborted: false,
+    queryInstance: ++nextProbeInstance.value,
+    donePromise,
+    resolveDone,
+  };
+  commandProbes.set(sessionId, entry);
+  void runCommandProbe(sessionId, mainWindow, options, entry);
+  await donePromise;
+}
+
+const PROBE_TIMEOUT_MS = 30_000;
+const SUPPORTED_COMMANDS_TIMEOUT_MS = 8_000;
+
+async function runCommandProbe(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  options: Record<string, unknown>,
+  entry: CommandProbeEntry,
+): Promise<void> {
+  const hardTimer = setTimeout(() => {
+    entry.aborted = true;
+    try {
+      entry.abortController.abort();
+    } catch {
+      // ignore
+    }
+  }, PROBE_TIMEOUT_MS);
+  try {
+    const query = await startSdkQuery(controlPromptIterable(), { ...options, abortController: entry.abortController });
+    if (entry.aborted || !isSessionActive(sessionId) || !isCurrentProbe(sessionId, entry)) {
+      try {
+        await query.interrupt();
+      } catch {
+        // ProcessTransport not ready → ignore
+      }
+      return;
+    }
+    entry.query = query;
+    for await (const msg of query) {
+      if (!isSessionActive(sessionId) || !isCurrentProbe(sessionId, entry) || entry.aborted) break;
+      const t = msg.type as string;
+      const st = msg.subtype as string | undefined;
+      if (t === 'system' && st === 'init') {
+        await resolveAndApplyProbeCommands(sessionId, mainWindow, query, entry);
+        break; // 拿到命令即退出消费循环
+      }
+    }
+  } catch (e) {
+    if (isSessionActive(sessionId) && isCurrentProbe(sessionId, entry)) {
+      const message = e instanceof Error ? e.message : String(e);
+      const snap = sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'degraded', `命令探测失败：${message}`);
+      emitCommandChanged(sessionId, mainWindow, snap);
+    }
+  } finally {
+    clearTimeout(hardTimer);
+    // Task 1 实测：流结束后 interrupt 会抛 ProcessTransport is not ready for writing → catch ignore；
+    // abortController.abort() 作为硬杀兜底（与 runQuery 一致）。
+    try {
+      await entry.query?.interrupt();
+    } catch {
+      // ignore
+    }
+    try {
+      entry.abortController.abort();
+    } catch {
+      // ignore
+    }
+    if (isCurrentProbe(sessionId, entry)) commandProbes.delete(sessionId);
+    entry.resolveDone();
+  }
+}
+
+async function resolveAndApplyProbeCommands(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  query: Query,
+  entry: CommandProbeEntry,
+): Promise<void> {
+  if (typeof query.supportedCommands !== 'function') {
+    if (isSessionActive(sessionId) && isCurrentProbe(sessionId, entry)) {
+      const snap = sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'degraded', 'SDK 不支持 supportedCommands');
+      emitCommandChanged(sessionId, mainWindow, snap);
+    }
+    return;
+  }
+  const startRev = sdkCommandRegistry.getRevision(sessionId);
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const rawCommands = await Promise.race([
+      query.supportedCommands(),
+      new Promise<never>((_, reject) => {
+        // O3：记录定时器句柄，supportedCommands 先 resolve 时在 finally 清理。
+        timeoutTimer = setTimeout(() => reject(new Error('supportedCommands timeout')), SUPPORTED_COMMANDS_TIMEOUT_MS);
+      }),
+    ]);
+    // F4：只有仍是启动时代际（期间无 commands_changed 等 replace）才写入，防旧 probe 覆盖新列表。
+    if (
+      isSessionActive(sessionId) &&
+      isCurrentProbe(sessionId, entry) &&
+      sdkCommandRegistry.getRevision(sessionId) === startRev
+    ) {
+      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(rawCommands) ? rawCommands : [], 'probe');
+      emitCommandChanged(sessionId, mainWindow, snap);
+    }
+  } catch (e) {
+    if (isSessionActive(sessionId) && isCurrentProbe(sessionId, entry)) {
+      const message = e instanceof Error ? e.message : String(e);
+      const snap = sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'degraded', `supportedCommands 失败：${message}`);
+      emitCommandChanged(sessionId, mainWindow, snap);
+    }
+  } finally {
+    clearTimeout(timeoutTimer);
+  }
+}
+
+/**
+ * 取消某会话的命令探测并等待其结束（有限超时）。CHAT_SEND 触发真实 query 前调用，保证 probe 与真实
+ * query 不并行（Task 4 §7）。取消失败不阻塞普通发送超过短超时。
+ */
+export async function cancelCommandProbe(sessionId: string, timeoutMs = 1_500): Promise<void> {
+  await cancelCommandProbeInternal(sessionId, timeoutMs);
+}
+
+async function cancelCommandProbeInternal(sessionId: string, timeoutMs: number): Promise<void> {
+  const entry = commandProbes.get(sessionId);
+  if (!entry) return;
+  entry.aborted = true;
+  try {
+    entry.abortController.abort();
+  } catch {
+    // ignore
+  }
+  try {
+    await entry.query?.interrupt();
+  } catch {
+    // ProcessTransport not ready → ignore
+  }
+  await Promise.race([entry.donePromise, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+}
+
+// ── 启动全局兜底命令探测（无会话绑定）──
+// app.whenReady 后跑一次：复用 buildProbeSdkOptions（哨兵 sessionId，applySessionPermissionUpdates
+// 无害退化）+ startSdkQuery + controlPromptIterable。结果写入 registry.globalFallback，作为「无 per-session
+// 快照会话」的兜底（重启后旧会话立即可用 + 探测异常容错）。per-session 快照永远优先。
+// 不走 per-session 的 isSessionActive 守卫 / revision / commandProbes map；启动只跑一次（幂等）。
+const GLOBAL_PROBE_SESSION_ID = '__global_command_probe__';
+
+interface GlobalProbeEntry {
+  query: Query | null;
+  abortController: AbortController;
+  donePromise: Promise<void>;
+  resolveDone: () => void;
+}
+let globalProbe: GlobalProbeEntry | null = null;
+
+/** 启动一次全局兜底命令探测（幂等：已有在跑则跳过）。fire-and-forget 调用。 */
+export function runGlobalCommandProbe(mainWindow: BrowserWindow): void {
+  if (globalProbe) return;
+  let resolveDone!: () => void;
+  const donePromise = new Promise<void>((r) => {
+    resolveDone = r;
+  });
+  const entry: GlobalProbeEntry = {
+    query: null,
+    abortController: new AbortController(),
+    donePromise,
+    resolveDone,
+  };
+  globalProbe = entry;
+  void runGlobalCommandProbeInternal(mainWindow, entry);
+}
+
+async function runGlobalCommandProbeInternal(mainWindow: BrowserWindow, entry: GlobalProbeEntry): Promise<void> {
+  const hardTimer = setTimeout(() => {
+    try {
+      entry.abortController.abort();
+    } catch {
+      // ignore
+    }
+  }, PROBE_TIMEOUT_MS);
+  try {
+    // 复用 probe 的 options builder（空 SpawnOptions + 哨兵 sessionId）：仅构造内存 options.settings，不写盘；
+    // applySessionPermissionUpdates 对未知 sessionId 查表返回 undefined → 原样 permissions。
+    let probeSdk: { options: Record<string, unknown>; exe: string | undefined };
+    try {
+      probeSdk = buildProbeSdkOptions({}, GLOBAL_PROBE_SESSION_ID);
+    } catch (e) {
+      logger.warn(`[global-probe] 构建探测选项失败：${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    const { options, exe } = probeSdk;
+    if (!exe) return; // 无 CLI：不写 degraded，留给 per-session 处理
+    const query = await startSdkQuery(controlPromptIterable(), { ...options, abortController: entry.abortController });
+    if (entry.abortController.signal.aborted) {
+      try {
+        await query.interrupt();
+      } catch {
+        // ignore
+      }
+      return;
+    }
+    entry.query = query;
+    for await (const msg of query) {
+      if (entry.abortController.signal.aborted) break;
+      const t = msg.type as string;
+      const st = msg.subtype as string | undefined;
+      if (t === 'system' && st === 'init') {
+        await applyGlobalProbeCommands(mainWindow, query, entry);
+        break; // 拿到命令即退出消费循环
+      }
+    }
+  } catch (e) {
+    logger.warn(`[global-probe] 探测失败：${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    clearTimeout(hardTimer);
+    try {
+      await entry.query?.interrupt();
+    } catch {
+      // ProcessTransport not ready → ignore
+    }
+    try {
+      entry.abortController.abort();
+    } catch {
+      // ignore
+    }
+    if (globalProbe === entry) globalProbe = null;
+    entry.resolveDone();
+  }
+}
+
+async function applyGlobalProbeCommands(
+  mainWindow: BrowserWindow,
+  query: Query,
+  entry: GlobalProbeEntry,
+): Promise<void> {
+  if (typeof query.supportedCommands !== 'function') return;
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const rawCommands = await Promise.race([
+      query.supportedCommands(),
+      new Promise<never>((_, reject) => {
+        // O3：记录定时器句柄，supportedCommands 先 resolve 时在 finally 清理。
+        timeoutTimer = setTimeout(() => reject(new Error('supportedCommands timeout')), SUPPORTED_COMMANDS_TIMEOUT_MS);
+      }),
+    ]);
+    if (entry.abortController.signal.aborted) return;
+    // 写入全局兜底（内部清洗 + 去重，与 replace 同款）。
+    sdkCommandRegistry.setGlobalFallback(Array.isArray(rawCommands) ? rawCommands : [], 'probe');
+    // 回填（N7）：globalFallback 就绪后，对 activeSessions 中「命令仍为空」的会话补推兜底命令。不按 has(sid)
+    // 判断——loading/degraded 已写入 snapshots 使 has 为 true，但命令可能仍空（probe 进行中/失败/兜底晚到）。
+    // 按 commands 空判断：保留该会话当前 status（loading/degraded），用 setStatusPreservingCommands 补 cache 命令不清空。
+    const fallback = sdkCommandRegistry.getGlobalFallback();
+    if (fallback && fallback.commands.length > 0) {
+      for (const sid of activeSessions) {
+        const current = sdkCommandRegistry.get(sid);
+        if (current.commands.length > 0) continue; // 已有命令（per-session ready 或已回填 cache），跳过
+        const snap = sdkCommandRegistry.setStatusPreservingCommands(sid, current.status);
+        emitCommandChanged(sid, mainWindow, snap);
+      }
+    }
+  } catch (e) {
+    logger.warn(`[global-probe] supportedCommands 失败：${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    clearTimeout(timeoutTimer);
+  }
+}
+
+/** 取消全局兜底探测并等待其结束（有限超时）。app 退出时调用，避免孤儿 claude 子进程。 */
+export async function cancelGlobalCommandProbe(timeoutMs = 500): Promise<void> {
+  const entry = globalProbe;
+  if (!entry) return;
+  try {
+    entry.abortController.abort();
+  } catch {
+    // ignore
+  }
+  try {
+    await entry.query?.interrupt();
+  } catch {
+    // ProcessTransport not ready → ignore
+  }
+  await Promise.race([entry.donePromise, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+}
+
+// Task 4 §2/§3：真实 query init 兜底命令发现。probe 是主路径（新会话创建即跑）；此处仅当 probe 未就绪
+// （失败/未跑/SDK 不支持，snapshot 非 ready）时：先用 init.slash_commands 写名称级早期快照（source:'init'），
+// 再异步调 supportedCommands 补完整描述。probe 已 ready 则跳过（commands_changed 负责后续刷新）。
+async function maybeDiscoverCommandsFromInit(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  entry: SessionEntry,
+  sdkMsg: Record<string, unknown>,
+  query: Query,
+): Promise<void> {
+  if (!isSessionActive(sessionId) || !isCurrentEntry(sessionId, entry)) return;
+  if (sdkCommandRegistry.get(sessionId).status === 'ready') return;
+  // init.slash_commands 是名称级字符串数组（sdk.d.ts:4060）；作为早期快照，仅当该会话尚无任何命令时写入。
+  if (Array.isArray(sdkMsg.slash_commands)) {
+    const names = (sdkMsg.slash_commands as unknown[]).filter(
+      (n): n is string => typeof n === 'string' && n.trim().length > 0,
+    );
+    if (names.length > 0 && sdkCommandRegistry.get(sessionId).commands.length === 0) {
+      const initCmds: unknown[] = names.map((n) => ({
+        name: n.replace(/^\/+/, ''),
+        description: '',
+        argumentHint: '',
+        aliases: [],
+        source: 'sdk',
+      }));
+      const snap = sdkCommandRegistry.replace(sessionId, initCmds, 'init');
+      emitCommandChanged(sessionId, mainWindow, snap);
+    }
+  }
+  const startRev = sdkCommandRegistry.getRevision(sessionId);
+  if (typeof query.supportedCommands !== 'function') return;
+  let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const raw = await Promise.race([
+      query.supportedCommands(),
+      new Promise<never>((_, reject) => {
+        // O3：记录定时器句柄，supportedCommands 先 resolve 时在 finally 清理。
+        timeoutTimer = setTimeout(() => reject(new Error('supportedCommands timeout')), SUPPORTED_COMMANDS_TIMEOUT_MS);
+      }),
+    ]);
+    // F4：只有仍是启动时代际（期间无 commands_changed 等 replace）才写入，防止 init 旧 probe 覆盖新列表。
+    if (
+      isSessionActive(sessionId) &&
+      isCurrentEntry(sessionId, entry) &&
+      sdkCommandRegistry.getRevision(sessionId) === startRev
+    ) {
+      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(raw) ? raw : [], 'probe');
+      emitCommandChanged(sessionId, mainWindow, snap);
+    }
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    logger.warn(`[${sessionId}] supportedCommands (init fallback) failed: ${message}`);
+    if (
+      isSessionActive(sessionId) &&
+      isCurrentEntry(sessionId, entry) &&
+      sdkCommandRegistry.get(sessionId).commands.length === 0
+    ) {
+      const snap = sdkCommandRegistry.setStatusPreservingCommands(sessionId, 'degraded', `命令发现失败：${message}`);
+      emitCommandChanged(sessionId, mainWindow, snap);
+    }
+  } finally {
+    clearTimeout(timeoutTimer);
+  }
+}
+
 function clearResumeSessionId(sessionId: string): void {
   sessionCliIds.delete(sessionId);
   if (!isSessionActive(sessionId)) return;
@@ -1388,6 +1946,9 @@ async function runQuery(
 ): Promise<void> {
   const { emitExit, emitError } = entry;
   try {
+    // Task 4 §7：真实 query 启动前取消该会话的命令探测并等待其结束（有限超时），保证 probe 与真实
+    // query 不并行。取消失败不阻塞普通发送超过 cancelCommandProbe 的短超时。
+    await cancelCommandProbe(sessionId);
     entry.query = null;
 
   // spawn 前若已有旧 query（同 session），先中断并移除——与 process-manager 的 killProcess 一致。
@@ -1541,6 +2102,8 @@ async function runQuery(
                 logger.warn(`[${sessionId}] getContextUsage 诊断失败：${e instanceof Error ? e.message : String(e)}`);
               });
           }
+          // Task 4 §2/§3：命令发现兜底——probe 未就绪时用 init.slash_commands + supportedCommands 补全。
+          void maybeDiscoverCommandsFromInit(sessionId, mainWindow, entry, sdkMsg, query);
           continue;
         }
         // 系统横幅（informational / compact_boundary / plugin_install）：转发并落库。
@@ -1675,6 +2238,25 @@ async function runQuery(
             };
             forwardTransient(sessionId, mainWindow, sysInfo);
           }
+          continue;
+        }
+        // Task 4 §4：commands_changed——命令列表中途变化（skills 动态发现等）。SDK 官定客户端应 REPLACE
+        // 缓存列表（sdk.d.ts:2751），不重新调 supportedCommands（其只反映 init 时快照）。registry 全量替换，
+        // source:'changed'，不落库、不走 CHAT_EVENT（走独立 COMMANDS_CHANGED IPC）。
+        if (subtype === 'commands_changed') {
+          const rawCommands = Array.isArray(sdkMsg.commands) ? sdkMsg.commands : [];
+          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed');
+          emitCommandChanged(sessionId, mainWindow, snap);
+          continue;
+        }
+        // Task 8：local_command_output——本地命令（/clear /help 等）的输出。主进程单一落库
+        // （role:system, processKind 'system:local_command_output'），renderer 按 persisted_message upsert，
+        // 不二次落库。content 为 string 时原样；非 string 安全 JSON.stringify；不靠正文正则猜命令名。
+        // result.result 走现有 result 终态（/usage 等结果只出现在 result.result，见 §0.1-9），两者并存。
+        if (subtype === 'local_command_output') {
+          const rawContent = sdkMsg.content;
+          const content = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent ?? '');
+          persistLocalCommandOutput(sessionId, mainWindow, content);
           continue;
         }
         // 其它未知 system 子类型：暂不转发（前端不消费）。
