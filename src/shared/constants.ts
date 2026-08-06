@@ -195,23 +195,3 @@ export const THEME_PALETTES: ThemePalette[] = [
     },
   },
 ];
-
-export interface SlashCommand {
-  name: string;
-  description: string;
-  example?: string;
-}
-
-export const SLASH_COMMANDS: SlashCommand[] = [
-  { name: '/init', description: '初始化项目配置（生成 CLAUDE.md）' },
-  { name: '/cost', description: '显示当前会话的累计费用与 Token 用量' },
-  { name: '/compact', description: '压缩对话上下文，释放 Token 占用' },
-  { name: '/clear', description: '清空当前对话历史' },
-  { name: '/resume', description: '恢复/切换到指定历史会话' },
-  { name: '/model', description: '查看或切换当前使用的模型' },
-  { name: '/help', description: '显示可用命令与帮助信息' },
-  { name: '/config', description: '打开配置界面' },
-  { name: '/doctor', description: '检查 Claude Code CLI 健康状态' },
-  { name: '/status', description: '显示当前会话与账号状态' },
-  { name: '/review', description: '审查代码变更' },
-];

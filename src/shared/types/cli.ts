@@ -1,5 +1,6 @@
 import type { ApiRetryTerminalDetailsV1, ApiRetryTerminalKind } from '../api-retry-state';
 import type { StallInfo } from '../stall-watchdog';
+import type { SdkCommand } from './command';
 import type { Message } from './session';
 
 export interface CliInitEvent {
@@ -275,6 +276,27 @@ export interface CliApiRetryTerminalFallbackEvent {
   summary: string;
   details: ApiRetryTerminalDetailsV1;
   persisted: false;
+}
+
+// 原生 Slash Commands：命令列表中途变化（skills 被动态发现等）。
+// 主进程识别后走独立 COMMANDS_CHANGED IPC（registry 全量替换 + 推 snapshot），不经过 forwardEvent /
+// persistCliEvent——它是 transient 能力事件，落库会污染 messages。此处仅文档化 SDK 事件形态
+// （对应 sdk.d.ts SDKCommandsChangedMessage），故不加入 CliEvent 联合。
+export interface CliCommandsChangedEvent {
+  type: 'system';
+  subtype: 'commands_changed';
+  commands: SdkCommand[];
+  session_id: string;
+}
+
+// 原生命令输出（如 /usage 的本地结果）。Task 8 接入主进程单一落库（role:system，
+// processKind 'system:local_command_output'）；此处先文档化，暂不加入 CliEvent 联合。
+// content 是 string 时原样；非 string 由主进程安全 JSON.stringify；不靠正文正则猜命令名。
+export interface CliLocalCommandOutputEvent {
+  type: 'system';
+  subtype: 'local_command_output';
+  content: string;
+  command?: string;
 }
 
 export type CliEvent =
