@@ -6,7 +6,7 @@ import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
 import { detectCli } from './modules/cli-detector';
-import { killAllProcesses } from './modules/sdk-backend';
+import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe } from './modules/sdk-backend';
 import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
 import {
@@ -109,6 +109,12 @@ app.whenReady().then(async () => {
 
   createWindow();
 
+  // 启动全局兜底命令探测（无会话绑定）：结果写入 registry.globalFallback，作为重启后旧会话的命令兜底。
+  // fire-and-forget；完成时对已打开且无 per-session 快照的会话回填。CLI 缺失/失败均不阻塞启动。
+  if (mainWindow) {
+    runGlobalCommandProbe(mainWindow);
+  }
+
   // 阶段二 fixture smoke：env CLAUDE_LINK_EXPORT_SMOKE 指定会话种子消息条数时自动跑一次导出。
   if (process.env.CLAUDE_LINK_EXPORT_SMOKE) {
     logger.info('[smoke] hook scheduled');
@@ -129,6 +135,7 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   killAllProcesses();
+  void cancelGlobalCommandProbe(); // 取消全局兜底探测，避免孤儿 claude 子进程（killAllProcesses 不扫 probe）
   closeConnection();
 
   if (process.platform !== 'darwin') {
@@ -138,6 +145,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   killAllProcesses();
+  void cancelGlobalCommandProbe(); // 取消全局兜底探测，避免孤儿 claude 子进程（killAllProcesses 不扫 probe）
   void disposeExportImageOnQuit();
   closeConnection();
 });

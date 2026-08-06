@@ -19,7 +19,8 @@ import { listRecentWorkspaces, addRecentWorkspace } from './modules/workspace-hi
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe } from './modules/chat-backend';
+import { sdkCommandRegistry } from './modules/sdk-command-registry';
 import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
 import {
   startQueue,
@@ -129,7 +130,21 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => sessionRepo.listSessions());
   ipcMain.handle(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string) => {
     const config = getConfig();
-    return sessionRepo.createSession(name, resolveDefaultModel(config.advancedJson));
+    const session = sessionRepo.createSession(name, resolveDefaultModel(config.advancedJson));
+    // Task 4/5：新会话创建后立即后台命令发现（control-only probe）。fire-and-forget——失败/无 exe 走
+    // degraded，不阻塞会话创建返回；结果经 COMMANDS_CHANGED 推前端。
+    // F1 修复：probe 用 activeSessions 做存活守卫，创建后必须先登记（markSessionActive），否则
+    // startCommandProbe 首行 isSessionActive 守卫直接 return，探测根本不启动；删除时 markSessionDeleted 已撤销。
+    markSessionActive(session.id);
+    void startCommandProbe(session.id, mainWindow, {
+      model: session.model,
+      modelOverride: session.modelOverride,
+      workingDir: session.workingDir,
+      maxTurns: session.maxTurns,
+      permissionMode: session.permissionMode,
+      thinkingLevel: session.thinkingLevel,
+    });
+    return session;
   });
   ipcMain.handle(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => sessionRepo.getSession(id));
   ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, id: string) => {
@@ -164,7 +179,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         logger.warn(`[thinking] invalid thinkingLevel, discarding: ${String(data.thinkingLevel)}`);
         delete data.thinkingLevel;
       }
-      return sessionRepo.updateSession(id, data);
+      const updated = sessionRepo.updateSession(id, data);
+      // F3：工作目录变化影响 Skill/Plugin 可见性 → 重新探测命令（旧快照标 stale，新结果替换）。
+      // N2：清除工作目录（workingDir: null）同样必须重新探测——旧目录的 Skill/Plugin 命令不再适用。
+      if (data.workingDir !== undefined) {
+        void startCommandProbe(id, mainWindow, { ...data });
+      }
+      return updated;
     },
   );
   ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
@@ -193,6 +214,26 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.CLAUDE_PLAN_GET, async (_event, sessionId: string) =>
     getClaudePlanState(sessionId),
   );
+
+  // 原生 Slash Commands：读取某会话当前命令快照（registry 已清洗 + 去重）。返回纯可克隆 snapshot，
+  // 不返回 Query / SDK stream / 未经清洗的消息。
+  ipcMain.handle(IPC_CHANNELS.COMMANDS_GET, async (_event, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
+    // 已有 per-session 快照（精确命令）直接返回。
+    if (sdkCommandRegistry.has(sessionId)) {
+      return sdkCommandRegistry.get(sessionId);
+    }
+    // N6 修复：无 per-session 快照时 markSessionActive，让 startCommandProbe 下游 4 处 isSessionActive 守卫
+    // 全部放行（与 SESSION_CREATE 一致；删除时 markSessionDeleted 已撤销）。否则重启后打开闲置旧会话，probe
+    // 在 runCommandProbe 被 !isSessionActive 拦截、emitCommandChanged 不推送，命令永远 loading。
+    markSessionActive(sessionId);
+    void startCommandProbe(sessionId, mainWindow);
+    // 启动兜底：无 per-session 快照时立即返回全局兜底（复制 + source:'cache'），UI 不再持续 loading；
+    // 该会话 probe 完成后经 COMMANDS_CHANGED 推精确命令覆盖。
+    const fallback = sdkCommandRegistry.getGlobalFallback();
+    if (fallback) return { ...fallback, sessionId, source: 'cache' as const };
+    return sdkCommandRegistry.get(sessionId);
+  });
 
   // Chat
   ipcMain.handle(IPC_CHANNELS.CHAT_SEND, async (_event, sessionId: string, payload: ChatSendPayload) => {
