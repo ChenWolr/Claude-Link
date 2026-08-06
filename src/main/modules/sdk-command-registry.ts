@@ -1,0 +1,197 @@
+// sdk-command-registry.ts
+// 主进程按 Claude Link sessionId 隔离的运行时命令快照注册表。
+//
+// 职责：
+//  ① 把 SDK 原始 SlashCommand（sdk.d.ts:6174，对主进程而言是 unknown）清洗成可结构化克隆的 SdkCommand；
+//  ② 按 sessionId 全量替换 / 状态切换 / 清理（commands_changed 全量替换，绝不 concat）；
+//  ③ 进程单例 sdkCommandRegistry 供 sdk-backend（发现/清理）与 ipc-handlers（读取/推送）共用同一份快照。
+//
+// 不依赖 Electron / logger，便于 tsx 行为测试；日志由调用方（sdk-backend）记录。
+
+import type {
+  CommandSnapshotSource,
+  CommandSnapshotStatus,
+  SdkCommand,
+  SessionCommandSnapshot,
+} from '../../shared/types/command';
+import { createDefaultCommandSnapshot } from '../../shared/types/command';
+
+/** 去除前导 '/'（用户/SDK 偶尔带斜杠），不改大小写；非字符串归空。 */
+function normalizeCommandName(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  let s = value.trim();
+  while (s.startsWith('/')) s = s.slice(1);
+  return s;
+}
+
+/**
+ * 把 SDK 原始 SlashCommand 清洗成 SdkCommand。
+ * - name 为空（或去 / 后为空）→ 丢弃（返回 undefined）。
+ * - 非字符串 description / argumentHint → 空字符串。
+ * - aliases 过滤非字符串、去前导 /、大小写不敏感去重、去掉与 canonical name 同名者。
+ * - 强制 source: 'sdk'；构造新对象，不泄漏 SDK 原始私有字段。
+ */
+export function toSdkCommand(raw: unknown): SdkCommand | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  const name = normalizeCommandName(r.name);
+  if (!name) return undefined;
+  const description = typeof r.description === 'string' ? r.description : '';
+  const argumentHint = typeof r.argumentHint === 'string' ? r.argumentHint : '';
+  const aliases: string[] = [];
+  const seen = new Set<string>();
+  const nameKey = name.toLowerCase();
+  if (Array.isArray(r.aliases)) {
+    for (const a of r.aliases) {
+      const n = normalizeCommandName(a);
+      if (!n) continue;
+      const key = n.toLowerCase();
+      if (key === nameKey) continue; // alias 与 canonical 同名 → 跳过
+      if (seen.has(key)) continue; // 大小写不敏感去重
+      seen.add(key);
+      aliases.push(n);
+    }
+  }
+  return { name, description, argumentHint, aliases, source: 'sdk' };
+}
+
+/**
+ * 全局兜底快照的哨兵 sessionId。启动时跑一次「全局命令探测」（无会话绑定），结果写入
+ * registry.globalFallback；任何无 per-session 快照的会话经 COMMANDS_GET 取此兜底（复制 + 改 sessionId
+ * + source:'cache'），实现「重启后旧会话立即可用 + 探测异常时的容错兜底」。per-session 快照永远优先。
+ */
+export const GLOBAL_FALLBACK_SESSION_ID = '__global_command_fallback__';
+
+export class SdkCommandRegistry {
+  private readonly snapshots = new Map<string, SessionCommandSnapshot>();
+  // F4：单调代际号。replace 递增，用于区分「异步旧 probe 结果」与「较新 commands_changed」；
+  // 异步 supportedCommands 完成后校验，只有仍是启动时代际才写入，防止旧结果覆盖新列表。
+  private readonly revisions = new Map<string, number>();
+  // 启动全局兜底快照（无会话绑定）。仅当某 session 无 per-session 快照时作为兜底显现，
+  // 被 per-session（probe/init/changed）任意来源覆盖。不分代际（启动只跑一次，不与 per-session 竞争）。
+  private globalFallback: SessionCommandSnapshot | null = null;
+
+  /** 当前命令快照的代际号（默认 0）。 */
+  getRevision(sessionId: string): number {
+    return this.revisions.get(sessionId) ?? 0;
+  }
+
+  /** 读取快照；不存在时返回默认 loading 快照（不入库，纯派生值）。 */
+  get(sessionId: string): SessionCommandSnapshot {
+    return this.snapshots.get(sessionId) ?? createDefaultCommandSnapshot(sessionId);
+  }
+
+  /** 是否已存在该 session 的真实快照（区分「从未探测」与「loading 占位」）。 */
+  has(sessionId: string): boolean {
+    return this.snapshots.has(sessionId);
+  }
+
+  /**
+   * 全量替换某 session 的命令列表（commands_changed / probe / init 共用入口）。
+   * - 不 concat：旧命令完全消失。
+   * - 逐条清洗 + 同名（大小写不敏感）去重。
+   * - 非空 → ready；空 → empty。
+   */
+  replace(sessionId: string, rawCommands: unknown[], source: CommandSnapshotSource): SessionCommandSnapshot {
+    const commands = this.cleanCommands(rawCommands);
+    const snapshot: SessionCommandSnapshot = {
+      sessionId,
+      commands,
+      status: commands.length > 0 ? 'ready' : 'empty',
+      source,
+      updatedAt: new Date().toISOString(),
+    };
+    this.revisions.set(sessionId, (this.revisions.get(sessionId) ?? 0) + 1);
+    this.snapshots.set(sessionId, snapshot);
+    return snapshot;
+  }
+
+  /**
+   * 切换状态（probe 失败 → degraded/error；恢复 → ready）。
+   * 保留已有 commands：缓存命令不清空，断网/探测失败时仍可本地显示与过滤（计划 §0.2-8）。
+   */
+  setStatus(sessionId: string, status: CommandSnapshotStatus, error?: string): SessionCommandSnapshot {
+    const current = this.snapshots.get(sessionId) ?? createDefaultCommandSnapshot(sessionId);
+    const snapshot: SessionCommandSnapshot = {
+      ...current,
+      status,
+      ...(error !== undefined ? { error } : {}),
+    };
+    this.snapshots.set(sessionId, snapshot);
+    return snapshot;
+  }
+
+  /**
+   * 切换 non-ready 状态（loading / stale / degraded / error）但保留「最佳可用命令」：
+   * 优先 per-session 已有命令，否则 fallback 到 globalFallback 命令（启动兜底）。
+   * N7：避免 0 命令的 loading/degraded 快照覆盖本可用的全局 cache——probe 进行中或失败时，用户仍能看到
+   * 兜底命令。ready 用 replace（权威命令），不走此方法。
+   */
+  setStatusPreservingCommands(sessionId: string, status: CommandSnapshotStatus, error?: string): SessionCommandSnapshot {
+    const current = this.snapshots.get(sessionId) ?? createDefaultCommandSnapshot(sessionId);
+    const commands = current.commands.length > 0 ? current.commands : (this.globalFallback?.commands ?? []);
+    // 命令来源：保留 per-session 既有 source；命令取自 globalFallback 时标 cache（兜底）。
+    const source = current.commands.length > 0 ? current.source : this.globalFallback ? 'cache' : current.source;
+    const snapshot: SessionCommandSnapshot = {
+      sessionId,
+      commands,
+      status,
+      source,
+      updatedAt: new Date().toISOString(),
+      ...(error !== undefined ? { error } : {}),
+    };
+    this.snapshots.set(sessionId, snapshot);
+    return snapshot;
+  }
+
+  /** 删除某 session 的快照（markSessionDeleted 收口调用）；只影响指定 session。 */
+  clear(sessionId: string): void {
+    this.snapshots.delete(sessionId);
+    this.revisions.delete(sessionId);
+  }
+
+  /** 清洗 SDK 原始命令为 SdkCommand[] + 同名（大小写不敏感）去重；replace 与 setGlobalFallback 共用。 */
+  private cleanCommands(rawCommands: unknown[]): SdkCommand[] {
+    const commands: SdkCommand[] = [];
+    const seenNames = new Set<string>();
+    for (const raw of rawCommands) {
+      const c = toSdkCommand(raw);
+      if (!c) continue;
+      const key = c.name.toLowerCase();
+      if (seenNames.has(key)) continue;
+      seenNames.add(key);
+      commands.push(c);
+    }
+    return commands;
+  }
+
+  /**
+   * 写入启动全局兜底快照（无会话绑定）。逐条清洗 + 去重，与 replace 同款；非空→ready / 空→empty。
+   * 不分代际（启动只跑一次）。sessionId 用哨兵 GLOBAL_FALLBACK_SESSION_ID，回填会话时由调用方覆盖。
+   */
+  setGlobalFallback(rawCommands: unknown[], source: CommandSnapshotSource): SessionCommandSnapshot {
+    const commands = this.cleanCommands(rawCommands);
+    const snapshot: SessionCommandSnapshot = {
+      sessionId: GLOBAL_FALLBACK_SESSION_ID,
+      commands,
+      status: commands.length > 0 ? 'ready' : 'empty',
+      source,
+      updatedAt: new Date().toISOString(),
+    };
+    this.globalFallback = snapshot;
+    return snapshot;
+  }
+
+  /** 读取全局兜底快照；未探测返回 null。 */
+  getGlobalFallback(): SessionCommandSnapshot | null {
+    return this.globalFallback;
+  }
+
+  /** 清空全局兜底（app 退出 / 强制重置时）。不影响任何 per-session 快照。 */
+  clearGlobalFallback(): void {
+    this.globalFallback = null;
+  }
+}
+
+/** 进程单例：sdk-backend（发现/清理）与 ipc-handlers（读取/推送）共用同一份运行时快照。 */
+export const sdkCommandRegistry = new SdkCommandRegistry();
