@@ -8,14 +8,17 @@ import { useConfigStore } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useExportImageStore } from './stores/export-image-store';
 import { useChat } from './composables/use-chat';
+import { useCommandStore } from './stores/command-store';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../shared/constants';
 import { applyThemePalette, applyFontScale } from './utils/apply-theme';
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
 const exportImageStore = useExportImageStore();
+const commandStore = useCommandStore();
 const { startListening, stopListening } = useChat();
 let stopExportProgress: (() => void) | null = null;
+let stopCommandChanges: (() => void) | null = null;
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
@@ -43,6 +46,9 @@ onMounted(async () => {
   sessionStore.bindContextUpdates();
   // 导出进度监听也在全局注册一次：切换路由/会话不影响进行中的导出 job。
   stopExportProgress = window.claudeLink.onImageExportProgress((p) => exportImageStore.applyProgress(p));
+  // 原生 Slash Commands：命令变化全局订阅（ChatPage 卸载/后台会话不丢事件）。主进程 COMMANDS_CHANGED
+  // 推送的 snapshot 按 sessionId 全量替换进 command-store。
+  stopCommandChanges = window.claudeLink.onCommandChanged((payload) => commandStore.replaceFromEvent(payload));
 });
 
 onBeforeUnmount(() => {
@@ -50,6 +56,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('drop', suppressDragNavigation);
   stopListening();
   if (stopExportProgress) stopExportProgress();
+  if (stopCommandChanges) stopCommandChanges();
 });
 </script>
 

@@ -6,6 +6,7 @@ import { useStream } from '../composables/use-stream';
 import { useTaskStore } from '../stores/task-store';
 import { useChatDraftStore } from '../stores/chat-draft-store';
 import { useClaudePlanStore } from '../stores/claude-plan-store';
+import { useCommandStore } from '../stores/command-store';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
 import SessionToolbar from '../components/chat/SessionToolbar.vue';
@@ -17,11 +18,17 @@ const store = useSessionStore();
 const taskStore = useTaskStore();
 const draftStore = useChatDraftStore();
 const planStore = useClaudePlanStore();
+const commandStore = useCommandStore();
 const { sending, error, lastFailedBySession, sendMessage, abort } = useChat();
 // 当前会话最近一次【失败】的 user 消息（按会话隔离）：error 置位时抓取，重新编辑据此恢复到主草稿。
 const lastFailedCurrent = computed(() => {
   const sid = store.activeSession?.id;
   return sid ? lastFailedBySession.value[sid] ?? null : null;
+});
+// 原生 Slash Commands：当前活动会话的命令快照（command-store 按 sessionId 索引，切会话自动切换）。
+const activeCommandSnapshot = computed(() => {
+  const sid = store.activeSession?.id;
+  return sid ? commandStore.activeSnapshot(sid) : null;
 });
 const { displayContent, displayThinking, displayTool } = useStream();
 
@@ -314,6 +321,9 @@ async function handleNewSession() {
           :model-value="draftText"
           :has-attachments="draftAttachments.length > 0"
           :disabled="sending"
+          :commands="activeCommandSnapshot?.commands"
+          :command-status="activeCommandSnapshot?.status"
+          :command-error="activeCommandSnapshot?.error"
           @update:model-value="(v: string) => (draftText = v)"
           @send="handleSend"
         />
