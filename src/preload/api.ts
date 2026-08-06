@@ -7,7 +7,7 @@ import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
-import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, SessionCommandSnapshot } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
@@ -83,6 +83,10 @@ export interface ClaudeLinkAPI {
   removeQueueListener: () => void;
   startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
   onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => () => void;
+  // 原生 Slash Commands：读取某会话当前命令快照 + 监听全量替换。
+  getSessionCommands: (sessionId: string) => Promise<SessionCommandSnapshot>;
+  onCommandChanged: (callback: (payload: CommandChangedPayload) => void) => () => void;
+  removeCommandListener: () => void;
 }
 
 export function createApi(): ClaudeLinkAPI {
@@ -185,6 +189,13 @@ export function createApi(): ClaudeLinkAPI {
       ipcRenderer.on(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
     },
+    getSessionCommands: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.COMMANDS_GET, sessionId) as Promise<SessionCommandSnapshot>,
+    onCommandChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: CommandChangedPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.COMMANDS_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.COMMANDS_CHANGED, listener);
+    },
+    removeCommandListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.COMMANDS_CHANGED),
   };
 }
 

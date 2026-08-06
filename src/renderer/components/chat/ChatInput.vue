@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
-import { SLASH_COMMANDS } from '../../../shared/constants';
+import { parseSlashInvocation, filterRenderableCommands } from '../../../shared/command-routing';
+import type { SdkCommand, CommandSnapshotStatus } from '../../../shared/types/command';
 
 // 受控输入：modelValue 由父组件（草稿 store）持有；附件-only 也允许发送。
 // 拖放/粘贴由 ChatPage 在 .chat-page 容器统一处理（不依赖 textarea 焦点、落点更大）。
@@ -8,6 +9,10 @@ const props = defineProps<{
   disabled?: boolean;
   modelValue: string;
   hasAttachments?: boolean;
+  // 原生 Slash Commands：由父组件从 command-store 传入当前会话的 SDK 动态命令列表与状态。
+  commands?: SdkCommand[];
+  commandStatus?: CommandSnapshotStatus;
+  commandError?: string;
 }>();
 
 const emit = defineEmits<{
@@ -20,13 +25,21 @@ const selectedSlashIndex = ref(0);
 const wrapperRef = ref<HTMLElement | null>(null);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
-const matchingCommands = computed(() => {
-  if (!props.modelValue.startsWith('/')) return [];
-  const q = props.modelValue.toLowerCase();
-  // 动态搜索：前缀匹配优先；无前缀命中时退化为包含匹配，提升可发现性。
-  const prefix = SLASH_COMMANDS.filter((c) => c.name.toLowerCase().startsWith(q));
+// 动态命令菜单：数据源来自父组件传入的当前会话 SDK 命令（command-store active snapshot），
+// 不再依赖静态 SLASH_COMMANDS。仅 / 开头且无参数时联想命令名；alias 与 canonical 都参与匹配。
+const matchingCommands = computed<SdkCommand[]>(() => {
+  const parsed = parseSlashInvocation(props.modelValue);
+  if (parsed.kind !== 'slash' || parsed.argumentsText.length > 0) return [];
+  const q = parsed.commandName.toLowerCase();
+  const cmds = filterRenderableCommands(props.commands ?? []);
+  if (!q) return cmds; // 纯 /：列出全部
+  const prefix = cmds.filter(
+    (c) => c.name.toLowerCase().startsWith(q) || c.aliases.some((a) => a.toLowerCase().startsWith(q)),
+  );
   if (prefix.length) return prefix;
-  return SLASH_COMMANDS.filter((c) => c.name.toLowerCase().includes(q));
+  return cmds.filter(
+    (c) => c.name.toLowerCase().includes(q) || c.aliases.some((a) => a.toLowerCase().includes(q)),
+  );
 });
 
 // 显式触发命令联想：插入 '/' 并聚焦，让斜杠菜单立刻弹出。
@@ -34,7 +47,8 @@ function insertSlash() {
   if (!props.modelValue.startsWith('/')) {
     emit('update:modelValue', '/');
   }
-  showSlashMenu.value = matchingCommands.value.length > 0;
+  // 始终弹出菜单：有命令显示列表，loading/empty 显示状态提示（普通文本仍可发送）。
+  showSlashMenu.value = true;
   selectedSlashIndex.value = 0;
   textareaRef.value?.focus();
 }
@@ -75,8 +89,9 @@ function handleKeydown(e: KeyboardEvent): void {
   }
 }
 
-function selectSlashCommand(cmd: { name: string }): void {
-  emit('update:modelValue', cmd.name + ' ');
+// 菜单选择：插入 canonical 命令 /name（SDK name 不带斜杠，需补 /）。用户手写 alias 不经此路径，原样保留。
+function selectSlashCommand(cmd: SdkCommand): void {
+  emit('update:modelValue', `/${cmd.name} `);
   showSlashMenu.value = false;
   selectedSlashIndex.value = 0;
 }
@@ -84,7 +99,9 @@ function selectSlashCommand(cmd: { name: string }): void {
 function handleInput(e: Event): void {
   const value = (e.target as HTMLTextAreaElement).value;
   emit('update:modelValue', value);
-  showSlashMenu.value = value.startsWith('/') && matchingCommands.value.length > 0;
+  // 菜单：仅 / 开头且无参数（参数输入阶段关闭联想）。loading/empty 仍显示状态提示。
+  const parsed = parseSlashInvocation(value);
+  showSlashMenu.value = parsed.kind === 'slash' && parsed.argumentsText.length === 0;
   selectedSlashIndex.value = 0;
 }
 
@@ -159,9 +176,14 @@ onUnmounted(() => {
         @click="selectSlashCommand(cmd)"
         @mouseenter="hoverCommand(i)"
       >
-        <span class="slash-menu__name">{{ cmd.name }}</span>
-        <span class="slash-menu__desc">{{ cmd.description }}</span>
+        <span class="slash-menu__name">/{{ cmd.name }}</span>
       </div>
+      <div v-if="matchingCommands.length === 0" class="slash-menu__status">
+        <span v-if="commandStatus === 'loading'">正在读取 Claude Code 命令…</span>
+        <span v-else-if="commandStatus === 'error' || commandStatus === 'degraded'">{{ commandError || '命令读取异常，可继续输入或发送' }}</span>
+        <span v-else>当前会话没有可用 Slash Command（仍可直接输入发送）</span>
+      </div>
+      <div v-else-if="commandStatus === 'stale'" class="slash-menu__hint">可能不是最新</div>
     </div>
     <div class="chat-input">
       <button
@@ -194,7 +216,7 @@ onUnmounted(() => {
   bottom: 100%;
   left: 1.5rem;
   right: 1.5rem;
-  max-width: 47rem;
+  max-width: 28rem;
   z-index: 50;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -225,9 +247,17 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
-.slash-menu__desc {
+.slash-menu__status {
+  padding: 0.5rem 0.875rem;
   color: var(--color-text-muted);
   font-size: 0.75rem;
+}
+
+.slash-menu__hint {
+  padding: 0.25rem 0.875rem;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  border-top: 1px solid var(--color-border);
 }
 
 .chat-input {

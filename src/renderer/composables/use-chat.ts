@@ -24,6 +24,26 @@ import type { ChatSendPayload } from '../../shared/types/attachment';
 // sendMessage/abort 可在任意组件调（通过 useChat() 复用单例）。
 let chatSingleton: ReturnType<typeof createChat> | null = null;
 
+// F5：命令回合结果去重。本回合（最新用户消息之后）已展示相同内容的 local_command_output 系统消息时
+// 返回 true——result.result 正文是同一命令输出的重复，ensureResultMessage 据此跳过补落 assistant。
+// 纯函数（不依赖闭包），可单测：local-only / result-only / 两者相同 / 两者不同 四种情况。
+export function hasLocalCommandOutputMessage(messages: Message[], resultText: string): boolean {
+  const needle = resultText.trim();
+  if (!needle) return false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.role === 'user') return false; // 只查本回合（最新用户消息之后）
+    if (
+      m.role === 'system' &&
+      m.processKind === 'system:local_command_output' &&
+      m.content?.trim() === needle
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // C：把进度类事件（tool_progress / compacting / task_*）映射到 store。纯函数（不依赖闭包），可单测。
 // task_notification 终态：先 upsert 终态卡片，4 秒后移除（淡出，避免列表残留已完成任务）。
 export function applyStalledEvent(store: ReturnType<typeof useSessionStore>, sessionId: string, event: CliStalledEvent): void {
@@ -764,6 +784,9 @@ function createChat() {
     const resultText = event.result?.trim();
     if (!resultText) return;
     if (turnHasAssistantText()) return;
+    // F5：命令回合结果去重——本回合已展示相同内容的 local_command_output 系统消息时，result 正文是
+    // 同一命令输出的重复，不再补落 assistant 消息（避免界面/历史出现两份相同命令结果）。
+    if (hasLocalCommandOutputMessage(store.messages, resultText)) return;
 
     persistMessage({ role: 'assistant', eventType: 'message', content: resultText, processKind: null });
   }

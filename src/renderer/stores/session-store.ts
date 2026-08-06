@@ -18,6 +18,7 @@ import {
 import { resolveContextWindow } from '../../shared/model-context-windows';
 import { useConfigStore } from './config-store';
 import { useClaudePlanStore } from './claude-plan-store';
+import { useCommandStore } from './command-store';
 
 // C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
 export interface BackgroundTask {
@@ -196,6 +197,8 @@ export const useSessionStore = defineStore('session', {
       try {
         const session = await window.claudeLink.createSession(name);
         this.sessions.unshift(session);
+        // Task 5：新会话创建后拉取命令快照初始态（loading）；主进程 probe 经 COMMANDS_CHANGED 推完整列表。
+        void useCommandStore().load(session.id);
         return session;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '创建会话失败';
@@ -214,6 +217,9 @@ export const useSessionStore = defineStore('session', {
         };
       }
       this.activeSession = session;
+      // N4：切到已有会话（应用重启后 registry 为空）时触发命令快照加载；主进程 COMMANDS_GET
+      // 对无快照会话会异步启动探测。
+      void useCommandStore().load(session.id);
       // 恢复目标会话的流式快照（如果有），否则清空
       const snapshot = this.sessionStreams[session.id];
       if (snapshot) {
@@ -289,6 +295,9 @@ export const useSessionStore = defineStore('session', {
       delete this.apiRetryInfo[id];
       delete this.apiRetryTerminalFallback[id];
       delete this.subAgentStreamingThinking[id];
+      // 原生 Slash Commands：清理命令快照（与 UI 同步移除；失败回滚不恢复——主进程 markSessionDeleted
+      // 已清 registry，切回该会话时 load 重建）。
+      useCommandStore().clear(id);
       // 状态灯与回合计时随会话删除一并清理，避免迟到的完成态串到其它会话。
       delete this.sessionStatus[id];
       delete this.turnStartedAt[id];
