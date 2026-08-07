@@ -5,7 +5,7 @@
 // 约定（与项目其它 tdd-*-verify.ts 一致）：纯 node:assert + check() 计数，
 // 不 import Electron；失败 process.exit(1)。优先测纯函数行为；记录跨文件接线契约用源码文本断言。
 import { strict as assert } from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -25,6 +25,7 @@ import { useCommandStore } from '../src/renderer/stores/command-store';
 import { prepareAttachmentPrompt } from '../src/main/modules/attachment-prompt-builder';
 import { hasLocalCommandOutputMessage } from '../src/renderer/composables/use-chat';
 import { mergeSpawnOptions } from '../src/main/modules/sdk-command-options';
+import { buildCommandOriginEvidence } from '../src/main/modules/sdk-command-origin';
 import type { Message, Session } from '../src/shared/types/session';
 
 let pass = 0;
@@ -52,8 +53,8 @@ async function asyncCheck(name: string, fn: () => Promise<void>): Promise<void> 
 }
 
 const sdkCommands: SdkCommand[] = [
-  { name: 'usage', description: 'show usage', argumentHint: '', aliases: ['cost', 'stats'], source: 'sdk' },
-  { name: 'goal', description: 'set a goal', argumentHint: '', aliases: [], source: 'sdk' },
+  { name: 'usage', description: 'show usage', argumentHint: '', aliases: ['cost', 'stats'], source: 'sdk', origin: 'builtin', availability: 'available' },
+  { name: 'goal', description: 'set a goal', argumentHint: '', aliases: [], source: 'sdk', origin: 'builtin', availability: 'available' },
 ];
 
 console.log('=== 1) parseSlashInvocation 路由（不充当发送白名单）===');
@@ -140,7 +141,7 @@ check('filterRenderableCommands：返回合法 sdk 命令', () => {
 check('filterRenderableCommands：丢弃 name 空 / 非 sdk 来源', () => {
   const mixed: SdkCommand[] = [
     ...sdkCommands,
-    { name: '', description: 'x', argumentHint: '', aliases: [], source: 'sdk' },
+    { name: '', description: 'x', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' },
   ];
   assert.deepEqual(
     filterRenderableCommands(mixed).map((c) => c.name),
@@ -148,10 +149,23 @@ check('filterRenderableCommands：丢弃 name 空 / 非 sdk 来源', () => {
   );
 });
 
+check('filterRenderableCommands：过滤 hidden（removed/internal）命令（Task 2）', () => {
+  const withHidden: SdkCommand[] = [
+    { name: 'usage', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'builtin', availability: 'available' },
+    { name: 'some-skill', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'user-skill', availability: 'available' },
+    { name: 'agents', description: '(removed)', argumentHint: '', aliases: [], source: 'sdk', origin: 'removed', availability: 'hidden' },
+    { name: '__remote-workflow', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'internal', availability: 'hidden' },
+  ];
+  assert.deepEqual(
+    filterRenderableCommands(withHidden).map((c) => c.name),
+    ['usage', 'some-skill'],
+  );
+});
+
 console.log('=== 4) 共享命令模型 / 默认快照 ===');
 
 check('SdkCommand 字段齐备', () => {
-  const c: SdkCommand = { name: 'usage', description: 'd', argumentHint: '<file>', aliases: ['cost'], source: 'sdk' };
+  const c: SdkCommand = { name: 'usage', description: 'd', argumentHint: '<file>', aliases: ['cost'], source: 'sdk', origin: 'unknown', availability: 'unknown' };
   assert.equal(c.name, 'usage');
   assert.equal(c.argumentHint, '<file>');
   assert.deepEqual(c.aliases, ['cost']);
@@ -204,8 +218,8 @@ check('registry.get 默认 loading / 空命令', () => {
 
 check('registry.replace 全量替换（旧命令消失，不 concat）', () => {
   const reg = new SdkCommandRegistry();
-  reg.replace('a', [{ name: 'goal', description: 'd', argumentHint: '', aliases: [], source: 'sdk' }], 'probe');
-  reg.replace('a', [{ name: 'usage', description: 'd', argumentHint: '', aliases: ['cost'], source: 'sdk' }], 'changed');
+  reg.replace('a', [{ name: 'goal', description: 'd', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'probe');
+  reg.replace('a', [{ name: 'usage', description: 'd', argumentHint: '', aliases: ['cost'], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'changed');
   assert.deepEqual(
     reg.get('a').commands.map((c) => c.name),
     ['usage'],
@@ -216,8 +230,8 @@ check('registry.replace 全量替换（旧命令消失，不 concat）', () => {
 
 check('registry 隔离 + clear 只影响指定 session', () => {
   const reg = new SdkCommandRegistry();
-  reg.replace('a', [{ name: 'goal', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'probe');
-  reg.replace('b', [{ name: 'help', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'probe');
+  reg.replace('a', [{ name: 'goal', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'probe');
+  reg.replace('b', [{ name: 'help', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'probe');
   reg.clear('a');
   assert.equal(reg.get('a').status, 'loading'); // clear 后回默认 loading
   assert.equal(reg.get('b').commands[0].name, 'help'); // B 不受影响
@@ -225,7 +239,7 @@ check('registry 隔离 + clear 只影响指定 session', () => {
 
 check('registry.setStatus 保留 commands（probe 失败降级不清空缓存）', () => {
   const reg = new SdkCommandRegistry();
-  reg.replace('a', [{ name: 'goal', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'probe');
+  reg.replace('a', [{ name: 'goal', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'probe');
   reg.setStatus('a', 'degraded', 'probe failed');
   assert.equal(reg.get('a').status, 'degraded');
   assert.equal(reg.get('a').commands.length, 1); // 命令保留
@@ -237,6 +251,54 @@ check('registry.replace 空列表 → status empty', () => {
   const snap = reg.replace('a', [], 'changed');
   assert.equal(snap.status, 'empty');
   assert.equal(snap.commands.length, 0);
+});
+
+console.log('=== 6b) Task 2：registry 替换/兜底/状态切换保持 provenance ===');
+check('replace 带 ctx 分类 user-skill 并保留', () => {
+  const reg = new SdkCommandRegistry();
+  reg.replace('a', [{ name: 'verify', description: '', argumentHint: '', aliases: [] }], 'probe', {
+    skills: ['verify'], plugins: [], slashCommands: ['verify'],
+  });
+  assert.equal(reg.get('a').commands[0].origin, 'user-skill');
+  assert.equal(reg.get('a').commands[0].availability, 'available');
+});
+check('replace 全量替换：新 ctx 分类覆盖旧命令，旧命令消失', () => {
+  const reg = new SdkCommandRegistry();
+  reg.replace('a', [{ name: 'verify', description: '', argumentHint: '', aliases: [] }], 'probe', {
+    skills: ['verify'], plugins: [], slashCommands: ['verify'],
+  });
+  reg.replace('a', [{ name: 'agents', description: '(removed) x', argumentHint: '', aliases: [] }], 'changed', {
+    skills: [], plugins: [], slashCommands: ['agents'],
+  });
+  assert.deepEqual(reg.get('a').commands.map((c) => c.name), ['agents']);
+  assert.equal(reg.get('a').commands[0].origin, 'removed');
+  assert.equal(reg.get('a').commands[0].availability, 'hidden');
+});
+check('setGlobalFallback 按描述分类 removed/internal，清空不残留', () => {
+  const reg = new SdkCommandRegistry();
+  reg.setGlobalFallback([{ name: 'agents', description: '(removed) x', argumentHint: '', aliases: [] }], 'probe');
+  assert.equal(reg.getGlobalFallback()?.commands[0]?.origin, 'removed');
+  assert.equal(reg.getGlobalFallback()?.commands[0]?.availability, 'hidden');
+  reg.clearGlobalFallback();
+  assert.equal(reg.getGlobalFallback(), null);
+});
+check('setStatusPreservingCommands 保留已有命令的 origin/availability', () => {
+  const reg = new SdkCommandRegistry();
+  reg.replace('a', [{ name: 'waza-check', description: '', argumentHint: '', aliases: [] }], 'probe', {
+    skills: ['waza-check'], plugins: [], slashCommands: ['waza-check'],
+  });
+  reg.setStatusPreservingCommands('a', 'degraded', '探测失败');
+  assert.equal(reg.get('a').commands[0].origin, 'user-skill');
+  assert.equal(reg.get('a').status, 'degraded');
+});
+check('清理：clear 后 registry 无残留命令与分类', () => {
+  const reg = new SdkCommandRegistry();
+  reg.replace('a', [{ name: 'verify', description: '', argumentHint: '', aliases: [] }], 'probe', {
+    skills: ['verify'], plugins: [], slashCommands: ['verify'],
+  });
+  reg.clear('a');
+  assert.equal(reg.get('a').commands.length, 0);
+  assert.equal(reg.get('a').status, 'loading');
 });
 
 console.log('=== 7) toSdkCommand：SDK 原始对象清洗 ===');
@@ -268,6 +330,94 @@ check('sdkCommandRegistry 单例存在（供 sdk-backend / ipc-handlers 共用�
   assert.ok(sdkCommandRegistry instanceof SdkCommandRegistry);
 });
 
+console.log('=== 7b) Task 2：provenance 来源分类（toSdkCommand + CommandOriginContext）===');
+check('verify 命中 skills → user-skill / available', () => {
+  const skill = toSdkCommand(
+    { name: 'verify', description: 'x (user)', argumentHint: '' },
+    { skills: ['verify'], plugins: [], slashCommands: ['verify'] },
+  );
+  assert.equal(skill?.origin, 'user-skill');
+  assert.equal(skill?.availability, 'available');
+});
+check('init 命中已知 builtin → builtin', () => {
+  const init = toSdkCommand(
+    { name: 'init', description: 'Initialize a new CLAUDE.md file with codebase documentation' },
+    { skills: [], plugins: [], slashCommands: ['init'] },
+  );
+  assert.equal(init?.origin, 'builtin');
+});
+check('agents(removed) → removed + hidden（不误判 builtin）', () => {
+  const removed = toSdkCommand(
+    { name: 'agents', description: '(removed) Ask Claude to manage subagents' },
+    { skills: [], plugins: [], slashCommands: ['agents'] },
+  );
+  assert.equal(removed?.origin, 'removed');
+  assert.equal(removed?.availability, 'hidden');
+  assert.notEqual(removed?.origin, 'builtin');
+});
+check('__remote-workflow → internal + hidden', () => {
+  const internal = toSdkCommand(
+    { name: '__remote-workflow', description: 'Run the workflow script (server-launched only)' },
+    { skills: [], plugins: [], slashCommands: ['__remote-workflow'] },
+  );
+  assert.equal(internal?.origin, 'internal');
+  assert.equal(internal?.availability, 'hidden');
+});
+check('插件名命中 plugins → plugin', () => {
+  const plugin = toSdkCommand(
+    { name: 'pdf', description: 'x' },
+    { skills: [], plugins: ['pdf'], slashCommands: ['pdf'] },
+  );
+  assert.equal(plugin?.origin, 'plugin');
+});
+check('无法判断 → unknown + availability unknown（显式差异，非完成态）', () => {
+  const unk = toSdkCommand({ name: 'mystery', description: 'x' }, { skills: [], plugins: [], slashCommands: [] });
+  assert.equal(unk?.origin, 'unknown');
+  assert.equal(unk?.availability, 'unknown');
+});
+check('SDK 结构化 provenance 优先（未来字段透传即采信）', () => {
+  const withProv = toSdkCommand({ name: 'x', description: '', provenance: 'plugin' }, { skills: [], plugins: [], slashCommands: [] });
+  assert.equal(withProv?.origin, 'plugin');
+});
+check('分类上下文缺省时单参数调用仍可用（默认空 ctx）', () => {
+  const c = toSdkCommand({ name: 'init', description: 'x' });
+  assert.equal(c?.origin, 'builtin'); // 空 ctx 下靠已知 builtin 名称
+});
+
+console.log('=== 7c) Task 2 / review-v1 F7：provenance 证据扫描支持隔离 userHome ===');
+// 证据扫描不得依赖宿主真实 homedir（不同机器用户目录存在不同 Skill 时，同一会话命令会得到不同
+// provenance）。注入 userHome 后必须只扫该隔离目录；未注入时不把隔离目录当用户来源。
+const ORIGIN_TMP_ROOT = 'D:/software/Cache/temp';
+const UNIQUE_SKILL = 'zzz-isolated-skill-test';
+check('注入 userHome 后，隔离目录 skill 被分类为 user-skill（不读真实 homedir）', () => {
+  mkdirSync(ORIGIN_TMP_ROOT, { recursive: true });
+  const isolated = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-origin-'));
+  try {
+    const skillDir = path.join(isolated, '.claude', 'skills', UNIQUE_SKILL);
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: zzz-isolated-skill-test\n---\n# 隔离技能夹具\n', 'utf8');
+    const ev = buildCommandOriginEvidence({ userHome: isolated, cwd: path.join(isolated, 'proj') });
+    assert.equal(ev.origins[UNIQUE_SKILL], 'user-skill', '注入 userHome 后隔离目录 skill 应分类为 user-skill');
+  } finally {
+    rmSync(isolated, { recursive: true, force: true });
+  }
+});
+check('未注入 userHome 时不把隔离目录 skill 当用户来源（隔离生效，读的是真实 homedir）', () => {
+  mkdirSync(ORIGIN_TMP_ROOT, { recursive: true });
+  const isolated = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-origin-'));
+  try {
+    const skillDir = path.join(isolated, '.claude', 'skills', UNIQUE_SKILL);
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: zzz-isolated-skill-test\n---\n# 隔离技能夹具\n', 'utf8');
+    // cwd 指向隔离目录下无 .claude 的子目录：该 skill 只可能被「真实 homedir 扫描」命中，
+    // 而真实 homedir 不会有这个唯一名 → 断言 undefined，证明未注入时不会误读隔离目录。
+    const ev = buildCommandOriginEvidence({ cwd: path.join(isolated, 'proj') });
+    assert.equal(ev.origins[UNIQUE_SKILL], undefined, '未注入 userHome 时不得读到隔离目录 skill');
+  } finally {
+    rmSync(isolated, { recursive: true, force: true });
+  }
+});
+
 console.log('=== 8) Task 4 SDK 动态发现接线契约（sdk-backend 源码）===');
 // sdk-backend.ts 经 config-manager → electron 运行时依赖链，无法被 tsx 直接 import，故用源码文本契约
 // 钉住跨文件接线不变量（CLAUDE.md：记录接线契约可用源码文本断言）。
@@ -282,15 +432,16 @@ check('control-only probe 使用 shouldQuery:false（Task 1 验证的 B 路径�
   assert.ok(sdkBackendSrc.includes('shouldQuery: false'), 'probe 应使用 shouldQuery:false 单条消息，不伪造空 prompt');
 });
 
-check('Query 类型声明 supportedCommands?（可选，调用前判断）', () => {
-  assert.ok(/supportedCommands\?\s*:/.test(sdkBackendSrc), 'Query 类型应有可选 supportedCommands');
+check('Query 使用 Claude Agent SDK 官方 supportedCommands 契约', () => {
+  assert.ok(sdkBackendSrc.includes("Query as SdkQuery") || sdkBackendSrc.includes('type Query = SdkQuery'), 'Query 应复用 SDK 官方 Query 类型');
+  assert.ok(!/supportedCommands\?\s*:/.test(sdkBackendSrc), '不应把 SDK 官方必需 supportedCommands 降级为可选字段');
 });
 
 check('commands_changed 全量替换 source:changed，不 concat', () => {
   assert.ok(sdkBackendSrc.includes("'commands_changed'"), "system 分支应识别 commands_changed");
   assert.ok(
-    /replace\(sessionId,\s*rawCommands,\s*'changed'\)/.test(sdkBackendSrc),
-    'commands_changed 应 registry.replace 全量替换 source:changed',
+    /replace\(sessionId,\s*rawCommands,\s*'changed'[,)]/.test(sdkBackendSrc),
+    'commands_changed 应 registry.replace 全量替换 source:changed（可带分类 ctx）',
   );
 });
 
@@ -304,6 +455,17 @@ check('runQuery 开头取消 probe（probe/真实 query 互斥，§7）', () => 
 check('markSessionDeleted 清理 probe + registry（生命周期）', () => {
   assert.ok(/cancelCommandProbeInternal\(sessionId,\s*0\)/.test(sdkBackendSrc), 'markSessionDeleted 应取消 probe');
   assert.ok(sdkBackendSrc.includes('sdkCommandRegistry.clear(sessionId)'), 'markSessionDeleted 应 registry.clear');
+});
+check('Task2: system.init 捕获命令分类 ctx（buildCommandOriginContext）', () => {
+  assert.ok(/function buildCommandOriginContext/.test(sdkBackendSrc), '应存在 buildCommandOriginContext');
+  assert.ok(sdkBackendSrc.includes('sessionCommandCtx.set(sessionId, buildCommandOriginContext('), 'init 分支应写入 sessionCommandCtx');
+});
+check('Task2: probe/changed 全量替换均带本会话分类 ctx', () => {
+  assert.ok(sdkBackendSrc.includes("'probe', sessionCommandCtx.get(sessionId)"), 'probe replace 应带 sessionCommandCtx');
+  assert.ok(sdkBackendSrc.includes("'changed', sessionCommandCtx.get(sessionId)"), 'changed replace 应带 sessionCommandCtx');
+});
+check('Task2: markSessionDeleted 清理 sessionCommandCtx（单一收口登记）', () => {
+  assert.ok(sdkBackendSrc.includes('sessionCommandCtx.delete(sessionId)'), 'markSessionDeleted 应清理命令分类 ctx');
 });
 
 check('emitCommandChanged 走独立 COMMANDS_CHANGED + isSessionActive 守卫', () => {
@@ -340,7 +502,7 @@ check('replaceFromEvent 全量替换指定 session', () => {
     sessionId: 's-store-2',
     snapshot: {
       sessionId: 's-store-2',
-      commands: [{ name: 'usage', description: '', argumentHint: '', aliases: [], source: 'sdk' }],
+      commands: [{ name: 'usage', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }],
       status: 'ready',
       source: 'probe',
       updatedAt: 't',
@@ -372,8 +534,8 @@ check('commands_changed 全量替换不 concat（旧命令消失）', () => {
     snapshot: {
       sessionId: 'c',
       commands: [
-        { name: 'goal', description: '', argumentHint: '', aliases: [], source: 'sdk' },
-        { name: 'help', description: '', argumentHint: '', aliases: [], source: 'sdk' },
+        { name: 'goal', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' },
+        { name: 'help', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' },
       ],
       status: 'ready',
       source: 'probe',
@@ -384,7 +546,7 @@ check('commands_changed 全量替换不 concat（旧命令消失）', () => {
     sessionId: 'c',
     snapshot: {
       sessionId: 'c',
-      commands: [{ name: 'usage', description: '', argumentHint: '', aliases: [], source: 'sdk' }],
+      commands: [{ name: 'usage', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }],
       status: 'ready',
       source: 'changed',
       updatedAt: 't2',
@@ -581,9 +743,9 @@ void (async () => {
   check('F4 registry.getRevision 单调递增，clear 归零', () => {
     const reg = new SdkCommandRegistry();
     assert.equal(reg.getRevision('a'), 0);
-    reg.replace('a', [{ name: 'goal', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'probe');
+    reg.replace('a', [{ name: 'goal', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'probe');
     assert.equal(reg.getRevision('a'), 1);
-    reg.replace('a', [{ name: 'usage', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'changed');
+    reg.replace('a', [{ name: 'usage', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'changed');
     assert.equal(reg.getRevision('a'), 2);
     reg.clear('a');
     assert.equal(reg.getRevision('a'), 0);
@@ -599,7 +761,7 @@ void (async () => {
   check('F2 probe 复用 buildClaudeSettingsProjection / 模型映射 / 会话权限', () => {
     const backend = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
     assert.ok(/function buildProbeSdkOptions/.test(backend), '应存在 buildProbeSdkOptions');
-    const m = backend.match(/function buildProbeSdkOptions[\s\S]*?return \{ options, exe \};/);
+    const m = backend.match(/function buildProbeSdkOptions[sS]*?return { options, exe };/);
     if (!m) throw new Error('buildProbeSdkOptions 未找到');
     assert.ok(m[0].includes('buildClaudeSettingsProjection'), 'probe 应用 settings 投影');
     assert.ok(m[0].includes('resolveAliasToActualModel'), 'probe 应用模型别名映射');
@@ -751,7 +913,7 @@ void (async () => {
     const reg = new SdkCommandRegistry();
     assert.strictEqual(reg.getGlobalFallback(), null, '初始无兜底');
     const snap = reg.setGlobalFallback(
-      [{ name: 'foo', description: 'd', argumentHint: '', aliases: [], source: 'sdk' }],
+      [{ name: 'foo', description: 'd', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }],
       'probe',
     );
     assert.strictEqual(snap.status, 'ready');
@@ -764,9 +926,9 @@ void (async () => {
     const reg = new SdkCommandRegistry();
     const snap = reg.setGlobalFallback(
       [
-        { name: 'foo', description: '', argumentHint: '', aliases: [], source: 'sdk' },
-        { name: 'Foo', description: '', argumentHint: '', aliases: [], source: 'sdk' }, // 同名大小写去重
-        { name: '', description: '', argumentHint: '', aliases: [], source: 'sdk' }, // 空 name 丢弃
+        { name: 'foo', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' },
+        { name: 'Foo', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }, // 同名大小写去重
+        { name: '', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }, // 空 name 丢弃
         null,
       ],
       'probe',
@@ -776,15 +938,15 @@ void (async () => {
   });
   check('clear(sessionId) 不影响 globalFallback（per-session 优先且隔离）', () => {
     const reg = new SdkCommandRegistry();
-    reg.replace('s1', [{ name: 'a', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'probe');
-    reg.setGlobalFallback([{ name: 'g', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'probe');
+    reg.replace('s1', [{ name: 'a', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'probe');
+    reg.setGlobalFallback([{ name: 'g', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'probe');
     reg.clear('s1');
     assert.strictEqual(reg.has('s1'), false);
     assert.ok(reg.getGlobalFallback() !== null, '清 per-session 不应影响 globalFallback');
   });
   check('get/has 语义不受 globalFallback 影响（无 per-session 仍 loading）', () => {
     const reg = new SdkCommandRegistry();
-    reg.setGlobalFallback([{ name: 'g', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'probe');
+    reg.setGlobalFallback([{ name: 'g', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'probe');
     const got = reg.get('s1');
     assert.strictEqual(got.status, 'loading', '无 per-session 快照时 get 仍返回 loading 默认');
     assert.strictEqual(got.commands.length, 0);
@@ -795,7 +957,8 @@ void (async () => {
     const src = readFileSync(path.join('src', 'main', 'ipc-handlers.ts'), 'utf8');
     const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=ipcMain\.handle)/);
     if (!m) throw new Error('COMMANDS_GET handler 未找到');
-    assert.ok(m[0].includes('markSessionActive(sessionId)'), '无快照应 markSessionActive 让 probe 下游守卫放行');
+    assert.ok(m[0].includes('sessionRepo.getSession(sessionId)'), '无快照应先验证 DB 会话存在');
+    assert.ok(m[0].includes('markSessionActive(sessionId)'), '已知会话无快照才登记 active 让 probe 下游守卫放行');
     assert.ok(m[0].includes('getGlobalFallback()'), '无快照应回填全局兜底');
     assert.ok(m[0].includes("'cache'"), '回填快照 source 应为 cache');
   });
@@ -825,7 +988,7 @@ void (async () => {
   check('N7 setStatusPreservingCommands：无 per-session 快照时 loading 携带 globalFallback 命令', () => {
     const reg = new SdkCommandRegistry();
     reg.setGlobalFallback(
-      [{ name: 'global-cmd', description: '', argumentHint: '', aliases: [], source: 'sdk' }],
+      [{ name: 'global-cmd', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }],
       'probe',
     );
     const snap = reg.setStatusPreservingCommands('s1', 'loading');
@@ -837,7 +1000,7 @@ void (async () => {
   check('N7 setStatusPreservingCommands：degraded 同样保留 globalFallback 命令（异常容错）', () => {
     const reg = new SdkCommandRegistry();
     reg.setGlobalFallback(
-      [{ name: 'global-cmd', description: '', argumentHint: '', aliases: [], source: 'sdk' }],
+      [{ name: 'global-cmd', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }],
       'probe',
     );
     const snap = reg.setStatusPreservingCommands('s1', 'degraded', '探测失败');
@@ -847,9 +1010,9 @@ void (async () => {
   });
   check('N7 setStatusPreservingCommands：有 per-session 命令时优先保留（per-session 优先于兜底）', () => {
     const reg = new SdkCommandRegistry();
-    reg.replace('s1', [{ name: 'session-cmd', description: '', argumentHint: '', aliases: [], source: 'sdk' }], 'init');
+    reg.replace('s1', [{ name: 'session-cmd', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }], 'init');
     reg.setGlobalFallback(
-      [{ name: 'global-cmd', description: '', argumentHint: '', aliases: [], source: 'sdk' }],
+      [{ name: 'global-cmd', description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' }],
       'probe',
     );
     const snap = reg.setStatusPreservingCommands('s1', 'loading');
@@ -884,7 +1047,7 @@ void (async () => {
     setActivePinia(createPinia());
     const store = useCommandStore();
     const sid = 'n7-renderer';
-    const cmd = (name: string): SdkCommand => ({ name, description: '', argumentHint: '', aliases: [], source: 'sdk' });
+    const cmd = (name: string): SdkCommand => ({ name, description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' });
     const snap = (
       commands: SdkCommand[],
       status: SessionCommandSnapshot['status'],
@@ -907,7 +1070,7 @@ void (async () => {
     setActivePinia(createPinia());
     const store = useCommandStore();
     const sid = 'n7-degraded';
-    const cmd = (name: string): SdkCommand => ({ name, description: '', argumentHint: '', aliases: [], source: 'sdk' });
+    const cmd = (name: string): SdkCommand => ({ name, description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' });
     const snap = (
       commands: SdkCommand[],
       status: SessionCommandSnapshot['status'],
