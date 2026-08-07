@@ -757,15 +757,20 @@ void (async () => {
     const backend = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
     assert.ok(/export function markSessionActive/.test(backend), 'markSessionActive 应导出');
   });
-  // F2：probe 复用会话 SDK 上下文（settings 投影 / 模型映射 / 会话权限）
-  check('F2 probe 复用 buildClaudeSettingsProjection / 模型映射 / 会话权限', () => {
+  // F2 + review-v1 F6：probe 复用会话 SDK 上下文（settings 投影 / 模型映射 / 会话权限）。
+  // F6 后 settings 投影与权限更新统一收口到 buildClaudeLinkSettingsBlock，query 与 probe 共用同一
+  // 构造（杜绝配置漂移），因此断言 buildProbeSdkOptions 调用统一构造、且该构造内含投影与权限逻辑。
+  check('F2/F6 probe 与 query 共用统一 settings 构造（buildClaudeLinkSettingsBlock 含投影/权限）', () => {
     const backend = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
     assert.ok(/function buildProbeSdkOptions/.test(backend), '应存在 buildProbeSdkOptions');
-    const m = backend.match(/function buildProbeSdkOptions[sS]*?return { options, exe };/);
+    const m = backend.match(/function buildProbeSdkOptions[\s\S]*?return \{ options, exe \};/);
     if (!m) throw new Error('buildProbeSdkOptions 未找到');
-    assert.ok(m[0].includes('buildClaudeSettingsProjection'), 'probe 应用 settings 投影');
+    assert.ok(m[0].includes('buildClaudeLinkSettingsBlock'), 'probe 应调用统一 settings 构造（F6）');
     assert.ok(m[0].includes('resolveAliasToActualModel'), 'probe 应用模型别名映射');
-    assert.ok(m[0].includes('applySessionPermissionUpdates'), 'probe 应用会话权限更新');
+    const block = backend.match(/function buildClaudeLinkSettingsBlock[\s\S]*?\n}/);
+    if (!block) throw new Error('buildClaudeLinkSettingsBlock 未找到');
+    assert.ok(block[0].includes('buildClaudeSettingsProjection'), '统一 settings 构造应应用 settings 投影');
+    assert.ok(block[0].includes('applySessionPermissionUpdates'), '统一 settings 构造应应用会话权限更新');
   });
   // F3：SESSION_UPDATE workingDir 变化触发重新 probe；startCommandProbe 标 stale
   check('F3 workingDir 变化触发重新 probe（SESSION_UPDATE + stale 标记）', () => {
