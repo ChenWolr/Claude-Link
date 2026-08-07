@@ -275,7 +275,14 @@ export function syncFormToAdvancedJson(
   }
 
   const permissions = ensureObject(adv, 'permissions');
-  permissions.defaultMode = form.permissionMode;
+  // 'default' 表示 Claude Link 未显式覆盖权限模式；删除旧的 defaultMode，恢复原生
+  // user/project/local settings 的优先级。只有非默认模式才写入 flag 层设置。
+  if (form.permissionMode && form.permissionMode !== 'default') {
+    permissions.defaultMode = form.permissionMode;
+  } else {
+    delete permissions.defaultMode;
+    if (Object.keys(permissions).length === 0) delete adv.permissions;
+  }
 
   dropEmptyEnv(adv);
   return JSON.stringify(adv, null, 2);

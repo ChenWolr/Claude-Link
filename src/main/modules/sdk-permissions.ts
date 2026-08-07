@@ -94,9 +94,14 @@ export function buildPermissionSettings(input: { permissionMode: string; advance
     fromJson = {};
   }
 
+  // Task 3 Step 4：用户未显式选择非默认 mode（= 'default'）时，不强制写 permissions.defaultMode，
+  // 避免用一份全量 JSON 把未设字段写成默认值去覆盖原生 user/project/local 设置文件的权限默认模式。
+  // 只叠加 Claude Link 显式配置的字段；用户已写入 advancedJson.permissions 的 defaultMode 保留在 fromJson。
+  const mode = input.permissionMode;
+  if (!mode || mode === 'default') return fromJson;
   return {
     ...fromJson,
-    defaultMode: input.permissionMode,
+    defaultMode: mode,
   };
 }
 
