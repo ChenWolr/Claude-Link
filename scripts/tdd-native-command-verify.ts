@@ -674,7 +674,7 @@ void (async () => {
     await asyncCheck(`无附件时原样进 SDK：${c.text}`, async () => {
       const result = await prepareAttachmentPrompt({
         sessionId: 's7',
-        payload: { text: c.text, attachmentIds: [] },
+        payload: { text: c.text, attachmentIds: [], clientMessageId: 's7-message' },
         attachments: [],
         attachmentPaths: {},
       });
@@ -686,7 +686,7 @@ void (async () => {
   await asyncCheck('alias 手写不被 canonicalize（/cost 不变 /usage）', async () => {
     const result = await prepareAttachmentPrompt({
       sessionId: 's7',
-      payload: { text: '/cost tokens', attachmentIds: [] },
+      payload: { text: '/cost tokens', attachmentIds: [], clientMessageId: 's7-alias-message' },
       attachments: [],
       attachmentPaths: {},
     });
