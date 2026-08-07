@@ -39,7 +39,8 @@ export function buildClaudeSettingsProjection(config: AppConfig): Record<string,
   };
 
   // 全局默认思考强度投影：selector > advancedJson——在 ...advanced 之后覆盖 thinking 相关同名字段。
-  // medium 不投影以尊重用户 ~/.claude 配置（叠加 settingSources:[] 后 medium = CC 完全自决）。
+  // medium 不投影以尊重用户 ~/.claude 配置（Task 3 恢复原生 user/project/local 来源后，未显式设档时
+  // 让 CC 按原生文件自决；level 显式非 medium 才投影覆盖）。
   // level 缺省/非法时（如手构的不完整 config）跳过，等同 medium，避免 resolveThinkingConfig 收到脏值。
   const level = config.defaultThinkingLevel;
   if (level && level !== 'medium') {

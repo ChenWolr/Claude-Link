@@ -23,7 +23,7 @@ import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
-import { resolveEffectiveThinkingLevel, resolveThinkingConfig } from '../../shared/thinking-resolver';
+import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { isSuccessfulCliResult } from '../../shared/session-completion';
 import { convertResultMessage } from '../../shared/result-converter';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
@@ -46,6 +46,7 @@ import type { ClaudePlanTask, ClaudePlanState, ClaudePlanTaskPatch } from '../..
 import * as claudePlanRepo from '../database/repositories/claude-plan-repo';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
+import type { AppConfig } from '../../shared/types/config';
 import type { CommandChangedPayload, CommandOriginContext, SessionCommandSnapshot } from '../../shared/types/command';
 import type {
   CliEvent,
@@ -65,7 +66,11 @@ import {
   persistMessageParts,
 } from './cli-shared';
 import { isMissingConversationResumeError } from './sdk-errors';
-import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  Options as SdkOptions,
+  Query as SdkQuery,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import type { SdkPrompt } from './attachment-prompt-builder';
 import { cancelInteractionsForSession, requestInteraction } from './interaction-prompts';
 import {
@@ -88,7 +93,7 @@ import {
   type SdkPermissionSettings,
 } from './sdk-permissions';
 import { sdkCommandRegistry } from './sdk-command-registry';
-import { mergeSpawnOptions } from './sdk-command-options';
+import { buildNativeSdkOptionsCore, mergeSpawnOptions } from './sdk-command-options';
 import { buildCommandOriginEvidence } from './sdk-command-origin';
 import { isSubAgentToolUse } from '../../shared/process-kind';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
@@ -113,23 +118,12 @@ void persistMessageParts;
 // query() 返回 Query（AsyncGenerator<SDKMessage> + interrupt()/setPermissionMode()）。
 // 这里只引 type，运行时值由 importSdk() 动态获取。
 // prompt 与 Agent SDK 对齐：纯文字 string；含图片时 AsyncIterable<SDKUserMessage>。
-type Query = AsyncGenerator<Record<string, unknown>, void> & {
-  interrupt(): Promise<void>;
-  // 原生 Slash Commands：init 后调用，返回当前 SDK 可用 SlashCommand[]（sdk.d.ts:2294）。
-  // 可选——调用前判断函数存在；不存在时回退 init 名称级快照，不让聊天失败（Task 4 Step 1）。
-  supportedCommands?: () => Promise<unknown[]>;
-  getContextUsage(): Promise<{
-    maxTokens: number;
-    rawMaxTokens: number;
-    totalTokens: number;
-    percentage: number;
-    autoCompactThreshold?: number;
-    isAutoCompactEnabled: boolean;
-  }>;
-};
+// SDK 官方 Query/Options 契约（sdk.d.ts:1246/2194）：仅在本地 wrapper 上保留当前后端
+// 需要的 optional getContextUsage 兼容字段，不再用 Record<string, unknown> 抹掉 SDK 类型检查。
+type Query = SdkQuery;
 
 interface SdkModule {
-  query: (params: { prompt: string | AsyncIterable<SDKUserMessage>; options?: Record<string, unknown> }) => Query;
+  query: (params: { prompt: string | AsyncIterable<SDKUserMessage>; options?: SdkOptions }) => Query;
 }
 
 let sdkPromise: Promise<SdkModule> | null = null;
@@ -164,7 +158,9 @@ const nextQueryInstance = { value: 1 };
 
 const entries = new Map<string, SessionEntry>();
 const sessionCliIds = new Map<string, string>();
-// 每会话的命令来源分类上下文（system.init 的 skills/plugins/slash_commands）。
+// Task 2：每会话的命令来源分类上下文（system.init 的 skills/plugins/slash_commands）。
+// replace/commands_changed 需要它把 SDK 原始命令正确分类（user-skill/plugin/builtin）。
+// 会话删除时必须在 markSessionDeleted 清理（单一收口）。
 const sessionCommandCtx = new Map<string, CommandOriginContext>();
 // 中断标记按 query 实例（与 process-manager 的 interruptedChildren 思路一致，避免跨回合串扰）。
 const interruptedQueries = new WeakSet<Query>();
@@ -441,7 +437,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
   contextUsageDiagnosed.delete(sessionId);
-  sessionCommandCtx.delete(sessionId);
+  sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
   // 原生 Slash Commands：会话删除时取消正在进行的命令探测并清理快照，避免 stale 命令堆积与 A/B 串扰。
   // cancelCommandProbeInternal 用 0 超时 fire-and-forget（abort 同步触发，probe 异步自行退出）。
   void cancelCommandProbeInternal(sessionId, 0);
@@ -717,61 +713,23 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
 }
 
 // ── 组装 SDK Options ───────────────────────────────────────────────
-function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow, entry: SessionEntry): Record<string, unknown> {
-  const config = getConfig();
-  // 思考强度：会话 override（null/auto）回落全局默认，再映射成 thinking/effort/settingsPatch。
-  // thinking → Options.thinking（adaptive + 摘要展示）；effort → Options.effort（含 max，运行时补偿）；
-  // settingsPatch → 合并进 Options.settings，覆盖全局投影（query 级 > 全局 > advancedJson）。
-  const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
-  const thinkingConfig = resolveThinkingConfig(effectiveLevel);
-  const queryEnv = buildSpawnEnv();
-  const options: Record<string, unknown> = {
-    // env：apiKey/baseUrl/模型映射全靠它（复用 buildSpawnEnv，第三方端点跑通的关键）。
-    env: queryEnv,
-    // 复用本地安装的 claude（cli-detector 发现）。cliPath 可能是裸命令名，需解析成绝对路径
-    //（Windows 上还要穿透 .cmd shim 拿到真正 .exe），否则 SDK 报 "native binary not found"。
-    // 项目不内嵌二进制，解析失败留 undefined，由 runQuery 给中文提示。
-    pathToClaudeCodeExecutable: resolveExecutable(config.cliPath),
-    // 脱离磁盘 settings：完全由 claude-link 内联控制，避免 ~/.claude/settings.json 污染。
-    settingSources: [],
-    // 拿流式增量（对应 stream_event），前端逐字/逐工具参数显示。
-    includePartialMessages: true,
-    // Bug2：转发子 agent 的 text/thinking 为带 parent_tool_use_id 的消息（sdk.d.ts 的 forwardSubagentText，
-    // 默认 false 只转发 tool_use/tool_result）。开启后子 Agent Tab 能看到子 agent 完整思考/正文，
-    // 配合 stream_event 透传的 parent_tool_use_id，思考中也实时可见，不再只有「开启subagent」锚点。
-    forwardSubagentText: true,
-    // adaptive thinking + 摘要展示；具体档位由思考强度 selector 决定（thinkingConfig）。
-    thinking: thinkingConfig.thinking,
-    canUseTool: createPermissionHandler(sessionId, mainWindow, opts.workingDir || config.workingDirectory || null),
-    onElicitation: createElicitationHandler(sessionId, mainWindow),
-    // SDK 只有同时声明 supportedDialogKinds 与 onUserDialog，才会把选择题交互交给宿主 UI。
-    supportedDialogKinds: SUPPORTED_USER_DIALOG_KINDS,
-    onUserDialog: createUserDialogHandler(sessionId, mainWindow),
-  };
-
-  // 模型：与 process-manager.buildCommonArgs 同规则——别名解析成实际模型名再传。
-  const requestedAlias = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
-  entry.requestedAlias = requestedAlias;
-  options.model = resolveAliasToActualModel(requestedAlias, config.advancedJson);
-
-  if (opts.workingDir) options.cwd = opts.workingDir;
-  else if (config.workingDirectory) options.cwd = config.workingDirectory;
-
-  if (opts.maxTurns && opts.maxTurns > 0) options.maxTurns = opts.maxTurns;
-
-  if (opts.permissionMode && opts.permissionMode !== 'default') {
-    options.permissionMode = opts.permissionMode;
-    if (opts.permissionMode === 'bypassPermissions') {
-      options.allowDangerouslySkipPermissions = true;
-    }
-  }
-
-  // effort（运行时补偿）：Options.effort 含 max，是思考力度的运行时权威通道（§1.6）。
-  if (thinkingConfig.effort) options.effort = thinkingConfig.effort;
-
-  // 内联 settings——脱离磁盘（settingSources:[]），由 claude-link 完全主导。
-  // 与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），避免 SDK 路径丢
-  // hooks 等 advancedJson 顶层设置；投影内含 env（apiKey/baseUrl/advancedJson.env 字符串项）。
+/**
+ * 统一构造 claude-link 显式 settings 块（review-v1 F6）。生产 query 与 probe 共用，杜绝配置漂移。
+ * 优先级：Claude Code managed < user < project < local < 此处 claude-link 显式 Options.settings。
+ * 返回：
+ *   settings —— 完整显式 settings（projection 顶层 + 会话级 permissions + 动态注入 env + thinking patch）；
+ *   additionalDirectories —— 用户配置与附件目录并集（非空时同时写顶层 Options 与 settings.permissions）。
+ */
+function buildClaudeLinkSettingsBlock(
+  config: AppConfig,
+  sessionId: string,
+  opts: SpawnOptions,
+  thinkingConfig: ThinkingConfigResult,
+  requestedAlias: string,
+): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined } {
+  // 内联 settings——claude-link 显式设置叠加在原生来源之上（managed < user < project < local
+  // < Options.settings）。与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），
+  // 避免 SDK 路径丢 hooks 等 advancedJson 顶层设置；投影内含 env（apiKey/baseUrl/advancedJson.env 字符串项）。
   const settings = buildClaudeSettingsProjection(config);
   // buildClaudeSettingsProjection 返回类型宽化为 Record<string,unknown>，但 env 运行时实为 Record<string,string>；
   // 取别名供下方按会话别名补注入 MAX_CONTEXT_TOKENS（投影不含该项，需在此按会话补）。
@@ -810,23 +768,54 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   for (const dir of opts.additionalDirectories ?? []) {
     if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
   }
+  let additionalDirectories: string[] | undefined;
   if (mergedDirs.size > 0) {
-    const dirs = [...mergedDirs];
+    additionalDirectories = [...mergedDirs];
     // 双写同一集合：顶层 options 与 settings.permissions，避免 SDK/CLI 只读一侧时丢目录。
-    options.additionalDirectories = dirs;
-    permissions.additionalDirectories = dirs;
+    permissions.additionalDirectories = additionalDirectories;
   }
 
-  options.settings = {
-    ...settings,
-    permissions,
-  };
-
+  const out: Record<string, unknown> = { ...settings, permissions };
   // 每会话思考强度 settingsPatch 覆盖全局投影：opts.thinkingLevel 已过 resolveEffectiveThinkingLevel
   // 解析为实际生效档，故此处覆盖优先级最高（query 级 > 全局投影 > advancedJson）。
   if (thinkingConfig.settingsPatch) {
-    Object.assign(options.settings as Record<string, unknown>, thinkingConfig.settingsPatch);
+    Object.assign(out, thinkingConfig.settingsPatch);
   }
+  return { settings: out, additionalDirectories };
+}
+
+function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow, entry: SessionEntry): Record<string, unknown> {
+  const config = getConfig();
+  // 思考强度：会话 override（null/auto）回落全局默认，再映射成 thinking/effort/settingsPatch。
+  // thinking → Options.thinking（adaptive + 摘要展示）；effort → Options.effort（含 max，运行时补偿）；
+  // settingsPatch → 合并进 Options.settings，覆盖全局投影（query 级 > 全局 > advancedJson）。
+  const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
+  const thinkingConfig = resolveThinkingConfig(effectiveLevel);
+  const requestedAlias = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
+  entry.requestedAlias = requestedAlias;
+  // Task 3 / review-v1 F6：显式 settings 由 buildClaudeLinkSettingsBlock 单一构造，query 与 probe 共用，
+  // 经 buildNativeSdkOptionsCore 统一放入 Options（原生 settings 来源——不传 settingSources，SDK 默认
+  // 加载 user/project/local）。
+  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias);
+  const options: Record<string, unknown> = buildNativeSdkOptionsCore({
+    env: buildSpawnEnv(),
+    exe: resolveExecutable(config.cliPath),
+    model: resolveAliasToActualModel(requestedAlias, config.advancedJson),
+    thinking: thinkingConfig.thinking,
+    effort: thinkingConfig.effort,
+    cwd: opts.workingDir || config.workingDirectory || undefined,
+    maxTurns: opts.maxTurns,
+    permissionMode: opts.permissionMode as SdkOptions['permissionMode'],
+    settings,
+    additionalDirectories,
+  });
+  // 生产 query 特有：流式增量（stream_event）、子 agent 思考透传、统一交互弹窗 hook。
+  options.includePartialMessages = true;
+  options.forwardSubagentText = true;
+  options.canUseTool = createPermissionHandler(sessionId, mainWindow, opts.workingDir || config.workingDirectory || null);
+  options.onElicitation = createElicitationHandler(sessionId, mainWindow);
+  options.supportedDialogKinds = SUPPORTED_USER_DIALOG_KINDS;
+  options.onUserDialog = createUserDialogHandler(sessionId, mainWindow);
 
   return options;
 }
@@ -1441,65 +1430,29 @@ function controlPromptIterable(): AsyncIterable<SDKUserMessage> {
 // permissions（含会话级权限更新）/ additionalDirectories / thinking / effort / cwd / contextWindow，
 // 保证 supportedCommands 返回与「用户随后真实聊天 query」一致的命令集合。control-only 不触发回合，
 // 因此不注入 canUseTool / onElicitation / onUserDialog（无交互）。
+// review-v1 F6：settings 块与 additionalDirectories 由 buildClaudeLinkSettingsBlock 统一构造
+// （与 buildSdkOptions 同一逻辑），杜绝 probe 与真实 query 配置漂移。
 function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options: Record<string, unknown>; exe: string | undefined } {
   const config = getConfig();
   const exe = resolveExecutable(config.cliPath);
   const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
   const thinkingConfig = resolveThinkingConfig(effectiveLevel);
-  const options: Record<string, unknown> = {
-    env: buildSpawnEnv(),
-    pathToClaudeCodeExecutable: exe,
-    settingSources: [],
-    thinking: thinkingConfig.thinking,
-  };
-  if (thinkingConfig.effort) options.effort = thinkingConfig.effort;
-
   const requestedAlias = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
-  options.model = resolveAliasToActualModel(requestedAlias, config.advancedJson);
-
-  if (opts.workingDir) options.cwd = opts.workingDir;
-  else if (config.workingDirectory) options.cwd = config.workingDirectory;
-
-  if (opts.maxTurns && opts.maxTurns > 0) options.maxTurns = opts.maxTurns;
-
-  if (opts.permissionMode && opts.permissionMode !== 'default') {
-    options.permissionMode = opts.permissionMode;
-    if (opts.permissionMode === 'bypassPermissions') {
-      options.allowDangerouslySkipPermissions = true;
-    }
-  }
-
-  // 内联 settings 完整投影（含 hooks/env/permissions），与 buildSdkOptions 一致（F2）。
-  const settings = buildClaudeSettingsProjection(config);
-  const settingsEnv = settings.env as Record<string, string>;
-  const userWindow = lookupUserContextWindow({
-    aliasOrModel: requestedAlias,
-    advancedJson: config.advancedJson,
-    contextWindowByAlias: config.contextWindowByAlias,
+  // Task 3 / review-v1 F6：与生产 query 同一核心构造（原生 settings 来源，不传 settingSources 数组；
+  // 显式 settings 共用 buildClaudeLinkSettingsBlock，经工厂统一放入 Options）。
+  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias);
+  const options: Record<string, unknown> = buildNativeSdkOptionsCore({
+    env: buildSpawnEnv(),
+    exe,
+    model: resolveAliasToActualModel(requestedAlias, config.advancedJson),
+    thinking: thinkingConfig.thinking,
+    effort: thinkingConfig.effort,
+    cwd: opts.workingDir || config.workingDirectory || undefined,
+    maxTurns: opts.maxTurns,
+    permissionMode: opts.permissionMode as SdkOptions['permissionMode'],
+    settings,
+    additionalDirectories,
   });
-  if (typeof userWindow === 'number' && userWindow > 0) {
-    const clamped = Math.max(100000, Math.min(1000000, userWindow));
-    settingsEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(clamped);
-  }
-
-  const permissions = applySessionPermissionUpdates(sessionId, settings.permissions as SdkPermissionSettings);
-  const mergedDirs = new Set<string>();
-  for (const dir of permissions.additionalDirectories ?? []) {
-    if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
-  }
-  for (const dir of opts.additionalDirectories ?? []) {
-    if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
-  }
-  if (mergedDirs.size > 0) {
-    const dirs = [...mergedDirs];
-    options.additionalDirectories = dirs;
-    permissions.additionalDirectories = dirs;
-  }
-  options.settings = { ...settings, permissions };
-
-  if (thinkingConfig.settingsPatch) {
-    Object.assign(options.settings as Record<string, unknown>, thinkingConfig.settingsPatch);
-  }
 
   return { options, exe };
 }
@@ -1616,11 +1569,13 @@ async function runCommandProbe(
       return;
     }
     entry.query = query;
-    for await (const msg of query) {
+    for await (const msg of query as AsyncGenerator<Record<string, unknown>, void>) {
       if (!isSessionActive(sessionId) || !isCurrentProbe(sessionId, entry) || entry.aborted) break;
       const t = msg.type as string;
       const st = msg.subtype as string | undefined;
       if (t === 'system' && st === 'init') {
+        // 独立 probe 也必须先保存 init 来源上下文；否则 supportedCommands 结果会用空 ctx 分类。
+        sessionCommandCtx.set(sessionId, buildCommandOriginContext(msg as Record<string, unknown>));
         await resolveAndApplyProbeCommands(sessionId, mainWindow, query, entry);
         break; // 拿到命令即退出消费循环
       }
@@ -1672,6 +1627,52 @@ function buildCommandOriginContext(sdkMsg: Record<string, unknown>): CommandOrig
     ...(userHome ? { userHome } : {}),
   });
   return { skills, plugins, slashCommands, evidence };
+}
+
+/** 从 cwd 向上收集存在的 CLAUDE.md 候选（CC 会加载的上下文文件，Task 3 诊断用）。 */
+function findClaudeMdCandidates(cwd: string): string[] {
+  const candidates: string[] = [];
+  let dir = cwd;
+  for (let i = 0; i < 8 && dir; i++) {
+    const p = path.join(dir, 'CLAUDE.md');
+    if (existsSync(p)) candidates.push(p);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return candidates;
+}
+
+/**
+ * Task 3 Step 5：SDK 官方 resolveSettings 诊断（不 spawn CLI）。
+ * 返回可克隆摘要：来源级联（source + path）、可见 CLAUDE.md 候选、effective 键名。
+ * 绝不回传 effective 的值（可能含 env/API key 等秘密）——只取键名，日志与 IPC 一律脱敏。
+ */
+export async function getNativeSettingsDiagnostic(cwd: string): Promise<{
+  cwd: string;
+  sources: Array<{ source: string; path?: string }>;
+  claudeMdCandidates: string[];
+  effectiveKeys: string[];
+}> {
+  const sdk = (await importSdk()) as unknown as { resolveSettings?: (opts: { cwd: string }) => Promise<Record<string, any>> };
+  if (typeof sdk.resolveSettings !== 'function') {
+    throw new Error('SDK 未导出 resolveSettings（Task 3 原生 settings 诊断依赖）');
+  }
+  const resolved = await sdk.resolveSettings({ cwd });
+  return {
+    cwd,
+    sources: Array.isArray(resolved?.sources)
+      ? resolved.sources.map((s: any) => ({
+          source: typeof s?.source === 'string' ? s.source : 'unknown',
+          ...(typeof s?.path === 'string' && s.path ? { path: s.path } : {}),
+        }))
+      : [],
+    claudeMdCandidates: findClaudeMdCandidates(cwd),
+    effectiveKeys:
+      resolved?.effective && typeof resolved.effective === 'object'
+        ? Object.keys(resolved.effective)
+        : [],
+  };
 }
 
 async function resolveAndApplyProbeCommands(
@@ -1804,12 +1805,17 @@ async function runGlobalCommandProbeInternal(mainWindow: BrowserWindow, entry: G
       return;
     }
     entry.query = query;
-    for await (const msg of query) {
+    for await (const msg of query as AsyncGenerator<Record<string, unknown>, void>) {
       if (entry.abortController.signal.aborted) break;
       const t = msg.type as string;
       const st = msg.subtype as string | undefined;
       if (t === 'system' && st === 'init') {
-        await applyGlobalProbeCommands(mainWindow, query, entry, buildCommandOriginContext(msg as Record<string, unknown>));
+        await applyGlobalProbeCommands(
+          mainWindow,
+          query,
+          entry,
+          buildCommandOriginContext(msg as Record<string, unknown>),
+        );
         break; // 拿到命令即退出消费循环
       }
     }
@@ -1849,7 +1855,7 @@ async function applyGlobalProbeCommands(
       }),
     ]);
     if (entry.abortController.signal.aborted) return;
-    // 写入全局兜底（内部清洗 + 去重，与 replace 同款）。
+    // 写入全局兜底（内部清洗 + 去重，与 replace 同款；带本次 init 的分类上下文）。
     sdkCommandRegistry.setGlobalFallback(Array.isArray(rawCommands) ? rawCommands : [], 'probe', ctx);
     // 回填（N7）：globalFallback 就绪后，对 activeSessions 中「命令仍为空」的会话补推兜底命令。不按 has(sid)
     // 判断——loading/degraded 已写入 snapshots 使 has 为 true，但命令可能仍空（probe 进行中/失败/兜底晚到）。
@@ -1933,7 +1939,12 @@ async function maybeDiscoverCommandsFromInit(
       isCurrentEntry(sessionId, entry) &&
       sdkCommandRegistry.getRevision(sessionId) === startRev
     ) {
-      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(raw) ? raw : [], 'probe', sessionCommandCtx.get(sessionId));
+      const snap = sdkCommandRegistry.replace(
+        sessionId,
+        Array.isArray(raw) ? raw : [],
+        'probe',
+        sessionCommandCtx.get(sessionId),
+      );
       emitCommandChanged(sessionId, mainWindow, snap);
     }
   } catch (e) {
@@ -2083,7 +2094,7 @@ async function runQuery(
 
   while (true) {
   try {
-    for await (const sdkMsg of query) {
+    for await (const sdkMsg of query as AsyncGenerator<Record<string, unknown>, void>) {
       // 旧 query 被 abort/替换后可能稍后才吐出事件；只允许当前 running entry 继续转发。
       if (!isCurrentEntry(sessionId, entry)) break;
       // 守卫：会话已被删除（SESSION_DELETE 调 markSessionDeleted）→ 立即停止消费流，
@@ -2104,6 +2115,7 @@ async function runQuery(
           const sid = sdkMsg.session_id as string;
           touchActivity(sessionId, 'system:init');
           sessionCliIds.set(sessionId, sid);
+          // Task 2：捕获命令来源分类上下文（skills/plugins/slash_commands），供本会话 replace 分类。
           sessionCommandCtx.set(sessionId, buildCommandOriginContext(sdkMsg as Record<string, unknown>));
           // 会话已删则不写库（避免外键失败）。
           if (isSessionActive(sessionId)) {
@@ -2275,6 +2287,7 @@ async function runQuery(
         // source:'changed'，不落库、不走 CHAT_EVENT（走独立 COMMANDS_CHANGED IPC）。
         if (subtype === 'commands_changed') {
           const rawCommands = Array.isArray(sdkMsg.commands) ? sdkMsg.commands : [];
+          // Task 2：用本会话 init 捕获的分类上下文分类；动态 skills 新增由 Task 7 的 commands_changed 刷新覆盖。
           const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', sessionCommandCtx.get(sessionId));
           emitCommandChanged(sessionId, mainWindow, snap);
           continue;
