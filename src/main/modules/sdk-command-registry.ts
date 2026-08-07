@@ -9,12 +9,18 @@
 // 不依赖 Electron / logger，便于 tsx 行为测试；日志由调用方（sdk-backend）记录。
 
 import type {
+  CommandAvailability,
+  CommandOrigin,
+  CommandOriginContext,
   CommandSnapshotSource,
   CommandSnapshotStatus,
   SdkCommand,
   SessionCommandSnapshot,
 } from '../../shared/types/command';
-import { createDefaultCommandSnapshot } from '../../shared/types/command';
+import {
+  createDefaultCommandSnapshot,
+  EMPTY_COMMAND_ORIGIN_CONTEXT,
+} from '../../shared/types/command';
 
 /** 去除前导 '/'（用户/SDK 偶尔带斜杠），不改大小写；非字符串归空。 */
 function normalizeCommandName(value: unknown): string {
@@ -24,14 +30,81 @@ function normalizeCommandName(value: unknown): string {
   return s;
 }
 
+/** 来源上下文比较用 canonical key：与 SDK command 清洗同样去斜杠/空白/大小写。 */
+function commandNameKey(value: unknown): string {
+  return normalizeCommandName(value).toLowerCase();
+}
+
+/** 已知 Claude Code builtin 命令名（Task 2：非 Skill、非插件，也不匹配 removed/internal 特征）。 */
+export const KNOWN_BUILTIN_NAMES: ReadonlySet<string> = new Set([
+  'init', 'clear', 'compact', 'config', 'context', 'heapdump', 'reload-skills', 'review',
+  'security-review', 'usage', 'insights', 'recap', 'goal', 'team-onboarding',
+]);
+
+const KNOWN_ORIGINS: ReadonlySet<string> = new Set([
+  'builtin', 'user-skill', 'project', 'plugin', 'internal', 'removed', 'unknown',
+]);
+
+/**
+ * 单命令来源分类（Task 2）。分类顺序固定，前序命中即返回：
+ *   ① SDK 结构化 provenance（未来字段，当前 SDK 未提供 → undefined 跳过）；
+ *   ② removed 描述（agents 等描述含 (removed)）；
+ *   ③ internal 名称/描述（__ 前缀 / server-only 描述）；
+ *   ④ skills 集合（system.init.skills）；
+ *   ⑤ plugins 集合（system.init.plugins.name）；
+ *   ⑥ 项目文件来源（预留：当前 SDK 无 project 命令数据通道，无则跳过）；
+ *   ⑦ 已知 builtin 名称集合；
+ *   ⑧ unknown（显式差异，不得当作 builtin 完成）。
+ */
+export function classifyOrigin(
+  name: string,
+  description: string,
+  provenance: unknown,
+  ctx: CommandOriginContext,
+): CommandOrigin {
+  if (typeof provenance === 'string' && KNOWN_ORIGINS.has(provenance)) {
+    return provenance as CommandOrigin;
+  }
+  if (description.includes('(removed)')) return 'removed';
+  const evidenceKey = commandNameKey(name);
+  const evidenceOrigin = ctx.evidence?.origins[evidenceKey];
+  if (evidenceOrigin && evidenceOrigin !== 'unknown') return evidenceOrigin;
+  // Claude Code 当前 supportedCommands 描述会给用户 Skill 加 '(user)' 标记；这是 SDK
+  // 返回的可验证来源证据，优先于 init.skills 的另一套 canonical 名称视图。
+  if (/\(user\)\s*$/.test(description)) return 'user-skill';
+  if (
+    name.startsWith('__') ||
+    /server-launched|server session|server-only|internal/i.test(description)
+  ) {
+    return 'internal';
+  }
+  const key = commandNameKey(name);
+  if (ctx.skills.some((skill) => commandNameKey(skill) === key)) return 'user-skill';
+  if (ctx.plugins.some((plugin) => commandNameKey(plugin) === key)) return 'plugin';
+  // ⑥ project 文件来源：预留，当前 SDK 无此数据通道。
+  if (KNOWN_BUILTIN_NAMES.has(name)) return 'builtin';
+  return 'unknown';
+}
+
+/** 由来源推导可渲染状态：removed/internal → hidden；unknown → unknown；其余 available。 */
+export function availabilityOfOrigin(origin: CommandOrigin): CommandAvailability {
+  if (origin === 'removed' || origin === 'internal') return 'hidden';
+  if (origin === 'unknown') return 'unknown';
+  return 'available';
+}
+
 /**
  * 把 SDK 原始 SlashCommand 清洗成 SdkCommand。
  * - name 为空（或去 / 后为空）→ 丢弃（返回 undefined）。
  * - 非字符串 description / argumentHint → 空字符串。
  * - aliases 过滤非字符串、去前导 /、大小写不敏感去重、去掉与 canonical name 同名者。
  * - 强制 source: 'sdk'；构造新对象，不泄漏 SDK 原始私有字段。
+ * - 依 CommandOriginContext 分类出 origin / availability（Task 2）。
  */
-export function toSdkCommand(raw: unknown): SdkCommand | undefined {
+export function toSdkCommand(
+  raw: unknown,
+  ctx: CommandOriginContext = EMPTY_COMMAND_ORIGIN_CONTEXT,
+): SdkCommand | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const r = raw as Record<string, unknown>;
   const name = normalizeCommandName(r.name);
@@ -52,7 +125,16 @@ export function toSdkCommand(raw: unknown): SdkCommand | undefined {
       aliases.push(n);
     }
   }
-  return { name, description, argumentHint, aliases, source: 'sdk' };
+  const origin = classifyOrigin(name, description, r.provenance, ctx);
+  return {
+    name,
+    description,
+    argumentHint,
+    aliases,
+    source: 'sdk',
+    origin,
+    availability: availabilityOfOrigin(origin),
+  };
 }
 
 /**
@@ -92,8 +174,13 @@ export class SdkCommandRegistry {
    * - 逐条清洗 + 同名（大小写不敏感）去重。
    * - 非空 → ready；空 → empty。
    */
-  replace(sessionId: string, rawCommands: unknown[], source: CommandSnapshotSource): SessionCommandSnapshot {
-    const commands = this.cleanCommands(rawCommands);
+  replace(
+    sessionId: string,
+    rawCommands: unknown[],
+    source: CommandSnapshotSource,
+    ctx: CommandOriginContext = EMPTY_COMMAND_ORIGIN_CONTEXT,
+  ): SessionCommandSnapshot {
+    const commands = this.cleanCommands(rawCommands, ctx);
     const snapshot: SessionCommandSnapshot = {
       sessionId,
       commands,
@@ -151,11 +238,14 @@ export class SdkCommandRegistry {
   }
 
   /** 清洗 SDK 原始命令为 SdkCommand[] + 同名（大小写不敏感）去重；replace 与 setGlobalFallback 共用。 */
-  private cleanCommands(rawCommands: unknown[]): SdkCommand[] {
+  private cleanCommands(
+    rawCommands: unknown[],
+    ctx: CommandOriginContext = EMPTY_COMMAND_ORIGIN_CONTEXT,
+  ): SdkCommand[] {
     const commands: SdkCommand[] = [];
     const seenNames = new Set<string>();
     for (const raw of rawCommands) {
-      const c = toSdkCommand(raw);
+      const c = toSdkCommand(raw, ctx);
       if (!c) continue;
       const key = c.name.toLowerCase();
       if (seenNames.has(key)) continue;
@@ -169,8 +259,12 @@ export class SdkCommandRegistry {
    * 写入启动全局兜底快照（无会话绑定）。逐条清洗 + 去重，与 replace 同款；非空→ready / 空→empty。
    * 不分代际（启动只跑一次）。sessionId 用哨兵 GLOBAL_FALLBACK_SESSION_ID，回填会话时由调用方覆盖。
    */
-  setGlobalFallback(rawCommands: unknown[], source: CommandSnapshotSource): SessionCommandSnapshot {
-    const commands = this.cleanCommands(rawCommands);
+  setGlobalFallback(
+    rawCommands: unknown[],
+    source: CommandSnapshotSource,
+    ctx: CommandOriginContext = EMPTY_COMMAND_ORIGIN_CONTEXT,
+  ): SessionCommandSnapshot {
+    const commands = this.cleanCommands(rawCommands, ctx);
     const snapshot: SessionCommandSnapshot = {
       sessionId: GLOBAL_FALLBACK_SESSION_ID,
       commands,
