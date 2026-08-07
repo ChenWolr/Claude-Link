@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.node.json",
+  "include": [
+    "scripts/claude-code-command-baseline.ts",
+    "scripts/claude-code-command-matrix.ts",
+    "scripts/claude-code-command-e2e-verify.ts"
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
+    "types": ["node"]
+  }
+}
