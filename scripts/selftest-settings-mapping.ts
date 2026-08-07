@@ -862,7 +862,7 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
     !apiRetryBranch.includes('persistCliEvent(sessionId, sysInfo)'));
   check('MessageList 挂载 ApiRetryBanner', ml.includes('ApiRetryBanner'));
   // Bug2：SDK 转发子 agent text/thinking + stream_event 透传 parent_tool_use_id → 子 Agent Tab 思考中可见。
-  check('sdk-backend 开启 forwardSubagentText', sb.includes('forwardSubagentText: true'));
+  check('sdk-backend 开启 forwardSubagentText', sb.includes('forwardSubagentText = true'));
   check('convertStreamEvent 透传 parent_tool_use_id', /convertStreamEvent[\s\S]{0,300}parent_tool_use_id/.test(sb));
   check('TaskQueuePanel 引入 ThinkingBlock（子 agent 实时思考）', tqp.includes('ThinkingBlock'));
   // Task3：重试次数只由 apiRetryStates 维护；StallTracker 仍识别 system/api_retry 并提前返回，避免刷新静默计时。
@@ -1605,8 +1605,9 @@ console.log('\n=== 48) 思考强度接线：持久化层 + 注入层 + IPC 通�
   check('sdk-backend import resolveThinkingConfig', sdkBackend.includes('resolveThinkingConfig'));
   check('sdk-backend import resolveEffectiveThinkingLevel', sdkBackend.includes('resolveEffectiveThinkingLevel'));
   check('sdk-backend 用 thinkingConfig.thinking（替换硬编码）', sdkBackend.includes('thinking: thinkingConfig.thinking'));
-  check('sdk-backend 运行时注入 options.effort', sdkBackend.includes('options.effort = thinkingConfig.effort'));
-  check('sdk-backend settingsPatch Object.assign 覆盖全局投影', sdkBackend.includes('Object.assign(options.settings as Record<string, unknown>, thinkingConfig.settingsPatch)'));
+  check('sdk-backend 经统一核心注入 effort（Task 3 buildNativeSdkOptionsCore）',
+    sdkBackend.includes('effort: thinkingConfig.effort') && sdkBackend.includes('buildNativeSdkOptionsCore'));
+  check('sdk-backend settingsPatch Object.assign 覆盖全局投影（review-v1 F6 后收口到 buildClaudeLinkSettingsBlock）', sdkBackend.includes('Object.assign(out, thinkingConfig.settingsPatch)'));
   check('task-queue spawnForTask 传 thinkingLevel', taskQueue.includes('thinkingLevel: session?.thinkingLevel ?? null'));
   check('task-queue spawnForChat(续接) 传 thinkingLevel', taskQueue.includes('thinkingLevel: session.thinkingLevel'));
   check('ipc-handlers CHAT_SEND spawnForChat 传 thinkingLevel', handlers.includes('thinkingLevel: session.thinkingLevel'));
