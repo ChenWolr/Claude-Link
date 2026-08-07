@@ -59,6 +59,10 @@ export const useConfigStore = defineStore('config', {
     updatingFromJson: false,
     // 配置/数据落盘目录（点 4：让用户知道配置存在哪）
     storageInfo: null as { userData: string; config: string; workspaces: string; db: string } | null,
+    // Task 3 Step 5：原生 settings 诊断摘要（脱敏视图，供 UI 核验 user/project/local 实际加载来源）
+    nativeSettingsDiagnostic: null as import('../../shared/types/ipc').NativeSettingsDiagnostic | null,
+    // 诊断请求代际：快速切换工作目录时，旧 IPC 结果不得覆盖新目录诊断。
+    nativeSettingsDiagnosticRequestId: 0,
   }),
   getters: {
     // 从 advancedJson 的 env 提取 Claude Code 类型别名 → 实际模型映射
@@ -86,6 +90,32 @@ export const useConfigStore = defineStore('config', {
         // 静默
       }
     },
+    // Task 3 Step 5：拉取某工作目录的原生 settings 诊断摘要（脱敏）。失败置 null 不抛到页面——
+    // 诊断是可选的核验能力，不能因 SDK resolveSettings 缺失或目录异常阻塞配置页。
+    async loadNativeSettingsDiagnostic(workingDir: string) {
+      const requestId = ++this.nativeSettingsDiagnosticRequestId;
+      try {
+        const diagnostic = await window.claudeLink.getNativeSettingsDiagnostic(workingDir);
+        // 结果写回前同时校验请求仍是最新代际，且 config 未切换到其它 cwd。
+        if (
+          requestId === this.nativeSettingsDiagnosticRequestId &&
+          this.config.workingDirectory === workingDir
+        ) {
+          this.nativeSettingsDiagnostic = diagnostic;
+        }
+      } catch {
+        if (
+          requestId === this.nativeSettingsDiagnosticRequestId &&
+          this.config.workingDirectory === workingDir
+        ) {
+          this.nativeSettingsDiagnostic = null;
+        }
+      }
+    },
+    invalidateNativeSettingsDiagnostic() {
+      this.nativeSettingsDiagnosticRequestId++;
+      this.nativeSettingsDiagnostic = null;
+    },
     // 一键清空"连接"相关：重置供应商字段 + 从 advancedJson 移除 key/url/模型映射 env。
     // 字段与 JSON 同步清空，确保连接 tab 全部可清。
     clearConnectionConfig() {
@@ -111,6 +141,13 @@ export const useConfigStore = defineStore('config', {
         // 必须先深拷贝成纯普通对象再过 IPC。
         const plainConfig: AppConfig = JSON.parse(JSON.stringify(this.config));
         this.config = await window.claudeLink.saveConfig(plainConfig);
+        // 主进程 saveConfig 末尾已把配置投影写入 <工作目录>/.claude/settings.local.json。
+        // 刷新诊断使其反映最新的 effective settings（advancedJson/permissionMode/模型等变化后
+        // 若只依赖 workingDirectory watcher，页面会继续展示保存前的过期 effectiveKeys/来源）。
+        // 复用 loadNativeSettingsDiagnostic 的请求代际校验，避免与目录切换的刷新互相覆盖。
+        if (this.config.workingDirectory) {
+          await this.loadNativeSettingsDiagnostic(this.config.workingDirectory);
+        }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '保存配置失败';
         throw error;

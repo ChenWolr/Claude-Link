@@ -19,7 +19,7 @@ import { listRecentWorkspaces, addRecentWorkspace } from './modules/workspace-hi
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic } from './modules/chat-backend';
 import { sdkCommandRegistry } from './modules/sdk-command-registry';
 import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
 import {
@@ -106,6 +106,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     runTestConnectionStream(model ?? null, mainWindow);
   });
   ipcMain.handle(IPC_CHANNELS.TEST_CONNECTION_ABORT, async () => abortTestConnection());
+  // Task 3 Step 5：原生 settings 诊断摘要（resolveSettings 脱敏视图：来源/CLAUDE.md 候选/生效键名，
+  // 绝不含 effective 值/API key/env）。cwd 只做非空字符串校验——真实路径解析交给 SDK 与 findClaudeMdCandidates。
+  ipcMain.handle(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, async (_event, cwd: unknown) => {
+    if (typeof cwd !== 'string' || !cwd.trim()) throw new Error('Invalid working directory');
+    return getNativeSettingsDiagnostic(cwd);
+  });
 
   // Workspace（工作空间）：选目录 + 最近历史。Claude Code 基于某目录运行，会话可绑定并复用历史目录。
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_PICK_DIR, async () => {
@@ -219,6 +225,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 不返回 Query / SDK stream / 未经清洗的消息。
   ipcMain.handle(IPC_CHANNELS.COMMANDS_GET, async (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
+    // 先验证 DB 会话存在，再允许登记 active/启动 probe；不能把任意 renderer 输入当作会话生命周期事实。
+    if (!sessionRepo.getSession(sessionId)) throw new Error(`Session ${sessionId} not found`);
     // 已有 per-session 快照（精确命令）直接返回。
     if (sdkCommandRegistry.has(sessionId)) {
       return sdkCommandRegistry.get(sessionId);
