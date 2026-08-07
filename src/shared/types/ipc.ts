@@ -23,6 +23,8 @@ export const IPC_CHANNELS = {
   CONFIG_TEST_CONNECTION: 'config:testConnection',
   TEST_CONNECTION_EVENT: 'testConnection:event',
   TEST_CONNECTION_ABORT: 'testConnection:abort',
+  // Task 3 Step 5：原生 settings 诊断（resolveSettings 摘要，脱敏：只回来源/路径/键名，绝不含值）。
+  SETTINGS_GET_DIAGNOSTIC: 'settings:getDiagnostic',
   WORKSPACE_PICK_DIR: 'workspace:pickDir',
   WORKSPACE_LIST_RECENT: 'workspace:listRecent',
   WORKSPACE_ADD_RECENT: 'workspace:addRecent',
@@ -246,6 +248,21 @@ export interface ContextStatsPayload {
   windowSize: number;        // 上下文窗口（默认 200000）
   model: string | null;      // 当前会话模型
   compactedJustNow?: boolean; // CC 自动压缩事件
+}
+
+/**
+ * 原生 settings 诊断摘要（Task 3 Step 5，SDK resolveSettings 的可克隆脱敏视图）。
+ * 只回来源级联（source + path）、可见 CLAUDE.md 候选、effective 键名——绝不回传 effective 的值
+ * （可能含 env/API key 等秘密），日志与 IPC 一律脱敏。
+ */
+export interface NativeSettingsDiagnostic {
+  cwd: string;
+  /** 来源级联（低→高优先级）：managed / user / project / local / flag 等。 */
+  sources: Array<{ source: string; path?: string }>;
+  /** 从 cwd 向上可发现的 CLAUDE.md 候选（CC 会加载的上下文文件）。 */
+  claudeMdCandidates: string[];
+  /** effective settings 的顶层键名摘要（只取键，不含值）。 */
+  effectiveKeys: string[];
 }
 
 export type QueueEventType =

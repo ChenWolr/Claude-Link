@@ -63,16 +63,35 @@ watch(configSnapshot, (snap) => {
   scheduleAutoSave();
 });
 
+async function refreshNativeSettingsDiagnostic(workingDir: string | null): Promise<void> {
+  if (!workingDir) {
+    store.invalidateNativeSettingsDiagnostic();
+    return;
+  }
+  await store.loadNativeSettingsDiagnostic(workingDir);
+}
+
 async function performInit() {
   await store.loadConfig();
   await store.detectCli();
   await store.loadStorageInfo();
+  await refreshNativeSettingsDiagnostic(store.config.workingDirectory);
   // 建立基线：此后任何字段变化才视为"用户改动"触发自动保存。
   lastSavedSnapshot = configSnapshot();
   initialized = true;
 }
 
 onMounted(performInit);
+
+// 工作目录可能由自动检测、工作区切换或主进程配置流程更新；诊断必须跟随当前 cwd，
+// 不得继续展示旧目录的 settings 来源和 CLAUDE.md candidates。
+watch(
+  () => store.config.workingDirectory,
+  (workingDir) => {
+    if (!initialized) return;
+    void refreshNativeSettingsDiagnostic(workingDir);
+  },
+);
 
 // 切页卸载时立即落盘 pending 的自动保存：原 700ms 防抖期间若用户填完即切走（去会话发消息），
 // pending 保存不保证在发消息前执行，导致"填了没生效、需手动点保存"。卸载时强制 flush 修复此时序缺陷。
@@ -301,6 +320,19 @@ function handleThinkingLevelChange(e: Event) {
         <div><span>配置文件</span><code>{{ store.storageInfo.config }}</code></div>
         <div><span>工作空间历史</span><code>{{ store.storageInfo.workspaces }}</code></div>
         <div><span>会话数据库</span><code>{{ store.storageInfo.db }}</code></div>
+      </div>
+    </details>
+
+    <details v-if="store.nativeSettingsDiagnostic" class="storage-info native-settings-diagnostic">
+      <summary>Claude Code 原生 settings 诊断</summary>
+      <div class="storage-info__body">
+        <div><span>工作目录</span><code>{{ store.nativeSettingsDiagnostic.cwd }}</code></div>
+        <div><span>生效键名</span><code>{{ store.nativeSettingsDiagnostic.effectiveKeys.join(', ') || '（无）' }}</code></div>
+        <div><span>CLAUDE.md 候选</span><code>{{ store.nativeSettingsDiagnostic.claudeMdCandidates.join(', ') || '（无）' }}</code></div>
+        <div>
+          <span>settings 来源</span>
+          <code>{{ store.nativeSettingsDiagnostic.sources.map((source) => source.source + (source.path ? ` (${source.path})` : '')).join(' → ') || '（无）' }}</code>
+        </div>
       </div>
     </details>
 

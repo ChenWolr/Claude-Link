@@ -87,6 +87,8 @@ export interface ClaudeLinkAPI {
   getSessionCommands: (sessionId: string) => Promise<SessionCommandSnapshot>;
   onCommandChanged: (callback: (payload: CommandChangedPayload) => void) => () => void;
   removeCommandListener: () => void;
+  // Task 3 Step 5：原生 settings 诊断摘要（脱敏，只回来源/CLAUDE.md 候选/生效键名）。
+  getNativeSettingsDiagnostic: (cwd: string) => Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>;
 }
 
 export function createApi(): ClaudeLinkAPI {
@@ -196,6 +198,8 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.COMMANDS_CHANGED, listener);
     },
     removeCommandListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.COMMANDS_CHANGED),
+    getNativeSettingsDiagnostic: (cwd) =>
+      ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, cwd) as Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>,
   };
 }
 

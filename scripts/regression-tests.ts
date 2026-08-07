@@ -23,6 +23,7 @@ import { buildClaudeSettingsProjection } from '../src/main/modules/claude-settin
 import { isMissingConversationResumeError } from '../src/main/modules/sdk-errors';
 import { applyPermissionUpdates, buildPermissionSettings, coercePermissionUpdatesToSession, isToolSessionAllowed, withToolSessionAllow } from '../src/main/modules/sdk-permissions';
 import { parseClaudeSettings } from '../src/main/modules/settings-importer';
+import { syncFormToAdvancedJson } from '../src/shared/settings-parser';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdownRenderer, isDiffContent, renderDiffHtml, renderDiffHtmlWithRenderer, renderMarkdown } from '../src/renderer/utils/markdown';
 import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';
@@ -1409,11 +1410,53 @@ function testPermissionPromptIntegration(): void {
   assert.ok(preloadApi.includes('onInteractionCancel'));
   assert.ok(preloadApi.includes('respondInteraction'));
   assert.ok(ipcHandlers.includes('respondToInteractionPrompt'));
-  assert.ok(/canUseTool:\s*createPermissionHandler\(sessionId,\s*mainWindow,\s*opts\.workingDir/.test(sdkBackend), 'canUseTool 须接线 createPermissionHandler 并传 workingDir（供改前快照解析相对路径）');
+  assert.ok(/canUseTool\s*[:=]\s*createPermissionHandler\(sessionId,\s*mainWindow,\s*opts\.workingDir/.test(sdkBackend), 'canUseTool 须接线 createPermissionHandler 并传 workingDir（供改前快照解析相对路径）');
   assert.ok(sdkBackend.includes('supportedDialogKinds'));
   assert.ok(sdkBackend.includes('onUserDialog'));
   assert.ok(sdkBackend.includes('requestInteraction'));
   assert.ok(appVue.includes('<InteractionPrompt />'));
+
+  // ── Task 3：恢复 Claude Code 原生 settings / CLAUDE.md 来源（计划 Task 3 Step 1 契约）──
+  const optionsSrc = fs.readFileSync(new URL('../src/main/modules/sdk-command-options.ts', import.meta.url), 'utf8');
+  const writerSrc = fs.readFileSync(new URL('../src/main/modules/settings-writer.ts', import.meta.url), 'utf8');
+  assert.ok(!/settingSources:\s*\[\]/.test(sdkBackend), '生产 query 不得强制禁用 user/project/local 原生来源');
+  assert.ok(!/settingSources:\s*\[\]/.test(optionsSrc), 'probe options 不得强制禁用 user/project/local 原生来源');
+  assert.ok(/resolveSettings/.test(sdkBackend), '应接入 SDK resolveSettings 诊断（Task 3 Step 5）');
+  assert.ok(/buildNativeSdkOptionsCore/.test(sdkBackend), '生产 query/probe 应共用统一核心 options 构造（Task 3 Step 3）');
+  assert.ok(sdkBackend.includes('cwd'), 'sdk-backend 应使用 cwd');
+  assert.ok(writerSrc.includes("layer: 'local'"), 'settings-writer 应声明只写 local 层');
+  // review-v1 F5：原生 settings 诊断必须接入 IPC 三处（通道常量 + preload 方法 + ipc-handler）。
+  assert.ok(ipcTypes.includes('SETTINGS_GET_DIAGNOSTIC'), 'ipc.ts 应定义 settings 诊断通道常量');
+  assert.ok(ipcTypes.includes('NativeSettingsDiagnostic'), 'ipc.ts 应定义可克隆 NativeSettingsDiagnostic 类型');
+  assert.ok(preloadApi.includes('getNativeSettingsDiagnostic'), 'preload 应暴露 getNativeSettingsDiagnostic');
+  assert.ok(ipcHandlers.includes('SETTINGS_GET_DIAGNOSTIC'), 'ipc-handlers 应注册 SETTINGS_GET_DIAGNOSTIC handler');
+  assert.ok(ipcHandlers.includes('getNativeSettingsDiagnostic'), 'ipc-handlers 应调用 getNativeSettingsDiagnostic（主进程函数不再死代码）');
+  const configStoreSrc = fs.readFileSync(new URL('../src/renderer/stores/config-store.ts', import.meta.url), 'utf8');
+  const configPageSrc = fs.readFileSync(new URL('../src/renderer/pages/ConfigPage.vue', import.meta.url), 'utf8');
+  assert.ok(configStoreSrc.includes('loadNativeSettingsDiagnostic'), 'renderer store 应消费 settings 诊断 API');
+  assert.ok(configPageSrc.includes('loadNativeSettingsDiagnostic'), 'ConfigPage 应触发 settings 诊断加载');
+  assert.ok(configPageSrc.includes('nativeSettingsDiagnostic'), 'ConfigPage 应展示 settings 诊断摘要');
+  const e2eSettingsSrc = fs.readFileSync(new URL('../scripts/claude-code-command-e2e-verify.ts', import.meta.url), 'utf8');
+  const contextHelper = e2eSettingsSrc.match(/function collectContextMarkerResult[\s\S]*?\n}/)?.[0] ?? '';
+  assert.ok(contextHelper, 'settings E2E 应有 CLAUDE.md 上下文验证 helper');
+  assert.ok(!contextHelper.includes('USER_CLAUDE_CONTEXT_MARKER') && !contextHelper.includes('PROJECT_CLAUDE_CONTEXT_MARKER'), 'query prompt 不得直接包含 CLAUDE.md 目标标记');
+  assert.ok(/watch\(\s*\(\)\s*=>\s*store\.config\.workingDirectory/.test(configPageSrc), 'ConfigPage 应监听工作目录变化并刷新诊断');
+  assert.ok(configStoreSrc.includes('nativeSettingsDiagnosticRequestId'), 'settings 诊断应有请求代际号');
+  assert.ok(/requestId[\s\S]*config\.workingDirectory[\s\S]*nativeSettingsDiagnostic/.test(configStoreSrc), '诊断结果写回前应校验请求代际与当前工作目录');
+  assert.ok(/saveConfig[\s\S]*loadNativeSettingsDiagnostic\(this\.config\.workingDirectory\)/.test(configStoreSrc), '配置保存落盘后应刷新 settings 诊断，避免展示过期 effective settings');
+  const commandMatrixSrc = fs.readFileSync(new URL('../scripts/claude-code-command-matrix.ts', import.meta.url), 'utf8');
+  assert.ok(commandMatrixSrc.includes('PENDING_MATRIX_OUT_FILE'), 'runtime-only 命令应有待补规格输出路径');
+  assert.ok(commandMatrixSrc.includes('writeFileSync'), 'runtime-only 命令应持久化待补矩阵规格');
+  // review-v1 F6：query 与 probe 共用统一 settings 构造（buildClaudeLinkSettingsBlock），
+  // 工厂把显式 settings 放入 Options.settings，杜绝两条路径各自重复构造 settings。
+  assert.ok(sdkBackend.includes('buildClaudeLinkSettingsBlock'), 'sdk-backend 应有统一 settings 块构造函数（F6）');
+  assert.ok(
+    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias\)/g) ?? []).length >= 2,
+    '生产 query 与 probe 必须调用同一个 buildClaudeLinkSettingsBlock（F6：杜绝配置漂移）',
+  );
+  assert.ok(optionsSrc.includes('settings?: Record<string, unknown>'), '统一 options 工厂输入应含显式 settings（F6）');
+  assert.ok(optionsSrc.includes('options.settings = input.settings'), '工厂应把显式 settings 放入 Options.settings（F6）');
+  assert.ok(optionsSrc.includes('options.additionalDirectories = input.additionalDirectories'), '工厂应把 additionalDirectories 放入 Options（F6）');
 }
 
 function testPermissionInteractionAdapter(): void {
@@ -1489,11 +1532,18 @@ function testPermissionInteractionAdapter(): void {
 }
 
 function testPermissionSettingsMergeAndSessionCoercion(): void {
+  // Task 3 Step 4：用户未显式选非默认 mode（= 'default'）时，不得强制写 defaultMode 覆盖原生文件。
   const base = buildPermissionSettings({
     permissionMode: 'default',
     advancedJson: JSON.stringify({ permissions: { allow: ['Read'], ask: ['Bash(git status)'], additionalDirectories: ['D:/work'] } }),
   });
-  assert.deepEqual(base, { defaultMode: 'default', allow: ['Read'], ask: ['Bash(git status)'], additionalDirectories: ['D:/work'] });
+  assert.deepEqual(base, { allow: ['Read'], ask: ['Bash(git status)'], additionalDirectories: ['D:/work'] });
+  // 显式非默认 mode 才强制写 defaultMode（Claude Link 显式设置优先级最高）。
+  assert.deepEqual(buildPermissionSettings({ permissionMode: 'acceptEdits', advancedJson: null }), { defaultMode: 'acceptEdits' });
+  const syncedDefault = syncFormToAdvancedJson(JSON.stringify({ permissions: { defaultMode: 'plan' } }), {
+    apiKey: '', apiBaseUrl: 'https://api.anthropic.com', permissionMode: 'default',
+  });
+  assert.deepEqual(JSON.parse(syncedDefault), {}, '表单默认权限不得把 defaultMode 写回 advancedJson 覆盖原生层');
 
   assert.deepEqual(applyPermissionUpdates(base, [
     { type: 'addRules', rules: [{ toolName: 'WebSearch' }], behavior: 'allow', destination: 'localSettings' },
