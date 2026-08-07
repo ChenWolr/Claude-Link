@@ -46,7 +46,7 @@ import type { ClaudePlanTask, ClaudePlanState, ClaudePlanTaskPatch } from '../..
 import * as claudePlanRepo from '../database/repositories/claude-plan-repo';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
-import type { CommandChangedPayload, SessionCommandSnapshot } from '../../shared/types/command';
+import type { CommandChangedPayload, CommandOriginContext, SessionCommandSnapshot } from '../../shared/types/command';
 import type {
   CliEvent,
   CliMessageContentPart,
@@ -89,6 +89,7 @@ import {
 } from './sdk-permissions';
 import { sdkCommandRegistry } from './sdk-command-registry';
 import { mergeSpawnOptions } from './sdk-command-options';
+import { buildCommandOriginEvidence } from './sdk-command-origin';
 import { isSubAgentToolUse } from '../../shared/process-kind';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
 import {
@@ -163,6 +164,8 @@ const nextQueryInstance = { value: 1 };
 
 const entries = new Map<string, SessionEntry>();
 const sessionCliIds = new Map<string, string>();
+// 每会话的命令来源分类上下文（system.init 的 skills/plugins/slash_commands）。
+const sessionCommandCtx = new Map<string, CommandOriginContext>();
 // 中断标记按 query 实例（与 process-manager 的 interruptedChildren 思路一致，避免跨回合串扰）。
 const interruptedQueries = new WeakSet<Query>();
 // 内存级"会话是否仍存活"集合。删会话时移除，runQuery/forwardEvent 据此在落库前判活，
@@ -438,6 +441,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
   contextUsageDiagnosed.delete(sessionId);
+  sessionCommandCtx.delete(sessionId);
   // 原生 Slash Commands：会话删除时取消正在进行的命令探测并清理快照，避免 stale 命令堆积与 A/B 串扰。
   // cancelCommandProbeInternal 用 0 超时 fire-and-forget（abort 同步触发，probe 异步自行退出）。
   void cancelCommandProbeInternal(sessionId, 0);
@@ -1646,6 +1650,30 @@ async function runCommandProbe(
   }
 }
 
+/** 从 system.init 消息提取命令来源分类上下文（Task 2）。 */
+function buildCommandOriginContext(sdkMsg: Record<string, unknown>): CommandOriginContext {
+  const skills = Array.isArray(sdkMsg.skills)
+    ? (sdkMsg.skills as unknown[]).filter((s): s is string => typeof s === 'string')
+    : [];
+  const plugins = Array.isArray(sdkMsg.plugins)
+    ? (sdkMsg.plugins as Array<Record<string, unknown>>)
+        .map((p) => (typeof p?.name === 'string' ? p.name : ''))
+        .filter((n) => n.length > 0)
+    : [];
+  const slashCommands = Array.isArray(sdkMsg.slash_commands)
+    ? (sdkMsg.slash_commands as unknown[]).filter((s): s is string => typeof s === 'string')
+    : [];
+  // 证据扫描必须与 query 使用同一用户目录：buildSpawnEnv() 将 process.env 传入 Claude Code，
+  // 因此这里显式使用同一 USERPROFILE/HOME，而不是让 sdk-command-origin 另行读取宿主默认 homedir。
+  const userHome = process.env.USERPROFILE || process.env.HOME;
+  const evidence = buildCommandOriginEvidence({
+    cwd: typeof sdkMsg.cwd === 'string' ? sdkMsg.cwd : undefined,
+    plugins: Array.isArray(sdkMsg.plugins) ? (sdkMsg.plugins as Array<{ name: string; path?: string }>) : [],
+    ...(userHome ? { userHome } : {}),
+  });
+  return { skills, plugins, slashCommands, evidence };
+}
+
 async function resolveAndApplyProbeCommands(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -1675,7 +1703,7 @@ async function resolveAndApplyProbeCommands(
       isCurrentProbe(sessionId, entry) &&
       sdkCommandRegistry.getRevision(sessionId) === startRev
     ) {
-      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(rawCommands) ? rawCommands : [], 'probe');
+      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(rawCommands) ? rawCommands : [], 'probe', sessionCommandCtx.get(sessionId));
       emitCommandChanged(sessionId, mainWindow, snap);
     }
   } catch (e) {
@@ -1781,7 +1809,7 @@ async function runGlobalCommandProbeInternal(mainWindow: BrowserWindow, entry: G
       const t = msg.type as string;
       const st = msg.subtype as string | undefined;
       if (t === 'system' && st === 'init') {
-        await applyGlobalProbeCommands(mainWindow, query, entry);
+        await applyGlobalProbeCommands(mainWindow, query, entry, buildCommandOriginContext(msg as Record<string, unknown>));
         break; // 拿到命令即退出消费循环
       }
     }
@@ -1808,6 +1836,7 @@ async function applyGlobalProbeCommands(
   mainWindow: BrowserWindow,
   query: Query,
   entry: GlobalProbeEntry,
+  ctx: CommandOriginContext,
 ): Promise<void> {
   if (typeof query.supportedCommands !== 'function') return;
   let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1821,7 +1850,7 @@ async function applyGlobalProbeCommands(
     ]);
     if (entry.abortController.signal.aborted) return;
     // 写入全局兜底（内部清洗 + 去重，与 replace 同款）。
-    sdkCommandRegistry.setGlobalFallback(Array.isArray(rawCommands) ? rawCommands : [], 'probe');
+    sdkCommandRegistry.setGlobalFallback(Array.isArray(rawCommands) ? rawCommands : [], 'probe', ctx);
     // 回填（N7）：globalFallback 就绪后，对 activeSessions 中「命令仍为空」的会话补推兜底命令。不按 has(sid)
     // 判断——loading/degraded 已写入 snapshots 使 has 为 true，但命令可能仍空（probe 进行中/失败/兜底晚到）。
     // 按 commands 空判断：保留该会话当前 status（loading/degraded），用 setStatusPreservingCommands 补 cache 命令不清空。
@@ -1883,7 +1912,7 @@ async function maybeDiscoverCommandsFromInit(
         aliases: [],
         source: 'sdk',
       }));
-      const snap = sdkCommandRegistry.replace(sessionId, initCmds, 'init');
+      const snap = sdkCommandRegistry.replace(sessionId, initCmds, 'init', buildCommandOriginContext(sdkMsg));
       emitCommandChanged(sessionId, mainWindow, snap);
     }
   }
@@ -1904,7 +1933,7 @@ async function maybeDiscoverCommandsFromInit(
       isCurrentEntry(sessionId, entry) &&
       sdkCommandRegistry.getRevision(sessionId) === startRev
     ) {
-      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(raw) ? raw : [], 'probe');
+      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(raw) ? raw : [], 'probe', sessionCommandCtx.get(sessionId));
       emitCommandChanged(sessionId, mainWindow, snap);
     }
   } catch (e) {
@@ -2075,6 +2104,7 @@ async function runQuery(
           const sid = sdkMsg.session_id as string;
           touchActivity(sessionId, 'system:init');
           sessionCliIds.set(sessionId, sid);
+          sessionCommandCtx.set(sessionId, buildCommandOriginContext(sdkMsg as Record<string, unknown>));
           // 会话已删则不写库（避免外键失败）。
           if (isSessionActive(sessionId)) {
             try {
@@ -2245,7 +2275,7 @@ async function runQuery(
         // source:'changed'，不落库、不走 CHAT_EVENT（走独立 COMMANDS_CHANGED IPC）。
         if (subtype === 'commands_changed') {
           const rawCommands = Array.isArray(sdkMsg.commands) ? sdkMsg.commands : [];
-          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed');
+          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', sessionCommandCtx.get(sessionId));
           emitCommandChanged(sessionId, mainWindow, snap);
           continue;
         }
