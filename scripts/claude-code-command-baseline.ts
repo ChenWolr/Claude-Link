@@ -598,6 +598,11 @@ function runAssertions(b: BaselineResult): void {
 }
 
 // ── 入口（CJS 不支持 top-level await，包一层 async；review-v1 F4：exit 不在 try/catch 内）──
+// review-v4：仅当本文件作为 CLI 入口被直接执行时才运行门禁。matrix --require-runtime-match 通过
+// import 复用 collectBaselineToFile，若入口 IIFE 在模块导入时即执行，会以调用方无关的 RUN_NATIVE
+// 判定打 SKIP 并 process.exit 劫持 matrix 进程（无 env 时 matrix 断言从未运行、门禁假绿）。守卫后，
+// 被导入时只暴露函数，不执行任何入口副作用。
+if (require.main === module) {
 void (async () => {
   if (!RUN_NATIVE) {
     console.log('SKIP: Claude Code native E2E 未触发（--native 或 CLAUDE_LINK_RUN_NATIVE_E2E=1）。' +
@@ -644,3 +649,4 @@ void (async () => {
   console.error('baseline fatal:', e);
   process.exit(1);
 });
+}
