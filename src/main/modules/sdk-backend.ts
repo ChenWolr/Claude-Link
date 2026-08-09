@@ -2527,6 +2527,16 @@ export function killProcess(
     // 不会被 getActiveProcess 误判为仍有活 query 而把消息 drop 掉。旧 query 退出时靠 identity guard 清理。
     removeEntryIfCurrent(sessionId, entry);
     cleanupSessionStall(sessionId);
+    // Task 4 review P1-2：用户中断/卡死硬杀须显式发幂等 aborted 终态。killProcess 已 abortEntry
+    // （state='aborting'）+ removeEntryIfCurrent，isCurrentEntry 此后 false；runQuery 流末兜底
+    // （isCurrentEntry 检查）与 catch 段（!isCurrentEntry → emitExit(null)）都不会再发 aborted，
+    // 导致后台会话/窗口切换/依赖统一终态事件的路径收不到取消结果、sending 不复位。此处补发：
+    // forwardEvent 对 aborted 只 IPC 不落库（persistCliEvent 无 case），前端 markStopped 幂等；
+    // runQuery 不会重复发（上述分支已吞掉）。session_cleanup/queue/api_retry_exhausted 不发
+    // （会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
+    if ((reason === 'user' || reason === 'watchdog') && mainWindow) {
+      forwardEvent(sessionId, mainWindow, { type: 'aborted', message: reason === 'user' ? '已中断' : '已硬中断' });
+    }
     if (entry.query) {
       void entry.query.interrupt().catch(() => {
         // 软中断失败不阻塞；query 会因迭代抛错走 aborted 分支。
