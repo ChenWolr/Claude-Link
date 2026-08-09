@@ -17,6 +17,8 @@
 import { strict as assert } from 'node:assert';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+// review-v2 P1-2：baseline 过期/缺失时在门禁内重新采集，版本绑定当前 executable/SDK，不依赖旧缓存时间戳。
+import { collectBaselineToFile } from './claude-code-command-baseline';
 
 /** 单命令预期来源（与 src/shared/types/command.ts 的 CommandOrigin 对齐，Task 2 落地）。 */
 export type CommandOrigin =
@@ -327,20 +329,44 @@ const EFFECTIVE_MATRIX_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 
 
 type BaselineJsonCommand = { name?: string; description?: string; argumentHint?: string; aliases?: string[]; origin?: string };
 
-function requireRuntimeMatch(): void {
+async function requireRuntimeMatch(): Promise<void> {
   console.log('=== 6) --require-runtime-match：矩阵消费真实基线（以运行时为真相源 reconcile + origin 交叉校验）===');
-  let baseline: {
+  type BaselineJson = {
     slashCommands?: string[];
     commands?: BaselineJsonCommand[];
     probeView?: { names?: string[]; canonicalMappings?: Record<string, string> };
     collectedAt?: string;
     environment?: { sdkVersion?: string; claudeCodeVersion?: string };
   };
-  try {
-    baseline = JSON.parse(readFileSync(BASELINE_OUT_FILE, 'utf8'));
-  } catch (e) {
+  const readBaseline = (): BaselineJson | null => {
+    try {
+      return JSON.parse(readFileSync(BASELINE_OUT_FILE, 'utf8')) as BaselineJson;
+    } catch {
+      return null;
+    }
+  };
+  let baseline = readBaseline();
+  // review-v2 P1-2：baseline 缺失或过期时在门禁内重新采集当前 executable/SDK 版本基线，
+  // 不依赖仓库外旧缓存时间戳（selftest:native 串行跑时 e2e 耗时 >5min 会导致 baseline 过期）。
+  const ageMs0 = baseline?.collectedAt && !Number.isNaN(Date.parse(baseline.collectedAt))
+    ? Date.now() - Date.parse(baseline.collectedAt)
+    : Number.POSITIVE_INFINITY;
+  const needsRegen = !baseline || ageMs0 > 5 * 60 * 1000;
+  if (needsRegen) {
+    console.log('  ℹ baseline 缺失或过期，重新采集当前版本基线（review-v2 P1-2，版本绑定当前 executable/SDK）...');
+    try {
+      await collectBaselineToFile();
+    } catch (e) {
+      check('baseline 重新采集成功（executable 可用）', () => {
+        throw new Error(`重新采集 baseline 失败（executable 缺失或 SDK 异常）: ${(e as Error).message}`);
+      });
+      return;
+    }
+    baseline = readBaseline();
+  }
+  if (!baseline) {
     check('command-baseline.json 可读取（需先运行 baseline --native）', () => {
-      throw new Error(`读取 ${BASELINE_OUT_FILE} 失败: ${(e as Error).message}`);
+      throw new Error(`读取 ${BASELINE_OUT_FILE} 失败`);
     });
     return;
   }
@@ -463,17 +489,20 @@ function requireRuntimeMatch(): void {
 }
 
 // ── 入口 ───────────────────────────────────────────────────────────────────────────
-function main(): void {
+async function main(): Promise<void> {
   console.log('Claude Code 命令矩阵：当前基线 %d 条（技能 %d + 非 Skill %d）', COMMAND_MATRIX.length, SKILL_NAMES.length, NON_SKILL_NAMES.length);
   runStructuralAssertions();
   if (process.argv.includes('--require-no-unexplained-gap')) {
     requireNoUnexplainedGap();
   }
   if (process.argv.includes('--require-runtime-match')) {
-    requireRuntimeMatch();
+    await requireRuntimeMatch();
   }
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
 }
 
-main();
+void main().catch((e) => {
+  console.error('matrix fatal:', e);
+  process.exit(1);
+});

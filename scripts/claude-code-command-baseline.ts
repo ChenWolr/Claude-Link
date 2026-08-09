@@ -463,6 +463,47 @@ async function collectBaseline(exe: string, cwd: string, userHome?: string): Pro
   };
 }
 
+/**
+ * review-v2 P1-2：采集 baseline 并写 OUT_FILE，返回结果。供 baseline.ts 入口与 matrix
+ * --require-runtime-match 共用——matrix 在 baseline 过期/不存在时调用本函数重新采集，
+ * 保证版本绑定当前 executable/SDK（不依赖仓库外旧缓存时间戳）。不跑 runAssertions
+ *（matrix 有自己的 runtime match 断言；入口单独跑基线行为断言）。executable 缺失抛带
+ * 中文 Error，由调用方决定 exit 码。
+ */
+export async function collectBaselineToFile(): Promise<BaselineResult> {
+  const resolved = resolveClaudeExe();
+  if (!resolved) {
+    throw new Error(
+      '前置条件缺失：未找到本地 Claude Code 可执行文件（claude.exe）。\n' +
+        '请先 npm install -g @anthropic-ai/claude-code，或设置 CLAUDE_LINK_CLAUDE_EXE。',
+    );
+  }
+  const { exe, source } = resolved;
+  if (source !== 'demo' && source !== 'explicit') {
+    console.warn(`⚠ 使用的 claude.exe 来自 ${source}（非 demo 目标环境 ${DEMO_EXE_PATH}）。` +
+      '采集结果可能与 Task1 的 demo 72 命令基线漂移；请确认这是预期的目标环境。');
+  }
+  mkdirSync(TEMP_ROOT, { recursive: true });
+  const cwd = mkdtempSync(path.join(TEMP_ROOT, 'baseline-cwd-'));
+  try {
+    setupNativeFixture(cwd);
+    const defaultUserHome = homedir();
+    const overrideUserHome = process.env.CLAUDE_LINK_USER_HOME?.trim();
+    const userHome = overrideUserHome && existsSync(overrideUserHome) ? path.resolve(overrideUserHome) : defaultUserHome;
+    if (userHome !== defaultUserHome) {
+      process.env.USERPROFILE = userHome;
+      process.env.HOME = userHome;
+    }
+    const userHomeUsed = userHome !== defaultUserHome ? userHome : undefined;
+    const baseline = await collectBaseline(exe, cwd, userHomeUsed);
+    mkdirSync(OUT_DIR, { recursive: true });
+    writeFileSync(OUT_FILE, JSON.stringify(baseline, null, 2), 'utf8');
+    return baseline;
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
 function runAssertions(b: BaselineResult): void {
   let pass = 0;
   let fail = 0;
@@ -564,6 +605,8 @@ void (async () => {
     process.exit(0);
   }
 
+  // 前置检查：executable 缺失 exit 2（前置条件，非断言失败）。采集逻辑（fixture/cleanup/写文件）
+  // 已下沉到 collectBaselineToFile，供 matrix --require-runtime-match 过期时复用（review-v2 P1-2）。
   const resolved = resolveClaudeExe();
   if (!resolved) {
     console.error(
@@ -573,36 +616,12 @@ void (async () => {
     );
     process.exit(2);
   }
-  const { exe, source } = resolved;
-  if (source !== 'demo' && source !== 'explicit') {
-    // review-v1 F5：PATH/npm 兜底的环境 ≠ demo 基线，显式告警，不允许静默当成 demo 基线。
-    console.warn(`⚠ 使用的 claude.exe 来自 ${source}（非 demo 目标环境 ${DEMO_EXE_PATH}）。` +
-      '采集结果可能与 Task1 的 demo 72 命令基线漂移；请确认这是预期的目标环境。');
-  }
-
-  mkdirSync(TEMP_ROOT, { recursive: true });
-  const cwd = mkdtempSync(path.join(TEMP_ROOT, 'baseline-cwd-'));
-  console.log('真实基线采集：exe=%s (source=%s)\ncwd=%s', exe, source, cwd);
-  setupNativeFixture(cwd);
-
-  // review-v1 F7：userHome 覆盖（CLAUDE_LINK_USER_HOME）用于证据扫描与 query 子进程，保证可复现；
-  // 未覆盖时用宿主 homedir（与 Claude Code 实际行为一致）。覆盖时同步设置进程级 USERPROFILE/HOME，
-  // 让 resolveSettings 的 user 来源也解析到同一隔离目录。
-  const defaultUserHome = homedir();
-  const overrideUserHome = process.env.CLAUDE_LINK_USER_HOME?.trim();
-  const userHome = overrideUserHome && existsSync(overrideUserHome) ? path.resolve(overrideUserHome) : defaultUserHome;
-  if (userHome !== defaultUserHome) {
-    process.env.USERPROFILE = userHome;
-    process.env.HOME = userHome;
-  }
-  const userHomeUsed = userHome !== defaultUserHome ? userHome : undefined;
+  console.log('真实基线采集：exe=%s (source=%s)', resolved.exe, resolved.source);
 
   let code = 0;
   try {
-    const baseline = await collectBaseline(exe, cwd, userHomeUsed);
+    const baseline = await collectBaselineToFile();
     runAssertions(baseline);
-    mkdirSync(OUT_DIR, { recursive: true });
-    writeFileSync(OUT_FILE, JSON.stringify(baseline, null, 2), 'utf8');
     console.log('基线 JSON 已写入 %s', OUT_FILE);
     console.log(
       '概要：commands=%d skills=%d plugins=%d slash_commands=%d settings.sources=%s 终态=%s ccVersion=%s userHome=%s%s',
@@ -619,9 +638,6 @@ void (async () => {
   } catch (e) {
     console.error('基线采集失败：', (e as Error).message);
     code = 1;
-  } finally {
-    // review-v1 F4：清理在 main 的 finally 完成；process.exit 在 finally 之后执行。
-    rmSync(cwd, { recursive: true, force: true });
   }
   process.exit(code);
 })().catch((e) => {
