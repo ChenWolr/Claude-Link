@@ -1457,6 +1457,110 @@ function testPermissionPromptIntegration(): void {
   assert.ok(optionsSrc.includes('settings?: Record<string, unknown>'), '统一 options 工厂输入应含显式 settings（F6）');
   assert.ok(optionsSrc.includes('options.settings = input.settings'), '工厂应把显式 settings 放入 Options.settings（F6）');
   assert.ok(optionsSrc.includes('options.additionalDirectories = input.additionalDirectories'), '工厂应把 additionalDirectories 放入 Options（F6）');
+
+  // ── Task 4：统一原生命令 query、结果和取消语义（计划 Task 4 Step 1/3/4/5 契约）──
+  const useChatCmd = fs.readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
+  const sdkInteractions = fs.readFileSync(new URL('../src/main/modules/sdk-interactions.ts', import.meta.url), 'utf8');
+  // §4：local_command_output 主进程单一落库（role:system + processKind），renderer 按 persisted_message upsert 不二次落库。
+  assert.ok(sdkBackend.includes('persistLocalCommandOutput'), 'local_command_output 应由主进程单一落库（persistLocalCommandOutput）');
+  assert.ok(sdkBackend.includes("processKind: 'system:local_command_output'"), 'local_command_output 落库 processKind 须为 system:local_command_output');
+  assert.ok(/persistLocalCommandOutput[\s\S]*?role: 'system'[\s\S]*?persisted_message/.test(sdkBackend), 'local_command_output 落库后须推 persisted_message 让 renderer upsert');
+  assert.ok(sdkBackend.includes("subtype === 'local_command_output'"), 'runQuery 须识别 local_command_output 子类型并单一落库');
+  // §4：commands_changed 全量替换（REPLACE，不 concat，source:'changed'）。
+  assert.ok(sdkBackend.includes("subtype === 'commands_changed'"), 'runQuery 须识别 commands_changed 子类型');
+  assert.ok(/replace\(sessionId,\s*rawCommands,\s*'changed'/.test(sdkBackend), 'commands_changed 须全量替换（source:changed，不 concat）');
+  // §1/§4：renderer 命令结果去重——result.result 与 local_command_output 内容相同时不二次落库。
+  assert.ok(useChatCmd.includes('hasLocalCommandOutputMessage'), 'renderer 应有 local_command_output 去重判断');
+  assert.ok(useChatCmd.includes("'system:local_command_output'"), '去重须匹配 processKind system:local_command_output');
+  assert.ok(/ensureResultMessage[\s\S]*?hasLocalCommandOutputMessage/.test(useChatCmd), 'ensureResultMessage 须调用去重避免命令结果二次落库');
+  // §3：统一命令执行入口——命令与普通消息同一 runQuery/buildSdkOptions，prompt 原样透传，无命令 prompt 翻译器。
+  assert.ok(ipcHandlers.includes('sendMessage(sessionId, prepared.prompt)'), 'CHAT_SEND 须用原样 prepared.prompt，不得翻译命令文本');
+  assert.ok(/async function runQuery\([\s\S]*?prompt: SdkPrompt/.test(sdkBackend), 'runQuery 须接收原始 prompt（命令与普通消息同一入口）');
+  assert.ok(sdkBackend.includes('startSdkQuery(prompt, sdkOptions)'), 'runQuery 须把原始 prompt 原样传给 SDK query（无中间翻译）');
+  assert.ok(!sdkBackend.includes('translateSlashCommand') && !sdkBackend.includes('commandToPrompt'), '不得存在命令 prompt 翻译器（绕过 SDK 的近似实现）');
+  // §4：终态与取消——流末无 result 合成 aborted 复位 sending；中断走 aborted（不弹错误）；executable 缺失中文错误。
+  assert.ok(sdkBackend.includes("type: 'aborted'"), 'runQuery 须合成 aborted 终态（流末无 result / 中断）');
+  assert.ok(sdkBackend.includes('已中断'), '用户中断须发 aborted（不弹错误，与 SDK 执行出错解耦）');
+  assert.ok(sdkBackend.includes('未检测到本地 Claude Code'), 'executable 缺失须发中文错误，不伪装成功');
+  assert.ok(/killProcess[\s\S]*?interruptedQueries\.add/.test(sdkBackend), 'killProcess 须记入 interruptedQueries 让 runQuery 走 aborted 分支');
+  // §5：取消与 deny 解耦——reason:'user' 记「用户拒绝」；abort/缺省记中性「已取消」，防 transcript 误 deny。
+  assert.ok(sdkInteractions.includes("response.reason === 'user'"), '权限响应须按 reason 分映（user vs abort）');
+  assert.ok(sdkInteractions.includes('用户拒绝了该工具调用'), 'reason:user 须记 deny「用户拒绝」语义');
+  assert.ok(sdkInteractions.includes('工具调用已取消'), 'reason:abort/缺省须记中性 deny「已取消」（不指控用户）');
+  // §1：e2e harness 钉住 /init 真实落盘契约（bypassPermissions + 真实 key，plan 模式不落盘）。
+  const e2eCmdSrc = fs.readFileSync(new URL('../scripts/claude-code-command-e2e-verify.ts', import.meta.url), 'utf8');
+  assert.ok(e2eCmdSrc.includes("permissionMode: 'bypassPermissions'"), '/init E2E 须用 bypassPermissions 让 Write 真实执行（plan 模式只产计划不落盘）');
+  // review P1-4：凭据检测须覆盖 env + settings.json 的 ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN，不只 settings.json。
+  assert.ok(e2eCmdSrc.includes('resolveInitCredentials'), '/init E2E 凭据检测须用 resolveInitCredentials 统一解析（P1-4）');
+  assert.ok(e2eCmdSrc.includes('ANTHROPIC_AUTH_TOKEN'), '/init E2E 凭据检测须覆盖 ANTHROPIC_AUTH_TOKEN，不只 ANTHROPIC_API_KEY（P1-4）');
+  assert.ok(/resolveInitCredentials\(\)[\s\S]*?SKIP/.test(e2eCmdSrc), '/init E2E 无凭据时须 SKIP，不得用 plan 假成功冒充（P1-4）');
+  assert.ok(e2eCmdSrc.includes("writeFileSync(path.join(initCwd"), '/init E2E 须在 cwd 放真实文件让 /init 有内容可分析（空目录不落盘）');
+  // review P1-3：清理须用 safeRmSync 带退避重试，EBUSY 不覆盖已通过的核心断言。
+  assert.ok(e2eCmdSrc.includes('safeRmSync'), 'e2E 清理须用 safeRmSync 带退避重试（P1-3）');
+  assert.ok(/safeRmSync[\s\S]*?不影响核心断言/.test(e2eCmdSrc), 'safeRmSync 清理失败须只 log 不 throw，不覆盖核心断言（P1-3）');
+  // Task 4 review P1-1：主进程持久化层命令结果去重——result.result 与本回合 local_command_output
+  // 正文相同时不重复落库（去重下沉到 persistCliEvent，与 renderer hasLocalCommandOutputMessage 同形）。
+  const cliSharedSrc = fs.readFileSync(new URL('../src/main/modules/cli-shared.ts', import.meta.url), 'utf8');
+  assert.ok(cliSharedSrc.includes('currentTurnHasLocalCommandOutput'), '主进程 result 落库须检查 local_command_output 去重（P1-1）');
+  assert.ok(/currentTurnHasLocalCommandOutput\(sessionId,\s*text\)/.test(cliSharedSrc), 'result case 须调用 local_command_output 去重判定（P1-1）');
+  assert.ok(/system:local_command_output[\s\S]*?\.trim\(\) === needle/.test(cliSharedSrc), '主进程去重须与 renderer 同形（正文 trim 相同才跳过，P1-1）');
+  // Task 4 review P1-2：killProcess 对 user/watchdog 显式发幂等 aborted（entry 移除后 runQuery
+  // 流末兜底与 catch 段 !isCurrentEntry 都不会再发，须由 killProcess 补发，防后台会话 sending 不复位）。
+  assert.ok(/reason === 'user' \|\| reason === 'watchdog'/.test(sdkBackend), 'killProcess 须对 user/watchdog reason 判定发 aborted（P1-2）');
+  assert.ok(/reason === 'user' \|\| reason === 'watchdog'[\s\S]*?forwardEvent[\s\S]*?type: 'aborted'/.test(sdkBackend), 'killProcess 须在移除 entry 后 forwardEvent aborted（P1-2）');
+  // review P2-1：/compact 须用 warmup+resume 有上下文场景，移除 typeof result==='string' 放宽。
+  assert.ok(/warmup[\s\S]*?resume: cliSid/.test(e2eCmdSrc), '/compact 须 warmup 产生上下文再 resume 压缩（P2-1）');
+  assert.ok(!/typeof run\.termination\?\.result === 'string'/.test(e2eCmdSrc), '/compact 不得用 typeof result===string 放宽（空字符串也命中，P2-1）');
+  assert.ok(/hasBoundary \|\| hasLocalOutput \|\| hasStatus/.test(e2eCmdSrc), '/compact 须断言 compact_boundary/非空 local_command_output/system:status 压缩证据（P2-1）');
+  // review P1-6：取消/启动失败/executable 缺失/权限拒绝真实场景。
+  assert.ok(e2eCmdSrc.includes('abortAfterMs'), 'e2e 须有用户取消场景 abortAfterMs（P1-6）');
+  assert.ok(/executable 缺失[\s\S]*?不伪造成功/.test(e2eCmdSrc), 'e2e 须有 executable 缺失不伪造成功场景（P1-6）');
+  assert.ok(/plan 模式 \/init[\s\S]*?不得落盘/.test(e2eCmdSrc), 'e2e 须有 plan /init 权限拒绝不落盘场景（P1-6）');
+  // ── Task 4 review-v2 ──
+  // P1-1：/init 超时调至 300s（实测 ~106s，180s 余量小端点波动即超时），断言用 termination（SDK 真实
+  // result）不放宽；失败时记录完整事件序列区分端点超时 vs 命令逻辑失败。
+  assert.ok(e2eCmdSrc.includes('timeoutMs: 300000'), '/init E2E 超时须 300s 给真实耗时余量（review-v2 P1-1）');
+  assert.ok(/run\.termination[\s\S]*?超时=.*启动错误=/.test(e2eCmdSrc), '/init 失败须记录 timedOut/queryError/事件序列供诊断，不放宽 result 断言（review-v2 P1-1）');
+  // P1-3：harness 合成事件与 SDK 原始事件分离，取消断言不靠 harness 合成放宽。
+  assert.ok(e2eCmdSrc.includes('syntheticEvents'), 'e2e 须分离 syntheticEvents（harness 合成）与 events（SDK 原始）（review-v2 P1-3）');
+  assert.ok(/syntheticEvents[\s\S]*?不计入通过条件/.test(e2eCmdSrc), 'syntheticEvents 不得计入取消断言通过条件（review-v2 P1-3）');
+  assert.ok(/run\.queryError[\s\S]*?run\.timedOut/.test(e2eCmdSrc), '启动失败须用 queryError/timedOut 区分，不靠 harness 合成 aborted（review-v2 P1-3）');
+  // review-v2 P1-3 修复：普通文本/用户取消 cwd 须创建（否则 SDK failed to launch，被 synthetic aborted
+  // / abortAfterMs !timedOut 掩盖，暴露为流末无 result 假象）。
+  assert.ok(/普通文本[\s\S]*?mkdirSync\(plainCwd/.test(e2eCmdSrc), '普通文本 E2E 须创建 cwd（防 failed to launch 被 synthetic 掩盖，review-v2 P1-3）');
+  assert.ok(/用户取消[\s\S]*?mkdirSync\(abortCwd/.test(e2eCmdSrc), '用户取消 E2E 须创建 cwd（防 failed to launch 被 abortAfterMs !timedOut 掩盖，review-v2 P1-3）');
+  // P1-4：真实用户 deny 交互（canUseTool 返回 deny），非 plan 模式拦截。
+  assert.ok(e2eCmdSrc.includes('canUseTool: async'), 'e2e 须有真实 canUseTool deny 交互测试（review-v2 P1-4）');
+  assert.ok(/denyCount > 0/.test(e2eCmdSrc), 'deny 测试须断言 canUseTool 被调用（权限请求产生）（review-v2 P1-4）');
+  assert.ok(/与 abort 路径分离/.test(e2eCmdSrc), 'deny 测试须与 abort 路径终态区分（review-v2 P1-4）');
+  // P1-2：matrix --require-runtime-match 在 baseline 过期/缺失时自动重新采集（版本绑定当前 executable/SDK）。
+  const matrixSrc = fs.readFileSync(new URL('../scripts/claude-code-command-matrix.ts', import.meta.url), 'utf8');
+  const baselineSrc = fs.readFileSync(new URL('../scripts/claude-code-command-baseline.ts', import.meta.url), 'utf8');
+  assert.ok(baselineSrc.includes('export async function collectBaselineToFile'), 'baseline 须 export collectBaselineToFile 供 matrix 复用（review-v2 P1-2）');
+  assert.ok(matrixSrc.includes('collectBaselineToFile'), 'matrix 须 import collectBaselineToFile（review-v2 P1-2）');
+  assert.ok(/needsRegen[\s\S]*?collectBaselineToFile/.test(matrixSrc), 'matrix 须在 baseline 过期/缺失时自动重新采集，不依赖旧缓存时间戳（review-v2 P1-2）');
+  // ── Task 4 review-v4 ──
+  // P1-3：baseline 入口 IIFE 必须 require.main === module 守卫。matrix import collectBaselineToFile 复用
+  // 采集时若入口在导入期即执行，会以调用方无关的 RUN_NATIVE 打 SKIP 并 process.exit(0) 劫持 matrix 进程
+  // （selftest:native 里 matrix --require-runtime-match 无 env，断言从未运行却整体 exit 0 假绿）。
+  assert.ok(/require\.main === module[\s\S]*?void \(async \(\) =>/.test(baselineSrc), 'baseline 入口须 require.main 守卫，被 matrix 导入时不执行入口（review-v4 P1-3）');
+  // ── Task 4 review-v3 ──
+  // P1-1/P1-2：/init 与普通文本失败须输出完整 result 诊断（subtype/errors/terminal_reason/api_error_status/
+  // stop_reason/result 文本/事件序列/文件状态），定位端点/认证/maxTurns 根因；is_error===false 保持强制不放宽。
+  assert.ok(e2eCmdSrc.includes('resultDiagnostic'), 'e2e 须有 resultDiagnostic 输出完整 result 诊断（review-v3 P1-1/P1-2）');
+  assert.ok(
+    /subtype=\$\{head\(t\?\.subtype\)\}[\s\S]*?stop_reason=\$\{head\(t\?\.stop_reason\)\}[\s\S]*?api_error_status=\$\{head\(t\?\.api_error_status\)\}[\s\S]*?errors=\$\{head\(t\?\.errors\)\}/.test(e2eCmdSrc),
+    'resultDiagnostic 须输出 subtype/stop_reason/api_error_status/errors 等完整字段（review-v3 P1-1）',
+  );
+  assert.ok(/不得 is_error[\s\S]*?resultDiagnostic/.test(e2eCmdSrc), '/init/普通文本 is_error 断言失败须带 resultDiagnostic 完整诊断（review-v3 P1-1/P1-2）');
+  // ── Task 4 review-v4 ──
+  // /init 与普通文本 success fixture 必须显式给足 maxTurns，不能继承 helper 默认 1 或固定 20
+  // 而在模型仍有 tool_use 时被 error_max_turns 截断；普通文本 success 路径必须是 result + is_error=false，
+  // 未安排 cancel 时不得让真实 aborted 作为成功。
+  assert.ok(/\/init[\s\S]*?maxTurns:\s*50/.test(e2eCmdSrc), '/init success E2E 须显式 maxTurns:50（review-v4 P1-1：20 不足会 error_max_turns）');
+  assert.ok(/普通文本[\s\S]*?maxTurns:\s*10/.test(e2eCmdSrc), '普通文本 success E2E 须显式 maxTurns:10（review-v4 P1-2：不得继承 helper 默认 1）');
+  assert.ok(/普通文本[\s\S]*?assert\.equal\(run\.termination\?\.type,\s*'result'/.test(e2eCmdSrc), '普通文本 success E2E 须强制真实 result 终态（不得把 aborted 当成功，review-v4 P1-2）');
+  assert.ok(/普通文本[\s\S]*?assert\.equal\(run\.termination\?\.is_error,\s*false/.test(e2eCmdSrc), '普通文本 success E2E 须强制 result.is_error=false（review-v4 P1-2）');
 }
 
 function testPermissionInteractionAdapter(): void {
