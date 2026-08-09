@@ -151,6 +151,13 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
       // 避免把错误文案当成正常回答污染历史；error_during_execution（用户中断）跳过。
       if (isErrorCliResult(r)) break;
       if (currentTurnHasMainFlowText(sessionId)) break;
+      // Task 4 review P1-1：命令回合去重下沉到持久化层。SDK 对本地命令（/clear /usage 等）会同时
+      // 返回 system:local_command_output（已由 persistLocalCommandOutput 落库为 system 消息）和
+      // result.result（正文相同）。currentTurnHasMainFlowText 只查 assistant 正文，查不到 system
+      // 消息，导致 result.result 再写一条 assistant 行 → DB 重复（重启后历史出现两条气泡）。
+      // 此处与 renderer hasLocalCommandOutputMessage 同形判定（本回合内 system:local_command_output
+      // 正文 trim 相同即跳过），保证 DB 与 renderer 用同一去重逻辑。
+      if (currentTurnHasLocalCommandOutput(sessionId, text)) break;
       messageRepo.createMessage({
         sessionId, role: 'assistant', content: r.result, eventType: 'message', processKind: null,
       });
@@ -165,6 +172,28 @@ function currentTurnHasMainFlowText(sessionId: string): boolean {
     const m = rows[i];
     if (m.role === 'user') break;
     if (m.role === 'assistant' && m.eventType === 'message' && !m.parentAgentId) return true;
+  }
+  return false;
+}
+
+// Task 4 review P1-1：本回合内是否已有正文相同的 local_command_output 系统消息。
+// 与 renderer hasLocalCommandOutputMessage 同形——只查最新用户消息之后，processKind
+// system:local_command_output 且 content.trim() === text.trim()。命中则 result.result
+// 不再重复落库（local_command_output 已是同一命令输出的权威落库）。
+function currentTurnHasLocalCommandOutput(sessionId: string, text: string): boolean {
+  const needle = text.trim();
+  if (!needle) return false;
+  const rows = messageRepo.getMessagesBySession(sessionId);
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const m = rows[i];
+    if (m.role === 'user') break;
+    if (
+      m.role === 'system' &&
+      m.processKind === 'system:local_command_output' &&
+      m.content?.trim() === needle
+    ) {
+      return true;
+    }
   }
   return false;
 }
