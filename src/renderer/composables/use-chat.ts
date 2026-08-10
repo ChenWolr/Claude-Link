@@ -769,7 +769,8 @@ function createChat() {
       info.subtype === 'compact_boundary' ? '上下文已达压缩边界'
         : info.subtype === 'plugin_install' ? '插件安装'
           : info.subtype === 'interaction_response' ? '用户已完成交互选择'
-            : '系统提示';
+            : info.subtype === 'init_write_skipped' ? '未执行文件写入'
+              : '系统提示';
     persistMessage({
       role: 'system',
       eventType: 'system',
