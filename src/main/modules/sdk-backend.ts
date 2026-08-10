@@ -2019,6 +2019,18 @@ async function runQuery(
   ensureWatchdog(mainWindow);
 
   const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow, entry);
+  // P1-3（review-v1）：/init 文件副作用诊断——回合开始前记录目标 CLAUDE.md 是否存在。result 成功后
+  // 若仍未创建（空目录无内容可分析 / 权限不足 / plan 模式 Write 被拦），推送"未执行文件写入"横幅。
+  // 判定基于文件存在性（结构化），不靠 result 文本关键词推断；仅 /init 命令有"应写 CLAUDE.md"的副作用语义。
+  // review-v2 P2：带附件时 prompt 是 AsyncIterable，typeof string 判定失效。优先用调用方在
+  // SpawnOptions.userCommandText 保留的原始用户命令文本（ipc-handlers/task-queue 在 prepareAttachmentPrompt
+  // 前已知 payload.text），不从 AsyncIterable 反推命令名。
+  const initCommandText = (opts.userCommandText ?? (typeof prompt === 'string' ? prompt : '')).trim();
+  const initCwd = opts.workingDir || getConfig().workingDirectory;
+  const initTargetFile = /^(\/init)\b/.test(initCommandText) && initCwd
+    ? path.join(initCwd, 'CLAUDE.md')
+    : null;
+  const initFileExistedBefore = initTargetFile ? existsSync(initTargetFile) : false;
   // 卡死检测/硬杀：每会话一个 AbortController，传入 Options.abortController。
   // killProcess 在软中断之外调 .abort()，Windows 上 → TerminateProcess 真硬杀。
   entry.abortController = new AbortController();
@@ -2359,6 +2371,20 @@ async function runQuery(
         gotResult = true;
         if (sdkMsg.is_error === true) {
           finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
+        }
+        // P1-3 / review-v2 P1 / review-v3 P1：/init 回合结束（result 到达）但未创建 CLAUDE.md → 推送独立
+        // init_write_skipped 横幅（计划 Task 5 Step 3）。用专用 subtype 而非 informational——informational
+        // 会被 renderer 冗余过滤吞掉（review-v2 P1）。review-v3 P1：与 result.is_error 解耦——无论成功
+        // （空目录无内容可分析）还是 plan/权限拒绝（Write 被拦，is_error=true/error_max_turns），只要回合前
+        // 目标文件不存在且回合后仍不存在，就发此提示。它不声称成功（warn 级 + 「未能创建」文案），只陈述
+        // 「未写入」事实，与普通错误终态并存。取消（aborted 无 result）不走此分支（result 未到达）。
+        if (initTargetFile && !initFileExistedBefore && !existsSync(initTargetFile)) {
+          forwardEvent(sessionId, mainWindow, {
+            type: 'system',
+            subtype: 'init_write_skipped',
+            text: '未执行文件写入：/init 未能创建 CLAUDE.md（目录可能为空或被权限/计划模式拦截），请检查工作目录内容与权限。',
+            level: 'warn',
+          });
         }
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
         // result 已明确结束当前回合：先释放 active entry，再通知队列退出。

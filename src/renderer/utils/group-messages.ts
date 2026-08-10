@@ -62,7 +62,10 @@ export function groupMessagesForRender(messages: RenderableMessage[]): RenderIte
     // R2（问题 5）：权限询问 + 交互回执已由交互弹窗承载，不在聊天流重复渲染（仍落库留审计）。
     // 在此单一瓶颈过滤，同时覆盖主流程（MessageList）与子 Agent 面板（TaskQueuePanel→ProcessGroup）。
     if (isRedundantSystemProcessKind(msg.processKind)) continue;
-    if (msg.processKind === null) {
+    // review-v2 P1：init_write_skipped 是 /init 的独立文件副作用诊断，须独立展示（不进过程 fold），
+    // 否则被 fold 折叠态隐藏——ProcessGroup 的 system item 仅在 fold 展开时显示，用户无法立即看到
+    // 「未执行文件写入」。让它像正文一样独立成 message 项（MessageBubble bubble--system 居中横幅）。
+    if (msg.processKind === null || msg.processKind === 'system:init_write_skipped') {
       close();
       items.push({ key: msg.id, type: 'message', message: msg });
       continue;

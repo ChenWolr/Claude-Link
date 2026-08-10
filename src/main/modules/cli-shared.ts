@@ -28,6 +28,12 @@ export interface SpawnOptions {
   additionalDirectories?: string[];
   /** 每会话思考强度覆盖；null/未设=回落全局默认（config.defaultThinkingLevel）。 */
   thinkingLevel?: ThinkingLevel | null;
+  /**
+   * 原始用户命令文本（review-v2 P2）：带附件时 prompt 被转为 AsyncIterable，runQuery 无法从中反推
+   * 命令名。调用方（ipc-handlers/task-queue）在 prepareAttachmentPrompt 前已知 payload.text，由此传入，
+   * 供 /init 文件副作用诊断等命令判定使用。
+   */
+  userCommandText?: string;
 }
 
 // 构造注入子进程/SDK 的 env：apiKey + baseUrl + advancedJson.env 块展开。

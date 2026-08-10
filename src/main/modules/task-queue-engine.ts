@@ -261,6 +261,7 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
       thinkingLevel: session?.thinkingLevel ?? null,
       resumeSessionId: resolveCliSessionId(sessionId),
       additionalDirectories: prepared.additionalDirectories,
+      userCommandText: task.prompt,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -383,6 +384,7 @@ export async function continueWithUserMessage(
       thinkingLevel: session.thinkingLevel,
       resumeSessionId: resolveCliSessionId(sessionId),
       additionalDirectories: prepared.additionalDirectories,
+      userCommandText: payload.text,
     });
     spawned = true;
 

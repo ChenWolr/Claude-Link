@@ -33,7 +33,7 @@ async function copyMessage(): Promise<void> {
 
 <template>
   <div :class="['bubble', `bubble--${message.role}`]">
-    <div class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
+    <div v-if="message.role !== 'system'" class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
     <div v-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
     <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
     <div v-if="message.costUsd != null || message.durationMs" class="bubble__meta">

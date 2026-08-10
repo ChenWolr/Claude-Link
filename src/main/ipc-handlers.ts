@@ -298,6 +298,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         thinkingLevel: session.thinkingLevel,
         resumeSessionId: session.cliSessionId,
         additionalDirectories: prepared.additionalDirectories,
+        userCommandText: payload.text,
       });
       spawned = true;
       // sendMessage 同步路径只负责把 pending 交给 runQuery；真正 SDK 失败走事件流，不在此 IPC 回滚。
