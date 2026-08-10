@@ -1402,9 +1402,24 @@ function convertStreamEvent(sdkMsg: Record<string, unknown>): CliEvent {
   } as CliStreamEvent;
 }
 
-async function startSdkQuery(prompt: SdkPrompt, options: Record<string, unknown>): Promise<Query> {
+// review-v4 P1-2 test-only seam：允许测试注入 fake query factory，驱动真实 runQuery/forwardEvent/DB
+// 而不调真实 CLI/模型。仅测试入口安装；生产永不安装；finally 恢复默认。无 IPC/API/环境变量暴露。
+type SdkQueryFactory = (params: { prompt: SdkPrompt; options: Record<string, unknown> }) => Promise<Query>;
+
+const defaultSdkQueryFactory: SdkQueryFactory = async (params) => {
   const sdk = await importSdk();
-  return sdk.query({ prompt, options });
+  return sdk.query(params);
+};
+
+let activeSdkQueryFactory: SdkQueryFactory = defaultSdkQueryFactory;
+
+/** @internal test-only — 安装 fake query factory 覆盖真实 SDK query；传 null 恢复默认。 */
+export function __setSdkQueryFactoryForTest(factory: SdkQueryFactory | null): void {
+  activeSdkQueryFactory = factory ?? defaultSdkQueryFactory;
+}
+
+async function startSdkQuery(prompt: SdkPrompt, options: Record<string, unknown>): Promise<Query> {
+  return activeSdkQueryFactory({ prompt, options });
 }
 
 // ── 原生 Slash Commands 命令发现（Task 4）─────────────────────────────
