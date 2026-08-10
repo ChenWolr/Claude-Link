@@ -1089,6 +1089,190 @@ void (async () => {
     assert.strictEqual(store.activeSnapshot(sid).status, 'degraded');
   });
 
+  console.log('=== 21) Task 5 /init 闭环契约（源码）===');
+
+  check('ChatPage 无工作空间时阻止发送（ensureWorkspace 校验 activeSession.workingDir）', () => {
+    const src = readFileSync(path.join('src', 'renderer', 'pages', 'ChatPage.vue'), 'utf8');
+    assert.ok(src.includes('ensureWorkspace'), 'ChatPage 应有 ensureWorkspace 函数');
+    assert.ok(
+      /if\s*\(store\.activeSession\?\.workingDir\)\s*return true/.test(src),
+      'ensureWorkspace 应校验 activeSession.workingDir（无工作目录阻止发送）',
+    );
+    assert.ok(src.includes('if (!ensureWorkspace()) return;'), 'handleSend 应调用 ensureWorkspace 阻止无工作空间发送');
+  });
+
+  check('e2e 已实现 --init-matrix 模式并复用 runNativeCommand 真实 harness', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    assert.ok(src.includes('--init-matrix'), 'e2e 应识别 --init-matrix mode');
+    assert.ok(src.includes('runInitMatrixMode'), '应存在 runInitMatrixMode');
+    assert.ok(src.includes('await runInit(sdk, exe,'), '矩阵应经 runInit 执行 /init（调用链：runInitMatrixMode → runInit → runNativeCommand）');
+    assert.ok(src.includes('runNativeCommand'), 'runInit 应复用 runNativeCommand harness');
+  });
+
+  check('/init 成功证据固化：文件存在 + 是文件 + 非空 + 成功终态', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    // assertInitSuccessFile 把 CLAUDE.md 提到 const file = path.join(cwd, 'CLAUDE.md') 后统一断言。
+    assert.ok(src.includes("path.join(cwd, 'CLAUDE.md')"), '应解析 cwd 下的 CLAUDE.md 路径');
+    assert.ok(src.includes('existsSync(file)'), '应断言 CLAUDE.md 存在');
+    assert.ok(src.includes('.isFile()'), '应断言是文件');
+    assert.ok(src.includes(".trim().length > 0"), '应断言非空');
+    assert.ok(
+      src.includes('is_error === false') || src.includes('is_error, false'),
+      '应断言成功终态 is_error=false',
+    );
+  });
+
+  check('selftest:native 已接入 --init-matrix（发布门禁执行 /init 全矩阵）', () => {
+    const pkg = readFileSync(path.join('package.json'), 'utf8');
+    assert.ok(
+      /"selftest:native": "npm run selftest:static && node scripts\/run-native-chain\.mjs"/.test(pkg),
+      'selftest:native 应经 run-native-chain.mjs 执行 native 链',
+    );
+    const chain = readFileSync(path.join('scripts', 'run-native-chain.mjs'), 'utf8');
+    assert.ok(chain.includes('--native --init-matrix'), 'run-native-chain.mjs 应含 --native --init-matrix');
+  });
+
+  check('init-matrix 凭据缺失时须以退出码 2 结束（SKIP 不算 PASS，发布门禁拒绝前置缺失）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    assert.ok(src.includes('process.exit(2)'), '凭据缺失应非零退出（exit 2 前置条件缺失）');
+    assert.ok(
+      /if \(!creds\)[\s\S]{0,400}process\.exit\(2\)/.test(src),
+      'exit 2 应挂在 !creds 分支（全矩阵被 SKIP 不得绿色通过）',
+    );
+  });
+
+  console.log('=== 22) review-v1/v2/v3/v4 修复契约（P1-1/P1-2/v2-P1/v2-P2×2/v3-P1/v4-P1/v4-P2 seam）===');
+
+  // P1-1：用户级/项目级 CLAUDE.md 不得用「仅输出 X」互斥措辞（复用同一次 query 时模型只能满足一条，
+  // 导致⑤项 flaky）。改为「包含自己的标记」协调协议；prompt 不泄漏具体标记值。
+  check('P1-1：fixture 无「仅输出」互斥，改为「包含标记」协调协议', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    assert.ok(!/仅输出 USER_RULE_RESPONSE_7F31/.test(src), '用户级 CLAUDE.md 不得用「仅输出」互斥措辞');
+    assert.ok(!/仅输出 PROJECT_RULE_RESPONSE_9C42/.test(src), '项目级 CLAUDE.md 不得用「仅输出」互斥措辞');
+    assert.ok(src.includes('包含标记 USER_RULE_RESPONSE_7F31'), '用户级应改为「包含标记」协调协议');
+    assert.ok(src.includes('包含标记 PROJECT_RULE_RESPONSE_9C42'), '项目级应改为「包含标记」协调协议');
+    // prompt 不得泄漏具体标记值（7F31/9C42），否则不能证明 CLAUDE.md 进入上下文。
+    const promptLine = src.match(/prompt: '[^']*所有规则要求的标记[^']*'/);
+    assert.ok(promptLine, 'prompt 应要求「所有规则要求的标记都出现」且不泄漏具体值');
+    assert.ok(!/prompt: '[^']*7F31/.test(src) && !/prompt: '[^']*9C42/.test(src), 'prompt 不得含具体标记值');
+  });
+
+  // P1-2：只读目录不得用「cwd 不存在」代理（那是启动错误，非写权限失败）。用 ACL 构造 + accessSync 探测，
+  // 探测失败时诚实 SKIP（不用 cwd 不存在代理）。
+  check('P1-2：只读目录用 ACL 构造 + accessSync 探测，不用 cwd 不存在代理', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    assert.ok(src.includes('tryMakeDirReadOnly'), '应有 tryMakeDirReadOnly 辅助');
+    assert.ok(src.includes('accessSync(dir, constants.W_OK)'), '应用 accessSync(W_OK) 探测不可写');
+    assert.ok(src.includes('/inheritance:r'), 'Windows 应用 icacls /inheritance:r 移除继承');
+    assert.ok(src.includes('restoreDirWritable'), '应有 restoreDirWritable 恢复权限便于清理');
+    assert.ok(
+      !/以 cwd 不存在覆盖不可写语义/.test(src),
+      '不得保留「以 cwd 不存在覆盖不可写语义」代理措辞',
+    );
+  });
+
+  // v2-P1（review-v2 P1）：未执行文件写入须用独立 init_write_skipped 事件——informational 会被
+  // isRedundantSystemProcessKind 冗余过滤吞掉（review-v2 P1）。独立 subtype 不被过滤、独立展示。
+  check('v2-P1：未执行文件写入用独立 init_write_skipped 事件，不被冗余过滤、独立展示', () => {
+    const backend = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
+    assert.ok(
+      backend.includes("subtype: 'init_write_skipped'"),
+      '主进程应用独立 init_write_skipped subtype（非 informational，避免被冗余过滤）',
+    );
+    assert.ok(backend.includes('initTargetFile') && backend.includes('initFileExistedBefore'), '应记录 /init 文件副作用状态');
+    // review-v3 P1：与 result.is_error 解耦——plan/deny（is_error=true）未写入也发 init_write_skipped。
+    assert.ok(
+      !backend.includes('sdkMsg.is_error !== true && !existsSync(initTargetFile)'),
+      '不得保留 is_error !== true 条件（review-v3 P1：plan/权限拒绝未写入也须发提示）',
+    );
+    assert.ok(
+      /if \(initTargetFile && !initFileExistedBefore && !existsSync\(initTargetFile\)\)/.test(backend),
+      '触发条件应为 initTargetFile && !initFileExistedBefore && !existsSync(initTargetFile)（与 is_error 解耦）',
+    );
+    const cli = readFileSync(path.join('src', 'shared', 'types', 'cli.ts'), 'utf8');
+    assert.ok(cli.includes("'init_write_skipped'"), 'CliSystemInfoEvent.subtype 联合应含 init_write_skipped');
+    // isRedundantSystemProcessKind 不得把 init_write_skipped 判冗余（否则又被过滤）。
+    const sysinfo = readFileSync(path.join('src', 'shared', 'system-info.ts'), 'utf8');
+    assert.ok(!sysinfo.includes('system:init_write_skipped'), 'isRedundantSystemProcessKind 不得含 init_write_skipped');
+    // group-messages 须让 init_write_skipped 独立展示（不进 fold，否则被折叠隐藏）。
+    const group = readFileSync(path.join('src', 'renderer', 'utils', 'group-messages.ts'), 'utf8');
+    assert.ok(group.includes("'system:init_write_skipped'"), 'group-messages 应让 init_write_skipped 独立展示（不进 fold）');
+    // MessageBubble 对 system role 隐藏 bubble__role（避免「Claude」误导居中横幅）。
+    const bubble = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'MessageBubble.vue'), 'utf8');
+    assert.ok(/v-if="message\.role !== 'system'"/.test(bubble), 'MessageBubble 对 system role 应隐藏 bubble__role');
+  });
+
+  // v3-P1（review-v3 P1）：plan/权限拒绝导致 /init 未写入（is_error=true）时也须发 init_write_skipped。
+  // 产品层已与 is_error 解耦；e2e 补 /init + canUseTool deny Write 真实交互场景，验证 SDK 行为
+  // （不落盘 + result 非成功），保留 deny 语义的同时让产品层能显示「未写入」原因。
+  check('v3-P1：/init deny Write 真实交互 E2E（plan/deny 未写入有 SDK 证据）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    assert.ok(src.includes('/init 用户 deny Write'), 'e2e 应有 /init + canUseTool deny Write 场景（区别于 plan 自动拦截）');
+    assert.ok(src.includes("toolName === 'Write'"), 'canUseTool 应区分 Write 工具拒绝（其他放行）');
+    assert.ok(src.includes('writeDenied'), '应追踪 canUseTool 对 Write 的 deny 次数（证明 deny 生效）');
+    assert.ok(src.includes('deny Write 后不得落盘'), '应断言 deny Write 后不落盘 CLAUDE.md（核心 deny 语义，不伪造写入）');
+  });
+
+  // v4-P1（review-v4）：native /init harness 与 CLI API_TIMEOUT_MS 同值（300s）导致竞争——端点稍慢
+  // 外层先触发，abort 压制真实 result。修正：harness wall-clock 解耦（> API_TIMEOUT_MS + 余量）+
+  // 终止协议先 interrupt+有界 grace 再 abort（旧 abort→interrupt 顺序压制 result）。result 强断言不变。
+  check('v4-P1：harness deadline 与 API_TIMEOUT_MS 解耦 + 终止协议 interrupt+grace→abort', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    assert.ok(src.includes('harnessInitDeadlineMs'), '应有 harnessInitDeadlineMs（wall-clock > API_TIMEOUT_MS）');
+    assert.ok(/base \+ 180000/.test(src), 'harness deadline 应 = API_TIMEOUT_MS + 余量（修正同值竞争）');
+    assert.ok(!/timeoutMs: 300000(?!\d)/.test(src), '不得保留硬编码 timeoutMs: 300000（应经 harnessInitDeadlineMs 解耦）');
+    assert.ok(src.includes('graceAfterTimeoutMs'), '应有 graceAfterTimeoutMs（有界 grace 等 SDK 真实 result）');
+    assert.ok(src.includes('let forcedAbort = false'), '应有 forcedAbort 标记（grace 后仍无终态才硬 abort 兜底）');
+  });
+
+  // v4-P2（review-v4）：生产链路 E2E 前置——test-only query factory seam，让 Electron smoke 能注入
+  // fake query 驱动真实 runQuery/forwardEvent/DB，不调真实 CLI/模型。默认仍用真实 SDK。
+  check('v4-P2：test-only query factory seam（startSdkQuery 可注入，默认用真实 SDK）', () => {
+    const src = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
+    assert.ok(src.includes('__setSdkQueryFactoryForTest'), '应导出 test-only __setSdkQueryFactoryForTest');
+    assert.ok(src.includes('activeSdkQueryFactory'), 'startSdkQuery 应经 activeSdkQueryFactory（可注入）');
+    assert.ok(src.includes('defaultSdkQueryFactory'), '应有默认 factory（调真实 importSdk + sdk.query）');
+    assert.ok(/defaultSdkQueryFactory[\s\S]{0,120}importSdk[\s\S]{0,60}sdk\.query/.test(src), '默认 factory 应调真实 importSdk + sdk.query');
+  });
+
+  // v2-P2（review-v2 P2）：带附件时 prompt 是 AsyncIterable，typeof string 判定失效。用 SpawnOptions
+  // .userCommandText 保留原始命令文本，runQuery 优先用它，不从 AsyncIterable 反推命令名。
+  check('v2-P2：带附件 /init 用 userCommandText 保留原始命令判定', () => {
+    const opts = readFileSync(path.join('src', 'main', 'modules', 'cli-shared.ts'), 'utf8');
+    assert.ok(opts.includes('userCommandText?: string'), 'SpawnOptions 应含 userCommandText 字段');
+    const backend = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
+    assert.ok(backend.includes('opts.userCommandText'), 'runQuery 应优先用 opts.userCommandText 判定 /init');
+    const ipc = readFileSync(path.join('src', 'main', 'ipc-handlers.ts'), 'utf8');
+    assert.ok(ipc.includes('userCommandText: payload.text'), 'CHAT_SEND spawnForChat 应传 payload.text');
+    const taskq = readFileSync(path.join('src', 'main', 'modules', 'task-queue-engine.ts'), 'utf8');
+    assert.ok(taskq.includes('userCommandText: task.prompt'), 'task spawnForTask 应传 task.prompt');
+    assert.ok(taskq.includes('userCommandText: payload.text'), 'queue spawnForChat 应传 payload.text');
+  });
+
+  // v2-P2（review-v2 P2）：selftest 与 selftest:native 各调一次 native 链，env=1 时不重复。
+  check('v2-P2：selftest 与 selftest:native 各调一次 native 链（env=1 不重复）', () => {
+    const pkg = readFileSync(path.join('package.json'), 'utf8');
+    assert.ok(/"selftest:static":/.test(pkg), '应拆出 selftest:static（纯静态链）');
+    assert.ok(
+      /"selftest": "npm run selftest:static && node scripts\/run-native-if-env\.mjs"/.test(pkg),
+      'selftest = selftest:static + run-native-if-env.mjs',
+    );
+    assert.ok(
+      /"selftest:native": "npm run selftest:static && node scripts\/run-native-chain\.mjs"/.test(pkg),
+      'selftest:native = selftest:static + run-native-chain.mjs',
+    );
+    // selftest:native 不得调 selftest 或 run-native-if-env（否则 env=1 时 native 链重复）。
+    const nativeMatch = pkg.match(/"selftest:native": "([^"]*)"/);
+    assert.ok(nativeMatch, '应有 selftest:native');
+    assert.ok(!nativeMatch![1].includes('npm run selftest"'), 'selftest:native 不得调 npm run selftest（避免重复）');
+    assert.ok(!nativeMatch![1].includes('run-native-if-env'), 'selftest:native 不得经 run-native-if-env（避免重复）');
+    const chain = readFileSync(path.join('scripts', 'run-native-chain.mjs'), 'utf8');
+    assert.ok(chain.includes('--native --init-matrix') && chain.includes('--require-runtime-match'), 'run-native-chain.mjs 应含完整 native 段');
+    const ifEnv = readFileSync(path.join('scripts', 'run-native-if-env.mjs'), 'utf8');
+    assert.ok(ifEnv.includes('run-native-chain.mjs'), 'run-native-if-env.mjs 应委托 run-native-chain.mjs（单一命令源）');
+    assert.ok(/CLAUDE_LINK_RUN_NATIVE_E2E !== '1'/.test(ifEnv), 'run-native-if-env.mjs 应在 env 未设时 exit 0');
+  });
+
   // ── 汇总 ──
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) {

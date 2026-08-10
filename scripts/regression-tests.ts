@@ -1517,9 +1517,10 @@ function testPermissionPromptIntegration(): void {
   assert.ok(/executable 缺失[\s\S]*?不伪造成功/.test(e2eCmdSrc), 'e2e 须有 executable 缺失不伪造成功场景（P1-6）');
   assert.ok(/plan 模式 \/init[\s\S]*?不得落盘/.test(e2eCmdSrc), 'e2e 须有 plan /init 权限拒绝不落盘场景（P1-6）');
   // ── Task 4 review-v2 ──
-  // P1-1：/init 超时调至 300s（实测 ~106s，180s 余量小端点波动即超时），断言用 termination（SDK 真实
-  // result）不放宽；失败时记录完整事件序列区分端点超时 vs 命令逻辑失败。
-  assert.ok(e2eCmdSrc.includes('timeoutMs: 300000'), '/init E2E 超时须 300s 给真实耗时余量（review-v2 P1-1）');
+  // P1-1 + review-v4 P1-1：/init harness wall-clock 与 CLI API_TIMEOUT_MS 解耦（旧 300s 同值导致竞争，
+  // abort 压制真实 result）。用 harnessInitDeadlineMs（API_TIMEOUT_MS + 余量）；result 断言不放宽。
+  assert.ok(e2eCmdSrc.includes('harnessInitDeadlineMs'), '/init E2E 超时须用 harnessInitDeadlineMs 解耦 wall-clock 与 API_TIMEOUT_MS（review-v4 P1-1）');
+  assert.ok(!e2eCmdSrc.includes('timeoutMs: 300000'), '/init 不得保留硬编码 timeoutMs: 300000（review-v4 P1-1 解耦）');
   assert.ok(/run\.termination[\s\S]*?超时=.*启动错误=/.test(e2eCmdSrc), '/init 失败须记录 timedOut/queryError/事件序列供诊断，不放宽 result 断言（review-v2 P1-1）');
   // P1-3：harness 合成事件与 SDK 原始事件分离，取消断言不靠 harness 合成放宽。
   assert.ok(e2eCmdSrc.includes('syntheticEvents'), 'e2e 须分离 syntheticEvents（harness 合成）与 events（SDK 原始）（review-v2 P1-3）');
