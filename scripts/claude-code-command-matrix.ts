@@ -155,6 +155,19 @@ function buildMatrix(): CommandMatrixEntry[] {
       });
       continue;
     }
+    if (name === 'review') {
+      // 版本漂移（review-v4 运行时核对）：Claude Code 2.1.227 移除 /review builtin（由 code-review skill 承接）。
+      // 标记 hidden+removed：新版 runtime 合法消失 → 显式 drift，reconcile 不判红（计划：以运行时为准）。
+      entries.push({
+        name: 'review',
+        expectedOrigin: 'removed',
+        executionMode: 'hidden',
+        sideEffects: ['无（Claude Code 2.1.227 已移除 /review，由 code-review skill 承接）'],
+        successEvidence: ['菜单不展示，或展示并标注「已移除」原因；reconcile 时按 hidden 允许漂移'],
+        failureEvidence: ['不得当作正常可执行命令转发给 SDK；新版 runtime 不再发现 review'],
+      });
+      continue;
+    }
     if (name === 'init') {
       entries.push(builtinEntry('init', {
         sideEffects: ['在 cwd 创建/更新 CLAUDE.md（真实文件副作用）'],
@@ -171,15 +184,16 @@ function buildMatrix(): CommandMatrixEntry[] {
       continue;
     }
     if (name === 'clear') {
-      // Task 6 前强制 native-sdk：新建对话只是候选平替，未逐项证明等价前不得改 proven-equivalent。
+      // Task 6 已验证：「新建对话」与原生 /clear 逐项不等价（conversation_reset + 新 CLI session id +
+      // result 反馈 vs 独立新会话），强制保持 native-sdk（计划 Task 6 Step 2 结论）。
       entries.push(builtinEntry('clear', {
         successEvidence: [
           ...BUILTIN_SUCCESS,
-          '原生 /clear 清空当前会话上下文（旧 transcript 不可恢复、生成新 CLI session id）',
+          '原生 /clear 清空当前 CLI 会话上下文（conversation_reset + 生成新 CLI session id，同 Claude Link 会话内）',
         ],
         failureEvidence: [
           ...COMMON_FAILURE,
-          '在 Task 6 逐项等价证明前，不得用「新建对话」平替冒充 /clear',
+          'Task 6 已验证「新建对话」不等价（不重置当前会话、不中断 running query、不产生 result 反馈），保持 native-sdk',
         ],
       }));
       continue;
@@ -191,6 +205,150 @@ function buildMatrix(): CommandMatrixEntry[] {
 }
 
 export const COMMAND_MATRIX: readonly CommandMatrixEntry[] = buildMatrix();
+
+// ── Task 6：候选平替等价性规格（测试规格，非运行时真相源）────────────────────────
+// 计划 Task 6 Step 1：5 个候选平替（/clear↔新建对话、/context↔上下文统计 UI、
+// /usage↔费用/用量 UI、/compact↔压缩入口、/config↔配置页）须逐项对照原生 SDK 行为断言
+// 5 个等价字段；任一字段为 false 即保持 executionMode='native-sdk'，不得采用平替。
+// e2e-verify.ts --replacements 以真实 SDK 证据断言这些规格；此处是预期规格（single source）。
+// kind：substitute=「不同操作的平替」须逐项证明等价；native-execution=「入口即原生命令执行」
+//       （无替代操作需证明，压缩入口即 sendMessage('/compact')），非平替候选。
+export type ReplacementField =
+  | 'visibleBehaviorEqual'
+  | 'sessionStateEqual'
+  | 'fileSideEffectsEqual'
+  | 'configMemorySemanticsEqual'
+  | 'resultFeedbackEqual';
+
+export type ReplacementCandidateKind = 'substitute' | 'native-execution';
+
+export interface ReplacementCandidateSpec {
+  command: string;
+  kind: ReplacementCandidateKind;
+  candidateOperation: string;
+  /**
+   * 逐项等价判定（计划 Task 6 Step 1 的 5 个字段全填）。
+   * - `false`：E2E 实测该字段不等价（已由 e2e observedFields 绑定，review-v4 F5/review-v5 F4）；
+   * - `true`：E2E 实测该字段等价（同样必须绑定）；
+   * - `'unverified'`：该字段未被 E2E 直接观察（结构语义、需 renderer 对照），不得写成已验证事实。
+   * 任一字段 false → executionMode 保持 native-sdk，不得采用平替。
+   * kind='native-execution'（压缩入口即原生命令本身）：无平替等价需验证，5 字段全标 'unverified'。
+   */
+  verdict: Record<ReplacementField, boolean | 'unverified'>;
+  /** true=经 Task 6 逐项证明等价才可标 proven-equivalent；false=保持 native-sdk。 */
+  expectedEquivalent: boolean;
+  /** 等价性对照项（计划 Task 6 Step 1/2 的检查维度，供 e2e 断言与人工复核）。 */
+  equivalenceChecks: string[];
+  /** 判定说明（为什么保持 native-sdk）。 */
+  note: string;
+}
+
+/** 从 verdict 派生判定 false 的字段集合（不另存，避免双真相源）。 */
+export function failingFieldsOf(spec: ReplacementCandidateSpec): ReplacementField[] {
+  return (Object.keys(spec.verdict) as ReplacementField[]).filter((f) => spec.verdict[f] === false);
+}
+
+export const REPLACEMENT_CANDIDATES: readonly ReplacementCandidateSpec[] = [
+  {
+    command: 'clear',
+    kind: 'substitute',
+    candidateOperation: '新建对话（createSession + switchSession）',
+    verdict: {
+      visibleBehaviorEqual: 'unverified',
+      sessionStateEqual: false,
+      fileSideEffectsEqual: 'unverified',
+      configMemorySemanticsEqual: 'unverified',
+      resultFeedbackEqual: false,
+    },
+    expectedEquivalent: false,
+    equivalenceChecks: [
+      '旧 transcript 是否仍可恢复',
+      '新 CLI session id 是否生成',
+      '旧消息是否保留在历史',
+      'running query 是否中断',
+      '权限/工具缓存是否清理',
+      '计划/上下文/retry/流式缓存是否清理',
+      'UI 当前会话是否切换或重置',
+    ],
+    note: '原生 /clear 在本 Claude Link 会话内重置 CLI 会话（conversation_reset + 新 CLI session id）并产生 result 反馈；新建对话创建独立 DB 会话、不重置当前会话上下文、不中断运行中 query、不产生命令结果反馈。逐项不等价，保持 native-sdk。',
+  },
+  {
+    command: 'context',
+    kind: 'substitute',
+    candidateOperation: '上下文统计 UI（ContextButton / contextStats getter）',
+    verdict: {
+      visibleBehaviorEqual: false,
+      sessionStateEqual: 'unverified',
+      fileSideEffectsEqual: 'unverified',
+      configMemorySemanticsEqual: 'unverified',
+      resultFeedbackEqual: false,
+    },
+    expectedEquivalent: false,
+    equivalenceChecks: [
+      '统计来源（原生实时 CLI 报告 vs 上一回合 SDK usage 派生）',
+      '更新时间（原生即时 vs 下一回合 CONTEXT_UPDATE 前保持旧值）',
+      '结果反馈（原生 result 消息 vs 常驻卡片）',
+    ],
+    note: '原生 /context 以 result 消息输出实时 Context Usage 报告（model/tokens/分类占比）；上下文 UI 显示上一回合 SDK usage 派生的紧凑卡片，来源与更新时机不同。保持 native-sdk。',
+  },
+  {
+    command: 'usage',
+    kind: 'substitute',
+    candidateOperation: '费用/用量 UI（assistant 气泡 costUsd/durationMs）',
+    verdict: {
+      visibleBehaviorEqual: false,
+      sessionStateEqual: 'unverified',
+      fileSideEffectsEqual: 'unverified',
+      configMemorySemanticsEqual: 'unverified',
+      resultFeedbackEqual: false,
+    },
+    expectedEquivalent: false,
+    equivalenceChecks: [
+      '统计粒度（原生会话聚合 totals vs 单条 assistant 消息成本）',
+      '统计内容（原生含 duration/code changes vs UI 仅 cost/duration）',
+      '结果反馈（原生 result 消息 vs 气泡元数据附着）',
+    ],
+    note: '原生 /usage 输出会话聚合用量（total cost/duration/code changes/tokens）；费用 UI 只在单条 assistant 气泡上附着 costUsd/durationMs。内容与反馈不等价。保持 native-sdk。',
+  },
+  {
+    command: 'compact',
+    kind: 'native-execution',
+    candidateOperation: '压缩入口（ContextButton → sendMessage(\'/compact\')）',
+    verdict: {
+      visibleBehaviorEqual: 'unverified',
+      sessionStateEqual: 'unverified',
+      fileSideEffectsEqual: 'unverified',
+      configMemorySemanticsEqual: 'unverified',
+      resultFeedbackEqual: 'unverified',
+    },
+    expectedEquivalent: false,
+    equivalenceChecks: [
+      '压缩入口是否以原生 /compact 命令执行（非本地模拟）',
+      '原生 /compact 在有上下文时是否返回压缩证据（compact_boundary/compact_result:success）',
+      '原生 /compact 是否实际减少上下文（压缩前后 input 侧 token 对比，即「上下文统计变化」）',
+    ],
+    note: '压缩入口即原生 /compact 执行（ChatPage.handleCompress → sendMessage(\'/compact\')），无替代操作需证明等价，非平替候选。E2E 已验证 compact_boundary/compact_result:success 且压缩前后 input token 下降（上下文统计变化）。保持 native-sdk。',
+  },
+  {
+    command: 'config',
+    kind: 'substitute',
+    candidateOperation: '配置页（settings-writer 写 .claude/settings.local.json）',
+    verdict: {
+      visibleBehaviorEqual: 'unverified',
+      sessionStateEqual: 'unverified',
+      fileSideEffectsEqual: false,
+      configMemorySemanticsEqual: false,
+      resultFeedbackEqual: 'unverified',
+    },
+    expectedEquivalent: false,
+    equivalenceChecks: [
+      '写入位置（原生用户级 ~/.claude/settings.json vs 配置页项目级 .claude/settings.local.json）',
+      '配置层级（user vs local，下一 query 的有效配置不同）',
+      '结果反馈（原生「Set X to Y」result vs 表单保存）',
+    ],
+    note: '原生 /config key=value 写用户级 ~/.claude/settings.json；配置页经 settings-writer 写项目级 .claude/settings.local.json（local 层）。写入位置/层级/反馈均不同。保持 native-sdk。',
+  },
+];
 
 // ── 断言入口 ───────────────────────────────────────────────────────────────────────
 let pass = 0;
@@ -254,15 +412,15 @@ function runStructuralAssertions(): void {
     }
   });
 
-  console.log('=== 3) 平替门禁：/clear 在 Task 6 证明前不得 proven-equivalent ===');
-  check('/clear 当前为 native-sdk（候选平替未证明等价）', () => {
+  console.log('=== 3) 平替门禁：Task 6 已验证，5 个候选平替全部不合格 → 保持 native-sdk ===');
+  check('/clear 保持 native-sdk（Task 6 已证明「新建对话」不等价）', () => {
     const e = entries.find((x) => x.name === 'clear');
     assert.ok(e, 'clear 条目应存在');
-    assert.equal(e!.executionMode, 'native-sdk', 'Task 6 逐项等价证明前必须保持 native-sdk');
+    assert.equal(e!.executionMode, 'native-sdk', 'Task 6 已验证新建对话不等价，必须保持 native-sdk');
   });
-  check('当前无任何命令提前标 proven-equivalent（未经证明）', () => {
+  check('当前无任何命令标 proven-equivalent（Task 6 无一候选证明等价）', () => {
     const premature = entries.filter((e) => e.executionMode === 'proven-equivalent');
-    assert.deepEqual(premature.map((e) => e.name), [], '不应存在未经验证的 proven-equivalent');
+    assert.deepEqual(premature.map((e) => e.name), [], 'Task 6 未证明任何候选等价，不得存在 proven-equivalent');
   });
 
   console.log('=== 4) 完成状态约束：不得用 unknown 作为已完成状态 ===');
@@ -276,6 +434,55 @@ function runStructuralAssertions(): void {
     for (const e of entries) {
       assert.ok(e.successEvidence.length > 0, `${e.name} 缺 successEvidence`);
       assert.ok(e.failureEvidence.length > 0, `${e.name} 缺 failureEvidence`);
+    }
+  });
+
+  console.log('=== 5b) Task 6：候选平替等价性规格（5 候选全部不合格 → native-sdk）===');
+  check('候选平替规格覆盖计划的 5 个命令且无重复、顺序一致', () => {
+    const names = REPLACEMENT_CANDIDATES.map((c) => c.command);
+    assert.equal(names.length, 5, '应为计划 Task 6 的 5 个候选');
+    assert.equal(new Set(names).size, 5, '候选命令名重复');
+    assert.deepEqual(names, ['clear', 'context', 'usage', 'compact', 'config'], '候选名称/顺序与计划 Task 6 Step 1 一致');
+  });
+  check('5 个候选命令全部保持 executionMode=native-sdk（无一 proven-equivalent、不填 replacement）', () => {
+    for (const spec of REPLACEMENT_CANDIDATES) {
+      const entry = entries.find((e) => e.name === spec.command);
+      assert.ok(entry, `${spec.command} 矩阵条目应存在`);
+      assert.equal(entry!.executionMode, 'native-sdk', `${spec.command} 未逐项证明等价前必须保持 native-sdk`);
+      assert.ok(!entry!.replacement, `${spec.command} 非 proven-equivalent，不应填写 replacement 字段`);
+    }
+  });
+  check('verdict 逐字段为 boolean|unverified：substitute 至少一个实测 false；native-execution 全 unverified', () => {
+    for (const spec of REPLACEMENT_CANDIDATES) {
+      // 5 个等价字段必须全填（计划 Task 6 Step 1），值只能是 boolean（实测）或 'unverified'（未证明）。
+      const fields = Object.keys(spec.verdict) as ReplacementField[];
+      assert.deepEqual(
+        fields.sort(),
+        ['configMemorySemanticsEqual', 'fileSideEffectsEqual', 'resultFeedbackEqual', 'sessionStateEqual', 'visibleBehaviorEqual'],
+        `${spec.command} verdict 必须覆盖全部 5 个等价字段`,
+      );
+      for (const f of fields) {
+        const v = spec.verdict[f];
+        assert.ok(v === true || v === false || v === 'unverified', `${spec.command}.${f} verdict 只能是 boolean 或 'unverified'，实际 ${v}`);
+      }
+      assert.ok(spec.equivalenceChecks.length > 0, `${spec.command} 缺 equivalenceChecks`);
+      assert.ok(spec.note.length > 0, `${spec.command} 缺判定说明 note`);
+      if (spec.kind === 'substitute') {
+        // review-v5 F4：布尔 false 字段是「实测不合格」，必须存在；'unverified' 不得充当已验证的 true/false。
+        assert.ok(failingFieldsOf(spec).length > 0, `${spec.command} substitute 候选必须至少一个实测 false 字段（否则应已证明等价）`);
+        const bools = fields.filter((f) => typeof spec.verdict[f] === 'boolean');
+        assert.ok(bools.length > 0, `${spec.command} substitute 候选须有实测布尔字段（不能全是 unverified）`);
+        assert.equal(spec.expectedEquivalent, false, `${spec.command} 平替未逐项证明等价，expectedEquivalent 必须 false`);
+      }
+      if (spec.kind === 'native-execution') {
+        // 非平替：无平替等价需验证，5 字段全 'unverified'（review-v5 F4：不能写成静态 true）。
+        assert.deepEqual(
+          fields.filter((f) => spec.verdict[f] === 'unverified'),
+          fields,
+          `${spec.command} 为 native-execution（入口即原生命令），无平替等价验证，5 字段应全 unverified`,
+        );
+        assert.equal(spec.expectedEquivalent, false, `${spec.command} native-execution 非平替，不得标 proven-equivalent`);
+      }
     }
   });
 }
@@ -502,7 +709,16 @@ async function main(): Promise<void> {
   if (fail > 0) process.exit(1);
 }
 
-void main().catch((e) => {
-  console.error('matrix fatal:', e);
-  process.exit(1);
-});
+// 仅当本脚本作为入口执行时才跑 main；被其它脚本（如 e2e-verify.ts）当作规格导入时，
+// 只暴露 COMMAND_MATRIX / REPLACEMENT_CANDIDATES 等常量，不触发运行（防止导入即执行门禁）。
+// tsconfig.scripts.json 编译为 CommonJS，故用 __filename（tsx CJS 提供）而非 import.meta.url。
+const isMainModule =
+  process.argv[1] != null &&
+  path.resolve(process.argv[1]) === path.resolve(__filename);
+
+if (isMainModule) {
+  void main().catch((e) => {
+    console.error('matrix fatal:', e);
+    process.exit(1);
+  });
+}

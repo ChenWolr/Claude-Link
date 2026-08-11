@@ -1490,10 +1490,12 @@ function testPermissionPromptIntegration(): void {
   // §1：e2e harness 钉住 /init 真实落盘契约（bypassPermissions + 真实 key，plan 模式不落盘）。
   const e2eCmdSrc = fs.readFileSync(new URL('../scripts/claude-code-command-e2e-verify.ts', import.meta.url), 'utf8');
   assert.ok(e2eCmdSrc.includes("permissionMode: 'bypassPermissions'"), '/init E2E 须用 bypassPermissions 让 Write 真实执行（plan 模式只产计划不落盘）');
-  // review P1-4：凭据检测须覆盖 env + settings.json 的 ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN，不只 settings.json。
+  // review P1-4：凭据检测须覆盖 env + settings（user/project/local）的 ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN，不只 settings.json。
   assert.ok(e2eCmdSrc.includes('resolveInitCredentials'), '/init E2E 凭据检测须用 resolveInitCredentials 统一解析（P1-4）');
   assert.ok(e2eCmdSrc.includes('ANTHROPIC_AUTH_TOKEN'), '/init E2E 凭据检测须覆盖 ANTHROPIC_AUTH_TOKEN，不只 ANTHROPIC_API_KEY（P1-4）');
-  assert.ok(/resolveInitCredentials\(\)[\s\S]*?SKIP/.test(e2eCmdSrc), '/init E2E 无凭据时须 SKIP，不得用 plan 假成功冒充（P1-4）');
+  // review-v4 F3：resolveInitCredentials 接收 cwd（async）并检查多层 settings；无凭据时走 SKIP 分支（不得 plan 假成功）。
+  assert.ok(/await resolveInitCredentials\([\s\S]*?\)[\s\S]*?SKIP/.test(e2eCmdSrc), '/init E2E 无凭据时须 SKIP，不得用 plan 假成功冒充（P1-4 / review-v4 F3）');
+  assert.ok(e2eCmdSrc.includes('local-settings'), 'resolveInitCredentials 须检查 local settings（review-v4 F3）');
   assert.ok(e2eCmdSrc.includes("writeFileSync(path.join(initCwd"), '/init E2E 须在 cwd 放真实文件让 /init 有内容可分析（空目录不落盘）');
   // review P1-3：清理须用 safeRmSync 带退避重试，EBUSY 不覆盖已通过的核心断言。
   assert.ok(e2eCmdSrc.includes('safeRmSync'), 'e2E 清理须用 safeRmSync 带退避重试（P1-3）');
@@ -1511,7 +1513,12 @@ function testPermissionPromptIntegration(): void {
   // review P2-1：/compact 须用 warmup+resume 有上下文场景，移除 typeof result==='string' 放宽。
   assert.ok(/warmup[\s\S]*?resume: cliSid/.test(e2eCmdSrc), '/compact 须 warmup 产生上下文再 resume 压缩（P2-1）');
   assert.ok(!/typeof run\.termination\?\.result === 'string'/.test(e2eCmdSrc), '/compact 不得用 typeof result===string 放宽（空字符串也命中，P2-1）');
-  assert.ok(/hasBoundary \|\| hasLocalOutput \|\| hasStatus/.test(e2eCmdSrc), '/compact 须断言 compact_boundary/非空 local_command_output/system:status 压缩证据（P2-1）');
+  // review-v2 F1：/compact 收紧为只认 compact_boundary / compact_result:'success'。
+  // 旧 hasStatus（任意 system:status）/ 非空 local_command_output 不再当成功证据（status:'compacting'
+  // 仅表示开始压缩，compact_result:'failed' 明确未压缩）。共享 helper verifyCompactEvidence 供 --command/--replacements 复用。
+  assert.ok(/verifyCompactEvidence/.test(e2eCmdSrc), '/compact 须经 verifyCompactEvidence 共享 helper 验证真实压缩证据（review-v2 F1）');
+  assert.ok(/compact_result === 'success'/.test(e2eCmdSrc), '/compact 须断言 compact_result:\'success\' 作为成功证据（review-v2 F1 收紧）');
+  assert.ok(!/hasBoundary \|\| hasLocalOutput \|\| hasStatus/.test(e2eCmdSrc), '/compact 不得保留旧的 hasBoundary||hasLocalOutput||hasStatus 泛化断言（review-v2 F1 已收紧）');
   // review P1-6：取消/启动失败/executable 缺失/权限拒绝真实场景。
   assert.ok(e2eCmdSrc.includes('abortAfterMs'), 'e2e 须有用户取消场景 abortAfterMs（P1-6）');
   assert.ok(/executable 缺失[\s\S]*?不伪造成功/.test(e2eCmdSrc), 'e2e 须有 executable 缺失不伪造成功场景（P1-6）');
@@ -1526,10 +1533,12 @@ function testPermissionPromptIntegration(): void {
   assert.ok(e2eCmdSrc.includes('syntheticEvents'), 'e2e 须分离 syntheticEvents（harness 合成）与 events（SDK 原始）（review-v2 P1-3）');
   assert.ok(/syntheticEvents[\s\S]*?不计入通过条件/.test(e2eCmdSrc), 'syntheticEvents 不得计入取消断言通过条件（review-v2 P1-3）');
   assert.ok(/run\.queryError[\s\S]*?run\.timedOut/.test(e2eCmdSrc), '启动失败须用 queryError/timedOut 区分，不靠 harness 合成 aborted（review-v2 P1-3）');
-  // review-v2 P1-3 修复：普通文本/用户取消 cwd 须创建（否则 SDK failed to launch，被 synthetic aborted
-  // / abortAfterMs !timedOut 掩盖，暴露为流末无 result 假象）。
-  assert.ok(/普通文本[\s\S]*?mkdirSync\(plainCwd/.test(e2eCmdSrc), '普通文本 E2E 须创建 cwd（防 failed to launch 被 synthetic 掩盖，review-v2 P1-3）');
-  assert.ok(/用户取消[\s\S]*?mkdirSync\(abortCwd/.test(e2eCmdSrc), '用户取消 E2E 须创建 cwd（防 failed to launch 被 abortAfterMs !timedOut 掩盖，review-v2 P1-3）');
+  // review-v2 P1-3 修复：普通文本/用户取消 cwd 须存在（否则 SDK failed to launch，被 synthetic aborted
+  // / abortAfterMs !timedOut 掩盖，暴露为流末无 result 假象）。review-v5 起 cwd 在 runCommandMode 顶部统一创建。
+  assert.ok(/const plainCwd = path\.join\(root, 'plain'\)/.test(e2eCmdSrc), '普通文本 E2E 须定义 plainCwd（防 failed to launch 被 synthetic 掩盖，review-v2 P1-3）');
+  assert.ok(/普通文本原样进入 query[\s\S]*?plainCwd/.test(e2eCmdSrc), '普通文本块须以 plainCwd 为 cwd');
+  assert.ok(/const abortCwd = path\.join\(root, 'abort'\)/.test(e2eCmdSrc), '用户取消 E2E 须定义 abortCwd（防 failed to launch 被 abortAfterMs !timedOut 掩盖，review-v2 P1-3）');
+  assert.ok(/用户取消（abort）[\s\S]*?abortCwd/.test(e2eCmdSrc), '用户取消块须以 abortCwd 为 cwd');
   // P1-4：真实用户 deny 交互（canUseTool 返回 deny），非 plan 模式拦截。
   assert.ok(e2eCmdSrc.includes('canUseTool: async'), 'e2e 须有真实 canUseTool deny 交互测试（review-v2 P1-4）');
   assert.ok(/denyCount > 0/.test(e2eCmdSrc), 'deny 测试须断言 canUseTool 被调用（权限请求产生）（review-v2 P1-4）');
