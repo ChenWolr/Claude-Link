@@ -1566,6 +1566,59 @@ void (async () => {
     assert.ok(/resume 未保持会话/.test(helper), 'resume 失效/自动新建会话须明确失败');
   });
 
+  console.log('=== 24) Task 7：全量命令行为矩阵 + 无未验证命令门禁（源码契约）===');
+  {
+    const e2eSrc = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    const matrixSrc = readFileSync(path.join('scripts', 'claude-code-command-matrix.ts'), 'utf8');
+    const chainSrc = readFileSync(path.join('scripts', 'run-native-chain.mjs'), 'utf8');
+
+    check('T7-1：runAllMode 已实现 + 入口分派 --all', () => {
+      assert.ok(/async function runAllMode\(exe: string\)/.test(e2eSrc), '须定义 async function runAllMode(exe)');
+      assert.ok(/mode === '--all'/.test(e2eSrc), '入口须分派 --all 模式');
+    });
+    check('T7-2：runAllMode 写 command-verification.json manifest', () => {
+      assert.ok(/VERIFICATION_OUT_FILE/.test(e2eSrc), '须定义 VERIFICATION_OUT_FILE');
+      assert.ok(/writeFileSync\(VERIFICATION_OUT_FILE/.test(e2eSrc), '须写 manifest 到 VERIFICATION_OUT_FILE');
+      assert.ok(/VerificationManifest/.test(e2eSrc), '须有 VerificationManifest 类型');
+    });
+    check('T7-3：6 个核心命令交叉引用（避免重复真实执行）', () => {
+      const section = e2eSrc.slice(e2eSrc.indexOf('crossRefCore'), e2eSrc.indexOf('safeArgs'));
+      assert.ok(/init.*compact.*clear.*config.*usage.*context/s.test(section), '须交叉引用 init/compact/clear/config/usage/context');
+      assert.ok(/verified-cross-ref/.test(section), '核心命令标记 verified-cross-ref');
+    });
+    check('T7-4：SkipError 用于 runAllMode 的前置条件缺失分流', () => {
+      assert.ok(/class SkipError extends Error/.test(e2eSrc), '须定义 SkipError 类');
+      const allSection = e2eSrc.slice(e2eSrc.indexOf('async function runAllMode'), e2eSrc.indexOf('// ── 入口'));
+      assert.ok(/instanceof SkipError/.test(allSection), 'runAllMode 须用 SkipError 分流 skip');
+    });
+    check('T7-5：user-skill 发现标记全部（不因描述空 fail）', () => {
+      const allSection = e2eSrc.slice(e2eSrc.indexOf('Step 3a'), e2eSrc.indexOf('Step 3b'));
+      assert.ok(/verified-discovery/.test(allSection), 'skill 须标 verified-discovery');
+      assert.ok(/上游枚举行为/.test(allSection), '描述空须记为上游枚举行为（非 fail）');
+    });
+    check('T7-6：generic builtin 无终态时标 explicit-skip（不 fail）', () => {
+      const allSection = e2eSrc.slice(e2eSrc.indexOf('Step 1+2'), e2eSrc.indexOf('Step 3a'));
+      assert.ok(/explicit-skip/.test(allSection), 'builtin 无终态须标 explicit-skip');
+      assert.ok(/可能需丰富会话上下文/.test(allSection), '须写明 explicit-skip 原因');
+    });
+    check('T7-7：matrix --require-no-unverified-command 门禁已实现 + 分派', () => {
+      assert.ok(/function requireNoUnverifiedCommand\(\)/.test(matrixSrc), '须定义 requireNoUnverifiedCommand');
+      assert.ok(/requireNoUnverifiedCommand\(\)/.test(matrixSrc), 'main 须分派 --require-no-unverified-command');
+      assert.ok(/VERIFICATION_OUT_FILE/.test(matrixSrc), '门禁须读 VERIFICATION_OUT_FILE');
+      assert.ok(/unverified/.test(matrixSrc), '门禁须拒绝 unverified 状态');
+    });
+    check('T7-8：native 门禁链接入 --all + --require-no-unverified-command', () => {
+      assert.ok(/--native --all/.test(chainSrc), 'chain 须含 --native --all');
+      assert.ok(/--require-no-unverified-command/.test(chainSrc), 'chain 须含 --require-no-unverified-command');
+      // 顺序：--all 必须在 --replacements 之后（交叉引用前置模式），门禁必须在 --all 之后（消费 manifest）。
+      const allIdx = chainSrc.indexOf('--native --all');
+      const replIdx = chainSrc.indexOf('--native --replacements');
+      const gateIdx = chainSrc.indexOf('--require-no-unverified-command');
+      assert.ok(replIdx > 0 && allIdx > replIdx, '--all 须在 --replacements 之后（交叉引用前置模式验证结果）');
+      assert.ok(gateIdx > allIdx, '--require-no-unverified-command 须在 --all 之后（消费 manifest）');
+    });
+  }
+
   // ── 汇总 ──
   console.log(`\n${pass} passed, ${fail} failed`);
   if (fail > 0) {

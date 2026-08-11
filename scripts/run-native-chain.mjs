@@ -12,6 +12,11 @@ const chain = [
   'tsx scripts/claude-code-command-e2e-verify.ts --native --command /init --command /compact',
   // Task 6：候选平替等价性对照（任一字段 false → 保持 native-sdk，不合格则回退原生执行）。
   'tsx scripts/claude-code-command-e2e-verify.ts --native --replacements',
+  // Task 7：全量命令行为矩阵（builtin/user-skill/hidden + commands_changed），产出 command-verification.json。
+  // 6 个核心命令交叉引用已由上方 --init-matrix/--command/--replacements 验证，不重复真实执行。
+  'tsx scripts/claude-code-command-e2e-verify.ts --native --all',
+  // Task 7 Step 5：无未验证命令门禁（消费 --all manifest，要求每条 runtime 命令有明确验证状态）。
+  'tsx scripts/claude-code-command-matrix.ts --require-no-unverified-command',
   'tsx scripts/claude-code-command-matrix.ts --require-runtime-match',
 ];
 

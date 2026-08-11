@@ -490,7 +490,7 @@ function runStructuralAssertions(): void {
 /**
  * --require-no-unexplained-gap：每条命令必须处于「可解释」状态——
  * 有明确的 executionMode，且非 hidden 命令具备可验证的成功证据（无空档）。
- * Task 7 的 --require-no-unverified-command（要求运行时已验证）更强，届时再加。
+ * 更强的「要求运行时已验证」门禁见 requireNoUnverifiedCommand（Task 7 Step 5）。
  */
 function requireNoUnexplainedGap(): void {
   console.log('=== 6) --require-no-unexplained-gap：无未解释空档 ===');
@@ -695,12 +695,87 @@ async function requireRuntimeMatch(): Promise<void> {
   }
 }
 
+// ── Task 7 Step 5：--require-no-unverified-command（无未验证命令门禁）──────────────
+// 消费 --all 模式产出的 command-verification.json，断言每条 runtime 命令都有明确验证状态：
+// verified*/hidden/explicit-skip 均可，唯独不能停留在 'unverified'。
+// 比 requireNoUnexplainedGap 更强——后者只要求「有可验证目标」，本门禁要求「已被真实 E2E 验证
+// 或显式 skip 并写明原因」。unknown 来源命令允许，但必须以 explicit-skip + 证据展示，不能裸 unverified。
+const VERIFICATION_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 'command-verification.json');
+
+function requireNoUnverifiedCommand(): void {
+  console.log('=== 7) --require-no-unverified-command：无未验证命令（消费 --all manifest）===');
+  type ManifestEntry = { status: string; category?: string; evidence?: string[]; detail?: string; skipReason?: string };
+  let manifest: { entries: Record<string, ManifestEntry>; generatedAt?: string } | null = null;
+  try {
+    manifest = JSON.parse(readFileSync(VERIFICATION_OUT_FILE, 'utf8')) as { entries: Record<string, ManifestEntry> };
+  } catch {
+    check('读取 command-verification.json', () => {
+      throw new Error(`未读到 ${VERIFICATION_OUT_FILE}（先跑 claude-code-command-e2e-verify.ts --native --all）`);
+    });
+    return;
+  }
+  let runtimeNames: string[] = [];
+  try {
+    const b = JSON.parse(readFileSync(BASELINE_OUT_FILE, 'utf8')) as { commands?: Array<{ name: string }> };
+    runtimeNames = Array.isArray(b.commands) ? b.commands.map((c) => c.name) : [];
+  } catch {
+    check('读取 command-baseline.json（runtime 命令集合）', () => {
+      throw new Error(`未读到 ${BASELINE_OUT_FILE}（先跑 baseline --native）`);
+    });
+    return;
+  }
+  const entries = manifest.entries ?? {};
+  const ACCEPTABLE = new Set([
+    'verified',
+    'verified-discovery',
+    'verified-execution',
+    'verified-cross-ref',
+    'hidden',
+    'explicit-skip',
+  ]);
+
+  check('manifest 覆盖全部 runtime 命令（无缺失）', () => {
+    const missing = runtimeNames.filter((n) => !entries[n]);
+    assert.ok(
+      missing.length === 0,
+      `manifest 缺失 ${missing.length} 条 runtime 命令：${missing.slice(0, 15).join(', ')}`,
+    );
+  });
+  check('无命令停留在 unverified 状态', () => {
+    const bad = Object.entries(entries)
+      .filter(([, v]) => !ACCEPTABLE.has(v.status))
+      .map(([k, v]) => `${k}(${v.status})`);
+    assert.ok(
+      bad.length === 0,
+      `${bad.length} 条命令状态不可接受（须 verified*/hidden/explicit-skip）：${bad.slice(0, 15).join(', ')}`,
+    );
+  });
+  check('explicit-skip 命令都附证据/原因（不允许无依据跳过）', () => {
+    const unjustified = Object.entries(entries)
+      .filter(([, v]) => v.status === 'explicit-skip')
+      .filter(([, v]) => !((v.evidence?.length ?? 0) > 0 || v.skipReason || v.detail))
+      .map(([k]) => k);
+    assert.ok(unjustified.length === 0, `explicit-skip 命令缺证据/原因：${unjustified.join(', ')}`);
+  });
+
+  // 汇总：按状态分桶打印，让版本/环境漂移与覆盖度对门禁可见。
+  const byStatus: Record<string, string[]> = {};
+  for (const [name, v] of Object.entries(entries)) (byStatus[v.status] ??= []).push(name);
+  console.log('  验证状态汇总（共 ' + runtimeNames.length + ' 条 runtime 命令）：');
+  for (const s of Object.keys(byStatus).sort()) {
+    console.log(`    ${s} (${byStatus[s].length}): ${byStatus[s].slice(0, 12).join(', ')}${byStatus[s].length > 12 ? ' …' : ''}`);
+  }
+}
+
 // ── 入口 ───────────────────────────────────────────────────────────────────────────
 async function main(): Promise<void> {
   console.log('Claude Code 命令矩阵：当前基线 %d 条（技能 %d + 非 Skill %d）', COMMAND_MATRIX.length, SKILL_NAMES.length, NON_SKILL_NAMES.length);
   runStructuralAssertions();
   if (process.argv.includes('--require-no-unexplained-gap')) {
     requireNoUnexplainedGap();
+  }
+  if (process.argv.includes('--require-no-unverified-command')) {
+    requireNoUnverifiedCommand();
   }
   if (process.argv.includes('--require-runtime-match')) {
     await requireRuntimeMatch();
