@@ -76,9 +76,12 @@ const KNOWN_ORIGIN_SET = new Set<CommandOrigin>([
 // 已知 CC builtin 名称（不在 init.skills/plugins 内，也不匹配 removed/internal 特征）。
 // 分类顺序固定：SDK 结构化 provenance → removed 描述 → internal 名称/描述 → skills → plugins
 // → 已知 builtin 名称 → unknown。
+// review-v4 运行时核对：Claude Code 2.1.x 新增 builtin 命令（autocompact/color/effort/fast/mcp/model/rename），
+// 已从运行时 supportedCommands/init.slash_commands 的描述证实为 builtin（非 skill/plugin），补入名单。
 const KNOWN_BUILTIN_NAMES = new Set<string>([
   'init', 'clear', 'compact', 'config', 'context', 'heapdump', 'reload-skills', 'review',
   'security-review', 'usage', 'insights', 'recap', 'goal', 'team-onboarding',
+  'autocompact', 'color', 'effort', 'fast', 'mcp', 'model', 'rename',
 ]);
 
 function commandNameKeyForBaseline(value: unknown): string {

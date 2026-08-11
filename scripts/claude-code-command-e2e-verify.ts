@@ -28,6 +28,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+// Task 6：候选平替等价性规格单一真相源（矩阵只存测试规格，e2e 以真实 SDK 证据断言它）。
+import { REPLACEMENT_CANDIDATES, type ReplacementField } from './claude-code-command-matrix';
 
 const RUN_NATIVE =
   process.argv.includes('--native') || process.env.CLAUDE_LINK_RUN_NATIVE_E2E === '1';
@@ -373,39 +375,290 @@ async function safeRmSync(dir: string, label: string): Promise<void> {
   }
 }
 
-// Task 4 review P1-4：按 Claude Code/Agent SDK 真实凭据解析链检测 /init 所需凭据。
-// 不只读 settings.json 的 ANTHROPIC_API_KEY——SDK 凭据优先级涵盖进程 env 的
-// ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN + ~/.claude/settings.json env 块。任一可用即返回
-// 合并 env 与来源说明；全无则 null（SKIP）。executable 缺失由入口 resolveClaudeExe 已处理
-// （exit 2）；此处只区分「有凭据」与「无凭据」，不区分凭据是否有效（凭据存在但请求失败由
-// /init 断言本身报告，不在此预先判定）。
-function resolveInitCredentials(): { env: Record<string, string>; source: string } | null {
-  const merged: Record<string, string> = {};
-  const sources: string[] = [];
-  const envKey = process.env.ANTHROPIC_API_KEY;
-  const envToken = process.env.ANTHROPIC_AUTH_TOKEN;
-  if (envKey) { merged.ANTHROPIC_API_KEY = envKey; sources.push('env:ANTHROPIC_API_KEY'); }
-  if (envToken) { merged.ANTHROPIC_AUTH_TOKEN = envToken; sources.push('env:ANTHROPIC_AUTH_TOKEN'); }
-  const home = process.env.HOME || process.env.USERPROFILE;
-  if (home) {
-    try {
-      const parsed = JSON.parse(readFileSync(path.join(home, '.claude', 'settings.json'), 'utf8'));
-      const envBlock = parsed?.env;
-      if (envBlock && typeof envBlock === 'object' && !Array.isArray(envBlock)) {
-        for (const [k, v] of Object.entries(envBlock as Record<string, unknown>)) {
-          if (typeof v !== 'string') continue;
-          if ((k === 'ANTHROPIC_API_KEY' || k === 'ANTHROPIC_AUTH_TOKEN') && !merged[k]) {
-            merged[k] = v;
-            sources.push(`settings.json:${k}`);
-          }
-        }
+// Task 4 review P1-4 / review-v3 F2 / review-v4 F2+F3：按 Claude Code/Agent SDK 真实凭据解析链
+// 检测 /init、/compact 等模型场景所需凭据。与生产 settings source 一致地检查多层来源：
+//   process.env（运行时注入）< user settings.json（Windows 多候选：USERPROFILE+HOME）
+//   < <cwd>/.claude/settings.json（project）< <cwd>/.claude/settings.local.json（local）
+// 任一层发现 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN 即按层级覆盖；全无则 null（SKIP）。
+// executable 缺失由入口 resolveClaudeExe 已处理（exit 2）；此处只区分「有凭据」与「无凭据」，
+// 不区分凭据是否有效（凭据存在但请求失败由 /init 断言本身报告，不在此预先判定）。
+//
+// review-v4 F2：API Key 与 Auth Token 同时存在时 SDK 可能双重认证冲突，按优先级只选一种
+//（ANTHROPIC_API_KEY > ANTHROPIC_AUTH_TOKEN），选中后从传给子进程的 env 中删除另一种（含
+// process.env 残留）。source 仅记录脱敏的来源类型，不记录 token/key 值或完整路径。
+function readSettingsEnvLayer(dir: string, layer: 'settings.json' | 'settings.local.json'): Record<string, string> {
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(dir, '.claude', layer), 'utf8'));
+    const envBlock = parsed?.env;
+    if (envBlock && typeof envBlock === 'object' && !Array.isArray(envBlock)) {
+      const out: Record<string, string> = {};
+      for (const [k, v] of Object.entries(envBlock as Record<string, unknown>)) {
+        if (typeof v === 'string') out[k] = v;
       }
-    } catch {
-      // 本机无 settings.json 或解析失败：跳过该来源。
+      return out;
+    }
+  } catch {
+    // 该层无文件或解析失败：跳过。
+  }
+  return {};
+}
+
+export async function resolveInitCredentials(
+  cwd: string | null,
+): Promise<{ env: Record<string, string>; source: string } | null> {
+  type Slot = { value: string; src: string } | null;
+  let apiKey: Slot = null;
+  let authToken: Slot = null;
+  const setKey = (v: string, src: string) => { apiKey = { value: v, src }; };
+  const setToken = (v: string, src: string) => { authToken = { value: v, src }; };
+  // ① process.env（最低层，被 settings 覆盖）。
+  if (process.env.ANTHROPIC_API_KEY) setKey(process.env.ANTHROPIC_API_KEY, 'env');
+  if (process.env.ANTHROPIC_AUTH_TOKEN) setToken(process.env.ANTHROPIC_AUTH_TOKEN, 'env');
+  // ② user settings.json（review-v3 F2：Windows 多候选目录，去重）。
+  const userDirs: string[] = [];
+  if (process.platform === 'win32') {
+    if (process.env.USERPROFILE) userDirs.push(process.env.USERPROFILE);
+    if (process.env.HOME) userDirs.push(process.env.HOME);
+  } else if (process.env.HOME) {
+    userDirs.push(process.env.HOME);
+  }
+  const seenUser = new Set<string>();
+  for (const dir of userDirs) {
+    const norm = path.resolve(dir);
+    if (seenUser.has(norm)) continue;
+    seenUser.add(norm);
+    const env = readSettingsEnvLayer(dir, 'settings.json');
+    if (env.ANTHROPIC_API_KEY) setKey(env.ANTHROPIC_API_KEY, 'user-settings');
+    if (env.ANTHROPIC_AUTH_TOKEN) setToken(env.ANTHROPIC_AUTH_TOKEN, 'user-settings');
+  }
+  // ③④ project / local（review-v4 F3：与生产 SDK settings source 一致）。
+  if (cwd) {
+    const projectEnv = readSettingsEnvLayer(cwd, 'settings.json');
+    if (projectEnv.ANTHROPIC_API_KEY) setKey(projectEnv.ANTHROPIC_API_KEY, 'project-settings');
+    if (projectEnv.ANTHROPIC_AUTH_TOKEN) setToken(projectEnv.ANTHROPIC_AUTH_TOKEN, 'project-settings');
+    const localEnv = readSettingsEnvLayer(cwd, 'settings.local.json');
+    if (localEnv.ANTHROPIC_API_KEY) setKey(localEnv.ANTHROPIC_API_KEY, 'local-settings');
+    if (localEnv.ANTHROPIC_AUTH_TOKEN) setToken(localEnv.ANTHROPIC_AUTH_TOKEN, 'local-settings');
+  }
+  if (!apiKey && !authToken) return null;
+  // review-v4 F2：优先级 ANTHROPIC_API_KEY > ANTHROPIC_AUTH_TOKEN；只把选中者注入 child env，
+  // 删除另一种（含 process.env 残留），避免 SDK 双重认证。
+  const useKey = !!apiKey;
+  const chosenKey = useKey ? 'ANTHROPIC_API_KEY' : 'ANTHROPIC_AUTH_TOKEN';
+  const droppedKey = useKey ? 'ANTHROPIC_AUTH_TOKEN' : 'ANTHROPIC_API_KEY';
+  const chosen = useKey ? apiKey! : authToken!;
+  const env = { ...process.env } as Record<string, string>;
+  delete env[droppedKey];
+  env[chosenKey] = chosen.value;
+  return { env, source: `${chosen.src}:${chosenKey}` };
+}
+
+// review-v2 F1：/compact 真实压缩证据 warmup 提示（多轮，堆积消息条数 + 上下文体积）。
+// 单轮短 warmup 实测会让 /compact 因 "Not enough messages to compact" 返回 compact_result:'failed'；
+// 必须多轮堆积，/compact 才有内容可压缩并产出 compact_boundary / compact_result:'success'。
+const COMPACT_WARMUP_PROMPTS: readonly string[] = [
+  '请极其详尽地解释 TypeScript 的泛型、条件类型、映射类型、infer 关键字，每种都给出多个完整代码示例，至少 1000 字。',
+  '接着极其详尽地解释 JavaScript 闭包、原型链、this 绑定、事件循环、宏任务与微任务，每种给多个完整代码示例，至少 1000 字。',
+  '再极其详尽地解释 React 的 hooks（useState/useEffect/useMemo/useCallback/useReducer/useContext）与 Fiber 架构，每种给完整代码示例，至少 1000 字。',
+];
+
+// Task 6 补齐（计划 Step 3「上下文统计变化」）：用 Claude Code 自己的 /context 报告采集当前会话上下文占用百分比。
+//
+// 为什么不用 SDK result.usage 的 input/cache token 对比压缩前后：实测发现 resume 会话时 cache_read_input_tokens
+// 会把压缩前的缓存历史一并计入，压缩后数值反而变大（实测 warmup 后 input≈25595 → 压缩后探测 input≈37436，
+// 尽管 compact_boundary=true），不是「当前上下文大小」的有效代理。/context 是 Claude Code 报告上下文占用的
+// 权威本地命令（零模型成本），其百分比才是上下文统计变化的有效度量。
+//
+// 返回上下文占用百分比（0..100）；/context 无终态或文本不含百分比时返回 null（回退到 compact_boundary 证据）。
+async function captureContextUsagePct(
+  sdk: any,
+  exe: string,
+  cwd: string,
+  creds: { env: Record<string, string>; source: string },
+  resumeSid: string,
+): Promise<number | null> {
+  const r = await runNativeCommand(sdk, exe, cwd, '/context', {
+    maxTurns: 1,
+    env: creds.env,
+    timeoutMs: 60000,
+    resume: resumeSid,
+  });
+  if (!r.termination) return null;
+  // /context 报告文本可能在 result.result（常规）或 system:local_command_output 事件里（resume 时偶发），
+  // 汇总后取第一个百分比作上下文占用代理。
+  const parts: string[] = [];
+  if (typeof r.termination.result === 'string') parts.push(r.termination.result);
+  for (const e of r.events) {
+    if (e.type === 'system' && e.subtype === 'local_command_output') {
+      const c = (e as any).content ?? (e as any).text;
+      if (typeof c === 'string') parts.push(c);
     }
   }
-  if (Object.keys(merged).length === 0) return null;
-  return { env: { ...process.env, ...merged } as Record<string, string>, source: sources.join(', ') };
+  const text = parts.join('\n');
+  const m = text.match(/(\d+(?:\.\d+)?)\s*%/);
+  return m ? parseFloat(m[1]) : null;
+}
+
+/**
+ * review-v2 F1：/compact 真实压缩证据验证（--command / --replacements 共用）。
+ * 收紧验收——只接受 `compact_boundary` 或 `compact_result:'success'`：
+ *   - `status:'compacting'` 仅表示压缩开始，不证明完成/成功（旧 hasStatus 据此误报成功）；
+ *   - `compact_result:'failed'`（如 "Not enough messages to compact"）明确表示未压缩 → 不得当成功；
+ *   - 非空 local_command_output 可能是错误文本，不能单独证明压缩成功（review-v2 F1）。
+ * 生产侧 sdk-backend.ts 同样只把 status:'compacting'/compact_result 当压缩状态，其余 status 不代表压缩。
+ */
+async function verifyCompactEvidence(
+  sdk: any,
+  exe: string,
+  cwd: string,
+  creds: { env: Record<string, string>; source: string },
+  warmupPrompts: readonly string[],
+): Promise<void> {
+  // review-v4 F4 / review-v5 F3：每轮 warmup 须确认成功终态与会话连续性——某轮失败立即让 /compact
+  // 场景失败，不得沿用旧 sid 在不完整/不连续上下文上继续。
+  // review-v5 F3（实测协议）：resume 同一会话时 init.session_id 应保持等于上一轮 sid（本轮已实证）；
+  // 若 resume 失效/自动新建会话则 sid 变化 → 断言失败，证明预期多轮上下文确在同一连续会话中构造。
+  let cliSid: string | null = null;
+  for (let i = 0; i < warmupPrompts.length; i++) {
+    const r = await runNativeCommand(sdk, exe, cwd, warmupPrompts[i], {
+      permissionMode: 'bypassPermissions',
+      maxTurns: 3,
+      env: creds.env,
+      // warmup 提示词刻意要求大段输出（≥1000 字 × 多主题）以堆积可压缩上下文；慢端点 + tool_use 往返
+      // 易超 120s（Task 6 review 记录的瞬态抖动）。与 /compact 调用一致用 240s + 60s grace，避免 warmup
+      // 被超时硬中断报 is_error 导致上下文不连续（与压缩证据判定无关的纯环境鲁棒性）。
+      timeoutMs: 240000,
+      ...(cliSid ? { resume: cliSid } : {}),
+    });
+    assert.ok(r.termination, `warmup 第 ${i + 1} 轮须有 result 终态（构造连续上下文）；诊断：${resultDiagnostic(r)}`);
+    assert.equal(r.termination?.is_error, false, `warmup 第 ${i + 1} 轮不得 is_error（否则上下文不连续）；诊断：${resultDiagnostic(r)}`);
+    const sid = r.init?.session_id;
+    assert.ok(sid, `warmup 第 ${i + 1} 轮须返回 system.init.session_id`);
+    if (cliSid) {
+      assert.equal(
+        sid,
+        cliSid,
+        `warmup 第 ${i + 1} 轮 resume 后 session_id 应保持 ${cliSid}（同一 CLI 会话），实际 ${sid}——` +
+          'resume 未保持会话（失效/自动新建），上下文不连续（review-v5 F3）',
+      );
+    }
+    cliSid = sid;
+  }
+  assert.ok(cliSid, 'warmup 须返回 system.init.session_id 供 /compact resume');
+  // Task 6 补齐（计划 Step 3「上下文统计变化」）：压缩前用 /context 采集上下文占用百分比作为基线。
+  const preCompactPct = await captureContextUsagePct(sdk, exe, cwd, creds, cliSid);
+  const run = await runNativeCommand(sdk, exe, cwd, '/compact', {
+    permissionMode: 'bypassPermissions',
+    maxTurns: 8,
+    env: creds.env,
+    timeoutMs: 180000,
+    resume: cliSid,
+  });
+  assert.ok(run.termination, '必须收到 /compact result 终态');
+  assert.equal(run.termination?.is_error, false, `成功 /compact 不得 is_error；诊断：${resultDiagnostic(run)}`);
+  const hasBoundary = run.events.some((e) => e.subtype === 'compact_boundary');
+  const hasCompactSuccess = run.events.some(
+    (e) => e.type === 'system' && e.subtype === 'status' && (e as any).compact_result === 'success',
+  );
+  const failedEvent = run.events.find(
+    (e) => e.type === 'system' && e.subtype === 'status' && (e as any).compact_result === 'failed',
+  );
+  assert.ok(
+    hasBoundary || hasCompactSuccess,
+    `/compact 须返回真实压缩成功证据（compact_boundary 或 compact_result:'success'，review-v2 F1 收紧）；` +
+      `实际 hasBoundary=${hasBoundary} hasCompactSuccess=${hasCompactSuccess}` +
+      `${failedEvent ? `；compact_result:'failed'（${(failedEvent as any).compact_error ?? '未知原因'}）—— 若为「Not enough messages to compact」等上下文不足原因，须增加 warmup 轮次` : ''}`,
+  );
+  // Task 6 补齐（计划 Step 3「上下文统计变化」）：compact_boundary/compact_result:'success' 证明压缩发生；
+  // 这里再用 /context 在压缩后采集一次上下文占用百分比，与压缩前基线对比——给出「上下文被压缩」的数值证据。
+  // /context 是 Claude Code 报告上下文占用的权威本地命令（见上方 captureContextUsagePct 注释：SDK result.usage
+  // 因 cache_read 计入压缩前历史而无效）。pre/post 任一不可读（如 /context 报告格式变化）时回退到 boundary 证据。
+  const postCompactPct = await captureContextUsagePct(sdk, exe, cwd, creds, cliSid);
+  if (preCompactPct != null && postCompactPct != null) {
+    assert.ok(
+      postCompactPct < preCompactPct,
+      `/compact 应降低上下文占用（上下文统计变化证据）：压缩前 /context≈${preCompactPct}%，` +
+        `压缩后 /context≈${postCompactPct}%；若未降低，可能 warmup 上下文不足或压缩未生效` +
+        `（boundary=${hasBoundary}, compactSuccess=${hasCompactSuccess}）。`,
+    );
+    console.log(`  ℹ /compact 上下文统计变化：/context 占用 ${preCompactPct}% → ${postCompactPct}%（已压缩）`);
+  } else {
+    console.log(
+      `  ℹ /context 百分比不可读（pre=${preCompactPct}, post=${postCompactPct}，可能是报告格式变化），` +
+        `上下文统计变化以 compact_boundary 为据：boundary=${hasBoundary}`,
+    );
+  }
+}
+
+// ── review-v5 F1：--command 逐命令成功证据（本地命令，无需凭据）────────────────────
+// 供 --command 模式对用户请求的每个命令做真实成功断言；--replacements 模式复用做等价性观察。
+async function verifyUsageCommand(sdk: any, exe: string, cwd: string): Promise<string> {
+  const run = await runNativeCommand(sdk, exe, cwd, '/usage', { maxTurns: 1, timeoutMs: 60000 });
+  assert.equal(run.termination?.type, 'result', `原生 /usage 须有 result 终态；诊断：${resultDiagnostic(run)}`);
+  const termResult = run.termination?.result;
+  const text = typeof termResult === 'string' ? termResult : '';
+  assert.ok(
+    /Total cost|Total duration|code changes/i.test(text),
+    `原生 /usage 应输出会话聚合用量文本（result.result）；result_head=${text.slice(0, 120)}`,
+  );
+  return text;
+}
+
+async function verifyContextCommand(sdk: any, exe: string, cwd: string): Promise<string> {
+  const run = await runNativeCommand(sdk, exe, cwd, '/context', { maxTurns: 1, timeoutMs: 60000 });
+  assert.equal(run.termination?.type, 'result', `原生 /context 须有 result 终态；诊断：${resultDiagnostic(run)}`);
+  const termResult = run.termination?.result;
+  const text = typeof termResult === 'string' ? termResult : '';
+  assert.ok(
+    /Context Usage|Tokens:/i.test(text),
+    `原生 /context 应输出 Context Usage 报告文本（result.result）；result_head=${text.slice(0, 120)}`,
+  );
+  return text;
+}
+
+async function verifyClearCommand(sdk: any, exe: string, cwd: string): Promise<string> {
+  const run = await runNativeCommand(sdk, exe, cwd, '/clear', { maxTurns: 1, timeoutMs: 60000 });
+  assert.ok(
+    run.events.some((e) => e.type === 'conversation_reset'),
+    `原生 /clear 应发出 conversation_reset（重置当前会话上下文）；事件=${run.events.map((e) => e.type).join('|')}`,
+  );
+  assert.equal(run.termination?.type, 'result', '原生 /clear 须有 result 终态（产生命令结果反馈）');
+  assert.ok(run.init?.session_id, '原生 /clear 的 init 须携带 session id');
+  return typeof run.init?.session_id === 'string' ? run.init.session_id : '';
+}
+
+async function verifyConfigCommand(sdk: any, exe: string, cwd: string, root: string): Promise<void> {
+  // /config key=value 写用户级 settings.json（隔离 USERPROFILE/HOME 验证写盘位置，不污染真实 home）。
+  const isoHome = path.join(root, 'config-home');
+  mkdirSync(path.join(isoHome, '.claude'), { recursive: true });
+  writeFileSync(path.join(isoHome, '.claude', 'settings.json'), '{}\n', 'utf8');
+  const prevUserProfile = process.env.USERPROFILE;
+  const prevHome = process.env.HOME;
+  process.env.USERPROFILE = isoHome;
+  process.env.HOME = isoHome;
+  const isolatedEnv = { ...process.env, USERPROFILE: isoHome, HOME: isoHome } as Record<string, string>;
+  try {
+    const run = await runNativeCommand(sdk, exe, cwd, '/config autoCompact=false', {
+      env: isolatedEnv,
+      maxTurns: 1,
+      timeoutMs: 60000,
+    });
+    assert.equal(run.termination?.type, 'result', '原生 /config 须有 result 终态');
+    const termResult = run.termination?.result;
+    const text = typeof termResult === 'string' ? termResult : '';
+    assert.ok(/Auto-compact|autoCompact/i.test(text), `原生 /config 应确认配置写入；result_head=${text.slice(0, 120)}`);
+    const userSettings = JSON.parse(readFileSync(path.join(isoHome, '.claude', 'settings.json'), 'utf8')) as Record<string, unknown>;
+    assert.ok(
+      'autoCompactEnabled' in userSettings,
+      `原生 /config 应写用户级 ~/.claude/settings.json（autoCompactEnabled）；实际 keys=${Object.keys(userSettings).join(',')}`,
+    );
+    assert.ok(!existsSync(path.join(cwd, '.claude', 'settings.local.json')), '原生 /config 不应写项目级 .claude/settings.local.json');
+  } finally {
+    if (prevUserProfile !== undefined) process.env.USERPROFILE = prevUserProfile;
+    else delete process.env.USERPROFILE;
+    if (prevHome !== undefined) process.env.HOME = prevHome;
+    else delete process.env.HOME;
+  }
 }
 
 async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
@@ -413,6 +666,9 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
   const root = mkdtempSync(path.join(TEMP_ROOT, 'e2e-command-'));
   let pass = 0;
   let fail = 0;
+  // review-v3 F1：--command 模式同样需要独立 skipped 状态。无凭据时 /init、/compact、普通文本、
+  // 取消/plan 等核心模型场景被 SKIP，不得以 exit 0 冒充完整通过（与 runReplacementsMode 同约定）。
+  let skipped = 0;
   const check = async (name: string, fn: () => void | Promise<void>): Promise<void> => {
     try {
       await fn();
@@ -424,11 +680,53 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
     }
   };
   try {
-    // review P1-4：凭据检测覆盖 env + settings.json，/init、/compact、用户取消等调模型场景共用。
-    const creds = resolveInitCredentials();
+    // review-v5 F1/F2：--command 逐命令执行。先创建各场景真实 cwd，再按 query 的真实 cwd 解析凭据
+    //（project/local settings 在真实命令目录下才可能命中，不能统一用 root——review-v4 F3 场景会漏检）。
+    // 本地命令（/usage /context /clear /config）无需凭据；/init /compact 与协议场景需模型。
+    const initCwd = path.join(root, 'init');
+    const compactCwd = path.join(root, 'compact');
+    const plainCwd = path.join(root, 'plain');
+    const abortCwd = path.join(root, 'abort');
+    const planCwd = path.join(root, 'plan-init');
+    const denyCwd = path.join(root, 'deny');
+    const denyInitCwd = path.join(root, 'deny-init');
+    const usageCwd = path.join(root, 'usage');
+    const contextCwd = path.join(root, 'context');
+    const clearCwd = path.join(root, 'clear');
+    const configCwd = path.join(root, 'config');
+    for (const d of [initCwd, compactCwd, plainCwd, abortCwd, planCwd, denyCwd, denyInitCwd, usageCwd, contextCwd, clearCwd, configCwd]) {
+      mkdirSync(d, { recursive: true });
+    }
+    // 各模型场景凭据按其真实 query cwd 解析（review-v5 F2）；协议场景 cwd 均为空目录，用 root 即可。
+    const initCreds = await resolveInitCredentials(initCwd);
+    const compactCreds = await resolveInitCredentials(compactCwd);
+    const protocolCreds = await resolveInitCredentials(root);
+    // review-v4 F1：--command 的范围语义——只验证 prompts 列出的命令。普通文本/取消/plan/deny 等
+    // 「需要模型调用的协议场景」仅在请求了 /init 或 /compact（需要模型的命令）时才运行/计数 skip；
+    // 这样 `--command /usage`（本地命令，不需模型）不会被未请求的模型场景阻断 exit 2。
+    // executable/cwd 启动失败检查不需凭据，与模型无关，保持总运行。
+    const hasModelCommand = prompts.includes('/init') || prompts.includes('/compact');
+    if (prompts.includes('/usage')) {
+      await check('/usage 真实 result + 会话聚合用量文本（review-v5 F1：逐命令执行，不静默跳过）', async () => {
+        await verifyUsageCommand(sdk, exe, usageCwd);
+      });
+    }
+    if (prompts.includes('/context')) {
+      await check('/context 真实 result + Context Usage 文本（review-v5 F1：逐命令执行，不静默跳过）', async () => {
+        await verifyContextCommand(sdk, exe, contextCwd);
+      });
+    }
+    if (prompts.includes('/clear')) {
+      await check('/clear conversation_reset + result + session id（review-v5 F1：逐命令执行，不静默跳过）', async () => {
+        await verifyClearCommand(sdk, exe, clearCwd);
+      });
+    }
+    if (prompts.includes('/config')) {
+      await check('/config result + 用户级 settings 写盘（review-v5 F1：逐命令执行，不静默跳过）', async () => {
+        await verifyConfigCommand(sdk, exe, configCwd, root);
+      });
+    }
     if (prompts.includes('/init')) {
-      const initCwd = path.join(root, 'init');
-      mkdirSync(initCwd, { recursive: true });
       // /init 分析代码库生成 CLAUDE.md；空目录无内容可分析时模型不写文件（实测 bypassPermissions
       // + maxTurns:20 空目录仍不落盘）。放一个最小 README 让 /init 有真实内容可分析，验证命令执行
       // 入口的真实文件副作用。空目录不落盘是 Claude Code 真实行为，由 Task 5 矩阵记录为预期差异。
@@ -438,18 +736,19 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
       // 真实凭据 + 足够 maxTurns 才能真正写文件。review-v4 已证实 20 turns 在仍有 tool_use 时会被
       // error_max_turns 截断；成功 fixture 使用显式 50 turns（有限预算）并保留 300s wall-clock 兜底。
       // 全无凭据时 SKIP——/init 需真实模型调用，不得用 plan 假成功冒充。
-      if (!creds) {
-        console.log('  SKIP /init 落盘验证：本机未检出 ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN（env 或 ~/.claude/settings.json）；/init 需真实模型调用 + Write 权限，plan 模式只产计划不落盘');
+      if (!initCreds) {
+        skipped++;
+        console.log('  SKIP /init 落盘验证：本机未检出 ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN（env 或 .claude/settings 各层）；/init 需真实模型调用 + Write 权限，plan 模式只产计划不落盘');
       } else {
-        await check(`/init 真实 query 创建非空 CLAUDE.md 并有成功终态（凭据：${creds.source}）`, async () => {
+        await check(`/init 真实 query 创建非空 CLAUDE.md 并有成功终态（凭据：${initCreds.source}）`, async () => {
           // review-v2 P1-1 + review-v4 P1-1：/init 多 turn 工作流，harness wall-clock 必须 > CLI 单请求
           // API_TIMEOUT_MS（review-v4 根因：两者同值导致外层先触发，abort 压制真实 result）。用
           // harnessInitDeadlineMs 解耦——result 终态仍强制要求，超时则 termination=null 断言 fail。
           const run = await runNativeCommand(sdk, exe, initCwd, '/init', {
             permissionMode: 'bypassPermissions',
             maxTurns: 50,
-            env: creds.env,
-            timeoutMs: harnessInitDeadlineMs(creds),
+            env: initCreds.env,
+            timeoutMs: harnessInitDeadlineMs(initCreds),
           });
           const file = path.join(initCwd, 'CLAUDE.md');
           // review-v2 P1-3：termination 是 SDK 真实 result（不含 harness 合成），强制要求成功终态。
@@ -463,66 +762,46 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
     }
 
     if (prompts.includes('/compact')) {
-      // P2-1：/compact 压缩的是当前 CLI 会话上下文，空目录无上下文 → 仅返回 assistant+空 result，
-      // 旧断言 typeof result==='string' 连空字符串都命中（过宽）。必须先 warmup 产生上下文
-      //（拿 init.session_id），再 /compact resume 同一会话，断言可观测压缩证据。实测 glm-5.2
-      // 端点 /compact 不返回 compact_boundary，但有上下文时返回 system:status（空目录无此事件），
-      // 作为端点可观测的压缩状态证据；若端点均不返回则该断言失败，记录为需说明的差异。
-      if (!creds) {
+      // review-v2 F1：/compact 真实压缩证据。空目录/短 warmup 无足够上下文 → /compact 返回
+      // compact_result:'failed'（"Not enough messages to compact"）。必须多轮 warmup 堆积上下文，
+      // 再断言真实压缩成功证据（compact_boundary / compact_result:'success'）——status:'compacting'
+      // 只表示开始压缩、compact_result:'failed' 明确未压缩，均不得当成功（旧 hasStatus 据此误报）。
+      if (!compactCreds) {
+        skipped++;
         console.log('  SKIP /compact 压缩证据验证：无凭据，/compact 需先 warmup 产生上下文再压缩（P2-1）');
       } else {
-        const compactCwd = path.join(root, 'compact');
-        mkdirSync(compactCwd, { recursive: true });
-        await check('/compact 在有上下文时返回压缩证据（移除空 result 放宽，P2-1）', async () => {
-          const warmup = await runNativeCommand(sdk, exe, compactCwd, '请详细解释 TypeScript 泛型与闭包，尽量详尽。', {
-            permissionMode: 'bypassPermissions', maxTurns: 3, env: creds.env, timeoutMs: 120000,
-          });
-          const cliSid = warmup.init?.session_id;
-          assert.ok(cliSid, 'warmup 须返回 system.init.session_id 供 /compact resume');
-          const run = await runNativeCommand(sdk, exe, compactCwd, '/compact', {
-            permissionMode: 'bypassPermissions', maxTurns: 5, env: creds.env, timeoutMs: 120000, resume: cliSid,
-          });
-          assert.ok(run.termination, '必须收到 /compact result 终态');
-          assert.equal(run.termination?.is_error, false, `成功 /compact 不得 is_error；诊断：${resultDiagnostic(run)}`);
-          // P2-1：必须有可观测压缩证据，不得只靠 result.result 字符串（空字符串也命中 typeof==='string'）。
-          // 接受 compact_boundary（官方边界）/ 非空 local_command_output / system:status（端点压缩状态）。
-          const hasBoundary = run.events.some((e) => e.subtype === 'compact_boundary');
-          const hasLocalOutput = run.events.some(
-            (e) => e.subtype === 'local_command_output' && typeof (e as any).content === 'string' && ((e as any).content as string).trim().length > 0,
-          );
-          const hasStatus = run.events.some((e) => e.type === 'system' && e.subtype === 'status');
-          assert.ok(
-            hasBoundary || hasLocalOutput || hasStatus,
-            '/compact 须返回 compact_boundary/非空 local_command_output/system:status 作为压缩证据（P2-1：不得用空 result 放宽）；若端点均不返回，需记录为已知差异',
-          );
+        await check('/compact 在有上下文时返回真实压缩证据（compact_boundary/compact_result:success，review-v2 F1 收紧）', async () => {
+          await verifyCompactEvidence(sdk, exe, compactCwd, compactCreds, COMPACT_WARMUP_PROMPTS);
         });
       }
     }
 
-    if (!creds) {
-      console.log('  SKIP 普通文本验证：无凭据，需调模型生成回答（验证原文透传 + 真实终态）');
-    } else {
-      await check('普通文本原样进入 query，不被自然语言前缀改写', async () => {
-        const prompt = '请解释 /tmp 目录，保留双空格  与引号"';
-        // review-v2 P1-3：须传 creds.env + 创建 cwd（否则无凭据/cwd 不存在 → SDK failed to launch，
-        // 之前靠 harness synthetic aborted 掩盖）。
-        const plainCwd = path.join(root, 'plain');
-        mkdirSync(plainCwd, { recursive: true });
-        // review-v4 P1-2：普通文本可能先请求工具；默认 maxTurns:1 会在 tool_use 后 error_max_turns。
-        // 成功 fixture 显式给有限 10 turns，并由 120s wall-clock timeout 兜底；不继承 helper 默认值。
-        const run = await runNativeCommand(sdk, exe, plainCwd, prompt, {
-          maxTurns: 10,
-          timeoutMs: 120000,
-          env: creds.env,
+    // 协议场景 ①：普通文本透传（需模型；仅当本次请求了需要模型的命令时运行，review-v4 F1）。
+    if (hasModelCommand) {
+      if (!protocolCreds) {
+        skipped++;
+        console.log('  SKIP 普通文本验证：无凭据，需调模型生成回答（验证原文透传 + 真实终态）');
+      } else {
+        await check('普通文本原样进入 query，不被自然语言前缀改写', async () => {
+          const prompt = '请解释 /tmp 目录，保留双空格  与引号"';
+          // review-v2 P1-3：须传 protocolCreds.env + 创建 cwd（否则无凭据/cwd 不存在 → SDK failed to launch，
+          // 之前靠 harness synthetic aborted 掩盖）。
+          // review-v4 P1-2：普通文本可能先请求工具；默认 maxTurns:1 会在 tool_use 后 error_max_turns。
+          // 成功 fixture 显式给有限 10 turns，并由 120s wall-clock timeout 兜底；不继承 helper 默认值。
+          const run = await runNativeCommand(sdk, exe, plainCwd, prompt, {
+            maxTurns: 10,
+            timeoutMs: 120000,
+            env: protocolCreds.env,
+          });
+          // §1 核心：原文透传（无命令 prompt 翻译器改写）。
+          assert.equal(run.prompt, prompt);
+          // review-v4 P1-2：未安排 cancel 的成功场景必须获得真实 result + is_error=false。
+          // SDK 原始 aborted 仅可用于取消场景，绝不能当作普通文本成功。
+          assert.ok(run.termination, `普通文本必须返回真实 result 终态；诊断：${resultDiagnostic(run)}`);
+          assert.equal(run.termination?.type, 'result', `普通文本终态必须为 result，不得以 aborted 当成功；诊断：${resultDiagnostic(run)}`);
+          assert.equal(run.termination?.is_error, false, `普通文本 result 不得 is_error；诊断：${resultDiagnostic(run)}`);
         });
-        // §1 核心：原文透传（无命令 prompt 翻译器改写）。
-        assert.equal(run.prompt, prompt);
-        // review-v4 P1-2：未安排 cancel 的成功场景必须获得真实 result + is_error=false。
-        // SDK 原始 aborted 仅可用于取消场景，绝不能当作普通文本成功。
-        assert.ok(run.termination, `普通文本必须返回真实 result 终态；诊断：${resultDiagnostic(run)}`);
-        assert.equal(run.termination?.type, 'result', `普通文本终态必须为 result，不得以 aborted 当成功；诊断：${resultDiagnostic(run)}`);
-        assert.equal(run.termination?.is_error, false, `普通文本 result 不得 is_error；诊断：${resultDiagnostic(run)}`);
-      });
+      }
     }
 
     // Task 4 review P1-6：取消/启动失败/不可写目录/executable 缺失/权限拒绝真实 E2E 场景。
@@ -549,15 +828,16 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
       );
       assert.ok(!run.termination || run.termination.is_error !== false, 'cwd 不存在不得伪造成功 result');
     });
-    if (!creds) {
+    // 协议场景 ②：取消/plan /init/deny（需模型；仅当本次请求了需要模型的命令时运行，review-v4 F1）。
+    if (hasModelCommand) {
+    if (!protocolCreds) {
+      skipped++;
       console.log('  SKIP 用户取消/plan /init 验证：无凭据，需启动真实模型 query（P1-6）');
     } else {
       await check('用户取消（abort）→ 中断生效不卡死（P1-3：不靠 harness 合成；SDK 终态缺失记 Windows 已知差异）', async () => {
         // review-v2 P1-3：须创建 cwd（否则 SDK failed to launch，abortAfterMs 让 !timedOut 通过掩盖启动失败）。
-        const abortCwd = path.join(root, 'abort');
-        mkdirSync(abortCwd, { recursive: true });
         const run = await runNativeCommand(sdk, exe, abortCwd, '请详尽解释 TypeScript 类型系统，尽量长。', {
-          permissionMode: 'bypassPermissions', maxTurns: 10, env: creds.env, timeoutMs: 30000, abortAfterMs: 5000,
+          permissionMode: 'bypassPermissions', maxTurns: 10, env: protocolCreds.env, timeoutMs: 30000, abortAfterMs: 5000,
         });
         // review-v2 P1-3：abort 后 query 须在超时内结束（中断生效，不卡死）——这是「明确的 query 终止状态」
         // （迭代器 resolve），不靠 harness syntheticEvents 放宽（合成 ${run.syntheticEvents.length} 条不计入）。
@@ -574,7 +854,7 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
         mkdirSync(planCwd, { recursive: true });
         writeFileSync(path.join(planCwd, 'README.md'), '# plan init\n', 'utf8');
         const run = await runNativeCommand(sdk, exe, planCwd, '/init', {
-          permissionMode: 'plan', maxTurns: 1, env: creds.env, timeoutMs: 60000,
+          permissionMode: 'plan', maxTurns: 1, env: protocolCreds.env, timeoutMs: 60000,
         });
         assert.ok(!existsSync(path.join(planCwd, 'CLAUDE.md')), 'plan 模式 /init 不得落盘 CLAUDE.md（Write 被拦成计划）');
         assert.ok(run.termination, 'plan /init 须有终态');
@@ -594,7 +874,7 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
         const run = await runNativeCommand(sdk, exe, denyInitCwd, '/init', {
           permissionMode: 'default',
           maxTurns: 20,
-          env: creds.env,
+          env: protocolCreds.env,
           timeoutMs: 180000,
           canUseTool: async (toolName: string, input: Record<string, unknown>) => {
             // 仅拒绝 Write（/init 写 CLAUDE.md 的工具），其他工具放行让其分析代码库。
@@ -628,7 +908,7 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
         const run = await runNativeCommand(sdk, exe, denyCwd, '请使用 Bash 工具运行命令 echo hello', {
           permissionMode: 'default',
           maxTurns: 5,
-          env: creds.env,
+          env: protocolCreds.env,
           timeoutMs: 120000,
           canUseTool: async () => {
             denyCount++;
@@ -648,11 +928,28 @@ async function runCommandMode(exe: string, prompts: string[]): Promise<void> {
         );
       });
     }
+    }
   } finally {
     await safeRmSync(root, 'command');
   }
-  console.log(`\\n${pass} passed, ${fail} failed`);
-  if (fail > 0) throw new Error(`e2e --command 断言 ${fail} 项失败`);
+  console.log(`\\n${pass} passed, ${fail} failed, ${skipped} skipped`);
+  // review-v3 F1 / review-v2 F2：稳定退出协议——fail 优先 exit 1，但抛错前打印 skipped 诊断；
+  // fail===0 且 skipped>0（前置条件缺失）→ exit 2（SKIP 不算 PASS，与 --init-matrix / --replacements 同约定）。
+  if (fail > 0) {
+    if (skipped > 0) {
+      console.error(
+        `（另有 ${skipped} 项核心场景因前置条件缺失 SKIP，完整验收未执行；fail 优先报告为 exit 1。详见上文 SKIP 行。）`,
+      );
+    }
+    throw new Error(`e2e --command 断言 ${fail} 项失败`);
+  }
+  if (skipped > 0) {
+    console.error(
+      `前置条件缺失：${skipped} 项核心场景 SKIP（本机未检出 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN（env 或 ~/.claude/settings.json）），` +
+        '--command 未执行真实模型场景验证。发布门禁必须以凭据环境运行；SKIP 不算 PASS（exit 2）。',
+    );
+    process.exit(2);
+  }
 }
 
 // ── --settings（Task 3 Step 6）：原生 settings 来源 + user/project CLAUDE.md 进入上下文 ──
@@ -913,7 +1210,12 @@ async function runInitMatrixMode(exe: string): Promise<void> {
       console.log(`  ❌ ${name} — ${(e as Error).message}`);
     }
   };
-  const creds = resolveInitCredentials();
+  // review-v5 F2：凭据按 query 的真实 cwd 解析（不能用 root——那是 e2e 临时根，非任何 query 目录，
+  // 会漏掉 query cwd/.claude/settings.local.json 提供的凭据）。各场景 fixture 均为空临时目录，用
+  // 一个代表 query cwd 的 fixture（credsCwd）解析，与生产 settings source 一致。
+  const credsCwd = path.join(root, 'creds-fixture');
+  mkdirSync(credsCwd, { recursive: true });
+  const creds = await resolveInitCredentials(credsCwd);
 
   console.log('=== --init-matrix：/init 完整场景矩阵（Task 5）===');
   try {
@@ -1216,43 +1518,338 @@ async function runInitMatrixMode(exe: string): Promise<void> {
   }
 }
 
-// ── 入口 ───────────────────────────────────────────────────────────────────────────
-void (async () => {
-  if (!RUN_NATIVE) {
-    console.log('SKIP: Claude Code native E2E 未触发（--native 或 CLAUDE_LINK_RUN_NATIVE_E2E=1）。');
-    process.exit(0);
+// ── --replacements（Task 6）：候选平替等价性对照 ─────────────────────────────────
+// 计划 Task 6 Step 1-3：为 5 个候选平替（/clear↔新建对话、/context↔上下文统计 UI、
+// /usage↔费用/用量 UI、/compact↔压缩入口、/config↔配置页）对照原生 SDK 行为逐项断言 5 个
+// 等价字段；任一字段为 false 即保持 executionMode='native-sdk'，不得采用平替（「不合格则回退原生
+// 执行」）。预期规格单一真相源为矩阵 REPLACEMENT_CANDIDATES；本模式以真实 SDK 证据断言它。
+// 真实证据优先：/clear 的 conversation_reset + 新 CLI session id、/context /usage 的 result 报告、
+// /config 在隔离 USERPROFILE/HOME 下的写盘位置；结构语义次之（新建对话/上下文 UI/费用 UI 的操作定义）。
+// /clear /context /usage /config 均为本地命令，无需凭据；/clear warmup 对比与 /compact 压缩证据需
+// 模型（无凭据时该两项 SKIP，核心等价判定不依赖它们）。
+async function runReplacementsMode(exe: string): Promise<void> {
+  const sdk: any = await import('@anthropic-ai/claude-agent-sdk');
+  const root = mkdtempSync(path.join(TEMP_ROOT, 'e2e-replacements-'));
+  let pass = 0;
+  let fail = 0;
+  // review-v1 F1：核心场景因前置条件缺失（无模型凭据）被 SKIP 时，不得以 exit 0 冒充完整通过。
+  // SKIP 是独立结果状态：native 触发下 skipped>0 → exit 2（与 --init-matrix 同约定「SKIP 不算 PASS」）。
+  let skipped = 0;
+  const check = async (name: string, fn: () => void | Promise<void>): Promise<void> => {
+    try {
+      await fn();
+      pass++;
+      console.log(`  ✅ ${name}`);
+    } catch (e) {
+      fail++;
+      console.log(`  ❌ ${name} — ${(e as Error).message}`);
+    }
+  };
+  // review-v5 F5：运行时观察结果（E2E 实际证明的等价字段），末尾与矩阵 REPLACEMENT_CANDIDATES.verdict
+  // 逐字段比对——防止 verdict 被静态改写而契约仍通过；未直接观察的字段标记为「未证明」而非手写 true。
+  const observedFields: Record<string, Partial<Record<ReplacementField, boolean>>> = {};
+  const recordObserved = (cmd: string, field: ReplacementField, value: boolean): void => {
+    (observedFields[cmd] ??= {})[field] = value;
+  };
+
+  console.log('=== --replacements：候选平替等价性对照（Task 6，任一字段 false 即保持 native-sdk）===');
+  try {
+    const projectCwd = path.join(root, 'project');
+    mkdirSync(projectCwd, { recursive: true });
+    writeFileSync(path.join(projectCwd, 'README.md'), '# replacements fixture\n\nA minimal project for replacement equivalence E2E.\n', 'utf8');
+    // review-v4 F3 / review-v5 F2：凭据按 query 的真实 cwd（projectCwd）解析，检查 project/local settings
+    //（不能用 root——那会漏掉 projectCwd/.claude/settings.local.json 提供的凭据）。
+    const creds = await resolveInitCredentials(projectCwd);
+
+    // ── /clear ↔ 新建对话（Task 6 Step 2：不得直接替换）──
+    await check('/clear 原生行为：conversation_reset + 新 CLI session id + result 反馈（新建对话不具备）', async () => {
+      // 原生 /clear 为本地命令；有凭据时先 warmup 拿到旧会话 id 以对比「新 CLI session id 是否生成」。
+      let priorSid: string | null = null;
+      if (creds) {
+        const warm = await runNativeCommand(sdk, exe, projectCwd, '请用一句话回答：什么是纯函数？', {
+          maxTurns: 2,
+          env: creds.env,
+          timeoutMs: 120000,
+        });
+        priorSid = warm.init?.session_id ?? null;
+        assert.ok(priorSid, 'warmup 须返回 session_id（供 /clear 新旧 sid 对比）');
+      }
+      const run = await runNativeCommand(sdk, exe, projectCwd, '/clear', {
+        ...(priorSid ? { resume: priorSid } : {}),
+        maxTurns: 1,
+        ...(creds ? { env: creds.env } : {}),
+        timeoutMs: 60000,
+      });
+      // 证据 1：conversation_reset —— SDK 明确表示 /clear 重置了当前会话上下文。
+      const hasConversationReset = run.events.some((e) => e.type === 'conversation_reset');
+      assert.ok(
+        hasConversationReset,
+        `原生 /clear 应发出 conversation_reset（重置当前会话上下文）；事件=${run.events.map((e) => e.type).join('|')}`,
+      );
+      // 证据 2：result 终态 —— /clear 产生命令结果反馈。
+      assert.equal(run.termination?.type, 'result', '原生 /clear 须有 result 终态（产生命令结果反馈）');
+      // 证据 3（凭据可用时）：新 CLI session id 区别于 warmup 会话。
+      if (priorSid) {
+        const newSid = run.init?.session_id;
+        assert.ok(
+          typeof newSid === 'string' && newSid !== priorSid,
+          '原生 /clear 应生成新的 CLI session id（区别于 warmup 会话）',
+        );
+      }
+      // 等价判定（对照 REPLACEMENT_CANDIDATES.clear.verdict，T6-15 要求 observed ⇔ verdict 一致）：
+      //   sessionStateEqual=false（E2E 已观察）：原生 /clear 发出 conversation_reset + 生成新 CLI session id，
+      //     即在同一 Claude Link 会话内重置 CLI 会话上下文；「新建对话」（createSession+switchSession）创建独立
+      //     DB 会话、不重置当前会话上下文。两者会话状态语义不同 → false。
+      //   resultFeedbackEqual=false（E2E 已观察）：原生 /clear 有 result 终态反馈；新建对话无命令结果反馈。
+      //   visibleBehaviorEqual='unverified'（未观察）：「/clear 后续回合从零开始 vs 新建对话旧历史仍可见」
+      //     属 renderer 侧用户可见行为对照，SDK harness 无法直接观测，诚实标记为未证明（非 false）。
+      //   fileSideEffectsEqual='unverified'（未观察）：两者都不写工作目录文件；「向同一 DB 会话落消息 vs 插入
+      //     新会话行」是 DB 落库语义而非 SDK 文件副作用，本 harness 不观测，标记为未证明。
+      //   configMemorySemanticsEqual='unverified'（未观察）：两者都不写配置/记忆，结构上相当；该字段非 E2E
+      //     观察所得，标记为未证明（不写成 true 以免与 verdict 的 'unverified' 冲突）。
+      // review-v4 F5：只对 SDK 实际观察到的字段 recordObserved（conversation_reset + 新 sid → sessionState=false；
+      //   result 终态 → resultFeedback=false）。其余 3 字段保持 'unverified'，与矩阵 verdict 一致（T6-15）。
+      recordObserved('clear', 'sessionStateEqual', false);
+      recordObserved('clear', 'resultFeedbackEqual', false);
+      console.log('  ℹ /clear 等价判定：sessionState/resultFeedback 已观察为 false → 保持 native-sdk（新建对话为独立产品操作）；visibleBehavior/fileSideEffects/configMemory 为未观察字段，保持 unverified');
+    });
+
+    // ── /context ↔ 上下文统计 UI（Task 6 Step 3）──
+    await check('/context 原生行为：result 消息输出实时 Context Usage 报告（≠ 上下文 UI 上一回合派生的紧凑卡片）', async () => {
+      const run = await runNativeCommand(sdk, exe, projectCwd, '/context', { maxTurns: 1, timeoutMs: 60000 });
+      assert.equal(run.termination?.type, 'result', '原生 /context 须有 result 终态');
+      // 仅提取报告文本供内容断言（非成功判据）；避开 P2-1 钉住的 typeof run.termination?.result 放宽模式。
+      const termResult = run.termination?.result;
+      const resultText = typeof termResult === 'string' ? termResult : '';
+      assert.ok(
+        /Context Usage|Tokens:/i.test(resultText),
+        `原生 /context 应以 result 消息输出实时 Context Usage 报告；result_head=${resultText.slice(0, 120)}`,
+      );
+      // visibleBehaviorEqual=false：原生输出实时完整报告（model/tokens/分类占比）；上下文 UI
+      //   （ContextButton/contextStats）显示上一回合 SDK usage 派生的紧凑卡片，来源与更新时机不同
+      //   （下一回合 CONTEXT_UPDATE 前保持旧值）。
+      // resultFeedbackEqual=false：原生产生 result 消息；常驻卡片不是 transcript 消息。
+      // 其余字段（sessionState/fileSideEffects/configMemory）均为 true（两者都不改会话/文件/配置）。
+      // review-v4 F5：记录 E2E 实际观察的字段（实时 result 报告 → visibleBehavior=false；result 终态 → resultFeedback=false）。
+      // sessionState/fileSideEffects/configMemory 为「上下文 UI vs /context」的结构语义，标记为未证明。
+      recordObserved('context', 'visibleBehaviorEqual', false);
+      recordObserved('context', 'resultFeedbackEqual', false);
+      console.log('  ℹ /context 等价判定：visibleBehavior/resultFeedback false → 保持 native-sdk');
+    });
+
+    // ── /usage ↔ 费用/用量 UI（Task 6 Step 3）──
+    await check('/usage 原生行为：result 消息输出会话聚合用量（≠ 费用 UI 单条气泡 cost/duration）', async () => {
+      const run = await runNativeCommand(sdk, exe, projectCwd, '/usage', { maxTurns: 1, timeoutMs: 60000 });
+      assert.equal(run.termination?.type, 'result', '原生 /usage 须有 result 终态');
+      // 仅提取报告文本供内容断言（非成功判据）；避开 P2-1 钉住的 typeof run.termination?.result 放宽模式。
+      const termResult = run.termination?.result;
+      const resultText = typeof termResult === 'string' ? termResult : '';
+      assert.ok(
+        /Total cost|Total duration|code changes/i.test(resultText),
+        `原生 /usage 应以 result 消息输出会话聚合用量；result_head=${resultText.slice(0, 120)}`,
+      );
+      // visibleBehaviorEqual=false：原生输出会话聚合 totals（cost/duration/code changes/tokens）；
+      //   费用 UI（attachResultMetadata）只把 costUsd/durationMs 附着到单条 assistant 气泡。
+      // resultFeedbackEqual=false：原生产生 result 消息；气泡成本为元数据附着，非命令结果反馈。
+      // review-v4 F5：记录 E2E 实际观察的字段；sessionState/fileSideEffects/configMemory 标记为未证明。
+      recordObserved('usage', 'visibleBehaviorEqual', false);
+      recordObserved('usage', 'resultFeedbackEqual', false);
+      console.log('  ℹ /usage 等价判定：visibleBehavior/resultFeedback false → 保持 native-sdk');
+    });
+
+    // ── /compact ↔ 压缩入口（Task 6 Step 3；native-execution：入口即原生 /compact 执行）──
+    await check('/compact 压缩入口即原生执行：ChatPage.handleCompress → sendMessage(\'/compact\')（结构契约，非本地模拟）', () => {
+      const chatPage = readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'pages', 'ChatPage.vue'), 'utf8');
+      const fnStart = chatPage.indexOf('async function handleCompress');
+      assert.ok(fnStart >= 0, 'ChatPage 应有 handleCompress');
+      const fnBody = chatPage.slice(fnStart, fnStart + 400);
+      assert.ok(fnBody.includes("'/compact'"), `handleCompress 应发送 /compact 命令文本；实际=${fnBody.slice(0, 160)}`);
+      assert.ok(fnBody.includes('sendMessage('), '压缩入口应经 sendMessage 原生执行（非本地模拟）');
+      // 压缩入口即原生 /compact 命令本身（sendMessage('/compact')），无替代操作需证明等价 → 非平替候选，
+      // 保持 native-sdk（矩阵 REPLACEMENT_CANDIDATES.compact.kind === 'native-execution'）。
+      // review-v5 F4：native-execution 无平替等价需验证——5 个等价字段不 recordObserved（矩阵标 'unverified'），
+      // 不把「入口即原生命令」的结构事实写成已实测的等价布尔值。真实压缩证据由下方 verifyCompactEvidence E2E 补充。
+    });
+    if (!creds) {
+      // review-v1 F1：无凭据时 /compact 真实压缩证据为「前置条件缺失」，计入 skipped（SKIP 不算 PASS）。
+      skipped++;
+      console.log(
+        '  SKIP 原生 /compact 压缩证据 E2E：无凭据，需先 warmup 产生上下文（--command 模式已覆盖，本项为补充证据）；' +
+          'SKIP 不算 PASS（native 触发下本模式将 exit 2，发布门禁拒绝）',
+      );
+    } else {
+      await check('原生 /compact（有上下文）返回真实压缩证据（compact_boundary/compact_result:success），证明压缩入口行为真实', async () => {
+        // review-v2 F1：收紧为只认 compact_boundary / compact_result:'success'（status:'compacting'
+        // 不证明成功、compact_result:'failed' 明确未压缩，旧 hasStatus 据此误报）。多轮 warmup 堆积上下文。
+        await verifyCompactEvidence(sdk, exe, projectCwd, creds, COMPACT_WARMUP_PROMPTS);
+      });
+    }
+
+    // ── /config ↔ 配置页（Task 6 Step 3；隔离 USERPROFILE/HOME 验证写盘位置）──
+    await check('/config 原生写入用户级 ~/.claude/settings.json（≠ 配置页写项目级 .claude/settings.local.json）', async () => {
+      const isoHome = path.join(root, 'config-home');
+      mkdirSync(path.join(isoHome, '.claude'), { recursive: true });
+      writeFileSync(path.join(isoHome, '.claude', 'settings.json'), '{}\n', 'utf8');
+      const configCwd = path.join(root, 'config-cwd');
+      mkdirSync(configCwd, { recursive: true });
+      const prevUserProfile = process.env.USERPROFILE;
+      const prevHome = process.env.HOME;
+      process.env.USERPROFILE = isoHome;
+      process.env.HOME = isoHome;
+      const isolatedEnv = { ...process.env, USERPROFILE: isoHome, HOME: isoHome } as Record<string, string>;
+      try {
+        const run = await runNativeCommand(sdk, exe, configCwd, '/config autoCompact=false', {
+          env: isolatedEnv,
+          maxTurns: 1,
+          timeoutMs: 60000,
+        });
+        assert.equal(run.termination?.type, 'result', '原生 /config 须有 result 终态');
+        // 仅提取报告文本供内容断言（非成功判据）；避开 P2-1 钉住的 typeof run.termination?.result 放宽模式。
+        const termResult = run.termination?.result;
+        const resultText = typeof termResult === 'string' ? termResult : '';
+        assert.ok(/Auto-compact|autoCompact/i.test(resultText), `原生 /config 应确认配置写入；result_head=${resultText.slice(0, 120)}`);
+        // 写入位置：用户级（隔离 home）settings.json。
+        const userSettings = JSON.parse(readFileSync(path.join(isoHome, '.claude', 'settings.json'), 'utf8')) as Record<string, unknown>;
+        assert.ok(
+          'autoCompactEnabled' in userSettings,
+          `原生 /config 应写用户级 ~/.claude/settings.json（autoCompactEnabled）；实际 keys=${Object.keys(userSettings).join(',')}`,
+        );
+        // 项目级 settings.local.json 不被原生 /config 触碰（配置页 settings-writer 才写 local 层）。
+        assert.ok(!existsSync(path.join(configCwd, '.claude', 'settings.local.json')), '原生 /config 不应写项目级 .claude/settings.local.json');
+        // configMemorySemanticsEqual=false：原生写 user 层，配置页（settings-writer）写 local 层
+        //   （Task 3 层级：local 高于 project、低于 Claude Link 显式 options），下一 query 有效配置不同。
+        // fileSideEffectsEqual=false：写入文件不同（user settings.json vs project settings.local.json）。
+        // visibleBehaviorEqual=false / resultFeedbackEqual=false：原生「Set X to Y」result vs 表单保存。
+        // review-v4 F5：记录 E2E 实际观察的字段（写 user settings + 不写 project local → configMemory=false、
+        // fileSideEffects=false）；visibleBehavior/resultFeedback 为「配置页表单 vs 命令结果」结构语义，标记未证明。
+        recordObserved('config', 'configMemorySemanticsEqual', false);
+        recordObserved('config', 'fileSideEffectsEqual', false);
+        console.log('  ℹ /config 等价判定：configMemory/fileSideEffects/visibleBehavior/resultFeedback false → 保持 native-sdk');
+      } finally {
+        if (prevUserProfile !== undefined) process.env.USERPROFILE = prevUserProfile;
+        else delete process.env.USERPROFILE;
+        if (prevHome !== undefined) process.env.HOME = prevHome;
+        else delete process.env.HOME;
+      }
+    });
+
+    // ── 规格一致性：实测判定与矩阵 REPLACEMENT_CANDIDATES 逐字段绑定（review-v4 F5 / review-v5 F4）──
+    await check('矩阵规格一致性：verdict 布尔字段必须被 E2E 观察且一致；unverified 字段必须未被观察', () => {
+      assert.equal(REPLACEMENT_CANDIDATES.length, 5, '候选规格应为 5 个');
+      for (const spec of REPLACEMENT_CANDIDATES) {
+        assert.equal(spec.expectedEquivalent, false, `${spec.command} 候选平替须为 false（Task 6 未证明等价）`);
+        assert.ok(spec.note.length > 0, `${spec.command} 缺判定说明 note`);
+        assert.ok(spec.equivalenceChecks.length > 0, `${spec.command} 缺 equivalenceChecks`);
+        const fields = Object.keys(spec.verdict) as ReplacementField[];
+        assert.equal(fields.length, 5, `${spec.command} verdict 须覆盖全部 5 个等价字段`);
+        const obs = observedFields[spec.command] ?? {};
+        let observedFalseCount = 0;
+        for (const f of fields) {
+          const v = spec.verdict[f];
+          if (v === 'unverified') {
+            // review-v5 F4：矩阵标 unverified 的字段必须是「E2E 未直接观察」——若被观察，说明应更新矩阵或去除观察。
+            assert.ok(!(f in obs), `${spec.command}.${f} 矩阵标 unverified 但 E2E 观察到了（应更新矩阵或去除 recordObserved）`);
+          } else {
+            // 布尔字段（实测 true/false）必须被 E2E 观察且逐字段一致——verdict 被静态改写即失败。
+            assert.ok(f in obs, `${spec.command}.${f} 矩阵声称 ${v}（实测）但 E2E 未观察——应标 unverified 或补观察`);
+            assert.equal(
+              obs[f],
+              v,
+              `${spec.command}.${f} 运行时观察=${obs[f]} 与矩阵 verdict=${v} 不一致（verdict 被改写或真实证据变化）`,
+            );
+            if (v === false) observedFalseCount++;
+          }
+        }
+        // substitute 候选必须存在「实测 false」字段（review-v5 F4：不能把 unverified 当不合格证据）；
+        // native-execution 无平替等价需验证，不要求观察字段。
+        if (spec.kind === 'substitute') {
+          assert.ok(observedFalseCount > 0, `${spec.command} substitute 候选须至少一个被 E2E 实测的 false 字段`);
+        }
+      }
+    });
+  } finally {
+    await safeRmSync(root, 'replacements');
   }
-  const exe = resolveClaudeExe();
-  if (!exe) {
+  console.log(`\n${pass} passed, ${fail} failed, ${skipped} skipped`);
+  // review-v2 F2：稳定退出协议——混合结果（fail + skip）时保留实现失败优先级（exit 1），
+  // 但在抛错前显式打印 skipped 及原因，避免丢失「前置条件缺失」诊断（否则 CI 只见 exit 1，
+  // 无法区分实现回归与 native 前置条件也未满足）。
+  if (fail > 0) {
+    if (skipped > 0) {
+      console.error(
+        `（另有 ${skipped} 项核心场景因前置条件缺失 SKIP，完整验收未执行；fail 优先报告为 exit 1。详见上文 SKIP 行。）`,
+      );
+    }
+    throw new Error(`e2e --replacements 断言 ${fail} 项失败`);
+  }
+  // review-v1 F1：前置条件缺失（无凭据）导致核心场景 SKIP 时，exit 2（SKIP 不算 PASS），
+  // 与 --init-matrix 同约定；run-native-chain.mjs 依退出码传播，发布门禁拒绝缺失环境。
+  if (skipped > 0) {
     console.error(
-      '前置条件缺失：未找到本地 Claude Code 可执行文件（claude.exe）。\n' +
-        '请先 npm install -g @anthropic-ai/claude-code，或设置 CLAUDE_LINK_CLAUDE_EXE。',
+      `前置条件缺失：${skipped} 项核心场景 SKIP（本机未检出 ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN（env 或 ~/.claude/settings.json）），` +
+        '--replacements 未执行真实压缩证据验证。发布门禁必须以凭据环境运行；SKIP 不算 PASS（exit 2）。',
     );
     process.exit(2);
   }
+}
 
-  const args = process.argv.slice(2);
-  // --native 是触发开关（与 CLAUDE_LINK_RUN_NATIVE_E2E=1 等价，供 npm 脚本跨平台使用），不是 mode；
-  // mode 从其余 -- 参数取，避免 `--native --settings` 时把 --native 误判为 mode。
-  const mode = args.find((a) => a.startsWith('--') && a !== '--native') ?? '--settings';
-  try {
-    if (mode === '--settings') {
-      await runSettingsMode(exe);
-    } else if (mode === '--command') {
-      const prompts = args.filter((a) => a.startsWith('/'));
-      await runCommandMode(exe, prompts.length > 0 ? prompts : ['/init']);
-    } else if (mode === '--init-matrix') {
-      await runInitMatrixMode(exe);
-    } else {
-      console.error(`e2e 模式 "${mode}" 尚未实现（Task 6/7 追加）。`);
+// ── 入口 ───────────────────────────────────────────────────────────────────────────
+// isMainModule 守卫：仅当本脚本作为入口执行时才跑入口逻辑；被其它脚本（如 tdd）当作模块导入
+// resolveInitCredentials 等导出函数时不触发（否则入口的 process.exit 会终止导入方进程）。
+// tsconfig.scripts.json 编译为 CommonJS，故用 __filename（tsx CJS 提供）。
+const isMainModule =
+  process.argv[1] != null &&
+  path.resolve(process.argv[1]) === path.resolve(__filename);
+
+if (isMainModule) {
+  void (async () => {
+    if (!RUN_NATIVE) {
+      console.log('SKIP: Claude Code native E2E 未触发（--native 或 CLAUDE_LINK_RUN_NATIVE_E2E=1）。');
+      process.exit(0);
+    }
+    const exe = resolveClaudeExe();
+    if (!exe) {
+      console.error(
+        '前置条件缺失：未找到本地 Claude Code 可执行文件（claude.exe）。\n' +
+          '请先 npm install -g @anthropic-ai/claude-code，或设置 CLAUDE_LINK_CLAUDE_EXE。',
+      );
+      process.exit(2);
+    }
+
+    const args = process.argv.slice(2);
+    // --native 是触发开关（与 CLAUDE_LINK_RUN_NATIVE_E2E=1 等价，供 npm 脚本跨平台使用），不是 mode；
+    // mode 从其余 -- 参数取，避免 `--native --settings` 时把 --native 误判为 mode。
+    const mode = args.find((a) => a.startsWith('--') && a !== '--native') ?? '--settings';
+    try {
+      if (mode === '--settings') {
+        await runSettingsMode(exe);
+      } else if (mode === '--command') {
+        const prompts = args.filter((a) => a.startsWith('/'));
+        // review-v5 F1：--command 逐命令执行；不支持的命令参数必须明确报错，不得静默跳过。
+        const supportedCommands = ['/init', '/compact', '/usage', '/context', '/clear', '/config'];
+        const unsupported = prompts.filter((p) => !supportedCommands.includes(p));
+        if (unsupported.length > 0) {
+          console.error(
+            `e2e --command 不支持的命令参数：${unsupported.join(', ')}（支持：${supportedCommands.join(', ')}；无参数默认 /init）`,
+          );
+          process.exit(1);
+        }
+        await runCommandMode(exe, prompts.length > 0 ? prompts : ['/init']);
+      } else if (mode === '--init-matrix') {
+        await runInitMatrixMode(exe);
+      } else if (mode === '--replacements') {
+        await runReplacementsMode(exe);
+      } else {
+        console.error(`e2e 模式 "${mode}" 尚未实现（Task 6/7 追加）。`);
+        process.exit(1);
+      }
+      process.exit(0);
+    } catch (e) {
+      console.error(`e2e ${mode} 失败：`, (e as Error).message);
       process.exit(1);
     }
-    process.exit(0);
-  } catch (e) {
-    console.error(`e2e ${mode} 失败：`, (e as Error).message);
+  })().catch((e) => {
+    console.error('e2e fatal:', e);
     process.exit(1);
-  }
-})().catch((e) => {
-  console.error('e2e fatal:', e);
-  process.exit(1);
-});
+  });
+}

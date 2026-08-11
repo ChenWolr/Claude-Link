@@ -10,6 +10,8 @@ const chain = [
   'tsx scripts/claude-code-command-e2e-verify.ts --native --settings',
   'tsx scripts/claude-code-command-e2e-verify.ts --native --init-matrix',
   'tsx scripts/claude-code-command-e2e-verify.ts --native --command /init --command /compact',
+  // Task 6：候选平替等价性对照（任一字段 false → 保持 native-sdk，不合格则回退原生执行）。
+  'tsx scripts/claude-code-command-e2e-verify.ts --native --replacements',
   'tsx scripts/claude-code-command-matrix.ts --require-runtime-match',
 ];
 

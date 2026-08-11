@@ -6,6 +6,7 @@
 // 不 import Electron；失败 process.exit(1)。优先测纯函数行为；记录跨文件接线契约用源码文本断言。
 import { strict as assert } from 'node:assert';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -27,6 +28,10 @@ import { hasLocalCommandOutputMessage } from '../src/renderer/composables/use-ch
 import { mergeSpawnOptions } from '../src/main/modules/sdk-command-options';
 import { buildCommandOriginEvidence } from '../src/main/modules/sdk-command-origin';
 import type { Message, Session } from '../src/shared/types/session';
+// Task 6：候选平替等价性规格（矩阵 single source）。
+import { REPLACEMENT_CANDIDATES, failingFieldsOf, type ReplacementField } from './claude-code-command-matrix';
+// review-v3 F2：e2e 凭据解析（行为测试导入；e2e 入口已 isMainModule 守卫，导入不触发执行）。
+import { resolveInitCredentials } from './claude-code-command-e2e-verify';
 
 let pass = 0;
 let fail = 0;
@@ -1271,6 +1276,294 @@ void (async () => {
     const ifEnv = readFileSync(path.join('scripts', 'run-native-if-env.mjs'), 'utf8');
     assert.ok(ifEnv.includes('run-native-chain.mjs'), 'run-native-if-env.mjs 应委托 run-native-chain.mjs（单一命令源）');
     assert.ok(/CLAUDE_LINK_RUN_NATIVE_E2E !== '1'/.test(ifEnv), 'run-native-if-env.mjs 应在 env 未设时 exit 0');
+  });
+
+  // ── Task 6：候选平替等价性结构契约（Step 4 UI 不提前标注；Step 5 门禁接线）──
+  console.log('=== 23) Task 6：候选平替等价性结构契约（不合格则回退原生执行）===');
+  check('T6-1 矩阵 REPLACEMENT_CANDIDATES 文档化 5 候选、verdict 为 boolean|unverified、substitute 有实测 false', () => {
+    assert.equal(REPLACEMENT_CANDIDATES.length, 5, '应有 5 个候选平替（计划 Task 6 Step 1）');
+    for (const spec of REPLACEMENT_CANDIDATES) {
+      assert.equal(spec.expectedEquivalent, false, `${spec.command} 候选未证明等价，expectedEquivalent 必须 false`);
+      assert.ok(spec.equivalenceChecks.length > 0, `${spec.command} 缺 equivalenceChecks`);
+      assert.ok(spec.note.length > 0, `${spec.command} 缺判定说明 note`);
+      const fields = Object.keys(spec.verdict) as ReplacementField[];
+      assert.equal(fields.length, 5, `${spec.command} verdict 须覆盖全部 5 个等价字段`);
+      // review-v5 F4：布尔字段 = E2E 实测；'unverified' = 未证明，不得充当已验证的布尔值。
+      for (const f of fields) {
+        const v = spec.verdict[f];
+        assert.ok(v === true || v === false || v === 'unverified', `${spec.command}.${f} verdict 只能是 boolean 或 'unverified'，实际 ${v}`);
+      }
+      if (spec.kind === 'substitute') {
+        assert.ok(failingFieldsOf(spec).length > 0, `${spec.command} substitute 候选须至少一个实测 false 字段`);
+        assert.ok(fields.some((f) => typeof spec.verdict[f] === 'boolean'), `${spec.command} substitute 候选须有实测布尔字段（不能全 unverified）`);
+      }
+      if (spec.kind === 'native-execution') {
+        assert.ok(fields.every((f) => spec.verdict[f] === 'unverified'), `${spec.command} 为 native-execution，无平替等价验证，5 字段应全 unverified`);
+      }
+    }
+  });
+  check('T6-2 e2e-verify 已实现并接线 --replacements 模式（真实 SDK 证据断言规格）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    assert.ok(src.includes('async function runReplacementsMode'), '应定义 runReplacementsMode');
+    assert.ok(src.includes("mode === '--replacements'"), '入口应接线 --replacements 分支');
+    assert.ok(src.includes('REPLACEMENT_CANDIDATES'), '应导入矩阵 REPLACEMENT_CANDIDATES 规格（single source）');
+  });
+  check('T6-3 native 门禁链已纳入 --replacements（Task 6 Step 5 门禁）', () => {
+    const chain = readFileSync(path.join('scripts', 'run-native-chain.mjs'), 'utf8');
+    assert.ok(chain.includes('--native --replacements'), 'run-native-chain.mjs 应含 --replacements 门禁');
+  });
+  check('T6-4 候选命令以原生文本流向 SDK，不经本地拦截（无隐式命令翻译器）', () => {
+    const routing = readFileSync(path.join('src', 'shared', 'command-routing.ts'), 'utf8');
+    assert.ok(routing.includes('不充当发送白名单'), 'command-routing 声明不充当发送白名单');
+    const useChat = readFileSync(path.join('src', 'renderer', 'composables', 'use-chat.ts'), 'utf8');
+    // 4 个 substitute 候选不得在发送路径被拦截为本地操作（作为命令文本原样透传）。
+    for (const c of ['clear', 'context', 'usage', 'config']) {
+      assert.ok(!useChat.includes(`'/` + c + `'`), `use-chat 不得拦截 /${c} 为本地操作（保持原生发送）`);
+    }
+    // /compact 由 ChatPage.handleCompress 显式以原生命令文本发送（非本地模拟）。
+    const chatPage = readFileSync(path.join('src', 'renderer', 'pages', 'ChatPage.vue'), 'utf8');
+    assert.ok(chatPage.includes("'/compact'") && chatPage.includes('sendMessage('), '压缩入口以原生 /compact 文本发送');
+  });
+  check('T6-5 renderer 命令模型无提前等价标注（Step 4：不能把候选平替提前标为官方兼容）', () => {
+    // Task 6 无一候选证明等价 → 运行时模型不得承载 proven-equivalent/executionMode 标记（Task 8 才做完整 UI provenance 展示）。
+    const cmdType = readFileSync(path.join('src', 'shared', 'types', 'command.ts'), 'utf8');
+    assert.ok(!cmdType.includes('proven-equivalent'), 'command.ts 不得含 proven-equivalent 运行时标记');
+    assert.ok(!cmdType.includes('executionMode'), 'command.ts 不得含 executionMode 字段（矩阵规格不进入运行时模型）');
+    const chatInput = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'ChatInput.vue'), 'utf8');
+    assert.ok(!chatInput.includes('Claude Link 等价操作'), 'ChatInput 不得提前把候选平替标为等价操作');
+  });
+  check('T6-6 review-v1 F1：--replacements 无凭据时 SKIP 计入退出码（SKIP 不算 PASS，exit 2）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    // ① SKIP 是独立结果状态（不是只打印日志）：无凭据时 /compact 真实压缩证据计为 skipped。
+    assert.ok(/\bskipped\+\+/.test(src), 'runReplacementsMode 无凭据时须累计 skipped（SKIP 为独立状态）');
+    assert.ok(/let skipped = 0/.test(src), '须声明 skip 计数初始值');
+    // ② 汇总输出 skipped 计数，避免「0 failed」被误读为完整通过。
+    assert.ok(/\$\{skipped\} skipped/.test(src), '汇总须输出 skipped 计数');
+    // ③ native 触发下 skipped>0 → exit 2，且明示「SKIP 不算 PASS」（与 --init-matrix 同约定）。
+    assert.ok(/skipped > 0/.test(src), '须以 skipped>0 判定前置条件缺失');
+    assert.ok(/process\.exit\(2\)/.test(src), '前置条件缺失须 exit 2（发布门禁拒绝）');
+    assert.ok(/SKIP 不算 PASS/.test(src), '须明示 SKIP 不算 PASS');
+  });
+  check('T6-7 review-v2 F1：/compact 收紧为只认 compact_boundary/compact_result:success（不再用泛化 hasStatus）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    // 收紧：只接受 compact_boundary 或 compact_result:'success' 作为真实压缩成功证据。
+    assert.ok(/verifyCompactEvidence/.test(src), '应有 verifyCompactEvidence 共享 helper（--command/--replacements 复用）');
+    assert.ok(/compact_result === 'success'/.test(src), '须以 compact_result:\'success\' 作为成功证据');
+    assert.ok(/subtype === 'compact_boundary'/.test(src), '须保留 compact_boundary 作为成功证据');
+    // 禁止旧泛化断言：任意 system:status（含 status:'compacting'/requesting）不证明压缩成功。
+    assert.ok(!/hasBoundary \|\| hasLocalOutput \|\| hasStatus/.test(src), '不得保留 hasBoundary||hasLocalOutput||hasStatus 泛化断言（status 不证明压缩成功）');
+    // 多轮 warmup：单轮短 warmup 实测让 /compact 因 "Not enough messages" 返回 compact_result:'failed'。
+    assert.ok(/COMPACT_WARMUP_PROMPTS/.test(src), '须用 COMPACT_WARMUP_PROMPTS 多轮 warmup 堆积消息条数');
+    assert.ok(/compact_result === 'failed'/.test(src), "须检测 compact_result:'failed' 并明示上下文不足须加 warmup");
+  });
+  check('T6-8 review-v2 F2：混合 fail+skip 时 fail 优先 exit 1，但抛错前打印 skipped 及原因', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    // 稳定退出协议：fail>0 时 exit 1（实现回归优先），但须先打印 skipped 诊断，避免丢失前置条件缺失信号。
+    const summaryMatch = src.match(/\$\{pass\} passed, \$\{fail\} failed, \$\{skipped\} skipped[\s\S]*?process\.exit\(2\)/);
+    assert.ok(summaryMatch, '汇总应先打印 pass/fail/skipped，再处理退出码');
+    // fail 分支在 throw 前，须有 skipped>0 的诊断打印（混合结果不丢 SKIP 语义）。
+    assert.ok(/if \(fail > 0\) \{[\s\S]*?skipped > 0[\s\S]*?另有[\s\S]*?throw/.test(src), 'fail>0 时抛错前须打印 skipped 及原因（review-v2 F2）');
+    // skipped>0 && fail===0 → exit 2（前置条件缺失优先于「全过」假象）。
+    assert.ok(/if \(skipped > 0\) \{[\s\S]*?process\.exit\(2\)/.test(src), 'fail===0 且 skipped>0 须 exit 2');
+  });
+  check('T6-9 review-v3 F1：--command 无凭据时 SKIP 计入退出码（runCommandMode 与 --replacements 同约定）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    const cmdStart = src.indexOf('async function runCommandMode');
+    const cmdEnd = src.indexOf('async function runSettingsMode');
+    assert.ok(cmdStart >= 0 && cmdEnd > cmdStart, '应能定位 runCommandMode 源码段');
+    const cmdSection = src.slice(cmdStart, cmdEnd);
+    // 独立 skipped 计数。
+    assert.ok(/let skipped = 0/.test(cmdSection), 'runCommandMode 须声明 skipped 计数');
+    // 4 个凭据缺失 SKIP 点（/init、/compact、普通文本、取消/plan）均累计 skipped。
+    const skipIncrements = (cmdSection.match(/\bskipped\+\+/g) || []).length;
+    assert.ok(skipIncrements >= 4, `runCommandMode 须在 >=4 个无凭据 SKIP 点累计 skipped（实际 ${skipIncrements}）`);
+    // 汇总输出 skipped + exit 2。
+    assert.ok(/\$\{skipped\} skipped/.test(cmdSection), 'runCommandMode 汇总须输出 skipped 计数');
+    assert.ok(/skipped > 0[\s\S]*?process\.exit\(2\)/.test(cmdSection), 'runCommandMode 须 skipped>0 时 exit 2（SKIP 不算 PASS）');
+  });
+  await asyncCheck('T6-10 review-v3 F2：HOME 与 USERPROFILE 分离时凭据解析检查多候选目录', async () => {
+    // F2 为 Windows/Git Bash 专属问题（Claude Code Windows 用户配置在 USERPROFILE）。
+    if (process.platform !== 'win32') {
+      console.log('  ℹ 非.Windows 平台不检查 USERPROFILE，T6-10 自动通过（F2 为 Windows 专属）');
+      return;
+    }
+    // fixture：HOME 指向空目录、USERPROFILE 指向含 settings.json 的目录。
+    // 旧逻辑 `HOME || USERPROFILE` 只看 HOME（空）→ 返回 null；新逻辑按平台检查多候选 → 解析出凭据。
+    const tmpRoot = mkdtempSync(path.join(os.tmpdir(), 'tdd-creds-'));
+    const emptyHome = path.join(tmpRoot, 'empty-home');
+    mkdirSync(emptyHome, { recursive: true });
+    const profileHome = path.join(tmpRoot, 'profile-home');
+    mkdirSync(path.join(profileHome, '.claude'), { recursive: true });
+    writeFileSync(
+      path.join(profileHome, '.claude', 'settings.json'),
+      JSON.stringify({ env: { ANTHROPIC_API_KEY: 'test-key-via-userprofile' } }),
+      'utf8',
+    );
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    const prevKey = process.env.ANTHROPIC_API_KEY;
+    const prevToken = process.env.ANTHROPIC_AUTH_TOKEN;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    process.env.HOME = emptyHome;
+    process.env.USERPROFILE = profileHome;
+    try {
+      // review-v4 F3：resolveInitCredentials 已改为 async + 接收 cwd（null = 只看 user/env 层）。
+      const creds = await resolveInitCredentials(null);
+      assert.ok(creds, 'HOME 空但 USERPROFILE 有 settings.json 时应解析出凭据（不得只看 HOME 返回 null）');
+      assert.equal(creds!.env.ANTHROPIC_API_KEY, 'test-key-via-userprofile', '应来自 USERPROFILE 下的 settings.json');
+    } finally {
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+      if (prevToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN; else process.env.ANTHROPIC_AUTH_TOKEN = prevToken;
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+      if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+  check('T6-11 review-v4 F1：--command 协议场景按 hasModelCommand 门控（本地命令请求不被模型场景阻断）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    const cmdStart = src.indexOf('async function runCommandMode');
+    const cmdEnd = src.indexOf('async function runSettingsMode');
+    assert.ok(cmdStart >= 0 && cmdEnd > cmdStart, '应能定位 runCommandMode 源码段');
+    const cmdSection = src.slice(cmdStart, cmdEnd);
+    assert.ok(
+      /hasModelCommand = prompts\.includes\('\/init'\) \|\| prompts\.includes\('\/compact'\)/.test(cmdSection),
+      '应有 hasModelCommand（本次是否请求了需要模型的命令）',
+    );
+    assert.ok(/if \(hasModelCommand\) \{[\s\S]*?SKIP 普通文本验证/.test(cmdSection), '普通文本协议场景应受 hasModelCommand 门控');
+    assert.ok(/if \(hasModelCommand\) \{[\s\S]*?SKIP 用户取消/.test(cmdSection), '取消/plan/deny 协议场景应受 hasModelCommand 门控');
+    // 本地命令请求（如 --command /usage，hasModelCommand=false）不进入协议场景 → 不计 skip、不 exit 2。
+    // executable/cwd 启动失败检查与模型无关，保持总运行（unconditional await check；不受 creds/hasModelCommand 门控，
+    // 由 T6-9 的 skipped 计数与 `--command /usage` 无凭据 exit 0 行为共同保证，见 review-v4 F1 行为验证）。
+    assert.ok(cmdSection.includes("await check('executable 缺失"), 'executable 启动检查应存在（总运行）');
+    assert.ok(cmdSection.includes("await check('cwd 不存在"), 'cwd 启动检查应存在（总运行）');
+  });
+  await asyncCheck('T6-12 review-v4 F2：API Key 与 Auth Token 同时存在时只选一种（key 优先），child env 不含另一种', async () => {
+    const tmpRoot = mkdtempSync(path.join(os.tmpdir(), 'tdd-creds-f2-'));
+    const home = path.join(tmpRoot, 'home');
+    mkdirSync(path.join(home, '.claude'), { recursive: true });
+    // user settings 提供 Auth Token，process.env 提供 API Key → 优先级 key 胜，token 被删。
+    writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'token-from-settings' } }),
+      'utf8',
+    );
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    const prevKey = process.env.ANTHROPIC_API_KEY;
+    const prevToken = process.env.ANTHROPIC_AUTH_TOKEN;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    try {
+      // Case 1：env 有 API Key + user settings 有 Auth Token → 选 key，child env 删 token。
+      process.env.ANTHROPIC_API_KEY = 'key-from-env';
+      delete process.env.ANTHROPIC_AUTH_TOKEN;
+      const creds1 = await resolveInitCredentials(null);
+      assert.ok(creds1, '应解析出凭据');
+      assert.equal(creds1!.env.ANTHROPIC_API_KEY, 'key-from-env', 'API Key 应优先（> Auth Token）');
+      assert.ok(!('ANTHROPIC_AUTH_TOKEN' in creds1!.env), 'child env 不得同时含 Auth Token（避免 SDK 双重认证）');
+      // Case 2：仅 Auth Token 可用（env 无 key、user settings 有 token）→ 用 token，child env 删 key。
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.ANTHROPIC_AUTH_TOKEN;
+      const creds2 = await resolveInitCredentials(null);
+      assert.ok(creds2, '应解析出凭据（token 来源）');
+      assert.equal(creds2!.env.ANTHROPIC_AUTH_TOKEN, 'token-from-settings', 'user settings 层提供 token（> env 无 token）');
+      assert.ok(!('ANTHROPIC_API_KEY' in creds2!.env), '选 token 时 child env 不得含 API Key');
+    } finally {
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+      if (prevToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN; else process.env.ANTHROPIC_AUTH_TOKEN = prevToken;
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+      if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+  await asyncCheck('T6-13 review-v4 F3：凭据解析读取 project/local settings 的 env（与生产一致）', async () => {
+    // fixture：local settings 提供凭据（user 空、env 无）→ 旧逻辑只看 user 目录返回 null；新逻辑应解析出。
+    const tmpRoot = mkdtempSync(path.join(os.tmpdir(), 'tdd-creds-f3-'));
+    const userHome = path.join(tmpRoot, 'user');
+    mkdirSync(path.join(userHome, '.claude'), { recursive: true });
+    const cwd = path.join(tmpRoot, 'project');
+    mkdirSync(path.join(cwd, '.claude'), { recursive: true });
+    writeFileSync(
+      path.join(cwd, '.claude', 'settings.local.json'),
+      JSON.stringify({ env: { ANTHROPIC_API_KEY: 'key-via-local' } }),
+      'utf8',
+    );
+    const prevHome = process.env.HOME;
+    const prevProfile = process.env.USERPROFILE;
+    const prevKey = process.env.ANTHROPIC_API_KEY;
+    const prevToken = process.env.ANTHROPIC_AUTH_TOKEN;
+    process.env.HOME = userHome;
+    process.env.USERPROFILE = userHome;
+    delete process.env.ANTHROPIC_API_KEY;
+    delete process.env.ANTHROPIC_AUTH_TOKEN;
+    try {
+      const creds = await resolveInitCredentials(cwd);
+      assert.ok(creds, 'local settings 提供凭据时应解析出（不得只看 user 目录返回 null，review-v4 F3）');
+      assert.equal(creds!.env.ANTHROPIC_API_KEY, 'key-via-local', '应来自 cwd/.claude/settings.local.json');
+      assert.ok(creds!.source.includes('local-settings'), `source 应标注 local-settings，实际 ${creds!.source}`);
+    } finally {
+      if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY; else process.env.ANTHROPIC_API_KEY = prevKey;
+      if (prevToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN; else process.env.ANTHROPIC_AUTH_TOKEN = prevToken;
+      if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
+      if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile;
+      rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  });
+  check('T6-14 review-v4 F4：compact warmup 每轮断言成功终态与会话连续性', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    const helperStart = src.indexOf('async function verifyCompactEvidence');
+    const helperEnd = src.indexOf('async function runCommandMode');
+    assert.ok(helperStart >= 0 && helperEnd > helperStart, '应能定位 verifyCompactEvidence 源码段');
+    const helper = src.slice(helperStart, helperEnd);
+    assert.ok(/warmup 第 \$\{i \+ 1\} 轮须有 result 终态/.test(helper), '每轮 warmup 须断言 result 终态（review-v4 F4）');
+    assert.ok(/warmup 第 \$\{i \+ 1\} 轮不得 is_error/.test(helper), '每轮 warmup 须断言 is_error=false（上下文连续）');
+    assert.ok(/warmup 第 \$\{i \+ 1\} 轮须返回 system\.init\.session_id/.test(helper), '每轮 warmup 须断言 init.session_id 存在');
+  });
+  check('T6-15 review-v4 F5 / review-v5 F4：observedFields 与 verdict 逐字段绑定（布尔字段须观察一致，unverified 须未观察）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    const modeStart = src.indexOf('async function runReplacementsMode');
+    const modeEnd = src.indexOf('// ── 入口 ──');
+    assert.ok(modeStart >= 0 && modeEnd > modeStart, '应能定位 runReplacementsMode 源码段');
+    const modeSection = src.slice(modeStart, modeEnd);
+    assert.ok(/const observedFields/.test(modeSection), 'runReplacementsMode 应有 observedFields 记录器');
+    assert.ok(/recordObserved\(/.test(modeSection), '各候选 check 应 recordObserved 运行时观察');
+    // 布尔字段（实测）必须被观察且逐字段一致；unverified 字段必须未被观察。
+    assert.ok(/运行时观察=\$\{obs\[f\]\}[\s\S]*?与矩阵 verdict/.test(modeSection), '应逐字段比对 observed 与 verdict（review-v4 F5）');
+    assert.ok(/矩阵标 unverified 但 E2E 观察到了/.test(modeSection), 'unverified 字段若被 E2E 观察须失败（review-v5 F4）');
+    assert.ok(/矩阵声称 \$\{v\}（实测）但 E2E 未观察/.test(modeSection), '布尔字段若 E2E 未观察须失败（不得把未观察写成实测）');
+    assert.ok(/substitute 候选须至少一个被 E2E 实测的 false 字段/.test(modeSection), 'substitute 须有实测 false 字段（unverified 不能当不合格证据）');
+  });
+  check('T6-16 review-v5 F1：--command 逐命令执行（/usage /context /clear /config 有真实成功断言，入口拒绝不支持命令）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    const cmdStart = src.indexOf('async function runCommandMode');
+    const cmdEnd = src.indexOf('async function runSettingsMode');
+    assert.ok(cmdStart >= 0 && cmdEnd > cmdStart, '应能定位 runCommandMode 源码段');
+    const cmdSection = src.slice(cmdStart, cmdEnd);
+    for (const cmd of ['/usage', '/context', '/clear', '/config']) {
+      assert.ok(cmdSection.includes(`prompts.includes('${cmd}')`), `--command 应支持 ${cmd} 并逐命令执行`);
+    }
+    assert.ok(/verifyUsageCommand|verifyContextCommand|verifyClearCommand|verifyConfigCommand/.test(src), '应有本地命令验证 helper（review-v5 F1 成功证据）');
+    // 入口拒绝不支持的命令参数（不得静默跳过）。
+    const entrySection = src.slice(src.indexOf('// ── 入口 ──'));
+    assert.ok(/不支持的命令参数/.test(entrySection), '入口应对不支持的 --command 参数明确报错');
+  });
+  check('T6-17 review-v5 F2：凭据按真实 query cwd 解析（runCommandMode 按场景、replacements 用 projectCwd、init-matrix 用 fixture cwd）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    const cmdSection = src.slice(src.indexOf('async function runCommandMode'), src.indexOf('async function runSettingsMode'));
+    assert.ok(/const initCreds = await resolveInitCredentials\(initCwd\)/.test(cmdSection), '/init 凭据应按 initCwd 解析');
+    assert.ok(/const compactCreds = await resolveInitCredentials\(compactCwd\)/.test(cmdSection), '/compact 凭据应按 compactCwd 解析');
+    assert.ok(/const protocolCreds = await resolveInitCredentials\(root\)/.test(cmdSection), '协议场景凭据用 root（其 cwd 均为空目录）');
+    const replSection = src.slice(src.indexOf('async function runReplacementsMode'), src.indexOf('// ── 入口 ──'));
+    assert.ok(/resolveInitCredentials\(projectCwd\)/.test(replSection), 'replacements 凭据应按 projectCwd 解析');
+    const initMatrixSection = src.slice(src.indexOf('async function runInitMatrixMode'), src.indexOf('async function runReplacementsMode'));
+    assert.ok(/resolveInitCredentials\(credsCwd\)/.test(initMatrixSection), 'init-matrix 凭据应按代表 query cwd 的 fixture 解析');
+  });
+  check('T6-18 review-v5 F3：compact warmup resume 后 session_id 必须保持（同一 CLI 会话）', () => {
+    const src = readFileSync(path.join('scripts', 'claude-code-command-e2e-verify.ts'), 'utf8');
+    const helper = src.slice(src.indexOf('async function verifyCompactEvidence'), src.indexOf('async function runCommandMode'));
+    assert.ok(/resume 后 session_id 应保持 \$\{cliSid\}/.test(helper), '每轮 warmup resume 后须断言 session_id 保持等于上一轮 sid（review-v5 F3）');
+    assert.ok(/resume 未保持会话/.test(helper), 'resume 失效/自动新建会话须明确失败');
   });
 
   // ── 汇总 ──
