@@ -132,6 +132,19 @@ SDK canUseTool / onUserDialog / onElicitation
 - **新增功能必须在 selftest 补契约断言**（按节追加，如 `=== 30) ... ===`）。`scripts/` 里的 `tdd-*-verify.ts` / `export-image-*-verify.ts` 同此风格；只有进入 `package.json` `selftest` 的 `&&` 链才算门禁，其余可单跑。
 - 新脚本约定：纯 `node:assert`/自定义 `check()` 计数、不 import Electron、失败 `process.exit(1)`、优先测纯函数行为而非脆弱的源码文本匹配（除非在记录接线契约）。
 
+## 命令对齐已验证真实行为（Task 5–9 证据，脱敏）
+
+> 只记录经真实门禁验证的事实，不含 API key/token/完整 env。命令对齐不以此节为准——以 `scripts/` 的
+> 实时门禁为权威；本节是「到某时间点已验证」的快照，命令集随 Claude Code 版本漂移时须重跑门禁刷新。
+
+- **环境（最近一次完整 native 门禁链，selftest:native exit 0）**：Claude Code `2.1.227` / Agent SDK `0.3.191`；
+  运行时 **80 命令**（20 builtin + 57 user-skill + 2 internal + 1 removed）；`settings.sources = user|project|local`（Task 3 恢复原生级联，不再 `settingSources: []`）。
+- **`/init`（Task 5）**：真实创建/更新 `CLAUDE.md`（10 场景矩阵，含空目录/已有文件/用户级·项目级 CLAUDE.md 进上下文/local settings/executable 缺失/用户取消/流末无 result 合成 aborted）；空目录不落盘时 UI 须显「未执行文件写入」不假成功。
+- **候选平替（Task 6）**：`/clear`↔新建对话、`/context`↔上下文 UI、`/usage`↔费用 UI、`/config`↔配置页 **逐项不等价 → 全部保持 `native-sdk`**；`/compact` 入口即原生执行。`/compact` 上下文统计变化用 `/context` 前后对比实证（如 4%→3%，SDK `result.usage` 因 cache_read 计入压缩前历史而无效，禁用）。
+- **全量命令行为矩阵（Task 7）**：`--all` 20 场景 + `--require-no-unverified-command` 17 断言，80 runtime 命令 **零 unverified**（14 verified + 6 交叉引用 + 54 discovery + 3 execution + 3 hidden + 1 explicit-skip）；`insights` 在空 cwd+plan 模式不响应 → explicit-skip（需丰富会话上下文）；8 个 skill 运行时描述空是上游枚举行为（dir name≠frontmatter name），非对齐缺陷。
+- **跨进程 provenance（Task 8）**：命令菜单按来源区分（Claude Code 内置/用户 Skill/项目/插件）；unknown 作为可见差异状态计数展示，不被当 builtin 完成；provenance 诊断是 transient 状态，不经 renderer 聊天流二次落库。
+- **未覆盖边界（诚实记录）**：只读目录场景因 Windows 管理员特权绕过 DACL 无法可靠构造，记 SKIP，须在受限账户/非管理员环境补测；真实 Electron 窗口用户路径（`/init` 落盘可见、命令结果/历史一致）见 `docs/superpowers/plans/task9-electron-checklist.md`，须手动核验。
+
 ## Git 提交规范
 
 - **所有提交主题和正文使用中文**（运行环境强制追加的固定署名行除外）。
