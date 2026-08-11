@@ -89,6 +89,8 @@ export interface ClaudeLinkAPI {
   removeCommandListener: () => void;
   // Task 3 Step 5：原生 settings 诊断摘要（脱敏，只回来源/CLAUDE.md 候选/生效键名）。
   getNativeSettingsDiagnostic: (cwd: string) => Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>;
+  // Task 8：命令来源 provenance 诊断（origin/availability 计数 + unknown/hidden 命令名，脱敏派生视图）。
+  getCommandDiagnostics: (sessionId: string) => Promise<import('../shared/types/ipc').CommandProvenance>;
 }
 
 export function createApi(): ClaudeLinkAPI {
@@ -200,6 +202,8 @@ export function createApi(): ClaudeLinkAPI {
     removeCommandListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.COMMANDS_CHANGED),
     getNativeSettingsDiagnostic: (cwd) =>
       ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, cwd) as Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>,
+    getCommandDiagnostics: (sessionId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, sessionId) as Promise<import('../shared/types/ipc').CommandProvenance>,
   };
 }
 

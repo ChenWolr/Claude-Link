@@ -45,6 +45,22 @@ const matchingCommands = computed<SdkCommand[]>(() => {
     : cmds;
 });
 
+// Task 8：命令来源徽章文案——区分 builtin / 用户 Skill / 项目 / 插件，不让「source=sdk」被误读为官方 builtin。
+// unknown 不出现在菜单（availability=unknown 被 filterRenderableCommands 过滤），其计数由 unknownCount 单独展示。
+const ORIGIN_LABELS: Record<string, string> = {
+  builtin: 'Claude Code 内置',
+  'user-skill': '用户 Skill',
+  project: '项目命令',
+  plugin: '插件命令',
+};
+function originLabel(origin: string): string {
+  return ORIGIN_LABELS[origin] ?? '';
+}
+// 来源未知/隐藏命令计数（从完整 props.commands 派生，不经菜单过滤）——让 unknown 作为可见差异状态
+// （计划：unknown 不得当 builtin 完成）。hidden 是 removed/internal，菜单不展示但计数可见。
+const unknownCount = computed(() => (props.commands ?? []).filter((c) => c.origin === 'unknown').length);
+const hiddenCount = computed(() => (props.commands ?? []).filter((c) => c.availability === 'hidden').length);
+
 const visibleCommands = computed(() => matchingCommands.value.slice(0, loadedCommandCount.value));
 const hasMoreCommands = computed(() => loadedCommandCount.value < matchingCommands.value.length);
 
@@ -230,6 +246,11 @@ onUnmounted(() => {
         @mouseenter="hoverCommand(i)"
       >
         <span class="slash-menu__name">/{{ cmd.name }}</span>
+        <span
+          v-if="originLabel(cmd.origin)"
+          class="slash-menu__origin"
+          :data-origin="cmd.origin"
+        >{{ originLabel(cmd.origin) }}</span>
       </div>
       <div v-if="matchingCommands.length === 0" class="slash-menu__status">
         <span v-if="commandStatus === 'loading'">正在读取 Claude Code 命令…</span>
@@ -237,6 +258,11 @@ onUnmounted(() => {
         <span v-else>当前会话没有可用 Slash Command（仍可直接输入发送）</span>
       </div>
       <div v-else-if="commandStatus === 'stale'" class="slash-menu__hint">可能不是最新</div>
+      <div v-if="unknownCount > 0 || hiddenCount > 0" class="slash-menu__provenance">
+        <span v-if="unknownCount > 0">{{ unknownCount }} 个命令来源未知（待分类，不可执行）</span>
+        <span v-if="unknownCount > 0 && hiddenCount > 0">·</span>
+        <span v-if="hiddenCount > 0">{{ hiddenCount }} 个隐藏命令（已移除/内部）</span>
+      </div>
     </div>
     <div class="chat-input">
       <textarea
@@ -297,6 +323,22 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
+/* Task 8：来源徽章——区分 builtin / 用户 Skill / 项目 / 插件，不让 source=sdk 被误读为官方 builtin。 */
+.slash-menu__origin {
+  margin-left: auto;
+  padding-left: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 400;
+  white-space: nowrap;
+}
+.slash-menu__origin[data-origin='builtin'] {
+  color: var(--color-accent-strong);
+}
+.slash-menu__origin[data-origin='user-skill'] {
+  color: var(--color-text-muted);
+}
+
 .slash-menu__status {
   padding: 0.5rem 0.875rem;
   color: var(--color-text-muted);
@@ -308,6 +350,16 @@ onUnmounted(() => {
   color: var(--color-text-muted);
   font-size: 0.6875rem;
   border-top: 1px solid var(--color-border);
+}
+
+/* Task 8：来源未知/隐藏命令计数（unknown 作为可见差异状态，不被当 builtin 完成）。 */
+.slash-menu__provenance {
+  padding: 0.25rem 0.875rem;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  gap: 0.25rem;
 }
 
 .chat-input {

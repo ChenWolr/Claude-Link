@@ -12,6 +12,7 @@ import type {
   CommandAvailability,
   CommandOrigin,
   CommandOriginContext,
+  CommandProvenance,
   CommandSnapshotSource,
   CommandSnapshotStatus,
   SdkCommand,
@@ -285,7 +286,51 @@ export class SdkCommandRegistry {
   clearGlobalFallback(): void {
     this.globalFallback = null;
   }
+
+  /**
+   * 命令来源诊断（Task 8）：从已清洗快照派生 provenance 摘要——聚合计数 + unknown/hidden 命令名。
+   * 只读、无副作用，不触发 probe。优先用 per-session 快照；无则用全局兜底；都没有返回 total=0 的空诊断。
+   */
+  getCommandProvenance(sessionId: string): CommandProvenance {
+    const snapshot = this.snapshots.get(sessionId) ?? this.globalFallback;
+    const commands = snapshot?.commands ?? [];
+    const byOrigin: Record<CommandOrigin, number> = {
+      builtin: 0,
+      'user-skill': 0,
+      project: 0,
+      plugin: 0,
+      internal: 0,
+      removed: 0,
+      unknown: 0,
+    };
+    const byAvailability = { available: 0, hidden: 0, unknown: 0 };
+    const unknownNames: string[] = [];
+    const hiddenNames: string[] = [];
+    for (const c of commands) {
+      byOrigin[c.origin] += 1;
+      byAvailability[c.availability] += 1;
+      if (c.origin === 'unknown') unknownNames.push(c.name);
+      if (c.availability === 'hidden') hiddenNames.push(c.name);
+    }
+    return {
+      sessionId,
+      total: commands.length,
+      byOrigin,
+      byAvailability,
+      unknownNames,
+      hiddenNames,
+      generatedAt: new Date().toISOString(),
+    };
+  }
 }
 
 /** 进程单例：sdk-backend（发现/清理）与 ipc-handlers（读取/推送）共用同一份运行时快照。 */
 export const sdkCommandRegistry = new SdkCommandRegistry();
+
+/**
+ * 命令来源诊断顶层导出（Task 8）：供 ipc-handlers 经 chat-backend 聚合出口暴露给 renderer。
+ * 与 getNativeSettingsDiagnostic 的导出形态对称（顶层函数包装进程单例方法）。
+ */
+export function getCommandProvenance(sessionId: string): CommandProvenance {
+  return sdkCommandRegistry.getCommandProvenance(sessionId);
+}

@@ -8,6 +8,7 @@ export type {
   SdkCommand,
   CommandSnapshotStatus,
   CommandSnapshotSource,
+  CommandProvenance,
 } from './command';
 
 export const IPC_CHANNELS = {
@@ -91,6 +92,9 @@ export const IPC_CHANNELS = {
   // 独立于 CHAT_EVENT——命令能力是 transient 状态，不被当成聊天消息持久化。
   COMMANDS_GET: 'commands:get',
   COMMANDS_CHANGED: 'commands:changed',
+  // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
+  // unknown/hidden 命令名，不含 Query 句柄或原始数据）。只读、无副作用，不触发 probe。
+  COMMANDS_GET_DIAGNOSTIC: 'commands:getDiagnostic',
 } as const;
 
 export const DEFAULT_TASK_DELAY_SECONDS = 60;

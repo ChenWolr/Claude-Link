@@ -20,7 +20,7 @@ import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
 import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic } from './modules/chat-backend';
-import { sdkCommandRegistry } from './modules/sdk-command-registry';
+import { sdkCommandRegistry, getCommandProvenance } from './modules/sdk-command-registry';
 import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
 import {
   startQueue,
@@ -241,6 +241,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     const fallback = sdkCommandRegistry.getGlobalFallback();
     if (fallback) return { ...fallback, sessionId, source: 'cache' as const };
     return sdkCommandRegistry.get(sessionId);
+  });
+  // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
+  // unknown/hidden 命令名）。只读、无副作用——不 markSessionActive、不触发 probe（区别于 COMMANDS_GET）。
+  // sessionId 做非空校验；DB 会话存在性不强制（诊断对无快照会话也返回 total=0 空诊断，不抛错）。
+  ipcMain.handle(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, async (_event, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
+    return getCommandProvenance(sessionId);
   });
 
   // Chat

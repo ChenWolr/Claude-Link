@@ -99,3 +99,24 @@ export function createDefaultCommandSnapshot(sessionId: string): SessionCommandS
     updatedAt: null,
   };
 }
+
+/**
+ * 命令来源诊断摘要（Task 8）：某会话命令列表的 provenance 脱敏视图，供 renderer 展示来源徽章。
+ * 从已清洗的 SessionCommandSnapshot 派生（聚合计数 + unknown/hidden 命令名），只读、无副作用、
+ * 不触发 probe；绝不回传 SDK Query 句柄或未经清洗的原始数据。origin=unknown 命令名显式列出，
+ * 让「来源未知」作为可见差异状态（计划：unknown 不得当作 builtin 完成）。
+ */
+export interface CommandProvenance {
+  sessionId: string;
+  /** 命令总数（已清洗去重）。 */
+  total: number;
+  /** 按 origin 分桶计数。 */
+  byOrigin: Record<CommandOrigin, number>;
+  /** 按 availability 分桶计数。 */
+  byAvailability: { available: number; hidden: number; unknown: number };
+  /** 来源未知命令名（origin=unknown，显式差异，需后续分类任务）。 */
+  unknownNames: string[];
+  /** 隐藏命令名（removed/internal，菜单不展示但保留诊断可见性）。 */
+  hiddenNames: string[];
+  generatedAt: string;
+}
