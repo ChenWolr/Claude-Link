@@ -143,7 +143,8 @@ SDK canUseTool / onUserDialog / onElicitation
 - **候选平替（Task 6）**：`/clear`↔新建对话、`/context`↔上下文 UI、`/usage`↔费用 UI、`/config`↔配置页 **逐项不等价 → 全部保持 `native-sdk`**；`/compact` 入口即原生执行。`/compact` 上下文统计变化用 `/context` 前后对比实证（如 4%→3%，SDK `result.usage` 因 cache_read 计入压缩前历史而无效，禁用）。
 - **全量命令行为矩阵（Task 7）**：`--all` 20 场景 + `--require-no-unverified-command` 17 断言，80 runtime 命令 **零 unverified**（14 verified + 6 交叉引用 + 54 discovery + 3 execution + 3 hidden + 1 explicit-skip）；`insights` 在空 cwd+plan 模式不响应 → explicit-skip（需丰富会话上下文）；8 个 skill 运行时描述空是上游枚举行为（dir name≠frontmatter name），非对齐缺陷。
 - **跨进程 provenance（Task 8）**：命令菜单按来源区分（Claude Code 内置/用户 Skill/项目/插件）；unknown 作为可见差异状态计数展示，不被当 builtin 完成；provenance 诊断是 transient 状态，不经 renderer 聊天流二次落库。
-- **未覆盖边界（诚实记录）**：只读目录场景因 Windows 管理员特权绕过 DACL 无法可靠构造，记 SKIP，须在受限账户/非管理员环境补测；真实 Electron 窗口用户路径（`/init` 落盘可见、命令结果/历史一致）见 `docs/superpowers/plans/task9-electron-checklist.md`，须手动核验。
+- **未覆盖边界（诚实记录）**：只读目录场景因 Windows 管理员特权绕过 DACL 无法可靠构造，记 SKIP，须在受限账户/非管理员环境补测。
+- **真实 Electron 窗口核验（Task 9 Step 3，经 CDP 驱动真实运行窗口）**：app 启动含 Task 8 改动无崩溃；`window.claudeLink` preload 桥真实在位且 `getCommandDiagnostics` 已上线；命令菜单来源徽章真实渲染（`/init`→「Claude Code 内置」、user-skill→「用户 Skill」）+ provenance 行「7 个命令来源未知 · 3 个隐藏命令」；`/context` `/usage` 本地命令在真实窗口内执行并渲染结果。**`/init` 落盘在真实窗口内被模型网关 502（`gpt-5.6-sol` upstream 不可用）阻断**——`/init` 代码路径已由 native E2E init-matrix（10 场景 + 真实 CLAUDE.md 创建）覆盖；`/clear` `/config` 本地但具破坏性/侵入性，未在用户真实会话上执行。完整交互清单见 `docs/superpowers/plans/task9-electron-checklist.md`，网关恢复后可由用户在真实窗口补 `/init`/`/compact`/`/clear` 落盘核验。
 
 ## Git 提交规范
 
