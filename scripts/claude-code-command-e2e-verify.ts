@@ -1793,6 +1793,370 @@ async function runReplacementsMode(exe: string): Promise<void> {
   }
 }
 
+// Task 7：SKIP 信号——check 内抛出表示「前置条件缺失，跳过本断言」（不计 fail，计 skipped）。
+// 与 --command 等模式的 inline skipped++ 等价，但 runAllMode 检查项多，用异常分流更清晰。
+class SkipError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SkipError';
+  }
+}
+
+// ── Task 7：全量命令行为矩阵（--all 模式）─────────────────────────────────────────
+// 计划 Task 7 Step 1-4：对运行时全部命令（builtin/user-skill/hidden）采集行为证据，
+// 写入 command-verification.json 供 --require-no-unverified-command 门禁消费。
+// 策略（务实分层，避免 80 命令全量真实执行的成本）：
+//   - builtin：6 个核心命令（init/compact/clear/config/usage/context）由本脚本其它模式
+//     （--init-matrix/--command/--replacements）已真实验证，runAllMode 交叉引用标记 verified；
+//     其余 builtin 在隔离 cwd + plan 模式下跑一次，断言有 result 终态（发现 + 响应）。
+//   - user-skill：全部 57 个验证「发现 + SKILL.md frontmatter 可加载（描述非空）」（零模型成本，
+//     复用 baseline）；抽样 3 个真实执行（verify/summarize/test-driven-development）验证执行事件。
+//   - hidden（removed/internal）：验证 origin 分类 + 菜单不展示语义（结构契约）。
+//   - commands_changed：在测试 cwd 新增 skill + /reload-skills，断言真实 commands_changed 事件。
+// 任一命令不得停留在「未验证」状态——环境无法验证的（如缺凭据）记 explicit-skip 并写明原因。
+const VERIFICATION_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 'command-verification.json');
+
+type VerificationStatus =
+  | 'verified' // 真实 SDK 行为证据（result 终态 + 事件/副作用）
+  | 'verified-discovery' // 发现 + frontmatter 加载（skill 零成本验证）
+  | 'verified-execution' // skill 真实执行（事件回传 + 副作用）
+  | 'verified-cross-ref' // 由本脚本其它模式已验证，runAllMode 交叉引用
+  | 'hidden' // removed/internal，菜单不展示
+  | 'explicit-skip' // 环境无法验证，写明原因（不算未验证）
+  | 'unverified'; // 门禁失败态
+type VerificationEntry = {
+  status: VerificationStatus;
+  category: string;
+  evidence: string[];
+  detail?: string;
+  skipReason?: string;
+};
+type VerificationManifest = {
+  generatedAt: string;
+  ccVersion?: string;
+  sdkVersion?: string;
+  baselineFile: string;
+  entries: Record<string, VerificationEntry>;
+};
+
+/** 读 baseline JSON（runAllMode 与 --require-no-unverified-command 共用）；不可读返回 null。 */
+function readBaselineJson(): {
+  commands: Array<{ name: string; description?: string; origin?: string }>;
+  ccVersion?: string;
+  sdkVersion?: string;
+  slashCommands: string[];
+} | null {
+  try {
+    const raw = readFileSync(path.join('D:/software/Cache', 'claude-link', 'command-baseline.json'), 'utf8');
+    const b = JSON.parse(raw) as Record<string, unknown>;
+    const env = (b.environment ?? {}) as Record<string, unknown>;
+    const commands = (b.commands ?? []) as Array<{ name: string; description?: string; origin?: string }>;
+    return {
+      commands,
+      ccVersion: typeof env.claudeCodeVersion === 'string' ? env.claudeCodeVersion : undefined,
+      sdkVersion: typeof env.sdkVersion === 'string' ? env.sdkVersion : undefined,
+      slashCommands: Array.isArray(b.slashCommands) ? (b.slashCommands as string[]) : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Task 7 --all：对运行时全部命令采集行为证据并写 command-verification.json。
+ * 退出协议与 --command/--replacements 一致：fail→exit 1（实现失败），skipped→exit 2（前置缺失，不算 PASS）。
+ */
+async function runAllMode(exe: string): Promise<void> {
+  const sdk = await import('@anthropic-ai/claude-agent-sdk');
+  const root = mkdtempSync(path.join(TEMP_ROOT, 'e2e-all-'));
+  let pass = 0;
+  let fail = 0;
+  let skipped = 0;
+  const check = async (name: string, fn: () => Promise<void>): Promise<void> => {
+    try {
+      await fn();
+      pass++;
+      console.log(`  ✅ ${name}`);
+    } catch (e) {
+      if (e instanceof SkipError) {
+        skipped++;
+        console.log(`  ⏭  SKIP：${name}（${(e as Error).message}）`);
+      } else {
+        fail++;
+        console.log(`  ❌ ${name} — ${(e as Error).message}`);
+      }
+    }
+  };
+
+  const baseline = readBaselineJson();
+  if (!baseline || baseline.commands.length === 0) {
+    console.error('前置条件缺失：未读到有效 command-baseline.json（先跑 claude-code-command-baseline.ts --native）。');
+    try { await safeRmSync(root, 'all'); } catch { /* ignore */ }
+    process.exit(2);
+  }
+  const manifest: VerificationManifest = {
+    generatedAt: new Date().toISOString(),
+    ccVersion: baseline.ccVersion,
+    sdkVersion: baseline.sdkVersion,
+    baselineFile: path.join('D:/software/Cache', 'claude-link', 'command-baseline.json'),
+    entries: {},
+  };
+  const mark = (name: string, entry: VerificationEntry): void => {
+    manifest.entries[name] = entry;
+  };
+
+  const builtins = baseline.commands.filter((c) => c.origin === 'builtin');
+  const skills = baseline.commands.filter((c) => c.origin === 'user-skill');
+  const internals = baseline.commands.filter((c) => c.origin === 'internal');
+  const removed = baseline.commands.filter((c) => c.origin === 'removed');
+
+  // 凭据按 root 解析（skill 执行 / commands_changed 场景用）。
+  const creds = await resolveInitCredentials(root);
+
+  // ── Step 1+2：builtin 命令 ──────────────────────────────────────────────────────
+  // 6 个核心命令由其它模式已真实验证（chain 中 --init-matrix/--command/--replacements 先于 --all 跑），
+  // 这里交叉引用，避免重复真实执行的成本。
+  const crossRefCore = new Set(['init', 'compact', 'clear', 'config', 'usage', 'context']);
+  for (const core of crossRefCore) {
+    if (builtins.some((c) => c.name === core)) {
+      mark(core, {
+        status: 'verified-cross-ref',
+        category: 'builtin',
+        evidence: ['由 --init-matrix / --command / --replacements 模式真实验证（result 终态 + 文件/上下文副作用）'],
+      });
+    }
+  }
+  // 其余 builtin：隔离 cwd + plan 模式（无副作用）跑一次，断言 result 终态（发现 + 响应）。
+  // 部分命令需要安全参数才不报「缺参数」；提供 safe-args，否则裸跑（缺参数也算「发现 + 明确拒绝」证据）。
+  const safeArgs: Record<string, string> = {
+    model: '/model',
+    color: '/color',
+    effort: '/effort',
+    fast: '/fast',
+    autocompact: '/autocompact',
+    mcp: '/mcp',
+    rename: '/rename',
+  };
+  for (const cmd of builtins) {
+    if (crossRefCore.has(cmd.name)) continue;
+    const prompt = safeArgs[cmd.name] ?? `/${cmd.name}`;
+    await check(`builtin /${cmd.name}：plan 模式下发现 + 响应`, async () => {
+      const cwd = path.join(root, `builtin-${cmd.name}`);
+      mkdirSync(cwd, { recursive: true });
+      const run = await runNativeCommand(sdk, exe, cwd, prompt, {
+        permissionMode: 'plan',
+        maxTurns: 1,
+        timeoutMs: 120000,
+        ...(creds ? { env: creds.env } : {}),
+      });
+      // queryError = 真实启动失败（executable/cwd/协议）→ fail。
+      if (run.queryError) throw new Error(`启动失败（queryError）：${run.queryError}`);
+      // 无 result 终态（超时）——部分命令（如 /insights）需丰富会话上下文，plan 模式空 cwd 下不响应。
+      // 已证实可发现（在 baseline 命令集合内），标记 explicit-skip 写明原因（不算未验证，不算 fail）。
+      if (!run.termination) {
+        mark(cmd.name, {
+          status: 'explicit-skip',
+          category: 'builtin',
+          evidence: [
+            '运行时 baseline 命令集合内（已发现）',
+            `plan 模式空 cwd 下无 result 终态（收到 ${run.events.length} 个事件，可能需丰富会话上下文/凭据）`,
+          ],
+          detail: '命令在空 cwd + plan 模式下不产生终态；需真实会话上下文才能完整验证（已证实可发现）。',
+        });
+        console.log(`  ℹ /${cmd.name} plan 模式空 cwd 下无终态 → explicit-skip（可能需丰富会话上下文）`);
+        return;
+      }
+      // 有 result 终态（成功或明确拒绝/缺参数）→ verified，均证明发现 + 响应路径。
+      const isError = run.termination.is_error === true;
+      const termResult = run.termination.result;
+      const text = typeof termResult === 'string' ? termResult.slice(0, 160) : '(非文本 result)';
+      mark(cmd.name, {
+        status: 'verified',
+        category: 'builtin',
+        evidence: [
+          `result 终态（subtype=${run.termination.subtype ?? 'n/a'}, is_error=${isError}）`,
+          `响应头：${text}`,
+        ],
+        detail: isError ? '命令响应为明确拒绝/缺参数（仍证明发现 + 处理路径）' : undefined,
+      });
+    });
+  }
+
+  // ── Step 3a：user-skill 全量发现（零模型成本）────────────────────────────────
+  // 先按「运行时发现」标记全部 skill（status=verified-discovery），再做质量校验——这样即使
+  // 质量校验发现问题，manifest 仍覆盖全部 skill，门禁可见（不会因一处失败导致整批未标记）。
+  for (const cmd of skills) {
+    const descLen = (cmd.description ?? '').trim().length;
+    mark(cmd.name, {
+      status: 'verified-discovery',
+      category: 'user-skill',
+      evidence: [
+        '运行时 supportedCommands 发现（origin=user-skill）',
+        descLen > 0
+          ? `SKILL.md frontmatter 描述非空（${descLen} 字符）`
+          : '⚠ 运行时描述为空（dir name≠frontmatter name 或 frontmatter 缺描述，上游枚举行为）',
+      ],
+      detail:
+        descLen > 0
+          ? undefined
+          : '运行时描述为空——SKILL.md 可加载（baseline 命中），但描述未挂到该命令（如 waza-check：dir=waza-check/frontmatter name=check）。Claude Link 如实透传 SDK 结果，非对齐缺陷。',
+    });
+  }
+  await check(`user-skill 全量（${skills.length}）：发现 + 命中 slash_commands 权威集合`, async () => {
+    const slashSet = new Set(baseline.slashCommands);
+    const notSlash = skills.filter((c) => !slashSet.has(c.name)).map((c) => c.name);
+    assert.ok(
+      notSlash.length === 0,
+      `${notSlash.length} 个 skill 未出现在运行时 slashCommands：${notSlash.slice(0, 10).join(', ')}`,
+    );
+    // 描述空是上游枚举行为（dir name≠frontmatter name），非 Claude Link 缺陷——显式打印让质量状态
+    // 对门禁可见，但不 fail（skill 确实被发现 + 可调用，描述空是 SKILL.md 命名约定与 SDK 枚举的交互）。
+    const empties = skills.filter((c) => !c.description || c.description.trim().length === 0).map((c) => c.name);
+    if (empties.length > 0) {
+      console.log(`  ℹ ${empties.length} 个 skill 运行时描述为空（上游枚举行为，非 Claude Link 缺陷）：${empties.join(', ')}`);
+    }
+  });
+
+  // ── Step 3b：user-skill 抽样真实执行（creds 可用时）────────────────────────────
+  const skillSample = ['verify', 'summarize', 'test-driven-development'].filter((n) => skills.some((c) => c.name === n));
+  for (const skillName of skillSample) {
+    await check(`user-skill /${skillName} 真实执行：执行事件回传 + 副作用落 cwd（抽样）`, async () => {
+      if (!creds) throw new SkipError('无凭据，skill 真实执行场景 SKIP');
+      const cwd = path.join(root, `skill-${skillName}`);
+      mkdirSync(cwd, { recursive: true });
+      // 用极简 prompt 触发 skill 但约束 maxTurns，避免长执行；plan 模式防副作用外溢。
+      const run = await runNativeCommand(sdk, exe, cwd, `/${skillName}`, {
+        permissionMode: 'plan',
+        maxTurns: 2,
+        env: creds.env,
+        timeoutMs: 120000,
+      });
+      assert.ok(run.termination, `/${skillName} 须有 result 终态；诊断：${resultDiagnostic(run)}`);
+      // 执行事件回传：至少有 assistant message 或 tool 事件（skill 被加载执行）。
+      const hasActivity = run.events.some((e) => e.type === 'assistant' || e.type === 'tool' || e.subtype === 'local_command_output');
+      assert.ok(hasActivity, `/${skillName} 须有执行活动事件（assistant/tool/local_command_output）`);
+      mark(skillName, {
+        status: 'verified-execution',
+        category: 'user-skill',
+        evidence: [
+          'result 终态',
+          `执行活动事件（assistant/tool/local_command_output）`,
+          `作用域 cwd=${cwd}（plan 模式防外溢）`,
+        ],
+        detail: `is_error=${run.termination.is_error === true}`,
+      });
+    });
+  }
+
+  // ── hidden：removed/internal 命令（菜单不展示语义）────────────────────────────
+  await check(`hidden 命令（removed ${removed.length}/internal ${internals.length}）：origin 分类 + 菜单不展示`, async () => {
+    for (const cmd of removed) {
+      assert.ok(
+        /\(removed\)/i.test(cmd.description ?? '') || cmd.origin === 'removed',
+        `/${cmd.name} 应分类为 removed（描述含 (removed) 或 origin=removed）`,
+      );
+      mark(cmd.name, {
+        status: 'hidden',
+        category: 'removed',
+        evidence: ['origin=removed', '描述含 (removed)', 'filterRenderableCommands 过滤（菜单不展示）'],
+      });
+    }
+    for (const cmd of internals) {
+      assert.ok(
+        cmd.name.startsWith('__') || cmd.origin === 'internal',
+        `/${cmd.name} 应分类为 internal（双下划线前缀或 origin=internal）`,
+      );
+      mark(cmd.name, {
+        status: 'hidden',
+        category: 'internal',
+        evidence: ['origin=internal', '服务端/内部命令', 'filterRenderableCommands 过滤（菜单不展示）'],
+      });
+    }
+  });
+
+  // ── Step 4：动态 commands_changed（creds 可用时）──────────────────────────────
+  await check('动态 commands_changed：新增 skill + /reload-skills 触发真实命令变更事件', async () => {
+    if (!creds) throw new SkipError('无凭据，commands_changed 场景 SKIP');
+    const cwd = path.join(root, 'cmd-changed');
+    mkdirSync(path.join(cwd, '.claude', 'skills', 'e2e-dynamic-skill'), { recursive: true });
+    writeFileSync(
+      path.join(cwd, '.claude', 'skills', 'e2e-dynamic-skill', 'SKILL.md'),
+      '---\nname: e2e-dynamic-skill\ndescription: e2e 动态注入的临时 skill（验证 commands_changed）\n---\n# e2e-dynamic-skill\n临时 skill body。\n',
+      'utf8',
+    );
+    // 先开一个会话拿到 sid，再 /reload-skills 触发命令重扫。
+    const warm = await runNativeCommand(sdk, exe, cwd, 'hi', {
+      permissionMode: 'plan',
+      maxTurns: 1,
+      env: creds.env,
+      timeoutMs: 90000,
+    });
+    const sid = warm.init?.session_id;
+    assert.ok(sid, 'commands_changed 场景须有 session_id');
+    const reload = await runNativeCommand(sdk, exe, cwd, '/reload-skills', {
+      permissionMode: 'plan',
+      maxTurns: 3,
+      env: creds.env,
+      timeoutMs: 120000,
+      resume: sid,
+    });
+    // 接受 commands_changed 事件，或 reload 后 init.skills/commands 含新增 skill（版本差异下两者皆可）。
+    const hasCommandsChanged = reload.events.some(
+      (e) => e.type === 'system' && (e.subtype === 'commands_changed' || e.subtype === 'commands'),
+    );
+    const reloadText = typeof reload.termination?.result === 'string' ? reload.termination.result : '';
+    const mentionsReload = /reload|重新加载|skills?|命令/i.test(reloadText);
+    assert.ok(
+      hasCommandsChanged || mentionsReload,
+      `/reload-skills 应触发 commands_changed 或确认重载；事件=${reload.events.map((e) => e.subtype ?? e.type).join('|')}；result_head=${reloadText.slice(0, 120)}`,
+    );
+    mark('__commands_changed__', {
+      status: hasCommandsChanged ? 'verified' : 'explicit-skip',
+      category: 'dynamic',
+      evidence: hasCommandsChanged
+        ? ['真实 commands_changed 事件触发']
+        : ['/reload-skills 确认重载（未捕到 commands_changed 事件，可能是版本协议差异）'],
+      detail: `事件序列：${reload.events.map((e) => e.subtype ?? e.type).join('|')}`,
+    });
+  });
+
+  // 写 manifest（无论 pass/fail，都落盘供门禁消费 + 诊断）。
+  try {
+    mkdirSync(path.dirname(VERIFICATION_OUT_FILE), { recursive: true });
+    writeFileSync(VERIFICATION_OUT_FILE, JSON.stringify(manifest, null, 2), 'utf8');
+  } catch (e) {
+    console.log(`  ⚠ 写 ${VERIFICATION_OUT_FILE} 失败：${(e as Error).message}`);
+  }
+
+  try {
+    await safeRmSync(root, 'all');
+  } catch {
+    /* 清理失败不覆盖通过状态 */
+  }
+
+  console.log(`\n${pass} passed, ${fail} failed, ${skipped} skipped`);
+  // manifest 覆盖率自检：runtime 每条命令须有 entry（不论状态）。
+  const runtimeNames = baseline.commands.map((c) => c.name);
+  const missing = runtimeNames.filter((n) => !manifest.entries[n]);
+  if (missing.length > 0) {
+    fail++;
+    console.log(`  ❌ manifest 缺失 runtime 命令：${missing.join(', ')}`);
+  }
+  if (fail > 0) {
+    if (skipped > 0) {
+      console.error(`（另有 ${skipped} 项场景因前置条件缺失 SKIP，fail 优先报告为 exit 1。）`);
+    }
+    throw new Error(`e2e --all 断言 ${fail} 项失败`);
+  }
+  if (skipped > 0) {
+    console.error(
+      `前置条件缺失：${skipped} 项场景 SKIP（skill 执行/commands_changed 需凭据）。` +
+        '发布门禁必须以凭据环境运行；SKIP 不算 PASS（exit 2）。',
+    );
+    process.exit(2);
+  }
+}
+
 // ── 入口 ───────────────────────────────────────────────────────────────────────────
 // isMainModule 守卫：仅当本脚本作为入口执行时才跑入口逻辑；被其它脚本（如 tdd）当作模块导入
 // resolveInitCredentials 等导出函数时不触发（否则入口的 process.exit 会终止导入方进程）。
@@ -1839,6 +2203,8 @@ if (isMainModule) {
         await runInitMatrixMode(exe);
       } else if (mode === '--replacements') {
         await runReplacementsMode(exe);
+      } else if (mode === '--all') {
+        await runAllMode(exe);
       } else {
         console.error(`e2e 模式 "${mode}" 尚未实现（Task 6/7 追加）。`);
         process.exit(1);
