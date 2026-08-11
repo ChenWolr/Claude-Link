@@ -1444,6 +1444,36 @@ function testPermissionPromptIntegration(): void {
   assert.ok(configStoreSrc.includes('nativeSettingsDiagnosticRequestId'), 'settings 诊断应有请求代际号');
   assert.ok(/requestId[\s\S]*config\.workingDirectory[\s\S]*nativeSettingsDiagnostic/.test(configStoreSrc), '诊断结果写回前应校验请求代际与当前工作目录');
   assert.ok(/saveConfig[\s\S]*loadNativeSettingsDiagnostic\(this\.config\.workingDirectory\)/.test(configStoreSrc), '配置保存落盘后应刷新 settings 诊断，避免展示过期 effective settings');
+
+  // ── Task 8：命令来源 provenance 跨进程契约 + UI 来源徽章 + 历史不变量 ──
+  // 命令诊断 IPC 三处接线（mirror Task 3 settings 诊断：通道常量 + 类型 + preload + handler）。
+  assert.ok(ipcTypes.includes('COMMANDS_GET_DIAGNOSTIC'), 'ipc.ts 应定义命令诊断通道常量 COMMANDS_GET_DIAGNOSTIC');
+  assert.ok(ipcTypes.includes('CommandProvenance'), 'ipc.ts 应 re-export CommandProvenance 类型');
+  assert.ok(preloadApi.includes('getCommandDiagnostics'), 'preload 应暴露 getCommandDiagnostics');
+  assert.ok(ipcHandlers.includes('COMMANDS_GET_DIAGNOSTIC'), 'ipc-handlers 应注册 COMMANDS_GET_DIAGNOSTIC handler');
+  assert.ok(ipcHandlers.includes('getCommandProvenance'), 'ipc-handlers 应调用 getCommandProvenance（主进程函数不再死代码）');
+  // 命令诊断必须只读、无副作用——不得 markSessionActive/触发 probe（区别于 COMMANDS_GET）。
+  const registrySrc = fs.readFileSync(new URL('../src/main/modules/sdk-command-registry.ts', import.meta.url), 'utf8');
+  assert.ok(registrySrc.includes('getCommandProvenance(sessionId: string): CommandProvenance'), 'registry 应有 getCommandProvenance 方法（只读派生）');
+  assert.ok(/getCommandProvenance[\s\S]*?不触发 probe|只读[\s\S]*?无副作用/.test(registrySrc), 'getCommandProvenance 须明确只读无副作用（不触发 probe）');
+  // 历史不变量：provenance 诊断是 transient 状态，不被当成聊天消息持久化（与 commands_changed 同语义）。
+  // local_command_output 主进程单一落库已在 §4 钉住；此处强化命令诊断不经 renderer 二次落库。
+  const useChatSrcT8 = fs.readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
+  assert.ok(!useChatSrcT8.includes('getCommandDiagnostics'), 'renderer 聊天流不得消费命令诊断 API（诊断是 UI 状态，非聊天消息，不二次落库）');
+  // UI 来源徽章：ChatInput 区分 builtin/Skill/project/plugin，不让 source=sdk 被误读为官方 builtin；
+  // unknown 作为可见差异状态（计数展示，不被当 builtin 完成）。
+  const chatInputSrc = fs.readFileSync(new URL('../src/renderer/components/chat/ChatInput.vue', import.meta.url), 'utf8');
+  assert.ok(chatInputSrc.includes('slash-menu__origin'), 'ChatInput 应有来源徽章元素 slash-menu__origin');
+  assert.ok(chatInputSrc.includes('originLabel'), 'ChatInput 应有 originLabel 来源文案映射');
+  assert.ok(chatInputSrc.includes('Claude Code 内置'), '来源徽章应区分 builtin（Claude Code 内置）');
+  assert.ok(chatInputSrc.includes('用户 Skill'), '来源徽章应区分 user-skill（用户 Skill）');
+  assert.ok(/unknownCount[\s\S]*?来源未知/.test(chatInputSrc), 'ChatInput 应展示 unknown 命令计数（来源未知作为可见差异状态）');
+  // command-store 诊断状态：按 sessionId 缓存，静默失败不抛页面（mirror load 模式）。
+  const commandStoreSrc = fs.readFileSync(new URL('../src/renderer/stores/command-store.ts', import.meta.url), 'utf8');
+  assert.ok(commandStoreSrc.includes('diagnosticsBySession'), 'command-store 应缓存 diagnosticsBySession');
+  assert.ok(commandStoreSrc.includes('loadDiagnostics'), 'command-store 应有 loadDiagnostics action');
+  assert.ok(commandStoreSrc.includes('activeDiagnostics'), 'command-store 应有 activeDiagnostics getter');
+  assert.ok(commandStoreSrc.includes('getCommandDiagnostics'), 'command-store loadDiagnostics 应调用 getCommandDiagnostics API');
   const commandMatrixSrc = fs.readFileSync(new URL('../scripts/claude-code-command-matrix.ts', import.meta.url), 'utf8');
   assert.ok(commandMatrixSrc.includes('PENDING_MATRIX_OUT_FILE'), 'runtime-only 命令应有待补规格输出路径');
   assert.ok(commandMatrixSrc.includes('writeFileSync'), 'runtime-only 命令应持久化待补矩阵规格');
