@@ -7,6 +7,8 @@
   "license": "MIT",
   "scripts": {
     "dev": "electron-vite dev",
+    "dev:cdp": "electron-vite dev -- --remote-debugging-port=9223",
+    "test:cdp": "node scripts/cdp-smoke-test.mjs",
     "build": "electron-vite build",
     "postinstall": "electron-builder install-app-deps",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
