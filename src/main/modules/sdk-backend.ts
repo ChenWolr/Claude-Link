@@ -48,6 +48,7 @@ import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type { AppConfig } from '../../shared/types/config';
 import type { CommandChangedPayload, CommandOriginContext, SessionCommandSnapshot } from '../../shared/types/command';
+import { EMPTY_COMMAND_ORIGIN_CONTEXT } from '../../shared/types/command';
 import type {
   CliEvent,
   CliMessageContentPart,
@@ -162,6 +163,14 @@ const sessionCliIds = new Map<string, string>();
 // replace/commands_changed 需要它把 SDK 原始命令正确分类（user-skill/plugin/builtin）。
 // 会话删除时必须在 markSessionDeleted 清理（单一收口）。
 const sessionCommandCtx = new Map<string, CommandOriginContext>();
+// review-v1 §5.1：init 时的 cwd + plugin 路径（plugins 路径不在 CommandOriginContext 中，单独保存）。
+// commands_changed 时按当前磁盘状态重建 evidence 需要这些种子——init 时冻结的 evidence 不反映会话过程中
+// 新增/修改/删除的项目命令文件（.claude/skills、.claude/commands）。
+interface CommandProvenanceSeed {
+  cwd: string | undefined;
+  plugins: Array<{ name: string; path?: string }>;
+}
+const sessionProvenanceSeeds = new Map<string, CommandProvenanceSeed>();
 // 中断标记按 query 实例（与 process-manager 的 interruptedChildren 思路一致，避免跨回合串扰）。
 const interruptedQueries = new WeakSet<Query>();
 // 内存级"会话是否仍存活"集合。删会话时移除，runQuery/forwardEvent 据此在落库前判活，
@@ -438,6 +447,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionCliIds.delete(sessionId);
   contextUsageDiagnosed.delete(sessionId);
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
+  sessionProvenanceSeeds.delete(sessionId); // review-v1 §5.1：provenance 种子同生命周期清理
   // 原生 Slash Commands：会话删除时取消正在进行的命令探测并清理快照，避免 stale 命令堆积与 A/B 串扰。
   // cancelCommandProbeInternal 用 0 超时 fire-and-forget（abort 同步触发，probe 异步自行退出）。
   void cancelCommandProbeInternal(sessionId, 0);
@@ -1590,7 +1600,7 @@ async function runCommandProbe(
       const st = msg.subtype as string | undefined;
       if (t === 'system' && st === 'init') {
         // 独立 probe 也必须先保存 init 来源上下文；否则 supportedCommands 结果会用空 ctx 分类。
-        sessionCommandCtx.set(sessionId, buildCommandOriginContext(msg as Record<string, unknown>));
+        sessionCommandCtx.set(sessionId, buildCommandOriginContext(msg as Record<string, unknown>, sessionId));
         await resolveAndApplyProbeCommands(sessionId, mainWindow, query, entry);
         break; // 拿到命令即退出消费循环
       }
@@ -1620,8 +1630,22 @@ async function runCommandProbe(
   }
 }
 
+/**
+ * review-v2 §5：SDK 子进程的 userHome 可能被 advancedJson.env 的 USERPROFILE/HOME 覆盖。
+ * buildSpawnEnv() 先 {...process.env} 再注入 advancedJson.env 块，其中可能含 USERPROFILE/HOME——
+ * 该 env 经 SDK options 传给 Claude Code 子进程。证据扫描必须用与子进程一致的 userHome，
+ * 否则 SDK 发现的 Skill 在证据扫描中找不到对应磁盘证据，分类回退到 unknown。
+ */
+function effectiveUserHome(): string | undefined {
+  const env = buildSpawnEnv();
+  return env.USERPROFILE || env.HOME;
+}
+
 /** 从 system.init 消息提取命令来源分类上下文（Task 2）。 */
-function buildCommandOriginContext(sdkMsg: Record<string, unknown>): CommandOriginContext {
+function buildCommandOriginContext(
+  sdkMsg: Record<string, unknown>,
+  sessionId?: string,
+): CommandOriginContext {
   const skills = Array.isArray(sdkMsg.skills)
     ? (sdkMsg.skills as unknown[]).filter((s): s is string => typeof s === 'string')
     : [];
@@ -1633,15 +1657,42 @@ function buildCommandOriginContext(sdkMsg: Record<string, unknown>): CommandOrig
   const slashCommands = Array.isArray(sdkMsg.slash_commands)
     ? (sdkMsg.slash_commands as unknown[]).filter((s): s is string => typeof s === 'string')
     : [];
-  // 证据扫描必须与 query 使用同一用户目录：buildSpawnEnv() 将 process.env 传入 Claude Code，
-  // 因此这里显式使用同一 USERPROFILE/HOME，而不是让 sdk-command-origin 另行读取宿主默认 homedir。
-  const userHome = process.env.USERPROFILE || process.env.HOME;
+  // review-v2 §5：证据扫描的 userHome 必须与 SDK 子进程一致——用 buildSpawnEnv() 的 effective env，
+  // 而非宿主 process.env 默认值（advancedJson.env 可能覆盖 USERPROFILE/HOME）。
+  const userHome = effectiveUserHome();
+  const cwd = typeof sdkMsg.cwd === 'string' ? sdkMsg.cwd : undefined;
+  const rawPlugins = Array.isArray(sdkMsg.plugins) ? (sdkMsg.plugins as Array<{ name: string; path?: string }>) : [];
   const evidence = buildCommandOriginEvidence({
-    cwd: typeof sdkMsg.cwd === 'string' ? sdkMsg.cwd : undefined,
-    plugins: Array.isArray(sdkMsg.plugins) ? (sdkMsg.plugins as Array<{ name: string; path?: string }>) : [],
+    cwd,
+    plugins: rawPlugins,
     ...(userHome ? { userHome } : {}),
   });
+  // review-v1 §5.1：保存 init 时的 cwd + plugin 路径种子，供 commands_changed 刷新证据时重扫项目来源。
+  if (sessionId) {
+    sessionProvenanceSeeds.set(sessionId, { cwd, plugins: rawPlugins });
+  }
   return { skills, plugins, slashCommands, evidence };
+}
+
+/**
+ * review-v1 §5.1：commands_changed 时按当前会话 cwd 重新扫描项目来源证据。
+ * init 时冻结的 evidence 不反映会话过程中新增/修改/删除的项目命令文件（.claude/skills、.claude/commands）；
+ * commands_changed 表示命令列表已变化，必须重建 evidence 以正确分类新增/变更的项目命令。
+ * skills/plugins/slashCommands 名称集合沿用 init（SDK canonical 视图，不随项目文件变化）；
+ * evidence 部分（文件来源映射）按当前磁盘状态重扫。
+ */
+function refreshCommandOriginContext(sessionId: string): CommandOriginContext {
+  const ctx = sessionCommandCtx.get(sessionId);
+  if (!ctx) return EMPTY_COMMAND_ORIGIN_CONTEXT;
+  const seed = sessionProvenanceSeeds.get(sessionId);
+  // review-v2 §5：与 buildCommandOriginContext 一致，用 effective env 的 userHome。
+  const userHome = effectiveUserHome();
+  const evidence = buildCommandOriginEvidence({
+    cwd: seed?.cwd,
+    plugins: seed?.plugins ?? [],
+    ...(userHome ? { userHome } : {}),
+  });
+  return { skills: ctx.skills, plugins: ctx.plugins, slashCommands: ctx.slashCommands, evidence };
 }
 
 /** 从 cwd 向上收集存在的 CLAUDE.md 候选（CC 会加载的上下文文件，Task 3 诊断用）。 */
@@ -1933,7 +1984,7 @@ async function maybeDiscoverCommandsFromInit(
         aliases: [],
         source: 'sdk',
       }));
-      const snap = sdkCommandRegistry.replace(sessionId, initCmds, 'init', buildCommandOriginContext(sdkMsg));
+      const snap = sdkCommandRegistry.replace(sessionId, initCmds, 'init', buildCommandOriginContext(sdkMsg, sessionId));
       emitCommandChanged(sessionId, mainWindow, snap);
     }
   }
@@ -2143,7 +2194,7 @@ async function runQuery(
           touchActivity(sessionId, 'system:init');
           sessionCliIds.set(sessionId, sid);
           // Task 2：捕获命令来源分类上下文（skills/plugins/slash_commands），供本会话 replace 分类。
-          sessionCommandCtx.set(sessionId, buildCommandOriginContext(sdkMsg as Record<string, unknown>));
+          sessionCommandCtx.set(sessionId, buildCommandOriginContext(sdkMsg as Record<string, unknown>, sessionId));
           // 会话已删则不写库（避免外键失败）。
           if (isSessionActive(sessionId)) {
             try {
@@ -2314,8 +2365,10 @@ async function runQuery(
         // source:'changed'，不落库、不走 CHAT_EVENT（走独立 COMMANDS_CHANGED IPC）。
         if (subtype === 'commands_changed') {
           const rawCommands = Array.isArray(sdkMsg.commands) ? sdkMsg.commands : [];
-          // Task 2：用本会话 init 捕获的分类上下文分类；动态 skills 新增由 Task 7 的 commands_changed 刷新覆盖。
-          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', sessionCommandCtx.get(sessionId));
+          // review-v1 §5.1：按当前会话 cwd 重建来源证据（init 时冻结的 evidence 不反映会话过程中
+          // 新增/修改/删除的项目命令文件 .claude/skills、.claude/commands）。skills/plugins/slashCommands
+          // 名称集合沿用 init（SDK canonical 视图），evidence 按当前磁盘状态重扫。
+          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', refreshCommandOriginContext(sessionId));
           emitCommandChanged(sessionId, mainWindow, snap);
           continue;
         }
