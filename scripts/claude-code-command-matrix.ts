@@ -695,20 +695,72 @@ async function requireRuntimeMatch(): Promise<void> {
   }
 }
 
-// ── Task 7 Step 5：--require-no-unverified-command（无未验证命令门禁）──────────────
+// ── Task 7 Step 5：--require-no-unverified-command（分类覆盖门禁）─────────────────
 // 消费 --all 模式产出的 command-verification.json，断言每条 runtime 命令都有明确验证状态：
 // verified*/hidden/explicit-skip 均可，唯独不能停留在 'unverified'。
 // 比 requireNoUnexplainedGap 更强——后者只要求「有可验证目标」，本门禁要求「已被真实 E2E 验证
 // 或显式 skip 并写明原因」。unknown 来源命令允许，但必须以 explicit-skip + 证据展示，不能裸 unverified。
+//
+// review-v1 §4.1/§4.2：本门禁证明「分类覆盖」（每条命令有明确标签），**不**证明「行为覆盖」
+// （成功/失败/取消/副作用/重开全部验证）。行为覆盖由 --require-behavioral-coverage 单独检查；
+// 此处打印行为覆盖汇总，让 gap 对门禁可见，阻止「全量已验证」的虚假表述。
 const VERIFICATION_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 'command-verification.json');
 
-function requireNoUnverifiedCommand(): void {
-  console.log('=== 7) --require-no-unverified-command：无未验证命令（消费 --all manifest）===');
-  type ManifestEntry = { status: string; category?: string; evidence?: string[]; detail?: string; skipReason?: string };
-  let manifest: { entries: Record<string, ManifestEntry>; generatedAt?: string } | null = null;
+type BehavioralDimensions = {
+  discovery: boolean;
+  success?: boolean;
+  failure?: boolean;
+  cancel?: boolean;
+  sideEffects?: boolean;
+  reopenPersistence?: boolean;
+};
+type ManifestEntry = {
+  status: string;
+  category?: string;
+  evidence?: string[];
+  detail?: string;
+  skipReason?: string;
+  dimensions?: BehavioralDimensions;
+};
+
+/** 计划要求的行为维度（按 category）。 */
+const REQUIRED_DIMENSIONS: Record<string, (keyof BehavioralDimensions)[]> = {
+  builtin: ['discovery', 'success', 'failure', 'cancel', 'sideEffects', 'reopenPersistence'],
+  'user-skill': ['discovery', 'success', 'failure', 'cancel', 'sideEffects'],
+  plugin: ['discovery', 'success', 'failure', 'cancel', 'sideEffects'],
+  project: ['discovery', 'success', 'failure', 'cancel', 'sideEffects'],
+};
+
+/**
+ * review-v1 §4.1/§4.2：逐命令行为覆盖等级。
+ * - 'full'：该 category 计划要求的所有维度均有真实证据。
+ * - 'partial'：部分维度覆盖（如有 success 但缺 cancel/failure）。
+ * - 'discovery-only'：仅发现维度覆盖（verified-discovery / explicit-skip）。
+ * - 'n/a'：hidden（removed/internal），不要求行为维度。
+ */
+function behavioralLevel(entry: ManifestEntry): 'full' | 'partial' | 'discovery-only' | 'n/a' {
+  if (entry.status === 'hidden') return 'n/a';
+  const dims = entry.dimensions;
+  if (!dims) return 'discovery-only';
+  const covered = (Object.keys(dims) as (keyof BehavioralDimensions)[]).filter((k) => dims[k] === true);
+  if (covered.length <= 1 && covered[0] === 'discovery') return 'discovery-only';
+  const required = REQUIRED_DIMENSIONS[entry.category ?? ''] ?? REQUIRED_DIMENSIONS['user-skill'];
+  const missing = required.filter((d) => dims[d] !== true);
+  return missing.length === 0 ? 'full' : 'partial';
+}
+
+function readVerificationManifest(): { entries: Record<string, ManifestEntry> } | null {
   try {
-    manifest = JSON.parse(readFileSync(VERIFICATION_OUT_FILE, 'utf8')) as { entries: Record<string, ManifestEntry> };
+    return JSON.parse(readFileSync(VERIFICATION_OUT_FILE, 'utf8')) as { entries: Record<string, ManifestEntry> };
   } catch {
+    return null;
+  }
+}
+
+function requireNoUnverifiedCommand(): void {
+  console.log('=== 7) --require-no-unverified-command：分类覆盖门禁（消费 --all manifest）===');
+  let manifest: { entries: Record<string, ManifestEntry>; generatedAt?: string } | null = readVerificationManifest();
+  if (!manifest) {
     check('读取 command-verification.json', () => {
       throw new Error(`未读到 ${VERIFICATION_OUT_FILE}（先跑 claude-code-command-e2e-verify.ts --native --all）`);
     });
@@ -758,12 +810,184 @@ function requireNoUnverifiedCommand(): void {
     assert.ok(unjustified.length === 0, `explicit-skip 命令缺证据/原因：${unjustified.join(', ')}`);
   });
 
-  // 汇总：按状态分桶打印，让版本/环境漂移与覆盖度对门禁可见。
+  // 汇总 1：按状态分桶打印（分类覆盖）。
   const byStatus: Record<string, string[]> = {};
   for (const [name, v] of Object.entries(entries)) (byStatus[v.status] ??= []).push(name);
-  console.log('  验证状态汇总（共 ' + runtimeNames.length + ' 条 runtime 命令）：');
+  console.log('  分类覆盖汇总（共 ' + runtimeNames.length + ' 条 runtime 命令）：');
   for (const s of Object.keys(byStatus).sort()) {
     console.log(`    ${s} (${byStatus[s].length}): ${byStatus[s].slice(0, 12).join(', ')}${byStatus[s].length > 12 ? ' …' : ''}`);
+  }
+
+  // 汇总 2（review-v1 §4.1/§4.2）：行为覆盖等级——区分「分类已落定」与「行为已验证」。
+  const byLevel: Record<string, string[]> = { full: [], partial: [], 'discovery-only': [], 'n/a': [] };
+  for (const [name, v] of Object.entries(entries)) (byLevel[behavioralLevel(v)] ??= []).push(name);
+  console.log('  行为覆盖等级（discovery=最低门槛；full=计划要求维度全覆盖）：');
+  for (const lvl of ['full', 'partial', 'discovery-only', 'n/a'] as const) {
+    if (byLevel[lvl].length > 0) {
+      console.log(`    ${lvl} (${byLevel[lvl].length}): ${byLevel[lvl].slice(0, 12).join(', ')}${byLevel[lvl].length > 12 ? ' …' : ''}`);
+    }
+  }
+  const nonNa = byLevel['full'].length + byLevel['partial'].length + byLevel['discovery-only'].length;
+  if (byLevel['full'].length < nonNa) {
+    console.log(
+      `  ⚠ 行为覆盖不完整：${byLevel['full'].length}/${nonNa} 条命令达到 full（${byLevel['partial'].length} partial + ${byLevel['discovery-only'].length} discovery-only）。` +
+        `此门禁只证明分类覆盖；完整行为验收须用 --require-behavioral-coverage。`,
+    );
+  }
+}
+
+/**
+ * review-v3 §6.2：行为覆盖门禁（接入发布链的实践版）。
+ *
+ * 两级门禁：
+ *   --require-behavioral-coverage（本函数）：实践级——要求 discovery + cancel + ≥1(success,failure)，
+ *     builtin 还需 reopenPersistence。sideEffects 为信息维度（plan 模式下工具受限，不阻塞）。
+ *     容忍 ≤5% 命令因网关瞬态失败缺维度（≥95% 通过即 PASS）。
+ *     接入 run-native-chain.mjs，作为发布链的行为覆盖底线。
+ *
+ *   --require-behavioral-coverage-full：严格级——要求全部计划维度（含 sideEffects）。
+ *     用于「全量行为已验证」声明；当前 gap（sideEffects）未闭合前不接入 chain。
+ */
+function requireBehavioralCoverage(): void {
+  console.log('=== 8) --require-behavioral-coverage：行为覆盖门禁（实践级：discovery+cancel+≥1 success/failure）===');
+  let manifest = readVerificationManifest();
+  if (!manifest) {
+    check('读取 command-verification.json', () => {
+      throw new Error(`未读到 ${VERIFICATION_OUT_FILE}（先跑 claude-code-command-e2e-verify.ts --native --all）`);
+    });
+    return;
+  }
+  let runtimeNames: string[] = [];
+  try {
+    const b = JSON.parse(readFileSync(BASELINE_OUT_FILE, 'utf8')) as { commands?: Array<{ name: string }> };
+    runtimeNames = Array.isArray(b.commands) ? b.commands.map((c) => c.name) : [];
+  } catch {
+    check('读取 command-baseline.json（runtime 命令集合）', () => {
+      throw new Error(`未读到 ${BASELINE_OUT_FILE}（先跑 baseline --native）`);
+    });
+    return;
+  }
+  const entries = manifest.entries ?? {};
+  const runtimeSet = new Set(runtimeNames);
+
+  // 实践级检查：discovery + cancel + ≥1(success, failure)；builtin 还需 reopenPersistence
+  check('实践级行为覆盖（discovery + cancel + ≥1 success/failure [+builtin reopenPersistence]）≥95%', () => {
+    const gaps: string[] = [];
+    let total = 0;
+    for (const name of Object.keys(entries)) {
+      if (!runtimeSet.has(name)) continue;
+      const entry = entries[name];
+      if (entry.status === 'hidden') continue;
+      total++;
+      const d = entry.dimensions ?? ({ discovery: true } as BehavioralDimensions);
+      const isBuiltin = entry.category === 'builtin';
+      const minOk = d.discovery === true && d.cancel === true && (d.success === true || d.failure === true)
+        && (!isBuiltin || d.reopenPersistence === true);
+      if (!minOk) {
+        const missing: string[] = [];
+        if (!d.discovery) missing.push('discovery');
+        if (!d.cancel) missing.push('cancel');
+        if (!d.success && !d.failure) missing.push('success/failure');
+        if (isBuiltin && !d.reopenPersistence) missing.push('reopenPersistence');
+        gaps.push(`${name} [${entry.category ?? '?'}/${entry.status}]: 缺 ${missing.join('/')}`);
+      }
+    }
+    const passRate = total > 0 ? (total - gaps.length) / total : 0;
+    console.log(`  实践级通过率：${total - gaps.length}/${total} = ${(passRate * 100).toFixed(1)}%`);
+    if (gaps.length > 0) {
+      console.log(`  未达标命令（${gaps.length}）：${gaps.slice(0, 10).join(', ')}${gaps.length > 10 ? ' …' : ''}`);
+    }
+    assert.ok(
+      passRate >= 0.95,
+      `实践级行为覆盖率 ${(passRate * 100).toFixed(1)}% < 95%（${gaps.length} 条未达标）：\n    ${gaps.slice(0, 10).join('\n    ')}`,
+    );
+  });
+
+  // 逐维度统计（信息性，不阻塞）
+  const dimCounts: Record<string, number> = {};
+  let totalNonHidden = 0;
+  for (const name of Object.keys(entries)) {
+    if (!runtimeSet.has(name)) continue;
+    const entry = entries[name];
+    if (entry.status === 'hidden') continue;
+    totalNonHidden++;
+    const dims = entry.dimensions ?? { discovery: true };
+    for (const dim of ['discovery', 'success', 'failure', 'cancel', 'sideEffects', 'reopenPersistence'] as const) {
+      if (dims[dim] === true) dimCounts[dim] = (dimCounts[dim] ?? 0) + 1;
+    }
+  }
+  console.log(`  逐维度覆盖（${totalNonHidden} 条非 hidden runtime 命令，信息性）：`);
+  for (const dim of ['discovery', 'success', 'failure', 'cancel', 'sideEffects', 'reopenPersistence'] as const) {
+    const c = dimCounts[dim] ?? 0;
+    console.log(`    ${dim}: ${c}/${totalNonHidden}${c < totalNonHidden ? ' ⚠' : ''}`);
+  }
+  console.log('  注：sideEffects 在 plan 模式下工具受限，为信息维度（不阻塞实践级门禁）。');
+  console.log('  严格级（含 sideEffects 全覆盖）用 --require-behavioral-coverage-full。');
+}
+
+/**
+ * review-v3 §6.2：行为覆盖严格门禁——要求全部计划维度（含 sideEffects）。
+ * 用于「全量行为已验证」声明；当前 sideEffects gap 未闭合前不接入 chain。
+ */
+function requireBehavioralCoverageFull(): void {
+  console.log('=== 8b) --require-behavioral-coverage-full：行为覆盖严格门禁（全维度含 sideEffects）===');
+  let manifest = readVerificationManifest();
+  if (!manifest) {
+    check('读取 command-verification.json', () => {
+      throw new Error(`未读到 ${VERIFICATION_OUT_FILE}（先跑 claude-code-command-e2e-verify.ts --native --all）`);
+    });
+    return;
+  }
+  let runtimeNames: string[] = [];
+  try {
+    const b = JSON.parse(readFileSync(BASELINE_OUT_FILE, 'utf8')) as { commands?: Array<{ name: string }> };
+    runtimeNames = Array.isArray(b.commands) ? b.commands.map((c) => c.name) : [];
+  } catch {
+    check('读取 command-baseline.json（runtime 命令集合）', () => {
+      throw new Error(`未读到 ${BASELINE_OUT_FILE}（先跑 baseline --native）`);
+    });
+    return;
+  }
+  const entries = manifest.entries ?? {};
+  const runtimeSet = new Set(runtimeNames);
+
+  check('非 hidden 命令行为维度全覆盖（计划要求 success/failure/cancel/sideEffects[/reopenPersistence]）', () => {
+    const gaps: string[] = [];
+    for (const name of Object.keys(entries)) {
+      if (!runtimeSet.has(name)) continue;
+      const entry = entries[name];
+      const level = behavioralLevel(entry);
+      if (level === 'n/a') continue;
+      if (level !== 'full') {
+        const required = REQUIRED_DIMENSIONS[entry.category ?? ''] ?? REQUIRED_DIMENSIONS['user-skill'];
+        const dims = entry.dimensions ?? ({ discovery: true } as BehavioralDimensions);
+        const missing = required.filter((d) => dims[d] !== true);
+        gaps.push(`${name} [${entry.category ?? '?'}/${entry.status}]: 缺 ${missing.join('/')}`);
+      }
+    }
+    assert.ok(
+      gaps.length === 0,
+      `${gaps.length} 条命令行为维度未全覆盖：\n    ${gaps.slice(0, 20).join('\n    ')}`,
+    );
+  });
+
+  // 汇总：逐维度覆盖统计（让 gap 精确可见）。
+  const dimCounts: Record<string, number> = {};
+  let totalNonHidden = 0;
+  for (const name of Object.keys(entries)) {
+    if (!runtimeSet.has(name)) continue;
+    const entry = entries[name];
+    if (behavioralLevel(entry) === 'n/a') continue;
+    totalNonHidden++;
+    const dims = entry.dimensions ?? { discovery: true };
+    for (const dim of ['discovery', 'success', 'failure', 'cancel', 'sideEffects', 'reopenPersistence'] as const) {
+      if (dims[dim] === true) dimCounts[dim] = (dimCounts[dim] ?? 0) + 1;
+    }
+  }
+  console.log(`  逐维度覆盖（${totalNonHidden} 条非 hidden runtime 命令）：`);
+  for (const dim of ['discovery', 'success', 'failure', 'cancel', 'sideEffects', 'reopenPersistence'] as const) {
+    const c = dimCounts[dim] ?? 0;
+    console.log(`    ${dim}: ${c}/${totalNonHidden}${c < totalNonHidden ? ' ⚠' : ''}`);
   }
 }
 
@@ -776,6 +1000,12 @@ async function main(): Promise<void> {
   }
   if (process.argv.includes('--require-no-unverified-command')) {
     requireNoUnverifiedCommand();
+  }
+  if (process.argv.includes('--require-behavioral-coverage')) {
+    requireBehavioralCoverage();
+  }
+  if (process.argv.includes('--require-behavioral-coverage-full')) {
+    requireBehavioralCoverageFull();
   }
   if (process.argv.includes('--require-runtime-match')) {
     await requireRuntimeMatch();

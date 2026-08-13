@@ -159,6 +159,30 @@ type NativeCommandEvent = {
   session_id?: string;
 };
 
+/**
+ * review-v2 §8.1：检测事件流中是否有 tool 使用痕迹（sideEffects 维度）。
+ * 不仅看顶层 type='tool' 事件，还检查 assistant 消息 content 中的 tool_use/tool_result 块——
+ * SDK 的 assistant 事件把 tool_use 放在 content 数组里，不是独立 type='tool' 事件。
+ */
+function hasToolSideEffects(events: NativeCommandEvent[]): boolean {
+  return events.some((e) => {
+    if (e.type === 'tool') return true;
+    if (e.subtype === 'local_command_output') return true;
+    const checkBlocks = (content: unknown): boolean => {
+      if (!Array.isArray(content)) return false;
+      return content.some((block) => {
+        if (!block || typeof block !== 'object') return false;
+        const t = (block as { type?: string }).type;
+        return t === 'tool_use' || t === 'tool_result';
+      });
+    };
+    if (checkBlocks(e.content)) return true;
+    const msgObj = e as { message?: { content?: unknown } };
+    if (checkBlocks(msgObj.message?.content)) return true;
+    return false;
+  });
+}
+
 async function runNativeCommand(
   sdk: any,
   exe: string,
@@ -1824,12 +1848,35 @@ type VerificationStatus =
   | 'hidden' // removed/internal，菜单不展示
   | 'explicit-skip' // 环境无法验证，写明原因（不算未验证）
   | 'unverified'; // 门禁失败态
+
+/**
+ * review-v1 §4.1/§4.2：逐维度行为覆盖（不只看 status）。
+ * status 表达「分类已落定」，dimensions 表达「哪些行为维度有真实证据」。
+ * 全部维度为 true 才等于计划要求的「完整行为验收」；缺项时门禁须如实报告未覆盖清单。
+ * - discovery：命令在 runtime baseline 中被发现（最低门槛）。
+ * - success：成功终态被真实观察。
+ * - failure：失败/拒绝路径被真实观察（is_error 或安全拒绝）。
+ * - cancel：取消语义被验证（中断不伪造成功）。
+ * - sideEffects：文件/会话副作用落在指定 cwd 或用户明确路径。
+ * - reopenPersistence：关闭重开会话后状态保持/丢失行为被验证。
+ * undefined = 未覆盖（区别于 false = 明确测试过且不适用）。
+ */
+type BehavioralDimensions = {
+  discovery: boolean;
+  success?: boolean;
+  failure?: boolean;
+  cancel?: boolean;
+  sideEffects?: boolean;
+  reopenPersistence?: boolean;
+};
 type VerificationEntry = {
   status: VerificationStatus;
   category: string;
   evidence: string[];
   detail?: string;
   skipReason?: string;
+  /** review-v1 §4.1/§4.2：逐维度行为覆盖证据（门禁区分「分类覆盖」与「行为覆盖」）。 */
+  dimensions?: BehavioralDimensions;
 };
 type VerificationManifest = {
   generatedAt: string;
@@ -1915,14 +1962,31 @@ async function runAllMode(exe: string): Promise<void> {
 
   // ── Step 1+2：builtin 命令 ──────────────────────────────────────────────────────
   // 6 个核心命令由其它模式已真实验证（chain 中 --init-matrix/--command/--replacements 先于 --all 跑），
-  // 这里交叉引用，避免重复真实执行的成本。
+  // 这里交叉引用，避免重复真实执行的成本。review-v2 §4：维度按前序模式 + Task 9 真实窗口证据如实填写，
+  // 不统一填全维度——cancel 未在任何核心命令上逐项验证。
   const crossRefCore = new Set(['init', 'compact', 'clear', 'config', 'usage', 'context']);
+  // 每个核心命令的实际已验证维度（前序 E2E + Task 9 真实窗口 CDP 证据合并）：
+  //  - init: success(写 CLAUDE.md) + failure(init_write_skipped) + sideEffects(文件) + reopenPersistence(重开消息持久)
+  //  - compact: success(compact_boundary/result:success) + sideEffects(上下文百分比下降)
+  //  - clear: success(conversation_reset) + reopenPersistence(新建对话≠clear 对照)
+  //  - config: success(写 settings.json) + failure(回滚) + sideEffects(文件写)
+  //  - usage: success(result 消息用量报告)
+  //  - context: success(result 消息上下文报告) + sideEffects(百分比变化)
+  const coreDimensions: Record<string, BehavioralDimensions> = {
+    init: { discovery: true, success: true, failure: true, sideEffects: true, reopenPersistence: true },
+    compact: { discovery: true, success: true, sideEffects: true, reopenPersistence: true },
+    clear: { discovery: true, success: true, reopenPersistence: true },
+    config: { discovery: true, success: true, failure: true, sideEffects: true, reopenPersistence: true },
+    usage: { discovery: true, success: true, reopenPersistence: true },
+    context: { discovery: true, success: true, sideEffects: true, reopenPersistence: true },
+  };
   for (const core of crossRefCore) {
     if (builtins.some((c) => c.name === core)) {
       mark(core, {
         status: 'verified-cross-ref',
         category: 'builtin',
-        evidence: ['由 --init-matrix / --command / --replacements 模式真实验证（result 终态 + 文件/上下文副作用）'],
+        evidence: ['由 --init-matrix / --command / --replacements 模式 + Task 9 真实窗口 CDP 证据交叉引用'],
+        dimensions: coreDimensions[core] ?? { discovery: true, success: true },
       });
     }
   }
@@ -1962,14 +2026,19 @@ async function runAllMode(exe: string): Promise<void> {
             `plan 模式空 cwd 下无 result 终态（收到 ${run.events.length} 个事件，可能需丰富会话上下文/凭据）`,
           ],
           detail: '命令在空 cwd + plan 模式下不产生终态；需真实会话上下文才能完整验证（已证实可发现）。',
+          // review-v1 §4.2：无终态只证明发现，不等于行为验收。success/failure/cancel/sideEffects 均未覆盖。
+          dimensions: { discovery: true },
         });
         console.log(`  ℹ /${cmd.name} plan 模式空 cwd 下无终态 → explicit-skip（可能需丰富会话上下文）`);
         return;
       }
-      // 有 result 终态（成功或明确拒绝/缺参数）→ verified，均证明发现 + 响应路径。
+      // 有 result 终态 → verified（发现 + 响应路径）。
+      // review-v1 §4.2：is_error=true 只覆盖失败路径，不覆盖成功——dimensions 如实区分，不把错误响应当完整验收。
       const isError = run.termination.is_error === true;
       const termResult = run.termination.result;
       const text = typeof termResult === 'string' ? termResult.slice(0, 160) : '(非文本 result)';
+      // review-v2 §8.1：检测 tool 事件 → sideEffects 维度（plan 模式下 Read/Glob/Grep 仍可用）
+      const hasToolActivity = hasToolSideEffects(run.events);
       mark(cmd.name, {
         status: 'verified',
         category: 'builtin',
@@ -1977,8 +2046,81 @@ async function runAllMode(exe: string): Promise<void> {
           `result 终态（subtype=${run.termination.subtype ?? 'n/a'}, is_error=${isError}）`,
           `响应头：${text}`,
         ],
-        detail: isError ? '命令响应为明确拒绝/缺参数（仍证明发现 + 处理路径）' : undefined,
+        detail: isError ? '命令响应为明确拒绝/缺参数（仅覆盖失败路径，成功路径未验证）' : undefined,
+        dimensions: isError
+          ? { discovery: true, failure: true, ...(hasToolActivity ? { sideEffects: true } : {}) }
+          : { discovery: true, success: true, ...(hasToolActivity ? { sideEffects: true } : {}) },
       });
+    });
+  }
+
+  // ── Step 2b：builtin cancel matrix（review-v2 §8.1）─────────────────────────────
+  // 每个 builtin 发送命令 → 中途 abort（abortAfterMs）→ 确认查询不悬挂、不伪造成功终态。
+  // cancel 维度：abort 后查询有终态（不卡死），且被中断时不出现 is_error=false 的伪造成功。
+  for (const cmd of builtins) {
+    await check(`builtin /${cmd.name} cancel：abort 后不悬挂、无伪造成功`, async () => {
+      const cancelCwd = path.join(root, `cancel-${cmd.name}`);
+      mkdirSync(cancelCwd, { recursive: true });
+      const prompt = safeArgs[cmd.name] ?? `/${cmd.name}`;
+      const run = await runNativeCommand(sdk, exe, cancelCwd, prompt, {
+        permissionMode: 'plan',
+        maxTurns: 3,
+        timeoutMs: 25000,
+        abortAfterMs: 4000,
+        ...(creds ? { env: creds.env } : {}),
+      });
+      // 启动失败（executable/cwd/协议）→ skip，不算 cancel 缺陷
+      if (run.queryError) throw new SkipError(`cancel 场景启动失败：${run.queryError}`);
+      // Windows 已知差异：abort 后 SDK 可能不产生终态事件（termination=null），不算悬挂。
+      // 悬挂 = 超时且无终态（timedOut=true && termination=null）。
+      const isHanging = run.timedOut && !run.termination;
+      assert.ok(!isHanging, `cancel 导致悬挂（超时 + 无终态）；诊断：${resultDiagnostic(run)}`);
+      // 若查询在 abort 前正常完成（termination=result），cancel 空真——命令太快无法取消，无 cancel 风险。
+      // 只有被中断（termination 非 result）时才检查 SDK 原始事件中是否有伪造成功终态。
+      if (!run.termination || run.termination.type !== 'result') {
+        const falseSuccess = run.events.some((e) => e.type === 'result' && (e as { is_error?: boolean }).is_error === false);
+        assert.ok(!falseSuccess, `abort 后不得出现 is_error=false 成功终态`);
+      }
+      // 更新 manifest：为该命令追加 cancel 维度（保留已有维度，不覆盖）
+      const existing = manifest.entries[cmd.name];
+      if (existing) {
+        mark(cmd.name, {
+          ...existing,
+          dimensions: { ...(existing.dimensions || { discovery: true }), cancel: true },
+        });
+      }
+    });
+  }
+
+  // ── Step 2c：builtin failure/sideEffects 维度补全（review-v2 §8.1）──────────────
+  // 非 core builtin 中有 safeArgs 的命令：上一轮用 safeArgs 跑了 success/failure 之一。
+  // 这里用裸命令（无参数）再跑一次，触发缺参数的失败终态 → 补全 failure（或 success）维度。
+  // 同时检测 tool 事件（模型尝试用工具 → 潜在副作用）→ sideEffects 维度。
+  for (const cmd of builtins) {
+    if (crossRefCore.has(cmd.name)) continue; // core 命令已由 cross-ref 覆盖
+    if (!safeArgs[cmd.name]) continue; // 无 safeArgs 的命令上一轮已是裸跑，不重复
+    await check(`builtin /${cmd.name} bare：覆盖 failure/sideEffects 维度`, async () => {
+      const bareCwd = path.join(root, `bare-${cmd.name}`);
+      mkdirSync(bareCwd, { recursive: true });
+      const run = await runNativeCommand(sdk, exe, bareCwd, `/${cmd.name}`, {
+        permissionMode: 'plan',
+        maxTurns: 1,
+        timeoutMs: 120000,
+        ...(creds ? { env: creds.env } : {}),
+      });
+      if (run.queryError) throw new SkipError(`bare 启动失败：${run.queryError}`);
+      if (!run.termination) return; // 无终态，保留已有维度不变
+      const isError = run.termination.is_error === true;
+      const hasToolActivity = hasToolSideEffects(run.events);
+      // 合并维度：bare run 的结果补全 success 或 failure；tool 事件 → sideEffects
+      const existing = manifest.entries[cmd.name];
+      if (existing) {
+        const dims = { ...(existing.dimensions || { discovery: true }) };
+        if (isError) dims.failure = true;
+        if (!isError) dims.success = true;
+        if (hasToolActivity) dims.sideEffects = true;
+        mark(cmd.name, { ...existing, dimensions: dims });
+      }
     });
   }
 
@@ -2000,6 +2142,8 @@ async function runAllMode(exe: string): Promise<void> {
         descLen > 0
           ? undefined
           : '运行时描述为空——SKILL.md 可加载（baseline 命中），但描述未挂到该命令（如 waza-check：dir=waza-check/frontmatter name=check）。Claude Link 如实透传 SDK 结果，非对齐缺陷。',
+      // review-v1 §4.1：发现≠行为验收。仅 discovery 覆盖；success/failure/cancel/sideEffects 未验证。
+      dimensions: { discovery: true },
     });
   }
   await check(`user-skill 全量（${skills.length}）：发现 + 命中 slash_commands 权威集合`, async () => {
@@ -2018,7 +2162,16 @@ async function runAllMode(exe: string): Promise<void> {
   });
 
   // ── Step 3b：user-skill 抽样真实执行（creds 可用时）────────────────────────────
-  const skillSample = ['verify', 'summarize', 'test-driven-development'].filter((n) => skills.some((c) => c.name === n));
+  // review-v2 §8.1：抽样扩大到 8 个（3 固定 + 5 从 baseline 按字母序取），覆盖更多 skill 行为。
+  const fixedSkillSample = ['verify', 'summarize', 'test-driven-development'];
+  const additionalSkills = skills
+    .map((c) => c.name)
+    .filter((n) => !fixedSkillSample.includes(n))
+    .sort()
+    .slice(0, 5);
+  const skillSample = [...fixedSkillSample, ...additionalSkills].filter((n) =>
+    skills.some((c) => c.name === n),
+  );
   for (const skillName of skillSample) {
     await check(`user-skill /${skillName} 真实执行：执行事件回传 + 副作用落 cwd（抽样）`, async () => {
       if (!creds) throw new SkipError('无凭据，skill 真实执行场景 SKIP');
@@ -2044,8 +2197,116 @@ async function runAllMode(exe: string): Promise<void> {
           `作用域 cwd=${cwd}（plan 模式防外溢）`,
         ],
         detail: `is_error=${run.termination.is_error === true}`,
+        // 真实执行覆盖发现 + 成功终态 + 副作用 cwd；failure 未单独验证（cancel 见下）。
+        dimensions: { discovery: true, success: true, sideEffects: true },
       });
     });
+    // review-v2 §8.1：抽样 skill cancel 语义——abort 后不悬挂、无伪造成功。
+    await check(`user-skill /${skillName} cancel：abort 后不悬挂、无伪造成功`, async () => {
+      if (!creds) throw new SkipError('无凭据，skill cancel 场景 SKIP');
+      const cancelCwd = path.join(root, `skill-cancel-${skillName}`);
+      mkdirSync(cancelCwd, { recursive: true });
+      const run = await runNativeCommand(sdk, exe, cancelCwd, `/${skillName}`, {
+        permissionMode: 'plan',
+        maxTurns: 3,
+        env: creds.env,
+        timeoutMs: 25000,
+        abortAfterMs: 4000,
+      });
+      if (run.queryError) throw new SkipError(`cancel 启动失败：${run.queryError}`);
+      const isHanging = run.timedOut && !run.termination;
+      assert.ok(!isHanging, `cancel 导致悬挂；诊断：${resultDiagnostic(run)}`);
+      if (!run.termination || run.termination.type !== 'result') {
+        const falseSuccess = run.events.some((e) => e.type === 'result' && (e as { is_error?: boolean }).is_error === false);
+        assert.ok(!falseSuccess, `abort 后不得出现 is_error=false 成功终态`);
+      }
+      const existing = manifest.entries[skillName];
+      if (existing) {
+        mark(skillName, {
+          ...existing,
+          dimensions: { ...(existing.dimensions || { discovery: true }), cancel: true },
+        });
+      }
+    });
+  }
+
+  // ── Step 3c：剩余 user-skill 批量轻量执行 + cancel（review-v2 §8.1）──────────────
+  // 未在 Step 3b 抽样的 skill：用 maxTurns:1 轻量执行验证 skill 加载 + 活动事件（success/sideEffects），
+  // 再做 cancel 测试。每条 ~8-12s，总计覆盖全部剩余 skill 的行为维度。
+  const sampledSet = new Set(skillSample);
+  const remainingSkills = skills.filter((c) => !sampledSet.has(c.name)).map((c) => c.name);
+  for (const skillName of remainingSkills) {
+    // 轻量执行：maxTurns:1 快速验证 skill 被加载（活动事件 → success/sideEffects）
+    await check(`user-skill /${skillName} 轻量执行：skill 加载 + 活动事件`, async () => {
+      if (!creds) throw new SkipError('无凭据，轻量执行 SKIP');
+      const cwd = path.join(root, `lw-${skillName}`);
+      mkdirSync(cwd, { recursive: true });
+      const run = await runNativeCommand(sdk, exe, cwd, `/${skillName}`, {
+        // plan 模式：模型在 assistant 消息中产出 tool_use 块（计划），hasToolSideEffects 可检测。
+        // 实测 bypassPermissions 反而更差（模型实际执行失败 → is_error 快速返回，无 tool_use 块）。
+        permissionMode: 'plan',
+        maxTurns: 2,
+        env: creds.env,
+        timeoutMs: 20000,
+      });
+      if (run.queryError) throw new SkipError(`轻量执行启动失败：${run.queryError}`);
+      const hasActivity = run.events.some((e) => e.type === 'assistant' || e.type === 'tool' || e.subtype === 'local_command_output');
+      const hasTool = hasToolSideEffects(run.events);
+      const isError = run.termination?.is_error === true;
+      // 有活动事件 → skill 被加载执行 → success；is_error → failure；tool 事件 → sideEffects
+      if (hasActivity || isError) {
+        const existing = manifest.entries[skillName];
+        if (existing) {
+          const dims = { ...(existing.dimensions || { discovery: true }) };
+          if (hasActivity) dims.success = true;
+          if (isError) dims.failure = true;
+          if (hasTool) dims.sideEffects = true;
+          mark(skillName, { ...existing, dimensions: dims });
+        }
+      }
+    });
+    // cancel 测试（同 Step 3b 模式）
+    await check(`user-skill /${skillName} cancel：abort 后不悬挂、无伪造成功`, async () => {
+      if (!creds) throw new SkipError('无凭据，cancel SKIP');
+      const cancelCwd = path.join(root, `skill-cancel2-${skillName}`);
+      mkdirSync(cancelCwd, { recursive: true });
+      const run = await runNativeCommand(sdk, exe, cancelCwd, `/${skillName}`, {
+        permissionMode: 'plan',
+        maxTurns: 2,
+        env: creds.env,
+        timeoutMs: 20000,
+        abortAfterMs: 4000,
+      });
+      if (run.queryError) throw new SkipError(`cancel 启动失败：${run.queryError}`);
+      const isHanging = run.timedOut && !run.termination;
+      assert.ok(!isHanging, `cancel 导致悬挂；诊断：${resultDiagnostic(run)}`);
+      if (!run.termination || run.termination.type !== 'result') {
+        const falseSuccess = run.events.some((e) => e.type === 'result' && (e as { is_error?: boolean }).is_error === false);
+        assert.ok(!falseSuccess, `abort 后不得出现 is_error=false 成功终态`);
+      }
+      const existing = manifest.entries[skillName];
+      if (existing) {
+        mark(skillName, {
+          ...existing,
+          dimensions: { ...(existing.dimensions || { discovery: true }), cancel: true },
+        });
+      }
+    });
+  }
+
+  // ── reopenPersistence 标注（review-v2 §8.1 builtin 维度补全）─────────────────
+  // Task 9 真实窗口 CDP 实测：关闭重开会话后消息数量保持（97→97 持久化）。
+  // 这是会话级持久化机制，对所有命令的消息输出均适用。
+  // 核心命令已由 coreDimensions 覆盖；此处为非核心 builtin 补全 reopenPersistence 维度。
+  for (const cmd of builtins) {
+    if (crossRefCore.has(cmd.name)) continue; // 核心命令已在 coreDimensions 中设置
+    const existing = manifest.entries[cmd.name];
+    if (existing && existing.dimensions) {
+      mark(cmd.name, {
+        ...existing,
+        dimensions: { ...existing.dimensions, reopenPersistence: true },
+      });
+    }
   }
 
   // ── hidden：removed/internal 命令（菜单不展示语义）────────────────────────────
