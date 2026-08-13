@@ -259,7 +259,7 @@ onUnmounted(() => {
       </div>
       <div v-else-if="commandStatus === 'stale'" class="slash-menu__hint">可能不是最新</div>
       <div v-if="unknownCount > 0 || hiddenCount > 0" class="slash-menu__provenance">
-        <span v-if="unknownCount > 0">{{ unknownCount }} 个命令来源未知（待分类，不可执行）</span>
+        <span v-if="unknownCount > 0">{{ unknownCount }} 个命令来源未知（待分类，未作为内置命令验证）</span>
         <span v-if="unknownCount > 0 && hiddenCount > 0">·</span>
         <span v-if="hiddenCount > 0">{{ hiddenCount }} 个隐藏命令（已移除/内部）</span>
       </div>

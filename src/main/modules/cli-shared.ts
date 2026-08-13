@@ -5,7 +5,7 @@
 // 这是从 process-manager.ts 提取的纯工具函数。process-manager.ts 的 spawn 入口
 // 已删除（SDK 路径完全取代），但工具函数被 SDK 路径复用，故独立到此模块。
 
-import type { CliInitEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliResultEvent, CliEvent, CliMessageEvent, CliMessageContentPart } from '../../shared/types/cli';
+import type { CliInitEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliResultEvent, CliEvent, CliMessageEvent, CliMessageContentPart, CliAbortedEvent } from '../../shared/types/cli';
 import type { ThinkingLevel } from '../../shared/types/thinking';
 import { getConfig } from './config-manager';
 import { resolveThinkingConfig } from '../../shared/thinking-resolver';
@@ -148,6 +148,20 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
 
     case 'stream_event':
       break;
+
+    case 'aborted': {
+      // review-v2 §3.7：aborted 终态（用户中断「已中断」/ 硬杀「已硬中断」/ 回合结束「回合已结束」）
+      // 此前未落库——forwardEvent 推了 IPC 但 persistCliEvent 缺 case，导致重开会话后中断文本消失。
+      const abortEvent = event as CliAbortedEvent;
+      messageRepo.createMessage({
+        sessionId,
+        role: 'system',
+        content: abortEvent.message,
+        eventType: 'system',
+        processKind: 'system:aborted',
+      });
+      break;
+    }
 
     case 'result': {
       const r = event as CliResultEvent;
