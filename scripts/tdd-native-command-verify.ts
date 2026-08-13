@@ -423,6 +423,59 @@ check('未注入 userHome 时不把隔离目录 skill 当用户来源（隔离�
   }
 });
 
+// review-v1 §5.1：commands_changed provenance 刷新的核心机制——重扫同一 cwd 后，
+// 新增的项目命令文件会被正确分类（init 时冻结的 evidence 不反映此变化）。
+check('review-v1 §5.1: 重扫 cwd 后新增项目命令文件被正确分类（provenance 刷新机制）', () => {
+  mkdirSync(ORIGIN_TMP_ROOT, { recursive: true });
+  const proj = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-refresh-'));
+  try {
+    const DYN_CMD = 'zzz-dynamic-refresh-cmd';
+    const userHome = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-refresh-home-'));
+    // ① init 时（无项目命令）：DYN_CMD 不在 evidence 中。
+    const evBefore = buildCommandOriginEvidence({ cwd: proj, userHome });
+    assert.equal(evBefore.origins[DYN_CMD], undefined, 'init 时项目命令文件不存在 → origins 中无 DYN_CMD');
+
+    // ② 会话过程中新增项目命令文件（模拟 /reload-skills 前用户创建 .claude/commands/zzz-dynamic-refresh-cmd.md）。
+    mkdirSync(path.join(proj, '.claude', 'commands'), { recursive: true });
+    writeFileSync(path.join(proj, '.claude', 'commands', `${DYN_CMD}.md`), '# 动态项目命令\n', 'utf8');
+
+    // ③ commands_changed 刷新：重扫同一 cwd → DYN_CMD 被分类为 project。
+    const evAfter = buildCommandOriginEvidence({ cwd: proj, userHome });
+    assert.equal(evAfter.origins[DYN_CMD], 'project', '重扫后新增项目命令文件须分类为 project');
+
+    rmSync(userHome, { recursive: true, force: true });
+  } finally {
+    rmSync(proj, { recursive: true, force: true });
+  }
+});
+
+// review-v3 §6.7：advancedJson.env.USERPROFILE 覆盖时，evidence 扫描须用覆盖值（非宿主默认）。
+// 模拟：宿主 process.env.USERPROFILE 指向 real-home（无 Skill），advancedJson.env.USERPROFILE 指向 isolated-home（有 Skill）。
+// buildSpawnEnv 会用 advancedJson.env 覆盖 → effectiveUserHome() = isolated-home → evidence 扫描 isolated-home。
+check('review-v3 §6.7: advancedJson.env.USERPROFILE 覆盖 → evidence 扫描用覆盖值（非 process.env）', () => {
+  mkdirSync(ORIGIN_TMP_ROOT, { recursive: true });
+  const realHome = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-real-home-'));
+  const isolatedHome = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-iso-home-'));
+  try {
+    // 只在 isolatedHome 放 Skill（模拟 advancedJson.env.USERPROFILE 指向的隔离目录）
+    const skillDir = path.join(isolatedHome, '.claude', 'skills', UNIQUE_SKILL);
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(path.join(skillDir, 'SKILL.md'), '---\nname: zzz-isolated-skill-test\n---\n# 隔离技能\n', 'utf8');
+
+    // 用 realHome（process.env 默认）→ 找不到 Skill
+    const evReal = buildCommandOriginEvidence({ userHome: realHome });
+    assert.equal(evReal.origins[UNIQUE_SKILL], undefined, '用宿主默认 userHome 不应发现隔离 Skill');
+
+    // 用 isolatedHome（advancedJson.env 覆盖值）→ 发现 Skill 并分类为 user-skill
+    const evOverridden = buildCommandOriginEvidence({ userHome: isolatedHome });
+    assert.equal(evOverridden.origins[UNIQUE_SKILL], 'user-skill', '用覆盖后的 userHome 须发现隔离 Skill');
+
+    rmSync(realHome, { recursive: true, force: true });
+  } finally {
+    rmSync(isolatedHome, { recursive: true, force: true });
+  }
+});
+
 console.log('=== 8) Task 4 SDK 动态发现接线契约（sdk-backend 源码）===');
 // sdk-backend.ts 经 config-manager → electron 运行时依赖链，无法被 tsx 直接 import，故用源码文本契约
 // 钉住跨文件接线不变量（CLAUDE.md：记录接线契约可用源码文本断言）。
@@ -465,9 +518,43 @@ check('Task2: system.init 捕获命令分类 ctx（buildCommandOriginContext）'
   assert.ok(/function buildCommandOriginContext/.test(sdkBackendSrc), '应存在 buildCommandOriginContext');
   assert.ok(sdkBackendSrc.includes('sessionCommandCtx.set(sessionId, buildCommandOriginContext('), 'init 分支应写入 sessionCommandCtx');
 });
-check('Task2: probe/changed 全量替换均带本会话分类 ctx', () => {
+check('Task2: probe 全量替换带本会话分类 ctx', () => {
   assert.ok(sdkBackendSrc.includes("'probe', sessionCommandCtx.get(sessionId)"), 'probe replace 应带 sessionCommandCtx');
-  assert.ok(sdkBackendSrc.includes("'changed', sessionCommandCtx.get(sessionId)"), 'changed replace 应带 sessionCommandCtx');
+});
+// review-v1 §5.1：commands_changed 不再用 init 时冻结的 ctx，而是按当前 cwd 重建来源证据。
+check('review-v1 §5.1: commands_changed 按 cwd 刷新 provenance（refreshCommandOriginContext）', () => {
+  assert.ok(/function refreshCommandOriginContext\(sessionId: string\)/.test(sdkBackendSrc), '应定义 refreshCommandOriginContext(sessionId)');
+  assert.ok(
+    /'changed',\s*refreshCommandOriginContext\(sessionId\)/.test(sdkBackendSrc),
+    'commands_changed replace 应带 refreshCommandOriginContext（非 init 时冻结的 ctx）',
+  );
+  // commands_changed 分支不得回退为冻结的 sessionCommandCtx.get。
+  const changedBranch = sdkBackendSrc.match(/subtype === 'commands_changed'[\s\S]*?continue;/);
+  assert.ok(changedBranch, 'commands_changed 分支未找到');
+  assert.ok(!/sessionCommandCtx\.get\(sessionId\)/.test(changedBranch![0]), 'commands_changed 不应用 init 时冻结的 ctx');
+});
+check('review-v1 §5.1: provenance 种子存储 + 清理（sessionProvenanceSeeds）', () => {
+  assert.ok(/sessionProvenanceSeeds\s*=\s*new Map/.test(sdkBackendSrc), '应定义 sessionProvenanceSeeds Map');
+  assert.ok(sdkBackendSrc.includes('sessionProvenanceSeeds.set(sessionId,'), 'buildCommandOriginContext 应存 provenance 种子');
+  assert.ok(sdkBackendSrc.includes('sessionProvenanceSeeds.delete(sessionId)'), 'markSessionDeleted 应清理 provenance 种子');
+});
+// review-v2 §5：证据扫描必须用与 SDK 子进程一致的 userHome（buildSpawnEnv 的 effective env），
+// 而非宿主 process.env 默认值——否则 advancedJson.env 覆盖 USERPROFILE/HOME 时分类错。
+check('review-v2 §5: provenance 证据扫描用 effective env userHome（非 process.env）', () => {
+  assert.ok(/function effectiveUserHome\(\)/.test(sdkBackendSrc), '应定义 effectiveUserHome()');
+  const effFn = sdkBackendSrc.match(/function effectiveUserHome\(\)[\s\S]*?\n}/);
+  assert.ok(effFn, 'effectiveUserHome 函数体未找到');
+  assert.ok(/buildSpawnEnv\(\)/.test(effFn![0]), 'effectiveUserHome 应调用 buildSpawnEnv()');
+  // buildCommandOriginContext + refreshCommandOriginContext 均用 effectiveUserHome()
+  const ctxSection = sdkBackendSrc.slice(
+    sdkBackendSrc.indexOf('function buildCommandOriginContext'),
+    sdkBackendSrc.indexOf('function findClaudeMdCandidates'),
+  );
+  assert.ok(ctxSection.includes('effectiveUserHome()'), '证据扫描入口应调用 effectiveUserHome()');
+  assert.ok(
+    !/process\.env\.USERPROFILE\s*\|\|\s*process\.env\.HOME/.test(ctxSection),
+    '证据扫描不得直接读 process.env.USERPROFILE||process.env.HOME（须走 effective env）',
+  );
 });
 check('Task2: markSessionDeleted 清理 sessionCommandCtx（单一收口登记）', () => {
   assert.ok(sdkBackendSrc.includes('sessionCommandCtx.delete(sessionId)'), 'markSessionDeleted 应清理命令分类 ctx');
@@ -478,6 +565,29 @@ check('emitCommandChanged 走独立 COMMANDS_CHANGED + isSessionActive 守卫', 
   const m = sdkBackendSrc.match(/function emitCommandChanged[\s\S]*?\n}/);
   assert.ok(m, 'emitCommandChanged 函数应存在');
   assert.ok(m && m[0].includes('isSessionActive'), 'emitCommandChanged 应有 isSessionActive 守卫（迟到事件拒绝）');
+});
+// review-v3 §6.3：commands_changed 全链路接线契约——从 SDK 事件到 renderer 菜单。
+// 每一环都须存在且串联：sdk-backend → registry.replace → emitCommandChanged → IPC → preload → command-store → ChatInput
+check('review-v3 §6.3: commands_changed 全链路接线（registry→IPC→preload→store→ChatInput）', () => {
+  // ① sdk-backend: commands_changed 分支 → refreshCommandOriginContext → registry.replace('changed') → emitCommandChanged
+  const changedBranch = sdkBackendSrc.match(/subtype === 'commands_changed'[\s\S]*?continue;/);
+  assert.ok(changedBranch, 'commands_changed 分支须存在');
+  assert.ok(/refreshCommandOriginContext/.test(changedBranch![0]), '须调 refreshCommandOriginContext');
+  assert.ok(/emitCommandChanged/.test(changedBranch![0]), '须调 emitCommandChanged');
+  // ② emitCommandChanged → COMMANDS_CHANGED IPC
+  assert.ok(sdkBackendSrc.includes('IPC_CHANNELS.COMMANDS_CHANGED'), 'emitCommandChanged 须用 COMMANDS_CHANGED IPC');
+  // ③ preload: on(COMMANDS_CHANGED) → callback
+  const preloadSrc = readFileSync(path.join('src', 'preload', 'api.ts'), 'utf8');
+  assert.ok(preloadSrc.includes('IPC_CHANNELS.COMMANDS_CHANGED'), 'preload 须监听 COMMANDS_CHANGED');
+  assert.ok(/onCommandChanged/.test(preloadSrc), 'preload 须暴露 onCommandChanged');
+  // ④ command-store: replaceFromEvent 全量替换
+  const storeSrc = readFileSync(path.join('src', 'renderer', 'stores', 'command-store.ts'), 'utf8');
+  assert.ok(/replaceFromEvent/.test(storeSrc), 'command-store 须有 replaceFromEvent');
+  // ⑤ ChatInput 从 command-store 读 commands（菜单数据源）
+  const chatInputSrc = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'ChatInput.vue'), 'utf8');
+  assert.ok(/commandStore|command-store|useCommandStore|matchingCommands/.test(chatInputSrc), 'ChatInput 须从 command-store 读命令');
+  // ⑥ provenance 徽章渲染
+  assert.ok(/originLabel|data-origin/.test(chatInputSrc), 'ChatInput 须渲染 origin 徽章');
 });
 
 check('命令发现失败 → degraded（保留缓存命令，不阻塞聊天）', () => {
@@ -723,6 +833,16 @@ void (async () => {
   });
   check('result 终态兜底保留（/usage 结果只出现在 result.result）', () => {
     assert.ok(/type === 'result'/.test(sdkBackendSrcLco), 'result 终态分支应保留');
+  });
+  // review-v2 §3.7：aborted 终态（「已中断」/「已硬中断」）须落库——此前 persistCliEvent 缺 case 导致
+  // 中断文本消失。验证 persistCliEvent（cli-shared.ts）处理 aborted 并 createMessage。
+  check('review-v2 §3.7: aborted 终态落库（persistCliEvent case aborted + createMessage）', () => {
+    const cliSharedSrc = readFileSync(path.join('src', 'main', 'modules', 'cli-shared.ts'), 'utf8');
+    const persistFn = cliSharedSrc.match(/export function persistCliEvent[\s\S]*?\n}/);
+    assert.ok(persistFn, 'persistCliEvent 函数体未找到');
+    assert.ok(/case 'aborted'/.test(persistFn![0]), 'persistCliEvent 须有 case aborted');
+    assert.ok(/system:aborted/.test(persistFn![0]), 'aborted 须用 processKind system:aborted 落库');
+    assert.ok(/createMessage/.test(persistFn![0]), 'aborted 须 createMessage（不能只 break）');
   });
 
   console.log('=== 14) Task 9 降级 / 隔离 / 迟到事件补全契约（源码）===');
@@ -1616,6 +1736,49 @@ void (async () => {
       const gateIdx = chainSrc.indexOf('--require-no-unverified-command');
       assert.ok(replIdx > 0 && allIdx > replIdx, '--all 须在 --replacements 之后（交叉引用前置模式验证结果）');
       assert.ok(gateIdx > allIdx, '--require-no-unverified-command 须在 --all 之后（消费 manifest）');
+    });
+    // review-v3 §6.2：行为覆盖两级门禁 + 接入发布链
+    check('review-v3 §6.2: 行为覆盖实践级门禁接入 chain + 严格级门禁独立', () => {
+      assert.ok(/function requireBehavioralCoverage\(\)/.test(matrixSrc), '须定义 requireBehavioralCoverage（实践级）');
+      assert.ok(/function requireBehavioralCoverageFull\(\)/.test(matrixSrc), '须定义 requireBehavioralCoverageFull（严格级）');
+      assert.ok(matrixSrc.includes('--require-behavioral-coverage-full'), 'main 须分派 --require-behavioral-coverage-full');
+      assert.ok(/0\.95/.test(matrixSrc), '实践级须有 ≥95% 容忍阈值');
+      // chain 须含实践级门禁
+      assert.ok(/--require-behavioral-coverage['"]/.test(chainSrc), 'chain 须含 --require-behavioral-coverage');
+      // chain 不含严格级（gap 未闭合前不阻塞发布链）
+      assert.ok(!/--require-behavioral-coverage-full/.test(chainSrc), 'chain 不应含严格级（sideEffects gap 未闭合）');
+    });
+    // ── review-v1 §4.1/§4.2：行为维度拆分（发现 ≠ 行为验收）──
+    check('review-v1 §4.1: manifest 携带 BehavioralDimensions 逐维度字段', () => {
+      assert.ok(/type BehavioralDimensions/.test(e2eSrc), '须定义 BehavioralDimensions 类型');
+      assert.ok(/dimensions\?:\s*BehavioralDimensions/.test(e2eSrc), 'VerificationEntry 须有 dimensions 可选字段');
+      // verified-discovery mark 只带 discovery 维度（不伪装行为覆盖）。
+      const step3a = e2eSrc.slice(e2eSrc.indexOf('Step 3a'), e2eSrc.indexOf('Step 3b'));
+      assert.ok(/discovery:\s*true/.test(step3a), 'verified-discovery 须带 dimensions.discovery = true');
+      assert.ok(!/success:\s*true/.test(step3a), 'verified-discovery 不得伪装 success 维度');
+    });
+    check('review-v1 §4.2: builtin is_error 标 failure 维度（不标 success）', () => {
+      // is_error 分支须设 failure: true 且不设 success: true；非 is_error 分支设 success: true。
+      const builtinSection = e2eSrc.slice(e2eSrc.indexOf('Step 1+2'), e2eSrc.indexOf('Step 3a'));
+      assert.ok(/failure:\s*true/.test(builtinSection), 'is_error builtin 须标 dimensions.failure = true');
+      assert.ok(/success:\s*true/.test(builtinSection), '非 is_error builtin 须标 dimensions.success = true');
+      // 显式条件分支（isError ? failure : success），不是无条件标全维度。
+      assert.ok(/isError\s*\?/.test(builtinSection), 'dimensions 须按 is_error 条件区分');
+    });
+    check('review-v1 §4.1: explicit-skip 只带 discovery 维度（不伪装行为覆盖）', () => {
+      const builtinSection = e2eSrc.slice(e2eSrc.indexOf('Step 1+2'), e2eSrc.indexOf('Step 3a'));
+      // explicit-skip 的 dimensions 须为 { discovery: true }（只发现，无终态）。
+      assert.ok(/discovery:\s*true/.test(builtinSection), 'explicit-skip 须带 dimensions.discovery = true');
+    });
+    check('review-v1 §4.1/§4.2: --require-behavioral-coverage 行为覆盖门禁已实现 + 分派', () => {
+      assert.ok(/function requireBehavioralCoverage\(\)/.test(matrixSrc), '须定义 requireBehavioralCoverage');
+      assert.ok(/requireBehavioralCoverage\(\)/.test(matrixSrc), 'main 须分派 --require-behavioral-coverage');
+      assert.ok(/behavioralLevel/.test(matrixSrc), '须有 behavioralLevel 逐命令等级判定');
+      assert.ok(/REQUIRED_DIMENSIONS/.test(matrixSrc), '须定义按 category 的要求维度表');
+    });
+    check('review-v1 §4.1: --require-no-unverified-command 打印行为覆盖汇总（区分分类覆盖与行为覆盖）', () => {
+      assert.ok(/行为覆盖等级/.test(matrixSrc), '门禁须打印行为覆盖等级汇总');
+      assert.ok(/behavioralLevel/.test(matrixSrc), '汇总须用 behavioralLevel 判定');
     });
   }
 
