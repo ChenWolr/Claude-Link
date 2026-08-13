@@ -17,6 +17,9 @@ const chain = [
   'tsx scripts/claude-code-command-e2e-verify.ts --native --all',
   // Task 7 Step 5：无未验证命令门禁（消费 --all manifest，要求每条 runtime 命令有明确验证状态）。
   'tsx scripts/claude-code-command-matrix.ts --require-no-unverified-command',
+  // review-v3 §6.2：行为覆盖实践级门禁（discovery+cancel+≥1 success/failure，≥95% 通过）。
+  // 接入发布链——sideEffects 为信息维度（plan 模式受限），严格级（full）不入链。
+  'tsx scripts/claude-code-command-matrix.ts --require-behavioral-coverage',
   'tsx scripts/claude-code-command-matrix.ts --require-runtime-match',
 ];
 
