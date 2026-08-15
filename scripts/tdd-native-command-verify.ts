@@ -16,6 +16,7 @@ import {
 } from '../src/shared/command-routing';
 import {
   createDefaultCommandSnapshot,
+  EMPTY_COMMAND_ORIGIN_CONTEXT,
   type SdkCommand,
   type SessionCommandSnapshot,
 } from '../src/shared/types/command';
@@ -522,16 +523,60 @@ check('Task2: probe 全量替换带本会话分类 ctx', () => {
   assert.ok(sdkBackendSrc.includes("'probe', sessionCommandCtx.get(sessionId)"), 'probe replace 应带 sessionCommandCtx');
 });
 // review-v1 §5.1：commands_changed 不再用 init 时冻结的 ctx，而是按当前 cwd 重建来源证据。
+// review-v9 §4 更新：refreshCommandOriginContext 增加可选 queryCwd——当前 query 的 cwd 优先于
+// init seed（实测：会话创建时 probe 用全局默认 cwd，seed 冻结旧目录会把新 cwd 的 project skill
+// 分类成 unknown，且代际号 guard 使后到的正确 probe 无法纠正 → 菜单永不显示）。
 check('review-v1 §5.1: commands_changed 按 cwd 刷新 provenance（refreshCommandOriginContext）', () => {
-  assert.ok(/function refreshCommandOriginContext\(sessionId: string\)/.test(sdkBackendSrc), '应定义 refreshCommandOriginContext(sessionId)');
+  assert.ok(/function refreshCommandOriginContext\(sessionId: string, queryCwd\?: string\)/.test(sdkBackendSrc), '应定义 refreshCommandOriginContext(sessionId, queryCwd?)');
   assert.ok(
-    /'changed',\s*refreshCommandOriginContext\(sessionId\)/.test(sdkBackendSrc),
-    'commands_changed replace 应带 refreshCommandOriginContext（非 init 时冻结的 ctx）',
+    /'changed',\s*refreshCommandOriginContext\(sessionId,\s*opts\.workingDir/.test(sdkBackendSrc),
+    'commands_changed replace 应传入当前 query 的 workingDir（优先于 init seed）',
   );
   // commands_changed 分支不得回退为冻结的 sessionCommandCtx.get。
   const changedBranch = sdkBackendSrc.match(/subtype === 'commands_changed'[\s\S]*?continue;/);
   assert.ok(changedBranch, 'commands_changed 分支未找到');
   assert.ok(!/sessionCommandCtx\.get\(sessionId\)/.test(changedBranch![0]), 'commands_changed 不应用 init 时冻结的 ctx');
+  // review-v9 §4：当前 query cwd 优先，且回写 seed（后续刷新不再沿用旧 cwd）。
+  const fnMatch = sdkBackendSrc.match(/function refreshCommandOriginContext[\s\S]*?\n}/);
+  assert.ok(fnMatch, 'refreshCommandOriginContext 函数体未找到');
+  const fnBody = fnMatch![0];
+  assert.ok(/const cwd = queryCwd \?\? seed\?\.cwd/.test(fnBody), 'cwd 应为 queryCwd ?? seed.cwd（当前 query 优先）');
+  assert.ok(/sessionProvenanceSeeds\.set\(sessionId, \{ cwd: queryCwd/.test(fnBody), 'queryCwd 与 seed 不一致时应回写 seed');
+});
+// review-v4 §5.3（review-v9 §4 修订）：commands_changed 在 init 前到达（sessionCommandCtx 缺失）时，
+// 不再早返回 EMPTY——那会把 project skill 固化成 unknown 且被代际号 guard 锁死（实测缺陷）。
+// 新契约：缺失 ctx 时仍按磁盘 evidence 构建分类上下文（名称集合为空，由 evidence +
+// '(user)' 描述标记 + KNOWN_BUILTIN_NAMES 兜底分类）。
+check('review-v4 §5.3（v9 修订）: refreshCommandOriginContext 缺失 ctx 时按 evidence 兜底（不返回 EMPTY）', () => {
+  const fnMatch = sdkBackendSrc.match(/function refreshCommandOriginContext[\s\S]*?\n}/);
+  assert.ok(fnMatch, 'refreshCommandOriginContext 函数体未找到');
+  const fnBody = fnMatch![0];
+  assert.ok(
+    !/if\s*\(\s*!ctx\s*\)\s*return\s+EMPTY_COMMAND_ORIGIN_CONTEXT/.test(fnBody),
+    '不得在缺失 sessionCommandCtx 时早返回 EMPTY（unknown 会固化为终态）',
+  );
+  assert.ok(
+    /return \{ skills: \[\], plugins: \[\], slashCommands: \[\], evidence \};/.test(fnBody),
+    '缺失 ctx 时应返回 evidence-only 上下文（名称集合空，磁盘来源映射兜底）',
+  );
+});
+check('review-v4 §5.3: 缺失分类上下文 → 命令 unknown，后续带 ctx 的 replace 纠正（行为）', () => {
+  const reg = new SdkCommandRegistry();
+  const sid = 'test-missing-ctx';
+  const rawCmds = [
+    { name: 'init', description: 'Initialize project' },
+    { name: 'my-skill', description: 'A test skill' },
+  ];
+  // ① commands_changed 在 init 前到达 → ctx=EMPTY → 未知命令分类为 unknown（启发式）
+  const snap1 = reg.replace(sid, rawCmds, 'changed', EMPTY_COMMAND_ORIGIN_CONTEXT);
+  const skillCmd1 = snap1.commands.find((c) => c.name === 'my-skill');
+  assert.equal(skillCmd1?.origin, 'unknown', '空 ctx 下未知 skill 应分类为 unknown（非 user-skill）');
+  // ② init 到达后建立 ctx → 下次 commands_changed 带正确 ctx → 同一命令重新分类为 user-skill
+  const snap2 = reg.replace(sid, rawCmds, 'changed', {
+    skills: ['my-skill'], plugins: [], slashCommands: ['init', 'my-skill'],
+  });
+  const skillCmd2 = snap2.commands.find((c) => c.name === 'my-skill');
+  assert.equal(skillCmd2?.origin, 'user-skill', '带 ctx 后 my-skill 须纠正为 user-skill（全量替换不残留旧分类）');
 });
 check('review-v1 §5.1: provenance 种子存储 + 清理（sessionProvenanceSeeds）', () => {
   assert.ok(/sessionProvenanceSeeds\s*=\s*new Map/.test(sdkBackendSrc), '应定义 sessionProvenanceSeeds Map');
@@ -874,6 +919,30 @@ void (async () => {
     assert.equal(reg.getRevision('a'), 2);
     reg.clear('a');
     assert.equal(reg.getRevision('a'), 0);
+  });
+  // review-v4 §5.2：revision 防旧回写——异步 probe 完成时若代际已变（期间发生 commands_changed），
+  // 须跳过写入，防旧 probe 覆盖新命令列表。行为模拟生产代码中的 startRev === getRevision 守卫。
+  check('review-v4 §5.2: revision 防旧回写——旧 probe 代际不匹配时跳过写入（行为模拟）', () => {
+    const reg = new SdkCommandRegistry();
+    const sid = 'test-stale-probe';
+    // ① probe 启动时捕获代际
+    const startRev = reg.getRevision(sid); // 0
+    // ② probe 进行中，commands_changed 先到达 → replace 翻代际（写入新命令）
+    reg.replace(sid, [{ name: 'fresh-cmd', description: 'from commands_changed' }], 'changed');
+    const currentRev = reg.getRevision(sid); // 1
+    // ③ probe 完成——代际不匹配 → 跳过写入（防旧覆盖新）
+    assert.notEqual(startRev, currentRev, 'probe 期间发生 commands_changed → 代际不匹配 → 须跳过旧 probe 写入');
+    // ④ commands_changed 的新命令须保留（未被旧 probe 覆盖）
+    const snap = reg.get(sid);
+    assert.ok(
+      snap.commands.some((c) => c.name === 'fresh-cmd'),
+      'commands_changed 写入的命令须保留（旧 probe 未覆盖）',
+    );
+    // ⑤ 对比：若期间无 commands_changed（代际匹配），probe 写入正常
+    const sid2 = 'test-fresh-probe';
+    const startRev2 = reg.getRevision(sid2); // 0
+    reg.replace(sid2, [{ name: 'probe-cmd', description: 'from probe' }], 'probe');
+    assert.equal(startRev2, reg.getRevision(sid2) - 1, '无 commands_changed 时 probe 正常写入（代际匹配）');
   });
   // F1：SESSION_CREATE 登记会话，probe 真正启动
   check('F1 SESSION_CREATE 调 markSessionActive 登记会话（probe 守卫可通过）', () => {

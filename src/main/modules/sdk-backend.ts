@@ -48,7 +48,6 @@ import { isDisplayableSystemInfo } from '../../shared/system-info';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type { AppConfig } from '../../shared/types/config';
 import type { CommandChangedPayload, CommandOriginContext, SessionCommandSnapshot } from '../../shared/types/command';
-import { EMPTY_COMMAND_ORIGIN_CONTEXT } from '../../shared/types/command';
 import type {
   CliEvent,
   CliMessageContentPart,
@@ -1681,18 +1680,30 @@ function buildCommandOriginContext(
  * skills/plugins/slashCommands 名称集合沿用 init（SDK canonical 视图，不随项目文件变化）；
  * evidence 部分（文件来源映射）按当前磁盘状态重扫。
  */
-function refreshCommandOriginContext(sessionId: string): CommandOriginContext {
+function refreshCommandOriginContext(sessionId: string, queryCwd?: string): CommandOriginContext {
   const ctx = sessionCommandCtx.get(sessionId);
-  if (!ctx) return EMPTY_COMMAND_ORIGIN_CONTEXT;
   const seed = sessionProvenanceSeeds.get(sessionId);
   // review-v2 §5：与 buildCommandOriginContext 一致，用 effective env 的 userHome。
   const userHome = effectiveUserHome();
+  // review-v9 §4（实测修复）：commands_changed 可能早于 system:init 到达，或 seed 冻结的是
+  // 旧 cwd 的 init（实测：会话创建时 probe 用全局默认 cwd，设置 workingDir 后首个 query 的
+  // changed 若沿用 seed cwd，会把新 cwd 的 project skill 分类成 unknown）。当前 query 的 cwd
+  // 才是 CLI 本次扫描的真实根目录——优先于 seed，并回写 seed 供后续刷新使用。
+  const cwd = queryCwd ?? seed?.cwd;
+  if (queryCwd && queryCwd !== seed?.cwd) {
+    sessionProvenanceSeeds.set(sessionId, { cwd: queryCwd, plugins: seed?.plugins ?? [] });
+  }
   const evidence = buildCommandOriginEvidence({
-    cwd: seed?.cwd,
+    cwd,
     plugins: seed?.plugins ?? [],
     ...(userHome ? { userHome } : {}),
   });
-  return { skills: ctx.skills, plugins: ctx.plugins, slashCommands: ctx.slashCommands, evidence };
+  if (ctx) {
+    return { skills: ctx.skills, plugins: ctx.plugins, slashCommands: ctx.slashCommands, evidence };
+  }
+  // init 未处理（commands_changed 早于 init 到达）：名称集合为空——分类由 evidence（文件来源
+  // 映射）+ '(user)' 描述标记 + KNOWN_BUILTIN_NAMES 兜底完成，不再返回 EMPTY 导致 unknown 固化。
+  return { skills: [], plugins: [], slashCommands: [], evidence };
 }
 
 /** 从 cwd 向上收集存在的 CLAUDE.md 候选（CC 会加载的上下文文件，Task 3 诊断用）。 */
@@ -2368,7 +2379,7 @@ async function runQuery(
           // review-v1 §5.1：按当前会话 cwd 重建来源证据（init 时冻结的 evidence 不反映会话过程中
           // 新增/修改/删除的项目命令文件 .claude/skills、.claude/commands）。skills/plugins/slashCommands
           // 名称集合沿用 init（SDK canonical 视图），evidence 按当前磁盘状态重扫。
-          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', refreshCommandOriginContext(sessionId));
+          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', refreshCommandOriginContext(sessionId, opts.workingDir || getConfig().workingDirectory || undefined));
           emitCommandChanged(sessionId, mainWindow, snap);
           continue;
         }
