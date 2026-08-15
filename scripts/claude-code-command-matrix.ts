@@ -350,6 +350,130 @@ export const REPLACEMENT_CANDIDATES: readonly ReplacementCandidateSpec[] = [
   },
 ];
 
+// ── review-v9 §3 第一步：命令行为契约（CommandBehaviorContract）──────────────────
+// 把「是否需要副作用」从布尔猜测改成逐命令契约：
+//   - 会写文件/设置/会话/数据库/命令 registry 的命令 → sideEffect.kind='required' + observable；
+//   - 纯展示/只读命令 → 'not-applicable'，必须人工写明 reason（不允许运行时自动推断），
+//     并由 E2E 前后快照证明没有应有副作用被遗漏（snapshotClean）。
+// 严格门禁 --require-behavioral-coverage-full 消费本契约：仅当 required 已观察、或明确
+// not-applicable 且理由与快照证据齐备时，sideEffects 维度才算完成。
+export type SideEffectObservable = 'file' | 'settings' | 'session' | 'database' | 'command-registry';
+
+export type CommandBehaviorContract = {
+  command: string;
+  origin: 'builtin' | 'user-skill' | 'project' | 'plugin';
+  required: {
+    discovery: boolean;
+    success: boolean;
+    failure: boolean;
+    cancel: boolean;
+    reopenPersistence: boolean;
+  };
+  sideEffect: {
+    kind: 'required' | 'not-applicable';
+    reason: string;
+    observable?: SideEffectObservable;
+  };
+};
+
+// 计划 Task 7 的维度要求按 category 落实到契约默认值：
+// builtin 须覆盖 discovery/success/failure/cancel/reopenPersistence；skill 类不要求 reopenPersistence。
+const BUILTIN_REQUIRED = { discovery: true, success: true, failure: true, cancel: true, reopenPersistence: true } as const;
+const SKILL_REQUIRED = { discovery: true, success: true, failure: true, cancel: true, reopenPersistence: false } as const;
+
+/** 会产生文件/设置/registry 写入的 skill（按 SKILL.md 语义人工归类，plan 模式下以 tool 计划块观察）。 */
+const FILE_WRITING_SKILLS: readonly (readonly [name: string, observable: SideEffectObservable, reason: string])[] = [
+  ['update-config', 'settings', '修改 Claude Code 设置（写入 settings 层）'],
+  ['run', 'file', '执行任意 shell/文件操作（写工作目录文件）'],
+  ['run-skill-generator', 'file', '生成 skill 文件（写 SKILL.md 到磁盘）'],
+  ['slides', 'file', '生成 PPTX 文件（写工作目录）'],
+  ['dataviz', 'file', '生成图表文件（写工作目录）'],
+  ['banner-design', 'file', '生成横幅图片文件（写工作目录）'],
+  ['auto-updater', 'file', '修改项目源码/配置文件以接入自动更新'],
+  ['using-git-worktrees', 'file', '创建/管理 git worktree（写文件系统）'],
+  ['executing-plans', 'file', '按计划修改项目源码文件'],
+  ['finishing-a-development-branch', 'file', '合并/清理 git 分支（写文件系统）'],
+  ['writing-plans', 'file', '将计划文档写入 docs/plans'],
+  ['writing-skills', 'file', '生成 SKILL.md 文件'],
+  ['waza-write', 'file', '写作类 skill，产出文档文件'],
+  ['notion', 'file', '调用 Notion API 并可能落本地文件'],
+  ['smtp', 'file', '发送邮件并可能写附件/日志文件'],
+];
+
+const SKILL_NA_REASON =
+  '会话内文本/计划输出型 skill：副作用限于会话消息本身（plan 模式无 Write/Bash 执行），' +
+  '无文件/设置/DB 写入——由 E2E 前后快照（cwd 递归清单 + 用户 settings 哈希）举证 snapshotClean';
+
+function builtinContract(
+  command: string,
+  sideEffect: CommandBehaviorContract['sideEffect'],
+): CommandBehaviorContract {
+  return { command, origin: 'builtin', required: { ...BUILTIN_REQUIRED }, sideEffect };
+}
+
+function skillContract(name: string): CommandBehaviorContract {
+  const fileWriting = FILE_WRITING_SKILLS.find(([n]) => n === name);
+  return {
+    command: name,
+    origin: 'user-skill',
+    required: { ...SKILL_REQUIRED },
+    sideEffect: fileWriting
+      ? { kind: 'required', reason: fileWriting[2], observable: fileWriting[1] }
+      : { kind: 'not-applicable', reason: SKILL_NA_REASON },
+  };
+}
+
+/**
+ * 当前 runtime（demo 基线 2.1.227）非 hidden 命令的行为契约表（77 条 = 20 builtin + 57 skill）。
+ * 命令集合随版本漂移时由 --require-runtime-match 报差集；runtime-only 新命令缺契约会被
+ * 严格门禁显式列出（缺契约 = 未解释空档，不允许静默通过）。
+ */
+export const COMMAND_BEHAVIOR_CONTRACTS: readonly CommandBehaviorContract[] = [
+  // ── builtin（20）──
+  builtinContract('init', { kind: 'required', reason: '在 cwd 创建/更新 CLAUDE.md（真实文件副作用）', observable: 'file' }),
+  builtinContract('compact', { kind: 'required', reason: 'compact boundary/上下文压缩改变会话状态', observable: 'session' }),
+  builtinContract('clear', { kind: 'required', reason: 'conversation_reset + 新 CLI session id（会话状态重置）', observable: 'session' }),
+  builtinContract('config', { kind: 'required', reason: '写用户级 ~/.claude/settings.json', observable: 'settings' }),
+  builtinContract('reload-skills', { kind: 'required', reason: '触发命令注册表重扫（commands_changed）', observable: 'command-registry' }),
+  // autocompact：实测（--all 首跑）SDK 非交互路径仅返回「Auto-compact window: auto」状态文本，
+  // 不写设置——契约按真实行为标 not-applicable，由前后快照举证（若实测有写入，快照不一致会判红）。
+  builtinContract('autocompact', { kind: 'not-applicable', reason: 'SDK 非交互路径仅返回 auto-compact 开关状态文本，不写设置（前后快照举证；实测 CC 2.1.227）' }),
+  builtinContract('heapdump', { kind: 'required', reason: '生成 heap dump 文件', observable: 'file' }),
+  builtinContract('security-review', { kind: 'required', reason: '生成安全审查报告消息（会话内容变化）', observable: 'session' }),
+  builtinContract('insights', { kind: 'required', reason: '生成使用洞察分析消息（会话内容变化）', observable: 'session' }),
+  builtinContract('recap', { kind: 'required', reason: '生成会话回顾消息（会话内容变化）', observable: 'session' }),
+  builtinContract('goal', { kind: 'required', reason: '生成目标跟踪消息（会话内容变化）', observable: 'session' }),
+  builtinContract('team-onboarding', { kind: 'required', reason: '生成团队引导消息（会话内容变化）', observable: 'session' }),
+  builtinContract('rename', { kind: 'not-applicable', reason: 'TUI 会话标题命令；Agent SDK 非交互查询路径不改会话/文件/设置状态（前后快照举证）' }),
+  builtinContract('usage', { kind: 'not-applicable', reason: '只读统计命令：仅生成 result 消息，不改文件/设置/会话状态（前后快照举证）' }),
+  builtinContract('context', { kind: 'not-applicable', reason: '只读统计命令：仅生成 result 消息，不改文件/设置/会话状态（前后快照举证）' }),
+  builtinContract('model', { kind: 'not-applicable', reason: 'TUI 交互式模型选择面板；SDK 非交互路径仅返回模型信息文本，不写设置（前后快照举证）' }),
+  builtinContract('color', { kind: 'not-applicable', reason: '会话颜色为 CLI 会话内瞬态状态（单回合 SDK 会话即结束），不落文件/设置/DB（前后快照举证）' }),
+  builtinContract('effort', { kind: 'not-applicable', reason: 'TUI 交互式推理力度面板；SDK 非交互路径不写设置（前后快照举证）' }),
+  builtinContract('fast', { kind: 'not-applicable', reason: 'TUI 快速模式切换提示；SDK 非交互路径不写设置（前后快照举证）' }),
+  builtinContract('mcp', { kind: 'not-applicable', reason: 'MCP 服务器连接状态列表（只读；add/remove 子操作不在裸命令路径）（前后快照举证）' }),
+  // ── user-skill（57）──
+  ...[
+    'ai-news-digest', 'auto-updater', 'banner-design', 'brainstorming', 'brand', 'cantian-bazi',
+    'design', 'design-system', 'dispatching-parallel-agents', 'error-driven-evolution',
+    'executing-plans', 'finishing-a-development-branch', 'gog', 'karpathy-guidelines',
+    'multi-search-engine', 'notion', 'proactive-agent', 'pua', 'receiving-code-review',
+    'requesting-code-review', 'self-evolving', 'self-improving-agent', 'skill-vetter', 'slides',
+    'smtp', 'subagent-driven-development', 'summarize', 'systematic-debugging',
+    'test-driven-development', 'ui-styling', 'ui-ux-pro-max', 'using-git-worktrees',
+    'using-superpowers', 'verification-before-completion', 'waza-check', 'waza-health',
+    'waza-hunt', 'waza-learn', 'waza-read', 'waza-think', 'waza-write', 'writing-plans',
+    'writing-skills', 'deep-research', 'dataviz', 'update-config', 'verify', 'debug',
+    'code-review', 'simplify', 'batch', 'fewer-permission-prompts', 'doctor', 'loop',
+    'claude-api', 'run', 'run-skill-generator',
+  ].map(skillContract),
+];
+
+/** 按命令名取契约；不存在返回 undefined（门禁据此报告「缺契约」）。 */
+export function behaviorContractOf(command: string): CommandBehaviorContract | undefined {
+  return COMMAND_BEHAVIOR_CONTRACTS.find((c) => c.command === command);
+}
+
 // ── 断言入口 ───────────────────────────────────────────────────────────────────────
 let pass = 0;
 let fail = 0;
@@ -483,6 +607,51 @@ function runStructuralAssertions(): void {
         );
         assert.equal(spec.expectedEquivalent, false, `${spec.command} native-execution 非平替，不得标 proven-equivalent`);
       }
+    }
+  });
+
+  console.log('=== 5c) review-v9 §3：命令行为契约（required/not-applicable + 理由 + 可观察对象）===');
+  check('契约表无重复命令名', () => {
+    const names = COMMAND_BEHAVIOR_CONTRACTS.map((c) => c.command);
+    assert.equal(new Set(names).size, names.length, '契约表存在重复命令名');
+  });
+  check('每条契约：not-applicable 必须写明非空理由（不允许无依据豁免）', () => {
+    const bad = COMMAND_BEHAVIOR_CONTRACTS.filter(
+      (c) => c.sideEffect.kind === 'not-applicable' && c.sideEffect.reason.trim().length === 0,
+    );
+    assert.deepEqual(bad.map((c) => c.command), [], `not-applicable 契约缺理由：${bad.map((c) => c.command).join(', ')}`);
+  });
+  check('每条契约：required 必须注明可观察对象（file/settings/session/database/command-registry）', () => {
+    const bad = COMMAND_BEHAVIOR_CONTRACTS.filter(
+      (c) => c.sideEffect.kind === 'required' && !c.sideEffect.observable,
+    );
+    assert.deepEqual(bad.map((c) => c.command), [], `required 契约缺 observable：${bad.map((c) => c.command).join(', ')}`);
+  });
+  check('契约 required 维度与 category 计划要求一致（builtin 含 reopenPersistence，skill 不含）', () => {
+    for (const c of COMMAND_BEHAVIOR_CONTRACTS) {
+      if (c.origin === 'builtin') {
+        assert.equal(c.required.reopenPersistence, true, `${c.command} 为 builtin，契约须要求 reopenPersistence`);
+      } else {
+        assert.equal(c.required.reopenPersistence, false, `${c.command} 为 ${c.origin}，契约不要求 reopenPersistence`);
+      }
+      assert.ok(c.required.discovery && c.required.success && c.required.failure && c.required.cancel,
+        `${c.command} 契约须要求 discovery/success/failure/cancel`);
+    }
+  });
+  check('契约覆盖矩阵全部非 hidden 命令（缺失 = 未解释空档）', () => {
+    const contractNames = new Set(COMMAND_BEHAVIOR_CONTRACTS.map((c) => c.command));
+    const missing = entries
+      .filter((e) => e.executionMode !== 'hidden')
+      .filter((e) => !contractNames.has(e.name))
+      .map((e) => e.name);
+    assert.deepEqual(missing, [], `非 hidden 命令缺行为契约：${missing.join(', ')}`);
+  });
+  check('契约 origin 与矩阵 expectedOrigin 一致（交叉契约）', () => {
+    for (const c of COMMAND_BEHAVIOR_CONTRACTS) {
+      const entry = entries.find((e) => e.name === c.command);
+      if (!entry) continue; // runtime 漂移新增命令，由 --require-runtime-match 差集报告
+      if (entry.executionMode === 'hidden') continue;
+      assert.equal(entry.expectedOrigin, c.origin, `${c.command} 契约 origin=${c.origin} 与矩阵 ${entry.expectedOrigin} 不一致`);
     }
   });
 }
@@ -922,15 +1091,22 @@ function requireBehavioralCoverage(): void {
     console.log(`    ${dim}: ${c}/${totalNonHidden}${c < totalNonHidden ? ' ⚠' : ''}`);
   }
   console.log('  注：sideEffects 在 plan 模式下工具受限，为信息维度（不阻塞实践级门禁）。');
-  console.log('  严格级（含 sideEffects 全覆盖）用 --require-behavioral-coverage-full。');
+  console.log('  ⚠ 实践级门禁通过 ≠ 计划全量行为验收完成（review-v6 §4.1）。严格级门禁');
+  console.log('    （--require-behavioral-coverage-full，契约驱动：success+failure+cancel+reopenPersistence');
+  console.log('    + sideEffects 按 required 已观察/not-applicable 豁免判定）。完成声明须区分');
+  console.log('    「实践级覆盖完成」与「严格全维度完成」。');
 }
 
 /**
- * review-v3 §6.2：行为覆盖严格门禁——要求全部计划维度（含 sideEffects）。
- * 用于「全量行为已验证」声明；当前 sideEffects gap 未闭合前不接入 chain。
+ * review-v9 §3：严格门禁消费契约。sideEffects 维度完成条件：
+ *   - 契约 required：manifest dimensions.sideEffects === true 且 entry.sideEffect.kind === 'observed'；
+ *   - 契约 not-applicable：entry.sideEffect.kind === 'not-applicable'、reason 非空、snapshotClean === true
+ *     （前后快照举证没有应有副作用被遗漏）。
+ * 其余维度（discovery/success/failure/cancel/reopenPersistence）按契约 required 逐项检查。
+ * 输出必须列出每个 not-applicable 命令及原因；缺口逐条列出，不允许被比例掩盖。
  */
 function requireBehavioralCoverageFull(): void {
-  console.log('=== 8b) --require-behavioral-coverage-full：行为覆盖严格门禁（全维度含 sideEffects）===');
+  console.log('=== 8b) --require-behavioral-coverage-full：行为覆盖严格门禁（契约驱动，含 sideEffects required/not-applicable）===');
   let manifest = readVerificationManifest();
   if (!manifest) {
     check('读取 command-verification.json', () => {
@@ -951,40 +1127,85 @@ function requireBehavioralCoverageFull(): void {
   const entries = manifest.entries ?? {};
   const runtimeSet = new Set(runtimeNames);
 
-  check('非 hidden 命令行为维度全覆盖（计划要求 success/failure/cancel/sideEffects[/reopenPersistence]）', () => {
-    const gaps: string[] = [];
-    for (const name of Object.keys(entries)) {
-      if (!runtimeSet.has(name)) continue;
-      const entry = entries[name];
-      const level = behavioralLevel(entry);
-      if (level === 'n/a') continue;
-      if (level !== 'full') {
-        const required = REQUIRED_DIMENSIONS[entry.category ?? ''] ?? REQUIRED_DIMENSIONS['user-skill'];
-        const dims = entry.dimensions ?? ({ discovery: true } as BehavioralDimensions);
-        const missing = required.filter((d) => dims[d] !== true);
-        gaps.push(`${name} [${entry.category ?? '?'}/${entry.status}]: 缺 ${missing.join('/')}`);
-      }
+  // sideEffects 完成判定（契约消费）：required 已观察，或 not-applicable + 理由 + 快照举证。
+  type SideEffectState = 'observed' | 'exempt-not-applicable' | 'missing';
+  const sideEffectStateOf = (name: string, entry: ManifestEntry): SideEffectState => {
+    const contract = behaviorContractOf(name);
+    if (!contract) return 'missing'; // 缺契约：不允许静默通过（未解释空档）
+    const se = (entry as ManifestEntry & { sideEffect?: { kind?: string; reason?: string; snapshotClean?: boolean } }).sideEffect;
+    if (contract.sideEffect.kind === 'required') {
+      return entry.dimensions?.sideEffects === true && se?.kind === 'observed' ? 'observed' : 'missing';
     }
+    // not-applicable：必须由 manifest 的豁免记录（reason + snapshotClean）举证，不能只靠契约声明。
+    return se?.kind === 'not-applicable' && (se.reason ?? '').trim().length > 0 && se.snapshotClean === true
+      ? 'exempt-not-applicable'
+      : 'missing';
+  };
+
+  const gaps: string[] = [];
+  const exempted: { name: string; reason: string }[] = [];
+  const missingContracts: string[] = [];
+  let total = 0;
+  for (const name of Object.keys(entries)) {
+    if (!runtimeSet.has(name)) continue;
+    if (name.startsWith('__')) continue; // 动态场景标记（__commands_changed__），非命令
+    const entry = entries[name];
+    if (entry.status === 'hidden') continue;
+    total++;
+    const contract = behaviorContractOf(name);
+    if (!contract) {
+      missingContracts.push(name);
+      continue;
+    }
+    const dims = entry.dimensions ?? ({ discovery: true } as BehavioralDimensions);
+    const missing: string[] = [];
+    for (const dim of ['discovery', 'success', 'failure', 'cancel'] as const) {
+      if (contract.required[dim] && dims[dim] !== true) missing.push(dim);
+    }
+    if (contract.required.reopenPersistence && dims.reopenPersistence !== true) missing.push('reopenPersistence');
+    const seState = sideEffectStateOf(name, entry);
+    if (seState === 'missing') missing.push(`sideEffects(${contract.sideEffect.kind})`);
+    if (seState === 'exempt-not-applicable') {
+      exempted.push({ name, reason: contract.sideEffect.reason });
+    }
+    if (missing.length > 0) {
+      gaps.push(`${name} [${entry.category ?? '?'}/${entry.status}]: 缺 ${missing.join('/')}`);
+    }
+  }
+  if (missingContracts.length > 0) {
+    check('runtime 非 hidden 命令全部有行为契约（缺契约 = 未解释空档）', () => {
+      throw new Error(`缺契约：${missingContracts.join(', ')}（版本漂移新增命令须补契约后才能通过严格门禁）`);
+    });
+  }
+  check(`非 hidden 命令行为维度契约全覆盖（${total} 条，sideEffects 按 required/not-applicable 判定）`, () => {
     assert.ok(
       gaps.length === 0,
-      `${gaps.length} 条命令行为维度未全覆盖：\n    ${gaps.slice(0, 20).join('\n    ')}`,
+      `${gaps.length} 条命令未满足行为契约：\n    ${gaps.slice(0, 30).join('\n    ')}`,
     );
   });
+  // review-v9 §3 验收标准 2：输出中列出每个不适用命令及原因。
+  console.log(`  sideEffects 豁免（not-applicable，共 ${exempted.length} 条，均有理由 + 快照举证）：`);
+  for (const ex of exempted) {
+    console.log(`    - ${ex.name}: ${ex.reason}`);
+  }
+  if (exempted.length === 0) {
+    console.log('    （无）');
+  }
 
   // 汇总：逐维度覆盖统计（让 gap 精确可见）。
   const dimCounts: Record<string, number> = {};
   let totalNonHidden = 0;
   for (const name of Object.keys(entries)) {
-    if (!runtimeSet.has(name)) continue;
+    if (!runtimeSet.has(name) || name.startsWith('__')) continue;
     const entry = entries[name];
-    if (behavioralLevel(entry) === 'n/a') continue;
+    if (entry.status === 'hidden') continue;
     totalNonHidden++;
     const dims = entry.dimensions ?? { discovery: true };
     for (const dim of ['discovery', 'success', 'failure', 'cancel', 'sideEffects', 'reopenPersistence'] as const) {
       if (dims[dim] === true) dimCounts[dim] = (dimCounts[dim] ?? 0) + 1;
     }
   }
-  console.log(`  逐维度覆盖（${totalNonHidden} 条非 hidden runtime 命令）：`);
+  console.log(`  逐维度覆盖（${totalNonHidden} 条非 hidden runtime 命令；sideEffects 另有 not-applicable 豁免 ${exempted.length} 条）：`);
   for (const dim of ['discovery', 'success', 'failure', 'cancel', 'sideEffects', 'reopenPersistence'] as const) {
     const c = dimCounts[dim] ?? 0;
     console.log(`    ${dim}: ${c}/${totalNonHidden}${c < totalNonHidden ? ' ⚠' : ''}`);
