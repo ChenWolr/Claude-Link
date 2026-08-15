@@ -21,7 +21,8 @@
     "selftest": "npm run selftest:static && node scripts/run-native-if-env.mjs",
     "selftest:native": "npm run selftest:static && node scripts/run-native-chain.mjs",
     "test:cdp:commands-e2e": "node scripts/cdp-commands-e2e.mjs",
-    "test:cdp:real-window": "node scripts/cdp-real-window-e2e.mjs"
+    "test:cdp:real-window": "node scripts/cdp-real-window-e2e.mjs",
+    "evidence:pack": "node scripts/evidence-pack.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.191",
