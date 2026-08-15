@@ -236,12 +236,15 @@ onUnmounted(() => {
       v-if="showSlashMenu"
       ref="slashMenuRef"
       class="slash-menu"
+      data-testid="slash-menu"
       @scroll="handleSlashMenuScroll"
     >
       <div
         v-for="(cmd, i) in visibleCommands"
         :key="cmd.name"
         :class="['slash-menu__item', { active: i === selectedSlashIndex }]"
+        data-testid="slash-menu-item"
+        :data-command="cmd.name"
         @click="selectSlashCommand(cmd)"
         @mouseenter="hoverCommand(i)"
       >
@@ -249,6 +252,7 @@ onUnmounted(() => {
         <span
           v-if="originLabel(cmd.origin)"
           class="slash-menu__origin"
+          data-testid="slash-menu-origin"
           :data-origin="cmd.origin"
         >{{ originLabel(cmd.origin) }}</span>
       </div>
@@ -269,12 +273,13 @@ onUnmounted(() => {
         ref="textareaRef"
         :value="modelValue"
         :disabled="disabled"
+        data-testid="chat-input-textarea"
         placeholder="输入消息；输入 / 联想命令（↑↓ 选择，回车确认）"
         rows="1"
         @keydown="handleKeydown"
         @input="handleInput"
       />
-      <button type="button" :disabled="disabled || (!modelValue.trim() && !hasAttachments)" @click="submit">发送</button>
+      <button type="button" data-testid="chat-send-button" :disabled="disabled || (!modelValue.trim() && !hasAttachments)" @click="submit">发送</button>
     </div>
   </div>
 </template>
