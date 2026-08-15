@@ -1542,7 +1542,14 @@ function testPermissionPromptIntegration(): void {
   assert.ok(/reason === 'user' \|\| reason === 'watchdog'[\s\S]*?forwardEvent[\s\S]*?type: 'aborted'/.test(sdkBackend), 'killProcess 须在移除 entry 后 forwardEvent aborted（P1-2）');
   // review P2-1：/compact 须用 warmup+resume 有上下文场景，移除 typeof result==='string' 放宽。
   assert.ok(/warmup[\s\S]*?resume: cliSid/.test(e2eCmdSrc), '/compact 须 warmup 产生上下文再 resume 压缩（P2-1）');
-  assert.ok(!/typeof run\.termination\?\.result === 'string'/.test(e2eCmdSrc), '/compact 不得用 typeof result===string 放宽（空字符串也命中，P2-1）');
+  // review-v9 §3 收窄：禁令只作用于 verifyCompactEvidence（成功判据不得用 typeof result 放宽）；
+  // 其它场景（如 sideEffect 文件路径诊断）允许以类型安全方式提取 result 文本。
+  const compactFn = e2eCmdSrc.match(/async function verifyCompactEvidence[\s\S]*?\n}/);
+  assert.ok(compactFn, 'verifyCompactEvidence 函数体未找到');
+  assert.ok(
+    !/typeof run\.termination\?\.result === 'string'/.test(compactFn[0]),
+    '/compact 成功判据不得用 typeof result===string 放宽（空字符串也命中，P2-1）',
+  );
   // review-v2 F1：/compact 收紧为只认 compact_boundary / compact_result:'success'。
   // 旧 hasStatus（任意 system:status）/ 非空 local_command_output 不再当成功证据（status:'compacting'
   // 仅表示开始压缩，compact_result:'failed' 明确未压缩）。共享 helper verifyCompactEvidence 供 --command/--replacements 复用。
