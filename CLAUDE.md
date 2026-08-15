@@ -137,13 +137,19 @@ SDK canUseTool / onUserDialog / onElicitation
 > 只记录经真实门禁验证的事实，不含 API key/token/完整 env。命令对齐不以此节为准——以 `scripts/` 的
 > 实时门禁为权威；本节是「到某时间点已验证」的快照，命令集随 Claude Code 版本漂移时须重跑门禁刷新。
 
-- **环境（最近一次完整 native 门禁链，selftest:native exit 0）**：Claude Code `2.1.227` / Agent SDK `0.3.191`；
-  运行时 **80 命令**（20 builtin + 57 user-skill + 2 internal + 1 removed）；`settings.sources = user|project|local`（Task 3 恢复原生级联，不再 `settingSources: []`）。
+- **环境**：Claude Code `2.1.227` / Agent SDK `0.3.191`；运行时 **80 命令**（20 builtin + 57 user-skill + 2 internal + 1 removed）；
+  `settings.sources = user|project|local`（Task 3 恢复原生级联，不再 `settingSources: []`）。
+  > **门禁口径（review-v9/v10 终态）**：两级门禁均接入且通过——
+  > **实践级**（`--require-behavioral-coverage`）：discovery + cancel + ≥1(success,failure)，builtin 还需 reopenPersistence，≥95% 通过。
+  > **严格级**（`--require-behavioral-coverage-full`）：**契约驱动**（`CommandBehaviorContract` 77 条：required 须 observed，not-applicable 须理由 + 前后快照 snapshotClean 举证），逐条列出全部豁免及原因。
+  > 当前状态（evidence `run-2026-08-14T21-31-07`）：实践级 77/77，严格级 exit 0（discovery/success/failure/cancel 77/77；sideEffects 50 observed + 51 豁免；reopenPersistence 20/20 builtin）。
+  > manifest（`D:/software/Cache/claude-link/command-verification.json`）须随 CC/SDK 版本漂移重跑 `--all` 刷新（skillMeta 含 SKILL.md 哈希做版本绑定）。
 - **`/init`（Task 5）**：真实创建/更新 `CLAUDE.md`（10 场景矩阵，含空目录/已有文件/用户级·项目级 CLAUDE.md 进上下文/local settings/executable 缺失/用户取消/流末无 result 合成 aborted）；空目录不落盘时 UI 须显「未执行文件写入」不假成功。
 - **候选平替（Task 6）**：`/clear`↔新建对话、`/context`↔上下文 UI、`/usage`↔费用 UI、`/config`↔配置页 **逐项不等价 → 全部保持 `native-sdk`**；`/compact` 入口即原生执行。`/compact` 上下文统计变化用 `/context` 前后对比实证（如 4%→3%，SDK `result.usage` 因 cache_read 计入压缩前历史而无效，禁用）。
-- **全量命令行为矩阵（Task 7）**：`--all` 20 场景 + `--require-no-unverified-command` 17 断言，80 runtime 命令 **零 unverified**（14 verified + 6 交叉引用 + 54 discovery + 3 execution + 3 hidden + 1 explicit-skip）；`insights` 在空 cwd+plan 模式不响应 → explicit-skip（需丰富会话上下文）；8 个 skill 运行时描述空是上游枚举行为（dir name≠frontmatter name），非对齐缺陷。
-- **跨进程 provenance（Task 8）**：命令菜单按来源区分（Claude Code 内置/用户 Skill/项目/插件）；unknown 作为可见差异状态计数展示，不被当 builtin 完成；provenance 诊断是 transient 状态，不经 renderer 聊天流二次落库。
-- **未覆盖边界（诚实记录）**：只读目录场景因 Windows 管理员特权绕过 DACL 无法可靠构造，记 SKIP，须在受限账户/非管理员环境补测。
+- **全量命令行为矩阵（Task 7）**：`--all` **240 场景 0 失败 0 skip** + 四门禁（含严格级）exit 0。逐命令独立失败场景（无效 resume → 原生 `error_during_execution`）；核心 builtin 显式成功/失败/重开场景（/insights 等须 warmup 真实会话历史）；文件写入类 skill bypassPermissions 真实落盘举证。8 个 skill 运行时描述空是上游枚举行为（dir name≠frontmatter name），非对齐缺陷。
+- **跨进程 provenance（Task 8）**：命令菜单按来源区分（Claude Code 内置/用户 Skill/项目/插件）；unknown 作为可见差异状态计数展示，不被当 builtin 完成；provenance 诊断是 transient 状态，不经 renderer 聊天流二次落库。发布级 DOM 门禁 `npm run test:cdp:commands-e2e`（6/6）：真实 slash 菜单 DOM 断言「项目命令」徽章/全量替换/会话隔离/延迟 probe 不回退；烟雾测试 §6.3 ⑤⑥⑦ 覆盖动态 commands_changed。
+- **只读目录受限账户链（Task 9，review-v10 已闭合）**：`npm run test:cdp:readonly-e2e` exit 0——非管理员账户 `ClaudeLinkROE2E` + RX-only ACL + 同账户 EPERM 预检 + 完整 Electron/SDK/CLI 链真实 UI `/init`：文件未创建、EPERM tool result 落库、`init_write_skipped` 持久化、sending 复位、重开一致。此前「DPAPI 跨用户限制」的结论被推翻：不复制加密 store、以该账户新建自身 profile 即可运行。② 中断取消 DB 文本——已修复并真实验证：abort 后 `system:aborted`（「已中断」）落库且重开可见（review-v4 §7.3，推翻 v1–v3 旧结论）。
+- **真实窗口发布门禁（Task 9）**：`npm run test:cdp:real-window` exit 0（10 断言：/init 落盘/重开恢复//clear 对照新建对话//context /usage /reload-skills 原生结果//compact 压缩证据//config 备份恢复/中断持久化）；完整 native 链 `selftest:native` exit 0（--all 240/0/0）。全部证据以 `npm run evidence:pack` 产出的 runId 引用（如 `run-2026-08-14T21-31-07`）。
 - **真实 Electron 窗口核验（Task 9 Step 3，经 CDP 驱动真实运行窗口，已通过）**：app 启动含 Task 8 改动无崩溃；`window.claudeLink` preload 桥真实在位且 `getCommandDiagnostics` 已上线；命令菜单来源徽章真实渲染（`/init`→「Claude Code 内置」、user-skill→「用户 Skill」）+ provenance 行「7 个命令来源未知 · 3 个隐藏命令」；**`/init` 在真实窗口内对临时目录落盘成功**（~80s 生成 1201 字节非空 `CLAUDE.md`，模型经 Read/Write 工具真实创建）；关闭并重开会话消息 97→97 持久化、徽章稳定；`/clear` 正确派发（conversation_reset）；`/reload-skills` 返回「Reloaded skills: 53 available」；`/context` `/usage` 本地命令真实执行并渲染结果；网关工具层降级期间还观察到 app **正确触发 `init_write_skipped` 横幅（Task 5 逻辑：不伪造成功）**。`/compact` 真实窗口实证压缩（`/context` 10%→5%，103.1k tokens 经 glm-5.2 压缩，与 native E2E `--replacements` 的 compact_boundary + 4%→3% 一致）；`/config` 真实窗口实证「Set Auto-compact to false」并写**用户级** `~/.claude/settings.json`（测后从快照还原，无污染）——隔离 HOME 经 `advancedJson.env.USERPROFILE` 不可达（CC 进程从 process env 解析 HOME，非 SDK env 选项），故 native E2E 的隔离 HOME 覆盖（设 process.env）与真实窗口互补。另实证：中断按钮（`ctl__btn--abort`）停止运行中 query；新建对话对照（会话 15→16 独立新会话 ≠ `/clear` 当前会话内重置，Task 6「不等价」结论复证）。
 
 ## Git 提交规范
