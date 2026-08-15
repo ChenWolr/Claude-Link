@@ -199,13 +199,15 @@ async function main() {
     if (!('source' in cmd)) throw new Error('command 缺 source 字段');
   });
 
-  // §6.3 ③: onCommandChanged 监听器可注册/移除（动态命令推送通道）
-  await checkAsync('§6.3 ③ onCommandChanged 监听器注册/移除无异常', async () => {
+  // §6.3 ③: onCommandChanged 监听器可注册（动态命令推送通道）
+  // review-v9 §4 修复：不再调用 removeCommandListener()——preload 的实现是 removeAllListeners，
+  // 会把 App.vue 的全局 command-store 监听器一并移除，破坏运行中应用的 commands_changed 接线
+  // （后续 DOM 级测试因此收不到推送）。测试自建监听器留在页面生命周期内即可，无副作用。
+  await checkAsync('§6.3 ③ onCommandChanged 监听器注册无异常（不触碰应用全局监听器）', async () => {
     await evalExpr(ws, `
       window.__cmdListener = (payload) => { window.__lastCmdPayload = payload; };
       window.claudeLink.onCommandChanged(window.__cmdListener);
     `);
-    await evalExpr(ws, `window.claudeLink.removeCommandListener()`);
     // No throw = pass
   });
 
@@ -334,7 +336,7 @@ async function main() {
   });
 
   // Cleanup dynamic test
-  try { await evalExpr(ws, `window.claudeLink.removeCommandListener()`); } catch {}
+  // （review-v9 §4：不调用 removeCommandListener——它是 removeAllListeners，会移除应用自身监听器。）
   if (dynSid) {
     try { await evalExpr(ws, `window.claudeLink.deleteSession(${JSON.stringify(dynSid)})`); } catch {}
   }
