@@ -503,7 +503,16 @@ export async function collectBaselineToFile(): Promise<BaselineResult> {
     writeFileSync(OUT_FILE, JSON.stringify(baseline, null, 2), 'utf8');
     return baseline;
   } finally {
-    rmSync(cwd, { recursive: true, force: true });
+    // review-v6: Windows EBUSY — CLI 子进程退出后文件句柄可能未立即释放，需重试
+    for (let i = 0; i < 3; i++) {
+      try {
+        rmSync(cwd, { recursive: true, force: true });
+        break;
+      } catch {
+        if (i < 2) await new Promise((r) => setTimeout(r, 1500));
+        else console.log(`  ⚠ 清理 ${cwd} 失败（EBUSY），已忽略——不影响基线数据`);
+      }
+    }
   }
 }
 
