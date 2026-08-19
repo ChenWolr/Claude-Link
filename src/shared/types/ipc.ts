@@ -27,6 +27,7 @@ export const IPC_CHANNELS = {
   WORKSPACE_PICK_DIR: 'workspace:pickDir',
   WORKSPACE_LIST_RECENT: 'workspace:listRecent',
   WORKSPACE_ADD_RECENT: 'workspace:addRecent',
+  WORKSPACE_REMOVE_RECENT: 'workspace:removeRecent',
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save/test 时进主进程，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',

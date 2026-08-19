@@ -15,7 +15,7 @@ import { IPC_CHANNELS } from '../shared/constants';
 import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel } from './modules/config-manager';
 import { detectClaudeConfig } from './modules/claude-config-detector';
 import { runProviderModelTest } from './modules/connection-tester';
-import { listRecentWorkspaces, addRecentWorkspace } from './modules/workspace-history';
+import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
@@ -132,6 +132,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_LIST_RECENT, async () => listRecentWorkspaces());
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
+  // 永久删除某条最近目录历史（只移除历史记录，不触碰磁盘上的目录本体）。
+  ipcMain.handle(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => removeRecentWorkspace(dir));
 
   // 多供应商模型库：设置页（可选项库）与 会话选择器（只读）共用。
   // 密钥边界：listProviders 只回掩码视图；save 的明文 key 落盘前加密；查询/行内测试都在主进程内解密。
