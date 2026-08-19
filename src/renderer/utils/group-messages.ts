@@ -3,8 +3,11 @@
 // 主流程（MessageList）与子 Agent 面板（TaskQueuePanel）共用同一规则。
 //
 // 规则（对齐 openhanako desktop/src/react/components/chat/process-fold.ts）：
-//   - processKind === null（正文 text）→ 独立 message 项，打断 fold（保留多段正文原位）；
-//   - 连续的过程消息（thinking / tool_use / tool_result / system）合并成一个 fold，
+//   - 折叠单位近似为「连续过程记录」；正文分三类：
+//     · user 消息 → 独立 message 项（天然回合边界）；
+//     · assistant 正文 text → 短叙事（≤PROCESS_NARRATION_TEXT_LIMIT，非回合最终）并入 fold；
+//       回合最终文本（protectedFinalTextIds 标记）与长正文 → 独立 message 项（打断 fold）；
+//   - 连续过程（thinking / tool_use / tool_result / system）合并成一个 fold，
 //     折叠成一行居中摘要「✨ Claude 忙活了一阵子 · N 个工具 · N 次思考」；
 //   - fold 内 tool_use 与其 tool_result 按 toolUseId 配对（ToolCallBlock 行内合并）；
 //   - 少于 MIN_FOLD 条过程的 fold 不折叠（直接展开行式），避免很短也收起；
@@ -28,6 +31,36 @@ export type RenderItem =
 /** 连续多少条过程才折叠成居中摘要（少于则直接展开行式）。对齐 openhanako MIN_PROCESS_MESSAGES_TO_FOLD。 */
 export const MIN_FOLD = 3;
 
+/** 短过程叙事文本上限（字符数）。对齐 openhanako PROCESS_NARRATION_TEXT_LIMIT。 */
+export const PROCESS_NARRATION_TEXT_LIMIT = 100;
+
+/** 是否为 assistant 正文 text（区别于 tool_use / thinking / system 过程记录）。 */
+function isAssistantBodyText(m: RenderableMessage): boolean {
+  return m.role === 'assistant' && m.eventType === 'message' && m.processKind === null;
+}
+
+/** 是否为短过程叙事文本（正文，但长度短到可视为过程旁白，不打断 fold）。 */
+function isShortNarration(m: RenderableMessage): boolean {
+  return isAssistantBodyText(m) && m.content.trim().length <= PROCESS_NARRATION_TEXT_LIMIT;
+}
+
+// 对齐 openhanako protectedFinalTextIndexes：按 user 消息分回合，标记每回合最后一条
+// assistant 正文 text 为「受保护最终文本」——它是回合的结论性总结，必须独立展示、不得折叠。
+function protectedFinalTextIds(messages: RenderableMessage[]): Set<string> {
+  const protectedIds = new Set<string>();
+  let latestTextId: string | null = null;
+  for (const m of messages) {
+    if (m.role === 'user') {
+      if (latestTextId) protectedIds.add(latestTextId);
+      latestTextId = null;
+      continue;
+    }
+    if (isAssistantBodyText(m)) latestTextId = m.id;
+  }
+  if (latestTextId) protectedIds.add(latestTextId);
+  return protectedIds;
+}
+
 export function computeStats(messages: RenderableMessage[]): FoldStats {
   let toolCount = 0;
   let thinkingCount = 0;
@@ -49,6 +82,7 @@ export function computeStats(messages: RenderableMessage[]): FoldStats {
 }
 
 export function groupMessagesForRender(messages: RenderableMessage[]): RenderItem[] {
+  const protectedIds = protectedFinalTextIds(messages);
   const items: RenderItem[] = [];
   let fold: Extract<RenderItem, { type: 'fold' }> | null = null;
   const close = () => {
@@ -62,14 +96,20 @@ export function groupMessagesForRender(messages: RenderableMessage[]): RenderIte
     // R2（问题 5）：权限询问 + 交互回执已由交互弹窗承载，不在聊天流重复渲染（仍落库留审计）。
     // 在此单一瓶颈过滤，同时覆盖主流程（MessageList）与子 Agent 面板（TaskQueuePanel→ProcessGroup）。
     if (isRedundantSystemProcessKind(msg.processKind)) continue;
-    // review-v2 P1：init_write_skipped 是 /init 的独立文件副作用诊断，须独立展示（不进过程 fold），
-    // 否则被 fold 折叠态隐藏——ProcessGroup 的 system item 仅在 fold 展开时显示，用户无法立即看到
-    // 「未执行文件写入」。让它像正文一样独立成 message 项（MessageBubble bubble--system 居中横幅）。
-    if (msg.processKind === null || msg.processKind === 'system:init_write_skipped') {
+    // 独立 message 项（打断 fold）：
+    //   · review-v2 P1：init_write_skipped 是 /init 的独立文件副作用诊断，须独立展示（不进 fold）；
+    //   · user 消息是回合边界；
+    //   · assistant 正文的「回合最终文本」受保护、「长正文」是结论性回复，均打断 fold。
+    const isBreak =
+      msg.processKind === 'system:init_write_skipped' ||
+      msg.role === 'user' ||
+      (isAssistantBodyText(msg) && (protectedIds.has(msg.id) || !isShortNarration(msg)));
+    if (isBreak) {
       close();
       items.push({ key: msg.id, type: 'message', message: msg });
       continue;
     }
+    // 其余进 fold：过程（tool_use / tool_result / thinking / 非冗余 system）＋ 短过程叙事文本。
     if (!fold) {
       fold = { key: msg.id, type: 'fold', messages: [], stats: { toolCount: 0, thinkingCount: 0, running: false } };
     }
