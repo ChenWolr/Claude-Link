@@ -1,12 +1,60 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../stores/session-store';
+import { useInteractionStore } from '../stores/interaction-store';
 
 const store = useSessionStore();
+const interactionStore = useInteractionStore();
 const router = useRouter();
 const searchQuery = ref('');
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// 批量管理模式：开启后卡片显示复选框、点击卡片切换选中（不再跳转会话），
+// 顶部工具条提供全选/删除所选。删除走 store.deleteSessions → 单个删除同一条
+// 物理删除 IPC 链（停 query/队列 → DELETE 级联删库 → 清理附件物理文件）。
+const batchMode = ref(false);
+const selectedIds = ref(new Set<string>());
+
+const allSelected = computed(
+  () =>
+    store.displayedSessions.length > 0 &&
+    store.displayedSessions.every((s) => selectedIds.value.has(s.id)),
+);
+
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value;
+  selectedIds.value = new Set();
+}
+
+function toggleSelected(id: string) {
+  const next = new Set(selectedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedIds.value = next;
+}
+
+function toggleSelectAll() {
+  selectedIds.value = allSelected.value
+    ? new Set()
+    : new Set(store.displayedSessions.map((s) => s.id));
+}
+
+async function confirmBatchDelete() {
+  const count = selectedIds.value.size;
+  if (!count) return;
+  const ok = await interactionStore.requestConfirm({
+    title: '批量删除会话',
+    message: `确定删除选中的 ${count} 个会话？会话及其全部消息、任务与附件将被永久删除，此操作不可撤销。`,
+    confirmText: '删除',
+    cancelText: '取消',
+    danger: true,
+  });
+  if (!ok) return;
+  await store.deleteSessions([...selectedIds.value]);
+  batchMode.value = false;
+  selectedIds.value = new Set();
+}
 
 onMounted(() => {
   store.loadSessions();
@@ -50,13 +98,40 @@ async function openSession(session: { id: string }) {
         <p class="eyebrow">Sessions</p>
         <h1>会话管理</h1>
       </div>
-      <button type="button" @click="createAndNavigate">+ 新建会话</button>
+      <div class="sessions-page__actions">
+        <button
+          type="button"
+          class="sessions-page__batch"
+          :class="{ 'sessions-page__batch--active': batchMode }"
+          @click="toggleBatchMode"
+        >
+          {{ batchMode ? '退出批量' : '批量删除' }}
+        </button>
+        <button type="button" class="sessions-page__create" @click="createAndNavigate">
+          + 新建会话
+        </button>
+      </div>
     </header>
+    <div v-if="batchMode" class="sessions-page__batchbar">
+      <label class="batchbar__select-all">
+        <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" />
+        全选
+      </label>
+      <span class="batchbar__count">已选 {{ selectedIds.size }} 个会话</span>
+      <button
+        type="button"
+        class="batchbar__delete"
+        :disabled="!selectedIds.size"
+        @click="confirmBatchDelete"
+      >
+        删除所选
+      </button>
+    </div>
     <input
       v-model="searchQuery"
       class="sessions-page__search"
       type="search"
-      placeholder="搜索会话"
+      placeholder="搜索会话标题"
       @input="onSearchInput"
       @search="handleSearchClear"
     />
@@ -64,14 +139,22 @@ async function openSession(session: { id: string }) {
       <div
         v-for="session in store.displayedSessions"
         :key="session.id"
-        class="session-card"
-        @click="openSession(session)"
+        :class="['session-card', { 'session-card--selected': batchMode && selectedIds.has(session.id) }]"
+        @click="batchMode ? toggleSelected(session.id) : openSession(session)"
       >
+        <input
+          v-if="batchMode"
+          class="session-card__check"
+          type="checkbox"
+          :checked="selectedIds.has(session.id)"
+          @click.stop="toggleSelected(session.id)"
+        />
         <div class="session-card__name">{{ session.name }}</div>
         <div class="session-card__meta">
           {{ session.model }} · {{ new Date(session.updatedAt).toLocaleString() }}
         </div>
         <button
+          v-if="!batchMode"
           type="button"
           class="session-card__delete"
           @click.stop="store.deleteSession(session.id)"
@@ -88,6 +171,10 @@ async function openSession(session: { id: string }) {
 
 <style scoped>
 .sessions-page {
+  /* 独立滚动区：外层 workspace-main overflow hidden，长列表在此自身滚动。 */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding: 32px;
   max-width: 800px;
 }
@@ -111,7 +198,12 @@ async function openSession(session: { id: string }) {
   font-size: 1.5rem;
 }
 
-.sessions-page__header button {
+.sessions-page__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.sessions-page__create {
   border: 0;
   border-radius: var(--radius-md);
   background: var(--color-accent);
@@ -119,6 +211,59 @@ async function openSession(session: { id: string }) {
   box-shadow: var(--ring-light-accent);
   padding: 8px 16px;
   font-weight: 700;
+}
+
+.sessions-page__batch {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  padding: 8px 16px;
+  font-weight: 600;
+}
+
+.sessions-page__batch--active {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.sessions-page__batchbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+}
+
+.batchbar__select-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.batchbar__count {
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}
+
+.batchbar__delete {
+  margin-left: auto;
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-danger);
+  padding: 4px 12px;
+  font-size: 0.8125rem;
+}
+
+.batchbar__delete:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .sessions-page__search {
@@ -153,6 +298,18 @@ async function openSession(session: { id: string }) {
 .session-card:hover {
   border-color: var(--color-accent);
   box-shadow: var(--ring-light), var(--elevation-2);
+}
+
+.session-card--selected {
+  border-color: var(--color-accent);
+}
+
+.session-card__check {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
 }
 
 .session-card__name {
