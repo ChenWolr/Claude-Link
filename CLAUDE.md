@@ -31,7 +31,7 @@ Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本�
 |------|------|
 | `npm run dev` | 启动开发模式（热重载，仅覆盖渲染层） |
 | `npm run typecheck` | 依次检查 node（`tsc`）和 web（`vue-tsc`）两个 TS project，**主要正确性门禁**；无 jest/vitest、无 `npm test` |
-| `npm run selftest` | 自测六段（`&&` 串联，全过才算过）：settings↔JSON 映射 / claude-plan / regression / stall-watchdog / export-image / PNG codec；本地 `tsx` 执行，不启动 Electron |
+| `npm run selftest` | 自测多段（`&&` 串联，全过才算过）：settings↔JSON 映射 / claude-plan / regression / stall-watchdog / export-image / PNG codec / 供应商库 / 会话模型选择器；本地 `tsx` 执行，不启动 Electron |
 | `npx tsx scripts/regression-tests.ts` | 最大那段回归，selftest 已串联，可单独跑 |
 | `npm run rebuild` | 重编译 `better-sqlite3` 原生 ABI；**拉代码后若启动报 `NODE_MODULE_VERSION` 错误必跑** |
 | `npm run build` / `npm run package:win` | 构建 / 打包 Windows 安装包 |
@@ -102,18 +102,21 @@ SDK canUseTool / onUserDialog / onElicitation
 - 后台（非活动）会话的流式累积进 `sessionStreams[id]` 快照，`switchSession` 恢复。
 - `config-store`：`saveConfig` 用 `JSON.parse(JSON.stringify(this.config))` 脱响应式代理（Pinia proxy 过不了 IPC 结构化克隆）；`updatingFromJson` 标志 gates JSON→表单回填，防 `watch` 再写回 JSON 形成循环。
 
-### 配置注入与模型映射
+### 配置注入与模型选择（多供应商库）
 
-- **双通道注入**：env 注入子进程 + `<工作目录>/.claude/settings.local.json` 写盘（后者带权限/hooks，优先级最高，覆盖 CC 自身 `~/.claude/settings.json` 的 env 块）。`claude-settings-projection.ts` 合并 `advancedJson` + 计算后的 `permissions` + `env`（apiKey→`ANTHROPIC_API_KEY`，仅非官方端点写 `ANTHROPIC_BASE_URL`）+ thinking 级别 patch。
-- **模型别名映射**：CC 用 `sonnet/haiku/opus/fable` 别名；claude-link 通过 `ANTHROPIC_DEFAULT_*_MODEL` env 映射到真实模型（如 `glm-5.2`），从不直接用真实模型名；`resolveAliasToActualModel` 解析后传 `--model` 双保险。
-- **表单 ↔ JSON 双向**：`advancedJson` 是单一真相源，表单字段是它的视图。`parseClaudeSettings` peek 不删，`updatingFromJson` 防循环。
-- apiKey 经 electron-store + safeStorage 加密；`TestConnectionModal` 明文回显 `requestedModel` vs CC 上报 `model` + 端点，不一致标红。
+- **多供应商库**：`ProviderProfile[]`（名称/备注/Base URL/加密 key/模型列表）存 electron-store，密钥 safeStorage 加密、只在主进程内解密；renderer 经 `config:listProviders` 只拿掩码视图（`sk-…****xxxx`）。设置页=可选项库（无「使用中/默认」选用语义）；**会话是唯一选用现场**（工具栏 `ProviderModelSelector` 二级级联，r9/a2 视觉稿为基准）。
+- **唯一实际模型原则**：会话只有一个「当前实际模型」（如 `glm-4.6`），主流程与全部普通 subagent 统一使用它；`haiku/opus/sonnet/fable` 只作 CC 内部兼容层，不出现在 UI/业务数据。解析单一真相源 `resolveSessionModel`（`src/shared/session-model.ts`，renderer 显示与主进程 spawn 共用）：会话 override > `lastUsedProviderId/lastUsedModelId`（记忆性字段）> 库首。
+- **双通道注入**：env 注入子进程 + `<工作目录>/.claude/settings.local.json` 写盘（后者带权限/hooks，优先级最高）。`claude-settings-projection.ts` 合并 `advancedJson` + permissions + env；会话当前实际模型由 `buildClaudeLinkSettingsBlock` 钉进 `settings.env`（`ANTHROPIC_MODEL` + 四个 `ANTHROPIC_DEFAULT_*_MODEL` 全部映射到它），`buildSpawnEnv(override)` 同样最后应用压过旧映射 env。
+- **防绕过双保险**：①每次 query 四别名 env 全映射到当前实际模型；②`canUseTool` 入口对 Task/Agent 工具调用级改写 `model` 入参（`decideAgentModelOverride` 纯函数，fork 不改），压过 agent 定义 frontmatter。
+- **老字段投影**：`providerName/apiKey/apiBaseUrl/defaultModel` = lastUsed 档案的投影（`config-manager.projectLegacyFields`），spawn/settings-writer/connection-tester 继续读老字段；库为空时回落老字段链。
+- **表单 ↔ JSON 双向**：`advancedJson` 是全局 Claude 设置（permissions/hooks/env）单一真相源，设置页「高级 JSON」折叠区编辑。`parseClaudeSettings` peek 不删，`updatingFromJson` 防循环。
+- apiKey（全局 + 每档案）经 electron-store + safeStorage 加密；模型行内测试（`config:testProviderModel`）按指定供应商+模型直 spawn 并直返结果——弹框式「测试连接」与流式通道已删除（用户决策：测试收敛到连接页每个模型行内的「测试」按钮）。
 
 ### 数据库（`src/main/database/`）
 
 - 单例 better-sqlite3（`getConnection()` 每语句同步调用），`journal_mode=WAL` + `PRAGMA foreign_keys=ON`。DB 文件在 `userData/claude-link.db`，附件在同级 `attachments/`（不在工作树内）。
-- 迁移幂等自愈：`CURRENT_SCHEMA_VERSION = 7`；V3+ 用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 守卫的 `ALTER TABLE ADD COLUMN`，老库/半应用库升级不阻塞。
-- 核心表：`sessions`（含 `model_override`、缓存上下文）、`messages`（FK CASCADE，含过程分组列 `process_kind`/`parent_agent_id`/`tool_use_id`/`title`/`is_error`）、`tasks`（含幂等 `client_message_id` 偏索引）、`attachments` + `message_attachments`/`task_attachments` 连接表、`claude_plan_state`（带单调 `revision`）、`interaction_history`。
+- 迁移幂等自愈：`CURRENT_SCHEMA_VERSION = 8`；V3+ 用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 守卫的 `ALTER TABLE ADD COLUMN`，老库/半应用库升级不阻塞。V8：`sessions.provider_override` 列 + `model_override` 旧别名值（sonnet/haiku/opus/fable）清洗为 NULL。
+- 核心表：`sessions`（含 `provider_override`/`model_override`（实际模型 ID）、缓存上下文）、`messages`（FK CASCADE，含过程分组列 `process_kind`/`parent_agent_id`/`tool_use_id`/`title`/`is_error`）、`tasks`（含幂等 `client_message_id` 偏索引）、`attachments` + `message_attachments`/`task_attachments` 连接表、`claude_plan_state`（带单调 `revision`）、`interaction_history`。
 - 各 repo 是 `getConnection()` 之上的薄函数模块；`createMessageWithAttachments` 在单事务内 insert+link+promote。
 
 ### 其它子系统（`src/main/modules/`）
