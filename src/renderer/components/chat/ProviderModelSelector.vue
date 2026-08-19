@@ -320,11 +320,17 @@ function formatCtx(maxTokens: number): string {
   letter-spacing: 0;
 }
 
-/* 两列各最多 4 项可见，超出后仅本列内部滚动（互不带动）。 */
+/* 两列各最多 4 项可见，超出后仅本列内部滚动（互不带动）。
+   悬停显现：与全局滚动条策略一致。Chromium 121+ 中 scrollbar-color 一旦
+   非 auto 会接管并禁用 ::-webkit-scrollbar* 自定义，两套机制需保持同一行为。 */
 .scroll {
   max-height: calc(2.625rem * 4);
   overflow-y: auto;
   scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.scroll:hover {
   scrollbar-color: color-mix(in srgb, var(--color-text-muted) 42%, transparent) transparent;
 }
 
@@ -333,8 +339,12 @@ function formatCtx(maxTokens: number): string {
 }
 
 .scroll::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--color-text-muted) 40%, transparent);
+  background: transparent;
   border-radius: 999px;
+}
+
+.scroll:hover::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-muted) 40%, transparent);
 }
 
 .item {

@@ -380,6 +380,12 @@ a:focus-visible,
 .hljs-variable, .hljs-template-variable { color: var(--color-text); }
 .hljs-deletion { color: var(--color-danger); }
 .hljs-addition { color: var(--color-accent); }
+/* ── 全局滚动条：悬停显现 ──
+   默认 thumb 全透明（滚动条不再常驻、影响观感），仅当鼠标移入可滚动容器
+   （或其后代）时显现；直接悬停 thumb 时加深提示可拖拽。
+   纯 CSS 方案：悬停元素的 :hover 会连同其所有可滚动祖先一起命中，
+   即"鼠标靠近容器才显示"。组件级 ::-webkit-scrollbar-thumb 覆写
+   （DiffBody 等）需自带同样的透明默认 + :hover 显现，否则退回常驻样式。 */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -390,9 +396,14 @@ a:focus-visible,
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border);
+  background: transparent;
   border-radius: 8px;
   border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--color-border);
   background-clip: padding-box;
 }
 
