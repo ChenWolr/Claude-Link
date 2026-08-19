@@ -136,40 +136,10 @@ export function searchSessions(query: string): Session[] {
     return sessions;
   }
 
+  // 仅按会话标题匹配：不命中消息内容与附件文件名（会话内内容不参与搜索）。
   // 用与前端完全相同的 normalizeSearchText 函数做对称归一化，
   // 避免 SQL REPLACE 与 TS 正则的归一化分歧导致漏匹配。
-  // 一次性取出每个会话的拼接消息内容用于内容匹配。
-  const contentMap = new Map<string, string>();
-  const contentRows = getConnection()
-    .prepare("SELECT session_id, GROUP_CONCAT(content, ' ') AS text FROM messages GROUP BY session_id")
-    .all() as { session_id: string; text: string | null }[];
-  for (const row of contentRows) {
-    contentMap.set(row.session_id, row.text ?? '');
-  }
-
-  // 仅历史消息附件文件名参与搜索；草稿、失败和仅任务引用的附件不应命中。
-  // 不纳入 storage_key / MIME / 哈希 / 文件内容。
-  const attachmentNameMap = new Map<string, string>();
-  const attachmentNameRows = getConnection()
-    .prepare(
-      `SELECT a.session_id, GROUP_CONCAT(a.filename, ' ') AS text
-       FROM message_attachments ma
-       JOIN attachments a ON a.id = ma.attachment_id
-       GROUP BY a.session_id`,
-    )
-    .all() as { session_id: string; text: string | null }[];
-  for (const row of attachmentNameRows) {
-    attachmentNameMap.set(row.session_id, row.text ?? '');
-  }
-
-  return sessions.filter((session) => {
-    if (normalizeSearchText(session.name).includes(normalizedQuery)) return true;
-    const content = contentMap.get(session.id);
-    if (content && normalizeSearchText(content).includes(normalizedQuery)) return true;
-    const attachmentNames = attachmentNameMap.get(session.id);
-    if (attachmentNames && normalizeSearchText(attachmentNames).includes(normalizedQuery)) return true;
-    return false;
-  });
+  return sessions.filter((session) => normalizeSearchText(session.name).includes(normalizedQuery));
 }
 
 export function deleteSession(id: string): void {
