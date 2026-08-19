@@ -802,7 +802,13 @@ onBeforeUnmount(() => {
   width: 12px;
   height: 12px;
 }
+/* 悬停显现：与全局滚动条策略一致（默认透明，移入才显示），组件级覆写避免退回常驻。 */
 .pane-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 8px;
+  border: 3px solid transparent;
+}
+.pane-scroll:hover::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--color-text) 18%, transparent);
   border-radius: 8px;
   border: 3px solid var(--color-panel-soft);
@@ -855,6 +861,11 @@ onBeforeUnmount(() => {
   height: 12px;
 }
 .diff-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 8px;
+  border: 3px solid transparent;
+}
+.diff-scroll:hover::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--color-text) 18%, transparent);
   border-radius: 8px;
   border: 3px solid var(--color-panel-soft);
