@@ -1301,7 +1301,8 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 7);
+  assert.equal(schemaVersion, 8);
+  assert.ok(sessionColumns.has('provider_override'), 'V8：迁移后须补 provider_override 列');
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
   assert.ok(sessionColumns.has('thinking_level'), 'V7：迁移后须补 thinking_level 列');
@@ -1361,7 +1362,9 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 7, '迁移后 schema version 须升到 7（V7 思考强度）');
+  assert.equal(schemaVersion, 8, '迁移后 schema version 须升到 8（V8 供应商 override + 别名清洗）');
+  assert.ok(sessionsColumns.has('provider_override'), 'V8：老库迁移须补 provider_override 列');
+  assert.ok(allExecSql.some((sql) => sql.includes('model_override = NULL')), 'V8：须执行 model_override 别名清洗 SQL');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');
   assert.ok(createdTables.has('message_attachments'), '须建 message_attachments 关联表');
   assert.ok(createdTables.has('task_attachments'), '须建 task_attachments 关联表');
@@ -1481,7 +1484,7 @@ function testPermissionPromptIntegration(): void {
   // 工厂把显式 settings 放入 Options.settings，杜绝两条路径各自重复构造 settings。
   assert.ok(sdkBackend.includes('buildClaudeLinkSettingsBlock'), 'sdk-backend 应有统一 settings 块构造函数（F6）');
   assert.ok(
-    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias\)/g) ?? []).length >= 2,
+    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias(?:,\s*(?:override|modelOverride))?\)/g) ?? []).length >= 2,
     '生产 query 与 probe 必须调用同一个 buildClaudeLinkSettingsBlock（F6：杜绝配置漂移）',
   );
   assert.ok(optionsSrc.includes('settings?: Record<string, unknown>'), '统一 options 工厂输入应含显式 settings（F6）');
@@ -2187,10 +2190,8 @@ function testMarkdownRenderProfiles(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const tool = fs.readFileSync(new URL('../src/renderer/components/chat/ToolCallBlock.vue', import.meta.url), 'utf8');
   const thinking = fs.readFileSync(new URL('../src/renderer/components/chat/ThinkingBlock.vue', import.meta.url), 'utf8');
-  const testModal = fs.readFileSync(new URL('../src/renderer/components/config/TestConnectionModal.vue', import.meta.url), 'utf8');
   assert.ok(tool.includes("renderMarkdown(resultContent.value, 'static')"));
   assert.ok(thinking.includes("renderMarkdown(props.content, 'static')"));
-  assert.ok(testModal.includes("renderMarkdown(streamedText.value, 'static')"));
 }
 
 function testMarkdownSecurityAndProtocolContracts(): void {
@@ -2490,13 +2491,6 @@ function testMermaidDeadPreRuleRemoved(): void {
   assert.ok(css.includes('.markdown-body .mermaid-block'), 'mermaid-block 容器样式须保留');
 }
 
-function testTestConnectionCopyFailureResets(): void {
-  const fs = require('node:fs') as typeof import('node:fs');
-  const src = fs.readFileSync(new URL('../src/renderer/components/config/TestConnectionModal.vue', import.meta.url), 'utf8');
-  const resets = src.split("button.textContent = '复制'").length - 1;
-  assert.ok(resets >= 2, `handleMarkdownCopy 须在成功与失败两分支都复位为「复制」，当前仅 ${resets} 处`);
-}
-
 function testImageLightboxZIndexTokenized(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const css = fs.readFileSync(new URL('../src/renderer/assets/styles/main.css', import.meta.url), 'utf8');
@@ -2562,13 +2556,6 @@ function testMermaidLifecycleGuards(): void {
   assert.ok(src.includes('data-mermaid-source'), '渲染任务须记录启动时源码');
   assert.ok(src.includes('data-mermaid-state'), 'Mermaid 状态需区分 loading/rendered/error');
   assert.ok(src.includes('bindFunctions'), '须执行 Mermaid 返回的 bindFunctions');
-}
-
-function testTestConnectionMarkdownCopyWiring(): void {
-  const fs = require('node:fs') as typeof import('node:fs');
-  const src = fs.readFileSync(new URL('../src/renderer/components/config/TestConnectionModal.vue', import.meta.url), 'utf8');
-  assert.ok(src.includes('navigator.clipboard'), '测试连接入口必须绑定代码复制行为');
-  assert.ok(src.includes('@click="handleMarkdownCopy"'), '测试连接流式 Markdown 容器应挂复制委托');
 }
 
 // Edit/Write/MultiEdit 的 tool_result 只是一句成功提示（无 diff），ToolCallBlock 改为
@@ -3339,7 +3326,6 @@ testSplitRowsContracts();
 testDiffWordsDecouplesJsdiff();
 testReducedMotionStopsInfiniteAnimations();
 testMermaidLifecycleGuards();
-testTestConnectionMarkdownCopyWiring();
 testMarkdownImageInLinkNotButtonized();
 testMarkdownImageProtocolFilter();
 testInteractionPreviewDiffFallback();
@@ -3347,7 +3333,6 @@ testMarkdownIndentedCodeUsesContainer();
 testMermaidRendersBlocksSerially();
 testMermaidErrorRetryAndAccessibleTitleContracts();
 testMermaidDeadPreRuleRemoved();
-testTestConnectionCopyFailureResets();
 testImageLightboxZIndexTokenized();
 testChatBlockKeyboardAccessibility();
 testAttachmentPolicyContracts();

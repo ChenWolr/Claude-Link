@@ -20,8 +20,9 @@ import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
 import { execFileSync } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
-import { getConfig } from './config-manager';
+import { getConfig, getProviderModelSources } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
+import { resolveSessionModel, buildUnifiedModelEnv, decideAgentModelOverride } from '../../shared/session-model';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { isSuccessfulCliResult } from '../../shared/session-completion';
@@ -57,7 +58,7 @@ import type {
   CliPermissionEvent,
   ClaudePlanCliEvent,
 } from '../../shared/types/cli';
-import type { SpawnOptions } from './cli-shared';
+import type { SpawnOptions, SessionModelOverride } from './cli-shared';
 // 复用 cli-shared 的纯函数（env 注入 / 落库）。
 import {
   buildSpawnEnv,
@@ -148,9 +149,14 @@ interface SessionEntry {
   // 官方 Options.abortController：query() 传入后，abort() 会在 Windows 上经 SDK
   // → TerminateProcess（瞬时不可捕获），打不死卡死在死 socket 上的子进程时兜底硬杀。
   abortController: AbortController | null;
-  // 启动时解析出的模型类型别名(sonnet/haiku/opus/fable)或自定义真实模型名。
-  // persistCliEvent 推送初始 windowSize 时，按它查用户设的按别名上下文覆盖。
+  // 启动时解析出的当前实际模型 ID（供应商库解析；库空时为老别名链结果）。
+  // persistCliEvent 推送初始 windowSize 按它查上下文覆盖；canUseTool 的 Agent/Task
+  // 调用级 model 改写（唯一实际模型·第二层保险）也读它。
   requestedAlias: string | null;
+  // 本次 query 解析出的「当前实际模型」ID（resolveSessionModel 结果；库空时 null）。
+  // 与 requestedAlias 分开存：requestedAlias 兼作上下文窗口查询键，resolvedModel
+  // 语义上只表示「子代理也必须统一到它」的当前实际模型。
+  resolvedModel: string | null;
   // 仅用于日志区分同一 Query 内部重试与 stale resume 重建的新 Query。
   queryInstance: number;
 }
@@ -489,6 +495,18 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
       return { behavior: 'deny', message: '会话已关闭', interrupt: true, toolUseID: options.toolUseID };
     }
 
+    // 唯一实际模型·第二层保险（doc2 §5.3）：Agent/Task 工具调用级 model 改写。
+    // 调用级 model 优先于 agent 定义 frontmatter（sdk-tools.d.ts AgentInput.model），
+    // 把入参 model 钉到本会话当前实际模型，杜绝 agent 定义/模型自行传 haiku 等别名
+    // 绕过会话选择。fork 天然继承 parent 不改；该分支无条件放行（仅改写入参），
+    // 不引入额外权限询问，且必须在下方「本会话已授权」本地短路之前。
+    const currentModel = entries.get(sessionId)?.resolvedModel ?? null;
+    const rewriteModel = decideAgentModelOverride(toolName, input, currentModel);
+    if (rewriteModel) {
+      logger.info(`[canUseTool] Agent/Task model 改写为当前实际模型：${String(input.model)} -> ${rewriteModel}`);
+      return { behavior: 'allow', updatedInput: { ...input, model: rewriteModel }, toolUseID: options.toolUseID };
+    }
+
     if (toolName === 'AskUserQuestion' && isAskUserQuestionPayload(input)) {
       const result = await requestAskUserQuestionInteractions(sessionId, mainWindow, input, options);
       if (result) {
@@ -563,6 +581,7 @@ function createEntry(): SessionEntry {
     state: 'pending',
     abortController: null,
     requestedAlias: null,
+    resolvedModel: null,
     queryInstance: nextQueryInstance.value++,
     emitExit: (code) => {
       if (exitEmitted) return;
@@ -722,6 +741,23 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
 }
 
 // ── 组装 SDK Options ───────────────────────────────────────────────
+// 解析本次 query 的「会话当前实际模型」覆盖（doc2 §5.1）：供应商库（会话 override >
+// 最近使用 > 库首）解析出供应商 + 模型；库为空时返回 null（走老字段/别名链兜底）。
+function resolveSessionOverride(opts: SpawnOptions): SessionModelOverride | null {
+  const config = getConfig();
+  const resolved = resolveSessionModel(
+    { providerOverride: opts.providerOverride ?? null, modelOverride: opts.modelOverride ?? null },
+    { providerId: config.lastUsedProviderId, modelId: config.lastUsedModelId },
+    getProviderModelSources(),
+  );
+  if (!resolved.provider || !resolved.modelId) return null;
+  return {
+    apiBaseUrl: resolved.provider.apiBaseUrl,
+    apiKey: resolved.provider.apiKey,
+    modelId: resolved.modelId,
+  };
+}
+
 /**
  * 统一构造 claude-link 显式 settings 块（review-v1 F6）。生产 query 与 probe 共用，杜绝配置漂移。
  * 优先级：Claude Code managed < user < project < local < 此处 claude-link 显式 Options.settings。
@@ -735,6 +771,7 @@ function buildClaudeLinkSettingsBlock(
   opts: SpawnOptions,
   thinkingConfig: ThinkingConfigResult,
   requestedAlias: string,
+  modelOverride: SessionModelOverride | null,
 ): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined } {
   // 内联 settings——claude-link 显式设置叠加在原生来源之上（managed < user < project < local
   // < Options.settings）。与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），
@@ -743,6 +780,18 @@ function buildClaudeLinkSettingsBlock(
   // buildClaudeSettingsProjection 返回类型宽化为 Record<string,unknown>，但 env 运行时实为 Record<string,string>；
   // 取别名供下方按会话别名补注入 MAX_CONTEXT_TOKENS（投影不含该项，需在此按会话补）。
   const settingsEnv = settings.env as Record<string, string>;
+
+  // 会话当前实际模型注入（唯一实际模型·第一层保险）：settings.env 是 SDK 侧最高优先级通道
+  // （高于 Options.env），把供应商端点/密钥与 ANTHROPIC_MODEL + 四别名映射全部钉到当前实际模型，
+  // 压过 advancedJson / 投影里可能残留的旧映射。
+  if (modelOverride) {
+    settingsEnv.ANTHROPIC_BASE_URL = modelOverride.apiBaseUrl;
+    if (modelOverride.apiKey) {
+      settingsEnv.ANTHROPIC_API_KEY = modelOverride.apiKey;
+      delete settingsEnv.ANTHROPIC_AUTH_TOKEN;
+    }
+    Object.assign(settingsEnv, buildUnifiedModelEnv(modelOverride.modelId));
+  }
 
   // 按当前模型别名动态注入 CC 的真实窗口 override（CLAUDE_CODE_MAX_CONTEXT_TOKENS）。
   // CC 对第三方/未知模型名（如 glm-5.2，非 claude- 开头）默认回退 200k → 提前压缩丢上下文。
@@ -800,16 +849,20 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // settingsPatch → 合并进 Options.settings，覆盖全局投影（query 级 > 全局 > advancedJson）。
   const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
   const thinkingConfig = resolveThinkingConfig(effectiveLevel);
-  const requestedAlias = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
+  // 供应商库解析（会话 override > 最近使用 > 库首）；命中则本回合 env/options.model/别名映射
+  // 全部以它为准，modelOverride 语义为实际模型 ID（唯一实际模型原则）。
+  const override = resolveSessionOverride(opts);
+  const requestedAlias = override?.modelId ?? (opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson));
   entry.requestedAlias = requestedAlias;
+  entry.resolvedModel = override?.modelId ?? null;
   // Task 3 / review-v1 F6：显式 settings 由 buildClaudeLinkSettingsBlock 单一构造，query 与 probe 共用，
   // 经 buildNativeSdkOptionsCore 统一放入 Options（原生 settings 来源——不传 settingSources，SDK 默认
   // 加载 user/project/local）。
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias);
+  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override);
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
-    env: buildSpawnEnv(),
+    env: buildSpawnEnv(override),
     exe: resolveExecutable(config.cliPath),
-    model: resolveAliasToActualModel(requestedAlias, config.advancedJson),
+    model: override ? override.modelId : resolveAliasToActualModel(requestedAlias, config.advancedJson),
     thinking: thinkingConfig.thinking,
     effort: thinkingConfig.effort,
     cwd: opts.workingDir || config.workingDirectory || undefined,
@@ -1461,14 +1514,16 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
   const exe = resolveExecutable(config.cliPath);
   const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
   const thinkingConfig = resolveThinkingConfig(effectiveLevel);
-  const requestedAlias = opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson);
+  // 与生产 query 同一供应商库解析（F2/N1：probe 与真实回合的模型/端点上下文一致）。
+  const override = resolveSessionOverride(opts);
+  const requestedAlias = override?.modelId ?? (opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson));
   // Task 3 / review-v1 F6：与生产 query 同一核心构造（原生 settings 来源，不传 settingSources 数组；
   // 显式 settings 共用 buildClaudeLinkSettingsBlock，经工厂统一放入 Options）。
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias);
+  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override);
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
-    env: buildSpawnEnv(),
+    env: buildSpawnEnv(override),
     exe,
-    model: resolveAliasToActualModel(requestedAlias, config.advancedJson),
+    model: override ? override.modelId : resolveAliasToActualModel(requestedAlias, config.advancedJson),
     thinking: thinkingConfig.thinking,
     effort: thinkingConfig.effort,
     cwd: opts.workingDir || config.workingDirectory || undefined,

@@ -16,10 +16,13 @@ import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import { isErrorCliResult } from '../../shared/session-completion';
 import { resolveContextWindowForSession } from '../../shared/model-context-windows';
+import { buildUnifiedModelEnv } from '../../shared/session-model';
 
 export interface SpawnOptions {
   model?: string;
   modelOverride?: string | null;
+  /** 会话级供应商选用（ProviderProfile.id）；null/未设 = 用全局「最近使用」记忆。 */
+  providerOverride?: string | null;
   workingDir?: string | null;
   maxTurns?: number;
   permissionMode?: string;
@@ -36,9 +39,20 @@ export interface SpawnOptions {
   userCommandText?: string;
 }
 
+// 会话当前实际模型的 spawn 覆盖（doc2 §5.1）：resolveSessionModel 的结果由调用方解析后传入。
+// apiKey 可为空串（档案未配 key：baseUrl/model 仍生效，认证走外部登录态/环境）。
+export interface SessionModelOverride {
+  apiBaseUrl: string;
+  apiKey: string;
+  modelId: string;
+}
+
 // 构造注入子进程/SDK 的 env：apiKey + baseUrl + advancedJson.env 块展开。
 // spawn 路径和 SDK 路径都复用此函数，确保第三方端点配置一致。
-export function buildSpawnEnv(): Record<string, string> {
+// override（会话当前实际模型）最后应用：供应商端点/密钥与 ANTHROPIC_MODEL +
+// 四别名 ANTHROPIC_DEFAULT_*_MODEL 全部钉到当前实际模型（唯一实际模型原则·第一层保险），
+// 压过 advancedJson 里可能残留的旧映射 env。
+export function buildSpawnEnv(override?: SessionModelOverride | null): Record<string, string> {
   const config = getConfig();
   const env: Record<string, string> = { ...process.env as Record<string, string> };
 
@@ -80,6 +94,20 @@ export function buildSpawnEnv(): Record<string, string> {
     const result = resolveThinkingConfig(level);
     if (result.effort) {
       env.CLAUDE_EFFORT = result.effort;
+    }
+  }
+
+  if (override) {
+    const overrideBaseUrl = override.apiBaseUrl.trim();
+    if (overrideBaseUrl) {
+      env.ANTHROPIC_BASE_URL = overrideBaseUrl;
+    }
+    if (override.apiKey) {
+      env.ANTHROPIC_API_KEY = override.apiKey;
+      delete env.ANTHROPIC_AUTH_TOKEN;
+    }
+    if (override.modelId) {
+      Object.assign(env, buildUnifiedModelEnv(override.modelId));
     }
   }
 

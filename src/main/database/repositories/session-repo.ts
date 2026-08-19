@@ -10,6 +10,7 @@ interface SessionRow {
   name: string;
   cli_session_id: string | null;
   model: string;
+  provider_override: string | null;
   model_override: string | null;
   working_dir: string | null;
   permission_mode: Session['permissionMode'];
@@ -28,7 +29,8 @@ function toSession(row: SessionRow): Session {
     name: row.name,
     cliSessionId: row.cli_session_id,
     model: row.model,
-    modelOverride: row.model_override,
+    providerOverride: row.provider_override ?? null,
+    modelOverride: row.model_override ?? null,
     workingDir: row.working_dir,
     permissionMode: row.permission_mode,
     maxTurns: row.max_turns,
@@ -75,7 +77,9 @@ export function listSessions(): Session[] {
 
 export function updateSession(
   id: string,
-  partial: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel'>>,
+  partial: Partial<
+    Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>
+  >,
 ): Session | null {
   const updates: string[] = [];
   const values: Record<string, unknown> = { id };
@@ -87,6 +91,14 @@ export function updateSession(
   if (partial.model !== undefined) {
     updates.push('model = @model');
     values.model = partial.model;
+  }
+  if (partial.providerOverride !== undefined) {
+    updates.push('provider_override = @providerOverride');
+    values.providerOverride = partial.providerOverride;
+  }
+  if (partial.modelOverride !== undefined) {
+    updates.push('model_override = @modelOverride');
+    values.modelOverride = partial.modelOverride;
   }
   if (partial.workingDir !== undefined) {
     updates.push('working_dir = @workingDir');

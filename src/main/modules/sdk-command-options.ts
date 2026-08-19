@@ -23,6 +23,7 @@ export function mergeSpawnOptions(session: Session | null, opts: SpawnOptions): 
   const merged: SpawnOptions = { ...opts };
   if (merged.model === undefined || merged.model === null) merged.model = session.model;
   if (merged.modelOverride === undefined || merged.modelOverride === null) merged.modelOverride = session.modelOverride;
+  if (merged.providerOverride === undefined || merged.providerOverride === null) merged.providerOverride = session.providerOverride;
   if (merged.workingDir === undefined || merged.workingDir === null) merged.workingDir = session.workingDir;
   if (merged.maxTurns === undefined || merged.maxTurns === null) merged.maxTurns = session.maxTurns;
   if (merged.permissionMode === undefined || merged.permissionMode === null) merged.permissionMode = session.permissionMode;

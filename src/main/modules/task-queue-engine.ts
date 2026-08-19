@@ -255,6 +255,7 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
     child = spawnForTask(task.id, sessionId, prepared.prompt, mainWindow, {
       model: session?.model ?? config.defaultModel,
       modelOverride: session?.modelOverride ?? null,
+      providerOverride: session?.providerOverride ?? null,
       workingDir: session?.workingDir ?? config.workingDirectory,
       maxTurns: config.maxTurns,
       permissionMode: session?.permissionMode ?? config.permissionMode,
@@ -378,6 +379,7 @@ export async function continueWithUserMessage(
     child = spawnForChat(sessionId, mainWindow, {
       model: session.model ?? config.defaultModel,
       modelOverride: session.modelOverride ?? null,
+      providerOverride: session.providerOverride ?? null,
       workingDir: session.workingDir ?? config.workingDirectory,
       maxTurns: config.maxTurns,
       permissionMode: session.permissionMode ?? config.permissionMode,

@@ -1,24 +1,22 @@
 <script setup lang="ts">
+// ConfigPage.vue — 设置页（r9 定版版式）。
+// 结构：标题/标签/工作区同宽一列（宽 = min(舞台宽, 舞台高×1.5)），列在页面水平居中；
+// 工作区固定 3:2 宽高比，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
+// 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
+// 所有滚动发生在面板内部；尺寸全部 rem（随 fontScale 等比缩放）。
 import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config-store';
-import ApiKeyInput from '../components/config/ApiKeyInput.vue';
-import ModelMappingInputs from '../components/config/ModelMappingInputs.vue';
+import ProviderManager from '../components/providers/ProviderManager.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
-import TestConnectionModal from '../components/config/TestConnectionModal.vue';
-import { useInteractionStore } from '../stores/interaction-store';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
-import { parseClaudeSettings } from '../../shared/settings-parser';
 
 const store = useConfigStore();
 const router = useRouter();
-const interactionStore = useInteractionStore();
 const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
-const advancedJsonError = ref<string | null>(null);
 
-// 分类标签页：连接（含端点/模型映射/高级 JSON）/ 行为 / 外观。
-// 连接、模型、高级同属"如何接入 API"，合并在一页用子卡片分隔。
+// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观。
 type TabId = 'connection' | 'behavior' | 'appearance';
 const activeTab = ref<TabId>('connection');
 
@@ -45,9 +43,9 @@ function scheduleAutoSave(): void {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     if (!initialized) return;
-    lastSavedSnapshot = configSnapshot(); // 以"将保存的值"为基线，防回写循环
     try {
       await store.saveConfig();
+      lastSavedSnapshot = configSnapshot();
       saveStatus.value = 'saved';
       if (savedIndicatorTimer) clearTimeout(savedIndicatorTimer);
       savedIndicatorTimer = setTimeout(() => { saveStatus.value = 'idle'; }, 2000);
@@ -83,6 +81,34 @@ async function performInit() {
 
 onMounted(performInit);
 
+// ── r6/r8：3:2 工作区自适应 ──
+// 标题/标签/工作区同宽一列：宽 = min(舞台宽, 舞台高×1.5)，列水平居中、左缘同一条竖线。
+// 舞台（页头/横幅/标签之外的剩余区）用 ResizeObserver 实测，保证任意窗口比例下
+// 工作区恒 3:2、页面零溢出（滚动全部发生在面板内部）。
+const stageRef = ref<HTMLElement | null>(null);
+const stageSize = ref({ w: 0, h: 0 });
+let stageObserver: ResizeObserver | null = null;
+
+onMounted(() => {
+  if (!stageRef.value) return;
+  stageObserver = new ResizeObserver((entries) => {
+    const rect = entries[0]?.contentRect;
+    if (rect) stageSize.value = { w: rect.width, h: rect.height };
+  });
+  stageObserver.observe(stageRef.value);
+});
+
+onBeforeUnmount(() => {
+  stageObserver?.disconnect();
+  stageObserver = null;
+});
+
+const columnWidth = computed(() => {
+  const { w, h } = stageSize.value;
+  if (w <= 0 || h <= 0) return '100%';
+  return `${Math.floor(Math.min(w, h * 1.5))}px`;
+});
+
 // 工作目录可能由自动检测、工作区切换或主进程配置流程更新；诊断必须跟随当前 cwd，
 // 不得继续展示旧目录的 settings 来源和 CLAUDE.md candidates。
 watch(
@@ -104,44 +130,16 @@ onBeforeUnmount(() => {
   }
 });
 
-// 监听高级 JSON 文本框：粘贴 Claude Code settings.json 后自动回填字段（防抖 600ms）。
-// applyExtractedSettings 只在 JSON 含对应字段时覆盖，空字段不会清掉用户手填的值。
-let autoFillTimer: ReturnType<typeof setTimeout> | null = null;
-watch(
-  () => store.config.advancedJson,
-  (val) => {
-    if (store.updatingFromJson) return;
-    if (autoFillTimer) clearTimeout(autoFillTimer);
-    if (!val || val.trim() === '' || val.trim() === '{}') return;
-    autoFillTimer = setTimeout(() => {
-      try {
-        const parsed = parseClaudeSettings(val);
-        store.applyExtractedSettings(parsed);
-      } catch {
-        // 静默：用户可能正在编辑不完整的 JSON
-      }
-    }, 600);
-  },
-);
+// 高级 JSON 编辑器已随多供应商化移除：连接配置由供应商库维护，
+// config.advancedJson（全局 permissions/hooks/env）仍经「自动检测配置」导入维护。
 
-// 表单→JSON：apiKey/apiBaseUrl/permissionMode 改动同步进 advancedJson（完整双向）
-watch(
-  () => [store.config.apiKey, store.config.apiBaseUrl, store.config.permissionMode],
-  () => {
-    if (!store.updatingFromJson) store.syncFormToAdvanced();
-  },
-);
-
-const advancedJsonValid = computed(() => {
-  if (!store.config.advancedJson || store.config.advancedJson === '{}') return true;
-  try {
-    JSON.parse(store.config.advancedJson);
-    return true;
-  } catch {
-    return false;
-  }
-});
-
+function showToast(message: string, type: 'success' | 'error' = 'success'): void {
+  toastType.value = type;
+  toast.value = message;
+  setTimeout(() => {
+    toast.value = null;
+  }, 3000);
+}
 
 async function handleSave() {
   // 立即落盘（不等防抖），并修正 URL 尾部斜杠
@@ -157,96 +155,12 @@ async function handleSave() {
     await store.saveConfig();
     lastSavedSnapshot = configSnapshot();
     saveStatus.value = 'saved';
-    toastType.value = 'success';
-    toast.value = '配置已保存';
+    if (savedIndicatorTimer) clearTimeout(savedIndicatorTimer);
+    savedIndicatorTimer = setTimeout(() => { saveStatus.value = 'idle'; }, 2000);
   } catch {
     saveStatus.value = 'error';
-    toastType.value = 'error';
-    toast.value = store.error ?? '保存失败';
+    showToast(store.error ?? '保存失败', 'error');
   }
-
-  setTimeout(() => {
-    toast.value = null;
-  }, 3000);
-}
-
-function formatJson() {
-  try {
-    const parsed = JSON.parse(store.config.advancedJson || '{}');
-    store.config.advancedJson = JSON.stringify(parsed, null, 2);
-    advancedJsonError.value = null;
-  } catch (e) {
-    advancedJsonError.value = e instanceof Error ? e.message : 'JSON 格式错误';
-  }
-}
-
-async function handleImportSettings() {
-  const filePath = await window.claudeLink.pickSettingsFile();
-  if (filePath) {
-    await store.importSettings(filePath);
-  }
-}
-
-const autoDetectInfo = ref<string | null>(null);
-
-async function handleAutoDetect() {
-  const detected = await store.autoDetectClaudeConfig();
-  if (!detected) {
-    autoDetectInfo.value = store.error;
-    return;
-  }
-  const parts = [`检测来源：${detected.sources.join('、') || '无'}`];
-  if (detected.hasOAuthCredentials) parts.push('检测到 OAuth 登录态（claude.ai 订阅）');
-  if (detected.oauthAccount?.email) parts.push(`账号：${detected.oauthAccount.email}`);
-  if (detected.apiKeyHelper) parts.push('检测到 apiKeyHelper（Claude Link 不执行动态密钥脚本，请改用静态 API Key）');
-  autoDetectInfo.value = parts.join('；');
-}
-
-const showTestModal = ref(false);
-
-async function handleTestConnection() {
-  // 测试前先回填字段并持久化，确保测试用的是最新配置（消除贴 JSON 未保存的竞态）。
-  try {
-    store.fillFromAdvancedJson();
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
-    }
-    await store.saveConfig();
-    lastSavedSnapshot = configSnapshot();
-    saveStatus.value = 'saved';
-  } catch {
-    // 保存失败不阻塞测试——测试连接会从 advancedJson 兜底取 key/url。
-  }
-  showTestModal.value = true;
-}
-
-function handleFillFromJson() {
-  const result = store.fillFromAdvancedJson();
-  toastType.value = result.ok ? 'success' : 'error';
-  toast.value = result.message;
-  setTimeout(() => {
-    toast.value = null;
-  }, 3000);
-}
-
-// 一键清空连接配置：供应商/API Key/请求地址字段 + 高级 JSON 对应 env 键 + 模型映射。
-// 用 interaction 队列的 requestConfirm 确认，避免 window.confirm 导致 Electron 焦点丢失。
-async function handleClearConnection() {
-  const ok = await interactionStore.requestConfirm({
-    title: '清空连接配置',
-    message: '确定清空连接配置？供应商、API Key、请求地址会重置，高级 JSON 里对应的 env 键（含模型映射）也会一并移除。',
-    confirmText: '清空',
-    cancelText: '取消',
-    danger: true,
-  });
-  if (!ok) return;
-  store.clearConnectionConfig();
-  toastType.value = 'success';
-  toast.value = '已清空连接配置';
-  setTimeout(() => {
-    toast.value = null;
-  }, 3000);
 }
 
 function handleThemeSelect(paletteId: string) {
@@ -290,9 +204,9 @@ function handleThinkingLevelChange(e: Event) {
 </script>
 
 <template>
-  <section class="config-scroll">
-    <section class="config-page">
-    <header class="config-page__header">
+  <section class="settings">
+    <div class="settings-inner" :style="{ '--col-w': columnWidth }">
+    <header class="page-head">
       <div>
         <p class="eyebrow">Settings</p>
         <h1>配置</h1>
@@ -336,143 +250,123 @@ function handleThinkingLevelChange(e: Event) {
       </div>
     </details>
 
-    <!-- 顶部操作：自动检测 / 测试连接 / 保存状态 -->
-    <div class="autodetect-bar">
-      <button type="button" class="autodetect-btn" @click="handleAutoDetect">自动检测配置</button>
-      <button type="button" class="test-btn" @click="handleTestConnection">测试连接</button>
-      <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus}`]">
-        <span v-if="saveStatus === 'saving'" class="save-badge__dot" />
-        {{ saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '已自动保存' : '保存失败' }}
-      </span>
-      <p v-if="autoDetectInfo" class="autodetect-info">{{ autoDetectInfo }}</p>
+    <!-- 高级 JSON 编辑器已随多供应商化移除（连接配置由供应商库维护；
+         config.advancedJson 仍承载全局 permissions/hooks/env，经「自动检测配置」导入）-->
+
+    <!-- 分类标签页与保存状态同行，保存反馈靠右对齐 -->
+    <div class="tabs-row">
+      <nav class="tabs" aria-label="设置分类">
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'connection' }]" @click="activeTab = 'connection'">连接</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'behavior' }]" @click="activeTab = 'behavior'">行为</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
+      </nav>
+      <div class="save-actions">
+        <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus}`]">
+          <span v-if="saveStatus === 'saving'" class="save-badge__dot" />
+          {{ saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '保存成功' : '保存失败' }}
+        </span>
+        <button type="button" class="test-btn" @click="handleSave">立即保存</button>
+      </div>
     </div>
-    <TestConnectionModal v-model:visible="showTestModal" />
 
-    <!-- 分类标签页 -->
-    <nav class="tabs">
-      <button type="button" :class="['tab', { 'tab--active': activeTab === 'connection' }]" @click="activeTab = 'connection'">连接</button>
-      <button type="button" :class="['tab', { 'tab--active': activeTab === 'behavior' }]" @click="activeTab = 'behavior'">行为</button>
-      <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
-    </nav>
+    <!-- 舞台：剩余全部空间；工作区 3:2 自适应并水平居中（与标题/标签同宽一列） -->
+    <div ref="stageRef" class="stage">
+      <div class="workbench" :class="{ 'workbench--solo': activeTab !== 'connection' }">
+        <!-- 连接：供应商/模型可选项库（列表 + 详情复合面板，内部滚动；测试在模型行内） -->
+        <div v-show="activeTab === 'connection'" class="wb-connection">
+          <ProviderManager />
+        </div>
 
-    <form class="config-form" @submit.prevent="handleSave">
-      <!-- 连接：端点 / 模型映射 / 高级 JSON（同属"如何接入 API"，合并一页）-->
-      <div v-show="activeTab === 'connection'" class="connection-stack">
-        <div class="section">
-          <div class="section-head">
-            <h3 class="section-title">连接配置</h3>
-            <button type="button" class="clear-btn" @click="handleClearConnection">清空连接配置</button>
-          </div>
-          <label class="field">
-            <span>供应商名称 <span class="required">*</span></span>
-            <input v-model="store.config.providerName" type="text" placeholder="例如：sub2Api" />
-          </label>
-          <label class="field">
-            <span>备注</span>
-            <input v-model="store.config.providerNote" type="text" placeholder="可选" />
-          </label>
-          <ApiKeyInput v-model="store.config.apiKey" />
-          <div v-if="store.importedFields.has('apiKey')" class="imported-mark">✓ 已从 settings.json 导入</div>
-          <label class="field">
-            <span>请求地址（API Base URL） <span class="required">*</span></span>
-            <input v-model="store.config.apiBaseUrl" type="text" placeholder="https://api.anthropic.com" />
-          </label>
-          <ModelMappingInputs />
-          <div class="advanced-panel">
-            <div class="advanced-actions">
-              <button type="button" class="import-btn" @click="handleImportSettings">导入 settings.json 文件</button>
-              <button type="button" class="fill-btn" @click="handleFillFromJson">从 JSON 填充字段</button>
+        <!-- 行为：轮次 / 队列间隔 / 默认思考强度（内部排版沿用原字段，仅装入统一面板） -->
+        <div v-show="activeTab === 'behavior'" class="solo-card">
+          <div class="mscroll">
+            <div class="section">
+              <h3 class="section-title">行为</h3>
+              <label class="field">
+                <span>最大轮次 <small class="field-hint">对应 Claude Code <code>--max-turns</code>：限制单次会话的最大工具调用轮数。</small></span>
+                <input v-model.number="store.config.maxTurns" type="number" min="1" />
+              </label>
+              <label class="field">
+                <span>队列任务间隔（秒） <small class="field-hint">Claude Link 自身功能：任务队列里两条任务之间的等待时间。<strong>非</strong> Claude Code 配置。</small></span>
+                <input v-model.number="store.config.taskDelaySeconds" type="number" min="0" />
+              </label>
+              <label class="field">
+                <span>默认思考强度 <small class="field-hint">新会话与未单独设档的会话回落到此值。低=快速响应、高=深入分析、超高/极限=最强推理；「工作流」档为 xhigh + 动态工作流编排（Beta，成本最高）。也可在<strong>会话内</strong>按需单独调整。</small></span>
+                <select :value="store.config.defaultThinkingLevel" @change="handleThinkingLevelChange">
+                  <option value="low">低（快速响应）</option>
+                  <option value="medium">中（平衡，默认）</option>
+                  <option value="high">高（深入分析）</option>
+                  <option value="xhigh">超高（复杂推理）</option>
+                  <option value="max">极限（最高强度，成本最高）</option>
+                  <option value="ultracode">工作流（xhigh + 动态工作流，Beta）</option>
+                </select>
+              </label>
+              <p class="field-hint">权限模式（default / acceptEdits / plan / bypassPermissions）已改为在<strong>会话内</strong>按需调整，不再放在这里。</p>
             </div>
-            <div v-if="store.importedFields.has('advancedJson')" class="imported-mark">✓ 已从 settings.json 导入</div>
-            <button type="button" class="format-btn" @click="formatJson">格式化</button>
-            <textarea v-model="store.config.advancedJson" class="json-editor" rows="8" placeholder='{"key": "value"}' />
-            <div v-if="advancedJsonError" class="json-error">{{ advancedJsonError }}</div>
-            <div v-if="!advancedJsonValid" class="json-error">JSON 格式错误</div>
+          </div>
+        </div>
+
+        <!-- 外观：主题（ThemeSelector 9 卡网格）+ 字号（r9：原有内容原样保留） -->
+        <div v-show="activeTab === 'appearance'" class="solo-card">
+          <div class="mscroll">
+            <div class="section">
+              <h3 class="section-title">外观</h3>
+              <ThemeSelector :selected-id="store.config.themePaletteId" @select="handleThemeSelect" />
+              <label class="field">
+                <span>字号 <small class="field-hint">小/中/大三档，全局缩放所有文字与间距</small></span>
+                <select :value="store.config.fontScale" @change="handleFontScaleChange">
+                  <option value="small">小</option>
+                  <option value="medium">中</option>
+                  <option value="large">大</option>
+                </select>
+              </label>
+            </div>
           </div>
         </div>
       </div>
-
-      <!-- 行为：轮次 / 队列间隔 / 默认思考强度（权限模式已移至会话内调整）-->
-      <div v-show="activeTab === 'behavior'" class="section">
-        <h3 class="section-title">行为</h3>
-        <label class="field">
-          <span>最大轮次 <small class="field-hint">对应 Claude Code <code>--max-turns</code>：限制单次会话的最大工具调用轮数。</small></span>
-          <input v-model.number="store.config.maxTurns" type="number" min="1" />
-        </label>
-        <label class="field">
-          <span>队列任务间隔（秒） <small class="field-hint">Claude Link 自身功能：任务队列里两条任务之间的等待时间。<strong>非</strong> Claude Code 配置。</small></span>
-          <input v-model.number="store.config.taskDelaySeconds" type="number" min="0" />
-        </label>
-        <label class="field">
-          <span>默认思考强度 <small class="field-hint">新会话与未单独设档的会话回落到此值。低=快速响应、高=深入分析、超高/极限=最强推理；「工作流」档为 xhigh + 动态工作流编排（Beta，成本最高）。也可在<strong>会话内</strong>按需单独调整。</small></span>
-          <select :value="store.config.defaultThinkingLevel" @change="handleThinkingLevelChange">
-            <option value="low">低（快速响应）</option>
-            <option value="medium">中（平衡，默认）</option>
-            <option value="high">高（深入分析）</option>
-            <option value="xhigh">超高（复杂推理）</option>
-            <option value="max">极限（最高强度，成本最高）</option>
-            <option value="ultracode">工作流（xhigh + 动态工作流，Beta）</option>
-          </select>
-        </label>
-        <p class="field-hint">权限模式（default / acceptEdits / plan / bypassPermissions）已改为在<strong>会话内</strong>按需调整，不再放在这里。</p>
-      </div>
-
-      <!-- 外观：主题 -->
-      <div v-show="activeTab === 'appearance'" class="section">
-        <h3 class="section-title">外观</h3>
-        <ThemeSelector :selected-id="store.config.themePaletteId" @select="handleThemeSelect" />
-        <label class="field">
-          <span>字号 <small class="field-hint">小/中/大三档，全局缩放所有文字与间距</small></span>
-          <select :value="store.config.fontScale" @change="handleFontScaleChange">
-            <option value="small">小</option>
-            <option value="medium">中</option>
-            <option value="large">大</option>
-          </select>
-        </label>
-      </div>
-
-      <!-- 保存：始终可见，与所在标签页无关 -->
-      <div class="save-bar">
-        <span class="save-bar__status">
-          <span v-if="saveStatus === 'saving'" class="save-badge__dot" />
-          {{ saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '已自动保存' : saveStatus === 'error' ? '有未保存的更改（保存失败）' : '所有配置自动保存到本地' }}
-        </span>
-        <button class="save-button" type="submit" :disabled="store.savingConfig">
-          {{ store.savingConfig ? '保存中...' : '立即保存' }}
-        </button>
-      </div>
-    </form>
-    </section>
+    </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
-.config-scroll {
+/* r6-r9：设置页不再整页滚动——页头/标签常驻，滚动全部发生在工作区面板内部。 */
+.settings {
   flex: 1 1 0;
   min-height: 0;
   width: 100%;
-  overflow-y: auto;
-}
-
-.config-page {
-  max-width: 40rem;
-  margin: 0 auto;
-  padding: 2rem 2rem 4rem;
-}
-
-.config-page__header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 1.5rem;
+  overflow: hidden;
 }
 
-.config-page__header h1 {
+.settings-inner {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 1.5rem 5% 1.75rem;
+}
+
+/* 标题/标签/工作区同宽一列（宽=var(--col-w)），列在页面水平居中；列内左缘同一条竖线。 */
+.page-head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex: none;
+  width: var(--col-w);
+  margin-inline: auto;
+}
+
+.page-head h1 {
   margin: 0.25rem 0 0;
   font-size: 1.5rem;
 }
 
 .back-button {
+  margin-left: auto;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: transparent;
@@ -492,6 +386,18 @@ function handleThinkingLevelChange(e: Event) {
   color: var(--color-accent-strong);
   font-size: 0.75rem;
   font-weight: 700;
+}
+
+/* 家具块（横幅/toast/存储信息/操作条）与标题/标签/工作区同宽一列（用户反馈：
+   这几块此前通栏偏长，须与整体列宽对齐并水平居中）。 */
+.banner,
+.toast,
+.storage-info,
+.autodetect-bar {
+  width: var(--col-w);
+  max-width: 100%;
+  margin-inline: auto;
+  flex: none;
 }
 
 .banner {
@@ -539,10 +445,44 @@ function handleThinkingLevelChange(e: Event) {
 }
 
 .autodetect-bar {
+  display: none;
+}
+
+.tabs-row {
+  width: var(--col-w);
+  max-width: 100%;
+  margin-inline: auto;
+  margin-bottom: 1.25rem;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: space-between;
   gap: 0.75rem;
-  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.tabs-row .tabs {
+  width: auto;
+  margin: 0;
+  border-bottom: 0;
+}
+
+.save-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin-left: auto;
+  padding-bottom: 0.25rem;
+}
+
+@media (max-width: 42rem) {
+  .tabs-row {
+    align-items: flex-end;
+  }
+
+  .save-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
 }
 
 .autodetect-btn {
@@ -563,10 +503,7 @@ function handleThinkingLevelChange(e: Event) {
   color: var(--color-text-muted);
   font-size: 0.75rem;
   line-height: 1.5;
-}
-
-.autodetect-bar {
-  flex-wrap: wrap;
+  flex-basis: 100%;
 }
 
 .test-btn {
@@ -589,8 +526,11 @@ function handleThinkingLevelChange(e: Event) {
 .tabs {
   display: flex;
   gap: 0.25rem;
-  margin-bottom: 1rem;
+  margin-bottom: 1.25rem;
   border-bottom: 1px solid var(--color-border);
+  flex: none;
+  width: var(--col-w);
+  margin-inline: auto;
 }
 
 .tab {
@@ -655,88 +595,6 @@ function handleThinkingLevelChange(e: Event) {
   }
 }
 
-.save-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  flex-wrap: wrap;
-  margin-top: 0.5rem;
-}
-
-.save-bar__status {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-}
-
-.test-result {
-  margin-bottom: 1rem;
-  padding: 0.75rem 0.875rem;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border);
-  font-size: 0.8125rem;
-}
-
-.test-result--ok {
-  border-color: var(--color-accent);
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-  color: var(--color-accent-strong);
-}
-
-.test-result--fail {
-  border-color: var(--color-fail-strong);
-  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
-  color: var(--color-fail-strong);
-}
-
-.test-result__msg {
-  margin: 0;
-  line-height: 1.5;
-}
-
-.test-result__preview {
-  margin: 0.5rem 0 0;
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  word-break: break-all;
-}
-
-.config-form {
-  display: grid;
-  gap: 1.25rem;
-}
-
-.connection-stack {
-  display: grid;
-  gap: 1.25rem;
-}
-
-.section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-}
-
-.clear-btn {
-  justify-self: end;
-  border: 1px solid color-mix(in srgb, var(--color-fail) 50%, transparent);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-danger);
-  padding: 0.3125rem 0.75rem;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-
-.clear-btn:hover {
-  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
-}
-
 .storage-info {
   margin-bottom: 1.25rem;
   border: 1px solid var(--color-border);
@@ -775,6 +633,62 @@ function handleThinkingLevelChange(e: Event) {
   font-size: 0.75rem;
   color: var(--color-text);
   word-break: break-all;
+}
+
+/* ── 舞台与 3:2 工作区 ── */
+.stage {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workbench {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  aspect-ratio: 3 / 2;
+  width: var(--col-w);
+  margin-inline: auto;
+}
+
+.wb-connection {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+}
+
+/* 行为/外观：整卡表单（solo 卡，内部滚动，全圆角）。 */
+.workbench--solo {
+  display: block;
+}
+
+.solo-card {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-panel-soft);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.solo-card .mscroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 原有 .section 内容装入 solo 卡：去掉自带卡片框（外层已是统一面板），字段排版不变。 */
+.solo-card .section {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 0;
 }
 
 .section {
@@ -824,131 +738,5 @@ input[type='number'] {
   color: var(--color-text);
   padding: 0.625rem 0.75rem;
   font-size: 0.8125rem;
-}
-
-.accordion-toggle {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  border: none;
-  background: transparent;
-  color: var(--color-text-muted);
-  font-size: 0.8125rem;
-  cursor: pointer;
-  padding: 0;
-}
-
-.advanced-panel {
-  display: grid;
-  gap: 0.75rem;
-  margin-top: 0.75rem;
-  padding: 1rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-panel-soft);
-  box-shadow: var(--ring-light);
-}
-
-
-.format-btn {
-  justify-self: start;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-muted);
-  padding: 0.375rem 0.75rem;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-
-.json-editor {
-  width: 100%;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-panel);
-  color: var(--color-text);
-  padding: 0.625rem 0.75rem;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Consolas, monospace;
-  font-size: 0.8125rem;
-  resize: vertical;
-  min-height: 7.5rem;
-}
-
-.json-error {
-  color: var(--color-danger);
-  font-size: 0.8125rem;
-}
-
-.save-button {
-  margin-top: 0.5rem;
-  border: 0;
-  border-radius: var(--radius-md);
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  padding: 0.75rem;
-  font-size: 0.9375rem;
-  font-weight: 700;
-  cursor: pointer;
-  box-shadow: var(--ring-light-accent);
-}
-
-.save-button:disabled {
-  cursor: wait;
-  opacity: 0.7;
-}
-
-.url-validation {
-  font-size: 0.75rem;
-  line-height: 1.5;
-}
-
-.url-validation--ok {
-  color: var(--color-accent-strong);
-}
-
-.url-validation--warn {
-  color: var(--color-warn-strong);
-}
-
-.url-validation--error {
-  color: var(--color-danger);
-}
-
-.url-validation--empty {
-  color: var(--color-text-muted);
-}
-
-.import-btn {
-  justify-self: start;
-  border: 1px solid var(--color-accent);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
-  color: var(--color-accent-strong);
-  padding: 0.375rem 0.75rem;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-
-.advanced-actions {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-}
-
-.fill-btn {
-  border: 1px solid var(--color-accent);
-  border-radius: var(--radius-sm);
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  padding: 0.375rem 0.75rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  cursor: pointer;
-  box-shadow: var(--ring-light-accent);
-}
-
-.imported-mark {
-  color: var(--color-accent-strong);
-  font-size: 0.75rem;
 }
 </style>

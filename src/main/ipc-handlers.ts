@@ -12,9 +12,9 @@ import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { IPC_CHANNELS } from '../shared/constants';
-import { clearConfig, getConfig, importSettingsFile, saveConfig } from './modules/config-manager';
+import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel } from './modules/config-manager';
 import { detectClaudeConfig } from './modules/claude-config-detector';
-import { runTestConnectionStream, abortTestConnection } from './modules/connection-tester';
+import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace } from './modules/workspace-history';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
@@ -60,6 +60,15 @@ let mainWindow: BrowserWindow;
 /** 会话级发送互斥：防止并发 CHAT_SEND 双落库/覆盖 pending。 */
 const chatSendLocks = new Set<string>();
 
+/** 供应商库内容变更 → 推送全部渲染方（设置页 + 会话选择器缓存）刷新。 */
+function broadcastProvidersChanged(): void {
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.PROVIDERS_CHANGED);
+  } catch {
+    // webContents 可能已销毁（窗口关闭），忽略
+  }
+}
+
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   mainWindow = mainWindowRef;
 
@@ -102,10 +111,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return result.filePaths[0];
   });
   ipcMain.handle(IPC_CHANNELS.CONFIG_AUTO_DETECT, async () => detectClaudeConfig());
-  ipcMain.handle(IPC_CHANNELS.CONFIG_TEST_CONNECTION, async (_event, model: string | null) => {
-    runTestConnectionStream(model ?? null, mainWindow);
-  });
-  ipcMain.handle(IPC_CHANNELS.TEST_CONNECTION_ABORT, async () => abortTestConnection());
+  // 流式测试连接（弹框）已删除：测试收敛到 PROVIDER_TEST_MODEL（模型行内按钮，直返结果）。
   // Task 3 Step 5：原生 settings 诊断摘要（resolveSettings 脱敏视图：来源/CLAUDE.md 候选/生效键名，
   // 绝不含 effective 值/API key/env）。cwd 只做非空字符串校验——真实路径解析交给 SDK 与 findClaudeMdCandidates。
   ipcMain.handle(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, async (_event, cwd: unknown) => {
@@ -126,11 +132,37 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_LIST_RECENT, async () => listRecentWorkspaces());
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
-  ipcMain.handle(
-    IPC_CHANNELS.MODELS_FETCH,
-    async (_event, provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) =>
-      fetchAvailableModels(provider, apiKey, apiBaseUrl),
-  );
+
+  // 多供应商模型库：设置页（可选项库）与 会话选择器（只读）共用。
+  // 密钥边界：listProviders 只回掩码视图；save 的明文 key 落盘前加密；查询/行内测试都在主进程内解密。
+  ipcMain.handle(IPC_CHANNELS.PROVIDER_LIST, async () => getLibrarySnapshot());
+  ipcMain.handle(IPC_CHANNELS.PROVIDER_SAVE, async (_event, input) => {
+    const view = saveProviderProfile(input);
+    broadcastProvidersChanged();
+    return view;
+  });
+  ipcMain.handle(IPC_CHANNELS.PROVIDER_DELETE, async (_event, providerId: string) => {
+    deleteProviderProfile(providerId);
+    broadcastProvidersChanged();
+  });
+  ipcMain.handle(IPC_CHANNELS.PROVIDER_RESTORE, async () => {
+    const view = restoreDeletedProvider();
+    broadcastProvidersChanged();
+    return view;
+  });
+  ipcMain.handle(IPC_CHANNELS.PROVIDER_QUERY_MODELS, async (_event, providerId: string, forceRefresh?: boolean) => {
+    if (typeof providerId !== 'string' || !providerId.trim()) throw new Error('Invalid provider id');
+    const profile = getStoredProviderProfile(providerId);
+    if (!profile) throw new Error('供应商不存在');
+    const apiKey = decryptProviderApiKey(profile);
+    if (!apiKey) throw new Error('该供应商未配置 API Key，无法查询；可在下拉框手动输入模型 ID 添加。');
+    return fetchAvailableModels(profile, apiKey, forceRefresh === true);
+  });
+  // 模型行内测试（r5）：指定供应商 + 指定模型真实 spawn CLI，直返汇总结果。
+  ipcMain.handle(IPC_CHANNELS.PROVIDER_TEST_MODEL, async (_event, providerId: string, modelId: string) => {
+    if (typeof providerId !== 'string' || typeof modelId !== 'string') throw new Error('Invalid provider/model id');
+    return runProviderModelTest(providerId, modelId);
+  });
 
   // Sessions
   ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => sessionRepo.listSessions());
@@ -145,6 +177,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     void startCommandProbe(session.id, mainWindow, {
       model: session.model,
       modelOverride: session.modelOverride,
+      providerOverride: session.providerOverride,
       workingDir: session.workingDir,
       maxTurns: session.maxTurns,
       permissionMode: session.permissionMode,
@@ -177,7 +210,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     async (
       _event,
       id: string,
-      data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel'>>,
+      data: Partial<
+        Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>
+      >,
     ) => {
       // 白名单校验（review-v2 F11）：不信任 renderer 传值，非法 thinkingLevel 丢弃，
       // 合法 null（跟随默认）/ 有效档位放行。
@@ -185,7 +220,28 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         logger.warn(`[thinking] invalid thinkingLevel, discarding: ${String(data.thinkingLevel)}`);
         delete data.thinkingLevel;
       }
+      // 供应商/模型 override 同样白名单：只接受 string | null（实际模型 ID，非别名）。
+      if (data.providerOverride !== undefined && data.providerOverride !== null && typeof data.providerOverride !== 'string') {
+        logger.warn(`[session] invalid providerOverride, discarding: ${String(data.providerOverride)}`);
+        delete data.providerOverride;
+      }
+      if (data.modelOverride !== undefined && data.modelOverride !== null && typeof data.modelOverride !== 'string') {
+        logger.warn(`[session] invalid modelOverride, discarding: ${String(data.modelOverride)}`);
+        delete data.modelOverride;
+      }
+      const touchedSelection =
+        data.providerOverride !== undefined || data.modelOverride !== undefined;
       const updated = sessionRepo.updateSession(id, data);
+      // 会话选用供应商×模型成功 → 更新全局「最近使用」记忆 + 老字段投影
+      //（recordLastUsed 内部校验存在性，供应商/模型已删则静默跳过，解析层走回退链）。
+      if (
+        touchedSelection &&
+        typeof data.providerOverride === 'string' &&
+        typeof data.modelOverride === 'string' &&
+        updated
+      ) {
+        recordLastUsedProviderModel(data.providerOverride, data.modelOverride);
+      }
       // F3：工作目录变化影响 Skill/Plugin 可见性 → 重新探测命令（旧快照标 stale，新结果替换）。
       // N2：清除工作目录（workingDir: null）同样必须重新探测——旧目录的 Skill/Plugin 命令不再适用。
       if (data.workingDir !== undefined) {
@@ -299,6 +355,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       spawnForChat(sessionId, mainWindow, {
         model: session.model,
         modelOverride: session.modelOverride,
+        providerOverride: session.providerOverride,
         workingDir: session.workingDir,
         maxTurns: session.maxTurns,
         permissionMode: session.permissionMode,

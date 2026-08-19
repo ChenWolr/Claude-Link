@@ -227,12 +227,13 @@ console.log('\n=== 11) 上下文 token 用量解析 ===');
   check('缺 cache 字段只算 input', extractContextTokens({ input_tokens: 100 }) === 100);
 }
 
-console.log('\n=== 12) 回归：后台标题分析不得硬编码 Haiku，必须走配置模型解析 ===');
+console.log('\n=== 12) 回归：后台标题分析不得硬编码 Haiku，必须走供应商库/配置模型解析 ===');
 {
   const source = readRel('src/main/modules/topic-analyzer.ts');
   // 不得出现任何 claude-haiku-4-5 字面量（无论 = 还是 : 写法），否则就是硬编码。
   check('topic-analyzer 不再硬编码 claude-haiku-4-5', !source.includes('claude-haiku-4-5'));
-  check('topic-analyzer 使用 resolveConfiguredDefaultModel 解析配置模型', source.includes('resolveConfiguredDefaultModel'));
+  check('topic-analyzer 使用 resolveSessionModel 解析供应商库模型', source.includes('resolveSessionModel'));
+  check('topic-analyzer 保留老链路兜底 resolveConfiguredDefaultModel', source.includes('resolveConfiguredDefaultModel'));
 }
 
 console.log('\n=== 13) 回归：聊天发送错误必须在 ChatPage 可见 ===');
@@ -553,7 +554,7 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
   const tb = readRel('src/renderer/components/chat/ThinkingBlock.vue');
   const ml = readRel('src/renderer/components/chat/MessageList.vue');
   const cb = readRel('src/renderer/components/chat/ContextButton.vue');
-  const ms = readRel('src/renderer/components/chat/ModelSelector.vue');
+  const ms = readRel('src/renderer/components/chat/ProviderModelSelector.vue');
   const st = readRel('src/renderer/components/chat/SessionToolbar.vue');
 
   // 问题 1：会话切换隔离
@@ -587,13 +588,13 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
 
   // 问题 3：执行中禁用
   check('ContextButton 含 disabled prop', cb.includes('disabled') && cb.includes('defineProps'));
-  check('ModelSelector 含 disabled prop', ms.includes('disabled') && ms.includes('defineProps'));
+  check('ProviderModelSelector 含 disabled prop', ms.includes('disabled') && ms.includes('defineProps'));
   check('SessionToolbar ContextButton :disabled', st.includes('ContextButton :disabled="sending"'));
   check('SessionToolbar 工作空间 button :disabled', /ctl__btn[\s\S]{0,120}:disabled="sending"/.test(st));
-  check('SessionToolbar ModelSelector :disabled', st.includes('ModelSelector :disabled="sending"'));
-  // 权限控件已由 <select> 改为卡片式（触发按钮 + 弹出 perm-menu，commit d396477）：校验权限触发按钮在 sending 时禁用。
+  check('SessionToolbar ProviderModelSelector :disabled', st.includes('ProviderModelSelector :disabled="sending"'));
+  // 权限控件已由 <select> 改为卡片式（commit d396477）：校验权限触发按钮在 sending 时禁用。
   // ctl__perm-icon 已随卡片化重构移除；改用「:disabled="sending" 后跟 perm-menu 卡片面板」唯一定位权限按钮
-  // （工作空间按钮后跟 workspaceMenu、模型是 ModelSelector，均无 perm-menu）。
+  // （工作空间按钮后跟 workspaceMenu、模型是 ProviderModelSelector，均无 perm-menu）。
   check('SessionToolbar 权限触发按钮 :disabled（卡片式）', /:disabled="sending"[\s\S]{0,400}perm-menu/.test(st));
 }
 
@@ -1174,19 +1175,32 @@ console.log('\n=== 39) 上下文窗口 fallback + fable 映射契约 ===');
   check('lookupUserContextWindow [1m]后缀真实名反查命中(glm-5.2[1m]→sonnet)', lookupUserContextWindow({ aliasOrModel: 'glm-5.2[1m]', advancedJson: advWith1m, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
 }
 
-console.log('\n=== 40) UI 简化：连接配置单卡片 + 会话内不调字号 ===');
+console.log('\n=== 40) UI 简化（r9 定版）：连接页=供应商库 + 会话内不调字号 ===');
 {
   const cp = readRel('src/renderer/pages/ConfigPage.vue');
-  const mm = readRel('src/renderer/components/config/ModelMappingInputs.vue');
   const st = readRel('src/renderer/components/chat/SessionToolbar.vue');
-  const connectionBlock = cp.match(/<div v-show="activeTab === 'connection'"[\s\S]*?<!-- 行为：/)?.[0] ?? '';
-  check('ConfigPage 不再导入 ProviderSelect', !cp.includes('ProviderSelect from'));
-  check('ConfigPage 不再渲染 ProviderSelect 下拉', !cp.includes('<ProviderSelect'));
-  check('连接区标题改为中性的连接配置', cp.includes('连接配置') && !cp.includes('<h3 class="section-title">供应商与端点</h3>'));
-  check('连接区只保留一个 section 卡片', (connectionBlock.match(/<div class="section">/g) ?? []).length === 1);
-  check('上下文窗口和模型映射不再作为独立标题', !connectionBlock.includes('<h3 class="section-title">上下文窗口和模型映射</h3>'));
-  check('高级 JSON 不再作为独立标题', !connectionBlock.includes('<h3 class="section-title">高级 JSON</h3>'));
-  check('ModelMappingInputs 不再展示长别名说明', !mm.includes('Claude Code 用 sonnet / haiku / opus / fable'));
+  const pm = readRel('src/renderer/components/providers/ProviderManager.vue');
+  // 连接页换成供应商可选项库（ProviderManager）；旧别名映射组件已删除。
+  check('ConfigPage 连接页挂载 ProviderManager', cp.includes('<ProviderManager />'));
+  const cpTemplate = cp.slice(cp.indexOf('<template>')).replace(/<!--[\s\S]*?-->/g, '');
+  check('顶部测试连接已删（收敛到模型行内「测试」）', !cpTemplate.includes('测试连接'));
+  check('自动检测入口已从多供应商设置页移除', !cpTemplate.includes('自动检测配置') && !cp.includes('handleAutoDetect'));
+  check('自动保存成功后才更新快照，失败可重试', /try \{\s*await store\.saveConfig\(\);\s*lastSavedSnapshot = configSnapshot\(\);/.test(cp) && !/lastSavedSnapshot = configSnapshot\(\); \/\/ 以/.test(cp));
+  check('保存状态与 tabs 同行显示在右侧', cpTemplate.includes('tabs-row') && /tabs-row[\s\S]*tabs[\s\S]*save-badge/.test(cpTemplate));
+  check('保存成功文案为保存成功', cpTemplate.includes("'保存成功'") || cp.includes("=== 'saved' ? '保存成功'"));
+  check('高级 JSON 编辑器已删（多供应商化，advancedJson 由自动检测维护）', !cpTemplate.includes('高级 JSON'));
+  check('家具块（横幅/存储/操作条）对齐同宽列（--col-w 居中）', cp.includes('.autodetect-bar {') && /banner,\s*\n\s*\.toast,/.test(cp) && cp.includes('max-width: 100%'));
+  check('ModelMappingInputs 组件已删除（别名映射 UI 退场）', readRel('src/renderer/components/config/ModelMappingInputs.vue') === '');
+  check('ModelSelector 组件已删除（会话选择器换级联）', readRel('src/renderer/components/chat/ModelSelector.vue') === '');
+  // r6-r9 版式契约：3:2 工作区 + 同宽一列 + 面板内部滚动。
+  check('工作区固定 3:2 宽高比', cp.includes('aspect-ratio: 3 / 2'));
+  check('标题/标签/工作区同宽一列（--col-w 居中）', cp.includes('width: var(--col-w)') && cp.includes('margin-inline: auto'));
+  check('行为/外观共用 solo 卡 + 内部滚动', cp.includes('workbench--solo') && cp.includes('.solo-card .mscroll'));
+  check('设置页不再整页滚动（面板内部滚动）', cp.includes('display: flex') && cp.includes('overflow: hidden') && !cp.includes('overflow-y: auto;\n}'));
+  // 库无选用语义（r3）：无「使用中/设为当前使用/默认模型」。
+  check('ProviderManager 模板无「使用中」徽章', !pm.slice(pm.indexOf('<template>')).includes('使用中'));
+  check('ProviderManager 无「设为当前使用」', !pm.includes('设为当前使用'));
+  check('ProviderManager 有职责说明表尾', pm.includes('设置页只维护可选的供应商与模型'));
   check('SessionToolbar 不再导入 FONT_SCALE_SIZES', !st.includes('FONT_SCALE_SIZES'));
   check('SessionToolbar 不再含会话内字号控件', !st.includes('onFontScaleChange') && !st.includes('<span class="ctl__label">字号</span>'));
 }
@@ -1308,8 +1322,8 @@ console.log('\n=== 43) 浅色主题系统契约（openhanako 真实浅色色板�
   check('warm-paper textMuted 已加深（#6A6C70 非 #8E9196）', wp?.colors.textMuted === '#6A6C70');
   const it = readRel('src/renderer/assets/styles/interaction-tokens.css');
   check('interaction-history-bg 走 token（非 rgba 黑底）', !/rgba\(0,\s*0,\s*0,\s*0\.1[2-9]/.test(it));
-  const tcm = readRel('src/renderer/components/config/TestConnectionModal.vue');
-  check('TestConnectionModal 遮罩走 interaction-overlay-bg token', /background:\s*var\(--interaction-overlay-bg\)/.test(tcm));
+  // TestConnectionModal 已删除（弹框测试退场，行内测试为唯一入口）：
+  // interaction-overlay-bg token 仍由 InteractionPrompt 等使用，此处不再断言已删组件。
 }
 
 console.log('\n=== 44) 右侧活动栏方案 B：图标轨 + 总览/筛选 + 状态指标网格 ===');
@@ -1423,7 +1437,7 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
 
   // DB migration + repo
   check('migrations.ts 有 claude_plan_state 表', migrations.includes('claude_plan_state'));
-  check('migrations.ts 版本升为 7', migrations.includes('CURRENT_SCHEMA_VERSION = 7'));
+  check('migrations.ts 版本升为 8（V8 供应商 override + 别名清洗）', migrations.includes('CURRENT_SCHEMA_VERSION = 8'));
   check('claude-plan-repo.ts 有 getPlanState', repo.includes('export function getPlanState'));
   check('claude-plan-repo.ts 有 replaceTodos', repo.includes('export function replaceTodos'));
   check('claude-plan-repo.ts 有 upsertTask', repo.includes('export function upsertTask'));
@@ -1586,7 +1600,7 @@ console.log('\n=== 48) 思考强度接线：持久化层 + 注入层 + IPC 通�
   const projection = readRel('src/main/modules/claude-settings-projection.ts');
 
   // 持久化层（Task 4）
-  check('migrations.ts schema 版本升为 7', migrations.includes('CURRENT_SCHEMA_VERSION = 7'));
+  check('migrations.ts schema 版本升为 8（V8 供应商 override + 别名清洗）', migrations.includes('CURRENT_SCHEMA_VERSION = 8'));
   check('migrations.ts 补 thinking_level 列', migrations.includes("ADD COLUMN thinking_level TEXT DEFAULT NULL"));
   check('session-repo.ts SessionRow 有 thinking_level', repo.includes('thinking_level: string | null'));
   check('session-repo.ts toSession 映射 thinkingLevel（脏值兜底）', repo.includes('isValidThinkingLevel(row.thinking_level)'));

@@ -6,6 +6,7 @@ import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
 import { detectCli } from './modules/cli-detector';
+import { ensureProviderMigration } from './modules/config-manager';
 import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe } from './modules/sdk-backend';
 import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
@@ -79,6 +80,9 @@ app.whenReady().then(async () => {
   try {
     // Initialize database
     runMigrations(getConnection());
+
+    // 多供应商库一次性迁移：老单供应商配置 → ProviderProfile（幂等，键存在即跳过）。
+    ensureProviderMigration();
 
     // Reset any tasks that were running when app was closed
     // (since their processes died with the app)

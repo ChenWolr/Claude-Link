@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>多供应商 × 模型管理 · V3 弹窗模型库</title>
+<!--
+  多供应商模型管理 — 视觉稿 V3（卡片网格 + 「模型库」大弹窗）
+  ══════════════════════════════════════════════════════════════
+  · 布局：连接页常显供应商卡片网格（名称/域名/Key/模型数/默认
+    模型摘要 + 操作）。点「管理模型」打开全屏级大弹窗——左右双区：
+    左「我的模型」/ 右「可用模型（查询）」，点击右侧行即添加并
+    带飞入动效。沉浸式添加流。
+  · 与 V1/V2 的差异：设置页最克制（卡片只显摘要），添加模型的
+    操作全部收进弹窗，上下文集中；适合「配置少次、管理集中」。
+  · 交互（均可真实操作）：卡片网格（设为使用/测试/删除确认/
+    新建）；弹窗（查询异步+骨架屏/搜索/点击添加+高亮飞入/已添加
+    态/手动添加就地校验/设默认/移除撤销/ESC 或点遮罩关闭）。
+  · 视觉：与主应用同源 token（warm-paper）。
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --color-bg: #F8F4ED; --color-panel: #F4F0EA; --color-panel-soft: #FCFAF5;
+    --color-border: rgba(122, 96, 88, 0.18); --color-border-strong: rgba(0, 0, 0, 0.12);
+    --color-text: #3B3D3F; --color-text-muted: #6A6C70;
+    --color-accent: #537D96; --color-accent-strong: #456A80; --color-on-accent: #FFFFFF;
+    --color-danger: #8B3A3A; --color-success: #4A9E5E; --color-success-strong: #2E7D46; --color-info: #3B7DD8;
+    --radius-xs: 4px; --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px; --radius-pill: 999px;
+    --elevation-1: 0 1px 2px rgba(0,0,0,0.06);
+    --elevation-2: 0 4px 12px rgba(0,0,0,0.08);
+    --elevation-3: 0 12px 32px rgba(0,0,0,0.12);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --duration-fast: 120ms; --duration-base: 200ms; --duration-slow: 320ms;
+    --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, monospace;
+    --sidebar-width: 200px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root { --duration-fast: 1ms; --duration-base: 1ms; --duration-slow: 1ms; --ease-spring: var(--ease-out); }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); font-size: 16px; line-height: 1.5; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  input { font: inherit; color: inherit; }
+  svg { flex: none; }
+
+  .app { display: flex; height: 100vh; }
+  .app-nav { width: var(--sidebar-width); flex: none; background: var(--color-panel); border-right: 1px solid var(--color-border-strong); padding: 14px 10px; }
+  .app-brand { font-weight: 700; font-size: 0.9rem; padding: 6px 10px 14px; }
+  .app-nav a { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; font-size: 0.875rem; }
+  .app-nav a.active { background: color-mix(in srgb, var(--color-accent) 14%, transparent); color: var(--color-accent-strong); font-weight: 600; }
+
+  .settings { flex: 1; min-width: 0; overflow: auto; }
+  .settings-inner { max-width: 980px; margin: 0 auto; padding: 28px 32px 60px; }
+  .page-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+  .page-head h1 { font-size: 1.375rem; margin: 0; }
+  .proto-tag { font-size: 0.75rem; color: var(--color-accent-strong); background: color-mix(in srgb, var(--color-accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent); padding: 2px 10px; border-radius: var(--radius-pill); font-weight: 600; }
+  .tabs { display: inline-flex; background: color-mix(in srgb, var(--color-text) 5%, transparent); border-radius: var(--radius-sm); padding: 3px; margin-bottom: 22px; }
+  .tabs button { border: 0; background: transparent; padding: 6px 18px; font-size: 0.875rem; font-weight: 600; color: var(--color-text-muted); border-radius: 6px; }
+  .tabs button.active { background: var(--color-panel-soft); color: var(--color-accent-strong); box-shadow: var(--elevation-1); }
+
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 13px; font-size: 0.8125rem; font-weight: 600; border-radius: var(--radius-sm); border: 1px solid var(--color-border); background: var(--color-panel-soft); color: var(--color-text); transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast); }
+  .btn:hover { border-color: var(--color-border-strong); background: color-mix(in srgb, var(--color-text) 4%, var(--color-panel-soft)); }
+  .btn:focus-visible, .icon-btn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+  .btn.primary { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); }
+  .btn.primary:hover { background: var(--color-accent-strong); }
+  .btn.ghost-danger { color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 35%, transparent); background: transparent; }
+  .btn.ghost-danger:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .btn.sm { padding: 5px 10px; font-size: 0.75rem; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn.danger { background: var(--color-danger); border-color: var(--color-danger); color: #fff; }
+
+  /* ══ 供应商卡片网格 ══ */
+  .stack-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+  .stack-head h2 { margin: 0; font-size: 1rem; flex: 1; }
+  .pgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .pcard { position: relative; background: var(--color-panel-soft); border: 1px solid var(--color-border); border-radius: var(--radius-md); padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; transition: border-color var(--duration-base) var(--ease-out), box-shadow var(--duration-base); }
+  .pcard:hover { border-color: color-mix(in srgb, var(--color-accent) 35%, var(--color-border)); box-shadow: var(--elevation-1); }
+  .pcard.on { border-color: color-mix(in srgb, var(--color-success) 40%, var(--color-border)); }
+  .pc-top { display: flex; align-items: center; gap: 11px; }
+  .p-ava { width: 38px; height: 38px; flex: none; border-radius: var(--radius-sm); display: grid; place-items: center; font-weight: 700; font-size: 0.9375rem; background: color-mix(in srgb, var(--color-accent) 15%, var(--color-panel)); color: var(--color-accent-strong); }
+  .pc-top .t { flex: 1; min-width: 0; }
+  .pc-top .nm { font-size: 0.9375rem; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .badge-on { font-size: 0.625rem; font-weight: 700; color: var(--color-success-strong); background: color-mix(in srgb, var(--color-success) 14%, transparent); padding: 1px 6px; border-radius: var(--radius-xs); }
+  .pc-top .host { font-size: 0.75rem; color: var(--color-text-muted); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pc-mid { display: flex; gap: 8px; flex-wrap: wrap; }
+  .stat { font-size: 0.71875rem; color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 6%, transparent); padding: 3px 9px; border-radius: var(--radius-pill); }
+  .stat b { color: var(--color-text); font-variant-numeric: tabular-nums; }
+  .stat code { font-family: var(--font-mono); font-size: 0.6875rem; }
+  .pc-acts { display: flex; gap: 8px; margin-top: 2px; flex-wrap: wrap; }
+  .pc-acts .grow { flex: 1; }
+
+  .newcard { border: 1.5px dashed color-mix(in srgb, var(--color-accent) 45%, transparent); border-radius: var(--radius-md); background: color-mix(in srgb, var(--color-accent) 4%, var(--color-panel-soft)); display: grid; place-items: center; min-height: 120px; color: var(--color-accent-strong); font-size: 0.875rem; font-weight: 600; padding: 14px; }
+  .newcard .form { display: none; place-items: stretch; width: 100%; }
+  .newcard.open { padding: 16px 18px; }
+  .newcard.open > button { display: none; }
+  .newcard.open .form { display: flex; flex-direction: column; gap: 10px; }
+  .newcard label { display: grid; gap: 4px; font-size: 0.75rem; color: var(--color-text-muted); }
+  .newcard input { border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-panel-soft); padding: 6px 10px; font-size: 0.8125rem; }
+  .req::after { content: " *"; color: var(--color-danger); }
+  .frow { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ══ 模型库大弹窗 ══ */
+  .scrim { position: fixed; inset: 0; background: rgba(59,61,63,0.44); backdrop-filter: blur(3px); display: none; z-index: 900; }
+  .scrim.show { display: block; }
+  .modal { position: fixed; inset: 0; display: none; place-items: center; padding: 4vh 4vw; z-index: 901; }
+  .modal.show { display: grid; }
+  .mbox { width: min(960px, 100%); max-height: 88vh; background: var(--color-panel-soft); border-radius: var(--radius-lg); box-shadow: var(--elevation-3); display: flex; flex-direction: column; overflow: hidden; animation: m-in var(--duration-slow) var(--ease-spring); }
+  @keyframes m-in { from { opacity: 0; transform: scale(0.96) translateY(10px); } }
+  .m-head { display: flex; align-items: center; gap: 12px; padding: 16px 22px; border-bottom: 1px solid var(--color-border); }
+  .m-head .p-ava { width: 34px; height: 34px; font-size: 0.8125rem; }
+  .m-head .t { flex: 1; min-width: 0; }
+  .m-head h2 { margin: 0; font-size: 1.0625rem; display: flex; gap: 8px; align-items: center; }
+  .m-head .sub { font-size: 0.75rem; color: var(--color-text-muted); font-family: var(--font-mono); }
+  .icon-btn { width: 32px; height: 32px; display: inline-grid; place-items: center; border: 1px solid var(--color-border); background: var(--color-panel-soft); border-radius: var(--radius-sm); color: var(--color-text-muted); }
+  .icon-btn:hover { color: var(--color-text); border-color: var(--color-border-strong); }
+  .m-body { display: grid; grid-template-columns: 5fr 6fr; min-height: 0; flex: 1; }
+  .zone { display: flex; flex-direction: column; min-height: 0; }
+  .zone.left { border-right: 1px solid var(--color-border); }
+  .z-head { padding: 14px 18px 10px; display: flex; align-items: center; gap: 8px; }
+  .z-head h3 { margin: 0; font-size: 0.875rem; }
+  .z-head .n { font-size: 0.71875rem; color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 7%, transparent); padding: 2px 8px; border-radius: var(--radius-pill); font-variant-numeric: tabular-nums; }
+  .z-head .hint { font-size: 0.71875rem; color: var(--color-text-muted); }
+  .z-scroll { overflow: auto; min-height: 120px; flex: 1; padding: 0 10px 10px; }
+
+  .mrow { display: grid; grid-template-columns: 22px 1fr auto auto; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--radius-sm); }
+  .mrow:hover { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
+  .mrow.flash { animation: flash var(--duration-slow) var(--ease-out); }
+  @keyframes flash { 0% { background: color-mix(in srgb, var(--color-accent) 26%, transparent); transform: translateX(14px); opacity: 0.4; } 100% { background: transparent; transform: none; opacity: 1; } }
+  .mrow .mid { font-family: var(--font-mono); font-size: 0.8125rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mrow .nm { color: var(--color-text-muted); font-family: var(--font-sans); font-size: 0.71875rem; margin-left: 7px; }
+  .radio { appearance: none; width: 15px; height: 15px; border: 1.5px solid var(--color-border-strong); border-radius: 50%; background: var(--color-panel-soft); cursor: pointer; }
+  .radio:checked { border-width: 4.5px; border-color: var(--color-accent); }
+  .tag { font-size: 0.65625rem; padding: 2px 7px; border-radius: var(--radius-pill); font-weight: 600; }
+  .tag.queried { color: var(--color-info); background: color-mix(in srgb, var(--color-info) 10%, transparent); }
+  .tag.manual { color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+  .tag.def { color: var(--color-success-strong); background: color-mix(in srgb, var(--color-success) 13%, transparent); }
+  .rm { border: 0; background: transparent; color: var(--color-text-muted); width: 26px; height: 26px; display: inline-grid; place-items: center; border-radius: var(--radius-xs); }
+  .rm:hover { background: color-mix(in srgb, var(--color-danger) 10%, transparent); color: var(--color-danger); }
+
+  .madd { padding: 10px 18px 14px; border-top: 1px solid var(--color-border); display: flex; gap: 8px; align-items: flex-start; }
+  .madd .fieldbox { flex: 1; min-width: 0; }
+  .madd input { width: 100%; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-panel); padding: 6px 10px; font-size: 0.8125rem; font-family: var(--font-mono); }
+  .madd input.err { border-color: var(--color-danger); }
+  .madd .hint { font-size: 0.6875rem; color: var(--color-text-muted); margin-top: 3px; }
+  .madd .hint.err { color: var(--color-danger); font-weight: 600; }
+
+  .qzone { padding: 0 10px 12px; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .qrow1 { display: flex; gap: 8px; padding: 0 8px 10px; align-items: center; }
+  .searchbox { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-panel); padding: 0 10px; color: var(--color-text-muted); }
+  .searchbox input { flex: 1; border: 0; background: transparent; padding: 6px 0; font-size: 0.8125rem; outline: none; font-family: var(--font-mono); }
+  .spinner { width: 14px; height: 14px; border: 2px solid color-mix(in srgb, var(--color-accent) 30%, transparent); border-top-color: var(--color-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .qlist { overflow: auto; flex: 1; min-height: 140px; display: flex; flex-direction: column; gap: 2px; padding: 0 8px; }
+  .qrow { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; padding: 7px 10px; border: 0; background: transparent; text-align: left; border-radius: var(--radius-sm); transition: background var(--duration-fast) var(--ease-out); }
+  .qrow:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+  .qrow:disabled { opacity: 0.5; cursor: default; }
+  .qrow .qid { font-family: var(--font-mono); font-size: 0.8125rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qrow .qid .nm { color: var(--color-text-muted); font-family: var(--font-sans); font-size: 0.71875rem; margin-left: 7px; }
+  .qrow .qadd { font-size: 0.71875rem; font-weight: 700; color: var(--color-accent-strong); }
+  .qrow .qok { font-size: 0.71875rem; font-weight: 700; color: var(--color-success-strong); display: inline-flex; gap: 4px; align-items: center; }
+  .skel { display: flex; flex-direction: column; gap: 7px; padding: 4px 8px; }
+  .skel .bar { height: 32px; border-radius: var(--radius-xs); background: linear-gradient(90deg, color-mix(in srgb, var(--color-text) 6%, transparent) 25%, color-mix(in srgb, var(--color-text) 10%, transparent) 50%, color-mix(in srgb, var(--color-text) 6%, transparent) 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite linear; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  .empty-note { padding: 18px 12px; text-align: center; color: var(--color-text-muted); font-size: 0.8125rem; }
+  .empty-note b { color: var(--color-text); }
+
+  .toast-wrap { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 1000; align-items: center; }
+  .toast { display: flex; align-items: center; gap: 10px; background: var(--color-text); color: #FCFAF5; font-size: 0.8125rem; padding: 9px 12px 9px 16px; border-radius: var(--radius-md); box-shadow: var(--elevation-3); animation: t-in var(--duration-slow) var(--ease-spring); }
+  .toast.out { animation: t-out var(--duration-base) var(--ease-out) forwards; }
+  @keyframes t-in { from { opacity: 0; transform: translateY(12px); } }
+  @keyframes t-out { to { opacity: 0; transform: translateY(8px); } }
+  .toast button { border: 0; background: color-mix(in srgb, #FCFAF5 14%, transparent); color: #FCFAF5; font-size: 0.75rem; font-weight: 700; padding: 4px 10px; border-radius: var(--radius-xs); }
+
+  .scrim2 { position: fixed; inset: 0; background: rgba(59,61,63,0.4); backdrop-filter: blur(2px); display: none; place-items: center; z-index: 1100; }
+  .scrim2.show { display: grid; }
+  .dialog { width: 400px; background: var(--color-panel-soft); border-radius: var(--radius-lg); box-shadow: var(--elevation-3); padding: 22px 24px; animation: t-in var(--duration-slow) var(--ease-spring); }
+  .dialog h3 { margin: 0 0 8px; font-size: 1rem; }
+  .dialog p { margin: 0 0 18px; font-size: 0.8125rem; color: var(--color-text-muted); }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="app-nav" aria-label="主导航">
+    <div class="app-brand">Claude Link</div>
+    <a href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>会话</a>
+    <a href="#" class="active"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>设置</a>
+  </nav>
+
+  <main class="settings">
+    <div class="settings-inner">
+      <div class="page-head">
+        <h1>设置</h1>
+        <span class="proto-tag">视觉稿 V3 · 弹窗模型库</span>
+      </div>
+      <nav class="tabs" aria-label="设置分类">
+        <button class="active">连接</button><button>行为</button><button>外观</button>
+      </nav>
+
+      <div class="stack-head"><h2>供应商</h2><span style="font-size:.75rem;color:var(--color-text-muted)" id="pCount"></span></div>
+      <div class="pgrid" id="pgrid"></div>
+    </div>
+  </main>
+</div>
+
+<!-- 模型库大弹窗 -->
+<div class="scrim" id="scrim"></div>
+<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="模型库"></div>
+
+<div class="toast-wrap" id="toasts"></div>
+<div class="scrim2" id="scrim2"><div class="dialog" role="alertdialog" aria-modal="true" id="dialogBox"></div></div>
+
+<script>
+/* ══ Mock 数据（与 V1/V2 共用同一套，保证可比） ══ */
+const ICON = {
+  refresh: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg>',
+  search: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>',
+  x: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  check: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  trash: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  zap: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
+  undo: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
+  lib: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+  plus: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+};
+const AVAILABLE = {
+  p1: [['glm-4.7','GLM-4.7 旗舰',98304],['glm-4.7-air','GLM-4.7 Air 轻量',65536],['glm-4.6','GLM-4.6',98304],['glm-4.5-air','GLM-4.5 Air',65536],['glm-4.5-flash','GLM-4.5 Flash 免费',32768],['glm-4v-plus','GLM-4V Plus 视觉',16384],['glm-4-long','GLM-4 Long 长文本',1048576],['glm-4-flashx','GLM-4 FlashX',32768],['glm-4-air-250414','GLM-4 Air 250414',65536],['glm-4-plus','GLM-4 Plus',98304],['codegeex-4','CodeGeeX-4 编程',32768],['glm-zero-preview','GLM Zero Preview',32768]],
+  p2: [['claude-opus-4-6','Claude Opus 4.6',32768],['claude-sonnet-4-6','Claude Sonnet 4.6',65536],['claude-sonnet-4-5','Claude Sonnet 4.5',65536],['claude-haiku-4-5','Claude Haiku 4.5',32768],['claude-3-7-sonnet','Claude 3.7 Sonnet',65536],['claude-3-5-haiku','Claude 3.5 Haiku',8192]],
+  p3: [['claude-opus-4-6','Claude Opus 4.6',32768],['claude-sonnet-4-6','Claude Sonnet 4.6',65536],['claude-sonnet-4-5','Claude Sonnet 4.5',65536],['gpt-5.2','GPT-5.2（兼容层）',131072],['gemini-3-pro','Gemini 3 Pro（兼容层）',1048576],['deepseek-v3.2','DeepSeek V3.2（兼容层）',131072],['kimi-k2.5','Kimi K2.5（兼容层）',262144]],
+};
+function m(id, name, tok, src) { return { id, name, tok, src, addedAt: Date.now() }; }
+let providers = [
+  { id: 'p1', name: '智谱 GLM', note: '主力，性价比', url: 'https://open.bigmodel.cn/api/anthropic', key: '9f2c', active: true,
+    models: [m('glm-4.7','GLM-4.7 旗舰',98304,'queried'), m('glm-4.7-air','GLM-4.7 Air 轻量',65536,'queried'), m('glm-4.6','GLM-4.6',98304,'queried')], def: 'glm-4.7' },
+  { id: 'p2', name: 'Anthropic 官方', note: '', url: 'https://api.anthropic.com', key: 'a41b', active: false,
+    models: [m('claude-sonnet-4-6','Claude Sonnet 4.6',65536,'queried'), m('claude-opus-4-6','Claude Opus 4.6',32768,'queried'), m('claude-haiku-4-5','Claude Haiku 4.5',32768,'queried')], def: 'claude-sonnet-4-6' },
+  { id: 'p3', name: 'sub2api 中转', note: '备用线路', url: 'https://sub2api.example.com', key: '77e0', active: false,
+    models: [m('claude-sonnet-4-6','Claude Sonnet 4.6',65536,'manual')], def: 'claude-sonnet-4-6' },
+];
+const queried = {}, queryState = {};
+let qFilter = '';
+
+const $ = (s) => document.querySelector(s);
+const host = (u) => { try { return new URL(u).host; } catch { return u; } };
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const cur = () => modalPid ? providers.find(p => p.id === modalPid) : null;
+let modalPid = null;
+
+function toast(msg, action) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = `<span>${msg}</span>` + (action ? `<button type="button">${ICON.undo}${action.label}</button>` : '');
+  if (action) el.querySelector('button').onclick = () => { action.fn(); kill(); };
+  $('#toasts').appendChild(el);
+  const kill = () => { el.classList.add('out'); setTimeout(() => el.remove(), 220); };
+  setTimeout(kill, action ? 5000 : 2600);
+}
+function confirmDlg({ title, body, okText, onOk }) {
+  const scrim = $('#scrim2'), box = $('#dialogBox');
+  box.innerHTML = `<h3>${title}</h3><p>${body}</p><div class="frow"><button class="btn" data-x>取消</button><button class="btn danger" data-ok>${okText}</button></div>`;
+  scrim.classList.add('show');
+  box.querySelector('[data-x]').onclick = () => scrim.classList.remove('show');
+  box.querySelector('[data-ok]').onclick = () => { scrim.classList.remove('show'); onOk(); };
+}
+
+/* ══ 卡片网格 ══ */
+function renderGrid() {
+  $('#pCount').textContent = `${providers.length} 个供应商 · 「使用中」的配置会注入新会话`;
+  $('#pgrid').innerHTML = providers.map(p => `
+    <div class="pcard ${p.active ? 'on' : ''}" data-id="${p.id}">
+      <div class="pc-top">
+        <span class="p-ava">${esc(p.name.trim()[0] || '?')}</span>
+        <span class="t">
+          <span class="nm">${esc(p.name)} ${p.active ? '<span class="badge-on">使用中</span>' : ''}</span>
+          <span class="host" title="${esc(p.url)}">${esc(host(p.url))}</span>
+        </span>
+      </div>
+      <div class="pc-mid">
+        <span class="stat">模型 <b>${p.models.length}</b></span>
+        <span class="stat">默认 <code>${esc(p.def || '未设置')}</code></span>
+        <span class="stat" title="API Key 已加密保存">Key <code>…${esc(p.key)}</code></span>
+      </div>
+      <div class="pc-acts">
+        <button class="btn primary sm" data-lib>${ICON.lib}管理模型</button>
+        ${p.active ? '' : '<button class="btn sm" data-use>设为使用</button>'}
+        <span class="grow"></span>
+        <button class="btn sm" data-test title="测试连接">${ICON.zap}</button>
+        <button class="btn sm ghost-danger" data-del aria-label="删除供应商 ${esc(p.name)}">${ICON.trash}</button>
+      </div>
+    </div>`).join('') + `
+    <div class="newcard" id="newCard">
+      <button type="button" id="btnNew">${ICON.plus} 新建供应商</button>
+      <div class="form">
+        <label class="req">名称<input id="fName" placeholder="例如：DeepSeek 官方" /></label>
+        <label class="req">请求地址（Base URL）<input id="fUrl" placeholder="https://api.deepseek.com/anthropic" /></label>
+        <label>API Key<input id="fKey" type="password" placeholder="sk-…" /></label>
+        <div class="frow"><button class="btn sm" id="fCancel">取消</button><button class="btn sm primary" id="fSave">创建</button></div>
+      </div>
+    </div>`;
+  document.querySelectorAll('[data-lib]').forEach(b => b.onclick = () => openModal(b.closest('.pcard').dataset.id));
+  document.querySelectorAll('[data-use]').forEach(b => b.onclick = () => {
+    const p = providers.find(x => x.id === b.closest('.pcard').dataset.id);
+    providers.forEach(x => x.active = false); p.active = true;
+    renderGrid(); toast(`已切换到「${esc(p.name)}」，配置已生效`);
+  });
+  document.querySelectorAll('[data-test]').forEach(b => b.onclick = () => toast('已发起连接测试（复用现有测试连接弹窗）'));
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+    const p = providers.find(x => x.id === b.closest('.pcard').dataset.id);
+    confirmDlg({ title: `删除供应商「${esc(p.name)}」？`, body: `将同时删除其 ${p.models.length} 个模型配置。删除后可撤销。`, okText: '删除',
+      onOk: () => { const i = providers.indexOf(p), snap = p; providers.splice(i, 1); renderGrid(); toast(`已删除供应商「${esc(p.name)}」`, { label: '撤销', fn: () => { providers.splice(i, 0, snap); renderGrid(); } }); } });
+  });
+  const nc = $('#newCard');
+  $('#btnNew').onclick = () => { nc.classList.add('open'); $('#fName').focus(); };
+  $('#fCancel').onclick = () => nc.classList.remove('open');
+  $('#fSave').onclick = () => {
+    const name = $('#fName').value.trim(), url = $('#fUrl').value.trim(), key = $('#fKey').value.trim();
+    if (!name || !url) { toast('名称和请求地址为必填'); return; }
+    const id = 'p' + (Date.now() % 100000);
+    AVAILABLE[id] = [];
+    providers.push({ id, name, note: '', url, key: key ? key.slice(-4) : '未设', active: false, models: [], def: null });
+    renderGrid(); toast(`已创建供应商「${esc(name)}」，点「管理模型」添加模型`);
+    openModal(id);
+  };
+}
+
+/* ══ 模型库弹窗 ══ */
+function openModal(pid) { modalPid = pid; qFilter = ''; $('#scrim').classList.add('show'); $('#modal').classList.add('show'); renderModal(); }
+function closeModal() { modalPid = null; $('#scrim').classList.remove('show'); $('#modal').classList.remove('show'); }
+$('#scrim').onclick = closeModal;
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && modalPid && !$('#scrim2').classList.contains('show')) closeModal(); });
+
+function renderModal(flashId) {
+  const p = cur();
+  $('#modal').innerHTML = `
+  <div class="mbox">
+    <div class="m-head">
+      <span class="p-ava">${esc(p.name.trim()[0] || '?')}</span>
+      <span class="t">
+        <h2>模型库 · ${esc(p.name)} ${p.active ? '<span class="badge-on">使用中</span>' : ''}</h2>
+        <span class="sub">${esc(p.url)} · sk-…****${esc(p.key)}</span>
+      </span>
+      <button class="icon-btn" data-close aria-label="关闭模型库">${ICON.x}</button>
+    </div>
+    <div class="m-body">
+      <div class="zone left">
+        <div class="z-head"><h3>我的模型</h3><span class="n">${p.models.length}</span><span class="hint">单选设默认</span></div>
+        <div class="z-scroll">
+          ${p.models.length ? p.models.map(mm => `
+            <div class="mrow ${flashId === mm.id ? 'flash' : ''}" data-mid="${esc(mm.id)}">
+              <input type="radio" class="radio" name="def" ${p.def === mm.id ? 'checked' : ''} aria-label="将 ${esc(mm.id)} 设为默认" title="设为默认模型" />
+              <span class="mid" title="${esc(mm.id)}">${esc(mm.id)}<span class="nm">${esc(mm.name)}</span></span>
+              <span class="tag ${p.def === mm.id ? 'def' : mm.src}">${p.def === mm.id ? '默认' : mm.src === 'queried' ? '查询' : '手动'}</span>
+              <button type="button" class="rm" data-rm="${esc(mm.id)}" aria-label="移除模型 ${esc(mm.id)}" title="移除">${ICON.x}</button>
+            </div>`).join('')
+          : `<div class="empty-note">还没有模型。<b>在右侧查询</b>后点击添加，或在下方手动输入。</div>`}
+        </div>
+        <div class="madd">
+          <div class="fieldbox">
+            <input id="mAddInput" placeholder="手动输入模型 ID，例如 glm-4.7-flash" autocomplete="off" spellcheck="false" />
+            <div class="hint" id="mAddHint">适用于网关自定义模型 / 端点不暴露模型列表的场景</div>
+          </div>
+          <button class="btn sm primary" id="mAddBtn">添加</button>
+        </div>
+      </div>
+      <div class="zone">
+        <div class="z-head"><h3>可用模型</h3><span class="hint">来自端点 /v1/models</span></div>
+        <div class="qzone">${renderQueryZone(p)}</div>
+      </div>
+    </div>
+  </div>`;
+  $('[data-close]').onclick = closeModal;
+  document.querySelectorAll('.mrow .radio').forEach(r => r.onchange = () => { p.def = r.closest('.mrow').dataset.mid; renderModal(); toast(`默认模型已设为 <b>${esc(p.def)}</b>`); });
+  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => {
+    const id = b.dataset.rm, i = p.models.findIndex(x => x.id === id);
+    const removed = p.models.splice(i, 1)[0];
+    if (p.def === id) p.def = p.models[0]?.id || null;
+    renderModal(); toast(`已移除模型 ${esc(id)}`, { label: '撤销', fn: () => { p.models.splice(i, 0, removed); if (!p.def) p.def = removed.id; renderModal(); } });
+  });
+  $('#mAddBtn').onclick = () => {
+    const inp = $('#mAddInput'), hint = $('#mAddHint'), id = inp.value.trim();
+    if (!id) { inp.classList.add('err'); hint.className = 'hint err'; hint.textContent = '请输入模型 ID'; return; }
+    if (p.models.some(x => x.id === id)) { inp.classList.add('err'); hint.className = 'hint err'; hint.textContent = `「${esc(id)}」已在列表中`; return; }
+    p.models.push(m(id, id, 0, 'manual')); if (!p.def) p.def = id;
+    renderModal(id); toast(`已手动添加模型 <b>${esc(id)}</b>`);
+  };
+  $('#mAddInput').oninput = () => { $('#mAddInput').classList.remove('err'); const h = $('#mAddHint'); h.className = 'hint'; h.textContent = '适用于网关自定义模型 / 端点不暴露模型列表的场景'; };
+  bindQueryZone(p);
+}
+
+function renderQueryZone(p) {
+  const st = queryState[p.id] || 'idle';
+  if (st === 'idle') return `
+    <div class="qrow1"><button class="btn primary" id="qBtn">${ICON.refresh}查询可用模型</button><span class="hint" style="font-size:.71875rem;color:var(--color-text-muted)">一键拉取该端点支持的全部模型，点击即添加</span></div>
+    <div class="empty-note">尚未查询。也可以直接手动添加。</div>`;
+  if (st === 'loading') return `
+    <div class="qrow1"><button class="btn primary" disabled><span class="spinner"></span>查询中…</button></div>
+    <div class="skel"><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>`;
+  const filter = qFilter.toLowerCase();
+  const list = (queried[p.id] || []).filter(x => x.id.toLowerCase().includes(filter) || x.name.toLowerCase().includes(filter));
+  const added = new Set(p.models.map(x => x.id));
+  return `
+    <div class="qrow1">
+      <div class="searchbox">${ICON.search}<input id="qSearch" placeholder="在 ${(queried[p.id]||[]).length} 个模型中搜索…" value="${esc(qFilter)}" autocomplete="off" spellcheck="false" /></div>
+      <button class="btn" id="qBtn">${ICON.refresh}重新查询</button>
+    </div>
+    <div class="qlist">${list.length ? list.map(x => added.has(x.id)
+      ? `<button type="button" class="qrow" disabled><span class="qid" title="${esc(x.id)}">${esc(x.id)}<span class="nm">${esc(x.name)}</span></span><span></span><span class="qok">${ICON.check}已添加</span></button>`
+      : `<button type="button" class="qrow" data-qid="${esc(x.id)}"><span class="qid" title="${esc(x.id)}">${esc(x.id)}<span class="nm">${esc(x.name)}</span></span><span class="hint" style="font-size:.6875rem;color:var(--color-text-muted)">${x.tok ? (x.tok/1024|0)+'k tok' : ''}</span><span class="qadd">＋ 添加</span></button>`).join('')
+    : `<div class="empty-note">无匹配模型。试试其他关键词，或<b>手动添加</b>。</div>`}</div>`;
+}
+
+function bindQueryZone(p) {
+  const btn = $('#qBtn');
+  if (btn && !btn.disabled) btn.onclick = () => {
+    queryState[p.id] = 'loading';
+    const z = $('#modal .qzone'); z.innerHTML = renderQueryZone(p);
+    setTimeout(() => { queried[p.id] = (AVAILABLE[p.id] || []).map(([id, name, tok]) => ({ id, name, tok })); queryState[p.id] = 'done'; if (modalPid === p.id) { $('#modal .qzone').innerHTML = renderQueryZone(p); bindQueryZone(p); } }, 900);
+  };
+  const s = $('#qSearch');
+  if (s) s.oninput = () => { qFilter = s.value; $('#modal .qlist').outerHTML = renderQueryZone(p).match(/<div class="qlist">[\s\S]*<\/div>\s*$/)[0]; bindQueryZone(p); };
+  document.querySelectorAll('[data-qid]').forEach(r => r.onclick = () => {
+    const info = (queried[p.id] || []).find(x => x.id === r.dataset.qid);
+    p.models.push(m(info.id, info.name, info.tok, 'queried'));
+    if (!p.def) p.def = info.id;
+    renderModal(info.id);
+    toast(`已添加 <b>${esc(info.id)}</b> 到「${esc(p.name)}」`);
+  });
+}
+
+renderGrid();
+</script>
+</body>
+</html>

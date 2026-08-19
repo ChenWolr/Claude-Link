@@ -6,6 +6,10 @@ export interface Session {
   name: string;
   cliSessionId: string | null;
   model: string;
+  // 会话级供应商选用（ProviderProfile.id）；null = 用全局「最近使用」记忆。
+  providerOverride: string | null;
+  // 会话当前实际模型 ID（如 glm-4.6）。字段名保留 modelOverride（列已存在），
+  // 但取值域已从 sonnet/haiku/opus/fable 别名改为实际模型 ID——别名只作 CC 内部兼容层。
   modelOverride: string | null;
   workingDir: string | null;
   permissionMode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
