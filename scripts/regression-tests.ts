@@ -3168,6 +3168,30 @@ function testOpenWithFallbackContracts(): void {
   assert.ok(/fullText.*\?.*rows\.map.*true/.test(diffBodySrc), 'DiffBody 须在 fullText 开启时跳过 inlineVisiblePlan（全部行可见，不折叠）');
 }
 
+// 工作空间历史删除契约：新 IPC 通道三处同步（IPC_CHANNELS 常量 / preload API / ipc handler）
+// + store action + 工具栏删除按钮 + 最近目录 4 条封顶滚动容器。
+function testWorkspaceHistoryRemoveContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const read = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const ipc = read('../src/shared/types/ipc.ts');
+  assert.ok(ipc.includes("WORKSPACE_REMOVE_RECENT: 'workspace:removeRecent'"), 'IPC_CHANNELS 须定义 WORKSPACE_REMOVE_RECENT');
+  const preload = read('../src/preload/api.ts');
+  assert.ok(preload.includes('removeRecentWorkspace: (dir: string) => Promise<string[]>'), 'preload ClaudeLinkAPI 须声明 removeRecentWorkspace');
+  assert.ok(preload.includes('IPC_CHANNELS.WORKSPACE_REMOVE_RECENT'), 'preload 须 invoke WORKSPACE_REMOVE_RECENT');
+  const handlers = read('../src/main/ipc-handlers.ts');
+  assert.ok(handlers.includes('IPC_CHANNELS.WORKSPACE_REMOVE_RECENT'), 'ipc-handlers 须注册 WORKSPACE_REMOVE_RECENT handler');
+  assert.ok(handlers.includes('removeRecentWorkspace(dir)'), 'ipc-handlers handler 须调用 removeRecentWorkspace');
+  const history = read('../src/main/modules/workspace-history.ts');
+  assert.ok(history.includes('export function removeRecentWorkspace'), 'workspace-history 须导出 removeRecentWorkspace');
+  const store = read('../src/renderer/stores/session-store.ts');
+  assert.ok(store.includes('async removeRecentWorkspace(dir: string)'), 'session-store 须有 removeRecentWorkspace action');
+  assert.ok(store.includes('window.claudeLink.removeRecentWorkspace(dir)'), 'store 须经 window.claudeLink.removeRecentWorkspace 删除');
+  const toolbar = read('../src/renderer/components/chat/SessionToolbar.vue');
+  assert.ok(toolbar.includes('@click.stop="removeRecent(dir)"'), '目录行须有删除按钮（stop 防误选目录）');
+  assert.ok(toolbar.includes('menu__recent-list'), '最近目录须包在滚动容器 menu__recent-list');
+  assert.ok(/max-height:\s*7rem/.test(toolbar) && /overflow-y:\s*auto/.test(toolbar), '最近目录须 4 条封顶 + 溢出滚动');
+}
+
 async function main(): Promise<void> {
 testDiffDialogSearchUiContracts();
 testDiffDialogNoWrapContracts();
@@ -3350,6 +3374,7 @@ testAttachmentTask7BContracts();
 testProcessKindSubAgentTitleNarrowing();
 testExportAttachmentSmokeContracts();
 testAttachmentTask8Contracts();
+testWorkspaceHistoryRemoveContracts();
 }
 
 main().catch((error) => {
