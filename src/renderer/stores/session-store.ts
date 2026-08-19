@@ -332,6 +332,14 @@ export const useSessionStore = defineStore('session', {
         this.error = error instanceof Error ? error.message : '删除会话失败';
       }
     },
+    // 批量删除：逐个复用 deleteSession 的完整链（乐观更新、执行态清理、主进程
+    // 停 query/队列 → DELETE 级联物理删库 → 附件物理文件清理、失败回滚）。
+    // 单个失败只回滚该会话并写 error，不中断其余会话的删除。
+    async deleteSessions(ids: string[]) {
+      for (const id of ids) {
+        await this.deleteSession(id);
+      }
+    },
     async searchSessions(query: string) {
       const q = query.trim();
       if (!q) {

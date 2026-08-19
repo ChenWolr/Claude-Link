@@ -41,7 +41,7 @@ async function openSession(session: { id: string }) {
 }
 
 // 侧栏搜索与 SessionsPage 行为对齐：250ms 防抖 → store.searchSessions
-// （IPC 含消息内容匹配）。store 通过 searchResults 视图态隔离，不污染全量 sessions。
+// （IPC 仅匹配会话标题，不含会话内消息/附件）。store 通过 searchResults 视图态隔离，不污染全量 sessions。
 function onSearchInput() {
   if (debounceTimer) clearTimeout(debounceTimer);
   const q = searchQuery.value.trim();
@@ -83,7 +83,7 @@ async function confirmDelete(session: { id: string; name: string }) {
       v-model="searchQuery"
       class="sidebar__search"
       type="search"
-      placeholder="搜索会话"
+      placeholder="搜索会话标题"
       @input="onSearchInput"
       @search="handleSearchClear"
     />
@@ -126,7 +126,10 @@ async function confirmDelete(session: { id: string; name: string }) {
 
     <div class="sidebar__footer">
       <button class="new-button" type="button" @click="handleNewSession">+ 新会话</button>
-      <RouterLink class="settings-link" to="/config">配置</RouterLink>
+      <div class="sidebar__footer-links">
+        <RouterLink class="sessions-link" to="/sessions">会话管理</RouterLink>
+        <RouterLink class="settings-link" to="/config">配置</RouterLink>
+      </div>
     </div>
   </aside>
 </template>
@@ -338,7 +341,15 @@ async function confirmDelete(session: { id: string; name: string }) {
   gap: 8px;
 }
 
+/* 会话管理 / 配置：底部并排两个描边入口；会话管理页承载批量删除。 */
+.sidebar__footer-links {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .new-button,
+.sessions-link,
 .settings-link {
   border-radius: var(--radius-md);
   padding: 10px 11px;
@@ -353,9 +364,16 @@ async function confirmDelete(session: { id: string; name: string }) {
   font-weight: 700;
 }
 
+.sessions-link,
 .settings-link {
   display: block;
   border: 1px solid var(--color-border);
   text-align: center;
+  font-size: 0.8125rem;
+}
+
+.sessions-link:hover,
+.settings-link:hover {
+  border-color: var(--color-accent);
 }
 </style>
