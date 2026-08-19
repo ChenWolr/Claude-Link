@@ -1057,8 +1057,12 @@ function testAttachmentTask8Contracts(): void {
   const exportAttachments = readFileSync(new URL('../src/main/modules/export-attachment-snapshot.ts', import.meta.url), 'utf8');
   const messageAttachments = readFileSync(new URL('../src/renderer/components/chat/MessageAttachments.vue', import.meta.url), 'utf8');
 
-  assert.ok(/FROM message_attachments ma[\s\S]*JOIN attachments a/.test(sessionRepo), '搜索须只聚合历史消息附件');
-  assert.ok(!/FROM attachments GROUP BY session_id/.test(sessionRepo), '搜索不得聚合 draft/task-only 附件');
+  // 会话搜索契约（用户需求）：只按会话标题匹配，不聚合消息内容或附件（含草稿/任务附件）。
+  assert.ok(
+    /sessions\.filter\(\(session\) => normalizeSearchText\(session\.name\)\.includes\(normalizedQuery\)\)/.test(sessionRepo),
+    '搜索须只按会话标题匹配',
+  );
+  assert.ok(!/GROUP BY session_id/.test(sessionRepo), '搜索不得聚合消息内容/附件（标题-only）');
   assert.ok(/refs\.message > 0[\s\S]*'message'[\s\S]*refs\.task > 0[\s\S]*'task'/.test(attachmentService), 'draft reconcile 须消息引用优先、任务引用其次');
   assert.ok(/reconcileDraftAttachments[\s\S]*cleanupOrphanAttachments/.test(mainIndex), '启动清理须先 reconcile 后 orphan');
   assert.ok(/catch \(error\)[\s\S]*rm\(tmpPath, \{ force: true \}\)/.test(attachmentStorage), '写入失败须自行删除 .part');
