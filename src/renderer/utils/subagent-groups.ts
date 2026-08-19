@@ -71,6 +71,8 @@ export function filterCurrentTurnItems(items: RenderItem[], opts: CurrentTurnFil
     const messages = item.messages.filter((m) => {
       if (!isInCurrentTurn(m, opts.allMessages, opts.turnStartIndex)) return true;
       if (opts.hideThinking && m.eventType === 'thinking') return false;
+      // 流式正文非空时隐藏本回合已落库正文（含并入 fold 的短过程叙事文本），避免与流式块重复。
+      if (opts.hideText && m.role === 'assistant' && m.eventType === 'message') return false;
       return true;
     });
     if (messages.length > 0) {
