@@ -435,6 +435,14 @@ export const useSessionStore = defineStore('session', {
         // 静默：历史为空也能用
       }
     },
+    // 从最近目录历史永久删除一条（只移除历史记录，不删除磁盘目录）。主进程返回删除后的完整列表。
+    async removeRecentWorkspace(dir: string) {
+      try {
+        this.recentWorkspaces = await window.claudeLink.removeRecentWorkspace(dir);
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '删除目录历史失败';
+      }
+    },
     bindContextUpdates() {
       return window.claudeLink.onContextUpdate((payload) => {
         if (this.activeSession?.id !== payload.sessionId) return;
