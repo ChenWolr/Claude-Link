@@ -68,7 +68,7 @@ const API_RETRY_TERMINAL_KINDS = new Set([
 
 interface GroupItem {
   key: string;
-  type: 'thinking' | 'tool' | 'system' | 'api_retry';
+  type: 'thinking' | 'tool' | 'system' | 'api_retry' | 'narration';
   msg?: RenderableMessage;
   use?: RenderableMessage | null;
   result?: RenderableMessage | null;
@@ -93,6 +93,9 @@ const items = computed<GroupItem[]>(() => {
       out.push({ key: m.id, type: 'api_retry', msg: m });
     } else if (m.eventType === 'system') {
       out.push({ key: m.id, type: 'system', msg: m });
+    } else if (m.role === 'assistant' && m.eventType === 'message') {
+      // 短过程叙事文本（group-messages 并入 fold 的正文），按原顺序渲染为一行可读文本。
+      out.push({ key: m.id, type: 'narration', msg: m });
     }
   }
   for (const m of props.messages) {
@@ -135,6 +138,9 @@ const items = computed<GroupItem[]>(() => {
         />
         <div v-else-if="item.type === 'system'" class="process-fold__system">
           <span>{{ item.msg!.content }}</span>
+        </div>
+        <div v-else-if="item.type === 'narration'" class="process-fold__narration">
+          {{ item.msg!.content }}
         </div>
         <ToolCallBlock
           v-else
@@ -231,5 +237,15 @@ const items = computed<GroupItem[]>(() => {
   padding: 4px 8px;
   font-size: 0.75rem;
   color: var(--color-text-muted);
+}
+
+/* fold 内短过程叙事文本：正文色（区别于 system 灰）、可换行，展开时按原顺序穿插在工具卡之间。 */
+.process-fold__narration {
+  padding: 4px 8px;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>
