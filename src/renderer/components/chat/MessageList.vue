@@ -73,8 +73,15 @@ const renderItems = computed<RenderItem[]>(() => {
       if (!(hideText && isMainAssistantText && turnIds.has(item.message.id))) out.push(item);
       continue;
     }
-    if (hideThinking) {
-      const filtered = item.messages.filter((m) => !(m.role === 'assistant' && m.eventType === 'thinking' && !m.parentAgentId && turnIds.has(m.id)));
+    if (hideThinking || hideText) {
+      const filtered = item.messages.filter((m) => {
+        if (!turnIds.has(m.id)) return true;
+        // 流式思考非空时隐藏本回合已落库 thinking；流式正文非空时隐藏本回合已落库正文
+        // （含并入 fold 的短过程叙事文本），避免与流式块重复显示。
+        if (hideThinking && m.role === 'assistant' && m.eventType === 'thinking' && !m.parentAgentId) return false;
+        if (hideText && m.role === 'assistant' && m.eventType === 'message' && !m.parentAgentId) return false;
+        return true;
+      });
       if (filtered.length === 0) continue;
       if (filtered.length !== item.messages.length) {
         out.push({ ...item, messages: filtered, stats: computeStats(filtered) });
