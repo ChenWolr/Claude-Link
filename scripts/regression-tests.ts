@@ -29,7 +29,7 @@ import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdow
 import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';
 import { extractSubAgentTitle, TOOL_DIFF_TOOL_NAMES } from '../src/shared/process-kind';
 import { parseStatusPorcelainV1Z, parseNumstatZ, normalizeStatus, truncateDiff } from '../src/main/modules/changes-panel';
-import { parseUnifiedDiff } from '../src/renderer/utils/diff-parser';
+import { parseUnifiedDiff, splitUnifiedDiff } from '../src/renderer/utils/diff-parser';
 import {
   diffWordRanges,
   diffWordsOrFlat,
@@ -2656,11 +2656,12 @@ function testToolDiffSynthesisContracts(): void {
   const src = fs.readFileSync(new URL('../src/renderer/components/chat/ToolCallBlock.vue', import.meta.url), 'utf8');
   assert.ok(src.includes('synthesizeToolDiff'), 'ToolCallBlock 须导入 synthesizeToolDiff');
   assert.ok(/synthesizeToolDiff\([^)]*\)/.test(src), 'ToolCallBlock 须调用 synthesizeToolDiff');
-  // §3.1：side-by-side 经 useSideBySide 控制（窄宽度回退 line-by-line）
-  assert.ok(src.includes('sideBySide: useSideBySide.value'), '工具结果 diff 须 side-by-side，窄宽度回退 line-by-line');
-  assert.ok(src.includes('ResizeObserver') && src.includes('SIDE_BY_SIDE_MIN_WIDTH'), '须经 ResizeObserver 测宽');
-  // §4.1：Edit/Write/MultiEdit 合成 diff 优先于 isDiff 真分支（renderedDiff 里 toolDiff 在 isDiff 之前）
-  assert.ok(/renderedDiff[\s\S]*?if \(toolDiff\.value\)[\s\S]*?if \(isDiff\.value\)/.test(src), '合成 diff 须优先于 isDiff 真分支');
+  // 消息详情 diff 改为弹窗：接入 openToolDiffDialog，不再内嵌 diff2html 渲染
+  assert.ok(src.includes('openToolDiffDialog'), 'ToolCallBlock 须接入 openToolDiffDialog 弹出对比弹窗');
+  assert.ok(!src.includes('renderDiffHtml'), 'ToolCallBlock 不得再内嵌 renderDiffHtml');
+  assert.ok(!src.includes('ResizeObserver') && !src.includes('SIDE_BY_SIDE_MIN_WIDTH'), 'ToolCallBlock 不再内嵌两栏测量（ResizeObserver/SIDE_BY_SIDE_MIN_WIDTH 已移除）');
+  // §4.1：Edit/Write/MultiEdit 合成 diff 优先于 isDiff 真分支（openDiff 里 toolDiff 在 isDiff 之前）
+  assert.ok(/openDiff\(\)[\s\S]*?if \(toolDiff\.value\)[\s\S]*?if \(isDiff\.value/.test(src), '合成 diff 须优先于 isDiff 真分支');
   // §3.2：折叠态 +/− 行数徽标
   assert.ok(src.includes('tool-row__diffcounts') && src.includes('diffCounts'), '折叠态须有 +/− 行数徽标');
   // §3.3：截断提示
@@ -2674,6 +2675,51 @@ function testToolDiffSynthesisContracts(): void {
   assert.ok(css.includes('--d2h-del-bg-color') && css.includes('--d2h-ins-bg-color'), 'main.css 须 token 化 +/- 行底色');
   assert.ok(/--d2h-del-bg-color:\s*color-mix/.test(css), '+/- 底色须经 color-mix 接入主题 token');
   assert.ok(/var\(--color-danger\)/.test(css) && /var\(--color-accent\)/.test(css), '+/- 底色须接入 danger/accent token');
+}
+
+// 消息详情 diff 弹窗（ToolDiffDialog）：多段拆分纯函数 + 接线契约。
+// 消息里 Edit/Write/MultiEdit 的片段意图 diff 不再内嵌 diff2html，改为弹窗复用 DiffBody 渲染。
+function testToolDiffDialogContracts(): void {
+  // ── splitUnifiedDiff 行为 ──
+  assert.deepEqual(splitUnifiedDiff(''), [], '空文本须拆成空数组');
+  assert.deepEqual(splitUnifiedDiff('   \n  '), [], '纯空白须拆成空数组');
+
+  // 单段：仅一个文件头 → 一段
+  const single = '--- a/x.ts\n+++ b/x.ts\n@@ -1,1 +1,1 @@\n-old\n+new\n';
+  assert.equal(splitUnifiedDiff(single).length, 1, '单段须拆成 1 段');
+  assert.ok(splitUnifiedDiff(single)[0]!.includes('-old'), '单段内容须完整保留');
+
+  // 多段（MultiEdit 合成：每段 `--- a/...` 起）→ 按段数拆分
+  const multi = '--- a/m.txt\n+++ b/m.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n--- a/m.txt\n+++ b/m.txt\n@@ -1,1 +1,1 @@\n-c\n+d\n';
+  const multiSegs = splitUnifiedDiff(multi);
+  assert.equal(multiSegs.length, 2, 'MultiEdit 两段须拆成 2 段');
+  assert.ok(multiSegs[0]!.includes('-a') && multiSegs[0]!.includes('+b'), '第 1 段内容正确');
+  assert.ok(multiSegs[1]!.includes('-c') && multiSegs[1]!.includes('+d'), '第 2 段内容正确');
+
+  // git 多文件：按 `diff --git ` 分界
+  const git = 'diff --git a/one.txt b/one.txt\nindex 111..222 100644\n--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n-1\n+one\ndiff --git a/two.txt b/two.txt\nindex 333..444 100644\n--- a/two.txt\n+++ b/two.txt\n@@ -1 +1 @@\n-2\n+two\n';
+  const gitSegs = splitUnifiedDiff(git);
+  assert.equal(gitSegs.length, 2, 'git 多文件须拆成 2 段');
+  assert.ok(gitSegs[0]!.startsWith('diff --git a/one.txt') && gitSegs[1]!.startsWith('diff --git a/two.txt'), 'git 段须以各自 diff --git 起');
+
+  // ── 接线契约 ──
+  const fs = require('node:fs') as typeof import('node:fs');
+  const read = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const useToolDiffDialog = read('../src/renderer/composables/useToolDiffDialog.ts');
+  assert.ok(useToolDiffDialog.includes('openToolDiffDialog') && useToolDiffDialog.includes('requests.length'), 'openToolDiffDialog 须在交互弹窗并存时 no-op（requests.length>0）');
+  assert.ok(useToolDiffDialog.includes('splitUnifiedDiff'), 'useToolDiffDialog 须经 splitUnifiedDiff 拆段');
+
+  const appVue = read('../src/renderer/App.vue');
+  assert.ok(appVue.includes('<ToolDiffDialog'), 'App.vue 须挂载 <ToolDiffDialog />');
+
+  const dialog = read('../src/renderer/components/chat/ToolDiffDialog.vue');
+  assert.ok(dialog.includes("from '../changes/DiffBody.vue'"), 'ToolDiffDialog 须复用 DiffBody 渲染器');
+  assert.ok(dialog.includes('parseUnifiedDiff'), 'ToolDiffDialog 须经 parseUnifiedDiff 解析本地 diff 文本');
+  assert.ok(dialog.includes('diff-segments'), 'ToolDiffDialog 多段时须有段切换条');
+  assert.ok(!/from ['"].*changes-store['"]/.test(dialog), 'ToolDiffDialog 不得 import changesStore');
+  assert.ok(!dialog.includes('ensureDiff'), 'ToolDiffDialog 不得调用 ensureDiff（git 拉取）');
+  // isDiff 回退分支（如 Bash git diff）标题回落 parsed.path，显示真实文件路径并恢复语法高亮。
+  assert.ok(dialog.includes('effectiveTitle') && dialog.includes('parsed.value?.path'), 'ToolDiffDialog 标题须回落 parsed.path（isDiff 真 diff 显示真实文件路径）');
 }
 
 // 会话改动面板：纯解析函数 + 共享工具名集合契约（git 运行时行为靠端到端目视覆盖）。
@@ -3240,6 +3286,7 @@ testMarkdownBlockMathDoesNotSwallowUnclosed();
 testImageLightboxAccessibilityWiring();
 testDiffContentDetectionContracts();
 testToolDiffSynthesisContracts();
+testToolDiffDialogContracts();
 // 词级 LCS 引擎契约（diff-words.ts，纯函数行为）。
 function testDiffWordLcsContracts(): void {
   const join = (segs: { x: string }[] | undefined): string => (segs ?? []).map((s) => s.x).join('');

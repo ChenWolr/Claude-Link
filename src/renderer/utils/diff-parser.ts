@@ -178,3 +178,27 @@ export function parseUnifiedDiff(text: string): ParsedDiffFile | null {
 
   return { path: filePath, groups, binary: false };
 }
+
+/**
+ * 把一段可能含多文件/多段的 unified diff 文本拆成独立段，供「片段意图 diff」弹窗逐段展示。
+ * - 含 `diff --git ` 行（真 git 多文件输出）→ 按 `diff --git ` 分界，每段自文件头完整保留。
+ * - 否则按行首 `--- ` 分界（tool-diff 合成的 MultiEdit 多段：每段 `--- a/...` 起）。
+ * - 空/纯空白 → []。
+ * 纯文本拆分（不解析），保证每段仍可独立喂 parseUnifiedDiff（其只取首个 patch）。
+ */
+export function splitUnifiedDiff(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  // git 多文件优先：diff --git 行是每个文件段的真正起点（含 index/---/+++ 全头）。
+  if (/^diff --git /m.test(trimmed)) {
+    return trimmed
+      .split(/\n(?=diff --git )/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  // 合成多段：行首 `--- ` 为段起点（hunk 行以 ' '/+/-/\ 开头，不会以 '--- ' 起）。
+  return trimmed
+    .split(/\n(?=--- )/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
