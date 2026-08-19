@@ -43,6 +43,11 @@ async function chooseRecent(dir: string) {
   await sessionStore.setActiveSessionWorkingDir(dir);
 }
 
+// 从最近目录历史永久删除一条（只移除历史记录，不影响磁盘目录）。菜单保持展开，便于连续删除多条。
+async function removeRecent(dir: string) {
+  await sessionStore.removeRecentWorkspace(dir);
+}
+
 async function clearWorkspace() {
   showWorkspaceMenu.value = false;
   await sessionStore.setActiveSessionWorkingDir(null);
@@ -131,16 +136,32 @@ onUnmounted(() => {
         <button type="button" class="menu__item menu__item--accent" @click="pickDirectory">📁 选择目录…</button>
         <template v-if="sessionStore.recentWorkspaces.length">
           <div class="menu__section">最近使用</div>
-          <button
-            v-for="dir in sessionStore.recentWorkspaces"
-            :key="dir"
-            type="button"
-            :class="['menu__item', { 'menu__item--active': dir === activeSession.workingDir }]"
-            :title="dir"
-            @click="chooseRecent(dir)"
-          >
-            {{ dir.replace(/\\/g, '/').split('/').filter(Boolean).slice(-2).join('/') || dir }}
-          </button>
+          <div class="menu__recent-list">
+            <div
+              v-for="dir in sessionStore.recentWorkspaces"
+              :key="dir"
+              class="menu__row"
+              :class="{ 'menu__row--active': dir === activeSession.workingDir }"
+            >
+              <button
+                type="button"
+                class="menu__item menu__item--dir"
+                :title="dir"
+                @click="chooseRecent(dir)"
+              >
+                {{ dir.replace(/\\/g, '/').split('/').filter(Boolean).slice(-2).join('/') || dir }}
+              </button>
+              <button
+                type="button"
+                class="menu__row-delete"
+                :title="`从历史删除：${dir}`"
+                aria-label="删除目录"
+                @click.stop="removeRecent(dir)"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
         </template>
         <button v-if="activeSession.workingDir" type="button" class="menu__item menu__item--muted" @click="clearWorkspace">
           清除工作空间
@@ -378,6 +399,66 @@ onUnmounted(() => {
   font-size: 0.625rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+}
+
+/* 最近目录列表：最多展示 4 条，超出滚动（全局滚动条悬停显现）。 */
+.menu__recent-list {
+  max-height: 7rem; /* 4 × 1.75rem 固定行高 */
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.menu__row {
+  display: flex;
+  align-items: center;
+  min-height: 1.75rem;
+  border-radius: var(--radius-sm);
+}
+
+.menu__row:hover {
+  background: var(--color-panel-soft);
+}
+
+.menu__row--active .menu__item--dir {
+  color: var(--color-accent-strong);
+}
+
+.menu__item--dir {
+  flex: 1;
+  min-width: 0;
+  height: 1.75rem;
+  display: flex;
+  align-items: center;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.menu__item--dir,
+.menu__item--dir:hover {
+  background: transparent;
+}
+
+.menu__row-delete {
+  flex-shrink: 0;
+  width: 1.5rem;
+  height: 1.5rem;
+  margin-right: 0.25rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.menu__row-delete:hover {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
 }
 
 /* 添加文件按钮内的小图标（回形针），与权限图标同 stroke 风格 */
