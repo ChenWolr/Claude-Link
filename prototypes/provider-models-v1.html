@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>多供应商 × 模型管理 · V1 双栏主从</title>
+<!--
+  多供应商模型管理 — 视觉稿 V1（双栏主从 / Master-Detail）
+  ══════════════════════════════════════════════════════════════
+  · 布局：左栏供应商列表（可切换/新建），右栏选中供应商详情
+    （基本信息 + 我的模型表 + 可用模型查询面板）。
+  · 交互（均可真实操作）：
+      - 左栏切换供应商；「使用中」徽章随「设为当前使用」移动
+      - 查询可用模型：按钮异步态(spinner+禁用) → 骨架屏 → 列表
+      - 查询结果：搜索过滤；点击行即添加；已添加行置灰打勾
+      - 我的模型：设默认(单选)/删除(撤销 toast)/手动添加(重复与空值就地报错)
+      - 删除供应商：确认弹窗；新建供应商：左栏底部展开表单
+  · 视觉：与主应用同源 token（warm-paper，src/renderer/assets/styles/variables.css）。
+  · 对照版本：V2 折叠卡片 / V3 弹窗模型库。定版后以选中版为实现基准。
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --color-bg: #F8F4ED;
+    --color-panel: #F4F0EA;
+    --color-panel-soft: #FCFAF5;
+    --color-border: rgba(122, 96, 88, 0.18);
+    --color-border-strong: rgba(0, 0, 0, 0.12);
+    --color-text: #3B3D3F;
+    --color-text-muted: #6A6C70;
+    --color-accent: #537D96;
+    --color-accent-strong: #456A80;
+    --color-on-accent: #FFFFFF;
+    --color-danger: #8B3A3A;
+    --color-success: #4A9E5E;
+    --color-success-strong: #2E7D46;
+    --color-info: #3B7DD8;
+    --radius-xs: 4px; --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px; --radius-pill: 999px;
+    --elevation-1: 0 1px 2px rgba(0,0,0,0.06);
+    --elevation-2: 0 4px 12px rgba(0,0,0,0.08);
+    --elevation-3: 0 12px 32px rgba(0,0,0,0.12);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --duration-fast: 120ms; --duration-base: 200ms; --duration-slow: 320ms;
+    --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, monospace;
+    --sidebar-width: 200px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    :root { --duration-fast: 1ms; --duration-base: 1ms; --duration-slow: 1ms; --ease-spring: var(--ease-out); }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); font-size: 16px; line-height: 1.5; }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  input { font: inherit; color: inherit; }
+  svg { flex: none; }
+
+  /* ── 应用外壳（示意，帮助评估在真实应用中的观感）────────────── */
+  .app { display: flex; height: 100vh; }
+  .app-nav { width: var(--sidebar-width); flex: none; background: var(--color-panel); border-right: 1px solid var(--color-border-strong); padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; }
+  .app-brand { font-weight: 700; font-size: 0.9rem; padding: 6px 10px 14px; letter-spacing: 0.02em; }
+  .app-nav a { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: var(--radius-sm); color: var(--color-text-muted); text-decoration: none; font-size: 0.875rem; }
+  .app-nav a.active { background: color-mix(in srgb, var(--color-accent) 14%, transparent); color: var(--color-accent-strong); font-weight: 600; }
+
+  /* ── 设置页框架 ─────────────────────────────────────────────── */
+  .settings { flex: 1; min-width: 0; overflow: auto; }
+  .settings-inner { max-width: 1080px; margin: 0 auto; padding: 28px 32px 60px; }
+  .page-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 18px; }
+  .page-head h1 { font-size: 1.375rem; margin: 0; }
+  .page-head .proto-tag { font-size: 0.75rem; color: var(--color-accent-strong); background: color-mix(in srgb, var(--color-accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent); padding: 2px 10px; border-radius: var(--radius-pill); font-weight: 600; }
+  .tabs { display: inline-flex; background: color-mix(in srgb, var(--color-text) 5%, transparent); border-radius: var(--radius-sm); padding: 3px; margin-bottom: 22px; }
+  .tabs button { border: 0; background: transparent; padding: 6px 18px; font-size: 0.875rem; font-weight: 600; color: var(--color-text-muted); border-radius: 6px; }
+  .tabs button.active { background: var(--color-panel-soft); color: var(--color-accent-strong); box-shadow: var(--elevation-1); }
+
+  /* ── 供应商管理：双栏主从 ───────────────────────────────────── */
+  .pm { display: grid; grid-template-columns: 280px 1fr; gap: 18px; align-items: start; }
+
+  /* 左栏：供应商列表 */
+  .plist { background: var(--color-panel-soft); border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden; }
+  .plist-head { padding: 14px 16px 10px; display: flex; align-items: center; justify-content: space-between; }
+  .plist-head h2 { margin: 0; font-size: 0.9375rem; }
+  .plist-head .count { font-size: 0.75rem; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .plist-add { margin: 0 12px 12px; width: calc(100% - 24px); display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 8px; font-size: 0.8125rem; font-weight: 600; color: var(--color-accent-strong); background: color-mix(in srgb, var(--color-accent) 10%, transparent); border: 1px dashed color-mix(in srgb, var(--color-accent) 45%, transparent); border-radius: var(--radius-sm); transition: background var(--duration-fast) var(--ease-out); }
+  .plist-add:hover { background: color-mix(in srgb, var(--color-accent) 16%, transparent); }
+  .plist-items { display: flex; flex-direction: column; padding: 0 8px 10px; gap: 2px; }
+  .pitem { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; width: 100%; text-align: left; border: 0; background: transparent; padding: 10px 10px; border-radius: var(--radius-sm); transition: background var(--duration-fast) var(--ease-out); }
+  .pitem:hover { background: color-mix(in srgb, var(--color-text) 4%, transparent); }
+  .pitem.sel { background: color-mix(in srgb, var(--color-accent) 13%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-accent) 38%, transparent); }
+  .pitem .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--color-border-strong); }
+  .pitem.on .dot { background: var(--color-success); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 20%, transparent); }
+  .pitem .meta { min-width: 0; }
+  .pitem .meta .name { font-size: 0.875rem; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .pitem .meta .host { font-size: 0.75rem; color: var(--color-text-muted); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pitem .mcount { font-size: 0.6875rem; color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 7%, transparent); padding: 2px 7px; border-radius: var(--radius-pill); font-variant-numeric: tabular-nums; }
+  .badge-on { font-size: 0.625rem; font-weight: 700; color: var(--color-success-strong); background: color-mix(in srgb, var(--color-success) 14%, transparent); padding: 1px 6px; border-radius: var(--radius-xs); letter-spacing: 0.02em; }
+
+  /* 右栏：详情 */
+  .pdetail { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+  .card { background: var(--color-panel-soft); border: 1px solid var(--color-border); border-radius: var(--radius-md); }
+  .card-head { display: flex; align-items: center; gap: 10px; padding: 16px 20px 0; }
+  .card-head h3 { margin: 0; font-size: 1rem; }
+  .card-head .spacer { flex: 1; }
+
+  .d-head { padding: 18px 20px; display: flex; align-items: flex-start; gap: 14px; border-bottom: 1px solid var(--color-border); }
+  .d-ava { width: 40px; height: 40px; flex: none; border-radius: var(--radius-sm); display: grid; place-items: center; background: color-mix(in srgb, var(--color-accent) 15%, var(--color-panel)); color: var(--color-accent-strong); }
+  .d-title { flex: 1; min-width: 0; }
+  .d-title .row1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .d-title h2 { margin: 0; font-size: 1.0625rem; }
+  .d-title .sub { margin-top: 3px; font-size: 0.8125rem; color: var(--color-text-muted); display: flex; gap: 14px; flex-wrap: wrap; }
+  .d-title .sub .kv b { color: var(--color-text); font-weight: 600; }
+  .d-title .sub code { font-family: var(--font-mono); font-size: 0.75rem; }
+
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 7px 13px; font-size: 0.8125rem; font-weight: 600; border-radius: var(--radius-sm); border: 1px solid var(--color-border); background: var(--color-panel-soft); color: var(--color-text); transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out); }
+  .btn:hover { background: color-mix(in srgb, var(--color-text) 5%, var(--panel, transparent)); border-color: var(--color-border-strong); }
+  .btn:focus-visible, .pitem:focus-visible, .mrow-btn:focus-visible, .icon-btn:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 2px; }
+  .btn.primary { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); }
+  .btn.primary:hover { background: var(--color-accent-strong); border-color: var(--color-accent-strong); }
+  .btn.ghost-danger { color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 35%, transparent); background: transparent; }
+  .btn.ghost-danger:hover { background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .btn.sm { padding: 5px 10px; font-size: 0.75rem; }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .d-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* 我的模型表 */
+  .mlist { display: flex; flex-direction: column; }
+  .mrow { display: grid; grid-template-columns: 26px 1fr auto auto auto; align-items: center; gap: 10px; padding: 9px 20px; border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent); }
+  .mrow:first-child { border-top: 0; }
+  .mrow:hover { background: color-mix(in srgb, var(--color-text) 3%, transparent); }
+  .mrow.enter { animation: row-in var(--duration-slow) var(--ease-spring); }
+  @keyframes row-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+  .mrow .mid { font-family: var(--font-mono); font-size: 0.8125rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mrow .mid .nm { color: var(--color-text-muted); font-family: var(--font-sans); font-size: 0.75rem; margin-left: 8px; }
+  .mrow .tag { font-size: 0.6875rem; padding: 2px 8px; border-radius: var(--radius-pill); font-weight: 600; }
+  .tag.queried { color: var(--color-info); background: color-mix(in srgb, var(--color-info) 10%, transparent); }
+  .tag.manual { color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+  .tag.def { color: var(--color-success-strong); background: color-mix(in srgb, var(--color-success) 13%, transparent); }
+  .mrow .mtok { font-size: 0.75rem; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .radio { appearance: none; width: 16px; height: 16px; border: 1.5px solid var(--color-border-strong); border-radius: 50%; background: var(--color-panel-soft); cursor: pointer; transition: border-color var(--duration-fast); }
+  .radio:checked { border-width: 4.5px; border-color: var(--color-accent); }
+  .icon-btn { width: 30px; height: 30px; display: inline-grid; place-items: center; border: 0; background: transparent; border-radius: var(--radius-xs); color: var(--color-text-muted); }
+  .icon-btn:hover { background: color-mix(in srgb, var(--color-danger) 9%, transparent); color: var(--color-danger); }
+  .icon-btn.plain:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); color: var(--color-text); }
+
+  /* 手动添加行 */
+  .madd { display: flex; gap: 10px; padding: 12px 20px 16px; border-top: 1px dashed var(--color-border); align-items: flex-start; }
+  .madd .fieldbox { flex: 1; min-width: 0; }
+  .madd input { width: 100%; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-panel); padding: 7px 11px; font-size: 0.8125rem; font-family: var(--font-mono); }
+  .madd input.err { border-color: var(--color-danger); }
+  .madd .hint { font-size: 0.71875rem; color: var(--color-text-muted); margin-top: 4px; }
+  .madd .hint.err { color: var(--color-danger); font-weight: 600; }
+
+  .empty { padding: 26px 20px; text-align: center; color: var(--color-text-muted); font-size: 0.8125rem; }
+  .empty b { color: var(--color-text); }
+
+  /* 可用模型查询面板 */
+  .qhead-r { display: flex; gap: 8px; padding: 14px 20px 0; align-items: center; flex-wrap: wrap; }
+  .searchbox { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-panel); padding: 0 10px; color: var(--color-text-muted); }
+  .searchbox input { flex: 1; border: 0; background: transparent; padding: 7px 0; font-size: 0.8125rem; outline: none; font-family: var(--font-mono); }
+  .spinner { width: 14px; height: 14px; border: 2px solid color-mix(in srgb, var(--color-accent) 30%, transparent); border-top-color: var(--color-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .qlist { margin-top: 12px; display: flex; flex-direction: column; max-height: 300px; overflow: auto; }
+  .qrow { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; padding: 8px 20px; border: 0; background: transparent; text-align: left; border-top: 1px solid color-mix(in srgb, var(--color-border) 45%, transparent); transition: background var(--duration-fast) var(--ease-out); }
+  .qrow:hover:not(:disabled) { background: color-mix(in srgb, var(--color-accent) 9%, transparent); }
+  .qrow:disabled { opacity: 0.55; cursor: default; }
+  .qrow .qid { font-family: var(--font-mono); font-size: 0.8125rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .qrow .qid .nm { color: var(--color-text-muted); font-family: var(--font-sans); font-size: 0.75rem; margin-left: 8px; }
+  .qrow .qadd { display: inline-flex; align-items: center; gap: 5px; font-size: 0.75rem; font-weight: 600; color: var(--color-accent-strong); }
+  .qrow .qok { display: inline-flex; align-items: center; gap: 5px; font-size: 0.75rem; font-weight: 600; color: var(--color-success-strong); }
+  .skel { display: flex; flex-direction: column; gap: 8px; padding: 14px 20px 18px; }
+  .skel .bar { height: 34px; border-radius: var(--radius-xs); background: linear-gradient(90deg, color-mix(in srgb, var(--color-text) 6%, transparent) 25%, color-mix(in srgb, var(--color-text) 10%, transparent) 50%, color-mix(in srgb, var(--color-text) 6%, transparent) 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite linear; }
+  @keyframes shimmer { to { background-position: -200% 0; } }
+  .qnote { padding: 10px 20px 16px; font-size: 0.8125rem; color: var(--color-text-muted); }
+
+  /* 新建供应商表单（左栏内嵌展开） */
+  .pform { padding: 4px 16px 16px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--color-border); background: color-mix(in srgb, var(--color-accent) 4%, var(--color-panel-soft)); }
+  .pform[hidden] { display: none; }
+  .pform label { display: grid; gap: 4px; font-size: 0.75rem; color: var(--color-text-muted); }
+  .pform input { border: 1px solid var(--color-border); border-radius: var(--radius-sm); background: var(--color-panel-soft); padding: 6px 10px; font-size: 0.8125rem; }
+  .pform .req::after { content: " *"; color: var(--color-danger); }
+  .pform .frow { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* toast */
+  .toast-wrap { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; gap: 8px; z-index: 1000; align-items: center; }
+  .toast { display: flex; align-items: center; gap: 10px; background: var(--color-text); color: #FCFAF5; font-size: 0.8125rem; padding: 9px 12px 9px 16px; border-radius: var(--radius-md); box-shadow: var(--elevation-3); animation: toast-in var(--duration-slow) var(--ease-spring); }
+  .toast.out { animation: toast-out var(--duration-base) var(--ease-out) forwards; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(12px); } }
+  @keyframes toast-out { to { opacity: 0; transform: translateY(8px); } }
+  .toast button { border: 0; background: color-mix(in srgb, #FCFAF5 14%, transparent); color: #FCFAF5; font-size: 0.75rem; font-weight: 700; padding: 4px 10px; border-radius: var(--radius-xs); }
+
+  /* 确认弹窗 */
+  .scrim { position: fixed; inset: 0; background: rgba(59, 61, 63, 0.4); backdrop-filter: blur(2px); display: none; place-items: center; z-index: 900; }
+  .scrim.show { display: grid; }
+  .dialog { width: 400px; background: var(--color-panel-soft); border-radius: var(--radius-lg); box-shadow: var(--elevation-3); padding: 22px 24px; animation: toast-in var(--duration-slow) var(--ease-spring); }
+  .dialog h3 { margin: 0 0 8px; font-size: 1rem; }
+  .dialog p { margin: 0 0 18px; font-size: 0.8125rem; color: var(--color-text-muted); }
+  .dialog .frow { display: flex; gap: 10px; justify-content: flex-end; }
+  .btn.danger { background: var(--color-danger); border-color: var(--color-danger); color: #fff; }
+  .btn.danger:hover { background: #743030; border-color: #743030; }
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="app-nav" aria-label="主导航">
+    <div class="app-brand">Claude Link</div>
+    <a href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>会话</a>
+    <a href="#" class="active"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>设置</a>
+  </nav>
+
+  <main class="settings">
+    <div class="settings-inner">
+      <div class="page-head">
+        <h1>设置</h1>
+        <span class="proto-tag">视觉稿 V1 · 双栏主从</span>
+      </div>
+      <nav class="tabs" aria-label="设置分类">
+        <button class="active">连接</button>
+        <button>行为</button>
+        <button>外观</button>
+      </nav>
+
+      <div class="pm">
+        <!-- 左栏：供应商列表 -->
+        <aside class="plist" aria-label="供应商列表">
+          <div class="plist-head">
+            <h2>供应商</h2>
+            <span class="count" id="pCount"></span>
+          </div>
+          <button class="plist-add" id="btnNew">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>新建供应商
+          </button>
+          <div class="pform" id="pForm" hidden>
+            <label class="req">名称<input id="fName" placeholder="例如：智谱 GLM" /></label>
+            <label>请求地址（Base URL）<input id="fUrl" placeholder="https://open.bigmodel.cn/api/anthropic" /></label>
+            <label>API Key<input id="fKey" type="password" placeholder="sk-…" /></label>
+            <div class="frow">
+              <button class="btn sm" id="fCancel">取消</button>
+              <button class="btn sm primary" id="fSave">创建</button>
+            </div>
+          </div>
+          <div class="plist-items" id="pItems"></div>
+        </aside>
+
+        <!-- 右栏：详情 -->
+        <section class="pdetail" id="pDetail"></section>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+<div class="scrim" id="scrim">
+  <div class="dialog" role="alertdialog" aria-modal="true" id="dialogBox"></div>
+</div>
+
+<script>
+/* ══ Mock 数据（三版原型共用同一套，保证可比） ══ */
+const ICON = {
+  server: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>',
+  refresh: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg>',
+  search: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.35-4.35"/></svg>',
+  trash: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  check: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
+  plus: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  zap: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>',
+  undo: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>',
+};
+
+const AVAILABLE = {
+  p1: [
+    ['glm-4.7', 'GLM-4.7 旗舰', 98304], ['glm-4.7-air', 'GLM-4.7 Air 轻量', 65536],
+    ['glm-4.6', 'GLM-4.6', 98304], ['glm-4.5-air', 'GLM-4.5 Air', 65536],
+    ['glm-4.5-flash', 'GLM-4.5 Flash 免费', 32768], ['glm-4v-plus', 'GLM-4V Plus 视觉', 16384],
+    ['glm-4-long', 'GLM-4 Long 长文本', 1048576], ['glm-4-flashx', 'GLM-4 FlashX', 32768],
+    ['glm-4-air-250414', 'GLM-4 Air 250414', 65536], ['glm-4-plus', 'GLM-4 Plus', 98304],
+    ['codegeex-4', 'CodeGeeX-4 编程', 32768], ['glm-zero-preview', 'GLM Zero Preview', 32768],
+  ],
+  p2: [
+    ['claude-opus-4-6', 'Claude Opus 4.6', 32768], ['claude-sonnet-4-6', 'Claude Sonnet 4.6', 65536],
+    ['claude-sonnet-4-5', 'Claude Sonnet 4.5', 65536], ['claude-haiku-4-5', 'Claude Haiku 4.5', 32768],
+    ['claude-3-7-sonnet', 'Claude 3.7 Sonnet', 65536], ['claude-3-5-haiku', 'Claude 3.5 Haiku', 8192],
+  ],
+  p3: [
+    ['claude-opus-4-6', 'Claude Opus 4.6', 32768], ['claude-sonnet-4-6', 'Claude Sonnet 4.6', 65536],
+    ['claude-sonnet-4-5', 'Claude Sonnet 4.5', 65536], ['gpt-5.2', 'GPT-5.2（兼容层）', 131072],
+    ['gemini-3-pro', 'Gemini 3 Pro（兼容层）', 1048576], ['deepseek-v3.2', 'DeepSeek V3.2（兼容层）', 131072],
+    ['kimi-k2.5', 'Kimi K2.5（兼容层）', 262144],
+  ],
+};
+
+let providers = [
+  { id: 'p1', name: '智谱 GLM', note: '主力，性价比', url: 'https://open.bigmodel.cn/api/anthropic', key: '9f2c', active: true,
+    models: [m('glm-4.7', 'GLM-4.7 旗舰', 98304, 'queried'), m('glm-4.7-air', 'GLM-4.7 Air 轻量', 65536, 'queried'), m('glm-4.6', 'GLM-4.6', 98304, 'queried')], def: 'glm-4.7' },
+  { id: 'p2', name: 'Anthropic 官方', note: '', url: 'https://api.anthropic.com', key: 'a41b', active: false,
+    models: [m('claude-sonnet-4-6', 'Claude Sonnet 4.6', 65536, 'queried'), m('claude-opus-4-6', 'Claude Opus 4.6', 32768, 'queried'), m('claude-haiku-4-5', 'Claude Haiku 4.5', 32768, 'queried')], def: 'claude-sonnet-4-6' },
+  { id: 'p3', name: 'sub2api 中转', note: '备用线路', url: 'https://sub2api.example.com', key: '77e0', active: false,
+    models: [m('claude-sonnet-4-6', 'Claude Sonnet 4.6', 65536, 'manual')], def: 'claude-sonnet-4-6' },
+];
+function m(id, name, tok, src) { return { id, name, tok, src, addedAt: Date.now() }; }
+
+let selId = 'p1';
+const queried = {};   // providerId -> ModelInfo[]（查询缓存）
+let queryState = {};  // providerId -> 'idle' | 'loading' | 'done'
+let qFilter = '';
+
+const $ = (s) => document.querySelector(s);
+const host = (url) => { try { return new URL(url).host; } catch { return url; } };
+const cur = () => providers.find(p => p.id === selId);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ══ toast（含撤销动作） ══ */
+function toast(msg, action) {
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.innerHTML = `<span>${msg}</span>` + (action ? `<button type="button">${ICON.undo}${action.label}</button>` : '');
+  if (action) el.querySelector('button').onclick = () => { action.fn(); kill(); };
+  $('#toasts').appendChild(el);
+  const kill = () => { el.classList.add('out'); setTimeout(() => el.remove(), 220); };
+  setTimeout(kill, action ? 5000 : 2600);
+}
+
+/* ══ 确认弹窗 ══ */
+function confirmDlg({ title, body, okText, danger, onOk }) {
+  const scrim = $('#scrim'), box = $('#dialogBox');
+  box.innerHTML = `<h3>${title}</h3><p>${body}</p>
+    <div class="frow"><button class="btn" data-x>取消</button><button class="btn ${danger ? 'danger' : 'primary'}" data-ok>${okText}</button></div>`;
+  scrim.classList.add('show');
+  box.querySelector('[data-x]').onclick = () => scrim.classList.remove('show');
+  box.querySelector('[data-ok]').onclick = () => { scrim.classList.remove('show'); onOk(); };
+  scrim.onclick = (e) => { if (e.target === scrim) scrim.classList.remove('show'); };
+}
+
+/* ══ 左栏渲染 ══ */
+function renderList() {
+  $('#pCount').textContent = `${providers.length} 个`;
+  $('#pItems').innerHTML = providers.map(p => `
+    <button type="button" class="pitem ${p.id === selId ? 'sel' : ''} ${p.active ? 'on' : ''}" data-id="${p.id}" aria-current="${p.id === selId}">
+      <span class="dot" title="${p.active ? '当前使用' : '未启用'}"></span>
+      <span class="meta">
+        <span class="name">${esc(p.name)} ${p.active ? '<span class="badge-on">使用中</span>' : ''}</span>
+        <span class="host">${esc(host(p.url))}</span>
+      </span>
+      <span class="mcount">${p.models.length} 模型</span>
+    </button>`).join('');
+  $('#pItems').querySelectorAll('.pitem').forEach(b => b.onclick = () => { selId = b.dataset.id; qFilter = ''; render(); });
+}
+
+/* ══ 右栏渲染 ══ */
+function renderDetail() {
+  const p = cur();
+  $('#pDetail').innerHTML = `
+    <div class="card">
+      <div class="d-head">
+        <div class="d-ava">${ICON.server}</div>
+        <div class="d-title">
+          <div class="row1"><h2>${esc(p.name)}</h2>${p.active ? '<span class="badge-on">当前使用</span>' : ''}</div>
+          <div class="sub">
+            <span class="kv">地址 <code>${esc(p.url)}</code></span>
+            <span class="kv">Key <code>sk-…****${esc(p.key)}</code></span>
+            ${p.note ? `<span class="kv">备注 ${esc(p.note)}</span>` : ''}
+          </div>
+        </div>
+        <div class="d-actions">
+          ${p.active ? '' : `<button class="btn" id="aUse">设为当前使用</button>`}
+          <button class="btn" id="aTest">${ICON.zap}测试连接</button>
+          <button class="btn ghost-danger" id="aDel" aria-label="删除供应商">${ICON.trash}删除</button>
+        </div>
+      </div>
+      <div class="card-head"><h3>我的模型</h3><div class="spacer"></div><span class="count" style="font-size:.75rem;color:var(--color-text-muted)">${p.models.length} 个 · 默认 <code style="font-family:var(--font-mono)">${esc(p.def || '未设置')}</code></span></div>
+      ${renderMyModels(p)}
+    </div>
+    <div class="card">
+      <div class="card-head"><h3>可用模型</h3><div class="spacer"></div><span style="font-size:.75rem;color:var(--color-text-muted)">来自 ${esc(host(p.url))}/v1/models</span></div>
+      ${renderQuery(p)}
+    </div>`;
+
+  $('#aTest').onclick = () => toast('已发起连接测试（复用现有测试连接弹窗）');
+  const del = $('#aDel'); if (del) del.onclick = () => deleteProvider(p);
+  const use = $('#aUse'); if (use) use.onclick = () => { providers.forEach(x => x.active = false); p.active = true; render(); toast(`已切换到「${esc(p.name)}」，配置已生效`); };
+  bindMyModels(p);
+  bindQuery(p);
+}
+
+function renderMyModels(p) {
+  if (!p.models.length) {
+    return `<div class="empty">还没有模型。<b>查询可用模型</b>后点击添加，或在下方手动输入模型 ID。</div>
+      ${manualAddHtml(p, true)}`;
+  }
+  const rows = p.models.map(mm => `
+    <div class="mrow" data-mid="${esc(mm.id)}">
+      <input type="radio" class="radio" name="def" ${p.def === mm.id ? 'checked' : ''} title="设为默认模型" aria-label="将 ${esc(mm.id)} 设为默认模型" />
+      <span class="mid" title="${esc(mm.id)}">${esc(mm.id)}<span class="nm">${esc(mm.name)}</span></span>
+      <span class="mtok">${mm.tok ? (mm.tok / 1024 | 0) + 'k tok' : '—'}</span>
+      <span class="tag ${mm.src}">${mm.src === 'queried' ? '查询' : '手动'}</span>
+      <button type="button" class="icon-btn" data-del="${esc(mm.id)}" aria-label="删除模型 ${esc(mm.id)}" title="删除">${ICON.trash}</button>
+    </div>`).join('');
+  return `<div class="mlist">${rows}</div>${manualAddHtml(p, false)}`;
+}
+function manualAddHtml(p) {
+  return `<div class="madd">
+    <div class="fieldbox">
+      <input id="mAddInput" placeholder="手动输入模型 ID，例如 glm-4.7-flash" autocomplete="off" spellcheck="false" />
+      <div class="hint" id="mAddHint">适用于网关自定义模型 / 端点不暴露模型列表的场景</div>
+    </div>
+    <button class="btn primary" id="mAddBtn" style="margin-top:1px">${ICON.plus}添加模型</button>
+  </div>`;
+}
+
+function bindMyModels(p) {
+  document.querySelectorAll('.mrow .radio').forEach(r => r.onchange = () => { p.def = r.closest('.mrow').dataset.mid; renderDetail(); toast(`默认模型已设为 <b>${esc(p.def)}</b>`); });
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = () => {
+    const id = b.dataset.del;
+    const idx = p.models.findIndex(x => x.id === id);
+    const removed = p.models.splice(idx, 1)[0];
+    if (p.def === id) p.def = p.models[0]?.id || null;
+    render();
+    toast(`已删除模型 ${esc(id)}`, { label: '撤销', fn: () => { p.models.splice(idx, 0, removed); if (!p.def) p.def = removed.id; render(); } });
+  });
+  $('#mAddBtn').onclick = () => {
+    const inp = $('#mAddInput'), hint = $('#mAddHint');
+    const id = inp.value.trim();
+    if (!id) { inp.classList.add('err'); hint.className = 'hint err'; hint.textContent = '请输入模型 ID'; return; }
+    if (p.models.some(x => x.id === id)) { inp.classList.add('err'); hint.className = 'hint err'; hint.textContent = `「${esc(id)}」已在列表中（同供应商内模型 ID 不可重复）`; return; }
+    p.models.push(m(id, id, 0, 'manual'));
+    render();
+    toast(`已手动添加模型 <b>${esc(id)}</b>`);
+  };
+  $('#mAddInput').oninput = () => { $('#mAddInput').classList.remove('err'); const h = $('#mAddHint'); h.className = 'hint'; h.textContent = '适用于网关自定义模型 / 端点不暴露模型列表的场景'; };
+}
+
+/* ══ 查询面板 ══ */
+function renderQuery(p) {
+  const st = queryState[p.id] || 'idle';
+  if (st === 'idle') {
+    return `<div class="qhead-r">
+        <button class="btn primary" id="qBtn">${ICON.refresh}查询可用模型</button>
+        <span style="font-size:.75rem;color:var(--color-text-muted)">一键拉取该端点支持的全部模型，点击即添加</span>
+      </div>
+      <div class="qnote">尚未查询。也可以直接在上方手动添加。</div>`;
+  }
+  if (st === 'loading') {
+    return `<div class="qhead-r"><button class="btn primary" disabled><span class="spinner"></span>查询中…</button></div>
+      <div class="skel"><div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div></div>`;
+  }
+  const list = (queried[p.id] || []).filter(x => x.id.toLowerCase().includes(qFilter.toLowerCase()) || x.name.toLowerCase().includes(qFilter.toLowerCase()));
+  const addedSet = new Set(p.models.map(x => x.id));
+  const rows = list.map(x => {
+    const added = addedSet.has(x.id);
+    return `<button type="button" class="qrow" data-qid="${esc(x.id)}" ${added ? 'disabled' : ''}>
+      <span class="qid" title="${esc(x.id)}">${esc(x.id)}<span class="nm">${esc(x.name)}</span></span>
+      <span class="mtok">${x.tok ? (x.tok / 1024 | 0) + 'k' : '—'}</span>
+      ${added ? `<span class="qok">${ICON.check}已添加</span>` : `<span class="qadd">${ICON.plus}点击添加</span>`}
+    </button>`;
+  }).join('');
+  return `<div class="qhead-r">
+      <div class="searchbox">${ICON.search}<input id="qSearch" placeholder="在 ${(queried[p.id] || []).length} 个模型中搜索…" value="${esc(qFilter)}" autocomplete="off" spellcheck="false" /></div>
+      <button class="btn" id="qBtn">${ICON.refresh}重新查询</button>
+    </div>
+    <div class="qlist">${rows || `<div class="empty">无匹配模型。试试其他关键词，或到上方<b>手动添加</b>。</div>`}</div>`;
+}
+
+function bindQuery(p) {
+  const btn = $('#qBtn');
+  if (btn && !btn.disabled) btn.onclick = () => {
+    queryState[p.id] = 'loading'; renderDetail();
+    setTimeout(() => { queried[p.id] = (AVAILABLE[p.id] || []).map(([id, name, tok]) => ({ id, name, tok })); queryState[p.id] = 'done'; renderDetail(); }, 900);
+  };
+  const s = $('#qSearch');
+  if (s) {
+    // 只替换列表区，搜索框节点保持不动：连续输入/中文 IME 不丢焦点
+    s.oninput = () => { qFilter = s.value; refreshQueryOnly(); };
+    bindQueryRows(p);
+  }
+}
+function bindQueryRows(p) {
+  document.querySelectorAll('.qrow:not(:disabled)').forEach(r => r.onclick = () => {
+    const info = (queried[p.id] || []).find(x => x.id === r.dataset.qid);
+    p.models.push(m(info.id, info.name, info.tok, 'queried'));
+    if (!p.def) p.def = info.id;
+    render();
+    toast(`已添加 <b>${esc(info.id)}</b> 到「${esc(p.name)}」`);
+  });
+}
+/* 只刷新列表区，避免整卡重建导致搜索框丢焦点（IME 场景） */
+function refreshQueryOnly() {
+  const p = cur();
+  const qlist = $('#pDetail .qlist');
+  if (!qlist) return;
+  const list = (queried[p.id] || []).filter(x => x.id.toLowerCase().includes(qFilter.toLowerCase()) || x.name.toLowerCase().includes(qFilter.toLowerCase()));
+  const addedSet = new Set(p.models.map(x => x.id));
+  qlist.innerHTML = list.map(x => {
+    const added = addedSet.has(x.id);
+    return `<button type="button" class="qrow" data-qid="${esc(x.id)}" ${added ? 'disabled' : ''}>
+      <span class="qid" title="${esc(x.id)}">${esc(x.id)}<span class="nm">${esc(x.name)}</span></span>
+      <span class="mtok">${x.tok ? (x.tok / 1024 | 0) + 'k' : '—'}</span>
+      ${added ? `<span class="qok">${ICON.check}已添加</span>` : `<span class="qadd">${ICON.plus}点击添加</span>`}
+    </button>`;
+  }).join('') || `<div class="empty">无匹配模型。试试其他关键词，或到上方<b>手动添加</b>。</div>`;
+  bindQueryRows(p);
+}
+
+/* ══ 供应商新建/删除 ══ */
+$('#btnNew').onclick = () => { const f = $('#pForm'); f.hidden = !f.hidden; if (!f.hidden) $('#fName').focus(); };
+$('#fCancel').onclick = () => { $('#pForm').hidden = true; };
+$('#fSave').onclick = () => {
+  const name = $('#fName').value.trim(), url = $('#fUrl').value.trim(), key = $('#fKey').value.trim();
+  if (!name || !url) { toast('名称和请求地址为必填'); return; }
+  const id = 'p' + (Date.now() % 100000);
+  AVAILABLE[id] = [];
+  providers.push({ id, name, note: '', url, key: key ? key.slice(-4) : '未设', active: false, models: [], def: null });
+  selId = id; $('#pForm').hidden = true;
+  $('#fName').value = ''; $('#fUrl').value = ''; $('#fKey').value = '';
+  render();
+  toast(`已创建供应商「${esc(name)}」，可查询或手动添加模型`);
+};
+function deleteProvider(p) {
+  confirmDlg({
+    title: `删除供应商「${esc(p.name)}」？`,
+    body: `将同时删除其 ${p.models.length} 个模型配置。此操作可用「撤销」恢复。`,
+    okText: '删除', danger: true,
+    onOk: () => {
+      const idx = providers.indexOf(p);
+      const snapshot = p;
+      providers.splice(idx, 1);
+      if (selId === p.id) selId = providers[0]?.id || null;
+      render();
+      toast(`已删除供应商「${esc(p.name)}」`, { label: '撤销', fn: () => { providers.splice(idx, 0, snapshot); selId = snapshot.id; render(); } });
+    },
+  });
+}
+
+function render() { renderList(); if (cur()) renderDetail(); else $('#pDetail').innerHTML = `<div class="card"><div class="empty">还没有供应商。点击左上角<b>「新建供应商」</b>开始。</div></div>`; }
+render();
+</script>
+</body>
+</html>

@@ -3,11 +3,11 @@
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
-import type { AppConfig, ModelInfo, DetectedClaudeConfig } from '../shared/types/config';
+import type { AppConfig, ModelInfo, DetectedClaudeConfig, ProviderLibrarySnapshot, ProviderProfileView, ProviderSaveInput } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
-import type { ChatEventPayload, QueueEventPayload, TestConnectionEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, SessionCommandSnapshot } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, SessionCommandSnapshot } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
@@ -27,14 +27,18 @@ export interface ClaudeLinkAPI {
   }>;
   pickSettingsFile: () => Promise<string | null>;
   autoDetectClaudeConfig: () => Promise<DetectedClaudeConfig>;
-  testConnection: (model: string | null) => Promise<void>;
-  abortTestConnection: () => Promise<void>;
-  onTestConnectionEvent: (callback: (payload: TestConnectionEventPayload) => void) => () => void;
-  removeTestConnectionListener: () => void;
   pickWorkspaceDir: () => Promise<string | null>;
   listRecentWorkspaces: () => Promise<string[]>;
   addRecentWorkspace: (dir: string) => Promise<string[]>;
-  fetchModels: (provider: AppConfig['provider'], apiKey: string, apiBaseUrl?: string) => Promise<ModelInfo[]>;
+  // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，list 只回掩码）。
+  listProviders: () => Promise<ProviderLibrarySnapshot>;
+  saveProvider: (input: ProviderSaveInput) => Promise<ProviderProfileView>;
+  deleteProvider: (providerId: string) => Promise<void>;
+  restoreProvider: () => Promise<ProviderProfileView>;
+  queryProviderModels: (providerId: string, forceRefresh?: boolean) => Promise<ModelInfo[]>;
+  testProviderModel: (providerId: string, modelId: string) => Promise<{ success: boolean; message: string; detail: string; durationMs: number }>;
+  onProvidersChanged: (callback: () => void) => () => void;
+  removeProvidersListener: () => void;
   listSessions: () => Promise<Session[]>;
   createSession: (name: string) => Promise<Session>;
   getSession: (id: string) => Promise<Session | null>;
@@ -42,7 +46,7 @@ export interface ClaudeLinkAPI {
   deleteSession: (id: string) => Promise<void>;
   updateSession: (
     id: string,
-    data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel'>>,
+    data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>>,
   ) => Promise<Session | null>;
   searchSessions: (query: string) => Promise<Session[]>;
   analyzeTopic: (sessionId: string, firstMessage: string) => Promise<string | null>;
@@ -110,18 +114,28 @@ export function createApi(): ClaudeLinkAPI {
     importSettings: (filePath) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, filePath),
     pickSettingsFile: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE) as Promise<string | null>,
     autoDetectClaudeConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_AUTO_DETECT) as Promise<DetectedClaudeConfig>,
-    testConnection: (model) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_TEST_CONNECTION, model ?? null),
-    abortTestConnection: () => ipcRenderer.invoke(IPC_CHANNELS.TEST_CONNECTION_ABORT),
     pickWorkspaceDir: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_PICK_DIR) as Promise<string | null>,
     listRecentWorkspaces: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_LIST_RECENT) as Promise<string[]>,
     addRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_ADD_RECENT, dir) as Promise<string[]>,
-    onTestConnectionEvent: (callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: TestConnectionEventPayload) => callback(payload);
-      ipcRenderer.on(IPC_CHANNELS.TEST_CONNECTION_EVENT, listener);
-      return () => ipcRenderer.off(IPC_CHANNELS.TEST_CONNECTION_EVENT, listener);
+    listProviders: () => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_LIST) as Promise<ProviderLibrarySnapshot>,
+    saveProvider: (input) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_SAVE, input) as Promise<ProviderProfileView>,
+    deleteProvider: (providerId) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_DELETE, providerId),
+    restoreProvider: () => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_RESTORE) as Promise<ProviderProfileView>,
+    queryProviderModels: (providerId, forceRefresh) =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_QUERY_MODELS, providerId, forceRefresh === true) as Promise<ModelInfo[]>,
+    testProviderModel: (providerId, modelId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_TEST_MODEL, providerId, modelId) as Promise<{
+        success: boolean;
+        message: string;
+        detail: string;
+        durationMs: number;
+      }>,
+    onProvidersChanged: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on(IPC_CHANNELS.PROVIDERS_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.PROVIDERS_CHANGED, listener);
     },
-    removeTestConnectionListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.TEST_CONNECTION_EVENT),
-    fetchModels: (provider, apiKey, apiBaseUrl) => ipcRenderer.invoke(IPC_CHANNELS.MODELS_FETCH, provider, apiKey, apiBaseUrl),
+    removeProvidersListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.PROVIDERS_CHANGED),
     listSessions: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LIST),
     createSession: (name) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_CREATE, name),
     getSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_GET, id),

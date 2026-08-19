@@ -3,7 +3,7 @@
 // 按用户要求，所有"会话内容"相关的控件都放在底部（输入区附近），而非顶部。
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
-import ModelSelector from './ModelSelector.vue';
+import ProviderModelSelector from './ProviderModelSelector.vue';
 import ThinkingLevelSelector from './ThinkingLevelSelector.vue';
 import ContextButton from './ContextButton.vue';
 import type { Session } from '../../../shared/types/session';
@@ -148,12 +148,12 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 模型 -->
+    <!-- 模型：供应商 × 模型二级级联（向上弹出；整个会话统一当前实际模型） -->
     <div class="ctl">
       <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
         <path d="M5 5h14v14H5z M9 9h6v6H9z" />
       </svg>
-      <ModelSelector :disabled="sending" />
+      <ProviderModelSelector :disabled="sending" />
     </div>
 
     <!-- 思考强度：每会话切档（低=快速响应 … 工作流=xhigh+动态编排）；默认跟随全局配置 -->

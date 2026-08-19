@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -73,6 +73,18 @@ export function runMigrations(db: Database.Database): void {
     `);
   }
 
+  // V8：会话级供应商选用 + 别名清洗。model_override 取值域从 sonnet/haiku/opus/fable 别名
+  // 改为实际模型 ID（唯一实际模型原则）；旧别名值不再有意义，置 NULL 回退到「最近使用」。
+  if (currentVersion < 8) {
+    db.exec(`
+      ALTER TABLE sessions ADD COLUMN provider_override TEXT DEFAULT NULL;
+    `);
+    db.exec(`
+      UPDATE sessions SET model_override = NULL
+      WHERE model_override IN ('sonnet', 'haiku', 'opus', 'fable');
+    `);
+  }
+
   // 幂等自愈：某些 DB 的 schema_version 与实际列状态不一致（历史迁移把版本号推进了、
   // 或列已被部分加上）。按列是否存在补加，确保任何状态的 DB 都能修好，不阻塞启动。
   {
@@ -94,7 +106,18 @@ export function runMigrations(db: Database.Database): void {
     if (!hasCol('thinking_level')) {
       db.exec('ALTER TABLE sessions ADD COLUMN thinking_level TEXT DEFAULT NULL');
     }
+    // 会话级供应商选用（V8）：幂等自愈补列（与版本块双保险，老库/半应用库不阻塞）。
+    if (!hasCol('provider_override')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN provider_override TEXT DEFAULT NULL');
+    }
   }
+
+  // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。
+  // 重复执行无害（别名值已为 NULL 时 UPDATE 不改变任何行）。
+  db.exec(`
+    UPDATE sessions SET model_override = NULL
+    WHERE model_override IN ('sonnet', 'haiku', 'opus', 'fable');
+  `);
 
   // 幂等自愈（messages 过程化四列）：老 DB（plan 落地前建库）的 messages 表没有
   // process_kind / parent_agent_id / tool_use_id / title。按列是否存在补加，老库升级后

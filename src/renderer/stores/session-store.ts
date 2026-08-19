@@ -362,6 +362,23 @@ export const useSessionStore = defineStore('session', {
         this.error = error instanceof Error ? error.message : '更新会话模型失败';
       }
     },
+    // 会话级供应商×模型选用（doc2 §4.4）：一次写两个 override + 主进程更新全局「最近使用」记忆。
+    // 切换保留会话历史，从下一条消息起生效（每条消息 = 全新 query + resume，天然成立）。
+    async setActiveSessionProviderModel(providerId: string, modelId: string) {
+      if (!this.activeSession) return;
+      try {
+        const updated = await window.claudeLink.updateSession(this.activeSession.id, {
+          providerOverride: providerId,
+          modelOverride: modelId,
+        });
+        if (updated) {
+          this.activeSession = updated;
+          this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+        }
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '更新会话模型失败';
+      }
+    },
     // 会话级工作空间：写入 session.workingDir，spawn 时生效；同时记入最近历史便于复用。
     async setActiveSessionWorkingDir(dir: string | null) {
       if (!this.activeSession) return;

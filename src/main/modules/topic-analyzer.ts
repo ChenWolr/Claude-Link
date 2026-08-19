@@ -1,10 +1,11 @@
 import https from 'https';
 import http from 'http';
-import { getConfig } from './config-manager';
+import { getConfig, getProviderModelSources } from './config-manager';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { logger } from '../utils/logger';
 import { buildAnthropicApiUrl, isOfficialAnthropicBaseUrl } from './api-url';
 import { resolveConfiguredDefaultModel } from '../../shared/settings-parser';
+import { resolveSessionModel } from '../../shared/session-model';
 
 interface ClaudeApiResponse {
   content: Array<{ type: string; text?: string }>;
@@ -13,16 +14,24 @@ interface ClaudeApiResponse {
 export async function analyzeTopic(sessionId: string, firstMessage: string): Promise<string | null> {
   const config = getConfig();
 
-  if (!config.apiKey) {
+  // 供应商库解析（会话空选择 → 最近使用 → 库首）；库为空时回落老字段/别名链。
+  // 后台标题分析同样遵守「唯一实际模型」——不得硬编码任何别名/官方模型。
+  const resolved = resolveSessionModel(
+    { providerOverride: null, modelOverride: null },
+    { providerId: config.lastUsedProviderId, modelId: config.lastUsedModelId },
+    getProviderModelSources(),
+  );
+  const apiKey = resolved.provider?.apiKey || config.apiKey;
+  if (!apiKey) {
     logger.warn('No API key configured; skipping topic analysis');
     return null;
   }
 
-  const baseUrl = config.apiBaseUrl?.trim() || 'https://api.anthropic.com';
+  const baseUrl = resolved.provider?.apiBaseUrl || config.apiBaseUrl?.trim() || 'https://api.anthropic.com';
   const isAnthropic = isOfficialAnthropicBaseUrl(baseUrl);
   const url = buildAnthropicApiUrl(baseUrl, 'messages');
 
-  const model = resolveConfiguredDefaultModel(config.advancedJson, config.defaultModel);
+  const model = resolved.modelId || resolveConfiguredDefaultModel(config.advancedJson, config.defaultModel);
 
   const requestBody = JSON.stringify({
     model,

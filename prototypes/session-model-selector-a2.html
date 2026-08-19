@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>A2 向上级联 · 统一当前模型</title>
+<style>
+:root{--bg:#f8f4ed;--panel:#f4f0ea;--soft:#fcfaf5;--text:#3b3d3f;--muted:#6a6c70;--border:rgba(122,96,88,.18);--accent:#537d96;--accent-strong:#456a80;--green:#4a9e5e;--shadow:0 12px 32px rgba(0,0,0,.14);--r:12px;--rs:8px;--item-h:42px}
+*{box-sizing:border-box}html,body{margin:0;height:100%}body{background:var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}.page{max-width:1120px;height:100%;margin:auto;padding:26px 30px;display:flex;flex-direction:column}.head{display:flex;align-items:baseline;gap:10px}.head h1{margin:0;font-size:22px}.tag{font-size:12px;color:var(--accent-strong);background:color-mix(in srgb,var(--accent) 12%,transparent);border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);border-radius:999px;padding:2px 9px}.sub{margin:6px 0 18px;color:var(--muted);font-size:13px}.chat-shell{flex:1;min-height:460px;background:var(--panel);border:1px solid var(--border);border-radius:16px;box-shadow:0 1px 2px rgba(0,0,0,.05);display:flex;flex-direction:column;overflow:hidden}.transcript{flex:1;min-height:0;padding:24px 28px;display:flex;flex-direction:column;justify-content:flex-end;gap:14px;background:linear-gradient(180deg,var(--panel),var(--soft))}.bubble{max-width:68%;padding:11px 14px;border:1px solid var(--border);background:#fff;border-radius:12px;font-size:13px;line-height:1.55}.bubble.user{align-self:flex-end;background:color-mix(in srgb,var(--accent) 10%,#fff)}.composer{position:relative;flex:none;background:var(--soft);border-top:1px solid var(--border);padding:14px 20px 15px}.input{height:50px;border:1px solid var(--border);border-radius:12px;background:#fff;color:var(--muted);display:flex;align-items:center;padding:0 14px;font-size:13px}.toolbar{display:flex;align-items:center;gap:13px;margin-top:10px}.tool{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px}.ctl{border:1px solid var(--border);background:#fff;border-radius:8px;padding:5px 10px;font-size:12px;color:var(--text)}.model-wrap{position:relative}.model-trigger{border:1px solid var(--accent);background:color-mix(in srgb,var(--accent) 7%,#fff);border-radius:8px;padding:5px 10px;font-size:12px;color:var(--accent-strong);cursor:pointer;display:flex;gap:5px;align-items:center}.model-trigger strong{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}.send{margin-left:auto;border:0;border-radius:8px;background:var(--accent);color:#fff;width:32px;height:32px;font-size:18px;font-weight:700}.cascade{position:absolute;left:0;bottom:calc(100% + 8px);display:flex;align-items:flex-end;z-index:20;filter:drop-shadow(var(--shadow));animation:up .18s ease-out}.cascade.hidden{display:none}@keyframes up{from{opacity:0;transform:translateY(7px)}to{opacity:1;transform:none}}.menu{background:var(--panel);border:1px solid var(--border);overflow:hidden}.providers{width:190px;border-radius:12px 0 0 12px}.models{width:235px;border-left:0;border-radius:0 12px 12px 0;background:var(--soft)}.menu-head{height:38px;padding:10px 12px 8px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.04em;display:flex;align-items:center;justify-content:space-between}.menu-head b{font-size:10px;font-weight:500;color:var(--muted);text-transform:none;letter-spacing:0}.scroll{max-height:calc(var(--item-h) * 4);overflow-y:auto;scrollbar-width:thin;scrollbar-color:color-mix(in srgb,var(--muted) 42%,transparent) transparent}.scroll::-webkit-scrollbar{width:6px}.scroll::-webkit-scrollbar-thumb{background:color-mix(in srgb,var(--muted) 40%,transparent);border-radius:999px}.item{height:var(--item-h);width:100%;border:0;background:transparent;padding:0 11px;display:flex;align-items:center;gap:8px;text-align:left;color:var(--text);cursor:pointer;font-size:12px}.item:hover,.item.active{background:color-mix(in srgb,var(--accent) 12%,transparent)}.item.active{color:var(--accent-strong);font-weight:650}.item-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.count{margin-left:auto;flex:none;font-size:10px;color:var(--muted);background:color-mix(in srgb,var(--text) 7%,transparent);padding:2px 6px;border-radius:999px;font-weight:500}.arrow,.check{margin-left:auto;color:var(--accent-strong);font-weight:700}.model-id{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}.model-meta{margin-left:auto;color:var(--muted);font-size:10px;white-space:nowrap}.foot{height:34px;border-top:1px solid var(--border);display:flex;align-items:center;padding:0 11px;color:var(--muted);font-size:10px}.foot span{margin-left:auto;color:var(--green);font-weight:600}.note{display:flex;gap:12px;align-items:center;margin-top:14px;padding:10px 12px;border-radius:10px;background:color-mix(in srgb,var(--accent) 6%,transparent);border:1px solid color-mix(in srgb,var(--accent) 20%,transparent);font-size:12px;color:var(--muted)}.note b{color:var(--text)}.cursor{position:absolute;pointer-events:none;right:-8px;top:70px;color:var(--accent-strong);font-size:14px}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="head"><h1>会话模型选择</h1><span class="tag">A2 · 向上级联 · 统一当前模型</span></div>
+  <p class="sub">点击底部模型按钮向上弹出。供应商与模型各自最多同时显示 4 项，超出后在各自列内部滚动。会话内不再出现 haiku/opus/sonnet/fable 别名。</p>
+  <div class="chat-shell">
+    <div class="transcript">
+      <div class="bubble">我会使用当前会话选择的供应商与模型继续工作。切换只影响下一条及后续消息。</div>
+      <div class="bubble user">帮我调用子代理分析这个仓库。</div>
+    </div>
+    <div class="composer">
+      <div class="input">输入消息；输入 / 联想命令（↑↓ 选择，回车确认）</div>
+      <div class="toolbar">
+        <div class="tool">◌ 上下文</div>
+        <div class="tool"><span>⌘</span><button class="ctl">claude-link ⌄</button></div>
+        <div class="model-wrap">
+          <button class="model-trigger" id="trigger"><span>▣</span><strong id="current">sub2api / gpt-5.6-sol</strong><span>⌃</span></button>
+          <div class="cascade" id="cascade">
+            <div class="menu providers">
+              <div class="menu-head"><span>供应商</span><b>6 个</b></div>
+              <div class="scroll" id="providerList">
+                <button class="item" data-provider="BigModel"><span class="item-name">BigModel</span><span class="count">3</span><span class="arrow">›</span></button>
+                <button class="item active" data-provider="sub2api"><span class="item-name">sub2api</span><span class="count">7</span><span class="check">✓ ›</span></button>
+                <button class="item" data-provider="Anthropic 官方"><span class="item-name">Anthropic 官方</span><span class="count">6</span><span class="arrow">›</span></button>
+                <button class="item" data-provider="智谱 GLM"><span class="item-name">智谱 GLM</span><span class="count">12</span><span class="arrow">›</span></button>
+                <button class="item" data-provider="OpenRouter"><span class="item-name">OpenRouter</span><span class="count">24</span><span class="arrow">›</span></button>
+                <button class="item" data-provider="本地网关"><span class="item-name">本地网关</span><span class="count">5</span><span class="arrow">›</span></button>
+              </div>
+              <div class="foot">设置中管理供应商</div>
+            </div>
+            <div class="menu models">
+              <div class="menu-head"><span id="modelTitle">sub2api</span><b id="modelCount">7 个模型</b></div>
+              <div class="scroll" id="modelList">
+                <button class="item active"><span class="model-id">gpt-5.6-sol</span><span class="check">✓</span></button>
+                <button class="item"><span class="model-id">gpt-5.6-pro</span><span class="model-meta">256k</span></button>
+                <button class="item"><span class="model-id">gpt-5.5</span><span class="model-meta">128k</span></button>
+                <button class="item"><span class="model-id">claude-sonnet-4-6</span><span class="model-meta">200k</span></button>
+                <button class="item"><span class="model-id">claude-opus-4-6</span><span class="model-meta">200k</span></button>
+                <button class="item"><span class="model-id">kimi-k2.5</span><span class="model-meta">256k</span></button>
+                <button class="item"><span class="model-id">deepseek-v3.2</span><span class="model-meta">128k</span></button>
+              </div>
+              <div class="foot">下一条消息起生效<span>全部任务统一当前模型</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="tool">♧ 高 <button class="ctl">⌄</button></div>
+        <div class="tool">▣ <button class="ctl">默认模式 ⌄</button></div>
+        <button class="send">↑</button>
+      </div>
+    </div>
+  </div>
+  <div class="note"><b>交互说明</b> 触发器位于会话底部，所以菜单固定向上弹出；供应商列和模型列各自独立滚动，互不带动。点击模型后菜单关闭，触发器更新为“供应商 / 模型”。</div>
+</div>
+<script>
+const cascade=document.getElementById('cascade');
+const trigger=document.getElementById('trigger');
+trigger.onclick=(e)=>{e.stopPropagation();cascade.classList.toggle('hidden')};
+document.addEventListener('click',(e)=>{if(!e.target.closest('.model-wrap'))cascade.classList.add('hidden')});
+document.addEventListener('keydown',(e)=>{if(e.key==='Escape')cascade.classList.add('hidden')});
+const catalogs={
+'BigModel':['GLM-5.2','GLM-5-Turbo','glm-5.3'],
+'sub2api':['gpt-5.6-sol','gpt-5.6-pro','gpt-5.5','claude-sonnet-4-6','claude-opus-4-6','kimi-k2.5','deepseek-v3.2'],
+'Anthropic 官方':['claude-opus-4-6','claude-sonnet-4-6','claude-sonnet-4-5','claude-haiku-4-5','claude-3-7-sonnet','claude-3-5-haiku'],
+'智谱 GLM':['glm-4.7','glm-4.7-air','glm-4.6','glm-4.5-air','glm-4.5-flash','glm-4v-plus','glm-4-long','glm-4-flashx','glm-4-air','glm-4-plus','codegeex-4','glm-zero-preview'],
+'OpenRouter':['anthropic/claude-sonnet-4.6','openai/gpt-5.6','google/gemini-3-pro','deepseek/deepseek-v3.2','moonshot/kimi-k2.5'],
+'本地网关':['local-coder','local-chat','local-reasoning','qwen3-32b','llama-4']};
+let provider='sub2api',model='gpt-5.6-sol';
+function renderModels(){const list=document.getElementById('modelList');const ms=catalogs[provider];document.getElementById('modelTitle').textContent=provider;document.getElementById('modelCount').textContent=ms.length+' 个模型';list.innerHTML=ms.map(x=>`<button class="item ${x===model?'active':''}" data-model="${x}"><span class="model-id">${x}</span>${x===model?'<span class="check">✓</span>':'<span class="model-meta">200k</span>'}</button>`).join('');list.querySelectorAll('[data-model]').forEach(b=>b.onclick=()=>{model=b.dataset.model;document.getElementById('current').textContent=provider+' / '+model;cascade.classList.add('hidden')})}
+document.querySelectorAll('[data-provider]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-provider]').forEach(x=>x.classList.remove('active'));b.classList.add('active');provider=b.dataset.provider;model=catalogs[provider][0];renderModels()});
+</script>
+</body>
+</html>

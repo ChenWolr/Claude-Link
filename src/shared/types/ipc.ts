@@ -21,15 +21,21 @@ export const IPC_CHANNELS = {
   CONFIG_IMPORT_SETTINGS: 'config:importSettings',
   CONFIG_PICK_SETTINGS_FILE: 'config:pickSettingsFile',
   CONFIG_AUTO_DETECT: 'config:autoDetect',
-  CONFIG_TEST_CONNECTION: 'config:testConnection',
-  TEST_CONNECTION_EVENT: 'testConnection:event',
-  TEST_CONNECTION_ABORT: 'testConnection:abort',
+  // 流式测试连接通道已删除（测试收敛到 PROVIDER_TEST_MODEL 行内直返）。
   // Task 3 Step 5：原生 settings 诊断（resolveSettings 摘要，脱敏：只回来源/路径/键名，绝不含值）。
   SETTINGS_GET_DIAGNOSTIC: 'settings:getDiagnostic',
   WORKSPACE_PICK_DIR: 'workspace:pickDir',
   WORKSPACE_LIST_RECENT: 'workspace:listRecent',
   WORKSPACE_ADD_RECENT: 'workspace:addRecent',
-  MODELS_FETCH: 'models:fetch',
+  // 多供应商模型库（设置页=可选项库；密钥明文只在 save/test 时进主进程，出主进程只有掩码视图）。
+  PROVIDER_LIST: 'config:listProviders',
+  PROVIDER_SAVE: 'config:saveProvider',
+  PROVIDER_DELETE: 'config:deleteProvider',
+  PROVIDER_RESTORE: 'config:restoreProvider',
+  PROVIDER_QUERY_MODELS: 'config:queryProviderModels',
+  PROVIDER_TEST_MODEL: 'config:testProviderModel',
+  // 主→渲染推送：库内容变更（增删改/撤销）后通知所有缓存方（设置页 + 会话选择器）刷新。
+  PROVIDERS_CHANGED: 'providers:changed',
   SESSION_LIST: 'session:list',
   SESSION_CREATE: 'session:create',
   SESSION_GET: 'session:get',
@@ -289,30 +295,7 @@ export interface QueueEventPayload {
   data?: Record<string, unknown>;
 }
 
-// 流式测试连接事件：main 进程 spawn CLI 后，逐事件推送给渲染进程的弹框。
-// phase 状态机：connecting(已启动,等待端点) → connected(收到init,端点可达) →
-//   streaming(assistant 文本增量) → done(成功/失败判定) / error(spawn/超时错误)。
-export type TestConnectionPhase = 'connecting' | 'connected' | 'streaming' | 'done' | 'error';
-
-export interface TestConnectionEventPayload {
-  phase: TestConnectionPhase;
-  /** connected: CLI init 回显的实际模型 */
-  model?: string;
-  /** streaming: 本次增量文本 */
-  delta?: string;
-  /** done: 是否连接成功 */
-  success?: boolean;
-  /** done/error: 给用户看的结论文案 */
-  message?: string;
-  /** done/error: 排查用的详情（退出码/stderr/原始片段） */
-  detail?: string;
-  /** done: 耗时毫秒 */
-  durationMs?: number;
-  // —— 问题 3 明文回显（新增）——
-  /** claude-link 本次解析出、写进 --model 与 settings.local.json 的实际模型名 */
-  requestedModel?: string;
-  /** claude-link 本次写入的端点 */
-  usedBaseUrl?: string;
-}
+// 流式测试连接事件（TestConnectionPhase / TestConnectionEventPayload）已随弹框测试删除：
+// 测试收敛到 PROVIDER_TEST_MODEL（模型行内按钮，invoke 直返 ProviderModelTestResult）。
 
 export type CliDetectionResultAlias = CliDetectionResult;
