@@ -90,6 +90,36 @@ export interface ContextStatsView {
   samplePhase: ContextSamplePhase | null;
 }
 
+// post-turn 官方 /context 探针持久化的 last-known → canonical 预填（Task 3 Step 3）。
+// 重启/切回会话时若 DB 有 last_context_used 且 renderer 尚无 canonical 值，预填数字
+// 并诚实标注 stale + source='native-context' + samplePhase='post-turn'——重启后无新
+// telemetry，契约不允许冒充 fresh（S12 实证语义保持）。会话内新 payload 到达即覆盖。
+function buildPersistedCanonical(session: Session): CanonicalContextState | null {
+  const used = session.lastContextUsed;
+  if (typeof used !== 'number' || !Number.isFinite(used) || used < 0) return null;
+  const capacity = session.lastContextUsedCapacity;
+  const percent =
+    typeof capacity === 'number' && Number.isFinite(capacity) && capacity > 0
+      ? Math.round((used / capacity) * 100)
+      : null;
+  return {
+    currentContextUsedTokens: used,
+    contextWindowCapacityTokens: typeof capacity === 'number' && capacity > 0 ? capacity : null,
+    currentContextUsedPercent: percent,
+    currentContextRemainingTokens:
+      typeof capacity === 'number' && capacity >= used ? capacity - used : null,
+    currentContextRemainingPercent: percent != null ? Math.max(0, 100 - percent) : null,
+    turnInputTokens: null,
+    turnCacheReadTokens: null,
+    turnCacheCreationTokens: null,
+    turnOutputTokens: null,
+    source: 'native-context',
+    freshness: 'stale',
+    consistency: 'unavailable',
+    diagnostic: '上次会话记录值，等待刷新',
+    samplePhase: 'post-turn',
+  };
+}
 
 export const useSessionStore = defineStore('session', {
   state: () => ({
@@ -307,7 +337,9 @@ export const useSessionStore = defineStore('session', {
       // Task 9：真实窗口容量（provenance）交给 state；canonical 当前窗口数据在切换后置 null
       // （无 fresh 快照 → pending），不得把持久化的 lastContextTokens（累计 turn usage）伪装成当前。
       this.contextLastWindow = session.lastContextWindow;
-      this.canonicalContext = null;
+      // Task 3 Step 3：若有 post-turn 探针持久化的精确占用，预填 stale（诚实标注非实时），
+      // 否则置 null（pending 空态）。会话内新 payload 到达即覆盖此预填值。
+      this.canonicalContext = buildPersistedCanonical(session);
       try {
         this.messages = await window.claudeLink.getSessionMessages(session.id);
         // 运行中会话切回时，不能把 turnStartIndex 固定成 0；否则 MessageList 会把全量历史

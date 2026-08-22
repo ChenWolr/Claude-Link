@@ -29,6 +29,10 @@ export const logger = {
   info(message: string): void {
     writeLog('INFO', message);
   },
+  // 低级别诊断日志：post-turn 探针失败/守卫拒绝等纯旁路路径用它，不刷屏、不打断回合收尾。
+  debug(message: string): void {
+    writeLog('DEBUG', message);
+  },
   warn(message: string): void {
     writeLog('WARN', message);
   },

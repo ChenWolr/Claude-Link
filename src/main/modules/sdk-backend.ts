@@ -18,7 +18,7 @@
 import type { BrowserWindow } from 'electron';
 import { existsSync, readFileSync } from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig, getProviderModelSources } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
@@ -31,7 +31,7 @@ import { notifySessionCompleted, notifySessionNetworkInterrupted } from './sessi
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
-import { extractContextTokens, detectCompaction, deriveCurrentContextUsed, parseNativeContextReport, reconcileContextUsage, isRuntimeSnapshotForQuery, mapContextReconcileTerminal, postTurnFallbackTerminal } from '../../shared/context-usage';
+import { extractContextTokens, detectCompaction, deriveCurrentContextUsed, parseNativeContextReport, reconcileContextUsage, isRuntimeSnapshotForQuery, mapContextReconcileTerminal, postTurnFallbackTerminal, derivePostTurnProbePayloadFields } from '../../shared/context-usage';
 import type { RuntimeContextSnapshot, ContextSamplePhase } from '../../shared/context-usage';
 import { convertToolProgress, convertTaskEvent } from '../../shared/progress-events';
 import {
@@ -458,6 +458,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionRuntimeSnapshot.delete(sessionId);
   contextRefreshGeneration.delete(sessionId);
   midTurnRefreshState.delete(sessionId); // P2 mid-turn 节流状态随会话清理（单一收口）
+  postTurnProbeState.delete(sessionId); // post-turn 官方探针单飞/冷却状态随会话清理（单一收口）
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
@@ -1228,6 +1229,221 @@ function maybeMidTurnRefresh(
     .finally(() => {
       const cur = midTurnRefreshState.get(sessionId);
       if (cur) cur.inFlight = false;
+    });
+}
+
+// ── post-turn 官方 /context 探针（本计划）────────────────────────────
+// 回合真实结束后 fire-and-forget 起 `claude.exe -p "/context" --resume <sid>
+// --no-session-persistence` 子进程（§0 实测：零 API、~2s、不污染 transcript），
+// 拿回合末精确占用。报告经共享 parseNativeContextReport 解析，发一条
+// source='native-context' + freshness='fresh' + samplePhase='post-turn' 的 canonical
+// payload（带原回合代际）。成功时 UI 终态升级为精确 fresh；失败时维持既有 stale 兜底
+// ——探针是增强，不是替换。per-session「可打断单飞」：每个回合结束都起新探针，旧探针在飞则
+// 直接 kill（其结果必然过时——新回合已发生），用 generation 区分批次；状态随会话删除收口清理。
+// 不用固定冷却：回合结束是低频事件，固定 10s 冷却会让快速连发时后续回合漏探、终态停留 stale。
+const POST_TURN_PROBE_TIMEOUT_MS = 10_000;
+interface PostTurnProbeState {
+  child: ReturnType<typeof spawn> | null;
+  generation: number;
+}
+const postTurnProbeState = new Map<string, PostTurnProbeState>();
+
+// 从 stream-json 输出提取 /context 报告原文：assistant 事件的 message.content[].text
+// 拼接（F1 嵌套位置），result.result 作兜底源。
+function extractProbeText(out: string): string {
+  const texts: string[] = [];
+  for (const line of out.split('\n')) {
+    const l = line.trim();
+    if (!l) continue;
+    let ev: Record<string, unknown>;
+    try {
+      ev = JSON.parse(l) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (ev.type === 'assistant') {
+      const content = (ev.message as { content?: unknown[] } | undefined)?.content;
+      if (Array.isArray(content)) {
+        for (const c of content) {
+          if (c && typeof (c as { text?: unknown }).text === 'string') {
+            texts.push((c as { text: string }).text);
+          }
+        }
+      }
+    } else if (ev.type === 'result' && typeof ev.result === 'string') {
+      texts.push(ev.result as string);
+    }
+  }
+  return texts.join('\n');
+}
+
+async function runPostTurnContextProbe(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  probeInstance: number,
+  cliSessionId: string,
+  opts: { compactedJustNow?: boolean },
+  generation: number,
+): Promise<void> {
+  let exe: string | undefined;
+  let cwd: string | undefined;
+  let env: Record<string, string>;
+  try {
+    const config = getConfig();
+    exe = resolveExecutable(config.cliPath);
+    if (!exe) {
+      logger.debug(`[${sessionId}] post-turn 探针：本地 Claude Code 不可用，跳过`);
+      return;
+    }
+    // 环境同源（计划 Task 2 Step 1）：从 DB 读会话配置，与生产 query 同一 env/cwd，
+    // 保证 --resume 命中同一会话（CLAUDE_CONFIG_DIR/CLAUDE_HOME/凭据/模型映射一致）。
+    const session = sessionRepo.getSession(sessionId);
+    const fullOpts = mergeSpawnOptions(session, {});
+    const override = resolveSessionOverride(fullOpts);
+    env = buildSpawnEnv(override);
+    cwd = fullOpts.workingDir || config.workingDirectory || undefined;
+  } catch (e) {
+    logger.debug(`[${sessionId}] post-turn 探针：构建环境失败 ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+
+  const args = [
+    '-p', '/context',
+    '--resume', cliSessionId,
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--no-session-persistence',
+  ];
+  await new Promise<void>((resolve) => {
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(exe, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (e) {
+      logger.debug(`[${sessionId}] post-turn 探针：spawn 失败 ${e instanceof Error ? e.message : String(e)}`);
+      resolve();
+      return;
+    }
+    const state = postTurnProbeState.get(sessionId);
+    if (state) state.child = child;
+    // 本探针是否仍是最新一代：spawn 期间可能已被后续回合的新探针打断（generation 被推进）。
+    const isCurrentProbe = (): boolean => postTurnProbeState.get(sessionId)?.generation === generation;
+    let out = '';
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      logger.debug(`[${sessionId}] post-turn 探针超时（${POST_TURN_PROBE_TIMEOUT_MS}ms），不发 payload`);
+      resolve();
+    }, POST_TURN_PROBE_TIMEOUT_MS);
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('data', (c: string) => {
+      out += c;
+    });
+    child.stderr?.on('data', () => {
+      // stderr 忽略（错误日志不参与报告解析）
+    });
+    child.on('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    });
+    child.on('close', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // 批次守卫：本探针已被后续回合的新探针打断（generation 被推进）→ 结果过时，丢弃。
+      if (!isCurrentProbe()) {
+        logger.debug(`[${sessionId}] post-turn 探针：已被新探针打断，丢弃过时结果`);
+        resolve();
+        return;
+      }
+      const report = parseNativeContextReport(extractProbeText(out));
+      if (!report) {
+        logger.debug(`[${sessionId}] post-turn 探针：无法解析 /context 报告`);
+        resolve();
+        return;
+      }
+      // 发射前守卫（计划 Task 2 Step 1）：此时原 entry 已 deleteEntry——
+      // 查「无新回合在途」（entries.get == null）而非 entry 状态；cliSessionId 仍须等于
+      // resolveCliSessionId（用户若已 resume 出新会话则丢弃）。
+      if (!isSessionActive(sessionId)) {
+        resolve();
+        return;
+      }
+      if (entries.get(sessionId) != null) {
+        logger.debug(`[${sessionId}] post-turn 探针：有新回合在途，丢弃过时结果`);
+        resolve();
+        return;
+      }
+      if (resolveCliSessionId(sessionId) !== cliSessionId) {
+        logger.debug(`[${sessionId}] post-turn 探针：cliSessionId 已变，丢弃结果`);
+        resolve();
+        return;
+      }
+      const { queryGeneration, ...probeCanonical } = derivePostTurnProbePayloadFields(report, probeInstance, Date.now());
+      const payload: ContextStatsPayload = {
+        sessionId,
+        queryGeneration: queryGeneration,
+        ...probeCanonical,
+        inputTokens: 0,
+        outputTokens: 0,
+        windowSize: probeCanonical.contextWindowCapacityTokens,
+        model: report.model,
+        ...(opts.compactedJustNow ? { compactedJustNow: true } : {}),
+      };
+      try {
+        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      } catch {
+        // webContents 已销毁，忽略
+        resolve();
+        return;
+      }
+      try {
+        sessionRepo.updateLastContextUsed(sessionId, probeCanonical.currentContextUsedTokens, probeCanonical.contextWindowCapacityTokens, Date.now());
+      } catch (err) {
+        logger.warn(`[${sessionId}] post-turn 探针持久化失败 ${err instanceof Error ? err.message : String(err)}`);
+      }
+      resolve();
+    });
+  });
+}
+
+export function schedulePostTurnProbe(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  probeInstance: number,
+  cliSessionId: string | undefined,
+  opts: { compactedJustNow?: boolean } = {},
+): void {
+  if (!cliSessionId) {
+    logger.debug(`[${sessionId}] post-turn 探针：无 cliSessionId，跳过（probeInstance=${probeInstance}）`);
+    return;
+  }
+  if (!isSessionActive(sessionId)) return;
+  // 可打断单飞：每个回合结束都起新探针；旧探针在飞则 kill（其结果必然过时，新回合已发生）。
+  const prev = postTurnProbeState.get(sessionId);
+  const generation = (prev?.generation ?? 0) + 1;
+  if (prev?.child && !prev.child.killed) {
+    try {
+      prev.child.kill();
+    } catch {
+      // ignore
+    }
+  }
+  postTurnProbeState.set(sessionId, { child: null, generation });
+  void runPostTurnContextProbe(sessionId, mainWindow, probeInstance, cliSessionId, opts, generation)
+    .catch((e) => {
+      logger.debug(`[${sessionId}] post-turn 探针失败 ${e instanceof Error ? e.message : String(e)}`);
+    })
+    .finally(() => {
+      const cur = postTurnProbeState.get(sessionId);
+      if (cur && cur.generation === generation) cur.child = null;
     });
 }
 
@@ -2909,8 +3125,17 @@ async function runQuery(
         }
         // result 已明确结束当前回合：先释放 active entry，再通知队列退出。
         // renderer 收到 result 后可立即发送下一回合，不再撞上尚未走到函数 finally 的旧 entry。
+        // post-turn 官方探针：deleteEntry 前捕获原回合代际与 cliSessionId，emitExit 后 fire-and-forget
+        // 调度（非 contextTurn 时——/context 回合本身已产出精确报告，再探冗余）。压缩回合(/compact)
+        // 附加 compactedJustNow，使压缩后骤降值由探针 fresh 精确覆盖。
+        const probeInstance = entry.queryInstance;
+        const probeCliSid = sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId);
+        const compactedJustNow = /^\/compact\b/.test(initCommandText);
         deleteEntry(sessionId, entry);
         emitExit(0);
+        if (!contextTurn) {
+          schedulePostTurnProbe(sessionId, mainWindow, probeInstance, probeCliSid, { compactedJustNow });
+        }
         return;
       }
       // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。
@@ -2922,8 +3147,12 @@ async function runQuery(
     // 仅对当前 entry 合成——已被替换的旧 entry 由新 entry 负责发终态，这里跳过避免重复。
     if (isCurrentEntry(sessionId, entry) && !gotResult) {
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
+      // 出口②（流丢 result 合成 aborted）：引擎侧内容已落 transcript，探针反映真实占用。
+      const probeInstance2 = entry.queryInstance;
+      const probeCliSid2 = sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId);
       deleteEntry(sessionId, entry);
       emitExit(0);
+      schedulePostTurnProbe(sessionId, mainWindow, probeInstance2, probeCliSid2);
       return;
     }
     emitExit(null);
@@ -2948,6 +3177,8 @@ async function runQuery(
         const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
         forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
         emitExit(1);
+        // 出口⑤（resume 重试失败）：resume 已清旧 id → cliSessionId 可能已变，探针守卫会兜住。
+        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId));
         break;
       }
     }
@@ -2960,6 +3191,11 @@ async function runQuery(
       forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
       emitExit(1);
     }
+    // 出口④（真实 SDK 执行出错，isCurrentEntry 仍为 true 才到达此处）：出错的部分内容引擎已
+    // 记录 transcript，探针反映会话真实占用（兜底需求 #2）。review-v1 High-1：出口③（用户中断）
+    // 的探针已迁移到 killProcess 调度——真实中断流在 removeEntryIfCurrent 后走 catch 的
+    // !isCurrentEntry 分支提前退出，到不了这里，此处仅服务 SDK 错误路径。
+    schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId));
     break;
   }
   }
@@ -3083,6 +3319,14 @@ export function killProcess(
     // （会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
     if ((reason === 'user' || reason === 'watchdog') && mainWindow) {
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: reason === 'user' ? '已中断' : '已硬中断' });
+      // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
+      // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
+      // !isCurrentEntry 分支（state='aborting' 且 entries 已移除）提前 emitExit(null) 退出，
+      // 永远到不了 catch 段的 schedulePostTurnProbe（那是死代码，仅服务真实 SDK 错误路径）。
+      // 此处 entry 已被 removeEntryIfCurrent 移除，探针发射守卫「entries.get==null（无新回合在途）」
+      // 天然满足；若用户在探针 ~2s 窗口内重发新回合，新回合的 schedule 会 kill 旧探针并推进
+      // generation，结果不会污染（可打断单飞机制）。
+      schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId));
     }
     if (entry.query) {
       void entry.query.interrupt().catch(() => {

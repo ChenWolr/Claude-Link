@@ -312,6 +312,63 @@ export function mapContextReconcileTerminal(input: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// post-turn 官方 /context 探针（本计划）→ canonical payload 核心字段。
+//
+// 探针是回合外旁路：回合正常收尾后 fire-and-forget 起 `claude.exe -p "/context"
+// --resume <sid> --no-session-persistence` 子进程，拿回合末精确占用。此时 runtime
+// 快照已非同代，native 报告本身即权威 —— 与现有 native-only 分支同语义
+// （consistency='unavailable'），但 freshness='fresh' + samplePhase='post-turn'，
+// 因为它确确实实是回合结束时刻的官方引擎数值。语义单源：主进程 payload 构造
+// 与本函数共用，行为测试同源。
+// ─────────────────────────────────────────────────────────────────────────────
+export interface PostTurnProbeCanonicalFields {
+  queryGeneration: number;
+  source: 'native-context';
+  freshness: 'fresh';
+  consistency: 'unavailable';
+  diagnostic: null;
+  currentContextUsedTokens: number;
+  contextWindowCapacityTokens: number;
+  currentContextUsedPercent: number | null;
+  currentContextRemainingTokens: number | null;
+  currentContextRemainingPercent: number | null;
+  turnInputTokens: null;
+  turnCacheReadTokens: null;
+  turnCacheCreationTokens: null;
+  turnOutputTokens: null;
+  refreshedAt: number;
+  samplePhase: 'post-turn';
+}
+
+export function derivePostTurnProbePayloadFields(
+  report: NativeContextReport,
+  queryGeneration: number,
+  refreshedAt: number,
+): PostTurnProbeCanonicalFields {
+  const used = report.usedTokens;
+  const capacity = report.maxTokens;
+  const percent = report.percentage;
+  return {
+    queryGeneration,
+    source: 'native-context',
+    freshness: 'fresh',
+    consistency: 'unavailable',
+    diagnostic: null,
+    currentContextUsedTokens: used,
+    contextWindowCapacityTokens: capacity,
+    currentContextUsedPercent: percent,
+    currentContextRemainingTokens: capacity >= used ? capacity - used : null,
+    currentContextRemainingPercent: percent != null ? Math.max(0, 100 - percent) : null,
+    turnInputTokens: null,
+    turnCacheReadTokens: null,
+    turnCacheCreationTokens: null,
+    turnOutputTokens: null,
+    refreshedAt,
+    samplePhase: 'post-turn',
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // review-v3 High-1：runtime 快照必须绑定 query 代际。
 // snapshot 只有所属 queryInstance 与当前回合一致时，才允许参与 /context reconcile——
 // 上一回合的 runtime 数字可以做诊断参考，但绝不能与本回合 native 强行对账出 reconciled。
