@@ -327,13 +327,14 @@ export interface RuntimeContextSnapshot {
   /**
    * 采样阶段（review-v4 High-1）：query-start 快照不得在回合结束后继续冒充当前值。
    *   - query-start：init 后立即采样（回合开始时的基线）；
+   *   - mid-turn：回合进行中（工具结果/assistant 落地后）采样，代表中途最新值（本计划新增）；
    *   - post-turn：result 处理期（query 仍存活）采样，代表回合结束状态；
    *   - post-compaction：compact_result:success 后采样。
    */
   samplePhase: ContextSamplePhase;
 }
 
-export type ContextSamplePhase = 'query-start' | 'post-turn' | 'post-compaction';
+export type ContextSamplePhase = 'query-start' | 'mid-turn' | 'post-turn' | 'post-compaction';
 
 // review-v4 High-1 方案 B 兜底：post-turn 快照不可得（getContextUsage 超时 / query 已关闭）时，
 // 必须显式降级为 stale + diagnostic——禁止 query-start 快照在回合结束后继续伪装 fresh。

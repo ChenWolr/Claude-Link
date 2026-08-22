@@ -604,7 +604,15 @@ async function main() {
       if (r.after.dom.present === false) throw new Error('回合后 ContextButton 消失');
       // review-v4 5.6-5：末行 marker——截断时行号 < 39999 也必须有数字，证明读的是 big.txt 本体。
       if (!/[0-9]/.test(reply)) throw new Error(`回复未含行号数字（实际：${reply.slice(0, 80)}）`);
-      return `${/[0-9]{4,}/.test(reply) ? '行号=' + reply.replace(/\s+/g, ' ').slice(0, 20) : '行号<1000（截断）'}；parser 分类 ${report?.categories?.length ?? 0} 项`;
+      // P2 mid-turn：回合中途轮询断言（docs/.../2026-08-22 §7 Step 1）。
+      // S4 大文件 Read 的工具结果足够大（Δused 远超 1000 门限），mid-turn payload 应送达；
+      // 若节流（8s）/值变化门限导致缺席，本断言如实失败并记录命中数（不假绿）。
+      const midTurn = EVID.payloads.filter((p) => p.sessionId === scrubSessionId(sid) && p.samplePhase === 'mid-turn');
+      const midTurnLive = midTurn.filter((p) => p.source === 'runtime-live' && p.freshness === 'fresh');
+      if (midTurnLive.length === 0) {
+        throw new Error(`S4 未捕获 mid-turn live payload（samplePhase=mid-turn, source=runtime-live, freshness=fresh）——mid-turn 命中 ${midTurn.length} 次但均非 live/fresh（节流/值变化门限可能抑制）`);
+      }
+      return `${/[0-9]{4,}/.test(reply) ? '行号=' + reply.replace(/\s+/g, ' ').slice(0, 20) : '行号<1000（截断）'}；parser 分类 ${report?.categories?.length ?? 0} 项；mid-turn payload 命中 ${midTurnLive.length} 次`;
     });
 
     // ── S5：工具错误 ──

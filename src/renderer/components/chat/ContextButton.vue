@@ -116,7 +116,7 @@ function fmt(n: number): string {
       <div v-if="eff.turnCacheCreationTokens != null" class="ctx__row"><span>缓存写入</span><code>{{ fmt(eff.turnCacheCreationTokens) }}</code></div>
       <div class="ctx__row ctx__row--pct"><span>占比</span><code>{{ hasTrustedCurrent ? pct + '%' : '待刷新' }}</code></div>
       <div v-if="eff.source || eff.freshness" class="ctx__row"><span>来源</span><code>{{ eff.source }} / {{ eff.freshness }}</code></div>
-      <div v-if="eff.samplePhase" class="ctx__row"><span>采样阶段</span><code>{{ { 'query-start': '回合开始', 'post-turn': '回合结束', 'post-compaction': '压缩后' }[eff.samplePhase] ?? eff.samplePhase }}</code></div>
+      <div v-if="eff.samplePhase" class="ctx__row"><span>采样阶段</span><code>{{ { 'query-start': '回合开始', 'mid-turn': '回合中', 'post-turn': '回合结束', 'post-compaction': '压缩后' }[eff.samplePhase] ?? eff.samplePhase }}</code></div>
       <div v-if="eff.consistency === 'mismatch' || eff.consistency === 'unavailable'" class="ctx__row"><span>状态</span><code>{{ eff.consistency === 'mismatch' ? '对账不一致' : '暂不可对账' }}</code></div>
       <!-- review-v5 Medium-1：主进程四条 unavailable/mismatch 路径构造的具体诊断在此落地（含上一采样阶段）。 -->
       <div v-if="eff.diagnostic" class="ctx__row ctx__row--diag" data-testid="ctx-diag-row"><span>诊断</span><code :title="eff.diagnostic">{{ diagPreview }}</code></div>

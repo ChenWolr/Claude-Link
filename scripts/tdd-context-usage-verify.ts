@@ -598,5 +598,30 @@ check('CDP DOM 断言接线：诊断行 + stale title（Medium-1/Low-1 验收）
 });
 
 // ── P2 mid-turn：回合中途轮询接线（docs/superpowers/plans/2026-08-22-mid-turn-context-refresh.md Task 5）──
+console.log('=== 19) P2 mid-turn：回合中途轮询接线 ===');
+check('mid-turn 触发接线：assistant 与 tool_result 落地后调用 maybeMidTurnRefresh', () => {
+  const assistantIdx = sdkBackendSrc.indexOf("if (type === 'assistant')");
+  const userIdx = sdkBackendSrc.indexOf("if (type === 'user')");
+  assert.ok(assistantIdx >= 0 && userIdx > assistantIdx, '应存在 assistant/user 事件分支');
+  assert.ok(/maybeMidTurnRefresh\(sessionId, mainWindow, entry, query\)/.test(sdkBackendSrc), '缺 maybeMidTurnRefresh 调用');
+  const assistantCall = sdkBackendSrc.indexOf('maybeMidTurnRefresh(sessionId, mainWindow, entry, query)', assistantIdx);
+  assert.ok(assistantCall > 0 && assistantCall < userIdx, 'assistant 分支内应调用 maybeMidTurnRefresh');
+  assert.ok(sdkBackendSrc.indexOf('maybeMidTurnRefresh(sessionId, mainWindow, entry, query)', userIdx) > userIdx, 'user(tool_result) 分支内应调用 maybeMidTurnRefresh');
+});
+check('mid-turn 复用 refreshContextSnapshot(samplePhase: mid-turn)', () => {
+  assert.ok(/samplePhase: 'mid-turn'/.test(sdkBackendSrc), 'mid-turn 采样应调用 refreshContextSnapshot 带 samplePhase');
+});
+check('mid-turn 节流 helper + 值变化门限常量存在', () => {
+  assert.ok(/function maybeMidTurnRefresh/.test(sdkBackendSrc), '缺 maybeMidTurnRefresh helper');
+  assert.ok(/MID_TURN_THROTTLE_MS\s*=\s*8000/.test(sdkBackendSrc), '缺 MID_TURN_THROTTLE_MS=8000');
+  assert.ok(/MID_TURN_USED_DELTA_THRESHOLD\s*=\s*1000/.test(sdkBackendSrc), '缺 MID_TURN_USED_DELTA_THRESHOLD=1000');
+  assert.ok(/MID_TURN_PCT_DELTA_THRESHOLD\s*=\s*0\.5/.test(sdkBackendSrc), '缺 MID_TURN_PCT_DELTA_THRESHOLD=0.5');
+});
+check('mid-turn 值变化门限：更新快照但跳过 payload 发送', () => {
+  assert.ok(/samplePhase === 'mid-turn'/.test(sdkBackendSrc), '缺 mid-turn 值变化门限判定');
+  assert.ok(/MID_TURN_USED_DELTA_THRESHOLD/.test(sdkBackendSrc) && /MID_TURN_PCT_DELTA_THRESHOLD/.test(sdkBackendSrc), '门限应引用常量');
+});
+
+// ── §20 post-turn 官方 /context 探针（docs/.../2026-08-22-post-turn-context-probe.md Task 4）──
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
