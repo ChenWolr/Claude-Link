@@ -59,6 +59,7 @@ const sessionRepoStub = {
     return s ?? null;
   },
   updateLastContext: () => null,
+  updateLastContextWindow: () => null,
 };
 
 const origLoad = Module._load;

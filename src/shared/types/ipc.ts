@@ -1,5 +1,6 @@
 import type { CliEvent, CliDetectionResult } from './cli';
 import type { AttachmentSummary } from './attachment';
+import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../context-usage';
 
 // 命令快照类型 re-export：payload/快照在 ./command 定义，这里对外统一出口（main/preload/renderer 共用）。
 export type {
@@ -254,11 +255,40 @@ export interface RecordInteractionHistoryInput {
 
 export interface ContextStatsPayload {
   sessionId: string;
-  inputTokens: number;       // 上下文用量（input+cache）
+  // ── 旧字段（过渡兼容，勿再当当前窗口主值）──
+  inputTokens: number;       // 语义已降级为 turn usage（input+cache），保留仅供旧展示兜底
   outputTokens: number;      // 上一轮生成量（参考）
-  windowSize: number;        // 上下文窗口（默认 200000）
+  windowSize: number;        // 上下文窗口容量（真实值或 200k 兜底）
   model: string | null;      // 当前会话模型
-  compactedJustNow?: boolean; // CC 自动压缩事件
+  compactedJustNow?: boolean; // CC 自动压缩事件（仅允许出现在压缩后 fresh payload）
+  // ── 代际（review-v3 High-2，发布契约必填）──
+  // 产生本 payload 的 query 代际（主进程 entry.queryInstance，全局单调递增）。
+  // renderer 据此拒收旧回合迟到 payload 与缺代际的可疑 payload。
+  queryGeneration: number;
+  // 采样时间（Date.now()）：runtime 快照为捕获时刻，/context 终态为 result 时刻（review-v3 §5.1-3）。
+  // 采样阶段（review-v4 High-1）：runtime 快照为 query-start/post-turn/post-compaction；
+  // 非快照 payload（turn usage/pending/native 对账）为 null。
+  refreshedAt: number | null;
+  samplePhase: ContextSamplePhase | null;
+  // ── 新 canonical 字段（Task 7/8；review-v3 §6.3 + review-v4 Medium-2 全量收紧必填）──
+  // 当前窗口主值：可信时来自 SDK getContextUsage().totalTokens 或 native /context used。
+  // 契约：所有 canonical 字段必须存在，无数据用 null；缺字段即协议错误（renderer 拒收）。
+  currentContextUsedTokens: number | null;
+  contextWindowCapacityTokens: number | null;
+  currentContextUsedPercent: number | null;
+  currentContextRemainingTokens: number | null;
+  currentContextRemainingPercent: number | null;
+  // turn usage 分解（仅参考，不得驱动圆环）
+  turnInputTokens: number | null;
+  turnCacheReadTokens: number | null;
+  turnCacheCreationTokens: number | null;
+  turnOutputTokens: number | null;
+  // 来源/新鲜度/一致性（必填：主进程构造路径全部显式填写，renderer 不猜测默认值）
+  source: ContextUsageSource;
+  freshness: ContextUsageFreshness;
+  consistency: 'reconciled' | 'mismatch' | 'unavailable';
+  diagnostic: string | null;
+  // ── 压缩账单（compact metadata display，纯附加全可选）──
 }
 
 /**

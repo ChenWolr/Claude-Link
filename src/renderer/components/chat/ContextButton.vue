@@ -38,19 +38,52 @@ onBeforeUnmount(() => {
 });
 
 const stats = computed(() => store.contextStats);
-// 始终展示结构化三行；无数据时按 已用 0 / 默认窗口 / 占比 0% 显示，不用"尚未产生上下文"这种空态文案。
-const DEFAULT_WINDOW = 200000;
-const eff = computed(() =>
-  stats.value ?? { inputTokens: 0, outputTokens: 0, windowSize: DEFAULT_WINDOW, ratio: 0 },
+// Task 9：圆环只读可信当前窗口。无可信当前窗口 → pending（空底圈 + 待刷新提示），不得显示 0%。
+const hasTrustedCurrent = computed(
+  () => stats.value != null && stats.value.currentUsedTokens != null,
 );
-const pct = computed(() => Math.min(100, Math.round(eff.value.ratio * 100)));
+// 圆环百分比：只读可信 currentPercent；否则 0（只画空底圈）。
+const pct = computed(() => {
+  const p = stats.value?.currentPercent;
+  return typeof p === 'number' && Number.isFinite(p) ? Math.min(100, Math.max(0, Math.round(p))) : 0;
+});
+// popover 数值：可信当前窗口时显示 current；否则显示「待刷新」。
+const eff = computed(() => ({
+  currentUsedTokens: stats.value?.currentUsedTokens ?? null,
+  windowSize: stats.value?.windowSize ?? null,
+  turnInputTokens: stats.value?.turnInputTokens ?? null,
+  turnCacheReadTokens: stats.value?.turnCacheReadTokens ?? null,
+  turnCacheCreationTokens: stats.value?.turnCacheCreationTokens ?? null,
+  source: stats.value?.source ?? null,
+  freshness: stats.value?.freshness ?? null,
+  consistency: stats.value?.consistency ?? null,
+  diagnostic: stats.value?.diagnostic ?? null,
+  // review-v4 High-1：采样阶段透出（query-start=回合开始基线 / post-turn=回合末 / post-compaction=压缩后），
+  // 用户可区分「当前值」与「回合开始时的采样」。
+  samplePhase: stats.value?.samplePhase ?? null,
+}));
 // 批次 B：思考进行中时按钮加克制 accent 呼吸提示（thinking_tokens.estimated_tokens > 0 即触发）。
 // 仅作「正在思考」可视提示，不在 hover popover 展示数值（按用户要求移除）。
 const thinking = computed(() => typeof store.thinkingTokens === 'number' && store.thinkingTokens > 0);
+// review-v4 §3.5 方案 B / review-v5 Low-1：stale 态（post-turn 兜底是普通回合结束后的常态）下
+// 数字保留 last-known 可以接受，但 title 必须标明不是当前实时值。
+const isStaleTrusted = computed(() => hasTrustedCurrent.value && eff.value.freshness !== 'fresh');
+const btnTitle = computed(() => {
+  if (!hasTrustedCurrent.value) return '上下文待刷新，点击压缩';
+  return isStaleTrusted.value
+    ? `上下文约已用 ${pct.value}%（上次采样，待刷新），点击压缩`
+    : `上下文已用 ${pct.value}%，点击压缩`;
+});
+// review-v5 Medium-1：diagnostic 最后一公里——popover 截断展示 + title 放全文。
+const diagPreview = computed(() => {
+  const d = eff.value.diagnostic ?? '';
+  return d.length > 80 ? d.slice(0, 80) + '…' : d;
+});
 
 function fmt(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
+
 </script>
 
 <template>
@@ -58,12 +91,12 @@ function fmt(n: number): string {
     <button
       type="button"
       class="ctx__btn"
-      :class="{ 'ctx__btn--high': pct >= 80, 'ctx__btn--thinking': thinking }"
+      :class="{ 'ctx__btn--high': pct >= 80, 'ctx__btn--thinking': thinking, 'ctx__btn--stale': isStaleTrusted }"
       :disabled="props.disabled"
-      :title="`上下文已用 ${pct}%，点击压缩`"
+      :title="btnTitle"
       @click="emit('compress')"
     >
-      <!-- 圆环可视化：底圈=未占用(整环)，扇形弧=已占用。无数据(pct=0)时只显示空底圈。 -->
+      <!-- 圆环可视化：底圈=未占用(整环)，扇形弧=已占用。无可信当前窗口(pct=0)时只显示空底圈。 -->
       <svg class="ctx__ring" viewBox="0 0 36 36" aria-hidden="true">
         <circle class="ctx__ring-bg" cx="18" cy="18" r="15.915" />
         <circle
@@ -76,9 +109,18 @@ function fmt(n: number): string {
     </button>
 
     <div v-if="showPopover" class="ctx__popover">
-      <div class="ctx__row"><span>已用上下文</span><code>{{ fmt(eff.inputTokens) }}</code></div>
-      <div class="ctx__row"><span>最大上下文</span><code>{{ fmt(eff.windowSize) }}</code></div>
-      <div class="ctx__row ctx__row--pct"><span>占比</span><code>{{ pct }}%</code></div>
+      <div class="ctx__row"><span>已用上下文</span><code>{{ hasTrustedCurrent ? fmt(eff.currentUsedTokens ?? 0) : '待刷新' }}</code></div>
+      <div class="ctx__row"><span>最大上下文</span><code>{{ eff.windowSize != null ? fmt(eff.windowSize) : '—' }}</code></div>
+      <div v-if="eff.turnInputTokens != null" class="ctx__row"><span>本轮输入</span><code>{{ fmt(eff.turnInputTokens) }}</code></div>
+      <div v-if="eff.turnCacheReadTokens != null" class="ctx__row"><span>缓存读取</span><code>{{ fmt(eff.turnCacheReadTokens) }}</code></div>
+      <div v-if="eff.turnCacheCreationTokens != null" class="ctx__row"><span>缓存写入</span><code>{{ fmt(eff.turnCacheCreationTokens) }}</code></div>
+      <div class="ctx__row ctx__row--pct"><span>占比</span><code>{{ hasTrustedCurrent ? pct + '%' : '待刷新' }}</code></div>
+      <div v-if="eff.source || eff.freshness" class="ctx__row"><span>来源</span><code>{{ eff.source }} / {{ eff.freshness }}</code></div>
+      <div v-if="eff.samplePhase" class="ctx__row"><span>采样阶段</span><code>{{ { 'query-start': '回合开始', 'post-turn': '回合结束', 'post-compaction': '压缩后' }[eff.samplePhase] ?? eff.samplePhase }}</code></div>
+      <div v-if="eff.consistency === 'mismatch' || eff.consistency === 'unavailable'" class="ctx__row"><span>状态</span><code>{{ eff.consistency === 'mismatch' ? '对账不一致' : '暂不可对账' }}</code></div>
+      <!-- review-v5 Medium-1：主进程四条 unavailable/mismatch 路径构造的具体诊断在此落地（含上一采样阶段）。 -->
+      <div v-if="eff.diagnostic" class="ctx__row ctx__row--diag" data-testid="ctx-diag-row"><span>诊断</span><code :title="eff.diagnostic">{{ diagPreview }}</code></div>
+      <!-- compact metadata display：压缩明细行（三值齐时才显示，样式与诊断行同级 muted）。 -->
     </div>
 
     <!-- C：实时压缩进行中（status:compacting） -->
@@ -88,6 +130,7 @@ function fmt(n: number): string {
       </div>
     </transition>
 
+    <!-- 问题 4：CC 自动压缩横幅。收到 compactedJustNow 时弹出，3 秒后自动消失。 -->
     <!-- 问题 4：CC 自动压缩横幅。收到 compactedJustNow 时弹出，3 秒后自动消失。 -->
     <transition name="ctx-banner">
       <div v-if="showCompactBanner" class="ctx__banner" role="status" aria-live="polite">
@@ -143,6 +186,8 @@ function fmt(n: number): string {
   transition: stroke-dasharray 0.3s;
 }
 .ctx__btn--high .ctx__ring-fg { stroke: var(--color-warn-strong); }
+/* review-v5 Low-1：stale 态圆环降透明度，与 thinking 呼吸态区分（数字为上次采样非实时） */
+.ctx__btn--stale .ctx__ring-fg { stroke-opacity: 0.55; }
 
 .ctx__popover {
   position: absolute;

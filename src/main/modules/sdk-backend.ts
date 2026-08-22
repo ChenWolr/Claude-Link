@@ -31,7 +31,8 @@ import { notifySessionCompleted, notifySessionNetworkInterrupted } from './sessi
 import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
-import { extractContextTokens, detectCompaction } from '../../shared/context-usage';
+import { extractContextTokens, detectCompaction, deriveCurrentContextUsed, parseNativeContextReport, reconcileContextUsage, isRuntimeSnapshotForQuery, mapContextReconcileTerminal, postTurnFallbackTerminal } from '../../shared/context-usage';
+import type { RuntimeContextSnapshot, ContextSamplePhase } from '../../shared/context-usage';
 import { convertToolProgress, convertTaskEvent } from '../../shared/progress-events';
 import {
   parseTodoWriteInput,
@@ -191,6 +192,12 @@ interface CachedContextStats {
   windowSize: number;
 }
 const sessionContextStats = new Map<string, CachedContextStats>();
+// review-v2 Blocker：缓存每会话最近一次 runtime 当前窗口快照（getContextUsage 成功时），
+// 供 /context 原生输出到达时 reconcile 对账。不是 turn usage，是当前窗口 used/capacity/percentage。
+// review-v3 High-1（标记法）：快照带 queryInstance/capturedAt 代际；新回合不清除（stale 数字
+// 可作诊断参考），但 /context reconcile 只允许同代快照参与对账（isRuntimeSnapshotForQuery），
+// 禁止上一回合 runtime 与本回合 native 强行 reconcile。
+const sessionRuntimeSnapshot = new Map<string, RuntimeContextSnapshot>();
 // 批次 B：thinking_tokens 限频状态（per-session）。estimated_tokens 是思考阶段高频流式帧，
 // 仅当「值变化 且 距上次转发 ≥ THINKING_TOKENS_THROTTLE_MS」才转发，防 IPC 淹没（review-v2 F9）。
 // estimated_tokens 在一个思考块内单调递增，丢中间帧不影响最终峰值被后续帧追平。
@@ -448,9 +455,10 @@ export function markSessionDeleted(sessionId: string): void {
   }
   // 清理上下文/权限/CLI resume 缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
   sessionContextStats.delete(sessionId);
+  sessionRuntimeSnapshot.delete(sessionId);
+  contextRefreshGeneration.delete(sessionId);
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
-  contextUsageDiagnosed.delete(sessionId);
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
   sessionProvenanceSeeds.delete(sessionId); // review-v1 §5.1：provenance 种子同生命周期清理
   // 原生 Slash Commands：会话删除时取消正在进行的命令探测并清理快照，避免 stale 命令堆积与 A/B 串扰。
@@ -883,7 +891,12 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
 }
 
 // ── SDKMessage → CliEvent 转换 + 落库 + 推前端 ───────────────────────
-function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEvent): void {
+function forwardEvent(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  event: CliEvent,
+  queryInstance?: number,
+): void {
   // 会话已删除：不再落库（messages 表已被级联删空，INSERT 会触发外键失败回滚，
   // 反复同步失败阻塞主进程事件循环，导致所有输入框失效）。事件也不必推前端
   //（前端 activeSession 已切走/置 null，handleEvent 守卫也会丢弃）。
@@ -906,58 +919,349 @@ function forwardEvent(sessionId: string, mainWindow: BrowserWindow, event: CliEv
   if (event.type === 'result' && isSuccessfulCliResult(event)) {
     notifySessionCompleted(mainWindow, sessionId);
   }
-  // 上下文用量：message/result 的 usage（与 process-manager.attachStreamParser 同逻辑）。
+  // 上下文用量：message/result 的 usage 是「本轮 turn usage」（input + cache），**不是当前窗口已用**。
+  // 黑盒证据（run-2026-08-21-205616）：turn usage 可高达 104k 而当前窗口仅 40.1k，二者不相等。
+  // 因此这里只发 turn usage 分解 + 容量，source=estimated-turn-usage；当前窗口主值由
+  // refreshContextSnapshot（init 后 query 存活期调 getContextUsage）单独下发 runtime-live。
+  // review-v3 High-2：payload 必须带 queryGeneration（事件产生回合的代际）。queryInstance 由
+  // runQuery 循环内调用方传入（事件真正所属的 entry）；缺省回落 entries.get（合成事件路径），
+  // 再缺省 -1 —— renderer 已知代际时 -1 会被拒收，天然挡住旧回合迟到 usage 覆盖新状态。
   const usage = (event as { usage?: Record<string, unknown> }).usage;
   if (usage && (event.type === 'message' || event.type === 'result')) {
-    const inputTokens = extractContextTokens(usage as never);
-    if (inputTokens > 0) {
+    const turnInputTokens = extractContextTokens(usage as never);
+    const turnOutputTokens = (usage as { output_tokens?: number }).output_tokens ?? 0;
+    if (turnInputTokens > 0 || turnOutputTokens > 0) {
       const modelUsage = (event as { modelUsage?: Record<string, { contextWindow?: number }> }).modelUsage;
       const realWindow =
         modelUsage && typeof modelUsage === 'object'
           ? Object.values(modelUsage)[0]?.contextWindow ?? undefined
           : undefined;
+      const windowSize = realWindow ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null);
       const payload: ContextStatsPayload = {
         sessionId,
-        inputTokens,
-        outputTokens: (usage as { output_tokens?: number }).output_tokens ?? 0,
-        windowSize: realWindow ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null),
+        queryGeneration: queryInstance ?? entries.get(sessionId)?.queryInstance ?? -1,
+        refreshedAt: Date.now(),
+        samplePhase: null,
+        // 旧字段：inputTokens 语义降级为 turn usage（兼容旧 renderer），不再驱动当前窗口圆环。
+        inputTokens: turnInputTokens,
+        outputTokens: turnOutputTokens,
+        windowSize,
         model: null,
+        // 新 canonical 字段：当前窗口主值缺失（turn usage 不是当前窗口）。
+        currentContextUsedTokens: null,
+        contextWindowCapacityTokens: windowSize,
+        currentContextUsedPercent: null,
+        currentContextRemainingTokens: null,
+        currentContextRemainingPercent: null,
+        turnInputTokens,
+        turnCacheReadTokens: (usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0,
+        turnCacheCreationTokens: (usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens ?? 0,
+        turnOutputTokens,
+        source: 'estimated-turn-usage',
+        freshness: 'estimated',
+        consistency: 'unavailable',
+        diagnostic: '仅本轮 turn usage，无当前窗口快照',
       };
       mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
-      // 缓存最近一次用量，供 compact_boundary 事件（无 usage）emit 时沿用。
+      // 缓存最近一次 turn usage 供诊断，但不再把它当当前窗口持久化。
       sessionContextStats.set(sessionId, {
-        inputTokens,
-        outputTokens: (usage as { output_tokens?: number }).output_tokens ?? 0,
-        windowSize: payload.windowSize,
+        inputTokens: turnInputTokens,
+        outputTokens: turnOutputTokens,
+        windowSize,
       });
       try {
-        // 连同真实窗口一起持久化：payload.windowSize 已是 realWindow ?? readContextWindow()
-        // 的值，切换会话重建时直接复用，不再回到 200k 兜底。
-        sessionRepo.updateLastContext(sessionId, inputTokens, payload.windowSize);
+        // 只持久化真实窗口容量（provenance），turn usage 不写入 last_context_tokens。
+        sessionRepo.updateLastContextWindow(sessionId, windowSize);
       } catch (err) {
-        logger.warn(`Failed to persist last context [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+        logger.warn(`Failed to persist last context window [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   }
   // 问题 4：检测 CC 自动压缩事件（system + subtype 'compact_boundary'）。
-  // 压缩事件本身不带 usage，emit CONTEXT_UPDATE 带 compactedJustNow:true 并沿用
-  // 缓存的最近用量作为载体。前端 ContextButton 据此弹横幅回显自动压缩。
+  // 压缩事件本身不带 usage。review-v2 High#3：compactedJustNow 成功标记**不得**在此边界事件
+  // 上携带——边界只表示「压缩刚发生」，fresh 快照尚未确认。这里只发 pending（清除旧状态），
+  // 成功横幅改由 compact_result: success 后 getContextUsage 成功返回 fresh 快照时附加。
   const compaction = detectCompaction(event);
   if (compaction) {
     const lastStats = sessionContextStats.get(sessionId);
     const payload: ContextStatsPayload = {
       sessionId,
+      // review-v3 High-2：压缩边界 pending 同样带代际，迟到压缩事件不得污染新回合状态。
+      queryGeneration: queryInstance ?? entries.get(sessionId)?.queryInstance ?? -1,
+      refreshedAt: Date.now(),
+      samplePhase: null,
       inputTokens: lastStats?.inputTokens ?? 0,
       outputTokens: lastStats?.outputTokens ?? 0,
       windowSize: lastStats?.windowSize ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null),
       model: null,
-      compactedJustNow: true,
+      // 压缩后当前窗口值未知，禁止沿用 stale turn usage 冒充 fresh 快照；不发 compactedJustNow。
+      currentContextUsedTokens: null,
+      contextWindowCapacityTokens: lastStats?.windowSize ?? null,
+      currentContextUsedPercent: null,
+      currentContextRemainingTokens: null,
+      currentContextRemainingPercent: null,
+      turnInputTokens: null,
+      turnCacheReadTokens: null,
+      turnCacheCreationTokens: null,
+      turnOutputTokens: null,
+      source: 'unavailable',
+      freshness: 'pending',
+      consistency: 'unavailable',
+      diagnostic: '压缩完成，等待 fresh 快照',
     };
     try {
       mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
     } catch {
       // webContents 可能已销毁（窗口关闭），忽略
     }
+  }
+}
+
+// ── runtime 当前窗口快照（Task 8）：query 存活期（streaming 中）调 query.getContextUsage() ──
+// 黑盒证据（run-2026-08-21-205616）：getContextUsage().totalTokens 是当前窗口已用（与 /context 一致）。
+// SDK 时序铁律（sdk.mjs）：getContextUsage 是 control_request，须在 query 存活期完成；一旦 for-await
+// 循环在 result 后 return，SDK 生成器的 finally 会 cleanup() 并拒绝所有 pending control response
+// （"Query closed before response received"）。因此只能在 streaming 期（init 后）fire-and-forget 调用，
+// 不能在 result 后调用。短命令 query 关闭太快仍可能失败 → 落到 pending（契约允许），长 turn 能拿到。
+const contextRefreshGeneration = new Map<string, number>();
+const CONTEXT_REFRESH_TIMEOUT_MS = 5000;
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('context refresh timeout')), ms);
+  });
+  // 主 promise 先 settle 时清掉定时器，避免 5s 定时器无谓驻留（每 turn 一次的小泄漏）。
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function refreshContextSnapshot(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  entry: SessionEntry,
+  query: Query,
+  opts: { compactedJustNow?: boolean; samplePhase: ContextSamplePhase } = { samplePhase: 'query-start' },
+): Promise<void> {
+  if (!isSessionActive(sessionId)) return;
+  // 绑定本次刷新的身份：queryInstance（entry 内单调递增）+ query 引用 + generation。
+  // 旧 query A 的迟到结果不得覆盖已被 query B 替换的当前状态。
+  const gen = (contextRefreshGeneration.get(sessionId) ?? 0) + 1;
+  contextRefreshGeneration.set(sessionId, gen);
+  const queryInstance = entry.queryInstance;
+  try {
+    const cu = await withTimeout(query.getContextUsage(), CONTEXT_REFRESH_TIMEOUT_MS);
+    // 身份守卫（review-v2 High#2）：旧 query 的异步结果不得发送/持久化。四重校验：
+    //   1) 会话仍存活；
+    //   2) 当前 entry 仍是发起刷新的 entry（query A 被替换为 query B 时，entries.get 已指向新 entry）；
+    //   3) 当前 entry.query 仍是发起刷新的 query（query 被清空/替换即失效）；
+    //   4) generation 未变（期间无新刷新启动）。
+    if (!isSessionActive(sessionId)) return;
+    if (entries.get(sessionId) !== entry) return;
+    if (entry.query !== query) return;
+    if (entry.state !== 'running') return;
+    if ((contextRefreshGeneration.get(sessionId) ?? 0) !== gen) return;
+    if (entry.queryInstance !== queryInstance) return;
+    const used = deriveCurrentContextUsed({
+      contextUsedTokens:
+        typeof cu.totalTokens === 'number' && Number.isFinite(cu.totalTokens) ? cu.totalTokens : null,
+      inputTokens: null,
+      cachedInputTokens: null,
+    });
+    const capacity =
+      typeof cu.rawMaxTokens === 'number' && cu.rawMaxTokens > 0
+        ? cu.rawMaxTokens
+        : typeof cu.maxTokens === 'number' && cu.maxTokens > 0
+          ? cu.maxTokens
+          : null;
+    const pct = typeof cu.percentage === 'number' && Number.isFinite(cu.percentage) && cu.percentage >= 0 && cu.percentage <= 100
+      ? cu.percentage
+      : null;
+    // review-v2 Blocker：缓存 runtime 当前窗口快照，供 /context 原生输出 reconcile 对账。
+    // review-v3 High-1：快照必须携带产生它的 query 代际（queryInstance）与捕获时刻——
+    // /context reconcile 只认同代快照，旧回合数字不得到新回合对账（详见 isRuntimeSnapshotForQuery）。
+    // review-v4 High-1：samplePhase 标记采样阶段——query-start 基线 / post-turn 回合末 / post-compaction。
+    if (used != null && capacity != null) {
+      sessionRuntimeSnapshot.set(sessionId, {
+        usedTokens: used,
+        capacityTokens: capacity,
+        percentage: pct,
+        queryInstance,
+        capturedAt: Date.now(),
+        samplePhase: opts.samplePhase,
+      });
+    }
+    const lastStats = sessionContextStats.get(sessionId);
+    const payload: ContextStatsPayload = {
+      sessionId,
+      // review-v3 High-2：runtime 快照 payload 带本回合代际与捕获时刻。
+      queryGeneration: queryInstance,
+      refreshedAt: Date.now(),
+      samplePhase: opts.samplePhase,
+      inputTokens: lastStats?.inputTokens ?? 0,
+      outputTokens: lastStats?.outputTokens ?? 0,
+      windowSize: capacity ?? lastStats?.windowSize ?? readContextWindow(entry.requestedAlias ?? null),
+      model: entry.resolvedModel,
+      currentContextUsedTokens: used,
+      contextWindowCapacityTokens: capacity,
+      currentContextUsedPercent: pct,
+      currentContextRemainingTokens: used != null && capacity != null && capacity >= used ? capacity - used : null,
+      currentContextRemainingPercent: pct != null ? Math.max(0, 100 - pct) : null,
+      // runtime 快照不带 turn usage 分解：显式 null（Medium-2 契约），renderer 侧保留 last-known。
+      turnInputTokens: null,
+      turnCacheReadTokens: null,
+      turnCacheCreationTokens: null,
+      turnOutputTokens: null,
+      source: used != null ? 'runtime-live' : 'unavailable',
+      freshness: used != null ? 'fresh' : 'pending',
+      consistency: 'unavailable',
+      diagnostic: used != null ? null : 'runtime 当前窗口快照缺失',
+      // review-v2 High#3：compactedJustNow 只在 fresh 快照到达时附加（used != null），
+      // pending/失败不得携带成功标记。
+      ...(opts.compactedJustNow && used != null ? { compactedJustNow: true } : {}),
+    };
+    try {
+      mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+    } catch {
+      // webContents 已销毁，忽略
+    }
+    if (capacity != null) {
+      try {
+        sessionRepo.updateLastContextWindow(sessionId, capacity);
+      } catch (err) {
+        logger.warn(`Failed to persist last context window [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  } catch (e) {
+    // getContextUsage 失败（query 已关闭/超时等）→ 只记诊断，不阻塞 turn completion。
+    logger.warn(`[${sessionId}] refreshContextSnapshot 失败（${opts.samplePhase}）：${e instanceof Error ? e.message : String(e)}`);
+    // review-v4 High-1 方案 B：post-turn 快照不可得时必须显式降级 stale + diagnostic——
+    // 禁止回合结束后仍保留 query-start 快照的 fresh 语义冒充当前值。renderer 收到 stale 后
+    // 保留 last-known 数字但 freshness 降级（ContextButton 明示非实时）。仅对仍是当前 entry 的
+    // 会话发送（身份守卫与成功路径一致）。
+    if (opts.samplePhase === 'post-turn' && isSessionActive(sessionId) && entries.get(sessionId) === entry) {
+      const lastSnapshot = sessionRuntimeSnapshot.get(sessionId) ?? null;
+      const lastPhase = isRuntimeSnapshotForQuery(lastSnapshot, entry.queryInstance) ? lastSnapshot!.samplePhase : null;
+      const fallback = postTurnFallbackTerminal(lastPhase);
+      const lastStats = sessionContextStats.get(sessionId);
+      const payload: ContextStatsPayload = {
+        sessionId,
+        queryGeneration: entry.queryInstance,
+        refreshedAt: Date.now(),
+        samplePhase: null,
+        inputTokens: lastStats?.inputTokens ?? 0,
+        outputTokens: lastStats?.outputTokens ?? 0,
+        windowSize: lastStats?.windowSize ?? readContextWindow(entry.requestedAlias ?? null),
+        model: entry.resolvedModel,
+        currentContextUsedTokens: null,
+        contextWindowCapacityTokens: lastStats?.windowSize ?? null,
+        currentContextUsedPercent: null,
+        currentContextRemainingTokens: null,
+        currentContextRemainingPercent: null,
+        turnInputTokens: null,
+        turnCacheReadTokens: null,
+        turnCacheCreationTokens: null,
+        turnOutputTokens: null,
+        source: fallback.source,
+        freshness: fallback.freshness,
+        consistency: 'unavailable',
+        diagnostic: fallback.diagnostic,
+      };
+      try {
+        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      } catch {
+        // webContents 已销毁，忽略
+      }
+    }
+  }
+}
+
+// ── /context 原生输出 reconcile（review-v2 Blocker）────────────────────────────
+// 用户发 /context 时，SDK 以 assistant 文本返回「## Context Usage …」原生报告。这里把
+// 该文本用共享 parser 解析，并与最近一次 runtime 快照（getContextUsage）对账，发送带
+// source/freshness/consistency/diagnostic 的 canonical 终态：
+//   - native 解析成功 + 与 runtime 一致 → source='reconciled' + freshness='fresh'
+//   - 解析失败/空输出/mismatch      → source='unavailable'（或 mismatch）+ freshness='stale' + diagnostic
+// 不覆盖已有 authoritative live 快照：仅当 native 与 runtime 能对账时才升级为 reconciled。
+function isContextCommand(text: string): boolean {
+  return /^\/context\b/.test(text.trim());
+}
+
+function extractAssistantText(parts: CliMessageContentPart[]): string {
+  let out = '';
+  for (const p of parts) {
+    if (p.type === 'text' && typeof p.text === 'string') out += p.text;
+  }
+  return out;
+}
+
+function emitNativeContextReconcile(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  entry: SessionEntry,
+  nativeText: string,
+  // review-v3 High-1：调用方按代际筛选后传入的本回合 runtime 快照（非同代传 null）。
+  // 函数内部再次防御性复查（isRuntimeSnapshotForQuery），不得自行无条件读 session-wide Map。
+  runtimeSnapshot: RuntimeContextSnapshot | null,
+): void {
+  if (!isSessionActive(sessionId)) return;
+  const report = parseNativeContextReport(nativeText);
+  // 防御性复查：非本回合代际的快照一律视为缺失（旧回合数字不参与本回合对账）。
+  const runtime = isRuntimeSnapshotForQuery(runtimeSnapshot, entry.queryInstance) ? runtimeSnapshot : null;
+  const hasNative = report != null;
+  const hasRuntime = runtime != null;
+  const rec = reconcileContextUsage({
+    runtimeUsedTokens: runtime?.usedTokens ?? null,
+    runtimeCapacityTokens: runtime?.capacityTokens ?? null,
+    runtimePercentage: runtime?.percentage ?? null,
+    nativeUsedTokens: report?.usedTokens ?? null,
+    nativeCapacityTokens: report?.maxTokens ?? null,
+    nativePercentage: report?.percentage ?? null,
+  });
+  // 终态 source/freshness 映射（review-v2 Blocker，review-v3 §3.6-E）——共享纯函数
+  // mapContextReconcileTerminal，契约语义与行为测试同源：
+  //   - reconciled：native 与同代 runtime 一致 → reconciled + fresh
+  //   - 仅 native（runtime 缺失/代际不符但 native 可解析）：native 即当前窗口权威 → native-context + fresh
+  //   - 仅 runtime（native 空/解析失败）：保留 runtime last-known，不伪装 fresh → unavailable + stale
+  //   - mismatch：native 与 runtime 冲突 → unavailable + stale + diagnostic
+  //   - 两者皆无 → unavailable + pending
+  const terminal = mapContextReconcileTerminal({ consistency: rec.consistency, hasRuntime, hasNative });
+  const source = terminal.source;
+  const freshness = terminal.freshness;
+  const lastStats = sessionContextStats.get(sessionId);
+  const payload: ContextStatsPayload = {
+    sessionId,
+    // review-v3 High-2：/context 终态 payload 带本回合代际；采样时间取 result 对账时刻。
+    queryGeneration: entry.queryInstance,
+    refreshedAt: Date.now(),
+    samplePhase: null,
+    inputTokens: lastStats?.inputTokens ?? 0,
+    outputTokens: lastStats?.outputTokens ?? 0,
+    windowSize: rec.capacityTokens ?? lastStats?.windowSize ?? readContextWindow(entry.requestedAlias ?? null),
+    model: entry.resolvedModel,
+    currentContextUsedTokens: rec.usedTokens,
+    contextWindowCapacityTokens: rec.capacityTokens,
+    currentContextUsedPercent: rec.percentage,
+    currentContextRemainingTokens:
+      rec.usedTokens != null && rec.capacityTokens != null && rec.capacityTokens >= rec.usedTokens
+        ? rec.capacityTokens - rec.usedTokens
+        : null,
+    currentContextRemainingPercent: rec.percentage != null ? Math.max(0, 100 - rec.percentage) : null,
+    // /context 对账终态不带 turn usage 分解：显式 null，renderer 侧保留 last-known（Medium-2 契约）。
+    turnInputTokens: null,
+    turnCacheReadTokens: null,
+    turnCacheCreationTokens: null,
+    turnOutputTokens: null,
+    source,
+    freshness,
+    consistency: rec.consistency,
+    diagnostic: rec.diagnostic,
+  };
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+  } catch {
+    // webContents 已销毁，忽略
   }
 }
 
@@ -2105,9 +2409,6 @@ function clearResumeSessionId(sessionId: string): void {
   }
 }
 
-// 每会话只诊断一次（首回合 result 后调 query.getContextUsage），避免每 turn 重复调用。
-const contextUsageDiagnosed = new Set<string>();
-
 // ── 运行一个 query：消费 SDKMessage 流，转 CliEvent 推前端，结束后 emit exit ─
 async function runQuery(
   sessionId: string,
@@ -2163,6 +2464,10 @@ async function runQuery(
     ? path.join(initCwd, 'CLAUDE.md')
     : null;
   const initFileExistedBefore = initTargetFile ? existsSync(initTargetFile) : false;
+  // review-v2 Blocker：/context 原生对账——本回合若为 /context 命令，收集 assistant 原生输出，
+  // result 时 parse+reconcile 发送 canonical 终态。
+  const contextTurn = isContextCommand(initCommandText);
+  let contextTurnNativeText = '';
   // 卡死检测/硬杀：每会话一个 AbortController，传入 Options.abortController。
   // killProcess 在软中断之外调 .abort()，Windows 上 → TerminateProcess 真硬杀。
   entry.abortController = new AbortController();
@@ -2269,25 +2574,11 @@ async function runQuery(
               logger.warn(`Failed to persist cli session id [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
             }
           }
-          // 诊断：init 后 CC 已连通且 query 仍活着，读 CC 实际认定的窗口/阈值/auto-compact 开关，
-          // 验证 CLAUDE_CODE_MAX_CONTEXT_TOKENS 注入是否生效 + 第三方端点 auto-compact 是否启用（#65585）。
-          // 不能在 result 事件后调——result 是流末事件，query 随即关闭，getContextUsage 会
-          // "Query closed before response received"。fire-and-forget，每会话只诊断一次。
-          if (!contextUsageDiagnosed.has(sessionId)) {
-            contextUsageDiagnosed.add(sessionId);
-            void query.getContextUsage()
-              .then((cu) => {
-                logger.info(
-                  `[${sessionId}] getContextUsage 诊断：maxTokens=${cu.maxTokens} rawMaxTokens=${cu.rawMaxTokens}` +
-                  ` totalTokens=${cu.totalTokens} percentage=${cu.percentage}` +
-                  ` autoCompactThreshold=${cu.autoCompactThreshold ?? 'n/a'} isAutoCompactEnabled=${cu.isAutoCompactEnabled}` +
-                  ` | 注入别名=${entry.requestedAlias ?? 'n/a'}`,
-                );
-              })
-              .catch((e) => {
-                logger.warn(`[${sessionId}] getContextUsage 诊断失败：${e instanceof Error ? e.message : String(e)}`);
-              });
-          }
+          // Task 8：在 query 存活期（init 后、streaming 中）fire-and-forget 读 runtime 当前窗口快照。
+          // 不能在 result 后调用（SDK for-await return 会 cleanup 并拒绝 pending control request）。
+          // 短命令 query 关闭太快仍可能失败 → 落到 pending；长 turn 能拿到真实 current window。
+          // review-v4 High-1：init 采样标记 samplePhase='query-start'（回合开始基线，非回合末状态）。
+          void refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'query-start' });
           // Task 4 §2/§3：命令发现兜底——probe 未就绪时用 init.slash_commands + supportedCommands 补全。
           void maybeDiscoverCommandsFromInit(sessionId, mainWindow, entry, sdkMsg, query);
           continue;
@@ -2310,8 +2601,12 @@ async function runQuery(
             subtype: infoSubtype,
             text,
             level: sdkMsg.level === 'warn' ? 'warn' : 'info',
+            // 压缩账单原样透传（snake_case compact_metadata / camelCase compactMetadata 两种形态），
+            // detectCompaction 在 forwardEvent 内解析。
+            ...(sdkMsg.compact_metadata !== undefined ? { compact_metadata: sdkMsg.compact_metadata } : {}),
+            ...(sdkMsg.compactMetadata !== undefined ? { compactMetadata: sdkMsg.compactMetadata } : {}),
           };
-          forwardEvent(sessionId, mainWindow, sysInfo);
+          forwardEvent(sessionId, mainWindow, sysInfo, entry.queryInstance);
           continue;
         }
         // api_retry 仅表示 Claude Code 已安排随后的一次真实重试；SDK 的 attempt/max_retries
@@ -2405,6 +2700,12 @@ async function runQuery(
               compactError: typeof sdkMsg.compact_error === 'string' ? sdkMsg.compact_error : undefined,
             };
             forwardTransient(sessionId, mainWindow, sysInfo);
+            // Task 8/9：压缩成功 → 立即取 fresh 当前窗口快照（query 此时仍存活，getContextUsage 可达）。
+            // 否则 compact_boundary 已把 UI 置 pending，若不在压缩完成点刷新，圆环会一直停留「待刷新」
+            // 直到下一回合 init，违背「compaction 完成后 fresh 快照到达才显示成功」契约。
+            if (sdkMsg.compact_result === 'success') {
+              void refreshContextSnapshot(sessionId, mainWindow, entry, query, { compactedJustNow: true, samplePhase: 'post-compaction' });
+            }
           } else if (sdkMsg.status === 'requesting') {
             const sysInfo: CliSystemInfoEvent = { type: 'system', subtype: 'requesting' };
             forwardTransient(sessionId, mainWindow, sysInfo);
@@ -2446,6 +2747,11 @@ async function runQuery(
           const rawContent = sdkMsg.content;
           const content = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent ?? '');
           persistLocalCommandOutput(sessionId, mainWindow, content);
+          // review-v2 Blocker：/context 回合的原生输出也可能以 local_command_output 落库
+          // （不同端点形态）。与 assistant 分支合并收集，result 时统一 parse+reconcile。
+          if (contextTurn && typeof rawContent === 'string') {
+            contextTurnNativeText += rawContent;
+          }
           continue;
         }
         // 其它未知 system 子类型：暂不转发（前端不消费）。
@@ -2460,7 +2766,11 @@ async function runQuery(
         }
         const cliEvent = convertAssistantMessage(sdkMsg);
         if (cliEvent) {
-          forwardEvent(sessionId, mainWindow, cliEvent);
+          forwardEvent(sessionId, mainWindow, cliEvent, entry.queryInstance);
+          // review-v2 Blocker：/context 回合收集 assistant 原生报告文本，result 时 reconcile。
+          if (contextTurn) {
+            contextTurnNativeText += extractAssistantText(cliEvent.content);
+          }
           // Claude 计划：扫描 tool_use 块，处理 TodoWrite/TaskCreate/TaskUpdate 等。
           // 不写入 messages 表——计划快照存在独立 claude_plan_state 表。
           // F9：传 parentToolUseId，子 Agent 的 plan 工具不影响父会话主计划。
@@ -2478,7 +2788,7 @@ async function runQuery(
         if (cliEvent) {
           const resultParts = cliEvent.content.filter(isToolResultPart);
           if (resultParts.length > 0) {
-            forwardEvent(sessionId, mainWindow, { ...cliEvent, content: resultParts });
+            forwardEvent(sessionId, mainWindow, { ...cliEvent, content: resultParts }, entry.queryInstance);
             // Claude 计划：配对 tool_result 与缓存的 tool_use，解析 TaskCreate/TaskList/TaskGet 输出。
             // F1: 传 sdkMsg.tool_use_result（SDK 顶层结构化结果，非 content 文本）。
             processToolResultForPlan(sessionId, mainWindow, resultParts, sdkMsg.tool_use_result);
@@ -2488,7 +2798,7 @@ async function runQuery(
       }
       if (type === 'stream_event') {
         finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance);
-        forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg));
+        forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg), entry.queryInstance);
         continue;
       }
       if (type === 'tool_progress') {
@@ -2518,9 +2828,27 @@ async function runQuery(
             subtype: 'init_write_skipped',
             text: '未执行文件写入：/init 未能创建 CLAUDE.md（目录可能为空或被权限/计划模式拦截），请检查工作目录内容与权限。',
             level: 'warn',
-          });
+          }, entry.queryInstance);
         }
-        forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg));
+        forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg), entry.queryInstance);
+        // review-v2 Blocker：/context 回合 result 到达 → parse+reconcile native 输出并发送 canonical 终态。
+        // 失败（空输出/解析失败/mismatch）也会发送 unavailable/stale + diagnostic，不阻塞 turn 收尾。
+        // review-v3 High-1：runtime 快照按代际筛选后传入——只有本回合 queryInstance 的快照才允许
+        // 参与对账；旧回合快照（queryInstance 不符）一律传 null，走 native-only 契约，不得 reconciled。
+        if (contextTurn) {
+          const snapshot = sessionRuntimeSnapshot.get(sessionId) ?? null;
+          const sameQuerySnapshot = isRuntimeSnapshotForQuery(snapshot, entry.queryInstance) ? snapshot : null;
+          emitNativeContextReconcile(sessionId, mainWindow, entry, contextTurnNativeText, sameQuerySnapshot);
+        }
+        // review-v4 High-1 方案 A：普通回合 result 处理期（for-await 仍在循环体内，SDK cleanup 未执行，
+        // control request 仍可达）awaited 采一次 post-turn 快照——回合末真实 current 值。5s 超时兜底，
+        // 失败时 refreshContextSnapshot 内部走方案 B（显式 stale + diagnostic）。
+        // /context 回合跳过（native 对账终态已是当前值，避免双 payload）。
+        // 必须在 deleteEntry 之前完成：身份守卫要求 entries.get===entry 且 state==='running'；
+        // 代价是回合 exit 最多延迟 5s（超时路径），正常 <1s。
+        if (!contextTurn && isCurrentEntry(sessionId, entry)) {
+          await refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'post-turn' });
+        }
         // result 已明确结束当前回合：先释放 active entry，再通知队列退出。
         // renderer 收到 result 后可立即发送下一回合，不再撞上尚未走到函数 finally 的旧 entry。
         deleteEntry(sessionId, entry);
@@ -2580,6 +2908,7 @@ async function runQuery(
   } catch (err) {
     // buildSdkOptions / 其它启动阶段异常不在内部 startSdkQuery catch 覆盖范围内；
     // 必须发终态并交给 finally 清理 entry，否则 fire-and-forget runQuery 会永久占坑。
+    // 出口⑥（启动阶段外层 catch）不探：query 从未启动、上下文零变化，旧值即真实值。
     if (isCurrentEntry(sessionId, entry)) {
       const message = err instanceof Error ? err.message : String(err);
       forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${message}` });
