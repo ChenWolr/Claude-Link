@@ -32,7 +32,7 @@ import { logger } from '../utils/logger';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
 import { extractContextTokens, detectCompaction, deriveCurrentContextUsed, parseNativeContextReport, reconcileContextUsage, isRuntimeSnapshotForQuery, mapContextReconcileTerminal, postTurnFallbackTerminal, derivePostTurnProbePayloadFields } from '../../shared/context-usage';
-import type { RuntimeContextSnapshot, ContextSamplePhase } from '../../shared/context-usage';
+import type { RuntimeContextSnapshot, ContextSamplePhase, CompactionResult } from '../../shared/context-usage';
 import { convertToolProgress, convertTaskEvent } from '../../shared/progress-events';
 import {
   parseTodoWriteInput,
@@ -198,6 +198,11 @@ const sessionContextStats = new Map<string, CachedContextStats>();
 // 可作诊断参考），但 /context reconcile 只允许同代快照参与对账（isRuntimeSnapshotForQuery），
 // 禁止上一回合 runtime 与本回合 native 强行 reconcile。
 const sessionRuntimeSnapshot = new Map<string, RuntimeContextSnapshot>();
+// 压缩账单（compact metadata display）：boundary 到达时按会话存 CompactionResult（含账单字段）
+// + 当回合代际 + 时间戳。挂载到 compactedJustNow payload 时要求代际 === 本回合代际（旧回合账单
+// 不跨回合）。被挂载消费后不删除——同一回合内 compactedJustNow payload 可能两条（refresh 与探针），
+// 都允许挂。随会话删除收口清理（markSessionDeleted）。
+const sessionCompactMeta = new Map<string, CompactionResult & { queryInstance: number; ts: number }>();
 // 批次 B：thinking_tokens 限频状态（per-session）。estimated_tokens 是思考阶段高频流式帧，
 // 仅当「值变化 且 距上次转发 ≥ THINKING_TOKENS_THROTTLE_MS」才转发，防 IPC 淹没（review-v2 F9）。
 // estimated_tokens 在一个思考块内单调递增，丢中间帧不影响最终峰值被后续帧追平。
@@ -456,6 +461,7 @@ export function markSessionDeleted(sessionId: string): void {
   // 清理上下文/权限/CLI resume 缓存，避免会话删除后 stale 数据堆积（内存泄漏）。
   sessionContextStats.delete(sessionId);
   sessionRuntimeSnapshot.delete(sessionId);
+  sessionCompactMeta.delete(sessionId); // 压缩账单随会话删除收口（单一收口）
   contextRefreshGeneration.delete(sessionId);
   midTurnRefreshState.delete(sessionId); // P2 mid-turn 节流状态随会话清理（单一收口）
   postTurnProbeState.delete(sessionId); // post-turn 官方探针单飞/冷却状态随会话清理（单一收口）
@@ -985,6 +991,13 @@ function forwardEvent(
   // 成功横幅改由 compact_result: success 后 getContextUsage 成功返回 fresh 快照时附加。
   const compaction = detectCompaction(event);
   if (compaction) {
+    // compact metadata display：boundary 到达即存账单（含当回合代际），供随后 compactedJustNow
+    // payload（refresh 与 post-turn 探针）按同代际挂载。queryInstance 与现有 pending payload 同源。
+    sessionCompactMeta.set(sessionId, {
+      ...compaction,
+      queryInstance: queryInstance ?? entries.get(sessionId)?.queryInstance ?? -1,
+      ts: Date.now(),
+    });
     const lastStats = sessionContextStats.get(sessionId);
     const payload: ContextStatsPayload = {
       sessionId,
@@ -1034,6 +1047,44 @@ const MID_TURN_PCT_DELTA_THRESHOLD = 0.5;
 // per-session 节流状态：lastInitiatedAt 记录上次「发起」时刻（失败后靠它防立即重试刷屏，
 // 成功路径再叠加 sessionRuntimeSnapshot.capturedAt 判定）；inFlight 保证同一时刻仅一个在途。
 const midTurnRefreshState = new Map<string, { lastInitiatedAt: number; inFlight: boolean }>();
+
+// 读取与指定 query 代际匹配的压缩账单（compact metadata display）。代际不符/字段缺失 → null，
+// 调用方不挂载任何字段（payload 其余部分与现状逐字节一致）。
+function resolveCompactMetaForQuery(sessionId: string, queryInstance: number): CompactionResult | null {
+  const meta = sessionCompactMeta.get(sessionId);
+  if (!meta || meta.queryInstance !== queryInstance) return null;
+  return meta;
+}
+
+// 构造「同代际压缩账单」的 payload 附加字段：只有 compactedJustNow 成立、账单存在且代际一致时才挂。
+function compactMetaPayloadFields(
+  sessionId: string,
+  queryInstance: number,
+  opts: { compactedJustNow?: boolean },
+): {
+  compactFromTokens?: number;
+  compactToTokens?: number;
+  compactDroppedTokens?: number;
+  compactDurationMs?: number;
+  compactTrigger?: string;
+} {
+  if (!opts.compactedJustNow) return {};
+  const meta = resolveCompactMetaForQuery(sessionId, queryInstance);
+  if (!meta) return {};
+  const out: {
+    compactFromTokens?: number;
+    compactToTokens?: number;
+    compactDroppedTokens?: number;
+    compactDurationMs?: number;
+    compactTrigger?: string;
+  } = {};
+  if (typeof meta.fromTokens === 'number') out.compactFromTokens = meta.fromTokens;
+  if (typeof meta.toTokens === 'number') out.compactToTokens = meta.toTokens;
+  if (typeof meta.droppedTokens === 'number') out.compactDroppedTokens = meta.droppedTokens;
+  if (typeof meta.durationMs === 'number') out.compactDurationMs = meta.durationMs;
+  if (typeof meta.trigger === 'string') out.compactTrigger = meta.trigger;
+  return out;
+}
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1139,8 +1190,10 @@ async function refreshContextSnapshot(
       consistency: 'unavailable',
       diagnostic: used != null ? null : 'runtime 当前窗口快照缺失',
       // review-v2 High#3：compactedJustNow 只在 fresh 快照到达时附加（used != null），
-      // pending/失败不得携带成功标记。
-      ...(opts.compactedJustNow && used != null ? { compactedJustNow: true } : {}),
+      // pending/失败不得携带成功标记。compact metadata display：同代账单字段一并挂载（全可选）。
+      ...(opts.compactedJustNow && used != null
+        ? { compactedJustNow: true, ...compactMetaPayloadFields(sessionId, queryInstance, opts) }
+        : {}),
     };
     try {
       mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
@@ -1396,6 +1449,8 @@ async function runPostTurnContextProbe(
         windowSize: probeCanonical.contextWindowCapacityTokens,
         model: report.model,
         ...(opts.compactedJustNow ? { compactedJustNow: true } : {}),
+        // compact metadata display：probeInstance 与账单代际比对，同回合才挂载（全可选）。
+        ...compactMetaPayloadFields(sessionId, probeInstance, opts),
       };
       try {
         mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);

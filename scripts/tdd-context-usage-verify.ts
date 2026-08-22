@@ -727,5 +727,133 @@ check('renderer 预填只写 stale 不写 fresh（buildPersistedCanonical）', (
 });
 
 // ── §21 compact metadata display：压缩账单解析 + 文案 + 接线契约 ──
+console.log('=== 21) compact metadata display：账单解析 + 文案单源 + 接线 ===');
+// F1（自动压缩，snake_case）与 F2（手动 /compact，camelCase）真实事件形态（证据见 §0）。
+const F1_AUTO = {
+  type: 'system',
+  subtype: 'compact_boundary',
+  compact_metadata: {
+    trigger: 'auto',
+    pre_tokens: 91043,
+    post_tokens: 1650,
+    cumulative_dropped_tokens: 89393,
+    duration_ms: 32506,
+    preserved_segment: { head_uuid: 'h', anchor_uuid: 'a', tail_uuid: 't' },
+  },
+};
+const F2_MANUAL = {
+  type: 'system',
+  subtype: 'compact_boundary',
+  compactMetadata: {
+    trigger: 'manual',
+    preTokens: 47672,
+    postTokens: 1398,
+    cumulativeDroppedTokens: 46274,
+    durationMs: 25119,
+  },
+};
+check('parseCompactMetadata：F1 snake_case 逐字段解析', () => {
+  const r = parseCompactMetadata(F1_AUTO.compact_metadata);
+  assert.equal(r.fromTokens, 91043);
+  assert.equal(r.toTokens, 1650);
+  assert.equal(r.droppedTokens, 89393);
+  assert.equal(r.durationMs, 32506);
+  assert.equal(r.trigger, 'auto');
+});
+check('parseCompactMetadata：F2 camelCase 逐字段解析', () => {
+  const r = parseCompactMetadata(F2_MANUAL.compactMetadata);
+  assert.equal(r.fromTokens, 47672);
+  assert.equal(r.toTokens, 1398);
+  assert.equal(r.droppedTokens, 46274);
+  assert.equal(r.durationMs, 25119);
+  assert.equal(r.trigger, 'manual');
+});
+check('parseCompactMetadata：非法/缺失/负数/空 → 空对象（不抛错）', () => {
+  assert.deepEqual(parseCompactMetadata(null), {});
+  assert.deepEqual(parseCompactMetadata(undefined), {});
+  assert.deepEqual(parseCompactMetadata('x'), {});
+  assert.deepEqual(parseCompactMetadata({ pre_tokens: -1, post_tokens: NaN, cumulative_dropped_tokens: 'abc' }), {});
+  assert.deepEqual(parseCompactMetadata({ trigger: '  ' }), {});
+  assert.deepEqual(parseCompactMetadata({ pre_tokens: 100 }), { fromTokens: 100 });
+});
+check('detectCompaction：F1/F2 事件解析出账单 + compactedJustNow', () => {
+  const a = detectCompaction(F1_AUTO as never);
+  assert.ok(a && a.compactedJustNow === true);
+  assert.equal(a!.fromTokens, 91043);
+  assert.equal(a!.trigger, 'auto');
+  const m = detectCompaction(F2_MANUAL as never);
+  assert.ok(m && m.compactedJustNow === true);
+  assert.equal(m!.fromTokens, 47672);
+  assert.equal(m!.trigger, 'manual');
+});
+check('detectCompaction：无账单 boundary 仍返回 compactedJustNow（账单字段缺席）', () => {
+  const r = detectCompaction({ type: 'system', subtype: 'compact_boundary' } as never);
+  assert.ok(r && r.compactedJustNow === true);
+  assert.equal(r!.fromTokens, undefined);
+});
+check('formatCompactionSummary：完整数字 → 含 → 与清出；auto → 含自动', () => {
+  const auto = formatCompactionSummary({ fromTokens: 91043, toTokens: 1650, droppedTokens: 89393, trigger: 'auto' });
+  assert.equal(auto.hasNumbers, true);
+  assert.ok(auto.title.includes('自动'), 'auto 应含「自动」');
+  assert.ok(auto.title.includes('91.0k') && auto.title.includes('1.6k') && auto.title.includes('89.4k'), `数字格式化不符：${auto.title}`);
+  assert.ok(auto.title.includes('→') && auto.title.includes('清出'));
+  const manual = formatCompactionSummary({ fromTokens: 47672, toTokens: 1398, droppedTokens: 46274, trigger: 'manual' });
+  assert.equal(manual.hasNumbers, true);
+  assert.ok(!manual.title.includes('自动'), 'manual 不应含「自动」');
+  assert.ok(manual.title.includes('47.7k → 1.4k'));
+});
+check('formatCompactionSummary：缺任一数字 → hasNumbers:false + 现有文案（无 undefined/NaN）', () => {
+  const noDrop = formatCompactionSummary({ fromTokens: 100, toTokens: 50, trigger: 'auto' });
+  assert.equal(noDrop.hasNumbers, false);
+  assert.equal(noDrop.title, 'Claude Code 已自动压缩上下文');
+  const noFrom = formatCompactionSummary({ toTokens: 50, droppedTokens: 10 });
+  assert.equal(noFrom.hasNumbers, false);
+  const empty = formatCompactionSummary({});
+  assert.equal(empty.hasNumbers, false);
+  assert.equal(empty.title, 'Claude Code 已自动压缩上下文');
+  assert.ok(!/undefined|NaN/.test(empty.title));
+});
+check('formatCompactionSummary：<1000 整数不缩 k', () => {
+  const r = formatCompactionSummary({ fromTokens: 900, toTokens: 100, droppedTokens: 800, trigger: 'auto' });
+  assert.equal(r.hasNumbers, true);
+  assert.ok(r.title.includes('900 → 100（清出 800）'));
+});
+check('结构：payload 两处挂载点含 5 字段 + 代际比对（sessionCompactMeta + compactMetaPayloadFields）', () => {
+  assert.ok(/sessionCompactMeta/.test(sdkBackendSrc), '缺 sessionCompactMeta Map');
+  assert.ok(/sessionCompactMeta\.delete\(sessionId\)/.test(sdkBackendSrc), 'markSessionDeleted 未清理压缩账单');
+  assert.ok(/function resolveCompactMetaForQuery/.test(sdkBackendSrc) && /queryInstance !== queryInstance|meta\.queryInstance !== queryInstance/.test(sdkBackendSrc), '缺代际比对');
+  assert.ok(/function compactMetaPayloadFields/.test(sdkBackendSrc), '缺 compactMetaPayloadFields helper');
+  assert.ok(/compactFromTokens/.test(sdkBackendSrc) && /compactToTokens/.test(sdkBackendSrc) && /compactDroppedTokens/.test(sdkBackendSrc) && /compactDurationMs/.test(sdkBackendSrc) && /compactTrigger/.test(sdkBackendSrc), '5 字段挂载不全');
+  // 两处挂载点：refreshContextSnapshot 的 compactedJustNow 分支 + runPostTurnContextProbe payload。
+  assert.ok(/compactedJustNow: true, \.\.\.compactMetaPayloadFields/.test(sdkBackendSrc), 'refresh 挂载点缺 compactMetaPayloadFields');
+  assert.ok(/\.\.\.compactMetaPayloadFields\(sessionId, probeInstance, opts\)/.test(sdkBackendSrc), '探针挂载点缺 compactMetaPayloadFields');
+  // 写入：boundary 到达即存（含当时代际）。
+  assert.ok(/sessionCompactMeta\.set\(sessionId, \{/.test(sdkBackendSrc), 'boundary 未写入账单');
+});
+check('结构：CANONICAL_REQUIRED_FIELDS 不含新字段（16 canonical 契约不变）', () => {
+  const sharedSrc = readFileSync(resolve('src/shared/context-usage.ts'), 'utf8');
+  assert.ok(!/compactFromTokens|compactToTokens|compactDroppedTokens|compactDurationMs|compactTrigger/.test(sharedSrc.split('const CANONICAL_REQUIRED_FIELDS')[1].split('] as const')[0]), 'canonical 必填字段不得加入新字段');
+});
+check('结构：ContextStatsPayload 新增 5 个可选字段（不进 CANONICAL）', () => {
+  assert.ok(/compactFromTokens\?:\s*number/.test(ipcSrc), '缺 compactFromTokens?');
+  assert.ok(/compactToTokens\?:\s*number/.test(ipcSrc), '缺 compactToTokens?');
+  assert.ok(/compactDroppedTokens\?:\s*number/.test(ipcSrc), '缺 compactDroppedTokens?');
+  assert.ok(/compactDurationMs\?:\s*number/.test(ipcSrc), '缺 compactDurationMs?');
+  assert.ok(/compactTrigger\?:\s*string/.test(ipcSrc), '缺 compactTrigger?');
+});
+check('结构：renderer 接线（lastCompactionSummary 显示态 + 横幅调 formatCompactionSummary）', () => {
+  assert.ok(/lastCompactionSummary/.test(sessionStoreSrc), 'session-store 缺 lastCompactionSummary');
+  assert.ok(/this\.lastCompactionSummary = null/.test(sessionStoreSrc), 'switchSession 未清空压缩账单显示态');
+  assert.ok(/formatCompactionSummary/.test(contextButtonSrc), 'ContextButton 未调用 formatCompactionSummary');
+  assert.ok(/compactBannerTitle/.test(contextButtonSrc), '横幅未读 compactBannerTitle');
+});
+check('结构：sdk-backend 透传 compact_metadata/compactMetadata 原始事件字段', () => {
+  assert.ok(/sdkMsg\.compact_metadata/.test(sdkBackendSrc) && /sdkMsg\.compactMetadata/.test(sdkBackendSrc), 'informational/compact_boundary 透传缺 compact_metadata/compactMetadata');
+});
+check('结构：E2E S10 增强——探针 payload 断言 compactFromTokens + 横幅 DOM 匹配 /→|清出/', () => {
+  assert.ok(/probe\.compactFromTokens/.test(cdpE2eSrc), 'S10 未断言探针 compactFromTokens');
+  assert.ok(/→\|清出/.test(cdpE2eSrc), 'S10 未断言横幅 DOM 含 →/清出');
+});
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);

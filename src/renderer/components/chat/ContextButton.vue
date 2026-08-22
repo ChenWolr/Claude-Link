@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
+import { formatCompactionSummary } from '../../../shared/context-usage';
 
 const props = withDefaults(defineProps<{ disabled?: boolean }>(), { disabled: false });
 const emit = defineEmits<{ compress: [] }>();
@@ -84,6 +85,25 @@ function fmt(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
+// compact metadata display：横幅文案单源。有完整数字用「已压缩上下文：91.0k → 1.6k（清出 89.4k）」，
+// 否则回退现有文案（不显示 undefined/NaN）。
+const compactSummary = computed(() =>
+  formatCompactionSummary({
+    fromTokens: store.lastCompactionSummary?.fromTokens,
+    toTokens: store.lastCompactionSummary?.toTokens,
+    droppedTokens: store.lastCompactionSummary?.droppedTokens,
+    trigger: store.lastCompactionSummary?.trigger,
+  }),
+);
+const compactBannerTitle = computed(() => compactSummary.value.title);
+// popover 压缩明细行：三值齐时才显示（hasNumbers），否则整行不渲染。
+const compactDetailLine = computed(() => {
+  const s = store.lastCompactionSummary;
+  if (!s || typeof s.fromTokens !== 'number' || typeof s.toTokens !== 'number' || typeof s.droppedTokens !== 'number') {
+    return null;
+  }
+  return `压缩  ${fmt(s.fromTokens)} → ${fmt(s.toTokens)}（清出 ${fmt(s.droppedTokens)}）`;
+});
 </script>
 
 <template>
@@ -121,6 +141,7 @@ function fmt(n: number): string {
       <!-- review-v5 Medium-1：主进程四条 unavailable/mismatch 路径构造的具体诊断在此落地（含上一采样阶段）。 -->
       <div v-if="eff.diagnostic" class="ctx__row ctx__row--diag" data-testid="ctx-diag-row"><span>诊断</span><code :title="eff.diagnostic">{{ diagPreview }}</code></div>
       <!-- compact metadata display：压缩明细行（三值齐时才显示，样式与诊断行同级 muted）。 -->
+      <div v-if="compactDetailLine" class="ctx__row ctx__row--diag" data-testid="ctx-compact-row"><span>压缩</span><code>{{ compactDetailLine.replace(/^压缩\s+/, '') }}</code></div>
     </div>
 
     <!-- C：实时压缩进行中（status:compacting） -->
@@ -131,10 +152,10 @@ function fmt(n: number): string {
     </transition>
 
     <!-- 问题 4：CC 自动压缩横幅。收到 compactedJustNow 时弹出，3 秒后自动消失。 -->
-    <!-- 问题 4：CC 自动压缩横幅。收到 compactedJustNow 时弹出，3 秒后自动消失。 -->
+    <!-- compact metadata display：有账单数字时显示真实前后/清出量，否则回退现有文案。 -->
     <transition name="ctx-banner">
       <div v-if="showCompactBanner" class="ctx__banner" role="status" aria-live="polite">
-        Claude Code 已自动压缩上下文
+        {{ compactBannerTitle }}
       </div>
     </transition>
   </div>

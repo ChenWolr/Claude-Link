@@ -166,6 +166,15 @@ export const useSessionStore = defineStore('session', {
     // 问题 4：CC 自动压缩事件标记。收到 compactedJustNow:true 的 CONTEXT_UPDATE 时置 true，
     // ContextButton 据此弹短暂横幅回显。横幅显示后由 ContextButton 自行复位为 false。
     compactedJustNow: false as boolean,
+    // compact metadata display：最近一次压缩账单显示态（横幅 + popover 共用）。shouldShowCompactedBanner
+    // 通过时从 payload 提取（全可选），切换会话时与 compactedJustNow 一并清空。
+    lastCompactionSummary: null as null | {
+      fromTokens?: number;
+      toTokens?: number;
+      droppedTokens?: number;
+      durationMs?: number;
+      trigger?: string;
+    },
     // C：工具运行实时耗时（tool_progress），按 toolUseId。瞬态，回合结束清。
     toolProgress: {} as Record<string, number>,
     // C：后台任务编排（task_*），按 taskId。task_notification 终态后移除。
@@ -328,6 +337,8 @@ export const useSessionStore = defineStore('session', {
       this.turnStartIndex = 0;
       // 问题 4：切换会话时复位自动压缩横幅标记，避免会话 A 的横幅串扰到会话 B。
       this.compactedJustNow = false;
+      // compact metadata display：压缩账单显示态随会话切换清空（与 compactedJustNow 复位同处）。
+      this.lastCompactionSummary = null;
       // C：切换会话清理瞬态进度状态，避免会话 A 的工具耗时/后台任务/压缩态串扰到会话 B。
       this.toolProgress = {};
       this.backgroundTasks = {};
@@ -612,6 +623,15 @@ export const useSessionStore = defineStore('session', {
         if (shouldShowCompactedBanner(payload)) {
           this.compactedJustNow = true;
           this.compacting = false; // C：压缩完成，复位实时态
+          // compact metadata display：从 payload 提取账单显示态（全可选；缺字段自然缺席，
+          // formatCompactionSummary 会回退现有文案）。
+          this.lastCompactionSummary = {
+            ...(typeof payload.compactFromTokens === 'number' ? { fromTokens: payload.compactFromTokens } : {}),
+            ...(typeof payload.compactToTokens === 'number' ? { toTokens: payload.compactToTokens } : {}),
+            ...(typeof payload.compactDroppedTokens === 'number' ? { droppedTokens: payload.compactDroppedTokens } : {}),
+            ...(typeof payload.compactDurationMs === 'number' ? { durationMs: payload.compactDurationMs } : {}),
+            ...(typeof payload.compactTrigger === 'string' ? { trigger: payload.compactTrigger } : {}),
+          };
         }
       });
     },

@@ -289,6 +289,14 @@ export interface ContextStatsPayload {
   consistency: 'reconciled' | 'mismatch' | 'unavailable';
   diagnostic: string | null;
   // ── 压缩账单（compact metadata display，纯附加全可选）──
+  // 引擎在 compact_boundary 免费附带的账单：压缩前/后 token、清出量、耗时、触发方式。
+  // 只在 compactedJustNow 成立的 payload 上挂载（post-compaction 快照 + post-turn 探针两处），
+  // 且要求账单代际 === 本回合代际（旧回合账单不跨回合）。不进入 CANONICAL_REQUIRED_FIELDS。
+  compactFromTokens?: number;
+  compactToTokens?: number;
+  compactDroppedTokens?: number;
+  compactDurationMs?: number;
+  compactTrigger?: string;
 }
 
 /**
