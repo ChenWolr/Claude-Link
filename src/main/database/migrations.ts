@@ -110,6 +110,17 @@ export function runMigrations(db: Database.Database): void {
     if (!hasCol('provider_override')) {
       db.exec('ALTER TABLE sessions ADD COLUMN provider_override TEXT DEFAULT NULL');
     }
+    // post-turn 官方 /context 探针持久化（本计划）：回合末精确占用（used/capacity/时间戳）。
+    // 与 last_context_tokens（历史累计 turn usage）分离；used 与模型无绑定关系，不设模型列。
+    if (!hasCol('last_context_used')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_context_used INTEGER DEFAULT NULL');
+    }
+    if (!hasCol('last_context_used_capacity')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_context_used_capacity INTEGER DEFAULT NULL');
+    }
+    if (!hasCol('last_context_used_at')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_context_used_at INTEGER DEFAULT NULL');
+    }
   }
 
   // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。

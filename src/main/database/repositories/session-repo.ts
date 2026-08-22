@@ -21,6 +21,9 @@ interface SessionRow {
   last_context_tokens: number | null;
   last_context_updated_at: string | null;
   last_context_window: number | null;
+  last_context_used: number | null;
+  last_context_used_capacity: number | null;
+  last_context_used_at: number | null;
 }
 
 function toSession(row: SessionRow): Session {
@@ -41,6 +44,9 @@ function toSession(row: SessionRow): Session {
     lastContextTokens: row.last_context_tokens,
     lastContextUpdatedAt: normalizeDbTime(row.last_context_updated_at),
     lastContextWindow: row.last_context_window,
+    lastContextUsed: row.last_context_used,
+    lastContextUsedCapacity: row.last_context_used_capacity,
+    lastContextUsedAt: row.last_context_used_at,
   };
 }
 
@@ -180,3 +186,14 @@ export function updateLastContextWindow(id: string, windowSize?: number): Sessio
   return getSession(id);
 }
 
+// post-turn 官方 /context 探针成功后持久化回合末精确占用（used/capacity/采样时间戳）。
+// 与 last_context_tokens（历史累计 turn usage）分离：这里写的是「当前窗口已用」的 last-known，
+// 重启/切回会话时预填 stale 恢复显示。used 与模型无绑定关系，故不设模型列。
+export function updateLastContextUsed(id: string, used: number, capacity: number, at: number): Session | null {
+  getConnection()
+    .prepare(
+      'UPDATE sessions SET last_context_used = ?, last_context_used_capacity = ?, last_context_used_at = ? WHERE id = ?',
+    )
+    .run(used, capacity, at, id);
+  return getSession(id);
+}

@@ -331,7 +331,22 @@ async function getMessages(ws, sid) { return (await evalExpr(ws, `window.claudeL
 async function sendViaUI(ws, text) {
   await waitQueryIdle(ws, 600);
   await typeInChatInput(ws, text);
-  await evalExpr(ws, `document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
+  // 稳健发送：主进程「方案 A」在 deleteEntry 前 await post-turn 快照（1.4s~5s 窗口），
+  // renderer 收到 result 先清 abort 按钮（waitQueryIdle 通过），但主进程 entry 尚未释放——
+  // 此时快速连发会撞上 chat:send 被拒「当前回合仍在执行」，草稿保留（父组件只在主进程
+  // 接受后清空）。这里点击后轮询「输入框被清空」= 发送被主进程接受；未清空则重试点击。
+  const deadline = Date.now() + 20_000;
+  for (;;) {
+    await evalExpr(ws, `document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
+    const accepted = await waitFor(
+      '发送被接受（输入框清空）',
+      () => evalOk(ws, `(() => { const ta = document.querySelector('[data-testid="chat-input-textarea"]'); return ta ? !ta.value.trim() : true; })()`),
+      3,
+      200,
+    ).catch(() => false);
+    if (accepted) return;
+    if (Date.now() > deadline) throw new Error('发送未被主进程接受（输入框未清空，疑似 entry 未释放）');
+  }
 }
 async function waitTurnComplete(ws, sid, baseCount, timeoutS = 180) {
   return waitFor('回合完成', async () => {
@@ -397,6 +412,18 @@ async function readUpdates(ws) {
   return updates;
 }
 async function clearUpdates(ws) { await evalExpr(ws, `(() => { window.__ctxE2E.updates = []; return true; })()`); }
+// post-turn 官方 /context 探针（本计划 Task 5）：回合结束后 fire-and-forget 起 `claude.exe -p
+// "/context" --resume <sid> --no-session-persistence`，约 2s 返回。等待并返回该 fresh payload
+// （source='native-context' && freshness='fresh' && samplePhase='post-turn'），超时则 fail（≤10s）。
+// sessionId 过滤：只匹配当前会话的探针，避免残留会话/其它会话的迟到探针误命中。
+// minGen 过滤（review-v1 High-2）：只接受代际 > minGen 的探针，用于识破「旧回合迟到探针」冒充
+// 本回合探针（否则断言空转通过，如把 B 回合探针误当成被中断 A 回合的探针）。
+async function waitForPostTurnProbe(ws, sid, timeoutS = 10, minGen = -1) {
+  return waitFor('post-turn 探针 fresh payload（native-context+post-turn）', async () => {
+    const ups = await readUpdates(ws);
+    return ups.find((u) => u.sessionId === sid && u.source === 'native-context' && u.freshness === 'fresh' && u.samplePhase === 'post-turn' && (typeof u.queryGeneration !== 'number' || u.queryGeneration > minGen)) ?? null;
+  }, timeoutS, 500);
+}
 async function sampleDom(ws) {
   return await evalExpr(ws, `(() => {
     const btn = document.querySelector('.ctx__btn');
@@ -545,11 +572,33 @@ async function main() {
       // source/freshness 必须下发；review-v3 High-2：payload 必须带 queryGeneration（代际）。
       if (!last.source || !last.freshness) throw new Error(`缺 source/freshness：source=${last.source} freshness=${last.freshness}`);
       if (typeof last.queryGeneration !== 'number') throw new Error(`缺 queryGeneration：${String(last.queryGeneration)}`);
-      const terminalFresh = last.source === 'runtime-live' && last.freshness === 'fresh';
-      const pop = await assertDiagAndTitle(ws, !terminalFresh);
-      recordScenario('S1', { prompt: '请只回复"收到"', lastPayload: scrub(last), dom: await sampleDom(ws), popover: pop });
-      log(`  ℹ 代际 queryGeneration=${last.queryGeneration}（review-v3 High-2，证据随 payload 落盘）`);
-      return `queryGeneration=${last.queryGeneration}`;
+      // ── post-turn 官方 /context 探针增强（本计划 Task 5 S1）──
+      // 回合真实结束后 ≤10s 出现 source='native-context' && freshness='fresh' &&
+      // samplePhase='post-turn' 的精确 fresh payload；其 used 不得低于本回合 query-start 值。
+      const msgCountAfterTurn = (await getMessages(ws, sid)).length;
+      const probe = await waitForPostTurnProbe(ws, sid, 10);
+      // 污染断言：探针走独立进程 + --no-session-persistence，消息不得落 DB。
+      const msgCountAfterProbe = (await getMessages(ws, sid)).length;
+      if (msgCountAfterProbe !== msgCountAfterTurn) {
+        throw new Error(`探针污染 DB 消息数：${msgCountAfterTurn} → ${msgCountAfterProbe}`);
+      }
+      const qs = updates.find((u) => u.samplePhase === 'query-start');
+      const qsUsed = qs && typeof qs.currentContextUsedTokens === 'number' ? qs.currentContextUsedTokens : null;
+      // 探针 used 不得显著低于 query-start 值。原生 /context 报告用 k 缩写（0.1k=100 舍入），
+      // 与 SDK getContextUsage 精确值可能有 ≤100 tokens 的舍入差；按 500 tokens 容差比较，
+      // 只拒绝「探针明显偏小」的异常（压缩后骤降等），不把正常舍入误差判为回归。
+      if (
+        qsUsed != null &&
+        typeof probe.currentContextUsedTokens === 'number' &&
+        probe.currentContextUsedTokens < qsUsed - 500
+      ) {
+        throw new Error(`探针 used(${probe.currentContextUsedTokens}) 明显低于 query-start used(${qsUsed})`);
+      }
+      // DOM 终态：探针 fresh 到达后 title 为「上下文已用 X%」，不再标「上次采样」。
+      const pop = await assertDiagAndTitle(ws, false);
+      recordScenario('S1', { prompt: '请只回复"收到"', lastPayload: scrub(last), probePayload: scrub(probe), dom: await sampleDom(ws), popover: pop });
+      log(`  ℹ 代际 queryGeneration=${probe.queryGeneration}；探针 used=${probe.currentContextUsedTokens}（review-v3 High-2，证据随 payload 落盘）`);
+      return `queryGeneration=${probe.queryGeneration} probeUsed=${probe.currentContextUsedTokens}`;
     });
 
     // ── S2：多轮文本（三轮 before/after 对比）──
@@ -762,6 +811,41 @@ async function main() {
       return `pending=${!!pending} freshBanner=${!!banner} ${orderNote}`;
     });
 
+    // ── S10 增强（压缩兜底，F8）：/compact 回合结束后 ≤10s 出现 post-turn 探针 fresh payload，
+    // 且其 used 值明显低于压缩前最后已知值（压缩骤降的精确证据）。Step 3b：该 payload 带
+    // compactedJustNow:true 且横幅出现。
+    await check('S10 压缩兜底：/compact 后 post-turn 探针给出骤降后的精确 fresh 值', async () => {
+      // review-v1 Low-1：基线在压缩**前**采集——从全局 EVID.payloads（本会话累计）回溯最后一个
+      // currentContextUsedTokens != null 的 payload（如 S9 /context 对账的 ~36k），而非压缩回合自身
+      // 的 window buffer（/compact 回合快、常无带数值 payload，preCompactKnown 恒为 null 使对比空转）。
+      const sidScrubbed = scrubSessionId(sid);
+      const preCompactKnown = (() => {
+        for (let i = EVID.payloads.length - 1; i >= 0; i -= 1) {
+          const p = EVID.payloads[i];
+          if (p.sessionId === sidScrubbed && typeof p.currentContextUsedTokens === 'number') {
+            return p.currentContextUsedTokens;
+          }
+        }
+        return null;
+      })();
+      // 25s 等待（非 10s）：压缩回合 result 分支的 await refreshContextSnapshot(post-turn) 在
+      // deleteEntry 前最多阻塞 5s（方案 A 固有延迟），探针才 spawn；再加压缩后 resume 慢（网关）余量，
+      // 10s 窗口在网关慢时会误判 flaky。探针自身 spawn→close 仍 ~3s（符合计划「≤10s」语义）。
+      const probe = await waitForPostTurnProbe(ws, sid, 25);
+      const used = probe.currentContextUsedTokens;
+      if (typeof used !== 'number') throw new Error('探针 payload 缺 currentContextUsedTokens');
+      if (preCompactKnown != null && typeof preCompactKnown === 'number' && used >= preCompactKnown) {
+        throw new Error(`压缩后探针 used(${used}) 未明显低于压缩前(${preCompactKnown})`);
+      }
+      // Step 3b：压缩回合探针应带 compactedJustNow:true，且共享横幅判定对 native-context+ fresh 为 true。
+      if (probe.compactedJustNow !== true) {
+        throw new Error(`压缩回合探针应带 compactedJustNow:true（实际 ${probe.compactedJustNow}）`);
+      }
+      const bannerShown = await evalOk(ws, `!!document.querySelector('.ctx__banner:not(.ctx__banner--compacting)')`);
+      recordScenario('S10', { probePayload: scrub(probe), preCompactKnown, bannerShown });
+      return `压缩后探针 used=${used}（压缩前 ${preCompactKnown ?? '未知'}）bannerShown=${bannerShown}`;
+    });
+
     // ── S11：中断重发（A 迟到 payload 不污染 B）──
     await check('S11 中断重发：A 中断、B 重发，A 代际 payload 不得晚于 B 出现', async () => {
       await clearUpdates(ws);
@@ -794,6 +878,50 @@ async function main() {
       if (lateA.length > 0) throw new Error(`B 回合窗口内出现 A 代际迟到 payload：gen=${lateA.map((u) => u.queryGeneration).join(',')}`);
       recordScenario('S11:final', { domAfterLateWindow: await sampleDom(ws) });
       return `aGen=${aGen} bGen=${bGen} lateA=0`;
+    });
+
+    // ── S11 增强（中断兜底）：A 回合中断后 ≤10s 出现**被中断回合自身代际**的 post-turn 探针。
+    // review-v1 High-2：不再 clearUpdates——改为发送 A 前记录缓冲内已知最大代际 G0，断言探针代际
+    // aProbeGen > G0（必须属于 A 或更新的回合；旧回合迟到探针 gen ≤ G0 必被识破），并用 minBGen
+    // 夹逼证明代际单调。修复前此断言对「旧探针冒充」必须失败。
+    await check('S11 中断兜底：A 中断后 ≤10s 出 A 代际探针；连发代际序列单调', async () => {
+      // G0 = 发送 A 前缓冲内已知最大代际（旧回合迟到探针的代际上限）。
+      const g0 = Math.max(0, ...(await readUpdates(ws)).map((u) => (typeof u.queryGeneration === 'number' ? u.queryGeneration : 0)));
+      const b3 = (await getMessages(ws, sid)).length;
+      await sendViaUI(ws, '请从 1 慢慢数到 40，每个数字单独一行，不要使用工具，不要提前停止。');
+      await waitFor('A 回合进入执行（abort 按钮出现）', () => evalOk(ws, `!!document.querySelector('button.ctl__btn--abort')`), 60, 500);
+      await new Promise((r) => setTimeout(r, 1200));
+      await abortCurrentTurn(ws);
+      await waitQueryIdle(ws, 120);
+      // A 回合中断后：其探针应在 ≤10s 内出现，且代际 > G0（属于被中断的 A 回合，而非旧回合迟到探针）。
+      const aProbe = await waitForPostTurnProbe(ws, sid, 10, g0);
+      const aProbeGen = aProbe.queryGeneration;
+      if (typeof aProbeGen !== 'number' || aProbeGen <= g0) throw new Error(`A 探针代际(${aProbeGen})未大于 G0(${g0})——中断探针可能未命中被中断回合`);
+      // 若 A 回合自身产出过带代际 payload（query-start 等），进一步断言探针代际恰等于 A 代际。
+      const aGens = (await readUpdates(ws)).map((u) => u.queryGeneration).filter((g) => typeof g === 'number' && g > g0);
+      if (aGens.length > 0) {
+        const aGen = Math.min(...aGens);
+        if (aProbeGen < aGen) throw new Error(`A 探针代际(${aProbeGen})早于 A 回合首包代际(${aGen})`);
+      }
+      recordScenario('S11:afterAbort', { g0, aProbeGen, probeUsed: aProbe.currentContextUsedTokens ?? null });
+      // B 重发：B 回合 payload 代际应 > A 探针代际（单调）。
+      await clearUpdates(ws);
+      const b4 = (await getMessages(ws, sid)).length;
+      await sendViaUI(ws, '只回复"重发完成"。');
+      await waitTurnComplete(ws, sid, b4, 180);
+      await waitQueryIdle(ws, 180);
+      // B 回合结束后同样应出现 B 代际的探针（> A 探针代际）。等待并消费它：
+      // ① 验证代际单调；② 避免该迟到探针污染后续 S13 的「两会话隔离」断言。
+      const bProbe = await waitForPostTurnProbe(ws, sid, 15, aProbeGen);
+      const bProbeGen = bProbe.queryGeneration;
+      const bPayloads2 = await readUpdates(ws);
+      const bGens2 = bPayloads2.map((u) => u.queryGeneration).filter((g) => typeof g === 'number');
+      if (bGens2.length === 0) throw new Error('B 回合未捕获任何带代际的 payload');
+      const minBGen = Math.min(...bGens2);
+      if (minBGen <= aProbeGen) throw new Error(`B 回合代际(${minBGen})未严格大于 A 探针代际(${aProbeGen})`);
+      if (typeof bProbeGen !== 'number' || bProbeGen <= aProbeGen) throw new Error(`B 探针代际(${bProbeGen})未严格大于 A 探针代际(${aProbeGen})`);
+      recordScenario('S11:afterResend', { g0, aProbeGen, minBGen, bProbeGen });
+      return `G0=${g0} A探针代际=${aProbeGen} B代际=${minBGen} B探针代际=${bProbeGen}（单调）`;
     });
 
     // ── S12：restart/resume（review-v4 High-4：未执行不得计 pass）──

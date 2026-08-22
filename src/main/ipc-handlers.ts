@@ -19,7 +19,7 @@ import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from 
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId } from './modules/chat-backend';
 import { sdkCommandRegistry, getCommandProvenance } from './modules/sdk-command-registry';
 import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
 import {
@@ -294,6 +294,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 在 runCommandProbe 被 !isSessionActive 拦截、emitCommandChanged 不推送，命令永远 loading。
     markSessionActive(sessionId);
     void startCommandProbe(sessionId, mainWindow);
+    // Task 3 Step 5（本计划）：重启后首次加载会话，若 DB 有 post-turn 探针持久化的占用值，
+    // 预填 stale 后追加一次免费探针（~2s）——成功升级为 fresh 精确值，失败保持 stale 预填，
+    // 无「待刷新」空态回归。probeInstance 用 0：重启后 renderer 无已知代际，0 会被接受并建立
+    // 已知代际，随后真实回合代际单调递增覆盖。守卫在 schedulePostTurnProbe 内（仅无 running entry 时调度）。
+    const reopenSession = sessionRepo.getSession(sessionId);
+    if (reopenSession && typeof reopenSession.lastContextUsed === 'number' && reopenSession.lastContextUsed >= 0) {
+      schedulePostTurnProbe(sessionId, mainWindow, 0, resolveCliSessionId(sessionId));
+    }
     // 启动兜底：无 per-session 快照时立即返回全局兜底（复制 + source:'cache'），UI 不再持续 loading；
     // 该会话 probe 完成后经 COMMANDS_CHANGED 推精确命令覆盖。
     const fallback = sdkCommandRegistry.getGlobalFallback();

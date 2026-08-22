@@ -592,7 +592,10 @@ check('S10 断言：顺序校验 + 禁 vacuous pass（Low-2）', () => {
 check('CDP DOM 断言接线：诊断行 + stale title（Medium-1/Low-1 验收）', () => {
   assert.ok(/function assertDiagAndTitle/.test(cdpE2eSrc), '应有 samplePopover/assertDiagAndTitle 断言助手');
   const s1Idx = cdpE2eSrc.indexOf("check('S1 ");
-  assert.ok(cdpE2eSrc.indexOf('assertDiagAndTitle(ws, !terminalFresh)', s1Idx) > 0, 'S1 应断言 stale title+诊断行');
+  // post-turn 官方探针（本计划 Task 5 S1 增强）：S1 回合结束探针 fresh 到达后，title 不得标
+  // 「上次采样」——assertDiagAndTitle(ws, false) 断言 fresh 终态语义（不再用 !terminalFresh）。
+  assert.ok(cdpE2eSrc.indexOf('assertDiagAndTitle(ws, false)', s1Idx) > 0, 'S1 探针 fresh 后应断言 title 不含上次采样');
+  assert.ok(/waitForPostTurnProbe\(ws, sid, 10\)/.test(cdpE2eSrc), 'S1 应等待 post-turn 探针 fresh payload');
   assert.ok(/assertDiagAndTitle\(ws, !\(lp3\?\.source/.test(cdpE2eSrc), 'S3 应按终态断言 title 语义');
   assert.ok(/assertDiagAndTitle\(ws, !freshReconcile\)/.test(cdpE2eSrc), 'S9 fresh 对账终态不得标注上次采样');
 });
@@ -623,5 +626,106 @@ check('mid-turn 值变化门限：更新快照但跳过 payload 发送', () => {
 });
 
 // ── §20 post-turn 官方 /context 探针（docs/.../2026-08-22-post-turn-context-probe.md Task 4）──
+console.log('=== 20) post-turn 官方 /context 探针：payload 纯函数 + 接线契约 ===');
+// observed fixture：摘自 p2-probe-nopersist.jsonl（run-2026-08-2213290），真实报告原文。
+const PROBE_FIXTURE =
+  '## Context Usage\n\n**Model:** glm-5.2[1m]  \n**Tokens:** 22.1k / 1m (2%)\n\n### Estimated usage by category\n' +
+  '| Category | Tokens | Percentage |\n| System prompt | 1.5k | 0.2% |\n| Messages | 2.1k | 0.2% |\n';
+check('探针 markdown → parser → used=22100/max=1000000/pct=2（F1 数字，observed）', () => {
+  const r = parseNativeContextReport(PROBE_FIXTURE);
+  assert.ok(r, '应解析成功');
+  assert.equal(r!.usedTokens, 22100);
+  assert.equal(r!.maxTokens, 1000000);
+  assert.equal(r!.percentage, 2);
+});
+check('derivePostTurnProbePayloadFields：16 canonical 字段齐全 + source/freshness/samplePhase 正确', () => {
+  const r = parseNativeContextReport(PROBE_FIXTURE)!;
+  const f = derivePostTurnProbePayloadFields(r, 7, 123);
+  assert.equal(hasCompleteCanonicalFields(f), true, '应满足 16 canonical 字段完整性契约');
+  assert.equal(f.source, 'native-context');
+  assert.equal(f.freshness, 'fresh');
+  assert.equal(f.samplePhase, 'post-turn');
+  assert.equal(f.consistency, 'unavailable');
+  assert.equal(f.diagnostic, null);
+  assert.equal(f.queryGeneration, 7);
+  assert.equal(f.currentContextUsedTokens, 22100);
+  assert.equal(f.contextWindowCapacityTokens, 1000000);
+  assert.equal(f.currentContextUsedPercent, 2);
+  assert.equal(f.currentContextRemainingTokens, 977900);
+  assert.equal(f.turnInputTokens, null);
+});
+check('shouldShowCompactedBanner：native-context + fresh + compactedJustNow=true → true（Step 3b 扩展）', () => {
+  assert.equal(shouldShowCompactedBanner({ compactedJustNow: true, freshness: 'fresh', source: 'native-context' }), true);
+});
+check('shouldShowCompactedBanner：native-context + stale → 仍 false（§5.3 只有 fresh 才带标记，不回归）', () => {
+  assert.equal(shouldShowCompactedBanner({ compactedJustNow: true, freshness: 'stale', source: 'native-context' }), false);
+  assert.equal(shouldShowCompactedBanner({ compactedJustNow: false, freshness: 'fresh', source: 'native-context' }), false);
+});
+check('sdk-backend spawn 参数含 --no-session-persistence 与 --resume（字符串级，防回归）', () => {
+  assert.ok(/'--no-session-persistence'/.test(sdkBackendSrc), 'spawn 参数缺 --no-session-persistence（漏掉即污染会话）');
+  assert.ok(/'--resume'/.test(sdkBackendSrc), 'spawn 参数缺 --resume');
+  assert.ok(/'-p',\s*'\/context'/.test(sdkBackendSrc) || /-p'?\s*,\s*'\/context'/.test(sdkBackendSrc), 'spawn 参数应为 -p /context');
+});
+check('result 分支 deleteEntry 后调用探针（顺序：deleteEntryIdx < probeCallIdx）', () => {
+  const resultIdx = sdkBackendSrc.indexOf("if (type === 'result')");
+  const deleteIdx = sdkBackendSrc.indexOf('deleteEntry(sessionId, entry);', resultIdx);
+  const probeIdx = sdkBackendSrc.indexOf('schedulePostTurnProbe(sessionId, mainWindow, probeInstance', resultIdx);
+  assert.ok(resultIdx >= 0 && deleteIdx > resultIdx && probeIdx > deleteIdx, '探针调度必须在 result 分支 deleteEntry 之后');
+});
+check('兜底挂点全覆盖（F9 表）：出口②③④⑤ 含 schedulePostTurnProbe；出口⑥ 与 !isCurrentEntry 出口不含', () => {
+  // 出口②：合成 aborted（流丢 result）
+  const abortSynthIdx = sdkBackendSrc.indexOf("forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' })");
+  const abortSynthSeg = sdkBackendSrc.slice(abortSynthIdx, sdkBackendSrc.indexOf('emitExit(null);', abortSynthIdx));
+  assert.ok(abortSynthIdx >= 0 && /schedulePostTurnProbe/.test(abortSynthSeg), '出口②（合成 aborted）缺探针');
+  // 出口④：真实 SDK 执行出错（catch 段调度）。review-v1 High-1：出口③（用户中断）的探针已迁移
+  // 到 killProcess 调度——真实中断流在 removeEntryIfCurrent 后走 !isCurrentEntry 分支提前退出，
+  // catch 段此调用仅服务 SDK 错误路径。
+  const interruptedIdx = sdkBackendSrc.indexOf('interruptedQueries.has(query)');
+  const catchSeg = sdkBackendSrc.slice(interruptedIdx, sdkBackendSrc.indexOf('break;', sdkBackendSrc.indexOf('SDK 执行出错', interruptedIdx)) + 6);
+  assert.ok(interruptedIdx >= 0 && /schedulePostTurnProbe/.test(catchSeg), '出口④（SDK 执行出错）缺探针');
+  // 出口⑤：resume 重试失败
+  const resumeRetryIdx = sdkBackendSrc.indexOf('SDK 执行出错：${msg}` });', sdkBackendSrc.indexOf('isMissingConversationResumeError(err)'));
+  assert.ok(resumeRetryIdx >= 0 && /schedulePostTurnProbe/.test(sdkBackendSrc.slice(resumeRetryIdx, sdkBackendSrc.indexOf('break;', resumeRetryIdx) + 6)), '出口⑤（resume 重试失败）缺探针');
+  // 出口⑥：启动阶段外层 catch 不含探针
+  const outerCatchIdx = sdkBackendSrc.indexOf('// 出口⑥（启动阶段外层 catch）不探');
+  const outerCatchEnd = sdkBackendSrc.indexOf('finally {', outerCatchIdx);
+  assert.ok(outerCatchIdx >= 0 && outerCatchEnd > outerCatchIdx, '缺出口⑥ 标注');
+  assert.ok(!/schedulePostTurnProbe/.test(sdkBackendSrc.slice(outerCatchIdx, outerCatchEnd)), '出口⑥ 不得调度探针');
+  // 探针调用总数 ≥ 6（result 分支 + 出口②④⑤ + killProcess 中断挂点），且出口⑥ 区段排除后仍覆盖。
+  const totalProbeCalls = [...sdkBackendSrc.matchAll(/schedulePostTurnProbe\(/g)].length;
+  assert.ok(totalProbeCalls >= 6, `schedulePostTurnProbe 调用点应 ≥6（实际 ${totalProbeCalls}）`);
+});
+check('review-v1 High-1：killProcess(user/watchdog) 分支含 schedulePostTurnProbe（中断兜底真实挂点）', () => {
+  // 中断探针在 killProcess 的 reason==='user'||'watchdog' 且 mainWindow 分支内调度——这是唯一可达的
+  // 中断路径（removeEntryIfCurrent 后 runQuery catch 段到不了）。契约：catch 段调用仅服务 SDK 错误。
+  const killIdx = sdkBackendSrc.indexOf('export function killProcess(');
+  const killSeg = sdkBackendSrc.slice(killIdx, sdkBackendSrc.indexOf('// killProcess 会先移除当前 entry', killIdx));
+  const userWatchdogIdx = killSeg.indexOf("(reason === 'user' || reason === 'watchdog') && mainWindow");
+  assert.ok(userWatchdogIdx >= 0, 'killProcess 缺 reason===user||watchdog 分支');
+  const branchSeg = killSeg.slice(userWatchdogIdx, killSeg.indexOf('if (entry.query) {', userWatchdogIdx));
+  assert.ok(/schedulePostTurnProbe\(sessionId, mainWindow, entry\.queryInstance/.test(branchSeg), 'killProcess 中断分支缺 schedulePostTurnProbe 调度（High-1 死代码未修）');
+});
+check('探针失败路径无 payload 发送（失败只 logger.debug，不发 CONTEXT_UPDATE）', () => {
+  const probeFnStart = sdkBackendSrc.indexOf('async function runPostTurnContextProbe(');
+  const probeFnEnd = sdkBackendSrc.indexOf('export function schedulePostTurnProbe(', probeFnStart);
+  const probeFn = sdkBackendSrc.slice(probeFnStart, probeFnEnd);
+  // 失败路径（解析失败/守卫拒绝/超时）在 return 前都不得出现 webContents.send。
+  const sendSites = [...probeFn.matchAll(/webContents\.send\(IPC_CHANNELS\.CONTEXT_UPDATE/g)];
+  assert.equal(sendSites.length, 1, '探针函数应只有成功路径一处 CONTEXT_UPDATE 发送点');
+});
+check('renderer 预填只写 stale 不写 fresh（buildPersistedCanonical）', () => {
+  assert.ok(/buildPersistedCanonical/.test(sessionStoreSrc), '缺 buildPersistedCanonical 预填函数');
+  assert.ok(/freshness:\s*'stale'/.test(sessionStoreSrc), '预填应写 stale');
+  assert.ok(/diagnostic:\s*'上次会话记录值，等待刷新'/.test(sessionStoreSrc), '预填诊断应为「上次会话记录值，等待刷新」');
+  assert.ok(/source:\s*'native-context'/.test(sessionStoreSrc), '预填 source 应为 native-context');
+  assert.ok(/samplePhase:\s*'post-turn'/.test(sessionStoreSrc), '预填 samplePhase 应为 post-turn');
+  // 预填函数体内不得出现 freshness:'fresh'（诚实标注非实时）。
+  const fnStart2 = sessionStoreSrc.indexOf('function buildPersistedCanonical(');
+  const fnEnd2 = sessionStoreSrc.indexOf('\n}', fnStart2);
+  const fnBody2 = sessionStoreSrc.slice(fnStart2, fnEnd2);
+  assert.ok(!/freshness:\s*'fresh'/.test(fnBody2), '预填不得写 fresh');
+});
+
+// ── §21 compact metadata display：压缩账单解析 + 文案 + 接线契约 ──
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
