@@ -964,7 +964,8 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     sb.indexOf("if (type === 'user')"),
   );
   const assistantRecoveryIndex = assistantBranch.indexOf('finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance)');
-  const assistantForwardIndex = assistantBranch.indexOf('forwardEvent(sessionId, mainWindow, cliEvent)');
+  // review-v3 High-2：forwardEvent 增加第 4 参 queryInstance（payload 代际），断言同步新签名。
+  const assistantForwardIndex = assistantBranch.indexOf('forwardEvent(sessionId, mainWindow, cliEvent, entry.queryInstance)');
   check('assistant 模型活动先写恢复记录再 forwardEvent',
     assistantRecoveryIndex >= 0 && assistantForwardIndex > assistantRecoveryIndex);
   const streamEventBranch = sb.slice(
@@ -972,7 +973,7 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     sb.indexOf("if (type === 'tool_progress')"),
   );
   const streamRecoveryIndex = streamEventBranch.indexOf('finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance)');
-  const streamForwardIndex = streamEventBranch.indexOf('forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg))');
+  const streamForwardIndex = streamEventBranch.indexOf('forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg), entry.queryInstance)');
   check('stream_event 模型活动先写恢复记录再 forwardEvent',
     streamRecoveryIndex >= 0 && streamForwardIndex > streamRecoveryIndex);
 
@@ -1003,7 +1004,7 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     markDeletedBody.includes('apiRetryStates.delete(sessionId)'));
   check('markSessionDeleted 清理 CLI session 与 context 诊断缓存',
     markDeletedBody.includes('sessionCliIds.delete(sessionId)') &&
-    markDeletedBody.includes('contextUsageDiagnosed.delete(sessionId)'));
+    markDeletedBody.includes('contextRefreshGeneration.delete(sessionId)'));
   check('deleteEntry 仅 current entry 清理 apiRetryStates',
     /if \(isCurrent\) \{[\s\S]*apiRetryStates\.delete\(sessionId\)[\s\S]*\}/.test(deleteEntryBody) &&
     deleteEntryBody.indexOf('apiRetryStates.delete(sessionId)') > deleteEntryBody.indexOf('if (isCurrent)'));
@@ -1231,7 +1232,8 @@ console.log('\n=== 42) contextStats getter 化（切模型/改设置即时重算
   // 切模型不重算 contextStats，ContextButton「最大上下文」停在旧模型窗口，要等下一回合 CONTEXT_UPDATE 才刷新。
   check('contextStats 已从 state 移除（不再写入式快照）', !/contextStats:\s*null as/.test(ss));
   check('contextStats 改为 getter（派生 windowSize/ratio）', /getters:\s*\{[\s\S]*?\bcontextStats\(state\)/.test(ss));
-  check('新增 contextUsage state（真实用量）', ss.includes('contextUsage: null as'));
+  // review-v2 证据缺口 3：turn usage 与当前窗口统一收进 canonicalContext，删除旧 contextUsage state。
+  check('canonicalContext 单一真相源（替代旧 contextUsage state）', ss.includes('canonicalContext: null as'));
   check('新增 contextLastWindow state（SDK 真实窗口）', ss.includes('contextLastWindow: null as'));
   check('switchSession/onContextUpdate 不再直接赋值 contextStats', !/this\.contextStats\s*=/.test(ss));
   check('switchSession 改写 contextLastWindow', ss.includes('this.contextLastWindow = session.lastContextWindow'));

@@ -16,7 +16,8 @@ import {
   type SessionStatus,
 } from '../../shared/session-display-status';
 import { resolveContextWindow } from '../../shared/model-context-windows';
-import { useConfigStore } from './config-store';
+import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../../shared/context-usage';
+import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';import { useConfigStore } from './config-store';
 import { useClaudePlanStore } from './claude-plan-store';
 import { useCommandStore } from './command-store';
 
@@ -47,6 +48,48 @@ interface ApiRetryTerminalFallback {
   summary: string;
   details: ApiRetryTerminalDetailsV1;
 }
+
+// Task 9：canonical 上下文状态（单一真相源）。ContextButton 只读这里，不得再从
+// contextLastWindow 拼装「当前窗口已用」。source/freshness 决定展示级别。
+export interface CanonicalContextState {
+  currentContextUsedTokens: number | null;
+  contextWindowCapacityTokens: number | null;
+  currentContextUsedPercent: number | null;
+  currentContextRemainingTokens: number | null;
+  currentContextRemainingPercent: number | null;
+  turnInputTokens: number | null;
+  turnCacheReadTokens: number | null;
+  turnCacheCreationTokens: number | null;
+  turnOutputTokens: number | null;
+  source: ContextUsageSource | null;
+  freshness: ContextUsageFreshness | null;
+  consistency: 'reconciled' | 'mismatch' | 'unavailable' | null;
+  diagnostic: string | null;
+  /** 采样阶段（review-v4 High-1）：runtime 快照为 query-start/post-turn/post-compaction；其余 null。 */
+  samplePhase: ContextSamplePhase | null;
+}
+
+// Task 9：contextStats getter 的视图（ContextButton 消费）。
+export interface ContextStatsView {
+  // 当前窗口（可信值，可 null）
+  currentUsedTokens: number | null;
+  currentPercent: number | null;
+  currentRemainingTokens: number | null;
+  currentRemainingPercent: number | null;
+  windowSize: number;
+  // turn usage（参考，不得驱动圆环）
+  turnInputTokens: number | null;
+  turnCacheReadTokens: number | null;
+  turnCacheCreationTokens: number | null;
+  turnOutputTokens: number | null;
+  source: ContextUsageSource | null;
+  freshness: ContextUsageFreshness | null;
+  consistency: 'reconciled' | 'mismatch' | 'unavailable' | null;
+  diagnostic: string | null;
+  /** 采样阶段（review-v4 High-1）：runtime 快照的 query-start/post-turn/post-compaction；其余 null。 */
+  samplePhase: ContextSamplePhase | null;
+}
+
 
 export const useSessionStore = defineStore('session', {
   state: () => ({
@@ -79,13 +122,17 @@ export const useSessionStore = defineStore('session', {
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
     // 隐藏本回合已落库的 text/thinking（与流式块去重），回合结束/会话切换时复位。
     turnStartIndex: 0,
-    // 真实上下文用量（来自 SDK usage）。windowSize/ratio 不在此存，改由 contextStats getter
-    // 派生——使切换模型（modelOverride）或改设置（contextWindowByAlias）时即时重算，
-    // 无需等下一回合 CONTEXT_UPDATE。修复「切了模型上下文窗口不刷新」。
-    contextUsage: null as { inputTokens: number; outputTokens: number } | null,
     // 当前活动会话最近一次 SDK 上报的真实窗口（作 resolveContextWindow 的 lastContextWindow）。
-    // 切会话时从 session.lastContextWindow 初始化，收 usage 回调时用 payload.windowSize 覆盖。
+    // 切会话时从 session.lastContextWindow 初始化，收 usage 回调时用 payload 覆盖。
     contextLastWindow: null as number | null,
+    // Task 9：canonical 上下文占用（当前窗口 + turn usage + source/freshness/diagnostic）。
+    // 单一真相源：ContextButton 只读这里；切换会话时置 null（无 fresh 数据 → pending）。
+    canonicalContext: null as CanonicalContextState | null,
+    // review-v3 High-2：每会话已见的 CONTEXT_UPDATE query 代际（主进程 entry.queryInstance）。
+    // 收到 payload 先过代际门（shouldAcceptContextPayload）：旧代际 / 已知代际却缺代际的
+    // 迟到 payload 一律拒收，防止被中断/替换的旧回合覆盖新回合 canonical 状态。
+    // 权威值来自主进程 entry；renderer 不自行递增（本地只被动记录见过的最大代际）。
+    contextQueryGenerations: {} as Record<string, number | undefined>,
     // 问题 4：CC 自动压缩事件标记。收到 compactedJustNow:true 的 CONTEXT_UPDATE 时置 true，
     // ContextButton 据此弹短暂横幅回显。横幅显示后由 ContextButton 自行复位为 false。
     compactedJustNow: false as boolean,
@@ -165,11 +212,9 @@ export const useSessionStore = defineStore('session', {
       if (!state.activeSession) return {};
       return state.subAgentStreamingThinking[state.activeSession.id] ?? {};
     },
-    // 上下文统计：windowSize/ratio 派生而非写入。依赖 activeSession.modelOverride/model +
-    // contextLastWindow + configStore.contextWindowByAlias，任一变化即时重算。
-    // 原先 contextStats 是切会话/收 usage 回调时写入的快照，切模型不触发重算，要等下一回合
-    // CONTEXT_UPDATE 才刷新——此 getter 从根上消除该滞后。
-    contextStats(state): { inputTokens: number; outputTokens: number; windowSize: number; ratio: number } | null {
+    // 上下文统计（Task 9）：从 canonicalContext 派生。圆环只读当前窗口可信值；
+    // turn usage 仅作参考。无可信当前窗口时 currentUsedTokens/currentPercent 为 null（pending）。
+    contextStats(state): ContextStatsView | null {
       if (!state.activeSession) return null;
       const alias = state.activeSession.modelOverride || state.activeSession.model;
       const windowSize = resolveContextWindow({
@@ -177,9 +222,24 @@ export const useSessionStore = defineStore('session', {
         alias,
         contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
       });
-      const inputTokens = state.contextUsage?.inputTokens ?? 0;
-      const outputTokens = state.contextUsage?.outputTokens ?? 0;
-      return { inputTokens, outputTokens, windowSize, ratio: windowSize > 0 ? inputTokens / windowSize : 0 };
+      const c = state.canonicalContext;
+      // review-v2 证据缺口 3：turn usage 只读 canonicalContext，不再回落旧 contextUsage state。
+      return {
+        currentUsedTokens: c?.currentContextUsedTokens ?? null,
+        currentPercent: c?.currentContextUsedPercent ?? null,
+        currentRemainingTokens: c?.currentContextRemainingTokens ?? null,
+        currentRemainingPercent: c?.currentContextRemainingPercent ?? null,
+        windowSize,
+        turnInputTokens: c?.turnInputTokens ?? null,
+        turnCacheReadTokens: c?.turnCacheReadTokens ?? null,
+        turnCacheCreationTokens: c?.turnCacheCreationTokens ?? null,
+        turnOutputTokens: c?.turnOutputTokens ?? null,
+        source: c?.source ?? null,
+        freshness: c?.freshness ?? null,
+        consistency: c?.consistency ?? null,
+        diagnostic: c?.diagnostic ?? null,
+        samplePhase: c?.samplePhase ?? null,
+      };
     },
   },
   actions: {
@@ -244,12 +304,10 @@ export const useSessionStore = defineStore('session', {
       this.compacting = false;
       // 批次 B：清思考 token 估算，避免会话 A 的思考峰值串扰到会话 B 的 ContextButton。
       this.thinkingTokens = null;
-      // 真实用量 + 上次连通的真实窗口交给 state；windowSize/ratio 由 contextStats getter 派生，
-      // 切模型/改设置时即时重算。lastContextWindow 为该会话持久化的 SDK 真实窗口（连通后缓存）。
+      // Task 9：真实窗口容量（provenance）交给 state；canonical 当前窗口数据在切换后置 null
+      // （无 fresh 快照 → pending），不得把持久化的 lastContextTokens（累计 turn usage）伪装成当前。
       this.contextLastWindow = session.lastContextWindow;
-      this.contextUsage = session.lastContextTokens
-        ? { inputTokens: session.lastContextTokens, outputTokens: 0 }
-        : null;
+      this.canonicalContext = null;
       try {
         this.messages = await window.claudeLink.getSessionMessages(session.id);
         // 运行中会话切回时，不能把 turnStartIndex 固定成 0；否则 MessageList 会把全量历史
@@ -302,6 +360,9 @@ export const useSessionStore = defineStore('session', {
       delete this.sessionStatus[id];
       delete this.turnStartedAt[id];
       delete this.turnGeneration[id];
+      // review-v3 High-2：已删会话的 context 代际记录一并清理（防内存泄漏；会话已删，
+      // 主进程不会再发该会话的 CONTEXT_UPDATE，无需保留 known generation 拒收旧值）。
+      delete this.contextQueryGenerations[id];
       // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
       const planStore = useClaudePlanStore();
       const prevPlan = planStore.planBySession[id];
@@ -446,13 +507,77 @@ export const useSessionStore = defineStore('session', {
     bindContextUpdates() {
       return window.claudeLink.onContextUpdate((payload) => {
         if (this.activeSession?.id !== payload.sessionId) return;
-        // 真实用量 + SDK 上报的真实窗口交给 state；windowSize/ratio 由 contextStats getter 派生。
+        // review-v3 High-2：代际门——旧 query 的迟到 payload（中断/替换后到达）与「已知代际却
+        // 缺代际」的可疑 payload 一律拒收，防止旧回合覆盖新回合 canonical 状态。规则见
+        // shouldAcceptContextPayload（共享纯函数，行为有专项测试）；通过时记录见过的最大代际。
+        const gate = shouldAcceptContextPayload(this.contextQueryGenerations[payload.sessionId], payload.queryGeneration);
+        if (!gate.accept) return;
+        this.contextQueryGenerations[payload.sessionId] = gate.nextKnownGeneration;
+        // review-v4 Medium-2：字段完整性协议校验——canonical 字段缺省（undefined）即协议错误，
+        // 拒收，不得与 prev state 拼接成混合状态（无数据必须显式 null，由主进程构造保证）。
+        if (!hasCompleteCanonicalFields(payload)) return;
+        // 真实窗口容量交给 state（provenance）；windowSize/percent 由 contextStats getter 派生。
         // 用户按别名设置（contextWindowByAlias）优先级高于 payload.windowSize，由 getter 内
         // resolveContextWindow 处理，避免 SDK 误报 200k 覆盖用户设置的 1M。
         this.contextLastWindow = payload.windowSize;
-        this.contextUsage = { inputTokens: payload.inputTokens, outputTokens: payload.outputTokens };
+        // Task 9：canonical 单一真相源。当前窗口主值只读 canonical 字段；turn usage 单列。
+        // 关键：turn-usage-only 事件（message/result，currentContextUsedTokens=null）不得把
+        // 已到达的 runtime-live 当前窗口值清空——否则 live 快照会被随后 message/result 的
+        // estimated 事件覆盖回 null。此时保留 last-known 值并降级 freshness 为 stale。
+        // 但 pending（压缩后/重启后等待 fresh）与 unavailable（无数据）必须清空——旧数字已
+        // 失效（压缩后实际占用下降），不得显示过期数字冒充当前。
+        const incomingUsed = payload.currentContextUsedTokens;
+        const hasLive =
+          typeof incomingUsed === 'number' && Number.isFinite(incomingUsed) && incomingUsed >= 0;
+        const prev = this.canonicalContext;
+        const prevUsed = prev?.currentContextUsedTokens ?? null;
+        const prevHasLive = typeof prevUsed === 'number' && prevUsed >= 0;
+        const incomingFreshness = payload.freshness ?? null;
+        const shouldPreserve = !hasLive && prevHasLive && (incomingFreshness === 'estimated' || incomingFreshness === 'stale');
+        const currentUsedTokens = hasLive ? incomingUsed : shouldPreserve ? prevUsed : null;
+        const currentUsedPercent = hasLive
+          ? payload.currentContextUsedPercent ?? null
+          : shouldPreserve
+            ? prev?.currentContextUsedPercent ?? null
+            : null;
+        this.canonicalContext = {
+          currentContextUsedTokens: currentUsedTokens,
+          contextWindowCapacityTokens: payload.contextWindowCapacityTokens ?? prev?.contextWindowCapacityTokens ?? null,
+          currentContextUsedPercent: currentUsedPercent,
+          currentContextRemainingTokens: hasLive
+            ? payload.currentContextRemainingTokens ?? null
+            : shouldPreserve
+              ? prev?.currentContextRemainingTokens ?? null
+              : null,
+          currentContextRemainingPercent: hasLive
+            ? payload.currentContextRemainingPercent ?? null
+            : shouldPreserve
+              ? prev?.currentContextRemainingPercent ?? null
+              : null,
+          // review-v2 证据缺口 3：turn usage 单一来源——runtime-live 快照不带 turn 字段时，
+          // 从 prev 保留最近一轮 turn usage，不再回落旧 contextUsage state。
+          turnInputTokens: payload.turnInputTokens ?? prev?.turnInputTokens ?? null,
+          turnCacheReadTokens: payload.turnCacheReadTokens ?? prev?.turnCacheReadTokens ?? null,
+          turnCacheCreationTokens: payload.turnCacheCreationTokens ?? prev?.turnCacheCreationTokens ?? null,
+          turnOutputTokens: payload.turnOutputTokens ?? prev?.turnOutputTokens ?? null,
+          source: hasLive ? payload.source ?? null : shouldPreserve ? prev?.source ?? null : null,
+          freshness: hasLive ? payload.freshness ?? null : shouldPreserve ? 'stale' : payload.freshness ?? null,
+          consistency: payload.consistency ?? null,
+          // review-v5 Medium-1：shouldPreserve 优先透传 payload.diagnostic（post-turn 兜底
+          // 的诊断本就含「上一可信快照采样阶段」），仅 payload 无诊断时才用兜底文案。
+          diagnostic: hasLive
+            ? payload.diagnostic ?? null
+            : shouldPreserve
+              ? payload.diagnostic ?? '上次快照已过期，等待刷新'
+              : payload.diagnostic ?? null,
+          samplePhase: payload.samplePhase ?? null,
+        };
         // 问题 4：CC 自动压缩事件 → 置标记，ContextButton 弹横幅回显。
-        if (payload.compactedJustNow) {
+        // review-v2 High#3 / review-v3 §5.3 双保险（shouldShowCompactedBanner 共享纯函数）：
+        // compactedJustNow 只在 fresh 快照（freshness==='fresh' 且 source 为 runtime-live/reconciled）
+        // 到达时置位，pending/unavailable/stale 不假称完成。主进程侧仅在 compact_result:success 后的
+        // 同代 fresh 快照附加 compactedJustNow，此处再验一次终态语义。
+        if (shouldShowCompactedBanner(payload)) {
           this.compactedJustNow = true;
           this.compacting = false; // C：压缩完成，复位实时态
         }

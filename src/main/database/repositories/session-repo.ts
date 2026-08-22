@@ -168,3 +168,15 @@ export function updateLastContext(id: string, tokens: number, windowSize?: numbe
     .run(tokens, windowSize ?? null, id);
   return getSession(id);
 }
+
+// 仅持久化窗口容量（不写 last_context_tokens）。用于 turn usage 事件：turn usage 不是当前窗口，
+// 不得写入 last_context_tokens 冒充当前上下文；容量才是有持久化价值的 provenance。
+export function updateLastContextWindow(id: string, windowSize?: number): Session | null {
+  getConnection()
+    .prepare(
+      "UPDATE sessions SET last_context_window = ?, last_context_updated_at = datetime('now') WHERE id = ?",
+    )
+    .run(windowSize ?? null, id);
+  return getSession(id);
+}
+
