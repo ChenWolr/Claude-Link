@@ -254,6 +254,10 @@ export interface CliSystemInfoEvent {
   // 批次 B：思考 token 实时估算（SDK thinking_tokens.estimated_tokens，思考块累计，单调递增）。
   // 瞬态信号——不落库，仅 ContextButton hover 实时展示；回合结束清零。
   estimatedTokens?: number;
+  // 压缩账单（compact_boundary 免费附带）：自动压缩为 compact_metadata(snake_case)，
+  // 手动 /compact 为 compactMetadata(camelCase)——runQuery 原样透传给 detectCompaction 解析。
+  compact_metadata?: unknown;
+  compactMetadata?: unknown;
 }
 
 // 权限事件：权限询问 / 自动拒绝。落库 processKind = permission。

@@ -499,20 +499,100 @@ export function shouldShowCompactedBanner(payload: {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CC 自动压缩事件检测。compactedJustNow=true 表示本次流里发生了自动压缩。
-// fromTokens/toTokens 预留给未来 CC 若在 compact_boundary 事件里携带压缩前后 token 数。
+// CC 自动压缩事件检测。compactedJustNow=true 表示本次流里发生了压缩。
+// compact_boundary 免费附带账单 compact_metadata（F1/F2 实测，两种键名均有）：
+//   - snake_case：compact_metadata.{pre_tokens,post_tokens,cumulative_dropped_tokens,duration_ms,trigger}
+//     （F1 自动压缩，events.jsonl / timeline.json）
+//   - camelCase：compactMetadata.{preTokens,postTokens,cumulativeDroppedTokens,durationMs,trigger}
+//     （F2 手动 /compact，manual-compact-meta2 的 jsonl）
+// 全部可选（F3：小上下文手动压缩 compact_result:"failed" 且无 boundary → 无账单，
+// 必须缺席优雅降级）。解析进可测纯函数 parseCompactMetadata，与事件形状解耦。
 // ─────────────────────────────────────────────────────────────────────────────
 export interface CompactionResult {
   compactedJustNow: true;
+  /** 压缩前 token（pre_tokens / preTokens）。 */
   fromTokens?: number;
+  /** 压缩后 token（post_tokens / postTokens）。 */
   toTokens?: number;
+  /** 累计清出 token（cumulative_dropped_tokens / cumulativeDroppedTokens）。 */
+  droppedTokens?: number;
+  /** 压缩耗时 ms（duration_ms / durationMs）。 */
+  durationMs?: number;
+  /** 触发方式：auto（自动压缩）/ manual（手动 /compact）等。 */
+  trigger?: 'auto' | 'manual' | string;
 }
 
-// 检测一个 CliEvent 是否为 CC 自动压缩事件（system + subtype 'compact_boundary'）。
-// 返回 CompactionResult（带 compactedJustNow:true）或 null（非压缩事件）。
+// 数值字段读取：必须是有限非负 number，否则丢弃（不报错）。snake_case 优先、camelCase 防御兼容。
+function readCompactNumber(m: Record<string, unknown>, ...keys: string[]): number | undefined {
+  for (const key of keys) {
+    const v = m[key];
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v;
+  }
+  return undefined;
+}
+
+// 解析 compact_metadata / compactMetadata 原始对象 → 可选账单字段。
+// 非法/缺失/负数一律忽略（对应字段缺席），不抛错、不猜测。
+export function parseCompactMetadata(raw: unknown): Partial<CompactionResult> {
+  if (raw == null || typeof raw !== 'object') return {};
+  const m = raw as Record<string, unknown>;
+  const fromTokens = readCompactNumber(m, 'pre_tokens', 'preTokens');
+  const toTokens = readCompactNumber(m, 'post_tokens', 'postTokens');
+  const droppedTokens = readCompactNumber(m, 'cumulative_dropped_tokens', 'cumulativeDroppedTokens');
+  const durationMs = readCompactNumber(m, 'duration_ms', 'durationMs');
+  const triggerRaw = m.trigger;
+  const trigger = typeof triggerRaw === 'string' && triggerRaw.trim() ? triggerRaw.trim() : undefined;
+  const out: Partial<CompactionResult> = {};
+  if (fromTokens !== undefined) out.fromTokens = fromTokens;
+  if (toTokens !== undefined) out.toTokens = toTokens;
+  if (droppedTokens !== undefined) out.droppedTokens = droppedTokens;
+  if (durationMs !== undefined) out.durationMs = durationMs;
+  if (trigger !== undefined) out.trigger = trigger;
+  return out;
+}
+
+// 检测一个 CliEvent 是否为 CC 压缩事件（system + subtype 'compact_boundary'）。
+// 返回 CompactionResult（带 compactedJustNow:true + 可选账单字段）或 null（非压缩事件）。
 export function detectCompaction(event: CliEvent): CompactionResult | null {
   if (event.type !== 'system') return null;
   const sys = event as CliSystemInfoEvent;
   if (sys.subtype !== 'compact_boundary') return null;
-  return { compactedJustNow: true };
+  const raw = sys as unknown as { compact_metadata?: unknown; compactMetadata?: unknown };
+  const metadata = raw.compact_metadata ?? raw.compactMetadata;
+  return { compactedJustNow: true, ...parseCompactMetadata(metadata) };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 压缩横幅文案单源（主进程/renderer 共用）。
+// 有完整数字（from/to/dropped 三值齐且合法）：「已自动压缩上下文：91.0k → 1.6k（清出 89.4k）」
+//（trigger==='auto' 才带「自动」）；缺任一数字 → hasNumbers:false + 现有文案。
+// 数字格式化与 ContextButton fmt 同风格（>=1000 → x.xk）。
+// ─────────────────────────────────────────────────────────────────────────────
+export interface CompactionSummaryFormat {
+  title: string;
+  hasNumbers: boolean;
+}
+
+function fmtCompactTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+export function formatCompactionSummary(c: {
+  fromTokens?: number;
+  toTokens?: number;
+  droppedTokens?: number;
+  trigger?: string;
+}): CompactionSummaryFormat {
+  const from = c?.fromTokens;
+  const to = c?.toTokens;
+  const dropped = c?.droppedTokens;
+  const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
+  if (!valid(from) || !valid(to) || !valid(dropped)) {
+    return { title: 'Claude Code 已自动压缩上下文', hasNumbers: false };
+  }
+  const prefix = c.trigger === 'auto' ? '已自动压缩上下文：' : '已压缩上下文：';
+  return {
+    title: `${prefix}${fmtCompactTokens(from)} → ${fmtCompactTokens(to)}（清出 ${fmtCompactTokens(dropped)}）`,
+    hasNumbers: true,
+  };
 }

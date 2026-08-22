@@ -842,8 +842,21 @@ async function main() {
         throw new Error(`压缩回合探针应带 compactedJustNow:true（实际 ${probe.compactedJustNow}）`);
       }
       const bannerShown = await evalOk(ws, `!!document.querySelector('.ctx__banner:not(.ctx__banner--compacting)')`);
-      recordScenario('S10', { probePayload: scrub(probe), preCompactKnown, bannerShown });
-      return `压缩后探针 used=${used}（压缩前 ${preCompactKnown ?? '未知'}）bannerShown=${bannerShown}`;
+      // compact metadata display：探针 payload 断言 compactFromTokens 为数值（账单挂载成功）。
+      // 横幅 DOM 文本：有账单数字时须匹配 /→|清出/；降级（旧 CLI 无账单）时回退现有文案且不 fail。
+      const bannerText = await evalExpr(ws, `document.querySelector('.ctx__banner:not(.ctx__banner--compacting)')?.textContent?.trim() ?? null`);
+      let metadataNote = 'no-compact-metadata';
+      if (typeof probe.compactFromTokens === 'number' && typeof probe.compactToTokens === 'number' && typeof probe.compactDroppedTokens === 'number') {
+        metadataNote = `compactFrom=${probe.compactFromTokens} compactTo=${probe.compactToTokens} compactDropped=${probe.compactDroppedTokens}`;
+        if (bannerShown && bannerText != null && !/→|清出/.test(bannerText)) {
+          throw new Error(`横幅应显示真实压缩数字（含 →/清出），实际「${bannerText}」`);
+        }
+      } else {
+        // 降级路径：无账单时横幅回退现有文案，存在即通过（记录 note）。
+        metadataNote = 'no-compact-metadata（旧 CLI 或无账单，横幅回退现有文案）';
+      }
+      recordScenario('S10', { probePayload: scrub(probe), preCompactKnown, bannerShown, bannerText: scrubString(bannerText ?? ''), metadataNote });
+      return `压缩后探针 used=${used}（压缩前 ${preCompactKnown ?? '未知'}）bannerShown=${bannerShown} ${metadataNote}`;
     });
 
     // ── S11：中断重发（A 迟到 payload 不污染 B）──
