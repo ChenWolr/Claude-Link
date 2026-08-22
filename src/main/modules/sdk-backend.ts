@@ -457,6 +457,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionContextStats.delete(sessionId);
   sessionRuntimeSnapshot.delete(sessionId);
   contextRefreshGeneration.delete(sessionId);
+  midTurnRefreshState.delete(sessionId); // P2 mid-turn 节流状态随会话清理（单一收口）
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
@@ -1025,6 +1026,13 @@ function forwardEvent(
 // 不能在 result 后调用。短命令 query 关闭太快仍可能失败 → 落到 pending（契约允许），长 turn 能拿到。
 const contextRefreshGeneration = new Map<string, number>();
 const CONTEXT_REFRESH_TIMEOUT_MS = 5000;
+// P2 mid-turn：回合中途轮询的节流与值变化门限常量（docs/.../2026-08-22-mid-turn-context-refresh.md §5.2）。
+const MID_TURN_THROTTLE_MS = 8000;
+const MID_TURN_USED_DELTA_THRESHOLD = 1000;
+const MID_TURN_PCT_DELTA_THRESHOLD = 0.5;
+// per-session 节流状态：lastInitiatedAt 记录上次「发起」时刻（失败后靠它防立即重试刷屏，
+// 成功路径再叠加 sessionRuntimeSnapshot.capturedAt 判定）；inFlight 保证同一时刻仅一个在途。
+const midTurnRefreshState = new Map<string, { lastInitiatedAt: number; inFlight: boolean }>();
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1081,7 +1089,8 @@ async function refreshContextSnapshot(
     // review-v2 Blocker：缓存 runtime 当前窗口快照，供 /context 原生输出 reconcile 对账。
     // review-v3 High-1：快照必须携带产生它的 query 代际（queryInstance）与捕获时刻——
     // /context reconcile 只认同代快照，旧回合数字不得到新回合对账（详见 isRuntimeSnapshotForQuery）。
-    // review-v4 High-1：samplePhase 标记采样阶段——query-start 基线 / post-turn 回合末 / post-compaction。
+    // review-v4 High-1：samplePhase 标记采样阶段——query-start 基线 / mid-turn 中途 / post-turn 回合末 / post-compaction。
+    const prevSnapshot = sessionRuntimeSnapshot.get(sessionId) ?? null;
     if (used != null && capacity != null) {
       sessionRuntimeSnapshot.set(sessionId, {
         usedTokens: used,
@@ -1091,6 +1100,17 @@ async function refreshContextSnapshot(
         capturedAt: Date.now(),
         samplePhase: opts.samplePhase,
       });
+    }
+    // P2 mid-turn 值变化门限（防 IPC 刷屏）：used 变化 < 1000 且 percentage 变化 < 0.5 时，
+    // 快照已更新（最新值已缓存供后续对账），但跳过 payload 发送——中途高频轮询不淹没 renderer。
+    // 仅对同代 mid-turn 快照与上一同代快照比较；query-start 基线/首次 mid-turn 无 prev 可比，正常发送。
+    if (opts.samplePhase === 'mid-turn' && prevSnapshot != null && prevSnapshot.queryInstance === queryInstance && used != null && prevSnapshot.usedTokens != null) {
+      const usedDelta = Math.abs(used - prevSnapshot.usedTokens);
+      const pctDelta = pct != null && prevSnapshot.percentage != null ? Math.abs(pct - prevSnapshot.percentage) : Number.POSITIVE_INFINITY;
+      if (usedDelta < MID_TURN_USED_DELTA_THRESHOLD && pctDelta < MID_TURN_PCT_DELTA_THRESHOLD) {
+        logger.info(`[${sessionId}] mid-turn 值变化低于门限（Δused=${usedDelta}, Δpct=${pctDelta}），跳过 payload 发送`);
+        return;
+      }
     }
     const lastStats = sessionContextStats.get(sessionId);
     const payload: ContextStatsPayload = {
@@ -1175,6 +1195,40 @@ async function refreshContextSnapshot(
       }
     }
   }
+}
+
+// ── P2 mid-turn：回合中途轮询（docs/.../2026-08-22-mid-turn-context-refresh.md §5.2）──
+// 事件驱动（不建定时器，避免 timer 泄漏）：assistant 落地 / tool_result 转发后调用。
+// 节流：距上次「发起」≥ 8s 才发起；同一时刻仅一个在途（inFlight）。fire-and-forget（void），
+// 绝不 await——不阻塞事件循环。失败静默（refreshContextSnapshot 内部 logger.warn + 本 helper
+// logger.debug），无兜底 payload（中途失败下一事件还会再试，与 post-turn 不同）。
+function maybeMidTurnRefresh(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  entry: SessionEntry,
+  query: Query,
+): void {
+  // 同步身份守卫：仅当前 running entry 且 query 存活才发起。旧 query 的迟到事件不会触发。
+  if (!isSessionActive(sessionId)) return;
+  if (entries.get(sessionId) !== entry) return;
+  if (entry.query !== query) return;
+  if (entry.state !== 'running') return;
+  const now = Date.now();
+  const st = midTurnRefreshState.get(sessionId);
+  // 节流：距上次发起 < 8s 不再发起（先查「上次发起时间」，避免 refreshContextSnapshot 的
+  // generation bump 使上一个在途结果作废时反复重发）。
+  if (st && now - st.lastInitiatedAt < MID_TURN_THROTTLE_MS) return;
+  // 单飞：同一时刻仅一个在途。
+  if (st?.inFlight) return;
+  midTurnRefreshState.set(sessionId, { lastInitiatedAt: now, inFlight: true });
+  void refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'mid-turn' })
+    .catch((e) => {
+      logger.warn(`[${sessionId}] mid-turn 刷新失败：${e instanceof Error ? e.message : String(e)}`);
+    })
+    .finally(() => {
+      const cur = midTurnRefreshState.get(sessionId);
+      if (cur) cur.inFlight = false;
+    });
 }
 
 // ── /context 原生输出 reconcile（review-v2 Blocker）────────────────────────────
@@ -2767,6 +2821,8 @@ async function runQuery(
         const cliEvent = convertAssistantMessage(sdkMsg);
         if (cliEvent) {
           forwardEvent(sessionId, mainWindow, cliEvent, entry.queryInstance);
+          // P2 mid-turn：assistant 落地后触发中途轮询（节流 + 单飞 + fire-and-forget）。
+          maybeMidTurnRefresh(sessionId, mainWindow, entry, query);
           // review-v2 Blocker：/context 回合收集 assistant 原生报告文本，result 时 reconcile。
           if (contextTurn) {
             contextTurnNativeText += extractAssistantText(cliEvent.content);
@@ -2789,6 +2845,8 @@ async function runQuery(
           const resultParts = cliEvent.content.filter(isToolResultPart);
           if (resultParts.length > 0) {
             forwardEvent(sessionId, mainWindow, { ...cliEvent, content: resultParts }, entry.queryInstance);
+            // P2 mid-turn：tool_result 落地后触发中途轮询（工具结果落地是数值增长的关键时点）。
+            maybeMidTurnRefresh(sessionId, mainWindow, entry, query);
             // Claude 计划：配对 tool_result 与缓存的 tool_use，解析 TaskCreate/TaskList/TaskGet 输出。
             // F1: 传 sdkMsg.tool_use_result（SDK 顶层结构化结果，非 content 文本）。
             processToolResultForPlan(sessionId, mainWindow, resultParts, sdkMsg.tool_use_result);
