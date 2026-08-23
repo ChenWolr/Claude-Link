@@ -25,6 +25,7 @@ import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } 
 import { THEME_PALETTES, DEFAULT_THEME_PALETTE_ID } from '../src/shared/constants';
 import { resolveThinkingConfig, resolveEffectiveThinkingLevel } from '../src/shared/thinking-resolver';
 import { THINKING_LEVELS, isValidThinkingLevel } from '../src/shared/types/thinking';
+import { PERMISSION_MODES, isValidPermissionMode, resolveEffectivePermissionMode } from '../src/shared/permission-resolver';
 
 let pass = 0;
 let fail = 0;
@@ -1764,6 +1765,63 @@ console.log('\n=== 52) API 重试终态专用折叠记录 ===');
     apiRetryRecordSrc.includes('仅终止本次回复，会话仍可继续'));
   check('图片导出强制展开过程组以保留 retry 终态摘要',
     processGroup.includes('if (props.exportMode) return true'));
+}
+
+console.log('\n=== 53) 权限模式全局默认 + 会话覆盖链路（permission-resolver / 落盘 / 注入 / UI）===');
+{
+  // 共享 resolver：类型 + 守卫 + 回落。
+  check('PERMISSION_MODES 含四档（default/plan/acceptEdits/bypassPermissions）',
+    PERMISSION_MODES.length === 4 &&
+    ['default', 'plan', 'acceptEdits', 'bypassPermissions'].every((m) => PERMISSION_MODES.includes(m as never)));
+  check('isValidPermissionMode("bypassPermissions")=true', isValidPermissionMode('bypassPermissions') === true);
+  check('isValidPermissionMode("invalid")=false', isValidPermissionMode('invalid') === false);
+  check('isValidPermissionMode(null)=false', isValidPermissionMode(null) === false);
+  check('isValidPermissionMode(undefined)=false', isValidPermissionMode(undefined) === false);
+  check('resolveEffectivePermissionMode(null,"acceptEdits")="acceptEdits"', resolveEffectivePermissionMode(null, 'acceptEdits') === 'acceptEdits');
+  check('resolveEffectivePermissionMode("plan","acceptEdits")="plan"', resolveEffectivePermissionMode('plan', 'acceptEdits') === 'plan');
+
+  // 类型层：AppConfig 全局默认 + Session 可空覆盖。
+  const configType = readRel('src/shared/types/config.ts');
+  const sessionType = readRel('src/shared/types/session.ts');
+  check('AppConfig.permissionMode 是全局默认档', configType.includes('permissionMode: PermissionMode') && configType.includes('全局默认权限'));
+  check('Session.permissionMode 可空（null=跟随全局默认）', sessionType.includes('permissionMode: PermissionMode | null'));
+
+  // 落盘层：新会话写 NULL（不钉死 default）；老库列默认改 NULL。
+  const migrations = readRel('src/main/database/migrations.ts');
+  const repo = readRel('src/main/database/repositories/session-repo.ts');
+  check('migrations.ts 新表 permission_mode DEFAULT NULL', migrations.includes('permission_mode TEXT DEFAULT NULL'));
+  check('session-repo.ts createSession 显式写 NULL', repo.includes('permission_mode)') && repo.includes('NULL'));
+  check('session-repo.ts toSession 脏值兜底 isValidPermissionMode', repo.includes('isValidPermissionMode(row.permission_mode)'));
+  // 存量清洗：老库会话 permission_mode='default' 是旧列默认值的幻影显式值，须重置为 NULL 跟随全局。
+  check('migrations 存量会话权限清洗（default → NULL 跟随全局默认）',
+    migrations.includes("UPDATE sessions SET permission_mode = NULL"));
+  check('权限清洗在 currentVersion<1 块之后（老库必须执行到）',
+    migrations.indexOf('UPDATE sessions SET permission_mode = NULL') >
+      migrations.lastIndexOf('if (currentVersion < 1)'));
+
+  // IPC 层：SESSION_UPDATE 白名单校验非法 permissionMode 丢弃。
+  const handlers = readRel('src/main/ipc-handlers.ts');
+  check('ipc-handlers SESSION_UPDATE 白名单校验 isValidPermissionMode', handlers.includes('isValidPermissionMode(data.permissionMode)'));
+  check('ipc-handlers 非法 permissionMode 丢弃', handlers.includes('delete data.permissionMode'));
+
+  // 注入层：sdk-backend 经 resolver 回落全局默认（query + probe 两条链）。
+  const sdkBackend = readRel('src/main/modules/sdk-backend.ts');
+  const cliShared = readRel('src/main/modules/cli-shared.ts');
+  check('sdk-backend import resolveEffectivePermissionMode', sdkBackend.includes('resolveEffectivePermissionMode'));
+  check('sdk-backend buildSdkOptions 用 effectivePermissionMode（两处回落）',
+    sdkBackend.split('resolveEffectivePermissionMode(opts.permissionMode ?? null, config.permissionMode)').length - 1 >= 2);
+  check('sdk-backend 注入 permissionMode: effectivePermissionMode',
+    sdkBackend.includes('permissionMode: effectivePermissionMode as'));
+  check('cli-shared SpawnOptions permissionMode 可空', cliShared.includes('permissionMode?: PermissionMode | null'));
+
+  // UI 层：ConfigPage 全局默认选择器 + SessionToolbar 跟随全局默认(null) 选项。
+  const configPage = readRel('src/renderer/pages/ConfigPage.vue');
+  const toolbar = readRel('src/renderer/components/chat/SessionToolbar.vue');
+  check('ConfigPage PERSISTED_FIELDS 含 permissionMode', configPage.includes("'permissionMode'"));
+  check('ConfigPage 有 handlePermissionModeChange', configPage.includes('handlePermissionModeChange'));
+  check('ConfigPage 行为 tab 有默认权限选择器', configPage.includes('默认权限'));
+  check('SessionToolbar 权限选项含跟随全局默认(null)', toolbar.includes("value: null") && toolbar.includes('跟随全局默认'));
+  check('SessionToolbar 显示全局默认档名', toolbar.includes('globalDefaultPermissionLabel'));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

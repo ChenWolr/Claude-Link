@@ -25,6 +25,7 @@ import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/set
 import { resolveSessionModel, buildUnifiedModelEnv, decideAgentModelOverride } from '../../shared/session-model';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
+import { resolveEffectivePermissionMode } from '../../shared/permission-resolver';
 import { isSuccessfulCliResult } from '../../shared/session-completion';
 import { convertResultMessage } from '../../shared/result-converter';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
@@ -865,6 +866,8 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // settingsPatch → 合并进 Options.settings，覆盖全局投影（query 级 > 全局 > advancedJson）。
   const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
   const thinkingConfig = resolveThinkingConfig(effectiveLevel);
+  // 权限模式：会话 override（null/未设）回落全局默认（config.permissionMode），与思考强度同构。
+  const effectivePermissionMode = resolveEffectivePermissionMode(opts.permissionMode ?? null, config.permissionMode);
   // 供应商库解析（会话 override > 最近使用 > 库首）；命中则本回合 env/options.model/别名映射
   // 全部以它为准，modelOverride 语义为实际模型 ID（唯一实际模型原则）。
   const override = resolveSessionOverride(opts);
@@ -883,7 +886,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     effort: thinkingConfig.effort,
     cwd: opts.workingDir || config.workingDirectory || undefined,
     maxTurns: opts.maxTurns,
-    permissionMode: opts.permissionMode as SdkOptions['permissionMode'],
+    permissionMode: effectivePermissionMode as SdkOptions['permissionMode'],
     settings,
     additionalDirectories,
   });
@@ -2143,6 +2146,8 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
   const exe = resolveExecutable(config.cliPath);
   const effectiveLevel = resolveEffectiveThinkingLevel(opts.thinkingLevel ?? null, config.defaultThinkingLevel);
   const thinkingConfig = resolveThinkingConfig(effectiveLevel);
+  // 权限模式回落（与 buildSdkOptions 同构：会话 override null → 全局默认）。
+  const effectivePermissionMode = resolveEffectivePermissionMode(opts.permissionMode ?? null, config.permissionMode);
   // 与生产 query 同一供应商库解析（F2/N1：probe 与真实回合的模型/端点上下文一致）。
   const override = resolveSessionOverride(opts);
   const requestedAlias = override?.modelId ?? (opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson));
@@ -2157,7 +2162,7 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
     effort: thinkingConfig.effort,
     cwd: opts.workingDir || config.workingDirectory || undefined,
     maxTurns: opts.maxTurns,
-    permissionMode: opts.permissionMode as SdkOptions['permissionMode'],
+    permissionMode: effectivePermissionMode as SdkOptions['permissionMode'],
     settings,
     additionalDirectories,
   });

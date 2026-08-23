@@ -11,6 +11,7 @@ import path from 'node:path';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
+import { isValidPermissionMode } from '../shared/permission-resolver';
 import { IPC_CHANNELS } from '../shared/constants';
 import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel } from './modules/config-manager';
 import { detectClaudeConfig } from './modules/claude-config-detector';
@@ -221,6 +222,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (data.thinkingLevel !== undefined && data.thinkingLevel !== null && !isValidThinkingLevel(data.thinkingLevel)) {
         logger.warn(`[thinking] invalid thinkingLevel, discarding: ${String(data.thinkingLevel)}`);
         delete data.thinkingLevel;
+      }
+      // 权限模式同样白名单：只接受 null（跟随全局默认）/ 合法四档；非法值丢弃。
+      if (data.permissionMode !== undefined && data.permissionMode !== null && !isValidPermissionMode(data.permissionMode)) {
+        logger.warn(`[permission] invalid permissionMode, discarding: ${String(data.permissionMode)}`);
+        delete data.permissionMode;
       }
       // 供应商/模型 override 同样白名单：只接受 string | null（实际模型 ID，非别名）。
       if (data.providerOverride !== undefined && data.providerOverride !== null && typeof data.providerOverride !== 'string') {

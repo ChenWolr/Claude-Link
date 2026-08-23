@@ -201,6 +201,12 @@ function handleThinkingLevelChange(e: Event) {
   const level = (e.target as HTMLSelectElement).value;
   store.config.defaultThinkingLevel = level as typeof store.config.defaultThinkingLevel;
 }
+
+// 默认权限：写 config.permissionMode（全局默认；会话内可各自覆盖）。走 PERSISTED_FIELDS 自动保存。
+function handlePermissionModeChange(e: Event) {
+  const mode = (e.target as HTMLSelectElement).value;
+  store.config.permissionMode = mode as typeof store.config.permissionMode;
+}
 </script>
 
 <template>
@@ -301,7 +307,16 @@ function handleThinkingLevelChange(e: Event) {
                   <option value="ultracode">工作流（xhigh + 动态工作流，Beta）</option>
                 </select>
               </label>
-              <p class="field-hint">权限模式（default / acceptEdits / plan / bypassPermissions）已改为在<strong>会话内</strong>按需调整，不再放在这里。</p>
+              <label class="field">
+                <span>默认权限 <small class="field-hint">新会话与未单独设置权限的会话回落到此档；也可在<strong>会话内</strong>按需单独调整（跟随全局默认 / 默认 / 规划 / 代理 / 自动）。</small></span>
+                <select :value="store.config.permissionMode" @change="handlePermissionModeChange">
+                  <option value="default">默认模式（需手动确认危险操作）</option>
+                  <option value="plan">规划模式（只规划，审批后执行）</option>
+                  <option value="acceptEdits">代理模式（自动提交文件编辑）</option>
+                  <option value="bypassPermissions">自动模式（越过所有权限检查，谨慎使用）</option>
+                </select>
+              </label>
+              <p class="field-hint">权限与思考强度均为「全局默认 + 会话内各自覆盖」：全局默认在这里设置，单个会话在聊天区底部工具栏独立调整。</p>
             </div>
           </div>
         </div>

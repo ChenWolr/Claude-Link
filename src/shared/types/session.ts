@@ -1,5 +1,6 @@
 import type { RenderableMessage } from './export-image';
 import type { ThinkingLevel } from './thinking';
+import type { PermissionMode } from '../permission-resolver';
 
 export interface Session {
   id: string;
@@ -12,7 +13,9 @@ export interface Session {
   // 但取值域已从 sonnet/haiku/opus/fable 别名改为实际模型 ID——别名只作 CC 内部兼容层。
   modelOverride: string | null;
   workingDir: string | null;
-  permissionMode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+  // 该会话的权限档。null = 跟随全局默认（AppConfig.permissionMode），非 null = 该会话显式选定档。
+  // UI 用「跟随全局默认」选项表达 null，注入层经 resolveEffectivePermissionMode 回落处理。
+  permissionMode: PermissionMode | null;
   maxTurns: number;
   // 该会话的思考强度档位。null = 回落全局默认（AppConfig.defaultThinkingLevel）。
   // 'auto' 与 null 同义（UI 用 'auto' 显式表达「跟随默认」，注入层统一按回落处理）。

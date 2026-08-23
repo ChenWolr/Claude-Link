@@ -3,6 +3,7 @@
 // 按用户要求，所有"会话内容"相关的控件都放在底部（输入区附近），而非顶部。
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
+import { useConfigStore } from '../../stores/config-store';
 import ProviderModelSelector from './ProviderModelSelector.vue';
 import ThinkingLevelSelector from './ThinkingLevelSelector.vue';
 import ContextButton from './ContextButton.vue';
@@ -55,7 +56,8 @@ async function clearWorkspace() {
 
 // 权限模式：value 对齐 Claude Code 原生字面值（default/acceptEdits/plan/bypassPermissions），
 // 仅在 SDK 注入时生效；label/desc/icon 仅用于 UI 展示，不影响底层。
-type PermIconKey = 'shield' | 'list' | 'bolt' | 'rocket';
+// 新增 null（跟随全局默认）：新会话默认不落库具体档，回落 AppConfig.permissionMode。
+type PermIconKey = 'shield' | 'list' | 'bolt' | 'rocket' | 'follow';
 
 const PERMISSIONS: Array<{
   value: Session['permissionMode'];
@@ -63,6 +65,7 @@ const PERMISSIONS: Array<{
   desc: string;
   icon: PermIconKey;
 }> = [
+  { value: null,                label: '跟随全局默认', desc: '使用设置页配置的全局默认权限档',              icon: 'follow' },
   { value: 'default',           label: '默认模式', desc: '禁用手动确认等操作，适合普通使用',         icon: 'shield' },
   { value: 'plan',              label: '规划模式', desc: '仅使用规划工具，生成计划用户审批后执行',   icon: 'list' },
   { value: 'acceptEdits',       label: '代理模式', desc: '自动提交无创建/编辑，减少人为干预',         icon: 'bolt' },
@@ -71,6 +74,7 @@ const PERMISSIONS: Array<{
 
 // 图标 SVG path（24×24，stroke 风格统一；触发按钮与面板项共用）。
 const PERM_ICON_PATHS: Record<PermIconKey, string> = {
+  follow: 'M12 3v12 M7 10l5 5 5-5 M5 21h14',
   shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
   list:   'M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01',
   bolt:   'M13 2L3 14h9l-1 8 10-12h-9l1-8z',
@@ -85,6 +89,12 @@ const permissionRef = ref<HTMLElement | null>(null);
 const activePermission = computed(
   () => PERMISSIONS.find((p) => p.value === activeSession.value?.permissionMode) ?? PERMISSIONS[0],
 );
+
+// 全局默认权限档名（null 档 tooltip 回显实际回落目标）。
+const globalDefaultPermissionLabel = computed(() => {
+  const g = useConfigStore().config.permissionMode;
+  return PERMISSIONS.find((p) => p.value === g)?.label ?? '默认模式';
+});
 
 async function onPermissionChange(mode: Session['permissionMode']) {
   showPermissionMenu.value = false;
@@ -194,7 +204,7 @@ onUnmounted(() => {
         type="button"
         class="ctl__btn"
         :disabled="sending"
-        :title="`本会话 Claude Code 权限模式（${activePermission.value}）`"
+        :title="`本会话 Claude Code 权限模式（${activeSession.permissionMode === null ? `跟随全局默认：${globalDefaultPermissionLabel}` : activePermission.label}）`"
         @click="showPermissionMenu = !showPermissionMenu"
       >
         {{ activePermission.label }} <span class="caret">▾</span>
@@ -202,7 +212,7 @@ onUnmounted(() => {
       <div v-if="showPermissionMenu" class="perm-menu">
         <button
           v-for="p in PERMISSIONS"
-          :key="p.value"
+          :key="p.value ?? 'follow-default'"
           type="button"
           :class="['perm-item', { 'perm-item--active': p.value === activeSession.permissionMode }]"
           @click="onPermissionChange(p.value)"
@@ -211,7 +221,10 @@ onUnmounted(() => {
             <svg viewBox="0 0 24 24" aria-hidden="true"><path :d="PERM_ICON_PATHS[p.icon]" /></svg>
           </span>
           <span class="perm-item__text">
-            <span class="perm-item__label">{{ p.label }}</span>
+            <span class="perm-item__label">
+              {{ p.label }}
+              <small v-if="p.value === null" class="perm-item__sub">（全局默认：{{ globalDefaultPermissionLabel }}）</small>
+            </span>
             <span class="perm-item__desc">{{ p.desc }}</span>
           </span>
           <svg
@@ -546,6 +559,12 @@ onUnmounted(() => {
   font-size: 0.8125rem;
   font-weight: 600;
   line-height: 1.2;
+}
+
+.perm-item__sub {
+  font-weight: 400;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
 }
 
 .perm-item__desc {

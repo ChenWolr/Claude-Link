@@ -25,6 +25,7 @@ import type {
 } from '../../shared/types/config';
 import type { ProviderModelSource } from '../../shared/session-model';
 import { isValidThinkingLevel } from '../../shared/types/thinking';
+import { isValidPermissionMode } from '../../shared/permission-resolver';
 import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels } from '../../shared/provider-library';
 import { logger } from '../utils/logger';
@@ -154,6 +155,9 @@ export function getConfig(): AppConfig {
   const rawThinkingLevel = config.defaultThinkingLevel as unknown;
   const defaultThinkingLevel =
     isValidThinkingLevel(rawThinkingLevel) && rawThinkingLevel !== 'auto' ? rawThinkingLevel : 'medium';
+  // 脏值清洗：老版本/手改 JSON 可能给 permissionMode 存非法值，回落 'default'。
+  const rawPermissionMode = config.permissionMode as unknown;
+  const permissionMode = isValidPermissionMode(rawPermissionMode) ? rawPermissionMode : 'default';
   return {
     provider: config.provider,
     providerName: config.providerName ?? 'Anthropic',
@@ -165,7 +169,7 @@ export function getConfig(): AppConfig {
     cliPath: config.cliPath,
     cliVersion: config.cliVersion,
     workingDirectory: config.workingDirectory,
-    permissionMode: config.permissionMode,
+    permissionMode,
     maxTurns: config.maxTurns,
     taskDelaySeconds: config.taskDelaySeconds,
     themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,

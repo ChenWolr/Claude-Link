@@ -505,7 +505,8 @@ export const useSessionStore = defineStore('session', {
         this.error = error instanceof Error ? error.message : '更新工作空间失败';
       }
     },
-    // 会话级权限模式：写入 session.permissionMode，spawn 时通过 --permission-mode 生效。
+    // 会话级权限模式：写入 session.permissionMode（null = 跟随全局默认 config.permissionMode），
+    // spawn 时经 resolveEffectivePermissionMode 回落为实际档后经 --permission-mode 生效。
     async setActiveSessionPermissionMode(mode: Session['permissionMode']) {
       if (!this.activeSession) return;
       try {
