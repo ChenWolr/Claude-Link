@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import type { Session } from '../../../shared/types/session';
 import { isValidThinkingLevel } from '../../../shared/types/thinking';
+import { isValidPermissionMode } from '../../../shared/permission-resolver';
 import { getConnection } from '../connection';
 import { normalizeSearchText } from '../../utils/search-normalizer';
 import { normalizeDbTime } from '../../../shared/time';
@@ -35,7 +36,8 @@ function toSession(row: SessionRow): Session {
     providerOverride: row.provider_override ?? null,
     modelOverride: row.model_override ?? null,
     workingDir: row.working_dir,
-    permissionMode: row.permission_mode,
+    // 脏值兜底：DB 值非法（手改/历史脏数据）时回落 null（= 跟随全局默认）。
+    permissionMode: isValidPermissionMode(row.permission_mode) ? row.permission_mode : null,
     maxTurns: row.max_turns,
     // 脏值兜底：DB 值非法（手改/历史脏数据）时回落 null（= 跟随全局默认）。
     thinkingLevel: isValidThinkingLevel(row.thinking_level) ? row.thinking_level : null,
@@ -54,9 +56,11 @@ export function createSession(name: string, model: string, workingDir: string | 
   const db = getConnection();
   const id = uuidv4();
 
+  // permission_mode 显式写 NULL（= 跟随全局默认 AppConfig.permissionMode），
+  // 不落 'default'——否则会钉死新会话为默认档，全局默认权限永远不生效。
   db.prepare(
-    `INSERT INTO sessions (id, name, model, working_dir)
-     VALUES (@id, @name, @model, @workingDir)`,
+    `INSERT INTO sessions (id, name, model, working_dir, permission_mode)
+     VALUES (@id, @name, @model, @workingDir, NULL)`,
   ).run({ id, name, model, workingDir });
 
   const session = getSession(id);

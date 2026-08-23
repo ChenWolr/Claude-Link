@@ -1,6 +1,7 @@
 // Claude Code 的模型类型别名（CLI 通过 env.ANTHROPIC_DEFAULT_<ALIAS>_MODEL 映射到实际模型）。
 export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
 import type { NonAutoThinkingLevel } from './thinking';
+import type { PermissionMode } from '../permission-resolver';
 
 export interface AppConfig {
   provider: 'anthropic' | 'openrouter' | 'bedrock' | 'vertex';
@@ -13,7 +14,9 @@ export interface AppConfig {
   cliPath: string | null;
   cliVersion: string | null;
   workingDirectory: string | null;
-  permissionMode: 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
+  // 全局默认权限档（新会话与未单独设权限的会话回落到此值）。会话级 Session.permissionMode
+  // 为 null = 跟随此全局默认，非 null = 该会话显式选定档（见 permission-resolver）。
+  permissionMode: PermissionMode;
   maxTurns: number;
   taskDelaySeconds: number;
   themePaletteId: string;

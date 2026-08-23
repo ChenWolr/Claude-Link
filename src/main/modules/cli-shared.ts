@@ -7,6 +7,7 @@
 
 import type { CliInitEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliResultEvent, CliEvent, CliMessageEvent, CliMessageContentPart, CliAbortedEvent } from '../../shared/types/cli';
 import type { ThinkingLevel } from '../../shared/types/thinking';
+import type { PermissionMode } from '../../shared/permission-resolver';
 import { getConfig } from './config-manager';
 import { resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { logger } from '../utils/logger';
@@ -25,7 +26,8 @@ export interface SpawnOptions {
   providerOverride?: string | null;
   workingDir?: string | null;
   maxTurns?: number;
-  permissionMode?: string;
+  /** 每会话权限覆盖；null/未设 = 回落全局默认（config.permissionMode）。 */
+  permissionMode?: PermissionMode | null;
   resumeSessionId?: string | null;
   /** 当前会话附件根目录等受控路径；合并进 SDK options.additionalDirectories，不覆盖 cwd。 */
   additionalDirectories?: string[];

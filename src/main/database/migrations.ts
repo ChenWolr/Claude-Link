@@ -22,7 +22,8 @@ export function runMigrations(db: Database.Database): void {
         cli_session_id TEXT,
         model TEXT NOT NULL DEFAULT 'claude-sonnet-4-6',
         working_dir TEXT,
-        permission_mode TEXT DEFAULT 'default',
+        -- NULL = 跟随全局默认权限（AppConfig.permissionMode）；createSession 显式写 NULL。
+        permission_mode TEXT DEFAULT NULL,
         max_turns INTEGER DEFAULT 200,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -128,6 +129,15 @@ export function runMigrations(db: Database.Database): void {
   db.exec(`
     UPDATE sessions SET model_override = NULL
     WHERE model_override IN ('sonnet', 'haiku', 'opus', 'fable');
+  `);
+
+  // 幂等自愈（权限存量清洗）：老版本 createSession 落的 'default' 是旧列默认值（幻影显式值，
+  // 非用户选择），会把存量会话钉死在默认档、永不跟随全局默认权限。统一重置为 NULL
+  //（= 跟随全局默认）。代价：升级前用户显式选过「默认模式」的会话也会被重置为跟随——
+  // 与 V8 model_override 别名清洗同一取舍，用户重选一次即可。重复执行无害（已为 NULL 不变）。
+  db.exec(`
+    UPDATE sessions SET permission_mode = NULL
+    WHERE permission_mode = 'default';
   `);
 
   // 幂等自愈（messages 过程化四列）：老 DB（plan 落地前建库）的 messages 表没有
