@@ -391,6 +391,16 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
   gap: 0.125rem;
 }
 
+/* 设置页滚动容器：供应商列表溢出时常驻低对比度滚动条（同 ConfigPage 行为/外观卡，避免
+   全局 overlay 滚动条在表单溢出时无提示）。 */
+.plist-items::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-muted) 28%, transparent);
+}
+
+.plist-items::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
 .pitem {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -485,6 +495,15 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
   overflow-y: auto;
   display: flex;
   flex-direction: column;
+}
+
+/* 设置页滚动容器：模型列表溢出时常驻低对比度滚动条（同左栏 plist-items）。 */
+.mscroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-muted) 28%, transparent);
+}
+
+.mscroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
 }
 
 .card-head {
