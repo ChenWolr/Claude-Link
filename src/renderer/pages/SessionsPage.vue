@@ -167,12 +167,15 @@ async function openSession(session: { id: string }) {
 
 <style scoped>
 .sessions-page {
-  /* 独立滚动区：外层 workspace-main overflow hidden，长列表在此自身滚动。 */
+  /* 独立滚动区：外层 workspace-main overflow hidden，长列表在此自身滚动。
+     width:100% + max-width + margin:0 auto 让整块内容在中间工作区内水平居中。 */
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 32px;
+  width: 100%;
   max-width: 800px;
+  margin: 0 auto;
 }
 
 .sessions-page__header {
