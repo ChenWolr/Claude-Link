@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu } from 'electron';
+import { app, BrowserWindow, Menu, Tray, nativeImage } from 'electron';
 import { join } from 'path';
 import { randomUUID } from 'node:crypto';
 import { electronApp, is, optimizer } from '@electron-toolkit/utils';
@@ -6,7 +6,7 @@ import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
 import { detectCli } from './modules/cli-detector';
-import { ensureProviderMigration } from './modules/config-manager';
+import { ensureProviderMigration, getConfig } from './modules/config-manager';
 import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe } from './modules/sdk-backend';
 import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
@@ -28,6 +28,51 @@ if (process.env.CLAUDE_LINK_EXPORT_SMOKE) {
 }
 
 let mainWindow: BrowserWindow | null = null;
+// 托盘（后台运行模式）。懒创建：首次「关闭即隐藏」时建立，之后常驻直到退出；
+// 右键菜单提供「显示主窗口」与「退出」两项——退出是真正结束进程的唯一入口（当 minimizeToTray 开时）。
+let tray: Tray | null = null;
+// 正在真正退出的标志：托盘「退出」置 true 后，close 处理器不再拦截（避免最小化拦截到 app.quit）。
+let quitting = false;
+
+function trayIcon(): Electron.NativeImage {
+  // dev：icon.png 位于项目根 resources/；packaged：经 electron-builder extraResources
+  // 拷贝到 <安装目录>/resources/icon.png（process.resourcesPath），asar 内不含 resources/。
+  const base = app.isPackaged ? process.resourcesPath : app.getAppPath();
+  const icon = nativeImage.createFromPath(join(base, 'resources', 'icon.png'));
+  if (!icon.isEmpty()) {
+    return icon.resize({ width: 16, height: 16 });
+  }
+  return nativeImage.createEmpty();
+}
+
+function showMainWindow(): void {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function ensureTray(): void {
+  if (tray) return;
+  tray = new Tray(trayIcon());
+  tray.setToolTip('Claude Link');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      { label: '显示主窗口', click: () => showMainWindow() },
+      { type: 'separator' },
+      {
+        label: '退出',
+        click: () => {
+          quitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+  // 左键单击/双击都显示主窗口（右键已由 setContextMenu 弹出菜单）。
+  tray.on('click', () => showMainWindow());
+  tray.on('double-click', () => showMainWindow());
+}
 
 function createWindow(): void {
   const size = loadWindowSize();
@@ -52,6 +97,14 @@ function createWindow(): void {
     if (process.platform === 'win32') {
       Menu.setApplicationMenu(null);
     }
+  });
+
+  // 后台运行模式：minimizeToTray 开启且非真正退出时，关闭窗口改为隐藏到托盘，不退出进程。
+  mainWindow.on('close', (event) => {
+    if (quitting || !getConfig().minimizeToTray) return;
+    event.preventDefault();
+    mainWindow?.hide();
+    ensureTray();
   });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
