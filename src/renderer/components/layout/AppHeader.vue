@@ -13,6 +13,15 @@ const taskStore = useTaskStore();
 const exportStore = useExportImageStore();
 const activeSession = computed(() => sessionStore.activeSession);
 
+// 顶栏标题按路由切换：chat 页显示「当前会话 + 会话标题」，配置/会话管理页显示各自页面标题。
+// 会话标题只属于聊天页；进入配置页后左上角不应再出现会话名，而应显示「配置」。
+const isChat = computed(() => route.name === 'chat');
+const pageTitle = computed(() => {
+  if (route.name === 'config') return '配置';
+  if (route.name === 'sessions') return '会话管理';
+  return '';
+});
+
 // 标题重命名：点击 ✎ 进入内联编辑，Enter/blur 保存，Esc 取消。
 const editing = ref(false);
 const draftName = ref('');
@@ -78,26 +87,30 @@ function onFormatCancel(): void {
 <template>
   <header class="app-header">
     <div class="app-header__title">
-      <p class="app-header__label">当前会话</p>
-      <div v-if="activeSession" class="app-header__name">
-        <input
-          v-if="editing"
-          ref="inputRef"
-          v-model="draftName"
-          class="app-header__name-input"
-          maxlength="80"
-          @keydown.enter.prevent="commitEdit"
-          @keydown.esc="cancelEdit"
-          @blur="commitEdit"
-        />
-        <template v-else>
-          <h2 :title="activeSession.name">{{ activeSession.name }}</h2>
-          <button type="button" class="app-header__rename" title="重命名会话" @click="startEdit">✎</button>
-        </template>
-      </div>
-      <h2 v-else>未选择会话</h2>
+      <template v-if="isChat">
+        <p class="app-header__label">当前会话</p>
+        <div v-if="activeSession" class="app-header__name">
+          <input
+            v-if="editing"
+            ref="inputRef"
+            v-model="draftName"
+            class="app-header__name-input"
+            maxlength="80"
+            @keydown.enter.prevent="commitEdit"
+            @keydown.esc="cancelEdit"
+            @blur="commitEdit"
+          />
+          <template v-else>
+            <h2 :title="activeSession.name">{{ activeSession.name }}</h2>
+            <button type="button" class="app-header__rename" title="重命名会话" @click="startEdit">✎</button>
+          </template>
+        </div>
+        <h2 v-else>未选择会话</h2>
+      </template>
+      <h2 v-else class="app-header__page-title">{{ pageTitle }}</h2>
     </div>
     <button
+      v-if="isChat"
       type="button"
       class="app-header__share"
       :class="{ 'app-header__share--busy': exportStore.running, 'app-header__share--done': exportStore.phase === 'done' }"

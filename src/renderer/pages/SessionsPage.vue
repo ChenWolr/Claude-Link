@@ -94,10 +94,6 @@ async function openSession(session: { id: string }) {
 <template>
   <section class="sessions-page">
     <header class="sessions-page__header">
-      <div>
-        <p class="eyebrow">Sessions</p>
-        <h1>会话管理</h1>
-      </div>
       <div class="sessions-page__actions">
         <button
           type="button"
@@ -182,20 +178,8 @@ async function openSession(session: { id: string }) {
 .sessions-page__header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   margin-bottom: 24px;
-}
-
-.eyebrow {
-  margin: 0 0 4px;
-  color: var(--color-accent-strong);
-  font-size: 0.75rem;
-  font-weight: 700;
-}
-
-.sessions-page__header h1 {
-  margin: 0;
-  font-size: 1.5rem;
 }
 
 .sessions-page__actions {

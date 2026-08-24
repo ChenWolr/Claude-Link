@@ -213,10 +213,6 @@ function handlePermissionModeChange(e: Event) {
   <section class="settings">
     <div class="settings-inner" :style="{ '--col-w': columnWidth }">
     <header class="page-head">
-      <div>
-        <p class="eyebrow">Settings</p>
-        <h1>配置</h1>
-      </div>
       <button class="back-button" type="button" @click="router.push('/')">← 返回会话</button>
     </header>
 
@@ -375,11 +371,6 @@ function handlePermissionModeChange(e: Event) {
   margin-inline: auto;
 }
 
-.page-head h1 {
-  margin: 0.25rem 0 0;
-  font-size: 1.5rem;
-}
-
 .back-button {
   margin-left: auto;
   border: 1px solid var(--color-border);
@@ -394,13 +385,6 @@ function handlePermissionModeChange(e: Event) {
 
 .back-button:hover {
   background: var(--color-panel-soft);
-}
-
-.eyebrow {
-  margin: 0;
-  color: var(--color-accent-strong);
-  font-size: 0.75rem;
-  font-weight: 700;
 }
 
 /* 家具块（横幅/toast/存储信息/操作条）与标题/标签/工作区同宽一列（用户反馈：
