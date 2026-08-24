@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { sessionDisplayStatusMeta, type SessionDisplayStatus } from '../../../shared/session-display-status';
+import { groupSessionsByProject, type SessionGroup } from '../../utils/group-sessions';
 
 const store = useSessionStore();
 const router = useRouter();
@@ -19,6 +20,65 @@ function statusLabel(sessionId: string): string {
 }
 const searchQuery = ref('');
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// 项目分组开关：false=全部（不分组，默认），true=按项目（workingDir）分组展示。
+// 点击「项目」切换分组，再点「全部」取消分组。
+const groupByProject = ref(false);
+
+// 分组视图：关闭时返回单个「全部」组（不渲染组头）；开启时按 workingDir 分组。
+// 分组作用于 displayedSessions，天然兼容搜索态（searchResults）。
+const viewGroups = computed<SessionGroup[]>(() => {
+  if (!groupByProject.value) {
+    return [{ key: 'all', label: '', dir: null, sessions: store.displayedSessions }];
+  }
+  return groupSessionsByProject(store.displayedSessions);
+});
+
+// 批量删除模式：开启后会话显示复选框、点击切换选中（不再跳转会话），
+// 底部批量操作条提供全选/删除所选。删除走 store.deleteSessions → 单个删除同一条
+// 物理删除 IPC 链（停 query/队列 → DELETE 级联删库 → 清理附件物理文件）。
+const batchMode = ref(false);
+const selectedIds = ref(new Set<string>());
+
+const allSelected = computed(
+  () =>
+    store.displayedSessions.length > 0 &&
+    store.displayedSessions.every((s) => selectedIds.value.has(s.id)),
+);
+
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value;
+  selectedIds.value = new Set();
+}
+
+function toggleSelected(id: string) {
+  const next = new Set(selectedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedIds.value = next;
+}
+
+function toggleSelectAll() {
+  selectedIds.value = allSelected.value
+    ? new Set()
+    : new Set(store.displayedSessions.map((s) => s.id));
+}
+
+async function confirmBatchDelete() {
+  const count = selectedIds.value.size;
+  if (!count) return;
+  const ok = await interactionStore.requestConfirm({
+    title: '批量删除会话',
+    message: `确定删除选中的 ${count} 个会话？会话及其全部消息、任务与附件将被永久删除，此操作不可撤销。`,
+    confirmText: '删除',
+    cancelText: '取消',
+    danger: true,
+  });
+  if (!ok) return;
+  await store.deleteSessions([...selectedIds.value]);
+  batchMode.value = false;
+  selectedIds.value = new Set();
+}
 
 onMounted(() => {
   store.loadSessions();
@@ -88,46 +148,111 @@ async function confirmDelete(session: { id: string; name: string }) {
       @search="handleSearchClear"
     />
 
-    <nav class="sidebar__sessions">
-      <div
-        v-for="session in store.displayedSessions"
-        :key="session.id"
-        :class="['session-link', {
-          active: store.activeSession?.id === session.id,
-          'session-link--running': displayStatus(session.id) === 'running',
-          'session-link--retrying': displayStatus(session.id) === 'retrying',
-          'session-link--completed': displayStatus(session.id) === 'completed',
-          'session-link--network-interrupted': displayStatus(session.id) === 'network_interrupted',
-        }]"
-        @click="openSession(session)"
-      >
-        <span
-          v-if="displayStatus(session.id) !== 'idle'"
-          class="session-link__status"
-          :class="[`session-link__status--${displayStatus(session.id)}`]"
-          role="img"
-          :aria-label="statusLabel(session.id)"
-          :title="statusLabel(session.id)"
-        ></span>
-        <span class="session-link__name">{{ session.name }}</span>
+    <div class="sidebar__toolbar">
+      <div class="seg" :class="{ 'seg--project': groupByProject }" role="group" aria-label="会话分组方式">
+        <span class="seg__thumb" aria-hidden="true"></span>
         <button
           type="button"
-          class="session-link__delete"
-          title="删除会话"
-          @click.stop="confirmDelete(session)"
+          :class="['seg__btn', { 'seg__btn--active': !groupByProject }]"
+          @click="groupByProject = false"
         >
-          ×
+          全部
+        </button>
+        <button
+          type="button"
+          :class="['seg__btn', { 'seg__btn--active': groupByProject }]"
+          @click="groupByProject = true"
+        >
+          项目
         </button>
       </div>
+      <button
+        type="button"
+        class="sidebar__multiselect"
+        :class="{ 'sidebar__multiselect--active': batchMode }"
+        :title="batchMode ? '退出批量删除' : '批量删除'"
+        :aria-label="batchMode ? '退出批量删除' : '批量删除'"
+        @click="toggleBatchMode"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 6h18" />
+          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+          <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          <path d="M10 11v6" />
+          <path d="M14 11v6" />
+        </svg>
+      </button>
+    </div>
+
+    <nav class="sidebar__sessions">
+      <template v-for="group in viewGroups" :key="group.key">
+        <div v-if="groupByProject" class="sidebar__group" :title="group.dir ?? undefined">
+          <span class="sidebar__group__label">{{ group.label }}</span>
+          <span class="sidebar__group__count">{{ group.sessions.length }}</span>
+        </div>
+        <div
+          v-for="session in group.sessions"
+          :key="session.id"
+          :class="['session-link', {
+            active: store.activeSession?.id === session.id,
+            'session-link--selected': batchMode && selectedIds.has(session.id),
+            'session-link--running': displayStatus(session.id) === 'running',
+            'session-link--retrying': displayStatus(session.id) === 'retrying',
+            'session-link--completed': displayStatus(session.id) === 'completed',
+            'session-link--network-interrupted': displayStatus(session.id) === 'network_interrupted',
+          }]"
+          @click="batchMode ? toggleSelected(session.id) : openSession(session)"
+        >
+          <input
+            v-if="batchMode"
+            class="session-link__check"
+            type="checkbox"
+            :checked="selectedIds.has(session.id)"
+            @click.stop="toggleSelected(session.id)"
+          />
+          <span
+            v-if="displayStatus(session.id) !== 'idle'"
+            class="session-link__status"
+            :class="[`session-link__status--${displayStatus(session.id)}`]"
+            role="img"
+            :aria-label="statusLabel(session.id)"
+            :title="statusLabel(session.id)"
+          ></span>
+          <span class="session-link__name">{{ session.name }}</span>
+          <button
+            v-if="!batchMode"
+            type="button"
+            class="session-link__delete"
+            title="删除会话"
+            @click.stop="confirmDelete(session)"
+          >
+            ×
+          </button>
+        </div>
+      </template>
       <div v-if="!store.displayedSessions.length" class="sidebar__empty">
         {{ store.searchQuery ? '未找到匹配的会话' : '暂无会话' }}
       </div>
     </nav>
 
+    <div v-if="batchMode" class="sidebar__batchbar">
+      <label class="sidebar__batchbar__all">
+        <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" />
+        <span>全选</span>
+      </label>
+      <button
+        type="button"
+        class="sidebar__batchbar__delete"
+        :disabled="!selectedIds.size"
+        @click="confirmBatchDelete"
+      >
+        删除{{ selectedIds.size ? ` (${selectedIds.size})` : '' }}
+      </button>
+    </div>
+
     <div class="sidebar__footer">
       <button class="new-button" type="button" @click="handleNewSession">+ 新会话</button>
       <div class="sidebar__footer-links">
-        <RouterLink class="sessions-link" to="/sessions">会话管理</RouterLink>
         <RouterLink class="settings-link" to="/config">配置</RouterLink>
       </div>
     </div>
@@ -184,6 +309,139 @@ async function confirmDelete(session: { id: string; name: string }) {
   color: var(--color-text);
   padding: 9px 10px;
   outline: none;
+}
+
+/* 工具条：分组开关 + 批量删除按钮一行，紧贴搜索框下方。 */
+.sidebar__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* 分组开关：等宽左右切换（全部/项目）。seg 相对定位承载滑动滑块 thumb，
+   未选中时 thumb 停在「全部」，选中「项目」时滑到右侧。 */
+.seg {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  box-shadow: var(--ring-light);
+}
+
+.seg__thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc(50% - 4px);
+  border-radius: calc(var(--radius-md) - 3px);
+  background: var(--color-accent);
+  box-shadow: var(--ring-light-accent), var(--elevation-1);
+  transition: transform var(--duration-base) var(--ease-out);
+}
+
+/* 补偿 2px gap，确保滑块精确覆盖「项目」按钮，不露边。 */
+.seg--project .seg__thumb {
+  transform: translateX(calc(100% + 2px));
+}
+
+.seg__btn {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: calc(var(--radius-md) - 3px);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out);
+}
+
+.seg__btn--active {
+  color: var(--color-on-accent);
+}
+
+/* 批量删除按钮：图标按钮（垃圾桶），进入多选删除模式；激活时红色填充回显。 */
+.sidebar__multiselect {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+
+.sidebar__multiselect:hover {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.sidebar__multiselect--active {
+  background: var(--color-danger);
+  border-color: var(--color-danger);
+  color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent);
+}
+
+.sidebar__multiselect svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 项目分组头：组名 + 计数，紧贴下一组卡片。 */
+.sidebar__group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 2px 4px;
+}
+
+.sidebar__group:first-child {
+  margin-top: 0;
+}
+
+.sidebar__group__label {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: var(--color-accent-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__group__count {
+  flex-shrink: 0;
+  font-size: 0.625rem;
+  color: var(--color-text-muted);
+  background: var(--color-panel-soft);
+  border-radius: 999px;
+  padding: 1px 7px;
 }
 
 .sidebar__sessions {
@@ -336,20 +594,82 @@ async function confirmDelete(session: { id: string; name: string }) {
   text-align: center;
 }
 
+/* 批量删除：复选框 + 选中态高亮。选中态用 accent 描边+淡填充，区别于活动会话的左侧条。 */
+.session-link__check {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.session-link--selected {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  box-shadow: inset 0 0 0 1px var(--color-accent);
+}
+
+.session-link--selected:hover {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+/* 批量操作条：多选模式下置底（footer 之上），全选 + 删除所选。 */
+.sidebar__batchbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+}
+
+.sidebar__batchbar__all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.sidebar__batchbar__all input {
+  width: 14px;
+  height: 14px;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.sidebar__batchbar__delete {
+  margin-left: auto;
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-danger);
+  padding: 5px 12px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sidebar__batchbar__delete:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .sidebar__footer {
   display: grid;
   gap: 8px;
 }
 
-/* 会话管理 / 配置：底部并排两个描边入口；会话管理页承载批量删除。 */
+/* 底部入口：现在只剩「配置」单入口，占满整行。 */
 .sidebar__footer-links {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 
 .new-button,
-.sessions-link,
 .settings-link {
   border-radius: var(--radius-md);
   padding: 10px 11px;
@@ -364,7 +684,6 @@ async function confirmDelete(session: { id: string; name: string }) {
   font-weight: 700;
 }
 
-.sessions-link,
 .settings-link {
   display: block;
   border: 1px solid var(--color-border);
@@ -372,7 +691,6 @@ async function confirmDelete(session: { id: string; name: string }) {
   font-size: 0.8125rem;
 }
 
-.sessions-link:hover,
 .settings-link:hover {
   border-color: var(--color-accent);
 }
