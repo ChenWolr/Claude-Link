@@ -791,7 +791,8 @@ console.log('\n=== 34) 进度状态层（C）：tool_progress / task_* / compact
   check('TaskQueuePanel 子Agent 本回合过滤（util 纯逻辑 + 组件接线）',
     tqp.includes('turnStartIndex') && tqp.includes('aggregateSubAgentGroups') &&
     readRel('src/renderer/utils/subagent-groups.ts').includes('currentTurnMessages'));
-  check('ContextButton 实时压缩态', cb.includes('store.compacting') && cb.includes('正在压缩'));
+  // 用户要求：长按圈圈触发压缩后，不再展示「正在压缩上下文…」横幅；store.compacting 状态链路仍保留。
+  check('ContextButton 不再展示压缩中横幅', !cb.includes('正在压缩') && !cb.includes('ctx__banner--compacting'));
 }
 
 console.log('\n=== 35) system-info 过滤契约（问题 5）：空 informational 不展示 ===');
