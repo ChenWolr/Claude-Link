@@ -84,6 +84,9 @@ const defaultConfig: StoredConfig = {
   // 默认思考强度：medium 是五级中位，最接近原硬编码 adaptive 的「平衡」档，
   // 避免默认开高带来成本/延迟意外。投影层对 medium 不投影以尊重 ~/.claude 配置。
   defaultThinkingLevel: 'medium',
+  // 失焦系统通知默认开（保留既有「完成/中断时弹通知」行为）；后台运行默认关（保持「关闭即退出」）。
+  notifyOnLeave: true,
+  minimizeToTray: false,
   // ⚠️ providerProfiles / lastUsedProviderId / lastUsedModelId 故意不设默认值：
   // electron-store 的 defaults 会并入 store 视图参与 has() 判定，一旦给了默认值
   // （哪怕是 []），「键是否存在」永远是 true，ensureProviderMigration 的迁移守卫
@@ -178,6 +181,8 @@ export function getConfig(): AppConfig {
     defaultThinkingLevel,
     lastUsedProviderId: config.lastUsedProviderId ?? null,
     lastUsedModelId: config.lastUsedModelId ?? null,
+    notifyOnLeave: config.notifyOnLeave ?? true,
+    minimizeToTray: config.minimizeToTray ?? false,
   };
 }
 

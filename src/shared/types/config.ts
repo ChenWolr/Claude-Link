@@ -33,6 +33,12 @@ export interface AppConfig {
   // ProviderProfileView（掩码）出主进程，故不进 AppConfig 公开形状。
   lastUsedProviderId: string | null;
   lastUsedModelId: string | null;
+  // 失焦系统通知开关：主窗口未聚焦时，会话完成 / 网络异常中断是否弹桌面右下角系统通知。
+  // 仅控制「离开会话后」的通知；窗口聚焦时本就静默（见 session-completion-notifier 守卫）。
+  notifyOnLeave: boolean;
+  // 后台运行开关：为 true 时点击窗口关闭按钮只把主窗口隐藏到系统托盘，而非退出进程；
+  // 需在托盘图标右键「退出」才真正结束程序。为 false 时关闭窗口直接退出（现状行为）。
+  minimizeToTray: boolean;
 }
 
 // ── 多供应商 × 无限模型库（设置页 = 可选项库，会话内选用）────────────────

@@ -727,31 +727,39 @@ check('v2-F3：use-chat 兜底捕获 generation 并比较（旧回合 finally �
 });
 
 console.log('\n=== F3：失焦系统通知判定 buildSessionNotification 行为 ===');
-check('F3：平台不支持 / 窗口销毁 / 窗口聚焦 / 会话不存在 → 均不通知', () => {
-  const base = { notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: 'S-1' };
+check('F3：通知开关关闭 / 平台不支持 / 窗口销毁 / 窗口聚焦 / 会话不存在 → 均不通知', () => {
+  const base = { notifyEnabled: true, notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: 'S-1' };
+  assert.equal(buildSessionNotification({ ...base, notifyEnabled: false }, '网络异常，已中断'), null);
   assert.equal(buildSessionNotification({ ...base, notificationSupported: false }, '网络异常，已中断'), null);
   assert.equal(buildSessionNotification({ ...base, windowDestroyed: true }, '网络异常，已中断'), null);
   assert.equal(buildSessionNotification({ ...base, windowFocused: true }, '网络异常，已中断'), null);
   assert.equal(buildSessionNotification({ ...base, sessionName: null }, '网络异常，已中断'), null);
 });
+check('F3：notifyOnLeave 开关关闭优先于平台/焦点/会话判定（一律静默）', () => {
+  // 即使其它条件全部满足，只要开关关闭就不通知。
+  assert.equal(
+    buildSessionNotification({ notifyEnabled: false, notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: 'S' }, '任务已完成'),
+    null,
+  );
+});
 check('F3：窗口销毁优先于聚焦判定（destroyed 一律不通知）', () => {
   assert.equal(
-    buildSessionNotification({ notificationSupported: true, windowDestroyed: true, windowFocused: false, sessionName: 'S' }, 'x'),
+    buildSessionNotification({ notifyEnabled: true, notificationSupported: true, windowDestroyed: true, windowFocused: false, sessionName: 'S' }, 'x'),
     null,
   );
 });
 check('F3：失焦且会话存在 → 载荷精确为会话标题 + 指定正文（两种通知种类）', () => {
   assert.deepEqual(
-    buildSessionNotification({ notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: '会话 A' }, '网络异常，已中断'),
+    buildSessionNotification({ notifyEnabled: true, notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: '会话 A' }, '网络异常，已中断'),
     { title: '会话 A', body: '网络异常，已中断' },
   );
   assert.deepEqual(
-    buildSessionNotification({ notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: '会话 A' }, '任务已完成'),
+    buildSessionNotification({ notifyEnabled: true, notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: '会话 A' }, '任务已完成'),
     { title: '会话 A', body: '任务已完成' },
   );
 });
 check('F3：标题来自最新 session.name（非用户输入拼接），正文固定不随标题变', () => {
-  const p = buildSessionNotification({ notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: 'S-123' }, '网络异常，已中断');
+  const p = buildSessionNotification({ notifyEnabled: true, notificationSupported: true, windowDestroyed: false, windowFocused: false, sessionName: 'S-123' }, '网络异常，已中断');
   assert.equal(p?.title, 'S-123');
   assert.equal(p?.body, '网络异常，已中断');
 });
@@ -760,6 +768,9 @@ check('F3：notifier 实际使用共享纯函数决策并构造 Notification', (
   assert.ok(notifier.includes("import { buildSessionNotification } from '../../shared/session-notification';"));
   assert.ok(notifier.includes('buildSessionNotification('));
   assert.ok(notifier.includes('new Notification({ title: payload.title, body: payload.body })'));
+  // 配置开关 notifyOnLeave 必须接入纯函数决策（getConfig().notifyOnLeave → notifyEnabled）。
+  assert.ok(notifier.includes('notifyEnabled: getConfig().notifyOnLeave'));
+  assert.ok(notifier.includes("import { getConfig } from './config-manager';"));
 });
 
 console.log('\n=== 源码接线契约 ===');

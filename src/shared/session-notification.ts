@@ -9,6 +9,8 @@ export interface SessionNotificationPayload {
 }
 
 export interface SessionNotificationContext {
+  /** 用户配置「离开会话后通知」开关（notifyOnLeave）；false 时一律不弹系统通知。 */
+  notifyEnabled: boolean;
   /** Notification.isSupported() 的平台支持性。 */
   notificationSupported: boolean;
   /** 主窗口已销毁。 */
@@ -19,12 +21,13 @@ export interface SessionNotificationContext {
   sessionName: string | null;
 }
 
-// 守卫顺序与主进程 notifier 一致：① 平台支持性 → ② 窗口存活且未聚焦 → ③ 会话存在。
+// 守卫顺序与主进程 notifier 一致：① 配置开关 → ② 平台支持性 → ③ 窗口存活且未聚焦 → ④ 会话存在。
 // 返回 null 表示不发送（调用方静默跳过）；否则返回精确的 { title, body } 载荷。
 export function buildSessionNotification(
   ctx: SessionNotificationContext,
   body: string,
 ): SessionNotificationPayload | null {
+  if (!ctx.notifyEnabled) return null;
   if (!ctx.notificationSupported) return null;
   if (ctx.windowDestroyed || ctx.windowFocused) return null;
   if (!ctx.sessionName) return null;

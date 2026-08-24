@@ -36,6 +36,8 @@ const defaultConfig: AppConfig = {
   defaultThinkingLevel: 'medium',
   lastUsedProviderId: null,
   lastUsedModelId: null,
+  notifyOnLeave: true,
+  minimizeToTray: false,
 };
 
 export const useConfigStore = defineStore('config', {

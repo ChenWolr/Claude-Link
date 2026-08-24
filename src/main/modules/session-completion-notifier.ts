@@ -16,13 +16,14 @@ import { Notification } from 'electron';
 import type { BrowserWindow } from 'electron';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { buildSessionNotification } from '../../shared/session-notification';
+import { getConfig } from './config-manager';
 import { logger } from '../utils/logger';
 
 /**
  * 公共内部实现：主窗口未聚焦时发送系统通知。
  *
- * 守卫顺序固定：① 平台支持性 → ② 窗口存活/未聚焦 → ③ 读最新标题（会话不存在则
- * 跳过，避免已删除会话弹陈旧通知）→ ④ 构造并 show。判定由共享纯函数完成；
+ * 守卫顺序固定：① 配置开关（notifyOnLeave）→ ② 平台支持性 → ③ 窗口存活/未聚焦 → ④ 读最新标题
+ * （会话不存在则跳过，避免已删除会话弹陈旧通知）→ ⑤ 构造并 show。判定由共享纯函数完成；
  * 整个函数同步快速返回、不 await、不触碰 activeSessions 生命周期；
  * 任何异常（含 Notification 构造/show 抛错）只记录日志，不中断业务。
  */
@@ -31,6 +32,8 @@ function notifySession(mainWindow: BrowserWindow, sessionId: string, body: strin
     const session = sessionRepo.getSession(sessionId);
     const payload = buildSessionNotification(
       {
+        // 用户配置「离开会话后通知」开关（notifyOnLeave）；false 时纯函数直接返回 null 不弹通知。
+        notifyEnabled: getConfig().notifyOnLeave,
         notificationSupported: Notification.isSupported(),
         windowDestroyed: mainWindow.isDestroyed(),
         windowFocused: mainWindow.isFocused(),

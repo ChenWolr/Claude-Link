@@ -40,6 +40,12 @@
     "node_modules/pngjs/**",
   ],
 
+  // 托盘图标（后台运行模式）：resources/ 是 buildResources，只参与打包不被打进 asar，
+  // 运行时经 process.resourcesPath 读取，故额外拷贝 icon.png 到 <安装目录>/resources/。
+  extraResources: [
+    { from: "resources/icon.png", to: "icon.png" },
+  ],
+
   win: {
     icon: "resources/icon.ico",
     executableName: "claude-link",

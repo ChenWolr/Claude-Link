@@ -26,6 +26,7 @@ const activeTab = ref<TabId>('connection');
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
   'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale', 'contextWindowByAlias', 'defaultThinkingLevel',
+  'notifyOnLeave', 'minimizeToTray',
 ] as const;
 
 const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -285,15 +286,15 @@ function handlePermissionModeChange(e: Event) {
             <div class="section">
               <h3 class="section-title">行为</h3>
               <label class="field">
-                <span>最大轮次 <small class="field-hint">对应 Claude Code <code>--max-turns</code>：限制单次会话的最大工具调用轮数。</small></span>
+                <span>最大轮次 <small class="field-hint">单次会话最大工具调用轮数（<code>--max-turns</code>）。</small></span>
                 <input v-model.number="store.config.maxTurns" type="number" min="1" />
               </label>
               <label class="field">
-                <span>队列任务间隔（秒） <small class="field-hint">Claude Link 自身功能：任务队列里两条任务之间的等待时间。<strong>非</strong> Claude Code 配置。</small></span>
+                <span>队列任务间隔（秒） <small class="field-hint">任务队列中相邻任务的等待时间。</small></span>
                 <input v-model.number="store.config.taskDelaySeconds" type="number" min="0" />
               </label>
               <label class="field">
-                <span>默认思考强度 <small class="field-hint">新会话与未单独设档的会话回落到此值。低=快速响应、高=深入分析、超高/极限=最强推理；「工作流」档为 xhigh + 动态工作流编排（Beta，成本最高）。也可在<strong>会话内</strong>按需单独调整。</small></span>
+                <span>默认思考强度 <small class="field-hint">新会话默认档；「工作流」档成本最高（Beta）。会话内可单独调整。</small></span>
                 <select :value="store.config.defaultThinkingLevel" @change="handleThinkingLevelChange">
                   <option value="low">低（快速响应）</option>
                   <option value="medium">中（平衡，默认）</option>
@@ -304,7 +305,7 @@ function handlePermissionModeChange(e: Event) {
                 </select>
               </label>
               <label class="field">
-                <span>默认权限 <small class="field-hint">新会话与未单独设置权限的会话回落到此档；也可在<strong>会话内</strong>按需单独调整（跟随全局默认 / 默认 / 规划 / 代理 / 自动）。</small></span>
+                <span>默认权限 <small class="field-hint">新会话默认档；会话内可单独调整。</small></span>
                 <select :value="store.config.permissionMode" @change="handlePermissionModeChange">
                   <option value="default">默认模式（需手动确认危险操作）</option>
                   <option value="plan">规划模式（只规划，审批后执行）</option>
@@ -312,7 +313,14 @@ function handlePermissionModeChange(e: Event) {
                   <option value="bypassPermissions">自动模式（越过所有权限检查，谨慎使用）</option>
                 </select>
               </label>
-              <p class="field-hint">权限与思考强度均为「全局默认 + 会话内各自覆盖」：全局默认在这里设置，单个会话在聊天区底部工具栏独立调整。</p>
+              <label class="field field--toggle">
+                <span>离开会话后通知 <small class="field-hint">窗口失焦时，任务完成/网络中断弹系统通知。</small></span>
+                <input v-model="store.config.notifyOnLeave" type="checkbox" />
+              </label>
+              <label class="field field--toggle">
+                <span>后台运行 <small class="field-hint">关闭窗口时最小化到托盘，右键托盘「退出」才结束程序。</small></span>
+                <input v-model="store.config.minimizeToTray" type="checkbox" />
+              </label>
             </div>
           </div>
         </div>
@@ -737,5 +745,20 @@ input[type='number'] {
   color: var(--color-text);
   padding: 0.625rem 0.75rem;
   font-size: 0.8125rem;
+}
+
+/* 布尔开关项：标题与勾选框同行，勾选框右对齐（与 r9 统一面板风格一致）。 */
+.field--toggle {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.field--toggle input[type='checkbox'] {
+  width: 1.25rem;
+  height: 1.25rem;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
 }
 </style>
