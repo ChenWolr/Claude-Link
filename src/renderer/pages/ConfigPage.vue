@@ -286,15 +286,18 @@ function handlePermissionModeChange(e: Event) {
             <div class="section">
               <h3 class="section-title">行为</h3>
               <label class="field">
-                <span>最大轮次 <small class="field-hint">单次会话最大工具调用轮数（<code>--max-turns</code>）。</small></span>
+                <span class="field-label">最大轮次</span>
+                <span class="field-desc">单次会话最大工具调用轮数（<code>--max-turns</code>）。</span>
                 <input v-model.number="store.config.maxTurns" type="number" min="1" />
               </label>
               <label class="field">
-                <span>队列任务间隔（秒） <small class="field-hint">任务队列中相邻任务的等待时间。</small></span>
+                <span class="field-label">队列任务间隔（秒）</span>
+                <span class="field-desc">任务队列中相邻任务的等待时间。</span>
                 <input v-model.number="store.config.taskDelaySeconds" type="number" min="0" />
               </label>
               <label class="field">
-                <span>默认思考强度 <small class="field-hint">新会话默认档；「工作流」档成本最高（Beta）。会话内可单独调整。</small></span>
+                <span class="field-label">默认思考强度</span>
+                <span class="field-desc">新会话默认档；「工作流」档成本最高（Beta）。会话内可单独调整。</span>
                 <select :value="store.config.defaultThinkingLevel" @change="handleThinkingLevelChange">
                   <option value="low">低（快速响应）</option>
                   <option value="medium">中（平衡，默认）</option>
@@ -305,7 +308,8 @@ function handlePermissionModeChange(e: Event) {
                 </select>
               </label>
               <label class="field">
-                <span>默认权限 <small class="field-hint">新会话默认档；会话内可单独调整。</small></span>
+                <span class="field-label">默认权限</span>
+                <span class="field-desc">新会话默认档；会话内可单独调整。</span>
                 <select :value="store.config.permissionMode" @change="handlePermissionModeChange">
                   <option value="default">默认模式（需手动确认危险操作）</option>
                   <option value="plan">规划模式（只规划，审批后执行）</option>
@@ -314,11 +318,13 @@ function handlePermissionModeChange(e: Event) {
                 </select>
               </label>
               <label class="field field--toggle">
-                <span>离开会话后通知 <small class="field-hint">窗口失焦时，任务完成/网络中断弹系统通知。</small></span>
+                <span class="field-label">离开会话后通知</span>
+                <span class="field-desc">窗口失焦时，任务完成/网络中断弹系统通知。</span>
                 <input v-model="store.config.notifyOnLeave" type="checkbox" />
               </label>
               <label class="field field--toggle">
-                <span>后台运行 <small class="field-hint">关闭窗口时最小化到托盘，右键托盘「退出」才结束程序。</small></span>
+                <span class="field-label">后台运行</span>
+                <span class="field-desc">关闭窗口时最小化到托盘，右键托盘「退出」才结束程序。</span>
                 <input v-model="store.config.minimizeToTray" type="checkbox" />
               </label>
             </div>
@@ -332,7 +338,8 @@ function handlePermissionModeChange(e: Event) {
               <h3 class="section-title">外观</h3>
               <ThemeSelector :selected-id="store.config.themePaletteId" @select="handleThemeSelect" />
               <label class="field">
-                <span>字号 <small class="field-hint">小/中/大三档，全局缩放所有文字与间距</small></span>
+                <span class="field-label">字号</span>
+                <span class="field-desc">小/中/大三档，全局缩放所有文字与间距</span>
                 <select :value="store.config.fontScale" @change="handleFontScaleChange">
                   <option value="small">小</option>
                   <option value="medium">中</option>
@@ -657,6 +664,10 @@ function handlePermissionModeChange(e: Event) {
   aspect-ratio: 3 / 2;
   width: var(--col-w);
   margin-inline: auto;
+  /* 关键：作为 .stage（flex column）的子项，默认 min-height:auto 会被内容 min-content 钳制，
+     字号放大后撑破 aspect-ratio 高度、溢出被 .settings 裁掉（底部内容看不到）。
+     min-height:0 解除自动最小尺寸，让高度严格回落到 3:2，内容由面板内部滚动兜底。 */
+  min-height: 0;
 }
 
 .wb-connection {
@@ -666,19 +677,25 @@ function handlePermissionModeChange(e: Event) {
   display: flex;
 }
 
-/* 行为/外观：整卡表单（solo 卡，内部滚动，全圆角）。 */
+/* 行为/外观：整卡表单（solo 卡，内部滚动，全圆角）。
+   必须保持 flex 布局：display:block 会让 aspect-ratio 在 height:100% 子元素下失效，
+   工作区被内容撑破、溢出被 .settings 裁掉（字号「大」时内容超高，底部看不到）。 */
 .workbench--solo {
-  display: block;
+  display: flex;
+  flex-direction: column;
 }
 
 .solo-card {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   width: 100%;
-  height: 100%;
   display: flex;
   flex-direction: column;
-  background: var(--color-panel-soft);
+  background: var(--color-panel);
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--ring-light), var(--elevation-1);
   overflow: hidden;
 }
 
@@ -690,49 +707,67 @@ function handlePermissionModeChange(e: Event) {
   flex-direction: column;
 }
 
-/* 原有 .section 内容装入 solo 卡：去掉自带卡片框（外层已是统一面板），字段排版不变。 */
-.solo-card .section {
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-  border-radius: 0;
-}
-
+/* 统一面板内部分组表单：字段间 hairline 分隔，标签/描述分层，控件精致化。 */
 .section {
-  display: grid;
-  gap: 1rem;
-  padding: 1.25rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-panel);
-  box-shadow: var(--ring-light), var(--elevation-1);
+  display: flex;
+  flex-direction: column;
+  padding: 1.5rem;
 }
 
 .section-title {
-  margin: 0 0 0.25rem;
-  font-size: 0.9375rem;
-  font-weight: 650;
+  margin: 0 0 1.125rem;
+  font-size: 1rem;
+  font-weight: 700;
   color: var(--color-text);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* 标题前 accent 竖条：给分组一个视觉锚点（不改变文案与结构）。 */
+.section-title::before {
+  content: '';
+  width: 0.25rem;
+  height: 1rem;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
 }
 
 .field {
   display: grid;
   gap: 0.5rem;
+  padding: 0.875rem 0;
 }
 
-.field span {
+/* 连续字段之间用 hairline 分隔（外观页单个字段无内部分隔线）。 */
+.field + .field {
+  border-top: 1px solid var(--color-border);
+}
+
+.field-label {
+  color: var(--color-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.field-desc {
   color: var(--color-text-muted);
-  font-size: 0.8125rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.field-desc code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-xs);
 }
 
 .field .required {
   color: var(--color-danger);
-}
-
-.field-hint {
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-  line-height: 1.5;
 }
 
 select,
@@ -740,25 +775,88 @@ input[type='text'],
 input[type='number'] {
   width: 100%;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 0.625rem 0.75rem;
-  font-size: 0.8125rem;
+  padding: 0.5625rem 0.75rem;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+  transition: border-color var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out);
 }
 
-/* 布尔开关项：标题与勾选框同行，勾选框右对齐（与 r9 统一面板风格一致）。 */
+select:hover,
+input[type='text']:hover,
+input[type='number']:hover {
+  border-color: var(--color-border-strong);
+}
+
+/* 主题网格与下方字号字段之间也补一条 hairline（与行为页字段节奏一致）。 */
+.section .theme-selector {
+  margin-bottom: 0.875rem;
+}
+
+.section .theme-selector + .field {
+  border-top: 1px solid var(--color-border);
+}
+
+/* 布尔开关项：标题与描述在左（竖直堆叠同一列）、开关在右跨两行居中。
+   原生 checkbox 用 CSS 重塑为 switch，保留 <input type="checkbox"> 与 v-model 绑定不变
+   （可访问性不损失）。 */
 .field--toggle {
   grid-template-columns: 1fr auto;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.5rem 1.5rem;
+}
+
+.field--toggle .field-label,
+.field--toggle .field-desc {
+  grid-column: 1;
 }
 
 .field--toggle input[type='checkbox'] {
-  width: 1.25rem;
-  height: 1.25rem;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+.field--toggle input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 2.75rem;
+  height: 1.5rem;
   margin: 0;
-  accent-color: var(--color-accent);
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
   cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--duration-base) var(--ease-out);
+}
+
+.field--toggle input[type='checkbox']::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0.1875rem;
+  width: 1.125rem;
+  height: 1.125rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transform: translateY(-50%);
+  transition: transform var(--duration-base) var(--ease-spring);
+}
+
+.field--toggle input[type='checkbox']:checked {
+  background: var(--color-accent);
+}
+
+.field--toggle input[type='checkbox']:checked::before {
+  transform: translateY(-50%) translateX(1.25rem);
+}
+
+.field--toggle input[type='checkbox']:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 </style>
