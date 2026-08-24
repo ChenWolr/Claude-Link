@@ -707,6 +707,16 @@ function handlePermissionModeChange(e: Event) {
   flex-direction: column;
 }
 
+/* 设置页表单滚动容器：内容溢出时常驻低对比度滚动条（全局 overlay 滚动条 hover 才显现，
+   表单溢出时无任何提示，用户误以为「下面没内容」；此处改常驻、hover 加深，仍保持细条风格）。 */
+.solo-card .mscroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-muted) 28%, transparent);
+}
+
+.solo-card .mscroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
 /* 统一面板内部分组表单：字段间 hairline 分隔，标签/描述分层，控件精致化。 */
 .section {
   display: flex;
