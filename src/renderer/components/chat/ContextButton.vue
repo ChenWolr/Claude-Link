@@ -33,9 +33,10 @@ watch(
   },
 );
 
-// 组件卸载时清 timer，避免 setTimeout 回调访问已销毁的 ref
+// 组件卸载时清 timer/rAF，避免 setTimeout 回调访问已销毁的 ref
 onBeforeUnmount(() => {
   if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+  resetHold();
 });
 
 const stats = computed(() => store.contextStats);
@@ -70,10 +71,10 @@ const thinking = computed(() => typeof store.thinkingTokens === 'number' && stor
 // 数字保留 last-known 可以接受，但 title 必须标明不是当前实时值。
 const isStaleTrusted = computed(() => hasTrustedCurrent.value && eff.value.freshness !== 'fresh');
 const btnTitle = computed(() => {
-  if (!hasTrustedCurrent.value) return '上下文待刷新，点击压缩';
+  if (!hasTrustedCurrent.value) return '上下文待刷新，长按 1 秒压缩';
   return isStaleTrusted.value
-    ? `上下文约已用 ${pct.value}%（上次采样，待刷新），点击压缩`
-    : `上下文已用 ${pct.value}%，点击压缩`;
+    ? `上下文约已用 ${pct.value}%（上次采样，待刷新），长按 1 秒压缩`
+    : `上下文已用 ${pct.value}%，长按 1 秒压缩`;
 });
 // review-v5 Medium-1：diagnostic 最后一公里——popover 截断展示 + title 放全文。
 const diagPreview = computed(() => {
@@ -104,6 +105,45 @@ const compactDetailLine = computed(() => {
   }
   return `压缩  ${fmt(s.fromTokens)} → ${fmt(s.toTokens)}（清出 ${fmt(s.droppedTokens)}）`;
 });
+
+// 长按压缩：按住圈圈 1 秒，红色进度环从 0 画满一圈后触发 /compact（等同旧「点击压缩」行为）。
+// 单击不再触发压缩；只有按满 1 秒才执行，中途松开/移出即取消。
+const HOLD_DURATION_MS = 1000;
+const holding = ref(false);
+const holdProgress = ref(0); // 0–100，驱动红色进度环 stroke-dasharray
+let holdStart = 0;
+let holdRaf = 0;
+let holdDoneTimer: ReturnType<typeof setTimeout> | null = null;
+
+function startHold(e: PointerEvent) {
+  if (e.button !== 0 || props.disabled) return;
+  holding.value = true;
+  holdProgress.value = 0;
+  holdStart = performance.now();
+  const tick = () => {
+    const elapsed = performance.now() - holdStart;
+    const p = Math.min(100, (elapsed / HOLD_DURATION_MS) * 100);
+    holdProgress.value = p;
+    if (p >= 100) {
+      // 红线刚好画满一圈 → 触发压缩（等同 /compact）；完整红圈停留 150ms 再复位，让用户看清画满。
+      holdProgress.value = 100;
+      holdRaf = 0;
+      emit('compress');
+      if (holdDoneTimer) clearTimeout(holdDoneTimer);
+      holdDoneTimer = setTimeout(resetHold, 150);
+      return;
+    }
+    holdRaf = requestAnimationFrame(tick);
+  };
+  holdRaf = requestAnimationFrame(tick);
+}
+
+function resetHold() {
+  if (holdRaf) { cancelAnimationFrame(holdRaf); holdRaf = 0; }
+  if (holdDoneTimer) { clearTimeout(holdDoneTimer); holdDoneTimer = null; }
+  holding.value = false;
+  holdProgress.value = 0;
+}
 </script>
 
 <template>
@@ -114,16 +154,26 @@ const compactDetailLine = computed(() => {
       :class="{ 'ctx__btn--high': pct >= 80, 'ctx__btn--thinking': thinking, 'ctx__btn--stale': isStaleTrusted }"
       :disabled="props.disabled"
       :title="btnTitle"
-      @click="emit('compress')"
+      @pointerdown.prevent="startHold"
+      @pointerup="resetHold"
+      @pointerleave="resetHold"
+      @pointercancel="resetHold"
     >
       <!-- 圆环可视化：底圈=未占用(整环)，扇形弧=已占用。无可信当前窗口(pct=0)时只显示空底圈。 -->
       <svg class="ctx__ring" viewBox="0 0 36 36" aria-hidden="true">
         <circle class="ctx__ring-bg" cx="18" cy="18" r="15.915" />
         <circle
-          v-if="pct > 0"
+          v-if="pct > 0 && !holding"
           class="ctx__ring-fg"
           cx="18" cy="18" r="15.915"
           :stroke-dasharray="`${pct} ${100 - pct}`"
+        />
+        <!-- 长按 1 秒压缩：红色进度环从 0 画满一圈 -->
+        <circle
+          v-if="holding"
+          class="ctx__ring-progress"
+          cx="18" cy="18" r="15.915"
+          :stroke-dasharray="`${holdProgress} ${100 - holdProgress}`"
         />
       </svg>
     </button>
@@ -135,22 +185,14 @@ const compactDetailLine = computed(() => {
       <div v-if="eff.turnCacheReadTokens != null" class="ctx__row"><span>缓存读取</span><code>{{ fmt(eff.turnCacheReadTokens) }}</code></div>
       <div v-if="eff.turnCacheCreationTokens != null" class="ctx__row"><span>缓存写入</span><code>{{ fmt(eff.turnCacheCreationTokens) }}</code></div>
       <div class="ctx__row ctx__row--pct"><span>占比</span><code>{{ hasTrustedCurrent ? pct + '%' : '待刷新' }}</code></div>
-      <div v-if="eff.source || eff.freshness" class="ctx__row"><span>来源</span><code>{{ eff.source }} / {{ eff.freshness }}</code></div>
-      <div v-if="eff.samplePhase" class="ctx__row"><span>采样阶段</span><code>{{ { 'query-start': '回合开始', 'mid-turn': '回合中', 'post-turn': '回合结束', 'post-compaction': '压缩后' }[eff.samplePhase] ?? eff.samplePhase }}</code></div>
-      <div v-if="eff.consistency === 'mismatch' || eff.consistency === 'unavailable'" class="ctx__row"><span>状态</span><code>{{ eff.consistency === 'mismatch' ? '对账不一致' : '暂不可对账' }}</code></div>
       <!-- review-v5 Medium-1：主进程四条 unavailable/mismatch 路径构造的具体诊断在此落地（含上一采样阶段）。 -->
       <div v-if="eff.diagnostic" class="ctx__row ctx__row--diag" data-testid="ctx-diag-row"><span>诊断</span><code :title="eff.diagnostic">{{ diagPreview }}</code></div>
       <!-- compact metadata display：压缩明细行（三值齐时才显示，样式与诊断行同级 muted）。 -->
       <div v-if="compactDetailLine" class="ctx__row ctx__row--diag" data-testid="ctx-compact-row"><span>压缩</span><code>{{ compactDetailLine.replace(/^压缩\s+/, '') }}</code></div>
     </div>
 
-    <!-- C：实时压缩进行中（status:compacting） -->
-    <transition name="ctx-banner">
-      <div v-if="store.compacting" class="ctx__banner ctx__banner--compacting" role="status" aria-live="polite">
-        正在压缩上下文…
-      </div>
-    </transition>
-
+    <!-- C：实时压缩进行中（status:compacting）——按用户要求不再展示横幅；
+         store.compacting 状态仍在 session-store/use-chat 维护，仅去掉这里的显示。 -->
     <!-- 问题 4：CC 自动压缩横幅。收到 compactedJustNow 时弹出，3 秒后自动消失。 -->
     <!-- compact metadata display：有账单数字时显示真实前后/清出量，否则回退现有文案。 -->
     <transition name="ctx-banner">
@@ -206,6 +248,13 @@ const compactDetailLine = computed(() => {
   stroke-linecap: round;
   transition: stroke-dasharray 0.3s;
 }
+/* 长按压缩进度环：红色，随 holdProgress 从 0 画满一圈 */
+.ctx__ring-progress {
+  fill: none;
+  stroke: var(--color-danger);
+  stroke-width: 3;
+  stroke-linecap: round;
+}
 .ctx__btn--high .ctx__ring-fg { stroke: var(--color-warn-strong); }
 /* review-v5 Low-1：stale 态圆环降透明度，与 thinking 呼吸态区分（数字为上次采样非实时） */
 .ctx__btn--stale .ctx__ring-fg { stroke-opacity: 0.55; }
@@ -247,11 +296,6 @@ const compactDetailLine = computed(() => {
   padding: 0.375rem 0.625rem;
   font-size: 0.75rem;
   box-shadow: var(--elevation-2), var(--ring-light);
-}
-/* C：实时压缩态强调色 */
-.ctx__banner--compacting {
-  border-color: var(--color-accent-strong);
-  color: var(--color-accent-strong);
 }
 .ctx-banner-enter-active, .ctx-banner-leave-active {
   transition: opacity 0.25s ease, transform 0.25s ease;
