@@ -321,6 +321,43 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
   min-height: 0;
 }
 
+/* 窄容器（workbench < 460px）：供应商列表 + 详情双栏折为上下堆叠，且整体垂直滚动，
+   避免 230px 列表栏把详情列压到不可达、也避免堆叠后详情区 mscroll 被 flex:1 压到 0
+   高度导致「看不到下面内容」。断点 460 保证双栏态下详情区 ≥ 230px（460−230）。
+   容器查询锚点是父级 .wb-connection（声明 container-type:inline-size，见 ConfigPage），
+   不是 .pm 自身——容器查询不能作用于容器自己。 */
+@container (max-width: 460px) {
+  .pm {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  /* .pm .plist / .pm .pdetail / .pm .card 提高特异性（0,2,0 > 0,1,0），压过源码后文
+     同属性的普通规则，不依赖声明顺序——否则 .plist 的 width:14.375rem 会覆盖 width:100%。 */
+  .pm .plist {
+    width: 100%;
+    flex: none;
+    border-right: 1px solid var(--color-border);
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+  }
+  .pm .plist-items {
+    flex: none;
+    max-height: 12rem;
+    overflow-y: auto;
+  }
+  .pm .pdetail {
+    flex: none;
+  }
+  .pm .card {
+    flex: none;
+    border-top: 0;
+    border-radius: 0 0 var(--radius-md) var(--radius-md);
+  }
+  .pm .mscroll {
+    flex: none;
+    overflow: visible;
+  }
+}
+
 /* ── 左侧供应商列表栏 ── */
 .plist {
   width: 14.375rem;
@@ -518,6 +555,10 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
 .card-head h3 {
   margin: 0;
   font-size: 1rem;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .card-head__count {
@@ -563,6 +604,9 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
 .d-title h2 {
   margin: 0;
   font-size: 1.0625rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .d-title .sub {
@@ -571,12 +615,30 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
   color: var(--color-text-muted);
   display: flex;
   gap: 0.875rem;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+
+/* 地址/备注超长时省略号截断（不再换行堆叠挤高标题区）；地址列优先收缩、备注列不收缩。 */
+.d-title .sub span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.d-title .sub span:first-child {
+  flex: 1;
+}
+
+.d-title .sub span:not(:first-child) {
+  flex-shrink: 0;
 }
 
 .d-title .sub code {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.75rem;
+  word-break: break-all;
 }
 
 .d-actions {

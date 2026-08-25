@@ -228,4 +228,19 @@ async function runRowTest(model: ProviderModel): Promise<void> {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
+
+/* 窄容器（详情区 ≤460px，与 ProviderManager 折纵向同断点）：模型行从单行 grid 改两行 flex——
+   模型名独占一行（完整 ellipsis），token/来源标签/测试/删除换行到第二行。
+   避免 4 个 auto 操作列把 1fr 模型名压到 0、完全看不到。 */
+@container (max-width: 460px) {
+  .mrow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.375rem 0.625rem;
+  }
+  .mrow .mid {
+    flex: 1 1 100%;
+  }
+}
 </style>

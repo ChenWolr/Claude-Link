@@ -649,6 +649,9 @@ function handlePermissionModeChange(e: Event) {
   min-width: 0;
   min-height: 0;
   display: flex;
+  /* 容器查询锚点：ProviderManager 的 @container(max-width:460px) 以它为参考，
+     按 workbench 实际宽度（而非视口）决定「列表+详情」双栏/堆叠。 */
+  container-type: inline-size;
 }
 
 /* 行为/外观：整卡表单（solo 卡，内部滚动，全圆角）。
