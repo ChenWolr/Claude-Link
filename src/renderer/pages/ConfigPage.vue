@@ -1,10 +1,10 @@
 <script setup lang="ts">
-// ConfigPage.vue — 设置页（r9 定版版式）。
-// 结构：标题/标签/工作区同宽一列（宽 = min(舞台宽, 舞台高×1.5)），列在页面水平居中；
-// 工作区固定 3:2 宽高比，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
+// ConfigPage.vue — 设置页。
+// 结构：标题/标签/工作区同宽一列（宽 = min(100%, --chat-bottom-max-width)，与聊天/会话页同一 800px 契约），
+// 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
 // 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
 // 所有滚动发生在面板内部；尺寸全部 rem（随 fontScale 等比缩放）。
-import { onMounted, onBeforeUnmount, ref, computed, watch } from 'vue';
+import { onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore } from '../stores/config-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
@@ -82,33 +82,9 @@ async function performInit() {
 
 onMounted(performInit);
 
-// ── r6/r8：3:2 工作区自适应 ──
-// 标题/标签/工作区同宽一列：宽 = min(舞台宽, 舞台高×1.5)，列水平居中、左缘同一条竖线。
-// 舞台（页头/横幅/标签之外的剩余区）用 ResizeObserver 实测，保证任意窗口比例下
-// 工作区恒 3:2、页面零溢出（滚动全部发生在面板内部）。
-const stageRef = ref<HTMLElement | null>(null);
-const stageSize = ref({ w: 0, h: 0 });
-let stageObserver: ResizeObserver | null = null;
-
-onMounted(() => {
-  if (!stageRef.value) return;
-  stageObserver = new ResizeObserver((entries) => {
-    const rect = entries[0]?.contentRect;
-    if (rect) stageSize.value = { w: rect.width, h: rect.height };
-  });
-  stageObserver.observe(stageRef.value);
-});
-
-onBeforeUnmount(() => {
-  stageObserver?.disconnect();
-  stageObserver = null;
-});
-
-const columnWidth = computed(() => {
-  const { w, h } = stageSize.value;
-  if (w <= 0 || h <= 0) return '100%';
-  return `${Math.floor(Math.min(w, h * 1.5))}px`;
-});
+// ── 布局：内容列宽统一为 min(100%, --chat-bottom-max-width)（与聊天页/会话页同一 800px 契约）。
+// 工作区不再锁定 3:2 比例、不再用 ResizeObserver 实测舞台尺寸——改为 flex:1 填满舞台剩余高度，
+// 高度自然跟随窗口，消除「最大化(宽窗)左右 letterboxing / 还原(窄窗)底部大留白」两态不一致。
 
 // 工作目录可能由自动检测、工作区切换或主进程配置流程更新；诊断必须跟随当前 cwd，
 // 不得继续展示旧目录的 settings 来源和 CLAUDE.md candidates。
@@ -212,7 +188,7 @@ function handlePermissionModeChange(e: Event) {
 
 <template>
   <section class="settings">
-    <div class="settings-inner" :style="{ '--col-w': columnWidth }">
+    <div class="settings-inner" :style="{ '--col-w': 'min(100%, var(--chat-bottom-max-width))' }">
     <header class="page-head">
       <button class="back-button" type="button" @click="router.push('/')">← 返回会话</button>
     </header>
@@ -272,8 +248,8 @@ function handlePermissionModeChange(e: Event) {
       </div>
     </div>
 
-    <!-- 舞台：剩余全部空间；工作区 3:2 自适应并水平居中（与标题/标签同宽一列） -->
-    <div ref="stageRef" class="stage">
+    <!-- 舞台：剩余全部空间；工作区填满高度并水平居中（与标题/标签同宽一列） -->
+    <div class="stage">
       <div class="workbench" :class="{ 'workbench--solo': activeTab !== 'connection' }">
         <!-- 连接：供应商/模型可选项库（列表 + 详情复合面板，内部滚动；测试在模型行内） -->
         <div v-show="activeTab === 'connection'" class="wb-connection">
@@ -372,7 +348,7 @@ function handlePermissionModeChange(e: Event) {
   display: flex;
   flex-direction: column;
   width: 100%;
-  padding: 1.5rem 5% 1.75rem;
+  padding: 1.5rem 2rem 1.75rem;
 }
 
 /* 标题/标签/工作区同宽一列（宽=var(--col-w)），列在页面水平居中；列内左缘同一条竖线。 */
@@ -649,7 +625,7 @@ function handlePermissionModeChange(e: Event) {
   word-break: break-all;
 }
 
-/* ── 舞台与 3:2 工作区 ── */
+/* ── 舞台与工作区（内容列统一 800px 上限，高度自然填满）── */
 .stage {
   flex: 1;
   min-height: 0;
@@ -658,15 +634,13 @@ function handlePermissionModeChange(e: Event) {
 }
 
 .workbench {
-  flex: none;
+  flex: 1;
   display: flex;
   align-items: stretch;
-  aspect-ratio: 3 / 2;
   width: var(--col-w);
   margin-inline: auto;
-  /* 关键：作为 .stage（flex column）的子项，默认 min-height:auto 会被内容 min-content 钳制，
-     字号放大后撑破 aspect-ratio 高度、溢出被 .settings 裁掉（底部内容看不到）。
-     min-height:0 解除自动最小尺寸，让高度严格回落到 3:2，内容由面板内部滚动兜底。 */
+  /* flex:1 填满 .stage（flex column）剩余高度；min-height:0 解除 flex item 的自动最小尺寸钳制，
+     内容超高出面板内部滚动兜底（不再锁 3:2 比例）。 */
   min-height: 0;
 }
 
@@ -678,7 +652,7 @@ function handlePermissionModeChange(e: Event) {
 }
 
 /* 行为/外观：整卡表单（solo 卡，内部滚动，全圆角）。
-   必须保持 flex 布局：display:block 会让 aspect-ratio 在 height:100% 子元素下失效，
+   必须保持 flex 布局：display:block 会让 flex:1 在 height 撑满的子元素下失效，
    工作区被内容撑破、溢出被 .settings 裁掉（字号「大」时内容超高，底部看不到）。 */
 .workbench--solo {
   display: flex;
