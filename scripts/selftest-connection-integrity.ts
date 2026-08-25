@@ -152,5 +152,18 @@ console.log('\n=== 6) settings 投影卫生 ===');
   check('投影不再写端点凭据（P3 单通道）', !proj.includes('env.ANTHROPIC_API_KEY = config.apiKey') && !proj.includes('ANTHROPIC_BASE_URL = baseUrl'));
 }
 
+console.log('\n=== 7) 连接测试修复 ===');
+{
+  const tester = readRel('src/main/modules/connection-tester.ts');
+  check('超时路径 resolve（不再永久「测试中」）', /active\.timer = setTimeout\(\(\) => \{[\s\S]{0,400}?resolve\(finishWith\(/.test(tester));
+  check('Windows 树杀（taskkill /T /F）', tester.includes('taskkill') && tester.includes("'/T'") && tester.includes("'/F'"));
+  check('不再写 settings.local.json（恒用进程 env + --model）', !tester.includes('writeClaudeSettings'));
+  check('恒用临时目录（不碰用户工作目录）', !/config\.workingDirectory \|\| ''/.test(tester));
+  check('失败路径接分类器给精确诊断', /classifyUpstreamError\(/.test(tester) && /upstreamFatalMessage\(/.test(tester));
+  check('测试进程隔离 settings 来源（--setting-sources 空列表：user 的 ~/.claude/settings.json env 不再劫持测试，连接由进程 env 唯一决定）', tester.includes("'--setting-sources'"));
+  check('测试并发按行隔离（Map 替代全局单飞，多行可同时测）', /const activeTests = new Map</.test(tester));
+  check('仅同行重入中止（按 key abort 落定「被取代」），不同行互不影响', /function abortActiveTest[\s\S]{0,400}?active\.settle\?\.\(\{[\s\S]{0,80}?'测试已被新的测试取代/.test(tester));
+}
+
 console.log(`\n=== 连接完整性自测：${pass} 过 / ${fail} 败 ===`);
 if (fail > 0) process.exit(1);
