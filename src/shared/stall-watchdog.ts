@@ -92,3 +92,26 @@ export function classifyStall(
       : gapMs >= thresholds.toolHardAbortMs);
   return { stalled, zone, gapMs, hardAbort };
 }
+
+/** 重试排期后的宽限：排期时刻（或最后一次重试事件）过后这么久仍无任何事件
+ *  （无恢复、无新重试通知、无终态），视为真卡死，恢复看门狗管辖。 */
+export const RETRY_PAUSE_GRACE_MS = 120_000;
+
+/** shouldPauseStallWatchdog 的探测输入（ApiRetryState 的子集，便于纯函数测试）。 */
+export interface RetryPauseProbe {
+  phase: 'idle' | 'retrying' | 'terminal';
+  nextRetryAt: number | null;
+  lastRetryAt: number | null;
+}
+
+/**
+ * 有排期中的 API 重试时暂停 stall 判定（不横幅、不硬杀）：Claude Code 内部按退避
+ * 重试期间静默是预期行为，把它算进「距上次业务活动的间隔」会把正常重试误判成卡死
+ * （120s 横幅 / 600s 硬杀）。暂停条件收紧为「排期尚未过期 + 宽限」：nextRetryAt 已过
+ * 且超过宽限仍无任何事件 → 重试机制自身挂死，恢复看门狗管辖，保证 sending 不会永久卡住。
+ */
+export function shouldPauseStallWatchdog(probe: RetryPauseProbe | undefined, now: number): boolean {
+  if (!probe || probe.phase !== 'retrying') return false;
+  if (probe.nextRetryAt !== null) return probe.nextRetryAt + RETRY_PAUSE_GRACE_MS > now;
+  return probe.lastRetryAt !== null && probe.lastRetryAt + RETRY_PAUSE_GRACE_MS > now;
+}

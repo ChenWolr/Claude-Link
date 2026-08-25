@@ -3,7 +3,7 @@
 // 运行：npx tsx scripts/tdd-stall-watchdog-verify.ts
 import { strict as assert } from 'node:assert';
 import { setActivePinia, createPinia } from 'pinia';
-import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
+import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, shouldPauseStallWatchdog, RETRY_PAUSE_GRACE_MS } from '../src/shared/stall-watchdog';
 import {
   apiRetryErrorLabel,
   apiRetrySummary,
@@ -108,6 +108,17 @@ check('hardAbort 分 zone：MODEL 用 hardAutoAbortMs，TOOL 用 toolHardAbortMs
   assert.equal(classifyStall(0, DEFAULT_STALL_THRESHOLDS.toolHardAbortMs, true).hardAbort, true);
   assert.equal(classifyStall(0, DEFAULT_STALL_THRESHOLDS.toolHardAbortMs, true).zone, 'tool');
 });
+
+// ── 重试排期暂停看门狗（连接加固 Task 5）──
+{
+  const now = 1_000_000;
+  assert.equal(shouldPauseStallWatchdog(undefined, now), false);
+  assert.equal(shouldPauseStallWatchdog({ phase: 'retrying', nextRetryAt: now + 5_000, lastRetryAt: now }, now), true);
+  assert.equal(shouldPauseStallWatchdog({ phase: 'retrying', nextRetryAt: now - RETRY_PAUSE_GRACE_MS - 1, lastRetryAt: now }, now), false);
+  assert.equal(shouldPauseStallWatchdog({ phase: 'retrying', nextRetryAt: null, lastRetryAt: now - RETRY_PAUSE_GRACE_MS - 1 }, now), false);
+  assert.equal(shouldPauseStallWatchdog({ phase: 'terminal', nextRetryAt: now + 999_999, lastRetryAt: now }, now), false);
+  console.log('  ✅ shouldPauseStallWatchdog 行为（6 例）');
+}
 
 console.log('\n=== keep_alive / api_retry：不算业务活动 ===');
 check('keep_alive 不重置业务静默计时', () => {
