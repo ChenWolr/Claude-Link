@@ -17,7 +17,7 @@ import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import { isErrorCliResult } from '../../shared/session-completion';
 import { resolveContextWindowForSession } from '../../shared/model-context-windows';
-import { buildUnifiedModelEnv } from '../../shared/session-model';
+import { applySessionOverrideEnv } from '../../shared/session-model';
 
 export interface SpawnOptions {
   model?: string;
@@ -100,17 +100,9 @@ export function buildSpawnEnv(override?: SessionModelOverride | null): Record<st
   }
 
   if (override) {
-    const overrideBaseUrl = override.apiBaseUrl.trim();
-    if (overrideBaseUrl) {
-      env.ANTHROPIC_BASE_URL = overrideBaseUrl;
-    }
-    if (override.apiKey) {
-      env.ANTHROPIC_API_KEY = override.apiKey;
-      delete env.ANTHROPIC_AUTH_TOKEN;
-    }
-    if (override.modelId) {
-      Object.assign(env, buildUnifiedModelEnv(override.modelId));
-    }
+    // 连接三元组完整性：端点/密钥/模型的归一规则收口在 shared 纯函数，
+    // 与 sdk-backend.buildClaudeLinkSettingsBlock（settings.env 通道）共用同一实现。
+    applySessionOverrideEnv(env, override);
   }
 
   return env;

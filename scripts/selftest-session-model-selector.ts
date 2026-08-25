@@ -124,14 +124,13 @@ console.log('\n=== 5) 主进程注入：env / settings / options.model / canUseT
 
   check('buildSpawnEnv 接受会话覆盖（SessionModelOverride）', cliShared.includes('export interface SessionModelOverride') && /buildSpawnEnv\(override\??: SessionModelOverride \| null\)/.test(cliShared));
   const overrideBlock = cliShared.slice(cliShared.indexOf('if (override) {'));
-  check('覆盖最后应用：BASE_URL/API_KEY + 四别名映射压过 advancedJson', overrideBlock.includes('ANTHROPIC_BASE_URL') && overrideBlock.includes('buildUnifiedModelEnv(override.modelId)'));
-  check('覆盖 key 存在时清掉 AUTH_TOKEN（防双凭据冲突）', overrideBlock.includes('delete env.ANTHROPIC_AUTH_TOKEN'));
+  check('覆盖应用收口 applySessionOverrideEnv（BASE_URL/API_KEY/AUTH_TOKEN/四别名规则单源）', overrideBlock.includes('applySessionOverrideEnv(env, override)'));
 
   check('SpawnOptions 含 providerOverride', cliShared.includes('providerOverride?: string | null'));
   check('buildSdkOptions 走 resolveSessionModel', /function buildSdkOptions[\s\S]*?resolveSessionOverride\(opts\)/.test(sb));
   check('buildProbeSdkOptions 同一解析（probe 与真实回合一致）', /function buildProbeSdkOptions[\s\S]*?resolveSessionOverride\(opts\)/.test(sb));
   check('resolveSessionOverride 实现（会话 override > lastUsed > 库首）', /function resolveSessionOverride[\s\S]*?resolveSessionModel\(/.test(sb) && sb.includes('getProviderModelSources()'));
-  check('settings.env 注入统一模型（最高优先级通道）', /buildClaudeLinkSettingsBlock[\s\S]*?settingsEnv\.ANTHROPIC_BASE_URL = modelOverride\.apiBaseUrl[\s\S]*?buildUnifiedModelEnv\(modelOverride\.modelId\)/.test(sb));
+  check('settings.env 注入统一模型（最高优先级通道，与 env 通道同一规则单源）', /buildClaudeLinkSettingsBlock[\s\S]*?applySessionOverrideEnv\(settingsEnv, modelOverride\)/.test(sb));
   check('options.model = 当前实际模型', /buildSdkOptions[\s\S]*?model: override \? override\.modelId :/.test(sb));
   check('entry.resolvedModel 记录当前实际模型（canUseTool 用）', sb.includes('entry.resolvedModel = override?.modelId ?? null'));
 
