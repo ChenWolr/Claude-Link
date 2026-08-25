@@ -22,7 +22,7 @@ import { execFileSync, spawn } from 'child_process';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig, getProviderModelSources } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
-import { resolveSessionModel, buildUnifiedModelEnv, decideAgentModelOverride } from '../../shared/session-model';
+import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride } from '../../shared/session-model';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { resolveEffectivePermissionMode } from '../../shared/permission-resolver';
@@ -802,12 +802,9 @@ function buildClaudeLinkSettingsBlock(
   // （高于 Options.env），把供应商端点/密钥与 ANTHROPIC_MODEL + 四别名映射全部钉到当前实际模型，
   // 压过 advancedJson / 投影里可能残留的旧映射。
   if (modelOverride) {
-    settingsEnv.ANTHROPIC_BASE_URL = modelOverride.apiBaseUrl;
-    if (modelOverride.apiKey) {
-      settingsEnv.ANTHROPIC_API_KEY = modelOverride.apiKey;
-      delete settingsEnv.ANTHROPIC_AUTH_TOKEN;
-    }
-    Object.assign(settingsEnv, buildUnifiedModelEnv(modelOverride.modelId));
+    // 连接三元组完整性：与 buildSpawnEnv（Options.env 通道）同一规则单源（shared 纯函数），
+    // settings.env 是 SDK 侧最高优先级通道，两通道不分叉。
+    applySessionOverrideEnv(settingsEnv, modelOverride);
   }
 
   // 按当前模型别名动态注入 CC 的真实窗口 override（CLAUDE_CODE_MAX_CONTEXT_TOKENS）。

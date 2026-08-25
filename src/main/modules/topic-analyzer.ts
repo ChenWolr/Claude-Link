@@ -14,20 +14,29 @@ interface ClaudeApiResponse {
 export async function analyzeTopic(sessionId: string, firstMessage: string): Promise<string | null> {
   const config = getConfig();
 
-  // 供应商库解析（会话空选择 → 最近使用 → 库首）；库为空时回落老字段/别名链。
-  // 后台标题分析同样遵守「唯一实际模型」——不得硬编码任何别名/官方模型。
+  // 供应商库解析（会话 override > 最近使用 > 库首）；库为空时回落老字段/别名链。
+  // 后台标题分析同样遵守「唯一实际模型」与「连接三元组完整性」——端点/密钥/模型必须
+  // 来自同一解析结果，不得端点用解析值、凭据用 lastUsed 投影（跨供应商混用）。
+  const session = sessionRepo.getSession(sessionId);
   const resolved = resolveSessionModel(
-    { providerOverride: null, modelOverride: null },
+    {
+      providerOverride: session?.providerOverride ?? null,
+      modelOverride: session?.modelOverride ?? null,
+    },
     { providerId: config.lastUsedProviderId, modelId: config.lastUsedModelId },
     getProviderModelSources(),
   );
-  const apiKey = resolved.provider?.apiKey || config.apiKey;
+  // 解析到供应商时凭据/端点一律取该供应商（key 为空即无凭据）；只有库为空（老字段链）
+  // 才回落 config 老字段——两者永不交叉。
+  const apiKey = resolved.provider ? resolved.provider.apiKey : config.apiKey;
   if (!apiKey) {
     logger.warn('No API key configured; skipping topic analysis');
     return null;
   }
 
-  const baseUrl = resolved.provider?.apiBaseUrl || config.apiBaseUrl?.trim() || 'https://api.anthropic.com';
+  const baseUrl = resolved.provider
+    ? resolved.provider.apiBaseUrl
+    : (config.apiBaseUrl?.trim() || 'https://api.anthropic.com');
   const isAnthropic = isOfficialAnthropicBaseUrl(baseUrl);
   const url = buildAnthropicApiUrl(baseUrl, 'messages');
 
@@ -46,14 +55,14 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    'x-api-key': config.apiKey,
+    'x-api-key': apiKey,
     'anthropic-version': '2023-06-01',
   };
 
   // 第三方兼容端点（OneAPI/openrouter 等）通常同时需要 Bearer 或保留 x-api-key，
-  // 这里两者都带上，避免删掉 x-api-key 导致 401。
+  // 这里两者都带上，避免删掉 x-api-key 导致 401。凭据与上方 baseUrl/model 同源。
   if (!isAnthropic) {
-    headers['Authorization'] = `Bearer ${config.apiKey}`;
+    headers['Authorization'] = `Bearer ${apiKey}`;
   }
 
   try {

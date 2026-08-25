@@ -87,6 +87,44 @@ export function buildUnifiedModelEnv(modelId: string): Record<string, string> {
   };
 }
 
+// 连接三元组完整性（多供应商连接加固 Task 2）：把「会话当前实际连接」应用到 env 的规则
+// 收口为纯函数，供 buildSpawnEnv（Options.env 通道）与 buildClaudeLinkSettingsBlock
+// （Options.settings.env 通道）共用，两条通道规则永不分叉。规则：
+//  1. BASE_URL 归一：非空 → 本供应商；空 → 删除（回落官方默认端点），严禁沿用
+//     lastUsed 投影/advancedJson 里其它供应商的端点。
+//  2. key 非空 → ANTHROPIC_API_KEY = 本供应商 key；key 为空（档案未配 key，认证走端点
+//     侧白名单/外部登录态）→ 显式删除 ANTHROPIC_API_KEY。new-api 类网关按 key 分组判定
+//     模型可用性，把 A 供应商的请求配上 B 的 key 会直接报
+//     "Model X is not supported by any configured account in this group"。
+//  3. ANTHROPIC_AUTH_TOKEN 一律清除：token 与 key 是互斥的两套凭据，override 生效时
+//     不得让 advancedJson/env 残留的 token 伴随本供应商端点发送。
+export interface SessionModelOverrideEnvInput {
+  apiBaseUrl: string;
+  apiKey: string;
+  modelId: string;
+}
+
+export function applySessionOverrideEnv(
+  env: Record<string, string>,
+  override: SessionModelOverrideEnvInput,
+): void {
+  const overrideBaseUrl = override.apiBaseUrl.trim();
+  if (overrideBaseUrl) {
+    env.ANTHROPIC_BASE_URL = overrideBaseUrl;
+  } else {
+    delete env.ANTHROPIC_BASE_URL;
+  }
+  if (override.apiKey) {
+    env.ANTHROPIC_API_KEY = override.apiKey;
+  } else {
+    delete env.ANTHROPIC_API_KEY;
+  }
+  delete env.ANTHROPIC_AUTH_TOKEN;
+  if (override.modelId) {
+    Object.assign(env, buildUnifiedModelEnv(override.modelId));
+  }
+}
+
 // Agent/Task 工具调用级 model 改写判定（双保险第二层，纯函数供 canUseTool 与 selftest 共用）。
 // 依据：调用级 model 优先于 agent 定义 frontmatter（sdk-tools.d.ts AgentInput.model），
 // fork 天然继承 parent 不改。返回需要改写成的模型 ID；null = 无需改写。
