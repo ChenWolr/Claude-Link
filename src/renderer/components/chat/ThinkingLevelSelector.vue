@@ -46,8 +46,14 @@ const globalDefaultLabel = computed(() => {
   return LEVELS.find((l) => l.value === g)?.label ?? '中';
 });
 
+// 触发按钮显示的档名：'auto'（跟随全局默认）时直接展示全局默认档名（如「高」/「低」），
+// 而非展示「自动」这个中间态；非 auto 档展示本会话显式选定的档名。
+const triggerLabel = computed(() =>
+  activeValue.value === 'auto' ? globalDefaultLabel.value : activeOption.value.label,
+);
+
 const triggerTitle = computed(
-  () => `思考强度：${activeOption.value.label}${activeValue.value === 'auto' ? `（跟随全局默认：${globalDefaultLabel.value}）` : `（${activeOption.value.desc}）`}`,
+  () => `思考强度：${triggerLabel.value}${activeValue.value === 'auto' ? `（跟随全局默认）` : `（${activeOption.value.desc}）`}`,
 );
 
 async function onSelect(level: ThinkingLevel) {
@@ -85,7 +91,7 @@ onUnmounted(() => {
       :title="triggerTitle"
       @click="showMenu = !showMenu"
     >
-      {{ activeOption.label }} <span class="tl-caret">▾</span>
+      {{ triggerLabel }} <span class="tl-caret">▾</span>
     </button>
     <div v-if="showMenu" class="tl-menu">
       <button
@@ -97,8 +103,7 @@ onUnmounted(() => {
       >
         <span class="tl-item__text">
           <span class="tl-item__label">
-            {{ opt.label }}
-            <small v-if="opt.value === 'auto'" class="tl-item__sub">（全局默认：{{ globalDefaultLabel }}）</small>
+            {{ opt.value === 'auto' ? `默认：${globalDefaultLabel}` : opt.label }}
           </span>
           <span class="tl-item__desc">{{ opt.desc }}</span>
         </span>
@@ -209,12 +214,6 @@ onUnmounted(() => {
   font-size: 0.8125rem;
   font-weight: 600;
   line-height: 1.2;
-}
-
-.tl-item__sub {
-  font-weight: 400;
-  color: var(--color-text-muted);
-  font-size: 0.6875rem;
 }
 
 .tl-item__desc {

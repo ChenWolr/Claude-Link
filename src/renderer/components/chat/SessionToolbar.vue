@@ -96,6 +96,13 @@ const globalDefaultPermissionLabel = computed(() => {
   return PERMISSIONS.find((p) => p.value === g)?.label ?? '默认模式';
 });
 
+// 触发按钮显示的档名：null（跟随全局默认）时直接展示全局默认档名（如「默认模式」/「自动模式」），
+// 而非展示「跟随全局默认」这个中间态；非 null 档展示本会话显式选定的档名。
+const permissionTriggerLabel = computed(() => {
+  const mode = activeSession.value?.permissionMode;
+  return mode === null ? globalDefaultPermissionLabel.value : activePermission.value.label;
+});
+
 async function onPermissionChange(mode: Session['permissionMode']) {
   showPermissionMenu.value = false;
   await sessionStore.setActiveSessionPermissionMode(mode);
@@ -207,7 +214,7 @@ onUnmounted(() => {
         :title="`本会话 Claude Code 权限模式（${activeSession.permissionMode === null ? `跟随全局默认：${globalDefaultPermissionLabel}` : activePermission.label}）`"
         @click="showPermissionMenu = !showPermissionMenu"
       >
-        {{ activePermission.label }} <span class="caret">▾</span>
+        {{ permissionTriggerLabel }} <span class="caret">▾</span>
       </button>
       <div v-if="showPermissionMenu" class="perm-menu">
         <button
@@ -222,8 +229,7 @@ onUnmounted(() => {
           </span>
           <span class="perm-item__text">
             <span class="perm-item__label">
-              {{ p.label }}
-              <small v-if="p.value === null" class="perm-item__sub">（全局默认：{{ globalDefaultPermissionLabel }}）</small>
+              {{ p.value === null ? `默认：${globalDefaultPermissionLabel}` : p.label }}
             </span>
             <span class="perm-item__desc">{{ p.desc }}</span>
           </span>
@@ -559,12 +565,6 @@ onUnmounted(() => {
   font-size: 0.8125rem;
   font-weight: 600;
   line-height: 1.2;
-}
-
-.perm-item__sub {
-  font-weight: 400;
-  color: var(--color-text-muted);
-  font-size: 0.6875rem;
 }
 
 .perm-item__desc {
