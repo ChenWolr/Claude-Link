@@ -3,6 +3,7 @@
 // settings 投影卫生 / 连接测试接线契约。运行：npx tsx scripts/selftest-connection-integrity.ts（不启动 Electron）。
 
 import { applySessionOverrideEnv } from '../src/shared/session-model';
+import { shouldPauseStallWatchdog, RETRY_PAUSE_GRACE_MS } from '../src/shared/stall-watchdog';
 import {
   classifyUpstreamError,
   isNonRetryableUpstreamError,
@@ -113,6 +114,22 @@ console.log('\n=== 3) 确定性上游错误快败接线 ===');
   check('快败收口函数存在且落库 upstream_fatal 消息', sb.includes('function abortNonRetryableUpstream') && sb.includes("processKind: 'system:upstream_fatal'"));
   check('快败调用 killProcess(upstream_fatal)', /killProcess\(sessionId,\s*'upstream_fatal'/.test(sb));
   check('entry 记录供应商名（诊断用）', sb.includes('entry.providerName = override?.providerName ?? null'));
+}
+
+console.log('\n=== 4) 看门狗重试暂停 ===');
+{
+  const now = 1_000_000;
+  check('无状态 → 不暂停', shouldPauseStallWatchdog(undefined, now) === false);
+  check('idle → 不暂停', shouldPauseStallWatchdog({ phase: 'idle', nextRetryAt: null, lastRetryAt: null }, now) === false);
+  check('terminal → 不暂停', shouldPauseStallWatchdog({ phase: 'terminal', nextRetryAt: now + 999_999, lastRetryAt: now }, now) === false);
+  check('retrying 且排期在未来 → 暂停', shouldPauseStallWatchdog({ phase: 'retrying', nextRetryAt: now + 5_000, lastRetryAt: now }, now) === true);
+  check('retrying 排期已过但仍在宽限内 → 暂停', shouldPauseStallWatchdog({ phase: 'retrying', nextRetryAt: now - 10_000, lastRetryAt: now }, now) === true);
+  check('retrying 排期过期超宽限 → 恢复管辖', shouldPauseStallWatchdog({ phase: 'retrying', nextRetryAt: now - RETRY_PAUSE_GRACE_MS - 1, lastRetryAt: now }, now) === false);
+  check('retrying 无排期、最近有重试事件 → 暂停', shouldPauseStallWatchdog({ phase: 'retrying', nextRetryAt: null, lastRetryAt: now - 1_000 }, now) === true);
+  check('retrying 无排期、久无重试事件 → 恢复管辖', shouldPauseStallWatchdog({ phase: 'retrying', nextRetryAt: null, lastRetryAt: now - RETRY_PAUSE_GRACE_MS - 1 }, now) === false);
+
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  check('watchdogTick 接入暂停判定 + 恢复时重置计时基准', /function watchdogTick[\s\S]*?shouldPauseStallWatchdog\(apiRetryStates\.get\(sessionId\), now\)[\s\S]*?t\.retryPaused = false;[\s\S]*?t\.lastActivityAt = now;/.test(sb));
 }
 
 console.log(`\n=== 连接完整性自测：${pass} 过 / ${fail} 败 ===`);

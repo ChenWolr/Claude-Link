@@ -100,7 +100,7 @@ import { sdkCommandRegistry } from './sdk-command-registry';
 import { buildNativeSdkOptionsCore, mergeSpawnOptions } from './sdk-command-options';
 import { buildCommandOriginEvidence } from './sdk-command-origin';
 import { isSubAgentToolUse } from '../../shared/process-kind';
-import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
+import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, shouldPauseStallWatchdog, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
 import {
   apiRetrySummary,
   createApiRetryState,
@@ -252,6 +252,9 @@ interface StallTracker {
   stallNotified: boolean;
   stallCount: number;
   hardAbortFired: boolean;
+  // 重试暂停标记：暂停结束（排期过期超宽限/终态）时据此重置计时基准一次，
+  // 保证「先横幅、后硬杀」顺序不因跨暂停累计的 gapMs 被打破。
+  retryPaused: boolean;
 }
 const stallTrackers = new Map<string, StallTracker>();
 // 待决 tool_use id 集合（判定 zone：有无工具在跑）。add on tool_use，delete on tool_result。
@@ -290,6 +293,7 @@ function resetStallTracker(sessionId: string): void {
     stallNotified: false,
     stallCount: 0,
     hardAbortFired: false,
+    retryPaused: false,
   });
   pendingToolUseIds.delete(sessionId);
   pendingSubAgentUseIds.delete(sessionId);
@@ -410,6 +414,21 @@ function watchdogTick(): void {
   const now = Date.now();
   for (const [sessionId, t] of stallTrackers) {
     if (!isSessionActive(sessionId)) continue;
+    // API 重试排期期间让位（连接加固 Task 5）：有排期重试的静默是退避等待，不是卡死。
+    // 暂停结束（宽限耗尽/终态）时刷新 lastActivityAt——否则跨暂停累计的 gapMs 可能
+    // 直接达到硬杀阈值，跳过横幅直接 kill。
+    if (shouldPauseStallWatchdog(apiRetryStates.get(sessionId), now)) {
+      t.retryPaused = true;
+      continue;
+    }
+    if (t.retryPaused) {
+      t.retryPaused = false;
+      t.lastActivityAt = now;
+      if (t.stalledSince !== null) {
+        t.stalledSince = null;
+        t.stallNotified = false;
+      }
+    }
     const verdict = classifyStall(t.lastActivityAt, now, t.pendingToolUse, STALL_THRESHOLDS);
     if (!verdict.stalled) {
       // 活跃：清标记，下次再卡可再次通知。
