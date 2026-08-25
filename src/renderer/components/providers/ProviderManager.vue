@@ -238,6 +238,7 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
       <!-- 新建供应商：表单渲染在与详情同一个框里（再点新建按钮收起）-->
       <ProviderEditor
         v-if="creating || editing"
+        :key="editing ? 'edit-' + (current?.id ?? '') : 'create'"
         :id="editing ? current?.id : undefined"
         :initial-name="editing ? current?.name : undefined"
         :initial-note="editing ? current?.note : undefined"
