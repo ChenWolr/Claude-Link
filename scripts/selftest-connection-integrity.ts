@@ -105,5 +105,15 @@ console.log('\n=== 2) 上游错误分类器 ===');
   check('快败文案含供应商/模型/行动建议', msg.includes('智谱 GLM') && msg.includes('glm-5.2') && msg.includes('更换模型'));
 }
 
+console.log('\n=== 3) 确定性上游错误快败接线 ===');
+{
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  check('KillReason 含 upstream_fatal', /'user'\s*\|\s*'api_retry_exhausted'\s*\|\s*'watchdog'\s*\|\s*'upstream_fatal'/.test(sb) || sb.includes("'upstream_fatal'"));
+  check('api_retry 分支接分类器', /infoSubtype === 'api_retry'[\s\S]{0,4000}?classifyUpstreamError\(/.test(sb));
+  check('快败收口函数存在且落库 upstream_fatal 消息', sb.includes('function abortNonRetryableUpstream') && sb.includes("processKind: 'system:upstream_fatal'"));
+  check('快败调用 killProcess(upstream_fatal)', /killProcess\(sessionId,\s*'upstream_fatal'/.test(sb));
+  check('entry 记录供应商名（诊断用）', sb.includes('entry.providerName = override?.providerName ?? null'));
+}
+
 console.log(`\n=== 连接完整性自测：${pass} 过 / ${fail} 败 ===`);
 if (fail > 0) process.exit(1);
