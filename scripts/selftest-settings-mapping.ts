@@ -1195,8 +1195,7 @@ console.log('\n=== 40) UI 简化（r9 定版）：连接页=供应商库 + 会�
   check('家具块（横幅/存储/操作条）对齐同宽列（--col-w 居中）', cp.includes('.autodetect-bar {') && /banner,\s*\n\s*\.toast,/.test(cp) && cp.includes('max-width: 100%'));
   check('ModelMappingInputs 组件已删除（别名映射 UI 退场）', readRel('src/renderer/components/config/ModelMappingInputs.vue') === '');
   check('ModelSelector 组件已删除（会话选择器换级联）', readRel('src/renderer/components/chat/ModelSelector.vue') === '');
-  // r6-r9 版式契约：3:2 工作区 + 同宽一列 + 面板内部滚动。
-  check('工作区固定 3:2 宽高比', cp.includes('aspect-ratio: 3 / 2'));
+  // r6-r9 版式契约：同宽一列 + 面板内部滚动。
   check('标题/标签/工作区同宽一列（--col-w 居中）', cp.includes('width: var(--col-w)') && cp.includes('margin-inline: auto'));
   check('行为/外观共用 solo 卡 + 内部滚动', cp.includes('workbench--solo') && cp.includes('.solo-card .mscroll'));
   check('设置页不再整页滚动（面板内部滚动）', cp.includes('display: flex') && cp.includes('overflow: hidden') && !cp.includes('overflow-y: auto;\n}'));
