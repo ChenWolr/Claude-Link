@@ -1653,6 +1653,15 @@ console.log('\n=== 49) 思考强度 UI 层：ThinkingLevelSelector + session-sto
   check('ThinkingLevelSelector Escape 关闭', selector.includes('handleEscape'));
   check('ThinkingLevelSelector 向上展开（bottom: calc(100%）', selector.includes('bottom: calc(100% + 0.25rem)'));
   check('ThinkingLevelSelector 选中勾号', selector.includes('CHECK_PATH') || selector.includes('tl-item__check'));
+  // 默认档（auto/跟随全局默认）触发按钮直接展示全局默认档名，而非「自动」中间态。
+  check('ThinkingLevelSelector 默认档展示全局默认档名（triggerLabel 回落 globalDefaultLabel）',
+    selector.includes('triggerLabel') && selector.includes("activeValue.value === 'auto' ? globalDefaultLabel.value"));
+  // 菜单默认档标题动态显示「默认：{全局默认档名}」，其余档 desc 保留。
+  check('ThinkingLevelSelector 菜单默认档标题为「默认：全局默认档名」',
+    selector.includes("opt.value === 'auto' ? `默认：${globalDefaultLabel}` : opt.label"));
+  check('ThinkingLevelSelector 菜单其余档标题保持（低/中/高/超高/极限/工作流）',
+    selector.includes("label: '低'") && selector.includes("label: '中'") && selector.includes("label: '高'")
+    && selector.includes("label: '超高'") && selector.includes("label: '极限'") && selector.includes("label: '工作流'"));
 
   // session-store action（Task 5）
   check('session-store 有 setActiveSessionThinkingLevel action', sessionStore.includes('async setActiveSessionThinkingLevel'));
@@ -1823,6 +1832,12 @@ console.log('\n=== 53) 权限模式全局默认 + 会话覆盖链路（permissio
   check('ConfigPage 行为 tab 有默认权限选择器', configPage.includes('默认权限'));
   check('SessionToolbar 权限选项含跟随全局默认(null)', toolbar.includes("value: null") && toolbar.includes('跟随全局默认'));
   check('SessionToolbar 显示全局默认档名', toolbar.includes('globalDefaultPermissionLabel'));
+  // 默认权限档（null/跟随全局默认）触发按钮直接展示全局默认档名，而非「跟随全局默认」中间态。
+  check('SessionToolbar 默认权限档展示全局默认档名（permissionTriggerLabel）',
+    toolbar.includes('permissionTriggerLabel') && toolbar.includes('mode === null ? globalDefaultPermissionLabel.value'));
+  // 菜单默认档标题动态显示「默认：{全局默认档名}」，其余档 desc 保留。
+  check('SessionToolbar 菜单默认档标题为「默认：全局默认档名」',
+    toolbar.includes("p.value === null ? `默认：${globalDefaultPermissionLabel}` : p.label"));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
