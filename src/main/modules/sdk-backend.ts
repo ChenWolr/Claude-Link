@@ -489,11 +489,13 @@ export function markSessionDeleted(sessionId: string): void {
   sessionCompactMeta.delete(sessionId); // 压缩账单随会话删除收口（单一收口）
   contextRefreshGeneration.delete(sessionId);
   midTurnRefreshState.delete(sessionId); // P2 mid-turn 节流状态随会话清理（单一收口）
-  postTurnProbeState.delete(sessionId); // post-turn 官方探针单飞/冷却状态随会话清理（单一收口）
+  cancelPostTurnProbe(sessionId); // post-turn 官方探针单飞/冷却状态随会话清理（单一收口）
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
   sessionProvenanceSeeds.delete(sessionId); // review-v1 §5.1：provenance 种子同生命周期清理
+  sessionLastTurnOverride.delete(sessionId); // 连接加固 Task 6：回合快照随会话清理
+  sessionLastEffective.delete(sessionId); // 连接加固 Task 6：漂移检测状态随会话清理
   // 原生 Slash Commands：会话删除时取消正在进行的命令探测并清理快照，避免 stale 命令堆积与 A/B 串扰。
   // cancelCommandProbeInternal 用 0 超时 fire-and-forget（abort 同步触发，probe 异步自行退出）。
   void cancelCommandProbeInternal(sessionId, 0);
@@ -809,6 +811,42 @@ function resolveSessionOverride(opts: SpawnOptions): ResolvedSessionOverride | n
   };
 }
 
+// 会话生效连接的漂移可见性（连接加固 Task 6）：每回合起点解析出的「实际连接」若与
+// 上一回合不同（会话所选被删/全局 lastUsed 变更/库首回退等），落库一条 system 消息。
+// 切换本身是设计内行为（工具栏切换「下一条消息起生效」），但**静默回退**必须留痕，
+// 否则用户看到的是模型行为突变 + 上游报错却无从知晓原因。首回合只记录不提示；
+// 仅在变化时写一条；会话删除时清理。
+function notifyEffectiveConnectionDrift(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  override: ResolvedSessionOverride | null,
+): void {
+  const current = { providerName: override?.providerName ?? null, modelId: override?.modelId ?? null };
+  const prev = sessionLastEffective.get(sessionId);
+  sessionLastEffective.set(sessionId, current);
+  if (!prev) return;
+  if (prev.providerName === current.providerName && prev.modelId === current.modelId) return;
+  const fmt = (v: { providerName: string | null; modelId: string | null }): string =>
+    `${v.providerName ?? '（库外/老字段链）'} / ${v.modelId ?? '别名链'}`;
+  const content = `本回合起连接已切换：${fmt(prev)} → ${fmt(current)}。若非你主动切换，请检查供应商库（会话所选的供应商/模型可能已被删除或修改）。`;
+  try {
+    const persisted = messageRepo.createMessage({
+      sessionId,
+      role: 'system',
+      content,
+      eventType: 'system',
+      processKind: 'system:connection_drift',
+      title: '连接切换',
+    });
+    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: { type: 'persisted_message', message: persisted },
+    });
+  } catch (err) {
+    logger.warn(`[${sessionId}] 连接切换提示落库失败：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
 /**
  * 统一构造 claude-link 显式 settings 块（review-v1 F6）。生产 query 与 probe 共用，杜绝配置漂移。
  * 优先级：Claude Code managed < user < project < local < 此处 claude-link 显式 Options.settings。
@@ -907,6 +945,8 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   entry.resolvedModel = override?.modelId ?? null;
   entry.providerName = override?.providerName ?? null;
   entry.sessionModelOverride = override;
+  sessionLastTurnOverride.set(sessionId, override);
+  notifyEffectiveConnectionDrift(sessionId, mainWindow, override);
   // Task 3 / review-v1 F6：显式 settings 由 buildClaudeLinkSettingsBlock 单一构造，query 与 probe 共用，
   // 经 buildNativeSdkOptionsCore 统一放入 Options（原生 settings 来源——不传 settingSources，SDK 默认
   // 加载 user/project/local）。
@@ -1337,6 +1377,13 @@ interface PostTurnProbeState {
 }
 const postTurnProbeState = new Map<string, PostTurnProbeState>();
 
+// 回合连接快照（连接加固 Task 6）：buildSdkOptions 在回合起点解析出的连接覆盖，
+// post-turn 探针复用它，保证「探针环境 === 产生该上下文的回合环境」（用户在回合中
+// 切换供应商时，探针不再漂到新连接上）。null 是有意义值（库空走老链），用 has() 区分。
+const sessionLastTurnOverride = new Map<string, SessionModelOverride | null>();
+// 会话上一回合的生效连接（漂移检测用）：跨回合变化时落库一条 system 提示。
+const sessionLastEffective = new Map<string, { providerName: string | null; modelId: string | null }>();
+
 // 从 stream-json 输出提取 /context 报告原文：assistant 事件的 message.content[].text
 // 拼接（F1 嵌套位置），result.result 作兜底源。
 function extractProbeText(out: string): string {
@@ -1388,7 +1435,11 @@ async function runPostTurnContextProbe(
     // 保证 --resume 命中同一会话（CLAUDE_CONFIG_DIR/CLAUDE_HOME/凭据/模型映射一致）。
     const session = sessionRepo.getSession(sessionId);
     const fullOpts = mergeSpawnOptions(session, {});
-    const override = resolveSessionOverride(fullOpts);
+    // 回合环境快照（Task 6）：优先复用本回合 buildSdkOptions 解析出的连接覆盖，保证
+    // 探针与产生该上下文的回合同供应商/同模型；无快照（应用重开后由 ipc-handlers 触发
+    // 的补偿探针）才现场解析。
+    const snap = sessionLastTurnOverride.has(sessionId) ? sessionLastTurnOverride.get(sessionId) : undefined;
+    const override = snap !== undefined ? snap : resolveSessionOverride(fullOpts);
     env = buildSpawnEnv(override);
     cwd = fullOpts.workingDir || config.workingDirectory || undefined;
   } catch (e) {
@@ -1503,6 +1554,22 @@ async function runPostTurnContextProbe(
       resolve();
     });
   });
+}
+
+// 取消该会话在飞的 post-turn 探针（连接加固 Task 6）：新回合启动时调用——旧探针的
+// --resume 读进程与新回合的 --resume 写进程并发在同一 transcript 上，存在竞态；
+// 且其结果必然过时。kill 之外推进 generation，让在飞探针的迟到的 close 回调丢弃结果。
+function cancelPostTurnProbe(sessionId: string): void {
+  const state = postTurnProbeState.get(sessionId);
+  if (!state) return;
+  if (state.child && !state.child.killed) {
+    try {
+      state.child.kill();
+    } catch {
+      // ignore
+    }
+  }
+  postTurnProbeState.set(sessionId, { child: null, generation: state.generation + 1 });
 }
 
 export function schedulePostTurnProbe(
@@ -2817,6 +2884,8 @@ async function runQuery(
     // Task 4 §7：真实 query 启动前取消该会话的命令探测并等待其结束（有限超时），保证 probe 与真实
     // query 不并行。取消失败不阻塞普通发送超过 cancelCommandProbe 的短超时。
     await cancelCommandProbe(sessionId);
+    // 连接加固 Task 6：同时取消在飞的 post-turn 探针（避免 --resume 读/写竞态）。
+    cancelPostTurnProbe(sessionId);
     entry.query = null;
 
   // spawn 前若已有旧 query（同 session），先中断并移除——与 process-manager 的 killProcess 一致。

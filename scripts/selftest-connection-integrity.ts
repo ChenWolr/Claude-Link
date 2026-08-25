@@ -132,5 +132,16 @@ console.log('\n=== 4) 看门狗重试暂停 ===');
   check('watchdogTick 接入暂停判定 + 恢复时重置计时基准', /function watchdogTick[\s\S]*?shouldPauseStallWatchdog\(apiRetryStates\.get\(sessionId\), now\)[\s\S]*?t\.retryPaused = false;[\s\S]*?t\.lastActivityAt = now;/.test(sb));
 }
 
+console.log('\n=== 5) 回合快照 / 探针取消 / 漂移可见 ===');
+{
+  const sb = readRel('src/main/modules/sdk-backend.ts');
+  check('回合内连接快照 Map 存在并在 buildSdkOptions 写入', sb.includes('sessionLastTurnOverride') && sb.includes('entry.sessionModelOverride = override;'));
+  check('探针优先复用回合快照', /runPostTurnContextProbe[\s\S]*?sessionLastTurnOverride\.has\(sessionId\)/.test(sb));
+  check('新回合取消 post-turn 探针', /await cancelCommandProbe\(sessionId\);[\s\S]{0,200}?cancelPostTurnProbe\(sessionId\);/.test(sb));
+  check('会话删除收口清理两个新 Map', /markSessionDeleted[\s\S]*?sessionLastTurnOverride\.delete\(sessionId\)[\s\S]*?sessionLastEffective\.delete\(sessionId\)/.test(sb));
+  check('漂移落库 system:connection_drift', sb.includes("processKind: 'system:connection_drift'"));
+  check('漂移仅在变化时落库（prev 比对）', /function notifyEffectiveConnectionDrift[\s\S]*?if \(!prev\) return;[\s\S]*?providerName === current\.providerName && prev\.modelId === current\.modelId\) return;/.test(sb));
+}
+
 console.log(`\n=== 连接完整性自测：${pass} 过 / ${fail} 败 ===`);
 if (fail > 0) process.exit(1);
