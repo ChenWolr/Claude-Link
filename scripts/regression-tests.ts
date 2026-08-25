@@ -1119,10 +1119,10 @@ function testClaudeSettingsProjectionPreservesAdvancedSettings(): void {
   assert.deepEqual(settings.hooks, [{ event: 'Stop', command: 'notify' }]);
   assert.equal(settings.alwaysThinkingEnabled, true);
   assert.deepEqual(settings.permissions, { defaultMode: 'plan', allow: ['Read'] });
+  // 连接加固 P3：settings.local.json 不再投影端点凭据（凭据只随进程 env / Options.settings
+  // 走）；advancedJson 里用户自己的 env 仍原样保留。
   assert.deepEqual(settings.env, {
     ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2',
-    ANTHROPIC_API_KEY: 'sk-test',
-    ANTHROPIC_BASE_URL: 'https://example.com/v1',
   });
 }
 

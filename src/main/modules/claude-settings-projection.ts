@@ -1,3 +1,11 @@
+// 把 Claude Link 配置投影成 Claude Code settings.local.json（对标 CC GUI）。
+// 写在 workingDirectory/.claude/settings.local.json，让 CLI 在该 cwd 启动时自动读取，
+// permissions/hooks 等顶层字段生效（env 注入管不到这些）。
+// 连接加固 P3：端点凭据（ANTHROPIC_API_KEY/BASE_URL）不再投影进本文件——凭据唯一
+// 通道是进程 env（buildSpawnEnv）与 SDK Options.settings（最高优先级），避免本地文件
+// 携带 lastUsed 凭据与会话 override 的进程 env 形成两套凭据并存/互相劫持。
+// 注意：workingDirectory 为 null 时跳过（不阻塞保存，env 注入仍走 buildSpawnEnv）。
+
 import type { AppConfig } from '../../shared/types/config';
 import { resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { buildPermissionSettings } from './sdk-permissions';
@@ -22,11 +30,9 @@ function stringEnvFrom(value: unknown): Record<string, string> {
 
 export function buildClaudeSettingsProjection(config: AppConfig): Record<string, unknown> {
   const advanced = recordFromJson(config.advancedJson);
+  // env 只保留用户在高级 JSON 里自己写的字符串项（连接加固 P3：端点凭据不投影，
+  // 凭据唯一通道是进程 env / SDK Options.settings）。
   const env = stringEnvFrom(advanced.env);
-
-  if (config.apiKey) env.ANTHROPIC_API_KEY = config.apiKey;
-  const baseUrl = config.apiBaseUrl?.trim();
-  if (baseUrl && baseUrl !== 'https://api.anthropic.com') env.ANTHROPIC_BASE_URL = baseUrl;
 
   // advancedJson 先 spread（携带用户 hooks 等顶层设置，以及可能已存在的 effortLevel/ultracode）。
   const projection: Record<string, unknown> = {

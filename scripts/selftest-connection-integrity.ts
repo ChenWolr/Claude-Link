@@ -143,5 +143,14 @@ console.log('\n=== 5) 回合快照 / 探针取消 / 漂移可见 ===');
   check('漂移仅在变化时落库（prev 比对）', /function notifyEffectiveConnectionDrift[\s\S]*?if \(!prev\) return;[\s\S]*?providerName === current\.providerName && prev\.modelId === current\.modelId\) return;/.test(sb));
 }
 
+console.log('\n=== 6) settings 投影卫生 ===');
+{
+  const writer = readRel('src/main/modules/settings-writer.ts');
+  const proj = readRel('src/main/modules/claude-settings-projection.ts');
+  check('settings-writer 原子写（临时文件 + rename）', writer.includes('.tmp') && writer.includes('renameSync'));
+  check('settings-writer 内容不变跳过写盘', /readFileSync\(file, 'utf8'\) === content/.test(writer));
+  check('投影不再写端点凭据（P3 单通道）', !proj.includes('env.ANTHROPIC_API_KEY = config.apiKey') && !proj.includes('ANTHROPIC_BASE_URL = baseUrl'));
+}
+
 console.log(`\n=== 连接完整性自测：${pass} 过 / ${fail} 败 ===`);
 if (fail > 0) process.exit(1);
