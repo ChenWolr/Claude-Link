@@ -23,6 +23,7 @@ import { IPC_CHANNELS } from '../../shared/constants';
 import { getConfig, getProviderModelSources } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride } from '../../shared/session-model';
+import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { resolveEffectivePermissionMode } from '../../shared/permission-resolver';
@@ -159,6 +160,10 @@ interface SessionEntry {
   // 与 requestedAlias 分开存：requestedAlias 兼作上下文窗口查询键，resolvedModel
   // 语义上只表示「子代理也必须统一到它」的当前实际模型。
   resolvedModel: string | null;
+  // 本次 query 解析出的供应商显示名（快败诊断/连接漂移提示用；库空时 null）。
+  providerName: string | null;
+  // 本次 query 解析出的完整连接覆盖（post-turn 探针复用，保证回合内环境一致）。
+  sessionModelOverride: SessionModelOverride | null;
   // 仅用于日志区分同一 Query 内部重试与 stale resume 重建的新 Query。
   queryInstance: number;
 }
@@ -599,6 +604,8 @@ function createEntry(): SessionEntry {
     abortController: null,
     requestedAlias: null,
     resolvedModel: null,
+    providerName: null,
+    sessionModelOverride: null,
     queryInstance: nextQueryInstance.value++,
     emitExit: (code) => {
       if (exitEmitted) return;
@@ -758,9 +765,15 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
 }
 
 // ── 组装 SDK Options ───────────────────────────────────────────────
+interface ResolvedSessionOverride extends SessionModelOverride {
+  providerName: string | null;
+  invalidOverride: boolean;
+}
+
 // 解析本次 query 的「会话当前实际模型」覆盖（doc2 §5.1）：供应商库（会话 override >
 // 最近使用 > 库首）解析出供应商 + 模型；库为空时返回 null（走老字段/别名链兜底）。
-function resolveSessionOverride(opts: SpawnOptions): SessionModelOverride | null {
+// providerName/invalidOverride 供快败诊断与漂移提示使用。
+function resolveSessionOverride(opts: SpawnOptions): ResolvedSessionOverride | null {
   const config = getConfig();
   const resolved = resolveSessionModel(
     { providerOverride: opts.providerOverride ?? null, modelOverride: opts.modelOverride ?? null },
@@ -772,6 +785,8 @@ function resolveSessionOverride(opts: SpawnOptions): SessionModelOverride | null
     apiBaseUrl: resolved.provider.apiBaseUrl,
     apiKey: resolved.provider.apiKey,
     modelId: resolved.modelId,
+    providerName: resolved.provider.name,
+    invalidOverride: resolved.invalidOverride,
   };
 }
 
@@ -871,6 +886,8 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   const requestedAlias = override?.modelId ?? (opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson));
   entry.requestedAlias = requestedAlias;
   entry.resolvedModel = override?.modelId ?? null;
+  entry.providerName = override?.providerName ?? null;
+  entry.sessionModelOverride = override;
   // Task 3 / review-v1 F6：显式 settings 由 buildClaudeLinkSettingsBlock 单一构造，query 与 probe 共用，
   // 经 buildNativeSdkOptionsCore 统一放入 Options（原生 settings 来源——不传 settingSources，SDK 默认
   // 加载 user/project/local）。
@@ -1723,6 +1740,38 @@ function finishApiRetryExhausted(sessionId: string, mainWindow: BrowserWindow, q
     notifySessionNetworkInterrupted(mainWindow, sessionId);
   }
   return exhausted.becameExhausted;
+}
+
+// 确定性上游错误的快败收口（连接加固 Task 4）：精确 error 事件（前端即时可见）+
+// 落库 system 消息（重开会话仍可见）+ killProcess 中断 CC 内部的无效重试。
+// 不复用 api_retry_exhausted 终态——那是「网络异常」语义；这里是「连接配置错误」语义，
+// 文案必须区分，用户才知道要去切换供应商/模型而不是干等网络恢复。
+function abortNonRetryableUpstream(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  entry: SessionEntry,
+  upstream: UpstreamErrorClassification,
+): void {
+  const message = upstreamFatalMessage(upstream, entry.providerName, entry.resolvedModel);
+  forwardEvent(sessionId, mainWindow, { type: 'error', message }, entry.queryInstance);
+  try {
+    const persisted = messageRepo.createMessage({
+      sessionId,
+      role: 'system',
+      content: message,
+      eventType: 'system',
+      processKind: 'system:upstream_fatal',
+      title: '连接配置错误',
+      isError: true,
+    });
+    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: { type: 'persisted_message', message: persisted },
+    });
+  } catch (err) {
+    logger.error(`Failed to persist upstream_fatal message [${sessionId}]`, err);
+  }
+  killProcess(sessionId, 'upstream_fatal', mainWindow);
 }
 
 function isToolResultPart(part: CliMessageContentPart): boolean {
@@ -2980,6 +3029,14 @@ async function runQuery(
             level: 'warn',
           };
           forwardTransient(sessionId, mainWindow, sysInfo);
+          // 确定性上游错误快败：model_not_found/鉴权/计费类错误重试 N 次结果不变（网关按
+          // key 分组路由，与重试无关）。CC 内部仍会按退避重试，这里主动中断本回合并给出
+          // 可行动诊断，替代「烧满 ~10 次重试 → 看门狗 600s 硬杀」的旧体验。isCurrentEntry
+          // 守卫保证迟到的 api_retry 不误杀新回合；abort 后下一次 await 即抛错走既有收尾。
+          const upstream = classifyUpstreamError(next.state.lastError, next.state.lastErrorStatus);
+          if (isNonRetryableUpstreamError(upstream.kind) && isCurrentEntry(sessionId, entry)) {
+            abortNonRetryableUpstream(sessionId, mainWindow, entry, upstream);
+          }
           continue;
         }
         // 权限询问/拒绝事件：转发并落库（processKind = permission）。
@@ -3337,6 +3394,7 @@ export type KillReason =
   | 'user'
   | 'api_retry_exhausted'
   | 'watchdog'
+  | 'upstream_fatal'
   | 'queue'
   | 'session_cleanup';
 
