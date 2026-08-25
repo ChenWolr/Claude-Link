@@ -3,6 +3,12 @@
 // settings 投影卫生 / 连接测试接线契约。运行：npx tsx scripts/selftest-connection-integrity.ts（不启动 Electron）。
 
 import { applySessionOverrideEnv } from '../src/shared/session-model';
+import {
+  classifyUpstreamError,
+  isNonRetryableUpstreamError,
+  upstreamFatalMessage,
+  type UpstreamErrorClassification,
+} from '../src/shared/upstream-errors';
 
 let pass = 0;
 let fail = 0;
@@ -69,6 +75,34 @@ console.log('\n=== 1b) 三元组接线契约（两通道同源 + topic-analyzer 
 
   check('topic-analyzer headers 使用解析出的 apiKey（不再硬用 config.apiKey）', /'x-api-key':\s*apiKey/.test(topic) && !/'x-api-key':\s*config\.apiKey/.test(topic) && !/Bearer \$\{config\.apiKey\}/.test(topic));
   check('topic-analyzer 解析传入会话 override（与会话同源）', /providerOverride:\s*session\?\.providerOverride/.test(topic));
+}
+
+console.log('\n=== 2) 上游错误分类器 ===');
+{
+  check(
+    '短错误码 model_not_found → kind 命中',
+    classifyUpstreamError('model_not_found').kind === 'model_not_found',
+  );
+  check(
+    'authentication_failed → authentication',
+    classifyUpstreamError('authentication_failed').kind === 'authentication',
+  );
+  // 用户实测的原样 JSON（连接测试 stderr / SDK 异常 message 形态）。
+  const rawJson = '{"error":{"message":"Model \\"glm-5.2\\" is not supported by any configured account in this group","type":"model_not_found"}}';
+  const c = classifyUpstreamError(rawJson);
+  check('原始 JSON：type 提取 model_not_found', c.kind === 'model_not_found', JSON.stringify(c));
+  check('原始 JSON：modelId 提取 glm-5.2', c.modelId === 'glm-5.2', String(c.modelId));
+  check('原始 JSON：detail 含上游 message', c.detail.includes('not supported by any configured account'), c.detail);
+  check('model_not_found 是非重试错误', isNonRetryableUpstreamError('model_not_found'));
+  check('rate_limit 可重试', !isNonRetryableUpstreamError('rate_limit'));
+  check('overloaded 可重试', !isNonRetryableUpstreamError('overloaded'));
+  check('404 状态码兜底 → model_not_found', classifyUpstreamError('Not Found', 404).kind === 'model_not_found');
+  check('401 状态码兜底 → authentication', classifyUpstreamError('Unauthorized', 401).kind === 'authentication');
+  check('网络文本 → network', classifyUpstreamError('fetch failed: ETIMEDOUT').kind === 'network');
+  check('空输入 → network', classifyUpstreamError(null).kind === 'network');
+
+  const msg = upstreamFatalMessage({ kind: 'model_not_found', detail: 'not supported', modelId: 'glm-5.2' }, '智谱 GLM', 'glm-5.2');
+  check('快败文案含供应商/模型/行动建议', msg.includes('智谱 GLM') && msg.includes('glm-5.2') && msg.includes('更换模型'));
 }
 
 console.log(`\n=== 连接完整性自测：${pass} 过 / ${fail} 败 ===`);
