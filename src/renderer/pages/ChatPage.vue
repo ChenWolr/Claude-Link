@@ -9,6 +9,7 @@ import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useCommandStore } from '../stores/command-store';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
+import TurnTimer from '../components/chat/TurnTimer.vue';
 import SessionToolbar from '../components/chat/SessionToolbar.vue';
 import AttachmentDraftList from '../components/chat/AttachmentDraftList.vue';
 import ExportImageOverlay from '../components/chat/ExportImageOverlay.vue';
@@ -316,6 +317,8 @@ async function handleNewSession() {
       <AttachmentDraftList :attachments="draftAttachments" />
 
       <div class="chat-composer" :class="{ 'chat-composer--drag': dragActive }">
+        <!-- 实时计时器：紧贴输入框上方（浮岛内），sending 期间平滑展开显示本回合主线程计算耗时。 -->
+        <TurnTimer />
         <ChatInput
           ref="chatInputRef"
           :model-value="draftText"
