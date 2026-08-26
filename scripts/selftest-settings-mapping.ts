@@ -821,10 +821,11 @@ console.log('\n=== 36) 实时计时器 + 子 Agent 折叠（问题 1/2/6/7）===
   const tqp = readRel('src/renderer/components/task/TaskQueuePanel.vue');
   const un = readRel('src/renderer/composables/use-now.ts');
   const pg = readRel('src/renderer/components/chat/ProcessGroup.vue');
+  const tt = readRel('src/renderer/components/chat/TurnTimer.vue');
   check('use-now 提供 useNow（100ms 跳动）', un.includes('useNow') && un.includes('setInterval'));
   check('session-store 含 turnStartedAt + activeTurnStartedAt', ss.includes('turnStartedAt') && ss.includes('activeTurnStartedAt'));
   check('markRunning 记录 turnStartedAt', ss.includes('this.turnStartedAt[sessionId] = Date.now()'));
-  check('MessageList 实时计时器（turn-timer + formatElapsed + useNow）', ml.includes('turn-timer') && ml.includes('formatElapsed') && ml.includes('useNow'));
+  check('TurnTimer 实时计时器（turn-timer + formatDurationMs + useNow）', tt.includes('turn-timer') && tt.includes('formatDurationMs') && tt.includes('useNow'));
   check('MessageBubble duration 与 cost 解耦', mb.includes('message.costUsd != null || message.durationMs'));
   check('use-chat 客户端时长兜底（clientMs）', uc.includes('clientMs'));
   check('subagent-groups 含 startMs / frozenSeconds', sg.includes('startMs') && sg.includes('frozenSeconds'));
@@ -842,6 +843,7 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
   const ts = readRel('src/renderer/stores/task-store.ts');
   const tb = readRel('src/renderer/components/chat/ThinkingBlock.vue');
   const ml = readRel('src/renderer/components/chat/MessageList.vue');
+  const tt = readRel('src/renderer/components/chat/TurnTimer.vue');
 
   // R2（问题 5）：渲染层过滤 permission / interaction_response（首轮误诊为空 informational）。
   check('permission 视为冗余（不渲染）', isRedundantSystemProcessKind('permission') === true);
@@ -891,7 +893,7 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
   check('ProcessGroup manualClosed 运行中可折叠', pg.includes('manualClosed'));
 
   // R5（问题 1）：动画点工作阶段常驻 + ThinkingBlock 脉冲动画点（首轮 pre-token 一闪即逝 + 静态 ··· ）。
-  check('MessageList 动画点工作阶段常驻（turn-timer__working）', ml.includes('turn-timer__working') && ml.includes("v-if=\"!streamingContent\""));
+  check('TurnTimer 动画点工作阶段常驻（turn-timer__working）', tt.includes('turn-timer__working') && tt.includes('v-if="!streamingContent"'));
   check('ThinkingBlock 脉冲动画点', tb.includes('think-dot-pulse'));
 
   // R6（问题 1+2 健壮性）：队列驱动回合同步执行态（不经 sendMessage → 否则 sending 恒 false）。

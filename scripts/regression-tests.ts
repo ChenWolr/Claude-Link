@@ -65,6 +65,46 @@ import {
 import { prepareAttachmentPrompt } from '../src/main/modules/attachment-prompt-builder';
 import { attachmentBadge } from '../src/renderer/utils/attachment';
 import type { AttachmentRecord, ChatSendPayload } from '../src/shared/types/attachment';
+import { formatDurationMs } from '../src/shared/format-duration';
+
+// 回复耗时：formatDurationMs 纯函数行为 + 运行中计时/结束耗时展示的接线契约。
+function testTurnTimingContracts(): void {
+  // 1) 纯函数行为：<60s 一位小数秒；≥60s 分:秒；非有限/≤0 兜底 0.0s。
+  assert.equal(formatDurationMs(3700), '3.7s', '<60s 显示一位小数秒');
+  assert.equal(formatDurationMs(0), '0.0s', '0 兜底 0.0s');
+  assert.equal(formatDurationMs(-5), '0.0s', '负数兜底 0.0s');
+  assert.equal(formatDurationMs(Number.NaN), '0.0s', 'NaN 兜底 0.0s');
+  assert.equal(formatDurationMs(60000), '1:00', '60s 整显示 1:00');
+  assert.equal(formatDurationMs(83000), '1:23', '≥60s 显示分:秒');
+  assert.equal(formatDurationMs(3600000), '60:00', '超过 59 分继续累计分钟');
+
+  // 2) 结构契约：运行中计时器从消息流末尾移到输入浮岛顶部（ChatPage 挂 TurnTimer），
+  //    与旧 MessageList 内嵌 turn-timer 互斥（同一计时逻辑单一宿主）。
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const turnTimer = readFileSync(new URL('../src/renderer/components/chat/TurnTimer.vue', import.meta.url), 'utf8');
+  const chatPage = readFileSync(new URL('../src/renderer/pages/ChatPage.vue', import.meta.url), 'utf8');
+  const messageList = readFileSync(new URL('../src/renderer/components/chat/MessageList.vue', import.meta.url), 'utf8');
+  const messageBubble = readFileSync(new URL('../src/renderer/components/chat/MessageBubble.vue', import.meta.url), 'utf8');
+
+  // TurnTimer：自包含读 store.sending + activeTurnStartedAt + useNow + 共享 formatDurationMs。
+  assert.ok(turnTimer.includes('activeTurnStartedAt'), 'TurnTimer 须读 activeTurnStartedAt 计时起点');
+  assert.ok(turnTimer.includes('useNow'), 'TurnTimer 须用 useNow 跳动时钟');
+  assert.ok(turnTimer.includes('formatDurationMs'), 'TurnTimer 须复用 formatDurationMs 口径');
+  assert.ok(turnTimer.includes('prefers-reduced-motion'), 'TurnTimer 脉冲点须尊重 reduced-motion');
+  // 计时器在 ChatPage 的浮岛（.chat-composer）内、ChatInput 之前（紧贴输入框上方）。
+  const timerIdx = chatPage.indexOf('<TurnTimer');
+  const composerIdx = chatPage.indexOf('class="chat-composer"');
+  const inputIdx = chatPage.indexOf('<ChatInput');
+  assert.ok(timerIdx >= 0, 'ChatPage 须挂载 TurnTimer');
+  assert.ok(composerIdx >= 0 && inputIdx >= 0, 'ChatPage 须有 .chat-composer 与 ChatInput');
+  assert.ok(timerIdx > composerIdx && timerIdx < inputIdx, 'TurnTimer 须在浮岛内、ChatInput 之前（紧贴输入框）');
+  // MessageList 不再内嵌 turn-timer（旧计时器已迁出，避免重复显示）。
+  assert.ok(!messageList.includes('turn-timer'), 'MessageList 不得再内嵌 turn-timer');
+  // MessageBubble：结束耗时用共享 formatDurationMs 口径 + 时钟图标 + tabular-nums。
+  assert.ok(messageBubble.includes('formatDurationMs'), 'MessageBubble 结束耗时须复用 formatDurationMs');
+  assert.ok(messageBubble.includes('bubble__meta-clock'), 'MessageBubble 结束耗时须带时钟图标');
+  assert.ok(messageBubble.includes('font-variant-numeric: tabular-nums'), '结束耗时数字须 tabular-nums 防抖动');
+}
 
 // Task1：附件策略纯函数契约（MIME/魔数/归类/大小/总预算/Base64/文件名安全化/空提交）。
 function testAttachmentPolicyContracts(): void {
@@ -3239,6 +3279,7 @@ function testWorkspaceHistoryRemoveContracts(): void {
 }
 
 async function main(): Promise<void> {
+testTurnTimingContracts();
 testDiffDialogSearchUiContracts();
 testDiffDialogNoWrapContracts();
 testDiffDialogSearchStateContracts();
