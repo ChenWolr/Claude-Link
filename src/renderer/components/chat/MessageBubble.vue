@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
+import { formatDurationMs } from '../../../shared/format-duration';
 import MessageAttachments from './MessageAttachments.vue';
 
 const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>();
@@ -11,6 +12,11 @@ const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>(
 const renderedContent = computed(() => renderMarkdown(props.message.content, props.exportMode ? 'export' : 'rich'));
 const hasContent = computed(() => props.message.content.trim().length > 0);
 const attachments = computed(() => props.message.attachments ?? []);
+
+// 本次回复耗时文案（结束后气泡脚注）；与运行中 TurnTimer 共用 formatDurationMs 保持口径一致。
+const durationText = computed(() =>
+  props.message.durationMs != null ? formatDurationMs(props.message.durationMs) : '',
+);
 
 // 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）。
 // 复制内容 = 正文 + 附件文件名列表；不含绝对路径/Base64/附件 ID。
@@ -37,8 +43,12 @@ async function copyMessage(): Promise<void> {
     <div v-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
     <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
     <div v-if="message.costUsd != null || message.durationMs" class="bubble__meta">
-      <template v-if="message.costUsd != null">${{ message.costUsd.toFixed(4) }}</template>
-      <template v-if="message.durationMs">{{ message.costUsd != null ? ' · ' : '' }}{{ (message.durationMs / 1000).toFixed(1) }}s</template>
+      <svg v-if="durationText" class="bubble__meta-clock" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v5l3.5 2" />
+      </svg>
+      <span v-if="durationText" class="bubble__meta-duration">{{ durationText }}</span>
+      <span v-if="message.costUsd != null" class="bubble__meta-cost">{{ durationText ? ' · ' : '' }}${{ message.costUsd.toFixed(4) }}</span>
     </div>
     <!-- 仅 user / assistant 消息提供复制按钮；tool / system 不需要。
          流式布局放在内容正下方独立一行，避免与正文重叠。 -->
@@ -146,10 +156,38 @@ async function copyMessage(): Promise<void> {
   margin: 0;
 }
 
+/* 回复脚注（耗时 + 费用）：紧贴内容下方，细分隔线不打断正文流；
+   muted 色 + 时钟图标，耗时数字 tabular-nums 固定宽度不抖动。 */
 .bubble__meta {
-  margin-top: 6px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   font-size: 0.6875rem;
-  opacity: 0.6;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.bubble__meta-clock {
+  width: 0.75rem;
+  height: 0.75rem;
+  fill: none;
+  stroke: var(--color-accent-strong);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
+}
+
+.bubble__meta-duration {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.bubble__meta-cost {
+  opacity: 0.8;
 }
 
 /* 复制按钮：定位到气泡右下角外侧（贴近消息但浮在背景区上）。
