@@ -24,6 +24,7 @@ import { isMissingConversationResumeError } from '../src/main/modules/sdk-errors
 import { alignPermissionDefaultMode, applyPermissionUpdates, buildPermissionSettings, coercePermissionUpdatesToSession, isToolSessionAllowed, normalizeToolNameForMatch, withToolSessionAllow, type SdkPermissionSettings } from '../src/main/modules/sdk-permissions';
 import { shouldNotifyInteractionCancelled } from '../src/shared/interaction-cancel';
 import { isApiErrorAssistantText } from '../src/shared/api-error-text';
+import { classifyUpstreamError, isNonRetryableUpstreamError, isReasoningReplayApiError, upstreamFatalMessage } from '../src/shared/upstream-errors';
 import { parseClaudeSettings } from '../src/main/modules/settings-importer';
 import { syncFormToAdvancedJson } from '../src/shared/settings-parser';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
@@ -2156,6 +2157,30 @@ function testApiErrorAssistantTextPredicate(): void {
   assert.equal(isApiErrorAssistantText('   '), false, '纯空白不命中');
 }
 
+// ── reasoning_replay 分类与谓词（2026-08-27 韧性层）───────────────────
+// 真串 = DeepSeek thinking 回传 400 逐字形态；反例 = 前缀不符 / 缺关键词 / 正文引用 /
+// 其他 400 / reasoning_content 单独出现。分类接线 + 致命文案行动建议一并覆盖。
+function testReasoningReplayPredicate(): void {
+  const TRUE_TEXT = 'API Error: 400 The `reasoning_content` in the thinking mode must be passed back to the API.';
+  assert.equal(isReasoningReplayApiError(TRUE_TEXT), true, '真串命中（逐字 DeepSeek 报错）');
+  assert.equal(isReasoningReplayApiError(`  \n${TRUE_TEXT}`), true, '前导空白 trim 后命中');
+  assert.equal(isReasoningReplayApiError('之前报了 API Error: 400 reasoning_content must be passed back，后来好了'), false, '正文引用不命中（非前缀）');
+  assert.equal(isReasoningReplayApiError('API Error: 400 invalid request'), false, '其他 400 不命中（缺关键词）');
+  assert.equal(isReasoningReplayApiError('API Error: 400 reasoning_content is missing'), false, '仅 reasoning_content 无 passed back 不命中');
+  assert.equal(isReasoningReplayApiError('API Error: 400 must be passed back to the API'), false, '仅 passed back 无 reasoning_content 不命中');
+  assert.equal(isReasoningReplayApiError('reasoning_content must be passed back to the API'), false, '无 API Error 前缀不命中');
+  assert.equal(isReasoningReplayApiError(''), false, '空串不命中');
+
+  const cls = classifyUpstreamError(TRUE_TEXT);
+  assert.equal(cls.kind, 'reasoning_replay', 'classifyUpstreamError 识别 reasoning_replay（优先于通用 type 推断）');
+  const other = classifyUpstreamError('API Error: 400 invalid_request_error');
+  assert.notEqual(other.kind, 'reasoning_replay', '其他 400 不误判为 reasoning_replay');
+  // reasoning_replay 不进 NON_RETRYABLE（重试一次有意义），与确定性错误相区分。
+  assert.equal(isNonRetryableUpstreamError('reasoning_replay' as never), false, 'reasoning_replay 可重试');
+  const fatal = upstreamFatalMessage(cls, 'sub2api 中转', 'deepseek-v4-pro');
+  assert.ok(fatal.includes('已自动重试') === false && fatal.includes('压缩会话') && fatal.includes('Anthropic 直连'), '致命文案含行动建议（压缩会话/Anthropic 直连）');
+}
+
 function testThinkingDisplaySummarizedEnabled(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const sb = fs.readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
@@ -3389,6 +3414,7 @@ testToolSessionAllowedShortCircuit();
 testInteractionCancelledNotifyPredicate();
 testToolNameMatchNormalization();
 testApiErrorAssistantTextPredicate();
+testReasoningReplayPredicate();
 testThinkingDisplaySummarizedEnabled();
 testMarkdownParserEmitsCoreBlocks();
 testMarkdownBodyCssCoversCoreElements();
