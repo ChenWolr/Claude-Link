@@ -21,7 +21,9 @@ import {
 } from '../src/main/modules/sdk-interactions';
 import { buildClaudeSettingsProjection } from '../src/main/modules/claude-settings-projection';
 import { isMissingConversationResumeError } from '../src/main/modules/sdk-errors';
-import { applyPermissionUpdates, buildPermissionSettings, coercePermissionUpdatesToSession, isToolSessionAllowed, withToolSessionAllow } from '../src/main/modules/sdk-permissions';
+import { alignPermissionDefaultMode, applyPermissionUpdates, buildPermissionSettings, coercePermissionUpdatesToSession, isToolSessionAllowed, normalizeToolNameForMatch, withToolSessionAllow, type SdkPermissionSettings } from '../src/main/modules/sdk-permissions';
+import { shouldNotifyInteractionCancelled } from '../src/shared/interaction-cancel';
+import { isApiErrorAssistantText } from '../src/shared/api-error-text';
 import { parseClaudeSettings } from '../src/main/modules/settings-importer';
 import { syncFormToAdvancedJson } from '../src/shared/settings-parser';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
@@ -703,7 +705,7 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       assert.ok(/if \(isCurrentEntry\(sessionId, entry\) && !gotResult\)[\s\S]*?deleteEntry\(sessionId, entry\);[\s\S]*?emitExit/.test(sdkBackend), '流末合成终态须先释放 entry 再通知退出');
       assert.ok(sdkBackend.includes('let exitEmitted = false'), 'SDK query exit 回调须幂等');
       assert.ok(/executeNextTask\([\s\S]*?spawnForTask\([\s\S]*?catch \(err\)[\s\S]*?task_failed/.test(taskQueue), '队列 spawn 同步失败须转为 task_failed');
-      assert.ok(/continueWithUserMessage\([\s\S]*?let spawned = false[\s\S]*?killProcess\(sessionId, 'queue'\)/.test(taskQueue), '队列续接 spawn/send 同步失败须清理 entry');
+      assert.ok(/continueWithUserMessage\([\s\S]*?let spawned = false[\s\S]*?killProcess\(sessionId, 'queue', mainWindow\)/.test(taskQueue), '队列续接 spawn/send 同步失败须清理 entry（F5：带 mainWindow，弹窗取消反馈不静默）');
       assert.ok(/continueWithUserMessage\([\s\S]*?promoteAttachments: false[\s\S]*?deleteMessage\(userMessage\.id\)[\s\S]*?markAttachmentsStatus\(prepared\.attachmentIds, 'draft'\)/.test(taskQueue), '队列续接失败须回滚消息并恢复附件草稿');
       const continueBody = taskQueue.slice(taskQueue.indexOf('export async function continueWithUserMessage'), taskQueue.indexOf('export function skipCountdown'));
       assert.ok(continueBody.indexOf("sendMessage(sessionId, prepared.prompt)") < continueBody.indexOf("state.status = 'continuing'"), '队列续接须在 query 接收后才切 continuing');
@@ -1528,7 +1530,7 @@ function testPermissionPromptIntegration(): void {
   // 工厂把显式 settings 放入 Options.settings，杜绝两条路径各自重复构造 settings。
   assert.ok(sdkBackend.includes('buildClaudeLinkSettingsBlock'), 'sdk-backend 应有统一 settings 块构造函数（F6）');
   assert.ok(
-    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias(?:,\s*(?:override|modelOverride))?\)/g) ?? []).length >= 2,
+    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias(?:,\s*(?:override|modelOverride))?(?:,\s*effectivePermissionMode)?\)/g) ?? []).length >= 2,
     '生产 query 与 probe 必须调用同一个 buildClaudeLinkSettingsBlock（F6：杜绝配置漂移）',
   );
   assert.ok(optionsSrc.includes('settings?: Record<string, unknown>'), '统一 options 工厂输入应含显式 settings（F6）');
@@ -1550,10 +1552,15 @@ function testPermissionPromptIntegration(): void {
   assert.ok(useChatCmd.includes('hasLocalCommandOutputMessage'), 'renderer 应有 local_command_output 去重判断');
   assert.ok(useChatCmd.includes("'system:local_command_output'"), '去重须匹配 processKind system:local_command_output');
   assert.ok(/ensureResultMessage[\s\S]*?hasLocalCommandOutputMessage/.test(useChatCmd), 'ensureResultMessage 须调用去重避免命令结果二次落库');
-  // §3：统一命令执行入口——命令与普通消息同一 runQuery/buildSdkOptions，prompt 原样透传，无命令 prompt 翻译器。
+  // §3：统一命令执行入口——命令与普通消息同一 runQuery/buildSdkOptions，prompt 无命令文本翻译。
+  // 批次二 streaming 迁移后：原始 prompt 先经 toStreamingPrompt 包装（transport 层归一，非命令翻译），
+  // startSdkQuery 收 streamingPrompt.iterable；仍不得存在命令 prompt 翻译器。
   assert.ok(ipcHandlers.includes('sendMessage(sessionId, prepared.prompt)'), 'CHAT_SEND 须用原样 prepared.prompt，不得翻译命令文本');
   assert.ok(/async function runQuery\([\s\S]*?prompt: SdkPrompt/.test(sdkBackend), 'runQuery 须接收原始 prompt（命令与普通消息同一入口）');
-  assert.ok(sdkBackend.includes('startSdkQuery(prompt, sdkOptions)'), 'runQuery 须把原始 prompt 原样传给 SDK query（无中间翻译）');
+  assert.ok(
+    sdkBackend.includes('toStreamingPrompt(prompt)') && !/startSdkQuery\(prompt,/.test(sdkBackend),
+    'runQuery 须把原始 prompt 经 toStreamingPrompt 包装后传给 SDK query（streaming input，无中间翻译）',
+  );
   assert.ok(!sdkBackend.includes('translateSlashCommand') && !sdkBackend.includes('commandToPrompt'), '不得存在命令 prompt 翻译器（绕过 SDK 的近似实现）');
   // §4：终态与取消——流末无 result 合成 aborted 复位 sending；中断走 aborted（不弹错误）；executable 缺失中文错误。
   assert.ok(sdkBackend.includes("type: 'aborted'"), 'runQuery 须合成 aborted 终态（流末无 result / 中断）');
@@ -1773,6 +1780,29 @@ function testPermissionSettingsMergeAndSessionCoercion(): void {
     { type: 'addRules', rules: [{ toolName: 'WebFetch', ruleContent: 'domain:example.com' }], behavior: 'allow', destination: 'session' },
     { type: 'addRules', rules: [{ toolName: 'WebFetch' }], behavior: 'allow', destination: 'session' },
   ]);
+
+  // 角度D：权限通道对齐纯函数。settings.permissions.defaultMode（全局档）与会话有效档对齐，
+  // 避免「全局默认=bypassPermissions、会话显式选 default」时 settings 块越权放行。
+  // 有效档非 default → 写有效档（覆盖全局档）；有效档 default → 删 defaultMode（原生来源自决）。
+  assert.deepEqual(
+    alignPermissionDefaultMode({ defaultMode: 'bypassPermissions', allow: ['Read'] }, 'default'),
+    { allow: ['Read'] },
+    '会话显式选 default 应删除 settings 块的全局宽松 defaultMode',
+  );
+  assert.deepEqual(
+    alignPermissionDefaultMode({ defaultMode: 'bypassPermissions', allow: ['Read'] }, 'acceptEdits'),
+    { defaultMode: 'acceptEdits', allow: ['Read'] },
+    '会话显式选 acceptEdits 应覆盖 settings 块的全局 defaultMode',
+  );
+  assert.deepEqual(
+    alignPermissionDefaultMode({ defaultMode: 'acceptEdits', allow: ['Read'] }, 'bypassPermissions'),
+    { defaultMode: 'bypassPermissions', allow: ['Read'] },
+    '会话显式选 bypassPermissions 应写有效档（与 Options.permissionMode 同源）',
+  );
+  // 不 mutate 入参：对齐后原 permissions 对象 defaultMode 保持不变。
+  const immutSource: SdkPermissionSettings = { defaultMode: 'bypassPermissions' };
+  alignPermissionDefaultMode(immutSource, 'default');
+  assert.equal(immutSource.defaultMode, 'bypassPermissions', 'alignPermissionDefaultMode 不得 mutate 入参');
 }
 
 function testAskUserQuestionInteractionAdapter(): void {
@@ -2078,6 +2108,52 @@ function testToolSessionAllowedShortCircuit(): void {
     sb.includes('isToolSessionAllowed(sessionBook, toolName)'),
     'createPermissionHandler 必须在弹窗前用 isToolSessionAllowed 短路本会话已授权工具',
   );
+}
+
+// ── 系统取消权限弹窗的可见反馈（批次一 #1）────────────────────────────
+// killProcess 静默 cancel pending 弹窗的三种系统理由（watchdog/upstream_fatal/queue）
+// 须落可见反馈；user/session_cleanup/api_retry_exhausted 或无 pending 弹窗时不落。
+function testInteractionCancelledNotifyPredicate(): void {
+  assert.equal(shouldNotifyInteractionCancelled('watchdog', true), true, 'watchdog 取消且有 pending 弹窗须通知');
+  assert.equal(shouldNotifyInteractionCancelled('upstream_fatal', true), true, 'upstream_fatal 取消且有 pending 弹窗须通知');
+  assert.equal(shouldNotifyInteractionCancelled('queue', true), true, 'queue 取消且有 pending 弹窗须通知');
+  assert.equal(shouldNotifyInteractionCancelled('user', true), false, '用户主动中断不通知（符合预期，无需解释）');
+  assert.equal(shouldNotifyInteractionCancelled('session_cleanup', true), false, '会话删除不通知（落库必失败）');
+  assert.equal(shouldNotifyInteractionCancelled('api_retry_exhausted', true), false, '网络重试耗尽不通知（另有专用终态）');
+  assert.equal(shouldNotifyInteractionCancelled('watchdog', false), false, '无 pending 弹窗时无须解释弹窗消失');
+  assert.equal(shouldNotifyInteractionCancelled('queue', false), false, 'queue 无 pending 弹窗不通知');
+}
+
+// ── toolName 归一化（批次一 #2）──────────────────────────────────────
+// 写入（withToolSessionAllow 查重）与判定（isToolSessionAllowed）两处共用
+// normalizeToolNameForMatch，任一侧大小写/空白漂移不得破坏短路。
+function testToolNameMatchNormalization(): void {
+  assert.equal(normalizeToolNameForMatch(' Write '), 'write', '归一化=trim+小写');
+  // 大小写漂移：写入 'Write' 后 'write' / ' write ' 均命中。
+  const book = coercePermissionUpdatesToSession(withToolSessionAllow('Write', undefined));
+  assert.equal(isToolSessionAllowed(book, 'write'), true, '写入 Write 后 write 命中（对称性）');
+  assert.equal(isToolSessionAllowed(book, ' Write '), true, '带空白漂移命中');
+  assert.equal(isToolSessionAllowed(book, 'WRITE'), true, '全大写命中');
+  // 细粒度规则（带 ruleContent）不构成整工具放行——归一化不得放宽 ruleContent 语义。
+  assert.equal(isToolSessionAllowed([
+    { type: 'addRules', rules: [{ toolName: 'write', ruleContent: 'a.txt' }], behavior: 'allow', destination: 'session' },
+  ], 'Write'), false, '带 ruleContent 的规则不因归一化命中');
+  // 查重侧同样归一化：已按 'write' 写入裸规则后，再放行 'Write' 不得追加第二条重复规则。
+  const book2 = coercePermissionUpdatesToSession(withToolSessionAllow('write', undefined));
+  const merged = withToolSessionAllow('Write', book2);
+  const bareRules = merged.filter((u) => u.type === 'addRules' && u.behavior === 'allow')
+    .flatMap((u) => u.rules.filter((r) => !r.ruleContent).map((r) => r.toolName));
+  assert.equal(bareRules.length, 1, '查重归一化后不追加重复裸规则');
+}
+
+// ── API Error 文案谓词（批次一 #4）──────────────────────────────────
+// 只认 trim 后前缀 `API Error:`；正文引用不命中；空串不命中。
+function testApiErrorAssistantTextPredicate(): void {
+  assert.equal(isApiErrorAssistantText('API Error: 400 The reasoning_content in the thinking mode must be passed back to the API'), true, '真前缀命中');
+  assert.equal(isApiErrorAssistantText('  \n API Error: 500 internal'), true, '前导空白 trim 后命中');
+  assert.equal(isApiErrorAssistantText('之前那轮报了 API Error: 400，后来好了'), false, '正文引用不命中（非前缀）');
+  assert.equal(isApiErrorAssistantText(''), false, '空串不命中');
+  assert.equal(isApiErrorAssistantText('   '), false, '纯空白不命中');
 }
 
 function testThinkingDisplaySummarizedEnabled(): void {
@@ -3310,6 +3386,9 @@ testElicitationCancelMapping();
 testStatusSubtypeCoverage();
 testAllowSessionPermissionsSurviveNextSdkQuery();
 testToolSessionAllowedShortCircuit();
+testInteractionCancelledNotifyPredicate();
+testToolNameMatchNormalization();
+testApiErrorAssistantTextPredicate();
 testThinkingDisplaySummarizedEnabled();
 testMarkdownParserEmitsCoreBlocks();
 testMarkdownBodyCssCoversCoreElements();

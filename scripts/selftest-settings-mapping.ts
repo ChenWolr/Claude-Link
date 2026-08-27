@@ -593,10 +593,10 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
   check('SessionToolbar ContextButton :disabled', st.includes('ContextButton :disabled="sending"'));
   check('SessionToolbar 工作空间 button :disabled', /ctl__btn[\s\S]{0,120}:disabled="sending"/.test(st));
   check('SessionToolbar ProviderModelSelector :disabled', st.includes('ProviderModelSelector :disabled="sending"'));
-  // 权限控件已由 <select> 改为卡片式（commit d396477）：校验权限触发按钮在 sending 时禁用。
-  // ctl__perm-icon 已随卡片化重构移除；改用「:disabled="sending" 后跟 perm-menu 卡片面板」唯一定位权限按钮
-  // （工作空间按钮后跟 workspaceMenu、模型是 ProviderModelSelector，均无 perm-menu）。
-  check('SessionToolbar 权限触发按钮 :disabled（卡片式）', /:disabled="sending"[\s\S]{0,400}perm-menu/.test(st));
+  // 权限控件已由 <select> 改为卡片式（commit d396477）。批次二 #3 后权限触发按钮放开
+  // sending 禁用（运行中切档经 streaming 控制请求即时生效），此处改为反向契约：
+  // 权限按钮块（perm-menu 之前）不得再挂 :disabled="sending"。
+  check('SessionToolbar 权限触发按钮不再 :disabled（批次二 #3 运行中可切档）', !/:disabled="sending"[\s\S]{0,400}perm-menu/.test(st));
 }
 
 console.log('\n=== 31) 根因修复：chat:event 监听全局化 + sending 派生 ===');
@@ -1076,8 +1076,8 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     ipcHandlers.includes("killProcess(sessionId, 'user', mainWindowRef)"));
   check('删除会话以 session_cleanup reason 中断',
     ipcHandlers.includes("killProcess(id, 'session_cleanup')"));
-  check('任务队列以 queue reason 中断',
-    queueEngine.includes("killProcess(sessionId, 'queue')"));
+  check('任务队列以 queue reason 中断（F5：带 mainWindow）',
+    queueEngine.includes("killProcess(sessionId, 'queue', mainWindow)"));
   const killProcessBody = sb.slice(
     sb.indexOf('export function killProcess('),
     sb.indexOf('export function killAllProcesses()'),
@@ -1111,6 +1111,20 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
   check('StalledBanner 三动作', banner.includes('继续等待') && banner.includes('重试') && banner.includes('中断'));
   check('MessageList 挂载 StalledBanner 且 stalledInfo 可显形', ml.includes('StalledBanner') && ml.includes('activeStalledInfo'));
   check('selftest 串联 tdd-stall-watchdog-verify', pkg.includes('tdd-stall-watchdog-verify.ts'));
+
+  // 静默拒绝根因修复：权限交互 pending 期间必须暂停该会话的 stall 判定，
+  // 否则用户在弹窗停留过久会被 toolHardAbortMs 硬杀 → cancelInteractionsForSession
+  // 静默 cancel → 中性 deny → is_error tool_result 污染 transcript。
+  const ip = readRel('src/main/modules/interaction-prompts.ts');
+  check('interaction-prompts 暴露 hasPendingInteractionForSession',
+    ip.includes('export function hasPendingInteractionForSession'));
+  check('sdk-backend import hasPendingInteractionForSession',
+    sb.includes('hasPendingInteractionForSession') && sb.includes("import { cancelInteractionsForSession, requestInteraction, hasPendingInteractionForSession } from './interaction-prompts'"));
+  check('看门狗 tick 在 pending 交互时暂停 stall 判定并刷新 lastActivityAt',
+    /hasPendingInteractionForSession\(sessionId\)\s*\)\s*\{[\s\S]*?t\.lastActivityAt = now;[\s\S]*?t\.stalledSince = null;[\s\S]*?t\.stallNotified = false;[\s\S]*?continue;/.test(sb));
+  check('pending 交互暂停位于 api_retry 暂停之后（两路暂停并列，不遮蔽 retry 逻辑）',
+    sb.indexOf('shouldPauseStallWatchdog(apiRetryStates.get(sessionId), now)') <
+    sb.indexOf('hasPendingInteractionForSession(sessionId)'));
 }
 
 console.log('\n=== 39) 上下文窗口 fallback + fable 映射契约 ===');
@@ -1818,11 +1832,24 @@ console.log('\n=== 53) 权限模式全局默认 + 会话覆盖链路（permissio
   // 注入层：sdk-backend 经 resolver 回落全局默认（query + probe 两条链）。
   const sdkBackend = readRel('src/main/modules/sdk-backend.ts');
   const cliShared = readRel('src/main/modules/cli-shared.ts');
+  const sdkPermissions = readRel('src/main/modules/sdk-permissions.ts');
   check('sdk-backend import resolveEffectivePermissionMode', sdkBackend.includes('resolveEffectivePermissionMode'));
   check('sdk-backend buildSdkOptions 用 effectivePermissionMode（两处回落）',
     sdkBackend.split('resolveEffectivePermissionMode(opts.permissionMode ?? null, config.permissionMode)').length - 1 >= 2);
   check('sdk-backend 注入 permissionMode: effectivePermissionMode',
     sdkBackend.includes('permissionMode: effectivePermissionMode as'));
+  // 权限通道对齐（角度D 遗漏修复）：settings.permissions.defaultMode 由 buildClaudeSettingsProjection
+  // 用全局 config.permissionMode 构造，会话显式选档时须按会话有效档对齐，否则「UI 所见权限档」与
+  // 「settings 块注入档」分叉（全局默认=bypassPermissions、会话显式选 default 时越权放行）。
+  check('buildClaudeLinkSettingsBlock 接收 effectivePermissionMode 参数',
+    sdkBackend.includes('effectivePermissionMode: PermissionMode,') && sdkBackend.includes('override, effectivePermissionMode)'));
+  check('会话显式选档时经 alignPermissionDefaultMode 对齐（sdk-backend 接线）',
+    sdkBackend.includes('alignPermissionDefaultMode') && sdkBackend.includes("if (opts.permissionMode != null)") && sdkBackend.includes('permissions = alignPermissionDefaultMode(permissions, effectivePermissionMode)'));
+  check('alignPermissionDefaultMode 抽为 sdk-permissions 纯函数（default→删 / 非 default→写有效档 / 不 mutate 入参）',
+    sdkPermissions.includes('export function alignPermissionDefaultMode') &&
+    sdkPermissions.includes("delete next.defaultMode") &&
+    sdkPermissions.includes('next.defaultMode = effectivePermissionMode') &&
+    sdkPermissions.includes('const next: SdkPermissionSettings = { ...permissions }'));
   check('cli-shared SpawnOptions permissionMode 可空', cliShared.includes('permissionMode?: PermissionMode | null'));
 
   // UI 层：ConfigPage 全局默认选择器 + SessionToolbar 跟随全局默认(null) 选项。
@@ -1839,6 +1866,140 @@ console.log('\n=== 53) 权限模式全局默认 + 会话覆盖链路（permissio
   // 菜单默认档标题动态显示「默认：{全局默认档名}」，其余档 desc 保留。
   check('SessionToolbar 菜单默认档标题为「默认：全局默认档名」',
     toolbar.includes("p.value === null ? `默认：${globalDefaultPermissionLabel}` : p.label"));
+  // D8（CDP 实测报告）旧契约「权限按钮 sending 期间 disabled」已被批次二 #3 取代：
+  // streaming 迁移后运行中切换经控制请求即时生效，按钮放开禁用。
+  // 锚定模板中的权限按钮块（div ref="permissionRef" → perm-menu），避免误捕脚本区的同名 ref
+  // 与其它 :disabled="sending" 控件。
+  const permTplIdx = toolbar.indexOf('<div ref="permissionRef"');
+  const permMenuIdx = toolbar.indexOf('perm-menu', permTplIdx);
+  const permBtnBlock2 = toolbar.slice(permTplIdx, permMenuIdx > 0 ? permMenuIdx : permTplIdx + 1500);
+  check('SessionToolbar 权限切换按钮放开 sending 禁用（运行中可切档，批次二 #3）',
+    /class="ctl__btn"/.test(permBtnBlock2) && !/:disabled="sending"/.test(permBtnBlock2));
+}
+
+console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 ===');
+{
+  const sdkBackend = readRel('src/main/modules/sdk-backend.ts');
+  const sdkPermissions = readRel('src/main/modules/sdk-permissions.ts');
+  const cliShared = readRel('src/main/modules/cli-shared.ts');
+  const interactionCancel = readRel('src/shared/interaction-cancel.ts');
+  const useChat = readRel('src/renderer/composables/use-chat.ts');
+  const messageBubble = readRel('src/renderer/components/chat/MessageBubble.vue');
+  const toolbar2 = readRel('src/renderer/components/chat/SessionToolbar.vue');
+  const systemInfo = readRel('src/shared/system-info.ts');
+
+  // #1 系统取消弹窗可见反馈：killProcess 捕获 hadPending → 取消 → 谓词判定 → 落库 system:interaction_cancelled。
+  check('shouldNotifyInteractionCancelled 抽为 shared 纯函数（三 reason 显式枚举 + hadPending）',
+    interactionCancel.includes('export function shouldNotifyInteractionCancelled') &&
+    interactionCancel.includes("reason === 'watchdog' || reason === 'upstream_fatal' || reason === 'queue'"));
+  const killBody = sdkBackend.slice(sdkBackend.indexOf('export function killProcess('), sdkBackend.indexOf('export function killProcess(') + 2500);
+  check('killProcess 取消前捕获 hadPending（hasPendingInteractionForSession）',
+    /const hadPendingInteraction = hasPendingInteractionForSession\(sessionId\);[\s\S]*?cancelInteractionsForSession\(sessionId\);/.test(killBody));
+  check('killProcess 接线 shouldNotifyInteractionCancelled + processKind system:interaction_cancelled + isError',
+    sdkBackend.includes('shouldNotifyInteractionCancelled(reason, hadPendingInteraction)') &&
+    sdkBackend.includes("'system:interaction_cancelled'") &&
+    /processKind: 'system:interaction_cancelled',[\s\S]*?title: '权限弹窗已取消',[\s\S]*?isError: true,/.test(sdkBackend));
+  check('killProcess 推送 persisted_message（重开会话仍可见）',
+    /system:interaction_cancelled[\s\S]{0,600}?type: 'persisted_message'/.test(sdkBackend));
+  check('system:interaction_cancelled 不在冗余集（聊天流默认可见）',
+    !/isRedundantSystemProcessKind[\s\S]*?interaction_cancelled/.test(systemInfo) &&
+    !systemInfo.includes('interaction_cancelled'));
+
+  // #2/#3：归一化两处对称 + 子 agent 不吃主流程会话放行。
+  check('toolName 归一化纯函数（trim+toLowerCase）',
+    sdkPermissions.includes('export function normalizeToolNameForMatch') &&
+    sdkPermissions.includes('toolName.trim().toLowerCase()'));
+  check('withToolSessionAllow 与 isToolSessionAllowed 比较两侧均过归一化（对称）',
+    (sdkPermissions.match(/normalizeToolNameForMatch\(rule\.toolName\) === matchTool/g) ?? []).length >= 2);
+  check('createPermissionHandler 短路含 agentID 判定（子 agent 不吃主流程会话放行）',
+    sdkBackend.includes('options.agentID == null && isToolSessionAllowed(sessionBook, toolName)'));
+
+  // #4 API Error → isError + 红气泡：三处接线。
+  check('isApiErrorAssistantText 抽为 shared 纯函数（trim 后前缀匹配）',
+    readRel('src/shared/api-error-text.ts').includes("text.trim().startsWith('API Error:')"));
+  check('cli-shared 落库 assistant 正文命中谓词即 isError',
+    cliShared.includes("isError: role === 'assistant' && isApiErrorAssistantText(part.text)"));
+  check('use-chat persistMessage 镜像路径同样标 isError',
+    useChat.includes("isError: role === 'assistant' && isApiErrorAssistantText(part.text)"));
+  check('MessageBubble 错误气泡（bubble--error + fail 色系）',
+    messageBubble.includes("'bubble--error': message.isError === true") &&
+    messageBubble.includes('.bubble--error') &&
+    messageBubble.includes('var(--color-fail)') &&
+    messageBubble.includes('var(--color-fail-strong)'));
+
+  // #5 权限菜单生效提示（F2 验收 review 精确化：只对切换后新发起的工具请求即时生效；
+  // bypass 档 CLI 拒绝中途设置，回落下一条生效）。
+  check('SessionToolbar perm-menu 底部生效提示（foot 文案）',
+    toolbar2.includes('对切换后新发起的工具请求即时生效') && toolbar2.includes('自动模式档从下一条消息起生效'));
+  check('SessionToolbar 权限触发按钮 title 追加「；运行中切换即时生效」',
+    toolbar2.includes('}）；运行中切换即时生效`'));
+
+  // ── 批次二：streaming 迁移 + 权限中途切换 + 两段式中止 ──
+  const ipcTypes = readRel('src/shared/types/ipc.ts');
+  const ipcHandlers = readRel('src/main/ipc-handlers.ts');
+  const preloadApi = readRel('src/preload/api.ts');
+  const sessionStore = readRel('src/renderer/stores/session-store.ts');
+  const taskStore = readRel('src/renderer/stores/task-store.ts');
+
+  check('toStreamingPrompt 包装器（yield 后挂起 + settle 收口 + 可重复迭代）',
+    sdkBackend.includes('export function toStreamingPrompt') &&
+    sdkBackend.includes('await done;') &&
+    sdkBackend.includes('settle: () =>'));
+  check('runQuery 三处 startSdkQuery 均传 streaming iterable（迁移接线）',
+    (sdkBackend.match(/startSdkQuery\(streamingPrompt\.iterable, sdkOptions\)/g) ?? []).length === 3);
+  check('result 分支 settle + finally 兜底 settle（防挂起生成器泄漏）',
+    /type === 'result'[\s\S]{0,400}?streamingPrompt\.settle\(\)/.test(sdkBackend) &&
+    /finally \{[\s\S]{0,300}?entry\.streamingPrompt\?\.settle\(\);[\s\S]*?deleteEntry\(sessionId, entry\);/.test(sdkBackend));
+  check('SessionEntry 挂 streamingPrompt 句柄 + markEntryAborting settle',
+    sdkBackend.includes('streamingPrompt: StreamingPromptHandle | null;') &&
+    /markEntryAborting[\s\S]{0,200}?entry\.streamingPrompt\?\.settle\(\);/.test(sdkBackend));
+  check('两段式 killProcess：watchdog/upstream_fatal/queue 先 interrupt、有界 5000ms、记账延迟到优雅窗口后',
+    sdkBackend.includes("reason === 'watchdog' || reason === 'upstream_fatal' || reason === 'queue'") &&
+    /query\.interrupt\(\)[\s\S]{0,900}?finishKill\(\)/.test(sdkBackend) &&
+    /const deadline = Date\.now\(\) \+ 5000;/.test(sdkBackend) &&
+    sdkBackend.includes('const finishKill = () => {'));
+  check('权限中途切换：CHAT_SET_PERMISSION_MODE 通道 + 主进程解析有效档',
+    ipcTypes.includes("CHAT_SET_PERMISSION_MODE: 'chat:setPermissionMode'") &&
+    ipcHandlers.includes('setRunningQueryPermissionMode(sessionId, effective)') &&
+    ipcHandlers.includes('resolveEffectivePermissionMode(mode as PermissionMode | null, getConfig().permissionMode)'));
+  check('setRunningQueryPermissionMode：无运行回合 false + 3s ACK 放行 + 拒绝记日志',
+    sdkBackend.includes('export async function setRunningQueryPermissionMode') &&
+    /return false;[\s\S]{0,700}?setTimeout\(\(\) => finish\(true\), 3000\)/.test(sdkBackend));
+  check('preload 暴露 setRunningPermissionMode',
+    preloadApi.includes('setRunningPermissionMode: (sessionId, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE'));
+  check('session-store setActiveSessionPermissionMode 接运行中切换 + catch 静默回落',
+    /setActiveSessionPermissionMode[\s\S]{0,700}?setRunningPermissionMode\(this\.activeSession\.id, mode\)/.test(sessionStore));
+  check('task-store 中断收口 task_completed(interrupted) 补 markStopped（sending 不卡死）',
+    /task_completed[\s\S]{0,500}?interrupted[\s\S]{0,200}?markStopped\(payload\.sessionId\)/.test(taskStore));
+
+  // ── 验收 review 修复 ──
+  // F1：两段式优雅窗口内重发接管——entry.forceKill 句柄 + finishKill 幂等（killClosed）+
+  // spawnForChat 遇 forceKill 强制收口而非抛「回合仍在执行」+ getActiveProcess 判否放行队列续接。
+  check('F1 两段式 forceKill 句柄（SessionEntry 字段 + 两段式分支挂载 + finishKill 幂等自清）',
+    sdkBackend.includes('forceKill: (() => void) | null;') &&
+    /entry\.forceKill = finishKill;/.test(sdkBackend) &&
+    /let killClosed = false;[\s\S]{0,150}?killClosed = true;[\s\S]{0,80}?entry\.forceKill = null;/.test(sdkBackend));
+  check('F1 spawnForChat 优雅窗口重发先 forceKill 接管（不抛误导性错误）',
+    /spawnForChat[\s\S]*?blocking\.forceKill\(\);[\s\S]*?当前回合仍在执行/.test(sdkBackend));
+  check('F1 getActiveProcess 对 forceKill 优雅窗口判否（队列续接预检放行）',
+    /isEntryActive\(entry\) && !entry\.forceKill \? entry\.handle : undefined/.test(sdkBackend));
+  // F4：mid-turn context refresh 超时降级 debug（CLI 生成中不回控制 ACK 属常态）。
+  check('F4 mid-turn refresh 超时日志降级 debug（防刷屏误导）',
+    /samplePhase === 'mid-turn' \? logger\.debug : logger\.warn/.test(sdkBackend));
+
+  // F5（验收 review 第三轮）：queue 触发点 killProcess 漏传 mainWindow 会使「弹窗被系统
+  // 取消」反馈（system:interaction_cancelled）在 queue 路径恒静默——interruptTask 与
+  // continueWithUserMessage 回滚路径两处调用都必须带 mainWindow 字面量。
+  const taskQueueEngine = readRel('src/main/modules/task-queue-engine.ts');
+  check('F5 interruptTask 的 queue killProcess 含 mainWindow（弹窗取消反馈不静默）',
+    /export function interruptTask\(taskId: string, sessionId: string, mainWindow: BrowserWindow\): void \{[\s\S]{0,900}?killProcess\(sessionId, 'queue', mainWindow\);/.test(taskQueueEngine));
+  check('F5 continueWithUserMessage 回滚路径 queue killProcess 同样含 mainWindow',
+    /if \(spawned\) killProcess\(sessionId, 'queue', mainWindow\);/.test(taskQueueEngine) &&
+    !/killProcess\(sessionId, 'queue'\)/.test(taskQueueEngine));
+  // F5 复验延伸：interaction_cancelled 须独立成条（不折进过程组），红色系统消息才用户可见。
+  const groupMessages = readRel('src/renderer/utils/group-messages.ts');
+  check('F5 interaction_cancelled 打断 fold 独立展示（红色系统消息可见）',
+    /isBreak =[\s\S]{0,400}?msg\.processKind === 'system:interaction_cancelled'/.test(groupMessages));
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
