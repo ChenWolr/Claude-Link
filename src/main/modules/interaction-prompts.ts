@@ -89,6 +89,17 @@ export function getPendingInteractionPrompts(): InteractionPromptPayload[] {
   return Array.from(pendingInteractionRequests.values(), (pending) => pending.payload);
 }
 
+// 某会话当前是否有 pending 的交互请求（权限确认 / 选择题 / confirm）。
+// 供 stall 看门狗暂停判定：权限弹窗 pending 期间模型已发 tool_use 但工具未执行，
+// 无业务事件刷新 lastActivityAt，若不暂停会累积到 toolHardAbortMs 被硬杀，
+// 静默 cancel 弹窗 → 中性 deny → is_error tool_result 污染 transcript。
+export function hasPendingInteractionForSession(sessionId: string): boolean {
+  for (const pending of pendingInteractionRequests.values()) {
+    if (pending.sessionId === sessionId) return true;
+  }
+  return false;
+}
+
 export function cancelInteractionsForSession(sessionId: string): void {
   for (const [id, pending] of pendingInteractionRequests) {
     if (pending.sessionId === sessionId) {
