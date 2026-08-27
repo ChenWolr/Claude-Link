@@ -1327,7 +1327,11 @@ async function refreshContextSnapshot(
     }
   } catch (e) {
     // getContextUsage 失败（query 已关闭/超时等）→ 只记诊断，不阻塞 turn completion。
-    logger.warn(`[${sessionId}] refreshContextSnapshot 失败（${opts.samplePhase}）：${e instanceof Error ? e.message : String(e)}`);
+    // F4（验收 review）：mid-turn 超时降级 debug——CLI 生成中不回控制请求 ACK（R6 实测
+    // 同因），该相位超时是常态而非异常，warn 级刷屏误导排障；query-start/post-turn
+    // 仍 warn（它们有 stale 降级语义，值得看见）。
+    const logFn = opts.samplePhase === 'mid-turn' ? logger.debug : logger.warn;
+    logFn(`[${sessionId}] refreshContextSnapshot 失败（${opts.samplePhase}）：${e instanceof Error ? e.message : String(e)}`);
     // review-v4 High-1 方案 B：post-turn 快照不可得时必须显式降级 stale + diagnostic——
     // 禁止回合结束后仍保留 query-start 快照的 fresh 语义冒充当前值。renderer 收到 stale 后
     // 保留 last-known 数字但 freshness 降级（ContextButton 明示非实时）。仅对仍是当前 entry 的
