@@ -1927,10 +1927,10 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
     messageBubble.includes('var(--color-fail)') &&
     messageBubble.includes('var(--color-fail-strong)'));
 
-  // #5 权限菜单生效提示（F2 验收 review 精确化：只对切换后新发起的工具请求即时生效；
-  // bypass 档 CLI 拒绝中途设置，回落下一条生效）。
-  check('SessionToolbar perm-menu 底部生效提示（foot 文案）',
-    toolbar2.includes('对切换后新发起的工具请求即时生效') && toolbar2.includes('自动模式档从下一条消息起生效'));
+  // #5 权限菜单生效提示（F2 验收 review 精确化：只对切换后新发起的工具请求即时生效）。
+  // bypass 档 CLI 拒绝中途设置回落下一条生效是 CLI 约束的已知例外，按用户要求不在界面展示。
+  check('SessionToolbar perm-menu 底部生效提示（foot 文案，无 bypass 例外行）',
+    toolbar2.includes('对切换后新发起的工具请求即时生效') && !toolbar2.includes('自动模式档从下一条消息起生效'));
   check('SessionToolbar 权限触发按钮 title 追加「；运行中切换即时生效」',
     toolbar2.includes('}）；运行中切换即时生效`'));
 
