@@ -242,9 +242,10 @@ onUnmounted(() => {
           </svg>
         </button>
         <!-- 生效时机提示（照 ProviderModelSelector foot 先例）。F2（验收 review）精确化：
-             切档只对「切换后新发起」的工具请求即时生效——已在途的请求按旧档走完；
-             自动模式（bypassPermissions）被 CLI 拒绝中途设置（须启动 flag），下一条生效。 -->
-        <div class="perm-foot">对切换后新发起的工具请求即时生效<span>自动模式档从下一条消息起生效</span></div>
+             切档只对「切换后新发起」的工具请求即时生效——已在途的请求按旧档走完。
+             自动模式（bypassPermissions）被 CLI 拒绝中途设置（须启动 flag），下一条生效——
+             属 CLI 约束的已知例外，按用户要求不在界面上展示。 -->
+        <div class="perm-foot">对切换后新发起的工具请求即时生效</div>
       </div>
     </div>
 
@@ -525,12 +526,6 @@ onUnmounted(() => {
   color: var(--color-text-muted);
   font-size: 0.625rem;
   flex: none;
-}
-
-.perm-foot span {
-  margin-left: auto;
-  color: var(--color-success-strong);
-  font-weight: 600;
 }
 
 .perm-item {
