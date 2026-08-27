@@ -162,6 +162,12 @@ export function runMigrations(db: Database.Database): void {
     if (!hasMsgCol('is_error')) {
       db.exec('ALTER TABLE messages ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0');
     }
+    // reasoning_replay 结构化标记（api_error_kind）：assistant 正文命中
+    // isReasoningReplayApiError 时写入 'reasoning_replay'，供错误气泡行动建议与审计
+    // 按分类检索。幂等自愈补加，老库升级不阻塞。
+    if (!hasMsgCol('api_error_kind')) {
+      db.exec('ALTER TABLE messages ADD COLUMN api_error_kind TEXT');
+    }
   }
 
   // V5：任务稳定消息身份 client_message_id。入队时写入，执行/失败重试/应用重启都复用同一 ID

@@ -20,6 +20,7 @@ interface MessageRow {
   tool_use_id: string | null;
   title: string | null;
   is_error: number;
+  api_error_kind: string | null;
   created_at: string;
 }
 
@@ -39,6 +40,7 @@ function toMessage(row: MessageRow): Message {
     toolUseId: row.tool_use_id,
     title: row.title,
     isError: !!row.is_error,
+    apiErrorKind: row.api_error_kind ?? null,
     createdAt: normalizeDbTime(row.created_at),
   };
 }
@@ -73,6 +75,8 @@ export interface CreateMessageInput {
   title?: string | null;
   // 工具结果是否失败（tool_result.is_error）。
   isError?: boolean;
+  // 上游错误结构化分类键（assistant API Error 命中 isReasoningReplayApiError 时为 'reasoning_replay'）。
+  apiErrorKind?: string | null;
   /** 受校验的消息 ID（renderer 乐观消息与 DB 消息共用同一 ID）；缺省则生成 uuid。 */
   id?: string;
   /** 按显示顺序的草稿附件 ID；非空时在同一事务内关联。 */
@@ -109,13 +113,14 @@ export function createMessageWithAttachments(input: CreateMessageInput): Message
     toolUseId = null,
     title = null,
     isError = false,
+    apiErrorKind = null,
   } = input;
 
   const insert = db.prepare(
     `INSERT INTO messages (id, session_id, role, content, event_type, raw_event, parent_task_id,
-                           process_kind, parent_agent_id, tool_use_id, title, is_error)
+                           process_kind, parent_agent_id, tool_use_id, title, is_error, api_error_kind)
      VALUES (@id, @sessionId, @role, @content, @eventType, @rawEvent, @parentTaskId,
-             @processKind, @parentAgentId, @toolUseId, @title, @isError)`,
+             @processKind, @parentAgentId, @toolUseId, @title, @isError, @apiErrorKind)`,
   );
 
   const transaction = db.transaction(() => {
@@ -132,6 +137,7 @@ export function createMessageWithAttachments(input: CreateMessageInput): Message
       toolUseId,
       title,
       isError: isError ? 1 : 0,
+      apiErrorKind,
     });
     if (attachmentIds.length > 0) {
       attachmentRepo.linkAttachmentsToMessage(id, attachmentIds);
