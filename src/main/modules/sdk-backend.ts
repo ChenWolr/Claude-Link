@@ -26,7 +26,7 @@ import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride 
 import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
-import { resolveEffectivePermissionMode } from '../../shared/permission-resolver';
+import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
 import { isSuccessfulCliResult } from '../../shared/session-completion';
 import { convertResultMessage } from '../../shared/result-converter';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
@@ -76,7 +76,7 @@ import type {
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { SdkPrompt } from './attachment-prompt-builder';
-import { cancelInteractionsForSession, requestInteraction } from './interaction-prompts';
+import { cancelInteractionsForSession, requestInteraction, hasPendingInteractionForSession } from './interaction-prompts';
 import {
   SUPPORTED_USER_DIALOG_KINDS,
   buildPermissionInteractionPayload,
@@ -90,6 +90,7 @@ import {
 } from './sdk-interactions';
 import { buildClaudeSettingsProjection } from './claude-settings-projection';
 import {
+  alignPermissionDefaultMode,
   applyPermissionUpdates,
   coercePermissionUpdatesToSession,
   isToolSessionAllowed,
@@ -419,6 +420,20 @@ function watchdogTick(): void {
     // 直接达到硬杀阈值，跳过横幅直接 kill。
     if (shouldPauseStallWatchdog(apiRetryStates.get(sessionId), now)) {
       t.retryPaused = true;
+      continue;
+    }
+    // 权限交互 pending 期间让位（静默拒绝根因修复）：弹窗等待用户抉择时模型已发出 tool_use
+    // 但工具未执行，不会有业务事件刷新 lastActivityAt。若继续计时，用户停留过久（如 >900s
+    // 的长任务权限抉择）会被 toolHardAbortMs 硬杀 → cancelInteractionsForSession 静默 cancel 弹窗
+    // → 中性 deny → is_error tool_result 污染 transcript，模型后续回避该工具（表现为「没弹窗却
+    // 突然不再要权限」）。用户在弹窗上的停留是等待用户输入，不是卡死，必须暂停 stall 判定；
+    // 弹窗 resolve（用户抉择或取消）后 pending 清除，看门狗自动恢复管辖。
+    if (hasPendingInteractionForSession(sessionId)) {
+      t.lastActivityAt = now;
+      if (t.stalledSince !== null) {
+        t.stalledSince = null;
+        t.stallNotified = false;
+      }
       continue;
     }
     if (t.retryPaused) {
@@ -861,6 +876,7 @@ function buildClaudeLinkSettingsBlock(
   thinkingConfig: ThinkingConfigResult,
   requestedAlias: string,
   modelOverride: SessionModelOverride | null,
+  effectivePermissionMode: PermissionMode,
 ): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined } {
   // 内联 settings——claude-link 显式设置叠加在原生来源之上（managed < user < project < local
   // < Options.settings）。与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），
@@ -901,10 +917,20 @@ function buildClaudeLinkSettingsBlock(
   }
 
   // permissions 先应用 session 级更新，再并集 additionalDirectories（用户配置 + 附件目录）。
-  const permissions = applySessionPermissionUpdates(
+  let permissions = applySessionPermissionUpdates(
     sessionId,
     settings.permissions as SdkPermissionSettings,
   );
+  // 权限通道对齐（角度D 遗漏修复，纯函数 alignPermissionDefaultMode）：settings.permissions.defaultMode
+  // 由 buildClaudeSettingsProjection 用全局 config.permissionMode 构造（无会话上下文），而
+  // Options.permissionMode 用会话有效档（resolveEffectivePermissionMode：会话 override > 全局默认）。
+  // 会话显式选档（opts.permissionMode 非 null）时两者可能分叉——例如全局默认=bypassPermissions、会话
+  // 显式选 default：UI 显示「默认模式」，settings 块却仍注入 defaultMode='bypassPermissions'，若 CLI 以
+  // settings 块为准会造成越权放行（或反之降级），使「用户所见权限档」与「真实生效权限档」不一致。
+  // 跟随全局（opts.permissionMode 为 null）时不动——settings 块已用全局档正确投影。
+  if (opts.permissionMode != null) {
+    permissions = alignPermissionDefaultMode(permissions, effectivePermissionMode);
+  }
   const mergedDirs = new Set<string>();
   for (const dir of permissions.additionalDirectories ?? []) {
     if (typeof dir === 'string' && dir.trim()) mergedDirs.add(path.resolve(dir.trim()));
@@ -950,7 +976,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // Task 3 / review-v1 F6：显式 settings 由 buildClaudeLinkSettingsBlock 单一构造，query 与 probe 共用，
   // 经 buildNativeSdkOptionsCore 统一放入 Options（原生 settings 来源——不传 settingSources，SDK 默认
   // 加载 user/project/local）。
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override);
+  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode);
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
     env: buildSpawnEnv(override),
     exe: resolveExecutable(config.cliPath),
@@ -2285,7 +2311,7 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
   const requestedAlias = override?.modelId ?? (opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson));
   // Task 3 / review-v1 F6：与生产 query 同一核心构造（原生 settings 来源，不传 settingSources 数组；
   // 显式 settings 共用 buildClaudeLinkSettingsBlock，经工厂统一放入 Options）。
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override);
+  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode);
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
     env: buildSpawnEnv(override),
     exe,

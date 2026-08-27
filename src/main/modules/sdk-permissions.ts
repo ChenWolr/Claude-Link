@@ -179,3 +179,32 @@ export function applyPermissionUpdates(permissions: SdkPermissionSettings, updat
   }
   return next;
 }
+
+/**
+ * 权限通道对齐：把 settings.permissions.defaultMode 对齐到「会话有效权限档」。
+ *
+ * 背景：`buildPermissionSettings` 用全局 `config.permissionMode` 构造 settings.permissions.defaultMode
+ *（无会话上下文），而 SDK `Options.permissionMode` 用会话有效档（resolveEffectivePermissionMode：
+ * 会话 override > 全局默认）。会话显式选档（session.permissionMode 非 null）时两者可能分叉——
+ * 例如全局默认=bypassPermissions、会话显式选 default：UI 显示「默认模式」，settings 块却仍注入
+ * defaultMode='bypassPermissions'，若 CLI 以 settings 块为准会造成越权放行（或反之降级），使
+ * 「用户所见权限档」与「真实生效权限档」不一致。
+ *
+ * 规则（纯函数，供行为测试）：
+ *   - 有效档 === 'default' → 删除 defaultMode（让原生 user/project/local 来源自决，与
+ *     buildPermissionSettings「不强制写 default 覆盖原生默认」语义一致）；
+ *   - 有效档非 default → 写 defaultMode = 有效档，与 Options.permissionMode 同源。
+ * 总是返回新对象，不 mutate 入参（调用方可能把 settings.permissions 原引用传入）。
+ */
+export function alignPermissionDefaultMode(
+  permissions: SdkPermissionSettings,
+  effectivePermissionMode: string,
+): SdkPermissionSettings {
+  const next: SdkPermissionSettings = { ...permissions };
+  if (effectivePermissionMode === 'default') {
+    delete next.defaultMode;
+  } else {
+    next.defaultMode = effectivePermissionMode;
+  }
+  return next;
+}
