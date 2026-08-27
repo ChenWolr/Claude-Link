@@ -8,6 +8,8 @@
 //  3. 纯文本错误 + 可选 HTTP 状态码。
 // 分类决定两件事：是否「重试无意义的确定性错误」（快败）与面向用户的精确文案。
 
+import { isApiErrorAssistantText } from './api-error-text';
+
 export type UpstreamErrorKind =
   | 'model_not_found'
   | 'authentication'
@@ -17,6 +19,7 @@ export type UpstreamErrorKind =
   | 'overloaded'
   | 'server_error'
   | 'network'
+  | 'reasoning_replay'
   | 'unknown';
 
 export interface UpstreamErrorClassification {
@@ -51,6 +54,18 @@ const KIND_BY_CODE: Record<string, UpstreamErrorKind> = {
   api_error: 'server_error',
 };
 
+// reasoning_replay（2026-08-27 定案）：DeepSeek V4 thinking 模式对带 tools 的多轮请求强制
+// 要求回传 assistant 历史 reasoning_content；sub2api（<0.1.178-reasoning-patch）的
+// Anthropic→OpenAI 转换桥丢弃 thinking 块导致上游间歇性 400。错误以 assistant 正文
+// `API Error: 400 The \`reasoning_content\` in the thinking mode must be passed back
+// to the API.` 形态落库。识别三要素：API Error 前缀（复用 api-error-text 的前缀谓词
+// 约定，正文中间引用不误伤）+ reasoning_content + passed back 关键词。
+export function isReasoningReplayApiError(text: string): boolean {
+  if (!isApiErrorAssistantText(text)) return false;
+  const lower = text.toLowerCase();
+  return lower.includes('reasoning_content') && lower.includes('passed back');
+}
+
 const TYPE_RE = /"type"\s*:\s*"([a-z_]+)"/;
 const MSG_RE = /"message"\s*:\s*"((?:[^"\\]|\\.)*)"/;
 const MODEL_IN_MSG_RE = /Model\s+\\"?([\w.\-]+)\\"?/;
@@ -67,6 +82,11 @@ export function classifyUpstreamError(
   }
   if (KIND_BY_CODE[text]) {
     return { kind: KIND_BY_CODE[text], detail: '', modelId: null };
+  }
+  // reasoning_replay 优先于通用 type/状态码推断：其 JSON 里 type=invalid_request_error
+  // 会被误归 server/unknown，专用文案与「重试一次有效」语义需要独立 kind。
+  if (isReasoningReplayApiError(text)) {
+    return { kind: 'reasoning_replay', detail: text.slice(0, 300), modelId: null };
   }
   const typeMatch = TYPE_RE.exec(text);
   let kind: UpstreamErrorKind = typeMatch ? (KIND_BY_CODE[typeMatch[1]] ?? 'unknown') : 'unknown';
@@ -105,6 +125,8 @@ export function upstreamFatalMessage(
       return `${where}的 Key 无权访问${modelText}（permission_error）。请核对令牌权限。${detail}`;
     case 'billing':
       return `${where}账户计费异常（余额不足或额度到期）。请到供应商侧处理后再试。${detail}`;
+    case 'reasoning_replay':
+      return `${where}的上游要求回传思考内容（reasoning_content 缺失，网关桥接缺陷）。重发一次通常可恢复；反复出现请压缩会话，或改用 Anthropic 直连 / GLM Anthropic 端点。${detail}`;
     default:
       return `${where}请求失败（${c.kind}）。${detail}`;
   }
