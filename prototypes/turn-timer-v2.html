@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TurnTimer 重设计 v2 · 紧贴会话框 · 4 方案</title>
+<style>
+/* ============ 主题 token（与 variables.css warm-paper 完全一致）============ */
+:root {
+  color-scheme: light;
+  --color-bg: #F8F4ED;
+  --color-panel: #F4F0EA;
+  --color-panel-soft: #FCFAF5;
+  --color-border: rgba(122, 96, 88, 0.18);
+  --color-border-strong: rgba(0, 0, 0, 0.12);
+  --color-text: #3B3D3F;
+  --color-text-muted: #6A6C70;
+  --color-accent: #537D96;
+  --color-accent-strong: #456A80;
+  --color-on-accent: #FFFFFF;
+  --color-danger: #8B3A3A;
+  --color-info: #3B7DD8;
+  --color-success: #4A9E5E;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-pill: 999px;
+  --ring-light: inset 0 -1px 0 rgba(0, 0, 0, 0.04);
+  --ring-light-accent: inset 0 -1px 0 rgba(0, 0, 0, 0.06);
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --elevation-3: 0 12px 32px rgba(0, 0, 0, 0.12);
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", Consolas, "Liberation Mono", monospace;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background:
+    radial-gradient(1100px 460px at 50% -8%, rgba(83,125,150,0.07), transparent 70%),
+    var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  padding: 40px 24px 100px;
+}
+
+/* ============ 页头 ============ */
+.page-head { max-width: 900px; margin: 0 auto 12px; }
+.page-head h1 { margin: 0 0 8px; font-size: 1.55rem; font-weight: 760; letter-spacing: -0.015em; }
+.page-head .sub { margin: 0 0 16px; color: var(--color-text-muted); font-size: 0.9rem; max-width: 760px; }
+.delta {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+  max-width: 900px; margin: 0 auto 20px;
+}
+.delta .item {
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-panel-soft); padding: 11px 13px; font-size: 0.78rem; line-height: 1.5;
+}
+.delta .item b { display: block; color: var(--color-accent-strong); font-size: 0.75rem; margin-bottom: 3px; letter-spacing: 0.02em; }
+.delta .item span { color: var(--color-text-muted); }
+
+/* ============ 全局开关 ============ */
+.switch-bar {
+  position: sticky; top: 14px; z-index: 40;
+  max-width: 900px; margin: 0 auto 26px;
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 15px;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-panel) 90%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--elevation-3), var(--ring-light);
+}
+.switch-bar .lbl { font-size: 0.8125rem; color: var(--color-text-muted); }
+.switch-bar .state { display: inline-flex; align-items: center; gap: 7px; font-weight: 700; font-size: 0.8125rem; color: var(--color-accent-strong); }
+.switch-bar button {
+  margin-left: auto; border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-panel-soft); color: var(--color-accent-strong); font-weight: 700;
+  font-size: 0.8125rem; padding: 8px 16px; cursor: pointer; transition: all var(--duration-fast) var(--ease-out);
+}
+.switch-bar button:hover { border-color: var(--color-accent); }
+
+/* ============ 场景卡片 ============ */
+.wrap { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 30px; }
+.scene {
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  background: var(--color-panel); overflow: hidden;
+  box-shadow: var(--elevation-3), var(--ring-light);
+}
+.scene--rec { border-color: color-mix(in srgb, var(--color-accent) 42%, transparent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 18%, transparent), var(--elevation-3), var(--ring-light); }
+.scene__head { display: flex; align-items: baseline; gap: 11px; flex-wrap: wrap; padding: 15px 19px; border-bottom: 1px solid var(--color-border); }
+.scene__tag {
+  flex-shrink: 0; font-family: var(--font-mono); font-size: 0.656rem; font-weight: 700; letter-spacing: 0.05em;
+  color: var(--color-accent-strong); background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 28%, transparent); border-radius: var(--radius-pill); padding: 2px 9px;
+}
+.scene__tag--rec { color: #fff; background: var(--color-accent); border-color: var(--color-accent); }
+.scene__head h3 { margin: 0; font-size: 1rem; font-weight: 700; }
+.scene__head .why { flex: 1 1 260px; min-width: 200px; font-size: 0.75rem; color: var(--color-text-muted); line-height: 1.45; }
+
+/* ============ 聊天舞台 ============ */
+.chat { display: flex; flex-direction: column; padding: 18px 19px 22px; }
+.msgs { display: flex; flex-direction: column; gap: 11px; margin-bottom: 18px; min-height: 88px; }
+.msg { max-width: 80%; border-radius: var(--radius-md); padding: 10px 14px; font-size: 0.8125rem; line-height: 1.5; }
+.msg--user { align-self: flex-end; background: color-mix(in srgb, var(--color-accent) 14%, transparent); color: var(--color-accent-strong); border: 1px solid color-mix(in srgb, var(--color-accent) 20%, transparent); }
+.msg--assistant { align-self: flex-start; background: var(--color-panel-soft); border: 1px solid var(--color-border); color: var(--color-text); }
+.caret { display: inline-block; width: 7px; height: 14px; margin-left: 2px; vertical-align: -2px; background: var(--color-accent); border-radius: 1px; animation: caret 1s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+
+/* ============ 浮岛（对齐 ChatPage .chat-composer）============ */
+.composer {
+  display: flex; flex-direction: column;
+  background: var(--color-panel); border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg); box-shadow: var(--elevation-3), var(--ring-light);
+  overflow: hidden;
+}
+.input-row { display: flex; gap: 10px; padding: 16px 18px 8px; align-items: flex-end; }
+.textarea {
+  flex: 1; min-height: 42px; border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-panel-soft); color: var(--color-text); padding: 10px 14px;
+  font-size: 0.875rem; line-height: 1.5; display: flex; align-items: center;
+  transition: opacity var(--duration-base) var(--ease-out);
+}
+.textarea .ph { color: var(--color-text-muted); opacity: 0.72; }
+.scene.running .textarea { opacity: 0.88; }
+.send-btn {
+  border: 0; border-radius: var(--radius-md); padding: 10px 20px; font-weight: 700; font-size: 0.8125rem;
+  cursor: pointer; background: var(--color-accent); color: var(--color-on-accent);
+  box-shadow: var(--ring-light-accent); white-space: nowrap; transition: opacity var(--duration-base) var(--ease-out), background var(--duration-base) var(--ease-out);
+}
+.scene.running .send-btn { opacity: 0.5; }
+.toolbar { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; padding: 6px 18px 12px; }
+.tool {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--color-text);
+  border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-panel-soft); padding: 5px 10px;
+}
+.tool .ic { color: var(--color-text-muted); opacity: 0.8; font-size: 0.72rem; }
+.tool--abort { margin-left: auto; background: var(--color-danger); border-color: var(--color-danger); color: #fff; font-weight: 700; }
+.tool--abort .ic { color: #fff; }
+
+/* ============ 通用状态元件 ============ */
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+
+/* 呼吸点：核心稳定 + 一圈向外扩散的 ping（Linear/Notion 级活性指示）*/
+.live { position: relative; width: 8px; height: 8px; flex-shrink: 0; }
+.live::before { content: ''; position: absolute; inset: 0; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 16%, transparent); }
+.live::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: var(--color-accent); animation: ping 2.1s cubic-bezier(0, 0, 0.2, 1) infinite; }
+@keyframes ping { 0% { transform: scale(1); opacity: 0.55; } 72%, 100% { transform: scale(2.7); opacity: 0; } }
+
+/* 阶段徽章：统一克制配色（单一 accent 点 + muted 文字）*/
+.phase {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.6875rem; color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-text) 5%, transparent);
+  border: 1px solid var(--color-border); border-radius: var(--radius-pill); padding: 2px 10px; white-space: nowrap;
+}
+.phase .pdot { width: 5px; height: 5px; border-radius: 50%; background: var(--color-accent); flex-shrink: 0; }
+.phase--info .pdot { background: var(--color-info); }
+.phase--ok .pdot { background: var(--color-success); }
+
+/* 流动光条 */
+.glowbar { position: relative; height: 2px; width: 100%; background: linear-gradient(90deg, transparent, var(--color-accent) 35%, color-mix(in srgb, var(--color-accent) 55%, #fff) 50%, var(--color-accent) 65%, transparent); background-size: 220% 100%; animation: flow 2.2s linear infinite; }
+@keyframes flow { 0% { background-position: 120% 0; } 100% { background-position: -120% 0; } }
+
+/* ============ 方案 A：状态头条 ============ */
+.a-head {
+  display: flex; align-items: center; gap: 11px;
+  padding: 8px 18px; border-bottom: 1px solid var(--color-border);
+  max-height: 46px; overflow: hidden;
+  transition: max-height var(--duration-base) var(--ease-out), padding var(--duration-base) var(--ease-out), opacity var(--duration-fast) var(--ease-out), border-color var(--duration-base) var(--ease-out);
+}
+.a-head .lead { display: inline-flex; align-items: center; gap: 8px; }
+.a-head .lbl { font-size: 0.75rem; font-weight: 600; color: var(--color-text); }
+.a-head .time { font-size: 0.8125rem; font-weight: 700; color: var(--color-accent-strong); }
+.a-head .phase { margin-left: auto; }
+.scene:not(.running) .a-head { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; border-bottom-color: transparent; }
+
+/* ============ 方案 B：内嵌输入框 ============ */
+.b-box { flex: 1; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-panel-soft); overflow: hidden; }
+.b-status {
+  display: flex; align-items: center; gap: 8px; padding: 7px 14px;
+  border-bottom: 1px solid var(--color-border); font-size: 0.75rem; color: var(--color-text-muted);
+  max-height: 40px; overflow: hidden;
+  transition: max-height var(--duration-base) var(--ease-out), padding var(--duration-base) var(--ease-out), opacity var(--duration-fast) var(--ease-out);
+}
+.b-status .time { font-weight: 700; color: var(--color-accent-strong); font-size: 0.8125rem; }
+.b-status .phase { margin-left: auto; }
+.scene:not(.running) .b-status { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; border-bottom-color: transparent; }
+.b-input { display: flex; align-items: center; padding: 10px 14px; min-height: 42px; font-size: 0.875rem; color: var(--color-text-muted); opacity: 0.72; }
+
+/* ============ 方案 C：精修胶囊 ============ */
+.c-pill {
+  display: inline-flex; align-items: center; gap: 8px; align-self: flex-start;
+  margin: 0 0 10px 18px; padding: 5px 12px;
+  border-radius: var(--radius-md); background: var(--color-panel-soft);
+  border: 1px solid var(--color-border); font-size: 0.75rem; color: var(--color-text-muted);
+  box-shadow: var(--elevation-1), var(--ring-light);
+  max-height: 44px; overflow: hidden;
+  transition: max-height var(--duration-base) var(--ease-out), padding var(--duration-base) var(--ease-out), margin var(--duration-base) var(--ease-out), opacity var(--duration-fast) var(--ease-out);
+}
+.c-pill .time { font-weight: 700; color: var(--color-accent-strong); font-size: 0.8125rem; }
+.scene:not(.running) .c-pill { max-height: 0; padding-top: 0; padding-bottom: 0; margin-bottom: 0; opacity: 0; border-color: transparent; }
+
+/* ============ 方案 D：环境光 + 角标 ============ */
+.d-top { position: relative; height: 2px; overflow: hidden; transition: height var(--duration-base) var(--ease-out); }
+.d-top .glowbar { position: absolute; inset: 0; }
+.scene:not(.running) .d-top { height: 0; }
+.d-row { position: relative; display: flex; gap: 10px; padding: 16px 18px 8px; align-items: flex-end; }
+.d-time {
+  position: absolute; right: 18px; top: -22px; z-index: 2;
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 0.6875rem; font-weight: 700; color: var(--color-accent-strong);
+  background: var(--color-panel); border: 1px solid var(--color-border); border-radius: var(--radius-pill);
+  padding: 2px 9px; box-shadow: var(--elevation-1), var(--ring-light);
+  opacity: 0; transform: translateY(4px); pointer-events: none;
+  transition: opacity var(--duration-base) var(--ease-out), transform var(--duration-base) var(--ease-out);
+}
+.scene.running .d-time { opacity: 1; transform: translateY(0); }
+.d-time .live { width: 6px; height: 6px; }
+
+/* ============ 图例 & 推荐说明 ============ */
+.legend {
+  max-width: 900px; margin: 0 auto 0; display: flex; gap: 22px; flex-wrap: wrap; align-items: center;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-panel-soft);
+  padding: 13px 17px; font-size: 0.75rem; color: var(--color-text-muted);
+}
+.legend .cap { font-weight: 700; color: var(--color-text); font-size: 0.75rem; }
+.rec {
+  max-width: 900px; margin: 12px auto 0;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 32%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+  border-radius: var(--radius-md); padding: 15px 18px; font-size: 0.8125rem; color: var(--color-accent-strong); line-height: 1.6;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live::after, .glowbar, .caret { animation: none !important; }
+}
+</style>
+</head>
+<body>
+
+<div class="page-head">
+  <h1>TurnTimer 重设计 v2 · 紧贴会话框</h1>
+  <p class="sub">这一版我收敛到你的原始约束「计时紧贴会话框」，不再跑偏到消息流。核心变化：① 把现状堆叠的 4 个信号收敛成「一个呼吸点 + 一个数字 + 一个阶段徽章」；② 每个方案都是浮岛结构的一部分，不再是悬浮孤岛；③ 补上真实有价值的「阶段」信息（思考中 / 调用工具中 / 生成回复中）。</p>
+  <div class="delta">
+    <div class="item"><b>信号收敛</b><span>去掉静态时钟 SVG、3 脉冲点、条件文字，只留一个 ping 呼吸点 + tabular 计时。</span></div>
+    <div class="item"><b>对齐真实结构</b><span>运行态完整还原：输入框禁用、发送钮降透明度、工具栏出现「■ 中断」。</span></div>
+    <div class="item"><b>阶段徽章</b><span>把现状的 dots+文字堆叠，理清为三个明确阶段，用统一克制的徽章呈现。</span></div>
+  </div>
+</div>
+
+<div class="switch-bar">
+  <span class="lbl">全局状态</span>
+  <span class="state" id="stateTxt">● 发送中</span>
+  <button id="toggleBtn" type="button">切换为空闲</button>
+</div>
+
+<div class="wrap">
+
+  <!-- ===================== 方案 A：状态头条（推荐） ===================== -->
+  <section class="scene scene--rec running" data-scene>
+    <div class="scene__head">
+      <span class="scene__tag scene__tag--rec">推荐</span>
+      <span class="scene__tag">方案 A</span>
+      <h3>状态头条</h3>
+      <span class="why">运行状态是浮岛的第一行（有 header 语义，不是悬浮物）：左呼吸点+计时，右阶段徽章，下方细分隔线自然过渡到输入区。</span>
+    </div>
+    <div class="chat">
+      <div class="msgs">
+        <div class="msg msg--user">帮我重构这个函数</div>
+        <div class="msg msg--assistant">正在流式输出回复<span class="caret"></span></div>
+      </div>
+      <div class="composer">
+        <div class="a-head">
+          <span class="lead"><span class="live"></span><span class="lbl">正在回复</span><span class="time num">3.7s</span></span>
+          <span class="phase phase--info"><span class="pdot"></span>调用工具中</span>
+        </div>
+        <div class="input-row">
+          <div class="textarea"><span class="ph">输入消息…</span></div>
+          <button class="send-btn" type="button">发送</button>
+        </div>
+        <div class="toolbar">
+          <span class="tool"><span class="ic">◔</span>上下文</span>
+          <span class="tool"><span class="ic">▣</span>工作空间</span>
+          <span class="tool"><span class="ic">▤</span>模型</span>
+          <span class="tool"><span class="ic">⛨</span>权限</span>
+          <span class="tool"><span class="ic">＋</span></span>
+          <span class="tool tool--abort"><span class="ic">■</span>中断</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 方案 B：内嵌输入框 ===================== -->
+  <section class="scene running" data-scene>
+    <div class="scene__head">
+      <span class="scene__tag">方案 B</span>
+      <h3>内嵌输入框</h3>
+      <span class="why">状态直接内嵌进输入框顶部，作为 textarea 自身的一段。运行中草稿已清空，正好让出这行做状态。</span>
+    </div>
+    <div class="chat">
+      <div class="msgs">
+        <div class="msg msg--user">帮我重构这个函数</div>
+        <div class="msg msg--assistant">正在流式输出回复<span class="caret"></span></div>
+      </div>
+      <div class="composer">
+        <div class="input-row">
+          <div class="b-box">
+            <div class="b-status">
+              <span class="live"></span><span class="time num">3.7s</span><span>· 生成回复中</span>
+              <span class="phase"><span class="pdot"></span>Claude 正在思考…</span>
+            </div>
+            <div class="b-input">输入消息…</div>
+          </div>
+          <button class="send-btn" type="button">发送</button>
+        </div>
+        <div class="toolbar">
+          <span class="tool"><span class="ic">◔</span>上下文</span>
+          <span class="tool"><span class="ic">▣</span>工作空间</span>
+          <span class="tool"><span class="ic">▤</span>模型</span>
+          <span class="tool"><span class="ic">⛨</span>权限</span>
+          <span class="tool"><span class="ic">＋</span></span>
+          <span class="tool tool--abort"><span class="ic">■</span>中断</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 方案 C：精修胶囊 ===================== -->
+  <section class="scene running" data-scene>
+    <div class="scene__head">
+      <span class="scene__tag">方案 C</span>
+      <h3>精修胶囊</h3>
+      <span class="why">保留你最初的「胶囊紧贴浮岛上方」位置，但彻底重做：左对齐输入框、圆角改 md 与浮岛成阶梯、单一信号。</span>
+    </div>
+    <div class="chat">
+      <div class="msgs">
+        <div class="msg msg--user">帮我重构这个函数</div>
+        <div class="msg msg--assistant">正在流式输出回复<span class="caret"></span></div>
+      </div>
+      <div class="composer">
+        <div class="c-pill">
+          <span class="live"></span><span class="time num">3.7s</span><span>· 生成回复中</span>
+          <span class="phase"><span class="pdot"></span>调用工具中</span>
+        </div>
+        <div class="input-row">
+          <div class="textarea"><span class="ph">输入消息…</span></div>
+          <button class="send-btn" type="button">发送</button>
+        </div>
+        <div class="toolbar">
+          <span class="tool"><span class="ic">◔</span>上下文</span>
+          <span class="tool"><span class="ic">▣</span>工作空间</span>
+          <span class="tool"><span class="ic">▤</span>模型</span>
+          <span class="tool"><span class="ic">⛨</span>权限</span>
+          <span class="tool"><span class="ic">＋</span></span>
+          <span class="tool tool--abort"><span class="ic">■</span>中断</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 方案 D：环境光 + 角标 ===================== -->
+  <section class="scene running" data-scene>
+    <div class="scene__head">
+      <span class="scene__tag">方案 D</span>
+      <h3>环境光 + 角标</h3>
+      <span class="why">最克制：浮岛顶部 2px 流动微光表示「工作中」，计时作为极小角标吸附在光条右端，几乎零高度。</span>
+    </div>
+    <div class="chat">
+      <div class="msgs">
+        <div class="msg msg--user">帮我重构这个函数</div>
+        <div class="msg msg--assistant">正在流式输出回复<span class="caret"></span></div>
+      </div>
+      <div class="composer">
+        <div class="d-top"><div class="glowbar"></div></div>
+        <div class="d-row">
+          <div class="textarea"><span class="ph">输入消息…</span></div>
+          <button class="send-btn" type="button">发送</button>
+          <span class="d-time num"><span class="live"></span>3.7s</span>
+        </div>
+        <div class="toolbar">
+          <span class="tool"><span class="ic">◔</span>上下文</span>
+          <span class="tool"><span class="ic">▣</span>工作空间</span>
+          <span class="tool"><span class="ic">▤</span>模型</span>
+          <span class="tool"><span class="ic">⛨</span>权限</span>
+          <span class="tool"><span class="ic">＋</span></span>
+          <span class="tool tool--abort"><span class="ic">■</span>中断</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="legend">
+    <span class="cap">阶段徽章（三态）：</span>
+    <span class="phase"><span class="pdot"></span>思考中</span>
+    <span class="phase phase--info"><span class="pdot"></span>调用工具中</span>
+    <span class="phase phase--ok"><span class="pdot"></span>生成回复中</span>
+    <span>—— 数据源已在 <code>TurnTimer.vue</code> 里（streamingThinking / streamingTool / streamingContent），无需新增。</span>
+  </div>
+
+  <div class="rec">
+    <strong>我的推荐：方案 A「状态头条」。</strong>理由：它最彻底地根治了「丑」的根源——不再是一个悬浮孤岛，而是浮岛的第一行，有明确的 header 语义和分层（主状态在左、阶段在右）；信息收敛为「呼吸点 + 计时 + 阶段」三点，无一冗余；且展开/收起动画自然。方案 C 是「小改」路线（保留你最初的胶囊位置），如果你就想维持原位置、只求变好看，选它。你定一个（或混搭），我落到 <code>TurnTimer.vue</code> + <code>ChatPage.vue</code>，再补 typecheck + selftest 契约。
+  </div>
+</div>
+
+<script>
+const scenes = document.querySelectorAll('[data-scene]');
+const btn = document.getElementById('toggleBtn');
+const stateTxt = document.getElementById('stateTxt');
+let running = true;
+function apply() {
+  scenes.forEach(s => s.classList.toggle('running', running));
+  btn.textContent = running ? '切换为空闲' : '切换为发送中';
+  stateTxt.textContent = running ? '● 发送中' : '○ 空闲';
+  stateTxt.style.color = running ? 'var(--color-accent-strong)' : 'var(--color-text-muted)';
+}
+btn.addEventListener('click', () => { running = !running; apply(); });
+apply();
+</script>
+</body>
+</html>
