@@ -168,6 +168,14 @@ interface SessionEntry {
   sessionModelOverride: SessionModelOverride | null;
   // 仅用于日志区分同一 Query 内部重试与 stale resume 重建的新 Query。
   queryInstance: number;
+  // streaming input 包装句柄：settle 在回合终态收口（result/aborted/error/abort 路径），
+  // 解除挂起的输入生成器，避免泄漏 + 让 streamInput 正常 endInput。
+  streamingPrompt: StreamingPromptHandle | null;
+  // F1（验收 review）：两段式优雅窗口期暴露的强制收口句柄（finishKill）。窗口内 entry
+  // 保持 current（runQuery 的 for-await 不 break，interrupt 才不被 cleanup 自伤拒绝），
+  // 期间用户重发须先经它强制完成系统 kill（abort+移除）再接管，而不是吃到误导性
+  // 「当前回合仍在执行」。finishKill 首行自清 null，幂等。
+  forceKill: (() => void) | null;
 }
 const nextQueryInstance = { value: 1 };
 
@@ -645,6 +653,8 @@ function createEntry(): SessionEntry {
     resolvedModel: null,
     providerName: null,
     sessionModelOverride: null,
+    streamingPrompt: null,
+    forceKill: null,
     queryInstance: nextQueryInstance.value++,
     emitExit: (code) => {
       if (exitEmitted) return;
@@ -679,6 +689,9 @@ function isEntryActive(entry: SessionEntry | undefined): entry is SessionEntry {
 
 function markEntryAborting(entry: SessionEntry): void {
   entry.state = 'aborting';
+  // abort 收口同步解除挂起的 streaming 输入生成器：进程虽被 abort 杀死，挂起的
+  // for-await 不再依赖进程事件自行退出，避免每回合泄漏一个永不 resolve 的闭包。
+  entry.streamingPrompt?.settle();
   entry.handle.interrupt();
 }
 
@@ -2277,6 +2290,54 @@ async function startSdkQuery(prompt: SdkPrompt, options: Record<string, unknown>
   return activeSdkQueryFactory({ prompt, options });
 }
 
+// ── 主聊天 streaming input 统一包装（批次二 §4.3 步骤 1）─────────────
+// SDK 控制类请求（Query.interrupt / setPermissionMode，sdk.d.ts ~:2196-2215）仅在
+// streaming input 模式（prompt 为 AsyncIterable）下受支持：string prompt 走 SDK 内部
+// isSingleUserTurn 单射路径，attachment iterable 又在消息写完后立即完成 → endInput 关
+// stdin。两条旧路径在回合进行中都无法保证控制请求可写（write 对 writableEnded 静默 drop）。
+//
+// 包装策略：任意 SdkPrompt 归一为「yield 完用户消息后保持挂起」的 iterable——挂起期间
+// stdin 开启，interrupt/setPermissionMode 回合内随时可达；回合终态（result / 错误 / 中断 /
+// cleanup）经 settle() 解除挂起 → streamInput 正常收尾 → transport.endInput()。
+// 时机与 string 路径「首 result 后 endInput」等价（string 路径由 SDK readMessages 的
+// isSingleUserTurn 分支自动关，iterable 路径归我们管）。
+export interface StreamingPromptHandle {
+  iterable: AsyncIterable<SDKUserMessage>;
+  /** 回合终态收口：解除挂起的输入生成器（幂等，可多次调用）。 */
+  settle(): void;
+}
+
+export function toStreamingPrompt(prompt: SdkPrompt): StreamingPromptHandle {
+  let settleFn: (() => void) | undefined;
+  const done = new Promise<void>((resolve) => {
+    settleFn = resolve;
+  });
+  const iterable: AsyncIterable<SDKUserMessage> = {
+    // 可重复迭代：runQuery 的 resume 失败重试会二次消费同一 prompt（attachment 路径的
+    // repeatablePrompt 同款契约）。每次消费新建生成器、重新 yield 消息，再挂起到同一个 done。
+    async *[Symbol.asyncIterator]() {
+      if (typeof prompt === 'string') {
+        // 与 SDK 内部 string→SDKUserMessage 的包装同形（aw()：session_id:''）。
+        yield {
+          type: 'user',
+          session_id: '',
+          message: { role: 'user', content: [{ type: 'text', text: prompt }] },
+          parent_tool_use_id: null,
+        } as SDKUserMessage;
+      } else {
+        for await (const msg of prompt) yield msg;
+      }
+      await done;
+    },
+  };
+  return {
+    iterable,
+    settle: () => {
+      settleFn?.();
+    },
+  };
+}
+
 // ── 原生 Slash Commands 命令发现（Task 4）─────────────────────────────
 // 新会话创建后立即在后台独立 probe（Task 1 实测可行：shouldQuery:false 单条消息收到 init +
 // supportedCommands 返回 29 命令，无真实模型回合）。不写 sessionCliIds、不进聊天 entries、不落库、
@@ -2981,10 +3042,15 @@ async function runQuery(
   const resumeId = opts.resumeSessionId || resolveCliSessionId(sessionId);
   if (resumeId) sdkOptions.resume = resumeId;
 
+  // 批次二 §4.3 步骤 1：主聊天统一 streaming input 包装（string 单射 / attachment iterable 合一），
+  // 让 interrupt / setPermissionMode 在回合进行中可达。settle 收口见 result 分支与外层 finally。
+  const streamingPrompt = toStreamingPrompt(prompt);
+  entry.streamingPrompt = streamingPrompt;
+
   let query: Query;
   let resumedOnce = Boolean(resumeId);
   try {
-    query = await startSdkQuery(prompt, sdkOptions);
+    query = await startSdkQuery(streamingPrompt.iterable, sdkOptions);
   } catch (err) {
     if (!isCurrentEntry(sessionId, entry)) {
       emitExit(null);
@@ -2996,7 +3062,7 @@ async function runQuery(
       delete sdkOptions.resume;
       resumedOnce = false;
       try {
-        query = await startSdkQuery(prompt, sdkOptions);
+        query = await startSdkQuery(streamingPrompt.iterable, sdkOptions);
         apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
       } catch (retryErr) {
         forwardEvent(sessionId, mainWindow, {
@@ -3318,6 +3384,10 @@ async function runQuery(
       }
       if (type === 'result') {
         gotResult = true;
+        // streaming input 收口：result 已明确结束本回合 → 解除挂起的输入生成器 →
+        // streamInput 收尾 endInput（stdin EOF），CLI 得以干净退出。时机与 string 路径
+        // 的 isSingleUserTurn 分支（首 result 即关 stdin）等价。
+        streamingPrompt.settle();
         if (sdkMsg.is_error === true) {
           finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
         }
@@ -3399,7 +3469,7 @@ async function runQuery(
       delete sdkOptions.resume;
       resumedOnce = false;
       try {
-        query = await startSdkQuery(prompt, sdkOptions);
+        query = await startSdkQuery(streamingPrompt.iterable, sdkOptions);
         entry.query = query;
         gotResult = false; // 新 query = 新回合，重置终态追踪
         apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
@@ -3443,6 +3513,11 @@ async function runQuery(
       emitExit(null);
     }
   } finally {
+    // streaming input 兜底收口：result 分支已 settle 的重复调用幂等；本处覆盖
+    // error / aborted / 启动早退等所有非 result 出口，杜绝挂起生成器泄漏。
+    // 走 entry 句柄而非局部常量：streamingPrompt 在 try 内声明，早退路径下局部
+    // 常量处于 TDZ，直接引用会抛 ReferenceError。
+    entry.streamingPrompt?.settle();
     deleteEntry(sessionId, entry);
   }
 }
@@ -3457,8 +3532,15 @@ export function spawnForChat(
   // pendingFirstPrompt 记住 mainWindow/opts，sendMessage 时用同 entry 起 query，
   // 这样 spawn 时返回的 handle 就是 runQuery 要 emit 的那个，on('exit') 回调不丢失。
   // 若已有 pending 或 active entry，拒绝覆盖，防止并发 CHAT_SEND 后写吃掉先写的 prompt。
-  if (pendingFirstPrompt.has(sessionId) || isEntryActive(entries.get(sessionId))) {
-    throw new Error('当前回合仍在执行，请等待结束或中断后重试');
+  // F1 例外：两段式优雅窗口期的 entry 暴露 forceKill——重发先强制完成系统 kill
+  // （abort + 移除）再接管，而不是抛「当前回合仍在执行」误导用户（回合刚被系统杀掉）。
+  const blocking = entries.get(sessionId);
+  if (pendingFirstPrompt.has(sessionId) || isEntryActive(blocking)) {
+    if (blocking?.forceKill) {
+      blocking.forceKill();
+    } else {
+      throw new Error('当前回合仍在执行，请等待结束或中断后重试');
+    }
   }
   const entry = createEntry();
   entries.set(sessionId, entry);
@@ -3560,38 +3642,97 @@ export function killProcess(
     // user 与 watchdog 中断都记入 interruptedQueries：让 runQuery 的 catch 走 aborted 分支
     //（干净收尾），避免 watchdog 已发友好 error 后又叠一条「SDK 执行出错」。
     if (entry.query) interruptedQueries.add(entry.query);
-    abortEntry(entry);
-    // 立即从 active entries 移除：retryLastTurn 后续 CHAT_SEND 才能走 spawnForChat + resume，
-    // 不会被 getActiveProcess 误判为仍有活 query 而把消息 drop 掉。旧 query 退出时靠 identity guard 清理。
-    removeEntryIfCurrent(sessionId, entry);
-    cleanupSessionStall(sessionId);
-    // Task 4 review P1-2：用户中断/卡死硬杀须显式发幂等 aborted 终态。killProcess 已 abortEntry
-    // （state='aborting'）+ removeEntryIfCurrent，isCurrentEntry 此后 false；runQuery 流末兜底
-    // （isCurrentEntry 检查）与 catch 段（!isCurrentEntry → emitExit(null)）都不会再发 aborted，
-    // 导致后台会话/窗口切换/依赖统一终态事件的路径收不到取消结果、sending 不复位。此处补发：
-    // forwardEvent 对 aborted 只 IPC 不落库（persistCliEvent 无 case），前端 markStopped 幂等；
-    // runQuery 不会重复发（上述分支已吞掉）。session_cleanup/queue/api_retry_exhausted 不发
-    // （会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
-    if ((reason === 'user' || reason === 'watchdog') && mainWindow) {
-      forwardEvent(sessionId, mainWindow, { type: 'aborted', message: reason === 'user' ? '已中断' : '已硬中断' });
-      // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
-      // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
-      // !isCurrentEntry 分支（state='aborting' 且 entries 已移除）提前 emitExit(null) 退出，
-      // 永远到不了 catch 段的 schedulePostTurnProbe（那是死代码，仅服务真实 SDK 错误路径）。
-      // 此处 entry 已被 removeEntryIfCurrent 移除，探针发射守卫「entries.get==null（无新回合在途）」
-      // 天然满足；若用户在探针 ~2s 窗口内重发新回合，新回合的 schedule 会 kill 旧探针并推进
-      // generation，结果不会污染（可打断单飞机制）。
-      schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId));
-    }
-    if (entry.query) {
-      void entry.query.interrupt().catch(() => {
-        // 软中断失败不阻塞；query 会因迭代抛错走 aborted 分支。
+    // 记账收口（abort + entry 移除 + 终态事件 + 探针）：一次性完成，供两路径复用。
+    // 首行自清 forceKill 并以 killClosed 幂等——优雅窗口内的重发接管（spawnForChat）
+    // 与自然收尾/超时兜底都可能调它，双发不得重复 forwardEvent/探针。
+    let killClosed = false;
+    const finishKill = () => {
+      if (killClosed) return;
+      killClosed = true;
+      entry.forceKill = null;
+      abortEntry(entry);
+      // 立即从 active entries 移除：retryLastTurn 后续 CHAT_SEND 才能走 spawnForChat + resume，
+      // 不会被 getActiveProcess 误判为仍有活 query 而把消息 drop 掉。旧 query 退出时靠 identity guard 清理。
+      removeEntryIfCurrent(sessionId, entry);
+      cleanupSessionStall(sessionId);
+      // Task 4 review P1-2：用户中断/卡死硬杀须显式发幂等 aborted 终态。killProcess 已 abortEntry
+      // （state='aborting'）+ removeEntryIfCurrent，isCurrentEntry 此后 false；runQuery 流末兜底
+      // （isCurrentEntry 检查）与 catch 段（!isCurrentEntry → emitExit(null)）都不会再发 aborted，
+      // 导致后台会话/窗口切换/依赖统一终态事件的路径收不到取消结果、sending 不复位。此处补发：
+      // forwardEvent 对 aborted 只 IPC 不落库（persistCliEvent 无 case），前端 markStopped 幂等；
+      // runQuery 不会重复发（上述分支已吞掉）。session_cleanup/queue/api_retry_exhausted 不发
+      // （会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
+      if ((reason === 'user' || reason === 'watchdog') && mainWindow) {
+        forwardEvent(sessionId, mainWindow, { type: 'aborted', message: reason === 'user' ? '已中断' : '已硬中断' });
+        // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
+        // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
+        // !isCurrentEntry 分支（state='aborting' 且 entries 已移除）提前 emitExit(null) 退出，
+        // 永远到不了 catch 段的 schedulePostTurnProbe（那是死代码，仅服务真实 SDK 错误路径）。
+        // 此处 entry 已被 removeEntryIfCurrent 移除，探针发射守卫「entries.get==null（无新回合在途）」
+        // 天然满足；若用户在探针 ~2s 窗口内重发新回合，新回合的 schedule 会 kill 旧探针并推进
+        // generation，结果不会污染（可打断单飞机制）。
+        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId));
+      }
+      // 硬杀兜底：abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
+      //（瞬时不可捕获），子进程卡死在死 socket 上时真能打死。
+      logger.info(`Interrupted SDK query for session ${sessionId} (reason=${reason}, abort signaled)`);
+    };
+    // 批次二 #4 两段式中止：watchdog / upstream_fatal / queue 先 interrupt() 给 CLI 优雅
+    // 落盘窗口——硬杀（abort → TerminateProcess）会把进行中的 thinking 轮撕成残缺
+    // transcript，resume 回传被上游 400 拒收（实测报告场景 C 的机制链）。有界等待 ≤5s
+    // 流自然结束；超时或 interrupt 不可达再走 finishKill 硬杀兜底。
+    // R6 实测修正：记账必须延迟到优雅窗口之后——runQuery 的 for-await 在 !isCurrentEntry
+    // 时 break 会触发 SDK 生成器 return() → cleanup() → 拒绝一切在途控制请求（interrupt
+    // 的 ACK 直接变 "Query closed before response received"）。保持 entry current，让
+    // interrupt 真正被 CLI 消化、流自然收尾。user 维持现状（用户要的就是立刻停）；
+    // session_cleanup 是应用退出路径，延迟 abort 的浮动 promise 会随进程消亡，保持
+    // 确定性立即硬杀。
+    const query = entry.query;
+    if (query && (reason === 'watchdog' || reason === 'upstream_fatal' || reason === 'queue')) {
+      // F1：优雅窗口内重发的强制接管句柄（finishKill 自清 + 幂等）。
+      entry.forceKill = finishKill;
+      const deadline = Date.now() + 5000;
+      const waitUntil = (ms: number): Promise<void> =>
+        new Promise((resolve) => {
+          const timer = setTimeout(resolve, Math.max(ms, 0));
+          timer.unref?.();
+        });
+      const exited = new Promise<number | null>((resolve) => {
+        entry.handle.on('exit', (code) => resolve(code));
       });
+      void (async () => {
+        let how = 'timeout';
+        try {
+          // interrupt() 本身也要有界：卡死子进程不回 ACK 时 pendingControlResponses
+          // 永不 resolve，链条若无超时会永远到不了 abort 兜底。
+          const sent = await Promise.race([
+            query.interrupt().then(
+              () => 'ack' as const,
+              (err: unknown) => `rejected:${err instanceof Error ? err.message : String(err)}` as const,
+            ),
+            waitUntil(5000).then(() => 'no-ack' as const),
+          ]);
+          // 无论 ACK 与否，deadline 前持续观察流是否自然收尾——R6 实测 CLI 在生成中
+          // 不回控制请求 ACK（与 context refresh 超时同因），但 interrupt 写入已被
+          // 消化、回合可优雅结束；exit 先到 = 优雅生效，deadline 到 = abort 兜底。
+          const remaining = deadline - Date.now();
+          if (remaining > 0) {
+            const race = await Promise.race([
+              exited.then((c) => `exit:${c}` as const),
+              waitUntil(remaining).then(() => `abort-fallback:${sent}` as const),
+            ]);
+            how = race;
+          } else {
+            how = `abort-fallback:${sent}`;
+          }
+        } finally {
+          finishKill(); // 幂等兜底：流已优雅结束时对已退出进程 abort 无害
+          logger.info(`[two-phase-interrupt] session=${sessionId} reason=${reason} outcome=${how}`);
+        }
+      })();
+    } else {
+      finishKill();
     }
-    // 硬杀兜底：query.interrupt() 是 stdin 控制帧（软），子进程卡死在死 socket 上时
-    // 根本读不到。abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
-    //（瞬时不可捕获），真能打死。两条都发，软的先给优雅退出机会。
-    logger.info(`Interrupted SDK query for session ${sessionId} (reason=${reason}, abort signaled)`);
   }
   // killProcess 会先移除当前 entry，迟到的 deleteEntry 因 identity guard 不再清理；
   // 因此在终态已由调用方写入后同步收口，避免被中断 Query 的状态滞留。
@@ -3606,7 +3747,38 @@ export function killAllProcesses(): void {
 
 export function getActiveProcess(sessionId: string): SdkQueryHandle | undefined {
   const entry = entries.get(sessionId);
-  return isEntryActive(entry) ? entry.handle : undefined;
+  // F1：两段式优雅窗口（forceKill 非空）的 entry 对「是否有活回合」判否——任务队列
+  // waiting 续接预检等据此放行接管（接管方 spawnForChat 会先 forceKill 强制收口）。
+  return isEntryActive(entry) && !entry.forceKill ? entry.handle : undefined;
+}
+
+/**
+ * 批次二 #3：运行中回合中途切权限档。streaming input 迁移后 Query.setPermissionMode
+ * 在回合进行中可写（stdin 保持开启）。无运行回合 → false（调用方回落「下一条消息生效」
+ * 语义）。CLI 生成中不回控制请求 ACK（R6 实测与 context refresh 超时同因），3s 后按
+ * 「已写入」放行，不悬挂 IPC；真实拒绝（如 query 已关闭）记日志返回 false。
+ */
+export async function setRunningQueryPermissionMode(sessionId: string, mode: PermissionMode): Promise<boolean> {
+  const entry = entries.get(sessionId);
+  if (!isEntryActive(entry) || !entry.query) return false;
+  const query = entry.query;
+  return new Promise<boolean>((resolve) => {
+    let settledFlag = false;
+    const finish = (ok: boolean): void => {
+      if (settledFlag) return;
+      settledFlag = true;
+      resolve(ok);
+    };
+    query.setPermissionMode(mode).then(
+      () => finish(true),
+      (err: unknown) => {
+        logger.warn(`setPermissionMode rejected [${sessionId}]: ${err instanceof Error ? err.message : String(err)}`);
+        finish(false);
+      },
+    );
+    const timer = setTimeout(() => finish(true), 3000);
+    timer.unref?.();
+  });
 }
 
 export function getCliSessionId(sessionId: string): string | undefined {

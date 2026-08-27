@@ -54,6 +54,8 @@ export interface ClaudeLinkAPI {
   updateModelOverride: (id: string, modelOverride: string | null) => Promise<Session | null>;
   sendMessage: (sessionId: string, payload: ChatSendPayload) => Promise<SendMessageResult>;
   abortChat: (sessionId: string) => Promise<void>;
+  /** 批次二 #3：运行中回合中途切权限档（streaming 控制请求）；无运行回合返回 false。 */
+  setRunningPermissionMode: (sessionId: string, mode: string | null) => Promise<boolean>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
   removeChatListener: () => void;
   onInteractionRequest: (callback: (payload: InteractionPromptPayload) => void) => () => void;
@@ -149,6 +151,7 @@ export function createApi(): ClaudeLinkAPI {
     updateModelOverride: (id, modelOverride) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE_MODEL_OVERRIDE, id, modelOverride),
     sendMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, payload),
     abortChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ABORT, sessionId),
+    setRunningPermissionMode: (sessionId, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE, sessionId, mode),
     onChatEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: ChatEventPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.CHAT_EVENT, listener);

@@ -210,8 +210,7 @@ onUnmounted(() => {
       <button
         type="button"
         class="ctl__btn"
-        :disabled="sending"
-        :title="`本会话 Claude Code 权限模式（${activeSession.permissionMode === null ? `跟随全局默认：${globalDefaultPermissionLabel}` : activePermission.label}）`"
+        :title="`本会话 Claude Code 权限模式（${activeSession.permissionMode === null ? `跟随全局默认：${globalDefaultPermissionLabel}` : activePermission.label}）；运行中切换即时生效`"
         @click="showPermissionMenu = !showPermissionMenu"
       >
         {{ permissionTriggerLabel }} <span class="caret">▾</span>
@@ -242,6 +241,10 @@ onUnmounted(() => {
             <path :d="CHECK_PATH" />
           </svg>
         </button>
+        <!-- 生效时机提示（照 ProviderModelSelector foot 先例）。F2（验收 review）精确化：
+             切档只对「切换后新发起」的工具请求即时生效——已在途的请求按旧档走完；
+             自动模式（bypassPermissions）被 CLI 拒绝中途设置（须启动 flag），下一条生效。 -->
+        <div class="perm-foot">对切换后新发起的工具请求即时生效<span>自动模式档从下一条消息起生效</span></div>
       </div>
     </div>
 
@@ -509,6 +512,25 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 0.125rem;
   box-shadow: var(--elevation-3), var(--ring-light);
+}
+
+/* 菜单底部生效时机提示（ProviderModelSelector .foot 同款）。 */
+.perm-foot {
+  height: 2.125rem;
+  margin-top: 0.125rem;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  padding: 0 0.6875rem;
+  color: var(--color-text-muted);
+  font-size: 0.625rem;
+  flex: none;
+}
+
+.perm-foot span {
+  margin-left: auto;
+  color: var(--color-success-strong);
+  font-weight: 600;
 }
 
 .perm-item {

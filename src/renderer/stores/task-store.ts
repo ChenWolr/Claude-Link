@@ -126,6 +126,14 @@ export const useTaskStore = defineStore('task', {
           const t = this.tasks.find((t) => t.id === payload.taskId);
           if (t) t.status = payload.type === 'task_completed' ? 'completed' : 'failed';
           this.queueState.currentTaskId = null;
+          // 中断收口的 task_completed（interruptTask 带 interrupted:true）：被杀回合不再有
+          // result/aborted CHAT_EVENT 兜底（两段式 abort 兜底路径下 runQuery 的 catch 因
+          // entry 已移除走 !isCurrentEntry 分支，只 emitExit 不发事件），sending 会永久
+          // 卡住。此处按中断语义补 markStopped（幂等）；自然完成的绿灯由 result 事件
+          // 负责，不带 interrupted 标记，不会误降级。
+          if (payload.type === 'task_completed' && (payload.data as { interrupted?: boolean } | undefined)?.interrupted) {
+            sessionStore.markStopped(payload.sessionId);
+          }
           break;
         }
         case 'countdown_tick': {
