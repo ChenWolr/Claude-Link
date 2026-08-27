@@ -105,6 +105,8 @@ export function groupMessagesForRender(messages: RenderableMessage[]): RenderIte
     const isBreak =
       msg.processKind === 'system:init_write_skipped' ||
       msg.processKind === 'system:interaction_cancelled' ||
+      // reasoning_replay 自动重试提示：韧性层的用户可见反馈，须独立展示（不进 fold）。
+      msg.processKind === 'system:auto_retry' ||
       msg.role === 'user' ||
       (isAssistantBodyText(msg) && (protectedIds.has(msg.id) || !isShortNarration(msg)));
     if (isBreak) {

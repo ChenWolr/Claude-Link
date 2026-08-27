@@ -39,6 +39,9 @@ export interface AppConfig {
   // 后台运行开关：为 true 时点击窗口关闭按钮只把主窗口隐藏到系统托盘，而非退出进程；
   // 需在托盘图标右键「退出」才真正结束程序。为 false 时关闭窗口直接退出（现状行为）。
   minimizeToTray: boolean;
+  // reasoning_replay（DeepSeek thinking 回传 400）自动重试开关：回合结束后主进程以相同
+  // 用户文本自动重发一次（单次、~2s 延迟、同文本防重入）。默认开（同形状重放大概率通过）。
+  autoRetryReasoningReplay: boolean;
 }
 
 // ── 多供应商 × 无限模型库（设置页 = 可选项库，会话内选用）────────────────

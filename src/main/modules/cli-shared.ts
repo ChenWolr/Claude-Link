@@ -16,6 +16,8 @@ import * as sessionRepo from '../database/repositories/session-repo';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import { isApiErrorAssistantText } from '../../shared/api-error-text';
+import { isReasoningReplayApiError } from '../../shared/upstream-errors';
+import { noteReasoningReplayError } from './reasoning-replay-auto-retry';
 import { isErrorCliResult } from '../../shared/session-completion';
 import { resolveContextWindowForSession } from '../../shared/model-context-windows';
 import { applySessionOverrideEnv } from '../../shared/session-model';
@@ -266,12 +268,17 @@ export function persistMessageParts(
   for (const part of parts) {
     const processKind = processKindFromPart(part);
     if (part.type === 'text' && 'text' in part) {
+      // API Error 文案以 assistant 正文形态落库（isError=false 会被当普通回复展示），
+      // 命中谓词即标错误——仅限 assistant，user 正文不受影响。
+      const isAssistantApiError = role === 'assistant' && isApiErrorAssistantText(part.text);
+      // reasoning_replay 结构化标记 + 韧性层回合标记：命中共享谓词即通知自动重试模块。
+      const isReasoningReplay = role === 'assistant' && isReasoningReplayApiError(part.text);
+      if (isReasoningReplay) noteReasoningReplayError(sessionId);
       messageRepo.createMessage({
         sessionId, role, content: part.text, eventType: 'message',
         processKind, parentAgentId,
-        // API Error 文案以 assistant 正文形态落库（isError=false 会被当普通回复展示），
-        // 命中谓词即标错误——仅限 assistant，user 正文不受影响。
-        isError: role === 'assistant' && isApiErrorAssistantText(part.text),
+        isError: isAssistantApiError,
+        apiErrorKind: isReasoningReplay ? 'reasoning_replay' : null,
       });
     } else if (part.type === 'tool_use') {
       messageRepo.createMessage({

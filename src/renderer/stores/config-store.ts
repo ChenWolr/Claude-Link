@@ -38,6 +38,8 @@ const defaultConfig: AppConfig = {
   lastUsedModelId: null,
   notifyOnLeave: true,
   minimizeToTray: false,
+  // reasoning_replay 自动重试默认开（与主进程 config-manager 默认保持同值）。
+  autoRetryReasoningReplay: true,
 };
 
 export const useConfigStore = defineStore('config', {

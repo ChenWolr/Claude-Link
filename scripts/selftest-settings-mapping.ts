@@ -1920,10 +1920,32 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
   // #4 API Error → isError + 红气泡：三处接线。
   check('isApiErrorAssistantText 抽为 shared 纯函数（trim 后前缀匹配）',
     readRel('src/shared/api-error-text.ts').includes("text.trim().startsWith('API Error:')"));
-  check('cli-shared 落库 assistant 正文命中谓词即 isError',
-    cliShared.includes("isError: role === 'assistant' && isApiErrorAssistantText(part.text)"));
-  check('use-chat persistMessage 镜像路径同样标 isError',
-    useChat.includes("isError: role === 'assistant' && isApiErrorAssistantText(part.text)"));
+  check('cli-shared 落库 assistant 正文命中谓词即 isError（isAssistantApiError 变量）',
+    cliShared.includes("const isAssistantApiError = role === 'assistant' && isApiErrorAssistantText(part.text)") &&
+    cliShared.includes('isError: isAssistantApiError'));
+  check('use-chat persistMessage 镜像路径同样标 isError（isAssistantApiError 变量）',
+    useChat.includes("const isAssistantApiError = isAssistant && isApiErrorAssistantText(part.text)") &&
+    useChat.includes('isError: isAssistantApiError'));
+  // reasoning_replay 韧性层接线（2026-08-27）：共享谓词 + 结构化标记 + 自动重试 + 气泡建议。
+  check('upstream-errors 导出 reasoning_replay 谓词与分类',
+    readRel('src/shared/upstream-errors.ts').includes('export function isReasoningReplayApiError') &&
+    readRel('src/shared/upstream-errors.ts').includes("'reasoning_replay'"));
+  check('cli-shared 命中 reasoning_replay 落 apiErrorKind 并通知自动重试模块',
+    cliShared.includes("apiErrorKind: isReasoningReplay ? 'reasoning_replay' : null") &&
+    cliShared.includes('noteReasoningReplayError(sessionId)'));
+  check('use-chat 镜像路径同谓词打 apiErrorKind 标记',
+    useChat.includes("isReasoningReplayApiError(part.text) ? 'reasoning_replay' : null"));
+  check('sdk-backend 三个接线点（记录文本/两终态调度/删除清理）',
+    readRel('src/main/modules/sdk-backend.ts').includes('recordOutgoingUserText(sessionId, opts.userCommandText)') &&
+    (readRel('src/main/modules/sdk-backend.ts').match(/scheduleReasoningReplayRetryForTurn\(sessionId, mainWindow\)/g) ?? []).length === 2 &&
+    readRel('src/main/modules/sdk-backend.ts').includes('clearReasoningReplayState(sessionId)'));
+  check('配置项 autoRetryReasoningReplay 默认开且持久化映射',
+    readRel('src/main/modules/config-manager.ts').includes('autoRetryReasoningReplay: true') &&
+    readRel('src/main/modules/config-manager.ts').includes('config.autoRetryReasoningReplay ?? true'));
+  check('MessageBubble reasoning_replay 行动建议（手动重试/压缩/换端点）',
+    messageBubble.includes('reasoning-replay-advice') &&
+    messageBubble.includes('已自动重试一次') &&
+    messageBubble.includes('Anthropic 直连'));
   check('MessageBubble 错误气泡（bubble--error + fail 色系）',
     messageBubble.includes("'bubble--error': message.isError === true") &&
     messageBubble.includes('.bubble--error') &&

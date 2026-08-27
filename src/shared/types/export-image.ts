@@ -38,6 +38,9 @@ export interface RenderableMessage<A = AttachmentSummary> {
   toolUseId: string | null;
   title: string | null;
   isError: boolean;
+  // 上游错误结构化分类键（如 'reasoning_replay'）。落库路径（cli-shared / use-chat）依
+  // isReasoningReplayApiError 命中打标，错误气泡据此附行动建议；未分类为 null/缺省。
+  apiErrorKind?: string | null;
   createdAt: string;
   // 导出专用最小附件快照。老消息无附件时为 undefined，消费处用 ?? [] 兜底。
   // attachments?: AttachmentSummary[]
