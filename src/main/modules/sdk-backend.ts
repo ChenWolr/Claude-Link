@@ -49,6 +49,7 @@ import {
 import type { ClaudePlanTask, ClaudePlanState, ClaudePlanTaskPatch } from '../../shared/types/claude-plan';
 import * as claudePlanRepo from '../database/repositories/claude-plan-repo';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
+import { shouldNotifyInteractionCancelled } from '../../shared/interaction-cancel';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type { AppConfig } from '../../shared/types/config';
 import type { CommandChangedPayload, CommandOriginContext, SessionCommandSnapshot } from '../../shared/types/command';
@@ -3529,7 +3530,30 @@ export function killProcess(
       }
     }
   }
+  // 先捕获「取消前是否有 pending 弹窗」再取消——系统取消（watchdog/upstream_fatal/queue）
+  // 时用户只看到弹窗凭空消失，须落一条可见的红色系统消息解释（user 主动中断符合预期、
+  // session_cleanup 会话已删，均不落）。
+  const hadPendingInteraction = hasPendingInteractionForSession(sessionId);
   cancelInteractionsForSession(sessionId);
+  if (mainWindow && shouldNotifyInteractionCancelled(reason, hadPendingInteraction)) {
+    try {
+      const persisted = messageRepo.createMessage({
+        sessionId,
+        role: 'system',
+        content: '回合被系统中断，未答复的权限弹窗已取消，对应工具调用按取消处理。',
+        eventType: 'system',
+        processKind: 'system:interaction_cancelled',
+        title: '权限弹窗已取消',
+        isError: true,
+      });
+      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+        sessionId,
+        event: { type: 'persisted_message', message: persisted },
+      });
+    } catch (err) {
+      logger.error(`Failed to persist interaction_cancelled message [${sessionId}]`, err);
+    }
+  }
   pendingFirstPrompt.delete(sessionId);
   const entry = entries.get(sessionId);
   if (entry) {
