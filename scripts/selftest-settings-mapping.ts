@@ -825,6 +825,8 @@ console.log('\n=== 36) 实时计时器 + 子 Agent 折叠（问题 1/2/6/7）===
   check('use-now 提供 useNow（100ms 跳动）', un.includes('useNow') && un.includes('setInterval'));
   check('session-store 含 turnStartedAt + activeTurnStartedAt', ss.includes('turnStartedAt') && ss.includes('activeTurnStartedAt'));
   check('markRunning 记录 turnStartedAt', ss.includes('this.turnStartedAt[sessionId] = Date.now()'));
+  check('markRunning 全新回合清 toolProgress 残留（第四态配套）', ss.includes('全新回合清空工具进度残留'));
+  check('markRunning 清 toolProgress 仅限活动会话（防后台队列跨会话误清）', ss.includes('sessionId === this.activeSession?.id'));
   check('TurnTimer 实时计时器（turn-timer + formatDurationMs + useNow）', tt.includes('turn-timer') && tt.includes('formatDurationMs') && tt.includes('useNow'));
   check('MessageBubble duration 与 cost 解耦', mb.includes('message.costUsd != null || message.durationMs'));
   check('use-chat 客户端时长兜底（clientMs）', uc.includes('clientMs'));
@@ -892,8 +894,9 @@ console.log('\n=== 37) 二次修复契约（实测根因修正：问题 1/2/5/6/
   // R4（问题 7）：内层 ProcessGroup manualClosed 覆盖 active，运行中可折叠。
   check('ProcessGroup manualClosed 运行中可折叠', pg.includes('manualClosed'));
 
-  // R5（问题 1）：动画点工作阶段常驻 + ThinkingBlock 脉冲动画点（首轮 pre-token 一闪即逝 + 静态 ··· ）。
-  check('TurnTimer 动画点工作阶段常驻（turn-timer__working）', tt.includes('turn-timer__working') && tt.includes('v-if="!streamingContent"'));
+  // R5（问题 1）：阶段徽章工作阶段常驻（方案 A 状态头条：呼吸点 + 计时 + 四态阶段徽章，替代旧 turn-timer__working 脉冲点）。
+  check('TurnTimer 阶段徽章四态常驻（思考/调用/执行/生成）', tt.includes('turn-timer__phase') && tt.includes('工具执行中') && tt.includes('streamingTool'));
+  check('TurnTimer 工具执行中读 toolProgress（第四态）', tt.includes('toolProgress'));
   check('ThinkingBlock 脉冲动画点', tb.includes('think-dot-pulse'));
 
   // R6（问题 1+2 健壮性）：队列驱动回合同步执行态（不经 sendMessage → 否则 sending 恒 false）。

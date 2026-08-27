@@ -317,7 +317,7 @@ async function handleNewSession() {
       <AttachmentDraftList :attachments="draftAttachments" />
 
       <div class="chat-composer" :class="{ 'chat-composer--drag': dragActive }">
-        <!-- 实时计时器：紧贴输入框上方（浮岛内），sending 期间平滑展开显示本回合主线程计算耗时。 -->
+        <!-- 实时计时器（方案 A 状态头条）：浮岛第一行，sending 期间展开显示本回合耗时 + 阶段徽章。 -->
         <TurnTimer />
         <ChatInput
           ref="chatInputRef"
