@@ -57,6 +57,13 @@ function permissionRuleToString(rule: PermissionRuleValue): string {
   return rule.ruleContent ? `${rule.toolName}(${rule.ruleContent})` : rule.toolName;
 }
 
+// 会话级放行匹配用的 toolName 归一化：CLI 发来的 toolName 大小写/首尾空白不保证稳定
+//（排查文档遗留项 3：写入与判定两处严格相等，任一侧大小写漂移就漏弹/过度弹）。
+// withToolSessionAllow 查重与 isToolSessionAllowed 判定必须共用本函数，保证对称。
+export function normalizeToolNameForMatch(toolName: string): string {
+  return toolName.trim().toLowerCase();
+}
+
 function uniquePush(target: string[], values: string[]): void {
   for (const value of values) {
     if (!target.includes(value)) target.push(value);
@@ -118,10 +125,11 @@ export function buildToolSessionAllowUpdate(toolName: string): PermissionUpdate 
 
 export function withToolSessionAllow(toolName: string, updates: unknown[] | undefined): PermissionUpdate[] {
   const sessionUpdates = coercePermissionUpdatesToSession(updates);
+  const matchTool = normalizeToolNameForMatch(toolName);
   const hasToolAllow = sessionUpdates.some((update) =>
     (update.type === 'addRules' || update.type === 'replaceRules')
     && update.behavior === 'allow'
-    && update.rules.some((rule) => rule.toolName === toolName && !rule.ruleContent),
+    && update.rules.some((rule) => normalizeToolNameForMatch(rule.toolName) === matchTool && !rule.ruleContent),
   );
   return hasToolAllow ? sessionUpdates : [...sessionUpdates, buildToolSessionAllowUpdate(toolName)];
 }
@@ -136,11 +144,12 @@ export function withToolSessionAllow(toolName: string, updates: unknown[] | unde
 // 与 allow-session 的整工具放行语义一致；带 ruleContent 的细粒度规则不在此判定内（避免误放行）。
 export function isToolSessionAllowed(updates: PermissionUpdate[] | undefined, toolName: string): boolean {
   if (!updates?.length) return false;
+  const matchTool = normalizeToolNameForMatch(toolName);
   return updates.some((update) =>
     update.destination === 'session'
     && (update.type === 'addRules' || update.type === 'replaceRules')
     && update.behavior === 'allow'
-    && update.rules.some((rule) => rule.toolName === toolName && !rule.ruleContent),
+    && update.rules.some((rule) => normalizeToolNameForMatch(rule.toolName) === matchTool && !rule.ruleContent),
   );
 }
 
