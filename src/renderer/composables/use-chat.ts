@@ -15,6 +15,7 @@ import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliApiRetryTerminalFallbackEvent, CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
+import { isApiErrorAssistantText } from '../../shared/api-error-text';
 import { isErrorCliResult, isSuccessfulCliResult } from '../../shared/session-completion';
 import type { Message } from '../../shared/types/session';
 import type { ChatSendPayload } from '../../shared/types/attachment';
@@ -590,7 +591,11 @@ function createChat() {
       }
       if (part.type === 'text' && 'text' in part) {
         if (isMainFlow) turnHadText = true;
-        persistMessage({ role, eventType: 'message', content: part.text, processKind: null, parentAgentId });
+        // API Error 谓词与主进程 cli-shared 落库同源：assistant 命中即标 isError，UI 走错误气泡。
+        persistMessage({
+          role, eventType: 'message', content: part.text, processKind: null, parentAgentId,
+          isError: role === 'assistant' && isApiErrorAssistantText(part.text),
+        });
         continue;
       }
       if (part.type === 'tool_use') {

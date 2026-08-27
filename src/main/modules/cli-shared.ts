@@ -15,6 +15,7 @@ import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
+import { isApiErrorAssistantText } from '../../shared/api-error-text';
 import { isErrorCliResult } from '../../shared/session-completion';
 import { resolveContextWindowForSession } from '../../shared/model-context-windows';
 import { applySessionOverrideEnv } from '../../shared/session-model';
@@ -268,6 +269,9 @@ export function persistMessageParts(
       messageRepo.createMessage({
         sessionId, role, content: part.text, eventType: 'message',
         processKind, parentAgentId,
+        // API Error 文案以 assistant 正文形态落库（isError=false 会被当普通回复展示），
+        // 命中谓词即标错误——仅限 assistant，user 正文不受影响。
+        isError: role === 'assistant' && isApiErrorAssistantText(part.text),
       });
     } else if (part.type === 'tool_use') {
       messageRepo.createMessage({
