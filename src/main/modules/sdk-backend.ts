@@ -579,8 +579,10 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
     // (stdio) 模式下不会据此自动跳过后续同工具 prompt，故 claude-link 自行短路，避免同一会话同一工具
     // 反复弹窗。短路跨 query 生效（sessionPermissionUpdates 按 app session 缓存，新 query 复用）。
     // 不发 permission_request 系统消息、不入交互历史——用户已授权，无需再留痕。
+    // 子 agent（options.agentID 非空）不享受主流程的会话放行：授权语义是「用户放行了主流程用这个
+    // 工具」，模型自行派生的子 agent 裸 toolName 相同不能搭车（排查文档遗留项 4，收窄方向=多问）。
     const sessionBook = sessionPermissionUpdates.get(sessionId);
-    const sessionAllowed = isToolSessionAllowed(sessionBook, toolName);
+    const sessionAllowed = options.agentID == null && isToolSessionAllowed(sessionBook, toolName);
     logger.info(`[canUseTool] tool=${toolName} shortCircuit=${sessionAllowed} bookTools=[${bookToolNames(sessionBook).join(',')}]`);
 
     if (sessionAllowed) {
