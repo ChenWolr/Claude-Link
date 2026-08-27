@@ -662,6 +662,14 @@ export const useSessionStore = defineStore('session', {
         this.runningSessions.push(sessionId);
         // 问题 2：记录本回合开始时间（仅新加入时置位，避免重复 send 覆盖）。
         this.turnStartedAt[sessionId] = Date.now();
+        // 第四态阶段徽章配套：全新回合清空工具进度残留（中断 aborted 后 tool_result 不到达会遗留旧
+        // toolUseId → 阶段徽章误判「工具执行中」）。toolProgress 是全局 map（仅活动会话的 tool_progress
+        // 事件写入），故只在「活动会话」开启全新回合时清——后台会话 B 的队列 markRunning(B) 不得清掉
+        // 活动会话 A 运行中工具的实时进度（否则 A 阶段徽章误回落「思考中」、ProcessGroup/子Agent 实时
+        // 耗时丢失）。续写 continuing 时 runningSessions 已含该会话、不进此分支，保留进行中进度。
+        if (sessionId === this.activeSession?.id) {
+          this.toolProgress = {};
+        }
       }
       // v2-F3：每次 markRunning 递增回合 generation（新回合边界）。abort finally 兜底
       // 据此识别「被中断的那一代」，旧 finally 不会误停新回合。

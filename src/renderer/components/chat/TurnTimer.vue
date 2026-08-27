@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // TurnTimer.vue
-// 本回合实时计时器：紧贴会话输入浮岛顶部，sending 期间常驻显示「时钟 + 递增耗时 + 脉冲点」。
-// 自包含——直接读 session-store.sending / activeTurnStartedAt / streamingContent 等（同 StalledBanner 风格）。
+// 方案 A「状态头条」：sending 期间作为输入浮岛的第一行（有 header 语义，非悬浮孤岛）。
+// 左侧「呼吸点 + 正在回复 + 递增耗时」，右侧「阶段徽章」（思考中 / 调用工具中 / 工具执行中 / 生成回复中）。
+// 信号收敛为一个 ping 呼吸点 + 一个 tabular 计时 + 一个阶段徽章，替代旧版
+// 「时钟 SVG + 3 脉冲点 + 条件文字」的四信号堆叠。
 // 数据源：markRunning 置 turnStartedAt，markStopped/markCompleted 清除；useNow 每 100ms 跳动驱动递增。
-// 保留原 MessageList 内嵌计时器的完整语义：动画点在整个工作阶段（正文未流出）常驻，pre-token
-// 阶段额外显示「Claude 正在思考…」文字，让用户始终明确「正在回复」。
+// 阶段直接读 store 流式状态（未防抖，布尔切换更即时；50ms 防抖对阶段徽章无感知差异）。
 import { computed } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useNow } from '../../composables/use-now';
@@ -18,129 +19,176 @@ const elapsedMs = computed(() => {
   if (!start) return 0;
   return Math.max(0, now.value - start);
 });
-// pre-token 判断直接读 store 流式状态（未防抖，布尔切换更即时；50ms 防抖对「正在思考」无感知差异）。
 const streamingContent = computed(() => sessionStore.streamingContent);
-const streamingThinking = computed(() => sessionStore.streamingThinking);
 const streamingTool = computed(() => sessionStore.streamingTool);
+// 工具执行中：tool_progress 事件实时置位 toolProgress（toolUseId → 秒数），工具结果到达时 clearToolProgress 清除。
+// 全新回合开始时 markRunning 已清残留（见 session-store），故这里读到非空即「当前回合有工具在跑」。
+const hasRunningTool = computed(() => Object.keys(sessionStore.toolProgress).length > 0);
+
+// 阶段判定（按时间线优先级）：正文流出 → 生成回复中；工具真正执行中（toolProgress 非空）→ 工具执行中；
+// 正在吐工具入参（streamingTool）→ 调用工具中；否则（thinking 流式或 pre-token）→ 思考中。
+// 阶段徽章在整个 sending 期间常驻（替代旧 pre-token 一闪而过的动画点）。
+type Phase = 'thinking' | 'toolCalling' | 'toolRunning' | 'generating';
+const phase = computed<Phase>(() => {
+  if (streamingContent.value) return 'generating';
+  if (hasRunningTool.value) return 'toolRunning';
+  if (streamingTool.value) return 'toolCalling';
+  return 'thinking';
+});
+const PHASE_META: Record<Phase, { label: string; mod: string }> = {
+  thinking: { label: '思考中', mod: 'turn-timer__phase--thinking' },
+  toolCalling: { label: '调用工具中', mod: 'turn-timer__phase--tool-calling' },
+  toolRunning: { label: '工具执行中', mod: 'turn-timer__phase--tool-running' },
+  generating: { label: '生成回复中', mod: 'turn-timer__phase--generating' },
+};
+const phaseMeta = computed(() => PHASE_META[phase.value]);
 </script>
 
 <template>
   <Transition name="turn-timer">
-    <div v-if="sending" class="turn-timer" role="status" aria-live="polite" title="本次回复耗时（主线程计算时间）">
-      <svg class="turn-timer__clock" viewBox="0 0 24 24" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" />
-        <path d="M12 7v5l3.5 2" />
-      </svg>
-      <span class="turn-timer__time">{{ formatDurationMs(elapsedMs) }}</span>
-      <!-- R5（问题 1）：动画点在整个「工作阶段」（最终正文未流出时）常驻跳动，不再只在一闪而过的
-           pre-token 窗口显示。「正在思考…」文字仅 pre-token（无正文/思考/工具流式）。 -->
-      <span v-if="!streamingContent" class="turn-timer__working">
-        <span class="turn-timer__dots"><span></span><span></span><span></span></span>
-        <span v-if="!streamingThinking && !streamingTool" class="turn-timer__label">Claude 正在思考…</span>
+    <div v-if="sending" class="turn-timer" role="status" aria-live="polite" title="本次回复进行中（主线程计算时间）">
+      <span class="turn-timer__lead">
+        <span class="turn-timer__live" aria-hidden="true"></span>
+        <span class="turn-timer__label">正在回复</span>
+        <span class="turn-timer__time">{{ formatDurationMs(elapsedMs) }}</span>
+      </span>
+      <span class="turn-timer__phase" :class="phaseMeta.mod">
+        <span class="turn-timer__pdot" aria-hidden="true"></span>
+        {{ phaseMeta.label }}
       </span>
     </div>
   </Transition>
 </template>
 
 <style scoped>
-/* 紧贴输入框上方的低调节点：panel-soft 底 + 细边框，与浮岛同色系，不抢视线。
+/* 方案 A「状态头条」：浮岛第一行，整宽 header + 底部细分隔线自然过渡到输入区。
    font-variant-numeric: tabular-nums 固定数字宽度，计时跳动不引起布局抖动（CLS）。 */
 .turn-timer {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 8px var(--chat-bottom-pad-x);
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.75rem;
+}
+
+.turn-timer__lead {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  align-self: flex-start;
-  margin: 2px 0 0 var(--chat-bottom-pad-x);
-  padding: 3px 10px;
-  border-radius: var(--radius-pill);
-  background: var(--color-panel-soft);
-  border: 1px solid var(--color-border);
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-  box-shadow: var(--ring-light);
 }
 
-.turn-timer__clock {
-  width: 0.8125rem;
-  height: 0.8125rem;
-  fill: none;
-  stroke: var(--color-accent-strong);
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  opacity: 0.9;
+.turn-timer__label {
+  color: var(--color-text);
+  font-weight: 600;
 }
 
 .turn-timer__time {
   color: var(--color-accent-strong);
-  font-weight: 600;
+  font-weight: 700;
+  font-size: 0.8125rem;
   font-variant-numeric: tabular-nums;
 }
 
-.turn-timer__working {
+/* 呼吸点：静态核心 + 一圈向外扩散的 ping，进行中的活性指示。 */
+.turn-timer__live {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+}
+.turn-timer__live::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+.turn-timer__live::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: turn-timer-ping 2.1s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+@keyframes turn-timer-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  72%, 100% {
+    transform: scale(2.7);
+    opacity: 0;
+  }
+}
+
+/* 工具执行中：阶段点脉冲（与静态「调用工具中」区分，表示工具正在活跃执行）。 */
+@keyframes turn-timer-pdot-pulse {
+  0%, 100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* 阶段徽章：克制配色（单一色点 + muted 文案），pill 轮廓。 */
+.turn-timer__phase {
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-}
-
-.turn-timer__label {
+  padding: 2px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-text) 5%, transparent);
   color: var(--color-text-muted);
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
+  white-space: nowrap;
 }
-
-.turn-timer__dots {
-  display: inline-flex;
-  gap: 3px;
-}
-
-.turn-timer__dots span {
-  width: 4px;
-  height: 4px;
+.turn-timer__pdot {
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
-  background: var(--color-accent-strong);
-  animation: turn-timer-pulse 1.4s infinite ease-in-out both;
+  background: var(--color-accent);
+  flex-shrink: 0;
+}
+.turn-timer__phase--tool-calling .turn-timer__pdot {
+  background: var(--color-info);
+}
+.turn-timer__phase--tool-running .turn-timer__pdot {
+  background: var(--color-info);
+  animation: turn-timer-pdot-pulse 1.2s ease-in-out infinite;
+}
+.turn-timer__phase--generating .turn-timer__pdot {
+  background: var(--color-success);
 }
 
-.turn-timer__dots span:nth-child(2) {
-  animation-delay: 0.16s;
-}
-
-.turn-timer__dots span:nth-child(3) {
-  animation-delay: 0.32s;
-}
-
-@keyframes turn-timer-pulse {
-  0%, 80%, 100% {
-    opacity: 0.3;
-    transform: scale(0.8);
-  }
-  40% {
-    opacity: 1;
-    transform: scale(1);
-  }
-}
-
-/* 出现/消失过渡：高度平滑展开收起（推挤下方输入框但不突兀），150ms 对齐微交互节奏。 */
+/* 出现/消失过渡：高度平滑展开收起（推挤下方输入框但不突兀），对齐微交互节奏。 */
 .turn-timer-enter-active,
 .turn-timer-leave-active {
-  transition: opacity var(--duration-fast) var(--ease-out), max-height var(--duration-fast) var(--ease-out), margin var(--duration-fast) var(--ease-out);
+  transition: opacity var(--duration-fast) var(--ease-out), max-height var(--duration-fast) var(--ease-out), padding var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
   overflow: hidden;
 }
 .turn-timer-enter-from,
 .turn-timer-leave-to {
   opacity: 0;
   max-height: 0;
-  margin-top: 0;
-  margin-bottom: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  border-bottom-color: transparent;
 }
 .turn-timer-enter-to,
 .turn-timer-leave-from {
-  max-height: 40px;
+  max-height: 44px;
 }
 
-/* 无障碍：减少动态时脉冲点静止、过渡近乎瞬切。 */
+/* 无障碍：减少动态时呼吸点 ping 静止。 */
 @media (prefers-reduced-motion: reduce) {
-  .turn-timer__dots span {
+  .turn-timer__live::after,
+  .turn-timer__phase--tool-running .turn-timer__pdot {
     animation: none;
   }
 }
