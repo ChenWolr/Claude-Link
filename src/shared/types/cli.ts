@@ -233,7 +233,8 @@ export type ClaudePlanCliEvent = {
 // 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
 export interface CliSystemInfoEvent {
   type: 'system';
-  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting' | 'compact_result' | 'compact_error' | 'requesting' | 'thinking_tokens' | 'init_write_skipped';
+  // auto_retry：claude-link 自有子类型（非 CC 事件）——reasoning_replay 自动重试的系统提示。
+  subtype: 'informational' | 'compact_boundary' | 'plugin_install' | 'permission_request' | 'interaction_response' | 'api_retry' | 'compacting' | 'compact_result' | 'compact_error' | 'requesting' | 'thinking_tokens' | 'init_write_skipped' | 'auto_retry';
   text?: string;
   level?: 'info' | 'warn';
   // api_retry 专属：Claude Code 当前请求链的权威重试排期；一次事件对应随后一次真实请求。

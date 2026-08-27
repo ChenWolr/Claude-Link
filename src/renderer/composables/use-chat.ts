@@ -16,6 +16,7 @@ import type { CliApiRetryTerminalFallbackEvent, CliEvent, CliMessageContentPart,
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import { isApiErrorAssistantText } from '../../shared/api-error-text';
+import { isReasoningReplayApiError } from '../../shared/upstream-errors';
 import { isErrorCliResult, isSuccessfulCliResult } from '../../shared/session-completion';
 import type { Message } from '../../shared/types/session';
 import type { ChatSendPayload } from '../../shared/types/attachment';
@@ -250,6 +251,8 @@ function createChat() {
     toolUseId?: string | null;
     title?: string | null;
     isError?: boolean;
+    // 上游错误结构化分类键（assistant API Error 命中 isReasoningReplayApiError 时 'reasoning_replay'）。
+    apiErrorKind?: string | null;
     // Task 6：乐观 user 消息的 id 用 clientMessageId（与主进程 DB 消息同一 ID，避免双气泡）；
     // attachments 用草稿摘要让乐观消息立即渲染附件卡片，不必等 DB 回读。
     id?: string;
@@ -271,6 +274,7 @@ function createChat() {
       toolUseId: partial.toolUseId ?? null,
       title: partial.title ?? null,
       isError: partial.isError === true,
+      apiErrorKind: partial.apiErrorKind ?? null,
       createdAt: new Date().toISOString(),
       attachments: partial.attachments,
     });
@@ -592,9 +596,12 @@ function createChat() {
       if (part.type === 'text' && 'text' in part) {
         if (isMainFlow) turnHadText = true;
         // API Error 谓词与主进程 cli-shared 落库同源：assistant 命中即标 isError，UI 走错误气泡。
+        // reasoning_replay 结构化标记与主进程同谓词同键——错误气泡据此附行动建议。
+        const isAssistantApiError = isAssistant && isApiErrorAssistantText(part.text);
         persistMessage({
           role, eventType: 'message', content: part.text, processKind: null, parentAgentId,
-          isError: role === 'assistant' && isApiErrorAssistantText(part.text),
+          isError: isAssistantApiError,
+          apiErrorKind: isAssistant && isReasoningReplayApiError(part.text) ? 'reasoning_replay' : null,
         });
         continue;
       }

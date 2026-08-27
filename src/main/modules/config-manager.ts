@@ -87,6 +87,8 @@ const defaultConfig: StoredConfig = {
   // 失焦系统通知默认开（保留既有「完成/中断时弹通知」行为）；后台运行默认关（保持「关闭即退出」）。
   notifyOnLeave: true,
   minimizeToTray: false,
+  // reasoning_replay 自动重试默认开（韧性层：同形状重放大概率通过，单次重试覆盖间歇性命中）。
+  autoRetryReasoningReplay: true,
   // ⚠️ providerProfiles / lastUsedProviderId / lastUsedModelId 故意不设默认值：
   // electron-store 的 defaults 会并入 store 视图参与 has() 判定，一旦给了默认值
   // （哪怕是 []），「键是否存在」永远是 true，ensureProviderMigration 的迁移守卫
@@ -183,6 +185,8 @@ export function getConfig(): AppConfig {
     lastUsedModelId: config.lastUsedModelId ?? null,
     notifyOnLeave: config.notifyOnLeave ?? true,
     minimizeToTray: config.minimizeToTray ?? false,
+    // 老配置无此键时默认开（electron-store defaults 兜底，?? true 双保险）。
+    autoRetryReasoningReplay: config.autoRetryReasoningReplay ?? true,
   };
 }
 

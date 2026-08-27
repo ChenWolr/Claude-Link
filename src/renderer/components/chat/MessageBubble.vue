@@ -4,6 +4,7 @@ import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 import { formatDurationMs } from '../../../shared/format-duration';
+import { isReasoningReplayApiError } from '../../../shared/upstream-errors';
 import MessageAttachments from './MessageAttachments.vue';
 
 const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>();
@@ -12,6 +13,13 @@ const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>(
 const renderedContent = computed(() => renderMarkdown(props.message.content, props.exportMode ? 'export' : 'rich'));
 const hasContent = computed(() => props.message.content.trim().length > 0);
 const attachments = computed(() => props.message.attachments ?? []);
+
+// reasoning_replay（DeepSeek thinking 回传 400）错误气泡：附行动建议。
+// 结构化标记优先（落库路径打标）；老消息无标记时用共享谓词兜底，兼容历史数据。
+const reasoningReplayAdviceVisible = computed(() => {
+  if (props.message.role !== 'assistant' || props.message.isError !== true) return false;
+  return props.message.apiErrorKind === 'reasoning_replay' || isReasoningReplayApiError(props.message.content);
+});
 
 // 本次回复耗时文案（结束后气泡脚注）；与运行中 TurnTimer 共用 formatDurationMs 保持口径一致。
 const durationText = computed(() =>
@@ -41,6 +49,14 @@ async function copyMessage(): Promise<void> {
   <div :class="['bubble', `bubble--${message.role}`, { 'bubble--error': message.isError === true }]">
     <div v-if="message.role !== 'system'" class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
     <div v-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
+    <div v-if="reasoningReplayAdviceVisible" class="bubble__advice" data-testid="reasoning-replay-advice">
+      <div class="bubble__advice-title">已自动重试一次；若仍失败，可：</div>
+      <ul class="bubble__advice-list">
+        <li>手动重试（重新发送上一条消息）</li>
+        <li>压缩会话后重试（/compact，缩短需回传的思考历史）</li>
+        <li>更换供应商：Anthropic 直连或 GLM Anthropic 端点（不经 OpenAI 转换桥）</li>
+      </ul>
+    </div>
     <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
     <div v-if="message.costUsd != null || message.durationMs" class="bubble__meta">
       <svg v-if="durationText" class="bubble__meta-clock" viewBox="0 0 24 24" aria-hidden="true">
@@ -127,6 +143,25 @@ async function copyMessage(): Promise<void> {
   border-color: color-mix(in srgb, var(--color-fail) 50%, transparent);
   background: color-mix(in srgb, var(--color-fail) 12%, transparent);
   color: var(--color-fail-strong);
+}
+
+/* reasoning_replay 行动建议：红气泡内的次级列表，边界线分隔正文与建议。 */
+.bubble__advice {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid color-mix(in srgb, var(--color-fail) 30%, transparent);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+.bubble__advice-title {
+  font-weight: 600;
+}
+
+.bubble__advice-list {
+  margin: 4px 0 0;
+  padding-left: 1.1em;
+  list-style: disc;
 }
 
 .bubble__role {

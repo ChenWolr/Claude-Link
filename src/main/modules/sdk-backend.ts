@@ -31,6 +31,7 @@ import { isSuccessfulCliResult } from '../../shared/session-completion';
 import { convertResultMessage } from '../../shared/result-converter';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
 import { logger } from '../utils/logger';
+import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState } from './reasoning-replay-auto-retry';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
 import { extractContextTokens, detectCompaction, deriveCurrentContextUsed, parseNativeContextReport, reconcileContextUsage, isRuntimeSnapshotForQuery, mapContextReconcileTerminal, postTurnFallbackTerminal, derivePostTurnProbePayloadFields } from '../../shared/context-usage';
@@ -517,6 +518,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
+  clearReasoningReplayState(sessionId); // reasoning_replay 韧性层状态/延时器随会话清理（单一收口）
   sessionProvenanceSeeds.delete(sessionId); // review-v1 §5.1：provenance 种子同生命周期清理
   sessionLastTurnOverride.delete(sessionId); // 连接加固 Task 6：回合快照随会话清理
   sessionLastEffective.delete(sessionId); // 连接加固 Task 6：漂移检测状态随会话清理
@@ -3441,6 +3443,8 @@ async function runQuery(
         if (!contextTurn) {
           schedulePostTurnProbe(sessionId, mainWindow, probeInstance, probeCliSid, { compactedJustNow });
         }
+        // reasoning_replay 韧性层：回合以 result 终态结束 → 命中即延时自动重发一次。
+        scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);
         return;
       }
       // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。
@@ -3458,6 +3462,8 @@ async function runQuery(
       deleteEntry(sessionId, entry);
       emitExit(0);
       schedulePostTurnProbe(sessionId, mainWindow, probeInstance2, probeCliSid2);
+      // reasoning_replay 韧性层：流丢 result 同样是回合终态（第三方端点常见）→ 命中即重发。
+      scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);
       return;
     }
     emitExit(null);
@@ -3549,6 +3555,8 @@ export function spawnForChat(
   const entry = createEntry();
   entries.set(sessionId, entry);
   markSessionActive(sessionId);
+  // reasoning_replay 韧性层：记录本回合原样用户文本（自动重试载体；命令文本不记录）。
+  recordOutgoingUserText(sessionId, opts.userCommandText);
   pendingFirstPrompt.set(sessionId, { mainWindow, opts, entry });
   return entry.handle;
 }
@@ -3558,6 +3566,40 @@ const pendingFirstPrompt = new Map<
   string,
   { mainWindow: BrowserWindow; opts: SpawnOptions; entry: SessionEntry }
 >();
+
+// reasoning_replay 韧性层：回合终态调度自动重试（回调注入 sdk-backend 能力，模块自身无环导入）。
+function scheduleReasoningReplayRetryForTurn(sessionId: string, mainWindow: BrowserWindow): void {
+  maybeScheduleReasoningReplayRetry({
+    sessionId,
+    mainWindow,
+    hasRunningQuery: () => {
+      const e = entries.get(sessionId);
+      return Boolean(e && (e.query || pendingFirstPrompt.has(sessionId)));
+    },
+    isSessionAlive: () => sessionRepo.getSession(sessionId) !== null,
+    forwardSystemNotice: (subtype, text) => {
+      forwardEvent(sessionId, mainWindow, { type: 'system', subtype, text });
+    },
+    resendUserText: (text) => {
+      // 复用 CHAT_SEND 纯文本核心：落库 user 行 → spawn 占坑 → sendMessage 起 query。
+      const session = sessionRepo.getSession(sessionId);
+      if (!session) throw new Error(`Session ${sessionId} not found`);
+      messageRepo.createMessage({ sessionId, role: 'user', content: text, eventType: 'message' });
+      spawnForChat(sessionId, mainWindow, {
+        model: session.model,
+        modelOverride: session.modelOverride,
+        providerOverride: session.providerOverride,
+        workingDir: session.workingDir,
+        maxTurns: session.maxTurns,
+        permissionMode: session.permissionMode,
+        thinkingLevel: session.thinkingLevel,
+        resumeSessionId: session.cliSessionId,
+        userCommandText: text,
+      });
+      sendMessage(sessionId, text);
+    },
+  });
+}
 
 export function spawnForTask(
   taskId: string,
