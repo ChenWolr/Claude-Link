@@ -38,7 +38,7 @@ async function copyMessage(): Promise<void> {
 </script>
 
 <template>
-  <div :class="['bubble', `bubble--${message.role}`]">
+  <div :class="['bubble', `bubble--${message.role}`, { 'bubble--error': message.isError === true }]">
     <div v-if="message.role !== 'system'" class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
     <div v-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
     <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
@@ -118,6 +118,15 @@ async function copyMessage(): Promise<void> {
   border: 1px solid var(--color-border);
   max-width: 90%;
   box-shadow: var(--ring-light), var(--elevation-1);
+}
+
+/* 错误消息（isError 标记：API Error 文案 / system:interaction_cancelled 等）：fail 色
+   红边红字，与 ChatPage .chat-error 同款 color-mix 配方。置于角色气泡规则之后，
+   border-color 覆盖 user/assistant 的 accent 色条，整圈描边归一为红色系。 */
+.bubble--error {
+  border-color: color-mix(in srgb, var(--color-fail) 50%, transparent);
+  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
+  color: var(--color-fail-strong);
 }
 
 .bubble__role {
