@@ -119,7 +119,9 @@ export function interruptTask(taskId: string, sessionId: string, mainWindow: Bro
   // 使当前执行实例失效：retry 可能很快把同一 task 再设为 currentTaskId，
   // 旧 child 的迟到 exit 不能据此覆盖新一轮 pending/running 状态。
   queueGenerations.set(sessionId, getQueueGeneration(sessionId) + 1);
-  killProcess(sessionId, 'queue');
+  // F5（验收 review）：必须传 mainWindow——killProcess 的「弹窗被系统取消」反馈
+  //（system:interaction_cancelled 落库 + 推送）以此为前提，漏传则 queue 触发点恒静默。
+  killProcess(sessionId, 'queue', mainWindow);
   if (isRunning) {
     taskRepo.updateTaskStatus(taskId, 'cancelled');
   }
@@ -393,7 +395,9 @@ export async function continueWithUserMessage(
     // SDK prompt（含图片时为可重复迭代 AsyncIterable，支持 stale-resume 重试）；sendMessage 触发 runQuery。
     sendMessage(sessionId, prepared.prompt);
   } catch (err) {
-    if (spawned) killProcess(sessionId, 'queue');
+    // F5：同 interruptTask——回滚路径的 queue kill 也带 mainWindow，弹窗取消反馈不因
+    // spawn 半途失败而静默（该时刻 pending 弹窗虽少见，语义上对称）。
+    if (spawned) killProcess(sessionId, 'queue', mainWindow);
     messageRepo.deleteMessage(userMessage.id);
     if (prepared.attachmentIds.length > 0) {
       attachmentRepo.markAttachmentsStatus(prepared.attachmentIds, 'draft');
