@@ -20,7 +20,8 @@ import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from 
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode } from './modules/chat-backend';
+import { resolveEffectivePermissionMode, type PermissionMode } from '../shared/permission-resolver';
 import { sdkCommandRegistry, getCommandProvenance } from './modules/sdk-command-registry';
 import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
 import {
@@ -431,6 +432,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   ipcMain.handle(IPC_CHANNELS.CHAT_ABORT, async (_event, sessionId: string) => {
     killProcess(sessionId, 'user', mainWindowRef);
+  });
+
+  // 批次二 #3：运行中回合中途切权限档。null（跟随全局）在主进程解析成有效档；
+  // 无运行回合返回 false（渲染层回落「下一条消息生效」语义，不另提示）。
+  ipcMain.handle(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE, async (_event, sessionId: string, mode: string | null) => {
+    const effective = resolveEffectivePermissionMode(mode as PermissionMode | null, getConfig().permissionMode);
+    return setRunningQueryPermissionMode(sessionId, effective);
   });
 
   ipcMain.handle(IPC_CHANNELS.INTERACTION_RESPOND, async (_event, response) => {

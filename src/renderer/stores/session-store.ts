@@ -515,6 +515,14 @@ export const useSessionStore = defineStore('session', {
           this.activeSession = updated;
           this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
         }
+        // 批次二 #3：运行中回合经 streaming 控制请求即时生效；无运行回合（返回 false）自然
+        // 回落「下一条消息生效」——新 query 读上面已落库的 session.permissionMode。
+        // catch 静默回落：控制请求失败不影响已写入的会话档，最坏退化为下一条生效。
+        try {
+          await window.claudeLink.setRunningPermissionMode(this.activeSession.id, mode);
+        } catch {
+          // 静默回落（IPC 不可达等极端情况）
+        }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '更新权限模式失败';
       }

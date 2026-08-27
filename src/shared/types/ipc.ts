@@ -49,6 +49,8 @@ export const IPC_CHANNELS = {
   MESSAGE_GET_BY_SESSION: 'message:getBySession',
   CHAT_SEND: 'chat:send',
   CHAT_ABORT: 'chat:abort',
+  // 批次二 #3：运行中回合中途切权限档（streaming input 控制请求，setPermissionMode）。
+  CHAT_SET_PERMISSION_MODE: 'chat:setPermissionMode',
   CHAT_EVENT: 'chat:event',
   INTERACTION_REQUEST: 'interaction:request',
   INTERACTION_RESPOND: 'interaction:respond',
