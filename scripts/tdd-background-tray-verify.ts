@@ -62,20 +62,32 @@ check('buildSessionNotification 首道守卫为 notifyEnabled 关闭即返回 nu
 check('notifier 从 config-manager 读 getConfig().notifyOnLeave', notifier.includes('notifyEnabled: getConfig().notifyOnLeave'));
 check('notifier 导入 getConfig', notifier.includes("import { getConfig } from './config-manager';"));
 
-console.log('\n=== 6) 主进程 index.ts：托盘 + 关闭拦截 + 右键退出 ===');
+console.log('\n=== 6) 主进程 index.ts：托盘常驻 + 关闭拦截 + 右键退出 ===');
 check('index.ts 导入 Tray 与 nativeImage', indexMain.includes('import { app, BrowserWindow, Menu, Tray, nativeImage } from \'electron\';'));
 check('声明托盘句柄 let tray: Tray | null', indexMain.includes('let tray: Tray | null = null;'));
 check('声明真正退出标志 let quitting = false', indexMain.includes('let quitting = false;'));
+check('启动即同步托盘（createWindow 后调用 syncTrayWithConfig）', /createWindow\(\);[\s\S]{0,200}syncTrayWithConfig\(\);/.test(indexMain));
+check('托盘生命周期挂接配置保存回调 onConfigSaved(syncTrayWithConfig)', indexMain.includes('onConfigSaved(syncTrayWithConfig);'));
+check('syncTrayWithConfig：开关开→ensureTray（运行中托盘常驻可见）', /function syncTrayWithConfig\(\): void \{[\s\S]{0,120}ensureTray\(\);/.test(indexMain));
+check('syncTrayWithConfig：开关关且窗口可见→销毁托盘（tray.destroy）', indexMain.includes('tray.destroy();'));
+check('syncTrayWithConfig：窗口藏托盘时保留图标守卫（mainWindow.isVisible()）', /if \(tray && \(!mainWindow \|\| mainWindow\.isVisible\(\)\)\)/.test(indexMain));
 check('close 处理器挂到 mainWindow.on(\'close\')', indexMain.includes("mainWindow.on('close', (event) => {"));
 check('close 守卫：quitting 或 minimizeToTray 关闭时放行（不拦截）', indexMain.includes('if (quitting || !getConfig().minimizeToTray) return;'));
 check('close 拦截：event.preventDefault()', indexMain.includes('event.preventDefault();'));
 check('close 拦截：隐藏窗口而非销毁（mainWindow?.hide()）', indexMain.includes('mainWindow?.hide();'));
-check('close 拦截：懒创建托盘（ensureTray()）', indexMain.includes('ensureTray();'));
+check('close 拦截：兜底创建托盘（ensureTray()）', indexMain.includes('ensureTray();'));
 check('ensureTray 创建 Tray（new Tray(trayIcon())）', indexMain.includes('tray = new Tray(trayIcon());'));
 check('托盘菜单含「显示主窗口」', indexMain.includes("label: '显示主窗口'"));
 check('托盘菜单含「退出」', indexMain.includes("label: '退出'"));
 check('托盘「退出」先置 quitting=true 再 app.quit()（避免 close 拦截到退出）', /quitting = true;[\s\S]{0,40}app\.quit\(\);/.test(indexMain));
 check('托盘图标路径按 packaged 区分（process.resourcesPath vs app.getAppPath）', indexMain.includes('app.isPackaged ? process.resourcesPath : app.getAppPath()'));
+
+console.log('\n=== 6b) config-manager：保存后回调（托盘随开关实时增删） ===');
+check('config-manager 导出 onConfigSaved 订阅', configManager.includes('export function onConfigSaved('));
+check('saveConfig 末尾触发 emitConfigSaved()', /export function saveConfig[\s\S]{0,800}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
+check('clearConfig 末尾触发 emitConfigSaved()', /export function clearConfig[\s\S]{0,200}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
+check('回调异常不扩散（listener try/catch）', /for \(const listener of configSavedListeners\) \{[\s\S]{0,120}catch/.test(configManager));
+check('设置页文案提示「开启后托盘图标常驻右下角」', configPage.includes('开启后托盘图标常驻右下角'));
 
 console.log('\n=== 7) 打包：托盘图标资源随包分发 ===');
 check('electron-builder 配置 extraResources 拷贝托盘图标', builder.includes('extraResources'));
