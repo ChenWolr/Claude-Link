@@ -1,6 +1,8 @@
 import type { CliEvent, CliDetectionResult } from './cli';
 import type { AttachmentSummary } from './attachment';
 import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../context-usage';
+import type { ThinkingLevel } from './thinking';
+import type { PermissionMode } from '../permission-resolver';
 
 // 命令快照类型 re-export：payload/快照在 ./command 定义，这里对外统一出口（main/preload/renderer 共用）。
 export type {
@@ -110,6 +112,21 @@ export const IPC_CHANNELS = {
 export const DEFAULT_TASK_DELAY_SECONDS = 60;
 export const STREAM_DEBOUNCE_MS = 50;
 export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
+
+/** SESSION_CREATE 的可选物化参数：暂态会话首条消息发送前由 renderer 携带。 */
+export interface SessionCreateSpec {
+  /** 暂态会话 id（renderer 预生成）：物化沿用同一 id，草稿/附件/乐观消息无需迁移 key。 */
+  id?: string;
+  workingDir?: string | null;
+  providerOverride?: string;
+  modelOverride?: string;
+  /** 暂态期间选定的权限档（null = 跟随全局默认）；主进程按 SESSION_UPDATE 同语义白名单透传。 */
+  permissionMode?: PermissionMode | null;
+  /** 暂态期间选定的思考强度（null = 跟随全局默认）；白名单语义同上。 */
+  thinkingLevel?: ThinkingLevel | null;
+  /** 暂态期间无行暂存的附件 id：物化建行后绑定为 draft 记录。 */
+  bindTransientAttachmentIds?: string[];
+}
 
 /** 粘贴/拖放入参：把 renderer 的 Blob bytes 交给主进程暂存（不传文件路径）。 */
 export interface StageAttachmentBytesInput {

@@ -74,12 +74,10 @@ function handleSearchClear() {
   store.searchSessions('');
 }
 
-async function createAndNavigate() {
-  const session = await store.createSession(`会话 ${store.sessions.length + 1}`);
-  if (session) {
-    await store.switchSession(session);
-    router.push('/');
-  }
+function createAndNavigate() {
+  // 新会话延迟持久化：与会话管理页入口统一走暂态（首条消息发送才落库）。
+  store.startTransientSession();
+  router.push('/');
 }
 
 async function openSession(session: { id: string }) {

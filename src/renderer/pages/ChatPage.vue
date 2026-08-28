@@ -284,12 +284,9 @@ async function handleCompress() {
   await sendMessage({ text: '/compact', attachmentIds: [], clientMessageId: crypto.randomUUID() });
 }
 
-async function handleNewSession() {
-  const session = await store.createSession(`会话 ${store.sessions.length + 1}`);
-  if (session) {
-    await store.switchSession(session);
-    // 根因修复：监听已在 App.vue 全局注册，无需在新建会话时重新注册。
-  }
+function handleNewSession() {
+  // 新会话延迟持久化：不落库，进入/回到暂态草稿（已有暂态则原地复用，内容保留）。
+  store.startTransientSession();
 }
 </script>
 

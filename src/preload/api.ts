@@ -7,7 +7,7 @@ import type { AppConfig, ModelInfo, DetectedClaudeConfig, ProviderLibrarySnapsho
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
-import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, SessionCommandSnapshot } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
@@ -41,7 +41,7 @@ export interface ClaudeLinkAPI {
   onProvidersChanged: (callback: () => void) => () => void;
   removeProvidersListener: () => void;
   listSessions: () => Promise<Session[]>;
-  createSession: (name: string) => Promise<Session>;
+  createSession: (name: string, spec?: SessionCreateSpec) => Promise<Session>;
   getSession: (id: string) => Promise<Session | null>;
   getSessionMessages: (sessionId: string) => Promise<Message[]>;
   deleteSession: (id: string) => Promise<void>;
@@ -141,7 +141,7 @@ export function createApi(): ClaudeLinkAPI {
     },
     removeProvidersListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.PROVIDERS_CHANGED),
     listSessions: () => ipcRenderer.invoke(IPC_CHANNELS.SESSION_LIST),
-    createSession: (name) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_CREATE, name),
+    createSession: (name, spec) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_CREATE, name, spec),
     getSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_GET, id),
     getSessionMessages: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, sessionId),
     deleteSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_DELETE, id),
