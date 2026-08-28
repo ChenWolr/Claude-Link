@@ -20,7 +20,9 @@ import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from 
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh } from './modules/chat-backend';
+import { resolveCommandsGetResult } from '../shared/commands-get';
+import { getUserOriginFingerprint } from './modules/command-source-watcher';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../shared/permission-resolver';
 import { sdkCommandRegistry, getCommandProvenance } from './modules/sdk-command-registry';
 import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
@@ -337,30 +339,43 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 不返回 Query / SDK stream / 未经清洗的消息。
   ipcMain.handle(IPC_CHANNELS.COMMANDS_GET, async (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
-    // 先验证 DB 会话存在，再允许登记 active/启动 probe；不能把任意 renderer 输入当作会话生命周期事实。
-    if (!sessionRepo.getSession(sessionId)) throw new Error(`Session ${sessionId} not found`);
-    // 已有 per-session 快照（精确命令）直接返回。
-    if (sdkCommandRegistry.has(sessionId)) {
-      return sdkCommandRegistry.get(sessionId);
+    // D1 分流：先验证 DB 会话存在，再允许登记 active/启动 probe——不能把任意 renderer 输入当作会话
+    // 生命周期事实。无 DB 行（暂态）不再 throw：只读返回全局兜底副本（source:'cache'），不 markSessionActive、
+    // 不 startCommandProbe、不 schedulePostTurnProbe；分流决策统一在 shared 纯函数 resolveCommandsGetResult。
+    const decision = resolveCommandsGetResult({
+      sessionExists: Boolean(sessionRepo.getSession(sessionId)),
+      hasSnapshot: sdkCommandRegistry.has(sessionId),
+      snapshot: sdkCommandRegistry.get(sessionId),
+      fallback: sdkCommandRegistry.getGlobalFallback(),
+      currentUserFingerprint: getUserOriginFingerprint(),
+    });
+    if (decision.readOnly) {
+      // D6：兜底未就绪（启动探测失败/未完成）时打开菜单即自然重试一次（60s 节流，fire-and-forget）。
+      void ensureGlobalCommandProbeFresh(mainWindow);
+      return decision.snapshot;
     }
-    // N6 修复：无 per-session 快照时 markSessionActive，让 startCommandProbe 下游 4 处 isSessionActive 守卫
-    // 全部放行（与 SESSION_CREATE 一致；删除时 markSessionDeleted 已撤销）。否则重启后打开闲置旧会话，probe
-    // 在 runCommandProbe 被 !isSessionActive 拦截、emitCommandChanged 不推送，命令永远 loading。
-    markSessionActive(sessionId);
-    void startCommandProbe(sessionId, mainWindow);
-    // Task 3 Step 5（本计划）：重启后首次加载会话，若 DB 有 post-turn 探针持久化的占用值，
-    // 预填 stale 后追加一次免费探针（~2s）——成功升级为 fresh 精确值，失败保持 stale 预填，
-    // 无「待刷新」空态回归。probeInstance 用 0：重启后 renderer 无已知代际，0 会被接受并建立
-    // 已知代际，随后真实回合代际单调递增覆盖。守卫在 schedulePostTurnProbe 内（仅无 running entry 时调度）。
-    const reopenSession = sessionRepo.getSession(sessionId);
-    if (reopenSession && typeof reopenSession.lastContextUsed === 'number' && reopenSession.lastContextUsed >= 0) {
-      schedulePostTurnProbe(sessionId, mainWindow, 0, resolveCliSessionId(sessionId));
+    if (decision.needsFullProbeSideEffects) {
+      // N6 修复：无 per-session 快照时 markSessionActive，让 startCommandProbe 下游 4 处 isSessionActive 守卫
+      // 全部放行（与 SESSION_CREATE 一致；删除时 markSessionDeleted 已撤销）。否则重启后打开闲置旧会话，probe
+      // 在 runCommandProbe 被 !isSessionActive 拦截、emitCommandChanged 不推送，命令永远 loading。
+      markSessionActive(sessionId);
+      void startCommandProbe(sessionId, mainWindow);
+      // Task 3 Step 5（本计划）：重启后首次加载会话，若 DB 有 post-turn 探针持久化的占用值，
+      // 预填 stale 后追加一次免费探针（~2s）——成功升级为 fresh 精确值，失败保持 stale 预填，
+      // 无「待刷新」空态回归。probeInstance 用 0：重启后 renderer 无已知代际，0 会被接受并建立
+      // 已知代际，随后真实回合代际单调递增覆盖。守卫在 schedulePostTurnProbe 内（仅无 running entry 时调度）。
+      const reopenSession = sessionRepo.getSession(sessionId);
+      if (reopenSession && typeof reopenSession.lastContextUsed === 'number' && reopenSession.lastContextUsed >= 0) {
+        schedulePostTurnProbe(sessionId, mainWindow, 0, resolveCliSessionId(sessionId));
+      }
+    } else if (decision.needsRefreshProbeOnly) {
+      // D5：用户级命令文件变更 → 旧会话快照过期。decision.snapshot 已是克隆 stale（UI「可能不是最新」），
+      // 免费重探一次（幂等/N3 互斥/活跃 query 只标 stale 等全守卫在 startCommandProbe 内），
+      // 完成后经 COMMANDS_CHANGED 推精确覆盖。不 markSessionActive（N5 的 DB 存活判据已放行）。
+      void startCommandProbe(sessionId, mainWindow);
     }
-    // 启动兜底：无 per-session 快照时立即返回全局兜底（复制 + source:'cache'），UI 不再持续 loading；
-    // 该会话 probe 完成后经 COMMANDS_CHANGED 推精确命令覆盖。
-    const fallback = sdkCommandRegistry.getGlobalFallback();
-    if (fallback) return { ...fallback, sessionId, source: 'cache' as const };
-    return sdkCommandRegistry.get(sessionId);
+    // 返回值统一由分流给出：per-session 快照 / 兜底 cache 副本 / stale 克隆 / loading 默认。
+    return decision.snapshot;
   });
   // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
   // unknown/hidden 命令名）。只读、无副作用——不 markSessionActive、不触发 probe（区别于 COMMANDS_GET）。
