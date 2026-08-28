@@ -98,6 +98,26 @@ const defaultConfig: StoredConfig = {
 type ConfigStore = InstanceType<typeof ElectronStoreCtor>;
 let store: ConfigStore | null = null;
 
+// 配置落盘回调：主进程消费方（如托盘随 minimizeToTray 开关增删）在 saveConfig/clearConfig
+// 完成后联动。用回调而非让 index.ts 直接监听 IPC，避免 ipc-handlers ↔ index 循环依赖。
+type ConfigSavedListener = () => void;
+const configSavedListeners = new Set<ConfigSavedListener>();
+
+export function onConfigSaved(listener: ConfigSavedListener): () => void {
+  configSavedListeners.add(listener);
+  return () => configSavedListeners.delete(listener);
+}
+
+function emitConfigSaved(): void {
+  for (const listener of configSavedListeners) {
+    try {
+      listener();
+    } catch (e) {
+      logger.error('onConfigSaved listener failed', e);
+    }
+  }
+}
+
 function getStore(): ConfigStore {
   store ??= new ElectronStoreCtor({
     name: 'claude-link-config',
@@ -249,6 +269,7 @@ export function saveConfig(partial: Partial<AppConfig>): AppConfig {
   // 老字段是库的投影：渲染层整份 saveConfig（自动保存）可能带回陈旧的投影字段，
   // 这里重新断言库的权威值，再统一写 settings.local.json。
   projectLegacyFields();
+  emitConfigSaved();
   return getConfig();
 }
 
@@ -264,6 +285,7 @@ export function hasApiKey(): boolean {
 export function clearConfig(): AppConfig {
   getStore().clear();
   getStore().set(defaultConfig);
+  emitConfigSaved();
   return getConfig();
 }
 

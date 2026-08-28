@@ -6,7 +6,7 @@ import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
 import { detectCli } from './modules/cli-detector';
-import { ensureProviderMigration, getConfig } from './modules/config-manager';
+import { ensureProviderMigration, getConfig, onConfigSaved } from './modules/config-manager';
 import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe } from './modules/sdk-backend';
 import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
@@ -28,8 +28,9 @@ if (process.env.CLAUDE_LINK_EXPORT_SMOKE) {
 }
 
 let mainWindow: BrowserWindow | null = null;
-// 托盘（后台运行模式）。懒创建：首次「关闭即隐藏」时建立，之后常驻直到退出；
-// 右键菜单提供「显示主窗口」与「退出」两项——退出是真正结束进程的唯一入口（当 minimizeToTray 开时）。
+// 托盘（后台运行模式）。minimizeToTray 开启时随启动/配置保存同步创建，常驻可见——
+// 运行中即可在右下角看到入口，而不是关窗后才出现；右键菜单提供「显示主窗口」与「退出」
+// 两项——退出是真正结束进程的唯一入口（当 minimizeToTray 开时）。
 let tray: Tray | null = null;
 // 正在真正退出的标志：托盘「退出」置 true 后，close 处理器不再拦截（避免最小化拦截到 app.quit）。
 let quitting = false;
@@ -72,6 +73,22 @@ function ensureTray(): void {
   // 左键单击/双击都显示主窗口（右键已由 setContextMenu 弹出菜单）。
   tray.on('click', () => showMainWindow());
   tray.on('double-click', () => showMainWindow());
+  logger.info('托盘图标已创建');
+}
+
+// 托盘生命周期跟随 minimizeToTray 开关：开启 → 常驻（启动时与设置页保存后各同步一次）；
+// 关闭 → 撤掉图标。例外：开关为关但主窗口仍藏在托盘里（外部改配置文件等场景）时保留
+// 图标，否则程序失去唯一入口——窗口可见（设置页里正常切换）才会走到销毁分支。
+function syncTrayWithConfig(): void {
+  if (getConfig().minimizeToTray) {
+    ensureTray();
+    return;
+  }
+  if (tray && (!mainWindow || mainWindow.isVisible())) {
+    tray.destroy();
+    tray = null;
+    logger.info('托盘图标已移除');
+  }
 }
 
 function createWindow(): void {
@@ -100,6 +117,7 @@ function createWindow(): void {
   });
 
   // 后台运行模式：minimizeToTray 开启且非真正退出时，关闭窗口改为隐藏到托盘，不退出进程。
+  // ensureTray 作兜底（正常路径下开关开启时托盘早已由 syncTrayWithConfig 常驻创建）。
   mainWindow.on('close', (event) => {
     if (quitting || !getConfig().minimizeToTray) return;
     event.preventDefault();
@@ -165,6 +183,11 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+
+  // 后台运行开启时托盘常驻：启动即建图标，修复「运行中托盘不可见、关窗后才出现」。
+  // 之后设置页每次保存配置（含开关切换）都经 onConfigSaved 重新同步托盘增删。
+  syncTrayWithConfig();
+  onConfigSaved(syncTrayWithConfig);
 
   // 启动全局兜底命令探测（无会话绑定）：结果写入 registry.globalFallback，作为重启后旧会话的命令兜底。
   // fire-and-forget；完成时对已打开且无 per-session 快照的会话回填。CLI 缺失/失败均不阻塞启动。

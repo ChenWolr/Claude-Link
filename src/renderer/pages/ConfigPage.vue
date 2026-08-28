@@ -300,7 +300,7 @@ function handlePermissionModeChange(e: Event) {
               </label>
               <label class="field field--toggle">
                 <span class="field-label">后台运行</span>
-                <span class="field-desc">关闭窗口时最小化到托盘，右键托盘「退出」才结束程序。</span>
+                <span class="field-desc">开启后托盘图标常驻右下角；关闭窗口最小化到托盘，右键托盘「退出」才结束程序。</span>
                 <input v-model="store.config.minimizeToTray" type="checkbox" />
               </label>
             </div>
