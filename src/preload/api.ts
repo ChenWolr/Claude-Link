@@ -7,7 +7,7 @@ import type { AppConfig, ModelInfo, DetectedClaudeConfig, ProviderLibrarySnapsho
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueState } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
-import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
@@ -94,6 +94,8 @@ export interface ClaudeLinkAPI {
   getSessionCommands: (sessionId: string) => Promise<SessionCommandSnapshot>;
   onCommandChanged: (callback: (payload: CommandChangedPayload) => void) => () => void;
   removeCommandListener: () => void;
+  // D4：全局兜底快照热刷新广播（暂态会话命令菜单的实时更新通道）。
+  onGlobalCommandsChanged: (callback: (payload: CommandGlobalChangedPayload) => void) => () => void;
   // Task 3 Step 5：原生 settings 诊断摘要（脱敏，只回来源/CLAUDE.md 候选/生效键名）。
   getNativeSettingsDiagnostic: (cwd: string) => Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>;
   // Task 8：命令来源 provenance 诊断（origin/availability 计数 + unknown/hidden 命令名，脱敏派生视图）。
@@ -219,6 +221,11 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.COMMANDS_CHANGED, listener);
     },
     removeCommandListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.COMMANDS_CHANGED),
+    onGlobalCommandsChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: CommandGlobalChangedPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, listener);
+    },
     getNativeSettingsDiagnostic: (cwd) =>
       ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, cwd) as Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>,
     getCommandDiagnostics: (sessionId) =>
