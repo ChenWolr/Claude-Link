@@ -20,6 +20,7 @@ import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } fr
 import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';import { useConfigStore } from './config-store';
 import { useClaudePlanStore } from './claude-plan-store';
 import { useCommandStore } from './command-store';
+import { useChatDraftStore } from './chat-draft-store';
 
 // C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
 export interface BackgroundTask {
@@ -130,6 +131,9 @@ export const useSessionStore = defineStore('session', {
     // 当前搜索词，供 UI 同步空态判断。
     searchQuery: '' as string,
     activeSession: null as Session | null,
+    // 暂态会话单例持有者（B3/B5）：切到已有会话后暂态不再是 activeSession，但对象仍在此存活；
+    // 再点「新会话」回到同一对象（同 id → chat-draft-store 草稿天然找回）。物化成功即清空（B6）。
+    transientDraft: null as Session | null,
     messages: [] as Message[],
     streamingContent: '',
     streamingThinking: '',
@@ -292,12 +296,91 @@ export const useSessionStore = defineStore('session', {
       this.searchResults = null;
       this.searchQuery = '';
     },
-    async createSession(name: string) {
+    // —— 暂态会话（新会话延迟持久化）——
+    // 点击「新会话」不再落库：构造 renderer-only 暂态对象占据 activeSession，首条消息发送时经
+    // materializeActiveTransient 物化为同 id 的 DB 行。狂点新会话只回到同一暂态（单例），
+    // 侧栏不出现任何条目；文字/附件草稿按 id 存于 chat-draft-store，天然跨视图/跨会话切换存活。
+    startTransientSession() {
+      if (this.activeSession?.transient) return; // 单例：当前已在暂态则原地复用（草稿与选择全保留）
+      // 离开的是持久会话：先保存流式快照（与 switchSession 同构），否则下面的瞬态清空会让
+      // 该会话切换前已流出的正文/思考永久丢失（后台事件从零累积，直到回合结束落库才自愈）。
+      const oldId = this.activeSession?.id;
+      if (oldId) {
+        this.sessionStreams[oldId] = {
+          content: this.streamingContent,
+          thinking: this.streamingThinking,
+          tool: this.streamingTool,
+        };
+      }
+      if (this.transientDraft) {
+        // B5：切到已有会话后暂态在后台存活——回到同一对象（同 id，文字/附件草稿按 id 存于
+        // chat-draft-store 天然找回；暂态期间选定的 override/工作空间就在对象上）。
+        this.activeSession = this.transientDraft;
+      } else {
+        const now = new Date().toISOString();
+        this.transientDraft = {
+          id: crypto.randomUUID(),
+          name: '新会话',
+          cliSessionId: null,
+          model: '',
+          providerOverride: null,
+          modelOverride: null,
+          workingDir: null,
+          permissionMode: null,
+          maxTurns: 200,
+          thinkingLevel: null,
+          createdAt: now,
+          updatedAt: now,
+          lastContextTokens: null,
+          lastContextUpdatedAt: null,
+          lastContextWindow: null,
+          lastContextUsed: null,
+          lastContextUsedCapacity: null,
+          lastContextUsedAt: null,
+          transient: true,
+        };
+        this.activeSession = this.transientDraft;
+      }
+      // 与 switchSession 同构的瞬态清理（暂态无历史可拉；不 commandStore.load——
+      // COMMANDS_GET 对无 DB 行会话抛错，暂态期间斜杠菜单为空，手输命令仍可用（B10）。
+      this.streamingContent = '';
+      this.streamingThinking = '';
+      this.streamingTool = '';
+      this.error = null;
+      this.messages = [];
+      this.turnStartIndex = 0;
+      this.compactedJustNow = false;
+      this.lastCompactionSummary = null;
+      this.toolProgress = {};
+      this.backgroundTasks = {};
+      this.compacting = false;
+      this.thinkingTokens = null;
+      this.contextLastWindow = null;
+      this.canonicalContext = null;
+    },
+    /** 物化当前暂态会话：沿用同一 id 建 DB 行（含暂态期间选定的 override/工作空间/附件绑定）。 */
+    async materializeActiveTransient(): Promise<Session | null> {
+      const transient = this.activeSession;
+      if (!transient?.transient) return this.activeSession;
       try {
-        const session = await window.claudeLink.createSession(name);
+        const draftIds = (useChatDraftStore().getAttachments(transient.id) ?? []).map((a) => a.id);
+        const session = await window.claudeLink.createSession(`会话 ${this.sessions.length + 1}`, {
+          id: transient.id,
+          workingDir: transient.workingDir,
+          providerOverride: transient.providerOverride ?? undefined,
+          modelOverride: transient.modelOverride ?? undefined,
+          // F-1：权限档/思考强度同样随物化落库（null=跟随默认 → undefined 省字段，建行默认即 NULL）。
+          permissionMode: transient.permissionMode ?? undefined,
+          thinkingLevel: transient.thinkingLevel ?? undefined,
+          bindTransientAttachmentIds: draftIds,
+        });
         this.sessions.unshift(session);
+        // 物化成功：单例暂态退场（下次「新会话」= 全新空白暂态，B6）。
+        this.transientDraft = null;
         // Task 5：新会话创建后拉取命令快照初始态（loading）；主进程 probe 经 COMMANDS_CHANGED 推完整列表。
         void useCommandStore().load(session.id);
+        // await 期间用户可能已切走：只有仍在本会话时才替换 activeSession（物化结果无论如何都已进列表）。
+        if (this.activeSession?.id === session.id) this.activeSession = session;
         return session;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '创建会话失败';
@@ -463,6 +546,12 @@ export const useSessionStore = defineStore('session', {
     },
     async updateActiveSessionModelOverride(modelOverride: string | null) {
       if (!this.activeSession) return;
+      // 暂态会话：尚未落库，先写内存；物化时随 SessionCreateSpec 一并落库。
+      // 原位变更（不 spread 换对象）：保持与 transientDraft 单例同一引用，切走再回来不丢选择。
+      if (this.activeSession.transient) {
+        this.activeSession.modelOverride = modelOverride?.trim() || null;
+        return;
+      }
       try {
         const normalized = modelOverride?.trim() || null;
         const updated = await window.claudeLink.updateModelOverride(this.activeSession.id, normalized);
@@ -478,6 +567,12 @@ export const useSessionStore = defineStore('session', {
     // 切换保留会话历史，从下一条消息起生效（每条消息 = 全新 query + resume，天然成立）。
     async setActiveSessionProviderModel(providerId: string, modelId: string) {
       if (!this.activeSession) return;
+      // 暂态会话：尚未落库，先写内存；物化时随 SessionCreateSpec 一并落库（原位变更保单例引用）。
+      if (this.activeSession.transient) {
+        this.activeSession.providerOverride = providerId;
+        this.activeSession.modelOverride = modelId;
+        return;
+      }
       try {
         const updated = await window.claudeLink.updateSession(this.activeSession.id, {
           providerOverride: providerId,
@@ -494,6 +589,12 @@ export const useSessionStore = defineStore('session', {
     // 会话级工作空间：写入 session.workingDir，spawn 时生效；同时记入最近历史便于复用。
     async setActiveSessionWorkingDir(dir: string | null) {
       if (!this.activeSession) return;
+      // 暂态会话：先写内存（原位变更保单例引用），物化时随 SessionCreateSpec 一并落库；目录照记历史。
+      if (this.activeSession.transient) {
+        this.activeSession.workingDir = dir;
+        if (dir) this.recentWorkspaces = await window.claudeLink.addRecentWorkspace(dir);
+        return;
+      }
       try {
         const updated = await window.claudeLink.updateSession(this.activeSession.id, { workingDir: dir });
         if (updated) {
@@ -509,6 +610,10 @@ export const useSessionStore = defineStore('session', {
     // spawn 时经 resolveEffectivePermissionMode 回落为实际档后经 --permission-mode 生效。
     async setActiveSessionPermissionMode(mode: Session['permissionMode']) {
       if (!this.activeSession) return;
+      if (this.activeSession.transient) {
+        this.activeSession.permissionMode = mode;
+        return;
+      }
       try {
         const updated = await window.claudeLink.updateSession(this.activeSession.id, { permissionMode: mode });
         if (updated) {
@@ -531,6 +636,10 @@ export const useSessionStore = defineStore('session', {
     // 与 setActiveSessionPermissionMode 同构（通用 updateSession 通道）。
     async setActiveSessionThinkingLevel(level: ThinkingLevel | null) {
       if (!this.activeSession) return;
+      if (this.activeSession.transient) {
+        this.activeSession.thinkingLevel = level;
+        return;
+      }
       try {
         const updated = await window.claudeLink.updateSession(this.activeSession.id, { thinkingLevel: level });
         if (updated) {
@@ -792,6 +901,7 @@ export const useSessionStore = defineStore('session', {
     // 不重新注册监听（监听已在 App.vue 全局注册），只刷新当前会话数据。
     async refreshActiveSession() {
       if (!this.activeSession) return;
+      if (this.activeSession.transient) return;
       try {
         this.messages = await window.claudeLink.getSessionMessages(this.activeSession.id);
       } catch {
@@ -803,6 +913,10 @@ export const useSessionStore = defineStore('session', {
       if (!this.activeSession) return;
       const trimmed = name.trim();
       if (!trimmed) return;
+      if (this.activeSession.transient) {
+        this.activeSession.name = trimmed;
+        return;
+      }
       try {
         const updated = await window.claudeLink.updateSession(this.activeSession.id, { name: trimmed });
         if (updated) {

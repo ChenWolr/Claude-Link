@@ -52,20 +52,27 @@ function toSession(row: SessionRow): Session {
   };
 }
 
-export function createSession(name: string, model: string, workingDir: string | null = null): Session {
+export function createSession(
+  name: string,
+  model: string,
+  workingDir: string | null = null,
+  id?: string,
+): Session {
   const db = getConnection();
-  const id = uuidv4();
+  // id 可由调用方指定：暂态会话物化沿用 renderer 生成的 uuid，让草稿 key（chat-draft-store
+  // 按 sessionId 索引）与附件 id 无需迁移。缺省时行为与旧版完全一致（自生成 uuid）。
+  const sessionId = id ?? uuidv4();
 
   // permission_mode 显式写 NULL（= 跟随全局默认 AppConfig.permissionMode），
   // 不落 'default'——否则会钉死新会话为默认档，全局默认权限永远不生效。
   db.prepare(
     `INSERT INTO sessions (id, name, model, working_dir, permission_mode)
      VALUES (@id, @name, @model, @workingDir, NULL)`,
-  ).run({ id, name, model, workingDir });
+  ).run({ id: sessionId, name, model, workingDir });
 
-  const session = getSession(id);
+  const session = getSession(sessionId);
   if (!session) {
-    throw new Error(`Failed to create session ${id}`);
+    throw new Error(`Failed to create session ${sessionId}`);
   }
 
   return session;

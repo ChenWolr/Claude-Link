@@ -1993,7 +1993,7 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
   check('preload 暴露 setRunningPermissionMode',
     preloadApi.includes('setRunningPermissionMode: (sessionId, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE'));
   check('session-store setActiveSessionPermissionMode 接运行中切换 + catch 静默回落',
-    /setActiveSessionPermissionMode[\s\S]{0,700}?setRunningPermissionMode\(this\.activeSession\.id, mode\)/.test(sessionStore));
+    /setActiveSessionPermissionMode[\s\S]{0,900}?setRunningPermissionMode\(this\.activeSession\.id, mode\)/.test(sessionStore));
   check('task-store 中断收口 task_completed(interrupted) 补 markStopped（sending 不卡死）',
     /task_completed[\s\S]{0,500}?interrupted[\s\S]{0,200}?markStopped\(payload\.sessionId\)/.test(taskStore));
 

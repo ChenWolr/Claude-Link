@@ -861,12 +861,28 @@ function createChat() {
     const text = payload.text.trim();
     if (!text && payload.attachmentIds.length === 0) return false;
 
+    // 新会话延迟持久化：暂态会话首条消息发送前先物化（同 id 建 DB 行 + 绑定暂态附件 + 落库
+    // 暂态期间的 override/工作空间选择），CHAT_SEND 的 getSession 才能命中。
+    // 物化失败：草稿保留（调用方只在 ok 时清草稿），置错误横幅返回 false。
+    if (store.activeSession?.transient) {
+      const materialized = await store.materializeActiveTransient();
+      if (!materialized) {
+        error.value = store.error ?? '会话初始化失败';
+        return false;
+      }
+    }
     // 新回合开始：作废上一回合 abort 残留的超时兜底，避免它到点把本次 sending 错误复位。
     clearAbortTimer(sessionId);
     resetTurnCache();
     error.value = null;
     // 根因修复：markRunning 加入 runningSessions，sending getter 自动变 true。
     store.markRunning(sessionId);
+
+    // 物化 await（IPC 往返）期间用户可能已切到别的会话：乐观消息与 turnStartIndex 归属
+    // activeSession 当前值（persistMessage 如此），错插会给别的会话留幽灵气泡/污染回合边界；
+    // 切走时跳过两者，发送本体经上面捕获的 sessionId 照常进行，切回由 switchSession 从 DB 重载呈现。
+    // （捕获放在同步块之后语义等价——clearAbortTimer 到此处无 await，切换不可能发生在其间。）
+    const stillOnSender = store.activeSession?.id === sessionId;
 
     // 草稿摘要用于乐观渲染附件卡片；仅取当前会话草稿里属于本 payload 的附件。
     // 同步段（无 await）内 activeSession 恒为本次发送的会话，取草稿归属安全。
@@ -876,17 +892,19 @@ function createChat() {
         )
       : [];
 
-    persistMessage({
-      id: payload.clientMessageId,
-      role: 'user',
-      eventType: 'message',
-      content: text,
-      processKind: null,
-      attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
-    });
-    // 力度② turn 边界：本回合 assistant 消息从此索引开始。MessageList 据此在发送中
-    // （且对应流式非空）隐藏本回合已落库的 text/thinking，避免与流式块重复显示。
-    store.turnStartIndex = store.messages.length;
+    if (stillOnSender) {
+      persistMessage({
+        id: payload.clientMessageId,
+        role: 'user',
+        eventType: 'message',
+        content: text,
+        processKind: null,
+        attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
+      });
+      // 力度② turn 边界：本回合 assistant 消息从此索引开始。MessageList 据此在发送中
+      // （且对应流式非空）隐藏本回合已落库的 text/thinking，避免与流式块重复显示。
+      store.turnStartIndex = store.messages.length;
+    }
 
     try {
       await window.claudeLink.sendMessage(sessionId, payload);

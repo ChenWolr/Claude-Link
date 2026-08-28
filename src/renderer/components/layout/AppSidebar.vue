@@ -84,12 +84,10 @@ onMounted(() => {
   store.loadSessions();
 });
 
-async function handleNewSession() {
-  const session = await store.createSession(`会话 ${store.sessions.length + 1}`);
-  if (session) {
-    await store.switchSession(session);
-    router.push('/');
-  }
+function handleNewSession() {
+  // 新会话延迟持久化：不落库，进入/回到暂态草稿；已有暂态则原地回到它（内容保留）。
+  store.startTransientSession();
+  router.push('/');
 }
 
 async function openSession(session: { id: string }) {
@@ -251,7 +249,7 @@ async function confirmDelete(session: { id: string; name: string }) {
     </div>
 
     <div class="sidebar__footer">
-      <button class="new-button" type="button" @click="handleNewSession">+ 新会话</button>
+      <button class="new-button" type="button" :class="{ 'new-button--active': store.activeSession?.transient }" @click="handleNewSession">+ 新会话</button>
       <div class="sidebar__footer-links">
         <RouterLink class="settings-link" to="/config">配置</RouterLink>
       </div>
@@ -682,6 +680,11 @@ async function confirmDelete(session: { id: string; name: string }) {
   box-shadow: var(--ring-light-accent);
   color: var(--color-on-accent);
   font-weight: 700;
+}
+
+/* 暂态会话激活态（B14）：暂态不进列表、无高亮项，用按钮描边标识「正在暂态草稿」。 */
+.new-button--active {
+  box-shadow: var(--ring-light-accent), 0 0 0 2px color-mix(in srgb, var(--color-accent) 55%, transparent);
 }
 
 .settings-link {

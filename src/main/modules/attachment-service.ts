@@ -21,18 +21,23 @@ import {
 import { randomUUID } from 'node:crypto';
 import * as attachmentRepo from '../database/repositories/attachment-repo';
 import type {
+  AttachmentKind,
   AttachmentPreviewResponse,
   AttachmentRecord,
   AttachmentSummary,
+  StoredAttachmentFile,
 } from '../../shared/types/attachment';
 import { logger } from '../utils/logger';
 
-/**
- * 暂存草稿附件：字节级校验 → 图片尺寸校验 → 原子写文件 → 建 draft 记录。
- * 任一步失败都删除已写的临时文件。返回的摘要不含绝对路径/哈希/storageKey。
- * id 由调用方（IPC handler）提供，与 repo 记录、storageKey 共用。
- */
-export async function stageAttachment(input: StagedAttachmentInput): Promise<AttachmentSummary> {
+/** 校验 + 原子写文件（不建 DB 行）。正式暂存与暂态暂存两条路径共用，保证校验语义不分裂。 */
+async function validateAndStoreAttachment(input: StagedAttachmentInput): Promise<{
+  kind: AttachmentKind;
+  filename: string;
+  mimeType: string;
+  width?: number;
+  height?: number;
+  stored: StoredAttachmentFile;
+}> {
   const policy = validateAttachmentBytes({
     filename: input.filename,
     mimeType: input.mimeType ?? '',
@@ -57,24 +62,104 @@ export async function stageAttachment(input: StagedAttachmentInput): Promise<Att
   const safeFilename = sanitizeAttachmentFilename(input.filename);
   const detectedMime = detectDirectImageFormat(input.bytes);
   const mimeType = detectedMime ?? (input.mimeType?.trim() || 'application/octet-stream');
+  return { kind: policy.kind, filename: safeFilename, mimeType, width, height, stored };
+}
 
+/**
+ * 暂存草稿附件：字节级校验 → 图片尺寸校验 → 原子写文件 → 建 draft 记录。
+ * 任一步失败都删除已写的临时文件。返回的摘要不含绝对路径/哈希/storageKey。
+ * id 由调用方（IPC handler）提供，与 repo 记录、storageKey 共用。
+ */
+export async function stageAttachment(input: StagedAttachmentInput): Promise<AttachmentSummary> {
+  const info = await validateAndStoreAttachment(input);
   try {
     return attachmentRepo.createAttachment({
       id: input.id,
       sessionId: input.sessionId,
-      filename: safeFilename,
-      mimeType,
-      kind: policy.kind,
-      sizeBytes: stored.sizeBytes,
-      sha256: stored.sha256,
-      storageKey: stored.storageKey,
-      width,
-      height,
+      filename: info.filename,
+      mimeType: info.mimeType,
+      kind: info.kind,
+      sizeBytes: info.stored.sizeBytes,
+      sha256: info.stored.sha256,
+      storageKey: info.stored.storageKey,
+      width: info.width,
+      height: info.height,
       status: 'draft',
     });
   } catch (error) {
-    await removeAttachmentFile(stored.storageKey).catch(() => {});
+    await removeAttachmentFile(info.stored.storageKey).catch(() => {});
     throw error;
+  }
+}
+
+// —— 暂态附件（无会话行暂存）——
+// 「新会话」延迟持久化：暂态会话尚无 sessions 行，attachments 表外键（session_id REFERENCES
+// sessions）不允许建行。这里只写物理文件 + 内存 Map；物化（SESSION_CREATE 带
+// bindTransientAttachmentIds）时经 bindTransientAttachmentsToSession 转正为 draft 行。
+// 崩溃/放弃的暂态文件没有 DB 记录 → 下次启动 cleanupOrphanAttachments 自动清扫。
+const transientAttachments = new Map<string, AttachmentRecord>();
+
+/** 暂态暂存：校验+落盘与正式路径完全一致，但记录进内存 Map 而非 DB。 */
+export async function stageTransientAttachment(input: StagedAttachmentInput): Promise<AttachmentSummary> {
+  const info = await validateAndStoreAttachment(input);
+  const record: AttachmentRecord = {
+    id: input.id,
+    sessionId: input.sessionId,
+    kind: info.kind,
+    filename: info.filename,
+    mimeType: info.mimeType,
+    sizeBytes: info.stored.sizeBytes,
+    width: info.width,
+    height: info.height,
+    previewAvailable: true,
+    status: 'draft',
+    sha256: info.stored.sha256,
+    storageKey: info.stored.storageKey,
+  };
+  transientAttachments.set(input.id, record);
+  // 摘要不携带内部字段（sha256/storageKey 不出主进程）。
+  const { sha256: _sha, storageKey: _key, ...summary } = record;
+  return summary;
+}
+
+/** 按 id + 会话归属取暂态记录（归属校验与 DB 路径同构）。 */
+export function getTransientAttachment(id: string, sessionId: string): AttachmentRecord | null {
+  const record = transientAttachments.get(id);
+  return record && record.sessionId === sessionId ? record : null;
+}
+
+/** 移除暂态附件：删映射 + 删物理文件（失败仅记日志，交 orphan cleanup 兜底）。 */
+export async function removeTransientAttachment(sessionId: string, id: string): Promise<void> {
+  const record = getTransientAttachment(id, sessionId);
+  if (!record) return;
+  transientAttachments.delete(id);
+  await removeAttachmentFile(record.storageKey).catch((e) => logger.error('removeTransientAttachment file failed', e));
+}
+
+/**
+ * 物化转正：把暂态附件绑定到刚建好的会话行（status='draft'，随后走正常发送链路）。
+ * storageKey 保留暂存时的原值（key 由暂态 sessionId 段构成，仅是路径字符串，不影响
+ * 定位/删除/预览——后续会话删除按 DB 行里的 key 清文件，同样命中）。不在 Map 里的 id
+ * 静默跳过（已被用户移除或本就不存在）。
+ */
+export function bindTransientAttachmentsToSession(sessionId: string, ids: string[]): void {
+  for (const id of ids) {
+    const record = transientAttachments.get(id);
+    if (!record) continue;
+    transientAttachments.delete(id);
+    attachmentRepo.createAttachment({
+      id: record.id,
+      sessionId,
+      filename: record.filename,
+      mimeType: record.mimeType,
+      kind: record.kind,
+      sizeBytes: record.sizeBytes,
+      sha256: record.sha256,
+      storageKey: record.storageKey,
+      width: record.width,
+      height: record.height,
+      status: 'draft',
+    });
   }
 }
 
@@ -112,7 +197,11 @@ export function assertAttachmentsReadyForSend(
 /** 移除草稿附件：校验会话归属与 draft 状态后，先删 DB 记录再删物理文件。 */
 export async function removeDraftAttachment(sessionId: string, attachmentId: string): Promise<void> {
   const record = attachmentRepo.getAttachment(attachmentId);
-  if (!record) return;
+  if (!record) {
+    // 暂态附件（无 DB 行）：走内存映射 + 物理文件删除。
+    await removeTransientAttachment(sessionId, attachmentId);
+    return;
+  }
   if (record.sessionId !== sessionId) throw new AttachmentInputError('附件不属于当前会话');
   if (record.status !== 'draft') throw new AttachmentInputError('仅可移除草稿状态的附件');
   attachmentRepo.deleteAttachment(attachmentId);
@@ -143,7 +232,9 @@ export async function getAttachmentPreview(request: {
   attachmentId: string;
   thumbnail: boolean;
 }): Promise<AttachmentPreviewResponse> {
-  const record = attachmentRepo.getAttachment(request.attachmentId);
+  const record =
+    attachmentRepo.getAttachment(request.attachmentId) ??
+    getTransientAttachment(request.attachmentId, request.sessionId);
   if (!record) throw new AttachmentInputError('附件不存在');
   if (record.sessionId !== request.sessionId) throw new AttachmentInputError('附件不属于当前会话');
   return readStoredAttachmentPreview(record, request.thumbnail);

@@ -47,6 +47,8 @@ import { registerExportImageHandlers } from './modules/export-image-manager';
 import { detectDirectImageFormat, validateChatSendPayloadShape } from './modules/attachment-policy';
 import {
   stageAttachment,
+  stageTransientAttachment,
+  bindTransientAttachmentsToSession,
   getAttachmentPreview,
   removeDraftAttachment,
   assertAttachmentsReadyForSend,
@@ -55,7 +57,7 @@ import {
 } from './modules/attachment-service';
 import { prepareAttachmentPrompt } from './modules/attachment-prompt-builder';
 import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
-import type { StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult } from '../shared/types/ipc';
+import type { StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, SessionCreateSpec } from '../shared/types/ipc';
 
 let mainWindow: BrowserWindow;
 
@@ -170,9 +172,54 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // Sessions
   ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => sessionRepo.listSessions());
-  ipcMain.handle(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string) => {
+  ipcMain.handle(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string, spec?: SessionCreateSpec) => {
     const config = getConfig();
-    const session = sessionRepo.createSession(name, resolveDefaultModel(config.advancedJson));
+    // 暂态物化：renderer 预生成的 id 直接沿用（草稿/附件/乐观消息 key 不迁移）。
+    // spec 为空时行为与旧版完全一致（cdp-smoke-test 等直接调用方不受影响）。
+    const specId = typeof spec?.id === 'string' && spec.id.trim() ? spec.id : undefined;
+    if (specId && sessionRepo.getSession(specId)) throw new Error('会话 id 已存在');
+    let session = sessionRepo.createSession(
+      name,
+      resolveDefaultModel(config.advancedJson),
+      spec?.workingDir ?? null,
+      specId,
+    );
+    // 暂态期间选定的供应商×模型 override 在建行时一并落库（白名单：仅接受 string，
+    // 与 SESSION_UPDATE 同语义）；两者齐备时补记全局「最近使用」（与 SESSION_UPDATE 对齐）。
+    const providerOverride = typeof spec?.providerOverride === 'string' ? spec.providerOverride : undefined;
+    const modelOverride = typeof spec?.modelOverride === 'string' ? spec.modelOverride : undefined;
+    // 权限档/思考强度同随物化落库（F-1）：null = 跟随全局默认（合法，与建行默认一致），
+    // 非 null 非法值按 SESSION_UPDATE 同款白名单丢弃并记日志，不信任 renderer 传值。
+    let specPermissionMode = spec?.permissionMode;
+    if (specPermissionMode !== undefined && specPermissionMode !== null && !isValidPermissionMode(specPermissionMode)) {
+      logger.warn(`[permission] invalid spec.permissionMode, discarding: ${String(specPermissionMode)}`);
+      specPermissionMode = undefined;
+    }
+    let specThinkingLevel = spec?.thinkingLevel;
+    if (specThinkingLevel !== undefined && specThinkingLevel !== null && !isValidThinkingLevel(specThinkingLevel)) {
+      logger.warn(`[thinking] invalid spec.thinkingLevel, discarding: ${String(specThinkingLevel)}`);
+      specThinkingLevel = undefined;
+    }
+    if (
+      providerOverride !== undefined ||
+      modelOverride !== undefined ||
+      specPermissionMode !== undefined ||
+      specThinkingLevel !== undefined
+    ) {
+      const patch: Partial<Pick<Session, 'providerOverride' | 'modelOverride' | 'permissionMode' | 'thinkingLevel'>> = {};
+      if (providerOverride !== undefined) patch.providerOverride = providerOverride;
+      if (modelOverride !== undefined) patch.modelOverride = modelOverride;
+      if (specPermissionMode !== undefined) patch.permissionMode = specPermissionMode;
+      if (specThinkingLevel !== undefined) patch.thinkingLevel = specThinkingLevel;
+      session = sessionRepo.updateSession(session.id, patch) ?? session;
+      if (providerOverride !== undefined && modelOverride !== undefined) {
+        recordLastUsedProviderModel(providerOverride, modelOverride);
+      }
+    }
+    // 暂态附件转正：物化建行后外键已满足，绑定为 draft 记录供 CHAT_SEND 校验/升格。
+    if (spec?.bindTransientAttachmentIds?.length) {
+      bindTransientAttachmentsToSession(session.id, spec.bindTransientAttachmentIds);
+    }
     // Task 4/5：新会话创建后立即后台命令发现（control-only probe）。fire-and-forget——失败/无 exe 走
     // degraded，不阻塞会话创建返回；结果经 COMMANDS_CHANGED 推前端。
     // F1 修复：probe 用 activeSessions 做存活守卫，创建后必须先登记（markSessionActive），否则
@@ -549,8 +596,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 附件 IPC：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
   // 文件读取与校验全部在主进程；renderer 只拿不透明附件 ID 与受控预览 bytes。
   ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PICK, async (_event, sessionId: string): Promise<PickAttachmentsResult> => {
-    const session = sessionRepo.getSession(sessionId);
-    if (!session) throw new Error('会话不存在');
+    // 暂态会话（无 DB 行）：附件走无行暂存（内存 Map + 物理文件），物化时经
+    // bindTransientAttachmentIds 转正；持久会话走原 stageAttachment 建 draft 行。
+    const persisted = sessionRepo.getSession(sessionId);
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openFile', 'multiSelections'],
       title: '选择附件（图片 / 文档 / 文件）',
@@ -566,14 +614,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         const bytes = new Uint8Array(buf);
         // 据魔数识别真实图片格式，避免靠扩展名把伪装图片当 image 直传。
         const detected = detectDirectImageFormat(bytes);
-        const summary = await stageAttachment({
-          id: randomUUID(),
-          sessionId,
-          filename,
-          mimeType: detected ?? '',
-          bytes,
-        });
-        attachments.push(summary);
+        const staged = persisted
+          ? await stageAttachment({ id: randomUUID(), sessionId, filename, mimeType: detected ?? '', bytes })
+          : await stageTransientAttachment({ id: randomUUID(), sessionId, filename, mimeType: detected ?? '', bytes });
+        attachments.push(staged);
       } catch (e) {
         // 逐项收集失败：部分成功时 UI 仍展示成功项 + 集中提示失败项（错误文案来自业务校验，不含内部路径）。
         errors.push({ filename, message: e instanceof Error ? e.message : String(e) });
@@ -593,11 +637,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       ) {
         throw new Error('附件暂存参数无效');
       }
-      const session = sessionRepo.getSession(input.sessionId);
-      if (!session) throw new Error('会话不存在');
+      // 暂态会话（无 DB 行）走无行暂存；持久会话走原 stageAttachment 建 draft 行。
+      const persisted = sessionRepo.getSession(input.sessionId);
       // 主进程重新校验：不信任 renderer 传来的大小/MIME，由 policy 二次裁定。
       const detected = detectDirectImageFormat(input.bytes);
-      return stageAttachment({
+      const stage = persisted ? stageAttachment : stageTransientAttachment;
+      return stage({
         id: randomUUID(),
         sessionId: input.sessionId,
         filename: input.filename,

@@ -752,6 +752,51 @@ check('session-store create/delete 同步 command-store', () => {
   assert.ok(/useCommandStore\(\)\.clear\(id\)/.test(src), 'deleteSession 应 commandStore.clear');
 });
 
+check('新会话延迟持久化：暂态会话链路', () => {
+  const sessionStore = readFileSync(path.join('src', 'renderer', 'stores', 'session-store.ts'), 'utf8');
+  const useChat = readFileSync(path.join('src', 'renderer', 'composables', 'use-chat.ts'), 'utf8');
+  const chatPage = readFileSync(path.join('src', 'renderer', 'pages', 'ChatPage.vue'), 'utf8');
+  const appSidebar = readFileSync(path.join('src', 'renderer', 'components', 'layout', 'AppSidebar.vue'), 'utf8');
+  const sessionsPage = readFileSync(path.join('src', 'renderer', 'pages', 'SessionsPage.vue'), 'utf8');
+  const ipcHandlers = readFileSync(path.join('src', 'main', 'ipc-handlers.ts'), 'utf8');
+  const attService = readFileSync(path.join('src', 'main', 'modules', 'attachment-service.ts'), 'utf8');
+  const sessionType = readFileSync(path.join('src', 'shared', 'types', 'session.ts'), 'utf8');
+
+  assert.ok(/transient\?: boolean/.test(sessionType), 'Session 应有 renderer-only transient 标记');
+  assert.ok(/startTransientSession\(\)/.test(sessionStore), 'session-store 应有 startTransientSession');
+  assert.ok(/if \(this\.activeSession\?\.transient\) return;/.test(sessionStore), '暂态应单例复用（再点新会话不新建）');
+  assert.ok(/async materializeActiveTransient/.test(sessionStore), '应有 materializeActiveTransient');
+  assert.ok(sessionStore.includes('bindTransientAttachmentIds'), '物化应带暂态附件绑定');
+  assert.ok(!/async createSession\(name/.test(sessionStore), '旧的点击即落库 createSession action 应删除');
+  const guardCount = (sessionStore.match(/if \(this\.activeSession\.transient\)/g) || []).length;
+  assert.ok(guardCount >= 6, `会话级 setter 应有暂态内存分支（实际 ${guardCount} 处，含 rename）`);
+  assert.ok(useChat.includes('store.activeSession?.transient'), 'sendMessage 应有暂态物化守卫');
+  assert.ok(useChat.includes('materializeActiveTransient()'), '守卫应调用 materializeActiveTransient');
+  assert.ok(chatPage.includes('store.startTransientSession()'), 'ChatPage 新会话入口应走暂态');
+  assert.ok(appSidebar.includes('store.startTransientSession()'), '侧栏新会话入口应走暂态');
+  assert.ok(sessionsPage.includes('store.startTransientSession()'), '会话管理页新建入口应走暂态');
+  assert.ok(ipcHandlers.includes('bindTransientAttachmentsToSession'), 'SESSION_CREATE 应绑定暂态附件');
+  assert.ok(ipcHandlers.includes('stageTransientAttachment'), '附件暂存 handler 应有无行分支');
+  assert.ok(attService.includes('transientAttachments = new Map'), 'attachment-service 应有暂态附件内存映射');
+  assert.ok(attService.includes('export function bindTransientAttachmentsToSession'), 'attachment-service 应提供绑定转正');
+  // 验收 review F-1/F-2/F-3 补丁契约。
+  const ipcTypes = readFileSync(path.join('src', 'shared', 'types', 'ipc.ts'), 'utf8');
+  const specStart = ipcTypes.indexOf('export interface SessionCreateSpec');
+  const specBlock = ipcTypes.slice(specStart, specStart + 700);
+  assert.ok(
+    /permissionMode\?:/.test(specBlock) && /thinkingLevel\?:/.test(specBlock),
+    'SessionCreateSpec 应含 permissionMode/thinkingLevel（F-1：暂态选择随物化落库）',
+  );
+  assert.ok(
+    /startTransientSession\(\) \{[\s\S]{0,450}?this\.sessionStreams\[oldId\]/.test(sessionStore),
+    'startTransientSession 应保存离开会话的流式快照（F-2：与 switchSession 同构）',
+  );
+  assert.ok(
+    /stillOnSender = store\.activeSession\?\.id === sessionId/.test(useChat),
+    'sendMessage 应有物化后切走守卫（F-3：防乐观消息错插其他会话）',
+  );
+});
+
 console.log('=== 11) Task 6 ChatInput 动态菜单契约（源码）===');
 
 check('ChatInput 不再依赖静态 SLASH_COMMANDS，改用 props.commands', () => {
