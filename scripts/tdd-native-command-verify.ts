@@ -1989,7 +1989,8 @@ void (async () => {
       triggerGlobalProbe: () => true,
       onConfigSaved: () => () => {},
       logger: { info: () => {}, warn: () => {} },
-    });    const r = commandSourceRoots(mkDeps('C:/u', 'C:/p'));
+    });
+    const r = commandSourceRoots(mkDeps('C:/u', 'C:/p'));
     assert.equal(r.allRoots.length, 4, '四个 watch 根');
     assert.deepEqual(r.userRoots, [path.join('C:/u', '.claude', 'commands'), path.join('C:/u', '.claude', 'skills')], 'userRoots 只含用户级两根（D5 指纹口径）');
     assert.ok(r.allRoots.includes(path.join('C:/p', '.claude', 'commands')), '项目级 commands 根在场');
@@ -2081,7 +2082,7 @@ void (async () => {
     const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=ipcMain\.handle)/);
     if (!m) throw new Error('COMMANDS_GET handler 未找到');
     assert.ok(m[0].includes('resolveCommandsGetResult'), '分流决策应走 shared 纯函数');
-    assert.ok(!m[0].includes('not found'), '暂态/未知会话不得再 throw（D1 根因）');
+    assert.ok(!/Session \$\{sessionId\} not found/.test(m[0]), '不得因会话不存在而 throw（D1：未知会话走只读分流，语义断言不误伤其它字符串）');
     assert.ok(m[0].includes('ensureGlobalCommandProbeFresh'), '只读分流应触发 D6 节流重试');
     assert.ok(m[0].includes('sessionRepo.getSession(sessionId)'), 'N6：DB 会话存在性校验保留');
     assert.ok(m[0].includes('markSessionActive(sessionId)'), 'N6：有 DB 行无快照的 active 登记保留');
@@ -2154,6 +2155,8 @@ void (async () => {
     assert.ok(w.includes('WATCHER_DEBOUNCE_MS'), '应定义去抖常量');
     assert.ok(w.includes('WATCHER_PROBE_MIN_INTERVAL_MS'), '应定义 10s 探测节流常量');
     assert.ok(w.includes('WATCHER_REMOUNT_MAX_CONSECUTIVE'), '应定义重挂限次常量');
+    assert.ok(w.includes('WATCHER_PENDING_ROOT_RETRY_MS'), '应定义待重挂根重试周期常量（发现2 盲区兜底）');
+    assert.ok(w.includes('pendingRoots'), '应登记挂载失败的待重挂根（发现2）');
     assert.ok(w.includes('onConfigSaved'), '应订阅 onConfigSaved');
     assert.ok(w.includes('recursive: true'), '应优先递归 watch');
     assert.ok(/triggerGlobalProbe\(\): boolean/.test(w), 'deps.triggerGlobalProbe 应返回 boolean（发现1 被吞信号）');
@@ -2221,6 +2224,42 @@ void (async () => {
       assert.equal(isCommandSourceWatcherRunning(), false);
     } finally {
       stopCommandSourceWatcher(); // 幂等兜底（含 swallowedRetryTimer 清理）
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  await asyncCheck('发现2 watcher 盲区闭合：目录先缺失（登记待重挂）→ 后创建 → 兜底重挂能触发探测', async () => {
+    const sleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms));
+    mkdirSync(ORIGIN_TMP_ROOT, { recursive: true });
+    const home = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-w-blind-'));
+    let calls = 0;
+    try {
+      // 故意不建 commands 目录：watcher 启动时该根挂载失败 → pendingRoots
+      startCommandSourceWatcher({
+        getUserHome: () => home,
+        getWorkingDirectory: () => null,
+        triggerGlobalProbe: () => {
+          calls += 1;
+          return true;
+        },
+        onConfigSaved: () => () => {},
+        pendingRetryMs: 500, // 注入短周期，测试不必等 30s
+        logger: { info: () => {}, warn: () => {} },
+      });
+      await sleep(900); // 基准指纹（缺失根贡献空集）
+      assert.equal(calls, 0, '基准不探测');
+      // 目录从无到有 + 写命令文件（此时无 watch、无事件——盲区场景本体）
+      const cmdsDir = path.join(home, '.claude', 'commands');
+      mkdirSync(cmdsDir, { recursive: true });
+      writeFileSync(path.join(cmdsDir, 'born-later.md'), 'x');
+      // 兜底重挂周期（500ms 注入）挂上后重算指纹 → 指纹变化 → 触发探测
+      const t0 = Date.now();
+      while (calls === 0 && Date.now() - t0 < 20000) await sleep(400);
+      assert.ok(calls >= 1, '目录后建应经待重挂兜底触发探测（盲区闭合）');
+      stopCommandSourceWatcher();
+      assert.equal(isCommandSourceWatcherRunning(), false);
+    } finally {
+      stopCommandSourceWatcher(); // 幂等兜底
       rmSync(home, { recursive: true, force: true });
     }
   });

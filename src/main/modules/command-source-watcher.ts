@@ -23,6 +23,8 @@ export const WATCHER_PROBE_MIN_INTERVAL_MS = 10_000;
 /** watcher error 自愈：延迟重挂间隔与连续限次（超过放弃，等下一次 onConfigSaved/重启）。 */
 export const WATCHER_REMOUNT_DELAY_MS = 5000;
 export const WATCHER_REMOUNT_MAX_CONSECUTIVE = 3;
+/** 待重挂根（挂载时目录尚不存在等）的兜底重试周期（review-v1 发现2：目录从无到有盲区）。 */
+export const WATCHER_PENDING_ROOT_RETRY_MS = 30_000;
 
 /**
  * 对每个根目录递归收集「文件」条目（path:mtimeMs:size），排序后 sha1。
@@ -76,6 +78,8 @@ export interface CommandSourceWatcherDeps {
   /** 配置保存订阅（onConfigSaved）：workingDirectory / advancedJson.env 变化 → 全量重挂。 */
   onConfigSaved(listener: () => void): () => void;
   logger: { info(message: string): void; warn(message: string): void };
+  /** 待重挂根的兜底重试周期（ms）；缺省 WATCHER_PENDING_ROOT_RETRY_MS。测试可注入更短周期。 */
+  pendingRetryMs?: number;
 }
 
 export interface CommandSourceRoots {
@@ -106,6 +110,10 @@ interface CommandSourceWatcherState {
   userFingerprint: string | undefined;
   debounceTimer: ReturnType<typeof setTimeout> | null;
   remountTimer: ReturnType<typeof setTimeout> | null;
+  /** 挂载失败待重挂的根（review-v1 发现2：目录从无到有盲区；低频兜底重试直至挂上）。 */
+  pendingRoots: Set<string>;
+  /** 待重挂低频重试循环（pendingRoots 非空时运行）。 */
+  pendingRetryTimer: ReturnType<typeof setInterval> | null;
   /** 被幂等锁吞后的延迟重试 timer（发现1；stop 时需一并清理）。 */
   swallowedRetryTimer: ReturnType<typeof setTimeout> | null;
   lastProbeStartedAt: number;
@@ -141,6 +149,8 @@ export function startCommandSourceWatcher(deps: CommandSourceWatcherDeps): void 
     userFingerprint: undefined,
     debounceTimer: null,
     remountTimer: null,
+    pendingRoots: new Set<string>(),
+    pendingRetryTimer: null,
     swallowedRetryTimer: null,
     lastProbeStartedAt: 0,
     probeQueued: false,
@@ -171,6 +181,10 @@ export function stopCommandSourceWatcher(): void {
   if (s.remountTimer) {
     clearTimeout(s.remountTimer);
     s.remountTimer = null;
+  }
+  if (s.pendingRetryTimer) {
+    clearInterval(s.pendingRetryTimer);
+    s.pendingRetryTimer = null;
   }
   if (s.swallowedRetryTimer) {
     clearTimeout(s.swallowedRetryTimer);
@@ -215,22 +229,30 @@ function mountRoot(root: string, deps: CommandSourceWatcherDeps): void {
   const s = state;
   if (!s || s.stopped) return;
   const onEvent = (): void => scheduleRefresh(deps);
-  try {
-    // 首选递归 watch（Windows/Linux 支持良好）。
-    const w = watch(root, { recursive: true }, onEvent);
+  // 挂载成功即从待重挂集合移除（mountAll/兜底重试共用同一登记口径）。
+  const mounted = (w: FSWatcher): void => {
     w.on('error', (err) => handleWatcherError(root, deps, err));
     s.watchers.push(w);
+    if (s.pendingRoots.delete(root) && s.pendingRoots.size === 0 && s.pendingRetryTimer) {
+      clearInterval(s.pendingRetryTimer);
+      s.pendingRetryTimer = null;
+    }
+  };
+  try {
+    // 首选递归 watch（Windows/Linux 支持良好）。
+    mounted(watch(root, { recursive: true }, onEvent));
     return;
   } catch {
     // 降级：平台不支持 recursive 时退化为「本目录非递归 + 每根一层子目录」
     // （§4.4 防御性写法；本产品当前主战场 win32，正常走不到）。
   }
   try {
-    const w = watch(root, onEvent);
-    w.on('error', (err) => handleWatcherError(root, deps, err));
-    s.watchers.push(w);
+    mounted(watch(root, onEvent));
   } catch {
-    // 目录不存在等：记录待重挂（onConfigSaved / 下次 mountAll 重试），不阻塞其它根。
+    // 目录不存在等（review-v1 发现2）：登记待重挂，由低频兜底重试（目录从无到有后挂上），
+    // 不阻塞其它根。stop/onConfigSaved 亦覆盖（onConfigSaved 走全量重挂）。
+    s.pendingRoots.add(root);
+    ensurePendingRetryLoop(deps);
     return;
   }
   let children: Dirent[];
@@ -249,6 +271,25 @@ function mountRoot(root: string, deps: CommandSourceWatcherDeps): void {
       // 单个子目录挂载失败不阻塞其它根。
     }
   }
+}
+
+/** 待重挂根的低频兜底重试：挂上后从 pending 移除并重算指纹（新目录已有命令文件 → 指纹变化 → 正常探测）。 */
+function ensurePendingRetryLoop(deps: CommandSourceWatcherDeps): void {
+  const s = state;
+  if (!s || s.stopped || s.pendingRetryTimer || s.pendingRoots.size === 0) return;
+  const intervalMs = Math.max(250, deps.pendingRetryMs ?? WATCHER_PENDING_ROOT_RETRY_MS);
+  s.pendingRetryTimer = setInterval(() => {
+    const cur = state;
+    if (!cur || cur.stopped) return;
+    const before = cur.pendingRoots.size;
+    for (const root of [...cur.pendingRoots]) {
+      mountRoot(root, deps);
+    }
+    // 有根在重试中挂上 → 目录状态已变（从无到有），重算指纹；无实质变化时该调用只更新基准不探测。
+    const after = state;
+    if (after && after.pendingRoots.size < before) void refreshFingerprints(deps);
+  }, intervalMs);
+  if (s.pendingRetryTimer && typeof s.pendingRetryTimer.unref === 'function') s.pendingRetryTimer.unref();
 }
 
 function handleWatcherError(root: string, deps: CommandSourceWatcherDeps, err: unknown): void {
