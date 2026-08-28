@@ -2753,9 +2753,22 @@ interface GlobalProbeEntry {
 }
 let globalProbe: GlobalProbeEntry | null = null;
 
+// D6：globalFallback 为空时的节流重试。启动探测只跑一次且失败无重试（index.ts whenReady），
+// CLI 缺失/瞬态失败后，靠这条路径在用户下次打开命令菜单（COMMANDS_GET 只读分流）时自然重试，
+// 不做轮询。「上次尝试时刻」在 runGlobalCommandProbe 入口推进——成败都计入节流窗口。
+let lastGlobalProbeAttemptAt = 0;
+
+/** globalFallback 为 null 且距上次全局探测尝试 ≥ maxAgeMs 时 fire-and-forget 重探（幂等锁在 runGlobalCommandProbe 内）。 */
+export function ensureGlobalCommandProbeFresh(mainWindow: BrowserWindow, maxAgeMs = 60_000): void {
+  if (sdkCommandRegistry.getGlobalFallback()) return; // 已有兜底：无需重试
+  if (Date.now() - lastGlobalProbeAttemptAt < maxAgeMs) return; // 节流：距上次尝试不足 maxAgeMs
+  runGlobalCommandProbe(mainWindow);
+}
+
 /** 启动一次全局兜底命令探测（幂等：已有在跑则跳过）。fire-and-forget 调用。 */
 export function runGlobalCommandProbe(mainWindow: BrowserWindow): void {
   if (globalProbe) return;
+  lastGlobalProbeAttemptAt = Date.now();
   let resolveDone!: () => void;
   const donePromise = new Promise<void>((r) => {
     resolveDone = r;
