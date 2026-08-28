@@ -95,6 +95,15 @@ export interface CommandChangedPayload {
   snapshot: SessionCommandSnapshot;
 }
 
+/**
+ * 全局兜底快照热刷新广播 payload（D4 COMMANDS_GLOBAL_CHANGED）。
+ * snapshot 为哨兵 sessionId（GLOBAL_FALLBACK_SESSION_ID）的全局兜底快照；renderer 侧由
+ * command-store.applyGlobalFallback 决定消费方式（暂态覆盖 / 空命令已物化会话回填）。
+ */
+export interface CommandGlobalChangedPayload {
+  snapshot: SessionCommandSnapshot;
+}
+
 /** 新会话创建 / probe 进行中 / 无数据时的初始快照：loading + 空命令。 */
 export function createDefaultCommandSnapshot(sessionId: string): SessionCommandSnapshot {
   return {

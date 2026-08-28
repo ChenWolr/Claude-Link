@@ -6,6 +6,7 @@
 // 后台（非活动）会话的命令更新也累积于此，切回会话时直接读取，不串扰。
 
 import { defineStore } from 'pinia';
+import type { Session } from '../../shared/types/session';
 import type { SessionCommandSnapshot, CommandChangedPayload, CommandProvenance } from '../../shared/types/command';
 import { createDefaultCommandSnapshot } from '../../shared/types/command';
 
@@ -42,6 +43,25 @@ export const useCommandStore = defineStore('command', {
     // 主进程 COMMANDS_CHANGED 推送的快照全量替换（registry 已清洗 + 去重）。
     replaceFromEvent(payload: CommandChangedPayload) {
       this.snapshotsBySession[payload.sessionId] = payload.snapshot;
+    },
+    // D4：全局兜底快照热刷新广播的消费端（COMMANDS_GLOBAL_CHANGED）。activeSession 由调用方
+    // （App.vue）传入，避免 command-store ↔ session-store 的 store 间循环依赖。
+    // - 暂态会话：无条件覆盖（暂态天生只有全局兜底，全局即当前最准的命令集）；
+    // - 当前活跃的已物化会话：按主进程 N7 同款「commands 空判断」用 cache 回填（保留既有 status，
+    //   对齐 setStatusPreservingCommands 语义）；非空不动——per-session 精确集优先，
+    //   避免全局 cwd 的命令集覆盖 per-cwd 精确集。非活跃会话不消费（切回时 load 自然拿最新）。
+    applyGlobalFallback(snapshot: SessionCommandSnapshot, active: Session | null) {
+      if (!snapshot) return;
+      if (active?.transient) {
+        this.snapshotsBySession[active.id] = { ...snapshot, sessionId: active.id, source: 'cache' };
+        return;
+      }
+      if (!active) return;
+      const current = this.snapshotsBySession[active.id];
+      if (current && current.commands.length > 0) return; // per-session 优先
+      this.snapshotsBySession[active.id] = current
+        ? { ...current, commands: snapshot.commands, source: 'cache', updatedAt: snapshot.updatedAt }
+        : { ...snapshot, sessionId: active.id, source: 'cache' };
     },
     // 拉取某会话当前快照（新会话创建后、切回会话时）。失败保留既有快照；没有时不抛到页面。
     async load(sessionId: string) {

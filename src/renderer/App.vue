@@ -20,6 +20,7 @@ const commandStore = useCommandStore();
 const { startListening, stopListening } = useChat();
 let stopExportProgress: (() => void) | null = null;
 let stopCommandChanges: (() => void) | null = null;
+let stopGlobalCommandChanges: (() => void) | null = null;
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
@@ -50,6 +51,11 @@ onMounted(async () => {
   // 原生 Slash Commands：命令变化全局订阅（ChatPage 卸载/后台会话不丢事件）。主进程 COMMANDS_CHANGED
   // 推送的 snapshot 按 sessionId 全量替换进 command-store。
   stopCommandChanges = window.claudeLink.onCommandChanged((payload) => commandStore.replaceFromEvent(payload));
+  // D4：全局兜底快照热刷新广播——暂态会话覆盖 / 空命令已物化会话回填（当前活跃会话作为消费上下文传入，
+  // 避免 command-store ↔ session-store 的 store 间依赖）。不经 isSessionActive 守卫，暂态也能收到。
+  stopGlobalCommandChanges = window.claudeLink.onGlobalCommandsChanged((payload) =>
+    commandStore.applyGlobalFallback(payload.snapshot, sessionStore.activeSession),
+  );
 });
 
 onBeforeUnmount(() => {
@@ -58,6 +64,7 @@ onBeforeUnmount(() => {
   stopListening();
   if (stopExportProgress) stopExportProgress();
   if (stopCommandChanges) stopCommandChanges();
+  if (stopGlobalCommandChanges) stopGlobalCommandChanges();
 });
 </script>
 

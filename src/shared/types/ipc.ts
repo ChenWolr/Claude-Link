@@ -7,6 +7,7 @@ import type { PermissionMode } from '../permission-resolver';
 // 命令快照类型 re-export：payload/快照在 ./command 定义，这里对外统一出口（main/preload/renderer 共用）。
 export type {
   CommandChangedPayload,
+  CommandGlobalChangedPayload,
   SessionCommandSnapshot,
   SdkCommand,
   CommandSnapshotStatus,
@@ -104,6 +105,9 @@ export const IPC_CHANNELS = {
   // 独立于 CHAT_EVENT——命令能力是 transient 状态，不被当成聊天消息持久化。
   COMMANDS_GET: 'commands:get',
   COMMANDS_CHANGED: 'commands:changed',
+  // D4：全局兜底快照热刷新广播（globalFallback 变化时主→渲染推送）。不经 isSessionActive 守卫——
+  // 暂态会话不在 activeSessions，但正是它最需要这路广播；renderer 自行决定覆盖/回填。
+  COMMANDS_GLOBAL_CHANGED: 'commands:globalChanged',
   // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
   // unknown/hidden 命令名，不含 Query 句柄或原始数据）。只读、无副作用，不触发 probe。
   COMMANDS_GET_DIAGNOSTIC: 'commands:getDiagnostic',

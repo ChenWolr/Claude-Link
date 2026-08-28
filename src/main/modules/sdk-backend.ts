@@ -53,7 +53,7 @@ import { isDisplayableSystemInfo } from '../../shared/system-info';
 import { shouldNotifyInteractionCancelled } from '../../shared/interaction-cancel';
 import type { ContextStatsPayload } from '../../shared/types/ipc';
 import type { AppConfig } from '../../shared/types/config';
-import type { CommandChangedPayload, CommandOriginContext, SessionCommandSnapshot } from '../../shared/types/command';
+import type { CommandChangedPayload, CommandGlobalChangedPayload, CommandOriginContext, SessionCommandSnapshot } from '../../shared/types/command';
 import type {
   CliEvent,
   CliMessageContentPart,
@@ -1764,6 +1764,17 @@ function emitCommandChanged(sessionId: string, mainWindow: BrowserWindow, snapsh
   }
 }
 
+// D4：全局兜底快照热刷新广播（COMMANDS_GLOBAL_CHANGED）。刻意不经 emitCommandChanged 的
+// isSessionActive 守卫——暂态会话不在 activeSessions，但正是它最需要这路广播；renderer 的
+// applyGlobalFallback 自行决定覆盖/回填。webContents 销毁静默忽略。
+function emitGlobalCommandsChanged(mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
+  try {
+    mainWindow.webContents.send(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, { snapshot } as CommandGlobalChangedPayload);
+  } catch {
+    // webContents 可能已销毁（窗口关闭），忽略
+  }
+}
+
 // Task 8：本地命令输出（local_command_output）主进程单一落库。参照 persistApiRetryTerminal：
 // createMessage（role:system, processKind 'system:local_command_output'）+ 推 persisted_message 让 renderer upsert。
 // renderer 不二次落库；result.result 走现有 result 终态兜底（两者并存）。
@@ -2864,7 +2875,9 @@ async function applyGlobalProbeCommands(
     ]);
     if (entry.abortController.signal.aborted) return;
     // 写入全局兜底（内部清洗 + 去重，与 replace 同款；带本次 init 的分类上下文）。
-    sdkCommandRegistry.setGlobalFallback(Array.isArray(rawCommands) ? rawCommands : [], 'probe', ctx);
+    const written = sdkCommandRegistry.setGlobalFallback(Array.isArray(rawCommands) ? rawCommands : [], 'probe', ctx);
+    // D4：全局兜底热刷新广播——watcher 热刷新与启动探测共用此出口，暂态/空命令会话据此更新。
+    emitGlobalCommandsChanged(mainWindow, written);
     // 回填（N7）：globalFallback 就绪后，对 activeSessions 中「命令仍为空」的会话补推兜底命令。不按 has(sid)
     // 判断——loading/degraded 已写入 snapshots 使 has 为 true，但命令可能仍空（probe 进行中/失败/兜底晚到）。
     // 按 commands 空判断：保留该会话当前 status（loading/degraded），用 setStatusPreservingCommands 补 cache 命令不清空。
