@@ -5,7 +5,7 @@
 // 约定（与项目其它 tdd-*-verify.ts 一致）：纯 node:assert + check() 计数，
 // 不 import Electron；失败 process.exit(1)。优先测纯函数行为；记录跨文件接线契约用源码文本断言。
 import { strict as assert } from 'node:assert';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -14,6 +14,17 @@ import {
   filterRenderableCommands,
   findCommandByAlias,
 } from '../src/shared/command-routing';
+import { resolveCommandsGetResult, isSnapshotOriginStale } from '../src/shared/commands-get';
+import {
+  computeCommandRootsFingerprint,
+  commandSourceRoots,
+  FINGERPRINT_MAX_DEPTH,
+  startCommandSourceWatcher,
+  stopCommandSourceWatcher,
+  isCommandSourceWatcherRunning,
+  getUserOriginFingerprint,
+  type CommandSourceWatcherDeps,
+} from '../src/main/modules/command-source-watcher';
 import {
   createDefaultCommandSnapshot,
   EMPTY_COMMAND_ORIGIN_CONTEXT,
@@ -1895,6 +1906,273 @@ void (async () => {
       assert.ok(/behavioralLevel/.test(matrixSrc), '汇总须用 behavioralLevel 判定');
     });
   }
+
+  console.log('=== 25) 暂态命令可用 + 全局快照热刷新（计划 D1-D6 契约）===');
+  // 本节契约背景：暂态会话（无 DB 行）经 COMMANDS_GET 只读分流拿全局兜底（D1/D2）；watcher 监视
+  // 命令来源目录热刷新 globalFallback（D3）；COMMANDS_GLOBAL_CHANGED 广播链（D4）；旧会话用户级
+  // 指纹惰性刷新（D5）；兜底为空时节流重试（D6）。守卫（N3/N5/isEntryActive/收口）一律不动。
+  const dcmd = (name: string): SdkCommand => ({ name, description: '', argumentHint: '', aliases: [], source: 'sdk', origin: 'unknown', availability: 'unknown' });
+  const dsnap = (sessionId: string, names: string[], status: SessionCommandSnapshot['status'], source: SessionCommandSnapshot['source'], originFingerprint?: string): SessionCommandSnapshot => ({
+    sessionId,
+    commands: names.map(dcmd),
+    status,
+    source,
+    updatedAt: null,
+    ...(originFingerprint !== undefined ? { originFingerprint } : {}),
+  });
+
+  check('D1 resolveCommandsGetResult：无 DB 行只读分流（兜底副本覆写 sessionId+cache；兜底 null → loading 默认）', () => {
+    const loading = createDefaultCommandSnapshot('t1');
+    const fb = dsnap(GLOBAL_FALLBACK_SESSION_ID, ['g'], 'ready', 'probe');
+    const d = resolveCommandsGetResult({ sessionExists: false, hasSnapshot: false, snapshot: loading, fallback: fb });
+    assert.equal(d.readOnly, true, '无 DB 行必须标只读（禁一切生命周期副作用）');
+    assert.equal(d.needsFullProbeSideEffects, false);
+    assert.equal(d.needsRefreshProbeOnly, false);
+    assert.equal(d.snapshot.sessionId, 't1', '兜底副本应覆写为请求 sessionId');
+    assert.equal(d.snapshot.source, 'cache', '兜底副本 source 应为 cache');
+    assert.deepEqual(d.snapshot.commands.map((c) => c.name), ['g']);
+    const dNull = resolveCommandsGetResult({ sessionExists: false, hasSnapshot: false, snapshot: loading, fallback: null });
+    assert.equal(dNull.readOnly, true);
+    assert.equal(dNull.snapshot.status, 'loading', '无兜底时返回 loading 默认（不崩、优雅空态）');
+    assert.deepEqual(dNull.snapshot.commands, []);
+  });
+
+  check('D1 resolveCommandsGetResult：有 DB 行三态与改动前同语义（has 原样 / 无快照全链 / 无兜底 loading）', () => {
+    const snap = dsnap('s1', ['a'], 'ready', 'probe');
+    const dHas = resolveCommandsGetResult({ sessionExists: true, hasSnapshot: true, snapshot: snap, fallback: null });
+    assert.equal(dHas.readOnly, false);
+    assert.equal(dHas.needsFullProbeSideEffects, false, 'has 路径不触发 markSessionActive/probe 链（与改动前一致）');
+    assert.equal(dHas.snapshot, snap, 'has 路径应原样返回同一引用');
+    const fb = dsnap(GLOBAL_FALLBACK_SESSION_ID, ['g'], 'ready', 'probe');
+    const dNoSnap = resolveCommandsGetResult({ sessionExists: true, hasSnapshot: false, snapshot: createDefaultCommandSnapshot('s2'), fallback: fb });
+    assert.equal(dNoSnap.needsFullProbeSideEffects, true, '无快照需 N6 全副作用链');
+    assert.equal(dNoSnap.snapshot.sessionId, 's2');
+    assert.equal(dNoSnap.snapshot.source, 'cache');
+    const loading = createDefaultCommandSnapshot('s3');
+    const dNoFb = resolveCommandsGetResult({ sessionExists: true, hasSnapshot: false, snapshot: loading, fallback: null });
+    assert.equal(dNoFb.needsFullProbeSideEffects, true);
+    assert.equal(dNoFb.snapshot, loading, '无兜底回落 registry.get 的 loading 默认（旧行为）');
+  });
+
+  check('D5 指纹比对：不一致 → stale 克隆 + 仅重探；一致 → 原样；双端缺省 → 原样不误标', () => {
+    const staleSnap = dsnap('old', ['a'], 'ready', 'probe', 'fp-old');
+    const d = resolveCommandsGetResult({ sessionExists: true, hasSnapshot: true, snapshot: staleSnap, fallback: null, currentUserFingerprint: 'fp-new' });
+    assert.equal(d.needsRefreshProbeOnly, true, '指纹不一致应触发免费重探');
+    assert.equal(d.needsFullProbeSideEffects, false, '重探路径不 markSessionActive（N5 DB 判据放行）');
+    assert.equal(d.snapshot.status, 'stale', '返回克隆标 stale（UI「可能不是最新」）');
+    assert.notEqual(d.snapshot, staleSnap, '必须是克隆，不回写 registry');
+    assert.equal(staleSnap.status, 'ready', '原快照不被污染');
+    const dSame = resolveCommandsGetResult({ sessionExists: true, hasSnapshot: true, snapshot: dsnap('old', ['a'], 'ready', 'probe', 'fp-same'), fallback: null, currentUserFingerprint: 'fp-same' });
+    assert.equal(dSame.needsRefreshProbeOnly, false);
+    assert.equal(dSame.snapshot.status, 'ready', '指纹一致原样返回');
+    const dNoSnapFp = resolveCommandsGetResult({ sessionExists: true, hasSnapshot: true, snapshot: dsnap('old', ['a'], 'ready', 'probe'), fallback: null, currentUserFingerprint: 'fp-new' });
+    assert.equal(dNoSnapFp.needsRefreshProbeOnly, false, '快照无指纹（旧快照）不比对');
+    const dNoCur = resolveCommandsGetResult({ sessionExists: true, hasSnapshot: true, snapshot: dsnap('old', ['a'], 'ready', 'probe', 'fp-old'), fallback: null, currentUserFingerprint: undefined });
+    assert.equal(dNoCur.needsRefreshProbeOnly, false, 'watcher 未启动（当前指纹缺省）不比对');
+    assert.equal(isSnapshotOriginStale(dsnap('x', ['a'], 'ready', 'probe'), undefined), false, 'isSnapshotOriginStale 缺省恒 false');
+  });
+
+  check('D5 registry.replace 写入 originFingerprint；缺省不带字段；状态切换经 spread 保留指纹', () => {
+    const reg = new SdkCommandRegistry();
+    const withFp = reg.replace('fp1', [dcmd('a')], 'probe', EMPTY_COMMAND_ORIGIN_CONTEXT, 'fp-A');
+    assert.equal(withFp.originFingerprint, 'fp-A');
+    const noFp = reg.replace('fp2', [dcmd('b')], 'probe', EMPTY_COMMAND_ORIGIN_CONTEXT);
+    assert.equal(noFp.originFingerprint, undefined, '缺省时字段缺省');
+    const kept = reg.setStatusPreservingCommands('fp1', 'stale');
+    assert.equal(kept.originFingerprint, 'fp-A', '非 ready 状态切换保留出生指纹');
+  });
+
+  check('D3 commandSourceRoots：用户级两根 + 项目级两根；home/cwd 缺省各自为空；userRoots 只含用户级', () => {
+    const mkDeps = (home?: string, cwd?: string | null): CommandSourceWatcherDeps => ({
+      getUserHome: () => home,
+      getWorkingDirectory: () => cwd ?? null,
+      triggerGlobalProbe: () => {},
+      onConfigSaved: () => () => {},
+      logger: { info: () => {}, warn: () => {} },
+    });    const r = commandSourceRoots(mkDeps('C:/u', 'C:/p'));
+    assert.equal(r.allRoots.length, 4, '四个 watch 根');
+    assert.deepEqual(r.userRoots, [path.join('C:/u', '.claude', 'commands'), path.join('C:/u', '.claude', 'skills')], 'userRoots 只含用户级两根（D5 指纹口径）');
+    assert.ok(r.allRoots.includes(path.join('C:/p', '.claude', 'commands')), '项目级 commands 根在场');
+    assert.ok(r.allRoots.includes(path.join('C:/p', '.claude', 'skills')), '项目级 skills 根在场');
+    assert.deepEqual(commandSourceRoots(mkDeps(undefined, 'C:/p')).userRoots, [], 'home 缺省 → 用户级为空（不裸 homedir）');
+    assert.equal(commandSourceRoots(mkDeps('C:/u', null)).allRoots.length, 2, 'cwd null → 只剩用户级两根');
+    assert.deepEqual(commandSourceRoots(mkDeps(undefined, null)).allRoots, [], '全缺省 → 空根（指纹为常量）');
+  });
+
+  await asyncCheck('D3 指纹纯函数：建/改/删文件变化；仅 touch 目录不变；深度 ≤6 计入、>6 不计', async () => {
+    mkdirSync(ORIGIN_TMP_ROOT, { recursive: true });
+    const root = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-fp-'));
+    try {
+      const cmds = path.join(root, 'commands');
+      mkdirSync(cmds, { recursive: true });
+      const fpEmpty = await computeCommandRootsFingerprint([cmds]);
+      writeFileSync(path.join(cmds, 'a.md'), 'hello');
+      const fpA = await computeCommandRootsFingerprint([cmds]);
+      assert.notEqual(fpA, fpEmpty, '新建文件指纹应变化');
+      writeFileSync(path.join(cmds, 'a.md'), 'hello-world-longer');
+      const fpB = await computeCommandRootsFingerprint([cmds]);
+      assert.notEqual(fpB, fpA, '修改文件（内容+大小）指纹应变化');
+      const future = new Date(Date.now() + 60_000);
+      utimesSync(cmds, future, future);
+      assert.equal(await computeCommandRootsFingerprint([cmds]), fpB, '仅 touch 目录 mtime 不应改变指纹（指纹只含文件条目）');
+      rmSync(path.join(cmds, 'a.md'));
+      const fpDel = await computeCommandRootsFingerprint([cmds]);
+      assert.equal(fpDel, fpEmpty, '删回空目录回到空集指纹');
+      let deep6 = cmds;
+      for (let i = 0; i < FINGERPRINT_MAX_DEPTH; i++) deep6 = path.join(deep6, `d${i}`);
+      mkdirSync(deep6, { recursive: true });
+      writeFileSync(path.join(deep6, 'skill.md'), 'x');
+      const fpDeep6 = await computeCommandRootsFingerprint([cmds]);
+      assert.notEqual(fpDeep6, fpDel, '深度 ≤6 的嵌套文件应计入');
+      let deep7 = cmds;
+      for (let i = 0; i <= FINGERPRINT_MAX_DEPTH; i++) deep7 = path.join(deep7, `x${i}`);
+      mkdirSync(deep7, { recursive: true });
+      writeFileSync(path.join(deep7, 'beyond.md'), 'z');
+      assert.equal(await computeCommandRootsFingerprint([cmds]), fpDeep6, '深度 >6 的文件不应计入（与证据扫描同口径）');
+      const emptyFp = await computeCommandRootsFingerprint([]);
+      assert.equal(emptyFp, await computeCommandRootsFingerprint([]), '空根指纹为确定常量');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  await asyncCheck('D3 watcher 端到端（真实 fs.watch）：基准不探测 → 新文件触发 → 终态不变不触发 → stop 幂等', async () => {
+    mkdirSync(ORIGIN_TMP_ROOT, { recursive: true });
+    const home = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-w-home-'));
+    try {
+      const cmdsDir = path.join(home, '.claude', 'commands');
+      mkdirSync(cmdsDir, { recursive: true });
+      let probes = 0;
+      startCommandSourceWatcher({
+        getUserHome: () => home,
+        getWorkingDirectory: () => null,
+        triggerGlobalProbe: () => {
+          probes += 1;
+        },
+        onConfigSaved: () => () => {},
+        logger: { info: () => {}, warn: () => {} },
+      });
+      const sleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms));
+      await sleep(600); // 基准指纹建立（异步）
+      assert.equal(probes, 0, '启动基准指纹不得触发探测（启动探测由 index.ts 负责）');
+      assert.ok(typeof getUserOriginFingerprint() === 'string', '基准刷新后应导出用户级指纹（D5 附带）');
+      writeFileSync(path.join(cmdsDir, 'hot.md'), 'v1');
+      await sleep(2600); // 去抖 1500ms + 指纹扫描
+      assert.ok(probes >= 1, '文件新增应在去抖后触发一次全局探测');
+      const afterFirst = probes;
+      const scratch = path.join(cmdsDir, 'tmp-scratch.md');
+      writeFileSync(scratch, 'temp');
+      rmSync(scratch, { force: true });
+      await sleep(2600);
+      assert.equal(probes, afterFirst, '建/删同文件（终态不变，指纹相同）不应再 spawn 探测');
+      assert.ok(isCommandSourceWatcherRunning(), 'stop 前应处于运行态');
+      stopCommandSourceWatcher();
+      assert.equal(isCommandSourceWatcherRunning(), false, 'stop 后应清理单例');
+      assert.equal(getUserOriginFingerprint(), undefined, 'stop 后指纹导出回 undefined（D5 缺省不比对）');
+    } finally {
+      stopCommandSourceWatcher(); // 幂等兜底清理
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  check('D1/D5 结构：COMMANDS_GET 只读分流接线（不 throw + D6 重试 + N6 链保留 + 指纹入参）', () => {
+    const src = readFileSync(path.join('src', 'main', 'ipc-handlers.ts'), 'utf8');
+    const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=ipcMain\.handle)/);
+    if (!m) throw new Error('COMMANDS_GET handler 未找到');
+    assert.ok(m[0].includes('resolveCommandsGetResult'), '分流决策应走 shared 纯函数');
+    assert.ok(!m[0].includes('not found'), '暂态/未知会话不得再 throw（D1 根因）');
+    assert.ok(m[0].includes('ensureGlobalCommandProbeFresh'), '只读分流应触发 D6 节流重试');
+    assert.ok(m[0].includes('sessionRepo.getSession(sessionId)'), 'N6：DB 会话存在性校验保留');
+    assert.ok(m[0].includes('markSessionActive(sessionId)'), 'N6：有 DB 行无快照的 active 登记保留');
+    assert.ok(m[0].includes('startCommandProbe'), 'N4/N6/D5：probe 触发保留');
+    assert.ok(m[0].includes('schedulePostTurnProbe'), 'post-turn 探针调度保留');
+    assert.ok(m[0].includes('getUserOriginFingerprint()'), 'D5：指纹入参在场');
+    assert.ok(m[0].includes("'cache'"), '兜底 cache 语义保留');
+  });
+
+  check('D2 结构：startTransientSession 末尾 commandStore.load（B10 反转）', () => {
+    const src = readFileSync(path.join('src', 'renderer', 'stores', 'session-store.ts'), 'utf8');
+    assert.ok(
+      /startTransientSession\(\) \{[\s\S]*?useCommandStore\(\)\.load\(/.test(src),
+      '暂态创建应立即加载命令兜底快照（与 switchSession N4 同构）',
+    );
+    assert.ok(
+      /B10 反转/.test(src),
+      '旧「暂态不 load」注释应已反转',
+    );
+  });
+
+  check('D4 结构：COMMANDS_GLOBAL_CHANGED 三处同步 + 广播不经 isSessionActive', () => {
+    const ipcTypes = readFileSync(path.join('src', 'shared', 'types', 'ipc.ts'), 'utf8');
+    assert.ok(ipcTypes.includes("COMMANDS_GLOBAL_CHANGED: 'commands:globalChanged'"), 'ipc.ts 应定义通道常量');
+    assert.ok(ipcTypes.includes('CommandGlobalChangedPayload'), 'ipc.ts 应 re-export payload 类型');
+    const preload = readFileSync(path.join('src', 'preload', 'api.ts'), 'utf8');
+    assert.ok(preload.includes('onGlobalCommandsChanged'), 'preload 应暴露 onGlobalCommandsChanged');
+    assert.ok(preload.includes('IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED'), 'preload 应订阅该通道');
+    const appVue = readFileSync(path.join('src', 'renderer', 'App.vue'), 'utf8');
+    assert.ok(appVue.includes('onGlobalCommandsChanged'), 'App.vue 应注册全局广播消费');
+    assert.ok(appVue.includes('applyGlobalFallback'), 'App.vue 应调 commandStore.applyGlobalFallback');
+    const store = readFileSync(path.join('src', 'renderer', 'stores', 'command-store.ts'), 'utf8');
+    assert.ok(store.includes('applyGlobalFallback'), 'command-store 应有 applyGlobalFallback action');
+    const backend = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
+    const emit = backend.match(/function emitGlobalCommandsChanged[\s\S]*?\n\}/);
+    if (!emit) throw new Error('emitGlobalCommandsChanged 未找到');
+    assert.ok(!emit[0].includes('isSessionActive'), '全局广播不得经 isSessionActive 守卫（暂态不在 activeSessions）');
+    const apply = backend.match(/async function applyGlobalProbeCommands[\s\S]*?clearTimeout\(timeoutTimer\)/);
+    if (!apply) throw new Error('applyGlobalProbeCommands 未找到');
+    assert.ok(apply[0].includes('emitGlobalCommandsChanged'), 'applyGlobalProbeCommands 成功写入兜底后应广播');
+  });
+
+  check('D4 行为：applyGlobalFallback 暂态覆盖 / 空命令回填保留 status / 非空不动 / null 不写', () => {
+    setActivePinia(createPinia());
+    const store = useCommandStore();
+    const fb = (names: string[]): SessionCommandSnapshot => dsnap(GLOBAL_FALLBACK_SESSION_ID, names, 'ready', 'probe');
+    const asSession = (id: string, transient: boolean): Session => ({ id, transient } as unknown as Session);
+    store.applyGlobalFallback(fb(['g1']), asSession('t1', true));
+    assert.equal(store.snapshotsBySession['t1'].sessionId, 't1', '暂态应覆写 sessionId');
+    assert.equal(store.snapshotsBySession['t1'].source, 'cache');
+    assert.equal(store.activeSnapshot('t1').commands[0].name, 'g1');
+    store.setSnapshot({ sessionId: 'full', commands: [dcmd('mine')], status: 'ready', source: 'probe', updatedAt: null });
+    store.applyGlobalFallback(fb(['g2']), asSession('full', false));
+    assert.equal(store.activeSnapshot('full').commands[0].name, 'mine', '非空已物化会话不动（per-session 优先）');
+    store.setSnapshot({ sessionId: 'deg', commands: [], status: 'degraded', source: 'probe', updatedAt: null, error: 'x' });
+    store.applyGlobalFallback(fb(['g3']), asSession('deg', false));
+    const deg = store.snapshotsBySession['deg'];
+    assert.equal(deg.commands[0].name, 'g3', '空命令已物化会话应回填');
+    assert.equal(deg.status, 'degraded', '回填保留原 status（N7 语义）');
+    assert.equal(deg.source, 'cache');
+    store.applyGlobalFallback(fb(['g4']), asSession('fresh', false));
+    assert.equal(store.activeSnapshot('fresh').commands[0].name, 'g4', '无条目的活跃已物化会话整体回填');
+    const before = Object.keys(store.snapshotsBySession).length;
+    store.applyGlobalFallback(fb(['g5']), null);
+    assert.equal(Object.keys(store.snapshotsBySession).length, before, 'active 为 null 不写任何键');
+  });
+
+  check('D3/D6/D5 结构：watcher 纯净性 + index.ts 挂接清理 + 节流重试导出 + replace 附带指纹', () => {
+    const w = readFileSync(path.join('src', 'main', 'modules', 'command-source-watcher.ts'), 'utf8');
+    assert.ok(w.includes('WATCHER_DEBOUNCE_MS'), '应定义去抖常量');
+    assert.ok(w.includes('WATCHER_PROBE_MIN_INTERVAL_MS'), '应定义 10s 探测节流常量');
+    assert.ok(w.includes('WATCHER_REMOUNT_MAX_CONSECUTIVE'), '应定义重挂限次常量');
+    assert.ok(w.includes('onConfigSaved'), '应订阅 onConfigSaved');
+    assert.ok(w.includes('recursive: true'), '应优先递归 watch');
+    assert.ok(!/from 'electron'/.test(w), 'watcher 不得 import electron（保持 tsx 可测，依赖注入）');
+    const idx = readFileSync(path.join('src', 'main', 'index.ts'), 'utf8');
+    assert.ok(idx.includes('startCommandSourceWatcher'), 'whenReady 应挂接 watcher');
+    const stops = (idx.match(/stopCommandSourceWatcher\(\);/g) || []).length;
+    assert.ok(stops >= 2, `window-all-closed 与 before-quit 都应停止 watcher（实际 ${stops}）`);
+    assert.ok(/getUserHome:\s*effectiveUserHome/.test(idx), '用户级根锚点应注入 effectiveUserHome（禁裸 homedir 口径）');
+    const backend = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
+    assert.ok(/export function ensureGlobalCommandProbeFresh/.test(backend), 'D6 应导出节流重试');
+    assert.ok(/lastGlobalProbeAttemptAt = Date\.now\(\)/.test(backend), 'runGlobalCommandProbe 应推进尝试时刻（成败都计节流窗口）');
+    const ensure = backend.match(/export function ensureGlobalCommandProbeFresh[\s\S]*?\n\}/);
+    if (!ensure) throw new Error('ensureGlobalCommandProbeFresh 未找到');
+    assert.ok(ensure[0].includes('getGlobalFallback()'), '兜底非 null 直接返回');
+    assert.ok(ensure[0].includes('lastGlobalProbeAttemptAt'), '应按上次尝试时刻节流');
+    const fpCalls = (backend.match(/getUserOriginFingerprint\(\)/g) || []).length;
+    assert.ok(fpCalls >= 4, `replace 各来源调用点应附带用户级指纹（实际 ${fpCalls}，需 ≥4）`);
+    const registry = readFileSync(path.join('src', 'main', 'modules', 'sdk-command-registry.ts'), 'utf8');
+    assert.ok(/originFingerprint\?: string/.test(registry), 'replace 应接受可选 originFingerprint 参数');
+  });
 
   // ── 汇总 ──
   console.log(`\n${pass} passed, ${fail} failed`);
