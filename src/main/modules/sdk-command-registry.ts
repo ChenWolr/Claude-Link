@@ -174,12 +174,15 @@ export class SdkCommandRegistry {
    * - 不 concat：旧命令完全消失。
    * - 逐条清洗 + 同名（大小写不敏感）去重。
    * - 非空 → ready；空 → empty。
+   * - originFingerprint（D5）：用户级来源目录出生指纹，由调用方传 getUserOriginFingerprint() 现值；
+   *   watcher 未启动时缺省 → 字段缺省，COMMANDS_GET 不做指纹比对（不误标 stale）。
    */
   replace(
     sessionId: string,
     rawCommands: unknown[],
     source: CommandSnapshotSource,
     ctx: CommandOriginContext = EMPTY_COMMAND_ORIGIN_CONTEXT,
+    originFingerprint?: string,
   ): SessionCommandSnapshot {
     const commands = this.cleanCommands(rawCommands, ctx);
     const snapshot: SessionCommandSnapshot = {
@@ -188,6 +191,7 @@ export class SdkCommandRegistry {
       status: commands.length > 0 ? 'ready' : 'empty',
       source,
       updatedAt: new Date().toISOString(),
+      ...(originFingerprint !== undefined ? { originFingerprint } : {}),
     };
     this.revisions.set(sessionId, (this.revisions.get(sessionId) ?? 0) + 1);
     this.snapshots.set(sessionId, snapshot);
@@ -208,7 +212,6 @@ export class SdkCommandRegistry {
     this.snapshots.set(sessionId, snapshot);
     return snapshot;
   }
-
   /**
    * 切换 non-ready 状态（loading / stale / degraded / error）但保留「最佳可用命令」：
    * 优先 per-session 已有命令，否则 fallback 到 globalFallback 命令（启动兜底）。
@@ -226,6 +229,9 @@ export class SdkCommandRegistry {
       status,
       source,
       updatedAt: new Date().toISOString(),
+      // D5：保留出生指纹——状态切换重建快照对象，若不带回该字段，首次降级/loading 后指纹丢失，
+      // COMMANDS_GET 的过期比对（旧会话惰性刷新）对该会话永久失效。
+      ...(current.originFingerprint !== undefined ? { originFingerprint: current.originFingerprint } : {}),
       ...(error !== undefined ? { error } : {}),
     };
     this.snapshots.set(sessionId, snapshot);

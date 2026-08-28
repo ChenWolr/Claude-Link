@@ -100,6 +100,7 @@ import {
   type SdkPermissionSettings,
 } from './sdk-permissions';
 import { sdkCommandRegistry } from './sdk-command-registry';
+import { getUserOriginFingerprint } from './command-source-watcher';
 import { buildNativeSdkOptionsCore, mergeSpawnOptions } from './sdk-command-options';
 import { buildCommandOriginEvidence } from './sdk-command-origin';
 import { isSubAgentToolUse } from '../../shared/process-kind';
@@ -2710,7 +2711,7 @@ async function resolveAndApplyProbeCommands(
       isCurrentProbe(sessionId, entry) &&
       sdkCommandRegistry.getRevision(sessionId) === startRev
     ) {
-      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(rawCommands) ? rawCommands : [], 'probe', sessionCommandCtx.get(sessionId));
+      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(rawCommands) ? rawCommands : [], 'probe', sessionCommandCtx.get(sessionId), getUserOriginFingerprint());
       emitCommandChanged(sessionId, mainWindow, snap);
     }
   } catch (e) {
@@ -2939,7 +2940,7 @@ async function maybeDiscoverCommandsFromInit(
         aliases: [],
         source: 'sdk',
       }));
-      const snap = sdkCommandRegistry.replace(sessionId, initCmds, 'init', buildCommandOriginContext(sdkMsg, sessionId));
+      const snap = sdkCommandRegistry.replace(sessionId, initCmds, 'init', buildCommandOriginContext(sdkMsg, sessionId), getUserOriginFingerprint());
       emitCommandChanged(sessionId, mainWindow, snap);
     }
   }
@@ -2965,6 +2966,7 @@ async function maybeDiscoverCommandsFromInit(
         Array.isArray(raw) ? raw : [],
         'probe',
         sessionCommandCtx.get(sessionId),
+        getUserOriginFingerprint(),
       );
       emitCommandChanged(sessionId, mainWindow, snap);
     }
@@ -3335,7 +3337,7 @@ async function runQuery(
           // review-v1 §5.1：按当前会话 cwd 重建来源证据（init 时冻结的 evidence 不反映会话过程中
           // 新增/修改/删除的项目命令文件 .claude/skills、.claude/commands）。skills/plugins/slashCommands
           // 名称集合沿用 init（SDK canonical 视图），evidence 按当前磁盘状态重扫。
-          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', refreshCommandOriginContext(sessionId, opts.workingDir || getConfig().workingDirectory || undefined));
+          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', refreshCommandOriginContext(sessionId, opts.workingDir || getConfig().workingDirectory || undefined), getUserOriginFingerprint());
           emitCommandChanged(sessionId, mainWindow, snap);
           continue;
         }
