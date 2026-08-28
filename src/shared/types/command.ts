@@ -78,6 +78,12 @@ export interface SessionCommandSnapshot {
   source: CommandSnapshotSource;
   updatedAt: string | null;
   error?: string;
+  /**
+   * 用户级命令来源目录（~/.claude/{commands,skills}）的出生指纹（D5 旧会话惰性刷新）。
+   * replace 写入时由调用方附带（watcher 未启动时缺省 → 字段缺省，不触发指纹比对）。
+   * 只比用户级：用户级变更影响所有会话；项目级变更由存活期 commands_changed / 物化 probe 覆盖。
+   */
+  originFingerprint?: string;
 }
 
 /**
