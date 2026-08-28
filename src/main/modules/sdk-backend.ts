@@ -2551,8 +2551,9 @@ async function runCommandProbe(
  * buildSpawnEnv() 先 {...process.env} 再注入 advancedJson.env 块，其中可能含 USERPROFILE/HOME——
  * 该 env 经 SDK options 传给 Claude Code 子进程。证据扫描必须用与子进程一致的 userHome，
  * 否则 SDK 发现的 Skill 在证据扫描中找不到对应磁盘证据，分类回退到 unknown。
+ * 导出给 index.ts 注入 command-source-watcher（D3 用户级根锚点，同一口径）。
  */
-function effectiveUserHome(): string | undefined {
+export function effectiveUserHome(): string | undefined {
   const env = buildSpawnEnv();
   return env.USERPROFILE || env.HOME;
 }

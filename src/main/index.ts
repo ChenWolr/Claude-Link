@@ -7,7 +7,8 @@ import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
 import { detectCli } from './modules/cli-detector';
 import { ensureProviderMigration, getConfig, onConfigSaved } from './modules/config-manager';
-import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe } from './modules/sdk-backend';
+import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe, effectiveUserHome } from './modules/sdk-backend';
+import { startCommandSourceWatcher, stopCommandSourceWatcher } from './modules/command-source-watcher';
 import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
 import {
@@ -193,6 +194,19 @@ app.whenReady().then(async () => {
   // fire-and-forget；完成时对已打开且无 per-session 快照的会话回填。CLI 缺失/失败均不阻塞启动。
   if (mainWindow) {
     runGlobalCommandProbe(mainWindow);
+
+    // D3：命令来源目录监视——用户级 ~/.claude/{commands,skills} 与项目级 .claude/{commands,skills}
+    // 新增/修改/删除 → 指纹变化 → 节流重探热刷新 globalFallback，新会话（含暂态）免重启拿最新命令。
+    // app 依赖（effectiveUserHome / workingDirectory / onConfigSaved）在此注入，watcher 模块保持纯 node。
+    startCommandSourceWatcher({
+      getUserHome: effectiveUserHome,
+      getWorkingDirectory: () => getConfig().workingDirectory,
+      triggerGlobalProbe: () => {
+        if (mainWindow) runGlobalCommandProbe(mainWindow);
+      },
+      onConfigSaved,
+      logger,
+    });
   }
 
   // 阶段二 fixture smoke：env CLAUDE_LINK_EXPORT_SMOKE 指定会话种子消息条数时自动跑一次导出。
@@ -216,6 +230,7 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   killAllProcesses();
   void cancelGlobalCommandProbe(); // 取消全局兜底探测，避免孤儿 claude 子进程（killAllProcesses 不扫 probe）
+  stopCommandSourceWatcher(); // D3：停命令来源监视，释放 fs.watch 句柄
   closeConnection();
 
   if (process.platform !== 'darwin') {
@@ -226,6 +241,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   killAllProcesses();
   void cancelGlobalCommandProbe(); // 取消全局兜底探测，避免孤儿 claude 子进程（killAllProcesses 不扫 probe）
+  stopCommandSourceWatcher(); // D3：停命令来源监视，释放 fs.watch 句柄
   void disposeExportImageOnQuit();
   closeConnection();
 });
