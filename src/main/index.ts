@@ -201,9 +201,8 @@ app.whenReady().then(async () => {
     startCommandSourceWatcher({
       getUserHome: effectiveUserHome,
       getWorkingDirectory: () => getConfig().workingDirectory,
-      triggerGlobalProbe: () => {
-        if (mainWindow) runGlobalCommandProbe(mainWindow);
-      },
+      // 透传幂等结果（true=启动 / false=被吞）：watcher 据此在被吞时延迟重试（review-v1 发现1）。
+      triggerGlobalProbe: () => (mainWindow ? runGlobalCommandProbe(mainWindow) : false),
       onConfigSaved,
       logger,
     });

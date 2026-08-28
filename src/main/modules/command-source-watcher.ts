@@ -67,8 +67,12 @@ export interface CommandSourceWatcherDeps {
   getUserHome(): string | undefined;
   /** 项目级根锚点：getConfig().workingDirectory（全局默认工作目录）。 */
   getWorkingDirectory(): string | null;
-  /** 触发全局兜底探测（包装 runGlobalCommandProbe(mainWindow)；幂等锁在 sdk-backend 内）。 */
-  triggerGlobalProbe(): void;
+  /**
+   * 触发全局兜底探测（包装 runGlobalCommandProbe(mainWindow)）。
+   * 返回 true = 本次真正启动；false = 已有探测在跑被幂等锁吞掉——watcher 据此延迟重试，
+   * 否则该次磁盘变更永久丢失（review-v1 发现1：指纹已更新为最新，后续无新事件不再比对）。
+   */
+  triggerGlobalProbe(): boolean;
   /** 配置保存订阅（onConfigSaved）：workingDirectory / advancedJson.env 变化 → 全量重挂。 */
   onConfigSaved(listener: () => void): () => void;
   logger: { info(message: string): void; warn(message: string): void };
@@ -102,6 +106,8 @@ interface CommandSourceWatcherState {
   userFingerprint: string | undefined;
   debounceTimer: ReturnType<typeof setTimeout> | null;
   remountTimer: ReturnType<typeof setTimeout> | null;
+  /** 被幂等锁吞后的延迟重试 timer（发现1；stop 时需一并清理）。 */
+  swallowedRetryTimer: ReturnType<typeof setTimeout> | null;
   lastProbeStartedAt: number;
   probeQueued: boolean;
   /** 连续 error 重挂计数；一次「安静刷新周期」（挂载后至刷新完成无新 error）证明健康即清零。 */
@@ -135,6 +141,7 @@ export function startCommandSourceWatcher(deps: CommandSourceWatcherDeps): void 
     userFingerprint: undefined,
     debounceTimer: null,
     remountTimer: null,
+    swallowedRetryTimer: null,
     lastProbeStartedAt: 0,
     probeQueued: false,
     consecutiveErrors: 0,
@@ -164,6 +171,10 @@ export function stopCommandSourceWatcher(): void {
   if (s.remountTimer) {
     clearTimeout(s.remountTimer);
     s.remountTimer = null;
+  }
+  if (s.swallowedRetryTimer) {
+    clearTimeout(s.swallowedRetryTimer);
+    s.swallowedRetryTimer = null;
   }
   s.unsubscribeConfigSaved?.();
   closeWatchers(s);
@@ -309,12 +320,36 @@ function queueProbe(deps: CommandSourceWatcherDeps): void {
       const cur = state;
       if (!cur || cur.stopped) return;
       cur.probeQueued = false;
-      cur.lastProbeStartedAt = Date.now();
-      deps.triggerGlobalProbe();
+      fireProbe(deps);
     }, wait);
     if (t && typeof t.unref === 'function') t.unref();
     return;
   }
-  s.lastProbeStartedAt = now;
-  deps.triggerGlobalProbe();
+  fireProbe(deps);
+}
+
+/**
+ * 立即触发全局探测（节流窗口外）。
+ * review-v1 发现1：trigger 返回 false = 被幂等锁吞掉（已有探测在跑）——不推进 lastProbeStartedAt
+ * （否则指纹已是最新、后续无新事件不再比对，该次磁盘变更永久丢失），经 swallowedRetryTimer 延迟
+ * 一个最小间隔重试，直到真正启动（true）为止；stop 时清理。
+ */
+function fireProbe(deps: CommandSourceWatcherDeps): void {
+  const s = state;
+  if (!s || s.stopped) return;
+  const started = deps.triggerGlobalProbe();
+  if (started !== false) {
+    s.lastProbeStartedAt = Date.now();
+    return;
+  }
+  if (s.swallowedRetryTimer || s.probeQueued) return; // 已有重试/排队在途
+  s.probeQueued = true;
+  s.swallowedRetryTimer = setTimeout(() => {
+    const cur = state;
+    if (!cur || cur.stopped) return;
+    cur.swallowedRetryTimer = null;
+    cur.probeQueued = false;
+    fireProbe(deps);
+  }, WATCHER_PROBE_MIN_INTERVAL_MS);
+  if (s.swallowedRetryTimer && typeof s.swallowedRetryTimer.unref === 'function') s.swallowedRetryTimer.unref();
 }

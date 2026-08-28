@@ -1986,7 +1986,7 @@ void (async () => {
     const mkDeps = (home?: string, cwd?: string | null): CommandSourceWatcherDeps => ({
       getUserHome: () => home,
       getWorkingDirectory: () => cwd ?? null,
-      triggerGlobalProbe: () => {},
+      triggerGlobalProbe: () => true,
       onConfigSaved: () => () => {},
       logger: { info: () => {}, warn: () => {} },
     });    const r = commandSourceRoots(mkDeps('C:/u', 'C:/p'));
@@ -2048,6 +2048,7 @@ void (async () => {
         getWorkingDirectory: () => null,
         triggerGlobalProbe: () => {
           probes += 1;
+          return true;
         },
         onConfigSaved: () => () => {},
         logger: { info: () => {}, warn: () => {} },
@@ -2155,15 +2156,18 @@ void (async () => {
     assert.ok(w.includes('WATCHER_REMOUNT_MAX_CONSECUTIVE'), '应定义重挂限次常量');
     assert.ok(w.includes('onConfigSaved'), '应订阅 onConfigSaved');
     assert.ok(w.includes('recursive: true'), '应优先递归 watch');
+    assert.ok(/triggerGlobalProbe\(\): boolean/.test(w), 'deps.triggerGlobalProbe 应返回 boolean（发现1 被吞信号）');
     assert.ok(!/from 'electron'/.test(w), 'watcher 不得 import electron（保持 tsx 可测，依赖注入）');
     const idx = readFileSync(path.join('src', 'main', 'index.ts'), 'utf8');
     assert.ok(idx.includes('startCommandSourceWatcher'), 'whenReady 应挂接 watcher');
     const stops = (idx.match(/stopCommandSourceWatcher\(\);/g) || []).length;
     assert.ok(stops >= 2, `window-all-closed 与 before-quit 都应停止 watcher（实际 ${stops}）`);
     assert.ok(/getUserHome:\s*effectiveUserHome/.test(idx), '用户级根锚点应注入 effectiveUserHome（禁裸 homedir 口径）');
+    assert.ok(/runGlobalCommandProbe\(mainWindow\)\s*:\s*false|runGlobalCommandProbe\(mainWindow\)\s*\)/.test(idx), 'index.ts 应透传探测启动结果（发现1）');
     const backend = readFileSync(path.join('src', 'main', 'modules', 'sdk-backend.ts'), 'utf8');
     assert.ok(/export function ensureGlobalCommandProbeFresh/.test(backend), 'D6 应导出节流重试');
     assert.ok(/lastGlobalProbeAttemptAt = Date\.now\(\)/.test(backend), 'runGlobalCommandProbe 应推进尝试时刻（成败都计节流窗口）');
+    assert.ok(/export function runGlobalCommandProbe\(mainWindow: BrowserWindow\): boolean/.test(backend), 'runGlobalCommandProbe 应返回 boolean（发现1 修法A）');
     const ensure = backend.match(/export function ensureGlobalCommandProbeFresh[\s\S]*?\n\}/);
     if (!ensure) throw new Error('ensureGlobalCommandProbeFresh 未找到');
     assert.ok(ensure[0].includes('getGlobalFallback()'), '兜底非 null 直接返回');
@@ -2172,6 +2176,53 @@ void (async () => {
     assert.ok(fpCalls >= 4, `replace 各来源调用点应附带用户级指纹（实际 ${fpCalls}，需 ≥4）`);
     const registry = readFileSync(path.join('src', 'main', 'modules', 'sdk-command-registry.ts'), 'utf8');
     assert.ok(/originFingerprint\?: string/.test(registry), 'replace 应接受可选 originFingerprint 参数');
+  });
+
+  await asyncCheck('发现1 watcher：trigger 被幂等锁吞（false）→ 延迟重试直至 true；true 不排队', async () => {
+    const sleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms));
+    mkdirSync(ORIGIN_TMP_ROOT, { recursive: true });
+    const home = mkdtempSync(path.join(ORIGIN_TMP_ROOT, 'cl-w-swallow-'));
+    let calls = 0;
+    let mode: 'ok' | 'swallow' = 'ok';
+    try {
+      const cmdsDir = path.join(home, '.claude', 'commands');
+      mkdirSync(cmdsDir, { recursive: true });
+      startCommandSourceWatcher({
+        getUserHome: () => home,
+        getWorkingDirectory: () => null,
+        triggerGlobalProbe: () => {
+          calls += 1;
+          return mode === 'ok';
+        },
+        onConfigSaved: () => () => {},
+        logger: { info: () => {}, warn: () => {} },
+      });
+      await sleep(600); // 基准指纹
+      assert.equal(calls, 0, '基准不探测');
+      // 第一次变更：trigger 返回 true → 真正启动，lastProbeStartedAt 推进、不排队
+      writeFileSync(path.join(cmdsDir, 'a.md'), 'v1');
+      await sleep(2600);
+      assert.ok(calls >= 1, '指纹变化应触发 trigger');
+      const afterOk = calls;
+      // 第二次变更：吞掉模式 → 被吞后必须延迟重试（否则该次变更永久丢失）
+      mode = 'swallow';
+      writeFileSync(path.join(cmdsDir, 'a.md'), 'v2');
+      const t0 = Date.now();
+      while (calls === afterOk && Date.now() - t0 < 35000) await sleep(500);
+      assert.ok(calls > afterOk, '被吞（false）后应延迟重试再次 trigger（不永久丢失）');
+      // 恢复 ok：重试链/新变更最终以 true 收敛（不再无限重试）
+      mode = 'ok';
+      const beforeOk = calls;
+      writeFileSync(path.join(cmdsDir, 'a.md'), 'v3');
+      const t1 = Date.now();
+      while (calls === beforeOk && Date.now() - t1 < 35000) await sleep(500);
+      assert.ok(calls > beforeOk, '恢复 ok 后重试/新触发返回 true（收敛）');
+      stopCommandSourceWatcher();
+      assert.equal(isCommandSourceWatcherRunning(), false);
+    } finally {
+      stopCommandSourceWatcher(); // 幂等兜底（含 swallowedRetryTimer 清理）
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   // ── 汇总 ──
