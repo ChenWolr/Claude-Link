@@ -2777,9 +2777,14 @@ export function ensureGlobalCommandProbeFresh(mainWindow: BrowserWindow, maxAgeM
   runGlobalCommandProbe(mainWindow);
 }
 
-/** 启动一次全局兜底命令探测（幂等：已有在跑则跳过）。fire-and-forget 调用。 */
-export function runGlobalCommandProbe(mainWindow: BrowserWindow): void {
-  if (globalProbe) return;
+/**
+ * 启动一次全局兜底命令探测（幂等：已有在跑则跳过）。fire-and-forget 调用。
+ * 返回 true = 本次真正启动；false = 已有探测在跑被幂等锁吞掉。
+ * review-v1 发现1：watcher 触发据此感知被吞并延迟重试，否则该次磁盘变更永久丢失
+ * （指纹已更新为最新，后续无新事件不再比对）。index.ts 启动调用等不看返回值，天然兼容。
+ */
+export function runGlobalCommandProbe(mainWindow: BrowserWindow): boolean {
+  if (globalProbe) return false;
   lastGlobalProbeAttemptAt = Date.now();
   let resolveDone!: () => void;
   const donePromise = new Promise<void>((r) => {
@@ -2793,6 +2798,7 @@ export function runGlobalCommandProbe(mainWindow: BrowserWindow): void {
   };
   globalProbe = entry;
   void runGlobalCommandProbeInternal(mainWindow, entry);
+  return true;
 }
 
 async function runGlobalCommandProbeInternal(mainWindow: BrowserWindow, entry: GlobalProbeEntry): Promise<void> {
