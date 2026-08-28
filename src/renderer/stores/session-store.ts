@@ -341,8 +341,7 @@ export const useSessionStore = defineStore('session', {
         };
         this.activeSession = this.transientDraft;
       }
-      // 与 switchSession 同构的瞬态清理（暂态无历史可拉；不 commandStore.load——
-      // COMMANDS_GET 对无 DB 行会话抛错，暂态期间斜杠菜单为空，手输命令仍可用（B10）。
+      // 与 switchSession 同构的瞬态清理（暂态无历史可拉）。
       this.streamingContent = '';
       this.streamingThinking = '';
       this.streamingTool = '';
@@ -357,6 +356,11 @@ export const useSessionStore = defineStore('session', {
       this.thinkingTokens = null;
       this.contextLastWindow = null;
       this.canonicalContext = null;
+      // B10 反转：主进程 COMMANDS_GET 已对无 DB 行会话开放只读分流（不再抛错），暂态创建即 load
+      // 一次（与 switchSession 的 N4 同构）——斜杠菜单立即拿到全局兜底快照（全局指令），不再停留
+      // loading；物化后 SESSION_CREATE 的 per-session probe 经 COMMANDS_CHANGED 升级为精确命令。
+      const transientId = this.activeSession?.id;
+      if (transientId) void useCommandStore().load(transientId);
     },
     /** 物化当前暂态会话：沿用同一 id 建 DB 行（含暂态期间选定的 override/工作空间/附件绑定）。 */
     async materializeActiveTransient(): Promise<Session | null> {
