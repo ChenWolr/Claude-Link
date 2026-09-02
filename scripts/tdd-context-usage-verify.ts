@@ -592,13 +592,18 @@ check('S10 断言：顺序校验 + 禁 vacuous pass（Low-2）', () => {
   assert.ok(/vacuous pass 已禁止/.test(cdpE2eSrc), '/compact 回合零 payload 必须 fail');
   assert.ok(/pendingIdx > bannerIdx/.test(cdpE2eSrc), '应校验 pending 先于 banner 的顺序');
 });
-check('CDP DOM 断言接线：诊断行 + stale title（Medium-1/Low-1 验收）', () => {
+check('CDP DOM 断言接线：三行弹层 + stale title（v2 D5 更新；Medium-1 诊断行断言已删）', () => {
   assert.ok(/function assertDiagAndTitle/.test(cdpE2eSrc), '应有 samplePopover/assertDiagAndTitle 断言助手');
+  // v2 D4/D5：助手内断言 popover 恰好三行（已用上下文/全部上下文/占比）且不得再出现诊断行。
+  assert.ok(/EXPECTED_POPOVER_LABELS/.test(cdpE2eSrc), 'assertDiagAndTitle 应含三行期望标签表');
+  assert.ok(/不得再渲染「诊断」行/.test(cdpE2eSrc), 'assertDiagAndTitle 应断言诊断行不存在');
+  assert.ok(!/label === '诊断'[^)]*\)\s*\n\s*if \(!diag/.test(cdpE2eSrc), 'stale 分支不得再断言诊断行存在');
   const s1Idx = cdpE2eSrc.indexOf("check('S1 ");
   // post-turn 官方探针（本计划 Task 5 S1 增强）：S1 回合结束探针 fresh 到达后，title 不得标
   // 「上次采样」——assertDiagAndTitle(ws, false) 断言 fresh 终态语义（不再用 !terminalFresh）。
   assert.ok(cdpE2eSrc.indexOf('assertDiagAndTitle(ws, false)', s1Idx) > 0, 'S1 探针 fresh 后应断言 title 不含上次采样');
-  assert.ok(/waitForPostTurnProbe\(ws, sid, 10\)/.test(cdpE2eSrc), 'S1 应等待 post-turn 探针 fresh payload');
+  // v2 D5：等待窗按 45s 预算放大（S1=50s）。
+  assert.ok(/waitForPostTurnProbe\(ws, sid, 50\)/.test(cdpE2eSrc), 'S1 应等待 post-turn 探针 fresh payload（50s 窗）');
   assert.ok(/assertDiagAndTitle\(ws, !\(lp3\?\.source/.test(cdpE2eSrc), 'S3 应按终态断言 title 语义');
   assert.ok(/assertDiagAndTitle\(ws, !freshReconcile\)/.test(cdpE2eSrc), 'S9 fresh 对账终态不得标注上次采样');
 });
