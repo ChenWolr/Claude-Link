@@ -23,6 +23,7 @@ import {
   hasCompleteCanonicalFields,
   derivePostTurnProbePayloadFields,
 } from '../src/shared/context-usage';
+import { applySessionOverrideEnv } from '../src/shared/session-model';
 import type { RuntimeContextSnapshot } from '../src/shared/context-usage';
 
 let pass = 0;
@@ -854,6 +855,62 @@ check('结构：E2E S10 增强——探针 payload 断言 compactFromTokens + �
   assert.ok(/probe\.compactFromTokens/.test(cdpE2eSrc), 'S10 未断言探针 compactFromTokens');
   assert.ok(/→\|清出/.test(cdpE2eSrc), 'S10 未断言横幅 DOM 含 →/清出');
 });
+
+// ── §26 上下文圆圈 v2（docs/plans/context-circle-v2-plan.md §7）──────────
+// D1 探针设置拼接（fallback 形态）/ D2 预算 45s / D3 settle 顺序 + 日志降级 / D4 弹层三行化。
+console.log('=== 26) 上下文圆圈 v2：探针 env 补全 + 预算 + settle 顺序 + 弹层三行 ===');
+{
+  const sessionModelSrc = readFileSync(resolve('src/shared/session-model.ts'), 'utf8');
+
+  // D1.1：applySessionOverrideEnv 补 SMALL_FAST/SUBAGENT 两键——全局 settings.json 的
+  // SMALL_FAST/SUBAGENT env 泄漏（此前 env 通道无人覆盖→文件值生效）从此被会话模型压制。
+  check('D1.1 applySessionOverrideEnv 源码含 SMALL_FAST/SUBAGENT 赋值', () => {
+    assert.ok(/env\.ANTHROPIC_SMALL_FAST_MODEL\s*=\s*override\.modelId;/.test(sessionModelSrc), '缺 ANTHROPIC_SMALL_FAST_MODEL = override.modelId 赋值');
+    assert.ok(/env\.CLAUDE_CODE_SUBAGENT_MODEL\s*=\s*override\.modelId;/.test(sessionModelSrc), '缺 CLAUDE_CODE_SUBAGENT_MODEL = override.modelId 赋值');
+  });
+
+  // D1.3-3：行为断言——BASE_URL/KEY/AUTH_TOKEN 三元组语义不变 + 7 类模型键全钉会话模型。
+  check('D1.3 applySessionOverrideEnv 行为：BASE_URL/KEY/7 模型键钉会话模型 + AUTH_TOKEN 删除', () => {
+    const env: Record<string, string> = {
+      ANTHROPIC_AUTH_TOKEN: 'legacy-token',
+      ANTHROPIC_SMALL_FAST_MODEL: 'leak-small',
+      CLAUDE_CODE_SUBAGENT_MODEL: 'leak-subagent',
+    };
+    applySessionOverrideEnv(env, { apiBaseUrl: 'https://p.example/v1', apiKey: 'sk-p', modelId: 'm-1' });
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://p.example/v1');
+    assert.equal(env.ANTHROPIC_API_KEY, 'sk-p');
+    assert.equal(env.ANTHROPIC_MODEL, 'm-1');
+    assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL, 'm-1');
+    assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'm-1');
+    assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, 'm-1');
+    assert.equal(env.ANTHROPIC_DEFAULT_FABLE_MODEL, 'm-1');
+    assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, 'm-1', 'SMALL_FAST 应被会话模型压制');
+    assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, 'm-1', 'SUBAGENT 应被会话模型压制');
+    assert.ok(!('ANTHROPIC_AUTH_TOKEN' in env), 'AUTH_TOKEN 应删除');
+  });
+  check('D1.3 applySessionOverrideEnv 空 baseUrl/key 回归：删除键 + 模型键仍钉（不破旧语义）', () => {
+    const env: Record<string, string> = { ANTHROPIC_AUTH_TOKEN: 't', ANTHROPIC_BASE_URL: 'https://old/v1', ANTHROPIC_API_KEY: 'sk-old' };
+    applySessionOverrideEnv(env, { apiBaseUrl: '  ', apiKey: '', modelId: 'm-2' });
+    assert.ok(!('ANTHROPIC_BASE_URL' in env), '空 baseUrl 应删除 BASE_URL');
+    assert.ok(!('ANTHROPIC_API_KEY' in env), '空 key 应删除 API_KEY');
+    assert.ok(!('ANTHROPIC_AUTH_TOKEN' in env), 'AUTH_TOKEN 应删除');
+    assert.equal(env.ANTHROPIC_SMALL_FAST_MODEL, 'm-2');
+    assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, 'm-2');
+  });
+
+  // D1-fallback（P0-b/b2/c 实测定案，证据 D:/software/Cache/claude-link/probe-ctx/v2-20260902/）：
+  // flag --settings 的 env 与用户文件 env 同键对撞时文件赢（P0-b SONNET 键），且 flag 组合会使
+  // 探针工具集失真（P0-c System tools 14.7k→2.9k）——探针不传 --settings，走 env 单通道
+  // （buildSpawnEnv(override) 含 7 键全钉：ANTHROPIC_MODEL+4 别名+SMALL_FAST/SUBAGENT）。
+  check('D1-fallback 探针段不传 --settings（P0-b 证伪 flag 优先级，env 单通道定案）', () => {
+    const probeFnStart = sdkBackendSrc.indexOf('async function runPostTurnContextProbe(');
+    const probeFnEnd = sdkBackendSrc.indexOf('export function schedulePostTurnProbe(', probeFnStart);
+    assert.ok(probeFnStart >= 0 && probeFnEnd > probeFnStart, '探针函数切片失败');
+    const probeFn = sdkBackendSrc.slice(probeFnStart, probeFnEnd);
+    assert.ok(!probeFn.includes("'--settings'"), '探针段出现 --settings——P0-b 已证伪 flag 优先级（同键对撞文件赢）且 P0-c 证其使工具集失真，不得回退主方案');
+    assert.ok(/env = buildSpawnEnv\(override\)/.test(probeFn), '探针 env 应来自 buildSpawnEnv(override)（env 单通道）');
+  });
+}
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
