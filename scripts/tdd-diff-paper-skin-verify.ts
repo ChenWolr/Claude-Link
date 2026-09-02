@@ -3,6 +3,9 @@
 //   纯函数组：diff-render.bridgeRibbon 贝塞尔缎带几何（对齐退化水平直线 / add 三角兜底 / 无副作用 / bridgePolygon 兼容保留）。
 //   源码契约组：DiffBody split 舞台新结构（gutter/卡片/单 SVG river/insert 公式）、
 //     DiffLine split 分支去行号、DiffDialog 暖 scrim、--river-w token。
+// v9「行号贴码」增量契约（docs/plans/diff-linenums-plan-v2.md P0，Δ1-Δ6）：
+//   中廊 .mid（space-between）+ 行号贴码细线在码侧 + token 38/46 + 桥宽 122 +
+//   左栏色轨钉层 raillayer/crail + 插入线加实 3px/62% + gutterTone 三档钉死。
 // 运行：npx tsx scripts/tdd-diff-paper-skin-verify.ts
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
@@ -115,8 +118,10 @@ async function main(): Promise<void> {
     assert.ok(!riverSvgTag.includes('viewBox'), 'river-svg 不应使用 viewBox（user units=px，防圆点拉椭圆）');
   });
 
-  check('DiffBody split 舞台须有独立行号列（class="gutter"）', () => {
-    assert.ok(diffBodySrc.includes('class="gutter"'), 'DiffBody 缺 gutter 行号列');
+  check('DiffBody split 舞台须有独立行号列（gutter-l/gutter-r 移入中廊 .mid）', () => {
+    assert.ok(diffBodyTemplate.includes('class="gutter gutter-l"'), 'DiffBody 缺 gutter-l 行号列');
+    assert.ok(diffBodyTemplate.includes('class="gutter gutter-r"'), 'DiffBody 缺 gutter-r 行号列');
+    assert.ok(!diffBodySrc.includes('gutter--r'), '旧 gutter--r 类名须清理（v9 改 gutter-l/gutter-r）');
   });
 
   check('DiffBody 须有改动块卡片层（ccard + splitCardsL/R computed）', () => {
@@ -156,9 +161,89 @@ async function main(): Promise<void> {
     assert.ok(!diffBodySrc.includes('LH / 2'), 'DiffBody 不得含 LH / 2（插入标记偏移回归）');
   });
 
-  check('.diff-river 须为真实中间列（宽 var(--river-w)）且 DiffDialog 定义 --river-w: 64px', () => {
-    assert.match(diffBodySrc, /\.diff-river\s*\{[\s\S]{0,300}var\(--river-w\)/, '.diff-river 宽须走 var(--river-w)');
-    assert.ok(diffDialogSrc.includes('--river-w: 64px'), 'DiffDialog 须定义 --river-w: 64px');
+  check('Δ1/Δ3：.diff-river 须 absolute inset:0 覆盖全 mid（缎带桥横穿中廊），不再独立列', () => {
+    const rule = diffBodySrc.match(/\.diff-row--split \.diff-river\s*\{[^}]*\}/)?.[0] ?? '';
+    assert.ok(rule, '缺 .diff-river 规则');
+    assert.match(rule, /position:\s*absolute/, 'diff-river 须 absolute（覆盖 mid 全宽）');
+    assert.match(rule, /inset:\s*0/, 'diff-river 须 inset:0');
+    assert.ok(!rule.includes('var(--river-w)'), 'diff-river 不再是 flex 0 0 var(--river-w) 独立列');
+  });
+
+  console.log('  ── v9 行号贴码增量（Δ1-Δ6，diff-linenums-plan-v2）──');
+  check('Δ1 中廊重构：.mid 容器 + justify-content: space-between + 宽 calc(gutter*2+river)', () => {
+    assert.ok(diffBodyTemplate.includes('class="mid"'), 'DiffBody 模板缺 .mid 容器');
+    const midRule = diffBodySrc.match(/\.mid\s*\{[^}]*\}/)?.[0] ?? '';
+    assert.ok(midRule, '缺 .mid 规则');
+    assert.match(midRule, /justify-content:\s*space-between/, '.mid 须 space-between（gutter 分居两端、河居中）');
+    assert.match(midRule, /calc\(var\(--gutter-w\) \* 2 \+ var\(--river-w\)\)/, '.mid 宽须 = gutter*2+river（122px）');
+  });
+
+  check('Δ2 行号贴码：细线在码侧（gutter-l border-left / gutter-r border-right）+ 左列左对齐/右列右对齐（8px 内距）', () => {
+    assert.match(diffBodySrc, /\.gutter-l\s*\{[^}]*border-left:/, 'gutter-l 细线须在 border-left（贴左码列边界）');
+    assert.match(diffBodySrc, /\.gutter-r\s*\{[^}]*border-right:/, 'gutter-r 细线须在 border-right（贴右码列边界）');
+    const glnRule = diffBodySrc.match(/\.gln\s*\{[^}]*\}/)?.[0] ?? '';
+    assert.ok(glnRule, '缺 .gln 规则');
+    assert.match(glnRule, /padding-left:\s*8px/, '左列行号须 padding-left 8px（紧跟细线内侧）');
+    assert.match(glnRule, /text-align:\s*left/, '左列行号须左对齐');
+    const grRule = diffBodySrc.match(/\.gutter-r \.gln\s*\{[^}]*\}/)?.[0] ?? '';
+    assert.ok(grRule, '缺 .gutter-r .gln 规则');
+    assert.match(grRule, /padding-right:\s*8px/, '右列行号须 padding-right 8px（紧跟细线内侧）');
+    assert.match(grRule, /text-align:\s*right/, '右列行号须右对齐');
+  });
+
+  check('Δ3 中廊收窄：两弹窗 token --gutter-w: 38px、--river-w: 46px（不得残留 44/64）', () => {
+    for (const [name, src] of [['DiffDialog', diffDialogSrc], ['ToolDiffDialog', toolDiffDialogSrc]] as const) {
+      assert.ok(src.includes('--gutter-w: 38px'), `${name} 须定义 --gutter-w: 38px`);
+      assert.ok(src.includes('--river-w: 46px'), `${name} 须定义 --river-w: 46px`);
+      assert.ok(!src.includes('--river-w: 64px') && !src.includes('--gutter-w: 44px'), `${name} 不得残留旧值 64/44`);
+    }
+  });
+
+  check('Δ3 桥画布横穿 mid：RIVER_W=122（38+46+38）且锚点 cx = x*122（0/122）', () => {
+    assert.match(diffBodyScript, /const RIVER_W = 122/, 'DiffBody 桥宽常量须为 122（mid 全宽，尖端直抵两侧码列）');
+    assert.match(diffBodyTemplate, /:cx="d\.x \* RIVER_W"/, '锚点 cx 须为 d.x * RIVER_W（0/122）');
+  });
+
+  check('P1 列头：colhead--river 宽度公式 calc(gutter*2+river)（两弹窗）', () => {
+    for (const [name, src] of [['DiffDialog', diffDialogSrc], ['ToolDiffDialog', toolDiffDialogSrc]] as const) {
+      assert.match(
+        src,
+        /\.colhead--river\s*\{[^}]*calc\(var\(--gutter-w\) \* 2 \+ var\(--river-w\)\)/,
+        `${name} colhead--river 宽须 calc(gutter*2+river) 与中廊对齐`,
+      );
+    }
+  });
+
+  check('Δ3 行号贴码间距：DiffLine split code 左内距 8px（10→8）', () => {
+    assert.match(diffLineSrc, /\.line--split code\s*\{[^}]*padding:\s*0 16px 0 8px/, 'split code 左内距须 8px');
+  });
+
+  check('Δ4 左栏色轨钉层：pane 级 .raillayer>.crail，左栏卡带 ccard--norail、右栏卡不带', () => {
+    assert.match(diffBodySrc, /\.raillayer\s*\{/, 'DiffBody 缺 .raillayer 钉层样式');
+    assert.match(diffBodySrc, /\.crail\s*\{/, 'DiffBody 缺 .crail 色轨样式');
+    assert.match(diffBodyTemplate, /class="raillayer"/, 'DiffBody 模板缺 raillayer 钉层');
+    assert.match(diffBodySrc, /\.ccard--norail::before\s*\{[^}]*display:\s*none/, 'ccard--norail 须隐藏内置轨');
+    const tplL = diffBodyTemplate.split("'cl' + ci")[1] ?? '';
+    const tplR = diffBodyTemplate.split("'cr' + ci")[1] ?? '';
+    assert.ok(tplL.includes('ccard--norail'), '左栏卡片须带 ccard--norail（轨改由钉层绘制）');
+    assert.ok(tplR && !tplR.includes('ccard--norail'), '右栏卡片不得带 ccard--norail（保持内置左轨）');
+  });
+
+  check('Δ5 插入线加实：3px + edge 62% + left:0 right:0 贴满（与楔形尖端连成贯穿线）', () => {
+    const rule = diffBodySrc.match(/\.diff-row--split \.insert-line\s*\{[^}]*\}/)?.[0] ?? '';
+    assert.ok(rule, '缺 .insert-line 规则');
+    assert.match(rule, /height:\s*3px/, '插入线须 3px（原 2px）');
+    assert.match(rule, /left:\s*0/, '插入线须 left:0（贴可视左缘）');
+    assert.match(rule, /right:\s*0/, '插入线须 right:0（贴可视右缘）');
+    assert.match(rule, /62%,\s*transparent/, '插入线须 edge 62% 加实（原 30%）');
+  });
+
+  check('Δ6 行号色语义钉死：gutterTone 显式三档（del/modl→红、add/modr→绿、ctx 中性）', () => {
+    const fn = diffBodyScript.match(/function gutterTone\([^)]*\): string\[\]\s*\{[\s\S]*?\n\}/)?.[0] ?? '';
+    assert.ok(fn, 'DiffBody 须有 gutterTone');
+    assert.match(fn, /kind === 'add' \|\| kind === 'modr'/, 'add/modr 须显式映 add（绿）');
+    assert.match(fn, /kind === 'del' \|\| kind === 'modl'/, 'del/modl 须显式映 del（红，防三元漏 del 映绿回归）');
+    assert.match(fn, /return \[\];/, 'ctx 须中性（空 class）');
   });
 
   console.log('  ── inline 换皮（P3）──');
