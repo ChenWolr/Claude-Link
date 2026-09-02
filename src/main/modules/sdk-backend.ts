@@ -1331,10 +1331,12 @@ async function refreshContextSnapshot(
   } catch (e) {
     // getContextUsage 失败（query 已关闭/超时等）→ 只记诊断，不阻塞 turn completion。
     // F4（验收 review）：mid-turn 超时降级 debug——CLI 生成中不回控制请求 ACK（R6 实测
-    // 同因），该相位超时是常态而非异常，warn 级刷屏误导排障；query-start/post-turn
-    // 仍 warn（它们有 stale 降级语义，值得看见）。
-    const logFn = opts.samplePhase === 'mid-turn' ? logger.debug : logger.warn;
-    logFn(`[${sessionId}] refreshContextSnapshot 失败（${opts.samplePhase}）：${e instanceof Error ? e.message : String(e)}`);
+    // 同因），该相位超时是常态而非异常。
+    // context-circle-v2 D3：query-start/post-turn 一并降 debug（对齐 bbc9388 的 mid-turn
+    // 先例）——SDK 控制通道在本机当前 CLI 状态下已死（08-29 实证 90s 无响应），三相位
+    // 快照超时是固有遥测而非异常，warn 级每回合 4-8 条刷屏误导排障；stale 降级语义
+    // （下方方案 B payload）保持不变。
+    logger.debug(`[${sessionId}] refreshContextSnapshot 失败（${opts.samplePhase}）：${e instanceof Error ? e.message : String(e)}`);
     // review-v4 High-1 方案 B：post-turn 快照不可得时必须显式降级 stale + diagnostic——
     // 禁止回合结束后仍保留 query-start 快照的 fresh 语义冒充当前值。renderer 收到 stale 后
     // 保留 last-known 数字但 freshness 降级（ContextButton 明示非实时）。仅对仍是当前 entry 的
@@ -3428,10 +3430,6 @@ async function runQuery(
       }
       if (type === 'result') {
         gotResult = true;
-        // streaming input 收口：result 已明确结束本回合 → 解除挂起的输入生成器 →
-        // streamInput 收尾 endInput（stdin EOF），CLI 得以干净退出。时机与 string 路径
-        // 的 isSingleUserTurn 分支（首 result 即关 stdin）等价。
-        streamingPrompt.settle();
         if (sdkMsg.is_error === true) {
           finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
         }
@@ -3468,6 +3466,13 @@ async function runQuery(
         if (!contextTurn && isCurrentEntry(sessionId, entry)) {
           await refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'post-turn' });
         }
+        // streaming input 收口（context-circle-v2 D3）：挪到 post-turn 快照 await 之后——
+        // 先 settle 会关 stdin（endInput），SDK 控制通道（query.getContextUsage）的快照必超时；
+        // 通道死的环境无行为差异（快照照旧超时走方案 B），通道复活的环境快照才能工作。
+        // 时机语义：result 已明确结束本回合，此处解除挂起的输入生成器 → streamInput 收尾
+        // endInput（stdin EOF），CLI 得以干净退出。守卫不动：快照失败也必须收口 stdin，
+        // 外层 finally 的幂等 settle 兜底仍在。
+        streamingPrompt.settle();
         // result 已明确结束当前回合：先释放 active entry，再通知队列退出。
         // renderer 收到 result 后可立即发送下一回合，不再撞上尚未走到函数 finally 的旧 entry。
         // post-turn 官方探针：deleteEntry 前捕获原回合代际与 cliSessionId，emitExit 后 fire-and-forget

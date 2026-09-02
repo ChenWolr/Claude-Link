@@ -918,6 +918,29 @@ console.log('=== 26) 上下文圆圈 v2：探针 env 补全 + 预算 + settle �
     const v = Number(m![1].replace(/_/g, ''));
     assert.ok(v >= 45_000, `探针预算应 ≥45_000（实际 ${v}）`);
   });
+
+  // D3-1：result 分支内 post-turn 快照 await 先于 settle()——先 settle 会关 stdin，
+  // 控制通道快照必超时（08-29 审计过的同一修法；恢复 :2312 设计声明的控制请求窗口）。
+  check('D3 result 分支内快照 await 先于 settle()（恢复控制请求窗口）', () => {
+    const resultIdx = sdkBackendSrc.indexOf("if (type === 'result')");
+    assert.ok(resultIdx >= 0, '未找到 result 分支');
+    const settleIdx = sdkBackendSrc.indexOf('streamingPrompt.settle();', resultIdx);
+    const refreshIdx = sdkBackendSrc.indexOf("await refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'post-turn' })", resultIdx);
+    assert.ok(settleIdx > 0, 'result 分支内应存在 streamingPrompt.settle()');
+    assert.ok(refreshIdx > 0, 'result 分支内应存在 post-turn 快照 await');
+    assert.ok(refreshIdx < settleIdx, 'post-turn 快照 await 必须先于 streamingPrompt.settle()（先 settle 关 stdin → 控制通道快照必超时）');
+  });
+
+  // D3-2：refreshContextSnapshot 失败日志降 debug（死通道固有遥测不再 warn 刷屏；对齐 bbc9388 mid-turn 先例）。
+  check('D3 refreshContextSnapshot 失败日志为 logger.debug（不再 warn 刷屏）', () => {
+    const fnStart = sdkBackendSrc.indexOf('async function refreshContextSnapshot(');
+    const fnEnd = sdkBackendSrc.indexOf('// ── P2 mid-turn', fnStart);
+    assert.ok(fnStart >= 0 && fnEnd > fnStart, 'refreshContextSnapshot 函数切片失败');
+    const fnBody = sdkBackendSrc.slice(fnStart, fnEnd);
+    const m2 = fnBody.match(/(logger\.\w+)\(`\[\$\{sessionId\}\] refreshContextSnapshot 失败/);
+    assert.ok(m2, '未找到 refreshContextSnapshot 失败日志行');
+    assert.equal(m2![1], 'logger.debug', `失败日志应为 logger.debug（实际 ${m2![1]}）`);
+  });
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
