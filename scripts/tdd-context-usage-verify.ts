@@ -571,10 +571,12 @@ check('runTurnWithEvidence 在回合空闲后重读本回合终态消息', () =>
   assert.ok(idleIdx >= 0 && rereadIdx > idleIdx, '终态消息重读必须发生在 waitQueryIdle 之后');
 });
 // ── review-v5：显示层最后一公里 ──
-check('ContextButton popover 渲染具体 diagnostic（Medium-1）', () => {
-  assert.ok(/eff\.diagnostic.*ctx__row--diag|ctx__row--diag[\s\S]{0,200}eff\.diagnostic/.test(contextButtonSrc), 'popover 应有渲染 eff.diagnostic 的诊断行');
-  assert.ok(/data-testid="ctx-diag-row"/.test(contextButtonSrc), '诊断行应有 testid（供 CDP DOM 断言定位）');
-  assert.ok(/diagPreview/.test(contextButtonSrc) && /d\.length > 80/.test(contextButtonSrc), '诊断文本应截断展示（全文放 title）');
+// v2（context-circle-v2 D4）反转：诊断行从 popover 移除（用户要求弹层只留三行），
+// diagnostic 仍在 store/主进程日志/title 链路流转，只是不再渲染为 UI 行。
+check('ContextButton popover 不再渲染诊断行（v2 D4 反转 review-v5 Medium-1）', () => {
+  assert.ok(!/eff\.diagnostic.*ctx__row--diag|ctx__row--diag[\s\S]{0,200}eff\.diagnostic/.test(contextButtonSrc), 'popover 不得再渲染 eff.diagnostic 诊断行');
+  assert.ok(!/data-testid="ctx-diag-row"/.test(contextButtonSrc), '诊断行 testid 应删除');
+  assert.ok(!/diagPreview/.test(contextButtonSrc), 'diagPreview 截断展示应随诊断行一并删除');
 });
 check('stale 态 title 标注「上次采样」（Low-1）', () => {
   assert.ok(/isStaleTrusted/.test(contextButtonSrc) && /eff\.value\.freshness !== 'fresh'/.test(contextButtonSrc), 'title 计算应引用 freshness 区分 fresh/stale');
@@ -940,6 +942,40 @@ console.log('=== 26) 上下文圆圈 v2：探针 env 补全 + 预算 + settle �
     const m2 = fnBody.match(/(logger\.\w+)\(`\[\$\{sessionId\}\] refreshContextSnapshot 失败/);
     assert.ok(m2, '未找到 refreshContextSnapshot 失败日志行');
     assert.equal(m2![1], 'logger.debug', `失败日志应为 logger.debug（实际 ${m2![1]}）`);
+  });
+
+  // D4-1：诊断行/压缩明细行删除（反转 review-v5 :573-577 旧断言）。
+  check('D4 popover 不得含诊断行/压缩明细行（ctx-diag-row/diagPreview/compactDetailLine 删除）', () => {
+    assert.ok(!/ctx-diag-row/.test(contextButtonSrc), '诊断行 testid ctx-diag-row 应删除');
+    assert.ok(!/diagPreview/.test(contextButtonSrc), 'diagPreview computed 应删除');
+    assert.ok(!/ctx-compact-row/.test(contextButtonSrc), '压缩明细行 testid ctx-compact-row 应删除');
+    assert.ok(!/compactDetailLine/.test(contextButtonSrc), 'compactDetailLine computed 应删除');
+  });
+
+  // D4-2：弹层恰好三行——已用上下文/全部上下文/占比；计费行（本轮输入/缓存读取/缓存写入）
+  // 与「最大上下文」旧文案全部移除。
+  check('D4 popover 恰好三行：已用上下文/全部上下文/占比（计费行与「最大上下文」移除）', () => {
+    const blockStart = contextButtonSrc.indexOf('<div v-if="showPopover"');
+    const blockEnd = contextButtonSrc.indexOf('<!-- C：实时压缩进行中', blockStart);
+    assert.ok(blockStart >= 0 && blockEnd > blockStart, 'popover 块切片失败');
+    const block = contextButtonSrc.slice(blockStart, blockEnd);
+    assert.ok(block.includes('已用上下文'), '缺「已用上下文」行');
+    assert.ok(block.includes('全部上下文'), '缺「全部上下文」行（原「最大上下文」应改名）');
+    assert.ok(block.includes('占比'), '缺「占比」行');
+    assert.ok(!/本轮输入|缓存读取|缓存写入|最大上下文|诊断/.test(block), 'popover 不得再渲染计费行/「最大上下文」/诊断行');
+    const rowCount = (block.match(/class="ctx__row/g) || []).length;
+    assert.equal(rowCount, 3, `popover 应恰好 3 个 ctx__row（实际 ${rowCount}）`);
+  });
+
+  // D4-3：eff computed 裁剪为弹层与 isStaleTrusted 实际消费的字段。
+  check('D4 eff computed 裁剪（保留 currentUsedTokens/windowSize/freshness，不再透出计费/诊断字段）', () => {
+    const effStart = contextButtonSrc.indexOf('const eff = computed(');
+    assert.ok(effStart >= 0, '缺 eff computed');
+    const effEnd = contextButtonSrc.indexOf('}));', effStart);
+    const effBody = contextButtonSrc.slice(effStart, effEnd);
+    assert.ok(effBody.includes('currentUsedTokens') && effBody.includes('windowSize'), 'eff 应含 currentUsedTokens/windowSize');
+    assert.ok(effBody.includes('freshness'), 'eff 应保留 freshness（isStaleTrusted 消费）');
+    assert.ok(!/turnInputTokens|turnCacheReadTokens|turnCacheCreationTokens|diagnostic|samplePhase|consistency/.test(effBody), 'eff 不应再透出 turnInput*/diagnostic/samplePhase/consistency');
   });
 }
 
