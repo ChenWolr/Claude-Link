@@ -1972,8 +1972,15 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
     sdkBackend.includes('settle: () =>'));
   check('runQuery 三处 startSdkQuery 均传 streaming iterable（迁移接线）',
     (sdkBackend.match(/startSdkQuery\(streamingPrompt\.iterable, sdkOptions\)/g) ?? []).length === 3);
-  check('result 分支 settle + finally 兜底 settle（防挂起生成器泄漏）',
-    /type === 'result'[\s\S]{0,400}?streamingPrompt\.settle\(\)/.test(sdkBackend) &&
+  // v2（context-circle-v2 D3）：settle 挪至 result 分支内 post-turn 快照 await 之后——
+  // 先 settle 会关 stdin，控制通道快照必超时（08-29 审计定案的同款修法）。
+  check('result 分支 settle + finally 兜底 settle（防挂起生成器泄漏；settle 在 post-turn 快照 await 后）',
+    (() => {
+      const resultIdx = sdkBackend.indexOf("if (type === 'result')");
+      const settleIdx = sdkBackend.indexOf('streamingPrompt.settle();', resultIdx);
+      const refreshIdx = sdkBackend.indexOf("await refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'post-turn' })", resultIdx);
+      return resultIdx >= 0 && settleIdx > resultIdx && refreshIdx > resultIdx && refreshIdx < settleIdx;
+    })() &&
     /finally \{[\s\S]{0,300}?entry\.streamingPrompt\?\.settle\(\);[\s\S]*?deleteEntry\(sessionId, entry\);/.test(sdkBackend));
   check('SessionEntry 挂 streamingPrompt 句柄 + markEntryAborting settle',
     sdkBackend.includes('streamingPrompt: StreamingPromptHandle | null;') &&
@@ -2009,8 +2016,11 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
   check('F1 getActiveProcess 对 forceKill 优雅窗口判否（队列续接预检放行）',
     /isEntryActive\(entry\) && !entry\.forceKill \? entry\.handle : undefined/.test(sdkBackend));
   // F4：mid-turn context refresh 超时降级 debug（CLI 生成中不回控制 ACK 属常态）。
-  check('F4 mid-turn refresh 超时日志降级 debug（防刷屏误导）',
-    /samplePhase === 'mid-turn' \? logger\.debug : logger\.warn/.test(sdkBackend));
+  // v2（context-circle-v2 D3）：条件降级改为无条件 debug——query-start/post-turn 相位也降，
+  // 控制通道死的固有遥测不再 warn 刷屏（stale 降级 payload 语义不变）。
+  check('F4 refreshContextSnapshot 失败日志降级 debug（v2：三相位一律 debug，防刷屏误导）',
+    /logger\.debug\(`\[\$\{sessionId\}\] refreshContextSnapshot 失败/.test(sdkBackend) &&
+    !/logger\.warn\(`\[\$\{sessionId\}\] refreshContextSnapshot 失败/.test(sdkBackend));
 
   // F5（验收 review 第三轮）：queue 触发点 killProcess 漏传 mainWindow 会使「弹窗被系统
   // 取消」反馈（system:interaction_cancelled）在 queue 路径恒静默——interruptTask 与
