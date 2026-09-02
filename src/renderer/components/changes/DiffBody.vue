@@ -49,7 +49,7 @@ const rightPane = ref<HTMLElement | null>(null);
 
 // —— split：chunk 模型（contrast 风格：左右各自完整行 + 对齐块 + SVG 桥）——
 const LH = 22; // 与 CSS --diff-line-h 一致
-const RIVER_W = 64; // 与 CSS --river-w 一致（单张 river-svg 无 viewBox，user units = px）
+const RIVER_W = 122; // v9 Δ3：桥画布横穿整个 mid（38+46+38），锚点 cx 0/122 尖端直抵两侧码列（单张 river-svg 无 viewBox，user units = px）
 const splitLayout = computed<SplitLayout | null>(() =>
   props.parsed ? buildSplitChunks(props.parsed, LH) : null,
 );
@@ -271,6 +271,12 @@ const splitCardsL = computed(() => splitLayout.value?.chunks
   .filter((c) => c.kind !== 'same' && c.kind !== 'skip' && (c.leftSize > 0 || c.kind === 'add')) ?? []);
 const splitCardsR = computed(() => splitLayout.value?.chunks
   .filter((c) => c.kind !== 'same' && c.kind !== 'skip' && (c.rightSize > 0 || c.kind === 'del')) ?? []);
+// v9 Δ4 左栏色轨钉层：左栏卡片内置轨关闭（ccard--norail），改由 pane-col 级钉层绘制——
+// 钉层不在横向滚动的 .pane 内（产品 .pane 即滚动容器，与原型 pane/code 分层不同），right:0
+// 恒贴可视右缘不随 scrollLeft 跑走；纵向 transform 绑同一 offsets.left 与行/卡片同步。
+// 每改动 chunk 一个 crail（有界），tone 与左栏卡片同映射（del/edit→红、add→绿）。
+const splitRailL = computed(() => splitLayout.value?.chunks
+  .filter((c) => c.kind !== 'same' && c.kind !== 'skip' && c.leftSize > 0) ?? []);
 // gutter 行号墨色 tone（D4 行号中性化：槽不染色，仅改动行行号加重）
 function gutterTone(kind: string | undefined): string[] {
   if (kind === 'add' || kind === 'modr') return ['gln--add'];
@@ -561,15 +567,17 @@ onBeforeUnmount(() => {
     <div v-if="parsed && mode === 'split'" class="diff-row diff-row--split">
       <div ref="splitScroll" class="diff-scroll">
         <div class="split-track">
-          <!-- 左栏 -->
+          <!-- 左栏（v9 Δ1：行号列移入中廊 .mid，栏内只剩水平滚动码区） -->
           <div class="pane-col">
-            <div class="gutter">
-              <div class="g-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
-                <template v-for="(ln, i) in (splitLayout?.leftLines ?? [])" :key="'gl' + i">
-                  <div v-if="leftKindArr[i] === 'skip'" class="gln" aria-hidden="true"></div>
-                  <div v-else class="gln" :class="gutterTone(leftKindArr[i])">{{ ln.n ?? '' }}</div>
-                </template>
-              </div>
+            <!-- v9 Δ4 色轨钉层：放 pane-col（不滚动）内使 crail 恒贴可视右缘，纵向随 offsets.left 同步 -->
+            <div class="raillayer" aria-hidden="true" :style="{ transform: `translateY(${offsets.left}px)` }">
+              <div
+                v-for="(c, ri) in splitRailL"
+                :key="'rl' + ri"
+                class="crail"
+                :class="'crail--' + (c.kind === 'add' ? 'add' : 'del')"
+                :style="{ top: c.leftStart * LH + 'px', height: c.leftSize * LH + 'px' }"
+              ></div>
             </div>
             <div ref="leftPane" class="pane pane--left" @scroll.passive="onPaneScrollX('left')">
               <div class="file-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
@@ -577,7 +585,7 @@ onBeforeUnmount(() => {
                   <div
                     v-if="c.leftSize > 0"
                     class="ccard"
-                    :class="['ccard--' + (c.kind === 'add' ? 'add' : 'del'), { 'is-current': c.navIndex === curChange, flash: c.navIndex === flashNav }]"
+                    :class="['ccard--' + (c.kind === 'add' ? 'add' : 'del'), 'ccard--norail', { 'is-current': c.navIndex === curChange, flash: c.navIndex === flashNav }]"
                     :style="{ top: c.leftStart * LH + 'px', height: c.leftSize * LH + 'px' }"
                   ></div>
                   <div
@@ -609,8 +617,20 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </div>
-          <!-- river：单张全尺寸 SVG 缎带桥（无 viewBox，user units=px；edit 桥经 defs 双色渐变） -->
-          <div class="diff-river">
+          <!-- v9 中廊 .mid（Δ1）：gutterL｜river｜gutterR，space-between 把行号列分贴两侧码列边界；
+               行号贴码（Δ2）细线在码侧、透明底让缎带从下方横穿；river 改 absolute inset:0 覆盖全 mid
+               （Δ3 桥画布 122px=38+46+38，尖端直抵两侧码列边缘） -->
+          <div class="mid">
+            <div class="gutter gutter-l">
+              <div class="g-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
+                <template v-for="(ln, i) in (splitLayout?.leftLines ?? [])" :key="'gl' + i">
+                  <div v-if="leftKindArr[i] === 'skip'" class="gln" aria-hidden="true"></div>
+                  <div v-else class="gln" :class="gutterTone(leftKindArr[i])">{{ ln.n ?? '' }}</div>
+                </template>
+              </div>
+            </div>
+            <!-- river：单张全尺寸 SVG 缎带桥（无 viewBox，user units=px；edit 桥经 defs 双色渐变） -->
+            <div class="diff-river">
             <svg class="river-svg">
               <defs>
                 <template v-for="(r, ri) in splitRibbons" :key="'dg' + ri">
@@ -646,9 +666,7 @@ onBeforeUnmount(() => {
               </g>
             </svg>
           </div>
-          <!-- 右栏 -->
-          <div class="pane-col">
-            <div class="gutter gutter--r">
+            <div class="gutter gutter-r">
               <div class="g-offset" :style="{ transform: `translateY(${offsets.right}px)` }">
                 <template v-for="(ln, i) in (splitLayout?.rightLines ?? [])" :key="'gr' + i">
                   <div v-if="rightKindArr[i] === 'skip'" class="gln" aria-hidden="true"></div>
@@ -656,6 +674,9 @@ onBeforeUnmount(() => {
                 </template>
               </div>
             </div>
+          </div>
+          <!-- 右栏（v9 Δ1：行号列已移入中廊，栏内只剩水平滚动码区） -->
+          <div class="pane-col">
             <div ref="rightPane" class="pane pane--right" @scroll.passive="onPaneScrollX('right')">
               <div class="file-offset" :style="{ transform: `translateY(${offsets.right}px)` }">
                 <template v-for="(c, ci) in splitCardsR" :key="'cr' + ci">
@@ -911,26 +932,39 @@ onBeforeUnmount(() => {
      垂直内容（.file-offset 行数×LH）超出视口，靠 translateY = -scrollTop 滚动。 */
   height: 100%;
 }
-/* 栏容器：行号列（gutter）+ 水平滚动代码区（.pane）。gutter 不随横向滚动，
-   .pane 仍是水平滚动容器（持有 scrollLeft，搜索横向定位契约依赖）。 */
+/* 栏容器：水平滚动代码区（.pane）。v9 Δ1 后行号列不在此，gutter 移入中廊 .mid；
+   .pane 仍是水平滚动容器（持有 scrollLeft，搜索横向定位契约依赖）。
+   position:relative 供 Δ4 色轨钉层 .raillayer 锚定（钉层在 pane-col 内、pane 外）。 */
 .pane-col {
   flex: 1;
   min-width: 0;
   display: flex;
   min-height: 0;
+  position: relative;
 }
-/* 行号列（D4 行号中性化）：槽不染色，仅右/左发丝线与纸面区分 */
+/* v9 中廊（Δ1）：gutterL｜river｜gutterR。space-between 把行号列分贴两侧码列边界，
+   河区（absolute）横穿其间；宽 = gutter*2+river = 122px（Δ3）。 */
+.diff-row--split .mid {
+  flex: 0 0 calc(var(--gutter-w) * 2 + var(--river-w));
+  position: relative;
+  height: 100%;
+  display: flex;
+  justify-content: space-between;
+}
+/* 行号列（v9 Δ2 行号贴码）：透明底让缎带从下方横穿（原型 .gutter 同款），
+   细线移到码列边界——gutter-l 左缘贴左码列、gutter-r 右缘贴右码列 */
 .diff-row--split .gutter {
   flex: 0 0 var(--gutter-w);
   overflow: hidden;
   position: relative;
   z-index: 2;
-  background: color-mix(in srgb, var(--color-panel) 42%, var(--color-panel-soft));
-  border-right: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
+  background: transparent;
 }
-.diff-row--split .gutter--r {
-  border-right: 0;
-  border-left: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
+.diff-row--split .gutter-l {
+  border-left: 1px solid color-mix(in srgb, var(--color-border) 30%, transparent);
+}
+.diff-row--split .gutter-r {
+  border-right: 1px solid color-mix(in srgb, var(--color-border) 30%, transparent);
 }
 .g-offset {
   will-change: transform;
@@ -938,14 +972,20 @@ onBeforeUnmount(() => {
 .gln {
   height: var(--diff-line-h);
   line-height: var(--diff-line-h);
-  padding-right: 9px;
-  text-align: right;
+  /* v9 Δ2 行号贴码：左列行号左对齐、紧跟 gutter-l 细线内侧（右列镜像覆写 .gutter-r .gln） */
+  padding-left: 8px;
+  text-align: left;
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--color-text-muted);
   opacity: 0.78;
   font-variant-numeric: tabular-nums;
   user-select: none;
+}
+.gutter-r .gln {
+  padding-left: 0;
+  padding-right: 8px;
+  text-align: right;
 }
 .gln--add {
   color: var(--add-text);
@@ -984,12 +1024,13 @@ onBeforeUnmount(() => {
   width: max-content;
   flex-shrink: 0;
 }
-/* river：真实中间列（D2 桥曲线化：64px + 中心虚线脊线 + 单张全尺寸 SVG 缎带桥） */
+/* river（v9 Δ3）：不再独立列，absolute inset:0 覆盖全 mid（122px），桥画布横穿中廊、
+   尖端直抵两侧码列边缘；z-index 1 于 gutter(z2) 之下——缎带从行号列下方穿过 */
 .diff-row--split .diff-river {
-  flex: 0 0 var(--river-w);
-  position: relative;
+  position: absolute;
+  inset: 0;
   pointer-events: none;
-  z-index: 3;
+  z-index: 1;
   background: transparent;
   border: 0;
 }
@@ -1073,6 +1114,30 @@ onBeforeUnmount(() => {
 .ccard--del::before {
   background: color-mix(in srgb, var(--del-edge) 78%, transparent);
 }
+/* v9 Δ4：左栏卡片去内置轨（改由 pane-col 级钉层 .raillayer>.crail 绘制），右栏卡保持内置左轨 */
+.ccard--norail::before {
+  display: none;
+}
+/* v9 Δ4 左栏色轨钉层：right:0 恒贴 pane-col（=左栏码区）可视右缘——不在横向滚动的 .pane 内，
+   不随 scrollLeft 跑走（B13）；纵向 transform 随 offsets.left 与行/卡片同步。每 chunk 一个 crail（有界）。 */
+.raillayer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+.crail {
+  position: absolute;
+  right: 0;
+  width: 3px;
+  border-radius: 3px 0 0 3px;
+}
+.crail--add {
+  background: color-mix(in srgb, var(--add-edge) 78%, transparent);
+}
+.crail--del {
+  background: color-mix(in srgb, var(--del-edge) 78%, transparent);
+}
 .ccard.is-current {
   box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--color-accent) 78%, transparent), 0 0 0 5px color-mix(in srgb, var(--color-accent) 12%, transparent);
   z-index: 2;
@@ -1093,19 +1158,19 @@ onBeforeUnmount(() => {
   0% { opacity: 1; }
   100% { opacity: 0; }
 }
-/* 插入点标记线：纯增在左栏 / 纯删在右栏的插入位（桥尖对齐：top = 前侧末行底边） */
+/* 插入点标记线（v9 Δ5 加实）：3px、edge 62%、left/right 0 贴满可视两端——与桥楔形尖端
+   连成贯穿线（B15）；top 公式仍为前侧末行底边 leftStart*LH（B11 桥尖对齐不变） */
 .diff-row--split .insert-line {
   position: absolute;
-  left: 10px;
-  right: 16px;
-  height: 2px;
-  border-radius: 2px;
-  background: color-mix(in srgb, var(--add-edge) 30%, transparent);
-  z-index: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: color-mix(in srgb, var(--add-edge) 62%, transparent);
+  z-index: 2;
   pointer-events: none;
 }
 .diff-row--split .insert-line--del {
-  background: color-mix(in srgb, var(--del-edge) 30%, transparent);
+  background: color-mix(in srgb, var(--del-edge) 62%, transparent);
 }
 
 /* inline change 包裹层（D3 卡片化）：圆角容器（无底色，行自带 tint 底）+ 左侧渐变色轨；

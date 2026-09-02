@@ -462,8 +462,9 @@ onBeforeUnmount(() => {
   --del-tint: color-mix(in srgb, var(--color-danger) 8%, transparent);
   --add-card-edge: color-mix(in srgb, var(--color-success) 15%, transparent);
   --del-card-edge: color-mix(in srgb, var(--color-danger) 15%, transparent);
-  --river-w: 64px;
-  --gutter-w: 44px;
+  /* v9 行号贴码（Δ3 中廊收窄 44/64→38/46；与 DiffDialog 同步，DiffBody 复用） */
+  --river-w: 46px;
+  --gutter-w: 38px;
 
   position: fixed;
   inset: 0;
@@ -888,7 +889,8 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--color-success) 45%, transparent);
 }
 .colhead--river {
-  flex: 0 0 var(--river-w);
+  /* v9 Δ1：列头占位随中廊（gutterL+river+gutterR 全宽 122），不再是纯 river 列 */
+  flex: 0 0 calc(var(--gutter-w) * 2 + var(--river-w));
   padding: 6px 0;
   justify-content: center;
 }

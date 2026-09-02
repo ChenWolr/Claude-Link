@@ -149,10 +149,10 @@ const renderedTokens = computed(() =>
   font-weight: 600;
 }
 
-/* split 变体（纸面工坊 D3/D4）：行背景由 DiffBody 卡片层承担、行号由独立 gutter 列承担，
-   行本身素净；code 左 10px 右 16px 对齐原型 .cl。inline 变体行号/符号/行背景保持原样。 */
+/* split 变体（纸面工坊 D3/D4 + v9 Δ2 行号贴码）：行背景由 DiffBody 卡片层承担、行号由中廊 gutter 列承担，
+   行本身素净；code 左 8px（v9 Δ3：10→8 行号贴码间距）右 16px。inline 变体行号/符号/行背景保持原样。 */
 .line--split { background: transparent; }
-.line--split code { padding: 0 16px 0 10px; }
+.line--split code { padding: 0 16px 0 8px; }
 
 .search-hit {
   background: color-mix(in srgb, var(--color-warn) 28%, transparent);
