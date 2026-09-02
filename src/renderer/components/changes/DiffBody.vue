@@ -19,7 +19,7 @@ import {
   buildInlineRows,
   buildSplitChunks,
   computeOffsets,
-  bridgePolygon,
+  bridgeRibbon,
   inlineVisiblePlan,
   resolveSearchScrollTop,
   type InlineRow,
@@ -49,6 +49,7 @@ const rightPane = ref<HTMLElement | null>(null);
 
 // —— split：chunk 模型（contrast 风格：左右各自完整行 + 对齐块 + SVG 桥）——
 const LH = 22; // 与 CSS --diff-line-h 一致
+const RIVER_W = 64; // 与 CSS --river-w 一致（单张 river-svg 无 viewBox，user units = px）
 const splitLayout = computed<SplitLayout | null>(() =>
   props.parsed ? buildSplitChunks(props.parsed, LH) : null,
 );
@@ -166,13 +167,13 @@ function onPaneScrollX(side: 'left' | 'right'): void {
   });
 }
 
-// 桥随 offsets 重算（动态桥，contrast drawBridge 移植）。
-const splitBridges = computed(() => {
+// 桥随 offsets 重算（纸面工坊缎带桥：bridgeRibbon 贝塞尔几何，单张全尺寸 SVG 渲染）。
+const splitRibbons = computed(() => {
   const lay = splitLayout.value;
   if (!lay) return [];
   return lay.chunks
     .filter((c) => c.kind !== 'same' && c.kind !== 'skip')
-    .map((c) => bridgePolygon(c, offsets.value, LH));
+    .map((c) => bridgeRibbon(c, offsets.value, LH, RIVER_W));
 });
 
 // 预计算每行的 navIndex + kind（O(chunks) 一次，splitLayout 变时重算；curChange 变化时 O(1) 查询，
@@ -262,66 +263,25 @@ function currentSearchForRanges(ranges: DiffSearchRange[]): string | null {
 function searchMemoKey(ranges: DiffSearchRange[]): string {
   return `${ranges.map((range) => range.matchId).join(',')}|${currentSearchForRanges(ranges) ?? ''}`;
 }
-// chunk 上下边界标记（contrast chunk-start/chunk-end box-shadow 移植）：
-// 改动块首行画上边线、末行画下边线——恰在相邻行之间形成彩色分隔线（未改动行无线，对齐 contrast）。
-// 预计算每行是否 chunk 首行/末行，模板 :class 用，CSS 伪元素画线（不碰 box-shadow，与 is-current 零冲突）。
-const leftChunkStart = computed<boolean[]>(() => {
-  const lay = splitLayout.value;
-  if (!lay) return [];
-  const out = new Array(lay.leftLines.length).fill(false);
-  for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.kind === 'skip' || c.leftSize === 0) continue;
-    out[c.leftStart] = true;
-  }
-  return out;
-});
-const leftChunkEnd = computed<boolean[]>(() => {
-  const lay = splitLayout.value;
-  if (!lay) return [];
-  const out = new Array(lay.leftLines.length).fill(false);
-  for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.kind === 'skip' || c.leftSize === 0) continue;
-    out[c.leftStart + c.leftSize - 1] = true;
-  }
-  return out;
-});
-const rightChunkStart = computed<boolean[]>(() => {
-  const lay = splitLayout.value;
-  if (!lay) return [];
-  const out = new Array(lay.rightLines.length).fill(false);
-  for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.kind === 'skip' || c.rightSize === 0) continue;
-    out[c.rightStart] = true;
-  }
-  return out;
-});
-const rightChunkEnd = computed<boolean[]>(() => {
-  const lay = splitLayout.value;
-  if (!lay) return [];
-  const out = new Array(lay.rightLines.length).fill(false);
-  for (const c of lay.chunks) {
-    if (c.kind === 'same' || c.kind === 'skip' || c.rightSize === 0) continue;
-    out[c.rightStart + c.rightSize - 1] = true;
-  }
-  return out;
-});
-// 插入点标记线（contrast 占位侧 box-shadow 移植）：add chunk 在左栏插入位置、del chunk 在右栏
-// 插入位置画一条该色横线——三角形桥左尖/右尖在栏内的对应标记（claude-link 无占位行，单独画）。
-const leftInserts = computed<number[]>(() => {
-  const lay = splitLayout.value;
-  if (!lay) return [];
-  return lay.chunks.filter((c) => c.kind === 'add').map((c) => c.leftStart * LH);
-});
-const rightInserts = computed<number[]>(() => {
-  const lay = splitLayout.value;
-  if (!lay) return [];
-  return lay.chunks.filter((c) => c.kind === 'del').map((c) => c.rightStart * LH);
-});
+// 改动块卡片（D3 卡片化，取代旧整行背景+行号槽+上下边线的三重噪音）：
+// 每个改动 chunk 一张圆角卡片（3px 色轨 + tint 底 + 发丝边），几何全部由 chunk 行号×LH 派生，
+// 模板直接绑定 c.leftStart/rightStart * LH。纯 add（leftSize=0）左栏无卡片，改渲染插入标记线
+// （桥尖对齐：top 恰为前侧末行底边）；纯 del 右栏镜像同理。
+const splitCardsL = computed(() => splitLayout.value?.chunks
+  .filter((c) => c.kind !== 'same' && c.kind !== 'skip' && (c.leftSize > 0 || c.kind === 'add')) ?? []);
+const splitCardsR = computed(() => splitLayout.value?.chunks
+  .filter((c) => c.kind !== 'same' && c.kind !== 'skip' && (c.rightSize > 0 || c.kind === 'del')) ?? []);
+// gutter 行号墨色 tone（D4 行号中性化：槽不染色，仅改动行行号加重）
+function gutterTone(kind: string | undefined): string[] {
+  if (kind === 'add' || kind === 'modr') return ['gln--add'];
+  if (kind === 'del' || kind === 'modl') return ['gln--del'];
+  return [];
+}
 // 点击改动 chunk → 跳转导航（按 chunk navIndex）
 function clickChunk(navIndex: number | null): void {
   if (navIndex != null && navIndex !== props.curChange) emit('goto-nav', navIndex);
 }
-// 桥索引 → 对应改动 chunk 的 navIndex（splitBridges 按 chunks 里非 same 顺序，一一对应）
+// 桥索引 → 对应改动 chunk 的 navIndex（splitRibbons 按 chunks 里非 same 顺序，一一对应）
 function bridgeNavIndex(bridgeIdx: number): number | null {
   const lay = splitLayout.value;
   if (!lay) return null;
@@ -596,77 +556,142 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="bodyEl" class="diff-body">
-    <!-- 并排：左栏 | river(桥) | 右栏。单滚动容器 .diff-scroll 同步垂直滚动；水平各栏独立。 -->
+    <!-- 并排：[行号|码] river [行号|码]。单滚动容器 .diff-scroll 同步垂直滚动；水平各栏独立。
+         纸面工坊：行号独立成 gutter 列（D4）、改动块圆角卡片层（D3）、river 实列 + 单张 SVG 缎带桥（D2）。 -->
     <div v-if="parsed && mode === 'split'" class="diff-row diff-row--split">
       <div ref="splitScroll" class="diff-scroll">
         <div class="split-track">
-          <div ref="leftPane" class="pane pane--left" @scroll.passive="onPaneScrollX('left')">
-            <div class="file-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
-              <template v-for="(ln, i) in (splitLayout?.leftLines ?? [])" :key="'l' + i">
-                <div
-                  v-if="leftKindArr[i] === 'skip'"
-                  class="ctx-gap ctx-gap--skip"
-                  aria-hidden="true"
-                ><span class="ctx-gap__label">⋯ {{ leftSkipCount[i] }} 行未变更</span></div>
-                <DiffLine
-                  v-else
-                  variant="split"
-                  side="left"
-                  :line="ln"
-                  :kind="leftKindArr[i] ?? 'ctx'"
-                  :language="language"
-                  :search-ranges="leftSearchRanges(ln.n)"
-                  :current-search-match-id="currentSearchForRanges(leftSearchRanges(ln.n))"
-                  :class="{ 'is-current': leftNav[i] === curChange, flash: leftNav[i] === flashNav, 'chunk-start': leftChunkStart[i], 'chunk-end': leftChunkEnd[i] }"
-                  :data-nav="leftNav[i] != null ? leftNav[i] : null"
-                  :data-search-line="ln.n != null ? `old:${ln.n}` : null"
-                  @click="clickChunk(leftNav[i] ?? null)"
-                />
-              </template>
-              <div v-for="(y, i) in leftInserts" :key="'ins-l-' + i" class="insert-line insert-line--add" :style="{ top: y + 'px' }"></div>
+          <!-- 左栏 -->
+          <div class="pane-col">
+            <div class="gutter">
+              <div class="g-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
+                <template v-for="(ln, i) in (splitLayout?.leftLines ?? [])" :key="'gl' + i">
+                  <div v-if="leftKindArr[i] === 'skip'" class="gln" aria-hidden="true"></div>
+                  <div v-else class="gln" :class="gutterTone(leftKindArr[i])">{{ ln.n ?? '' }}</div>
+                </template>
+              </div>
+            </div>
+            <div ref="leftPane" class="pane pane--left" @scroll.passive="onPaneScrollX('left')">
+              <div class="file-offset" :style="{ transform: `translateY(${offsets.left}px)` }">
+                <template v-for="(c, ci) in splitCardsL" :key="'cl' + ci">
+                  <div
+                    v-if="c.leftSize > 0"
+                    class="ccard"
+                    :class="['ccard--' + (c.kind === 'add' ? 'add' : 'del'), { 'is-current': c.navIndex === curChange, flash: c.navIndex === flashNav }]"
+                    :style="{ top: c.leftStart * LH + 'px', height: c.leftSize * LH + 'px' }"
+                  ></div>
+                  <div
+                    v-else
+                    class="insert-line insert-line--add"
+                    :style="{ top: c.leftStart * LH + 'px' }"
+                  ></div>
+                </template>
+                <template v-for="(ln, i) in (splitLayout?.leftLines ?? [])" :key="'l' + i">
+                  <div
+                    v-if="leftKindArr[i] === 'skip'"
+                    class="ctx-gap ctx-gap--skip"
+                    aria-hidden="true"
+                  ><span class="ctx-gap__label"><span class="pill">⋯ {{ leftSkipCount[i] }} 行未变更</span></span></div>
+                  <DiffLine
+                    v-else
+                    variant="split"
+                    side="left"
+                    :line="ln"
+                    :kind="leftKindArr[i] ?? 'ctx'"
+                    :language="language"
+                    :search-ranges="leftSearchRanges(ln.n)"
+                    :current-search-match-id="currentSearchForRanges(leftSearchRanges(ln.n))"
+                    :data-nav="leftNav[i] != null ? leftNav[i] : null"
+                    :data-search-line="ln.n != null ? `old:${ln.n}` : null"
+                    @click="clickChunk(leftNav[i] ?? null)"
+                  />
+                </template>
+              </div>
             </div>
           </div>
-          <!-- river：SVG 桥 -->
+          <!-- river：单张全尺寸 SVG 缎带桥（无 viewBox，user units=px；edit 桥经 defs 双色渐变） -->
           <div class="diff-river">
-            <svg
-              v-for="(b, bi) in splitBridges"
-              :key="'br' + bi"
-              class="bridge"
-              :class="['bridge--' + b.kind, { 'is-current': bridgeNavIndex(bi) === curChange, flash: bridgeNavIndex(bi) === flashNav }]"
-              :style="{ top: b.top + 'px', height: b.height + 'px' }"
-              :viewBox="'0 0 100 ' + b.height"
-              preserveAspectRatio="none"
-            >
-              <polygon :points="b.points" />
-              <line x1="0" :y1="b.topLine.y1" x2="100" :y2="b.topLine.y2" />
-              <line x1="0" :y1="b.bottomLine.y1" x2="100" :y2="b.bottomLine.y2" />
+            <svg class="river-svg">
+              <defs>
+                <template v-for="(r, ri) in splitRibbons" :key="'dg' + ri">
+                  <linearGradient v-if="r.kind === 'edit'" :id="`bg-fill-${bridgeNavIndex(ri)}`" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0" stop-color="var(--del-edge)" stop-opacity="0.16" />
+                    <stop offset="1" stop-color="var(--add-edge)" stop-opacity="0.16" />
+                  </linearGradient>
+                  <linearGradient v-if="r.kind === 'edit'" :id="`bg-edge-${bridgeNavIndex(ri)}`" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0" stop-color="var(--del-edge)" stop-opacity="0.6" />
+                    <stop offset="1" stop-color="var(--add-edge)" stop-opacity="0.6" />
+                  </linearGradient>
+                </template>
+              </defs>
+              <g
+                v-for="(r, ri) in splitRibbons"
+                :key="'br' + ri"
+                class="bridge"
+                :class="['bridge--' + r.kind, { 'is-current': bridgeNavIndex(ri) === curChange, flash: bridgeNavIndex(ri) === flashNav }]"
+                :transform="`translate(0 ${r.top})`"
+              >
+                <path class="b-fill" :d="r.fillD" :fill="r.kind === 'edit' ? `url(#bg-fill-${bridgeNavIndex(ri)})` : undefined" />
+                <path class="b-edge" :d="r.topEdgeD" :stroke="r.kind === 'edit' ? `url(#bg-edge-${bridgeNavIndex(ri)})` : undefined" />
+                <path class="b-edge" :d="r.bottomEdgeD" :stroke="r.kind === 'edit' ? `url(#bg-edge-${bridgeNavIndex(ri)})` : undefined" />
+                <circle
+                  v-for="(d, di) in r.dots"
+                  :key="di"
+                  class="b-dot"
+                  :cx="d.x * RIVER_W"
+                  :cy="d.y"
+                  r="2.8"
+                  :style="r.kind === 'edit' ? { fill: d.x === 0 ? 'color-mix(in srgb, var(--del-edge) 75%, transparent)' : 'color-mix(in srgb, var(--add-edge) 75%, transparent)' } : undefined"
+                />
+              </g>
             </svg>
           </div>
           <!-- 右栏 -->
-          <div ref="rightPane" class="pane pane--right" @scroll.passive="onPaneScrollX('right')">
-            <div class="file-offset" :style="{ transform: `translateY(${offsets.right}px)` }">
-              <template v-for="(ln, i) in (splitLayout?.rightLines ?? [])" :key="'r' + i">
-                <div
-                  v-if="rightKindArr[i] === 'skip'"
-                  class="ctx-gap ctx-gap--skip"
-                  aria-hidden="true"
-                ><span class="ctx-gap__label">⋯ {{ rightSkipCount[i] }} 行未变更</span></div>
-                <DiffLine
-                  v-else
-                  variant="split"
-                  side="right"
-                  :line="ln"
-                  :kind="rightKindArr[i] ?? 'ctx'"
-                  :language="language"
-                  :search-ranges="rightSearchRanges(ln.n)"
-                  :current-search-match-id="currentSearchForRanges(rightSearchRanges(ln.n))"
-                  :class="{ 'is-current': rightNav[i] === curChange, flash: rightNav[i] === flashNav, 'chunk-start': rightChunkStart[i], 'chunk-end': rightChunkEnd[i] }"
-                  :data-nav="rightNav[i] != null ? rightNav[i] : null"
-                  :data-search-line="ln.n != null ? `new:${ln.n}` : null"
-                  @click="clickChunk(rightNav[i] ?? null)"
-                />
-              </template>
-              <div v-for="(y, i) in rightInserts" :key="'ins-r-' + i" class="insert-line insert-line--del" :style="{ top: y + 'px' }"></div>
+          <div class="pane-col">
+            <div class="gutter gutter--r">
+              <div class="g-offset" :style="{ transform: `translateY(${offsets.right}px)` }">
+                <template v-for="(ln, i) in (splitLayout?.rightLines ?? [])" :key="'gr' + i">
+                  <div v-if="rightKindArr[i] === 'skip'" class="gln" aria-hidden="true"></div>
+                  <div v-else class="gln" :class="gutterTone(rightKindArr[i])">{{ ln.n ?? '' }}</div>
+                </template>
+              </div>
+            </div>
+            <div ref="rightPane" class="pane pane--right" @scroll.passive="onPaneScrollX('right')">
+              <div class="file-offset" :style="{ transform: `translateY(${offsets.right}px)` }">
+                <template v-for="(c, ci) in splitCardsR" :key="'cr' + ci">
+                  <div
+                    v-if="c.rightSize > 0"
+                    class="ccard"
+                    :class="['ccard--' + (c.kind === 'del' ? 'del' : 'add'), { 'is-current': c.navIndex === curChange, flash: c.navIndex === flashNav }]"
+                    :style="{ top: c.rightStart * LH + 'px', height: c.rightSize * LH + 'px' }"
+                  ></div>
+                  <div
+                    v-else
+                    class="insert-line insert-line--del"
+                    :style="{ top: c.rightStart * LH + 'px' }"
+                  ></div>
+                </template>
+                <template v-for="(ln, i) in (splitLayout?.rightLines ?? [])" :key="'r' + i">
+                  <div
+                    v-if="rightKindArr[i] === 'skip'"
+                    class="ctx-gap ctx-gap--skip"
+                    aria-hidden="true"
+                  ><span class="ctx-gap__label"><span class="pill">⋯ {{ rightSkipCount[i] }} 行未变更</span></span></div>
+                  <DiffLine
+                    v-else
+                    variant="split"
+                    side="right"
+                    :line="ln"
+                    :kind="rightKindArr[i] ?? 'ctx'"
+                    :language="language"
+                    :search-ranges="rightSearchRanges(ln.n)"
+                    :current-search-match-id="currentSearchForRanges(rightSearchRanges(ln.n))"
+                    :data-nav="rightNav[i] != null ? rightNav[i] : null"
+                    :data-search-line="ln.n != null ? `new:${ln.n}` : null"
+                    @click="clickChunk(rightNav[i] ?? null)"
+                  />
+                </template>
+              </div>
             </div>
           </div>
         </div>
@@ -686,7 +711,7 @@ onBeforeUnmount(() => {
               <template v-if="seg.kind === 'gap'">
                 <template v-if="seg.gapIndex !== null && expandedGaps.has(seg.gapIndex)">
                   <button type="button" class="ctx-gap ctx-gap--open" @click="toggleGap(seg.gapIndex)">
-                    ⋯ 收起 · {{ seg.rows.length }} 行
+                    <span class="pill"><svg class="pill__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>⋯ 收起 · {{ seg.rows.length }} 行</span>
                   </button>
                   <DiffLine
                     v-for="(r, i) in seg.rows"
@@ -706,14 +731,14 @@ onBeforeUnmount(() => {
                   class="ctx-gap"
                   @click="seg.gapIndex !== null && toggleGap(seg.gapIndex)"
                 >
-                  ⋯ {{ seg.rows.length }} 行未变更<span v-if="seg.firstN != null && seg.lastN != null" class="ctx-gap__range">第 {{ seg.firstN }}–{{ seg.lastN }} 行</span>
+                  <span class="pill"><svg class="pill__chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>⋯ {{ seg.rows.length }} 行未变更<span v-if="seg.firstN != null && seg.lastN != null" class="ctx-gap__range">第 {{ seg.firstN }}–{{ seg.lastN }} 行</span></span>
                 </button>
               </template>
               <div
                 v-else-if="seg.kind === 'skip'"
                 class="ctx-gap ctx-gap--skip"
                 aria-hidden="true"
-              >⋯ {{ seg.skipCount }} 行未变更</div>
+              ><span class="pill">⋯ {{ seg.skipCount }} 行未变更</span></div>
               <div
                 v-else-if="seg.kind === 'change'"
                 class="hunk-block"
@@ -774,7 +799,8 @@ onBeforeUnmount(() => {
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  background: var(--color-panel-soft);
+  /* 纸面工坊 D1：底色由外层 .paper 纸卡承担，本体透明 */
+  background: transparent;
   position: relative;
 }
 
@@ -836,21 +862,22 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 /* 自定义垂直滚动条：thumb 高度/位置由 vthumbH/vthumbTop（%）驱动，反映 scrollTop/maxScrollTop。
-   拖 thumb 或点 track 跳转（onVthumbDown/onVtrackDown）。内容不溢出时 showVscroll=false 隐藏。 */
+   拖 thumb 或点 track 跳转（onVthumbDown/onVtrackDown）。内容不溢出时 showVscroll=false 隐藏。
+   纸面工坊：内缩 4px 悬浮于纸面右缘（原型同款）。 */
 .vscroll {
   position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 12px;
+  top: 4px;
+  right: 4px;
+  bottom: 4px;
+  width: 10px;
   z-index: 5;
 }
 .vthumb {
   position: absolute;
   left: 2px;
   right: 2px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--color-text) 18%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-text) 16%, transparent);
   cursor: grab;
 }
 .vthumb:hover {
@@ -884,6 +911,52 @@ onBeforeUnmount(() => {
      垂直内容（.file-offset 行数×LH）超出视口，靠 translateY = -scrollTop 滚动。 */
   height: 100%;
 }
+/* 栏容器：行号列（gutter）+ 水平滚动代码区（.pane）。gutter 不随横向滚动，
+   .pane 仍是水平滚动容器（持有 scrollLeft，搜索横向定位契约依赖）。 */
+.pane-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  min-height: 0;
+}
+/* 行号列（D4 行号中性化）：槽不染色，仅右/左发丝线与纸面区分 */
+.diff-row--split .gutter {
+  flex: 0 0 var(--gutter-w);
+  overflow: hidden;
+  position: relative;
+  z-index: 2;
+  background: color-mix(in srgb, var(--color-panel) 42%, var(--color-panel-soft));
+  border-right: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
+}
+.diff-row--split .gutter--r {
+  border-right: 0;
+  border-left: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
+}
+.g-offset {
+  will-change: transform;
+}
+.gln {
+  height: var(--diff-line-h);
+  line-height: var(--diff-line-h);
+  padding-right: 9px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  opacity: 0.78;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+.gln--add {
+  color: var(--add-text);
+  opacity: 1;
+  font-weight: 650;
+}
+.gln--del {
+  color: var(--del-text);
+  opacity: 1;
+  font-weight: 650;
+}
 .diff-row--split .pane {
   flex: 1;
   min-width: 0;
@@ -911,137 +984,199 @@ onBeforeUnmount(() => {
   width: max-content;
   flex-shrink: 0;
 }
-/* river 绝对定位覆盖在左右栏之间（桥的画布；越宽桥越显眼） */
+/* river：真实中间列（D2 桥曲线化：64px + 中心虚线脊线 + 单张全尺寸 SVG 缎带桥） */
 .diff-row--split .diff-river {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 50%;
-  width: 40px;
-  margin-left: -20px;
+  flex: 0 0 var(--river-w);
+  position: relative;
   pointer-events: none;
   z-index: 3;
   background: transparent;
   border: 0;
 }
-.bridge {
+.diff-river::before {
+  content: '';
   position: absolute;
-  left: 0;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: repeating-linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--color-text) 11%, transparent) 0 3px,
+    transparent 3px 7px
+  );
+}
+.river-svg {
+  position: absolute;
+  inset: 0;
   width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
-.bridge polygon {
-  stroke: none;
+/* 缎带桥：低填充 + 细描边 + 端点锚点；edit 桥填充/描边走 defs 双色渐变（模板注入），
+   is-current 用 CSS 覆盖（CSS 优先级高于 presentation attribute）。 */
+.bridge .b-fill,
+.bridge .b-edge,
+.bridge .b-dot {
+  transition: fill var(--duration-fast) linear, stroke var(--duration-fast) linear;
 }
-.bridge line {
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-  opacity: 0.85;
+.bridge--add .b-fill { fill: color-mix(in srgb, var(--add-edge) 15%, transparent); }
+.bridge--del .b-fill { fill: color-mix(in srgb, var(--del-edge) 15%, transparent); }
+.bridge .b-edge { fill: none; stroke-width: 1.2; }
+.bridge--add .b-edge { stroke: color-mix(in srgb, var(--add-edge) 62%, transparent); }
+.bridge--del .b-edge { stroke: color-mix(in srgb, var(--del-edge) 62%, transparent); }
+.bridge .b-dot { stroke: none; }
+.bridge--add .b-dot { fill: color-mix(in srgb, var(--add-edge) 75%, transparent); }
+.bridge--del .b-dot { fill: color-mix(in srgb, var(--del-edge) 75%, transparent); }
+.bridge.is-current .b-fill { fill: color-mix(in srgb, var(--color-accent) 28%, transparent); }
+.bridge.is-current .b-edge { stroke: var(--color-accent-strong); stroke-width: 1.6; }
+.bridge.is-current .b-dot { fill: var(--color-accent-strong); }
+.bridge.flash .b-fill {
+  animation: bridge-flash 0.9s var(--ease-out);
 }
-.bridge--add polygon {
-  fill: color-mix(in srgb, var(--add-edge) 60%, transparent);
+@keyframes bridge-flash {
+  0% { fill: color-mix(in srgb, var(--color-accent) 30%, transparent); }
 }
-.bridge--del polygon {
-  fill: color-mix(in srgb, var(--del-edge) 60%, transparent);
-}
-.bridge--edit polygon {
-  fill: color-mix(in srgb, var(--mod-edge) 60%, transparent);
-}
-.bridge--add line {
-  stroke: var(--add-edge);
-}
-.bridge--del line {
-  stroke: var(--del-edge);
-}
-.bridge--edit line {
-  stroke: var(--mod-edge);
-}
-.bridge.is-current polygon {
-  fill-opacity: 0.7;
-}
-.bridge.flash polygon {
-  animation: diff-flash 0.7s var(--ease-out);
-}
-/* curChange 高亮 + flash（split：绑在 DiffLine 根 .line 上，:deep 穿透 scoped） */
-.diff-row--split :deep(.line.is-current) {
-  box-shadow: inset 3px 0 0 var(--color-accent);
-}
-.diff-row--split :deep(.line.flash) {
-  animation: diff-flash 0.7s var(--ease-out);
-}
-/* chunk 上下边界线（contrast chunk-start/chunk-end box-shadow 移植）：
-   改动块首行画上边线、末行画下边线——恰在相邻行之间形成彩色分隔线（未改动行无线）。
-   伪元素画线，不碰 box-shadow，与上方 is-current 左侧 accent 条零冲突。 */
+
+/* 改动块卡片（D3 卡片化）：3px 圆角色轨 + tint 淡底 + 发丝边；行素净叠于其上（z-index:1） */
 .diff-row--split :deep(.line) {
   position: relative;
+  z-index: 1;
 }
-.diff-row--split :deep(.line.chunk-start)::before,
-.diff-row--split :deep(.line.chunk-end)::after {
+.ccard {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 0;
+  border-radius: 8px;
+}
+.ccard::before {
   content: '';
   position: absolute;
   left: 0;
-  right: 0;
-  height: 0;
-  border-top: 1px solid transparent;
-  pointer-events: none;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 3px 0 0 3px;
+}
+.ccard--add {
+  background: var(--add-tint);
+  box-shadow: inset 0 0 0 1px var(--add-card-edge);
+}
+.ccard--add::before {
+  background: color-mix(in srgb, var(--add-edge) 78%, transparent);
+}
+.ccard--del {
+  background: var(--del-tint);
+  box-shadow: inset 0 0 0 1px var(--del-card-edge);
+}
+.ccard--del::before {
+  background: color-mix(in srgb, var(--del-edge) 78%, transparent);
+}
+.ccard.is-current {
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--color-accent) 78%, transparent), 0 0 0 5px color-mix(in srgb, var(--color-accent) 12%, transparent);
   z-index: 2;
 }
-.diff-row--split :deep(.line.chunk-start)::before { top: 0; }
-.diff-row--split :deep(.line.chunk-end)::after { bottom: 0; }
-/* 颜色随 kind：add/modr 用 add 配色；del/modl 用 del 配色（与行背景同源） */
-.diff-row--split :deep(.line--add.chunk-start)::before,
-.diff-row--split :deep(.line--add.chunk-end)::after,
-.diff-row--split :deep(.line--modr.chunk-start)::before,
-.diff-row--split :deep(.line--modr.chunk-end)::after {
-  border-top-color: var(--add-edge);
+.ccard::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
 }
-.diff-row--split :deep(.line--del.chunk-start)::before,
-.diff-row--split :deep(.line--del.chunk-end)::after,
-.diff-row--split :deep(.line--modl.chunk-start)::before,
-.diff-row--split :deep(.line--modl.chunk-end)::after {
-  border-top-color: var(--del-edge);
+.ccard.flash::after {
+  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+  animation: ccard-flash 0.9s var(--ease-out);
 }
-/* 插入点标记线：add 左栏 / del 右栏插入位置画该色横线（三角形桥尖在栏内的对应标记） */
+@keyframes ccard-flash {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+/* 插入点标记线：纯增在左栏 / 纯删在右栏的插入位（桥尖对齐：top = 前侧末行底边） */
 .diff-row--split .insert-line {
   position: absolute;
-  left: 0;
-  right: 0;
-  height: 0;
-  border-top: 2px solid var(--add-edge);
-  z-index: 2;
+  left: 10px;
+  right: 16px;
+  height: 2px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--add-edge) 30%, transparent);
+  z-index: 0;
   pointer-events: none;
 }
 .diff-row--split .insert-line--del {
-  border-top-color: var(--del-edge);
+  background: color-mix(in srgb, var(--del-edge) 30%, transparent);
 }
 
-/* inline change 包裹层 */
+/* inline change 包裹层（D3 卡片化）：圆角容器（无底色，行自带 tint 底）+ 左侧渐变色轨；
+   is-current 描边+外晕、flash 两段式渐隐（与 split 卡片同语义，原型 .hunk 同款） */
 .hunk-block {
   position: relative;
+  border-radius: 9px;
+  cursor: pointer;
 }
+.hunk-block::before {
+  content: '';
+  position: absolute;
+  left: var(--gutter-w);
+  top: 2px;
+  bottom: 2px;
+  width: 3px;
+  border-radius: 3px;
+  background: linear-gradient(
+    in srgb,
+    color-mix(in srgb, var(--del-edge) 60%, transparent),
+    color-mix(in srgb, var(--add-edge) 60%, transparent)
+  );
+}
+.hunk-block > .line:first-child { border-radius: 9px 9px 0 0; }
+.hunk-block > .line:last-child { border-radius: 0 0 9px 9px; }
+.hunk-block > .line:first-child:last-child { border-radius: 9px; }
 .hunk-block.is-current {
-  box-shadow: inset 2px 0 0 var(--color-accent);
+  box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--color-accent) 72%, transparent), 0 0 0 5px color-mix(in srgb, var(--color-accent) 11%, transparent);
 }
-.hunk-block.flash {
-  animation: diff-flash 0.7s var(--ease-out);
+.hunk-block::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+}
+.hunk-block.flash::after {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  animation: ccard-flash 0.9s var(--ease-out);
 }
 
-/* inline 上下文断层 + hunk 间 skip 共用折叠条 */
+/* inline 上下文折叠条 + skip 分隔（纸面工坊药丸化）：按钮为全宽居中容器，视觉是 .pill 药丸 */
 .ctx-gap {
-  display: block;
+  display: flex;
+  justify-content: center;
+  align-items: center;
   width: 100%;
   border: 0;
   cursor: pointer;
-  text-align: center;
-  height: var(--diff-line-h);
-  line-height: var(--diff-line-h);
-  background: color-mix(in srgb, var(--color-panel) 50%, var(--color-panel-soft));
-  color: var(--color-text);
-  font-size: 11.5px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  padding: 3px 0;
+  background: transparent;
+  color: var(--color-text-muted);
   font-family: var(--font-sans);
-  border-top: 1px solid var(--color-border-strong);
-  border-bottom: 1px solid var(--color-border-strong);
+}
+.pill svg {
+  width: 11px;
+  height: 11px;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+.ctx-gap--open .pill svg {
+  transform: rotate(180deg);
+}
+.ctx-gap:hover:not(.ctx-gap--skip) .pill {
+  color: var(--color-accent-strong);
+  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+}
+.ctx-gap__range {
+  opacity: 0.65;
+  margin-left: 8px;
 }
 /* split 上下文：.file-offset 是 width:max-content，.ctx-gap 的 width:100%（百分比）
    在 max-content 父容器内对 block 子元素可能解析为文本宽而非父宽 → 分隔条变窄不可见。
@@ -1057,28 +1192,39 @@ onBeforeUnmount(() => {
 .diff-row--split .ctx-gap__label {
   position: sticky;
   left: 0;
-  display: inline-block;
+  display: inline-flex;
+  justify-content: center;
   width: min(100%, 100cqw);
-  text-align: center;
 }
-.ctx-gap:hover {
-  color: var(--add-text);
-  background: color-mix(in srgb, var(--color-success) 7%, transparent);
+/* 居中药丸（原型 .pill 同款）：skip 哨兵 / inline 折叠条共用形态 */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-family: var(--font-sans);
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-text) 4.5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-border) 65%, transparent);
+  white-space: nowrap;
 }
-.ctx-gap__range {
-  opacity: 0.65;
-  margin-left: 8px;
-}
-.ctx-gap--open {
-  color: var(--add-text);
-}
-/* hunk 间分隔条（git 跳过的未输出行）：显示「⋯ N 行」，不可展开（内容不在 diff 内） */
+/* hunk 间分隔条（git 跳过的未输出行）：居中药丸，不可展开（内容不在 diff 内） */
 .ctx-gap--skip {
   cursor: default;
   pointer-events: none;
-  background: color-mix(in srgb, var(--color-panel) 80%, var(--color-panel-soft));
-  border-top: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 60%, transparent);
+  opacity: 0.8;
+}
+.diff-row--split .ctx-gap--skip {
+  /* 覆盖基础 .ctx-gap 的 justify-content:center（那是 inline 全宽条用的）：
+     split 的 gap 容器是 max-content 宽（可比视口宽），label 才是 100cqw=视口宽的居中层 */
+  justify-content: flex-start;
+  display: flex;
+  align-items: center;
+  height: var(--diff-line-h);
 }
 
 /* 空态 */
@@ -1117,12 +1263,12 @@ onBeforeUnmount(() => {
   line-height: 1.6;
 }
 
-@keyframes diff-flash {
-  0% {
-    background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-  }
-  100% {
-    background: transparent;
+/* B8：偏好减弱动效时禁用两段式闪现 */
+@media (prefers-reduced-motion: reduce) {
+  .ccard.flash::after,
+  .hunk-block.flash::after,
+  .bridge.flash .b-fill {
+    animation: none;
   }
 }
 </style>
