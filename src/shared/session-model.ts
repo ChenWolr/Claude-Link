@@ -122,6 +122,10 @@ export function applySessionOverrideEnv(
   delete env.ANTHROPIC_AUTH_TOKEN;
   if (override.modelId) {
     Object.assign(env, buildUnifiedModelEnv(override.modelId));
+    // SMALL_FAST/SUBAGENT 也钉会话模型（context-circle-v2 D1.1）：全局 settings.json 的这两个
+    // env 键此前在 env 通道无人覆盖→文件值泄漏生效，subagent/后台小模型会漂离会话当前模型。
+    env.ANTHROPIC_SMALL_FAST_MODEL = override.modelId;
+    env.CLAUDE_CODE_SUBAGENT_MODEL = override.modelId;
   }
 }
 
