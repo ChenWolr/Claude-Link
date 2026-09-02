@@ -1419,7 +1419,10 @@ function maybeMidTurnRefresh(
 // ——探针是增强，不是替换。per-session「可打断单飞」：每个回合结束都起新探针，旧探针在飞则
 // 直接 kill（其结果必然过时——新回合已发生），用 generation 区分批次；状态随会话删除收口清理。
 // 不用固定冷却：回合结束是低频事件，固定 10s 冷却会让快速连发时后续回合漏探、终态停留 stale。
-const POST_TURN_PROBE_TIMEOUT_MS = 10_000;
+// 预算 45s（context-circle-v2 D2）：实测地板 13-21s（2026-09-02 复跑 E1=13s/E2=18s，计划 session
+// 上午 16.8/20.7s；地板在 skills 扫描/启动加载，与有无映射无关）——旧值 10s 必然超时，
+// 是圆圈长期空/不更新的第一主因。45s 覆盖地板 2 倍余量；超时仍走既有 kill+不发 payload 路径。
+const POST_TURN_PROBE_TIMEOUT_MS = 45_000;
 interface PostTurnProbeState {
   child: ReturnType<typeof spawn> | null;
   generation: number;

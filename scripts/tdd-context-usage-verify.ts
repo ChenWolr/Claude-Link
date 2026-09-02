@@ -910,6 +910,14 @@ console.log('=== 26) 上下文圆圈 v2：探针 env 补全 + 预算 + settle �
     assert.ok(!probeFn.includes("'--settings'"), '探针段出现 --settings——P0-b 已证伪 flag 优先级（同键对撞文件赢）且 P0-c 证其使工具集失真，不得回退主方案');
     assert.ok(/env = buildSpawnEnv\(override\)/.test(probeFn), '探针 env 应来自 buildSpawnEnv(override)（env 单通道）');
   });
+
+  // D2：探针预算 ≥45s（实测地板 13-21s，10s 必然超时——圆圈长期空/不更新的第一主因）。
+  check('D2 POST_TURN_PROBE_TIMEOUT_MS >= 45_000（对齐实测地板 13-21s）', () => {
+    const m = sdkBackendSrc.match(/const POST_TURN_PROBE_TIMEOUT_MS\s*=\s*(\d[\d_]*);/);
+    assert.ok(m, '缺 POST_TURN_PROBE_TIMEOUT_MS 常量');
+    const v = Number(m![1].replace(/_/g, ''));
+    assert.ok(v >= 45_000, `探针预算应 ≥45_000（实际 ${v}）`);
+  });
 }
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
