@@ -468,3 +468,48 @@ export function bridgePolygon(
   };
   return { kind: c.kind, top, height, points, topLine, bottomLine };
 }
+
+/**
+ * 「纸面工坊」桥几何（bridgePolygon 的贝塞尔缎带变体，与原型 diff-viewer-v3.html updateBridges
+ * 逐字一致，实测「桥尖-插入标记-前侧末行底边」三线合一）。与 bridgePolygon 并存：
+ * split 渲染层切到本函数，旧 polygon 契约（tdd-diff-offsets-verify）不动。
+ * - top 减 1 / bottom 加 2 对齐行边界（同 bridgePolygon 的 ruler 对齐）；
+ * - 一侧 size=0 时该侧保持 2px（Math.max），退化成三角缎带；
+ * - 单张全尺寸 SVG 无 viewBox：user units = px，返回的 top/height 供 <g> translate 定位，
+ *   fillD/topEdgeD/bottomEdgeD 与 dots 坐标均为 river 视口内的相对 y（已减 top）。
+ */
+export interface RibbonGeo {
+  kind: SplitChunkKind;
+  /** <g> translate y（river 视口坐标） */
+  top: number;
+  height: number;
+  /** 顶曲线 + 右直边 + 底曲线 + Z 闭合 */
+  fillD: string;
+  topEdgeD: string;
+  bottomEdgeD: string;
+  /** 四端点锚点：左 lt/lb（x=0）、右 rt/rb（x=1），y 为相对 top 的局部坐标 */
+  dots: Array<{ x: 0 | 1; y: number }>;
+}
+
+export function bridgeRibbon(c: SplitChunk, offsets: Offsets, lineHeight: number, riverW: number): RibbonGeo {
+  const lt = c.leftStart * lineHeight + offsets.left - 1;
+  const rt = c.rightStart * lineHeight + offsets.right - 1;
+  const lb = Math.max(lt + c.leftSize * lineHeight + 2, lt + 2);
+  const rb = Math.max(rt + c.rightSize * lineHeight + 2, rt + 2);
+  const top = Math.min(lt, rt);
+  const h = Math.max(Math.max(lb, rb) - top, 2);
+  const y = (v: number) => Math.round((v - top) * 10) / 10;
+  const w = riverW;
+  const topD = `M 0 ${y(lt)} C ${w * 0.62} ${y(lt)} ${w * 0.38} ${y(rt)} ${w} ${y(rt)}`;
+  const bottomD = `M 0 ${y(lb)} C ${w * 0.62} ${y(lb)} ${w * 0.38} ${y(rb)} ${w} ${y(rb)}`;
+  const fillD = `M 0 ${y(lt)} C ${w * 0.62} ${y(lt)} ${w * 0.38} ${y(rt)} ${w} ${y(rt)} L ${w} ${y(rb)} C ${w * 0.38} ${y(rb)} ${w * 0.62} ${y(lb)} 0 ${y(lb)} Z`;
+  return {
+    kind: c.kind,
+    top,
+    height: h,
+    fillD,
+    topEdgeD: topD,
+    bottomEdgeD: bottomD,
+    dots: [{ x: 0, y: y(lt) }, { x: 0, y: y(lb) }, { x: 1, y: y(rt) }, { x: 1, y: y(rb) }],
+  };
+}
