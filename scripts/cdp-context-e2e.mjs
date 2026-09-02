@@ -238,13 +238,35 @@ async function newSessionViaUI(ws) {
   precondition(clicked, '新建会话按钮未找到（.new-button / .new-session-button）——UI 结构变化或路由异常');
   await new Promise((r) => setTimeout(r, 900));
   try {
-    return await activeSessionId(ws);
+    const sid = await activeSessionId(ws);
+    // 基线暂态会话（50e4883）适配：新建落在暂态草稿（不落库）。立即经 Pinia 调
+    // materializeActiveTransient 物化（同 id 建 DB 行），使后续 getSession/getMessages/
+    // assertWorkingDir 等主进程 DB 链路可用——与「发首条消息时自动物化」同一路径。
+    const materialized = await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      return st && st.materializeActiveTransient ? st.materializeActiveTransient().then((s) => !!s) : Promise.resolve(false);
+    })()`);
+    if (!materialized) log('  ℹ 会话未物化（可能已是持久会话——非暂态基线）');
+    return sid;
   } catch (e) {
     throw new PreconditionError(`新建会话后未出现活跃会话：${e.message}`);
   }
 }
 async function activeSessionId(ws) {
   return waitFor('活跃会话 id', async () => {
+    // 基线暂态会话（50e4883）适配：「+ 新会话」进入暂态草稿（不落库、侧栏无 .session-link），
+    // 发首条消息才以同 id 物化。活跃判定优先直取 Pinia store 的 activeSession.id（暂态/持久
+    // 都覆盖）；持久会话维持侧栏 name 比对兜底。
+    const storeSid = await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      const a = st && st.activeSession;
+      return a && a.id ? a.id : null;
+    })()`);
+    if (storeSid) return storeSid;
     const activeName = await evalExpr(ws, `document.querySelector('.session-link.active .session-link__name')?.textContent?.trim() ?? null`);
     if (!activeName) return null;
     const sessions = await evalExpr(ws, `window.claudeLink.listSessions()`);
@@ -257,7 +279,9 @@ async function setWorkingDir(ws, dir) {
   await evalExpr(ws, `window.claudeLink.addRecentWorkspace(${JSON.stringify(dir)})`);
   await evalExpr(ws, `document.querySelector('.settings-link')?.click(), true`);
   await new Promise((r) => setTimeout(r, 800));
-  await evalExpr(ws, `(document.querySelector('.session-link.active') || document.querySelector('.session-link'))?.click(), true`);
+  // 基线暂态会话适配：侧栏无任何 .session-link 时（暂态草稿），点 .new-button 回到同一暂态
+  // （单例复用，不新建）→ router 回聊天页。持久会话维持点会话条目回聊天页的原路径。
+  await evalExpr(ws, `(document.querySelector('.session-link.active') || document.querySelector('.session-link') || (document.querySelector('.session-link') ? null : document.querySelector('.new-button')))?.click(), true`);
   await waitFor('回到聊天页（工具栏出现）', () => evalOk(ws, `!!document.querySelector('.session-toolbar')`), 15);
   await evalExpr(ws, `(() => {
     const btns = [...document.querySelectorAll('.session-toolbar .ctl__btn')];
@@ -289,8 +313,14 @@ async function assertWorkingDir(ws, sid, dir) {
 // 失败按 PreconditionError（exit 2）处理，绝不进入 query 等待（避免把权限等待误判为网关超时）。
 // value/label 对齐 SessionToolbar：bypassPermissions=「自动模式」（CLAUDE.md 自动化测试铁律）。
 async function ensurePermissionMode(ws, sid, mode, label) {
-  const cur = (await sessionOf(ws, sid))?.permissionMode ?? null;
-  if (cur === mode) return cur;
+  // 基线适配（权限全局默认 + 权限菜单改版）：DB permissionMode=null 表示「跟随全局默认档」，
+  // 生效档 = 会话显式档 ?? config.permissionMode。全局默认已等于目标档时无需切档（点菜单
+  // 「默认」项落库仍为 null，旧等待必超时；且旧 contains('自动模式') 匹配会误点「默认：自动
+  // 模式」项——故仅显式切档时用 .perm-item__label 精确匹配）。
+  const s = (await sessionOf(ws, sid)) ?? null;
+  const globalDefault = (await evalExpr(ws, `window.claudeLink.getConfig().then((c) => c.permissionMode ?? null)`)) ?? null;
+  const effective = s?.permissionMode ?? globalDefault;
+  if (effective === mode) return effective;
   const opened = await evalExpr(ws, `(() => {
     const btns = [...document.querySelectorAll('.session-toolbar .ctl__btn')];
     const btn = btns.find((b) => (b.getAttribute('title') || '').includes('权限模式'));
@@ -299,15 +329,15 @@ async function ensurePermissionMode(ws, sid, mode, label) {
   })()`);
   precondition(opened, '权限模式按钮未找到（工具栏）——UI 结构变化，环境前置不足');
   const clicked = await evalExpr(ws, `(() => {
-    const items = [...document.querySelectorAll('.perm-item')];
-    const t = items.find((i) => (i.textContent || '').includes(${JSON.stringify(label)}));
-    if (t) { t.click(); return true; }
+    const labels = [...document.querySelectorAll('.perm-item .perm-item__label')];
+    const t = labels.find((i) => (i.textContent || '').trim() === ${JSON.stringify(label)});
+    if (t) { t.closest('.perm-item').click(); return true; }
     return false;
   })()`);
   precondition(clicked, `权限面板未找到「${label}」（目标 ${mode}）——环境前置不足`);
   await waitFor(`权限模式生效 ${mode}`, async () => {
-    const s = await sessionOf(ws, sid);
-    return s?.permissionMode === mode;
+    const s2 = await sessionOf(ws, sid);
+    return (s2?.permissionMode ?? globalDefault) === mode;
   }, 15);
   return mode;
 }
@@ -384,7 +414,7 @@ function parseViaSharedRunner(text) {
     return JSON.parse(r.stdout).reports?.[0] ?? null;
   } catch { return null; }
 }
-// review-v5 Medium-1/Low-1：hover 打开 popover 采样（诊断行与 stale title 只有 popover 展开时可查）。
+// review-v5 Low-1：hover 打开 popover 采样（stale title 只有 popover 展开时可查）。
 async function samplePopover(ws) {
   await evalExpr(ws, `document.querySelector('.ctx')?.dispatchEvent(new MouseEvent('mouseenter')), true`);
   await new Promise((r) => setTimeout(r, 400));
@@ -393,14 +423,20 @@ async function samplePopover(ws) {
   await evalExpr(ws, `document.querySelector('.ctx')?.dispatchEvent(new MouseEvent('mouseleave')), true`);
   return { title, rows };
 }
-// expectStale=true：title 须含「上次采样」且 popover 须有非空「诊断」行（review-v5 Medium-1+Low-1）；
-// expectStale=false：fresh 终态 title 不得标注「上次采样」（防语义倒置回归）。
+// expectStale=true：title 须含「上次采样」（review-v5 Low-1）；expectStale=false：fresh 终态
+// title 不得标注「上次采样」（防语义倒置回归）。
+// context-circle-v2 D4：弹层三行化——诊断行已从 DOM 删除（原 stale 分支断言非空「诊断」行，
+// 随 D5 反转为「不得存在诊断行」）；并恒断言 popover 恰好三行（已用上下文/全部上下文/占比）。
+const EXPECTED_POPOVER_LABELS = ['已用上下文', '全部上下文', '占比'];
 async function assertDiagAndTitle(ws, expectStale) {
   const pop = await samplePopover(ws);
+  const labels = pop.rows.map((r) => r.label);
+  if (JSON.stringify(labels) !== JSON.stringify(EXPECTED_POPOVER_LABELS)) {
+    throw new Error(`popover 应恰好三行 ${JSON.stringify(EXPECTED_POPOVER_LABELS)}（实际 ${JSON.stringify(labels)}）`);
+  }
+  if (pop.rows.some((r) => r.label === '诊断')) throw new Error('popover 不得再渲染「诊断」行（context-circle-v2 D4 已删）');
   if (expectStale) {
     if (!pop.title || !pop.title.includes('上次采样')) throw new Error(`stale 态 title 应标注「上次采样」（实际：${pop.title}）`);
-    const diag = pop.rows.find((r) => r.label === '诊断');
-    if (!diag || !diag.value) throw new Error('stale 态 popover 应渲染非空「诊断」行（review-v5 Medium-1）');
   } else if (pop.title && pop.title.includes('上次采样')) {
     throw new Error(`fresh 终态 title 不应标注「上次采样」（实际：${pop.title}）`);
   }
@@ -413,12 +449,14 @@ async function readUpdates(ws) {
 }
 async function clearUpdates(ws) { await evalExpr(ws, `(() => { window.__ctxE2E.updates = []; return true; })()`); }
 // post-turn 官方 /context 探针（本计划 Task 5）：回合结束后 fire-and-forget 起 `claude.exe -p
-// "/context" --resume <sid> --no-session-persistence`，约 2s 返回。等待并返回该 fresh payload
-// （source='native-context' && freshness='fresh' && samplePhase='post-turn'），超时则 fail（≤10s）。
+// "/context" --resume <sid> --no-session-persistence`。等待并返回该 fresh payload
+// （source='native-context' && freshness='fresh' && samplePhase='post-turn'），超时则 fail。
+// context-circle-v2 D5：等待窗按 45s 预算放大（探针实测地板 13-21s，旧 10s 预算必然超时）——
+// 调用点 50/70/50/30（压缩回合加 5s 方案A 收尾延迟与 resume 慢余量，故 70）。
 // sessionId 过滤：只匹配当前会话的探针，避免残留会话/其它会话的迟到探针误命中。
 // minGen 过滤（review-v1 High-2）：只接受代际 > minGen 的探针，用于识破「旧回合迟到探针」冒充
 // 本回合探针（否则断言空转通过，如把 B 回合探针误当成被中断 A 回合的探针）。
-async function waitForPostTurnProbe(ws, sid, timeoutS = 10, minGen = -1) {
+async function waitForPostTurnProbe(ws, sid, timeoutS = 50, minGen = -1) {
   return waitFor('post-turn 探针 fresh payload（native-context+post-turn）', async () => {
     const ups = await readUpdates(ws);
     return ups.find((u) => u.sessionId === sid && u.source === 'native-context' && u.freshness === 'fresh' && u.samplePhase === 'post-turn' && (typeof u.queryGeneration !== 'number' || u.queryGeneration > minGen)) ?? null;
@@ -573,10 +611,10 @@ async function main() {
       if (!last.source || !last.freshness) throw new Error(`缺 source/freshness：source=${last.source} freshness=${last.freshness}`);
       if (typeof last.queryGeneration !== 'number') throw new Error(`缺 queryGeneration：${String(last.queryGeneration)}`);
       // ── post-turn 官方 /context 探针增强（本计划 Task 5 S1）──
-      // 回合真实结束后 ≤10s 出现 source='native-context' && freshness='fresh' &&
+      // 回合真实结束后 ≤50s（v2 D5：预算 45s+余量）出现 source='native-context' && freshness='fresh' &&
       // samplePhase='post-turn' 的精确 fresh payload；其 used 不得低于本回合 query-start 值。
       const msgCountAfterTurn = (await getMessages(ws, sid)).length;
-      const probe = await waitForPostTurnProbe(ws, sid, 10);
+      const probe = await waitForPostTurnProbe(ws, sid, 50);
       // 污染断言：探针走独立进程 + --no-session-persistence，消息不得落 DB。
       const msgCountAfterProbe = (await getMessages(ws, sid)).length;
       if (msgCountAfterProbe !== msgCountAfterTurn) {
@@ -656,9 +694,21 @@ async function main() {
       // P2 mid-turn：回合中途轮询断言（docs/.../2026-08-22 §7 Step 1）。
       // S4 大文件 Read 的工具结果足够大（Δused 远超 1000 门限），mid-turn payload 应送达；
       // 若节流（8s）/值变化门限导致缺席，本断言如实失败并记录命中数（不假绿）。
+      // context-circle-v2 环境适配：query-start/mid-turn 快照都走 SDK 控制通道（query.getContextUsage），
+      // 该通道在本机当前 CLI 状态下已死（08-29 实证 90s 无响应；context-circle-v2 计划 §1.3 定案
+      // 「runtime 快照三阶段全部超时属预期，不是回归」）。通道活性以「本会话至今是否出现过任何
+      // runtime-live 快照」判定——全程无 live 快照即通道死证据，mid-turn 断言按环境受限处理
+      // （exit 3，同 S7/S9/S12 先例），不判实现回归；通道活（曾出现 live 快照）时保持严格断言。
       const midTurn = EVID.payloads.filter((p) => p.sessionId === scrubSessionId(sid) && p.samplePhase === 'mid-turn');
       const midTurnLive = midTurn.filter((p) => p.source === 'runtime-live' && p.freshness === 'fresh');
       if (midTurnLive.length === 0) {
+        const liveEver = EVID.payloads.some((p) => p.sessionId === scrubSessionId(sid) && p.source === 'runtime-live' && p.freshness === 'fresh');
+        if (!liveEver) {
+          const reason = 'S4 mid-turn：SDK 控制通道死（本会话无任何 runtime-live 快照）——runtime 快照超时属基线预期（context-circle-v2 计划 §1.3），环境受限非实现回归';
+          envLimited = envLimited ?? reason;
+          recordScenario('S4', { status: 'environment-limited', reason, midTurnHits: midTurn.length });
+          return `mid-turn 断言环境受限跳过（控制通道死，mid-turn 命中 ${midTurn.length} 次）；Read 与 /context 断言已过`;
+        }
         throw new Error(`S4 未捕获 mid-turn live payload（samplePhase=mid-turn, source=runtime-live, freshness=fresh）——mid-turn 命中 ${midTurn.length} 次但均非 live/fresh（节流/值变化门限可能抑制）`);
       }
       return `${/[0-9]{4,}/.test(reply) ? '行号=' + reply.replace(/\s+/g, ' ').slice(0, 20) : '行号<1000（截断）'}；parser 分类 ${report?.categories?.length ?? 0} 项；mid-turn payload 命中 ${midTurnLive.length} 次`;
@@ -828,10 +878,10 @@ async function main() {
         }
         return null;
       })();
-      // 25s 等待（非 10s）：压缩回合 result 分支的 await refreshContextSnapshot(post-turn) 在
-      // deleteEntry 前最多阻塞 5s（方案 A 固有延迟），探针才 spawn；再加压缩后 resume 慢（网关）余量，
-      // 10s 窗口在网关慢时会误判 flaky。探针自身 spawn→close 仍 ~3s（符合计划「≤10s」语义）。
-      const probe = await waitForPostTurnProbe(ws, sid, 25);
+      // 70s 等待（v2 D5，原 25s）：探针预算 45s（实测地板 13-21s）；压缩回合 result 分支的
+      // await refreshContextSnapshot(post-turn) 在 deleteEntry 前最多阻塞 5s（方案 A 固有延迟），
+      // 探针才 spawn；再加压缩后 resume 慢（网关）余量。
+      const probe = await waitForPostTurnProbe(ws, sid, 70);
       const used = probe.currentContextUsedTokens;
       if (typeof used !== 'number') throw new Error('探针 payload 缺 currentContextUsedTokens');
       if (preCompactKnown != null && typeof preCompactKnown === 'number' && used >= preCompactKnown) {
@@ -906,8 +956,8 @@ async function main() {
       await new Promise((r) => setTimeout(r, 1200));
       await abortCurrentTurn(ws);
       await waitQueryIdle(ws, 120);
-      // A 回合中断后：其探针应在 ≤10s 内出现，且代际 > G0（属于被中断的 A 回合，而非旧回合迟到探针）。
-      const aProbe = await waitForPostTurnProbe(ws, sid, 10, g0);
+      // A 回合中断后：其探针应在 ≤50s 内出现（v2 D5：45s 预算+余量），且代际 > G0（属于被中断的 A 回合，而非旧回合迟到探针）。
+      const aProbe = await waitForPostTurnProbe(ws, sid, 50, g0);
       const aProbeGen = aProbe.queryGeneration;
       if (typeof aProbeGen !== 'number' || aProbeGen <= g0) throw new Error(`A 探针代际(${aProbeGen})未大于 G0(${g0})——中断探针可能未命中被中断回合`);
       // 若 A 回合自身产出过带代际 payload（query-start 等），进一步断言探针代际恰等于 A 代际。
@@ -925,7 +975,8 @@ async function main() {
       await waitQueryIdle(ws, 180);
       // B 回合结束后同样应出现 B 代际的探针（> A 探针代际）。等待并消费它：
       // ① 验证代际单调；② 避免该迟到探针污染后续 S13 的「两会话隔离」断言。
-      const bProbe = await waitForPostTurnProbe(ws, sid, 15, aProbeGen);
+      // 30s（v2 D5）：紧随 A 探针之后，A 已确认探针链路可用，取较小余量即可。
+      const bProbe = await waitForPostTurnProbe(ws, sid, 30, aProbeGen);
       const bProbeGen = bProbe.queryGeneration;
       const bPayloads2 = await readUpdates(ws);
       const bGens2 = bPayloads2.map((u) => u.queryGeneration).filter((g) => typeof g === 'number');
