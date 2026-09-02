@@ -405,22 +405,28 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div v-if="mode === 'split'" class="diff-colheads">
-            <div class="colhead">改动前</div>
-            <div class="colhead">改动后</div>
-          </div>
+          <!-- 纸面（D1 纸面分层，与 DiffDialog 同款）：列头 + 渲染器装进留白纸卡 -->
+          <div class="paperwrap">
+            <div class="paper">
+              <div v-if="mode === 'split'" class="diff-colheads">
+                <div class="colhead"><span class="colhead__tick"></span>改动前</div>
+                <div class="colhead colhead--river" aria-hidden="true"></div>
+                <div class="colhead"><span class="colhead__tick colhead__tick--new"></span>改动后</div>
+              </div>
 
-          <DiffBody
-            :parsed="parsed"
-            :mode="mode"
-            :context="effectiveContext"
-            :full-text="fullText"
-            :cur-change="curChange"
-            :language="language"
-            :search-matches="searchMatches"
-            :current-search-match-id="currentSearchMatch?.id ?? null"
-            @goto-nav="curChange = $event"
-          />
+              <DiffBody
+                :parsed="parsed"
+                :mode="mode"
+                :context="effectiveContext"
+                :full-text="fullText"
+                :cur-change="curChange"
+                :language="language"
+                :search-matches="searchMatches"
+                :current-search-match-id="currentSearchMatch?.id ?? null"
+                @goto-nav="curChange = $event"
+              />
+            </div>
+          </div>
 
           <footer class="diff-footer">
             <div class="legend">
@@ -439,15 +445,11 @@ onBeforeUnmount(() => {
 <style scoped>
 /* 衍生 token：与 DiffDialog 同源（绿增 / 红删 / 琥珀改），DiffBody/DiffLine 经 CSS 变量继承拿到。 */
 .diff-overlay {
-  --add-bg: color-mix(in srgb, var(--color-success) 14%, transparent);
   --add-bg-strong: color-mix(in srgb, var(--color-success) 28%, transparent);
-  --add-gutter: color-mix(in srgb, var(--color-success) 22%, var(--color-panel-soft));
   --add-word: color-mix(in srgb, var(--color-success) 34%, transparent);
   --add-edge: var(--color-success);
   --add-text: var(--color-success-strong);
-  --del-bg: color-mix(in srgb, var(--color-danger) 11%, transparent);
   --del-bg-strong: color-mix(in srgb, var(--color-danger) 22%, transparent);
-  --del-gutter: color-mix(in srgb, var(--color-danger) 19%, var(--color-panel-soft));
   --del-word: color-mix(in srgb, var(--color-danger) 28%, transparent);
   --del-edge: var(--color-danger);
   --del-text: var(--color-danger);
@@ -455,7 +457,13 @@ onBeforeUnmount(() => {
   --mod-edge: var(--color-warn-strong);
   --diff-line-h: 22px;
   --diff-font: 12.5px;
-  --diff-chunk-border: color-mix(in srgb, var(--color-border-strong) 65%, transparent);
+  /* 纸面工坊 token 与 DiffDialog 同步（DiffBody/DiffLine 复用，被动传播需要） */
+  --add-tint: color-mix(in srgb, var(--color-success) 9%, transparent);
+  --del-tint: color-mix(in srgb, var(--color-danger) 8%, transparent);
+  --add-card-edge: color-mix(in srgb, var(--color-success) 15%, transparent);
+  --del-card-edge: color-mix(in srgb, var(--color-danger) 15%, transparent);
+  --river-w: 64px;
+  --gutter-w: 44px;
 
   position: fixed;
   inset: 0;
@@ -831,24 +839,58 @@ onBeforeUnmount(() => {
   height: 28px;
 }
 
+/* 纸面（D1，与 DiffDialog 同款）：代码区外扩 12px 留白成圆角纸卡 */
+.paperwrap {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px;
+  display: flex;
+}
+.paper {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--color-panel-soft);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 1px 3px rgba(64, 48, 32, 0.05);
+  overflow: hidden;
+}
+
+/* 纸内列头（split 专属）：tick 小方块 + river 占位列 */
 .diff-colheads {
   flex: 0 0 auto;
   display: flex;
-  border-bottom: 1px solid var(--color-border-strong);
-  background: var(--color-panel);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent);
 }
 .colhead {
   flex: 1;
   min-width: 0;
-  padding: 7px 14px;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-text-muted);
   display: flex;
   align-items: center;
   gap: 7px;
+  padding: 6px 12px 6px calc(var(--gutter-w) + 10px);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+.colhead__tick {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--color-text) 16%, transparent);
+}
+.colhead__tick--new {
+  background: color-mix(in srgb, var(--color-success) 45%, transparent);
+}
+.colhead--river {
+  flex: 0 0 var(--river-w);
+  padding: 6px 0;
+  justify-content: center;
 }
 
 .diff-footer {
@@ -874,15 +916,24 @@ onBeforeUnmount(() => {
   gap: 5px;
 }
 .legend i {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   border-radius: 3px;
   display: inline-block;
-  border: 1px solid color-mix(in srgb, #000 8%, transparent);
 }
-.legend .lg-add { background: var(--add-bg-strong); }
-.legend .lg-del { background: var(--del-bg-strong); }
-.legend .lg-mod { background: var(--mod-bg); }
+/* mini 卡片样本（D3，与 DiffDialog 同步：bg-strong token 已删） */
+.legend .lg-add {
+  background: var(--add-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--add-edge) 30%, transparent), inset 2.5px 0 0 color-mix(in srgb, var(--add-edge) 70%, transparent);
+}
+.legend .lg-del {
+  background: var(--del-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--del-edge) 30%, transparent), inset 2.5px 0 0 color-mix(in srgb, var(--del-edge) 70%, transparent);
+}
+.legend .lg-mod {
+  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warn) 30%, transparent);
+}
 
 @media (prefers-reduced-motion: reduce) {
   .diff-overlay {
@@ -892,6 +943,11 @@ onBeforeUnmount(() => {
     --ease-spring: linear;
   }
   .diff-dialog {
+    animation: none;
+  }
+  .ccard.flash::after,
+  .hunk-block.flash::after,
+  .bridge.flash .b-fill {
     animation: none;
   }
 }

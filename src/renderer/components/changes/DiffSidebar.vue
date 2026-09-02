@@ -110,7 +110,8 @@ function statusLabel(s: string): string {
   gap: 8px;
   width: 100%;
   min-width: 0;
-  padding: 6px 8px;
+  /* 纸面工坊 D5：行高微调对齐原型 .sfile（7px），侧栏唯一改动 */
+  padding: 7px 8px;
   background: transparent;
   border: 0;
   border-radius: var(--radius-sm);

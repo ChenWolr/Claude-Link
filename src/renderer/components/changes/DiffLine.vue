@@ -55,8 +55,8 @@ const renderedTokens = computed(() =>
 </script>
 
 <template>
-  <div :class="['line', `line--${kind}`]">
-    <span class="ln">{{ line.n ?? '' }}</span>
+  <div :class="['line', `line--${kind}`, `line--${variant}`]">
+    <span v-if="variant === 'inline'" class="ln">{{ line.n ?? '' }}</span>
     <span v-if="variant === 'inline'" class="sign">{{ sign }}</span>
     <code>
       <span
@@ -114,21 +114,22 @@ const renderedTokens = computed(() =>
   color: var(--color-text);
 }
 
-/* 三档色：行 bg（最浅） < gutter（行号槽） < word（词级，最深） */
-.line--add { background: var(--add-bg); }
-.line--add .ln { background: var(--add-gutter); color: var(--add-text); opacity: 1; }
+/* inline 两档色（纸面工坊 D3：卡片 tint 底 + word 词级；split 行背景由 DiffBody 卡片承担）：
+   行号槽底色不透明（sticky 遮住横向滚动内容，透明底会露字）。 */
+.line--add { background: var(--add-tint); }
+.line--add .ln { background: color-mix(in srgb, var(--add-edge) 8%, var(--color-panel-soft)); color: var(--add-text); opacity: 1; font-weight: 650; }
 .line--add .sign { color: var(--add-text); opacity: 1; }
 
-.line--del { background: var(--del-bg); }
-.line--del .ln { background: var(--del-gutter); color: var(--del-text); opacity: 1; }
+.line--del { background: var(--del-tint); }
+.line--del .ln { background: color-mix(in srgb, var(--del-edge) 7%, var(--color-panel-soft)); color: var(--del-text); opacity: 1; font-weight: 650; }
 .line--del .sign { color: var(--del-text); opacity: 1; }
 
-.line--modl { background: var(--del-bg); }
-.line--modl .ln { background: var(--del-gutter); color: var(--del-text); opacity: 1; }
+.line--modl { background: var(--del-tint); }
+.line--modl .ln { background: color-mix(in srgb, var(--del-edge) 7%, var(--color-panel-soft)); color: var(--del-text); opacity: 1; font-weight: 650; }
 .line--modl .sign { color: var(--del-text); opacity: 0.9; }
 
-.line--modr { background: var(--add-bg); }
-.line--modr .ln { background: var(--add-gutter); color: var(--add-text); opacity: 1; }
+.line--modr { background: var(--add-tint); }
+.line--modr .ln { background: color-mix(in srgb, var(--add-edge) 8%, var(--color-panel-soft)); color: var(--add-text); opacity: 1; font-weight: 650; }
 .line--modr .sign { color: var(--add-text); opacity: 0.9; }
 
 .line--ws { background: var(--mod-bg); }
@@ -147,6 +148,11 @@ const renderedTokens = computed(() =>
   color: var(--add-text);
   font-weight: 600;
 }
+
+/* split 变体（纸面工坊 D3/D4）：行背景由 DiffBody 卡片层承担、行号由独立 gutter 列承担，
+   行本身素净；code 左 10px 右 16px 对齐原型 .cl。inline 变体行号/符号/行背景保持原样。 */
+.line--split { background: transparent; }
+.line--split code { padding: 0 16px 0 10px; }
 
 .search-hit {
   background: color-mix(in srgb, var(--color-warn) 28%, transparent);

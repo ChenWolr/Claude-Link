@@ -463,25 +463,58 @@ onBeforeUnmount(() => {
         <div class="diff-main">
           <header class="diff-header">
             <div class="diff-header__main">
-              <div class="diff-eyebrow">
-                <span class="dot" :style="{ background: statusColor }"></span>
-                {{ statusText }} · 文件对比
+              <span
+                class="seal"
+                :style="{
+                  color: statusColor,
+                  background: `color-mix(in srgb, ${statusColor} 14%, transparent)`,
+                  boxShadow: `inset 0 0 0 1px color-mix(in srgb, ${statusColor} 22%, transparent)`,
+                }"
+              >{{ statusText }}</span>
+              <div class="diff-header__titles">
+                <h2 class="diff-title">
+                  <span v-if="pathParts.dir" class="diff-title__dir">{{ pathParts.dir }}/</span><b>{{ pathParts.name || '—' }}</b>
+                </h2>
+                <p class="diff-meta">
+                  <span v-if="baselineShort">对比 <code>HEAD {{ baselineShort }}</code></span>
+                  <template v-if="currentFile && !isBinary">
+                    <span v-if="baselineShort" class="meta-sep">·</span>
+                    <span class="stat stat-add">+{{ counts.add }}</span>
+                    <span class="stat stat-del">−{{ counts.del }}</span>
+                    <span class="meta-sep">·</span>
+                    <span>{{ navTotal }} 处改动</span>
+                  </template>
+                  <span v-else-if="isBinary">二进制文件</span>
+                  <span v-if="isTruncated" class="stat-trunc">· 差异过大仅显示前部分</span>
+                </p>
               </div>
-              <h2 class="diff-title">
-                <span v-if="pathParts.dir" class="diff-title__dir">{{ pathParts.dir }}/</span><b>{{ pathParts.name || '—' }}</b>
-              </h2>
-              <p class="diff-meta">
-                <span v-if="baselineShort">对比 <code>HEAD {{ baselineShort }}</code></span>
-                <template v-if="currentFile && !isBinary">
-                  <span class="stat stat-add">+{{ counts.add }}</span>
-                  <span class="stat stat-del">−{{ counts.del }}</span>
-                  <span>{{ navTotal }} 处改动</span>
-                </template>
-                <span v-else-if="isBinary">二进制文件</span>
-                <span v-if="isTruncated" class="stat-trunc">· 差异过大仅显示前部分</span>
-              </p>
             </div>
             <div class="diff-header__actions">
+              <button
+                class="tbtn"
+                type="button"
+                :class="{ active: searchOpen }"
+                :disabled="isBinary"
+                title="搜索 diff 内容（Ctrl+F）"
+                @click="openSearch"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <circle cx="11" cy="11" r="7" />
+                  <path d="m20 20-4-4" />
+                </svg>
+                搜索
+              </button>
+
+              <div class="navchange" title="上一处 / 下一处改动（↑ / ↓）">
+                <button class="iconbtn" type="button" aria-label="上一处改动" :disabled="!navTotal" @click="gotoChange(-1)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15" /></svg>
+                </button>
+                <span class="navchange__count">{{ navTotal ? `${curChange + 1} / ${navTotal}` : '0 / 0' }}</span>
+                <button class="iconbtn" type="button" aria-label="下一处改动" :disabled="!navTotal" @click="gotoChange(1)">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+                </button>
+              </div>
+
               <button ref="closeBtn" class="iconbtn iconbtn--close" type="button" aria-label="关闭" @click="close">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
               </button>
@@ -508,33 +541,14 @@ onBeforeUnmount(() => {
 
             <div class="toolbar__spacer"></div>
 
-            <button
-              class="tbtn"
-              type="button"
-              :class="{ active: searchOpen }"
-              :disabled="isBinary"
-              title="搜索 diff 内容（Ctrl+F）"
-              @click="openSearch"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-                <circle cx="11" cy="11" r="7" />
-                <path d="m20 20-4-4" />
-              </svg>
-              搜索
-            </button>
-
-            <div class="navchange" title="上一处 / 下一处改动（↑ / ↓）">
-              <button class="iconbtn" type="button" aria-label="上一处改动" :disabled="!navTotal" @click="gotoChange(-1)">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15" /></svg>
-              </button>
-              <span class="navchange__count">{{ navTotal ? `${curChange + 1} / ${navTotal}` : '0 / 0' }}</span>
-              <button class="iconbtn" type="button" aria-label="下一处改动" :disabled="!navTotal" @click="gotoChange(1)">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
-              </button>
+            <div class="toolbar__hint" aria-hidden="true">
+              <span><kbd>↑</kbd><kbd>↓</kbd> 切换改动</span>
+              <span><kbd>Ctrl</kbd>+<kbd>F</kbd> 搜索</span>
+              <span><kbd>Esc</kbd> 关闭</span>
             </div>
           </div>
 
-          <div v-if="searchOpen" class="diff-searchbar" role="search">
+          <div class="diff-searchbar" role="search" :class="{ open: searchOpen }" :inert="!searchOpen">
             <label class="diff-searchbar__field">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
                 <circle cx="11" cy="11" r="7" />
@@ -572,44 +586,50 @@ onBeforeUnmount(() => {
             </button>
           </div>
 
-          <div v-if="mode === 'split'" class="diff-colheads">
-            <div class="colhead">改动前 <code>· HEAD</code></div>
-            <div class="colhead">改动后 <code>· 工作区</code></div>
-          </div>
+          <!-- 纸面（D1 纸面分层）：列头 + 渲染器 + 状态态装进一张留白圆角纸卡 -->
+          <div class="paperwrap">
+            <div class="paper">
+              <div v-if="mode === 'split'" class="diff-colheads">
+                <div class="colhead"><span class="colhead__tick"></span>改动前 <code>· HEAD</code></div>
+                <div class="colhead colhead--river" aria-hidden="true"></div>
+                <div class="colhead"><span class="colhead__tick colhead__tick--new"></span>改动后 <code>· 工作区</code></div>
+              </div>
 
-          <DiffBody
-            v-if="!errorMsg && !isBinary && !isLoading"
-            :parsed="parsed"
-            :mode="mode"
-            :context="effectiveContext"
-            :full-text="fullText"
-            :cur-change="curChange"
-            :language="language"
-            :search-matches="searchMatches"
-            :current-search-match-id="currentSearchMatch?.id ?? null"
-            @goto-nav="curChange = $event"
-          />
-          <div v-else-if="errorMsg" class="diff-state">
-            <div class="diff-state__icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+              <DiffBody
+                v-if="!errorMsg && !isBinary && !isLoading"
+                :parsed="parsed"
+                :mode="mode"
+                :context="effectiveContext"
+                :full-text="fullText"
+                :cur-change="curChange"
+                :language="language"
+                :search-matches="searchMatches"
+                :current-search-match-id="currentSearchMatch?.id ?? null"
+                @goto-nav="curChange = $event"
+              />
+              <div v-else-if="errorMsg" class="diff-state">
+                <div class="diff-state__icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                </div>
+                <h3>读取差异失败</h3>
+                <p>{{ errorMsg }}</p>
+              </div>
+              <div v-else-if="isBinary" class="diff-state">
+                <div class="diff-state__icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></svg>
+                </div>
+                <h3>二进制文件</h3>
+                <p>该文件为二进制资源（图片 / 字体 / 压缩包等），无法进行文本行级对比。可点「打开」用外部工具查看。</p>
+                <p v-if="currentFile" style="margin-top: 10px"><code>{{ currentFile.path }}</code></p>
+              </div>
+              <div v-else class="diff-state">
+                <div class="diff-state__icon">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 6v6" /></svg>
+                </div>
+                <h3>加载中…</h3>
+                <p>正在读取该文件相对 HEAD 的差异。</p>
+              </div>
             </div>
-            <h3>读取差异失败</h3>
-            <p>{{ errorMsg }}</p>
-          </div>
-          <div v-else-if="isBinary" class="diff-state">
-            <div class="diff-state__icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="M21 15l-5-5L5 21" /></svg>
-            </div>
-            <h3>二进制文件</h3>
-            <p>该文件为二进制资源（图片 / 字体 / 压缩包等），无法进行文本行级对比。可点「打开」用外部工具查看。</p>
-            <p v-if="currentFile" style="margin-top: 10px"><code>{{ currentFile.path }}</code></p>
-          </div>
-          <div v-else class="diff-state">
-            <div class="diff-state__icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 6v6" /></svg>
-            </div>
-            <h3>加载中…</h3>
-            <p>正在读取该文件相对 HEAD 的差异。</p>
           </div>
 
           <footer class="diff-footer">
@@ -640,15 +660,9 @@ onBeforeUnmount(() => {
 /* 衍生 token：绿增 / 红删 / 琥珀改，浅 tint。绿固定 token（9 套主题不换），红用主题 danger，琥珀用主题 warn。
    定义在 .diff-overlay 上，子组件（DiffBody/DiffLine/DiffSidebar）经 CSS 变量继承拿到。 */
 .diff-overlay {
-  --add-bg: color-mix(in srgb, var(--color-success) 14%, transparent);
-  --add-bg-strong: color-mix(in srgb, var(--color-success) 28%, transparent);
-  --add-gutter: color-mix(in srgb, var(--color-success) 22%, var(--color-panel-soft));
   --add-word: color-mix(in srgb, var(--color-success) 34%, transparent);
   --add-edge: var(--color-success);
   --add-text: var(--color-success-strong);
-  --del-bg: color-mix(in srgb, var(--color-danger) 11%, transparent);
-  --del-bg-strong: color-mix(in srgb, var(--color-danger) 22%, transparent);
-  --del-gutter: color-mix(in srgb, var(--color-danger) 19%, var(--color-panel-soft));
   --del-word: color-mix(in srgb, var(--color-danger) 28%, transparent);
   --del-edge: var(--color-danger);
   --del-text: var(--color-danger);
@@ -656,13 +670,20 @@ onBeforeUnmount(() => {
   --mod-edge: var(--color-warn-strong);
   --diff-line-h: 22px;
   --diff-font: 12.5px;
-  --diff-chunk-border: color-mix(in srgb, var(--color-border-strong) 65%, transparent);
+  /* 纸面工坊（D2 river / D3 卡片 / D4 行号列） */
+  --add-tint: color-mix(in srgb, var(--color-success) 9%, transparent);
+  --del-tint: color-mix(in srgb, var(--color-danger) 8%, transparent);
+  --add-card-edge: color-mix(in srgb, var(--color-success) 15%, transparent);
+  --del-card-edge: color-mix(in srgb, var(--color-danger) 15%, transparent);
+  --river-w: 64px;
+  --gutter-w: 44px;
 
   position: fixed;
   inset: 0;
   z-index: 1200;
-  background: var(--interaction-overlay-bg, rgba(0, 0, 0, 0.58));
-  backdrop-filter: blur(3px);
+  /* 暖色 scrim（D6）：diff 弹窗本地覆盖，不改全局共享的蒙层 token */
+  background: color-mix(in srgb, #4A3828 42%, transparent);
+  backdrop-filter: blur(9px) saturate(1.04);
 }
 /* Transition（v-if）淡入淡出蒙层；dialog 内部 animation 进场（spring 抬升）。 */
 .diff-fade-enter-active,
@@ -682,7 +703,8 @@ onBeforeUnmount(() => {
   border: 1px solid color-mix(in srgb, var(--color-accent-strong) 35%, var(--color-border));
   border-radius: var(--radius-lg);
   background: var(--color-panel);
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.46), var(--ring-light);
+  /* 双层柔影 + 纸面顶部高光（D6） */
+  box-shadow: 0 24px 64px rgba(64, 48, 32, 0.26), 0 6px 20px rgba(64, 48, 32, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.55);
   animation: diff-dialog-in var(--duration-slow) var(--ease-spring);
 }
 @keyframes diff-dialog-in {
@@ -750,32 +772,35 @@ onBeforeUnmount(() => {
 .diff-header {
   user-select: none;
   flex: 0 0 auto;
-  padding: 14px 18px 12px;
-  border-bottom: 1px solid var(--color-border);
-  background: linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 12%, transparent), transparent 72%);
   display: flex;
-  align-items: flex-start;
-  gap: 14px;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 10px 12px 16px;
+  border-bottom: 1px solid var(--color-border);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--color-panel-soft) 55%, transparent), transparent 80%);
 }
 .diff-header__main {
   flex: 1;
   min-width: 0;
-}
-.diff-eyebrow {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  margin-bottom: 5px;
-  color: var(--color-accent-strong);
-  font-size: 10.5px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  gap: 11px;
 }
-.diff-eyebrow .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+/* 状态印章（D5 chrome 重组）：26px 圆角方章；色由模板 :style 用现有 statusColor 派生（tint 底+发丝描边） */
+.seal {
+  flex: 0 0 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 750;
+  color: var(--mod-edge);
+  background: color-mix(in srgb, var(--color-warn) 15%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warn) 22%, transparent);
+}
+.diff-header__titles {
+  min-width: 0;
 }
 .diff-title {
   display: flex;
@@ -824,6 +849,9 @@ onBeforeUnmount(() => {
   font-family: var(--font-mono);
   color: var(--color-text);
   font-size: 11.5px;
+}
+.diff-meta .meta-sep {
+  opacity: 0.45;
 }
 .stat {
   font-family: var(--font-sans);
@@ -937,6 +965,24 @@ onBeforeUnmount(() => {
 .toolbar__spacer {
   flex: 1;
 }
+.toolbar__hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+.toolbar__hint kbd {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-text) 12%, transparent);
+  border-bottom-width: 2px;
+}
 .navchange {
   display: inline-flex;
   align-items: center;
@@ -991,15 +1037,29 @@ onBeforeUnmount(() => {
   width: 14px;
   height: 14px;
 }
+/* 搜索条（D7 微交互）：max-height/opacity 滑入滑出；closed 时 inert 不参与 Tab/输入 */
 .diff-searchbar {
   flex: 0 0 auto;
-  min-height: 42px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 14px;
-  border-bottom: 1px solid var(--color-border);
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  padding: 0 14px;
+  border-bottom: 1px solid transparent;
   background: color-mix(in srgb, var(--color-panel-soft) 82%, var(--color-accent) 4%);
+  transition:
+    max-height var(--duration-base) var(--ease-out),
+    opacity var(--duration-base) var(--ease-out),
+    padding var(--duration-base) var(--ease-out),
+    border-color var(--duration-base) var(--ease-out);
+}
+.diff-searchbar.open {
+  max-height: 46px;
+  opacity: 1;
+  padding: 7px 14px;
+  border-bottom-color: var(--color-border);
 }
 .diff-searchbar__field {
   min-width: 180px;
@@ -1064,39 +1124,66 @@ onBeforeUnmount(() => {
   height: 28px;
 }
 
-/* 列头 */
+/* 纸面（D1 纸面分层）：代码区外扩 12px 留白成圆角纸卡，文档感取代 IDE 条纹感 */
+.paperwrap {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 14px;
+  display: flex;
+}
+.paper {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--color-panel-soft);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 1px 3px rgba(64, 48, 32, 0.05);
+  overflow: hidden;
+}
+
+/* 纸内列头（split 专属）：tick 小方块 + river 占位列，padding 补偿 gutter 列宽对齐代码区 */
 .diff-colheads {
   flex: 0 0 auto;
   display: flex;
-  border-bottom: 1px solid var(--color-border-strong);
-  background: var(--color-panel);
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent);
 }
 .colhead {
   flex: 1;
   min-width: 0;
-  padding: 7px 14px;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-text-muted);
   display: flex;
   align-items: center;
   gap: 7px;
+  padding: 6px 12px 6px calc(var(--gutter-w) + 10px);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
 }
 .colhead code {
   text-transform: none;
   letter-spacing: 0;
-  font-size: 11px;
-  color: var(--color-text);
+  font-size: 10px;
   font-weight: 600;
+  font-family: var(--font-mono);
+  color: color-mix(in srgb, var(--color-text) 62%, transparent);
 }
-.colhead--gutter {
-  flex: 0 0 86px;
-  padding: 7px 0;
+.colhead__tick {
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--color-text) 16%, transparent);
+}
+.colhead__tick--new {
+  background: color-mix(in srgb, var(--color-success) 45%, transparent);
+}
+.colhead--river {
+  flex: 0 0 var(--river-w);
+  padding: 6px 0;
   justify-content: center;
-  font-size: 9px;
-  gap: 4px;
 }
 
 /* 状态态（加载 / 错误 / 二进制；空差异态在 DiffBody 内） */
@@ -1163,15 +1250,24 @@ onBeforeUnmount(() => {
   gap: 5px;
 }
 .legend i {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   border-radius: 3px;
   display: inline-block;
-  border: 1px solid color-mix(in srgb, #000 8%, transparent);
 }
-.legend .lg-add { background: var(--add-bg-strong); }
-.legend .lg-del { background: var(--del-bg-strong); }
-.legend .lg-mod { background: var(--mod-bg); }
+/* mini 卡片样本（D3）：tint 底 + 发丝边 + 左侧色轨 */
+.legend .lg-add {
+  background: var(--add-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--add-edge) 30%, transparent), inset 2.5px 0 0 color-mix(in srgb, var(--add-edge) 70%, transparent);
+}
+.legend .lg-del {
+  background: var(--del-tint);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--del-edge) 30%, transparent), inset 2.5px 0 0 color-mix(in srgb, var(--del-edge) 70%, transparent);
+}
+.legend .lg-mod {
+  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-warn) 30%, transparent);
+}
 .diff-footer__actions {
   margin-left: auto;
   display: flex;
@@ -1216,7 +1312,7 @@ onBeforeUnmount(() => {
   border-color: var(--color-accent);
   background: var(--color-accent);
   color: var(--color-on-accent);
-  box-shadow: var(--ring-light-accent);
+  box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.08);
 }
 .btn--primary:hover:not(:disabled) {
   background: var(--color-accent-strong);
@@ -1267,8 +1363,9 @@ onBeforeUnmount(() => {
   .diff-dialog {
     animation: none;
   }
-  .split-cell.flash,
-  .hunk-block.flash {
+  .ccard.flash::after,
+  .hunk-block.flash::after,
+  .bridge.flash .b-fill {
     animation: none;
   }
 }
