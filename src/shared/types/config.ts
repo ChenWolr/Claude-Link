@@ -18,7 +18,11 @@ export interface AppConfig {
   // 为 null = 跟随此全局默认，非 null = 该会话显式选定档（见 permission-resolver）。
   permissionMode: PermissionMode;
   maxTurns: number;
-  taskDelaySeconds: number;
+  // 队列任务总开关（默认关）。开：回复生成中会话框可继续输入发送并入队 + 回合结束后按间隔自动
+  // 执行队列；关：回复生成中禁止发送（旧行为），队列不自动执行（面板手动「开始」仍可用）。
+  queueEnabled: boolean;
+  // 队列任务间隔（分钟，1-60，默认 5）。
+  taskDelayMinutes: number;
   themePaletteId: string;
   fontScale: 'small' | 'medium' | 'large';
   // 按模型类型别名单独设置的上下文窗口（token 数）。写入 env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>。

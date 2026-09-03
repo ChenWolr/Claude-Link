@@ -13,7 +13,8 @@ import type { ModelAlias } from '../../shared/types/config';
 export type { ModelAlias };
 import type { AppConfig, DetectedClaudeConfig } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
-import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
+import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
+import { DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
 import { parseClaudeSettings } from '../../shared/settings-parser';
 
 const defaultConfig: AppConfig = {
@@ -29,7 +30,8 @@ const defaultConfig: AppConfig = {
   workingDirectory: null,
   permissionMode: 'default',
   maxTurns: 200,
-  taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
+  queueEnabled: false,
+  taskDelayMinutes: DEFAULT_TASK_DELAY_MINUTES,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
   contextWindowByAlias: {},

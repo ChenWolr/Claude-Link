@@ -75,9 +75,10 @@ export interface ClaudeLinkAPI {
   reorderTasks: (sessionId: string, taskIds: string[]) => Promise<Task[]>;
   interruptTask: (taskId: string) => Promise<void>;
   retryTask: (taskId: string) => Promise<Task>;
-  startQueue: (sessionId: string) => Promise<void>;
-  pauseQueue: (sessionId: string) => Promise<void>;
-  resumeQueue: (sessionId: string) => Promise<void>;
+  setTaskPaused: (taskId: string, paused: boolean) => Promise<Task>;
+  startQueue: (sessionId: string) => Promise<QueueState>;
+  pauseQueue: (sessionId: string) => Promise<QueueState>;
+  resumeQueue: (sessionId: string) => Promise<QueueState>;
   getQueueState: (sessionId: string) => Promise<QueueState>;
   queueUserMessage: (sessionId: string, payload: ChatSendPayload) => Promise<QueueState>;
   getClaudePlanState: (sessionId: string) => Promise<import('../shared/types/claude-plan').ClaudePlanState | null>;
@@ -190,6 +191,7 @@ export function createApi(): ClaudeLinkAPI {
       ipcRenderer.invoke(IPC_CHANNELS.TASK_REORDER, sessionId, taskIds) as Promise<Task[]>,
     interruptTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_INTERRUPT, taskId),
     retryTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_RETRY, taskId) as Promise<Task>,
+    setTaskPaused: (taskId, paused) => ipcRenderer.invoke(IPC_CHANNELS.TASK_SET_PAUSED, taskId, paused),
     startQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_START, sessionId),
     pauseQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_PAUSE, sessionId),
     resumeQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME, sessionId),

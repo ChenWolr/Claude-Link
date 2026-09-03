@@ -34,6 +34,8 @@ import {
   getQueueState,
   continueWithUserMessage,
   cleanupQueue,
+  maybeAutoStartQueue,
+  cancelWaitingIfDrained,
 } from './modules/task-queue-engine';
 import { analyzeTopic } from './modules/topic-analyzer';
 import { logger } from './utils/logger';
@@ -431,7 +433,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       createdMessageId = created.id;
 
       // spawn 占坑；若已有 pending/active 会抛错 → 走回滚。
-      spawnForChat(sessionId, mainWindow, {
+      const child = spawnForChat(sessionId, mainWindow, {
         model: session.model,
         modelOverride: session.modelOverride,
         providerOverride: session.providerOverride,
@@ -444,6 +446,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         userCommandText: payload.text,
       });
       spawned = true;
+      // 队列自动执行挂点：普通会话回合结束后，若开关开启且有可执行任务，按配置间隔自动起倒计时。
+      // 幂等守卫在 maybeAutoStartQueue 内（队列非 idle / 无 pending / 有活动回合均不接管）。
+      child.on('exit', () => {
+        maybeAutoStartQueue(sessionId, mainWindow);
+      });
       // sendMessage 同步路径只负责把 pending 交给 runQuery；真正 SDK 失败走事件流，不在此 IPC 回滚。
       sendMessage(sessionId, prepared.prompt);
 
@@ -575,7 +582,24 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // Task 7B：failed/cancelled → pending，清结果字段，保留附件 links + 稳定 clientMessageId。
     const task = taskRepo.retryTask(taskId);
     if (!task) throw new Error('任务不存在或当前状态不支持重试');
+    // 重试产生新的可执行任务：若队列空闲且无活动回合，按间隔自动重新调度。
+    maybeAutoStartQueue(task.sessionId, mainWindow);
     return task;
+  });
+
+  // 任务级暂停/恢复：暂停 = 顺延（getPendingTasks 过滤 paused=1，队列继续取下一个未暂停任务）；
+  // 全部暂停 = 无可执行任务，倒计时立即收口不执行；恢复 = 重新进入待执行序列并尝试自动调度。
+  ipcMain.handle(IPC_CHANNELS.TASK_SET_PAUSED, async (_event, taskId: string, paused: unknown) => {
+    const task = taskRepo.getTask(taskId);
+    if (!task) throw new Error('任务不存在');
+    const updated = taskRepo.setTaskPaused(taskId, paused === true);
+    if (!updated) throw new Error('仅待执行（pending）任务可暂停/恢复');
+    if (paused === true) {
+      cancelWaitingIfDrained(task.sessionId, mainWindow);
+    } else {
+      maybeAutoStartQueue(task.sessionId, mainWindow);
+    }
+    return updated;
   });
 
   // Queue

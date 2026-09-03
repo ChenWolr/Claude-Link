@@ -19,6 +19,7 @@ interface TaskRow {
   created_at: string;
   updated_at: string;
   client_message_id: string | null;
+  paused: number;
 }
 
 function toTask(row: TaskRow): Task {
@@ -38,6 +39,7 @@ function toTask(row: TaskRow): Task {
     updatedAt: normalizeDbTime(row.updated_at),
     attachments: [],
     clientMessageId: row.client_message_id ?? null,
+    paused: Boolean(row.paused),
   };
 }
 
@@ -103,7 +105,7 @@ export function getTasksBySession(sessionId: string): Task[] {
 
 export function getPendingTasks(sessionId: string): Task[] {
   const rows = getConnection()
-    .prepare("SELECT * FROM tasks WHERE session_id = ? AND status = 'pending' ORDER BY sort_order ASC")
+    .prepare("SELECT * FROM tasks WHERE session_id = ? AND status = 'pending' AND paused = 0 ORDER BY sort_order ASC")
     .all(sessionId) as TaskRow[];
   const tasks = rows.map(toTask);
   fillTaskAttachments(tasks);
@@ -217,6 +219,20 @@ export function retryTask(id: string): Task | null {
        WHERE id = @id AND status IN ('failed', 'cancelled')`,
     )
     .run({ id });
+  return getTask(id);
+}
+
+/** 任务级暂停/恢复：仅对 status='pending' 任务生效（running/终态任务零命中返回 null）。
+ *  方向守卫：暂停要求当前 paused=0、恢复要求当前 paused=1，脏调用不翻转。 */
+export function setTaskPaused(id: string, paused: boolean): Task | null {
+  const info = getConnection()
+    .prepare(
+      `UPDATE tasks
+       SET paused = @paused, updated_at = datetime('now')
+       WHERE id = @id AND status = 'pending' AND paused = @guard`,
+    )
+    .run({ id, paused: paused ? 1 : 0, guard: paused ? 0 : 1 });
+  if (info.changes === 0) return null;
   return getTask(id);
 }
 
