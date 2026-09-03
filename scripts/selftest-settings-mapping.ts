@@ -592,7 +592,9 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
   check('ProviderModelSelector 含 disabled prop', ms.includes('disabled') && ms.includes('defineProps'));
   check('SessionToolbar ContextButton :disabled', st.includes('ContextButton :disabled="sending"'));
   check('SessionToolbar 工作空间 button :disabled', /ctl__btn[\s\S]{0,120}:disabled="sending"/.test(st));
-  check('SessionToolbar ProviderModelSelector :disabled', st.includes('ProviderModelSelector :disabled="sending"'));
+  // 批次三（2026-09-03 midrun-settings-unlock）：模型选择器生成中放开 sending 禁用
+  // （下一条消息起生效），同批次二 #3 权限按钮先例，改为反向契约：不得再挂 :disabled="sending"。
+  check('SessionToolbar ProviderModelSelector 不再 :disabled（生成中可切，下一条生效）', st.includes('<ProviderModelSelector />') && !st.includes('ProviderModelSelector :disabled'));
   // 权限控件已由 <select> 改为卡片式（commit d396477）。批次二 #3 后权限触发按钮放开
   // sending 禁用（运行中切档经 streaming 控制请求即时生效），此处改为反向契约：
   // 权限按钮块（perm-menu 之前）不得再挂 :disabled="sending"。

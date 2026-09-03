@@ -155,7 +155,7 @@ console.log('\n=== 6) 渲染层：级联选择器（A2 视觉 1:1）+ 会话选�
   const ss = readRel('src/renderer/stores/session-store.ts');
   const api = readRel('src/preload/api.ts');
 
-  check('SessionToolbar 挂载 ProviderModelSelector（替换旧 ModelSelector）', st.includes('ProviderModelSelector :disabled="sending"') && !st.includes("from './ModelSelector.vue'"));
+  check('SessionToolbar 挂载 ProviderModelSelector（替换旧 ModelSelector；生成中不再禁用）', st.includes('<ProviderModelSelector />') && !st.includes('ProviderModelSelector :disabled') && !st.includes("from './ModelSelector.vue'"));
   check('旧 ModelSelector.vue 已删除', readRel('src/renderer/components/chat/ModelSelector.vue') === '');
 
   // a2 关键尺寸/结构契约（rem 化，随 fontScale 缩放）。
