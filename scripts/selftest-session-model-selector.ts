@@ -99,7 +99,7 @@ console.log('\n=== 3) Agent/Task 调用级 model 改写（双保险第二层）=
 console.log('\n=== 4) V8 迁移：provider_override 列 + 别名清洗 ===');
 {
   const mig = readRel('src/main/database/migrations.ts');
-  check('schema 版本 = 8', mig.includes('CURRENT_SCHEMA_VERSION = 8'));
+  check('schema 版本 = 9（V9 tasks.paused 列）', mig.includes('CURRENT_SCHEMA_VERSION = 9'));
   check('新增 provider_override 列（版本块）', mig.includes('ADD COLUMN provider_override TEXT DEFAULT NULL'));
   check('model_override 旧别名清洗为 NULL', /UPDATE sessions SET model_override = NULL\s+WHERE model_override IN \('sonnet', 'haiku', 'opus', 'fable'\)/.test(mig));
   check('幂等自愈也补 provider_override 列', /!hasCol\('provider_override'\)/.test(mig));
