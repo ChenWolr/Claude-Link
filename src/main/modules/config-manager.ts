@@ -26,7 +26,8 @@ import type {
 import type { ProviderModelSource } from '../../shared/session-model';
 import { isValidThinkingLevel } from '../../shared/types/thinking';
 import { isValidPermissionMode } from '../../shared/permission-resolver';
-import { DEFAULT_TASK_DELAY_SECONDS, DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
+import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
+import { sanitizeTaskDelayMinutes, DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
 import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels } from '../../shared/provider-library';
 import { logger } from '../utils/logger';
 import { parseClaudeSettings } from './settings-importer';
@@ -77,7 +78,8 @@ const defaultConfig: StoredConfig = {
   workingDirectory: null,
   permissionMode: 'default',
   maxTurns: 200,
-  taskDelaySeconds: DEFAULT_TASK_DELAY_SECONDS,
+  queueEnabled: false,
+  taskDelayMinutes: DEFAULT_TASK_DELAY_MINUTES,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
   contextWindowByAlias: {},
@@ -196,7 +198,8 @@ export function getConfig(): AppConfig {
     workingDirectory: config.workingDirectory,
     permissionMode,
     maxTurns: config.maxTurns,
-    taskDelaySeconds: config.taskDelaySeconds,
+    queueEnabled: config.queueEnabled ?? false,
+    taskDelayMinutes: sanitizeTaskDelayMinutes(config.taskDelayMinutes),
     themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,
     fontScale: config.fontScale ?? DEFAULT_FONT_SCALE,
     contextWindowByAlias: config.contextWindowByAlias ?? {},

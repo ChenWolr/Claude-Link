@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 8;
+const CURRENT_SCHEMA_VERSION = 9;
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`
@@ -183,6 +183,15 @@ export function runMigrations(db: Database.Database): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_client_message_id
       ON tasks(client_message_id) WHERE client_message_id IS NOT NULL;
   `);
+
+  // V9：任务级暂停标记 paused（INTEGER 0/1）。paused=1 的 pending 任务不参与队列调度（暂停顺延
+  // 语义），恢复清 0。幂等自愈补列（PRAGMA 检查存在性），老库升级不阻塞；不动 status CHECK 约束。
+  {
+    const taskCols = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+    if (!taskCols.some((c) => c.name === 'paused')) {
+      db.exec('ALTER TABLE tasks ADD COLUMN paused INTEGER NOT NULL DEFAULT 0');
+    }
+  }
 
   // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，
   // 切换会话或重启后仍可在 InteractionPrompt 底部"交互历史"区回看。

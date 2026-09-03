@@ -2,7 +2,8 @@ import type { BrowserWindow } from 'electron';
 import type { Message } from '../../shared/types/session';
 import type { ChatSendPayload } from '../../shared/types/attachment';
 import type { QueueState } from '../../shared/types/task';
-import { IPC_CHANNELS, DEFAULT_TASK_DELAY_SECONDS } from '../../shared/constants';
+import { IPC_CHANNELS } from '../../shared/constants';
+import { resolveQueueDelaySeconds } from '../../shared/queue-config';
 import {
   spawnForChat,
   spawnForTask,
@@ -161,7 +162,7 @@ function advanceAfterTask(
   const remaining = taskRepo.getPendingTasks(sessionId);
   state.pendingCount = remaining.length;
   if (remaining.length > 0) {
-    startCountdown(sessionId, mainWindow, config.taskDelaySeconds || DEFAULT_TASK_DELAY_SECONDS);
+    startCountdown(sessionId, mainWindow, resolveQueueDelaySeconds(config.taskDelayMinutes));
   } else {
     state.status = 'idle';
     emitQueueEvent(mainWindow, sessionId, 'queue_completed');
@@ -292,6 +293,44 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
     state.currentTaskId = null;
     advanceAfterTask(sessionId, mainWindow, config);
   });
+}
+
+/** 自动启动钩子：仅当「配置开启队列 + 队列 idle + 无活动回合 + 存在可执行 pending（未暂停）」时
+ *  按配置间隔起倒计时（首个任务也在间隔后执行——「回复结束 5 分钟后执行第一个任务」）。
+ *  任何条件不满足直接返回；幂等，可被任意事件安全重复调用。 */
+export function maybeAutoStartQueue(sessionId: string, mainWindow: BrowserWindow): void {
+  const state = queues.get(sessionId);
+  if (state && state.status !== 'idle') return;
+  const config = getConfig();
+  if (!config.queueEnabled) return;
+  if (getActiveProcess(sessionId)) return;
+  const pending = taskRepo.getPendingTasks(sessionId);
+  if (pending.length === 0) return;
+  const q = getOrCreateQueue(sessionId);
+  q.pendingCount = pending.length;
+  startCountdown(sessionId, mainWindow, resolveQueueDelaySeconds(config.taskDelayMinutes));
+}
+
+/** 倒计时期间可执行任务被清空（如暂停了唯一 pending）→ 立即收口为 idle，
+ *  不再空等到点（「全部暂停 = 全部不执行」的即时反馈）。 */
+export function cancelWaitingIfDrained(sessionId: string, mainWindow: BrowserWindow): void {
+  const state = queues.get(sessionId);
+  if (!state || state.status !== 'waiting') return;
+  if (taskRepo.getPendingTasks(sessionId).length > 0) return;
+  const countdownTimer = timers.get(sessionId);
+  const mainTimer = timers.get(`${sessionId}__main`);
+  if (countdownTimer) {
+    clearInterval(countdownTimer);
+    timers.delete(sessionId);
+  }
+  if (mainTimer) {
+    clearTimeout(mainTimer);
+    timers.delete(`${sessionId}__main`);
+  }
+  state.status = 'idle';
+  state.countdownRemaining = 0;
+  state.pendingCount = 0;
+  emitQueueEvent(mainWindow, sessionId, 'queue_completed');
 }
 
 function startCountdown(sessionId: string, mainWindow: BrowserWindow, delaySeconds: number): void {
@@ -425,7 +464,7 @@ export async function continueWithUserMessage(
     state.pendingCount = remaining.length;
 
     if (remaining.length > 0) {
-      startCountdown(sessionId, mainWindow, config.taskDelaySeconds || DEFAULT_TASK_DELAY_SECONDS);
+      startCountdown(sessionId, mainWindow, resolveQueueDelaySeconds(config.taskDelayMinutes));
     } else {
       state.status = 'idle';
       emitQueueEvent(mainWindow, sessionId, 'queue_completed');

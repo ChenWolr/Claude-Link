@@ -20,6 +20,9 @@ export interface Task {
   attachments: AttachmentSummary[];
   // 稳定消息身份：入队时写入，执行/重试/重启复用同一 ID 创建 user message，避免重复消息。
   clientMessageId: string | null;
+  // 任务级暂停标记：true = 暂停顺延（不参与队列调度，恢复后回到待执行序列）。
+  // 仅对 status='pending' 有意义；repo 恒定填充（老任务 false）。
+  paused: boolean;
 }
 
 export type QueueStateStatus = 'idle' | 'running' | 'waiting' | 'paused' | 'continuing';

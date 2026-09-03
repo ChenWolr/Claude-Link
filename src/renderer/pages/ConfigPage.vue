@@ -10,6 +10,7 @@ import { useConfigStore } from '../stores/config-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
+import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 
 const store = useConfigStore();
 const router = useRouter();
@@ -25,7 +26,7 @@ const activeTab = ref<TabId>('connection');
 // cliPath/cliVersion/workingDirectory 由系统维护（自动检测/未开放编辑），不纳入快照。
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
-  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'taskDelaySeconds', 'themePaletteId', 'fontScale', 'contextWindowByAlias', 'defaultThinkingLevel',
+  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'queueEnabled', 'taskDelayMinutes', 'themePaletteId', 'fontScale', 'contextWindowByAlias', 'defaultThinkingLevel',
   'notifyOnLeave', 'minimizeToTray',
 ] as const;
 
@@ -184,6 +185,11 @@ function handlePermissionModeChange(e: Event) {
   const mode = (e.target as HTMLSelectElement).value;
   store.config.permissionMode = mode as typeof store.config.permissionMode;
 }
+
+// 队列间隔输入夹取：失焦时把越界/非法值收敛到 1-60（NaN/空回落默认 5），与主进程清洗同源。
+function clampTaskDelayMinutes(): void {
+  store.config.taskDelayMinutes = sanitizeTaskDelayMinutes(store.config.taskDelayMinutes);
+}
 </script>
 
 <template>
@@ -266,10 +272,21 @@ function handlePermissionModeChange(e: Event) {
                 <span class="field-desc">单次会话最大工具调用轮数（<code>--max-turns</code>）。</span>
                 <input v-model.number="store.config.maxTurns" type="number" min="1" />
               </label>
+              <label class="field field--toggle">
+                <span class="field-label">开启队列任务</span>
+                <span class="field-desc">开启后：回复生成中可在会话框继续输入并发送，消息与附件自动加入队列，当前回复结束后按下方间隔自动逐个执行。关闭后：回复生成中禁止发送，队列不自动执行（仍可在队列面板手动「开始」）。</span>
+                <input v-model="store.config.queueEnabled" type="checkbox" />
+              </label>
               <label class="field">
-                <span class="field-label">队列任务间隔（秒）</span>
-                <span class="field-desc">任务队列中相邻任务的等待时间。</span>
-                <input v-model.number="store.config.taskDelaySeconds" type="number" min="0" />
+                <span class="field-label">队列任务间隔（分钟）</span>
+                <span class="field-desc">回复结束 / 上一队列任务完成后，等待多少分钟执行下一个队列任务。手填 1-60，最低 1 分钟。</span>
+                <input
+                  v-model.number="store.config.taskDelayMinutes"
+                  type="number"
+                  min="1"
+                  max="60"
+                  @blur="clampTaskDelayMinutes"
+                />
               </label>
               <label class="field">
                 <span class="field-label">默认思考强度</span>

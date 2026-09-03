@@ -1,6 +1,5 @@
 export { IPC_CHANNELS } from './types/ipc';
 
-export const DEFAULT_TASK_DELAY_SECONDS = 60;
 export const DEFAULT_THEME_PALETTE_ID = 'warm-paper';
 export const DEFAULT_FONT_SCALE = 'medium';
 export const FONT_SCALE_SIZES: Record<string, string> = {

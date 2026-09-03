@@ -73,6 +73,7 @@ export const IPC_CHANNELS = {
   TASK_REORDER: 'task:reorder',
   TASK_INTERRUPT: 'task:interrupt',
   TASK_RETRY: 'task:retry',
+  TASK_SET_PAUSED: 'task:setPaused',
   QUEUE_START: 'queue:start',
   QUEUE_PAUSE: 'queue:pause',
   QUEUE_RESUME: 'queue:resume',
@@ -113,7 +114,6 @@ export const IPC_CHANNELS = {
   COMMANDS_GET_DIAGNOSTIC: 'commands:getDiagnostic',
 } as const;
 
-export const DEFAULT_TASK_DELAY_SECONDS = 60;
 export const STREAM_DEBOUNCE_MS = 50;
 export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 
