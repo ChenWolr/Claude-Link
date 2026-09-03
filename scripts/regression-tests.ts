@@ -968,7 +968,7 @@ function testAttachmentTask7AContracts(): void {
 
 // Task 7B：任务队列附件 + waiting 续接附件 + 稳定 clientMessageId + retry 的接线契约（源码结构断言）。
 function testAttachmentTask7BContracts(): void {
-  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const { readFileSync, existsSync } = require('node:fs') as typeof import('node:fs');
   const ipcHandlers = readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
   const ipcTypes = readFileSync(new URL('../src/shared/types/ipc.ts', import.meta.url), 'utf8');
   const preloadApi = readFileSync(new URL('../src/preload/api.ts', import.meta.url), 'utf8');
@@ -978,7 +978,6 @@ function testAttachmentTask7BContracts(): void {
   const attService = readFileSync(new URL('../src/main/modules/attachment-service.ts', import.meta.url), 'utf8');
   const builder = readFileSync(new URL('../src/main/modules/attachment-prompt-builder.ts', import.meta.url), 'utf8');
   const taskStore = readFileSync(new URL('../src/renderer/stores/task-store.ts', import.meta.url), 'utf8');
-  const taskDraftStore = readFileSync(new URL('../src/renderer/stores/task-draft-store.ts', import.meta.url), 'utf8');
   const queuePanel = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');
   const taskTypes = readFileSync(new URL('../src/shared/types/task.ts', import.meta.url), 'utf8');
 
@@ -1024,18 +1023,22 @@ function testAttachmentTask7BContracts(): void {
   assert.ok(attService.includes('export async function cleanupDetachedAttachments'), 'attachment-service 须导出 cleanupDetachedAttachments');
   assert.ok(/cleanupDetachedAttachments[\s\S]*getAttachmentReferenceCount/.test(attService), 'cleanupDetachedAttachments 须按引用计数判定');
 
-  // 8) renderer：task-store retry + user_message_created upsert；task-draft-store 独立
+  // 8) renderer：task-store retry + user_message_created upsert；面板 composer 已删（任务改由主输入在生成中发送入队）
   assert.ok(taskStore.includes('async retryTask'), 'task-store 须有 retryTask action');
   assert.ok(taskStore.includes("case 'user_message_created'"), 'task-store 须处理 user_message_created 事件');
   assert.ok(taskStore.includes('sessionStore.addMessage(msg)'), 'user_message_created 须 upsert 进会话消息');
-  assert.ok(taskDraftStore.includes("defineStore('taskDraft'"), '须有独立 task-draft-store（按会话隔离任务草稿）');
+  assert.ok(
+    !existsSync(new URL('../src/renderer/stores/task-draft-store.ts', import.meta.url)),
+    '面板 composer 删除后 task-draft-store 应整体移除（任务草稿并入主输入 chat-draft-store）',
+  );
 
-  // 9) TaskQueuePanel：构造完整 payload（不再裸 string）+ 附件 composer + retry 接线
-  assert.ok(/clientMessageId: crypto\.randomUUID\(\)/.test(queuePanel), 'TaskQueuePanel 须构造带 clientMessageId 的 payload');
-  assert.ok(queuePanel.includes('taskDraft.clearAfterAccepted'), 'TaskQueuePanel 成功后才清草稿');
-  assert.ok(queuePanel.includes('AttachmentDraftList'), 'TaskQueuePanel 须挂载 AttachmentDraftList');
-  assert.ok(queuePanel.includes('pickTaskAttachments'), 'TaskQueuePanel 须有附件选择入口');
+  // 9) TaskQueuePanel：composer 已删（不再构造 payload/附件入口）；任务入队改由 ChatPage 生成中发送承担
+  assert.ok(!queuePanel.includes('pickTaskAttachments'), '面板不得再有附件选择入口（附件经主输入）');
+  assert.ok(!queuePanel.includes('useTaskDraftStore'), '面板不得再引用任务草稿 store');
+  assert.ok(!queuePanel.includes('<AttachmentDraftList'), '面板不再挂载附件草稿列表');
   assert.ok(queuePanel.includes('@retry="handleRetry"'), 'TaskItem 须接 retry 事件');
+  assert.ok(queuePanel.includes('@pause="handlePauseTask"'), 'TaskItem 须接 pause 事件（任务级暂停顺延）');
+  assert.ok(queuePanel.includes('@resume="handleResumeTask"'), 'TaskItem 须接 resume 事件');
 
   // 10) Task 类型：clientMessageId + attachments 必需数组
   assert.ok(taskTypes.includes('clientMessageId: string | null'), 'Task 类型须有 clientMessageId');
@@ -1348,7 +1351,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 8);
+  assert.equal(schemaVersion, 9);
   assert.ok(sessionColumns.has('provider_override'), 'V8：迁移后须补 provider_override 列');
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
@@ -1409,7 +1412,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 8, '迁移后 schema version 须升到 8（V8 供应商 override + 别名清洗）');
+  assert.equal(schemaVersion, 9, '迁移后 schema version 须升到 9（V9 tasks.paused 列）');
   assert.ok(sessionsColumns.has('provider_override'), 'V8：老库迁移须补 provider_override 列');
   assert.ok(allExecSql.some((sql) => sql.includes('model_override = NULL')), 'V8：须执行 model_override 别名清洗 SQL');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');

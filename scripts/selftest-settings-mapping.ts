@@ -1461,7 +1461,7 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
 
   // DB migration + repo
   check('migrations.ts 有 claude_plan_state 表', migrations.includes('claude_plan_state'));
-  check('migrations.ts 版本升为 8（V8 供应商 override + 别名清洗）', migrations.includes('CURRENT_SCHEMA_VERSION = 8'));
+  check('migrations.ts 版本升为 9（V9 tasks.paused 列）', migrations.includes('CURRENT_SCHEMA_VERSION = 9'));
   check('claude-plan-repo.ts 有 getPlanState', repo.includes('export function getPlanState'));
   check('claude-plan-repo.ts 有 replaceTodos', repo.includes('export function replaceTodos'));
   check('claude-plan-repo.ts 有 upsertTask', repo.includes('export function upsertTask'));
@@ -1624,7 +1624,7 @@ console.log('\n=== 48) 思考强度接线：持久化层 + 注入层 + IPC 通�
   const projection = readRel('src/main/modules/claude-settings-projection.ts');
 
   // 持久化层（Task 4）
-  check('migrations.ts schema 版本升为 8（V8 供应商 override + 别名清洗）', migrations.includes('CURRENT_SCHEMA_VERSION = 8'));
+  check('migrations.ts schema 版本升为 9（V9 tasks.paused 列）', migrations.includes('CURRENT_SCHEMA_VERSION = 9'));
   check('migrations.ts 补 thinking_level 列', migrations.includes("ADD COLUMN thinking_level TEXT DEFAULT NULL"));
   check('session-repo.ts SessionRow 有 thinking_level', repo.includes('thinking_level: string | null'));
   check('session-repo.ts toSession 映射 thinkingLevel（脏值兜底）', repo.includes('isValidThinkingLevel(row.thinking_level)'));
