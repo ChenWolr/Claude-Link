@@ -53,7 +53,7 @@ const triggerLabel = computed(() =>
 );
 
 const triggerTitle = computed(
-  () => `思考强度：${triggerLabel.value}${activeValue.value === 'auto' ? `（跟随全局默认）` : `（${activeOption.value.desc}）`}`,
+  () => `思考强度：${triggerLabel.value}${activeValue.value === 'auto' ? `（跟随全局默认）` : `（${activeOption.value.desc}）`}；下一条消息起生效`,
 );
 
 async function onSelect(level: ThinkingLevel) {
@@ -116,6 +116,8 @@ onUnmounted(() => {
           <path :d="CHECK_PATH" />
         </svg>
       </button>
+      <!-- 生效时机提示（照 ProviderModelSelector foot 先例）：切换写入会话档，运行中回合不受影响。 -->
+      <div class="tl-foot">下一条消息起生效</div>
     </div>
   </div>
 </template>
@@ -233,5 +235,12 @@ onUnmounted(() => {
   stroke-width: 2.5;
   stroke-linecap: round;
   stroke-linejoin: round;
+}
+
+.tl-foot {
+  padding: 0.375rem 0.625rem 0.25rem;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  text-align: center;
 }
 </style>
