@@ -4,6 +4,7 @@ import { useSessionStore } from '../stores/session-store';
 import { useChat } from '../composables/use-chat';
 import { useStream } from '../composables/use-stream';
 import { useTaskStore } from '../stores/task-store';
+import { useConfigStore } from '../stores/config-store';
 import { useChatDraftStore } from '../stores/chat-draft-store';
 import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useCommandStore } from '../stores/command-store';
@@ -17,6 +18,7 @@ import type { ChatSendPayload, AttachmentSummary } from '../../shared/types/atta
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
+const configStore = useConfigStore();
 const draftStore = useChatDraftStore();
 const planStore = useClaudePlanStore();
 const commandStore = useCommandStore();
@@ -47,6 +49,9 @@ function showNotice(msg: string) {
 // 草稿（按会话隔离）：直接绑 store 的响应式 computed，store 任何变化（添加/删除/清空）自动反映，
 // 不再用手动 ref 副本 + syncDraft（旧做法在 AttachmentDraftList 直接删 store 后副本不更新，致 × 无效）。
 const activeSessionId = computed(() => store.activeSession?.id ?? '');
+// 队列开关（配置页，默认关）：开启后回复生成中仍可输入发送（消息/附件入队），关闭维持旧行为禁发。
+// config 由 App.vue 启动时 loadConfig，配置页修改后同 store 实例响应式联动。
+const queueEnabled = computed(() => configStore.config.queueEnabled === true);
 const draftText = computed<string>({
   get: () => (activeSessionId.value ? draftStore.getText(activeSessionId.value) : ''),
   set: (v) => {
@@ -225,18 +230,20 @@ async function handleSend() {
 
   sendInflight = true;
   const sessionId = store.activeSession.id;
-  // 路由须限定「队列状态属于当前会话」：queueState 是全局单例，后台另一会话在跑时
-  // status 可能是 running，但与当前会话无关 → 不能把当前会话消息塞进任务队列。
+  // waiting 续写分支的会话归属判定：queueState 是全局单例，后台另一会话在等待时
+  // 不能把当前会话消息误送续写；生成中入队分支已改用 sending 判据（P1 修复），不再依赖它。
   const isQueueSession = taskStore.queueState.sessionId === sessionId;
   const status = taskStore.queueState.status;
   let ok = false;
 
   try {
-    // 倒计时期间补充输入 → 续写当前任务上下文，重置倒计时
+    // 倒计时期间补充输入 → 续写当前任务上下文，重置倒计时（保留续写语义，2026-09-03 用户拍板）
     if (isQueueSession && status === 'waiting') {
       ok = await taskStore.queueUserMessage(sessionId, payload);
-    } else if (isQueueSession && (status === 'running' || status === 'continuing')) {
-      // 任务执行中 → 排队为下一条指令，不打断当前任务
+    } else if (sending.value && queueEnabled.value) {
+      // 生成中（本会话回合在跑：普通回合 / 队列任务 / 续写皆同）→ 排队为下一条指令，不打断当前任务。
+      // 判据用 sending（本会话 running 派生态）而非 queueState.sessionId：后者是全局单例，
+      // 队列从未激活 / 应用刚重启时为空串，首次生成中发送会被误路由成直发而被主进程拒绝（P1）。
       ok = await taskStore.addTask(sessionId, payload);
     } else {
       ok = await sendMessage(payload);
@@ -320,7 +327,7 @@ function handleNewSession() {
           ref="chatInputRef"
           :model-value="draftText"
           :has-attachments="draftAttachments.length > 0"
-          :disabled="sending"
+          :disabled="sending && !queueEnabled"
           :commands="activeCommandSnapshot?.commands"
           :command-status="activeCommandSnapshot?.status"
           :command-error="activeCommandSnapshot?.error"
