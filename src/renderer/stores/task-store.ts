@@ -50,21 +50,24 @@ export const useTaskStore = defineStore('task', {
     },
     async startQueue(sessionId: string) {
       try {
-        await window.claudeLink.startQueue(sessionId);
+        this.error = null;
+        this.queueState = await window.claudeLink.startQueue(sessionId);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '启动队列失败';
       }
     },
     async pauseQueue(sessionId: string) {
       try {
-        await window.claudeLink.pauseQueue(sessionId);
+        this.error = null;
+        this.queueState = await window.claudeLink.pauseQueue(sessionId);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '暂停队列失败';
       }
     },
     async resumeQueue(sessionId: string) {
       try {
-        await window.claudeLink.resumeQueue(sessionId);
+        this.error = null;
+        this.queueState = await window.claudeLink.resumeQueue(sessionId);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '恢复队列失败';
       }
@@ -107,7 +110,21 @@ export const useTaskStore = defineStore('task', {
         return false;
       }
     },
+    // 任务级暂停/恢复（仅 pending；主进程方向守卫）。成功后同步本地任务 paused 标记。
+    async setTaskPaused(taskId: string, paused: boolean) {
+      try {
+        this.error = null;
+        await window.claudeLink.setTaskPaused(taskId, paused);
+        const t = this.tasks.find((x) => x.id === taskId);
+        if (t) t.paused = paused;
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : '暂停/恢复任务失败';
+      }
+    },
     handleQueueEvent(payload: QueueEventPayload) {
+      // 队列状态归属回写：queueState 是全局单例，必须让「当前调度的是哪个会话」随事件同步，
+      // ChatPage 的 isQueueSession 三路路由才不会把消息塞错会话（存量缺口修复）。
+      this.queueState.sessionId = payload.sessionId;
       // R6（问题 1+2 健壮性）：队列驱动的回合不经 use-chat.sendMessage，渲染层不会 markRunning，
       // 导致 sending 恒 false、计时器/动画不显示。在队列事件边界同步执行态：开始/续写置 running，
       // 队列结束置 stopped。markRunning/markStopped 均幂等、per-session，安全。
@@ -134,6 +151,11 @@ export const useTaskStore = defineStore('task', {
           if (payload.type === 'task_completed' && (payload.data as { interrupted?: boolean } | undefined)?.interrupted) {
             sessionStore.markStopped(payload.sessionId);
           }
+          break;
+        }
+        case 'countdown_started': {
+          this.queueState.status = 'waiting';
+          this.queueState.countdownRemaining = (payload.data?.seconds as number) ?? 0;
           break;
         }
         case 'countdown_tick': {

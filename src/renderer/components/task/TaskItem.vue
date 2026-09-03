@@ -8,6 +8,8 @@ const emit = defineEmits<{
   delete: [taskId: string];
   interrupt: [taskId: string];
   retry: [taskId: string];
+  pause: [taskId: string];
+  resume: [taskId: string];
 }>();
 
 const expanded = ref(false);
@@ -22,14 +24,17 @@ watch(() => props.task.status, (newStatus) => {
 
 <template>
   <div :class="['task-item', { 'task-item--running': task.status === 'running' }]">
-    <div class="task-item__header">
-      <span class="task-item__drag">⠿</span>
+    <div class="task-item__header" title="点击查看 / 收起详情" @click="expanded = !expanded">
+      <span class="task-item__drag" @click.stop>⠿</span>
       <TaskStatusBadge :status="task.status" />
+      <span v-if="task.paused && task.status === 'pending'" class="task-item__paused-chip">⏸ 已暂停</span>
       <span class="task-item__prompt">{{ task.prompt.slice(0, 80) }}{{ task.prompt.length > 80 ? '...' : '' }}</span>
     </div>
     <div class="task-item__actions">
       <button v-if="task.status === 'running'" type="button" class="action action--danger" @click="emit('interrupt', task.id)">中断</button>
       <button v-if="task.status === 'failed' || task.status === 'cancelled'" type="button" class="action action--accent" @click="emit('retry', task.id)">重试</button>
+      <button v-if="task.status === 'pending' && !task.paused" type="button" class="action action--muted" @click="emit('pause', task.id)">暂停</button>
+      <button v-if="task.status === 'pending' && task.paused" type="button" class="action action--accent" @click="emit('resume', task.id)">恢复</button>
       <button v-if="task.status === 'pending'" type="button" class="action action--muted" @click="emit('delete', task.id)">删除</button>
       <button type="button" class="action" @click="expanded = !expanded">{{ expanded ? '收起' : '详情' }}</button>
     </div>
@@ -85,6 +90,16 @@ watch(() => props.task.status, (newStatus) => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.task-item__paused-chip {
+  flex-shrink: 0;
+  border: 1px solid var(--color-warn);
+  border-radius: var(--radius-pill);
+  color: var(--color-warn-strong);
+  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
+  padding: 1px 8px;
+  font-size: 0.625rem;
 }
 
 .task-item__actions {
