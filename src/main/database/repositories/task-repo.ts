@@ -206,22 +206,6 @@ export function setTaskClientMessageId(id: string, clientMessageId: string): voi
     .run({ id, clientMessageId });
 }
 
-/** Task 7B：重试失败/取消的任务 → pending，清空执行结果字段，保留附件 links 与稳定 clientMessageId。
- *  WHERE status IN ('failed','cancelled') 保证只对终态失败任务生效，running/pending 不受影响。 */
-export function retryTask(id: string): Task | null {
-  getConnection()
-    .prepare(
-      `UPDATE tasks
-       SET status = 'pending',
-           result = NULL, cost_usd = NULL, duration_ms = NULL,
-           error_message = NULL, started_at = NULL, completed_at = NULL,
-           updated_at = datetime('now')
-       WHERE id = @id AND status IN ('failed', 'cancelled')`,
-    )
-    .run({ id });
-  return getTask(id);
-}
-
 /** 任务级暂停/恢复：仅对 status='pending' 任务生效（running/终态任务零命中返回 null）。
  *  方向守卫：暂停要求当前 paused=0、恢复要求当前 paused=1，脏调用不翻转。 */
 export function setTaskPaused(id: string, paused: boolean): Task | null {
@@ -236,15 +220,39 @@ export function setTaskPaused(id: string, paused: boolean): Task | null {
   return getTask(id);
 }
 
+/** 熔断（v3）：该会话全部未暂停 pending 任务置 paused。失败/中断回合收尾时由引擎调用。 */
+export function pauseAllPending(sessionId: string): void {
+  getConnection()
+    .prepare(
+      `UPDATE tasks
+       SET paused = 1, updated_at = datetime('now')
+       WHERE session_id = ? AND status = 'pending' AND paused = 0`,
+    )
+    .run(sessionId);
+}
+
+/** 全部恢复（v3）：该会话全部已暂停 pending 任务回待执行序列。 */
+export function resumeAllPending(sessionId: string): void {
+  getConnection()
+    .prepare(
+      `UPDATE tasks
+       SET paused = 0, updated_at = datetime('now')
+       WHERE session_id = ? AND status = 'pending' AND paused = 1`,
+    )
+    .run(sessionId);
+}
+
+/** 应用启动恢复：上次运行中（mid-run）任务置 failed——执行过、回合异常死亡，
+ *  不回队不重发（面板与历史均不读该状态，仅为防重复执行）。 */
 export function resetRunningTasks(sessionId?: string): void {
   if (sessionId) {
     getConnection()
-      .prepare("UPDATE tasks SET status = 'pending', updated_at = datetime('now') WHERE status = 'running' AND session_id = ?")
+      .prepare("UPDATE tasks SET status = 'failed', updated_at = datetime('now') WHERE status = 'running' AND session_id = ?")
       .run(sessionId);
     return;
   }
 
   getConnection()
-    .prepare("UPDATE tasks SET status = 'pending', updated_at = datetime('now') WHERE status = 'running'")
+    .prepare("UPDATE tasks SET status = 'failed', updated_at = datetime('now') WHERE status = 'running'")
     .run();
 }

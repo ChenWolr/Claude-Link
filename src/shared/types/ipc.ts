@@ -71,19 +71,16 @@ export const IPC_CHANNELS = {
   TASK_REMOVE: 'task:remove',
   TASK_GET_ALL: 'task:getAll',
   TASK_REORDER: 'task:reorder',
-  TASK_INTERRUPT: 'task:interrupt',
-  TASK_RETRY: 'task:retry',
   TASK_SET_PAUSED: 'task:setPaused',
-  QUEUE_START: 'queue:start',
-  QUEUE_PAUSE: 'queue:pause',
-  QUEUE_RESUME: 'queue:resume',
-  QUEUE_GET_STATE: 'queue:getState',
+  // v3 语义：跳过倒计时立即出队（非队首=插队）；熔断后一键全部恢复；面板全量数据拉取。
+  TASK_RUN_NOW: 'task:run-now',
+  QUEUE_RESUME_ALL: 'queue:resumeAll',
+  QUEUE_GET_OVERVIEW: 'queue:getOverview',
   QUEUE_EVENT: 'queue:event',
-  QUEUE_USER_MESSAGE: 'queue:userMessage',
   // Claude 计划快照：按会话读取 TodoWrite / Task 工具的计划状态。
   CLAUDE_PLAN_GET: 'claude-plan:get',
   // 附件：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
-  // 统一发送载荷 ChatSendPayload 经 CHAT_SEND / TASK_ADD / QUEUE_USER_MESSAGE 透传，不另设通道。
+  // 统一发送载荷 ChatSendPayload 经 CHAT_SEND / TASK_ADD 透传，不另设通道。
   ATTACHMENT_PICK: 'attachment:pick',
   ATTACHMENT_STAGE_BYTES: 'attachment:stageBytes',
   ATTACHMENT_PREVIEW: 'attachment:preview',
@@ -337,18 +334,16 @@ export interface NativeSettingsDiagnostic {
   effectiveKeys: string[];
 }
 
+// 队列事件（v3 语义）：state_changed 携带全量 QueueState 快照，是所有状态迁移的权威通道；
+// task_settled 是中断路径（无 result）渲染层更新历史/收口 sending 的唯一信号。
 export type QueueEventType =
-  | 'task_started'
-  | 'task_progress'
-  | 'task_completed'
-  | 'task_failed'
   | 'countdown_started'
   | 'countdown_tick'
-  | 'countdown_cancelled'
-  | 'task_continuing'
-  | 'user_message_created'
-  | 'queue_paused'
-  | 'queue_completed';
+  | 'state_changed'
+  | 'task_started'
+  | 'task_settled'
+  | 'queue_halted'
+  | 'user_message_created';
 
 export interface QueueEventPayload {
   sessionId: string;

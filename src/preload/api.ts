@@ -5,7 +5,7 @@
 import { ipcRenderer } from 'electron';
 import type { AppConfig, ModelInfo, DetectedClaudeConfig, ProviderLibrarySnapshot, ProviderProfileView, ProviderSaveInput } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
-import type { Task, QueueState } from '../shared/types/task';
+import type { Task, QueueOverview } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
 import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
@@ -69,18 +69,15 @@ export interface ClaudeLinkAPI {
   listChanges: (workingDir: string | null, touchedPaths: string[]) => Promise<ChangesListResult>;
   getChangeDiff: (workingDir: string | null, path: string, context: number) => Promise<ChangesDiffResult>;
   openChangeFile: (workingDir: string | null, path: string) => Promise<ChangesOpenResult>;
-  addTask: (sessionId: string, payload: ChatSendPayload) => Promise<Task>;
-  removeTask: (taskId: string) => Promise<void>;
+  addTask: (sessionId: string, payload: ChatSendPayload) => Promise<{ task: Task; tasks: Task[] }>;
+  removeTask: (taskId: string) => Promise<Task[]>;
   getTasks: (sessionId: string) => Promise<Task[]>;
   reorderTasks: (sessionId: string, taskIds: string[]) => Promise<Task[]>;
-  interruptTask: (taskId: string) => Promise<void>;
-  retryTask: (taskId: string) => Promise<Task>;
-  setTaskPaused: (taskId: string, paused: boolean) => Promise<Task>;
-  startQueue: (sessionId: string) => Promise<QueueState>;
-  pauseQueue: (sessionId: string) => Promise<QueueState>;
-  resumeQueue: (sessionId: string) => Promise<QueueState>;
-  getQueueState: (sessionId: string) => Promise<QueueState>;
-  queueUserMessage: (sessionId: string, payload: ChatSendPayload) => Promise<QueueState>;
+  setTaskPaused: (taskId: string, paused: boolean) => Promise<Task[]>;
+  // v3 队列语义：立即执行（守卫失败抛错）/ 全部恢复 / 面板全量数据。
+  runTaskNow: (taskId: string) => Promise<QueueOverview>;
+  resumeAllQueue: (sessionId: string) => Promise<QueueOverview>;
+  getQueueOverview: (sessionId: string) => Promise<QueueOverview>;
   getClaudePlanState: (sessionId: string) => Promise<import('../shared/types/claude-plan').ClaudePlanState | null>;
   pickAttachments: (sessionId: string) => Promise<PickAttachmentsResult>;
   stageAttachmentBytes: (input: StageAttachmentBytesInput) => Promise<AttachmentSummary>;
@@ -185,18 +182,14 @@ export function createApi(): ClaudeLinkAPI {
     getChangeDiff: (workingDir, path, context) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_DIFF, workingDir, path, context),
     openChangeFile: (workingDir, path) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_OPEN_FILE, workingDir, path),
     addTask: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, payload),
-    removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId),
+    removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId) as Promise<Task[]>,
     getTasks: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_GET_ALL, sessionId),
     reorderTasks: (sessionId, taskIds) =>
       ipcRenderer.invoke(IPC_CHANNELS.TASK_REORDER, sessionId, taskIds) as Promise<Task[]>,
-    interruptTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_INTERRUPT, taskId),
-    retryTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_RETRY, taskId) as Promise<Task>,
-    setTaskPaused: (taskId, paused) => ipcRenderer.invoke(IPC_CHANNELS.TASK_SET_PAUSED, taskId, paused),
-    startQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_START, sessionId),
-    pauseQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_PAUSE, sessionId),
-    resumeQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME, sessionId),
-    getQueueState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_STATE, sessionId),
-    queueUserMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_USER_MESSAGE, sessionId, payload),
+    setTaskPaused: (taskId, paused) => ipcRenderer.invoke(IPC_CHANNELS.TASK_SET_PAUSED, taskId, paused) as Promise<Task[]>,
+    runTaskNow: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_RUN_NOW, taskId) as Promise<QueueOverview>,
+    resumeAllQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME_ALL, sessionId) as Promise<QueueOverview>,
+    getQueueOverview: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_OVERVIEW, sessionId) as Promise<QueueOverview>,
     getClaudePlanState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_PLAN_GET, sessionId) as Promise<import('../shared/types/claude-plan').ClaudePlanState | null>,
     pickAttachments: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PICK, sessionId) as Promise<PickAttachmentsResult>,
     stageAttachmentBytes: (input) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_STAGE_BYTES, input) as Promise<AttachmentSummary>,

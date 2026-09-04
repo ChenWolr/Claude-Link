@@ -27,7 +27,8 @@ import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessag
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
-import { isSuccessfulCliResult } from '../../shared/session-completion';
+import { isSuccessfulCliResult, isAbortedCliResult } from '../../shared/session-completion';
+import { noteTurnOutcome } from './task-queue-engine';
 import { convertResultMessage } from '../../shared/result-converter';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
 import { logger } from '../utils/logger';
@@ -1047,6 +1048,17 @@ function forwardEvent(
   // 已删除会话因上方 isSessionActive 守卫提前 return，不会弹陈旧通知。
   if (event.type === 'result' && isSuccessfulCliResult(event)) {
     notifySessionCompleted(mainWindow, sessionId);
+  }
+  // v3 队列调度中央钩子：result 是回合结束的权威信号（到达时进程可能尚未退出，
+  // 绝不以进程存在性做守卫）。三态映射后交引擎状态机分派（arm/halt，幂等闸在引擎内）。
+  // try 包裹沿周围风格：调度收口异常不得阻塞事件循环。
+  if (event.type === 'result') {
+    const outcome = isSuccessfulCliResult(event) ? 'success' : isAbortedCliResult(event) ? 'interrupted' : 'error';
+    try {
+      noteTurnOutcome(sessionId, outcome, mainWindow);
+    } catch (err) {
+      logger.error(`queue noteTurnOutcome failed [${sessionId}]`, err);
+    }
   }
   // 上下文用量：message/result 的 usage 是「本轮 turn usage」（input + cache），**不是当前窗口已用**。
   // 黑盒证据（run-2026-08-21-205616）：turn usage 可高达 104k 而当前窗口仅 40.1k，二者不相等。

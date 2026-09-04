@@ -25,13 +25,36 @@ export interface Task {
   paused: boolean;
 }
 
-export type QueueStateStatus = 'idle' | 'running' | 'waiting' | 'paused' | 'continuing';
+// 调度器状态（v3 语义，每会话独立）：standby=待命（不计时不出队）/ countdown=倒计时中 /
+// running=回合执行中（普通发送/插话/队列任务出队皆同）。
+export type QueueStateStatus = 'standby' | 'countdown' | 'running';
+
+// standby 的原因（描述「为什么待命」）；回合开始即成历史（置 null），不持久化、重启丢失。
+export type QueueStandbyReason = 'restart' | 'halt_failed' | 'halt_interrupted' | 'switch_off' | null;
 
 export interface QueueState {
   sessionId: string;
   status: QueueStateStatus;
-  currentTaskId: string | null;
-  lastCompletedTaskId: string | null;
+  standbyReason: QueueStandbyReason;
   countdownRemaining: number;
-  pendingCount: number;
+  currentTaskId: string | null;
+}
+
+/** 已执行任务的结果态：出队即入历史（outcome 先为 running），回合收尾时定终态。 */
+export type ExecutedOutcome = 'running' | 'success' | 'failed' | 'interrupted';
+
+/** 「本次已执行」历史条目（方案 A：纯内存、本次运行期、重启清零、上限 50 条）。 */
+export interface ExecutedTaskInfo {
+  taskId: string;
+  prompt: string;
+  attachments: AttachmentSummary[];
+  outcome: ExecutedOutcome;
+  settledAt: string;
+}
+
+/** 队列面板全量数据：状态快照 + 待执行任务（含 paused，按 sort_order）+ 本次已执行历史（新→旧）。 */
+export interface QueueOverview {
+  state: QueueState;
+  tasks: Task[];
+  executed: ExecutedTaskInfo[];
 }

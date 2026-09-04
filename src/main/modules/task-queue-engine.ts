@@ -1,34 +1,51 @@
+// task-queue-engine.ts
+// 队列任务调度引擎（v3 语义，2026-09-03）。唯一规格：docs/plans/2026-09-03-queue-semantics-v3.md §1。
+//
+// 调度器状态（每会话独立）：standby（待命，不计时不出队）/ countdown（倒计时中）/ running（回合执行中）。
+// 核心不变量：
+//  - status='running' 的唯二入口是 beginUserTurn（普通发送/插话占坑后）与 popExecute（队列任务出队），
+//    两者都清 standbyReason；
+//  - 回合终态以 result 事件为权威信号（noteTurnOutcome），绝不以 getActiveProcess 存在性做守卫——
+//    result 到达时进程可能尚未退出，用进程存在性当守卫会吞掉所有正常 result。幂等靠状态机闸
+//   （arm/halt 都要求 status==='running'），重复/迟到 result 天然 no-op；
+//  - 「重启后绝不自动执行」无闸门设计：引擎所有 Map 启动时为空，倒计时的启动只可能发生在
+//    noteTurnOutcome(success)→armAfterTurn 与 armFromUserAction（恢复/全部恢复）两处，runTaskNow
+//    则是用户显式动作。没有任何路径会在启动时或开关打开时自发起倒计时，重启后无需唤醒白名单。
 import type { BrowserWindow } from 'electron';
 import type { Message } from '../../shared/types/session';
-import type { ChatSendPayload } from '../../shared/types/attachment';
-import type { QueueState } from '../../shared/types/task';
+import type { QueueState, QueueOverview, ExecutedTaskInfo, ExecutedOutcome, Task } from '../../shared/types/task';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { resolveQueueDelaySeconds } from '../../shared/queue-config';
 import {
-  spawnForChat,
   spawnForTask,
-  killProcess,
   resolveCliSessionId,
-  sendMessage,
   getActiveProcess,
 } from './chat-backend';
 import type { PreparedAttachmentPrompt } from './attachment-prompt-builder';
 import { prepareAttachmentPrompt } from './attachment-prompt-builder';
-import { resolveAttachmentRecords, assertAttachmentsReadyForSend } from './attachment-service';
+import { resolveAttachmentRecords } from './attachment-service';
 import { getConfig } from './config-manager';
 import * as taskRepo from '../database/repositories/task-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
-import * as attachmentRepo from '../database/repositories/attachment-repo';
 import { randomUUID } from 'node:crypto';
 import { logger } from '../utils/logger';
 
+/** 每会话调度器状态。 */
 const queues = new Map<string, QueueState>();
-const timers = new Map<string, ReturnType<typeof setTimeout>>();
-const queueGenerations = new Map<string, number>();
+/** 倒计时秒针 interval。 */
+const timers = new Map<string, ReturnType<typeof setInterval>>();
+/** 倒计时归零触发的主 setTimeout（独立 Map，清理不再动 key 拼接）。 */
+const mainTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** 执行代际：会话删除/重建后使旧 child 的迟到 exit 失效。 */
+const generations = new Map<string, number>();
+/** 「本次已执行」历史（方案 A：纯内存、本次运行期、重启清零、上限 50 条，新→旧）。 */
+const executedHistory = new Map<string, ExecutedTaskInfo[]>();
+
+const EXECUTED_HISTORY_CAP = 50;
 
 function getQueueGeneration(sessionId: string): number {
-  return queueGenerations.get(sessionId) ?? 0;
+  return generations.get(sessionId) ?? 0;
 }
 
 function isQueueGenerationActive(sessionId: string, generation: number): boolean {
@@ -55,153 +72,312 @@ function getOrCreateQueue(sessionId: string): QueueState {
   if (!state) {
     state = {
       sessionId,
-      status: 'idle',
-      currentTaskId: null,
-      lastCompletedTaskId: null,
+      status: 'standby',
+      standbyReason: 'restart',
       countdownRemaining: 0,
-      pendingCount: 0,
+      currentTaskId: null,
     };
     queues.set(sessionId, state);
   }
   return state;
 }
 
-export function startQueue(sessionId: string, mainWindow: BrowserWindow): void {
-  const state = getOrCreateQueue(sessionId);
-  if (state.status === 'running') return;
+/** 清掉该会话的秒针 interval 与归零主 timer（幂等）。 */
+function cancelTimers(sessionId: string): void {
+  const interval = timers.get(sessionId);
+  if (interval) {
+    clearInterval(interval);
+    timers.delete(sessionId);
+  }
+  const main = mainTimers.get(sessionId);
+  if (main) {
+    clearTimeout(main);
+    mainTimers.delete(sessionId);
+  }
+}
 
-  const pending = taskRepo.getPendingTasks(sessionId);
-  if (!pending.length) {
-    state.status = 'idle';
-    emitQueueEvent(mainWindow, sessionId, 'queue_completed');
+/** 状态迁移后的权威快照通道：渲染层整体替换 queueState。 */
+function emitStateChanged(mainWindow: BrowserWindow, sessionId: string): void {
+  const state = getOrCreateQueue(sessionId);
+  emitQueueEvent(mainWindow, sessionId, 'state_changed', undefined, { state: { ...state } });
+}
+
+/** 结算当前队列任务回合：历史条目定终态 + 清 currentTaskId + 发 task_settled。
+ *  中断路径（两段式 abort 兜底只 emitExit 不发 result 事件）依赖此事件更新渲染层历史
+ *  与 markStopped——它是中断收口在渲染层的唯一信号。currentTaskId 为空（普通回合）时 no-op。 */
+function settleCurrent(sessionId: string, outcome: ExecutedOutcome, mainWindow: BrowserWindow): void {
+  const state = queues.get(sessionId);
+  if (!state || !state.currentTaskId) return;
+  const taskId = state.currentTaskId;
+  const history = executedHistory.get(sessionId) ?? [];
+  const entry = history.find((h) => h.taskId === taskId && h.outcome === 'running');
+  if (entry) {
+    entry.outcome = outcome;
+    entry.settledAt = new Date().toISOString();
+  }
+  state.currentTaskId = null;
+  logger.info(`[queue] settle task=${taskId} outcome=${outcome} session=${sessionId}`);
+  emitQueueEvent(mainWindow, sessionId, 'task_settled', taskId, { outcome });
+}
+
+/** 用户直发占坑成功后的回合开始：插话顶掉倒计时（规则 #4 的唯一取消载体）+ 置 running。
+ *  standbyReason 描述的是「为什么待命」，回合开始即成历史，置 null。 */
+export function beginUserTurn(sessionId: string, mainWindow: BrowserWindow): void {
+  const state = getOrCreateQueue(sessionId);
+  cancelTimers(sessionId);
+  state.status = 'running';
+  state.standbyReason = null;
+  state.countdownRemaining = 0;
+  logger.info(`[queue] beginUserTurn session=${sessionId}`);
+  emitStateChanged(mainWindow, sessionId);
+}
+
+/** 全量倒计时（每次现取配置——进行中的旧倒计时不受配置修改影响，改配置只影响下一轮）。
+ *  入口先 cancelTimers（幂等）并置 standbyReason=null（防 halt_* 残留：熔断→恢复→倒计时中
+ *  渲染层 queuePausedNow 须已复位）。 */
+function startCountdown(sessionId: string, mainWindow: BrowserWindow): void {
+  const state = getOrCreateQueue(sessionId);
+  cancelTimers(sessionId);
+
+  const intervalSeconds = resolveQueueDelaySeconds(getConfig().taskDelayMinutes);
+  state.standbyReason = null;
+  state.status = 'countdown';
+  state.countdownRemaining = intervalSeconds;
+  emitQueueEvent(mainWindow, sessionId, 'countdown_started', undefined, { seconds: intervalSeconds });
+  emitStateChanged(mainWindow, sessionId);
+
+  const generation = getQueueGeneration(sessionId);
+  const countdownInterval = setInterval(() => {
+    state.countdownRemaining -= 1;
+    emitQueueEvent(mainWindow, sessionId, 'countdown_tick', undefined, {
+      remaining: state.countdownRemaining,
+    });
+    if (state.countdownRemaining <= 0) {
+      clearInterval(countdownInterval);
+    }
+  }, 1000);
+  timers.set(sessionId, countdownInterval);
+
+  const mainTimer = setTimeout(() => {
+    cancelTimers(sessionId);
+    // 归零回调守卫：竞态防双执行——状态已被插话/停止改变、或已有活动回合时放弃。
+    if (!isQueueGenerationActive(sessionId, generation)) return;
+    if (state.status !== 'countdown') return;
+    if (getActiveProcess(sessionId)) return;
+    const runnable = taskRepo.getPendingTasks(sessionId);
+    if (!runnable.length) {
+      state.status = 'standby';
+      state.standbyReason = null;
+      state.countdownRemaining = 0;
+      emitStateChanged(mainWindow, sessionId);
+      return;
+    }
+    void popExecute(sessionId, mainWindow, runnable[0]).catch((e) => {
+      logger.error(`popExecute threw (session ${sessionId})`, e);
+    });
+  }, intervalSeconds * 1000);
+  mainTimers.set(sessionId, mainTimer);
+}
+
+/** 回合正常结束后的 arming（仅 noteTurnOutcome(success) 调用）：有开关且有未暂停 pending →
+ *  全量倒计时；否则 standby（开关关时保留 switch_off 语义，面板文案不回退成「待命中」）。 */
+function armAfterTurn(sessionId: string, mainWindow: BrowserWindow): void {
+  const state = queues.get(sessionId);
+  if (!state || state.status !== 'running') return;
+  const queueEnabled = getConfig().queueEnabled === true;
+  if (queueEnabled && taskRepo.getPendingTasks(sessionId).length > 0) {
+    startCountdown(sessionId, mainWindow);
     return;
   }
-
-  runNextTask(sessionId, mainWindow);
+  state.status = 'standby';
+  state.standbyReason = queueEnabled ? null : 'switch_off';
+  state.countdownRemaining = 0;
+  emitStateChanged(mainWindow, sessionId);
 }
 
-export function pauseQueue(sessionId: string, mainWindow: BrowserWindow): void {
+/** 用户动作触发的 arming（恢复单个/全部恢复/TASK_SET_PAUSED 恢复路径）：standby 且无活动进程
+ *  且开关开且有未暂停 pending → 全量倒计时。countdown 已在走时 no-op（「不打断不重置」）；
+ *  回合中 no-op（交给 armAfterTurn）。 */
+export function armFromUserAction(sessionId: string, mainWindow: BrowserWindow): void {
+  const state = queues.get(sessionId);
+  if (!state || state.status !== 'standby') return;
+  if (getActiveProcess(sessionId)) return;
+  if (getConfig().queueEnabled !== true) return;
+  if (taskRepo.getPendingTasks(sessionId).length === 0) return;
+  startCountdown(sessionId, mainWindow);
+}
+
+/** 熔断：该会话全部 pending 任务置 paused → standby(halt_*)。
+ *  幂等闸带 status 条件：已处熔断待命态（standby + halt_*）才直接 return——防 exit 兜底/迟到
+ *  事件把 halt_interrupted 覆盖成 halt_failed；熔断→恢复→countdown→再失败时 status 已非
+ *  standby（running/countdown），第二次熔断是合法的，不得拦截。 */
+export function haltQueue(sessionId: string, reason: 'failed' | 'interrupted', mainWindow: BrowserWindow): void {
   const state = queues.get(sessionId);
   if (!state) return;
-
-  const countdownTimer = timers.get(sessionId);
-  const mainTimer = timers.get(`${sessionId}__main`);
-  if (countdownTimer) {
-    clearInterval(countdownTimer);
-    timers.delete(sessionId);
+  if (state.status === 'standby' && (state.standbyReason === 'halt_failed' || state.standbyReason === 'halt_interrupted')) {
+    return;
   }
-  if (mainTimer) {
-    clearTimeout(mainTimer);
-    timers.delete(`${sessionId}__main`);
-  }
-
-  state.status = 'paused';
-  emitQueueEvent(mainWindow, sessionId, 'queue_paused');
+  cancelTimers(sessionId);
+  taskRepo.pauseAllPending(sessionId);
+  state.status = 'standby';
+  state.standbyReason = reason === 'failed' ? 'halt_failed' : 'halt_interrupted';
+  state.countdownRemaining = 0;
+  logger.info(`[queue] halt session=${sessionId} reason=${reason}`);
+  emitStateChanged(mainWindow, sessionId);
+  emitQueueEvent(mainWindow, sessionId, 'queue_halted', undefined, { reason });
 }
 
-export function resumeQueue(sessionId: string, mainWindow: BrowserWindow): void {
+/** CHAT_ABORT 专用熔断挂点（killProcess 仍由 handler 调，引擎不自己 kill）：
+ *  守卫以引擎状态机为主判据（running）+ 活动进程兜底——与 killProcess 是否同步移除占坑记录的
+ *  时序解耦。result('aborted') 先到并已 halt 时 status 已非 running → no-op（不重复熔断）；
+ *  空闲误按 → 双判据皆假 → 不熔断。先 settleCurrent（中断路径无 result，这是唯一结算时机，
+ *  并令 popExecute 的 exit 兜底因 currentTaskId 不匹配而失效，防 reason 被覆盖），再熔断。 */
+export function abortHalt(sessionId: string, mainWindow: BrowserWindow): void {
   const state = queues.get(sessionId);
-  if (!state || state.status !== 'paused') return;
-
-  startQueue(sessionId, mainWindow);
+  const running = state ? state.status === 'running' : false;
+  if (!running && !getActiveProcess(sessionId)) return;
+  logger.info(`[queue] abortHalt session=${sessionId}`);
+  settleCurrent(sessionId, 'interrupted', mainWindow);
+  haltQueue(sessionId, 'interrupted', mainWindow);
 }
 
-// 中断当前任务。M8：原实现要求 state.currentTaskId === taskId，但 continuing（续写）
-// 状态下 currentTaskId 指向旧任务，导致续写中点中断不生效。放宽：running 或 continuing
-// 都允许中断当前会话进程，并清理 countdown 定时器避免泄漏。
-export function interruptTask(taskId: string, sessionId: string, mainWindow: BrowserWindow): void {
+/** 中央 result 钩子（sdk-backend forwardEvent 调用）。不设进程存在性守卫——result 事件本身就是
+ *  回合结束的权威信号（见文件头注释）。先结算队列任务回合（若有），再按 status==='running'
+ *  幂等闸分派：success→armAfterTurn（唤醒事件三）；error/interrupted→haltQueue（熔断）。
+ *  入口行日志（带当时 status）：result 与 exit 兜底到达顺序的时序实证依据（B19）。 */
+export function noteTurnOutcome(sessionId: string, outcome: 'success' | 'error' | 'interrupted', mainWindow: BrowserWindow): void {
   const state = queues.get(sessionId);
-  if (!state) return;
-  // running：currentTaskId 命中；continuing：currentTaskId 可能为 null/旧值，按 taskId 调用方语义中断。
-  const isRunning = state.status === 'running' && state.currentTaskId === taskId;
-  const isContinuing = state.status === 'continuing';
-  if (!isRunning && !isContinuing) return;
-
-  // 使当前执行实例失效：retry 可能很快把同一 task 再设为 currentTaskId，
-  // 旧 child 的迟到 exit 不能据此覆盖新一轮 pending/running 状态。
-  queueGenerations.set(sessionId, getQueueGeneration(sessionId) + 1);
-  // F5（验收 review）：必须传 mainWindow——killProcess 的「弹窗被系统取消」反馈
-  //（system:interaction_cancelled 落库 + 推送）以此为前提，漏传则 queue 触发点恒静默。
-  killProcess(sessionId, 'queue', mainWindow);
-  if (isRunning) {
-    taskRepo.updateTaskStatus(taskId, 'cancelled');
+  logger.info(`[queue] outcome session=${sessionId} outcome=${outcome} status=${state?.status ?? 'none'} currentTask=${state?.currentTaskId ?? 'none'}`);
+  if (state && state.currentTaskId) {
+    settleCurrent(sessionId, outcome, mainWindow);
   }
-
-  // 清理 countdown / main 定时器，避免 continuing 被中断后定时器仍触发下一任务。
-  const countdownTimer = timers.get(sessionId);
-  const mainTimer = timers.get(`${sessionId}__main`);
-  if (countdownTimer) {
-    clearInterval(countdownTimer);
-    timers.delete(sessionId);
-  }
-  if (mainTimer) {
-    clearTimeout(mainTimer);
-    timers.delete(`${sessionId}__main`);
-  }
-
-  state.currentTaskId = null;
-  state.status = 'idle';
-
-  emitQueueEvent(mainWindow, sessionId, 'task_completed', taskId, { interrupted: true });
-
-  // Continue with next pending task
-  const pending = taskRepo.getPendingTasks(sessionId);
-  if (pending.length > 0) {
-    runNextTask(sessionId, mainWindow);
-  }
-}
-
-/** 任务结束后推进队列：仍有 pending 则倒计时下一个，否则置 idle。 */
-function advanceAfterTask(
-  sessionId: string,
-  mainWindow: BrowserWindow,
-  config: ReturnType<typeof getConfig>,
-): void {
-  const state = queues.get(sessionId);
-  if (!state) return;
-  const remaining = taskRepo.getPendingTasks(sessionId);
-  state.pendingCount = remaining.length;
-  if (remaining.length > 0) {
-    startCountdown(sessionId, mainWindow, resolveQueueDelaySeconds(config.taskDelayMinutes));
+  if (!state || state.status !== 'running') return;
+  if (outcome === 'success') {
+    armAfterTurn(sessionId, mainWindow);
   } else {
-    state.status = 'idle';
-    emitQueueEvent(mainWindow, sessionId, 'queue_completed');
+    haltQueue(sessionId, outcome === 'interrupted' ? 'interrupted' : 'failed', mainWindow);
   }
 }
 
-/** fire-and-forget 包装：executeNextTask 改 async 后，所有定时器/事件调用点用此避免 unhandled rejection。 */
-function runNextTask(sessionId: string, mainWindow: BrowserWindow): void {
-  void executeNextTask(sessionId, mainWindow).catch((e) => {
-    logger.error(`executeNextTask threw (session ${sessionId})`, e);
+/** 「立即执行」：守卫（抛 Error 给 IPC → 渲染层 notice）后跳过倒计时立即出队执行；
+ *  非队首=插队：该任务 reorder 到可执行序列首位，原队首保留为下一个倒计时对象。 */
+export function runTaskNow(taskId: string, mainWindow: BrowserWindow): QueueOverview {
+  const task = taskRepo.getTask(taskId);
+  if (!task || task.status !== 'pending') throw new Error('任务不存在或不在待执行状态');
+  if (task.paused) throw new Error('已暂停的任务请先恢复');
+  if (getConfig().queueEnabled !== true) throw new Error('队列开关已关闭');
+  const state = getOrCreateQueue(task.sessionId);
+  if (getActiveProcess(task.sessionId) || state.status === 'running') {
+    throw new Error('当前会话有任务执行中，结束后可立即执行');
+  }
+  cancelTimers(task.sessionId);
+  // 插队：目标任务挪到会话全部任务首位（其余保持现序），原队首自然成为下一个出队对象。
+  const rest = taskRepo.getTasksBySession(task.sessionId).filter((t) => t.id !== taskId).map((t) => t.id);
+  taskRepo.reorderTasks(task.sessionId, [taskId, ...rest]);
+  void popExecute(task.sessionId, mainWindow, task).catch((e) => {
+    logger.error(`popExecute (runTaskNow) threw (task ${taskId})`, e);
   });
+  return getQueueOverview(task.sessionId);
 }
 
-async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Promise<void> {
+/** 「全部恢复」（熔断提示行内按钮）：全部 paused→pending + 立即开始全量倒计时（经 armFromUserAction
+ *  的 standby 前置守卫；无活动回合时必 arm，回合中则交给回合结束 armAfterTurn）。 */
+export function resumeAllTasks(sessionId: string, mainWindow: BrowserWindow): QueueOverview {
+  taskRepo.resumeAllPending(sessionId);
+  armFromUserAction(sessionId, mainWindow);
+  return getQueueOverview(sessionId);
+}
+
+/** 队列开关切换钩子（CONFIG_SAVE 值变化时调）：关→取消各会话倒计时转 standby(switch_off)，
+ *  任务状态不动；开→仅清各会话的 switch_off reason（不 arm——重新打开不自动计时）。 */
+export function onQueueEnabledChanged(enabled: boolean, mainWindow: BrowserWindow): void {
+  if (!enabled) {
+    for (const [sessionId, state] of queues) {
+      if (state.status !== 'countdown') continue;
+      cancelTimers(sessionId);
+      state.status = 'standby';
+      state.standbyReason = 'switch_off';
+      state.countdownRemaining = 0;
+      emitStateChanged(mainWindow, sessionId);
+    }
+    return;
+  }
+  for (const state of queues.values()) {
+    if (state.standbyReason === 'switch_off') {
+      state.standbyReason = null;
+      emitStateChanged(mainWindow, state.sessionId);
+    }
+  }
+}
+
+/** 暂停/删除任务后若已无未暂停 pending → 取消倒计时转 standby（语义表 #9/#10 的挂点载体）；
+ *  仍有未暂停任务 → 倒计时继续（到期取新队首）。非 countdown 状态 no-op。 */
+export function drainCountdownIfNoRunnable(sessionId: string, mainWindow: BrowserWindow): void {
+  const state = queues.get(sessionId);
+  if (!state || state.status !== 'countdown') return;
+  if (taskRepo.getPendingTasks(sessionId).length > 0) return;
+  cancelTimers(sessionId);
+  state.status = 'standby';
+  state.standbyReason = null;
+  state.countdownRemaining = 0;
+  emitStateChanged(mainWindow, sessionId);
+}
+
+/** 面板全量数据：状态快照 + pending 任务（含 paused，按 sort_order）+ 本次已执行历史。 */
+export function getQueueOverview(sessionId: string): QueueOverview {
+  const state = getOrCreateQueue(sessionId);
+  return {
+    state: { ...state },
+    tasks: taskRepo.getTasksBySession(sessionId).filter((t) => t.status === 'pending'),
+    executed: executedHistory.get(sessionId) ?? [],
+  };
+}
+
+/** 会话删除：代际+1 使旧 child 迟到 exit 失效，并清全部五张 per-session Map。 */
+export function cleanupQueue(sessionId: string): void {
+  generations.set(sessionId, getQueueGeneration(sessionId) + 1);
+  cancelTimers(sessionId);
+  queues.delete(sessionId);
+  executedHistory.delete(sessionId);
+  generations.delete(sessionId);
+}
+
+/** 出队执行（countdown 归零取 runnable[0] 与 runTaskNow 共用；status='running' 的第二个入口）。
+ *  承接旧 executeNextTask 主体，差异：落位/历史/结算全部对齐 v3 语义——
+ *  旧 child exit 的 advance/completed/failed 收尾删除，仅保留 result 丢失兜底
+ * （currentTaskId 匹配才补 noteTurnOutcome；正常路径 result 先到、settle 已清 currentTaskId，
+ *  此匹配自然失效；abortHalt 已熔断时 haltQueue 的 halt_* 幂等闸保证 reason 不被覆盖）。 */
+async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Task): Promise<void> {
+  if (!task) return;
   const generation = getQueueGeneration(sessionId);
   const state = getOrCreateQueue(sessionId);
-  const config = getConfig();
-
-  const pending = taskRepo.getPendingTasks(sessionId);
-  state.pendingCount = pending.length;
-
-  if (!pending.length) {
-    state.status = 'idle';
-    state.currentTaskId = null;
-    emitQueueEvent(mainWindow, sessionId, 'queue_completed');
-    return;
-  }
-
-  const task = pending[0];
   state.status = 'running';
   state.currentTaskId = task.id;
+  state.countdownRemaining = 0;
+  state.standbyReason = null;
+  emitStateChanged(mainWindow, sessionId);
 
+  // DB 仍记 running——面板不读它，仅崩溃恢复（resetRunningTasks→failed）用。
   taskRepo.updateTaskStatus(task.id, 'running');
-  emitQueueEvent(mainWindow, sessionId, 'task_started', task.id);
+  const history = executedHistory.get(sessionId) ?? [];
+  history.unshift({
+    taskId: task.id,
+    prompt: task.prompt,
+    attachments: task.attachments,
+    outcome: 'running',
+    settledAt: new Date().toISOString(),
+  });
+  if (history.length > EXECUTED_HISTORY_CAP) history.length = EXECUTED_HISTORY_CAP;
+  executedHistory.set(sessionId, history);
+  emitQueueEvent(mainWindow, sessionId, 'task_started', task.id, {
+    prompt: task.prompt,
+    attachments: task.attachments,
+  });
 
   const session = sessionRepo.getSession(sessionId);
   if (!isQueueGenerationActive(sessionId, generation)) return;
 
-  // Task 7B：稳定 clientMessageId（老任务首次执行时生成并持久化，retry/重启复用同一 ID）。
+  // 稳定 clientMessageId（老任务首次执行时生成并持久化，重启复用同一 ID）。
   let clientMessageId = task.clientMessageId;
   if (!clientMessageId) {
     clientMessageId = randomUUID();
@@ -220,18 +396,16 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
     });
     if (!isQueueGenerationActive(sessionId, generation)) return;
   } catch (err) {
-    // 构造失败：task→failed，保留 task link（附件状态不动，仍可 retry）；推进队列继续下一个。
+    // 构造失败：定账 failed + 熔断（v3 语义：任务不再回队，失败重试走主会话「重新编辑发送」）。
     const msg = err instanceof Error ? err.message : String(err);
-    logger.error(`executeNextTask prepare failed (task ${task.id}): ${msg}`);
+    logger.error(`popExecute prepare failed (task ${task.id}): ${msg}`);
     taskRepo.updateTaskError(task.id, msg);
-    emitQueueEvent(mainWindow, sessionId, 'task_failed', task.id);
-    state.lastCompletedTaskId = task.id;
-    state.currentTaskId = null;
-    advanceAfterTask(sessionId, mainWindow, config);
+    settleCurrent(sessionId, 'failed', mainWindow);
+    haltQueue(sessionId, 'failed', mainWindow);
     return;
   }
 
-  // 创建或复用 user message（按 parent_task_id 查；幂等，retry/重启不翻倍消息/links）。
+  // 创建或复用 user message（按 parent_task_id 查；幂等，重启不翻倍消息/links）。
   if (!isQueueGenerationActive(sessionId, generation)) return;
   const existing = messageRepo.getMessagesByTask(task.id).find((m) => m.role === 'user');
   let userMessage: Message;
@@ -256,11 +430,11 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
   let child: ReturnType<typeof spawnForTask>;
   try {
     child = spawnForTask(task.id, sessionId, prepared.prompt, mainWindow, {
-      model: session?.model ?? config.defaultModel,
+      model: session?.model ?? getConfig().defaultModel,
       modelOverride: session?.modelOverride ?? null,
       providerOverride: session?.providerOverride ?? null,
-      workingDir: session?.workingDir ?? config.workingDirectory,
-      maxTurns: config.maxTurns,
+      workingDir: session?.workingDir ?? getConfig().workingDirectory,
+      maxTurns: getConfig().maxTurns,
       permissionMode: session?.permissionMode ?? null,
       thinkingLevel: session?.thinkingLevel ?? null,
       resumeSessionId: resolveCliSessionId(sessionId),
@@ -269,245 +443,22 @@ async function executeNextTask(sessionId: string, mainWindow: BrowserWindow): Pr
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    logger.error(`executeNextTask spawn failed (task ${task.id}): ${message}`);
+    logger.error(`popExecute spawn failed (task ${task.id}): ${message}`);
     taskRepo.updateTaskError(task.id, message);
-    emitQueueEvent(mainWindow, sessionId, 'task_failed', task.id);
-    state.lastCompletedTaskId = task.id;
-    state.currentTaskId = null;
-    advanceAfterTask(sessionId, mainWindow, config);
+    settleCurrent(sessionId, 'failed', mainWindow);
+    haltQueue(sessionId, 'failed', mainWindow);
     return;
   }
 
+  // 注意：spawnForTask 是 task 模式（prompt 已知，直接起 query），无需也不能再 sendMessage
+  //（会抛「没有待发送的 SDK 入口」——ChatSend 模式的首条消息通道）。
+
+  // result 丢失兜底（崩溃路径）：正常路径 result 先到、settleCurrent 已清 currentTaskId，
+  // 此匹配自然失效；abortHalt 已熔断时 noteTurnOutcome 的 running 闸 + haltQueue 的 halt_* 闸双双 no-op。
   child.on('exit', (code) => {
-    if (state.currentTaskId !== task.id || !isQueueGenerationActive(sessionId, executionGeneration)) return;
-
-    if (code === 0) {
-      taskRepo.updateTaskStatus(task.id, 'completed');
-      emitQueueEvent(mainWindow, sessionId, 'task_completed', task.id, { success: true });
-    } else {
-      taskRepo.updateTaskError(task.id, `Process exited with code ${code}`);
-      emitQueueEvent(mainWindow, sessionId, 'task_failed', task.id, { exitCode: code });
-    }
-
-    state.lastCompletedTaskId = task.id;
-    state.currentTaskId = null;
-    advanceAfterTask(sessionId, mainWindow, config);
+    if (!isQueueGenerationActive(sessionId, executionGeneration)) return;
+    if (state.currentTaskId !== task.id) return;
+    logger.info(`[queue] child exit fallback session=${sessionId} task=${task.id} code=${code}`);
+    noteTurnOutcome(sessionId, code === 0 ? 'success' : 'error', mainWindow);
   });
-}
-
-/** 自动启动钩子：仅当「配置开启队列 + 队列 idle + 无活动回合 + 存在可执行 pending（未暂停）」时
- *  按配置间隔起倒计时（首个任务也在间隔后执行——「回复结束 5 分钟后执行第一个任务」）。
- *  任何条件不满足直接返回；幂等，可被任意事件安全重复调用。 */
-export function maybeAutoStartQueue(sessionId: string, mainWindow: BrowserWindow): void {
-  const state = queues.get(sessionId);
-  if (state && state.status !== 'idle') return;
-  const config = getConfig();
-  if (!config.queueEnabled) return;
-  if (getActiveProcess(sessionId)) return;
-  const pending = taskRepo.getPendingTasks(sessionId);
-  if (pending.length === 0) return;
-  const q = getOrCreateQueue(sessionId);
-  q.pendingCount = pending.length;
-  startCountdown(sessionId, mainWindow, resolveQueueDelaySeconds(config.taskDelayMinutes));
-}
-
-/** 倒计时期间可执行任务被清空（如暂停了唯一 pending）→ 立即收口为 idle，
- *  不再空等到点（「全部暂停 = 全部不执行」的即时反馈）。 */
-export function cancelWaitingIfDrained(sessionId: string, mainWindow: BrowserWindow): void {
-  const state = queues.get(sessionId);
-  if (!state || state.status !== 'waiting') return;
-  if (taskRepo.getPendingTasks(sessionId).length > 0) return;
-  const countdownTimer = timers.get(sessionId);
-  const mainTimer = timers.get(`${sessionId}__main`);
-  if (countdownTimer) {
-    clearInterval(countdownTimer);
-    timers.delete(sessionId);
-  }
-  if (mainTimer) {
-    clearTimeout(mainTimer);
-    timers.delete(`${sessionId}__main`);
-  }
-  state.status = 'idle';
-  state.countdownRemaining = 0;
-  state.pendingCount = 0;
-  emitQueueEvent(mainWindow, sessionId, 'queue_completed');
-}
-
-function startCountdown(sessionId: string, mainWindow: BrowserWindow, delaySeconds: number): void {
-  const state = queues.get(sessionId);
-  if (!state) return;
-
-  state.status = 'waiting';
-  state.countdownRemaining = delaySeconds;
-
-  emitQueueEvent(mainWindow, sessionId, 'countdown_started', undefined, { seconds: delaySeconds });
-
-  const countdownInterval = setInterval(() => {
-    state.countdownRemaining -= 1;
-    emitQueueEvent(mainWindow, sessionId, 'countdown_tick', undefined, {
-      remaining: state.countdownRemaining,
-    });
-
-    if (state.countdownRemaining <= 0) {
-      clearInterval(countdownInterval);
-    }
-  }, 1000);
-
-  timers.set(sessionId, countdownInterval);
-
-  const mainTimer = setTimeout(() => {
-    clearInterval(countdownInterval);
-    timers.delete(sessionId);
-    runNextTask(sessionId, mainWindow);
-  }, delaySeconds * 1000);
-
-  // Store the main timer reference for cancellation
-  timers.set(`${sessionId}__main`, mainTimer);
-}
-
-export async function continueWithUserMessage(
-  sessionId: string,
-  payload: ChatSendPayload,
-  mainWindow: BrowserWindow,
-): Promise<Message> {
-  const state = queues.get(sessionId);
-  if (!state || state.status !== 'waiting') {
-    throw new Error('当前不在等待续接状态，无法提交消息');
-  }
-  const session = sessionRepo.getSession(sessionId);
-  if (!session) throw new Error('会话不存在');
-
-  // 预检（全通过后才动状态）：无 active query + 附件就绪（draft）+ prepare prompt。
-  if (getActiveProcess(sessionId)) {
-    throw new Error('当前回合仍在执行，请等待结束或中断后重试');
-  }
-  const { records, paths } = assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
-  const prepared = await prepareAttachmentPrompt({
-    sessionId,
-    payload,
-    attachments: records,
-    attachmentPaths: paths,
-  });
-
-  // 取消 countdown（预检通过后才取消，避免非法提交误清倒计时/误清草稿）。
-  const countdownTimer = timers.get(sessionId);
-  const mainTimer = timers.get(`${sessionId}__main`);
-  if (countdownTimer) {
-    clearInterval(countdownTimer);
-    timers.delete(sessionId);
-  }
-  if (mainTimer) {
-    clearTimeout(mainTimer);
-    timers.delete(`${sessionId}__main`);
-  }
-
-  const continuingTaskId = state.currentTaskId ?? state.lastCompletedTaskId ?? undefined;
-  const config = getConfig();
-  // query 真正接收前保持附件 draft；同步启动失败时可删除消息并原样重试。
-  const userMessage = messageRepo.createMessageWithAttachments({
-    id: payload.clientMessageId,
-    sessionId,
-    role: 'user',
-    content: prepared.displayText,
-    eventType: 'message',
-    attachments: prepared.attachmentIds,
-    promoteAttachments: false,
-  });
-
-  let spawned = false;
-  let child: ReturnType<typeof spawnForChat>;
-  try {
-    child = spawnForChat(sessionId, mainWindow, {
-      model: session.model ?? config.defaultModel,
-      modelOverride: session.modelOverride ?? null,
-      providerOverride: session.providerOverride ?? null,
-      workingDir: session.workingDir ?? config.workingDirectory,
-      maxTurns: config.maxTurns,
-      permissionMode: session.permissionMode,
-      thinkingLevel: session.thinkingLevel,
-      resumeSessionId: resolveCliSessionId(sessionId),
-      additionalDirectories: prepared.additionalDirectories,
-      userCommandText: payload.text,
-    });
-    spawned = true;
-
-    // SDK prompt（含图片时为可重复迭代 AsyncIterable，支持 stale-resume 重试）；sendMessage 触发 runQuery。
-    sendMessage(sessionId, prepared.prompt);
-  } catch (err) {
-    // F5：同 interruptTask——回滚路径的 queue kill 也带 mainWindow，弹窗取消反馈不因
-    // spawn 半途失败而静默（该时刻 pending 弹窗虽少见，语义上对称）。
-    if (spawned) killProcess(sessionId, 'queue', mainWindow);
-    messageRepo.deleteMessage(userMessage.id);
-    if (prepared.attachmentIds.length > 0) {
-      attachmentRepo.markAttachmentsStatus(prepared.attachmentIds, 'draft');
-    }
-    throw err;
-  }
-
-  if (prepared.attachmentIds.length > 0) {
-    attachmentRepo.markAttachmentsStatus(prepared.attachmentIds, 'message');
-  }
-  state.status = 'continuing';
-  emitQueueEvent(mainWindow, sessionId, 'countdown_cancelled');
-  emitQueueEvent(mainWindow, sessionId, 'task_continuing', continuingTaskId);
-  emitQueueEvent(mainWindow, sessionId, 'user_message_created', continuingTaskId, { message: userMessage });
-
-  // 保持 'continuing' 直到续写进程退出；退出后推进下一任务或回 idle。
-  child.on('exit', () => {
-    // P1 守卫：续写进程退出可能晚于 interruptTask（已被改为 idle）或晚于新任务 spawn（已是 running）。
-    // 仅在仍是 continuing 时推进，否则交由当前状态所有者处理，避免僵尸回调插队。
-    if (state.status !== 'continuing') return;
-
-    state.currentTaskId = null;
-
-    const remaining = taskRepo.getPendingTasks(sessionId);
-    state.pendingCount = remaining.length;
-
-    if (remaining.length > 0) {
-      startCountdown(sessionId, mainWindow, resolveQueueDelaySeconds(config.taskDelayMinutes));
-    } else {
-      state.status = 'idle';
-      emitQueueEvent(mainWindow, sessionId, 'queue_completed');
-    }
-  });
-
-  return userMessage;
-}
-
-export function skipCountdown(sessionId: string, mainWindow: BrowserWindow): void {
-  const countdownTimer = timers.get(sessionId);
-  const mainTimer = timers.get(`${sessionId}__main`);
-
-  if (countdownTimer) {
-    clearInterval(countdownTimer);
-    timers.delete(sessionId);
-  }
-  if (mainTimer) {
-    clearTimeout(mainTimer);
-    timers.delete(`${sessionId}__main`);
-  }
-
-  runNextTask(sessionId, mainWindow);
-}
-
-export function getQueueState(sessionId: string): QueueState {
-  return queues.get(sessionId) ?? {
-    sessionId,
-    status: 'idle',
-    currentTaskId: null,
-    lastCompletedTaskId: null,
-    countdownRemaining: 0,
-    pendingCount: 0,
-  };
-}
-
-export function cleanupQueue(sessionId: string): void {
-  queueGenerations.set(sessionId, getQueueGeneration(sessionId) + 1);
-  const countdownTimer = timers.get(sessionId);
-  const mainTimer = timers.get(`${sessionId}__main`);
-  if (countdownTimer) clearInterval(countdownTimer);
-  if (mainTimer) clearTimeout(mainTimer);
-  timers.delete(sessionId);
-  timers.delete(`${sessionId}__main`);
-  queues.delete(sessionId);
 }
