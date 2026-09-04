@@ -4,7 +4,11 @@ import { VueDraggable } from 'vue-draggable-plus';
 import { useTaskStore } from '../../stores/task-store';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
+import { useConfigStore } from '../../stores/config-store';
 import { useTaskQueue } from '../../composables/use-task-queue';
+import { taskEtaText } from '../../../shared/queue-eta';
+import { resolveQueueDelaySeconds } from '../../../shared/queue-config';
+import type { Task } from '../../../shared/types/task';
 import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
 import { useNow } from '../../composables/use-now';
 import TaskItem from './TaskItem.vue';
@@ -20,6 +24,7 @@ import { useClaudePlanStore } from '../../stores/claude-plan-store';
 const taskStore = useTaskStore();
 const sessionStore = useSessionStore();
 const interactionStore = useInteractionStore();
+const configStore = useConfigStore();
 const changesStore = useChangesStore();
 const planStore = useClaudePlanStore();
 const changesCount = computed(() => changesStore.changedCount);
@@ -58,6 +63,64 @@ let cleanup: (() => void) | null = null;
 
 const queueStatus = computed(() => taskStore.queueState.status);
 
+// v3 调度判据：queuePausedNow = 熔断待命（「立即执行」置灰 + 熔断提示行）；
+// queueEnabledNow = 队列开关（关闭时「立即执行」全置灰）。
+const queuePausedNow = computed(
+  () => taskStore.queueState.standbyReason === 'halt_failed' || taskStore.queueState.standbyReason === 'halt_interrupted',
+);
+const queueEnabledNow = computed(() => configStore.config.queueEnabled === true);
+
+// ETA 文案：未暂停 pending 的序列位次 + 当前调度状态 → taskEtaText 纯函数（shared，契约测试同源）。
+function etaFor(task: Task): string | null {
+  const runnable = taskStore.tasks.filter((t) => !t.paused);
+  const runnableIndex = runnable.findIndex((t) => t.id === task.id);
+  return taskEtaText(task, {
+    status: taskStore.queueState.status,
+    countdownRemaining: taskStore.queueState.countdownRemaining,
+    intervalSeconds: resolveQueueDelaySeconds(configStore.config.taskDelayMinutes),
+    runnableIndex,
+  });
+}
+
+// 历史折叠区（queue section 底部）：默认收起；内存态（方案 A），重启清零。
+const executedCollapsed = ref(true);
+
+// 可执行（未暂停）pending 数：queue-bar running 文案分支用。
+const runnableCount = computed(() => taskStore.tasks.filter((t) => !t.paused).length);
+
+// queue-bar 文案按调度状态分支（v3 语义表）。
+const queueBarHint = computed<{ text: string; showResumeAll: boolean }>(() => {
+  const state = taskStore.queueState;
+  if (state.status === 'countdown' && state.countdownRemaining > 0) {
+    return {
+      text: `上一回合已结束，${state.countdownRemaining}s 后执行下一个任务（期间可在会话框插话或点「立即执行」）`,
+      showResumeAll: false,
+    };
+  }
+  if (state.status === 'running' || sessionStore.sending) {
+    return {
+      text: runnableCount.value > 0 ? '回合执行中… 结束后自动倒计时' : '回合执行中… 结束后队列空闲',
+      showResumeAll: false,
+    };
+  }
+  switch (state.standbyReason) {
+    case 'halt_failed':
+      return { text: '上次执行失败，队列已全部暂停', showResumeAll: true };
+    case 'halt_interrupted':
+      return { text: '上次执行被中断，队列已全部暂停', showResumeAll: true };
+    case 'restart':
+      return { text: '应用重启，队列待命：点「立即执行」/「恢复」，或完成一次会话后开始', showResumeAll: false };
+    case 'switch_off':
+      return { text: '队列开关已关闭：不倒计时、不自动执行', showResumeAll: false };
+    default:
+      break;
+  }
+  if (taskStore.tasks.length > 0 && runnableCount.value === 0) {
+    return { text: '所有任务已暂停 · 点恢复/全部恢复后执行', showResumeAll: false };
+  }
+  return { text: '待命中', showResumeAll: false };
+});
+
 // C：后台任务（task_*）列表与计数。
 const backgroundTaskList = computed(() => Object.values(sessionStore.backgroundTasks));
 const backgroundTaskCount = computed(() => backgroundTaskList.value.length);
@@ -67,8 +130,8 @@ function taskIcon(taskType?: string): string {
   return '🔁';
 }
 
-// Queue running → disable drag reorder（waiting 倒计时期间放开：执行时按 sort_order 现取队首）
-const dragDisabled = computed(() => queueStatus.value === 'running' || queueStatus.value === 'continuing');
+// Queue running → disable drag reorder（v3：standby/countdown 均可拖——执行顺序只影响到期取谁）
+const dragDisabled = computed(() => sessionStore.sending);
 
 function isSubAgentGroupExpanded(id: string, running: boolean): boolean {
   // 问题 7：用户显式折叠优先——即使运行中也保持收起。
@@ -209,13 +272,15 @@ const planMetric = computed<{ text: string; active: boolean }>(() => {
 const queueMetric = computed<{ text: string; active: boolean }>(() => {
   switch (queueStatus.value) {
     case 'running': return { text: '执行中', active: true };
-    case 'waiting': {
+    case 'countdown': {
       const cd = taskStore.queueState.countdownRemaining;
       return { text: cd > 0 ? `等待 ${cd}s` : '等待中', active: true };
     }
-    case 'paused': return { text: '已暂停', active: true };
-    case 'continuing': return { text: '续写中', active: true };
-    default: return { text: '空闲', active: false };
+    default: {
+      const reason = taskStore.queueState.standbyReason;
+      if (reason === 'halt_failed' || reason === 'halt_interrupted') return { text: '已熔断', active: true };
+      return { text: '待命', active: false };
+    }
   }
 });
 const subAgentMetric = computed<{ text: string; active: boolean }>(() => {
@@ -247,7 +312,7 @@ function openSummaryFile(path: string, e: Event): void {
 
 onMounted(() => {
   cleanup = startListening();
-  loadTasks();
+  loadOverview();
   // 面板常驻（默认 all 总览），改动数据须随挂载即拉，供轨 badge / 指标格 / 总览摘要。
   void changesStore.refresh();
 });
@@ -256,58 +321,22 @@ onUnmounted(() => {
   cleanup?.();
 });
 
-function loadTasks() {
+// v3：任务列表/队列状态/历史随会话切换（loadOverview 全量拉取）。
+watch(
+  () => sessionStore.activeSession?.id,
+  () => {
+    if (sessionStore.activeSession) loadOverview();
+  },
+);
+
+function loadOverview() {
   if (sessionStore.activeSession) {
-    taskStore.loadTasks(sessionStore.activeSession.id);
+    void taskStore.loadOverview(sessionStore.activeSession.id);
   }
 }
 
-// Task 7B：构造完整 ChatSendPayload（text + attachmentIds + clientMessageId）；成功才清草稿，失败保留。
-// 任务入队已改由 ChatPage 生成中发送承担（面板 composer 已删），以下三个 composer 相关函数移除。
-
-async function handleRetry(taskId: string) {
-  await taskStore.retryTask(taskId);
-}
-
-async function handleStart() {
-  if (!sessionStore.activeSession) return;
-  if (!sessionStore.activeSession.workingDir) {
-    await interactionStore.requestConfirm({
-      title: '提示',
-      message: '请先在底部选择「工作空间」目录，再启动任务队列。',
-      confirmText: '知道了',
-      mode: 'alert',
-    });
-    return;
-  }
-  await taskStore.startQueue(sessionStore.activeSession.id);
-}
-
-async function handlePause() {
-  if (!sessionStore.activeSession) return;
-  await taskStore.pauseQueue(sessionStore.activeSession.id);
-}
-
-async function handleResume() {
-  if (!sessionStore.activeSession) return;
-  if (!sessionStore.activeSession.workingDir) {
-    await interactionStore.requestConfirm({
-      title: '提示',
-      message: '请先在底部选择「工作空间」目录，再继续任务队列。',
-      confirmText: '知道了',
-      mode: 'alert',
-    });
-    return;
-  }
-  await taskStore.resumeQueue(sessionStore.activeSession.id);
-}
-
-async function handleDelete(taskId: string) {
-  await taskStore.removeTask(taskId);
-}
-
-async function handleInterrupt(taskId: string) {
-  await taskStore.interruptTask(taskId);
+function handleDelete(taskId: string) {
+  void taskStore.removeTask(taskId);
 }
 
 async function handlePauseTask(taskId: string) {
@@ -316,6 +345,59 @@ async function handlePauseTask(taskId: string) {
 
 async function handleResumeTask(taskId: string) {
   await taskStore.setTaskPaused(taskId, false);
+}
+
+async function handleRunNow(taskId: string) {
+  if (!sessionStore.activeSession) return;
+  await taskStore.runTaskNow(taskId, sessionStore.activeSession.id);
+  if (taskStore.error) {
+    await interactionStore.requestConfirm({
+      title: '提示',
+      message: taskStore.error,
+      confirmText: '知道了',
+      mode: 'alert',
+    });
+  }
+}
+
+async function handleResumeAll() {
+  if (!sessionStore.activeSession) return;
+  await taskStore.resumeAll(sessionStore.activeSession.id);
+  if (taskStore.error) {
+    await interactionStore.requestConfirm({
+      title: '提示',
+      message: taskStore.error,
+      confirmText: '知道了',
+      mode: 'alert',
+    });
+  }
+}
+
+// 已执行历史条目：outcome 徽标四态（执行中=accent / 成功=muted+✓ / 失败=danger / 中断=warn）。
+function executedOutcomeClass(outcome: string): string {
+  switch (outcome) {
+    case 'running': return 'executed-entry__outcome--running';
+    case 'success': return 'executed-entry__outcome--success';
+    case 'failed': return 'executed-entry__outcome--failed';
+    case 'interrupted': return 'executed-entry__outcome--interrupted';
+    default: return '';
+  }
+}
+
+function executedOutcomeText(entry: { outcome: string }): string {
+  switch (entry.outcome) {
+    case 'running': return '执行中';
+    case 'success': return '✓ 成功';
+    case 'failed': return '失败';
+    case 'interrupted': return '中断';
+    default: return entry.outcome;
+  }
+}
+
+function executedTime(settledAt: string): string {
+  const d = new Date(settledAt);
+  if (Number.isNaN(d.getTime())) return '';
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 function handleDragReorder() {
@@ -361,18 +443,11 @@ function handleDragReorder() {
         </button>
       </div>
 
-      <!-- 排队控制条 + 倒计时（仅 queue 筛选） -->
+      <!-- 排队状态条（仅 queue）：v3 删除队列级开始/暂停/恢复按钮，按调度状态显示提示 + 全部恢复 -->
       <div v-if="sessionStore.rightTab === 'queue'" class="queue-bar">
-        <div class="task-panel__controls">
-          <button v-if="queueStatus === 'idle' || queueStatus === 'paused'" type="button" class="btn btn--primary" title="开始执行队列中的任务" @click="handleStart">开始</button>
-          <button v-if="queueStatus === 'running' || queueStatus === 'waiting' || queueStatus === 'continuing'" type="button" class="btn btn--warn" title="暂停倒计时与队列执行" @click="handlePause">暂停</button>
-          <button v-if="queueStatus === 'paused'" type="button" class="btn btn--primary" title="恢复队列执行" @click="handleResume">恢复</button>
-        </div>
-        <div v-if="queueStatus === 'waiting' && taskStore.queueState.countdownRemaining > 0" class="countdown">
-          任务已完成，{{ taskStore.queueState.countdownRemaining }}s 内可继续追加指令
-        </div>
-        <div v-if="queueStatus === 'continuing'" class="countdown countdown--continuing">
-          继续执行当前任务...
+        <div class="countdown">{{ queueBarHint.text }}</div>
+        <div v-if="queueBarHint.showResumeAll" class="task-panel__controls">
+          <button type="button" class="btn btn--primary" title="全部暂停任务恢复为待执行，并立即开始全量倒计时" @click="handleResumeAll">全部恢复</button>
         </div>
       </div>
 
@@ -397,25 +472,44 @@ function handleDragReorder() {
             <button type="button" class="tp-section__goto" @click="setFilter('queue')">只看此类</button>
           </div>
           <div class="task-list">
+            <!-- v3 修复：vue-draggable-plus 只渲染默认插槽（旧版使用的具名插槽导致任务列表自 c6ec15e 起从未渲染），
+                 TaskItem 直接作为默认插槽子节点 v-for。 -->
             <VueDraggable
               v-model="taskStore.tasks"
               :disabled="dragDisabled"
               handle=".task-item__drag"
-              item-key="id"
               @end="handleDragReorder"
             >
-              <template #item="{ element: task }">
-                <TaskItem
-                  :task="task"
-                  @delete="handleDelete"
-                  @interrupt="handleInterrupt"
-                  @retry="handleRetry"
-                  @pause="handlePauseTask"
-                  @resume="handleResumeTask"
-                />
-              </template>
+              <TaskItem
+                v-for="task in taskStore.tasks"
+                :key="task.id"
+                :task="task"
+                :eta="etaFor(task)"
+                :sending="sessionStore.sending"
+                :queue-paused="queuePausedNow"
+                :queue-enabled="queueEnabledNow"
+                @runnow="handleRunNow"
+                @pause="handlePauseTask"
+                @resume="handleResumeTask"
+                @delete="handleDelete"
+              />
             </VueDraggable>
             <div v-if="!taskStore.tasks.length" class="task-panel__empty">暂无排队任务；开启队列任务后，回复生成中在会话框发送即入队</div>
+          </div>
+
+          <!-- 本次已执行（方案 A：内存态、重启清零、上限 50；默认收起） -->
+          <div v-if="taskStore.executed.length" class="executed-fold">
+            <button type="button" class="executed-fold__title" @click="executedCollapsed = !executedCollapsed">
+              <span class="executed-fold__arrow" :class="{ 'executed-fold__arrow--open': !executedCollapsed }">›</span>
+              本次已执行 {{ taskStore.executed.length }} 个
+            </button>
+            <ul v-if="!executedCollapsed" class="executed-list">
+              <li v-for="entry in taskStore.executed" :key="`${entry.taskId}-${entry.settledAt}`" class="executed-entry">
+                <span class="executed-entry__outcome" :class="executedOutcomeClass(entry.outcome)">{{ executedOutcomeText(entry) }}</span>
+                <span class="executed-entry__prompt">{{ entry.prompt.slice(0, 60) }}{{ entry.prompt.length > 60 ? '...' : '' }}</span>
+                <span class="executed-entry__time">{{ executedTime(entry.settledAt) }}</span>
+              </li>
+            </ul>
           </div>
         </section>
 
@@ -787,23 +881,12 @@ function handleDragReorder() {
   box-shadow: var(--ring-light-accent);
 }
 
-.btn--warn {
-  border: 1px solid var(--color-warn-strong);
-  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
-  color: var(--color-warn-strong);
-}
-
 .countdown {
   padding: 10px 16px;
   background: color-mix(in srgb, var(--color-accent) 6%, transparent);
   color: var(--color-accent-strong);
   font-size: 0.8125rem;
   text-align: center;
-}
-
-.countdown--continuing {
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-  color: var(--color-accent-strong);
 }
 
 /* 内容滚动区：总览四类纵向堆叠，单类只渲染对应数据源 */
@@ -888,6 +971,95 @@ function handleDragReorder() {
   text-align: center;
   border: 1px dashed var(--color-border);
   border-radius: var(--radius-md);
+}
+
+/* 本次已执行折叠区：整体灰化（muted、正常字重），不可点不可拖不可删 */
+.executed-fold {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px dashed var(--color-border);
+  padding-top: 6px;
+}
+
+.executed-fold__title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+  text-align: left;
+}
+
+.executed-fold__title:hover {
+  color: var(--color-text);
+}
+
+.executed-fold__arrow {
+  display: inline-block;
+  transition: transform 0.15s;
+}
+
+.executed-fold__arrow--open {
+  transform: rotate(90deg);
+}
+
+.executed-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.executed-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+}
+
+.executed-entry__outcome {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.executed-entry__outcome--running {
+  color: var(--color-accent-strong);
+}
+
+.executed-entry__outcome--success {
+  color: var(--color-text-muted);
+}
+
+.executed-entry__outcome--failed {
+  color: var(--color-danger);
+}
+
+.executed-entry__outcome--interrupted {
+  color: var(--color-warn-strong);
+}
+
+.executed-entry__prompt {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.executed-entry__time {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text-muted);
 }
 
 /* 总览改动摘要（精简列表，进单类看完整 diff） */

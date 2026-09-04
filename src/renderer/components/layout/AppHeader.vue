@@ -58,7 +58,7 @@ const canExport = computed(() => {
   if (!activeSession.value) return false;
   if (sessionStore.sending) return false;
   const q = taskStore.queueState.status;
-  if (q === 'running' || q === 'continuing') return false;
+  if (q === 'running') return false;
   if (exportStore.running) return false;
   return true;
 });
