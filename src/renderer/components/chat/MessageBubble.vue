@@ -47,7 +47,15 @@ async function copyMessage(): Promise<void> {
 
 <template>
   <div :class="['bubble', `bubble--${message.role}`, { 'bubble--error': message.isError === true }]">
-    <div v-if="message.role !== 'system'" class="bubble__role">{{ message.role === 'user' ? '你' : 'Claude' }}</div>
+    <div v-if="message.role !== 'system'" class="bubble__role">
+      <span>{{ message.role === 'user' ? '你' : 'Claude' }}</span>
+      <!-- 队列任务到点/立即执行发出的消息标（导出快照不含运行态标签） -->
+      <span
+        v-if="!exportMode && message.role === 'user' && (message as { parentTaskId?: string | null }).parentTaskId"
+        class="bubble__queue-tag"
+        title="此消息由队列任务到点/立即执行时发送"
+      >来自队列</span>
+    </div>
     <div v-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
     <div v-if="reasoningReplayAdviceVisible" class="bubble__advice" data-testid="reasoning-replay-advice">
       <div class="bubble__advice-title">已自动重试一次；若仍失败，可：</div>
@@ -170,6 +178,21 @@ async function copyMessage(): Promise<void> {
   text-transform: uppercase;
   margin-bottom: 6px;
   opacity: 0.7;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 队列任务消息标：accent 14% 底、accent-strong 字、pill */
+.bubble__queue-tag {
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  color: var(--color-accent-strong);
+  padding: 1px 7px;
+  font-size: 0.625rem;
+  text-transform: none;
+  letter-spacing: 0;
 }
 
 .bubble--user .bubble__role,

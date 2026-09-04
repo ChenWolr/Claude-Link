@@ -230,20 +230,15 @@ async function handleSend() {
 
   sendInflight = true;
   const sessionId = store.activeSession.id;
-  // waiting 续写分支的会话归属判定：queueState 是全局单例，后台另一会话在等待时
-  // 不能把当前会话消息误送续写；生成中入队分支已改用 sending 判据（P1 修复），不再依赖它。
-  const isQueueSession = taskStore.queueState.sessionId === sessionId;
-  const status = taskStore.queueState.status;
   let ok = false;
 
   try {
-    // 倒计时期间补充输入 → 续写当前任务上下文，重置倒计时（保留续写语义，2026-09-03 用户拍板）
-    if (isQueueSession && status === 'waiting') {
-      ok = await taskStore.queueUserMessage(sessionId, payload);
-    } else if (sending.value && queueEnabled.value) {
-      // 生成中（本会话回合在跑：普通回合 / 队列任务 / 续写皆同）→ 排队为下一条指令，不打断当前任务。
-      // 判据用 sending（本会话 running 派生态）而非 queueState.sessionId：后者是全局单例，
-      // 队列从未激活 / 应用刚重启时为空串，首次生成中发送会被误路由成直发而被主进程拒绝（P1）。
+    // v3 两路收敛：
+    //  入队 = 队列开关开 && （本会话回合执行中 ∥ 引擎已出队执行但渲染层 sending 尚未翻真的窗口
+    //  —— queueState 双保险，防该窗口直发被主进程占坑拒绝）；
+    //  直发 = 空闲/倒计时中（插话语义：主进程 beginUserTurn 负责取消倒计时并全量重来）。
+    const engineRunningThis = taskStore.queueState.sessionId === sessionId && taskStore.queueState.status === 'running';
+    if (queueEnabled.value && (sending.value || engineRunningThis)) {
       ok = await taskStore.addTask(sessionId, payload);
     } else {
       ok = await sendMessage(payload);
