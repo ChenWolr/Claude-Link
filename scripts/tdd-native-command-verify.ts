@@ -1495,8 +1495,7 @@ void (async () => {
     const ipc = readFileSync(path.join('src', 'main', 'ipc-handlers.ts'), 'utf8');
     assert.ok(ipc.includes('userCommandText: payload.text'), 'CHAT_SEND spawnForChat 应传 payload.text');
     const taskq = readFileSync(path.join('src', 'main', 'modules', 'task-queue-engine.ts'), 'utf8');
-    assert.ok(taskq.includes('userCommandText: task.prompt'), 'task spawnForTask 应传 task.prompt');
-    assert.ok(taskq.includes('userCommandText: payload.text'), 'queue spawnForChat 应传 payload.text');
+    assert.ok(taskq.includes('userCommandText: task.prompt'), 'task spawnForTask 应传 task.prompt（v3：续接路径已删，出队为唯一队列 spawn）');
   });
 
   // v2-P2（review-v2 P2）：selftest 与 selftest:native 各调一次 native 链，env=1 时不重复。

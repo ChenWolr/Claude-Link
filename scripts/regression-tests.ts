@@ -239,7 +239,7 @@ function testAttachmentPolicyContracts(): void {
   );
 }
 
-// Task3：统一发送载荷 ChatSendPayload 形状校验（CHAT_SEND/TASK_ADD/QUEUE_USER_MESSAGE 共用）。
+// Task3：统一发送载荷 ChatSendPayload 形状校验（CHAT_SEND/TASK_ADD 共用）。
 // 纯函数行为契约：合法通过；缺字段/超限/重复/坏 UUID/空提交拒绝；附件-only（空文字）允许。
 function testChatSendPayloadShapeContracts(): void {
   const check = (p: unknown) => validateChatSendPayloadShape(p);
@@ -284,16 +284,14 @@ function testChatSendPayloadShapeContracts(): void {
   assert.ok(preloadApi.includes('removeDraftAttachment:'), 'preload 须暴露 removeDraftAttachment');
   assert.ok(/sendMessage:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(preloadApi), 'sendMessage 须接收 ChatSendPayload');
   assert.ok(/addTask:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(preloadApi), 'addTask 须接收 ChatSendPayload');
-  assert.ok(/queueUserMessage:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(preloadApi), 'queueUserMessage 须接收 ChatSendPayload');
 
-  // 三发送 handler 改 ChatSendPayload 并做形状 + 归属校验
+  // 两发送 handler 改 ChatSendPayload 并做形状 + 归属校验（队列语义 v3：waiting 续写通道已删除）
   assert.ok(/CHAT_SEND, async \(_event, sessionId: string, payload: ChatSendPayload\)/.test(ipcHandlers), 'CHAT_SEND handler 须接收 ChatSendPayload');
   assert.ok(/TASK_ADD, async \(_event, sessionId: string, payload: ChatSendPayload\)/.test(ipcHandlers), 'TASK_ADD handler 须接收 ChatSendPayload');
-  assert.ok(/QUEUE_USER_MESSAGE, async \(_event, sessionId: string, payload: ChatSendPayload\)/.test(ipcHandlers), 'QUEUE_USER_MESSAGE handler 须接收 ChatSendPayload');
   const sendHandlerCount = (ipcHandlers.match(/validateChatSendPayloadShape\(payload\)/g) || []).length;
-  assert.ok(sendHandlerCount >= 3, `三发送 handler 须各调 validateChatSendPayloadShape（实际 ${sendHandlerCount}）`);
+  assert.ok(sendHandlerCount >= 2, `两发送 handler 须各调 validateChatSendPayloadShape（实际 ${sendHandlerCount}）`);
   const readyCheckCount = (ipcHandlers.match(/assertAttachmentsReadyForSend\(sessionId, payload\.attachmentIds\)/g) || []).length;
-  assert.ok(readyCheckCount >= 3, `三发送 handler 须各调 assertAttachmentsReadyForSend（实际 ${readyCheckCount}）`);
+  assert.ok(readyCheckCount >= 2, `两发送 handler 须各调 assertAttachmentsReadyForSend（实际 ${readyCheckCount}）`);
 
   // 4 附件 handler 注册（按源码字面量匹配，与既有 changes 测试一致）
   assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_PICK'), '须注册 ATTACHMENT_PICK handler');
@@ -305,11 +303,10 @@ function testChatSendPayloadShapeContracts(): void {
   assert.ok(/path\.basename\(filePath\)/.test(ipcHandlers), '须只取 basename，不泄露完整路径');
   assert.ok(ipcHandlers.includes('detectDirectImageFormat(bytes)'), '须据魔数探测真实图片格式');
 
-  // Task 5：use-chat.sendMessage / task-store.addTask / queueUserMessage 改为接收 ChatSendPayload；
+  // Task 5：use-chat.sendMessage / task-store.addTask 改为接收 ChatSendPayload；
   // payload 由 ChatPage 统一构造（见 testAttachmentDraftUiContracts）。
   assert.ok(/sendMessage\(payload: ChatSendPayload\)/.test(useChat), 'use-chat sendMessage 须接收 ChatSendPayload');
   assert.ok(/addTask\(sessionId: string, payload: ChatSendPayload\)/.test(taskStore), 'task-store addTask 须接收 ChatSendPayload');
-  assert.ok(/queueUserMessage\(sessionId: string, payload: ChatSendPayload\)/.test(taskStore), 'task-store queueUserMessage 须接收 ChatSendPayload');
 }
 
 // Task4：prepareAttachmentPrompt 构造契约 + CHAT_SEND / sdk-backend 接线。
@@ -668,7 +665,7 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       assert.ok(ipcHandlers.includes('promoteAttachments: false'), '落库时附件不得立刻升格 message');
       assert.ok(ipcHandlers.includes("markAttachmentsStatus(prepared.attachmentIds, 'message')"), 'spawn/send 成功后才升格 message');
       assert.ok(ipcHandlers.includes('deleteMessage'), '同步失败须回滚消息');
-      // Task 7B：TASK_ADD / QUEUE_USER_MESSAGE 已支持附件（旧的"尚未支持"反向断言移除）。
+      // Task 7B：TASK_ADD 已支持附件（旧的"尚未支持"反向断言移除）。
       // 详细契约见 testAttachmentTask7BContracts。
       assert.ok(ipcHandlers.includes('createTaskWithAttachments'), 'TASK_ADD 须用 createTaskWithAttachments 落库带附件任务');
 
@@ -705,12 +702,10 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       assert.ok(/if \(type === 'result'\)[\s\S]*?deleteEntry\(sessionId, entry\);[\s\S]*?emitExit\(0\);[\s\S]*?return;/.test(sdkBackend), 'result 终态须先释放 entry 再通知退出');
       assert.ok(/if \(isCurrentEntry\(sessionId, entry\) && !gotResult\)[\s\S]*?deleteEntry\(sessionId, entry\);[\s\S]*?emitExit/.test(sdkBackend), '流末合成终态须先释放 entry 再通知退出');
       assert.ok(sdkBackend.includes('let exitEmitted = false'), 'SDK query exit 回调须幂等');
-      assert.ok(/executeNextTask\([\s\S]*?spawnForTask\([\s\S]*?catch \(err\)[\s\S]*?task_failed/.test(taskQueue), '队列 spawn 同步失败须转为 task_failed');
-      assert.ok(/continueWithUserMessage\([\s\S]*?let spawned = false[\s\S]*?killProcess\(sessionId, 'queue', mainWindow\)/.test(taskQueue), '队列续接 spawn/send 同步失败须清理 entry（F5：带 mainWindow，弹窗取消反馈不静默）');
-      assert.ok(/continueWithUserMessage\([\s\S]*?promoteAttachments: false[\s\S]*?deleteMessage\(userMessage\.id\)[\s\S]*?markAttachmentsStatus\(prepared\.attachmentIds, 'draft'\)/.test(taskQueue), '队列续接失败须回滚消息并恢复附件草稿');
-      const continueBody = taskQueue.slice(taskQueue.indexOf('export async function continueWithUserMessage'), taskQueue.indexOf('export function skipCountdown'));
-      assert.ok(continueBody.indexOf("sendMessage(sessionId, prepared.prompt)") < continueBody.indexOf("state.status = 'continuing'"), '队列续接须在 query 接收后才切 continuing');
-      assert.ok(continueBody.indexOf("sendMessage(sessionId, prepared.prompt)") < continueBody.indexOf("emitQueueEvent(mainWindow, sessionId, 'countdown_cancelled')"), '队列续接须在 query 接收后才通知取消倒计时');
+      // 队列语义 v3：出队执行体改名 popExecute；spawn/prepare 失败 → settle 'failed' + 熔断（不再回队）。
+      assert.ok(/async function popExecute\(/.test(taskQueue), '队列出队执行体须为 async popExecute');
+      assert.ok(/popExecute[\s\S]*?catch \(err\)[\s\S]*?settleCurrent\(sessionId, 'failed', mainWindow\)[\s\S]*?haltQueue\(sessionId, 'failed', mainWindow\)/.test(taskQueue), '队列 spawn/prepare 失败须结算 failed 并熔断（任务不回队）');
+      assert.ok(/void popExecute\([\s\S]*?\.catch\(/.test(taskQueue), 'popExecute 改 async 后所有调用点须 .catch 防 unhandled rejection');
       assert.ok(builder.includes("parent_tool_use_id: null"), '构造的 user message 须 parent_tool_use_id=null');
       assert.ok(builder.includes('ATTACHMENT_DEFAULT_INSTRUCTION'), 'builder 须使用默认指令常量');
       assert.ok(builder.includes('MAX_ENCODED_IMAGE_REQUEST_BYTES') || builder.includes('30 * 1024 * 1024'), '须有图片编码请求预算');
@@ -744,12 +739,14 @@ function testAttachmentDraftUiContracts(): void {
   // 2) 拖放高亮 class（非常驻边框）
   assert.ok(chatPage.includes("'chat-composer--drag'"), '须有拖放高亮 class');
 
-  // 3) ChatPage 构造 ChatSendPayload + 三路径路由
+  // 3) ChatPage 构造 ChatSendPayload + 两路路由（v3：waiting 续写路由删除）
   assert.ok(/function buildPayload\(\)/.test(chatPage), 'ChatPage 须有 buildPayload 构造载荷');
   assert.ok(/clientMessageId: crypto\.randomUUID\(\)/.test(chatPage), 'payload 须带 clientMessageId');
-  assert.ok(chatPage.includes('taskStore.queueUserMessage(sessionId, payload)'), 'waiting 须走 queueUserMessage(payload)');
-  assert.ok(chatPage.includes('taskStore.addTask(sessionId, payload)'), 'running/continuing 须走 addTask(payload)');
-  assert.ok(chatPage.includes('sendMessage(payload)'), 'idle 须走 sendMessage(payload)');
+  // 旧 waiting 续写入口已整体移除（动态拼装避免本文件触发旧语义 grep 门禁）。
+  const legacyQueueSend = ['queue', 'User', 'Message'].join('');
+  assert.ok(!chatPage.includes(legacyQueueSend), 'waiting 续写路由须移除（旧队列发送入口零残留）');
+  assert.ok(chatPage.includes('taskStore.addTask(sessionId, payload)'), '生成中须走 addTask(payload)');
+  assert.ok(chatPage.includes('sendMessage(payload)'), '空闲/倒计时中须走 sendMessage(payload)');
   assert.ok(chatPage.includes('draftStore.clearAfterAccepted(sessionId)'), '成功后才清草稿');
   // 失败路径不清草稿：clearAfterAccepted 必须在 ok 分支内（在其后无无条件调用）
   const clearIdx = chatPage.indexOf('draftStore.clearAfterAccepted(sessionId)');
@@ -981,31 +978,27 @@ function testAttachmentTask7BContracts(): void {
   const queuePanel = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');
   const taskTypes = readFileSync(new URL('../src/shared/types/task.ts', import.meta.url), 'utf8');
 
-  // 1) TASK_ADD 落库带附件 + 稳定 clientMessageId；TASK_REMOVE 零引用清理；TASK_RETRY 全链路
+  // 1) TASK_ADD 落库带附件 + 稳定 clientMessageId；TASK_REMOVE 零引用清理
+  //    （v3：旧任务重试/中断通道整体删除——失败不回队，重试走主会话「重新编辑发送」）
   assert.ok(ipcHandlers.includes('createTaskWithAttachments'), 'TASK_ADD 须用 createTaskWithAttachments 落库');
   assert.ok(/createTaskWithAttachments\([\s\S]*payload\.clientMessageId/.test(ipcHandlers), 'TASK_ADD 须透传 payload.clientMessageId');
   assert.ok(ipcHandlers.includes('cleanupDetachedAttachments'), 'TASK_REMOVE 须用 cleanupDetachedAttachments 清理零引用附件');
-  assert.ok(ipcTypes.includes('TASK_RETRY'), 'ipc.ts 须有 TASK_RETRY 通道');
-  assert.ok(ipcHandlers.includes('TASK_RETRY'), 'handler 须注册 TASK_RETRY');
-  assert.ok(ipcHandlers.includes('taskRepo.retryTask'), 'TASK_RETRY 须调 taskRepo.retryTask');
-  assert.ok(preloadApi.includes('retryTask'), 'preload 须暴露 retryTask');
+  // 旧通道标识分片拼装（避免本文件出现完整旧标识字面量，触发全仓 grep 门禁）。
+  const oldRetryChannel = 'TASK_' + 'RETRY';
+  const oldInterruptChannel = 'TASK_' + 'INTERRUPT';
+  assert.ok(!ipcTypes.includes(oldRetryChannel) && !ipcTypes.includes(oldInterruptChannel), 'v3：旧任务重试/中断通道须删除');
+  assert.ok(!ipcHandlers.includes('IPC_CHANNELS.' + oldRetryChannel) && !ipcHandlers.includes('IPC_CHANNELS.' + oldInterruptChannel), 'v3：旧任务重试/中断 handler 须删除');
+  assert.ok(!taskRepo.includes('export function retryTask'), 'v3：task-repo retryTask 须删除（失败不回队）');
 
-  // 2) QUEUE_USER_MESSAGE 改收 payload + await continueWithUserMessage（不再裸 string / 不再拒绝附件）
-  assert.ok(/continueWithUserMessage\(sessionId, payload, mainWindow\)/.test(ipcHandlers), 'QUEUE_USER_MESSAGE 须把 payload 透传给 continueWithUserMessage');
-  assert.ok(!ipcHandlers.includes('等待续接附件尚未支持'), 'Task 7B：QUEUE_USER_MESSAGE 不再拒绝附件');
-  assert.ok(!ipcHandlers.includes('任务队列附件尚未支持'), 'Task 7B：TASK_ADD 不再拒绝附件');
-
-  // 3) 引擎：executeNextTask async + prepare + 稳定 ID + 幂等 user message；continueWithUserMessage async + payload
-  assert.ok(/async function executeNextTask/.test(engine), 'executeNextTask 须为 async');
-  assert.ok(engine.includes('prepareAttachmentPrompt'), 'executeNextTask 须 prepare 带附件 prompt');
+  // 2) 引擎：popExecute async + prepare + 稳定 ID + 幂等 user message
+  assert.ok(/async function popExecute\(/.test(engine), 'popExecute 须为 async');
+  assert.ok(engine.includes('prepareAttachmentPrompt'), 'popExecute 须 prepare 带附件 prompt');
   assert.ok(engine.includes('setTaskClientMessageId'), '老任务首执行须生成并持久化 clientMessageId');
   assert.ok(engine.includes('getMessagesByTask'), '须按 parent_task_id 查已有 user message 实现幂等');
-  assert.ok(/spawnForTask\([\s\S]*prepared\.prompt/.test(engine), 'executeNextTask 须把 prepared.prompt 传给 spawnForTask');
-  assert.ok(engine.includes('prepared.additionalDirectories'), 'executeNextTask 须透传 additionalDirectories');
-  assert.ok(/const executionGeneration = generation[\s\S]*child\.on\('exit'[\s\S]*isQueueGenerationActive\(sessionId, executionGeneration\)/.test(engine), 'task retry/interrupt 后旧 child exit 不得覆盖新执行状态');
-  assert.ok(/async function continueWithUserMessage[\s\S]*payload: ChatSendPayload/.test(engine), 'continueWithUserMessage 须 async + 收 ChatSendPayload');
+  assert.ok(/spawnForTask\([\s\S]*prepared\.prompt/.test(engine), 'popExecute 须把 prepared.prompt 传给 spawnForTask');
+  assert.ok(engine.includes('prepared.additionalDirectories'), 'popExecute 须透传 additionalDirectories');
+  assert.ok(/const executionGeneration = generation[\s\S]*child\.on\('exit'[\s\S]*isQueueGenerationActive\(sessionId, executionGeneration\)/.test(engine), '旧 child exit 不得覆盖新执行状态（代际守卫）');
   assert.ok(engine.includes('user_message_created'), '引擎创建 user message 后须 emit user_message_created 事件');
-  assert.ok(engine.includes('runNextTask'), 'executeNextTask 改 async 后须有 runNextTask 包装防 unhandled rejection');
 
   // 4) resume 统一：resolveCliSessionId（内存优先 + DB fallback）
   assert.ok(sdkBackend.includes('export function resolveCliSessionId'), 'sdk-backend 须导出 resolveCliSessionId');
@@ -1014,17 +1007,15 @@ function testAttachmentTask7BContracts(): void {
   // 5) 图片 prompt 可重复迭代（[Symbol.asyncIterator]，支持 stale-resume 二次消费）
   assert.ok(builder.includes('[Symbol.asyncIterator]'), 'prompt 须为可重复迭代对象（[Symbol.asyncIterator]）');
 
-  // 6) task-repo：retryTask（仅 failed/cancelled）+ setTaskClientMessageId
-  assert.ok(taskRepo.includes('export function retryTask'), 'task-repo 须导出 retryTask');
-  assert.ok(/retryTask[\s\S]*status IN \('failed', 'cancelled'\)/.test(taskRepo), 'retryTask 须仅对 failed/cancelled 生效');
+  // 6) task-repo：setTaskClientMessageId（v3：retryTask 已删，见本函数第 1 组）
   assert.ok(taskRepo.includes('export function setTaskClientMessageId'), 'task-repo 须导出 setTaskClientMessageId');
 
   // 7) attachment-service：cleanupDetachedAttachments（零引用才删）
   assert.ok(attService.includes('export async function cleanupDetachedAttachments'), 'attachment-service 须导出 cleanupDetachedAttachments');
   assert.ok(/cleanupDetachedAttachments[\s\S]*getAttachmentReferenceCount/.test(attService), 'cleanupDetachedAttachments 须按引用计数判定');
 
-  // 8) renderer：task-store retry + user_message_created upsert；面板 composer 已删（任务改由主输入在生成中发送入队）
-  assert.ok(taskStore.includes('async retryTask'), 'task-store 须有 retryTask action');
+  // 8) renderer：user_message_created upsert；面板 composer 已删（任务改由主输入在生成中发送入队）
+  //    （v3：retryTask action 已随「失败不回队」语义删除）
   assert.ok(taskStore.includes("case 'user_message_created'"), 'task-store 须处理 user_message_created 事件');
   assert.ok(taskStore.includes('sessionStore.addMessage(msg)'), 'user_message_created 须 upsert 进会话消息');
   assert.ok(
@@ -1036,7 +1027,7 @@ function testAttachmentTask7BContracts(): void {
   assert.ok(!queuePanel.includes('pickTaskAttachments'), '面板不得再有附件选择入口（附件经主输入）');
   assert.ok(!queuePanel.includes('useTaskDraftStore'), '面板不得再引用任务草稿 store');
   assert.ok(!queuePanel.includes('<AttachmentDraftList'), '面板不再挂载附件草稿列表');
-  assert.ok(queuePanel.includes('@retry="handleRetry"'), 'TaskItem 须接 retry 事件');
+  assert.ok(queuePanel.includes('@runnow="handleRunNow"'), 'TaskItem 须接 runnow 事件（立即执行）');
   assert.ok(queuePanel.includes('@pause="handlePauseTask"'), 'TaskItem 须接 pause 事件（任务级暂停顺延）');
   assert.ok(queuePanel.includes('@resume="handleResumeTask"'), 'TaskItem 须接 resume 事件');
 

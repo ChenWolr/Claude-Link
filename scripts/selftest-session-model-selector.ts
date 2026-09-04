@@ -143,7 +143,7 @@ console.log('\n=== 5) 主进程注入：env / settings / options.model / canUseT
   check('改写分支无条件放行（allow + updatedInput，不新增权限）', /decideAgentModelOverride[\s\S]{0,300}behavior: 'allow', updatedInput: \{ \.\.\.input, model: rewriteModel \}/.test(permHandler));
 
   check('CHAT_SEND spawn 传 providerOverride', handlers.includes('providerOverride: session.providerOverride'));
-  check('任务队列两处 spawn 传 providerOverride', (tq.match(/providerOverride: session\?\.providerOverride \?\? null/g) ?? []).length >= 1 && tq.includes('providerOverride: session.providerOverride ?? null'));
+  check('任务队列出队 spawn 传 providerOverride（v3：出队为唯一队列 spawn，续接路径已删）', (tq.match(/providerOverride: session\?\.providerOverride \?\? null/g) ?? []).length >= 1 && !tq.includes('providerOverride: session.providerOverride ?? null'));
   check('mergeSpawnOptions 补全 providerOverride', cmdOpts.includes("merged.providerOverride = session.providerOverride"));
   check('SESSION_UPDATE 扩展 providerOverride/modelOverride 白名单', handlers.includes("'providerOverride' | 'modelOverride'") && handlers.includes('recordLastUsedProviderModel'));
 }
