@@ -28,7 +28,6 @@ const expanded = ref(false);
 // 「立即执行」置灰原因（优先级从高到低，与主进程 runTaskNow 守卫一一对应）。
 // computed：暂停/恢复等 props 变化时 title 必须随之更新。
 const runNowTitle = computed(() => {
-  if (props.task.paused) return '已暂停的任务请先恢复';
   if (props.queueEnabled === false) return '队列开关已关闭';
   if (props.queuePaused) return '队列已暂停，恢复队列后可执行';
   if (props.sending) return '当前会话有任务执行中，结束后可立即执行';
@@ -62,13 +61,13 @@ const runNowTitle = computed(() => {
         v-if="task.status === 'pending'"
         type="button"
         class="action action--accent"
-        :disabled="task.paused || sending || queuePaused || !queueEnabled"
+        :disabled="sending || queuePaused || !queueEnabled"
         :title="runNowTitle"
         @click="emit('runnow', task.id)"
       >立即执行</button>
-      <button v-if="task.status === 'pending' && !task.paused" type="button" class="action action--muted" @click="emit('pause', task.id)">暂停</button>
+      <button v-if="task.status === 'pending' && !task.paused" type="button" class="action action--solid" @click="emit('pause', task.id)">暂停</button>
       <button v-if="task.status === 'pending' && task.paused" type="button" class="action action--accent" @click="emit('resume', task.id)">恢复</button>
-      <button v-if="task.status === 'pending'" type="button" class="action action--muted" @click="emit('delete', task.id)">删除</button>
+      <button v-if="task.status === 'pending'" type="button" class="action action--solid" @click="emit('delete', task.id)">删除</button>
       <button type="button" class="action" @click="expanded = !expanded">{{ expanded ? '收起' : '详情' }}</button>
     </div>
     <div v-if="expanded" class="task-item__detail">
@@ -181,9 +180,13 @@ const runNowTitle = computed(() => {
   cursor: not-allowed;
 }
 
-.action--muted {
-  color: var(--color-text-muted);
-  opacity: 0.6;
+.action--solid {
+  color: var(--color-text);
+}
+
+.action--solid:hover:not(:disabled) {
+  border-color: var(--color-accent-strong);
+  color: var(--color-accent-strong);
 }
 
 .action--accent {
