@@ -260,17 +260,19 @@ export function noteTurnOutcome(sessionId: string, outcome: 'success' | 'error' 
 }
 
 /** 「立即执行」：守卫（抛 Error 给 IPC → 渲染层 notice）后跳过倒计时立即出队执行；
- *  非队首=插队：该任务 reorder 到可执行序列首位，原队首保留为下一个倒计时对象。 */
+ *  非队首=插队：该任务 reorder 到可执行序列首位，原队首保留为下一个倒计时对象。
+ *  paused 任务可立即执行（主会话空闲时），执行前先解除暂停。 */
 export function runTaskNow(taskId: string, mainWindow: BrowserWindow): QueueOverview {
   const task = taskRepo.getTask(taskId);
   if (!task || task.status !== 'pending') throw new Error('任务不存在或不在待执行状态');
-  if (task.paused) throw new Error('已暂停的任务请先恢复');
   if (getConfig().queueEnabled !== true) throw new Error('队列开关已关闭');
   const state = getOrCreateQueue(task.sessionId);
   if (getActiveProcess(task.sessionId) || state.status === 'running') {
     throw new Error('当前会话有任务执行中，结束后可立即执行');
   }
   cancelTimers(task.sessionId);
+  // v3.1：paused 任务允许「立即执行」（主会话空闲守卫已过）——先解除暂停，落位/结算按未暂停处理
+  if (task.paused) taskRepo.setTaskPaused(taskId, false);
   // 插队：目标任务挪到会话全部任务首位（其余保持现序），原队首自然成为下一个出队对象。
   const rest = taskRepo.getTasksBySession(task.sessionId).filter((t) => t.id !== taskId).map((t) => t.id);
   taskRepo.reorderTasks(task.sessionId, [taskId, ...rest]);

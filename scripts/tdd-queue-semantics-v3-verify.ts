@@ -163,7 +163,8 @@ function fnBody(source: string, signature: string): string {
   const idxReorder = runNowBody.indexOf('reorderTasks(');
   const idxPop = runNowBody.indexOf('popExecute(');
   check('engine: runTaskNow 顺序=cancelTimers→插队 reorder→popExecute', idxCancel >= 0 && idxReorder > idxCancel && idxPop > idxReorder);
-  check('engine: runTaskNow 拒绝已暂停任务', runNowBody.includes('task.paused'));
+  check('engine: runTaskNow 不再拦截已暂停任务', !runNowBody.includes('已暂停的任务请先恢复'));
+  check('engine: runTaskNow 对 paused 任务先解除暂停', runNowBody.includes('if (task.paused) taskRepo.setTaskPaused(taskId, false)'));
   check('engine: runTaskNow 守卫队列开关', runNowBody.includes('queueEnabled'));
   check('engine: runTaskNow 守卫活动进程', runNowBody.includes('getActiveProcess('));
 
@@ -346,8 +347,8 @@ function fnBody(source: string, signature: string): string {
   const item = read('../src/renderer/components/task/TaskItem.vue');
   check('item: 立即执行按钮恒渲染（含已暂停置灰）', item.includes('立即执行'));
   check('item: runnow emit 声明', /runnow: \[taskId: string\]/.test(item));
-  check('item: 立即执行 disabled 五态判据', item.includes(':disabled="task.paused || sending || queuePaused || !queueEnabled"'));
-  check('item: title 已暂停的任务请先恢复', item.includes('已暂停的任务请先恢复'));
+  check('item: 立即执行 disabled 四态判据（paused 解禁）', item.includes(':disabled="sending || queuePaused || !queueEnabled"'));
+  check('item: 删「已暂停的任务请先恢复」title', !item.includes('已暂停的任务请先恢复'));
   check('item: title 队列开关已关闭', item.includes('队列开关已关闭'));
   check('item: title 队列已暂停，恢复队列后可执行', item.includes('队列已暂停，恢复队列后可执行'));
   check('item: title 当前会话有任务执行中', item.includes('当前会话有任务执行中，结束后可立即执行'));
@@ -361,6 +362,7 @@ function fnBody(source: string, signature: string): string {
   check('item: 删 running 自动展开 watch', !item.includes("newStatus === 'running'"));
   check('item: 删结果/费用/耗时/错误展示', !item.includes('task-item__result') && !item.includes('task-item__meta'));
   check('item: 禁用态样式 opacity', /.action:disabled/.test(item));
+  check('item: 暂停/删除按钮常亮（solid 类、muted 零残留）', item.includes('action--solid') && !item.includes('action--muted'));
   check('item: props 含 eta/sending/queuePaused/queueEnabled', /eta\?: string \| null/.test(item) && /sending\?: boolean/.test(item) && /queuePaused\?: boolean/.test(item) && /queueEnabled\?: boolean/.test(item));
 }
 
