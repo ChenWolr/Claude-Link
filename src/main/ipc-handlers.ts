@@ -27,15 +27,16 @@ import { resolveEffectivePermissionMode, type PermissionMode } from '../shared/p
 import { sdkCommandRegistry, getCommandProvenance } from './modules/sdk-command-registry';
 import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
 import {
-  startQueue,
-  pauseQueue,
-  resumeQueue,
-  interruptTask,
-  getQueueState,
-  continueWithUserMessage,
+  beginUserTurn,
+  noteTurnOutcome,
+  abortHalt,
+  armFromUserAction,
+  runTaskNow,
+  resumeAllTasks,
+  getQueueOverview,
+  onQueueEnabledChanged,
+  drainCountdownIfNoRunnable,
   cleanupQueue,
-  maybeAutoStartQueue,
-  cancelWaitingIfDrained,
 } from './modules/task-queue-engine';
 import { analyzeTopic } from './modules/topic-analyzer';
 import { logger } from './utils/logger';
@@ -95,7 +96,15 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // Config
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfig());
-  ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => saveConfig(partial));
+  ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => {
+    // v3：queueEnabled 值变化 → 通知引擎（关：取消倒计时转 switch_off；开：仅清 reason 不 arm）。
+    const prevQueueEnabled = getConfig().queueEnabled === true;
+    const saved = saveConfig(partial);
+    if ((saved.queueEnabled === true) !== prevQueueEnabled) {
+      onQueueEnabledChanged(saved.queueEnabled === true, mainWindow);
+    }
+    return saved;
+  });
   ipcMain.handle(IPC_CHANNELS.CONFIG_CLEAR, async () => clearConfig());
   ipcMain.handle(IPC_CHANNELS.CONFIG_STORAGE_INFO, async () => {
     const userData = app.getPath('userData');
@@ -446,10 +455,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         userCommandText: payload.text,
       });
       spawned = true;
-      // 队列自动执行挂点：普通会话回合结束后，若开关开启且有可执行任务，按配置间隔自动起倒计时。
-      // 幂等守卫在 maybeAutoStartQueue 内（队列非 idle / 无 pending / 有活动回合均不接管）。
-      child.on('exit', () => {
-        maybeAutoStartQueue(sessionId, mainWindow);
+      // v3 调度挂点：占坑成功即回合开始——插话顶掉倒计时 + 引擎置 running（规则 #4/#5）。
+      beginUserTurn(sessionId, mainWindow);
+      // exit 兜底：防普通回合 result 永久丢失时引擎 status 僵尸卡 running。
+      // 幂等安全：正常路径 result 先到（emitExit 与 result 处理同序列、期间占坑未释放，
+      // 新回合无法插入），引擎 status 已非 running，arm/halt 双双 no-op。
+      child.on('exit', (code) => {
+        noteTurnOutcome(sessionId, code === 0 ? 'success' : 'error', mainWindow);
       });
       // sendMessage 同步路径只负责把 pending 交给 runQuery；真正 SDK 失败走事件流，不在此 IPC 回滚。
       sendMessage(sessionId, prepared.prompt);
@@ -501,6 +513,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   ipcMain.handle(IPC_CHANNELS.CHAT_ABORT, async (_event, sessionId: string) => {
     killProcess(sessionId, 'user', mainWindowRef);
+    // v3 熔断挂点：手动中断可能没有 result 事件（两段式 abort 兜底只 emitExit 不发事件），
+    // 熔断必须同时挂在 CHAT_ABORT（守卫在 abortHalt 内：非 running 且无活动进程时 no-op）。
+    abortHalt(sessionId, mainWindowRef);
   });
 
   // 批次二 #3：运行中回合中途切权限档。null（跟随全局）在主进程解析成有效档；
@@ -538,98 +553,81 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // Tasks
+  // v3 面板只展示 pending 任务：所有返回给渲染层的任务列表统一过滤 pending
+  //（DB 里 running/failed 是执行残留行——status 仅崩溃恢复用，不进视图）。
+  const pendingTasksOf = (sessionId: string) =>
+    taskRepo.getTasksBySession(sessionId).filter((t) => t.status === 'pending');
+
   ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, payload: ChatSendPayload) => {
     // Task 7B：任务附件接入。落库 task + 稳定 clientMessageId + 附件 links（status→task）。
-    // 执行时由 executeNextTask 按 clientMessageId 创建/复用 user message、prepare 带附件的 prompt。
+    // 执行时由 popExecute 按 clientMessageId 创建/复用 user message、prepare 带附件的 prompt。
+    // v3：返回 { task, tasks }——渲染层以返回的 tasks 为顺序权威（addTask 后立即反映真实排序）。
     const shape = validateChatSendPayloadShape(payload);
     if (!shape.ok) throw new Error(shape.message);
     assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
     const tasks = taskRepo.getTasksBySession(sessionId);
     const sortOrder = tasks.length;
-    return taskRepo.createTaskWithAttachments(
+    const task = taskRepo.createTaskWithAttachments(
       sessionId,
       payload.text.trim(),
       sortOrder,
       payload.attachmentIds,
       payload.clientMessageId,
     );
+    return { task, tasks: pendingTasksOf(sessionId) };
   });
 
   ipcMain.handle(IPC_CHANNELS.TASK_REMOVE, async (_event, taskId: string) => {
     // Task 7B：解除 task_attachments 后，零引用附件（未执行的 pending task）删 row+文件；
     // 已升格为 message 的附件仍有引用，保留。
+    // v3（语义表 #10）：删除后若该会话已无未暂停 pending → 取消倒计时转 standby；仍有 → 倒计时继续。
+    const task = taskRepo.getTask(taskId);
     const attachmentIds = taskRepo.deleteTask(taskId);
     await cleanupDetachedAttachments(attachmentIds);
+    if (task) drainCountdownIfNoRunnable(task.sessionId, mainWindow);
+    return task ? pendingTasksOf(task.sessionId) : [];
   });
 
   ipcMain.handle(IPC_CHANNELS.TASK_GET_ALL, async (_event, sessionId: string) => {
-    return taskRepo.getTasksBySession(sessionId);
+    return pendingTasksOf(sessionId);
   });
 
+  // 拖拽排序：只改执行顺序（到期取谁），不触碰倒计时。
   ipcMain.handle(IPC_CHANNELS.TASK_REORDER, async (_event, sessionId: string, taskIds: string[]) => {
     taskRepo.reorderTasks(sessionId, taskIds);
-    return taskRepo.getTasksBySession(sessionId);
+    return pendingTasksOf(sessionId);
   });
 
-  ipcMain.handle(IPC_CHANNELS.TASK_INTERRUPT, async (_event, taskId: string) => {
-    const task = taskRepo.getTask(taskId);
-    if (task) {
-      interruptTask(taskId, task.sessionId, mainWindow);
-    }
-  });
-
-  ipcMain.handle(IPC_CHANNELS.TASK_RETRY, async (_event, taskId: string) => {
-    // Task 7B：failed/cancelled → pending，清结果字段，保留附件 links + 稳定 clientMessageId。
-    const task = taskRepo.retryTask(taskId);
-    if (!task) throw new Error('任务不存在或当前状态不支持重试');
-    // 重试产生新的可执行任务：若队列空闲且无活动回合，按间隔自动重新调度。
-    maybeAutoStartQueue(task.sessionId, mainWindow);
-    return task;
-  });
-
-  // 任务级暂停/恢复：暂停 = 顺延（getPendingTasks 过滤 paused=1，队列继续取下一个未暂停任务）；
-  // 全部暂停 = 无可执行任务，倒计时立即收口不执行；恢复 = 重新进入待执行序列并尝试自动调度。
+  // 任务级暂停/恢复（v3 语义表 #7/#9）：
+  // 暂停 = 顺延；若已无未暂停 pending → 取消倒计时转 standby，仍有 → 倒计时继续（到期取新队首）。
+  // 恢复 = 回待执行序列；standby 且无活动回合且开关开 → 立即全量倒计时；倒计时在走 → 不打断不重置。
   ipcMain.handle(IPC_CHANNELS.TASK_SET_PAUSED, async (_event, taskId: string, paused: unknown) => {
     const task = taskRepo.getTask(taskId);
     if (!task) throw new Error('任务不存在');
     const updated = taskRepo.setTaskPaused(taskId, paused === true);
     if (!updated) throw new Error('仅待执行（pending）任务可暂停/恢复');
     if (paused === true) {
-      cancelWaitingIfDrained(task.sessionId, mainWindow);
+      drainCountdownIfNoRunnable(task.sessionId, mainWindow);
     } else {
-      maybeAutoStartQueue(task.sessionId, mainWindow);
+      armFromUserAction(task.sessionId, mainWindow);
     }
-    return updated;
+    return pendingTasksOf(task.sessionId);
   });
 
-  // Queue
-  ipcMain.handle(IPC_CHANNELS.QUEUE_START, async (_event, sessionId: string) => {
-    startQueue(sessionId, mainWindow);
-    return getQueueState(sessionId);
+  // Queue（v3）
+  // 立即执行：跳过倒计时立即出队（非队首=插队）；守卫失败抛错 → 渲染层 notice。
+  ipcMain.handle(IPC_CHANNELS.TASK_RUN_NOW, async (_event, taskId: string) => {
+    return runTaskNow(taskId, mainWindow);
   });
 
-  ipcMain.handle(IPC_CHANNELS.QUEUE_PAUSE, async (_event, sessionId: string) => {
-    pauseQueue(sessionId, mainWindow);
-    return getQueueState(sessionId);
+  // 熔断提示行「全部恢复」：全部 paused→pending + 立即开始全量倒计时。
+  ipcMain.handle(IPC_CHANNELS.QUEUE_RESUME_ALL, async (_event, sessionId: string) => {
+    return resumeAllTasks(sessionId, mainWindow);
   });
 
-  ipcMain.handle(IPC_CHANNELS.QUEUE_RESUME, async (_event, sessionId: string) => {
-    resumeQueue(sessionId, mainWindow);
-    return getQueueState(sessionId);
-  });
-
-  ipcMain.handle(IPC_CHANNELS.QUEUE_GET_STATE, async (_event, sessionId: string) => {
-    return getQueueState(sessionId);
-  });
-
-  ipcMain.handle(IPC_CHANNELS.QUEUE_USER_MESSAGE, async (_event, sessionId: string, payload: ChatSendPayload) => {
-    // Task 7B：waiting 续接支持附件。边界先校验（与 CHAT_SEND/TASK_ADD 对齐），
-    // 预检/prepare/落库/spawn 全在 continueWithUserMessage 内；任一同步失败抛错（renderer 保留草稿）。
-    const shape = validateChatSendPayloadShape(payload);
-    if (!shape.ok) throw new Error(shape.message);
-    assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
-    await continueWithUserMessage(sessionId, payload, mainWindow);
-    return getQueueState(sessionId);
+  // 面板全量数据：状态 + pending 任务 + 本次已执行历史。
+  ipcMain.handle(IPC_CHANNELS.QUEUE_GET_OVERVIEW, async (_event, sessionId: string) => {
+    return getQueueOverview(sessionId);
   });
 
   // 附件 IPC：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。

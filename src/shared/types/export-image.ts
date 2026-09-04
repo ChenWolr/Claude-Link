@@ -38,6 +38,9 @@ export interface RenderableMessage<A = AttachmentSummary> {
   toolUseId: string | null;
   title: string | null;
   isError: boolean;
+  // 队列任务消息标（v3）：主进程落库时写入 parent_task_id；渲染层据此显示「来自队列」标，
+  // 导出模式排除。图片导出链路不发送该字段（可选向后兼容）。
+  parentTaskId?: string | null;
   // 上游错误结构化分类键（如 'reasoning_replay'）。落库路径（cli-shared / use-chat）依
   // isReasoningReplayApiError 命中打标，错误气泡据此附行动建议；未分类为 null/缺省。
   apiErrorKind?: string | null;
