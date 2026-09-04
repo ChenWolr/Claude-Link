@@ -341,11 +341,13 @@ console.log('\n=== 24) M7: 工具调用流式 input_json_delta 必须有反馈 =
   check('use-chat 处理 input_json_delta', uc.includes('input_json_delta') || uc.includes('partial_json'));
 }
 
-console.log('\n=== 25) M8: interruptTask 必须处理 continuing 状态 ===');
+console.log('\n=== 25) v3 中断收口守卫（旧任务中断函数已删，中断统一走 abortHalt）===');
 {
   const tq = readRel('src/main/modules/task-queue-engine.ts');
-  const fn = tq.match(/function interruptTask[\s\S]{0,500}/)?.[0] ?? '';
-  check('interruptTask 允许 continuing 状态中断', fn.includes('continuing') || fn.includes('running'));
+  check('abortHalt 以 running/活动进程双判据守卫（空闲误按不熔断）',
+    /export function abortHalt[\s\S]{0,600}?getActiveProcess\(sessionId\)/.test(tq));
+  check('noteTurnOutcome 以 running 为幂等闸（重复/迟到 result no-op）',
+    /export function noteTurnOutcome[\s\S]{0,600}?status !== 'running'/.test(tq));
 }
 
 console.log('\n=== 26) Review 修复：中断标记按 query 实例、abort 跨回合串扰 ===');
@@ -372,7 +374,8 @@ console.log('\n=== 26) Review 修复：中断标记按 query 实例、abort 跨�
     uc.indexOf('store.markStopped(sid)') > uc.indexOf('(store.turnGeneration[sid] ?? 0) !== generation'));
   check('abort 兜底全部按 sessionId 清理（无单例残留 clearAbortTimer()）', !uc.includes('clearAbortTimer()'));
   check('watch 切会话不清 abort 兜底（中断后切走仍保 finally）', !/activeSession\?\.id[\s\S]{0,120}clearAbortTimer/.test(uc));
-  check('continueWithUserMessage exit 守卫 continuing', /status !== 'continuing'/.test(tq));
+  // v3：旧续写链路已删，等价的「迟到 exit 不得覆盖新状态」由 popExecute 的 currentTaskId 闸承担。
+  check('popExecute exit 兜底以 currentTaskId 匹配为闸（迟到 exit 不覆盖新状态）', /state\.currentTaskId !== task\.id/.test(tq));
 }
 
 console.log('\n=== 27) 过程分组计划契约：类型/DB/透传/分组/子AgentTab/无诊断日志 ===');
@@ -1081,8 +1084,7 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
     ipcHandlers.includes("killProcess(sessionId, 'user', mainWindowRef)"));
   check('删除会话以 session_cleanup reason 中断',
     ipcHandlers.includes("killProcess(id, 'session_cleanup')"));
-  check('任务队列以 queue reason 中断（F5：带 mainWindow）',
-    queueEngine.includes("killProcess(sessionId, 'queue', mainWindow)"));
+  check('v3 队列引擎不再自行 killProcess（中断统一走 CHAT_ABORT）', !queueEngine.includes('killProcess('));
   const killProcessBody = sb.slice(
     sb.indexOf('export function killProcess('),
     sb.indexOf('export function killAllProcesses()'),
@@ -1406,11 +1408,9 @@ console.log('\n=== 45) 附件 IPC + preload 桥（Task 3）：通道/方法/Chat
   check('preload removeDraftAttachment', api.includes('removeDraftAttachment:'));
   check('sendMessage 接收 ChatSendPayload', /sendMessage:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(api));
   check('addTask 接收 ChatSendPayload', /addTask:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(api));
-  check('queueUserMessage 接收 ChatSendPayload', /queueUserMessage:\s*\(sessionId:\s*string,\s*payload:\s*ChatSendPayload\)/.test(api));
-
-  // 三发送 handler 共用形状 + 归属/draft 校验
-  check('三发送 handler 形状校验', (handlers.match(/validateChatSendPayloadShape\(payload\)/g) || []).length >= 3);
-  check('三发送 handler 归属+draft 校验', (handlers.match(/assertAttachmentsReadyForSend\(sessionId, payload\.attachmentIds\)/g) || []).length >= 3);
+  // v3：旧 waiting 续写发送通道删除，发送 handler 收敛为 CHAT_SEND/TASK_ADD 两处。
+  check('两发送 handler 形状校验', (handlers.match(/validateChatSendPayloadShape\(payload\)/g) || []).length >= 2);
+  check('两发送 handler 归属+draft 校验', (handlers.match(/assertAttachmentsReadyForSend\(sessionId, payload\.attachmentIds\)/g) || []).length >= 2);
 
   // 安全边界：主进程读文件、不泄露路径、魔数探测、受控预览/移除
   check('ATTACHMENT_PICK 用主进程 dialog', handlers.includes('dialog.showOpenDialog'));
@@ -1647,7 +1647,7 @@ console.log('\n=== 48) 思考强度接线：持久化层 + 注入层 + IPC 通�
     sdkBackend.includes('effort: thinkingConfig.effort') && sdkBackend.includes('buildNativeSdkOptionsCore'));
   check('sdk-backend settingsPatch Object.assign 覆盖全局投影（review-v1 F6 后收口到 buildClaudeLinkSettingsBlock）', sdkBackend.includes('Object.assign(out, thinkingConfig.settingsPatch)'));
   check('task-queue spawnForTask 传 thinkingLevel', taskQueue.includes('thinkingLevel: session?.thinkingLevel ?? null'));
-  check('task-queue spawnForChat(续接) 传 thinkingLevel', taskQueue.includes('thinkingLevel: session.thinkingLevel'));
+  check('task-queue 出队 spawnForTask 透传 thinkingLevel 空值合并（v3：续接路径已删）', taskQueue.includes('thinkingLevel: session?.thinkingLevel ?? null'));
   check('ipc-handlers CHAT_SEND spawnForChat 传 thinkingLevel', handlers.includes('thinkingLevel: session.thinkingLevel'));
 
   // 配置层 + 投影（Task 2）
@@ -2003,8 +2003,8 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
     preloadApi.includes('setRunningPermissionMode: (sessionId, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE'));
   check('session-store setActiveSessionPermissionMode 接运行中切换 + catch 静默回落',
     /setActiveSessionPermissionMode[\s\S]{0,900}?setRunningPermissionMode\(this\.activeSession\.id, mode\)/.test(sessionStore));
-  check('task-store 中断收口 task_completed(interrupted) 补 markStopped（sending 不卡死）',
-    /task_completed[\s\S]{0,500}?interrupted[\s\S]{0,200}?markStopped\(payload\.sessionId\)/.test(taskStore));
+  check('task-store 中断收口 task_settled 非 success 补 markStopped（sending 不卡死）',
+    /task_settled[\s\S]{0,500}?markStopped\(payload\.sessionId\)/.test(taskStore));
 
   // ── 验收 review 修复 ──
   // F1：两段式优雅窗口内重发接管——entry.forceKill 句柄 + finishKill 幂等（killClosed）+
@@ -2025,14 +2025,13 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
     !/logger\.warn\(`\[\$\{sessionId\}\] refreshContextSnapshot 失败/.test(sdkBackend));
 
   // F5（验收 review 第三轮）：queue 触发点 killProcess 漏传 mainWindow 会使「弹窗被系统
-  // 取消」反馈（system:interaction_cancelled）在 queue 路径恒静默——interruptTask 与
-  // continueWithUserMessage 回滚路径两处调用都必须带 mainWindow 字面量。
+  // 取消」反馈（system:interaction_cancelled）恒静默。v3 队列引擎不再自行 killProcess
+  //（旧中断/续写函数已删），中断统一走 CHAT_ABORT——killProcess 带 mainWindowRef + abortHalt 熔断。
   const taskQueueEngine = readRel('src/main/modules/task-queue-engine.ts');
-  check('F5 interruptTask 的 queue killProcess 含 mainWindow（弹窗取消反馈不静默）',
-    /export function interruptTask\(taskId: string, sessionId: string, mainWindow: BrowserWindow\): void \{[\s\S]{0,900}?killProcess\(sessionId, 'queue', mainWindow\);/.test(taskQueueEngine));
-  check('F5 continueWithUserMessage 回滚路径 queue killProcess 同样含 mainWindow',
-    /if \(spawned\) killProcess\(sessionId, 'queue', mainWindow\);/.test(taskQueueEngine) &&
-    !/killProcess\(sessionId, 'queue'\)/.test(taskQueueEngine));
+  const ipcHandlersSrc = readRel('src/main/ipc-handlers.ts');
+  check('v3 引擎不再自行 killProcess（中断统一走 CHAT_ABORT）', !/killProcess\(/.test(taskQueueEngine));
+  check('F5 CHAT_ABORT 仍带 mainWindowRef（弹窗取消反馈不静默）',
+    /killProcess\(sessionId, 'user', mainWindowRef\);[\s\S]{0,200}abortHalt\(sessionId, mainWindowRef\);/.test(ipcHandlersSrc));
   // F5 复验延伸：interaction_cancelled 须独立成条（不折进过程组），红色系统消息才用户可见。
   const groupMessages = readRel('src/renderer/utils/group-messages.ts');
   check('F5 interaction_cancelled 打断 fold 独立展示（红色系统消息可见）',

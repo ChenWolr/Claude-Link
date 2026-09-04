@@ -483,17 +483,15 @@ check('F2：新回合 markRunning 后合法 retry 正常红闪（常红→回黄
   assert.equal(store.apiRetryInfo['s1']?.retryCount, 1);
 });
 
-console.log('\n=== F2：queue_completed 不清掉已完成的绿灯 ===');
-check('markRunning → markCompleted → queue_completed：绿灯保留（修复前被 markStopped 清掉）', () => {
+console.log('\n=== F2(v3)：task_settled 不清掉已完成的绿灯 ===');
+check('markRunning → markCompleted → task_settled(success)：绿灯保留（结算成功不碰聊天终态）', () => {
   const store = useSessionStore();
   const taskStore = useTaskStore();
   store.$reset();
   taskStore.$reset();
   store.markRunning('s1');
   store.markCompleted('s1');
-  taskStore.queueState = { sessionId: 's1', status: 'running', currentTaskId: null, lastCompletedTaskId: null, countdownRemaining: 0, pendingCount: 0 };
-  taskStore.handleQueueEvent({ sessionId: 's1', type: 'queue_completed' });
-  assert.equal(taskStore.queueState.status, 'idle');
+  taskStore.handleQueueEvent({ sessionId: 's1', type: 'task_settled', taskId: 't1', data: { outcome: 'success' } });
   assert.equal(store.sessionStatus['s1'], 'completed');
   assert.equal(store.runningSessions.includes('s1'), false);
 });
@@ -824,9 +822,12 @@ check('use-chat sendMessage 捕获稳定 sessionId（F3）', () => {
   assert.ok(useChatSource.includes('store.markRunning(sessionId);'));
   assert.ok(useChatSource.includes('store.markStopped(sessionId);'), 'catch 必须用稳定 sessionId 而非 activeSession');
 });
-check('task-store queue_completed 保护 completed 绿灯与 network_interrupted 常红（F2）', () => {
-  assert.ok(taskStoreSource.includes("current !== 'completed' && current !== 'network_interrupted'"));
-  assert.ok(!taskStoreSource.includes("sessionStore.sessionStatus[payload.sessionId] !== 'completed'"), '旧的单终态判定应移除');
+check('task-store task_settled 成功不碰终态、非 success 走 markStopped（v3 等价 F2）', () => {
+  // 成功结算只更新历史（无 markCompleted/markStopped 调用）；非 success 才 markStopped 兜底。
+  const settledBranch = taskStoreSource.slice(taskStoreSource.indexOf("case 'task_settled'"), taskStoreSource.indexOf("case 'queue_halted'"));
+  assert.ok(settledBranch.includes("markStopped(payload.sessionId)"), '非 success 结算须 markStopped（中断兜底）');
+  assert.ok(!settledBranch.includes('markCompleted'), '结算成功不得驱动绿灯（绿灯由 result 事件权威驱动）');
+  assert.ok(!taskStoreSource.includes("'queue_completed'"), 'v3：旧队列收口事件分支应移除');
 });
 check('cli-shared result 落库跳过与 renderer 共用 isErrorCliResult（F1）', () => {
   assert.ok(cliShared.includes('isErrorCliResult(r)'));
