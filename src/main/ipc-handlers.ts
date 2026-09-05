@@ -458,8 +458,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // v3 调度挂点：占坑成功即回合开始——插话顶掉倒计时 + 引擎置 running（规则 #4/#5）。
       beginUserTurn(sessionId, mainWindow);
       // exit 兜底：防普通回合 result 永久丢失时引擎 status 僵尸卡 running。
-      // 幂等安全：正常路径 result 先到（emitExit 与 result 处理同序列、期间占坑未释放，
-      // 新回合无法插入），引擎 status 已非 running，arm/halt 双双 no-op。
+      // 幂等安全：正常路径 result 先到（emitExit 与 result 处理同一同步序列、中间无 await，
+      // 新回合不可能插在两者之间），引擎 status 已非 running，arm/halt 双双 no-op。
       child.on('exit', (code) => {
         noteTurnOutcome(sessionId, code === 0 ? 'success' : 'error', mainWindow);
       });
