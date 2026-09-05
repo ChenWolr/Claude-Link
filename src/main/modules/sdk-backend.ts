@@ -26,6 +26,7 @@ import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride 
 import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
+import { buildPostTurnProbeArgs } from '../../shared/post-turn-probe';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
 import { isSuccessfulCliResult, isAbortedCliResult } from '../../shared/session-completion';
 import { noteTurnOutcome } from './task-queue-engine';
@@ -1513,13 +1514,7 @@ async function runPostTurnContextProbe(
     return;
   }
 
-  const args = [
-    '-p', '/context',
-    '--resume', cliSessionId,
-    '--output-format', 'stream-json',
-    '--verbose',
-    '--no-session-persistence',
-  ];
+  const args = buildPostTurnProbeArgs(cliSessionId);
   await new Promise<void>((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
