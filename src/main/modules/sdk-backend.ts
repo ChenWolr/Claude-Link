@@ -3813,11 +3813,19 @@ export function killProcess(
       if (killClosed) return;
       killClosed = true;
       entry.forceKill = null;
+      // 迟到守卫（新增，2026-09-06）：两段式优雅窗口内回合可能已自然收尾（result/流末已
+      // deleteEntry，甚至新回合 B 已插入）。entry 级收口（abort/remove）对旧 entry 安全幂等、
+      // 保持无条件；会话级副作用（stall tracker 清理 / aborted 终态补发 / 探针）此刻属于 B
+      // 或已无意义（result 分支的 deleteEntry 已清过 tracker、终态已由 result 提供、探针已由
+      // result 分支自己的调度提供），必须以「entry 仍 current」为门。wasCurrent 必须在
+      // removeEntryIfCurrent 之前捕获（移除后恒假，契约测试钉死此顺序）。
+      const wasCurrent = entries.get(sessionId) === entry;
       abortEntry(entry);
       // 立即从 active entries 移除：retryLastTurn 后续 CHAT_SEND 才能走 spawnForChat + resume，
       // 不会被 getActiveProcess 误判为仍有活 query 而把消息 drop 掉。旧 query 退出时靠 identity guard 清理。
       removeEntryIfCurrent(sessionId, entry);
-      cleanupSessionStall(sessionId);
+      // 新增 wasCurrent 门（行首加 if，原调用不变）。
+      if (wasCurrent) cleanupSessionStall(sessionId);
       // Task 4 review P1-2：用户中断/卡死硬杀须显式发幂等 aborted 终态。killProcess 已 abortEntry
       // （state='aborting'）+ removeEntryIfCurrent，isCurrentEntry 此后 false；runQuery 流末兜底
       // （isCurrentEntry 检查）与 catch 段（!isCurrentEntry → emitExit(null)）都不会再发 aborted，
@@ -3825,7 +3833,9 @@ export function killProcess(
       // forwardEvent 对 aborted 只 IPC 不落库（persistCliEvent 无 case），前端 markStopped 幂等；
       // runQuery 不会重复发（上述分支已吞掉）。session_cleanup/queue/api_retry_exhausted 不发
       // （会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
-      if ((reason === 'user' || reason === 'watchdog') && mainWindow) {
+      // 迟到语义（新增）：仅当被杀回合仍 current 时补发；回合已自然收尾（终态已由 result/流末
+      // 提供）时不再叠加 aborted，防污染收尾后新回合的 UI 状态。
+      if (wasCurrent && (reason === 'user' || reason === 'watchdog') && mainWindow) {
         forwardEvent(sessionId, mainWindow, { type: 'aborted', message: reason === 'user' ? '已中断' : '已硬中断' });
         // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
         // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
@@ -3833,12 +3843,12 @@ export function killProcess(
         // 永远到不了 catch 段的 schedulePostTurnProbe（那是死代码，仅服务真实 SDK 错误路径）。
         // 此处 entry 已被 removeEntryIfCurrent 移除，探针发射守卫「entries.get==null（无新回合在途）」
         // 天然满足；若用户在探针 ~2s 窗口内重发新回合，新回合的 schedule 会 kill 旧探针并推进
-        // generation，结果不会污染（可打断单飞机制）。
+        // generation，结果不会污染（可打断单飞机制）。迟到时（wasCurrent=false）直接不调度。
         schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId));
       }
       // 硬杀兜底：abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
       //（瞬时不可捕获），子进程卡死在死 socket 上时真能打死。
-      logger.info(`Interrupted SDK query for session ${sessionId} (reason=${reason}, abort signaled)`);
+      logger.info(`Interrupted SDK query for session ${sessionId} (reason=${reason}, abort signaled${wasCurrent ? '' : ', late-finish skipped session-scoped effects'})`);
     };
     // 批次二 #4 两段式中止：watchdog / upstream_fatal / queue 先 interrupt() 给 CLI 优雅
     // 落盘窗口——硬杀（abort → TerminateProcess）会把进行中的 thinking 轮撕成残缺
