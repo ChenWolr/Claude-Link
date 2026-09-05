@@ -27,6 +27,7 @@ import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessag
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { buildPostTurnProbeArgs } from '../../shared/post-turn-probe';
+import { extractLastEffortFromJsonl, mungeProjectDirName } from '../../shared/effort-truth';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
 import { isSuccessfulCliResult, isAbortedCliResult } from '../../shared/session-completion';
 import { noteTurnOutcome } from './task-queue-engine';
@@ -3455,6 +3456,37 @@ async function runQuery(
           }, entry.queryInstance);
         }
         forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg), entry.queryInstance);
+        // P2（effort 可见性）：回合 result 后读 CLI 会话 JSONL 尾部 assistant 事件的顶层 effort
+        // （静默降级后真值），写 session.lastEffectiveEffort 供 UI「上回合实际生效」显示。
+        // 实测（2026-09-04 真窗诊断）：CLI 把 assistant 事件落盘晚于 SDK result 到达数秒，
+        // result 时刻同步读必然扑空 → 延迟 + 重试读取（fire-and-forget，不阻塞回合收尾）。
+        // 诊断信息：任何失败（路径缺失/文件未落盘/无 effort 字段）静默跳过，不影响回合收尾。
+        const extractEffortAttempt = (attemptsLeft: number): void => {
+          setTimeout(() => {
+            try {
+              const userHome = effectiveUserHome();
+              const turnCwd = opts.workingDir || getConfig().workingDirectory;
+              const cliSid = resolveCliSessionId(sessionId);
+              if (userHome && turnCwd && cliSid) {
+                const jsonlPath = path.join(
+                  userHome, '.claude', 'projects', mungeProjectDirName(turnCwd), `${cliSid}.jsonl`,
+                );
+                if (existsSync(jsonlPath)) {
+                  const effort = extractLastEffortFromJsonl(readFileSync(jsonlPath, 'utf8'));
+                  if (effort) {
+                    sessionRepo.updateSession(sessionId, { lastEffectiveEffort: effort });
+                    return;
+                  }
+                }
+              }
+              if (attemptsLeft > 1) extractEffortAttempt(attemptsLeft - 1);
+              else logger.debug(`[${sessionId}] effort-truth：JSONL 读取重试耗尽，跳过（诊断信息）`);
+            } catch {
+              // 诊断信息，失败不阻塞回合
+            }
+          }, 2000);
+        };
+        extractEffortAttempt(4);
         // review-v2 Blocker：/context 回合 result 到达 → parse+reconcile native 输出并发送 canonical 终态。
         // 失败（空输出/解析失败/mismatch）也会发送 unavailable/stale + diagnostic，不阻塞 turn 收尾。
         // review-v3 High-1：runtime 快照按代际筛选后传入——只有本回合 queryInstance 的快照才允许
@@ -3464,24 +3496,13 @@ async function runQuery(
           const sameQuerySnapshot = isRuntimeSnapshotForQuery(snapshot, entry.queryInstance) ? snapshot : null;
           emitNativeContextReconcile(sessionId, mainWindow, entry, contextTurnNativeText, sameQuerySnapshot);
         }
-        // review-v4 High-1 方案 A：普通回合 result 处理期（for-await 仍在循环体内，SDK cleanup 未执行，
-        // control request 仍可达）awaited 采一次 post-turn 快照——回合末真实 current 值。5s 超时兜底，
-        // 失败时 refreshContextSnapshot 内部走方案 B（显式 stale + diagnostic）。
-        // /context 回合跳过（native 对账终态已是当前值，避免双 payload）。
-        // 必须在 deleteEntry 之前完成：身份守卫要求 entries.get===entry 且 state==='running'；
-        // 代价是回合 exit 最多延迟 5s（超时路径），正常 <1s。
-        if (!contextTurn && isCurrentEntry(sessionId, entry)) {
-          await refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'post-turn' });
-        }
-        // streaming input 收口（context-circle-v2 D3）：挪到 post-turn 快照 await 之后——
-        // 先 settle 会关 stdin（endInput），SDK 控制通道（query.getContextUsage）的快照必超时；
-        // 通道死的环境无行为差异（快照照旧超时走方案 B），通道复活的环境快照才能工作。
-        // 时机语义：result 已明确结束本回合，此处解除挂起的输入生成器 → streamInput 收尾
-        // endInput（stdin EOF），CLI 得以干净退出。守卫不动：快照失败也必须收口 stdin，
-        // 外层 finally 的幂等 settle 兜底仍在。
-        streamingPrompt.settle();
-        // result 已明确结束当前回合：先释放 active entry，再通知队列退出。
-        // renderer 收到 result 后可立即发送下一回合，不再撞上尚未走到函数 finally 的旧 entry。
+        // —— 同步释放占坑（必须与 forwardEvent(result) 处于同一同步序列）——
+        // result 已推给 renderer（sending 复位、发送按钮立即可用）并触发队列 noteTurnOutcome
+        // （倒计时启动）。占坑释放（deleteEntry+emitExit）必须紧随其后、中间不得插入任何 await：
+        // 此前 post-turn 快照 await（getContextUsage 在控制通道失效环境必等满 5s 超时）卡在两者
+        // 之间，窗口期内 entries 仍持旧 running entry → CHAT_SEND 被「当前回合仍在执行」拒绝
+        //（renderer 显示空闲却发送报错，数秒后超时收尾才恢复）。exit 兜底在 result 之后到达，
+        // noteTurnOutcome 的 running 闸保证幂等 no-op（error result 先 halt、exit success 不覆盖）。
         // post-turn 官方探针：deleteEntry 前捕获原回合代际与 cliSessionId，emitExit 后 fire-and-forget
         // 调度（非 contextTurn 时——/context 回合本身已产出精确报告，再探冗余）。压缩回合(/compact)
         // 附加 compactedJustNow，使压缩后骤降值由探针 fresh 精确覆盖。
@@ -3490,6 +3511,22 @@ async function runQuery(
         const compactedJustNow = /^\/compact\b/.test(initCommandText);
         deleteEntry(sessionId, entry);
         emitExit(0);
+        // review-v4 High-1 方案 A：post-turn 快照——回合末真实 current 值。5s 超时兜底，
+        // 失败时 refreshContextSnapshot 内部走方案 B（显式 stale + diagnostic）。
+        // /context 回合跳过（native 对账终态已是当前值，避免双 payload）。
+        // 仍须在 for-await 循环体内 await（此处 return 才触发 SDK cleanup，control request 仍可达）；
+        // 占坑已释放属预期，身份守卫按 post-turn 相位放宽（见 refreshContextSnapshot），
+        // 快照 await 期间新回合插入时由守卫让位，不覆盖新回合状态。
+        if (!contextTurn) {
+          await refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'post-turn' });
+        }
+        // streaming input 收口（context-circle-v2 D3）：保持在 post-turn 快照 await 之后——
+        // 先 settle 会关 stdin（endInput），SDK 控制通道（query.getContextUsage）的快照必超时；
+        // 通道死的环境无行为差异（快照照旧超时走方案 B），通道复活的环境快照才能工作。
+        // 时机语义：result 已明确结束本回合，此处解除挂起的输入生成器 → streamInput 收尾
+        // endInput（stdin EOF），CLI 得以干净退出（快照超时路径下最多晚 5s，无行为影响）。
+        // 守卫不动：快照失败也必须收口 stdin，外层 finally 的幂等 settle 兜底仍在。
+        streamingPrompt.settle();
         if (!contextTurn) {
           schedulePostTurnProbe(sessionId, mainWindow, probeInstance, probeCliSid, { compactedJustNow });
         }
