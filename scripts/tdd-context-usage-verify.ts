@@ -541,11 +541,11 @@ check('S12/S7 未执行 → checkSkipped 不计 pass + envLimited（exit 3）', 
   assert.ok(/envLimited = envLimited \?\? reason/.test(cdpE2eSrc), '未执行场景应设 envLimited → exit 3');
   assert.ok(/skipped\+\+/.test(cdpE2eSrc) && !/pass\+\+;\s*\n\s*log\(`  ⏭/.test(cdpE2eSrc), 'skipped 不得计入 pass');
 });
-check('result 分支在 deleteEntry 前 awaited post-turn 刷新（方案A）且失败走方案B', () => {
+check('result 分支在 deleteEntry 之后 awaited post-turn 刷新（占坑同步释放，对齐 75a5b90）且失败走方案B', () => {
   const resultIdx = sdkBackendSrc.indexOf("if (type === 'result')");
   const refreshIdx = sdkBackendSrc.indexOf("await refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'post-turn' })");
   const deleteIdx = sdkBackendSrc.indexOf('deleteEntry(sessionId, entry);', resultIdx);
-  assert.ok(resultIdx >= 0 && refreshIdx > resultIdx && deleteIdx > refreshIdx, 'post-turn 刷新必须在 result 分支内、deleteEntry 之前 await');
+  assert.ok(resultIdx >= 0 && refreshIdx > resultIdx && refreshIdx > deleteIdx, 'post-turn 刷新必须在 result 分支内、deleteEntry 之后 await（占坑同步释放——旧序快照 5s 超时卡在 result 与 deleteEntry 之间，UI 空闲后 2–3s 发送被「当前回合仍在执行」拒绝）');
   assert.ok(/samplePhase: 'query-start'/.test(sdkBackendSrc), 'init 采样应标记 query-start');
   assert.ok(/samplePhase: 'post-compaction'/.test(sdkBackendSrc), '压缩后采样应标记 post-compaction');
   assert.ok(/postTurnFallbackTerminal\(/.test(sdkBackendSrc), '失败路径应走 postTurnFallbackTerminal（方案B 显式降级）');
