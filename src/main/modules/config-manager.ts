@@ -86,6 +86,14 @@ const defaultConfig: StoredConfig = {
   // 默认思考强度：medium 是五级中位，最接近原硬编码 adaptive 的「平衡」档，
   // 避免默认开高带来成本/延迟意外。投影层对 medium 不投影以尊重 ~/.claude 配置。
   defaultThinkingLevel: 'medium',
+  // 引擎后台请求六开关默认全开（用户定案 09-05：UI 已隐藏，默认注入全部六键——
+  // 关闭引擎记忆/后台任务/定时/问卷/遥测/非必要联网；存量配置显式 false 仍优先）。
+  disableAutoMemory: true,
+  disableBackgroundTasks: true,
+  disableCron: true,
+  disableFeedbackSurvey: true,
+  disableTelemetry: true,
+  disableNonessentialTraffic: true,
   // 失焦系统通知默认开（保留既有「完成/中断时弹通知」行为）；后台运行默认关（保持「关闭即退出」）。
   notifyOnLeave: true,
   minimizeToTray: false,
@@ -204,6 +212,15 @@ export function getConfig(): AppConfig {
     fontScale: config.fontScale ?? DEFAULT_FONT_SCALE,
     contextWindowByAlias: config.contextWindowByAlias ?? {},
     defaultThinkingLevel,
+    // 引擎后台请求六开关收敛：默认全开（?? true 兜底，UI 已隐藏）；存量配置显式 false 优先。
+    // disableNonessentialTraffic 字段名沿用旧单开关，存量配置免费迁移到第 6 开关
+    //（旧值 false 会压住默认 true，用户配置文件已同步翻转为 true）。
+    disableAutoMemory: config.disableAutoMemory ?? true,
+    disableBackgroundTasks: config.disableBackgroundTasks ?? true,
+    disableCron: config.disableCron ?? true,
+    disableFeedbackSurvey: config.disableFeedbackSurvey ?? true,
+    disableTelemetry: config.disableTelemetry ?? true,
+    disableNonessentialTraffic: config.disableNonessentialTraffic ?? true,
     lastUsedProviderId: config.lastUsedProviderId ?? null,
     lastUsedModelId: config.lastUsedModelId ?? null,
     notifyOnLeave: config.notifyOnLeave ?? true,

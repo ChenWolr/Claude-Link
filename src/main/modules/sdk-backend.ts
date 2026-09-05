@@ -938,6 +938,18 @@ function buildClaudeLinkSettingsBlock(
     logger.info(`[${sessionId}] 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS=${clamped} (alias=${requestedAlias})`);
   }
 
+  // 引擎后台请求六开关：勾选时注入 settings.env（SDK 侧最高优先级通道，键级压过
+  // ~/.claude/settings.json 的 env），未勾选不注入。仅在运行时 Options.settings 生效，不进
+  // buildClaudeSettingsProjection 投影——settings-writer 不会写入 settings.local.json，
+  // 用户在 Claude Link 工作目录手跑 claude 不受影响。永不注入 '0'（引擎对这类键按
+  // env 存在/非空直判 truthy，'0' 亦视为开）。
+  if (config.disableAutoMemory) settingsEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
+  if (config.disableBackgroundTasks) settingsEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
+  if (config.disableCron) settingsEnv.CLAUDE_CODE_DISABLE_CRON = '1';
+  if (config.disableFeedbackSurvey) settingsEnv.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = '1';
+  if (config.disableTelemetry) settingsEnv.DISABLE_TELEMETRY = '1';
+  if (config.disableNonessentialTraffic) settingsEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+
   // permissions 先应用 session 级更新，再并集 additionalDirectories（用户配置 + 附件目录）。
   let permissions = applySessionPermissionUpdates(
     sessionId,

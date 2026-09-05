@@ -102,6 +102,16 @@ export function buildSpawnEnv(override?: SessionModelOverride | null): Record<st
     }
   }
 
+  // 引擎后台请求六开关：勾选时注入 '1'，未勾选完全不注入（引擎默认）。本通道（进程 env）
+  // 覆盖 post-turn probe（裸 spawn）与 connection-tester（--setting-sources '' 后进程 env
+  // 唯一决定）；query/probe 的 Options.env 也走这里。子进程（sdk-cli 后台子进程）继承父 env。
+  if (config.disableAutoMemory) env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
+  if (config.disableBackgroundTasks) env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
+  if (config.disableCron) env.CLAUDE_CODE_DISABLE_CRON = '1';
+  if (config.disableFeedbackSurvey) env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = '1';
+  if (config.disableTelemetry) env.DISABLE_TELEMETRY = '1';
+  if (config.disableNonessentialTraffic) env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+
   if (override) {
     // 连接三元组完整性：端点/密钥/模型的归一规则收口在 shared 纯函数，
     // 与 sdk-backend.buildClaudeLinkSettingsBlock（settings.env 通道）共用同一实现。

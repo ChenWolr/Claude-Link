@@ -36,6 +36,13 @@ const defaultConfig: AppConfig = {
   fontScale: DEFAULT_FONT_SCALE,
   contextWindowByAlias: {},
   defaultThinkingLevel: 'medium',
+  // 引擎后台请求六开关默认全开（与主进程 config-manager 默认保持同值；UI 已隐藏）。
+  disableAutoMemory: true,
+  disableBackgroundTasks: true,
+  disableCron: true,
+  disableFeedbackSurvey: true,
+  disableTelemetry: true,
+  disableNonessentialTraffic: true,
   lastUsedProviderId: null,
   lastUsedModelId: null,
   notifyOnLeave: true,
