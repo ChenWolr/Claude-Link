@@ -1265,9 +1265,20 @@ async function refreshContextSnapshot(
     //   3) 当前 entry.query 仍是发起刷新的 query（query 被清空/替换即失效）；
     //   4) generation 未变（期间无新刷新启动）。
     if (!isSessionActive(sessionId)) return;
-    if (entries.get(sessionId) !== entry) return;
+    if (opts.samplePhase === 'post-turn') {
+      // post-turn 相位在占坑释放（deleteEntry+emitExit 与 result 推送同序列，见 runQuery result 分支）
+      // 之后恢复执行：entries.get 为空属正常，不得据此拦截；但 entries 已指向新 entry（快照 await
+      // 期间新回合已插入）→ 让位，旧回合快照不得覆盖新回合状态。中断收口（killProcess → aborting）
+      // 后快照无意义。其余相位（query-start/mid-turn/post-compaction）entry 必仍在 entries 且
+      // running，走原守卫语义不变。
+      const currentEntry = entries.get(sessionId);
+      if (currentEntry && currentEntry !== entry) return;
+      if (entry.state === 'aborting') return;
+    } else {
+      if (entries.get(sessionId) !== entry) return;
+      if (entry.state !== 'running') return;
+    }
     if (entry.query !== query) return;
-    if (entry.state !== 'running') return;
     if ((contextRefreshGeneration.get(sessionId) ?? 0) !== gen) return;
     if (entry.queryInstance !== queryInstance) return;
     const used = deriveCurrentContextUsed({
@@ -1367,7 +1378,10 @@ async function refreshContextSnapshot(
     // 禁止回合结束后仍保留 query-start 快照的 fresh 语义冒充当前值。renderer 收到 stale 后
     // 保留 last-known 数字但 freshness 降级（ContextButton 明示非实时）。仅对仍是当前 entry 的
     // 会话发送（身份守卫与成功路径一致）。
-    if (opts.samplePhase === 'post-turn' && isSessionActive(sessionId) && entries.get(sessionId) === entry) {
+    // post-turn 相位：占坑已释放（entries.get 为空属正常，见 runQuery result 分支时序），
+    // 仅当新回合已插入（entries 指向别的 entry）才让位不发。
+    const currentEntry = entries.get(sessionId);
+    if (opts.samplePhase === 'post-turn' && isSessionActive(sessionId) && (!currentEntry || currentEntry === entry)) {
       const lastSnapshot = sessionRuntimeSnapshot.get(sessionId) ?? null;
       const lastPhase = isRuntimeSnapshotForQuery(lastSnapshot, entry.queryInstance) ? lastSnapshot!.samplePhase : null;
       const fallback = postTurnFallbackTerminal(lastPhase);
