@@ -337,6 +337,7 @@ export const useSessionStore = defineStore('session', {
           lastContextUsed: null,
           lastContextUsedCapacity: null,
           lastContextUsedAt: null,
+          lastEffectiveEffort: null,
           transient: true,
         };
         this.activeSession = this.transientDraft;
@@ -652,6 +653,29 @@ export const useSessionStore = defineStore('session', {
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '更新思考强度失败';
+      }
+    },
+    // P2（effort 可见性）：回合结束后从主进程拉最新 lastEffectiveEffort 合并进 activeSession。
+    // 只合并这一个字段——不整体替换 activeSession，避免覆盖 renderer 侧乐观状态。
+    // 时序：CLI 把 assistant 事件落盘晚于 result 数秒，主进程在 result 后 2/4/6/8s 延迟重试写
+    // DB；渲染层无法区分「本轮新值」与「上轮旧值」，故按固定时刻表（3.5/6/9s）拉取合并，
+    // 覆盖主进程整个写入窗，最后一次为准。会话切换即放弃，不跨会话误合并。
+    async refreshActiveSessionEffort() {
+      if (!this.activeSession || this.activeSession.transient) return;
+      const sid = this.activeSession.id;
+      for (const delayMs of [3500, 6000, 9000]) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        if (this.activeSession?.id !== sid) return;
+        try {
+          const s = await window.claudeLink.getSession(sid);
+          if (this.activeSession?.id !== sid) return;
+          if (s && s.id === sid && s.lastEffectiveEffort) {
+            this.activeSession.lastEffectiveEffort = s.lastEffectiveEffort;
+          }
+        } catch {
+          // 静默：诊断信息
+          return;
+        }
       }
     },
     async loadRecentWorkspaces() {

@@ -56,6 +56,13 @@ const triggerTitle = computed(
   () => `思考强度：${triggerLabel.value}${activeValue.value === 'auto' ? `（跟随全局默认）` : `（${activeOption.value.desc}）`}；下一条消息起生效`,
 );
 
+// 上回合 CLI 实际生效档（JSONL 真值；null=尚无回合/读取失败）。非枚举值原样展示。
+const lastEffortLabel = computed(() => {
+  const e = sessionStore.activeSession?.lastEffectiveEffort;
+  if (!e) return null;
+  return LEVELS.find((l) => l.value === e)?.label ?? e;
+});
+
 async function onSelect(level: ThinkingLevel) {
   showMenu.value = false;
   await sessionStore.setActiveSessionThinkingLevel(level);
@@ -118,6 +125,8 @@ onUnmounted(() => {
       </button>
       <!-- 生效时机提示（照 ProviderModelSelector foot 先例）：切换写入会话档，运行中回合不受影响。 -->
       <div class="tl-foot">下一条消息起生效</div>
+      <!-- 上回合实际生效档（JSONL 真值，含静默降级）：有值才显示。 -->
+      <div v-if="lastEffortLabel" class="tl-foot">上回合实际生效：{{ lastEffortLabel }}</div>
     </div>
   </div>
 </template>

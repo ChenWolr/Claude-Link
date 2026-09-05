@@ -122,6 +122,10 @@ export function runMigrations(db: Database.Database): void {
     if (!hasCol('last_context_used_at')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_context_used_at INTEGER DEFAULT NULL');
     }
+    // P2（effort 可见性）：上回合 CLI 实际生效 effort（JSONL 真值，静默降级后）。诊断信息，NULL=尚无回合。
+    if (!hasCol('last_effective_effort')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_effective_effort TEXT DEFAULT NULL');
+    }
   }
 
   // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。

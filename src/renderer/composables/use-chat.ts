@@ -478,6 +478,8 @@ function createChat() {
             store.markStopped(store.activeSession.id);
           }
         }
+        // P2（effort 可见性）：回合结束拉取「上回合实际生效思考强度」合并进会话（fire-and-forget）。
+        void store.refreshActiveSessionEffort();
         resetTurnCache();
         break;
       }

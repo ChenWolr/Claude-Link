@@ -25,6 +25,7 @@ interface SessionRow {
   last_context_used: number | null;
   last_context_used_capacity: number | null;
   last_context_used_at: number | null;
+  last_effective_effort: string | null;
 }
 
 function toSession(row: SessionRow): Session {
@@ -49,6 +50,7 @@ function toSession(row: SessionRow): Session {
     lastContextUsed: row.last_context_used,
     lastContextUsedCapacity: row.last_context_used_capacity,
     lastContextUsedAt: row.last_context_used_at,
+    lastEffectiveEffort: row.last_effective_effort ?? null,
   };
 }
 
@@ -95,7 +97,7 @@ export function listSessions(): Session[] {
 export function updateSession(
   id: string,
   partial: Partial<
-    Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>
+    Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride' | 'lastEffectiveEffort'>
   >,
 ): Session | null {
   const updates: string[] = [];
@@ -132,6 +134,10 @@ export function updateSession(
   if (partial.thinkingLevel !== undefined) {
     updates.push('thinking_level = @thinkingLevel');
     values.thinkingLevel = partial.thinkingLevel;
+  }
+  if (partial.lastEffectiveEffort !== undefined) {
+    updates.push('last_effective_effort = @lastEffectiveEffort');
+    values.lastEffectiveEffort = partial.lastEffectiveEffort;
   }
 
   if (!updates.length) {

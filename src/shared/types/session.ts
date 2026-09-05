@@ -33,6 +33,9 @@ export interface Session {
   lastContextUsed: number | null;
   lastContextUsedCapacity: number | null;
   lastContextUsedAt: number | null;
+  // 上回合 CLI 实际生效的思考强度（JSONL 真值，静默降级后）。诊断信息：null = 尚无回合/读取失败。
+  // 值域 'low'|'medium'|'high'|'xhigh'|'max'；由主进程回合 result 后写入，renderer 只读。
+  lastEffectiveEffort: string | null;
   // renderer-only 标记：true = 暂态会话（「新会话」草稿态，尚未落库）。
   // 主进程 DB 读出的会话永远没有此字段；首条消息发送前经 materializeActiveTransient
   // 物化为同 id 的 DB 行，物化返回值替换本对象（transient 随之消失）。
