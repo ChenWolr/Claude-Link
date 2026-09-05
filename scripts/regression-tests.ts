@@ -3373,6 +3373,36 @@ function testWorkspaceHistoryRemoveContracts(): void {
   assert.ok(/max-height:\s*7rem/.test(toolbar) && /overflow-y:\s*auto/.test(toolbar), '最近目录须 4 条封顶 + 溢出滚动');
 }
 
+// 占坑同步释放契约（rapid-send 回归钉，2026-09-05）：result 转发后必须同 tick 释放占坑
+// （deleteEntry+emitExit），post-turn 快照 await 只能在释放之后；探针调度须带空闲守卫。
+// 背景：旧顺序下 5s 快照超时卡在 result 与 deleteEntry 之间，UI 空闲后 2–3s 发消息被
+// 「当前回合仍在执行」拒绝。本钉锁死代码顺序，防回归。
+function testTurnEntrySyncReleaseContracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const sdkBackend = readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+  // result 分支切片：从「同步释放占坑」锚注释到本分支末尾的 scheduleReasoningReplayRetryForTurn。
+  const marker = sdkBackend.indexOf('—— 同步释放占坑');
+  assert.ok(marker !== -1, 'result 分支须保留「—— 同步释放占坑」锚注释（本契约的定位锚）');
+  const endMarker = sdkBackend.indexOf('scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);', marker);
+  assert.ok(endMarker !== -1, 'result 分支末尾须有 scheduleReasoningReplayRetryForTurn 调用');
+  const branch = sdkBackend.slice(marker, endMarker);
+  const releaseIdx = branch.indexOf('deleteEntry(sessionId, entry);');
+  const snapshotIdx = branch.indexOf("await refreshContextSnapshot(sessionId, mainWindow, entry, query, { samplePhase: 'post-turn' })");
+  const settleIdx = branch.indexOf('streamingPrompt.settle();');
+  assert.ok(releaseIdx !== -1, 'result 分支须有 deleteEntry 释放占坑');
+  assert.ok(snapshotIdx !== -1, 'result 分支须有 post-turn 快照 await');
+  assert.ok(releaseIdx < snapshotIdx, 'deleteEntry 必须先于 post-turn 快照 await（占坑同步释放；旧序会让 result 后 5s 内发送被「当前回合仍在执行」拒绝）');
+  assert.ok(settleIdx > snapshotIdx, 'settle 须保持在快照 await 之后（控制通道 getContextUsage 需要 stdin 未关）');
+  assert.ok(
+    /!contextTurn && entries\.get\(sessionId\) == null[\s\S]{0,120}schedulePostTurnProbe/.test(branch),
+    '探针调度须带 entries 空闲守卫（快照 await 期间新回合插入则作废本回合探针，防 --resume 双写 transcript 竞态）',
+  );
+  // refreshContextSnapshot 相位守卫（成功采样 + 失败回落两路径）。
+  assert.ok(sdkBackend.includes("if (opts.samplePhase === 'post-turn') {"), 'refreshContextSnapshot 须有 post-turn 相位守卫块');
+  assert.ok(/opts\.samplePhase === 'post-turn'[\s\S]{0,500}currentEntry && currentEntry !== entry/.test(sdkBackend), 'post-turn 相位：entries 已指向新 entry 须让位（不得覆盖新回合状态）');
+  assert.ok(sdkBackend.includes('(!currentEntry || currentEntry === entry)'), '失败回落发送须按 post-turn 相位门控（entries 空或仍为本 entry 才发 stale）');
+}
+
 async function main(): Promise<void> {
 testTurnTimingContracts();
 testDiffDialogSearchUiContracts();
@@ -3562,6 +3592,7 @@ testProcessKindSubAgentTitleNarrowing();
 testExportAttachmentSmokeContracts();
 testAttachmentTask8Contracts();
 testWorkspaceHistoryRemoveContracts();
+testTurnEntrySyncReleaseContracts();
 }
 
 main().catch((error) => {
