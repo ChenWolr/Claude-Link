@@ -361,10 +361,9 @@ async function getMessages(ws, sid) { return (await evalExpr(ws, `window.claudeL
 async function sendViaUI(ws, text) {
   await waitQueryIdle(ws, 600);
   await typeInChatInput(ws, text);
-  // 稳健发送：主进程「方案 A」在 deleteEntry 前 await post-turn 快照（1.4s~5s 窗口），
-  // renderer 收到 result 先清 abort 按钮（waitQueryIdle 通过），但主进程 entry 尚未释放——
-  // 此时快速连发会撞上 chat:send 被拒「当前回合仍在执行」，草稿保留（父组件只在主进程
-  // 接受后清空）。这里点击后轮询「输入框被清空」= 发送被主进程接受；未清空则重试点击。
+  // 稳健发送：历史上的「deleteEntry 前快照窗口导致快速连发被拒」已于 75a5b90 修复（占坑与
+  // result 同步释放）。保留本重试环仅作 UI 层稳健性兜底（点击未生效/焦点丢失/输入法吞事件），
+  // 与主进程占坑无关。
   const deadline = Date.now() + 20_000;
   for (;;) {
     await evalExpr(ws, `document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
@@ -375,7 +374,7 @@ async function sendViaUI(ws, text) {
       200,
     ).catch(() => false);
     if (accepted) return;
-    if (Date.now() > deadline) throw new Error('发送未被主进程接受（输入框未清空，疑似 entry 未释放）');
+    if (Date.now() > deadline) throw new Error('发送未被主进程接受（输入框未清空，点击未生效或主进程忙）');
   }
 }
 async function waitTurnComplete(ws, sid, baseCount, timeoutS = 180) {
@@ -878,9 +877,9 @@ async function main() {
         }
         return null;
       })();
-      // 70s 等待（v2 D5，原 25s）：探针预算 45s（实测地板 13-21s）；压缩回合 result 分支的
-      // await refreshContextSnapshot(post-turn) 在 deleteEntry 前最多阻塞 5s（方案 A 固有延迟），
-      // 探针才 spawn；再加压缩后 resume 慢（网关）余量。
+      // 70s 等待（v2 D5，原 25s）：探针预算 45s（实测地板 13-21s）；result 分支 deleteEntry
+      // 同步释放后仍 await post-turn 快照（≤5s 超时）才 spawn 探针，再加压缩后 resume 慢
+      //（网关）余量——预算构成不变。
       const probe = await waitForPostTurnProbe(ws, sid, 70);
       const used = probe.currentContextUsedTokens;
       if (typeof used !== 'number') throw new Error('探针 payload 缺 currentContextUsedTokens');
