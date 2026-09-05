@@ -3403,6 +3403,28 @@ function testTurnEntrySyncReleaseContracts(): void {
   assert.ok(sdkBackend.includes('(!currentEntry || currentEntry === entry)'), '失败回落发送须按 post-turn 相位门控（entries 空或仍为本 entry 才发 stale）');
 }
 
+// finishKill 迟到守卫契约（late-finish 回归钉，2026-09-06）：两段式硬杀的 finishKill 在
+// 回合已自然收尾（entry 已非 current：result 同步释放后/新回合已插入）时，会话级副作用
+// 不得落在新回合上——stall tracker 清理 / aborted 终态补发 / post-turn 探针均须以
+// wasCurrent 为门；entry 级收口（abort/remove）保持无条件。
+function testFinishKillLateArrivalContracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const sdkBackend = readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
+  const fnMarker = sdkBackend.indexOf('const finishKill = () => {');
+  assert.ok(fnMarker !== -1, 'killProcess 内须有 finishKill 闭包（定位锚）');
+  const endMarker = sdkBackend.indexOf('logger.info(`Interrupted SDK query', fnMarker);
+  assert.ok(endMarker !== -1, 'finishKill 须以 Interrupted SDK query 日志收尾（定位锚）');
+  const region = sdkBackend.slice(fnMarker, endMarker);
+  const wasCurrentIdx = region.indexOf('const wasCurrent = entries.get(sessionId) === entry;');
+  const removeIdx = region.indexOf('removeEntryIfCurrent(sessionId, entry);');
+  assert.ok(wasCurrentIdx !== -1, 'finishKill 须捕获 wasCurrent（entry 是否仍 current）');
+  assert.ok(removeIdx !== -1 && wasCurrentIdx < removeIdx, 'wasCurrent 必须先于 removeEntryIfCurrent 捕获（移除后恒假）');
+  assert.ok(/if \(wasCurrent\) cleanupSessionStall\(sessionId\);/.test(region), 'cleanupSessionStall 须以 wasCurrent 为门（迟到的 finishKill 不得清掉新回合的卡死 tracker）');
+  assert.ok(/wasCurrent && \(reason === 'user' \|\| reason === 'watchdog'\)/.test(region), 'aborted 终态补发须以 wasCurrent 为门（回合已自然收尾时不得再叠加 aborted）');
+  assert.ok(/wasCurrent && \(reason === 'user' \|\| reason === 'watchdog'\)[\s\S]{0,700}schedulePostTurnProbe\(sessionId, mainWindow, entry\.queryInstance/.test(region), 'finishKill 探针调度须以 wasCurrent 为门（新回合在途时旧代际探针作废）');
+  assert.ok(/abortEntry\(entry\);/.test(region), 'abortEntry 保持无条件（entry 级、幂等，迟到时杀掉旧回合残留 CLI 仍正确）');
+}
+
 async function main(): Promise<void> {
 testTurnTimingContracts();
 testDiffDialogSearchUiContracts();
@@ -3593,6 +3615,7 @@ testExportAttachmentSmokeContracts();
 testAttachmentTask8Contracts();
 testWorkspaceHistoryRemoveContracts();
 testTurnEntrySyncReleaseContracts();
+testFinishKillLateArrivalContracts();
 }
 
 main().catch((error) => {
