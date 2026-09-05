@@ -3553,7 +3553,11 @@ async function runQuery(
         // endInput（stdin EOF），CLI 得以干净退出（快照超时路径下最多晚 5s，无行为影响）。
         // 守卫不动：快照失败也必须收口 stdin，外层 finally 的幂等 settle 兜底仍在。
         streamingPrompt.settle();
-        if (!contextTurn) {
+        // 探针空闲守卫：快照 await 期间新回合已插入（entries 非空，含 pendingFirstPrompt 占坑形态）
+        // → 本回合探针作废（新回合 result 时会自带自己的探针）。防旧探针 --resume 追加写与新回合
+        // CLI 并发写同一 transcript 的双写竞态（cancelPostTurnProbe 在新回合启动时已跑过、拦不住
+        // 此刻才调度的探针）。仅此调用点需要：其余出口的调度与 entry 释放之间无 await 插入。
+        if (!contextTurn && entries.get(sessionId) == null) {
           schedulePostTurnProbe(sessionId, mainWindow, probeInstance, probeCliSid, { compactedJustNow });
         }
         // reasoning_replay 韧性层：回合以 result 终态结束 → 命中即延时自动重发一次。
