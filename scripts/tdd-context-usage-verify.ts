@@ -670,9 +670,15 @@ check('shouldShowCompactedBanner：native-context + stale → 仍 false（§5.3 
   assert.equal(shouldShowCompactedBanner({ compactedJustNow: false, freshness: 'fresh', source: 'native-context' }), false);
 });
 check('sdk-backend spawn 参数含 --no-session-persistence 与 --resume（字符串级，防回归）', () => {
-  assert.ok(/'--no-session-persistence'/.test(sdkBackendSrc), 'spawn 参数缺 --no-session-persistence（漏掉即污染会话）');
-  assert.ok(/'--resume'/.test(sdkBackendSrc), 'spawn 参数缺 --resume');
-  assert.ok(/'-p',\s*'\/context'/.test(sdkBackendSrc) || /-p'?\s*,\s*'\/context'/.test(sdkBackendSrc), 'spawn 参数应为 -p /context');
+  // 2026-09-04 P1（探针防劫持）契约演进：args 字面量迁至 shared/post-turn-probe.ts（buildPostTurnProbeArgs，
+  // 首两位加 '--setting-sources' ''），sdk-backend 改调该纯函数。防回归意图不变：探针必须带
+  // --no-session-persistence（防污染会话）+ --resume + -p /context + settings 隔离。
+  const probeSrc = readFileSync(resolve('src/shared/post-turn-probe.ts'), 'utf8');
+  assert.ok(/'--no-session-persistence'/.test(probeSrc), '探针参数缺 --no-session-persistence（漏掉即污染会话）');
+  assert.ok(/'--resume'/.test(probeSrc), '探针参数缺 --resume');
+  assert.ok(/'-p',\s*'\/context'/.test(probeSrc), '探针参数应为 -p /context');
+  assert.ok(/'--setting-sources',\s*''/.test(probeSrc), "探针参数缺 '--setting-sources', ''（防 settings env 劫持）");
+  assert.ok(/buildPostTurnProbeArgs\(cliSessionId\)/.test(sdkBackendSrc), 'sdk-backend 探针未改用 buildPostTurnProbeArgs');
 });
 check('result 分支 deleteEntry 后调用探针（顺序：deleteEntryIdx < probeCallIdx）', () => {
   const resultIdx = sdkBackendSrc.indexOf("if (type === 'result')");
