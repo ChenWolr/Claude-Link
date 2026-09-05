@@ -32,6 +32,18 @@ export interface AppConfig {
   // 默认思考强度档位（新会话与未单独设档的会话回落到此值）。
   // 'auto' 在全局层无意义（全局默认本身就是 auto 的回落目标），用 NonAutoThinkingLevel 编译期拦截。
   defaultThinkingLevel: NonAutoThinkingLevel;
+  // 引擎后台请求六开关（默认全开=注入六键，UI 已隐藏——用户定案 09-05；存量配置显式 false 优先）。
+  // 勾选/true 时向全部引擎子进程注入对应 env 键='1'（双通道：buildSpawnEnv 进程 env +
+  // buildClaudeLinkSettingsBlock settings.env，子进程继承）。永不注入 '0'（引擎对这类键按
+  // env 存在/非空直判 truthy，'0' 亦视为开）。disableNonessentialTraffic 字段名沿用旧单开关
+  //（存量配置免费迁移），语义=版本检查/错误上报/反馈通道等非模型类联网；对模型类后台
+  // 小请求无效（2026-09-05 取证定案：洪流本体=count_tokens 404 后的 mt=1 计数 fallback）。
+  disableAutoMemory: boolean;
+  disableBackgroundTasks: boolean;
+  disableCron: boolean;
+  disableFeedbackSurvey: boolean;
+  disableTelemetry: boolean;
+  disableNonessentialTraffic: boolean;
   // 多供应商库（r3-r9）：「最近一次会话选用」的记忆性字段，只作新会话初始值，不是选用语义。
   // 供应商档案本体（含加密 key）只在主进程 config-manager 内部，经 config:listProviders 以
   // ProviderProfileView（掩码）出主进程，故不进 AppConfig 公开形状。
