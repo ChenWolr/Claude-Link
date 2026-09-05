@@ -249,7 +249,8 @@ export function noteTurnOutcome(sessionId: string, outcome: 'success' | 'error' 
   const state = queues.get(sessionId);
   logger.info(`[queue] outcome session=${sessionId} outcome=${outcome} status=${state?.status ?? 'none'} currentTask=${state?.currentTaskId ?? 'none'}`);
   if (state && state.currentTaskId) {
-    settleCurrent(sessionId, outcome, mainWindow);
+    // ExecutedOutcome 无 'error' 档（typecheck 存量缺口）：错误回合按渲染层四态映射为 'failed'。
+    settleCurrent(sessionId, outcome === 'error' ? 'failed' : outcome, mainWindow);
   }
   if (!state || state.status !== 'running') return;
   if (outcome === 'success') {

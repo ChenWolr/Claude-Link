@@ -51,7 +51,7 @@ async function copyMessage(): Promise<void> {
       <span>{{ message.role === 'user' ? '你' : 'Claude' }}</span>
       <!-- 队列任务到点/立即执行发出的消息标（导出快照不含运行态标签） -->
       <span
-        v-if="!exportMode && message.role === 'user' && (message as { parentTaskId?: string | null }).parentTaskId"
+        v-if="!exportMode && message.role === 'user' && message.parentTaskId"
         class="bubble__queue-tag"
         title="此消息由队列任务到点/立即执行时发送"
       >来自队列</span>
