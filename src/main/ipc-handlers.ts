@@ -460,7 +460,23 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // exit 兜底：防普通回合 result 永久丢失时引擎 status 僵尸卡 running。
       // 幂等安全：正常路径 result 先到（emitExit 与 result 处理同一同步序列、中间无 await，
       // 新回合不可能插在两者之间），引擎 status 已非 running，arm/halt 双双 no-op。
+      // 回合代际守卫（2026-09-06）：被中断/替换的旧回合 CLI 会滞留数秒才 emitExit，此刻若
+      // 新回合已在途（entries 持别的活动 entry，含 pendingFirstPrompt 形态），旧 exit 不得对
+      // 队列记账——否则在新回合 running 期间错误熔断转 standby，制造「UI 显示空闲但占坑未放」
+      // 的假空闲窗口（2026-09-06 定案：中断→百毫秒级重发链路 5/5 复现）。自身出口触发时
+      // getActiveProcess 恒为 undefined——entries 已空（result 分支/流末合成 aborted 的
+      // deleteEntry 先于 emitExit 同 tick），或本 entry 已被 emitExit 置 finished/killed
+      //（isEntryActive 恒假；catch 路径虽 entries 仍持本 entry 亦然）→ 照常兜底，result
+      // 丢失防线不变。谓词实际语义=「有任何活动 entry 在途（必属别的回合）才拦」；
+      // active !== child 为防御性子句（防 emitExit 未来改为先回调后置位），当前恒真。
+      // 谓词警告：不得写成 getActiveProcess(sessionId) === child——自身出口触发时 active
+      // 恒为 undefined，该写法恒假，会误杀兜底主场景（流丢 result）。
       child.on('exit', (code) => {
+        const active = getActiveProcess(sessionId);
+        if (active && active !== child) {
+          logger.debug(`[chat-exit-fallback] session=${sessionId} 旧回合迟到 exit 被代际守卫拦截（新回合在途）`);
+          return;
+        }
         noteTurnOutcome(sessionId, code === 0 ? 'success' : 'error', mainWindow);
       });
       // sendMessage 同步路径只负责把 pending 交给 runQuery；真正 SDK 失败走事件流，不在此 IPC 回滚。
