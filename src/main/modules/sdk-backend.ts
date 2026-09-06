@@ -1195,6 +1195,15 @@ const MID_TURN_PCT_DELTA_THRESHOLD = 0.5;
 // 成功路径再叠加 sessionRuntimeSnapshot.capturedAt 判定）；inFlight 保证同一时刻仅一个在途。
 const midTurnRefreshState = new Map<string, { lastInitiatedAt: number; inFlight: boolean }>();
 
+// 刷新熔断器（2026-09-06 根因：CLI get_context_usage 依赖上游 count_tokens，渠道不支持/
+// 按请求体贴签 404 时 CU 4-21s+ 不落定，5s 预算必爆。连续超时达到阈值后暂停发起，省掉
+// 每回合 3 相位 × 5s 的无效等待与 debug 刷屏；cooldown 过后自然半开重探，成功即关闭。
+// 会话删除不清理（key 不再命中，驻留可忽略）——挂 deleteEntry 会把跨回合 streak 清零，
+// 使轻短回合永远凑不满阈值，熔断失效。）
+const CONTEXT_REFRESH_BREAKER_THRESHOLD = 3;
+const CONTEXT_REFRESH_BREAKER_COOLDOWN_MS = 10 * 60 * 1000;
+const contextRefreshBreaker = new Map<string, { streak: number; openedAt: number | null; modelId: string | null }>();
+
 // 读取与指定 query 代际匹配的压缩账单（compact metadata display）。代际不符/字段缺失 → null，
 // 调用方不挂载任何字段（payload 其余部分与现状逐字节一致）。
 function resolveCompactMetaForQuery(sessionId: string, queryInstance: number): CompactionResult | null {
@@ -1244,6 +1253,37 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+// 熔断开启判定：openedAt 非空、模型身份未变且仍在 cooldown 窗口内。模型已切换 → 视作关闭
+// （后续 recordContextRefreshTimeout 会按新 modelId 重置 streak），新模型立即可探。
+function isContextRefreshBreakerOpen(sessionId: string, modelId: string | null): boolean {
+  const bk = contextRefreshBreaker.get(sessionId);
+  if (!bk || bk.openedAt == null) return false;
+  if (bk.modelId !== modelId) return false; // 模型已切换 → 视作关闭（后续记录会重置）
+  return Date.now() - bk.openedAt < CONTEXT_REFRESH_BREAKER_COOLDOWN_MS;
+}
+
+// 真超时（context refresh timeout）记账；「Query closed before response received」等回合
+// 生命周期伴生错误在调用侧守卫拦截，不进这里。重开条件必须允许「cooldown 到期后重探失败
+// 再次进入退避」：仅判 openedAt == null 会使 openedAt 恒非 null、熔断器在首个 10 分钟窗口
+// 后永久失活（审计 MAJOR-1 修订）。
+function recordContextRefreshTimeout(sessionId: string, modelId: string | null): void {
+  const bk = contextRefreshBreaker.get(sessionId);
+  const cur = bk && bk.modelId === modelId ? bk : { streak: 0, openedAt: null, modelId };
+  cur.streak += 1;
+  cur.modelId = modelId;
+  if (cur.streak >= CONTEXT_REFRESH_BREAKER_THRESHOLD
+    && (cur.openedAt == null || Date.now() - cur.openedAt >= CONTEXT_REFRESH_BREAKER_COOLDOWN_MS)) {
+    cur.openedAt = Date.now();
+    logger.info(`[${sessionId}] 上下文刷新连续超时 ${cur.streak} 次，进入 ${Math.round(CONTEXT_REFRESH_BREAKER_COOLDOWN_MS / 60000)} 分钟退避（疑似当前模型渠道 count_tokens 不可用）`);
+  }
+  contextRefreshBreaker.set(sessionId, cur);
+}
+
+// CU 成功即删键：半开重探成功关闭熔断，下一回合恢复正常三相位刷新。
+function recordContextRefreshSuccess(sessionId: string): void {
+  contextRefreshBreaker.delete(sessionId);
+}
+
 async function refreshContextSnapshot(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -1257,8 +1297,14 @@ async function refreshContextSnapshot(
   const gen = (contextRefreshGeneration.get(sessionId) ?? 0) + 1;
   contextRefreshGeneration.set(sessionId, gen);
   const queryInstance = entry.queryInstance;
+  const bkOpen = isContextRefreshBreakerOpen(sessionId, entry.resolvedModel ?? null);
+  // 熔断开启：非 post-turn 相位静默跳过（无 payload，与超时后无 payload 等效，省 5s 等待）。
+  if (bkOpen && opts.samplePhase !== 'post-turn') return;
   try {
+    // post-turn 在熔断期不发 CU，直接借道下方 catch 走方案 B（stale + 退避诊断），省 5s await。
+    if (bkOpen) throw new Error('context refresh breaker open');
     const cu = await withTimeout(query.getContextUsage(), CONTEXT_REFRESH_TIMEOUT_MS);
+    recordContextRefreshSuccess(sessionId);
     // 身份守卫（review-v2 High#2）：旧 query 的异步结果不得发送/持久化。四重校验：
     //   1) 会话仍存活；
     //   2) 当前 entry 仍是发起刷新的 entry（query A 被替换为 query B 时，entries.get 已指向新 entry）；
@@ -1373,6 +1419,11 @@ async function refreshContextSnapshot(
     // 先例）——SDK 控制通道在本机当前 CLI 状态下已死（08-29 实证 90s 无响应），三相位
     // 快照超时是固有遥测而非异常，warn 级每回合 4-8 条刷屏误导排障；stale 降级语义
     // （下方方案 B payload）保持不变。
+    // 熔断记账（2026-09-06）：只把真超时计入连续 streak；「Query closed before response
+    // received」是回合生命周期伴生（SDK cleanup 拒在途控制请求），快速短回合会误开熔断，不算。
+    if (e instanceof Error && e.message === 'context refresh timeout') {
+      recordContextRefreshTimeout(sessionId, entry.resolvedModel ?? null);
+    }
     logger.debug(`[${sessionId}] refreshContextSnapshot 失败（${opts.samplePhase}）：${e instanceof Error ? e.message : String(e)}`);
     // review-v4 High-1 方案 B：post-turn 快照不可得时必须显式降级 stale + diagnostic——
     // 禁止回合结束后仍保留 query-start 快照的 fresh 语义冒充当前值。renderer 收到 stale 后
@@ -1384,7 +1435,14 @@ async function refreshContextSnapshot(
     if (opts.samplePhase === 'post-turn' && isSessionActive(sessionId) && (!currentEntry || currentEntry === entry)) {
       const lastSnapshot = sessionRuntimeSnapshot.get(sessionId) ?? null;
       const lastPhase = isRuntimeSnapshotForQuery(lastSnapshot, entry.queryInstance) ? lastSnapshot!.samplePhase : null;
-      const fallback = postTurnFallbackTerminal(lastPhase);
+      const fallback = postTurnFallbackTerminal(
+        lastPhase,
+        // 熔断期借道 throw 进来的：诊断行带退避注记与自助验证指引（审计 MINOR-2：止于「可用 curl
+        // 验证」，不写环境相关 URL 字面量）。非熔断超时（如 query 关闭伴生）不带注记，文案不变。
+        bkOpen
+          ? `上下文刷新熔断中（连续超时 ≥${CONTEXT_REFRESH_BREAKER_THRESHOLD} 次，${Math.round(CONTEXT_REFRESH_BREAKER_COOLDOWN_MS / 60000)} 分钟后自动重试；可用 curl 验证当前模型渠道 count_tokens 可用性）`
+          : undefined,
+      );
       const lastStats = sessionContextStats.get(sessionId);
       const payload: ContextStatsPayload = {
         sessionId,
