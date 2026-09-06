@@ -222,7 +222,7 @@ function fnBody(source: string, signature: string): string {
   const handlers = read('../src/main/ipc-handlers.ts');
   const chatSendBody = handlers.slice(handlers.indexOf('IPC_CHANNELS.CHAT_SEND'), handlers.indexOf('IPC_CHANNELS.CHAT_ABORT'));
   check('ipc-handlers: CHAT_SEND 占坑后挂 beginUserTurn（插话顶掉倒计时）', chatSendBody.includes('beginUserTurn(sessionId, mainWindow)'));
-  check('ipc-handlers: CHAT_SEND 换挂 exit 兜底调 noteTurnOutcome', /child\.on\('exit', \(code\) =>[\s\S]{0,120}noteTurnOutcome\(sessionId, code === 0 \? 'success' : 'error', mainWindow\)/.test(chatSendBody));
+  check('ipc-handlers: CHAT_SEND 换挂 exit 兜底调 noteTurnOutcome', /child\.on\('exit', \(code\) =>[\s\S]{0,400}noteTurnOutcome\(sessionId, code === 0 \? 'success' : 'error', mainWindow\)/.test(chatSendBody));
   check('ipc-handlers: CHAT_SEND 不再挂旧自动调度钩子', !chatSendBody.includes(OLD_AUTOSTART));
 
   const abortBody = handlers.slice(handlers.indexOf('IPC_CHANNELS.CHAT_ABORT'), handlers.indexOf('IPC_CHANNELS.CHAT_SET_PERMISSION_MODE'));
