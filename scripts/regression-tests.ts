@@ -3425,6 +3425,25 @@ function testFinishKillLateArrivalContracts(): void {
   assert.ok(/abortEntry\(entry\);/.test(region), 'abortEntry 保持无条件（entry 级、幂等，迟到时杀掉旧回合残留 CLI 仍正确）');
 }
 
+// 僵尸 exit 回调代际守卫契约（false-halt 回归钉，2026-09-06）：CHAT_SEND 注册的 exit 兜底
+// 在被中断/替换旧回合的迟到 exit 时不得对队列记账——新回合在途（entries 持别的活动 entry）
+// 必须让位；entries 空（自身出口）或仍是本 handle（catch 路径）照常兜底。谓词不得收紧为
+// 「active === child」（会误杀流丢 result 兜底主场景）。
+function testZombieExitGuardContracts(): void {
+  const { readFileSync } = require('node:fs') as typeof import('node:fs');
+  const ipcHandlers = readFileSync(new URL('../src/main/ipc-handlers.ts', import.meta.url), 'utf8');
+  const marker = ipcHandlers.indexOf("child.on('exit', (code) => {");
+  assert.ok(marker !== -1, 'CHAT_SEND exit 兜底回调须在位');
+  assert.ok(ipcHandlers.indexOf("child.on('exit', (code) => {", marker + 1) === -1, 'ipc-handlers 内该回调须唯一（定位锚）');
+  const region = ipcHandlers.slice(marker, ipcHandlers.indexOf('});', marker));
+  const guardIdx = region.indexOf('if (active && active !== child) {');
+  const settleIdx = region.indexOf("noteTurnOutcome(sessionId, code === 0 ? 'success' : 'error', mainWindow);");
+  assert.ok(/const active = getActiveProcess\(sessionId\);/.test(region), '回调须捕获当前活动进程');
+  assert.ok(guardIdx !== -1, '须有「别的活动 entry 才拦」让位谓词（if (active && active !== child)）');
+  assert.ok(settleIdx !== -1, '让位之外须照常 noteTurnOutcome 兜底（result 丢失防线）');
+  assert.ok(guardIdx < settleIdx, '守卫必须先于队列记账（拦截要在 noteTurnOutcome 之前）');
+}
+
 async function main(): Promise<void> {
 testTurnTimingContracts();
 testDiffDialogSearchUiContracts();
@@ -3616,6 +3635,7 @@ testAttachmentTask8Contracts();
 testWorkspaceHistoryRemoveContracts();
 testTurnEntrySyncReleaseContracts();
 testFinishKillLateArrivalContracts();
+testZombieExitGuardContracts();
 }
 
 main().catch((error) => {
