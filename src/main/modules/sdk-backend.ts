@@ -3586,6 +3586,7 @@ async function runQuery(
     emitExit(null);
     break;
   } catch (err) {
+    logger.debug(`[${sessionId}] runQuery catch：${err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120)}`);
     if (!isCurrentEntry(sessionId, entry)) {
       emitExit(null);
       break;
@@ -3600,6 +3601,7 @@ async function runQuery(
         entry.query = query;
         gotResult = false; // 新 query = 新回合，重置终态追踪
         apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
+        logger.debug(`[${sessionId}] resume 重试：旧会话 id 已清除，第二 query 已启动`);
         continue;
       } catch (retryErr) {
         const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
