@@ -395,7 +395,12 @@ export type ContextSamplePhase = 'query-start' | 'mid-turn' | 'post-turn' | 'pos
 
 // review-v4 High-1 方案 B 兜底：post-turn 快照不可得（getContextUsage 超时 / query 已关闭）时，
 // 必须显式降级为 stale + diagnostic——禁止 query-start 快照在回合结束后继续伪装 fresh。
-export function postTurnFallbackTerminal(lastKnownPhase: ContextSamplePhase | null): {
+// breakerNote（刷新熔断器 2026-09-06）：熔断期借道此兜底时附加退避注记；缺省单参输出与
+// 历史文案逐字节一致（契约锁，见 tdd-context-usage-verify §27.6）。
+export function postTurnFallbackTerminal(
+  lastKnownPhase: ContextSamplePhase | null,
+  breakerNote?: string,
+): {
   source: 'unavailable';
   freshness: 'stale';
   diagnostic: string;
@@ -403,7 +408,7 @@ export function postTurnFallbackTerminal(lastKnownPhase: ContextSamplePhase | nu
   return {
     source: 'unavailable',
     freshness: 'stale',
-    diagnostic: `post-turn 快照不可得（getContextUsage 超时或 query 已关闭）；上一可信快照采样阶段：${lastKnownPhase ?? '未知'}`,
+    diagnostic: `post-turn 快照不可得（getContextUsage 超时或 query 已关闭）；上一可信快照采样阶段：${lastKnownPhase ?? '未知'}${breakerNote ? `；${breakerNote}` : ''}`,
   };
 }
 
