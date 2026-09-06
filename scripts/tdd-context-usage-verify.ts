@@ -990,5 +990,122 @@ console.log('=== 26) 上下文圆圈 v2：探针 env 补全 + 预算 + settle �
   });
 }
 
+// ── §27 刷新熔断器（docs/plans/2026-09-06-context-refresh-count-tokens-fix.md §3/§5.1）──
+// C 部分：连续 3 次 CU 超时 → 10 分钟退避跳过发起；post-turn 借道 catch 直走方案 B（stale +
+// 退避注记）；「Query closed before response received」为回合生命周期伴生不计数；重开条件须允许
+// cooldown 到期后重探失败再次进入退避（审计 MAJOR-1，防首个窗口后熔断器永久失活）。
+console.log('=== 27) 刷新熔断器：常量/跳过分支/记账/方案B注记/重开形态 ===');
+{
+  check('27.1 常量存在：THRESHOLD=3 + COOLDOWN_MS=10*60*1000', () => {
+    assert.ok(/const CONTEXT_REFRESH_BREAKER_THRESHOLD\s*=\s*3;/.test(sdkBackendSrc), '缺 CONTEXT_REFRESH_BREAKER_THRESHOLD=3');
+    assert.ok(/const CONTEXT_REFRESH_BREAKER_COOLDOWN_MS\s*=\s*10\s*\*\s*60\s*\*\s*1000;/.test(sdkBackendSrc), '缺 CONTEXT_REFRESH_BREAKER_COOLDOWN_MS=10*60*1000');
+  });
+  check('27.2 contextRefreshBreaker Map 声明存在（streak/openedAt/modelId 形态）', () => {
+    assert.ok(
+      /const contextRefreshBreaker = new Map<string, \{ streak: number; openedAt: number \| null; modelId: string \| null \}>\(\);/.test(sdkBackendSrc),
+      '缺 contextRefreshBreaker Map（形态须为 streak/openedAt/modelId）',
+    );
+  });
+  check('27.3 熔断跳过分支：bkOpen 且非 post-turn 静默 return（无 payload）', () => {
+    assert.ok(
+      /if \(bkOpen && opts\.samplePhase !== 'post-turn'\) return;/.test(sdkBackendSrc),
+      "缺 `if (bkOpen && opts.samplePhase !== 'post-turn') return;`",
+    );
+  });
+  check('27.4 post-turn 借道 catch：bkOpen 时 throw context refresh breaker open', () => {
+    assert.ok(
+      /if \(bkOpen\) throw new Error\('context refresh breaker open'\);/.test(sdkBackendSrc),
+      "缺 `if (bkOpen) throw new Error('context refresh breaker open');`",
+    );
+  });
+  check('27.5 记账接线：success 紧随 getContextUsage 成功行 + timeout 判定后记账', () => {
+    assert.ok(/function recordContextRefreshTimeout\(/.test(sdkBackendSrc), '缺 recordContextRefreshTimeout');
+    assert.ok(/function recordContextRefreshSuccess\(/.test(sdkBackendSrc), '缺 recordContextRefreshSuccess');
+    const cuIdx = sdkBackendSrc.indexOf('const cu = await withTimeout(query.getContextUsage(), CONTEXT_REFRESH_TIMEOUT_MS);');
+    assert.ok(cuIdx >= 0, '缺 getContextUsage 成功行');
+    const successCallIdx = sdkBackendSrc.indexOf('recordContextRefreshSuccess(sessionId);', cuIdx);
+    assert.ok(successCallIdx >= 0 && successCallIdx - cuIdx < 300, 'recordContextRefreshSuccess 应紧随 getContextUsage 成功行');
+    const guardIdx = sdkBackendSrc.indexOf("e instanceof Error && e.message === 'context refresh timeout'");
+    assert.ok(guardIdx >= 0, "缺 e.message === 'context refresh timeout' 判定");
+    const timeoutCallIdx = sdkBackendSrc.indexOf('recordContextRefreshTimeout(', guardIdx);
+    assert.ok(timeoutCallIdx >= 0 && timeoutCallIdx - guardIdx < 400, 'timeout 记账须在 context refresh timeout 判定守卫之后');
+  });
+  check('27.6 postTurnFallbackTerminal 单参输出逐字节回归锁 + 双参拼接「；<note>」', () => {
+    assert.equal(
+      postTurnFallbackTerminal('query-start').diagnostic,
+      'post-turn 快照不可得（getContextUsage 超时或 query 已关闭）；上一可信快照采样阶段：query-start',
+      '单参 diagnostic 逐字节回归锁被破坏',
+    );
+    assert.equal(
+      postTurnFallbackTerminal(null).diagnostic,
+      'post-turn 快照不可得（getContextUsage 超时或 query 已关闭）；上一可信快照采样阶段：未知',
+      '单参 null 诊断逐字节回归锁被破坏',
+    );
+    const t = postTurnFallbackTerminal('mid-turn', '上下文刷新熔断中');
+    assert.equal(
+      t.diagnostic,
+      'post-turn 快照不可得（getContextUsage 超时或 query 已关闭）；上一可信快照采样阶段：mid-turn；上下文刷新熔断中',
+      '双参应以「；」拼接 note',
+    );
+    assert.equal(t.source, 'unavailable');
+    assert.equal(t.freshness, 'stale');
+  });
+  check('27.7 方案B调用带 bkOpen 第二参数：退避注记含重试指引、无 URL（审计 MINOR-2）', () => {
+    const callIdx = sdkBackendSrc.indexOf('const fallback = postTurnFallbackTerminal(');
+    assert.ok(callIdx >= 0, '缺 postTurnFallbackTerminal 调用');
+    const callSeg = sdkBackendSrc.slice(callIdx, sdkBackendSrc.indexOf(');', callIdx));
+    assert.ok(/bkOpen/.test(callSeg), 'fallback 调用缺 bkOpen 条件第二参数');
+    assert.ok(/上下文刷新熔断中（连续超时/.test(callSeg), '缺退避注记文案');
+    assert.ok(/分钟后自动重试/.test(callSeg), '注记应含自动重试时长');
+    assert.ok(/可用 curl/.test(callSeg), '注记应含 curl 自助验证指引');
+    assert.ok(!/https?:\/\/|\$BASE/.test(callSeg), '注记不得写 URL/$BASE（审计 MINOR-2 定稿：止于「可用 curl 验证」）');
+  });
+  check('27.8 OPEN INFO 日志存在（进入 N 分钟退避 + 疑似 count_tokens 不可用）', () => {
+    const fnIdx = sdkBackendSrc.indexOf('function recordContextRefreshTimeout(');
+    const fnEnd = sdkBackendSrc.indexOf('\n}', fnIdx);
+    const fnBody = sdkBackendSrc.slice(fnIdx, fnEnd);
+    assert.ok(/logger\.info\(/.test(fnBody), 'recordContextRefreshTimeout 内缺 logger.info');
+    assert.ok(/分钟退避/.test(fnBody), 'INFO 文案缺「分钟退避」');
+    assert.ok(/count_tokens/.test(fnBody), 'INFO 文案缺 count_tokens 线索');
+  });
+  check('27.9 Query closed before response received 不计入熔断（记账仅在真超时守卫内、恰 1 处）', () => {
+    const fnStart = sdkBackendSrc.indexOf('async function refreshContextSnapshot(');
+    const fnEnd = sdkBackendSrc.indexOf('// ── P2 mid-turn', fnStart);
+    const fnBody = sdkBackendSrc.slice(fnStart, fnEnd);
+    const calls = [...fnBody.matchAll(/recordContextRefreshTimeout\(/g)];
+    assert.equal(calls.length, 1, `refreshContextSnapshot 内 recordContextRefreshTimeout 应恰 1 处（实际 ${calls.length}）`);
+    const guardStart = fnBody.indexOf("e instanceof Error && e.message === 'context refresh timeout'");
+    assert.ok(guardStart >= 0 && guardStart < (calls[0].index ?? -1), '记账调用应位于 context refresh timeout 守卫内（Query closed 等伴生错误不计入）');
+  });
+  check('27.10 重开条件形态钉：openedAt == null || cooldown 到期（审计 MAJOR-1）', () => {
+    const fnIdx = sdkBackendSrc.indexOf('function recordContextRefreshTimeout(');
+    const fnEnd = sdkBackendSrc.indexOf('\n}', fnIdx);
+    const fnBody = sdkBackendSrc.slice(fnIdx, fnEnd);
+    assert.ok(
+      /cur\.openedAt == null \|\| Date\.now\(\) - cur\.openedAt >= CONTEXT_REFRESH_BREAKER_COOLDOWN_MS/.test(fnBody),
+      '重开条件必须是 `cur.openedAt == null || Date.now() - cur.openedAt >= CONTEXT_REFRESH_BREAKER_COOLDOWN_MS`（仅判 openedAt == null 会使熔断器首个窗口后永久失活）',
+    );
+    // 开启侧（open 判定）与重开侧（reopen 判定）都要有 cooldown 分支，缺一即半开链断裂。
+    const openFnIdx = sdkBackendSrc.indexOf('function isContextRefreshBreakerOpen(');
+    const openFnEnd = sdkBackendSrc.indexOf('\n}', openFnIdx);
+    const openFnBody = sdkBackendSrc.slice(openFnIdx, openFnEnd);
+    assert.ok(/Date\.now\(\) - bk\.openedAt < CONTEXT_REFRESH_BREAKER_COOLDOWN_MS/.test(openFnBody), 'isContextRefreshBreakerOpen 缺 cooldown 窗口判定');
+    assert.ok(/bk\.modelId !== modelId/.test(openFnBody), 'isContextRefreshBreakerOpen 缺模型身份失配关闭（切模型立即可探）');
+  });
+  check('27.11 模型切换语义：modelId 失配重置 streak + 成功删键（半开自愈关闭）', () => {
+    const fnIdx = sdkBackendSrc.indexOf('function recordContextRefreshTimeout(');
+    const fnEnd = sdkBackendSrc.indexOf('\n}', fnIdx);
+    const fnBody = sdkBackendSrc.slice(fnIdx, fnEnd);
+    assert.ok(
+      /bk && bk\.modelId === modelId \? bk : \{ streak: 0, openedAt: null, modelId \}/.test(fnBody),
+      'modelId 失配应重置 streak 重新计数（切模型不继承旧退避）',
+    );
+    const succIdx = sdkBackendSrc.indexOf('function recordContextRefreshSuccess(');
+    const succEnd = sdkBackendSrc.indexOf('\n}', succIdx);
+    const succBody = sdkBackendSrc.slice(succIdx, succEnd);
+    assert.ok(/contextRefreshBreaker\.delete\(sessionId\)/.test(succBody), '成功应删键（重探成功即关闭）');
+  });
+}
+
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
