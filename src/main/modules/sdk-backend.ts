@@ -3945,7 +3945,8 @@ function scheduleReasoningReplayRetryForTurn(sessionId: string, mainWindow: Brow
         modelOverride: session.modelOverride,
         providerOverride: session.providerOverride,
         workingDir: session.workingDir,
-        maxTurns: session.maxTurns,
+        // F2：与 CHAT_SEND/队列路径同源——重发也读全局设置，不读从未被写入的会话级值。
+        maxTurns: getConfig().maxTurns,
         permissionMode: session.permissionMode,
         thinkingLevel: session.thinkingLevel,
         resumeSessionId: session.cliSessionId,

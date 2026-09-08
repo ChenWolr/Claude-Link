@@ -28,6 +28,7 @@ import { isValidThinkingLevel } from '../../shared/types/thinking';
 import { isValidPermissionMode } from '../../shared/permission-resolver';
 import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes, DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
+import { sanitizeMaxTurns } from '../../shared/max-turns';
 import { clearProviderModelsCache } from './model-resolver';
 import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels } from '../../shared/provider-library';
 import { logger } from '../utils/logger';
@@ -206,7 +207,7 @@ export function getConfig(): AppConfig {
     cliVersion: config.cliVersion,
     workingDirectory: config.workingDirectory,
     permissionMode,
-    maxTurns: config.maxTurns,
+    maxTurns: sanitizeMaxTurns(config.maxTurns),
     queueEnabled: config.queueEnabled ?? false,
     taskDelayMinutes: sanitizeTaskDelayMinutes(config.taskDelayMinutes),
     themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,
@@ -303,6 +304,11 @@ export function saveConfig(partial: Partial<AppConfig>): AppConfig {
   const { apiKey, ...rest } = partial;
   const storage = { ...rest } as Partial<StoredConfig>;
   delete (storage as Partial<StoredConfig>).providerProfiles; // 档案只经 saveProviderProfile 变更
+  // F2：maxTurns 落盘前兜底清洗（非有限/≤0/清空串 → 默认 200）——渲染层 v-model.number 的
+  // 空串/0 不得透传入库，否则 sdk-command-options 的 >0 守卫会静默丢旗标=队列任务无轮次上限。
+  if (storage.maxTurns !== undefined) {
+    storage.maxTurns = sanitizeMaxTurns(storage.maxTurns);
+  }
   getStore().set(storage);
 
   if (apiKey !== undefined) {

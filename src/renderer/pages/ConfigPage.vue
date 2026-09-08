@@ -6,11 +6,12 @@
 // 所有滚动发生在面板内部；尺寸全部 rem（随 fontScale 等比缩放）。
 import { onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { useConfigStore } from '../stores/config-store';
+import { useConfigStore, lastSaveFailed } from '../stores/config-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
+import { sanitizeMaxTurns } from '../../shared/max-turns';
 
 const store = useConfigStore();
 const router = useRouter();
@@ -72,6 +73,22 @@ async function refreshNativeSettingsDiagnostic(workingDir: string | null): Promi
 }
 
 async function performInit() {
+  // H1（F5 重做）：上次保存失败（含卸载 flush 失败）时，先用手头内存值重存一次——
+  // config-store 失败时不清内存 config，此刻仍是失败时的编辑值；一旦下方 loadConfig()
+  // 用主进程旧值覆写，失败编辑就永久丢失。成功结局的清标志由 config-store saveConfig
+  // 成功路径完成；失败结局进 catch 同样清标志（A1 边沿饥饿，见 catch 内注释）。
+  // 两种结局都不阻塞页面初始化（页面照常显示主进程值）。
+  if (lastSaveFailed.value) {
+    try {
+      await store.saveConfig();
+    } catch {
+      // A1（契约普查 2026-09-08）：重存失败时下方 loadConfig() 马上会用主进程旧值覆写
+      // 内存 config，「内存值仍是失败编辑」的标志语义已死；若保持 true，后续一切新失败
+      // 停在 true→true（无 false→true 边沿，全局 toast 不再弹），退回 F5 原静默丢失形态。
+      // 清标志恢复边沿：此后任何新失败 App.vue 都可再次触达。
+      lastSaveFailed.value = false;
+    }
+  }
   await store.loadConfig();
   await store.detectCli();
   await store.loadStorageInfo();
@@ -99,12 +116,21 @@ watch(
 
 // 切页卸载时立即落盘 pending 的自动保存：原 700ms 防抖期间若用户填完即切走（去会话发消息），
 // pending 保存不保证在发消息前执行，导致"填了没生效、需手动点保存"。卸载时强制 flush 修复此时序缺陷。
+// F5：flush 顺序收口——保存成功（.then）后才前移 lastSavedSnapshot 基线；失败进 .catch 置
+// error 态且不前移基线。原先「基线先行 + fire-and-forget」在保存失败时会被 watch 的
+// 「无变化」短路吞掉且组件已卸载无从重试（纯静默丢失）。卸载后无 toast 展示位，失败至少留状态标记。
 onBeforeUnmount(() => {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
-    lastSavedSnapshot = configSnapshot();
-    void store.saveConfig();
+    void store
+      .saveConfig()
+      .then(() => {
+        lastSavedSnapshot = configSnapshot();
+      })
+      .catch(() => {
+        saveStatus.value = 'error';
+      });
   }
 });
 
@@ -190,6 +216,13 @@ function handlePermissionModeChange(e: Event) {
 function clampTaskDelayMinutes(): void {
   store.config.taskDelayMinutes = sanitizeTaskDelayMinutes(store.config.taskDelayMinutes);
 }
+
+// 最大轮次输入夹取（F2）：失焦时把清空/非正数/小数收敛为正整数（非法回落默认 200），
+// 与主进程 sanitizeMaxTurns 同源——防止 v-model.number 的空串/0 经自动保存入库后，
+// sdk-command-options 的 >0 守卫静默丢旗标（=会话无轮次上限运行）。
+function clampMaxTurns(): void {
+  store.config.maxTurns = sanitizeMaxTurns(store.config.maxTurns);
+}
 </script>
 
 <template>
@@ -270,7 +303,7 @@ function clampTaskDelayMinutes(): void {
               <label class="field">
                 <span class="field-label">最大轮次</span>
                 <span class="field-desc">单次会话最大工具调用轮数（<code>--max-turns</code>）。</span>
-                <input v-model.number="store.config.maxTurns" type="number" min="1" />
+                <input v-model.number="store.config.maxTurns" type="number" min="1" @blur="clampMaxTurns" />
               </label>
               <label class="field field--toggle">
                 <span class="field-label">开启队列任务</span>
