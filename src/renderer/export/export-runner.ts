@@ -113,80 +113,93 @@ function report(
 export async function runExport(): Promise<void> {
   const api = window.exportLink;
   if (!api) return;
-  const job = await api.getJob();
-  if (!job) {
-    await api.finish({ kind: 'failed', jobId: '', code: 'no-job', message: '无 job 绑定' });
-    return;
-  }
-  runnerState.sessionName = job.sessionName;
-  runnerState.exportedAt = job.exportedAt;
-  applyTheme(job.themePalette, job.fontScale);
-
-  const items = groupMessagesForRender(job.messages as never);
-  if (items.length === 0) {
-    await api.finish({ kind: 'failed', jobId: job.jobId, code: 'empty', message: '无可导出内容' });
-    return;
-  }
-
-  runnerState.items = items;
-  report(api, job.jobId, { phase: 'planning', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, message: '正在排版长图…' });
-  await waitStable();
-  if (Object.prototype.hasOwnProperty.call(window, 'claudeLink')) {
-    await api.finish({ kind: 'failed', jobId: job.jobId, code: 'surface-leak', message: '隐藏导出窗口错误暴露了完整 preload API' });
-    return;
-  }
-  const expectedAttachments = job.messages.flatMap((message) => message.attachments ?? []);
-  if (expectedAttachments.length > 0) {
-    const renderedAttachmentCount = document.querySelectorAll('.msg-att').length;
-    const expectsImage = expectedAttachments.some((attachment) => attachment.kind === 'image' && attachment.preview);
-    const expectsFile = expectedAttachments.some((attachment) => attachment.kind !== 'image');
-    const expectsUnavailable = expectedAttachments.some((attachment) => attachment.previewUnavailable);
-    if (
-      renderedAttachmentCount !== expectedAttachments.length ||
-      (expectsImage && !document.querySelector('.msg-att__thumb-img')) ||
-      (expectsFile && !document.querySelector('.msg-att--file')) ||
-      (expectsUnavailable && !document.querySelector('.msg-att--unavailable'))
-    ) {
-      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'attachment-render-mismatch', message: '导出附件未完整进入隐藏渲染页面' });
+  // P3-12：顶层兜底 catch——IPC 瞬时失败/未处理异常此前直接冒泡成 unhandled rejection，
+  // job 空转到 90s 看门狗且错误信息失真。兜底路径显式 finish failed（真实错误码与文案）。
+  let jobId = '';
+  try {
+    const job = await api.getJob();
+    if (!job) {
+      await api.finish({ kind: 'failed', jobId: '', code: 'no-job', message: '无 job 绑定' });
       return;
     }
-  }
-  const itemHeights = measureItemHeights();
-  const docHeightAll = document.documentElement.scrollHeight;
-  const itemsContentHeight = itemHeights.reduce((s, h) => s + h, 0);
-  const overhead = Math.max(0, docHeightAll - itemsContentHeight);
+    jobId = job.jobId;
+    runnerState.sessionName = job.sessionName;
+    runnerState.exportedAt = job.exportedAt;
+    applyTheme(job.themePalette, job.fontScale);
 
-  // PNG 规划：先 probe 实测比例，用内存预算反推单页 CSS 高度上限（远大于 JPEG 的 1500）。
-  let maxPageHeight = PAGE_HEIGHT_CSS;
-  if (job.format === 'png') {
-    const probe = await api.probeSelf({ jobId: job.jobId });
-    if (!probe.ok) {
-      await api.finish({ kind: 'failed', jobId: job.jobId, code: probe.code, message: probe.message });
+    const items = groupMessagesForRender(job.messages as never);
+    if (items.length === 0) {
+      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'empty', message: '无可导出内容' });
       return;
     }
-    maxPageHeight = deriveMaxPageHeightByMemory(probe.scaleY, probe.viewportWidthCss);
-  }
-  const pages = splitPages(items.length, itemHeights, overhead, maxPageHeight);
-  if (pages.length > MAX_PAGES) {
-    await api.finish({ kind: 'failed', jobId: job.jobId, code: 'too-many-pages', message: `预计需要 ${pages.length} 张图片，超过上限 ${MAX_PAGES} 张` });
-    return;
-  }
 
-  const viewportW = window.innerWidth;
-  const viewportH = window.innerHeight;
-
-  for (let pi = 0; pi < pages.length; pi++) {
-    const page = pages[pi];
-    runnerState.items = items.slice(page.start, page.end);
+    runnerState.items = items;
+    report(api, job.jobId, { phase: 'planning', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, message: '正在排版长图…' });
     await waitStable();
+    if (Object.prototype.hasOwnProperty.call(window, 'claudeLink')) {
+      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'surface-leak', message: '隐藏导出窗口错误暴露了完整 preload API' });
+      return;
+    }
+    const expectedAttachments = job.messages.flatMap((message) => message.attachments ?? []);
+    if (expectedAttachments.length > 0) {
+      const renderedAttachmentCount = document.querySelectorAll('.msg-att').length;
+      const expectsImage = expectedAttachments.some((attachment) => attachment.kind === 'image' && attachment.preview);
+      const expectsFile = expectedAttachments.some((attachment) => attachment.kind !== 'image');
+      const expectsUnavailable = expectedAttachments.some((attachment) => attachment.previewUnavailable);
+      if (
+        renderedAttachmentCount !== expectedAttachments.length ||
+        (expectsImage && !document.querySelector('.msg-att__thumb-img')) ||
+        (expectsFile && !document.querySelector('.msg-att--file')) ||
+        (expectsUnavailable && !document.querySelector('.msg-att--unavailable'))
+      ) {
+        await api.finish({ kind: 'failed', jobId: job.jobId, code: 'attachment-render-mismatch', message: '导出附件未完整进入隐藏渲染页面' });
+        return;
+      }
+    }
+    const itemHeights = measureItemHeights();
+    const docHeightAll = document.documentElement.scrollHeight;
+    const itemsContentHeight = itemHeights.reduce((s, h) => s + h, 0);
+    const overhead = Math.max(0, docHeightAll - itemsContentHeight);
 
-    const ok = job.format === 'png'
-      ? await capturePngPage(api, job.jobId, pi, pages.length)
-      : await captureJpegPage(api, job.jobId, pi, pages.length, viewportW, viewportH);
-    if (!ok) return;
+    // PNG 规划：先 probe 实测比例，用内存预算反推单页 CSS 高度上限（远大于 JPEG 的 1500）。
+    let maxPageHeight = PAGE_HEIGHT_CSS;
+    if (job.format === 'png') {
+      const probe = await api.probeSelf({ jobId: job.jobId });
+      if (!probe.ok) {
+        await api.finish({ kind: 'failed', jobId: job.jobId, code: probe.code, message: probe.message });
+        return;
+      }
+      maxPageHeight = deriveMaxPageHeightByMemory(probe.scaleY, probe.viewportWidthCss);
+    }
+    const pages = splitPages(items.length, itemHeights, overhead, maxPageHeight);
+    if (pages.length > MAX_PAGES) {
+      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'too-many-pages', message: `预计需要 ${pages.length} 张图片，超过上限 ${MAX_PAGES} 张` });
+      return;
+    }
+
+    const viewportW = window.innerWidth;
+    const viewportH = window.innerHeight;
+
+    for (let pi = 0; pi < pages.length; pi++) {
+      const page = pages[pi];
+      runnerState.items = items.slice(page.start, page.end);
+      await waitStable();
+
+      const ok = job.format === 'png'
+        ? await capturePngPage(api, job.jobId, pi, pages.length)
+        : await captureJpegPage(api, job.jobId, pi, pages.length, viewportW, viewportH);
+      if (!ok) return;
+    }
+
+    await api.finish({ kind: 'done', jobId: job.jobId, pageImages: pages.length });
+  } catch (e) {
+    const message = `导出过程异常：${e instanceof Error ? e.message : String(e)}`;
+    try {
+      await api.finish({ kind: 'failed', jobId, code: 'unhandled', message });
+    } catch {
+      // finish 也失败（IPC 通道已死）：无更多兜底，主进程看门狗按无进展收口。
+    }
   }
-
-  await api.finish({ kind: 'done', jobId: job.jobId, pageImages: pages.length });
 }
 
 /** JPEG 单页：captureSelf(png bytes) → placeSegment → OffscreenCanvas → JPEG 分块写。返回 true=成功。 */

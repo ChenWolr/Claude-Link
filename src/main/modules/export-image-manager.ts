@@ -5,7 +5,7 @@
 
 import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import { mkdtemp, readdir, stat, rm } from 'fs/promises';
-import { constants as fsConstants, openSync, closeSync, writeSync, copyFileSync, unlinkSync, existsSync, statSync } from 'fs';
+import { constants as fsConstants, openSync, closeSync, writeSync, copyFileSync, unlinkSync, existsSync, statSync, readdirSync, rmSync } from 'fs';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import { Worker } from 'worker_threads';
@@ -50,6 +50,7 @@ import * as attachmentRepo from '../database/repositories/attachment-repo';
 import { readStoredAttachmentPreview } from './attachment-storage';
 import { buildExportAttachmentSnapshots } from './export-attachment-snapshot';
 import { logger } from '../utils/logger';
+import { setupLinkGuard } from './link-guard';
 
 const SEGMENT_PNG_MAX_BYTES = 64 * 1024 * 1024; // 单段 PNG 字节上限
 const TEMP_PREFIX = 'claude-link-export-';
@@ -570,7 +571,16 @@ async function performSave(job: ActiveJob, pages: { page: number; path: string; 
     if (!multi) {
       let target = smokeDest ? join(targetDir, buildExportFilename(sessionName, exportedAt, undefined, undefined, format)) : singleTarget!;
       if (!extRe.test(target)) target += '.' + defaultExt;
-      await moveExclusive(pages[0].path, target);
+      // P1-13：单张目标经系统保存对话框确认——对话框已让用户表达覆盖意图，目标存在时
+      // 先删除再写（存在性复查后 unlink），不再因 COPYFILE_EXCL 报「目标已存在」致导出失败。
+      // 目录批量路径保留排他语义（无逐文件确认，防误覆盖是有意设计）。
+      try {
+        if (existsSync(target)) unlinkSync(target);
+      } catch {
+        // 删除失败（只读/被占用）→ 下方写入按既有 failed 路径报错，不吞异常。
+      }
+      copyFileSync(pages[0].path, target);
+      try { unlinkSync(pages[0].path); } catch { /* 源删除失败不影响结果 */ }
       return { status: 'saved', paths: [target] };
     }
     const saved: string[] = [];
@@ -742,7 +752,9 @@ export async function startImageExport(
   };
 
   // 创建隐藏 export 窗口。
-  const exportSession = session.fromPartition(`claude-link-export-${jobId}`, { cache: false });
+  // OPT-9：固定 partition（claude-link-export）跨 job 复用——导出本身单飞串行，隔离已由
+  // 单飞保证；按 jobId 新建 partition 只会累积 session 存储垃圾。
+  const exportSession = session.fromPartition(`claude-link-export`, { cache: false });
   const exportWindow = new BrowserWindow({
     show: false,
     skipTaskbar: true,
@@ -762,6 +774,10 @@ export async function startImageExport(
   });
   // 禁止 window.open / 外部导航 / 下载 / 权限请求。
   exportWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // P2-19：导出窗同样挂 link-guard（will-navigate/will-redirect 全拦或放行本地 dev URL）——
+  // link-guard 此前只覆盖主窗，隐藏导出窗的导航面是漏网之鱼。dev 传 devUrl 防误拦本地加载，
+  // 生产不传全拦。附件快照不调 window.claudeLink，正常路径无任何导航需求。
+  setupLinkGuard(exportWindow, process.env['ELECTRON_RENDERER_URL']);
   exportSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
   exportWindow.webContents.on('render-process-gone', (_e, details) => {
     logger.error(`[export] 渲染进程消失：${details.reason}`);
@@ -908,6 +924,10 @@ export function registerExportImageHandlers(): void {
   ipcMain.on(IPC_CHANNELS.EXPORT_RENDER_PROGRESS, (event, payload: ExportImageProgressPayload) => {
     if (!isExportSender(event.sender)) return;
     if (!payload || payload.jobId !== active?.jobId) return; // 迟到过滤
+    // P1-12：渲染进度即进展证据——健康长导出（>90s 但持续推进）不得被「90 秒无进展」看门狗
+    // 误杀（此前 reset 全部只在 PNG codec 路径，JPEG 全程无重置必被误杀）。对 PNG 进度同样调用
+    // 无害（幂等重置）；已终态 job 由 resetWatchdog 的 terminal 门自行 no-op，迟到进度安全。
+    resetWatchdog('render-progress');
     active.phase = payload.phase;
     makeProgress({ phase: payload.phase, page: payload.page, totalPages: payload.totalPages, segment: payload.segment, segmentsInPage: payload.segmentsInPage, percent: payload.percent, message: payload.message });
   });
@@ -920,10 +940,22 @@ export function registerExportImageHandlers(): void {
   });
 }
 
-/** app 退出时终止仍在运行的 job（main/index.ts before-quit 调用）。 */
-export async function disposeExportImageOnQuit(): Promise<void> {
-  if (active) {
-    active.terminal = true;
-    await cleanup('quit');
+/** OPT-9：退出前同步 best-effort 删除全部导出临时目录。before-quit 曾用的
+ *  void disposeExportImageOnQuit() 异步 fire-and-forget 在进程退出前可能来不及执行完，
+ *  目录残留（该死导出已随本注释删除）；改为同步逐个删（单个失败静默，留给下次启动
+ *  cleanupStaleTempDirs 的 24h TTL 兜底）。 */
+export function disposeExportTempDirsSync(): void {
+  try {
+    const tmp = app.getPath('temp');
+    for (const name of readdirSync(tmp)) {
+      if (!name.startsWith(TEMP_PREFIX)) continue;
+      try {
+        rmSync(join(tmp, name), { recursive: true, force: true });
+      } catch {
+        // 目录被占用（在跑 job/杀进程竞态）→ 跳过，下次启动 TTL 清理兜底。
+      }
+    }
+  } catch {
+    // temp 目录不可读等：静默，不阻塞退出。
   }
 }

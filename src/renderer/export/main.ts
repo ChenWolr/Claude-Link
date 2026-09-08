@@ -15,5 +15,6 @@ app.mount('#app');
 // 挂载后启动导出循环。preload 暴露的 window.exportLink 由 --claude-link-surface=export 触发。
 // 若未带 surface（非导出窗口误加载），不启动。
 if (typeof window !== 'undefined' && (window as { exportLink?: unknown }).exportLink) {
-  void runExport();
+  // P3-12：runExport 内部已兜底 finish failed；此处 .catch 仅防兜底自身抛错成 unhandled rejection。
+  runExport().catch(() => { /* 已兜底 */ });
 }
