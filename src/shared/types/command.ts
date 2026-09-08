@@ -84,6 +84,12 @@ export interface SessionCommandSnapshot {
    * 只比用户级：用户级变更影响所有会话；项目级变更由存活期 commands_changed / 物化 probe 覆盖。
    */
   originFingerprint?: string;
+  /**
+   * P2-14：项目级命令来源目录（<会话 cwd>/.claude/{commands,skills}）的出生指纹。
+   * probe 成功时由调用方附带；快照缺省 → 不做项目级比对（不误标 stale）。
+   * 项目目录文件变更后，重开菜单经 isSnapshotOriginStale 判 stale 免费重探。
+   */
+  projectOriginFingerprint?: string;
 }
 
 /**

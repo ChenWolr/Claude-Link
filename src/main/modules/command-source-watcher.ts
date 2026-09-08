@@ -140,6 +140,19 @@ export function getUserOriginFingerprint(): string | undefined {
   return state?.userFingerprint;
 }
 
+/**
+ * P2-14：项目级出生指纹（per-session cwd 的 commands/skills 两根，与用户级同一指纹函数）。
+ * probe 成功时随快照写入；COMMANDS_GET 现算比对（目录小、递归廉价，不做缓存）。
+ * cwd 缺省 → undefined（不比对不误标）；目录不存在 → 空集指纹（确定性，仍可比对）。
+ */
+export async function getProjectOriginFingerprint(cwd: string | null | undefined): Promise<string | undefined> {
+  if (!cwd) return undefined;
+  return computeCommandRootsFingerprint([
+    path.join(cwd, '.claude', 'commands'),
+    path.join(cwd, '.claude', 'skills'),
+  ]);
+}
+
 /** 启动全局命令来源监视（全局单例；重复调用幂等跳过）。 */
 export function startCommandSourceWatcher(deps: CommandSourceWatcherDeps): void {
   if (state) return;

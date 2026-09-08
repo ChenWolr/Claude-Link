@@ -94,7 +94,11 @@ export function buildNativeSdkOptionsCore(input: NativeSdkOptionsCoreInput): Pic
   if (input.effort !== undefined) options.effort = input.effort;
   if (input.cwd !== undefined) options.cwd = input.cwd;
   if (input.maxTurns !== undefined && input.maxTurns > 0) options.maxTurns = input.maxTurns;
-  if (input.permissionMode !== undefined) {
+  // P2-5：有效档为 'default' 时**不设置** options.permissionMode——SDK 层 'default' 是 truthy，
+  // 必发 `--permission-mode default` 旗标，而旗标优先于原生 settings.permissions.defaultMode，
+  // 会把用户 settings 级联钉死在默认档。不传 = 让原生 settings 自决，与 sdk-permissions
+  // 「default 不写 settings 层」的意图贯通。非 default 档照传。
+  if (input.permissionMode !== undefined && input.permissionMode !== 'default') {
     options.permissionMode = input.permissionMode as PermissionMode;
     if (input.permissionMode === 'bypassPermissions') {
       options.allowDangerouslySkipPermissions = true;

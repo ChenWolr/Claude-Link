@@ -75,7 +75,10 @@ export function classifyOrigin(
   if (/\(user\)\s*$/.test(description)) return 'user-skill';
   if (
     name.startsWith('__') ||
-    /server-launched|server session|server-only|internal/i.test(description)
+    // P2-15：收窄为词边界/括号形态——裸 'internal' 子串会误伤描述含普通英文单词的用户命令
+    //（如 "Audit internal APIs"），被隐藏出菜单。真实内置命令的标记形态是
+    // 'server-launched' / 'server session' / 'server-only' / '(internal)'。
+    /\bserver-launched\b|\bserver\s+session\b|\bserver-only\b|\(internal\)/i.test(description)
   ) {
     return 'internal';
   }
@@ -183,6 +186,7 @@ export class SdkCommandRegistry {
     source: CommandSnapshotSource,
     ctx: CommandOriginContext = EMPTY_COMMAND_ORIGIN_CONTEXT,
     originFingerprint?: string,
+    projectOriginFingerprint?: string,
   ): SessionCommandSnapshot {
     const commands = this.cleanCommands(rawCommands, ctx);
     const snapshot: SessionCommandSnapshot = {
@@ -192,6 +196,8 @@ export class SdkCommandRegistry {
       source,
       updatedAt: new Date().toISOString(),
       ...(originFingerprint !== undefined ? { originFingerprint } : {}),
+      // P2-14：项目级出生指纹（probe 成功时附带；缺省不写不比对）。
+      ...(projectOriginFingerprint !== undefined ? { projectOriginFingerprint } : {}),
     };
     this.revisions.set(sessionId, (this.revisions.get(sessionId) ?? 0) + 1);
     this.snapshots.set(sessionId, snapshot);
@@ -232,6 +238,8 @@ export class SdkCommandRegistry {
       // D5：保留出生指纹——状态切换重建快照对象，若不带回该字段，首次降级/loading 后指纹丢失，
       // COMMANDS_GET 的过期比对（旧会话惰性刷新）对该会话永久失效。
       ...(current.originFingerprint !== undefined ? { originFingerprint: current.originFingerprint } : {}),
+      // P2-14：项目级出生指纹同生命周期保留。
+      ...(current.projectOriginFingerprint !== undefined ? { projectOriginFingerprint: current.projectOriginFingerprint } : {}),
       ...(error !== undefined ? { error } : {}),
     };
     this.snapshots.set(sessionId, snapshot);
