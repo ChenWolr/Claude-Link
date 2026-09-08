@@ -239,15 +239,19 @@ function handleCopyClick(event: MouseEvent): void {
           <StreamRenderer v-if="streamingContent" :content="streamingContent" />
         </div>
       </div>
-      <!-- OPT-6：回到底部浮动按钮（明显上滚时出现） -->
-      <button
-        v-if="showBackToBottom && !exportMode"
-        type="button"
-        class="message-list__back-bottom"
-        data-testid="back-to-bottom"
-        @click="scrollToBottom"
-      >↓ 回到底部</button>
     </div>
+    <!-- OPT-6：回到底部浮动按钮（明显上滚时出现）。
+         B2 修复：必须挂在 .message-list（滚动容器的父级）上，不能放进 scroller——
+         absolute 定位以滚动容器为包含块时锚定的是「内容坐标」，按钮会随内容滚走
+         （实测按钮内容坐标恒定、视口位置随 scrollTop 漂移出屏）。挂在父级才真正
+         悬浮于聊天区视口右下角，随显隐逻辑（距底 >400px 出现 / 到底消失）工作。 -->
+    <button
+      v-if="showBackToBottom && !exportMode"
+      type="button"
+      class="message-list__back-bottom"
+      data-testid="back-to-bottom"
+      @click="scrollToBottom"
+    >↓ 回到底部</button>
   </div>
 </template>
 
@@ -260,6 +264,9 @@ function handleCopyClick(event: MouseEvent): void {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* B2：回底浮动按钮的定位锚——必须是滚动容器的「父级」。锚在 scroller 自身上时
+     absolute 按钮锚定内容坐标随滚动漂移（B2 病根），锚在父级上才稳定悬浮视口右下。 */
+  position: relative;
 }
 
 .message-list__scroller {
@@ -273,8 +280,6 @@ function handleCopyClick(event: MouseEvent): void {
   /* 同一发送者的连续消息间距收紧（0.25rem = 4px@medium）；
      发送者切换处由 :deep(.msg-transition) 叠加 margin-top 加宽至 1rem。 */
   gap: 0.25rem;
-  /* OPT-6：浮动回底按钮的定位锚。 */
-  position: relative;
 }
 
 /* OPT-6：内层内容 wrapper——ResizeObserver 观察面；承接原 scroller 的纵向排列与
@@ -285,7 +290,8 @@ function handleCopyClick(event: MouseEvent): void {
   gap: 0.25rem;
 }
 
-/* OPT-6：回到底部浮动按钮——明显上滚（距底 >400px）时出现，悬停高亮。 */
+/* OPT-6：回到底部浮动按钮——明显上滚（距底 >400px）时出现，到底（<80px）消失，悬停高亮。
+   定位锚 = .message-list（滚动容器父级，见模板 B2 注释）。 */
 .message-list__back-bottom {
   position: absolute;
   right: 24px;
