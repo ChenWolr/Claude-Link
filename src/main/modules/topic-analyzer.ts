@@ -6,9 +6,19 @@ import { logger } from '../utils/logger';
 import { buildAnthropicApiUrl, isOfficialAnthropicBaseUrl } from './api-url';
 import { resolveConfiguredDefaultModel } from '../../shared/settings-parser';
 import { resolveSessionModel } from '../../shared/session-model';
+import { isAutoSessionName } from '../../shared/auto-session-name';
 
 interface ClaudeApiResponse {
   content: Array<{ type: string; text?: string }>;
+}
+
+// F4：自动命名竞态守卫——命名门槛在发送瞬间判定（渲染层 isAutoSessionName），而本模块的
+// HTTP 往返最长 10s；用户在此窗口手动重命名后，迟到的主题/兜底名不得覆盖。
+// 主进程侧收口：每次写 name 前重查当前名仍为「会话 N」自动形态才写（手动名一律让位）。
+// H3：判据抽 shared 纯函数（三端同源）并收紧为精确形态——「会话」前缀匹配会被
+// 「会话备份」等自然命名绕过，误判为自动名槽位后迟到主题照样覆盖。
+function isAutoNameSlot(sessionId: string): boolean {
+  return isAutoSessionName(sessionRepo.getSession(sessionId)?.name);
 }
 
 export async function analyzeTopic(sessionId: string, firstMessage: string): Promise<string | null> {
@@ -71,7 +81,9 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
     const text = data.content?.find((c) => c.type === 'text')?.text;
     if (text) {
       const topic = text.trim().replace(/\s+/g, ' ').slice(0, 20);
-      sessionRepo.updateSession(sessionId, { name: topic });
+      if (isAutoNameSlot(sessionId)) {
+        sessionRepo.updateSession(sessionId, { name: topic });
+      }
       return topic;
     }
   } catch (error) {
@@ -80,7 +92,9 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
 
   // 兜底：取首句前 15 个字符，压缩空白避免标题里出现换行
   const fallback = firstMessage.replace(/\s+/g, ' ').trim().slice(0, 15);
-  sessionRepo.updateSession(sessionId, { name: fallback });
+  if (isAutoNameSlot(sessionId)) {
+    sessionRepo.updateSession(sessionId, { name: fallback });
+  }
   return fallback;
 }
 
