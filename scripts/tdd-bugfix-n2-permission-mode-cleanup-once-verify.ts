@@ -101,7 +101,7 @@ function seedLegacyDb(explicitVersion: number): Db {
   const d = seedLegacyDb(10);
   let threw = '';
   try { runMigrations(d); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
-  check('① 版本 10 老库升级不抛错且版本到 11', threw === '' && versionOf(d) === 11, threw || `version=${versionOf(d)}`);
+  check('① 版本 10 老库升级不抛错且版本到 12', threw === '' && versionOf(d) === 12, threw || `version=${versionOf(d)}`);
   check('② 升级时 legacy 幻影 default 清洗为 NULL（一次性 V11 语义保留）',
     JSON.stringify(permModes(d)) === JSON.stringify([null, 'bypassPermissions', null]),
     JSON.stringify(permModes(d)));
@@ -117,7 +117,7 @@ function seedLegacyDb(explicitVersion: number): Db {
   check('④ 用户显式 default 重启后保留（不再被启动清洗抹为 NULL）',
     JSON.stringify(permModes(d)) === JSON.stringify(['default', 'bypassPermissions', null]),
     JSON.stringify(permModes(d)));
-  check('⑤ 版本 11 库版本号保持 11', versionOf(d) === 11, `version=${versionOf(d)}`);
+  check('⑤ 版本 11 老库迁移后版本到 12（V12 落地后 v11 库迁移即升 12）', versionOf(d) === 12, `version=${versionOf(d)}`);
   d.close();
 }
 
@@ -126,7 +126,7 @@ function seedLegacyDb(explicitVersion: number): Db {
   const d = openMemoryDb();
   let threw = '';
   try { runMigrations(d); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
-  check('⑥ 全新库迁移不抛错且版本到 11', threw === '' && versionOf(d) === 11, threw || `version=${versionOf(d)}`);
+  check('⑥ 全新库迁移不抛错且版本到 12', threw === '' && versionOf(d) === 12, threw || `version=${versionOf(d)}`);
   d.close();
 }
 
@@ -137,7 +137,7 @@ function seedLegacyDb(explicitVersion: number): Db {
     const v11 = src.slice(src.indexOf('currentVersion < 11'));
     return /UPDATE sessions SET permission_mode = NULL[\s\S]*?WHERE permission_mode = 'default'/.test(v11);
   })());
-  check('⑧ CURRENT_SCHEMA_VERSION = 11', /CURRENT_SCHEMA_VERSION = 11;/.test(src));
+  check('⑧ CURRENT_SCHEMA_VERSION = 12', /CURRENT_SCHEMA_VERSION = 12;/.test(src));
   check('⑨ 无版本守卫的裸 permission_mode 清洗已移除（清洗只出现在 V11 块内）', (() => {
     const v11At = src.indexOf('currentVersion < 11');
     const before = src.slice(0, v11At);

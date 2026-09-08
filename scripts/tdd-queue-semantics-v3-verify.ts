@@ -417,7 +417,7 @@ function fnBody(source: string, signature: string): string {
 
   // DB V9 paused 列（OPT-8 后版本升至 10，paused 列契约保留）
   const mig = read('../src/main/database/migrations.ts');
-  check('CURRENT_SCHEMA_VERSION >= 11（V11 一次性清洗；V9 paused 之上叠加 OPT-8 索引迁移）', /CURRENT_SCHEMA_VERSION = 11/.test(mig));
+  check('CURRENT_SCHEMA_VERSION >= 12（V12 会话回合计量列；V11 一次性清洗；V9 paused 之上叠加 OPT-8 索引迁移）', /CURRENT_SCHEMA_VERSION = 12/.test(mig));
   check('V9 补列 paused INTEGER NOT NULL DEFAULT 0', /ADD COLUMN paused INTEGER NOT NULL DEFAULT 0/.test(mig));
   const repo = read('../src/main/database/repositories/task-repo.ts');
   check('getPendingTasks 过滤 paused = 0', /AND paused = 0/.test(repo));

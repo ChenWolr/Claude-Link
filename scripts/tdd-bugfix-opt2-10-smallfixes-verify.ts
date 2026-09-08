@@ -84,8 +84,8 @@ check('OPT-7 formatCountdownHuman 导出 + 面板复用（两处裸秒消除）'
 
 // OPT-8
 const migrations = read('src/main/database/migrations.ts');
-check('OPT-8 V10 索引迁移 + 版本 11', () => {
-  assert.match(migrations, /CURRENT_SCHEMA_VERSION = 11;/);
+check('OPT-8 V10 索引迁移 + 版本 12', () => {
+  assert.match(migrations, /CURRENT_SCHEMA_VERSION = 12;/);
   assert.match(migrations, /CREATE INDEX IF NOT EXISTS idx_messages_parent_task ON messages\(parent_task_id\);/);
 });
 
