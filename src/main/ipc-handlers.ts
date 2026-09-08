@@ -13,16 +13,16 @@ import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
 import { IPC_CHANNELS } from '../shared/constants';
-import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel } from './modules/config-manager';
+import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer } from './modules/config-manager';
 import { detectClaudeConfig } from './modules/claude-config-detector';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing } from './modules/chat-backend';
 import { resolveCommandsGetResult } from '../shared/commands-get';
-import { getUserOriginFingerprint } from './modules/command-source-watcher';
+import { getUserOriginFingerprint, getProjectOriginFingerprint } from './modules/command-source-watcher';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../shared/permission-resolver';
 import { sdkCommandRegistry, getCommandProvenance } from './modules/sdk-command-registry';
 import { getPendingInteractionPrompts, respondToInteractionPrompt } from './modules/interaction-prompts';
@@ -49,7 +49,7 @@ import { createInteractionHistory, getInteractionHistory } from './database/repo
 import { getPlanState as getClaudePlanState } from './database/repositories/claude-plan-repo';
 import { listChanges, getChangeDiff, openChangeFile } from './modules/changes-panel';
 import { registerExportImageHandlers } from './modules/export-image-manager';
-import { detectDirectImageFormat, validateChatSendPayloadShape } from './modules/attachment-policy';
+import { detectDirectImageFormat, validateChatSendPayloadShape, ATTACHMENT_READ_GUARD_BYTES, MAX_FILE_BYTES, formatBytes } from './modules/attachment-policy';
 import {
   stageAttachment,
   stageTransientAttachment,
@@ -95,7 +95,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     openChangeFile(workingDir, p));
 
   // Config
-  ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfig());
+  ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfigForRenderer());
   ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => {
     // v3：queueEnabled 值变化 → 通知引擎（关：取消倒计时转 switch_off；开：仅清 reason 不 arm）。
     const prevQueueEnabled = getConfig().queueEnabled === true;
@@ -103,7 +103,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if ((saved.queueEnabled === true) !== prevQueueEnabled) {
       onQueueEnabledChanged(saved.queueEnabled === true, mainWindow);
     }
-    return saved;
+    // P3-6：回传给 renderer 的配置同样只带掩码（渲染层 UI 不显示明文 Key）。
+    return getConfigForRenderer();
   });
   ipcMain.handle(IPC_CHANNELS.CONFIG_CLEAR, async () => clearConfig());
   ipcMain.handle(IPC_CHANNELS.CONFIG_STORAGE_INFO, async () => {
@@ -322,11 +323,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
     sessionRepo.searchSessions(query),
   );
-  ipcMain.handle(
-    IPC_CHANNELS.SESSION_UPDATE_MODEL_OVERRIDE,
-    async (_event, id: string, modelOverride: string | null) =>
-      sessionRepo.updateModelOverride(id, modelOverride),
-  );
+  // OPT-10：会话级「单独改 model_override」的 IPC 死链已删除（模型选用唯一现场=供应商模型选择器
+  // SESSION_SET_PROVIDER_MODEL；该通道在 renderer/store/repo 三层均无调用方）。
   ipcMain.handle(
     IPC_CHANNELS.SESSION_ANALYZE_TOPIC,
     async (_event, sessionId: string, firstMessage: string) => {
@@ -353,12 +351,20 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // D1 分流：先验证 DB 会话存在，再允许登记 active/启动 probe——不能把任意 renderer 输入当作会话
     // 生命周期事实。无 DB 行（暂态）不再 throw：只读返回全局兜底副本（source:'cache'），不 markSessionActive、
     // 不 startCommandProbe、不 schedulePostTurnProbe；分流决策统一在 shared 纯函数 resolveCommandsGetResult。
+    const sessionRow = sessionRepo.getSession(sessionId);
+    // P2-14：快照带项目级出生指纹时现算比对（无指纹的旧快照/无 cwd 会话跳过 IO）。
+    const existingSnapshot = sdkCommandRegistry.get(sessionId);
+    const currentProjectFingerprint = existingSnapshot?.projectOriginFingerprint !== undefined
+      ? await getProjectOriginFingerprint(sessionRow?.workingDir ?? null)
+      : undefined;
     const decision = resolveCommandsGetResult({
-      sessionExists: Boolean(sessionRepo.getSession(sessionId)),
+      sessionExists: Boolean(sessionRow),
       hasSnapshot: sdkCommandRegistry.has(sessionId),
       snapshot: sdkCommandRegistry.get(sessionId),
       fallback: sdkCommandRegistry.getGlobalFallback(),
       currentUserFingerprint: getUserOriginFingerprint(),
+      currentProjectFingerprint,
+      cliMissing: isGlobalCliMissing(),
     });
     if (decision.readOnly) {
       // D6：兜底未就绪（启动探测失败/未完成）时打开菜单即自然重试一次（60s 节流，fire-and-forget）。
@@ -429,6 +435,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       });
       attachmentIdsForRollback = prepared.attachmentIds;
 
+      // P1-6：prepareAttachmentPrompt 的读盘 await（大附件数百 ms）窗口内会话可能已被删除——
+      // 落库前重查，避免 createMessage FK 报错刷屏 + 下方 spawn 把已删会话占坑（孤儿回合）。
+      // 走既有失败路径：抛错由外层 catch 回滚（锁释放/附件 draft 保持/占坑清理）。
+      if (!sessionRepo.getSession(sessionId)) {
+        throw new Error(`Session ${sessionId} not found`);
+      }
+
       // 落库时不升格附件 status，等 query 入口真正占坑成功后再 mark message。
       const created = messageRepo.createMessageWithAttachments({
         id: payload.clientMessageId,
@@ -453,6 +466,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         resumeSessionId: session.cliSessionId,
         additionalDirectories: prepared.additionalDirectories,
         userCommandText: payload.text,
+        // N4：带附件回合不参与 reasoning_replay 自动重试（重发载体是纯文本，照发丢图）。
+        hasAttachments: prepared.attachmentIds.length > 0,
       });
       spawned = true;
       // v3 调度挂点：占坑成功即回合开始——插话顶掉倒计时 + 引擎置 running（规则 #4/#5）。
@@ -581,8 +596,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     const shape = validateChatSendPayloadShape(payload);
     if (!shape.ok) throw new Error(shape.message);
     assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
-    const tasks = taskRepo.getTasksBySession(sessionId);
-    const sortOrder = tasks.length;
+    // P2-16：sortOrder 用现存量 MAX+1（nextSortOrder），不再用 tasks.length——建-删-建后
+    // 与现存行撞值导致排序不稳定。
+    const sortOrder = taskRepo.nextSortOrder(sessionId);
     const task = taskRepo.createTaskWithAttachments(
       sessionId,
       payload.text.trim(),
@@ -663,6 +679,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     for (const filePath of result.filePaths) {
       const filename = path.basename(filePath);
       try {
+        // P1-7：读入内存前先 stat 早退——数 GB 文件不再进 Buffer（防主进程 OOM）。
+        // 错误形态与既有业务校验一致（逐项收集，不含内部路径）；精确的 10/30MiB
+        // 区分仍由 stageAttachment 内的 validateAttachmentBytes 裁定（本守卫不动预算语义）。
+        const st = await fsp.stat(filePath);
+        if (st.size > ATTACHMENT_READ_GUARD_BYTES) {
+          throw new Error(`文件「${filename}」超过 ${formatBytes(MAX_FILE_BYTES)} 上限。`);
+        }
         const buf = await fsp.readFile(filePath);
         const bytes = new Uint8Array(buf);
         // 据魔数识别真实图片格式，避免靠扩展名把伪装图片当 image 直传。
