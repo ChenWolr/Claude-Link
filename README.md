@@ -240,13 +240,13 @@ npm run package:win
 
 - `npm run dev`：启动开发模式
 - `npm run typecheck`：检查 node 与 web 两个 TypeScript project
-- `npm run selftest`：运行静态自测（97 段契约脚本）和本地行为契约
+- `npm run selftest`：运行静态自测（106 段契约脚本）和本地行为契约
 - `npm run selftest:native`：运行静态自测加原生 Claude Code 链路
 - `npm run build`：构建 Electron 应用
 - `npm run rebuild`：重编译 better-sqlite3 原生模块
 - `npm run package:win`：打包 Windows NSIS 安装包
 
-`selftest` 使用 `tsx` 执行，不启动 Electron。它覆盖 settings 映射、供应商库、会话模型选择器、连接完整性、上下文用量（含熔断）、队列语义 v3、引擎后台开关、思考强度真值、命令矩阵与原生命令、回归场景、卡顿看门狗、权限默认档、图片导出、PNG 编码、diff 渲染器六件套、思考内滚、布局契约等 97 段契约。另有 CDP 门禁：`test:cdp`、`test:cdp:commands-e2e`、`test:cdp:real-window`、`test:cdp:context-e2e`、`test:cdp:readonly-e2e`、`test:cdp:layout`。
+`selftest` 使用 `tsx` 执行，不启动 Electron。它覆盖 settings 映射、供应商库、会话模型选择器、连接完整性、上下文用量（含熔断）、队列语义 v3、引擎后台开关、思考强度真值、命令矩阵与原生命令、回归场景、卡顿看门狗、权限默认档、图片导出、PNG 编码、diff 渲染器六件套、思考内滚、布局契约等 106 段契约。另有 CDP 门禁：`test:cdp`、`test:cdp:commands-e2e`、`test:cdp:real-window`、`test:cdp:context-e2e`、`test:cdp:readonly-e2e`、`test:cdp:layout`。
 
 如果启动时出现 `NODE_MODULE_VERSION` 或 `better-sqlite3` ABI 错误，先执行：
 

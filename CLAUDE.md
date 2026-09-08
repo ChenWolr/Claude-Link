@@ -32,7 +32,7 @@ Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本�
 |------|------|
 | `npm run dev` | 启动开发模式（热重载，仅覆盖渲染层） |
 | `npm run typecheck` | 依次检查 node（`tsc`）和 web（`vue-tsc`）两个 TS project，**主要正确性门禁**；无 jest/vitest、无 `npm test` |
-| `npm run selftest` | 自测多段（`&&` 串联，全过才算过）：`selftest:static` 97 段契约脚本 + 本地行为链；本地 `tsx` 执行，不启动 Electron |
+| `npm run selftest` | 自测多段（`&&` 串联，全过才算过）：`selftest:static` 106 段契约脚本 + 本地行为链；本地 `tsx` 执行，不启动 Electron |
 | `npx tsx scripts/regression-tests.ts` | 最大那段回归，selftest 已串联，可单独跑 |
 | `npm run rebuild` | 重编译 `better-sqlite3` 原生 ABI；**拉代码后若启动报 `NODE_MODULE_VERSION` 错误必跑** |
 | `npm run build` / `npm run package:win` | 构建 / 打包 Windows 安装包 |
@@ -153,7 +153,7 @@ SDK canUseTool / onUserDialog / onElicitation
 
 ## 测试约定
 
-- 无 jest/vitest，Vue 组件不做单测。`npm run selftest` 用 `tsx` 直接跑 Node，**不启动 Electron、不 build**；`selftest:static` 链现有 97 段契约脚本。
+- 无 jest/vitest，Vue 组件不做单测。`npm run selftest` 用 `tsx` 直接跑 Node，**不启动 Electron、不 build**；`selftest:static` 链现有 106 段契约脚本。
 - 两类断言：① 导入 `src/shared/*` 纯函数做**行为测试**；② `readFileSync` 读主进程/渲染层源码做**结构文本契约**（`.includes`/regex），专门钉住「一个功能横跨多文件」的接线不变量。注意 `selftest:static` 里的 `tdd-*-verify` 含大量**字面窗口正则**（隐藏契约网），行为改动前先跑基线，被破时按最小同步原则独立 commit 同步断言。
 - **新增功能必须在 selftest 补契约断言**并接入 `package.json` `selftest:static` 的 `&&` 链；`scripts/` 里的 `tdd-*-verify.ts` / `export-image-*-verify.ts` 同此风格。
 - CDP 门禁：`test:cdp`（烟雾）、`test:cdp:commands-e2e`（命令菜单 DOM）、`test:cdp:real-window`（真实窗口 10 断言）、`test:cdp:context-e2e`（上下文圆环发布级语义，S0–S13）、`test:cdp:readonly-e2e`（受限账户链）、`test:cdp:layout`（布局）。
