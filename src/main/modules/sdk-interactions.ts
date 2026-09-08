@@ -440,20 +440,37 @@ function isOptionList(value: unknown): value is AskUserQuestionOption[] {
       && typeof (option as Record<string, unknown>).label === 'string');
 }
 
-function fieldsFromJsonSchema(schema: Record<string, unknown> | undefined): InteractionFormField[] {
+/** G2：JSON schema → 表单字段。number/integer → 数值输入（numeric 标记，renderer 产出
+ *  string、提交侧转回数值）；array → textarea；数值 enum 保序透传为 select（String 化选项、
+ *  numeric 标记）；字符串 enum / boolean 行为不变。 */
+export function fieldsFromJsonSchema(schema: Record<string, unknown> | undefined): InteractionFormField[] {
   const properties = schema?.properties;
   if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return [];
   const required = Array.isArray(schema?.required) ? new Set(schema.required.filter((item): item is string => typeof item === 'string')) : new Set<string>();
   return Object.entries(properties as Record<string, Record<string, unknown>>).map(([id, spec]) => {
-    const enumValues = Array.isArray(spec.enum) ? spec.enum.filter((item): item is string => typeof item === 'string') : [];
-    const type = enumValues.length ? 'select' : spec.type === 'boolean' ? 'checkbox' : spec.format === 'textarea' ? 'textarea' : 'text';
+    const rawEnum = Array.isArray(spec.enum) ? spec.enum : [];
+    const enumHasValues = rawEnum.length > 0;
+    const numericEnum = enumHasValues && rawEnum.every((item) => typeof item === 'number');
+    const isNumeric = numericEnum || spec.type === 'number' || spec.type === 'integer';
+    const type: InteractionFormField['type'] = enumHasValues
+      ? 'select'
+      : spec.type === 'boolean'
+        ? 'checkbox'
+        : isNumeric
+          ? 'number'
+          : spec.format === 'textarea' || spec.type === 'array'
+            ? 'textarea'
+            : 'text';
     return {
       id,
       label: typeof spec.title === 'string' ? spec.title : id,
       type,
       required: required.has(id),
       placeholder: typeof spec.description === 'string' ? spec.description : undefined,
-      options: enumValues.map((value) => ({ id: value, label: value })),
+      // G2：enum 全量保序透传（数值 enum 不再被字符串过滤清空）；数值 enum 的选项经
+      // String 化渲染、提交侧按 numeric 标记转回数值。
+      options: rawEnum.map((value) => ({ id: String(value), label: String(value) })),
+      numeric: isNumeric || undefined,
     } satisfies InteractionFormField;
   });
 }
@@ -496,8 +513,27 @@ export function buildGenericInteractionPayload(
   };
 }
 
-export function dialogResultFromInteraction(response: InteractionPromptResponsePayload): unknown {
-  if (response.fieldValues) return response.fieldValues;
+/** G2：表单提交结果 → SDK 返回值。numeric 字段（number/integer、数值 enum select）的
+ *  renderer 产出是 string，这里转回数值；空串/非有限数值保持原样（校验层兜底）。 */
+export function dialogResultFromInteraction(
+  response: InteractionPromptResponsePayload,
+  payload?: InteractionPromptPayload,
+): unknown {
+  if (response.fieldValues) {
+    const numericIds = new Set(
+      (payload?.fields ?? [])
+        .filter((field) => field.numeric || field.type === 'number')
+        .map((field) => field.id),
+    );
+    if (numericIds.size === 0) return response.fieldValues;
+    const converted: Record<string, unknown> = { ...response.fieldValues };
+    for (const [key, value] of Object.entries(converted)) {
+      if (!numericIds.has(key) || typeof value !== 'string') continue;
+      const trimmed = value.trim();
+      if (trimmed !== '' && Number.isFinite(Number(trimmed))) converted[key] = Number(trimmed);
+    }
+    return converted;
+  }
   if (response.otherText) return { response: response.otherText };
   return { acknowledged: true };
 }
@@ -580,27 +616,36 @@ function buildGenericChoiceQuestion(payload: Record<string, unknown>): AskUserQu
   };
 }
 
+/** P2-7：AskUserQuestion 请求结果——回答成功携带 SDK 输出；取消携带来源 reason（文案分映见
+ * shared/interaction-cancel.mapAskUserQuestionCancel）。 */
+export type AskUserQuestionOutcome =
+  | { kind: 'answered'; result: AskUserQuestionOutput }
+  | { kind: 'cancel'; reason?: 'user' | 'abort' };
+
 export async function requestAskUserQuestionInteractions(
   sessionId: string,
   mainWindow: BrowserWindow,
   input: AskUserQuestionPayload,
   options: { signal: AbortSignal; toolUseID?: string },
-): Promise<AskUserQuestionOutput | null> {
-  if (!isAskUserQuestionPayload(input) || !input.questions?.length) return null;
+): Promise<AskUserQuestionOutcome> {
+  if (!isAskUserQuestionPayload(input) || !input.questions?.length) {
+    return { kind: 'cancel', reason: 'abort' };
+  }
   const questions = input.questions;
 
   if (questions.length > 1) {
     const payload = buildWizardAskUserQuestionPayload(sessionId, questions, options.toolUseID);
     const response = await requestInteraction(mainWindow, payload, options.signal);
-    if (response.action === 'cancel') return null;
-    return buildAskUserQuestionResult(questions, [{ payload, response }]);
+    // P2-7：cancel 透传 reason，deny 文案由 backend 按 mapAskUserQuestionCancel 分映。
+    if (response.action === 'cancel') return { kind: 'cancel', reason: response.reason };
+    return { kind: 'answered', result: buildAskUserQuestionResult(questions, [{ payload, response }]) };
   }
 
   const question = questions[0];
   const payload = buildAskUserQuestionInteractionPayload(sessionId, question, 0, options.toolUseID);
   const response = await requestInteraction(mainWindow, payload, options.signal);
-  if (response.action === 'cancel') return null;
-  return buildAskUserQuestionResult(questions, [{ payload, response }]);
+  if (response.action === 'cancel') return { kind: 'cancel', reason: response.reason };
+  return { kind: 'answered', result: buildAskUserQuestionResult(questions, [{ payload, response }]) };
 }
 
 export function createElicitationHandler(sessionId: string, mainWindow: BrowserWindow) {
@@ -623,7 +668,7 @@ export function createUserDialogHandler(sessionId: string, mainWindow: BrowserWi
       const payload = buildGenericInteractionPayload(sessionId, request.dialogKind, request.payload, request.toolUseID);
       const response = await requestInteraction(mainWindow, payload, options.signal);
       return response.action === 'submit'
-        ? { behavior: 'completed', result: dialogResultFromInteraction(response) }
+        ? { behavior: 'completed', result: dialogResultFromInteraction(response, payload) }
         : { behavior: 'cancelled' };
     }
 
@@ -631,8 +676,13 @@ export function createUserDialogHandler(sessionId: string, mainWindow: BrowserWi
       signal: options.signal,
       toolUseID: request.toolUseID,
     });
-    return result
-      ? { behavior: 'completed', result }
-      : { behavior: 'cancelled' };
+    // N8：按 kind 分映（P2-7 只修了 canUseTool 路径，此处为同族漏修分支）——
+    // answered→completed 携带输出本体；cancel→cancelled（SDK 该路径无文案字段，中性取消
+    // 语义与 shared/interaction-cancel.mapAskUserQuestionCancel 同源：不再把 {kind:'cancel'}
+    // 杂质对象伪装成「已完成结果」喂给 SDK/transcript）。
+    if (result.kind === 'answered') {
+      return { behavior: 'completed', result: result.result };
+    }
+    return { behavior: 'cancelled' };
   };
 }
