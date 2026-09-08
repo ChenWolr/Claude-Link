@@ -198,3 +198,21 @@ export function apiRetryErrorLabel(error: string | null | undefined): string {
   if (!error) return '连接异常';
   return ERROR_LABELS[error] ?? '连接异常';
 }
+
+// ── P2-21：upstream_fatal 一次性闩（迟到 api_retry 丢弃）的行为 seam ──
+// 闩挂 SessionEntry（每回合新建对象），随 entry 生命周期天然不跨回合残留；这里以结构类型
+// 入参避免 shared 反向依赖主进程类型。主进程 api_retry 入口查 shouldDropLateApiRetry 命中
+// 即丢弃迟到事件；快败处置（abortNonRetryableUpstream 前）用 markUpstreamFatalAborted 置位。
+export interface UpstreamFatalLatchCarrier {
+  upstreamFatalAborted?: boolean;
+}
+
+/** upstream_fatal 快败处置前置位一次性闩。 */
+export function markUpstreamFatalAborted(entry: UpstreamFatalLatchCarrier): void {
+  entry.upstreamFatalAborted = true;
+}
+
+/** 迟到 api_retry 是否应丢弃：闩已置位（upstream_fatal 已快败处置）即丢弃；无 entry 安全。 */
+export function shouldDropLateApiRetry(entry: UpstreamFatalLatchCarrier | null | undefined): boolean {
+  return entry?.upstreamFatalAborted === true;
+}

@@ -23,6 +23,20 @@ export function extractLastEffortFromJsonl(text: string): string | null {
   return null;
 }
 
+/** OPT-1：尾部窗口读取的默认字节数（256KB）——effort 是行级字段，尾部窗口覆盖最近数回合。 */
+export const EFFORT_TAIL_WINDOW_BYTES = 256 * 1024;
+
+/**
+ * OPT-1：从「文件尾部窗口文本」提取 effort。与全文版的唯一差异：窗口首行是被截断的半个
+ * 长行（按字节边界切窗所致），先丢弃到首个换行符再解析，避免半行 JSON 噪音。
+ * 调用方约定：文件整体小于窗口（未截断）时直接用 extractLastEffortFromJsonl 全文解析。
+ */
+export function extractLastEffortFromText(tailText: string): string | null {
+  const nl = tailText.indexOf('\n');
+  const text = nl >= 0 ? tailText.slice(nl + 1) : tailText;
+  return extractLastEffortFromJsonl(text);
+}
+
 /**
  * CLI 会话项目目录名 munge：cwd 逐字符把非 [A-Za-z0-9] 替换为 '-'（与 Claude Code 落盘一致，
  * 实测：D:\software\code\claude-link → D--software-code-claude-link；
