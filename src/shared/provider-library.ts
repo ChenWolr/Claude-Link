@@ -7,6 +7,8 @@ import type { ProviderModel, ProviderProfile } from './types/config';
 export function maskApiKey(plain: string): string {
   const trimmed = plain.trim();
   if (!trimmed) return '';
+  // P3-7：≤8 字符的 key 尾部 4 位即可拼出大半原文——纯占位符防泄露。
+  if (trimmed.length <= 8) return 'sk-…****';
   return `sk-…****${trimmed.slice(-4)}`;
 }
 
@@ -62,6 +64,11 @@ export function sanitizeProviderModels(input: unknown): ProviderModel[] {
     const item = raw as Record<string, unknown>;
     const id = typeof item.id === 'string' ? item.id.trim() : '';
     if (!id) throw new Error('模型 ID 不能为空');
+    // P2-3：模型 ID 格式白名单（字母/数字/下划线/点/连字符/冒号/斜杠）——含空格或
+    // shell 元字符（& | ^ % " < > ( )）的条目直接丢弃。这些 ID 会原样进 CLI
+    // `--model` 参数与 env，历史上连接测试走 shell:true 时存在 cmd 元字符注入面。
+    // 不抛错保持「查询列表含脏条目不阻断保存」的宽容语义；空白/重复仍按既有硬约束抛错。
+    if (!/^[\w.\-:/]+$/.test(id)) continue;
     if (seen.has(id)) throw new Error(`模型「${id}」重复，同供应商内 ID 必须唯一`);
     seen.add(id);
     const maxTokens =

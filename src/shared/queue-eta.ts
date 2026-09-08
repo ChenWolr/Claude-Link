@@ -24,6 +24,11 @@ function fmt(sec: number): string {
   return `${Math.round(sec / 60)} 分钟`;
 }
 
+/** OPT-7：裸秒 → 人类可读（<60s 秒级；否则分钟四舍五入；负数钳 0）。面板倒计时复用。 */
+export function formatCountdownHuman(sec: number): string {
+  return fmt(Math.max(0, sec));
+}
+
 /**
  * 计算单个任务卡上的 ETA 文案；不需要展示时返回 null。
  * 规则按序短路（§1 规格）：
@@ -46,7 +51,8 @@ export function taskEtaText(task: TaskEtaTask, ctx: TaskEtaContext): string | nu
       if (idx === 0) return `当前回合结束后倒计时 ${fmt(interval)} 执行`;
       return `最早约 ${fmt((idx + 1) * interval)} 后（第 ${idx + 1} 位）`;
     case 'countdown':
-      if (idx === 0) return `${cd}s 后执行`;
+      // OPT-7 收尾：首位过人类可读口径（<60s 秒级、≥60s 分钟取整），与同屏倒计时横幅同源。
+      if (idx === 0) return `${formatCountdownHuman(cd)} 后执行`;
       return `最早约 ${fmt(cd + idx * interval)} 后（第 ${idx + 1} 位）`;
     case 'standby':
       return '待命 · 完成一次会话或点恢复后调度';
