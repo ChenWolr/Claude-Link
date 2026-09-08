@@ -97,6 +97,15 @@ let holdDoneTimer: ReturnType<typeof setTimeout> | null = null;
 
 function startHold(e: PointerEvent) {
   if (e.button !== 0 || props.disabled) return;
+  // P2-20（注释模型修正）：捕获指针使 pointerup/pointermove 在指针滑出按钮后仍派发到本按钮
+  //（Pointer Events 规范：捕获期间 pointerleave 被抑制——此前注释宣称「捕获触发隐式
+  // leave」是错的）。滑出取消改由 moveHold/endHold 的边界判定显式实现；capture 失败（旧环境）
+  // 静默降级为原行为（无捕获时滑出后松手事件丢失，pointerleave 兜底取消）。
+  try {
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  } catch {
+    /* no-op */
+  }
   holding.value = true;
   holdProgress.value = 0;
   holdStart = performance.now();
@@ -124,6 +133,39 @@ function resetHold() {
   holding.value = false;
   holdProgress.value = 0;
 }
+
+/** P2-20：指针是否已滑出按钮边界（clientX/Y 与 rect 比对）。捕获期间 leave 不触发，
+ *  滑出判定只能靠坐标。 */
+function isPointerOutside(e: PointerEvent): boolean {
+  const el = e.currentTarget as HTMLElement | null;
+  if (!el) return false;
+  const rect = el.getBoundingClientRect();
+  return e.clientX < rect.left || e.clientX > rect.right
+    || e.clientY < rect.top || e.clientY > rect.bottom;
+}
+
+/** P2-20：捕获期间 pointermove 仍派发——滑出按钮即取消长按（杀掉「滑出后继续按住满 1s
+ *  误发 /compact」的根因；捕获使隐式 pointerleave 失效，坐标判定是唯一可靠出口）。 */
+function moveHold(e: PointerEvent) {
+  if (!holding.value) return;
+  if (isPointerOutside(e)) resetHold();
+}
+
+/** P2-20：pointerup——指针滑出边界 → resetHold 取消（不压缩）；未滑出 → 维持既有完成语义
+ *  （进度已满的 150ms 收尾窗口 / 未满即取消）。显式释放捕获，对鼠标拖出场景更干净。 */
+function endHold(e: PointerEvent) {
+  const outside = isPointerOutside(e);
+  try {
+    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+  } catch {
+    /* 捕获已隐式释放/未捕获 */
+  }
+  if (outside) {
+    resetHold();
+    return;
+  }
+  resetHold();
+}
 </script>
 
 <template>
@@ -135,7 +177,8 @@ function resetHold() {
       :disabled="props.disabled"
       :title="btnTitle"
       @pointerdown.prevent="startHold"
-      @pointerup="resetHold"
+      @pointermove="moveHold"
+      @pointerup="endHold"
       @pointerleave="resetHold"
       @pointercancel="resetHold"
     >
