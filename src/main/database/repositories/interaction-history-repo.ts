@@ -71,7 +71,7 @@ export function getInteractionHistory(sessionId: string, limit = 8): Interaction
       `SELECT id, session_id, title, kind, summary, action, created_at
        FROM interaction_history
        WHERE session_id = ?
-       ORDER BY created_at DESC
+       ORDER BY created_at DESC, rowid DESC
        LIMIT ?`,
     )
     .all(sessionId, limit) as InteractionHistoryRow[];

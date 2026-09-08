@@ -178,6 +178,20 @@ export function deleteMessage(id: string): void {
   getConnection().prepare('DELETE FROM messages WHERE id = ?').run(id);
 }
 
+/** OPT-2：回合尾部分析窄查询（result 落库去重谓词专用）——只取尾部 limit 条、窄列，
+ *  替代全量 getMessagesBySession（SELECT * + 附件 JOIN）。新→旧排序；谓词「从尾部遇
+ *  user 即停」的语义在 limit 窗口内不变。不填附件（去重判定不需要）。 */
+export function getRecentMessagesForTurnCheck(sessionId: string, limit = 50): Message[] {
+  const rows = getConnection()
+    .prepare(
+      `SELECT id, session_id, role, content, event_type, process_kind, parent_agent_id
+       FROM messages WHERE session_id = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+    )
+    .all(sessionId, limit) as MessageRow[];
+  return rows.map(toMessage);
+}
+
 export function getMessagesBySession(sessionId: string): Message[] {
   const rows = getConnection()
     // created_at 是秒级精度（列默认 datetime('now')），同一回合的多个 part 常落在同一秒，
