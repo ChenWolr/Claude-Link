@@ -11,6 +11,8 @@ import {
   detectDirectImageFormat,
   isSupportedDirectImage,
   sanitizeAttachmentFilename,
+  probeGifDimensions,
+  probeWebpDimensions,
 } from './attachment-policy';
 import type {
   AttachmentPreviewResponse,
@@ -106,13 +108,18 @@ export async function writeAttachmentFile(input: StagedAttachmentInput): Promise
   };
 }
 
-/** 解码图片拿像素尺寸；非受支持图片或 nativeImage 返回空尺寸时返回 null（由调用方按不支持图片处理）。 */
+/**
+ * 解码图片拿像素尺寸；非受支持图片或解码不出时返回 null（由调用方按不支持图片处理）。
+ * P1-8：nativeImage（Electron 35）实测解不出 GIF/WebP（探针 scripts/p1-08-nativeimage-probe.js
+ * 证实 isEmpty），按魔数回落自研解析（policy 纯函数）；两者都失败才返回 null。
+ * PNG/JPEG 路径完全不变（nativeImage 首试即成功，不走回落）。
+ */
 export function probeImageDimensions(bytes: Uint8Array): { width: number; height: number } | null {
   if (!detectDirectImageFormat(bytes)) return null;
   const img = nativeImage.createFromBuffer(Buffer.from(bytes));
   const size = img.getSize();
-  if (size.width <= 0 || size.height <= 0) return null;
-  return { width: size.width, height: size.height };
+  if (size.width > 0 && size.height > 0) return { width: size.width, height: size.height };
+  return probeGifDimensions(bytes) ?? probeWebpDimensions(bytes);
 }
 
 /** 读取附件原始 bytes（克隆用；不做缩略图/mime 推断，按落盘原样读）。 */
@@ -187,10 +194,20 @@ export async function removeAttachmentFile(storageKey: string): Promise<void> {
   }
 }
 
-/** 删除超过安全年龄的遗留 .part 文件，并回收遍历后发现的空目录。 */
-export async function cleanupStalePartFiles(minAgeMs = 60 * 60 * 1000): Promise<void> {
+/** 删除超过安全年龄的遗留 .part 文件，并回收遍历后发现的空目录。
+ *  P2-12：registeredStorageKeys——DB 已登记的 storageKey 集合（生产调用方传
+ *  attachmentRepo.listAllStorageKeys()，为完整键 `<sessionId>/<attachmentId>/<filename>`）。
+ *  N10：守卫按完整键（path.relative(root, full) 的 POSIX 形态）比对——叶子文件名命中不算数；
+ *  命中的 `.part` 结尾文件是「键即登记键的合法附件」（落盘名 report.part 的原子写临时名为
+ *  report.part.part），不得删除；真临时 .part（不在 DB）照删。缺省 null = 无登记信息、
+ *  行为与旧版一致。 */
+export async function cleanupStalePartFiles(
+  minAgeMs = 60 * 60 * 1000,
+  registeredStorageKeys?: Iterable<string> | null,
+): Promise<void> {
   const root = path.resolve(getAttachmentsDir());
   const cutoff = Date.now() - minAgeMs;
+  const registered = registeredStorageKeys ? new Set(registeredStorageKeys) : null;
 
   async function walk(dir: string): Promise<void> {
     let entries: Dirent[];
@@ -205,7 +222,13 @@ export async function cleanupStalePartFiles(minAgeMs = 60 * 60 * 1000): Promise<
         await walk(full);
       } else if (entry.isFile() && entry.name.endsWith('.part')) {
         const stat = await fsp.stat(full).catch(() => null);
-        if (stat && stat.mtimeMs <= cutoff) await fsp.rm(full, { force: true });
+        if (stat && stat.mtimeMs <= cutoff) {
+          // P2-12：完整 storageKey（POSIX 相对键）命中 DB 登记集合 → 是键即登记键的合法附件，保留。
+          // N10：必须比全键而非叶子文件名——叶子名命中不构成保护（与孤儿清扫「全键比对」同形）。
+          const posixKey = path.relative(root, full).split(path.sep).join('/');
+          if (registered?.has(posixKey)) continue;
+          await fsp.rm(full, { force: true });
+        }
       }
     }
     if (path.resolve(dir) !== root) {
