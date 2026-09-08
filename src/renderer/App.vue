@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount } from 'vue';
+import { onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import AppLayout from './components/layout/AppLayout.vue';
 import InteractionPrompt from './components/chat/InteractionPrompt.vue';
 import ImageLightbox from './components/chat/ImageLightbox.vue';
 import DiffDialog from './components/changes/DiffDialog.vue';
 import ToolDiffDialog from './components/chat/ToolDiffDialog.vue';
-import { useConfigStore } from './stores/config-store';
+import { useConfigStore, lastSaveFailed } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useExportImageStore } from './stores/export-image-store';
 import { useChat } from './composables/use-chat';
@@ -31,6 +31,27 @@ function suppressDragNavigation(e: DragEvent): void {
     e.preventDefault();
   }
 }
+
+// H1（F5 重做）：设置保存失败跨卸载可感知。ConfigPage 的局部 saveStatus 随页面卸载失效、
+// 其 watch 随 setup 停止——用户已离开设置页时全局 toast 是唯一可达的展示位。只在
+// false→true 边沿弹一次；标志由 ConfigPage performInit 重存清位（成功由 config-store
+// saveConfig 清；失败由 A1 在 catch 清，恢复下一次失败的边沿）。A3：文案中性化——
+// 用户在场时「重进设置页将恢复」承诺不适配（在场有页内 saveStatus）；且标志回到 false
+// 时若 toast 仍在显示则提前隐藏，不傻等 5s 自然到期。
+const saveFailedToastVisible = ref(false);
+let saveFailedToastTimer: ReturnType<typeof setTimeout> | null = null;
+watch(lastSaveFailed, (failed) => {
+  if (failed) {
+    saveFailedToastVisible.value = true;
+    if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
+    saveFailedToastTimer = setTimeout(() => { saveFailedToastVisible.value = false; }, 5000);
+  } else if (saveFailedToastVisible.value) {
+    // 重存/后续保存成功：提前撤销失败提示，缩短「已恢复」前的误导窗口。
+    saveFailedToastVisible.value = false;
+    if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
+    saveFailedToastTimer = null;
+  }
+});
 
 onMounted(async () => {
   document.addEventListener('dragover', suppressDragNavigation);
@@ -65,6 +86,7 @@ onBeforeUnmount(() => {
   if (stopExportProgress) stopExportProgress();
   if (stopCommandChanges) stopCommandChanges();
   if (stopGlobalCommandChanges) stopGlobalCommandChanges();
+  if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
 });
 </script>
 
@@ -75,5 +97,27 @@ onBeforeUnmount(() => {
     <ImageLightbox />
     <DiffDialog />
     <ToolDiffDialog />
+    <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">设置保存失败，部分修改可能未保存</div>
   </AppLayout>
 </template>
+
+<style scoped>
+/* H1：全局保存失败 toast——固定顶部居中，盖在所有路由内容之上（App.vue 无其它全局浮层样式）。 */
+.global-toast {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3000;
+  border-radius: var(--radius-md);
+  padding: 0.625rem 0.875rem;
+  font-size: 0.8125rem;
+  box-shadow: var(--ring-light), var(--elevation-2);
+}
+
+.global-toast--error {
+  border: 1px solid var(--color-fail-strong);
+  background: color-mix(in srgb, var(--color-fail) 12%, var(--color-panel));
+  color: var(--color-fail-strong);
+}
+</style>
