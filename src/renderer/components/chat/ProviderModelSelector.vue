@@ -3,7 +3,7 @@
 // prototypes/session-model-selector-a2.html 为 1:1 基准）。
 // 会话是唯一的模型选用现场；整个会话（主流程 + 全部普通 subagent）统一使用同一个当前实际模型，
 // haiku/opus/sonnet/fable 别名不再出现在 UI。切换保留会话历史，从下一条消息起生效。
-import { computed, ref, onMounted, onUnmounted, watch } from 'vue';
+import { computed, nextTick, ref, onMounted, onUnmounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 import { useProviderStore } from '../../stores/provider-store';
@@ -41,6 +41,10 @@ const resolved = computed(() =>
 
 const hasLibrary = computed(() => providerStore.providers.length > 0);
 
+// D3：触发器语义——会话未钉任何 override（供应商/模型均空）即「跟随默认（最近使用）」；
+// 显示值恰与默认同值时不再与「已钉住」混淆。
+const followsDefault = computed(() => !(sessionStore.activeSession?.providerOverride || sessionStore.activeSession?.modelOverride));
+
 const hoverProvider = computed(() =>
   providerStore.providers.find((p) => p.id === hoverProviderId.value) ?? null,
 );
@@ -57,6 +61,20 @@ function toggleOpen(): void {
   open.value = !open.value;
   if (open.value) {
     hoverProviderId.value = resolved.value.provider?.id ?? null;
+    // 打开即滚到当前项（D1/D2）：右列最多 4 行，第 5 个模型初始半行可见，其被裁剪段的
+    // 命中测试落在 .foot 提示条上形成点击死区；归位后当前行完整可见、可发现。目标行不
+    // 存在（invalidOverride / 供应商无该模型）时静默跳过。
+    void nextTick(() => {
+      const root = wrapRef.value;
+      if (!root) return;
+      root.querySelector('.cascade .providers .scroll .item.active')?.scrollIntoView({ block: 'nearest' });
+      if (!hoverIsCurrent.value || !resolved.value.modelId) return;
+      const currentModelId = resolved.value.modelId;
+      const models = hoverProvider.value?.models ?? [];
+      const idx = models.findIndex((m) => m.id === currentModelId);
+      if (idx < 0) return;
+      root.querySelectorAll('.cascade .models .scroll .item')[idx]?.scrollIntoView({ block: 'nearest' });
+    });
   }
 }
 
@@ -124,7 +142,9 @@ function formatCtx(maxTokens: number): string {
       type="button"
       class="model-trigger"
       :disabled="props.disabled"
-      title="切换本会话使用的供应商与模型（下一条消息起生效）"
+      :title="followsDefault
+        ? '切换本会话使用的供应商与模型（下一条消息起生效）；当前跟随默认（最近使用），未在本会话固定'
+        : '切换本会话使用的供应商与模型（下一条消息起生效）'"
       :aria-haspopup="true"
       :aria-expanded="open"
       @click="toggleOpen"
@@ -133,6 +153,7 @@ function formatCtx(maxTokens: number): string {
         <span class="model-trigger__provider">{{ resolved.provider?.name ?? '未选择' }}</span>
         <span class="model-trigger__sep">/</span>
         <strong class="model-trigger__model">{{ resolved.modelId ?? '未选择' }}</strong>
+        <span v-if="followsDefault" class="model-trigger__tag">默认</span>
         <span class="model-trigger__caret" aria-hidden="true">⌃</span>
       </template>
       <template v-else>
@@ -250,6 +271,17 @@ function formatCtx(maxTokens: number): string {
   font-size: 0.625rem;
 }
 
+/* 「跟随默认」徽标（D3）：与「已钉住」显示同值时区分语义。 */
+.model-trigger__tag {
+  flex: none;
+  font-size: 0.5625rem;
+  line-height: 1;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.125rem 0.25rem;
+}
+
 /* ── 级联：向上弹出（触发器位于底部工具栏）── */
 .cascade {
   position: absolute;
@@ -345,6 +377,17 @@ function formatCtx(maxTokens: number): string {
 
 .scroll:hover::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--color-text-muted) 40%, transparent);
+}
+
+/* 行级滚动吸附（D1 几何源）：滚轮松手后行吸附整行，消除「半行可见」中缝死区。
+   proximity 远距滚动不强制吸附，无 UX 劣化；不改行高与 4 行视窗数值（a2 基准 1:1）。 */
+.cascade .models .scroll,
+.cascade .providers .scroll {
+  scroll-snap-type: y proximity;
+}
+
+.cascade .scroll .item {
+  scroll-snap-align: start;
 }
 
 .item {
