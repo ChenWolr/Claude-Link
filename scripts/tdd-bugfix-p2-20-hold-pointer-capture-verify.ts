@@ -1,8 +1,12 @@
 // tdd-bugfix-p2-20-hold-pointer-capture-verify.ts
 // P2-20 契约钉：触屏长按圆环滑出不可取消 → 手指离开仍发 /compact。
 //
-// 修复语义：startHold 中 setPointerCapture（滑出触发隐式 pointerleave 取消长按）；
-// pointerup 显式 releasePointerCapture 后复位。结构契约（触屏交互本身记入 §5 人工清单）。
+// 记账更正（B4 契约普查 2026-09-08）：本脚本原头注释宣称「startHold 中 setPointerCapture
+// 后，滑出触发隐式 pointerleave 取消长按」——该指针模型已被 round2 §4.6 真窗实证推翻
+// （Pointer Events 规范：捕获期间指针视为始终位于捕获元素上，**不触发**隐式
+// pointerleave）。滑出误发的真正修复在同链 tdd-bugfix-p2-20-hold-boundary-verify.ts
+// （pointerup/pointermove 与按钮 rect 的边界判定）；本脚本仅钉 capture/release 接线形态
+// （结构契约，触屏交互本身记入 §5 人工清单）。
 //
 // 运行：npx tsx scripts/tdd-bugfix-p2-20-hold-pointer-capture-verify.ts
 

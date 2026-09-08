@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../stores/session-store';
 import { useInteractionStore } from '../stores/interaction-store';
@@ -56,8 +56,30 @@ async function confirmBatchDelete() {
   selectedIds.value = new Set();
 }
 
+// 单条删除与会话级另外两个入口同守卫（F1）：侧栏单删（AppSidebar confirmDelete）与本页
+// 批量删除（confirmBatchDelete）都走 requestConfirm（danger）确认——删除是不可逆物理删除
+// （停 query/队列 → DELETE 级联删库 → 清理附件物理文件），卡片直删按钮紧邻点击区，
+// 误触面真实存在，不得成为无守卫入口。文案逐字对齐 AppSidebar 单删版。
+async function confirmDelete(session: { id: string; name: string }) {
+  const ok = await interactionStore.requestConfirm({
+    title: '删除会话',
+    message: `确定删除会话「${session.name}」？此操作不可撤销。`,
+    confirmText: '删除',
+    cancelText: '取消',
+    danger: true,
+  });
+  if (ok) await store.deleteSession(session.id);
+}
+
 onMounted(() => {
   store.loadSessions();
+});
+
+// H2：搜索防抖定时器随卸载清理——250ms 防抖窗口内导航走后，残留定时器触发
+// searchSessions('旧词') 会给跨路由存活的 AppSidebar 重新置入「不可见过滤器」
+// （聊天页侧栏被静默过滤，直到下一次 loadSessions 才自愈）。对齐 ChatPage noticeTimer 先例。
+onUnmounted(() => {
+  if (debounceTimer) clearTimeout(debounceTimer);
 });
 
 function onSearchInput() {
@@ -151,7 +173,7 @@ async function openSession(session: { id: string }) {
           v-if="!batchMode"
           type="button"
           class="session-card__delete"
-          @click.stop="store.deleteSession(session.id)"
+          @click.stop="confirmDelete(session)"
         >
           删除
         </button>
