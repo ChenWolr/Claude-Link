@@ -46,8 +46,19 @@ export function writeClaudeSettings(workingDir: string | null, config: AppConfig
     }
     // 原子替换：先写同目录临时文件再 rename，杜绝并发读者看到半截文件。
     const tmp = path.join(dir, `.settings.local.json.${process.pid}.${Date.now()}.tmp`);
-    fs.writeFileSync(tmp, content, 'utf8');
-    fs.renameSync(tmp, file);
+    try {
+      fs.writeFileSync(tmp, content, 'utf8');
+      fs.renameSync(tmp, file);
+    } catch (writeErr) {
+      // P3-9：写失败 best-effort 清掉 .tmp 垃圾（每次保存都会生成唯一名，不清则累积）；
+      // 清理自身失败静默（主错误照常上抛给外层日志）。
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        /* ignore */
+      }
+      throw writeErr;
+    }
     return { ok: true, path: file, layer: 'local' };
   } catch (e) {
     logger.error('Failed to write settings.local.json', e);
