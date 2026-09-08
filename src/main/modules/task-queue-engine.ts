@@ -212,11 +212,25 @@ export function armFromUserAction(sessionId: string, mainWindow: BrowserWindow):
  *  事件把 halt_interrupted 覆盖成 halt_failed；熔断→恢复→countdown→再失败时 status 已非
  *  standby（running/countdown），第二次熔断是合法的，不得拦截。
  *  N9：队列开关联动闸——开关关时普通直发回合的失败/中断不得熔断（「开关关：任务状态不动」，
- *  与 armFromUserAction / runTaskNow 的开关闸同语义）。 */
+ *  与 armFromUserAction / runTaskNow 的开关闸同语义）。
+ *  R1（复查 2026-09-08）：开关关时 beginUserTurn（无开关闸）已把直发回合置 running——早退前须
+ *  把 running 收口为 standby(switch_off)，否则回合失败/中断后引擎卡 running（面板假象
+ *  「回合执行中…」、armFromUserAction 等 standby 依赖路径被阻塞）。任务状态不动（不
+ *  pauseAllPending）、不广播 queue_halted；countdown 理论上不存在（onQueueEnabledChanged(false)
+ *  已收口），standby 则 no-op。 */
 export function haltQueue(sessionId: string, reason: 'failed' | 'interrupted', mainWindow: BrowserWindow): void {
   const state = queues.get(sessionId);
   if (!state) return;
-  if (getConfig().queueEnabled !== true) return;
+  if (getConfig().queueEnabled !== true) {
+    if (state.status === 'running') {
+      state.status = 'standby';
+      state.standbyReason = 'switch_off';
+      state.countdownRemaining = 0;
+      logger.info(`[queue] halt suppressed (switch off) session=${sessionId} reason=${reason} → standby(switch_off)`);
+      emitStateChanged(mainWindow, sessionId);
+    }
+    return;
+  }
   if (state.status === 'standby' && (state.standbyReason === 'halt_failed' || state.standbyReason === 'halt_interrupted')) {
     return;
   }

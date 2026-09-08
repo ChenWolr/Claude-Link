@@ -231,6 +231,13 @@ export function getConfig(): AppConfig {
   };
 }
 
+// R2（复查 2026-09-08）：「删光供应商」删除事件置位（本进程内）。projectLegacyFields 的补清
+// 分支只在此旗标已置位时触发——P2-4 补清的目标仅是「库从非空变空」后 saveConfig 带回的陈旧
+// 回声；库**从未非空**的老字段直配用户（库一直为空 + 无全局 Key + 自定义端点/模型）不得被
+// saveConfig 重置到官方默认。不用「被动观测库长度」：重启后已有库的进程里
+// ensureProviderMigration 对已存在键早退、无观测机会，删光后的补清会漏。
+let libraryEmptiedByDeletion = false;
+
 // 把 lastUsed 档案投影回 AppConfig 老字段（providerName/apiKey/apiBaseUrl/defaultModel），
 // 并写 settings.local.json。任何供应商库变更（增删改/换 lastUsed/saveConfig）后调用，
 // 保证老链路（buildSpawnEnv 兜底 / settings-writer / connection-tester 兜底）看到一致的投影。
@@ -260,20 +267,23 @@ function projectLegacyFields(): void {
     patch.encryptedApiKey = profile.encryptedApiKey;
     patch.apiKeyEncoding = profile.apiKeyEncoding;
     patch.defaultModel = lastUsedModelId ?? '';
-  } else if (!s.store.encryptedApiKey) {
-    // P2-4 补口（审计「陈旧快照复活链」）：库空+无全局 Key 时补清投影老字段——渲染层整份
-    // saveConfig 带回的陈旧 apiBaseUrl/defaultModel 不得复活已删供应商的端点/模型，回落官方
-    // 默认（对齐 deleteProviderProfile 删光分支的清空集）。保护路径（P3-6 先例）：库空+全局
-    // apiKey 的老式用户在上方 if 不命中（库空）且 encryptedApiKey 非空——本分支不触发，
-    // saveConfig 刚写入的真实 Key/端点原样保留。
+  } else if (!s.store.encryptedApiKey && libraryEmptiedByDeletion) {
+    // P2-4 补口（审计「陈旧快照复活链」）+ R2 收窄（复查 2026-09-08）：只在「库从非空变空」
+    // （libraryEmptiedByDeletion 由 deleteProviderProfile 删光分支置位）后触发——saveConfig
+    // 带回的已删供应商陈旧 apiBaseUrl/defaultModel 不得复活，回落官方默认（对齐删光分支清空集）。
+    // R2：库从未非空的老字段直配用户不进此分支，saveConfig 刚写入的自定义端点/模型原样保留。
+    // 保护路径（P3-6 先例）：库空+全局 apiKey 时 encryptedApiKey 非空，同样不触发。
     patch.providerName = 'Anthropic';
     patch.providerNote = '';
     patch.apiBaseUrl = 'https://api.anthropic.com';
     patch.defaultModel = 'claude-sonnet-4-6';
   }
-  // P2-4 注：库空时清投影老字段（官方默认端点/无凭据）在 deleteProviderProfile 的删光分支
-  // 显式执行，不在本函数——否则库空+全局 apiKey 用户每次 saveConfig 都会把刚存的真实
-  // Key 抹掉（saveConfig 先写 key 再调投影，投影会覆盖）。老字段链「库空回落全局」保留。
+  // P2-4/R2 注：「库空→清投影老字段」有两处触发点，且都以「库曾非空」为前提——
+  // ① deleteProviderProfile 删光分支的显式清空（删除当场）；② 本函数上方补清分支
+  // （libraryEmptiedByDeletion 已置位，拦删光后 saveConfig 的陈旧回声）。都不是「库空」的
+  // 无条件分支：否则库空+全局 apiKey 用户每次 saveConfig 会把刚存的真实 Key 抹掉（saveConfig
+  // 先写 key 再调投影，投影会覆盖）、库从未非空的老字段直配用户会被覆盖自定义端点。
+  // 老字段链「库空回落全局」保留。
   s.set(patch);
 
   const config = getConfig();
@@ -332,6 +342,8 @@ export function hasApiKey(): boolean {
 export function clearConfig(): AppConfig {
   getStore().clear();
   getStore().set(defaultConfig);
+  // R2：恢复出厂=库从未非空，删除事件旗标一并复位（老字段直配重新可用，不受补清影响）。
+  libraryEmptiedByDeletion = false;
   emitConfigSaved();
   return getConfig();
 }
@@ -505,6 +517,9 @@ export function deleteProviderProfile(id: string): void {
   // 的 Base URL/加密 Key 残留在老字段被会话继续静默使用。仅在「删光」这一删除动作时执行，
   // 不放进 projectLegacyFields（否则库空+全局 apiKey 用户每次 saveConfig 都会抹掉真实 Key）。
   if (profiles.length === 0) {
+    // R2：置位「库从非空变空」删除事件——此后 projectLegacyFields 的补清分支才允许触发
+    // （拦删光后 saveConfig 带回的陈旧回声；库从未非空的用户不受补清影响）。
+    libraryEmptiedByDeletion = true;
     s.set({
       providerName: 'Anthropic',
       providerNote: '',
