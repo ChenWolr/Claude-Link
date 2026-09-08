@@ -122,7 +122,7 @@ async function handleDeleteProvider(): Promise<void> {
   if (!p) return;
   const ok = await interactionStore.requestConfirm({
     title: `删除供应商「${p.name}」？`,
-    message: `将同时删除其 ${p.models.length} 个模型配置。正在使用它的会话不受影响，但新建会话不能再选它。删除后可撤销。`,
+    message: `将同时删除其 ${p.models.length} 个模型配置。正在使用它的会话将回退到当前默认供应商（下一条消息起生效），新建会话不能再选它。删除后可撤销。`,
     confirmText: '删除',
     cancelText: '取消',
     danger: true,

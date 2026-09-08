@@ -54,6 +54,8 @@ export interface ParsedDiffFile {
   path: string;
   groups: DiffGroup[];
   binary: boolean;
+  /** P3-5：合并冲突文件降级标记（`diff --cc` combined 头 jsdiff 解析出 NaN 行号）——消费方在 header 提示。 */
+  conflict?: boolean;
 }
 
 // git 二进制标记：整行 meta（无 +/- 前缀），文本 diff 内容行（如 +Binary files…）不会命中。
@@ -104,6 +106,48 @@ function classifyRun(dels: DiffLine[], adds: DiffLine[]): DiffGroup[] {
  * - 无 hunk 且含二进制标记 → { binary: true }（防御；生产路径已由 getChangeDiff 提前置 binary）。
  * - 多文件 patch 只取首个（changes 面板按单文件 diff 调用）。
  */
+/** P3-5：合并冲突降级分组——纯 +/- 着色、无行号（n=null）；头/索引等 meta 行跳过。 */
+function buildConflictGroups(lines: string[]): DiffGroup[] {
+  const groups: DiffGroup[] = [];
+  let delRun: DiffLine[] = [];
+  let addRun: DiffLine[] = [];
+  let ctxL: DiffLine[] = [];
+  let ctxR: DiffLine[] = [];
+  const flushCtx = (): void => {
+    if (ctxL.length || ctxR.length) {
+      groups.push({ k: 'ctx', L: ctxL, R: ctxR });
+      ctxL = [];
+      ctxR = [];
+    }
+  };
+  const flushRun = (): void => {
+    if (!delRun.length && !addRun.length) return;
+    flushCtx();
+    if (delRun.length) groups.push({ k: 'del', L: delRun, R: [] });
+    if (addRun.length) groups.push({ k: 'add', L: [], R: addRun });
+    delRun = [];
+    addRun = [];
+  };
+  for (const raw of lines) {
+    const c = raw[0];
+    if (c !== '+' && c !== '-' && c !== ' ') continue; // diff --cc / index 等头部 meta 行
+    const t = raw.slice(1) || ' ';
+    if (c === '+') {
+      flushCtx();
+      addRun.push({ n: null, t });
+    } else if (c === '-') {
+      flushCtx();
+      delRun.push({ n: null, t });
+    } else {
+      flushRun();
+      ctxL.push({ n: null, t });
+      ctxR.push({ n: null, t });
+    }
+  }
+  flushRun();
+  return groups;
+}
+
 export function parseUnifiedDiff(text: string): ParsedDiffFile | null {
   if (!text || !text.trim()) return null;
 
@@ -124,6 +168,11 @@ export function parseUnifiedDiff(text: string): ParsedDiffFile | null {
 
   const groups: DiffGroup[] = [];
   let prevOldEnd = 0;
+  // P3-5：合并冲突文件（unmerged 输出 `diff --cc`，jsdiff 对 combined `@@@` 头解析出 NaN
+  // 行号）→ 整文件降级为「纯 +/- 行着色、无行号」视图（n=null），消费方据 conflict 标记提示。
+  if (!Number.isFinite(head.hunks[0]!.oldStart) || !Number.isFinite(head.hunks[0]!.newStart)) {
+    return { path: filePath, groups: buildConflictGroups(head.hunks.flatMap((h) => h.lines)), binary: false, conflict: true };
+  }
   for (const hunk of head.hunks) {
     // 相邻 hunk 间 git 跳过未输出的行 → skip 组（渲染为「⋯ N 行」分隔，让多处改动明确分块）
     if (prevOldEnd > 0 && hunk.oldStart > prevOldEnd) {
@@ -183,6 +232,8 @@ export function parseUnifiedDiff(text: string): ParsedDiffFile | null {
  * 把一段可能含多文件/多段的 unified diff 文本拆成独立段，供「片段意图 diff」弹窗逐段展示。
  * - 含 `diff --git ` 行（真 git 多文件输出）→ 按 `diff --git ` 分界，每段自文件头完整保留。
  * - 否则按行首 `--- ` 分界（tool-diff 合成的 MultiEdit 多段：每段 `--- a/...` 起）。
+ *   G4：段边界加严——`--- ` 行须为文件头形态且**紧随 `+++ ` 行**才构成段起点；hunk 内
+ *   以 `--- ` 开头的被删行（内容 `-- xxx` 的原始行）不再被误当段边界产出残缺段。
  * - 空/纯空白 → []。
  * 纯文本拆分（不解析），保证每段仍可独立喂 parseUnifiedDiff（其只取首个 patch）。
  */
@@ -196,9 +247,22 @@ export function splitUnifiedDiff(text: string): string[] {
       .map((s) => s.trim())
       .filter(Boolean);
   }
-  // 合成多段：行首 `--- ` 为段起点（hunk 行以 ' '/+/-/\ 开头，不会以 '--- ' 起）。
-  return trimmed
-    .split(/\n(?=--- )/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  // G4：合成多段——逐行扫描，`--- ` 行同时满足「文件头形态（非空路径）」与「下一行是
+  // `+++ ` 行」才算段起点。残余边界：被删行内容本身形如 `+++ xxx` 且紧随 `--- yyy` 的
+  // 病理形态无法在行级区分，按段起点处理（与真头同形，风险与收益同源）。
+  const lines = trimmed.split('\n');
+  const starts: number[] = [];
+  for (let i = 1; i < lines.length; i += 1) {
+    if (!/^--- \S/.test(lines[i])) continue;
+    if (lines[i + 1]?.startsWith('+++ ')) starts.push(i);
+  }
+  if (starts.length === 0) return [trimmed];
+  const segments: string[] = [];
+  let cursor = 0;
+  for (const start of starts) {
+    segments.push(lines.slice(cursor, start).join('\n').trim());
+    cursor = start;
+  }
+  segments.push(lines.slice(cursor).join('\n').trim());
+  return segments.filter(Boolean);
 }

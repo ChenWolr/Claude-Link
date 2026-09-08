@@ -41,7 +41,8 @@ export function openToolDiffDialog(options: OpenToolDiffDialogOptions): void {
   const { title, diffText, trigger = null } = options;
   if (!diffText) return;
   // 交互弹窗在场时不抢开（ESC 归属冲突，优先让 InteractionPrompt 处理）。
-  if (useInteractionStore().requests.length > 0) return;
+  // P2-8：只看「当前会话可见」的 pending 请求——他会话的后台弹窗不应阻断本会话的 diff 弹窗。
+  if (useInteractionStore().visibleRequestsForActiveSession.length > 0) return;
   const chunks = splitUnifiedDiff(diffText);
   const segments: ToolDiffSegment[] = chunks.map((chunk, i) => ({
     label: chunks.length > 1 ? `${title} · 段 ${i + 1}/${chunks.length}` : title,

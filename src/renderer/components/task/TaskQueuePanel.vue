@@ -6,7 +6,7 @@ import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { useConfigStore } from '../../stores/config-store';
 import { useTaskQueue } from '../../composables/use-task-queue';
-import { taskEtaText } from '../../../shared/queue-eta';
+import { taskEtaText, formatCountdownHuman } from '../../../shared/queue-eta';
 import { resolveQueueDelaySeconds } from '../../../shared/queue-config';
 import type { Task } from '../../../shared/types/task';
 import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
@@ -93,7 +93,7 @@ const queueBarHint = computed<{ text: string; showResumeAll: boolean }>(() => {
   const state = taskStore.queueState;
   if (state.status === 'countdown' && state.countdownRemaining > 0) {
     return {
-      text: `上一回合已结束，${state.countdownRemaining}s 后执行下一个任务（期间可在会话框插话或点「立即执行」）`,
+      text: `上一回合已结束，${formatCountdownHuman(state.countdownRemaining)} 后执行下一个任务（期间可在会话框插话或点「立即执行」）`,
       showResumeAll: false,
     };
   }
@@ -105,8 +105,11 @@ const queueBarHint = computed<{ text: string; showResumeAll: boolean }>(() => {
   }
   switch (state.standbyReason) {
     case 'halt_failed':
+      // N9：零任务不弹熔断横幅——空队列的 halt_* 待命态对用户无信息量。
+      if (taskStore.tasks.length === 0) break;
       return { text: '上次执行失败，队列已全部暂停', showResumeAll: true };
     case 'halt_interrupted':
+      if (taskStore.tasks.length === 0) break;
       return { text: '上次执行被中断，队列已全部暂停', showResumeAll: true };
     case 'restart':
       return { text: '应用重启，队列待命：点「立即执行」/「恢复」，或完成一次会话后开始', showResumeAll: false };
@@ -274,7 +277,7 @@ const queueMetric = computed<{ text: string; active: boolean }>(() => {
     case 'running': return { text: '执行中', active: true };
     case 'countdown': {
       const cd = taskStore.queueState.countdownRemaining;
-      return { text: cd > 0 ? `等待 ${cd}s` : '等待中', active: true };
+      return { text: cd > 0 ? `等待 ${formatCountdownHuman(cd)}` : '等待中', active: true };
     }
     default: {
       const reason = taskStore.queueState.standbyReason;
