@@ -1,8 +1,22 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 9;
+const CURRENT_SCHEMA_VERSION = 11;
+
+/** P1-10：表列集合查询（版本块守卫与自愈块共用同一谓词，防「列已存在」中间态复现抛错）。 */
+function tableColumns(db: Database.Database, table: string): Set<string> {
+  return new Set(
+    (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name),
+  );
+}
 
 export function runMigrations(db: Database.Database): void {
+  // P1-10：整体事务化——SQLite DDL 可事务化，迁移中途崩溃/断电时整体回滚到旧版本态，
+  // 不再产生「ALTER 已执行、版本号未写」的半应用残留；即便残留（老库已有），下方守卫亦可安全重放。
+  const migrate = db.transaction(() => runMigrationStatements(db));
+  migrate();
+}
+
+function runMigrationStatements(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_version (
       version INTEGER NOT NULL
@@ -69,17 +83,23 @@ export function runMigrations(db: Database.Database): void {
   }
 
   if (currentVersion < 2) {
-    db.exec(`
-      ALTER TABLE sessions ADD COLUMN model_override TEXT DEFAULT NULL;
-    `);
+    // P1-10：列存在守卫——「ALTER 已执行、版本号未写」中间态（升级中崩溃/断电）不再每次启动
+    // 复现 duplicate column 抛错（与下方自愈块同一谓词，幂等可重放）。
+    if (!tableColumns(db, 'sessions').has('model_override')) {
+      db.exec(`
+        ALTER TABLE sessions ADD COLUMN model_override TEXT DEFAULT NULL;
+      `);
+    }
   }
 
   // V8：会话级供应商选用 + 别名清洗。model_override 取值域从 sonnet/haiku/opus/fable 别名
   // 改为实际模型 ID（唯一实际模型原则）；旧别名值不再有意义，置 NULL 回退到「最近使用」。
   if (currentVersion < 8) {
-    db.exec(`
-      ALTER TABLE sessions ADD COLUMN provider_override TEXT DEFAULT NULL;
-    `);
+    if (!tableColumns(db, 'sessions').has('provider_override')) {
+      db.exec(`
+        ALTER TABLE sessions ADD COLUMN provider_override TEXT DEFAULT NULL;
+      `);
+    }
     db.exec(`
       UPDATE sessions SET model_override = NULL
       WHERE model_override IN ('sonnet', 'haiku', 'opus', 'fable');
@@ -91,6 +111,11 @@ export function runMigrations(db: Database.Database): void {
   {
     const sessCols = db.prepare('PRAGMA table_info(sessions)').all() as { name: string }[];
     const hasCol = (n: string): boolean => sessCols.some((c) => c.name === n);
+    // P1-10：model_override（V2）补进自愈清单——版本号已推进但列缺失的库（半应用/手工库）
+    // 也能修好；V8 的别名清洗 UPDATE 引用该列，缺列会在自愈之后无条件执行时抛 no such column。
+    if (!hasCol('model_override')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN model_override TEXT DEFAULT NULL');
+    }
     if (!hasCol('last_context_tokens')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_context_tokens INTEGER DEFAULT NULL');
     }
@@ -135,14 +160,18 @@ export function runMigrations(db: Database.Database): void {
     WHERE model_override IN ('sonnet', 'haiku', 'opus', 'fable');
   `);
 
-  // 幂等自愈（权限存量清洗）：老版本 createSession 落的 'default' 是旧列默认值（幻影显式值，
-  // 非用户选择），会把存量会话钉死在默认档、永不跟随全局默认权限。统一重置为 NULL
-  //（= 跟随全局默认）。代价：升级前用户显式选过「默认模式」的会话也会被重置为跟随——
-  // 与 V8 model_override 别名清洗同一取舍，用户重选一次即可。重复执行无害（已为 NULL 不变）。
-  db.exec(`
-    UPDATE sessions SET permission_mode = NULL
-    WHERE permission_mode = 'default';
-  `);
+  // V11（一次性存量清洗，N2 修复）：老版本 createSession 落的 'default' 是旧列默认值（幻影
+  // 显式值，非用户选择），会把存量会话钉死在默认档、永不跟随全局默认权限。升级到 V11 时统一
+  // 重置为 NULL（= 跟随全局默认）。**只在 currentVersion < 11 时执行一次**——'default' 此后是
+  // UI/校验层的一等显式档（SessionToolbar 可选、SESSION_UPDATE 白名单放行），用户显式钉在
+  // 安全档的会话重启后保留；旧实现（无版本守卫的启动块）每次启动都抹一遍，等于显式选择
+  // 永不生效（全局为自动模式时=静默升权）。
+  if (currentVersion < 11) {
+    db.exec(`
+      UPDATE sessions SET permission_mode = NULL
+      WHERE permission_mode = 'default';
+    `);
+  }
 
   // 幂等自愈（messages 过程化四列）：老 DB（plan 落地前建库）的 messages 表没有
   // process_kind / parent_agent_id / tool_use_id / title。按列是否存在补加，老库升级后
@@ -196,6 +225,13 @@ export function runMigrations(db: Database.Database): void {
       db.exec('ALTER TABLE tasks ADD COLUMN paused INTEGER NOT NULL DEFAULT 0');
     }
   }
+
+  // OPT-8（V10）：messages.parent_task_id 索引。messageRepo.getMessagesByTask 的
+  // WHERE parent_task_id=? 此前全表扫描（长会话消息多时明显）。幂等 CREATE INDEX IF NOT EXISTS，
+  // 风格对齐既有迁移；无列新增，老库/新库均幂等可重放。
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_messages_parent_task ON messages(parent_task_id);
+  `);
 
   // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，
   // 切换会话或重启后仍可在 InteractionPrompt 底部"交互历史"区回看。
