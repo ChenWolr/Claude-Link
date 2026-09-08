@@ -28,6 +28,7 @@ import { isValidThinkingLevel } from '../../shared/types/thinking';
 import { isValidPermissionMode } from '../../shared/permission-resolver';
 import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes, DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
+import { clearProviderModelsCache } from './model-resolver';
 import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels } from '../../shared/provider-library';
 import { logger } from '../utils/logger';
 import { parseClaudeSettings } from './settings-importer';
@@ -259,7 +260,20 @@ function projectLegacyFields(): void {
     patch.encryptedApiKey = profile.encryptedApiKey;
     patch.apiKeyEncoding = profile.apiKeyEncoding;
     patch.defaultModel = lastUsedModelId ?? '';
+  } else if (!s.store.encryptedApiKey) {
+    // P2-4 补口（审计「陈旧快照复活链」）：库空+无全局 Key 时补清投影老字段——渲染层整份
+    // saveConfig 带回的陈旧 apiBaseUrl/defaultModel 不得复活已删供应商的端点/模型，回落官方
+    // 默认（对齐 deleteProviderProfile 删光分支的清空集）。保护路径（P3-6 先例）：库空+全局
+    // apiKey 的老式用户在上方 if 不命中（库空）且 encryptedApiKey 非空——本分支不触发，
+    // saveConfig 刚写入的真实 Key/端点原样保留。
+    patch.providerName = 'Anthropic';
+    patch.providerNote = '';
+    patch.apiBaseUrl = 'https://api.anthropic.com';
+    patch.defaultModel = 'claude-sonnet-4-6';
   }
+  // P2-4 注：库空时清投影老字段（官方默认端点/无凭据）在 deleteProviderProfile 的删光分支
+  // 显式执行，不在本函数——否则库空+全局 apiKey 用户每次 saveConfig 都会把刚存的真实
+  // Key 抹掉（saveConfig 先写 key 再调投影，投影会覆盖）。老字段链「库空回落全局」保留。
   s.set(patch);
 
   const config = getConfig();
@@ -282,8 +296,14 @@ export function saveConfig(partial: Partial<AppConfig>): AppConfig {
   getStore().set(storage);
 
   if (apiKey !== undefined) {
-    const encrypted = encryptApiKey(apiKey);
-    getStore().set(encrypted);
+    // P3-6：空串或掩码形态 = 不改动（保留旧加密值）。CONFIG_GET/SAVE 的 renderer 出口现在
+    // 只下发掩码（sk-…****xxxx），渲染层自动保存整份 config 会把掩码原样带回——重新加密
+    // 掩码会污染真实 Key。仅非掩码明文才重新加密；清空 Key 走 deleteProviderProfile/clearConfig。
+    const trimmedKey = apiKey.trim();
+    if (trimmedKey !== '' && !trimmedKey.includes('…****')) {
+      const encrypted = encryptApiKey(apiKey);
+      getStore().set(encrypted);
+    }
   }
 
   // 老字段是库的投影：渲染层整份 saveConfig（自动保存）可能带回陈旧的投影字段，
@@ -296,6 +316,13 @@ export function saveConfig(partial: Partial<AppConfig>): AppConfig {
 export function getDecryptedApiKey(): string | null {
   const apiKey = decryptApiKey(getStore().store);
   return apiKey || null;
+}
+
+/** P3-6：renderer 出口专用——apiKey 掩码（sk-…****xxxx），主进程内部消费一律走 getConfig()。
+ *  渲染层 UI 本就不显示明文 Key；下发掩码配合 saveConfig 的「掩码=不改动」语义防回写污染。 */
+export function getConfigForRenderer(): AppConfig {
+  const config = getConfig();
+  return { ...config, apiKey: maskApiKey(config.apiKey) };
 }
 
 export function hasApiKey(): boolean {
@@ -444,14 +471,21 @@ export function saveProviderProfile(input: ProviderSaveInput): ProviderProfileVi
     };
   }
 
-  const profiles = (s.store.providerProfiles ?? []).filter((p) => p.id !== saved.id);
+  const previousProfiles = s.store.providerProfiles ?? [];
+  const profiles = previousProfiles.filter((p) => p.id !== saved.id);
   // 新建即成为最近选用（库的第一个用户动作）；编辑保持 lastUsed 不动。
-  const wasEmpty = profiles.length === 0;
+  // P1-14：空库判定必须用**过滤前**的库长度——编辑唯一档案在过滤后也为空，曾被误判为
+  // wasEmpty 而强写 lastUsed（选中模型被静默重置为 models[0]）；再叠加 !existing 门，
+  // 「编辑永不触碰 lastUsed」的意图双保险成立。
+  const wasEmpty = previousProfiles.length === 0;
   profiles.push(saved);
   s.set({ providerProfiles: profiles });
-  if (wasEmpty) {
+  if (wasEmpty && !existing) {
     s.set({ lastUsedProviderId: saved.id, lastUsedModelId: saved.models[0]?.id ?? null });
   }
+  // N6：模型查询缓存（缓存键仅 profile.id，TTL 1h）随档案编辑失效——否则改 Base URL/Key
+  // 后「查询模型」1 小时内仍返回旧端点列表，与行内测试（不走缓存）自相矛盾。
+  clearProviderModelsCache(saved.id);
   projectLegacyFields();
   return toProviderView(saved);
 }
@@ -467,6 +501,21 @@ export function deleteProviderProfile(id: string): void {
   lastDeletedProvider = profiles[index];
   profiles.splice(index, 1);
   s.set({ providerProfiles: [...profiles] });
+  // P2-4：删光后显式清投影老字段（官方默认端点/无凭据，与首次安装行为一致）——防已删档案
+  // 的 Base URL/加密 Key 残留在老字段被会话继续静默使用。仅在「删光」这一删除动作时执行，
+  // 不放进 projectLegacyFields（否则库空+全局 apiKey 用户每次 saveConfig 都会抹掉真实 Key）。
+  if (profiles.length === 0) {
+    s.set({
+      providerName: 'Anthropic',
+      providerNote: '',
+      apiBaseUrl: 'https://api.anthropic.com',
+      encryptedApiKey: null,
+      apiKeyEncoding: null,
+      defaultModel: 'claude-sonnet-4-6',
+    });
+  }
+  // N6：删除档案同步失效其模型查询缓存（同 id 档案未来重建时也不会命中旧数据）。
+  clearProviderModelsCache(id);
   projectLegacyFields();
 }
 

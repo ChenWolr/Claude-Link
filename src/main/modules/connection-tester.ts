@@ -8,6 +8,7 @@
 
 import { spawn, execFile, type ChildProcess } from 'child_process';
 import { getConfig, getStoredProviderProfile, decryptProviderApiKey } from './config-manager';
+import { resolveExecutable } from './sdk-backend';
 import { buildSpawnEnv, type SessionModelOverride } from './cli-shared';
 import { classifyUpstreamError, upstreamFatalMessage } from '../../shared/upstream-errors';
 import { logger } from '../utils/logger';
@@ -34,11 +35,14 @@ interface ActiveTest {
   child: ChildProcess | null;
   timer: ReturnType<typeof setTimeout> | null;
   settle: ((result: ProviderModelTestResult) => void) | null;
+  /** OPT-4：本行测试的隔离临时目录（落定/被取代时清理，防跨次累积）。 */
+  cwd: string;
 }
 const activeTests = new Map<string, ActiveTest>();
 
-// Windows 下 spawn 用 shell:true（PATH 解析 claude.cmd），child.kill() 只杀 cmd 包装、
-// 遗留 claude.exe 孤儿（曾致后续测试/会话被占用）；taskkill /T 按进程树整杀。
+// spawn 已改 shell:false + resolveExecutable 解析真实 claude.exe（P2-3，不再经 cmd 包装）；
+// taskkill /T /F 按进程树整杀仍保留作防御纵深——历史 shell:true 时代 child.kill() 只杀
+// cmd 包装、遗留 claude.exe 孤儿（曾致后续测试/会话被占用）的教训不因换 spawn 方式而失效。
 function killTestChild(child: ChildProcess): void {
   try {
     if (process.platform === 'win32' && child.pid) {
@@ -48,6 +52,15 @@ function killTestChild(child: ChildProcess): void {
     }
   } catch {
     // ignore
+  }
+}
+
+// OPT-4：测试隔离临时目录 best-effort 清理（子进程被杀后文件已释放；rm 失败静默）。
+function cleanupTestCwd(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // best-effort
   }
 }
 
@@ -63,6 +76,7 @@ function abortActiveTest(key: string): void {
     clearTimeout(active.timer);
   }
   activeTests.delete(key);
+  cleanupTestCwd(active.cwd);
   active.settle?.({
     success: false,
     message: '测试已被新的测试取代，请重试',
@@ -100,9 +114,9 @@ function executeCliTest(target: TestTarget): Promise<ProviderModelTestResult> {
     // settings env 块会压过进程 env——用户终端用的 ~/.claude/settings.json 若钉了别的供应商
     // 端点/凭据，会把「测试 A 供应商」的请求劫持到 B（实测 404 model_not_found 冤案）。
     // 空列表 = 不加载任何 settings 文件，连接三元组由下方进程 env（buildSpawnEnv）唯一决定。
-    // 注意：Windows 下 spawn 走 shell:true，空字符串参数会被 cmd 吞掉导致 --setting-sources
-    // 误吞下一个参数（实测 "Invalid setting source: -p"）；传字面 '""' 经 cmd 解析为空参数。
-    '--setting-sources', '""',
+    // P2-3：spawn 已改 shell:false（exe 经 resolveExecutable 解析为真实可执行文件），空参数
+    // 直接传 ''，不再需要 Windows shell:true 时代的字面 '""' 变通。
+    '--setting-sources', '',
     '-p', TEST_PROMPT,
     '--output-format', 'stream-json',
     '--include-partial-messages',
@@ -115,21 +129,35 @@ function executeCliTest(target: TestTarget): Promise<ProviderModelTestResult> {
       `SONNET映射=${target.override ? target.override.modelId : '(无)'}, apiKey=SET`,
   );
 
+  // P2-3：exe 经 resolveExecutable 解析（Windows .cmd shim → 真实 claude.exe），spawn 走
+  // shell:false——模型 ID 与路径不再经 cmd 解析，消除元字符注入面（配合入库侧 ID 白名单双保险）。
+  // OPT-4：CLI 缺失检查前置——mkdtempSync 移到本检查之后，CLI 缺失不再每次泄一个空临时目录。
+  const exe = resolveExecutable(cliPath);
+  if (!exe) {
+    return Promise.resolve({
+      success: false,
+      message: '未检测到本地 Claude Code',
+      detail: '请先安装 Claude Code CLI（npm install -g @anthropic-ai/claude-code）后在「连接」页配置。',
+      durationMs: Date.now() - startTime,
+    });
+  }
+
   // 恒用专用临时目录（连接加固 Task 8）：不碰用户真实工作目录，也隔离老版本投影残留的
   // settings.local.json env。真实会话凭据走 SDK Options.settings（最高优先级）+ 进程 env，
   // 与「临时目录 + 进程 env + --model」语义一致，测试结果仍代表真实会话能否跑通。
+  // OPT-4：位于 CLI 缺失检查之后——CLI 缺失早退不再泄空目录。
   const testCwd = fs.mkdtempSync(path.join(os.tmpdir(), 'cl-test-'));
 
-  const child = spawn(cliPath, args, {
+  const child = spawn(exe, args, {
     cwd: testCwd,
     env: buildSpawnEnv(target.override),
     stdio: ['pipe', 'pipe', 'pipe'],
-    shell: process.platform === 'win32',
+    shell: false,
   });
   const key = `${target.providerId}::${target.model}`;
   // 同一行若已有在飞测试（IPC 直调兜底；渲染层同行 pending 已拦截），先中止旧的。
   abortActiveTest(key);
-  const active: ActiveTest = { child, timer: null, settle: null };
+  const active: ActiveTest = { child, timer: null, settle: null, cwd: testCwd };
   activeTests.set(key, active);
 
   let buffer = '';
@@ -141,6 +169,7 @@ function executeCliTest(target: TestTarget): Promise<ProviderModelTestResult> {
     if (active.timer) clearTimeout(active.timer);
     activeTests.delete(key);
     killTestChild(child);
+    cleanupTestCwd(testCwd);
     return result;
   };
 
