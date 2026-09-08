@@ -17,6 +17,7 @@ import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-
 import { isDisplayableSystemInfo } from '../../shared/system-info';
 import { isApiErrorAssistantText } from '../../shared/api-error-text';
 import { isReasoningReplayApiError } from '../../shared/upstream-errors';
+import { computeTurnStartIndex } from '../../shared/turn-boundary';
 import { isErrorCliResult, isSuccessfulCliResult } from '../../shared/session-completion';
 import type { Message } from '../../shared/types/session';
 import type { ChatSendPayload } from '../../shared/types/attachment';
@@ -586,6 +587,10 @@ function createChat() {
       if (part.type === 'thinking' && 'thinking' in part) {
         if (isMainFlow) turnHadThinking = true;
         persistMessage({ role: 'assistant', eventType: 'thinking', content: part.thinking, processKind: 'thinking', parentAgentId });
+        // P1-5 落库即清（对齐 tool_use 的 clearToolStream 模式，仅主流程——子 Agent 思考走
+        // 独立累加器、已在 message 分支统一清）：已落库段不再留在流式预览里，否则多段回合
+        // 错位拼接、切走快照携带已落库内容导致切回后 finalize 重复落库（重复气泡）。
+        if (isMainFlow) store.clearThinking();
         continue;
       }
       if (part.type === 'redacted_thinking') {
@@ -593,6 +598,7 @@ function createChat() {
         // streamingThinking 再落一条，与 redacted 占位消息重复。
         if (isMainFlow) turnHadThinking = true;
         persistMessage({ role: 'assistant', eventType: 'thinking', content: '（此段思考已被安全策略隐藏）', processKind: 'redacted_thinking', parentAgentId });
+        if (isMainFlow) store.clearThinking();
         continue;
       }
       if (part.type === 'text' && 'text' in part) {
@@ -605,6 +611,8 @@ function createChat() {
           isError: isAssistantApiError,
           apiErrorKind: isAssistant && isReasoningReplayApiError(part.text) ? 'reasoning_replay' : null,
         });
+        // P1-5 落库即清（仅主流程）：已落库正文由落库消息接管显示，流式累加器只保留未落库尾巴。
+        if (isMainFlow) store.clearStream();
         continue;
       }
       if (part.type === 'tool_use') {
@@ -769,14 +777,9 @@ function createChat() {
       return;
     }
     const info = e as CliSystemInfoEvent;
-    // api_retry：SDK 不带 text，需自己拼「重试中（第 N/M 次）」动态文案。
+    // OPT-10：api_retry 动态文案分支已删除——api_retry 事件在 handleEvent 更早处被
+    // applyApiRetryEvent（状态卡）消费，永远不会到达 persistSystemEvent（验证轮坐实不可达）。
     let text = info.text;
-    if (!text && info.subtype === 'api_retry') {
-      const attempt = info.sdkAttempt ?? '?';
-      const max = info.sdkMaxRetries ?? '?';
-      const err = info.error ? `（${info.error}）` : '';
-      text = `API 重试中（第 ${attempt}/${max} 次）${err}`;
-    }
     // 问题 5：空文本的 informational 横幅不展示（每回合噪音「ℹ️ 系统提示」）。
     if (!isDisplayableSystemInfo(info.subtype, text)) return;
     const defaultText =
@@ -905,7 +908,8 @@ function createChat() {
       });
       // 力度② turn 边界：本回合 assistant 消息从此索引开始。MessageList 据此在发送中
       // （且对应流式非空）隐藏本回合已落库的 text/thinking，避免与流式块重复显示。
-      store.turnStartIndex = store.messages.length;
+      // P1-3：口径收口到共享纯函数（与切回恢复/队列回合同一实现）。
+      store.turnStartIndex = computeTurnStartIndex(store.messages);
     }
 
     try {
@@ -976,10 +980,18 @@ function createChat() {
     return null;
   }
 
-  function lastUserText(): string | null {
+  /** 从后往前找最后一条主流程 user 消息（含 id 与附件摘要），供卡死重试原样重发。 */
+  function lastUserMessage(): { id: string; content: string; attachmentIds: string[] } | null {
     const msgs = store.messages;
     for (let i = msgs.length - 1; i >= 0; i -= 1) {
-      if (msgs[i].role === 'user') return msgs[i].content;
+      const m = msgs[i];
+      if (m.role === 'user') {
+        return {
+          id: m.id,
+          content: m.content,
+          attachmentIds: (m.attachments ?? []).map((a) => a.id),
+        };
+      }
     }
     return null;
   }
@@ -989,7 +1001,7 @@ function createChat() {
     // 重入锁：仅在确有卡死标记时重试（横幅可见 ⟺ stalledInfo[sid] 已置）。
     // 防止用户连点重试导致多次 abortChat + 多次 sendMessage（重复用户气泡 + 重复 query）。
     if (!store.stalledInfo[sid]) return;
-    const last = lastUserText();
+    const last = lastUserMessage();
     store.clearStalled(sid);
     if (!last) return;
     try {
@@ -998,8 +1010,25 @@ function createChat() {
       // ignore
     }
     await new Promise((r) => setTimeout(r, 200));
-    // 卡死重试：重发最后一条用户文字（不带附件，新回合新 clientMessageId）。
-    await sendMessage({ text: last, attachmentIds: [], clientMessageId: crypto.randomUUID() });
+    // P2-13：重发前克隆原消息附件为新草稿（原消息附件已升格 message 态，直接复用旧 id 会
+    // 二次升格/引用计数错乱）。克隆出的草稿附件同步进 draft store（乐观附件卡片可见）。
+    // 克隆失败（IPC 异常）回落纯文本重发并提示；原消息无附件则跳过克隆（与旧行为一致）。
+    let attachmentIds: string[] = [];
+    if (last.attachmentIds.length > 0) {
+      try {
+        const cloned = await window.claudeLink.cloneMessageAttachments(sid, last.id);
+        attachmentIds = cloned.map((a) => a.id);
+        if (attachmentIds.length > 0) {
+          useChatDraftStore().addAttachments(sid, cloned);
+        } else {
+          error.value = '附件恢复失败，已按纯文本重发';
+        }
+      } catch {
+        error.value = '附件恢复失败，已按纯文本重发';
+      }
+    }
+    // 卡死重试：重发最后一条用户消息（新回合新 clientMessageId）。
+    await sendMessage({ text: last.content, attachmentIds, clientMessageId: crypto.randomUUID() });
   }
 
   return { sending, error, lastFailedBySession, sendMessage, abort, retryLastTurn, startListening, stopListening };
