@@ -6,10 +6,12 @@
 // 已删除（SDK 路径完全取代），但工具函数被 SDK 路径复用，故独立到此模块。
 
 import type { CliInitEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliResultEvent, CliEvent, CliMessageEvent, CliMessageContentPart, CliAbortedEvent } from '../../shared/types/cli';
+import type { Message } from '../../shared/types/session';
 import type { ThinkingLevel } from '../../shared/types/thinking';
 import type { PermissionMode } from '../../shared/permission-resolver';
 import { getConfig } from './config-manager';
 import { resolveThinkingConfig } from '../../shared/thinking-resolver';
+import { ENGINE_BACKGROUND_TOGGLE_ENV } from '../../shared/constants';
 import { logger } from '../utils/logger';
 import * as messageRepo from '../database/repositories/message-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
@@ -42,6 +44,12 @@ export interface SpawnOptions {
    * 供 /init 文件副作用诊断等命令判定使用。
    */
   userCommandText?: string;
+  /**
+   * 本回合是否带附件（N4）：CHAT_SEND 调用方按 prepared.attachmentIds 长度传入。
+   * reasoning_replay 自动重试据此跳过带附件回合——重发载体是纯文本，照发会落一条
+   * 无附件重复 user 行且模型看不到原图。
+   */
+  hasAttachments?: boolean;
 }
 
 // 会话当前实际模型的 spawn 覆盖（doc2 §5.1）：resolveSessionModel 的结果由调用方解析后传入。
@@ -73,11 +81,9 @@ export function buildSpawnEnv(override?: SessionModelOverride | null): Record<st
   if (config.advancedJson && config.advancedJson !== '{}') {
     try {
       const advanced = JSON.parse(config.advancedJson) as Record<string, unknown>;
-      for (const [key, value] of Object.entries(advanced)) {
-        if (typeof value === 'string') {
-          env[key] = value;
-        }
-      }
+      // P2-6：不再把 advancedJson **顶层**字符串键当 env 注入——顶层是 settings 语义
+      //（permissions/hooks/env 等字段，经 settings 投影通道生效），把 HOME/PATH 级键当 env
+      // 展开既与投影通道语义分叉，也给误配置开了覆盖关键变量的口子。env 只认 advanced.env 块。
       const envBlock = advanced.env;
       if (envBlock && typeof envBlock === 'object' && !Array.isArray(envBlock)) {
         for (const [key, value] of Object.entries(envBlock as Record<string, unknown>)) {
@@ -102,15 +108,13 @@ export function buildSpawnEnv(override?: SessionModelOverride | null): Record<st
     }
   }
 
-  // 引擎后台请求六开关：勾选时注入 '1'，未勾选完全不注入（引擎默认）。本通道（进程 env）
-  // 覆盖 post-turn probe（裸 spawn）与 connection-tester（--setting-sources '' 后进程 env
-  // 唯一决定）；query/probe 的 Options.env 也走这里。子进程（sdk-cli 后台子进程）继承父 env。
-  if (config.disableAutoMemory) env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
-  if (config.disableBackgroundTasks) env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
-  if (config.disableCron) env.CLAUDE_CODE_DISABLE_CRON = '1';
-  if (config.disableFeedbackSurvey) env.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = '1';
-  if (config.disableTelemetry) env.DISABLE_TELEMETRY = '1';
-  if (config.disableNonessentialTraffic) env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+  // 引擎后台请求六开关（OPT-10：键列表收口到 shared/constants 单一常量，settings.env 通道同源）：
+  // 勾选时注入 '1'，未勾选完全不注入（引擎默认）。
+  for (const [envKey, configKey] of ENGINE_BACKGROUND_TOGGLE_ENV) {
+    if ((config as unknown as Record<string, unknown>)[configKey] === true) {
+      env[envKey] = '1';
+    }
+  }
 
   if (override) {
     // 连接三元组完整性：端点/密钥/模型的归一规则收口在 shared 纯函数，
@@ -185,7 +189,7 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
       break;
 
     case 'aborted': {
-      // review-v2 §3.7：aborted 终态（用户中断「已中断」/ 硬杀「已硬中断」/ 回合结束「回合已结束」）
+      // review-v2 §3.7：aborted 终态（用户中断/硬杀「已中断」——P3-1 统一文案 / 回合结束「回合已结束」）
       // 此前未落库——forwardEvent 推了 IPC 但 persistCliEvent 缺 case，导致重开会话后中断文本消失。
       const abortEvent = event as CliAbortedEvent;
       messageRepo.createMessage({
@@ -221,10 +225,26 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
   }
 }
 
+/** OPT-2 窄查询窗口（尾部 50 条、新→旧）。 */
+const TURN_CHECK_WINDOW = 50;
+
+/** OPT-2 补口（审计「设计缺陷：不绝对等价」）：窄查询窗口打满（返回条数=limit）且窗内未见
+ *  user 边界时回落全量查询一次——重工具回合尾部 >50 条 assistant/tool 消息会把 user 标记
+ *  推出窗外，「遇 user 即停」的回合窗口语义被破坏（假阴性）。窗口内已见 user、或窗口未满
+ * （全量本就 ≤ limit）时不回落，保持窄查询快路径。 */
+function turnCheckRows(sessionId: string): Message[] {
+  const rows = messageRepo.getRecentMessagesForTurnCheck(sessionId, TURN_CHECK_WINDOW);
+  if (rows.length === TURN_CHECK_WINDOW && !rows.some((m) => m.role === 'user')) {
+    return messageRepo.getMessagesBySession(sessionId);
+  }
+  return rows;
+}
+
 function currentTurnHasMainFlowText(sessionId: string): boolean {
-  const rows = messageRepo.getMessagesBySession(sessionId);
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const m = rows[i];
+  // OPT-2：窄查询只取尾部 50 条（新→旧），「遇 user 即停」语义不变；窗口打满未见 user 时
+  // 回落全量一次（turnCheckRows，防 user 边界出窗的假阴性）。
+  const rows = turnCheckRows(sessionId);
+  for (const m of rows) {
     if (m.role === 'user') break;
     if (m.role === 'assistant' && m.eventType === 'message' && !m.parentAgentId) return true;
   }
@@ -238,9 +258,10 @@ function currentTurnHasMainFlowText(sessionId: string): boolean {
 function currentTurnHasLocalCommandOutput(sessionId: string, text: string): boolean {
   const needle = text.trim();
   if (!needle) return false;
-  const rows = messageRepo.getMessagesBySession(sessionId);
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    const m = rows[i];
+  // OPT-2：窄查询只取尾部 50 条（新→旧），「遇 user 即停」语义不变；窗口打满未见 user 时
+  // 回落全量一次（turnCheckRows）。
+  const rows = turnCheckRows(sessionId);
+  for (const m of rows) {
     if (m.role === 'user') break;
     if (
       m.role === 'system' &&
