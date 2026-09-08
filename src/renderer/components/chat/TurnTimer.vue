@@ -25,6 +25,12 @@ const streamingTool = computed(() => sessionStore.streamingTool);
 // 全新回合开始时 markRunning 已清残留（见 session-store），故这里读到非空即「当前回合有工具在跑」。
 const hasRunningTool = computed(() => Object.keys(sessionStore.toolProgress).length > 0);
 
+// B1：回合结束后的完成态——保留显示上次回复耗时 + 结束时间（持久化，切会话/重启不丢）。
+const lastMeta = computed(() => sessionStore.activeLastTurnMeta);
+const endClockText = computed(() =>
+  lastMeta.value ? new Date(lastMeta.value.endedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '',
+);
+
 // 阶段判定（按时间线优先级）：正文流出 → 生成回复中；工具真正执行中（toolProgress 非空）→ 工具执行中；
 // 正在吐工具入参（streamingTool）→ 调用工具中；否则（thinking 流式或 pre-token）→ 思考中。
 // 阶段徽章在整个 sending 期间常驻（替代旧 pre-token 一闪而过的动画点）。
@@ -55,6 +61,14 @@ const phaseMeta = computed(() => PHASE_META[phase.value]);
       <span class="turn-timer__phase" :class="phaseMeta.mod">
         <span class="turn-timer__pdot" aria-hidden="true"></span>
         {{ phaseMeta.label }}
+      </span>
+    </div>
+    <div v-else-if="lastMeta" class="turn-timer turn-timer--done" role="status" title="上次回复的耗时与结束时间（已持久化）">
+      <span class="turn-timer__lead">
+        <span class="turn-timer__done-dot" aria-hidden="true"></span>
+        <span class="turn-timer__label">本次回复</span>
+        <span class="turn-timer__time">{{ formatDurationMs(lastMeta.durationMs) }}</span>
+        <span class="turn-timer__end">· 结束于 {{ endClockText }}</span>
       </span>
     </div>
   </Transition>
@@ -164,6 +178,21 @@ const phaseMeta = computed(() => PHASE_META[phase.value]);
 }
 .turn-timer__phase--generating .turn-timer__pdot {
   background: var(--color-success);
+}
+
+/* B1 完成态：静态绿点（无 ping）+ muted 结束时刻；数字口径与运行中计时一致（tabular-nums）。 */
+.turn-timer--done .turn-timer__time {
+  color: var(--color-success);
+}
+.turn-timer__done-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--color-success);
+}
+.turn-timer__end {
+  color: var(--color-text-muted);
 }
 
 /* 出现/消失过渡：高度平滑展开收起（推挤下方输入框但不突兀），对齐微交互节奏。 */

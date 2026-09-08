@@ -391,7 +391,25 @@ function createChat() {
       case 'result': {
         // 后台会话成功完成：清中断兜底 + 标记完成（侧栏绿灯）。失败 result 走 markStopped。
         clearAbortTimer(sid);
+        // B1：后台会话回合也要记耗时（切回/重启后 TurnTimer 完成态可显示）。
+        // 后台分支不遍历 messages 挂气泡脚注（与现状一致），只写会话级 meta；
+        // messageId 传 null。clientMs 兜底对齐前台 R1 语义。
+        // 顺序硬要求：meta 计算（含 turnStartedAt 捕获）必须先于 markCompleted——
+        // markCompleted 会 delete turnStartedAt[sid]，晚读恒为 null（耗时丢失）。
+        const startedAt = store.turnStartedAt[sid] ?? null;
+        const dur = typeof event.duration_ms === 'number' && event.duration_ms > 0
+          ? event.duration_ms
+          : (startedAt ? Date.now() - startedAt : null);
+        const endedAt = Date.now();
         if (isSuccessfulCliResult(event)) {
+          store.setLastTurnMeta(sid, { durationMs: dur, endedAt });
+          // fire-and-forget：失败不阻塞回合收口（与前台同语义）。
+          window.claudeLink.recordTurnMeta(sid, {
+            messageId: null,
+            costUsd: typeof event.total_cost_usd === 'number' && event.total_cost_usd > 0 ? event.total_cost_usd : null,
+            durationMs: dur,
+            endedAt,
+          }).catch(() => {});
           store.markCompleted(sid);
         } else {
           store.markStopped(sid);
@@ -831,6 +849,7 @@ function createChat() {
 
   // 把费用/耗时挂到本回合最后一条 assistant 消息上（文本或 tool_use 均可），
   // 这样纯工具回合也能展示 cost/duration；回溯到上一回合的用户消息即停止。
+  // B1：同时经 recordTurnMeta 持久化（messages 两列 + sessions 最近回合元数据），切会话/重启不丢。
   function attachResultMetadata(event: CliResultEvent): void {
     const messages = store.messages;
     // 问题 2：第三方端点（如 glm-5.2）可能不回报 duration_ms，用客户端计时（本回合开始→现在）
@@ -846,9 +865,27 @@ function createChat() {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const message = messages[i];
       if (message.role === 'user') break;
+      // B1 审查修复：跳过子 agent 消息（continue 不 break，对齐 turnHasAssistantText 的既有排除）——
+      // 回合总耗时/费用不得挂到子 agent 行，否则脚注落入子 Agent Tab 且主流程行缺脚注。
+      if (message.parentAgentId) continue;
       if (message.role === 'assistant') {
         message.costUsd = typeof cost === 'number' && cost > 0 ? cost : null;
         message.durationMs = typeof duration === 'number' && duration > 0 ? duration : clientMs;
+        // B1：耗时/结束时间持久化（气泡脚注 + 会话级最近回合元数据）。
+        // durationMs 取刚算好的值（端点值或 clientMs 兜底）；无 startedAt 的极端场景为 null，
+        // 此时仍写 endedAt（会话级 durationMs 存 null，完成态不显示耗时——诚实不造数）。
+        if (sid) {
+          const endedAt = Date.now();
+          const finalDuration = typeof message.durationMs === 'number' && message.durationMs > 0 ? message.durationMs : null;
+          store.setLastTurnMeta(sid, { durationMs: finalDuration, endedAt });
+          // fire-and-forget：失败不阻塞回合结束（内存态已在）；重启后该次记录缺失可接受。
+          window.claudeLink.recordTurnMeta(sid, {
+            messageId: message.id,
+            costUsd: message.costUsd,
+            durationMs: finalDuration,
+            endedAt,
+          }).catch(() => {});
+        }
         break;
       }
     }
