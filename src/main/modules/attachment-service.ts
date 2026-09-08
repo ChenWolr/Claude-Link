@@ -319,11 +319,13 @@ export const cleanupDraftAttachments = reconcileDraftAttachments;
 
 /** 启动清理：删除数据库无记录的孤儿物理文件和过期临时文件。 */
 export async function cleanupOrphanAttachments(): Promise<void> {
-  await cleanupStalePartFiles();
-  const dbKeys = new Set(attachmentRepo.listAllStorageKeys());
+  const dbKeys = attachmentRepo.listAllStorageKeys();
+  // P2-12：清扫 .part 时跳过 DB 已登记键——名字本身以 .part 结尾的合法附件不得误删。
+  await cleanupStalePartFiles(60 * 60 * 1000, dbKeys);
+  const dbKeySet = new Set(dbKeys);
   const storedKeys = await listStoredAttachmentKeys();
   for (const key of storedKeys) {
-    if (!dbKeys.has(key)) {
+    if (!dbKeySet.has(key)) {
       await removeAttachmentFile(key).catch((e) => logger.error(`cleanup orphan attachment ${key} failed`, e));
     }
   }
