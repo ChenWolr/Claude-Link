@@ -46,7 +46,7 @@ export const IPC_CHANNELS = {
   SESSION_GET: 'session:get',
   SESSION_DELETE: 'session:delete',
   SESSION_UPDATE: 'session:update',
-  SESSION_UPDATE_MODEL_OVERRIDE: 'session:updateModelOverride',
+  // OPT-10：会话级「单独改 model_override」通道（'session:updateModelOverride'）已删除——全链无调用方。
   SESSION_SEARCH: 'session:search',
   SESSION_ANALYZE_TOPIC: 'session:analyzeTopic',
   MESSAGE_GET_BY_SESSION: 'message:getBySession',
@@ -195,11 +195,14 @@ export interface InteractionPromptOption {
 export interface InteractionFormField {
   id: string;
   label: string;
-  type: 'text' | 'textarea' | 'select' | 'checkbox';
+  /** G2：'number' = 数值输入——renderer 仍产出 string，提交侧按 numeric 标记转回数值。 */
+  type: 'text' | 'textarea' | 'select' | 'checkbox' | 'number';
   required?: boolean;
   placeholder?: string;
   defaultValue?: string | boolean;
   options?: InteractionPromptOption[];
+  /** G2：提交侧需要把 string 转回 number 的字段标记（number/integer 类型与数值 enum select）。 */
+  numeric?: boolean;
 }
 
 export interface InteractionPromptQuestion {
