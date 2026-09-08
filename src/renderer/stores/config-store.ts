@@ -6,7 +6,7 @@
 // 防循环：updatingFromJson 标志（JSON→表单期间置 true，阻止表单 watch 反向同步），nextTick 释放。
 
 import { defineStore } from 'pinia';
-import { nextTick } from 'vue';
+import { nextTick, ref } from 'vue';
 
 // ModelAlias 类型定义在 shared/types/config（供 shared 层 AppConfig 与渲染层共用）。
 import type { ModelAlias } from '../../shared/types/config';
@@ -16,6 +16,12 @@ import type { CliDetectionResult } from '../../shared/types/cli';
 import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
 import { parseClaudeSettings } from '../../shared/settings-parser';
+
+// H1（F5 重做）：设置保存失败跨卸载可感知标志。ConfigPage 组件局部 saveStatus 在页面卸载后
+// 无渲染、其 watch 随 setup 停止——失败对用户不可见，且重进页被 loadConfig 用主进程旧值
+// 回滚。此模块级 ref 与组件生命周期解耦：saveConfig 失败置 true、成功清 false；App.vue 全局
+// watch 在 false→true 边沿弹一次 toast，ConfigPage performInit 开头据它用内存值重存一次。
+export const lastSaveFailed = ref(false);
 
 const defaultConfig: AppConfig = {
   provider: 'anthropic',
@@ -124,6 +130,8 @@ export const useConfigStore = defineStore('config', {
         // 必须先深拷贝成纯普通对象再过 IPC。
         const plainConfig: AppConfig = JSON.parse(JSON.stringify(this.config));
         this.config = await window.claudeLink.saveConfig(plainConfig);
+        // H1：保存成功清失败标志（App.vue 的 toast 只在 false→true 边沿弹，不重复打扰）。
+        lastSaveFailed.value = false;
         // 主进程 saveConfig 末尾已把配置投影写入 <工作目录>/.claude/settings.local.json。
         // 刷新诊断使其反映最新的 effective settings（advancedJson/permissionMode/模型等变化后
         // 若只依赖 workingDirectory watcher，页面会继续展示保存前的过期 effectiveKeys/来源）。
@@ -133,6 +141,9 @@ export const useConfigStore = defineStore('config', {
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '保存配置失败';
+        // H1：失败置标志。注意 this.config 未被覆写（赋值在成功分支）——内存里仍是失败时
+        // 的编辑值，performInit 重存与 App.vue toast 都以此为前提。
+        lastSaveFailed.value = true;
         throw error;
       } finally {
         this.savingConfig = false;
