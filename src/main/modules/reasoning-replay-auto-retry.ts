@@ -12,7 +12,8 @@
 //   · maybeScheduleReasoningReplayRetry ← sdk-backend.runQuery 两个回合终态出口（result / 流丢 result）
 //
 // 不做的事（边界）：不动 thinking-resolver 的 adaptive 行为；不修改 CC transcript；
-// 不重试命令消息（'/' 前缀）；不重试带附件回合（当前记录的是纯文本 prompt）。
+// 不重试命令消息（'/' 前缀）；不重试带附件回合（N4：recordOutgoingUserText 对
+// hasAttachments 回合不记录，重试无载体自然不发生）。
 
 import { getConfig } from './config-manager';
 import { logger } from '../utils/logger';
@@ -33,8 +34,20 @@ export function noteReasoningReplayError(sessionId: string): void {
   turnHasReasoningReplayError.add(sessionId);
 }
 
-/** spawnForChat 发起回合时记录原样用户文本（命令消息不记录，重试层跳过）。 */
-export function recordOutgoingUserText(sessionId: string, text: string | undefined): void {
+/**
+ * 回合起步清除本回合错误标记（P1-1）：中断/流异常收尾不经过消费入口，标记会跨回合残留，
+ * 导致下一个无关成功回合被 result 出口误消费、原样重发。与 clearReasoningReplayState 区分：
+ * 那是会话级全清（删除会话时），本函数只清回合错误标记，不动重试载体/防重入状态。
+ */
+export function clearReasoningReplayTurnFlag(sessionId: string): void {
+  turnHasReasoningReplayError.delete(sessionId);
+}
+
+/** spawnForChat 发起回合时记录原样用户文本（自动重试载体）。
+ *  命令消息不记录（重试层跳过）；带附件回合不记录（N4：重发载体是纯文本，照发会落一条
+ *  无附件重复 user 行且模型看不到原图——与模块头「不重试带附件回合」边界对齐）。 */
+export function recordOutgoingUserText(sessionId: string, text: string | undefined, hasAttachments?: boolean): void {
+  if (hasAttachments) return;
   const trimmed = (text ?? '').trim();
   if (!trimmed || trimmed.startsWith('/')) return;
   lastUserTextBySession.set(sessionId, trimmed);
