@@ -32,7 +32,7 @@ Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本�
 |------|------|
 | `npm run dev` | 启动开发模式（热重载，仅覆盖渲染层） |
 | `npm run typecheck` | 依次检查 node（`tsc`）和 web（`vue-tsc`）两个 TS project，**主要正确性门禁**；无 jest/vitest、无 `npm test` |
-| `npm run selftest` | 自测多段（`&&` 串联，全过才算过）：`selftest:static` 32 段契约脚本 + 本地行为链；本地 `tsx` 执行，不启动 Electron |
+| `npm run selftest` | 自测多段（`&&` 串联，全过才算过）：`selftest:static` 97 段契约脚本 + 本地行为链；本地 `tsx` 执行，不启动 Electron |
 | `npx tsx scripts/regression-tests.ts` | 最大那段回归，selftest 已串联，可单独跑 |
 | `npm run rebuild` | 重编译 `better-sqlite3` 原生 ABI；**拉代码后若启动报 `NODE_MODULE_VERSION` 错误必跑** |
 | `npm run build` / `npm run package:win` | 构建 / 打包 Windows 安装包 |
@@ -45,7 +45,7 @@ Claude Link 是 **Electron 35 + Vue 3.5 + TypeScript** 桌面应用，作为本�
 
 ```
 src/main/        主进程（Node，CJS bundle）：SDK 接入、IPC handler、SQLite、配置存储、导出引擎
-src/preload/     contextBridge：主窗口暴露 window.claudeLink（70 方法），隐藏导出窗口暴露 window.exportLink（9 方法）
+src/preload/     contextBridge：主窗口暴露 window.claudeLink（69 方法），隐藏导出窗口暴露 window.exportLink（9 方法）
 src/renderer/    Vue 前端（Pinia stores / composables / pages / components）+ 独立 export.html（隐藏导出窗口的第二个 Vue app）
 src/shared/      主进程与渲染进程共享的类型与纯逻辑（settings-parser、context-usage、session-model、queue-eta、stall-watchdog、types）
 ```
@@ -133,7 +133,7 @@ SDK canUseTool / onUserDialog / onElicitation
 ### 数据库（`src/main/database/`）
 
 - 单例 better-sqlite3（`getConnection()` 每语句同步调用），`journal_mode=WAL` + `PRAGMA foreign_keys=ON`。DB 文件在 `userData/claude-link.db`，附件在同级 `attachments/`（不在工作树内）。
-- 迁移幂等自愈：**`CURRENT_SCHEMA_VERSION = 9`**；V3+ 用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 守卫的 `ALTER TABLE ADD COLUMN`。版本一览：V1 初始三表 / V2 `model_override` / V3 `interaction_history` / V4 attachments+连接表+`messages.is_error` / V5 `tasks.client_message_id` 部分唯一索引 / V6 `claude_plan_state` / V7 `thinking_level` / V8 `provider_override`+旧别名清洗 / V9 `tasks.paused`；另有无版本号幂等自愈块（sessions 的 `last_context_*` 6 列与 `last_effective_effort`、messages 的 `process_kind/parent_agent_id/tool_use_id/title/is_error/api_error_kind`、`permission_mode='default'` 存量清洗）。
+- 迁移幂等自愈：**`CURRENT_SCHEMA_VERSION = 11`**；V3+ 用 `CREATE TABLE IF NOT EXISTS` + `PRAGMA table_info` 守卫的 `ALTER TABLE ADD COLUMN`。版本一览：V1 初始三表 / V2 `model_override` / V3 `interaction_history` / V4 attachments+连接表+`messages.is_error` / V5 `tasks.client_message_id` 部分唯一索引 / V6 `claude_plan_state` / V7 `thinking_level` / V8 `provider_override`+旧别名清洗 / V9 `tasks.paused` / V10 `messages.parent_task_id` 索引 / V11 `permission_mode='default'` 存量一次性清洗（N2：只在升版时执行一次，用户显式 'default' 重启后保留）；另有无版本号幂等自愈块（sessions 的 `last_context_*` 6 列与 `last_effective_effort`、messages 的 `process_kind/parent_agent_id/tool_use_id/title/is_error/api_error_kind`）。
 - 核心表 9 张：`sessions`（19 列，含 provider/model/permission/thinking 覆盖与上下文缓存）、`messages`（FK CASCADE，16 列）、`tasks`（`paused` 列、幂等 `client_message_id` 偏索引）、`attachments` + `message_attachments`/`task_attachments` 连接表、`claude_plan_state`（单调 `revision`）、`interaction_history`、`schema_version`。
 - 各 repo 是 `getConnection()` 之上的薄函数模块；`createMessageWithAttachments` 在单事务内 insert+link+promote。
 
@@ -153,7 +153,7 @@ SDK canUseTool / onUserDialog / onElicitation
 
 ## 测试约定
 
-- 无 jest/vitest，Vue 组件不做单测。`npm run selftest` 用 `tsx` 直接跑 Node，**不启动 Electron、不 build**；`selftest:static` 链现有 32 段契约脚本。
+- 无 jest/vitest，Vue 组件不做单测。`npm run selftest` 用 `tsx` 直接跑 Node，**不启动 Electron、不 build**；`selftest:static` 链现有 97 段契约脚本。
 - 两类断言：① 导入 `src/shared/*` 纯函数做**行为测试**；② `readFileSync` 读主进程/渲染层源码做**结构文本契约**（`.includes`/regex），专门钉住「一个功能横跨多文件」的接线不变量。注意 `selftest:static` 里的 `tdd-*-verify` 含大量**字面窗口正则**（隐藏契约网），行为改动前先跑基线，被破时按最小同步原则独立 commit 同步断言。
 - **新增功能必须在 selftest 补契约断言**并接入 `package.json` `selftest:static` 的 `&&` 链；`scripts/` 里的 `tdd-*-verify.ts` / `export-image-*-verify.ts` 同此风格。
 - CDP 门禁：`test:cdp`（烟雾）、`test:cdp:commands-e2e`（命令菜单 DOM）、`test:cdp:real-window`（真实窗口 10 断言）、`test:cdp:context-e2e`（上下文圆环发布级语义，S0–S13）、`test:cdp:readonly-e2e`（受限账户链）、`test:cdp:layout`（布局）。

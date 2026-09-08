@@ -169,8 +169,8 @@ src/
 │   │   ├── changes-panel.ts       # Git 改动面板
 │   │   ├── reasoning-replay-auto-retry.ts # 上游错误自动重试
 │   │   └── export-image-*.ts      # 长图导出与 PNG worker
-│   └── database/                  # SQLite 连接、迁移（V9）和 repositories
-├── preload/                       # contextBridge，主窗口 70 方法 + 导出窗口 9 方法
+│   └── database/                  # SQLite 连接、迁移（V11）和 repositories
+├── preload/                       # contextBridge，主窗口 69 方法 + 导出窗口 9 方法
 ├── renderer/                      # Vue 页面、组件、Pinia stores
 │   ├── pages/                     # ChatPage、ConfigPage、SessionsPage
 │   ├── components/                # 聊天、配置、供应商、任务和改动面板
@@ -188,7 +188,7 @@ src/
 
 应用使用 Electron 的主进程、preload 和 renderer 三进程模型。主进程持有 SQLite、供应商密钥、附件绝对路径和 SDK query 句柄，renderer 只通过 preload 暴露的结构化 API 访问能力。
 
-数据库文件位于 Electron `userData` 目录的 `claude-link.db`（schema V9），附件位于同级 `attachments/` 目录。核心数据包括会话（含供应商/模型/权限/思考强度覆盖与上下文缓存列）、消息、任务、附件、Claude 计划快照和交互历史。
+数据库文件位于 Electron `userData` 目录的 `claude-link.db`（schema V11），附件位于同级 `attachments/` 目录。核心数据包括会话（含供应商/模型/权限/思考强度覆盖与上下文缓存列）、消息、任务、附件、Claude 计划快照和交互历史。
 
 ## 技术栈
 
@@ -240,13 +240,13 @@ npm run package:win
 
 - `npm run dev`：启动开发模式
 - `npm run typecheck`：检查 node 与 web 两个 TypeScript project
-- `npm run selftest`：运行静态自测（32 段契约脚本）和本地行为契约
+- `npm run selftest`：运行静态自测（97 段契约脚本）和本地行为契约
 - `npm run selftest:native`：运行静态自测加原生 Claude Code 链路
 - `npm run build`：构建 Electron 应用
 - `npm run rebuild`：重编译 better-sqlite3 原生模块
 - `npm run package:win`：打包 Windows NSIS 安装包
 
-`selftest` 使用 `tsx` 执行，不启动 Electron。它覆盖 settings 映射、供应商库、会话模型选择器、连接完整性、上下文用量（含熔断）、队列语义 v3、引擎后台开关、思考强度真值、命令矩阵与原生命令、回归场景、卡顿看门狗、权限默认档、图片导出、PNG 编码、diff 渲染器六件套、思考内滚、布局契约等 32 段契约。另有 CDP 门禁：`test:cdp`、`test:cdp:commands-e2e`、`test:cdp:real-window`、`test:cdp:context-e2e`、`test:cdp:readonly-e2e`、`test:cdp:layout`。
+`selftest` 使用 `tsx` 执行，不启动 Electron。它覆盖 settings 映射、供应商库、会话模型选择器、连接完整性、上下文用量（含熔断）、队列语义 v3、引擎后台开关、思考强度真值、命令矩阵与原生命令、回归场景、卡顿看门狗、权限默认档、图片导出、PNG 编码、diff 渲染器六件套、思考内滚、布局契约等 97 段契约。另有 CDP 门禁：`test:cdp`、`test:cdp:commands-e2e`、`test:cdp:real-window`、`test:cdp:context-e2e`、`test:cdp:readonly-e2e`、`test:cdp:layout`。
 
 如果启动时出现 `NODE_MODULE_VERSION` 或 `better-sqlite3` ABI 错误，先执行：
 
