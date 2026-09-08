@@ -89,7 +89,7 @@ export function getSession(id: string): Session | null {
 
 export function listSessions(): Session[] {
   const rows = getConnection()
-    .prepare('SELECT * FROM sessions ORDER BY updated_at DESC')
+    .prepare('SELECT * FROM sessions ORDER BY updated_at DESC, rowid DESC')
     .all() as SessionRow[];
   return rows.map(toSession);
 }
@@ -176,12 +176,8 @@ export function updateCliSessionId(id: string, cliSessionId: string | null): Ses
   return getSession(id);
 }
 
-export function updateModelOverride(id: string, modelOverride: string | null): Session | null {
-  getConnection()
-    .prepare("UPDATE sessions SET model_override = ?, updated_at = datetime('now') WHERE id = ?")
-    .run(modelOverride, id);
-  return getSession(id);
-}
+// OPT-10：updateModelOverride 已删除——会话级单独改 model_override 的 IPC 通道全链无调用方
+//（模型选用唯一现场=供应商模型选择器，经 SESSION_UPDATE / SESSION_SET_PROVIDER_MODEL）。
 
 export function updateLastContext(id: string, tokens: number, windowSize?: number): Session | null {
   getConnection()

@@ -54,6 +54,16 @@ export function createTask(sessionId: string, prompt: string, sortOrder: number)
   return createTaskWithAttachments(sessionId, prompt, sortOrder, [], null);
 }
 
+/** P2-16：下一个可用 sort_order（现存量 MAX+1；空会话为 0）。
+ *  TASK_ADD 原用 tasks.length 作 sort_order——建-删-建后与现存行撞值，同 sort_order 时
+ *  排序退化不稳定；按现存量最大值 +1 永不撞。 */
+export function nextSortOrder(sessionId: string): number {
+  const row = getConnection()
+    .prepare('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM tasks WHERE session_id = ?')
+    .get(sessionId) as { next: number } | undefined;
+  return row?.next ?? 0;
+}
+
 export function createTaskWithAttachments(
   sessionId: string,
   prompt: string,
@@ -96,7 +106,7 @@ export function getTask(id: string): Task | null {
 
 export function getTasksBySession(sessionId: string): Task[] {
   const rows = getConnection()
-    .prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY sort_order ASC')
+    .prepare('SELECT * FROM tasks WHERE session_id = ? ORDER BY sort_order ASC, rowid ASC')
     .all(sessionId) as TaskRow[];
   const tasks = rows.map(toTask);
   fillTaskAttachments(tasks);
@@ -105,7 +115,7 @@ export function getTasksBySession(sessionId: string): Task[] {
 
 export function getPendingTasks(sessionId: string): Task[] {
   const rows = getConnection()
-    .prepare("SELECT * FROM tasks WHERE session_id = ? AND status = 'pending' AND paused = 0 ORDER BY sort_order ASC")
+    .prepare("SELECT * FROM tasks WHERE session_id = ? AND status = 'pending' AND paused = 0 ORDER BY sort_order ASC, rowid ASC")
     .all(sessionId) as TaskRow[];
   const tasks = rows.map(toTask);
   fillTaskAttachments(tasks);
