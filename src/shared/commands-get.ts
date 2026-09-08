@@ -20,6 +20,10 @@ export interface CommandsGetInput {
   fallback: SessionCommandSnapshot | null;
   /** watcher 当前用户级指纹（D5）；undefined = watcher 未启动/未算出，不比对不误标。 */
   currentUserFingerprint?: string;
+  /** P2-14：当前项目级指纹（per-session cwd 两根现算）；undefined = 无 cwd/快照无出生指纹，不比对。 */
+  currentProjectFingerprint?: string;
+  /** P3-4：全局 CLI 缺失（runGlobalCommandProbe 无 exe）。暂态只读分流据此返回 degraded 而非永久 loading。 */
+  cliMissing?: boolean;
 }
 
 /** COMMANDS_GET 分流决策：返回给 renderer 的快照 + handler 需要执行的副作用档位。 */
@@ -44,17 +48,26 @@ function fallbackCopy(fallback: SessionCommandSnapshot, sessionId: string): Sess
 
 /**
  * D5：per-session 快照的用户级出生指纹与当前指纹是否不一致（应标 stale + 重探）。
- * 双端缺省（旧快照无指纹 / watcher 未启动）一律 false——绝不因缺数据误标「可能不是最新」。
+ * P2-14：增加项目级比对（snapshot.projectOriginFingerprint vs currentProjectFingerprint）——
+ * 已物化会话的项目级命令文件变更后，重开菜单即可判 stale 免费重探。
+ * 双端缺省（旧快照无指纹 / watcher 未启动 / 会话无 cwd）一律 false——绝不因缺数据误标。
  */
 export function isSnapshotOriginStale(
   snapshot: SessionCommandSnapshot,
   currentUserFingerprint: string | undefined,
+  currentProjectFingerprint?: string,
 ): boolean {
-  return Boolean(
+  const userStale = Boolean(
     snapshot.originFingerprint &&
       currentUserFingerprint &&
       snapshot.originFingerprint !== currentUserFingerprint,
   );
+  const projectStale = Boolean(
+    snapshot.projectOriginFingerprint &&
+      currentProjectFingerprint &&
+      snapshot.projectOriginFingerprint !== currentProjectFingerprint,
+  );
+  return userStale || projectStale;
 }
 
 /**
@@ -66,15 +79,21 @@ export function isSnapshotOriginStale(
  */
 export function resolveCommandsGetResult(input: CommandsGetInput): CommandsGetDecision {
   if (!input.sessionExists) {
+    let snapshot = input.fallback ? fallbackCopy(input.fallback, input.snapshot.sessionId) : input.snapshot;
+    // P3-4：无兜底且 CLI 缺失 → degraded 快照（显式失败出口），菜单显示「未检测到本地
+    // Claude Code」而非永久「正在读取」。重试动作：再次打开菜单经 D6 节流重探。
+    if (!input.fallback && input.cliMissing) {
+      snapshot = { ...snapshot, status: 'degraded', error: '未检测到本地 Claude Code，无法发现 Slash 命令' };
+    }
     return {
       readOnly: true,
       needsFullProbeSideEffects: false,
       needsRefreshProbeOnly: false,
-      snapshot: input.fallback ? fallbackCopy(input.fallback, input.snapshot.sessionId) : input.snapshot,
+      snapshot,
     };
   }
   if (input.hasSnapshot) {
-    const stale = isSnapshotOriginStale(input.snapshot, input.currentUserFingerprint);
+    const stale = isSnapshotOriginStale(input.snapshot, input.currentUserFingerprint, input.currentProjectFingerprint);
     return {
       readOnly: false,
       needsFullProbeSideEffects: false,

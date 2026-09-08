@@ -94,21 +94,49 @@ function scanSkillTree(
   visit(root, 0);
 }
 
+/**
+ * commands 目录扫描（P1-9 递归化）：`.claude/commands/<dir>/<cmd>.md` 形态的命名空间命令
+ * 之前只扫根层 → 磁盘无证据 → origin=unknown → availability hidden → 从菜单消失。
+ * 子目录命令 name 形态经真实 SDK probe 确证为「目录:basename」冒号拼接
+ *（scripts/p1-09-subdir-command-probe.ts：commands/devtool/buildcmd.md → `devtool:buildcmd`，
+ * system.init.slash_commands 与 supportedCommands 双源一致）。
+ * 证据同时记录「冒号拼接全名」与「basename」两个键，classifyOrigin 命中任一即可；
+ * 限深 3 层防爆炸，symlink 目录跳过（与 scanSkillTree 同防环手法）。
+ */
+const COMMAND_SCAN_MAX_DEPTH = 3;
+
 function scanCommandFiles(root: string, origin: CommandOrigin, out: CommandOriginEvidence): void {
-  let entries: Array<{ name: string; isFile(): boolean }>;
-  try {
-    entries = readdirSync(root, { withFileTypes: true }) as unknown as Array<{
-      name: string;
-      isFile(): boolean;
-    }>;
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
-    const name = entry.name.slice(0, -3);
-    record(out, name, name, origin);
-  }
+  const visit = (dir: string, prefix: string, depth: number): void => {
+    if (depth > COMMAND_SCAN_MAX_DEPTH) return;
+    let entries: Array<{ name: string; isFile(): boolean; isDirectory(): boolean }>;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true }) as unknown as Array<{
+        name: string;
+        isFile(): boolean;
+        isDirectory(): boolean;
+      }>;
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const child = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        try {
+          if (lstatSync(child).isSymbolicLink()) continue;
+        } catch {
+          continue;
+        }
+        visit(child, prefix ? `${prefix}:${entry.name}` : entry.name, depth + 1);
+        continue;
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.md')) continue;
+      const basename = entry.name.slice(0, -3);
+      const fullName = prefix ? `${prefix}:${basename}` : basename;
+      record(out, fullName, fullName, origin);
+      if (fullName !== basename) record(out, basename, basename, origin);
+    }
+  };
+  visit(root, '', 0);
 }
 
 export function buildCommandOriginEvidence(input: CommandOriginEvidenceInput): CommandOriginEvidence {
