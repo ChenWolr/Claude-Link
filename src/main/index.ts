@@ -19,9 +19,10 @@ import {
 } from '../shared/constants';
 import { loadWindowSize, trackWindowSize } from './modules/window-state';
 import { setupLinkGuard } from './modules/link-guard';
-import { cleanupStaleTempDirs, disposeExportImageOnQuit } from './modules/export-image-manager';
+import { cleanupStaleTempDirs, disposeExportTempDirsSync } from './modules/export-image-manager';
 import { runExportSmokeIfRequested } from './modules/export-image-smoke';
 import { cleanupOrphanAttachments, reconcileDraftAttachments } from './modules/attachment-service';
+import { setNotificationFocusHook } from './modules/session-completion-notifier';
 
 if (process.env.CLAUDE_LINK_EXPORT_SMOKE) {
   const smokeUserDataDir = join('D:\\software\\Cache', `claude-link-smoke-${process.pid}-${randomUUID()}`);
@@ -131,6 +132,8 @@ function createWindow(): void {
   });
 
   setupLinkGuard(mainWindow, is.dev ? process.env.ELECTRON_RENDERER_URL : undefined);
+  // P2-18：系统通知点击 → 聚焦主窗（回调注入，避免 notifier → index 循环依赖）。
+  setNotificationFocusHook(showMainWindow);
 
   if (is.dev && process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
@@ -241,7 +244,8 @@ app.on('before-quit', () => {
   killAllProcesses();
   void cancelGlobalCommandProbe(); // 取消全局兜底探测，避免孤儿 claude 子进程（killAllProcesses 不扫 probe）
   stopCommandSourceWatcher(); // D3：停命令来源监视，释放 fs.watch 句柄
-  void disposeExportImageOnQuit();
+  // OPT-9：退出前同步 best-effort 清导出临时目录（原 void 异步调用退出前可能跑不完）。
+  disposeExportTempDirsSync();
   closeConnection();
 });
 

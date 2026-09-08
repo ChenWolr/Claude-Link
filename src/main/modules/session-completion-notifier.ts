@@ -19,6 +19,14 @@ import { buildSessionNotification } from '../../shared/session-notification';
 import { getConfig } from './config-manager';
 import { logger } from '../utils/logger';
 
+// P2-18：点击系统 toast 聚焦主窗。index 与 notifier 的依赖方向问题经回调注入解决——
+// notifier 不 import index（会循环依赖），index 启动时 setNotificationFocusHook(showMainWindow)。
+type FocusMainWindow = () => void;
+let focusHook: FocusMainWindow | null = null;
+export function setNotificationFocusHook(fn: FocusMainWindow): void {
+  focusHook = fn;
+}
+
 /**
  * 公共内部实现：主窗口未聚焦时发送系统通知。
  *
@@ -43,6 +51,14 @@ function notifySession(mainWindow: BrowserWindow, sessionId: string, body: strin
     );
     if (!payload) return;
     const notification = new Notification({ title: payload.title, body: payload.body });
+    // P2-18：点击 toast → 聚焦主窗（restore/show/focus）。未注入（测试环境）时 no-op。
+    notification.on('click', () => {
+      try {
+        focusHook?.();
+      } catch (err) {
+        logger.warn(`[notify] 点击通知聚焦主窗失败 ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
     notification.show();
   } catch (err) {
     logger.warn(`[notify] 会话系统通知失败 [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
