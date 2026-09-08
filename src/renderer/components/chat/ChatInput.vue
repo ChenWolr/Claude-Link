@@ -2,6 +2,8 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { parseSlashInvocation, filterRenderableCommands } from '../../../shared/command-routing';
 import type { SdkCommand, CommandSnapshotStatus } from '../../../shared/types/command';
+import { useCommandStore } from '../../stores/command-store';
+import { useSessionStore } from '../../stores/session-store';
 
 // 受控输入：modelValue 由父组件（草稿 store）持有；附件-only 也允许发送。
 // 拖放/粘贴由 ChatPage 在 .chat-page 容器统一处理（不依赖 textarea 焦点、落点更大）。
@@ -127,6 +129,8 @@ function handleKeydown(e: KeyboardEvent): void {
       return;
     }
     if (e.key === 'Enter' && !e.shiftKey) {
+      // N3：IME 组词确认回车（isComposing）不是选中命令的意图，忽略。
+      if (e.isComposing) return;
       e.preventDefault();
       selectSlashCommand(visibleCommands.value[selectedSlashIndex.value]);
       return;
@@ -140,6 +144,8 @@ function handleKeydown(e: KeyboardEvent): void {
   }
 
   if (e.key === 'Enter' && !e.shiftKey) {
+    // N3：IME 组词确认回车（isComposing）不是发送意图——否则会把半成品草稿误发出去。
+    if (e.isComposing) return;
     e.preventDefault();
     submit();
   }
@@ -158,7 +164,37 @@ function handleInput(e: Event): void {
   // 菜单：仅 / 开头且无参数（参数输入阶段关闭联想）。loading/empty 仍显示状态提示。
   const parsed = parseSlashInvocation(value);
   showSlashMenu.value = parsed.kind === 'slash' && parsed.argumentsText.length === 0;
+  // N11：菜单打开路径触发命令快照重拉——P2-14 stale 比对 / P3-4 degraded 重试都在主进程
+  // COMMANDS_GET 处理器内，用户「留在会话内重开 `/` 菜单」是它们的唯一用户层入口。
+  // 经 1.5s 去抖（与 command-source-watcher 同款节流时长）；菜单关闭即取消，既有
+  // 会话生命周期三处 load 调用点行为不变。
+  if (showSlashMenu.value) {
+    scheduleMenuCommandsRefresh();
+  } else {
+    cancelMenuCommandsRefresh();
+  }
   resetCommandPagination();
+}
+
+// N11：菜单打开期间的命令快照去抖刷新（1.5s 内连续输入只拉一次，停止输入 1.5s 后触发）。
+const MENU_COMMANDS_REFRESH_DEBOUNCE_MS = 1500;
+let menuRefreshTimer: number | null = null;
+
+function scheduleMenuCommandsRefresh(): void {
+  if (menuRefreshTimer !== null) clearTimeout(menuRefreshTimer);
+  menuRefreshTimer = window.setTimeout(() => {
+    menuRefreshTimer = null;
+    const session = useSessionStore().activeSession;
+    if (!session) return;
+    void useCommandStore().load(session.id);
+  }, MENU_COMMANDS_REFRESH_DEBOUNCE_MS);
+}
+
+function cancelMenuCommandsRefresh(): void {
+  if (menuRefreshTimer !== null) {
+    clearTimeout(menuRefreshTimer);
+    menuRefreshTimer = null;
+  }
 }
 
 // 输入框自适应高度：随内容增高，最多约 4 行（CSS max-height 封顶），超出则内部滚动。
@@ -227,6 +263,7 @@ onMounted(() => {
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside);
   window.removeEventListener('resize', autoResize);
+  cancelMenuCommandsRefresh();
 });
 </script>
 

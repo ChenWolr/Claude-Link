@@ -44,6 +44,8 @@ const searchText = ref('');
 const wizardIndex = ref(0);
 const questionAnswers = ref<Record<string, QuestionAnswer>>({});
 const fieldValues = ref<Record<string, string | boolean>>({});
+// P3-8：已交互过的 checkbox 字段 id（change 事件登记）；required checkbox 据此放行 false 答案。
+const touchedCheckboxFields = ref<Set<string>>(new Set());
 const history = ref<HistoryEntry[]>([]);
 const showHistory = ref(false);
 const submittingId = ref<string | null>(null);
@@ -111,7 +113,14 @@ const cancelLabel = computed(() => activeRequest.value?.kind === 'permission' ? 
 const canSubmit = computed(() => {
   const request = activeRequest.value;
   if (!request || submittingId.value === request.id) return false;
-  if (hasStructuredForm.value) return formFields.value.every((field) => !field.required || Boolean(fieldValues.value[field.id]));
+  if (hasStructuredForm.value) {
+    // P3-8：required checkbox 按「已交互过」判定（false 亦是有效答案）；其余字段维持判空。
+    return formFields.value.every((field) => {
+      if (!field.required) return true;
+      if (field.type === 'checkbox') return touchedCheckboxFields.value.has(field.id);
+      return Boolean(fieldValues.value[field.id]);
+    });
+  }
   if (hasTextInput.value) return otherText.value.trim().length > 0;
   if (showOtherInput.value) return otherText.value.trim().length > 0;
   return selectedIds.value.size > 0 || request.kind === 'confirm';
@@ -138,6 +147,9 @@ function applyAnswer(answer?: QuestionAnswer): void {
 
 function initFields(request: InteractionPromptPayload): void {
   fieldValues.value = {};
+  // P3-8：required checkbox 的「已交互」登记表——checkbox 默认 false 是合法答案，
+  // Boolean(value) 判空会让用户无法提交 false；改按「是否交互过」判定。
+  touchedCheckboxFields.value = new Set();
   for (const field of request.fields ?? []) {
     fieldValues.value[field.id] = field.defaultValue ?? (field.type === 'checkbox' ? false : '');
   }
@@ -612,7 +624,9 @@ onBeforeUnmount(() => {
                 <select v-else-if="field.type === 'select'" v-model="fieldValues[field.id] as string">
                   <option v-for="option in field.options" :key="option.id" :value="option.id">{{ option.label }}</option>
                 </select>
-                <input v-else-if="field.type === 'checkbox'" v-model="fieldValues[field.id]" type="checkbox" />
+                <input v-else-if="field.type === 'checkbox'" v-model="fieldValues[field.id]" type="checkbox" @change="touchedCheckboxFields.add(field.id)" />
+                <!-- G2：number 字段走数值键盘/步进输入；v-model 仍是 string，提交侧统一转回数值。 -->
+                <input v-else-if="field.type === 'number'" v-model="fieldValues[field.id] as string" :placeholder="field.placeholder" type="number" inputmode="decimal" @keydown.stop @keydown.esc.prevent="cancel" />
                 <input v-else v-model="fieldValues[field.id] as string" :placeholder="field.placeholder" type="text" @keydown.stop @keydown.esc.prevent="cancel" />
               </label>
             </div>
