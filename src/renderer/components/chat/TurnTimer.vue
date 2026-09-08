@@ -51,7 +51,7 @@ const phaseMeta = computed(() => PHASE_META[phase.value]);
 </script>
 
 <template>
-  <Transition name="turn-timer">
+  <Transition name="turn-timer" mode="out-in">
     <div v-if="sending" class="turn-timer" role="status" aria-live="polite" title="本次回复进行中（主线程计算时间）">
       <span class="turn-timer__lead">
         <span class="turn-timer__live" aria-hidden="true"></span>
