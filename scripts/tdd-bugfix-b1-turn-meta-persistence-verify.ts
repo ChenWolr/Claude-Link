@@ -101,7 +101,9 @@ check('④ ipc.ts 通道常量 + ipc-handlers handler（getSession 校验 + v>0 
   assert.match(body, /v > 0/, 'handler 缺正数校验（v > 0）');
   assert.match(body, /messageRepo\.updateResultMeta/, 'handler 缺 messages 写入');
   assert.match(body, /sessionRepo\.updateTurnMeta/, 'handler 缺 sessions 写入');
-  assert.match(body, /const directHit = payload\?\.messageId[\s\S]*?:\s*false;/, '审查修复轮：handler 缺 updateResultMeta 返回值检查（directHit）');
+  assert.match(body, /const directHit = typeof payload\?\.messageId === 'string' && payload\.messageId[\s\S]*?:\s*false;/, '审查修复轮：handler 缺 updateResultMeta 返回值检查（directHit）');
+  // 审查收口：messageId 类型收窄——仅字符串直传，不得 String() 强转（非字符串直接走 fallback）。
+  assert.doesNotMatch(body, /String\(payload\.messageId\)/, '审查收口：handler 不得对 messageId 做 String() 强转');
   assert.match(body, /if \(!directHit\) \{\s*const fallbackId = messageRepo\.findLastTurnMainFlowAssistantId\(sessionId\);/, '审查修复轮：handler 缺 fallback（直传 0 行/null 时调 findLastTurnMainFlowAssistantId）');
   assert.match(body, /if \(fallbackId\) messageRepo\.updateResultMeta\(fallbackId, sessionId, meta\);/, '审查修复轮：fallback 命中后未用 fallbackId 再写 messages');
 });
@@ -158,7 +160,8 @@ check('⑧ use-chat：前台 attachResultMetadata 含 recordTurnMeta/endedAt；�
 });
 
 // ⑨ TurnTimer：完成态分支 + 结束于文案 + 不出现费用。
-check('⑨ TurnTimer：v-else-if="lastMeta" 完成态 + turn-timer--done + 结束于文案 + 完成态无费用字样', () => {
+check('⑨ TurnTimer：v-else-if="lastMeta" 完成态 + turn-timer--done + 结束于文案 + 完成态无费用字样 + Transition out-in', () => {
+  assert.match(turnTimer, /<Transition name="turn-timer" mode="out-in">/, '审查收口：Transition 缺 mode="out-in"（sending↔done 切换会一帧双条/布局跳动）');
   assert.match(turnTimer, /v-else-if="lastMeta"/, '缺完成态分支 v-else-if="lastMeta"');
   assert.match(turnTimer, /turn-timer--done/, '缺 turn-timer--done 完成态样式类');
   assert.match(turnTimer, /结束于/, '缺「结束于」文案');
