@@ -6,6 +6,11 @@
 // 修复语义：① haltQueue 入口加 `getConfig().queueEnabled !== true` 即 return（任务状态不动）；
 // ② TaskQueuePanel 的 halt_* 横幅渲染加「存在任务」门——零任务落到「待命中」。
 //
+// R1（复查 2026-09-08 增补）：开关关闭期间回合失败/中断，引擎不得卡 running——beginUserTurn
+// 无开关闸必置 running，haltQueue 开关关早退若不做状态收口，面板持续「回合执行中…」假象、
+// armFromUserAction 等 standby 依赖路径被阻塞。增补语义：开关关早退分支把 running 收口为
+// standby(switch_off)——任务状态不动（不 pauseAllPending）、不广播 queue_halted。
+//
 // 行为验证手法：Module._load 拦截 config-manager/task-repo/chat-backend 等，spy pauseAllPending，
 // 驱动真实 beginUserTurn + noteTurnOutcome；横幅门用源码结构契约（渲染层组件无单测约定）。
 //
@@ -31,7 +36,8 @@ function scheck(name: string, cond: boolean, detail = ''): void {
 scheck('结构① haltQueue 入口有 queueEnabled !== true 闸', (() => {
   const at = engineSrc.indexOf('export function haltQueue');
   const body = engineSrc.slice(at, engineSrc.indexOf('export function abortHalt', at));
-  return /getConfig\(\)\.queueEnabled !== true\)\s*return;/.test(body);
+  // R1 后该闸为块形式（体内做 running→standby(switch_off) 收口），只钉闸本身存在。
+  return /getConfig\(\)\.queueEnabled !== true\)/.test(body);
 })());
 scheck('结构② halt_failed 横幅有「存在任务」门（零任务不弹）', (() => {
   const at = panelSrc.indexOf("case 'halt_failed':");
@@ -59,6 +65,7 @@ const origLoad = Module._load;
     return {
       pauseAllPending: (sessionId: string) => { pauseCalls.push(sessionId); },
       getPendingTasks: () => [],
+      getTasksBySession: () => [],
       getTask: () => null,
       updateTaskError: () => undefined,
       listTasksBySession: () => [],
@@ -95,11 +102,28 @@ function check(name: string, cond: boolean, detail = ''): void {
   check('行为② 开关关：不广播 queue_halted',
     !eventLog.includes('queue_halted'), `events=${JSON.stringify(eventLog)}`);
 
+  // 场景 A2（R1，复查 2026-09-08）：开关关 + 回合失败 → 引擎状态须收口 standby(switch_off)，
+  // 不得卡 running（面板「回合执行中…」假象、armFromUserAction 被阻塞）；任务不动、不广播 halt。
+  configStub.queueEnabled = false;
+  engine.beginUserTurn('sess-n9-off2', win);
+  check('行为③ 前置：beginUserTurn 无开关闸，置 running',
+    engine.getQueueOverview('sess-n9-off2').state.status === 'running');
+  engine.noteTurnOutcome('sess-n9-off2', 'error', win);
+  const stR1 = engine.getQueueOverview('sess-n9-off2').state;
+  check('行为④ 开关关+回合失败：状态收口 standby（不卡 running）',
+    stR1.status === 'standby', `status=${stR1.status}`);
+  check('行为⑤ standbyReason=switch_off（面板落「队列开关已关闭」文案）',
+    stR1.standbyReason === 'switch_off', `standbyReason=${stR1.standbyReason}`);
+  check('行为⑥ 任务未被 pause（pauseAllPending 不被调）',
+    !pauseCalls.includes('sess-n9-off2'), `pauseCalls=${JSON.stringify(pauseCalls)}`);
+  check('行为⑦ 不广播 queue_halted',
+    !eventLog.includes('queue_halted'), `events=${JSON.stringify(eventLog)}`);
+
   // 场景 B：开关开 → 熔断照常（回归不伤）。
   configStub.queueEnabled = true;
   engine.beginUserTurn('sess-n9-on', win);
   engine.noteTurnOutcome('sess-n9-on', 'error', win);
-  check('行为③ 开关开：回合失败照常 pauseAllPending（熔断语义不变）',
+  check('行为⑧ 开关开：回合失败照常 pauseAllPending（熔断语义不变）',
     pauseCalls.includes('sess-n9-on'), `pauseCalls=${JSON.stringify(pauseCalls)}`);
 
   console.log(`\nverify 结果：结构 ${spass} passed/${sfail} failed，行为 ${pass} passed/${fail} failed`);

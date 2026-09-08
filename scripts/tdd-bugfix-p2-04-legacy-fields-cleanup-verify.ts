@@ -5,6 +5,11 @@
 // encryptedApiKey/apiKeyEncoding），名称/端点/模型回落 defaultConfig 默认——「老字段 =
 // lastUsed 档案投影」不变量在库空时成立为「无凭据」（与首次安装行为一致）。
 //
+// R2（复查 2026-09-08 增补）：补清收窄到「库从非空变空」——deleteProviderProfile 删光分支置位
+// libraryEmptiedByDeletion 旗标后才允许触发；库**从未非空**的老字段直配用户（库一直为空 + 无
+// 全局 Key + 自定义端点/模型）的 saveConfig 不再被重置到官方默认（R2-前置①②，置于脚本最前，
+// 先于任何 saveProviderProfile 执行）。
+//
 // 运行：npx tsx scripts/tdd-bugfix-p2-04-legacy-fields-cleanup-verify.ts
 
 import * as fs from 'node:fs';
@@ -34,6 +39,16 @@ function check(name: string, cond: boolean, detail = ''): void {
 }
 
 (async () => {
+  // ── R2（复查 2026-09-08）：库**从未非空**（老字段直配用户）+ 无全局 Key：saveConfig 不得重置 ──
+  // 补清分支只许在「库从非空变空」的删除链上触发；此处先于任何 saveProviderProfile 执行，
+  // 库尚为空（providerProfiles 键不存在），模拟只用老字段的存量用户改设置页触发 saveConfig。
+  cm.saveConfig({ apiBaseUrl: 'https://legacy-mine.example.com', defaultModel: 'my-legacy-model' });
+  let cfgR2 = cm.getConfig();
+  check('R2-前置① 库一直为空+无全局 Key：saveConfig 自定义 apiBaseUrl 不被重置（非删除触发）',
+    cfgR2.apiBaseUrl === 'https://legacy-mine.example.com', cfgR2.apiBaseUrl);
+  check('R2-前置② defaultModel 不被重置',
+    cfgR2.defaultModel === 'my-legacy-model', cfgR2.defaultModel);
+
   // 建唯一供应商（带自定义 Base URL）→ 老字段投影为该档案。
   const p1 = cm.saveProviderProfile({
     name: '将被删光的供应商',
