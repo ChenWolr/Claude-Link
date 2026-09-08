@@ -200,8 +200,11 @@ export function applyPermissionUpdates(permissions: SdkPermissionSettings, updat
  * 「用户所见权限档」与「真实生效权限档」不一致。
  *
  * 规则（纯函数，供行为测试）：
- *   - 有效档 === 'default' → 删除 defaultMode（让原生 user/project/local 来源自决，与
- *     buildPermissionSettings「不强制写 default 覆盖原生默认」语义一致）；
+ *   - 有效档 === 'default' → 写 defaultMode:'default'（显式写安全档压掉低层来源——本函数仅在
+ *     会话显式选档（opts.permissionMode != null）时被调用，而工作目录投影文件
+ *     settings.local.json 始终按全局档写 defaultMode；若此处删除 defaultMode，CLI 层叠回落
+ *     会读到投影文件里的全局档（如 bypassPermissions），UI 显示「默认模式」实际越权放行。
+ *     显式选择必须以显式值表达，删除=放弃本层话语权）；
  *   - 有效档非 default → 写 defaultMode = 有效档，与 Options.permissionMode 同源。
  * 总是返回新对象，不 mutate 入参（调用方可能把 settings.permissions 原引用传入）。
  */
@@ -210,10 +213,6 @@ export function alignPermissionDefaultMode(
   effectivePermissionMode: string,
 ): SdkPermissionSettings {
   const next: SdkPermissionSettings = { ...permissions };
-  if (effectivePermissionMode === 'default') {
-    delete next.defaultMode;
-  } else {
-    next.defaultMode = effectivePermissionMode;
-  }
+  next.defaultMode = effectivePermissionMode;
   return next;
 }

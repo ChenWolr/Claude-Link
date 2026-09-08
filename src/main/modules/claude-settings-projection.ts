@@ -19,11 +19,22 @@ function recordFromJson(json: string | null | undefined): Record<string, unknown
   }
 }
 
+// G1：端点凭据三键——即使经存量 advancedJson.env 写入也不得落入投影文件（明文落盘面）。
+// 与头注释「不投影端点凭据」及 CLAUDE.md 同款措辞一致；凭据唯一通道是进程 env
+//（buildSpawnEnv）与 SDK Options.settings（最高优先级）。
+const CREDENTIAL_ENV_KEYS: ReadonlySet<string> = new Set([
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_BASE_URL',
+]);
+
 function stringEnvFrom(value: unknown): Record<string, string> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   const env: Record<string, string> = {};
   for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
-    if (typeof item === 'string') env[key] = item;
+    if (typeof item !== 'string') continue;
+    if (CREDENTIAL_ENV_KEYS.has(key)) continue;
+    env[key] = item;
   }
   return env;
 }
