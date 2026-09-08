@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 11;
+const CURRENT_SCHEMA_VERSION = 12;
 
 /** P1-10：表列集合查询（版本块守卫与自愈块共用同一谓词，防「列已存在」中间态复现抛错）。 */
 function tableColumns(db: Database.Database, table: string): Set<string> {
@@ -151,6 +151,13 @@ function runMigrationStatements(db: Database.Database): void {
     if (!hasCol('last_effective_effort')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_effective_effort TEXT DEFAULT NULL');
     }
+    // V12 自愈：版本号已推进但列缺失的库（半应用/手工库）也能修好。
+    if (!hasCol('last_turn_duration_ms')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_turn_duration_ms INTEGER DEFAULT NULL');
+    }
+    if (!hasCol('last_turn_ended_at')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_turn_ended_at INTEGER DEFAULT NULL');
+    }
   }
 
   // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。
@@ -232,6 +239,18 @@ function runMigrationStatements(db: Database.Database): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_messages_parent_task ON messages(parent_task_id);
   `);
+
+  // V12（B1）：会话级「最近一回合」元数据持久化——回合 result 的耗时与结束时刻。
+  // TurnTimer 完成态（回合结束后保留显示 耗时+结束时间）与重启恢复的数据源。
+  // null = 该会话尚无记录（旧会话/中断回合不产生记录）。
+  if (currentVersion < 12) {
+    if (!tableColumns(db, 'sessions').has('last_turn_duration_ms')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_turn_duration_ms INTEGER DEFAULT NULL');
+    }
+    if (!tableColumns(db, 'sessions').has('last_turn_ended_at')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN last_turn_ended_at INTEGER DEFAULT NULL');
+    }
+  }
 
   // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，
   // 切换会话或重启后仍可在 InteractionPrompt 底部"交互历史"区回看。

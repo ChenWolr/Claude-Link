@@ -200,6 +200,10 @@ export const useSessionStore = defineStore('session', {
     // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
     // 渲染层据此 + useNow 跳动时钟算实时耗时，整个 sending 期间常驻显示「⏱ X.Xs」。
     turnStartedAt: {} as Record<string, number>,
+    // B1：最近一回合的耗时/结束时刻（按 sessionId）。回合 result 到达时由 use-chat 写入，
+    // 比 sessions 列表对象里的 lastTurn* 字段新鲜（后者只在 IPC 返回整会话时刷新）。
+    // TurnTimer 完成态优先读这里，读不到（重启后/切回未刷新）回落 Session 字段。
+    lastTurnMeta: {} as Record<string, { durationMs: number; endedAt: number }>,
     // v2-F3：回合 generation（按 sessionId）。每次 markRunning（新回合开始）递增；
     // use-chat 的 abort finally 兜底捕获发起中断时的 generation，到点若已开启新回合
     //（generation 变化）则 no-op，绝不误停随后启动的新回合。deleteSession 一并清理。
@@ -237,6 +241,19 @@ export const useSessionStore = defineStore('session', {
     activeTurnStartedAt(state): number | null {
       if (!state.activeSession) return null;
       return state.turnStartedAt[state.activeSession.id] ?? null;
+    },
+    // B1：当前活动会话的最近回合元数据。内存 map 优先（本启动周期内最新），
+    // 否则回落 Session 持久化字段（重启恢复/切回）。都无 → null（完成态不渲染）。
+    activeLastTurnMeta(state): { durationMs: number; endedAt: number } | null {
+      const sid = state.activeSession?.id;
+      if (!sid) return null;
+      const mem = state.lastTurnMeta[sid];
+      if (mem) return mem;
+      const s = state.activeSession;
+      if (s?.lastTurnDurationMs != null && s.lastTurnEndedAt != null) {
+        return { durationMs: s.lastTurnDurationMs, endedAt: s.lastTurnEndedAt };
+      }
+      return null;
     },
     // 当前活动会话的卡死信息（无则 null）。StalledBanner 据此显隐。
     activeStalledInfo(state): StallInfo | null {
@@ -347,6 +364,8 @@ export const useSessionStore = defineStore('session', {
           lastContextUsedCapacity: null,
           lastContextUsedAt: null,
           lastEffectiveEffort: null,
+          lastTurnDurationMs: null,
+          lastTurnEndedAt: null,
           transient: true,
         };
         this.activeSession = this.transientDraft;
@@ -499,6 +518,8 @@ export const useSessionStore = defineStore('session', {
       delete this.sessionStatus[id];
       delete this.turnStartedAt[id];
       delete this.turnGeneration[id];
+      // B1：最近回合元数据随会话删除一并清理（DB 行由级联删除处理）。
+      delete this.lastTurnMeta[id];
       // review-v3 High-2：已删会话的 context 代际记录一并清理（防内存泄漏；会话已删，
       // 主进程不会再发该会话的 CONTEXT_UPDATE，无需保留 known generation 拒收旧值）。
       delete this.contextQueryGenerations[id];
@@ -823,6 +844,21 @@ export const useSessionStore = defineStore('session', {
       this.turnGeneration[sessionId] = (this.turnGeneration[sessionId] ?? 0) + 1;
       // 侧栏黄灯：无论重复 send 与否都保持 running 状态。
       this.sessionStatus[sessionId] = 'running';
+    },
+    // B1：写入最近回合元数据（内存态 + 就地补 sessions/activeSession 对象字段，保持侧栏数据一致）。
+    setLastTurnMeta(sessionId: string, meta: { durationMs: number | null; endedAt: number }) {
+      if (meta.durationMs != null && meta.durationMs > 0) {
+        this.lastTurnMeta[sessionId] = { durationMs: meta.durationMs, endedAt: meta.endedAt };
+      }
+      const target = this.sessions.find((s) => s.id === sessionId);
+      if (target) {
+        target.lastTurnDurationMs = meta.durationMs;
+        target.lastTurnEndedAt = meta.endedAt;
+      }
+      if (this.activeSession?.id === sessionId) {
+        this.activeSession.lastTurnDurationMs = meta.durationMs;
+        this.activeSession.lastTurnEndedAt = meta.endedAt;
+      }
     },
     // 根因修复：标记会话成功完成。成功 result 时调用。
     // 与 markStopped 同构清理运行期数据，但额外写入 sessionStatus 'completed'（侧栏绿灯）。

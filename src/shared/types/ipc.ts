@@ -46,6 +46,8 @@ export const IPC_CHANNELS = {
   SESSION_GET: 'session:get',
   SESSION_DELETE: 'session:delete',
   SESSION_UPDATE: 'session:update',
+  // B1：回合元数据持久化（渲染层回合 result 到达时 fire-and-forget 调用，一次写 messages 两列 + sessions 两列）。
+  SESSION_RECORD_TURN_META: 'session:recordTurnMeta',
   // OPT-10：会话级「单独改 model_override」通道（'session:updateModelOverride'）已删除——全链无调用方。
   SESSION_SEARCH: 'session:search',
   SESSION_ANALYZE_TOPIC: 'session:analyzeTopic',

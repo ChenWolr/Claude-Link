@@ -49,6 +49,11 @@ export interface ClaudeLinkAPI {
     id: string,
     data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>>,
   ) => Promise<Session | null>;
+  // B1：回合元数据持久化（回合 result 到达时 fire-and-forget）。返回更新后的整会话（会话不存在返回 null）。
+  recordTurnMeta: (
+    sessionId: string,
+    payload: { messageId: string | null; costUsd: number | null; durationMs: number | null; endedAt: number | null },
+  ) => Promise<Session | null>;
   searchSessions: (query: string) => Promise<Session[]>;
   analyzeTopic: (sessionId: string, firstMessage: string) => Promise<string | null>;
   sendMessage: (sessionId: string, payload: ChatSendPayload) => Promise<SendMessageResult>;
@@ -145,6 +150,7 @@ export function createApi(): ClaudeLinkAPI {
     getSessionMessages: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, sessionId),
     deleteSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_DELETE, id),
     updateSession: (id, data) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE, id, data),
+    recordTurnMeta: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_RECORD_TURN_META, sessionId, payload),
     searchSessions: (query) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SEARCH, query),
     analyzeTopic: (sessionId, firstMessage) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_ANALYZE_TOPIC, sessionId, firstMessage),
     sendMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, payload),

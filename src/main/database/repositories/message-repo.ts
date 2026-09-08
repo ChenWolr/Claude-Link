@@ -178,6 +178,36 @@ export function deleteMessage(id: string): void {
   getConnection().prepare('DELETE FROM messages WHERE id = ?').run(id);
 }
 
+/** B1：回合 result 元数据落库（气泡脚注的持久化）。
+ *  双守卫：messageId 必须属于 sessionId（AND session_id），防渲染层错配写脏其它会话。 */
+export function updateResultMeta(
+  id: string,
+  sessionId: string,
+  meta: { costUsd: number | null; durationMs: number | null },
+): boolean {
+  const r = getConnection()
+    .prepare('UPDATE messages SET cost_usd = ?, duration_ms = ? WHERE id = ? AND session_id = ?')
+    .run(meta.costUsd, meta.durationMs, id, sessionId);
+  return r.changes > 0;
+}
+
+/** B1 审查修复：定位「本回合主流程最后一条 assistant 行」的 DB id（新→旧，遇 user 边界即停）。
+ *  渲染层乐观消息 id（crypto.randomUUID）与 DB 行 id（主进程 uuidv4）是两套独立 uuid 永不相等，
+ *  recordTurnMeta 直传 messageId 恒 0 行——handler 在直传命中失败/为 null 时回落本查找。
+ *  口径对齐 cli-shared.turnCheckRows：尾部 50 条窄查询，窗口打满且未见 user 边界时回落全量
+ *  （防重工具回合把 user 标记推出窗外的假阴性）；只认 parentAgentId 为空的主流程行。 */
+export function findLastTurnMainFlowAssistantId(sessionId: string): string | null {
+  let rows = getRecentMessagesForTurnCheck(sessionId, 50);
+  if (rows.length === 50 && !rows.some((m) => m.role === 'user')) {
+    rows = getMessagesBySession(sessionId);
+  }
+  for (const m of rows) {
+    if (m.role === 'user') return null;
+    if (m.role === 'assistant' && m.parentAgentId == null) return m.id;
+  }
+  return null;
+}
+
 /** OPT-2：回合尾部分析窄查询（result 落库去重谓词专用）——只取尾部 limit 条、窄列，
  *  替代全量 getMessagesBySession（SELECT * + 附件 JOIN）。新→旧排序；谓词「从尾部遇
  *  user 即停」的语义在 limit 窗口内不变。不填附件（去重判定不需要）。 */

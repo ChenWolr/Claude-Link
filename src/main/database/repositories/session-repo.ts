@@ -26,6 +26,8 @@ interface SessionRow {
   last_context_used_capacity: number | null;
   last_context_used_at: number | null;
   last_effective_effort: string | null;
+  last_turn_duration_ms: number | null;
+  last_turn_ended_at: number | null;
 }
 
 function toSession(row: SessionRow): Session {
@@ -51,6 +53,8 @@ function toSession(row: SessionRow): Session {
     lastContextUsedCapacity: row.last_context_used_capacity,
     lastContextUsedAt: row.last_context_used_at,
     lastEffectiveEffort: row.last_effective_effort ?? null,
+    lastTurnDurationMs: row.last_turn_duration_ms,
+    lastTurnEndedAt: row.last_turn_ended_at,
   };
 }
 
@@ -150,6 +154,17 @@ export function updateSession(
     .run(values);
 
   return getSession(id);
+}
+
+/** B1：记录会话最近一回合的耗时/结束时刻（epoch ms）。不 bump updated_at——
+ *  侧栏排序由用户操作驱动，回合结束不得把会话顶到列表最前。 */
+export function updateTurnMeta(
+  id: string,
+  meta: { durationMs: number | null; endedAt: number | null },
+): void {
+  getConnection()
+    .prepare('UPDATE sessions SET last_turn_duration_ms = ?, last_turn_ended_at = ? WHERE id = ?')
+    .run(meta.durationMs, meta.endedAt, id);
 }
 
 export function searchSessions(query: string): Session[] {

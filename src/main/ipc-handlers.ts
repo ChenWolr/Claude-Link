@@ -329,6 +329,40 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       return updated;
     },
   );
+  // B1：回合元数据持久化（渲染层在 result 到达时 fire-and-forget 调用）。
+  // 校验：会话必须存在；durationMs/endedAt 仅正数可写（非正/NaN/非 number → null）；
+  // costUsd 仅正数可写（非正 → null，端点 0 值不展示 $0.0000 的既有语义）。
+  // messageId 允许 null（后台分支无 attach 目标）；非 null 时经 repo 的 AND session_id 守卫。
+  ipcMain.handle(
+    IPC_CHANNELS.SESSION_RECORD_TURN_META,
+    async (
+      _event,
+      sessionId: string,
+      payload: { messageId: string | null; costUsd: number | null; durationMs: number | null; endedAt: number | null },
+    ) => {
+      if (typeof sessionId !== 'string' || !sessionId) return null;
+      if (!sessionRepo.getSession(sessionId)) return null;
+      const pos = (v: unknown): number | null =>
+        typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+      const durationMs = pos(payload?.durationMs);
+      const endedAt = pos(payload?.endedAt);
+      const costUsd = pos(payload?.costUsd);
+      // B1 审查修复：渲染层乐观消息 id（crypto.randomUUID）与 DB 行 id（主进程 uuidv4）两套
+      // uuid 永不相等，直传 messageId 恒 0 行。直传命中失败（含 messageId 为 null 的后台分支）
+      // 时回落「本回合主流程最后一条 assistant 行」查找（新→旧、遇 user 边界即停、跳过子 agent）；
+      // 仍找不到则只写 sessions 半边，不报错（无 assistant 行的回合不产生脚注，诚实不造数）。
+      const meta = { costUsd, durationMs };
+      const directHit = payload?.messageId
+        ? messageRepo.updateResultMeta(String(payload.messageId), sessionId, meta)
+        : false;
+      if (!directHit) {
+        const fallbackId = messageRepo.findLastTurnMainFlowAssistantId(sessionId);
+        if (fallbackId) messageRepo.updateResultMeta(fallbackId, sessionId, meta);
+      }
+      sessionRepo.updateTurnMeta(sessionId, { durationMs, endedAt });
+      return sessionRepo.getSession(sessionId);
+    },
+  );
   ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
     sessionRepo.searchSessions(query),
   );
