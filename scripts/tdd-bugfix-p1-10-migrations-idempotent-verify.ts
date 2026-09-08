@@ -90,7 +90,7 @@ const versionOf = (d: Db): number | null =>
   const d = openMemoryDb();
   let threw = '';
   try { runMigrations(d); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
-  check('① 全新库迁移不抛错且版本到 11', threw === '' && versionOf(d) === 11, threw || `version=${versionOf(d)}`);
+  check('① 全新库迁移不抛错且版本到 12', threw === '' && versionOf(d) === 12, threw || `version=${versionOf(d)}`);
   const sess = cols(d, 'sessions');
   check('② 全新库列齐全（model_override/provider_override/thinking_level/paused/is_error）',
     sess.includes('model_override') && sess.includes('provider_override') && sess.includes('thinking_level')
@@ -108,7 +108,7 @@ const versionOf = (d: Db): number | null =>
   try { runMigrations(d); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
   check('③ 半应用态（model_override 已加、版本 0）迁移不抛 duplicate column',
     threw === '', threw.slice(0, 160));
-  check('④ 半应用态迁移后版本写到 11 且列齐全', versionOf(d) === 11 && cols(d, 'sessions').includes('provider_override'));
+  check('④ 半应用态迁移后版本写到 12 且列齐全', versionOf(d) === 12 && cols(d, 'sessions').includes('provider_override'));
   d.close();
 }
 
