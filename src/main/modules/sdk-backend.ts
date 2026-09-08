@@ -17,24 +17,27 @@
 
 import type { BrowserWindow } from 'electron';
 import { existsSync, readFileSync } from 'fs';
+import * as fsp from 'node:fs/promises';
 import * as path from 'path';
 import { execFileSync, spawn } from 'child_process';
-import { IPC_CHANNELS } from '../../shared/constants';
-import { getConfig, getProviderModelSources } from './config-manager';
+import { IPC_CHANNELS, ENGINE_BACKGROUND_TOGGLE_ENV } from '../../shared/constants';
+import { getConfig, getProviderModelSources, onConfigSaved } from './config-manager';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride } from '../../shared/session-model';
 import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
+import { mapAskUserQuestionCancel } from '../../shared/interaction-cancel';
+import { getProjectOriginFingerprint } from './command-source-watcher';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { buildPostTurnProbeArgs } from '../../shared/post-turn-probe';
-import { extractLastEffortFromJsonl, mungeProjectDirName } from '../../shared/effort-truth';
+import { extractLastEffortFromJsonl, extractLastEffortFromText, EFFORT_TAIL_WINDOW_BYTES, mungeProjectDirName } from '../../shared/effort-truth';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
 import { isSuccessfulCliResult, isAbortedCliResult } from '../../shared/session-completion';
 import { noteTurnOutcome } from './task-queue-engine';
 import { convertResultMessage } from '../../shared/result-converter';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
 import { logger } from '../utils/logger';
-import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState } from './reasoning-replay-auto-retry';
+import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState, clearReasoningReplayTurnFlag } from './reasoning-replay-auto-retry';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
 import { extractContextTokens, detectCompaction, deriveCurrentContextUsed, parseNativeContextReport, reconcileContextUsage, isRuntimeSnapshotForQuery, mapContextReconcileTerminal, postTurnFallbackTerminal, derivePostTurnProbePayloadFields } from '../../shared/context-usage';
@@ -111,10 +114,12 @@ import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, s
 import {
   apiRetrySummary,
   createApiRetryState,
+  markUpstreamFatalAborted,
   recordApiRetry,
   recordApiRetryExhausted,
   recordApiRetryRecovery,
   recordApiRetryUserStop,
+  shouldDropLateApiRetry,
   toApiRetryTerminalDetails,
   type ApiRetryState,
   type ApiRetryTerminalKind,
@@ -181,6 +186,10 @@ interface SessionEntry {
   // 期间用户重发须先经它强制完成系统 kill（abort+移除）再接管，而不是吃到误导性
   // 「当前回合仍在执行」。finishKill 首行自清 null，幂等。
   forceKill: (() => void) | null;
+  // P2-21：确定性上游错误快败一次性闩。upstream_fatal 优雅窗内 entry 仍 current，迟到的
+  // api_retry 会重建 retry 状态并再次 abortNonRetryableUpstream（重复 error 事件+重复系统消息
+  // 落库）。闩随 entry 生命周期（每回合新 entry），天然不跨回合残留。
+  upstreamFatalAborted?: boolean;
 }
 const nextQueryInstance = { value: 1 };
 
@@ -260,6 +269,8 @@ function applySessionPermissionUpdates(sessionId: string, permissions: SdkPermis
 interface StallTracker {
   lastActivityAt: number;
   lastKind: string;
+  // P3-3：最近在跑的工具名（tool_use 时记录、result 后清空）——tool 区硬杀按家族放宽。
+  lastToolName: string | null;
   lastKeepAliveAt: number | null;
   lastParentAgentId: string | null;
   pendingToolUse: boolean;
@@ -301,6 +312,7 @@ function resetStallTracker(sessionId: string): void {
   stallTrackers.set(sessionId, {
     lastActivityAt: Date.now(),
     lastKind: 'query_start',
+    lastToolName: null,
     lastKeepAliveAt: null,
     lastParentAgentId: null,
     pendingToolUse: false,
@@ -382,6 +394,9 @@ function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
     for (const part of event.content) {
       if (part.type === 'tool_use' || part.type === 'server_tool_use' || part.type === 'mcp_tool_use') {
         const id = part.id ?? part.tool_use_id;
+        // P3-3：记录最近在跑的工具名（tool 区硬杀家族放宽判据）。
+        const toolName = (part as { name?: unknown }).name;
+        if (typeof toolName === 'string' && toolName) t.lastToolName = toolName;
         if (id) {
           set.add(id);
           // 主流程刚发出 Agent/Task/Workflow/Skill tool_use 后，子 Agent 可能还没吐出
@@ -404,6 +419,8 @@ function touchActivityFromEvent(sessionId: string, event: CliEvent): void {
           if (t.lastParentAgentId === part.tool_use_id) {
             t.lastParentAgentId = Array.from(subAgentSet).at(-1) ?? null;
           }
+          // P3-3：全部在跑工具结束 → 清空工具名（回落 model 区/未知路径旧行为）。
+          if (set.size === 0) t.lastToolName = null;
         }
       }
     }
@@ -489,6 +506,18 @@ function watchdogTick(): void {
     // 硬中断：静默累计到 zone 上限 → killProcess（abortController 真硬杀）。每回合只发一次。
     // model 区=模型服务卡死；tool 区=子任务/工具死锁或死连接（长工具会持续发 tool_progress，不会到这）。
     if (verdict.hardAbort && !t.hardAbortFired) {
+      // P3-3：非 shell 家族工具静默放宽——tool_progress 只有 Bash/PowerShell/REPL 会发
+      //（验证轮坐实），MCP/WebSearch/Task 等工具全程无心跳，900s 静默是正常时长而非死锁；
+      // 这些工具超 toolHardAbortMs 只保留 stalled 横幅（已发），不硬杀，用户可手动中断。
+      // shell 家族（有 progress 心跳仍静默=真挂死）与 lastToolName 未知（无工具/model 区、
+      // 未跟踪路径）维持旧行为。classifyStall 纯函数不改（放宽在调用侧）。
+      const knownNonShellTool =
+        verdict.zone === 'tool' &&
+        t.lastToolName != null &&
+        !/^(bash|powershell|repl)$/i.test(t.lastToolName);
+      if (knownNonShellTool) {
+        continue;
+      }
       t.hardAbortFired = true;
       const secs = Math.round(verdict.gapMs / 1000);
       const reason =
@@ -503,7 +532,11 @@ function watchdogTick(): void {
 }
 
 // 标记会话已删除：runQuery 下轮迭代检测到即自停，forwardEvent 落库前也据此跳过。
+// P1-6：同时登记 markedDeletedSessions（UUID 不可复生，集合只增不减，量级=本次运行期删除数），
+// 防「发送中删除」竞态把已删会话经 markSessionActive 重新拉回 activeSessions（复活→孤儿回合）。
+const markedDeletedSessions = new Set<string>();
 export function markSessionDeleted(sessionId: string): void {
+  markedDeletedSessions.add(sessionId);
   activeSessions.delete(sessionId);
   cancelInteractionsForSession(sessionId);
   pendingFirstPrompt.delete(sessionId);
@@ -519,6 +552,7 @@ export function markSessionDeleted(sessionId: string): void {
   contextRefreshGeneration.delete(sessionId);
   midTurnRefreshState.delete(sessionId); // P2 mid-turn 节流状态随会话清理（单一收口）
   cancelPostTurnProbe(sessionId); // post-turn 官方探针单飞/冷却状态随会话清理（单一收口）
+  postTurnProbeState.delete(sessionId); // P3-2：cancelPostTurnProbe 只 bump 代际不删键，会话删除须显式清理防永久残留
   sessionPermissionUpdates.delete(sessionId);
   sessionCliIds.delete(sessionId);
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
@@ -535,8 +569,17 @@ export function markSessionDeleted(sessionId: string): void {
   apiRetryStates.delete(sessionId);
   sessionThinkingTokenThrottle.delete(sessionId);
 }
-export function markSessionActive(sessionId: string): void {
+/** P1-6：已标记删除的会话拒绝复活（markSessionActive 不再登记、返回 false）。 */
+export function isSessionMarkedDeleted(sessionId: string): boolean {
+  return markedDeletedSessions.has(sessionId);
+}
+export function markSessionActive(sessionId: string): boolean {
+  if (markedDeletedSessions.has(sessionId)) {
+    logger.warn(`[P1-6] refused to revive marked-deleted session ${sessionId}`);
+    return false;
+  }
   activeSessions.add(sessionId);
+  return true;
 }
 function isSessionActive(sessionId: string): boolean {
   return activeSessions.has(sessionId);
@@ -581,12 +624,16 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
     }
 
     if (toolName === 'AskUserQuestion' && isAskUserQuestionPayload(input)) {
-      const result = await requestAskUserQuestionInteractions(sessionId, mainWindow, input, options);
-      if (result) {
-        recordInteractionResponse(sessionId, mainWindow, '用户完成选择题', Object.entries(result.answers).map(([question, answer]) => `${question}: ${answer}`).join('\n'));
-        return { behavior: 'allow', updatedInput: { ...result }, toolUseID: options.toolUseID };
+      const outcome = await requestAskUserQuestionInteractions(sessionId, mainWindow, input, options);
+      if (outcome.kind === 'answered') {
+        recordInteractionResponse(sessionId, mainWindow, '用户完成选择题', Object.entries(outcome.result.answers).map(([question, answer]) => `${question}: ${answer}`).join('\n'));
+        return { behavior: 'allow', updatedInput: { ...outcome.result }, toolUseID: options.toolUseID };
       }
-      return { behavior: 'deny', message: '用户取消了选择题交互', toolUseID: options.toolUseID };
+      // P2-7：取消文案按来源分映（对齐 mapPermissionInteractionResponse）——用户主动取消保留
+      // 归因文案；系统取消（signal abort/窗口关闭/会话删除/IPC 失败）用中性文案，防止 CLI 把
+      // 指控性 tool_result 记入 transcript，resume 时被模型误读为「用户拒绝过提问」。
+      const cancelResult = mapAskUserQuestionCancel(outcome.reason);
+      return { ...cancelResult, toolUseID: options.toolUseID };
     }
 
     // 本会话已授权的工具直接放行（本地短路）：用户点过「本会话总是允许」后，allow-session 经
@@ -787,14 +834,26 @@ function resolveFromCmdShim(cmdPath: string): string | undefined {
   }
 }
 
-function resolveExecutable(raw: string | null | undefined): string | undefined {
+// OPT-3：resolveExecutable 结果缓存（按 trim 后首段命令名）。execFileSync('where'/'which')
+// 同步阻塞，此前每回合 spawn / 每探针都执行一次纯浪费。失败（undefined）不缓存——CLI 装好
+// 后下次可重试成功；CONFIG_SAVE（cliPath 可能变化）时整表失效（onConfigSaved 订阅，见 init）。
+const resolveExecutableCache = new Map<string, string | undefined>();
+
+export function resolveExecutable(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
   // 含空格（如 'npx claude'）取首段再解析。
   const cmd = raw.trim().split(/\s+/)[0];
   if (!cmd) return undefined;
-  // 若 config.cliPath 本身已是绝对路径且是合法可执行文件，直接用。
+  // 若 config.cliPath 本身已是绝对路径且是合法可执行文件，直接用（零成本，不必缓存）。
   if (path.isAbsolute(cmd) && existsSync(cmd) && isLikelyExecutable(cmd)) return cmd;
+  if (resolveExecutableCache.has(cmd)) return resolveExecutableCache.get(cmd);
+  const resolved = resolveExecutableUncached(raw);
+  if (resolved) resolveExecutableCache.set(cmd, resolved);
+  return resolved;
+}
 
+function resolveExecutableUncached(raw: string): string | undefined {
+  const cmd = raw.trim().split(/\s+/)[0];
   const lookup = process.platform === 'win32' ? 'where' : 'which';
   try {
     const out = execFileSync(lookup, [cmd], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
@@ -821,6 +880,11 @@ function resolveExecutable(raw: string | null | undefined): string | undefined {
   logger.warn(`cliPath "${raw}" 无法解析为本地 Claude Code 可执行文件`);
   return undefined;
 }
+
+/** OPT-3：CONFIG_SAVE 订阅——cliPath 可能变化，缓存整表失效。 */
+onConfigSaved(() => {
+  resolveExecutableCache.clear();
+});
 
 // ── 组装 SDK Options ───────────────────────────────────────────────
 interface ResolvedSessionOverride extends SessionModelOverride {
@@ -943,12 +1007,12 @@ function buildClaudeLinkSettingsBlock(
   // buildClaudeSettingsProjection 投影——settings-writer 不会写入 settings.local.json，
   // 用户在 Claude Link 工作目录手跑 claude 不受影响。永不注入 '0'（引擎对这类键按
   // env 存在/非空直判 truthy，'0' 亦视为开）。
-  if (config.disableAutoMemory) settingsEnv.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1';
-  if (config.disableBackgroundTasks) settingsEnv.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = '1';
-  if (config.disableCron) settingsEnv.CLAUDE_CODE_DISABLE_CRON = '1';
-  if (config.disableFeedbackSurvey) settingsEnv.CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY = '1';
-  if (config.disableTelemetry) settingsEnv.DISABLE_TELEMETRY = '1';
-  if (config.disableNonessentialTraffic) settingsEnv.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+  // OPT-10：六开关键列表与 cli-shared.buildSpawnEnv 同源（shared/constants 单一常量）。
+  for (const [envKey, configKey] of ENGINE_BACKGROUND_TOGGLE_ENV) {
+    if ((config as unknown as Record<string, unknown>)[configKey] === true) {
+      settingsEnv[envKey] = '1';
+    }
+  }
 
   // permissions 先应用 session 级更新，再并集 additionalDirectories（用户配置 + 附件目录）。
   let permissions = applySessionPermissionUpdates(
@@ -1289,7 +1353,7 @@ async function refreshContextSnapshot(
   mainWindow: BrowserWindow,
   entry: SessionEntry,
   query: Query,
-  opts: { compactedJustNow?: boolean; samplePhase: ContextSamplePhase } = { samplePhase: 'query-start' },
+  opts: { compactedJustNow?: boolean; samplePhase: ContextSamplePhase; onFreshSent?: () => void } = { samplePhase: 'query-start' },
 ): Promise<void> {
   if (!isSessionActive(sessionId)) return;
   // 绑定本次刷新的身份：queryInstance（entry 内单调递增）+ query 引用 + generation。
@@ -1404,11 +1468,26 @@ async function refreshContextSnapshot(
     } catch {
       // webContents 已销毁，忽略
     }
+    // P2-9：带 compactedJustNow 的 fresh payload 已实际送达 renderer——通知调用方（双横幅
+    // 防重：本回合即时 fresh 已送，探针 fresh 不再携带成功标记）。仅在真正发送成功标记时触发。
+    if (opts.compactedJustNow && used != null) {
+      opts.onFreshSent?.();
+    }
     if (capacity != null) {
       try {
         sessionRepo.updateLastContextWindow(sessionId, capacity);
       } catch (err) {
         logger.warn(`Failed to persist last context window [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    // OPT-5：post-turn runtime 快照成功也持久化 last_context_used——此前只有官方探针写 DB，
+    // CU 通道健康（runtime-live 成功）的环境下探针被跳过/失败时，重启预填拿不到本次精确值。
+    // 探针成功仍照写（幂等，后写覆盖）；used 或 capacity 缺失不写。
+    if (opts.samplePhase === 'post-turn' && used != null && capacity != null) {
+      try {
+        sessionRepo.updateLastContextUsed(sessionId, used, capacity, Date.now());
+      } catch (err) {
+        logger.warn(`Failed to persist last context used [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
       }
     }
   } catch (e) {
@@ -1444,6 +1523,10 @@ async function refreshContextSnapshot(
           : undefined,
       );
       const lastStats = sessionContextStats.get(sessionId);
+      // P3-10：兜底容量优先取本回合 runtime 快照的 capacityTokens（mid-turn 成功时已缓存，
+      // 是真实窗口值）；lastStats.windowSize 是别名推导的静态兜底，未设别名的模型会偏小，
+      // 把 canonical 窗口覆盖缩小。无 runtime 快照时维持现值。
+      const runtimeCapacity = lastSnapshot != null ? lastSnapshot.capacityTokens : null;
       const payload: ContextStatsPayload = {
         sessionId,
         queryGeneration: entry.queryInstance,
@@ -1454,7 +1537,7 @@ async function refreshContextSnapshot(
         windowSize: lastStats?.windowSize ?? readContextWindow(entry.requestedAlias ?? null),
         model: entry.resolvedModel,
         currentContextUsedTokens: null,
-        contextWindowCapacityTokens: lastStats?.windowSize ?? null,
+        contextWindowCapacityTokens: runtimeCapacity ?? lastStats?.windowSize ?? null,
         currentContextUsedPercent: null,
         currentContextRemainingTokens: null,
         currentContextRemainingPercent: null,
@@ -2594,6 +2677,13 @@ export async function startCommandProbe(sessionId: string, mainWindow: BrowserWi
 const PROBE_TIMEOUT_MS = 30_000;
 const SUPPORTED_COMMANDS_TIMEOUT_MS = 8_000;
 
+// P3-4：全局 CLI 缺失标志。runGlobalCommandProbeInternal 无 exe 时置位；探测成功或启动新探测
+// （重试动作）时清位。COMMANDS_GET 只读分流据此给暂态会话返回 degraded 快照而非永久 loading。
+let globalCliMissing = false;
+export function isGlobalCliMissing(): boolean {
+  return globalCliMissing;
+}
+
 async function runCommandProbe(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -2808,7 +2898,11 @@ async function resolveAndApplyProbeCommands(
       isCurrentProbe(sessionId, entry) &&
       sdkCommandRegistry.getRevision(sessionId) === startRev
     ) {
-      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(rawCommands) ? rawCommands : [], 'probe', sessionCommandCtx.get(sessionId), getUserOriginFingerprint());
+      // P2-14：项目级出生指纹随 probe 成功写入快照（会话 cwd 两根；无 cwd → undefined 不比对）。
+      const projectFp = await getProjectOriginFingerprint(
+        sessionRepo.getSession(sessionId)?.workingDir ?? getConfig().workingDirectory,
+      );
+      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(rawCommands) ? rawCommands : [], 'probe', sessionCommandCtx.get(sessionId), getUserOriginFingerprint(), projectFp);
       emitCommandChanged(sessionId, mainWindow, snap);
     }
   } catch (e) {
@@ -2882,6 +2976,7 @@ export function ensureGlobalCommandProbeFresh(mainWindow: BrowserWindow, maxAgeM
  */
 export function runGlobalCommandProbe(mainWindow: BrowserWindow): boolean {
   if (globalProbe) return false;
+  globalCliMissing = false; // P3-4：新探测尝试启动即清「CLI 缺失」标志（exe 装好后重试可见效）
   lastGlobalProbeAttemptAt = Date.now();
   let resolveDone!: () => void;
   const donePromise = new Promise<void>((r) => {
@@ -2917,7 +3012,14 @@ async function runGlobalCommandProbeInternal(mainWindow: BrowserWindow, entry: G
       return;
     }
     const { options, exe } = probeSdk;
-    if (!exe) return; // 无 CLI：不写 degraded，留给 per-session 处理
+    if (!exe) {
+      // P3-4：无 CLI 时置全局缺失标志——暂态会话（只读分流，无 per-session probe）的斜杠菜单
+      // 此前永远停在 loading（fallback null → loading 快照）。COMMANDS_GET 读该标志返回 degraded
+      // 快照（显式失败出口，菜单显示「未检测到本地 Claude Code」）；再次打开菜单时
+      // ensureGlobalCommandProbeFresh 天然重试（D6 节流），exe 装好后 flags 在探测成功路径清位。
+      globalCliMissing = true;
+      return;
+    }
     const query = await startSdkQuery(controlPromptIterable(), { ...options, abortController: entry.abortController });
     if (entry.abortController.signal.aborted) {
       try {
@@ -3130,6 +3232,14 @@ async function runQuery(
     }
     removeEntryIfCurrent(sessionId, prev);
   }
+  // P1-6：起步删除守卫——cancelCommandProbe 的 await 窗口内会话可能已被删除（markSessionDeleted
+  // 会 abortEntry+移除本 entry 并清 activeSessions）。不得把 entry 重新置回 running 占坑，
+  // 否则孤儿 query 烧完整回合 + 落库 FK 报错刷屏。会话非 active 或 entry 已被移除即静默退出
+  //（终态由 finally 兜底，emitExit(null) 与「被替换」出口同形）。
+  if (!isSessionActive(sessionId) || entries.get(sessionId) !== entry) {
+    emitExit(null);
+    return;
+  }
   entry.state = 'running';
   entries.set(sessionId, entry);
   // 回合终态追踪：SDK 正常应在流末 yield 一条 result。但第三方端点（如 glm-5.2）
@@ -3138,9 +3248,15 @@ async function runQuery(
   // 是否真收到 result；未收到则在流末合成一条，恢复 process-manager 时代「0 退出无 result
   // 合成 aborted」的兜底（见 cli.ts CliAbortedEvent 注释）。
   let gotResult = false;
+  // P2-9：本回合压缩结果与「即时 fresh 已送」标志（回合作用域，起步即新值，收尾自然丢弃）。
+  let turnHadCompactSuccess = false;
+  let postCompactionFreshSent = false;
   // 每个新 Query 重置本回合卡死追踪与 API retry 状态。
   resetStallTracker(sessionId);
   apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
+  // P1-1：回合起步清 reasoning_replay 回合错误标记——上一回合若被中断/流异常收尾（不经
+  // 消费入口），标记残留会让本成功回合被 result 出口误消费、原样重发（重复回复+重复计费）。
+  clearReasoningReplayTurnFlag(sessionId);
   ensureWatchdog(mainWindow);
 
   const sdkOptions = buildSdkOptions(opts, sessionId, mainWindow, entry);
@@ -3202,6 +3318,8 @@ async function runQuery(
       try {
         query = await startSdkQuery(streamingPrompt.iterable, sdkOptions);
         apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
+        // P1-1：resume 重试二次起步同样清回合标记（首个 attempt 未流式启动，防御性对齐）。
+        clearReasoningReplayTurnFlag(sessionId);
       } catch (retryErr) {
         forwardEvent(sessionId, mainWindow, {
           type: 'error',
@@ -3349,13 +3467,26 @@ async function runQuery(
             sdkMaxRetries,
             level: 'warn',
           };
-          forwardTransient(sessionId, mainWindow, sysInfo);
           // 确定性上游错误快败：model_not_found/鉴权/计费类错误重试 N 次结果不变（网关按
           // key 分组路由，与重试无关）。CC 内部仍会按退避重试，这里主动中断本回合并给出
           // 可行动诊断，替代「烧满 ~10 次重试 → 看门狗 600s 硬杀」的旧体验。isCurrentEntry
           // 守卫保证迟到的 api_retry 不误杀新回合；abort 后下一次 await 即抛错走既有收尾。
+          // P2-21：一次性闩——upstream_fatal 优雅窗内 entry 仍 current，killProcess 已同步删
+          // retry 状态，迟到 api_retry 会在上方重建状态并再次快败（重复 error 事件+重复系统
+          // 消息落库）。闩命中即丢弃本次迟到事件。
+          if (shouldDropLateApiRetry(entry)) {
+            logger.warn(`[retry-trace] late_api_retry_dropped session=${sessionId} reason=upstream_fatal latch`);
+            continue;
+          }
+          // P3-13：先分类再转发——命中确定性错误时跳过本次「重试中」状态卡转发，
+          // 避免重试卡闪现一瞬即被快败 error 取代。
           const upstream = classifyUpstreamError(next.state.lastError, next.state.lastErrorStatus);
-          if (isNonRetryableUpstreamError(upstream.kind) && isCurrentEntry(sessionId, entry)) {
+          const nonRetryableNow = isNonRetryableUpstreamError(upstream.kind) && isCurrentEntry(sessionId, entry);
+          if (!nonRetryableNow) {
+            forwardTransient(sessionId, mainWindow, sysInfo);
+          }
+          if (nonRetryableNow) {
+            markUpstreamFatalAborted(entry);
             abortNonRetryableUpstream(sessionId, mainWindow, entry, upstream);
           }
           continue;
@@ -3409,7 +3540,15 @@ async function runQuery(
             // 否则 compact_boundary 已把 UI 置 pending，若不在压缩完成点刷新，圆环会一直停留「待刷新」
             // 直到下一回合 init，违背「compaction 完成后 fresh 快照到达才显示成功」契约。
             if (sdkMsg.compact_result === 'success') {
-              void refreshContextSnapshot(sessionId, mainWindow, entry, query, { compactedJustNow: true, samplePhase: 'post-compaction' });
+              // P2-9：压缩成功事实记入本回合标志（探针 compactedJustNow 的唯一来源——不再认
+              // 命令文本 /\/compact\b/，失败的 /compact 不得弹成功横幅）；即时 fresh 实际送达时
+              // 置 postCompactionFreshSent，探针 fresh 不再重复带标记（双横幅修复）。
+              turnHadCompactSuccess = true;
+              void refreshContextSnapshot(sessionId, mainWindow, entry, query, {
+                compactedJustNow: true,
+                samplePhase: 'post-compaction',
+                onFreshSent: () => { postCompactionFreshSent = true; },
+              });
             }
           } else if (sdkMsg.status === 'requesting') {
             const sysInfo: CliSystemInfoEvent = { type: 'system', subtype: 'requesting' };
@@ -3547,27 +3686,45 @@ async function runQuery(
         // 诊断信息：任何失败（路径缺失/文件未落盘/无 effort 字段）静默跳过，不影响回合收尾。
         const extractEffortAttempt = (attemptsLeft: number): void => {
           setTimeout(() => {
-            try {
-              const userHome = effectiveUserHome();
-              const turnCwd = opts.workingDir || getConfig().workingDirectory;
-              const cliSid = resolveCliSessionId(sessionId);
-              if (userHome && turnCwd && cliSid) {
-                const jsonlPath = path.join(
-                  userHome, '.claude', 'projects', mungeProjectDirName(turnCwd), `${cliSid}.jsonl`,
-                );
-                if (existsSync(jsonlPath)) {
-                  const effort = extractLastEffortFromJsonl(readFileSync(jsonlPath, 'utf8'));
-                  if (effort) {
-                    sessionRepo.updateSession(sessionId, { lastEffectiveEffort: effort });
-                    return;
+            void (async () => {
+              try {
+                const userHome = effectiveUserHome();
+                const turnCwd = opts.workingDir || getConfig().workingDirectory;
+                const cliSid = resolveCliSessionId(sessionId);
+                if (userHome && turnCwd && cliSid) {
+                  const jsonlPath = path.join(
+                    userHome, '.claude', 'projects', mungeProjectDirName(turnCwd), `${cliSid}.jsonl`,
+                  );
+                  if (existsSync(jsonlPath)) {
+                    // OPT-1：尾部窗口读——长会话 JSONL 数十 MB，每次整文件同步 readFileSync
+                    // 会阻塞主进程。只读末尾 EFFORT_TAIL_WINDOW_BYTES（256KB）；文件小于窗口时
+                    // 整读走全文解析；尾部窗口首行可能被字节边界截断，走 drop-首半个行 的
+                    // extractLastEffortFromText。重试链不变。
+                    const fh = await fsp.open(jsonlPath, 'r');
+                    try {
+                      const st = await fh.stat();
+                      const windowBytes = Math.min(EFFORT_TAIL_WINDOW_BYTES, st.size);
+                      const buf = Buffer.alloc(windowBytes);
+                      await fh.read(buf, 0, windowBytes, st.size - windowBytes);
+                      const tailText = buf.toString('utf8');
+                      const effort = st.size <= EFFORT_TAIL_WINDOW_BYTES
+                        ? extractLastEffortFromJsonl(tailText)
+                        : extractLastEffortFromText(tailText);
+                      if (effort) {
+                        sessionRepo.updateSession(sessionId, { lastEffectiveEffort: effort });
+                        return;
+                      }
+                    } finally {
+                      await fh.close();
+                    }
                   }
                 }
+                if (attemptsLeft > 1) extractEffortAttempt(attemptsLeft - 1);
+                else logger.debug(`[${sessionId}] effort-truth：JSONL 读取重试耗尽，跳过（诊断信息）`);
+              } catch {
+                // 诊断信息，失败不阻塞回合
               }
-              if (attemptsLeft > 1) extractEffortAttempt(attemptsLeft - 1);
-              else logger.debug(`[${sessionId}] effort-truth：JSONL 读取重试耗尽，跳过（诊断信息）`);
-            } catch {
-              // 诊断信息，失败不阻塞回合
-            }
+            })();
           }, 2000);
         };
         extractEffortAttempt(4);
@@ -3592,7 +3749,9 @@ async function runQuery(
         // 附加 compactedJustNow，使压缩后骤降值由探针 fresh 精确覆盖。
         const probeInstance = entry.queryInstance;
         const probeCliSid = sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId);
-        const compactedJustNow = /^\/compact\b/.test(initCommandText);
+        // P2-9：探针 compactedJustNow 只看本回合 compact_result==='success'（失败/未压缩的
+        // /compact 不弹成功横幅），且即时 fresh 已送过则不再重复带标记（双横幅修复）。
+        const compactedJustNow = turnHadCompactSuccess && !postCompactionFreshSent;
         deleteEntry(sessionId, entry);
         emitExit(0);
         // review-v4 High-1 方案 A：post-turn 快照——回合末真实 current 值。5s 超时兜底，
@@ -3627,9 +3786,13 @@ async function runQuery(
     // 流正常结束。若旧 query 已被 abort/替换，按中断收尾，避免误报成功退出。
     // 终态兜底：本回合未收到 result（第三方端点/Windows 丢包）→ 合成一条 aborted，
     // 保证前端 sending 必复位。前端 aborted 处理器幂等 markStopped；persistCliEvent 对
-    // aborted 无 case，不落库、不污染历史（与既有中断路径同形，见下方 catch 的 aborted）。
+    // aborted 有 case（review-v2 §3.7 起落库 system:aborted，重开会话可见），此处文案
+    // 「回合已结束」随之落库（P3-1 注释纠偏：旧注释「无 case 不落库」已不真）。
     // 仅对当前 entry 合成——已被替换的旧 entry 由新 entry 负责发终态，这里跳过避免重复。
     if (isCurrentEntry(sessionId, entry) && !gotResult) {
+      // P2-1：重试烧满后「流丢 result」收尾时补记账——否则 exhausted 终态不落库、红灯与
+      // 通知全丢。未烧满/不在重试中时 recordApiRetryExhausted 天然 no-op，普通回合零影响。
+      finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
       // 出口②（流丢 result 合成 aborted）：引擎侧内容已落 transcript，探针反映真实占用。
       const probeInstance2 = entry.queryInstance;
@@ -3659,6 +3822,9 @@ async function runQuery(
         entry.query = query;
         gotResult = false; // 新 query = 新回合，重置终态追踪
         apiRetryStates.set(sessionId, createApiRetryState(API_RETRY_LIMIT_FALLBACK));
+        // P1-1：resume 重试二次起步清回合标记——首个 attempt 命中的错误标记随新 query 作废，
+        // 重试本身已是同文本重发，成功后不应再触发一次自动重发。
+        clearReasoningReplayTurnFlag(sessionId);
         logger.debug(`[${sessionId}] resume 重试：旧会话 id 已清除，第二 query 已启动`);
         continue;
       } catch (retryErr) {
@@ -3671,10 +3837,18 @@ async function runQuery(
       }
     }
     if (interruptedQueries.has(query)) {
-      // 用户中断：发 aborted（不弹错误，等价 M4）。
-      forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
+      // 用户中断：发 aborted（不弹错误，等价 M4）。user_stopped 终态已由 killProcess('user')
+      // 的 recordApiRetryUserStop 记账，此处不再补 exhausted。
+      // P3-1：两段式优雅窗已接管（entry.forceKill 非空）时不再补发 aborted——finishKill 路径
+      // 已统一发 aborted 终态并负责收口，此处再发会产生双终态（aborted×2 且落库两条）。
+      // 仅 user 直杀/自然中断（forceKill 已自清或未设置）补发。
+      if (entry.forceKill == null) {
+        forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
+      }
       emitExit(null);
     } else {
+      // P2-1：SDK 异常收尾（流抛错）同样补记账——重试烧满后异常时 exhausted 终态不落库。
+      finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
       const msg = err instanceof Error ? err.message : String(err);
       forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
       emitExit(1);
@@ -3730,10 +3904,14 @@ export function spawnForChat(
     }
   }
   const entry = createEntry();
+  // P1-6：占坑前拒绝已标记删除的会话——「发送中删除」竞态下 prepareAttachmentPrompt 的
+  // 数百 ms 窗口内删除已由 CHAT_SEND 重查兜住，此处兜 spawn 前最后一瞬的删除（拒绝复活）。
+  if (!markSessionActive(sessionId)) {
+    throw new Error('会话已删除，无法发送');
+  }
   entries.set(sessionId, entry);
-  markSessionActive(sessionId);
-  // reasoning_replay 韧性层：记录本回合原样用户文本（自动重试载体；命令文本不记录）。
-  recordOutgoingUserText(sessionId, opts.userCommandText);
+  // reasoning_replay 韧性层：记录本回合原样用户文本（自动重试载体；命令文本/带附件回合不记录——N4）。
+  recordOutgoingUserText(sessionId, opts.userCommandText, opts.hasAttachments);
   pendingFirstPrompt.set(sessionId, { mainWindow, opts, entry });
   return entry.handle;
 }
@@ -3862,6 +4040,12 @@ export function killProcess(
   pendingFirstPrompt.delete(sessionId);
   const entry = entries.get(sessionId);
   if (entry) {
+    // P2-1：watchdog 硬杀路径补记账——重试烧满后排期中的 retry 随进程被杀，流不会再走
+    // result/catch 出口，exhausted 终态在此补落（未烧满时 no-op；与其他出口重复调用幂等）。
+    // 仅系统杀路径补：user 已有 user_stopped 记账、session_cleanup 会话已删不落库。
+    if (reason === 'watchdog' && mainWindow) {
+      finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
+    }
     // user 与 watchdog 中断都记入 interruptedQueries：让 runQuery 的 catch 走 aborted 分支
     //（干净收尾），避免 watchdog 已发友好 error 后又叠一条「SDK 执行出错」。
     if (entry.query) interruptedQueries.add(entry.query);
@@ -3890,13 +4074,14 @@ export function killProcess(
       // （state='aborting'）+ removeEntryIfCurrent，isCurrentEntry 此后 false；runQuery 流末兜底
       // （isCurrentEntry 检查）与 catch 段（!isCurrentEntry → emitExit(null)）都不会再发 aborted，
       // 导致后台会话/窗口切换/依赖统一终态事件的路径收不到取消结果、sending 不复位。此处补发：
-      // forwardEvent 对 aborted 只 IPC 不落库（persistCliEvent 无 case），前端 markStopped 幂等；
+      // forwardEvent 对 aborted 只 IPC + 落库 system:aborted（persistCliEvent 有 case，review-v2 §3.7），
+      // 前端 markStopped 幂等；
       // runQuery 不会重复发（上述分支已吞掉）。session_cleanup/queue/api_retry_exhausted 不发
       // （会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
       // 迟到语义（新增）：仅当被杀回合仍 current 时补发；回合已自然收尾（终态已由 result/流末
       // 提供）时不再叠加 aborted，防污染收尾后新回合的 UI 状态。
       if (wasCurrent && (reason === 'user' || reason === 'watchdog') && mainWindow) {
-        forwardEvent(sessionId, mainWindow, { type: 'aborted', message: reason === 'user' ? '已中断' : '已硬中断' });
+        forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
         // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
         // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
         // !isCurrentEntry 分支（state='aborting' 且 entries 已移除）提前 emitExit(null) 退出，
