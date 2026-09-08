@@ -194,3 +194,15 @@ export const THEME_PALETTES: ThemePalette[] = [
     },
   },
 ];
+
+/** OPT-10：引擎后台请求六开关单一常量（env 变量名 ← AppConfig 布尔字段名）。
+ *  cli-shared.buildSpawnEnv（进程 env 通道）与 sdk-backend.buildClaudeLinkSettingsBlock
+ *  （settings.env 通道）共用同一份映射，防两份手写列表漂移。 */
+export const ENGINE_BACKGROUND_TOGGLE_ENV: ReadonlyArray<readonly [string, string]> = [
+  ['CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'disableAutoMemory'],
+  ['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS', 'disableBackgroundTasks'],
+  ['CLAUDE_CODE_DISABLE_CRON', 'disableCron'],
+  ['CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY', 'disableFeedbackSurvey'],
+  ['DISABLE_TELEMETRY', 'disableTelemetry'],
+  ['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', 'disableNonessentialTraffic'],
+] as const;
