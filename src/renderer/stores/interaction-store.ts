@@ -9,6 +9,7 @@
 
 import { defineStore } from 'pinia';
 import type { InteractionPromptPayload, InteractionPromptResponsePayload } from '../../shared/types/ipc';
+import { useSessionStore } from './session-store';
 
 interface RequestMeta {
   isLocal: boolean;
@@ -23,6 +24,14 @@ export const useInteractionStore = defineStore('interaction', {
   getters: {
     activeRequest(state): InteractionPromptPayload | null {
       return state.requests[0] ?? null;
+    },
+    // P2-8：当前会话可见的 pending 请求（与 InteractionPrompt.currentRequests 同一谓词）：
+    // 本会话远程请求 + 本地 confirm（sessionId='' 全局可见）。他会话的 pending 请求不在此列——
+    // diff 弹窗的「让位」判定改用本 getter，避免驻留会话 A 时 B 的后台弹窗静默阻断 A 的弹窗。
+    visibleRequestsForActiveSession(state): InteractionPromptPayload[] {
+      const sid = useSessionStore().activeSession?.id;
+      if (!sid) return state.requests.filter((r) => !r.sessionId);
+      return state.requests.filter((r) => !r.sessionId || r.sessionId === sid);
     },
   },
   actions: {

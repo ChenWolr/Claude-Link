@@ -17,7 +17,8 @@ import {
 } from '../../shared/session-display-status';
 import { resolveContextWindow } from '../../shared/model-context-windows';
 import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../../shared/context-usage';
-import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';import { useConfigStore } from './config-store';
+import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';
+import { computeTurnStartIndex } from '../../shared/turn-boundary';import { useConfigStore } from './config-store';
 import { useClaudePlanStore } from './claude-plan-store';
 import { useCommandStore } from './command-store';
 import { useChatDraftStore } from './chat-draft-store';
@@ -440,17 +441,16 @@ export const useSessionStore = defineStore('session', {
       // 否则置 null（pending 空态）。会话内新 payload 到达即覆盖此预填值。
       this.canonicalContext = buildPersistedCanonical(session);
       try {
-        this.messages = await window.claudeLink.getSessionMessages(session.id);
+        const loaded = await window.claudeLink.getSessionMessages(session.id);
+        // P2-17：并发竞态守卫（对照 materializeActiveTransient 既有先例）——getSessionMessages
+        // 的 IPC 往返期间用户可能已切到别的会话，慢响应不得覆盖新会话的 messages/turnStartIndex。
+        if (this.activeSession?.id !== session.id) return;
+        this.messages = loaded;
         // 运行中会话切回时，不能把 turnStartIndex 固定成 0；否则 MessageList 会把全量历史
         // 都当成本回合流式重复内容隐藏，造成「主过程/思考消失但计时还在跳」。
+        // P1-3：口径收口到共享纯函数（与直发/队列回合同一实现）。
         if (this.runningSessions.includes(session.id)) {
-          const lastUserIndex = (() => {
-            for (let i = this.messages.length - 1; i >= 0; i -= 1) {
-              if (this.messages[i].role === 'user') return i;
-            }
-            return -1;
-          })();
-          this.turnStartIndex = lastUserIndex >= 0 ? lastUserIndex + 1 : this.messages.length;
+          this.turnStartIndex = computeTurnStartIndex(this.messages);
         }
       } catch {
         // session may have no messages yet
@@ -549,25 +549,8 @@ export const useSessionStore = defineStore('session', {
         this.searchResults = null;
       }
     },
-    async updateActiveSessionModelOverride(modelOverride: string | null) {
-      if (!this.activeSession) return;
-      // 暂态会话：尚未落库，先写内存；物化时随 SessionCreateSpec 一并落库。
-      // 原位变更（不 spread 换对象）：保持与 transientDraft 单例同一引用，切走再回来不丢选择。
-      if (this.activeSession.transient) {
-        this.activeSession.modelOverride = modelOverride?.trim() || null;
-        return;
-      }
-      try {
-        const normalized = modelOverride?.trim() || null;
-        const updated = await window.claudeLink.updateModelOverride(this.activeSession.id, normalized);
-        if (updated) {
-          this.activeSession = updated;
-          this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
-        }
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '更新会话模型失败';
-      }
-    },
+    // OPT-10：updateActiveSessionModelOverride 已删除——无调用方的死代码（模型选用唯一现场
+    // =供应商模型选择器 setActiveSessionProviderModel；preload 的 updateModelOverride 方法同步移除）。
     // 会话级供应商×模型选用（doc2 §4.4）：一次写两个 override + 主进程更新全局「最近使用」记忆。
     // 切换保留会话历史，从下一条消息起生效（每条消息 = 全新 query + resume，天然成立）。
     async setActiveSessionProviderModel(providerId: string, modelId: string) {
@@ -695,13 +678,25 @@ export const useSessionStore = defineStore('session', {
     },
     bindContextUpdates() {
       return window.claudeLink.onContextUpdate((payload) => {
-        if (this.activeSession?.id !== payload.sessionId) return;
         // review-v3 High-2：代际门——旧 query 的迟到 payload（中断/替换后到达）与「已知代际却
         // 缺代际」的可疑 payload 一律拒收，防止旧回合覆盖新回合 canonical 状态。规则见
         // shouldAcceptContextPayload（共享纯函数，行为有专项测试）；通过时记录见过的最大代际。
+        // P2-10：门提前到 activeSession 判定之前——后台会话的合法 payload 也要过门并回填列表，
+        // 而非直接丢弃。
         const gate = shouldAcceptContextPayload(this.contextQueryGenerations[payload.sessionId], payload.queryGeneration);
         if (!gate.accept) return;
         this.contextQueryGenerations[payload.sessionId] = gate.nextKnownGeneration;
+        // P2-10：后台会话的探针/runtime fresh 数据回填 sessions 列表对象——否则驻留会话 A 时
+        // 会话 B 的 post-turn 探针结果被整体丢弃，切回 B 时 switchSession 从列表旧对象预填
+        // canonicalContext（旧值/待刷新）。带 live 占用值的 payload 才回填（turn-usage-only
+        // 事件 currentContextUsedTokens=null，红线：turn usage 永不驱动圆环，照旧不回填）。
+        const listItem = this.sessions.find((s) => s.id === payload.sessionId);
+        if (listItem && typeof payload.currentContextUsedTokens === 'number' && payload.currentContextUsedTokens >= 0) {
+          listItem.lastContextUsed = payload.currentContextUsedTokens;
+          listItem.lastContextUsedCapacity = payload.contextWindowCapacityTokens ?? listItem.lastContextUsedCapacity ?? null;
+          listItem.lastContextUsedAt = payload.refreshedAt ?? Date.now();
+        }
+        if (this.activeSession?.id !== payload.sessionId) return;
         // review-v4 Medium-2：字段完整性协议校验——canonical 字段缺省（undefined）即协议错误，
         // 拒收，不得与 prev state 拼接成混合状态（无数据必须显式 null，由主进程构造保证）。
         if (!hasCompleteCanonicalFields(payload)) return;
@@ -955,7 +950,16 @@ export const useSessionStore = defineStore('session', {
         this.error = error instanceof Error ? error.message : '重命名失败';
       }
     },
+    /** P1-3：按共享口径重算回合边界（队列回合的 user_message_created 分支在消息入列后调用）。 */
+    recomputeTurnStartIndex() {
+      this.turnStartIndex = computeTurnStartIndex(this.messages);
+    },
     addMessage(message: Message) {
+      // P1-4 归属守卫（单点）：非活动会话的消息一律拒绝——后台队列回合的 user message
+      // 经 task-store 直连本方法，无守卫时串入当前会话（幽灵气泡），isNew+user 数=1 判定
+      // 还会用外来内容触发 analyzeTopic 改错标题。活动会话写入谓词恒真不受影响；
+      // activeSession 为 null（暂态草稿）时拒绝一切远端消息。切回原会话由 DB 重载补齐。
+      if (message.sessionId !== this.activeSession?.id) return;
       // Task 7B：按 id upsert——task 执行/waiting 续接经 queue event 回传同一 id 的 user message 时，
       // 替换而非追加，避免重复气泡（retry/重放也复用同一稳定 id）。
       const existingIdx = this.messages.findIndex((m) => m.id === message.id);
@@ -965,6 +969,9 @@ export const useSessionStore = defineStore('session', {
       } else {
         this.messages.splice(existingIdx, 1, message);
       }
+
+      // P1-3：回合边界随消息入列重算（队列回合的 turnStartIndex 唯一更新点由 task-store 调用）。
+      this.turnStartIndex = computeTurnStartIndex(this.messages);
 
       // Trigger topic analysis for first user message if session name is auto-generated
       if (

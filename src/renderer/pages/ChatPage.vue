@@ -127,6 +127,12 @@ async function stageFiles(files: File[]) {
   const staged: AttachmentSummary[] = [];
   for (const file of files) {
     try {
+      // P1-7：读 bytes 前按 size 早退（与主进程 ATTACHMENT_READ_GUARD_BYTES 同阈值，
+      // 渲染层不 import 主进程模块故本地镜像；精确 10/30MiB 区分仍由主进程校验裁定）。
+      if (file.size > 32 * 1024 * 1024) {
+        failures.push(`${file.name || '附件'}：文件超过 30 MiB 上限。`);
+        continue;
+      }
       const buf = await file.arrayBuffer();
       const summary = await window.claudeLink.stageAttachmentBytes({
         sessionId,

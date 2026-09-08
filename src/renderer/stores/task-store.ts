@@ -158,10 +158,17 @@ export const useTaskStore = defineStore('task', {
           break;
         }
         case 'user_message_created': {
-          // 队列任务到点/立即执行在主进程创建稳定 user message 后经此事件回传，
-          // 按 id upsert 进会话消息（sessionStore 自行按消息归属路由，后台会话也要入列）。
+          // 队列任务到点/立即执行在主进程创建稳定 user message 后经此事件回传，按 id upsert
+          // 进会话消息（addMessage 带归属守卫：P1-4 后台/已删会话的消息只写后台存储不串入当前列表）。
           const msg = payload.data?.message as Message | undefined;
-          if (msg) sessionStore.addMessage(msg);
+          if (msg) {
+            sessionStore.addMessage(msg);
+            // P1-3：队列驱动的回合没有直发链路的 turnStartIndex 写入点——消息入列后按
+            // 共享口径重算回合边界，否则流式去重会把上一回合/全部历史正文与思考隐藏到回合结束。
+            if (msg.sessionId === sessionStore.activeSession?.id) {
+              sessionStore.recomputeTurnStartIndex();
+            }
+          }
           break;
         }
       }
