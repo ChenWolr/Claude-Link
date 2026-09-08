@@ -117,16 +117,26 @@ async function waitFor(label, fn, timeoutS = 30, intervalMs = 500) {
 }
 
 /** 通过侧栏「+ 新会话」按钮真实创建会话；sid 用 listSessions 前后差集识别
- *  （侧栏 unshift 最新在前，与 listSessions 顺序不同；会话可能重名，名字/位置匹配都不可靠）。 */
+ *  （侧栏 unshift 最新在前，与 listSessions 顺序不同；会话可能重名，名字/位置匹配都不可靠）。
+ *  2026-09-07 适配（暂态会话，08-28/50e4883 起）：「新会话」= renderer-only 暂态草稿，
+ *  不入 listSessions——点击后经 Pinia 直调 materializeActiveTransient 物化（同 id 建 DB 行，
+ *  与「发首条消息自动物化」同路径；对齐 cdp-context-e2e 的既有适配）。 */
 async function newSessionViaUI(ws) {
   const before = new Set(((await evalExpr(ws, `window.claudeLink.listSessions()`)) ?? []).map((s) => s.id));
   await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`);
   await waitFor('聊天输入框出现', () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 15);
+  const materialized = await evalExpr(ws, `(() => {
+    const app = document.querySelector('#app');
+    const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+    const st = pinia && pinia._s ? pinia._s.get('session') : null;
+    return st && st.materializeActiveTransient ? st.materializeActiveTransient().then((s) => !!s) : Promise.resolve(false);
+  })()`);
+  if (!materialized) log('  ℹ 会话未物化（可能已是持久会话——非暂态基线）');
   const sid = await waitFor('新会话出现在 listSessions（差集唯一）', async () => {
     const list = (await evalExpr(ws, `window.claudeLink.listSessions()`)) ?? [];
     const fresh = list.filter((s) => !before.has(s.id));
     return fresh.length === 1 ? fresh[0].id : null;
-  }, 15);
+  }, 30);
   const sessions = (await evalExpr(ws, `window.claudeLink.listSessions()`)) ?? [];
   return { sid, name: sessions.find((s) => s.id === sid)?.name ?? '(未命名)' };
 }

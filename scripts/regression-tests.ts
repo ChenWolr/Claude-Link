@@ -1308,6 +1308,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   const db = {
+    transaction(fn: () => void) { return fn; },
     exec(sql: string) {
       for (const [, table, column] of sql.matchAll(/ALTER TABLE (sessions|messages) ADD COLUMN (\w+)/g)) {
         addColumn(table, column);
@@ -1342,7 +1343,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 9);
+  assert.equal(schemaVersion, 11);
   assert.ok(sessionColumns.has('provider_override'), 'V8：迁移后须补 provider_override 列');
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
@@ -1373,6 +1374,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   let schemaVersion = 3;
 
   const db = {
+    transaction(fn: () => void) { return fn; },
     exec(sql: string) {
       allExecSql.push(sql);
       for (const [, tbl] of sql.matchAll(/CREATE TABLE IF NOT EXISTS\s+(\w+)/g)) createdTables.add(tbl);
@@ -1403,7 +1405,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 9, '迁移后 schema version 须升到 9（V9 tasks.paused 列）');
+  assert.equal(schemaVersion, 11, '迁移后 schema version 须升到 11（V11 权限清洗一次性化；原 OPT-8 索引迁移）');
   assert.ok(sessionsColumns.has('provider_override'), 'V8：老库迁移须补 provider_override 列');
   assert.ok(allExecSql.some((sql) => sql.includes('model_override = NULL')), 'V8：须执行 model_override 别名清洗 SQL');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');
@@ -1778,11 +1780,12 @@ function testPermissionSettingsMergeAndSessionCoercion(): void {
 
   // 角度D：权限通道对齐纯函数。settings.permissions.defaultMode（全局档）与会话有效档对齐，
   // 避免「全局默认=bypassPermissions、会话显式选 default」时 settings 块越权放行。
-  // 有效档非 default → 写有效档（覆盖全局档）；有效档 default → 删 defaultMode（原生来源自决）。
+  // 有效档非 default → 写有效档（覆盖全局档）；有效档 default → **显式写 'default'**
+  // （N1 修复：压掉按全局档投影的 settings.local.json 文件层，删除会让 CLI 回落到宽松档）。
   assert.deepEqual(
     alignPermissionDefaultMode({ defaultMode: 'bypassPermissions', allow: ['Read'] }, 'default'),
-    { allow: ['Read'] },
-    '会话显式选 default 应删除 settings 块的全局宽松 defaultMode',
+    { defaultMode: 'default', allow: ['Read'] },
+    '会话显式选 default 应显式写 defaultMode=default 压掉投影文件层（N1）',
   );
   assert.deepEqual(
     alignPermissionDefaultMode({ defaultMode: 'bypassPermissions', allow: ['Read'] }, 'acceptEdits'),
@@ -2841,7 +2844,7 @@ function testToolDiffDialogContracts(): void {
   const fs = require('node:fs') as typeof import('node:fs');
   const read = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
   const useToolDiffDialog = read('../src/renderer/composables/useToolDiffDialog.ts');
-  assert.ok(useToolDiffDialog.includes('openToolDiffDialog') && useToolDiffDialog.includes('requests.length'), 'openToolDiffDialog 须在交互弹窗并存时 no-op（requests.length>0）');
+  assert.ok(useToolDiffDialog.includes('openToolDiffDialog') && useToolDiffDialog.includes('visibleRequestsForActiveSession'), 'openToolDiffDialog 须在「当前会话可见」交互弹窗并存时 no-op（P2-8：他会话 pending 不阻断）');
   assert.ok(useToolDiffDialog.includes('splitUnifiedDiff'), 'useToolDiffDialog 须经 splitUnifiedDiff 拆段');
 
   const appVue = read('../src/renderer/App.vue');
@@ -3042,7 +3045,7 @@ function testChangesPanelPlumbing(): void {
   // === DiffDialog 接线（点文件 → 弹窗，取代内联展开）===
   assert.ok(fs.existsSync(new URL('../src/renderer/composables/useDiffDialog.ts', import.meta.url)), 'useDiffDialog 组合式须存在');
   const useDiffDialogSrc = read('../src/renderer/composables/useDiffDialog.ts');
-  assert.ok(useDiffDialogSrc.includes('openDiffDialog') && useDiffDialogSrc.includes('requests.length'), 'openDiffDialog 须在交互弹窗并存时 no-op（requests.length>0）');
+  assert.ok(useDiffDialogSrc.includes('openDiffDialog') && useDiffDialogSrc.includes('visibleRequestsForActiveSession'), 'openDiffDialog 须在「当前会话可见」交互弹窗并存时 no-op（P2-8：他会话 pending 不阻断）');
   const appVue = read('../src/renderer/App.vue');
   assert.ok(appVue.includes('<DiffDialog'), 'App.vue 须挂载 <DiffDialog />');
   const changesPanelSrc = read('../src/renderer/components/changes/ChangesPanel.vue');

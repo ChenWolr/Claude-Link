@@ -118,7 +118,22 @@ async function waitFor(label, fn, timeoutS = 60, intervalMs = 500) {
 async function newSessionViaUI(ws, name) {
   await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`);
   await waitFor('聊天输入框出现', () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 15);
-  const sid = await activeSessionId(ws);
+  // 2026-09-07 适配（暂态会话，08-28/50e4883 起）：「新会话」= renderer-only 暂态草稿，
+  // 不入 listSessions、侧栏无名字条目——经 Pinia 直调 materializeActiveTransient 物化
+  // （同 id 建 DB 行；对齐 cdp-context-e2e 的既有适配）。
+  await evalExpr(ws, `(() => {
+    const app = document.querySelector('#app');
+    const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+    const st = pinia && pinia._s ? pinia._s.get('session') : null;
+    return st && st.materializeActiveTransient ? st.materializeActiveTransient().then((s) => !!s) : Promise.resolve(false);
+  })()`);
+  const sid = await evalExpr(ws, `(() => {
+    const app = document.querySelector('#app');
+    const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+    const st = pinia && pinia._s ? pinia._s.get('session') : null;
+    return st && st.activeSession ? st.activeSession.id : null;
+  })()`);
+  if (!sid) throw new Error('物化后未取得活跃会话 id');
   log(`  ℹ 新会话：sid=${sid}`);
   return sid;
 }
