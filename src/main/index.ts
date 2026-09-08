@@ -145,6 +145,28 @@ function createWindow(): void {
   trackWindowSize(mainWindow);
 }
 
+// D3：命令来源监视 + 全局兜底探测的统一启动点（F6）：whenReady 首启与 macOS activate
+// 重启共用同一份依赖注入，避免两处漂移。window-all-closed 会停 watcher/取消全局探测，
+// mac 重开路径必须在此恢复，否则命令热刷新在本进程剩余生命周期内永久失效。
+function startGlobalCommandPipeline(): void {
+  if (!mainWindow) return;
+  // 启动全局兜底命令探测（无会话绑定）：结果写入 registry.globalFallback，作为重启后旧会话的命令兜底。
+  // fire-and-forget；完成时对已打开且无 per-session 快照的会话回填。CLI 缺失/失败均不阻塞启动。
+  runGlobalCommandProbe(mainWindow);
+
+  // D3：命令来源目录监视——用户级 ~/.claude/{commands,skills} 与项目级 .claude/{commands,skills}
+  // 新增/修改/删除 → 指纹变化 → 节流重探热刷新 globalFallback，新会话（含暂态）免重启拿最新命令。
+  // app 依赖（effectiveUserHome / workingDirectory / onConfigSaved）在此注入，watcher 模块保持纯 node。
+  startCommandSourceWatcher({
+    getUserHome: effectiveUserHome,
+    getWorkingDirectory: () => getConfig().workingDirectory,
+    // 透传幂等结果（true=启动 / false=被吞）：watcher 据此在被吞时延迟重试（review-v1 发现1）。
+    triggerGlobalProbe: () => (mainWindow ? runGlobalCommandProbe(mainWindow) : false),
+    onConfigSaved,
+    logger,
+  });
+}
+
 app.whenReady().then(async () => {
   electronApp.setAppUserModelId('com.clauedelink.app');
 
@@ -193,23 +215,7 @@ app.whenReady().then(async () => {
   syncTrayWithConfig();
   onConfigSaved(syncTrayWithConfig);
 
-  // 启动全局兜底命令探测（无会话绑定）：结果写入 registry.globalFallback，作为重启后旧会话的命令兜底。
-  // fire-and-forget；完成时对已打开且无 per-session 快照的会话回填。CLI 缺失/失败均不阻塞启动。
-  if (mainWindow) {
-    runGlobalCommandProbe(mainWindow);
-
-    // D3：命令来源目录监视——用户级 ~/.claude/{commands,skills} 与项目级 .claude/{commands,skills}
-    // 新增/修改/删除 → 指纹变化 → 节流重探热刷新 globalFallback，新会话（含暂态）免重启拿最新命令。
-    // app 依赖（effectiveUserHome / workingDirectory / onConfigSaved）在此注入，watcher 模块保持纯 node。
-    startCommandSourceWatcher({
-      getUserHome: effectiveUserHome,
-      getWorkingDirectory: () => getConfig().workingDirectory,
-      // 透传幂等结果（true=启动 / false=被吞）：watcher 据此在被吞时延迟重试（review-v1 发现1）。
-      triggerGlobalProbe: () => (mainWindow ? runGlobalCommandProbe(mainWindow) : false),
-      onConfigSaved,
-      logger,
-    });
-  }
+  startGlobalCommandPipeline();
 
   // 阶段二 fixture smoke：env CLAUDE_LINK_EXPORT_SMOKE 指定会话种子消息条数时自动跑一次导出。
   if (process.env.CLAUDE_LINK_EXPORT_SMOKE) {
@@ -225,6 +231,10 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
+      // F6（macOS dock 重开）：window-all-closed 已 killAllProcesses/取消全局探测/停命令源
+      // 监视（darwin 不退出进程），重开走 activate——createWindow 后必须恢复命令管线，
+      // 否则 watcher 与全局兜底永久失效。IPC 注册经 registerIpcHandlers 幂等守卫安全重入。
+      startGlobalCommandPipeline();
     }
   });
 });

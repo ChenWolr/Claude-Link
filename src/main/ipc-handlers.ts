@@ -66,6 +66,13 @@ import type { StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmen
 
 let mainWindow: BrowserWindow;
 
+// F6（macOS dock 重开推演）：全量 IPC 注册只允许一次。重复调用（activate → createWindow
+// 二次进入）在此守卫收口——先更新模块级 mainWindow 指向新窗（事件推送仍可达），再直接
+// return，避免在第一个重复通道上同步抛 "Attempted to register a second handler"，导致
+// createWindow 里 registerIpcHandlers 之后的 trackWindowSize 等初始化被跳过。全仓无
+// removeHandler 调用，不采用逐通道重挂方案。
+let ipcHandlersRegistered = false;
+
 /** 会话级发送互斥：防止并发 CHAT_SEND 双落库/覆盖 pending。 */
 const chatSendLocks = new Set<string>();
 
@@ -80,6 +87,8 @@ function broadcastProvidersChanged(): void {
 
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   mainWindow = mainWindowRef;
+  if (ipcHandlersRegistered) return;
+  ipcHandlersRegistered = true;
 
   // CLI
   ipcMain.handle(IPC_CHANNELS.CLI_DETECT, async () => detectCli(true));
@@ -460,7 +469,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         modelOverride: session.modelOverride,
         providerOverride: session.providerOverride,
         workingDir: session.workingDir,
-        maxTurns: session.maxTurns,
+        // F2：三路执行链（直发/重发/队列）统一从全局设置取 maxTurns——session.maxTurns 的
+        // DB 列默认 200 且渲染层从不写入，会话级值永远到不了设置，直发路径曾完全无视该设置。
+        maxTurns: getConfig().maxTurns,
         permissionMode: session.permissionMode,
         thinkingLevel: session.thinkingLevel,
         resumeSessionId: session.cliSessionId,
@@ -551,7 +562,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // 批次二 #3：运行中回合中途切权限档。null（跟随全局）在主进程解析成有效档；
   // 无运行回合返回 false（渲染层回落「下一条消息生效」语义，不另提示）。
+  // F3：白名单纵深防御——本入口曾是唯一不过 isValidPermissionMode 的会话 IPC（对齐
+  // SESSION_CREATE/SESSION_UPDATE 先例），非法值丢弃按 null（跟随全局默认）处理并 warn，
+  // 不把渲染层传来的未校验值直送 SDK setPermissionMode 控制帧。
   ipcMain.handle(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE, async (_event, sessionId: string, mode: string | null) => {
+    if (mode !== null && !isValidPermissionMode(mode as PermissionMode)) {
+      logger.warn(`[permission] invalid running permissionMode, discarding: ${String(mode)}`);
+      mode = null;
+    }
     const effective = resolveEffectivePermissionMode(mode as PermissionMode | null, getConfig().permissionMode);
     return setRunningQueryPermissionMode(sessionId, effective);
   });
