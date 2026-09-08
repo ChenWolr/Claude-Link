@@ -51,7 +51,6 @@ export interface ClaudeLinkAPI {
   ) => Promise<Session | null>;
   searchSessions: (query: string) => Promise<Session[]>;
   analyzeTopic: (sessionId: string, firstMessage: string) => Promise<string | null>;
-  updateModelOverride: (id: string, modelOverride: string | null) => Promise<Session | null>;
   sendMessage: (sessionId: string, payload: ChatSendPayload) => Promise<SendMessageResult>;
   abortChat: (sessionId: string) => Promise<void>;
   /** 批次二 #3：运行中回合中途切权限档（streaming 控制请求）；无运行回合返回 false。 */
@@ -148,7 +147,6 @@ export function createApi(): ClaudeLinkAPI {
     updateSession: (id, data) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE, id, data),
     searchSessions: (query) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SEARCH, query),
     analyzeTopic: (sessionId, firstMessage) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_ANALYZE_TOPIC, sessionId, firstMessage),
-    updateModelOverride: (id, modelOverride) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE_MODEL_OVERRIDE, id, modelOverride),
     sendMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, payload),
     abortChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ABORT, sessionId),
     setRunningPermissionMode: (sessionId, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE, sessionId, mode),
