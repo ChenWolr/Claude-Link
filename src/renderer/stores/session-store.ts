@@ -18,7 +18,8 @@ import {
 import { resolveContextWindow } from '../../shared/model-context-windows';
 import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../../shared/context-usage';
 import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';
-import { computeTurnStartIndex } from '../../shared/turn-boundary';import { useConfigStore } from './config-store';
+import { computeTurnStartIndex } from '../../shared/turn-boundary';
+import { isAutoSessionName } from '../../shared/auto-session-name';import { useConfigStore } from './config-store';
 import { useClaudePlanStore } from './claude-plan-store';
 import { useCommandStore } from './command-store';
 import { useChatDraftStore } from './chat-draft-store';
@@ -122,6 +123,13 @@ function buildPersistedCanonical(session: Session): CanonicalContextState | null
     samplePhase: 'post-turn',
   };
 }
+
+// A2（契约普查 2026-09-08）：searchSessions 请求代际——模块级自增（与组件生命周期解耦，
+// 对照 config-store loadNativeSettingsDiagnostic 的请求代际先例）。H2 的 onUnmounted 只能
+// 取消未触发的防抖 timer；timer 已 fire、IPC 在途时导航走，晚完成的旧搜索会把 searchResults
+// 重新置入（AppSidebar 常驻消费，不可见过滤器变体）。发起新查询即换代，晚到旧结果/旧失败
+// 一律丢弃。
+let searchSessionsRequestId = 0;
 
 export const useSessionStore = defineStore('session', {
   state: () => ({
@@ -533,6 +541,8 @@ export const useSessionStore = defineStore('session', {
       }
     },
     async searchSessions(query: string) {
+      // 先换代再分流：空查询同样使在途旧搜索失效（清空输入 = 最新意图是全量列表）。
+      const requestId = ++searchSessionsRequestId;
       const q = query.trim();
       if (!q) {
         // 空查询退出搜索态，全量列表已在 sessions 里，无需 IPC。
@@ -542,8 +552,13 @@ export const useSessionStore = defineStore('session', {
       }
       this.searchQuery = q;
       try {
-        this.searchResults = await window.claudeLink.searchSessions(q);
+        const results = await window.claudeLink.searchSessions(q);
+        // A2：IPC 往返期间用户可能已发起新搜索/退出搜索态，晚到的旧结果不得覆盖新状态。
+        if (requestId !== searchSessionsRequestId) return;
+        this.searchResults = results;
       } catch (error) {
+        // 晚到的旧失败同理：不清新结果、不误报 error。
+        if (requestId !== searchSessionsRequestId) return;
         this.error = error instanceof Error ? error.message : '搜索会话失败';
         // 异常回退全量列表。
         this.searchResults = null;
@@ -978,7 +993,7 @@ export const useSessionStore = defineStore('session', {
         isNew &&
         message.role === 'user' &&
         this.messages.filter((m) => m.role === 'user').length === 1 &&
-        this.activeSession?.name.startsWith('会话')
+        isAutoSessionName(this.activeSession?.name)
       ) {
         const sessionId = this.activeSession.id;
         const textContent = message.content.trim();
@@ -988,7 +1003,10 @@ export const useSessionStore = defineStore('session', {
           window.claudeLink.analyzeTopic(sessionId, textContent).then((topic) => {
             if (topic) {
               // Only update if still on the same session
-              if (this.activeSession?.id === sessionId) {
+              // F4：发送瞬间到主题返回之间用户可能已手动重命名——迟到的主题不覆盖
+              // （与主进程 topic-analyzer 写前重查同门槛）。H3：判据收紧为
+              // isAutoSessionName 精确形态，「会话备份」等自然命名一律让位。
+              if (this.activeSession?.id === sessionId && isAutoSessionName(this.activeSession.name)) {
                 this.activeSession.name = topic;
               }
               this.loadSessions();
@@ -1000,8 +1018,13 @@ export const useSessionStore = defineStore('session', {
           // 附件-only：文件名即标题素材，直接截断使用，不喂 LLM——
           // 孤立文件名会被 LLM 误判为「没有对话内容」而回复客套话，反而劣化标题。
           const topic = firstName.replace(/\s+/g, ' ').slice(0, 15);
+          // H3：DB 写前同门槛——当前名已非「会话 N」自动形态（用户已手动命名）则跳过
+          // DB 写，不让附件名覆盖手动名。与上方触发门槛构成双保险，防未来重构在本分支
+          // 插入 await 后打开竞态窗口（触发门槛判定的是分支入口瞬间）。
+          if (!isAutoSessionName(this.activeSession?.name)) return;
           window.claudeLink.updateSession(sessionId, { name: topic }).then((updated) => {
-            if (updated && this.activeSession?.id === sessionId) {
+            // F4：附件名命名同样加门槛——覆盖视图前重查当前名仍是自动形态。
+            if (updated && this.activeSession?.id === sessionId && isAutoSessionName(this.activeSession.name)) {
               this.activeSession.name = updated.name;
             }
             this.loadSessions();
