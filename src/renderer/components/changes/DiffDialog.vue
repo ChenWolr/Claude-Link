@@ -87,6 +87,8 @@ const parsed = computed<ParsedDiffFile | null>(() => {
   if (!c || !c.ok || c.binary || c.context !== effectiveContext.value) return null;
   return parseUnifiedDiff(c.diff);
 });
+// P3-5：合并冲突文件降级标记（diff --cc → NaN 行号）→ header 提示。
+const isConflict = computed(() => !!parsed.value?.conflict);
 const searchMatches = computed(() => buildDiffSearchMatches(parsed.value, searchQuery.value));
 const currentSearchMatch = computed(() => searchMatches.value[currentSearchIndex.value] ?? null);
 const searchCountText = computed(() => {
@@ -485,6 +487,7 @@ onBeforeUnmount(() => {
                     <span>{{ navTotal }} 处改动</span>
                   </template>
                   <span v-else-if="isBinary">二进制文件</span>
+                  <span v-if="isConflict" class="stat-conflict">合并冲突文件，建议在编辑器中解决</span>
                   <span v-if="isTruncated" class="stat-trunc">· 差异过大仅显示前部分</span>
                 </p>
               </div>

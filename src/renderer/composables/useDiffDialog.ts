@@ -20,7 +20,8 @@ const state = ref<DiffDialogState | null>(null);
 export function openDiffDialog(path: string, trigger: HTMLElement | null = null): void {
   if (!path) return;
   // 交互弹窗在场时不抢开（ESC 归属冲突，优先让 InteractionPrompt 处理）。
-  if (useInteractionStore().requests.length > 0) return;
+  // P2-8：只看「当前会话可见」的 pending 请求——他会话的后台弹窗不应阻断本会话的 diff 弹窗。
+  if (useInteractionStore().visibleRequestsForActiveSession.length > 0) return;
   state.value = { path, trigger };
 }
 
