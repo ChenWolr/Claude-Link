@@ -210,10 +210,13 @@ export function armFromUserAction(sessionId: string, mainWindow: BrowserWindow):
 /** 熔断：该会话全部 pending 任务置 paused → standby(halt_*)。
  *  幂等闸带 status 条件：已处熔断待命态（standby + halt_*）才直接 return——防 exit 兜底/迟到
  *  事件把 halt_interrupted 覆盖成 halt_failed；熔断→恢复→countdown→再失败时 status 已非
- *  standby（running/countdown），第二次熔断是合法的，不得拦截。 */
+ *  standby（running/countdown），第二次熔断是合法的，不得拦截。
+ *  N9：队列开关联动闸——开关关时普通直发回合的失败/中断不得熔断（「开关关：任务状态不动」，
+ *  与 armFromUserAction / runTaskNow 的开关闸同语义）。 */
 export function haltQueue(sessionId: string, reason: 'failed' | 'interrupted', mainWindow: BrowserWindow): void {
   const state = queues.get(sessionId);
   if (!state) return;
+  if (getConfig().queueEnabled !== true) return;
   if (state.status === 'standby' && (state.standbyReason === 'halt_failed' || state.standbyReason === 'halt_interrupted')) {
     return;
   }
@@ -410,22 +413,41 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
 
   // 创建或复用 user message（按 parent_task_id 查；幂等，重启不翻倍消息/links）。
   if (!isQueueGenerationActive(sessionId, generation)) return;
-  const existing = messageRepo.getMessagesByTask(task.id).find((m) => m.role === 'user');
-  let userMessage: Message;
-  if (existing) {
-    userMessage = existing;
-  } else {
-    userMessage = messageRepo.createMessageWithAttachments({
-      id: clientMessageId,
-      sessionId,
-      role: 'user',
-      content: prepared.displayText,
-      eventType: 'message',
-      parentTaskId: task.id,
-      attachments: prepared.attachmentIds,
-      promoteAttachments: true,
-    });
-    emitQueueEvent(mainWindow, sessionId, 'user_message_created', task.id, { message: userMessage });
+  try {
+    const existing = messageRepo.getMessagesByTask(task.id).find((m) => m.role === 'user');
+    let userMessage: Message;
+    if (existing) {
+      userMessage = existing;
+    } else {
+      userMessage = messageRepo.createMessageWithAttachments({
+        id: clientMessageId,
+        sessionId,
+        role: 'user',
+        content: prepared.displayText,
+        eventType: 'message',
+        parentTaskId: task.id,
+        attachments: prepared.attachmentIds,
+        promoteAttachments: true,
+      });
+      emitQueueEvent(mainWindow, sessionId, 'user_message_created', task.id, { message: userMessage });
+    }
+  } catch (err) {
+    // P2-11：消息创建段异常收口——此前夹在两个 try 之间裸奔，IPC/DB 瞬时失败会让引擎僵尸
+    // running、任务无痕丢失。失败定账 failed + 结算（settleCurrent 自发 task_settled 让渲染层
+    // 收口）。本地 DB 错误**不**触发 haltQueue 熔断（与回合失败/上游错误语义区分，pending 任务
+    // 不转 paused）；但必须显式退出 running（置 standby），否则无回合可结算，引擎卡死。
+    // settleCurrent 后 exit 兜底因 currentTaskId 失配自然失效。
+    const message = err instanceof Error ? err.message : String(err);
+    logger.error(`popExecute createMessage failed (task ${task.id}): ${message}`);
+    taskRepo.updateTaskError(task.id, `消息创建失败：${message}`);
+    settleCurrent(sessionId, 'failed', mainWindow);
+    const stateAfter = queues.get(sessionId);
+    if (stateAfter && stateAfter.status === 'running') {
+      stateAfter.status = 'standby';
+      stateAfter.standbyReason = 'halt_failed';
+      emitStateChanged(mainWindow, sessionId);
+    }
+    return;
   }
 
   if (!isQueueGenerationActive(sessionId, generation)) return;
@@ -461,6 +483,16 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
   child.on('exit', (code) => {
     if (!isQueueGenerationActive(sessionId, executionGeneration)) return;
     if (state.currentTaskId !== task.id) return;
+    // P1-2「新回合在途」让位守卫（与 CHAT_SEND exit 兜底的代际守卫同形）：两段式 kill 优雅窗内
+    // getActiveProcess 判否、直发消息畅通，spawnForChat 经 forceKill 接管后 beginUserTurn 只置
+    // running 不清 currentTaskId；旧任务 child 迟到 exit 若照常记账，noteTurnOutcome('error')
+    // 会命中新回合的 running 闸 → haltQueue 误熔断整个队列。有别的活动 entry 在途（必属别的
+    // 回合）即让位——不记账、不熔断。引擎已从 chat-backend 导入 getActiveProcess，无循环依赖。
+    const active = getActiveProcess(sessionId);
+    if (active && active !== child) {
+      logger.info(`[queue] child exit fallback session=${sessionId} task=${task.id} 让位：新回合在途，旧 exit 不记账`);
+      return;
+    }
     logger.info(`[queue] child exit fallback session=${sessionId} task=${task.id} code=${code}`);
     noteTurnOutcome(sessionId, code === 0 ? 'success' : 'error', mainWindow);
   });
