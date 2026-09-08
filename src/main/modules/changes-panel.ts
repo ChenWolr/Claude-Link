@@ -9,9 +9,13 @@
 
 import { execFile, spawn } from 'child_process';
 import * as path from 'path';
+import * as fsp from 'node:fs/promises';
 import { shell } from 'electron';
 import { MAX_DIFF_LINES } from '../../shared/process-kind';
 import type { ChangedFile, ChangeStatusCode, ChangesDiffResult, ChangesListResult, ChangesOpenResult } from '../../shared/types/changes';
+
+// getChangeDiff 的入参 `path` 遮蔽了模块级 node:path 命名空间——目录条目兜底分支用此别名。
+const nodePath = path;
 
 const GIT_TIMEOUT_MS = 3000;
 const GIT_MAX_BUFFER = 8 * 1024 * 1024;
@@ -108,16 +112,31 @@ export function normalizeStatus(xy: string): ChangeStatusCode {
   return 'M'; // M / T / 其它一律视作 modified
 }
 
-/** 解析 `git diff HEAD --numstat -z` 输出；二进制（-\t-）标 binary。重命名的 oldPath 段被跳过。 */
+/** 解析 `git diff HEAD --numstat -z` 输出；二进制（-\t-）标 binary。
+ *  G3：重命名形态（本仓库 git 实证）为 `add\tdel\t<NUL>oldPath<NUL>newPath<NUL>`——计数段
+ *  路径为空串，随后两段依次为 old/new。现把计数并入 new 路径键、跳过 old 段（旧行为把
+ *  计数落在空串幽灵键、new 路径无条目）。 */
 export function parseNumstatZ(output: string): Map<string, { additions: number | null; deletions: number | null; binary: boolean }> {
   const out = new Map<string, { additions: number | null; deletions: number | null; binary: boolean }>();
-  for (const raw of output.split('\0')) {
+  const segments = output.split('\0');
+  for (let i = 0; i < segments.length; i += 1) {
+    const raw = segments[i];
     if (!raw) continue;
     const m = raw.match(/^(\d+|-)\t(\d+|-)\t(.*)$/);
-    if (!m) continue; // 重命名的 oldPath 段等非 numstat 行 → 跳过
+    if (!m) continue; // 重命名oldPath 段等非 numstat 行 → 跳过
     const add = m[1] === '-' ? null : Number(m[1]);
     const del = m[2] === '-' ? null : Number(m[2]);
-    out.set(m[3], { additions: add, deletions: del, binary: add === null && del === null });
+    const counts = { additions: add, deletions: del, binary: add === null && del === null };
+    if (m[3] === '') {
+      // G3：重命名形态——跳过 oldPath（i+1），计数并入 newPath（i+2）。
+      const newPath = segments[i + 2];
+      if (newPath) {
+        out.set(newPath, counts);
+        i += 2;
+      }
+      continue;
+    }
+    out.set(m[3], counts);
   }
   return out;
 }
@@ -158,7 +177,7 @@ export async function listChanges(workingDir: string | null, touchedPaths: strin
   let statusOut: string;
   let numstatOut: string;
   try {
-    statusOut = await runGit(root, ['--no-pager', 'status', '--porcelain=v1', '-z', '--ignore-submodules', ...pathspec]);
+    statusOut = await runGit(root, ['--no-pager', 'status', '--porcelain=v1', '-z', '--ignore-submodules', '--untracked-files=all', ...pathspec]);
     numstatOut = await runGit(root, ['--no-pager', 'diff', 'HEAD', '--numstat', '-z', '--ignore-submodules', ...pathspec]);
   } catch {
     return { ok: false, reason: 'error', message: '扫描改动失败（超时或输出过大），请重试' };
@@ -203,15 +222,32 @@ export async function getChangeDiff(workingDir: string | null, path: string, con
 
   let diffText = '';
   try {
+    // P1-11：目录折叠条目兜底（`dir/` 结尾，status.showUntrackedFiles=no 时仍会出现）——
+    // 对目录跑 --no-index 会报错（实测 exit 1 "Could not access"）。枚举目录内文件逐个
+    // --no-index 拼接整目录新增 diff，交给既有二进制检测/截断流程。
+    if (path.endsWith('/')) {
+      const absDir = nodePath.join(cwd, path);
+      const dirents = await fsp.readdir(absDir, { withFileTypes: true, recursive: true });
+      const parts: string[] = [];
+      for (const dirent of dirents) {
+        if (!dirent.isFile()) continue;
+        const rel = nodePath.relative(cwd, nodePath.join(dirent.path, dirent.name)).replace(/\\/g, '/');
+        const r = await runGitRaw(cwd, ['--no-pager', 'diff', '--no-index', '--', '/dev/null', rel]);
+        if (r.stdout.trim()) parts.push(r.stdout);
+      }
+      diffText = parts.join('\n');
+    } else
     // 已跟踪文件：相对 HEAD 的净改动（含已暂存+未暂存）。
     // -U{context}：上下文行数由弹窗「上下文 3/5/10/20」选择器决定 —— git 直接给 N 行 ctx，
     // inline 不再二次折叠（避免 -U 固定大值时边界 ctx 被拆成碎 gap）；hunk 间距 >2N 时 git 自然跳过 → skip 分隔。
-    const tracked = await runGitRaw(cwd, ['--no-pager', 'diff', 'HEAD', `-U${context}`, '--', path]);
-    if (tracked.stdout.trim()) {
-      diffText = tracked.stdout;
-    } else {
-      // 未跟踪文件（在改动列表里但 diff HEAD 为空）：整文件作新增。--no-index 文件不同时退出码 1。
-      diffText = (await runGitRaw(cwd, ['--no-pager', 'diff', '--no-index', '--', '/dev/null', path])).stdout;
+    {
+      const tracked = await runGitRaw(cwd, ['--no-pager', 'diff', 'HEAD', `-U${context}`, '--', path]);
+      if (tracked.stdout.trim()) {
+        diffText = tracked.stdout;
+      } else {
+        // 未跟踪文件（在改动列表里但 diff HEAD 为空）：整文件作新增。--no-index 文件不同时退出码 1。
+        diffText = (await runGitRaw(cwd, ['--no-pager', 'diff', '--no-index', '--', '/dev/null', path])).stdout;
+      }
     }
   } catch {
     return { ok: false, reason: 'error', message: '读取 diff 失败' };
