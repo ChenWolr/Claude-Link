@@ -704,7 +704,10 @@ console.log('\n=== 32) CC 回复形态补全：code_execution / is_error / api_r
   check('use-chat 用应用级权威字段驱动 api_retry UI',
     uc.includes('retryCount: event.retryCount') && uc.includes('retryLimit: event.retryLimit') &&
     !uc.includes('r.sdkMaxRetries') && !uc.includes('info.attempt') && !uc.includes('info.max_retries'));
-  check('persistSystemEvent 构造 api_retry 诊断文案', uc.includes('API 重试中'));
+  // OPT-10 同步：persistSystemEvent 的 api_retry 诊断文案分支为不可达死代码（事件在更早处
+  // 被 applyApiRetryEvent 消费），已删除——断言由「须存在文案」改为「须不存在死分支」。
+  check('persistSystemEvent 不再含不可达的 api_retry 文案分支（OPT-10）',
+    !uc.includes('API 重试中（第'));
 
   // 5. citations 类型字段（web search 引用，未来就绪；当前代理端点不触发）
   check('cli.ts text part 含 citations + stream delta 含 citation', cli.includes('citations?') && cli.includes('citation?'));
@@ -1461,7 +1464,7 @@ console.log('\n=== 46) Claude 计划任务状态（TodoWrite / Task 工具）：
 
   // DB migration + repo
   check('migrations.ts 有 claude_plan_state 表', migrations.includes('claude_plan_state'));
-  check('migrations.ts 版本升为 9（V9 tasks.paused 列）', migrations.includes('CURRENT_SCHEMA_VERSION = 9'));
+  check('migrations.ts 版本升为 11（V11 权限清洗一次性化；原 OPT-8 messages.parent_task_id 索引）', migrations.includes('CURRENT_SCHEMA_VERSION = 11'));
   check('claude-plan-repo.ts 有 getPlanState', repo.includes('export function getPlanState'));
   check('claude-plan-repo.ts 有 replaceTodos', repo.includes('export function replaceTodos'));
   check('claude-plan-repo.ts 有 upsertTask', repo.includes('export function upsertTask'));
@@ -1624,7 +1627,7 @@ console.log('\n=== 48) 思考强度接线：持久化层 + 注入层 + IPC 通�
   const projection = readRel('src/main/modules/claude-settings-projection.ts');
 
   // 持久化层（Task 4）
-  check('migrations.ts schema 版本升为 9（V9 tasks.paused 列）', migrations.includes('CURRENT_SCHEMA_VERSION = 9'));
+  check('migrations.ts schema 版本升为 11（V11 权限清洗一次性化；原 OPT-8 messages.parent_task_id 索引）', migrations.includes('CURRENT_SCHEMA_VERSION = 11'));
   check('migrations.ts 补 thinking_level 列', migrations.includes("ADD COLUMN thinking_level TEXT DEFAULT NULL"));
   check('session-repo.ts SessionRow 有 thinking_level', repo.includes('thinking_level: string | null'));
   check('session-repo.ts toSession 映射 thinkingLevel（脏值兜底）', repo.includes('isValidThinkingLevel(row.thinking_level)'));
@@ -1850,10 +1853,10 @@ console.log('\n=== 53) 权限模式全局默认 + 会话覆盖链路（permissio
     sdkBackend.includes('effectivePermissionMode: PermissionMode,') && sdkBackend.includes('override, effectivePermissionMode)'));
   check('会话显式选档时经 alignPermissionDefaultMode 对齐（sdk-backend 接线）',
     sdkBackend.includes('alignPermissionDefaultMode') && sdkBackend.includes("if (opts.permissionMode != null)") && sdkBackend.includes('permissions = alignPermissionDefaultMode(permissions, effectivePermissionMode)'));
-  check('alignPermissionDefaultMode 抽为 sdk-permissions 纯函数（default→删 / 非 default→写有效档 / 不 mutate 入参）',
+  check('alignPermissionDefaultMode 抽为 sdk-permissions 纯函数（default→显式写 default / 非 default→写有效档 / 不 mutate 入参；N1 修复：删除会让 CLI 回落投影文件的全局宽松档）',
     sdkPermissions.includes('export function alignPermissionDefaultMode') &&
-    sdkPermissions.includes("delete next.defaultMode") &&
     sdkPermissions.includes('next.defaultMode = effectivePermissionMode') &&
+    !sdkPermissions.includes('delete next.defaultMode') &&
     sdkPermissions.includes('const next: SdkPermissionSettings = { ...permissions }'));
   check('cli-shared SpawnOptions permissionMode 可空', cliShared.includes('permissionMode?: PermissionMode | null'));
 
@@ -1938,7 +1941,7 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
   check('use-chat 镜像路径同谓词打 apiErrorKind 标记',
     useChat.includes("isReasoningReplayApiError(part.text) ? 'reasoning_replay' : null"));
   check('sdk-backend 三个接线点（记录文本/两终态调度/删除清理）',
-    readRel('src/main/modules/sdk-backend.ts').includes('recordOutgoingUserText(sessionId, opts.userCommandText)') &&
+    readRel('src/main/modules/sdk-backend.ts').includes('recordOutgoingUserText(sessionId, opts.userCommandText, opts.hasAttachments)') &&
     (readRel('src/main/modules/sdk-backend.ts').match(/scheduleReasoningReplayRetryForTurn\(sessionId, mainWindow\)/g) ?? []).length === 2 &&
     readRel('src/main/modules/sdk-backend.ts').includes('clearReasoningReplayState(sessionId)'));
   check('配置项 autoRetryReasoningReplay 默认开且持久化映射',

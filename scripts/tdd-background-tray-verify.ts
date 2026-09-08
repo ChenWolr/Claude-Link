@@ -84,7 +84,8 @@ check('托盘图标路径按 packaged 区分（process.resourcesPath vs app.getA
 
 console.log('\n=== 6b) config-manager：保存后回调（托盘随开关实时增删） ===');
 check('config-manager 导出 onConfigSaved 订阅', configManager.includes('export function onConfigSaved('));
-check('saveConfig 末尾触发 emitConfigSaved()', /export function saveConfig[\s\S]{0,800}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
+// OPT-10/P3-6 同步：saveConfig 增加 getConfigForRenderer 说明与「掩码=不改动」注释后函数体变长，窗口 800→1400（断言语义不变）。
+check('saveConfig 末尾触发 emitConfigSaved()', /export function saveConfig[\s\S]{0,1400}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
 check('clearConfig 末尾触发 emitConfigSaved()', /export function clearConfig[\s\S]{0,200}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
 check('回调异常不扩散（listener try/catch）', /for \(const listener of configSavedListeners\) \{[\s\S]{0,120}catch/.test(configManager));
 check('设置页文案提示「开启后托盘图标常驻右下角」', configPage.includes('开启后托盘图标常驻右下角'));

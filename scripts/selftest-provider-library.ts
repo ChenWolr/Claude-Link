@@ -36,7 +36,9 @@ function readRel(p: string): string {
 console.log('\n=== 1) apiKey 掩码（明文不出主进程）===');
 {
   check('长 key 取末 4 位掩码', maskApiKey('sk-abcdef1234') === 'sk-…****1234', maskApiKey('sk-abcdef1234'));
-  check('短 key 也掩码（不回显原文）', maskApiKey('k9') === 'sk-…****k9');
+  // P3-7 同步：≤8 字符短 key 尾部 4 位即可拼出大半原文 → 纯占位符，不尾随任何原文。
+  check('短 key 掩码为纯占位符（不回显任何原文片段）', maskApiKey('k9') === 'sk-…****');
+  check('8 字符边界 key 同样纯占位符', maskApiKey('12345678') === 'sk-…****');
   check('空 key 返回空串', maskApiKey('') === '');
   check('空白 key 返回空串', maskApiKey('   ') === '');
 }
