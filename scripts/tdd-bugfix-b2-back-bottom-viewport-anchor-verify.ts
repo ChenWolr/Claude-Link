@@ -52,7 +52,9 @@ check('③ 按钮元素在滚动容器/内容 wrapper 双层闭合之后（div �
   // （旧版「连续两个 </div>」弱断言在病态结构下也命中，已废弃。）
   const scrollerOpen = src.lastIndexOf('<div', scrollerAttr);
   assert.ok(scrollerOpen > -1, '未找到 scroller 开标签');
-  const between = src.slice(scrollerOpen, btn);
+  // P2-4 补强：先剥离 HTML 注释再数 div——注释里的「<div」字样（如说明文字引用标签）
+  // 会污染开闭计数造成误报。
+  const between = src.slice(scrollerOpen, btn).replace(/<!--[\s\S]*?-->/g, '');
   const opens = between.match(/<div[\s>]/g)?.length ?? 0;
   const closes = between.match(/<\/div>/g)?.length ?? 0;
   assert.ok(opens > 0 && opens === closes, `按钮必须位于滚动容器双层闭合之后（片段 div 开 ${opens} !== 闭 ${closes}）`);

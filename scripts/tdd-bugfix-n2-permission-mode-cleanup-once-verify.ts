@@ -121,7 +121,7 @@ function seedLegacyDb(explicitVersion: number): Db {
   d.close();
 }
 
-// ── 场景 3：全新库——迁移到 11，V11 块对空表无害 ──
+// ── 场景 3：全新库——迁移到 12，V11 块对空表无害 ──
 {
   const d = openMemoryDb();
   let threw = '';

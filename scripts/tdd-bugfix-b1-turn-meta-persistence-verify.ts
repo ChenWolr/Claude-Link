@@ -84,10 +84,10 @@ check('③ message-repo：updateResultMeta（AND session_id 守卫）+ findLastT
   const findIdx = messageRepo.indexOf('export function findLastTurnMainFlowAssistantId');
   assert.ok(findIdx > -1, '审查修复轮：未找到 export function findLastTurnMainFlowAssistantId');
   const findBody = messageRepo.slice(findIdx, messageRepo.indexOf('export ', findIdx + 10) > -1 ? messageRepo.indexOf('export ', findIdx + 10) : undefined);
-  assert.match(findBody, /m\.parentAgentId == null/, '查找缺主流程守卫（parentAgentId == null，跳过子 agent 行）');
+  assert.match(findBody, /if \(m\.parentAgentId != null\) continue;/, '查找缺主流程守卫（parentAgentId != null 先行 continue，跳过子 agent 行；P3-1 须先于 user 边界）');
   assert.match(findBody, /m\.role === 'user'\) return null/, '查找缺 user 边界（遇 user 即停返回 null）');
   assert.match(findBody, /rows\.length === 50 && !rows\.some\(\(m\) => m\.role === 'user'\)/, '查找缺窗口打满未见 user 的回落谓词');
-  assert.match(findBody, /getMessagesBySession\(sessionId\)/, '查找缺回落全量（getMessagesBySession）');
+  assert.match(findBody, /getMessagesBySession\(sessionId\)\.reverse\(\)/, '回落全量必须 .reverse()——getMessagesBySession 是 ASC 旧→新，walk 期望新→旧；漏反转则长回合 fallback 恒 null/误写最老行');
 });
 
 // ④ IPC：通道常量 + handler（会话存在性校验 + 正数校验 + 双写）；审查修复轮：messageId 命中
@@ -125,7 +125,16 @@ check('⑦ session-store：lastTurnMeta state + activeLastTurnMeta getter + setL
   assert.match(sessionStore, /lastTurnMeta: \{\} as Record<string, \{ durationMs: number; endedAt: number \}>,/, '缺 lastTurnMeta state');
   assert.match(sessionStore, /activeLastTurnMeta\(state\)/, '缺 activeLastTurnMeta getter');
   assert.match(sessionStore, /setLastTurnMeta\(sessionId: string, meta:/, '缺 setLastTurnMeta action');
-  assert.match(sessionStore, /delete this\.lastTurnMeta\[id\];/, 'deleteSession 缺 lastTurnMeta 清理');
+  // P2-4 加钉：getter 回落形态（重启/切回恢复的精确形状，防字段漂移）。
+  assert.match(sessionStore, /return \{ durationMs: s\.lastTurnDurationMs, endedAt: s\.lastTurnEndedAt \};/, 'getter 缺 Session 字段回落形态');
+  // P2-4 加钉：setLastTurnMeta 须同步 activeSession 对象字段（完成态/侧栏数据一致）。
+  assert.match(sessionStore, /this\.activeSession\.lastTurnDurationMs = meta\.durationMs;/, 'setLastTurnMeta 缺 activeSession 同步（durationMs）');
+  assert.match(sessionStore, /this\.activeSession\.lastTurnEndedAt = meta\.endedAt;/, 'setLastTurnMeta 缺 activeSession 同步（endedAt）');
+  // P2-4 加钉：deleteSession 清理必须位于 deleteSession 函数体内（位置钉，防漂移到其它 action）。
+  const dsIdx = sessionStore.indexOf('async deleteSession(id: string) {');
+  const dsEnd = sessionStore.indexOf('async deleteSessions(', dsIdx);
+  assert.ok(dsIdx > -1 && dsEnd > dsIdx, '未定位到 deleteSession 函数体');
+  assert.ok(sessionStore.slice(dsIdx, dsEnd).includes('delete this.lastTurnMeta[id];'), 'deleteSession 函数体内缺 lastTurnMeta 清理');
 });
 
 // ⑧ use-chat：前台 attachResultMetadata 持久化 + 后台 result 分支接入（meta 计算先于 markCompleted）。
@@ -142,6 +151,14 @@ check('⑧ use-chat：前台 attachResultMetadata 含 recordTurnMeta/endedAt；�
   assert.ok(skipIdx > -1, '审查修复轮：attachResultMetadata 回溯缺 parentAgentId skip（continue）');
   assert.ok(costIdx > -1, '未找到 assistant costUsd 赋值');
   assert.ok(skipIdx < costIdx, 'parentAgentId skip 必须位于 assistant 赋值之前');
+  // P2-1 加钉：持久化（setLastTurnMeta + recordTurnMeta）必须位于 isSuccessfulCliResult 门控内
+  // （中断/错误回合不产生记录——error_during_execution 为第三态 false，对齐后台分支）。
+  const gateIdx = front.indexOf('if (sid && isSuccessfulCliResult(event)) {');
+  const setIdx = front.indexOf('store.setLastTurnMeta(');
+  const recIdx = front.indexOf('window.claudeLink.recordTurnMeta(');
+  assert.ok(gateIdx > -1, 'P2-1：前台缺持久化门控 if (sid && isSuccessfulCliResult(event))');
+  assert.ok(setIdx > -1 && gateIdx < setIdx, 'P2-1：setLastTurnMeta 必须位于门控之内');
+  assert.ok(recIdx > -1 && gateIdx < recIdx, 'P2-1：recordTurnMeta 必须位于门控之内');
   // 后台分支：handleBackgroundEvent 与 handleCliEvent 之间的切片。
   const bgIdx = useChat.indexOf('function handleBackgroundEvent');
   const cliIdx = useChat.indexOf('function handleCliEvent');
@@ -166,9 +183,11 @@ check('⑨ TurnTimer：v-else-if="lastMeta" 完成态 + turn-timer--done + 结�
   assert.match(turnTimer, /turn-timer--done/, '缺 turn-timer--done 完成态样式类');
   assert.match(turnTimer, /结束于/, '缺「结束于」文案');
   const doneIdx = turnTimer.indexOf('v-else-if="lastMeta"');
-  const closeIdx = turnTimer.indexOf('</div>', doneIdx);
-  assert.ok(closeIdx > -1, '完成态分支未闭合');
-  const doneBranch = turnTimer.slice(doneIdx, closeIdx + 6);
+  // P2-4 补强：扫整个完成态块（到 </Transition> 为止）——只扫到首个 </div> 时，嵌套 div
+  // 后插 $ 会逃逸契约。
+  const closeIdx = turnTimer.indexOf('</Transition>', doneIdx);
+  assert.ok(closeIdx > -1, '完成态分支未闭合（缺 </Transition>）');
+  const doneBranch = turnTimer.slice(doneIdx, closeIdx);
   assert.ok(!doneBranch.includes('costUsd'), '完成态分支不得出现 costUsd（费用不展示）');
   assert.ok(!doneBranch.includes('$'), '完成态分支不得出现 $ 字样');
   assert.match(doneBranch, /formatDurationMs\(lastMeta\.durationMs\)/, '完成态缺耗时展示');
