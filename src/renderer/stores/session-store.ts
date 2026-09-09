@@ -846,10 +846,11 @@ export const useSessionStore = defineStore('session', {
       this.sessionStatus[sessionId] = 'running';
     },
     // B1：写入最近回合元数据（内存态 + 就地补 sessions/activeSession 对象字段，保持侧栏数据一致）。
+    // P2-2 语义收口：只记「完整有效记录」——耗时无效（null/非正/非有限数）一律早退、保持上一条
+    // 有效记录，不再出现内存 map 留旧回合、Session 字段/DB 写 (null, T2) 的半写分叉。
     setLastTurnMeta(sessionId: string, meta: { durationMs: number | null; endedAt: number }) {
-      if (meta.durationMs != null && meta.durationMs > 0) {
-        this.lastTurnMeta[sessionId] = { durationMs: meta.durationMs, endedAt: meta.endedAt };
-      }
+      if (meta.durationMs == null || meta.durationMs <= 0 || !Number.isFinite(meta.durationMs)) return;
+      this.lastTurnMeta[sessionId] = { durationMs: meta.durationMs, endedAt: meta.endedAt };
       const target = this.sessions.find((s) => s.id === sessionId);
       if (target) {
         target.lastTurnDurationMs = meta.durationMs;

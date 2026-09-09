@@ -864,17 +864,21 @@ function createChat() {
     const duration = event.duration_ms;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const message = messages[i];
-      if (message.role === 'user') break;
-      // B1 审查修复：跳过子 agent 消息（continue 不 break，对齐 turnHasAssistantText 的既有排除）——
-      // 回合总耗时/费用不得挂到子 agent 行，否则脚注落入子 Agent Tab 且主流程行缺脚注。
+      // P3-1：parentAgentId 守卫先于 user 边界（continue 不 break，对齐 turnHasAssistantText 的
+      // 既有排除，也与主进程 findLastTurnMainFlowAssistantId 同序）——回合总耗时/费用不得挂到
+      // 子 agent 行（脚注会落入子 Agent Tab 且主流程行缺脚注）；user 行若带 parentAgentId 也不得
+      // 误停（当前 SDK 不可达，防御性同序）。
       if (message.parentAgentId) continue;
+      if (message.role === 'user') break;
       if (message.role === 'assistant') {
         message.costUsd = typeof cost === 'number' && cost > 0 ? cost : null;
         message.durationMs = typeof duration === 'number' && duration > 0 ? duration : clientMs;
         // B1：耗时/结束时间持久化（气泡脚注 + 会话级最近回合元数据）。
-        // durationMs 取刚算好的值（端点值或 clientMs 兜底）；无 startedAt 的极端场景为 null，
-        // 此时仍写 endedAt（会话级 durationMs 存 null，完成态不显示耗时——诚实不造数）。
-        if (sid) {
+        // P2-1 门控：仅成功 result（isSuccessfulCliResult；error_during_execution 中断第三态为
+        // false）才持久化——中断/错误回合不产生记录（对齐后台分支门控与 Session 字段注释），
+        // 气泡内存脚注行为保持不变。durationMs 取刚算好的值（端点值或 clientMs 兜底）；
+        // 无效耗时由 setLastTurnMeta/handler 的 P2-2 半写收口兜住（保持上一条有效记录）。
+        if (sid && isSuccessfulCliResult(event)) {
           const endedAt = Date.now();
           const finalDuration = typeof message.durationMs === 'number' && message.durationMs > 0 ? message.durationMs : null;
           store.setLastTurnMeta(sid, { durationMs: finalDuration, endedAt });

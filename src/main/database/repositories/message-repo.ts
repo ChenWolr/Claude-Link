@@ -195,15 +195,22 @@ export function updateResultMeta(
  *  渲染层乐观消息 id（crypto.randomUUID）与 DB 行 id（主进程 uuidv4）是两套独立 uuid 永不相等，
  *  recordTurnMeta 直传 messageId 恒 0 行——handler 在直传命中失败/为 null 时回落本查找。
  *  口径对齐 cli-shared.turnCheckRows：尾部 50 条窄查询，窗口打满且未见 user 边界时回落全量
- *  （防重工具回合把 user 标记推出窗外的假阴性）；只认 parentAgentId 为空的主流程行。 */
+ *  （防重工具回合把 user 标记推出窗外的假阴性）；只认 parentAgentId 为空的主流程行。
+ *  排序契约（两条路径不同，勿混）：窄窗 getRecentMessagesForTurnCheck 是新→旧（DESC）；
+ *  回落全量 getMessagesBySession 是旧→新（ASC，为历史回读顺序服务）——必须 .reverse()
+ *  反转成新→旧再走 walk，否则从最老消息起步：长回合首条几乎必为 user → 恒返回 null
+ * （fallback 整体失效），最坏（首条非 user 的会话）会把耗时/费用写到最老历史行。 */
 export function findLastTurnMainFlowAssistantId(sessionId: string): string | null {
   let rows = getRecentMessagesForTurnCheck(sessionId, 50);
   if (rows.length === 50 && !rows.some((m) => m.role === 'user')) {
-    rows = getMessagesBySession(sessionId);
+    rows = getMessagesBySession(sessionId).reverse();
   }
   for (const m of rows) {
+    // P3-1：parentAgentId 守卫先于 user 边界（与渲染层 attachResultMetadata 同序）——
+    // user 行若带 parent_agent_id 也不得误停（当前 SDK 不可达，防御性同序）。
+    if (m.parentAgentId != null) continue;
     if (m.role === 'user') return null;
-    if (m.role === 'assistant' && m.parentAgentId == null) return m.id;
+    if (m.role === 'assistant') return m.id;
   }
   return null;
 }
