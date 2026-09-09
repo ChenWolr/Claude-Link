@@ -7,9 +7,23 @@ import { buildAnthropicApiUrl, isOfficialAnthropicBaseUrl } from './api-url';
 import { resolveConfiguredDefaultModel } from '../../shared/settings-parser';
 import { resolveSessionModel } from '../../shared/session-model';
 import { isAutoSessionName } from '../../shared/auto-session-name';
+import {
+  TOPIC_ATTEMPT_LADDER,
+  buildTopicRequestBody,
+  extractTopicCandidate,
+  nextAttemptSpec,
+  type TopicAttemptSpec,
+  type TopicResponseShape,
+} from '../../shared/topic-analyzer-core';
 
-interface ClaudeApiResponse {
-  content: Array<{ type: string; text?: string }>;
+// 非 2xx 的类型化错误：4xx（疑似 thinking 字段不兼容）与 5xx/超时在网络层走不同升档分支。
+// 消息格式与修复前逐字一致（HTTP <status>: <body 前 200 字符>），仅多了 status 字段。
+class HttpStatusError extends Error {
+  readonly status: number;
+  constructor(status: number, body: string) {
+    super(`HTTP ${status}: ${body.slice(0, 200)}`);
+    this.status = status;
+  }
 }
 
 // F4：自动命名竞态守卫——命名门槛在发送瞬间判定（渲染层 isAutoSessionName），而本模块的
@@ -52,17 +66,6 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
 
   const model = resolved.modelId || resolveConfiguredDefaultModel(config.advancedJson, config.defaultModel);
 
-  const requestBody = JSON.stringify({
-    model,
-    max_tokens: 50,
-    messages: [
-      {
-        role: 'user',
-        content: `用5个字以内概括以下对话的主题，只输出主题，不要解释：\n\n${firstMessage.slice(0, 500)}`,
-      },
-    ],
-  });
-
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'x-api-key': apiKey,
@@ -75,22 +78,43 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
     headers['Authorization'] = `Bearer ${apiKey}`;
   }
 
-  try {
-    const response = await makeHttpRequest(url, requestBody, headers, 10000);
-    const data = JSON.parse(response) as ClaudeApiResponse;
-    const text = data.content?.find((c) => c.type === 'text')?.text;
-    if (text) {
-      const topic = text.trim().replace(/\s+/g, ' ').slice(0, 20);
-      if (isAutoNameSlot(sessionId)) {
-        sessionRepo.updateSession(sessionId, { name: topic });
+  // 验收梯（有界，全流程最多 2 次 HTTP）：思考型模型会把思考过程泄漏进 text 块并烧光
+  // max_tokens 截断（详见 shared/topic-analyzer-core.ts 头注释），答卷必须先验收再落库。
+  // 答卷被拒 → 升预算重试；首梯 4xx → 换 legacy 形态（无 thinking 字段）重试；
+  // 超时/5xx/网络错误/JSON 解析失败 → 不重试，直达首句兜底。
+  let spec: TopicAttemptSpec | null = TOPIC_ATTEMPT_LADDER[0];
+  let specIndex: 0 | 1 = 0;
+  while (spec) {
+    const requestBody = buildTopicRequestBody(model, firstMessage, spec);
+    try {
+      const response = await makeHttpRequest(url, requestBody, headers, 10000);
+      const verdict = extractTopicCandidate(JSON.parse(response) as TopicResponseShape);
+      if (verdict.ok && verdict.topic) {
+        // 出口①（LLM 主题）：F4 写前门保留
+        if (isAutoNameSlot(sessionId)) {
+          sessionRepo.updateSession(sessionId, { name: verdict.topic });
+        }
+        return verdict.topic;
       }
-      return topic;
+      logger.warn(`Topic analysis response rejected (${verdict.reason}), escalating thinking budget`);
+      spec = nextAttemptSpec(specIndex, 'validation');
+      specIndex = 1;
+    } catch (error) {
+      if (
+        error instanceof HttpStatusError && error.status >= 400 && error.status < 500 && specIndex === 0
+      ) {
+        logger.warn(`Topic analysis got HTTP ${error.status} (thinking param incompatibility suspected), retrying without thinking field`);
+        spec = nextAttemptSpec(0, 'http_4xx');
+        specIndex = 1;
+        continue;
+      }
+      logger.warn(`Topic analysis failed, using heuristic fallback: ${error instanceof Error ? error.message : String(error)}`);
+      break;
     }
-  } catch (error) {
-    logger.warn(`Topic analysis failed, using heuristic fallback: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // 兜底：取首句前 15 个字符，压缩空白避免标题里出现换行
+  // 兜底：取首句前 15 个字符，压缩空白避免标题里出现换行。
+  // 出口②（首句兜底）：与修复前逐字等价（F4/H3 写前门保留）。
   const fallback = firstMessage.replace(/\s+/g, ' ').trim().slice(0, 15);
   if (isAutoNameSlot(sessionId)) {
     sessionRepo.updateSession(sessionId, { name: fallback });
@@ -122,7 +146,7 @@ function makeHttpRequest(
           if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
             resolve(data);
           } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+            reject(new HttpStatusError(res.statusCode!, data));
           }
         });
       },
