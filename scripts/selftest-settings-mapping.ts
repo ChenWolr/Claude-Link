@@ -836,7 +836,7 @@ console.log('\n=== 36) 实时计时器 + 子 Agent 折叠（问题 1/2/6/7）===
   check('markRunning 全新回合清 toolProgress 残留（第四态配套）', ss.includes('全新回合清空工具进度残留'));
   check('markRunning 清 toolProgress 仅限活动会话（防后台队列跨会话误清）', ss.includes('sessionId === this.activeSession?.id'));
   check('TurnTimer 实时计时器（turn-timer + formatDurationMs + useNow）', tt.includes('turn-timer') && tt.includes('formatDurationMs') && tt.includes('useNow'));
-  check('MessageBubble duration 与 cost 解耦', mb.includes('message.costUsd != null || message.durationMs'));
+  check('MessageBubble 脚注只由 duration 门控（B3：费用不再展示）', mb.includes('v-if="message.durationMs" class="bubble__meta"'));
   check('use-chat 客户端时长兜底（clientMs）', uc.includes('clientMs'));
   check('subagent-groups 含 startMs / frozenSeconds', sg.includes('startMs') && sg.includes('frozenSeconds'));
   check('TaskQueuePanel 实时计时 + 运行中可折叠', tqp.includes('subAgentDurationText') && tqp.includes('collapsedGroups'));

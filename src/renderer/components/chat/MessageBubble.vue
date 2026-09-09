@@ -26,6 +26,12 @@ const durationText = computed(() =>
   props.message.durationMs != null ? formatDurationMs(props.message.durationMs) : '',
 );
 
+// B3：回合结束时刻（ended_at 持久化）文案；与 TurnTimer 完成态同口径（zh-CN 24 小时制）。
+// 老消息/中断回合无记录时不显示（诚实不造数）。
+const endedAtText = computed(() =>
+  props.message.endedAt != null ? new Date(props.message.endedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '',
+);
+
 // 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）。
 // 复制内容 = 正文 + 附件文件名列表；不含绝对路径/Base64/附件 ID。
 const copied = ref(false);
@@ -66,13 +72,15 @@ async function copyMessage(): Promise<void> {
       </ul>
     </div>
     <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
-    <div v-if="message.costUsd != null || message.durationMs" class="bubble__meta">
+    <!-- B3：脚注只展示 耗时 + 结束时间（费用不再展示）；门控仅 durationMs，
+         老消息无结束时刻记录时只显示耗时。 -->
+    <div v-if="message.durationMs" class="bubble__meta">
       <svg v-if="durationText" class="bubble__meta-clock" viewBox="0 0 24 24" aria-hidden="true">
         <circle cx="12" cy="12" r="9" />
         <path d="M12 7v5l3.5 2" />
       </svg>
       <span v-if="durationText" class="bubble__meta-duration">{{ durationText }}</span>
-      <span v-if="message.costUsd != null" class="bubble__meta-cost">{{ durationText ? ' · ' : '' }}${{ message.costUsd.toFixed(4) }}</span>
+      <span v-if="endedAtText" class="bubble__meta-end">· 结束于 {{ endedAtText }}</span>
     </div>
     <!-- 仅 user / assistant 消息提供复制按钮；tool / system 不需要。
          流式布局放在内容正下方独立一行，避免与正文重叠。 -->
@@ -223,7 +231,7 @@ async function copyMessage(): Promise<void> {
   margin: 0;
 }
 
-/* 回复脚注（耗时 + 费用）：紧贴内容下方，细分隔线不打断正文流；
+/* 回复脚注（耗时 + 结束时间，B3 起不再展示费用）：紧贴内容下方，细分隔线不打断正文流；
    muted 色 + 时钟图标，耗时数字 tabular-nums 固定宽度不抖动。 */
 .bubble__meta {
   margin-top: 8px;
@@ -253,7 +261,7 @@ async function copyMessage(): Promise<void> {
   font-weight: 600;
 }
 
-.bubble__meta-cost {
+.bubble__meta-end {
   opacity: 0.8;
 }
 

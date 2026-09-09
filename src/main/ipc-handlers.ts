@@ -353,7 +353,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // 非字符串不做 String() 强转）：命中失败/为 null/非字符串（含后台分支的 null）一律回落
       // 「本回合主流程最后一条 assistant 行」查找（新→旧、遇 user 边界即停、跳过子 agent）；
       // 仍找不到则只写 sessions 半边，不报错（无 assistant 行的回合不产生脚注，诚实不造数）。
-      const meta = { costUsd, durationMs };
+      const meta = { costUsd, durationMs, endedAt };
       // P2-2 半写收口：全 null payload（端点 0 值兜底后）不再抹掉既有记录——
       // messages 半边仅在 costUsd/durationMs 至少一个非 null 时执行；
       // sessions 半边仅在 durationMs/endedAt 齐备（完整有效记录）时执行。

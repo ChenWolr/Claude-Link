@@ -52,6 +52,9 @@ function runMigrationStatements(db: Database.Database): void {
         event_type TEXT,
         cost_usd REAL,
         duration_ms INTEGER,
+        -- 回合结束时刻（epoch ms，B3）：result 到达时随 cost/duration 一并写入，
+        -- 气泡脚注「结束于 HH:mm:ss」永久落盘的数据源；老消息为 NULL（不显示）。
+        ended_at INTEGER,
         parent_task_id TEXT,
         process_kind TEXT,
         parent_agent_id TEXT,
@@ -207,6 +210,11 @@ function runMigrationStatements(db: Database.Database): void {
     // 按分类检索。幂等自愈补加，老库升级不阻塞。
     if (!hasMsgCol('api_error_kind')) {
       db.exec('ALTER TABLE messages ADD COLUMN api_error_kind TEXT');
+    }
+    // 回合结束时刻（epoch ms，B3）：气泡脚注「结束于 HH:mm:ss」永久落盘的数据源。
+    // 幂等自愈补加（对齐 messages 加列免升版惯例），老库升级不阻塞；存量行为 NULL（不显示）。
+    if (!hasMsgCol('ended_at')) {
+      db.exec('ALTER TABLE messages ADD COLUMN ended_at INTEGER');
     }
   }
 

@@ -71,6 +71,7 @@ export function toRenderable<T extends RenderableMessage<import('./types/export-
     eventType: msg.eventType,
     costUsd: msg.costUsd,
     durationMs: msg.durationMs,
+    endedAt: msg.endedAt,
     processKind: msg.processKind,
     parentAgentId: msg.parentAgentId,
     toolUseId: msg.toolUseId,
