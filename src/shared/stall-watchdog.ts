@@ -9,11 +9,11 @@
 
 /** 一次卡死的诊断信息（随 stalled 事件下发，渲染层原样展示）。 */
 export interface StallInfo {
-  /** 自首次判定卡死至今的毫秒数（用于横幅「已 Ns 无响应」）。 */
+  /** 自首次判定卡死至今的毫秒数（诊断保留字段，当前横幅实际展示 gapMs，不展示本字段）。 */
   sinceMs: number;
   /** 本次 tick 测得的、距上次活动的毫秒数。 */
   gapMs: number;
-  /** 最后一次活动的事件类型（stream_event / message / tool_progress / keep_alive …），诊断用。 */
+  /** 最后一次业务活动的事件类型（stream_event / message / tool_progress / system…；keep_alive 不计入），诊断用。 */
   lastKind: string;
   /** 最后一条带 parentToolUseId 的消息所属子 Agent（定位「哪个子 Agent 卡住」），无则 null。 */
   pendingAgentId: string | null;
@@ -71,7 +71,7 @@ export function isBusinessStallActivityKind(kind: string): boolean {
  *  - stalled：是否达到卡死阈值。
  *  - zone：卡死区域（决定阈值与是否允许硬中断）。
  *  - gapMs：距上次活动的毫秒数（≥0）。
- *  - hardAbort：是否达到硬中断条件（仅 model 区且超 hardAutoAbortMs；tool 区长工具合法，永不硬中断）。
+ *  - hardAbort：是否达到硬中断条件（model 区超 hardAutoAbortMs，或 tool 区超 toolHardAbortMs 绝对上限；合法长工具持续发 tool_progress 刷新计时不会误触）。
  */
 export function classifyStall(
   lastActivityAt: number,

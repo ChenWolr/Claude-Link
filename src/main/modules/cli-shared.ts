@@ -97,9 +97,10 @@ export function buildSpawnEnv(override?: SessionModelOverride | null): Record<st
     }
   }
 
-  // 全局默认思考强度 env 冗余注入（best-effort）：SDK 路径的可靠通道是 inline options.settings +
-  // options.effort（buildSdkOptions 内），此处 env 仅服务保留兼容的 spawn CLI fallback，且可能被
-  // ~/.claude/settings.json 的 env 块覆盖。medium 不注入以尊重用户配置。effort 值严格匹配 EffortLevel 枚举。
+  // 全局默认思考强度 env 注入：随 buildSpawnEnv 进入 SDK 的 Options.env 生效（本文件头所述
+  // spawn CLI fallback 已删除）。注意 settings.env 是更高优先级通道（buildClaudeLinkSettingsBlock
+  // 注入的键会压过此处），且可能被 ~/.claude/settings.json 的 env 块覆盖。
+  // medium 不注入以尊重用户配置。effort 值严格匹配 EffortLevel 枚举。
   const level = config.defaultThinkingLevel;
   if (level !== 'medium') {
     const result = resolveThinkingConfig(level);

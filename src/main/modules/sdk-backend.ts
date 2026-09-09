@@ -125,8 +125,8 @@ import {
   type ApiRetryTerminalKind,
 } from '../../shared/api-retry-state';
 
-// 显式标注上述工具被复用（避免 lint 误报未使用）；persistMessageParts/normalizeToolResultContent
-// 在 convertAssistantMessage 后落库路径会用到。
+// 显式标注（避免 lint 误报未使用）：二者在本模块并无直接调用——落库路径由 persistCliEvent
+// （cli-shared 内部）使用 persistMessageParts。若 lint 规则允许可整条删除导入。
 void normalizeToolResultContent;
 void persistMessageParts;
 
@@ -152,7 +152,7 @@ async function importSdk(): Promise<SdkModule> {
 
 // ── 会话→query 句柄 映射（替代 process-manager 的 processes Map）────────
 // 这是进程级单例：SDK 后端与 process-manager 不会同时持有同一 session，但二者各自维护
-// 独立 Map 互不影响；回退到 process-manager 时本 Map 自然空置。
+// 独立 Map 互不影响。
 // 关键：handle + emit 闭包在 entry 创建时一次成型，runQuery 复用同一套，
 // 确保 spawn 时注册的 on('exit') 回调能被 runQuery 的 emitExit 触发。
 interface SessionEntry {
@@ -263,8 +263,9 @@ function applySessionPermissionUpdates(sessionId: string, permissions: SdkPermis
 }
 
 // ── 卡死检测：每会话活动追踪 ────────────────────────────────────────
-// 任何真实上游业务事件（assistant/user/stream_event/tool_progress/system/api_retry）
-// 都刷新 lastActivityAt；keep_alive 仅记录诊断，不重置业务静默计时。
+// 真实上游业务事件（assistant/user/stream_event/tool_progress/system）刷新 lastActivityAt；
+// keep_alive 仅记诊断、api_retry 是失败信号也不刷新（见 touchActivityFromEvent 的子类型守卫），
+// 否则重试风暴会永远判不出卡死。
 // 看门狗 setInterval(5s) 扫描，距上次业务活动超阈值 → 发 stalled。
 interface StallTracker {
   lastActivityAt: number;
@@ -735,7 +736,7 @@ function createEntry(): SessionEntry {
   return entry;
 }
 
-// 统一 entry + 卡死 tracker 清理（runQuery 的多个退出点共用，防泄漏）。
+// 判定 entry 是否仍可视为活动（未 aborting/finished 且未被 kill）。
 function isEntryActive(entry: SessionEntry | undefined): entry is SessionEntry {
   return !!entry && entry.state !== 'aborting' && entry.state !== 'finished' && !entry.handle.killed;
 }
@@ -1562,8 +1563,8 @@ async function refreshContextSnapshot(
 // ── P2 mid-turn：回合中途轮询（docs/.../2026-08-22-mid-turn-context-refresh.md §5.2）──
 // 事件驱动（不建定时器，避免 timer 泄漏）：assistant 落地 / tool_result 转发后调用。
 // 节流：距上次「发起」≥ 8s 才发起；同一时刻仅一个在途（inFlight）。fire-and-forget（void），
-// 绝不 await——不阻塞事件循环。失败静默（refreshContextSnapshot 内部 logger.warn + 本 helper
-// logger.debug），无兜底 payload（中途失败下一事件还会再试，与 post-turn 不同）。
+// 绝不 await——不阻塞事件循环。失败静默（refreshContextSnapshot 内部已降为 logger.debug，本
+// helper 的兜底 catch 为 logger.warn），无兜底 payload（中途失败下一事件还会再试，与 post-turn 不同）。
 function maybeMidTurnRefresh(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -1595,7 +1596,8 @@ function maybeMidTurnRefresh(
 
 // ── post-turn 官方 /context 探针（本计划）────────────────────────────
 // 回合真实结束后 fire-and-forget 起 `claude.exe -p "/context" --resume <sid>
-// --no-session-persistence` 子进程（§0 实测：零 API、~2s、不污染 transcript），
+// --no-session-persistence` 子进程（§0 实测：零 API、不污染 transcript；耗时实测地板 13-21s，
+// 见下方预算说明），
 // 拿回合末精确占用。报告经共享 parseNativeContextReport 解析，发一条
 // source='native-context' + freshness='fresh' + samplePhase='post-turn' 的 canonical
 // payload（带原回合代际）。成功时 UI 终态升级为精确 fresh；失败时维持既有 stale 兜底
@@ -2677,8 +2679,9 @@ export async function startCommandProbe(sessionId: string, mainWindow: BrowserWi
 const PROBE_TIMEOUT_MS = 30_000;
 const SUPPORTED_COMMANDS_TIMEOUT_MS = 8_000;
 
-// P3-4：全局 CLI 缺失标志。runGlobalCommandProbeInternal 无 exe 时置位；探测成功或启动新探测
-// （重试动作）时清位。COMMANDS_GET 只读分流据此给暂态会话返回 degraded 快照而非永久 loading。
+// P3-4：全局 CLI 缺失标志。runGlobalCommandProbeInternal 无 exe 时置位；仅在启动新探测尝试时
+// （runGlobalCommandProbe 入口）无条件清位（成败无关），此后若仍无 exe 会在探测内部重新置位。
+// COMMANDS_GET 只读分流据此给暂态会话返回 degraded 快照而非永久 loading。
 let globalCliMissing = false;
 export function isGlobalCliMissing(): boolean {
   return globalCliMissing;
@@ -3016,7 +3019,7 @@ async function runGlobalCommandProbeInternal(mainWindow: BrowserWindow, entry: G
       // P3-4：无 CLI 时置全局缺失标志——暂态会话（只读分流，无 per-session probe）的斜杠菜单
       // 此前永远停在 loading（fallback null → loading 快照）。COMMANDS_GET 读该标志返回 degraded
       // 快照（显式失败出口，菜单显示「未检测到本地 Claude Code」）；再次打开菜单时
-      // ensureGlobalCommandProbeFresh 天然重试（D6 节流），exe 装好后 flags 在探测成功路径清位。
+      // ensureGlobalCommandProbeFresh 天然重试（D6 节流），exe 装好后新探测入口无条件清位。
       globalCliMissing = true;
       return;
     }
