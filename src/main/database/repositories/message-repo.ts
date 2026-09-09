@@ -14,6 +14,7 @@ interface MessageRow {
   event_type: string | null;
   cost_usd: number | null;
   duration_ms: number | null;
+  ended_at: number | null;
   parent_task_id: string | null;
   process_kind: string | null;
   parent_agent_id: string | null;
@@ -34,6 +35,7 @@ function toMessage(row: MessageRow): Message {
     eventType: row.event_type,
     costUsd: row.cost_usd,
     durationMs: row.duration_ms,
+    endedAt: row.ended_at,
     parentTaskId: row.parent_task_id,
     processKind: row.process_kind,
     parentAgentId: row.parent_agent_id,
@@ -162,6 +164,7 @@ export function createMessageWithAttachments(input: CreateMessageInput): Message
     eventType,
     costUsd: null,
     durationMs: null,
+    endedAt: null,
     parentTaskId,
     processKind,
     parentAgentId,
@@ -178,16 +181,16 @@ export function deleteMessage(id: string): void {
   getConnection().prepare('DELETE FROM messages WHERE id = ?').run(id);
 }
 
-/** B1：回合 result 元数据落库（气泡脚注的持久化）。
+/** B1：回合 result 元数据落库（气泡脚注的持久化）。B3：ended_at 同写（「结束于」永久落盘）。
  *  双守卫：messageId 必须属于 sessionId（AND session_id），防渲染层错配写脏其它会话。 */
 export function updateResultMeta(
   id: string,
   sessionId: string,
-  meta: { costUsd: number | null; durationMs: number | null },
+  meta: { costUsd: number | null; durationMs: number | null; endedAt: number | null },
 ): boolean {
   const r = getConnection()
-    .prepare('UPDATE messages SET cost_usd = ?, duration_ms = ? WHERE id = ? AND session_id = ?')
-    .run(meta.costUsd, meta.durationMs, id, sessionId);
+    .prepare('UPDATE messages SET cost_usd = ?, duration_ms = ?, ended_at = ? WHERE id = ? AND session_id = ?')
+    .run(meta.costUsd, meta.durationMs, meta.endedAt, id, sessionId);
   return r.changes > 0;
 }
 
@@ -263,6 +266,7 @@ interface ExportMessageRow {
   event_type: string | null;
   cost_usd: number | null;
   duration_ms: number | null;
+  ended_at: number | null;
   process_kind: string | null;
   parent_agent_id: string | null;
   tool_use_id: string | null;
@@ -280,6 +284,7 @@ function toRenderable(row: ExportMessageRow): RenderableMessage {
     eventType: row.event_type,
     costUsd: row.cost_usd,
     durationMs: row.duration_ms,
+    endedAt: row.ended_at,
     processKind: row.process_kind,
     parentAgentId: row.parent_agent_id,
     toolUseId: row.tool_use_id,
@@ -292,7 +297,7 @@ function toRenderable(row: ExportMessageRow): RenderableMessage {
 export function getRenderableMessagesBySession(sessionId: string): RenderableMessage[] {
   const rows = getConnection()
     .prepare(
-      `SELECT id, session_id, role, content, event_type, cost_usd, duration_ms,
+      `SELECT id, session_id, role, content, event_type, cost_usd, duration_ms, ended_at,
               process_kind, parent_agent_id, tool_use_id, title, is_error, created_at
        FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`,
     )

@@ -269,6 +269,7 @@ function createChat() {
       eventType: partial.eventType,
       costUsd: null,
       durationMs: null,
+      endedAt: null,
       parentTaskId: null,
       processKind: partial.processKind ?? null,
       parentAgentId: partial.parentAgentId ?? null,
@@ -857,6 +858,8 @@ function createChat() {
     const sid = store.activeSession?.id;
     const startedAt = sid ? store.turnStartedAt[sid] : null;
     const clientMs = startedAt ? Date.now() - startedAt : null;
+    // B3：回合结束时刻一次性捕获，内存脚注与持久化共用同一值（前台 attach 与后台分支同语义）。
+    const endedAt = Date.now();
     // R1（二次修复）：sdk-backend 把缺失的 total_cost_usd/duration_ms 补成 0（非 undefined），
     // `??` 对 0 不生效会屏蔽客户端兜底。改用真值判断：>0 用端点值，否则 cost 置 null（不显示
     // $0.0000）、duration 回落客户端计时（用户「把最终时间映射到耗时」诉求）。
@@ -873,13 +876,14 @@ function createChat() {
       if (message.role === 'assistant') {
         message.costUsd = typeof cost === 'number' && cost > 0 ? cost : null;
         message.durationMs = typeof duration === 'number' && duration > 0 ? duration : clientMs;
+        // B3：结束时刻随脚注即时可见（门控外——中断/错误回合的内存脚注行为保持不变）。
+        message.endedAt = endedAt;
         // B1：耗时/结束时间持久化（气泡脚注 + 会话级最近回合元数据）。
         // P2-1 门控：仅成功 result（isSuccessfulCliResult；error_during_execution 中断第三态为
         // false）才持久化——中断/错误回合不产生记录（对齐后台分支门控与 Session 字段注释），
         // 气泡内存脚注行为保持不变。durationMs 取刚算好的值（端点值或 clientMs 兜底）；
         // 无效耗时由 setLastTurnMeta/handler 的 P2-2 半写收口兜住（保持上一条有效记录）。
         if (sid && isSuccessfulCliResult(event)) {
-          const endedAt = Date.now();
           const finalDuration = typeof message.durationMs === 'number' && message.durationMs > 0 ? message.durationMs : null;
           store.setLastTurnMeta(sid, { durationMs: finalDuration, endedAt });
           // fire-and-forget：失败不阻塞回合结束（内存态已在）；重启后该次记录缺失可接受。

@@ -79,7 +79,7 @@ check('③ message-repo：updateResultMeta（AND session_id 守卫）+ findLastT
   assert.ok(fnIdx > -1, '未找到 export function updateResultMeta');
   const nextExport = messageRepo.indexOf('export ', fnIdx + 10);
   const body = messageRepo.slice(fnIdx, nextExport > -1 ? nextExport : undefined);
-  assert.match(body, /UPDATE messages SET cost_usd = \?, duration_ms = \? WHERE id = \? AND session_id = \?/, 'updateResultMeta SQL 缺 AND session_id 归属守卫');
+  assert.match(body, /UPDATE messages SET cost_usd = \?, duration_ms = \?, ended_at = \? WHERE id = \? AND session_id = \?/, 'updateResultMeta SQL 缺 AND session_id 归属守卫（B3：ended_at 同写）');
   assert.match(body, /r\.changes > 0/, 'updateResultMeta 应返回 changes > 0 布尔');
   const findIdx = messageRepo.indexOf('export function findLastTurnMainFlowAssistantId');
   assert.ok(findIdx > -1, '审查修复轮：未找到 export function findLastTurnMainFlowAssistantId');

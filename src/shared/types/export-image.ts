@@ -33,6 +33,9 @@ export interface RenderableMessage<A = AttachmentSummary> {
   eventType: string | null;
   costUsd: number | null;
   durationMs: number | null;
+  // 回合结束时刻（epoch ms，B3 持久化）：气泡脚注「结束于 HH:mm:ss」数据源。
+  // 老消息/中断回合为 null（不显示，诚实不造数）。
+  endedAt: number | null;
   processKind: string | null;
   parentAgentId: string | null;
   toolUseId: string | null;
