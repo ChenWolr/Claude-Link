@@ -28,8 +28,11 @@ const origLoad = Module._load;
   if (req === 'electron') return require('./electron-stub.cjs');
   if (/[\\/]message-repo$/.test(req)) {
     return {
-      getRecentMessagesForTurnCheck: (_sessionId: string, limit = 50) => history.slice(0, limit),
-      getMessagesBySession: () => history,
+    getRecentMessagesForTurnCheck: (_sessionId: string, limit = 50) => history.slice(0, limit),
+    // 真实 getMessagesBySession 是 ASC 旧→新（历史回读顺序）且每次返回新数组——
+    // mock 忠实模拟：拷贝 + 反转（旧→新），cli-shared 的回落 .reverse() 消费后即新→旧，
+    // 且不得原地反转污染 history 夹具（B1 对抗二轮同步）。
+    getMessagesBySession: () => history.slice().reverse(),
       createMessage: (input: Record<string, unknown>) => { createdCount += 1; return { id: `m-${createdCount}`, ...input }; },
     };
   }
