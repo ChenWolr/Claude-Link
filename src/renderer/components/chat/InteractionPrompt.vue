@@ -625,7 +625,7 @@ onBeforeUnmount(() => {
                   <option v-for="option in field.options" :key="option.id" :value="option.id">{{ option.label }}</option>
                 </select>
                 <input v-else-if="field.type === 'checkbox'" v-model="fieldValues[field.id]" type="checkbox" @change="touchedCheckboxFields.add(field.id)" />
-                <!-- G2：number 字段走数值键盘/步进输入；v-model 仍是 string，提交侧统一转回数值。 -->
+                <!-- G2：number 字段走数值键盘/步进输入；Vue 对 type="number" 的 v-model 会自动转 number（不可解析时保留 string），提交侧 dialogResultFromInteraction 对 string/number 双向兜底统一为数值。 -->
                 <input v-else-if="field.type === 'number'" v-model="fieldValues[field.id] as string" :placeholder="field.placeholder" type="number" inputmode="decimal" @keydown.stop @keydown.esc.prevent="cancel" />
                 <input v-else v-model="fieldValues[field.id] as string" :placeholder="field.placeholder" type="text" @keydown.stop @keydown.esc.prevent="cancel" />
               </label>
@@ -717,7 +717,8 @@ onBeforeUnmount(() => {
   width: var(--interaction-panel-width-wide);
 }
 
-/* 简单确认弹窗（kind:'confirm' / alert）：无预览无选项列表，用窄宽度避免「一句话撑满屏宽」。
+/* 简单确认弹窗（kind:'confirm' / alert）：无预览；选项至多 2 个（取消/确定等选项仍经
+   InteractionOptionList 渲染，footer 另有取消/确认按钮），用窄宽度避免「一句话撑满屏宽」。
    24rem 随字号等比缩放（medium=384px / large=432px / small=336px）。 */
 .interaction-dialog--narrow {
   width: min(24rem, 94vw);
