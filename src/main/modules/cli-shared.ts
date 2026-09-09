@@ -231,11 +231,16 @@ const TURN_CHECK_WINDOW = 50;
 /** OPT-2 补口（审计「设计缺陷：不绝对等价」）：窄查询窗口打满（返回条数=limit）且窗内未见
  *  user 边界时回落全量查询一次——重工具回合尾部 >50 条 assistant/tool 消息会把 user 标记
  *  推出窗外，「遇 user 即停」的回合窗口语义被破坏（假阴性）。窗口内已见 user、或窗口未满
- * （全量本就 ≤ limit）时不回落，保持窄查询快路径。 */
+ * （全量本就 ≤ limit）时不回落，保持窄查询快路径。
+ *  排序契约：窄窗是新→旧（DESC）；回落全量 getMessagesBySession 是旧→新（ASC，历史回读
+ *  顺序服务）——必须 .reverse() 反转后才符合本函数「新→旧遇 user 即停」的消费契约。 */
 function turnCheckRows(sessionId: string): Message[] {
   const rows = messageRepo.getRecentMessagesForTurnCheck(sessionId, TURN_CHECK_WINDOW);
   if (rows.length === TURN_CHECK_WINDOW && !rows.some((m) => m.role === 'user')) {
-    return messageRepo.getMessagesBySession(sessionId);
+    // B1 对抗二轮（邻接老 bug）：漏 .reverse() 时回落路径恒从最老消息起步（首条几乎必为
+    // user）→ currentTurnHasMainFlowText 恒 false → result 文本重复落库，且 B1 的 fallback
+    // 会把脚注盖到这条重复行上。
+    return messageRepo.getMessagesBySession(sessionId).reverse();
   }
   return rows;
 }
