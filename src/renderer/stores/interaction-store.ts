@@ -81,7 +81,8 @@ export const useInteractionStore = defineStore('interaction', {
           meta.resolver({ id, action: 'cancel' });
         }
       }
-      // 只清本地请求，远程请求由主进程管理（窗口关闭时主进程会 cancelInteractionsForSession）
+      // 只清本地请求，远程请求由主进程管理：窗口关闭时 requestInteraction 内的 mainWindow 'closed'
+      // 监听将各 pending promise 以 cancel/abort resolve；会话删除/硬杀才走 cancelInteractionsForSession。
       this.requests = this.requests.filter((r) => !this.meta.get(r.id)?.isLocal);
       for (const [id, meta] of this.meta) {
         if (meta.isLocal) this.meta.delete(id);

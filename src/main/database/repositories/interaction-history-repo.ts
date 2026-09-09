@@ -1,5 +1,6 @@
 // interaction-history-repo.ts
-// 交互历史持久化：每次用户提交/取消交互弹窗时落库一条记录，
+// 交互历史持久化：远程交互弹窗（有 sessionId）在用户提交/取消时由渲染层落库一条记录；
+// 本地 confirm（sessionId 为空）不落库。
 // 切换会话或重启 app 后仍可在 InteractionPrompt 底部"交互历史"区回看。
 //
 // V3-3：把 InteractionPrompt.vue 原本仅内存的 history ref 升级为 DB 持久化。

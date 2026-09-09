@@ -35,7 +35,9 @@ export type PermissionResult = {
   behavior: 'allow';
   updatedInput?: Record<string, unknown>;
   // L2/L3：SDK 的 PermissionUpdate 联合（addRules/replaceRules/removeRules/setMode/addDirectories/removeDirectories）。
-  // 这里用宽松记录类型承载（claude-link 不构造具体 rule，只透传 suggestions 给 SDK）。
+  // 这里用宽松记录类型承载。allow-session 场景 claude-link 会构造规则：withToolSessionAllow 在 SDK
+  // suggestions 之外补一条本工具裸 allow（addRules, destination:'session'），供 CLI 会话内放行与
+  // isToolSessionAllowed 本地短路匹配；其余 suggestions 仅做 destination:'session' 改写后透传。
   updatedPermissions?: PermissionUpdate[];
   toolUseID?: string;
 } | {
@@ -440,9 +442,10 @@ function isOptionList(value: unknown): value is AskUserQuestionOption[] {
       && typeof (option as Record<string, unknown>).label === 'string');
 }
 
-/** G2：JSON schema → 表单字段。number/integer → 数值输入（numeric 标记，renderer 产出
- *  string、提交侧转回数值）；array → textarea；数值 enum 保序透传为 select（String 化选项、
- *  numeric 标记）；字符串 enum / boolean 行为不变。 */
+/** G2：JSON schema → 表单字段。number/integer → 数值输入（numeric 标记；Vue 对 type="number"
+ *  的 v-model 自动 looseToNumber——可解析时已是 number、不可解析保留 string，提交侧
+ *  dialogResultFromInteraction 对 string/number 双向兜底统一为数值）；array → textarea；
+ *  数值 enum 保序透传为 select（String 化选项、numeric 标记）；字符串 enum / boolean 行为不变。 */
 export function fieldsFromJsonSchema(schema: Record<string, unknown> | undefined): InteractionFormField[] {
   const properties = schema?.properties;
   if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return [];
@@ -513,8 +516,9 @@ export function buildGenericInteractionPayload(
   };
 }
 
-/** G2：表单提交结果 → SDK 返回值。numeric 字段（number/integer、数值 enum select）的
- *  renderer 产出是 string，这里转回数值；空串/非有限数值保持原样（校验层兜底）。 */
+/** G2：表单提交结果 → SDK 返回值。numeric 字段（number/integer、数值 enum select）到达时可能
+ *  已是 number（Vue 对 type="number" 的 v-model 自动转），也可能仍是 string（不可解析输入），
+ *  这里对 string 转回数值、number 原样放行；空串/非有限数值保持原样（校验层兜底）。 */
 export function dialogResultFromInteraction(
   response: InteractionPromptResponsePayload,
   payload?: InteractionPromptPayload,
@@ -539,8 +543,10 @@ export function dialogResultFromInteraction(
 }
 
 // M4：把 ElicitationRequest 构造成交互 payload。url 模式（浏览器认证）SDK 不带 schema，
-// 不回落成文本输入（那会让用户无处完成认证），改成一个只读的 URL 确认框：用户复制 URL
-// 去浏览器完成 OAuth 后回来确认。form/text 走通用表单/文本。
+// 不回落成文本输入（那会让用户无处完成认证），改成一个纯确认框。注意：URL 仅存于 input.url，
+// 当前 confirm 弹窗不渲染 input（InteractionDetails 仅 permission kind 显示），用户无法从弹窗
+// 复制 URL，只能依赖 description/message 文本；若要在弹窗内展示可复制 URL，需为 confirm kind
+// 增加 input.url 渲染。用户完成 OAuth 后回来点确认。form/text 走通用表单/文本。
 //
 // 注意：SDK 真实的 url-elicit 完成信号是 elicitation_complete 事件；claude-link 目前简化为
 // 「用户点确认即视为完成」（resolve OnElicitation Promise 为 accept）。这是有意的 UX 兜底，
