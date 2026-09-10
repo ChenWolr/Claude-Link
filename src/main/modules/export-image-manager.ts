@@ -1,7 +1,7 @@
-// 会话导出 JPEG 长图：主进程管理器（v3 第 6/7/8/11/12/13 节）。
-// 职责：单飞 job、阶段机、数据库快照 projection、隐藏 export BrowserWindow 生命周期、
-// 单段 capturePage + toPNG、JPEG 分块临时文件顺序写入、统一 cleanup、启动残留清理。
-// 阶段二：fixture 闭环（捕获→拼接→JPEG→分块写临时文件→finish），不含保存对话框（阶段四）。
+// 会话导出 JPEG/PNG 长图：主进程管理器（v3 第 6/7/8/11/12/13 节）。
+// 职责：单飞 job、阶段机、数据库快照 projection、隐藏 export BrowserWindow 生命周期；
+// JPEG 走 capturePage + toPNG + renderer Canvas 编码 + 分块顺序写；PNG 走主进程捕获 + codec worker（worker_threads）编码。
+// 统一 cleanup、启动残留清理、阶段四保存对话框 + 排他写入。
 
 import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
 import { mkdtemp, readdir, stat, rm } from 'fs/promises';
@@ -253,7 +253,7 @@ async function pngBeginPageImpl(request: ExportPageBeginRequest): Promise<Export
   const g = await readExportDomGeometry(win);
   if ('error' in g) return { ok: false, code: 'geometry', message: g.error };
 
-  // 比例由本页 probe 冻结（若调用方未先 probe，则用 capturePage 一次实测兜底）。
+  // 比例不依赖调用方是否已 probe：beginPage 无条件用 capturePage 自行实测并冻结本页 scaleY/物理宽。
   const [cw, ch] = win.getContentSize();
   const probe = await win.webContents.capturePage({ x: 0, y: 0, width: cw, height: ch }, { stayHidden: true, stayAwake: true });
   if (!probe || probe.isEmpty()) return { ok: false, code: 'empty-capture', message: 'begin capturePage 返回空图' };
@@ -652,14 +652,14 @@ async function cleanup(_reason: string): Promise<void> {
   clearTimeout(job.finishTimer);
 }
 
-/** 供 smoke / 阶段四显式清理当前 job（保留临时文件可先检查再清理）。 */
+/** 供 smoke 等外部路径显式清理当前 job；会无条件删除临时目录，正常 done 路径在 resolve 前已自行 cleanup，此调用通常为兜底 no-op。 */
 export async function cleanupActiveJob(): Promise<void> {
   await cleanup('explicit');
 }
 
 // —— 启动导出 ——
 export interface StartExportOptions {
-  /** smoke 模式：跳过发送态检查，完成时 resolve donePromise（阶段二自动验证用）。 */
+  /** smoke 模式：保存阶段用 CLAUDE_LINK_EXPORT_SMOKE_DEST 绕过对话框直接落盘，且 startImageExport 返回值附带导出快照供冒烟校验；done promise 对所有任务均创建，终态时 settle（非 smoke 专属）。 */
   smoke?: boolean;
 }
 
@@ -828,7 +828,7 @@ export async function startImageExport(
     await failJob(`导出窗口加载失败：${loadErr}`);
     return { ok: false, code: 'load-failed', message: loadErr };
   }
-  // 固定版心视口：896 × 1000（阶段四按 workArea 段高公式调整）。
+  // 固定版心视口：896 × 1000，全导出流程不再调整（段高由 renderer 按视口与文档高度自行推进）。
   exportWindow.setContentSize(896, 1000);
 
   makeProgress({ phase: 'preparing', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, message: '正在准备会话…' });
@@ -877,7 +877,7 @@ export function registerExportImageHandlers(): void {
     return active?.snapshot ?? null;
   });
 
-  // EXPORT_RENDER_CAPTURE_SELF：单飞，仅 capturing 阶段。JPEG 走 v3 captureSelfImpl；PNG 走 pngCaptureSelfImpl。
+  // EXPORT_RENDER_CAPTURE_SELF：单飞；阶段由实际捕获操作驱动（JPEG 进入 capturing），不做阶段前置门禁。JPEG 走 v3 captureSelfImpl；PNG 走 pngCaptureSelfImpl。
   ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_CAPTURE_SELF, async (event, request: CaptureSelfRequest | PngCaptureSelfRequest) => {
     if (!isExportSender(event.sender)) {
       return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies CaptureSelfResponse | PngCaptureSelfResponse;

@@ -78,7 +78,7 @@ body,
   border: 1px solid var(--color-border, rgba(0, 0, 0, 0.1));
   box-sizing: border-box;
 }
-/* 导出根节点关闭动画/光标/选择（v3 第 5 节）。 */
+/* 导出根节点隐藏输入光标（v3 第 5 节）；动画与文本选择未在此处禁用。 */
 .export-root * {
   caret-color: transparent;
 }

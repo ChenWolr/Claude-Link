@@ -17,8 +17,8 @@ import { groupMessagesForRender, type RenderItem } from '../utils/group-messages
 import { applyThemePalette } from '../utils/apply-theme';
 import { FONT_SCALE_SIZES } from '@shared/constants';
 
-// 单页 CSS 高度上限（保守取 1500，配合每页像素预算检查；阶段四每段捕获后用实测比例复核）。
-// Task 11 会按格式预算（PNG 内存预算）替换为动态值。
+// JPEG 单页 CSS 高度上限（保守取 1500，配合每页像素预算检查；每段捕获后用实测比例复核段间一致性）。
+// PNG 不用此值：先 probeSelf 实测比例，按内存预算经 deriveMaxPageHeightByMemory 动态反推。
 const PAGE_HEIGHT_CSS = 1500;
 const MAX_PAGES = DEFAULT_EXPORT_BUDGET.maxPageCount; // 100
 
