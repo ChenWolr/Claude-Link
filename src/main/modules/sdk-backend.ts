@@ -214,8 +214,9 @@ const interruptedQueries = new WeakSet<Query>();
 //      2) 反复同步 DB 操作阻塞主进程事件循环导致所有输入框失效。
 // 比 sessionRepo.getSession() 轻得多（内存 Set.has vs 索引查询）。
 const activeSessions = new Set<string>();
-// 问题 4：缓存每会话最近一次上下文用量。CC 自动压缩事件（compact_boundary）不带
-// usage，emit CONTEXT_UPDATE 时沿用此缓存，避免前端收到压缩标记但占比回零闪烁。
+// 问题 4：缓存每会话最近一次 turn usage 与窗口容量（legacy 字段供诊断/兜底）。
+// compact_boundary 不带可信当前窗口，pending payload 显式置 null（review-v2 High#3：
+// 禁止沿用 stale 值冒充 fresh），当前窗口主值由压缩后的 fresh 快照/探针重新下发。
 interface CachedContextStats {
   inputTokens: number;
   outputTokens: number;
@@ -1248,8 +1249,9 @@ function forwardEvent(
 // 黑盒证据（run-2026-08-21-205616）：getContextUsage().totalTokens 是当前窗口已用（与 /context 一致）。
 // SDK 时序铁律（sdk.mjs）：getContextUsage 是 control_request，须在 query 存活期完成；一旦 for-await
 // 循环在 result 后 return，SDK 生成器的 finally 会 cleanup() 并拒绝所有 pending control response
-// （"Query closed before response received"）。因此只能在 streaming 期（init 后）fire-and-forget 调用，
-// 不能在 result 后调用。短命令 query 关闭太快仍可能失败 → 落到 pending（契约允许），长 turn 能拿到。
+// （"Query closed before response received"）。因此只能在 SDK 生成器 return（cleanup）之前调用：
+// init 后 fire-and-forget，或 result 分支内、循环 return 前 await（post-turn 相位）。
+// 短命令 query 关闭太快仍可能失败 → 落到 pending（契约允许），长 turn 能拿到。
 const contextRefreshGeneration = new Map<string, number>();
 const CONTEXT_REFRESH_TIMEOUT_MS = 5000;
 // P2 mid-turn：回合中途轮询的节流与值变化门限常量（docs/.../2026-08-22-mid-turn-context-refresh.md §5.2）。
@@ -1524,9 +1526,10 @@ async function refreshContextSnapshot(
           : undefined,
       );
       const lastStats = sessionContextStats.get(sessionId);
-      // P3-10：兜底容量优先取本回合 runtime 快照的 capacityTokens（mid-turn 成功时已缓存，
-      // 是真实窗口值）；lastStats.windowSize 是别名推导的静态兜底，未设别名的模型会偏小，
-      // 把 canonical 窗口覆盖缩小。无 runtime 快照时维持现值。
+      // P3-10：兜底容量优先取缓存中最新 runtime 快照的 capacityTokens（通常为本回合 mid-turn
+      // 成功时的真实窗口值；不校验代际，熔断期可能来自上一回合，容量跨回合一般不变）；
+      // lastStats.windowSize 是别名推导的静态兜底，未设别名的模型会偏小，把 canonical 窗口
+      // 覆盖缩小。无任何快照时维持现值。
       const runtimeCapacity = lastSnapshot != null ? lastSnapshot.capacityTokens : null;
       const payload: ContextStatsPayload = {
         sessionId,
@@ -1840,9 +1843,9 @@ export function schedulePostTurnProbe(
 // 用户发 /context 时，SDK 以 assistant 文本返回「## Context Usage …」原生报告。这里把
 // 该文本用共享 parser 解析，并与最近一次 runtime 快照（getContextUsage）对账，发送带
 // source/freshness/consistency/diagnostic 的 canonical 终态：
-//   - native 解析成功 + 与 runtime 一致 → source='reconciled' + freshness='fresh'
-//   - 解析失败/空输出/mismatch      → source='unavailable'（或 mismatch）+ freshness='stale' + diagnostic
-// 不覆盖已有 authoritative live 快照：仅当 native 与 runtime 能对账时才升级为 reconciled。
+// 终态由 mapContextReconcileTerminal 单源映射：reconciled（与同代 runtime 一致）/
+// 仅 native（native-context + fresh，native 即权威）/ 仅 runtime 或 mismatch（unavailable +
+// stale，保留 last-known 不伪装 fresh）/ 两者皆无（unavailable + pending）。
 function isContextCommand(text: string): boolean {
   return /^\/context\b/.test(text.trim());
 }

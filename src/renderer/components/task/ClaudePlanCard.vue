@@ -4,9 +4,9 @@
 // 独立于手动排队任务（task-store / tasks 表）。状态来自 Claude SDK 事件，用户不可编辑。
 //
 // 设计要点：
-//  - pending ○ / in_progress ◌ / completed（文本划线，仅 span）
+//  - pending 空心圆 / in_progress 半填充圆 / completed（文本划线，仅 span）
 //  - in_progress 显示 activeForm，其他显示 content
-//  - Task 显示 subject，可展开 description/blockedBy
+//  - Task 显示 subject，可展开 activeForm（当前）/description/blockedBy
 //  - 全只读：无 checkbox、无编辑框、无拖拽排序
 //  - 完成项删除线只作用于直属文本 span，不划过图标和徽章
 

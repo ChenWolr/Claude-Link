@@ -6,8 +6,8 @@
 // SUBAGENT 槽位钉死值会把探针进程的后台辅助请求劫持到别的模型。
 // 探针只跑本地 /context 命令：不依赖 hooks/permissions（不加载 settings 无副作用）；--resume 读的
 // 会话文件存储位置由 HOME/CLAUDE_CONFIG_DIR 决定，不受 setting-sources 影响。
-// 注意：connection-tester 因 spawn 走 shell:true 需传 '""'（防 cmd 吞空参数）；此处 spawn 无 shell，
-// 直接传空字符串。
+// 注意：connection-tester 与此处同为 spawn 无 shell（shell:false），空参数均直接传空字符串；
+// 历史 shell:true 时代传「字面成对双引号」当空串的变通已废弃（见 connection-tester.ts P2-3 注释）。
 export function buildPostTurnProbeArgs(cliSessionId: string): string[] {
   return [
     '--setting-sources', '',
