@@ -201,7 +201,7 @@ export const useSessionStore = defineStore('session', {
     // 切会话/回合结束清零；ContextButton hover 展示。null=无（未在思考或回合已结束）。
     thinkingTokens: null as number | null,
     // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
-    // 渲染层据此 + useNow 跳动时钟算实时耗时，整个 sending 期间常驻显示「⏱ X.Xs」。
+    // 渲染层（TurnTimer）据此 + useNow 跳动时钟算实时耗时，sending 期间在状态头条常驻显示递增计时。
     turnStartedAt: {} as Record<string, number>,
     // B1：最近一回合的耗时/结束时刻（按 sessionId）。回合 result 到达时由 use-chat 写入，
     // 比 sessions 列表对象里的 lastTurn* 字段新鲜（后者只在 IPC 返回整会话时刷新）。
@@ -240,7 +240,7 @@ export const useSessionStore = defineStore('session', {
     sending(state): boolean {
       return !!state.activeSession && state.runningSessions.includes(state.activeSession.id);
     },
-    // 问题 2：当前活动会话的本回合开始时间戳（无则 null）。MessageList 实时计时器据此算耗时。
+    // 问题 2：当前活动会话的本回合开始时间戳（无则 null）。TurnTimer 实时计时器据此算耗时。
     activeTurnStartedAt(state): number | null {
       if (!state.activeSession) return null;
       return state.turnStartedAt[state.activeSession.id] ?? null;
