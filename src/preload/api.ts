@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（35 个方法）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（70 个方法）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -206,7 +206,7 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.QUEUE_EVENT, listener);
     },
     removeQueueListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.QUEUE_EVENT),
-    // 会话导出 JPEG 长图（v3）：可见 renderer 请求开始 + 接收进度。图片数据不经过可见 renderer。
+    // 会话导出长图（v3 JPEG / v4.1 PNG 双格式）：可见 renderer 请求开始 + 接收进度。图片数据不经过可见 renderer。
     startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId, format),
     onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: import('../shared/types/export-image').ExportImageProgressPayload) => callback(payload);
@@ -235,7 +235,7 @@ export function createApi(): ClaudeLinkAPI {
 // —— 导出窗口 surface ——
 // 隐藏导出窗口（additionalArguments 注入 --claude-link-surface=export）只暴露最小 window.exportLink，
 // 不接触主窗口完整 API（会话 CRUD / 聊天发送 / 任务队列 / 配置写入）。
-// 主进程仍按 sender/frame/URL/job 校验每次调用，surface 参数不是唯一授权条件。
+// surface 参数不是唯一授权条件；主进程仍按 sender（webContents 同一性）/frame（顶层 frame）/job（jobId 匹配）校验每次调用；URL 防护由导出窗口创建时的 link-guard（导航拦截）承担，不在每次 IPC 调用中校验。
 import type {
   CaptureSelfRequest,
   CaptureSelfResponse,
@@ -281,7 +281,7 @@ export function createExportApi(): ExportLinkAPI {
     beginPage: (request) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_BEGIN_PAGE, request),
     finishPage: (request) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_FINISH_PAGE, request),
     reportProgress: (payload) => {
-      // 单向推送，fire-and-forget；主进程做背压与限频。
+      // 单向推送，fire-and-forget；主进程仅校验 sender 与迟到 jobId 后转发给 origin（进度同时兼作看门狗进展证据），不做限频。
       ipcRenderer.send(IPC_CHANNELS.EXPORT_RENDER_PROGRESS, payload);
     },
     finish: (payload) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RENDER_FINISH, payload),

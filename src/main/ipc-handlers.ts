@@ -1,7 +1,7 @@
 // ipc-handlers.ts
 // IPC handler 注册中心：渲染进程 ↔ 主进程的桥梁。
 //
-// 注册 config / cli / session / message / chat / task / queue 全部 IPC handler。
+// 注册 cli / config / workspace / provider / changes / settings / session / message / claude-plan / commands / chat / interaction / task / queue / attachment 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
 import { BrowserWindow, dialog, ipcMain, app } from 'electron';
@@ -375,8 +375,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
     sessionRepo.searchSessions(query),
   );
-  // OPT-10：会话级「单独改 model_override」的 IPC 死链已删除（模型选用唯一现场=供应商模型选择器
-  // SESSION_SET_PROVIDER_MODEL；该通道在 renderer/store/repo 三层均无调用方）。
+  // OPT-10：会话级「单独改 model_override」的 IPC 死链已删除（模型选用唯一现场=供应商模型选择器，
+  // 渲染层经 SESSION_UPDATE 透传 providerOverride/modelOverride；被删通道在 renderer/store/repo 三层均无调用方）。
   ipcMain.handle(
     IPC_CHANNELS.SESSION_ANALYZE_TOPIC,
     async (_event, sessionId: string, firstMessage: string) => {
@@ -805,6 +805,6 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       cloneMessageAttachmentsToDraft(sessionId, messageId),
   );
 
-  // 会话导出 JPEG 长图（v3）：注册主窗口开始 + 隐藏 renderer 专用 IPC。
+  // 会话导出长图（v3 JPEG / v4.1 PNG 双格式）：注册主窗口开始 + 隐藏 renderer 专用 IPC。
   registerExportImageHandlers();
 }
