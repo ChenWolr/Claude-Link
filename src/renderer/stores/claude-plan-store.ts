@@ -7,7 +7,8 @@
 //  - 持久化：主进程 claude_plan_state 表，经 preload getClaudePlanState 读取
 //
 // 竞态保护：
-//  - applyPlanState 仅允许更高 revision 覆盖（防旧事件回退）
+//  - applyPlanState 仅拒绝更低 revision（防旧事件回退），相等或更高均覆盖
+//    （主进程每次操作递增，相等即重复推送同状态）
 //  - loadPlan 用 generation 保护，旧请求结果不覆盖新请求
 //  - 后台会话事件按 sessionId 写入对应 plan，切回时可见最新
 
@@ -69,7 +70,8 @@ export const useClaudePlanStore = defineStore('claude-plan', {
 
     /**
      * 应用实时计划快照（来自 CHAT_EVENT）。
-     * 仅允许更高 revision 覆盖；无 revision 的即时事件按序应用。
+     * 仅拒绝更低 revision（防旧事件回退），相等或更高均覆盖；
+     * 无「缺 revision」事件（ClaudePlanState.revision 类型必填）。
      */
     applyPlanState(sessionId: string, state: ClaudePlanState): void {
       const existing = this.planBySession[sessionId];

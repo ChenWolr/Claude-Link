@@ -8,7 +8,8 @@
 //  - status 跨子系统归一化：SDK task_updated.patch.status 的 'running' → 'in_progress'。
 //  - 'deleted' 只作为 TaskUpdate 输入动作，不进入可见列表。
 //  - addBlocks/addBlockedBy 是追加去重语义（SDK 是 add），metadata 是按 key 合并（null = 删 key）。
-//  - 所有模型输入在纯函数边界做类型校验；非法 status/空 ID/过长文本只记录并忽略。
+//  - 所有模型输入在纯函数边界做类型校验；非法 status/空 ID/过长文本一律静默忽略
+//    （无日志，非法快照不覆盖旧状态）。
 
 /** TodoWrite 三态（与 SDK TodoWriteInput.todos[].status 一致）。 */
 export type ClaudeTodoStatus = 'pending' | 'in_progress' | 'completed';
@@ -82,7 +83,8 @@ export interface ClaudePlanState {
 
 /**
  * Claude 计划事件：由 SDK 工具调用和 system/task_updated 消息经纯函数解析产生。
- * 主进程 forwardClaudePlanEvent 校验后经 repo 原子更新，再通过 CHAT_EVENT 推送。
+ * 主进程解析校验后经 repo 原子更新（事务内递增 revision），再由 forwardClaudePlanState
+ * 通过 CHAT_EVENT 推送完整快照。
  */
 export type ClaudePlanEvent =
   | { type: 'claude_plan'; operation: 'todos_replace'; sessionId: string; todos: ClaudeTodoItem[]; sourceToolUseId?: string; revision?: number }
@@ -235,7 +237,7 @@ export function parseTaskListOutput(
   return result;
 }
 
-/** 校验并解析 TaskGetOutput（tool result），返回 taskId + patch（只含实际返回的字段）。 */
+/** 校验并解析 TaskGetOutput（tool result），返回 taskId + patch（subject/description/status 必置，缺失时兜底；blocks/blockedBy/activeForm/owner/metadata 仅在 SDK 实际返回时携带）。 */
 export function parseTaskGetOutput(
   output: Record<string, unknown>,
 ): { id: string; patch: ClaudePlanTaskPatch } | null {
@@ -396,10 +398,11 @@ export function applyPlanEvent(
           });
         }
       }
-      // 检查是否有实际变化（避免无变化时也递增 revision）
+      // 跳过条件：entries 全部未命中本地任务且无新增（如空列表/纯过滤视图空结果），不递增
+      // revision；命中即递增，即使值相同。
       const hasNew = event.entries.some((e) => !existingIds.has(e.id));
       const hasUpdate = state.tasks.some((t) => entryIds.has(t.id));
-      if (!hasNew && !hasUpdate) return state; // 无变化不递增
+      if (!hasNew && !hasUpdate) return state; // 无交集且无新增：不递增
       return { ...state, tasks: merged, revision: nextRevision, updatedAt };
     }
     case 'task_delete': {

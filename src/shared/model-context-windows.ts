@@ -2,11 +2,12 @@
 //
 // 背景：Anthropic /v1/models 不返回 context_window，model-resolver 只能拿到
 // max_output_tokens；而真实窗口（SDK result.modelUsage.contextWindow）要等连通
-// Claude 后才到达。本表用于「未连接时」按当前模型给出合理窗口，避免一律显示 200k。
+// Claude 后才到达。本表仅作查表工具（selftest 与潜在复用），不参与运行时 fallback：
+// 未设置用户覆盖时严格按 200k（用户要求）。
 //
 // 命中规则：标准化（小写 + trim）后按「最长前缀」匹配——避免 'glm-5.2' 被更短的
 // 别名抢匹配，也兼容带后缀的变体（glm-5.2-1m、claude-sonnet-4-6 等）。
-// 未命中返回 null，由调用方走 fallback 链（持久化真实值 → 用户覆盖 → 200000）。
+// 未命中返回 null。
 //
 // 数值按各家官方文档；新模型按需补充。宁可少放，不要放错——命中错误的窗口比
 // 落到 fallback 更误导。
@@ -54,8 +55,9 @@ export function lookupModelWindow(model: string | null | undefined): number | nu
 }
 
 // 上下文窗口 fallback 链（优先级从高到低）：
-//   1. lastContextWindow           —— 该会话从 SDK result.modelUsage 拿到的真实值（已持久化）
-//   2. contextWindowByAlias[alias] —— 用户在配置页按当前别名设的覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>）
+//   1. contextWindowByAlias[alias] —— 用户按别名显式设置（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>），
+//                                    即使 SDK 上报真实窗口也覆盖（以设置为准）
+//   2. lastContextWindow           —— 该会话从 SDK result.modelUsage 拿到的真实值（已持久化）
 //   3. DEFAULT_CONTEXT_WINDOW（200000）
 // 注：内置 MODEL_CONTEXT_WINDOWS 表不再参与 fallback（用户要求「未设置严格默认 200k」），
 //     lookupModelWindow 仅保留为查表工具，供 selftest 与未来可能的复用。

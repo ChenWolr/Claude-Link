@@ -87,9 +87,9 @@ export function deriveCurrentContextUsed(input: {
   return typeof live === 'number' && Number.isFinite(live) && live >= 0 ? live : null;
 }
 
-// 新鲜度分类：有可信当前窗口 → live/fresh；仅 turn usage → estimated；全无 → pending。
-// 说明：本函数只依据「是否有可信当前窗口」做二分类；stale/unavailable 由调用方（带 source 时序）
-// 在 reconcile 阶段进一步判定。
+// 新鲜度分类：有可信当前窗口 → live；仅 turn usage → estimated；全无 → pending。
+// 说明：'fresh' 不由本函数产生（runtime 快照成功、reconcile 终态、post-turn 探针 payload
+// 均由调用方直接置 fresh）；stale/unavailable 由调用方（带 source 时序）在 reconcile 阶段判定。
 export function classifyUsageFreshness(input: {
   contextUsedTokens: number | null | undefined;
   inputTokens: number | null | undefined;
@@ -200,7 +200,7 @@ export function parseNativeContextReport(text: string | null | undefined): Nativ
   const pct = parsePercentage(pctRaw);
   if (used == null || max == null || max <= 0) return null;
 
-  // 百分比一致性：|pct - used/max*100| 容忍 1.5 个百分点（k/m 缩写有 ±0.05k 的舍入误差）。
+  // 百分比一致性：|pct - used/max*100| 容忍 1.5 个百分点（宽松容差，兼容 k/m 缩写舍入与 CLI 自报百分比的四舍五入）。
   const computedPct = (used / max) * 100;
   if (pct != null && Math.abs(pct - computedPct) > 1.5) return null;
 
@@ -485,8 +485,9 @@ export function shouldAcceptContextPayload(
 
 // ─────────────────────────────────────────────────────────────────────────────
 // review-v3 §5.3：压缩成功横幅时序契约（纯逻辑，主进程与 renderer 双侧共用语义）。
-// 只有 compact_result:success 之后、**同代 fresh** runtime 快照（compactedJustNow 由
-// 主进程在该条件下附加）才显示横幅；pending/failed/timeout/stale 一律不显示。
+// 只有 compact_result:success 之后、同代 fresh 快照（runtime-live/reconciled 或 post-turn
+// 探针的 native-context，compactedJustNow 由主进程在该条件下附加）才显示横幅；
+// pending/failed/timeout/stale 一律不显示。
 // ─────────────────────────────────────────────────────────────────────────────
 export function shouldShowCompactedBanner(payload: {
   compactedJustNow?: boolean;
