@@ -47,15 +47,17 @@ const KNOWN_ORIGINS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * 单命令来源分类（Task 2）。分类顺序固定，前序命中即返回：
- *   ① SDK 结构化 provenance（未来字段，当前 SDK 未提供 → undefined 跳过）；
+ * 单命令来源分类（Task 2 + review 更新）。分类顺序固定，前序命中即返回：
+ *   ① SDK 结构化 provenance（当前 SDK 未提供 → undefined 跳过）；
  *   ② removed 描述（agents 等描述含 (removed)）；
- *   ③ internal 名称/描述（__ 前缀 / server-only 描述）；
- *   ④ skills 集合（system.init.skills）；
- *   ⑤ plugins 集合（system.init.plugins.name）；
- *   ⑥ 项目文件来源（预留：当前 SDK 无 project 命令数据通道，无则跳过）；
- *   ⑦ 已知 builtin 名称集合；
- *   ⑧ unknown（显式差异，不得当作 builtin 完成）。
+ *   ③ evidence 磁盘证据映射（sdk-command-origin 扫描的用户级/项目级/插件 Skill 与 command 文件）；
+ *   ④ 描述 '(user)' 后缀（优先于 skills 集合，SDK 可验证证据）；
+ *   ⑤ internal 名称/描述；
+ *   ⑥ skills 集合（system.init.skills）；
+ *   ⑦ plugins 集合；
+ *   ⑧ 已知 builtin 名称集合；
+ *   ⑨ unknown（显式差异，不得当作 builtin 完成）。
+ * project 来源经 ③ evidence 通道实际生效。
  */
 export function classifyOrigin(
   name: string,
@@ -85,7 +87,7 @@ export function classifyOrigin(
   const key = commandNameKey(name);
   if (ctx.skills.some((skill) => commandNameKey(skill) === key)) return 'user-skill';
   if (ctx.plugins.some((plugin) => commandNameKey(plugin) === key)) return 'plugin';
-  // ⑥ project 文件来源：预留，当前 SDK 无此数据通道。
+  // project 文件来源经 ③ evidence 通道分类生效（sdk-command-origin 磁盘扫描），此处无独立 project 分支。
   if (KNOWN_BUILTIN_NAMES.has(name)) return 'builtin';
   return 'unknown';
 }
@@ -142,7 +144,7 @@ export function toSdkCommand(
 }
 
 /**
- * 全局兜底快照的哨兵 sessionId。启动时跑一次「全局命令探测」（无会话绑定），结果写入
+ * 全局兜底快照的哨兵 sessionId。启动时与 watcher 热刷新时都会执行「全局命令探测」（无会话绑定），结果写入
  * registry.globalFallback；任何无 per-session 快照的会话经 COMMANDS_GET 取此兜底（复制 + 改 sessionId
  * + source:'cache'），实现「重启后旧会话立即可用 + 探测异常时的容错兜底」。per-session 快照永远优先。
  */
@@ -154,7 +156,7 @@ export class SdkCommandRegistry {
   // 异步 supportedCommands 完成后校验，只有仍是启动时代际才写入，防止旧结果覆盖新列表。
   private readonly revisions = new Map<string, number>();
   // 启动全局兜底快照（无会话绑定）。仅当某 session 无 per-session 快照时作为兜底显现，
-  // 被 per-session（probe/init/changed）任意来源覆盖。不分代际（启动只跑一次，不与 per-session 竞争）。
+  // 被 per-session（probe/init/changed）任意来源覆盖。不分代际（启动探测与 watcher 热刷新共用入口、会被反复重写；不与 per-session 竞争）。
   private globalFallback: SessionCommandSnapshot | null = null;
 
   /** 当前命令快照的代际号（默认 0）。 */
@@ -179,6 +181,8 @@ export class SdkCommandRegistry {
    * - 非空 → ready；空 → empty。
    * - originFingerprint（D5）：用户级来源目录出生指纹，由调用方传 getUserOriginFingerprint() 现值；
    *   watcher 未启动时缺省 → 字段缺省，COMMANDS_GET 不做指纹比对（不误标 stale）。
+   * - projectOriginFingerprint（P2-14）：项目级来源目录出生指纹，probe 成功时由调用方传
+   *   getProjectOriginFingerprint(session.cwd)；缺省不写，COMMANDS_GET 不做项目级比对（不误标 stale）。
    */
   replace(
     sessionId: string,
@@ -220,7 +224,7 @@ export class SdkCommandRegistry {
   }
   /**
    * 切换 non-ready 状态（loading / stale / degraded / error）但保留「最佳可用命令」：
-   * 优先 per-session 已有命令，否则 fallback 到 globalFallback 命令（启动兜底）。
+   * 优先 per-session 已有命令，否则 fallback 到 globalFallback 命令（全局兜底，启动/watcher 热刷新共用）。
    * N7：避免 0 命令的 loading/degraded 快照覆盖本可用的全局 cache——probe 进行中或失败时，用户仍能看到
    * 兜底命令。ready 用 replace（权威命令），不走此方法。
    */
@@ -271,8 +275,10 @@ export class SdkCommandRegistry {
   }
 
   /**
-   * 写入启动全局兜底快照（无会话绑定）。逐条清洗 + 去重，与 replace 同款；非空→ready / 空→empty。
-   * 不分代际（启动只跑一次）。sessionId 用哨兵 GLOBAL_FALLBACK_SESSION_ID，回填会话时由调用方覆盖。
+   * 写入全局兜底快照（无会话绑定）。逐条清洗 + 去重，与 replace 同款；非空→ready / 空→empty。
+   * 不参与 per-session 代际号机制（per-session 快照永远优先显现）。启动探测（index.ts whenReady）
+   * 与 watcher 指纹热刷新（D4）共用此入口，运行期会被反复重写。sessionId 用哨兵
+   * GLOBAL_FALLBACK_SESSION_ID，回填会话时由调用方覆盖。
    */
   setGlobalFallback(
     rawCommands: unknown[],

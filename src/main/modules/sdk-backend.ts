@@ -2947,11 +2947,13 @@ async function cancelCommandProbeInternal(sessionId: string, timeoutMs: number):
   await Promise.race([entry.donePromise, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
 }
 
-// ── 启动全局兜底命令探测（无会话绑定）──
-// app.whenReady 后跑一次：复用 buildProbeSdkOptions（哨兵 sessionId，applySessionPermissionUpdates
+// ── 全局兜底命令探测（无会话绑定）──
+// 启动（index.ts whenReady / macOS activate 恢复同管道）与 watcher 指纹热刷新（D4）共用此入口，
+// 运行期会反复执行：复用 buildProbeSdkOptions（哨兵 sessionId，applySessionPermissionUpdates
 // 无害退化）+ startSdkQuery + controlPromptIterable。结果写入 registry.globalFallback，作为「无 per-session
 // 快照会话」的兜底（重启后旧会话立即可用 + 探测异常容错）。per-session 快照永远优先。
-// 不走 per-session 的 isSessionActive 守卫 / revision / commandProbes map；启动只跑一次（幂等）。
+// 不走 per-session 的 isSessionActive 守卫 / revision / commandProbes map；并发触发由幂等锁吞掉
+//（已有探测在跑则跳过，触发方按返回值感知——watcher 据此延迟重试）。
 const GLOBAL_PROBE_SESSION_ID = '__global_command_probe__';
 
 interface GlobalProbeEntry {

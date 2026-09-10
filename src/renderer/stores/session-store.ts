@@ -1013,7 +1013,8 @@ export const useSessionStore = defineStore('session', {
       // P1-4 归属守卫（单点）：非活动会话的消息一律拒绝——后台队列回合的 user message
       // 经 task-store 直连本方法，无守卫时串入当前会话（幽灵气泡），isNew+user 数=1 判定
       // 还会用外来内容触发 analyzeTopic 改错标题。活动会话写入谓词恒真不受影响；
-      // activeSession 为 null（暂态草稿）时拒绝一切远端消息。切回原会话由 DB 重载补齐。
+      // activeSession 为 null（未选中任何会话）时拒绝一切远端消息；暂态会话期间 activeSession 为
+      // 暂态对象，远端消息因 sessionId 与暂态 id 不匹配同样被拒。切回原会话由 DB 重载补齐。
       if (message.sessionId !== this.activeSession?.id) return;
       // Task 7B：按 id upsert——task 执行/waiting 续接经 queue event 回传同一 id 的 user message 时，
       // 替换而非追加，避免重复气泡（retry/重放也复用同一稳定 id）。

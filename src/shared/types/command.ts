@@ -31,7 +31,7 @@ export type CommandAvailability = 'available' | 'hidden' | 'unknown';
 
 /**
  * 来源分类所需上下文（来自 system.init 的 skills / plugins / slash_commands）。
- * `project 文件来源`（项目内 .claude/commands 等）尚无 SDK 数据通道，预留为分类顺序中的一环。
+ * project 文件来源无 SDK 结构化字段，经 evidence（sdk-command-origin 磁盘扫描）通道分类生效。
  */
 export interface CommandOriginContext {
   skills: string[];
@@ -81,7 +81,7 @@ export interface SessionCommandSnapshot {
   /**
    * 用户级命令来源目录（~/.claude/{commands,skills}）的出生指纹（D5 旧会话惰性刷新）。
    * replace 写入时由调用方附带（watcher 未启动时缺省 → 字段缺省，不触发指纹比对）。
-   * 只比用户级：用户级变更影响所有会话；项目级变更由存活期 commands_changed / 物化 probe 覆盖。
+   * 比用户级与项目级出生指纹：用户级变更影响所有会话（D5）；项目级变更经 P2-14 比对，重开菜单即判 stale 免费重探。
    */
   originFingerprint?: string;
   /**
