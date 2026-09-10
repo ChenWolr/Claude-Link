@@ -134,8 +134,9 @@ onBeforeUnmount(() => {
   }
 });
 
-// 高级 JSON 编辑器已随多供应商化移除：连接配置由供应商库维护，
-// config.advancedJson（全局 permissions/hooks/env）仍经「自动检测配置」导入维护。
+// 高级 JSON 编辑器已随多供应商化移除；advancedJson（全局 permissions/hooks/env）暂无 UI
+// 维护入口（config-store 的 importSettings/autoDetectClaudeConfig/fillFromAdvancedJson 均无
+// 调用方，仅存档），只能手改存储文件或经 SDK settings 生效。
 
 function showToast(message: string, type: 'success' | 'error' = 'success'): void {
   toastType.value = type;
@@ -146,7 +147,8 @@ function showToast(message: string, type: 'success' | 'error' = 'success'): void
 }
 
 async function handleSave() {
-  // 立即落盘（不等防抖），并修正 URL 尾部斜杠
+  // 立即落盘（不等防抖）。URL 尾斜杠修正为多供应商化前的残留：仅当库为空（无投影源覆盖）时
+  // 才会留存，库非空时会被 projectLegacyFields 用档案权威值覆盖。
   const baseUrl = store.config.apiBaseUrl?.trim();
   if (baseUrl && baseUrl.endsWith('/') && !baseUrl.endsWith('/v1/')) {
     store.config.apiBaseUrl = baseUrl.slice(0, -1);
@@ -269,7 +271,7 @@ function clampMaxTurns(): void {
     </details>
 
     <!-- 高级 JSON 编辑器已随多供应商化移除（连接配置由供应商库维护；
-         config.advancedJson 仍承载全局 permissions/hooks/env，经「自动检测配置」导入）-->
+         config.advancedJson 仍承载全局 permissions/hooks/env，暂无 UI 维护入口）-->
 
     <!-- 分类标签页与保存状态同行，保存反馈靠右对齐 -->
     <div class="tabs-row">

@@ -3,7 +3,8 @@
 //
 // 多供应商库上线后，连接字段（供应商/key/url）的真源是 provider-store（主进程 ProviderProfile）；
 // 本 store 仍承载行为/外观字段与 advancedJson（全局 Claude 设置）的编辑与自动保存。
-// 防循环：updatingFromJson 标志（JSON→表单期间置 true，阻止表单 watch 反向同步），nextTick 释放。
+// updatingFromJson：历史防循环标志（旧表单 watch 消费），现无任何读取点，仅导入回填时例行
+// 置位/释放；自动保存靠 ConfigPage 的 configSnapshot 快照比对防回写循环。可删（连同置位逻辑）。
 
 import { defineStore } from 'pinia';
 import { nextTick, ref } from 'vue';
@@ -66,7 +67,7 @@ export const useConfigStore = defineStore('config', {
     detectingCli: false,
     error: null as string | null,
     importedFields: new Set<string>(),
-    // 防循环：JSON→表单回填期间置 true，阻止表单 watch 反向同步
+    // 历史防循环标志：现无任何读取点（防回写循环由 ConfigPage 的 configSnapshot 快照比对承担）
     updatingFromJson: false,
     // 配置/数据落盘目录（点 4：让用户知道配置存在哪）
     storageInfo: null as { userData: string; config: string; workspaces: string; db: string } | null,
@@ -205,7 +206,7 @@ export const useConfigStore = defineStore('config', {
       advancedJson?: string;
       contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
     }): void {
-      // JSON→表单回填：置标志阻止 ConfigPage 表单 watch 反向同步（防循环）
+      // JSON→表单回填：例行置位/释放（历史防循环标志，现无读取点；防回写循环靠 configSnapshot 快照比对）
       this.updatingFromJson = true;
       if (extracted.apiKey) {
         this.config.apiKey = extracted.apiKey;

@@ -8,8 +8,9 @@
 // 多供应商库（r3-r9）：设置页只维护可选的供应商与模型，无「使用中/默认」选用语义；
 // AppConfig.lastUsedProviderId/lastUsedModelId 是「最近一次会话选用」的记忆性字段（新会话初始值）。
 // 档案密钥（明文/密文）只在本模块与主进程内存中；renderer 经 listProviderProfiles 只拿掩码视图。
-// 老字段（providerName/apiKey/apiBaseUrl/defaultModel…）= lastUsed 档案的投影，
-// buildSpawnEnv / settings-writer / connection-tester 继续读老字段，主链路零改动。
+// 老字段（providerName/apiKey/apiBaseUrl/defaultModel…）= lastUsed 档案的投影；
+// 当前唯一消费点是 buildSpawnEnv 无会话 override 时的兜底（settings-writer 已不投影端点凭据、
+// connection-tester 行内测试直读档案）。
 
 import ElectronStoreModule from 'electron-store';
 import { app, safeStorage } from 'electron';
@@ -241,7 +242,8 @@ let libraryEmptiedByDeletion = false;
 
 // 把 lastUsed 档案投影回 AppConfig 老字段（providerName/apiKey/apiBaseUrl/defaultModel），
 // 并写 settings.local.json。任何供应商库变更（增删改/换 lastUsed/saveConfig）后调用，
-// 保证老链路（buildSpawnEnv 兜底 / settings-writer / connection-tester 兜底）看到一致的投影。
+// 保证老链路（buildSpawnEnv 无会话 override 时的兜底）看到一致的投影
+//（settings-writer 已不投影端点凭据、connection-tester 行内测试直读档案）。
 function projectLegacyFields(): void {
   const s = getStore();
   const profiles = s.store.providerProfiles ?? [];

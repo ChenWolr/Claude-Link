@@ -1,6 +1,6 @@
 // 自动检测系统 Claude Code 配置，参考 cc gui 的"零手动"体验。
 //
-// 扫描 Windows 三个标准路径并合并提取：
+// 扫描用户主目录（跨平台，os.homedir()）下三个标准路径并合并提取：
 //   %USERPROFILE%\.claude\settings.json   → env.* / apiKeyHelper（复用 parseClaudeSettings）
 //   %USERPROFILE%\.claude.json            → oauthAccount 元数据（订阅登录态标识，脱敏）
 //   %USERPROFILE%\.claude\.credentials.json → 只判存在性，绝不读取 token 内容
@@ -8,6 +8,7 @@
 // 安全约束：检测到的明文 apiKey 只回传给渲染进程预填表单，最终落盘走
 // config-manager.encryptApiKey（safeStorage 加密）；OAuth token 永不读取/存储；
 // apiKeyHelper 仅记录路径用于 UI 提示，Claude Link 不执行外部脚本。
+// 现状：检测结果当前无 UI 消费入口（ConfigPage 的自动检测按钮已移除），仅保留主进程能力。
 
 import * as fs from 'fs';
 import * as path from 'path';

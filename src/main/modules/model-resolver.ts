@@ -39,7 +39,8 @@ export function normalizeAnthropicModelsPayload(
     .filter((m): m is ModelInfo => m !== null);
 }
 
-// OpenAI /v1/models 响应归一化：{object:"list", data:[{id, ...}]}，无 display_name/max_tokens。
+// OpenAI /v1/models 响应归一化：{object:"list", data:[{id, ...}]} 标准形状无 display_name/max_output_tokens；
+// 此处宽容兼容中转端点扩展——读 display_name 兜名、context_length 作 maxTokens，均缺省归 0/回退 id。
 export function normalizeOpenAiModelsPayload(payload: unknown): ModelInfo[] {
   const data = (payload as { data?: unknown }).data;
   if (!Array.isArray(data)) return [];
