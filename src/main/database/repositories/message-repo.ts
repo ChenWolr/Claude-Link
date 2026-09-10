@@ -218,9 +218,11 @@ export function findLastTurnMainFlowAssistantId(sessionId: string): string | nul
   return null;
 }
 
-/** OPT-2：回合尾部分析窄查询（result 落库去重谓词专用）——只取尾部 limit 条、窄列，
- *  替代全量 getMessagesBySession（SELECT * + 附件 JOIN）。新→旧排序；谓词「从尾部遇
- *  user 即停」的语义在 limit 窗口内不变。不填附件（去重判定不需要）。 */
+/** OPT-2：回合尾部分析窄查询——只取尾部 limit 条、窄列，替代全量 getMessagesBySession
+ *  （SELECT * + 附件 JOIN）。消费方：cli-shared 去重谓词（经 turnCheckRows）与本文件
+ *  findLastTurnMainFlowAssistantId。新→旧排序；谓词「从尾部遇 user 即停」的语义在
+ *  limit 窗口内不变（窗口打满未见 user 时的回落由调用方处理）。
+ *  不填附件（两类消费方均不需要）。 */
 export function getRecentMessagesForTurnCheck(sessionId: string, limit = 50): Message[] {
   const rows = getConnection()
     .prepare(

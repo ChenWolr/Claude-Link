@@ -4,7 +4,8 @@
 // 切换会话或重启 app 后仍可在 InteractionPrompt 底部"交互历史"区回看。
 //
 // V3-3：把 InteractionPrompt.vue 原本仅内存的 history ref 升级为 DB 持久化。
-// 保留最近 N 条（默认 8）供前端展示，表级 ON DELETE CASCADE 跟随会话删除清理。
+// 表本身不做条数清理（历史行全量留存，仅随会话删除级联清理）；「最近 N 条（默认 8）」
+// 只是 getInteractionHistory 查询的 LIMIT，供前端展示。
 
 import { v4 as uuidv4 } from 'uuid';
 import { getConnection } from '../connection';

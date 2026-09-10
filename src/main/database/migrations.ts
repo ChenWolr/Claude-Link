@@ -251,6 +251,9 @@ function runMigrationStatements(db: Database.Database): void {
   // V12（B1）：会话级「最近一回合」元数据持久化——回合 result 的耗时与结束时刻。
   // TurnTimer 完成态（回合结束后保留显示 耗时+结束时间）与重启恢复的数据源。
   // null = 该会话尚无记录（旧会话/中断回合不产生记录）。
+  // 注意：加列实际由上方幂等自愈块（本函数 157-163 行）先行完成，此版本块在任何库上
+  // 均为 no-op（两列此时必已存在，ALTER 不触发），仅作版本语义占位保留；
+  // 修改列定义须改自愈块，改这里无效。
   if (currentVersion < 12) {
     if (!tableColumns(db, 'sessions').has('last_turn_duration_ms')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_turn_duration_ms INTEGER DEFAULT NULL');
