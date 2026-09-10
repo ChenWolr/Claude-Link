@@ -85,7 +85,9 @@ function resolveAndAssertAttachmentPath(
   const absolutePath = path.resolve(rawPath);
   const absNorm = normalizeAbs(absolutePath);
   const keyTail = normalizeStorageKeyTail(storageKey);
-  // absolutePath 必须以完整 storageKey 相对段结尾，防止 C:\evil\<sessionId>\secret 一类越权。
+  // absolutePath 必须以完整 storageKey 相对段结尾；注意末位兜底 endsWith 未带分隔符，
+  // 同形目录树（形如 C:\evil\<sessionId>\<attachmentId>\<filename>）仍能通过本函数——
+  // 真正的约束是 rawPath 只允许来自主进程 resolveAttachmentRecords，禁止未来把 renderer/外部路径接入 attachmentPaths。
   if (absNorm !== keyTail && !absNorm.endsWith(path.sep + keyTail) && !absNorm.endsWith(keyTail)) {
     throw new AttachmentInputError(`附件「${record.filename}」路径与受控存储不一致。`);
   }

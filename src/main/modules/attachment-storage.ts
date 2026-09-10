@@ -22,7 +22,7 @@ import type {
 import { getAttachmentsDir } from '../utils/paths';
 
 export interface StagedAttachmentInput {
-  /** 附件 ID（由 service 生成并复用于 repo 记录，组成 storageKey 的中间段）。 */
+  /** 附件 ID（由调用方生成——IPC 路径由 handler、克隆路径由 service——并复用于 repo 记录，组成 storageKey 的中间段）。 */
   id: string;
   sessionId: string;
   filename: string;

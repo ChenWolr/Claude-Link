@@ -331,7 +331,7 @@ export async function cleanupOrphanAttachments(): Promise<void> {
   }
 }
 
-/** 会话删除后清理：按此前收集的 storage keys 删除物理文件（DB 级联已删行）。文件删除失败只记警告。 */
+/** 会话删除后清理：按此前收集的 storage keys 删除物理文件（DB 级联已删行）。文件删除失败仅记 error 日志，交下次启动 orphan cleanup 兜底重试。 */
 export async function cleanupSessionAttachments(sessionId: string, storageKeys: string[]): Promise<void> {
   for (const key of storageKeys) {
     await removeAttachmentFile(key).catch((e) =>

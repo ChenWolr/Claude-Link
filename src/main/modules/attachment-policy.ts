@@ -65,7 +65,7 @@ export function isSupportedDirectImage(mimeType: string): boolean {
   return DIRECT_IMAGE_MIME.has(normalizeMimeType(mimeType));
 }
 
-/** 是否为可被 Claude Code Read 工具读取的文档（按 MIME 或扩展名判定，魔数由 validate 阶段复核）。 */
+/** 是否为可被 Claude Code Read 工具读取的文档（按 MIME 或扩展名判定）；validate 阶段仅对声明为 PDF 的内容复核 %PDF 魔数，其余文档不做内容魔数校验。 */
 export function isPathReadableDocument(mimeType: string, filename: string): boolean {
   const mime = normalizeMimeType(mimeType);
   if (
@@ -292,7 +292,7 @@ export function isEmptySubmission(text: string, attachmentIds: readonly string[]
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
- * 统一发送载荷的形状校验（CHAT_SEND / TASK_ADD / QUEUE_USER_MESSAGE 共用）。
+ * 统一发送载荷的形状校验（CHAT_SEND / TASK_ADD 两条入队路径共用；队列任务执行阶段由 task-queue-engine 走 prepareAttachmentPrompt 二次校验）。
  * 纯函数、不触达 DB：只保证载荷本身合法。附件归属与 draft 状态由 attachment-service 在主进程再校验。
  * 失败信息面向用户，不暴露内部路径/键。
  */
