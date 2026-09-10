@@ -39,7 +39,8 @@ export function isErrorCliResult(event: CliEvent): boolean {
  * 判断一次会话终态事件是否为「被中断」（用户 abort / SIGINT 收尾）。
  *
  * 仓库实证的 aborted 形态（grep src/shared/types/cli.ts 与 use-chat）：
- *  - `type==='aborted'`：process-manager/sdk-backend 在「中断、或 0 退出无 result」时合成的本地事件；
+ *  - `type==='aborted'`：sdk-backend 在「用户中断（interruptedQueries / killProcess user·watchdog
+ *   补发）或流末未收到 result（不问退出码，第三方端点丢 result 也触发）」时合成的本地事件；
  *  - `type==='result' && subtype==='error_during_execution'`：用户 SIGINT/abort 的正常 result 收尾
  *   （CC 真实 subtype 集内唯一的中断值；不存在 abort_no_wait/abort_cv 之类的 result subtype）。
  * 与 isSuccessfulCliResult/isErrorCliResult 对 error_during_execution 的「双 false」互补：
