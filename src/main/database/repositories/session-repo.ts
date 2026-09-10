@@ -192,7 +192,8 @@ export function updateCliSessionId(id: string, cliSessionId: string | null): Ses
 }
 
 // OPT-10：updateModelOverride 已删除——会话级单独改 model_override 的 IPC 通道全链无调用方
-//（模型选用唯一现场=供应商模型选择器，经 SESSION_UPDATE / SESSION_SET_PROVIDER_MODEL）。
+//（模型选用唯一现场=供应商模型选择器，经 setActiveSessionProviderModel → SESSION_UPDATE 一次写两个
+// override；无独立通道）。
 
 export function updateLastContext(id: string, tokens: number, windowSize?: number): Session | null {
   getConnection()

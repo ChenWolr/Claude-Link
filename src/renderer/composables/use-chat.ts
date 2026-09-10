@@ -855,7 +855,7 @@ function createChat() {
 
   // 把费用/耗时挂到本回合最后一条 assistant 消息上（文本或 tool_use 均可），
   // 这样纯工具回合也能展示 cost/duration；回溯到上一回合的用户消息即停止。
-  // B1：同时经 recordTurnMeta 持久化（messages 两列 + sessions 最近回合元数据），切会话/重启不丢。
+  // B1：同时经 recordTurnMeta 持久化（messages 的 cost_usd/duration_ms/ended_at 三列 + sessions 最近回合元数据），切会话/重启不丢。
   function attachResultMetadata(event: CliResultEvent): void {
     const messages = store.messages;
     // 问题 2：第三方端点（如 glm-5.2）可能不回报 duration_ms，用客户端计时（本回合开始→现在）
