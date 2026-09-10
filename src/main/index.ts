@@ -38,8 +38,11 @@ let tray: Tray | null = null;
 let quitting = false;
 
 function trayIcon(): Electron.NativeImage {
-  // dev：icon.png 位于项目根 resources/；packaged：经 electron-builder extraResources
-  // 拷贝到 <安装目录>/resources/icon.png（process.resourcesPath），asar 内不含 resources/。
+  // dev：icon.png 位于项目根 resources/，app.getAppPath() + 'resources/icon.png' 可命中。
+  // packaged：extraResources 只把 icon.png 拷到 process.resourcesPath 根（electron-builder.json5
+  // 的 to: "icon.png" → <安装目录>/resources/icon.png），并无 resources/ 子目录——下方 join 拼出的
+  // <resourcesPath>/resources/icon.png 在打包版不存在，必落入 createEmpty()（打包版托盘空白，
+  // 疑似真 bug；修复须改打包 to 或改查找路径，两侧同步，待决策）。
   const base = app.isPackaged ? process.resourcesPath : app.getAppPath();
   const icon = nativeImage.createFromPath(join(base, 'resources', 'icon.png'));
   if (!icon.isEmpty()) {
@@ -80,7 +83,8 @@ function ensureTray(): void {
 
 // 托盘生命周期跟随 minimizeToTray 开关：开启 → 常驻（启动时与设置页保存后各同步一次）；
 // 关闭 → 撤掉图标。例外：开关为关但主窗口仍藏在托盘里（外部改配置文件等场景）时保留
-// 图标，否则程序失去唯一入口——窗口可见（设置页里正常切换）才会走到销毁分支。
+// 图标，否则程序失去唯一入口——窗口可见（设置页里正常切换；或 mainWindow 尚未创建的
+// 防御半边）才会走到销毁分支。
 function syncTrayWithConfig(): void {
   if (getConfig().minimizeToTray) {
     ensureTray();
