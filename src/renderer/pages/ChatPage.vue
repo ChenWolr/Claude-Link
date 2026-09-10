@@ -155,8 +155,8 @@ async function stageFiles(files: File[]) {
 }
 
 // 文件拖放：绑在 .chat-page 容器（落点覆盖消息列表/附件区/输入卡片），不依赖 textarea 焦点。
-// 全局 dragover/drop 兜底已在 App.vue 注册（无条件 preventDefault，防 Electron 把窗口导航到 file:///），
-// 这里只做业务消费：仅对 Files 类型 preventDefault 并高亮。
+// 全局 dragover/drop 兜底已在 App.vue 注册（仅对含 Files 类型的拖放 preventDefault，
+// 防窗口被导航到 file:///；文本拖放保留默认行为）。这里只做业务消费：对 Files 类型 preventDefault 并高亮。
 function hasFileDrag(e: DragEvent): boolean {
   return Array.from(e.dataTransfer?.types ?? []).includes('Files');
 }
