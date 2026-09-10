@@ -1,5 +1,5 @@
-// 从 Edit / MultiEdit / Write 的 tool_use 入参合成「片段意图」unified diff，供 ToolCallBlock 复用
-// markdown.ts 的 renderDiffHtml 显示。
+// 从 Edit / MultiEdit / Write 的 tool_use 入参合成「片段意图」unified diff，供 ToolCallBlock 触发
+// ToolDiffDialog（与改动面板同款 DiffBody 渲染器）弹窗展示。
 //
 // 背景：Claude Code 的 Write/Edit tool_result 只是一句成功提示
 // （"The file X has been updated successfully. (file state is current…)"），不含 diff；
@@ -16,7 +16,7 @@ export type ToolDiffKind = 'edit' | 'multiedit' | 'write';
 export interface ToolDiffResult {
   kind: ToolDiffKind;
   filePath: string;
-  /** unified diff 文本，可直接喂 renderDiffHtml。无变化时为空串。 */
+  /** unified diff 文本，经 openToolDiffDialog 弹窗展示（可被 parseUnifiedDiff 解析）。无变化时为空串。 */
   diff: string;
   /** 变更行数（-/+ 合计，含被截断部分），供折叠态徽标与截断提示用。 */
   changeCount: number;
@@ -254,7 +254,7 @@ export function synthesizeToolDiff(toolName: string, input: unknown): ToolDiffRe
   }
 
   if (MULTIEDIT_TOOL_NAMES.has(name)) {
-    // 无文件内偏移，逐条 edit 各成一段 patch 拼接，diff2html 渲染为同名文件多张卡片。
+    // 无文件内偏移，逐条 edit 各成一段 patch 拼接，由 splitUnifiedDiff 拆段后在 ToolDiffDialog 逐段切换展示。
     const parts: string[] = [];
     let changeCount = 0;
     let additions = 0;

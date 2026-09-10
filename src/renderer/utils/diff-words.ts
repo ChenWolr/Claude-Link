@@ -5,7 +5,7 @@
 // 给一对「旧行文本 / 新行文本」，产出两侧词级分段（L 侧只 eq+del，R 侧只 eq+ins），
 // 与 diff-parser 的 DiffSeg 契约一致。三道护栏命中时 diffWordRanges 返回 null；
 // diffWordsOrFlat 降级为整行单 eq 段（无词级高亮、仅行背景色），segs 恒非空——
-// 避免 DiffLine 的 v-if="line.segs" 配空数组导致 <code> 塌陷。
+// 避免 DiffLine 对空数组 segs map 出空 token 序列导致 <code> 塌陷。
 //
 // 算法：分词正则（空白/标识符/符号三类）→ LCS 动态规划（Uint16Array 反向填表）→
 //       回溯标记匹配段 → 未匹配段标 del/ins。

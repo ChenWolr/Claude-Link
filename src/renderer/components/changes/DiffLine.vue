@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // DiffLine —— 单行渲染。
-// split 变体：行号(sticky 左) + code（contrast 风格：行号回各 pane 左侧，背景色区分增删，无 +/- sign）。
+// split 变体：仅渲染 code（行背景由 DiffBody 卡片层承担、行号由中廊 gutter 列承担，本组件不渲染行号/符号/背景）。
 // inline 变体：行号(sticky 左) + 符号(+/-/~) + code（cc-haha 风格）。
 // 行内容静态（line 对象 identity 不变即不重渲），DiffBody 用 v-memo 跳过 curChange 等外层状态变化（大 diff 性能）。
 // 词级 segs 与整行文本两种模式，空行/空段渲染单空格（white-space:pre 下空 <code> 会塌陷）。
-// null 占位侧由 DiffBody 直接渲染 .line--placeholder，不走本组件（保留「行内容静态」契约）。
+// split 模式无 null 占位行（chunk 模型对侧缺行即留空），行内容静态契约不变。
 import { computed } from 'vue';
 import type { DiffLine as ParsedDiffLine } from '../../utils/diff-parser';
 import { highlightLineToTokens, mergeTokensWithDiff, type MergedToken } from '../../utils/diff-highlight';
@@ -21,7 +21,7 @@ const props = defineProps<{
   variant: 'split' | 'inline';
   /** split 用：左右栏标记（配色微调保留） */
   side?: 'left' | 'right';
-  /** split 语法高亮用：hljs language，由 DiffBody 按扩展名推断下传 */
+  /** split 语法高亮用：hljs language，由 DiffDialog/ToolDiffDialog 按扩展名推断，经 DiffBody 原样下传 */
   language?: string;
   searchRanges?: DiffSearchRange[];
   currentSearchMatchId?: string | null;

@@ -63,8 +63,8 @@ const files = computed(() => changesStore.files);
 const fileIdx = computed(() => files.value.findIndex((f) => f.path === state.value?.path));
 const currentFile = computed(() => (fileIdx.value >= 0 ? files.value[fileIdx.value] : null));
 // 当前文件语言（split 语法高亮用）。path 变 → extToLang 重新推断。
-// 大 diff 降级：>1500 行关高亮（hljs 逐行对大文件必然卡；语言推断仍在但传 '' → DiffLine splitTokens
-// 返回 null 走 line.segs/codeText 无 hljs，仅行背景色。Task 2b Step 6 / review-v1 P1）。
+// 大 diff 降级：>1500 行关高亮（hljs 逐行对大文件必然卡；语言推断仍在但传 '' → DiffLine 跳过
+// hljs 分支，按 line.segs/整行纯文本渲染，无语法色）。
 const SPLIT_HL_MAX_LINES = 1500;
 const language = computed(() => {
   const totalLines = parsed.value?.groups.reduce((a, g) => a + g.L.length + g.R.length, 0) ?? 0;

@@ -10,8 +10,8 @@
 // 引擎 diff-words.ts 提供（自写 Uint16Array DP + 三道护栏，比 jsdiff 的词级实现更贴合代码）。
 //
 // 不变量（渲染器依赖，selftest 钉死）：
-//   - mod/ws 组恒为 1:1（L.length===1 && R.length===1）—— renderSplit 用 pad=max(L,R)，
-//     mod 必须 pad=1 才能让中缝双三角对齐。不等长 M:N 退化为 del+add（牺牲词级，文档化）。
+//   - mod/ws 组恒为 1:1（L.length===1 && R.length===1）—— chunk 模型（buildSplitChunks）据此
+//     按单行左右对齐。不等长 M:N 退化为 del+add（牺牲词级，文档化）。
 //   - ctx 组 L.length===R.length；L[i].n 是旧行号、R[i].n 是新行号（未改动段二者常相等，
 //     但前置增删不等量时会错位，故分别取 oldN/newN）。
 //   - add 组 L=[]、del 组 R=[]。
@@ -76,7 +76,7 @@ function makeModGroup(d: DiffLine, a: DiffLine): DiffGroup {
   // trim 后相等但原文不同 → 纯空白差异 → ws（渲染器用 mod 配色，标记色更暗）。
   const isWs = d.t.trim() === a.t.trim() && d.t !== a.t;
   // 词级差异走本地 LCS 引擎（diff-words.ts）：三道护栏命中时降级为整行单 eq 段——
-  // segs 恒非空，避免 DiffLine 的 v-if="line.segs" 配空数组导致 <code> 塌陷。
+  // segs 恒非空，避免 DiffLine 对空数组 segs map 出空 token 序列导致 <code> 塌陷。
   const { left: Lsegs, right: Rsegs } = diffWordsOrFlat(d.t, a.t);
   return {
     k: isWs ? 'ws' : 'mod',
@@ -232,7 +232,7 @@ export function parseUnifiedDiff(text: string): ParsedDiffFile | null {
  * 把一段可能含多文件/多段的 unified diff 文本拆成独立段，供「片段意图 diff」弹窗逐段展示。
  * - 含 `diff --git ` 行（真 git 多文件输出）→ 按 `diff --git ` 分界，每段自文件头完整保留。
  * - 否则按行首 `--- ` 分界（tool-diff 合成的 MultiEdit 多段：每段 `--- a/...` 起）。
- *   G4：段边界加严——`--- ` 行须为文件头形态且**紧随 `+++ ` 行**才构成段起点；hunk 内
+ *   G4：段边界加严——`--- ` 行须为文件头形态且**其后一行是 `+++ ` 行**才构成段起点；hunk 内
  *   以 `--- ` 开头的被删行（内容 `-- xxx` 的原始行）不再被误当段边界产出残缺段。
  * - 空/纯空白 → []。
  * 纯文本拆分（不解析），保证每段仍可独立喂 parseUnifiedDiff（其只取首个 patch）。

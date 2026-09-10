@@ -16,7 +16,7 @@ import { useInteractionStore } from '../stores/interaction-store';
 import { splitUnifiedDiff } from '../utils/diff-parser';
 
 export interface ToolDiffSegment {
-  /** 段标题（如「编辑 1 / 3」或解析出的文件路径）。 */
+  /** 段标题：多段时为 "title · 段 i/N"，单段时为 title（通常是文件路径），用作段按钮 tooltip。 */
   label: string;
   /** 单段 unified diff 文本（可直接喂 parseUnifiedDiff）。 */
   diffText: string;
