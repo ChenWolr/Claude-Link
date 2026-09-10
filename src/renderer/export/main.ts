@@ -1,6 +1,4 @@
-// 导出 renderer 入口（隐藏 export 窗口加载）。
-// 阶段二：fixture 色带闭环（捕获→拼接→JPEG→分块→finish）。
-// 阶段三：替换 ExportPage 为真实消息组件 + groupMessagesForRender + export profile。
+// 导出 renderer 入口（隐藏 export 窗口加载）：挂载真实 ExportPage，带 exportLink surface 时启动导出循环。
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import ExportPage from './ExportPage.vue';

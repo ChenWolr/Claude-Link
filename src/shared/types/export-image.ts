@@ -1,4 +1,4 @@
-// 会话导出 JPEG 长图：共享类型（主进程 ↔ 隐藏导出 renderer ↔ 可见 renderer 共用）。
+// 会话导出 JPEG/PNG 长图：共享类型（主进程 ↔ 隐藏导出 renderer ↔ 可见 renderer 共用）。
 // 设计依据：docs/glittery-hatching-neumann-v3.md。
 // 本文件只放类型，无运行时逻辑、无 Vue/Electron/DOM 副作用，Node selftest 可直接导入。
 
@@ -92,7 +92,7 @@ export type ExportImageResult =
 export interface ExportJobSnapshot {
   jobId: string;
   sessionId: string;
-  sessionName: string;          // 已净化的会话名（用于文件名 + 标题）
+  sessionName: string;          // 会话原始名（未净化）：文件名由 buildExportFilename 内部 sanitize；导出图标题直接显示原文
   sessionCreatedAt: string;
   exportedAt: string;           // 导出开始时的本地时间戳（文件名用）
   themePaletteId: string;

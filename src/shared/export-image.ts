@@ -1,4 +1,4 @@
-// 会话导出 JPEG 长图：纯逻辑（文件名、turn 分组、可见权重、分页拆分、像素预算、尾段裁剪、进度）。
+// 会话导出 JPEG/PNG 长图：纯逻辑（文件名、turn 分组、可见权重、分页拆分、像素/内存预算、段几何与尾段裁剪、PNG 行拷贝与页守卫、进度）。
 // 无 Vue / Electron / DOM 副作用，Node selftest 可直接导入。
 // 依据：docs/glittery-hatching-neumann-v3.md 第 4 / 8 / 9 / 10 / 11 / 12 / 13 节。
 
@@ -286,7 +286,7 @@ function bisectLargestFitting(
 }
 
 /** 两遍分页：初始轮对齐贪心 + 实测高度超预算时二分（先轮边界、再原子单元边界）。
- *  measure 由调用方注入（renderer 用真实 DOM 高度；selftest 用确定性伪测量）。
+ *  measure 由调用方注入（selftest 用确定性伪测量；renderer 分页已改用自身 splitPages，不再经过本函数）。
  *  - 单个原子单元仍超预算 → atomic-unit-over-budget；
  *  - 自然页数超过 maxPageCount → too-many-pages（带 expectedPages）。 */
 export function paginate(

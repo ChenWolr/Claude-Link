@@ -1,7 +1,7 @@
 // 阶段二 fixture smoke（仅 env CLAUDE_LINK_EXPORT_SMOKE=<消息条数> 时运行，不进正常启动路径）。
-// 种子一个会话 + N 条消息，依次跑 JPEG 与 PNG 两个真实 job（smoke:true），等 done，校验临时产物，
+// 种子一个会话 + N 条消息，依次跑 JPEG 与 PNG 两个真实 job（smoke:true），等 done，校验落盘到 smokeDest 的最终产物，
 // 写结果 JSON 到 D:\software\Cache，清理后退出。验证主进程管理器 + 隐藏窗口 + IPC + 捕获/拼接/编码全链路（含 v4.1 PNG worker 路径）。
-// v4.1：PNG 路径校验 PNG magic / .png 扩展名 / pngjs 可解码 / 尺寸非零；JPEG 沿用 v3 校验。
+// v4.1：PNG 路径校验 PNG magic / pngjs 可解码 / 尺寸非零；JPEG 沿用 v3 校验。
 
 import { app } from 'electron';
 import { promises as fs } from 'fs';
