@@ -51,7 +51,7 @@ export function findCommandByAlias(commands: readonly SdkCommand[], token: strin
 }
 
 /**
- * 过滤出可渲染进 `/` 菜单的命令：name 非空、source==='sdk'、且非 hidden（removed/internal 不展示）。
+ * 过滤出可渲染进 `/` 菜单的命令：name 非空、source==='sdk'、availability==='available'——removed/internal（hidden）与来源未知（unknown）均不展示。
  * 只决定菜单数据边界，不把隐藏命令从 SDK 执行能力中伪造删除（Task 2）。
  */
 export function filterRenderableCommands(commands: readonly SdkCommand[]): SdkCommand[] {

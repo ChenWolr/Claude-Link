@@ -32,7 +32,7 @@ export interface CommandsGetDecision {
   readOnly: boolean;
   /** true = 有 DB 行且无 per-session 快照：markSessionActive + startCommandProbe + post-turn 调度（N6 原链）。 */
   needsFullProbeSideEffects: boolean;
-  /** true = 有 DB 行且快照用户级指纹过期：只 startCommandProbe（D5 免费重探，不 markSessionActive）。 */
+  /** true = 有 DB 行且快照用户级或项目级出生指纹过期（D5 / P2-14）：只 startCommandProbe（免费重探，不 markSessionActive）。 */
   needsRefreshProbeOnly: boolean;
   /** 返回给 renderer 的快照（按需克隆覆写 sessionId/source/status，不回写 registry）。 */
   snapshot: SessionCommandSnapshot;
