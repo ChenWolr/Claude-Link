@@ -46,7 +46,7 @@ export const IPC_CHANNELS = {
   SESSION_GET: 'session:get',
   SESSION_DELETE: 'session:delete',
   SESSION_UPDATE: 'session:update',
-  // B1：回合元数据持久化（渲染层回合 result 到达时 fire-and-forget 调用，一次写 messages 两列 + sessions 两列）。
+  // B1：回合元数据持久化（渲染层回合 result 到达时 fire-and-forget 调用，一次写 messages 三列 cost_usd/duration_ms/ended_at + sessions 两列 last_turn_duration_ms/last_turn_ended_at）。
   SESSION_RECORD_TURN_META: 'session:recordTurnMeta',
   // OPT-10：会话级「单独改 model_override」通道（'session:updateModelOverride'）已删除——全链无调用方。
   SESSION_SEARCH: 'session:search',
@@ -89,7 +89,7 @@ export const IPC_CHANNELS = {
   ATTACHMENT_REMOVE_DRAFT: 'attachment:removeDraft',
   // 克隆历史消息附件为草稿（异步发送失败后重新编辑用）。
   ATTACHMENT_CLONE_MESSAGE: 'attachment:cloneMessage',
-  // 会话导出 JPEG 长图（v3）。可见 renderer ↔ 主进程 ↔ 隐藏 export renderer。
+  // 会话导出长图（v3 JPEG / v4.1 PNG 双格式）。可见 renderer ↔ 主进程 ↔ 隐藏 export renderer。
   EXPORT_IMAGE_START: 'export-image:start',
   EXPORT_IMAGE_PROGRESS: 'export-image:progress',
   EXPORT_RENDER_GET_JOB: 'export-render:getJob',
