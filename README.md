@@ -254,7 +254,7 @@ npm run package:win
 npm run rebuild
 ```
 
-所有缓存、依赖下载和构建临时文件优先放在 `D:\software\Cache`，不要把临时产物写入源码目录。
+所有缓存、依赖下载和构建临时文件统一放在专用缓存目录，不要把临时产物写入系统盘用户目录或源码目录。
 
 ## 测试约定
 
@@ -279,7 +279,6 @@ Claude Link 的部分功能实现参考了以下开源项目：
 - [openhanako](https://github.com/liliMozi/openhanako)：带记忆、人格与自主性的个人 AI Agent。
 - [contrast](https://github.com/stewartlord/contrast)：Electron 编写的 Diff 工具，为代码改动面板与 Diff 渲染提供参考。
 - [desktop-cc-gui](https://github.com/zhukunpenglinyutong/desktop-cc-gui)：基于 Tauri 的多引擎 AI 编程桌面客户端（Claude Code、Codex、Gemini、OpenCode 等），为桌面客户端形态与多供应商接入提供参考。
-
 
 ## License
 

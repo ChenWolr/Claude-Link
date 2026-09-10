@@ -1,6 +1,6 @@
 // scripts/evidence-pack.mjs
 // review-v9 §7：正式验收证据包。每次执行发布级验收时，在
-// D:/software/Cache/claude-link/evidence/<run-id>/ 固化：输入、输出、版本与工作树状态。
+// $CLAUDE_LINK_CACHE_ROOT/claude-link/evidence/<run-id>/ 固化：输入、输出、版本与工作树状态。
 //
 // 用法：
 //   node scripts/evidence-pack.mjs                        # 默认集：typecheck + selftest:static + 矩阵门禁

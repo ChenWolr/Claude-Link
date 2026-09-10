@@ -7,7 +7,7 @@
 // 步骤（review-v10 §4.4）：
 //   1. 前置：管理员权限、9224 端口空闲、CLI/依赖就位。
 //   2. 专用非管理员账户 ClaudeLinkROE2E（存在则复用；--purge 时结束后删除账户与 profile）。
-//   3. ACL 夹具 D:/software/Cache/claude-link/readonly-e2e/<run-id>/cwd（RX only），
+//   3. ACL 夹具 $CLAUDE_LINK_CACHE_ROOT/claude-link/readonly-e2e/<run-id>/cwd（RX only），
 //      并以同一账户运行最小 Node 写入预检——必须 EPERM/EACCES（§4.5-2）。
 //   4. 受控凭据 bootstrap：该账户自己的 ~/.claude/settings.json env 块 + .claude.json 工作区
 //      信任标记（等价首次交互式接受信任对话框）；不复制任何加密 store / 记忆 / 用户数据。

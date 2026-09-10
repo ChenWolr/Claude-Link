@@ -4,7 +4,7 @@
 // 手法对齐 claude-code-command-baseline.ts：本地 claude.exe + 临时 cwd + /usage（零花费、不走模型）。
 //
 // 运行：npx tsx scripts/p1-09-subdir-command-probe.ts
-// 结果落盘：D:/software/Cache/claude-link/p1-09-subdir-probe.json
+// 结果落盘：$CLAUDE_LINK_CACHE_ROOT/claude-link/p1-09-subdir-probe.json
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
