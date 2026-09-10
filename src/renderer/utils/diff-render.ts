@@ -12,7 +12,7 @@ export function isHunkGroup(g: DiffGroup): boolean {
   return g.k !== 'ctx' && g.k !== 'skip';
 }
 
-/** 统计 +/- 行数（header 摘要与侧栏计数用）。ws 总算改动（与原型 countChanges 一致）。 */
+/** 统计 +/- 行数（弹窗 header 摘要用；侧栏计数来自 git numstat，不经本函数）。ws 总算改动（与原型 countChanges 一致）。 */
 export function countChanges(f: ParsedDiffFile): { add: number; del: number } {
   let add = 0;
   let del = 0;
@@ -87,7 +87,7 @@ export function inlineVisiblePlan(rows: InlineRow[], n: number): boolean[] {
   return rows.map((r, i) => r.type === 'skip' || r.changed || Math.min(dL[i], dR[i]) <= n);
 }
 
-/** 并排模式改动组数 = 改动导航总数（split 的 nav 上限）。 */
+/** 按改动 group 计数（不合并相邻 del+add）。注意 ≠ 当前 split 导航总数——导航总数按 buildSplitChunks 的 navIndex chunk 统计（del+add 合并计 1）；本函数已无渲染层调用，勿用作导航上限。 */
 export function countSplitHunks(f: ParsedDiffFile): number {
   let n = 0;
   for (const g of f.groups) if (isHunkGroup(g)) n++;

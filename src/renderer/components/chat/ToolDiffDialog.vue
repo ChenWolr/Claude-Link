@@ -923,7 +923,7 @@ onBeforeUnmount(() => {
   border-radius: 3px;
   display: inline-block;
 }
-/* mini 卡片样本（D3，与 DiffDialog 同步：bg-strong token 已删） */
+/* mini 卡片样本（D3，与 DiffDialog 同步，不再使用 bg-strong；本文件 :448/:452 的 --add/--del-bg-strong 定义为死变量，清理时可删） */
 .legend .lg-add {
   background: var(--add-tint);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--add-edge) 30%, transparent), inset 2.5px 0 0 color-mix(in srgb, var(--add-edge) 70%, transparent);

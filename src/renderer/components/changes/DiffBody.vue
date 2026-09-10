@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // DiffBody —— diff 渲染器。消费 ParsedDiffFile（diff-parser 输出）渲染并排/内联两种视图。
-// 所有 UI 状态（mode/context/curChange/language）由父 DiffDialog 传入，本组件无状态持有
+// 所有 UI 状态（mode/context/curChange/language）由父组件（DiffDialog/ToolDiffDialog）传入，本组件无状态持有
 // （仅 fold/gap 展开态这种纯局部 UI 在内部）。改动导航 curChange 变化时滚到中心 + 闪一下。
 //
 // split（contrast 风格）：消费 buildSplitChunks 的 SplitLayout（左右各自完整行 + 对齐 chunk + SVG 桥），
@@ -35,7 +35,7 @@ const props = defineProps<{
   /** 全文开关：inline 路径跳过 inlineVisiblePlan（全部行可见不折叠），展示文件完整内容。 */
   fullText: boolean;
   curChange: number;
-  /** hljs language，由 DiffDialog 按扩展名推断下传（Task 1d 接入；未传时 split 不上语法色） */
+  /** hljs language，由 DiffDialog/ToolDiffDialog 按扩展名推断下传（Task 1d 接入；未传时 split 不上语法色） */
   language?: string;
   searchMatches?: DiffSearchMatch[];
   currentSearchMatchId?: string | null;
@@ -75,7 +75,7 @@ function scheduleOffset(): void {
   });
 }
 // wheel：水平为主（deltaX 占优）→ 交给 .pane 原生水平滚动；垂直 → JS 驱动 scrollTop。
-// preventDefault 需 passive:false，故用 addEventListener（onMounted 注册），不用 @wheel。
+// preventDefault 需 passive:false，故用 addEventListener（在 splitScroll ref 的 watch 中随节点绑定/清理，.diff-scroll 处于 v-if 分支不能只在 onMounted 绑一次），不用 @wheel。
 function onWheel(e: WheelEvent): void {
   if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) return;
   const next = Math.max(0, Math.min(maxScrollTop.value, scrollTop.value + e.deltaY));
