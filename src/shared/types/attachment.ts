@@ -10,7 +10,8 @@ export type AttachmentKind = 'image' | 'document' | 'file';
  * - draft：已暂存未发送（草稿），可被移除/清理；
  * - message：已绑定到一条用户消息；
  * - task：已绑定到一个排队任务；
- * - failed：暂存或发送过程中失败（保留记录供排查，不再参与发送）。
+ * - failed：预留状态（DB CHECK 允许），当前代码路径不会写入——暂存失败不建行并删除文件，
+ *   发送失败回滚为 draft；保留枚举值供未来扩展。
  */
 export type AttachmentStatus = 'draft' | 'message' | 'task' | 'failed';
 
@@ -68,7 +69,7 @@ export interface StoredAttachmentFile {
   sha256: string;
 }
 
-/** 统一发送 IPC 的返回：数据库消息 ID 与最终附件摘要（状态已置 message/task）。 */
+/** 统一发送 IPC 的返回：数据库消息 ID 与最终附件摘要（CHAT_SEND 成功后状态已升格为 message）。 */
 export interface SendMessageResult {
   messageId: string;
   attachments: AttachmentSummary[];
