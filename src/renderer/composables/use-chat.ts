@@ -2,7 +2,9 @@
 // CLI 流事件处理：把 process-manager 转发的 stream-json 事件分流到 session-store。
 //
 // stream_event: thinking_delta → appendThinking（思考），text_delta → appendStream（正文），
-//   signature_delta 忽略；message: 清流 + 持久化各 part（text / tool_use / tool_result / thinking）；
+//   signature_delta 忽略；message: 逐 part 落库（text / thinking / redacted_thinking / tool_use /
+//   server_tool_use / tool_result / mcp_*）；主流程 text/thinking 落库即清对应流式累加器，
+//   tool_use 落库后清 streamingTool；
 // result: 补 result 文本（防丢）+ 挂费用/耗时。
 // 这里是"Claude 思考/输入/输出原封不动接收展示"的核心实现（之前 thinking_delta 被完全丢弃）。
 
@@ -47,8 +49,8 @@ export function hasLocalCommandOutputMessage(messages: Message[], resultText: st
   return false;
 }
 
-// C：把进度类事件（tool_progress / compacting / task_*）映射到 store。纯函数（不依赖闭包），可单测。
-// task_notification 终态：先 upsert 终态卡片，4 秒后移除（淡出，避免列表残留已完成任务）。
+// C：主进程 stalled 看门狗事件 → store.markStalled（记录卡死信息，供 StalledBanner 显形）。
+// 纯函数（不依赖闭包），可单测。
 export function applyStalledEvent(store: ReturnType<typeof useSessionStore>, sessionId: string, event: CliStalledEvent): void {
   store.markStalled(sessionId, {
     sinceMs: event.sinceMs,
@@ -123,6 +125,8 @@ export function applyApiRetryTerminalFallbackEvent(
   }
 }
 
+// C：把进度类事件（tool_progress / compacting / task_*）映射到 store。纯函数（不依赖闭包），可单测。
+// task_notification 终态：先 upsert 终态卡片，4 秒后移除（淡出，避免列表残留已完成任务）。
 export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, event: CliEvent): void {
   if (event.type === 'tool_progress') {
     if (event.toolUseId) store.setToolProgress(event.toolUseId, event.elapsedSeconds);
@@ -175,6 +179,7 @@ function createChat() {
   // 每会话【失败】的 user 消息（id+正文）：error 置位瞬间抓"会话最后一条 user 消息"= 刚跑失败的提问。
   // 重新编辑发送据此克隆附件 + 回填文字到主草稿。覆盖主发送 / 队列任务 / waiting 续接三条路径
   //（队列任务执行也产生 user 消息，故失败时能正确命中，不会误用陈旧的"上次主发送"）。
+  // 仅前台会话（handleCliEvent 路径）捕获；后台会话失败走 handleBackgroundEvent，不记录 lastFailed。
   const lastFailedBySession = ref<Record<string, { id: string; content: string }>>({});
 
   let cleanup: (() => void) | null = null;
@@ -1012,6 +1017,7 @@ function createChat() {
   // 失败捕获：error 置位瞬间，把"会话最后一条 user 消息"记为待恢复对象。
   // 覆盖主发送 / 队列任务 / waiting 续接三条路径——只要该回合在主会话跑过并失败即命中，
   // pending 队列任务（未跑）不产生 error，故不会误触发重新编辑。
+  // 仅前台会话（handleCliEvent 路径）捕获；后台会话失败走 handleBackgroundEvent，不记录 lastFailed。
   function captureFailedMessage(): void {
     if (!store.activeSession) return;
     const msg = lastFailedUserMessage();
@@ -1025,7 +1031,8 @@ function createChat() {
     return null;
   }
 
-  /** 从后往前找最后一条主流程 user 消息（含 id 与附件摘要），供卡死重试原样重发。 */
+  /** 从后往前找最后一条 user 消息（含 id 与附件摘要；未过滤 parentAgentId——当前 SDK 下
+   * 子 Agent user part 罕见，命中即视为可重发的最后提问），供卡死重试原样重发。 */
   function lastUserMessage(): { id: string; content: string; attachmentIds: string[] } | null {
     const msgs = store.messages;
     for (let i = msgs.length - 1; i >= 0; i -= 1) {

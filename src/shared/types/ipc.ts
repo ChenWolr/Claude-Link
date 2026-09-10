@@ -113,6 +113,7 @@ export const IPC_CHANNELS = {
   COMMANDS_GET_DIAGNOSTIC: 'commands:getDiagnostic',
 } as const;
 
+/** 无引用残留（且类型文件不应有运行时常量）：流式防抖真相源在 use-stream.ts 硬编码 50ms，改本值无效。 */
 export const STREAM_DEBOUNCE_MS = 50;
 export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 

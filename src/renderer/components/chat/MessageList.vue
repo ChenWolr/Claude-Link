@@ -152,8 +152,8 @@ onMounted(() => {
     updateBottomState();
   });
   resizeObserver.observe(el);
-  // 内容撑高（图片/KaTeX/代码高亮）反映在内层内容盒上，观察整个内容 wrapper（OPT-6：
-  // 观察面=整个内容 wrapper（OPT-6）：旧实现只盯首条消息，身份随内容漂移、非首条异步撑高兜不住）。
+  // 内容撑高（图片/KaTeX/代码高亮）反映在内层内容盒上：观察面=整个内容 wrapper（OPT-6：
+  // 旧实现只盯首条消息，元素身份随内容漂移、非首条异步撑高兜不住）。
   if (innerRef.value) resizeObserver.observe(innerRef.value);
 });
 
@@ -212,8 +212,8 @@ function handleCopyClick(event: MouseEvent): void {
 <template>
   <div class="message-list" :class="{ 'message-list--export': exportMode }">
     <div ref="container" class="message-list__scroller" @click="handleCopyClick" @scroll.passive="onScroll">
-      <!-- OPT-6：内层内容 wrapper——ResizeObserver 的观察面（内容整体撑高都触发跟底），
-           观察面是整个内容 wrapper，不再是会漂移的首条消息元素）。 -->
+      <!-- OPT-6：内层内容 wrapper——ResizeObserver 的观察面=整个内容 wrapper（内容整体撑高都
+           触发跟底；旧实现只盯首条消息，元素身份随内容漂移、非首条异步撑高兜不住）。 -->
       <div ref="innerRef" class="message-list__inner">
         <template v-for="(item, idx) in renderItems" :key="item.key">
           <ProcessGroup

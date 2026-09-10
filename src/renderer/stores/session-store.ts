@@ -155,7 +155,7 @@ export const useSessionStore = defineStore('session', {
     // per-session 流式快照。切换会话时保存当前流式内容到快照，切回时恢复。
     sessionStreams: {} as Record<string, { content: string; thinking: string; tool: string }>,
     recentWorkspaces: [] as string[],
-    // 右侧活动栏筛选：'all'（默认，四类总览同屏）/ 'queue' / 'subagent' / 'background' / 'changes'。
+    // 右侧活动栏筛选：'all'（默认）/ 'plan' / 'queue' / 'subagent' / 'background' / 'changes'。
     // 演进自旧 rightTab 互斥 Tab——保留字段名与 'changes'/'background' 等字面量，仅新增 'all' 默认。
     rightTab: 'all' as 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes',
     // 活动总览折叠态：true=只留 rail 图标轨、隐藏主体内容（rail 底部双箭头按钮切换）。
@@ -188,11 +188,14 @@ export const useSessionStore = defineStore('session', {
       durationMs?: number;
       trigger?: string;
     },
-    // C：工具运行实时耗时（tool_progress），按 toolUseId。瞬态，回合结束清。
+    // C：工具运行实时耗时（tool_progress），按 toolUseId。清理点：tool_result 到达逐项清；活动会话
+    // 新回合 markRunning 整表清（中断回合的残留由此收口）；切换/暂态会话整表清。
+    // 回合结束（markStopped/markCompleted）不清。
     toolProgress: {} as Record<string, number>,
     // C：后台任务编排（task_*），按 taskId。task_notification 终态后移除。
     backgroundTasks: {} as Record<string, BackgroundTask>,
-    // C：实时压缩进行中（status:compacting）。compact_boundary 复位为 false。
+    // C：实时压缩进行中（system:compacting）。compact_result（成功/失败）复位为 false；压缩横幅快照
+    // 到达（shouldShowCompactedBanner）时同样复位。compact_boundary 不在此复位，仅落库为过程消息。
     compacting: false as boolean,
     // 批次 B：当前会话思考 token 实时估算（thinking_tokens.estimated_tokens）。全局瞬态字段，
     // 切会话/回合结束清零；ContextButton hover 展示。null=无（未在思考或回合已结束）。

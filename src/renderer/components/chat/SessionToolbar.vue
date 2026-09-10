@@ -1,5 +1,6 @@
 <script setup lang="ts">
-// 会话底部工具栏：工作空间 / 模型 / 权限 三个带标签的控件 + 删除/中断。
+// 会话底部工具栏：上下文占用环 / 工作空间 / 模型 / 思考强度 / 权限 / 添加文件，
+// 发送中追加「中断」按钮（删除会话入口在左侧栏，不在此处）。
 // 按用户要求，所有"会话内容"相关的控件都放在底部（输入区附近），而非顶部。
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';

@@ -1,7 +1,7 @@
 // process-kind.ts（renderer）
-// processKind → 图标 / 中文名 / 语义强调色 映射。供 ProcessGroup 标题、工具卡头部、
-// 子 Agent 锚点统一消费，让"思考 / 读文件 / 执行命令"等不同过程在折叠态就有色彩区分，
-// 不再是一条清一色的灰缝。与 src/shared/process-kind.ts 的分类键一一对应。
+// processKind → 图标 / 中文名 / 语义强调色 映射。供 ToolCallBlock 工具卡头部统一消费，
+// 让"思考 / 读文件 / 执行命令"等不同过程在折叠态就有色彩区分，不再是一条清一色的灰缝。
+// 与 src/shared/process-kind.ts 的分类键一一对应。
 
 export interface ProcessKindMeta {
   icon: string;
@@ -74,7 +74,7 @@ export function getProcessKindMeta(kind: string | null | undefined): ProcessKind
 }
 
 // 给一个工具 processKind 追加具体名（如 ✨技能·design / 🔌MCP·github），用于组标题更可读。
-// name 是工具原始名（tool_use 的 part.name）。
+// 当前无调用方（预留）。name 是工具原始名（tool_use 的 part.name）。
 export function decorateToolLabel(kind: string | null | undefined, detail?: string | null): string {
   const meta = getProcessKindMeta(kind);
   if (!detail) return `${meta.icon} ${meta.label}`;

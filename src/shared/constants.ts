@@ -7,6 +7,7 @@ export const FONT_SCALE_SIZES: Record<string, string> = {
   medium: '16px',
   large: '18px',
 };
+/** 无引用残留：流式防抖真相源在 renderer/composables/use-stream.ts 的 50ms 硬编码，改本常量无效（保留仅防误删引发 import 报错，清理时连同两处一并删除）。 */
 export const STREAM_DEBOUNCE_MS = 50;
 export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 

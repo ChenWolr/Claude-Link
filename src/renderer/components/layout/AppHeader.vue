@@ -51,7 +51,7 @@ function cancelEdit() {
 
 // 分享（导出长图）按钮启用条件（v3 第 4.1 节）：
 // - 当前路由是 chat；存在活动会话；
-// - 会话不在发送或队列执行态（running/continuing）；
+// - 会话不在发送中、队列引擎不在 running 态（standby/countdown 允许导出）；
 // - 没有其他图片导出任务正在运行。
 const canExport = computed(() => {
   if (route.name !== 'chat') return false;
