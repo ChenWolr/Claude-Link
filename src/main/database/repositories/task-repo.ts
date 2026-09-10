@@ -253,7 +253,8 @@ export function resumeAllPending(sessionId: string): void {
 }
 
 /** 应用启动恢复：上次运行中（mid-run）任务置 failed——执行过、回合异常死亡，
- *  不回队不重发（面板与历史均不读该状态，仅为防重复执行）。 */
+ *  不回队不重发。置 failed 的核心目的是防重启后重复执行；该状态会在任务面板以
+ *  「失败」徽标可见，但本函数不写 error_message（无失败原因可展示）。 */
 export function resetRunningTasks(sessionId?: string): void {
   if (sessionId) {
     getConnection()
