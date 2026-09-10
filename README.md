@@ -272,6 +272,15 @@ Claude Link 会执行 Claude Code 产生的本地工具调用，因此工作目�
 
 使用 `bypassPermissions` 前，应确认工作目录、供应商配置和 Claude Code 工具权限符合预期。生产环境建议从 `default` 或 `acceptEdits` 开始，在确有需要时再切换到自动权限模式。
 
+## 参考项目
+
+Claude Link 的部分功能实现参考了以下开源项目：
+
+- [openhanako](https://github.com/liliMozi/openhanako)：带记忆、人格与自主性的个人 AI Agent。
+- [contrast](https://github.com/stewartlord/contrast)：Electron 编写的 Diff 工具，为代码改动面板与 Diff 渲染提供参考。
+- [desktop-cc-gui](https://github.com/zhukunpenglinyutong/desktop-cc-gui)：基于 Tauri 的多引擎 AI 编程桌面客户端（Claude Code、Codex、Gemini、OpenCode 等），为桌面客户端形态与多供应商接入提供参考。
+
+
 ## License
 
 MIT
