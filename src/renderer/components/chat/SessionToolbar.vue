@@ -73,7 +73,7 @@ const PERMISSIONS: Array<{
   { value: 'bypassPermissions', label: '自动模式', desc: '无任何限制，越过所有权限检查【谨慎使用】', icon: 'rocket' },
 ];
 
-// 图标 SVG path（24×24，stroke 风格统一；触发按钮与面板项共用）。
+// 图标 SVG path（24×24，stroke 风格统一；仅权限面板菜单项使用，触发按钮的锁形图标为模板内独立 path）。
 const PERM_ICON_PATHS: Record<PermIconKey, string> = {
   follow: 'M12 3v12 M7 10l5 5 5-5 M5 21h14',
   shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z',
