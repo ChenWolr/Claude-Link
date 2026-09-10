@@ -311,7 +311,7 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
 </template>
 
 <style scoped>
-/* 两栏紧挨（gap 0）拼成一个复合面板；宽高由外层 3:2 workbench 约束。 */
+/* 两栏紧挨（gap 0）拼成一个复合面板；宽高由外层 .wb-connection（flex:1 填满舞台）约束。 */
 .pm {
   display: flex;
   gap: 0;

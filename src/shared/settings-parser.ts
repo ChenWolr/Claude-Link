@@ -59,8 +59,6 @@ export function parseClaudeSettings(content: string): ImportedSettings {
   const result: ImportedSettings = { advancedJson: '{}' };
 
   const envOriginal = asObject(remaining.env);
-  // env is mutated to drop extracted apiKey/baseUrl (they have dedicated fields
-  // and are injected explicitly when spawning the CLI); model env keys are kept.
   const env = envOriginal ? { ...envOriginal } : undefined;
 
   // API key: top-level > env.ANTHROPIC_API_KEY > env.ANTHROPIC_AUTH_TOKEN
@@ -85,12 +83,8 @@ export function parseClaudeSettings(content: string): ImportedSettings {
     (env ? peekString(env, ['ANTHROPIC_BASE_URL']) : undefined);
   if (apiBaseUrl) result.apiBaseUrl = apiBaseUrl;
 
-  // Default model：优先用 Claude Code 的【类型别名】（sonnet/haiku/opus/fable），
-  // 让 CLI 通过 env 映射（ANTHROPIC_DEFAULT_*_MODEL）转到实际模型。会话里选的是"类型"，
-  // CLI 自动映射到国产模型（如 glm-5.2）——这是官方机制（aliases + ANTHROPIC_DEFAULT_*_MODEL）。
-  // 取首个有映射的别名（与 resolveDefaultModel 同优先级 sonnet>haiku>opus>fable）：
-  // 这样只配 fable 时 defaultModel='fable'，不再丢空。仅当无任何映射时，才 fallback
-  // 到顶层 model / ANTHROPIC_MODEL 的实际值。
+  // Default model：顶层 model > 首个有映射的类型别名（sonnet>haiku>opus>fable）> env.ANTHROPIC_MODEL。
+  // 注意与 resolveDefaultModel（纯按别名优先）不同：显式顶层 model 总是胜出。
   // (Peek only — keep the model-mapping env vars intact in advancedJson.)
   const mappedAlias = env
     ? MODEL_ALIASES.find((a) => peekString(env, [`ANTHROPIC_DEFAULT_${a.toUpperCase()}_MODEL`]))
@@ -219,7 +213,9 @@ export function peekEnvValue(advancedJson: string, key: string): string | undefi
   return typeof v === 'string' && v.trim() ? v.trim() : undefined;
 }
 
-// ── 表单字段 → advancedJson（纯函数，供 config-store 与自测共用）──────────────────────
+// ── 表单字段 → advancedJson（纯函数）─────────────────────────────────────────────────
+// 多供应商化后 UI 编辑入口已移除，现仅 selftest-settings-mapping 等脚本消费；
+// 保留以保证与 parseClaudeSettings 的双向映射语义可测。
 // 目的：把"输入框"（apiKey/apiBaseUrl/permissionMode/模型映射）写回 advancedJson，
 // 与 parseClaudeSettings（JSON→字段）构成完整双向映射。纯函数返回新 JSON 字符串。
 
@@ -308,7 +304,8 @@ export function setModelMappingInAdvancedJson(
 }
 
 // 单个类型别名 → 上下文窗口（token 数）覆盖，写入 env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>。
-// 与 setModelMappingInAdvancedJson 对称：表单字段即时写回 advancedJson（单一真相源）。
+// 与 setModelMappingInAdvancedJson 对称：表单字段即时写回 advancedJson（单一真相源；
+// UI 入口已移除，仅脚本消费）。
 // value 为 null/undefined/非正数时删 key（回落 200k 兜底）。
 export function setContextWindowInAdvancedJson(
   advancedJson: string,
@@ -327,7 +324,8 @@ export function setContextWindowInAdvancedJson(
   return JSON.stringify(adv, null, 2);
 }
 
-// 清空"连接"相关 env：apiKey / authToken / baseUrl / 四个类型别名映射。
+// 清空"连接"相关 env：apiKey / authToken / baseUrl / 四个类型别名映射 /
+// 四个 CLAUDE_LINK_CONTEXT_WINDOW_* 上下文窗口覆盖。
 // 保留 env 里其它键（如 CLAUDE_CODE_*）。供"清空连接配置"使用，确保字段与 JSON 一并清空。
 export function stripConnectionFromAdvancedJson(advancedJson: string): string {
   const adv = cloneAdv(advancedJson);

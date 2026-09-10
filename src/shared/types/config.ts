@@ -146,8 +146,7 @@ export interface DetectedClaudeConfig {
   errors: string[];
 }
 
-// 测试连接结果：用当前配置调 Claude Code CLI 发送一条简单消息，
-// 有正常响应文本代表配置（URL/Key/模型）可用。
+/** 死类型（全项目零引用）：旧顶部「测试连接」弹框时代残留；现行测试结果由 connection-tester.ts 的 ProviderModelTestResult 承载。清理时可整接口删除。 */
 export interface ConnectionTestResult {
   success: boolean;
   message: string;

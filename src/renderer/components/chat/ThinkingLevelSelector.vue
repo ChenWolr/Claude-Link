@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 会话级思考强度选择器：复刻 SessionToolbar 权限面板的内联下拉模式（项目无通用 Dropdown 组件）。
-// 触发按钮显示当前档位图标（null=自动/跟随全局默认）；点击向上展开卡片选项；click outside / Escape 关闭。
+// 触发按钮显示当前档位文字（会话 override 档名；auto=跟随全局默认时直接显示全局默认档名）；点击向上展开卡片选项；click outside / Escape 关闭。
 // 选中后调 sessionStore.setActiveSessionThinkingLevel，与 setActiveSessionPermissionMode 同构。
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
@@ -78,7 +78,8 @@ function handleEscape() {
 }
 
 onMounted(() => {
-  // configStore 已在 ConfigPage/ModelSelector 加载；此处仅保险读取全局默认档名。
+  // 全局默认档名依赖 App.vue 启动时的 loadConfig()，此处无需额外拉取；
+  // 下方 void configStore.config 是无副作用的空读取，无实际作用。
   void configStore.config;
   document.addEventListener('click', handleClickOutside);
   document.addEventListener('keydown', handleEscape);
@@ -208,7 +209,7 @@ onUnmounted(() => {
   background: var(--color-panel-soft);
 }
 
-/* ultracode 危险态：warn 边框提示成本最高 / Beta */
+/* ultracode 危险态：warn 边框提示 Beta / xhigh+工作流编排（成本高但非最高，最高为 max 档） */
 .tl-item--danger {
   border: 1px solid color-mix(in srgb, var(--color-warn) 45%, transparent);
 }

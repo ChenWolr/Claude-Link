@@ -64,7 +64,6 @@ function cleanupTestCwd(dir: string): void {
   }
 }
 
-// 取消正在进行的测试（新测试发起前调用，避免并发 spawn）。
 // 中止指定行的在飞测试：杀进程 + 落定「已被取代」（promise 不悬挂，按钮不卡「测试中」）。
 function abortActiveTest(key: string): void {
   const active = activeTests.get(key);
