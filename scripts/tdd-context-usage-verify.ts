@@ -911,7 +911,7 @@ console.log('=== 26) 上下文圆圈 v2：探针 env 补全 + 预算 + settle �
     assert.equal(env.CLAUDE_CODE_SUBAGENT_MODEL, 'm-2');
   });
 
-  // D1-fallback（P0-b/b2/c 实测定案，证据 D:/software/Cache/claude-link/probe-ctx/v2-20260902/）：
+  // D1-fallback（P0-b/b2/c 实测定案，证据 $CLAUDE_LINK_CACHE_ROOT/claude-link/probe-ctx/v2-20260902/）：
   // flag --settings 的 env 与用户文件 env 同键对撞时文件赢（P0-b SONNET 键），且 flag 组合会使
   // 探针工具集失真（P0-c System tools 14.7k→2.9k）——探针不传 --settings，走 env 单通道
   // （buildSpawnEnv(override) 含 7 键全钉：ANTHROPIC_MODEL+4 别名+SMALL_FAST/SUBAGENT）。

@@ -1433,7 +1433,7 @@ async function runInitMatrixMode(exe: string): Promise<void> {
     }
 
     // ⑦ 只读目录：尽力用 ACL 构造不可写目录（Windows icacls / 非 Windows chmod），探测确认不可写才真实跑。
-    // 本机 Windows Administrator 特权会绕过 DACL（accessSync(W_OK) 仍判可写）→ 无法构造 → 诚实 SKIP，
+    // Windows 管理员特权会绕过 DACL（accessSync(W_OK) 仍判可写）→ 无法构造 → 诚实 SKIP，
     // 不用「cwd 不存在」代理（那是启动错误，非写权限失败，事件/副作用不等价，review-v1 P1-2 反对）。
     const roDir = path.join(root, 'ro');
     mkdirSync(roDir, { recursive: true });

@@ -1,6 +1,6 @@
 // aux-traffic-proxy.mjs — 引擎后台请求取证记流代理（Phase A 工具，计划 §3.8）。
 //
-// 用法：node scripts/aux-traffic-proxy.mjs --upstream http://100.64.0.1:6183 --port 16884 --out <日志路径>
+// 用法：node scripts/aux-traffic-proxy.mjs --upstream http://127.0.0.1:6183 --port 16884 --out <日志路径>
 //
 // 每请求：收 body → 解析 JSON 提取 stream/model/max_tokens/system 首行前 120 字符/
 // metadata.user_id 前 40 字符 → 连同时间戳、方法、路径、x-api-key 前 12 字符写 JSONL 日志

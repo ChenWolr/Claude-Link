@@ -7,12 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 核心准则（必须遵守）
 
 1. **记忆写入需授权**：未经用户明确允许，一律禁止编辑 / 写入任何记忆文件（用户级或项目级）；仅在用户明确授权本次写入时才可写入或修改记忆。
-2. **缓存统一目录**：所有依赖下载、安装、构建中间产物、临时文件，如非必要一律生成在 `D:\software\Cache` 下（npm/pnpm 缓存、临时目录、打包中间产物等），不污染项目目录与系统盘。
+2. **缓存统一目录**：所有依赖下载、安装、构建中间产物、临时文件，如非必要一律生成在专用缓存根目录（环境变量 `CLAUDE_LINK_CACHE_ROOT` 指定）下（npm/pnpm 缓存、临时目录、打包中间产物等），不污染项目目录与系统盘。
 3. **沟通使用中文**：与用户的所有沟通必须使用中文。
 4. **禁止私自提交**：未经用户确认不得 `git commit` / `git push`；每次提交前说明范围并获确认。
 5. **提交按单一操作原子化拆分（接口隔离原则·铁训）**：代码获准提交后，每个 commit 只承载一种逻辑修改操作。先标注每处改动属于哪类操作（新增 / 修改 / 重构 / 修复 / 删除）；同一文件内若同时含多种性质改动（如「新增」+「修改既有逻辑」，或多个不相关问题点），必须用 `git add -p` 按 hunk 拆开、分多次提交，不得混入同一 commit。自检：一个 commit 能否用一句话、单一动词准确描述——需要“和”连接两件事时就该拆。
 6. **详细代码审核标准**：后续代码审核必须逐项给出文件、函数、字段和行号，说明触发场景、当前行为、实际后果及计划/契约依据；同时给出目标行为、分步骤整改方案、测试改法、验收命令和通过标准。报告必须区分已验证项、未验证项、证据缺口和阻塞项；结构测试不能替代真实行为验证，未完成真实验证不得宣称完成。需要 subagent 时严格单个、串行使用，不并行、不允许 subagent 派生。
-6. **参考代码优先本地 `D:\software\code`**：当用户提及「参考某代码 / 某项目 / 某开源库的源码」时，优先在本地 `D:\software\code` 目录下查找已 clone 的源码，先用 Glob/Grep 定位并读真实源码再落地，严禁凭印象脑补或先上 GitHub 浏览（具体 UI 参考项目见下文「前端设计参考」一节）。
+6. **参考代码优先本地已 clone 源码**：当用户提及「参考某代码 / 某项目 / 某开源库的源码」时，优先在本地参考目录查找已 clone 的源码，先用 Glob/Grep 定位并读真实源码再落地，严禁凭印象脑补或先上 GitHub 浏览（具体 UI 参考项目见下文「前端设计参考」一节）。
 7. **Claude Code 对齐铁训（必须遵守）**：Claude Link 的产品目标是通过 Claude Agent SDK 对 Claude Code 做 UI 层复刻。除非用户明确要求降级、简化、偏离或实现 Claude Code 没有的产品行为，否则新增或修改任何功能都必须以 Claude Code 的实际行为为唯一基准，做到运行语义、配置来源、用户级/项目级指令与记忆、工作目录、权限、交互、文件副作用、错误处理和结果展示的 1:1 对齐。实现前必须先核对对应 Claude Code/Agent SDK 的真实契约与端到端行为；不能把「菜单显示、IPC 接通、prompt 原样转发」当作功能完成。凡涉及命令（尤其 `/init`）必须验证真实结果（例如文件是否按原生行为创建/更新、上下文是否按原生来源加载），并在 selftest 或可运行的端到端回归中留下门禁；若 SDK 无法直接提供等价能力，必须先报告差异与影响并停止，不得私自用近似实现冒充 1:1。
 8. **命令对齐范围（必须遵守）**：命令对齐不能只修 `/init`，必须盘点并实现 SDK/Claude Code 支持的全部命令。仅当 Claude Link 已有操作在用户可见行为、会话状态、文件副作用、配置/记忆语义和结果反馈上逐项等价时，才允许采用平替（例如用「新建对话」平替 `/clear`）；每个平替必须单独证明等价并写入行为回归。除这些经过证明的平替外，其余命令必须 1:1 实现，不能用「功能类似」「能发送 prompt」或「菜单能显示」作为完成标准。
 9. **测试 Claude Link 时使用自动权限（必须遵守）**：对 Claude Link 做自动化测试（E2E / CDP / 真实窗口等）时，凡涉及需要工具执行的命令（如 `/init` 的 Write），必须先把会话权限模式切到「自动模式」（bypassPermissions）——经真实 UI 权限面板（工具栏权限按钮 → 「自动模式」项），或等效注入。default 权限下 query 会静默等待无人点击的权限确认（曾误判为「网关慢」：/init 挂 20 分钟实为等权限，切换后 1 分钟落盘）。纯本地命令（/usage、/clear 等）与纯文本场景保持默认权限即可。
@@ -170,7 +170,7 @@ SDK canUseTool / onUserDialog / onElicitation
   > **实践级**（`--require-behavioral-coverage`）：discovery + cancel + ≥1(success,failure)，builtin 还需 reopenPersistence，≥95% 通过。
   > **严格级**（`--require-behavioral-coverage-full`）：**契约驱动**（`CommandBehaviorContract` 77 条：required 须 observed，not-applicable 须理由 + 前后快照 snapshotClean 举证），逐条列出全部豁免及原因。
   > 当前状态（evidence `run-2026-08-14T21-31-07`）：实践级 77/77，严格级 exit 0（discovery/success/failure/cancel 77/77；sideEffects 50 observed + 51 豁免；reopenPersistence 20/20 builtin）。
-  > manifest（`D:/software/Cache/claude-link/command-verification.json`）须随 CC/SDK 版本漂移重跑 `--all` 刷新（skillMeta 含 SKILL.md 哈希做版本绑定）。
+  > manifest（`$CLAUDE_LINK_CACHE_ROOT/claude-link/command-verification.json`）须随 CC/SDK 版本漂移重跑 `--all` 刷新（skillMeta 含 SKILL.md 哈希做版本绑定）。
 - **`/init`（Task 5）**：真实创建/更新 `CLAUDE.md`（10 场景矩阵，含空目录/已有文件/用户级·项目级 CLAUDE.md 进上下文/local settings/executable 缺失/用户取消/流末无 result 合成 aborted）；空目录不落盘时 UI 须显「未执行文件写入」不假成功（`init_write_skipped` 横幅，判定在 sdk-backend 回合前记录 CLAUDE.md 存在性）。
 - **候选平替（Task 6）**：`/clear`↔新建对话、`/context`↔上下文 UI、`/usage`↔费用 UI、`/config`↔配置页 **逐项不等价 → 全部保持 `native-sdk`**；`/compact` 入口即原生执行。`/compact` 上下文统计变化用 `/context` 前后对比实证（如 4%→3%，SDK `result.usage` 因 cache_read 计入压缩前历史而无效，禁用）。
 - **全量命令行为矩阵（Task 7）**：`--all` **240 场景 0 失败 0 skip** + 四门禁（含严格级）exit 0。逐命令独立失败场景（无效 resume → 原生 `error_during_execution`）；核心 builtin 显式成功/失败/重开场景（/insights 等须 warmup 真实会话历史）；文件写入类 skill bypassPermissions 真实落盘举证。8 个 skill 运行时描述空是上游枚举行为（dir name≠frontmatter name），非对齐缺陷。
@@ -188,11 +188,11 @@ SDK canUseTool / onUserDialog / onElicitation
 
 ## 前端设计参考
 
-UI/设计灵感参考以下三个开源项目，源码已 clone 到本地 `D:\software\code`，**优先读本地源码**，不再上 GitHub 浏览：
+UI/设计灵感参考以下三个开源项目，源码已 clone 到本地参考目录，**优先读本地源码**，必要时再上 GitHub 对照：
 
-- **LobsterAI**：`D:\software\code\LobsterAI\LobsterAI-main`（Electron + Vue/TS，网易出品；前端在 `src/renderer`）
-- **openhanako**（HanaAgent）：`D:\software\code\openhanako\openhanako-main`（Electron，作者 liliMozi；主题在 `desktop/src/themes/*.css` + `desktop/src/shared/theme-registry-data.json`）
-- **desktop-cc-gui**（ccgui）：`D:\software\code\desktop-cc-gui-main`（**Tauri + React + Vite**，非 Electron、前端 React 非 Vue；只借 UX/视觉/交互，不可照搬技术栈）
+- **LobsterAI**（Electron + Vue/TS，网易出品；前端在 `src/renderer`）：公开仓库以 GitHub 搜索「LobsterAI」为准
+- **openhanako**（HanaAgent，Electron，作者 liliMozi；主题在 `desktop/src/themes/*.css` + `desktop/src/shared/theme-registry-data.json`）：https://github.com/liliMozi/openhanako
+- **desktop-cc-gui**（ccgui，**Tauri + React + Vite**，非 Electron、前端 React 非 Vue；只借 UX/视觉/交互，不可照搬技术栈）：https://github.com/zhukunpenglinyutong/desktop-cc-gui
 
 参考布局/交互/视觉时**必须先读本地真实源码（theme/token/组件源文件）再落地，严禁凭印象脑补**。主题色板（`src/shared/constants.ts` 的 `THEME_PALETTES`，9 套浅色，默认 `warm-paper`）灵感源自 openhanako。
 

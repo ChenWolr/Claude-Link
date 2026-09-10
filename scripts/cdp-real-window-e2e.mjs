@@ -12,7 +12,7 @@
 //   - exit 3：环境受限场景未执行（如 /compact 无法达到可压缩阈值）——阻止「Task 9 完成」声明。
 //
 // 场景（review-v9 §5 顺序）：
-//   1. 临时工作目录 D:/software/Cache/claude-link/e2e/<run-id>/cwd（/init 副作用只允许在此）。
+//   1. 临时工作目录 $CLAUDE_LINK_CACHE_ROOT/claude-link/e2e/<run-id>/cwd（/init 副作用只允许在此）。
 //   2. UI 建会话 + 设置工作目录 + /init 落盘断言（CLAUDE.md 存在且非空；无文件须有
 //      init_write_skipped 或原生失败，不允许文字回复当成功）。
 //   3. 记录消息数/命令快照/诊断摘要 → 切走再切回（重开会话）→ 断言恢复。
