@@ -25,7 +25,8 @@ const emit = defineEmits<{
 
 const expanded = ref(false);
 
-// 「立即执行」置灰原因（优先级从高到低，与主进程 runTaskNow 守卫一一对应）。
+// 「立即执行」置灰原因（优先级从高到低）；queuePaused 的禁用是渲染层策略，主进程 runTaskNow
+// 无对应守卫（仅 pending/开关/忙碌三道闸），两者并非一一对应。
 // computed：暂停/恢复等 props 变化时 title 必须随之更新。
 const runNowTitle = computed(() => {
   if (props.queueEnabled === false) return '队列开关已关闭';

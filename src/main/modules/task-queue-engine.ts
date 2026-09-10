@@ -1,13 +1,16 @@
 // task-queue-engine.ts
-// 队列任务调度引擎（v3 语义，2026-09-03）。唯一规格：docs/plans/2026-09-03-queue-semantics-v3.md §1。
+// 队列任务调度引擎（v3 语义，2026-09-03）。v3 语义以本文件与 queue-eta.ts 注释为准，行为由 scripts/tdd-queue-semantics-v3-verify.ts 锁定（原规格文档已不在仓库）。
 //
 // 调度器状态（每会话独立）：standby（待命，不计时不出队）/ countdown（倒计时中）/ running（回合执行中）。
 // 核心不变量：
 //  - status='running' 的唯二入口是 beginUserTurn（普通发送/插话占坑后）与 popExecute（队列任务出队），
 //    两者都清 standbyReason；
 //  - 回合终态以 result 事件为权威信号（noteTurnOutcome），绝不以 getActiveProcess 存在性做守卫——
-//    result 到达时进程可能尚未退出，用进程存在性当守卫会吞掉所有正常 result。幂等靠状态机闸
-//   （arm/halt 都要求 status==='running'），重复/迟到 result 天然 no-op；
+//    result 到达时进程可能尚未退出，用进程存在性当守卫会吞掉所有正常 result。幂等靠状态机闸：
+//    armAfterTurn/noteTurnOutcome 分派闸要求 status==='running'，armFromUserAction 要求
+//    status==='standby'，haltQueue 自身的幂等闸是『standby 且 standbyReason 为 halt_*』
+//   （abortHalt 可凭 getActiveProcess 兜底从非 running 态进入，见各函数注释）——重复/迟到
+//    result 天然 no-op；
 //  - 「重启后绝不自动执行」无闸门设计：引擎所有 Map 启动时为空，倒计时的启动只可能发生在
 //    noteTurnOutcome(success)→armAfterTurn 与 armFromUserAction（恢复/全部恢复）两处，runTaskNow
 //    则是用户显式动作。没有任何路径会在启动时或开关打开时自发起倒计时，重启后无需唤醒白名单。
@@ -246,7 +249,8 @@ export function haltQueue(sessionId: string, reason: 'failed' | 'interrupted', m
 
 /** CHAT_ABORT 专用熔断挂点（killProcess 仍由 handler 调，引擎不自己 kill）：
  *  守卫以引擎状态机为主判据（running）+ 活动进程兜底——与 killProcess 是否同步移除占坑记录的
- *  时序解耦。result('aborted') 先到并已 halt 时 status 已非 running → no-op（不重复熔断）；
+ *  时序解耦。result('aborted') 先到并已 halt 时：status 已非 running，但进程可能仍未退出而使
+ *  守卫放行——不重复熔断由 settleCurrent 的 currentTaskId 失配与 haltQueue 的 halt_* 幂等闸兜住。
  *  空闲误按 → 双判据皆假 → 不熔断。先 settleCurrent（中断路径无 result，这是唯一结算时机，
  *  并令 popExecute 的 exit 兜底因 currentTaskId 不匹配而失效，防 reason 被覆盖），再熔断。 */
 export function abortHalt(sessionId: string, mainWindow: BrowserWindow): void {
@@ -278,7 +282,7 @@ export function noteTurnOutcome(sessionId: string, outcome: 'success' | 'error' 
 }
 
 /** 「立即执行」：守卫（抛 Error 给 IPC → 渲染层 notice）后跳过倒计时立即出队执行；
- *  非队首=插队：该任务 reorder 到可执行序列首位，原队首保留为下一个倒计时对象。
+ *  非队首=插队：该任务 reorder 到会话全部任务（含 paused）首位，原队首保留为下一个倒计时对象。
  *  paused 任务可立即执行（主会话空闲时），执行前先解除暂停。 */
 export function runTaskNow(taskId: string, mainWindow: BrowserWindow): QueueOverview {
   const task = taskRepo.getTask(taskId);
@@ -300,8 +304,9 @@ export function runTaskNow(taskId: string, mainWindow: BrowserWindow): QueueOver
   return getQueueOverview(task.sessionId);
 }
 
-/** 「全部恢复」（熔断提示行内按钮）：全部 paused→pending + 立即开始全量倒计时（经 armFromUserAction
- *  的 standby 前置守卫；无活动回合时必 arm，回合中则交给回合结束 armAfterTurn）。 */
+/** 「全部恢复」（熔断提示行内按钮）：全部 paused→pending + 经 armFromUserAction 尝试倒计时
+ * （standby/开关开/无活动回合/有未暂停 pending 四道守卫——开关已关时仅解除暂停不计时；回合中
+ *  则交给回合结束 armAfterTurn）。 */
 export function resumeAllTasks(sessionId: string, mainWindow: BrowserWindow): QueueOverview {
   taskRepo.resumeAllPending(sessionId);
   armFromUserAction(sessionId, mainWindow);
@@ -446,11 +451,11 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
       emitQueueEvent(mainWindow, sessionId, 'user_message_created', task.id, { message: userMessage });
     }
   } catch (err) {
-    // P2-11：消息创建段异常收口——此前夹在两个 try 之间裸奔，IPC/DB 瞬时失败会让引擎僵尸
-    // running、任务无痕丢失。失败定账 failed + 结算（settleCurrent 自发 task_settled 让渲染层
-    // 收口）。本地 DB 错误**不**触发 haltQueue 熔断（与回合失败/上游错误语义区分，pending 任务
-    // 不转 paused）；但必须显式退出 running（置 standby），否则无回合可结算，引擎卡死。
-    // settleCurrent 后 exit 兜底因 currentTaskId 失配自然失效。
+    // P2-11：消息创建段异常收口（此前在两 try 间裸奔：IPC/DB 瞬时失败会僵尸 running、
+    // 任务无痕丢失）。失败定账 failed + settleCurrent 结算（自发 task_settled 收口）。
+    // 本地 DB 错误不触发 haltQueue 熔断（pending 不转 paused）；置 standby 且
+    // standbyReason='halt_failed'——渲染层呈熔断待命态但 pending 实未暂停（横幅与
+    // 实际不符，已知偏差）。其后 exit 兜底因 currentTaskId 失配自然失效。
     const message = err instanceof Error ? err.message : String(err);
     logger.error(`popExecute createMessage failed (task ${task.id}): ${message}`);
     taskRepo.updateTaskError(task.id, `消息创建失败：${message}`);

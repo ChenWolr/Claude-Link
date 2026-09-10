@@ -218,7 +218,7 @@ watch(
 );
 
 // —— 方案 B：右侧活动栏（图标轨 + 总览/筛选）——
-// rightTab 扩展 'all'（默认四类总览同屏）；点轨按钮切单类，再点同类回 all。
+// rightTab 扩展 'all'（默认五类总览同屏）；点轨按钮切单类，再点同类回 all。
 type RightFilter = 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes';
 const isAll = computed(() => sessionStore.rightTab === 'all');
 
@@ -271,7 +271,7 @@ const planMetric = computed<{ text: string; active: boolean }>(() => {
   return { text: `${planDone.value}/${n}`, active: planDone.value < n };
 });
 
-// 状态指标条（§4）：四格始终占位，标签与值分行，禁用 · 串句换行。
+// 状态指标条（§4）：五格始终占位，标签与值分行，禁用 · 串句换行。
 const queueMetric = computed<{ text: string; active: boolean }>(() => {
   switch (queueStatus.value) {
     case 'running': return { text: '执行中', active: true };
@@ -802,7 +802,7 @@ function handleDragReorder() {
   border-color: var(--color-accent-strong);
 }
 
-/* 状态指标条：2×2 网格，绝不用 · 串句换行 */
+/* 状态指标条：2 列网格（5 项，末格独占一行），绝不用 · 串句换行 */
 .status-metrics {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -892,7 +892,7 @@ function handleDragReorder() {
   text-align: center;
 }
 
-/* 内容滚动区：总览四类纵向堆叠，单类只渲染对应数据源 */
+/* 内容滚动区：总览五类纵向堆叠，单类只渲染对应数据源 */
 .task-panel__scroll {
   flex: 1;
   min-height: 0;
