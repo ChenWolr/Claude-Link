@@ -79,7 +79,9 @@ function testTurnTimingContracts(): void {
   assert.equal(formatDurationMs(Number.NaN), '0.0s', 'NaN 兜底 0.0s');
   assert.equal(formatDurationMs(60000), '1:00', '60s 整显示 1:00');
   assert.equal(formatDurationMs(83000), '1:23', '≥60s 显示分:秒');
-  assert.equal(formatDurationMs(3600000), '60:00', '超过 59 分继续累计分钟');
+  // hb10-TM-06 最小同步：≥3600s 进入小时档 H:MM:SS（长回合可读）；59 分以下分钟累计语义不变。
+  assert.equal(formatDurationMs(3540000), '59:00', '59 分仍显示分:秒（小时档界下）');
+  assert.equal(formatDurationMs(3600000), '1:00:00', '≥3600s 进入小时档 H:MM:SS');
 
   // 2) 结构契约：运行中计时器从消息流末尾移到输入浮岛顶部（ChatPage 挂 TurnTimer），
   //    与旧 MessageList 内嵌 turn-timer 互斥（同一计时逻辑单一宿主）。
@@ -661,7 +663,9 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       assert.ok(ipcHandlers.includes('prepared.displayText'), '落库 content 须使用 displayText');
       assert.ok(ipcHandlers.includes('当前回合仍在执行'), '活 query 时须在持久化前拒绝');
       assert.ok(/getActiveProcess\(sessionId\)/.test(ipcHandlers), '须检测 active process');
-      assert.ok(ipcHandlers.includes('chatSendLocks'), '须有会话级发送互斥');
+      // hb12-P2-11 最小同步：发送互斥锁下沉 chat-send-locks（引擎谓词可读），ipc-handlers
+      // 只 import 使用——互斥语义保持，实现位置演化。
+      assert.ok(ipcHandlers.includes('isChatSendLocked'), '须有会话级发送互斥');
       assert.ok(ipcHandlers.includes('promoteAttachments: false'), '落库时附件不得立刻升格 message');
       assert.ok(ipcHandlers.includes("markAttachmentsStatus(prepared.attachmentIds, 'message')"), 'spawn/send 成功后才升格 message');
       assert.ok(ipcHandlers.includes('deleteMessage'), '同步失败须回滚消息');
@@ -672,7 +676,9 @@ async function testAttachmentPromptBuilderContracts(): Promise<void> {
       // 顺序：在 CHAT_SEND handler 体内检查（避免 indexOf 命中 import 行）
       const chatSendStart = ipcHandlers.indexOf('IPC_CHANNELS.CHAT_SEND');
       assert.ok(chatSendStart >= 0, '须注册 CHAT_SEND');
-      const chatSendBody = ipcHandlers.slice(chatSendStart, chatSendStart + 4500);
+      // hb12-P2-2 最小同步：CHAT_SEND 的 exit 兜底插入已知终态让位分支（~200B），函数体变长，
+      // 断言窗口 4500→6000（断言语义不变：仍要求 promote 位于 spawn 之后的顺序不变量）。
+      const chatSendBody = ipcHandlers.slice(chatSendStart, chatSendStart + 6000);
       const idxActive = chatSendBody.indexOf('getActiveProcess(sessionId)');
       const idxPrepare = chatSendBody.indexOf('prepareAttachmentPrompt');
       const idxCreate = chatSendBody.indexOf('createMessageWithAttachments');
@@ -1544,7 +1550,12 @@ function testPermissionPromptIntegration(): void {
   assert.ok(sdkBackend.includes("subtype === 'local_command_output'"), 'runQuery 须识别 local_command_output 子类型并单一落库');
   // §4：commands_changed 全量替换（REPLACE，不 concat，source:'changed'）。
   assert.ok(sdkBackend.includes("subtype === 'commands_changed'"), 'runQuery 须识别 commands_changed 子类型');
-  assert.ok(/replace\(sessionId,\s*rawCommands,\s*'changed'/.test(sdkBackend), 'commands_changed 须全量替换（source:changed，不 concat）');
+  // hb13-v B6 必要同步：changed 路径 replace 收口至 replaceCommandSnapshotIfCurrent 守卫 helper
+  //（commands: rawCommands 全量 + source:'changed'，行为不变——防旧写覆盖的代际重查统一收口）。
+  assert.ok(
+    /replaceCommandSnapshotIfCurrent\(sessionId, mainWindow, \{[\s\S]{0,400}commands: rawCommands,[\s\S]{0,200}source: 'changed'/.test(sdkBackend),
+    'commands_changed 须全量替换（source:changed，不 concat）',
+  );
   // §1/§4：renderer 命令结果去重——result.result 与 local_command_output 内容相同时不二次落库。
   assert.ok(useChatCmd.includes('hasLocalCommandOutputMessage'), 'renderer 应有 local_command_output 去重判断');
   assert.ok(useChatCmd.includes("'system:local_command_output'"), '去重须匹配 processKind system:local_command_output');
@@ -1690,7 +1701,10 @@ function testPermissionInteractionAdapter(): void {
     toolUseID: 'tool-webfetch',
     signal: new AbortController().signal,
   });
-  assert.deepEqual(noSuggestionPayload.options?.map((option) => option.id), ['allow', 'allow-session', 'deny']);
+  // hb12-PERM-01 最小同步：无 SDK 建议场景不再强制出现「总是允许」选项（裸 allow 整工具
+  // 放行缺知情同意基础）——有建议时才展示该选项；「本会话总是允许」经 withToolSessionAllow
+  // 写入的裸 allow 规则仍在 suggestions 中（CLI headless 短路的补偿语义不变）。
+  assert.deepEqual(noSuggestionPayload.options?.map((option) => option.id), ['allow', 'deny']);
   assert.deepEqual(noSuggestionPayload.suggestions, [{ type: 'addRules', rules: [{ toolName: 'WebFetch' }], behavior: 'allow', destination: 'session' }]);
 
   const permInput = { command: 'npm run typecheck' };
@@ -1760,10 +1774,14 @@ function testPermissionSettingsMergeAndSessionCoercion(): void {
     { type: 'addDirectories', directories: ['D:/tmp'], destination: 'session' },
     { type: 'removeDirectories', directories: ['D:/work'], destination: 'session' },
   ]);
-  assert.deepEqual(normalized.map((update) => update.destination), ['session', 'session', 'session', 'session', 'session', 'session', 'session']);
+  // hb10-PERM-V04 最小同步：coerce 过滤 setMode 类建议——allow-session 小本本不再收 setMode
+  //（「本会话总是允许」静默改档=越权）。fixture 中 setMode 条目被过滤，destination 断言 7→6 条，
+  // 且 merged.defaultMode 不再经小本本产生（会话档写入走显式选档通道）。
+  assert.deepEqual(normalized.map((update) => update.destination), ['session', 'session', 'session', 'session', 'session', 'session']);
+  assert.ok(!normalized.some((update) => update.type === 'setMode'), 'setMode 不得进入 allow-session 小本本');
 
   const merged = applyPermissionUpdates(base, normalized);
-  assert.equal(merged.defaultMode, 'dontAsk');
+  assert.equal(merged.defaultMode, undefined);
   assert.deepEqual(merged.allow, ['Read', 'WebSearch', 'WebFetch(domain:example.com)']);
   assert.deepEqual(merged.ask, ['Bash(git push*)']);
   assert.deepEqual(merged.additionalDirectories, ['D:/tmp']);
@@ -3397,7 +3415,7 @@ function testTurnEntrySyncReleaseContracts(): void {
   assert.ok(releaseIdx < snapshotIdx, 'deleteEntry 必须先于 post-turn 快照 await（占坑同步释放；旧序会让 result 后 5s 内发送被「当前回合仍在执行」拒绝）');
   assert.ok(settleIdx > snapshotIdx, 'settle 须保持在快照 await 之后（控制通道 getContextUsage 需要 stdin 未关）');
   assert.ok(
-    /!contextTurn && entries\.get\(sessionId\) == null[\s\S]{0,120}schedulePostTurnProbe/.test(branch),
+    /!contextTurn && entries\.get\(sessionId\) == null[\s\S]{0,400}schedulePostTurnProbe/.test(branch),
     '探针调度须带 entries 空闲守卫（快照 await 期间新回合插入则作废本回合探针，防 --resume 双写 transcript 竞态）',
   );
   // refreshContextSnapshot 相位守卫（成功采样 + 失败回落两路径）。
