@@ -5,11 +5,11 @@
 // 这是从 process-manager.ts 提取的纯工具函数。process-manager.ts 的 spawn 入口
 // 已删除（SDK 路径完全取代），但工具函数被 SDK 路径复用，故独立到此模块。
 
-import type { CliInitEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliResultEvent, CliEvent, CliMessageEvent, CliMessageContentPart, CliAbortedEvent } from '../../shared/types/cli';
+import type { CliInitEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliResultEvent, CliEvent, CliMessageEvent, CliMessageContentPart, CliAbortedEvent, CliErrorEvent } from '../../shared/types/cli';
 import type { Message } from '../../shared/types/session';
 import type { ThinkingLevel } from '../../shared/types/thinking';
 import type { PermissionMode } from '../../shared/permission-resolver';
-import { getConfig } from './config-manager';
+import { getConfig, DECRYPT_FAILED } from './config-manager';
 import { resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { ENGINE_BACKGROUND_TOGGLE_ENV } from '../../shared/constants';
 import { logger } from '../utils/logger';
@@ -69,7 +69,8 @@ export function buildSpawnEnv(override?: SessionModelOverride | null): Record<st
   const config = getConfig();
   const env: Record<string, string> = { ...process.env as Record<string, string> };
 
-  if (config.apiKey) {
+  // hb10 P2-4：解密失败哨兵按空处理（与损坏前注入行为一致），哨兵串不得注入 ANTHROPIC_API_KEY。
+  if (config.apiKey && config.apiKey !== DECRYPT_FAILED) {
     env.ANTHROPIC_API_KEY = config.apiKey;
   }
 
@@ -199,6 +200,20 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
         content: abortEvent.message,
         eventType: 'system',
         processKind: 'system:aborted',
+      });
+      break;
+    }
+
+    case 'error': {
+      // hb10-ENG-12：error 事件落库（role:system，processKind 'system:error'，文案=事件文案）——
+      // forwardEvent 推了 IPC 但此处缺 case，DB 无该行，重开会话看不到失败原因。
+      const errorEvent = event as CliErrorEvent;
+      messageRepo.createMessage({
+        sessionId,
+        role: 'system',
+        content: errorEvent.message,
+        eventType: 'system',
+        processKind: 'system:error',
       });
       break;
     }

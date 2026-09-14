@@ -7,21 +7,24 @@
 import { BrowserWindow, dialog, ipcMain, app } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
+import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性/目录校验
 import path from 'node:path';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
 import { IPC_CHANNELS } from '../shared/constants';
-import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer } from './modules/config-manager';
+import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
 import { detectClaudeConfig } from './modules/claude-config-detector';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
 import { resolveDefaultModel } from '../shared/settings-parser';
+import { maskApiKey } from '../shared/provider-library';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight } from './modules/chat-backend';
 import { resolveCommandsGetResult } from '../shared/commands-get';
+import { isChatSendLocked, acquireChatSendLock, releaseChatSendLock } from './modules/chat-send-locks';
 import { getUserOriginFingerprint, getProjectOriginFingerprint } from './modules/command-source-watcher';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../shared/permission-resolver';
 import { sdkCommandRegistry, getCommandProvenance } from './modules/sdk-command-registry';
@@ -42,6 +45,7 @@ import { analyzeTopic } from './modules/topic-analyzer';
 import { logger } from './utils/logger';
 import * as sessionRepo from './database/repositories/session-repo';
 import * as messageRepo from './database/repositories/message-repo';
+import { getConnection } from './database/connection'; // hb12-TM-03：recordTurnMeta 两 UPDATE 包事务
 import * as taskRepo from './database/repositories/task-repo';
 import * as attachmentRepo from './database/repositories/attachment-repo';
 import { cleanupSessionAttachments } from './modules/attachment-service';
@@ -73,9 +77,6 @@ let mainWindow: BrowserWindow;
 // removeHandler 调用，不采用逐通道重挂方案。
 let ipcHandlersRegistered = false;
 
-/** 会话级发送互斥：防止并发 CHAT_SEND 双落库/覆盖 pending。 */
-const chatSendLocks = new Set<string>();
-
 /** 供应商库内容变更 → 推送全部渲染方（设置页 + 会话选择器缓存）刷新。 */
 function broadcastProvidersChanged(): void {
   try {
@@ -86,6 +87,9 @@ function broadcastProvidersChanged(): void {
 }
 
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
+  // hb10-CMD-10：needsRefreshProbeOnly 重探节流时间戳（模块级进程内）。
+  let lastProbeOnlyAt = 0;
+
   mainWindow = mainWindowRef;
   if (ipcHandlersRegistered) return;
   ipcHandlersRegistered = true;
@@ -95,17 +99,52 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.CLI_GET_STATUS, async () => getCachedCliStatus() ?? detectCli());
 
   // 会话改动面板：列出 workingDir 的 git 改动 + 按需取单文件 diff（不抓快照，按需 git diff）。
-  ipcMain.handle(IPC_CHANNELS.CHANGES_LIST, async (_event, workingDir: string | null, touchedPaths: string[]) =>
-    listChanges(workingDir, touchedPaths));
-  ipcMain.handle(IPC_CHANNELS.CHANGES_DIFF, async (_event, workingDir: string | null, path: string, context: number) =>
-    getChangeDiff(workingDir, path, context));
+  // hb10 P2-8：三通道 workingDir 绑定——主进程无「当前活动会话」追踪，允许集=全局配置工作目录
+  // ∪ 会话库全部工作目录（分隔符/大小写归一比对；win 大小写不敏感）。受损 renderer 不得对
+  // 任意目录跑 git。null 沿既有降级链路放行（listChanges 内部按无目录处理）。
+  const normDir = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  const isBoundWorkingDir = (dir: string | null): boolean => {
+    if (dir === null) return true;
+    if (typeof dir !== 'string' || !dir.trim()) return false;
+    const configDir = getConfig().workingDirectory;
+    if (configDir && normDir(configDir) === normDir(dir)) return true;
+    return sessionRepo.listSessions().some((s) => (s.workingDir ? normDir(s.workingDir) === normDir(dir) : false));
+  };
+  ipcMain.handle(IPC_CHANNELS.CHANGES_LIST, async (_event, workingDir: string | null, touchedPaths: string[]) => {
+    if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
+    return listChanges(workingDir, touchedPaths);
+  });
+  ipcMain.handle(IPC_CHANNELS.CHANGES_DIFF, async (_event, workingDir: string | null, path: string, context: number) => {
+    if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
+    // hb10 P2-7：-U context 钳制——非整数/负数/超界回落默认 3（防 -UNaN「整文件当新增」假象）。
+    const safeContext = Number.isInteger(context) && context >= 0 && context <= 100000 ? context : 3;
+    return getChangeDiff(workingDir, path, safeContext);
+  });
   // 点文件「打开」：shell.openPath 走系统默认程序（仓库根解析 + 越界守卫在 openChangeFile 内）。
-  ipcMain.handle(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) =>
-    openChangeFile(workingDir, p));
+  ipcMain.handle(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) => {
+    if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
+    return openChangeFile(workingDir, p);
+  });
 
   // Config
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfigForRenderer());
   ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => {
+    // hb10-CFG-09：workingDirectory 必须真实存在且为目录——否则丢弃该字段（保留旧值）。
+    // 坏目录入库后 spawn/投影/诊断处处失败。丢弃非硬失败：回传值保持旧目录，
+    // 渲染层比对所送值与回传值不一致后给 notice（见 config-store.saveConfig）。
+    if (partial && typeof partial.workingDirectory === 'string' && partial.workingDirectory) {
+      let dirOk = false;
+      try {
+        dirOk = fs.existsSync(partial.workingDirectory) && fs.statSync(partial.workingDirectory).isDirectory();
+      } catch {
+        dirOk = false;
+      }
+      if (!dirOk) {
+        const { workingDirectory: rejectedWorkingDirectory, ...rest } = partial;
+        partial = rest;
+        logger.warn(`[CONFIG_SAVE] workingDirectory 非有效目录，已丢弃并保留旧值：${rejectedWorkingDirectory}`);
+      }
+    }
     // v3：queueEnabled 值变化 → 通知引擎（关：取消倒计时转 switch_off；开：仅清 reason 不 arm）。
     const prevQueueEnabled = getConfig().queueEnabled === true;
     const saved = saveConfig(partial);
@@ -113,7 +152,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       onQueueEnabledChanged(saved.queueEnabled === true, mainWindow);
     }
     // P3-6：回传给 renderer 的配置同样只带掩码（渲染层 UI 不显示明文 Key）。
-    return getConfigForRenderer();
+    // hb13-v B3（F-04）：回传补带 projectionOk——getConfigForRenderer 不含该字段，旧回传使
+    // 「已保存（投影失败）」徽标条件恒 false（hb10-CFG-04 端到端死代码）。
+    return { ...getConfigForRenderer(), projectionOk: saved.projectionOk };
   });
   ipcMain.handle(IPC_CHANNELS.CONFIG_CLEAR, async () => clearConfig());
   ipcMain.handle(IPC_CHANNELS.CONFIG_STORAGE_INFO, async () => {
@@ -126,7 +167,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     };
   });
   ipcMain.handle(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, async (_event, filePath: string) => {
-    return importSettingsFile(filePath);
+    // hb10-CFG-05：死通道收窄——仅 .json 后缀且 ≤1MB；返回值 apiKey 掩码化（不泄露明文）。
+    if (typeof filePath !== 'string' || !filePath.toLowerCase().endsWith('.json')) throw new Error('仅支持 .json 设置文件');
+    const st = await fsp.stat(filePath);
+    if (st.size > 1024 * 1024) throw new Error('设置文件超过 1MB 上限');
+    const imported = importSettingsFile(filePath);
+    return { ...imported, apiKey: imported.apiKey ? maskApiKey(imported.apiKey) : imported.apiKey };
   });
   ipcMain.handle(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE, async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -184,6 +230,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     const profile = getStoredProviderProfile(providerId);
     if (!profile) throw new Error('供应商不存在');
     const apiKey = decryptProviderApiKey(profile);
+    // hb13-v B2（F-03）：解密哨兵按未配置短路——损坏态不得把哨兵串放进 x-api-key/Bearer 头。
+    if (apiKey === DECRYPT_FAILED) throw new Error('该供应商的 API Key 解密失败（密钥损坏，请重新输入），无法查询模型。');
     if (!apiKey) throw new Error('该供应商未配置 API Key，无法查询；可在下拉框手动输入模型 ID 添加。');
     return fetchAvailableModels(profile, apiKey, forceRefresh === true);
   });
@@ -196,6 +244,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // Sessions
   ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => sessionRepo.listSessions());
   ipcMain.handle(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string, spec?: SessionCreateSpec) => {
+    // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——空白名直调 IPC 不再建脏行。
+    if (typeof name !== 'string' || !name.trim()) throw new Error('会话名称不能为空');
     const config = getConfig();
     // 暂态物化：renderer 预生成的 id 直接沿用（草稿/附件/乐观消息 key 不迁移）。
     // spec 为空时行为与旧版完全一致（cdp-smoke-test 等直接调用方不受影响）。
@@ -237,11 +287,20 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       session = sessionRepo.updateSession(session.id, patch) ?? session;
       if (providerOverride !== undefined && modelOverride !== undefined) {
         recordLastUsedProviderModel(providerOverride, modelOverride);
+        // hb10 P2-3：lastUsed 变更兜底广播（幂等；渲染层 ensureReload 同步触发器显示态）。
+        broadcastProvidersChanged();
       }
     }
     // 暂态附件转正：物化建行后外键已满足，绑定为 draft 记录供 CHAT_SEND 校验/升格。
+    // hb12-SMG-09：绑定失败必须回滚会话行——只回滚附件不清会话行会留下「附件已指向不存在的
+    // 会话行」的死锁半态（hb10-ATT-V01 计划明文：实施时必须叠加本条）。
     if (spec?.bindTransientAttachmentIds?.length) {
-      bindTransientAttachmentsToSession(session.id, spec.bindTransientAttachmentIds);
+      try {
+        bindTransientAttachmentsToSession(session.id, spec.bindTransientAttachmentIds);
+      } catch (err) {
+        sessionRepo.deleteSession(session.id);
+        throw err;
+      }
     }
     // Task 4/5：新会话创建后立即后台命令发现（control-only probe）。fire-and-forget——失败/无 exe 走
     // degraded，不阻塞会话创建返回；结果经 COMMANDS_CHANGED 推前端。
@@ -288,6 +347,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>
       >,
     ) => {
+      // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——非字符串 sessionId 直拒。
+      if (typeof id !== 'string' || !id.trim()) throw new Error('非法会话 id');
       // 白名单校验（review-v2 F11）：不信任 renderer 传值，非法 thinkingLevel 丢弃，
       // 合法 null（跟随默认）/ 有效档位放行。
       if (data.thinkingLevel !== undefined && data.thinkingLevel !== null && !isValidThinkingLevel(data.thinkingLevel)) {
@@ -320,6 +381,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         updated
       ) {
         recordLastUsedProviderModel(data.providerOverride, data.modelOverride);
+        // hb10 P2-3：lastUsed 变更兜底广播（幂等；渲染层 ensureReload 同步触发器显示态）。
+        broadcastProvidersChanged();
       }
       // F3：工作目录变化影响 Skill/Plugin 可见性 → 重新探测命令（旧快照标 stale，新结果替换）。
       // N2：清除工作目录（workingDir: null）同样必须重新探测——旧目录的 Skill/Plugin 命令不再适用。
@@ -357,19 +420,25 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // P2-2 半写收口：全 null payload（端点 0 值兜底后）不再抹掉既有记录——
       // messages 半边仅在 costUsd/durationMs 至少一个非 null 时执行；
       // sessions 半边仅在 durationMs/endedAt 齐备（完整有效记录）时执行。
-      if (costUsd != null || durationMs != null) {
-        const directHit = typeof payload?.messageId === 'string' && payload.messageId
-          ? messageRepo.updateResultMeta(payload.messageId, sessionId, meta)
-          : false;
-        if (!directHit) {
-          const fallbackId = messageRepo.findLastTurnMainFlowAssistantId(sessionId);
-          if (fallbackId) messageRepo.updateResultMeta(fallbackId, sessionId, meta);
+      // hb12-TM-03：两半边 UPDATE 包同一 transaction——任一半边失败不再留半态
+      //（P2-2 双门控判定原样保留，事务只包两次写、不包门控判定）。
+      const applyTurnMeta = getConnection().transaction(() => {
+        if (costUsd != null || durationMs != null) {
+          const directHit = typeof payload?.messageId === 'string' && payload.messageId
+            ? messageRepo.updateResultMeta(payload.messageId, sessionId, meta)
+            : false;
+          if (!directHit) {
+            const fallbackId = messageRepo.findLastTurnMainFlowAssistantId(sessionId, { endedAt });
+            if (fallbackId) messageRepo.updateResultMeta(fallbackId, sessionId, meta);
+          }
         }
-      }
-      if (durationMs != null && endedAt != null) {
-        sessionRepo.updateTurnMeta(sessionId, { durationMs, endedAt });
-      }
-      return sessionRepo.getSession(sessionId);
+        if (durationMs != null && endedAt != null) {
+          sessionRepo.updateTurnMeta(sessionId, { durationMs, endedAt });
+        }
+      });
+      applyTurnMeta();
+      // hb10-OPT-1：两调用方均 fire-and-forget，返回布尔即可（省一次全行读）。
+      return true;
     },
   );
   ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
@@ -380,21 +449,29 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(
     IPC_CHANNELS.SESSION_ANALYZE_TOPIC,
     async (_event, sessionId: string, firstMessage: string) => {
+      // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——空白消息不再触发命名链写库。
+      if (typeof sessionId !== 'string' || !sessionId.trim() || typeof firstMessage !== 'string' || !firstMessage.trim()) {
+        return null;
+      }
       const result = await analyzeTopic(sessionId, firstMessage);
       return result;
     },
   );
 
   // Messages
-  ipcMain.handle(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, async (_event, sessionId: string) =>
-    messageRepo.getMessagesBySession(sessionId),
-  );
+  ipcMain.handle(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, async (_event, sessionId: string) => {
+    // hb10-SHL-08/V01：入参校验（对齐 COMMANDS_GET 形态）。
+    if (typeof sessionId !== 'string' || !sessionId.trim()) return [];
+    return messageRepo.getMessagesBySession(sessionId);
+  });
 
   // Claude 计划快照：按会话读取 TodoWrite / Task 工具的计划状态。
   // 独立于手动排队 tasks 表——不复用 task-repo。
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLAN_GET, async (_event, sessionId: string) =>
-    getClaudePlanState(sessionId),
-  );
+  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLAN_GET, async (_event, sessionId: string) => {
+    // hb10-SHL-08：入参校验（对齐 COMMANDS_GET 形态）。
+    if (typeof sessionId !== 'string' || !sessionId.trim()) return null;
+    return getClaudePlanState(sessionId);
+  });
 
   // 原生 Slash Commands：读取某会话当前命令快照（registry 已清洗 + 去重）。返回纯可克隆 snapshot，
   // 不返回 Query / SDK stream / 未经清洗的消息。
@@ -407,7 +484,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // P2-14：快照带项目级出生指纹时现算比对（无指纹的旧快照/无 cwd 会话跳过 IO）。
     const existingSnapshot = sdkCommandRegistry.get(sessionId);
     const currentProjectFingerprint = existingSnapshot?.projectOriginFingerprint !== undefined
-      ? await getProjectOriginFingerprint(sessionRow?.workingDir ?? null)
+      // hb10-CMD-V01：指纹比对侧镜像出生侧回退——session cwd 缺省时用全局配置工作目录
+      //（出生侧 probe 即该回退；否则全局 cwd 会话 stale 检测永远不触发）。
+      ? await getProjectOriginFingerprint(sessionRow?.workingDir ?? getConfig().workingDirectory ?? null)
       : undefined;
     const decision = resolveCommandsGetResult({
       sessionExists: Boolean(sessionRow),
@@ -417,6 +496,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       currentUserFingerprint: getUserOriginFingerprint(),
       currentProjectFingerprint,
       cliMissing: isGlobalCliMissing(),
+      // hb13-v B6（CMD-07/CMD-10）：失败旗标接上真实消费者；探测中抑制 needsRefreshProbeOnly。
+      probeFailed: isGlobalProbeFailed(),
+      probeInProgress: isCommandProbeInFlight(sessionId),
     });
     if (decision.readOnly) {
       // D6：兜底未就绪（启动探测失败/未完成）时打开菜单即自然重试一次（60s 节流，fire-and-forget）。
@@ -441,7 +523,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // D5：用户级命令文件变更 → 旧会话快照过期。decision.snapshot 已是克隆 stale（UI「可能不是最新」），
       // 免费重探一次（幂等/N3 互斥/活跃 query 只标 stale 等全守卫在 startCommandProbe 内），
       // 完成后经 COMMANDS_CHANGED 推精确覆盖。不 markSessionActive（N5 的 DB 存活判据已放行）。
-      void startCommandProbe(sessionId, mainWindow);
+      // hb10-CMD-10（加重）：10s 节流——指纹比对每次重新为真 + 探测中反复返回 stale 时，
+      // 无节流会反复 spawn/abort 探测可能永不完成；探测中幂等由 startCommandProbe 的 N3 互斥兜底。
+      const now = Date.now();
+      if (now - lastProbeOnlyAt >= 10_000) {
+        lastProbeOnlyAt = now;
+        void startCommandProbe(sessionId, mainWindow);
+      }
     }
     // 返回值统一由分流给出：per-session 快照 / 兜底 cache 副本 / stale 克隆 / loading 默认。
     return decision.snapshot;
@@ -472,10 +560,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       }
 
       // 会话级互斥 + 活 query 拒绝，均在落库前。
-      if (chatSendLocks.has(sessionId) || getActiveProcess(sessionId)) {
+      if (isChatSendLocked(sessionId) || getActiveProcess(sessionId)) {
         throw new Error('当前回合仍在执行，请等待结束或中断后重试');
       }
-      chatSendLocks.add(sessionId);
+      acquireChatSendLock(sessionId);
       locked = true;
 
       const resolved = assertAttachmentsReadyForSend(sessionId, payload.attachmentIds);
@@ -546,6 +634,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
           logger.debug(`[chat-exit-fallback] session=${sessionId} 旧回合迟到 exit 被代际守卫拦截（新回合在途）`);
           return;
         }
+        // hb12-P2-2（终态重构）：显式终态优先——result/合成 aborted 已结算（knownOutcome 置位）
+        // 时兜底 no-op；无终态信息才按退出码分类（0=真成功退出，null=系统杀/无 code 维持 error
+        // 现状语义，其余非 0=error）。不变量：任何路径不得把「已中断」记成 success。
+        const known = getKnownTurnOutcome(sessionId);
+        if (known) return;
         noteTurnOutcome(sessionId, code === 0 ? 'success' : 'error', mainWindow);
       });
       // sendMessage 同步路径只负责把 pending 交给 runQuery；真正 SDK 失败走事件流，不在此 IPC 回滚。
@@ -592,7 +685,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       logger.error('Failed to send message', error);
       throw error;
     } finally {
-      if (locked) chatSendLocks.delete(sessionId);
+      if (locked) releaseChatSendLock(sessionId);
     }
   });
 
@@ -614,7 +707,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       mode = null;
     }
     const effective = resolveEffectivePermissionMode(mode as PermissionMode | null, getConfig().permissionMode);
-    return setRunningQueryPermissionMode(sessionId, effective);
+    const changed = await setRunningQueryPermissionMode(sessionId, effective);
+    // hb10 P2-2：档位变更成功即失效本会话记忆的全部 allow-session 放行（小本本清账）——
+    // 切档后同工具重新弹窗，防新档位（尤其 plan）继承旧档记忆的裸 allow 越权。
+    if (changed) clearSessionPermissionBook(sessionId);
+    return changed;
   });
 
   ipcMain.handle(IPC_CHANNELS.INTERACTION_RESPOND, async (_event, response) => {
@@ -675,6 +772,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 已升格为 message 的附件仍有引用，保留。
     // v3（语义表 #10）：删除后若该会话已无未暂停 pending → 取消倒计时转 standby；仍有 → 倒计时继续。
     const task = taskRepo.getTask(taskId);
+    // hb10-ATT-05：状态守卫——仅待执行任务可删除（与面板只展示 pending 语义对齐；
+    // running 任务删除走先中断后删的两步，本期不做），防删除熔断队列。
+    if (!task || task.status !== 'pending') {
+      throw new Error('仅待执行任务可删除');
+    }
     const attachmentIds = taskRepo.deleteTask(taskId);
     await cleanupDetachedAttachments(attachmentIds);
     if (task) drainCountdownIfNoRunnable(task.sessionId, mainWindow);
@@ -734,6 +836,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       title: '选择附件（图片 / 文档 / 文件）',
     });
     if (result.canceled || !result.filePaths.length) return { attachments: [], errors: [] };
+    // hb10-ATT-06：一次最多 10 个附件——多选超出部分截断（暂存即限量）。
+    if (result.filePaths.length > 10) result.filePaths = result.filePaths.slice(0, 10);
 
     const attachments: AttachmentSummary[] = [];
     const errors: Array<{ filename: string; message: string }> = [];
@@ -757,7 +861,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         attachments.push(staged);
       } catch (e) {
         // 逐项收集失败：部分成功时 UI 仍展示成功项 + 集中提示失败项（错误文案来自业务校验，不含内部路径）。
-        errors.push({ filename, message: e instanceof Error ? e.message : String(e) });
+        // hb10-ATT-07：错误文案脱敏——FK/ENOENT 类内部错误串（可能含绝对路径）不出主进程，原文仅 logger。
+        const rawMessage = e instanceof Error ? e.message : String(e);
+        const safeMessage = /ENOENT|no such file|SQLITE_CONSTRAINT|FOREIGN KEY/i.test(rawMessage)
+          ? '部分附件保存失败（可能已被删除）'
+          : rawMessage;
+        if (safeMessage !== rawMessage) logger.warn(`[attachment-pick] sanitized error: ${rawMessage}`);
+        errors.push({ filename, message: safeMessage });
       }
     }
     return { attachments, errors };
@@ -766,6 +876,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(
     IPC_CHANNELS.ATTACHMENT_STAGE_BYTES,
     async (_event, input: StageAttachmentBytesInput): Promise<AttachmentSummary> => {
+      // hb10-ATT-09：主进程字节上界——超过 32MiB 早退拒绝（不进校验/落盘链路）。
+      if (input && input.bytes instanceof Uint8Array && input.bytes.byteLength > 32 * 1024 * 1024) {
+        throw new Error('附件超过 32MiB 上限');
+      }
       if (
         !input ||
         typeof input.sessionId !== 'string' ||
