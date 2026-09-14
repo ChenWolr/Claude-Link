@@ -2,6 +2,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Session } from '../../../shared/types/session';
 import { isValidThinkingLevel } from '../../../shared/types/thinking';
 import { isValidPermissionMode } from '../../../shared/permission-resolver';
+import { isAutoSessionName } from '../../../shared/auto-session-name';
 import { getConnection } from '../connection';
 import { normalizeSearchText } from '../../utils/search-normalizer';
 import { normalizeDbTime } from '../../../shared/time';
@@ -104,6 +105,15 @@ export function updateSession(
     Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride' | 'lastEffectiveEffort'>
   >,
 ): Session | null {
+  // hb10-SMG-09：IPC 竞态防线（主进程侧复用 shared 判据）——仅拦截「写入自动形态名覆盖
+  // 非自动名」方向：迟到的自动命名（analyzeTopic/附件名/物化名）不得抹掉用户手动名；
+  // 用户手动改名（非自动形态）与「自动名→新自动名」照常放行。
+  if (partial.name !== undefined && isAutoSessionName(partial.name)) {
+    const existing = getSession(id);
+    if (existing && !isAutoSessionName(existing.name)) {
+      partial = { ...partial, name: undefined };
+    }
+  }
   const updates: string[] = [];
   const values: Record<string, unknown> = { id };
 

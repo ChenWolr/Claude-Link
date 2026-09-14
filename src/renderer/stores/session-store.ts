@@ -15,14 +15,15 @@ import {
   type SessionDisplayStatus,
   type SessionStatus,
 } from '../../shared/session-display-status';
-import { resolveContextWindow } from '../../shared/model-context-windows';
+import { lookupUserContextWindow, resolveContextWindowForSession } from '../../shared/model-context-windows';
 import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../../shared/context-usage';
 import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';
 import { computeTurnStartIndex } from '../../shared/turn-boundary';
-import { isAutoSessionName } from '../../shared/auto-session-name';import { useConfigStore } from './config-store';
+import { isAutoSessionName, isMaterializableAutoName, maxAutoSessionNumber } from '../../shared/auto-session-name';import { useConfigStore } from './config-store';
 import { useClaudePlanStore } from './claude-plan-store';
 import { useCommandStore } from './command-store';
 import { useChatDraftStore } from './chat-draft-store';
+import { useProviderStore } from './provider-store';
 
 // C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
 export interface BackgroundTask {
@@ -95,8 +96,9 @@ export interface ContextStatsView {
 
 // post-turn 官方 /context 探针持久化的 last-known → canonical 预填（Task 3 Step 3）。
 // 重启/切回会话时若 DB 有 last_context_used 且 renderer 尚无 canonical 值，预填数字
-// 并诚实标注 stale + source='native-context' + samplePhase='post-turn'——重启后无新
-// telemetry，契约不允许冒充 fresh（S12 实证语义保持）。会话内新 payload 到达即覆盖。
+// 并诚实标注 stale + source='unavailable'（hb13-v 批C 注释纠偏：CTX-V02 改函数体时
+// 头注释漏改）+ samplePhase='post-turn'——重启后无新 telemetry，契约不允许冒充 fresh。
+// 会话内新 payload 到达即覆盖。
 function buildPersistedCanonical(session: Session): CanonicalContextState | null {
   const used = session.lastContextUsed;
   if (typeof used !== 'number' || !Number.isFinite(used) || used < 0) return null;
@@ -116,7 +118,9 @@ function buildPersistedCanonical(session: Session): CanonicalContextState | null
     turnCacheReadTokens: null,
     turnCacheCreationTokens: null,
     turnOutputTokens: null,
-    source: 'native-context',
+    // hb10-CTX-V01/V02：持久化预填诚实标注 unavailable——快照值是「上次会话记录」而非
+    // 确认的当前来源（native/runtime），诊断语义纯化（freshness 仍 stale 表达时效）。
+    source: 'unavailable',
     freshness: 'stale',
     consistency: 'unavailable',
     diagnostic: '上次会话记录值，等待刷新',
@@ -289,9 +293,20 @@ export const useSessionStore = defineStore('session', {
     contextStats(state): ContextStatsView | null {
       if (!state.activeSession) return null;
       const alias = state.activeSession.modelOverride || state.activeSession.model;
-      const windowSize = resolveContextWindow({
-        lastContextWindow: state.contextLastWindow,
-        alias,
+      // hb10-CTX-02：分母单源化——resolveContextWindowForSession（与主进程 spawn 同源
+      // 的纯函数）替换 byAlias 直查，模型 ID 会话（反查别名）分母不再恒 200k。
+      // hb13-v B7（F-1）：分母优先级恢复「用户 contextWindowByAlias 覆盖 > contextLastWindow
+      // > 默认 200k」（HEAD 契约顺序）——旧实现把 contextLastWindow 提到 ?? 左侧，SDK 误报
+      // 200k 会短路用户 1M 覆盖。lookupUserContextWindow（别名直查 + advancedJson 反查，
+      // 与主进程注入同源）非 undefined 即用户显式覆盖，优先于上报值。
+      const userOverride = lookupUserContextWindow({
+        aliasOrModel: alias,
+        advancedJson: useConfigStore().config.advancedJson,
+        contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
+      });
+      const windowSize = userOverride ?? state.contextLastWindow ?? resolveContextWindowForSession({
+        aliasOrModel: alias,
+        advancedJson: useConfigStore().config.advancedJson,
         contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
       });
       const c = state.canonicalContext;
@@ -321,9 +336,20 @@ export const useSessionStore = defineStore('session', {
       } catch (error) {
         this.error = error instanceof Error ? error.message : '加载会话失败';
       }
-      // 重新加载意味着退出搜索态，清空搜索视图。
-      this.searchResults = null;
-      this.searchQuery = '';
+      // hb10-SMG-03：仅在无搜索词时清搜索态——搜索中的自动命名/主题回调触发的 reload
+      // 不得把用户的搜索结果清掉（原实现无条件清，自动命名到达=搜索态消失）。
+      if (!this.searchQuery) {
+        this.searchResults = null;
+        this.searchQuery = '';
+      }
+    },
+    // hb10-SMG-03/V02：就地更新某会话字段（sessions 与 searchResults 双列表同步）——
+    // 主题回调/改名等轻量刷新走这里，不再整表 reload（避免搜索态被清/列表闪烁）。
+    patchSessionInLists(id: string, patch: Partial<Session>) {
+      this.sessions = this.sessions.map((s) => (s.id === id ? { ...s, ...patch } : s));
+      if (this.searchResults) {
+        this.searchResults = this.searchResults.map((s) => (s.id === id ? { ...s, ...patch } : s));
+      }
     },
     // —— 暂态会话（新会话延迟持久化）——
     // 点击「新会话」不再落库：构造 renderer-only 暂态对象占据 activeSession，首条消息发送时经
@@ -400,7 +426,16 @@ export const useSessionStore = defineStore('session', {
       if (!transient?.transient) return this.activeSession;
       try {
         const draftIds = (useChatDraftStore().getAttachments(transient.id) ?? []).map((a) => a.id);
-        const session = await window.claudeLink.createSession(`会话 ${this.sessions.length + 1}`, {
+        // hb10-SMG-01+08：物化名——暂态期间用户改过名（非自动形态）原样透传；仍是自动形态时
+        // 取「最大自动序号+1」（sessions.length+1 在删除中间会话后会与现存自动名撞号）。
+        // hb13-v A5：判定改用 isMaterializableAutoName 两形态并集——暂态默认名「新会话」不匹配
+        // isAutoSessionName 的「会话 N」形态，旧判据把全部新会话当「用户改过名」透传落库，
+        // 自动命名全链失效（所有新会话永远叫「新会话」）。
+        const materializedName =
+          transient.name && !isMaterializableAutoName(transient.name)
+            ? transient.name
+            : `会话 ${maxAutoSessionNumber(this.sessions.map((s) => s.name)) + 1}`;
+        const session = await window.claudeLink.createSession(materializedName, {
           id: transient.id,
           workingDir: transient.workingDir,
           providerOverride: transient.providerOverride ?? undefined,
@@ -485,6 +520,12 @@ export const useSessionStore = defineStore('session', {
       } catch {
         // session may have no messages yet
       }
+      // hb10 P2-3：读取侧同步——切会话时重拉供应商快照，触发器按最新 lastUsed 解析显示，
+      // 与实际 spawn 的解析（会话 override > 最近使用 > 库首）同源一致。
+      void useProviderStore().ensureReload();
+      // hb10-SMG-06：物化回补——目标会话仍为自动名且恰 1 条 user 消息（首轮）时补触发
+      // 主题分析（物化 await 窗口切走会漏触发；此处消息已加载，条件不满足时为 no-op）。
+      this.maybeAnalyzeTopicForFirstUserMessage(this.messages.find((m) => m.role === 'user') ?? null);
     },
     async deleteSession(id: string) {
       // 乐观更新：先从 UI 移除（列表/搜索态/activeSession/执行状态），让会话瞬间从侧栏消失，
@@ -526,6 +567,12 @@ export const useSessionStore = defineStore('session', {
       // review-v3 High-2：已删会话的 context 代际记录一并清理（防内存泄漏；会话已删，
       // 主进程不会再发该会话的 CONTEXT_UPDATE，无需保留 known generation 拒收旧值）。
       delete this.contextQueryGenerations[id];
+      // hb10-SMG-05：删除运行中会话的幽灵任务卡/工具耗时/压缩态/思考峰值瞬态
+      //（对齐 switchSession 清单——全局 map，删除后残留会在当前视图显示已死会话的任务卡）。
+      this.toolProgress = {};
+      this.backgroundTasks = {};
+      this.compacting = false;
+      this.thinkingTokens = null;
       // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
       const planStore = useClaudePlanStore();
       const prevPlan = planStore.planBySession[id];
@@ -608,10 +655,16 @@ export const useSessionStore = defineStore('session', {
         if (updated) {
           this.activeSession = updated;
           this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+          // hb10-SMG-03/V02 + hb13-v 批C 修正（F7）：原 patch {name} 对模型选用恒 no-op
+          //（updateSession 写的是 override，name 不变）——改 patch 全量 updated 对象，
+          // 搜索视图的 override 字段一并同步（显示一致性；选择器/spawn 原本读 activeSession/DB 不受影响）。
+          this.patchSessionInLists(updated.id, updated);
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '更新会话模型失败';
       }
+      // hb10 P2-3：写入侧同步——主进程已 recordLastUsed，重拉快照刷新触发器显示态。
+      void useProviderStore().ensureReload();
     },
     // 会话级工作空间：写入 session.workingDir，spawn 时生效；同时记入最近历史便于复用。
     async setActiveSessionWorkingDir(dir: string | null) {
@@ -619,7 +672,14 @@ export const useSessionStore = defineStore('session', {
       // 暂态会话：先写内存（原位变更保单例引用），物化时随 SessionCreateSpec 一并落库；目录照记历史。
       if (this.activeSession.transient) {
         this.activeSession.workingDir = dir;
-        if (dir) this.recentWorkspaces = await window.claudeLink.addRecentWorkspace(dir);
+        // hb12-SMG-02：历史记录失败只影响历史，不影响工作目录切换本身。
+        if (dir) {
+          try {
+            this.recentWorkspaces = await window.claudeLink.addRecentWorkspace(dir);
+          } catch {
+            /* 历史失败静默 */
+          }
+        }
         return;
       }
       try {
@@ -628,7 +688,14 @@ export const useSessionStore = defineStore('session', {
           this.activeSession = updated;
           this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
         }
-        if (dir) this.recentWorkspaces = await window.claudeLink.addRecentWorkspace(dir);
+        // hb12-SMG-02：历史记录独立 try/catch（失败只影响历史）。
+        if (dir) {
+          try {
+            this.recentWorkspaces = await window.claudeLink.addRecentWorkspace(dir);
+          } catch {
+            /* 历史失败静默 */
+          }
+        }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '更新工作空间失败';
       }
@@ -637,12 +704,16 @@ export const useSessionStore = defineStore('session', {
     // spawn 时经 resolveEffectivePermissionMode 回落为实际档后经 --permission-mode 生效。
     async setActiveSessionPermissionMode(mode: Session['permissionMode']) {
       if (!this.activeSession) return;
+      // hb10-PERM-02：入口捕获稳定 sessionId 全程复用——await 往返期间用户可能切走，
+      // 消息发送链路的回写/控制请求不得发到切换后的 activeSession（竞态窗发错会话；
+      // hb13-v 批C：原「:647 处」行号引用已漂移，去行号化）。
+      const sessionId = this.activeSession.id;
       if (this.activeSession.transient) {
         this.activeSession.permissionMode = mode;
         return;
       }
       try {
-        const updated = await window.claudeLink.updateSession(this.activeSession.id, { permissionMode: mode });
+        const updated = await window.claudeLink.updateSession(sessionId, { permissionMode: mode });
         if (updated) {
           this.activeSession = updated;
           this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
@@ -651,7 +722,10 @@ export const useSessionStore = defineStore('session', {
         // 回落「下一条消息生效」——新 query 读上面已落库的 session.permissionMode。
         // catch 静默回落：控制请求失败不影响已写入的会话档，最坏退化为下一条生效。
         try {
-          await window.claudeLink.setRunningPermissionMode(this.activeSession.id, mode);
+          // hb10-PERM-02：回写前比对——仍是发起时的会话才发控制请求。
+          if (this.activeSession?.id === sessionId) {
+            await window.claudeLink.setRunningPermissionMode(sessionId, mode);
+          }
         } catch {
           // 静默回落（IPC 不可达等极端情况）
         }
@@ -725,7 +799,10 @@ export const useSessionStore = defineStore('session', {
         const gate = shouldAcceptContextPayload(this.contextQueryGenerations[payload.sessionId], payload.queryGeneration);
         if (!gate.accept) return;
         this.contextQueryGenerations[payload.sessionId] = gate.nextKnownGeneration;
-        // P2-10：后台会话的探针/runtime fresh 数据回填 sessions 列表对象——否则驻留会话 A 时
+// review-v4 Medium-2：字段完整性协议校验——canonical 字段缺省（undefined）即协议错误，
+        // 拒收，不得与 prev state 拼接成混合状态（无数据必须显式 null，由主进程构造保证）。
+        if (!hasCompleteCanonicalFields(payload)) return;
+// P2-10：后台会话的探针/runtime fresh 数据回填 sessions 列表对象——否则驻留会话 A 时
         // 会话 B 的 post-turn 探针结果被整体丢弃，切回 B 时 switchSession 从列表旧对象预填
         // canonicalContext（旧值/待刷新）。带 live 占用值的 payload 才回填（turn-usage-only
         // 事件 currentContextUsedTokens=null，红线：turn usage 永不驱动圆环，照旧不回填）。
@@ -734,14 +811,27 @@ export const useSessionStore = defineStore('session', {
           listItem.lastContextUsed = payload.currentContextUsedTokens;
           listItem.lastContextUsedCapacity = payload.contextWindowCapacityTokens ?? listItem.lastContextUsedCapacity ?? null;
           listItem.lastContextUsedAt = payload.refreshedAt ?? Date.now();
+          // hb12-CTX-02（收紧）：仅携带 live capacity 的 payload（runtime/探针）回填窗口——
+          // estimated payload（turn-usage 缩水兜底值 200k）跳过，防把缩水值写进列表。
+          const liveWindow = typeof payload.windowSize === 'number' && payload.windowSize > 0
+            && payload.source !== 'estimated-turn-usage' ? payload.windowSize : null;
+          if (liveWindow != null) {
+            // hb10-CTX-08（只增不减）：早期事件不得降级真实窗口（modelUsage 到达即权威，
+            // 此处 estimated 源已被上方排除；剩余 live 源只升不降——探针/runtime 均为
+            // 真实测量，缩小只可能来自模型Usage 精确化，由 fresh 覆盖路径处理）。
+            const prevRealWindow = listItem.lastContextWindow;
+            listItem.lastContextWindow = prevRealWindow != null && prevRealWindow > 0
+              ? Math.max(prevRealWindow, liveWindow)
+              : liveWindow;
+          }
         }
+        // 注意：回填必须位于下方 activeSession 判定之前（后台会话也要回填，P2-10 语义）。
         if (this.activeSession?.id !== payload.sessionId) return;
-        // review-v4 Medium-2：字段完整性协议校验——canonical 字段缺省（undefined）即协议错误，
-        // 拒收，不得与 prev state 拼接成混合状态（无数据必须显式 null，由主进程构造保证）。
-        if (!hasCompleteCanonicalFields(payload)) return;
+
         // 真实窗口容量交给 state（provenance）；windowSize/percent 由 contextStats getter 派生。
-        // 用户按别名设置（contextWindowByAlias）优先级高于 payload.windowSize，由 getter 内
-        // resolveContextWindow 处理，避免 SDK 误报 200k 覆盖用户设置的 1M。
+        // hb13-v B7（F-1 注释面同步）：getter 分母优先级为「用户 contextWindowByAlias 覆盖
+        //（lookupUserContextWindow 别名直查+advancedJson 反查）> 本值（contextLastWindow 上报）
+        // > 默认 200k」——payload.windowSize（SDK 上报）只是第二级，不再覆盖用户设置的 1M。
         this.contextLastWindow = payload.windowSize;
         // Task 9：canonical 单一真相源。当前窗口主值只读 canonical 字段；turn usage 单列。
         // 关键：turn-usage-only 事件（message/result，currentContextUsedTokens=null）不得把
@@ -1000,6 +1090,8 @@ export const useSessionStore = defineStore('session', {
         if (updated) {
           this.activeSession = updated;
           this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
+          // hb10-SMG-03/V02：改名同步搜索视图中的同名项。
+          this.patchSessionInLists(updated.id, { name: updated.name });
         }
       } catch (error) {
         this.error = error instanceof Error ? error.message : '重命名失败';
@@ -1030,49 +1122,65 @@ export const useSessionStore = defineStore('session', {
       this.turnStartIndex = computeTurnStartIndex(this.messages);
 
       // Trigger topic analysis for first user message if session name is auto-generated
+      // hb10-SMG-06：触发逻辑抽为 action（switchSession 物化回补共用同一实现）。
+      if (isNew) this.maybeAnalyzeTopicForFirstUserMessage(message);
+    },
+    /** hb10-SMG-06：首轮自动命名触发——仅自动名 × 恰 1 条 user 消息时触发。
+     *  正常路径由 addMessage（isNew）调用；物化 await 期间切走的会话由 switchSession
+     *  加载消息后回补（该窗口乐观消息未入列，原实现会漏触发导致永远保持自动名）。 */
+    maybeAnalyzeTopicForFirstUserMessage(message: Message | null) {
+      // hb10-SMG-06：首条触发条件保留原字面（恰 1 条 user 消息，tdd-bugfix-topic-thinking-leak 契约钉）。
+      const isFirstUserTurn = this.messages.filter((m) => m.role === 'user').length === 1;
       if (
-        isNew &&
-        message.role === 'user' &&
-        this.messages.filter((m) => m.role === 'user').length === 1 &&
-        isAutoSessionName(this.activeSession?.name)
+        !message ||
+        message.role !== 'user' ||
+        message.sessionId !== this.activeSession?.id ||
+        !isFirstUserTurn ||
+        !isAutoSessionName(this.activeSession?.name)
       ) {
-        const sessionId = this.activeSession.id;
-        const textContent = message.content.trim();
-        const firstName = message.attachments?.[0]?.filename?.trim();
-        if (textContent) {
-          // 有文字：LLM 概括主题（仅传正文文字，不传附件 bytes/路径）。
-          window.claudeLink.analyzeTopic(sessionId, textContent).then((topic) => {
-            if (topic) {
-              // Only update if still on the same session
-              // F4：发送瞬间到主题返回之间用户可能已手动重命名——迟到的主题不覆盖
-              // （与主进程 topic-analyzer 写前重查同门槛）。H3：判据收紧为
-              // isAutoSessionName 精确形态，「会话备份」等自然命名一律让位。
-              if (this.activeSession?.id === sessionId && isAutoSessionName(this.activeSession.name)) {
-                this.activeSession.name = topic;
-              }
-              this.loadSessions();
+        return;
+      }
+      const sessionId = this.activeSession.id;
+      const textContent = message.content.trim();
+      const firstName = message.attachments?.[0]?.filename?.trim();
+      if (textContent) {
+        // 有文字：LLM 概括主题（仅传正文文字，不传附件 bytes/路径）。
+        window.claudeLink.analyzeTopic(sessionId, textContent).then((topic) => {
+          if (topic) {
+            // Only update if still on the same session
+            // F4：发送瞬间到主题返回之间用户可能已手动重命名——迟到的主题不覆盖
+            // （与主进程 topic-analyzer 写前重查同门槛）。H3：判据收紧为
+            // isAutoSessionName 精确形态，「会话备份」等自然命名一律让位。
+            if (this.activeSession?.id === sessionId && isAutoSessionName(this.activeSession.name)) {
+              this.activeSession.name = topic;
             }
-          }).catch(() => {
-            // Silently ignore topic analysis failures (fallback is applied by main process)
-          });
-        } else if (firstName) {
-          // 附件-only：文件名即标题素材，直接截断使用，不喂 LLM——
-          // 孤立文件名会被 LLM 误判为「没有对话内容」而回复客套话，反而劣化标题。
-          const topic = firstName.replace(/\s+/g, ' ').slice(0, 15);
-          // H3：DB 写前同门槛——当前名已非「会话 N」自动形态（用户已手动命名）则跳过
-          // DB 写，不让附件名覆盖手动名。与上方触发门槛构成双保险，防未来重构在本分支
-          // 插入 await 后打开竞态窗口（触发门槛判定的是分支入口瞬间）。
-          if (!isAutoSessionName(this.activeSession?.name)) return;
-          window.claudeLink.updateSession(sessionId, { name: topic }).then((updated) => {
-            // F4：附件名命名同样加门槛——覆盖视图前重查当前名仍是自动形态。
-            if (updated && this.activeSession?.id === sessionId && isAutoSessionName(this.activeSession.name)) {
-              this.activeSession.name = updated.name;
+            // hb13-v B10.1（session-mgmt F4）：列表 patch 同门槛——主进程写前门拒绝（用户已改名）
+            // 时返回的 topic 不得写进列表名（旧实现无条件 patch，侧栏与 DB/activeSession 分叉）。
+            const listItem = this.sessions.find((s) => s.id === sessionId);
+            if (listItem && isAutoSessionName(listItem.name)) {
+              this.patchSessionInLists(sessionId, { name: topic });
             }
-            this.loadSessions();
-          }).catch(() => {
-            // ignore
-          });
-        }
+          }
+        }).catch(() => {
+          // Silently ignore topic analysis failures (fallback is applied by main process)
+        });
+      } else if (firstName) {
+        // 附件-only：文件名即标题素材，直接截断使用，不喂 LLM——
+        // 孤立文件名会被 LLM 误判为「没有对话内容」而回复客套话，反而劣化标题。
+        const topic = firstName.replace(/\s+/g, ' ').slice(0, 15);
+        // H3：DB 写前同门槛——当前名已非「会话 N」自动形态（用户已手动命名）则跳过
+        // DB 写，不让附件名覆盖手动名。与上方触发门槛构成双保险，防未来重构在本分支
+        // 插入 await 后打开竞态窗口（触发门槛判定的是分支入口瞬间）。
+        if (!isAutoSessionName(this.activeSession?.name)) return;
+        window.claudeLink.updateSession(sessionId, { name: topic }).then((updated) => {
+          // F4：附件名命名同样加门槛——覆盖视图前重查当前名仍是自动形态。
+          if (updated && this.activeSession?.id === sessionId && isAutoSessionName(this.activeSession.name)) {
+            this.activeSession.name = updated.name;
+          }
+          this.patchSessionInLists(sessionId, { name: updated?.name ?? topic });
+        }).catch(() => {
+          // ignore
+        });
       }
     },
     appendStream(text: string) {

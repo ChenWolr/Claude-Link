@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue';
+import { ref, watch, onMounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
@@ -107,6 +107,15 @@ function onSearchInput() {
     store.searchSessions(q);
   }, 250);
 }
+
+// hb12-SMG-03：query 唯一存 store——本地 ref 仅作输入缓冲；store 变化（SessionsPage 搜索、
+// loadSessions 条件清搜索态等）经 watch 回写本地，两侧搜索框与空态判断保持一致。
+watch(
+  () => store.searchQuery,
+  (q) => {
+    searchQuery.value = q;
+  },
+);
 
 function handleSearchClear() {
   searchQuery.value = '';
@@ -217,6 +226,12 @@ async function confirmDelete(session: { id: string; name: string }) {
             :title="statusLabel(session.id)"
           ></span>
           <span class="session-link__name">{{ session.name }}</span>
+          <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge -->
+          <span
+            v-if="interactionStore.pendingRemoteCountBySession[session.id]"
+            class="session-link__pending"
+            title="该会话有待确认的弹窗"
+          >⏳</span>
           <button
             v-if="!batchMode"
             type="button"
@@ -488,6 +503,13 @@ async function confirmDelete(session: { id: string; name: string }) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* hb10-PERM-05：后台 pending 弹窗 badge */
+.session-link__pending {
+  flex: none;
+  font-size: 0.75rem;
+  line-height: 1;
 }
 
 .session-link__status {

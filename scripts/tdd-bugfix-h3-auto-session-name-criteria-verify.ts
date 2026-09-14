@@ -21,7 +21,7 @@
 import { strict as assert } from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { isAutoSessionName } from '../src/shared/auto-session-name';
+import { isAutoSessionName, isMaterializableAutoName } from '../src/shared/auto-session-name';
 
 const repoRoot = path.resolve(__dirname, '..');
 const read = (rel: string): string => fs.readFileSync(path.join(repoRoot, rel), 'utf8');
@@ -63,7 +63,7 @@ console.log('=== H3-① 四处判据替换（接线契约）===');
   check('isAutoNameSlot 重查改走 isAutoSessionName', /isAutoSessionName\(sessionRepo\.getSession\(sessionId\)\?\.name\)/.test(analyzer));
   check('topic-analyzer 无残留前缀判据', !analyzer.includes(".startsWith('会话')"));
 
-  check('session-store 引入 isAutoSessionName', /import\s*\{\s*isAutoSessionName\s*\}\s*from\s*'(\.\.\/)+shared\/auto-session-name'/.test(sessionStore));
+  check('session-store 引入 isAutoSessionName', /import\s*\{[^}]*\bisAutoSessionName\b[^}]*\}\s*from\s*'(\.\.\/)+shared\/auto-session-name'/.test(sessionStore));
   const gateCount = (sessionStore.match(/isAutoSessionName\(/g) || []).length;
   check(`session-store 判据调用 ≥4 处（触发+LLM 视图+附件写前+附件视图，实际 ${gateCount} 处）`, gateCount >= 4);
   check('session-store 无残留前缀判据', !sessionStore.includes(".startsWith('会话')"));
@@ -96,6 +96,28 @@ console.log('=== 回归：F4 竞态守卫语义不弱化 ===');
   check('主进程两处出口仍各有守卫（实际 %s 处）'.replace('%s', String(gateCount)), gateCount >= 2);
   check('analyzeTopic(sessionId, textContent) 调用形态不变', sessionStore.includes('analyzeTopic(sessionId, textContent)'));
   check('附件名标题素材截断逻辑保留', sessionStore.includes("firstName.replace(/\\s+/g, ' ').slice(0, 15)"));
+}
+
+console.log('=== hb13-v A5：物化判定两形态并集 + 物化分支接线 ===');
+{
+  const sharedFn = read('src/shared/auto-session-name.ts');
+  const sessionStore = read('src/renderer/stores/session-store.ts');
+
+  check('isMaterializableAutoName 导出存在（两形态并集）', /export function isMaterializableAutoName\(name: string \| null \| undefined\): boolean \{/.test(sharedFn));
+  check('并集行为：暂态默认名「新会话」与「会话 N」均视为自动形态', () => {
+    assert.equal(isMaterializableAutoName('新会话'), true, '暂态默认名未并入');
+    assert.equal(isMaterializableAutoName('会话 3'), true);
+    assert.equal(isMaterializableAutoName(' 会话 3 '), true);
+    assert.equal(isMaterializableAutoName(' 会话 '), false);
+    assert.equal(isMaterializableAutoName('会话备份'), false, '用户自然命名被误并');
+    assert.equal(isMaterializableAutoName('新会话备份'), false);
+    assert.equal(isMaterializableAutoName(''), false);
+    assert.equal(isMaterializableAutoName(null), false);
+  });
+  check('materializeActiveTransient 物化分支改用 isMaterializableAutoName', /transient\.name && !isMaterializableAutoName\(transient\.name\)/.test(sessionStore));
+  check('session-store 引入 isMaterializableAutoName', /import\s*\{[^}]*\bisMaterializableAutoName\b[^}]*\}\s*from\s*'(\.\.\/)+shared\/auto-session-name'/.test(sessionStore));
+  const gateCount = (sessionStore.match(/isAutoSessionName\(/g) || []).length;
+  check(`既有 isAutoSessionName 判据门仍 ≥4 处（实际 ${gateCount} 处）`, gateCount >= 4);
 }
 
 console.log(`\nverify 结果：${pass} passed, ${fail} failed`);
