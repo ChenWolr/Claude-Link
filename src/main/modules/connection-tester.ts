@@ -7,7 +7,7 @@
 // Claude Link 不参与 CLI 逻辑，只验证「配置送进去 CLI 认不认」。
 
 import { spawn, execFile, type ChildProcess } from 'child_process';
-import { getConfig, getStoredProviderProfile, decryptProviderApiKey } from './config-manager';
+import { getConfig, getStoredProviderProfile, decryptProviderApiKey, DECRYPT_FAILED } from './config-manager';
 import { resolveExecutable } from './sdk-backend';
 import { buildSpawnEnv, type SessionModelOverride } from './cli-shared';
 import { classifyUpstreamError, upstreamFatalMessage } from '../../shared/upstream-errors';
@@ -56,12 +56,23 @@ function killTestChild(child: ChildProcess): void {
 }
 
 // OPT-4：测试隔离临时目录 best-effort 清理（子进程被杀后文件已释放；rm 失败静默）。
+// hb12-CFG-04：win32 taskkill 是异步火忘——紧随其后的同步 rm 会因句柄未释放失败泄漏。
+// 改为：立即尝试一次；失败延迟重试（250ms/1s/4s 三次），仍失败留给 OS 临时目录清理。
 function cleanupTestCwd(dir: string): void {
-  try {
-    fs.rmSync(dir, { recursive: true, force: true });
-  } catch {
-    // best-effort
+  const delays = [0, 250, 1000, 4000];
+  for (const ms of delays) {
+    try {
+      if (ms > 0) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+      return; // 成功即返回
+    } catch {
+      // 占用中：进入下一档延迟重试
+    }
   }
+  // 全部失败：留证（cl-test-* 在系统临时目录，OS 清理兜底）
+  console.warn('[connection-tester] 临时目录清理失败（已重试）：', dir);
 }
 
 // 中止指定行的在飞测试：杀进程 + 落定「已被取代」（promise 不悬挂，按钮不卡「测试中」）。
@@ -150,8 +161,11 @@ function executeCliTest(target: TestTarget): Promise<ProviderModelTestResult> {
   const child = spawn(exe, args, {
     cwd: testCwd,
     env: buildSpawnEnv(target.override),
-    stdio: ['pipe', 'pipe', 'pipe'],
+    // hb12-CFG-03：stdin ignore——prompt 已走 argv，未关闭管道使读 stdin 的子进程永挂；
+    // hb12-ENG-05：windowsHide——win32 防后台 CLI 测试闪控制台窗。
+    stdio: ['ignore', 'pipe', 'pipe'],
     shell: false,
+    windowsHide: true,
   });
   const key = `${target.providerId}::${target.model}`;
   // 同一行若已有在飞测试（IPC 直调兜底；渲染层同行 pending 已拦截），先中止旧的。
@@ -293,6 +307,11 @@ export async function runProviderModelTest(providerId: string, modelId: string):
   if (!profile) throw new Error('供应商不存在');
   if (!profile.models.some((m) => m.id === modelId)) throw new Error('模型不在该供应商的列表中');
   const apiKey = decryptProviderApiKey(profile);
+  // hb13-v B2（F-03）：解密哨兵按「未配置」fail-fast——损坏态不得带哨兵串真实 spawn 上游
+  //（旧行为：守卫穿透 → 401 噪音），对齐面板「密钥损坏，请重新输入」语义。
+  if (apiKey === DECRYPT_FAILED) {
+    return { success: false, message: '密钥损坏，请重新输入', detail: `供应商「${profile.name}」的 API Key 解密失败（换机/重装后常见），请重新输入密钥。`, durationMs: 0 };
+  }
   if (!apiKey) {
     return { success: false, message: '未填写 API Key', detail: `供应商「${profile.name}」未配置 API Key，无法测试。`, durationMs: 0 };
   }

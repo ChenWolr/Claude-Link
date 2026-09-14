@@ -14,6 +14,7 @@ import * as path from 'path';
 import type { AppConfig } from '../../shared/types/config';
 import { logger } from '../utils/logger';
 import { buildClaudeSettingsProjection } from './claude-settings-projection';
+import { mergeProjectionWithFile, writeProjectionSnapshot } from './settings-projection-merge';
 
 export interface WriteSettingsResult {
   ok: boolean;
@@ -33,7 +34,12 @@ export function writeClaudeSettings(workingDir: string | null, config: AppConfig
   const file = path.join(dir, 'settings.local.json');
 
   const settings = buildClaudeSettingsProjection(config);
-  const content = JSON.stringify(settings, null, 2);
+  // hb12-CFG-01：投影合并——快照 diff（CC 授权保留 + CL 删除可撤销 + 自家键照写），
+  // 替换原整体覆盖（每次 CL 保存丢 CC 会话期「don't ask again」授权与用户手改内容）。
+  // rawProjection = CL 本次实际投影，写入快照供下轮 diff 判定外部增删。
+  const rawProjection = JSON.parse(JSON.stringify(settings)) as Record<string, unknown>;
+  const merged = mergeProjectionWithFile(workingDir, rawProjection);
+  const content = JSON.stringify(merged, null, 2);
 
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -48,7 +54,25 @@ export function writeClaudeSettings(workingDir: string | null, config: AppConfig
     const tmp = path.join(dir, `.settings.local.json.${process.pid}.${Date.now()}.tmp`);
     try {
       fs.writeFileSync(tmp, content, 'utf8');
-      fs.renameSync(tmp, file);
+      // hb10-CFG-04：rename 受杀软/索引器占用时瞬时失败常见——3 次退避重试（10/50/100ms）
+      // 后仍失败才上抛（saveConfig 据此返回 projectionOk:false，UI 可见「已保存（投影失败）」）。
+      const backoffs = [10, 50, 100];
+      let renamed = false;
+      let lastErr: unknown;
+      for (const ms of backoffs) {
+        try {
+          fs.renameSync(tmp, file);
+          renamed = true;
+          break;
+        } catch (renameErr) {
+          lastErr = renameErr;
+          const until = Date.now() + ms;
+          while (Date.now() < until) { /* 同步忙等（本模块全同步 API） */ }
+        }
+      }
+      if (!renamed) throw lastErr;
+      // hb12-CFG-01：落盘成功后写入快照（记录 CL 本次实际投影；失败仅记日志）。
+      writeProjectionSnapshot(dir, rawProjection);
     } catch (writeErr) {
       // P3-9：写失败 best-effort 清掉 .tmp 垃圾（每次保存都会生成唯一名，不清则累积）；
       // 清理自身失败静默（主错误照常上抛给外层日志）。

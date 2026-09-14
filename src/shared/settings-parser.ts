@@ -134,8 +134,12 @@ function parseAdvancedEnv(advancedJson: string): Record<string, unknown> {
     if (adv && adv.env && typeof adv.env === 'object' && !Array.isArray(adv.env)) {
       return adv.env as Record<string, unknown>;
     }
-  } catch {
-    // ignore malformed JSON
+  } catch (err) {
+    // hb12-CFG-07：非法 JSON 警告（env 读取降级可诊断）。
+    // hb13-v 批C（item13）：本模块为主/渲染双端共享（config-store 渲染层消费），不能导入
+    // electron logger——以 console.warn 承载、警告带错误信息与原文头部片段（「键名」在
+    // JSON 损坏时不可解析，取 head 片段供定位）。
+    console.warn(`[settings-parser] malformed advancedJson env block: ${err instanceof Error ? err.message : String(err)}; head=${(advancedJson || '').slice(0, 80)}`);
   }
   return {};
 }

@@ -3,11 +3,11 @@
 //
 // 多供应商库上线后，连接字段（供应商/key/url）的真源是 provider-store（主进程 ProviderProfile）；
 // 本 store 仍承载行为/外观字段与 advancedJson（全局 Claude 设置）的编辑与自动保存。
-// updatingFromJson：历史防循环标志（旧表单 watch 消费），现无任何读取点，仅导入回填时例行
+// hb12-CFG-09：updatingFromJson 死标志已删除（原历史防循环标志，无读取点）
 // 置位/释放；自动保存靠 ConfigPage 的 configSnapshot 快照比对防回写循环。可删（连同置位逻辑）。
 
 import { defineStore } from 'pinia';
-import { nextTick, ref } from 'vue';
+import { ref } from 'vue';
 
 // ModelAlias 类型定义在 shared/types/config（供 shared 层 AppConfig 与渲染层共用）。
 import type { ModelAlias } from '../../shared/types/config';
@@ -17,6 +17,7 @@ import type { CliDetectionResult } from '../../shared/types/cli';
 import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
 import { parseClaudeSettings } from '../../shared/settings-parser';
+import { useInteractionStore } from './interaction-store'; // hb10-CFG-05：advancedJson 覆盖前确认
 
 // H1（F5 重做）：设置保存失败跨卸载可感知标志。ConfigPage 组件局部 saveStatus 在页面卸载后
 // 无渲染、其 watch 随 setup 停止——失败对用户不可见，且重进页被 loadConfig 用主进程旧值
@@ -68,7 +69,6 @@ export const useConfigStore = defineStore('config', {
     error: null as string | null,
     importedFields: new Set<string>(),
     // 历史防循环标志：现无任何读取点（防回写循环由 ConfigPage 的 configSnapshot 快照比对承担）
-    updatingFromJson: false,
     // 配置/数据落盘目录（点 4：让用户知道配置存在哪）
     storageInfo: null as { userData: string; config: string; workspaces: string; db: string } | null,
     // Task 3 Step 5：原生 settings 诊断摘要（脱敏视图，供 UI 核验 user/project/local 实际加载来源）
@@ -123,6 +123,8 @@ export const useConfigStore = defineStore('config', {
       this.nativeSettingsDiagnostic = null;
     },
     async saveConfig() {
+      // hb10-CFG-08：真互斥——在途保存未落定时重入直接返回（防并发双写竞态）。
+      if (this.savingConfig) return;
       this.savingConfig = true;
       this.error = null;
       try {
@@ -131,6 +133,14 @@ export const useConfigStore = defineStore('config', {
         // 必须先深拷贝成纯普通对象再过 IPC。
         const plainConfig: AppConfig = JSON.parse(JSON.stringify(this.config));
         this.config = await window.claudeLink.saveConfig(plainConfig);
+        // hb10-CFG-09：主进程拒收非法 workingDirectory（不存在/非目录）时按旧值保存——回传与
+        // 所送不一致即给 notice（保存成功非硬失败；不比对 null/空串：清空目录是合法操作）。
+        if (
+          plainConfig.workingDirectory &&
+          plainConfig.workingDirectory !== this.config.workingDirectory
+        ) {
+          this.error = `工作目录「${plainConfig.workingDirectory}」不存在或不是目录，已保留原值`;
+        }
         // H1：保存成功清失败标志（App.vue 的 toast 只在 false→true 边沿弹，不重复打扰）。
         lastSaveFailed.value = false;
         // 主进程 saveConfig 末尾已把配置投影写入 <工作目录>/.claude/settings.local.json。
@@ -166,6 +176,22 @@ export const useConfigStore = defineStore('config', {
     async importSettings(filePath: string) {
       try {
         const extracted = await window.claudeLink.importSettings(filePath);
+        // hb10-CFG-05：advancedJson 是整体替换（现有 permissions/hooks/env 会被整个换掉），
+        // 替换前必须确认；与现值相同/为空则无需打扰。
+        if (
+          extracted.advancedJson &&
+          extracted.advancedJson !== '{}' &&
+          extracted.advancedJson !== this.config.advancedJson
+        ) {
+          const interactionStore = useInteractionStore();
+          const ok = await interactionStore.requestConfirm({
+            title: '导入设置',
+            message: '将覆盖现有高级配置（advancedJson 含 permissions/hooks/env），确定继续？',
+            confirmText: '覆盖',
+            cancelText: '取消',
+          });
+          if (!ok) return;
+        }
         this.applyExtractedSettings(extracted);
       } catch (error) {
         this.error = error instanceof Error ? error.message : '导入失败';
@@ -206,8 +232,7 @@ export const useConfigStore = defineStore('config', {
       advancedJson?: string;
       contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
     }): void {
-      // JSON→表单回填：例行置位/释放（历史防循环标志，现无读取点；防回写循环靠 configSnapshot 快照比对）
-      this.updatingFromJson = true;
+      // JSON→表单回填（hb12-CFG-09：updatingFromJson 死标志已删——防回写循环靠 configSnapshot 快照比对）
       if (extracted.apiKey) {
         this.config.apiKey = extracted.apiKey;
         this.importedFields.add('apiKey');
@@ -228,9 +253,6 @@ export const useConfigStore = defineStore('config', {
         this.config.contextWindowByAlias = extracted.contextWindowByAlias;
         this.importedFields.add('contextWindowByAlias');
       }
-      void nextTick(() => {
-        this.updatingFromJson = false;
-      });
     },
   },
 });

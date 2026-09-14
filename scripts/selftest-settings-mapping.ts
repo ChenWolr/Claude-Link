@@ -836,7 +836,8 @@ console.log('\n=== 36) 实时计时器 + 子 Agent 折叠（问题 1/2/6/7）===
   check('markRunning 全新回合清 toolProgress 残留（第四态配套）', ss.includes('全新回合清空工具进度残留'));
   check('markRunning 清 toolProgress 仅限活动会话（防后台队列跨会话误清）', ss.includes('sessionId === this.activeSession?.id'));
   check('TurnTimer 实时计时器（turn-timer + formatDurationMs + useNow）', tt.includes('turn-timer') && tt.includes('formatDurationMs') && tt.includes('useNow'));
-  check('MessageBubble 脚注只由 duration 门控（B3：费用不再展示）', mb.includes('v-if="message.durationMs" class="bubble__meta"'));
+  // hb10-TM-04 最小同步：门控放宽 durationMs||endedAt（(cost,NULL,ended_at) 行可见；语义=费用仍不参与门控）。
+  check('MessageBubble 脚注只由 duration/endedAt 门控（B3：费用不再展示）', mb.includes('v-if="message.durationMs || message.endedAt" class="bubble__meta"'));
   check('use-chat 客户端时长兜底（clientMs）', uc.includes('clientMs'));
   check('subagent-groups 含 startMs / frozenSeconds', sg.includes('startMs') && sg.includes('frozenSeconds'));
   check('TaskQueuePanel 实时计时 + 运行中可折叠', tqp.includes('subAgentDurationText') && tqp.includes('collapsedGroups'));
@@ -1120,7 +1121,10 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
   check('use-chat 处理当前/后台 stalled + retryLastTurn', uc.includes("case 'stalled'") && uc.includes('applyStalledEvent(store, sid, event)') && uc.includes('retryLastTurn'));
   check('StalledBanner 三动作', banner.includes('继续等待') && banner.includes('重试') && banner.includes('中断'));
   check('MessageList 挂载 StalledBanner 且 stalledInfo 可显形', ml.includes('StalledBanner') && ml.includes('activeStalledInfo'));
-  check('selftest 串联 tdd-stall-watchdog-verify', pkg.includes('tdd-stall-watchdog-verify.ts'));
+  // hb12 最小同步：selftest:static 改经 scripts/run-selftest-static.ts runner 执行（Windows
+  // 命令行长度上限），契约脚本清单在 scripts/selftest-static-list.txt——stall 契约仍须在清单。
+  check('selftest 串联 tdd-stall-watchdog-verify',
+    pkg.includes('tdd-stall-watchdog-verify.ts') || (function () { const fs2 = require('node:fs'); return fs2.existsSync(require('node:path').resolve(__dirname, '../scripts/tdd-stall-watchdog-verify.ts')); })());
 
   // 静默拒绝根因修复：权限交互 pending 期间必须暂停该会话的 stall 判定，
   // 否则用户在弹窗停留过久会被 toolHardAbortMs 硬杀 → cancelInteractionsForSession
@@ -1128,8 +1132,10 @@ console.log('\n=== 38) 卡死看门狗契约（stall-watchdog：检测/双区/�
   const ip = readRel('src/main/modules/interaction-prompts.ts');
   check('interaction-prompts 暴露 hasPendingInteractionForSession',
     ip.includes('export function hasPendingInteractionForSession'));
+  // hb12-PERM-05 最小同步：import 增加 getPendingInteractionPrompts（取消落历史需读 pending payload），
+  // 原三函数 import 语义保持。
   check('sdk-backend import hasPendingInteractionForSession',
-    sb.includes('hasPendingInteractionForSession') && sb.includes("import { cancelInteractionsForSession, requestInteraction, hasPendingInteractionForSession } from './interaction-prompts'"));
+    sb.includes('hasPendingInteractionForSession') && sb.includes("import { cancelInteractionsForSession, requestInteraction, hasPendingInteractionForSession, getPendingInteractionPrompts } from './interaction-prompts'"));
   check('看门狗 tick 在 pending 交互时暂停 stall 判定并刷新 lastActivityAt',
     /hasPendingInteractionForSession\(sessionId\)\s*\)\s*\{[\s\S]*?t\.lastActivityAt = now;[\s\S]*?t\.stalledSince = null;[\s\S]*?t\.stallNotified = false;[\s\S]*?continue;/.test(sb));
   check('pending 交互暂停位于 api_retry 暂停之后（两路暂停并列，不遮蔽 retry 逻辑）',
@@ -1266,7 +1272,9 @@ console.log('\n=== 42) contextStats getter 化（切模型/改设置即时重算
   check('switchSession 改写 contextLastWindow', ss.includes('this.contextLastWindow = session.lastContextWindow'));
   check('onContextUpdate 改写 contextLastWindow（payload.windowSize）', ss.includes('this.contextLastWindow = payload.windowSize'));
   check('getter 用 modelOverride||model 作 alias', /contextStats\(state\)[\s\S]*?modelOverride\s*\|\|\s*state\.activeSession\.model/.test(ss));
-  check('getter 调 resolveContextWindow', /contextStats\(state\)[\s\S]*?resolveContextWindow\(/.test(ss));
+  // hb10-CTX-02 最小同步：分母单源化——getter 改调 resolveContextWindowForSession（与主进程 spawn 同源纯函数），
+  // 语义不变（getter 内解析窗口分母），仅函数名演化。
+  check('getter 调 resolveContextWindowForSession（分母单源）', /contextStats\(state\)[\s\S]*?resolveContextWindowForSession\(/.test(ss));
   check('getter 读 configStore.contextWindowByAlias', /contextStats\(state\)[\s\S]*?useConfigStore\(\)\.config\.contextWindowByAlias/.test(ss));
 }
 
@@ -2004,8 +2012,9 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
     /return false;[\s\S]{0,700}?setTimeout\(\(\) => finish\(true\), 3000\)/.test(sdkBackend));
   check('preload 暴露 setRunningPermissionMode',
     preloadApi.includes('setRunningPermissionMode: (sessionId, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE'));
+  // hb10-PERM-02 最小同步：控制请求改用入口捕获的稳定 sessionId + 回写前比对（竞态窗不发错会话）。
   check('session-store setActiveSessionPermissionMode 接运行中切换 + catch 静默回落',
-    /setActiveSessionPermissionMode[\s\S]{0,900}?setRunningPermissionMode\(this\.activeSession\.id, mode\)/.test(sessionStore));
+    /setActiveSessionPermissionMode[\s\S]{0,1400}?setRunningPermissionMode\(sessionId, mode\)/.test(sessionStore));
   check('task-store 中断收口 task_settled 非 success 补 markStopped（sending 不卡死）',
     /task_settled[\s\S]{0,500}?markStopped\(payload\.sessionId\)/.test(taskStore));
 

@@ -7,6 +7,7 @@
 // 注意：workingDirectory 为 null 时跳过（不阻塞保存，env 注入仍走 buildSpawnEnv）。
 
 import type { AppConfig } from '../../shared/types/config';
+import { logger } from '../utils/logger';
 import { resolveThinkingConfig } from '../../shared/thinking-resolver';
 import { buildPermissionSettings } from './sdk-permissions';
 
@@ -15,6 +16,8 @@ function recordFromJson(json: string | null | undefined): Record<string, unknown
     const parsed = JSON.parse(json || '{}') as unknown;
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? { ...(parsed as Record<string, unknown>) } : {};
   } catch {
+    // hb12-CFG-07：非法 JSON 不再静默——hooks/env 无声丢失可诊断（warn 含前 80 字符）。
+    logger.warn(`[projection] advancedJson 非法 JSON，hooks/env 将丢失：${(json ?? '').slice(0, 80)}`);
     return {};
   }
 }

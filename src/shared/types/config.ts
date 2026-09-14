@@ -8,6 +8,12 @@ export interface AppConfig {
   providerName: string;
   providerNote: string;
   apiKey: string;
+  // hb10 P2-4：全局 apiKey safeStorage 解密失败时为 true（renderer 出口 apiKey 置空串）；
+  // 未损坏时省略（undefined）。
+  apiKeyBroken?: boolean;
+  // hb10-CFG-04：最近一次 saveConfig 的 settings.local.json 投影是否成功（渲染层保存徽标用）。
+  // 仅 saveConfig 返回值携带；CONFIG_GET 返回值不含（省略=undefined）。
+  projectionOk?: boolean;
   apiBaseUrl: string;
   defaultModel: string;
   advancedJson: string;
@@ -91,6 +97,9 @@ export interface StoredProviderProfile extends ProviderProfile {
 export interface ProviderProfileView extends ProviderProfile {
   apiKeyMasked: string;
   hasApiKey: boolean;
+  // hb10 P2-4：safeStorage 解密失败（换机/重装）= 密钥损坏——列表行显示「密钥损坏，请重新输入」。
+  // 未损坏时省略（undefined），与 hasApiKey=true 的正常态区分。
+  apiKeyBroken?: boolean;
 }
 
 // 保存档案的输入：apiKey 仅在创建/修改时以明文进入主进程，落盘前加密；
@@ -102,6 +111,9 @@ export interface ProviderSaveInput {
   note?: string;
   apiBaseUrl: string;
   apiKey?: string | null;
+  // hb13-v B4（F-06 / hb12-CFG-02）：显式清除通道——true=抹掉已存密文（渲染层暂无入口，
+  // 供直调/后续 UI 使用）；省略=false=不触碰；apiKey:'' 仍为「不改动」（语义不变）。
+  clearApiKey?: boolean;
   models?: ProviderModel[];
 }
 

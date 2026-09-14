@@ -2,28 +2,17 @@
 // 最近工作空间历史：记录用户用过的工作目录，便于在新建/切换会话时快速复用。
 // 独立 electron-store（claude-link-workspaces.json），与配置分离；最多保留 12 条，去重、新的置顶。
 
-import ElectronStoreModule from 'electron-store';
-import { app } from 'electron';
+import { createSafeStore } from '../utils/safe-store';
 
 const MAX_ENTRIES = 12;
 
-const ElectronStore =
-  (ElectronStoreModule as unknown as { default?: typeof ElectronStoreModule }).default ??
-  ElectronStoreModule;
-
-const ElectronStoreCtor = ElectronStore as unknown as new (options?: {
-  name?: string;
-  projectName?: string;
-  defaults?: { recentDirs: string[] };
-}) => { store: { recentDirs: string[] }; set: (v: { recentDirs: string[] }) => void };
-
-type WorkspaceStore = InstanceType<typeof ElectronStoreCtor>;
+type WorkspaceStore = { store: { recentDirs: string[] }; set: (v: { recentDirs: string[] }) => void };
 let store: WorkspaceStore | null = null;
 
 function getStore(): WorkspaceStore {
-  store ??= new ElectronStoreCtor({
+  // hb12-SMG-01（hb10-CFG-V01 合并面）：坏 JSON 自愈（safe-store helper 统一实现）。
+  store ??= createSafeStore<WorkspaceStore>({
     name: 'claude-link-workspaces',
-    projectName: app.getName(),
     defaults: { recentDirs: [] },
   });
   return store;
