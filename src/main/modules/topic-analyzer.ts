@@ -1,12 +1,13 @@
 import https from 'https';
 import http from 'http';
-import { getConfig, getProviderModelSources } from './config-manager';
+import { getConfig, getProviderModelSources, DECRYPT_FAILED } from './config-manager';
 import * as sessionRepo from '../database/repositories/session-repo';
 import { logger } from '../utils/logger';
 import { buildAnthropicApiUrl, isOfficialAnthropicBaseUrl } from './api-url';
 import { resolveConfiguredDefaultModel } from '../../shared/settings-parser';
 import { resolveSessionModel } from '../../shared/session-model';
 import { isAutoSessionName } from '../../shared/auto-session-name';
+import { maskApiKey } from '../../shared/provider-library';
 import {
   TOPIC_ATTEMPT_LADDER,
   buildTopicRequestBody,
@@ -36,6 +37,12 @@ function isAutoNameSlot(sessionId: string): boolean {
   return isAutoSessionName(sessionRepo.getSession(sessionId)?.name);
 }
 
+// hb10-SMG-02/V01（hb12-SMG-07 同函数）：总 Deadline 30s（复用既有 10s×2 语义上界）——
+// 断连/慢滴请求使单请求 10s 超时失效（悬挂 promise），总 Deadline 保证 analyzeTopic 有界返回；
+// 响应累积 >1MiB 即 destroy+reject，防恶意/异常端点无限吞内存。
+const TOPIC_TOTAL_DEADLINE_MS = 30 * 1000;
+const TOPIC_RESPONSE_MAX_BYTES = 1024 * 1024;
+
 export async function analyzeTopic(sessionId: string, firstMessage: string): Promise<string | null> {
   const config = getConfig();
 
@@ -54,7 +61,9 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   // 解析到供应商时凭据/端点一律取该供应商（key 为空即无凭据）；只有库为空（老字段链）
   // 才回落 config 老字段——两者永不交叉。
   const apiKey = resolved.provider ? resolved.provider.apiKey : config.apiKey;
-  if (!apiKey) {
+  // hb13-v B2（F-03）：解密哨兵按未配置处理——供应商分支的 apiKey 已由 getProviderModelSources
+  // 守卫为空串，此处兜住老字段链；损坏态直接跳过分析走首句兜底（不空耗 HTTP）。
+  if (!apiKey || apiKey === DECRYPT_FAILED) {
     logger.warn('No API key configured; skipping topic analysis');
     return null;
   }
@@ -85,38 +94,56 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   // 超时/5xx/网络错误/JSON 解析失败 → 不重试，直达首句兜底。
   let spec: TopicAttemptSpec | null = TOPIC_ATTEMPT_LADDER[0];
   let specIndex: 0 | 1 = 0;
-  while (spec) {
-    const requestBody = buildTopicRequestBody(model, firstMessage, spec);
-    try {
-      const response = await makeHttpRequest(url, requestBody, headers, 10000);
-      const verdict = extractTopicCandidate(JSON.parse(response) as TopicResponseShape);
-      if (verdict.ok && verdict.topic) {
-        // 出口①（LLM 主题）：F4 写前门保留
-        if (isAutoNameSlot(sessionId)) {
-          sessionRepo.updateSession(sessionId, { name: verdict.topic });
+  // hb10-SMG-02/V01：总 Deadline 竞速——到点按超时路径走首句兜底（与单请求超时同归）。
+  let deadlineReject: (e: Error) => void = () => {};
+  const overallDeadline = new Promise<never>((_, reject) => { deadlineReject = reject; });
+  const deadlineTimer = setTimeout(() => deadlineReject(new Error(`Topic analysis overall deadline (${TOPIC_TOTAL_DEADLINE_MS}ms)`)), TOPIC_TOTAL_DEADLINE_MS);
+  try {
+    while (spec) {
+      const requestBody = buildTopicRequestBody(model, firstMessage, spec);
+      try {
+        const response = await Promise.race([makeHttpRequest(url, requestBody, headers, 10000), overallDeadline]);
+        const verdict = extractTopicCandidate(JSON.parse(response) as TopicResponseShape);
+        if (verdict.ok && verdict.topic) {
+          // 出口①（LLM 主题）：F4 写前门保留
+          if (isAutoNameSlot(sessionId)) {
+            sessionRepo.updateSession(sessionId, { name: verdict.topic });
+          }
+          return verdict.topic;
         }
-        return verdict.topic;
-      }
-      logger.warn(`Topic analysis response rejected (${verdict.reason}), escalating thinking budget`);
-      spec = nextAttemptSpec(specIndex, 'validation');
-      specIndex = 1;
-    } catch (error) {
-      if (
-        error instanceof HttpStatusError && error.status >= 400 && error.status < 500 && specIndex === 0
-      ) {
-        logger.warn(`Topic analysis got HTTP ${error.status} (thinking param incompatibility suspected), retrying without thinking field`);
-        spec = nextAttemptSpec(0, 'http_4xx');
+        logger.warn(`Topic analysis response rejected (${verdict.reason}), escalating thinking budget`);
+        spec = nextAttemptSpec(specIndex, 'validation');
         specIndex = 1;
-        continue;
+      } catch (error) {
+        if (
+          error instanceof HttpStatusError && error.status >= 400 && error.status < 500 && specIndex === 0
+        ) {
+          logger.warn(`Topic analysis got HTTP ${error.status} (thinking param incompatibility suspected), retrying without thinking field`);
+          spec = nextAttemptSpec(0, 'http_4xx');
+          specIndex = 1;
+          continue;
+        }
+        logger.warn(`Topic analysis failed, using heuristic fallback: ${error instanceof Error ? error.message : String(error)}`);
+        break;
       }
-      logger.warn(`Topic analysis failed, using heuristic fallback: ${error instanceof Error ? error.message : String(error)}`);
-      break;
     }
+  } finally {
+    // 到点前正常返回/中断时清计时器，防 deadline 拒绝泄漏成 unhandledRejection。
+    clearTimeout(deadlineTimer);
   }
 
   // 兜底：取首句前 15 个字符，压缩空白避免标题里出现换行。
   // 出口②（首句兜底）：与修复前逐字等价（F4/H3 写前门保留）。
-  const fallback = firstMessage.replace(/\s+/g, ' ').trim().slice(0, 15);
+  // hb10-SMG-07：fallback 为空串（消息全是空白）时不写库，保持原名并返回 null。
+  // hb10-SHL-07：兜底名过 maskApiKey——用户粘贴密钥当首句时不落明文（掩码后再截断）。
+  // hb13-v A4：①空白压缩正则必须 /\s+/g（旧实现 /s+/g 反斜杠丢失按字母 s 替换，兜底标题
+  // 所有小写 s 变空格且落库）；②无条件掩码降为条件掩码——maskApiKey 把任意非空输入变
+  // sk-…**** 形态，正常兜底标题全部被毁，仅首句呈 API key 形态（sk- 前缀+≥8 位键字符）才掩码。
+  const rawFallback = firstMessage.replace(/\s+/g, ' ').trim().slice(0, 15);
+  const fallback = (/^sk-[A-Za-z0-9_\-]{8,}/.test(rawFallback) ? maskApiKey(rawFallback) : rawFallback).slice(0, 15);
+  if (!fallback) {
+    return null;
+  }
   if (isAutoNameSlot(sessionId)) {
     sessionRepo.updateSession(sessionId, { name: fallback });
   }
@@ -142,7 +169,20 @@ function makeHttpRequest(
       },
       (res) => {
         let data = '';
-        res.on('data', (chunk) => { data += chunk; });
+        let bytes = 0;
+        res.on('data', (chunk) => {
+          // hb12-SMG-07：响应累积 >1MiB 即断开拒绝（防异常端点无限吞内存）。
+          bytes += chunk.length;
+          if (bytes > TOPIC_RESPONSE_MAX_BYTES) {
+            req.destroy(new Error(`Topic response exceeds ${TOPIC_RESPONSE_MAX_BYTES} bytes`));
+            return;
+          }
+          data += chunk;
+        });
+        // hb10-SMG-V01：Node22/Electron35 实测断连只 emit 'aborted' 不 emit 'error'——
+        // 不监听 aborted 会让 promise 永久悬挂（该请求的 10s 超时挂在 req 上对响应流无效）。
+        res.on('error', reject);
+        res.on('aborted', () => reject(new Error('response aborted')));
         res.on('end', () => {
           if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
             resolve(data);

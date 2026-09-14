@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../stores/session-store';
 import { useInteractionStore } from '../stores/interaction-store';
@@ -91,6 +91,15 @@ function onSearchInput() {
   }, 250);
 }
 
+// hb12-SMG-03：query 唯一存 store——本地 ref 仅作输入缓冲；store 变化（侧栏搜索、
+// loadSessions 条件清搜索态等）经 watch 回写本地，两侧搜索框与空态判断保持一致。
+watch(
+  () => store.searchQuery,
+  (q) => {
+    searchQuery.value = q;
+  },
+);
+
 function handleSearchClear() {
   searchQuery.value = '';
   store.searchSessions('');
@@ -179,7 +188,7 @@ async function openSession(session: { id: string }) {
         </button>
       </div>
       <div v-if="!store.displayedSessions.length" class="empty">
-        {{ searchQuery.trim() ? '未找到匹配的会话' : '暂无会话' }}
+        {{ store.searchQuery ? '未找到匹配的会话' : '暂无会话' }}
       </div>
     </div>
   </section>

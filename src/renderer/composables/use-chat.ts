@@ -300,6 +300,19 @@ function createChat() {
     },
   );
 
+  // hb10-SMG-V03/ENG-09：删除会话联动清 lastFailedBySession——闭包状态无法被 store 的
+  // deleteSession 直接清理（导入方向 store←chat 会成环），watch sessions 列表做差集：
+  // 会话从列表消失（删除）后其 lastFailed 记录一并清掉，删除后「重新编辑发送」不再复活死会话。
+  watch(
+    () => store.sessions.map((s) => s.id).join(','),
+    () => {
+      const alive = new Set(store.sessions.map((s) => s.id));
+      for (const sid of Object.keys(lastFailedBySession.value)) {
+        if (!alive.has(sid)) delete lastFailedBySession.value[sid];
+      }
+    },
+  );
+
   // 根因修复：全局监听，在 App.vue onMounted 调一次。生命周期与 app 等长。
   function startListening(): void {
     window.claudeLink.removeChatListener();
@@ -316,11 +329,21 @@ function createChat() {
 
   function isStallRecoveryEvent(event: CliEvent): boolean {
     if (event.type === 'stream_event' || event.type === 'message' || event.type === 'tool_progress') return true;
-    if (event.type === 'system') return event.subtype !== 'init';
+    // hb12-ENG-04：api_retry 是失败信号（对齐主进程 stall-watchdog 口径），不作恢复信号——
+    // 否则 stalled 横幅被重试事件清掉，与「实际仍在失败重试」矛盾。
+    if (event.type === 'system') return event.subtype !== 'init' && event.subtype !== 'api_retry';
     return false;
   }
   function clearStalledForSession(sessionId: string, event: CliEvent): void {
     if (isStallRecoveryEvent(event)) store.clearStalled(sessionId);
+  }
+
+  // hb10-ENG-04：watchdog 优雅窗误报横幅回收——watchdog 硬杀的 error 事件先到并置横幅，
+  // 若 ≤6s 内成功 result 到达（回合实际已完成，仅卡死检测误判），横幅属误报，清除不残留。
+  const WATCHDOG_ERROR_GRACE_MS = 6000;
+  let watchdogErrorAt = 0;
+  function isWatchdogErrorText(t: string | null): boolean {
+    return !!t && (t.includes('判定模型服务卡死') || t.includes('判定卡死'));
   }
 
   // 问题 1：不再丢弃非当前会话的事件。后台执行的会话事件需要处理：
@@ -328,6 +351,12 @@ function createChat() {
   // - result/error/aborted: markStopped + 清快照（如果是当前会话还走正常结束流程）
   // - message/system: 主进程已落库，切回时 getSessionMessages 重载；渲染层只处理当前会话
   function handleEvent(payload: ChatEventPayload): void {
+    // hb12-SHL-03：通知点击导航事件——切换选中会话（store 层自愈：会话不存在时 switch no-op）。
+    if ((payload.event as { type: string }).type === 'navigate') {
+      const target = store.sessions.find((s) => s.id === payload.sessionId);
+      if (target) void store.switchSession(target);
+      return;
+    }
     if (payload.event.type === 'persisted_message' || payload.event.type === 'api_retry_terminal') {
       const isCurrent = !!store.activeSession && payload.sessionId === store.activeSession.id;
       const isExhausted = payload.event.type === 'persisted_message'
@@ -352,6 +381,8 @@ function createChat() {
     const isCurrent = !!store.activeSession && payload.sessionId === store.activeSession.id;
     clearStalledForSession(payload.sessionId, payload.event);
     if (!isCurrent) {
+      // hb12-SMG-05：已删除会话的后台事件直接丢弃（防幽灵 map 复活；窗口=一个 IPC 往返）。
+      if (!store.sessions.some((s) => s.id === payload.sessionId)) return;
       handleBackgroundEvent(payload);
       return;
     }
@@ -386,6 +417,17 @@ function createChat() {
         // 其余 system 子类型主进程已落库，切回时重载，这里跳过。
         if (event.subtype === 'api_retry') {
           applyApiRetryEvent(store, sid, event);
+          break;
+        }
+        // hb10-ENG-10（收窄）：后台任务卡片与前台同形 upsert（task_started/progress/notification）——
+        // 后台会话的任务卡片在切回前即可见；compacting/requesting 等瞬态仍跳过。
+        if (
+          event.subtype === 'task_started' ||
+          event.subtype === 'task_progress' ||
+          event.subtype === 'task_notification'
+        ) {
+          applyProgressEvent(store, event);
+          break;
         }
         break;
       }
@@ -395,6 +437,8 @@ function createChat() {
         break;
       }
       case 'result': {
+        // hb10-TM-07（收窄）：已删除的会话直接丢弃内存写（防幽灵 map 复活）。
+        if (!store.sessions.some((s) => s.id === sid)) break;
         // 后台会话成功完成：清中断兜底 + 标记完成（侧栏绿灯）。失败 result 走 markStopped。
         clearAbortTimer(sid);
         // B1：后台会话回合也要记耗时（切回/重启后 TurnTimer 完成态可显示）。
@@ -408,14 +452,17 @@ function createChat() {
           : (startedAt ? Date.now() - startedAt : null);
         const endedAt = Date.now();
         if (isSuccessfulCliResult(event)) {
-          store.setLastTurnMeta(sid, { durationMs: dur, endedAt });
-          // fire-and-forget：失败不阻塞回合收口（与前台同语义）。
-          window.claudeLink.recordTurnMeta(sid, {
-            messageId: null,
-            costUsd: typeof event.total_cost_usd === 'number' && event.total_cost_usd > 0 ? event.total_cost_usd : null,
-            durationMs: dur,
-            endedAt,
-          }).catch(() => {});
+          // hb10-TM-01（渲染层守卫）：turnStartedAt 已清（=已结算/已被新回合覆盖）时跳过 meta 写。
+          if (startedAt != null) {
+            store.setLastTurnMeta(sid, { durationMs: dur, endedAt });
+            // fire-and-forget：失败不阻塞回合收口（与前台同语义）。
+            window.claudeLink.recordTurnMeta(sid, {
+              messageId: null,
+              costUsd: typeof event.total_cost_usd === 'number' && event.total_cost_usd > 0 ? event.total_cost_usd : null,
+              durationMs: dur,
+              endedAt,
+            }).catch(() => {});
+          }
           store.markCompleted(sid);
         } else {
           store.markStopped(sid);
@@ -489,6 +536,10 @@ function createChat() {
         // 的 result 分支用同一 isErrResult 判断同步跳过，DB 与内存保持一致。
         if (!isErrResult) ensureResultMessage(event);
         attachResultMetadata(event);
+        // hb10-ENG-04：成功 result 到达且横幅为 watchdog 误报（≤6s 优雅窗）→ 清除。
+        if (isSuccessfulCliResult(event) && isWatchdogErrorText(error.value) && Date.now() - watchdogErrorAt <= WATCHDOG_ERROR_GRACE_MS) {
+          error.value = null;
+        }
         if (isErrResult) {
           error.value = resultErrorText(event);
           captureFailedMessage();
@@ -515,6 +566,8 @@ function createChat() {
         store.clearToolStream();
         store.setThinkingTokens(null);
         error.value = event.message;
+        // hb10-ENG-04：记录 watchdog 类文案置位时刻（供优雅窗误报回收判定）。
+        if (isWatchdogErrorText(event.message)) watchdogErrorAt = Date.now();
         captureFailedMessage();
         if (store.activeSession) {
           clearAbortTimer(store.activeSession.id);
@@ -870,6 +923,7 @@ function createChat() {
     // $0.0000）、duration 回落客户端计时（用户「把最终时间映射到耗时」诉求）。
     const cost = event.total_cost_usd;
     const duration = event.duration_ms;
+    let hitAssistant = false;
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const message = messages[i];
       // P3-1：parentAgentId 守卫先于 user 边界（continue 不 break，对齐 turnHasAssistantText 的
@@ -879,6 +933,7 @@ function createChat() {
       if (message.parentAgentId) continue;
       if (message.role === 'user') break;
       if (message.role === 'assistant') {
+        hitAssistant = true;
         message.costUsd = typeof cost === 'number' && cost > 0 ? cost : null;
         message.durationMs = typeof duration === 'number' && duration > 0 ? duration : clientMs;
         // B3：结束时刻随脚注即时可见（门控外——中断/错误回合的内存脚注行为保持不变）。
@@ -888,7 +943,9 @@ function createChat() {
         // false）才持久化——中断/错误回合不产生记录（对齐后台分支门控与 Session 字段注释），
         // 气泡内存脚注行为保持不变。durationMs 取刚算好的值（端点值或 clientMs 兜底）；
         // 无效耗时由 setLastTurnMeta/handler 的 P2-2 半写收口兜住（保持上一条有效记录）。
-        if (sid && isSuccessfulCliResult(event)) {
+        // hb10-TM-01（渲染层守卫）：turnStartedAt 已被 markCompleted 删除（=本回合已结算或
+        // 已被新回合覆盖）时，迟到旧 result 不再写 meta（防脏写新回合行/半截持久化）。
+        if (sid && isSuccessfulCliResult(event) && store.turnStartedAt[sid] != null) {
           const finalDuration = typeof message.durationMs === 'number' && message.durationMs > 0 ? message.durationMs : null;
           store.setLastTurnMeta(sid, { durationMs: finalDuration, endedAt });
           // fire-and-forget：失败不阻塞回合结束（内存态已在）；重启后该次记录缺失可接受。
@@ -901,6 +958,16 @@ function createChat() {
         }
         break;
       }
+    }
+    // hb10-TM-03：walk 未命中主流程 assistant 行（空回合/slash 回合）仍更新会话级 meta——
+    // handler 侧 fallback 找不到 assistant 行时只写 sessions 半边（现状已支持），同守卫（TM-01）。
+    if (sid && !hitAssistant && isSuccessfulCliResult(event) && store.turnStartedAt[sid] != null) {
+      window.claudeLink.recordTurnMeta(sid, {
+        messageId: null,
+        costUsd: typeof cost === 'number' && cost > 0 ? cost : null,
+        durationMs: clientMs,
+        endedAt,
+      }).catch(() => {});
     }
   }
 
@@ -967,6 +1034,12 @@ function createChat() {
       return true;
     } catch (e) {
       error.value = e instanceof Error ? e.message : '发送失败';
+      // hb10-SMG-12/ENG-03：回滚乐观 user 消息（主进程 CHAT_SEND 失败已删 DB 行）——
+      // 发送失败不再留幽灵气泡。乐观消息仅按 clientMessageId 定位（当前视图即归属会话；
+      // 切走视图由归属守卫本就未插入）。回滚后重算回合边界。
+      const optimisticIdx = store.messages.findIndex((m) => m.id === payload.clientMessageId);
+      if (optimisticIdx >= 0) store.messages.splice(optimisticIdx, 1);
+      store.turnStartIndex = computeTurnStartIndex(store.messages);
       // F3：必须用稳定 sessionId，不能用 store.activeSession（await 期间可能已切走）。
       store.markStopped(sessionId);
       return false;
@@ -1080,6 +1153,9 @@ function createChat() {
       }
     }
     // 卡死重试：重发最后一条用户消息（新回合新 clientMessageId）。
+    // hb12-SMG-06：显式清 turnStartedAt——残留的旧值会让新回合耗时计算（Date.now() - startedAt）
+    // 虚高（从上一卡死回合起算），且旧值守卫（TM-01）会误拒新回合 meta。
+    delete store.turnStartedAt[sid];
     await sendMessage({ text: last.content, attachmentIds, clientMessageId: crypto.randomUUID() });
   }
 

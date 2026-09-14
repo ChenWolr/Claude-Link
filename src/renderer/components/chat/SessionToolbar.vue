@@ -67,10 +67,10 @@ const PERMISSIONS: Array<{
   icon: PermIconKey;
 }> = [
   { value: null,                label: '跟随全局默认', desc: '使用设置页配置的全局默认权限档',              icon: 'follow' },
-  { value: 'default',           label: '默认模式', desc: '禁用手动确认等操作，适合普通使用',         icon: 'shield' },
-  { value: 'plan',              label: '规划模式', desc: '仅使用规划工具，生成计划用户审批后执行',   icon: 'list' },
-  { value: 'acceptEdits',       label: '代理模式', desc: '自动提交无创建/编辑，减少人为干预',         icon: 'bolt' },
-  { value: 'bypassPermissions', label: '自动模式', desc: '无任何限制，越过所有权限检查【谨慎使用】', icon: 'rocket' },
+  { value: 'default',           label: '默认模式', desc: '每次工具调用需手动确认',                     icon: 'shield' },
+  { value: 'plan',              label: '规划模式', desc: '仅规划，工具需审批',                       icon: 'list' },
+  { value: 'acceptEdits',       label: '代理模式', desc: '自动接受文件编辑，其余需确认',             icon: 'bolt' },
+  { value: 'bypassPermissions', label: '自动模式', desc: '跳过所有权限确认【谨慎使用】',             icon: 'rocket' },
 ];
 
 // 图标 SVG path（24×24，stroke 风格统一；仅权限面板菜单项使用，触发按钮的锁形图标为模板内独立 path）。
@@ -246,7 +246,7 @@ onUnmounted(() => {
              切档只对「切换后新发起」的工具请求即时生效——已在途的请求按旧档走完。
              自动模式（bypassPermissions）被 CLI 拒绝中途设置（须启动 flag），下一条生效——
              属 CLI 约束的已知例外，按用户要求不在界面上展示。 -->
-        <div class="perm-foot">对切换后新发起的工具请求即时生效</div>
+        <div class="perm-foot">对切换后新发起的工具请求即时生效；bypass 需下一条消息生效</div>
       </div>
     </div>
 
