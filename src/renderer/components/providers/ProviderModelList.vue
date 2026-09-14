@@ -18,8 +18,9 @@ const emit = defineEmits<{
 type TestState = 'idle' | 'pending' | 'ok' | 'fail';
 const testStates = reactive(new Map<string, TestState>());
 
+// hb12-PRV-05：直出原值 + 「out tok」标注（1024 除数取整误导）。
 function formatTokens(maxTokens: number): string {
-  return maxTokens > 0 ? `${Math.floor(maxTokens / 1024)}k tok` : '—';
+  return maxTokens > 0 ? `${maxTokens} out tok` : '—';
 }
 
 async function runRowTest(model: ProviderModel): Promise<void> {

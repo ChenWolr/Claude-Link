@@ -26,14 +26,18 @@ export function normalizeAnthropicModelsPayload(
   if (!Array.isArray(data)) return [];
   return data
     .map((model) => {
-      const m = model as { id?: unknown; display_name?: unknown; max_output_tokens?: unknown; max_tokens?: unknown };
+      const m = model as { id?: unknown; display_name?: unknown; max_output_tokens?: unknown; max_tokens?: unknown; context_length?: unknown };
       if (typeof m.id !== 'string' || !m.id.trim()) return null;
       return {
         id: m.id,
         name: typeof m.display_name === 'string' && m.display_name.trim() ? m.display_name : m.id,
         maxTokens:
           (typeof m.max_output_tokens === 'number' ? m.max_output_tokens : undefined) ??
-          (typeof m.max_tokens === 'number' ? m.max_tokens : 0),
+          (typeof m.max_tokens === 'number' ? m.max_tokens : undefined) ??
+          // hb13-v B5（hb12-PRV-04）：条目级形状探测——接受 x-api-key 却返回 OpenAI 形状条目
+          // 的网关（new-api/one-api 常见）缺 max_output_tokens/max_tokens，按 context_length
+          // 兜底；不再产出 0（显示「—/空」丢输出上限），Anthropic 先归一化也不再短路 OpenAI 端点信息。
+          (typeof m.context_length === 'number' ? m.context_length : 0),
       } satisfies ModelInfo;
     })
     .filter((m): m is ModelInfo => m !== null);
@@ -71,7 +75,8 @@ async function fetchModelsOnce(
   headers: Record<string, string>,
   normalize: (payload: unknown) => ModelInfo[],
 ): Promise<ModelInfo[]> {
-  const response = await fetch(url, { headers });
+  // hb10-PRV-07：15s 超时——挂起端点不再让查询按钮无限 loading（AbortSignal.timeout）。
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(15_000) });
   if (!response.ok) {
     const err = new Error(`HTTP ${response.status} ${response.statusText}`) as Error & { status?: number; body?: string };
     err.status = response.status;
@@ -88,7 +93,23 @@ async function fetchModelsOnce(
     : normalizeAnthropicModelsPayload(payload);
 }
 
-export async function fetchAvailableModels(
+// hb10-PRV-07：同供应商 in-flight 查询表（Promise 共享；完成后清除）。
+const inflightFetches = new Map<string, Promise<ModelInfo[]>>();
+
+export function fetchAvailableModels(
+  profile: Pick<ProviderProfile, 'id' | 'apiBaseUrl'>,
+  apiKey: string,
+  forceRefresh = false,
+): Promise<ModelInfo[]> {
+  // hb10-PRV-07：双击/并发单请求（复用在途 Promise；结束后清除）。
+  const existing = inflightFetches.get(profile.id);
+  if (existing) return existing;
+  const p = fetchAvailableModelsImpl(profile, apiKey, forceRefresh).finally(() => inflightFetches.delete(profile.id));
+  inflightFetches.set(profile.id, p);
+  return p;
+}
+
+async function fetchAvailableModelsImpl(
   profile: Pick<ProviderProfile, 'id' | 'apiBaseUrl'>,
   apiKey: string,
   forceRefresh = false,
