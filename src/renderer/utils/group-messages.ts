@@ -100,13 +100,18 @@ export function groupMessagesForRender(messages: RenderableMessage[]): RenderIte
     //   · review-v2 P1：init_write_skipped 是 /init 的独立文件副作用诊断，须独立展示（不进 fold）；
     //   · F5 复验发现：interaction_cancelled 是「弹窗被系统取消」的用户可见反馈（计划 §2.5.4
     //     红色系统消息），折进过程组会被淹没，须独立成条（MessageBubble bubble--error 红样式）；
+    //   · hb10-CHR-V01：短错误正文（isError 且 ≤100 字符，如 reasoning_replay 失败气泡）同样
+    //     豁免折叠——折进过程组会被淹没，独立成条保持可见；
     //   · user 消息是回合边界；
     //   · assistant 正文的「回合最终文本」受保护、「长正文」是结论性回复，均打断 fold。
     const isBreak =
       msg.processKind === 'system:init_write_skipped' ||
       msg.processKind === 'system:interaction_cancelled' ||
+      // hb13-v B10.3：system:error 与 system:aborted 家族同待遇——失败原因独立成条不被折没。
+      msg.processKind === 'system:error' ||
       // reasoning_replay 自动重试提示：韧性层的用户可见反馈，须独立展示（不进 fold）。
       msg.processKind === 'system:auto_retry' ||
+      (msg.isError === true && isAssistantBodyText(msg) && msg.content.trim().length <= PROCESS_NARRATION_TEXT_LIMIT) ||
       msg.role === 'user' ||
       (isAssistantBodyText(msg) && (protectedIds.has(msg.id) || !isShortNarration(msg)));
     if (isBreak) {

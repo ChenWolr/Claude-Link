@@ -7,23 +7,58 @@ export function useStream() {
   const displayThinking = ref('');
   const displayTool = ref('');
 
-  let contentTimer: ReturnType<typeof setTimeout> | null = null;
-  let thinkingTimer: ReturnType<typeof setTimeout> | null = null;
-  let toolTimer: ReturnType<typeof setTimeout> | null = null;
+  // hb12-CHR-01：节流（首条立即 + 50ms 间隔 + trailing）——流式增量高频触发时每 50ms 至多
+  // 上屏一次（替代原「每次都重排 50ms 防抖」：长流式下末帧延迟无上界），trailing 保证停更后
+  // 最后一帧不丢；空串直通（清 pending/timer 立即让位给已落库消息，不出现「流式块 + 已落库
+  // 消息」短暂重复）。像素 4 字节/帧级别的重渲频率也由此受控（StreamRenderer v-enrich 高频重渲）。
+  function makeThrottle(set: (v: string) => void): (v: string) => void {
+    const INTERVAL = 50;
+    let lastFire = 0;
+    let pending: string | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    return (value: string) => {
+      if (value === '') {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        pending = null;
+        set('');
+        return;
+      }
+      const now = Date.now();
+      const elapsed = now - lastFire;
+      if (elapsed >= INTERVAL) {
+        lastFire = now;
+        set(value);
+        return;
+      }
+      pending = value;
+      if (!timer) {
+        timer = setTimeout(() => {
+          timer = null;
+          lastFire = Date.now();
+          const v = pending;
+          pending = null;
+          if (v !== null) set(v);
+        }, INTERVAL - elapsed);
+      }
+    };
+  }
+  const pushContent = makeThrottle((v) => {
+    displayContent.value = v;
+  });
+  const pushThinking = makeThrottle((v) => {
+    displayThinking.value = v;
+  });
+  const pushTool = makeThrottle((v) => {
+    displayTool.value = v;
+  });
 
   watch(
     () => store.streamingContent,
     (content) => {
-      if (contentTimer) clearTimeout(contentTimer);
-      // 清空立即生效（不防抖）：回合结束/工具落库后流式归零，需立刻让出显示给已落库消息，
-      // 否则防抖 50ms 窗口内会出现「流式块 + 已落库消息」短暂重复。
-      if (content === '') {
-        displayContent.value = '';
-        return;
-      }
-      contentTimer = setTimeout(() => {
-        displayContent.value = content;
-      }, 50);
+      pushContent(content);
     },
     { immediate: true },
   );
@@ -31,14 +66,7 @@ export function useStream() {
   watch(
     () => store.streamingThinking,
     (content) => {
-      if (thinkingTimer) clearTimeout(thinkingTimer);
-      if (content === '') {
-        displayThinking.value = '';
-        return;
-      }
-      thinkingTimer = setTimeout(() => {
-        displayThinking.value = content;
-      }, 50);
+      pushThinking(content);
     },
     { immediate: true },
   );
@@ -46,14 +74,7 @@ export function useStream() {
   watch(
     () => store.streamingTool,
     (content) => {
-      if (toolTimer) clearTimeout(toolTimer);
-      if (content === '') {
-        displayTool.value = '';
-        return;
-      }
-      toolTimer = setTimeout(() => {
-        displayTool.value = content;
-      }, 50);
+      pushTool(content);
     },
     { immediate: true },
   );
