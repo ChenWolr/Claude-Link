@@ -70,7 +70,11 @@ check('启动即同步托盘（createWindow 后调用 syncTrayWithConfig）', /c
 check('托盘生命周期挂接配置保存回调 onConfigSaved(syncTrayWithConfig)', indexMain.includes('onConfigSaved(syncTrayWithConfig);'));
 check('syncTrayWithConfig：开关开→ensureTray（运行中托盘常驻可见）', /function syncTrayWithConfig\(\): void \{[\s\S]{0,120}ensureTray\(\);/.test(indexMain));
 check('syncTrayWithConfig：开关关且窗口可见→销毁托盘（tray.destroy）', indexMain.includes('tray.destroy();'));
-check('syncTrayWithConfig：窗口藏托盘时保留图标守卫（mainWindow.isVisible()）', /if \(tray && \(!mainWindow \|\| mainWindow\.isVisible\(\)\)\)/.test(indexMain));
+// hb12-SHL-02 最小同步：syncTrayWithConfig 守卫扩为 goneOrVisible（!mainWindow/isDestroyed/isVisible 合并短路），
+// 原语义「窗口藏托盘时保留图标」保持不变。
+check('syncTrayWithConfig：窗口藏托盘时保留图标守卫（goneOrVisible）', /if \(tray && goneOrVisible\)/.test(indexMain));
+// hb13-v 批C 补钉：改钉后 isVisible 分量失防——goneOrVisible 本体须含 isVisible()（三合一守卫不退化）。
+check('goneOrVisible 本体含 isVisible 分量', /const goneOrVisible = !mainWindow \|\| mainWindow\.isDestroyed\(\) \|\| mainWindow\.isVisible\(\);/.test(indexMain));
 check('close 处理器挂到 mainWindow.on(\'close\')', indexMain.includes("mainWindow.on('close', (event) => {"));
 check('close 守卫：quitting 或 minimizeToTray 关闭时放行（不拦截）', indexMain.includes('if (quitting || !getConfig().minimizeToTray) return;'));
 check('close 拦截：event.preventDefault()', indexMain.includes('event.preventDefault();'));
@@ -85,8 +89,10 @@ check('托盘图标路径按 packaged 区分（process.resourcesPath vs app.getA
 console.log('\n=== 6b) config-manager：保存后回调（托盘随开关实时增删） ===');
 check('config-manager 导出 onConfigSaved 订阅', configManager.includes('export function onConfigSaved('));
 // OPT-10/P3-6 同步：saveConfig 增加 getConfigForRenderer 说明与「掩码=不改动」注释后函数体变长，窗口 800→1400（断言语义不变）。
-check('saveConfig 末尾触发 emitConfigSaved()', /export function saveConfig[\s\S]{0,1400}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
-check('clearConfig 末尾触发 emitConfigSaved()', /export function clearConfig[\s\S]{0,200}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
+// hb10-CFG-04 同步：saveConfig 尾改为 return { ...getConfig(), projectionOk }（投影失败可见），尾形态钉随之演化（断言语义=emitConfigSaved 仍在末尾触发）。
+check('saveConfig 末尾触发 emitConfigSaved()', /export function saveConfig[\s\S]{0,1600}emitConfigSaved\(\);[\s\S]{0,120}return \{ \.\.\.getConfig\(\), projectionOk \};/.test(configManager));
+// hb13-v B4 同步：clearConfig 增补旧目录重投影+快照清理（约 +600 字符），断言窗 1100→1900（必要扩窗）。
+check('clearConfig 末尾触发 emitConfigSaved()', /export function clearConfig[\s\S]{0,1900}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
 check('回调异常不扩散（listener try/catch）', /for \(const listener of configSavedListeners\) \{[\s\S]{0,120}catch/.test(configManager));
 check('设置页文案提示「开启后托盘图标常驻右下角」', configPage.includes('开启后托盘图标常驻右下角'));
 
@@ -94,6 +100,9 @@ console.log('\n=== 7) 打包：托盘图标资源随包分发 ===');
 check('electron-builder 配置 extraResources 拷贝托盘图标', builder.includes('extraResources'));
 check('extraResources 源指向 resources/icon.png', builder.includes('from: "resources/icon.png"'));
 check('extraResources 目标为 icon.png（落入 process.resourcesPath）', builder.includes('to: "icon.png"'));
+// hb10 P2-15 同步：trayIcon 打包分支运行时查找路径钉为 resourcesPath/icon.png（与上方 extraResources 实际落点一致；
+// 原实现拼 <resourcesPath>/resources/icon.png 与落点错位致打包托盘空白——布局钉语义演化：钉「两侧一致」而非仅 builder 侧）。
+check('trayIcon 打包分支运行时查找 process.resourcesPath/icon.png（与 extraResources 落点一致）', indexMain.includes("join(base, 'icon.png')"));
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
