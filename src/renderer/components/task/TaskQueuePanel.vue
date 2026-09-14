@@ -77,7 +77,8 @@ function etaFor(task: Task): string | null {
   return taskEtaText(task, {
     status: taskStore.queueState.status,
     countdownRemaining: taskStore.queueState.countdownRemaining,
-    intervalSeconds: resolveQueueDelaySeconds(configStore.config.taskDelayMinutes),
+    // hb12-QUE-04：倒计时期优先用 countdown_started 快照（配置变更只影响下一轮）。
+    intervalSeconds: taskStore.queueState.intervalSeconds ?? resolveQueueDelaySeconds(configStore.config.taskDelayMinutes),
     runnableIndex,
   });
 }
@@ -91,7 +92,8 @@ const runnableCount = computed(() => taskStore.tasks.filter((t) => !t.paused).le
 // queue-bar 文案按调度状态分支（v3 语义表）。
 const queueBarHint = computed<{ text: string; showResumeAll: boolean }>(() => {
   const state = taskStore.queueState;
-  if (state.status === 'countdown' && state.countdownRemaining > 0) {
+  // hb12-QUE-05：>0 放宽 >=0（status==='countdown' 即示倒计时文案——归零瞬间 0 也属倒计时态）。
+  if (state.status === 'countdown' && state.countdownRemaining >= 0) {
     return {
       text: `上一回合已结束，${formatCountdownHuman(state.countdownRemaining)} 后执行下一个任务（期间可在会话框插话或点「立即执行」）`,
       showResumeAll: false,

@@ -148,7 +148,9 @@ function fnBody(source: string, signature: string): string {
   const startBody = fnBody(engine, 'function startCountdown');
   check('engine: startCountdown 现取配置 resolveQueueDelaySeconds(getConfig().taskDelayMinutes)', startBody.includes('resolveQueueDelaySeconds(getConfig().taskDelayMinutes)'));
   check('engine: 归零回调守卫 status countdown', startBody.includes("state.status !== 'countdown'"));
-  check('engine: 归零回调守卫无活动进程', /if \(getActiveProcess\(sessionId\)\) return/.test(startBody));
+  // hb12-ENG-02 最小同步：占坑命中守卫从裸 return 改为「收口 standby 再 return」
+  //（原裸 return 会让 status 永久卡 countdown）——守卫判据 getActiveProcess 保留。
+  check('engine: 归零回调守卫无活动进程（占坑命中收口 standby）', /if \(getActiveProcess\(sessionId\)\) \{[\s\S]{0,200}state\.status = 'standby'/.test(startBody));
   check('engine: 归零回调守卫后 popExecute', startBody.includes('popExecute('));
 
   check('engine: armAfterTurn 以 running 为前置', fnBody(engine, 'function armAfterTurn').includes("state.status !== 'running'"));
@@ -166,7 +168,9 @@ function fnBody(source: string, signature: string): string {
   check('engine: runTaskNow 不再拦截已暂停任务', !runNowBody.includes('已暂停的任务请先恢复'));
   check('engine: runTaskNow 对 paused 任务先解除暂停', runNowBody.includes('if (task.paused) taskRepo.setTaskPaused(taskId, false)'));
   check('engine: runTaskNow 守卫队列开关', runNowBody.includes('queueEnabled'));
-  check('engine: runTaskNow 守卫活动进程', runNowBody.includes('getActiveProcess('));
+  // hb12-P2-11 最小同步：runTaskNow 守卫改用谓词 isUserTurnInFlight（内部含 getActiveProcess，
+  // 另纳 chatSendLocks/pendingFirstPrompt——直发 prepare 窗口内不可 run-now），守卫语义加严不改松。
+  check('engine: runTaskNow 守卫活动进程', runNowBody.includes('isUserTurnInFlight(') || runNowBody.includes('getActiveProcess('));
 
   check('engine: settleCurrent 发 task_settled（中断路径唯一信号）', fnBody(engine, 'function settleCurrent').includes("'task_settled'"));
 
@@ -222,7 +226,8 @@ function fnBody(source: string, signature: string): string {
   const handlers = read('../src/main/ipc-handlers.ts');
   const chatSendBody = handlers.slice(handlers.indexOf('IPC_CHANNELS.CHAT_SEND'), handlers.indexOf('IPC_CHANNELS.CHAT_ABORT'));
   check('ipc-handlers: CHAT_SEND 占坑后挂 beginUserTurn（插话顶掉倒计时）', chatSendBody.includes('beginUserTurn(sessionId, mainWindow)'));
-  check('ipc-handlers: CHAT_SEND 换挂 exit 兜底调 noteTurnOutcome', /child\.on\('exit', \(code\) =>[\s\S]{0,400}noteTurnOutcome\(sessionId, code === 0 \? 'success' : 'error', mainWindow\)/.test(chatSendBody));
+  // hb12-P2-2 最小同步：exit 兜底插入已知终态让位分支（knownOutcome 检查 ~250B），窗口 400→900（断言语义不变）。
+  check('ipc-handlers: CHAT_SEND 换挂 exit 兜底调 noteTurnOutcome', /child\.on\('exit', \(code\) =>[\s\S]{0,900}noteTurnOutcome\(sessionId, code === 0 \? 'success' : 'error', mainWindow\)/.test(chatSendBody));
   check('ipc-handlers: CHAT_SEND 不再挂旧自动调度钩子', !chatSendBody.includes(OLD_AUTOSTART));
 
   const abortBody = handlers.slice(handlers.indexOf('IPC_CHANNELS.CHAT_ABORT'), handlers.indexOf('IPC_CHANNELS.CHAT_SET_PERMISSION_MODE'));
@@ -261,7 +266,8 @@ function fnBody(source: string, signature: string): string {
 {
   const sdkBackend = read('../src/main/modules/sdk-backend.ts');
   check('sdk-backend: result→outcome 三态映射', /isSuccessfulCliResult\(event\) \? 'success' : isAbortedCliResult\(event\) \? 'interrupted' : 'error'/.test(sdkBackend));
-  check('sdk-backend: result→noteTurnOutcome 挂点', /event\.type === 'result'[\s\S]{0,300}noteTurnOutcome\(sessionId, outcome, mainWindow\)/.test(sdkBackend));
+  // hb12-P2-2 最小同步：result 钩子插入 knownOutcome 置位（~250B），窗口 300→700（断言语义不变）。
+  check('sdk-backend: result→noteTurnOutcome 挂点', /event\.type === 'result'[\s\S]{0,700}noteTurnOutcome\(sessionId, outcome, mainWindow\)/.test(sdkBackend));
   check('sdk-backend: import isAbortedCliResult', sdkBackend.includes('isAbortedCliResult'));
   check('sdk-backend: import noteTurnOutcome（缺失=运行时 ReferenceError，纯文本断言拦不住）', sdkBackend.includes("} from './task-queue-engine'") && sdkBackend.includes('noteTurnOutcome'));
 }
@@ -392,7 +398,9 @@ function fnBody(source: string, signature: string): string {
 // ── 13) 挂载：selftest:static 链 ──
 {
   const pkg = JSON.parse(read('../package.json')) as { scripts: Record<string, string> };
-  check('package.json: selftest:static 挂载 tdd-queue-semantics-v3-verify', pkg.scripts['selftest:static'].includes('tdd-queue-semantics-v3-verify'));
+  // hb12 最小同步：链执行改 runner 清单（selftest-static-list.txt），入链断言改查清单。
+  const selftestList = readFileSync(new URL('./selftest-static-list.txt', import.meta.url), 'utf8');
+  check('package.json: selftest 清单挂载 tdd-queue-semantics-v3-verify', selftestList.includes('tdd-queue-semantics-v3-verify'));
   check('package.json: 摘除 tdd-queue-rework-verify', !pkg.scripts['selftest:static'].includes('tdd-queue-rework-verify'));
   check('旧脚本文件已删除', !existsSync(new URL('./tdd-queue-rework-verify.ts', import.meta.url)));
 }

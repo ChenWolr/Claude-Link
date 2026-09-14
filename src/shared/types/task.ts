@@ -38,6 +38,10 @@ export interface QueueState {
   standbyReason: QueueStandbyReason;
   countdownRemaining: number;
   currentTaskId: string | null;
+  // hb12-QUE-04：倒计时全长快照（hb13-v A1/F3 起由引擎在 startCountdown 随 QueueState 下发，
+  // state_changed/overview 整体替换自然携带；渲染层 countdown_started 载荷回填保留为兼容兜底。
+  // 仅 countdown/running 分支消费，etaFor 回落 countdownRemaining）。
+  intervalSeconds?: number;
 }
 
 /** 已执行任务的结果态：出队即入历史（outcome 先为 running），回合收尾时定终态。 */

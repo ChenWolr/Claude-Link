@@ -23,7 +23,16 @@ import {
   spawnForTask,
   resolveCliSessionId,
   getActiveProcess,
+  getKnownTurnOutcome,
+  isChatSendLocked,
+  hasPendingFirstPrompt,
 } from './chat-backend';
+
+// hb12-P2-11：队列出队谓词——chatSendLocks ∪ pendingFirstPrompt ∪ active entry。
+// 三者任一为真 = 用户回合在飞（直发 prepare 窗口/占坑未发/spawn 完成），队列不得放行。
+function isUserTurnInFlight(sessionId: string): boolean {
+  return isChatSendLocked(sessionId) || hasPendingFirstPrompt(sessionId) || Boolean(getActiveProcess(sessionId));
+}
 import type { PreparedAttachmentPrompt } from './attachment-prompt-builder';
 import { prepareAttachmentPrompt } from './attachment-prompt-builder';
 import { resolveAttachmentRecords } from './attachment-service';
@@ -118,6 +127,20 @@ function settleCurrent(sessionId: string, outcome: ExecutedOutcome, mainWindow: 
     entry.outcome = outcome;
     entry.settledAt = new Date().toISOString();
   }
+  // hb10 P2-13：终态落库（updateTaskResult 死代码启用）——DB 行不再永久 running，重启
+  // resetRunningTasks 不再把本会话已结算任务误翻 failed。按 outcome 映射复用现有 repo 函数
+  //（不扩列）：success→completed（updateTaskResult）；failed→updateTaskError；
+  // interrupted→cancelled（completed_at 同写）。幂等：DB running 判据 + currentTaskId 闸防重入。
+  const taskRow = taskRepo.getTask(taskId);
+  if (taskRow && taskRow.status === 'running') {
+    if (outcome === 'success') {
+      taskRepo.updateTaskResult(taskId, taskRow.result ?? '', null, null);
+    } else if (outcome === 'failed') {
+      taskRepo.updateTaskError(taskId, taskRow.errorMessage ?? '任务失败');
+    } else {
+      taskRepo.updateTaskStatus(taskId, 'cancelled');
+    }
+  }
   state.currentTaskId = null;
   logger.info(`[queue] settle task=${taskId} outcome=${outcome} session=${sessionId}`);
   emitQueueEvent(mainWindow, sessionId, 'task_settled', taskId, { outcome });
@@ -146,8 +169,58 @@ function startCountdown(sessionId: string, mainWindow: BrowserWindow): void {
   state.standbyReason = null;
   state.status = 'countdown';
   state.countdownRemaining = intervalSeconds;
+  // hb13-v A1/F3：倒计时全长快照随 QueueState 下发——旧实现只走 countdown_started 载荷由渲染层
+  // 回填，随即被 state_changed/overview 整体替换抹除（快照恒 undefined，etaFor 优先快照从未生效）。
+  // 快照在状态对象上，整体替换自然携带；仅 countdown/running 消费（下一轮 startCountdown 刷新）。
+  state.intervalSeconds = intervalSeconds;
   emitQueueEvent(mainWindow, sessionId, 'countdown_started', undefined, { seconds: intervalSeconds });
   emitStateChanged(mainWindow, sessionId);
+
+  // hb13-v A1（F1/F2）：出队资格判定收口为单一函数——主回调与重试回调共用，消除闭包捕获顺序
+  //（旧实现重试闭包引用声明在后、且早退路径不初始化的 runnable，重试触发即 TDZ ReferenceError，
+  // 被 index.ts 全局吞掉后引擎卡 countdown(0)）；出队时现取 pending，不持陈旧快照。
+  function evaluateDispatch(): void {
+    if (!isQueueGenerationActive(sessionId, generation)) return;
+    if (state.status === 'running') return; // 插话/重发接管：running 归属新回合，不动
+    if (state.status !== 'countdown') {
+      state.status = 'standby';
+      state.standbyReason = null;
+      state.countdownRemaining = 0;
+      emitStateChanged(mainWindow, sessionId);
+      return;
+    }
+    // hb12-P2-11：直发在飞（谓词含 chatSendLocks/pendingFirstPrompt）→ ~1s 短延迟重试重排，
+    // 不可直接放弃（否则卡 countdown(0)）；重试仍命中再顺延（timer 内递归同一守卫链）。
+    // hb13-v F2：不设重试上限——1s 固定间隔无限顺延（不变量：不出队也不丢任务，最终出队或被
+    // abort/删任务/开关关/插话接管等 cancelTimers 或状态迁移路径收口）；重试 timer 登记进
+    // mainTimers，cancelTimers 可收口。
+    if (isChatSendLocked(sessionId) || hasPendingFirstPrompt(sessionId)) {
+      state.countdownRemaining = 0;
+      const retryTimer = setTimeout(evaluateDispatch, 1000);
+      if (typeof retryTimer.unref === 'function') retryTimer.unref();
+      mainTimers.set(sessionId, retryTimer);
+      return;
+    }
+    if (getActiveProcess(sessionId)) {
+      // hb12-ENG-02（收窄）：重发占坑（beginUserTurn 置 running）——占坑已发生但引擎未及置 running（beginUserTurn 迟到）时收口 standby。
+      state.status = 'standby';
+      state.standbyReason = null;
+      state.countdownRemaining = 0;
+      emitStateChanged(mainWindow, sessionId);
+      return;
+    }
+    const runnable = taskRepo.getPendingTasks(sessionId);
+    if (!runnable.length) {
+      state.status = 'standby';
+      state.standbyReason = null;
+      state.countdownRemaining = 0;
+      emitStateChanged(mainWindow, sessionId);
+      return;
+    }
+    void popExecute(sessionId, mainWindow, runnable[0]).catch((e) => {
+      logger.error(`popExecute threw (session ${sessionId})`, e);
+    });
+  }
 
   const generation = getQueueGeneration(sessionId);
   const countdownInterval = setInterval(() => {
@@ -163,21 +236,9 @@ function startCountdown(sessionId: string, mainWindow: BrowserWindow): void {
 
   const mainTimer = setTimeout(() => {
     cancelTimers(sessionId);
-    // 归零回调守卫：竞态防双执行——状态已被插话/停止改变、或已有活动回合时放弃。
-    if (!isQueueGenerationActive(sessionId, generation)) return;
-    if (state.status !== 'countdown') return;
-    if (getActiveProcess(sessionId)) return;
-    const runnable = taskRepo.getPendingTasks(sessionId);
-    if (!runnable.length) {
-      state.status = 'standby';
-      state.standbyReason = null;
-      state.countdownRemaining = 0;
-      emitStateChanged(mainWindow, sessionId);
-      return;
-    }
-    void popExecute(sessionId, mainWindow, runnable[0]).catch((e) => {
-      logger.error(`popExecute threw (session ${sessionId})`, e);
-    });
+    // 归零回调守卫与出队资格判定统一收口在 evaluateDispatch（见上）：竞态防双执行、
+    // 直发在飞 1s 顺延重试、ENG-02 占坑收口、空队列收口、出队。
+    evaluateDispatch();
   }, intervalSeconds * 1000);
   mainTimers.set(sessionId, mainTimer);
 }
@@ -289,7 +350,8 @@ export function runTaskNow(taskId: string, mainWindow: BrowserWindow): QueueOver
   if (!task || task.status !== 'pending') throw new Error('任务不存在或不在待执行状态');
   if (getConfig().queueEnabled !== true) throw new Error('队列开关已关闭');
   const state = getOrCreateQueue(task.sessionId);
-  if (getActiveProcess(task.sessionId) || state.status === 'running') {
+  // hb12-P2-11：立即执行守卫同步纳入谓词（直发 prepare 窗口内也不可 run-now）。
+  if (isUserTurnInFlight(task.sessionId) || state.status === 'running') {
     throw new Error('当前会话有任务执行中，结束后可立即执行');
   }
   cancelTimers(task.sessionId);
@@ -382,23 +444,6 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
   state.standbyReason = null;
   emitStateChanged(mainWindow, sessionId);
 
-  // DB 仍记 running——面板不读它，仅崩溃恢复（resetRunningTasks→failed）用。
-  taskRepo.updateTaskStatus(task.id, 'running');
-  const history = executedHistory.get(sessionId) ?? [];
-  history.unshift({
-    taskId: task.id,
-    prompt: task.prompt,
-    attachments: task.attachments,
-    outcome: 'running',
-    settledAt: new Date().toISOString(),
-  });
-  if (history.length > EXECUTED_HISTORY_CAP) history.length = EXECUTED_HISTORY_CAP;
-  executedHistory.set(sessionId, history);
-  emitQueueEvent(mainWindow, sessionId, 'task_started', task.id, {
-    prompt: task.prompt,
-    attachments: task.attachments,
-  });
-
   const session = sessionRepo.getSession(sessionId);
   if (!isQueueGenerationActive(sessionId, generation)) return;
 
@@ -429,6 +474,40 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
     haltQueue(sessionId, 'failed', mainWindow);
     return;
   }
+
+  // hb10 P2-1（主保险）：prepare await 期间的占坑复查——用户带附件直发的 prepare 窗口内
+  // 引擎倒计时已放行本任务出队，此时用户回合 spawn 占坑则撤回出队：清 currentTaskId +
+  // 任务回 pending（可再次出队）+ running 归属保留给在飞回合（hb13-v F4：不收口 standby），
+  // 不 spawn、不覆盖用户 entry。
+  // task_started / 历史 unshift / DB running 落库均已后移到本复查之后，撤回路径零广播残留
+  //（不 emit task_settled：其渲染层 markStopped 副作用会误停用户回合的 sending 态）。
+  if (getActiveProcess(sessionId)) {
+    if (state.currentTaskId === task.id) state.currentTaskId = null;
+    taskRepo.updateTaskStatus(task.id, 'pending');
+    // hb13-v A1/F4：复查命中时 running 必已归属在飞用户/重发回合（beginUserTurn 在 spawn 同步
+    // 紧邻处置 running）——不得收口 standby（旧实现剥夺归属 → 回合结束 armAfterTurn/haltQueue
+    // 双跳过，队列静默停摆）。任务保持 pending 原位，回合结束经 noteTurnOutcome→armAfterTurn
+    // 以本任务仍 pending 正常再 arm。
+    logger.info(`[queue] popExecute rollback（prepare 期间用户回合占坑）session=${sessionId} task=${task.id}`);
+    return;
+  }
+
+  // DB 仍记 running——面板不读它，仅崩溃恢复（resetRunningTasks→failed）用。
+  taskRepo.updateTaskStatus(task.id, 'running');
+  const history = executedHistory.get(sessionId) ?? [];
+  history.unshift({
+    taskId: task.id,
+    prompt: task.prompt,
+    attachments: task.attachments,
+    outcome: 'running',
+    settledAt: new Date().toISOString(),
+  });
+  if (history.length > EXECUTED_HISTORY_CAP) history.length = EXECUTED_HISTORY_CAP;
+  executedHistory.set(sessionId, history);
+  emitQueueEvent(mainWindow, sessionId, 'task_started', task.id, {
+    prompt: task.prompt,
+    attachments: task.attachments,
+  });
 
   // 创建或复用 user message（按 parent_task_id 查；幂等，重启不翻倍消息/links）。
   if (!isQueueGenerationActive(sessionId, generation)) return;
@@ -512,7 +591,11 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
       logger.info(`[queue] child exit fallback session=${sessionId} task=${task.id} 让位：新回合在途，旧 exit 不记账`);
       return;
     }
+    // hb12-P2-2（终态重构）：与 ipc-handlers CHAT_SEND exit 兜底（ipc:624 附近）同一分类语义（镜像注释，hb13-v 批C 行号对齐）——已知终态让位（result/合成
+    // aborted 已结算）；无终态才按退出码分类（0=success，null/非 0=error）。
+    // 不变量：任何路径不得把「已中断」记成 success。
     logger.info(`[queue] child exit fallback session=${sessionId} task=${task.id} code=${code}`);
+    if (getKnownTurnOutcome(sessionId)) return;
     noteTurnOutcome(sessionId, code === 0 ? 'success' : 'error', mainWindow);
   });
 }

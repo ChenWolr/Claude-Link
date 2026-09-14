@@ -120,6 +120,10 @@ export const useTaskStore = defineStore('task', {
               ? (payload.data?.seconds as number)
               : (payload.data?.remaining as number);
           if (typeof remaining === 'number') this.queueState.countdownRemaining = remaining;
+          // hb12-QUE-04：倒计时全长快照（etaFor 倒计时期优先快照，不受 tick 漂移影响）。
+          if (payload.type === 'countdown_started' && typeof remaining === 'number') {
+            this.queueState.intervalSeconds = remaining;
+          }
           break;
         }
         case 'task_started': {
