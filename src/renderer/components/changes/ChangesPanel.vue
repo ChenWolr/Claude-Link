@@ -38,8 +38,9 @@ onMounted(() => {
   <div v-else-if="!store.files.length && !store.loading" class="changes__empty">工作目录无改动</div>
 
   <ul v-else class="changes__list">
+    <!-- hb10-CHG-11：万级文件截断——前 500 条 + 汇总行（列表冻结防护） -->
     <li
-      v-for="f in store.files"
+      v-for="f in store.files.slice(0, 500)"
       :key="f.path"
       class="changes__row"
       :class="{ 'changes__row--touched': f.touchedThisSession }"
@@ -54,10 +55,16 @@ onMounted(() => {
         <span v-if="f.touchedThisSession" class="changes__touched" title="本次会话编辑过">●</span>
       </button>
     </li>
+    <!-- hb10-CHG-11：截断汇总行 -->
+    <li v-if="store.files.length > 500" class="changes__row changes__row--more">
+      <span class="changes__path">其余 {{ store.files.length - 500 }} 条未显示（请缩小改动范围）</span>
+    </li>
   </ul>
 </template>
 
 <style scoped>
+/* hb13-v 批C：原文件尾部游离死注释「截断行样式」已删；changes__row--more 沿用
+   changes__row 既有行样式（scoped 内无独立规则，如需差异化样式再补）。 */
 .changes__header {
   display: flex;
   align-items: center;

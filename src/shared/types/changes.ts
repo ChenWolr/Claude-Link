@@ -22,11 +22,12 @@ export interface ChangedFile {
 
 export type ChangesListResult =
   | { ok: true; files: ChangedFile[]; baselineRef: string }
-  | { ok: false; reason: 'not-a-repo' | 'git-unavailable' | 'error'; message: string };
+  // git-error（hb10 P2-7）：git 异常退出（如损坏 .git/index）——面板显示失败态而非「无改动」。
+  | { ok: false; reason: 'not-a-repo' | 'git-unavailable' | 'git-error' | 'error'; message: string };
 
 export type ChangesDiffResult =
   | { ok: true; diff: string; truncated: boolean; binary: boolean; context: number }
-  | { ok: false; reason: 'not-a-repo' | 'no-such-file' | 'error'; message: string };
+  | { ok: false; reason: 'not-a-repo' | 'no-such-file' | 'git-error' | 'error'; message: string };
 
 // 「打开」文件结果：shell.openPath 走系统默认程序，失败时 Windows 降级弹「打开方式」对话框。失败分支类型安全：
 // 非 git 仓库 / git 缺失 / 文件不在仓库内（越界） / 打开失败（无默认程序且降级不可用等）。
