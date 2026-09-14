@@ -93,6 +93,10 @@ async function loadThumb(att: DisplayAttachment): Promise<void> {
 
 // 图片缩略图：点击进入灯箱时按需取原图。导出模式不加载（隐藏 renderer 复用文件卡片）。
 async function openPreview(att: DisplayAttachment, trigger: HTMLElement): Promise<void> {
+  // hb10-ATT-03：会话归属守卫（对齐 AttachmentDraftList）——非当前活动会话的附件（切走后
+  // 的迟到渲染/视图复用）不打开灯箱，防跨会话幽灵灯箱。
+  const sid = !isSnapshotAttachment(att) ? (att as AttachmentSummary).sessionId : undefined;
+  if (sid && sessionStore.activeSession?.id !== sid) return;
   if (isSnapshotAttachment(att)) return;
   if (errorByAttachmentId[attachmentKey(att)]) return;
   let url = urlByAttachmentId.get(attachmentKey(att));

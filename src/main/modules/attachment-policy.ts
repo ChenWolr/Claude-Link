@@ -1,6 +1,7 @@
 // 附件校验纯策略：MIME + 魔数 + 扩展名 + 大小 + 图片尺寸 + 总传输预算。
-// 纯函数，无 Electron/Node 副作用；regression 脚本与主进程 IPC/service 共用同一份判定逻辑。
+// 纯函数，无 Electron 依赖（node:crypto 仅用于确定性哈希，无副作用）；regression 脚本与主进程 IPC/service 共用同一份判定逻辑。
 // 附件数量、大小、MIME 常量统一在此定义，避免跨层重复（见 CLAUDE.md「关键设计决策」）。
+import { createHash } from 'node:crypto';
 import type { AttachmentKind, ChatSendPayload } from '../../shared/types/attachment';
 
 export const MAX_ATTACHMENTS_PER_SEND = 10;
@@ -269,18 +270,48 @@ export function validateSendBudget(items: Array<{
 /**
  * 安全化附件文件名：只保留 basename，剔除路径分隔符、`..` 穿越片段与控制字符。
  * 全部剔除后为空时返回 'attachment' 兜底（storageKey 中的 <attachmentId> 由 storage 层另拼）。
+ * hb12-P2-5（三合一，含 hb10-P2-17）：①黑名单补 `<>:"|?*`（`:` 触发 NTFS ADS 流，磁盘枚举键≠DB 键
+ * → 孤儿误删+队列熔断）；②折叠/清洗结果为纯点串时回退兜底名（path.win32.resolve/join 会把
+ * `<sid>/<id>/.` 折叠为目录自身），尾部 `.` 与空白一并剥除（Win32 尾点文件资源管理器不可操作）；
+ * ③basename 超 100 字符裁剪 + 短哈希后缀（区分同前缀不同名）并保留扩展名（MAX_PATH 260 必败 +
+ * raw 错误串泄漏路径）。前端展示名不变（filename 仅存储用）。
  */
 export function sanitizeAttachmentFilename(filename: string): string {
   const raw = filename ?? '';
   const segments = raw.split(/[/\\]/);
   let base = segments[segments.length - 1] ?? '';
   base = base.replace(/\.\./g, '').replace(/[\x00-\x1f\x7f]/g, '').replace(/[/\\]/g, '').trim();
+  // ①非法字符黑名单（NTFS 保留字符 → '_'）。
+  base = base.replace(/[<>:"|?*]/g, '_');
+  // ②剥尾部 `.` 与空白（原 trim() 不剥点——尾点文件不可操作且键失配）。
+  base = base.replace(/[.\s]+$/, '');
   // P3-11：Windows 保留设备名（CON.txt/NUL/COM1.md 等）在 Windows 上无法创建/写入且报错
-  // 不解释——首段命中保留名时加 file_ 前缀改写。
-  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)/i.test(base)) {
+  // 不解释——首段命中保留名时加 file_ 前缀改写。hb12-P2-5：扩 CONIN$/CONOUT$。
+  if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9]|CONIN\$|CONOUT\$)(\.|$)/i.test(base)) {
     base = `file_${base}`;
   }
-  return base.length > 0 ? base : 'attachment';
+  // 纯点串或空 → 兜底名（path.win32 会把 `.` 折叠为目录自身，storageKey 与磁盘键失配）。
+  if (base.length === 0 || /^[.]+$/.test(base)) {
+    return 'attachment';
+  }
+  // ③长度上限：basename 裁剪至 100 字符 + 8 位内容哈希后缀（同前缀不同名可区分），保留扩展名。
+  // hb13-v B10.4：扩展名长度上限 16——超长扩展名（如 `a.`+253z）原样保留会产出 350+ 字符
+  // 文件名（MAX_PATH 260 必败）。超限扩展截到前 16 位并插哈希改写，随后走下方 100 字符总长裁剪。
+  const MAX_EXT_LENGTH = 16;
+  const extDot = base.lastIndexOf('.');
+  if (extDot > 0 && base.length - extDot - 1 > MAX_EXT_LENGTH) {
+    const hash0 = createHash('sha256').update(base).digest('hex').slice(0, 8);
+    base = `${base.slice(0, extDot)}~${hash0}${base.slice(extDot, extDot + 1 + MAX_EXT_LENGTH)}`;
+  }
+  const MAX_BASE_LENGTH = 100;
+  if (base.length > MAX_BASE_LENGTH) {
+    const dot = base.lastIndexOf('.');
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const extPart = dot > 0 ? base.slice(dot) : '';
+    const hash = createHash('sha256').update(base).digest('hex').slice(0, 8);
+    base = `${stem.slice(0, MAX_BASE_LENGTH - hash.length - 1)}~${hash}${extPart}`;
+  }
+  return base;
 }
 
 /** 判定一次提交是否完全为空（无文字且无附件）——空提交应被发送链路拒绝。 */
