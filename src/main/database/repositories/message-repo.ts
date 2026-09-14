@@ -203,17 +203,36 @@ export function updateResultMeta(
  *  回落全量 getMessagesBySession 是旧→新（ASC，为历史回读顺序服务）——必须 .reverse()
  *  反转成新→旧再走 walk，否则从最老消息起步：长回合首条几乎必为 user → 恒返回 null
  * （fallback 整体失效），最坏（首条非 user 的会话）会把耗时/费用写到最老历史行。 */
-export function findLastTurnMainFlowAssistantId(sessionId: string): string | null {
+export function findLastTurnMainFlowAssistantId(
+  sessionId: string,
+  opts?: { endedAt?: number | null },
+): string | null {
   let rows = getRecentMessagesForTurnCheck(sessionId, 50);
-  if (rows.length === 50 && !rows.some((m) => m.role === 'user')) {
-    rows = getMessagesBySession(sessionId).reverse();
+  // hb13-v A11（hb12-TM-01）：回落触发谓词补 parentAgentId == null 口径（与 walk 判据对齐）——
+  // 尾窗打满且「无主流程 user 行」才回落；带 parent_agent_id 的 user 行不得误触发（当前 SDK
+  // 不可达，防御性对齐，hb12 计划 :234 原文）。
+  if (rows.length === 50 && !rows.some((m) => m.role === 'user' && m.parentAgentId == null)) {
+    // hb13-v A11（hb12-TM-02）：回落全量改窄列无 LIMIT 查询——getMessagesBySession 是
+    // SELECT * + 附件 JOIN 的全量物化，仅为挑一个 id；窄列两路同为新→旧（DESC），无需 reverse。
+    rows = getTurnCheckRowsAll(sessionId);
   }
+  // hb10-TM-01（时间下界）：fallback 返回的行必须不早于本回合窗（宽松 10min）——
+  // 迟到旧 result 的 meta 不得脏写到更早回合的 assistant 行。
+  const notBefore = typeof opts?.endedAt === 'number' && Number.isFinite(opts.endedAt)
+    ? opts.endedAt - 10 * 60_000
+    : null;
   for (const m of rows) {
     // P3-1：parentAgentId 守卫先于 user 边界（与渲染层 attachResultMetadata 同序）——
     // user 行若带 parent_agent_id 也不得误停（当前 SDK 不可达，防御性同序）。
     if (m.parentAgentId != null) continue;
     if (m.role === 'user') return null;
-    if (m.role === 'assistant') return m.id;
+    if (m.role === 'assistant') {
+      if (notBefore != null) {
+        const t = Date.parse(m.createdAt);
+        if (Number.isFinite(t) && t < notBefore) return null;
+      }
+      return m.id;
+    }
   }
   return null;
 }
@@ -222,15 +241,32 @@ export function findLastTurnMainFlowAssistantId(sessionId: string): string | nul
  *  （SELECT * + 附件 JOIN）。消费方：cli-shared 去重谓词（经 turnCheckRows）与本文件
  *  findLastTurnMainFlowAssistantId。新→旧排序；谓词「从尾部遇 user 即停」的语义在
  *  limit 窗口内不变（窗口打满未见 user 时的回落由调用方处理）。
- *  不填附件（两类消费方均不需要）。 */
+ *  不填附件（两类消费方均不需要）。
+ *  hb13-v A11（hb10-TM-01/F-1）：SELECT 补 created_at——旧列集缺该列，toMessage 得
+ *  createdAt=undefined，窄窗主路径 Date.parse(undefined)=NaN → 10min 时间下界恒被跳过。 */
 export function getRecentMessagesForTurnCheck(sessionId: string, limit = 50): Message[] {
   const rows = getConnection()
     .prepare(
-      `SELECT id, session_id, role, content, event_type, process_kind, parent_agent_id
+      `SELECT id, session_id, role, content, event_type, process_kind, parent_agent_id, created_at
        FROM messages WHERE session_id = ?
        ORDER BY created_at DESC, rowid DESC LIMIT ?`,
     )
     .all(sessionId, limit) as MessageRow[];
+  return rows.map(toMessage);
+}
+
+/** hb13-v A11（hb12-TM-02 补实施）：findLastTurnMainFlowAssistantId 回落全量查询——窄列、
+ *  不带 LIMIT、不填附件（复用 getRecentMessagesForTurnCheck 形态），替代
+ *  getMessagesBySession（SELECT * + 附件 JOIN）全量物化。新→旧排序与窄窗一致，调用方
+ *  无需 reverse。 */
+export function getTurnCheckRowsAll(sessionId: string): Message[] {
+  const rows = getConnection()
+    .prepare(
+      `SELECT id, session_id, role, content, event_type, process_kind, parent_agent_id, created_at
+       FROM messages WHERE session_id = ?
+       ORDER BY created_at DESC, rowid DESC`,
+    )
+    .all(sessionId) as MessageRow[];
   return rows.map(toMessage);
 }
 
@@ -274,6 +310,7 @@ interface ExportMessageRow {
   tool_use_id: string | null;
   title: string | null;
   is_error: number;
+  api_error_kind: string | null;
   created_at: string;
 }
 
@@ -292,6 +329,7 @@ function toRenderable(row: ExportMessageRow): RenderableMessage {
     toolUseId: row.tool_use_id,
     title: row.title,
     isError: !!row.is_error,
+    apiErrorKind: row.api_error_kind ?? null,
     createdAt: normalizeDbTime(row.created_at),
   };
 }
@@ -300,7 +338,7 @@ export function getRenderableMessagesBySession(sessionId: string): RenderableMes
   const rows = getConnection()
     .prepare(
       `SELECT id, session_id, role, content, event_type, cost_usd, duration_ms, ended_at,
-              process_kind, parent_agent_id, tool_use_id, title, is_error, created_at
+              process_kind, parent_agent_id, tool_use_id, title, is_error, api_error_kind, created_at
        FROM messages WHERE session_id = ? ORDER BY created_at ASC, rowid ASC`,
     )
     .all(sessionId) as ExportMessageRow[];
