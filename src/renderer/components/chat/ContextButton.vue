@@ -44,10 +44,19 @@ const stats = computed(() => store.contextStats);
 const hasTrustedCurrent = computed(
   () => stats.value != null && stats.value.currentUsedTokens != null,
 );
-// 圆环百分比：只读可信 currentPercent；否则 0（只画空底圈）。
+// 圆环百分比（hb13-v B7 / F-3：hb12-CTX-01 计划方向矫正）——used 与 windowSize 均可信即
+// 现算占比（used/windowSize），payload percent 仅在 used 缺失时兜底。payload percent 是 SDK
+// 按其分母算的，与本会话分母（用户覆盖/真实窗口）不一致时以现算为准，三行数学自洽、单源派生
+//（旧实现 percent 优先、缺 percent 才现算，方向与计划相反，构造出三行互斥窗口）。
 const pct = computed(() => {
+  const used = stats.value?.currentUsedTokens;
+  const win = stats.value?.windowSize;
+  if (typeof used === 'number' && used >= 0 && typeof win === 'number' && win > 0) {
+    return Math.min(100, Math.max(0, Math.round((used / win) * 100)));
+  }
   const p = stats.value?.currentPercent;
-  return typeof p === 'number' && Number.isFinite(p) ? Math.min(100, Math.max(0, Math.round(p))) : 0;
+  if (typeof p === 'number' && Number.isFinite(p)) return Math.min(100, Math.max(0, Math.round(p)));
+  return 0;
 });
 // popover 数值：可信当前窗口时显示 current；否则显示「待刷新」。
 // context-circle-v2 D4：裁剪为弹层与 isStaleTrusted 实际消费的字段——计费行（turnInput*）/
@@ -71,6 +80,8 @@ const btnTitle = computed(() => {
 });
 
 function fmt(n: number): string {
+  // hb10-CTX-06：m 档——≥1e6 显示 "1.0m"（1M 窗口不再显示 1000000.0k）。
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
