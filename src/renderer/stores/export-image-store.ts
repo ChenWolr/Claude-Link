@@ -66,6 +66,9 @@ export const useExportImageStore = defineStore('export-image', {
     /** 主动发起导出（来自 AppHeader 分享按钮，格式由 ExportImageFormatDialog 选定）。 */
     async start(sessionId: string, sessionName: string, format: 'jpeg' | 'png'): Promise<void> {
       if (this.running) return; // 全局只允许一个导出 job
+      // hb12-EXP-02：上一 job 终态的 1.2s 复位定时器若未取消，$reset() 会丢掉句柄却留活定时器，
+      // 到点把本 job 刚置的 preparing 态抹掉（遮罩闪烁消失）。新 start 必须先取消遗留定时器。
+      if (this._timer) clearTimeout(this._timer);
       this.$reset();
       this.phase = 'preparing';
       this.sessionId = sessionId;

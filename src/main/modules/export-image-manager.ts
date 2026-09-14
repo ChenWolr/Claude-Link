@@ -13,6 +13,7 @@ import type { WebContents } from 'electron';
 import { IPC_CHANNELS, THEME_PALETTES } from '../../shared/constants';
 import {
   JPEG_PAGE_MAX_BYTES,
+  SNAPSHOT_TOTAL_BYTES_MAX,
   buildExportFilename,
   buildSegmentCopyGeometry,
   checkPngMemoryBudget,
@@ -55,9 +56,16 @@ import { setupLinkGuard } from './link-guard';
 const SEGMENT_PNG_MAX_BYTES = 64 * 1024 * 1024; // 单段 PNG 字节上限
 const TEMP_PREFIX = 'claude-link-export-';
 const STALE_DIR_TTL_MS = 24 * 60 * 60 * 1000; // 24h
-// R3 看门狗：JPEG 沿用固定 90s；PNG 长图按段 ack/页保存重置（慢但有进展不误杀），绝对硬顶防真死循环。
+// hb12-EXP-03：EXPORT_RENDER_PROGRESS 通道 phase 白名单——白名单外（含终态）一律忽略，
+// 受损 renderer 不得毒化主进程阶段机（captureSelfImpl 对终态拒捕）或提前收遮罩；终态只认 EXPORT_RENDER_FINISH。
+const EXPORT_PROGRESS_PHASES: ReadonlySet<string> = new Set([
+  'preparing', 'planning', 'capturing', 'encoding', 'saving', 'waitingForDestination',
+]);
+// R3 看门狗：JPEG 沿用固定 90s；PNG 长图按段 ack/页保存重置（慢但有进展不误杀）。
+// hb10 P1-1：原「单 job 300s 绝对硬顶」误杀健康长导出（数千消息会话现实可达 >300s），改为
+// 「无进展硬顶」——连续 5 分钟无任何 resetWatchdog 进度才 failJob；有进展的导出不再受总时长限制。
 const WATCHDOG_RESET_MS = 90 * 1000;       // 每次段 ack/页保存后重置的窗口
-const WATCHDOG_ABSOLUTE_MS = 5 * 60 * 1000; // 单 job 绝对硬顶（5 分钟）
+const WATCHDOG_NO_PROGRESS_MS = 5 * 60_000; // 无进展硬顶：连续 5 分钟无任何进展才杀
 
 interface PageFile {
   path: string;
@@ -97,7 +105,8 @@ interface ActiveJob {
   doneResolve?: (result: ExportImageResult) => void;
   doneReject?: (e: Error) => void;
   finishTimer: NodeJS.Timeout;   // R3：reset 看门狗；超时触发 failJob
-  absoluteDeadlineMs: number;    // R3：绝对硬顶时间戳
+  noProgressTimer: NodeJS.Timeout; // hb10 P1-1：无进展硬顶定时器（与 finishTimer 同生命周期）
+  lastProgressAt: number;        // hb10 P1-1：最近一次进展时间戳（resetWatchdog 维护）
   smoke: boolean;
   removeOriginListener: () => void;
 }
@@ -134,15 +143,27 @@ function isExportSender(sender: WebContents): boolean {
   return !!active && active.exportWindow.webContents === sender && !sender.isDestroyed();
 }
 
-// —— R3 看门狗：reset（段 ack/页保存触发）+ 绝对硬顶 ——
+// —— R3 看门狗：reset（段 ack/页保存触发）+ hb10 P1-1 无进展硬顶 ——
 function resetWatchdog(reason: string): void {
   if (!active || active.terminal) return;
-  if (Date.now() >= active.absoluteDeadlineMs) {
-    void failJob(`导出超过绝对时限（${WATCHDOG_ABSOLUTE_MS / 1000}s）`);
-    return;
-  }
+  // hb12 WARN-3：保存对话框（waitingForDestination/saving）阶段不重排任何看门狗——
+  // 用户在对话框停留任意时长都不构成「无进展」，否则会被 5min 无进展定时器误杀。
+  if (active.phase === 'waitingForDestination' || active.phase === 'saving') return;
+  active.lastProgressAt = Date.now();
   clearTimeout(active.finishTimer);
   active.finishTimer = setTimeout(() => { void failJob(`导出段超时（${reason}后 ${WATCHDOG_RESET_MS / 1000}s 无进展）`); }, WATCHDOG_RESET_MS);
+}
+
+// hb10 P1-1：无进展硬顶定时器回调。resetWatchdog 恰在每次进展时被调并刷新 lastProgressAt，
+// 故「定时器到点时距上次进展 ≥ 5min」等价于「连续 5 分钟无任何进展」；未到点则按剩余时间续延。
+function checkNoProgress(): void {
+  if (!active || active.terminal) return;
+  const idle = Date.now() - active.lastProgressAt;
+  if (idle >= WATCHDOG_NO_PROGRESS_MS) {
+    void failJob('导出连续 5 分钟无进展');
+    return;
+  }
+  active.noProgressTimer = setTimeout(checkNoProgress, Math.max(1000, WATCHDOG_NO_PROGRESS_MS - idle));
 }
 
 // —— codec worker 生命周期 ——
@@ -194,7 +215,12 @@ async function sendToWorker(msg: CodecMessage): Promise<CodecWorkerMessage> {
   if (!w) throw new Error('codec worker 不可用');
   return new Promise((resolve, reject) => {
     pendingWorkerReply = { resolve, reject };
-    try { w.postMessage(msg); }
+    try {
+      // hb12-EXP-04：segment 消息按 types 契约（png: ArrayBuffer // transferable）走 transfer 路径，
+      // 免去每段 PNG（≤64MB）结构化克隆的一次全量拷贝；begin/finish/abort 无转移对象。
+      if (msg.type === 'segment') w.postMessage(msg, [msg.png]);
+      else w.postMessage(msg);
+    }
     catch (e) { pendingWorkerReply = null; reject(e as Error); }
   });
 }
@@ -328,8 +354,10 @@ async function pngCaptureSelfImpl(request: PngCaptureSelfRequest): Promise<PngCa
   });
   if (!geomRes.ok) return { ok: false, code: 'placement', message: geomRes.reason };
 
-  // byteOffset-safe transfer：拷成独立 ArrayBuffer 再转移。
-  const ab = Uint8Array.from(pngBuf).buffer;
+  // byteOffset-safe transfer：拷成独立 ArrayBuffer 后经 sendToWorker 的 transferList 转移（零拷贝）。
+  // hb13-v B10.5：原实现走逐元素遍历拷贝（大位图慢且多一次中转缓冲）——
+  // 改 buffer.slice 单次内存拷贝，同样产出独立可转移的 ArrayBuffer。
+  const ab = pngBuf.buffer.slice(pngBuf.byteOffset, pngBuf.byteOffset + pngBuf.byteLength) as ArrayBuffer;
   const reply = await sendToWorker({
     type: 'segment', jobId: active.jobId, page: pg.page, segment: request.segment, png: ab, geometry: geomRes.geometry,
   });
@@ -486,6 +514,9 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
   if (active.terminal) return; // 终态后迟到调用拒绝
   if (payload.jobId !== active.jobId) return; // 迟到
   clearTimeout(active.finishTimer);
+  // hb10 P1-1（hb12 WARN-3）：进入保存流程前停掉无进展定时器——waitingForDestination/saving
+  // 停留时长不受 5min 无进展硬顶约束（resetWatchdog 的阶段守卫兜底不重排）。
+  clearTimeout(active.noProgressTimer);
 
   if (payload.kind === 'done') {
     // 关闭所有页文件句柄，校验写入完整性。
@@ -616,6 +647,7 @@ async function failJob(message: string): Promise<void> {
   active.terminal = true;
   active.phase = 'error';
   clearTimeout(active.finishTimer);
+  clearTimeout(active.noProgressTimer);
   makeProgress({ phase: 'error', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, percent: 0, message });
   logger.error(`[export] job ${active.jobId} 失败：${message}`);
   if (active.doneReject) active.doneReject(new Error(message));
@@ -650,6 +682,7 @@ async function cleanup(_reason: string): Promise<void> {
     await rm(job.tempDir, { recursive: true, force: true });
   } catch { /* ignore */ }
   clearTimeout(job.finishTimer);
+  clearTimeout(job.noProgressTimer);
 }
 
 /** 供 smoke 等外部路径显式清理当前 job；会无条件删除临时目录，正常 done 路径在 resolve 前已自行 cleanup，此调用通常为兜底 no-op。 */
@@ -667,15 +700,34 @@ export type StartExportResult =
   | { ok: true; jobId: string; done: Promise<ExportImageResult>; snapshot?: ExportJobSnapshot }
   | { ok: false; code: string; message: string };
 
+// hb10 P2-9：startImageExport 的 isActive() 检查与 active 赋值之间隔两次 await（附件快照构建/mkdtemp），
+// 并发第二次调用可覆盖 active。starting 在同步段互斥该窗口：置位后并发调用直接 busy 返回，
+// 薄壳 finally 复位（首调失败后可重试）。
+let starting = false;
+
 export async function startImageExport(
   origin: WebContents,
   sessionId: string,
   format: ExportImageFormat = 'jpeg',
   _options: StartExportOptions = {},
 ): Promise<StartExportResult> {
-  if (isActive()) {
+  if (starting || isActive()) {
     return { ok: false, code: 'busy', message: '已有导出任务正在运行' };
   }
+  starting = true;
+  try {
+    return await startImageExportImpl(origin, sessionId, format, _options);
+  } finally {
+    starting = false;
+  }
+}
+
+async function startImageExportImpl(
+  origin: WebContents,
+  sessionId: string,
+  format: ExportImageFormat,
+  _options: StartExportOptions,
+): Promise<StartExportResult> {
   // 校验 origin。
   if (origin.isDestroyed()) {
     return { ok: false, code: 'bad-origin', message: '发起窗口已销毁' };
@@ -697,8 +749,11 @@ export async function startImageExport(
     async (attachment) => {
       const record = attachmentRepo.getAttachment(attachment.id);
       if (!record || record.sessionId !== sessionId) throw new Error('附件不存在');
-      return readStoredAttachmentPreview(record, true);
+      // hb10 P2-10：单附件读前 statSync 预检——超过整个预览预算的文件直接降级（不整读进内存）。
+      return readStoredAttachmentPreview(record, true, SNAPSHOT_TOTAL_BYTES_MAX);
     },
+    // hb10 P2-10：8 并发上限 + 边加载边累计预算，超预算对剩余附件短路降级（防 OOM 前置）。
+    { budgetBytes: SNAPSHOT_TOTAL_BYTES_MAX, maxConcurrency: 8 },
   );
 
   // 快照预算校验：正文、附件 metadata 与缩略图真实 bytes 均计入。
@@ -810,10 +865,11 @@ export async function startImageExport(
     codecWorker: null,
     currentPngPage: null,
     terminal: false,
-    absoluteDeadlineMs: Date.now() + WATCHDOG_ABSOLUTE_MS,
     smoke: _options.smoke === true,
     removeOriginListener,
     finishTimer: setTimeout(() => { void failJob(`导出超时（${WATCHDOG_RESET_MS / 1000} 秒无进展）`); }, WATCHDOG_RESET_MS),
+    noProgressTimer: setTimeout(checkNoProgress, WATCHDOG_NO_PROGRESS_MS),
+    lastProgressAt: Date.now(),
   };
 
   // 完成 promise：resolve 终态结果（saved/cancelled/failed）。
@@ -924,6 +980,8 @@ export function registerExportImageHandlers(): void {
   ipcMain.on(IPC_CHANNELS.EXPORT_RENDER_PROGRESS, (event, payload: ExportImageProgressPayload) => {
     if (!isExportSender(event.sender)) return;
     if (!payload || payload.jobId !== active?.jobId) return; // 迟到过滤
+    // hb12-EXP-03：phase 白名单——白名单外（含 done/cancelled/error 终态）忽略，阶段机不受受损 renderer 操纵。
+    if (!EXPORT_PROGRESS_PHASES.has(payload.phase)) return;
     // P1-12：渲染进度即进展证据——健康长导出（>90s 但持续推进）不得被「90 秒无进展」看门狗
     // 误杀（此前 reset 全部只在 PNG codec 路径，JPEG 全程无重置必被误杀）。对 PNG 进度同样调用
     // 无害（幂等重置）；已终态 job 由 resetWatchdog 的 terminal 门自行 no-op，迟到进度安全。

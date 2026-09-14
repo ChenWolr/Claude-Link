@@ -27,6 +27,8 @@ export const runnerState = reactive({
   items: [] as RenderItem[],
   sessionName: '',
   exportedAt: '',
+  // hb10 P2-11：splitPages 预检命中的超长单条（条目序号定位），runExport 据此快速失败。
+  oversizeItem: null as { index: number; heightPx: number } | null,
 });
 
 function applyTheme(palette: ThemePalette, fontScale: string): void {
@@ -63,14 +65,19 @@ async function waitStable(): Promise<void> {
   }
 }
 
-/** 测量 MessageList scroller 内每个渲染项的高度（item = 分页原子单元）。 */
-function measureItemHeights(): number[] {
+/** 测量 MessageList scroller 内每个渲染项的高度（item = 分页原子单元）。
+ *  OPT-6（0be1cdb）在 scroller 与消息项之间加了 .message-list__inner 包裹层，
+ *  迭代必须下沉到 inner.children（inner 取不到时兜底回 scroller 自身）。
+ *  测量项数与期望项数不一致（DOM 漂移/隐藏项）时返回 null，由调用方走
+ *  measurement-mismatch 快速失败，不再产出失真分页。 */
+function measureItemHeights(expectedCount: number): number[] | null {
   const scroller = document.querySelector('.message-list__scroller');
-  if (!scroller) return [];
+  if (!scroller) return null;
+  const container = scroller.querySelector('.message-list__inner') ?? scroller;
   const scrollerRect = scroller.getBoundingClientRect();
   const heights: number[] = [];
-  for (let i = 0; i < scroller.children.length; i++) {
-    const child = scroller.children[i] as HTMLElement;
+  for (let i = 0; i < container.children.length; i++) {
+    const child = container.children[i] as HTMLElement;
     const r = child.getBoundingClientRect();
     if (r.height <= 0) continue;
     heights.push(Math.round(r.bottom - scrollerRect.top));
@@ -80,16 +87,23 @@ function measureItemHeights(): number[] {
     const top = i === 0 ? 0 : heights[i - 1];
     itemHeights.push(heights[i] - top);
   }
+  if (itemHeights.length !== expectedCount) return null;
   return itemHeights;
 }
 
-/** 按 item 累积高度切页（item 为原子单元；单个 item 超限自成一项，由多段捕获）。 */
+/** 按 item 累积高度切页（item 为原子单元；单项超页预算不再自成一项走到捕获期才失败，
+ *  hb10 P2-11：置 runnerState.oversizeItem 提前收口，由 runExport 以 item-over-budget 快速失败）。 */
 function splitPages(itemCount: number, itemHeights: number[], overhead: number, maxHeight: number): { start: number; end: number }[] {
+  runnerState.oversizeItem = null;
   const pages: { start: number; end: number }[] = [];
   let start = 0;
   let acc = 0;
   for (let i = 0; i < itemCount; i++) {
     const h = itemHeights[i] ?? 0;
+    if (h > maxHeight) {
+      runnerState.oversizeItem = { index: i, heightPx: h };
+      return pages;
+    }
     if (i > start && overhead + acc + h > maxHeight) {
       pages.push({ start, end: i });
       start = i;
@@ -156,7 +170,11 @@ export async function runExport(): Promise<void> {
         return;
       }
     }
-    const itemHeights = measureItemHeights();
+    const itemHeights = measureItemHeights(items.length);
+    if (!itemHeights) {
+      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'measurement-mismatch', message: '导出测量失败：消息项数量与测量结果不一致' });
+      return;
+    }
     const docHeightAll = document.documentElement.scrollHeight;
     const itemsContentHeight = itemHeights.reduce((s, h) => s + h, 0);
     const overhead = Math.max(0, docHeightAll - itemsContentHeight);
@@ -172,6 +190,11 @@ export async function runExport(): Promise<void> {
       maxPageHeight = deriveMaxPageHeightByMemory(probe.scaleY, probe.viewportWidthCss);
     }
     const pages = splitPages(items.length, itemHeights, overhead, maxPageHeight);
+    // hb10 P2-11：超长单条预检快速失败——文案含条目序号，不再走到捕获期报 page-over-budget。
+    if (runnerState.oversizeItem) {
+      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'item-over-budget', message: `第 ${runnerState.oversizeItem.index + 1} 条消息高度超过单页上限，无法导出` });
+      return;
+    }
     if (pages.length > MAX_PAGES) {
       await api.finish({ kind: 'failed', jobId: job.jobId, code: 'too-many-pages', message: `预计需要 ${pages.length} 张图片，超过上限 ${MAX_PAGES} 张` });
       return;
@@ -266,7 +289,11 @@ async function captureJpegPage(
       return false;
     }
     const ctx = canvas.getContext('2d')!;
-    const bmp = await createImageBitmap(new Blob([Uint8Array.from(cap.png).buffer], { type: 'image/png' }));
+    // hb13-v review 补修（B10.5 renderer 半边）：原逐元素遍历拷贝（Uint8Array.from）——
+    // 改 buffer.slice 单次内存拷贝（byteOffset 安全；as ArrayBuffer 收窄
+    // ArrayBufferLike 联合，保持 Blob 入参类型安全）。
+    const pngAb = cap.png.buffer.slice(cap.png.byteOffset, cap.png.byteOffset + cap.png.byteLength) as ArrayBuffer;
+    const bmp = await createImageBitmap(new Blob([pngAb], { type: 'image/png' }));
     ctx.drawImage(bmp, 0, placement.sourceStartPx, cap.bitmapWidth, placement.drawHeightPx, 0, placement.destStartPx, cap.bitmapWidth, placement.drawHeightPx);
     cursor = placement.nextCursorCss;
     segIdx += 1;
