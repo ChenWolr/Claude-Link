@@ -60,6 +60,12 @@ export const useProviderStore = defineStore('provider', {
         void this.load();
       });
     },
+    // hb10 P2-3：无条件重拉快照（与 load() 共用实现，刷新 providers/lastUsed/loaded）——
+    // 主进程「最近使用」在会话选用等场景变更后，选择器读侧/写侧经此同步显示态。
+    // 不带 loaded 短路（区别于 ensureLoaded）；每次切会话/选模型至多一次 IPC，量级可接受。
+    async ensureReload(): Promise<void> {
+      await this.load();
+    },
     async save(input: ProviderSaveInput): Promise<ProviderProfileView> {
       // Pinia 状态中的 models 可能包含响应式代理；Electron IPC 结构化克隆无法处理代理。
       // 在 renderer → preload 边界前显式转成纯对象，避免多模型保存时报克隆错误。

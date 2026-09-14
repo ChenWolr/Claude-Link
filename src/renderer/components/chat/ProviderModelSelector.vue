@@ -54,6 +54,9 @@ const hoverModelCount = computed(() => hoverProvider.value?.models.length ?? 0);
 const hoverIsCurrent = computed(() => hoverProviderId.value === resolved.value.provider?.id);
 
 function toggleOpen(): void {
+  // hb10-PRV-02：三态——仅「已加载完且确认无库且无错误」才跳设置页；加载中/出错不再误跳。
+  if (providerStore.loading) return;
+  if (providerStore.error) return;
   if (!hasLibrary.value) {
     void router.push('/config');
     return;
@@ -120,7 +123,8 @@ watch(
     const sid = sessionStore.activeSession.id;
     if (!resolved.value.invalidOverride || fallbackToastShownFor.has(sid)) return;
     fallbackToastShownFor.add(sid);
-    const name = resolved.value.provider?.name ?? '（无供应商）';
+    // hb10-PRV-03：库空/解析到无供应商时文案如实标注老字段链（不再显示「无供应商」误导）。
+    const name = resolved.value.provider?.name ?? '库外配置（老字段链）';
     const model = resolved.value.modelId ?? '（无模型）';
     toastText.value = `原供应商/模型已删除，已回退到 ${name} / ${model}`;
     if (toastTimer) clearTimeout(toastTimer);
@@ -128,10 +132,13 @@ watch(
       toastText.value = null;
     }, 4000);
   },
+  // hb10-PRV-V01：immediate 首跑——从设置页删供应商回聊天页即提示，不等下一次触发。
+  { immediate: true },
 );
 
+// hb12-PRV-05：直出原值——1024 除数取整误导（51200 显示 50k，差 2.4%）；级联模板加「输出上限」前缀。
 function formatCtx(maxTokens: number): string {
-  return maxTokens > 0 ? `${Math.floor(maxTokens / 1024)}k` : '';
+  return maxTokens > 0 ? `${maxTokens}` : '';
 }
 </script>
 
@@ -201,7 +208,7 @@ function formatCtx(maxTokens: number): string {
           >
             <span class="model-id">{{ m.id }}</span>
             <span v-if="hoverIsCurrent && m.id === resolved.modelId" class="check">✓</span>
-            <span v-else class="model-meta">{{ formatCtx(m.maxTokens) }}</span>
+            <span v-else class="model-meta">输出上限 {{ formatCtx(m.maxTokens) }}</span>
           </button>
           <div v-if="!hoverProvider || hoverProvider.models.length === 0" class="models-empty">
             该供应商还没有模型，去设置页添加。

@@ -1,3 +1,10 @@
+<script lang="ts">
+// hb10-PRV-05（hb13-v A10 补实施）：persistModels 串行链的模块级承载——跨组件实例共用一条
+// promise 链，连点/并发编辑依次落库不丢更新（后写基于最新列表重算，先到先落）。
+let providerPersistChain: Promise<void> = Promise.resolve();
+
+export default { name: 'ProviderManagerPage' };
+</script>
 <script setup lang="ts">
 // ProviderManager.vue — 连接页容器（r9 定版布局）。
 // 左：供应商列表栏（新建按钮 + 条目：名称/域名/模型数）；右：详情框（查看 / 新建表单切换）。
@@ -137,6 +144,7 @@ async function handleDeleteProvider(): Promise<void> {
           .restoreDeleted()
           .then((view) => {
             selectedId.value = view.id;
+            pushToast('已恢复到列表末尾'); // hb12 附录 C/PRV-V04：告知恢复结果与位置
           })
           .catch(() => pushToast('撤销失败'));
       },
@@ -147,13 +155,27 @@ async function handleDeleteProvider(): Promise<void> {
 }
 
 // ── 模型增删（models 数组整体替换，撤销可回放）────────────────────────
+// hb10-PRV-05（hb13-v A10 补实施）：操作入模块级串行链依次落库——旧实现并发保存互相覆盖
+// （连点/添加+撤销交错丢更新）；调用方 await 本函数返回的链位，toast 提示时已真正落库。
+// 单次失败不断链（chained.catch 续链），失败 toast 仍由调用方在自身链位上提示。
 async function persistModels(p: ProviderProfileView, models: ProviderModel[]): Promise<void> {
-  await store.save({ id: p.id, name: p.name, note: p.note, apiBaseUrl: p.apiBaseUrl, models });
+  const doPersist = async (): Promise<void> => {
+    await store.save({ id: p.id, name: p.name, note: p.note, apiBaseUrl: p.apiBaseUrl, models });
+  };
+  const chained = providerPersistChain.then(doPersist);
+  providerPersistChain = chained.catch(() => undefined);
+  await chained;
 }
 
 async function handleModelAdd(info: Pick<ModelInfo, 'id' | 'name' | 'maxTokens'>, source: ProviderModel['source']): Promise<void> {
   const p = current.value;
   if (!p) return;
+  // hb10-PRV-06（hb13-v A10 补实施）：不合规 ID 前置拦截（查询列表可含脏条目，入库时会被
+  // sanitizeProviderModels 静默丢弃）——如实计数提示，toast 不再谎报已添加。
+  if (!/^[\w.\-:/]+$/.test(info.id)) {
+    pushToast(`1 个模型 ID 不合规被忽略：「${info.id}」（仅允许字母/数字/下划线/点/连字符/冒号/斜杠）`);
+    return;
+  }
   if (p.models.some((m) => m.id === info.id)) {
     pushToast(`「${info.id}」已在列表中，不可重复添加`);
     return;
@@ -226,6 +248,8 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
           <span class="meta">
             <span class="name" :title="p.name">{{ p.name }}</span>
             <span class="host" :title="p.apiBaseUrl">{{ host(p.apiBaseUrl) }}</span>
+            <!-- hb10 P2-4：safeStorage 解密失败=密钥损坏，行内徽标替代「未设置」误导 -->
+            <span v-if="p.apiKeyBroken" class="key-broken">密钥损坏，请重新输入</span>
           </span>
           <span class="mcount">{{ p.models.length }} 模型</span>
         </button>
@@ -282,6 +306,7 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
         </div>
         <div class="mscroll">
           <ProviderModelList
+            :key="current.id"
             :provider-id="current.id"
             :models="current.models"
             @remove="handleModelRemove"
@@ -487,6 +512,16 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
   font-size: 0.71875rem;
   color: var(--color-text-muted);
   font-family: var(--font-mono, ui-monospace, monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* hb10 P2-4：密钥损坏徽标 */
+.pitem .meta .key-broken {
+  display: block;
+  font-size: 0.6875rem;
+  color: var(--color-danger, #d64545);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -92,6 +92,14 @@ function confirmManual(): void {
   if (exact) {
     emit('add', exact);
   } else {
+    // hb10-PRV-06（hb13-v A10 补实施）：手动输入白名单预检（与 sanitizeProviderModels 一致：
+    // 字母/数字/下划线/点/连字符/冒号/斜杠）——不合规行内报错不入库（入库会在保存时被
+    // 静默丢弃，toast 却谎报已添加）。
+    if (!/^[\w.\-:/]+$/.test(id)) {
+      emit('toast', `「${id}」含不合规字符（仅允许字母/数字/下划线/点/连字符/冒号/斜杠），未添加`);
+      inputRef.value?.focus();
+      return;
+    }
     emit('manual-add', id);
   }
   filter.value = '';
@@ -127,8 +135,9 @@ onUnmounted(() => {
   document.removeEventListener('keydown', handleEscape);
 });
 
+// hb12-PRV-05：直出原值 + 「out tok」标注（1024 除数取整误导）。
 function formatTokens(maxTokens: number): string {
-  return maxTokens > 0 ? `${Math.floor(maxTokens / 1024)}k` : '—';
+  return maxTokens > 0 ? `${maxTokens} out tok` : '—';
 }
 </script>
 
