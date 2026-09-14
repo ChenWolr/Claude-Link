@@ -688,8 +688,11 @@ check('result 分支 deleteEntry 后调用探针（顺序：deleteEntryIdx < pro
 });
 check('兜底挂点全覆盖（F9 表）：出口②③④⑤ 含 schedulePostTurnProbe；出口⑥ 与 !isCurrentEntry 出口不含', () => {
   // 出口②：合成 aborted（流丢 result）
+  // hb12-P2-2 最小同步：出口② 插入终态重构段（knownOutcome+显式 interrupted 结算），探针调度
+  // 仍保留在该出口（emitExit(null) 之后一行）；切片窗口改到出口② 的 return（语义不变：
+  // 出口② 全段必须含探针调度）。
   const abortSynthIdx = sdkBackendSrc.indexOf("forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' })");
-  const abortSynthSeg = sdkBackendSrc.slice(abortSynthIdx, sdkBackendSrc.indexOf('emitExit(null);', abortSynthIdx));
+  const abortSynthSeg = sdkBackendSrc.slice(abortSynthIdx, sdkBackendSrc.indexOf('scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);', abortSynthIdx));
   assert.ok(abortSynthIdx >= 0 && /schedulePostTurnProbe/.test(abortSynthSeg), '出口②（合成 aborted）缺探针');
   // 出口④：真实 SDK 执行出错（catch 段调度）。review-v1 High-1：出口③（用户中断）的探针已迁移
   // 到 killProcess 调度——真实中断流在 removeEntryIfCurrent 后走 !isCurrentEntry 分支提前退出，
@@ -731,7 +734,9 @@ check('renderer 预填只写 stale 不写 fresh（buildPersistedCanonical）', (
   assert.ok(/buildPersistedCanonical/.test(sessionStoreSrc), '缺 buildPersistedCanonical 预填函数');
   assert.ok(/freshness:\s*'stale'/.test(sessionStoreSrc), '预填应写 stale');
   assert.ok(/diagnostic:\s*'上次会话记录值，等待刷新'/.test(sessionStoreSrc), '预填诊断应为「上次会话记录值，等待刷新」');
-  assert.ok(/source:\s*'native-context'/.test(sessionStoreSrc), '预填 source 应为 native-context');
+  // hb10-CTX-V01/V02 最小同步：预填 source 改 'unavailable'（诚实标注——持久化值非确认的
+  // 当前来源快照），诊断语义纯化；freshness 仍 stale 表达时效（断言语义=诚实标注不变）。
+  assert.ok(/source:\s*'unavailable'/.test(sessionStoreSrc), '预填 source 应为 unavailable（诚实标注）');
   assert.ok(/samplePhase:\s*'post-turn'/.test(sessionStoreSrc), '预填 samplePhase 应为 post-turn');
   // 预填函数体内不得出现 freshness:'fresh'（诚实标注非实时）。
   const fnStart2 = sessionStoreSrc.indexOf('function buildPersistedCanonical(');
