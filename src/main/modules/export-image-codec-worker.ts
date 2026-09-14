@@ -101,8 +101,23 @@ export function codecSegment(state: CodecPageState | null, msg: Extract<CodecMes
   if (g.destStartPx !== state.nextDestEndPx) {
     return err(msg.jobId, msg.page, 'dest-discontiguous', `期望 destStartPx=${state.nextDestEndPx}，收到 ${g.destStartPx}`);
   }
-  if (g.sourceStartPx + g.drawHeightPx > decoded.height) {
+  // hb10 P2-12：分数 DPR 尾段 ±1px 容差——placeSegment 对 sourceStart/destStart/destEnd 三处独立
+  // round，分数 scaleY 下尾段可产生 source 恰好越界 1 物理像素（复核实验：pageH=1001/cursor=1000/
+  // scale=1.5 → sourceEnd 1501 > bitmap 1500）。越界 ≤1px 时钳制拷贝高度收口（dest 连续性游标仍按
+  // 原 destEndPx 推进，页尾差 ≤1 物理像素不可见）；>1px 仍拒绝；负向镜像守卫容差 1px。
+  if (g.sourceStartPx < -1) {
+    return err(msg.jobId, msg.page, 'source-overflow', `sourceStartPx ${g.sourceStartPx} < -1`);
+  }
+  if (g.sourceStartPx + g.drawHeightPx > decoded.height + 1) {
     return err(msg.jobId, msg.page, 'source-overflow', `source ${g.sourceStartPx}+${g.drawHeightPx} > bitmap ${decoded.height}`);
+  }
+  let copyGeom: SegmentCopyGeometry = g;
+  if (g.sourceStartPx + g.drawHeightPx > decoded.height) {
+    const clampedDrawHeightPx = decoded.height - g.sourceStartPx;
+    if (clampedDrawHeightPx < 0) {
+      return err(msg.jobId, msg.page, 'source-overflow', `source ${g.sourceStartPx}+${g.drawHeightPx} > bitmap ${decoded.height}`);
+    }
+    copyGeom = { ...g, drawHeightPx: clampedDrawHeightPx, sourceEndPx: decoded.height };
   }
   if (g.destEndPx > state.totalHeightPx) {
     return err(msg.jobId, msg.page, 'dest-overflow', `destEndPx ${g.destEndPx} > totalHeightPx ${state.totalHeightPx}`);
@@ -111,7 +126,7 @@ export function codecSegment(state: CodecPageState | null, msg: Extract<CodecMes
     return err(msg.jobId, msg.page, 'geometry-width-mismatch', '几何 bitmapWidthPx 与冻结不一致');
   }
 
-  copySegmentRows(state.full, decoded.data, g);
+  copySegmentRows(state.full, decoded.data, copyGeom);
   // 立即丢弃段解码副本（峰值约束：不保留到页尾）。
   decoded.data.fill(0);
 

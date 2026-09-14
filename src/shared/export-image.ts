@@ -532,7 +532,9 @@ export function finalizeSegmentCopyGeometry(
   if (sourceStartPx < 0) return { ok: false, reason: 'sourceStartPx 为负' };
   if (destStartPx < 0 || destEndPx < 0) return { ok: false, reason: 'dest 为负' };
   const sourceEndPx = sourceStartPx + drawHeightPx;
-  if (sourceEndPx > bitmapHeightPx) {
+  // hb10 P2-12：拒绝条件放宽至 +1——分数 DPR 尾段三处独立 round 可产生恰好 1px 的 source 越界
+  // （派生值一律不改，自洽断言对 placeSegment 产物恒真；越界 ≤1px 由 worker 侧钳制收口）。
+  if (sourceEndPx > bitmapHeightPx + 1) {
     return { ok: false, reason: `source 越界 ${sourceEndPx} > bitmapHeightPx ${bitmapHeightPx}` };
   }
   return {
