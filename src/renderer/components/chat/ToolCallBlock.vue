@@ -24,9 +24,13 @@ const props = defineProps<{
 const store = useSessionStore();
 // 导出模式：工具详情保持默认闭合、不可展开。
 const expanded = ref(false);
+// hb10-CHR-09：大结果折叠态懒渲染——body 由 v-show 常驻改 v-if+已展开过标记（首次展开后
+// 常驻），到达瞬间不再全量渲染折叠块；展开过一次后保持 DOM（v-show 接管显隐）。
+const everExpanded = ref(false);
 function toggleExpand(): void {
   if (props.exportMode) return;
   expanded.value = !expanded.value;
+  if (expanded.value) everExpanded.value = true;
 }
 const bodyId = useId();
 
@@ -130,9 +134,13 @@ watch([expanded, displayedSource], () => {
       </button>
       <button v-if="!exportMode && isSubAgent && use?.toolUseId" type="button" class="tool-row__anchor" @click="focusSubAgent">查看过程 →</button>
     </div>
-    <div v-show="expanded" :id="bodyId" class="tool-row__body">
+    <div v-if="everExpanded" v-show="expanded" :id="bodyId" class="tool-row__body">
       <div v-if="useParsed" class="tool-row__json">
         <pre>{{ JSON.stringify(useParsed.input ?? {}, null, 2) }}</pre>
+      </div>
+      <!-- hb12-CHR-03：use 非 JSON（异常历史数据/截断行）时回退展示原文，不再整体空缺。 -->
+      <div v-else-if="use" class="tool-row__json">
+        <pre>{{ use.content }}</pre>
       </div>
       <div v-if="hasDiffView" class="tool-row__diffcta">
         <button ref="diffBtn" type="button" class="tool-row__diffbtn" @click="openDiff">
@@ -155,8 +163,8 @@ watch([expanded, displayedSource], () => {
         </div>
       </div>
       <div v-else-if="useParsed" class="tool-row__pending">（等待结果…）</div>
-      <div v-if="costMsg" class="tool-row__meta">
-        ${{ costMsg.costUsd!.toFixed(4) }}<span v-if="costMsg.durationMs"> · {{ (costMsg.durationMs / 1000).toFixed(1) }}s</span>
+      <div v-if="costMsg && (costMsg.durationMs || costMsg.costUsd != null)" class="tool-row__meta">
+        <span v-if="costMsg.costUsd != null">${{ costMsg.costUsd.toFixed(4) }}</span><span v-if="costMsg.costUsd != null && costMsg.durationMs"> · </span><span v-if="costMsg.durationMs">{{ (costMsg.durationMs / 1000).toFixed(1) }}s</span><span v-if="(exportMode || expanded) && costMsg.endedAt"> · 结束于 {{ new Date(costMsg.endedAt).toLocaleTimeString('zh-CN', { hour12: false }) }}</span>
       </div>
     </div>
   </div>

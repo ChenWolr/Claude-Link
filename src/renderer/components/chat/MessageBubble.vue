@@ -3,7 +3,7 @@ import { computed, ref } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
-import { formatDurationMs } from '../../../shared/format-duration';
+import { formatDurationMs, formatEndedAt } from '../../../shared/format-duration';
 import { isReasoningReplayApiError } from '../../../shared/upstream-errors';
 import MessageAttachments from './MessageAttachments.vue';
 
@@ -28,13 +28,13 @@ const durationText = computed(() =>
 
 // B3：回合结束时刻（ended_at 持久化）文案；与 TurnTimer 完成态同口径（zh-CN 24 小时制）。
 // 老消息/中断回合无记录时不显示（诚实不造数）。
-const endedAtText = computed(() =>
-  props.message.endedAt != null ? new Date(props.message.endedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '',
-);
+const endedAtText = computed(() => formatEndedAt(props.message.endedAt));
 
 // 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）。
 // 复制内容 = 正文 + 附件文件名列表；不含绝对路径/Base64/附件 ID。
 const copied = ref(false);
+// hb12-CHR-04：复制失败态（复用 copied 的限时反馈机制）。
+const copyFailed = ref(false);
 async function copyMessage(): Promise<void> {
   const text = props.message.content;
   const names = attachments.value.map((a) => a.filename);
@@ -43,7 +43,17 @@ async function copyMessage(): Promise<void> {
   if (names.length > 0) parts.push(`[附件] ${names.join('、')}`);
   const out = parts.join('\n');
   if (!out.trim()) return;
-  await navigator.clipboard?.writeText(out);
+  // hb12-CHR-04：复制失败置错误态，不再静默。（hb13-v 批C 注释纠偏：仅「权限拒绝」路径会进
+  // catch——非安全上下文 clipboard 为 undefined，?. 链静默无操作、不进失败态。）
+  try {
+    await navigator.clipboard?.writeText(out);
+  } catch {
+    copyFailed.value = true;
+    window.setTimeout(() => {
+      copyFailed.value = false;
+    }, 1200);
+    return;
+  }
   copied.value = true;
   window.setTimeout(() => {
     copied.value = false;
@@ -72,9 +82,9 @@ async function copyMessage(): Promise<void> {
       </ul>
     </div>
     <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
-    <!-- B3：脚注只展示 耗时 + 结束时间（费用不再展示）；门控仅 durationMs，
-         老消息无结束时刻记录时只显示耗时。 -->
-    <div v-if="message.durationMs" class="bubble__meta">
+    <!-- B3：脚注只展示 耗时 + 结束时间（费用不再展示）；门控 durationMs || endedAt（hb13-v 批C
+         注释纠偏：原「门控仅 durationMs」漏 B3 扩的 endedAt 半边），老消息无结束时刻只显示耗时。 -->
+    <div v-if="message.durationMs || message.endedAt" class="bubble__meta">
       <svg v-if="durationText" class="bubble__meta-clock" viewBox="0 0 24 24" aria-hidden="true">
         <circle cx="12" cy="12" r="9" />
         <path d="M12 7v5l3.5 2" />
@@ -88,7 +98,7 @@ async function copyMessage(): Promise<void> {
       v-if="!exportMode && (message.role === 'user' || message.role === 'assistant')"
       type="button"
       class="bubble__copy"
-      :title="copied ? '已复制' : '复制消息'"
+      :title="copyFailed ? '复制失败' : copied ? '已复制' : '复制消息'"
       @click="copyMessage"
     >
       <svg v-if="!copied" viewBox="0 0 24 24" aria-hidden="true">

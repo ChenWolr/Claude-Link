@@ -9,9 +9,17 @@ const props = defineProps<{ content: string; streaming?: boolean; sealed?: boole
 
 // 导出模式：思考详情保持默认闭合、不可展开。
 const open = ref(props.exportMode ? false : (props.defaultOpen ?? !!props.streaming));
+// hb10-CHR-09：懒渲染——body 首次展开后才挂载（v-if+v-show 组合），到达瞬间不再全量渲染
+// 折叠思考块；展开过一次后 DOM 常驻。
+// hb13-v 批C 注释如实化（chat-render F4）：懒挂载的块（fold 内思考行——初始折叠、非 streaming）
+// 其 follow-scroll 控制器仅在组件 onMounted 时 bodyEl 已存在才创建，故首次展开后 ctrl 恒 null：
+// 流式中展开该行无「回到贴底」跟随、无「↓ 回到最新」浮标（顶部 streaming 思考行不受影响）。
+// 「内滚位置保留语义不变」仅对 DOM 常驻成立，跟随能力对懒挂载体不生效——如实声明。
+const everOpened = ref(open.value);
 function toggle(): void {
   if (props.exportMode) return;
   open.value = !open.value;
+  if (open.value) everOpened.value = true;
 }
 // 思考正文唯一 id，供 aria-controls 指向（多实例不能硬编码）。
 const bodyId = useId();
@@ -72,7 +80,8 @@ watch(rendered, async () => {
   updateFades();
   syncPill();
 });
-// 收起→展开：流式中回到贴底；非流式保持原位（v-show 常驻 DOM，位置本就保留）
+// 收起→展开：流式中回到贴底（仅挂载时 bodyEl 已存在的行，fold 内懒挂载行 ctrl=null 不跟随
+// ——见顶部 hb13-v 批C 注记）；非流式保持原位（v-show 常驻 DOM，位置本就保留）
 watch(open, async (v) => {
   if (!v) return;
   await nextTick();
@@ -93,7 +102,7 @@ watch(open, async (v) => {
       <span v-if="open && !exportMode" class="think-row__count">{{ charCount.toLocaleString('zh-CN') }} 字</span>
       <span class="think-row__arrow">›</span>
     </button>
-    <div v-show="open" class="think-row__win" :data-fade-top="fadeTop ? 'on' : 'off'" :data-fade-bottom="fadeBottom ? 'on' : 'off'">
+    <div v-if="everOpened" v-show="open" class="think-row__win" :data-fade-top="fadeTop ? 'on' : 'off'" :data-fade-bottom="fadeBottom ? 'on' : 'off'">
       <div
         :id="bodyId"
         ref="bodyEl"

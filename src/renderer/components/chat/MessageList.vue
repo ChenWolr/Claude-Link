@@ -110,12 +110,20 @@ function onScroll(): void {
   updateBottomState();
 }
 
+// hb10-CHR-10：滚底 rAF 批处理——流式 delta 高频触发 watch，每帧至多执行一次实际滚动，
+// 长流式的布局/滚动 CPU 峰值显著下降（帧内多次触发合并，用户无感知差异）。
+let scrollRafId: number | null = null;
+
 function scrollToBottom(): void {
-  const el = container.value;
-  if (!el) return;
-  el.scrollTop = el.scrollHeight;
-  nearBottom.value = true;
-  showBackToBottom.value = false;
+  if (scrollRafId !== null) return; // 本帧已排程
+  scrollRafId = requestAnimationFrame(() => {
+    scrollRafId = null;
+    const el = container.value;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    nearBottom.value = true;
+    showBackToBottom.value = false;
+  });
 }
 
 watch(
@@ -160,6 +168,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   resizeObserver = null;
+  // hb10-CHR-10：卸载时取消未执行的滚底帧（防泄漏/访存已销毁元素）。
+  if (scrollRafId !== null) {
+    cancelAnimationFrame(scrollRafId);
+    scrollRafId = null;
+  }
 });
 
 // 发送者角色：fold（思考/工具过程）算 assistant 侧，message 按 role 判断。

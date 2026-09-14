@@ -1,9 +1,20 @@
+<script lang="ts">
+// hb13-v A3（hb10-CHR-03 修复落地）：展开态 Map 必须「模块级 + 响应式」——旧实现把非响应式
+// 普通 Map 声明在 setup 体内：每实例各建一份、Map.set 不触发 computed 重算，折叠/
+// 展开点击完全无效、跨实例存续目标未达成。reactive Map 使 manualOpen/manualClosed/open 的
+// .get 依赖收集生效；本普通 script 块的模块级声明使展开态跨实例（重挂载/fold 重建）存续。
+import { reactive } from 'vue';
+
+const foldOpenState = reactive(new Map<string, boolean>());
+
+export default { name: 'ProcessGroup' };
+</script>
 <script setup lang="ts">
 // ProcessGroup —— openhanako 风格的「过程折叠」。
 // 一整段连续过程（思考 + 工具）合并成一个 fold：折叠态是一行居中摘要
 // 「✨ Claude 忙活了一阵子 · N 个工具 · N 次思考 ›」，展开态是半透明 panel 内的行式列表。
 // 少于 MIN_FOLD 条过程不折叠（直接展开行式）。对齐 openhanako ProcessFoldBlock。
-import { ref, computed, useId } from 'vue';
+import { computed, useId } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import type { Message } from '../../../shared/types/session';
 import { isFoldable, type FoldStats } from '../../utils/group-messages';
@@ -34,12 +45,15 @@ const props = defineProps<{
 }>();
 
 const foldable = computed(() => isFoldable(props.messages.length));
-// 焦点跟随：发送中末组 active 自动展开；不可折叠的 fold 强制展开行式。
-const manualOpen = ref<null | boolean>(null);
+// hb10-CHR-03：展开态跨实例存续——manualOpen/manualClosed 以 fold 首消息 id 为键，读模块级
+// 响应式 Map foldOpenState（声明见本 SFC 顶部普通 <script> 块；hb13-v A3：reactive 使 toggle
+// 的 Map.set 触发重算——旧实现非响应式 Map 置于 setup 体内，点击无效且不跨实例）。
+const foldKey = computed(() => props.messages[0]?.id ?? '');
+const manualOpen = computed(() => foldOpenState.get(foldKey.value));
 // R4（问题 7）：用户显式收起标志，优先级高于 active。原 open = manualOpen ?? (active || !foldable)
 // 在 active=true（运行中）时，点击只能把 manualOpen 设成 false，但 false ?? (true) 仍为 true，
 // 被 active 钉死无法收起。manualClosed 让用户显式折叠后即便 active 也保持收起。
-const manualClosed = ref(false);
+const manualClosed = computed(() => manualOpen.value === false);
 const open = computed(() => {
   if (props.exportMode) return true;
   if (manualClosed.value) return false;
@@ -47,9 +61,7 @@ const open = computed(() => {
 });
 function toggle(): void {
   if (props.exportMode) return; // 导出模式不可折叠/展开，保持默认可见态。
-  const next = !open.value;
-  manualOpen.value = next;
-  manualClosed.value = !next;
+  foldOpenState.set(foldKey.value, !open.value);
 }
 
 // 居中摘要（对齐 openhanako buildProcessFoldSummary）。
@@ -65,6 +77,11 @@ const API_RETRY_TERMINAL_KINDS = new Set([
   'system:api_retry_stopped',
   'system:api_retry_exhausted',
 ]);
+
+// hb10-CHR-04/11：思考行 sealed 收窄——中断后组内 tool_use 永无 result，组级 running 恒真，
+// 思考行被永久钉在「思考中」。改判「组内仍有未回结果 use 且会话 sending」：
+// 回合已结束（sending=false）或组内工具全部回结果 → sealed。
+const thinkingSealed = computed(() => !(props.stats.running && store.sending));
 
 interface GroupItem {
   key: string;
@@ -129,7 +146,7 @@ const items = computed<GroupItem[]>(() => {
         <ThinkingBlock
           v-if="item.type === 'thinking'"
           :content="item.msg!.content"
-          :sealed="!stats.running"
+          :sealed="thinkingSealed"
           :exportMode="exportMode"
         />
         <ApiRetryRecord
