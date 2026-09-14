@@ -21,7 +21,7 @@ import { logger } from '../utils/logger';
 
 // P2-18：点击系统 toast 聚焦主窗。index 与 notifier 的依赖方向问题经回调注入解决——
 // notifier 不 import index（会循环依赖），index 启动时 setNotificationFocusHook(showMainWindow)。
-type FocusMainWindow = () => void;
+type FocusMainWindow = (sessionId?: string) => void;
 let focusHook: FocusMainWindow | null = null;
 export function setNotificationFocusHook(fn: FocusMainWindow): void {
   focusHook = fn;
@@ -54,7 +54,8 @@ function notifySession(mainWindow: BrowserWindow, sessionId: string, body: strin
     // P2-18：点击 toast → 聚焦主窗（restore/show/focus）。未注入（测试环境）时 no-op。
     notification.on('click', () => {
       try {
-        focusHook?.();
+        // hb12-SHL-03：点击通知携带 sessionId——聚焦主窗并切换到对应会话。
+        focusHook?.(sessionId);
       } catch (err) {
         logger.warn(`[notify] 点击通知聚焦主窗失败 ${err instanceof Error ? err.message : String(err)}`);
       }

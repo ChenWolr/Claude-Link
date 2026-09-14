@@ -6,6 +6,8 @@ export function setupLinkGuard(window: BrowserWindow, devRendererUrl?: string): 
   const guardNavigation = (event: Electron.Event<Electron.WebContentsWillNavigateEventParams>): void => {
     const disposition = getNavigationDisposition(event.url, devRendererUrl);
     if (disposition === 'allow') {
+      // hb10-SHL-09（收窄）：dev 放行可观测（生产恒 deny 无此分支）。
+      logger.debug('[link-guard] dev renderer 导航放行');
       return;
     }
 
