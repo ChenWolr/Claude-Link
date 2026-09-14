@@ -50,8 +50,10 @@ check('③ 子目录命令 basename 也有证据（buildcmd → project）',
   origins[k('buildcmd')] === 'project');
 check('④ 二级嵌套（ns:deep:deepcmd）与 basename 均有证据',
   origins[k('ns:deep:deepcmd')] === 'project' && origins[k('deepcmd')] === 'project');
-check('⑤ 超限深（4 层目录内 toodeep）不采集（回落 unknown 计数，可见差异状态）',
-  origins[k('toodeep')] === undefined && origins[k('ns:deep:deeper2:more:toodeep')] === undefined);
+// hb10-CMD-09 最小同步：扫描深度 3→6（与指纹/skill 对齐）——原「4 层超限不采集」断言
+// 演化为「4 层在限内采集」；6 层以深的不可见语义由 COMMAND_SCAN_MAX_DEPTH 单点控制。
+check('⑤ 4 层深目录（toodeep）在限内采集（hb10-CMD-09 深度 3→6）',
+  origins[k('toodeep')] === 'project' && origins[k('ns:deep:deeper2:more:toodeep')] === 'project');
 if (junctionCreated) {
   check('⑥ symlink/junction 目录跳过（linkdir:buildcmd 不采集）',
     origins[k('linkdir:buildcmd')] === undefined);

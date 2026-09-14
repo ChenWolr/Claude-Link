@@ -28,13 +28,15 @@ import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessag
 import { mapAskUserQuestionCancel } from '../../shared/interaction-cancel';
 import { getProjectOriginFingerprint } from './command-source-watcher';
 import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
+import type { ModelAlias } from '../../shared/types/config';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { buildPostTurnProbeArgs } from '../../shared/post-turn-probe';
 import { extractLastEffortFromJsonl, extractLastEffortFromText, EFFORT_TAIL_WINDOW_BYTES, mungeProjectDirName } from '../../shared/effort-truth';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
 import { isSuccessfulCliResult, isAbortedCliResult } from '../../shared/session-completion';
-import { noteTurnOutcome } from './task-queue-engine';
+import { noteTurnOutcome, beginUserTurn } from './task-queue-engine';
 import { convertResultMessage } from '../../shared/result-converter';
+import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
 import { logger } from '../utils/logger';
 import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState, clearReasoningReplayTurnFlag } from './reasoning-replay-auto-retry';
@@ -84,7 +86,7 @@ import type {
   SDKUserMessage,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { SdkPrompt } from './attachment-prompt-builder';
-import { cancelInteractionsForSession, requestInteraction, hasPendingInteractionForSession } from './interaction-prompts';
+import { cancelInteractionsForSession, requestInteraction, hasPendingInteractionForSession, getPendingInteractionPrompts } from './interaction-prompts';
 import {
   SUPPORTED_USER_DIALOG_KINDS,
   buildPermissionInteractionPayload,
@@ -190,6 +192,9 @@ interface SessionEntry {
   // api_retry 会重建 retry 状态并再次 abortNonRetryableUpstream（重复 error 事件+重复系统消息
   // 落库）。闩随 entry 生命周期（每回合新 entry），天然不跨回合残留。
   upstreamFatalAborted?: boolean;
+  // hb12-P2-2：回合已知终态（result/合成 aborted 显式结算时置位）。exit 兜底分类据此让位——
+  // result 权威 > 显式终态标记 > 退出码兜底，任何路径不得把「已中断」记成 success。
+  knownOutcome?: 'success' | 'error' | 'interrupted';
 }
 const nextQueryInstance = { value: 1 };
 
@@ -261,6 +266,12 @@ function rememberSessionPermissionUpdates(sessionId: string, updates: Permission
 
 function applySessionPermissionUpdates(sessionId: string, permissions: SdkPermissionSettings): SdkPermissionSettings {
   return applyPermissionUpdates(permissions, sessionPermissionUpdates.get(sessionId));
+}
+
+// hb10 P2-2：会话档位变更即失效本会话记忆的全部 allow-session 放行（小本本清账）——
+// 切档后同工具重新弹窗，防止新档位（尤其 plan）继承旧档记忆的裸 allow 越权。
+export function clearSessionPermissionBook(sessionId: string): void {
+  sessionPermissionUpdates.delete(sessionId);
 }
 
 // ── 卡死检测：每会话活动追踪 ────────────────────────────────────────
@@ -540,6 +551,7 @@ const markedDeletedSessions = new Set<string>();
 export function markSessionDeleted(sessionId: string): void {
   markedDeletedSessions.add(sessionId);
   activeSessions.delete(sessionId);
+  contextRefreshBreaker.delete(sessionId); // hb12-ENG-03（卫生）：breaker 随会话删除清口
   cancelInteractionsForSession(sessionId);
   pendingFirstPrompt.delete(sessionId);
   const entry = entries.get(sessionId);
@@ -645,9 +657,12 @@ function createPermissionHandler(sessionId: string, mainWindow: BrowserWindow, w
     // 不发 permission_request 系统消息、不入交互历史——用户已授权，无需再留痕。
     // 子 agent（options.agentID 非空）不享受主流程的会话放行：授权语义是「用户放行了主流程用这个
     // 工具」，模型自行派生的子 agent 裸 toolName 相同不能搭车（排查文档遗留项 4，收窄方向=多问）。
+    // hb10 P2-2：plan 档守卫——有效档为 plan 时跳过短路（plan 档任何工具都走弹窗终审，
+    // 会话小本本的裸 allow 不得静默放行）；default/acceptEdits/bypass 维持既有短路体验。
     const sessionBook = sessionPermissionUpdates.get(sessionId);
-    const sessionAllowed = options.agentID == null && isToolSessionAllowed(sessionBook, toolName);
-    logger.info(`[canUseTool] tool=${toolName} shortCircuit=${sessionAllowed} bookTools=[${bookToolNames(sessionBook).join(',')}]`);
+    const planGated = resolveEffectivePermissionMode(sessionRepo.getSession(sessionId)?.permissionMode ?? null, getConfig().permissionMode) === 'plan';
+    const sessionAllowed = !planGated && options.agentID == null && isToolSessionAllowed(sessionBook, toolName);
+    logger.info(`[canUseTool] tool=${toolName} shortCircuit=${sessionAllowed} planGated=${planGated} bookTools=[${bookToolNames(sessionBook).join(',')}]`);
 
     if (sessionAllowed) {
       return { behavior: 'allow', updatedInput: input, toolUseID: options.toolUseID };
@@ -841,10 +856,27 @@ function resolveFromCmdShim(cmdPath: string): string | undefined {
 // 后下次可重试成功；CONFIG_SAVE（cliPath 可能变化）时整表失效（onConfigSaved 订阅，见 init）。
 const resolveExecutableCache = new Map<string, string | undefined>();
 
+// hb10 P2-16：整串绝对路径解析——exe 直接命中；win 下 .cmd/.bat shim 不能直接 spawn，
+// 经 resolveFromCmdShim 解出真 exe。含空格 cliPath（C:\Program Files\...）此前被按空白切首段截断必败。
+function resolveAbsolutePathCandidate(full: string): string | undefined {
+  if (!path.isAbsolute(full) || !existsSync(full)) return undefined;
+  if (isLikelyExecutable(full)) return full;
+  if (process.platform === 'win32') {
+    const lower = full.toLowerCase();
+    if (lower.endsWith('.cmd') || lower.endsWith('.bat')) return resolveFromCmdShim(full);
+  }
+  return undefined;
+}
+
 export function resolveExecutable(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
-  // 含空格（如 'npx claude'）取首段再解析。
-  const cmd = raw.trim().split(/\s+/)[0];
+  // hb10 P2-16：整串绝对路径快路径优先（先于按空白切分；缓存键不变——按首段 cmd）。
+  const full = raw.trim();
+  if (!full) return undefined;
+  const viaFull = resolveAbsolutePathCandidate(full);
+  if (viaFull) return viaFull;
+  // 含空格（如 'npx claude'）取首段再解析（带参形态兼容回退）。
+  const cmd = full.split(/\s+/)[0];
   if (!cmd) return undefined;
   // 若 config.cliPath 本身已是绝对路径且是合法可执行文件，直接用（零成本，不必缓存）。
   if (path.isAbsolute(cmd) && existsSync(cmd) && isLikelyExecutable(cmd)) return cmd;
@@ -855,6 +887,10 @@ export function resolveExecutable(raw: string | null | undefined): string | unde
 }
 
 function resolveExecutableUncached(raw: string): string | undefined {
+  // hb10 P2-16：uncached 路径同样整串先行（两处同形收口），再回退按空白切分的 where/which 链。
+  const full = raw.trim();
+  const viaFull = resolveAbsolutePathCandidate(full);
+  if (viaFull) return viaFull;
   const cmd = raw.trim().split(/\s+/)[0];
   const lookup = process.platform === 'win32' ? 'where' : 'which';
   try {
@@ -891,6 +927,7 @@ onConfigSaved(() => {
 // ── 组装 SDK Options ───────────────────────────────────────────────
 interface ResolvedSessionOverride extends SessionModelOverride {
   providerName: string | null;
+  providerId: string | null; // hb12-PRV-03：漂移 current 携带供应商 id（同名可区分）
   invalidOverride: boolean;
 }
 
@@ -910,6 +947,7 @@ function resolveSessionOverride(opts: SpawnOptions): ResolvedSessionOverride | n
     apiKey: resolved.provider.apiKey,
     modelId: resolved.modelId,
     providerName: resolved.provider.name,
+    providerId: resolved.provider.id, // hb12-PRV-03：漂移 current 需 id（同名供应商可区分）
     invalidOverride: resolved.invalidOverride,
   };
 }
@@ -917,18 +955,15 @@ function resolveSessionOverride(opts: SpawnOptions): ResolvedSessionOverride | n
 // 会话生效连接的漂移可见性（连接加固 Task 6）：每回合起点解析出的「实际连接」若与
 // 上一回合不同（会话所选被删/全局 lastUsed 变更/库首回退等），落库一条 system 消息。
 // 切换本身是设计内行为（工具栏切换「下一条消息起生效」），但**静默回退**必须留痕，
-// 否则用户看到的是模型行为突变 + 上游报错却无从知晓原因。首回合只记录不提示；
-// 仅在变化时写一条；会话删除时清理。
-function notifyEffectiveConnectionDrift(
+// 否则用户看到的是模型行为突变 + 上游报错却无从知晓原因。首回合也落一条「初始化」提示
+//（hb10-PRV-03）；仅在变化时写一条；会话删除时清理。
+// hb10-PRV-03：连接切换系统消息构造（首回合 prev='初始化' 也走此通道）。
+function notifyDriftMessage(
   sessionId: string,
   mainWindow: BrowserWindow,
-  override: ResolvedSessionOverride | null,
+  prev: { providerName: string | null; modelId: string | null },
+  current: { providerName: string | null; modelId: string | null },
 ): void {
-  const current = { providerName: override?.providerName ?? null, modelId: override?.modelId ?? null };
-  const prev = sessionLastEffective.get(sessionId);
-  sessionLastEffective.set(sessionId, current);
-  if (!prev) return;
-  if (prev.providerName === current.providerName && prev.modelId === current.modelId) return;
   const fmt = (v: { providerName: string | null; modelId: string | null }): string =>
     `${v.providerName ?? '（库外/老字段链）'} / ${v.modelId ?? '别名链'}`;
   const content = `本回合起连接已切换：${fmt(prev)} → ${fmt(current)}。若非你主动切换，请检查供应商库（会话所选的供应商/模型可能已被删除或修改）。`;
@@ -948,6 +983,44 @@ function notifyEffectiveConnectionDrift(
   } catch (err) {
     logger.warn(`[${sessionId}] 连接切换提示落库失败：${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+function notifyEffectiveConnectionDrift(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  override: ResolvedSessionOverride | null,
+): void {
+  const current = { providerName: override?.providerName ?? null, modelId: override?.modelId ?? null, providerId: override?.providerId ?? null };
+  const prev = sessionLastEffective.get(sessionId);
+  sessionLastEffective.set(sessionId, current);
+  // hb10-PRV-03：首回合（无 prev）也落一条提示（prev 视为「初始化」），显示与实际一致。
+  if (!prev) {
+    notifyDriftMessage(sessionId, mainWindow, { providerName: null, modelId: '初始化' }, current);
+    return;
+  }
+  if (prev.providerName === current.providerName && prev.modelId === current.modelId && prev.providerId === current.providerId) return;
+  notifyDriftMessage(sessionId, mainWindow, prev, current);
+}
+
+// hb10-CTX-01：生产 query 与 post-turn 探针共用的窗口 override 计算（单源）——
+// 探针窗口与生产一致（用户覆盖不配置时探针按 200k 计占比的分母漂移修复）。
+// hb13-v 批C 注记（engine-sdk F5）：「一致」仅指本共享函数；入参推导两侧不同源——
+// 探针侧 aliasOrModel 取 override?.modelId ?? fullOpts.model ?? default（不读 opts.modelOverride），
+// 生产侧 modelOverride 优先；有 modelOverride 无 provider 覆盖的会话探针分母可能与生产漂移（仅诊断展示值）。
+function computeContextWindowOverrideTokens(input: {
+  aliasOrModel: string;
+  advancedJson: string;
+  contextWindowByAlias: Partial<Record<ModelAlias, number>>;
+}): number | null {
+  const userWindow = lookupUserContextWindow(input);
+  if (typeof userWindow !== 'number' || userWindow <= 0) return null;
+  // 钳制 [1e5, 1e6]：与 SDK autoCompactWindow zod 范围对齐，超界 CC 行为未定义。
+  // hb13-v 批C 补注（engine-sdk F7④）：超界钳制丢失的 warn 日志在此恢复（抽取单源时丢失）。
+  const clamped = Math.max(100000, Math.min(1000000, userWindow));
+  if (clamped !== userWindow) {
+    logger.warn(`[ctx-window] 用户覆盖窗口 ${userWindow} 越界，已钳制到 [100000, 1000000]`);
+  }
+  return clamped;
 }
 
 /**
@@ -989,17 +1062,12 @@ function buildClaudeLinkSettingsBlock(
   // （lookupUserContextWindow 返 undefined 则不注入），避免把未配的官方模型（如 fable 5 的 1M）降级。
   // 优先级：flag settings.env（此处）> options.env（buildSpawnEnv）；MAX_CONTEXT_TOKENS > [1m] 后缀。
   // v2.1.193+ 对未知模型名直接生效，无需 DISABLE_COMPACT；若日后改回 claude-* 官方名需配合 DISABLE_COMPACT。
-  const userWindow = lookupUserContextWindow({
+  const clamped = computeContextWindowOverrideTokens({
     aliasOrModel: requestedAlias,
     advancedJson: config.advancedJson,
     contextWindowByAlias: config.contextWindowByAlias,
   });
-  if (typeof userWindow === 'number' && userWindow > 0) {
-    // 钳制 [1e5, 1e6]：与 SDK autoCompactWindow zod 范围对齐，超界 CC 行为未定义。
-    const clamped = Math.max(100000, Math.min(1000000, userWindow));
-    if (clamped !== userWindow) {
-      logger.warn(`[${sessionId}] contextWindowByAlias[${requestedAlias}]=${userWindow} 越界 [1e5,1e6]，注入钳制为 ${clamped}`);
-    }
+  if (clamped != null) {
     settingsEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(clamped);
     logger.info(`[${sessionId}] 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS=${clamped} (alias=${requestedAlias})`);
   }
@@ -1134,6 +1202,9 @@ function forwardEvent(
   // try 包裹沿周围风格：调度收口异常不得阻塞事件循环。
   if (event.type === 'result') {
     const outcome = isSuccessfulCliResult(event) ? 'success' : isAbortedCliResult(event) ? 'interrupted' : 'error';
+    // hb12-P2-2：result 权威终态落 entry（exit 兜底据此让位，不按退出码重结算）。
+    const hookEntry = entries.get(sessionId);
+    if (hookEntry && !hookEntry.knownOutcome) hookEntry.knownOutcome = outcome;
     try {
       noteTurnOutcome(sessionId, outcome, mainWindow);
     } catch (err) {
@@ -1157,7 +1228,19 @@ function forwardEvent(
         modelUsage && typeof modelUsage === 'object'
           ? Object.values(modelUsage)[0]?.contextWindow ?? undefined
           : undefined;
-      const windowSize = realWindow ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null);
+      // hb13-v B7（F-2 / hb10-CTX-08 主进程面）：estimated 源「只增不减」——realWindow 缺失时
+      // readContextWindow 兜底值（未配覆盖的 1M 模型=200k）不得缩水 DB 已持久化的更大真实窗口
+      //（否则重启后列表/预填分母被拉低）；realWindow 存在仍允许缩小=modelUsage 精确化。
+      // 下发 payload 与 updateLastContextWindow 落库同用守卫后的 windowSize。
+      let windowSize = realWindow ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null);
+      if (!realWindow) {
+        try {
+          const persisted = sessionRepo.getSession(sessionId)?.lastContextWindow;
+          if (typeof persisted === 'number' && persisted > windowSize) windowSize = persisted;
+        } catch {
+          /* ignore */
+        }
+      }
       const payload: ContextStatsPayload = {
         sessionId,
         queryGeneration: queryInstance ?? entries.get(sessionId)?.queryInstance ?? -1,
@@ -1183,7 +1266,13 @@ function forwardEvent(
         consistency: 'unavailable',
         diagnostic: '仅本轮 turn usage，无当前窗口快照',
       };
-      mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      // hb10-ENG-02（收窄）：包 try 对齐同文件其他 send——窗口销毁（webContents 已
+      // destroyed）时此裸 send 抛错会劫持 result 分支/回滚成功发送的调用链。
+      try {
+        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      } catch (err) {
+        logger.warn(`Failed to send turn-usage CONTEXT_UPDATE [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+      }
       // 缓存最近一次 turn usage 供诊断，但不再把它当当前窗口持久化。
       sessionContextStats.set(sessionId, {
         inputTokens: turnInputTokens,
@@ -1265,7 +1354,8 @@ const midTurnRefreshState = new Map<string, { lastInitiatedAt: number; inFlight:
 // 刷新熔断器（2026-09-06 根因：CLI get_context_usage 依赖上游 count_tokens，渠道不支持/
 // 按请求体贴签 404 时 CU 4-21s+ 不落定，5s 预算必爆。连续超时达到阈值后暂停发起，省掉
 // 每回合 3 相位 × 5s 的无效等待与 debug 刷屏；cooldown 过后自然半开重探，成功即关闭。
-// 会话删除不清理（key 不再命中，驻留可忽略）——挂 deleteEntry 会把跨回合 streak 清零，
+// 会话删除经 markSessionDeleted → contextRefreshBreaker.delete 清口（hb12-ENG-03）；
+// 非删除的会话切换不清理（key 驻留可忽略）——挂 deleteEntry 会把跨回合 streak 清零，
 // 使轻短回合永远凑不满阈值，熔断失效。）
 const CONTEXT_REFRESH_BREAKER_THRESHOLD = 3;
 const CONTEXT_REFRESH_BREAKER_COOLDOWN_MS = 10 * 60 * 1000;
@@ -1622,7 +1712,8 @@ const postTurnProbeState = new Map<string, PostTurnProbeState>();
 // 切换供应商时，探针不再漂到新连接上）。null 是有意义值（库空走老链），用 has() 区分。
 const sessionLastTurnOverride = new Map<string, SessionModelOverride | null>();
 // 会话上一回合的生效连接（漂移检测用）：跨回合变化时落库一条 system 提示。
-const sessionLastEffective = new Map<string, { providerName: string | null; modelId: string | null }>();
+// hb12-PRV-03：增 providerId——仅按 providerName 比对区分不了同名供应商。
+const sessionLastEffective = new Map<string, { providerName: string | null; modelId: string | null; providerId: string | null }>();
 
 // 从 stream-json 输出提取 /context 报告原文：assistant 事件的 message.content[].text
 // 拼接（F1 嵌套位置），result.result 作兜底源。
@@ -1681,6 +1772,13 @@ async function runPostTurnContextProbe(
     const snap = sessionLastTurnOverride.has(sessionId) ? sessionLastTurnOverride.get(sessionId) : undefined;
     const override = snap !== undefined ? snap : resolveSessionOverride(fullOpts);
     env = buildSpawnEnv(override);
+    // hb10-CTX-01：探针窗口与生产一致——按会话实际模型补注入窗口 override（单源函数）。
+    const probeWindow = computeContextWindowOverrideTokens({
+      aliasOrModel: override?.modelId ?? fullOpts.model ?? config.defaultModel,
+      advancedJson: config.advancedJson,
+      contextWindowByAlias: config.contextWindowByAlias,
+    });
+    if (probeWindow != null) env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(probeWindow);
     cwd = fullOpts.workingDir || config.workingDirectory || undefined;
   } catch (e) {
     logger.debug(`[${sessionId}] post-turn 探针：构建环境失败 ${e instanceof Error ? e.message : String(e)}`);
@@ -1691,7 +1789,8 @@ async function runPostTurnContextProbe(
   await new Promise<void>((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(exe, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+      // hb12-ENG-05：windowsHide——后台探针子进程不闪控制台窗（对齐 SDK spawn 形态）。
+      child = spawn(exe, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     } catch (e) {
       logger.debug(`[${sessionId}] post-turn 探针：spawn 失败 ${e instanceof Error ? e.message : String(e)}`);
       resolve();
@@ -1806,6 +1905,12 @@ function cancelPostTurnProbe(sessionId: string): void {
   postTurnProbeState.set(sessionId, { child: null, generation: state.generation + 1 });
 }
 
+// SHL 批（2026-09-13 二轮补救）：取消全部在飞 post-turn 探针——一行循环逐会话走既有
+// cancelPostTurnProbe（kill + 推进代际，迟到 close 回调据此丢弃结果）。app before-quit 调用。
+export function cancelAllPostTurnProbes(): void {
+  for (const sid of [...postTurnProbeState.keys()]) cancelPostTurnProbe(sid);
+}
+
 export function schedulePostTurnProbe(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -1846,6 +1951,11 @@ export function schedulePostTurnProbe(
 // 终态由 mapContextReconcileTerminal 单源映射：reconciled（与同代 runtime 一致）/
 // 仅 native（native-context + fresh，native 即权威）/ 仅 runtime 或 mismatch（unavailable +
 // stale，保留 last-known 不伪装 fresh）/ 两者皆无（unavailable + pending）。
+// hb10-CTX-03：本地命令回合判定——/clear（清空）不探针；/context 已由 contextTurn 专门对账。
+function isLocalCommandTurn(initCommandText: string): boolean {
+  return /^\/(clear)\b/.test(initCommandText.trim());
+}
+
 function isContextCommand(text: string): boolean {
   return /^\/context\b/.test(text.trim());
 }
@@ -2610,12 +2720,49 @@ function isCurrentProbe(sessionId: string, entry: CommandProbeEntry): boolean {
   return commandProbes.get(sessionId) === entry;
 }
 
+// hb13-v B6（F5 / hb12-CMD-10）：探测进行中判定（COMMANDS_GET 分流抑制 needsRefreshProbeOnly）。
+export function isCommandProbeInFlight(sessionId: string): boolean {
+  const entry = commandProbes.get(sessionId);
+  return Boolean(entry && !entry.aborted);
+}
+
+// hb13-v B6（F3/F4）：replace 前守卫统一收口——「会话活跃 + 现役 + 代际」三查、指纹 IO 后
+// 二次重查再落盘（hb12-CMD-02 口径）。probe 主路径 / init 早期快照 / commands_changed 三处
+// 共用；startRev 由调用方在进入分支时捕获（changed 路径原先无任何重查，init 早期写入漏双查）。
+async function replaceCommandSnapshotIfCurrent(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  args: {
+    startRev: number;
+    isCurrent: () => boolean;
+    commands: unknown[];
+    source: 'init' | 'probe' | 'changed';
+    ctx: CommandOriginContext | undefined;
+    computeProjectFp: () => Promise<string | undefined> | string | undefined;
+  },
+): Promise<void> {
+  if (!isSessionActive(sessionId) || !args.isCurrent() || sdkCommandRegistry.getRevision(sessionId) !== args.startRev) return;
+  const projectFp = await args.computeProjectFp();
+  // 指纹 IO 是第二个异步窗——返回后代际/现役可能已推进，重查失败即放弃本次写入。
+  if (!isSessionActive(sessionId) || !args.isCurrent() || sdkCommandRegistry.getRevision(sessionId) !== args.startRev) return;
+  const snap = sdkCommandRegistry.replace(sessionId, args.commands, args.source, args.ctx, getUserOriginFingerprint(), projectFp);
+  emitCommandChanged(sessionId, mainWindow, snap);
+}
+
 /**
  * 新会话创建后立即在后台发起命令发现。成功 → registry 全量写入 source:'probe' 快照并推 COMMANDS_CHANGED；
  * 失败/无 exe → degraded（保留缓存命令）；SDK 无 supportedCommands → degraded（由真实 query init 兜底）。
  * 不阻塞普通聊天；返回的 Promise 在 probe 结束后 resolve。
  */
 export async function startCommandProbe(sessionId: string, mainWindow: BrowserWindow, opts: SpawnOptions = {}): Promise<void> {
+  // hb13-v B6（F5 / hb12-CMD-10）：探测中幂等——存活探针直接复用其 donePromise（等待完成后
+  // 返回），不再 cancel+respawn；10s 节流窗后重开菜单不再反复 spawn/abort。aborted=true
+  //（取消中/残留）探针不可复用，仍走下方有限超时取消清理。
+  const existing = commandProbes.get(sessionId);
+  if (existing && !existing.aborted) {
+    await existing.donePromise;
+    return;
+  }
   // N3：先等待已有 probe 取消结束（有限超时），避免两个 probe 并发创建/退出 Claude Code 进程。
   await cancelCommandProbeInternal(sessionId, 1000);
   // N5：重启后打开已有会话时 activeSessions 为空（markSessionActive 只在 SESSION_CREATE / spawnForChat /
@@ -2688,6 +2835,14 @@ const SUPPORTED_COMMANDS_TIMEOUT_MS = 8_000;
 let globalCliMissing = false;
 export function isGlobalCliMissing(): boolean {
   return globalCliMissing;
+}
+
+// hb10-CMD-07：全局探测失败标志（三失败路：构建 throw/运行失败/supportedCommands 失败）——
+// COMMANDS_GET 只读分流据此返回显式失败快照（暂态菜单显示失败而非永久 loading）；
+// 新探测入口无条件清位（与 globalCliMissing 同生命周期）。
+let globalProbeError = false;
+export function isGlobalProbeFailed(): boolean {
+  return globalProbeError;
 }
 
 async function runCommandProbe(
@@ -2899,18 +3054,17 @@ async function resolveAndApplyProbeCommands(
       }),
     ]);
     // F4：只有仍是启动时代际（期间无 commands_changed 等 replace）才写入，防旧 probe 覆盖新列表。
-    if (
-      isSessionActive(sessionId) &&
-      isCurrentProbe(sessionId, entry) &&
-      sdkCommandRegistry.getRevision(sessionId) === startRev
-    ) {
-      // P2-14：项目级出生指纹随 probe 成功写入快照（会话 cwd 两根；无 cwd → undefined 不比对）。
-      const projectFp = await getProjectOriginFingerprint(
+    // hb13-v B6：守卫收口至 replaceCommandSnapshotIfCurrent（三查 + 指纹 IO 后二次重查再落盘）。
+    await replaceCommandSnapshotIfCurrent(sessionId, mainWindow, {
+      startRev,
+      isCurrent: () => isCurrentProbe(sessionId, entry),
+      commands: Array.isArray(rawCommands) ? rawCommands : [],
+      source: 'probe',
+      ctx: sessionCommandCtx.get(sessionId),
+      computeProjectFp: () => getProjectOriginFingerprint(
         sessionRepo.getSession(sessionId)?.workingDir ?? getConfig().workingDirectory,
-      );
-      const snap = sdkCommandRegistry.replace(sessionId, Array.isArray(rawCommands) ? rawCommands : [], 'probe', sessionCommandCtx.get(sessionId), getUserOriginFingerprint(), projectFp);
-      emitCommandChanged(sessionId, mainWindow, snap);
-    }
+      ),
+    });
   } catch (e) {
     if (isSessionActive(sessionId) && isCurrentProbe(sessionId, entry)) {
       const message = e instanceof Error ? e.message : String(e);
@@ -2945,6 +3099,30 @@ async function cancelCommandProbeInternal(sessionId: string, timeoutMs: number):
     // ProcessTransport not ready → ignore
   }
   await Promise.race([entry.donePromise, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+}
+
+// hb12-CMD-01：取消全部 per-session 命令探针——app before-quit 与 cancelGlobalCommandProbe 并列调用
+//（killAllProcesses 不扫 probe 子进程，遗留即孤儿 claude）。形态对齐 cancelCommandProbeInternal：
+// 记账（aborted=true，在飞回调据此丢弃结果）→ abort → interrupt → 有限等待 donePromise。
+export async function cancelAllCommandProbes(timeoutMs = 500): Promise<void> {
+  const entries = [...commandProbes.entries()];
+  await Promise.all(
+    entries.map(async ([sid, entry]) => {
+      entry.aborted = true;
+      try {
+        entry.abortController.abort();
+      } catch {
+        // ignore
+      }
+      try {
+        await entry.query?.interrupt();
+      } catch {
+        // ProcessTransport not ready → ignore
+      }
+      await Promise.race([entry.donePromise, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
+      if (isCurrentProbe(sid, entry)) commandProbes.delete(sid);
+    }),
+  );
 }
 
 // ── 全局兜底命令探测（无会话绑定）──
@@ -2985,6 +3163,7 @@ export function ensureGlobalCommandProbeFresh(mainWindow: BrowserWindow, maxAgeM
 export function runGlobalCommandProbe(mainWindow: BrowserWindow): boolean {
   if (globalProbe) return false;
   globalCliMissing = false; // P3-4：新探测尝试启动即清「CLI 缺失」标志（exe 装好后重试可见效）
+  globalProbeError = false; // hb10-CMD-07：新尝试清失败标志
   lastGlobalProbeAttemptAt = Date.now();
   let resolveDone!: () => void;
   const donePromise = new Promise<void>((r) => {
@@ -3016,6 +3195,7 @@ async function runGlobalCommandProbeInternal(mainWindow: BrowserWindow, entry: G
     try {
       probeSdk = buildProbeSdkOptions({}, GLOBAL_PROBE_SESSION_ID);
     } catch (e) {
+      globalProbeError = true; // hb10-CMD-07：落终态（不再静默 loading）
       logger.warn(`[global-probe] 构建探测选项失败：${e instanceof Error ? e.message : String(e)}`);
       return;
     }
@@ -3053,6 +3233,7 @@ async function runGlobalCommandProbeInternal(mainWindow: BrowserWindow, entry: G
       }
     }
   } catch (e) {
+    globalProbeError = true; // hb10-CMD-07：落终态
     logger.warn(`[global-probe] 探测失败：${e instanceof Error ? e.message : String(e)}`);
   } finally {
     clearTimeout(hardTimer);
@@ -3105,6 +3286,7 @@ async function applyGlobalProbeCommands(
       }
     }
   } catch (e) {
+    globalProbeError = true; // hb10-CMD-07：第三失败路落终态
     logger.warn(`[global-probe] supportedCommands 失败：${e instanceof Error ? e.message : String(e)}`);
   } finally {
     clearTimeout(timeoutTimer);
@@ -3153,8 +3335,18 @@ async function maybeDiscoverCommandsFromInit(
         aliases: [],
         source: 'sdk',
       }));
-      const snap = sdkCommandRegistry.replace(sessionId, initCmds, 'init', buildCommandOriginContext(sdkMsg, sessionId), getUserOriginFingerprint());
-      emitCommandChanged(sessionId, mainWindow, snap);
+      // hb13-v B6（F3）：早期快照写入补代际/现役重查（守卫收口至 replaceCommandSnapshotIfCurrent）
+      //——指纹 IO 异步窗内 commands_changed 等写入方 replace 过更完整列表（含描述）时，
+      // 晚到的 name-only initCmds（描述空）不再覆盖；会话窗口内被删除也不再写入。
+      // hb10-CMD-03 的项目指纹经 helper 的 computeProjectFp 保持同款取值（stale 检测不断链）。
+      await replaceCommandSnapshotIfCurrent(sessionId, mainWindow, {
+        startRev: sdkCommandRegistry.getRevision(sessionId),
+        isCurrent: () => isSessionActive(sessionId) && isCurrentEntry(sessionId, entry),
+        commands: initCmds,
+        source: 'init',
+        ctx: buildCommandOriginContext(sdkMsg, sessionId),
+        computeProjectFp: () => getProjectOriginFingerprint(sessionRepo.getSession(sessionId)?.workingDir ?? getConfig().workingDirectory),
+      });
     }
   }
   const startRev = sdkCommandRegistry.getRevision(sessionId);
@@ -3174,12 +3366,22 @@ async function maybeDiscoverCommandsFromInit(
       isCurrentEntry(sessionId, entry) &&
       sdkCommandRegistry.getRevision(sessionId) === startRev
     ) {
+      const probeProjectFp = await getProjectOriginFingerprint(sessionRepo.getSession(sessionId)?.workingDir ?? getConfig().workingDirectory);
+      // hb12-CMD-02：同 probe 主路径——指纹 IO 异步窗后重查代际+现役再 replace。
+      if (
+        !isSessionActive(sessionId) ||
+        !isCurrentEntry(sessionId, entry) ||
+        sdkCommandRegistry.getRevision(sessionId) !== startRev
+      ) {
+        return;
+      }
       const snap = sdkCommandRegistry.replace(
         sessionId,
         Array.isArray(raw) ? raw : [],
         'probe',
         sessionCommandCtx.get(sessionId),
         getUserOriginFingerprint(),
+        probeProjectFp,
       );
       emitCommandChanged(sessionId, mainWindow, snap);
     }
@@ -3587,8 +3789,17 @@ async function runQuery(
           // review-v1 §5.1：按当前会话 cwd 重建来源证据（init 时冻结的 evidence 不反映会话过程中
           // 新增/修改/删除的项目命令文件 .claude/skills、.claude/commands）。skills/plugins/slashCommands
           // 名称集合沿用 init（SDK canonical 视图），evidence 按当前磁盘状态重扫。
-          const snap = sdkCommandRegistry.replace(sessionId, rawCommands, 'changed', refreshCommandOriginContext(sessionId, opts.workingDir || getConfig().workingDirectory || undefined), getUserOriginFingerprint());
-          emitCommandChanged(sessionId, mainWindow, snap);
+          // hb10-CMD-03：changed 重扫 evidence 时同步项目指纹（否则 stale 检测用旧基线误标/漏标）。
+          // hb13-v B6（F4）：指纹 await 打开竞态窗——补代际/现役重查（守卫收口至 helper，
+          // startRev 进入分支时捕获）；窗口内 per-session probe 等写入方已 replace 时不被本写覆盖。
+          await replaceCommandSnapshotIfCurrent(sessionId, mainWindow, {
+            startRev: sdkCommandRegistry.getRevision(sessionId),
+            isCurrent: () => isSessionActive(sessionId) && isCurrentEntry(sessionId, entry),
+            commands: rawCommands,
+            source: 'changed',
+            ctx: refreshCommandOriginContext(sessionId, opts.workingDir || getConfig().workingDirectory || undefined),
+            computeProjectFp: () => getProjectOriginFingerprint(opts.workingDir || getConfig().workingDirectory || sessionRepo.getSession(sessionId)?.workingDir),
+          });
           continue;
         }
         // Task 8：local_command_output——本地命令（/clear /help 等）的输出。主进程单一落库
@@ -3597,7 +3808,14 @@ async function runQuery(
         // result.result 走现有 result 终态（/usage 等结果只出现在 result.result，见 §0.1-9），两者并存。
         if (subtype === 'local_command_output') {
           const rawContent = sdkMsg.content;
-          const content = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent ?? '');
+          // hb10-CMD-04：null/undefined → 空串（不再产生字面 "" 噪声消息）；其余非 string 才 JSON 序列化。
+          // hb13-v 批C 注记（engine-sdk F6）：content 为空串/空白时本行仍原样落库并推送
+          //（persistLocalCommandOutput 无空串跳过）——「无噪声」仅对字面 "" 成立。
+          const content = typeof rawContent === 'string'
+            ? rawContent
+            : rawContent == null
+              ? ''
+              : JSON.stringify(rawContent);
           persistLocalCommandOutput(sessionId, mainWindow, content);
           // review-v2 Blocker：/context 回合的原生输出也可能以 local_command_output 落库
           // （不同端点形态）。与 assistant 分支合并收集，result 时统一 parse+reconcile。
@@ -3669,6 +3887,10 @@ async function runQuery(
       }
       if (type === 'result') {
         gotResult = true;
+        // hb12-P2-2：result 权威信号到达即记「已结算」（具体三态由 forwardEvent 的
+        // noteTurnOutcome 钩子精确写入 entry.knownOutcome；此处只保证兜底让位判据先于
+        // 可能的 emitExit 时序，实际兜底在流末/finally 远晚于本行）。此处用 is_error 粗标。
+        entry.knownOutcome = sdkMsg.is_error === true ? 'error' : 'success';
         if (sdkMsg.is_error === true) {
           finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
         }
@@ -3783,7 +4005,12 @@ async function runQuery(
         // CLI 并发写同一 transcript 的双写竞态（cancelPostTurnProbe 在新回合启动时已跑过、拦不住
         // 此刻才调度的探针）。仅此调用点需要：其余出口的调度与 entry 释放之间无 await 插入。
         if (!contextTurn && entries.get(sessionId) == null) {
-          schedulePostTurnProbe(sessionId, mainWindow, probeInstance, probeCliSid, { compactedJustNow });
+          // hb10-CTX-03（收窄 /clear 半条）：本地命令回合（/clear 等清空/复位语义）不调度探针——
+          // /clear 后 transcript 已清，探针 --resume 拿到的是清空后状态或直接失败，只会下发误导
+          // 性 fresh/stale payload。其余回合照常调度。
+          if (!isLocalCommandTurn(initCommandText)) {
+            schedulePostTurnProbe(sessionId, mainWindow, probeInstance, probeCliSid, { compactedJustNow });
+          }
         }
         // reasoning_replay 韧性层：回合以 result 终态结束 → 命中即延时自动重发一次。
         scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);
@@ -3802,11 +4029,20 @@ async function runQuery(
       // 通知全丢。未烧满/不在重试中时 recordApiRetryExhausted 天然 no-op，普通回合零影响。
       finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
-      // 出口②（流丢 result 合成 aborted）：引擎侧内容已落 transcript，探针反映真实占用。
+      // hb12-P2-2（出口② 终态重构）：entry.knownOutcome='interrupted' + 显式结算——无 result 时代码不得伪造 success——
+      // exit 兜底（ipc:624 / tqe:598 附近，hb13-v 批C 行号对齐）结算为 success（队列假成功+armAfterTurn 自动启动下一任务），
+      // 与用户看到的「回合已结束」矛盾。改 emitExit(null)（系统杀语义），同序列显式结算
+      // interrupted（在 emitExit 之前；队列结算幂等闸 noteTurnOutcome 防重入，exit 兜底变 no-op）。
+      entry.knownOutcome = 'interrupted';
+      try {
+        noteTurnOutcome(sessionId, 'interrupted', mainWindow);
+      } catch (err) {
+        logger.error(`queue noteTurnOutcome failed [${sessionId}]`, err);
+      }
       const probeInstance2 = entry.queryInstance;
       const probeCliSid2 = sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId);
       deleteEntry(sessionId, entry);
-      emitExit(0);
+      emitExit(null);
       schedulePostTurnProbe(sessionId, mainWindow, probeInstance2, probeCliSid2);
       // reasoning_replay 韧性层：流丢 result 同样是回合终态（第三方端点常见）→ 命中即重发。
       scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);
@@ -3833,6 +4069,13 @@ async function runQuery(
         // P1-1：resume 重试二次起步清回合标记——首个 attempt 命中的错误标记随新 query 作废，
         // 重试本身已是同文本重发，成功后不应再触发一次自动重发。
         clearReasoningReplayTurnFlag(sessionId);
+        // hb10-CTX-10：重试不误弹横幅——resume 重试二次起步重置压缩标记（首个 attempt 的
+        // 压缩成功标记随新 query 作废；不重置会在新回合 compact_result 时误判「连续压缩」双横幅）。
+        turnHadCompactSuccess = false;
+        postCompactionFreshSent = false;
+        // hb10-ENG-07：stall 计时不跨 query——重试前旧 query 的无活动累计不得带入新 query
+        //（否则 resume 重试刚起步就可能被判 stalled 硬杀）。
+        resetStallTracker(sessionId);
         logger.debug(`[${sessionId}] resume 重试：旧会话 id 已清除，第二 query 已启动`);
         continue;
       } catch (retryErr) {
@@ -3947,7 +4190,13 @@ function scheduleReasoningReplayRetryForTurn(sessionId: string, mainWindow: Brow
       // 复用 CHAT_SEND 纯文本核心：落库 user 行 → spawn 占坑 → sendMessage 起 query。
       const session = sessionRepo.getSession(sessionId);
       if (!session) throw new Error(`Session ${sessionId} not found`);
-      messageRepo.createMessage({ sessionId, role: 'user', content: text, eventType: 'message' });
+      const persisted = messageRepo.createMessage({ sessionId, role: 'user', content: text, eventType: 'message' });
+      // hb10-ENG-05：落库后补 persisted_message 推送（对齐 CHAT_SEND 形态）——自动重试回合的
+      // 用户气泡立即可见，不再等回合结束重载才出现。
+      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+        sessionId,
+        event: { type: 'persisted_message', message: persisted },
+      });
       spawnForChat(sessionId, mainWindow, {
         model: session.model,
         modelOverride: session.modelOverride,
@@ -3960,6 +4209,9 @@ function scheduleReasoningReplayRetryForTurn(sessionId: string, mainWindow: Brow
         resumeSessionId: session.cliSessionId,
         userCommandText: text,
       });
+      // hb12-ENG-02（收窄）：resend 绕过 CHAT_SEND 的调度挂点——spawn 占坑后补 beginUserTurn
+      //（等价 CHAT_SEND 语义：插话顶掉倒计时 + 引擎置 running），重发回合正常结算。
+      beginUserTurn(sessionId, mainWindow);
       sendMessage(sessionId, text);
     },
   });
@@ -3974,6 +4226,12 @@ export function spawnForTask(
 ): SdkQueryHandle {
   void taskId;
   // task 模式：prompt 已知，直接起 query。entry 一次成型，runQuery 复用其 emit。
+  // hb10 P2-1（双保险之外保险）：spawn 前占坑检查（对齐 spawnForChat 语义）——用户回合在途
+  // （pendingFirstPrompt 或活动 entry）时抛错不覆盖，杜绝队列出队顶掉用户回合。
+  const blocking = entries.get(sessionId);
+  if (pendingFirstPrompt.has(sessionId) || isEntryActive(blocking)) {
+    throw new Error('当前回合仍在执行，请等待结束或中断后重试');
+  }
   const entry = createEntry();
   entries.set(sessionId, entry);
   markSessionActive(sessionId);
@@ -4026,6 +4284,25 @@ export function killProcess(
   // 时用户只看到弹窗凭空消失，须落一条可见的红色系统消息解释（user 主动中断符合预期、
   // session_cleanup 会话已删，均不落）。
   const hadPendingInteraction = hasPendingInteractionForSession(sessionId);
+  // hb12-PERM-05：系统取消的弹窗统一落 interaction_history（cancel 记录 + reason）——
+  // 原实现仅落 system 消息，历史回看缺口。pending 为 0 时 no-op。
+  if (hadPendingInteraction) {
+    try {
+      const cancelled = getPendingInteractionPrompts().filter((p) => p.sessionId === sessionId);
+      for (const p of cancelled) {
+        createInteractionHistoryRecord({
+          sessionId,
+          title: p.title || '权限确认',
+          kind: p.kind || 'permission',
+          // hb13-v 批C（item9 措辞）：reason='user' 是用户主动取消，不属「系统取消」。
+          summary: reason === 'user' ? '用户取消，未答复' : `系统取消（${reason}），未答复`,
+          action: 'cancel',
+        });
+      }
+    } catch (err) {
+      logger.warn(`[${sessionId}] 取消弹窗落历史失败 ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   cancelInteractionsForSession(sessionId);
   if (mainWindow && shouldNotifyInteractionCancelled(reason, hadPendingInteraction)) {
     try {
@@ -4170,6 +4447,17 @@ export function killAllProcesses(): void {
   for (const [sessionId] of entries) {
     killProcess(sessionId, 'session_cleanup');
   }
+}
+
+// hb12-P2-11：队列出队谓词用——「首条 prompt 待发」（spawnForChat 占坑未 sendMessage）也算用户回合在飞。
+export function hasPendingFirstPrompt(sessionId: string): boolean {
+  return pendingFirstPrompt.has(sessionId);
+}
+
+// hb12-P2-2：exit 兜底分类用——读 entry 已知终态（result/合成 aborted 显式结算时置位）。
+// entry 缺失（已 deleteEntry）或无标记时返回 null，由兜底方按退出码分类。
+export function getKnownTurnOutcome(sessionId: string): 'success' | 'error' | 'interrupted' | null {
+  return entries.get(sessionId)?.knownOutcome ?? null;
 }
 
 export function getActiveProcess(sessionId: string): SdkQueryHandle | undefined {

@@ -81,13 +81,17 @@ export function maybeScheduleReasoningReplayRetry(ctx: ReasoningReplayRetryCtx):
   if (!text) return;
   if (retriedTextBySession.get(sessionId) === text) return;
   if (ctx.hasRunningQuery()) return;
-  retriedTextBySession.set(sessionId, text);
+  // hb10-ENG-06：闩从「调度时置位」改为「pending 判重 + 发起时置位」——原实现在调度点置闩，
+  // 延迟窗口内放弃（二次守卫 return）后闩已占住，后续同文本回合不再自动重试（放弃的调度白占闩）。
+  if (pendingTimers.has(sessionId)) return;
 
   const timer = setTimeout(() => {
     pendingTimers.delete(sessionId);
     try {
       // 二次守卫：延迟窗口内用户可能已手动重发/切会话/删会话。
       if (ctx.hasRunningQuery() || !ctx.isSessionAlive()) return;
+      // 防重入闩在「实际发起时」置位（同一文本只自动重试一次的语义保持，且放弃的调度不再占闩）。
+      retriedTextBySession.set(sessionId, text);
       ctx.forwardSystemNotice(
         'auto_retry',
         '检测到上游思考回传不兼容（网关桥接缺陷，reasoning_content 未回传），已自动重试一次。',

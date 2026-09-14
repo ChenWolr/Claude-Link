@@ -225,6 +225,11 @@ function handleConfigSaved(deps: CommandSourceWatcherDeps): void {
   // 配置保存给了新的重挂机会：清零连续错误计数（对应「超过限次等 onConfigSaved/重启」的恢复路径）。
   s.consecutiveErrors = 0;
   s.hadErrorSinceMount = false;
+  // hb10-CMD-06：先清在途重挂 timer 再重挂（防与 mountAll 双重重挂/句柄泄漏）。
+  if (s.remountTimer) {
+    clearTimeout(s.remountTimer);
+    s.remountTimer = null;
+  }
   mountAll(deps);
   void refreshFingerprints(deps);
 }
@@ -233,6 +238,7 @@ function mountAll(deps: CommandSourceWatcherDeps): void {
   const s = state;
   if (!s || s.stopped) return;
   closeWatchers(s);
+  s.pendingRoots.clear(); // hb10-CMD-05：全量重挂即全新登记，陈旧 pending 根不再空转
   s.hadErrorSinceMount = false;
   const { allRoots } = commandSourceRoots(deps);
   for (const root of allRoots) mountRoot(root, deps);
@@ -300,7 +306,14 @@ function ensurePendingRetryLoop(deps: CommandSourceWatcherDeps): void {
     }
     // 有根在重试中挂上 → 目录状态已变（从无到有），重算指纹；无实质变化时该调用只更新基准不探测。
     const after = state;
-    if (after && after.pendingRoots.size < before) void refreshFingerprints(deps);
+    if (after && after.pendingRoots.size < before) {
+      // hb13-v B11（F8）：有根在慢循环中重新挂上 = 恢复挂载成功——复位 hadErrorSinceMount，
+      // 让本次安静刷新可以把 consecutiveErrors 归零，恢复快/慢模式流转
+      //（旧实现该旗标在超限后永无复位点，一旦进入慢循环即永久慢模式）。
+      after.hadErrorSinceMount = false;
+      // 有根在重试中挂上 → 目录状态已变（从无到有），重算指纹；无实质变化时该调用只更新基准不探测。
+      void refreshFingerprints(deps);
+    }
   }, intervalMs);
   if (s.pendingRetryTimer && typeof s.pendingRetryTimer.unref === 'function') s.pendingRetryTimer.unref();
 }
@@ -314,7 +327,13 @@ function handleWatcherError(root: string, deps: CommandSourceWatcherDeps, err: u
   // 单根 error 后句柄状态不可信：全量关闭整体重挂（延迟 5s，限连续 3 次）。
   closeWatchers(s);
   if (s.consecutiveErrors > WATCHER_REMOUNT_MAX_CONSECUTIVE) {
-    deps.logger.warn('[command-source-watcher] 连续重挂失败超限，放弃自动重挂（等下一次配置保存或重启）。');
+    // hb10-CMD-02：超限不再永久放弃——登记全部根进 pending 慢重试循环（30s，见
+    // WATCHER_PENDING_ROOT_RETRY_MS），错误风暴后仍可自愈（pendingRetryLoop 挂上即重算
+    // 指纹并恢复常规探测）。hb13-v B11：注释向实现对齐——hb10 计划原文误写 60s。
+    deps.logger.warn('[command-source-watcher] 连续重挂失败超限，转入 30s 慢重试循环。');
+    const { allRoots } = commandSourceRoots(deps);
+    for (const r of allRoots) s.pendingRoots.add(r);
+    ensurePendingRetryLoop(deps);
     return;
   }
   if (s.remountTimer) return; // 已有重挂排队
@@ -341,9 +360,13 @@ function scheduleRefresh(deps: CommandSourceWatcherDeps): void {
   if (s.debounceTimer && typeof s.debounceTimer.unref === 'function') s.debounceTimer.unref();
 }
 
+// hb10-CMD-V03：单调序号——并发 refresh 仅最新完成者写基线（乱序旧结果不覆盖新基线）。
+let refreshSeq = 0;
+
 async function refreshFingerprints(deps: CommandSourceWatcherDeps): Promise<void> {
   const s = state;
   if (!s || s.stopped) return;
+  const mySeq = ++refreshSeq;
   const { userRoots, allRoots } = commandSourceRoots(deps);
   const [allFp, userFp] = await Promise.all([
     computeCommandRootsFingerprint(allRoots),
@@ -351,6 +374,7 @@ async function refreshFingerprints(deps: CommandSourceWatcherDeps): Promise<void
   ]);
   const cur = state;
   if (!cur || cur.stopped) return;
+  if (mySeq !== refreshSeq) return; // hb10-CMD-V03：已有更新一轮完成，本轮结果作废
   cur.userFingerprint = userFp;
   // 「安静刷新周期」证明挂载健康：清零连续错误计数（无限重挂循环的破除条件）。
   if (!cur.hadErrorSinceMount) cur.consecutiveErrors = 0;

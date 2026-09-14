@@ -24,6 +24,12 @@ export interface CommandsGetInput {
   currentProjectFingerprint?: string;
   /** P3-4：全局 CLI 缺失（runGlobalCommandProbe 无 exe）。暂态只读分流据此返回 degraded 而非永久 loading。 */
   cliMissing?: boolean;
+  /** hb13-v B6（hb10-CMD-07 兑现）：全局命令探测失败（构建 throw/运行失败/supportedCommands 失败
+   *  三路置位）。暂态只读分流据此返回 degraded 失败快照（菜单显示失败行而非永久 loading）。 */
+  probeFailed?: boolean;
+  /** hb13-v B6（hb12-CMD-10）：该会话探测进行中——stale 时不返回 needsRefreshProbeOnly
+   *  （探测中重复 spawn/abort 可能永不收敛；重开菜单不再触发 cancel+respawn）。 */
+  probeInProgress?: boolean;
 }
 
 /** COMMANDS_GET 分流决策：返回给 renderer 的快照 + handler 需要执行的副作用档位。 */
@@ -82,8 +88,12 @@ export function resolveCommandsGetResult(input: CommandsGetInput): CommandsGetDe
     let snapshot = input.fallback ? fallbackCopy(input.fallback, input.snapshot.sessionId) : input.snapshot;
     // P3-4：无兜底且 CLI 缺失 → degraded 快照（显式失败出口），菜单显示「未检测到本地
     // Claude Code」而非永久「正在读取」。重试动作：再次打开菜单经 D6 节流重探。
+    // hb13-v B6（CMD-07）：无兜底且全局探测失败 → 同款 degraded 失败快照（暂态菜单退出
+    // loading 显式失败行）；cliMissing 文案更具体故优先。
     if (!input.fallback && input.cliMissing) {
       snapshot = { ...snapshot, status: 'degraded', error: '未检测到本地 Claude Code，无法发现 Slash 命令' };
+    } else if (!input.fallback && input.probeFailed) {
+      snapshot = { ...snapshot, status: 'degraded', error: '命令探测失败，重新打开菜单可重试' };
     }
     return {
       readOnly: true,
@@ -97,7 +107,8 @@ export function resolveCommandsGetResult(input: CommandsGetInput): CommandsGetDe
     return {
       readOnly: false,
       needsFullProbeSideEffects: false,
-      needsRefreshProbeOnly: stale,
+      // hb13-v B6（CMD-10）：探测进行中不触发免费重探（复用存活探针结果，COMMANDS_CHANGED 推送）。
+      needsRefreshProbeOnly: stale && !input.probeInProgress,
       snapshot: stale ? { ...input.snapshot, status: 'stale' } : input.snapshot,
     };
   }

@@ -507,11 +507,13 @@ check('Query 使用 Claude Agent SDK 官方 supportedCommands 契约', () => {
   assert.ok(!/supportedCommands\?\s*:/.test(sdkBackendSrc), '不应把 SDK 官方必需 supportedCommands 降级为可选字段');
 });
 
-check('commands_changed 全量替换 source:changed，不 concat', () => {
+check('commands_changed 全量替换 source:changed，不 concat（hb13-v B6 同步：replace 收口至守卫 helper）', () => {
   assert.ok(sdkBackendSrc.includes("'commands_changed'"), "system 分支应识别 commands_changed");
+  // hb13-v B6 必要同步：changed 路径的 replace 收口至 replaceCommandSnapshotIfCurrent（代际守卫统一），
+  // 仍以 source:'changed' + 全量 rawCommands 落盘（helper 内 registry.replace 语义不变）。
   assert.ok(
-    /replace\(sessionId,\s*rawCommands,\s*'changed'[,)]/.test(sdkBackendSrc),
-    'commands_changed 应 registry.replace 全量替换 source:changed（可带分类 ctx）',
+    /replaceCommandSnapshotIfCurrent\(sessionId, mainWindow, \{[\s\S]{0,400}commands: rawCommands,[\s\S]{0,200}source: 'changed'/.test(sdkBackendSrc),
+    'commands_changed 应经守卫 helper 以 source:changed 全量替换（不 concat）',
   );
 });
 
@@ -530,8 +532,8 @@ check('Task2: system.init 捕获命令分类 ctx（buildCommandOriginContext）'
   assert.ok(/function buildCommandOriginContext/.test(sdkBackendSrc), '应存在 buildCommandOriginContext');
   assert.ok(sdkBackendSrc.includes('sessionCommandCtx.set(sessionId, buildCommandOriginContext('), 'init 分支应写入 sessionCommandCtx');
 });
-check('Task2: probe 全量替换带本会话分类 ctx', () => {
-  assert.ok(sdkBackendSrc.includes("'probe', sessionCommandCtx.get(sessionId)"), 'probe replace 应带 sessionCommandCtx');
+check('Task2: probe 全量替换带本会话分类 ctx（hb13-v B6 同步：经 helper ctx 参数传递）', () => {
+  assert.ok(sdkBackendSrc.includes('ctx: sessionCommandCtx.get(sessionId)'), 'probe replace 应带 sessionCommandCtx（经 helper ctx 参数）');
 });
 // review-v1 §5.1：commands_changed 不再用 init 时冻结的 ctx，而是按当前 cwd 重建来源证据。
 // review-v9 §4 更新：refreshCommandOriginContext 增加可选 queryCwd——当前 query 的 cwd 优先于
@@ -539,8 +541,9 @@ check('Task2: probe 全量替换带本会话分类 ctx', () => {
 // 分类成 unknown，且代际号 guard 使后到的正确 probe 无法纠正 → 菜单永不显示）。
 check('review-v1 §5.1: commands_changed 按 cwd 刷新 provenance（refreshCommandOriginContext）', () => {
   assert.ok(/function refreshCommandOriginContext\(sessionId: string, queryCwd\?: string\)/.test(sdkBackendSrc), '应定义 refreshCommandOriginContext(sessionId, queryCwd?)');
+  // hb13-v B6 必要同步：changed 路径经守卫 helper，refreshCommandOriginContext 以 ctx 参数传入。
   assert.ok(
-    /'changed',\s*refreshCommandOriginContext\(sessionId,\s*opts\.workingDir/.test(sdkBackendSrc),
+    /ctx: refreshCommandOriginContext\(sessionId,\s*opts\.workingDir/.test(sdkBackendSrc),
     'commands_changed replace 应传入当前 query 的 workingDir（优先于 init seed）',
   );
   // commands_changed 分支不得回退为冻结的 sessionCommandCtx.get。
@@ -625,11 +628,13 @@ check('emitCommandChanged 走独立 COMMANDS_CHANGED + isSessionActive 守卫', 
 // review-v3 §6.3：commands_changed 全链路接线契约——从 SDK 事件到 renderer 菜单。
 // 每一环都须存在且串联：sdk-backend → registry.replace → emitCommandChanged → IPC → preload → command-store → ChatInput
 check('review-v3 §6.3: commands_changed 全链路接线（registry→IPC→preload→store→ChatInput）', () => {
-  // ① sdk-backend: commands_changed 分支 → refreshCommandOriginContext → registry.replace('changed') → emitCommandChanged
+  // ① sdk-backend: commands_changed 分支 → 守卫 helper（refreshCommandOriginContext → registry.replace('changed') → emitCommandChanged）
   const changedBranch = sdkBackendSrc.match(/subtype === 'commands_changed'[\s\S]*?continue;/);
   assert.ok(changedBranch, 'commands_changed 分支须存在');
   assert.ok(/refreshCommandOriginContext/.test(changedBranch![0]), '须调 refreshCommandOriginContext');
-  assert.ok(/emitCommandChanged/.test(changedBranch![0]), '须调 emitCommandChanged');
+  // hb13-v B6 必要同步：replace+emit 收口至 replaceCommandSnapshotIfCurrent（helper 内 emitCommandChanged）。
+  assert.ok(/replaceCommandSnapshotIfCurrent/.test(changedBranch![0]), 'changed 路径须经守卫 helper（hb13-v B6）');
+  assert.ok(/async function replaceCommandSnapshotIfCurrent[\s\S]{0,1400}emitCommandChanged\(/.test(sdkBackendSrc), 'helper 内须调 emitCommandChanged');
   // ② emitCommandChanged → COMMANDS_CHANGED IPC
   assert.ok(sdkBackendSrc.includes('IPC_CHANNELS.COMMANDS_CHANGED'), 'emitCommandChanged 须用 COMMANDS_CHANGED IPC');
   // ③ preload: on(COMMANDS_CHANGED) → callback
@@ -921,10 +926,14 @@ void (async () => {
     assert.ok(m[0].includes('createMessage'), '应 createMessage 单一落库');
     assert.ok(m[0].includes('persisted_message'), '应推 persisted_message（renderer upsert 不二次落库）');
   });
-  check('content string 原样 / 非 string 安全 stringify', () => {
+  // hb10-CMD-04 最小同步：null/undefined → 空串（不再 "" 噪声消息），string 原样与非 string
+  // JSON 序列化语义保持——三段条件表达式的多行形态。
+  check('content string 原样 / 非 string 安全 stringify / null→空串', () => {
     assert.ok(
-      sdkBackendSrcLco.includes("typeof rawContent === 'string' ? rawContent : JSON.stringify"),
-      '应 string 原样 / 非 string 安全 stringify',
+      sdkBackendSrcLco.includes("typeof rawContent === 'string'") &&
+      sdkBackendSrcLco.includes('rawContent == null') &&
+      sdkBackendSrcLco.includes(': JSON.stringify(rawContent);'),
+      '应 string 原样 / null→空串 / 非 string 安全 stringify',
     );
   });
   check('local_command_output 不靠正文正则猜命令名', () => {
@@ -2175,7 +2184,13 @@ void (async () => {
     assert.ok(ensure[0].includes('getGlobalFallback()'), '兜底非 null 直接返回');
     assert.ok(ensure[0].includes('lastGlobalProbeAttemptAt'), '应按上次尝试时刻节流');
     const fpCalls = (backend.match(/getUserOriginFingerprint\(\)/g) || []).length;
-    assert.ok(fpCalls >= 4, `replace 各来源调用点应附带用户级指纹（实际 ${fpCalls}，需 ≥4）`);
+    // hb13-v B6 必要同步：probe/changed/init-早期三来源的用户级指纹附带收口至
+    // replaceCommandSnapshotIfCurrent（helper 内单点调用传入 replace），直接调用计数相应下降。
+    assert.ok(fpCalls >= 2, `replace 各来源调用点应附带用户级指纹（实际 ${fpCalls}，需 ≥2；三来源经 helper 归并）`);
+    assert.ok(
+      /async function replaceCommandSnapshotIfCurrent[\s\S]{0,1400}getUserOriginFingerprint\(\)/.test(backend),
+      'helper 应为三来源 replace 附带用户级指纹',
+    );
     const registry = readFileSync(path.join('src', 'main', 'modules', 'sdk-command-registry.ts'), 'utf8');
     assert.ok(/originFingerprint\?: string/.test(registry), 'replace 应接受可选 originFingerprint 参数');
   });

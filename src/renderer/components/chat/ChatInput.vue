@@ -152,8 +152,17 @@ function handleKeydown(e: KeyboardEvent): void {
 }
 
 // 菜单选择：插入 canonical 命令 /name（SDK name 不带斜杠，需补 /）。用户手写 alias 不经此路径，原样保留。
+// hb10-CMD-08：含空格命令名点击时不自动插入（空格会截断为命令名+参数误导），仅插入高亮名；
+// 菜单项标注「（含空格，需手动输入）」。parseSlashInvocation 不动。
+// hb13-v A2：空格判别必须用正则字面量 /\s/——旧实现经字符串构造空白正则时转义丢失
+//（'\s' 即字母 s），实为 /s/：含字母 s 的命令名被误判「含空格」，split(/s+/) 按字母 s
+// 切分致选择后插入截断（status → "/ "）。
 function selectSlashCommand(cmd: SdkCommand): void {
-  emit('update:modelValue', `/${cmd.name} `);
+  if (/\s/.test(cmd.name)) {
+    emit('update:modelValue', `/${cmd.name.split(/\s+/)[0]} `);
+  } else {
+    emit('update:modelValue', `/${cmd.name} `);
+  }
   showSlashMenu.value = false;
   resetCommandPagination();
 }
@@ -286,6 +295,7 @@ onUnmounted(() => {
         @mouseenter="hoverCommand(i)"
       >
         <span class="slash-menu__name">/{{ cmd.name }}</span>
+        <span v-if="/\s/.test(cmd.name)" class="slash-menu__name" title="命令名含空格，点击仅插入首段，需手动输入完整名">（含空格，需手动输入）</span>
         <span
           v-if="originLabel(cmd.origin)"
           class="slash-menu__origin"
@@ -331,9 +341,10 @@ onUnmounted(() => {
   bottom: 100%;
   left: 0;
   right: 0;
-  /* 最多容纳 5 项（每项约 2.5rem + 4 个 2px gap + 上下 0.5rem padding）后内部滚动，
-     触底由 handleSlashMenuScroll 追加下一页。 */
-  max-height: calc((0.5rem * 2) + (2px * 4) + (2.5rem * 5));
+  /* 最多容纳 4 项（每项约 2.5rem + 4 个 2px gap + 上下 0.5rem padding）；stale/provenance
+     提示行计入同一预算（尾部 2.5rem，两行提示时不挤出命令项）——hb12-CMD-03。预算内仍走
+     内部滚动，触底由 handleSlashMenuScroll 追加下一页。 */
+  max-height: calc((0.5rem * 2) + (2px * 4) + (2.5rem * 4) + 2.5rem);
   overflow-y: auto;
   z-index: 50;
   border: 1px solid var(--color-border);
