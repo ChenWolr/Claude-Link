@@ -9,7 +9,7 @@
 import { computed } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useNow } from '../../composables/use-now';
-import { formatDurationMs } from '../../../shared/format-duration';
+import { formatDurationMs, formatEndedAt } from '../../../shared/format-duration';
 
 const sessionStore = useSessionStore();
 const sending = computed(() => sessionStore.sending);
@@ -28,7 +28,7 @@ const hasRunningTool = computed(() => Object.keys(sessionStore.toolProgress).len
 // B1：回合结束后的完成态——保留显示上次回复耗时 + 结束时间（持久化，切会话/重启不丢）。
 const lastMeta = computed(() => sessionStore.activeLastTurnMeta);
 const endClockText = computed(() =>
-  lastMeta.value ? new Date(lastMeta.value.endedAt).toLocaleTimeString('zh-CN', { hour12: false }) : '',
+  formatEndedAt(lastMeta.value?.endedAt),
 );
 
 // 阶段判定（按时间线优先级）：正文流出 → 生成回复中；工具真正执行中（toolProgress 非空）→ 工具执行中；

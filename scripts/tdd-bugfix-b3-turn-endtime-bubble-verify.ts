@@ -125,7 +125,8 @@ check('⑥ use-chat：attachResultMetadata 内存赋 message.endedAt（门控外
   const assignIdx = front.indexOf('message.endedAt = endedAt;');
   assert.ok(endedIdx > -1 && assignIdx > endedIdx, 'endedAt 计算必须先于 message.endedAt 赋值');
   // 门控外赋值：中断/错误回合的内存脚注行为保持不变（持久化仍走 isSuccessfulCliResult 门控）。
-  const gateIdx = front.indexOf('if (sid && isSuccessfulCliResult(event)) {');
+  // hb10-TM-01 最小同步：门控形态更新为含 turnStartedAt 守卫的新形态。
+  const gateIdx = front.indexOf('if (sid && isSuccessfulCliResult(event) && store.turnStartedAt[sid] != null) {');
   assert.ok(gateIdx > assignIdx, 'message.endedAt 赋值必须在持久化门控之外（内存脚注行为不变）');
   assert.match(front, /endedAt,\s*\n\s*\}\)\.catch/, 'recordTurnMeta payload 缺 endedAt（B1 持久化链不得回退）');
 });
@@ -134,7 +135,9 @@ check('⑥ use-chat：attachResultMetadata 内存赋 message.endedAt（门控外
 check('⑦ MessageBubble：脚注门控仅 durationMs + 模板无 costUsd/$ + 「结束于」文案 + endedAtText 与 TurnTimer 同口径', () => {
   const tplIdx = messageBubble.indexOf('<template>');
   const tpl = messageBubble.slice(tplIdx);
-  assert.match(tpl, /v-if="message\.durationMs" class="bubble__meta"/, '脚注门控必须收窄为 message.durationMs（cost 不再参与门控）');
+  // hb10-TM-04 最小同步：门控放宽为 durationMs || endedAt——(cost,NULL,ended_at) 行可见；
+  // 原断言语义（cost 不参与门控、费用不展示）保持不变。
+  assert.match(tpl, /v-if="message\.durationMs \|\| message\.endedAt" class="bubble__meta"/, '脚注门控 durationMs||endedAt（cost 不参与门控）');
   assert.ok(!tpl.includes('costUsd'), '模板不得再出现 costUsd（费用不展示）');
   // $ 检查只扫脚注块本身（模板其它处的 ${} 类绑定如 bubble--${role} 与费用无关）。
   const metaIdx = tpl.indexOf('class="bubble__meta"');
@@ -142,7 +145,9 @@ check('⑦ MessageBubble：脚注门控仅 durationMs + 模板无 costUsd/$ + �
   const metaBlock = tpl.slice(metaIdx, metaEnd);
   assert.ok(!metaBlock.includes('$'), '脚注块不得出现 $ 字样（费用已移除）');
   assert.match(tpl, /结束于 \{\{ endedAtText \}\}/, '脚注缺「结束于」文案');
-  assert.match(messageBubble, /toLocaleTimeString\('zh-CN', \{ hour12: false \}\)/, 'endedAtText 必须与 TurnTimer 完成态同口径（zh-CN 24 小时制）');
+  // hb10-TM-05 最小同步：结束时刻格式提 shared formatEndedAt（MessageBubble 与 TurnTimer
+  // 共用单源，跨天显示 M/d HH:mm）——「两处同口径」由同一函数保证，替代原 toLocaleTimeString 形态钉。
+  assert.match(messageBubble, /formatEndedAt\(props\.message\.endedAt\)/, 'endedAtText 必须走 shared formatEndedAt（与 TurnTimer 单源同口径）');
   assert.match(messageBubble, /bubble__meta-end/, '缺 bubble__meta-end 样式类');
   assert.ok(!messageBubble.includes('bubble__meta-cost'), '残留 bubble__meta-cost 样式（应已删除）');
 });
@@ -193,10 +198,11 @@ check('⑨ 真库：fresh 迁移含 ended_at；老库（去列）自愈补列且
   fresh.close();
 });
 
-// ⑩ package.json：selftest:static 链入链（链尾）。
-check('⑩ package.json：selftest:static 链包含 tdd-bugfix-b3-turn-endtime-bubble-verify.ts', () => {
-  const chain = pkg.scripts['selftest:static'];
-  assert.ok(chain, '未找到 selftest:static 脚本');
+// ⑩ 清单文件：selftest:static 链入链（链尾）。
+check('⑩ 清单文件：selftest:static 清单包含 tdd-bugfix-b3-turn-endtime-bubble-verify.ts', () => {
+  // hb12 最小同步：链入链改查 runner 清单（selftest:static 经 run-selftest-static.ts 执行）。
+  const chain = fs.readFileSync(path.join(repoRoot, 'scripts', 'selftest-static-list.txt'), 'utf8');
+  assert.ok(chain, '未找到 selftest 清单');
   assert.ok(chain.includes('tdd-bugfix-b3-turn-endtime-bubble-verify.ts'), 'selftest:static 未包含 B3 契约脚本');
 });
 

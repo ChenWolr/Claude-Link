@@ -86,8 +86,8 @@ check('③ message-repo：updateResultMeta（AND session_id 守卫）+ findLastT
   const findBody = messageRepo.slice(findIdx, messageRepo.indexOf('export ', findIdx + 10) > -1 ? messageRepo.indexOf('export ', findIdx + 10) : undefined);
   assert.match(findBody, /if \(m\.parentAgentId != null\) continue;/, '查找缺主流程守卫（parentAgentId != null 先行 continue，跳过子 agent 行；P3-1 须先于 user 边界）');
   assert.match(findBody, /m\.role === 'user'\) return null/, '查找缺 user 边界（遇 user 即停返回 null）');
-  assert.match(findBody, /rows\.length === 50 && !rows\.some\(\(m\) => m\.role === 'user'\)/, '查找缺窗口打满未见 user 的回落谓词');
-  assert.match(findBody, /getMessagesBySession\(sessionId\)\.reverse\(\)/, '回落全量必须 .reverse()——getMessagesBySession 是 ASC 旧→新，walk 期望新→旧；漏反转则长回合 fallback 恒 null/误写最老行');
+  assert.match(findBody, /rows\.length === 50 && !rows\.some\(\(m\) => m\.role === 'user' && m\.parentAgentId == null\)/, '回落触发谓词缺 parentAgentId 对齐（hb13-v A11/hb12-TM-01：带 parent_agent_id 的 user 行不得误触发回落）');
+  assert.match(findBody, /rows = getTurnCheckRowsAll\(sessionId\);/, '回落全量必须走窄列无 LIMIT 查询（hb13-v A11/hb12-TM-02：getMessagesBySession SELECT * + 附件 JOIN 全量物化已废弃；窄窗/回落同为新→旧无需 reverse）');
 });
 
 // ④ IPC：通道常量 + handler（会话存在性校验 + 正数校验 + 双写）；审查修复轮：messageId 命中
@@ -104,7 +104,8 @@ check('④ ipc.ts 通道常量 + ipc-handlers handler（getSession 校验 + v>0 
   assert.match(body, /const directHit = typeof payload\?\.messageId === 'string' && payload\.messageId[\s\S]*?:\s*false;/, '审查修复轮：handler 缺 updateResultMeta 返回值检查（directHit）');
   // 审查收口：messageId 类型收窄——仅字符串直传，不得 String() 强转（非字符串直接走 fallback）。
   assert.doesNotMatch(body, /String\(payload\.messageId\)/, '审查收口：handler 不得对 messageId 做 String() 强转');
-  assert.match(body, /if \(!directHit\) \{\s*const fallbackId = messageRepo\.findLastTurnMainFlowAssistantId\(sessionId\);/, '审查修复轮：handler 缺 fallback（直传 0 行/null 时调 findLastTurnMainFlowAssistantId）');
+  // hb10-TM-01 最小同步：fallback 调用追加 { endedAt } 时间下界参数（宽松 10min 窗，防迟到旧 result 脏写更早回合行）。
+  assert.match(body, /if \(!directHit\) \{\s*const fallbackId = messageRepo\.findLastTurnMainFlowAssistantId\(sessionId, \{ endedAt \}\);/, '审查修复轮：handler 缺 fallback（直传 0 行/null 时调 findLastTurnMainFlowAssistantId）');
   assert.match(body, /if \(fallbackId\) messageRepo\.updateResultMeta\(fallbackId, sessionId, meta\);/, '审查修复轮：fallback 命中后未用 fallbackId 再写 messages');
 });
 
@@ -153,10 +154,11 @@ check('⑧ use-chat：前台 attachResultMetadata 含 recordTurnMeta/endedAt；�
   assert.ok(skipIdx < costIdx, 'parentAgentId skip 必须位于 assistant 赋值之前');
   // P2-1 加钉：持久化（setLastTurnMeta + recordTurnMeta）必须位于 isSuccessfulCliResult 门控内
   // （中断/错误回合不产生记录——error_during_execution 为第三态 false，对齐后台分支）。
-  const gateIdx = front.indexOf('if (sid && isSuccessfulCliResult(event)) {');
+  // hb10-TM-01 最小同步：门控追加 turnStartedAt 守卫（迟到旧 result 不再写 meta；成功门语义保持）。
+  const gateIdx = front.indexOf('if (sid && isSuccessfulCliResult(event) && store.turnStartedAt[sid] != null) {');
   const setIdx = front.indexOf('store.setLastTurnMeta(');
   const recIdx = front.indexOf('window.claudeLink.recordTurnMeta(');
-  assert.ok(gateIdx > -1, 'P2-1：前台缺持久化门控 if (sid && isSuccessfulCliResult(event))');
+  assert.ok(gateIdx > -1, 'P2-1+TM-1：前台缺持久化门控 if (sid && isSuccessfulCliResult(event) && turnStartedAt 未清)');
   assert.ok(setIdx > -1 && gateIdx < setIdx, 'P2-1：setLastTurnMeta 必须位于门控之内');
   assert.ok(recIdx > -1 && gateIdx < recIdx, 'P2-1：recordTurnMeta 必须位于门控之内');
   // 后台分支：handleBackgroundEvent 与 handleCliEvent 之间的切片。
@@ -195,12 +197,13 @@ check('⑨ TurnTimer：v-else-if="lastMeta" 完成态 + turn-timer--done + 结�
 
 // ⑩ package.json：selftest:static 链入链。B2 契约属另一工作流、可能未入链——
 // 本断言不得硬依赖其存在；仅当 B2 已入链时才要求 B1 排在其后（链尾追加顺序）。
-check('⑩ package.json：selftest:static 链包含 tdd-bugfix-b1-turn-meta-persistence-verify.ts', () => {
-  const chain = pkg.scripts['selftest:static'];
-  assert.ok(chain, '未找到 selftest:static 脚本');
-  const b1 = chain.indexOf('tdd-bugfix-b1-turn-meta-persistence-verify.ts');
-  const b2 = chain.indexOf('tdd-bugfix-b2-back-bottom-viewport-anchor-verify.ts');
-  assert.ok(b1 > -1, 'selftest:static 未包含 B1 契约脚本');
+check('⑩ 清单文件：selftest:static 清单包含 tdd-bugfix-b1-turn-meta-persistence-verify.ts', () => {
+  // hb12 最小同步：selftest:static 改经 runner（scripts/selftest-static-list.txt 清单执行，
+  // Windows 命令行长度上限）——入链断言改查清单文件。
+  const list = fs.readFileSync(path.join(repoRoot, 'scripts', 'selftest-static-list.txt'), 'utf8');
+  const b1 = list.indexOf('tdd-bugfix-b1-turn-meta-persistence-verify.ts');
+  const b2 = list.indexOf('tdd-bugfix-b2-back-bottom-viewport-anchor-verify.ts');
+  assert.ok(b1 > -1, 'selftest 清单未包含 B1 契约脚本');
   if (b2 > -1) {
     assert.ok(b1 > b2, 'B1 契约应追加在 B2 之后（链尾）');
   }
