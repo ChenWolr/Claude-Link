@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type {
   InteractionPromptOption,
   InteractionPromptPayload,
@@ -24,6 +24,11 @@ type HistoryEntry = {
 type OptionEntry = InteractionPromptOption & { originalIndex: number };
 
 const interactionStore = useInteractionStore();
+// 启动白屏 hotfix（2026-09-13）：sessionStore 声明必须置于 currentRequests 之前——
+// hb12-PERM-04 的 draftCache watch（源含 activeRequest）在 setup 期立即求值 getter，
+// 链式触达 currentRequests → sessionStore；若声明留在文件底部（V3-3 历史加载区），
+// TDZ ReferenceError 会在 app.mount 期未捕获抛出 → 整树挂载失败 → 白屏。
+const sessionStore = useSessionStore();
 // V3-2：requests 改由 interaction-store 统一管理（远程 IPC + 本地 confirm 同一队列）。
 // InteractionPrompt 只读 store.requests，UI 副作用（initSelection/restoreFocus）留本地。
 const requests = computed<InteractionPromptPayload[]>(() => interactionStore.requests);
@@ -49,6 +54,8 @@ const touchedCheckboxFields = ref<Set<string>>(new Set());
 const history = ref<HistoryEntry[]>([]);
 const showHistory = ref(false);
 const submittingId = ref<string | null>(null);
+// hb10-PERM-03：IPC 失败提示（请求留队可重试；成功提交/取消后清除）。
+const submitError = ref<string | null>(null);
 const otherInput = ref<HTMLInputElement | HTMLTextAreaElement | null>(null);
 const dialogRef = ref<HTMLElement | null>(null);
 const position = ref<{ x: number; y: number }>({ x: 0, y: 0 });
@@ -175,7 +182,28 @@ function optionDefaults(
   return result;
 }
 
+// hb12-PERM-04：按 request.id 缓存草稿（表单切换/临时切走后恢复用户已填内容）。
+const draftCache = new Map<string, { selectedIds: Set<string>; otherText: string; questionAnswers: Record<string, QuestionAnswer>; fieldValues: Record<string, string | boolean> }>();
+
 function initSelection(request: InteractionPromptPayload): void {
+  // hb13-v B9：新请求初始化即清除上次提交失败提示（错误只属于触发它的那一次提交）。
+  submitError.value = null;
+  // hb13-v A8：入口先刷新「正在展示的请求 id」，再做任何选择态变更——保证草稿 watch flush
+  // 时把当前状态写回自身 id（A→B 换位时不得把 A 的状态写进 B 的草稿）。
+  displayedRequestId = request.id;
+  const cached = draftCache.get(request.id);
+  if (cached) {
+    // 恢复草稿（不重置 focus 到起点——用户已在填写中）。
+    wizardIndex.value = 0;
+    selectedIds.value = cached.selectedIds;
+    otherText.value = cached.otherText;
+    questionAnswers.value = cached.questionAnswers;
+    fieldValues.value = cached.fieldValues;
+    searchText.value = '';
+    focusedIndex.value = 0;
+    syncFocusedSelection();
+    return;
+  }
   wizardIndex.value = 0;
   questionAnswers.value = {};
   searchText.value = '';
@@ -191,6 +219,27 @@ function initSelection(request: InteractionPromptPayload): void {
   syncFocusedSelection();
   void nextTick(focusDialogStart);
 }
+
+// hb12-PERM-04：草稿变化即入缓存（浅 watch 节流由 Vue 调度；请求完成时清理由 removeRequestData 消费方不再触发——残留小条目可接受）。
+// hb13-v A8：写回自身 id——旧实现把 activeRequest 放进 watch 源且回调读 flush 时的
+// activeRequest.value：A→B 弹窗换位时 flush 读到的已是 B，把 A 的选择写进 B 的草稿，
+// B 恢复出 A 的预选（权限弹窗预选上一单 allow，误按 Enter 即放行，误授权风险面）。
+// 改为 watch 源仅草稿字段，以 initSelection 入口捕获的 displayedRequestId（捕获期 id）
+// 为键；null（无已初始化请求）不写。
+let displayedRequestId: string | null = null;
+watch(
+  [selectedIds, otherText, questionAnswers, fieldValues] as const,
+  () => {
+    if (!displayedRequestId) return;
+    draftCache.set(displayedRequestId, {
+      selectedIds: new Set(selectedIds.value),
+      otherText: otherText.value,
+      questionAnswers: JSON.parse(JSON.stringify(questionAnswers.value)) as Record<string, QuestionAnswer>,
+      fieldValues: JSON.parse(JSON.stringify(fieldValues.value)) as Record<string, string | boolean>,
+    });
+  },
+  { deep: true },
+);
 
 function enqueue(request: InteractionPromptPayload): void {
   const enqueued = interactionStore.enqueueRemote(request);
@@ -364,9 +413,9 @@ async function submit(optionId?: string): Promise<void> {
     pushHistory(request, 'submit', ids);
     advanceQueueUI();
   } catch (err) {
-    // IPC 失败：请求已被 respondAndRemove 的 finally 移除，这里复位 UI 让用户能继续操作。
+    // hb10-PERM-03：IPC 失败时请求已留队（store 不再失败移除），不前进队列——用户可重试提交。
     console.error('Interaction submit failed', err);
-    advanceQueueUI();
+    submitError.value = '提交失败（连接异常），请重试';
   } finally {
     submittingId.value = null;
   }
@@ -383,8 +432,9 @@ async function cancel(): Promise<void> {
     pushHistory(request, 'cancel', []);
     advanceQueueUI();
   } catch (err) {
+    // hb10-PERM-03：取消失败同样留队可重试。
     console.error('Interaction cancel failed', err);
-    advanceQueueUI();
+    submitError.value = '取消失败（连接异常），请重试';
   } finally {
     submittingId.value = null;
   }
@@ -504,7 +554,6 @@ window.addEventListener('keydown', handleKeydown);
 // V3-3：交互历史持久化——跟随当前会话加载历史，切换会话时刷新。
 // 用自增 token 防竞态：快速切会话 A→B 时，若 A 的 IPC 响应晚于 B 返回，
 // token 不匹配则丢弃，避免 B 的历史被 A 覆盖。
-const sessionStore = useSessionStore();
 let historyLoadToken = 0;
 async function loadHistory(sessionId: string | null): Promise<void> {
   const token = ++historyLoadToken;
@@ -554,7 +603,19 @@ watch(searchText, () => {
   focusedIndex.value = 0;
 });
 
+// hb10-PERM-03：30s 对账轮询（仅弹窗可见即 activeRequest 存在时执行）——死亡/不可见挂起自愈。
+let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+onMounted(() => {
+  reconcileTimer = setInterval(() => {
+    if (interactionStore.activeRequest) void interactionStore.reconcile();
+  }, 30_000);
+});
+
 onBeforeUnmount(() => {
+  if (reconcileTimer) {
+    clearInterval(reconcileTimer);
+    reconcileTimer = null;
+  }
   cleanupRequest?.();
   cleanupCancel?.();
   window.removeEventListener('keydown', handleKeydown);
@@ -666,10 +727,20 @@ onBeforeUnmount(() => {
             </details>
 
             <InteractionDetails v-if="activeRequest.kind === 'permission'" :input="activeRequest.input" />
+            <!-- hb10-PERM-07：confirm 类（OAuth/授权）弹窗可核对目标 URL（仅 input.url 存在时） -->
+            <div
+              v-else-if="activeRequest.kind === 'confirm' && Boolean((activeRequest.input as Record<string, unknown> | undefined)?.url)"
+              class="interaction-url"
+            >
+              <span class="interaction-url__label">URL</span>
+              <code class="interaction-url__value">{{ String((activeRequest.input as Record<string, unknown>).url) }}</code>
+            </div>
           </div>
 
           <InteractionPreview v-if="hasPreview" :preview="optionPreview(focusedOption)" />
         </div>
+
+        <p v-if="submitError" class="interaction-dialog__submit-error" role="alert">{{ submitError }}</p>
 
         <footer class="interaction-dialog__footer">
           <button v-if="isWizard && wizardIndex > 0" type="button" class="interaction-btn interaction-btn--ghost" @click="previousQuestion">上一步</button>
@@ -827,6 +898,15 @@ onBeforeUnmount(() => {
   margin-left: 0.1875rem;
 }
 
+/* hb13-v B9：submitError 行内提示（IPC 失败可重试），footer 上方一行红字。 */
+.interaction-dialog__submit-error {
+  margin: 0 0 0.375rem;
+  padding: 0;
+  font-size: 0.75rem;
+  color: var(--color-danger);
+  text-align: right;
+}
+
 .interaction-search input,
 .interaction-other input,
 .interaction-other textarea,
@@ -935,5 +1015,28 @@ onBeforeUnmount(() => {
   .interaction-dialog__body--preview {
     grid-template-columns: 1fr;
   }
+}
+</style>
+
+<style scoped>
+/* hb10-PERM-07：confirm 类弹窗 URL 核对行 */
+.interaction-url {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 8px;
+  font-size: 0.75rem;
+}
+.interaction-url__label {
+  flex: none;
+  color: var(--color-text-muted);
+}
+.interaction-url__value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  color: var(--color-text);
 }
 </style>

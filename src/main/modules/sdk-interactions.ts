@@ -190,7 +190,9 @@ export function buildPermissionTitle(
       : typeof input.command === 'string'
         ? input.command
         : '';
-  return target ? `Claude 想要执行 ${displayName}：${target}` : `Claude 想要执行 ${displayName}`;
+  // hb12-PERM-06：超长 target 截断 200 chars + …（4KB 级 file_path 撑爆弹窗防御）。
+  const display = target.length > 200 ? `${target.slice(0, 200)}…` : target;
+  return display ? `Claude 想要执行 ${displayName}：${display}` : `Claude 想要执行 ${displayName}`;
 }
 
 export function buildPermissionInteractionPayload(
@@ -206,6 +208,9 @@ export function buildPermissionInteractionPayload(
   if (askPayload) return askPayload;
 
   const sessionSuggestions = withToolSessionAllow(toolName, options.suggestions);
+  // hb12-PERM-01：SDK 是否给了细粒度建议——无建议场景不再强制出现「总是允许」（裸 allow
+  // 整工具放行缺知情同意基础；该选项仅在 SDK 确实给了建议时展示）。
+  const hasSdkSuggestions = Array.isArray(options.suggestions) && options.suggestions.length > 0;
 
   return {
     id: requestId,
@@ -221,12 +226,30 @@ export function buildPermissionInteractionPayload(
     defaultOptionIds: [],
     options: [
       { id: 'allow', label: '允许本次', description: '只允许当前这一次工具调用。', primary: true },
-      ...(sessionSuggestions.length
-        ? [{ id: 'allow-session', label: '本会话总是允许', description: '接受 Claude Code 给出的会话级权限建议。' }]
+      ...(hasSdkSuggestions
+        // 文案明示整工具放行语义（细粒度建议如 Bash(git:*) 场景，用户实际授予全量 Bash）。
+        ? [{ id: 'allow-session', label: '本会话总是允许', description: '本会话内放行该工具的所有调用（不限参数）。' }]
         : []),
       { id: 'deny', label: '拒绝', description: '拒绝当前工具调用，并把原因反馈给 Claude。', danger: true },
     ],
   };
+}
+
+/** hb13-v A7：从交互载荷还原 AskUserQuestion 题目数组（生产两形态）——
+ *  单题 buildAskUserQuestionInteractionPayload：题目在 input.question（无顶层 questions 键）；
+ *  向导 buildWizardAskUserQuestionPayload：原始题目数组在 input.questions。
+ *  isAskUserQuestionPayload 在此仅作题目形状校验（MCP questions 形态），不再直接判 payload
+ *  顶层——payload 顶层无 questions 键时该判据恒 false（修复分支不可达的根因）。 */
+function askQuestionsFromInteractionPayload(payload: InteractionPromptPayload): AskUserQuestion[] | null {
+  if (payload.toolName !== 'AskUserQuestion') return null;
+  const input = payload.input as { question?: unknown; questions?: unknown } | undefined;
+  if (Array.isArray(input?.questions) && isAskUserQuestionPayload({ questions: input.questions })) {
+    return input.questions as AskUserQuestion[];
+  }
+  if (input?.question != null && isAskUserQuestionPayload({ questions: [input.question] })) {
+    return [input.question as AskUserQuestion];
+  }
+  return null;
 }
 
 export function mapPermissionInteractionResponse(
@@ -234,6 +257,21 @@ export function mapPermissionInteractionResponse(
   response: InteractionPromptResponsePayload,
   input: Record<string, unknown>,
 ): PermissionResult {
+  // hb10-PERM-04：AskUserQuestion 形状 payload——弹窗复用同一交互通道时 selectedOptionIds 是
+  // 「选择题答案」而非权限选项；按答案组装 AskUserQuestion 工具结果 allow 放行（复用
+  // buildAskUserQuestionResult），不再必 deny。
+  // hb13-v A7：题目提取改走 askQuestionsFromInteractionPayload（与生产载荷真实形状一致）——
+  // 旧 isAskUserQuestionPayload(payload) 判 payload 顶层 questions 键，而唯一生产来源
+  // buildAskUserQuestionInteractionPayload 无该键，修复分支不可达，MCP questions 形态作答
+  // 被映射 deny「工具调用已取消」。
+  const askQuestions = response.action === 'submit' ? askQuestionsFromInteractionPayload(payload) : null;
+  if (askQuestions) {
+    const askResult = buildAskUserQuestionResult(
+      askQuestions,
+      [{ payload: payload as unknown as Parameters<typeof buildAskUserQuestionResult>[1][number]['payload'], response }],
+    );
+    return { behavior: 'allow', updatedInput: askResult as unknown as Record<string, unknown>, toolUseID: payload.toolUseId };
+  }
   const selectedId = response.action === 'submit' ? response.selectedOptionIds?.[0] : undefined;
   if (selectedId === 'allow') {
     // P0：allow 必须回传 updatedInput（原样 input），否则 SDK 运行时 ZodError 阻断所有工具。
@@ -248,6 +286,10 @@ export function mapPermissionInteractionResponse(
   // SDK 的 PermissionResult 只有 allow/deny，工具未获授权只能 deny；但 message 必须中性——
   // 否则 CLI 把这条 tool_result(is_error) 记入 transcript，下一回合 resume 时模型读到「用户拒绝」，
   // 会认定用户拒绝过该工具，本会话后续不再调用（并发误 deny 根因）。缺省按中性处理（防御性不指控用户）。
+  // hb12-PERM-02：显式选择 deny 选项 = 用户拒绝（与 Esc 中性取消区分）。
+  if (selectedId === 'deny') {
+    return { behavior: 'deny', message: '用户拒绝了该工具调用', toolUseID: payload.toolUseId };
+  }
   if (response.reason === 'user') {
     return { behavior: 'deny', message: '用户拒绝了该工具调用', toolUseID: payload.toolUseId };
   }

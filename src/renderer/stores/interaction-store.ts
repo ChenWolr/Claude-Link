@@ -25,6 +25,15 @@ export const useInteractionStore = defineStore('interaction', {
     activeRequest(state): InteractionPromptPayload | null {
       return state.requests[0] ?? null;
     },
+    // hb10-PERM-05：按会话维度的远程 pending 计数（侧栏 badge / 托盘 ⏳ 数据源）。
+    pendingRemoteCountBySession(state): Record<string, number> {
+      const out: Record<string, number> = {};
+      for (const r of state.requests) {
+        if (!r.sessionId) continue;
+        out[r.sessionId] = (out[r.sessionId] ?? 0) + 1;
+      }
+      return out;
+    },
     // P2-8：当前会话可见的 pending 请求（与 InteractionPrompt.currentRequests 同一谓词）：
     // 本会话远程请求 + 本地 confirm（sessionId='' 全局可见）。他会话的 pending 请求不在此列——
     // diff 弹窗的「让位」判定改用本 getter，避免驻留会话 A 时 B 的后台弹窗静默阻断 A 的弹窗。
@@ -50,21 +59,39 @@ export const useInteractionStore = defineStore('interaction', {
         this.meta.set(payload.id, { isLocal: true, resolver: resolve });
       });
     },
-    // 用户响应：本地请求 resolve Promise，远程请求走 IPC；然后移除该请求。
-    // IPC 失败时仍移除请求并向上抛错，让 InteractionPrompt 的 try/finally 复位 submittingId，
-    // 避免用户点提交无反应且无法重试。
+    // hb10-PERM-03：30s 对账（仅弹窗可见时轮询）——主进程已不在的（已答复/已取消但回执丢失）
+    // 本地移除；主进程有而本地没有的（漏收）补挂。死亡/不可见挂起可自愈。
+    // （hb13-v 批C：原注释「IPC 失败时仍移除请求…」描述的是 respondAndRemove 旧行为，
+    //  与现实现「失败不移除、请求留队可重试」相反，已删——见 respondAndRemove 处注释。）
+    async reconcile(): Promise<void> {
+      try {
+        const pending = await window.claudeLink.getPendingInteractions();
+        const localIds = new Set(this.requests.map((r) => r.id));
+        const pendingIds = new Set(pending.map((p) => p.id));
+        for (const r of this.requests) {
+          if (!this.meta.get(r.id)?.isLocal && !pendingIds.has(r.id)) this.removeRequestData(r.id);
+        }
+        for (const p of pending) {
+          if (!localIds.has(p.id)) {
+            this.requests.push(p);
+            this.meta.set(p.id, { isLocal: false });
+          }
+        }
+      } catch {
+        // IPC 失败：下一轮再对账。
+      }
+    },
     async respondAndRemove(response: InteractionPromptResponsePayload): Promise<void> {
       const meta = this.meta.get(response.id);
-      try {
-        if (meta?.isLocal && meta.resolver) {
-          meta.resolver(response);
-        } else {
-          await window.claudeLink.respondInteraction(response);
-        }
-      } finally {
-        // 无论 IPC 成功与否都移除请求，避免失败时请求留队导致 UI 卡死。
+      if (meta?.isLocal && meta.resolver) {
+        meta.resolver(response);
         this.removeRequestData(response.id);
+        return;
       }
+      // hb10-PERM-03：IPC 失败时不本地移除——请求可能仍可作答，留队由 30s 对账/用户重试收口
+      //（原 finally 无条件移除会把 IPC 失败变成「静默丢答案」，主进程仍挂起等回复）。
+      await window.claudeLink.respondInteraction(response);
+      this.removeRequestData(response.id);
     },
     // 移除请求（abort/会话删除/取消/组件卸载）。本地请求 resolve cancel，避免 Promise 永挂。
     removeRequest(id: string): void {
