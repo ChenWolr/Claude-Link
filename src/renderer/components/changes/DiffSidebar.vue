@@ -11,14 +11,19 @@ const emit = defineEmits<{ (e: 'select', path: string): void }>();
 
 const STATUS_LABEL: Record<string, string> = { M: '改', A: '增', D: '删', R: '移', '??': '新', U: '冲' };
 
+// hb13-v B8（F-4 / hb10-CHG-11）：弹窗侧栏同款截断预算（对齐 ChangesPanel slice(0,500)）——
+// 万级文件时弹窗路径不再全量渲染 DOM；头栏计数仍显示真实总数。
+
 // 路径拆 dir/name：尾部文件名加粗，前缀目录淡化（原型 sf-path 结构）。
+// hb13-v B8（F-4 / hb10-CHG-11）：截断预算 500 与 ChangesPanel 同款字面（对齐维护）。
 const items = computed(() =>
-  props.files.map((f) => {
+  props.files.slice(0, 500).map((f) => {
     const segs = f.path.split('/');
     const name = segs.pop() ?? f.path;
     return { f, dir: segs.join('/'), name };
   }),
 );
+const hiddenCount = computed(() => Math.max(0, props.files.length - items.value.length));
 function statusLabel(s: string): string {
   return STATUS_LABEL[s] ?? s;
 }
@@ -48,6 +53,7 @@ function statusLabel(s: string): string {
           <span v-if="it.f.touchedThisSession" class="sf-dot" title="本次会话编辑过">●</span>
         </button>
       </li>
+      <li v-if="hiddenCount > 0" class="diff-sidebar__more">其余 {{ hiddenCount }} 个文件未显示</li>
     </ul>
   </aside>
 </template>
@@ -90,6 +96,12 @@ function statusLabel(s: string): string {
   background: color-mix(in srgb, var(--color-text) 8%, transparent);
   border-radius: var(--radius-pill);
   padding: 1px 8px;
+}
+.diff-sidebar__more {
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  text-align: center;
 }
 .diff-sidebar__list {
   list-style: none;
