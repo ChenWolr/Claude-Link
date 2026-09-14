@@ -21,7 +21,9 @@ async function runVersion(command: string): Promise<CliDetectionResult | null> {
   }
 
   // 2. Windows fallback: use cmd /c to resolve .cmd/.bat files via PATH
-  if (process.platform === 'win32') {
+  // hb10-SHL-V02：exec 壳兜底对 cliPath 白名单（^[\w\-.:\\ ]+$ 防注入面）；不匹配放弃该兜底
+  //（execFile 首选已覆盖绝大多数）。空格允许（Program Files 路径）。
+  if (process.platform === 'win32' && /^[\w\-.:\\ ]+$/.test(command)) {
     try {
       const { stdout, stderr } = await execAsync(`"${command}" --version`, { timeout: 5000 });
       const version = (stdout || stderr).trim() || null;
@@ -81,9 +83,17 @@ async function detectFromPath(cliPath: string | null): Promise<CliDetectionResul
   return runVersion(cliPath);
 }
 
+// hb10-CFG-06：失败缓存 60s TTL——「CLI 未安装」不再缓存到进程退出（重装后 60s 内可自愈）；
+// 成功缓存不受 TTL（cliPath/cliVersion 稳定）。
+const FAILURE_CACHE_TTL_MS = 60_000;
+let cachedResultAt = 0;
+
 export async function detectCli(force = false): Promise<CliDetectionResult> {
   if (cachedResult && !force) {
-    return cachedResult;
+    const isFailure = cachedResult.installed === false;
+    if (!isFailure || Date.now() - cachedResultAt < FAILURE_CACHE_TTL_MS) return cachedResult;
+    // 失败缓存过期：清掉重探。
+    cachedResult = null;
   }
 
   const config = getConfig();
@@ -111,7 +121,9 @@ export async function detectCli(force = false): Promise<CliDetectionResult> {
   }
 
   cachedResult = { installed: false, path: null, version: null };
-  saveConfig({ cliVersion: null });
+  cachedResultAt = Date.now();
+  // hb10-CFG-06：失败路径同时清 cliPath（坏记录不再被 resolveExecutable 消费）。
+  saveConfig({ cliPath: null, cliVersion: null });
   return cachedResult;
 }
 
@@ -121,4 +133,10 @@ export function getCachedCliStatus(): CliDetectionResult | null {
 
 export function forceRedetect(): Promise<CliDetectionResult> {
   return detectCli(true);
+}
+
+// hb12-CFG-05：恢复出厂复位 CLI 检测缓存（含 60s TTL 时间戳）。
+export function resetCliDetectionCache(): void {
+  cachedResult = null;
+  cachedResultAt = 0;
 }

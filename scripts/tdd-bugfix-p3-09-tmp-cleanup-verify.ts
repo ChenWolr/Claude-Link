@@ -21,7 +21,9 @@ function check(name: string, fn: () => void): void {
 
 check('① 写入失败路径 rmSync 清 .tmp（force）', () => {
   const at = src.indexOf('const tmp = path.join(dir,');
-  const seg = src.slice(at, at + 700);
+  // hb10-CFG-04 最小同步：rename 重试块插在 tmp 声明与 rmSync 之间（hb13-v 批C 实测 676B，
+  // 原注释误写 ~500B），窗口 700→1400（断言语义不变）。
+  const seg = src.slice(at, at + 1400);
   assert.match(seg, /rmSync\(tmp, \{ force: true \}\)/);
 });
 check('② 清理自身 try 包裹（清理失败不影响主错误）', () => {

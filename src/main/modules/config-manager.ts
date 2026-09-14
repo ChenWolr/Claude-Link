@@ -13,7 +13,7 @@
 // connection-tester 行内测试直读档案）。
 
 import ElectronStoreModule from 'electron-store';
-import { app, safeStorage } from 'electron';
+import { safeStorage } from 'electron';
 import { randomUUID } from 'node:crypto';
 import * as fs from 'fs';
 import type {
@@ -31,8 +31,12 @@ import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/const
 import { sanitizeTaskDelayMinutes, DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
 import { clearProviderModelsCache } from './model-resolver';
+import { resetCliDetectionCache } from './cli-detector';
+import * as path from 'path';
+import { clearProjectionSnapshot } from './settings-projection-merge';
 import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels } from '../../shared/provider-library';
 import { logger } from '../utils/logger';
+import { createSafeStore } from '../utils/safe-store';
 import { parseClaudeSettings } from './settings-importer';
 import { writeClaudeSettings, SKIP_NO_WORKDIR } from './settings-writer';
 
@@ -65,6 +69,8 @@ const ElectronStoreCtor = ElectronStore as unknown as new (
   set(value: Partial<StoredConfig>): void;
   has(key: keyof StoredConfig): boolean;
   clear(): void;
+  // hb10-CFG-10：显式删除键（clear 后免 set(defaultConfig) 逐键重写）。
+  delete(key: keyof StoredConfig): void;
 };
 
 const defaultConfig: StoredConfig = {
@@ -132,9 +138,9 @@ function emitConfigSaved(): void {
 }
 
 function getStore(): ConfigStore {
-  store ??= new ElectronStoreCtor({
+  // hb10-CFG-V01：坏 JSON 自愈（safe-store helper 统一实现——启动初始化链不再全跳）。
+  store ??= createSafeStore<ConfigStore>({
     name: 'claude-link-config',
-    projectName: app.getName(),
     defaults: defaultConfig,
   });
   return store;
@@ -154,6 +160,10 @@ function encryptApiKey(apiKey: string): Pick<StoredConfig, 'encryptedApiKey' | '
   return { encryptedApiKey: apiKey, apiKeyEncoding: 'plain' };
 }
 
+// hb10 P2-4：safeStorage 解密失败哨兵——解密失败（换机/重装后系统凭据库无对应条目）与
+// 未配置必须可区分：spawn 注入按空处理（行为不变），面板显示损坏态而非「未设置」。
+export const DECRYPT_FAILED = '__claude_link_decrypt_failed__';
+
 function decryptApiKey(config: StoredConfig): string {
   if (!config.encryptedApiKey) {
     return '';
@@ -164,7 +174,7 @@ function decryptApiKey(config: StoredConfig): string {
       return safeStorage.decryptString(Buffer.from(config.encryptedApiKey, 'base64'));
     } catch (error) {
       logger.error('Failed to decrypt API key', error);
-      return '';
+      return DECRYPT_FAILED;
     }
   }
 
@@ -179,7 +189,7 @@ export function decryptProviderApiKey(profile: StoredProviderProfile): string {
       return safeStorage.decryptString(Buffer.from(profile.encryptedApiKey, 'base64'));
     } catch (error) {
       logger.error(`Failed to decrypt API key for provider ${profile.id}`, error);
-      return '';
+      return DECRYPT_FAILED;
     }
   }
   return profile.encryptedApiKey;
@@ -196,11 +206,16 @@ export function getConfig(): AppConfig {
   // 脏值清洗：老版本/手改 JSON 可能给 permissionMode 存非法值，回落 'default'。
   const rawPermissionMode = config.permissionMode as unknown;
   const permissionMode = isValidPermissionMode(rawPermissionMode) ? rawPermissionMode : 'default';
+  // hb10 P2-4：解密失败以哨兵向上传递——spawn 消费点判哨兵按空处理；面板路径据此显示损坏态。
+  // apiKeyBroken 是派生标记（非存储字段）：仅损坏态存在该键，未损坏不产出 undefined 键
+  //（避免渲染层整份回显把 undefined 送进 conf.set 抛错）。
+  const rawApiKey = decryptApiKey(config);
   return {
     provider: config.provider,
     providerName: config.providerName ?? 'Anthropic',
     providerNote: config.providerNote ?? '',
-    apiKey: decryptApiKey(config),
+    apiKey: rawApiKey,
+    ...(rawApiKey === DECRYPT_FAILED ? { apiKeyBroken: true as const } : {}),
     apiBaseUrl: config.apiBaseUrl ?? 'https://api.anthropic.com',
     defaultModel: config.defaultModel,
     advancedJson: advancedJsonRaw,
@@ -244,7 +259,8 @@ let libraryEmptiedByDeletion = false;
 // 并写 settings.local.json。任何供应商库变更（增删改/换 lastUsed/saveConfig）后调用，
 // 保证老链路（buildSpawnEnv 无会话 override 时的兜底）看到一致的投影
 //（settings-writer 已不投影端点凭据、connection-tester 行内测试直读档案）。
-function projectLegacyFields(): void {
+// hb10-CFG-04：返回投影结果（projectionOk）——saveConfig 据此透出投影失败可见性。
+function projectLegacyFields(): boolean {
   const s = getStore();
   const profiles = s.store.providerProfiles ?? [];
   let lastUsedProviderId = s.store.lastUsedProviderId ?? null;
@@ -292,20 +308,32 @@ function projectLegacyFields(): void {
   const config = getConfig();
   // 投影成 Claude Code settings.local.json（对标 CC GUI），让 permissions 等顶层字段生效。
   // workingDirectory 为 null 时静默跳过（env 注入仍走 buildSpawnEnv）。
+  // hb10-CFG-04：投影失败可见——保存返回 projectionOk:false，ConfigPage 徽标显示「已保存（投影失败）」。
+  let projectionOk = true;
   try {
     const result = writeClaudeSettings(config.workingDirectory, config);
     if (!result.ok && result.error !== SKIP_NO_WORKDIR) {
       logger.warn(`settings.local.json 写入跳过：${result.error}`);
+      projectionOk = false;
     }
   } catch (e) {
     logger.warn(`settings.local.json 写入跳过：${e instanceof Error ? e.message : String(e)}`);
+    projectionOk = false;
   }
+  return projectionOk;
 }
 
 export function saveConfig(partial: Partial<AppConfig>): AppConfig {
   const { apiKey, ...rest } = partial;
   const storage = { ...rest } as Partial<StoredConfig>;
   delete (storage as Partial<StoredConfig>).providerProfiles; // 档案只经 saveProviderProfile 变更
+  // hb10 P2-4：apiKeyBroken 是 getConfig 的派生标记（解密失败态），不是存储字段——
+  // 渲染层整份回显带回时必须剥离，防派生态落盘。
+  delete (storage as Partial<StoredConfig>).apiKeyBroken;
+  // hb12-P2-6：lastUsed 两键只经 recordLastUsedProviderModel 直写——渲染层整份回显
+  //（H1 失败重存/队列任务运行期保存）不得把陈旧内存 lastUsed 回写主进程（全局「最近使用」静默回退）。
+  delete (storage as Partial<StoredConfig>).lastUsedProviderId;
+  delete (storage as Partial<StoredConfig>).lastUsedModelId;
   // F2：maxTurns 落盘前兜底清洗（非有限/≤0/清空串 → 默认 200）——渲染层 v-model.number 的
   // 空串/0 不得透传入库，否则 sdk-command-options 的 >0 守卫会静默丢旗标=队列任务无轮次上限。
   if (storage.maxTurns !== undefined) {
@@ -326,9 +354,10 @@ export function saveConfig(partial: Partial<AppConfig>): AppConfig {
 
   // 老字段是库的投影：渲染层整份 saveConfig（自动保存）可能带回陈旧的投影字段，
   // 这里重新断言库的权威值，再统一写 settings.local.json。
-  projectLegacyFields();
+  const projectionOk = projectLegacyFields();
   emitConfigSaved();
-  return getConfig();
+  // hb10-CFG-04：投影结果随保存返回（派生标记，不入库不回写）。
+  return { ...getConfig(), projectionOk };
 }
 
 export function getDecryptedApiKey(): string | null {
@@ -340,6 +369,10 @@ export function getDecryptedApiKey(): string | null {
  *  渲染层 UI 本就不显示明文 Key；下发掩码配合 saveConfig 的「掩码=不改动」语义防回写污染。 */
 export function getConfigForRenderer(): AppConfig {
   const config = getConfig();
+  // hb10 P2-4：损坏态掩码不伪造（哨兵串掩码是垃圾值）——apiKey 置空串，损坏可见性走 apiKeyBroken。
+  if (config.apiKeyBroken) {
+    return { ...config, apiKey: '' };
+  }
   return { ...config, apiKey: maskApiKey(config.apiKey) };
 }
 
@@ -348,10 +381,35 @@ export function hasApiKey(): boolean {
 }
 
 export function clearConfig(): AppConfig {
+  // hb10-CFG-10：恢复出厂单次写——clear() 后 set(defaultConfig) 会逐键落盘（约 25 次重写）。
+  // 改为 clear 后仅显式 delete 三键（defaults 已兜底其余键），消除重写风暴。
+  // hb13-v B4（F-05）：clear() 前先捕获旧 workingDirectory——clear 后该键已复位 null，旧实现
+  // 的快照清理与旧目录重投影恒被空值/SKIP_NO_WORKDIR 守卫跳过（hb10-P2-6 净残留不生效）。
+  const previousWorkingDir = getConfig().workingDirectory;
   getStore().clear();
-  getStore().set(defaultConfig);
+  const s = getStore();
+  s.delete('providerProfiles');
+  s.delete('lastUsedProviderId');
+  s.delete('lastUsedModelId');
   // R2：恢复出厂=库从未非空，删除事件旗标一并复位（老字段直配重新可用，不受补清影响）。
   libraryEmptiedByDeletion = false;
+  // hb10 P2-6（收 PRV-08）：重投影 default 清净 settings.local.json 残留；撤销栈跨复位清空。
+  lastDeletedProvider = null;
+  // hb12-CFG-05：跨复位清缓存——模型查询缓存 / CLI 检测缓存 / 投影快照，
+  // 恢复出厂后不复位会让旧缓存继续生效（防御性：当前 UI 无恢复出厂入口）。
+  clearProviderModelsCache();
+  resetCliDetectionCache();
+  try {
+    if (previousWorkingDir) {
+      // hb13-v B4（F-05）：旧目录重投影 default（快照仍在 → diff 模式按可撤销性清 CL 残留），
+      // 之后再清快照归位首跑态——顺序颠倒会退化成保守合并、清不掉旧投影。
+      writeClaudeSettings(previousWorkingDir, getConfig());
+      clearProjectionSnapshot(path.join(previousWorkingDir, '.claude'));
+    }
+  } catch {
+    /* ignore */
+  }
+  projectLegacyFields();
   emitConfigSaved();
   return getConfig();
 }
@@ -363,8 +421,15 @@ export function importSettingsFile(filePath: string): {
   contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
   advancedJson: string;
 } {
-  const content = fs.readFileSync(filePath, 'utf-8');
-  return parseClaudeSettings(content);
+  // hb10-CFG-05：入口三项加固（与 IPC 层 CONFIG_IMPORT_SETTINGS 死通道收窄对齐——
+  // 直调本函数也受保护）：① 仅 .json 后缀；② ≤1MB；③ 返回 apiKey 经 maskApiKey 掩码不泄露明文。
+  if (typeof filePath !== 'string' || !filePath.toLowerCase().endsWith('.json')) {
+    throw new Error('仅支持 .json 设置文件');
+  }
+  const st = fs.statSync(filePath);
+  if (st.size > 1024 * 1024) throw new Error('设置文件超过 1MB 上限');
+  const parsed = parseClaudeSettings(fs.readFileSync(filePath, 'utf-8'));
+  return { ...parsed, apiKey: parsed.apiKey ? maskApiKey(parsed.apiKey) : parsed.apiKey };
 }
 
 // ── 多供应商库：迁移 + CRUD ────────────────────────────────────────────
@@ -391,7 +456,17 @@ export function ensureProviderMigration(): void {
 
   const profiles: StoredProviderProfile[] = [];
   if (migrated) {
-    profiles.push({ ...migrated, ...encryptApiKey(legacyApiKey) });
+    // hb10 P2-4：legacyApiKey 为解密失败哨兵时保留原 blob 原样迁移（不 encrypt）——
+    // 保留物证，档案行经 toProviderView 显示损坏态；用户重新保存 Key 时正常覆盖。
+    if (legacyApiKey === DECRYPT_FAILED) {
+      profiles.push({
+        ...migrated,
+        encryptedApiKey: current.encryptedApiKey,
+        apiKeyEncoding: current.apiKeyEncoding,
+      });
+    } else {
+      profiles.push({ ...migrated, ...encryptApiKey(legacyApiKey) });
+    }
     logger.info(
       `已迁移老单供应商配置为档案「${migrated.name}」（${migrated.models.length} 个模型）`,
     );
@@ -406,6 +481,9 @@ export function ensureProviderMigration(): void {
 
 function toProviderView(profile: StoredProviderProfile): ProviderProfileView {
   const apiKey = decryptProviderApiKey(profile);
+  // hb10 P2-4：解密失败=损坏态——hasApiKey 仍 true（blob 存在），apiKeyBroken 供前端显示
+  // 「密钥损坏，请重新输入」徽标；掩码不伪造（空串），不再伪装成「未设置」。
+  const broken = apiKey === DECRYPT_FAILED;
   return {
     id: profile.id,
     name: profile.name,
@@ -414,8 +492,9 @@ function toProviderView(profile: StoredProviderProfile): ProviderProfileView {
     models: profile.models,
     createdAt: profile.createdAt,
     updatedAt: profile.updatedAt,
-    apiKeyMasked: maskApiKey(apiKey),
+    apiKeyMasked: broken ? '' : maskApiKey(apiKey),
     hasApiKey: Boolean(apiKey),
+    apiKeyBroken: broken || undefined,
   };
 }
 
@@ -431,13 +510,17 @@ export function getLibrarySnapshot(): ProviderLibrarySnapshot {
 // spawn 链的解析输入：档案 + 解密 key（只在主进程内流转）。
 export function getProviderModelSources(): ProviderModelSource[] {
   const s = getStore();
-  return (s.store.providerProfiles ?? []).map((p) => ({
-    id: p.id,
-    name: p.name,
-    apiBaseUrl: p.apiBaseUrl,
-    apiKey: decryptProviderApiKey(p),
-    models: p.models,
-  }));
+  return (s.store.providerProfiles ?? []).map((p) => {
+    const key = decryptProviderApiKey(p);
+    // hb10 P2-4：解密失败按空处理（注入行为与损坏前一致），哨兵串不得流进 env。
+    return {
+      id: p.id,
+      name: p.name,
+      apiBaseUrl: p.apiBaseUrl,
+      apiKey: key === DECRYPT_FAILED ? '' : key,
+      models: p.models,
+    };
+  });
 }
 
 export function getStoredProviderProfile(id: string): StoredProviderProfile | undefined {
@@ -467,6 +550,10 @@ export function saveProviderProfile(input: ProviderSaveInput): ProviderProfileVi
   const existing = input.id ? getStoredProviderProfile(input.id) : undefined;
   if (input.id && !existing) throw new Error(`供应商 ${input.id} 不存在`);
 
+  // hb10-CFG-07：掩码守卫（与 saveConfig 同语义）——渲染层整份回显带回掩码形态时
+  // 当作「不改动」保留原加密值；仅非掩码明文才重新加密。
+  const rawKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
+  const effectiveKey = rawKey.includes('…****') ? '' : rawKey;
   let saved: StoredProviderProfile;
   if (existing) {
     saved = {
@@ -475,12 +562,20 @@ export function saveProviderProfile(input: ProviderSaveInput): ProviderProfileVi
       models: input.models === undefined ? existing.models : models,
       updatedAt: now,
     };
-    if (input.apiKey !== undefined && input.apiKey !== null) {
-      const plain = input.apiKey.trim();
-      saved = { ...saved, ...encryptApiKey(plain) };
+    // hb12-CFG-02：空串=不改动（对齐 saveConfig「空串/掩码=不改动」语义）；
+    // encrypt('') 会产出 {null,null} 抹掉密钥——与「清空」意图混淆，清除走显式机制。
+    // hb13-v B4（F-06）：显式清除通道已补——clearApiKey:true 抹掉已存密文（encrypt('') 同形态），
+    // 优先于掩码/空串守卫；省略=false=不触碰。
+    if (input.clearApiKey === true) {
+      saved = { ...saved, encryptedApiKey: null, apiKeyEncoding: null };
+    } else if (input.apiKey !== undefined && input.apiKey !== null && effectiveKey !== '') {
+      saved = { ...saved, ...encryptApiKey(effectiveKey) };
+    } else if (input.apiKey === '' || input.apiKey === null) {
+      logger.info(`[provider] apiKey 空串/掩码视为不改动（${input.id}）`);
     }
   } else {
-    const plain = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
+    // hb10-CFG-07：新建同样吃掩码守卫（掩码串不成密文）。
+    const plain = effectiveKey;
     saved = {
       id: randomUUID(),
       ...fields,
@@ -492,13 +587,13 @@ export function saveProviderProfile(input: ProviderSaveInput): ProviderProfileVi
   }
 
   const previousProfiles = s.store.providerProfiles ?? [];
-  const profiles = previousProfiles.filter((p) => p.id !== saved.id);
-  // 新建即成为最近选用（库的第一个用户动作）；编辑保持 lastUsed 不动。
-  // P1-14：空库判定必须用**过滤前**的库长度——编辑唯一档案在过滤后也为空，曾被误判为
-  // wasEmpty 而强写 lastUsed（选中模型被静默重置为 models[0]）；再叠加 !existing 门，
-  // 「编辑永不触碰 lastUsed」的意图双保险成立。
+  // hb10-PRV-04（hb13-v A10 补实施）：编辑按原 index 原位替换——旧 filter+push 把被编辑档案
+  // 移到库尾，列表顺序漂移。wasEmpty 仍按过滤/替换前的库长度判定（P1-14）。
   const wasEmpty = previousProfiles.length === 0;
-  profiles.push(saved);
+  const profiles = [...previousProfiles];
+  const editIdx = profiles.findIndex((p) => p.id === saved.id);
+  if (editIdx >= 0) profiles[editIdx] = saved;
+  else profiles.push(saved);
   s.set({ providerProfiles: profiles });
   if (wasEmpty && !existing) {
     s.set({ lastUsedProviderId: saved.id, lastUsedModelId: saved.models[0]?.id ?? null });

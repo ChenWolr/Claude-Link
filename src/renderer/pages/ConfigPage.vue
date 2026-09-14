@@ -31,7 +31,8 @@ const PERSISTED_FIELDS = [
   'notifyOnLeave', 'minimizeToTray',
 ] as const;
 
-const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
+// hb10-CFG-04：'projection-failed' = 保存本身成功但 settings.local.json 投影失败（可见性）。
+const saveStatus = ref<'idle' | 'saving' | 'saved' | 'error' | 'projection-failed'>('idle');
 let initialized = false;
 let lastSavedSnapshot = '';
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -49,7 +50,8 @@ function scheduleAutoSave(): void {
     try {
       await store.saveConfig();
       lastSavedSnapshot = configSnapshot();
-      saveStatus.value = 'saved';
+      // hb10-CFG-04：投影失败可见——「已保存（投影失败）」徽标。
+      saveStatus.value = store.config.projectionOk === false ? 'projection-failed' : 'saved';
       if (savedIndicatorTimer) clearTimeout(savedIndicatorTimer);
       savedIndicatorTimer = setTimeout(() => { saveStatus.value = 'idle'; }, 2000);
     } catch {
@@ -281,9 +283,9 @@ function clampMaxTurns(): void {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
       </nav>
       <div class="save-actions">
-        <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus}`]">
+        <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus === 'projection-failed' ? 'saved' : saveStatus}`]">
           <span v-if="saveStatus === 'saving'" class="save-badge__dot" />
-          {{ saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '保存成功' : '保存失败' }}
+          {{ saveStatus === 'saving' ? '保存中…' : saveStatus === 'saved' ? '保存成功' : saveStatus === 'projection-failed' ? '已保存（投影失败）' : '保存失败' }}
         </span>
         <button type="button" class="test-btn" @click="handleSave">立即保存</button>
       </div>

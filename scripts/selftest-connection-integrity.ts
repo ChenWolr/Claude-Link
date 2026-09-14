@@ -140,7 +140,10 @@ console.log('\n=== 5) 回合快照 / 探针取消 / 漂移可见 ===');
   check('新回合取消 post-turn 探针', /await cancelCommandProbe\(sessionId\);[\s\S]{0,200}?cancelPostTurnProbe\(sessionId\);/.test(sb));
   check('会话删除收口清理两个新 Map', /markSessionDeleted[\s\S]*?sessionLastTurnOverride\.delete\(sessionId\)[\s\S]*?sessionLastEffective\.delete\(sessionId\)/.test(sb));
   check('漂移落库 system:connection_drift', sb.includes("processKind: 'system:connection_drift'"));
-  check('漂移仅在变化时落库（prev 比对）', /function notifyEffectiveConnectionDrift[\s\S]*?if \(!prev\) return;[\s\S]*?providerName === current\.providerName && prev\.modelId === current\.modelId\) return;/.test(sb));
+  // hb10-PRV-03 最小同步：首回合（无 prev）也落「初始化」提示（显式与实际一致），
+  // 「仅变化时落库」语义收窄为「变化或首回合」——同值重复回合仍不落（prev 比对保留在主路径）。
+  // hb13-v B5 必要同步：漂移早退比对纳入 providerId（hb12-PRV-03 落地，同名供应商可区分）。
+  check('漂移仅在变化或首回合时落库（prev 比对，含 providerId）', /function notifyEffectiveConnectionDrift[\s\S]*?if \(!prev\) \{[\s\S]*?notifyDriftMessage[\s\S]*?providerName === current\.providerName && prev\.modelId === current\.modelId && prev\.providerId === current\.providerId\) return;/.test(sb));
 }
 
 console.log('\n=== 6) settings 投影卫生 ===');
