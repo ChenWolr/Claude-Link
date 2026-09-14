@@ -53,6 +53,8 @@ export interface AttachmentPreviewResponse {
   width?: number;
   height?: number;
   isThumbnail: boolean;
+  // hb13-v B10.5：原「未缩略」布尔标记字段已删除——渲染层零消费者（死字段）；
+  // ATT-02 语义（解码失败返回原图 + CSS object-fit 缩放）由 isThumbnail=false 承载。
 }
 
 /** 主进程内部记录：在摘要之上增加存储定位与去重哈希，不暴露给 renderer。 */

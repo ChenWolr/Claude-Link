@@ -143,9 +143,26 @@ export async function removeTransientAttachment(sessionId: string, id: string): 
  * 静默跳过（已被用户移除或本就不存在）。
  */
 export function bindTransientAttachmentsToSession(sessionId: string, ids: string[]): void {
-  for (const id of ids) {
+  const boundIds: string[] = [];
+  try {
+    for (const id of ids) {
+      bindOne(sessionId, id, boundIds);
+    }
+  } catch (err) {
+    // hb10-ATT-V01：物化失败回滚已建行（收集已建 id 逐个 deleteAttachment），不再死锁半态。
+    for (const id of boundIds) {
+      try { attachmentRepo.deleteAttachment(id); } catch { /* 尽力回滚 */ }
+    }
+    throw err;
+  }
+}
+
+function bindOne(sessionId: string, id: string, boundIds: string[]): void {
+  {
     const record = transientAttachments.get(id);
-    if (!record) continue;
+    if (!record) return;
+    // hb10-ATT-04（收窄）：归属守卫——记录不属于目标会话（会话 id 传错/复用）跳过。
+    if (record.sessionId !== sessionId) return;
     transientAttachments.delete(id);
     attachmentRepo.createAttachment({
       id: record.id,
@@ -160,6 +177,7 @@ export function bindTransientAttachmentsToSession(sessionId: string, ids: string
       height: record.height,
       status: 'draft',
     });
+    boundIds.push(id);
   }
 }
 
@@ -237,6 +255,10 @@ export async function getAttachmentPreview(request: {
     getTransientAttachment(request.attachmentId, request.sessionId);
   if (!record) throw new AttachmentInputError('附件不存在');
   if (record.sessionId !== request.sessionId) throw new AttachmentInputError('附件不属于当前会话');
+  // hb10-ATT-09：原图预览（thumbnail=false）仅限 image kind——文档/文件不放行原图通道。
+  if (!request.thumbnail && record.kind !== 'image') {
+    throw new AttachmentInputError('该附件类型不支持原图预览');
+  }
   return readStoredAttachmentPreview(record, request.thumbnail);
 }
 

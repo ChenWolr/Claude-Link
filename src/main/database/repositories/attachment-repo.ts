@@ -158,24 +158,31 @@ export function linkAttachmentsToTask(taskId: string, ids: string[]): void {
   transaction(ids);
 }
 
+/** hb10-CHR-05/11：SQLite 变量上限 32766——超大会话单条 IN 查询直接抛 RangeError（历史/导出/
+ *  脚注回落链全断）。按 500 个 id 一批查询后拼接（安全余量，预留 SELECT 其余列的变量额）。 */
+const ATTACHMENT_IN_BATCH = 500;
+
 /** 批量加载多消息的附件；无附件的 messageId 不写入 Map，由调用方按 [] 兜底。 */
 export function getAttachmentsByMessageIds(messageIds: string[]): Map<string, AttachmentSummary[]> {
   const map = new Map<string, AttachmentSummary[]>();
   if (messageIds.length === 0) return map;
-  const placeholders = messageIds.map(() => '?').join(',');
-  const rows = getConnection()
-    .prepare(
-      `SELECT a.*, ma.message_id AS message_id, ma.ordinal AS ordinal
-       FROM message_attachments ma
-       JOIN attachments a ON a.id = ma.attachment_id
-       WHERE ma.message_id IN (${placeholders})
-       ORDER BY ma.message_id, ma.ordinal`,
-    )
-    .all(...messageIds) as (AttachmentRow & { message_id: string; ordinal: number })[];
-  for (const row of rows) {
-    const list = map.get(row.message_id) ?? [];
-    list.push(toSummary(row));
-    map.set(row.message_id, list);
+  for (let i = 0; i < messageIds.length; i += ATTACHMENT_IN_BATCH) {
+    const batch = messageIds.slice(i, i + ATTACHMENT_IN_BATCH);
+    const placeholders = batch.map(() => '?').join(',');
+    const rows = getConnection()
+      .prepare(
+        `SELECT a.*, ma.message_id AS message_id, ma.ordinal AS ordinal
+         FROM message_attachments ma
+         JOIN attachments a ON a.id = ma.attachment_id
+         WHERE ma.message_id IN (${placeholders})
+         ORDER BY ma.message_id, ma.ordinal`,
+      )
+      .all(...batch) as (AttachmentRow & { message_id: string; ordinal: number })[];
+    for (const row of rows) {
+      const list = map.get(row.message_id) ?? [];
+      list.push(toSummary(row));
+      map.set(row.message_id, list);
+    }
   }
   return map;
 }
@@ -183,20 +190,23 @@ export function getAttachmentsByMessageIds(messageIds: string[]): Map<string, At
 export function getAttachmentsByTaskIds(taskIds: string[]): Map<string, AttachmentSummary[]> {
   const map = new Map<string, AttachmentSummary[]>();
   if (taskIds.length === 0) return map;
-  const placeholders = taskIds.map(() => '?').join(',');
-  const rows = getConnection()
-    .prepare(
-      `SELECT a.*, ta.task_id AS task_id, ta.ordinal AS ordinal
-       FROM task_attachments ta
-       JOIN attachments a ON a.id = ta.attachment_id
-       WHERE ta.task_id IN (${placeholders})
-       ORDER BY ta.task_id, ta.ordinal`,
-    )
-    .all(...taskIds) as (AttachmentRow & { task_id: string; ordinal: number })[];
-  for (const row of rows) {
-    const list = map.get(row.task_id) ?? [];
-    list.push(toSummary(row));
-    map.set(row.task_id, list);
+  for (let i = 0; i < taskIds.length; i += ATTACHMENT_IN_BATCH) {
+    const batch = taskIds.slice(i, i + ATTACHMENT_IN_BATCH);
+    const placeholders = batch.map(() => '?').join(',');
+    const rows = getConnection()
+      .prepare(
+        `SELECT a.*, ta.task_id AS task_id, ta.ordinal AS ordinal
+         FROM task_attachments ta
+         JOIN attachments a ON a.id = ta.attachment_id
+         WHERE ta.task_id IN (${placeholders})
+         ORDER BY ta.task_id, ta.ordinal`,
+      )
+      .all(...batch) as (AttachmentRow & { task_id: string; ordinal: number })[];
+    for (const row of rows) {
+      const list = map.get(row.task_id) ?? [];
+      list.push(toSummary(row));
+      map.set(row.task_id, list);
+    }
   }
   return map;
 }

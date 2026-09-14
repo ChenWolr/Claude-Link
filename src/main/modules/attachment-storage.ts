@@ -3,7 +3,7 @@
 // 图片解码/缩略图用 Electron nativeImage，不引入 sharp 等额外依赖。
 // 注意：本模块依赖 electron（nativeImage），只能在主进程运行，不可被 regression 脚本导入。
 import { createHash } from 'node:crypto';
-import { promises as fsp, type Dirent } from 'node:fs';
+import { promises as fsp, statSync, type Dirent } from 'node:fs';
 import path from 'node:path';
 import { nativeImage } from 'electron';
 
@@ -32,6 +32,112 @@ export interface StagedAttachmentInput {
 
 /** 缩略图最长边固定 512px。 */
 const THUMBNAIL_LONG_EDGE = 512;
+
+// ── hb12-ATT-06（EXIF 半边，二轮补救）─────────────────────────────────
+// nativeImage 不应用 EXIF orientation（Electron 官方文档证实）：带方向标记的 JPEG 缩略图
+// 会保持传感器原始方向。最小解析 JPEG APP1/TIFF 的 orientation 标签（0x0112，不引依赖），
+// 再用手写位图变换转正后交给既有缩放流程；CMYK 半边维持留档待真机样张（hb12 附录 D）。
+
+/** 读 JPEG 的 EXIF orientation（1-8）；非 JPEG / 无 EXIF / 解析异常一律返回 1（不转正）。 */
+function readJpegExifOrientation(bytes: Uint8Array): number {
+  try {
+    if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return 1;
+    let off = 2;
+    while (off + 4 <= bytes.length) {
+      if (bytes[off] !== 0xff) {
+        off += 1;
+        continue;
+      }
+      const marker = bytes[off + 1];
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+        off += 2; // 无长度段标记
+        continue;
+      }
+      if (marker === 0xda) break; // SOS：EXIF 必在其前
+      const segLen = (bytes[off + 2] << 8) | bytes[off + 3];
+      if (segLen < 2 || off + 2 + segLen > bytes.length) return 1;
+      if (marker === 0xe1) {
+        // APP1："Exif\0\0" 后接 TIFF 头（II=小端 / MM=大端）。注意 tiff 变量实指 "Exif\0\0"
+        // 起始（下校验即 'E'..'f'），TIFF 头在其后 6 字节（tiff+6）。
+        const tiff = off + 4;
+        if (
+          tiff + 8 > bytes.length ||
+          bytes[tiff] !== 0x45 || bytes[tiff + 1] !== 0x78 || bytes[tiff + 2] !== 0x69 ||
+          bytes[tiff + 3] !== 0x66 || bytes[tiff + 4] !== 0x00 || bytes[tiff + 5] !== 0x00
+        ) {
+          return 1;
+        }
+        const little = bytes[tiff + 6] === 0x49 && bytes[tiff + 7] === 0x49;
+        const big = bytes[tiff + 6] === 0x4d && bytes[tiff + 7] === 0x4d;
+        if (!little && !big) return 1;
+        const u16 = (p: number): number => (little ? bytes[p] | (bytes[p + 1] << 8) : (bytes[p] << 8) | bytes[p + 1]);
+        const u32 = (p: number): number =>
+          little
+            ? (bytes[p] | (bytes[p + 1] << 8) | (bytes[p + 2] << 16) | (bytes[p + 3] << 24)) >>> 0
+            : (((bytes[p] << 24) | (bytes[p + 1] << 16) | (bytes[p + 2] << 8) | bytes[p + 3]) >>> 0);
+        // hb13-v A6：IFD0 偏移在 TIFF 头第 4-7 字节，即 tiff+6+4 = tiff+10——旧实现读
+        // u32(tiff+4) 落在 "Exif\0\0" 尾 + 字节序字符上，全部带方向 JPEG 恒解析为 1
+        //（uprightBitmap 死代码，转正从未生效）。合成样张阳性对照已验证本表达式。
+        const ifd0 = tiff + 6 + u32(tiff + 10);
+        if (ifd0 + 2 > bytes.length) return 1;
+        const count = u16(ifd0);
+        for (let i = 0; i < count; i += 1) {
+          const entry = ifd0 + 2 + i * 12;
+          if (entry + 12 > bytes.length) return 1;
+          if (u16(entry) === 0x0112) {
+            const v = u16(entry + 8);
+            return v >= 1 && v <= 8 ? v : 1;
+          }
+        }
+        return 1;
+      }
+      off += 2 + segLen;
+    }
+  } catch {
+    // 任何解析异常按无旋转处理
+  }
+  return 1;
+}
+
+/** 按 EXIF orientation 对位图做像素级转正（每像素 4 字节整组搬运，通道序无关）。
+ *  orientation 1/越界返回 null（无需变换）；数据不足（理论不可达）也返回 null 兜底不转。 */
+function uprightBitmap(
+  img: ReturnType<typeof nativeImage.createFromBuffer>,
+  orientation: number,
+): { data: Buffer; width: number; height: number } | null {
+  if (orientation <= 1 || orientation > 8) return null;
+  const { width: w, height: h } = img.getSize();
+  if (w <= 0 || h <= 0) return null;
+  const src = img.toBitmap();
+  if (src.length < w * h * 4) return null;
+  const swap = orientation >= 5; // 5-8：宽高互换
+  const nw = swap ? h : w;
+  const nh = swap ? w : h;
+  const out = Buffer.alloc(nw * nh * 4);
+  for (let y = 0; y < h; y += 1) {
+    for (let x = 0; x < w; x += 1) {
+      let dx = x;
+      let dy = y;
+      switch (orientation) {
+        case 2: dx = w - 1 - x; break; // 水平镜像
+        case 3: dx = w - 1 - x; dy = h - 1 - y; break; // 旋转 180°
+        case 4: dy = h - 1 - y; break; // 垂直镜像
+        case 5: dx = y; dy = x; break; // 转置
+        case 6: dx = h - 1 - y; dy = x; break; // 90° CW
+        case 7: dx = h - 1 - y; dy = w - 1 - x; break; // 反转置
+        case 8: dx = y; dy = w - 1 - x; break; // 90° CCW
+        default: break;
+      }
+      const s = (y * w + x) * 4;
+      const d = (dy * nw + dx) * 4;
+      out[d] = src[s];
+      out[d + 1] = src[s + 1];
+      out[d + 2] = src[s + 2];
+      out[d + 3] = src[s + 3];
+    }
+  }
+  return { data: out, width: nw, height: nh };
+}
 
 /** storageKey 为相对附件根的 POSIX 风格键：<sessionId>/<attachmentId>/<safeFilename>，由主进程生成。 */
 function buildStorageKey(sessionId: string, attachmentId: string, safeFilename: string): string {
@@ -130,13 +236,22 @@ export async function readStoredAttachmentBytes(record: AttachmentRecord): Promi
   return new Uint8Array(buf);
 }
 
-/** 读取受控预览：图片缩略图（最长边 512px，转 PNG）或原图有界 bytes；绝不返回绝对路径。 */
+/** 读取受控预览：图片缩略图（最长边 512px，转 PNG）或原图有界 bytes；绝不返回绝对路径。
+ *  hb10 P2-10：可选 maxBytes 读前预检——statSync 文件尺寸超限直接抛错（上层降级 previewUnavailable），
+ *  不再把超预算文件整读进内存。缺省不预检，既有两参调用方零影响。 */
 export async function readStoredAttachmentPreview(
   record: AttachmentRecord,
   thumbnail: boolean,
+  maxBytes?: number,
 ): Promise<AttachmentPreviewResponse> {
   const absolutePath = resolveAbsolutePath(record.storageKey);
   await assertNoSymlinkPath(absolutePath);
+  if (maxBytes !== undefined) {
+    const st = statSync(absolutePath);
+    if (st.size > maxBytes) {
+      throw new Error(`附件预览超预算：${st.size} > ${maxBytes} 字节`);
+    }
+  }
   const bytes = await fsp.readFile(absolutePath);
   const mime = inferMimeType(record.mimeType, bytes);
 
@@ -144,11 +259,21 @@ export async function readStoredAttachmentPreview(
     const img = nativeImage.createFromBuffer(bytes);
     const size = img.getSize();
     if (size.width > 0 && size.height > 0) {
-      const longest = Math.max(size.width, size.height);
+      // hb12-ATT-06（EXIF 半边）：nativeImage 不应用 EXIF orientation——先按标签位图转正，
+      // 再以转正后的宽高做既有 512 最长边缩放。非 JPEG/无标记/解析失败 orientation=1 →
+      // 不变换，行为与此前完全一致。CMYK 半边维持留档待真机样张（hb12 附录 D）。
+      const orientation = readJpegExifOrientation(bytes);
+      const upright = uprightBitmap(img, orientation);
+      const baseW = upright?.width ?? size.width;
+      const baseH = upright?.height ?? size.height;
+      const longest = Math.max(baseW, baseH);
       const scale = longest > THUMBNAIL_LONG_EDGE ? THUMBNAIL_LONG_EDGE / longest : 1;
-      const tw = Math.max(1, Math.round(size.width * scale));
-      const th = Math.max(1, Math.round(size.height * scale));
-      const png = img.resize({ width: tw, height: th }).toPNG();
+      const tw = Math.max(1, Math.round(baseW * scale));
+      const th = Math.max(1, Math.round(baseH * scale));
+      const source = upright
+        ? nativeImage.createFromBitmap(upright.data, { width: upright.width, height: upright.height })
+        : img;
+      const png = source.resize({ width: tw, height: th }).toPNG();
       return {
         attachmentId: record.id,
         mimeType: 'image/png',
@@ -158,6 +283,20 @@ export async function readStoredAttachmentPreview(
         isThumbnail: true,
       };
     }
+  }
+  // hb10-ATT-02：nativeImage 解码失败（GIF/WebP 多帧等）→ policy 探针取尺寸后仍返回原图，
+  // 渲染层用既有 object-fit CSS 缩放展示，不再无界直出。（hb13-v B10.5：原「未缩略」标记
+  // 字段渲染层零消费者，已删除——原「渲染层半边」不存在。）
+  const probed = probeImageDimensions(bytes);
+  if (probed) {
+    return {
+      attachmentId: record.id,
+      mimeType: mime,
+      bytes: new Uint8Array(bytes),
+      width: probed.width,
+      height: probed.height,
+      isThumbnail: false,
+    };
   }
 
   return {

@@ -107,12 +107,14 @@ async function onPickAttachments() {
   const sessionId = store.activeSession.id;
   try {
     const { attachments, errors } = await window.claudeLink.pickAttachments(sessionId);
-    if (attachments.length > 0) {
-      draftStore.addAttachments(sessionId, attachments);
-    }
+    // hb13-v B10.2：超上限被拒项弹 notice（draftStore 返回被拒摘要，不再静默丢弃）。
+    const rejected = attachments.length > 0 ? draftStore.addAttachments(sessionId, attachments) : [];
     // 部分失败：成功项已入草稿，失败项集中提示（错误文案来自主进程业务校验，不含内部路径）。
     if (errors.length > 0) {
       showNotice(`部分文件未能添加：${errors.map((err) => `${err.filename}：${err.message}`).join('；')}`);
+    }
+    if (rejected.length > 0) {
+      showNotice(`最多添加 10 个附件，已忽略：${rejected.map((a) => a.filename).join('、')}`);
     }
   } catch (e) {
     showNotice(e instanceof Error ? e.message : '添加文件失败');
@@ -146,8 +148,10 @@ async function stageFiles(files: File[]) {
       failures.push(`${file.name || '附件'}：${e instanceof Error ? e.message : '暂存失败'}`);
     }
   }
-  if (staged.length > 0) {
-    draftStore.addAttachments(sessionId, staged);
+  // hb13-v B10.2：超上限被拒项弹 notice（draftStore 返回被拒摘要，不再静默丢弃）。
+  const rejected = staged.length > 0 ? draftStore.addAttachments(sessionId, staged) : [];
+  if (rejected.length > 0) {
+    showNotice(`最多添加 10 个附件，已忽略：${rejected.map((a) => a.filename).join('、')}`);
   }
   if (failures.length > 0) {
     showNotice(`部分文件未能添加：${failures.join('；')}`);
