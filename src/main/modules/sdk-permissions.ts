@@ -116,6 +116,8 @@ export function coercePermissionUpdatesToSession(updates: unknown[] | undefined)
   if (!updates?.length) return [];
   return updates
     .filter(isPermissionUpdate)
+    // hb10-PERM-V04：allow-session 小本本不收 setMode 类建议——「本会话总是允许」若静默改档=越权。
+    .filter((update) => update.type !== 'setMode')
     .map((update) => ({ ...update, destination: 'session' as const }));
 }
 
