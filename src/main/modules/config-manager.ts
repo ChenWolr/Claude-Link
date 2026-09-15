@@ -30,6 +30,7 @@ import { isValidPermissionMode } from '../../shared/permission-resolver';
 import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes, DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
+import { sanitizeSkillOverridesConfig } from './sdk-skill-overrides';
 import { clearProviderModelsCache } from './model-resolver';
 import { resetCliDetectionCache } from './cli-detector';
 import * as path from 'path';
@@ -108,6 +109,10 @@ const defaultConfig: StoredConfig = {
   minimizeToTray: false,
   // reasoning_replay 自动重试默认开（韧性层：同形状重放大概率通过，单次重试覆盖间歇性命中）。
   autoRetryReasoningReplay: true,
+  // 全局 skill 禁用开关默认空（全部启用）；脏值兜底只在读路径（getConfig → sanitizeConfig
+  // 清洗为 {}），saveConfig/CONFIG_SAVE 写路径无 skillOverrides 专项清洗、原样落盘
+  //（S2 review 核实更正：原「写路径读路径各有一道」与事实不符；现状判定无害，不新增写清洗）。
+  skillOverrides: {},
   // ⚠️ providerProfiles / lastUsedProviderId / lastUsedModelId 故意不设默认值：
   // electron-store 的 defaults 会并入 store 视图参与 has() 判定，一旦给了默认值
   // （哪怕是 []），「键是否存在」永远是 true，ensureProviderMigration 的迁移守卫
@@ -245,6 +250,8 @@ export function getConfig(): AppConfig {
     minimizeToTray: config.minimizeToTray ?? false,
     // 老配置无此键时默认开（electron-store defaults 兜底，?? true 双保险）。
     autoRetryReasoningReplay: config.autoRetryReasoningReplay ?? true,
+    // 全局 skill 禁用开关：脏值（非对象/非法档位）清洗为 {}（= 全启用），存量配置无此键时同样兜底。
+    skillOverrides: sanitizeSkillOverridesConfig(config.skillOverrides),
   };
 }
 

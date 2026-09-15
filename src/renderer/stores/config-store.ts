@@ -57,6 +57,8 @@ const defaultConfig: AppConfig = {
   minimizeToTray: false,
   // reasoning_replay 自动重试默认开（与主进程 config-manager 默认保持同值）。
   autoRetryReasoningReplay: true,
+  // 全局 skill 禁用开关默认全启用（{} = 无禁用项；与主进程 config-manager 默认保持同值）。
+  skillOverrides: {},
 };
 
 export const useConfigStore = defineStore('config', {
