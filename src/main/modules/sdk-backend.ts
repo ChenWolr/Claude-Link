@@ -22,6 +22,7 @@ import * as path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import { IPC_CHANNELS, ENGINE_BACKGROUND_TOGGLE_ENV } from '../../shared/constants';
 import { getConfig, getProviderModelSources, onConfigSaved } from './config-manager';
+import { mergeSkillOverridesIntoSettings } from './sdk-skill-overrides';
 import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
 import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride } from '../../shared/session-model';
 import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
@@ -1027,7 +1028,7 @@ function computeContextWindowOverrideTokens(input: {
  * 统一构造 claude-link 显式 settings 块（review-v1 F6）。生产 query 与 probe 共用，杜绝配置漂移。
  * 优先级：Claude Code managed < user < project < local < 此处 claude-link 显式 Options.settings。
  * 返回：
- *   settings —— 完整显式 settings（projection 顶层 + 会话级 permissions + 动态注入 env + thinking patch）；
+ *   settings —— 完整显式 settings（projection 顶层 + 会话级 permissions + 动态注入 env + thinking patch + 会话钉住 skillOverrides）；
  *   additionalDirectories —— 用户配置与附件目录并集（非空时同时写顶层 Options 与 settings.permissions）。
  */
 function buildClaudeLinkSettingsBlock(
@@ -1113,12 +1114,18 @@ function buildClaudeLinkSettingsBlock(
     permissions.additionalDirectories = additionalDirectories;
   }
 
-  const out: Record<string, unknown> = { ...settings, permissions };
+  let out: Record<string, unknown> = { ...settings, permissions };
   // 每会话思考强度 settingsPatch 覆盖全局投影：opts.thinkingLevel 已过 resolveEffectiveThinkingLevel
   // 解析为实际生效档，故此处覆盖优先级最高（query 级 > 全局投影 > advancedJson）。
   if (thinkingConfig.settingsPatch) {
     Object.assign(out, thinkingConfig.settingsPatch);
   }
+  // Skill 管理：按会话钉住值注入引擎 skillOverrides（flag 层，最高用户可控层）。
+  // 空/ null 不加键——空配置下 settings 块与现状字节级一致。sessionId 为全局探针哨兵
+  // （'__global_command_probe__'）时 getSession 返回 null → 全局兜底快照保持未过滤
+  // （配置页要完整列表；暂态会话的菜单过滤在渲染层做）。
+  const sessionRow = sessionRepo.getSession(sessionId);
+  out = mergeSkillOverridesIntoSettings(out, sessionRow?.skillOverrides ?? null);
   return { settings: out, additionalDirectories };
 }
 
