@@ -73,10 +73,17 @@ onMounted(async () => {
   // 推送的 snapshot 按 sessionId 全量替换进 command-store。
   stopCommandChanges = window.claudeLink.onCommandChanged((payload) => commandStore.replaceFromEvent(payload));
   // D4：全局兜底快照热刷新广播——暂态会话覆盖 / 空命令已物化会话回填（当前活跃会话作为消费上下文传入，
-  // 避免 command-store ↔ session-store 的 store 间依赖）。不经 isSessionActive 守卫，暂态也能收到。
-  stopGlobalCommandChanges = window.claudeLink.onGlobalCommandsChanged((payload) =>
-    commandStore.applyGlobalFallback(payload.snapshot, sessionStore.activeSession),
-  );
+  // 避免 command-store ↔ session-store 的 store 间依赖；skillOverrides 亦由调用方传入，避免
+  // command-store ↔ config-store 依赖）。不经 isSessionActive 守卫，暂态也能收到。
+  // Skill 管理：globalSnapshot 存引擎全局探测的未过滤快照，供配置页「Skill 管理」页消费。
+  stopGlobalCommandChanges = window.claudeLink.onGlobalCommandsChanged((payload) => {
+    commandStore.globalSnapshot = payload.snapshot;
+    commandStore.applyGlobalFallback(payload.snapshot, sessionStore.activeSession, configStore.config.skillOverrides);
+  });
+  // 冷启动补拉（2026-09-15）：COMMANDS_GLOBAL_CHANGED 为一次性推送，早于本订阅注册即永久丢失；
+  // 订阅就绪后主动拉一次全局兜底快照，覆盖「用户从不进 Skill 页」的全路由场景（暂态会话兜底
+  // 快照也尽早到位）。幂等在 ensureGlobalSnapshot 内（非 loading 快照直接返回，广播已到则 no-op）。
+  void commandStore.ensureGlobalSnapshot();
 });
 
 onBeforeUnmount(() => {
