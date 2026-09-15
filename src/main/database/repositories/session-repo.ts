@@ -4,6 +4,7 @@ import { isValidThinkingLevel } from '../../../shared/types/thinking';
 import { isValidPermissionMode } from '../../../shared/permission-resolver';
 import { isAutoSessionName } from '../../../shared/auto-session-name';
 import { getConnection } from '../connection';
+import { parseSessionSkillOverrides } from '../../modules/sdk-skill-overrides';
 import { normalizeSearchText } from '../../utils/search-normalizer';
 import { normalizeDbTime } from '../../../shared/time';
 
@@ -18,6 +19,7 @@ interface SessionRow {
   permission_mode: Session['permissionMode'];
   max_turns: number;
   thinking_level: string | null;
+  skill_overrides: string | null;
   created_at: string;
   updated_at: string;
   last_context_tokens: number | null;
@@ -45,6 +47,8 @@ function toSession(row: SessionRow): Session {
     maxTurns: row.max_turns,
     // 脏值兜底：DB 值非法（手改/历史脏数据）时回落 null（= 跟随全局默认）。
     thinkingLevel: isValidThinkingLevel(row.thinking_level) ? row.thinking_level : null,
+    // 脏值兜底：NULL/空串/脏 JSON/非法值一律回落 null（= 全启用，与功能前存量会话一致）。
+    skillOverrides: parseSessionSkillOverrides(row.skill_overrides),
     createdAt: normalizeDbTime(row.created_at),
     updatedAt: normalizeDbTime(row.updated_at),
     lastContextTokens: row.last_context_tokens,
@@ -102,7 +106,7 @@ export function listSessions(): Session[] {
 export function updateSession(
   id: string,
   partial: Partial<
-    Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride' | 'lastEffectiveEffort'>
+    Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'skillOverrides' | 'providerOverride' | 'modelOverride' | 'lastEffectiveEffort'>
   >,
 ): Session | null {
   // hb10-SMG-09：IPC 竞态防线（主进程侧复用 shared 判据）——仅拦截「写入自动形态名覆盖
@@ -148,6 +152,11 @@ export function updateSession(
   if (partial.thinkingLevel !== undefined) {
     updates.push('thinking_level = @thinkingLevel');
     values.thinkingLevel = partial.thinkingLevel;
+  }
+  if (partial.skillOverrides !== undefined) {
+    updates.push('skill_overrides = @skillOverrides');
+    values.skillOverrides = partial.skillOverrides && Object.keys(partial.skillOverrides).length
+      ? JSON.stringify(partial.skillOverrides) : null;
   }
   if (partial.lastEffectiveEffort !== undefined) {
     updates.push('last_effective_effort = @lastEffectiveEffort');
