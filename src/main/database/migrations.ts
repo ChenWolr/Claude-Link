@@ -161,6 +161,11 @@ function runMigrationStatements(db: Database.Database): void {
     if (!hasCol('last_turn_ended_at')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_turn_ended_at INTEGER DEFAULT NULL');
     }
+    // Skill 管理自愈：会话级 skill 禁用快照（创建时钉住）。免升版（B3 先例），
+    // CURRENT_SCHEMA_VERSION 保持 12，不撞 pin 脚本。
+    if (!hasCol('skill_overrides')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN skill_overrides TEXT DEFAULT NULL');
+    }
   }
 
   // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。

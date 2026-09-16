@@ -20,6 +20,9 @@ export interface Session {
   // 该会话的思考强度档位。null = 回落全局默认（AppConfig.defaultThinkingLevel）。
   // 'auto' 与 null 同义（UI 用 'auto' 显式表达「跟随默认」，注入层统一按回落处理）。
   thinkingLevel: ThinkingLevel | null;
+  // 会话级 skill 禁用快照（创建时钉住的全局配置副本）；null = 全启用（含功能前存量会话）；
+  // 引擎注入见 buildClaudeLinkSettingsBlock。
+  skillOverrides: Record<string, 'off'> | null;
   createdAt: string;
   updatedAt: string;
   lastContextTokens: number | null;

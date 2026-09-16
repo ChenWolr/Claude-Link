@@ -4,22 +4,25 @@
 // 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
 // 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
 // 所有滚动发生在面板内部；尺寸全部 rem（随 fontScale 等比缩放）。
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore, lastSaveFailed } from '../stores/config-store';
+import { useCommandStore } from '../stores/command-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
+import type { SdkCommand } from '../../shared/types/command';
 
 const store = useConfigStore();
+const commandStore = useCommandStore();
 const router = useRouter();
 const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
 
-// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观。
-type TabId = 'connection' | 'behavior' | 'appearance';
+// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）。
+type TabId = 'connection' | 'behavior' | 'appearance' | 'skill';
 const activeTab = ref<TabId>('connection');
 
 // 自动保存：监听所有用户可编辑的持久化字段，700ms 防抖落盘，确保所有配置都永久保存。
@@ -28,7 +31,7 @@ const activeTab = ref<TabId>('connection');
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
   'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'queueEnabled', 'taskDelayMinutes', 'themePaletteId', 'fontScale', 'contextWindowByAlias', 'defaultThinkingLevel', 'disableAutoMemory', 'disableBackgroundTasks', 'disableCron', 'disableFeedbackSurvey', 'disableTelemetry', 'disableNonessentialTraffic',
-  'notifyOnLeave', 'minimizeToTray',
+  'notifyOnLeave', 'minimizeToTray', 'skillOverrides',
 ] as const;
 
 // hb10-CFG-04：'projection-failed' = 保存本身成功但 settings.local.json 投影失败（可见性）。
@@ -227,6 +230,78 @@ function clampTaskDelayMinutes(): void {
 function clampMaxTurns(): void {
   store.config.maxTurns = sanitizeMaxTurns(store.config.maxTurns);
 }
+
+// ── Skill 管理（B2 独立设置页）────────────────────────────────────────────
+// 数据源：commandStore.globalSnapshot（引擎全局探测的未过滤快照，App.vue 全局订阅回写）。
+// v1 只列 user-skill 来源，按 name 排序；项目/插件来源不进本页（边界见计划 §3.1）。
+type SkillFilterId = 'all' | 'on' | 'off';
+const skillSearch = ref('');
+const skillFilter = ref<SkillFilterId>('all');
+
+// S2-P2-2：null（无快照）与 status==='loading'（探测在飞/启动空窗回填）同属「探测中」——
+// 状态条走同一占位；统计三卡与空态网格在该态不渲染（0/0/0 + 「无匹配的 Skill」是误导空态）。
+const skillProbePending = computed(() => {
+  const snapshot = commandStore.globalSnapshot;
+  return !snapshot || snapshot.status === 'loading';
+});
+
+// 冷启动自愈（2026-09-15）：globalSnapshot 的广播可能早于 App.vue 订阅注册而永久丢失，本页
+// 纯被动消费会永停「正在探测」——Skill tab 激活时按需拉一次。幂等在 ensureGlobalSnapshot 内
+// （非 loading 快照直接返回 + in-flight 锁），反复切 tab 不产生拉取风暴。
+watch(activeTab, (tab) => {
+  if (tab === 'skill') void commandStore.ensureGlobalSnapshot();
+});
+
+const userSkills = computed<SdkCommand[]>(() => {
+  const snapshot = commandStore.globalSnapshot;
+  if (!snapshot) return [];
+  return snapshot.commands
+    .filter((c) => c.origin === 'user-skill')
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name));
+});
+
+// 开关语义：checked = 启用。启用 = 未禁用（键缺失或值非 'off' 均视为启用）；?. 防御存量存储缺键形态。
+function isSkillEnabled(name: string): boolean {
+  return store.config.skillOverrides?.[name] !== 'off';
+}
+
+// 拨开 → 删除该键（不落 'on' 残值，空配置在主进程不加 settings 键）；拨关 → 置 'off'。
+// 整体替换对象触发 PERSISTED_FIELDS 快照比对 → 既有 700ms 防抖自动保存（卸载 flush 兜底）。
+function setSkillEnabled(name: string, enabled: boolean): void {
+  const next: Record<string, 'off'> = { ...(store.config.skillOverrides ?? {}) };
+  if (enabled) delete next[name];
+  else next[name] = 'off';
+  store.config.skillOverrides = next;
+}
+
+function handleSkillToggle(skill: SdkCommand, e: Event): void {
+  setSkillEnabled(skill.name, (e.target as HTMLInputElement).checked);
+}
+
+// 统计随开关实时重算；无障碍播报见模板 sr-only[aria-live]。
+const skillEnabledCount = computed(() => userSkills.value.filter((s) => isSkillEnabled(s.name)).length);
+const skillDisabledCount = computed(() => userSkills.value.length - skillEnabledCount.value);
+
+// 纯前端过滤：搜索（名称+描述，大小写不敏感）× 状态 chips（全部/已启用/已禁用）。
+const visibleSkills = computed(() => {
+  const q = skillSearch.value.trim().toLowerCase();
+  return userSkills.value.filter((s) => {
+    const enabled = isSkillEnabled(s.name);
+    const matchQuery = !q || `${s.name} ${s.description}`.toLowerCase().includes(q);
+    const matchFilter = skillFilter.value === 'all' || (skillFilter.value === 'on' ? enabled : !enabled);
+    return matchQuery && matchFilter;
+  });
+});
+
+// stale 提示条的「上次引擎探测于 N 分钟前」短语：快照 updatedAt 缺失/非法时省略该短语。
+const snapshotAgeText = computed(() => {
+  const updatedAt = commandStore.globalSnapshot?.updatedAt;
+  if (!updatedAt) return '';
+  const elapsedMs = Date.now() - Date.parse(updatedAt);
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return '';
+  return `上次引擎探测于 ${Math.max(1, Math.round(elapsedMs / 60000))} 分钟前`;
+});
 </script>
 
 <template>
@@ -281,6 +356,7 @@ function clampMaxTurns(): void {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'connection' }]" @click="activeTab = 'connection'">连接</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'behavior' }]" @click="activeTab = 'behavior'">行为</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'skill' }]" @click="activeTab = 'skill'">Skill</button>
       </nav>
       <div class="save-actions">
         <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus === 'projection-failed' ? 'saved' : saveStatus}`]">
@@ -376,6 +452,104 @@ function clampMaxTurns(): void {
                   <option value="large">大</option>
                 </select>
               </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Skill：B2 独立设置页（快照状态条 + 统计三卡 + 搜索/chips + 卡片网格 + 说明）。
+             数据源 = commandStore.globalSnapshot（引擎全局探测快照）的 user-skill 子集；
+             开关 checked = 启用，写 config.skillOverrides（键='off' 即禁用），走自动保存。 -->
+        <div v-show="activeTab === 'skill'" class="solo-card">
+          <div class="mscroll">
+            <div class="section" data-testid="skill-manage-section">
+              <h3 class="section-title">Skill 管理</h3>
+
+              <!-- 快照状态条（页面级 v-if 链）：探测中（null/loading 同占位）/ stale / degraded+error；ready 整条隐藏 -->
+              <div v-if="skillProbePending" class="snap-status snap-status--neutral" role="status">
+                正在从 Claude Code 引擎探测已加载的 Skill…
+              </div>
+              <!-- 首臂 skillProbePending（computed）不向 vue-tsc 传递非空收窄，后续臂用 ?. 取值
+                   （实际不可达 null：这些臂仅在 skillProbePending=false 即快照非空时求值） -->
+              <div v-else-if="commandStore.globalSnapshot?.status === 'stale'" class="snap-status" role="status">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
+                </svg>
+                <span>命令快照可能不是最新{{ snapshotAgeText ? ` — ${snapshotAgeText}` : '' }}；磁盘上的 Skill 变更会自动热刷新</span>
+              </div>
+              <div
+                v-else-if="commandStore.globalSnapshot?.status === 'degraded' || commandStore.globalSnapshot?.status === 'error'"
+                class="snap-status"
+                role="status"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
+                </svg>
+                <span>{{ commandStore.globalSnapshot?.error || '命令读取异常，可继续输入或发送' }}</span>
+              </div>
+
+              <!-- 统计三卡（随开关实时重算）+ 无障碍播报；「探测中」不渲染（0/0/0 是误导空态，S2-P2-2） -->
+              <div v-if="!skillProbePending" class="stat-grid">
+                <div class="stat-card">
+                  <span class="stat-card__num">{{ userSkills.length }}</span>
+                  <span class="stat-card__label">用户 Skill 总数</span>
+                </div>
+                <div class="stat-card stat-card--on">
+                  <span class="stat-card__num">{{ skillEnabledCount }}</span>
+                  <span class="stat-card__label">已启用</span>
+                </div>
+                <div class="stat-card stat-card--off">
+                  <span class="stat-card__num">{{ skillDisabledCount }}</span>
+                  <span class="stat-card__label">已禁用</span>
+                </div>
+              </div>
+              <span v-if="!skillProbePending" class="sr-only" aria-live="polite">已禁用 {{ skillDisabledCount }} 个，共 {{ userSkills.length }} 个用户 Skill</span>
+
+              <!-- 工具行：搜索 + 状态过滤 chips -->
+              <div class="skill-toolbar">
+                <input
+                  v-model="skillSearch"
+                  class="skill-search"
+                  type="text"
+                  placeholder="搜索 Skill 名称或描述…"
+                  aria-label="搜索 Skill"
+                />
+                <div class="chips" role="group" aria-label="过滤">
+                  <button type="button" :class="['chip', { 'chip--active': skillFilter === 'all' }]" @click="skillFilter = 'all'">全部</button>
+                  <button type="button" :class="['chip', { 'chip--active': skillFilter === 'on' }]" @click="skillFilter = 'on'">已启用</button>
+                  <button type="button" :class="['chip', { 'chip--active': skillFilter === 'off' }]" @click="skillFilter = 'off'">已禁用</button>
+                </div>
+              </div>
+
+              <!-- 卡片网格：2 列（窄容器单列）；徽章用 v-if 控制（避免类 display 盖过 [hidden] 的 UA 样式坑） -->
+              <div class="skill-grid">
+                <div
+                  v-for="skill in visibleSkills"
+                  :key="skill.name"
+                  :class="['skill-card', { 'skill-card--off': !isSkillEnabled(skill.name) }]"
+                >
+                  <div class="skill-card__head">
+                    <span class="skill-card__name">{{ skill.name }}</span>
+                    <span v-if="!isSkillEnabled(skill.name)" class="skill-card__badge">已禁用</span>
+                  </div>
+                  <div class="skill-card__desc" :title="skill.description">{{ skill.description }}</div>
+                  <div class="skill-card__foot">
+                    <span :class="['skill-card__state', { 'skill-card__state--on': isSkillEnabled(skill.name) }]">
+                      {{ isSkillEnabled(skill.name) ? '新会话可用' : '新会话不加载' }}
+                    </span>
+                    <input
+                      type="checkbox"
+                      class="switch"
+                      :checked="isSkillEnabled(skill.name)"
+                      :aria-label="`启用 skill ${skill.name}`"
+                      @change="handleSkillToggle(skill, $event)"
+                    />
+                  </div>
+                </div>
+                <!-- 「探测中」不显示空态（loading 且 commands 为空 ≠ 无匹配，S2-P2-2）；真零 Skill（ready 且 0 个）仍显示 -->
+                <div v-if="!skillProbePending && visibleSkills.length === 0" class="skill-empty">当前筛选下无匹配的 Skill</div>
+              </div>
+
+              <p class="skill-note">禁用仅对 Claude Link 内新建的会话生效；已有会话不受影响。开关即刻保存，新会话即刻生效。</p>
             </div>
           </div>
         </div>
@@ -900,4 +1074,300 @@ input[type='number']:hover {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
+
+/* ── Skill 管理（B2 独立设置页，视觉基准 docs/prototypes/skill-management/option-b2-standalone-tab.html）── */
+
+/* 快照状态条：页面级，v-if 链（探测中=neutral / stale、degraded+error=warn / ready=不渲染）。 */
+.snap-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--color-warn) 55%, transparent);
+  background: color-mix(in srgb, var(--color-warn) 12%, transparent);
+  color: var(--color-warn-strong);
+  border-radius: var(--radius-sm);
+  padding: 0.4375rem 0.75rem;
+  font-size: 0.75rem;
+  margin: 1rem 0 0;
+}
+
+.snap-status svg {
+  width: 0.875rem;
+  height: 0.875rem;
+  flex-shrink: 0;
+}
+
+.snap-status--neutral {
+  border-color: var(--color-border);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+}
+
+/* 统计三卡（总数 / 已启用 / 已禁用），数字随开关实时重算。 */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.625rem;
+  margin: 1.125rem 0 1rem;
+}
+
+.stat-card {
+  background: var(--color-panel-soft);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 0.875rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.stat-card__num {
+  font-size: 1.375rem;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+
+.stat-card--on .stat-card__num {
+  color: var(--color-accent-strong);
+}
+
+.stat-card--off .stat-card__num {
+  color: var(--color-fail-strong);
+}
+
+.stat-card__label {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+/* 工具行：搜索框 + 状态过滤 chips。 */
+.skill-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+/* input.skill-search：双类选择器压过上方 input[type='text'] 通用规则（特异性 0,1,1 同级靠后生效）。 */
+input.skill-search {
+  flex: 1;
+  min-width: 12rem;
+  width: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+  padding: 0.5rem 0.75rem;
+  font-size: 0.8125rem;
+  transition: border-color var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out);
+}
+
+input.skill-search:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+.chips {
+  display: inline-flex;
+  gap: 0.375rem;
+}
+
+.chip {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+  padding: 0.3125rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
+}
+
+.chip:hover {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+}
+
+.chip--active {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-strong);
+}
+
+/* 卡片网格：2 列（窄视口单列，原型同款断点）。 */
+.skill-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.625rem;
+  margin: 0 -0.25rem;
+}
+
+@media (max-width: 46rem) {
+  .skill-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.skill-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  background: var(--color-panel-soft);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.75rem 0.875rem;
+  transition: box-shadow var(--duration-base) var(--ease-out), border-color var(--duration-base) var(--ease-out), opacity var(--duration-base) var(--ease-out);
+}
+
+.skill-card:hover {
+  box-shadow: var(--elevation-2);
+  border-color: var(--color-border-strong);
+}
+
+/* 禁用卡整体降不透明度 + 背景透明化，hover 恢复（启用态不动）。 */
+.skill-card--off {
+  opacity: 0.66;
+  background: transparent;
+}
+
+.skill-card--off:hover {
+  opacity: 0.85;
+}
+
+.skill-card__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.skill-card__name {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text);
+  word-break: break-all;
+}
+
+.skill-card__badge {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0.0625rem 0.4375rem;
+  border-radius: var(--radius-xs);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--color-fail) 45%, transparent);
+  background: color-mix(in srgb, var(--color-fail) 12%, transparent);
+  color: var(--color-fail-strong);
+}
+
+.skill-card__desc {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  min-height: 2.175rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.skill-card__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
+.skill-card__state {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.skill-card__state--on {
+  color: var(--color-accent-strong);
+  font-weight: 600;
+}
+
+.skill-empty {
+  grid-column: 1 / -1;
+  padding: 1.75rem;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.skill-note {
+  margin: 1rem 0 0;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.55;
+}
+
+/* 无障碍播报（统计 aria-live）：视觉隐藏。 */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Skill 卡开关：独立 .switch（与 .field--toggle 同款 pill 形态，on=启用；卡片场景非表单行）。 */
+.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 2.75rem;
+  height: 1.5rem;
+  margin: 0;
+  border-radius: var(--radius-pill);
+  background: var(--color-border);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background var(--duration-base) var(--ease-out);
+}
+
+.switch::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0.1875rem;
+  width: 1.125rem;
+  height: 1.125rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  transform: translateY(-50%);
+  transition: transform var(--duration-base) var(--ease-spring);
+}
+
+.switch:checked {
+  background: var(--color-accent);
+}
+
+.switch:checked::before {
+  transform: translateY(-50%) translateX(1.25rem);
+}
+
+.switch:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
 </style>

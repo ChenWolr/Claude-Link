@@ -23,6 +23,7 @@ import { maskApiKey } from '../shared/provider-library';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
 import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight } from './modules/chat-backend';
+import { buildSessionSkillOverridesForPin } from './modules/sdk-skill-overrides';
 import { resolveCommandsGetResult } from '../shared/commands-get';
 import { isChatSendLocked, acquireChatSendLock, releaseChatSendLock } from './modules/chat-send-locks';
 import { getUserOriginFingerprint, getProjectOriginFingerprint } from './modules/command-source-watcher';
@@ -291,6 +292,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         broadcastProvidersChanged();
       }
     }
+    // Skill 管理钉住：新会话创建时复制当前全局禁用集合（主进程侧取值，不信任 renderer）。
+    // 之后配置变更不影响本会话（旧会话不受影响语义）；null = 全启用，不写列（与建行默认一致）。
+    const pinnedSkillOverrides = buildSessionSkillOverridesForPin(getConfig().skillOverrides);
+    if (pinnedSkillOverrides) {
+      session = sessionRepo.updateSession(session.id, { skillOverrides: pinnedSkillOverrides }) ?? session;
+    }
     // 暂态附件转正：物化建行后外键已满足，绑定为 draft 记录供 CHAT_SEND 校验/升格。
     // hb12-SMG-09：绑定失败必须回滚会话行——只回滚附件不清会话行会留下「附件已指向不存在的
     // 会话行」的死锁半态（hb10-ATT-V01 计划明文：实施时必须叠加本条）。
@@ -344,7 +351,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       _event,
       id: string,
       data: Partial<
-        Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>
+        Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'skillOverrides' | 'providerOverride' | 'modelOverride'>
       >,
     ) => {
       // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——非字符串 sessionId 直拒。
@@ -369,6 +376,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         logger.warn(`[session] invalid modelOverride, discarding: ${String(data.modelOverride)}`);
         delete data.modelOverride;
       }
+      // skillOverrides（钉住值）不经本通道可写（P2-1）：仅 SESSION_CREATE 依据全局配置落库，
+      // 不信任 renderer 传值——renderer 经 IPC 附带的该键一律剔除（上方白名单同款形态）。
+      delete data.skillOverrides;
       const touchedSelection =
         data.providerOverride !== undefined || data.modelOverride !== undefined;
       const updated = sessionRepo.updateSession(id, data);

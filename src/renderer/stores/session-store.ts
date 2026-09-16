@@ -356,6 +356,7 @@ export const useSessionStore = defineStore('session', {
     // materializeActiveTransient 物化为同 id 的 DB 行。狂点新会话只回到同一暂态（单例），
     // 侧栏不出现任何条目；文字/附件草稿按 id 存于 chat-draft-store，天然跨视图/跨会话切换存活。
     startTransientSession() {
+      if (this.activeSession?.transient) useCommandStore().markTransientSession(this.activeSession.id, useConfigStore().config.skillOverrides);
       if (this.activeSession?.transient) return; // 单例：当前已在暂态则原地复用（草稿与选择全保留）
       // 离开的是持久会话：先保存流式快照（与 switchSession 同构），否则下面的瞬态清空会让
       // 该会话切换前已流出的正文/思考永久丢失（后台事件从零累积，直到回合结束落库才自愈）。
@@ -384,6 +385,8 @@ export const useSessionStore = defineStore('session', {
           permissionMode: null,
           maxTurns: 200,
           thinkingLevel: null,
+          // 暂态会话未物化=未钉住，按 null（全启用）；物化时由主进程 SESSION_CREATE 钉住。
+          skillOverrides: null,
           createdAt: now,
           updatedAt: now,
           lastContextTokens: null,
@@ -417,8 +420,15 @@ export const useSessionStore = defineStore('session', {
       // B10 反转：主进程 COMMANDS_GET 已对无 DB 行会话开放只读分流（不再抛错），暂态创建即 load
       // 一次（与 switchSession 的 N4 同构）——斜杠菜单立即拿到全局兜底快照（全局指令），不再停留
       // loading；物化后 SESSION_CREATE 的 per-session probe 经 COMMANDS_CHANGED 升级为精确命令。
+      // M8：load 前先按全局 skillOverrides 登记暂态身份（command-store.transientOverridesBySession），
+      // load() 据此过滤后入店，并供 ChatInput 斜杠菜单去抖重拉等未传参调用点复用同款过滤。
+      // P2-2：单例复用早退路径（上方首行守卫）同样先刷新登记——全局 skillOverrides 可能在暂态
+      // 存活期间被设置页改过，暂态未物化=跟随当前全局，否则去抖重拉按旧 overrides 过滤。
       const transientId = this.activeSession?.id;
-      if (transientId) void useCommandStore().load(transientId);
+      if (transientId) {
+        useCommandStore().markTransientSession(transientId, useConfigStore().config.skillOverrides);
+        void useCommandStore().load(transientId);
+      }
     },
     /** 物化当前暂态会话：沿用同一 id 建 DB 行（含暂态期间选定的 override/工作空间/附件绑定）。 */
     async materializeActiveTransient(): Promise<Session | null> {
@@ -448,6 +458,9 @@ export const useSessionStore = defineStore('session', {
         this.sessions.unshift(session);
         // 物化成功：单例暂态退场（下次「新会话」= 全新空白暂态，B6）。
         this.transientDraft = null;
+        // M8 配套：物化后该 id 不再是暂态——先注销登记再 load，load() 恢复未过滤原语义
+        //（后续命令集由 per-session probe 经 COMMANDS_CHANGED 接管）。
+        useCommandStore().unmarkTransientSession(session.id);
         // Task 5：新会话创建后拉取命令快照初始态（loading）；主进程 probe 经 COMMANDS_CHANGED 推完整列表。
         void useCommandStore().load(session.id);
         // await 期间用户可能已切走：只有仍在本会话时才替换 activeSession（物化结果无论如何都已进列表）。

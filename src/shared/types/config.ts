@@ -65,6 +65,10 @@ export interface AppConfig {
   // reasoning_replay（DeepSeek thinking 回传 400）自动重试开关：回合结束后主进程以相同
   // 用户文本自动重发一次（单次、~2s 延迟、同文本防重入）。默认开（同形状重放大概率通过）。
   autoRetryReasoningReplay: boolean;
+  // 全局 skill 禁用开关（配置页「Skill 管理」节维护）。仅 Claude Link 生效：经 Options.settings
+  //（flag 层）按会话钉住值注入引擎，不写入用户 ~/.claude/settings.json。键为 skill canonical 名。
+  // 必填：主进程 getConfig sanitize 恒产出该键、渲染层 defaultConfig 有默认 {}（全启用）。
+  skillOverrides: Record<string, 'off'>;
 }
 
 // ── 多供应商 × 无限模型库（设置页 = 可选项库，会话内选用）────────────────
