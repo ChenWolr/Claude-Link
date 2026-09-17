@@ -13,7 +13,7 @@ import ThemeSelector from '../components/config/ThemeSelector.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
-import type { SdkCommand } from '../../shared/types/command';
+import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
 
 const store = useConfigStore();
 const commandStore = useCommandStore();
@@ -248,9 +248,70 @@ const skillProbePending = computed(() => {
 // 冷启动自愈（2026-09-15）：globalSnapshot 的广播可能早于 App.vue 订阅注册而永久丢失，本页
 // 纯被动消费会永停「正在探测」——Skill tab 激活时按需拉一次。幂等在 ensureGlobalSnapshot 内
 // （非 loading 快照直接返回 + in-flight 锁），反复切 tab 不产生拉取风暴。
+// 项目目录同拍现查（2026-09-17 方案 B）：新目录自然纳入、被删目录自然消失（窗口 = 一次进 tab）。
 watch(activeTab, (tab) => {
-  if (tab === 'skill') void commandStore.ensureGlobalSnapshot();
+  if (tab === 'skill') { void commandStore.ensureGlobalSnapshot(); void ensureProjectDirs(); }
 });
+
+// ── 项目级 Skill 管理（方案 B 双栏 master-detail，2026-09-17）─────────────────
+// 作用域状态：'global' = 用户级（~/.claude/skills，快照 user-skill 子集）；
+// 'project' = 某历史目录（主进程直读 <dir>\.claude\skills 的磁盘全集，不经引擎探测）。
+type SkillScope = { kind: 'global' } | { kind: 'project'; path: string };
+const skillScope = ref<SkillScope>({ kind: 'global' });
+const projectDirs = ref<ProjectDirEntry[]>([]);
+
+// 每次进 tab 现查（覆盖式更新）。失败保留旧值不抛页面（B9：不 toast 不抛，
+// 右栏项目分支退化空 skills——渲染层找不到目录即显示空态引导，不误导）。
+async function ensureProjectDirs(): Promise<void> {
+  try {
+    projectDirs.value = (await window.claudeLink.getSkillProjectDirs()).dirs;
+  } catch { /* 保留旧值 */ }
+}
+
+// R-3 幽灵作用域回退：现查刷新后选中目录已不在清单（被删/淘汰）→ 自动回全局作用域；
+// 目录仍在（含写法不同的同键目录已被主进程归一）或用户停在全局时不触发。
+watch(projectDirs, (dirs) => {
+  const scope = skillScope.value;
+  if (scope.kind === 'project' && !dirs.some((d) => d.path === scope.path)) skillScope.value = { kind: 'global' };
+});
+
+// 当前选中的项目目录条目（全局作用域 / 目录已被现查淘汰 → null）。
+const activeProjectDir = computed(() =>
+  skillScope.value.kind === 'project'
+    ? projectDirs.value.find((d) => d.path === (skillScope.value as { kind: 'project'; path: string }).path) ?? null
+    : null,
+);
+
+// 作用域全集：全局 = userSkills（origin==='user-skill'，现 computed 不动）；项目 = 目录 skills。
+const scopeItems = computed<Array<{ name: string; description: string }>>(() =>
+  skillScope.value.kind === 'global'
+    ? userSkills.value
+    : (projectDirs.value.find((d) => d.path === (skillScope.value as { path: string }).path)?.skills ?? []),
+);
+
+// 同名联动徽章判定（R-2 按作用域计数，计划 §3.3 口径）：名字出现于 ≥2 个「作用域」
+// （'global' / `project:<path>`）的全集才徽章——单目录同名已由主进程去重，逐条计数会把
+// 同目录两条同名误判为「跨作用域」。开关按 Skill 名全局生效（config.skillOverrides），
+// 同名跨作用域必然联动——徽章只提示事实。
+const dupSkillNames = computed(() => {
+  const scopesByName = new Map<string, Set<string>>();
+  const record = (name: string, scope: string) => {
+    let set = scopesByName.get(name);
+    if (!set) { set = new Set<string>(); scopesByName.set(name, set); }
+    set.add(scope);
+  };
+  for (const s of userSkills.value) record(s.name, 'global');
+  for (const dir of projectDirs.value) {
+    for (const s of dir.skills) record(s.name, `project:${dir.path}`);
+  }
+  return new Set([...scopesByName].filter(([, set]) => set.size >= 2).map(([name]) => name));
+});
+
+// 左栏每行 meta 的已启用计数（零后端，按 skillOverrides 现值派生）。
+const globalEnabledCount = computed(() => userSkills.value.filter((s) => isSkillEnabled(s.name)).length);
+function projectEnabledCount(dir: ProjectDirEntry): number {
+  return dir.skills.filter((s) => isSkillEnabled(s.name)).length;
+}
 
 const userSkills = computed<SdkCommand[]>(() => {
   const snapshot = commandStore.globalSnapshot;
@@ -275,24 +336,32 @@ function setSkillEnabled(name: string, enabled: boolean): void {
   store.config.skillOverrides = next;
 }
 
-function handleSkillToggle(skill: SdkCommand, e: Event): void {
+// 双栏后项目条目非 SdkCommand，按结构最小宽度取 { name }（开关只消费名字；开关键空间同名全局）。
+function handleSkillToggle(skill: { name: string }, e: Event): void {
   setSkillEnabled(skill.name, (e.target as HTMLInputElement).checked);
 }
 
-// 统计随开关实时重算；无障碍播报见模板 sr-only[aria-live]。
-const skillEnabledCount = computed(() => userSkills.value.filter((s) => isSkillEnabled(s.name)).length);
-const skillDisabledCount = computed(() => userSkills.value.length - skillEnabledCount.value);
+// 统计随开关实时重算（当前作用域全集：全局 user-skill / 项目磁盘全集）；无障碍播报见模板 sr-only。
+const skillEnabledCount = computed(() => scopeItems.value.filter((s) => isSkillEnabled(s.name)).length);
+const skillDisabledCount = computed(() => scopeItems.value.length - skillEnabledCount.value);
 
-// 纯前端过滤：搜索（名称+描述，大小写不敏感）× 状态 chips（全部/已启用/已禁用）。
+// 纯前端过滤：搜索（名称+描述，大小写不敏感）× 状态 chips（全部/已启用/已禁用）——作用于当前作用域。
 const visibleSkills = computed(() => {
   const q = skillSearch.value.trim().toLowerCase();
-  return userSkills.value.filter((s) => {
+  return scopeItems.value.filter((s) => {
     const enabled = isSkillEnabled(s.name);
     const matchQuery = !q || `${s.name} ${s.description}`.toLowerCase().includes(q);
     const matchFilter = skillFilter.value === 'all' || (skillFilter.value === 'on' ? enabled : !enabled);
     return matchQuery && matchFilter;
   });
 });
+
+// 右栏标题路径：全局 = ~/.claude/skills；项目 = <path>\.claude\skills（引擎加载 project skill 的同款目录约定）。
+const scopePathText = computed(() =>
+  skillScope.value.kind === 'global'
+    ? '~/.claude/skills'
+    : `${activeProjectDir.value?.path ?? ''}\\.claude\\skills`,
+);
 
 // stale 提示条的「上次引擎探测于 N 分钟前」短语：快照 updatedAt 缺失/非法时省略该短语。
 const snapshotAgeText = computed(() => {
@@ -456,100 +525,167 @@ const snapshotAgeText = computed(() => {
           </div>
         </div>
 
-        <!-- Skill：B2 独立设置页（快照状态条 + 统计三卡 + 搜索/chips + 卡片网格 + 说明）。
-             数据源 = commandStore.globalSnapshot（引擎全局探测快照）的 user-skill 子集；
-             开关 checked = 启用，写 config.skillOverrides（键='off' 即禁用），走自动保存。 -->
+        <!-- Skill：方案 B 双栏 master-detail（左=作用域清单 rail，右=作用域详情 main）。
+             全局作用域数据源 = commandStore.globalSnapshot（引擎全局探测快照）的 user-skill 子集；
+             项目作用域 = 主进程直读 <dir>\.claude\skills 的磁盘全集（SKILL_PROJECT_DIRS_GET 每次进 tab 现查）。
+             开关 checked = 启用，写 config.skillOverrides（键='off' 即禁用，按 Skill 名全局生效），走自动保存。 -->
         <div v-show="activeTab === 'skill'" class="solo-card">
-          <div class="mscroll">
-            <div class="section" data-testid="skill-manage-section">
-              <h3 class="section-title">Skill 管理</h3>
-
-              <!-- 快照状态条（页面级 v-if 链）：探测中（null/loading 同占位）/ stale / degraded+error；ready 整条隐藏 -->
-              <div v-if="skillProbePending" class="snap-status snap-status--neutral" role="status">
-                正在从 Claude Code 引擎探测已加载的 Skill…
-              </div>
-              <!-- 首臂 skillProbePending（computed）不向 vue-tsc 传递非空收窄，后续臂用 ?. 取值
-                   （实际不可达 null：这些臂仅在 skillProbePending=false 即快照非空时求值） -->
-              <div v-else-if="commandStore.globalSnapshot?.status === 'stale'" class="snap-status" role="status">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
-                </svg>
-                <span>命令快照可能不是最新{{ snapshotAgeText ? ` — ${snapshotAgeText}` : '' }}；磁盘上的 Skill 变更会自动热刷新</span>
-              </div>
-              <div
-                v-else-if="commandStore.globalSnapshot?.status === 'degraded' || commandStore.globalSnapshot?.status === 'error'"
-                class="snap-status"
-                role="status"
+          <div class="skill-md-body" data-testid="skill-manage-section">
+            <!-- 左栏：作用域清单（全局 + 项目目录；目录 = 最近工作区 ∪ 默认工作区，已删除的不显示） -->
+            <nav class="skill-md-rail" aria-label="Skill 作用域">
+              <div class="skill-md-rail__head"><span>作用域</span><span>{{ projectDirs.length }} 个目录</span></div>
+              <button
+                type="button"
+                :class="['skill-md-item', { 'skill-md-item--active': skillScope.kind === 'global' }]"
+                :aria-current="skillScope.kind === 'global' ? 'true' : 'false'"
+                @click="skillScope = { kind: 'global' }"
               >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                  <path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
-                </svg>
-                <span>{{ commandStore.globalSnapshot?.error || '命令读取异常，可继续输入或发送' }}</span>
+                <span class="skill-md-item__top">
+                  <span class="skill-md-item__dot"></span>
+                  <span class="skill-md-item__name">全局 Skill</span>
+                </span>
+                <span class="skill-md-item__path">~/.claude/skills</span>
+                <span class="skill-md-item__meta">共 {{ userSkills.length }} · {{ globalEnabledCount }} 启用</span>
+              </button>
+              <div class="skill-md-rail__head skill-md-rail__head--group">
+                <span>项目目录 · 来自最近工作区</span><span>{{ projectDirs.length }} 个</span>
               </div>
+              <button
+                v-for="dir in projectDirs"
+                :key="dir.path"
+                type="button"
+                :class="['skill-md-item', 'skill-md-item--project', { 'skill-md-item--active': skillScope.kind === 'project' && skillScope.path === dir.path }]"
+                :aria-current="skillScope.kind === 'project' && skillScope.path === dir.path ? 'true' : 'false'"
+                :title="dir.path"
+                @click="skillScope = { kind: 'project', path: dir.path }"
+              >
+                <span class="skill-md-item__top">
+                  <span class="skill-md-item__dot skill-md-item__dot--project"></span>
+                  <span class="skill-md-item__name">{{ dir.name }}</span>
+                  <span v-if="dir.isDefault" class="skill-md-tag">默认</span>
+                </span>
+                <span class="skill-md-item__path">{{ dir.path }}</span>
+                <span class="skill-md-item__meta">共 {{ dir.skills.length }} · {{ projectEnabledCount(dir) }} 启用 · {{ dir.sessionCount }} 会话</span>
+              </button>
+              <div class="skill-md-rail__foot">目录自动来自最近工作区并集与默认工作区；已删除的目录不再显示。开关按 Skill 名全局生效。</div>
+            </nav>
 
-              <!-- 统计三卡（随开关实时重算）+ 无障碍播报；「探测中」不渲染（0/0/0 是误导空态，S2-P2-2） -->
-              <div v-if="!skillProbePending" class="stat-grid">
-                <div class="stat-card">
-                  <span class="stat-card__num">{{ userSkills.length }}</span>
-                  <span class="stat-card__label">用户 Skill 总数</span>
+            <!-- 右栏：所选作用域详情 -->
+            <div class="skill-md-main">
+              <div class="skill-md-main__head">
+                <div class="skill-md-title">
+                  <span class="skill-md-title__name">
+                    <span :class="['skill-md-title__dot', { 'skill-md-title__dot--project': skillScope.kind === 'project' }]"></span>
+                    {{ skillScope.kind === 'global' ? '全局 Skill' : activeProjectDir?.name }}
+                  </span>
+                  <span class="skill-md-title__path">{{ scopePathText }}</span>
                 </div>
-                <div class="stat-card stat-card--on">
-                  <span class="stat-card__num">{{ skillEnabledCount }}</span>
-                  <span class="stat-card__label">已启用</span>
+                <div class="skill-md-title__meta">
+                  <template v-if="skillScope.kind === 'global'">对所有项目的会话可用</template>
+                  <template v-else-if="activeProjectDir">{{ activeProjectDir.sessionCount }} 个会话在使用 · {{ activeProjectDir.isDefault ? '默认工作区' : '最近目录' }}</template>
                 </div>
-                <div class="stat-card stat-card--off">
-                  <span class="stat-card__num">{{ skillDisabledCount }}</span>
-                  <span class="stat-card__label">已禁用</span>
-                </div>
-              </div>
-              <span v-if="!skillProbePending" class="sr-only" aria-live="polite">已禁用 {{ skillDisabledCount }} 个，共 {{ userSkills.length }} 个用户 Skill</span>
 
-              <!-- 工具行：搜索 + 状态过滤 chips -->
-              <div class="skill-toolbar">
-                <input
-                  v-model="skillSearch"
-                  class="skill-search"
-                  type="text"
-                  placeholder="搜索 Skill 名称或描述…"
-                  aria-label="搜索 Skill"
-                />
-                <div class="chips" role="group" aria-label="过滤">
-                  <button type="button" :class="['chip', { 'chip--active': skillFilter === 'all' }]" @click="skillFilter = 'all'">全部</button>
-                  <button type="button" :class="['chip', { 'chip--active': skillFilter === 'on' }]" @click="skillFilter = 'on'">已启用</button>
-                  <button type="button" :class="['chip', { 'chip--active': skillFilter === 'off' }]" @click="skillFilter = 'off'">已禁用</button>
-                </div>
-              </div>
-
-              <!-- 卡片网格：2 列（窄容器单列）；徽章用 v-if 控制（避免类 display 盖过 [hidden] 的 UA 样式坑） -->
-              <div class="skill-grid">
-                <div
-                  v-for="skill in visibleSkills"
-                  :key="skill.name"
-                  :class="['skill-card', { 'skill-card--off': !isSkillEnabled(skill.name) }]"
-                >
-                  <div class="skill-card__head">
-                    <span class="skill-card__name">{{ skill.name }}</span>
-                    <span v-if="!isSkillEnabled(skill.name)" class="skill-card__badge">已禁用</span>
+                <!-- 快照状态条（页面级 v-if 链）：探测中（null/loading 同占位）/ stale / degraded+error；
+                     仅全局作用域渲染（项目直读与快照无关）。ready 整条隐藏 -->
+                <template v-if="skillScope.kind === 'global'">
+                  <div v-if="skillProbePending" class="snap-status snap-status--neutral" role="status">
+                    正在从 Claude Code 引擎探测已加载的 Skill…
                   </div>
-                  <div class="skill-card__desc" :title="skill.description">{{ skill.description }}</div>
-                  <div class="skill-card__foot">
-                    <span :class="['skill-card__state', { 'skill-card__state--on': isSkillEnabled(skill.name) }]">
-                      {{ isSkillEnabled(skill.name) ? '新会话可用' : '新会话不加载' }}
-                    </span>
-                    <input
-                      type="checkbox"
-                      class="switch"
-                      :checked="isSkillEnabled(skill.name)"
-                      :aria-label="`启用 skill ${skill.name}`"
-                      @change="handleSkillToggle(skill, $event)"
-                    />
+                  <!-- 首臂 skillProbePending（computed）不向 vue-tsc 传递非空收窄，后续臂用 ?. 取值
+                       （实际不可达 null：这些臂仅在 skillProbePending=false 即快照非空时求值） -->
+                  <div v-else-if="commandStore.globalSnapshot?.status === 'stale'" class="snap-status" role="status">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
+                    </svg>
+                    <span>命令快照可能不是最新{{ snapshotAgeText ? ` — ${snapshotAgeText}` : '' }}；磁盘上的 Skill 变更会自动热刷新</span>
+                  </div>
+                  <div
+                    v-else-if="commandStore.globalSnapshot?.status === 'degraded' || commandStore.globalSnapshot?.status === 'error'"
+                    class="snap-status"
+                    role="status"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
+                    </svg>
+                    <span>{{ commandStore.globalSnapshot?.error || '命令读取异常，可继续输入或发送' }}</span>
+                  </div>
+                </template>
+
+                <!-- 统计三卡（随开关实时重算，作用于当前作用域）+ 无障碍播报；「探测中」不渲染（0/0/0 是误导空态，S2-P2-2） -->
+                <div v-if="!skillProbePending" class="stat-grid">
+                  <div class="stat-card">
+                    <span class="stat-card__num">{{ scopeItems.length }}</span>
+                    <span class="stat-card__label">{{ skillScope.kind === 'global' ? '用户 Skill 总数' : '项目 Skill' }}</span>
+                  </div>
+                  <div class="stat-card stat-card--on">
+                    <span class="stat-card__num">{{ skillEnabledCount }}</span>
+                    <span class="stat-card__label">已启用</span>
+                  </div>
+                  <div class="stat-card stat-card--off">
+                    <span class="stat-card__num">{{ skillDisabledCount }}</span>
+                    <span class="stat-card__label">已禁用</span>
                   </div>
                 </div>
-                <!-- 「探测中」不显示空态（loading 且 commands 为空 ≠ 无匹配，S2-P2-2）；真零 Skill（ready 且 0 个）仍显示 -->
-                <div v-if="!skillProbePending && visibleSkills.length === 0" class="skill-empty">当前筛选下无匹配的 Skill</div>
-              </div>
+                <span v-if="!skillProbePending" class="sr-only" aria-live="polite">已禁用 {{ skillDisabledCount }} 个，共 {{ scopeItems.length }} 个{{ skillScope.kind === 'global' ? '用户' : '项目' }} Skill</span>
 
-              <p class="skill-note">禁用仅对 Claude Link 内新建的会话生效；已有会话不受影响。开关即刻保存，新会话即刻生效。</p>
+                <!-- 工具行：搜索 + 状态过滤 chips -->
+                <div class="skill-toolbar">
+                  <input
+                    v-model="skillSearch"
+                    class="skill-search"
+                    type="text"
+                    placeholder="搜索 Skill 名称或描述…"
+                    aria-label="搜索 Skill"
+                  />
+                  <div class="chips" role="group" aria-label="过滤">
+                    <button type="button" :class="['chip', { 'chip--active': skillFilter === 'all' }]" @click="skillFilter = 'all'">全部</button>
+                    <button type="button" :class="['chip', { 'chip--active': skillFilter === 'on' }]" @click="skillFilter = 'on'">已启用</button>
+                    <button type="button" :class="['chip', { 'chip--active': skillFilter === 'off' }]" @click="skillFilter = 'off'">已禁用</button>
+                  </div>
+                </div>
+              </div>
+              <div class="skill-md-main__scroll">
+                <!-- 探测占位（B8：pending 时双作用域同门——探测同一调用也验证 CLI 在位，进 tab 即触发通常亚秒） -->
+                <div v-if="skillProbePending" class="skill-md-probe">正在从 Claude Code 引擎探测已加载的 Skill…</div>
+                <template v-else>
+                  <!-- 卡片网格：2 列（窄容器单列）；徽章用 v-if 控制（避免类 display 盖过 [hidden] 的 UA 样式坑） -->
+                  <div class="skill-grid">
+                    <div
+                      v-for="skill in visibleSkills"
+                      :key="skill.name"
+                      :class="['skill-card', { 'skill-card--off': !isSkillEnabled(skill.name) }]"
+                    >
+                      <div class="skill-card__head">
+                        <span class="skill-card__name">{{ skill.name }}</span>
+                        <span :class="['scope-badge', { 'scope-badge--project': skillScope.kind === 'project' }]">{{ skillScope.kind === 'project' ? '项目' : '全局' }}</span>
+                        <span v-if="dupSkillNames.has(skill.name)" class="dup-badge" title="该名称同时存在于多个作用域，开关按名全局生效">同名 · 联动</span>
+                        <span v-if="!isSkillEnabled(skill.name)" class="skill-card__badge">已禁用</span>
+                      </div>
+                      <div class="skill-card__desc" :title="skill.description">{{ skill.description }}</div>
+                      <div class="skill-card__foot">
+                        <span :class="['skill-card__state', { 'skill-card__state--on': isSkillEnabled(skill.name) }]">
+                          {{ isSkillEnabled(skill.name) ? '新会话可用' : '新会话不加载' }}
+                        </span>
+                        <input
+                          type="checkbox"
+                          class="switch"
+                          :checked="isSkillEnabled(skill.name)"
+                          :aria-label="`启用 skill ${skill.name}`"
+                          @change="handleSkillToggle(skill, $event)"
+                        />
+                      </div>
+                    </div>
+                    <!-- 「探测中」不显示空态（loading 且 commands 为空 ≠ 无匹配，S2-P2-2）；真零 Skill（ready 且 0 个）仍显示 -->
+                    <div v-if="!skillProbePending && visibleSkills.length === 0" class="skill-empty">
+                      <template v-if="skillScope.kind === 'global'">当前筛选下无匹配的全局 Skill</template>
+                      <template v-else-if="scopeItems.length === 0">该项目还没有项目级 Skill<br /><code>{{ activeProjectDir?.path }}\.claude\skills\&lt;名称&gt;\SKILL.md</code> 放置后自动出现在这里</template>
+                      <template v-else>当前筛选下无匹配的项目 Skill</template>
+                    </div>
+                  </div>
+
+                  <p class="skill-note">项目目录自动来自最近工作区与默认工作区（已删除的目录不再显示）；开关按 Skill 名全局生效，同名 Skill 跨作用域联动。禁用仅对 Claude Link 内新建的会话生效；开关即刻保存，新会话即刻生效。</p>
+                </template>
+              </div>
             </div>
           </div>
         </div>
@@ -1368,6 +1504,267 @@ input.skill-search:focus {
 .switch:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+/* ── Skill 管理双栏 master-detail（方案 B，视觉基准 docs/prototypes/skill-management/proj-b-master-detail.html）──
+   既有类名（snap-status/stat-grid/skill-toolbar/skill-search/chips/chip/skill-grid/skill-card 全家族/
+   skill-empty/skill-note/switch）一律不改不删；新增 skill-md-* 前缀类与效果图 md-* 一一对应。
+   项目紫直接写字面 #7C5CFC（hover 深 #5F3DC4），不新增全局 token（避免动 variables.css 影响面）。 */
+
+.skill-md-body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* 左栏：作用域清单（全局 + 项目目录），自有滚动。 */
+.skill-md-rail {
+  width: 264px;
+  flex: none;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-panel);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.skill-md-rail::-webkit-scrollbar {
+  width: 8px;
+}
+
+.skill-md-rail::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-muted) 28%, transparent);
+  border-radius: var(--radius-pill);
+}
+
+.skill-md-rail__head {
+  padding: 0.875rem 1rem 0.4375rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.skill-md-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.125rem;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  padding: 0.5625rem 0.875rem 0.5625rem 1rem;
+  cursor: pointer;
+  font-family: inherit;
+  border-left: 2px solid transparent;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.skill-md-item:hover {
+  background: var(--color-panel-soft);
+}
+
+.skill-md-item--active {
+  background: var(--color-panel-soft);
+  border-left-color: var(--color-accent);
+}
+
+/* active 左侧 2px 竖条：全局=accent 蓝、项目=紫。 */
+.skill-md-item--project.skill-md-item--active {
+  border-left-color: #7C5CFC;
+}
+
+.skill-md-item__top {
+  display: flex;
+  align-items: center;
+  gap: 0.4375rem;
+  min-width: 0;
+}
+
+.skill-md-item__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--color-accent);
+  flex-shrink: 0;
+}
+
+.skill-md-item__dot--project {
+  background: #7C5CFC;
+}
+
+.skill-md-item__name {
+  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.skill-md-item__path {
+  font-family: var(--font-mono);
+  font-size: 0.6563rem;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-left: 0.9375rem;
+}
+
+.skill-md-item__meta {
+  display: flex;
+  gap: 0.375rem;
+  align-items: center;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  padding-left: 0.9375rem;
+  flex-wrap: wrap;
+}
+
+/* rail 行内小 tag（「默认」）。 */
+.skill-md-tag {
+  flex-shrink: 0;
+  font-size: 0.625rem;
+  font-weight: 700;
+  padding: 0.0625rem 0.375rem;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  color: var(--color-accent-strong);
+}
+
+.skill-md-rail__foot {
+  margin-top: auto;
+  padding: 0.75rem 1rem 0.875rem;
+  border-top: 1px dashed var(--color-border);
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  line-height: 1.55;
+}
+
+/* 右栏：所选作用域详情（头部固定不滚 + 滚动区）。 */
+.skill-md-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.skill-md-main__head {
+  flex: none;
+  padding: 1rem 1.25rem 0.875rem;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-panel);
+}
+
+.skill-md-title {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.skill-md-title__name {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+}
+
+.skill-md-title__dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.skill-md-title__dot--project {
+  background: #7C5CFC;
+}
+
+.skill-md-title__path {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+.skill-md-title__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin: 0.25rem 0 0;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+.skill-md-main__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1rem 1.25rem 1.25rem;
+}
+
+.skill-md-main__scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.skill-md-main__scroll::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-text-muted) 28%, transparent);
+  border-radius: var(--radius-pill);
+}
+
+/* 探测占位行（pending 时双作用域同门，替代网格与统计渲染）。 */
+.skill-md-probe {
+  padding: 1.75rem;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}
+
+/* 作用域徽章（全局=蓝/项目=紫）与「同名 · 联动」虚线徽章（开关键空间按名全局生效的提示）。 */
+.scope-badge {
+  flex-shrink: 0;
+  padding: 0.0625rem 0.4375rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.625rem;
+  font-weight: 700;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent-strong);
+}
+
+.scope-badge--project {
+  border-color: color-mix(in srgb, #7C5CFC 45%, transparent);
+  background: color-mix(in srgb, #7C5CFC 10%, transparent);
+  color: #5F3DC4;
+}
+
+.dup-badge {
+  flex-shrink: 0;
+  padding: 0.0625rem 0.4375rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.625rem;
+  font-weight: 700;
+  border: 1px dashed color-mix(in srgb, var(--color-warn-strong) 50%, transparent);
+  color: var(--color-warn-strong);
+}
+
+/* 空态引导里的路径 code（项目零 Skill 时提示放置位置）。 */
+.skill-empty code {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--color-accent-strong);
+  overflow-wrap: anywhere;
 }
 
 </style>
