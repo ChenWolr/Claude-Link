@@ -121,6 +121,29 @@ export function createDefaultCommandSnapshot(sessionId: string): SessionCommandS
   };
 }
 
+// ── 项目级 Skill 管理（2026-09-17 方案 B 双栏 master-detail）──────────────────
+// 主进程直读 <dir>\.claude\skills\<子目录>\SKILL.md 的枚举结果模型（只含可克隆字段）。
+
+/** 单个项目级 Skill：frontmatter 的 name/description（name 缺省子目录名，description 缺省空串）。 */
+export interface ProjectDirSkill {
+  name: string;
+  description: string;
+}
+
+/** 左栏一个项目目录条目：路径/目录名/是否默认工作区/会话计数/该目录的项目 Skill 全集。 */
+export interface ProjectDirEntry {
+  path: string;
+  name: string;
+  isDefault: boolean;
+  sessionCount: number;
+  skills: ProjectDirSkill[];
+}
+
+/** SKILL_PROJECT_DIRS_GET 的返回载荷（每次进 Skill tab 现查全量，≤12 目录毫秒级）。 */
+export interface SkillProjectDirsPayload {
+  dirs: ProjectDirEntry[];
+}
+
 /**
  * 命令来源诊断摘要（Task 8）：某会话命令列表的 provenance 脱敏视图，供 renderer 展示来源徽章。
  * 从已清洗的 SessionCommandSnapshot 派生（聚合计数 + unknown/hidden 命令名），只读、无副作用、

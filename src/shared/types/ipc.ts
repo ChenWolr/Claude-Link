@@ -32,6 +32,9 @@ export const IPC_CHANNELS = {
   WORKSPACE_LIST_RECENT: 'workspace:listRecent',
   WORKSPACE_ADD_RECENT: 'workspace:addRecent',
   WORKSPACE_REMOVE_RECENT: 'workspace:removeRecent',
+  // 项目级 Skill 管理左栏数据（方案 B 双栏 master-detail）：最近工作区 ∪ 默认工作区（存在性过滤）
+  // + 每目录直读 .claude\skills\<子目录>\SKILL.md 的项目 Skill 全集 + 会话计数。只读、无副作用。
+  SKILL_PROJECT_DIRS_GET: 'skills:projectDirsGet',
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save/test 时进主进程，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',
