@@ -186,6 +186,17 @@ export function updateTurnMeta(
     .run(meta.durationMs, meta.endedAt, id);
 }
 
+// 项目级 Skill 管理左栏的会话计数：working_dir 原文分组计数（不做归一，归一在
+// collectSkillProjectDirs 消费端做——sessions 表原文与 recentDirs 写法可能不同）。
+export function listWorkingDirCounts(): Map<string, number> {
+  const rows = getConnection()
+    .prepare(
+      "SELECT working_dir AS dir, COUNT(*) AS c FROM sessions WHERE working_dir IS NOT NULL AND working_dir != '' GROUP BY working_dir",
+    )
+    .all() as Array<{ dir: string; c: number }>;
+  return new Map(rows.map((r) => [r.dir, r.c]));
+}
+
 export function searchSessions(query: string): Session[] {
   const normalizedQuery = normalizeSearchText(query);
   const sessions = listSessions();

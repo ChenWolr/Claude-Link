@@ -18,6 +18,7 @@ import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnaps
 import { detectClaudeConfig } from './modules/claude-config-detector';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
+import { collectSkillProjectDirs } from './modules/project-skills';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { maskApiKey } from '../shared/provider-library';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
@@ -208,6 +209,20 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
   // 永久删除某条最近目录历史（只移除历史记录，不触碰磁盘上的目录本体）。
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => removeRecentWorkspace(dir));
+
+  // 项目级 Skill 管理左栏数据（方案 B 双栏）：最近工作区 ∪ 默认工作区（存在性过滤，
+  // 磁盘上已删除的目录不再显示）+ 每目录直读 .claude\skills 的项目 Skill 全集 + 会话计数。
+  // 只读、无副作用；全链 async + 每目录 3s 超时预算（R-1：不可达 UNC/断连映射盘不再同步
+  // 占死主进程），每次进 Skill tab 现查。
+  ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET, async () => {
+    return {
+      dirs: await collectSkillProjectDirs({
+        recentDirs: listRecentWorkspaces(),
+        defaultDir: getConfig().workingDirectory ?? null,
+        sessionCounts: sessionRepo.listWorkingDirCounts(),
+      }),
+    };
+  });
 
   // 多供应商模型库：设置页（可选项库）与 会话选择器（只读）共用。
   // 密钥边界：listProviders 只回掩码视图；save 的明文 key 落盘前加密；查询/行内测试都在主进程内解密。

@@ -9,6 +9,7 @@ import type { Task, QueueOverview } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
 import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
+import type { SkillProjectDirsPayload } from '../shared/types/command';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
 
@@ -102,6 +103,8 @@ export interface ClaudeLinkAPI {
   getNativeSettingsDiagnostic: (cwd: string) => Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>;
   // Task 8：命令来源 provenance 诊断（origin/availability 计数 + unknown/hidden 命令名，脱敏派生视图）。
   getCommandDiagnostics: (sessionId: string) => Promise<import('../shared/types/ipc').CommandProvenance>;
+  // 项目级 Skill 管理左栏数据（最近工作区 ∪ 默认工作区 + 每目录项目 Skill 全集 + 会话计数）。
+  getSkillProjectDirs: () => Promise<SkillProjectDirsPayload>;
 }
 
 export function createApi(): ClaudeLinkAPI {
@@ -229,6 +232,8 @@ export function createApi(): ClaudeLinkAPI {
       ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, cwd) as Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>,
     getCommandDiagnostics: (sessionId) =>
       ipcRenderer.invoke(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, sessionId) as Promise<import('../shared/types/ipc').CommandProvenance>,
+    getSkillProjectDirs: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET) as Promise<SkillProjectDirsPayload>,
   };
 }
 
