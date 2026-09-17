@@ -4,6 +4,16 @@ Claude Link 是一个基于 Electron 的 Claude Code 桌面客户端。它调用
 
 Claude Link 不直接实现一套聊天模型，也不把用户输入原样转发到某个 HTTP 接口。每条用户消息都会由 Claude Agent SDK 创建或恢复一次 Claude Code query，配置、工作目录、权限模式和会话状态都会进入这条原生链路。所有聊天 prompt 统一经流式输入（AsyncIterable）包装发送。
 
+## 界面预览
+
+**主界面**——会话视图、输入工具栏与右侧活动总览：
+
+![主界面：会话视图与活动总览](assets/screenshot-main.png)
+
+**配置页**——供应商库、行为、外观与 Skill 管理：
+
+![配置页：供应商与连接设置](assets/screenshot-config.png)
+
 ## 主要功能
 
 - **Claude Code 会话**：使用本机 Claude Code CLI，支持连续会话、会话恢复和中断；新会话采用「暂态草稿」模式——点「新会话」不立即落库，首条消息发送时才物化为数据库记录，草稿跨视图保活。
