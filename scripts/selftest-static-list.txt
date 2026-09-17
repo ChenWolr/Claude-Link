@@ -154,3 +154,4 @@ scripts/tdd-bugfix-hb13-v-cfg-projection-verify.ts
 scripts/tdd-bugfix-hb13-v-cmd-probe-verify.ts
 scripts/tdd-bugfix-hb13-v-smg-patch-verify.ts
 scripts/tdd-skill-overrides-verify.ts
+scripts/tdd-skill-project-dirs-verify.ts
