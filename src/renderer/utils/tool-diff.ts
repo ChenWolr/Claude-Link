@@ -69,7 +69,7 @@ function asEdits(value: unknown): { old_string: string; new_string: string }[] {
   }));
 }
 
-// 统一反斜杠→正斜杠（Windows 路径在 diff 头里更好看），去首尾空白；空回退 'file'。
+// 统一反斜杠→正斜杠（Windows 路径在 diff 头里更好看），去首尾空白与前导斜杠（POSIX 绝对路径的 / 也会被剥掉，仅影响 diff 头显示文本）；空回退 'file'。
 function normalizePath(path: string): string {
   const normalized = path.trim().replace(/\\+/g, '/').replace(/^\/+/, '');
   return normalized || 'file';

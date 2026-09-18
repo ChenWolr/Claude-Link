@@ -101,7 +101,7 @@ export function highlightLineToTokens(text: string, language: string): HlToken[]
 }
 
 // 字符级 merge：HlToken[] × DiffSeg[]（对该行：eq+del 或 eq+ins，重组回 text）→ MergedToken[]。
-// 两者都覆盖 [0, text.length)；双指针按字符推进，输出每段同时带 {cls, diff}，合并相邻同 (cls,diff)。
+// 两者都覆盖 [0, text.length)；各自展平为「字符→cls」「字符→diff」数组后按下标合成，输出每段同时带 {cls, diff}，合并相邻同 (cls,diff)。
 // segs 为空/不匹配 → 整行 eq（无词级高亮，仅行背景色）。
 export function mergeTokensWithDiff(tokens: HlToken[], segs: DiffSeg[] | undefined): MergedToken[] {
   if (!segs || !segs.length) {

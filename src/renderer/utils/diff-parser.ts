@@ -3,8 +3,8 @@
 //
 // 视觉/行为真相源：prototypes/diff-viewer.html。渲染器（DiffBody）只消费这里输出的
 // ParsedDiffFile，二者经数据契约解耦：解析器负责把 git unified diff 拆成
-//   ctx 未改动 / mod 1:1 修改(词级 segs) / add 纯增 / del 纯删 / ws 仅空白
-// 五类组，渲染器负责排版与中缝标记。
+//   ctx 未改动 / mod 1:1 修改(词级 segs) / add 纯增 / del 纯删 / ws 仅空白 / skip hunk 间隙
+// 六类组，渲染器负责排版与中缝标记。
 //
 // 依赖 jsdiff：parsePatch 取 hunks（行号从 oldStart/newStart 起算）；词级差异由本地 LCS
 // 引擎 diff-words.ts 提供（自写 Uint16Array DP + 三道护栏，比 jsdiff 的词级实现更贴合代码）。
@@ -15,6 +15,7 @@
 //   - ctx 组 L.length===R.length；L[i].n 是旧行号、R[i].n 是新行号（未改动段二者常相等，
 //     但前置增删不等量时会错位，故分别取 oldN/newN）。
 //   - add 组 L=[]、del 组 R=[]。
+//   - skip 组 L=[]、R=[]，仅带 skipCount>0（相邻 hunk 间隙，恒渲染为「⋯ N 行」分隔）。
 //   - 词级 segs：L 侧只 eq+del，R 侧只 eq+ins（同一次 diffWordsOrFlat 拆出）。
 
 import { parsePatch } from 'diff';
