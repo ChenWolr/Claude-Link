@@ -61,10 +61,11 @@ const STALE_DIR_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const EXPORT_PROGRESS_PHASES: ReadonlySet<string> = new Set([
   'preparing', 'planning', 'capturing', 'encoding', 'saving', 'waitingForDestination',
 ]);
-// R3 看门狗：JPEG 沿用固定 90s；PNG 长图按段 ack/页保存重置（慢但有进展不误杀）。
+// R3 看门狗（hb10 P1-12 后现状）：JPEG/PNG 均按 EXPORT_RENDER_PROGRESS 渲染进度重置；
+// PNG 另有 codec worker ack（segment-accepted/page-saved）与页 begin/finish 重置（慢但有进展不误杀）。
 // hb10 P1-1：原「单 job 300s 绝对硬顶」误杀健康长导出（数千消息会话现实可达 >300s），改为
 // 「无进展硬顶」——连续 5 分钟无任何 resetWatchdog 进度才 failJob；有进展的导出不再受总时长限制。
-const WATCHDOG_RESET_MS = 90 * 1000;       // 每次段 ack/页保存后重置的窗口
+const WATCHDOG_RESET_MS = 90 * 1000;       // 单次无进展窗口：上述任一重置点触发后重新计时
 const WATCHDOG_NO_PROGRESS_MS = 5 * 60_000; // 无进展硬顶：连续 5 分钟无任何进展才杀
 
 interface PageFile {
@@ -532,7 +533,7 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
     active.pageFiles.clear();
     pages.sort((a, b) => a.page - b.page);
 
-    // 阶段四：保存对话框 + 排他移动 + 冲突处理。result 为判别联合（saved/cancelled/failed）。
+    // 阶段四：保存对话框 + 写入（单张经对话框确认后先删后写可覆盖、多张排他移动不覆盖）+ 冲突处理。result 为判别联合（saved/cancelled/failed）。
     active.phase = 'waitingForDestination';
     makeProgress({ phase: 'waitingForDestination', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, message: '请选择保存位置…' });
     const result = await performSave(active, pages);
@@ -555,7 +556,7 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
   }
 }
 
-// —— 保存：单张另存为 / 多张目录选择；排他移动（不覆盖）；smoke 用 CLAUDE_LINK_EXPORT_SMOKE_DEST 绕过对话框 ——
+// —— 保存：单张另存为（P1-13：对话框已确认覆盖意图，目标存在时先删后写，可覆盖）/ 多张目录选择 + 排他移动（不覆盖）；smoke 用 CLAUDE_LINK_EXPORT_SMOKE_DEST 绕过对话框 ——
 async function performSave(job: ActiveJob, pages: { page: number; path: string; bytes: number }[]): Promise<ExportImageResult> {
   const { sessionName, exportedAt, format } = job.snapshot;
   const smokeDest = job.smoke ? process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST : undefined;
@@ -827,7 +828,7 @@ async function startImageExportImpl(
       session: exportSession,
     },
   });
-  // 禁止 window.open / 外部导航 / 下载 / 权限请求。
+  // 禁止 window.open / 外部导航 / 权限请求（下载无专门拦截：隐藏沙箱窗无下载触发面；如需硬防线须另挂 session 的 will-download）。
   exportWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   // P2-19：导出窗同样挂 link-guard（will-navigate/will-redirect 全拦或放行本地 dev URL）——
   // link-guard 此前只覆盖主窗，隐藏导出窗的导航面是漏网之鱼。dev 传 devUrl 防误拦本地加载，
@@ -947,7 +948,8 @@ export function registerExportImageHandlers(): void {
     return await captureSelfImpl(request as CaptureSelfRequest);
   });
 
-  // v4.1 PNG 页协议（仅 PNG 模式生效，handler 内校验 format）。
+  // v4.1 PNG 页协议（仅 PNG 模式生效：probe/begin 在 impl 内显式校验 format；finish 无显式校验，
+  // 靠 currentPngPage 仅 PNG 模式非空——JPEG 模式恒 null——间接以 no-page 拒绝）。
   ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_PROBE_SELF, async (event, request: PngProbeSelfRequest) => {
     if (!isExportSender(event.sender)) return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies PngProbeSelfResponse;
     if (!request || typeof request.jobId !== 'string') return { ok: false, code: 'bad-request', message: '非法请求参数' } satisfies PngProbeSelfResponse;

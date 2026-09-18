@@ -209,7 +209,7 @@ export function validateAttachmentBytes(input: {
     return { ok: true, kind: 'image' };
   }
 
-  // 非图片：声明为 PDF 时复核 %PDF- 魔数，拒绝伪装 PDF。
+  // 非图片：声明为 PDF 时复核 %PDF 魔数（isPdfMagic 比对前 4 字节，不含第 5 字节连字符），拒绝伪装 PDF。
   const declaredPdf = getExtension(filename) === '.pdf' || normalizeMimeType(mimeType) === 'application/pdf';
   if (declaredPdf && !isPdfMagic(bytes)) {
     return { ok: false, message: `附件「${filename}」声明为 PDF 但内容不是有效的 PDF 文件。` };

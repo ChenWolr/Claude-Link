@@ -45,7 +45,7 @@ export interface ChatSendPayload {
   clientMessageId: string;
 }
 
-/** 主进程受控预览响应：只返回有界缩略图/原图 bytes，绝不返回绝对路径。 */
+/** 主进程受控预览响应：只返回缩略图/原图 bytes（原图大小受图片暂存 10MiB 上限约束），绝不返回绝对路径。 */
 export interface AttachmentPreviewResponse {
   attachmentId: string;
   mimeType: string;
