@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（70 个方法）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（71 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -50,7 +50,9 @@ export interface ClaudeLinkAPI {
     id: string,
     data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>>,
   ) => Promise<Session | null>;
-  // B1：回合元数据持久化（回合 result 到达时 fire-and-forget）。返回更新后的整会话（会话不存在返回 null）。
+  // B1：回合元数据持久化（回合 result 到达时 fire-and-forget）。主进程 handler 成功时固定返回 true，
+  // sessionId 非法/会话不存在返回 null（hb10-OPT-1：布尔返回省一次全行读）。下方 Promise<Session | null>
+  // 仅为历史形态，运行时实际返回 true | null；调用方均 fire-and-forget，不消费返回值。
   recordTurnMeta: (
     sessionId: string,
     payload: { messageId: string | null; costUsd: number | null; durationMs: number | null; endedAt: number | null },

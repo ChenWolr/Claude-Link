@@ -1,7 +1,7 @@
 // ipc-handlers.ts
 // IPC handler 注册中心：渲染进程 ↔ 主进程的桥梁。
 //
-// 注册 cli / config / workspace / provider / changes / settings / session / message / claude-plan / commands / chat / interaction / task / queue / attachment 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
+// 注册 cli / config / workspace / provider / changes / settings / skill / session / message / claude-plan / commands / chat / interaction / task / queue / attachment 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
 import { BrowserWindow, dialog, ipcMain, app } from 'electron';
@@ -89,7 +89,7 @@ function broadcastProvidersChanged(): void {
 }
 
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
-  // hb10-CMD-10：needsRefreshProbeOnly 重探节流时间戳（模块级进程内）。
+  // hb10-CMD-10：needsRefreshProbeOnly 重探节流时间戳（registerIpcHandlers 单次注册闭包内，ipcHandlersRegistered 守卫保证语义等效模块级进程内单例）。
   let lastProbeOnlyAt = 0;
 
   mainWindow = mainWindowRef;
@@ -462,7 +462,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         }
       });
       applyTurnMeta();
-      // hb10-OPT-1：两调用方均 fire-and-forget，返回布尔即可（省一次全行读）。
+      // hb10-OPT-1：调用方均 fire-and-forget，返回布尔即可（省一次全行读）。
       return true;
     },
   );
@@ -506,7 +506,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 生命周期事实。无 DB 行（暂态）不再 throw：只读返回全局兜底副本（source:'cache'），不 markSessionActive、
     // 不 startCommandProbe、不 schedulePostTurnProbe；分流决策统一在 shared 纯函数 resolveCommandsGetResult。
     const sessionRow = sessionRepo.getSession(sessionId);
-    // P2-14：快照带项目级出生指纹时现算比对（无指纹的旧快照/无 cwd 会话跳过 IO）。
+    // P2-14：快照带项目级出生指纹时现算比对（无指纹的旧快照跳过 IO；cwd 取值见下条 hb10-CMD-V01
+    // 回退——会话 cwd 缺省时用全局配置工作目录现算，两级皆空才经 getProjectOriginFingerprint 的
+    // !cwd 短路无 IO）。
     const existingSnapshot = sdkCommandRegistry.get(sessionId);
     const currentProjectFingerprint = existingSnapshot?.projectOriginFingerprint !== undefined
       // hb10-CMD-V01：指纹比对侧镜像出生侧回退——session cwd 缺省时用全局配置工作目录
@@ -561,7 +563,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
   // unknown/hidden 命令名）。只读、无副作用——不 markSessionActive、不触发 probe（区别于 COMMANDS_GET）。
-  // sessionId 做非空校验；DB 会话存在性不强制（诊断对无快照会话也返回 total=0 空诊断，不抛错）。
+  // sessionId 做非空校验；DB 会话存在性不强制（无快照会话回退全局兜底派生诊断，兜底也未就绪时
+  // 才返回 total=0 空诊断；均不抛错）。
   ipcMain.handle(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, async (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
     return getCommandProvenance(sessionId);
