@@ -71,7 +71,9 @@ export function parseClaudeSettings(content: string): ImportedSettings {
 
   // apiKeyHelper: 顶层命令字符串，用于动态获取 key（Claude Code 特有）。
   // 单独提取出来，避免残留在 advancedJson 被运行时当普通字段注入。
-  // Claude Link 本身不执行它——只用于 UI 提示用户改用静态 API Key。
+  // Claude Link 本身不执行它；字段随 DetectedClaudeConfig 透传到渲染层，但当前无任何 UI
+  // 消费点（config-store 的 applyExtractedSettings 只回填 apiKey/apiBaseUrl/defaultModel/
+  // advancedJson/contextWindowByAlias，apiKeyHelper 被静默丢弃），不做「改用静态 API Key」提示。
   const apiKeyHelper = takeString(remaining, 'apiKeyHelper');
   if (apiKeyHelper) result.apiKeyHelper = apiKeyHelper;
 

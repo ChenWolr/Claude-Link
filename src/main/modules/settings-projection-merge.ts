@@ -11,7 +11,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { logger } from '../utils/logger';
 
-/** CL 所有权键：这些顶层键由 CL 投影权威写入（CC 不会写它们；手改以 CL 为准）。 */
+/** CL 所有权键：这些顶层键由 CL 投影权威整体写入（env/effortLevel/alwaysThinkingEnabled
+ *  三键 CC 不写；permissions 例外——CC 会话期「don't ask again」会写 permissions.allow/ask/deny，
+ *  故在 mergeProjection 中单独深合并，见下方 permissions 分支）。 */
 const CL_OWNED_KEYS: ReadonlySet<string> = new Set([
   'permissions',
   'env',
@@ -129,9 +131,11 @@ export function mergeProjection(
       if (!wasOurs && key in currentFile) merged[key] = currentFile[key];
       continue;
     }
-    // 键在本次投影中：
+    // 键在本次投影中（走到这里的必为非所有权键——所有权键已在上方 CL_OWNED_KEYS 分支
+    //  照写并 continue，不会到达此处）：
     //  · 现文件没有 = CL 上次写入且已被外部删除 → 重写投影（恢复 CL 意图）；
-    //  · 现文件有 → 非所有权键保留现文件（外部更新优先）；所有权键照写投影（下方）。
+    //  · 现文件有 → 首跑无快照保留现文件（保守合并）；有快照则 diff：现文件==快照（无外部
+    //    改动）→ 照写 CL 新值，不等 → 保留现文件（外部更新优先）。
     if (!(key in currentFile)) {
       merged[key] = nextProjection[key];
       continue;

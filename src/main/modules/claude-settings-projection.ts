@@ -61,7 +61,13 @@ export function buildClaudeSettingsProjection(config: AppConfig): Record<string,
   // 全局默认思考强度投影：selector > advancedJson——在 ...advanced 之后覆盖 thinking 相关同名字段。
   // medium 不投影以尊重用户 ~/.claude 配置（Task 3 恢复原生 user/project/local 来源后，未显式设档时
   // 让 CC 按原生文件自决；level 显式非 medium 才投影覆盖）。
-  // level 缺省/非法时（如手构的不完整 config）跳过，等同 medium，避免 resolveThinkingConfig 收到脏值。
+  // level 缺省（undefined/null/空串）时跳过，等同 medium。注意：这里只拦 falsy/'medium'，
+  // 不校验档位合法性——非法非空串（恰是注释曾声称要防的「手构不完整 config」）会穿透传入
+  // resolveThinkingConfig（其 switch 无 default，运行时返回 undefined），随后下方
+  // result.settingsPatch 取值即抛 TypeError（settings-writer 路径被 projectLegacyFields
+  // 捕获 → projectionOk:false）。生产调用方（settings-writer / sdk-backend）传的 config 均
+  // 出自 getConfig()，档位已经 isValidThinkingLevel 清洗，该穿透现实不可达；若需真正防
+  // 手构脏值，应补 isValidThinkingLevel 校验（疑似缺陷，未改代码）。
   const level = config.defaultThinkingLevel;
   if (level && level !== 'medium') {
     const result = resolveThinkingConfig(level);

@@ -107,7 +107,8 @@ export interface ProviderProfileView extends ProviderProfile {
 }
 
 // 保存档案的输入：apiKey 仅在创建/修改时以明文进入主进程，落盘前加密；
-// 编辑时省略（undefined/null）= 保留原密钥，显式空串 = 清除。
+// 编辑时省略（undefined/null）、显式空串或掩码串（sk-…****）= 保留原密钥（不改动，
+// hb12-CFG-02）；显式清除走 clearApiKey:true（见下方字段注释）。
 // models 提供时整体替换（增删模型走此路径；renderer 持有完整无密钥列表）。
 export interface ProviderSaveInput {
   id?: string | null;
