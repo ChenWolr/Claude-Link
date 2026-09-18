@@ -223,7 +223,8 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
       const text = r.result?.trim();
       if (!text) break;
       // F1：与 renderer 共用 isErrorCliResult 权威判定——错误 result（含缺失 subtype）不落库，
-      // 避免把错误文案当成正常回答污染历史；error_during_execution（用户中断）跳过。
+      // 避免把错误文案当成正常回答污染历史；error_during_execution（用户中断）不算错误、
+      // 不经此拦截，是否落库由下方去重守卫决定。
       if (isErrorCliResult(r)) break;
       if (currentTurnHasMainFlowText(sessionId)) break;
       // Task 4 review P1-1：命令回合去重下沉到持久化层。SDK 对本地命令（/clear /usage 等）会同时

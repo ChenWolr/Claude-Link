@@ -154,8 +154,8 @@ async function importSdk(): Promise<SdkModule> {
 }
 
 // ── 会话→query 句柄 映射（替代 process-manager 的 processes Map）────────
-// 这是进程级单例：SDK 后端与 process-manager 不会同时持有同一 session，但二者各自维护
-// 独立 Map 互不影响。
+// 这是进程级单例的会话→query 句柄映射（process-manager 已删除，无并存 Map；
+// spawnForChat/runQuery/killProcess 均经它占坑与收口）。
 // 关键：handle + emit 闭包在 entry 创建时一次成型，runQuery 复用同一套，
 // 确保 spawn 时注册的 on('exit') 回调能被 runQuery 的 emitExit 触发。
 interface SessionEntry {
@@ -4291,8 +4291,9 @@ export function killProcess(
   // 时用户只看到弹窗凭空消失，须落一条可见的红色系统消息解释（user 主动中断符合预期、
   // session_cleanup 会话已删，均不落）。
   const hadPendingInteraction = hasPendingInteractionForSession(sessionId);
-  // hb12-PERM-05：系统取消的弹窗统一落 interaction_history（cancel 记录 + reason）——
-  // 原实现仅落 system 消息，历史回看缺口。pending 为 0 时 no-op。
+  // hb12-PERM-05：被取消的 pending 弹窗统一落 interaction_history（cancel 记录 + reason，
+  // user 取消也落、文案区分归因）——原实现仅系统取消落 system 消息，历史回看缺口。
+  // pending 为 0 时 no-op。
   if (hadPendingInteraction) {
     try {
       const cancelled = getPendingInteractionPrompts().filter((p) => p.sessionId === sessionId);

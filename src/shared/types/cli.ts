@@ -186,7 +186,7 @@ export interface CliErrorEvent {
   code?: number | null;
 }
 
-// 中断/结束的本地合成事件（process-manager 在 interrupted 或 0 退出无 result 时发出）。
+// 中断/结束的本地合成事件（sdk-backend 在用户/看门狗中断，或流末未收到 result 时合成发出；不问退出码）。
 export interface CliAbortedEvent {
   type: 'aborted';
   message: string;

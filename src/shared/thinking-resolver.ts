@@ -8,7 +8,7 @@
 //   settingsPatch → 合并进 Options.settings，覆盖 advancedJson 同名字段（selector > advancedJson）。
 //
 // MVP 映射：所有模型统一走 adaptive，不传 budgetTokens（旧模型 budgetTokens 路径需先建能力表，批次 C）。
-// 详见 thinking-budget-design-final.md §2.3 / §1.4 / §1.5。
+// 原始设计文档已不在仓库，映射口径以此注释为准。
 //
 // 这里用本地定义的结果类型，不直接 import SDK 类型——shared 层被 renderer 复用，
 // renderer 侧无 SDK 运行时依赖；结构字段与 SDK 的 ThinkingAdaptive / EffortLevel / Settings 子集对齐。
