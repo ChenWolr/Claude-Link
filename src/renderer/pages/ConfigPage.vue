@@ -3,7 +3,7 @@
 // 结构：标题/标签/工作区同宽一列（宽 = min(100%, --chat-bottom-max-width)，与聊天/会话页同一 800px 契约），
 // 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
 // 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
-// 所有滚动发生在面板内部；尺寸全部 rem（随 fontScale 等比缩放）。
+// 所有滚动发生在面板内部；尺寸除 Skill 双栏区（.skill-md-rail 264px 定宽、滚动条 8px）外全部 rem（随 fontScale 等比缩放）。
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore, lastSaveFailed } from '../stores/config-store';
@@ -648,7 +648,7 @@ const snapshotAgeText = computed(() => {
                 <!-- 探测占位（B8：pending 时双作用域同门——探测同一调用也验证 CLI 在位，进 tab 即触发通常亚秒） -->
                 <div v-if="skillProbePending" class="skill-md-probe">正在从 Claude Code 引擎探测已加载的 Skill…</div>
                 <template v-else>
-                  <!-- 卡片网格：2 列（窄容器单列）；徽章用 v-if 控制（避免类 display 盖过 [hidden] 的 UA 样式坑） -->
+                  <!-- 卡片网格：2 列（窄视口 ≤46rem 单列，见样式区断点）；徽章用 v-if 控制（避免类 display 盖过 [hidden] 的 UA 样式坑） -->
                   <div class="skill-grid">
                     <div
                       v-for="skill in visibleSkills"
