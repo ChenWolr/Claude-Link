@@ -57,7 +57,7 @@ const splitLayout = computed<SplitLayout | null>(() =>
 // 垂直滚动 JS 化（对齐 contrast）：.diff-scroll overflow:hidden 不原生滚，wheel 驱动 scrollTop，
 // .file-offset translateY = -scrollTop + magic 焦点偏移。换来的关键收益：.pane 高度 = 视口高
 // （随 .split-track height:100% 而非内容全高）→ 水平滚动条常驻视口底、不盖最后一行、
-// 行背景随 .file-offset inline-block 撑满铺到最宽行末尾（滚到最右不露白）。
+// 行背景随 .file-offset block + width:max-content 取最宽行宽，撑满铺到行末尾（滚到最右不露白，见下方 .file-offset 样式注释）。
 const scrollTop = ref(0);
 // maxScrollTop 用 ref：自定义垂直滚动条的 thumb 几何依赖它（响应式重算）。
 const maxScrollTop = ref(0);
@@ -138,7 +138,7 @@ function onVthumbDown(e: MouseEvent): void {
   document.addEventListener('mousemove', move);
   document.addEventListener('mouseup', cleanup);
 }
-// 点 track（非 thumb）：跳到点击位置对齐 thumb 顶。
+// 点 track（非 thumb）：跳到点击位置，thumb 中心对齐点击点（ratio 扣半个 thumb 高）。
 function onVtrackDown(e: MouseEvent): void {
   if (e.target !== e.currentTarget) return;
   const trackH = (e.currentTarget as HTMLElement).clientHeight;

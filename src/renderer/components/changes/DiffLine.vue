@@ -16,10 +16,10 @@ import {
 
 const props = defineProps<{
   line: ParsedDiffLine;
-  /** ctx / add / del / modl / modr / ws */
+  /** ctx / add / del / modl / modr（'ws' 当前构建链不产出：split 侧 mod/ws 归并 edit→modl/modr、inline 侧摊平为 del+add；sign 与 .line--ws 的 ws 分支保留防御） */
   kind: string;
   variant: 'split' | 'inline';
-  /** split 用：左右栏标记（配色微调保留） */
+  /** split 用：左右栏标记（当前渲染不消费，仅契约保留；配色由 kind 档承担） */
   side?: 'left' | 'right';
   /** split 语法高亮用：hljs language，由 DiffDialog/ToolDiffDialog 按扩展名推断，经 DiffBody 原样下传 */
   language?: string;

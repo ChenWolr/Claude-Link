@@ -135,7 +135,7 @@ function taskIcon(taskType?: string): string {
   return '🔁';
 }
 
-// Queue running → disable drag reorder（v3：standby/countdown 均可拖——执行顺序只影响到期取谁）
+// 回合执行中 → disable drag reorder（以会话 sending 为准：activeSession ∈ runningSessions，普通发送/队列回合均覆盖，非 queueState.status 字面判断；v3：standby/countdown 均可拖——执行顺序只影响到期取谁）
 const dragDisabled = computed(() => sessionStore.sending);
 
 function isSubAgentGroupExpanded(id: string, running: boolean): boolean {
@@ -978,7 +978,7 @@ function handleDragReorder() {
   border-radius: var(--radius-md);
 }
 
-/* 本次已执行折叠区：整体灰化（muted、正常字重），不可点不可拖不可删 */
+/* 本次已执行折叠区：整体灰化（muted），条目本体正常字重、outcome 徽标 600 加粗强调；不可点不可拖不可删 */
 .executed-fold {
   display: flex;
   flex-direction: column;
