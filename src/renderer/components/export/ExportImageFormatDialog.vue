@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // v4.1 导出格式选择弹窗。AppHeader 分享按钮先开此弹窗，用户选 JPEG/PNG 后再 start。
 // 复用 theme/interaction tokens；文案诚实：两种格式超长会话都按安全边界分多张，不承诺无限单图。
-// 依据：docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md §7 Task 12。
+// 依据：导出图片 v4.1 PNG worker 计划 §7 Task 12（原文档
+// docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）。
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import type { ExportImageFormat } from '@shared/types/export-image';
 

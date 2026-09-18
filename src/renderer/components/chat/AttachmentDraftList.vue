@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 输入框上方的附件草稿列表：图片缩略图按钮 + 文件卡片 + 移除。
 // 放在 .chat-composer 之前；自身不设横向满宽背景/边框/阴影，每个附件卡片只有自身边框。
-// 不持有文件系统路径/bytes；预览经 preload 受控 IPC 取有界缩略图，生成 Blob URL 进现有灯箱。
+// 不持有文件系统路径/bytes；预览经 preload 受控 IPC 取缩略图/原图 bytes（读侧无显式 maxBytes 预检，
+// 上界间接来自图片暂存 10MiB 上限），生成 Blob URL 进现有灯箱。
 import { onBeforeUnmount, reactive, watch } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useChatDraftStore } from '../../stores/chat-draft-store';

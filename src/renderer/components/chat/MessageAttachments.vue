@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 历史消息附件渲染：图片缩略图（点击进现有灯箱取原图）+ 文件卡片。
-// 预览经 preload 受控 IPC 取有界 bytes → Blob URL；卸载/列表变化/会话切换时 revoke。
+// 预览经 preload 受控 IPC 取缩略图/原图 bytes（读侧无显式 maxBytes 预检，上界间接来自图片暂存
+// 10MiB 上限）→ Blob URL；卸载/列表变化/会话切换时 revoke。
 // 附件文件丢失/损坏时显示「附件不可用」占位，不抛错、不让整条消息渲染失败。
 // 不持有文件系统路径/bytes，不直接调用 Node API。
 import { onBeforeUnmount, reactive, watch } from 'vue';
@@ -33,7 +34,8 @@ const attachmentKey = (att: DisplayAttachment): string => {
 
 // 原图 Blob URL（attachmentId -> url）：点击缩略图时按需取原图进灯箱。非响应式（不参与模板渲染）。
 const urlByAttachmentId = new Map<string, string>();
-// 缩略图 Blob URL（响应式，模板 <img> 绑定）。挂载/附件出现时取 thumbnail=true；导出模式不加载。
+// 缩略图 Blob URL（响应式，模板 <img> 绑定）。普通附件挂载/附件出现时经 IPC 取 thumbnail=true；
+// 导出模式不经 IPC，由列表 watch 用 snapshot preview bytes 直接建 URL（见下方 watch 导出分支）。
 const thumbByAttachmentId = reactive<Record<string, string>>({});
 const errorByAttachmentId = reactive<Record<string, string>>({});
 const loading = reactive<Record<string, boolean>>({});       // 原图灯箱读取态

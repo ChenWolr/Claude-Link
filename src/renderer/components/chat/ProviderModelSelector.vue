@@ -226,7 +226,7 @@ function formatCtx(maxTokens: number): string {
 </template>
 
 <style scoped>
-/* 尺寸全部 rem（a2 px 值按 16px 基准换算），随 fontScale 等比缩放。 */
+/* 尺寸按 a2 px 值以 16px 基准换算为 rem，随 fontScale 等比缩放（例外：滚动条宽度 6px 固定）。 */
 .model-wrap {
   position: relative;
 }

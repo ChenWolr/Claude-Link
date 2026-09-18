@@ -14,7 +14,8 @@ const showMenu = ref(false);
 const menuRef = ref<HTMLElement | null>(null);
 
 // 档位元信息：value 对齐 ThinkingLevel 联合；label/desc 仅 UI 展示。
-// desc 文案为中性描述（§1.6：effort 对 thinking_tokens 的实际影响待批次 B 实测后再细化）。
+// desc 文案为中性描述（thinking_tokens 估算批次 B 已上线；effort 对其实际影响的量化
+// 细化未见落地，文案维持中性；原始设计文档已不在仓库，口径以此注释为准）。
 interface ThinkingOption {
   value: ThinkingLevel;
   label: string;
