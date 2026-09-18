@@ -50,9 +50,9 @@ const foldable = computed(() => isFoldable(props.messages.length));
 // 的 Map.set 触发重算——旧实现非响应式 Map 置于 setup 体内，点击无效且不跨实例）。
 const foldKey = computed(() => props.messages[0]?.id ?? '');
 const manualOpen = computed(() => foldOpenState.get(foldKey.value));
-// R4（问题 7）：用户显式收起标志，优先级高于 active。原 open = manualOpen ?? (active || !foldable)
-// 在 active=true（运行中）时，点击只能把 manualOpen 设成 false，但 false ?? (true) 仍为 true，
-// 被 active 钉死无法收起。manualClosed 让用户显式折叠后即便 active 也保持收起。
+// R4（问题 7）：用户显式收起标志，优先级高于 active——manualClosed（manualOpen === false）
+// 前置短路，用户显式收起后即便 active（发送中焦点跟随自动展开）也保持收起；
+// manualOpen 仅在非 nullish 时经 ?? 参与合并（false ?? x 求值为 false，?? 不跳过 false）。
 const manualClosed = computed(() => manualOpen.value === false);
 const open = computed(() => {
   if (props.exportMode) return true;

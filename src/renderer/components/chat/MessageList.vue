@@ -291,7 +291,7 @@ function handleCopyClick(event: MouseEvent): void {
   display: flex;
   flex-direction: column;
   /* 同一发送者的连续消息间距收紧（0.25rem = 4px@medium）；
-     发送者切换处由 :deep(.msg-transition) 叠加 margin-top 加宽至 1rem。 */
+     发送者切换处由 :deep(.msg-transition) 叠加 margin-top 加宽至 2.25rem（二次修复后值，见下方注释）。 */
   gap: 0.25rem;
 }
 

@@ -2,7 +2,7 @@
 // ToolCallBlock —— openhanako 行式工具行（ToolIndicator 风格）。
 // 默认一行：图标 + 标签 + mono 细节（summarizeToolUse 提取的文件名/命令/查询）+ ✓/✗/···；
 // 点击展开看完整入参与结果（保留 claude-link 的详情能力 + 长结果渐进披露）。
-// 子 Agent（Agent/Task）行带「查看过程 →」锚点，点击定位右侧子Agent Tab。
+// 子 Agent（Agent/Task/Workflow/Skill，见 SUB_AGENT_TOOL_NAMES）行带「查看过程 →」锚点，点击定位右侧子Agent Tab。
 import { computed, ref, watch, nextTick, useId } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { isDiffContent, renderMarkdown } from '../../utils/markdown';
@@ -63,7 +63,7 @@ const toolDiff = computed(() => {
   if (!useParsed.value) return null;
   return synthesizeToolDiff(useParsed.value.name ?? '', useParsed.value.input ?? {});
 });
-// 折叠态 +/− 徽标：用内核给的 additions/deletions（含截断部分，准确）。
+// 折叠态 +/− 徽标：renderer 依 tool_use 入参本地合成 diff 并统计 additions/deletions（tool-diff.ts，截断前按全量变更计数）。
 const diffCounts = computed(() =>
   toolDiff.value ? { additions: toolDiff.value.additions, deletions: toolDiff.value.deletions } : null,
 );
@@ -228,7 +228,7 @@ watch([expanded, displayedSource], () => {
   white-space: nowrap;
 }
 
-/* 折叠态 +/− 行数徽标：一眼看出改动规模（additions/deletions 由内核统计，含截断部分）。 */
+/* 折叠态 +/− 行数徽标：一眼看出改动规模（additions/deletions 由渲染层 tool-diff.ts 本地统计，截断前按全量变更计数）。 */
 .tool-row__diffcounts {
   flex-shrink: 0;
   display: inline-flex;
