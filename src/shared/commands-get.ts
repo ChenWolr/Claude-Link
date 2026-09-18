@@ -20,7 +20,7 @@ export interface CommandsGetInput {
   fallback: SessionCommandSnapshot | null;
   /** watcher 当前用户级指纹（D5）；undefined = watcher 未启动/未算出，不比对不误标。 */
   currentUserFingerprint?: string;
-  /** P2-14：当前项目级指纹（per-session cwd 两根现算）；undefined = 无 cwd/快照无出生指纹，不比对。 */
+  /** P2-14：当前项目级指纹（per-session cwd 两根现算，会话 cwd 缺省回退全局工作目录）；undefined = 无任何可用 cwd（会话与全局皆空）/快照无出生指纹，不比对。 */
   currentProjectFingerprint?: string;
   /** P3-4：全局 CLI 缺失（runGlobalCommandProbe 无 exe）。暂态只读分流据此返回 degraded 而非永久 loading。 */
   cliMissing?: boolean;

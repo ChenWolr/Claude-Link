@@ -44,7 +44,7 @@ export interface CommandOriginContext {
   };
 }
 
-/** 空上下文：无 skills/plugins 时，命令只能靠 removed/internal 描述与已知 builtin 名称分类。 */
+/** 空上下文：无 skills/plugins/evidence 时，命令靠结构化 provenance（若传入）、removed/internal/'(user)' 描述特征与已知 builtin 名称分类。 */
 export const EMPTY_COMMAND_ORIGIN_CONTEXT: CommandOriginContext = {
   skills: [],
   plugins: [],
@@ -139,7 +139,7 @@ export interface ProjectDirEntry {
   skills: ProjectDirSkill[];
 }
 
-/** SKILL_PROJECT_DIRS_GET 的返回载荷（每次进 Skill tab 现查全量，≤12 目录毫秒级）。 */
+/** SKILL_PROJECT_DIRS_GET 的返回载荷（每次进 Skill tab 现查全量；recent ≤12 条，独立 defaultDir 并入时至多 13；本地目录毫秒级，坏目录单目录 3s 超时预算兜底）。 */
 export interface SkillProjectDirsPayload {
   dirs: ProjectDirEntry[];
 }

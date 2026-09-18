@@ -12,7 +12,7 @@
 
 export type PermissionMode = 'default' | 'acceptEdits' | 'plan' | 'bypassPermissions';
 
-/** 全部四档，供 UI 渲染与校验共用，顺序即 UI 展示顺序。 */
+/** 全部四档，供运行时校验（isValidPermissionMode）与行为测试共用；UI 选项在 SessionToolbar/ConfigPage 硬编码，四档相对顺序与本数组一致。 */
 export const PERMISSION_MODES: readonly PermissionMode[] = [
   'default',
   'plan',
