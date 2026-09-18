@@ -3,8 +3,8 @@
 //
 // 多供应商库上线后，连接字段（供应商/key/url）的真源是 provider-store（主进程 ProviderProfile）；
 // 本 store 仍承载行为/外观字段与 advancedJson（全局 Claude 设置）的编辑与自动保存。
-// hb12-CFG-09：updatingFromJson 死标志已删除（原历史防循环标志，无读取点）
-// 置位/释放；自动保存靠 ConfigPage 的 configSnapshot 快照比对防回写循环。可删（连同置位逻辑）。
+// hb12-CFG-09：updatingFromJson 死标志（原历史防循环标志，无读取点）已全链删除；
+// 自动保存的防回写循环由 ConfigPage 的 configSnapshot 快照比对承担。
 
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
@@ -70,7 +70,6 @@ export const useConfigStore = defineStore('config', {
     detectingCli: false,
     error: null as string | null,
     importedFields: new Set<string>(),
-    // 历史防循环标志：现无任何读取点（防回写循环由 ConfigPage 的 configSnapshot 快照比对承担）
     // 配置/数据落盘目录（点 4：让用户知道配置存在哪）
     storageInfo: null as { userData: string; config: string; workspaces: string; db: string } | null,
     // Task 3 Step 5：原生 settings 诊断摘要（脱敏视图，供 UI 核验 user/project/local 实际加载来源）
