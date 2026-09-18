@@ -27,10 +27,13 @@ export interface Session {
   updatedAt: string;
   lastContextTokens: number | null;
   lastContextUpdatedAt: string | null;
-  // 该会话从 SDK result.modelUsage.contextWindow 拿到的真实上下文窗口（持久化）。
-  // 切换会话重建 contextStats 时优先用它，避免回落到 200k 兜底。null 表示尚未连通过。
+  // 该会话的上下文窗口容量（持久化）：优先取 SDK result.modelUsage.contextWindow 真值；
+  // 缺失时落库 readContextWindow 估算窗口（hb13-v B7 只增不减守卫），post-turn runtime 快照
+  // capacity 亦写入。切换会话重建 contextStats 时优先用它，避免回落到 200k 兜底。
+  // null 表示尚未连通过（各写入路径均 null 不落库）。
   lastContextWindow: number | null;
-  // post-turn 官方 /context 探针持久化的回合末精确占用（used/capacity/采样时间戳）。
+  // post-turn 相位持久化的回合末精确占用（used/capacity/采样时间戳）。双来源：官方 /context
+  // 探针，或 OPT-5 起成功的 post-turn runtime 快照（探针成功仍照写、后写覆盖）。
   // 重启/切回会话时预填 stale（诚实标注非实时），不冒充 fresh；与 lastContextTokens
   // （历史累计 turn usage）语义不同，此处是「当前窗口已用」的 last-known。
   lastContextUsed: number | null;

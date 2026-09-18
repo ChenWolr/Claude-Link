@@ -47,7 +47,7 @@ import { logger } from '../utils/logger';
 const queues = new Map<string, QueueState>();
 /** 倒计时秒针 interval。 */
 const timers = new Map<string, ReturnType<typeof setInterval>>();
-/** 倒计时归零触发的主 setTimeout（独立 Map，清理不再动 key 拼接）。 */
+/** 倒计时归零主 setTimeout 与直发在飞 1s 顺延重试 timer（hb13-v F2；独立 Map，清理不再动 key 拼接）。 */
 const mainTimers = new Map<string, ReturnType<typeof setTimeout>>();
 /** 执行代际：会话删除/重建后使旧 child 的迟到 exit 失效。 */
 const generations = new Map<string, number>();
@@ -591,7 +591,7 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
       logger.info(`[queue] child exit fallback session=${sessionId} task=${task.id} 让位：新回合在途，旧 exit 不记账`);
       return;
     }
-    // hb12-P2-2（终态重构）：与 ipc-handlers CHAT_SEND exit 兜底（ipc:624 附近）同一分类语义（镜像注释，hb13-v 批C 行号对齐）——已知终态让位（result/合成
+    // hb12-P2-2（终态重构）：与 ipc-handlers CHAT_SEND handler 内 child.on('exit') 兜底同一分类语义（镜像注释）——已知终态让位（result/合成
     // aborted 已结算）；无终态才按退出码分类（0=success，null/非 0=error）。
     // 不变量：任何路径不得把「已中断」记成 success。
     logger.info(`[queue] child exit fallback session=${sessionId} task=${task.id} code=${code}`);
