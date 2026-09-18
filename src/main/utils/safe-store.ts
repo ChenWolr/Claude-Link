@@ -3,7 +3,7 @@
 // 病根：config-manager 与 workspace-history 两处 getStore 同构裸构造——坏 JSON 抛错后
 // 一处启动初始化链全跳（进程不死但 resetRunningTasks/附件清理/detectCli 全跳过，store 恒
 // null 后续 getConfig 继续抛）、一处选目录全链 reject。
-// 修法：try 构造 + 坏文件 renameSync 为 <name>.corrupt-<ts>.bak 物证 + 重建空 store +
+// 修法：try 构造 + 坏文件 renameSync 为 <name>.json.corrupt-<ts>.bak 物证 + 重建空 store +
 // logger.error 留证。目录不可写等非 SyntaxError 异常按原抛错路径降级（不吞）。
 
 import * as fs from 'fs';

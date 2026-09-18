@@ -199,10 +199,12 @@ export function updateResultMeta(
  *  recordTurnMeta 直传 messageId 恒 0 行——handler 在直传命中失败/为 null 时回落本查找。
  *  口径对齐 cli-shared.turnCheckRows：尾部 50 条窄查询，窗口打满且未见 user 边界时回落全量
  *  （防重工具回合把 user 标记推出窗外的假阴性）；只认 parentAgentId 为空的主流程行。
- *  排序契约（两条路径不同，勿混）：窄窗 getRecentMessagesForTurnCheck 是新→旧（DESC）；
- *  回落全量 getMessagesBySession 是旧→新（ASC，为历史回读顺序服务）——必须 .reverse()
- *  反转成新→旧再走 walk，否则从最老消息起步：长回合首条几乎必为 user → 恒返回 null
- * （fallback 整体失效），最坏（首条非 user 的会话）会把耗时/费用写到最老历史行。 */
+ *  排序契约（hb13-v A11/hb12-TM-02 后两路同序）：窄窗 getRecentMessagesForTurnCheck 与
+ *  回落全量 getTurnCheckRowsAll 均为新→旧（DESC），无需 .reverse()，直接 walk。
+ *  旧 getMessagesBySession（ASC + .reverse()）回落已废弃——勿混入 ASC 路径，否则从最老
+ *  消息起步：长回合首条几乎必为 user → 恒返回 null（fallback 整体失效），最坏（首条非
+ *  user 的会话）会把耗时/费用写到最老历史行。cli-shared.turnCheckRows 仍走旧
+ *  getMessagesBySession+.reverse() 回落，两处契约不同勿混。 */
 export function findLastTurnMainFlowAssistantId(
   sessionId: string,
   opts?: { endedAt?: number | null },
