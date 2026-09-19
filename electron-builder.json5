@@ -32,7 +32,7 @@
     "!assets/**",
     "!Cache/**",
     "!.claude/**",
-    "!{AGENTS.md,CLAUDE.md,tsconfig.scripts.json,process-display-preview.html,.npmrc}"
+    "!{AGENTS.md,tsconfig.scripts.json,process-display-preview.html,.npmrc}"
   ],
 
   // 应用是中文界面，Electron 语言包只保留中英（默认几十种语言 ~40MB）。
