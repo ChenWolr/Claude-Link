@@ -93,7 +93,7 @@ export function resolveCommandsGetResult(input: CommandsGetInput): CommandsGetDe
     if (!input.fallback && input.cliMissing) {
       snapshot = { ...snapshot, status: 'degraded', error: '未检测到本地 Claude Code，无法发现 Slash 命令' };
     } else if (!input.fallback && input.probeFailed) {
-      snapshot = { ...snapshot, status: 'degraded', error: '命令探测失败，重新打开菜单可重试' };
+      snapshot = { ...snapshot, status: 'degraded', error: '命令探测失败，可重试（重开菜单，或进 Skill 页点「重试」）' };
     }
     return {
       readOnly: true,

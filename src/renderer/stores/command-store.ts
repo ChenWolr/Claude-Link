@@ -34,6 +34,12 @@ export const useCommandStore = defineStore('command', {
     //（N11，该文件禁触）等未显式传参的按需拉取入口。S2-P2-1 起「过滤取值」不再读本表冻结值，
     // 改读当前全局配置（useConfigStore()）；登记值仅存档，不再被消费。内存态，不持久化。
     transientOverridesBySession: {} as Record<string, Record<string, 'off'> | null>,
+    // R-1（review 2026-09-18 验收 §3 R-1）：全局作用域（~/.claude/skills）skill 的 fm 名→目录名
+    // 映射。ConfigPage 进 Skill tab 现查 SKILL_PROJECT_DIRS_GET 时随载荷写入；ChatInput '/'
+    // 菜单过滤按目录名键消费（引擎 skillOverrides 键空间=目录名）。内存态不持久化；未进过
+    // Skill 页为空对象——菜单过滤拿不到映射时回退 slash 名口径（fm==dir 公共形态同键，
+    // fm≠dir 且映射不可得的残面由引擎键入本地拦截兜底，登记已知限制）。
+    userSkillDirNames: {} as Record<string, string>,
   }),
   getters: {
     // 返回函数的 getter（sessionId 入参）。未加载时返回默认 loading 快照——不抛错、不阻塞 UI。
@@ -142,9 +148,11 @@ export const useCommandStore = defineStore('command', {
     // 既有调用点均由会话交互驱动，零交互直达 Skill 页时 globalSnapshot 唯二写入者双双不可达，
     // 页面永停「正在探测」。本方法把自愈路径（load(哨兵) → COMMANDS_GET 只读分流 → cache 守卫
     // 回填）正式化为显式按需拉取：ConfigPage Skill tab 激活与 App.vue 订阅就绪后调用。
-    // - 幂等守卫：已有非 loading 快照（ready/stale/degraded/empty/error）直接返回，防 tab 反复
-    //   切换的拉取风暴；null/loading 占位才拉（loading 放行——主进程探测未完时只读分流返回
-    //   loading 默认 + D6 节流重探，探测完成后广播照常补位，两路写入同一份未过滤快照）。
+    // - 幂等守卫：已有「定态」快照（ready/stale/empty）直接返回，防 tab 反复切换的拉取风暴；
+    //   null/loading/degraded/error 放行——loading 是启动空窗占位（主进程探测未完时只读分流返回
+    //   loading 默认 + D6 节流重探，探测完成后广播照常补位，两路写入同一份未过滤快照）；
+    //   degraded/error 是失败出口（B-1，review 2026-09-18）：Skill 页纯被动消费 globalSnapshot、
+    //   无「重开菜单」旁路，守卫若对其早退即永久封死自重试——放行让 ensure 成为显式重试通道。
     // - in-flight 锁：并发调用共享同一 Promise，防重入重复拉取。
     // 副作用核实（docs/review/2026-09-15-skill-management-coldstart-fix.md §2）：仅多写一个
     // snapshotsBySession 哨兵键（全消费端按键取值、无遍历，惰性无害）；主进程侧无 DB 行走只读
@@ -153,7 +161,12 @@ export const useCommandStore = defineStore('command', {
     async ensureGlobalSnapshot(): Promise<void> {
       if (globalEnsureInFlight) return globalEnsureInFlight;
       const current = this.globalSnapshot;
-      if (current && current.status !== 'loading') return;
+      if (
+        current &&
+        current.status !== 'loading' &&
+        current.status !== 'degraded' &&
+        current.status !== 'error'
+      ) return;
       globalEnsureInFlight = (async () => {
         try {
           await this.load(GLOBAL_FALLBACK_SESSION_ID);

@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue';
 import { parseSlashInvocation, filterRenderableCommands } from '../../../shared/command-routing';
+import { filterMenuCommandsBySkillOverrides } from '../../../shared/command-filter';
 import type { SdkCommand, CommandSnapshotStatus } from '../../../shared/types/command';
 import { useCommandStore } from '../../stores/command-store';
+import { useConfigStore } from '../../stores/config-store';
 import { useSessionStore } from '../../stores/session-store';
 
 // 受控输入：modelValue 由父组件（草稿 store）持有；附件-only 也允许发送。
@@ -33,11 +35,31 @@ const slashMenuRef = ref<HTMLElement | null>(null);
 const COMMANDS_PAGE_SIZE = 5;
 const loadedCommandCount = ref(COMMANDS_PAGE_SIZE);
 
+// B-5（review 2026-09-18 §3-2）：'/' 菜单对 user-skill 类命令按 skill 禁用配置过滤（展示面收口：
+// 引擎 supportedCommands 不经 skillOverrides 过滤，Phase 0-1 实证键入有引擎本地拦截，菜单展示
+// 是最后残面）。过滤取值与注入链同源：暂态会话（含无会话的未探测态）读全局现值
+//（config.skillOverrides，与 command-store load/applyGlobalFallback 一致）；已物化会话读该会话
+// 创建时钉住值（Session.skillOverrides，与 buildClaudeLinkSettingsBlock 引擎注入同源）。
+const menuSkillOverrides = computed<Record<string, 'off'> | null>(() => {
+  const session = useSessionStore().activeSession;
+  if (!session || session.transient) return useConfigStore().config.skillOverrides ?? null;
+  return session.skillOverrides ?? null;
+});
+
+// R-1（review 2026-09-18 验收 §3）：fm≠dir 的用户级 skill 开关键=目录名（引擎口径）——菜单过滤
+// 需 fm 名→目录名解析。映射与 ConfigPage 现查同源（commandStore.userSkillDirNames，进过 Skill
+// 页才有值）；空映射（未进过 Skill 页/无用户级 skill）归一 null → 过滤回退 slash 名口径
+//（fm==dir 公共形态同键；fm≠dir 且映射不可得的残面由引擎键入本地拦截兜底，登记已知限制）。
+const menuSkillNameToDir = computed<Record<string, string> | null>(() => {
+  const m = useCommandStore().userSkillDirNames;
+  return m && Object.keys(m).length > 0 ? m : null;
+});
+
 const matchingCommands = computed<SdkCommand[]>(() => {
   const parsed = parseSlashInvocation(props.modelValue);
   if (parsed.kind !== 'slash' || parsed.argumentsText.length > 0) return [];
   const q = parsed.commandName.toLowerCase();
-  const cmds = filterRenderableCommands(props.commands ?? []);
+  const cmds = filterMenuCommandsBySkillOverrides(filterRenderableCommands(props.commands ?? []), menuSkillOverrides.value, menuSkillNameToDir.value);
   return q
     ? cmds.filter(
         (c) =>

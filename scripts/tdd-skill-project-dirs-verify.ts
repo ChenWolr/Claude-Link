@@ -30,6 +30,7 @@
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 
 const repoRoot = path.resolve(__dirname, '..');
 
@@ -193,16 +194,30 @@ console.log('\n=== 组1 纯函数行为（shared/project-skills.ts） ===');
     // 其余键忽略
     const r8 = p('---\nname: k\nallowed-tools: Bash\ndescription: d\n---\n');
     if (!r8 || r8.name !== 'k' || r8.description !== 'd') sub.push(`其余键应忽略：${JSON.stringify(r8)}`);
+    // ── P2-3 解析对齐引擎（2026-09-18）：以下形态引擎均可加载/按真 YAML 解析，管理页须同口径 ──
+    const r9 = p('--- \nname: ts-delim\ndescription: trailing space delim\n---\nbody');
+    if (!r9 || r9.name !== 'ts-delim') sub.push(`开分隔符尾随空白（---␣）应可解析：${JSON.stringify(r9)}`);
+    const r10 = p('---\nname: cs-close\n--- \nbody');
+    if (!r10 || r10.name !== 'cs-close') sub.push(`闭分隔符尾随空白应可解析：${JSON.stringify(r10)}`);
+    if (p('---\nname: anchor\n---more') !== null) sub.push('闭合 --- 后非行尾（---more）不应视为闭合');
+    const r11 = p("---\nname: 'a' # comment\ndescription: d\n---\n");
+    if (!r11 || r11.name !== 'a') sub.push(`引号值行内注释应剥离（'a' # comment → a）：${JSON.stringify(r11)}`);
+    const r12 = p('---\nname: plain # c\ndescription: d\n---\n');
+    if (!r12 || r12.name !== 'plain') sub.push(`裸值行内注释应剥离：${JSON.stringify(r12)}`);
+    const r13 = p('---\nname: "a # b"\ndescription: d\n---\n');
+    if (!r13 || r13.name !== 'a # b') sub.push(`引号内 # 不是注释应保留：${JSON.stringify(r13)}`);
+    const r14 = p('---\nname: a#b\ndescription: d\n---\n');
+    if (!r14 || r14.name !== 'a#b') sub.push(`无空白前 # 应保留：${JSON.stringify(r14)}`);
   }
-  check('⑤', 'parseSkillFrontmatter：标准/CRLF/BOM/引号值；无分隔符→null；无 name→null；首块不误切', sub.length === 0, sub.join('; '));
+  check('⑤', 'parseSkillFrontmatter：标准/CRLF/BOM/引号值；无分隔符→null；无 name→null；首块不误切；P2-3 对齐（尾空白分隔符/闭合锚定/行内注释引号感知剥离）', sub.length === 0, sub.join('; '));
 }
 
 // ── 组2 主进程枚举链（fs 行为 + 源形钉）────────────────────────────────────
 
 console.log('\n=== 组2 主进程枚举链（enumerateProjectSkills / collectSkillProjectDirs / 接线） ===');
 
-// 临时夹具（D:\software\Cache，绝不触碰仓库与用户数据；用毕清理）。
-const fixtureRoot = path.join('D:\\software\\Cache', 'claude-link', 'project-skill-impl', `tdd-fixture-${process.pid}-${Date.now()}`);
+// 临时夹具（系统临时目录 os.tmpdir，绝不触碰仓库与用户数据；用毕清理）。
+const fixtureRoot = path.join(os.tmpdir(), 'claude-link-fixtures', `tdd-fixture-${process.pid}-${Date.now()}`);
 function writeSkill(dir: string, rel: string, content: string): void {
   const abs = path.join(dir, rel);
   fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -221,6 +236,24 @@ try {
   writeSkill(projA, path.join('.claude', 'skills', 'dup-a', 'SKILL.md'), '---\nname: twin\ndescription: same-dir dup a\n---\nbody');
   writeSkill(projA, path.join('.claude', 'skills', 'dup-b', 'SKILL.md'), '---\nname: twin\ndescription: same-dir dup b\n---\nbody');
   writeSkill(projA, path.join('.claude', 'skills', 'blank-name', 'SKILL.md'), '---\nname:\ndescription: blank desc\n---\nbody'); // R-5：name 空行 → 回退子目录名
+  // P2-3 批（2026-09-18）：尾空白分隔符 / 行内注释名 / frontmatter 名≠目录名（键名口径夹具）
+  writeSkill(projA, path.join('.claude', 'skills', 'trailing-delim', 'SKILL.md'), '--- \nname: ts-delim\ndescription: trailing space delim\n---\nbody');
+  writeSkill(projA, path.join('.claude', 'skills', 'comment-name', 'SKILL.md'), "---\nname: 'cn' # comment\ndescription: comment tail\n---\nbody");
+  writeSkill(projA, path.join('.claude', 'skills', 'dir-fm-diff', 'SKILL.md'), '---\nname: fm-diff\ndescription: frontmatter name differs from dir name\n---\nbody');
+  // D-4 批（2026-09-18）：junction 形态（引擎双通道均加载，管理页须同口径枚举）+ 断链跳过夹具。
+  // Windows junction 用 fs.symlinkSync(target, path, 'junction')（普通用户权限即可，目录专用）。
+  const junctionTargetSrc = path.join(fixtureRoot, 'junction-target-src');
+  writeSkill(junctionTargetSrc, 'SKILL.md', '---\nname: junction-skill\ndescription: via junction\n---\nbody');
+  fs.symlinkSync(junctionTargetSrc, path.join(projA, '.claude', 'skills', 'junction-skill'), 'junction');
+  const deadTarget = path.join(fixtureRoot, 'junction-dead-target');
+  fs.mkdirSync(deadTarget, { recursive: true });
+  fs.symlinkSync(deadTarget, path.join(projA, '.claude', 'skills', 'dead-link'), 'junction');
+  fs.rmSync(deadTarget, { recursive: true, force: true }); // 断链：目标已删 → stat 抛错 → 跳过
+  // D-6 批（2026-09-18）：两目录仅大小写不同的同名对——去重键改 toLowerCase 后归并为一条
+  //（first-wins 保留胜者原串展示；胜者大小写由排序 localeCompare 的 case tie-break 决定，
+  // 平台相关，契约不钉胜者拼写只钉归一条数与 lower 相等）。
+  writeSkill(projA, path.join('.claude', 'skills', 'case-a', 'SKILL.md'), '---\nname: CaseDup\ndescription: case variant upper\n---\nbody');
+  writeSkill(projA, path.join('.claude', 'skills', 'case-b', 'SKILL.md'), '---\nname: casedup\ndescription: case variant lower\n---\nbody');
   fs.mkdirSync(path.join(projA, '.claude', 'skills', 'eta-isdir', 'SKILL.md'), { recursive: true }); // SKILL.md 为目录 → 读失败跳过
   writeSkill(projA, path.join('.claude', 'skills', 'plain.md'), 'file not dir');
   // proj-b：与 proj-a 存在同名 skill（渲染层「同名 · 联动」场景的数据基础）
@@ -238,18 +271,34 @@ try {
     if (typeof fn !== 'function') {
       sub.push(`导出 enumerateProjectSkills 不可用${mainModErr ? `（模块加载失败：${mainModErr.slice(0, 120)}）` : ''}`);
     } else {
-      const e = fn as (dir: string) => Promise<Array<{ name: string; description: string }>>;
-      // proj-a：6 个合法 skill（dup-a/dup-b 同名 twin 去重为一条；blank-name 空 name 回退子目录名，R-5），
-      // 按 name 字典序（实测 localeCompare 序：beta < blank-name < bom-name）；非法形态全部静默跳过
+      const e = fn as (dir: string) => Promise<Array<{ name: string; dirName: string; description: string }>>;
+      // proj-a：11 个合法 skill（10 = 9 基线 + junction-skill；D-6 大小写同名对去重为 1 条），
+      // 按 name 字典序；非法形态全部静默跳过（D-4：junction 经 stat 跟随枚举，断链 dead-link 跳过）
       const outA = await e(projA);
-      if (!deepEq(outA.map((s) => s.name), ['alpha', 'beta', 'blank-name', 'bom-name', 'twin', 'zeta']))
-        sub.push(`proj-a 应得 [alpha,beta,blank-name,bom-name,twin,zeta]（dup 同名去重为一条；blank-name 空名回退子目录名；delta 无 frontmatter/eta 目录/plain.md 跳过），实际 ${JSON.stringify(outA.map((s) => s.name))}`);
-      else {
+      const namesA = outA.map((s) => s.name);
+      if (outA.length !== 11) {
+        sub.push(`proj-a 应得 11 条（10 基线 + 大小写同名去重 1 条），实际 ${outA.length}：${JSON.stringify(namesA)}`);
+      } else {
+        const baseline = ['alpha', 'beta', 'blank-name', 'bom-name', 'cn', 'fm-diff', 'junction-skill', 'ts-delim', 'twin', 'zeta'];
+        const missing = baseline.filter((n) => !namesA.includes(n));
+        if (missing.length > 0) sub.push(`缺基线条目：${missing.join(',')}，实际 ${JSON.stringify(namesA)}`);
+        if (namesA.includes('dead-link')) sub.push('断链 junction（dead-link）应跳过，实际被枚举');
+        // D-6：大小写同名对应归并为恰一条（first-wins；胜者原串拼写平台相关不钉，钉 lower 相等）
+        const caseDup = outA.filter((s) => s.name.toLowerCase() === 'casedup');
+        if (caseDup.length !== 1) sub.push(`大小写同名（CaseDup/casedup）应去重为一条，实际 ${caseDup.length} 条：${JSON.stringify(namesA)}`);
         if (outA.filter((s) => s.name === 'twin').length !== 1) sub.push(`同目录同名 twin 应恰一条（first-wins），实际 ${outA.filter((s) => s.name === 'twin').length} 条`);
-        if (outA[0].description !== 'quoted desc') sub.push(`alpha 引号值应剥一层，实际 ${JSON.stringify(outA[0].description)}`);
-        if (outA[1].description !== 'crlf desc') sub.push(`beta CRLF 值应干净，实际 ${JSON.stringify(outA[1].description)}`);
+        if (outA[0].name !== 'alpha' || outA[0].description !== 'quoted desc') sub.push(`alpha 应为首条且引号值剥一层，实际 ${JSON.stringify(outA[0])}`);
+        if (outA[1].description !== 'crlf desc') sub.push(`beta CRLF 值应干净，实际 ${JSON.stringify(outA[1])}`);
         if (outA[2].name !== 'blank-name' || outA[2].description !== 'blank desc') sub.push(`blank-name 空 name 应回退子目录名且描述仍取 frontmatter，实际 ${JSON.stringify(outA[2])}`);
-        if (outA[5].name !== 'zeta' || outA[5].description !== 'desc only') sub.push(`zeta 无 name 键应以子目录名兜底，实际 ${JSON.stringify(outA[5])}`);
+        if (outA[10].name !== 'zeta' || outA[10].description !== 'desc only') sub.push(`zeta 无 name 键应以子目录名兜底，实际 ${JSON.stringify(outA[10])}`);
+        // D-4：junction 条目的 name/description 来自目标 SKILL.md，dirName 恒等于 junction 自身名
+        const junctionE = outA.find((s) => s.name === 'junction-skill');
+        if (!junctionE || junctionE.dirName !== 'junction-skill' || junctionE.description !== 'via junction') sub.push(`junction 条目应带 dirName=junction-skill 与目标描述，实际 ${JSON.stringify(junctionE)}`);
+        // P2-3 键名口径：dirName 恒等于真实子目录名（引擎 skillOverrides 只认目录名）
+        const fmdiff = outA.find((s) => s.name === 'fm-diff');
+        if (!fmdiff || fmdiff.dirName !== 'dir-fm-diff') sub.push(`fm≠目录名条目应带 dirName=dir-fm-diff，实际 ${JSON.stringify(fmdiff)}`);
+        const alphaE = outA.find((s) => s.name === 'alpha');
+        if (!alphaE || alphaE.dirName !== 'alpha') sub.push(`dirName 应恒等于真实子目录名，实际 ${JSON.stringify(alphaE)}`);
       }
       // B4：目录无 .claude/skills → []
       if (!deepEq(await e(path.join(fixtureRoot, 'proj-c')), [])) sub.push('proj-c 无 .claude/skills 应返回 []');
@@ -285,7 +334,7 @@ try {
       else {
         if (out[0].isDefault !== true) sub.push('proj-a 同键合并后 isDefault 应为 true');
         if (out[0].path !== recentA) sub.push(`显示串应保留 recentDirs 原串（含尾分隔符），实际 ${JSON.stringify(out[0].path)}`);
-        if (out[0].skills.length !== 6) sub.push(`proj-a skills 应 6 条（同名 twin 去重 + blank-name 空名回退），实际 ${out[0].skills.length}`);
+        if (out[0].skills.length !== 11) sub.push(`proj-a skills 应 11 条（10 基线 + 大小写同名去重 1 条），实际 ${out[0].skills.length}`);
         if (out[0].sessionCount !== 0) sub.push(`proj-a 无会话应 0，实际 ${out[0].sessionCount}`);
         if (out[1].sessionCount !== 7) sub.push(`proj-b 不同写法计数应聚合为 7，实际 ${out[1].sessionCount}`);
         if (!deepEq(out[1].skills.map((s) => s.name), ['shared-name'])) sub.push(`proj-b skills 应 [shared-name]，实际 ${JSON.stringify(out[1].skills.map((s) => s.name))}`);

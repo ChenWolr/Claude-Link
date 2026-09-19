@@ -18,3 +18,26 @@ export function filterCommandsBySkillOverrides<T extends { name: string }>(
   if (!overrides || Object.keys(overrides).length === 0) return commands;
   return commands.filter((c) => overrides[c.name] !== 'off');
 }
+
+/**
+ * B-5（review 2026-09-18 §3-2）：'/' 菜单命令按 skill 禁用配置过滤——仅 user-skill 来源参与
+ * （skillOverrides 键空间是 skill 目录名，builtin/project/plugin 命令不受其约束，同名碰撞时
+ * 非 user-skill 条目保留）。overrides 空 → 原数组引用返回（零开销快路径）。
+ * R-1（2026-09-19）：开关键统一为目录名（引擎口径）——user-skill 条目经开关键解析
+ * `nameToDir?.[c.name] ?? c.name`（fm 名→目录名映射，同源 SKILL_PROJECT_DIRS_GET 载荷；
+ * hasOwnProperty 防原型链误取）；映射缺省/无命中回退 slash 名（fm==dir 公共形态同键；
+ * fm≠dir 且映射不可得时维持旧行为，残面由引擎键入本地拦截兜底）。
+ */
+export function filterMenuCommandsBySkillOverrides<T extends { name: string; origin?: string }>(
+  commands: T[],
+  overrides: Record<string, 'off'> | null | undefined,
+  nameToDir?: Record<string, string> | null,
+): T[] {
+  if (!overrides || Object.keys(overrides).length === 0) return commands;
+  return commands.filter((c) => {
+    if (c.origin !== 'user-skill') return true;
+    const key =
+      nameToDir && Object.prototype.hasOwnProperty.call(nameToDir, c.name) ? nameToDir[c.name] : c.name;
+    return overrides[key] !== 'off';
+  });
+}

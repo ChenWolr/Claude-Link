@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性/目录校验
 import path from 'node:path';
+import os from 'node:os';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
@@ -18,7 +19,7 @@ import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnaps
 import { detectClaudeConfig } from './modules/claude-config-detector';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
-import { collectSkillProjectDirs } from './modules/project-skills';
+import { collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { maskApiKey } from '../shared/provider-library';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
@@ -215,12 +216,20 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 只读、无副作用；全链 async + 每目录 3s 超时预算（R-1：不可达 UNC/断连映射盘不再同步
   // 占死主进程），每次进 Skill tab 现查。
   ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET, async () => {
+    // Y-1（2026-09-19 X-123 批评审 §2）：用户根映射先取（独立单槽共享）；null 哨兵=枚举超时——
+    // 载荷恒回对象 + 超时标记（渲染层据此不覆盖映射槽/不置就绪旗标），dirs 三源 await 内联不动。
+    const userDirNames = await collectUserSkillDirNames(path.join(os.homedir(), '.claude', 'skills'));
     return {
       dirs: await collectSkillProjectDirs({
         recentDirs: listRecentWorkspaces(),
         defaultDir: getConfig().workingDirectory ?? null,
         sessionCounts: sessionRepo.listWorkingDirCounts(),
       }),
+      // R-1（2026-09-19）：全局作用域（~/.claude/skills）fm 名→目录名映射，与项目清单同拍现查
+      // （开关键=目录名口径的数据源）；rootDir 由本侧组装，collectUserSkillDirNames 参数化
+      // 不硬编码用户目录（契约以夹具直测）。
+      userSkillDirNames: userDirNames ?? {},
+      userSkillDirNamesTimedOut: userDirNames === null,
     };
   });
 
