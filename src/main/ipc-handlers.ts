@@ -371,6 +371,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     ) => {
       // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——非字符串 sessionId 直拒。
       if (typeof id !== 'string' || !id.trim()) throw new Error('非法会话 id');
+      // D-8（review 2026-09-18 §3-14）：data 形状守卫（对齐防御惯例）——null/非对象入参时下方
+      // 白名单访问会 TypeError → invoke reject；渲染层 6 处恒传对象（当前不可达），此处仅兜底
+      // 拒绝（return false 与 updateSession 无行 falsy 返回同形态），不抛错。
+      if (!data || typeof data !== 'object') return false;
       // 白名单校验（review-v2 F11）：不信任 renderer 传值，非法 thinkingLevel 丢弃，
       // 合法 null（跟随默认）/ 有效档位放行。
       if (data.thinkingLevel !== undefined && data.thinkingLevel !== null && !isValidThinkingLevel(data.thinkingLevel)) {

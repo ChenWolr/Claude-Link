@@ -156,3 +156,4 @@ scripts/tdd-bugfix-hb13-v-smg-patch-verify.ts
 scripts/tdd-skill-overrides-verify.ts
 scripts/tdd-skill-project-dirs-verify.ts
 scripts/tdd-config-save-race-verify.ts
+scripts/tdd-session-update-guard-verify.ts
