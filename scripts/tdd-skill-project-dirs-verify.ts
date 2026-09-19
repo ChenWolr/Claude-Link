@@ -101,8 +101,8 @@ console.log('\n=== 组1 纯函数行为（shared/project-skills.ts） ===');
     sub.push(`导出 basenameOfDir 不可用${sharedModErr ? `（模块加载失败：${sharedModErr.slice(0, 120)}）` : ''}`);
   } else {
     const b = fn as (d: string) => string;
-    if (b('D:\\software\\code\\claude-link') !== 'claude-link') sub.push('反斜杠路径尾段应取最后一段');
-    if (b('D:/software/code/sub2api/') !== 'sub2api') sub.push('正斜杠+尾分隔符应取 sub2api');
+    if (b('D:\\Code\\DemoSuite\\viewer') !== 'viewer') sub.push('反斜杠路径尾段应取最后一段');
+    if (b('D:/Code/DemoSuite/viewer/') !== 'viewer') sub.push('正斜杠+尾分隔符应取尾段');
     if (b(' lone-dir') !== 'lone-dir') sub.push('裸名（含空白 trim）应原样返回尾段');
   }
   check('②', 'basenameOfDir：win32/posix 分隔符与尾分隔符均取末段', sub.length === 0, sub.join('; '));
