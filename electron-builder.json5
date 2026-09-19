@@ -23,7 +23,16 @@
     "!**/node_modules/better-sqlite3/{deps,src}/**",
     "!**/node_modules/**/{*.md,README,readme,CHANGELOG}*",
     "!**/node_modules/**/{test,tests,__tests__,docs,doc,examples,example}/**",
-    "!**/node_modules/**/*.d.ts"
+    "!**/node_modules/**/*.d.ts",
+    // 仓库工件不随包发布（2026-09-18）：契约测试/内部文档/原型运行时零引用（out/ grep 实证），
+    // 且 asar 可被 asar extract 解出，docs/ 审计文档不得进安装包。
+    "!scripts/**",
+    "!docs/**",
+    "!prototypes/**",
+    "!assets/**",
+    "!Cache/**",
+    "!.claude/**",
+    "!{AGENTS.md,CLAUDE.md,tsconfig.scripts.json,process-display-preview.html,.npmrc}"
   ],
 
   // 应用是中文界面，Electron 语言包只保留中英（默认几十种语言 ~40MB）。
