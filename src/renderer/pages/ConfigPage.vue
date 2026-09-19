@@ -13,10 +13,13 @@ import ThemeSelector from '../components/config/ThemeSelector.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
+import { attachUserSkillDirNames, findStaleSkillKeys, isStaleKeyScanReady, loadSkillProjectDirs, normalizeDirKey } from '../../shared/project-skills';
+import { useInteractionStore } from '../stores/interaction-store';
 import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
 
 const store = useConfigStore();
 const commandStore = useCommandStore();
+const interactionStore = useInteractionStore();
 const router = useRouter();
 const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
@@ -285,33 +288,79 @@ type SkillScope = { kind: 'global' } | { kind: 'project'; path: string };
 const skillScope = ref<SkillScope>({ kind: 'global' });
 const projectDirs = ref<ProjectDirEntry[]>([]);
 
-// 每次进 tab 现查（覆盖式更新）。失败保留旧值不抛页面（B9：不 toast 不抛，
-// 右栏项目分支退化空 skills——渲染层找不到目录即显示空态引导，不误导）。
+// C-4（review 2026-09-18 §3-6）：请求代际守卫（先例 config-store.nativeSettingsDiagnosticRequestId
+// 同款）——慢旧响应乱序返回时不得覆盖新请求结果（坏目录场景旧响应可拖秒级）；与 P2-4 的
+// in-flight 共享叠加（共享消并发、代卫消串行乱序）。
+let projectDirsRequestId = 0;
+
+// C-5（review 2026-09-18 §3-7）：装载状态——首拍 rail 不再误显「0 个目录」；reject 不再静默
+// 永久退化（错误可见 + rail 重试入口）。失败仍保留旧值不抛页面（B9 语义不变）。
+const projectDirsPending = ref(false);
+const projectDirsError = ref<string | null>(null);
+// X-1/X-2（2026-09-19 独立评审 §2）：fm 名→目录名映射「至少成功装载一次」旗标（首访前 false）。
+// 未装载时全局开关键集不可信（fm≠dir 条目回退 slash 名键）：D-1 清理入口不列失效键（X-1）、
+// 全局卡片开关禁用 + title 提示（X-2「键名映射读取中」；W-2 超时态分化「键名映射读取超时」）；
+// 项目条目 dirName 恒来自磁盘枚举不受门控。
+// 空映射 ≠ 未装载：真零用户级 skill 的合法空在首次成功装载后旗标即为 true（二者以此区分）。
+const userSkillDirNamesReady = ref(false);
+// Y-1（2026-09-19 X-123 批评审 §2）：用户根枚举超时态（载荷 userSkillDirNamesTimedOut）——映射
+// 内容不可信时不覆盖槽/不置就绪旗标（X-1/X-2 门控自然兜住），rail 以独立轻提示呈现（不写
+// projectDirsError：项目目录与用户根两源独立）；每次装载前复位，不跨拍残留。
+const userDirNamesTimedOut = ref(false);
+
+// 每次进 tab 现查（覆盖式更新）。E-7：经 shared 装载状态机（桩可测），resolve 写目录 /
+// reject 写 projectDirsError，catch 不再吞到无形；代际失守（C-4）直接作废，不动 pending——
+// 更新中的请求会在自身落定时收敛状态。
 async function ensureProjectDirs(): Promise<void> {
-  try {
-    projectDirs.value = (await window.claudeLink.getSkillProjectDirs()).dirs;
-  } catch { /* 保留旧值 */ }
+  const requestId = ++projectDirsRequestId;
+  projectDirsPending.value = true;
+  projectDirsError.value = null;
+  userDirNamesTimedOut.value = false;
+  const r = await loadSkillProjectDirs(() => window.claudeLink.getSkillProjectDirs());
+  if (requestId !== projectDirsRequestId) return;
+  if (r.ok) {
+    projectDirs.value = r.dirs;
+    // Y-1：用户根枚举超时（载荷标记）与「合法空」区分——超时映射内容不可信：不覆盖映射槽、
+    // 不置就绪旗标（首访超时 ready 保持 false，X-1 清理门控与 X-2 开关禁用自然兜住；曾装载过
+    // 则保留旧映射，消费旧值为已申报残面）；不写 projectDirsError（两源独立），rail 独立超时提示。
+    if (r.userSkillDirNamesTimedOut) {
+      userDirNamesTimedOut.value = true;
+    } else {
+      // R-1：同拍载荷携带全局 fm 名→目录名映射 → 写 commandStore.userSkillDirNames 槽
+      //（ChatInput '/' 菜单过滤同源消费）；代卫失守早退时同样不写（与 projectDirs 同生命周期）。
+      commandStore.userSkillDirNames = r.userSkillDirNames;
+      // X-1/X-2：映射就绪旗标与映射槽同拍写入（X-1 清理入口门控 / X-2 全局开关禁用共用）。
+      userSkillDirNamesReady.value = true;
+    }
+  } else {
+    projectDirsError.value = r.error;
+  }
+  projectDirsPending.value = false;
 }
 
-// R-3 幽灵作用域回退：现查刷新后选中目录已不在清单（被删/淘汰）→ 自动回全局作用域；
-// 目录仍在（含写法不同的同键目录已被主进程归一）或用户停在全局时不触发。
+// R-3 幽灵作用域回退：现查刷新后选中目录已不在清单（被删/淘汰）→ 自动回全局作用域。
+// A-2/D-10（review 2026-09-18）：比较改 normalizeDirKey 相等——原 path 原串全等在同键不同写法
+//（recent 淘汰换幸存串：大小写/斜杠/尾分隔符）时误判「不在清单」→ 误回退全局；用户停在全局
+// 时不触发。已知限制（登记不实施）：realpath 级等价类（映射盘↔UNC/8.3/\\?\）不在归一范围。
 watch(projectDirs, (dirs) => {
   const scope = skillScope.value;
-  if (scope.kind === 'project' && !dirs.some((d) => d.path === scope.path)) skillScope.value = { kind: 'global' };
+  if (scope.kind === 'project' && !dirs.some((d) => normalizeDirKey(d.path) === normalizeDirKey(scope.path))) skillScope.value = { kind: 'global' };
 });
 
-// 当前选中的项目目录条目（全局作用域 / 目录已被现查淘汰 → null）。
+// 当前选中的项目目录条目（全局作用域 / 目录已被现查淘汰 → null）；匹配同走归一键（A-2/D-10）。
 const activeProjectDir = computed(() =>
   skillScope.value.kind === 'project'
-    ? projectDirs.value.find((d) => d.path === (skillScope.value as { kind: 'project'; path: string }).path) ?? null
+    ? projectDirs.value.find((d) => normalizeDirKey(d.path) === normalizeDirKey((skillScope.value as { kind: 'project'; path: string }).path)) ?? null
     : null,
 );
 
-// 作用域全集：全局 = userSkills（origin==='user-skill'，现 computed 不动）；项目 = 目录 skills。
-const scopeItems = computed<Array<{ name: string; description: string }>>(() =>
+// 作用域全集：全局 = userSkills（origin==='user-skill'，条目经 attachUserSkillDirNames 补
+// dirName——R-1 起全局与项目同口径）；项目 = 目录 skills。开关键经 skillKey 取值（P2-3 键名
+// 口径：一律目录名）。目录匹配同走归一键（A-2/D-10，与幽灵回退/activeProjectDir 同口径）。
+const scopeItems = computed<Array<{ name: string; dirName?: string; description: string }>>(() =>
   skillScope.value.kind === 'global'
     ? userSkills.value
-    : (projectDirs.value.find((d) => d.path === (skillScope.value as { path: string }).path)?.skills ?? []),
+    : (projectDirs.value.find((d) => normalizeDirKey(d.path) === normalizeDirKey((skillScope.value as { path: string }).path))?.skills ?? []),
 );
 
 // 同名联动徽章判定（R-2 按作用域计数，计划 §3.3 口径）：名字出现于 ≥2 个「作用域」
@@ -333,18 +382,28 @@ const dupSkillNames = computed(() => {
 });
 
 // 左栏每行 meta 的已启用计数（零后端，按 skillOverrides 现值派生）。
-const globalEnabledCount = computed(() => userSkills.value.filter((s) => isSkillEnabled(s.name)).length);
+// R-1：全局行改按 skillKey（目录名口径）与开关/统计卡同键——旧 s.name 口径对 fm≠dir 条目
+// 读无效键，计数与卡片开关态相悖。
+const globalEnabledCount = computed(() => userSkills.value.filter((s) => isSkillEnabled(skillKey(s))).length);
 function projectEnabledCount(dir: ProjectDirEntry): number {
-  return dir.skills.filter((s) => isSkillEnabled(s.name)).length;
+  return dir.skills.filter((s) => isSkillEnabled(skillKey(s))).length;
 }
 
-const userSkills = computed<SdkCommand[]>(() => {
+// 全局作用域条目 = 引擎快照 user-skill 子集（显示名 = slash 名 = frontmatter 名，快照无目录名）。
+// R-1（review 2026-09-18 验收 §3）：按 commandStore.userSkillDirNames（ConfigPage 现查
+// SKILL_PROJECT_DIRS_GET 载荷同源写入）为每条补 dirName——下游 skillKey（dirName ?? name）/
+// 开关/统计/可见性过滤/D-1 全集统一到目录名口径；映射未命中（fm==dir 公共形态或未进过 Skill 页）
+// dirName 缺省，skillKey 回退 slash 名（与收口前行为一致）。
+const userSkills = computed<Array<SdkCommand & { dirName?: string }>>(() => {
   const snapshot = commandStore.globalSnapshot;
   if (!snapshot) return [];
-  return snapshot.commands
-    .filter((c) => c.origin === 'user-skill')
-    .slice()
-    .sort((a, b) => a.name.localeCompare(b.name));
+  return attachUserSkillDirNames(
+    snapshot.commands
+      .filter((c) => c.origin === 'user-skill')
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    commandStore.userSkillDirNames,
+  );
 });
 
 // 开关语义：checked = 启用。启用 = 未禁用（键缺失或值非 'off' 均视为启用）；?. 防御存量存储缺键形态。
@@ -352,29 +411,40 @@ function isSkillEnabled(name: string): boolean {
   return store.config.skillOverrides?.[name] !== 'off';
 }
 
+// P2-3 键名口径（2026-09-18 Phase 0-2 实验裁决，单键定案）：引擎 skillOverrides 只认目录名
+// （模型清单过滤与键入拦截都在目录名层，frontmatter 名键全链零效果）——开关键一律取目录名。
+// 项目条目带 dirName（真实子目录名）；user-skill 快照项无该字段，回退 name（快照名=目录名公共形态）。
+function skillKey(s: { name: string; dirName?: string }): string {
+  return s.dirName ?? s.name;
+}
+
 // 拨开 → 删除该键（不落 'on' 残值，空配置在主进程不加 settings 键）；拨关 → 置 'off'。
 // 整体替换对象触发 PERSISTED_FIELDS 快照比对 → 既有 700ms 防抖自动保存（卸载 flush 兜底）。
+// B-2（review 2026-09-18 §3-11）：next 改 null 原型对象——旧展开字面量形态下 `next['__proto__']`
+// 走 Object.prototype setter 静默 no-op（该名 skill 开关无效）；null 原型让赋值/删除都落在自有
+// 属性语义（saveConfig 的 JSON 往返归一为普通对象，IPC 安全）。
 function setSkillEnabled(name: string, enabled: boolean): void {
-  const next: Record<string, 'off'> = { ...(store.config.skillOverrides ?? {}) };
+  const next: Record<string, 'off'> = Object.assign(Object.create(null), store.config.skillOverrides ?? {});
   if (enabled) delete next[name];
   else next[name] = 'off';
   store.config.skillOverrides = next;
 }
 
-// 双栏后项目条目非 SdkCommand，按结构最小宽度取 { name }（开关只消费名字；开关键空间同名全局）。
-function handleSkillToggle(skill: { name: string }, e: Event): void {
-  setSkillEnabled(skill.name, (e.target as HTMLInputElement).checked);
+// 双栏后项目条目非 SdkCommand，按结构最小宽度取 { name, dirName? }（开关只消费开关键 skillKey，
+// 按目录名全局生效——键名口径见 skillKey 注释）。
+function handleSkillToggle(skill: { name: string; dirName?: string }, e: Event): void {
+  setSkillEnabled(skillKey(skill), (e.target as HTMLInputElement).checked);
 }
 
 // 统计随开关实时重算（当前作用域全集：全局 user-skill / 项目磁盘全集）；无障碍播报见模板 sr-only。
-const skillEnabledCount = computed(() => scopeItems.value.filter((s) => isSkillEnabled(s.name)).length);
+const skillEnabledCount = computed(() => scopeItems.value.filter((s) => isSkillEnabled(skillKey(s))).length);
 const skillDisabledCount = computed(() => scopeItems.value.length - skillEnabledCount.value);
 
 // 纯前端过滤：搜索（名称+描述，大小写不敏感）× 状态 chips（全部/已启用/已禁用）——作用于当前作用域。
 const visibleSkills = computed(() => {
   const q = skillSearch.value.trim().toLowerCase();
   return scopeItems.value.filter((s) => {
-    const enabled = isSkillEnabled(s.name);
+    const enabled = isSkillEnabled(skillKey(s));
     const matchQuery = !q || `${s.name} ${s.description}`.toLowerCase().includes(q);
     const matchFilter = skillFilter.value === 'all' || (skillFilter.value === 'on' ? enabled : !enabled);
     return matchQuery && matchFilter;
@@ -388,14 +458,54 @@ const scopePathText = computed(() =>
     : `${activeProjectDir.value?.path ?? ''}\\.claude\\skills`,
 );
 
-// stale 提示条的「上次引擎探测于 N 分钟前」短语：快照 updatedAt 缺失/非法时省略该短语。
-const snapshotAgeText = computed(() => {
-  const updatedAt = commandStore.globalSnapshot?.updatedAt;
-  if (!updatedAt) return '';
-  const elapsedMs = Date.now() - Date.parse(updatedAt);
-  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return '';
-  return `上次引擎探测于 ${Math.max(1, Math.round(elapsedMs / 60000))} 分钟前`;
+// C-8（review 2026-09-18 §3-10）：stale 提示臂与 snapshotAgeText 已删——globalSnapshot 的写入者
+// （setGlobalFallback 只产 ready/empty；load() 回填只产 loading/degraded/cache 副本）不产 stale，
+// 该臂不可达；stale 仅存在于 per-session 快照（commands-get 指纹比对），不在本页数据链上。
+
+// B-1（review 2026-09-18）：degraded/error 态显式重试入口——ensureGlobalSnapshot 守卫收窄后对
+// 失败态放行重拉，本函数即 Skill 页的自愈通道（Skill 页无「重开菜单」旁路，degraded 文案已
+// 在 commands-get 同步修正；幂等与 in-flight 锁复用 ensure 自身）。
+function retryGlobalSnapshot(): void {
+  void commandStore.ensureGlobalSnapshot();
+}
+
+// D-1（review 2026-09-18 §3-3）+ R-1：死键识别——键 ∈ skillOverrides 但 ∉（全局 userSkills 经
+// skillKey 的键集（目录名口径，含 dirName——收口前写入的无效 fm 名键不再被误认有效，可被标出
+// 清理）∪ 当前已枚举项目目录 skills 的 skillKey 全集）者列为「疑似失效」；未挂载项目目录的键
+// 不在全集、也会被列出（防误删由清理入口的确认步骤兜底），不做自动清理。
+const staleSkillKeys = computed<string[]>(() => {
+  // X-1（2026-09-19 独立评审 §2）：三「假失效」窗口（快照非 ready / 目录 pending / 目录 error /
+  // 映射未就绪）下已知全集不完整——恒返回 []（skill-stale-row 的 v-if 长度判定与
+  // cleanupStaleSkillKeys 同以此为一道闸门），防确认弹窗诱导误删有效禁用键。
+  if (!isStaleKeyScanReady({
+    snapshotStatus: commandStore.globalSnapshot?.status,
+    projectDirsPending: projectDirsPending.value,
+    projectDirsError: projectDirsError.value,
+    userSkillDirNamesReady: userSkillDirNamesReady.value,
+  })) return [];
+  const dirKeys: string[] = [];
+  for (const dir of projectDirs.value) {
+    for (const s of dir.skills) dirKeys.push(skillKey(s));
+  }
+  return findStaleSkillKeys(store.config.skillOverrides, userSkills.value.map((s) => skillKey(s)), dirKeys);
 });
+
+// D-1 清理写路径：requestConfirm 确认后逐键 delete、整体替换触发自动保存（与开关拨动同链落盘）。
+async function cleanupStaleSkillKeys(): Promise<void> {
+  const keys = staleSkillKeys.value;
+  if (keys.length === 0) return;
+  const ok = await interactionStore.requestConfirm({
+    title: '清理失效 Skill 开关键',
+    message: `以下 ${keys.length} 个开关键不属于当前可见的任何 Skill（对应 Skill 可能已删除或改名）：${keys.join('、')}。确认从配置移除？`,
+    confirmText: '清理',
+    cancelText: '取消',
+    danger: false,
+  });
+  if (!ok) return;
+  const next: Record<string, 'off'> = { ...(store.config.skillOverrides ?? {}) };
+  for (const k of keys) delete next[k];
+  store.config.skillOverrides = next;
+}
 </script>
 
 <template>
@@ -570,9 +680,29 @@ const snapshotAgeText = computed(() => {
                   <span class="skill-md-item__name">全局 Skill</span>
                 </span>
                 <span class="skill-md-item__path">~/.claude/skills</span>
-                <span class="skill-md-item__meta">共 {{ userSkills.length }} · {{ globalEnabledCount }} 启用</span>
+                <span class="skill-md-item__meta">
+                  <!-- C-6：探测中显「…」占位，与统计卡同门控（不再误显 共0·0 启用） -->
+                  <template v-if="skillProbePending">共 … · … 启用</template>
+                  <template v-else>共 {{ userSkills.length }} · {{ globalEnabledCount }} 启用</template>
+                </span>
               </button>
-              <div class="skill-md-rail__head skill-md-rail__head--group">
+              <!-- C-5：项目目录装载状态行（pending 占位 / error 显错+重试，重调 ensureProjectDirs） -->
+              <div v-if="projectDirsPending" class="skill-md-rail__status">项目目录读取中…</div>
+              <div v-else-if="projectDirsError" class="skill-md-rail__status skill-md-rail__status--error">
+                <span class="skill-md-rail__status-text">{{ projectDirsError }}</span>
+                <button type="button" class="skill-md-rail__status-retry" @click="ensureProjectDirs()">重试</button>
+              </div>
+              <!-- Y-1（2026-09-19 X-123 批评审 §2）：用户根枚举超时第三态——独立轻提示（不写
+                   projectDirsError，项目目录与用户根两源独立）；重试同走 ensureProjectDirs。
+                   Z-1（2026-09-19 Y-1 批独立评审 §2）：文案按 userSkillDirNamesReady 分化——
+                   「曾装载成功后超时」（ready=true）态开关 :disabled 只看 !ready、实际可拨，
+                   改述「正在使用上次成功读取的映射」；首访（ready=false）开关真禁用（X-2 门控），
+                   维持「暂不可用」 -->
+              <div v-else-if="userDirNamesTimedOut" class="skill-md-rail__status skill-md-rail__status--warn">
+                <span class="skill-md-rail__status-text">{{ userSkillDirNamesReady ? '用户级 Skill 键名映射读取超时，正在使用上次成功读取的映射' : '用户级 Skill 键名映射读取超时，全局开关暂不可用' }}</span>
+                <button type="button" class="skill-md-rail__status-retry" @click="ensureProjectDirs()">重试</button>
+              </div>
+              <div class="skill-md-rail__head">
                 <span>项目目录 · 来自最近工作区</span><span>{{ projectDirs.length }} 个</span>
               </div>
               <button
@@ -610,20 +740,14 @@ const snapshotAgeText = computed(() => {
                   <template v-else-if="activeProjectDir">{{ activeProjectDir.sessionCount }} 个会话在使用 · {{ activeProjectDir.isDefault ? '默认工作区' : '最近目录' }}</template>
                 </div>
 
-                <!-- 快照状态条（页面级 v-if 链）：探测中（null/loading 同占位）/ stale / degraded+error；
-                     仅全局作用域渲染（项目直读与快照无关）。ready 整条隐藏 -->
+                <!-- 快照状态条（页面级 v-if 链）：探测中（null/loading 同占位）/ degraded+error（B-1 附显式重试）；
+                     仅全局作用域渲染（项目直读与快照无关）。ready 整条隐藏；stale 臂已删（C-8：写入者不产 stale） -->
                 <template v-if="skillScope.kind === 'global'">
                   <div v-if="skillProbePending" class="snap-status snap-status--neutral" role="status">
                     正在从 Claude Code 引擎探测已加载的 Skill…
                   </div>
                   <!-- 首臂 skillProbePending（computed）不向 vue-tsc 传递非空收窄，后续臂用 ?. 取值
                        （实际不可达 null：这些臂仅在 skillProbePending=false 即快照非空时求值） -->
-                  <div v-else-if="commandStore.globalSnapshot?.status === 'stale'" class="snap-status" role="status">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                      <path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
-                    </svg>
-                    <span>命令快照可能不是最新{{ snapshotAgeText ? ` — ${snapshotAgeText}` : '' }}；磁盘上的 Skill 变更会自动热刷新</span>
-                  </div>
                   <div
                     v-else-if="commandStore.globalSnapshot?.status === 'degraded' || commandStore.globalSnapshot?.status === 'error'"
                     class="snap-status"
@@ -633,6 +757,7 @@ const snapshotAgeText = computed(() => {
                       <path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path>
                     </svg>
                     <span>{{ commandStore.globalSnapshot?.error || '命令读取异常，可继续输入或发送' }}</span>
+                    <button type="button" class="snap-status__retry" @click="retryGlobalSnapshot">重试</button>
                   </div>
                 </template>
 
@@ -678,23 +803,37 @@ const snapshotAgeText = computed(() => {
                     <div
                       v-for="skill in visibleSkills"
                       :key="skill.name"
-                      :class="['skill-card', { 'skill-card--off': !isSkillEnabled(skill.name) }]"
+                      :class="['skill-card', { 'skill-card--off': !isSkillEnabled(skillKey(skill)) }]"
                     >
                       <div class="skill-card__head">
                         <span class="skill-card__name">{{ skill.name }}</span>
+                        <!-- R-1：fm≠dir 条目「键名=目录名」小字提示（开关键口径=目录名；fm==dir 不显示） -->
+                        <span
+                          v-if="skill.dirName !== undefined && skill.dirName !== skill.name"
+                          class="skill-card__keyhint"
+                          title="该 Skill 的 frontmatter 名与目录名不一致；开关键（skillOverrides 键）使用目录名"
+                        >键名 {{ skill.dirName }}</span>
                         <span :class="['scope-badge', { 'scope-badge--project': skillScope.kind === 'project' }]">{{ skillScope.kind === 'project' ? '项目' : '全局' }}</span>
                         <span v-if="dupSkillNames.has(skill.name)" class="dup-badge" title="该名称同时存在于多个作用域，开关按名全局生效">同名 · 联动</span>
-                        <span v-if="!isSkillEnabled(skill.name)" class="skill-card__badge">已禁用</span>
+                        <span v-if="!isSkillEnabled(skillKey(skill))" class="skill-card__badge">已禁用</span>
                       </div>
                       <div class="skill-card__desc" :title="skill.description">{{ skill.description }}</div>
                       <div class="skill-card__foot">
-                        <span :class="['skill-card__state', { 'skill-card__state--on': isSkillEnabled(skill.name) }]">
-                          {{ isSkillEnabled(skill.name) ? '新会话可用' : '新会话不加载' }}
+                        <span :class="['skill-card__state', { 'skill-card__state--on': isSkillEnabled(skillKey(skill)) }]">
+                          {{ isSkillEnabled(skillKey(skill)) ? '新会话可用' : '新会话不加载' }}
                         </span>
+                        <!-- X-2（2026-09-19 独立评审 §2）：映射未就绪时全局开关键集不可信（fm≠dir
+                             条目 skillKey 回退 slash 名，拨开关写无效 fm 名键且载荷落地后回弹）——
+                             禁用 + title 提示；项目条目 dirName 恒来自磁盘枚举，不受门控。
+                             W-2（2026-09-19 Z-1 批独立评审 §2）：首访超时拍（ready=false+timedOut=true）
+                             装载已落定为超时非进行中，title 按 userDirNamesTimedOut 分化出
+                             「键名映射读取超时」，与 rail 同拍措辞对齐。 -->
                         <input
                           type="checkbox"
                           class="switch"
-                          :checked="isSkillEnabled(skill.name)"
+                          :checked="isSkillEnabled(skillKey(skill))"
+                          :disabled="skillScope.kind === 'global' && !userSkillDirNamesReady"
+                          :title="skillScope.kind === 'global' && !userSkillDirNamesReady ? (userDirNamesTimedOut ? '键名映射读取超时' : '键名映射读取中') : undefined"
                           :aria-label="`启用 skill ${skill.name}`"
                           @change="handleSkillToggle(skill, $event)"
                         />
@@ -702,13 +841,23 @@ const snapshotAgeText = computed(() => {
                     </div>
                     <!-- 「探测中」不显示空态（loading 且 commands 为空 ≠ 无匹配，S2-P2-2）；真零 Skill（ready 且 0 个）仍显示 -->
                     <div v-if="!skillProbePending && visibleSkills.length === 0" class="skill-empty">
-                      <template v-if="skillScope.kind === 'global'">当前筛选下无匹配的全局 Skill</template>
+                      <!-- C-7：全局分支三态区分——真零（引导放置）/筛选零（原文案）；探测中由外层门控承担 -->
+                      <template v-if="skillScope.kind === 'global'">
+                        <template v-if="userSkills.length === 0">还没有全局 Skill<br /><code>~/.claude/skills/&lt;名称&gt;\SKILL.md</code> 放置后自动出现在这里</template>
+                        <template v-else>当前筛选下无匹配的全局 Skill</template>
+                      </template>
                       <template v-else-if="scopeItems.length === 0">该项目还没有项目级 Skill<br /><code>{{ activeProjectDir?.path }}\.claude\skills\&lt;名称&gt;\SKILL.md</code> 放置后自动出现在这里</template>
                       <template v-else>当前筛选下无匹配的项目 Skill</template>
                     </div>
                   </div>
 
                   <p class="skill-note">项目目录自动来自最近工作区与默认工作区（已删除的目录不再显示）；开关按 Skill 名全局生效，同名 Skill 跨作用域联动。禁用仅对 Claude Link 内新建的会话生效；开关即刻保存，新会话即刻生效。</p>
+
+                  <!-- D-1：死键清理入口（手动确认式，不做自动清理；确认弹窗列出疑似键明细） -->
+                  <div v-if="staleSkillKeys.length > 0" class="skill-stale-row">
+                    <span class="skill-stale-row__text">发现 {{ staleSkillKeys.length }} 个失效开关键（对应 Skill 已不存在或已改名）</span>
+                    <button type="button" class="skill-stale-row__btn" @click="cleanupStaleSkillKeys()">清理失效键</button>
+                  </div>
                 </template>
               </div>
             </div>
@@ -771,8 +920,7 @@ const snapshotAgeText = computed(() => {
    这几块此前通栏偏长，须与整体列宽对齐并水平居中）。 */
 .banner,
 .toast,
-.storage-info,
-.autodetect-bar {
+.storage-info {
   width: var(--col-w);
   max-width: 100%;
   margin-inline: auto;
@@ -823,10 +971,6 @@ const snapshotAgeText = computed(() => {
   color: var(--color-fail-strong);
 }
 
-.autodetect-bar {
-  display: none;
-}
-
 .tabs-row {
   width: var(--col-w);
   max-width: 100%;
@@ -862,27 +1006,6 @@ const snapshotAgeText = computed(() => {
     flex-wrap: wrap;
     justify-content: flex-end;
   }
-}
-
-.autodetect-btn {
-  border: 1px solid var(--color-accent);
-  border-radius: var(--radius-md);
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  padding: 0.5rem 0.875rem;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-  box-shadow: var(--ring-light-accent);
-}
-
-.autodetect-info {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-  line-height: 1.5;
-  flex-basis: 100%;
 }
 
 .test-btn {
@@ -1142,10 +1265,6 @@ const snapshotAgeText = computed(() => {
   border-radius: var(--radius-xs);
 }
 
-.field .required {
-  color: var(--color-danger);
-}
-
 select,
 input[type='text'],
 input[type='number'] {
@@ -1238,7 +1357,8 @@ input[type='number']:hover {
 
 /* ── Skill 管理（B2 独立设置页，视觉基准 docs/prototypes/skill-management/option-b2-standalone-tab.html）── */
 
-/* 快照状态条：页面级，v-if 链（探测中=neutral / stale、degraded+error=warn / ready=不渲染）。 */
+/* 快照状态条：页面级，v-if 链（探测中=neutral / degraded+error=warn 附 B-1 重试 / ready=不渲染；
+   C-8：stale 臂已删，写入者不产 stale）。 */
 .snap-status {
   display: flex;
   align-items: center;
@@ -1262,6 +1382,26 @@ input[type='number']:hover {
   border-color: var(--color-border);
   background: var(--color-panel-soft);
   color: var(--color-text-muted);
+}
+
+/* B-1：degraded/error 臂的显式重试按钮（Skill 页无「重开菜单」旁路，自愈通道可视化）。 */
+.snap-status__retry {
+  margin-left: auto;
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--color-warn-strong) 50%, transparent);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-warn-strong);
+  padding: 0.1875rem 0.625rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.snap-status__retry:hover {
+  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
 }
 
 /* 统计三卡（总数 / 已启用 / 已禁用），数字随开关实时重算。 */
@@ -1415,6 +1555,15 @@ input.skill-search:focus {
   word-break: break-all;
 }
 
+/* R-1：fm≠dir 条目的「键名=目录名」小字提示（开关键口径在卡片上可见，避免键名歧义）。 */
+.skill-card__keyhint {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  word-break: break-all;
+}
+
 .skill-card__badge {
   flex-shrink: 0;
   margin-left: auto;
@@ -1476,6 +1625,42 @@ input.skill-search:focus {
   line-height: 1.55;
 }
 
+/* D-1：死键清理入口行（skill-note 之下，疑似键存在时才渲染）。 */
+.skill-stale-row {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px dashed color-mix(in srgb, var(--color-warn-strong) 45%, transparent);
+  border-radius: var(--radius-md);
+  font-size: 0.75rem;
+  color: var(--color-warn-strong);
+}
+
+.skill-stale-row__text {
+  flex: 1;
+  min-width: 0;
+}
+
+.skill-stale-row__btn {
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--color-warn-strong) 50%, transparent);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-warn-strong);
+  padding: 0.1875rem 0.625rem;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.skill-stale-row__btn:hover {
+  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
+}
+
 /* 无障碍播报（统计 aria-live）：视觉隐藏。 */
 .sr-only {
   position: absolute;
@@ -1529,6 +1714,13 @@ input.skill-search:focus {
 .switch:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
+}
+
+/* Y-3（2026-09-19 X-123 批评审 §2，OPT）：X-2 禁用态视觉形态——映射装载期间开关灰显 +
+   not-allowed 光标，不再「看似可点实则不可点」（原仅 title 兜底）。 */
+.switch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 /* ── Skill 管理双栏 master-detail（方案 B，视觉基准 docs/prototypes/skill-management/proj-b-master-detail.html）──
@@ -1662,6 +1854,47 @@ input.skill-search:focus {
   border-radius: var(--radius-xs);
   background: color-mix(in srgb, var(--color-accent) 14%, transparent);
   color: var(--color-accent-strong);
+}
+
+/* C-5：项目目录装载状态行（pending 占位 / error 显错+重试），置于全局行与项目分组之间。 */
+.skill-md-rail__status {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.4375rem 0.875rem;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+/* Y-1：超时第三态与错误行同色系（warn 系），语义由文字区分（超时=可自愈的降态，非硬错误）。 */
+.skill-md-rail__status--error,
+.skill-md-rail__status--warn {
+  color: var(--color-warn-strong);
+  flex-wrap: wrap;
+}
+
+.skill-md-rail__status-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.skill-md-rail__status-retry {
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--color-warn-strong) 50%, transparent);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--color-warn-strong);
+  padding: 0.125rem 0.5rem;
+  font-size: 0.625rem;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.skill-md-rail__status-retry:hover {
+  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
 }
 
 .skill-md-rail__foot {

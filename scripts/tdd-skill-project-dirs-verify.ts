@@ -2,10 +2,10 @@
 // 项目级 Skill 管理（方案 B 双栏 master-detail）TDD 契约
 // （docs/plans/2026-09-17-project-skill-master-detail-plan.md §4.9；review-round3 修复轮 R-1~R-3 增改；
 // review-round4 修复轮 R-5 增改：空/纯空白 name 回退子目录名）。
-// 共 16 条断言，四组：
+// 共 17 条断言，四组：
 // 组1 纯函数行为（①-⑤）：src/shared/project-skills.ts（新增纯函数模块）；
 // 组2 主进程枚举链（⑥-⑪）：enumerateProjectSkills/collectSkillProjectDirs 真实 fs 行为
-//      （临时夹具在 D:\software\Cache，绝不触碰仓库/用户数据）+ 源形钉
+//      （临时夹具在系统临时目录（os.tmpdir），绝不触碰仓库/用户数据）+ 源形钉
 //      （ipc-handlers 三源接线 / session-repo GROUP BY / ipc 通道 / preload 暴露）。
 //      R-1 起全链 async（node:fs/promises + withTimeout 3s 预算），⑥⑦ 改 await 直跑；
 //      R-2 起单目录同名去重（first-wins），⑥ 夹具含同目录同名对 dup-a/dup-b（name: twin）；
@@ -17,11 +17,12 @@
 //
 // 修复轮 RED 预期（对未修复工作树）：⑥⑦（twin 未去重/条数 6≠5）、⑧（无 async 形态）、
 // ⑫（缺 watch(projectDirs）、⑭（缺作用域键）FAIL，其余 PASS——新增/改动断言未过、基线不破。
-// 留证：D:\software\Cache\claude-link\project-skill-impl\red-r2.log（首轮 RED 见 red.log）。
+// 留证：red-r2.log（首轮 RED 见 red.log；证据目录不入库）。
 // R-5 轮 RED 预期（对未修复工作树）：⑥（blank-name 产出空串名条目）、⑧（缺 fm.name?.trim() 钉）
 // FAIL——⑥ 实际数组首条为 ""（空名直通未回退），⑦ 条数 6=6 不构成区分（未修代码也吐 6 条，
 // 区分力在 ⑥ 的空串与 ⑧ 的源钉）；留证：同目录 red-r3.log。
-// GREEN 目标：16/16 全 PASS。
+// GREEN 目标：17/17 全 PASS。（P2-3 批 2026-09-18：⑤ 增解析对齐子断言、⑥ 夹具 6→9、
+// ⑰ 增键名口径钉——引擎 skillOverrides 只认目录名（Phase 0-2 实验裁决）。）
 //
 // 运行：npx tsx scripts/tdd-skill-project-dirs-verify.ts（不启动 Electron、不碰 better-sqlite3，
 // 无 ABI respawn 需求——被测模块只依赖 node:fs/promises/node:path；
@@ -481,6 +482,17 @@ console.log('\n=== 组3 渲染层形态钉（ConfigPage.vue 双栏 master-detail
   if (!src.includes('v-if="!skillProbePending && visibleSkills.length === 0"')) sub.push('缺空态臂门控字面（㉑）');
   if (!(watchAt >= 0 && watchBody.includes("'skill'") && watchBody.includes('ensureGlobalSnapshot'))) sub.push("watch(activeTab) 缺 'skill' → ensureGlobalSnapshot 接线（㉓）");
   check('⑮', '回归钉：⑮/㉑/㉓ 六处契约字面在双栏改后源码仍命中', sub.length === 0, sub.join('; '));
+}
+
+// ⑰ P2-3 键名口径钉（2026-09-18 Phase 0-2 实验裁决：引擎 skillOverrides 只认目录名——模型
+// 清单过滤与键入拦截都在目录名层，frontmatter 名键零效果）：开关键 = skillKey（dirName ?? name）。
+{
+  const src = readRel('src/renderer/pages/ConfigPage.vue');
+  const sub: string[] = [];
+  if (!/function skillKey\(/.test(src)) sub.push('缺 skillKey helper（dirName ?? name）');
+  if (!/skillKey\(skill\)/.test(src)) sub.push('卡片开关未按 skillKey（目录名键）消费');
+  if (!/skillKey\(s\)/.test(src)) sub.push('计数/可见性过滤未按 skillKey 消费');
+  check('⑰', 'ConfigPage 开关键口径 = skillKey（dirName ?? name，单键目录名定案）', sub.length === 0, sub.join('; '));
 }
 
 // ── 组4 行为回归 ────────────────────────────────────────────────────────────
