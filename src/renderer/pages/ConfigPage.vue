@@ -51,7 +51,13 @@ function scheduleAutoSave(): void {
   saveTimer = setTimeout(async () => {
     if (!initialized) return;
     try {
-      await store.saveConfig();
+      // P2-1：撞在途保存（{saved:false}）时基线不动并显式重排防抖——watch 对不变的快照
+      // 不会自行再触发，链式补存必须在这里递一程；仅真实落定（saved=true）才前移基线。
+      const r = await store.saveConfig();
+      if (!r.saved) {
+        scheduleAutoSave();
+        return;
+      }
       lastSavedSnapshot = configSnapshot();
       // hb10-CFG-04：投影失败可见——「已保存（投影失败）」徽标。
       saveStatus.value = store.config.projectionOk === false ? 'projection-failed' : 'saved';
@@ -61,6 +67,17 @@ function scheduleAutoSave(): void {
       saveStatus.value = 'error';
     }
   }, 700);
+}
+
+// P2-1：有界重试直至真实落定——撞在途保存（{saved:false}）时轮询重试，供手动保存与卸载
+// flush 共用；40×150ms=6s 上限防永久挂起（超限返回 false，由调用方置 error 态不前移基线）。
+async function saveUntilSettled(maxTries = 40): Promise<boolean> {
+  let r = await store.saveConfig();
+  for (let i = 1; !r.saved && i < maxTries; i++) {
+    await new Promise((res) => setTimeout(res, 150));
+    r = await store.saveConfig();
+  }
+  return r.saved;
 }
 
 watch(configSnapshot, (snap) => {
@@ -128,10 +145,12 @@ onBeforeUnmount(() => {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
-    void store
-      .saveConfig()
-      .then(() => {
-        lastSavedSnapshot = configSnapshot();
+    // P2-1：卸载 flush 有界重试至真实落定；仅真实保存完成才前移基线（失败/超限置 error
+    // 态不前移，跨卸载可感知走 H1 lastSaveFailed 链）。
+    void saveUntilSettled()
+      .then((saved) => {
+        if (saved) lastSavedSnapshot = configSnapshot();
+        else saveStatus.value = 'error';
       })
       .catch(() => {
         saveStatus.value = 'error';
@@ -163,7 +182,13 @@ async function handleSave() {
     saveTimer = null;
   }
   try {
-    await store.saveConfig();
+    // P2-1：撞在途保存时有界重试至真实落定，再报「保存成功」并前移基线。
+    const saved = await saveUntilSettled();
+    if (!saved) {
+      saveStatus.value = 'error';
+      showToast('保存仍在进行中，未确认落盘，请稍后重试', 'error');
+      return;
+    }
     lastSavedSnapshot = configSnapshot();
     saveStatus.value = 'saved';
     if (savedIndicatorTimer) clearTimeout(savedIndicatorTimer);

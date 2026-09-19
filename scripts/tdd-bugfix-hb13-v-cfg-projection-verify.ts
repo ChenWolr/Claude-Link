@@ -36,8 +36,11 @@ check('① CONFIG_SAVE 回传 {...getConfigForRenderer(), projectionOk: saved.pr
 });
 
 // ② 渲染层消费链：store 赋值 + 页面绑定 + 类型字段（既有半边保持）。
+// P2-1/P2-2 同步（2026-09-18）：saveConfig 改两步化（先 await 回传，漂移判定后采纳），
+// 原「await 整体替换」一行形态被取代；无漂移分支仍以回传值整体替换（projectionOk 链不断）。
 check('② 渲染层消费链：config-store 赋值 + ConfigPage 徽标绑定 + 类型字段', () => {
-  assert.match(configStore, /this\.config = await window\.claudeLink\.saveConfig\(plainConfig\);/, 'config-store 未以回传值整体替换 config');
+  assert.match(configStore, /const resp = await window\.claudeLink\.saveConfig\(plainConfig\);/, 'config-store 缺保存回传两步化形态（P2-2 漂移判定前置）');
+  assert.match(configStore, /this\.config = resp;/, 'config-store 无漂移分支未采纳回传值');
   assert.match(configPage, /store\.config\.projectionOk === false \? 'projection-failed' : 'saved'/, 'ConfigPage 徽标绑定缺失');
   assert.match(configTypes, /projectionOk\?: boolean;/, 'AppConfig 缺 projectionOk 字段');
 });

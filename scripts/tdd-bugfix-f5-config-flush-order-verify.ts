@@ -43,15 +43,19 @@ console.log('=== F5 设置页卸载 flush 顺序 ===');
 
     check('flush 块不再「基线先行」', !/lastSavedSnapshot = configSnapshot\(\);[\s\S]*store\.saveConfig\(\)/.test(block));
     check('flush 块不再裸 fire-and-forget（void store.saveConfig();）', !block.includes('void store.saveConfig();'));
-    check('保存成功（.then）后才前移基线', /\.saveConfig\(\)\s*\.then\(\(\) => \{\s*lastSavedSnapshot = configSnapshot\(\);\s*\}\)/.test(block));
-    check('失败路径（.catch）不前移基线且置 error 态', /\.catch\(\(\) => \{(?![\s\S]*lastSavedSnapshot = configSnapshot\(\);[\s\S]*\}\))[\s\S]*saveStatus\.value = 'error';/.test(block));
+    // P2-1 同步（2026-09-18）：flush 改走 saveUntilSettled 有界重试——撞在途保存（{saved:false}）
+    // 时重试，仅真实落定才前移基线；原「.then(() => lastSavedSnapshot…)」无条件前移形态被
+    // {saved} 信号语义取代（申报见实施报告）。
+    check('保存真实落定（saved）后才前移基线', /\.then\(\(saved\) => \{\s*if \(saved\) lastSavedSnapshot = configSnapshot\(\);/.test(block));
+    check('失败路径（!saved 与 .catch）不前移基线且置 error 态', /else saveStatus\.value = 'error';/.test(block) && /\.catch\(\(\) => \{\s*saveStatus\.value = 'error';\s*\}\)/.test(block));
     check('仍在防抖定时器存在时才 flush', block.includes('if (saveTimer)'));
   }
 
   // 回归：手动保存（handleSave）await+catch+toast 正确形态不受影响
+  // P2-1 同步：handleSave 改走 saveUntilSettled（撞在途保存时有界重试至真实落定再报成功）。
   const handleSaveAt = page.indexOf('async function handleSave()');
   const handleSave = page.slice(handleSaveAt, page.indexOf('function handleThemeSelect', handleSaveAt));
-  check('handleSave 维持 try/await/catch 形态（既有契约窗口）', /try \{\s*await store\.saveConfig\(\);\s*lastSavedSnapshot = configSnapshot\(\);/.test(handleSave));
+  check('handleSave 维持 try/catch 形态且经 saveUntilSettled 真实落定后前移基线', /try \{[\s\S]*?const saved = await saveUntilSettled\(\);[\s\S]*?lastSavedSnapshot = configSnapshot\(\);/.test(handleSave));
   check('handleSave 失败 toast 保留', handleSave.includes("showToast(store.error ?? '保存失败', 'error')"));
 }
 
