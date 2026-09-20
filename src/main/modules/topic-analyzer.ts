@@ -1,3 +1,7 @@
+// 【连接面声明】本模块是主进程 HTTP 直连白名单成员（契约：scripts/regression-tests.ts 连接面白名单）。
+// 直连绕过 SDK 属设计内（后台轻量任务：会话自动命名/主题分析）；不读任何 settings.json——
+// 与生产 SDK 链路的已知语义分叉：生产会话受原生 user/project/local settings env 影响，本直连不受。
+// 凭据/端点/模型经 resolveSessionModel 与生产同源（连接三元组完整性）。
 import https from 'https';
 import http from 'http';
 import { getConfig, getProviderModelSources, DECRYPT_FAILED } from './config-manager';

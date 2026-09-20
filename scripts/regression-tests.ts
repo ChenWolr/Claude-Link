@@ -1198,6 +1198,75 @@ function testSensitiveEnvKeysDiagnosticContracts(): void {
   assert.ok(/envKeysBySource/.test(configPage), 'ConfigPage 须按 envKeysBySource 逐层渲染键名');
 }
 
+// ── 2026-09-20 settings/连接审计契约（G3）：连接面白名单 ─────────────────────────────
+// 扫描范围仅 src/{renderer,preload,main,shared} 的 .ts/.vue；out/node_modules/scripts/prototypes 不在面内。
+// 边界注：聊天 markdown 的远程图片由网页引擎按 isAllowedMarkdownImageUrl 协议过滤做资源加载，
+// 不是代码发起的直连——断言 A 钉代码级 API，不覆盖 DOM 资源加载（计划如实声明的已知边界）。
+function testConnectionSurfaceWhitelistContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const path = require('node:path') as typeof import('node:path');
+  const srcRoot = path.resolve(__dirname, '..', 'src');
+  const sources = new Map<string, string>();
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(abs, rel);
+      else if (/\.(tsx?)$/.test(entry.name) || entry.name.endsWith('.vue')) {
+        sources.set(rel, fs.readFileSync(abs, 'utf8'));
+      }
+    }
+  };
+  for (const dir of ['renderer', 'preload', 'main', 'shared']) {
+    walk(path.join(srcRoot, dir), dir);
+  }
+  assert.ok(sources.size > 100, `连接面扫描仅覆盖 ${sources.size} 个文件——src 目录结构变化须同步本契约`);
+
+  // 断言 A：渲染层/preload 代码级零直连（fetch / XMLHttpRequest / WebSocket / EventSource）。
+  const directApi = /\bfetch\s*\(|XMLHttpRequest|new WebSocket|new EventSource/;
+  for (const [file, src] of sources) {
+    if (file.startsWith('renderer/') || file.startsWith('preload/')) {
+      assert.ok(!directApi.test(src), `${file} 渲染层/preload 不得出现代码级直连 API`);
+    }
+  }
+
+  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver}。
+  // （\.request\( 覆盖 topic-analyzer 的 https/http 模块别名 lib.request 形态；该别名全树仅此一处。）
+  const httpDirect = /\bfetch\s*\(|https\.request|http\.request|https\.get|http\.get|\.request\s*\(/;
+  const httpHits = [...sources.entries()].filter(([, src]) => httpDirect.test(src)).map(([file]) => file).sort();
+  assert.deepEqual(
+    httpHits,
+    ['main/modules/model-resolver.ts', 'main/modules/topic-analyzer.ts'],
+    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单两处外不得新增直连）',
+  );
+
+  // 断言 C：spawn/execFile 文件 ∈ {connection-tester, sdk-backend, changes-panel, cli-detector}。
+  // （\bexecFile\b 含 import/promisify 形态——cli-detector 经 execFileAsync 调用，字面 execFile( 漏检。）
+  const processSpawn = /\bspawn\s*\(|\bexecFile\b/;
+  const spawnHits = [...sources.entries()].filter(([, src]) => processSpawn.test(src)).map(([file]) => file).sort();
+  assert.deepEqual(
+    spawnHits,
+    [
+      'main/modules/changes-panel.ts',
+      'main/modules/cli-detector.ts',
+      'main/modules/connection-tester.ts',
+      'main/modules/sdk-backend.ts',
+    ],
+    'spawn/execFile 文件超出白名单（连接测试/post-turn 探针/打开方式/CLI 检测四处外不得新增子进程）',
+  );
+
+  // 断言 D：--setting-sources 隔离参数仅存于 connection-tester 与 shared/post-turn-probe，且两处都在。
+  const settingSourcesHits = [...sources.entries()]
+    .filter(([, src]) => src.includes('--setting-sources'))
+    .map(([file]) => file)
+    .sort();
+  assert.deepEqual(
+    settingSourcesHits,
+    ['main/modules/connection-tester.ts', 'shared/post-turn-probe.ts'],
+    '--setting-sources 隔离参数必须仅存于连接测试与 post-turn 探针两处（防 settings env 劫持的隔离防御丢失/扩散）',
+  );
+}
+
 function testClaudeSettingsProjectionPreservesAdvancedSettings(): void {
   const settings = buildClaudeSettingsProjection({
     apiKey: 'sk-test',
@@ -3529,6 +3598,7 @@ testOpenWithFallbackContracts();
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
 testSensitiveEnvKeysDiagnosticContracts();
+testConnectionSurfaceWhitelistContracts();
 testClaudeSettingsProjectionPreservesAdvancedSettings();
 testSearchNormalizer();
 testMarkdownExternalLinks();

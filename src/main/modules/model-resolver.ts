@@ -2,6 +2,8 @@
 // 任何档案都先尝试 Anthropic 风格 GET {base}/v1/models（x-api-key + anthropic-version）；
 // 404/401 时自动回退 OpenAI 风格（Authorization: Bearer，同 path），两种响应都归一化为 ModelInfo[]。
 // 缓存 key = profile.id，TTL 1h；「查询」按钮带强制刷新语义（forceRefresh 绕过缓存）。
+// 【连接面声明】本模块是主进程 HTTP 直连白名单成员（契约：scripts/regression-tests.ts 连接面白名单）；
+// SDK 无 /v1/models 查询能力故直连属设计内，凭据/端点经供应商档案解密与生产同源。
 import type { ModelInfo, ProviderProfile } from '../../shared/types/config';
 import { buildAnthropicApiUrl } from './api-url';
 
