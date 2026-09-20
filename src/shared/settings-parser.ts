@@ -1,6 +1,8 @@
 // Shared parser for Claude Code settings.json content.
-// Used by BOTH main process (file import) and renderer ("从 JSON 填充字段"),
-// so they apply identical extraction rules.
+// 生产消费方是主进程的模型解析/端点解析纯函数（resolveDefaultModel / resolveAliasToActualModel /
+// extractModelMappings / resolveConfiguredDefaultModel）；parseClaudeSettings 本体在
+// settings.json 导入/自动检测死链路删除（2026-09-20）后仅剩契约脚本消费（行为语义钉），
+// 保留以保证双向映射语义可测（纯函数无 IO 无攻击面）。
 //
 // Claude Code's real settings.json keeps the API key / base URL / model mappings
 // inside an `env` object (e.g. env.ANTHROPIC_API_KEY, env.ANTHROPIC_BASE_URL,
@@ -71,9 +73,8 @@ export function parseClaudeSettings(content: string): ImportedSettings {
 
   // apiKeyHelper: 顶层命令字符串，用于动态获取 key（Claude Code 特有）。
   // 单独提取出来，避免残留在 advancedJson 被运行时当普通字段注入。
-  // Claude Link 本身不执行它；字段随 DetectedClaudeConfig 透传到渲染层，但当前无任何 UI
-  // 消费点（config-store 的 applyExtractedSettings 只回填 apiKey/apiBaseUrl/defaultModel/
-  // advancedJson/contextWindowByAlias，apiKeyHelper 被静默丢弃），不做「改用静态 API Key」提示。
+  // Claude Link 本身不执行它；渲染层回填链已随 2026-09-20 死链路删除，该字段当前仅
+  // 作为解析语义保留（契约脚本钉），不做「改用静态 API Key」提示。
   const apiKeyHelper = takeString(remaining, 'apiKeyHelper');
   if (apiKeyHelper) result.apiKeyHelper = apiKeyHelper;
 
@@ -130,6 +131,29 @@ export function parseClaudeSettings(content: string): ImportedSettings {
 // 顺序即"默认优先级"：sonnet 最常用，作为兜底默认。
 const MODEL_ALIASES = ['sonnet', 'haiku', 'opus', 'fable'] as const;
 
+// ── 原生 settings 敏感 env 键名提取（G2 透明性警示，纯函数）────────────────────────
+// 参与会话连接的原生 env 键前缀：Anthropic 连接凭据/端点/模型映射（ANTHROPIC_）、
+// Claude Code 行为开关（CLAUDE_CODE_）、思考强度（CLAUDE_EFFORT）、配置根重定向（CLAUDE_CONFIG_DIR）。
+const SENSITIVE_ENV_PREFIXES = ['ANTHROPIC_', 'CLAUDE_CODE_', 'CLAUDE_EFFORT', 'CLAUDE_CONFIG_DIR'] as const;
+
+/**
+ * 从 settings 文件原文提取「会参与会话连接的敏感 env 键名」（G2 诊断）。
+ * 只返回键名，永不返回值；键名过滤只看键名本身、与值类型无关（值非字符串仍报键名）。
+ * 坏 JSON / 顶层非对象 / env 缺失或非对象 → 返回 []（诊断是可选能力，静默不抛）。
+ */
+export function sensitiveEnvKeys(raw: string): string[] {
+  let settings: unknown;
+  try {
+    settings = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const root = asObject(settings);
+  const env = root ? asObject(root.env) : undefined;
+  if (!env) return [];
+  return Object.keys(env).filter((key) => SENSITIVE_ENV_PREFIXES.some((prefix) => key.startsWith(prefix)));
+}
+
 function parseAdvancedEnv(advancedJson: string): Record<string, unknown> {
   try {
     const adv = JSON.parse(advancedJson || '{}');
@@ -138,9 +162,9 @@ function parseAdvancedEnv(advancedJson: string): Record<string, unknown> {
     }
   } catch (err) {
     // hb12-CFG-07：非法 JSON 警告（env 读取降级可诊断）。
-    // hb13-v 批C（item13）：本模块为主/渲染双端共享（config-store 渲染层消费），不能导入
-    // electron logger——以 console.warn 承载、警告带错误信息与原文头部片段（「键名」在
-    // JSON 损坏时不可解析，取 head 片段供定位）。
+    // hb13-v 批C（item13）：本模块为主进程/脚本共享的纯函数模块（渲染层消费已随 2026-09-20
+    // 死链路删除），不能导入 electron logger——以 console.warn 承载、警告带错误信息与原文
+    // 头部片段（「键名」在 JSON 损坏时不可解析，取 head 片段供定位）。
     console.warn(`[settings-parser] malformed advancedJson env block: ${err instanceof Error ? err.message : String(err)}; head=${(advancedJson || '').slice(0, 80)}`);
   }
   return {};

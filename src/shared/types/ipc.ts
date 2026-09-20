@@ -340,6 +340,8 @@ export interface NativeSettingsDiagnostic {
   claudeMdCandidates: string[];
   /** effective settings 的顶层键名摘要（只取键，不含值）。 */
   effectiveKeys: string[];
+  /** G2 警示：逐层（user/project/local）参与会话连接的敏感 env 键名（只回键名，绝不回值）；无敏感键的层不出现。 */
+  envKeysBySource: Array<{ source: 'user' | 'project' | 'local'; path: string; envKeys: string[] }>;
 }
 
 // 队列事件（v3 语义）：state_changed 携带全量 QueueState 快照，是所有状态迁移的权威通道；

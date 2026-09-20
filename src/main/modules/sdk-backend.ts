@@ -23,7 +23,7 @@ import { execFileSync, spawn } from 'child_process';
 import { IPC_CHANNELS, ENGINE_BACKGROUND_TOGGLE_ENV } from '../../shared/constants';
 import { getConfig, getProviderModelSources, onConfigSaved } from './config-manager';
 import { mergeSkillOverridesIntoSettings } from './sdk-skill-overrides';
-import { resolveAliasToActualModel, resolveDefaultModel } from '../../shared/settings-parser';
+import { resolveAliasToActualModel, resolveDefaultModel, sensitiveEnvKeys } from '../../shared/settings-parser';
 import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride } from '../../shared/session-model';
 import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
 import { mapAskUserQuestionCancel } from '../../shared/interaction-cancel';
@@ -3009,18 +3009,51 @@ function findClaudeMdCandidates(cwd: string): string[] {
  * Task 3 Step 5：SDK 官方 resolveSettings 诊断（不 spawn CLI）。
  * 返回可克隆摘要：来源级联（source + path）、可见 CLAUDE.md 候选、effective 键名。
  * 绝不回传 effective 的值（可能含 env/API key 等秘密）——只取键名，日志与 IPC 一律脱敏。
+ * G2（2026-09-20）：另附逐层敏感 env 键名 envKeysBySource（同样只回键名不回值）。
  */
 export async function getNativeSettingsDiagnostic(cwd: string): Promise<{
   cwd: string;
   sources: Array<{ source: string; path?: string }>;
   claudeMdCandidates: string[];
   effectiveKeys: string[];
+  envKeysBySource: Array<{ source: 'user' | 'project' | 'local'; path: string; envKeys: string[] }>;
 }> {
   const sdk = (await importSdk()) as unknown as { resolveSettings?: (opts: { cwd: string }) => Promise<Record<string, any>> };
   if (typeof sdk.resolveSettings !== 'function') {
     throw new Error('SDK 未导出 resolveSettings（Task 3 原生 settings 诊断依赖）');
   }
   const resolved = await sdk.resolveSettings({ cwd });
+  // G2 透明性警示：逐层定位原生 settings 文件并提取敏感 env 键名（只回键名，永不回值）。
+  // user 层 Windows 多候选 home（USERPROFILE 与 HOME，两候选同先例 claude-code-command-e2e-verify，
+  // 按 resolve 规范化去重，两候选文件不同则都报、path 字段区分）；project/local 层按 cwd。
+  // 文件缺失/不可读 → 该层不出现；诊断是可选能力，全链不抛错。
+  const envKeysBySource: Array<{ source: 'user' | 'project' | 'local'; path: string; envKeys: string[] }> = [];
+  const collectEnvKeys = (source: 'user' | 'project' | 'local', filePath: string): void => {
+    let raw: string;
+    try {
+      raw = readFileSync(filePath, 'utf-8');
+    } catch {
+      return; // 文件不存在/不可读：该层静默跳过
+    }
+    const envKeys = sensitiveEnvKeys(raw);
+    if (envKeys.length > 0) envKeysBySource.push({ source, path: filePath, envKeys });
+  };
+  const userHomeDirs: string[] = [];
+  if (process.platform === 'win32') {
+    if (process.env.USERPROFILE) userHomeDirs.push(process.env.USERPROFILE);
+    if (process.env.HOME) userHomeDirs.push(process.env.HOME);
+  } else if (process.env.HOME) {
+    userHomeDirs.push(process.env.HOME);
+  }
+  const seenUserHomeDirs = new Set<string>();
+  for (const dir of userHomeDirs) {
+    const normalized = path.resolve(dir);
+    if (seenUserHomeDirs.has(normalized)) continue;
+    seenUserHomeDirs.add(normalized);
+    collectEnvKeys('user', path.join(normalized, '.claude', 'settings.json'));
+  }
+  collectEnvKeys('project', path.join(cwd, '.claude', 'settings.json'));
+  collectEnvKeys('local', path.join(cwd, '.claude', 'settings.local.json'));
   return {
     cwd,
     sources: Array.isArray(resolved?.sources)
@@ -3034,6 +3067,7 @@ export async function getNativeSettingsDiagnostic(cwd: string): Promise<{
       resolved?.effective && typeof resolved.effective === 'object'
         ? Object.keys(resolved.effective)
         : [],
+    envKeysBySource,
   };
 }
 

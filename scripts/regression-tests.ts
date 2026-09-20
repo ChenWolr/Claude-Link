@@ -25,7 +25,7 @@ import { alignPermissionDefaultMode, applyPermissionUpdates, buildPermissionSett
 import { shouldNotifyInteractionCancelled } from '../src/shared/interaction-cancel';
 import { isApiErrorAssistantText } from '../src/shared/api-error-text';
 import { classifyUpstreamError, isNonRetryableUpstreamError, isReasoningReplayApiError, upstreamFatalMessage } from '../src/shared/upstream-errors';
-import { parseClaudeSettings, syncFormToAdvancedJson } from '../src/shared/settings-parser';
+import { parseClaudeSettings, sensitiveEnvKeys, syncFormToAdvancedJson } from '../src/shared/settings-parser';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdownRenderer, isDiffContent, renderDiffHtml, renderDiffHtmlWithRenderer, renderMarkdown } from '../src/renderer/utils/markdown';
 import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';
@@ -1143,6 +1143,59 @@ function testSettingsImportPreservesNestedJson(): void {
     hooks: [{ event: 'Stop', command: 'notify' }],
     alwaysThinkingEnabled: true,
   });
+}
+
+// ── 2026-09-20 settings/连接审计契约（G2）：原生 settings 敏感 env 键警示 ──────────────
+function testSensitiveEnvKeysDiagnosticContracts(): void {
+  // 行为级：sensitiveEnvKeys 只回键名、永不回值；坏输入静默返回 []。
+  const keys = sensitiveEnvKeys(
+    JSON.stringify({
+      env: {
+        ANTHROPIC_API_KEY: 'sk-secret',
+        ANTHROPIC_BASE_URL: 'https://x',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        MY_VAR: 'plain',
+      },
+    }),
+  );
+  assert.deepEqual(
+    keys,
+    ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'],
+    '命中 ANTHROPIC_*/CLAUDE_CODE_* 前缀；普通键（MY_VAR）不命中',
+  );
+  assert.deepEqual(
+    sensitiveEnvKeys(JSON.stringify({ env: { CLAUDE_EFFORT: 'high', CLAUDE_CONFIG_DIR: '/x', MYVAR: '1' } })),
+    ['CLAUDE_EFFORT', 'CLAUDE_CONFIG_DIR'],
+    'CLAUDE_EFFORT/CLAUDE_CONFIG_DIR 前缀命中',
+  );
+  assert.deepEqual(sensitiveEnvKeys('not-json{'), [], '坏 JSON → []（诊断可选能力，静默不抛）');
+  assert.deepEqual(sensitiveEnvKeys(''), [], '空串 → []');
+  assert.deepEqual(sensitiveEnvKeys('[1,2]'), [], '顶层非对象 → []');
+  assert.deepEqual(sensitiveEnvKeys('{}'), [], 'env 缺失 → []');
+  assert.deepEqual(sensitiveEnvKeys(JSON.stringify({ env: 'nope' })), [], 'env 非对象 → []');
+  // 值非字符串仍报键名（键名过滤只看键名；若实现回值，本 deepEqual 必失败——值零泄露在此钉住）。
+  assert.deepEqual(sensitiveEnvKeys(JSON.stringify({ env: { ANTHROPIC_API_KEY: 123 } })), ['ANTHROPIC_API_KEY'], '值非字符串仍报键名');
+
+  // 形态级：诊断函数扩展 envKeysBySource 并调用 sensitiveEnvKeys；返回对象无 env/effective 值字段。
+  const fs = require('node:fs') as typeof import('node:fs');
+  const readSrc = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const sdkBackend = readSrc('../src/main/modules/sdk-backend.ts');
+  const diagStart = sdkBackend.indexOf('export async function getNativeSettingsDiagnostic');
+  assert.ok(diagStart > -1, '未找到 getNativeSettingsDiagnostic');
+  // 窗口锚用下一个「\nexport 」：函数签名的 Promise 类型闭合「}> {」顶格，'\n}' 会切在签名处。
+  const diagEnd = sdkBackend.indexOf('\nexport ', diagStart + 10);
+  const diagBody = sdkBackend.slice(diagStart, diagEnd > -1 ? diagEnd : undefined);
+  assert.ok(diagBody.includes('envKeysBySource'), '诊断返回须含 envKeysBySource（逐层敏感 env 键名）');
+  assert.ok(/sensitiveEnvKeys\(/.test(diagBody), '诊断须调用 sensitiveEnvKeys 提取键名');
+  assert.ok(!/envValues|envByKeyValue|effectiveValues/.test(diagBody), '诊断不得携带 env/effective 值字段（只回键名）');
+  assert.ok(/USERPROFILE[\s\S]{0,400}HOME/.test(diagBody), 'user 层须 USERPROFILE/HOME 多候选 home（去重）');
+  assert.ok(/settings\.local\.json/.test(diagBody), 'local 层须按 cwd 定位 settings.local.json');
+  const ipcTypes = readSrc('../src/shared/types/ipc.ts');
+  assert.ok(/envKeysBySource/.test(ipcTypes), 'NativeSettingsDiagnostic 类型须声明 envKeysBySource');
+  const configPage = readSrc('../src/renderer/pages/ConfigPage.vue');
+  assert.ok(configPage.includes('原生 settings env 影响连接的键（值不显示）'), 'ConfigPage 须渲染敏感 env 键警示标题');
+  assert.ok(configPage.includes('下列键会参与会话连接'), 'ConfigPage 警示块须含「优先级 + 参与连接」说明文案');
+  assert.ok(/envKeysBySource/.test(configPage), 'ConfigPage 须按 envKeysBySource 逐层渲染键名');
 }
 
 function testClaudeSettingsProjectionPreservesAdvancedSettings(): void {
@@ -3475,6 +3528,7 @@ testDiffBodySearchScrollContracts();
 testOpenWithFallbackContracts();
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
+testSensitiveEnvKeysDiagnosticContracts();
 testClaudeSettingsProjectionPreservesAdvancedSettings();
 testSearchNormalizer();
 testMarkdownExternalLinks();

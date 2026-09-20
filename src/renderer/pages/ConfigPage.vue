@@ -543,6 +543,17 @@ async function cleanupStaleSkillKeys(): Promise<void> {
       <div class="storage-info__body">
         <div><span>工作目录</span><code>{{ store.nativeSettingsDiagnostic.cwd }}</code></div>
         <div><span>生效键名</span><code>{{ store.nativeSettingsDiagnostic.effectiveKeys.join(', ') || '（无）' }}</code></div>
+        <!-- G2 警示：原生层敏感 env 键名（只显键名，值零泄露）；三层全空整块不渲染。 -->
+        <template v-if="store.nativeSettingsDiagnostic.envKeysBySource.length > 0">
+          <div>
+            <span>env 警示</span>
+            <code>原生 settings env 影响连接的键（值不显示）：原生层优先级 managed &lt; user &lt; project &lt; local &lt; Claude Link 显式注入，下列键会参与会话连接</code>
+          </div>
+          <div v-for="entry in store.nativeSettingsDiagnostic.envKeysBySource" :key="entry.source + entry.path">
+            <span>{{ entry.source }} 层</span>
+            <code>{{ entry.path }}：{{ entry.envKeys.join('、') }}</code>
+          </div>
+        </template>
         <div><span>CLAUDE.md 候选</span><code>{{ store.nativeSettingsDiagnostic.claudeMdCandidates.join(', ') || '（无）' }}</code></div>
         <div>
           <span>settings 来源</span>
