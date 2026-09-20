@@ -10,6 +10,7 @@ import { useSessionStore } from './stores/session-store';
 import { useExportImageStore } from './stores/export-image-store';
 import { useChat } from './composables/use-chat';
 import { useCommandStore } from './stores/command-store';
+import { useTaskStore } from './stores/task-store';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../shared/constants';
 import { applyThemePalette, applyFontScale } from './utils/apply-theme';
 
@@ -17,10 +18,12 @@ const configStore = useConfigStore();
 const sessionStore = useSessionStore();
 const exportImageStore = useExportImageStore();
 const commandStore = useCommandStore();
+const taskStore = useTaskStore();
 const { startListening, stopListening } = useChat();
 let stopExportProgress: (() => void) | null = null;
 let stopCommandChanges: (() => void) | null = null;
 let stopGlobalCommandChanges: (() => void) | null = null;
+let stopQueueEvents: (() => void) | null = null;
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
@@ -84,6 +87,10 @@ onMounted(async () => {
   // 订阅就绪后主动拉一次全局兜底快照，覆盖「用户从不进 Skill 页」的全路由场景（暂态会话兜底
   // 快照也尽早到位）。幂等在 ensureGlobalSnapshot 内（非 loading 快照直接返回，广播已到则 no-op）。
   void commandStore.ensureGlobalSnapshot();
+  // 队列事件全局注册（与 chat:event 同模式）：TaskQueuePanel 在非 chat 路由卸载后，
+  // markRunning / markStopped（中断收口）/ user_message_created（队列任务消息入列）等
+  // 带副作用的队列事件仍须被处理——后台队列执行不因切页丢事件。
+  stopQueueEvents = window.claudeLink.onQueueEvent((payload) => taskStore.handleQueueEvent(payload));
 });
 
 onBeforeUnmount(() => {
@@ -93,6 +100,7 @@ onBeforeUnmount(() => {
   if (stopExportProgress) stopExportProgress();
   if (stopCommandChanges) stopCommandChanges();
   if (stopGlobalCommandChanges) stopGlobalCommandChanges();
+  if (stopQueueEvents) stopQueueEvents();
   if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
 });
 </script>

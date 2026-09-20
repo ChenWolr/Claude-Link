@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted } from 'vue';
 import { VueDraggable } from 'vue-draggable-plus';
 import { useTaskStore } from '../../stores/task-store';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { useConfigStore } from '../../stores/config-store';
-import { useTaskQueue } from '../../composables/use-task-queue';
 import { taskEtaText, formatCountdownHuman } from '../../../shared/queue-eta';
 import { resolveQueueDelaySeconds } from '../../../shared/queue-config';
 import type { Task } from '../../../shared/types/task';
@@ -28,7 +27,6 @@ const configStore = useConfigStore();
 const changesStore = useChangesStore();
 const planStore = useClaudePlanStore();
 const changesCount = computed(() => changesStore.changedCount);
-const { startListening } = useTaskQueue();
 
 const expandedGroups = ref<Set<string>>(new Set());
 // 问题 7：用户显式折叠的组（优先级最高，运行中也保持收起）。
@@ -59,7 +57,6 @@ function subAgentDurationText(g: SubAgentGroup): string {
   if (frozenLive != null) return formatDuration(frozenLive);
   return g.durationText;
 }
-let cleanup: (() => void) | null = null;
 
 const queueStatus = computed(() => taskStore.queueState.status);
 
@@ -316,15 +313,13 @@ function openSummaryFile(path: string, e: Event): void {
 }
 
 onMounted(() => {
-  cleanup = startListening();
   loadOverview();
   // 面板常驻（默认 all 总览），改动数据须随挂载即拉，供轨 badge / 指标格 / 总览摘要。
   void changesStore.refresh();
 });
 
-onUnmounted(() => {
-  cleanup?.();
-});
+// 队列事件监听已全局化到 App.vue（onQueueEvent → taskStore.handleQueueEvent），面板卸载
+// （非 chat 路由）不丢事件；此处仅保留重挂载兜底拉取。
 
 // v3：任务列表/队列状态/历史随会话切换（loadOverview 全量拉取）。
 watch(

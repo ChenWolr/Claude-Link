@@ -167,3 +167,4 @@ scripts/tdd-skill-ghost-fallback-verify.ts
 scripts/tdd-session-update-guard-verify.ts
 scripts/tdd-skill-user-dirnames-verify.ts
 scripts/tdd-skill-x123-verify.ts
+scripts/tdd-rightpanel-route-gate-verify.ts
