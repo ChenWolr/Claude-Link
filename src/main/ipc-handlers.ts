@@ -15,13 +15,11 @@ import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
 import { IPC_CHANNELS } from '../shared/constants';
-import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
-import { detectClaudeConfig } from './modules/claude-config-detector';
+import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
 import { collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
 import { resolveDefaultModel } from '../shared/settings-parser';
-import { maskApiKey } from '../shared/provider-library';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
 import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight } from './modules/chat-backend';
@@ -169,24 +167,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       db: `${userData}/claude-link.db`,
     };
   });
-  ipcMain.handle(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, async (_event, filePath: string) => {
-    // hb10-CFG-05：死通道收窄——仅 .json 后缀且 ≤1MB；返回值 apiKey 掩码化（不泄露明文）。
-    if (typeof filePath !== 'string' || !filePath.toLowerCase().endsWith('.json')) throw new Error('仅支持 .json 设置文件');
-    const st = await fsp.stat(filePath);
-    if (st.size > 1024 * 1024) throw new Error('设置文件超过 1MB 上限');
-    const imported = importSettingsFile(filePath);
-    return { ...imported, apiKey: imported.apiKey ? maskApiKey(imported.apiKey) : imported.apiKey };
-  });
-  ipcMain.handle(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE, async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openFile'],
-      filters: [{ name: 'JSON', extensions: ['json'] }],
-      title: '选择 Claude Code settings.json',
-    });
-    if (result.canceled || !result.filePaths.length) return null;
-    return result.filePaths[0];
-  });
-  ipcMain.handle(IPC_CHANNELS.CONFIG_AUTO_DETECT, async () => detectClaudeConfig());
+  // settings.json 导入/选档/自动检测三条死通道（原 config:importSettings 等三个 channel）
+  // 已于 2026-09-20 整链删除：无 UI 入口却保留明文 apiKey 回传渲染进程的通道。
   // 流式测试连接（弹框）已删除：测试收敛到 PROVIDER_TEST_MODEL（模型行内按钮，直返结果）。
   // Task 3 Step 5：原生 settings 诊断摘要（resolveSettings 脱敏视图：来源/CLAUDE.md 候选/生效键名，
   // 绝不含 effective 值/API key/env）。cwd 只做非空字符串校验——真实路径解析交给 SDK 与 findClaudeMdCandidates。

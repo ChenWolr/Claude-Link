@@ -16,10 +16,8 @@
 import ElectronStoreModule from 'electron-store';
 import { safeStorage } from 'electron';
 import { randomUUID } from 'node:crypto';
-import * as fs from 'fs';
 import type {
   AppConfig,
-  ModelAlias,
   ProviderProfileView,
   ProviderSaveInput,
   ProviderLibrarySnapshot,
@@ -39,7 +37,6 @@ import { clearProjectionSnapshot } from './settings-projection-merge';
 import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels } from '../../shared/provider-library';
 import { logger } from '../utils/logger';
 import { createSafeStore } from '../utils/safe-store';
-import { parseClaudeSettings } from './settings-importer';
 import { writeClaudeSettings, SKIP_NO_WORKDIR } from './settings-writer';
 
 interface StoredConfig
@@ -421,24 +418,6 @@ export function clearConfig(): AppConfig {
   projectLegacyFields();
   emitConfigSaved();
   return getConfig();
-}
-
-export function importSettingsFile(filePath: string): {
-  apiKey?: string;
-  apiBaseUrl?: string;
-  defaultModel?: string;
-  contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
-  advancedJson: string;
-} {
-  // hb10-CFG-05：入口三项加固（与 IPC 层 CONFIG_IMPORT_SETTINGS 死通道收窄对齐——
-  // 直调本函数也受保护）：① 仅 .json 后缀；② ≤1MB；③ 返回 apiKey 经 maskApiKey 掩码不泄露明文。
-  if (typeof filePath !== 'string' || !filePath.toLowerCase().endsWith('.json')) {
-    throw new Error('仅支持 .json 设置文件');
-  }
-  const st = fs.statSync(filePath);
-  if (st.size > 1024 * 1024) throw new Error('设置文件超过 1MB 上限');
-  const parsed = parseClaudeSettings(fs.readFileSync(filePath, 'utf-8'));
-  return { ...parsed, apiKey: parsed.apiKey ? maskApiKey(parsed.apiKey) : parsed.apiKey };
 }
 
 // ── 多供应商库：迁移 + CRUD ────────────────────────────────────────────

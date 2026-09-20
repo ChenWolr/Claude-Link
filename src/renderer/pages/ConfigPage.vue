@@ -162,8 +162,8 @@ onBeforeUnmount(() => {
 });
 
 // 高级 JSON 编辑器已随多供应商化移除；advancedJson（全局 permissions/hooks/env）暂无 UI
-// 维护入口（config-store 的 importSettings/autoDetectClaudeConfig/fillFromAdvancedJson 均无
-// 调用方，仅存档），只能手改存储文件或经 SDK settings 生效。
+// 维护入口——settings.json 导入/自动检测死链路已于 2026-09-20 整链删除，
+// advancedJson 只能手改存储文件或经 SDK settings 生效。
 
 function showToast(message: string, type: 'success' | 'error' = 'success'): void {
   toastType.value = type;

@@ -25,8 +25,7 @@ import { alignPermissionDefaultMode, applyPermissionUpdates, buildPermissionSett
 import { shouldNotifyInteractionCancelled } from '../src/shared/interaction-cancel';
 import { isApiErrorAssistantText } from '../src/shared/api-error-text';
 import { classifyUpstreamError, isNonRetryableUpstreamError, isReasoningReplayApiError, upstreamFatalMessage } from '../src/shared/upstream-errors';
-import { parseClaudeSettings } from '../src/main/modules/settings-importer';
-import { syncFormToAdvancedJson } from '../src/shared/settings-parser';
+import { parseClaudeSettings, syncFormToAdvancedJson } from '../src/shared/settings-parser';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdownRenderer, isDiffContent, renderDiffHtml, renderDiffHtmlWithRenderer, renderMarkdown } from '../src/renderer/utils/markdown';
 import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';

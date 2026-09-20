@@ -142,26 +142,8 @@ export interface ModelInfo {
   maxTokens: number;
 }
 
-// 自动检测 Claude Code 系统配置的结果。OAuth token 绝不读取内容，只判断存在性；
-// apiKey 来自 settings.json 的 env.*，最终经 safeStorage 加密入库。
-export interface DetectedOauthAccount {
-  email?: string;
-  accountUuid?: string;
-  organizationType?: string;
-}
-
-export interface DetectedClaudeConfig {
-  found: boolean;
-  sources: Array<'settings.json' | '.claude.json' | '.credentials.json'>;
-  apiKey?: string;
-  apiBaseUrl?: string;
-  defaultModel?: string;
-  apiKeyHelper?: string;
-  oauthAccount?: DetectedOauthAccount;
-  hasOAuthCredentials: boolean;
-  advancedJson: string;
-  errors: string[];
-}
+// 自动检测 Claude Code 系统配置的类型（DetectedClaudeConfig / DetectedOauthAccount）已随
+// 2026-09-20 死链路删除：检测通道无 UI 入口却保留明文 apiKey 回传渲染进程的能力。
 
 /** 死类型（全项目零引用）：旧顶部「测试连接」弹框时代残留；现行测试结果由 connection-tester.ts 的 ProviderModelTestResult 承载。清理时可整接口删除。 */
 export interface ConnectionTestResult {

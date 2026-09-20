@@ -1,5 +1,7 @@
 // config-store.ts
-// 配置状态：AppConfig + advancedJson 单一数据源 + 自动检测回填 + 防循环。
+// 配置状态：AppConfig + advancedJson 单一数据源 + 防循环。
+// （settings.json 导入/自动检测回填死链路已于 2026-09-20 删除：导入/自动检测/JSON 回填/
+// 抽取值回写四个 action 均无 UI 调用方，随主进程通道一并整链移除。）
 //
 // 多供应商库上线后，连接字段（供应商/key/url）的真源是 provider-store（主进程 ProviderProfile）；
 // 本 store 仍承载行为/外观字段与 advancedJson（全局 Claude 设置）的编辑与自动保存。
@@ -12,12 +14,10 @@ import { ref } from 'vue';
 // ModelAlias 类型定义在 shared/types/config（供 shared 层 AppConfig 与渲染层共用）。
 import type { ModelAlias } from '../../shared/types/config';
 export type { ModelAlias };
-import type { AppConfig, DetectedClaudeConfig } from '../../shared/types/config';
+import type { AppConfig } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
 import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
-import { parseClaudeSettings } from '../../shared/settings-parser';
-import { useInteractionStore } from './interaction-store'; // hb10-CFG-05：advancedJson 覆盖前确认
 
 // H1（F5 重做）：设置保存失败跨卸载可感知标志。ConfigPage 组件局部 saveStatus 在页面卸载后
 // 无渲染、其 watch 随 setup 停止——失败对用户不可见，且重进页被 loadConfig 用主进程旧值
@@ -73,7 +73,6 @@ export const useConfigStore = defineStore('config', {
     savingConfig: false,
     detectingCli: false,
     error: null as string | null,
-    importedFields: new Set<string>(),
     // 配置/数据落盘目录（点 4：让用户知道配置存在哪）
     storageInfo: null as { userData: string; config: string; workspaces: string; db: string } | null,
     // Task 3 Step 5：原生 settings 诊断摘要（脱敏视图，供 UI 核验 user/project/local 实际加载来源）
@@ -200,87 +199,6 @@ export const useConfigStore = defineStore('config', {
         this.error = error instanceof Error ? error.message : '检测 Claude Code CLI 失败';
       } finally {
         this.detectingCli = false;
-      }
-    },
-    async importSettings(filePath: string) {
-      try {
-        const extracted = await window.claudeLink.importSettings(filePath);
-        // hb10-CFG-05：advancedJson 是整体替换（现有 permissions/hooks/env 会被整个换掉），
-        // 替换前必须确认；与现值相同/为空则无需打扰。
-        if (
-          extracted.advancedJson &&
-          extracted.advancedJson !== '{}' &&
-          extracted.advancedJson !== this.config.advancedJson
-        ) {
-          const interactionStore = useInteractionStore();
-          const ok = await interactionStore.requestConfirm({
-            title: '导入设置',
-            message: '将覆盖现有高级配置（advancedJson 含 permissions/hooks/env），确定继续？',
-            confirmText: '覆盖',
-            cancelText: '取消',
-          });
-          if (!ok) return;
-        }
-        this.applyExtractedSettings(extracted);
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '导入失败';
-      }
-    },
-    // 自动扫描系统 Claude Code 配置（settings.json / .claude.json / .credentials.json），
-    // 回填 apiKey/apiBaseUrl/defaultModel/advancedJson。OAuth token 绝不读取，只判存在性。
-    async autoDetectClaudeConfig(): Promise<DetectedClaudeConfig | null> {
-      try {
-        const detected = await window.claudeLink.autoDetectClaudeConfig();
-        if (!detected.found) {
-          this.error = '未找到 Claude Code 配置（请确认已安装 Claude Code 并至少登录/配置过一次）';
-          return null;
-        }
-        this.applyExtractedSettings(detected);
-        return detected;
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '自动检测失败';
-        return null;
-      }
-    },
-    // 直接从高级 JSON 文本框内容解析并回填字段。
-    // 复用主进程同一个 parseClaudeSettings，确保规则一致（含 Claude Code 的 env.* 字段）。
-    fillFromAdvancedJson(): { ok: boolean; message: string } {
-      const raw = this.config.advancedJson?.trim() || '{}';
-      try {
-        const parsed = parseClaudeSettings(raw);
-        this.applyExtractedSettings(parsed);
-        return { ok: true, message: '已从 JSON 填充字段' };
-      } catch (e) {
-        return { ok: false, message: e instanceof Error ? e.message : 'JSON 格式错误' };
-      }
-    },
-    applyExtractedSettings(extracted: {
-      apiKey?: string;
-      apiBaseUrl?: string;
-      defaultModel?: string;
-      advancedJson?: string;
-      contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
-    }): void {
-      // JSON→表单回填（hb12-CFG-09：updatingFromJson 死标志已删——防回写循环靠 configSnapshot 快照比对）
-      if (extracted.apiKey) {
-        this.config.apiKey = extracted.apiKey;
-        this.importedFields.add('apiKey');
-      }
-      if (extracted.apiBaseUrl) {
-        this.config.apiBaseUrl = extracted.apiBaseUrl;
-        this.importedFields.add('apiBaseUrl');
-      }
-      if (extracted.defaultModel) {
-        this.config.defaultModel = extracted.defaultModel;
-        this.importedFields.add('defaultModel');
-      }
-      if (extracted.advancedJson && extracted.advancedJson !== '{}') {
-        this.config.advancedJson = extracted.advancedJson;
-        this.importedFields.add('advancedJson');
-      }
-      if (extracted.contextWindowByAlias !== undefined) {
-        this.config.contextWindowByAlias = extracted.contextWindowByAlias;
-        this.importedFields.add('contextWindowByAlias');
       }
     },
   },

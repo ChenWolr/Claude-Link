@@ -166,9 +166,10 @@ check('⑦ CFG-03/04：测试 spawn stdin ignore + 清理延迟重试（taskkill
 });
 
 // ⑧ CFG-05：clearConfig 缓存复位。
+// （2026-09-20：断言窗口原锚函数已随 settings 导入死链路删除而移除，改用函数闭合括号锚，断言不变。）
 check('⑧ CFG-05：clearConfig 复位模型缓存/CLI 缓存/投影快照', () => {
   const idx = cm.indexOf('export function clearConfig');
-  const body = cm.slice(idx, cm.indexOf('export function importSettingsFile'));
+  const body = cm.slice(idx, cm.indexOf('\n}', idx));
   assert.match(body, /clearProviderModelsCache\(\);/, '缺模型缓存复位');
   assert.match(body, /resetCliDetectionCache\(\);/, '缺 CLI 缓存复位');
   assert.match(body, /clearProjectionSnapshot\(/, '缺投影快照清理');

@@ -22,9 +22,8 @@ export const IPC_CHANNELS = {
   CONFIG_SAVE: 'config:save',
   CONFIG_CLEAR: 'config:clear',
   CONFIG_STORAGE_INFO: 'config:storageInfo',
-  CONFIG_IMPORT_SETTINGS: 'config:importSettings',
-  CONFIG_PICK_SETTINGS_FILE: 'config:pickSettingsFile',
-  CONFIG_AUTO_DETECT: 'config:autoDetect',
+  // settings.json 导入/自动检测死链路通道（config:importSettings / config:pickSettingsFile /
+  // config:autoDetect）已于 2026-09-20 整链删除。
   // 流式测试连接通道已删除（测试收敛到 PROVIDER_TEST_MODEL 行内直返）。
   // Task 3 Step 5：原生 settings 诊断（resolveSettings 摘要，脱敏：只回来源/路径/键名，绝不含值）。
   SETTINGS_GET_DIAGNOSTIC: 'settings:getDiagnostic',
