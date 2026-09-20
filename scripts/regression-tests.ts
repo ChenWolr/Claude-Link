@@ -25,8 +25,7 @@ import { alignPermissionDefaultMode, applyPermissionUpdates, buildPermissionSett
 import { shouldNotifyInteractionCancelled } from '../src/shared/interaction-cancel';
 import { isApiErrorAssistantText } from '../src/shared/api-error-text';
 import { classifyUpstreamError, isNonRetryableUpstreamError, isReasoningReplayApiError, upstreamFatalMessage } from '../src/shared/upstream-errors';
-import { parseClaudeSettings } from '../src/main/modules/settings-importer';
-import { syncFormToAdvancedJson } from '../src/shared/settings-parser';
+import { parseClaudeSettings, sensitiveEnvKeys, syncFormToAdvancedJson } from '../src/shared/settings-parser';
 import { normalizeSearchText } from '../src/main/utils/search-normalizer';
 import { applyExternalLinkTarget, applyImageProtocolFilter, createPreviewMarkdownRenderer, isDiffContent, renderDiffHtml, renderDiffHtmlWithRenderer, renderMarkdown } from '../src/renderer/utils/markdown';
 import { synthesizeToolDiff } from '../src/renderer/utils/tool-diff';
@@ -1144,6 +1143,128 @@ function testSettingsImportPreservesNestedJson(): void {
     hooks: [{ event: 'Stop', command: 'notify' }],
     alwaysThinkingEnabled: true,
   });
+}
+
+// ── 2026-09-20 settings/连接审计契约（G2）：原生 settings 敏感 env 键警示 ──────────────
+function testSensitiveEnvKeysDiagnosticContracts(): void {
+  // 行为级：sensitiveEnvKeys 只回键名、永不回值；坏输入静默返回 []。
+  const keys = sensitiveEnvKeys(
+    JSON.stringify({
+      env: {
+        ANTHROPIC_API_KEY: 'sk-secret',
+        ANTHROPIC_BASE_URL: 'https://x',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        MY_VAR: 'plain',
+      },
+    }),
+  );
+  assert.deepEqual(
+    keys,
+    ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC'],
+    '命中 ANTHROPIC_*/CLAUDE_CODE_* 前缀；普通键（MY_VAR）不命中',
+  );
+  assert.deepEqual(
+    sensitiveEnvKeys(JSON.stringify({ env: { CLAUDE_EFFORT: 'high', CLAUDE_CONFIG_DIR: '/x', MYVAR: '1' } })),
+    ['CLAUDE_EFFORT', 'CLAUDE_CONFIG_DIR'],
+    'CLAUDE_EFFORT/CLAUDE_CONFIG_DIR 前缀命中',
+  );
+  assert.deepEqual(sensitiveEnvKeys('not-json{'), [], '坏 JSON → []（诊断可选能力，静默不抛）');
+  assert.deepEqual(sensitiveEnvKeys(''), [], '空串 → []');
+  assert.deepEqual(sensitiveEnvKeys('[1,2]'), [], '顶层非对象 → []');
+  assert.deepEqual(sensitiveEnvKeys('{}'), [], 'env 缺失 → []');
+  assert.deepEqual(sensitiveEnvKeys(JSON.stringify({ env: 'nope' })), [], 'env 非对象 → []');
+  // 值非字符串仍报键名（键名过滤只看键名；若实现回值，本 deepEqual 必失败——值零泄露在此钉住）。
+  assert.deepEqual(sensitiveEnvKeys(JSON.stringify({ env: { ANTHROPIC_API_KEY: 123 } })), ['ANTHROPIC_API_KEY'], '值非字符串仍报键名');
+
+  // 形态级：诊断函数扩展 envKeysBySource 并调用 sensitiveEnvKeys；返回对象无 env/effective 值字段。
+  const fs = require('node:fs') as typeof import('node:fs');
+  const readSrc = (rel: string): string => fs.readFileSync(new URL(rel, import.meta.url), 'utf8');
+  const sdkBackend = readSrc('../src/main/modules/sdk-backend.ts');
+  const diagStart = sdkBackend.indexOf('export async function getNativeSettingsDiagnostic');
+  assert.ok(diagStart > -1, '未找到 getNativeSettingsDiagnostic');
+  // 窗口锚用下一个「\nexport 」：函数签名的 Promise 类型闭合「}> {」顶格，'\n}' 会切在签名处。
+  const diagEnd = sdkBackend.indexOf('\nexport ', diagStart + 10);
+  const diagBody = sdkBackend.slice(diagStart, diagEnd > -1 ? diagEnd : undefined);
+  assert.ok(diagBody.includes('envKeysBySource'), '诊断返回须含 envKeysBySource（逐层敏感 env 键名）');
+  assert.ok(/sensitiveEnvKeys\(/.test(diagBody), '诊断须调用 sensitiveEnvKeys 提取键名');
+  assert.ok(!/envValues|envByKeyValue|effectiveValues/.test(diagBody), '诊断不得携带 env/effective 值字段（只回键名）');
+  assert.ok(/USERPROFILE[\s\S]{0,400}HOME/.test(diagBody), 'user 层须 USERPROFILE/HOME 多候选 home（去重）');
+  assert.ok(/settings\.local\.json/.test(diagBody), 'local 层须按 cwd 定位 settings.local.json');
+  const ipcTypes = readSrc('../src/shared/types/ipc.ts');
+  assert.ok(/envKeysBySource/.test(ipcTypes), 'NativeSettingsDiagnostic 类型须声明 envKeysBySource');
+  const configPage = readSrc('../src/renderer/pages/ConfigPage.vue');
+  assert.ok(configPage.includes('原生 settings env 影响连接的键（值不显示）'), 'ConfigPage 须渲染敏感 env 键警示标题');
+  assert.ok(configPage.includes('下列键会参与会话连接'), 'ConfigPage 警示块须含「优先级 + 参与连接」说明文案');
+  assert.ok(/envKeysBySource/.test(configPage), 'ConfigPage 须按 envKeysBySource 逐层渲染键名');
+}
+
+// ── 2026-09-20 settings/连接审计契约（G3）：连接面白名单 ─────────────────────────────
+// 扫描范围仅 src/{renderer,preload,main,shared} 的 .ts/.vue；out/node_modules/scripts/prototypes 不在面内。
+// 边界注：聊天 markdown 的远程图片由网页引擎按 isAllowedMarkdownImageUrl 协议过滤做资源加载，
+// 不是代码发起的直连——断言 A 钉代码级 API，不覆盖 DOM 资源加载（计划如实声明的已知边界）。
+function testConnectionSurfaceWhitelistContracts(): void {
+  const fs = require('node:fs') as typeof import('node:fs');
+  const path = require('node:path') as typeof import('node:path');
+  const srcRoot = path.resolve(__dirname, '..', 'src');
+  const sources = new Map<string, string>();
+  const walk = (dir: string, prefix: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(abs, rel);
+      else if (/\.(tsx?)$/.test(entry.name) || entry.name.endsWith('.vue')) {
+        sources.set(rel, fs.readFileSync(abs, 'utf8'));
+      }
+    }
+  };
+  for (const dir of ['renderer', 'preload', 'main', 'shared']) {
+    walk(path.join(srcRoot, dir), dir);
+  }
+  assert.ok(sources.size > 100, `连接面扫描仅覆盖 ${sources.size} 个文件——src 目录结构变化须同步本契约`);
+
+  // 断言 A：渲染层/preload 代码级零直连（fetch / XMLHttpRequest / WebSocket / EventSource）。
+  const directApi = /\bfetch\s*\(|XMLHttpRequest|new WebSocket|new EventSource/;
+  for (const [file, src] of sources) {
+    if (file.startsWith('renderer/') || file.startsWith('preload/')) {
+      assert.ok(!directApi.test(src), `${file} 渲染层/preload 不得出现代码级直连 API`);
+    }
+  }
+
+  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver}。
+  // （\.request\( 覆盖 topic-analyzer 的 https/http 模块别名 lib.request 形态；该别名全树仅此一处。）
+  const httpDirect = /\bfetch\s*\(|https\.request|http\.request|https\.get|http\.get|\.request\s*\(/;
+  const httpHits = [...sources.entries()].filter(([, src]) => httpDirect.test(src)).map(([file]) => file).sort();
+  assert.deepEqual(
+    httpHits,
+    ['main/modules/model-resolver.ts', 'main/modules/topic-analyzer.ts'],
+    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单两处外不得新增直连）',
+  );
+
+  // 断言 C：spawn/execFile 文件 ∈ {connection-tester, sdk-backend, changes-panel, cli-detector}。
+  // （\bexecFile\b 含 import/promisify 形态——cli-detector 经 execFileAsync 调用，字面 execFile( 漏检。）
+  const processSpawn = /\bspawn\s*\(|\bexecFile\b/;
+  const spawnHits = [...sources.entries()].filter(([, src]) => processSpawn.test(src)).map(([file]) => file).sort();
+  assert.deepEqual(
+    spawnHits,
+    [
+      'main/modules/changes-panel.ts',
+      'main/modules/cli-detector.ts',
+      'main/modules/connection-tester.ts',
+      'main/modules/sdk-backend.ts',
+    ],
+    'spawn/execFile 文件超出白名单（连接测试/post-turn 探针/打开方式/CLI 检测四处外不得新增子进程）',
+  );
+
+  // 断言 D：--setting-sources 隔离参数仅存于 connection-tester 与 shared/post-turn-probe，且两处都在。
+  const settingSourcesHits = [...sources.entries()]
+    .filter(([, src]) => src.includes('--setting-sources'))
+    .map(([file]) => file)
+    .sort();
+  assert.deepEqual(
+    settingSourcesHits,
+    ['main/modules/connection-tester.ts', 'shared/post-turn-probe.ts'],
+    '--setting-sources 隔离参数必须仅存于连接测试与 post-turn 探针两处（防 settings env 劫持的隔离防御丢失/扩散）',
+  );
 }
 
 function testClaudeSettingsProjectionPreservesAdvancedSettings(): void {
@@ -3476,6 +3597,8 @@ testDiffBodySearchScrollContracts();
 testOpenWithFallbackContracts();
 testApiUrlBuilder();
 testSettingsImportPreservesNestedJson();
+testSensitiveEnvKeysDiagnosticContracts();
+testConnectionSurfaceWhitelistContracts();
 testClaudeSettingsProjectionPreservesAdvancedSettings();
 testSearchNormalizer();
 testMarkdownExternalLinks();

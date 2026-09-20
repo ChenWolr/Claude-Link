@@ -244,7 +244,7 @@ export async function cleanupDetachedAttachments(ids: string[]): Promise<void> {
   }
 }
 
-/** 受控预览：校验会话归属后返回有界缩略图/原图 bytes，不返回路径。 */
+/** 受控预览：校验会话归属后返回缩略图/原图 bytes，不返回路径（原图无读侧字节预检，上界来自图片暂存 10MiB 上限；导出快照链另传 maxBytes 读前预检）。 */
 export async function getAttachmentPreview(request: {
   sessionId: string;
   attachmentId: string;

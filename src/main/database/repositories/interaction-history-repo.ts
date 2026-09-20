@@ -1,6 +1,8 @@
 // interaction-history-repo.ts
-// 交互历史持久化：远程交互弹窗（有 sessionId）在用户提交/取消时由渲染层落库一条记录；
-// 本地 confirm（sessionId 为空）不落库。
+// 交互历史持久化：① 远程交互弹窗（有 sessionId）用户提交/取消时经渲染层 IPC 落库
+//（本地 confirm 无 sessionId 不落库）；② 主进程兜底直写 cancel 行：回合取消统一落
+//（sdk-backend killProcess，hb12-PERM-05，用户/系统取消均落、文案区分归因）与渲染
+// 进程崩溃兜底（interaction-prompts recordCancelHistory，hb13-v B9）。
 // 切换会话或重启 app 后仍可在 InteractionPrompt 底部"交互历史"区回看。
 //
 // V3-3：把 InteractionPrompt.vue 原本仅内存的 history ref 升级为 DB 持久化。

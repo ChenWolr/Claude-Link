@@ -7,7 +7,8 @@
 //
 // 多供应商库（r3-r9）：设置页只维护可选的供应商与模型，无「使用中/默认」选用语义；
 // AppConfig.lastUsedProviderId/lastUsedModelId 是「最近一次会话选用」的记忆性字段（新会话初始值）。
-// 档案密钥（明文/密文）只在本模块与主进程内存中；renderer 经 listProviderProfiles 只拿掩码视图。
+// 档案密钥（明文/密文）只在本模块与主进程内存中；renderer 经 config:listProviders
+//（getLibrarySnapshot → ProviderProfileView）只拿掩码视图。
 // 老字段（providerName/apiKey/apiBaseUrl/defaultModel…）= lastUsed 档案的投影；
 // 当前唯一消费点是 buildSpawnEnv 无会话 override 时的兜底（settings-writer 已不投影端点凭据、
 // connection-tester 行内测试直读档案）。
@@ -15,10 +16,8 @@
 import ElectronStoreModule from 'electron-store';
 import { safeStorage } from 'electron';
 import { randomUUID } from 'node:crypto';
-import * as fs from 'fs';
 import type {
   AppConfig,
-  ModelAlias,
   ProviderProfileView,
   ProviderSaveInput,
   ProviderLibrarySnapshot,
@@ -38,7 +37,6 @@ import { clearProjectionSnapshot } from './settings-projection-merge';
 import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels } from '../../shared/provider-library';
 import { logger } from '../utils/logger';
 import { createSafeStore } from '../utils/safe-store';
-import { parseClaudeSettings } from './settings-importer';
 import { writeClaudeSettings, SKIP_NO_WORKDIR } from './settings-writer';
 
 interface StoredConfig
@@ -337,8 +335,9 @@ export function saveConfig(partial: Partial<AppConfig>): AppConfig {
   // hb10 P2-4：apiKeyBroken 是 getConfig 的派生标记（解密失败态），不是存储字段——
   // 渲染层整份回显带回时必须剥离，防派生态落盘。
   delete (storage as Partial<StoredConfig>).apiKeyBroken;
-  // hb12-P2-6：lastUsed 两键只经 recordLastUsedProviderModel 直写——渲染层整份回显
-  //（H1 失败重存/队列任务运行期保存）不得把陈旧内存 lastUsed 回写主进程（全局「最近使用」静默回退）。
+  // hb12-P2-6：CONFIG_SAVE 回显的 lastUsed 两键一律剥离（合法直写点全在主进程内部：
+  // recordLastUsedProviderModel、saveProviderProfile 首档创建、projectLegacyFields/迁移投影）——
+  // 渲染层整份回显（H1 失败重存等）不得把陈旧内存 lastUsed 回写主进程（全局「最近使用」静默回退）。
   delete (storage as Partial<StoredConfig>).lastUsedProviderId;
   delete (storage as Partial<StoredConfig>).lastUsedModelId;
   // F2：maxTurns 落盘前兜底清洗（非有限/≤0/清空串 → 默认 200）——渲染层 v-model.number 的
@@ -419,24 +418,6 @@ export function clearConfig(): AppConfig {
   projectLegacyFields();
   emitConfigSaved();
   return getConfig();
-}
-
-export function importSettingsFile(filePath: string): {
-  apiKey?: string;
-  apiBaseUrl?: string;
-  defaultModel?: string;
-  contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
-  advancedJson: string;
-} {
-  // hb10-CFG-05：入口三项加固（与 IPC 层 CONFIG_IMPORT_SETTINGS 死通道收窄对齐——
-  // 直调本函数也受保护）：① 仅 .json 后缀；② ≤1MB；③ 返回 apiKey 经 maskApiKey 掩码不泄露明文。
-  if (typeof filePath !== 'string' || !filePath.toLowerCase().endsWith('.json')) {
-    throw new Error('仅支持 .json 设置文件');
-  }
-  const st = fs.statSync(filePath);
-  if (st.size > 1024 * 1024) throw new Error('设置文件超过 1MB 上限');
-  const parsed = parseClaudeSettings(fs.readFileSync(filePath, 'utf-8'));
-  return { ...parsed, apiKey: parsed.apiKey ? maskApiKey(parsed.apiKey) : parsed.apiKey };
 }
 
 // ── 多供应商库：迁移 + CRUD ────────────────────────────────────────────

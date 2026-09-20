@@ -25,9 +25,10 @@ type OptionEntry = InteractionPromptOption & { originalIndex: number };
 
 const interactionStore = useInteractionStore();
 // 启动白屏 hotfix（2026-09-13）：sessionStore 声明必须置于 currentRequests 之前——
-// hb12-PERM-04 的 draftCache watch（源含 activeRequest）在 setup 期立即求值 getter，
-// 链式触达 currentRequests → sessionStore；若声明留在文件底部（V3-3 历史加载区），
-// TDZ ReferenceError 会在 app.mount 期未捕获抛出 → 整树挂载失败 → 白屏。
+// hb12-PERM-04 时期 draftCache watch 源含 activeRequest，setup 期求值 getter 链式触达
+// currentRequests → sessionStore；若声明留在文件底部（V3-3 历史加载区），TDZ ReferenceError
+// 会在 app.mount 期未捕获抛出 → 整树挂载失败 → 白屏。hb13-v A8 后 watch 源已改为仅草稿字段
+//（见下方 A8 注记），此声明顺序作为防御保留。
 const sessionStore = useSessionStore();
 // V3-2：requests 改由 interaction-store 统一管理（远程 IPC + 本地 confirm 同一队列）。
 // InteractionPrompt 只读 store.requests，UI 副作用（initSelection/restoreFocus）留本地。
@@ -220,7 +221,7 @@ function initSelection(request: InteractionPromptPayload): void {
   void nextTick(focusDialogStart);
 }
 
-// hb12-PERM-04：草稿变化即入缓存（浅 watch 节流由 Vue 调度；请求完成时清理由 removeRequestData 消费方不再触发——残留小条目可接受）。
+// hb12-PERM-04：草稿变化即入缓存（deep watch，触发时机由 Vue 调度器批处理；请求完成时清理由 removeRequestData 消费方不再触发——残留小条目可接受）。
 // hb13-v A8：写回自身 id——旧实现把 activeRequest 放进 watch 源且回调读 flush 时的
 // activeRequest.value：A→B 弹窗换位时 flush 读到的已是 B，把 A 的选择写进 B 的草稿，
 // B 恢复出 A 的预选（权限弹窗预选上一单 allow，误按 Enter 即放行，误授权风险面）。

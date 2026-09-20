@@ -245,7 +245,8 @@ onUnmounted(() => {
         <!-- 生效时机提示（照 ProviderModelSelector foot 先例）。F2（验收 review）精确化：
              切档只对「切换后新发起」的工具请求即时生效——已在途的请求按旧档走完。
              自动模式（bypassPermissions）被 CLI 拒绝中途设置（须启动 flag），下一条生效——
-             属 CLI 约束的已知例外，按用户要求不在界面上展示。 -->
+             属 CLI 约束的已知例外：早期版本整条例外不在界面展示，hb10-PERM 后由下方
+             foot 以简化文案「bypass 需下一条消息生效」有意补进界面（机制细节仍不在界面展开）。 -->
         <div class="perm-foot">对切换后新发起的工具请求即时生效；bypass 需下一条消息生效</div>
       </div>
     </div>

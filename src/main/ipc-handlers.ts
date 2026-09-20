@@ -1,7 +1,7 @@
 // ipc-handlers.ts
 // IPC handler 注册中心：渲染进程 ↔ 主进程的桥梁。
 //
-// 注册 cli / config / workspace / provider / changes / settings / session / message / claude-plan / commands / chat / interaction / task / queue / attachment 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
+// 注册 cli / config / workspace / provider / changes / settings / skill / session / message / claude-plan / commands / chat / interaction / task / queue / attachment 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
 import { BrowserWindow, dialog, ipcMain, app } from 'electron';
@@ -9,18 +9,17 @@ import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性/目录校验
 import path from 'node:path';
+import os from 'node:os';
 import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
 import { IPC_CHANNELS } from '../shared/constants';
-import { clearConfig, getConfig, importSettingsFile, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
-import { detectClaudeConfig } from './modules/claude-config-detector';
+import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
-import { collectSkillProjectDirs } from './modules/project-skills';
+import { collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
 import { resolveDefaultModel } from '../shared/settings-parser';
-import { maskApiKey } from '../shared/provider-library';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
 import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight } from './modules/chat-backend';
@@ -89,7 +88,7 @@ function broadcastProvidersChanged(): void {
 }
 
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
-  // hb10-CMD-10：needsRefreshProbeOnly 重探节流时间戳（模块级进程内）。
+  // hb10-CMD-10：needsRefreshProbeOnly 重探节流时间戳（registerIpcHandlers 单次注册闭包内，ipcHandlersRegistered 守卫保证语义等效模块级进程内单例）。
   let lastProbeOnlyAt = 0;
 
   mainWindow = mainWindowRef;
@@ -168,24 +167,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       db: `${userData}/claude-link.db`,
     };
   });
-  ipcMain.handle(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, async (_event, filePath: string) => {
-    // hb10-CFG-05：死通道收窄——仅 .json 后缀且 ≤1MB；返回值 apiKey 掩码化（不泄露明文）。
-    if (typeof filePath !== 'string' || !filePath.toLowerCase().endsWith('.json')) throw new Error('仅支持 .json 设置文件');
-    const st = await fsp.stat(filePath);
-    if (st.size > 1024 * 1024) throw new Error('设置文件超过 1MB 上限');
-    const imported = importSettingsFile(filePath);
-    return { ...imported, apiKey: imported.apiKey ? maskApiKey(imported.apiKey) : imported.apiKey };
-  });
-  ipcMain.handle(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE, async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openFile'],
-      filters: [{ name: 'JSON', extensions: ['json'] }],
-      title: '选择 Claude Code settings.json',
-    });
-    if (result.canceled || !result.filePaths.length) return null;
-    return result.filePaths[0];
-  });
-  ipcMain.handle(IPC_CHANNELS.CONFIG_AUTO_DETECT, async () => detectClaudeConfig());
+  // settings.json 导入/选档/自动检测三条死通道（原 config:importSettings 等三个 channel）
+  // 已于 2026-09-20 整链删除：无 UI 入口却保留明文 apiKey 回传渲染进程的通道。
   // 流式测试连接（弹框）已删除：测试收敛到 PROVIDER_TEST_MODEL（模型行内按钮，直返结果）。
   // Task 3 Step 5：原生 settings 诊断摘要（resolveSettings 脱敏视图：来源/CLAUDE.md 候选/生效键名，
   // 绝不含 effective 值/API key/env）。cwd 只做非空字符串校验——真实路径解析交给 SDK 与 findClaudeMdCandidates。
@@ -215,12 +198,20 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 只读、无副作用；全链 async + 每目录 3s 超时预算（R-1：不可达 UNC/断连映射盘不再同步
   // 占死主进程），每次进 Skill tab 现查。
   ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET, async () => {
+    // Y-1（2026-09-19 X-123 批评审 §2）：用户根映射先取（独立单槽共享）；null 哨兵=枚举超时——
+    // 载荷恒回对象 + 超时标记（渲染层据此不覆盖映射槽/不置就绪旗标），dirs 三源 await 内联不动。
+    const userDirNames = await collectUserSkillDirNames(path.join(os.homedir(), '.claude', 'skills'));
     return {
       dirs: await collectSkillProjectDirs({
         recentDirs: listRecentWorkspaces(),
         defaultDir: getConfig().workingDirectory ?? null,
         sessionCounts: sessionRepo.listWorkingDirCounts(),
       }),
+      // R-1（2026-09-19）：全局作用域（~/.claude/skills）fm 名→目录名映射，与项目清单同拍现查
+      // （开关键=目录名口径的数据源）；rootDir 由本侧组装，collectUserSkillDirNames 参数化
+      // 不硬编码用户目录（契约以夹具直测）。
+      userSkillDirNames: userDirNames ?? {},
+      userSkillDirNamesTimedOut: userDirNames === null,
     };
   });
 
@@ -371,6 +362,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     ) => {
       // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——非字符串 sessionId 直拒。
       if (typeof id !== 'string' || !id.trim()) throw new Error('非法会话 id');
+      // D-8（review 2026-09-18 §3-14）：data 形状守卫（对齐防御惯例）——null/非对象入参时下方
+      // 白名单访问会 TypeError → invoke reject；渲染层 6 处恒传对象（当前不可达），此处仅兜底
+      // 拒绝（return false 与 updateSession 无行 falsy 返回同形态），不抛错。
+      if (!data || typeof data !== 'object') return false;
       // 白名单校验（review-v2 F11）：不信任 renderer 传值，非法 thinkingLevel 丢弃，
       // 合法 null（跟随默认）/ 有效档位放行。
       if (data.thinkingLevel !== undefined && data.thinkingLevel !== null && !isValidThinkingLevel(data.thinkingLevel)) {
@@ -462,7 +457,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         }
       });
       applyTurnMeta();
-      // hb10-OPT-1：两调用方均 fire-and-forget，返回布尔即可（省一次全行读）。
+      // hb10-OPT-1：调用方均 fire-and-forget，返回布尔即可（省一次全行读）。
       return true;
     },
   );
@@ -506,7 +501,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 生命周期事实。无 DB 行（暂态）不再 throw：只读返回全局兜底副本（source:'cache'），不 markSessionActive、
     // 不 startCommandProbe、不 schedulePostTurnProbe；分流决策统一在 shared 纯函数 resolveCommandsGetResult。
     const sessionRow = sessionRepo.getSession(sessionId);
-    // P2-14：快照带项目级出生指纹时现算比对（无指纹的旧快照/无 cwd 会话跳过 IO）。
+    // P2-14：快照带项目级出生指纹时现算比对（无指纹的旧快照跳过 IO；cwd 取值见下条 hb10-CMD-V01
+    // 回退——会话 cwd 缺省时用全局配置工作目录现算，两级皆空才经 getProjectOriginFingerprint 的
+    // !cwd 短路无 IO）。
     const existingSnapshot = sdkCommandRegistry.get(sessionId);
     const currentProjectFingerprint = existingSnapshot?.projectOriginFingerprint !== undefined
       // hb10-CMD-V01：指纹比对侧镜像出生侧回退——session cwd 缺省时用全局配置工作目录
@@ -561,7 +558,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
   // unknown/hidden 命令名）。只读、无副作用——不 markSessionActive、不触发 probe（区别于 COMMANDS_GET）。
-  // sessionId 做非空校验；DB 会话存在性不强制（诊断对无快照会话也返回 total=0 空诊断，不抛错）。
+  // sessionId 做非空校验；DB 会话存在性不强制（无快照会话回退全局兜底派生诊断，兜底也未就绪时
+  // 才返回 total=0 空诊断；均不抛错）。
   ipcMain.handle(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, async (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
     return getCommandProvenance(sessionId);

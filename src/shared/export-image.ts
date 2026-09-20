@@ -28,7 +28,7 @@ export const DEFAULT_EXPORT_BUDGET: PaginationBudget = {
   targetWeight: 10000,
   imageWeight: 6000,
   maxPageCount: 100,
-  maxPageHeightCss: 16000, // 由像素预算反推的单页 CSS 高度上限（见 checkPixelBudget）
+  maxPageHeightCss: 16000, // 兜底默认：deriveMaxPageHeightCss/ByMemory 入参非法时返回本值（16000 为 v3 按像素预算反推的历史取值；现行分页 JPEG 固定 1500、PNG 经 deriveMaxPageHeightByMemory 按内存反推）
 };
 
 // 单页像素预算阈值（v3 第 8.4 节）。检查原始值，不先 clamp。
@@ -40,7 +40,7 @@ export const SEGMENT_COUNT_MAX = 120;
 // 快照预算阈值（v3 第 11.3 节）。
 export const SNAPSHOT_MESSAGE_MAX = 50_000;
 export const SNAPSHOT_MESSAGE_BYTES_MAX = 16 * 1024 * 1024; // 单条 UTF-8 文本 16 MiB
-export const SNAPSHOT_TOTAL_BYTES_MAX = 64 * 1024 * 1024; // 总可见文本 + data URL 64 MiB
+export const SNAPSHOT_TOTAL_BYTES_MAX = 64 * 1024 * 1024; // 总可见文本 + 附件 filename/MIME 元数据 + 缩略图真实 bytes 64 MiB（快照不含 data URL，预览为 PNG bytes）
 export const SNAPSHOT_IMAGE_MAX = 2000;
 
 // JPEG / 分块常量。
@@ -637,7 +637,7 @@ export function isStaleEvent(eventJobId: string, currentJobId: string | null): b
   return eventJobId !== currentJobId;
 }
 
-/** 构造一条进度 payload（便于主进程统一发出）。 */
+/** 构造一条进度 payload（v3 遗留便捷构造，当前 src/scripts 均无调用方；主进程实际用 export-image-manager 本地 makeProgress，逻辑同构）。 */
 export function makeProgressPayload(
   partial: Omit<ExportImageProgressPayload, 'percent'> & { percent?: number },
 ): ExportImageProgressPayload {

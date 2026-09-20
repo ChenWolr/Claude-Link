@@ -1,10 +1,12 @@
 // config-store.ts
-// 配置状态：AppConfig + advancedJson 单一数据源 + 自动检测回填 + 防循环。
+// 配置状态：AppConfig + advancedJson 单一数据源 + 防循环。
+// （settings.json 导入/自动检测回填死链路已于 2026-09-20 删除：导入/自动检测/JSON 回填/
+// 抽取值回写四个 action 均无 UI 调用方，随主进程通道一并整链移除。）
 //
 // 多供应商库上线后，连接字段（供应商/key/url）的真源是 provider-store（主进程 ProviderProfile）；
 // 本 store 仍承载行为/外观字段与 advancedJson（全局 Claude 设置）的编辑与自动保存。
-// hb12-CFG-09：updatingFromJson 死标志已删除（原历史防循环标志，无读取点）
-// 置位/释放；自动保存靠 ConfigPage 的 configSnapshot 快照比对防回写循环。可删（连同置位逻辑）。
+// hb12-CFG-09：updatingFromJson 死标志（原历史防循环标志，无读取点）已全链删除；
+// 自动保存的防回写循环由 ConfigPage 的 configSnapshot 快照比对承担。
 
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
@@ -12,18 +14,20 @@ import { ref } from 'vue';
 // ModelAlias 类型定义在 shared/types/config（供 shared 层 AppConfig 与渲染层共用）。
 import type { ModelAlias } from '../../shared/types/config';
 export type { ModelAlias };
-import type { AppConfig, DetectedClaudeConfig } from '../../shared/types/config';
+import type { AppConfig } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
 import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
-import { parseClaudeSettings } from '../../shared/settings-parser';
-import { useInteractionStore } from './interaction-store'; // hb10-CFG-05：advancedJson 覆盖前确认
 
 // H1（F5 重做）：设置保存失败跨卸载可感知标志。ConfigPage 组件局部 saveStatus 在页面卸载后
 // 无渲染、其 watch 随 setup 停止——失败对用户不可见，且重进页被 loadConfig 用主进程旧值
 // 回滚。此模块级 ref 与组件生命周期解耦：saveConfig 失败置 true、成功清 false；App.vue 全局
 // watch 在 false→true 边沿弹一次 toast，ConfigPage performInit 开头据它用内存值重存一次。
 export const lastSaveFailed = ref(false);
+
+// P2-2 漂移补偿定时器（模块级，与组件生命周期解耦）：保存响应落地时内存已被在飞编辑，
+// 则不覆写并排一次 700ms 防抖补偿重存；多条防抖合一，持续编辑期间不产生保存风暴。
+let driftResaveTimer: ReturnType<typeof setTimeout> | null = null;
 
 const defaultConfig: AppConfig = {
   provider: 'anthropic',
@@ -69,8 +73,6 @@ export const useConfigStore = defineStore('config', {
     savingConfig: false,
     detectingCli: false,
     error: null as string | null,
-    importedFields: new Set<string>(),
-    // 历史防循环标志：现无任何读取点（防回写循环由 ConfigPage 的 configSnapshot 快照比对承担）
     // 配置/数据落盘目录（点 4：让用户知道配置存在哪）
     storageInfo: null as { userData: string; config: string; workspaces: string; db: string } | null,
     // Task 3 Step 5：原生 settings 诊断摘要（脱敏视图，供 UI 核验 user/project/local 实际加载来源）
@@ -124,25 +126,31 @@ export const useConfigStore = defineStore('config', {
       this.nativeSettingsDiagnosticRequestId++;
       this.nativeSettingsDiagnostic = null;
     },
-    async saveConfig() {
-      // hb10-CFG-08：真互斥——在途保存未落定时重入直接返回（防并发双写竞态）。
-      if (this.savingConfig) return;
+    async saveConfig(): Promise<{ saved: boolean }> {
+      // hb10-CFG-08：真互斥——在途保存未落定时重入不丢弃锁，改为返回 {saved:false} 信号
+      // （P2-1：调用方据信号重排补存，不再被静默吞掉；锁本身不回退，防双写竞态复活）。
+      if (this.savingConfig) return { saved: false };
       this.savingConfig = true;
       this.error = null;
+      // P2-2 漂移补偿：漂移分支排 700ms 防抖补偿重存（拨回开场景 watch 已短路、页面不会再排，
+      // 必须由 store 自补）；补偿又撞在飞被跳过时按同节奏重排，直至真实落定。
+      const scheduleDriftResave = () => {
+        if (driftResaveTimer) return;
+        driftResaveTimer = setTimeout(() => {
+          driftResaveTimer = null;
+          void this.saveConfig()
+            .then((r) => { if (!r.saved) scheduleDriftResave(); })
+            .catch(() => undefined); // 补偿失败已经由 saveConfig 内部置 lastSaveFailed（toast 可见）
+        }, 700);
+      };
       try {
         // this.config 是 Pinia/Vue 的 reactive proxy，无法被 Electron IPC 结构化克隆，
         // 直接传输会抛 "An object could not be cloned."，保存失败、配置无法持久化。
         // 必须先深拷贝成纯普通对象再过 IPC。
         const plainConfig: AppConfig = JSON.parse(JSON.stringify(this.config));
-        this.config = await window.claudeLink.saveConfig(plainConfig);
-        // hb10-CFG-09：主进程拒收非法 workingDirectory（不存在/非目录）时按旧值保存——回传与
-        // 所送不一致即给 notice（保存成功非硬失败；不比对 null/空串：清空目录是合法操作）。
-        if (
-          plainConfig.workingDirectory &&
-          plainConfig.workingDirectory !== this.config.workingDirectory
-        ) {
-          this.error = `工作目录「${plainConfig.workingDirectory}」不存在或不是目录，已保留原值`;
-        }
+        // P2-2：发送时快照串。响应回来后与现内存比对——在飞期间的用户编辑不得被回传覆写。
+        const sentStr = JSON.stringify(plainConfig);
+        const resp = await window.claudeLink.saveConfig(plainConfig);
         // H1：保存成功清失败标志（App.vue 的 toast 只在 false→true 边沿弹，不重复打扰）。
         lastSaveFailed.value = false;
         // 主进程 saveConfig 末尾已把配置投影写入 <工作目录>/.claude/settings.local.json。
@@ -152,6 +160,24 @@ export const useConfigStore = defineStore('config', {
         if (this.config.workingDirectory) {
           await this.loadNativeSettingsDiagnostic(this.config.workingDirectory);
         }
+        // P2-2：漂移判定放在锁窗口尾（诊断 await 期间产生的编辑同属在飞编辑）。
+        // 无漂移 → 采纳主进程清洗派生态（掩码/投影权威值），并做 hb10-CFG-09 notice 比对；
+        // 有漂移 → 不覆写内存（保留用户编辑），排一次补偿重存把最新内存落盘。
+        const nowStr = JSON.stringify(JSON.parse(JSON.stringify(this.config)));
+        if (nowStr === sentStr) {
+          this.config = resp;
+          // hb10-CFG-09：主进程拒收非法 workingDirectory（不存在/非目录）时按旧值保存——回传与
+          // 所送不一致即给 notice（保存成功非硬失败；不比对 null/空串：清空目录是合法操作）。
+          if (
+            plainConfig.workingDirectory &&
+            plainConfig.workingDirectory !== this.config.workingDirectory
+          ) {
+            this.error = `工作目录「${plainConfig.workingDirectory}」不存在或不是目录，已保留原值`;
+          }
+        } else {
+          scheduleDriftResave();
+        }
+        return { saved: true };
       } catch (error) {
         this.error = error instanceof Error ? error.message : '保存配置失败';
         // H1：失败置标志。注意 this.config 未被覆写（赋值在成功分支）——内存里仍是失败时
@@ -173,87 +199,6 @@ export const useConfigStore = defineStore('config', {
         this.error = error instanceof Error ? error.message : '检测 Claude Code CLI 失败';
       } finally {
         this.detectingCli = false;
-      }
-    },
-    async importSettings(filePath: string) {
-      try {
-        const extracted = await window.claudeLink.importSettings(filePath);
-        // hb10-CFG-05：advancedJson 是整体替换（现有 permissions/hooks/env 会被整个换掉），
-        // 替换前必须确认；与现值相同/为空则无需打扰。
-        if (
-          extracted.advancedJson &&
-          extracted.advancedJson !== '{}' &&
-          extracted.advancedJson !== this.config.advancedJson
-        ) {
-          const interactionStore = useInteractionStore();
-          const ok = await interactionStore.requestConfirm({
-            title: '导入设置',
-            message: '将覆盖现有高级配置（advancedJson 含 permissions/hooks/env），确定继续？',
-            confirmText: '覆盖',
-            cancelText: '取消',
-          });
-          if (!ok) return;
-        }
-        this.applyExtractedSettings(extracted);
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '导入失败';
-      }
-    },
-    // 自动扫描系统 Claude Code 配置（settings.json / .claude.json / .credentials.json），
-    // 回填 apiKey/apiBaseUrl/defaultModel/advancedJson。OAuth token 绝不读取，只判存在性。
-    async autoDetectClaudeConfig(): Promise<DetectedClaudeConfig | null> {
-      try {
-        const detected = await window.claudeLink.autoDetectClaudeConfig();
-        if (!detected.found) {
-          this.error = '未找到 Claude Code 配置（请确认已安装 Claude Code 并至少登录/配置过一次）';
-          return null;
-        }
-        this.applyExtractedSettings(detected);
-        return detected;
-      } catch (error) {
-        this.error = error instanceof Error ? error.message : '自动检测失败';
-        return null;
-      }
-    },
-    // 直接从高级 JSON 文本框内容解析并回填字段。
-    // 复用主进程同一个 parseClaudeSettings，确保规则一致（含 Claude Code 的 env.* 字段）。
-    fillFromAdvancedJson(): { ok: boolean; message: string } {
-      const raw = this.config.advancedJson?.trim() || '{}';
-      try {
-        const parsed = parseClaudeSettings(raw);
-        this.applyExtractedSettings(parsed);
-        return { ok: true, message: '已从 JSON 填充字段' };
-      } catch (e) {
-        return { ok: false, message: e instanceof Error ? e.message : 'JSON 格式错误' };
-      }
-    },
-    applyExtractedSettings(extracted: {
-      apiKey?: string;
-      apiBaseUrl?: string;
-      defaultModel?: string;
-      advancedJson?: string;
-      contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
-    }): void {
-      // JSON→表单回填（hb12-CFG-09：updatingFromJson 死标志已删——防回写循环靠 configSnapshot 快照比对）
-      if (extracted.apiKey) {
-        this.config.apiKey = extracted.apiKey;
-        this.importedFields.add('apiKey');
-      }
-      if (extracted.apiBaseUrl) {
-        this.config.apiBaseUrl = extracted.apiBaseUrl;
-        this.importedFields.add('apiBaseUrl');
-      }
-      if (extracted.defaultModel) {
-        this.config.defaultModel = extracted.defaultModel;
-        this.importedFields.add('defaultModel');
-      }
-      if (extracted.advancedJson && extracted.advancedJson !== '{}') {
-        this.config.advancedJson = extracted.advancedJson;
-        this.importedFields.add('advancedJson');
-      }
-      if (extracted.contextWindowByAlias !== undefined) {
-        this.config.contextWindowByAlias = extracted.contextWindowByAlias;
-        this.importedFields.add('contextWindowByAlias');
       }
     },
   },

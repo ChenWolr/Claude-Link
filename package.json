@@ -1,6 +1,6 @@
 {
   "name": "claude-link",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Claude Code CLI Task Manager - Schedule, queue and manage Claude Code tasks",
   "main": "./out/main/index.js",
   "author": "Claude Link",

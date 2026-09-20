@@ -3,7 +3,7 @@
 // 与弹窗几何（rect/sidebarW），组装 DiffSidebar + DiffBody，处理键盘 / 焦点 / 缩放 / 「打开」/ toast。
 //
 // 显隐由 useDiffDialog 的模块级 state 驱动（openDiffDialog/closeDiffDialog）。组件在 App.vue 单例常驻，
-// v-if="state" 挂载。a11y 仿 InteractionPrompt / ImageLightbox：role=dialog、Tab trap、ESC/↑↓/[/]、还原焦点。
+// v-if="state" 挂载。a11y 仿 InteractionPrompt / ImageLightbox：role=dialog、Tab trap、Ctrl+F 搜索、ESC 关搜索/关弹窗、↑↓ 切改动、还原焦点。
 // 防残留三层：ensureDiff 的 sessionGen 守卫 + store 切会话清 diffCache + 本组件 watch(files) 当前文件消失即关。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useDiffDialog } from '../../composables/useDiffDialog';

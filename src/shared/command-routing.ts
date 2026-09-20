@@ -3,7 +3,9 @@
 //
 // 铁训不变量：本模块只用于「识别 / 匹配 / 菜单」，绝不充当发送白名单——
 // 用户手写的未知 /unknown 仍是 slash candidate，由现有 CHAT_SEND 原样发送（计划 §0.2-7、Task 7）。
-// parseSlashInvocation 不 trim、不重建 rawText：原样发送铁训要求参数/空格/中文/引号/换行不被改写。
+// parseSlashInvocation 不 trim、不重建 rawText；发送铁训的实际口径是「仅 trim 前后空白，
+// 参数内部空白/引号/中文/换行不改写」（trim 在 ChatPage buildPayload 完成，见
+// scripts/tdd-native-command-verify.ts Task 7 契约）。
 
 import type { SdkCommand } from './types/command';
 
@@ -16,7 +18,8 @@ export type SlashInvocation =
  * 识别输入是否形如 `/name ...`。
  *
  * - 只看首个非空白字符是否为 '/'；普通文本中间的 '/' 一律视为 prompt（不触发命令逻辑）。
- * - 不 trim、不重建 rawText（原样返回，供发送链路保留）。
+ * - 不 trim、不重建 rawText（原样返回；rawText 仅供调用方按需取用，生产发送链路不经本函数——
+ *   ChatPage buildPayload 自行取输入框原文并 trim 前后空白）。
  * - commandName 去掉前导 '/' 后原样保留大小写（canonical 展示不强制小写）；纯 '/' 时 commandName 为空（菜单触发）。
  * - argumentsText 为 commandName token 之后的内容，仅去掉紧随的一个分隔空白，保留参数内部所有空白/引号/中文。
  * - 未知命令同样归为 slash（kind 不携带「拒绝发送」信号）。

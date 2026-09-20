@@ -20,7 +20,7 @@ export interface CommandsGetInput {
   fallback: SessionCommandSnapshot | null;
   /** watcher 当前用户级指纹（D5）；undefined = watcher 未启动/未算出，不比对不误标。 */
   currentUserFingerprint?: string;
-  /** P2-14：当前项目级指纹（per-session cwd 两根现算）；undefined = 无 cwd/快照无出生指纹，不比对。 */
+  /** P2-14：当前项目级指纹（per-session cwd 两根现算，会话 cwd 缺省回退全局工作目录）；undefined = 无任何可用 cwd（会话与全局皆空）/快照无出生指纹，不比对。 */
   currentProjectFingerprint?: string;
   /** P3-4：全局 CLI 缺失（runGlobalCommandProbe 无 exe）。暂态只读分流据此返回 degraded 而非永久 loading。 */
   cliMissing?: boolean;
@@ -93,7 +93,7 @@ export function resolveCommandsGetResult(input: CommandsGetInput): CommandsGetDe
     if (!input.fallback && input.cliMissing) {
       snapshot = { ...snapshot, status: 'degraded', error: '未检测到本地 Claude Code，无法发现 Slash 命令' };
     } else if (!input.fallback && input.probeFailed) {
-      snapshot = { ...snapshot, status: 'degraded', error: '命令探测失败，重新打开菜单可重试' };
+      snapshot = { ...snapshot, status: 'degraded', error: '命令探测失败，可重试（重开菜单，或进 Skill 页点「重试」）' };
     }
     return {
       readOnly: true,

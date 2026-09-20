@@ -1,12 +1,19 @@
 <script setup lang="ts">
 // 应用骨架：左侧栏（会话）+ 中间工作区 + 右侧任务队列。
 // 左右两侧栏宽度可拖拽调整；聊天区与两侧栏保留间距；窗口缩放时中间工作区等比伸缩。
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { useRoute } from 'vue-router';
 import AppHeader from './AppHeader.vue';
 import AppSidebar from './AppSidebar.vue';
 import TaskQueuePanel from '../task/TaskQueuePanel.vue';
 
 const isTaskPanelOpen = ref(true);
+
+// 右侧活动栏（队列/子Agent/后台/改动）是会话工作区的一部分：仅 chat 路由渲染；
+// 配置页/会话管理页隐藏（AppHeader 同款路由感知，右栏此前遗漏）。
+// 队列事件监听已全局化到 App.vue，面板卸载不影响后台队列事件处理。
+const route = useRoute();
+const isChatRoute = computed(() => route.name === 'chat');
 
 // 可拉伸侧栏宽度（px）。默认值与原 --sidebar-width/--task-panel-width 一致。
 const SIDEBAR_MIN = 180;
@@ -82,11 +89,11 @@ onUnmounted(() => {
       </main>
     </section>
 
-    <template v-if="isTaskPanelOpen">
+    <template v-if="isTaskPanelOpen && isChatRoute">
       <div class="resize-handle resize-handle--task" @mousedown="onTaskResizeStart" title="拖动调整队列宽度" />
       <TaskQueuePanel />
     </template>
-    <button v-else class="reopen-task-panel" type="button" @click="isTaskPanelOpen = true">队列</button>
+    <button v-else-if="isChatRoute" class="reopen-task-panel" type="button" @click="isTaskPanelOpen = true">队列</button>
   </div>
 </template>
 

@@ -348,8 +348,9 @@ export class SdkCommandRegistry {
 export const sdkCommandRegistry = new SdkCommandRegistry();
 
 /**
- * 命令来源诊断顶层导出（Task 8）：供 ipc-handlers 经 chat-backend 聚合出口暴露给 renderer。
- * 与 getNativeSettingsDiagnostic 的导出形态对称（顶层函数包装进程单例方法）。
+ * 命令来源诊断顶层导出（Task 8）：供 ipc-handlers 的 COMMANDS_GET_DIAGNOSTIC 通道直接导入调用
+ * （不经 chat-backend 聚合出口；getNativeSettingsDiagnostic 才走 chat-backend，两者不对称）。
+ * 顶层函数包装进程单例方法，便于 tsx 行为测试。
  */
 export function getCommandProvenance(sessionId: string): CommandProvenance {
   return sdkCommandRegistry.getCommandProvenance(sessionId);

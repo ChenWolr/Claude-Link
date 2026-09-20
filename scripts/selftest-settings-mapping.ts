@@ -1220,11 +1220,15 @@ console.log('\n=== 40) UI 简化（r9 定版）：连接页=供应商库 + 会�
   const cpTemplate = cp.slice(cp.indexOf('<template>')).replace(/<!--[\s\S]*?-->/g, '');
   check('顶部测试连接已删（收敛到模型行内「测试」）', !cpTemplate.includes('测试连接'));
   check('自动检测入口已从多供应商设置页移除', !cpTemplate.includes('自动检测配置') && !cp.includes('handleAutoDetect'));
-  check('自动保存成功后才更新快照，失败可重试', /try \{\s*await store\.saveConfig\(\);\s*lastSavedSnapshot = configSnapshot\(\);/.test(cp) && !/lastSavedSnapshot = configSnapshot\(\); \/\/ 以/.test(cp));
+  // P2-1 同步（2026-09-18）：handleSave 改走 saveUntilSettled 有界重试——仅真实落定才前移快照
+  // （撞在途保存 {saved:false} 时重试），语义不变：成功才更新快照、失败可重试。
+  check('自动保存成功后才更新快照，失败可重试', /const saved = await saveUntilSettled\(\);[\s\S]{0,160}?lastSavedSnapshot = configSnapshot\(\);/.test(cp) && !/lastSavedSnapshot = configSnapshot\(\); \/\/ 以/.test(cp));
   check('保存状态与 tabs 同行显示在右侧', cpTemplate.includes('tabs-row') && /tabs-row[\s\S]*tabs[\s\S]*save-badge/.test(cpTemplate));
   check('保存成功文案为保存成功', cpTemplate.includes("'保存成功'") || cp.includes("=== 'saved' ? '保存成功'"));
   check('高级 JSON 编辑器已删（多供应商化，advancedJson 由自动检测维护）', !cpTemplate.includes('高级 JSON'));
-  check('家具块（横幅/存储/操作条）对齐同宽列（--col-w 居中）', cp.includes('.autodetect-bar {') && /banner,\s*\n\s*\.toast,/.test(cp) && cp.includes('max-width: 100%'));
+  // C-8 同步（2026-09-18）：死样式 .autodetect-bar 三件删除——家具块同宽列断言改钉 .storage-info {
+  // （同选择器组第二成员，意图不变：横幅/toast/存储/操作条对齐 --col-w 居中）。
+  check('家具块（横幅/存储/操作条）对齐同宽列（--col-w 居中）', cp.includes('.storage-info {') && /banner,\s*\n\s*\.toast,/.test(cp) && cp.includes('max-width: 100%'));
   check('ModelMappingInputs 组件已删除（别名映射 UI 退场）', readRel('src/renderer/components/config/ModelMappingInputs.vue') === '');
   check('ModelSelector 组件已删除（会话选择器换级联）', readRel('src/renderer/components/chat/ModelSelector.vue') === '');
   // r6-r9 版式契约：同宽一列 + 面板内部滚动。

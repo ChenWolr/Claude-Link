@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// ProviderEditor.vue — 新建供应商表单（r9：不单独弹卡，与详情框合并；再点左栏「新建供应商」收起）。
+// ProviderEditor.vue — 供应商新建/编辑双用表单（r9：不单独弹卡，与详情框合并；新建再点左栏「新建供应商」收起，编辑经详情框「编辑」进入、取消或保存后退出）。
 import { ref, onMounted } from 'vue';
 
 const props = withDefaults(defineProps<{

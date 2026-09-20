@@ -22,9 +22,8 @@ export const IPC_CHANNELS = {
   CONFIG_SAVE: 'config:save',
   CONFIG_CLEAR: 'config:clear',
   CONFIG_STORAGE_INFO: 'config:storageInfo',
-  CONFIG_IMPORT_SETTINGS: 'config:importSettings',
-  CONFIG_PICK_SETTINGS_FILE: 'config:pickSettingsFile',
-  CONFIG_AUTO_DETECT: 'config:autoDetect',
+  // settings.json 导入/自动检测死链路通道（config:importSettings / config:pickSettingsFile /
+  // config:autoDetect）已于 2026-09-20 整链删除。
   // 流式测试连接通道已删除（测试收敛到 PROVIDER_TEST_MODEL 行内直返）。
   // Task 3 Step 5：原生 settings 诊断（resolveSettings 摘要，脱敏：只回来源/路径/键名，绝不含值）。
   SETTINGS_GET_DIAGNOSTIC: 'settings:getDiagnostic',
@@ -35,7 +34,7 @@ export const IPC_CHANNELS = {
   // 项目级 Skill 管理左栏数据（方案 B 双栏 master-detail）：最近工作区 ∪ 默认工作区（存在性过滤）
   // + 每目录直读 .claude\skills\<子目录>\SKILL.md 的项目 Skill 全集 + 会话计数。只读、无副作用。
   SKILL_PROJECT_DIRS_GET: 'skills:projectDirsGet',
-  // 多供应商模型库（设置页=可选项库；密钥明文只在 save/test 时进主进程，出主进程只有掩码视图）。
+  // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，test/query 由主进程自行解密，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',
   PROVIDER_DELETE: 'config:deleteProvider',
@@ -116,7 +115,7 @@ export const IPC_CHANNELS = {
   COMMANDS_GET_DIAGNOSTIC: 'commands:getDiagnostic',
 } as const;
 
-/** 无引用残留（且类型文件不应有运行时常量）：流式防抖真相源在 use-stream.ts 硬编码 50ms，改本值无效。 */
+/** 无引用残留（且类型文件不应有运行时常量）：流式上屏节流间隔真相源在 use-stream.ts 硬编码 50ms（hb12-CHR-01 节流，非防抖），改本值无效。 */
 export const STREAM_DEBOUNCE_MS = 50;
 export const MODEL_CACHE_TTL_MS = 60 * 60 * 1000;
 
@@ -143,7 +142,7 @@ export interface StageAttachmentBytesInput {
   bytes: Uint8Array;
 }
 
-/** 受控预览请求：主进程校验会话归属后返回有界缩略图/原图 bytes，不返回路径。 */
+/** 受控预览请求：主进程校验会话归属后返回缩略图/原图 bytes，不返回路径。预览链（本 IPC 两参调用）无显式 maxBytes 读侧预检，界由附件暂存上限（图片 10MiB）间接保证；导出链才传显式 maxBytes。 */
 export interface AttachmentPreviewRequest {
   sessionId: string;
   attachmentId: string;
@@ -341,6 +340,8 @@ export interface NativeSettingsDiagnostic {
   claudeMdCandidates: string[];
   /** effective settings 的顶层键名摘要（只取键，不含值）。 */
   effectiveKeys: string[];
+  /** G2 警示：逐层（user/project/local）参与会话连接的敏感 env 键名（只回键名，绝不回值）；无敏感键的层不出现。 */
+  envKeysBySource: Array<{ source: 'user' | 'project' | 'local'; path: string; envKeys: string[] }>;
 }
 
 // 队列事件（v3 语义）：state_changed 携带全量 QueueState 快照，是所有状态迁移的权威通道；

@@ -1,9 +1,9 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（70 个方法）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（68 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
-import type { AppConfig, ModelInfo, DetectedClaudeConfig, ProviderLibrarySnapshot, ProviderProfileView, ProviderSaveInput } from '../shared/types/config';
+import type { AppConfig, ModelInfo, ProviderLibrarySnapshot, ProviderProfileView, ProviderSaveInput } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueOverview } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
@@ -20,14 +20,6 @@ export interface ClaudeLinkAPI {
   saveConfig: (config: Partial<AppConfig>) => Promise<AppConfig>;
   clearConfig: () => Promise<AppConfig>;
   getStorageInfo: () => Promise<{ userData: string; config: string; workspaces: string; db: string }>;
-  importSettings: (filePath: string) => Promise<{
-    apiKey?: string;
-    apiBaseUrl?: string;
-    defaultModel?: string;
-    advancedJson: string;
-  }>;
-  pickSettingsFile: () => Promise<string | null>;
-  autoDetectClaudeConfig: () => Promise<DetectedClaudeConfig>;
   pickWorkspaceDir: () => Promise<string | null>;
   listRecentWorkspaces: () => Promise<string[]>;
   addRecentWorkspace: (dir: string) => Promise<string[]>;
@@ -50,7 +42,9 @@ export interface ClaudeLinkAPI {
     id: string,
     data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>>,
   ) => Promise<Session | null>;
-  // B1：回合元数据持久化（回合 result 到达时 fire-and-forget）。返回更新后的整会话（会话不存在返回 null）。
+  // B1：回合元数据持久化（回合 result 到达时 fire-and-forget）。主进程 handler 成功时固定返回 true，
+  // sessionId 非法/会话不存在返回 null（hb10-OPT-1：布尔返回省一次全行读）。下方 Promise<Session | null>
+  // 仅为历史形态，运行时实际返回 true | null；调用方均 fire-and-forget，不消费返回值。
   recordTurnMeta: (
     sessionId: string,
     payload: { messageId: string | null; costUsd: number | null; durationMs: number | null; endedAt: number | null },
@@ -121,9 +115,6 @@ export function createApi(): ClaudeLinkAPI {
         workspaces: string;
         db: string;
       }>,
-    importSettings: (filePath) => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_IMPORT_SETTINGS, filePath),
-    pickSettingsFile: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_PICK_SETTINGS_FILE) as Promise<string | null>,
-    autoDetectClaudeConfig: () => ipcRenderer.invoke(IPC_CHANNELS.CONFIG_AUTO_DETECT) as Promise<DetectedClaudeConfig>,
     pickWorkspaceDir: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_PICK_DIR) as Promise<string | null>,
     listRecentWorkspaces: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_LIST_RECENT) as Promise<string[]>,
     addRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_ADD_RECENT, dir) as Promise<string[]>,

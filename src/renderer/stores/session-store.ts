@@ -2,7 +2,7 @@
 // 会话与消息状态：sessions 列表、activeSession、messages（持久化历史）、
 // streamingContent（流式正文）/ streamingThinking（流式思考）。
 //
-// 流式状态由 use-chat 的 stream_event 填充，use-stream 防抖后驱动 MessageList 展示。
+// 流式状态由 use-chat 的 stream_event 填充，use-stream 节流（首条立即 + 50ms 间隔 + trailing）后驱动 MessageList 展示。
 
 import { defineStore } from 'pinia';
 import type { Session } from '../../shared/types/session';
@@ -167,13 +167,16 @@ export const useSessionStore = defineStore('session', {
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
-    // 隐藏本回合已落库的 text/thinking（与流式块去重），回合结束/会话切换时复位。
+    // 隐藏本回合已落库的 text/thinking（与流式块去重）。回合结束不清理：sending=false 时
+    // MessageList 短路返回全量分组，本索引不再被消费（隐藏逻辑兜底停用）。实际更新点：
+    // 暂态会话创建/切换会话置 0；直发乐观消息入列、发送失败回滚、addMessage 消息入列
+    //（队列回合经 task-store 调 recomputeTurnStartIndex）、运行中会话切回时按共享口径重算。
     turnStartIndex: 0,
     // 当前活动会话最近一次 SDK 上报的真实窗口（作 resolveContextWindow 的 lastContextWindow）。
     // 切会话时从 session.lastContextWindow 初始化，收 usage 回调时用 payload 覆盖。
     contextLastWindow: null as number | null,
     // Task 9：canonical 上下文占用（当前窗口 + turn usage + source/freshness/diagnostic）。
-    // 单一真相源：ContextButton 只读这里；切换会话时置 null（无 fresh 数据 → pending）。
+    // 单一真相源：ContextButton 只读这里；切换会话时预填持久化 stale 快照（无持久化值才置 null → pending），会话内新 payload 到达即覆盖。
     canonicalContext: null as CanonicalContextState | null,
     // review-v3 High-2：每会话已见的 CONTEXT_UPDATE query 代际（主进程 entry.queryInstance）。
     // 收到 payload 先过代际门（shouldAcceptContextPayload）：旧代际 / 已知代际却缺代际的
@@ -207,9 +210,9 @@ export const useSessionStore = defineStore('session', {
     // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
     // 渲染层（TurnTimer）据此 + useNow 跳动时钟算实时耗时，sending 期间在状态头条常驻显示递增计时。
     turnStartedAt: {} as Record<string, number>,
-    // B1：最近一回合的耗时/结束时刻（按 sessionId）。回合 result 到达时由 use-chat 写入，
-    // 比 sessions 列表对象里的 lastTurn* 字段新鲜（后者只在 IPC 返回整会话时刷新）。
-    // TurnTimer 完成态优先读这里，读不到（重启后/切回未刷新）回落 Session 字段。
+    // B1：最近一回合的耗时/结束时刻（按 sessionId）。回合 result 到达时由 use-chat 经
+    // setLastTurnMeta 写入，同一刻就地补写 sessions/activeSession 对象的 lastTurn* 字段
+    //（两处无新鲜度差）；TurnTimer 完成态优先读这里，读不到（重启后内存 map 为空）回落 Session 字段。
     lastTurnMeta: {} as Record<string, { durationMs: number; endedAt: number }>,
     // v2-F3：回合 generation（按 sessionId）。每次 markRunning（新回合开始）递增；
     // use-chat 的 abort finally 兜底捕获发起中断时的 generation，到点若已开启新回合

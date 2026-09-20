@@ -135,7 +135,7 @@ export interface PaginationBudget {
   targetWeight: number;       // 初始贪心目标权重（默认 10000）
   imageWeight: number;        // 单张图片估算权重（默认 6000）
   maxPageCount: number;       // 页数上限（默认 100）
-  maxPageHeightCss: number;   // 单页 CSS 高度上限（捕获前由实测像素预算换算）
+  maxPageHeightCss: number;   // 单页 CSS 高度上限（selftest 分页流程用；生产 renderer 已改自身 splitPages——JPEG 固定 1500、PNG 按内存预算反推；DEFAULT_EXPORT_BUDGET 的本值兼作派生函数非法入参兜底）
 }
 
 export type PaginateResult =

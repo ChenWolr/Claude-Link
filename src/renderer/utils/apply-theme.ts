@@ -1,5 +1,6 @@
 // 共享主题应用：把完整 ThemePalette 写入根 CSS 变量。
-// 主窗口（App.vue）、配置预览（ConfigPage.vue）与隐藏 export renderer 共用，不再复制第三份映射。
+// 主窗口（App.vue）与隐藏 export renderer（export-runner.ts）共用；ConfigPage.vue 的主题预览未接入本函数，
+// 本地持有一份复制的映射（selftest-settings-mapping 钉此现状）——修改下方变量映射时须同步 ConfigPage.vue 的 applyTheme。
 // 依据：v3 第 5 节 + 第 14.4 节。
 import type { ThemePalette } from '../../shared/constants';
 

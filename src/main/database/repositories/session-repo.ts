@@ -205,8 +205,9 @@ export function searchSessions(query: string): Session[] {
   }
 
   // 仅按会话标题匹配：不命中消息内容与附件文件名（会话内内容不参与搜索）。
-  // 用与前端完全相同的 normalizeSearchText 函数做对称归一化，
-  // 避免 SQL REPLACE 与 TS 正则的归一化分歧导致漏匹配。
+  // 归一化唯一发生在主进程：normalizeSearchText（TS，小写+去空白）统一处理 query 与
+  // 标题；渲染层仅 trim 判空后经 IPC 透传、无本地归一，不经 SQL REPLACE，
+  // 避免归一化分歧导致漏匹配。
   return sessions.filter((session) => normalizeSearchText(session.name).includes(normalizedQuery));
 }
 

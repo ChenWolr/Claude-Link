@@ -1,3 +1,7 @@
+// 【连接面声明】本模块是主进程 HTTP 直连白名单成员（契约：scripts/regression-tests.ts 连接面白名单）。
+// 直连绕过 SDK 属设计内（后台轻量任务：会话自动命名/主题分析）；不读任何 settings.json——
+// 与生产 SDK 链路的已知语义分叉：生产会话受原生 user/project/local settings env 影响，本直连不受。
+// 凭据/端点/模型经 resolveSessionModel 与生产同源（连接三元组完整性）。
 import https from 'https';
 import http from 'http';
 import { getConfig, getProviderModelSources, DECRYPT_FAILED } from './config-manager';
@@ -28,7 +32,8 @@ class HttpStatusError extends Error {
 }
 
 // F4：自动命名竞态守卫——命名门槛在发送瞬间判定（渲染层 isAutoSessionName），而本模块
-// 全流程最多 2 次串行 HTTP 请求（每次超时 10s，窗口最长约 20s）；用户在此窗口手动重命名后，
+// 全流程最多 2 次串行 HTTP 请求（每次超时 10s，正常窗口上界约 20s；总 Deadline 30s 兜底，
+// 见下方 hb10-SMG-02）；用户在此窗口手动重命名后，
 // 迟到的主题/兜底名不得覆盖（写前重查兜底）。
 // 主进程侧收口：每次写 name 前重查当前名仍为「会话 N」自动形态才写（手动名一律让位）。
 // H3：判据抽 shared 纯函数（三端同源）并收紧为精确形态——「会话」前缀匹配会被
@@ -38,7 +43,8 @@ function isAutoNameSlot(sessionId: string): boolean {
 }
 
 // hb10-SMG-02/V01（hb12-SMG-07 同函数）：总 Deadline 30s（复用既有 10s×2 语义上界）——
-// 断连/慢滴请求使单请求 10s 超时失效（悬挂 promise），总 Deadline 保证 analyzeTopic 有界返回；
+// 慢滴（持续低速流入使 socket idle 型 10s 超时永不触发）等异常令 promise 长期悬挂（干净断连
+// 已由下方 aborted 监听即时 reject，不再依赖 Deadline），总 Deadline 保证 analyzeTopic 有界返回；
 // 响应累积 >1MiB 即 destroy+reject，防恶意/异常端点无限吞内存。
 const TOPIC_TOTAL_DEADLINE_MS = 30 * 1000;
 const TOPIC_RESPONSE_MAX_BYTES = 1024 * 1024;

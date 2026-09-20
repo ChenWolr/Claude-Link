@@ -167,8 +167,9 @@ check('⑫ CHR-03：ToolCallBlock parse 失败回退展示原文 pre', () => {
   assert.match(body, /\{\{ use\.content \}\}/, '回退分支未展示原文');
 });
 
-// ⑬ hb13-v B10.3：折叠豁免清单补 system:error——失败原因与 system:aborted 家族同待遇，
-// 独立成条不被折进过程组（错误可见性）。
+// ⑬ hb13-v B10.3：折叠豁免清单补 system:error——失败原因独立成条不被折进过程组（错误可见性）。
+// 注：system:aborted 不在豁免清单内（仍随过程折进 fold），原「与 system:aborted 家族同待遇」
+// 说法与实现不符；本断言仅钉 system:error 行为。
 check('⑬ B10.3：group-messages 折叠豁免清单补 system:error', () => {
   const idx = group.indexOf('system:init_write_skipped');
   assert.ok(idx > -1, '未找到豁免清单锚');

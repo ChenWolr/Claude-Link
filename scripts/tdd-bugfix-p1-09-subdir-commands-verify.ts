@@ -1,7 +1,7 @@
 // tdd-bugfix-p1-09-subdir-commands-verify.ts
 // P1-9 契约钉：commands 子目录命名空间命令无磁盘证据 → origin=unknown → 从菜单消失。
 //
-// 修复语义：scanCommandFiles 递归扫描（限深 3、symlink 跳过），证据同时记录
+// 修复语义：scanCommandFiles 递归扫描（hb10-CMD-09 后限深 6、symlink 跳过），证据同时记录
 //「目录冒号拼接全名」（真实 SDK probe 确证形态：devtool:buildcmd）与「basename」两键；
 // classifyOrigin 命中任一即可正确分类（project/user-skill）。
 //

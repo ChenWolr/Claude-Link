@@ -434,7 +434,9 @@ export function resolveSearchScrollTop(
  * - top 减 1 / bottom 加 2 对齐 2px ruler；
  * - 一侧 size=0 时该侧 top-bottom 保持 2px（Math.max），形成三角形（左尖右宽），不是 1 行梯形；
  * - polygon 之外返回上下边线坐标（contrast 用 2 条 <line> 描边，让「顶部往左插入」的斜线清晰可见）。
- * viewBox=0 0 100 height，preserveAspectRatio=none 横向拉伸。
+ * 历史 polygon 渲染用法为 viewBox=0 0 100 height + preserveAspectRatio=none 横向拉伸；现 split 渲染层
+ * 已切到 bridgeRibbon（无 viewBox 全尺寸 SVG），本函数已无产品代码调用方，仅由契约脚本消费
+ * （tdd-diff-offsets-verify 钉几何行为，tdd-diff-paper-skin-verify 钉兼容保留且禁 DiffBody 再 import 本函数）。
  */
 export function bridgePolygon(
   c: SplitChunk,

@@ -241,7 +241,8 @@ function createWindow(): void {
 function startGlobalCommandPipeline(): void {
   if (!mainWindow) return;
   // 启动全局兜底命令探测（无会话绑定）：结果写入 registry.globalFallback，作为重启后旧会话的命令兜底。
-  // fire-and-forget；完成时对已打开且无 per-session 快照的会话回填。CLI 缺失/失败均不阻塞启动。
+  // fire-and-forget；完成时对已打开且命令仍为空的会话回填（含已有 loading/degraded 快照但命令
+  // 为空者，见 sdk-backend 回填（N7）注释——不按 has(sid) 判断）。CLI 缺失/失败均不阻塞启动。
   runGlobalCommandProbe(mainWindow);
 
   // D3：命令来源目录监视——用户级 ~/.claude/{commands,skills} 与项目级 .claude/{commands,skills}

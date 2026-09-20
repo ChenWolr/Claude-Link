@@ -155,3 +155,16 @@ scripts/tdd-bugfix-hb13-v-cmd-probe-verify.ts
 scripts/tdd-bugfix-hb13-v-smg-patch-verify.ts
 scripts/tdd-skill-overrides-verify.ts
 scripts/tdd-skill-project-dirs-verify.ts
+scripts/tdd-config-save-race-verify.ts
+scripts/tdd-skill-enum-resilience-verify.ts
+scripts/tdd-skill-probe-retry-verify.ts
+scripts/tdd-skill-menu-filter-verify.ts
+scripts/tdd-skill-stale-keys-verify.ts
+scripts/tdd-skill-dirs-generation-verify.ts
+scripts/tdd-skill-dirs-status-verify.ts
+scripts/tdd-skill-nullproto-verify.ts
+scripts/tdd-skill-ghost-fallback-verify.ts
+scripts/tdd-session-update-guard-verify.ts
+scripts/tdd-skill-user-dirnames-verify.ts
+scripts/tdd-skill-x123-verify.ts
+scripts/tdd-rightpanel-route-gate-verify.ts

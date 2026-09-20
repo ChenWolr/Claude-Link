@@ -119,7 +119,7 @@ function scanSkillTree(
  *（scripts/p1-09-subdir-command-probe.ts：commands/devtool/buildcmd.md → `devtool:buildcmd`，
  * system.init.slash_commands 与 supportedCommands 双源一致）。
  * 证据同时记录「冒号拼接全名」与「basename」两个键，classifyOrigin 命中任一即可；
- * 限深 3 层防爆炸，symlink 目录跳过（与 scanSkillTree 同防环手法）。
+ * 限深 6 层防爆炸（hb10-CMD-09 由 3 调到 6，见下方 COMMAND_SCAN_MAX_DEPTH），symlink 目录跳过（与 scanSkillTree 同防环手法）。
  */
 // hb10-CMD-09：扫描深度 3→6（与指纹/skill 对齐，深命名空间命令可见）。
 const COMMAND_SCAN_MAX_DEPTH = 6;

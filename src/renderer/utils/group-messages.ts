@@ -107,7 +107,8 @@ export function groupMessagesForRender(messages: RenderableMessage[]): RenderIte
     const isBreak =
       msg.processKind === 'system:init_write_skipped' ||
       msg.processKind === 'system:interaction_cancelled' ||
-      // hb13-v B10.3：system:error 与 system:aborted 家族同待遇——失败原因独立成条不被折没。
+      // hb13-v B10.3：system:error 独立成条不被折没（失败原因可见性）；system:aborted 不在
+      // 豁免清单内——中断/回合结束提示仍随过程折进 fold（fold 展开时灰字可见，折叠态收起）。
       msg.processKind === 'system:error' ||
       // reasoning_replay 自动重试提示：韧性层的用户可见反馈，须独立展示（不进 fold）。
       msg.processKind === 'system:auto_retry' ||

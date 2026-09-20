@@ -198,9 +198,9 @@ onUnmounted(() => {
   background: linear-gradient(180deg, var(--color-accent-strong), color-mix(in srgb, var(--color-accent-strong) 68%, #ffffff));
 }
 
-/* 选中+聚焦同时存在时（单选默认聚焦跟随选中）：--selected 与 --focused 同特异性，
+/* 选中+聚焦同时存在时（单选默认聚焦跟随选中）：--selected 与 --focused 同特异性 (0,1,0)，
    --selected 源序在后会覆盖 --focused 的焦点环，导致键盘焦点指示器丢失（WCAG 2.4.7）。
-   此复合规则特异性更高 (0,3,0)，叠加保留：1px 选中环 + 投影 + 2px 焦点环（最外层）。 */
+   此复合规则 (0,2,0) 特异性更高，叠加保留：1px 选中环 + 投影 + 2px 焦点环（最外层）。 */
 .interaction-option--selected.interaction-option--focused {
   box-shadow:
     0 0 0 1px color-mix(in srgb, var(--color-accent-strong) 50%, transparent),

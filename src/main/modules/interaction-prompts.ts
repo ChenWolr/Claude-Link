@@ -163,8 +163,9 @@ function recordCancelHistory(
   }
 }
 
-// hb10-PERM-06：渲染进程崩溃兜底——枚举取消当前全部 pending（render-process-gone 时调用；
-// 对不可恢复 reason（launch-failed 等）也覆盖）。hb13-v B9（F4）：取消前统一落库 cancel 历史。
+// hb10-PERM-06：渲染进程崩溃兜底——枚举取消当前全部 pending（index.ts render-process-gone 的
+// clean-exit 与 reload 超限两分支调用；hb13-v A9 后 reload 路径不取消，pending 由新渲染层
+// GET_PENDING 重拉）。hb13-v B9（F4）：取消前统一落库 cancel 历史。
 export function cancelAllPendingInteractions(): void {
   recordCancelHistory([...pendingInteractionRequests.values()], 'render-crashed');
   for (const [id, pending] of pendingInteractionRequests) {

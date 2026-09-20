@@ -14,7 +14,7 @@ const emit = defineEmits<{
   toast: [message: string];
 }>();
 
-// 行内测试状态（按模型 ID）：pending（按钮内 spinner）→ ok/fail（按钮态）；重渲染会复位，可接受（r5 备注）。
+// 行内测试状态（按模型 ID）：pending（按钮内 spinner）→ ok/fail（按钮态）；切换供应商经 :key 重挂载复位（hb12-PRV-02），同一供应商内重渲染不复位（r5 起接受短暂态）。
 type TestState = 'idle' | 'pending' | 'ok' | 'fail';
 const testStates = reactive(new Map<string, TestState>());
 
@@ -230,7 +230,7 @@ async function runRowTest(model: ProviderModel): Promise<void> {
   outline-offset: 2px;
 }
 
-/* 窄容器（详情区 ≤460px，与 ProviderManager 折纵向同断点）：模型行从单行 grid 改两行 flex——
+/* 窄容器（面板容器 .wb-connection ≤460px，与 ProviderManager 折纵向同断点）：模型行从单行 grid 改两行 flex——
    模型名独占一行（完整 ellipsis），token/来源标签/测试/删除换行到第二行。
    避免 4 个 auto 操作列把 1fr 模型名压到 0、完全看不到。 */
 @container (max-width: 460px) {

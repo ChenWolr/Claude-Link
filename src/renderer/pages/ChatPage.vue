@@ -219,7 +219,7 @@ function onPagePaste(e: ClipboardEvent): void {
   }
 }
 
-// 统一构造发送载荷；按队列状态路由三条路径。仅主进程成功接受才清草稿，失败保留以供重试。
+// 统一构造发送载荷；按队列状态路由两条路径（入队/直发，见 handleSend v3 两路收敛）。仅主进程成功接受才清草稿，失败保留以供重试。
 function buildPayload(): ChatSendPayload | null {
   if (!activeSessionId.value) return null;
   const text = draftText.value.trim();

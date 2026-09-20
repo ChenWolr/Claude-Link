@@ -4,14 +4,15 @@
 // 开关档（ultracode = xhigh effort + 动态工作流编排）+ 一个 auto 回落（仅会话级用）。
 // 与模型别名正交：思考强度不改变用哪个模型，只改变模型投入多少「思考/响应」力度。
 //
-// 详见 thinking-budget-design-final.md §2.1。
+// 原始设计文档已不在仓库，档位口径以此注释及 THINKING_LEVELS 定义为准。
 
 /**
  * 思考强度档位。
  * - 'auto'：回落全局默认（仅用于 Session 级别，全局默认本身不允许 auto）。
  * - 'low'/'medium'/'high'/'xhigh'/'max'：对应 SDK EffortLevel 五档。
  * - 'ultracode'：xhigh effort + 动态工作流编排（SDK 定义，锁死 effort=xhigh，
- *   不可与其他 effort 组合；实际效果待批次 B 实测）。
+ *   不可与其他 effort 组合；批次 B 已落地——thinking_tokens 估算链路上线，
+ *   UI 文案维持中性描述，effort 对实际效果的量化细化未实施）。
  */
 export type ThinkingLevel = 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultracode';
 

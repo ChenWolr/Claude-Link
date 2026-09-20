@@ -7,7 +7,9 @@
 // 快照，随后 projectLegacyFields() + emitConfigSaved() + 撤销栈清空。
 //
 // 2026-09-13 二轮补救追加 ②③：hb10-CFG-09（CONFIG_SAVE workingDirectory 验目录）与
-// hb10-CFG-05（importSettingsFile 入口四项加固）——round2 验收判两项未实施（P2-B/P2-C）。
+// hb10-CFG-05（settings 导入入口四项加固）——round2 验收判两项未实施（P2-B/P2-C）。
+// 2026-09-20 收口：CFG-05 项随 settings.json 导入死链路整链删除而移除（原 ③，
+// 导入函数与渲染层入口已不存在，见 docs/plans/2026-09-20-settings-connection-audit-plan.md）。
 // 2026-09-13 三轮补救追加 ④⑤：hb13-v B4（F-05 清理顺序 + F-06 clearApiKey 显式通道）。
 //
 // 运行：npx tsx scripts/tdd-bugfix-hb10-config-clear-verify.ts
@@ -52,22 +54,8 @@ check('② CFG-09：CONFIG_SAVE 验存在目录否则丢弃该字段；渲染层
   assert.match(configStore, /plainConfig\.workingDirectory !== this\.config\.workingDirectory/, '渲染层缺回传比对');
 });
 
-// ③ hb10-CFG-05（二轮补救）：importSettingsFile 入口四项加固（① 后缀 ② 1MB ③ 掩码 ④ 覆盖确认）。
-check('③ CFG-05：importSettingsFile 后缀/1MB/掩码 + 渲染层 advancedJson 覆盖前确认', () => {
-  const idx = cm.indexOf('export function importSettingsFile');
-  assert.ok(idx > -1, '未找到 importSettingsFile');
-  const body = cm.slice(idx, idx + 1000);
-  assert.match(body, /toLowerCase\(\)\.endsWith\('\.json'\)/, '① 缺 .json 后缀校验');
-  assert.match(body, /1024 \* 1024/, '② 缺 1MB 上限');
-  assert.match(body, /maskApiKey\(parsed\.apiKey\)/, '③ 缺 apiKey 掩码');
-  const st = configStore.indexOf('async importSettings(');
-  assert.ok(st > -1, '渲染层缺 importSettings 入口');
-  const stBody = configStore.slice(st, st + 1100);
-  const cfmIdx = stBody.indexOf('将覆盖现有高级配置');
-  const applyIdx = stBody.indexOf('this.applyExtractedSettings(extracted)');
-  assert.ok(cfmIdx > -1, '④ 缺覆盖确认文案');
-  assert.ok(applyIdx > cfmIdx, '确认必须先于 advancedJson 整体替换');
-});
+// ③ hb10-CFG-05（原 2026-09-13 二轮补救项）：已于 2026-09-20 随死链路删除收口移除——
+// settings 导入函数与渲染层入口整链不存在，四项加固随之失去载体。
 
 // ④ hb13-v B4（F-05）：clear() 前捕获旧 workingDirectory——清后按捕获值重投影旧目录+清快照
 // （旧实现先 clear 致 workingDirectory 复位 null，清理恒被跳过、hb10-P2-6 净残留承诺失效）。

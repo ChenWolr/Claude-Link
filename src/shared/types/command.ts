@@ -44,7 +44,7 @@ export interface CommandOriginContext {
   };
 }
 
-/** 空上下文：无 skills/plugins 时，命令只能靠 removed/internal 描述与已知 builtin 名称分类。 */
+/** 空上下文：无 skills/plugins/evidence 时，命令靠结构化 provenance（若传入）、removed/internal/'(user)' 描述特征与已知 builtin 名称分类。 */
 export const EMPTY_COMMAND_ORIGIN_CONTEXT: CommandOriginContext = {
   skills: [],
   plugins: [],
@@ -124,9 +124,14 @@ export function createDefaultCommandSnapshot(sessionId: string): SessionCommandS
 // ── 项目级 Skill 管理（2026-09-17 方案 B 双栏 master-detail）──────────────────
 // 主进程直读 <dir>\.claude\skills\<子目录>\SKILL.md 的枚举结果模型（只含可克隆字段）。
 
-/** 单个项目级 Skill：frontmatter 的 name/description（name 缺省子目录名，description 缺省空串）。 */
+/**
+ * 单个项目级 Skill：frontmatter 的 name/description（name 缺省子目录名，description 缺省空串）。
+ * dirName = 真实子目录名（P2-3 键名口径，2026-09-18 Phase 0-2 实验裁决：引擎 skillOverrides
+ * 只认目录名——模型清单过滤与键入拦截都在目录名层，frontmatter 名键零效果，渲染层开关键取此键）。
+ */
 export interface ProjectDirSkill {
   name: string;
+  dirName: string;
   description: string;
 }
 
@@ -139,9 +144,22 @@ export interface ProjectDirEntry {
   skills: ProjectDirSkill[];
 }
 
-/** SKILL_PROJECT_DIRS_GET 的返回载荷（每次进 Skill tab 现查全量，≤12 目录毫秒级）。 */
+/** SKILL_PROJECT_DIRS_GET 的返回载荷（每次进 Skill tab 现查全量；recent ≤12 条，独立 defaultDir 并入时至多 13；本地目录毫秒级，坏目录单目录 3s 超时预算兜底）。 */
 export interface SkillProjectDirsPayload {
   dirs: ProjectDirEntry[];
+  /**
+   * R-1（2026-09-19）：全局作用域（~/.claude/skills）skill 的 frontmatter 名→目录名映射
+   * （键=目录名口径的数据源；同名 fm 冲突 first-wins，与项目枚举去重口径一致）。
+   * ConfigPage 现查时写入 commandStore.userSkillDirNames，供开关键合并与 '/' 菜单过滤同源消费。
+   */
+  userSkillDirNames: Record<string, string>;
+  /**
+   * Y-1（2026-09-19 X-123 批独立评审 §2）：用户根（~/.claude/skills）枚举超时标记——
+   * true=映射内容不可信（3s 预算耗尽），渲染层不得覆盖映射槽/不得置就绪旗标（X-1 清理门控与
+   * X-2 开关禁用自然兜住）；缺省/false=真实枚举结果（含「不存在/读失败 → 空对象」合法空）。
+   * userSkillDirNames 恒为对象（超时态由本标记表达，槽/seam/attach 消费链零触碰）。
+   */
+  userSkillDirNamesTimedOut?: boolean;
 }
 
 /**

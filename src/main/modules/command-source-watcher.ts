@@ -144,6 +144,8 @@ export function getUserOriginFingerprint(): string | undefined {
  * P2-14：项目级出生指纹（per-session cwd 的 commands/skills 两根，与用户级同一指纹函数）。
  * probe 成功时随快照写入；COMMANDS_GET 现算比对（目录小、递归廉价，不做缓存）。
  * cwd 缺省 → undefined（不比对不误标）；目录不存在 → 空集指纹（确定性，仍可比对）。
+ * 注：COMMANDS_GET 侧按 hb10-CMD-V01 在会话 cwd 缺省时回退全局配置工作目录，函数级「无 cwd」
+ * 仅在会话与全局两级皆空时触发（出生侧 probe 同该回退）。
  */
 export async function getProjectOriginFingerprint(cwd: string | null | undefined): Promise<string | undefined> {
   if (!cwd) return undefined;

@@ -107,7 +107,8 @@ export interface ProviderProfileView extends ProviderProfile {
 }
 
 // 保存档案的输入：apiKey 仅在创建/修改时以明文进入主进程，落盘前加密；
-// 编辑时省略（undefined/null）= 保留原密钥，显式空串 = 清除。
+// 编辑时省略（undefined/null）、显式空串或掩码串（sk-…****）= 保留原密钥（不改动，
+// hb12-CFG-02）；显式清除走 clearApiKey:true（见下方字段注释）。
 // models 提供时整体替换（增删模型走此路径；renderer 持有完整无密钥列表）。
 export interface ProviderSaveInput {
   id?: string | null;
@@ -141,26 +142,8 @@ export interface ModelInfo {
   maxTokens: number;
 }
 
-// 自动检测 Claude Code 系统配置的结果。OAuth token 绝不读取内容，只判断存在性；
-// apiKey 来自 settings.json 的 env.*，最终经 safeStorage 加密入库。
-export interface DetectedOauthAccount {
-  email?: string;
-  accountUuid?: string;
-  organizationType?: string;
-}
-
-export interface DetectedClaudeConfig {
-  found: boolean;
-  sources: Array<'settings.json' | '.claude.json' | '.credentials.json'>;
-  apiKey?: string;
-  apiBaseUrl?: string;
-  defaultModel?: string;
-  apiKeyHelper?: string;
-  oauthAccount?: DetectedOauthAccount;
-  hasOAuthCredentials: boolean;
-  advancedJson: string;
-  errors: string[];
-}
+// 自动检测 Claude Code 系统配置的类型（DetectedClaudeConfig / DetectedOauthAccount）已随
+// 2026-09-20 死链路删除：检测通道无 UI 入口却保留明文 apiKey 回传渲染进程的能力。
 
 /** 死类型（全项目零引用）：旧顶部「测试连接」弹框时代残留；现行测试结果由 connection-tester.ts 的 ProviderModelTestResult 承载。清理时可整接口删除。 */
 export interface ConnectionTestResult {

@@ -1,7 +1,7 @@
 // 附件物理文件存储边界：原子写入、SHA-256、缩略图/预览读取、物理删除、孤儿键枚举。
 // 只负责文件系统操作，不访问 SQLite（元数据由 attachment-repo 管理）。
 // 图片解码/缩略图用 Electron nativeImage，不引入 sharp 等额外依赖。
-// 注意：本模块依赖 electron（nativeImage），只能在主进程运行，不可被 regression 脚本导入。
+// 注意：本模块依赖 electron（nativeImage），裸 import 只能在主进程运行；脚本如需导入须先 stub electron（先例 scripts/tdd-bugfix-p2-12-part-cleanup-guard-verify.ts 劫持 Module._load）。
 import { createHash } from 'node:crypto';
 import { promises as fsp, statSync, type Dirent } from 'node:fs';
 import path from 'node:path';
@@ -236,7 +236,9 @@ export async function readStoredAttachmentBytes(record: AttachmentRecord): Promi
   return new Uint8Array(buf);
 }
 
-/** 读取受控预览：图片缩略图（最长边 512px，转 PNG）或原图有界 bytes；绝不返回绝对路径。
+/** 读取受控预览：图片缩略图（最长边 512px，转 PNG）或原图 bytes（缺省无读侧预检，大小上限仅由
+ *  图片暂存 10MiB 上限 MAX_IMAGE_BYTES 间接保证；预览链不传 maxBytes，导出链才显式传入）；
+ *  绝不返回绝对路径。
  *  hb10 P2-10：可选 maxBytes 读前预检——statSync 文件尺寸超限直接抛错（上层降级 previewUnavailable），
  *  不再把超预算文件整读进内存。缺省不预检，既有两参调用方零影响。 */
 export async function readStoredAttachmentPreview(
