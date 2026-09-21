@@ -170,3 +170,4 @@ scripts/tdd-skill-x123-verify.ts
 scripts/tdd-rightpanel-route-gate-verify.ts
 scripts/tdd-bridge-shared-verify.ts
 scripts/tdd-bridge-binding-repo-verify.ts
+scripts/tdd-bridge-profiles-verify.ts
