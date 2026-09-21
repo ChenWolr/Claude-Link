@@ -172,3 +172,4 @@ scripts/tdd-bridge-shared-verify.ts
 scripts/tdd-bridge-binding-repo-verify.ts
 scripts/tdd-bridge-profiles-verify.ts
 scripts/tdd-bridge-dispatcher-verify.ts
+scripts/tdd-bridge-feishu-adapter-verify.ts
