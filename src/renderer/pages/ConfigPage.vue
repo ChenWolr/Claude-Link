@@ -10,6 +10,7 @@ import { useConfigStore, lastSaveFailed } from '../stores/config-store';
 import { useCommandStore } from '../stores/command-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
+import BridgeSettings from '../components/config/BridgeSettings.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
@@ -669,6 +670,13 @@ async function cleanupStaleSkillKeys(): Promise<void> {
               </label>
             </div>
           </div>
+        </div>
+
+        <!-- IM 机器人（飞书/微信 bridge）：凭据掩码读写、状态总览、扫码登录、绑定管理。
+             保存语义=字段 blur/开关 change 即 bridgeSaveConfig；掩码/加密在主进程处理。 -->
+        <div class="section">
+          <h3 class="section-title">IM 机器人</h3>
+          <BridgeSettings />
         </div>
 
         <!-- Skill：方案 B 双栏 master-detail（左=作用域清单 rail，右=作用域详情 main）。
