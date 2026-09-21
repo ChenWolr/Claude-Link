@@ -5,6 +5,7 @@ import { electronApp, is, optimizer } from '@electron-toolkit/utils';
 import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
+import { initBridge, stopBridge } from './modules/bridge/init';
 import { detectCli } from './modules/cli-detector';
 import { ensureProviderMigration, getConfig, onConfigSaved } from './modules/config-manager';
 import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe, cancelAllCommandProbes, cancelAllPostTurnProbes, effectiveUserHome } from './modules/sdk-backend';
@@ -232,6 +233,9 @@ function createWindow(): void {
   }
 
   registerIpcHandlers(mainWindow);
+
+  // IM 机器人（飞书/微信 bridge）：IPC 注册后组装真实 deps 并启动已启用平台。
+  initBridge({ getWindow: () => mainWindow, userDataDir: app.getPath('userData') });
   trackWindowSize(mainWindow);
 }
 
@@ -352,6 +356,7 @@ app.on('before-quit', () => {
   // 「隐藏到托盘」分支拦截（quitting 尚为 false），而下方 killAllProcesses/closeConnection
   // 已先行执行，被取消的退出留下已拆毁的运行环境。
   quitting = true;
+  void stopBridge(); // B14：停轮询/断 WS/清定时器（在途回合由 killAllProcesses 兜底）
   killAllProcesses();
   void cancelGlobalCommandProbe(); // 取消全局兜底探测，避免孤儿 claude 子进程（killAllProcesses 不扫 probe）
   // hb12-CMD-01：per-session 命令探针与 post-turn 探针一并收口（同上，killAllProcesses 不扫它们）。

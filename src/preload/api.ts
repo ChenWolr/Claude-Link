@@ -10,6 +10,7 @@ import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, Sen
 import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import type { SkillProjectDirsPayload } from '../shared/types/command';
+import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatusEntry, WechatQrcodeStatusResult } from '../shared/types/bridge';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
 
@@ -99,6 +100,16 @@ export interface ClaudeLinkAPI {
   getCommandDiagnostics: (sessionId: string) => Promise<import('../shared/types/ipc').CommandProvenance>;
   // 项目级 Skill 管理左栏数据（最近工作区 ∪ 默认工作区 + 每目录项目 Skill 全集 + 会话计数）。
   getSkillProjectDirs: () => Promise<SkillProjectDirsPayload>;
+  // IM 机器人（飞书/微信 bridge）：凭据掩码读写 / 状态 / 连通测试 / 扫码登录 / 绑定管理。
+  bridgeGetConfig: () => Promise<BridgeConfigGetResult>;
+  bridgeSaveConfig: (input: BridgeConfigSaveInput) => Promise<BridgeConfigGetResult>;
+  bridgeGetStatus: () => Promise<BridgePlatformStatusEntry[]>;
+  bridgeTestFeishu: (input: { appId?: string; appSecret?: string }) => Promise<{ ok: boolean; detail?: string }>;
+  bridgeWechatQrcode: () => Promise<{ qrcodeId: string; qrcodeDataUrl: string }>;
+  bridgeWechatQrcodeStatus: (qrcodeId: string) => Promise<WechatQrcodeStatusResult>;
+  bridgeListBindings: () => Promise<BridgeBindingView[]>;
+  bridgeUnbind: (sessionKey: string) => Promise<void>;
+  onBridgeStatusChanged: (callback: (payload: BridgePlatformStatusEntry[]) => void) => () => void;
 }
 
 export function createApi(): ClaudeLinkAPI {
@@ -225,6 +236,20 @@ export function createApi(): ClaudeLinkAPI {
       ipcRenderer.invoke(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, sessionId) as Promise<import('../shared/types/ipc').CommandProvenance>,
     getSkillProjectDirs: () =>
       ipcRenderer.invoke(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET) as Promise<SkillProjectDirsPayload>,
+    // IM 机器人（飞书/微信 bridge）。
+    bridgeGetConfig: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_GET) as Promise<BridgeConfigGetResult>,
+    bridgeSaveConfig: (input) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, input),
+    bridgeGetStatus: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_STATUS_GET),
+    bridgeTestFeishu: (input) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_FEISHU_TEST, input),
+    bridgeWechatQrcode: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE),
+    bridgeWechatQrcodeStatus: (qrcodeId) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE_STATUS, qrcodeId),
+    bridgeListBindings: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_BINDING_LIST),
+    bridgeUnbind: (sessionKey) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_BINDING_DELETE, sessionKey),
+    onBridgeStatusChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: BridgePlatformStatusEntry[]) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.BRIDGE_STATUS_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.BRIDGE_STATUS_CHANGED, listener);
+    },
   };
 }
 
