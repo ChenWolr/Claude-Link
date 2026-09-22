@@ -25,8 +25,8 @@ const router = useRouter();
 const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
 
-// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）。
-type TabId = 'connection' | 'behavior' | 'appearance' | 'skill';
+// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）。
+type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im';
 const activeTab = ref<TabId>('connection');
 
 // 自动保存：监听所有用户可编辑的持久化字段，700ms 防抖落盘，确保所有配置都永久保存。
@@ -573,6 +573,7 @@ async function cleanupStaleSkillKeys(): Promise<void> {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'behavior' }]" @click="activeTab = 'behavior'">行为</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'skill' }]" @click="activeTab = 'skill'">Skill</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'im' }]" @click="activeTab = 'im'">IM</button>
       </nav>
       <div class="save-actions">
         <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus === 'projection-failed' ? 'saved' : saveStatus}`]">
@@ -672,10 +673,8 @@ async function cleanupStaleSkillKeys(): Promise<void> {
           </div>
         </div>
 
-        <!-- IM 机器人（飞书/微信 bridge）：凭据掩码读写、状态总览、扫码登录、绑定管理。
-             保存语义=字段 blur/开关 change 即 bridgeSaveConfig；掩码/加密在主进程处理。 -->
-        <div class="section">
-          <h3 class="section-title">IM 机器人</h3>
+        <!-- IM：平台导航双栏（BridgeSettings 自管加载与状态订阅，v-show 保持常挂不重置扫码链） -->
+        <div v-show="activeTab === 'im'" class="solo-card">
           <BridgeSettings />
         </div>
 

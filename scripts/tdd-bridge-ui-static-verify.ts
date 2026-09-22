@@ -11,6 +11,11 @@
 // 零遗留收口追加（2026-09-21 review R2 观察）：
 //   E. 扫码登录在途再点防双链：pollQrcodeStatus 快照局部 id + 重排前校验 id 一致；
 //      startQrcodeLogin 开头终止旧链（非空即 stopQrcodePoll + 清 id）。
+// 方案 D 版式契约（计划 docs/plans/2026-09-21-im-tab-d-layout-plan.md §2.5）：
+//   B③ 语义升级：孤儿「IM 机器人」区块 → IM tab 门控挂载（v-show=activeTab im）。
+//   F. BridgeSettings.vue 双栏版式：F① 平台导航 / F② 五态中文映射 / F③ 绑定按面板过滤 /
+//      F④ 迷你开关联 save 链 / F⑤ 全局面板保留 / F⑥ 微信扫码链原样 / F⑦ 图标全内联 SVG。
+//      F⑧ mini-switch 双开关 @click.stop（点开关不连带切面板）。
 // RED 预期（未改树）：BridgeSettings.vue 不存在 → FAIL。
 // 运行：npx tsx scripts/tdd-bridge-ui-static-verify.ts
 
@@ -60,7 +65,8 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   const src = read('src/renderer/pages/ConfigPage.vue');
   check('B', '①', 'import BridgeSettings 组件', src.includes("import BridgeSettings from '../components/config/BridgeSettings.vue'"));
   check('B', '②', '模板挂载 <BridgeSettings />', /<BridgeSettings\s*\/>/.test(src));
-  check('B', '③', '「IM 机器人」区块标题', src.includes('IM 机器人'));
+  check('B', '③', 'IM tab 门控挂载（v-show=activeTab im + <BridgeSettings />）',
+    src.includes(`v-show="activeTab === 'im'"`) && /<BridgeSettings\s*\/>/.test(src));
 }
 
 // C. preload/api.ts bridge 组 9 方法
@@ -111,6 +117,42 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   check('E', '③', 'startQrcodeLogin 开头终止旧链（qrQrcodeId 非空 → stopQrcodePoll + 清 id）',
     /async function startQrcodeLogin\(\)[\s\S]*?if \(qrQrcodeId\.value\) \{[\s\S]*?stopQrcodePoll\(\);[\s\S]*?qrQrcodeId\.value = '';/m.test(vueSrc),
     'startQrcodeLogin 未清旧链，在途再点产生双链');
+}
+
+// F. 方案 D 版式契约（计划 docs/plans/2026-09-21-im-tab-d-layout-plan.md §2.5）
+{
+  const src = read('src/renderer/components/config/BridgeSettings.vue');
+  check('F', '①', '平台导航存在（activePane + im-rail）',
+    src.includes('activePane') && src.includes('im-rail'),
+    '缺左栏平台导航（activePane ref / im-rail 类）');
+  check('F', '②', '状态五态中文映射（STATUS_LABELS：已连接/连接中/异常/已断开/未启用）',
+    src.includes('STATUS_LABELS') && ['已连接', '连接中', '异常', '已断开', '未启用'].every((t) => src.includes(t)),
+    '缺 STATUS_LABELS 五态中文映射');
+  check('F', '③', '绑定按面板过滤（paneBindings：平台面板只看本平台，全局=全部）',
+    src.includes('paneBindings') && /b\.platform\s*===\s*activePane/.test(src),
+    '缺 paneBindings computed / 平台过滤形态');
+  check('F', '④', '迷你开关联 save 链（mini-switch × feishu/wechat enabled）',
+    src.includes('mini-switch') && src.includes('save({ feishu: { enabled') && src.includes('save({ wechat: { enabled'),
+    'rail 迷你开关未接原 save({ platform: { enabled } }) 链');
+  check('F', '⑤', '全局面板保留（pickWorkingDir + 留空 = 不设置工作目录）',
+    src.includes('pickWorkingDir') && src.includes('留空 = 不设置工作目录'),
+    '全局面板工作目录/浏览/说明文案丢失');
+  check('F', '⑥', '微信扫码链原样（startQrcodeLogin + bridgeWechatQrcodeStatus + 每 4 秒自动查询状态）',
+    src.includes('startQrcodeLogin') && src.includes('bridgeWechatQrcodeStatus') && src.includes('每 4 秒自动查询状态'),
+    '微信扫码链或 4s 提示文案丢失');
+  const logoCount = (src.match(/im-rail__logo/g) ?? []).length;
+  const svgCount = (src.match(/<svg/g) ?? []).length;
+  check('F', '⑦', '图标全内联 SVG（im-rail__logo ≥3 且 <svg ≥3，无 emoji 结构位）',
+    logoCount >= 3 && svgCount >= 3,
+    `im-rail__logo=${logoCount}, <svg=${svgCount}（须各 ≥3：飞书/微信/全局）`);
+  // F⑧（P3 收口）：mini-switch 嵌套在 rail <button> 内，须 @click.stop 阻断冒泡，
+  // 否则点开关会连带触发外层按钮 @click 切换面板（P3-1）。逐个标签断言：删任一 @click.stop 必转 FAIL。
+  const inputTags = src.match(/<input\b[^>]*>/g) ?? [];
+  const miniSwitchTags = inputTags.filter((tag) => tag.includes('mini-switch'));
+  const stopCount = miniSwitchTags.filter((tag) => tag.includes('@click.stop')).length;
+  check('F', '⑧', '迷你开关 @click.stop（嵌套在 rail 按钮内，点击/空格不冒泡切面板，两个均须带）',
+    miniSwitchTags.length === 2 && stopCount === 2,
+    `mini-switch 输入=${miniSwitchTags.length}（须 2），带 @click.stop=${stopCount}/2`);
 }
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);
