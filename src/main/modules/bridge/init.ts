@@ -144,6 +144,7 @@ function buildManagerDeps(rt: BridgeRuntime): BridgeManagerDeps {
     rebind: (sessionKey, newSessionId) => void bindingRepo.rebindSession(db, sessionKey, newSessionId),
     touch: (sessionKey) => bindingRepo.touchBinding(db, sessionKey),
     getSessionRow: (id) => sessionRepo.getSession(id),
+    isUnbound: (sessionKey) => bindingRepo.isUnbound(db, sessionKey),
     resolveModel: () => resolveDefaultModel(getConfig().advancedJson),
     profiles: () => runtime?.profiles ?? rt.profiles,
     saveFeishuOwner: (openId) => {
@@ -358,7 +359,9 @@ export function bridgeBindingList(): BridgeBindingView[] {
   }));
 }
 
-/** phase 1 只解绑不删会话。 */
+/** phase 1 只解绑不删会话。V14 墓碑：先 DB 置位，再清 manager 缓冲定时器（免消息复活路径）。 */
 export function bridgeUnbind(sessionKey: string): void {
   bindingRepo.deleteBinding(getConnection(), sessionKey);
+  const rt = runtime;
+  if (rt) rt.manager.unbind(sessionKey);
 }

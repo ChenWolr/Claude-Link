@@ -25,6 +25,9 @@
 //       flush finally 须清该 sessionKey 标记。
 //   T.  stopPlatform 缓冲语义：禁用平台（clearBuffers:true）清在途缓冲（dispatcher 0 次）；
 //       重启路径（不带参，startPlatform 内部 stop）缓冲跨重启保留照常 flush。
+// 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次1）：
+//   U.  解绑墓碑：flush B7 凭 deps.isUnbound 拦截已解绑会话的消息（不重建、不派发）；
+//   V.  manager.unbind(sessionKey)：清该 key 的 pending debounce 定时器（免消息复活定时器消灭）；
 // RED 预期（未改树）：manager/owner-policy 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-manager-verify.ts
 
@@ -72,6 +75,8 @@ interface World {
   /** sendReply 挂起钩子（[S] 组用）：feishu sendReply text 命中即挂起，replyGate.open() 放行。 */
   hangFeishuReply: string | null;
   replyGate: { open: () => void } | null;
+  /** [U] 组：墓碑 sessionKey 集合（deps.isUnbound 事实源）。 */
+  unbound: Set<string>;
 }
 
 function createWorld(): { world: World; deps: BridgeManagerDeps } {
@@ -92,6 +97,7 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
     statusChanges: 0,
     hangFeishuReply: null,
     replyGate: null,
+    unbound: new Set<string>(),
   };
 
   let sessionCounter = 0;
@@ -137,6 +143,7 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
     }),
     saveFeishuOwner: (openId) => world.savedOwners.push(openId),
     interruptTurn: (sessionId) => world.interrupted.push(sessionId),
+    isUnbound: (sessionKey) => world.unbound.has(sessionKey),
     adapters: {
       feishu: (hooks) => {
         if (world.feishuFactoryReturnsNull) return null;
@@ -555,6 +562,35 @@ async function main(): Promise<void> {
     await sleep(40);
     check('T', '②', '重启路径（stop 不带参）缓冲跨重启保留：startPlatform 后照常 flush（防回归锚）',
       worldT2.world.dispatcherCalls.length === 1, JSON.stringify(worldT2.world.dispatcherCalls));
+  }
+
+  // ── U. 解绑墓碑（生命周期修复批次1）：已解绑（deps.isUnbound=true）会话的消息在 flush 被
+  // B7 拦截——不重建绑定、不派发 dispatcher、不回复。普通消息照常进缓冲，flush 时丢弃。
+  {
+    const { world, deps } = createWorld();
+    world.unbound.add('fs_dm_ou_owner');
+    const mgr = new BridgeManager(deps);
+    await mgr.startPlatform('feishu');
+    mgr.handleInbound(fsMsg({ text: '解绑后仍发来的消息' }));
+    await sleep(40);
+    check('U', '①', '已解绑会话消息：dispatcher 0 次 + 不重建绑定（createdSessions 0）',
+      world.dispatcherCalls.length === 0 && world.createdSessions.length === 0,
+      `disp=${JSON.stringify(world.dispatcherCalls)} sessions=${world.createdSessions.length}`);
+    check('U', '②', '已解绑会话消息：无回复送达', world.feishuAdapter.sentReplies.length === 0,
+      JSON.stringify(world.feishuAdapter.sentReplies));
+  }
+
+  // ── V. manager.unbind 清缓冲定时器（生命周期修复批次1）：解绑时该 key 的 pending debounce
+  // 定时器被清 + lines 清空——三条免消息复活定时器路径（debounce/busy 重试/afterTurnFlush）消灭。
+  {
+    const { world, deps } = createWorld();
+    const mgr = new BridgeManager(deps);
+    await mgr.startPlatform('feishu');
+    mgr.handleInbound(fsMsg({ text: '排程中的消息' })); // debounce(10ms) 定时器排程中
+    mgr.unbind('fs_dm_ou_owner');
+    await sleep(40); // ≥3×debounceMs
+    check('V', '①', 'unbind 后 pending debounce 定时器不再触发 flush（dispatcher 0 次）',
+      world.dispatcherCalls.length === 0, JSON.stringify(world.dispatcherCalls));
   }
 
   assert.ok(true);

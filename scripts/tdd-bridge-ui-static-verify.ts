@@ -155,5 +155,21 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     `mini-switch 输入=${miniSwitchTags.length}（须 2），带 @click.stop=${stopCount}/2`);
 }
 
+// 生命周期修复计划契约（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次1）：
+//   G. 解绑确认框+_transient 提示 / 空态文案 / appId 前置校验（渲染层红字+主进程正则双路径）/
+//      微信 expired 态扫码入口并存。
+{
+  const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
+  check('G', '①', '解绑按钮走确认框+unbindNotice 提示（window.confirm + unbindNotice ref）',
+    vueSrc.includes('window.confirm') && vueSrc.includes('unbindNotice'),
+    '解绑无确认框或无 transient 提示 ref');
+  check('G', '②', '绑定空态文案含「/new 重新绑定」（解绑语义告知）',
+    vueSrc.includes('/new 重新绑定'),
+    '空态文案未告知解绑后需 /new 重新绑定');
+  check('G', '⑥', '微信 expired 态扫码入口并存（!loggedIn || wechatSessionExpired()）',
+    /!config\?\.wechat\.loggedIn \|\| wechatSessionExpired\(\)/.test(vueSrc),
+    '扫码登录区仍以 v-else 挂在 loggedIn 上，expired 态被「退出登录」遮挡');
+}
+
 console.log(`\n结果：${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

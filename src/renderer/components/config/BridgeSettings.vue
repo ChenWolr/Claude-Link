@@ -13,6 +13,9 @@ const config = ref<BridgeConfigGetResult | null>(null);
 const statuses = ref<BridgePlatformStatusEntry[]>([]);
 const bindings = ref<BridgeBindingView[]>([]);
 const saveError = ref('');
+// 解绑 transient 提示（生命周期修复批次1）：确认框通过后展示 4s，告知解绑语义与平台连接保持。
+const unbindNotice = ref('');
+let unbindNoticeTimer: number | undefined;
 
 // 飞书表单
 const feishuAppSecret = ref('');
@@ -172,6 +175,24 @@ async function pickWorkingDir(): Promise<void> {
   if (dir) await save({ global: { workingDir: dir } });
 }
 
+// 解绑（生命周期修复批次1）：确认框明示「消息被忽略 + 平台不断开」语义；成功后 transient
+// 提示 4s 并重拉列表。彻底停用引导走平台开关（面板提示文案）。
+async function unbindBinding(sessionKey: string): Promise<void> {
+  if (!window.confirm('确定解绑？解绑后该用户的消息将被忽略，直到对方发送 /new 重新绑定。平台连接保持不断开。')) return;
+  try {
+    await claude.bridgeUnbind(sessionKey);
+    unbindNotice.value = '已解绑；期间该用户消息将被忽略，平台连接保持（彻底停用请关闭平台开关）';
+    if (unbindNoticeTimer !== undefined) window.clearTimeout(unbindNoticeTimer);
+    unbindNoticeTimer = window.setTimeout(() => {
+      unbindNoticeTimer = undefined;
+      unbindNotice.value = '';
+    }, 4000);
+    await loadAll();
+  } catch (e) {
+    saveError.value = String(e instanceof Error ? e.message : e);
+  }
+}
+
 onMounted(() => {
   void loadAll();
   stopStatusChanged = claude.onBridgeStatusChanged((s) => {
@@ -185,6 +206,10 @@ onBeforeUnmount(() => {
   if (nowTimer !== undefined) {
     window.clearTimeout(nowTimer);
     nowTimer = undefined;
+  }
+  if (unbindNoticeTimer !== undefined) {
+    window.clearTimeout(unbindNoticeTimer);
+    unbindNoticeTimer = undefined;
   }
   if (stopStatusChanged) stopStatusChanged();
 });
@@ -297,6 +322,7 @@ function formatLastActive(ts: number): string {
     <!-- 右栏：所选平台详情 -->
     <div class="im-detail">
       <p v-if="saveError" class="im-error" role="alert">{{ saveError }}</p>
+      <p v-if="unbindNotice" class="im-hint" role="status">{{ unbindNotice }}</p>
 
       <!-- 飞书面板 -->
       <template v-if="activePane === 'feishu'">
@@ -375,7 +401,9 @@ function formatLastActive(ts: number): string {
         <div v-if="config?.wechat.loggedIn" class="im-inline-row">
           <span>已登录{{ config?.wechat.botUserId ? `：${config.wechat.botUserId}` : '' }}</span>
         </div>
-        <template v-else>
+        <!-- 扫码入口独立条件（生命周期修复批次1.5）：expired 态与「退出登录」并存，
+             扫码确认即完成重登，免除「先退出再扫码」两步。 -->
+        <template v-if="!config?.wechat.loggedIn || wechatSessionExpired()">
           <div class="im-inline-row">
             <button type="button" class="im-act-btn" :disabled="qrLoginBusy" @click="startQrcodeLogin">
               {{ qrLoginBusy ? '获取中…' : '扫码登录' }}
@@ -418,9 +446,9 @@ function formatLastActive(ts: number): string {
           <span class="im-bind-row__name">{{ b.displayName || b.userId }}</span>
           <span class="im-bind-row__id">{{ b.userId }}</span>
           <span class="im-bind-row__time">{{ formatLastActive(b.lastActiveAt) }}</span>
-          <button type="button" class="im-act-btn" @click="claude.bridgeUnbind(b.sessionKey).then(loadAll)">解绑</button>
+          <button type="button" class="im-act-btn" @click="unbindBinding(b.sessionKey)">解绑</button>
         </div>
-        <p v-if="paneBindings.length === 0" class="im-bind-empty">暂无绑定；在 IM 里给机器人发私聊消息后会自动出现。</p>
+        <p v-if="paneBindings.length === 0" class="im-bind-empty">暂无绑定；在 IM 里给机器人发私聊消息后会自动出现。解绑后需对方发送 /new 重新绑定。</p>
       </div>
     </div>
   </div>
@@ -785,6 +813,13 @@ function formatLastActive(ts: number): string {
 .im-error {
   margin: 0;
   color: var(--color-danger);
+  font-size: 0.75rem;
+}
+
+/* transient 操作提示（解绑确认后 4s）：中性蓝灰，区别于错误红。 */
+.im-hint {
+  margin: 0;
+  color: var(--color-text-muted);
   font-size: 0.75rem;
 }
 

@@ -101,7 +101,7 @@ function seedLegacyDb(explicitVersion: number): Db {
   const d = seedLegacyDb(10);
   let threw = '';
   try { runMigrations(d); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
-  check('① 版本 10 老库升级不抛错且版本到 13（V13 落地后同步）', threw === '' && versionOf(d) === 13, threw || `version=${versionOf(d)}`);
+  check('① 版本 10 老库升级不抛错且版本到 14（V14 落地后同步）', threw === '' && versionOf(d) === 14, threw || `version=${versionOf(d)}`);
   check('② 升级时 legacy 幻影 default 清洗为 NULL（一次性 V11 语义保留）',
     JSON.stringify(permModes(d)) === JSON.stringify([null, 'bypassPermissions', null]),
     JSON.stringify(permModes(d)));
@@ -117,7 +117,7 @@ function seedLegacyDb(explicitVersion: number): Db {
   check('④ 用户显式 default 重启后保留（不再被启动清洗抹为 NULL）',
     JSON.stringify(permModes(d)) === JSON.stringify(['default', 'bypassPermissions', null]),
     JSON.stringify(permModes(d)));
-  check('⑤ 版本 11 老库迁移后版本到当前（V13 落地后=13）', versionOf(d) === 13, `version=${versionOf(d)}`);
+  check('⑤ 版本 11 老库迁移后版本到当前（V14 落地后=14）', versionOf(d) === 14, `version=${versionOf(d)}`);
   d.close();
 }
 
@@ -126,7 +126,7 @@ function seedLegacyDb(explicitVersion: number): Db {
   const d = openMemoryDb();
   let threw = '';
   try { runMigrations(d); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
-  check('⑥ 全新库迁移不抛错且版本到 13（V13 落地后同步）', threw === '' && versionOf(d) === 13, threw || `version=${versionOf(d)}`);
+  check('⑥ 全新库迁移不抛错且版本到 14（V14 落地后同步）', threw === '' && versionOf(d) === 14, threw || `version=${versionOf(d)}`);
   d.close();
 }
 

@@ -221,9 +221,9 @@ const versionOf = (d: { prepare: (sql: string) => { get: () => unknown } }): num
   try { runMigrations(d); runMigrations(d); } catch (e) { threw = errMsg(e); }
   const hasCol = cols(d, 'sessions').includes('skill_overrides');
   const ver = versionOf(d);
-  check('⑤', '全新临时库 runMigrations×2：不抛错；sessions 含 skill_overrides；版本=当前 13（V13 落地后同步）',
-    threw === '' && hasCol && ver === 13,
-    [threw ? `抛错：${threw.slice(0, 120)}` : '', hasCol ? '' : '缺 skill_overrides 列', ver !== 13 ? `版本=${ver}` : ''].filter(Boolean).join('; '));
+  check('⑤', '全新临时库 runMigrations×2：不抛错；sessions 含 skill_overrides；版本=当前 14（V14 落地后同步）',
+    threw === '' && hasCol && ver === 14,
+    [threw ? `抛错：${threw.slice(0, 120)}` : '', hasCol ? '' : '缺 skill_overrides 列', ver !== 14 ? `版本=${ver}` : ''].filter(Boolean).join('; '));
   d.close();
 }
 
@@ -272,9 +272,9 @@ function seedLegacySchema12Db(): ReturnType<typeof openMemoryDb> {
   try { runMigrations(d); } catch (e) { threw = errMsg(e); }
   const hasCol = cols(d, 'sessions').includes('skill_overrides');
   const ver = versionOf(d);
-  check('⑥', '老 schema-12 库跑迁移：skill_overrides 列补上；版本升到 13（V13 生效）',
-    threw === '' && hasCol && ver === 13,
-    [threw ? `抛错：${threw.slice(0, 120)}` : '', hasCol ? '' : '缺 skill_overrides 列（自愈块未覆盖）', ver !== 13 ? `版本=${ver}` : ''].filter(Boolean).join('; '));
+  check('⑥', '老 schema-12 库跑迁移：skill_overrides 列补上；版本升到 14（V14 生效）',
+    threw === '' && hasCol && ver === 14,
+    [threw ? `抛错：${threw.slice(0, 120)}` : '', hasCol ? '' : '缺 skill_overrides 列（自愈块未覆盖）', ver !== 14 ? `版本=${ver}` : ''].filter(Boolean).join('; '));
   d.close();
 }
 

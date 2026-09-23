@@ -1484,6 +1484,11 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
             // tasks 已含 client_message_id（v5），自愈块跳过 ALTER。
             return ['id', 'session_id', 'prompt', 'status', 'sort_order', 'client_message_id', 'created_at', 'updated_at'].map((name) => ({ name }));
           }
+          // V14 最小同步：bridge_bindings 列集探针——fixture 模拟的老库无该表（V13 建表只在
+          // exec 记账、不建模列集），返回空集使迁移走「无 unbound_at → ALTER 补列」路径。
+          if (sql.includes('PRAGMA table_info(bridge_bindings)')) {
+            return [];
+          }
           throw new Error(`Unexpected all SQL: ${sql}`);
         },
         run(version: number) {
@@ -1494,7 +1499,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 13); // V13（bridge_bindings）落地后同步
+  assert.equal(schemaVersion, 14); // V14（bridge_bindings 解绑墓碑列）落地后同步
   assert.ok(sessionColumns.has('provider_override'), 'V8：迁移后须补 provider_override 列');
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
@@ -1546,6 +1551,8 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
           if (sql.includes('PRAGMA table_info(sessions)')) return [...sessionsColumns].map((name) => ({ name }));
           if (sql.includes('PRAGMA table_info(messages)')) return [...messagesColumns].map((name) => ({ name }));
           if (sql.includes('PRAGMA table_info(tasks)')) return [...tasksColumns].map((name) => ({ name }));
+          // V14 最小同步：bridge_bindings 列集探针（同上，fixture 不建模该表列集）。
+          if (sql.includes('PRAGMA table_info(bridge_bindings)')) return [];
           throw new Error(`Unexpected all SQL: ${sql}`);
         },
         run(version: number) {
@@ -1556,7 +1563,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 13, '迁移后 schema version 须升到当前（V13 bridge_bindings 落地后=13）');
+  assert.equal(schemaVersion, 14, '迁移后 schema version 须升到当前（V14 bridge_bindings 解绑墓碑列落地后=14）');
   assert.ok(sessionsColumns.has('provider_override'), 'V8：老库迁移须补 provider_override 列');
   assert.ok(allExecSql.some((sql) => sql.includes('model_override = NULL')), 'V8：须执行 model_override 别名清洗 SQL');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');

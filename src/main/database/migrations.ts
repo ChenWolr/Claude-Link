@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 13;
+const CURRENT_SCHEMA_VERSION = 14;
 
 /** P1-10：表列集合查询（版本块守卫与自愈块共用同一谓词，防「列已存在」中间态复现抛错）。 */
 function tableColumns(db: Database.Database, table: string): Set<string> {
@@ -285,6 +285,16 @@ function runMigrationStatements(db: Database.Database): void {
         last_active_at INTEGER NOT NULL
       );
     `);
+  }
+
+  // V14（IM 生命周期修复批次1）：解绑墓碑列。bridgeUnbind 从 DELETE 改 UPDATE 置位（行保留、
+  // get/list/touch 过滤），杜绝「解绑后 flush 把无绑定解释为悬空→自动重建」的接回复活；upsert
+  // ON CONFLICT 清位 = IM 端发 /new 天然重新绑定。旧数据自动 NULL（= 未解绑）。
+  // 列存在守卫（V12 同款）：版本号已推进但列缺失的半应用库不阻塞启动。
+  if (currentVersion < 14) {
+    if (!tableColumns(db, 'bridge_bindings').has('unbound_at')) {
+      db.exec('ALTER TABLE bridge_bindings ADD COLUMN unbound_at INTEGER');
+    }
   }
 
   // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，

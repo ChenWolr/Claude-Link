@@ -32,6 +32,8 @@ export interface BridgeManagerDeps {
   rebind: (sessionKey: string, newSessionId: string) => void;
   touch: (sessionKey: string) => void;
   getSessionRow: (id: string) => unknown | null; // 判绑定悬空（UI 删了会话）
+  /** V14 解绑墓碑判定：true=该用户已被解绑，flush 须忽略其消息（不悬空重建）。 */
+  isUnbound: (sessionKey: string) => boolean;
   resolveModel: () => string;
   profiles: () => BridgeProfilesStored; // 实时读（owner/workingDir）
   saveFeishuOwner: (openId: string) => void; // 首个私聊用户自动捕获
@@ -110,6 +112,21 @@ export class BridgeManager {
     this.adapters.delete(p);
     await adapter.stop();
     this.setStatus(p, { status: 'disconnected' });
+  }
+
+  /**
+   * 解绑收口（生命周期修复批次1）：清该用户在途缓冲与免消息复活定时器（debounce/busy 重试
+   * 定时器；afterTurnFlush 因 lines 清空不再触发），消费残留中断标记。墓碑置位在 binding-repo
+   * （init.ts bridgeUnbind 先 DB 后调本方法）；不打断 running 中的在途回合（N4 保留语义）。
+   */
+  unbind(sessionKey: string): void {
+    const buf = this.buffers.get(sessionKey);
+    if (buf) {
+      this.clearBufferTimer(buf);
+      buf.lines = [];
+      buf.busyRetries = 0;
+    }
+    this.interruptedTurns.delete(sessionKey);
   }
 
   async stopAll(): Promise<void> {
@@ -230,8 +247,17 @@ export class BridgeManager {
     buf.running = true;
     try {
       let binding = this.deps.getBinding(sessionKey);
-      // B7：绑定不存在或会话被 UI 删除（悬空）→ 自动重建绑定+新会话。
-      if (!binding || !this.deps.getSessionRow(binding.sessionId)) {
+      // B7：绑定不存在或会话被 UI 删除（悬空）→ 自动重建绑定+新会话；
+      // 绑定已被用户解绑（V14 墓碑，getBinding 已过滤不可见）→ 忽略本批（不重建、不派发）。
+      if (binding && !this.deps.getSessionRow(binding.sessionId)) {
+        binding = null; // 会话被 UI 删除 → 悬空，走下方重建
+      }
+      if (!binding) {
+        if (this.deps.isUnbound(sessionKey)) {
+          buf.busyRetries = 0;
+          console.info(`[bridge] 已解绑会话的消息被忽略（sessionKey=${sessionKey}，${lines.length} 条）`);
+          return; // 在 finally 中 running 复位、lines 已取走清空，不触发积压补发
+        }
         const label = PLATFORM_LABEL[lastMsg.platform];
         const session = this.deps.createSession(`[${label}] ${lastMsg.senderName}`, this.deps.resolveModel(), this.deps.profiles().global.workingDir);
         this.deps.upsertBinding({

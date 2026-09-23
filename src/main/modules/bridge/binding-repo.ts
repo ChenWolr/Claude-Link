@@ -1,5 +1,7 @@
-// binding-repo.ts — bridge_bindings 表 repo（V13）。
+// binding-repo.ts — bridge_bindings 表 repo（V14）。
 // IM 平台用户（飞书 open_id / 微信 user id）↔ claude-link 会话行的绑定存取。
+// 解绑语义（V14 墓碑）：deleteBinding 置 unbound_at（行保留、get/list/touch 过滤），
+// 消息被忽略直到该用户发 /new（upsert ON CONFLICT 清墓碑复活）或重新产生绑定。
 // 一律接收 db 参数（可测性；生产侧由 bridge/init.ts 传 getConnection()），
 // 不 import connection.ts（避免单例拽进测试）。不 import electron。
 
@@ -50,6 +52,7 @@ export function upsertBinding(
 ): BridgeBinding {
   const now = Date.now();
   // 同 sessionKey 幂等覆盖：保留原 id/created_at，更新可变字段（会话重建/改名场景）。
+  // unbound_at = NULL：显式重建（/new 换绑、flush 悬空重建）天然清解绑墓碑复活。
   const upsert = db.prepare(`
     INSERT INTO bridge_bindings (id, platform, session_key, user_id, chat_id, display_name, session_id, created_at, last_active_at)
     VALUES (@id, @platform, @sessionKey, @userId, @chatId, @displayName, @sessionId, @now, @now)
@@ -59,7 +62,8 @@ export function upsertBinding(
       chat_id = excluded.chat_id,
       display_name = excluded.display_name,
       session_id = excluded.session_id,
-      last_active_at = excluded.last_active_at
+      last_active_at = excluded.last_active_at,
+      unbound_at = NULL
   `);
   upsert.run({
     id: b.id ?? randomUUID(),
@@ -76,14 +80,15 @@ export function upsertBinding(
 }
 
 export function getBindingBySessionKey(db: Database.Database, sessionKey: string): BridgeBinding | null {
-  const row = db.prepare('SELECT * FROM bridge_bindings WHERE session_key = ?').get(sessionKey) as
+  // 墓碑行不可见：解绑后查询等同未绑定（flush 走 isUnbound 分支忽略，不悬空重建）。
+  const row = db.prepare('SELECT * FROM bridge_bindings WHERE session_key = ? AND unbound_at IS NULL').get(sessionKey) as
     | BridgeBindingRow
     | undefined;
   return row ? toBinding(row) : null;
 }
 
 export function listBindings(db: Database.Database): BridgeBinding[] {
-  const rows = db.prepare('SELECT * FROM bridge_bindings ORDER BY last_active_at DESC').all() as BridgeBindingRow[];
+  const rows = db.prepare('SELECT * FROM bridge_bindings WHERE unbound_at IS NULL ORDER BY last_active_at DESC').all() as BridgeBindingRow[];
   return rows.map(toBinding);
 }
 
@@ -96,11 +101,20 @@ export function rebindSession(db: Database.Database, sessionKey: string, newSess
   return getBindingBySessionKey(db, sessionKey);
 }
 
-/** 回合活动时刷新 lastActiveAt（绑定列表排序依据）。 */
+/** 回合活动时刷新 lastActiveAt（绑定列表排序依据）。墓碑行不触碰。 */
 export function touchBinding(db: Database.Database, sessionKey: string): void {
-  db.prepare('UPDATE bridge_bindings SET last_active_at = ? WHERE session_key = ?').run(Date.now(), sessionKey);
+  db.prepare('UPDATE bridge_bindings SET last_active_at = ? WHERE session_key = ? AND unbound_at IS NULL').run(Date.now(), sessionKey);
 }
 
+/**
+ * 解绑（V14 墓碑）：置 unbound_at 而非物理删行——manager.flush 凭 isUnbound 区分
+ * 「悬空→自动重建」与「已解绑→忽略」，消灭解绑后自动接回复活路径。幂等：已置位不刷新时间。
+ */
 export function deleteBinding(db: Database.Database, sessionKey: string): void {
-  db.prepare('DELETE FROM bridge_bindings WHERE session_key = ?').run(sessionKey);
+  db.prepare('UPDATE bridge_bindings SET unbound_at = ? WHERE session_key = ? AND unbound_at IS NULL').run(Date.now(), sessionKey);
+}
+
+/** 该 sessionKey 是否处于解绑墓碑态（get/list 已过滤墓碑行，须以本函数单独判定）。 */
+export function isUnbound(db: Database.Database, sessionKey: string): boolean {
+  return db.prepare('SELECT 1 FROM bridge_bindings WHERE session_key = ? AND unbound_at IS NOT NULL').get(sessionKey) !== undefined;
 }
