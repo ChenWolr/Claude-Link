@@ -5,7 +5,7 @@
 // 状态：挂载时 bridgeGetStatus 拉快照 + onBridgeStatusChanged 订阅增量；
 // v-show 常挂（ConfigPage IM tab 门控），切 tab 不卸载、扫码轮询链不中断。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatus, BridgePlatformStatusEntry } from '../../../shared/types/bridge';
+import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatus, BridgePlatformStatusEntry, BridgeFeishuTestResult } from '../../../shared/types/bridge';
 
 const claude = window.claudeLink;
 
@@ -22,7 +22,7 @@ const appidError = ref('');
 // 飞书表单
 const feishuAppSecret = ref('');
 const feishuTesting = ref(false);
-const feishuTestResult = ref<{ ok: boolean; detail?: string } | null>(null);
+const feishuTestResult = ref<BridgeFeishuTestResult | null>(null);
 // B4：测试结果自动消失（仅 ok=true 60s 后清；失败保留供查看）。生命周期同 unbindNoticeTimer。
 let feishuTestResultTimer: number | undefined;
 function clearFeishuTestResultTimer(): void {
@@ -66,6 +66,15 @@ const restarting = ref<'' | 'feishu' | 'wechat'>('');
 
 function wechatSessionExpired(): boolean {
   return statusOf('wechat')?.status === 'error' && (statusOf('wechat')?.error ?? '').includes('session expired');
+}
+
+// C2：已连接超 2 分钟且无新入站 → 自查引导（最常见故障=事件订阅未开/未发布版本）。
+function staleInbound(platform: 'feishu' | 'wechat'): boolean {
+  void nowTick.value; // 响应式依赖：60s tick 驱动重算
+  const s = statusOf(platform);
+  if (!s || s.status !== 'connected' || !s.connectedAt) return false;
+  if (s.lastInboundAt && s.lastInboundAt >= s.connectedAt) return false;
+  return Date.now() - s.connectedAt > 120_000;
 }
 
 async function loadAll(): Promise<void> {
@@ -268,6 +277,14 @@ function clearWechatOwner(): void {
   void save({ wechat: { ownerUserId: '' } }); // 主进程 '' → null
 }
 
+// C3：飞书 owner 从绑定行解析昵称（对齐 wechatOwnerName 模式）；
+// 无绑定/无昵称回退裸 openId 原样显示（不显示 undefined/空）。
+const feishuOwnerName = computed(() => {
+  const oid = config.value?.feishu.ownerOpenId;
+  if (!oid) return '';
+  return bindings.value.find((x) => x.platform === 'feishu' && x.userId === oid)?.displayName ?? '';
+});
+
 async function pickWorkingDir(): Promise<void> {
   const dir = await claude.pickWorkspaceDir();
   if (dir) await save({ global: { workingDir: dir } });
@@ -459,6 +476,9 @@ defineExpose({ refresh: loadAll });
           </button>
         </div>
         <div v-if="paneError('feishu')" class="im-status-error" :title="paneError('feishu')">{{ truncate(paneError('feishu'), 140) }}</div>
+        <p v-if="staleInbound('feishu')" class="im-field-hint">
+          已连接超过 2 分钟但未收到消息：请确认已按使用说明订阅 im.message.receive_v1 事件并发布应用版本，然后给机器人发一条私聊消息试试。
+        </p>
         <p v-if="config?.secretBroken.feishu" class="im-error">密钥解密失败（换机/重装后常见），请重新录入 App Secret。</p>
         <label class="im-field">
           <span class="im-field-label">区域</span>
@@ -491,11 +511,11 @@ defineExpose({ refresh: loadAll });
           />
         </label>
         <div v-if="config?.feishu.ownerOpenId" class="im-inline-row">
-          <span>Owner：{{ config.feishu.ownerOpenId }}</span>
+          <span>Owner：{{ feishuOwnerName || config.feishu.ownerOpenId }}{{ feishuOwnerName ? `（${config.feishu.ownerOpenId}）` : '' }}</span>
           <button type="button" class="im-act-btn im-act-btn--danger" @click="clearOwner">清除</button>
         </div>
         <div v-if="feishuTestResult" class="im-inline-row">
-          <span v-if="feishuTestResult.ok" class="im-status-pill im-status-pill--ok">连接成功</span>
+          <span v-if="feishuTestResult.ok" class="im-status-pill im-status-pill--ok">连接成功{{ feishuTestResult.botName ? `（机器人：${feishuTestResult.botName}）` : '' }}</span>
           <span v-else class="im-error">失败：{{ feishuTestResult.detail ?? '' }}</span>
           <span v-if="feishuTestResult.ok && !config?.feishu.enabled" class="im-field-hint">凭据可用；在左侧列表打开飞书开关即可启用机器人</span>
         </div>
@@ -533,6 +553,9 @@ defineExpose({ refresh: loadAll });
           <button v-if="config?.wechat.loggedIn" type="button" class="im-act-btn" @click="wechatLogout">退出登录</button>
         </div>
         <div v-if="paneError('wechat')" class="im-status-error" :title="paneError('wechat')">{{ truncate(paneError('wechat'), 140) }}</div>
+        <p v-if="staleInbound('wechat')" class="im-field-hint">
+          已连接超过 2 分钟但未收到消息：请用授权微信给机器人发一条私聊消息试试。
+        </p>
         <p v-if="config?.secretBroken.wechat" class="im-error">登录态解密失败，请重新扫码登录。</p>
         <p v-if="wechatSessionExpired()" class="im-error">登录态已过期（session expired），请重新扫码登录。</p>
         <div v-if="config?.wechat.loggedIn" class="im-inline-row">

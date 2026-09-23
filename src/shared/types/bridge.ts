@@ -27,6 +27,17 @@ export interface BridgePlatformStatusEntry {
   platform: BridgePlatform;
   status: BridgePlatformStatus;
   error?: string;
+  /** 诊断字段（C2）：最近一次入站消息时间 / 本次连接建立时间；off/error 等态缺省。 */
+  lastInboundAt?: number;
+  connectedAt?: number;
+}
+
+/** BRIDGE_FEISHU_TEST 返回。botName=凭据有效但应用未开机器人权限等场景可能缺省。 */
+export interface BridgeFeishuTestResult {
+  ok: boolean;
+  detail?: string;
+  /** 凭据验证通过后附带查询的机器人名称（bot/v3/info），失败/无权限时缺省。 */
+  botName?: string;
 }
 
 /** BRIDGE_CONFIG_SAVE 入参（渲染层 → 主进程；appSecret 为明文新值/掩码/空串，语义见 profiles.resolveSecretPatch）。 */

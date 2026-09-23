@@ -9,7 +9,7 @@ import * as path from 'node:path';
 
 import { IPC_CHANNELS } from '../../../shared/constants';
 import { resolveDefaultModel } from '../../../shared/settings-parser';
-import type { BridgeConfigSaveInput, BridgePlatformStatusEntry, BridgeBindingView, WechatQrcodeStatusResult, BridgeConfigGetResult } from '../../../shared/types/bridge';
+import type { BridgeConfigSaveInput, BridgePlatformStatusEntry, BridgeBindingView, WechatQrcodeStatusResult, BridgeConfigGetResult, BridgeFeishuTestResult } from '../../../shared/types/bridge';
 import { getConfig } from '../config-manager';
 import { getConnection } from '../../database/connection';
 import * as sessionRepo from '../../database/repositories/session-repo';
@@ -255,7 +255,7 @@ export function bridgeConfigGet(): BridgeConfigGetResult {
   return {
     feishu: toFeishuView(runtime.profiles),
     wechat: toWechatView(runtime.profiles),
-    global: { workingDir: runtime.profiles.global.workingDir },
+    global: { workingDir: runtime.profiles.global.workingDir, receiptEnabled: runtime.profiles.global.receiptEnabled },
     secretBroken: { feishu: runtime.feishuSecretBroken, wechat: runtime.wechatTokenBroken },
   };
 }
@@ -320,8 +320,14 @@ async function doSave(input: BridgeConfigSaveInput): Promise<BridgeConfigGetResu
       rt.wechatTokenBroken = false;
     }
   }
-  if (input.global && input.global.workingDir !== undefined) {
-    p.global.workingDir = input.global.workingDir === '' ? null : input.global.workingDir;
+  if (input.global) {
+    if (input.global.workingDir !== undefined) {
+      p.global.workingDir = input.global.workingDir === '' ? null : input.global.workingDir;
+    }
+    // A2：纯数据操作——不在重启字段集（开关保存绝不重启平台）。
+    if (input.global.receiptEnabled !== undefined) {
+      p.global.receiptEnabled = input.global.receiptEnabled !== false;
+    }
   }
   persistProfiles(rt);
 
@@ -388,8 +394,9 @@ export function bridgeStatusGet(): BridgePlatformStatusEntry[] {
   return runtime.manager.getStatus();
 }
 
-/** 飞书凭据连通测试：POST tenant_access_token/internal，code===0 即成功（openhanako :815-839）。 */
-export async function bridgeFeishuTest(input: { appId?: string; appSecret?: string }): Promise<{ ok: boolean; detail?: string }> {
+/** 飞书凭据连通测试：POST tenant_access_token/internal，code===0 即成功（openhanako :815-839）。
+ *  成功后附带 bot/v3/info 查询 botName（C1）——任何失败静默省略，不影响 ok 判定。 */
+export async function bridgeFeishuTest(input: { appId?: string; appSecret?: string }): Promise<BridgeFeishuTestResult> {
   const rt = runtime;
   const stored = rt?.profiles.feishu;
   const region = stored?.region ?? 'feishu_cn';
@@ -411,8 +418,29 @@ export async function bridgeFeishuTest(input: { appId?: string; appSecret?: stri
       body: JSON.stringify({ app_id: appId, app_secret: appSecret }),
       signal: controller.signal,
     });
-    const data = (await res.json()) as { code?: number; msg?: string };
-    if (data.code === 0) return { ok: true, detail: '连接成功' };
+    const data = (await res.json()) as { code?: number; msg?: string; tenant_access_token?: string };
+    if (data.code === 0) {
+      // C1：凭据通过后附带查 botName（bot/v3/info）。独立 10s 超时；失败静默省略不影响 ok。
+      const token = data.tenant_access_token ?? '';
+      let botName: string | undefined;
+      if (token) {
+        try {
+          const ctrl2 = new AbortController();
+          const timer2 = setTimeout(() => ctrl2.abort(), 10_000);
+          try {
+            const info = await fetch(`${domain}/open-apis/bot/v3/info`, {
+              headers: { Authorization: `Bearer ${token}` },
+              signal: ctrl2.signal,
+            });
+            const j = (await info.json()) as { code?: number; data?: { bot?: { bot_name?: string } } };
+            if (j.code === 0 && j.data?.bot?.bot_name) botName = j.data.bot.bot_name;
+          } finally {
+            clearTimeout(timer2);
+          }
+        } catch { /* botName 可选：任何失败静默省略，不影响 ok */ }
+      }
+      return { ok: true, detail: '连接成功', botName };
+    }
     return { ok: false, detail: `code=${String(data.code)} msg=${String(data.msg ?? '')}` };
   } catch (err) {
     return { ok: false, detail: String(err instanceof Error ? err.message : err) };

@@ -68,7 +68,9 @@ export class BridgeManager {
   private readonly deps: BridgeManagerDeps;
   private readonly buffers = new Map<string, SessionBuffer>();
   private readonly adapters = new Map<BridgePlatform, BridgeManagerAdapter>();
-  private readonly statuses = new Map<BridgePlatform, { status: string; error?: string }>();
+  private readonly statuses = new Map<BridgePlatform, { status: string; error?: string; lastInboundAt?: number; connectedAt?: number }>();
+  // C2：lastInboundAt 的 5s 广播节流（防 40s 轮询批量到达逐条轰炸渲染层）。
+  private lastInboundBroadcastAt = 0;
   // P1：/stop 置位的用户中断标记（per sessionKey）。sdk-backend 出口先 deleteEntry 再 emitExit，
   // dispatcher 对中断回合只能兜底判 'error'——flush 处凭此标记把该 'error' 按 interrupted 处理
   //（时序机制钉在 tdd-bridge-dispatcher-verify [8]，行为钉在 tdd-bridge-manager-verify [Q]）。
@@ -171,24 +173,49 @@ export class BridgeManager {
     const out: BridgePlatformStatusEntry[] = [];
     for (const p of ['feishu', 'wechat'] as const) {
       const s = this.statuses.get(p);
-      if (s) out.push({ platform: p, status: s.status as BridgePlatformStatusEntry['status'], error: s.error });
+      if (s) {
+        out.push({
+          platform: p, status: s.status as BridgePlatformStatusEntry['status'], error: s.error,
+          lastInboundAt: s.lastInboundAt, connectedAt: s.connectedAt,
+        });
+      }
     }
     return out;
   }
 
-  private setStatus(p: BridgePlatform, s: { status: string; error?: string }): void {
+  private setStatus(p: BridgePlatform, s: { status: string; error?: string; lastInboundAt?: number; connectedAt?: number }): void {
     this.statuses.set(p, s);
     this.deps.onStatusChanged?.(this.getStatus());
   }
 
   private handleAdapterStatus(p: BridgePlatform, s: BridgeAdapterStatus): void {
-    this.setStatus(p, s);
+    // C2：connected 边沿记 connectedAt（新连接重计）；非 connected 清两诊断字段。
+    const prev = this.statuses.get(p);
+    if (s.status === 'connected') {
+      const connectedAt = prev?.status === 'connected' && prev.connectedAt !== undefined ? prev.connectedAt : Date.now();
+      const lastInboundAt = prev?.status === 'connected' ? prev.lastInboundAt : undefined;
+      this.setStatus(p, { ...s, connectedAt, ...(lastInboundAt !== undefined ? { lastInboundAt } : {}) });
+      return;
+    }
+    this.setStatus(p, { ...s });
   }
 
   // ── 入站管线（唯一入口，adapter onMessage 接此）──
 
   handleInbound(m: BridgeInboundMessage): void {
     if (m.isGroup) return; // phase 1 仅私聊
+    // C2：入站活动性——即刻记内存；5s 节流广播（否则 40s 轮询批量到达逐条轰炸渲染层）。
+    {
+      const entry = this.statuses.get(m.platform);
+      if (entry) {
+        entry.lastInboundAt = Date.now();
+        const now = Date.now();
+        if (now - this.lastInboundBroadcastAt >= 5000) {
+          this.lastInboundBroadcastAt = now;
+          this.deps.onStatusChanged?.(this.getStatus());
+        }
+      }
+    }
     // B1：空文本/纯空格忽略不派发。
     if (!m.text || !m.text.trim()) return;
 

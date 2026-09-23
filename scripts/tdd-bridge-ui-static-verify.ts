@@ -281,7 +281,6 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     '缺「（正在处理…）」回执说明锚点');
 }
 
-
 // 第二轮计划契约（docs/plans/2026-09-23-im-config-ux-round2-plan.md 批次B）：
 //   L. 设置页交互卫生：B1 二维码自动换码（限 2 次）+手动刷新 / B2 微信使用说明折叠区 /
 //      B3 清除授权确认框（两处）/ B4 重连引导 title+测试结果自动消失+引导开启。
@@ -331,6 +330,46 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   check('L', '⑩', 'B4 测试成功引导开启（凭据可用；在左侧列表打开飞书开关）',
     vueSrc.includes('凭据可用；在左侧列表打开飞书开关'),
     '测试成功后缺引导开启 hint');
+}
+
+// 第二轮计划契约（docs/plans/2026-09-23-im-config-ux-round2-plan.md 批次C）：
+//   M. C1 botName 回显 / C2 入站活动性自查提示 / C3 飞书 owner 昵称显示。
+{
+  const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
+  // C1：botName 展示（机器人：）+ BridgeFeishuTestResult 类型引用。
+  check('M', '①', 'C1 测试成功回显 botName（机器人：）',
+    vueSrc.includes('机器人：') && /botName/.test(vueSrc),
+    '测试结果缺 botName 回显');
+  check('M', '②', 'C1 feishuTestResult 类型用 BridgeFeishuTestResult（替换内联类型）',
+    /BridgeFeishuTestResult/.test(vueSrc),
+    'feishuTestResult 仍用内联类型');
+
+  // C2：staleInbound 派生 + 两平台自查提示关键词。
+  check('M', '③', 'C2 staleInbound 活动性派生（connectedAt + 120s + nowTick 依赖）',
+    /staleInbound/.test(vueSrc) && /120_000/.test(vueSrc) && /connectedAt/.test(vueSrc),
+    '缺 staleInbound 派生');
+  check('M', '④', 'C2 飞书自查提示关键词（im.message.receive_v1 事件并发布 / 给机器人发一条私聊消息试试）',
+    vueSrc.includes('im.message.receive_v1 事件并发布') && vueSrc.includes('给机器人发一条私聊消息试试'),
+    '缺飞书无入站自查提示');
+  check('M', '⑤', 'C2 微信自查提示（已连接超过 2 分钟但未收到消息）',
+    /staleInbound\('wechat'\)/.test(vueSrc) && vueSrc.includes('已连接超过 2 分钟但未收到消息'),
+    '缺微信无入站自查提示');
+
+  // C3：feishuOwnerName computed + 模板昵称（openId）回退形态。
+  check('M', '⑥', 'C3 feishuOwnerName 解析（bindings displayName 匹配 + 空回退）',
+    /feishuOwnerName/.test(vueSrc) && /ownerOpenId/.test(vueSrc),
+    '缺 feishuOwnerName computed');
+  check('M', '⑦', 'C3 模板昵称优先回退裸 openId（feishuOwnerName || config.feishu.ownerOpenId）',
+    /feishuOwnerName \|\| config\.feishu\.ownerOpenId/.test(vueSrc),
+    'Owner 行未接昵称回退形态');
+
+  // C1 关键边界（执行要点③）：botName 二次请求失败必须静默省略、不影响 ok 判定。
+  // init.ts 耦合 electron 无法行为级测试，按 D② 先例用源码形态断言。
+  const initSrc = read('src/main/modules/bridge/init.ts');
+  check('M', '⑧', 'C1 botName 二次请求失败静默省略（catch 空体）且 ok 判定只看第一步',
+    /bot\/v3\/info/.test(initSrc) && /catch \{ \/\* botName 可选[\s\S]{0,40}\*\//.test(initSrc)
+      && /return \{ ok: true, detail: '连接成功', botName \}/.test(initSrc),
+    'init.ts botName 路径缺静默省略形态');
 }
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);

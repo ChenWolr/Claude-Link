@@ -44,6 +44,9 @@
 //   Y.  A1 /help（注册即拦截/回复帮助/不建会话不建绑定）；A2 处理中回执（默认开/false 不发/
 //       busy 重试不重发/超限丢弃复位再发/回执失败不阻塞回合）；A3 error+部分正文追加
 //       「（回复中断，以上内容可能不完整）」（success 不加；error 无正文维持失败提示）。
+// 第二轮计划追加（同计划批次C C2）：
+//   Z.  入站活动性：connectedAt/lastInboundAt 记录与清零 / handleInbound 更新 /
+//       5s 节流广播（连续两条只广播一次）/ getStatus 带出两字段。
 // RED 预期（未改树）：manager/owner-policy 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-manager-verify.ts
 
@@ -922,6 +925,41 @@ async function main(): Promise<void> {
     check('Y', '⑩', 'A3 error 无正文维持「回复生成失败，请稍后重试」',
       worldA3.world.feishuAdapter.sentReplies.some((r) => r.text === '回复生成失败，请稍后重试'),
       JSON.stringify(worldA3.world.feishuAdapter.sentReplies));
+  }
+
+  // ── Z. C2 入站活动性（2026-09-23 批次C）：connectedAt/lastInboundAt 记录清零 + 5s 节流广播。──
+  {
+    const worldZ = createWorld();
+    const snapshots: Array<Array<{ platform: string; status: string; lastInboundAt?: number; connectedAt?: number }>> = [];
+    const mgrZ = new BridgeManager({ ...worldZ.deps, onStatusChanged: (s) => snapshots.push(JSON.parse(JSON.stringify(s))) });
+    await mgrZ.startPlatform('feishu'); // → connected（connectedAt 记录）
+    const afterConnect = mgrZ.getStatus().find((s) => s.platform === 'feishu');
+    check('Z', '①', 'connected 转换记录 connectedAt 且清 lastInboundAt',
+      typeof afterConnect?.connectedAt === 'number' && afterConnect?.lastInboundAt === undefined,
+      JSON.stringify(afterConnect));
+    check('Z', '②', 'getStatus 带出 connectedAt（诊断字段透传）',
+      typeof afterConnect?.connectedAt === 'number', JSON.stringify(afterConnect));
+
+    mgrZ.handleInbound(fsMsg({ text: '第一条入站' }));
+    await sleep(10);
+    const afterInbound = mgrZ.getStatus().find((s) => s.platform === 'feishu');
+    check('Z', '③', 'handleInbound 更新 lastInboundAt（≥connectedAt）',
+      typeof afterInbound?.lastInboundAt === 'number'
+      && (afterInbound?.lastInboundAt ?? 0) >= (afterInbound?.connectedAt ?? 0),
+      JSON.stringify(afterInbound));
+    const broadcastsAfterFirst = snapshots.length;
+    mgrZ.handleInbound(fsMsg({ text: '第二条入站' }));
+    await sleep(10);
+    check('Z', '④', '5s 节流：紧接着第二条只改内存不广播（onStatusChanged 不新增）',
+      snapshots.length === broadcastsAfterFirst,
+      `before=${broadcastsAfterFirst} after=${snapshots.length}`);
+
+    // 非 connected 状态 → 两字段清空。
+    await mgrZ.stopPlatform('feishu', { clearBuffers: true });
+    const afterStop = mgrZ.getStatus().find((s) => s.platform === 'feishu');
+    check('Z', '⑤', '非 connected（disconnected）清 lastInboundAt/connectedAt',
+      afterStop?.lastInboundAt === undefined && afterStop?.connectedAt === undefined,
+      JSON.stringify(afterStop));
   }
 
   assert.ok(true);

@@ -10,7 +10,7 @@ import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, Sen
 import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import type { SkillProjectDirsPayload } from '../shared/types/command';
-import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatusEntry, WechatQrcodeStatusResult } from '../shared/types/bridge';
+import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatusEntry, WechatQrcodeStatusResult, BridgeFeishuTestResult } from '../shared/types/bridge';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
 
@@ -104,7 +104,7 @@ export interface ClaudeLinkAPI {
   bridgeGetConfig: () => Promise<BridgeConfigGetResult>;
   bridgeSaveConfig: (input: BridgeConfigSaveInput) => Promise<BridgeConfigGetResult>;
   bridgeGetStatus: () => Promise<BridgePlatformStatusEntry[]>;
-  bridgeTestFeishu: (input: { appId?: string; appSecret?: string }) => Promise<{ ok: boolean; detail?: string }>;
+  bridgeTestFeishu: (input: { appId?: string; appSecret?: string }) => Promise<BridgeFeishuTestResult>;
   bridgeWechatQrcode: () => Promise<{ qrcodeId: string; qrcodeDataUrl: string }>;
   bridgeWechatQrcodeStatus: (qrcodeId: string) => Promise<WechatQrcodeStatusResult>;
   bridgeListBindings: () => Promise<BridgeBindingView[]>;

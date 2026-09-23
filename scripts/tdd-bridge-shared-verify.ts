@@ -119,5 +119,15 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     `实际=${losslessOver.length} 段`);
 }
 
+// D. 第二轮计划契约（docs/plans/2026-09-23-im-config-ux-round2-plan.md 批次C C1）：
+//    BridgeFeishuTestResult 类型存在且 botName 可选（源码形态断言，按本脚本类型钉先例）。
+{
+  const typesSrc = readTypes();
+  check('D', '①', 'BridgeFeishuTestResult 导出类型存在（ok + detail? + botName?）',
+    /export interface BridgeFeishuTestResult[\s\S]{0,300}ok: boolean/.test(typesSrc)
+      && /export interface BridgeFeishuTestResult[\s\S]{0,400}botName\?: string/.test(typesSrc),
+    'shared/types/bridge.ts 缺 BridgeFeishuTestResult/botName 可选字段');
+}
+
 console.log(`\n结果：${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
