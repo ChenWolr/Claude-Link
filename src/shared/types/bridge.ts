@@ -42,6 +42,8 @@ export interface BridgeConfigSaveInput {
     enabled?: boolean;
     /** 掩码/空串语义同 appSecret：掩码=保留，空串=清除（退出登录）。 */
     botToken?: string;
+    /** 授权用户（批次5.2）：'' = 清除授权（主进程归一为 null），非空 = 设为该 userId。 */
+    ownerUserId?: string | null;
   };
   global?: {
     workingDir?: string | null;
@@ -68,6 +70,8 @@ export interface BridgeConfigGetResult {
     enabled: boolean;
     loggedIn: boolean;
     botUserId: string | null;
+    /** 授权用户（批次5.2 owner 收窄）：null = 未定（下一个私聊用户首捕获）。 */
+    ownerUserId: string | null;
   };
   global: { workingDir: string | null };
   secretBroken: { feishu: boolean; wechat: boolean };

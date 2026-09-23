@@ -118,3 +118,14 @@ export function deleteBinding(db: Database.Database, sessionKey: string): void {
 export function isUnbound(db: Database.Database, sessionKey: string): boolean {
   return db.prepare('SELECT 1 FROM bridge_bindings WHERE session_key = ? AND unbound_at IS NOT NULL').get(sessionKey) !== undefined;
 }
+
+/**
+ * 指定平台 last_active_at 最新活跃绑定的 user_id（批次5.2 wechat owner 存量迁移用）。
+ * 墓碑行不参与；无活跃绑定返回 null（等待首捕获）。
+ */
+export function getLatestBindingUserIdByPlatform(db: Database.Database, platform: BridgeBinding['platform']): string | null {
+  const row = db.prepare(
+    'SELECT user_id FROM bridge_bindings WHERE platform = ? AND unbound_at IS NULL ORDER BY last_active_at DESC LIMIT 1',
+  ).get(platform) as { user_id: string } | undefined;
+  return row?.user_id ?? null;
+}

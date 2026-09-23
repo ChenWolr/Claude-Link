@@ -6,6 +6,8 @@
 //   D. resolveSecretPatch 掩码语义：'********'/undefined→保留旧密文；新明文→加密；空串→null。
 //   E. 解密失败 cipher → loadProfilesWithStatus broken 标记 + Enc 置 null（B12）。
 //   F. profiles.json 损坏 JSON → 回落默认值不抛（B13）。
+// 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次5.2）：
+//   G. wechat ownerUserId：默认 null / save→load 往返 / 老文件缺字段兜底 null。
 // RED 预期（未改树）：profiles 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-profiles-verify.ts
 
@@ -142,6 +144,32 @@ const profilesFile = path.join(tmpRoot, 'profiles.json');
     `threw=${threw} loaded=${JSON.stringify(loaded)}`);
   const missing = loadProfiles(path.join(tmpRoot, 'no-such.json'), fakeCipher);
   check('F', '②', '文件缺失：回落默认值', JSON.stringify(missing) === JSON.stringify(defaultProfiles()));
+}
+
+// G. wechat ownerUserId（生命周期修复批次5.2：owner 收窄的存储面）
+{
+  check('G', '①', 'defaultProfiles：wechat.ownerUserId 默认 null',
+    defaultProfiles().wechat.ownerUserId === null,
+    String(defaultProfiles().wechat.ownerUserId));
+
+  const ownerFile = path.join(tmpRoot, 'owner.json');
+  const p = defaultProfiles();
+  p.wechat.ownerUserId = 'wxid_owner_1';
+  saveProfiles(ownerFile, p);
+  const back = loadProfiles(ownerFile, fakeCipher);
+  check('G', '②', 'ownerUserId save→load 往返一致',
+    back.wechat.ownerUserId === 'wxid_owner_1', String(back.wechat.ownerUserId));
+
+  // 老版本 profiles.json（无 ownerUserId 字段）→ 加载兜底 null，不抛。
+  const legacyFile = path.join(tmpRoot, 'legacy.json');
+  fs.writeFileSync(legacyFile, JSON.stringify({
+    global: { workingDir: null },
+    feishu: { enabled: false, appId: '', appSecretEnc: null, region: 'feishu_cn', ownerOpenId: null },
+    wechat: { enabled: false, botTokenEnc: null, botUserId: null },
+  }), 'utf-8');
+  const legacy = loadProfiles(legacyFile, fakeCipher);
+  check('G', '③', '老文件缺 ownerUserId 字段 → 加载兜底 null',
+    legacy.wechat.ownerUserId === null, String(legacy.wechat.ownerUserId));
 }
 
 fs.rmSync(tmpRoot, { recursive: true, force: true });

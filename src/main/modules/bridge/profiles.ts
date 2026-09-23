@@ -28,6 +28,8 @@ export interface WechatProfileStored {
   enabled: boolean;
   botTokenEnc: string | null;
   botUserId: string | null;
+  // 批次5.2：授权用户收窄——仅此 userId 可触发对话；null = 未定（下一个私聊用户首捕获）。
+  ownerUserId: string | null;
 }
 
 export interface BridgeProfilesStored {
@@ -50,6 +52,7 @@ export interface WechatProfileView {
   enabled: boolean;
   loggedIn: boolean;
   botUserId: string | null;
+  ownerUserId: string | null;
 }
 
 export const MASKED_SECRET = '********';
@@ -58,7 +61,7 @@ export function defaultProfiles(): BridgeProfilesStored {
   return {
     global: { workingDir: null },
     feishu: { enabled: false, appId: '', appSecretEnc: null, region: 'feishu_cn', ownerOpenId: null },
-    wechat: { enabled: false, botTokenEnc: null, botUserId: null },
+    wechat: { enabled: false, botTokenEnc: null, botUserId: null, ownerUserId: null },
   };
 }
 
@@ -101,6 +104,8 @@ export function loadProfilesWithStatus(file: string, cipher: BridgeCipher): Brid
     if (raw.wechat && typeof raw.wechat === 'object') {
       d.wechat.enabled = raw.wechat.enabled === true;
       d.wechat.botUserId = typeof raw.wechat.botUserId === 'string' ? raw.wechat.botUserId : null;
+      // 批次5.2：老文件缺 ownerUserId 字段 → 兜底 null（等待首捕获/存量迁移）。
+      d.wechat.ownerUserId = typeof raw.wechat.ownerUserId === 'string' && raw.wechat.ownerUserId ? raw.wechat.ownerUserId : null;
       if (typeof raw.wechat.botTokenEnc === 'string' && raw.wechat.botTokenEnc) {
         if (cipher.decrypt(raw.wechat.botTokenEnc) === null) {
           result.wechatTokenBroken = true;
@@ -144,6 +149,7 @@ export function toWechatView(p: BridgeProfilesStored): WechatProfileView {
   return {
     enabled: p.wechat.enabled,
     loggedIn: typeof p.wechat.botTokenEnc === 'string' && p.wechat.botTokenEnc.length > 0,
+    ownerUserId: p.wechat.ownerUserId,
     botUserId: p.wechat.botUserId,
   };
 }

@@ -157,6 +157,11 @@ function buildManagerDeps(rt: BridgeRuntime): BridgeManagerDeps {
       persistProfiles(rt);
       logger.info(`[bridge] 首个飞书私聊用户已自动捕获为 owner: ${openId.slice(0, 8)}…`);
     },
+    saveWechatOwner: (userId) => {
+      rt.profiles.wechat.ownerUserId = userId;
+      persistProfiles(rt);
+      logger.info(`[bridge] 首个微信私聊用户已自动捕获为 owner: ${userId.slice(0, 8)}…`);
+    },
     interruptTurn: (sessionId) => killProcess(sessionId, 'user', rt.opts.getWindow() ?? undefined),
     adapters: {
       feishu: (hooks) => {
@@ -202,6 +207,17 @@ export function initBridge(opts: { getWindow: () => BrowserWindow | null; userDa
   };
   rt.manager = new BridgeManager(buildManagerDeps(rt));
   runtime = rt;
+
+  // 批次5.2 存量迁移（一次性）：旧版「微信任何私聊用户即 owner」升级为显式 owner——取绑定表
+  // wechat 平台 last_active_at 最新活跃行的 user_id（墓碑行不参与）；无绑定保持 null 等待首捕获。
+  if (!rt.profiles.wechat.ownerUserId) {
+    const legacyOwner = bindingRepo.getLatestBindingUserIdByPlatform(getConnection(), 'wechat');
+    if (legacyOwner) {
+      rt.profiles.wechat.ownerUserId = legacyOwner;
+      persistProfiles(rt);
+      logger.info(`[bridge] wechat owner 存量迁移：已取绑定表最新活跃用户 ${legacyOwner.slice(0, 8)}…`);
+    }
+  }
 
   // B12：解密失败的凭据 → 平台不启动（enabled 也视为不可用），UI 红字提示重新录入。
   if (rt.feishuSecretBroken && rt.profiles.feishu.enabled) {
@@ -294,6 +310,10 @@ async function doSave(input: BridgeConfigSaveInput): Promise<BridgeConfigGetResu
   }
   if (input.wechat) {
     if (input.wechat.enabled !== undefined) p.wechat.enabled = input.wechat.enabled;
+    if (input.wechat.ownerUserId !== undefined) {
+      // 批次5.2：'' = 清除授权（null），非空 = 设为该 userId。纯数据操作（不在重启字段集）。
+      p.wechat.ownerUserId = input.wechat.ownerUserId === '' ? null : input.wechat.ownerUserId;
+    }
     if (input.wechat.botToken !== undefined) {
       // 掩码=保留；空串=清除（退出登录）；新值=加密落库。
       p.wechat.botTokenEnc = resolveSecretPatch(p.wechat.botTokenEnc, input.wechat.botToken, cipher);

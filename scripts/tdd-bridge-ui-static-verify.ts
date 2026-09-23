@@ -249,6 +249,12 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     /feishuAppIdInput/.test(vueSrc)
       && /async function testFeishu[\s\S]{0,300}await save\(\{ feishu: \{ appId: feishuAppIdInput\.value\.trim\(\) \} \}\)/m.test(vueSrc),
     'testFeishu 未用当前输入框值先保存');
+  check('J', '⑤', '微信授权用户 UI（ownerUserId 匹配 + 清除授权按钮 + dim 提示）',
+    vueSrc.includes('wechatOwnerUserId') || (vueSrc.includes('ownerUserId') && vueSrc.includes('清除授权')),
+    '微信面板缺授权用户行/清除授权');
+  check('J', '⑥', '使用说明六条补全（私聊/命令/合并/积压/隐私/owner）',
+    ['仅支持私聊', '/new', '/stop', '合并为一次回复', '不会在重新打开后处理', '会话列表中可见', '仅授权用户'].every((t) => vueSrc.includes(t)),
+    '使用说明缺批次5.3 新文案');
 
   const pageSrc = read('src/renderer/pages/ConfigPage.vue');
   check('J', '⑦', 'ConfigPage 切回 IM tab 重拉（watch im 分支 + bridgeSettingsRef + refresh expose）',

@@ -37,6 +37,9 @@
 //         IM /stop 置标记的 interrupted → 保持静默（原 H① 全量静默作废）；
 //   O①③ /stop 空闲（无绑定或无 running）→ 回「当前没有进行中的回合」且不 interruptTurn；
 //   I⑤. busy 超限丢弃前向 IM 发丢弃通知（文案含「已丢弃」）。
+// 生命周期修复计划追加（批次5.2）：微信 owner 收窄——
+//   A②. owner-policy wechat 不再「任何私聊用户即 owner」，与 feishu 统一 userId 精确匹配；
+//   W.  manager.handleInbound wechat 段：ownerUserId 空 → 首捕获 saveWechatOwner；非 owner 忽略。
 // RED 预期（未改树）：manager/owner-policy 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-manager-verify.ts
 
@@ -76,6 +79,7 @@ interface World {
   rebound: Array<{ sessionKey: string; newSessionId: string }>;
   touched: string[];
   savedOwners: string[];
+  savedWechatOwners: string[];
   interrupted: string[];
   feishuAdapter: FakeAdapter;
   wechatAdapter: FakeAdapter;
@@ -101,6 +105,7 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
     rebound: [],
     touched: [],
     savedOwners: [],
+    savedWechatOwners: [],
     interrupted: [],
     feishuAdapter: { started: false, stopped: false, sentReplies: [] },
     wechatAdapter: { started: false, stopped: false, sentReplies: [] },
@@ -151,9 +156,10 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
     profiles: () => ({
       global: { workingDir: 'D:/bridge-work' },
       feishu: { enabled: true, appId: 'a', appSecretEnc: null, region: 'feishu_cn', ownerOpenId: 'ou_owner' },
-      wechat: { enabled: true, botTokenEnc: null, botUserId: null },
+      wechat: { enabled: true, botTokenEnc: null, botUserId: null, ownerUserId: 'wxid_owner' },
     }),
     saveFeishuOwner: (openId) => world.savedOwners.push(openId),
+    saveWechatOwner: (userId) => world.savedWechatOwners.push(userId),
     interruptTurn: (sessionId) => world.interrupted.push(sessionId),
     isUnbound: (sessionKey) => world.unbound.has(sessionKey),
     adapters: {
@@ -198,8 +204,11 @@ async function main(): Promise<void> {
       isBridgeOwner('feishu', 'ou_owner', 'ou_owner') === true
       && isBridgeOwner('feishu', 'ou_x', 'ou_owner') === false
       && isBridgeOwner('feishu', 'ou_x', null) === false);
-    check('A', '②', 'isBridgeOwner：wechat 任何 DM 用户即 owner',
-      isBridgeOwner('wechat', 'wxid_any', null) === true);
+    // 批次5.2：wechat owner 收窄——不再任何用户即 owner，与 feishu 统一精确匹配。
+    check('A', '②', 'isBridgeOwner：wechat 与 feishu 统一 userId 精确匹配（空 owner → false）',
+      isBridgeOwner('wechat', 'wxid_1', 'wxid_1') === true
+      && isBridgeOwner('wechat', 'wxid_2', 'wxid_1') === false
+      && isBridgeOwner('wechat', 'wxid_2', null) === false);
 
     const { world, deps } = createWorld();
     const mgr = new BridgeManager(deps);
@@ -303,10 +312,10 @@ async function main(): Promise<void> {
     worldO.world.sessionRows.set('old-sess', { model: 'm' });
     const mgrO = new BridgeManager(worldO.deps);
     await mgrO.startPlatform('feishu');
-    mgrO.handleInbound(fsMsg({ text: '/stop' }));
-    await sleep(40);
     // 批次4.2：空闲 /stop（有绑定、无 running）→ 撒谎修正：回「当前没有进行中的回合」，
     // 不 interruptTurn、不置标记、不回「已中断」（原 O①/O② 的「一律 interruptTurn+已中断」作废）。
+    mgrO.handleInbound(fsMsg({ text: '/stop' }));
+    await sleep(40);
     check('O', '①', '空闲 /stop（有绑定无 running）→ 回「当前没有进行中的回合」且不 interruptTurn',
       worldO.world.interrupted.length === 0
       && worldO.world.feishuAdapter.sentReplies.some((r) => r.text === '当前没有进行中的回合'),
@@ -712,6 +721,42 @@ async function main(): Promise<void> {
       worldX4.world.feishuAdapter.stopped
       && mgrX4.getStatus().some((s) => s.platform === 'feishu' && s.status === 'off'),
       `stopped=${worldX4.world.feishuAdapter.stopped} statuses=${JSON.stringify(mgrX4.getStatus())}`);
+  }
+
+  // ── W. 微信 owner 收窄（批次5.2）：ownerUserId 空 → 首捕获；非 owner 私聊忽略；
+  // owner 消息照常处理（对齐 feishu 捕获/判定逻辑，isBridgeOwner 唯一事实源）。
+  {
+    const worldW = createWorld();
+    const profilesW = worldW.deps.profiles;
+    worldW.deps.profiles = () => {
+      const p = profilesW();
+      return { ...p, wechat: { ...p.wechat, ownerUserId: null } };
+    };
+    const mgrW = new BridgeManager(worldW.deps);
+    mgrW.handleInbound(fsMsg({ platform: 'wechat', chatId: 'wxid_first', userId: 'wxid_first', sessionKey: 'wx_dm_wxid_first', text: '微信首条', senderName: '微信用户' }));
+    await sleep(40);
+    check('W', '①', 'wechat ownerUserId=null → 首捕获 saveWechatOwner 且消息继续处理',
+      worldW.world.savedWechatOwners.includes('wxid_first') && worldW.world.dispatcherCalls.length === 1,
+      `owners=${JSON.stringify(worldW.world.savedWechatOwners)} disp=${worldW.world.dispatcherCalls.length}`);
+
+    const worldW2 = createWorld(); // profiles 默认 wechat.ownerUserId='wxid_owner'
+    const mgrW2 = new BridgeManager(worldW2.deps);
+    await mgrW2.startPlatform('wechat');
+    mgrW2.handleInbound(fsMsg({ platform: 'wechat', chatId: 'wxid_stranger', userId: 'wxid_stranger', sessionKey: 'wx_dm_wxid_stranger', text: '陌生人的私聊', senderName: '陌生人' }));
+    await sleep(40);
+    check('W', '②', 'wechat 非 owner 私聊 → 忽略（dispatcher 0 次，不捕获不回复）',
+      worldW2.world.dispatcherCalls.length === 0 && worldW2.world.savedWechatOwners.length === 0
+      && worldW2.world.wechatAdapter.sentReplies.length === 0,
+      `disp=${worldW2.world.dispatcherCalls.length} owners=${JSON.stringify(worldW2.world.savedWechatOwners)}`);
+
+    const worldW3 = createWorld();
+    const mgrW3 = new BridgeManager(worldW3.deps);
+    await mgrW3.startPlatform('wechat');
+    mgrW3.handleInbound(fsMsg({ platform: 'wechat', chatId: 'wxid_owner', userId: 'wxid_owner', sessionKey: 'wx_dm_wxid_owner', text: 'owner 的私聊', senderName: 'owner' }));
+    await sleep(40);
+    check('W', '③', 'wechat owner 私照常处理（dispatcher 1 次 + 回复送达）',
+      worldW3.world.dispatcherCalls.length === 1 && worldW3.world.wechatAdapter.sentReplies.length === 1,
+      `disp=${worldW3.world.dispatcherCalls.length} replies=${JSON.stringify(worldW3.world.wechatAdapter.sentReplies)}`);
   }
 
   assert.ok(true);

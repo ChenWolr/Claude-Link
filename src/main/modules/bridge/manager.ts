@@ -37,6 +37,7 @@ export interface BridgeManagerDeps {
   resolveModel: () => string;
   profiles: () => BridgeProfilesStored; // 实时读（owner/workingDir）
   saveFeishuOwner: (openId: string) => void; // 首个私聊用户自动捕获
+  saveWechatOwner: (userId: string) => void; // 批次5.2：wechat owner 首捕获（语义同 saveFeishuOwner）
   interruptTurn: (sessionId: string) => void;
   adapters: {
     feishu: (hooks: { onMessage: (m: BridgeInboundMessage) => void; onStatus: (s: BridgeAdapterStatus) => void }) => BridgeManagerAdapter | null;
@@ -196,8 +197,15 @@ export class BridgeManager {
       } else if (!isBridgeOwner('feishu', m.userId, ownerOpenId)) {
         return; // 非 owner：无会话创建、无回复（判定唯一事实源：owner-policy，P3c）
       }
+    } else {
+      // 批次5.2：wechat owner 收窄——对齐 feishu 捕获/判定逻辑（原「任何私聊用户即 owner」废除）。
+      const ownerUserId = this.deps.profiles().wechat.ownerUserId;
+      if (!ownerUserId) {
+        this.deps.saveWechatOwner(m.userId); // 首捕获
+      } else if (!isBridgeOwner('wechat', m.userId, ownerUserId)) {
+        return; // 非 owner 私聊：忽略（无会话创建、无回复）
+      }
     }
-    // wechat：任何私聊用户即 owner（owner-policy 语义）。
 
     // slash 拦截：owner-only 命令；未知 /x 不拦截，当普通文本进 LLM（防吞消息）。
     const trimmed = m.text.trim();

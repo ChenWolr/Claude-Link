@@ -223,6 +223,18 @@ async function wechatLogout(): Promise<void> {
   await save({ wechat: { botToken: '' } });
 }
 
+// 批次5.2-5：微信授权用户展示（bindings 匹配 displayName；无匹配回退 userId 前 8 位 + …）。
+const wechatOwnerUserId = computed(() => config.value?.wechat.ownerUserId ?? null);
+const wechatOwnerName = computed(() => {
+  const uid = wechatOwnerUserId.value;
+  if (!uid) return '';
+  const b = bindings.value.find((x) => x.platform === 'wechat' && x.userId === uid);
+  return b?.displayName || `${uid.slice(0, 8)}…`;
+});
+function clearWechatOwner(): void {
+  void save({ wechat: { ownerUserId: '' } }); // 主进程 '' → null
+}
+
 async function pickWorkingDir(): Promise<void> {
   const dir = await claude.pickWorkspaceDir();
   if (dir) await save({ global: { workingDir: dir } });
@@ -460,6 +472,12 @@ defineExpose({ refresh: loadAll });
             <li>把 App ID / App Secret 填入本页并保存。</li>
             <li>打开「启用」开关，等待状态变绿。</li>
             <li>在飞书里给机器人发私聊消息即可对话。</li>
+            <li>仅支持私聊；群消息不会响应。</li>
+            <li>命令：/new 开启新会话并重新绑定；/stop 中断当前回合。解绑后需发送 /new 重新绑定。</li>
+            <li>短时间连发的多条消息会合并为一次回复（约 2 秒窗口）。</li>
+            <li>关闭通信期间收到的消息不会在重新打开后处理（微信）。</li>
+            <li>IM 对话内容会在桌面端会话列表中可见与留存（隐私提示）。</li>
+            <li>仅授权用户（owner）可触发对话；首个私聊用户将自动成为授权用户。</li>
           </ol>
         </details>
       </template>
@@ -482,6 +500,12 @@ defineExpose({ refresh: loadAll });
         <div v-if="config?.wechat.loggedIn" class="im-inline-row">
           <span>已登录{{ config?.wechat.botUserId ? `：${config.wechat.botUserId}` : '' }}</span>
         </div>
+        <!-- 批次5.2-5：授权用户行（owner 收窄 UI）。 -->
+        <div v-if="wechatOwnerUserId" class="im-inline-row">
+          <span>当前授权用户：{{ wechatOwnerName }}（{{ wechatOwnerUserId }}）</span>
+          <button type="button" class="im-act-btn im-act-btn--danger" @click="clearWechatOwner">清除授权</button>
+        </div>
+        <span class="im-field-hint">仅授权用户可触发对话；清除后下一个发私聊的用户将自动成为授权用户</span>
         <!-- 扫码入口独立条件（生命周期修复批次1.5）：expired 态与「退出登录」并存，
              扫码确认即完成重登，免除「先退出再扫码」两步。 -->
         <template v-if="!config?.wechat.loggedIn || wechatSessionExpired()">

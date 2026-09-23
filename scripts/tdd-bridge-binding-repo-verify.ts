@@ -220,6 +220,29 @@ db.pragma('foreign_keys = ON');
     `实际=${JSON.stringify(revived)} isUnbound=${bindingRepo.isUnbound(db, 'wx_dm_wxid_1')}`);
   // 复活后还原为墓碑态，免影响 C 组级联断言基线（C 只动 sess-a，此处仅还原可见性基线）。
   bindingRepo.deleteBinding(db, 'wx_dm_wxid_1');
+
+  // ── wechat owner 存量迁移查询（生命周期修复批次5.2-4）──
+  bindingRepo.upsertBinding(db, {
+    platform: 'wechat', sessionKey: 'wx_dm_old', userId: 'wxid_older',
+    chatId: 'wxid_older', displayName: null, sessionId: 'sess-b',
+  });
+  bindingRepo.upsertBinding(db, {
+    platform: 'wechat', sessionKey: 'wx_dm_new', userId: 'wxid_newest',
+    chatId: 'wxid_newest', displayName: null, sessionId: 'sess-b',
+  });
+  db.prepare("UPDATE bridge_bindings SET last_active_at = 100 WHERE session_key = 'wx_dm_old'").run();
+  db.prepare("UPDATE bridge_bindings SET last_active_at = 200 WHERE session_key = 'wx_dm_new'").run();
+  check('B', '⑮', 'getLatestBindingUserIdByPlatform：返回 wechat last_active_at 最新行 user_id',
+    bindingRepo.getLatestBindingUserIdByPlatform(db, 'wechat') === 'wxid_newest'
+    && bindingRepo.getLatestBindingUserIdByPlatform(db, 'feishu') === 'ou_abc',
+    `wechat=${bindingRepo.getLatestBindingUserIdByPlatform(db, 'wechat')} feishu=${bindingRepo.getLatestBindingUserIdByPlatform(db, 'feishu')}`);
+  // 墓碑行不参与：把最新行置为解绑 → 回退次新行。
+  bindingRepo.deleteBinding(db, 'wx_dm_new');
+  check('B', '⑯', 'getLatestBindingUserIdByPlatform：墓碑行不参与（回退次新活跃行）',
+    bindingRepo.getLatestBindingUserIdByPlatform(db, 'wechat') === 'wxid_older',
+    String(bindingRepo.getLatestBindingUserIdByPlatform(db, 'wechat')));
+  // 清理迁移测试行，免影响 C 组。
+  db.prepare("DELETE FROM bridge_bindings WHERE session_key IN ('wx_dm_old', 'wx_dm_new')").run();
 }
 
 // ── C. 级联删除 ──
