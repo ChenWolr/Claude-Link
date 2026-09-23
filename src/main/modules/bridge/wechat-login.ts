@@ -8,6 +8,8 @@ import QRCode from 'qrcode';
 const BASE_URL = 'https://ilinkai.weixin.qq.com';
 const BOT_TYPE = '3';
 const QRCODE_STATUS_TIMEOUT_MS = 40_000;
+// 批次5.1-8：获取二维码请求超时（防挂死——无超时则扫码按钮永远「获取中…」）。
+const QRCODE_FETCH_TIMEOUT_MS = 15_000;
 
 /** 登录阶段请求头（无需 Authorization）。 */
 function loginHeaders(): Record<string, string> {
@@ -19,10 +21,21 @@ export interface WechatQrcodeResult {
   qrcodeDataUrl: string;
 }
 
-/** 获取微信扫码登录二维码：qrcode_img_content 是要编码成二维码的 URL 文本（不是图片）。 */
-export async function getWechatQrcode(fetchFn: typeof fetch = fetch): Promise<WechatQrcodeResult> {
+/** 获取微信扫码登录二维码：qrcode_img_content 是要编码成二维码的 URL 文本（不是图片）。
+ *  批次5.1-8：AbortController 超时（对齐 bridgeFeishuTest 的 controller 模式）；timeoutMs 可注入（契约用）。 */
+export async function getWechatQrcode(fetchFn: typeof fetch = fetch, timeoutMs = QRCODE_FETCH_TIMEOUT_MS): Promise<WechatQrcodeResult> {
   const url = `${BASE_URL}/ilink/bot/get_bot_qrcode?bot_type=${BOT_TYPE}`;
-  const res = await fetchFn(url, { headers: loginHeaders() });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetchFn(url, { headers: loginHeaders(), signal: controller.signal });
+    clearTimeout(timer);
+  } catch (err) {
+    clearTimeout(timer);
+    if ((err as Error)?.name === 'AbortError') throw new Error('获取二维码超时，请重试');
+    throw err;
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
     throw new Error(`获取微信二维码失败：HTTP ${res.status}${body ? `: ${body.slice(0, 200)}` : ''}`);

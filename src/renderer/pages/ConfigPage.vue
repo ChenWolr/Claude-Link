@@ -24,6 +24,8 @@ const interactionStore = useInteractionStore();
 const router = useRouter();
 const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
+// 批次5.1-5：IM tab 切回时经 BridgeSettings.refresh 重拉 config/bindings（owner 首捕获后可见）。
+const bridgeSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
 
 // 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）。
 type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im';
@@ -280,6 +282,8 @@ const skillProbePending = computed(() => {
 // 项目目录同拍现查（2026-09-17 方案 B）：新目录自然纳入、被删目录自然消失（窗口 = 一次进 tab）。
 watch(activeTab, (tab) => {
   if (tab === 'skill') { void commandStore.ensureGlobalSnapshot(); void ensureProjectDirs(); }
+  // 批次5.1-5：IM tab 激活重拉（组件 v-show 常挂，onMounted 只跑一次，切 tab 需手动刷新）。
+  if (tab === 'im') void bridgeSettingsRef.value?.refresh?.();
 });
 
 // ── 项目级 Skill 管理（方案 B 双栏 master-detail，2026-09-17）─────────────────
@@ -675,7 +679,7 @@ async function cleanupStaleSkillKeys(): Promise<void> {
 
         <!-- IM：平台导航双栏（BridgeSettings 自管加载与状态订阅，v-show 保持常挂不重置扫码链） -->
         <div v-show="activeTab === 'im'" class="solo-card">
-          <BridgeSettings />
+          <BridgeSettings ref="bridgeSettingsRef" />
         </div>
 
         <!-- Skill：方案 B 双栏 master-detail（左=作用域清单 rail，右=作用域详情 main）。

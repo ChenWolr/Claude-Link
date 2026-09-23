@@ -64,9 +64,10 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
 {
   const src = read('src/renderer/pages/ConfigPage.vue');
   check('B', '①', 'import BridgeSettings 组件', src.includes("import BridgeSettings from '../components/config/BridgeSettings.vue'"));
-  check('B', '②', '模板挂载 <BridgeSettings />', /<BridgeSettings\s*\/>/.test(src));
-  check('B', '③', 'IM tab 门控挂载（v-show=activeTab im + <BridgeSettings />）',
-    src.includes(`v-show="activeTab === 'im'"`) && /<BridgeSettings\s*\/>/.test(src));
+  // 批次5.1-5 同步：挂载加 ref="bridgeSettingsRef"（IM tab 重拉），正则放宽到允许属性。
+  check('B', '②', '模板挂载 <BridgeSettings … />（允许 ref 属性）', /<BridgeSettings\b[^>]*\/>/.test(src));
+  check('B', '③', 'IM tab 门控挂载（v-show=activeTab im + <BridgeSettings … />）',
+    src.includes(`v-show="activeTab === 'im'"`) && /<BridgeSettings\b[^>]*\/>/.test(src));
 }
 
 // C. preload/api.ts bridge 组 9 方法
@@ -228,6 +229,35 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   check('I', '③', '重连按钮（restartPlatform + bridgePlatformRestart + restarting busy 锁）',
     vueSrc.includes('restartPlatform') && vueSrc.includes('bridgePlatformRestart') && /restarting/.test(vueSrc),
     '缺重连按钮或 busy 锁');
+}
+
+// 生命周期修复计划契约（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次5）：
+//   J. 渲染层卫生：saveError 生命周期 / 扫码失败走 qrError+清二维码 / 轮询容错 streak /
+//      ConfigPage im tab 重拉 / 测试连接先存后测 / 微信授权用户 UI / 使用说明六条补全。
+{
+  const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
+  check('J', '①', 'loadAll 成功路径清 saveError',
+    /await claude\.bridgeListBindings\(\);[\s\S]{0,80}saveError\.value = ''/.test(vueSrc),
+    'loadAll 成功后未清 saveError');
+  check('J', '②', 'startQrcodeLogin 失败走 qrError 且清残留二维码',
+    /catch[\s\S]{0,200}qrError\.value =/m.test(vueSrc) && /qrDataUrl\.value = ''[\s\S]{0,120}qrQrcodeId\.value = '';[\s\S]{0,120}qrError\.value =/m.test(vueSrc),
+    '扫码失败仍占用 saveError 槽位或未清旧二维码');
+  check('J', '③', '扫码轮询容错（qrErrorStreak：<3 不断链，>=3 才 settled 断链）',
+    /qrErrorStreak/.test(vueSrc),
+    '一次 error 即断链（网络抖动作废整条扫码链）');
+  check('J', '④', '测试连接先存后测（feishuAppIdInput 本地 ref + testFeishu 内先 save appId）',
+    /feishuAppIdInput/.test(vueSrc)
+      && /async function testFeishu[\s\S]{0,300}await save\(\{ feishu: \{ appId: feishuAppIdInput\.value\.trim\(\) \} \}\)/m.test(vueSrc),
+    'testFeishu 未用当前输入框值先保存');
+
+  const pageSrc = read('src/renderer/pages/ConfigPage.vue');
+  check('J', '⑦', 'ConfigPage 切回 IM tab 重拉（watch im 分支 + bridgeSettingsRef + refresh expose）',
+    /watch\(activeTab, \(tab\) => \{[\s\S]{0,200}tab === 'im'[\s\S]{0,120}bridgeSettingsRef[\s\S]{0,80}refresh/m.test(pageSrc)
+      && /<BridgeSettings ref="bridgeSettingsRef" \/>/.test(pageSrc),
+    'ConfigPage 缺 im 分支 watch 或模板 ref');
+  check('J', '⑧', 'BridgeSettings defineExpose refresh（loadAll）',
+    /defineExpose\(\{ refresh: loadAll \}\)/.test(vueSrc),
+    'BridgeSettings 未暴露 refresh');
 }
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);

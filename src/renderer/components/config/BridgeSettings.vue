@@ -33,6 +33,7 @@ const qrError = ref('');
 const QR_POLL_INTERVAL_MS = 4000;
 let qrTimer: number | undefined;
 let qrPollDisposed = false; // 卸载后不再链式排下一轮（防在途 poll 回来后泄漏定时器）
+let qrErrorStreak = 0; // 批次5.1-3：连续 error 计数（<3 不断链；任意非 error 态清零）
 let stopStatusChanged: (() => void) | null = null;
 
 function statusOf(platform: 'feishu' | 'wechat'): BridgePlatformStatusEntry | undefined {
@@ -65,6 +66,7 @@ async function loadAll(): Promise<void> {
     const st = await claude.bridgeGetStatus();
     if (gen === pushGen) statuses.value = st; // 在途期间推送已更新 → 丢弃旧快照
     bindings.value = await claude.bridgeListBindings();
+    saveError.value = ''; // 批次5.1-1：成功加载即清（transient 错误不跨加载滞留）
   } catch (e) {
     saveError.value = `加载 IM 机器人配置失败：${e instanceof Error ? e.message : String(e)}`;
   }
@@ -112,6 +114,8 @@ async function testFeishu(): Promise<void> {
   feishuTesting.value = true;
   feishuTestResult.value = null;
   try {
+    // 批次5.1-6（E5-2 混测修正）：先用当前输入框值保存，再以「已保存凭据」做连通测试。
+    await save({ feishu: { appId: feishuAppIdInput.value.trim() } });
     // 输入框有新密钥用新值，否则主进程用已存密文（掩码语义）。
     feishuTestResult.value = await claude.bridgeTestFeishu({
       appId: config.value?.feishu.appId,
@@ -139,6 +143,7 @@ async function startQrcodeLogin(): Promise<void> {
   qrLoginBusy.value = true;
   qrExpired.value = false;
   qrError.value = '';
+  qrErrorStreak = 0;
   try {
     const qr = await claude.bridgeWechatQrcode();
     qrDataUrl.value = qr.qrcodeDataUrl;
@@ -147,7 +152,10 @@ async function startQrcodeLogin(): Promise<void> {
     // 首查；后续由 pollQrcodeStatus 完成后链式自排（review P3e，防长轮询在途请求堆积）。
     await pollQrcodeStatus();
   } catch (e) {
-    saveError.value = `获取微信登录二维码失败：${e instanceof Error ? e.message : String(e)}`;
+    // 批次5.1-1/2：扫码失败走独立 qrError 槽位（不再占用 saveError），并清残留二维码。
+    qrDataUrl.value = '';
+    qrQrcodeId.value = '';
+    qrError.value = `获取微信登录二维码失败：${e instanceof Error ? e.message : String(e)}`;
   } finally {
     qrLoginBusy.value = false;
   }
@@ -162,24 +170,32 @@ async function pollQrcodeStatus(): Promise<void> {
   try {
     const r = await claude.bridgeWechatQrcodeStatus(id);
     if (r.status === 'confirmed') {
+      qrErrorStreak = 0;
       settled = true;
       stopQrcodePoll();
       qrDataUrl.value = '';
       qrQrcodeId.value = '';
       await loadAll();
     } else if (r.status === 'expired') {
+      qrErrorStreak = 0;
       settled = true;
       stopQrcodePoll();
       qrDataUrl.value = '';
       qrQrcodeId.value = '';
       qrExpired.value = true;
     } else if (r.status === 'error') {
-      // review P3b：扫码链路错误文案透传展示，不再当作「二维码已过期」误导用户重扫。
-      settled = true;
-      stopQrcodePoll();
-      qrDataUrl.value = '';
-      qrQrcodeId.value = '';
-      qrError.value = r.error;
+      // review P3b：错误文案透传；批次5.1-3：轮询容错——1-2 次链路抖动不断链（继续重排），
+      // 连续 3 次 error 才 settled 断链展示（修「一次网络抖动作废整条扫码链」）。
+      qrErrorStreak += 1;
+      if (qrErrorStreak >= 3) {
+        settled = true;
+        stopQrcodePoll();
+        qrDataUrl.value = '';
+        qrQrcodeId.value = '';
+        qrError.value = r.error;
+      }
+    } else {
+      qrErrorStreak = 0; // wait/scaned：链路健康，清容错计数
     }
   } catch {
     // 单次轮询失败静默（下轮再试）
@@ -312,6 +328,9 @@ function formatLastActive(ts: number): string {
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前活跃`;
   return `${Math.floor(diff / 86_400_000)} 天前活跃`;
 }
+
+// 批次5.1-5：供 ConfigPage 切回 IM tab 时重拉（owner 被捕获后切 tab 能看到最新数据）。
+defineExpose({ refresh: loadAll });
 </script>
 
 <template>

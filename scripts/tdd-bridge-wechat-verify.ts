@@ -17,6 +17,7 @@
 // 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次3.2）：
 //   K. reportStatus 去重：连续同状态只上报一次（消 40s 轮询周期全量广播噪音）；
 //      状态变化后恢复上报（error → connected 重报）。
+// 生命周期修复计划追加（批次5.1-8）：getWechatQrcode AbortController 超时 → throw「获取二维码超时」。
 // 手法：按 URL 片段分派 mock fetch（对照 openhanako tests/wechat-adapter.test.ts）。
 // RED 预期（未改树）：三模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-wechat-verify.ts
@@ -503,6 +504,36 @@ async function main(): Promise<void> {
       && statuses.some((s) => s.status === 'error'),
       JSON.stringify(statuses));
     client.stop();
+  }
+
+  // ── L. getWechatQrcode 超时（批次5.1-8）：挂起 fetch + 注入短超时 → throw「获取二维码超时」。
+  {
+    // 挂起 fetch：实现传入的 signal abort 时 reject；另设 2s 兜底 reject——未实现超时（无 signal）
+    // 时脚本不至于静默退出，以错误文案不匹配转 FAIL（真实 RED）。
+    const hangingFetch = (async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      await new Promise((_resolve, reject) => {
+        const fallback = setTimeout(() => {
+          reject(new Error('fallback: fetch never settled'));
+        }, 2000);
+        if (init?.signal) {
+          init.signal.addEventListener('abort', () => {
+            clearTimeout(fallback);
+            const err = new Error('The operation was aborted');
+            err.name = 'AbortError';
+            reject(err);
+          }, { once: true });
+        }
+      });
+      throw new Error('unreachable');
+    }) as typeof fetch;
+    let timeoutErr = '';
+    try {
+      await getWechatQrcode(hangingFetch, 20);
+    } catch (e) {
+      timeoutErr = e instanceof Error ? e.message : String(e);
+    }
+    check('L', '①', 'getWechatQrcode 挂起 fetch 超时 → throw「获取二维码超时，请重试」',
+      timeoutErr.includes('获取二维码超时'), timeoutErr);
   }
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });
