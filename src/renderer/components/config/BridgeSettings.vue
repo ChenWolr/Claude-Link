@@ -23,6 +23,14 @@ const appidError = ref('');
 const feishuAppSecret = ref('');
 const feishuTesting = ref(false);
 const feishuTestResult = ref<{ ok: boolean; detail?: string } | null>(null);
+// B4：测试结果自动消失（仅 ok=true 60s 后清；失败保留供查看）。生命周期同 unbindNoticeTimer。
+let feishuTestResultTimer: number | undefined;
+function clearFeishuTestResultTimer(): void {
+  if (feishuTestResultTimer !== undefined) {
+    window.clearTimeout(feishuTestResultTimer);
+    feishuTestResultTimer = undefined;
+  }
+}
 
 // 微信扫码
 const qrDataUrl = ref('');
@@ -34,6 +42,7 @@ const QR_POLL_INTERVAL_MS = 4000;
 let qrTimer: number | undefined;
 let qrPollDisposed = false; // 卸载后不再链式排下一轮（防在途 poll 回来后泄漏定时器）
 let qrErrorStreak = 0; // 批次5.1-3：连续 error 计数（<3 不断链；任意非 error 态清零）
+let qrAutoRefetch = 0; // B1：自动换码已用额度（用户点击重置）
 let stopStatusChanged: (() => void) | null = null;
 
 function statusOf(platform: 'feishu' | 'wechat'): BridgePlatformStatusEntry | undefined {
@@ -112,6 +121,7 @@ async function saveFeishuSecret(): Promise<void> {
 
 async function testFeishu(): Promise<void> {
   feishuTesting.value = true;
+  clearFeishuTestResultTimer(); // B4：新测试清旧定时器
   feishuTestResult.value = null;
   try {
     // 批次5.1-6（E5-2 混测修正）：先用当前输入框值保存，再以「已保存凭据」做连通测试。
@@ -121,6 +131,14 @@ async function testFeishu(): Promise<void> {
       appId: config.value?.feishu.appId,
       appSecret: feishuAppSecret.value || undefined,
     });
+    // B4：成功结果 60s 自动清（失败保留——错误要留着看）。
+    if (feishuTestResult.value?.ok) {
+      clearFeishuTestResultTimer();
+      feishuTestResultTimer = window.setTimeout(() => {
+        feishuTestResultTimer = undefined;
+        feishuTestResult.value = null;
+      }, 60_000);
+    }
   } catch (e) {
     feishuTestResult.value = { ok: false, detail: e instanceof Error ? e.message : String(e) };
   } finally {
@@ -129,12 +147,15 @@ async function testFeishu(): Promise<void> {
 }
 
 function clearOwner(): void {
+  if (!window.confirm('确定清除授权用户？清除后，下一个给机器人发私聊消息的用户将自动成为授权用户。')) return;
   void save({ feishu: { ownerOpenId: '' } });
 }
 
 // ── 微信 ──
 
-async function startQrcodeLogin(): Promise<void> {
+async function startQrcodeLogin(opts?: { auto?: boolean }): Promise<void> {
+  // B1：用户点击（非 auto）重置自动换码额度；auto 不重置。
+  if (!opts?.auto) qrAutoRefetch = 0;
   // R2 观察：扫码在途再点会产生双轮询链——先终止旧链（清 id 使旧链回来后不再续排）再开新链。
   if (qrQrcodeId.value) {
     stopQrcodePoll();
@@ -171,6 +192,7 @@ async function pollQrcodeStatus(): Promise<void> {
     const r = await claude.bridgeWechatQrcodeStatus(id);
     if (r.status === 'confirmed') {
       qrErrorStreak = 0;
+      qrAutoRefetch = 0;
       settled = true;
       stopQrcodePoll();
       qrDataUrl.value = '';
@@ -182,7 +204,17 @@ async function pollQrcodeStatus(): Promise<void> {
       stopQrcodePoll();
       qrDataUrl.value = '';
       qrQrcodeId.value = '';
-      qrExpired.value = true;
+      // B1：自动换码限 2 次（防无人值守无限刷）；第 3 个 expired 停手转手动。
+      if (qrAutoRefetch < 2 && !qrPollDisposed) {
+        qrAutoRefetch += 1;
+        // R2 竞态收口：错开外层扫码调用的 await 栈——首轮 expired 时其 finally 会释放
+        // 内层刚置的 qrLoginBusy，窗口期手动点击可双取码；0ms 后外层已收口、锁语义恢复。
+        window.setTimeout(() => {
+          if (!qrPollDisposed) void startQrcodeLogin({ auto: true });
+        }, 0);
+      } else {
+        qrExpired.value = true;
+      }
     } else if (r.status === 'error') {
       // review P3b：错误文案透传；批次5.1-3：轮询容错——1-2 次链路抖动不断链（继续重排），
       // 连续 3 次 error 才 settled 断链展示（修「一次网络抖动作废整条扫码链」）。
@@ -232,6 +264,7 @@ const wechatOwnerName = computed(() => {
   return b?.displayName || `${uid.slice(0, 8)}…`;
 });
 function clearWechatOwner(): void {
+  if (!window.confirm('确定清除授权用户？清除后，下一个给机器人发私聊消息的用户将自动成为授权用户。')) return;
   void save({ wechat: { ownerUserId: '' } }); // 主进程 '' → null
 }
 
@@ -290,6 +323,11 @@ onBeforeUnmount(() => {
   if (unbindNoticeTimer !== undefined) {
     window.clearTimeout(unbindNoticeTimer);
     unbindNoticeTimer = undefined;
+  }
+  // B4：同 unbindNoticeTimer 生命周期写法。
+  if (feishuTestResultTimer !== undefined) {
+    window.clearTimeout(feishuTestResultTimer);
+    feishuTestResultTimer = undefined;
   }
   if (stopStatusChanged) stopStatusChanged();
 });
@@ -413,7 +451,7 @@ defineExpose({ refresh: loadAll });
           <h3 class="im-head__title">飞书</h3>
           <span :class="['im-status-pill', `im-status-pill--${statusInfo('feishu').tone}`]">{{ statusInfo('feishu').label }}</span>
           <span class="im-head__spacer"></span>
-          <button type="button" class="im-act-btn" :disabled="restarting !== '' || !config?.feishu.enabled" @click="restartPlatform('feishu')">
+          <button type="button" class="im-act-btn" :disabled="restarting !== '' || !config?.feishu.enabled" :title="!config?.feishu.enabled ? '请先在左侧打开飞书开关' : ''" @click="restartPlatform('feishu')">
             {{ restarting === 'feishu' ? '重连中…' : '重连' }}
           </button>
           <button type="button" class="im-act-btn" :disabled="feishuTesting" @click="testFeishu">
@@ -459,6 +497,7 @@ defineExpose({ refresh: loadAll });
         <div v-if="feishuTestResult" class="im-inline-row">
           <span v-if="feishuTestResult.ok" class="im-status-pill im-status-pill--ok">连接成功</span>
           <span v-else class="im-error">失败：{{ feishuTestResult.detail ?? '' }}</span>
+          <span v-if="feishuTestResult.ok && !config?.feishu.enabled" class="im-field-hint">凭据可用；在左侧列表打开飞书开关即可启用机器人</span>
         </div>
         <details class="im-guide">
           <summary>使用说明</summary>
@@ -488,14 +527,13 @@ defineExpose({ refresh: loadAll });
           <h3 class="im-head__title">微信</h3>
           <span :class="['im-status-pill', `im-status-pill--${statusInfo('wechat').tone}`]">{{ statusInfo('wechat').label }}</span>
           <span class="im-head__spacer"></span>
-          <button type="button" class="im-act-btn" :disabled="restarting !== '' || !config?.wechat.enabled" @click="restartPlatform('wechat')">
+          <button type="button" class="im-act-btn" :disabled="restarting !== '' || !config?.wechat.enabled" :title="!config?.wechat.enabled ? '请先在左侧打开微信开关' : ''" @click="restartPlatform('wechat')">
             {{ restarting === 'wechat' ? '重连中…' : '重连' }}
           </button>
           <button v-if="config?.wechat.loggedIn" type="button" class="im-act-btn" @click="wechatLogout">退出登录</button>
         </div>
         <div v-if="paneError('wechat')" class="im-status-error" :title="paneError('wechat')">{{ truncate(paneError('wechat'), 140) }}</div>
         <p v-if="config?.secretBroken.wechat" class="im-error">登录态解密失败，请重新扫码登录。</p>
-        <span class="im-field-hint">关闭通信期间收到的消息不会在重新打开后处理</span>
         <p v-if="wechatSessionExpired()" class="im-error">登录态已过期（session expired），请重新扫码登录。</p>
         <div v-if="config?.wechat.loggedIn" class="im-inline-row">
           <span>已登录{{ config?.wechat.botUserId ? `：${config.wechat.botUserId}` : '' }}</span>
@@ -510,17 +548,35 @@ defineExpose({ refresh: loadAll });
              扫码确认即完成重登，免除「先退出再扫码」两步。 -->
         <template v-if="!config?.wechat.loggedIn || wechatSessionExpired()">
           <div class="im-inline-row">
-            <button type="button" class="im-act-btn" :disabled="qrLoginBusy" @click="startQrcodeLogin">
+            <button type="button" class="im-act-btn" :disabled="qrLoginBusy" @click="startQrcodeLogin()">
               {{ qrLoginBusy ? '获取中…' : '扫码登录' }}
             </button>
-            <span v-if="qrExpired" class="im-error">二维码已过期，请重新扫码</span>
+            <span v-if="qrExpired" class="im-error">二维码已过期（自动换码已达上限），请点击刷新重新获取</span>
             <span v-if="qrError" class="im-error">扫码登录失败：{{ qrError }}</span>
           </div>
           <div v-if="qrDataUrl" class="im-qr">
             <img :src="qrDataUrl" alt="微信扫码登录二维码" width="200" height="200" />
-            <span class="im-field-hint">请用微信扫码确认登录（每 4 秒自动查询状态）</span>
+            <div class="im-inline-row">
+              <span class="im-field-hint">请用微信扫码确认登录（每 4 秒自动查询状态）</span>
+              <button type="button" class="im-act-btn" :disabled="qrLoginBusy" @click="startQrcodeLogin()">刷新二维码</button>
+            </div>
           </div>
         </template>
+        <details class="im-guide">
+          <summary>使用说明</summary>
+          <ol>
+            <li>点击「扫码登录」，用微信扫二维码并在手机上确认。</li>
+            <li>登录成功后显示已登录状态，打开左侧「微信」开关启用机器人。</li>
+            <li>用微信给机器人发私聊消息即可对话；仅支持私聊，群消息不会响应。</li>
+            <li>仅授权用户可触发对话；首个私聊用户将自动成为授权用户。</li>
+            <li>命令：/new 开启新会话并重新绑定；/stop 中断当前回合；/help 查看帮助。解绑后需发送 /new 重新绑定。</li>
+            <li>短时间连发的多条消息会合并为一次回复（约 2 秒窗口）。</li>
+            <li>机器人只能在你最近 24 小时内发过消息后回复你（微信平台限制）。</li>
+            <li>图片/文件/视频消息暂不支持查看，会收到占位提示；语音会自动转为文字。</li>
+            <li>关闭通信期间收到的消息不会在重新打开后处理。</li>
+            <li>IM 对话内容会在桌面端会话列表中可见与留存（隐私提示）。</li>
+          </ol>
+        </details>
       </template>
 
       <!-- 全局面板 -->

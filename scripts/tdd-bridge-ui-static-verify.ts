@@ -115,8 +115,10 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   check('E', '②', 'pollQrcodeStatus 尾部重排前校验链身份（qrQrcodeId.value === id，旧链回来不再排程）',
     vueSrc.includes('qrQrcodeId.value === id'),
     '重排条件未校验 id 一致性，在途旧链回来会续排双链');
+  // 2026-09-23 第二轮 B1 最小同步：startQrcodeLogin 加 opts?/{ auto? } 参（自动换码），
+  // 签名钉放宽为可带参（窗口位移按 5db45f7 先例）；终止旧链三锚点不变。
   check('E', '③', 'startQrcodeLogin 开头终止旧链（qrQrcodeId 非空 → stopQrcodePoll + 清 id）',
-    /async function startQrcodeLogin\(\)[\s\S]*?if \(qrQrcodeId\.value\) \{[\s\S]*?stopQrcodePoll\(\);[\s\S]*?qrQrcodeId\.value = '';/m.test(vueSrc),
+    /async function startQrcodeLogin\([^)]*\)[\s\S]*?if \(qrQrcodeId\.value\) \{[\s\S]*?stopQrcodePoll\(\);[\s\S]*?qrQrcodeId\.value = '';/m.test(vueSrc),
     'startQrcodeLogin 未清旧链，在途再点产生双链');
 }
 
@@ -279,6 +281,57 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     '缺「（正在处理…）」回执说明锚点');
 }
 
+
+// 第二轮计划契约（docs/plans/2026-09-23-im-config-ux-round2-plan.md 批次B）：
+//   L. 设置页交互卫生：B1 二维码自动换码（限 2 次）+手动刷新 / B2 微信使用说明折叠区 /
+//      B3 清除授权确认框（两处）/ B4 重连引导 title+测试结果自动消失+引导开启。
+{
+  const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
+  // B1：自动换码计数 + auto 调用形态 + 上限 2 + 手动刷新按钮 + 过期文案。
+  check('L', '①', 'B1 二维码自动换码（qrAutoRefetch 计数 + auto 形态调用 + 上限 2）',
+    /qrAutoRefetch/.test(vueSrc) && /startQrcodeLogin\(\{ auto: true \}\)/.test(vueSrc)
+      && /qrAutoRefetch < 2/.test(vueSrc),
+    '缺 qrAutoRefetch 计数 / auto 调用 / 上限守卫');
+  check('L', '②', 'B1 手动刷新按钮（「刷新二维码」+ 过期文案含自动换码已达上限）',
+    vueSrc.includes('刷新二维码') && vueSrc.includes('自动换码已达上限'),
+    '缺手动刷新按钮或过期提示未改');
+
+  // B2：微书面板使用说明折叠区（与飞书块分块锚定，互不误伤）+ 旧积压 hint 不残留。
+  const wechatSection = vueSrc.split('<!-- 微书面板 -->')[1]?.split('<!-- 全局面板 -->')[0] ?? '';
+  const feishuSection = vueSrc.split('<!-- 飞书面板 -->')[1]?.split('<!-- 微书面板 -->')[0] ?? '';
+  check('L', '③', 'B2 微书面板新增 <details class="im-guide"> 使用说明折叠区',
+    wechatSection.includes('<details class="im-guide">') && wechatSection.includes('<summary>使用说明</summary>'),
+    '微书面板缺 im-guide 折叠区');
+  const guideKeywords = ['扫码登录', '授权用户', '/help', '24 小时', '暂不支持', '隐私提示'];
+  const hit = guideKeywords.filter((k) => wechatSection.includes(k));
+  check('L', '④', 'B2 微信使用说明关键词 ≥6（扫码登录/授权用户//help/24 小时/暂不支持/隐私提示）',
+    hit.length >= 6, `命中=${JSON.stringify(hit)}（飞书面板不含「24 小时」——分块锚定不误伤）`);
+  check('L', '⑤', 'B2 旧积压散置 hint 删除（短语并入说明第 9 条，独立 hint 行不残留）',
+    !/<span class="im-field-hint">关闭通信期间收到的消息不会在重新打开后处理<\/span>/.test(vueSrc)
+      && wechatSection.includes('关闭通信期间收到的消息不会在重新打开后处理'),
+    '旧积压 hint 行残留或未并入说明');
+  check('L', '⑥', 'B2 分块锚定不误伤（飞书面板不含「24 小时」字样）',
+    !feishuSection.includes('24 小时'),
+    `飞书面板长度=${feishuSection.length}（锚定失败会误伤）`);
+
+  // B3：清除授权两处确认框（clearOwner / clearWechatOwner 函数体各含 confirm+明示后果）。
+  check('L', '⑦', 'B3 clearOwner/clearWechatOwner 各含 window.confirm+后果明示',
+    /function clearOwner\(\): void \{[\s\S]{0,300}window\.confirm\('确定清除授权用户\？[\s\S]{0,200}下一个给机器人发私聊消息的用户将自动成为授权用户/.test(vueSrc)
+      && /function clearWechatOwner\(\): void \{[\s\S]{0,300}window\.confirm\('确定清除授权用户\？[\s\S]{0,200}下一个给机器人发私聊消息的用户将自动成为授权用户/.test(vueSrc),
+    '清除授权缺确认框或未明示后果');
+
+  // B4：三处小卫生。
+  check('L', '⑧', 'B4 重连按钮禁用解释 title（请先在左侧打开×2 平台）',
+    (vueSrc.match(/请先在左侧打开/g) ?? []).length >= 2,
+    `出现 ${(vueSrc.match(/请先在左侧打开/g) ?? []).length} 次（须 ≥2）`);
+  check('L', '⑨', 'B4 测试结果自动消失（feishuTestResultTimer + onBeforeUnmount 清理）',
+    /feishuTestResultTimer/.test(vueSrc)
+      && /onBeforeUnmount\(\(\) => \{[\s\S]{0,600}feishuTestResultTimer/.test(vueSrc),
+    '缺 feishuTestResultTimer 或 onBeforeUnmount 未清理');
+  check('L', '⑩', 'B4 测试成功引导开启（凭据可用；在左侧列表打开飞书开关）',
+    vueSrc.includes('凭据可用；在左侧列表打开飞书开关'),
+    '测试成功后缺引导开启 hint');
+}
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);
