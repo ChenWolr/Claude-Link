@@ -180,7 +180,15 @@ export function createIlinkClient(botToken: string, deps: IlinkDeps): IlinkClien
     } catch { /* 忽略写盘失败（内存态仍可用） */ }
   }
 
+  // 批次3.2：reportStatus 去重（对齐 feishu-adapter 写法）——40s 长轮询每轮成功都到 connected，
+  // 不去重则每个轮询周期全量广播一次状态噪音；状态/error 变化时仍正常上报。
+  let lastStatus: string | null = null;
+  let lastError: string | null | undefined = undefined;
   function reportStatus(status: 'connected' | 'error' | 'disconnected', error?: string): void {
+    const normalizedError = error ?? null;
+    if (lastStatus === status && lastError === normalizedError) return;
+    lastStatus = status;
+    lastError = normalizedError;
     deps.onStatus?.(error ? { status, error } : { status });
   }
 

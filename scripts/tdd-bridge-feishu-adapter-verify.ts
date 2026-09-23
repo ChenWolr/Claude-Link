@@ -10,6 +10,9 @@
 //   H. SDK 抛 {response:{data:{code,msg,log_id}}} → sendReply reject 且 message 含 code 与 log_id。
 // 零遗留收口追加（2026-09-21 review R1 P3g）：
 //   C②③. 群消息忽略补节流日志（60s 1 条，chat_id 透传）——捕获 console.log 断言。
+// 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次3.1）：
+//   L. 错误文案中文化：初始轮询超限 →「连接建立失败，将自动重试」；WSClient.start 抛错 →
+//      「连接异常：<msg>」；健康巡检未连接 →「连接已断开，正在重连」。
 // 手法：__loadSdkForTest 注入 fake lark 模块（对照 openhanako tests/feishu-adapter.test.ts:22-95）。
 // RED 预期（未改树）：适配器模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-feishu-adapter-verify.ts
@@ -43,10 +46,12 @@ interface FakeState {
   messageCreates: CreateCall[];
   createReject: unknown;
   nickname: string | null;
+  /** [L②] 注入 WSClient.start 抛错（null=正常 resolve）。 */
+  wsStartReject: Error | null;
 }
 
 function createFakeState(): FakeState {
-  return { wsInstances: [], dispatcherRegistry: {}, clients: [], messageCreates: [], createReject: undefined, nickname: '阿明' };
+  return { wsInstances: [], dispatcherRegistry: {}, clients: [], messageCreates: [], createReject: undefined, nickname: '阿明', wsStartReject: null };
 }
 
 function createFakeLark(state: FakeState): Record<string, unknown> {
@@ -86,6 +91,7 @@ function createFakeLark(state: FakeState): Record<string, unknown> {
       state.wsInstances.push(this);
     }
     async start(_dispatcher: unknown): Promise<void> {
+      if (state.wsStartReject) throw state.wsStartReject;
       this.started = true;
     }
     close(): void {
@@ -257,6 +263,50 @@ async function main(): Promise<void> {
     check('H', '①', 'SDK 业务错误 → reject 且 message 含 code(9499) 与 log_id(L1)',
       errText.includes('9499') && errText.includes('L1'), errText);
     await adapter.stop();
+  }
+
+  // ── L. 错误文案中文化（生命周期修复批次3.1）──
+  // win32 libuv 定时器欠服务规避：适配器轮询/巡检 timer 经 unrefTimer 去 ref——timer 阶段自旋
+  // （setTimeout 链）下欠服务 ~1:15（20 checks 不可达），而 setImmediate 自旋近 1:1 服务
+  //（实测 99/100）。生产 500ms×20 初轮轮询 + 真实负载不触发该伪象；此仅为契约环境等待方式
+  // 调整，非生产改动。
+  const spinSleep = async (ms: number): Promise<void> => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) await new Promise((r) => setImmediate(r));
+  };
+  {
+    // L①③：readyState 恒 0 → 初始轮询超限（1ms×20）报「连接建立失败，将自动重试」；
+    // 随后健康巡检（5ms）未连接报「连接已断开，正在重连」并自动重连（循环）。
+    const state = createFakeState();
+    const statuses: Array<{ status: string; error?: string }> = [];
+    const adapter = createFeishuAdapter(baseOpts(state, { onStatus: (s) => statuses.push(s) }));
+    try {
+      await adapter.start();
+      await spinSleep(60);
+      check('L', '①', "初始轮询超限 → error「连接建立失败，将自动重试」",
+        statuses.some((s) => (s.error ?? '').includes('连接建立失败，将自动重试')),
+        JSON.stringify(statuses));
+      check('L', '③', "健康巡检未连接 → error「连接已断开，正在重连」",
+        statuses.some((s) => (s.error ?? '').includes('连接已断开，正在重连')),
+        JSON.stringify(statuses));
+    } finally {
+      await adapter.stop();
+    }
+
+    // L②：WSClient.start 抛错 → error「连接异常：<原始 message>」。
+    const state2 = createFakeState();
+    const statuses2: Array<{ status: string; error?: string }> = [];
+    state2.wsStartReject = new Error('boom-ws');
+    const adapter2 = createFeishuAdapter(baseOpts(state2, { onStatus: (s) => statuses2.push(s) }));
+    try {
+      await adapter2.start();
+      await spinSleep(30);
+      check('L', '②', "WSClient.start 抛错 → error「连接异常：boom-ws」（保留原始 detail）",
+        statuses2.some((s) => (s.error ?? '').includes('连接异常：') && (s.error ?? '').includes('boom-ws')),
+        JSON.stringify(statuses2));
+    } finally {
+      await adapter2.stop();
+    }
   }
 
   console.log(`\n结果：${pass} passed, ${fail} failed`);

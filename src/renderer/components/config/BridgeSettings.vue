@@ -39,6 +39,18 @@ function statusOf(platform: 'feishu' | 'wechat'): BridgePlatformStatusEntry | un
   return statuses.value.find((s) => s.platform === platform);
 }
 
+// 批次3.3：loadAll/save 快照与状态推送的竞态代际守卫——推送回调推进代际，
+// 在途拉取回来时若代际已变（推送更新过）则丢弃旧快照，防旧状态覆盖新推送。
+let pushGen = 0;
+
+// 批次3.1：平台面板内联错误（不再仅 hover title）；超 140 字截断。
+function paneError(platform: 'feishu' | 'wechat'): string {
+  return statusOf(platform)?.error ?? '';
+}
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
 // 批次3.4：重连按钮 busy 锁（全局单飞；未启用平台禁用由模板 :disabled 承担）。
 const restarting = ref<'' | 'feishu' | 'wechat'>('');
 
@@ -49,7 +61,9 @@ function wechatSessionExpired(): boolean {
 async function loadAll(): Promise<void> {
   try {
     config.value = await claude.bridgeGetConfig();
-    statuses.value = await claude.bridgeGetStatus();
+    const gen = pushGen;
+    const st = await claude.bridgeGetStatus();
+    if (gen === pushGen) statuses.value = st; // 在途期间推送已更新 → 丢弃旧快照
     bindings.value = await claude.bridgeListBindings();
   } catch (e) {
     saveError.value = `加载 IM 机器人配置失败：${e instanceof Error ? e.message : String(e)}`;
@@ -60,7 +74,9 @@ async function save(patch: BridgeConfigSaveInput): Promise<void> {
   saveError.value = '';
   try {
     config.value = await claude.bridgeSaveConfig(patch);
-    statuses.value = await claude.bridgeGetStatus();
+    const gen = pushGen;
+    const st = await claude.bridgeGetStatus();
+    if (gen === pushGen) statuses.value = st;
   } catch (e) {
     saveError.value = `保存失败：${e instanceof Error ? e.message : String(e)}`;
   }
@@ -231,6 +247,7 @@ async function restartPlatform(p: 'feishu' | 'wechat'): Promise<void> {
 onMounted(() => {
   void loadAll();
   stopStatusChanged = claude.onBridgeStatusChanged((s) => {
+    pushGen += 1;
     statuses.value = s;
   });
 });
@@ -372,6 +389,7 @@ function formatLastActive(ts: number): string {
             {{ feishuTesting ? '测试中…' : '测试连接' }}
           </button>
         </div>
+        <div v-if="paneError('feishu')" class="im-status-error" :title="paneError('feishu')">{{ truncate(paneError('feishu'), 140) }}</div>
         <p v-if="config?.secretBroken.feishu" class="im-error">密钥解密失败（换机/重装后常见），请重新录入 App Secret。</p>
         <label class="im-field">
           <span class="im-field-label">区域</span>
@@ -438,6 +456,7 @@ function formatLastActive(ts: number): string {
           </button>
           <button v-if="config?.wechat.loggedIn" type="button" class="im-act-btn" @click="wechatLogout">退出登录</button>
         </div>
+        <div v-if="paneError('wechat')" class="im-status-error" :title="paneError('wechat')">{{ truncate(paneError('wechat'), 140) }}</div>
         <p v-if="config?.secretBroken.wechat" class="im-error">登录态解密失败，请重新扫码登录。</p>
         <span class="im-field-hint">关闭通信期间收到的消息不会在重新打开后处理</span>
         <p v-if="wechatSessionExpired()" class="im-error">登录态已过期（session expired），请重新扫码登录。</p>
@@ -864,6 +883,14 @@ function formatLastActive(ts: number): string {
   margin: 0;
   color: var(--color-text-muted);
   font-size: 0.75rem;
+}
+
+/* 批次3.1：平台面板内联错误行（红字 12px；完整文案 hover title）。 */
+.im-status-error {
+  margin: -0.5rem 0 0;
+  color: var(--color-danger);
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
 /* 虚线说明卡（LobsterAI PlatformGuide 形态）。 */

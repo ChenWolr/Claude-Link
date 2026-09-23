@@ -214,5 +214,21 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     '微信开关区缺积压语义说明');
 }
 
+// 生命周期修复计划契约（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次3）：
+//   I. 状态可见性：错误内联红字（140 截断）/ loadAll 竞态代际守卫 / 重连按钮（busy 锁 + 未启用禁用）。
+{
+  const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
+  check('I', '①', '平台面板错误内联红字（paneError + truncate 140 截断 + im-status-error）',
+    vueSrc.includes('paneError') && /truncate\(/.test(vueSrc) && /140/.test(vueSrc)
+      && vueSrc.includes('im-status-error'),
+    '缺内联错误行或 140 字截断');
+  check('I', '②', 'loadAll/推送竞态代际守卫（pushGen：旧快照不覆盖新推送）',
+    /pushGen/.test(vueSrc) && /gen === pushGen/.test(vueSrc),
+    '缺 pushGen 代际守卫');
+  check('I', '③', '重连按钮（restartPlatform + bridgePlatformRestart + restarting busy 锁）',
+    vueSrc.includes('restartPlatform') && vueSrc.includes('bridgePlatformRestart') && /restarting/.test(vueSrc),
+    '缺重连按钮或 busy 锁');
+}
+
 console.log(`\n结果：${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

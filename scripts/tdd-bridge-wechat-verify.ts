@@ -14,6 +14,9 @@
 //   J. 微信积压跳过：writeWechatSkipBacklogFlag 落盘 skip-backlog-<hash8>.json；客户端创建时
 //      一次性消费（文件删除 + 内部 pending 标志）；首批非空整批丢弃只前进 cursor（不派发）；
 //      空批保留标志到下一轮；标志消费后恢复正常派发（症状③：关通信重开消息涌出）。
+// 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次3.2）：
+//   K. reportStatus 去重：连续同状态只上报一次（消 40s 轮询周期全量广播噪音）；
+//      状态变化后恢复上报（error → connected 重报）。
 // 手法：按 URL 片段分派 mock fetch（对照 openhanako tests/wechat-adapter.test.ts）。
 // RED 预期（未改树）：三模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-wechat-verify.ts
@@ -470,6 +473,36 @@ async function main(): Promise<void> {
     check('J', '⑦', '无标志文件：首批消息照常派发（既有语义零回归）',
       received4.length === 1 && received4[0]?.text === '正常', JSON.stringify(received4));
     client4.stop();
+  }
+
+  // ── K. reportStatus 去重（生命周期修复批次3.2）：走 createIlinkClient 直连
+  //（intervals.pollSuccessPauseMs 可注入；经 adapter 则不可控节奏，去重前会连报 3 次）。
+  {
+    const mock = createFetchMock();
+    const stateDir = path.join(tmpRoot, 'dedupe');
+    const statuses: Array<{ status: string; error?: string }> = [];
+    const client = createIlinkClient('tok-M', {
+      fetchFn: makeFetch(mock), stateDir,
+      intervals: { pollTimeoutMs: 50, pollSuccessPauseMs: 5, backoffMs: [0, 0, 0] },
+      onStatus: (s) => statuses.push(s),
+    });
+    for (let i = 0; i < 3; i++) {
+      mock.queue.push({ match: 'getupdates', respond: okResponse({ msgs: [], get_updates_buf: `B${i}` }) });
+    }
+    client.startLoop();
+    await sleep(80);
+    check('K', '①', '连续三轮成功轮询 → connected 只广播 1 次（去重）',
+      statuses.filter((s) => s.status === 'connected').length === 1, JSON.stringify(statuses));
+    // 夹一次失败到 ≥3 触发 error → 恢复成功 → connected 重报（变化才上报，非一律吞掉）。
+    for (let i = 0; i < 3; i++) mock.queue.push({ match: 'getupdates', respond: new Error(`net down ${i}`) });
+    mock.queue.push({ match: 'getupdates', respond: okResponse({ msgs: [] }) });
+    mock.queue.push({ match: 'getupdates', respond: okResponse({ msgs: [] }) });
+    await sleep(150);
+    check('K', '②', 'error 恢复后 connected 重报（去重不吞状态变化）',
+      statuses.filter((s) => s.status === 'connected').length === 2
+      && statuses.some((s) => s.status === 'error'),
+      JSON.stringify(statuses));
+    client.stop();
   }
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });

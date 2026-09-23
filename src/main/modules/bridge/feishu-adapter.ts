@@ -18,7 +18,8 @@ const FEISHU_WS_OPEN = 1;
 const FEISHU_WS_INITIAL_POLL_MS = 500;
 const FEISHU_WS_INITIAL_MAX_CHECKS = 20;
 const FEISHU_WS_HEALTH_INTERVAL_MS = 30_000;
-const FEISHU_WS_DISCONNECTED_ERROR = 'WebSocket disconnected';
+// 批次3.1：错误文案中文化（渲染层内联展示，英文仅存 hover title 的形态废弃）。
+const FEISHU_WS_DISCONNECTED_ERROR = '连接已断开，正在重连';
 const MAX_MSG_SIZE = 100_000; // B2：超长入站截断（对齐 openhanako MAX_MSG_SIZE）
 const USER_CACHE_MAX = 200;
 const GROUP_IGNORE_LOG_INTERVAL_MS = 60_000; // R1-P3g：群消息忽略日志节流间隔
@@ -359,7 +360,7 @@ export function createFeishuAdapter(opts: FeishuAdapterOptions): FeishuAdapter {
         scheduleHealthCheck();
       } else if (checks >= FEISHU_WS_INITIAL_MAX_CHECKS) {
         clearConnectionPoll();
-        reportStatus('error', 'WebSocket connection failed');
+        reportStatus('error', '连接建立失败，将自动重试');
         scheduleHealthCheck();
       }
     }, initialPollMs));
@@ -374,7 +375,7 @@ export function createFeishuAdapter(opts: FeishuAdapterOptions): FeishuAdapter {
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
-        reportStatus('error', message);
+        reportStatus('error', `连接异常：${message}`);
         scheduleHealthCheck();
       });
   }
