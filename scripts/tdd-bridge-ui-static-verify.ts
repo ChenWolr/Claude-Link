@@ -166,9 +166,52 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   check('G', '②', '绑定空态文案含「/new 重新绑定」（解绑语义告知）',
     vueSrc.includes('/new 重新绑定'),
     '空态文案未告知解绑后需 /new 重新绑定');
+  check('G', '③', 'appId 渲染层即时校验（appidError ref + cli_ 正则字面 + 校验失败不保存）',
+    vueSrc.includes('appidError') && /cli_\[0-9a-fA-F\]\{16\}/.test(vueSrc),
+    '缺渲染层 appId 格式校验');
+  const initSrc = read('src/main/modules/bridge/init.ts');
+  check('G', '④', 'init.ts 保存路径 appId 前置校验（FEISHU_APPID_RE + 格式非法抛错）',
+    initSrc.includes('FEISHU_APPID_RE') && initSrc.includes('App ID 格式非法'),
+    'init.ts 缺保存路径 appId 前置校验');
+  check('G', '⑤', 'initBridge 启动分支非法 appId → markPlatformError（文案含 cli_ 开头）',
+    initSrc.includes('markPlatformError') && initSrc.includes('cli_ 开头'),
+    '启动分支缺非法 appId markPlatformError 兜底');
   check('G', '⑥', '微信 expired 态扫码入口并存（!loggedIn || wechatSessionExpired()）',
     /!config\?\.wechat\.loggedIn \|\| wechatSessionExpired\(\)/.test(vueSrc),
     '扫码登录区仍以 v-else 挂在 loggedIn 上，expired 态被「退出登录」遮挡');
+}
+
+// 生命周期修复计划契约（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次2）：
+//   H. 保存串行链 + 脏检查 + 微信积压跳过接线 + 平台重启 IPC 全链（constants/types/ipc-handlers/
+//      preload）+ 微信开关区积压语义文案。
+{
+  const initSrc = read('src/main/modules/bridge/init.ts');
+  check('H', '①', '保存串行链（bridgeSaveChain + doSave 拆分，restart 与 save 全局串行）',
+    initSrc.includes('bridgeSaveChain') && /async function doSave/.test(initSrc),
+    'init.ts 缺保存串行链');
+  check('H', '②', '保存脏检查（before 快照 + feishuRestart/wechatRestart 触发字段集比较）',
+    initSrc.includes('feishuRestart') && initSrc.includes('wechatRestart') && initSrc.includes('before.feishu'),
+    'bridgeConfigSave 未按重启字段集做脏检查');
+  check('H', '③', '微信禁用写积压跳过标记（writeWechatSkipBacklogFlag 接线）',
+    initSrc.includes('writeWechatSkipBacklogFlag'),
+    '微信禁用分支未写 skip-backlog 标记');
+  check('H', '④', '平台重启 IPC 逻辑（bridgePlatformRestart：入链 + 未启用/凭据缺失明确拒绝）',
+    initSrc.includes('bridgePlatformRestart') && initSrc.includes('无法重连'),
+    'init.ts 缺 bridgePlatformRestart');
+  const ipcSrc = read('src/shared/types/ipc.ts');
+  check('H', '⑤', 'BRIDGE_PLATFORM_RESTART 通道常量', ipcSrc.includes('BRIDGE_PLATFORM_RESTART'),
+    'types/ipc.ts 缺 BRIDGE_PLATFORM_RESTART');
+  check('H', '⑥', 'ipc-handlers 注册 BRIDGE_PLATFORM_RESTART（输入归一）',
+    read('src/main/ipc-handlers.ts').includes('IPC_CHANNELS.BRIDGE_PLATFORM_RESTART'),
+    'ipc-handlers 未注册平台重启通道');
+  const preloadSrc = read('src/preload/api.ts');
+  check('H', '⑦', 'preload bridgePlatformRestart 方法（接口 + 实现 ≥2 处）',
+    (preloadSrc.match(/bridgePlatformRestart/g) ?? []).length >= 2,
+    `出现 ${(preloadSrc.match(/bridgePlatformRestart/g) ?? []).length} 次（须 ≥2）`);
+  const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
+  check('H', '⑧', '微信积压语义 dim 文案（关闭通信期间消息不补处理）',
+    vueSrc.includes('关闭通信期间收到的消息不会在重新打开后处理'),
+    '微信开关区缺积压语义说明');
 }
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);

@@ -33,6 +33,7 @@ import { dispatchBridgeTurn, type TurnEngineDeps, type TurnPersistenceDeps, type
 import { BridgeManager, type BridgeManagerDeps } from './manager';
 import { createFeishuAdapter } from './feishu-adapter';
 import { createWechatAdapter } from './wechat-adapter';
+import { writeWechatSkipBacklogFlag } from './wechat-ilink';
 import { getWechatQrcode, pollWechatQrcodeStatus } from './wechat-login';
 
 interface BridgeRuntime {
@@ -46,6 +47,10 @@ interface BridgeRuntime {
 }
 
 let runtime: BridgeRuntime | null = null;
+
+// 飞书 App ID 格式（生命周期修复批次1.3）：非此形态时 lark SDK start() 会静默 return，
+// 30s 健康巡检无限重试、状态永远「异常」——保存与启动双路径前置正则拦截（症状④最强根因）。
+const FEISHU_APPID_RE = /^cli_[0-9a-fA-F]{16}$/;
 
 // ── safeStorage cipher（provider apiKey 同款先例：加密不可用时降级 base64，带前缀可逆）──
 
@@ -205,9 +210,14 @@ export function initBridge(opts: { getWindow: () => BrowserWindow | null; userDa
   if (rt.wechatTokenBroken && rt.profiles.wechat.enabled) {
     logger.error('[bridge] 微信 botToken 解密失败，平台不启动；请重新扫码登录');
   }
-  // 已启用且凭据可用的平台随应用启动。
+  // 已启用且凭据可用的平台随应用启动。飞书 appId 非法 → 不启动直接 error
+  //（SDK start() 对坏 appId 静默 return，30s 巡检无限重试——批次1.3 前置拦截）。
   if (rt.profiles.feishu.enabled && !rt.feishuSecretBroken) {
-    void rt.manager.startPlatform('feishu');
+    if (rt.profiles.feishu.appId && !FEISHU_APPID_RE.test(rt.profiles.feishu.appId)) {
+      rt.manager.markPlatformError('feishu', 'App ID 格式非法：应为 cli_ 开头的 20 位字符，请在设置页修正');
+    } else {
+      void rt.manager.startPlatform('feishu');
+    }
   }
   if (rt.profiles.wechat.enabled && !rt.wechatTokenBroken) {
     void rt.manager.startPlatform('wechat');
@@ -234,10 +244,40 @@ export function bridgeConfigGet(): BridgeConfigGetResult {
   };
 }
 
-export async function bridgeConfigSave(input: BridgeConfigSaveInput): Promise<BridgeConfigGetResult> {
+export function bridgeConfigSave(input: BridgeConfigSaveInput): Promise<BridgeConfigGetResult> {
+  return enqueueBridgeSave(() => doSave(input));
+}
+
+// ── 保存串行链（生命周期修复批次2.2）：并发 save / save×restart 竞态收口——全部入链严格串行，
+// 前驱失败不断链（catch 吞掉后继照跑）。doSave 主体保持纯函数形态（单次保存语义不变）。
+let bridgeSaveChain: Promise<unknown> = Promise.resolve();
+
+function enqueueBridgeSave<T>(task: () => Promise<T>): Promise<T> {
+  const run = bridgeSaveChain.then(task, task);
+  bridgeSaveChain = run.catch(() => undefined);
+  return run;
+}
+
+async function doSave(input: BridgeConfigSaveInput): Promise<BridgeConfigGetResult> {
   const rt = runtime;
   if (!rt) throw new Error('bridge 未初始化');
   const p = rt.profiles;
+  // 批次1.3：appId 前置校验（persist 之前抛错，坏值不落盘；渲染层 save() catch 显示 saveError）。
+  if (input.feishu?.appId !== undefined) {
+    const appId = input.feishu.appId.trim();
+    if (appId && !FEISHU_APPID_RE.test(appId)) {
+      throw new Error('App ID 格式非法：应为 cli_ 开头的 20 位字符（可在飞书开放平台凭证页查看）');
+    }
+  }
+  // 批次2.1：重启触发字段集快照（before）——只有这些字段实际变化才重启平台；ownerOpenId /
+  // workingDir / 掩码同值 blur 等纯数据操作只落盘不动平台（消灭重启窗口丢在途回复）。
+  const before = {
+    feishu: {
+      enabled: p.feishu.enabled, appId: p.feishu.appId, region: p.feishu.region,
+      appSecretEnc: p.feishu.appSecretEnc,
+    },
+    wechat: { enabled: p.wechat.enabled, botTokenEnc: p.wechat.botTokenEnc },
+  };
   if (input.feishu) {
     if (input.feishu.enabled !== undefined) p.feishu.enabled = input.feishu.enabled;
     if (input.feishu.appId !== undefined) p.feishu.appId = input.feishu.appId.trim();
@@ -265,24 +305,62 @@ export async function bridgeConfigSave(input: BridgeConfigSaveInput): Promise<Br
   }
   persistProfiles(rt);
 
-  // 存盘后重启受影响平台（enabled → start（stop→create→start）；禁用 → stop）。
-  // 禁用分支带 clearBuffers:true（R1-P3d）：禁用即弃该平台在途缓冲；重启分支不传——
-  // 缓冲与 debounce 定时器须原样跨重启，否则「保存一次凭据」会丢掉在途消息。
-  if (input.feishu) {
-    if (p.feishu.enabled && !rt.feishuSecretBroken) {
+  // 批次2.1：脏检查——重启触发字段集逐项比较；未变化则完全不碰平台生命周期。
+  const feishuRestart = (['enabled', 'appId', 'region', 'appSecretEnc'] as const).some((k) => before.feishu[k] !== p.feishu[k]);
+  const wechatRestart = (['enabled', 'botTokenEnc'] as const).some((k) => before.wechat[k] !== p.wechat[k]);
+  // 启用分支条件补凭据非空（批次2.1）：退出登录（token 空）+ enabled 仍 true → 走 off
+  // （面板「未登录」区），不再落入「凭据未配置完整」error 红字误导。
+  if (input.feishu && feishuRestart) {
+    if (p.feishu.enabled && !rt.feishuSecretBroken && p.feishu.appId && p.feishu.appSecretEnc) {
       await rt.manager.startPlatform('feishu');
     } else {
-      await rt.manager.stopPlatform('feishu', { clearBuffers: true });
+      // 批次1.4：禁用分支 silent + markPlatformOff——终态「未启用」而非「已断开」，
+      // 且不再残留「凭据未配置完整」error 红字。
+      await rt.manager.stopPlatform('feishu', { clearBuffers: true, silent: true });
+      rt.manager.markPlatformOff('feishu');
     }
   }
-  if (input.wechat) {
-    if (p.wechat.enabled && !rt.wechatTokenBroken) {
+  if (input.wechat && wechatRestart) {
+    if (p.wechat.enabled && !rt.wechatTokenBroken && p.wechat.botTokenEnc) {
       await rt.manager.startPlatform('wechat');
     } else {
-      await rt.manager.stopPlatform('wechat', { clearBuffers: true });
+      await rt.manager.stopPlatform('wechat', { clearBuffers: true, silent: true });
+      rt.manager.markPlatformOff('wechat');
+      // 批次2.3：禁用即写积压跳过标记——重开后的首轮非空拉取整批丢弃只进 cursor。
+      writeWechatSkipBacklog(rt);
     }
   }
   return bridgeConfigGet();
+}
+
+/** 批次2.3：微信禁用时写积压跳过标记（token 已空/解密失败则不写——无积压意义）。 */
+function writeWechatSkipBacklog(rt: BridgeRuntime): void {
+  const tok = rt.profiles.wechat.botTokenEnc ? cipher.decrypt(rt.profiles.wechat.botTokenEnc) : null;
+  if (tok) writeWechatSkipBacklogFlag(rt.wechatStateDir, tok);
+}
+
+/**
+ * 平台重启 IPC（生命周期修复批次2.4，重连按钮后端）：入保存串行链防与 save 交错；
+ * 未启用或凭据缺失/非法 → 明确抛错（渲染层 saveError 展示），不静默半启动。
+ */
+export async function bridgePlatformRestart(platform: 'feishu' | 'wechat'): Promise<BridgePlatformStatusEntry[]> {
+  return enqueueBridgeSave(async () => {
+    const rt = runtime;
+    if (!rt) throw new Error('bridge 未初始化');
+    const broken = platform === 'feishu' ? rt.feishuSecretBroken : rt.wechatTokenBroken;
+    let credentialOk: boolean;
+    if (platform === 'feishu') {
+      const f = rt.profiles.feishu;
+      credentialOk = Boolean(f.appId && FEISHU_APPID_RE.test(f.appId) && f.appSecretEnc);
+    } else {
+      credentialOk = Boolean(rt.profiles.wechat.botTokenEnc);
+    }
+    if (!rt.profiles[platform].enabled || broken || !credentialOk) {
+      throw new Error('平台未启用或凭据缺失，无法重连');
+    }
+    await rt.manager.startPlatform(platform);
+    return rt.manager.getStatus();
+  });
 }
 
 export function bridgeStatusGet(): BridgePlatformStatusEntry[] {

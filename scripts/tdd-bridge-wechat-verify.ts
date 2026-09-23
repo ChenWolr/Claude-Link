@@ -10,6 +10,10 @@
 // 零遗留收口追加（2026-09-21 review R1 P3h）：
 //   H. 多分段中途失败 → 段级断点续传：失败存断点（text+nextIndex）并 throw（错误注明续发）；
 //      同 userId 同 text 重试从断点段起发（不重发已送达段）；换 text 不误命中旧断点，全量重发。
+// 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次2.3）：
+//   J. 微信积压跳过：writeWechatSkipBacklogFlag 落盘 skip-backlog-<hash8>.json；客户端创建时
+//      一次性消费（文件删除 + 内部 pending 标志）；首批非空整批丢弃只前进 cursor（不派发）；
+//      空批保留标志到下一轮；标志消费后恢复正常派发（症状③：关通信重开消息涌出）。
 // 手法：按 URL 片段分派 mock fetch（对照 openhanako tests/wechat-adapter.test.ts）。
 // RED 预期（未改树）：三模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-wechat-verify.ts
@@ -19,7 +23,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { createIlinkClient, type IlinkDeps } from '../src/main/modules/bridge/wechat-ilink';
+import { createIlinkClient, writeWechatSkipBacklogFlag, type IlinkDeps } from '../src/main/modules/bridge/wechat-ilink';
 import { createWechatAdapter } from '../src/main/modules/bridge/wechat-adapter';
 import { getWechatQrcode, pollWechatQrcodeStatus } from '../src/main/modules/bridge/wechat-login';
 import type { BridgeInboundMessage } from '../src/shared/types/bridge';
@@ -363,6 +367,109 @@ async function main(): Promise<void> {
     mock.queue.push({ match: 'get_qrcode_status', respond: okResponse({ status: 'expired' }) });
     const s3 = await pollWechatQrcodeStatus('QR-ID-1', fetchFn);
     check('G', '③', 'expired 状态透传', s3.status === 'expired', JSON.stringify(s3));
+  }
+
+  // ── J. 微信积压跳过（生命周期修复批次2.3：症状③）──
+  {
+    const mock = createFetchMock();
+    const stateDir = path.join(tmpRoot, 'skip');
+    writeWechatSkipBacklogFlag(stateDir, 'tok-J');
+    const flagFile = fs.readdirSync(stateDir).find((f) => f.startsWith('skip-backlog-') && f.endsWith('.json'));
+    const flagContent = flagFile
+      ? (JSON.parse(fs.readFileSync(path.join(stateDir, flagFile!), 'utf-8')) as { createdAt?: number })
+      : null;
+    check('J', '①', 'writeWechatSkipBacklogFlag 写 stateDir/skip-backlog-<hash8>.json（含 createdAt）',
+      !!flagFile && typeof flagContent?.createdAt === 'number' && flagContent.createdAt > 0,
+      `file=${String(flagFile)} content=${JSON.stringify(flagContent)}`);
+
+    // 首批积压消息：整批丢弃只进 cursor。标志在客户端创建时被一次性消费（文件删除）。
+    mock.queue.push({
+      match: 'getupdates',
+      respond: okResponse({
+        msgs: [{ from_user_id: 'wxid_backlog', context_token: 'CTX-BL', item_list: [{ type: 1, text_item: { text: '积压消息' } }] }],
+        get_updates_buf: 'BUF-J2',
+      }),
+    });
+    const received: BridgeInboundMessage[] = [];
+    const client = createIlinkClient('tok-J', {
+      fetchFn: makeFetch(mock), stateDir,
+      onMessage: (m) => received.push(m),
+    });
+    check('J', '②', '客户端创建时一次性消费积压标志（skip-backlog 文件删除）',
+      !!flagFile && !fs.existsSync(path.join(stateDir, flagFile!)),
+      `exists=${flagFile ? fs.existsSync(path.join(stateDir, flagFile)) : 'no-file'}`);
+    await client.pollOnce();
+    check('J', '③', '标志在途首批非空 → 整批丢弃（onMessage 0 次，不回复不建绑定）',
+      received.length === 0, JSON.stringify(received));
+    // 再轮询一次（空批）：请求体应携带上轮响应的 BUF-J2——丢弃批 cursor 已前进，不重复拉取积压。
+    mock.queue.push({ match: 'getupdates', respond: okResponse({ msgs: [], get_updates_buf: '' }) });
+    await client.pollOnce();
+    const secondReq = mock.requests.filter((r) => r.url.includes('getupdates'))[1];
+    check('J', '④', '丢弃批 cursor 已前进（第二次轮询请求体带 BUF-J2，不重复拉取）',
+      secondReq?.body.get_updates_buf === 'BUF-J2', JSON.stringify(secondReq?.body));
+    client.stop();
+
+    // 下一轮正常派发：同 token 新客户端（无标志）→ 消息照常 onMessage。
+    const mock2 = createFetchMock();
+    mock2.queue.push({
+      match: 'getupdates',
+      respond: okResponse({
+        msgs: [{ from_user_id: 'wxid_new', context_token: 'CTX-N', item_list: [{ type: 1, text_item: { text: '重开后的新消息' } }] }],
+        get_updates_buf: 'BUF-J3',
+      }),
+    });
+    const received2: BridgeInboundMessage[] = [];
+    const client2 = createIlinkClient('tok-J', {
+      fetchFn: makeFetch(mock2), stateDir,
+      onMessage: (m) => received2.push(m),
+    });
+    await client2.pollOnce();
+    check('J', '⑤', '标志消费后新客户端正常派发（重开后新消息照常服务）',
+      received2.length === 1 && received2[0]?.text === '重开后的新消息', JSON.stringify(received2));
+    client2.stop();
+
+    // 空批保留标志：写新标志 → 首轮空批 → 标志仍在 → 次轮有消息仍丢弃 → 三轮恢复正常。
+    const stateDir3 = path.join(tmpRoot, 'skip-empty');
+    writeWechatSkipBacklogFlag(stateDir3, 'tok-K');
+    const mock3 = createFetchMock();
+    mock3.queue.push({ match: 'getupdates', respond: okResponse({ msgs: [], get_updates_buf: 'B1' }) });
+    mock3.queue.push({
+      match: 'getupdates',
+      respond: okResponse({ msgs: [{ from_user_id: 'wxid_late', item_list: [{ type: 1, text_item: { text: '迟到积压' } }] }], get_updates_buf: 'B2' }),
+    });
+    mock3.queue.push({
+      match: 'getupdates',
+      respond: okResponse({ msgs: [{ from_user_id: 'wxid_live', item_list: [{ type: 1, text_item: { text: '新消息' } }] }], get_updates_buf: 'B3' }),
+    });
+    const received3: BridgeInboundMessage[] = [];
+    const client3 = createIlinkClient('tok-K', {
+      fetchFn: makeFetch(mock3), stateDir: stateDir3,
+      onMessage: (m) => received3.push(m),
+    });
+    await client3.pollOnce(); // 空批：标志保留
+    await client3.pollOnce(); // 有消息：丢弃
+    await client3.pollOnce(); // 恢复
+    check('J', '⑥', '空批保留标志到下一轮（空批不消费；次轮积压仍丢弃；三轮起恢复派发）',
+      received3.length === 1 && received3[0]?.text === '新消息',
+      `三轮派发=${JSON.stringify(received3.map((m) => m.text))}`);
+    client3.stop();
+
+    // 无标志文件 → 客户端行为完全不变（回归锚）。
+    const stateDir4 = path.join(tmpRoot, 'skip-none');
+    const mock4 = createFetchMock();
+    mock4.queue.push({
+      match: 'getupdates',
+      respond: okResponse({ msgs: [{ from_user_id: 'wxid_plain', item_list: [{ type: 1, text_item: { text: '正常' } }] }] }),
+    });
+    const received4: BridgeInboundMessage[] = [];
+    const client4 = createIlinkClient('tok-L', {
+      fetchFn: makeFetch(mock4), stateDir: stateDir4,
+      onMessage: (m) => received4.push(m),
+    });
+    await client4.pollOnce();
+    check('J', '⑦', '无标志文件：首批消息照常派发（既有语义零回归）',
+      received4.length === 1 && received4[0]?.text === '正常', JSON.stringify(received4));
+    client4.stop();
   }
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });

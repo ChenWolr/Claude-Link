@@ -71,6 +71,7 @@ import type { BridgeConfigSaveInput } from '../shared/types/bridge';
 import {
   bridgeConfigGet, bridgeConfigSave, bridgeStatusGet, bridgeFeishuTest,
   bridgeWechatQrcode, bridgeWechatQrcodeStatus, bridgeBindingList, bridgeUnbind,
+  bridgePlatformRestart,
 } from './modules/bridge/init';
 import type { StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, SessionCreateSpec } from '../shared/types/ipc';
 
@@ -964,4 +965,6 @@ function registerBridgeIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE_STATUS, async (_event, qrcodeId: string) => bridgeWechatQrcodeStatus(qrcodeId));
   ipcMain.handle(IPC_CHANNELS.BRIDGE_BINDING_LIST, async () => bridgeBindingList());
   ipcMain.handle(IPC_CHANNELS.BRIDGE_BINDING_DELETE, async (_event, sessionKey: string) => bridgeUnbind(sessionKey));
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_PLATFORM_RESTART, async (_event, platform: string) =>
+    bridgePlatformRestart(platform === 'wechat' ? 'wechat' : 'feishu'));
 }

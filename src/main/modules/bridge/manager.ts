@@ -79,7 +79,9 @@ export class BridgeManager {
   // ── 生命周期 ──
 
   async startPlatform(p: BridgePlatform): Promise<void> {
-    await this.stopPlatform(p);
+    // 生命周期修复批次1.4：内部 stop 静默化——不写 disconnected（消 UI 状态闪烁/乱序），
+    // 不清缓冲（保存凭据重启路径的在途缓冲照常跨重启，契约 T② 防回归锚）。
+    await this.stopPlatform(p, { silent: true });
     const adapter = this.deps.adapters[p]({
       onMessage: (m) => this.handleInbound(m),
       onStatus: (s) => this.handleAdapterStatus(p, s),
@@ -91,10 +93,19 @@ export class BridgeManager {
     }
     this.adapters.set(p, adapter);
     this.setStatus(p, { status: 'connecting' });
-    await adapter.start();
+    // 批次1.2：start() 抛错（凭据坏/网络不可达等）兜底为 error 状态——此前直透，
+    // initBridge 的 void startPlatform 产生 unhandled rejection、且卡死 connecting。
+    try {
+      await adapter.start();
+    } catch (err) {
+      this.adapters.delete(p); // 移除残骸，防 reply 走死适配器
+      const msg = String(err instanceof Error ? err.message : err);
+      this.setStatus(p, { status: 'error', error: `平台启动失败：${msg}` });
+      console.error(`[bridge] ${p} 平台启动失败：${msg}`);
+    }
   }
 
-  async stopPlatform(p: BridgePlatform, opts?: { clearBuffers?: boolean }): Promise<void> {
+  async stopPlatform(p: BridgePlatform, opts?: { clearBuffers?: boolean; silent?: boolean }): Promise<void> {
     // R1-P3d：clearBuffers=true（禁用平台）时清该平台在途缓冲——否则缓冲照跑、回复因适配器
     // 已移除而静默丢。默认 false：startPlatform 重启路径（保存凭据后 stop→create→start）也先
     // stop，无条件清会让「用户保存一次凭据」丢掉在途缓冲消息。running 中的在途 flush 不打断，
@@ -108,10 +119,26 @@ export class BridgeManager {
       }
     }
     const adapter = this.adapters.get(p);
-    if (!adapter) return;
+    if (!adapter) {
+      // 批次1.4：非静默早退写 off（禁用从未启动的平台 → UI「未启用」）；
+      // silent（startPlatform 内部 stop）不写，防覆盖真实状态。
+      if (!opts?.silent) this.setStatus(p, { status: 'off' });
+      return;
+    }
     this.adapters.delete(p);
     await adapter.stop();
-    this.setStatus(p, { status: 'disconnected' });
+    // silent（重启路径内部 stop）不写 disconnected，状态由 start 接力（connecting→…）。
+    if (!opts?.silent) this.setStatus(p, { status: 'disconnected' });
+  }
+
+  /** 显式写平台错误状态（initBridge 启动期前置校验等非 adapter 产生的错误）。 */
+  markPlatformError(p: BridgePlatform, message: string): void {
+    this.setStatus(p, { status: 'error', error: message });
+  }
+
+  /** 显式写平台 off 状态（禁用平台语义=「未启用」，非「已断开」）。 */
+  markPlatformOff(p: BridgePlatform): void {
+    this.setStatus(p, { status: 'off' });
   }
 
   /**

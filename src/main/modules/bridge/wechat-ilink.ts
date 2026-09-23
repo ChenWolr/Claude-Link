@@ -95,6 +95,18 @@ function atomicWriteSync(filePath: string, content: string): void {
   fs.renameSync(tmp, filePath);
 }
 
+/**
+ * 微信积压跳过标记（生命周期修复批次2.3，症状③）：平台禁用时写——重开后的首轮非空拉取整批
+ * 丢弃、只前进 cursor，不补处理关闭期间服务端积压的消息。文件名带 token hash8（换号互不误伤），
+ * 客户端创建时一次性消费（读后即删）。
+ */
+export function writeWechatSkipBacklogFlag(stateDir: string, botToken: string): void {
+  try {
+    fs.mkdirSync(stateDir, { recursive: true });
+    atomicWriteSync(path.join(stateDir, `skip-backlog-${hash8(botToken)}.json`), JSON.stringify({ createdAt: Date.now() }));
+  } catch { /* 写失败按无标记处理（最多退回补处理积压的原状） */ }
+}
+
 interface ContextEntry {
   token: string;
   ts: number;
@@ -118,6 +130,17 @@ export function createIlinkClient(botToken: string, deps: IlinkDeps): IlinkClien
   fs.mkdirSync(deps.stateDir, { recursive: true });
   const syncBufPath = path.join(deps.stateDir, `sync-${hash8(botToken)}.json`);
   const contextCachePath = path.join(deps.stateDir, `context-${hash8(botToken)}.json`);
+  const skipBacklogPath = path.join(deps.stateDir, `skip-backlog-${hash8(botToken)}.json`);
+
+  // 积压跳过标志（批次2.3）：创建时探测一次性消费（读后即删）——首次非空拉取整批丢弃只进
+  // cursor；空批保留标志到下一轮。无标志文件（正常启停/新 token）行为完全不变。
+  let skipBacklogPending = false;
+  try {
+    if (fs.existsSync(skipBacklogPath)) {
+      skipBacklogPending = true;
+      fs.rmSync(skipBacklogPath, { force: true });
+    }
+  } catch { /* 探测失败按无标志 */ }
 
   // cursor：重启不丢不重（增量协议要求跨进程持久化）。
   let getUpdatesBuf = '';
@@ -318,7 +341,16 @@ export function createIlinkClient(botToken: string, deps: IlinkDeps): IlinkClien
         atomicWriteSync(syncBufPath, JSON.stringify({ get_updates_buf: getUpdatesBuf }));
       } catch { /* 忽略写盘失败 */ }
     }
-    for (const msg of (resp.msgs as IlinkMsg[] | undefined) ?? []) {
+    const msgs = (resp.msgs as IlinkMsg[] | undefined) ?? [];
+    // 积压跳过（批次2.3）：标志在途且首批非空 → 整批丢弃、只前进 cursor（上方已写盘）；
+    // 空批保留标志到下一轮（服务端可能尚未吐出积压）。
+    if (skipBacklogPending) {
+      if (msgs.length === 0) return;
+      skipBacklogPending = false;
+      console.info(`[wechat-bridge] 跳过积压消息 ${msgs.length} 条（平台关闭期间）`);
+      return;
+    }
+    for (const msg of msgs) {
       try {
         handleInbound(msg);
       } catch { /* 单条解析失败不中断整批 */ }

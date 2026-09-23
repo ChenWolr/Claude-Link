@@ -4,7 +4,7 @@
 // 保存语义：字段 blur / 开关 change 即 bridgeSaveConfig（掩码规则由主进程处理，密钥不回显）。
 // 状态：挂载时 bridgeGetStatus 拉快照 + onBridgeStatusChanged 订阅增量；
 // v-show 常挂（ConfigPage IM tab 门控），切 tab 不卸载、扫码轮询链不中断。
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatus, BridgePlatformStatusEntry } from '../../../shared/types/bridge';
 
 const claude = window.claudeLink;
@@ -16,6 +16,8 @@ const saveError = ref('');
 // 解绑 transient 提示（生命周期修复批次1）：确认框通过后展示 4s，告知解绑语义与平台连接保持。
 const unbindNotice = ref('');
 let unbindNoticeTimer: number | undefined;
+// 飞书 appId 即时校验（批次1.3）：blur 时格式非法 → 红字且不触发保存。
+const appidError = ref('');
 
 // 飞书表单
 const feishuAppSecret = ref('');
@@ -36,6 +38,9 @@ let stopStatusChanged: (() => void) | null = null;
 function statusOf(platform: 'feishu' | 'wechat'): BridgePlatformStatusEntry | undefined {
   return statuses.value.find((s) => s.platform === platform);
 }
+
+// 批次3.4：重连按钮 busy 锁（全局单飞；未启用平台禁用由模板 :disabled 承担）。
+const restarting = ref<'' | 'feishu' | 'wechat'>('');
 
 function wechatSessionExpired(): boolean {
   return statusOf('wechat')?.status === 'error' && (statusOf('wechat')?.error ?? '').includes('session expired');
@@ -62,6 +67,22 @@ async function save(patch: BridgeConfigSaveInput): Promise<void> {
 }
 
 // ── 飞书 ──
+
+// 批次5.1-6：appId 输入框本地 ref（v-model）——testFeishu 先用当前输入框值保存再测（E5-2 混测修正）。
+const feishuAppIdInput = ref('');
+watch(config, (c) => { feishuAppIdInput.value = c?.feishu.appId ?? ''; });
+
+// appId blur 保存（批次1.3 即时校验 + 批次5.1-6 本地 ref）：非空且格式非法 → 红字 early return，
+// 不触发 save；空值放行（交由主进程既有「凭据未配置完整」路径）；主进程保存路径另有同款正则兜底。
+function saveFeishuAppId(): void {
+  const value = feishuAppIdInput.value.trim();
+  if (value && !/^cli_[0-9a-fA-F]{16}$/.test(value)) {
+    appidError.value = 'App ID 格式应为 cli_ 开头的 20 位字符';
+    return;
+  }
+  appidError.value = '';
+  void save({ feishu: { appId: value } });
+}
 
 async function saveFeishuSecret(): Promise<void> {
   // 掩码语义在主进程：空串=清除，'********'=保留。输入框不回显已存密钥。
@@ -190,6 +211,20 @@ async function unbindBinding(sessionKey: string): Promise<void> {
     await loadAll();
   } catch (e) {
     saveError.value = String(e instanceof Error ? e.message : e);
+  }
+}
+
+// 批次3.4：平台重连（bridgePlatformRestart 后端；未启用/凭据缺失由主进程明确抛错）。
+async function restartPlatform(p: 'feishu' | 'wechat'): Promise<void> {
+  if (restarting.value !== '') return;
+  restarting.value = p;
+  try {
+    await claude.bridgePlatformRestart(p);
+    await loadAll();
+  } catch (e) {
+    saveError.value = String(e instanceof Error ? e.message : e);
+  } finally {
+    restarting.value = '';
   }
 }
 
@@ -330,6 +365,9 @@ function formatLastActive(ts: number): string {
           <h3 class="im-head__title">飞书</h3>
           <span :class="['im-status-pill', `im-status-pill--${statusInfo('feishu').tone}`]">{{ statusInfo('feishu').label }}</span>
           <span class="im-head__spacer"></span>
+          <button type="button" class="im-act-btn" :disabled="restarting !== '' || !config?.feishu.enabled" @click="restartPlatform('feishu')">
+            {{ restarting === 'feishu' ? '重连中…' : '重连' }}
+          </button>
           <button type="button" class="im-act-btn" :disabled="feishuTesting" @click="testFeishu">
             {{ feishuTesting ? '测试中…' : '测试连接' }}
           </button>
@@ -348,11 +386,12 @@ function formatLastActive(ts: number): string {
         <label class="im-field">
           <span class="im-field-label">App ID</span>
           <input
+            v-model="feishuAppIdInput"
             type="text"
-            :value="config?.feishu.appId ?? ''"
             placeholder="cli_xxxx"
-            @blur="save({ feishu: { appId: ($event.target as HTMLInputElement).value } })"
+            @blur="saveFeishuAppId()"
           />
+          <span v-if="appidError" class="im-error">{{ appidError }}</span>
         </label>
         <label class="im-field">
           <span class="im-field-label">App Secret</span>
@@ -394,9 +433,13 @@ function formatLastActive(ts: number): string {
           <h3 class="im-head__title">微信</h3>
           <span :class="['im-status-pill', `im-status-pill--${statusInfo('wechat').tone}`]">{{ statusInfo('wechat').label }}</span>
           <span class="im-head__spacer"></span>
+          <button type="button" class="im-act-btn" :disabled="restarting !== '' || !config?.wechat.enabled" @click="restartPlatform('wechat')">
+            {{ restarting === 'wechat' ? '重连中…' : '重连' }}
+          </button>
           <button v-if="config?.wechat.loggedIn" type="button" class="im-act-btn" @click="wechatLogout">退出登录</button>
         </div>
         <p v-if="config?.secretBroken.wechat" class="im-error">登录态解密失败，请重新扫码登录。</p>
+        <span class="im-field-hint">关闭通信期间收到的消息不会在重新打开后处理</span>
         <p v-if="wechatSessionExpired()" class="im-error">登录态已过期（session expired），请重新扫码登录。</p>
         <div v-if="config?.wechat.loggedIn" class="im-inline-row">
           <span>已登录{{ config?.wechat.botUserId ? `：${config.wechat.botUserId}` : '' }}</span>

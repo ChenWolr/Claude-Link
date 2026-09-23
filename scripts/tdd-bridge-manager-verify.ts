@@ -28,6 +28,9 @@
 // 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次1）：
 //   U.  解绑墓碑：flush B7 凭 deps.isUnbound 拦截已解绑会话的消息（不重建、不派发）；
 //   V.  manager.unbind(sessionKey)：清该 key 的 pending debounce 定时器（免消息复活定时器消灭）；
+//   W.  startPlatform adapter.start() 抛错 → 状态 error 含「平台启动失败」、不抛 unhandled rejection；
+//   X.  off 语义：stopPlatform silent 早退不写状态 / 非静默早退写 off / markPlatformOff 与
+//       markPlatformError 显式写 / 禁用链（clearBuffers+silent+markPlatformOff）终态 off。
 // RED 预期（未改树）：manager/owner-policy 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-manager-verify.ts
 
@@ -77,6 +80,8 @@ interface World {
   replyGate: { open: () => void } | null;
   /** [U] 组：墓碑 sessionKey 集合（deps.isUnbound 事实源）。 */
   unbound: Set<string>;
+  /** [W] 组：注入 adapter.start 抛错（null=正常）。 */
+  feishuStartError: Error | null;
 }
 
 function createWorld(): { world: World; deps: BridgeManagerDeps } {
@@ -98,6 +103,7 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
     hangFeishuReply: null,
     replyGate: null,
     unbound: new Set<string>(),
+    feishuStartError: null,
   };
 
   let sessionCounter = 0;
@@ -148,7 +154,10 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
       feishu: (hooks) => {
         if (world.feishuFactoryReturnsNull) return null;
         return {
-          start: async () => { world.feishuAdapter.started = true; hooks.onStatus({ status: 'connected' }); },
+          start: async () => {
+            if (world.feishuStartError) throw world.feishuStartError;
+            world.feishuAdapter.started = true; hooks.onStatus({ status: 'connected' });
+          },
           stop: async () => { world.feishuAdapter.stopped = true; },
           sendReply: async (chatId, text) => {
             if (world.hangFeishuReply !== null && text === world.hangFeishuReply) {
@@ -591,6 +600,67 @@ async function main(): Promise<void> {
     await sleep(40); // ≥3×debounceMs
     check('V', '①', 'unbind 后 pending debounce 定时器不再触发 flush（dispatcher 0 次）',
       world.dispatcherCalls.length === 0, JSON.stringify(world.dispatcherCalls));
+  }
+
+  // ── W. startPlatform 异常兜底（生命周期修复批次1）：adapter.start() 抛错 → 状态 error 含
+  // 「平台启动失败」、startPlatform 不再向外抛（initBridge 的 void startPlatform 不产生
+  // unhandled rejection）、adapters 残骸被移除。
+  {
+    const { world, deps } = createWorld();
+    world.feishuStartError = new Error('invalid app credentials');
+    const mgr = new BridgeManager(deps);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (err: unknown): void => { unhandled.push(err); };
+    process.on('unhandledRejection', onUnhandled);
+    let threw = '';
+    try { await mgr.startPlatform('feishu'); } catch (e) { threw = e instanceof Error ? e.message : String(e); }
+    await sleep(30);
+    process.off('unhandledRejection', onUnhandled);
+    check('W', '①', 'startPlatform 吞掉 adapter.start 异常不外抛', threw === '', threw);
+    check('W', '②', '启动失败 → 状态 error 且文案含「平台启动失败」',
+      mgr.getStatus().some((s) => s.platform === 'feishu' && s.status === 'error'
+        && (s.error ?? '').includes('平台启动失败')),
+      JSON.stringify(mgr.getStatus()));
+    check('W', '③', '启动失败无 unhandled rejection', unhandled.length === 0, JSON.stringify(unhandled));
+  }
+
+  // ── X. off 语义（生命周期修复批次1.4）：silent 早退不写状态；非静默早退写 off；
+  // markPlatformOff / markPlatformError 显式写；禁用链终态 off（非 disconnected）。
+  {
+    const worldX1 = createWorld();
+    const mgrX1 = new BridgeManager(worldX1.deps);
+    await mgrX1.stopPlatform('feishu', { silent: true });
+    check('X', '①', 'stopPlatform silent 早退（无 adapter）不写状态条目',
+      !mgrX1.getStatus().some((s) => s.platform === 'feishu'), JSON.stringify(mgrX1.getStatus()));
+
+    const worldX2 = createWorld();
+    const mgrX2 = new BridgeManager(worldX2.deps);
+    await mgrX2.stopPlatform('feishu'); // 非静默：早退写 off
+    check('X', '②', 'stopPlatform 非静默早退（无 adapter）写 off',
+      mgrX2.getStatus().some((s) => s.platform === 'feishu' && s.status === 'off'),
+      JSON.stringify(mgrX2.getStatus()));
+
+    const worldX3 = createWorld();
+    const mgrX3 = new BridgeManager(worldX3.deps);
+    mgrX3.markPlatformError('wechat', 'App ID 格式非法');
+    check('X', '③', 'markPlatformError 显式写 error+文案',
+      mgrX3.getStatus().some((s) => s.platform === 'wechat' && s.status === 'error'
+        && s.error === 'App ID 格式非法'),
+      JSON.stringify(mgrX3.getStatus()));
+    mgrX3.markPlatformOff('wechat');
+    check('X', '④', 'markPlatformOff 显式写 off',
+      mgrX3.getStatus().some((s) => s.platform === 'wechat' && s.status === 'off'),
+      JSON.stringify(mgrX3.getStatus()));
+
+    const worldX4 = createWorld();
+    const mgrX4 = new BridgeManager(worldX4.deps);
+    await mgrX4.startPlatform('feishu');
+    await mgrX4.stopPlatform('feishu', { clearBuffers: true, silent: true });
+    mgrX4.markPlatformOff('feishu');
+    check('X', '⑤', '禁用链（clearBuffers+silent stop + markPlatformOff）终态 off 非 disconnected',
+      worldX4.world.feishuAdapter.stopped
+      && mgrX4.getStatus().some((s) => s.platform === 'feishu' && s.status === 'off'),
+      `stopped=${worldX4.world.feishuAdapter.stopped} statuses=${JSON.stringify(mgrX4.getStatus())}`);
   }
 
   assert.ok(true);

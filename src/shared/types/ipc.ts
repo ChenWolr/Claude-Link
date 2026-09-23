@@ -122,6 +122,8 @@ export const IPC_CHANNELS = {
   BRIDGE_WECHAT_QRCODE_STATUS: 'bridge:wechatQrcodeStatus',
   BRIDGE_BINDING_LIST: 'bridge:bindingList',
   BRIDGE_BINDING_DELETE: 'bridge:bindingDelete',
+  // 平台重启（生命周期修复批次2.4）：设置页「重连」按钮后端——startPlatform 全链（stop→create→start）。
+  BRIDGE_PLATFORM_RESTART: 'bridge:platformRestart',
   // 主→渲染推送：平台状态变化。
   BRIDGE_STATUS_CHANGED: 'bridge:statusChanged',
 } as const;
