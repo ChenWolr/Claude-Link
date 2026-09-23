@@ -31,6 +31,12 @@
 //   W.  startPlatform adapter.start() 抛错 → 状态 error 含「平台启动失败」、不抛 unhandled rejection；
 //   X.  off 语义：stopPlatform silent 早退不写状态 / 非静默早退写 off / markPlatformOff 与
 //       markPlatformError 显式写 / 禁用链（clearBuffers+silent+markPlatformOff）终态 off。
+// 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次4）：
+//   E④. /new 会话名统一 `[平台] 昵称`（与 B7 重建一致）；
+//   H①② 语义升级：无中断标记的 interrupted（桌面端中断）→ 回「本轮已被桌面端中断」；
+//         IM /stop 置标记的 interrupted → 保持静默（原 H① 全量静默作废）；
+//   O①③ /stop 空闲（无绑定或无 running）→ 回「当前没有进行中的回合」且不 interruptTurn；
+//   I⑤. busy 超限丢弃前向 IM 发丢弃通知（文案含「已丢弃」）。
 // RED 预期（未改树）：manager/owner-policy 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-manager-verify.ts
 
@@ -285,6 +291,9 @@ async function main(): Promise<void> {
       JSON.stringify(world.feishuAdapter.sentReplies));
     check('E', '③', '/new 不进 dispatcher',
       world.dispatcherCalls.length === 0, JSON.stringify(world.dispatcherCalls));
+    check('E', '④', '/new 会话名 `[飞书] 昵称`（与 B7 悬空重建命名统一，批次4.4）',
+      world.createdSessions.some((s) => s.name === '[飞书] 测试用户'),
+      JSON.stringify(world.createdSessions.map((s) => s.name)));
 
     const worldO = createWorld();
     worldO.world.bindings.set('fs_dm_ou_owner', {
@@ -296,11 +305,26 @@ async function main(): Promise<void> {
     await mgrO.startPlatform('feishu');
     mgrO.handleInbound(fsMsg({ text: '/stop' }));
     await sleep(40);
-    check('O', '①', '/stop → interruptTurn(当前绑定 session)',
-      worldO.world.interrupted.includes('old-sess'), JSON.stringify(worldO.world.interrupted));
-    check('O', '②', '/stop sendReply 已中断',
-      worldO.world.feishuAdapter.sentReplies.some((r) => r.text.includes('已中断')),
+    // 批次4.2：空闲 /stop（有绑定、无 running）→ 撒谎修正：回「当前没有进行中的回合」，
+    // 不 interruptTurn、不置标记、不回「已中断」（原 O①/O② 的「一律 interruptTurn+已中断」作废）。
+    check('O', '①', '空闲 /stop（有绑定无 running）→ 回「当前没有进行中的回合」且不 interruptTurn',
+      worldO.world.interrupted.length === 0
+      && worldO.world.feishuAdapter.sentReplies.some((r) => r.text === '当前没有进行中的回合'),
+      JSON.stringify({ interrupted: worldO.world.interrupted, replies: worldO.world.feishuAdapter.sentReplies }));
+    check('O', '②', '空闲 /stop 不回「已中断」',
+      !worldO.world.feishuAdapter.sentReplies.some((r) => r.text.includes('已中断')),
       JSON.stringify(worldO.world.feishuAdapter.sentReplies));
+
+    // O③：无绑定 /stop 同语义（binding null → 提示无进行中回合）。
+    const worldO2 = createWorld();
+    const mgrO2 = new BridgeManager(worldO2.deps);
+    await mgrO2.startPlatform('feishu');
+    mgrO2.handleInbound(fsMsg({ text: '/stop' }));
+    await sleep(40);
+    check('O', '③', '无绑定 /stop → 回「当前没有进行中的回合」且不 interruptTurn',
+      worldO2.world.interrupted.length === 0
+      && worldO2.world.feishuAdapter.sentReplies.some((r) => r.text === '当前没有进行中的回合'),
+      JSON.stringify({ interrupted: worldO2.world.interrupted, replies: worldO2.world.feishuAdapter.sentReplies }));
   }
 
   // ── Q. /stop 中断时序真实化（review P1）：真实管线中 sdk-backend 出口先 deleteEntry 再
@@ -424,14 +448,38 @@ async function main(): Promise<void> {
       JSON.stringify(world.feishuAdapter.sentReplies));
     mgr.handleInbound(fsMsg({ text: '普通消息3' }));
     await sleep(40);
-    const countBefore = world.feishuAdapter.sentReplies.length;
-    check('H', '①', "interrupted → 不 sendReply",
-      world.feishuAdapter.sentReplies.length === countBefore,
+    // 批次4.3 语义升级：无中断标记的 interrupted = 桌面端中断（非 IM /stop）→ 通知 IM。
+    check('H', '①', "无中断标记的 interrupted（桌面端中断）→ 回「本轮已被桌面端中断」",
+      world.feishuAdapter.sentReplies.some((r) => r.text === '本轮已被桌面端中断'),
       JSON.stringify(world.feishuAdapter.sentReplies));
     mgr.handleInbound(fsMsg({ text: '普通消息4' }));
     await sleep(40);
     check('P', '①', "success+replyText → adapter.sendReply(原文，渲染在 adapter 内部)",
       world.feishuAdapter.sentReplies.some((r) => r.text === '正常回复' && r.chatId === 'oc_c'),
+      JSON.stringify(world.feishuAdapter.sentReplies));
+  }
+
+  // ── H②. IM /stop 置标记 → dispatcher interrupted 结算 → 保持静默（批次4.3 互补面）：
+  // 结算时 userInterrupted=true（/stop 置入），不得发「本轮已被桌面端中断」误报桌面中断。
+  {
+    const { world, deps } = createWorld();
+    world.bindings.set('fs_dm_ou_owner', {
+      platform: 'feishu', sessionKey: 'fs_dm_ou_owner', userId: 'ou_owner',
+      chatId: 'oc_c', displayName: null, sessionId: 'old-sess',
+    });
+    world.sessionRows.set('old-sess', { model: 'm' });
+    world.dispatcherResults.push({ outcome: 'interrupted', replyText: null, __gate: true } as never);
+    const mgr = new BridgeManager(deps);
+    await mgr.startPlatform('feishu');
+    mgr.handleInbound(fsMsg({ text: '进行中的回合' }));
+    await sleep(30);
+    mgr.handleInbound(fsMsg({ text: '/stop' })); // running → 置标记 + interruptTurn + 回「已中断」
+    await sleep(30);
+    world.gate?.open(); // 回合按 interrupted 结算（标记在结算处消费 → 静默）
+    await sleep(60);
+    check('H', '②', 'IM /stop 中断（interrupted 结算 + 标记消费）→ 不误报「本轮已被桌面端中断」',
+      world.feishuAdapter.sentReplies.some((r) => r.text.includes('已中断'))
+      && !world.feishuAdapter.sentReplies.some((r) => r.text.includes('本轮已被桌面端中断')),
       JSON.stringify(world.feishuAdapter.sentReplies));
   }
 
@@ -480,6 +528,9 @@ async function main(): Promise<void> {
     check('I', '④', 'busy 超限丢弃补 logger 日志（含丢弃条数，不留无诊断痕迹的静默丢弃）',
       errLog.some((l) => l.includes('busy') && l.includes('丢弃')),
       JSON.stringify(errLog));
+    check('I', '⑤', 'busy 超限丢弃前向 IM 发丢弃通知（文案含「已丢弃」，批次4.1 消息黑洞修复）',
+      worldI2.world.feishuAdapter.sentReplies.some((r) => r.text.includes('已丢弃')),
+      JSON.stringify(worldI2.world.feishuAdapter.sentReplies));
   }
 
   // ── J. 绑定悬空重建 ──

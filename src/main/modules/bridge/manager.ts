@@ -235,8 +235,9 @@ export class BridgeManager {
   private async handleSlashCommand(m: BridgeInboundMessage, cmd: string): Promise<void> {
     const label = PLATFORM_LABEL[m.platform];
     if (cmd === '/new') {
-      // 新会话 + 换绑；无旧绑定时直接建绑定。
-      const session = this.deps.createSession(`${label} ${m.senderName}`, this.deps.resolveModel(), this.deps.profiles().global.workingDir);
+      // 新会话 + 换绑；无旧绑定时直接建绑定。命名 `[平台] 昵称`（批次4.4：与 B7 悬空重建、
+      // UI「[飞书]/[微信] 前缀」提示统一）。
+      const session = this.deps.createSession(`[${label}] ${m.senderName}`, this.deps.resolveModel(), this.deps.profiles().global.workingDir);
       const existing = this.deps.getBinding(m.sessionKey);
       if (existing) {
         this.deps.rebind(m.sessionKey, session.id);
@@ -250,17 +251,18 @@ export class BridgeManager {
       return;
     }
     if (cmd === '/stop') {
+      // 批次4.2：/stop 语义修正——仅「有绑定且有在途回合」才置标记+中断+回「已中断」；
+      // 空闲（无绑定或无 running）如实回「当前没有进行中的回合」，不再一律回「已中断」撒谎。
       const binding = this.deps.getBinding(m.sessionKey);
-      if (binding) {
-        // P1：置中断标记再 interrupt——dispatcher 对中断回合只能兜底判 'error'（见 interruptedTurns 注），
-        // flush 处凭此标记按 interrupted 处理，不再误发「回复生成失败」。
-        // R2-N1：仅在有在途回合（running）时才置标记——空闲 /stop（或 busy 重试间隙）的
-        // interruptTurn 本就 no-op，置标记会残留并被下一个无关回合结算消费，误吞其失败提示。
-        if (this.buffers.get(m.sessionKey)?.running === true) {
-          this.interruptedTurns.add(m.sessionKey);
-        }
-        this.deps.interruptTurn(binding.sessionId);
+      const running = this.buffers.get(m.sessionKey)?.running === true;
+      if (!binding || !running) {
+        await this.reply(m, '当前没有进行中的回合');
+        return;
       }
+      // P1：置中断标记再 interrupt——dispatcher 对中断回合只能兜底判 'error'（见 interruptedTurns 注），
+      // flush 处凭此标记按 interrupted 处理，不再误发「回复生成失败」。
+      this.interruptedTurns.add(m.sessionKey);
+      this.deps.interruptTurn(binding.sessionId);
       await this.reply(m, '已中断');
     }
   }
@@ -308,6 +310,8 @@ export class BridgeManager {
           // 超出丢弃 + 记录（绝不无限重试，防重复轰炸）；中断标记一并清，防残留误吞后续失败提示（P1）。
           this.interruptedTurns.delete(sessionKey);
           console.error(`[bridge] busy 重试超限（${BUSY_MAX_RETRIES} 次），丢弃本批 ${lines.length} 条缓冲消息（sessionKey=${sessionKey}）`);
+          // 批次4.1：丢弃前告知 IM 用户（消息黑洞修复）；reply 内部已有失败兜底，通知失败不影响丢弃。
+          await this.reply(lastMsg, '当前有回合仍在进行，您发送的消息较多，本批已丢弃，请稍后重发。');
           return;
         }
         buf.running = false;
@@ -323,7 +327,12 @@ export class BridgeManager {
       // P1：消费并清除 /stop 中断标记（任何完成结算的回合都清，防残留）。
       const userInterrupted = this.interruptedTurns.delete(sessionKey);
       // 回复正交（openhanako #1607）：error 只进日志；完全没有可见正文才提示失败。
-      if (result.outcome === 'interrupted') return; // 用户主动 /stop，不打扰
+      // 批次4.3：interrupted 分流——IM /stop 置位的静默（用户自己中断）；无标记的 interrupted
+      // 是桌面端杀进程所致，IM 侧消息凭空消失，发提示（退出场景 adapter 已移除 → 日志路径）。
+      if (result.outcome === 'interrupted') {
+        if (!userInterrupted) await this.reply(lastMsg, '本轮已被桌面端中断');
+        return;
+      }
       if (userInterrupted && result.outcome === 'error') return; // /stop 中断被 exit 兜底误判成 error（P1）：静默
       if (result.replyText && result.replyText.trim()) {
         await this.reply(lastMsg, result.replyText);
