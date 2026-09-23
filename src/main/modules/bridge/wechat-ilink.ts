@@ -234,8 +234,17 @@ export function createIlinkClient(botToken: string, deps: IlinkDeps): IlinkClien
 
   // ── 入站 ──
 
-  function extractText(itemList?: IlinkItem[]): string {
+  /** A4：媒体类型 → 占位提示片段；未认识的类型返回 ''（行为不变）。 */
+  function mediaHintOf(type: number | undefined): string {
+    if (type === MessageItemType.IMAGE) return '图片';
+    if (type === MessageItemType.FILE) return '文件';
+    if (type === MessageItemType.VIDEO) return '视频';
+    return '';
+  }
+
+  function extractText(itemList?: IlinkItem[], trackMedia = true): string {
     if (!itemList?.length) return '';
+    let mediaHint = ''; // A4：无可提取文本时的媒体占位（与飞书「占位可见」语义对齐，不再静默丢）
     for (const item of itemList) {
       if (item.type === MessageItemType.TEXT && item.text_item?.text != null) {
         const text = String(item.text_item.text);
@@ -245,7 +254,7 @@ export function createIlinkClient(botToken: string, deps: IlinkDeps): IlinkClien
         const parts: string[] = [];
         if (ref.title) parts.push(ref.title);
         if (ref.message_item) {
-          const refBody = extractText([ref.message_item]); // 协议：message_item 是单个 item，包数组复用提取
+          const refBody = extractText([ref.message_item], false); // 协议：message_item 单个 item 包数组复用；媒体引用不产占位（仅顶层占位）
           if (refBody) parts.push(refBody);
         }
         if (!parts.length) return text;
@@ -255,8 +264,10 @@ export function createIlinkClient(botToken: string, deps: IlinkDeps): IlinkClien
       if (item.type === MessageItemType.VOICE && item.voice_item?.text) {
         return item.voice_item.text;
       }
+      if (trackMedia && !mediaHint) mediaHint = mediaHintOf(item.type);
     }
-    return '';
+    // 两段式：可提取文本优先（上方已 return）；仅整体无文本时返回媒体占位。
+    return mediaHint ? `[微信${mediaHint}消息，当前版本暂不支持]` : '';
   }
 
   function handleInbound(msg: IlinkMsg): void {

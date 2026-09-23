@@ -14,6 +14,8 @@ export interface BridgeCipher {
 
 export interface BridgeGlobalConfig {
   workingDir: string | null;
+  /** A2 处理中回执开关（默认开）：每回合至多先回一条「（正在处理…）」。 */
+  receiptEnabled: boolean;
 }
 
 export interface FeishuProfileStored {
@@ -59,7 +61,7 @@ export const MASKED_SECRET = '********';
 
 export function defaultProfiles(): BridgeProfilesStored {
   return {
-    global: { workingDir: null },
+    global: { workingDir: null, receiptEnabled: true },
     feishu: { enabled: false, appId: '', appSecretEnc: null, region: 'feishu_cn', ownerOpenId: null },
     wechat: { enabled: false, botTokenEnc: null, botUserId: null, ownerUserId: null },
   };
@@ -87,6 +89,8 @@ export function loadProfilesWithStatus(file: string, cipher: BridgeCipher): Brid
     const d = result.profiles;
     if (raw.global && typeof raw.global === 'object') {
       d.global.workingDir = typeof raw.global.workingDir === 'string' ? raw.global.workingDir : null;
+      // A2：缺省/非法视为 true（老文件无缝升级）。
+      d.global.receiptEnabled = raw.global.receiptEnabled !== false;
     }
     if (raw.feishu && typeof raw.feishu === 'object') {
       d.feishu.enabled = raw.feishu.enabled === true;

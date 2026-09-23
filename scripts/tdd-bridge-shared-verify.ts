@@ -8,6 +8,12 @@
 // 运行：npx tsx scripts/tdd-bridge-shared-verify.ts
 
 import * as assert from 'node:assert';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+
+function readTypes(): string {
+  return fs.readFileSync(path.join(__dirname, '../src/shared/types/bridge.ts'), 'utf8');
+}
 
 // tsx 下带 .ts 后缀 import（先例：tdd 脚本直接引 src 模块）。
 import { buildBridgeSessionKey, parseBridgeSessionKey } from '../src/shared/bridge/session-key';

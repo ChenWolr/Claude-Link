@@ -18,6 +18,9 @@
 //   K. reportStatus 去重：连续同状态只上报一次（消 40s 轮询周期全量广播噪音）；
 //      状态变化后恢复上报（error → connected 重报）。
 // 生命周期修复计划追加（批次5.1-8）：getWechatQrcode AbortController 超时 → throw「获取二维码超时」。
+// 第二轮计划追加（docs/plans/2026-09-23-im-config-ux-round2-plan.md 批次A A4）：
+//   N.  微信媒体占位：IMAGE/FILE/VIDEO-only → 「[微信X消息，当前版本暂不支持]」占位入站；
+//      TEXT+IMAGE 混合文本优先原样；VOICE 不回归（ASR 文本透传）。
 // 手法：按 URL 片段分派 mock fetch（对照 openhanako tests/wechat-adapter.test.ts）。
 // RED 预期（未改树）：三模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-wechat-verify.ts
@@ -534,6 +537,74 @@ async function main(): Promise<void> {
     }
     check('L', '①', 'getWechatQrcode 挂起 fetch 超时 → throw「获取二维码超时，请重试」',
       timeoutErr.includes('获取二维码超时'), timeoutErr);
+  }
+
+  // ── N. 微信媒体占位（2026-09-23 第二轮 A4）──
+  {
+    const mock = createFetchMock();
+    const stateDir = path.join(tmpRoot, 'media-placeholder');
+    const received: BridgeInboundMessage[] = [];
+    const adapter = createWechatAdapter({
+      botToken: 'tok-N', stateDir,
+      onMessage: (m) => received.push(m),
+      onStatus: () => {},
+      fetchFn: makeFetch(mock),
+    });
+    mock.queue.push({
+      match: 'getupdates',
+      respond: okResponse({
+        msgs: [
+          { from_user_id: 'wxid_img', item_list: [{ type: 2 }] },
+          { from_user_id: 'wxid_file', item_list: [{ type: 4 }] },
+          { from_user_id: 'wxid_video', item_list: [{ type: 5 }] },
+          { from_user_id: 'wxid_mix', item_list: [{ type: 2 }, { type: 1, text_item: { text: '看这张图' } }] },
+          { from_user_id: 'wxid_voice', item_list: [{ type: 3, voice_item: { text: '语音转写不变' } }] },
+        ],
+        get_updates_buf: 'BUF-N',
+      }),
+    });
+    await adapter.start();
+    await sleep(30);
+    await adapter.stop();
+    check('N', '①', 'IMAGE-only → 占位「[微信图片消息，当前版本暂不支持]」',
+      received.some((m) => m.userId === 'wxid_img' && m.text === '[微信图片消息，当前版本暂不支持]'),
+      JSON.stringify(received.map((m) => ({ u: m.userId, t: m.text }))));
+    check('N', '②', 'FILE/VIDEO-only → 「[微信文件消息…]」「[微信视频消息…]」占位',
+      received.some((m) => m.userId === 'wxid_file' && m.text === '[微信文件消息，当前版本暂不支持]')
+      && received.some((m) => m.userId === 'wxid_video' && m.text === '[微信视频消息，当前版本暂不支持]'),
+      JSON.stringify(received.map((m) => ({ u: m.userId, t: m.text }))));
+    check('N', '③', 'TEXT+IMAGE 混合 → 文本优先原样（不被图片改写为占位）',
+      received.some((m) => m.userId === 'wxid_mix' && m.text === '看这张图'),
+      JSON.stringify(received.map((m) => ({ u: m.userId, t: m.text }))));
+    check('N', '④', 'VOICE 不回归（ASR 文本照常透传）',
+      received.some((m) => m.userId === 'wxid_voice' && m.text === '语音转写不变'),
+      JSON.stringify(received.map((m) => ({ u: m.userId, t: m.text }))));
+
+    // N⑤ 边界回归钉（§5.1「引用内媒体不变」）：引用消息的 message_item 是媒体时不产占位
+    // （媒体引用本就不拼正文）——占位仅限顶层无文本消息。
+    const mockRef = createFetchMock();
+    const receivedRef: BridgeInboundMessage[] = [];
+    const adapterRef = createWechatAdapter({
+      botToken: 'tok-N5', stateDir: path.join(tmpRoot, 'media-ref'),
+      onMessage: (m) => receivedRef.push(m),
+      onStatus: () => {},
+      fetchFn: makeFetch(mockRef),
+    });
+    mockRef.queue.push({
+      match: 'getupdates',
+      respond: okResponse({
+        msgs: [
+          { from_user_id: 'wxid_refimg', item_list: [{ type: 1, text_item: { text: '引用图片说事' }, ref_msg: { title: '图片', message_item: { type: 2 } } }] },
+        ],
+        get_updates_buf: 'BUF-N5',
+      }),
+    });
+    await adapterRef.start();
+    await sleep(30);
+    await adapterRef.stop();
+    check('N', '⑤', '引用内媒体不产占位（mediaHint 仅顶层）：引用图片 → [引用: 图片]\\n正文',
+      receivedRef.some((m) => m.userId === 'wxid_refimg' && m.text === '[引用: 图片]\n引用图片说事'),
+      JSON.stringify(receivedRef.map((m) => ({ u: m.userId, t: m.text }))));
   }
 
   fs.rmSync(tmpRoot, { recursive: true, force: true });

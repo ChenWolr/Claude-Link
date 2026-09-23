@@ -40,6 +40,10 @@
 // 生命周期修复计划追加（批次5.2）：微信 owner 收窄——
 //   A②. owner-policy wechat 不再「任何私聊用户即 owner」，与 feishu 统一 userId 精确匹配；
 //   W.  manager.handleInbound wechat 段：ownerUserId 空 → 首捕获 saveWechatOwner；非 owner 忽略。
+// 第二轮计划追加（docs/plans/2026-09-23-im-config-ux-round2-plan.md 批次A）：
+//   Y.  A1 /help（注册即拦截/回复帮助/不建会话不建绑定）；A2 处理中回执（默认开/false 不发/
+//       busy 重试不重发/超限丢弃复位再发/回执失败不阻塞回合）；A3 error+部分正文追加
+//       「（回复中断，以上内容可能不完整）」（success 不加；error 无正文维持失败提示）。
 // RED 预期（未改树）：manager/owner-policy 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-manager-verify.ts
 
@@ -66,6 +70,8 @@ interface FakeAdapter {
   started: boolean;
   stopped: boolean;
   sentReplies: Array<{ chatId: string; text: string }>;
+  /** 发送尝试记录（含失败）：A2 fire-and-forget 断言用（回执抛错也留痕）。 */
+  attempted: string[];
 }
 
 interface World {
@@ -92,6 +98,8 @@ interface World {
   unbound: Set<string>;
   /** [W] 组：注入 adapter.start 抛错（null=正常）。 */
   feishuStartError: Error | null;
+  /** [Y] A2⑤：命中此文案的 sendReply 抛错（回执 fire-and-forget 断言用）。 */
+  failReplyText: string | null;
 }
 
 function createWorld(): { world: World; deps: BridgeManagerDeps } {
@@ -107,14 +115,15 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
     savedOwners: [],
     savedWechatOwners: [],
     interrupted: [],
-    feishuAdapter: { started: false, stopped: false, sentReplies: [] },
-    wechatAdapter: { started: false, stopped: false, sentReplies: [] },
+    feishuAdapter: { started: false, stopped: false, sentReplies: [], attempted: [] },
+    wechatAdapter: { started: false, stopped: false, sentReplies: [], attempted: [] },
     feishuFactoryReturnsNull: false,
     statusChanges: 0,
     hangFeishuReply: null,
     replyGate: null,
     unbound: new Set<string>(),
     feishuStartError: null,
+    failReplyText: null,
   };
 
   let sessionCounter = 0;
@@ -154,7 +163,7 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
     getSessionRow: (id) => world.sessionRows.get(id) ?? null,
     resolveModel: () => 'test-model',
     profiles: () => ({
-      global: { workingDir: 'D:/bridge-work' },
+      global: { workingDir: 'D:/bridge-work', receiptEnabled: true },
       feishu: { enabled: true, appId: 'a', appSecretEnc: null, region: 'feishu_cn', ownerOpenId: 'ou_owner' },
       wechat: { enabled: true, botTokenEnc: null, botUserId: null, ownerUserId: 'wxid_owner' },
     }),
@@ -172,6 +181,10 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
           },
           stop: async () => { world.feishuAdapter.stopped = true; },
           sendReply: async (chatId, text) => {
+            world.feishuAdapter.attempted.push(text);
+            if (world.failReplyText !== null && text === world.failReplyText) {
+              throw new Error('injected sendReply failure');
+            }
             if (world.hangFeishuReply !== null && text === world.hangFeishuReply) {
               // 手动放行：挂起直到 world.replyGate.open()（参照 dispatcher __gate 手法）。
               await new Promise<void>((resolve) => { world.replyGate = { open: resolve }; });
@@ -405,7 +418,8 @@ async function main(): Promise<void> {
     });
     world.sessionRows.set('old-sess', { model: 'm' });
     world.dispatcherResults.push({ outcome: 'error', replyText: '错误但有正文照发' });
-    world.hangFeishuReply = '错误但有正文照发'; // sendReply 挂在此条上
+    // A3 最小同步：error+正文的实发文本带「（回复中断…）」suffix，挂起匹配实发全文。
+    world.hangFeishuReply = '错误但有正文照发\n\n（回复中断，以上内容可能不完整）'; // sendReply 挂在此条上
     const mgr = new BridgeManager(deps);
     await mgr.startPlatform('feishu');
     mgr.handleInbound(fsMsg({ text: '触发回合' }));
@@ -448,8 +462,10 @@ async function main(): Promise<void> {
       JSON.stringify(world.dispatcherCalls));
     mgr.handleInbound(fsMsg({ text: '普通消息1' }));
     await sleep(40);
-    check('G', '①', "success+replyText=null → 不发任何 IM 消息（B17）",
-      world.feishuAdapter.sentReplies.length === 0, JSON.stringify(world.feishuAdapter.sentReplies));
+    // A2 最小同步：回合先发「（正在处理…）」回执，B17「无正文不发」收窄为无正文回复（回执除外）。
+    check('G', '①', "success+replyText=null → 无正文 IM 消息（B17；A2 回执除外）",
+      world.feishuAdapter.sentReplies.every((r) => r.text === '（正在处理…）'),
+      JSON.stringify(world.feishuAdapter.sentReplies));
     mgr.handleInbound(fsMsg({ text: '普通消息2' }));
     await sleep(40);
     check('G', '②', "error+空文本 → sendReply('回复生成失败，请稍后重试')",
@@ -754,9 +770,158 @@ async function main(): Promise<void> {
     await mgrW3.startPlatform('wechat');
     mgrW3.handleInbound(fsMsg({ platform: 'wechat', chatId: 'wxid_owner', userId: 'wxid_owner', sessionKey: 'wx_dm_wxid_owner', text: 'owner 的私聊', senderName: 'owner' }));
     await sleep(40);
-    check('W', '③', 'wechat owner 私照常处理（dispatcher 1 次 + 回复送达）',
-      worldW3.world.dispatcherCalls.length === 1 && worldW3.world.wechatAdapter.sentReplies.length === 1,
+    check('W', '③', 'wechat owner 私照常处理（dispatcher 1 次 + 回复送达；A2 回执不计）',
+      worldW3.world.dispatcherCalls.length === 1
+      && worldW3.world.wechatAdapter.sentReplies.filter((r) => r.text !== '（正在处理…）').length === 1,
       `disp=${worldW3.world.dispatcherCalls.length} replies=${JSON.stringify(worldW3.world.wechatAdapter.sentReplies)}`);
+  }
+
+  // ── Y. 第二轮批A（2026-09-23）：A1 /help / A2 处理中回执 / A3 中断标注 ──
+  {
+    // A1：/help 注册 + 回复帮助 + 不建会话不建绑定不派发。
+    const worldY = createWorld();
+    const mgrY = new BridgeManager(worldY.deps);
+    await mgrY.startPlatform('feishu');
+    mgrY.handleInbound(fsMsg({ text: '/help' }));
+    await sleep(40);
+    check('Y', '①', '/help 回复帮助文案（含「可用命令」与 /new /stop /help 三条）',
+      worldY.world.feishuAdapter.sentReplies.some((r) => r.text.includes('可用命令')
+        && r.text.includes('/new') && r.text.includes('/stop') && r.text.includes('/help')),
+      JSON.stringify(worldY.world.feishuAdapter.sentReplies));
+    check('Y', '②', '/help 不建会话不建绑定不派发（createSession 0 + upsertBinding 0 + dispatcher 0）',
+      worldY.world.createdSessions.length === 0 && worldY.world.dispatcherCalls.length === 0
+      && worldY.world.bindings.size === 0,
+      `sessions=${worldY.world.createdSessions.length} disp=${worldY.world.dispatcherCalls.length} bindings=${worldY.world.bindings.size}`);
+
+    // A2①：默认开 → 回合先回「（正在处理…）」再回正文。
+    const worldA2 = createWorld();
+    worldA2.world.bindings.set('fs_dm_ou_owner', {
+      platform: 'feishu', sessionKey: 'fs_dm_ou_owner', userId: 'ou_owner',
+      chatId: 'oc_c', displayName: null, sessionId: 'old-sess',
+    });
+    worldA2.world.sessionRows.set('old-sess', { model: 'm' });
+    worldA2.world.dispatcherResults.push({ outcome: 'success', replyText: '正文来了' });
+    const mgrA2 = new BridgeManager(worldA2.deps);
+    await mgrA2.startPlatform('feishu');
+    mgrA2.handleInbound(fsMsg({ text: '触发回合' }));
+    await sleep(60);
+    const r2 = worldA2.world.feishuAdapter.sentReplies;
+    check('Y', '③', 'A2 默认开：flush 发「（正在处理…）」且回执先于正文',
+      r2.some((r) => r.text === '（正在处理…）')
+      && r2.findIndex((r) => r.text === '（正在处理…）') < r2.findIndex((r) => r.text === '正文来了'),
+      JSON.stringify(r2));
+
+    // A2②：receiptEnabled=false → 零回执。
+    const worldA2b = createWorld();
+    const profilesA2b = worldA2b.deps.profiles;
+    worldA2b.deps.profiles = () => {
+      const p = profilesA2b();
+      return { ...p, global: { ...p.global, receiptEnabled: false } };
+    };
+    worldA2b.world.bindings.set('fs_dm_ou_owner', {
+      platform: 'feishu', sessionKey: 'fs_dm_ou_owner', userId: 'ou_owner',
+      chatId: 'oc_c', displayName: null, sessionId: 'old-sess',
+    });
+    worldA2b.world.sessionRows.set('old-sess', { model: 'm' });
+    worldA2b.world.dispatcherResults.push({ outcome: 'success', replyText: '无回执正文' });
+    const mgrA2b = new BridgeManager(worldA2b.deps);
+    await mgrA2b.startPlatform('feishu');
+    mgrA2b.handleInbound(fsMsg({ text: '关开关的回合' }));
+    await sleep(60);
+    check('Y', '④', 'A2 receiptEnabled=false：零「（正在处理…）」且正文照发',
+      !worldA2b.world.feishuAdapter.sentReplies.some((r) => r.text === '（正在处理…）')
+      && worldA2b.world.feishuAdapter.sentReplies.some((r) => r.text === '无回执正文'),
+      JSON.stringify(worldA2b.world.feishuAdapter.sentReplies));
+
+    // A2③④：busy 塞回重试不重发；超限丢弃后复位，下一回合可再发。
+    const worldA2c = createWorld();
+    worldA2c.world.bindings.set('fs_dm_ou_owner', {
+      platform: 'feishu', sessionKey: 'fs_dm_ou_owner', userId: 'ou_owner',
+      chatId: 'oc_c', displayName: null, sessionId: 'old-sess',
+    });
+    worldA2c.world.sessionRows.set('old-sess', { model: 'm' });
+    worldA2c.world.dispatcherResults.push({ outcome: 'error', replyText: null, busy: true });
+    worldA2c.world.dispatcherResults.push({ outcome: 'success', replyText: '重试后成功' });
+    const mgrA2c = new BridgeManager(worldA2c.deps);
+    await mgrA2c.startPlatform('feishu');
+    mgrA2c.handleInbound(fsMsg({ text: 'busy 合并回合' }));
+    await sleep(120);
+    const receipts = worldA2c.world.feishuAdapter.sentReplies.filter((r) => r.text === '（正在处理…）');
+    check('Y', '⑤', 'A2 busy 塞回重试不重发回执（「（正在处理…）」恰 1 条）',
+      receipts.length === 1, JSON.stringify(worldA2c.world.feishuAdapter.sentReplies));
+
+    const worldA2d = createWorld();
+    worldA2d.world.bindings.set('fs_dm_ou_owner', {
+      platform: 'feishu', sessionKey: 'fs_dm_ou_owner', userId: 'ou_owner',
+      chatId: 'oc_c', displayName: null, sessionId: 'old-sess',
+    });
+    worldA2d.world.sessionRows.set('old-sess', { model: 'm' });
+    for (let i = 0; i < 5; i++) worldA2d.world.dispatcherResults.push({ outcome: 'error', replyText: null, busy: true });
+    worldA2d.world.dispatcherResults.push({ outcome: 'success', replyText: '丢弃后新回合' });
+    const mgrA2d = new BridgeManager(worldA2d.deps);
+    await mgrA2d.startPlatform('feishu');
+    const errLogD: string[] = [];
+    const origErrD = console.error;
+    console.error = (...args: unknown[]) => { errLogD.push(args.map((a) => String(a)).join(' ')); };
+    try {
+      mgrA2d.handleInbound(fsMsg({ text: '一直 busy 直到丢弃' }));
+      await sleep(180); // busy 超限丢弃（含丢弃通知）
+    } finally {
+      console.error = origErrD;
+    }
+    mgrA2d.handleInbound(fsMsg({ text: '丢弃后的下一回合' }));
+    await sleep(60);
+    check('Y', '⑥', 'A2 busy 超限丢弃后 receiptSent 复位：下一回合回执可再发（恰 2 条）',
+      worldA2d.world.feishuAdapter.sentReplies.filter((r) => r.text === '（正在处理…）').length === 2
+      && worldA2d.world.feishuAdapter.sentReplies.some((r) => r.text === '丢弃后新回合'),
+      JSON.stringify(worldA2d.world.feishuAdapter.sentReplies));
+
+    // A2⑤：回执发送失败不阻塞回合（fire-and-forget：dispatcher 已被调用、正文照发）。
+    const worldA2e = createWorld();
+    worldA2e.world.failReplyText = '（正在处理…）';
+    worldA2e.world.bindings.set('fs_dm_ou_owner', {
+      platform: 'feishu', sessionKey: 'fs_dm_ou_owner', userId: 'ou_owner',
+      chatId: 'oc_c', displayName: null, sessionId: 'old-sess',
+    });
+    worldA2e.world.sessionRows.set('old-sess', { model: 'm' });
+    worldA2e.world.dispatcherResults.push({ outcome: 'success', replyText: '回执失败也照发' });
+    const mgrA2e = new BridgeManager(worldA2e.deps);
+    await mgrA2e.startPlatform('feishu');
+    mgrA2e.handleInbound(fsMsg({ text: '回执会失败的回合' }));
+    await sleep(120); // 含 sendRetryMs=5 重试窗口
+    check('Y', '⑦', 'A2 回执发送失败不阻塞回合（dispatcher 1 次 + 正文照发）',
+      worldA2e.world.dispatcherCalls.length === 1
+      && worldA2e.world.feishuAdapter.sentReplies.some((r) => r.text === '回执失败也照发'),
+      `disp=${worldA2e.world.dispatcherCalls.length} replies=${JSON.stringify(worldA2e.world.feishuAdapter.sentReplies)}`);
+
+    // A3：error+部分正文追加标注；success 不加；error 无正文维持失败提示。
+    const worldA3 = createWorld();
+    worldA3.world.bindings.set('fs_dm_ou_owner', {
+      platform: 'feishu', sessionKey: 'fs_dm_ou_owner', userId: 'ou_owner',
+      chatId: 'oc_c', displayName: null, sessionId: 'old-sess',
+    });
+    worldA3.world.sessionRows.set('old-sess', { model: 'm' });
+    worldA3.world.dispatcherResults.push({ outcome: 'error', replyText: '中断前的部分输出' });
+    worldA3.world.dispatcherResults.push({ outcome: 'success', replyText: '正常完整输出' });
+    worldA3.world.dispatcherResults.push({ outcome: 'error', replyText: null });
+    const mgrA3 = new BridgeManager(worldA3.deps);
+    await mgrA3.startPlatform('feishu');
+    mgrA3.handleInbound(fsMsg({ text: '回合1' }));
+    await sleep(60);
+    mgrA3.handleInbound(fsMsg({ text: '回合2' }));
+    await sleep(60);
+    mgrA3.handleInbound(fsMsg({ text: '回合3' }));
+    await sleep(60);
+    check('Y', '⑧', 'A3 error+部分正文 → 正文尾部带「（回复中断，以上内容可能不完整）」',
+      worldA3.world.feishuAdapter.sentReplies.some((r) => r.text.includes('中断前的部分输出')
+        && r.text.includes('（回复中断，以上内容可能不完整）')),
+      JSON.stringify(worldA3.world.feishuAdapter.sentReplies));
+    check('Y', '⑨', 'A3 success+正文不含中断标注',
+      worldA3.world.feishuAdapter.sentReplies.some((r) => r.text === '正常完整输出'),
+      JSON.stringify(worldA3.world.feishuAdapter.sentReplies));
+    check('Y', '⑩', 'A3 error 无正文维持「回复生成失败，请稍后重试」',
+      worldA3.world.feishuAdapter.sentReplies.some((r) => r.text === '回复生成失败，请稍后重试'),
+      JSON.stringify(worldA3.world.feishuAdapter.sentReplies));
   }
 
   assert.ok(true);

@@ -266,5 +266,19 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     'BridgeSettings 未暴露 refresh');
 }
 
+// 第二轮计划契约（docs/plans/2026-09-23-im-config-ux-round2-plan.md 批次A A2）：
+//   K. 处理中回执开关（全局面板「处理中提示」checkbox + save receiptEnabled + 「（正在处理…）」锚点）。
+{
+  const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
+  check('K', '①', '全局面板「处理中提示」开关（checkbox + receiptEnabled 联动保存）',
+    vueSrc.includes('处理中提示') && /receiptEnabled/.test(vueSrc)
+      && /save\(\{ global: \{ receiptEnabled/.test(vueSrc),
+    '全局面板缺处理中回执开关或未接 save receiptEnabled');
+  check('K', '②', '「（正在处理…）」回执文案锚点存在（与 manager 回执文案一致）',
+    vueSrc.includes('（正在处理…）'),
+    '缺「（正在处理…）」回执说明锚点');
+}
+
+
 console.log(`\n结果：${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

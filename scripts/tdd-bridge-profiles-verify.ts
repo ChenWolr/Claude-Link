@@ -8,6 +8,8 @@
 //   F. profiles.json 损坏 JSON → 回落默认值不抛（B13）。
 // 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次5.2）：
 //   G. wechat ownerUserId：默认 null / save→load 往返 / 老文件缺字段兜底 null。
+// 第二轮计划追加（docs/plans/2026-09-23-im-config-ux-round2-plan.md 批次A A2）：
+//   H. global.receiptEnabled：默认 true / 老文件缺字段读出 true / 显式 false 持久化往返。
 // RED 预期（未改树）：profiles 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-profiles-verify.ts
 
@@ -170,6 +172,32 @@ const profilesFile = path.join(tmpRoot, 'profiles.json');
   const legacy = loadProfiles(legacyFile, fakeCipher);
   check('G', '③', '老文件缺 ownerUserId 字段 → 加载兜底 null',
     legacy.wechat.ownerUserId === null, String(legacy.wechat.ownerUserId));
+}
+
+// H. global.receiptEnabled（2026-09-23 第二轮 A2：处理中回执开关的存储面）
+{
+  check('H', '①', 'defaultProfiles：global.receiptEnabled 默认 true',
+    defaultProfiles().global.receiptEnabled === true,
+    String(defaultProfiles().global.receiptEnabled));
+
+  const receiptFile = path.join(tmpRoot, 'receipt.json');
+  const p = defaultProfiles();
+  p.global.receiptEnabled = false;
+  saveProfiles(receiptFile, p);
+  const back = loadProfiles(receiptFile, fakeCipher);
+  check('H', '②', 'receiptEnabled=false 持久化往返一致',
+    back.global.receiptEnabled === false, String(back.global.receiptEnabled));
+
+  // 老版本 profiles.json（无 receiptEnabled 字段）→ 读出 true（缺省视为开，老文件无缝升级）。
+  const legacyRFile = path.join(tmpRoot, 'legacy-receipt.json');
+  fs.writeFileSync(legacyRFile, JSON.stringify({
+    global: { workingDir: null },
+    feishu: { enabled: false, appId: '', appSecretEnc: null, region: 'feishu_cn', ownerOpenId: null },
+    wechat: { enabled: false, botTokenEnc: null, botUserId: null, ownerUserId: null },
+  }), 'utf-8');
+  const legacyR = loadProfiles(legacyRFile, fakeCipher);
+  check('H', '③', '老文件缺 receiptEnabled 字段 → 读出 true（缺省视为开）',
+    legacyR.global.receiptEnabled === true, String(legacyR.global.receiptEnabled));
 }
 
 fs.rmSync(tmpRoot, { recursive: true, force: true });

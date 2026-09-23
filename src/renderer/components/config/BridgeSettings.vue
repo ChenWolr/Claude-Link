@@ -541,6 +541,15 @@ defineExpose({ refresh: loadAll });
           </div>
           <span class="im-field-hint">新 bridge 会话（[飞书]/[微信] 前缀）将使用此目录</span>
         </label>
+        <label class="im-field">
+          <span class="im-field-label">处理中提示</span>
+          <input
+            type="checkbox"
+            :checked="config?.global.receiptEnabled ?? true"
+            @change="save({ global: { receiptEnabled: ($event.target as HTMLInputElement).checked } })"
+          />
+          <span class="im-field-hint">开启后，每条消息触发处理时先回一条「（正在处理…）」，长任务等待时不至于无反馈</span>
+        </label>
       </template>
 
       <!-- 会话绑定（三个面板共用，置于底部；平台面板过滤本平台，全局=全部） -->

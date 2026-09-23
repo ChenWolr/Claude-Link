@@ -47,6 +47,8 @@ export interface BridgeConfigSaveInput {
   };
   global?: {
     workingDir?: string | null;
+    /** A2 处理中回执开关（缺省不覆盖）。 */
+    receiptEnabled?: boolean;
   };
 }
 
@@ -73,7 +75,7 @@ export interface BridgeConfigGetResult {
     /** 授权用户（批次5.2 owner 收窄）：null = 未定（下一个私聊用户首捕获）。 */
     ownerUserId: string | null;
   };
-  global: { workingDir: string | null };
+  global: { workingDir: string | null; receiptEnabled: boolean };
   secretBroken: { feishu: boolean; wechat: boolean };
 }
 

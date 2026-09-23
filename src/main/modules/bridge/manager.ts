@@ -55,10 +55,11 @@ interface SessionBuffer {
   timer: ReturnType<typeof setTimeout> | null;
   running: boolean;
   busyRetries: number;
+  receiptSent: boolean; // A2：本回合是否已发「（正在处理…）」（每回合至多一条）
 }
 
 const PLATFORM_LABEL: Record<BridgePlatform, string> = { feishu: '飞书', wechat: '微信' };
-const SLASH_COMMANDS = new Set(['/new', '/stop']);
+const SLASH_COMMANDS = new Set(['/new', '/stop', '/help']);
 const FORCE_FLUSH_LINES = 20;
 const FORCE_FLUSH_CHARS = 20_000;
 const BUSY_MAX_RETRIES = 3;
@@ -117,6 +118,7 @@ export class BridgeManager {
         this.clearBufferTimer(buf);
         buf.lines = [];
         buf.busyRetries = 0;
+        buf.receiptSent = false;
       }
     }
     const adapter = this.adapters.get(p);
@@ -153,6 +155,7 @@ export class BridgeManager {
       this.clearBufferTimer(buf);
       buf.lines = [];
       buf.busyRetries = 0;
+      buf.receiptSent = false;
     }
     this.interruptedTurns.delete(sessionKey);
   }
@@ -215,7 +218,7 @@ export class BridgeManager {
     }
 
     // 缓冲：running → 仅 push（无定时）；空闲 → push + debounce 定时；超限 force flush。
-    const buf = this.buffers.get(m.sessionKey) ?? { lines: [], timer: null, running: false, busyRetries: 0 };
+    const buf = this.buffers.get(m.sessionKey) ?? { lines: [], timer: null, running: false, busyRetries: 0, receiptSent: false };
     this.buffers.set(m.sessionKey, buf);
     buf.lines.push(m.text);
     if (buf.running) return;
@@ -242,6 +245,17 @@ export class BridgeManager {
 
   private async handleSlashCommand(m: BridgeInboundMessage, cmd: string): Promise<void> {
     const label = PLATFORM_LABEL[m.platform];
+    if (cmd === '/help') {
+      // A1：最轻命令最先——不查 binding、不建会话、不触发 LLM（slash 拦截层在缓冲之前，天然即时回复）。
+      await this.reply(m, [
+        '可用命令：',
+        '/new — 开启新会话并绑定（旧会话保留在电脑端）',
+        '/stop — 中断当前进行中的回复',
+        '/help — 显示本帮助',
+        '普通消息：短时间连发的多条会合并（约 2 秒窗口）后交给 AI 处理。',
+      ].join('\n'));
+      return;
+    }
     if (cmd === '/new') {
       // 新会话 + 换绑；无旧绑定时直接建绑定。命名 `[平台] 昵称`（批次4.4：与 B7 悬空重建、
       // UI「[飞书]/[微信] 前缀」提示统一）。
@@ -279,6 +293,7 @@ export class BridgeManager {
   private async flush(sessionKey: string, lastMsg: BridgeInboundMessage, retryDepth = 0): Promise<void> {
     const buf = this.buffers.get(sessionKey);
     if (!buf || buf.running || buf.lines.length === 0) return;
+    let requeued = false; // A2：busy 重排时 finally 不复位回执（重试不重发，回合未结束）
     const lines = buf.lines;
     buf.lines = [];
     buf.running = true;
@@ -306,6 +321,12 @@ export class BridgeManager {
       if (!binding) return; // upsert 后仍取不到（异常），放弃本批
       this.deps.touch(sessionKey);
 
+      // A2 处理中回执：每回合至多一条；fire-and-forget——发送失败/迟滞不拖延回合本身。
+      if (this.deps.profiles().global.receiptEnabled !== false && !buf.receiptSent) {
+        buf.receiptSent = true;
+        void this.reply(lastMsg, '（正在处理…）');
+      }
+
       const result = await this.deps.dispatcher(binding.sessionId, lines.join('\n'));
 
       if (result.busy) {
@@ -315,6 +336,7 @@ export class BridgeManager {
         if (buf.busyRetries > BUSY_MAX_RETRIES) {
           buf.lines = [];
           buf.busyRetries = 0;
+          buf.receiptSent = false; // A2：丢弃即回合终，复位让下一回合可再发回执（重试期间不重置）
           // 超出丢弃 + 记录（绝不无限重试，防重复轰炸）；中断标记一并清，防残留误吞后续失败提示（P1）。
           this.interruptedTurns.delete(sessionKey);
           console.error(`[bridge] busy 重试超限（${BUSY_MAX_RETRIES} 次），丢弃本批 ${lines.length} 条缓冲消息（sessionKey=${sessionKey}）`);
@@ -323,6 +345,7 @@ export class BridgeManager {
           return;
         }
         buf.running = false;
+        requeued = true; // A2：重排非回合结束，finally 跳过回执复位（重试不重发）
         // 重试定时器入 buf.timer：stopAll 统一清理，防退出后幽灵 flush（B14）。
         buf.timer = setTimeout(() => {
           buf.timer = null;
@@ -343,7 +366,9 @@ export class BridgeManager {
       }
       if (userInterrupted && result.outcome === 'error') return; // /stop 中断被 exit 兜底误判成 error（P1）：静默
       if (result.replyText && result.replyText.trim()) {
-        await this.reply(lastMsg, result.replyText);
+        // A3：error 但已有部分正文 → 追加标注（openhanako #2010 模式），防用户把截断回复当完整结论。
+        const suffix = result.outcome === 'error' ? '\n\n（回复中断，以上内容可能不完整）' : '';
+        await this.reply(lastMsg, result.replyText + suffix);
       } else if (result.outcome === 'error') {
         await this.reply(lastMsg, '回复生成失败，请稍后重试');
       } else {
@@ -351,6 +376,8 @@ export class BridgeManager {
       }
     } finally {
       buf.running = false;
+      // A2：回合结束复位（busy 重排除外——重排非回合结束，重试不重发）。
+      if (!requeued) buf.receiptSent = false;
       // R3-N3：清掉活到 finally 的中断标记——标记结算消费点在上方 reply 之前，凡此时仍存在的
       // 标记必为 reply 发送尾窗（running 已 true）置入的陈旧标记，残留会被下一个无关回合结算
       // 消费、误吞其失败提示；mid-turn 置入的标记已在结算处消费（此处 delete 幂等）。
