@@ -335,6 +335,9 @@ export class BridgeManager {
         if (this.deps.isUnbound(sessionKey)) {
           buf.busyRetries = 0;
           console.info(`[bridge] 已解绑会话的消息被忽略（sessionKey=${sessionKey}，${lines.length} 条）`);
+          // 2026-09-23 消息黑洞修复：解绑后用户发消息不再静默吞——回一条引导提示
+          // （每批一条，对齐批次4.1 busy 丢弃通知先例；reply 内部失败兜底不阻塞吞批语义）。
+          await this.reply(lastMsg, '会话绑定已解除，发送 /new 重新开始对话。');
           return; // 在 finally 中 running 复位、lines 已取走清空，不触发积压补发
         }
         const label = PLATFORM_LABEL[lastMsg.platform];

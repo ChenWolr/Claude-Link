@@ -47,6 +47,9 @@
 // 第二轮计划追加（同计划批次C C2）：
 //   Z.  入站活动性：connectedAt/lastInboundAt 记录与清零 / handleInbound 更新 /
 //       5s 节流广播（连续两条只广播一次）/ getStatus 带出两字段。
+// 2026-09-23 微信扫码重连修复计划追加：U② 语义升级——墓碑吞批改为送达 /new 引导提示
+//   （原『无回复送达』作废，行为随本计划 Commit 2 变更）；新增 UU 组
+//   （wechat 侧同场景 + 提示失败兜底）。
 // RED 预期（未改树）：manager/owner-policy 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-manager-verify.ts
 
@@ -185,7 +188,7 @@ function createWorld(): { world: World; deps: BridgeManagerDeps } {
           stop: async () => { world.feishuAdapter.stopped = true; },
           sendReply: async (chatId, text) => {
             world.feishuAdapter.attempted.push(text);
-            if (world.failReplyText !== null && text === world.failReplyText) {
+            if (world.failReplyText !== null && text.includes(world.failReplyText)) {
               throw new Error('injected sendReply failure');
             }
             if (world.hangFeishuReply !== null && text === world.hangFeishuReply) {
@@ -664,8 +667,50 @@ async function main(): Promise<void> {
     check('U', '①', '已解绑会话消息：dispatcher 0 次 + 不重建绑定（createdSessions 0）',
       world.dispatcherCalls.length === 0 && world.createdSessions.length === 0,
       `disp=${JSON.stringify(world.dispatcherCalls)} sessions=${world.createdSessions.length}`);
-    check('U', '②', '已解绑会话消息：无回复送达', world.feishuAdapter.sentReplies.length === 0,
+    check('U', '②', '已解绑会话消息：送达一条墓碑引导提示（含 /new）且无 LLM 回复',
+      world.feishuAdapter.sentReplies.length === 1
+        && world.feishuAdapter.sentReplies[0]!.text.includes('/new')
+        && world.feishuAdapter.sentReplies[0]!.text.includes('已解除'),
       JSON.stringify(world.feishuAdapter.sentReplies));
+  }
+
+  // ── UU. 墓碑吞批提示（2026-09-23 微信扫码重连修复）：wechat 平台同场景送达引导提示；
+  // 提示发送失败不逃逸（flush 不 reject，吞批语义不受影响——对齐 A2⑤ failReplyText 手法）。──
+  {
+    // UU①：wechat 墓碑场景 → wechat adapter 恰 1 条含 /new 的提示、dispatcher 0 次。
+    // userId 须等于 profiles.wechat.ownerUserId（批次5.2 owner 收窄门先于 flush；计划字面
+    // 'wx_owner' 会被非 owner 忽略分支拦截，对齐 W③ 既有 wechat owner 消息形态）。
+    const worldUU = createWorld();
+    worldUU.world.unbound.add('wx_dm_wx_owner');
+    const mgrUU = new BridgeManager(worldUU.deps);
+    await mgrUU.startPlatform('wechat');
+    mgrUU.handleInbound(fsMsg({ platform: 'wechat', chatId: 'wxid_owner', userId: 'wxid_owner', sessionKey: 'wx_dm_wx_owner', text: '解绑后的微信消息', senderName: '微信用户', isGroup: false }));
+    await sleep(40); // ≥3×debounceMs(10)
+    check('UU', '①', 'wechat 墓碑吞批：送达一条含 /new 引导提示（恰 1 条）且 dispatcher 0 次',
+      worldUU.world.wechatAdapter.sentReplies.length === 1
+      && worldUU.world.wechatAdapter.sentReplies[0]!.text.includes('/new')
+      && worldUU.world.dispatcherCalls.length === 0,
+      `replies=${JSON.stringify(worldUU.world.wechatAdapter.sentReplies)} disp=${worldUU.world.dispatcherCalls.length}`);
+
+    // UU②：提示发送失败不逃逸——failReplyText 以稳定子串 '/new' 命中提示文案（提示文案将来
+    // 微调时钩子不失配），flush promise 不 reject、无 unhandled、吞批语义保持。
+    const worldUF = createWorld();
+    worldUF.world.unbound.add('fs_dm_ou_owner');
+    worldUF.world.failReplyText = '/new';
+    const mgrUF = new BridgeManager(worldUF.deps);
+    const unhandledUF: unknown[] = [];
+    const onUnhandledUF = (err: unknown): void => { unhandledUF.push(err); };
+    process.on('unhandledRejection', onUnhandledUF);
+    void mgrUF.startPlatform('feishu');
+    await sleep(10);
+    void mgrUF.handleInbound(fsMsg({ text: '提示会发送失败的消息' }));
+    await sleep(120); // 含 sendRetryMs=5 重试窗口
+    process.off('unhandledRejection', onUnhandledUF);
+    check('UU', '②', '提示发送失败不逃逸：flush 不 reject（无 unhandled）且失败路径真实触发（attempted 恰 2）且吞批语义保持（dispatcher 0 次）',
+      unhandledUF.length === 0
+      && worldUF.world.feishuAdapter.attempted.length === 2
+      && worldUF.world.dispatcherCalls.length === 0,
+      `unhandled=${JSON.stringify(unhandledUF)} attempted=${JSON.stringify(worldUF.world.feishuAdapter.attempted)} disp=${worldUF.world.dispatcherCalls.length}`);
   }
 
   // ── V. manager.unbind 清缓冲定时器（生命周期修复批次1）：解绑时该 key 的 pending debounce
