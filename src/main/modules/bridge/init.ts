@@ -467,6 +467,10 @@ export async function bridgeWechatQrcodeStatus(qrcodeId: string): Promise<Wechat
   rt.profiles.wechat.botUserId = result.botUserId;
   rt.wechatTokenBroken = false;
   persistProfiles(rt);
+  // 2026-09-23 墓碑治本：重新扫码 = 微信桥全新开始，清掉旧解绑墓碑——否则 owner 的
+  // 普通消息会被 flush 的墓碑分支静默吞（用户被迫发 /new 才能对话）。
+  const purged = bindingRepo.purgeTombstonesByPlatform(getConnection(), 'wechat');
+  if (purged > 0) logger.info(`[bridge] 微信重新登录：已清除 ${purged} 条旧解绑墓碑`);
   if (rt.profiles.wechat.enabled) {
     await rt.manager.startPlatform('wechat'); // stop→create→start：旧客户端收口后重建
   }

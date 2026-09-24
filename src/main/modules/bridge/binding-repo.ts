@@ -129,3 +129,14 @@ export function getLatestBindingUserIdByPlatform(db: Database.Database, platform
   ).get(platform) as { user_id: string } | undefined;
   return row?.user_id ?? null;
 }
+
+/**
+ * 清除指定平台的全部解绑墓碑行（物理删除，2026-09-23 微信扫码重连修复）：
+ * 重新扫码登录 = 该平台桥接的全新开始，旧墓碑不应继续吞掉 owner 的普通消息
+ * （症状：新连接后普通消息静默无回复，必须发 /new 才能复活）。返回删除行数。
+ * 只删墓碑行（unbound_at IS NOT NULL），活跃绑定不动；幂等（无墓碑删 0 行）。
+ */
+export function purgeTombstonesByPlatform(db: Database.Database, platform: BridgeBinding['platform']): number {
+  const result = db.prepare('DELETE FROM bridge_bindings WHERE platform = ? AND unbound_at IS NOT NULL').run(platform);
+  return result.changes;
+}

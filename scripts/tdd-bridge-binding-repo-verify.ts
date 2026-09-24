@@ -8,6 +8,9 @@
 //   A⑤⑥. V14 迁移：bridge_bindings 加 unbound_at 列；V13→V14 升级路径（老库跑 runMigrations 补列）。
 //   B⑩-⑭. 解绑墓碑：deleteBinding=UPDATE 置 unbound_at（行保留、get/list 不可见、isUnbound=true、
 //          幂等不刷新时间戳）；upsert ON CONFLICT 清墓碑（/new 复活）；touch 不触碰墓碑行。
+// 2026-09-23 微信扫码重连修复计划追加：D. purgeTombstonesByPlatform 只删指定平台墓碑行
+//   （活跃行/异平台墓碑不动）、删后 isUnbound=false 且 getBinding=null（走无绑定自动重建路径）、
+//   幂等、返回删除行数。
 // RED 预期（未改树）：bridge_bindings 表不存在 / binding-repo 模块不存在 → FAIL。
 // 运行：npx tsx scripts/tdd-bridge-binding-repo-verify.ts
 // （better-sqlite3 为 Electron ABI：当前 node 不匹配时自动以 ELECTRON_RUN_AS_NODE 重 spawn 本脚本）
@@ -251,6 +254,53 @@ db.pragma('foreign_keys = ON');
   check('C', '①', '删除 sessions 行 → bridge_bindings 级联消失',
     bindingRepo.getBindingBySessionKey(db, 'fs_dm_ou_abc') === null,
     `实际=${JSON.stringify(bindingRepo.getBindingBySessionKey(db, 'fs_dm_ou_abc'))}`);
+}
+
+// ── D. purgeTombstonesByPlatform（2026-09-23 微信扫码重连修复）：只删指定平台墓碑行、
+// 活跃行与异平台墓碑不动、删后走「无绑定+无墓碑」自动重建路径、幂等、返回删除行数。──
+{
+  // 预置前清残留：B 组按契约故意遗留 wx_dm_wxid_1 微信墓碑行（墓碑断言基线），
+  // 会混入 D④ 删除计数——此处物理清全部墓碑行，使 D④ 计数封闭（不改 A/B/C 断言）。
+  db.prepare('DELETE FROM bridge_bindings WHERE unbound_at IS NOT NULL').run();
+  // 预置：1 个 wechat 活跃绑定 A + 1 个 wechat 墓碑行 B + 1 个 feishu 墓碑行 C（均需 sessions 外键）。
+  db.prepare("INSERT INTO sessions (id, name, model) VALUES ('sess-d', '会话D', 'sonnet')").run();
+  bindingRepo.upsertBinding(db, {
+    platform: 'wechat', sessionKey: 'wx_dm_u1', userId: 'wxid_u1',
+    chatId: 'wxid_u1', displayName: null, sessionId: 'sess-d',
+  });
+  bindingRepo.upsertBinding(db, {
+    platform: 'wechat', sessionKey: 'wx_dm_u2', userId: 'wxid_u2',
+    chatId: 'wxid_u2', displayName: null, sessionId: 'sess-d',
+  });
+  bindingRepo.deleteBinding(db, 'wx_dm_u2'); // B → 墓碑
+  bindingRepo.upsertBinding(db, {
+    platform: 'feishu', sessionKey: 'fs_dm_u3', userId: 'ou_u3',
+    chatId: 'oc_u3', displayName: null, sessionId: 'sess-d',
+  });
+  bindingRepo.deleteBinding(db, 'fs_dm_u3'); // C → 墓碑
+
+  const purged = bindingRepo.purgeTombstonesByPlatform(db, 'wechat');
+
+  // D④：返回值 = 恰好删掉的 wechat 墓碑行数（feishu 墓碑不计入）。
+  check('D', '④', 'purgeTombstonesByPlatform 返回删除行数（恰 1，异平台墓碑不计入）', purged === 1, String(purged));
+  // D①：跨平台隔离——wechat 墓碑 B 消失、活跃行 A 仍在、feishu 墓碑 C 仍是墓碑态。
+  const rowB = db.prepare("SELECT * FROM bridge_bindings WHERE session_key = 'wx_dm_u2'").get();
+  check('D', '①', 'purge 只删 wechat 墓碑：B 行消失、活跃行 A 仍在、feishu 墓碑 C 不动',
+    rowB === undefined
+    && bindingRepo.getBindingBySessionKey(db, 'wx_dm_u1') !== null
+    && bindingRepo.isUnbound(db, 'fs_dm_u3') === true,
+    `B行=${JSON.stringify(rowB)} A可见=${bindingRepo.getBindingBySessionKey(db, 'wx_dm_u1') !== null} C墓碑=${bindingRepo.isUnbound(db, 'fs_dm_u3')}`);
+  // D②：物理删除 ≠ 复活——删后 isUnbound=false 且 getBinding=null（flush 走无绑定自动重建路径）。
+  check('D', '②', 'purge 后 B 键 isUnbound=false 且 getBinding=null（无绑定+无墓碑 → 自动重建路径）',
+    bindingRepo.isUnbound(db, 'wx_dm_u2') === false
+    && bindingRepo.getBindingBySessionKey(db, 'wx_dm_u2') === null,
+    `isUnbound=${bindingRepo.isUnbound(db, 'wx_dm_u2')} get=${JSON.stringify(bindingRepo.getBindingBySessionKey(db, 'wx_dm_u2'))}`);
+  // D③：幂等——无墓碑时再跑不抛错且返回 0。
+  let idemThrew = '';
+  let purgedAgain = -1;
+  try { purgedAgain = bindingRepo.purgeTombstonesByPlatform(db, 'wechat') as number; } catch (e) { idemThrew = e instanceof Error ? e.message : String(e); }
+  check('D', '③', '无墓碑时再跑 purge 不抛错且返回 0（幂等）', idemThrew === '' && purgedAgain === 0,
+    `threw=${idemThrew} 返回=${String(purgedAgain)}`);
 }
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);

@@ -17,6 +17,8 @@
 //      F④ 迷你开关联 save 链 / F⑤ 全局面板保留 / F⑥ 微信扫码链原样 / F⑦ 图标全内联 SVG。
 //      F⑧ mini-switch 双开关 @click.stop（点开关不连带切面板）。
 // RED 预期（未改树）：BridgeSettings.vue 不存在 → FAIL。
+// 2026-09-23 微信扫码重连修复计划追加：N. init.ts 扫码 confirmed 清墓碑接线
+//   （耦合 electron 无法行为级测试，沿 D 组形态断言先例）。
 // 运行：npx tsx scripts/tdd-bridge-ui-static-verify.ts
 
 import * as fs from 'node:fs';
@@ -370,6 +372,24 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     /bot\/v3\/info/.test(initSrc) && /catch \{ \/\* botName 可选[\s\S]{0,40}\*\//.test(initSrc)
       && /return \{ ok: true, detail: '连接成功', botName \}/.test(initSrc),
     'init.ts botName 路径缺静默省略形态');
+}
+
+{
+  const initSrc = read('src/main/modules/bridge/init.ts');
+  check('N', '①', 'init.ts 接线存在（purgeTombstonesByPlatform 调用）',
+    initSrc.includes('purgeTombstonesByPlatform'),
+    'init.ts 缺扫码 confirmed 清墓碑接线');
+  // N②：位置钉。锚点取 confirmed 分支内特有字面量避免歧义：
+  //   cipher.encrypt（confirmed 段内写密文，全文件唯一）→ persistProfiles（confirmed 段内那处）→
+  //   purgeTombstonesByPlatform → startPlatform('wechat')（qrcodeStatus 段内调用处）。
+  const anchorEncrypt = initSrc.indexOf('botTokenEnc = cipher.encrypt');
+  const anchorPersist = initSrc.indexOf('persistProfiles(rt);', anchorEncrypt);
+  const anchorPurge = initSrc.indexOf('purgeTombstonesByPlatform', anchorEncrypt);
+  const anchorStart = initSrc.indexOf("startPlatform('wechat')", anchorEncrypt);
+  check('N', '②', '接线位置正确：persistProfiles(rt) 之后、startPlatform(\'wechat\') 之前（confirmed 分支内）',
+    anchorEncrypt >= 0 && anchorPersist >= 0 && anchorPurge >= 0 && anchorStart >= 0
+    && anchorPersist < anchorPurge && anchorPurge < anchorStart,
+    `encrypt=${anchorEncrypt} persist=${anchorPersist} purge=${anchorPurge} start=${anchorStart}`);
 }
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);
