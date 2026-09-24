@@ -18,6 +18,7 @@
 //      F⑧ mini-switch 双开关 @click.stop（点开关不连带切面板）。
 // RED 预期（未改树）：BridgeSettings.vue 不存在 → FAIL。
 // 2026-09-23 微信扫码重连修复计划追加：N. init.ts 扫码 confirmed 清墓碑接线
+//   （N③④ 2026-09-23 退出登录完全重置追加：doSave 退出登录清绑定接线形态断言）
 //   （耦合 electron 无法行为级测试，沿 D 组形态断言先例）。
 // 运行：npx tsx scripts/tdd-bridge-ui-static-verify.ts
 
@@ -390,6 +391,18 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     anchorEncrypt >= 0 && anchorPersist >= 0 && anchorPurge >= 0 && anchorStart >= 0
     && anchorPersist < anchorPurge && anchorPurge < anchorStart,
     `encrypt=${anchorEncrypt} persist=${anchorPersist} purge=${anchorPurge} start=${anchorStart}`);
+  // N③④（2026-09-23 退出登录完全重置）：doSave 微信禁用分支接线退出登录清绑定——
+  // purgeAllBindingsByPlatform + 逐 key manager.unbind，位置在 markPlatformOff('wechat')
+  // （该调用全文件唯一）之后；init.ts 耦合 electron，沿 N①② 形态断言先例。
+  check('N', '③', '退出登录接线存在（purgeAllBindingsByPlatform + manager.unbind + 授权用户一并清除）',
+    initSrc.includes('purgeAllBindingsByPlatform') && initSrc.includes('manager.unbind')
+    && initSrc.includes("input.wechat.botToken === ''") && initSrc.includes('p.wechat.ownerUserId = null'),
+    'init.ts 缺退出登录清绑定/清授权用户接线');
+  const anchorOff = initSrc.indexOf("markPlatformOff('wechat')");
+  const anchorPurgeAll = initSrc.indexOf('purgeAllBindingsByPlatform');
+  check('N', '④', '退出登录接线位于微信禁用分支（markPlatformOff(\'wechat\') 之后）',
+    anchorOff >= 0 && anchorPurgeAll > anchorOff,
+    `off=${anchorOff} purgeAll=${anchorPurgeAll}`);
 }
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);

@@ -318,6 +318,11 @@ async function doSave(input: BridgeConfigSaveInput): Promise<BridgeConfigGetResu
       // 掩码=保留；空串=清除（退出登录）；新值=加密落库。
       p.wechat.botTokenEnc = resolveSecretPatch(p.wechat.botTokenEnc, input.wechat.botToken, cipher);
       rt.wechatTokenBroken = false;
+      if (input.wechat.botToken === '') {
+        // 2026-09-23 退出登录完全重置：授权用户（owner）一并清除——persistProfiles 在本函数
+        // 后段统一落盘；重扫码后首个私聊用户经首捕获自动重新成为授权用户。
+        p.wechat.ownerUserId = null;
+      }
     }
   }
   if (input.global) {
@@ -354,6 +359,14 @@ async function doSave(input: BridgeConfigSaveInput): Promise<BridgeConfigGetResu
       rt.manager.markPlatformOff('wechat');
       // 批次2.3：禁用即写积压跳过标记——重开后的首轮非空拉取整批丢弃只进 cursor。
       writeWechatSkipBacklog(rt);
+      // 2026-09-23 退出登录完全重置：仅 token 被清空（退出登录）时物理清除微信平台全部
+      // 会话绑定（含解绑墓碑）并逐 key 清 manager 在途状态——重扫码后绑定全新开始；
+      // 开关禁用（token 仍在）不清绑定，保留再次启用时续用原会话的能力。
+      if (before.wechat.botTokenEnc !== null && p.wechat.botTokenEnc === null) {
+        const purgedKeys = bindingRepo.purgeAllBindingsByPlatform(getConnection(), 'wechat');
+        for (const k of purgedKeys) rt.manager.unbind(k);
+        if (purgedKeys.length > 0) logger.info(`[bridge] 微信退出登录：已清除 ${purgedKeys.length} 条会话绑定（含墓碑）`);
+      }
     }
   }
   return bridgeConfigGet();

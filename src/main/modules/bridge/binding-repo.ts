@@ -140,3 +140,16 @@ export function purgeTombstonesByPlatform(db: Database.Database, platform: Bridg
   const result = db.prepare('DELETE FROM bridge_bindings WHERE platform = ? AND unbound_at IS NOT NULL').run(platform);
   return result.changes;
 }
+
+/**
+ * 物理删除指定平台的全部绑定行（活跃 + 墓碑，2026-09-23 退出登录完全重置）：
+ * 退出登录 = 微信桥完全重置，旧绑定（含指向旧会话的活跃绑定与解绑墓碑）全部清除，
+ * 重新扫码后从零开始（首条消息自动重建绑定+新会话）。返回被删的 session_key 列表
+ * （调用方逐 key 清 manager 在途状态）。异平台行不动；无行返回 []（幂等）。
+ */
+export function purgeAllBindingsByPlatform(db: Database.Database, platform: BridgeBinding['platform']): string[] {
+  const rows = db.prepare('SELECT session_key FROM bridge_bindings WHERE platform = ?').all(platform) as Array<{ session_key: string }>;
+  if (rows.length === 0) return [];
+  db.prepare('DELETE FROM bridge_bindings WHERE platform = ?').run(platform);
+  return rows.map((r) => r.session_key);
+}

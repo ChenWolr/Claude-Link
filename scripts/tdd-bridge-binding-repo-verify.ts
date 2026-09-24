@@ -11,6 +11,8 @@
 // 2026-09-23 微信扫码重连修复计划追加：D. purgeTombstonesByPlatform 只删指定平台墓碑行
 //   （活跃行/异平台墓碑不动）、删后 isUnbound=false 且 getBinding=null（走无绑定自动重建路径）、
 //   幂等、返回删除行数。
+// 2026-09-23 退出登录完全重置追加（会话内直改）：E. purgeAllBindingsByPlatform 物理删指定平台
+//   全部绑定行（活跃+墓碑）、跨平台隔离、返回被删 session_key 列表、幂等空数组、sessions 不级联。
 // RED 预期（未改树）：bridge_bindings 表不存在 / binding-repo 模块不存在 → FAIL。
 // 运行：npx tsx scripts/tdd-bridge-binding-repo-verify.ts
 // （better-sqlite3 为 Electron ABI：当前 node 不匹配时自动以 ELECTRON_RUN_AS_NODE 重 spawn 本脚本）
@@ -301,6 +303,57 @@ db.pragma('foreign_keys = ON');
   try { purgedAgain = bindingRepo.purgeTombstonesByPlatform(db, 'wechat') as number; } catch (e) { idemThrew = e instanceof Error ? e.message : String(e); }
   check('D', '③', '无墓碑时再跑 purge 不抛错且返回 0（幂等）', idemThrew === '' && purgedAgain === 0,
     `threw=${idemThrew} 返回=${String(purgedAgain)}`);
+}
+
+// ── E. purgeAllBindingsByPlatform（2026-09-23 退出登录完全重置）：物理删指定平台全部绑定行
+// （活跃 + 墓碑）、跨平台隔离、返回被删 session_key 列表、幂等空数组、sessions 行不级联。──
+{
+  // 预置前清残留：D 组遗留 wx_dm_u1 活跃行与 fs_dm_u3 墓碑行，会混入 E① 返回列表——
+  // 此处清空全部绑定行使 E 组封闭（不改 A/B/C/D 断言）。
+  db.prepare('DELETE FROM bridge_bindings').run();
+  // 预置：wechat 活跃 + wechat 墓碑 + feishu 活跃 + feishu 墓碑（均需 sessions 外键）。
+  db.prepare("INSERT INTO sessions (id, name, model) VALUES ('sess-e', '会话E', 'sonnet')").run();
+  bindingRepo.upsertBinding(db, {
+    platform: 'wechat', sessionKey: 'wx_dm_e1', userId: 'wxid_e1',
+    chatId: 'wxid_e1', displayName: null, sessionId: 'sess-e',
+  });
+  bindingRepo.upsertBinding(db, {
+    platform: 'wechat', sessionKey: 'wx_dm_e2', userId: 'wxid_e2',
+    chatId: 'wxid_e2', displayName: null, sessionId: 'sess-e',
+  });
+  bindingRepo.deleteBinding(db, 'wx_dm_e2'); // wechat 墓碑
+  bindingRepo.upsertBinding(db, {
+    platform: 'feishu', sessionKey: 'fs_dm_e3', userId: 'ou_e3',
+    chatId: 'oc_e3', displayName: null, sessionId: 'sess-e',
+  });
+  bindingRepo.upsertBinding(db, {
+    platform: 'feishu', sessionKey: 'fs_dm_e4', userId: 'ou_e4',
+    chatId: 'oc_e4', displayName: null, sessionId: 'sess-e',
+  });
+  bindingRepo.deleteBinding(db, 'fs_dm_e4'); // feishu 墓碑
+
+  const keys = bindingRepo.purgeAllBindingsByPlatform(db, 'wechat') as string[];
+
+  // E①：返回值 = 被删的 wechat 全部 session_key（活跃 + 墓碑都在列，feishu 不计入）。
+  check('E', '①', '返回被删 session_key 列表（wechat 活跃+墓碑共 2 条，feishu 不计入）',
+    JSON.stringify([...keys].sort()) === JSON.stringify(['wx_dm_e1', 'wx_dm_e2']),
+    JSON.stringify(keys));
+  // E②：wechat 两行（含墓碑）物理消失；跨平台隔离——feishu 活跃仍可见、墓碑仍是墓碑态。
+  check('E', '②', 'wechat 行全删（含墓碑）；feishu 活跃/墓碑均不动',
+    bindingRepo.getBindingBySessionKey(db, 'wx_dm_e1') === null
+    && bindingRepo.isUnbound(db, 'wx_dm_e2') === false
+    && bindingRepo.getBindingBySessionKey(db, 'fs_dm_e3') !== null
+    && bindingRepo.isUnbound(db, 'fs_dm_e4') === true,
+    `wx1=${JSON.stringify(bindingRepo.getBindingBySessionKey(db, 'wx_dm_e1'))} wx2墓碑=${bindingRepo.isUnbound(db, 'wx_dm_e2')} fs3可见=${bindingRepo.getBindingBySessionKey(db, 'fs_dm_e3') !== null} fs4墓碑=${bindingRepo.isUnbound(db, 'fs_dm_e4')}`);
+  // E③：幂等——无行时再跑不抛错且返回 []。
+  let idemThrew = '';
+  let keysAgain: string[] = ['sentinel'];
+  try { keysAgain = bindingRepo.purgeAllBindingsByPlatform(db, 'wechat') as string[]; } catch (e) { idemThrew = e instanceof Error ? e.message : String(e); }
+  check('E', '③', '无行时再跑不抛错且返回 []（幂等）', idemThrew === '' && Array.isArray(keysAgain) && keysAgain.length === 0,
+    `threw=${idemThrew} 返回=${JSON.stringify(keysAgain)}`);
+  // E④：绑定删行不级联删 sessions——被引用的会话行仍在（聊天历史保留）。
+  const sessRow = db.prepare("SELECT id FROM sessions WHERE id = 'sess-e'").get();
+  check('E', '④', 'sessions 行不级联删除（会话历史保留）', sessRow !== undefined, JSON.stringify(sessRow));
 }
 
 console.log(`\n结果：${pass} passed, ${fail} failed`);
