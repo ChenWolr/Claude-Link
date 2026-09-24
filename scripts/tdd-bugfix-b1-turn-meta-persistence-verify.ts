@@ -44,7 +44,7 @@ function check(name: string, fn: () => void): void {
 
 // ① migrations：V12 版本块（列守卫 + ALTER）+ 尾部自愈守卫，且必须在写版本号之前。
 check('① migrations：CURRENT_SCHEMA_VERSION=12 + V12 两列 ALTER/守卫 + 自愈 + 版本块先于 upsertVersion', () => {
-  assert.match(migrations, /CURRENT_SCHEMA_VERSION = 12/, 'CURRENT_SCHEMA_VERSION 未升到 12');
+  assert.match(migrations, /CURRENT_SCHEMA_VERSION = 1[2-9]/, 'CURRENT_SCHEMA_VERSION 应 ≥ 12（V13 落地后放宽，保 V12 语义）');
   assert.match(migrations, /ALTER TABLE sessions ADD COLUMN last_turn_duration_ms INTEGER DEFAULT NULL/, '缺 last_turn_duration_ms ALTER');
   assert.match(migrations, /ALTER TABLE sessions ADD COLUMN last_turn_ended_at INTEGER DEFAULT NULL/, '缺 last_turn_ended_at ALTER');
   assert.match(migrations, /tableColumns\(db, 'sessions'\)\.has\('last_turn_duration_ms'\)/, 'V12 版本块缺列守卫（duration）');

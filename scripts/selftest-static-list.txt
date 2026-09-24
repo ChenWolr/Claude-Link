@@ -168,3 +168,11 @@ scripts/tdd-session-update-guard-verify.ts
 scripts/tdd-skill-user-dirnames-verify.ts
 scripts/tdd-skill-x123-verify.ts
 scripts/tdd-rightpanel-route-gate-verify.ts
+scripts/tdd-bridge-shared-verify.ts
+scripts/tdd-bridge-binding-repo-verify.ts
+scripts/tdd-bridge-profiles-verify.ts
+scripts/tdd-bridge-dispatcher-verify.ts
+scripts/tdd-bridge-feishu-adapter-verify.ts
+scripts/tdd-bridge-wechat-verify.ts
+scripts/tdd-bridge-manager-verify.ts
+scripts/tdd-bridge-ui-static-verify.ts

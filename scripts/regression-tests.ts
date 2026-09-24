@@ -1230,14 +1230,38 @@ function testConnectionSurfaceWhitelistContracts(): void {
     }
   }
 
-  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver}。
+  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver, bridge/init}。
+  // bridge/init：2026-09-21 IM 机器人计划新增 BRIDGE_FEISHU_TEST 连通测试（POST tenant_access_token/internal）。
   // （\.request\( 覆盖 topic-analyzer 的 https/http 模块别名 lib.request 形态；该别名全树仅此一处。）
+  // 白名单盲区补记（2026-09-21 review P3f）：bridge 的微信三文件（wechat-ilink/wechat-login/
+  // wechat-adapter）经 fetchFn 注入形态发起全部 iLink 出站流量，上面的 \bfetch\s*\( 源码正则
+  // 看不见——该面已由下方断言 B2 的 typeof fetch 第二扫描登记收口，新增出站点先过 B2。
   const httpDirect = /\bfetch\s*\(|https\.request|http\.request|https\.get|http\.get|\.request\s*\(/;
   const httpHits = [...sources.entries()].filter(([, src]) => httpDirect.test(src)).map(([file]) => file).sort();
   assert.deepEqual(
     httpHits,
-    ['main/modules/model-resolver.ts', 'main/modules/topic-analyzer.ts'],
-    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单两处外不得新增直连）',
+    [
+      'main/modules/bridge/init.ts',
+      'main/modules/model-resolver.ts',
+      'main/modules/topic-analyzer.ts',
+    ],
+    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单/bridge 连通测试三处外不得新增直连）',
+  );
+
+  // 断言 B2（review R1 P3f 主体）：DI 形态出站面第二扫描——fetch 经 `typeof fetch` 注入
+  // （默认参 / 必填注入 / ?? 回退三种写法）发起的请求，断言 B 的 \bfetch\s*\( 看不见。
+  // 零遗留收口（2026-09-21）：typeof fetch 现全树仅存于 bridge 微信三文件，恰好构成完整
+  // 白名单；新增采用 DI 形态出站的文件必须在此登记，防哨兵盲区再次静默扩大。
+  const diFetch = /typeof fetch\b/;
+  const diHits = [...sources.entries()].filter(([, src]) => diFetch.test(src)).map(([file]) => file).sort();
+  assert.deepEqual(
+    diHits,
+    [
+      'main/modules/bridge/wechat-adapter.ts',
+      'main/modules/bridge/wechat-ilink.ts',
+      'main/modules/bridge/wechat-login.ts',
+    ],
+    'DI 形态出站面白名单（typeof fetch 注入）：仅 bridge 微信三文件；新增采用此形态的文件必须在此登记',
   );
 
   // 断言 C：spawn/execFile 文件 ∈ {connection-tester, sdk-backend, changes-panel, cli-detector}。
@@ -1460,6 +1484,11 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
             // tasks 已含 client_message_id（v5），自愈块跳过 ALTER。
             return ['id', 'session_id', 'prompt', 'status', 'sort_order', 'client_message_id', 'created_at', 'updated_at'].map((name) => ({ name }));
           }
+          // V14 最小同步：bridge_bindings 列集探针——fixture 模拟的老库无该表（V13 建表只在
+          // exec 记账、不建模列集），返回空集使迁移走「无 unbound_at → ALTER 补列」路径。
+          if (sql.includes('PRAGMA table_info(bridge_bindings)')) {
+            return [];
+          }
           throw new Error(`Unexpected all SQL: ${sql}`);
         },
         run(version: number) {
@@ -1470,7 +1499,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 12);
+  assert.equal(schemaVersion, 14); // V14（bridge_bindings 解绑墓碑列）落地后同步
   assert.ok(sessionColumns.has('provider_override'), 'V8：迁移后须补 provider_override 列');
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
@@ -1522,6 +1551,8 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
           if (sql.includes('PRAGMA table_info(sessions)')) return [...sessionsColumns].map((name) => ({ name }));
           if (sql.includes('PRAGMA table_info(messages)')) return [...messagesColumns].map((name) => ({ name }));
           if (sql.includes('PRAGMA table_info(tasks)')) return [...tasksColumns].map((name) => ({ name }));
+          // V14 最小同步：bridge_bindings 列集探针（同上，fixture 不建模该表列集）。
+          if (sql.includes('PRAGMA table_info(bridge_bindings)')) return [];
           throw new Error(`Unexpected all SQL: ${sql}`);
         },
         run(version: number) {
@@ -1532,7 +1563,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 12, '迁移后 schema version 须升到 12（V12 会话回合计量列；V11 权限清洗一次性化；原 OPT-8 索引迁移）');
+  assert.equal(schemaVersion, 14, '迁移后 schema version 须升到当前（V14 bridge_bindings 解绑墓碑列落地后=14）');
   assert.ok(sessionsColumns.has('provider_override'), 'V8：老库迁移须补 provider_override 列');
   assert.ok(allExecSql.some((sql) => sql.includes('model_override = NULL')), 'V8：须执行 model_override 别名清洗 SQL');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');

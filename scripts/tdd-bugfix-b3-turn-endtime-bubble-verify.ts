@@ -69,14 +69,14 @@ function check(name: string, fn: () => void): void {
 }
 
 // ① migrations：messages 初始建表含 ended_at + 幂等自愈补列 + 不升版本（保持 12）。
-check('① migrations：初始建表含 ended_at + 自愈块 hasMsgCol 守卫 ALTER + CURRENT_SCHEMA_VERSION 保持 12（不升版）', () => {
+check('① migrations：初始建表含 ended_at + 自愈块 hasMsgCol 守卫 ALTER + CURRENT_SCHEMA_VERSION ≥ 12（自愈不升版）', () => {
   const createIdx = migrations.indexOf('CREATE TABLE IF NOT EXISTS messages');
   assert.ok(createIdx > -1, '未找到 messages 初始建表');
   const createEnd = migrations.indexOf(')', migrations.indexOf('created_at', createIdx));
   const createBlock = migrations.slice(createIdx, createEnd);
   assert.match(createBlock, /ended_at INTEGER/, 'messages 初始建表缺 ended_at 列（新库首建即有）');
   assert.match(migrations, /if \(!hasMsgCol\('ended_at'\)\) \{\s*db\.exec\('ALTER TABLE messages ADD COLUMN ended_at INTEGER'\);/, '自愈块缺 ended_at 守卫 + ALTER（老库补列）');
-  assert.match(migrations, /CURRENT_SCHEMA_VERSION = 12/, 'CURRENT_SCHEMA_VERSION 必须保持 12——messages 加列走自愈惯例，升版撞一组 pin 脚本');
+  assert.match(migrations, /CURRENT_SCHEMA_VERSION = 1[2-9]/, 'CURRENT_SCHEMA_VERSION 应 ≥ 12（V13 落地后放宽，保「自愈加列不刻意升版」语义）');
 });
 
 // ② message-repo 写路径：updateResultMeta SQL 三列同写 + AND session_id 守卫 + meta 类型含 endedAt。
@@ -172,13 +172,13 @@ check('⑨ 真库：fresh 迁移含 ended_at；老库（去列）自愈补列且
   assert.ok(cols(fresh).includes('ended_at'), 'fresh 库迁移后 messages 缺 ended_at');
   const versionOf = (db: import('better-sqlite3').Database): number =>
     (db.prepare('SELECT version FROM schema_version LIMIT 1').get() as { version: number }).version;
-  assert.equal(versionOf(fresh), 12, 'fresh 库版本应为 12');
+  assert.equal(versionOf(fresh), 14, 'fresh 库版本应为当前版本（V14 落地后=14）');
 
   // b) 老库模拟：先迁移出今日 schema，DROP COLUMN 模拟 B3 之前的库，再迁移 → 自愈补列、版本不升。
   fresh.exec('ALTER TABLE messages DROP COLUMN ended_at');
   runMigrations(fresh);
   assert.ok(cols(fresh).includes('ended_at'), '去列老库二次迁移未自愈补列');
-  assert.equal(versionOf(fresh), 12, '自愈迁移不得升版本（保持 12）');
+  assert.equal(versionOf(fresh), 14, '自愈重放不得再升版本（V14 下重放保持 14）');
 
   // c) 行为：提取 repo 源中的 UPDATE 字面 SQL，在迁移后 schema 上执行——列存在、SQL 合法、守卫生效。
   const sqlMatch = messageRepo.match(/UPDATE messages SET cost_usd = \?, duration_ms = \?, ended_at = \? WHERE id = \? AND session_id = \?/);

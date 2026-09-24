@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 12;
+const CURRENT_SCHEMA_VERSION = 14;
 
 /** P1-10：表列集合查询（版本块守卫与自愈块共用同一谓词，防「列已存在」中间态复现抛错）。 */
 function tableColumns(db: Database.Database, table: string): Set<string> {
@@ -265,6 +265,35 @@ function runMigrationStatements(db: Database.Database): void {
     }
     if (!tableColumns(db, 'sessions').has('last_turn_ended_at')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_turn_ended_at INTEGER DEFAULT NULL');
+    }
+  }
+
+  // V13：bridge_bindings——IM 机器人（飞书/微信）平台用户 ↔ claude-link 会话绑定。
+  // session_key 唯一（一个平台用户一条绑定）；session_id 外键级联：用户在 UI 删会话 →
+  // 绑定行随之消失，bridge 侧按下条消息检测悬空重建（bridge-manager 职责）。
+  if (currentVersion < 13) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS bridge_bindings (
+        id TEXT PRIMARY KEY,
+        platform TEXT NOT NULL,
+        session_key TEXT NOT NULL UNIQUE,
+        user_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        display_name TEXT,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        created_at INTEGER NOT NULL,
+        last_active_at INTEGER NOT NULL
+      );
+    `);
+  }
+
+  // V14（IM 生命周期修复批次1）：解绑墓碑列。bridgeUnbind 从 DELETE 改 UPDATE 置位（行保留、
+  // get/list/touch 过滤），杜绝「解绑后 flush 把无绑定解释为悬空→自动重建」的接回复活；upsert
+  // ON CONFLICT 清位 = IM 端发 /new 天然重新绑定。旧数据自动 NULL（= 未解绑）。
+  // 列存在守卫（V12 同款）：版本号已推进但列缺失的半应用库不阻塞启动。
+  if (currentVersion < 14) {
+    if (!tableColumns(db, 'bridge_bindings').has('unbound_at')) {
+      db.exec('ALTER TABLE bridge_bindings ADD COLUMN unbound_at INTEGER');
     }
   }
 

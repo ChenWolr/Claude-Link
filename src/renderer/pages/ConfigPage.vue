@@ -10,6 +10,7 @@ import { useConfigStore, lastSaveFailed } from '../stores/config-store';
 import { useCommandStore } from '../stores/command-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
+import BridgeSettings from '../components/config/BridgeSettings.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
@@ -23,9 +24,11 @@ const interactionStore = useInteractionStore();
 const router = useRouter();
 const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
+// 批次5.1-5：IM tab 切回时经 BridgeSettings.refresh 重拉 config/bindings（owner 首捕获后可见）。
+const bridgeSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
 
-// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）。
-type TabId = 'connection' | 'behavior' | 'appearance' | 'skill';
+// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）。
+type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im';
 const activeTab = ref<TabId>('connection');
 
 // 自动保存：监听所有用户可编辑的持久化字段，700ms 防抖落盘，确保所有配置都永久保存。
@@ -279,6 +282,8 @@ const skillProbePending = computed(() => {
 // 项目目录同拍现查（2026-09-17 方案 B）：新目录自然纳入、被删目录自然消失（窗口 = 一次进 tab）。
 watch(activeTab, (tab) => {
   if (tab === 'skill') { void commandStore.ensureGlobalSnapshot(); void ensureProjectDirs(); }
+  // 批次5.1-5：IM tab 激活重拉（组件 v-show 常挂，onMounted 只跑一次，切 tab 需手动刷新）。
+  if (tab === 'im') void bridgeSettingsRef.value?.refresh?.();
 });
 
 // ── 项目级 Skill 管理（方案 B 双栏 master-detail，2026-09-17）─────────────────
@@ -572,6 +577,7 @@ async function cleanupStaleSkillKeys(): Promise<void> {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'behavior' }]" @click="activeTab = 'behavior'">行为</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'skill' }]" @click="activeTab = 'skill'">Skill</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'im' }]" @click="activeTab = 'im'">IM</button>
       </nav>
       <div class="save-actions">
         <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus === 'projection-failed' ? 'saved' : saveStatus}`]">
@@ -669,6 +675,11 @@ async function cleanupStaleSkillKeys(): Promise<void> {
               </label>
             </div>
           </div>
+        </div>
+
+        <!-- IM：平台导航双栏（BridgeSettings 自管加载与状态订阅，v-show 保持常挂不重置扫码链） -->
+        <div v-show="activeTab === 'im'" class="solo-card">
+          <BridgeSettings ref="bridgeSettingsRef" />
         </div>
 
         <!-- Skill：方案 B 双栏 master-detail（左=作用域清单 rail，右=作用域详情 main）。

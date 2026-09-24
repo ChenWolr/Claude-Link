@@ -221,9 +221,9 @@ const versionOf = (d: { prepare: (sql: string) => { get: () => unknown } }): num
   try { runMigrations(d); runMigrations(d); } catch (e) { threw = errMsg(e); }
   const hasCol = cols(d, 'sessions').includes('skill_overrides');
   const ver = versionOf(d);
-  check('⑤', '全新临时库 runMigrations×2：不抛错；sessions 含 skill_overrides；版本仍 12',
-    threw === '' && hasCol && ver === 12,
-    [threw ? `抛错：${threw.slice(0, 120)}` : '', hasCol ? '' : '缺 skill_overrides 列', ver !== 12 ? `版本=${ver}` : ''].filter(Boolean).join('; '));
+  check('⑤', '全新临时库 runMigrations×2：不抛错；sessions 含 skill_overrides；版本=当前 14（V14 落地后同步）',
+    threw === '' && hasCol && ver === 14,
+    [threw ? `抛错：${threw.slice(0, 120)}` : '', hasCol ? '' : '缺 skill_overrides 列', ver !== 14 ? `版本=${ver}` : ''].filter(Boolean).join('; '));
   d.close();
 }
 
@@ -272,9 +272,9 @@ function seedLegacySchema12Db(): ReturnType<typeof openMemoryDb> {
   try { runMigrations(d); } catch (e) { threw = errMsg(e); }
   const hasCol = cols(d, 'sessions').includes('skill_overrides');
   const ver = versionOf(d);
-  check('⑥', '老 schema-12 库跑迁移：skill_overrides 列补上；版本仍 12',
-    threw === '' && hasCol && ver === 12,
-    [threw ? `抛错：${threw.slice(0, 120)}` : '', hasCol ? '' : '缺 skill_overrides 列（自愈块未覆盖）', ver !== 12 ? `版本=${ver}` : ''].filter(Boolean).join('; '));
+  check('⑥', '老 schema-12 库跑迁移：skill_overrides 列补上；版本升到 14（V14 生效）',
+    threw === '' && hasCol && ver === 14,
+    [threw ? `抛错：${threw.slice(0, 120)}` : '', hasCol ? '' : '缺 skill_overrides 列（自愈块未覆盖）', ver !== 14 ? `版本=${ver}` : ''].filter(Boolean).join('; '));
   d.close();
 }
 
@@ -368,14 +368,14 @@ console.log('\n=== 组3 源形契约（regex 源码检查） ===');
     `connection-tester=${ct.includes("'--setting-sources', ''")}, post-turn-probe=${pt.includes("'--setting-sources', ''")}`);
 }
 
-// ⑫ migrations.ts：CURRENT_SCHEMA_VERSION = 12 且含 ADD COLUMN skill_overrides TEXT
+// ⑫ migrations.ts：CURRENT_SCHEMA_VERSION ≥ 12 且含 ADD COLUMN skill_overrides TEXT
 {
   const src = readRel('src/main/database/migrations.ts');
-  const verOk = /CURRENT_SCHEMA_VERSION\s*=\s*12;/.test(src);
+  const verOk = /CURRENT_SCHEMA_VERSION\s*=\s*1[2-9];/.test(src);
   const colOk = src.includes('ADD COLUMN skill_overrides TEXT');
-  check('⑫', 'migrations.ts 仍 CURRENT_SCHEMA_VERSION = 12 且含 ADD COLUMN skill_overrides TEXT',
+  check('⑫', 'migrations.ts CURRENT_SCHEMA_VERSION ≥ 12 且含 ADD COLUMN skill_overrides TEXT',
     verOk && colOk,
-    [verOk ? '' : 'CURRENT_SCHEMA_VERSION ≠ 12（不许升版）', colOk ? '' : '缺 skill_overrides 补列语句（RED 预期）'].filter(Boolean).join('; '));
+    [verOk ? '' : 'CURRENT_SCHEMA_VERSION < 12（版本回退）', colOk ? '' : '缺 skill_overrides 补列语句（RED 预期）'].filter(Boolean).join('; '));
 }
 
 // ⑬ App.vue：globalSnapshot = payload.snapshot（或等价赋值）

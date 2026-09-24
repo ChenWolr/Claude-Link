@@ -113,6 +113,19 @@ export const IPC_CHANNELS = {
   // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
   // unknown/hidden 命令名，不含 Query 句柄或原始数据）。只读、无副作用，不触发 probe。
   COMMANDS_GET_DIAGNOSTIC: 'commands:getDiagnostic',
+  // IM 机器人（飞书/微信 bridge）：凭据掩码读写 / 状态 / 连通测试 / 扫码登录 / 绑定管理。
+  BRIDGE_CONFIG_GET: 'bridge:configGet',
+  BRIDGE_CONFIG_SAVE: 'bridge:configSave',
+  BRIDGE_STATUS_GET: 'bridge:statusGet',
+  BRIDGE_FEISHU_TEST: 'bridge:feishuTest',
+  BRIDGE_WECHAT_QRCODE: 'bridge:wechatQrcode',
+  BRIDGE_WECHAT_QRCODE_STATUS: 'bridge:wechatQrcodeStatus',
+  BRIDGE_BINDING_LIST: 'bridge:bindingList',
+  BRIDGE_BINDING_DELETE: 'bridge:bindingDelete',
+  // 平台重启（生命周期修复批次2.4）：设置页「重连」按钮后端——startPlatform 全链（stop→create→start）。
+  BRIDGE_PLATFORM_RESTART: 'bridge:platformRestart',
+  // 主→渲染推送：平台状态变化。
+  BRIDGE_STATUS_CHANGED: 'bridge:statusChanged',
 } as const;
 
 /** 无引用残留（且类型文件不应有运行时常量）：流式上屏节流间隔真相源在 use-stream.ts 硬编码 50ms（hb12-CHR-01 节流，非防抖），改本值无效。 */

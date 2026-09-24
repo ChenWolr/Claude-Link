@@ -67,6 +67,12 @@ import {
 } from './modules/attachment-service';
 import { prepareAttachmentPrompt } from './modules/attachment-prompt-builder';
 import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
+import type { BridgeConfigSaveInput } from '../shared/types/bridge';
+import {
+  bridgeConfigGet, bridgeConfigSave, bridgeStatusGet, bridgeFeishuTest,
+  bridgeWechatQrcode, bridgeWechatQrcodeStatus, bridgeBindingList, bridgeUnbind,
+  bridgePlatformRestart,
+} from './modules/bridge/init';
 import type { StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, SessionCreateSpec } from '../shared/types/ipc';
 
 let mainWindow: BrowserWindow;
@@ -944,4 +950,21 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // 会话导出长图（v3 JPEG / v4.1 PNG 双格式）：注册主窗口开始 + 隐藏 renderer 专用 IPC。
   registerExportImageHandlers();
+
+  // IM 机器人（飞书/微信 bridge）通道：逻辑在 modules/bridge/init.ts（凭据只回掩码，不回明文/密文）。
+  registerBridgeIpcHandlers();
+}
+
+/** bridge IPC 注册（由 registerIpcHandlers 尾部调用一次，F6 幂等守卫天然覆盖）。 */
+function registerBridgeIpcHandlers(): void {
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_CONFIG_GET, async () => bridgeConfigGet());
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, async (_event, input: BridgeConfigSaveInput) => bridgeConfigSave(input));
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_STATUS_GET, async () => bridgeStatusGet());
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_FEISHU_TEST, async (_event, input: { appId?: string; appSecret?: string }) => bridgeFeishuTest(input));
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE, async () => bridgeWechatQrcode());
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE_STATUS, async (_event, qrcodeId: string) => bridgeWechatQrcodeStatus(qrcodeId));
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_BINDING_LIST, async () => bridgeBindingList());
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_BINDING_DELETE, async (_event, sessionKey: string) => bridgeUnbind(sessionKey));
+  ipcMain.handle(IPC_CHANNELS.BRIDGE_PLATFORM_RESTART, async (_event, platform: string) =>
+    bridgePlatformRestart(platform === 'wechat' ? 'wechat' : 'feishu'));
 }
