@@ -10,6 +10,9 @@ import MessageAttachments from './MessageAttachments.vue';
 const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>();
 
 // 导出模式用 export profile：Mermaid 渲染、代码换行、图片 eager、无灯箱按钮化。
+// 第五轮方案替换（2026-09-27）：user 气泡不再走 markdown 渲染——CommonMark 把 ≥2 连续空行
+// 折叠成一个段距、用户消息中的 markdown 语法（粗体/行内 code/围栏/图片）被渲染成样式，均与
+// 输入字面不符。user 气泡纯文本回显见模板分支（插值 + white-space: pre-wrap）。
 const renderedContent = computed(() => renderMarkdown(props.message.content, props.exportMode ? 'export' : 'rich'));
 const hasContent = computed(() => props.message.content.trim().length > 0);
 const attachments = computed(() => props.message.attachments ?? []);
@@ -72,7 +75,13 @@ async function copyMessage(): Promise<void> {
         title="此消息由队列任务到点/立即执行时发送"
       >来自队列</span>
     </div>
-    <div v-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
+    <!-- user 气泡纯文本逐字回显（第五轮方案，2026-09-27）：插值自动 HTML 转义防 XSS，
+         white-space: pre-wrap 按原文显示——气泡显示文本 === 实际发送文本 === 落库文本。
+         不挂 v-enrich（mermaid/灯箱增强仅适用 markdown HTML）、不挂 markdown-body
+         （纯文本无子元素，其语义失效）。 -->
+    <div v-if="hasContent && message.role === 'user'" class="bubble__content">{{ message.content }}</div>
+    <!-- assistant/系统/工具仍走 markdown 渲染（v-html + 灯箱/mermaid 增强），行为零变化。 -->
+    <div v-else-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
     <div v-if="reasoningReplayAdviceVisible" class="bubble__advice" data-testid="reasoning-replay-advice">
       <div class="bubble__advice-title">已自动重试一次；若仍失败，可：</div>
       <ul class="bubble__advice-list">
@@ -235,6 +244,12 @@ async function copyMessage(): Promise<void> {
 
 .bubble__content :deep(p:last-child) {
   margin-bottom: 0;
+}
+
+/* user 气泡纯文本逐字回显（第五轮方案）：white-space: pre-wrap 保留原文换行与连续空行，
+   长行折行仍靠 .bubble__content 基础规则继承的 word-break: break-word。 */
+.bubble--user .bubble__content {
+  white-space: pre-wrap;
 }
 
 .bubble__content :deep(pre) {
