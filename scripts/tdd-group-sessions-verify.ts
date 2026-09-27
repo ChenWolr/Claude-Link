@@ -1,5 +1,5 @@
 // tdd-group-sessions-verify.ts
-// 会话管理页「项目分组」纯函数契约：projectLabel + groupSessionsByProject。
+// 会话侧栏「项目分组」纯函数契约：projectLabel + groupSessionsByProject（曾属会话管理页，后随分组入口移入 AppSidebar 侧栏）。
 // 运行：npx tsx scripts/tdd-group-sessions-verify.ts
 import { strict as assert } from 'node:assert';
 import { projectLabel, groupSessionsByProject } from '../src/renderer/utils/group-sessions';

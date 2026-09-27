@@ -32,7 +32,7 @@ export interface BridgeManagerDeps {
   rebind: (sessionKey: string, newSessionId: string) => void;
   touch: (sessionKey: string) => void;
   getSessionRow: (id: string) => unknown | null; // 判绑定悬空（UI 删了会话）
-  /** V14 解绑墓碑判定：true=该用户已被解绑，flush 须忽略其消息（不悬空重建）。 */
+  /** V14 解绑墓碑判定：true=该用户已被解绑，flush 须拦截其消息（不派发、不悬空重建，回一条 /new 引导提示）。 */
   isUnbound: (sessionKey: string) => boolean;
   resolveModel: () => string;
   profiles: () => BridgeProfilesStored; // 实时读（owner/workingDir）
@@ -71,8 +71,9 @@ export class BridgeManager {
   private readonly statuses = new Map<BridgePlatform, { status: string; error?: string; lastInboundAt?: number; connectedAt?: number }>();
   // C2：lastInboundAt 的 5s 广播节流（防 40s 轮询批量到达逐条轰炸渲染层）。
   private lastInboundBroadcastAt = 0;
-  // P1：/stop 置位的用户中断标记（per sessionKey）。sdk-backend 出口先 deleteEntry 再 emitExit，
-  // dispatcher 对中断回合只能兜底判 'error'——flush 处凭此标记把该 'error' 按 interrupted 处理
+  // P1：/stop 置位的用户中断标记（per sessionKey）。sdk-backend 中断出口的 entry 先被移除
+  //（killProcess removeEntryIfCurrent 先删 entry 再 emitExit），dispatcher 对中断回合只能兜底
+  // 判 'error'——flush 处凭此标记把该 'error' 按 interrupted 处理
   //（时序机制钉在 tdd-bridge-dispatcher-verify [8]，行为钉在 tdd-bridge-manager-verify [Q]）。
   private readonly interruptedTurns = new Set<string>();
 
@@ -149,7 +150,7 @@ export class BridgeManager {
   /**
    * 解绑收口（生命周期修复批次1）：清该用户在途缓冲与免消息复活定时器（debounce/busy 重试
    * 定时器；afterTurnFlush 因 lines 清空不再触发），消费残留中断标记。墓碑置位在 binding-repo
-   * （init.ts bridgeUnbind 先 DB 后调本方法）；不打断 running 中的在途回合（N4 保留语义）。
+   * （init.ts 退出登录清绑定路径先 DB 后调本方法）；不打断 running 中的在途回合（N4 保留语义）。
    */
   unbind(sessionKey: string): void {
     const buf = this.buffers.get(sessionKey);

@@ -99,7 +99,7 @@ export const IPC_CHANNELS = {
   EXPORT_RENDER_PROGRESS: 'export-render:progress',
   EXPORT_RENDER_WRITE_PAGE_CHUNK: 'export-render:writePageChunk',
   EXPORT_RENDER_FINISH: 'export-render:finish',
-  // v4.1 PNG 长图页协议（renderer → 主进程）。JPEG 路径沿用上面 4 个通道不变。
+  // v4.1 PNG 长图页协议（renderer → 主进程）。JPEG 路径沿用上面 5 个通道不变（其中 PROGRESS 为单向推送）。
   EXPORT_RENDER_PROBE_SELF: 'export-render:probeSelf',
   EXPORT_RENDER_BEGIN_PAGE: 'export-render:beginPage',
   EXPORT_RENDER_FINISH_PAGE: 'export-render:finishPage',
@@ -121,7 +121,6 @@ export const IPC_CHANNELS = {
   BRIDGE_WECHAT_QRCODE: 'bridge:wechatQrcode',
   BRIDGE_WECHAT_QRCODE_STATUS: 'bridge:wechatQrcodeStatus',
   BRIDGE_BINDING_LIST: 'bridge:bindingList',
-  BRIDGE_BINDING_DELETE: 'bridge:bindingDelete',
   // 平台重启（生命周期修复批次2.4）：设置页「重连」按钮后端——startPlatform 全链（stop→create→start）。
   BRIDGE_PLATFORM_RESTART: 'bridge:platformRestart',
   // 主→渲染推送：平台状态变化。
@@ -307,7 +306,7 @@ export interface ContextStatsPayload {
   // renderer 据此拒收旧回合迟到 payload 与缺代际的可疑 payload。
   queryGeneration: number;
   // 采样时间（Date.now()）：runtime 快照为捕获时刻，/context 终态为 result 时刻（review-v3 §5.1-3）。
-  // 采样阶段（review-v4 High-1）：runtime 快照为 query-start/post-turn/post-compaction；
+  // 采样阶段（review-v4 High-1）：runtime 快照为 query-start/mid-turn/post-turn/post-compaction；
   // 非快照 payload（turn usage/pending/native 对账）为 null。
   refreshedAt: number | null;
   samplePhase: ContextSamplePhase | null;

@@ -15,7 +15,7 @@ export interface StallInfo {
   gapMs: number;
   /** 最后一次业务活动的事件类型（stream_event / message / tool_progress / system…；keep_alive 不计入），诊断用。 */
   lastKind: string;
-  /** 最后一条带 parentToolUseId 的消息所属子 Agent（定位「哪个子 Agent 卡住」），无则 null。 */
+  /** 最近一次定位到的疑似卡住子 Agent/后台任务的 tool_use id（来源：带 parentToolUseId 的事件、system task_started/task_progress 的 toolUseId、主流程子 Agent tool_use 无 parentToolUseId 时的预记录），无则 null。 */
   pendingAgentId: string | null;
   /** 卡死区域：model=等模型首字节/回合间；tool=有待决 tool_use。 */
   zone: 'model' | 'tool';
@@ -31,9 +31,12 @@ export interface StallThresholds {
   toolPendingMs: number;
   /** MODEL 区硬中断阈值：纯模型空隙累计超过此值，看门狗自动 killProcess。默认 600s。 */
   hardAutoAbortMs: number;
-  /** TOOL 区硬中断阈值（绝对上限）：有待决工具且持续静默超过此值也自动 killProcess。
-   *  长工具合法，故比 model 区更长；但子 Agent 死锁/死连接/api_retry 风暴不能无限等，
-   *  到此绝对上限即硬杀。默认 900s。合法长工具会持续发 tool_progress 刷新计时，不会误触。 */
+  /** TOOL 区硬中断阈值（绝对上限）：有待决工具且持续静默超过此值即判 hardAbort。
+   *  长工具合法，故比 model 区更长；死连接/api_retry 风暴不能无限等。默认 900s。
+   *  本模块只做纯阈值判定：tool_progress 心跳只有 shell 家族（bash/powershell/repl）会发，
+   *  MCP/WebSearch/Task 等非 shell 长工具全程无心跳、会静默到 900s 照判 hardAbort，
+   *  主进程 watchdogTick 按 P3-3 对此类已知非 shell 家族待决工具豁免硬杀、只保留 stalled 横幅，
+   *  「到绝对上限即硬杀」仅对 shell 家族（有心跳仍静默=真挂死）、最近工具名未知与 model 区路径成立。 */
   toolHardAbortMs: number;
 }
 
@@ -71,7 +74,9 @@ export function isBusinessStallActivityKind(kind: string): boolean {
  *  - stalled：是否达到卡死阈值。
  *  - zone：卡死区域（决定阈值与是否允许硬中断）。
  *  - gapMs：距上次活动的毫秒数（≥0）。
- *  - hardAbort：是否达到硬中断条件（model 区超 hardAutoAbortMs，或 tool 区超 toolHardAbortMs 绝对上限；合法长工具持续发 tool_progress 刷新计时不会误触）。
+ *  - hardAbort：是否达到硬中断阈值（model 区超 hardAutoAbortMs，或 tool 区超 toolHardAbortMs 绝对上限）。
+ *    纯阈值判定，不代表必然 killProcess：主进程 watchdogTick 按 P3-3 对已知非 shell 家族待决工具
+ *   （无 tool_progress 心跳）豁免硬杀、只保留 stalled 横幅；硬杀仅对 shell 家族/最近工具名未知/model 区成立。
  */
 export function classifyStall(
   lastActivityAt: number,
@@ -83,8 +88,9 @@ export function classifyStall(
   const zone: 'model' | 'tool' = pendingToolUse ? 'tool' : 'model';
   const threshold = zone === 'tool' ? thresholds.toolPendingMs : thresholds.modelGapMs;
   const stalled = gapMs >= threshold;
-  // 硬中断分 zone：model 区纯静默到 hardAutoAbortMs 即杀；tool 区到 toolHardAbortMs 绝对上限才杀
-  //（长工具会持续发 tool_progress 刷新计时，正常不会触；只兜子 Agent 死锁/死连接/重试风暴）。
+  // 硬中断分 zone：model 区纯静默到 hardAutoAbortMs 即杀；tool 区到 toolHardAbortMs 绝对上限判 hardAbort
+  //（classifyStall 是纯阈值判定、不区分工具：shell 家族持续发 tool_progress 刷新计时正常不会触；
+  // MCP/WebSearch/Task 等非 shell 工具全程无心跳、到点会触，主进程 watchdogTick 按 P3-3 豁免硬杀、只留横幅）。
   const hardAbort =
     stalled &&
     (zone === 'model'

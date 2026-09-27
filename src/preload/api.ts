@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（68 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（77 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -108,7 +108,6 @@ export interface ClaudeLinkAPI {
   bridgeWechatQrcode: () => Promise<{ qrcodeId: string; qrcodeDataUrl: string }>;
   bridgeWechatQrcodeStatus: (qrcodeId: string) => Promise<WechatQrcodeStatusResult>;
   bridgeListBindings: () => Promise<BridgeBindingView[]>;
-  bridgeUnbind: (sessionKey: string) => Promise<void>;
   bridgePlatformRestart: (platform: 'feishu' | 'wechat') => Promise<BridgePlatformStatusEntry[]>;
   onBridgeStatusChanged: (callback: (payload: BridgePlatformStatusEntry[]) => void) => () => void;
 }
@@ -245,7 +244,6 @@ export function createApi(): ClaudeLinkAPI {
     bridgeWechatQrcode: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE),
     bridgeWechatQrcodeStatus: (qrcodeId) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE_STATUS, qrcodeId),
     bridgeListBindings: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_BINDING_LIST),
-    bridgeUnbind: (sessionKey) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_BINDING_DELETE, sessionKey),
     bridgePlatformRestart: (platform) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_PLATFORM_RESTART, platform),
     onBridgeStatusChanged: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: BridgePlatformStatusEntry[]) => callback(payload);

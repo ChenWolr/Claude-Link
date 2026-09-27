@@ -138,7 +138,7 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
     clearTimeout(deadlineTimer);
   }
 
-  // 兜底：取首句前 15 个字符，压缩空白避免标题里出现换行。
+  // 兜底：取首句前 15 个字符（「首句」系历史措辞——实现并无句子切分，实为整条首条消息压缩空白后的前 15 字符，多句消息会跨句截断），压缩空白避免标题里出现换行。
   // 出口②（首句兜底）：与修复前逐字等价（F4/H3 写前门保留）。
   // hb10-SMG-07：fallback 为空串（消息全是空白）时不写库，保持原名并返回 null。
   // hb10-SHL-07：兜底名过 maskApiKey——用户粘贴密钥当首句时不落明文（掩码后再截断）。

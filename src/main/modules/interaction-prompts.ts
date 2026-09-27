@@ -19,7 +19,7 @@ interface PendingInteraction {
 const pendingInteractionRequests = new Map<string, PendingInteraction>();
 
 // hb10-PERM-06（hb12 §1.3 加重）：pending 最大停留 10min 兜底超时——渲染层崩溃/事件丢失时
-// 看门狗对 pending 让位（sdk-backend:464-471），死弹窗会无限期悬挂；到点按中性 cancel 收口。
+// 看门狗对 pending 让位（sdk-backend:470-476），死弹窗会无限期悬挂；到点按中性 cancel 收口。
 const PENDING_MAX_AGE_MS = 10 * 60_000;
 // hb10-PERM-05：pending 数量变化回调（托盘 ⏳ 提示注入用）。
 let countChangedHook: ((count: number) => void) | null = null;

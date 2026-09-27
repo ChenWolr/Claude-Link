@@ -195,8 +195,9 @@ export function updateResultMeta(
 }
 
 /** B1 审查修复：定位「本回合主流程最后一条 assistant 行」的 DB id（新→旧，遇 user 边界即停）。
- *  渲染层乐观消息 id（crypto.randomUUID）与 DB 行 id（主进程 uuidv4）是两套独立 uuid 永不相等，
- *  recordTurnMeta 直传 messageId 恒 0 行——handler 在直传命中失败/为 null 时回落本查找。
+ *  渲染层内存消息 id（crypto.randomUUID）与 DB 行 id（主进程 uuidv4）是两套独立 uuid 永不相等，
+ *  常态（活跃会话内）直传 messageId 命中不了；回合中切走再切回时 store 经 getSessionMessages
+ *  重载出 DB-id 行，直传可命中（良性）——handler 在直传命中失败/为 null 时回落本查找。
  *  口径对齐 cli-shared.turnCheckRows：尾部 50 条窄查询，窗口打满且未见 user 边界时回落全量
  *  （防重工具回合把 user 标记推出窗外的假阴性）；只认 parentAgentId 为空的主流程行。
  *  排序契约（hb13-v A11/hb12-TM-02 后两路同序）：窄窗 getRecentMessagesForTurnCheck 与

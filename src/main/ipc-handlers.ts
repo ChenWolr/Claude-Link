@@ -1,7 +1,7 @@
 // ipc-handlers.ts
 // IPC handler 注册中心：渲染进程 ↔ 主进程的桥梁。
 //
-// 注册 cli / config / workspace / provider / changes / settings / skill / session / message / claude-plan / commands / chat / interaction / task / queue / attachment 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
+// 注册 cli / config / workspace / provider / changes / settings / skill / session / message / claude-plan / commands / chat / interaction / task / queue / attachment / bridge 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
 import { BrowserWindow, dialog, ipcMain, app } from 'electron';
@@ -70,7 +70,7 @@ import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../s
 import type { BridgeConfigSaveInput } from '../shared/types/bridge';
 import {
   bridgeConfigGet, bridgeConfigSave, bridgeStatusGet, bridgeFeishuTest,
-  bridgeWechatQrcode, bridgeWechatQrcodeStatus, bridgeBindingList, bridgeUnbind,
+  bridgeWechatQrcode, bridgeWechatQrcodeStatus, bridgeBindingList,
   bridgePlatformRestart,
 } from './modules/bridge/init';
 import type { StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, SessionCreateSpec } from '../shared/types/ipc';
@@ -91,6 +91,13 @@ function broadcastProvidersChanged(): void {
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
+}
+
+// bridge 会话锁定装饰（review 2026-09-25 P1 收类）：SESSION_GET/SESSION_UPDATE 单行出口附带 bridgePlatform，
+// 防渲染层整体替换 activeSession/列表行的路径（改名等）丢锁定标记；SESSION_CREATE 新会话不可能已绑定，无需附带。
+function withBridgePlatform<T extends { id: string }>(session: T) {
+  const platform = bridgeBindingList().find((b) => b.sessionId === session.id)?.platform ?? null;
+  return { ...session, bridgePlatform: platform };
 }
 
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
@@ -255,7 +262,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // Sessions
-  ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => sessionRepo.listSessions());
+  // bridge 会话本地锁定：以 bridge_bindings 活跃绑定为唯一事实源，给列表行附带
+  // bridgePlatform（null=普通会话）；渲染层凭它把绑定会话置为桌面端只读。
+  // runtime 未初始化时 bridgeBindingList 返回 []（全不锁，仅退出路径可达）。
+  ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => {
+    const sessions = sessionRepo.listSessions();
+    const boundPlatformBySessionId = new Map(bridgeBindingList().map((b) => [b.sessionId, b.platform]));
+    return sessions.map((s) => ({ ...s, bridgePlatform: boundPlatformBySessionId.get(s.id) ?? null }));
+  });
   ipcMain.handle(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string, spec?: SessionCreateSpec) => {
     // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——空白名直调 IPC 不再建脏行。
     if (typeof name !== 'string' || !name.trim()) throw new Error('会话名称不能为空');
@@ -337,7 +351,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     });
     return session;
   });
-  ipcMain.handle(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => sessionRepo.getSession(id));
+  ipcMain.handle(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => {
+    const s = sessionRepo.getSession(id);
+    return s ? withBridgePlatform(s) : s;
+  });
   ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, id: string) => {
     // 删会话必须先让正在跑的 SDK query 停下来，否则它会变孤儿继续往已被级联删空的
     // messages 表 INSERT，外键失败回滚同步阻塞主进程，导致所有输入框假死。
@@ -415,7 +432,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (data.workingDir !== undefined) {
         void startCommandProbe(id, mainWindow, { ...data });
       }
-      return updated;
+      return updated ? withBridgePlatform(updated) : updated;
     },
   );
   // B1：回合元数据持久化（渲染层在 result 到达时 fire-and-forget 调用）。
@@ -437,11 +454,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       const durationMs = pos(payload?.durationMs);
       const endedAt = pos(payload?.endedAt);
       const costUsd = pos(payload?.costUsd);
-      // B1 审查修复：渲染层乐观消息 id（crypto.randomUUID）与 DB 行 id（主进程 uuidv4）两套
-      // uuid 永不相等，直传 messageId 恒 0 行。messageId 类型收窄（typeof string 且非空才直传，
-      // 非字符串不做 String() 强转）：命中失败/为 null/非字符串（含后台分支的 null）一律回落
-      // 「本回合主流程最后一条 assistant 行」查找（新→旧、遇 user 边界即停、跳过子 agent）；
-      // 仍找不到则只写 sessions 半边，不报错（无 assistant 行的回合不产生脚注，诚实不造数）。
+      // B1 审查修复：渲染层内存消息 id（crypto.randomUUID）与 DB 行 id（主进程 uuidv4）两套
+      // uuid 永不相等，常态（活跃会话内）直传 messageId 命中不了；回合中切走再切回时 store
+      // 经 getSessionMessages 重载出 DB-id 行，直传可命中（良性）。messageId 类型收窄
+      //（typeof string 且非空才直传，非字符串不做 String() 强转）：命中失败/为 null/非字符串
+      //（含后台分支的 null）一律回落「本回合主流程最后一条 assistant 行」查找（新→旧、
+      // 遇 user 边界即停、跳过子 agent）；仍找不到则只写 sessions 半边，不报错（无 assistant
+      // 行的回合不产生脚注，诚实不造数）。
       const meta = { costUsd, durationMs, endedAt };
       // P2-2 半写收口：全 null payload（端点 0 值兜底后）不再抹掉既有记录——
       // messages 半边仅在 costUsd/durationMs 至少一个非 null 时执行；
@@ -629,8 +648,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         modelOverride: session.modelOverride,
         providerOverride: session.providerOverride,
         workingDir: session.workingDir,
-        // F2：三路执行链（直发/重发/队列）统一从全局设置取 maxTurns——session.maxTurns 的
-        // DB 列默认 200 且渲染层从不写入，会话级值永远到不了设置，直发路径曾完全无视该设置。
+        // F2：四路执行链（直发/重发/队列/bridge 分发器）统一从全局设置取 maxTurns——
+        // session.maxTurns 的 DB 列默认 200 且渲染层从不写入，会话级值永远到不了设置，
+        // 直发路径曾完全无视该设置。
         maxTurns: getConfig().maxTurns,
         permissionMode: session.permissionMode,
         thinkingLevel: session.thinkingLevel,
@@ -964,7 +984,6 @@ function registerBridgeIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE, async () => bridgeWechatQrcode());
   ipcMain.handle(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE_STATUS, async (_event, qrcodeId: string) => bridgeWechatQrcodeStatus(qrcodeId));
   ipcMain.handle(IPC_CHANNELS.BRIDGE_BINDING_LIST, async () => bridgeBindingList());
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_BINDING_DELETE, async (_event, sessionKey: string) => bridgeUnbind(sessionKey));
   ipcMain.handle(IPC_CHANNELS.BRIDGE_PLATFORM_RESTART, async (_event, platform: string) =>
     bridgePlatformRestart(platform === 'wechat' ? 'wechat' : 'feishu'));
 }

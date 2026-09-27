@@ -390,7 +390,7 @@ async function pngFinishPageImpl(request: ExportPageFinishRequest): Promise<Expo
   if (reply.type !== 'page-saved') {
     return { ok: false, code: reply.type === 'error' ? reply.code : 'worker', message: reply.type === 'error' ? reply.message : 'worker 未 page-saved' };
   }
-  // 校验文件存在 + 非空 + 扩展名。
+  // 校验文件存在 + 非空（扩展名无需在此复核：outputPath 由 beginPage 生成、恒为 page-XXXX.png，worker codecBegin 的 bad-output-path 已断言 .png 后缀）。
   try {
     const st = statSync(pg.outputPath);
     if (!st.isFile() || st.size === 0) return { ok: false, code: 'bad-output', message: '输出文件空或非文件' };

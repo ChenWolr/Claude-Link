@@ -6,7 +6,9 @@
 // split（contrast 风格）：消费 buildSplitChunks 的 SplitLayout（左右各自完整行 + 对齐 chunk + SVG 桥），
 //   单滚动容器 .diff-scroll；scroll handler rAF 节流调 computeOffsets 算焦点偏移套到 .file-offset
 //   translateY（magic scrolling：焦点 chunk 左右对齐，非焦点错位靠桥连接），桥随偏移动态重算。
-//   行背景由预计算 leftKindArr/rightKindArr 查所属 chunk kind；curChange 高亮/flash/data-nav 绑在 DiffLine 根。
+//   行底色（卡片 tint）与 curChange 高亮/flash 由 D3 卡片层（splitCardsL/R）+ 缎带桥承担；
+//   leftKindArr/rightKindArr 现驱动行 kind 类（split 下透明底）、gutter 行号墨色与 skip 分隔；
+//   data-nav 绑在 DiffLine 根（inline 绑在 .hunk-block）。
 // inline（cc-haha 风格）：buildInlineRows 摊平 + 上下文规划 + gap 折叠，行号 sticky、三档色。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import type { ParsedDiffFile } from '../../utils/diff-parser';

@@ -4,7 +4,8 @@
 //   PNG ：probeSelf → beginPage → scrollTo → captureSelf（主进程直接送 worker，只回几何）→ finishPage。
 //         不创建 OffscreenCanvas、不收 PNG bytes、不 drawImage、不 convertToBlob、不分块写。
 // 复用 shared/export-image.ts 的 placeSegment（JPEG 尾段裁剪）与常量。
-// 依据：docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md §6 Task 10。
+// 依据：导出图片 v4.1 PNG worker 计划 §6 Task 10（原文档
+// docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）。
 
 import { reactive } from 'vue';
 import { JPEG_CHUNK_BYTES, JPEG_QUALITY, placeSegment, checkPixelBudget, deriveMaxPageHeightByMemory, DEFAULT_EXPORT_BUDGET } from '@shared/export-image';
@@ -66,7 +67,7 @@ async function waitStable(): Promise<void> {
 }
 
 /** 测量 MessageList scroller 内每个渲染项的高度（item = 分页原子单元）。
- *  OPT-6（0be1cdb）在 scroller 与消息项之间加了 .message-list__inner 包裹层，
+ *  OPT-6（09-08 回底按钮修复）在 scroller 与消息项之间加了 .message-list__inner 包裹层，
  *  迭代必须下沉到 inner.children（inner 取不到时兜底回 scroller 自身）。
  *  测量项数与期望项数不一致（DOM 漂移/隐藏项）时返回 null，由调用方走
  *  measurement-mismatch 快速失败，不再产出失真分页。 */

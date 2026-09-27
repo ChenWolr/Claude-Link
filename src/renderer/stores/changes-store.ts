@@ -168,7 +168,7 @@ export const useChangesStore = defineStore('changes', () => {
     },
   );
 
-  // 回合结束（isRunning true→false）→ 防抖刷新列表，让 Claude 中途的文件改动及时反映。
+  // 回合结束（sending true→false）→ 防抖刷新列表，让 Claude 中途的文件改动及时反映。
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   watch(
     () => sessionStore.sending,

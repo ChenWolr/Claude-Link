@@ -16,7 +16,7 @@ export type ToolDiffKind = 'edit' | 'multiedit' | 'write';
 export interface ToolDiffResult {
   kind: ToolDiffKind;
   filePath: string;
-  /** unified diff 文本，经 openToolDiffDialog 弹窗展示（可被 parseUnifiedDiff 解析）。无变化时为空串。 */
+  /** unified diff 文本，经 openToolDiffDialog 弹窗展示（可被 parseUnifiedDiff 解析）。恒非空串：无变化时 synthesizeToolDiff 返回 null。 */
   diff: string;
   /** 变更行数（-/+ 合计，含被截断部分），供折叠态徽标与截断提示用。 */
   changeCount: number;

@@ -163,7 +163,7 @@ export const useTaskStore = defineStore('task', {
         }
         case 'user_message_created': {
           // 队列任务到点/立即执行在主进程创建稳定 user message 后经此事件回传，按 id upsert
-          // 进会话消息（addMessage 带归属守卫：P1-4 后台/已删会话的消息只写后台存储不串入当前列表）。
+          // 进会话消息（addMessage 带归属守卫：P1-4 后台/已删会话的消息直接拒绝、不落渲染层存储不串入当前列表，后台会话切回时由 DB 重载补齐）。
           const msg = payload.data?.message as Message | undefined;
           if (msg) {
             sessionStore.addMessage(msg);

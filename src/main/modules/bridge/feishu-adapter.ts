@@ -220,7 +220,8 @@ export function createFeishuAdapter(opts: FeishuAdapterOptions): FeishuAdapter {
 
   async function loadSdk(): Promise<LarkSdkModule> {
     if (opts.__loadSdkForTest) return opts.__loadSdkForTest();
-    // 模块级缓存手法同 sdk-backend 动态加载 claude-agent-sdk：进程内只加载一次。
+    // import() 本身被 ESM 模块表缓存，进程内只加载一次（sdk-backend 的 claude-agent-sdk
+    // 为显式 sdkPromise memoization，此处无此层）。
     return import('@larksuiteoapi/node-sdk') as Promise<LarkSdkModule>;
   }
 

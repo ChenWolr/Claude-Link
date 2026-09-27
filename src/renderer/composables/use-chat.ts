@@ -1,9 +1,11 @@
 // use-chat.ts
-// CLI 流事件处理：把 process-manager 转发的 stream-json 事件分流到 session-store。
+// CLI 流事件处理：把主进程 sdk-backend 经 CHAT_EVENT 转发的 stream-json 事件分流到 session-store。
 //
-// stream_event: thinking_delta → appendThinking（思考），text_delta → appendStream（正文），
-//   signature_delta 忽略；message: 逐 part 落库（text / thinking / redacted_thinking / tool_use /
-//   server_tool_use / tool_result / mcp_*）；主流程 text/thinking 落库即清对应流式累加器，
+// stream_event: thinking_delta → appendThinking（主流程思考）；带 parentToolUseId 的子 Agent
+//   思考走 appendSubAgentThinking（Bug2 分流）；text_delta → appendStream（正文）；
+//   input_json_delta → appendToolStream（工具入参流式预览）；signature_delta 忽略；
+//   message: 逐 part 落库（text / thinking / redacted_thinking / tool_use /
+//   server_tool_use / tool_result（含 web_search/web_fetch/code_execution 结果族）/ mcp_*）；主流程 text/thinking 落库即清对应流式累加器，
 //   tool_use 落库后清 streamingTool；
 // result: 补 result 文本（防丢）+ 挂费用/耗时。
 // 这里是"Claude 思考/输入/输出原封不动接收展示"的核心实现（之前 thinking_delta 被完全丢弃）。
@@ -25,7 +27,8 @@ import type { Message } from '../../shared/types/session';
 import type { ChatSendPayload } from '../../shared/types/attachment';
 
 // 根因修复：全局单例。useChat 只初始化一次（在 App.vue），监听生命周期与 app 等长。
-// ChatPage 卸载/重挂载不影响监听——sending 从 store getter 派生，error 用 store.error。
+// ChatPage 卸载/重挂载不影响监听——sending 从 store getter 派生；error 为本单例闭包 ref
+//（与 app 等长，同样不随 ChatPage 卸载丢失；勿与 session-store 的会话 CRUD error 混淆）。
 // sendMessage/abort 可在任意组件调（通过 useChat() 复用单例）。
 let chatSingleton: ReturnType<typeof createChat> | null = null;
 
@@ -125,7 +128,7 @@ export function applyApiRetryTerminalFallbackEvent(
   }
 }
 
-// C：把进度类事件（tool_progress / compacting / task_*）映射到 store。纯函数（不依赖闭包），可单测。
+// C：把进度类事件（tool_progress / compacting / compact_result / task_*）映射到 store。纯函数（不依赖闭包），可单测。
 // task_notification 终态：先 upsert 终态卡片，4 秒后移除（淡出，避免列表残留已完成任务）。
 export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, event: CliEvent): void {
   if (event.type === 'tool_progress') {
@@ -346,10 +349,8 @@ function createChat() {
     return !!t && (t.includes('判定模型服务卡死') || t.includes('判定卡死'));
   }
 
-  // 问题 1：不再丢弃非当前会话的事件。后台执行的会话事件需要处理：
-  // - stream_event: 写入 sessionStreams 快照（切回时恢复流式预览）
-  // - result/error/aborted: markStopped + 清快照（如果是当前会话还走正常结束流程）
-  // - message/system: 主进程已落库，切回时 getSessionMessages 重载；渲染层只处理当前会话
+  // 问题 1：不再丢弃非当前会话的事件——非当前会话的事件分流到 handleBackgroundEvent
+  // 逐类处理，逐类口径以其上方注释为准（此处不重复列举，避免双份口径漂移）。
   function handleEvent(payload: ChatEventPayload): void {
     // hb12-SHL-03：通知点击导航事件——切换选中会话（store 层自愈：会话不存在时 switch no-op）。
     if ((payload.event as { type: string }).type === 'navigate') {
@@ -389,8 +390,12 @@ function createChat() {
     handleCliEvent(payload.event);
   }
 
-  // 问题 1：处理后台（非当前）会话的事件。只处理流式累积和结束标记，
-  // 不处理 message/system（主进程已落库，切回时重载）。
+  // 问题 1：处理后台（非当前）会话的事件。处理流式快照、stalled、claude_plan、
+  // result/error/aborted 收尾，以及 system 的 api_retry（计数）与 task_*（任务卡片，
+  // hb10-ENG-10 收窄）；message 及落库型 system 子类型（informational/compact_boundary/plugin_install/
+  // interaction_response/init_write_skipped/auto_retry/permission_*）主进程已落库，切回时重载，这里跳过；
+  // compacting/compact_result/requesting/thinking_tokens 等瞬态（不落库）同样跳过，切回后由后续事件自然恢复；
+  // tool_progress 瞬态进度（不落库）后台期间一并丢弃，切回后由后续事件自然恢复。
   function handleBackgroundEvent(payload: ChatEventPayload): void {
     const sid = payload.sessionId;
     const event = payload.event;
@@ -414,7 +419,7 @@ function createChat() {
       }
       case 'system': {
         // Bug4/Bug5：api_retry 不再落库，后台会话也要计数，切回时 ApiRetryBanner 能显示。
-        // 其余 system 子类型主进程已落库，切回时重载，这里跳过。
+        // 其余 system 子类型（落库型/瞬态）均跳过——逐类口径以函数头块注释为准（避免双份口径漂移）。
         if (event.subtype === 'api_retry') {
           applyApiRetryEvent(store, sid, event);
           break;
@@ -476,7 +481,7 @@ function createChat() {
         store.markStopped(sid);
         break;
       }
-      // message/init: 主进程已落库，切回时 getSessionMessages 重载，这里跳过
+      // message: 主进程已落库，切回时 getSessionMessages 重载；init 遗留形态主进程不落库（无发射点），一并跳过
     }
   }
 
@@ -601,7 +606,7 @@ function createChat() {
           if (store.activeSession) applyApiRetryEvent(store, store.activeSession.id, event);
           break;
         }
-        // 批次 B：thinking_tokens——思考 token 实时估算，瞬态写 store（ContextButton hover 展示），不落库。
+        // 批次 B：thinking_tokens——思考 token 实时估算，瞬态写 store（ContextButton 思考中呼吸提示），不落库。
         // 后台会话不走此分支（handleBackgroundEvent 跳过），仅前台实时（review-v2 F8）。
         if (event.subtype === 'thinking_tokens') {
           const t = event as CliSystemInfoEvent;
@@ -835,8 +840,10 @@ function createChat() {
     }
   }
 
-  // system 子类型事件（非 init）落库为过程消息：informational/compact_boundary/plugin_install
-  // → system:<subtype>；permission_denied → permission。主进程同样落库，这里供本回合实时显示。
+  // system 子类型事件（非 init）落库为过程消息：permission_denied/permission_request → permission；
+  // informational/compact_boundary/plugin_install/interaction_response/init_write_skipped/auto_retry
+  // → system:<subtype>（auto_retry 无专用 defaultText，走「系统提示」兜底，但 text 恒非空）。
+  // 主进程同样落库，这里供本回合实时显示。
   function persistSystemEvent(event: CliEvent): void {
     if (event.type !== 'system') return;
     const e = event as CliSystemInitEvent | CliSystemInfoEvent | CliPermissionEvent;
@@ -1086,7 +1093,7 @@ function createChat() {
   //     这是「显式重问」语义（stall 后重新发起一回合），而非静默续传，保留可见性。
   //  2) 主进程 killProcess 会立即把旧 entry 标为 aborting 并移出 active entries，
   //     因此重试不再依赖固定等待来避免 message dropped；这里的短延迟只用于事件排序缓冲。
-  //  3) lastUserText 假定「卡死的回合已持久化自己的 user 消息」——sendMessage 始终如此。
+  //  3) lastUserMessage 假定「卡死的回合已持久化自己的 user 消息」——sendMessage 始终如此。
   // 失败捕获：error 置位瞬间，把"会话最后一条 user 消息"记为待恢复对象。
   // 覆盖主发送 / 队列任务 / waiting 续接三条路径——只要该回合在主会话跑过并失败即命中，
   // pending 队列任务（未跑）不产生 error，故不会误触发重新编辑。

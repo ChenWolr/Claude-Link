@@ -604,7 +604,9 @@ watch(searchText, () => {
   focusedIndex.value = 0;
 });
 
-// hb10-PERM-03：30s 对账轮询（仅弹窗可见即 activeRequest 存在时执行）——死亡/不可见挂起自愈。
+// hb10-PERM-03：30s 对账轮询（store.activeRequest 非空即执行——该 getter 取 requests[0] 未按
+// 会话过滤，含他会话排队请求，弹窗不可见仍轮询；弹窗可见由按会话过滤的 currentRequests 决定）
+// ——死亡/不可见挂起自愈。
 let reconcileTimer: ReturnType<typeof setInterval> | null = null;
 onMounted(() => {
   reconcileTimer = setInterval(() => {
