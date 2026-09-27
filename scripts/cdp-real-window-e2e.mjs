@@ -453,7 +453,11 @@ async function main() {
       await sendViaUI(ws, sid, '请极其详尽地解释整个 JavaScript 生态系统历史，尽量长。');
       // 等待中断按钮出现（query 运行中）。
       await waitFor('中断按钮出现（query 运行中）', () => evalOk(ws, `!!document.querySelector('button.ctl__btn--abort')`), 60, 500);
-      await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.click(), true`);
+      // 问题⑥ 后中断按钮改长按 1 秒：.click() 走不到 pointerdown/长按路径（永不 abort）。
+      // 模拟真实长按：pointerdown → 1.2s → pointerup；须窗口可见（进度由 rAF 驱动，遮挡窗 rAF 停摆会长按不完成）。
+      await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
+      await new Promise((r) => setTimeout(r, 1200));
+      await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
       // 按钮状态恢复（abort 按钮消失）。
       await waitFor('中断按钮消失（sending 复位）', async () => !(await evalOk(ws, `!!document.querySelector('button.ctl__btn--abort')`)), 60, 1000);
       // system:aborted 恰好新增一条。

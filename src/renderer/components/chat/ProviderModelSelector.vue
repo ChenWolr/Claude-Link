@@ -108,7 +108,12 @@ function handleClickOutside(event: MouseEvent): void {
 }
 
 function handleEscape(event: KeyboardEvent): void {
-  if (event.key === 'Escape' && open.value) close();
+  // 消费 Esc 关菜单时 preventDefault：与 ChatInput 斜杠菜单同口径，给 Esc 急停的
+  // defaultPrevented 让位加双保险（不再单靠 escConsumerOpen 的 DOM 探测兜底）。
+  if (event.key === 'Escape' && open.value) {
+    event.preventDefault();
+    close();
+  }
 }
 
 // 回退一次性 toast：会话 override 指向的供应商/模型已被删（每会话只提示一次）。

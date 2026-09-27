@@ -385,7 +385,11 @@ async function waitTurnComplete(ws, sid, baseCount, timeoutS = 180) {
   }, timeoutS, 1000);
 }
 async function abortCurrentTurn(ws) {
-  await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.click(), true`);
+  // 问题⑥ 后中断按钮改长按 1 秒：.click() 走不到 pointerdown/长按路径（永不 abort）。
+  // 模拟真实长按：pointerdown → 1.2s → pointerup；须窗口可见（进度由 rAF 驱动，遮挡窗 rAF 停摆会长按不完成）。
+  await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
+  await new Promise((r) => setTimeout(r, 1200));
+  await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
 }
 
 // native /context 原文：最近的含 "Context Usage" 的消息。

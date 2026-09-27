@@ -2,15 +2,16 @@
 // 会话底部工具栏：上下文占用环 / 工作空间 / 模型 / 思考强度 / 权限 / 添加文件，
 // 发送中追加「中断」按钮（删除会话入口在左侧栏，不在此处）。
 // 按用户要求，所有"会话内容"相关的控件都放在底部（输入区附近），而非顶部。
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useConfigStore } from '../../stores/config-store';
+import { useHoldAction } from '../../composables/use-hold-action';
 import ProviderModelSelector from './ProviderModelSelector.vue';
 import ThinkingLevelSelector from './ThinkingLevelSelector.vue';
 import ContextButton from './ContextButton.vue';
 import type { Session } from '../../../shared/types/session';
 
-defineProps<{
+const props = defineProps<{
   sending?: boolean;
 }>();
 
@@ -22,6 +23,29 @@ const emit = defineEmits<{
 
 const sessionStore = useSessionStore();
 const activeSession = computed(() => sessionStore.activeSession);
+
+// 问题⑥：中断按钮长按 1 秒防误触——单击不再立即 abort（误触曾硬杀当前回合 + 熔断整个
+// 任务队列）。按住时按钮内横向进度填充，<1s 松开/滑出/取消均无动作；满 1s 走既有
+// emit('abort')（abort 链/主进程零改动）。键盘 Space/Enter 按住 1 秒等效（可达性）。
+const {
+  holding: abortHolding,
+  holdProgress: abortHoldProgress,
+  onPointerDown: onAbortPointerDown,
+  onPointerMove: onAbortPointerMove,
+  onPointerUp: onAbortPointerUp,
+  onPointerLeave: onAbortPointerLeave,
+  onPointerCancel: onAbortPointerCancel,
+  onKeydown: onAbortKeydown,
+  onKeyup: onAbortKeyup,
+  onBlur: onAbortBlur,
+  resetHold: resetAbortHold,
+} = useHoldAction(() => emit('abort'));
+
+// P2 补做：长按进行中回合自然结束（sending 翻 false）时按钮被 v-if 卸载，但 composable 的
+// rAF/doneTimer 仍在跑，最迟 1s 后会迟发一次幽灵 abort 落在空闲会话上（组件级
+// onBeforeUnmount 不覆盖 v-if 卸载路径）。sending 翻 false 即取消进行中的长按——只取消、
+// 绝不触发 abort（resetHold 幂等：未持有时 no-op；恰逢满时长已完成时清掉 doneTimer 不二次触发）。
+watch(() => props.sending, (v) => { if (!v) resetAbortHold(); });
 
 // 工作空间下拉
 const showWorkspaceMenu = ref(false);
@@ -268,9 +292,26 @@ onUnmounted(() => {
       </button>
     </div>
 
-    <!-- 操作：仅发送中显示中断；ctl--right 推到最右，不影响左侧添加文件位置。 -->
+    <!-- 操作：仅发送中显示中断；ctl--right 推到最右，不影响左侧添加文件位置。
+         问题⑥：长按 1 秒才中断（进度填充可视反馈），单击不动作；Esc 急停见 ChatPage。 -->
     <div v-if="sending" class="ctl ctl--right">
-      <button type="button" class="ctl__btn ctl__btn--abort" @click="emit('abort')">■ 中断</button>
+      <button
+        type="button"
+        class="ctl__btn ctl__btn--abort"
+        :class="{ 'ctl__btn--abort-holding': abortHolding }"
+        title="长按 1 秒中断"
+        @pointerdown.prevent="onAbortPointerDown"
+        @pointermove="onAbortPointerMove"
+        @pointerup="onAbortPointerUp"
+        @pointerleave="onAbortPointerLeave"
+        @pointercancel="onAbortPointerCancel"
+        @keydown="onAbortKeydown"
+        @keyup="onAbortKeyup"
+        @blur="onAbortBlur"
+      >
+        <span class="ctl__abort-fill" :style="{ width: `${abortHoldProgress}%` }" aria-hidden="true"></span>
+        <span class="ctl__abort-label">■ 中断</span>
+      </button>
     </div>
   </div>
 </template>
@@ -359,10 +400,34 @@ onUnmounted(() => {
 }
 
 .ctl__btn--abort {
+  position: relative;
   background: var(--color-danger);
   border-color: var(--color-danger);
   color: #fff;
   font-weight: 700;
+}
+
+/* 问题⑥：长按进度填充——按住时从左向右铺满，满 1s 触发中断。
+   计划原配方 color-mix(danger 18%, transparent) 在已是 danger 实底的按钮上不可见，
+   改用白色 30% 半透明叠加保证进度可视（偏差已在实施报告申报）。 */
+.ctl__abort-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: inherit; /* 随按钮 --radius-md 圆角裁剪，填充左右不露直角 */
+  background: color-mix(in srgb, #fff 30%, transparent);
+  pointer-events: none;
+}
+
+.ctl__abort-label {
+  position: relative;
+}
+
+/* holding 态「已武装」反馈：边框本就是 danger（实底按钮），叠加同色外圈微光环区分按住中。 */
+.ctl__btn--abort-holding {
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-danger) 35%, transparent);
 }
 
 .caret {
