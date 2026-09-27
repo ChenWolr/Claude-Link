@@ -287,7 +287,7 @@ function runMigrationStatements(db: Database.Database): void {
     `);
   }
 
-  // V14（IM 生命周期修复批次1）：解绑墓碑列。bridgeUnbind 从 DELETE 改 UPDATE 置位（行保留、
+  // V14（IM 生命周期修复批次1）：解绑墓碑列。解绑路径从 DELETE 改 UPDATE 置位（行保留、
   // get/list/touch 过滤），杜绝「解绑后 flush 把无绑定解释为悬空→自动重建」的接回复活；upsert
   // ON CONFLICT 清位 = IM 端发 /new 天然重新绑定。旧数据自动 NULL（= 未解绑）。
   // 列存在守卫（V12 同款）：版本号已推进但列缺失的半应用库不阻塞启动。

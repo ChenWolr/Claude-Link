@@ -501,10 +501,3 @@ export function bridgeBindingList(): BridgeBindingView[] {
     lastActiveAt: b.lastActiveAt,
   }));
 }
-
-/** phase 1 只解绑不删会话。V14 墓碑：先 DB 置位，再清 manager 缓冲定时器（免消息复活路径）。 */
-export function bridgeUnbind(sessionKey: string): void {
-  bindingRepo.deleteBinding(getConnection(), sessionKey);
-  const rt = runtime;
-  if (rt) rt.manager.unbind(sessionKey);
-}

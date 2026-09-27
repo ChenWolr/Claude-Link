@@ -149,7 +149,7 @@ export class BridgeManager {
   /**
    * 解绑收口（生命周期修复批次1）：清该用户在途缓冲与免消息复活定时器（debounce/busy 重试
    * 定时器；afterTurnFlush 因 lines 清空不再触发），消费残留中断标记。墓碑置位在 binding-repo
-   * （init.ts bridgeUnbind 先 DB 后调本方法）；不打断 running 中的在途回合（N4 保留语义）。
+   * （init.ts 退出登录清绑定路径先 DB 后调本方法）；不打断 running 中的在途回合（N4 保留语义）。
    */
   unbind(sessionKey: string): void {
     const buf = this.buffers.get(sessionKey);
