@@ -127,9 +127,11 @@ a:focus-visible,
   display: block;
   padding: 0.75rem 1rem;
   overflow-x: auto;
+  /* 等宽字体栈与行内 code（.markdown-body code:not(pre code)）同源（问题③）：此前走 UA
+     默认 monospace，缩进代码块误判关闭后 fence 块字体须与全局等宽栈一致，不随系统回退漂移。 */
+  font-family: var(--font-mono);
   font-size: 0.8125rem;
   line-height: 1.6;
-  font-family: var(--font-mono);
 }
 
 .markdown-body .d2h-wrapper {
@@ -284,6 +286,15 @@ a:focus-visible,
 /* 数学公式（KaTeX）：块级公式长式横向滚动不撑破气泡，颜色随主题。 */
 .markdown-body .katex { font-size: 1.05em; color: var(--color-text); }
 .markdown-body .katex-display { margin: 0.625rem 0; overflow-x: auto; overflow-y: hidden; padding: 0.25rem 0; }
+/* 行内 KaTeX 同款宽度约束（与 .katex-display 同法）：.katex .base 是 inline-block+nowrap 的
+   min-content 原子块（katex.css），长公式会撑破气泡 → scroller 出横向滚动条（透明滚动条观感
+   「截断在框外」）。约束后公式内部横向滚动，不外溢到会话框（问题④）。 */
+.markdown-body .katex {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  vertical-align: bottom;
+}
 
 /* Mermaid：fence 规则直接产 <div class="mermaid-block">（无 <pre> 祖先），容器暖底居中；
    __source 是渲染前/失败时的源码回退，SVG 由 v-enrich 指令注入。 */
