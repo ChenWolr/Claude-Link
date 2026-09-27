@@ -1,6 +1,7 @@
 import type { RenderableMessage } from './export-image';
 import type { ThinkingLevel } from './thinking';
 import type { PermissionMode } from '../permission-resolver';
+import type { BridgePlatform } from './bridge';
 
 export interface Session {
   id: string;
@@ -48,6 +49,10 @@ export interface Session {
   // lastTurnDurationMs != null && lastTurnEndedAt != null 为准。
   lastTurnDurationMs: number | null;
   lastTurnEndedAt: number | null;
+  // IM 桥接标记（主进程 SESSION_LIST 装饰，非 DB 列）：非 null = 该会话正被对应平台
+  // 活跃绑定驱动，桌面端只读（发言仅限 IM 客户端）；解绑/退出登录后回落 null。
+  // undefined = 数据源未装饰（transient 草稿等），按未锁定处理。
+  bridgePlatform?: BridgePlatform | null;
   // renderer-only 标记：true = 暂态会话（「新会话」草稿态，尚未落库）。
   // 主进程 DB 读出的会话永远没有此字段；首条消息发送前经 materializeActiveTransient
   // 物化为同 id 的 DB 行，物化返回值替换本对象（transient 随之消失）。

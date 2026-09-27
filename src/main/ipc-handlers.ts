@@ -93,6 +93,13 @@ function broadcastProvidersChanged(): void {
   }
 }
 
+// bridge 会话锁定装饰（review 2026-09-25 P1 收类）：单行出口统一附带 bridgePlatform，
+// 防渲染层整体替换 activeSession/列表行的路径（改名等）丢锁定标记。
+function withBridgePlatform<T extends { id: string }>(session: T) {
+  const platform = bridgeBindingList().find((b) => b.sessionId === session.id)?.platform ?? null;
+  return { ...session, bridgePlatform: platform };
+}
+
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // hb10-CMD-10：needsRefreshProbeOnly 重探节流时间戳（registerIpcHandlers 单次注册闭包内，ipcHandlersRegistered 守卫保证语义等效模块级进程内单例）。
   let lastProbeOnlyAt = 0;
@@ -255,7 +262,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // Sessions
-  ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => sessionRepo.listSessions());
+  // bridge 会话本地锁定：以 bridge_bindings 活跃绑定为唯一事实源，给列表行附带
+  // bridgePlatform（null=普通会话）；渲染层凭它把绑定会话置为桌面端只读。
+  // runtime 未初始化时 bridgeBindingList 返回 []（全不锁，仅退出路径可达）。
+  ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => {
+    const sessions = sessionRepo.listSessions();
+    const boundPlatformBySessionId = new Map(bridgeBindingList().map((b) => [b.sessionId, b.platform]));
+    return sessions.map((s) => ({ ...s, bridgePlatform: boundPlatformBySessionId.get(s.id) ?? null }));
+  });
   ipcMain.handle(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string, spec?: SessionCreateSpec) => {
     // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——空白名直调 IPC 不再建脏行。
     if (typeof name !== 'string' || !name.trim()) throw new Error('会话名称不能为空');
@@ -337,7 +351,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     });
     return session;
   });
-  ipcMain.handle(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => sessionRepo.getSession(id));
+  ipcMain.handle(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => {
+    const s = sessionRepo.getSession(id);
+    return s ? withBridgePlatform(s) : s;
+  });
   ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, id: string) => {
     // 删会话必须先让正在跑的 SDK query 停下来，否则它会变孤儿继续往已被级联删空的
     // messages 表 INSERT，外键失败回滚同步阻塞主进程，导致所有输入框假死。
@@ -415,7 +432,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (data.workingDir !== undefined) {
         void startCommandProbe(id, mainWindow, { ...data });
       }
-      return updated;
+      return updated ? withBridgePlatform(updated) : updated;
     },
   );
   // B1：回合元数据持久化（渲染层在 result 到达时 fire-and-forget 调用）。
