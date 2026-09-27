@@ -2760,12 +2760,16 @@ function testInteractionPreviewDiffFallback(): void {
   assert.ok(renderDiffHtml('', { matching: 'lines' }).includes('<pre><code>'), '空 diff 经 matching:lines 须回退 <pre><code>');
 }
 
-function testMarkdownIndentedCodeUsesContainer(): void {
+// 2026-09-27 问题③ 最小同步（5db45f7 先例）：消息路径关闭缩进代码块（Java 堆栈 \tat 误判为
+// 等宽代码块），原「缩进走统一容器」契约反转为「缩进按普通段落渲染、围栏不受影响」。
+function testMarkdownIndentedCodeDisabled(): void {
   const out = renderMarkdown('段落\n\n    let x = 1\n\n后文');
-  assert.ok(out.includes('class="code-block"'), '4 空格缩进代码块须走统一 code-block 容器（含 header/复制/高亮）');
-  assert.ok(out.includes('code-block__copy'), '缩进代码块须带复制按钮');
-  assert.ok(out.includes('language-plaintext'), '缩进代码块无语言信息，须标 plaintext');
-  assert.ok(!/<pre><code>let x = 1/.test(out), '缩进代码块不能再是裸 <pre><code>');
+  assert.ok(!out.includes('class="code-block"'), '缩进代码块已对消息路径关闭，不得渲染 .code-block');
+  assert.ok(out.includes('let x = 1'), '缩进内容仍须按正文渲染（不得丢失）');
+  assert.ok(!out.includes('code-block__copy'), '缩进内容不应再带代码块复制按钮');
+  const fence = renderMarkdown('```js\nlet x = 1\n```');
+  assert.ok(fence.includes('class="code-block"'), '``` 围栏不受影响，仍走统一 code-block 容器');
+  assert.ok(fence.includes('code-block__copy'), '``` 围栏仍带复制按钮');
 }
 
 function testMermaidRendersBlocksSerially(): void {
@@ -3790,7 +3794,7 @@ testMermaidLifecycleGuards();
 testMarkdownImageInLinkNotButtonized();
 testMarkdownImageProtocolFilter();
 testInteractionPreviewDiffFallback();
-testMarkdownIndentedCodeUsesContainer();
+testMarkdownIndentedCodeDisabled();
 testMermaidRendersBlocksSerially();
 testMermaidErrorRetryAndAccessibleTitleContracts();
 testMermaidDeadPreRuleRemoved();

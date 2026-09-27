@@ -106,7 +106,14 @@ md.renderer.rules.fence = (tokens, idx, _options, env) => {
   return wrapCodeBlock(highlighted, normalizedLanguage, code);
 };
 
-// 4 空格缩进代码块走 code_block 规则（markdown-it 默认输出裸 <pre><code>），统一复用 .code-block 容器。
+// 缩进代码块（CommonMark 'code' 规则）对消息路径关闭（问题③）：空行后 ≥4 空格或 tab 缩进行
+//（Java 堆栈 "\tat ..." 最常见）会被误判成等宽代码块，用户回显观感突兀。关闭后缩进行按普通
+// 段落渲染；``` 围栏（fence）与行内 `code`（backticks）规则不受影响。预览渲染器
+//（createPreviewMarkdownRenderer）保留缩进代码块行为。下方 code_block renderer 规则保留：
+// 仅当该规则被重新启用时兜底统一容器，正常消息路径不再触达。
+md.disable('code');
+// 缩进代码块的 code_block 规则（markdown-it 默认输出裸 <pre><code>）：消息路径已被上方
+// md.disable('code') 关闭、不再触达；规则仅预览/兜底适用——重新启用时统一复用 .code-block 容器。
 md.renderer.rules.code_block = (tokens, idx) => {
   const code = tokens[idx].content;
   return wrapCodeBlock(escapeHtml(code), 'plaintext', code);

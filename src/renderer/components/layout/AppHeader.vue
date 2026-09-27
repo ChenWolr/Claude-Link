@@ -90,6 +90,7 @@ function onFormatCancel(): void {
       <template v-if="isChat">
         <p class="app-header__label">当前会话</p>
         <div v-if="activeSession" class="app-header__name">
+          <!-- .stop 阻断冒泡：sending 中重命名按 Esc 取消编辑，不得冒泡到 ChatPage 急停误触发中断。 -->
           <input
             v-if="editing"
             ref="inputRef"
@@ -97,7 +98,7 @@ function onFormatCancel(): void {
             class="app-header__name-input"
             maxlength="80"
             @keydown.enter.prevent="commitEdit"
-            @keydown.esc="cancelEdit"
+            @keydown.esc.stop="cancelEdit"
             @blur="commitEdit"
           />
           <template v-else>

@@ -235,7 +235,13 @@ function autoResize(): void {
   const el = textareaRef.value;
   if (!el) return;
   el.style.height = 'auto';
-  el.style.height = `${el.scrollHeight}px`;
+  // border-box 全局生效（main.css `* { box-sizing: border-box }`）而 scrollHeight 不含上下
+  // 边框（各 1px）：直接回填 scrollHeight 会让 clientHeight = scrollHeight − 2，恒差 2px
+  // → 1~2 行即出竖向滚动条。补偿 = 加回两边框 + 1px（+1 覆盖 small/large 字号档小数行高
+  // 18.375/23.625px 的 scrollHeight 取整下偏，保证整行容纳时不亏）。
+  const cs = window.getComputedStyle(el);
+  const vertBorder = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
+  el.style.height = `${el.scrollHeight + vertBorder + 1}px`;
 }
 
 // flush:'post' 确保 DOM 已反映最新 modelValue，scrollHeight 读数准确。
@@ -460,9 +466,11 @@ textarea {
   font-size: 0.875rem;
   line-height: 1.5;
   min-height: 42px;
-  /* 约 4 行封顶（line-height 1.5 × 14px × 4 + 上下 padding ≈ 104px）；超出由 overflow-y 滚动查看。
-     高度自增由 autoResize() 驱动，max-height 在此兜底封顶。 */
-  max-height: 104px;
+  /* 4 整行封顶（border-box 下 max-height 含边框）：4 行 line-height 1.5 × 0.875rem + 上下
+     padding 20px + 上下边框 2px = 22px 收尾 → calc(0.875rem * 1.5 * 4 + 22px)；medium 106px /
+     small 95.5px / large 116.5px 三档恰容 4 整行（旧 104px 漏算 2px 边框，medium/large 档
+     实际只容 3 整行）。超出由 overflow-y 滚动查看。高度自增由 autoResize() 驱动，max-height 在此兜底封顶。 */
+  max-height: calc(0.875rem * 1.5 * 4 + 22px);
   overflow-y: auto;
 }
 

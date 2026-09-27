@@ -8,6 +8,10 @@ import { useConfigStore } from '../stores/config-store';
 import { useChatDraftStore } from '../stores/chat-draft-store';
 import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useCommandStore } from '../stores/command-store';
+import { useInteractionStore } from '../stores/interaction-store';
+import { useDiffDialog } from '../composables/useDiffDialog';
+import { useToolDiffDialog } from '../composables/useToolDiffDialog';
+import { useImageLightbox } from '../composables/useImageLightbox';
 import MessageList from '../components/chat/MessageList.vue';
 import ChatInput from '../components/chat/ChatInput.vue';
 import TurnTimer from '../components/chat/TurnTimer.vue';
@@ -72,12 +76,49 @@ const dragActive = ref(false);
 // ChatInput 实例引用：粘贴混合剪贴板时，把文字插入 textarea 选区（图片进附件、文字不吞）。
 const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null);
 
+// 问题⑥：Esc 急停通道——sending 且无任何 Esc 消费者打开时按 Esc 立即中断（工具栏中断
+// 按钮已改长按 1 秒，Esc 是急停补偿）。分层避让：交互弹窗/双 diff 弹窗/图片灯箱读各全局
+// 单例状态；斜杠菜单/工具栏与选择器下拉/导出遮罩 v-if 才在 DOM，用选择器探测。桥接只读
+// 会话不让桌面中断（中断由 IM 客户端 /stop 驱动）。
+const interactionStore = useInteractionStore();
+const { state: diffDialogState } = useDiffDialog();
+const { state: toolDiffDialogState } = useToolDiffDialog();
+const { state: imageLightboxState } = useImageLightbox();
+
+function escConsumerOpen(): boolean {
+  if (interactionStore.visibleRequestsForActiveSession.length > 0) return true;
+  if (diffDialogState.value != null) return true;
+  if (toolDiffDialogState.value != null) return true;
+  if (imageLightboxState.value != null) return true;
+  if (document.querySelector('.slash-menu')) return true;
+  if (document.querySelector('.menu, .perm-menu, .tl-menu, .cascade')) return true;
+  if (document.querySelector('.export-overlay')) return true;
+  return false;
+}
+
+function onGlobalKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Escape') return;
+  // IME 组合态：中文输入法按 Esc 取消组词时 keydown 携真实 Escape 值冒泡（ChatInput N3 同款
+  // 平台行为），不守卫会把「取消组词」误判成急停（review R1-P2）。
+  if (e.isComposing || e.keyCode === 229) return;
+  // defaultPrevented 让位覆盖「更早注册且会 preventDefault」的 window 消费者（InteractionPrompt
+  // 等常驻 setup 注册者）；模型/思考选择器走 document 级监听先派发但不 preventDefault，真正
+  // 兜底是下方 DOM 探测（v-if 弹层在同步派发期间仍在 DOM，关闭要到下一渲染 tick）。
+  if (e.defaultPrevented) return;
+  if (!sending.value) return;
+  if (!store.activeSession) return;
+  if (bridgeLocked.value) return;
+  if (escConsumerOpen()) return;
+  void abort();
+}
+
 onMounted(() => {
   store.loadSessions();
   // 根因修复：监听已在 App.vue 全局注册，这里只刷新当前会话数据（重拉 messages）。
   store.refreshActiveSession();
   // 加载 Claude 计划快照（独立于手动排队 tasks 表）。
   if (store.activeSession?.id) planStore.loadPlan(store.activeSession.id);
+  window.addEventListener('keydown', onGlobalKeydown);
 });
 
 // 切换会话时清掉上一会话残留的错误横幅与提示、复位拖放态与计数（草稿视图由 computed 自动切换）。
@@ -95,6 +136,7 @@ watch(
 
 onUnmounted(() => {
   if (noticeTimer) clearTimeout(noticeTimer);
+  window.removeEventListener('keydown', onGlobalKeydown);
 });
 
 // 工作空间必选：Claude Code 基于某目录运行，未选工作空间禁止发送。

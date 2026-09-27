@@ -74,8 +74,13 @@ function handleClickOutside(event: MouseEvent) {
     showMenu.value = false;
   }
 }
-function handleEscape() {
-  if (showMenu.value) showMenu.value = false;
+function handleEscape(event: KeyboardEvent) {
+  // 消费 Esc 关菜单时 preventDefault：与 ChatInput 斜杠菜单同口径，给 Esc 急停的
+  // defaultPrevented 让位加双保险（不再单靠 escConsumerOpen 的 DOM 探测兜底）。
+  if (showMenu.value) {
+    event.preventDefault();
+    showMenu.value = false;
+  }
 }
 
 onMounted(() => {

@@ -177,3 +177,9 @@ scripts/tdd-bridge-wechat-verify.ts
 scripts/tdd-bridge-manager-verify.ts
 scripts/tdd-bridge-ui-static-verify.ts
 scripts/tdd-bridge-session-lock-verify.ts
+scripts/tdd-chatinput-autosize-verify.ts
+scripts/tdd-user-bubble-plaintext-verify.ts
+scripts/tdd-markdown-indented-code-off-verify.ts
+scripts/tdd-inline-katex-bounded-verify.ts
+scripts/tdd-compact-banner-fallback-verify.ts
+scripts/tdd-hold-abort-verify.ts

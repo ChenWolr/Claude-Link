@@ -594,7 +594,10 @@ export function formatCompactionSummary(c: {
   const dropped = c?.droppedTokens;
   const valid = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
   if (!valid(from) || !valid(to) || !valid(dropped)) {
-    return { title: 'Claude Code 已自动压缩上下文', hasNumbers: false };
+    // 无账单数字的兜底文案按 trigger 分流（问题⑤）：App 零程序自动压缩，实测压缩事件全为
+    // manual——写死「已自动压缩」是误导主源；有数字分支（下方 prefix）早已按 trigger 区分，
+    // 这里对齐同一口径。auto 触发（未来若发生）仍保留「自动」语义。
+    return { title: c.trigger === 'auto' ? 'Claude Code 已自动压缩上下文' : '上下文已压缩', hasNumbers: false };
   }
   const prefix = c.trigger === 'auto' ? '已自动压缩上下文：' : '已压缩上下文：';
   return {
