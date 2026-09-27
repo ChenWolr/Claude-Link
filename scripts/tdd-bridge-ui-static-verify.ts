@@ -3,7 +3,7 @@
 //   A. BridgeSettings.vue：BRIDGE IPC 调用 / qrcode <img> 渲染 / 掩码占位「已保存」不回显 /
 //      飞书教程文案关键词「长连接」/ blur/change 即保存 / 4s 轮询 / session expired 提示。
 //   B. ConfigPage.vue：import BridgeSettings 且模板挂载（「IM 机器人」区块）。
-//   C. preload/api.ts：bridge 组 9 方法存在。
+//   C. preload/api.ts：bridge 组 8 方法存在。
 // 返工追加（2026-09-21 review）：
 //   D. P3b 扫码 error 透传（类型 error 变体 / init.ts 不再映射 expired / Vue 展示错误文案）
 //      + P3e 扫码轮询链式化（无 setInterval 堆积，poll 完成后再 setTimeout 下一次）。
@@ -20,6 +20,7 @@
 // 2026-09-23 微信扫码重连修复计划追加：N. init.ts 扫码 confirmed 清墓碑接线
 //   （N③④ 2026-09-23 退出登录完全重置追加：doSave 退出登录清绑定接线形态断言）
 //   （耦合 electron 无法行为级测试，沿 D 组形态断言先例）。
+// 2026-09-25 设置页收窄计划修订：撤清除授权/会话绑定 UI（A①/C/F③/G①②/J⑤/L⑦ 同步，新增 A⑩）。
 // 运行：npx tsx scripts/tdd-bridge-ui-static-verify.ts
 
 import * as fs from 'node:fs';
@@ -41,10 +42,11 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   const p = 'src/renderer/components/config/BridgeSettings.vue';
   if (exists(p)) {
     const src = read(p);
-    check('A', '①', '调用 BRIDGE IPC（getConfig/saveConfig/getStatus/testFeishu/qrcode/qrcodeStatus/bindings/unbind）',
+    check('A', '①', '调用 BRIDGE IPC（getConfig/saveConfig/getStatus/testFeishu/qrcode/qrcodeStatus/bindings）',
       src.includes('bridgeGetConfig') && src.includes('bridgeSaveConfig') && src.includes('bridgeGetStatus')
       && src.includes('bridgeTestFeishu') && src.includes('bridgeWechatQrcode') && src.includes('bridgeWechatQrcodeStatus')
-      && src.includes('bridgeListBindings') && src.includes('bridgeUnbind'));
+      && src.includes('bridgeListBindings'));
+    check('A', '⑩', '退出登录按钮保留（微信面板唯一授权动作）', src.includes('退出登录'));
     check('A', '②', '二维码 <img :src> 渲染', /<img[^>]*:src=/.test(src));
     check('A', '③', '已存 App Secret 显示占位「已保存」不回显',
       src.includes('已保存') && !/placeholder="\{\{\s*config/.test(src));
@@ -57,7 +59,7 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     check('A', '⑨', '订阅 onBridgeStatusChanged + 卸载清理', src.includes('onBridgeStatusChanged') && src.includes('onBeforeUnmount'));
   } else {
     check('A', '①', 'BridgeSettings.vue 存在', false, '文件不存在');
-    for (const no of ['②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨']) {
+    for (const no of ['②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩']) {
       check('A', no, '（BridgeSettings.vue 缺失连带断言）', false);
     }
   }
@@ -73,16 +75,16 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     src.includes(`v-show="activeTab === 'im'"`) && /<BridgeSettings\b[^>]*\/>/.test(src));
 }
 
-// C. preload/api.ts bridge 组 9 方法
+// C. preload/api.ts bridge 组 8 方法
 {
   const src = read('src/preload/api.ts');
   const methods = [
     'bridgeGetConfig', 'bridgeSaveConfig', 'bridgeGetStatus', 'bridgeTestFeishu',
-    'bridgeWechatQrcode', 'bridgeWechatQrcodeStatus', 'bridgeListBindings', 'bridgeUnbind',
+    'bridgeWechatQrcode', 'bridgeWechatQrcodeStatus', 'bridgeListBindings',
     'onBridgeStatusChanged',
   ];
   const missing = methods.filter((m) => !src.includes(`${m}:`));
-  check('C', '①', 'bridge 组 9 方法齐全（接口 + 实现各 1 处）', missing.length === 0,
+  check('C', '①', 'bridge 组 8 方法齐全（接口 + 实现各 1 处）', missing.length === 0,
     `缺=${JSON.stringify(missing)}；实现对象遗漏=${JSON.stringify(methods.filter((m) => (src.split(`${m}:`).length - 1) < 2))}`);
   check('C', '②', 'onBridgeStatusChanged 订阅 BRIDGE_STATUS_CHANGED 通道',
     src.includes('IPC_CHANNELS.BRIDGE_STATUS_CHANGED'));
@@ -134,9 +136,9 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   check('F', '②', '状态五态中文映射（STATUS_LABELS：已连接/连接中/异常/已断开/未启用）',
     src.includes('STATUS_LABELS') && ['已连接', '连接中', '异常', '已断开', '未启用'].every((t) => src.includes(t)),
     '缺 STATUS_LABELS 五态中文映射');
-  check('F', '③', '绑定按面板过滤（paneBindings：平台面板只看本平台，全局=全部）',
-    src.includes('paneBindings') && /b\.platform\s*===\s*activePane/.test(src),
-    '缺 paneBindings computed / 平台过滤形态');
+  check('F', '③', '绑定管理 UI 已收窄（无 paneBindings/无「会话绑定」分区；bridgeListBindings 保留供 owner 昵称解析）',
+    !src.includes('paneBindings') && !src.includes('会话绑定') && src.includes('bridgeListBindings'),
+    '绑定分区/paneBindings 残留，或 bridgeListBindings 数据源被误删');
   check('F', '④', '迷你开关联 save 链（mini-switch × feishu/wechat enabled）',
     src.includes('mini-switch') && src.includes('save({ feishu: { enabled') && src.includes('save({ wechat: { enabled'),
     'rail 迷你开关未接原 save({ platform: { enabled } }) 链');
@@ -162,16 +164,10 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
 }
 
 // 生命周期修复计划契约（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次1）：
-//   G. 解绑确认框+_transient 提示 / 空态文案 / appId 前置校验（渲染层红字+主进程正则双路径）/
-//      微信 expired 态扫码入口并存。
+//   G. appId 前置校验（渲染层红字+主进程正则双路径）/ 微信 expired 态扫码入口并存。
+//   （G①② 解绑确认框/空态文案断言随 2026-09-25 收窄撤下；编号留空位不重排。）
 {
   const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
-  check('G', '①', '解绑按钮走确认框+unbindNotice 提示（window.confirm + unbindNotice ref）',
-    vueSrc.includes('window.confirm') && vueSrc.includes('unbindNotice'),
-    '解绑无确认框或无 transient 提示 ref');
-  check('G', '②', '绑定空态文案含「/new 重新绑定」（解绑语义告知）',
-    vueSrc.includes('/new 重新绑定'),
-    '空态文案未告知解绑后需 /new 重新绑定');
   check('G', '③', 'appId 渲染层即时校验（appidError ref + cli_ 正则字面 + 校验失败不保存）',
     vueSrc.includes('appidError') && /cli_\[0-9a-fA-F\]\{16\}/.test(vueSrc),
     '缺渲染层 appId 格式校验');
@@ -215,8 +211,8 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     (preloadSrc.match(/bridgePlatformRestart/g) ?? []).length >= 2,
     `出现 ${(preloadSrc.match(/bridgePlatformRestart/g) ?? []).length} 次（须 ≥2）`);
   const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
-  check('H', '⑧', '微信积压语义 dim 文案（关闭通信期间消息不补处理）',
-    vueSrc.includes('关闭通信期间收到的消息不会在重新打开后处理'),
+  check('H', '⑧', '微信积压语义 dim 文案（关闭开关期间不补处理/退出期间补处理）',
+    vueSrc.includes('关闭「微信」开关期间收到的消息不会在重新打开后处理；应用退出期间收到的消息会在下次启动后补处理'),
     '微信开关区缺积压语义说明');
 }
 
@@ -254,9 +250,10 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     /feishuAppIdInput/.test(vueSrc)
       && /async function testFeishu[\s\S]{0,300}await save\(\{ feishu: \{ appId: feishuAppIdInput\.value\.trim\(\) \} \}\)/m.test(vueSrc),
     'testFeishu 未用当前输入框值先保存');
-  check('J', '⑤', '微信授权用户 UI（ownerUserId 匹配 + 清除授权按钮 + dim 提示）',
-    vueSrc.includes('wechatOwnerUserId') || (vueSrc.includes('ownerUserId') && vueSrc.includes('清除授权')),
-    '微信面板缺授权用户行/清除授权');
+  check('J', '⑤', '微信授权用户展示保留且清除类按钮已撤（wechatOwnerUserId + 无「清除授权」/clearOwner/clearWechatOwner）',
+    vueSrc.includes('wechatOwnerUserId') && !vueSrc.includes('清除授权')
+      && !vueSrc.includes('clearOwner') && !vueSrc.includes('clearWechatOwner'),
+    '授权用户展示丢失，或清除授权入口残留');
   check('J', '⑥', '使用说明六条补全（私聊/命令/合并/积压/隐私/owner）',
     ['仅支持私聊', '/new', '/stop', '合并为一次回复', '不会在重新打开后处理', '会话列表中可见', '仅授权用户'].every((t) => vueSrc.includes(t)),
     '使用说明缺批次5.3 新文案');
@@ -308,19 +305,15 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   const hit = guideKeywords.filter((k) => wechatSection.includes(k));
   check('L', '④', 'B2 微信使用说明关键词 ≥6（扫码登录/授权用户//help/24 小时/暂不支持/隐私提示）',
     hit.length >= 6, `命中=${JSON.stringify(hit)}（飞书面板不含「24 小时」——分块锚定不误伤）`);
-  check('L', '⑤', 'B2 旧积压散置 hint 删除（短语并入说明第 9 条，独立 hint 行不残留）',
+  check('L', '⑤', 'B2 旧积压散置 hint 删除（积压语义并入说明第 9 条限定场景版，独立 hint 行不残留）',
     !/<span class="im-field-hint">关闭通信期间收到的消息不会在重新打开后处理<\/span>/.test(vueSrc)
-      && wechatSection.includes('关闭通信期间收到的消息不会在重新打开后处理'),
+      && wechatSection.includes('关闭「微信」开关期间收到的消息不会在重新打开后处理；应用退出期间收到的消息会在下次启动后补处理'),
     '旧积压 hint 行残留或未并入说明');
   check('L', '⑥', 'B2 分块锚定不误伤（飞书面板不含「24 小时」字样）',
     !feishuSection.includes('24 小时'),
     `飞书面板长度=${feishuSection.length}（锚定失败会误伤）`);
 
-  // B3：清除授权两处确认框（clearOwner / clearWechatOwner 函数体各含 confirm+明示后果）。
-  check('L', '⑦', 'B3 clearOwner/clearWechatOwner 各含 window.confirm+后果明示',
-    /function clearOwner\(\): void \{[\s\S]{0,300}window\.confirm\('确定清除授权用户\？[\s\S]{0,200}下一个给机器人发私聊消息的用户将自动成为授权用户/.test(vueSrc)
-      && /function clearWechatOwner\(\): void \{[\s\S]{0,300}window\.confirm\('确定清除授权用户\？[\s\S]{0,200}下一个给机器人发私聊消息的用户将自动成为授权用户/.test(vueSrc),
-    '清除授权缺确认框或未明示后果');
+  // （L⑦ B3 清除授权确认框断言随 2026-09-25 收窄撤下；L⑧-⑩ 保留、编号留空位不重排。）
 
   // B4：三处小卫生。
   check('L', '⑧', 'B4 重连按钮禁用解释 title（请先在左侧打开×2 平台）',

@@ -52,6 +52,10 @@ const activeSessionId = computed(() => store.activeSession?.id ?? '');
 // 队列开关（配置页，默认关）：开启后回复生成中仍可输入发送（消息/附件入队），关闭维持旧行为禁发。
 // config 由 App.vue 启动时 loadConfig，配置页修改后同 store 实例响应式联动。
 const queueEnabled = computed(() => configStore.config.queueEnabled === true);
+// IM 桥接会话桌面端只读：绑定中的会话由 IM 客户端（微信/飞书）驱动，本地收起
+// 输入区与工具栏、仅展示提示；解绑/退出登录后 SESSION_LIST 重拉即自动恢复。
+const bridgeLocked = computed(() => store.activeSession?.bridgePlatform != null);
+const bridgePlatformLabel = computed(() => (store.activeSession?.bridgePlatform === 'wechat' ? '微信' : '飞书'));
 const draftText = computed<string>({
   get: () => (activeSessionId.value ? draftStore.getText(activeSessionId.value) : ''),
   set: (v) => {
@@ -104,6 +108,7 @@ function ensureWorkspace(): boolean {
 // 选文件只需暂存，不要求工作空间（与拖放/粘贴一致）；工作空间在发送时才校验。
 async function onPickAttachments() {
   if (!store.activeSession) return;
+  if (bridgeLocked.value) return;
   const sessionId = store.activeSession.id;
   try {
     const { attachments, errors } = await window.claudeLink.pickAttachments(sessionId);
@@ -124,6 +129,7 @@ async function onPickAttachments() {
 // 粘贴/拖放：把 File 字节经 stageAttachmentBytes 暂存（不把 bytes 放进长期 state）。
 async function stageFiles(files: File[]) {
   if (!store.activeSession || files.length === 0) return;
+  if (bridgeLocked.value) return;
   const sessionId = store.activeSession.id;
   const failures: string[] = [];
   const staged: AttachmentSummary[] = [];
@@ -167,6 +173,7 @@ function hasFileDrag(e: DragEvent): boolean {
 let dragCounter = 0;
 function onPageDragEnter(e: DragEvent): void {
   if (!hasFileDrag(e) || !store.activeSession) return;
+  if (bridgeLocked.value) return;
   e.preventDefault();
   dragCounter += 1;
   dragActive.value = true;
@@ -233,6 +240,7 @@ function buildPayload(): ChatSendPayload | null {
 let sendInflight = false;
 async function handleSend() {
   if (!store.activeSession) return;
+  if (bridgeLocked.value) return;
   if (sendInflight) return;
   if (!ensureWorkspace()) return;
   const payload = buildPayload();
@@ -291,6 +299,7 @@ async function retryLastFailed() {
 
 async function handleCompress() {
   if (!store.activeSession) return;
+  if (bridgeLocked.value) return;
   if (!ensureWorkspace()) return;
   // /compact 不携带附件，独立 payload；成功后不清草稿（压缩命令语义）。
   await sendMessage({ text: '/compact', attachmentIds: [], clientMessageId: crypto.randomUUID() });
@@ -328,18 +337,24 @@ function handleNewSession() {
       <div class="chat-composer" :class="{ 'chat-composer--drag': dragActive }">
         <!-- 实时计时器（方案 A 状态头条）：浮岛第一行，sending 期间展开显示本回合耗时 + 阶段徽章。 -->
         <TurnTimer />
-        <ChatInput
-          ref="chatInputRef"
-          :model-value="draftText"
-          :has-attachments="draftAttachments.length > 0"
-          :disabled="sending && !queueEnabled"
-          :commands="activeCommandSnapshot?.commands"
-          :command-status="activeCommandSnapshot?.status"
-          :command-error="activeCommandSnapshot?.error"
-          @update:model-value="(v: string) => (draftText = v)"
-          @send="handleSend"
-        />
-        <SessionToolbar :sending="sending" @abort="abort" @compress="handleCompress" @add-attachment="onPickAttachments" />
+        <!-- IM 桥接会话：桌面端只读，输入区/工具栏收起（发言仅限 IM 客户端）。 -->
+        <div v-if="bridgeLocked" class="bridge-lock" role="status">
+          该会话由{{ bridgePlatformLabel }}桥接驱动：请在{{ bridgePlatformLabel }}客户端中与机器人对话，桌面端仅可查看。
+        </div>
+        <template v-else>
+          <ChatInput
+            ref="chatInputRef"
+            :model-value="draftText"
+            :has-attachments="draftAttachments.length > 0"
+            :disabled="sending && !queueEnabled"
+            :commands="activeCommandSnapshot?.commands"
+            :command-status="activeCommandSnapshot?.status"
+            :command-error="activeCommandSnapshot?.error"
+            @update:model-value="(v: string) => (draftText = v)"
+            @send="handleSend"
+          />
+          <SessionToolbar :sending="sending" @abort="abort" @compress="handleCompress" @add-attachment="onPickAttachments" />
+        </template>
       </div>
     </template>
     <template v-else>
@@ -385,6 +400,18 @@ function handleNewSession() {
 .chat-composer--drag {
   border-color: var(--color-accent);
   box-shadow: var(--elevation-3), var(--ring-light), 0 0 0 2px color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+
+/* IM 桥接会话锁定提示：替代输入区/工具栏（桌面端只读会话）。 */
+.bridge-lock {
+  margin: 0.5rem 0.75rem 0.75rem;
+  padding: 0.625rem 0.875rem;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  text-align: center;
 }
 
 .empty-state {

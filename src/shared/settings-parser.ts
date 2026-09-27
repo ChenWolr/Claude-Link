@@ -74,7 +74,8 @@ export function parseClaudeSettings(content: string): ImportedSettings {
   // apiKeyHelper: 顶层命令字符串，用于动态获取 key（Claude Code 特有）。
   // 单独提取出来，避免残留在 advancedJson 被运行时当普通字段注入。
   // Claude Link 本身不执行它；渲染层回填链已随 2026-09-20 死链路删除，该字段当前仅
-  // 作为解析语义保留（契约脚本钉），不做「改用静态 API Key」提示。
+  // 作为解析语义保留（parseClaudeSettings 整体由契约脚本消费，本字段自身无断言钉），
+  // 不做「改用静态 API Key」提示。
   const apiKeyHelper = takeString(remaining, 'apiKeyHelper');
   if (apiKeyHelper) result.apiKeyHelper = apiKeyHelper;
 
@@ -237,7 +238,9 @@ export function resolveConfiguredDefaultModel(advancedJson: string, fallbackMode
   return resolveConfiguredActualModel(resolveDefaultModel(advancedJson), advancedJson, fallbackModel);
 }
 
-// 从 advancedJson 的 env 块读取单个值（不修改原 JSON），用于 apiKey/baseUrl 等字段的兜底。
+// 从 advancedJson 的 env 块读取单个值（不修改原 JSON）。原供 connection-tester 行内测试的
+// apiKey/baseUrl env 兜底（多供应商库改造后行内测试直读供应商档案，该生产消费已移除），
+// 现仅 selftest-settings-mapping 等脚本消费（保留以保证 peek 不删除语义可测）。
 export function peekEnvValue(advancedJson: string, key: string): string | undefined {
   const v = parseAdvancedEnv(advancedJson)[key];
   return typeof v === 'string' && v.trim() ? v.trim() : undefined;
@@ -356,7 +359,8 @@ export function setContextWindowInAdvancedJson(
 
 // 清空"连接"相关 env：apiKey / authToken / baseUrl / 四个类型别名映射 /
 // 四个 CLAUDE_LINK_CONTEXT_WINDOW_* 上下文窗口覆盖。
-// 保留 env 里其它键（如 CLAUDE_CODE_*）。供"清空连接配置"使用，确保字段与 JSON 一并清空。
+// 保留 env 里其它键（如 CLAUDE_CODE_*）。原供"清空连接配置"使用（UI 入口已随多供应商化
+// 移除），现仅 selftest-settings-mapping 等脚本消费（保留以保证清除语义可测）。
 export function stripConnectionFromAdvancedJson(advancedJson: string): string {
   const adv = cloneAdv(advancedJson);
   const envObj =

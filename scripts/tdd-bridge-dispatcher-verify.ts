@@ -10,7 +10,7 @@
 //   6. spawn 抛「仍在执行」→ busy:true。
 //   7. replyText：findReplyText null → replyText:null（不伪造）。
 // 返工追加（2026-09-21 review P1）：
-//   8. 时序真实化：sdk-backend 所有出口先 deleteEntry 再 emitExit——exit 回调触发时
+//   8. 时序真实化：sdk-backend 置位 knownOutcome 的出口均先 deleteEntry 再 emitExit——exit 回调触发时
 //      getKnownTurnOutcome 已恒 null，且 /stop kill 与流丢 result 出口 code=null → 兜底
 //      只能判 'error'。本组钉死该机制本身与 limitation 注释（/stop 的静默由 manager 消费
 //      此结果，钉在 tdd-bridge-manager-verify [Q]）。
@@ -28,7 +28,7 @@ import {
 
 // R2-N2：原 `import type { SdkQueryHandle } from '../src/main/sdk-backend'` 是死导入——路径错
 // （真实位置多一层 /modules）且该接口未导出；type-only 导入被 tsx 擦除、又不在任何 typecheck
-// 门禁内，故全绿掩盖。按 dispatcher.ts 同一手法本地声明结构化等价类型（sdk-backend.ts :696-701 真实形状）。
+// 门禁内，故全绿掩盖。按 dispatcher.ts 同一手法本地声明结构化等价类型（sdk-backend.ts :698-703 真实形状）。
 interface BridgeQueryHandle {
   killed: boolean;
   on(event: 'exit', cb: (code: number | null) => void): void;
@@ -342,7 +342,7 @@ async function main(): Promise<void> {
 
 // ── 8. 时序真实化（review P1 契约钉）──
 {
-  // 真实时序模型：sdk-backend 出口先 deleteEntry 再 emitExit → exit 回调触发时 entry 已移除，
+  // 真实时序模型：sdk-backend 置位 knownOutcome 的出口先 deleteEntry 再 emitExit → exit 回调触发时 entry 已移除，
   // getKnownTurnOutcome 恒返回 null；/stop kill 路径 exit code=null（系统杀语义）。
   const engine = createFakeEngine({ knownOutcome: null });
   const p = dispatchBridgeTurn(engine, createFakePersistence(), 'sess-stop', '中断前的消息');

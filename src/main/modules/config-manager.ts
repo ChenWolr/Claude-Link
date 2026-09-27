@@ -10,8 +10,9 @@
 // 档案密钥（明文/密文）只在本模块与主进程内存中；renderer 经 config:listProviders
 //（getLibrarySnapshot → ProviderProfileView）只拿掩码视图。
 // 老字段（providerName/apiKey/apiBaseUrl/defaultModel…）= lastUsed 档案的投影；
-// 当前唯一消费点是 buildSpawnEnv 无会话 override 时的兜底（settings-writer 已不投影端点凭据、
-// connection-tester 行内测试直读档案）。
+// 消费点全部是兜底链——buildSpawnEnv 无会话 override 时的端点/密钥兜底（cli-shared）、
+// 任务队列 spawn 与 post-turn 探针的 defaultModel 兜底、topic-analyzer 库空老字段链
+//（端点/密钥/模型）（settings-writer 已不投影端点凭据、connection-tester 行内测试直读档案）。
 
 import ElectronStoreModule from 'electron-store';
 import { safeStorage } from 'electron';
@@ -107,7 +108,7 @@ const defaultConfig: StoredConfig = {
   minimizeToTray: false,
   // reasoning_replay 自动重试默认开（韧性层：同形状重放大概率通过，单次重试覆盖间歇性命中）。
   autoRetryReasoningReplay: true,
-  // 全局 skill 禁用开关默认空（全部启用）；脏值兜底只在读路径（getConfig → sanitizeConfig
+  // 全局 skill 禁用开关默认空（全部启用）；脏值兜底只在读路径（getConfig → sanitizeSkillOverridesConfig
   // 清洗为 {}），saveConfig/CONFIG_SAVE 写路径无 skillOverrides 专项清洗、原样落盘
   //（S2 review 核实更正：原「写路径读路径各有一道」与事实不符；现状判定无害，不新增写清洗）。
   skillOverrides: {},
@@ -262,7 +263,8 @@ let libraryEmptiedByDeletion = false;
 
 // 把 lastUsed 档案投影回 AppConfig 老字段（providerName/apiKey/apiBaseUrl/defaultModel），
 // 并写 settings.local.json。任何供应商库变更（增删改/换 lastUsed/saveConfig）后调用，
-// 保证老链路（buildSpawnEnv 无会话 override 时的兜底）看到一致的投影
+// 保证老字段兜底链（buildSpawnEnv 无会话 override 时的端点/密钥、任务队列 spawn 与 post-turn
+// 探针的 defaultModel、topic-analyzer 库空老字段链——枚举见文件头）看到一致的投影
 //（settings-writer 已不投影端点凭据、connection-tester 行内测试直读档案）。
 // hb10-CFG-04：返回投影结果（projectionOk）——saveConfig 据此透出投影失败可见性。
 function projectLegacyFields(): boolean {

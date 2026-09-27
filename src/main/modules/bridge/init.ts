@@ -84,7 +84,7 @@ function pushStatusChanged(rt: BridgeRuntime): void {
   }
 }
 
-// ── dispatcher 真实 deps（同构 CHAT_SEND :627-711）──
+// ── dispatcher 真实 deps（同构 CHAT_SEND :594-739）──
 
 function buildEngineDeps(rt: BridgeRuntime): TurnEngineDeps {
   const getWindow = rt.opts.getWindow;
@@ -480,8 +480,9 @@ export async function bridgeWechatQrcodeStatus(qrcodeId: string): Promise<Wechat
   rt.profiles.wechat.botUserId = result.botUserId;
   rt.wechatTokenBroken = false;
   persistProfiles(rt);
-  // 2026-09-23 墓碑治本：重新扫码 = 微信桥全新开始，清掉旧解绑墓碑——否则 owner 的
-  // 普通消息会被 flush 的墓碑分支静默吞（用户被迫发 /new 才能对话）。
+  // 2026-09-23 墓碑治本：重新扫码 = 微信桥全新开始，清掉旧解绑墓碑——否则 owner 的普通消息
+  // 只会收到 flush 墓碑分支的「发送 /new 重新开始对话」引导提示而无法直接对话（不派发 LLM）；
+  // 清墓碑后下一条消息走 B7 自动重建绑定+新会话。
   const purged = bindingRepo.purgeTombstonesByPlatform(getConnection(), 'wechat');
   if (purged > 0) logger.info(`[bridge] 微信重新登录：已清除 ${purged} 条旧解绑墓碑`);
   if (rt.profiles.wechat.enabled) {
@@ -500,11 +501,4 @@ export function bridgeBindingList(): BridgeBindingView[] {
     sessionId: b.sessionId,
     lastActiveAt: b.lastActiveAt,
   }));
-}
-
-/** phase 1 只解绑不删会话。V14 墓碑：先 DB 置位，再清 manager 缓冲定时器（免消息复活路径）。 */
-export function bridgeUnbind(sessionKey: string): void {
-  bindingRepo.deleteBinding(getConnection(), sessionKey);
-  const rt = runtime;
-  if (rt) rt.manager.unbind(sessionKey);
 }

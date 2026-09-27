@@ -1,5 +1,6 @@
 // 会话导出 JPEG/PNG 长图：共享类型（主进程 ↔ 隐藏导出 renderer ↔ 可见 renderer 共用）。
-// 设计依据：docs/glittery-hatching-neumann-v3.md。
+// 设计依据：设计文档《glittery-hatching-neumann-v3》（原文档
+// docs/glittery-hatching-neumann-v3.md 已不在仓库内）。
 // 本文件只放类型，无运行时逻辑、无 Vue/Electron/DOM 副作用，Node selftest 可直接导入。
 
 import type { ThemePalette } from '../constants';
@@ -123,7 +124,7 @@ export interface PageRange {
   endUnitIndex: number;
 }
 
-// 稳定单元构建入参：分组后的渲染项（与 renderer 的 RenderItem 结构兼容，由隐藏 renderer 适配传入）。
+// 稳定单元构建入参：分组后的渲染项（与 renderer 的 RenderItem 结构兼容；原设计由隐藏 renderer 适配传入，现生产分页已改走 export-runner 自身 splitPages，本类型仅 selftest 驱动）。
 // message 项 messages 长度为 1；fold 项 messages 长度 ≥1。firstMessageId 用于稳定 ID。
 export interface StableUnitInput {
   kind: 'message' | 'fold';
@@ -240,7 +241,8 @@ export type CaptureSelfResponse =
 // =====================================================================
 // v4.1：PNG 长图（Node/pngjs + worker_threads）共享类型
 // JPEG 继续沿用 v3 的 CaptureSelfResponse / PageChunkPayload；PNG 走下列页协议。
-// 设计依据：docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md §3 Task 5。
+// 设计依据：导出图片 v4.1 PNG worker 计划 §3 Task 5（原文档
+// docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）。
 // =====================================================================
 
 /** 导出格式。主进程在 start 时冻结，全链路不可被 renderer 改写。 */
@@ -327,7 +329,8 @@ export interface SegmentCopyGeometry {
 // =====================================================================
 // v4.1 codec worker 消息协议（主进程 ↔ worker，内部；不暴露给 renderer）
 // worker 只接受主进程生成的内部消息，outputPath 必须是主进程生成的当前页临时路径。
-// 依据：docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md §4 Task 7。
+// 依据：导出图片 v4.1 PNG worker 计划 §4 Task 7（原文档
+// docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）。
 // =====================================================================
 
 /** 主进程 → worker。begin 的 totalHeightPx/bitmapWidthPx 由主进程据 probe 实测比例预算并冻结。 */

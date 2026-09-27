@@ -49,7 +49,7 @@ const queues = new Map<string, QueueState>();
 const timers = new Map<string, ReturnType<typeof setInterval>>();
 /** 倒计时归零主 setTimeout 与直发在飞 1s 顺延重试 timer（hb13-v F2；独立 Map，清理不再动 key 拼接）。 */
 const mainTimers = new Map<string, ReturnType<typeof setTimeout>>();
-/** 执行代际：会话删除/重建后使旧 child 的迟到 exit 失效。 */
+/** 执行代际：cleanupQueue set 后同函数内即 delete，Map 恒空、比对恒过（0===0）——旧 child 迟到 exit 实际由 isQueueGenerationActive 的会话存在性子句失效。 */
 const generations = new Map<string, number>();
 /** 「本次已执行」历史（方案 A：纯内存、本次运行期、重启清零、上限 50 条，新→旧）。 */
 const executedHistory = new Map<string, ExecutedTaskInfo[]>();
@@ -420,7 +420,7 @@ export function getQueueOverview(sessionId: string): QueueOverview {
   };
 }
 
-/** 会话删除：代际+1 使旧 child 迟到 exit 失效，并清全部五张 per-session Map。 */
+/** 会话删除：清全部五张 per-session Map（generations 键直接删除，代际比对恒过 0===0，旧 child 迟到 exit 由 isQueueGenerationActive 的会话存在性子句兜底失效）。 */
 export function cleanupQueue(sessionId: string): void {
   generations.set(sessionId, getQueueGeneration(sessionId) + 1);
   cancelTimers(sessionId);
@@ -585,7 +585,9 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
     // getActiveProcess 判否、直发消息畅通，spawnForChat 经 forceKill 接管后 beginUserTurn 只置
     // running 不清 currentTaskId；旧任务 child 迟到 exit 若照常记账，noteTurnOutcome('error')
     // 会命中新回合的 running 闸 → haltQueue 误熔断整个队列。有别的活动 entry 在途（必属别的
-    // 回合）即让位——不记账、不熔断。引擎已从 chat-backend 导入 getActiveProcess，无循环依赖。
+    // 回合）即让位——不记账、不熔断。getActiveProcess 经 chat-backend 统一入口导入（不经 ipc-handlers）；
+    // engine↔sdk-backend 既有回边（sdk-backend 直接 import 引擎的 noteTurnOutcome/beginUserTurn，
+    // 与本侧经 chat-backend 的导入构成模块环）为函数级调用期引用，运行时无害，本守卫未新增依赖边。
     const active = getActiveProcess(sessionId);
     if (active && active !== child) {
       logger.info(`[queue] child exit fallback session=${sessionId} task=${task.id} 让位：新回合在途，旧 exit 不记账`);

@@ -2,7 +2,7 @@
 // 过程类型的最小颗粒度分类键。被主进程（落库）与渲染层（实时 addMessage）共用，
 // 保证两条路径对同一个 part 产出相同的 processKind，从而历史回读与实时显示分组一致。
 //
-// 分类规则（见 docs/claude-code-skill-kind-wirth.md「过程类型穷举」）：
+// 分类规则（穷举）：
 //   text              → null（正文，唯一「结果」，独立气泡，打断过程组）
 //   thinking          → 'thinking'
 //   redacted_thinking → 'redacted_thinking'
@@ -13,6 +13,8 @@
 //   web_search_tool_result → 'tool:web_search'
 //   web_fetch_tool_result  → 'tool:web_fetch'
 //   code_execution_tool_result → 'tool:code_execution'
+//   mcp_tool_use        → 'tool:<name>'（MCP 工具，与 tool_use 同形）
+//   mcp_tool_result     → 'tool:result'（与 tool_result 同形）
 
 import type { CliMessageContentPart } from './types/cli';
 

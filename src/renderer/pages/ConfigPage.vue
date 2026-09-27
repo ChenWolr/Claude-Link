@@ -3,7 +3,7 @@
 // 结构：标题/标签/工作区同宽一列（宽 = min(100%, --chat-bottom-max-width)，与聊天/会话页同一 800px 契约），
 // 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
 // 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
-// 所有滚动发生在面板内部；尺寸除 Skill 双栏区（.skill-md-rail 264px 定宽、滚动条 8px）外全部 rem（随 fontScale 等比缩放）。
+// 所有滚动发生在面板内部；尺寸除 Skill 双栏区（.skill-md-rail 264px 定宽、滚动条 8px）与个别固定装饰件（保存徽标 spinner 圆点 8px、sr-only 1px 裁剪、tab/列表项 2px 指示边框）外全部 rem（随 fontScale 等比缩放）。
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore, lastSaveFailed } from '../stores/config-store';
@@ -278,7 +278,7 @@ const skillProbePending = computed(() => {
 
 // 冷启动自愈（2026-09-15）：globalSnapshot 的广播可能早于 App.vue 订阅注册而永久丢失，本页
 // 纯被动消费会永停「正在探测」——Skill tab 激活时按需拉一次。幂等在 ensureGlobalSnapshot 内
-// （非 loading 快照直接返回 + in-flight 锁），反复切 tab 不产生拉取风暴。
+// （ready/empty/stale 定态直接返回 + in-flight 锁；loading/degraded/error 放行，失败态重拉见 B-1），反复切 tab 不产生拉取风暴。
 // 项目目录同拍现查（2026-09-17 方案 B）：新目录自然纳入、被删目录自然消失（窗口 = 一次进 tab）。
 watch(activeTab, (tab) => {
   if (tab === 'skill') { void commandStore.ensureGlobalSnapshot(); void ensureProjectDirs(); }
@@ -1377,7 +1377,7 @@ input[type='number']:hover {
   outline-offset: 2px;
 }
 
-/* ── Skill 管理（B2 独立设置页，视觉基准 docs/prototypes/skill-management/option-b2-standalone-tab.html）── */
+/* ── Skill 管理（B2 独立设置页；视觉基准原型 docs/prototypes/skill-management/option-b2-standalone-tab.html 未入库且本地已不存在，基线形态以本节类名/注释描述为准）── */
 
 /* 快照状态条：页面级，v-if 链（探测中=neutral / degraded+error=warn 附 B-1 重试 / ready=不渲染；
    C-8：stale 臂已删，写入者不产 stale）。 */
@@ -1745,10 +1745,10 @@ input.skill-search:focus {
   cursor: not-allowed;
 }
 
-/* ── Skill 管理双栏 master-detail（方案 B，视觉基准 docs/prototypes/skill-management/proj-b-master-detail.html）──
+/* ── Skill 管理双栏 master-detail（方案 B；视觉基准原型 docs/prototypes/skill-management/proj-b-master-detail.html 未入库且本地已不存在，基线形态以本节类名/注释描述为准）──
    既有类名（snap-status/stat-grid/skill-toolbar/skill-search/chips/chip/skill-grid/skill-card 全家族/
    skill-empty/skill-note/switch）一律不改不删；新增 skill-md-* 前缀类与效果图 md-* 一一对应。
-   项目紫直接写字面 #7C5CFC（hover 深 #5F3DC4），不新增全局 token（避免动 variables.css 影响面）。 */
+   项目紫直接写字面 #7C5CFC（项目徽章 .scope-badge--project 静态文字用深紫 #5F3DC4），不新增全局 token（避免动 variables.css 影响面）。 */
 
 .skill-md-body {
   flex: 1;

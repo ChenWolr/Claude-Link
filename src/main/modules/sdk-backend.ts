@@ -137,8 +137,8 @@ void persistMessageParts;
 // query() 返回 Query（AsyncGenerator<SDKMessage> + interrupt()/setPermissionMode()）。
 // 这里只引 type，运行时值由 importSdk() 动态获取。
 // prompt 与 Agent SDK 对齐：纯文字 string；含图片时 AsyncIterable<SDKUserMessage>。
-// SDK 官方 Query/Options 契约（sdk.d.ts:1246/2194）：仅在本地 wrapper 上保留当前后端
-// 需要的 optional getContextUsage 兼容字段，不再用 Record<string, unknown> 抹掉 SDK 类型检查。
+// SDK 官方 Query/Options 契约（sdk.d.ts:1246/2194）：直接用 SDK 类型（getContextUsage 已是
+// Query 原生方法，sdk.d.ts:2319），不用 Record<string, unknown> 抹掉 SDK 类型检查。
 type Query = SdkQuery;
 
 interface SdkModule {
@@ -168,8 +168,8 @@ interface SessionEntry {
   // → TerminateProcess（瞬时不可捕获），打不死卡死在死 socket 上的子进程时兜底硬杀。
   abortController: AbortController | null;
   // 启动时解析出的当前实际模型 ID（供应商库解析；库空时为老别名链结果）。
-  // persistCliEvent 推送初始 windowSize 按它查上下文覆盖；canUseTool 的 Agent/Task
-  // 调用级 model 改写（唯一实际模型·第二层保险）也读它。
+  // forwardEvent 推送 turn-usage/压缩 pending 的 windowSize 时按它查上下文覆盖；
+  // canUseTool 的 Agent/Task 调用级 model 改写（唯一实际模型·第二层保险）读的是下方 resolvedModel。
   requestedAlias: string | null;
   // 本次 query 解析出的「当前实际模型」ID（resolveSessionModel 结果；库空时 null）。
   // 与 requestedAlias 分开存：requestedAlias 兼作上下文窗口查询键，resolvedModel
@@ -179,7 +179,9 @@ interface SessionEntry {
   providerName: string | null;
   // 本次 query 解析出的完整连接覆盖（post-turn 探针复用，保证回合内环境一致）。
   sessionModelOverride: SessionModelOverride | null;
-  // 仅用于日志区分同一 Query 内部重试与 stale resume 重建的新 Query。
+  // 本 Query 的代际序号：除日志区分同 Query 内部重试与 stale resume 重建的新 Query 外，
+  // 还是行为契约键——上下文 payload 的 queryGeneration、runtime 快照/压缩账单的同代际守卫
+  // （review-v3 High-1/High-2）与 post-turn 探针代际（probeInstance）都由它充当，旧代际迟到结果据此让位。
   queryInstance: number;
   // streaming input 包装句柄：settle 在回合终态收口（result/aborted/error/abort 路径），
   // 解除挂起的输入生成器，避免泄漏 + 让 streamInput 正常 endInput。
@@ -518,7 +520,7 @@ function watchdogTick(): void {
       logger.warn(`[stall] session ${sessionId} 无响应 ${Math.round(verdict.gapMs / 1000)}s（zone=${verdict.zone}, lastKind=${t.lastKind}, agent=${t.lastParentAgentId ?? '-'}, count=${t.stallCount}）`);
     }
     // 硬中断：静默累计到 zone 上限 → killProcess（abortController 真硬杀）。每回合只发一次。
-    // model 区=模型服务卡死；tool 区=子任务/工具死锁或死连接（长工具会持续发 tool_progress，不会到这）。
+    // model 区=模型服务卡死；tool 区=子任务/工具死锁或死连接（shell 家族长工具持续发 tool_progress 不会到这；非 shell 家族无心跳、可达此处，仅被下方 P3-3 守卫豁免硬杀）。
     if (verdict.hardAbort && !t.hardAbortFired) {
       // P3-3：非 shell 家族工具静默放宽——tool_progress 只有 Bash/PowerShell/REPL 会发
       //（验证轮坐实），MCP/WebSearch/Task 等工具全程无心跳，900s 静默是正常时长而非死锁；
@@ -854,7 +856,7 @@ function resolveFromCmdShim(cmdPath: string): string | undefined {
 
 // OPT-3：resolveExecutable 结果缓存（按 trim 后首段命令名）。execFileSync('where'/'which')
 // 同步阻塞，此前每回合 spawn / 每探针都执行一次纯浪费。失败（undefined）不缓存——CLI 装好
-// 后下次可重试成功；CONFIG_SAVE（cliPath 可能变化）时整表失效（onConfigSaved 订阅，见 init）。
+// 后下次可重试成功；CONFIG_SAVE（cliPath 可能变化）时整表失效（onConfigSaved 订阅，见下方模块级订阅点）。
 const resolveExecutableCache = new Map<string, string | undefined>();
 
 // hb10 P2-16：整串绝对路径解析——exe 直接命中；win 下 .cmd/.bat shim 不能直接 spawn，
@@ -1042,7 +1044,9 @@ function buildClaudeLinkSettingsBlock(
 ): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined } {
   // 内联 settings——claude-link 显式设置叠加在原生来源之上（managed < user < project < local
   // < Options.settings）。与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），
-  // 避免 SDK 路径丢 hooks 等 advancedJson 顶层设置；投影内含 env（apiKey/baseUrl/advancedJson.env 字符串项）。
+  // 避免 SDK 路径丢 hooks 等 advancedJson 顶层设置；投影内含 env（仅 advancedJson.env 的非凭据
+  // 字符串项——G1 凭据三键排除在投影外）；apiKey/baseUrl 仅在 modelOverride 非空时经
+  // applySessionOverrideEnv 注入本 settings 块（见下），全局凭据只走 Options.env（buildSpawnEnv）通道。
   const settings = buildClaudeSettingsProjection(config);
   // buildClaudeSettingsProjection 返回类型宽化为 Record<string,unknown>，但 env 运行时实为 Record<string,string>；
   // 取别名供下方按会话别名补注入 MAX_CONTEXT_TOKENS（投影不含该项，需在此按会话补）。
@@ -2772,9 +2776,9 @@ export async function startCommandProbe(sessionId: string, mainWindow: BrowserWi
   }
   // N3：先等待已有 probe 取消结束（有限超时），避免两个 probe 并发创建/退出 Claude Code 进程。
   await cancelCommandProbeInternal(sessionId, 1000);
-  // N5：重启后打开已有会话时 activeSessions 为空（markSessionActive 只在 SESSION_CREATE / spawnForChat /
-  // spawnForTask 调用），probe 不应因此被拦截。会话存活的判据是「内存活跃 或 DB 中真实存在（未删除）」；
-  // 删除会话会同时撤销 activeSessions 登记与 DB 记录。getSession 结果同时供下方 N1 配置合并复用。
+  // N5：重启后打开已有会话时 activeSessions 可能为空（并非所有打开会话的路径都调用 markSessionActive，
+  // 如 COMMANDS_GET 的 needsRefreshProbeOnly 只重探分支即不登记），probe 不应因此被拦截。会话存活的判据是
+  // 「内存活跃 或 DB 中真实存在（未删除）」；删除会话会同时撤销 activeSessions 登记与 DB 记录。getSession 结果同时供下方 N1 配置合并复用。
   let sessionFromDb: ReturnType<typeof sessionRepo.getSession> = null;
   try {
     sessionFromDb = sessionRepo.getSession(sessionId);
@@ -4071,7 +4075,7 @@ async function runQuery(
       finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
       // hb12-P2-2（出口② 终态重构）：entry.knownOutcome='interrupted' + 显式结算——无 result 时代码不得伪造 success——
-      // exit 兜底（ipc:624 / tqe:598 附近，hb13-v 批C 行号对齐）结算为 success（队列假成功+armAfterTurn 自动启动下一任务），
+      // exit 兜底（ipc-handlers.ts child.on('exit') 内 getKnownTurnOutcome 处，当前 ~:689 / tqe 出队 child.on('exit') 兜底内同函数处 ~:600）结算为 success（队列假成功+armAfterTurn 自动启动下一任务），
       // 与用户看到的「回合已结束」矛盾。改 emitExit(null)（系统杀语义），同序列显式结算
       // interrupted（在 emitExit 之前；队列结算幂等闸 noteTurnOutcome 防重入，exit 兜底变 no-op）。
       entry.knownOutcome = 'interrupted';

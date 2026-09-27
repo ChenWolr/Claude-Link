@@ -17,7 +17,7 @@ async function runVersion(command: string): Promise<CliDetectionResult | null> {
     const version = (stdout || stderr).trim() || null;
     return { installed: true, path: command, version };
   } catch {
-    // Fall through to shell-based fallback
+    // Fall through to the fallback below (shell fallbacks are Windows-only; non-Windows returns null)
   }
 
   // 2. Windows fallback: use cmd /c to resolve .cmd/.bat files via PATH

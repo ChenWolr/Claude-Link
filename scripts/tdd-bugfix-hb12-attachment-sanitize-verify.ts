@@ -10,7 +10,7 @@
 //   ③ 无长度上限（hb12-ATT-02）：300 字符文件名原样通过 → MAX_PATH 260 必败且 raw 错误串经
 //      ipc 透传泄漏绝对路径 → basename 裁剪 100 字符 + 截断哈希后缀，保留扩展名。
 //
-// 边界值：老库已存坏键的孤儿清扫逻辑不动（仅新写入不产生坏键）；前端展示名不变（filename 仅存储用）。
+// 边界值：老库已存坏键的孤儿清扫逻辑不动（仅新写入不产生坏键）；UI 展示名与存储名同源（renderer 直接渲染本函数产物 filename，被改写文件在 UI 亦显示改写后名称，无独立展示名通道）。
 //
 // 运行：npx tsx scripts/tdd-bugfix-hb12-attachment-sanitize-verify.ts
 

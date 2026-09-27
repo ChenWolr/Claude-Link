@@ -20,7 +20,7 @@ export const FINGERPRINT_MAX_DEPTH = 6;
 export const WATCHER_DEBOUNCE_MS = 1500;
 /** 两次真实全局探测的最小间隔（节流；绝不轮询式 spawn）。 */
 export const WATCHER_PROBE_MIN_INTERVAL_MS = 10_000;
-/** watcher error 自愈：延迟重挂间隔与连续限次（超过放弃，等下一次 onConfigSaved/重启）。 */
+/** watcher error 自愈：延迟重挂间隔与连续限次（超限不再放弃，转入 WATCHER_PENDING_ROOT_RETRY_MS 慢重试循环直至挂上；onConfigSaved 仍会清零计数给新机会）。 */
 export const WATCHER_REMOUNT_DELAY_MS = 5000;
 export const WATCHER_REMOUNT_MAX_CONSECUTIVE = 3;
 /** 待重挂根（挂载时目录尚不存在等）的兜底重试周期（review-v1 发现2：目录从无到有盲区）。 */

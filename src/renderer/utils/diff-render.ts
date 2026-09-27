@@ -142,7 +142,9 @@ export interface SplitRow {
  * - ctx → 每行 same（L[i]/R[i] 各取一行；行号 L 旧 / R 新）
  * - add → 左 null + 右行；del → 左行 + 右 null
  * - mod/ws（恒 1:1）→ 左右各一行，带 LCS segs（同时 chunkStart+chunkEnd）
- * 替代 DiffBody 模板里的 pad=Math.max(L,R) 循环 + 占位逻辑。
+ * 初版为替代 DiffBody 模板里的 pad=Math.max(L,R) 循环 + 占位逻辑而生；现 split 渲染层已切到
+ * buildSplitChunks，本函数已无产品代码调用方，仅 scripts/regression-tests.ts「并排成对行数组
+ * 契约」消费。planSplitVisible 同（仅随本函数的测试消费）。
  */
 export function buildSplitRows(f: ParsedDiffFile): SplitRow[] {
   const rows: SplitRow[] = [];
@@ -349,7 +351,7 @@ export function buildSplitChunks(
 export interface Offsets { left: number; right: number; }
 
 /**
- * 移植 contrast scrollY 的焦点 1/3 对齐：焦点 = 视口顶部下 1/3 处。
+ * 移植 contrast 风格稿的焦点 1/3 对齐（参照源未入库）：焦点 = 视口顶部下 1/3 处。
  * 找焦点所在 chunk，让该 chunk 左右两侧在 river 空间对齐——
  *   base = (riverStart - sideStart) × lineHeight  （让侧顶部对齐 river 顶部）
  *   + percent × (size - sideSize) × lineHeight     （按 chunk 内进度，较窄侧往下推）
@@ -430,7 +432,7 @@ export function resolveSearchScrollTop(
 }
 
 /**
- * 单个桥的几何（随 offsets 变化）。忠实移植 contrast drawBridge L380-420：
+ * 单个桥的几何（随 offsets 变化）。忠实移植 contrast（cc-haha）桥几何（参照源未入库）：
  * - top 减 1 / bottom 加 2 对齐 2px ruler；
  * - 一侧 size=0 时该侧 top-bottom 保持 2px（Math.max），形成三角形（左尖右宽），不是 1 行梯形；
  * - polygon 之外返回上下边线坐标（contrast 用 2 条 <line> 描边，让「顶部往左插入」的斜线清晰可见）。
@@ -459,7 +461,7 @@ export function bridgePolygon(
   const height = Math.max(bottom - top, 2);
   const p = (x: number, y: number) => `${x},${Math.round((y - top) * 10) / 10}`;
   const points = [p(0, leftTop), p(100, rightTop), p(100, rightBottom), p(0, leftBottom)].join(' ');
-  // 上下边线（contrast L418-420：±1px offset 防 viewBox 裁剪）
+  // 上下边线（参照源未入库：±1px offset 防 viewBox 裁剪）
   const topLine = {
     y1: Math.round((leftTop - top + 1) * 10) / 10,
     y2: Math.round((rightTop - top + 1) * 10) / 10,
@@ -472,8 +474,8 @@ export function bridgePolygon(
 }
 
 /**
- * 「纸面工坊」桥几何（bridgePolygon 的贝塞尔缎带变体，与原型 diff-viewer-v3.html updateBridges
- * 逐字一致，实测「桥尖-插入标记-前侧末行底边」三线合一）。与 bridgePolygon 并存：
+ * 「纸面工坊」桥几何（bridgePolygon 的贝塞尔缎带变体，与纸面工坊原型 updateBridges 一致——
+ * 原型未入库，实测「桥尖-插入标记-前侧末行底边」三线合一）。与 bridgePolygon 并存：
  * split 渲染层切到本函数，旧 polygon 契约（tdd-diff-offsets-verify）不动。
  * - top 减 1 / bottom 加 2 对齐行边界（同 bridgePolygon 的 ruler 对齐）；
  * - 一侧 size=0 时该侧保持 2px（Math.max），退化成三角缎带；

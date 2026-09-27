@@ -18,7 +18,9 @@ import type { ProjectDirEntry } from '../../shared/types/command';
  * R-1 超时预算 helper：Promise.race 竞速，超时归 null（finally 中 clearTimeout 清理定时器）。
  * 3s 预算针对不可达 UNC/断连映射盘——Windows 对不可达网络主机的同步 stat 阻塞数秒~数十秒，
  * 曾会让整个 IPC handler 同步占死主进程；本地路径 stat/枚举亚毫秒，预算不受影响。
- * 同一坏目录每次进 tab 仍会消耗一次 3s 预算（目录至多 13：recent ≤12 + 独立 defaultDir，可接受）。
+ * P2-4 起项目目录路径上 stat 超时的坏目录受负缓存（60s TTL）保护，期内重复进 tab 不再消耗
+ * 预算（TTL 过期后的首次重探仍会；目录至多 13：recent ≤12 + 独立 defaultDir，可接受）；
+ * 用户根整根枚举（collectUserSkillDirNames）无负缓存，每次进 tab 仍消耗一次 3s 预算。
  */
 async function withTimeout<T>(p: Promise<T>, ms = 3000): Promise<T | null> {
   let timer: NodeJS.Timeout | undefined;

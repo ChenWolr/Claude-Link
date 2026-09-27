@@ -2,9 +2,9 @@
 // 纯函数：把会话配置与增量 SpawnOptions 合并为完整 probe/query options（review-v2 N1 修复）。
 //
 // 背景：SESSION_UPDATE 重新探测时只传本次 IPC 的增量 patch（如仅 { workingDir }），若直接当完整
-// probe options 使用，会丢失 modelOverride / model / permissionMode / maxTurns / thinkingLevel，
-// 导致探测上下文与会话真实上下文漂移（N1）。本函数用 sessionRepo 读出的完整 Session 补全 opts
-// 缺失字段（增量优先）。
+// probe options 使用，会丢失 modelOverride / model / providerOverride / workingDir /
+// permissionMode / maxTurns / thinkingLevel，导致探测上下文与会话真实上下文漂移（N1）。
+// 本函数用 sessionRepo 读出的完整 Session 补全 opts 缺失字段（增量优先）。
 //
 // Task 3：新增 buildNativeSdkOptionsCore——统一生产 query / 全局 probe / per-session probe 的
 // 核心 SDK options 组装。保证两类调用走同一构造逻辑，避免 probe 与真实回合配置漂移；且绝不传

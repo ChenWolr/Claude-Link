@@ -13,9 +13,6 @@ const config = ref<BridgeConfigGetResult | null>(null);
 const statuses = ref<BridgePlatformStatusEntry[]>([]);
 const bindings = ref<BridgeBindingView[]>([]);
 const saveError = ref('');
-// 解绑 transient 提示（生命周期修复批次1）：确认框通过后展示 4s，告知解绑语义与平台连接保持。
-const unbindNotice = ref('');
-let unbindNoticeTimer: number | undefined;
 // 飞书 appId 即时校验（批次1.3）：blur 时格式非法 → 红字且不触发保存。
 const appidError = ref('');
 
@@ -23,7 +20,7 @@ const appidError = ref('');
 const feishuAppSecret = ref('');
 const feishuTesting = ref(false);
 const feishuTestResult = ref<BridgeFeishuTestResult | null>(null);
-// B4：测试结果自动消失（仅 ok=true 60s 后清；失败保留供查看）。生命周期同 unbindNoticeTimer。
+// B4：测试结果自动消失（仅 ok=true 60s 后清；失败保留供查看）。
 let feishuTestResultTimer: number | undefined;
 function clearFeishuTestResultTimer(): void {
   if (feishuTestResultTimer !== undefined) {
@@ -155,11 +152,6 @@ async function testFeishu(): Promise<void> {
   }
 }
 
-function clearOwner(): void {
-  if (!window.confirm('确定清除授权用户？清除后，下一个给机器人发私聊消息的用户将自动成为授权用户。')) return;
-  void save({ feishu: { ownerOpenId: '' } });
-}
-
 // ── 微信 ──
 
 async function startQrcodeLogin(opts?: { auto?: boolean }): Promise<void> {
@@ -272,10 +264,6 @@ const wechatOwnerName = computed(() => {
   const b = bindings.value.find((x) => x.platform === 'wechat' && x.userId === uid);
   return b?.displayName || `${uid.slice(0, 8)}…`;
 });
-function clearWechatOwner(): void {
-  if (!window.confirm('确定清除授权用户？清除后，下一个给机器人发私聊消息的用户将自动成为授权用户。')) return;
-  void save({ wechat: { ownerUserId: '' } }); // 主进程 '' → null
-}
 
 // C3：飞书 owner 从绑定行解析昵称（对齐 wechatOwnerName 模式）；
 // 无绑定/无昵称回退裸 openId 原样显示（不显示 undefined/空）。
@@ -288,24 +276,6 @@ const feishuOwnerName = computed(() => {
 async function pickWorkingDir(): Promise<void> {
   const dir = await claude.pickWorkspaceDir();
   if (dir) await save({ global: { workingDir: dir } });
-}
-
-// 解绑（生命周期修复批次1）：确认框明示「消息被忽略 + 平台不断开」语义；成功后 transient
-// 提示 4s 并重拉列表。彻底停用引导走平台开关（面板提示文案）。
-async function unbindBinding(sessionKey: string): Promise<void> {
-  if (!window.confirm('确定解绑？解绑后该用户的消息将被忽略，直到对方发送 /new 重新绑定。平台连接保持不断开。')) return;
-  try {
-    await claude.bridgeUnbind(sessionKey);
-    unbindNotice.value = '已解绑；期间该用户消息将被忽略，平台连接保持（彻底停用请关闭平台开关）';
-    if (unbindNoticeTimer !== undefined) window.clearTimeout(unbindNoticeTimer);
-    unbindNoticeTimer = window.setTimeout(() => {
-      unbindNoticeTimer = undefined;
-      unbindNotice.value = '';
-    }, 4000);
-    await loadAll();
-  } catch (e) {
-    saveError.value = String(e instanceof Error ? e.message : e);
-  }
 }
 
 // 批次3.4：平台重连（bridgePlatformRestart 后端；未启用/凭据缺失由主进程明确抛错）。
@@ -337,11 +307,7 @@ onBeforeUnmount(() => {
     window.clearTimeout(nowTimer);
     nowTimer = undefined;
   }
-  if (unbindNoticeTimer !== undefined) {
-    window.clearTimeout(unbindNoticeTimer);
-    unbindNoticeTimer = undefined;
-  }
-  // B4：同 unbindNoticeTimer 生命周期写法。
+  // B4：卸载时清理测试结果自动消失定时器。
   if (feishuTestResultTimer !== undefined) {
     window.clearTimeout(feishuTestResultTimer);
     feishuTestResultTimer = undefined;
@@ -366,15 +332,9 @@ function statusInfo(platform: 'feishu' | 'wechat'): { label: string; tone: 'ok' 
   return { label: s === 'disconnected' ? STATUS_LABELS.disconnected : STATUS_LABELS.off, tone: 'dim' };
 }
 
-// 绑定按面板过滤：平台面板只看本平台；全局面板看全部（数据仍是同一 bridgeListBindings 快照）。
-const paneBindings = computed(() =>
-  activePane.value === 'global' ? bindings.value : bindings.value.filter((b) => b.platform === activePane.value),
-);
-
-// lastActiveAt（契约已有、UI 此前未用）以相对时间显示。
 // nowTick：60 秒链式 setTimeout 自排（scheduleNowTick 风格：本轮完成后再排下一轮；不用 interval 型
-// 轮询 API——契约钉 D④ 断言本文件源码不含其字样，注释同样回避），让相对时间无需操作也会随 tick
-// 刷新；卸载时在 onBeforeUnmount 里 clearTimeout 清理。
+// 轮询 API——契约钉 D④ 断言本文件源码不含其字样，注释同样回避），驱动 staleInbound 等模板内
+// 时间判定随 tick 重算；卸载时在 onBeforeUnmount 里 clearTimeout 清理。
 const nowTick = ref(Date.now());
 let nowTimer: number | undefined;
 function scheduleNowTick(): void {
@@ -385,16 +345,6 @@ function scheduleNowTick(): void {
   }, 60_000);
 }
 scheduleNowTick();
-
-function formatLastActive(ts: number): string {
-  if (!ts) return ''; // 0/缺省 → 空串（不显示「刚刚活跃」假象）
-  // 「现在」取 nowTick.value（响应式 tick），diff 为负（时钟偏移）落入 < 60_000 分支按「刚刚活跃」处理。
-  const diff = nowTick.value - ts;
-  if (diff < 60_000) return '刚刚活跃';
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前活跃`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前活跃`;
-  return `${Math.floor(diff / 86_400_000)} 天前活跃`;
-}
 
 // 批次5.1-5：供 ConfigPage 切回 IM tab 时重拉（owner 被捕获后切 tab 能看到最新数据）。
 defineExpose({ refresh: loadAll });
@@ -460,7 +410,6 @@ defineExpose({ refresh: loadAll });
     <!-- 右栏：所选平台详情 -->
     <div class="im-detail">
       <p v-if="saveError" class="im-error" role="alert">{{ saveError }}</p>
-      <p v-if="unbindNotice" class="im-hint" role="status">{{ unbindNotice }}</p>
 
       <!-- 飞书面板 -->
       <template v-if="activePane === 'feishu'">
@@ -512,7 +461,6 @@ defineExpose({ refresh: loadAll });
         </label>
         <div v-if="config?.feishu.ownerOpenId" class="im-inline-row">
           <span>Owner：{{ feishuOwnerName || config.feishu.ownerOpenId }}{{ feishuOwnerName ? `（${config.feishu.ownerOpenId}）` : '' }}</span>
-          <button type="button" class="im-act-btn im-act-btn--danger" @click="clearOwner">清除</button>
         </div>
         <div v-if="feishuTestResult" class="im-inline-row">
           <span v-if="feishuTestResult.ok" class="im-status-pill im-status-pill--ok">连接成功{{ feishuTestResult.botName ? `（机器人：${feishuTestResult.botName}）` : '' }}</span>
@@ -532,9 +480,9 @@ defineExpose({ refresh: loadAll });
             <li>打开「启用」开关，等待状态变绿。</li>
             <li>在飞书里给机器人发私聊消息即可对话。</li>
             <li>仅支持私聊；群消息不会响应。</li>
-            <li>命令：/new 开启新会话并重新绑定；/stop 中断当前回合。解绑后需发送 /new 重新绑定。</li>
+            <li>命令：/new 开启新会话并重新绑定；/stop 中断当前回合。</li>
             <li>短时间连发的多条消息会合并为一次回复（约 2 秒窗口）。</li>
-            <li>关闭通信期间收到的消息不会在重新打开后处理（微信）。</li>
+            <li>关闭通信期间收到的消息不会在重新打开后处理。</li>
             <li>IM 对话内容会在桌面端会话列表中可见与留存（隐私提示）。</li>
             <li>仅授权用户（owner）可触发对话；首个私聊用户将自动成为授权用户。</li>
           </ol>
@@ -564,9 +512,8 @@ defineExpose({ refresh: loadAll });
         <!-- 批次5.2-5：授权用户行（owner 收窄 UI）。 -->
         <div v-if="wechatOwnerUserId" class="im-inline-row">
           <span>当前授权用户：{{ wechatOwnerName }}（{{ wechatOwnerUserId }}）</span>
-          <button type="button" class="im-act-btn im-act-btn--danger" @click="clearWechatOwner">清除授权</button>
         </div>
-        <span class="im-field-hint">仅授权用户可触发对话；清除后下一个发私聊的用户将自动成为授权用户</span>
+        <span class="im-field-hint">仅授权用户可触发对话；退出登录并重新扫码后，下一个发私聊的用户将自动成为授权用户</span>
         <!-- 扫码入口独立条件（生命周期修复批次1.5）：expired 态与「退出登录」并存，
              扫码确认即完成重登，免除「先退出再扫码」两步。 -->
         <template v-if="!config?.wechat.loggedIn || wechatSessionExpired()">
@@ -592,11 +539,11 @@ defineExpose({ refresh: loadAll });
             <li>登录成功后显示已登录状态，打开左侧「微信」开关启用机器人。</li>
             <li>用微信给机器人发私聊消息即可对话；仅支持私聊，群消息不会响应。</li>
             <li>仅授权用户可触发对话；首个私聊用户将自动成为授权用户。</li>
-            <li>命令：/new 开启新会话并重新绑定；/stop 中断当前回合；/help 查看帮助。解绑后需发送 /new 重新绑定。</li>
+            <li>命令：/new 开启新会话并重新绑定；/stop 中断当前回合；/help 查看帮助。</li>
             <li>短时间连发的多条消息会合并为一次回复（约 2 秒窗口）。</li>
             <li>机器人只能在你最近 24 小时内发过消息后回复你（微信平台限制）。</li>
             <li>图片/文件/视频消息暂不支持查看，会收到占位提示；语音会自动转为文字。</li>
-            <li>关闭通信期间收到的消息不会在重新打开后处理。</li>
+            <li>关闭「微信」开关期间收到的消息不会在重新打开后处理；应用退出期间收到的消息会在下次启动后补处理。</li>
             <li>IM 对话内容会在桌面端会话列表中可见与留存（隐私提示）。</li>
           </ol>
         </details>
@@ -627,22 +574,9 @@ defineExpose({ refresh: loadAll });
             :checked="config?.global.receiptEnabled ?? true"
             @change="save({ global: { receiptEnabled: ($event.target as HTMLInputElement).checked } })"
           />
-          <span class="im-field-hint">开启后，每条消息触发处理时先回一条「（正在处理…）」，长任务等待时不至于无反馈</span>
+          <span class="im-field-hint">开启后，每批消息开始处理时先回一条「（正在处理…）」（连发合并为一批时也只回一条），长任务等待时不至于无反馈</span>
         </label>
       </template>
-
-      <!-- 会话绑定（三个面板共用，置于底部；平台面板过滤本平台，全局=全部） -->
-      <div class="im-bindings">
-        <div class="im-subhead">会话绑定（{{ paneBindings.length }}）{{ activePane === 'global' ? ' · 全部平台' : ' · 仅本平台' }}</div>
-        <div v-for="b in paneBindings" :key="b.sessionKey" class="im-bind-row">
-          <span :class="['im-platform-badge', `im-platform-badge--${b.platform}`]">{{ b.platform === 'feishu' ? '飞书' : '微信' }}</span>
-          <span class="im-bind-row__name">{{ b.displayName || b.userId }}</span>
-          <span class="im-bind-row__id">{{ b.userId }}</span>
-          <span class="im-bind-row__time">{{ formatLastActive(b.lastActiveAt) }}</span>
-          <button type="button" class="im-act-btn" @click="unbindBinding(b.sessionKey)">解绑</button>
-        </div>
-        <p v-if="paneBindings.length === 0" class="im-bind-empty">暂无绑定；在 IM 里给机器人发私聊消息后会自动出现。解绑后需对方发送 /new 重新绑定。</p>
-      </div>
     </div>
   </div>
 </template>
@@ -1009,13 +943,6 @@ defineExpose({ refresh: loadAll });
   font-size: 0.75rem;
 }
 
-/* transient 操作提示（解绑确认后 4s）：中性蓝灰，区别于错误红。 */
-.im-hint {
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-}
-
 /* 批次3.1：平台面板内联错误行（红字 12px；完整文案 hover title）。 */
 .im-status-error {
   margin: -0.5rem 0 0;
@@ -1061,95 +988,5 @@ defineExpose({ refresh: loadAll });
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: #fff;
-}
-
-/* 会话绑定：分区标题 + 行卡片。 */
-.im-bindings {
-  display: flex;
-  flex-direction: column;
-}
-
-.im-subhead {
-  display: flex;
-  align-items: baseline;
-  gap: 0.5rem;
-  border-bottom: 1px solid var(--color-border);
-  padding-bottom: 0.5rem;
-  margin-bottom: 0.625rem;
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: var(--color-text);
-}
-
-.im-bind-row {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-panel-soft);
-  padding: 0.625rem 0.75rem;
-}
-
-.im-bind-row + .im-bind-row {
-  margin-top: 0.375rem;
-}
-
-.im-bind-row:hover {
-  border-color: color-mix(in srgb, var(--color-accent) 40%, transparent);
-}
-
-.im-bind-row__name {
-  font-size: 0.8125rem;
-  font-weight: 500;
-  color: var(--color-text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.im-bind-row__id {
-  flex: 1;
-  min-width: 0;
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-  overflow-wrap: anywhere;
-}
-
-.im-bind-row__time {
-  flex-shrink: 0;
-  font-size: 0.6875rem;
-  color: var(--color-text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.im-platform-badge {
-  flex-shrink: 0;
-  padding: 0.0625rem 0.4375rem;
-  border-radius: var(--radius-pill);
-  font-size: 0.625rem;
-  font-weight: 700;
-  border: 1px solid transparent;
-}
-
-/* 平台色字面量：飞书品牌蓝。 */
-.im-platform-badge--feishu {
-  border-color: color-mix(in srgb, #3370FF 45%, transparent);
-  background: color-mix(in srgb, #3370FF 10%, transparent);
-  color: #3370FF;
-}
-
-/* 平台色字面量：微信品牌绿。 */
-.im-platform-badge--wechat {
-  border-color: color-mix(in srgb, #07C160 45%, transparent);
-  background: color-mix(in srgb, #07C160 10%, transparent);
-  color: #07C160;
-}
-
-.im-bind-empty {
-  margin: 0;
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
 }
 </style>

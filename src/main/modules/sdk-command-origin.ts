@@ -37,7 +37,8 @@ function parseFrontmatter(text: string): { name?: string; slug?: string } {
 
 // hb10-CMD-01（收窄）+ hb12-CMD-04：同名冲突按官方优先级裁 winner（plugin/builtin >
 // enterprise > user-skill/personal > project），不再判 unknown——同名命令菜单可见且
-// 来源徽章正确。证据仍记录全部 origins 供诊断。
+// 来源徽章正确。证据仍采集全部来源通道（user/project/plugin）；同名冲突键经优先级
+// 裁决后仅保留 winner origin（落败来源不留痕），诊断以 winner 为准。
 const ORIGIN_PRIORITY: Record<string, number> = {
   plugin: 60,
   builtin: 60,

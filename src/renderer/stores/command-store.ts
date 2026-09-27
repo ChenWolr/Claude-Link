@@ -14,7 +14,9 @@ import { useConfigStore } from './config-store';
 
 // M8/D-1：主进程全局兜底快照的哨兵 sessionId（镜像 src/main/modules/sdk-command-registry.ts 的
 // GLOBAL_FALLBACK_SESSION_ID 字面量；渲染层不 import 主进程模块、本次亦不改 shared，故镜像于此）。
-// 仅用于 load() 暂态分支回填 globalSnapshot 时把被主进程改写的 sessionId 归位。
+// 用于两处：① load() 内 source==='cache' 响应回填 globalSnapshot 时把被主进程改写的 sessionId
+// 归位（S2-P2-2 起不限暂态分支，暂态/非暂态路径均回填）；② ensureGlobalSnapshot() 以哨兵 id
+// 调 load() 走只读分流自愈。
 const GLOBAL_FALLBACK_SESSION_ID = '__global_command_fallback__';
 
 // ensureGlobalSnapshot 的 in-flight 锁（模块级非响应式：只做并发去重，不驱动 UI；单 renderer

@@ -176,3 +176,4 @@ scripts/tdd-bridge-feishu-adapter-verify.ts
 scripts/tdd-bridge-wechat-verify.ts
 scripts/tdd-bridge-manager-verify.ts
 scripts/tdd-bridge-ui-static-verify.ts
+scripts/tdd-bridge-session-lock-verify.ts

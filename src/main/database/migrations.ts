@@ -161,8 +161,8 @@ function runMigrationStatements(db: Database.Database): void {
     if (!hasCol('last_turn_ended_at')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_turn_ended_at INTEGER DEFAULT NULL');
     }
-    // Skill 管理自愈：会话级 skill 禁用快照（创建时钉住）。免升版（B3 先例），
-    // CURRENT_SCHEMA_VERSION 保持 12，不撞 pin 脚本。
+    // Skill 管理自愈：会话级 skill 禁用快照（创建时钉住）。落地时免升版（B3 先例），
+    // 仅走幂等自愈补列；后续 V13/V14 已另行升版，本列的加列入口仍以本自愈块为准。
     if (!hasCol('skill_overrides')) {
       db.exec('ALTER TABLE sessions ADD COLUMN skill_overrides TEXT DEFAULT NULL');
     }
@@ -287,7 +287,7 @@ function runMigrationStatements(db: Database.Database): void {
     `);
   }
 
-  // V14（IM 生命周期修复批次1）：解绑墓碑列。bridgeUnbind 从 DELETE 改 UPDATE 置位（行保留、
+  // V14（IM 生命周期修复批次1）：解绑墓碑列。解绑路径从 DELETE 改 UPDATE 置位（行保留、
   // get/list/touch 过滤），杜绝「解绑后 flush 把无绑定解释为悬空→自动重建」的接回复活；upsert
   // ON CONFLICT 清位 = IM 端发 /new 天然重新绑定。旧数据自动 NULL（= 未解绑）。
   // 列存在守卫（V12 同款）：版本号已推进但列缺失的半应用库不阻塞启动。

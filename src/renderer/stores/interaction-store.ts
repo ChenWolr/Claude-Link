@@ -25,7 +25,8 @@ export const useInteractionStore = defineStore('interaction', {
     activeRequest(state): InteractionPromptPayload | null {
       return state.requests[0] ?? null;
     },
-    // hb10-PERM-05：按会话维度的远程 pending 计数（侧栏 badge / 托盘 ⏳ 数据源）。
+    // hb10-PERM-05：按会话维度的远程 pending 计数（侧栏 badge 数据源；托盘 ⏳ 走主进程
+    // pendingInteractionCount + setInteractionCountChangedHook，不经本 getter）。
     pendingRemoteCountBySession(state): Record<string, number> {
       const out: Record<string, number> = {};
       for (const r of state.requests) {
@@ -59,7 +60,8 @@ export const useInteractionStore = defineStore('interaction', {
         this.meta.set(payload.id, { isLocal: true, resolver: resolve });
       });
     },
-    // hb10-PERM-03：30s 对账（仅弹窗可见时轮询）——主进程已不在的（已答复/已取消但回执丢失）
+    // hb10-PERM-03：30s 对账（activeRequest 非空即轮询——该 getter 取 requests[0] 未按会话过滤，
+    // 含他会话排队请求，弹窗不可见仍对账自愈）——主进程已不在的（已答复/已取消但回执丢失）
     // 本地移除；主进程有而本地没有的（漏收）补挂。死亡/不可见挂起可自愈。
     // （hb13-v 批C：原注释「IPC 失败时仍移除请求…」描述的是 respondAndRemove 旧行为，
     //  与现实现「失败不移除、请求留队可重试」相反，已删——见 respondAndRemove 处注释。）

@@ -11,7 +11,7 @@
 // 返工追加（2026-09-21 review）：
 //   A④. owner 判定收敛到 isBridgeOwner 纯函数，manager 不留内联比较（P3c 防两处漂移）；
 //   I④. busy 超限丢弃补 logger 日志（P3a：丢弃不得无诊断痕迹）；
-//   Q.  /stop 时序真实化（P1）：真实管线中 sdk-backend 出口先 deleteEntry 再 emitExit →
+//   Q.  /stop 时序真实化（P1）：真实管线中 sdk-backend 置位 knownOutcome 的出口先 deleteEntry 再 emitExit →
 //       dispatcher exit 回调读 known 恒 null、kill 出口 code=null → 中断回合被兜底判 'error'
 //       （时序机制钉在 tdd-bridge-dispatcher-verify [8]）。fake dispatcher 按此真实产出返回
 //       {outcome:'error'}，钉死 manager 须按 interrupted 处理、不得向 IM 发「回复生成失败」。
@@ -355,8 +355,8 @@ async function main(): Promise<void> {
       JSON.stringify({ interrupted: worldO2.world.interrupted, replies: worldO2.world.feishuAdapter.sentReplies }));
   }
 
-  // ── Q. /stop 中断时序真实化（review P1）：真实管线中 sdk-backend 出口先 deleteEntry 再
-  // emitExit → dispatcher 的 exit 回调读 getKnownTurnOutcome 恒 null、kill 出口 code=null →
+  // ── Q. /stop 中断时序真实化（review P1）：真实管线中 sdk-backend 置位 knownOutcome 的出口先 deleteEntry 再
+  // emitExit（/stop kill 路径则由 killProcess 先移除 entry）→ dispatcher 的 exit 回调读 getKnownTurnOutcome 恒 null、kill 出口 code=null →
   // 中断回合被兜底判 'error'。fake dispatcher 按该真实产出返回 {outcome:'error', replyText:null}，
   // 钉死 manager：/stop 后不得再向 IM 发「回复生成失败，请稍后重试」（interrupted 分支由此可达）。
   {

@@ -91,7 +91,7 @@ check('③ message-repo：updateResultMeta（AND session_id 守卫）+ findLastT
 });
 
 // ④ IPC：通道常量 + handler（会话存在性校验 + 正数校验 + 双写）；审查修复轮：messageId 命中
-// 失败/为 null 时回落 findLastTurnMainFlowAssistantId（直传 messageId 与 DB id 两套 uuid 永不相等）。
+// 失败/为 null 时回落 findLastTurnMainFlowAssistantId（直传 messageId 常态下非 DB 行 id、命中不了；回合中切走再切回重载后为 DB id 可命中，属良性，两种情况都以本回落兜底）。
 check('④ ipc.ts 通道常量 + ipc-handlers handler（getSession 校验 + v>0 正数校验 + 双写 + messageId 失配 fallback）', () => {
   assert.match(ipcTypes, /SESSION_RECORD_TURN_META: 'session:recordTurnMeta'/, 'IPC_CHANNELS 缺 SESSION_RECORD_TURN_META');
   const hIdx = ipcHandlers.indexOf('IPC_CHANNELS.SESSION_RECORD_TURN_META');
@@ -105,7 +105,7 @@ check('④ ipc.ts 通道常量 + ipc-handlers handler（getSession 校验 + v>0 
   // 审查收口：messageId 类型收窄——仅字符串直传，不得 String() 强转（非字符串直接走 fallback）。
   assert.doesNotMatch(body, /String\(payload\.messageId\)/, '审查收口：handler 不得对 messageId 做 String() 强转');
   // hb10-TM-01 最小同步：fallback 调用追加 { endedAt } 时间下界参数（宽松 10min 窗，防迟到旧 result 脏写更早回合行）。
-  assert.match(body, /if \(!directHit\) \{\s*const fallbackId = messageRepo\.findLastTurnMainFlowAssistantId\(sessionId, \{ endedAt \}\);/, '审查修复轮：handler 缺 fallback（直传 0 行/null 时调 findLastTurnMainFlowAssistantId）');
+  assert.match(body, /if \(!directHit\) \{\s*const fallbackId = messageRepo\.findLastTurnMainFlowAssistantId\(sessionId, \{ endedAt \}\);/, '审查修复轮：handler 缺 fallback（直传未命中/null 时调 findLastTurnMainFlowAssistantId）');
   assert.match(body, /if \(fallbackId\) messageRepo\.updateResultMeta\(fallbackId, sessionId, meta\);/, '审查修复轮：fallback 命中后未用 fallbackId 再写 messages');
 });
 

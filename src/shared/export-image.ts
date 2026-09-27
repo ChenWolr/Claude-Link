@@ -1,6 +1,7 @@
 // 会话导出 JPEG/PNG 长图：纯逻辑（文件名、turn 分组、可见权重、分页拆分、像素/内存预算、段几何与尾段裁剪、PNG 行拷贝与页守卫、进度）。
 // 无 Vue / Electron / DOM 副作用，Node selftest 可直接导入。
-// 依据：docs/glittery-hatching-neumann-v3.md 第 4 / 8 / 9 / 10 / 11 / 12 / 13 节。
+// 依据：设计文档《glittery-hatching-neumann-v3》第 4 / 8 / 9 / 10 / 11 / 12 / 13 节（原文档
+// docs/glittery-hatching-neumann-v3.md 已不在仓库内）。
 
 import type { RenderableMessage } from './types/export-image';
 import type {
@@ -169,7 +170,7 @@ export function estimateMessageWeight(msg: RenderableMessage, imageWeight: numbe
 }
 
 /** 主流程（parentAgentId===null）按 user 消息边界划分对话轮。
- *  首条非 user 的前置消息与首条 user 消息同处 turn 0（prelude/首轮）。
+ *  首条非 user 的前置消息归 turn 0（prelude）；存在前置时首条 user 消息开启 turn 1，无前置时首条 user 消息位于 turn 0。
  *  返回每条消息的 turnIndex；后续每个 user 边界 +1。 */
 export function splitTurnIndices(messages: RenderableMessage[]): number[] {
   const out = new Array<number>(messages.length).fill(0);

@@ -1,6 +1,6 @@
 // 附件校验纯策略：MIME + 魔数 + 扩展名 + 大小 + 图片尺寸 + 总传输预算。
 // 纯函数，无 Electron 依赖（node:crypto 仅用于确定性哈希，无副作用）；regression 脚本与主进程 IPC/service 共用同一份判定逻辑。
-// 附件数量、大小、MIME 常量统一在此定义，避免跨层重复（见 CLAUDE.md「关键设计决策」）。
+// 附件数量、大小、MIME 常量统一在此定义，避免跨层重复（见 CLAUDE.md「其它子系统 → 附件」）。
 import { createHash } from 'node:crypto';
 import type { AttachmentKind, ChatSendPayload } from '../../shared/types/attachment';
 
@@ -274,7 +274,8 @@ export function validateSendBudget(items: Array<{
  * → 孤儿误删+队列熔断）；②折叠/清洗结果为纯点串时回退兜底名（path.win32.resolve/join 会把
  * `<sid>/<id>/.` 折叠为目录自身），尾部 `.` 与空白一并剥除（Win32 尾点文件资源管理器不可操作）；
  * ③basename 超 100 字符裁剪 + 短哈希后缀（区分同前缀不同名）并保留扩展名（MAX_PATH 260 必败 +
- * raw 错误串泄漏路径）。前端展示名不变（filename 仅存储用）。
+ * raw 错误串泄漏路径）。UI 展示名与存储名同源：renderer 直接渲染本函数产物（AttachmentSummary.filename，
+ * 草稿卡片/历史消息附件均如此），被改写文件在 UI 亦显示改写后名称，无独立展示名通道。
  */
 export function sanitizeAttachmentFilename(filename: string): string {
   const raw = filename ?? '';

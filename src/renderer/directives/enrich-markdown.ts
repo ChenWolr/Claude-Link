@@ -8,8 +8,9 @@ import { openImageLightbox } from '../composables/useImageLightbox';
  *    这里懒加载 mermaid 运行时（动态 import，code-splitting 出首屏包），渲染成 SVG。
  *  - 图片灯箱：点击 img.md-img 弹出原图模态（事件委托到容器，卸载时解绑）。
  *
- * 这些是 DOM 依赖的客户端增强，无法由 tsx 契约覆盖（契约只验 renderMarkdown 的 HTML 输出），
- * 视觉/交互正确性靠真实 Electron 目视。
+ * 这些是 DOM 依赖的客户端增强，其中可测部分已由 tsx 契约覆盖（scripts/regression-tests.ts：
+ * mermaid 错误重试判定/无障碍标题为行为断言，串行队列/生命周期守卫为源码结构断言）；
+ * mermaid 运行时真实 SVG 渲染与灯箱视觉交互仍靠真实 Electron 目视。
  */
 
 type MermaidApi = typeof import('mermaid')['default'];

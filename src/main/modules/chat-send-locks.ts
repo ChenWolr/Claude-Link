@@ -12,7 +12,7 @@ export function isChatSendLocked(sessionId: string): boolean {
   return chatSendLocks.has(sessionId);
 }
 
-/** CHAT_SEND 入口加锁（ipc-handlers 专用语义；重复加锁由调用方守卫先行拒绝）。 */
+/** 直发回合入口加锁（CHAT_SEND 与 bridge dispatcher 同构管线共用；重复加锁由调用方守卫先行拒绝）。 */
 export function acquireChatSendLock(sessionId: string): void {
   chatSendLocks.add(sessionId);
 }

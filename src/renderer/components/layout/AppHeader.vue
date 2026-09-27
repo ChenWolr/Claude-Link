@@ -201,7 +201,7 @@ function onFormatCancel(): void {
   color: var(--color-accent-strong);
 }
 
-/* 分享（导出长图）按钮：纯图标，最右侧。启用态 accent 描边，busy 态脉冲，完成态短暂高亮。 */
+/* 分享（导出长图）按钮：纯图标，最右侧。hover 提亮为 accent 描边，busy 态脉冲，完成态短暂高亮。 */
 .app-header__share {
   flex-shrink: 0;
   display: inline-flex;
