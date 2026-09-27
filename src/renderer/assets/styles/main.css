@@ -129,6 +129,7 @@ a:focus-visible,
   overflow-x: auto;
   font-size: 0.8125rem;
   line-height: 1.6;
+  font-family: var(--font-mono);
 }
 
 .markdown-body .d2h-wrapper {
