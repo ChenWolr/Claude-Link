@@ -181,3 +181,4 @@ scripts/tdd-chatinput-autosize-verify.ts
 scripts/tdd-user-bubble-plaintext-verify.ts
 scripts/tdd-markdown-indented-code-off-verify.ts
 scripts/tdd-inline-katex-bounded-verify.ts
+scripts/tdd-compact-banner-fallback-verify.ts

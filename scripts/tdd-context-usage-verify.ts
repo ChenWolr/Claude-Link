@@ -829,7 +829,10 @@ check('formatCompactionSummary：缺任一数字 → hasNumbers:false + 现有�
   assert.equal(noFrom.hasNumbers, false);
   const empty = formatCompactionSummary({});
   assert.equal(empty.hasNumbers, false);
-  assert.equal(empty.title, 'Claude Code 已自动压缩上下文');
+  // 2026-09-27 问题⑤ 最小同步（5db45f7 先例）：无数字 fallback 按 trigger 分流——空 trigger
+  // 视同 manual 显示「上下文已压缩」；auto 仍「已自动压缩」（上一断言 noDrop 已覆盖）。
+  assert.equal(empty.title, '上下文已压缩');
+  assert.equal(formatCompactionSummary({ trigger: 'manual' }).title, '上下文已压缩');
   assert.ok(!/undefined|NaN/.test(empty.title));
 });
 check('formatCompactionSummary：<1000 整数不缩 k', () => {
