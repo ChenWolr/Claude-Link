@@ -85,7 +85,7 @@ onMounted(async () => {
   });
   // 冷启动补拉（2026-09-15）：COMMANDS_GLOBAL_CHANGED 为一次性推送，早于本订阅注册即永久丢失；
   // 订阅就绪后主动拉一次全局兜底快照，覆盖「用户从不进 Skill 页」的全路由场景（暂态会话兜底
-  // 快照也尽早到位）。幂等在 ensureGlobalSnapshot 内（非 loading 快照直接返回，广播已到则 no-op）。
+  // 快照也尽早到位）。幂等在 ensureGlobalSnapshot 内（ready/empty/stale 定态快照直接返回，loading/degraded/error 放行重拉，广播已到则 no-op）。
   void commandStore.ensureGlobalSnapshot();
   // 队列事件全局注册（与 chat:event 同模式）：TaskQueuePanel 在非 chat 路由卸载后，
   // markRunning / markStopped（中断收口）/ user_message_created（队列任务消息入列）等

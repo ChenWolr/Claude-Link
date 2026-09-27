@@ -25,15 +25,23 @@ export interface AppConfig {
   permissionMode: PermissionMode;
   maxTurns: number;
   // 队列任务总开关（默认关）。开：回复生成中会话框可继续输入发送并入队 + 回合结束后按间隔自动
-  // 执行队列；关：回复生成中禁止发送（旧行为），队列不自动执行（面板手动「开始」仍可用）。
+  // 执行队列；关：回复生成中禁止发送（旧行为），队列不自动执行，「立即执行」/「全部恢复」同样
+  // 被开关闸拦下（仅「全部恢复」可解除暂停、不计时）——开关关即队列完全冻结，任务保持 pending。
   queueEnabled: boolean;
   // 队列任务间隔（分钟，1-60，默认 5）。
   taskDelayMinutes: number;
   themePaletteId: string;
   fontScale: 'small' | 'medium' | 'large';
-  // 按模型类型别名单独设置的上下文窗口（token 数）。写入 env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>。
-  // 未列出的别名 = 未设置，圆环分母回落 DEFAULT_CONTEXT_WINDOW（200k）。仅 claude-link 内部
-  // 用于 ContextButton 占比分母；CC 自身不消费此 env。连通后仍以 SDK 上报的真实窗口为准。
+  // 按模型类型别名单独设置的上下文窗口（token 数）。在 settings.json 语义下表示为
+  // env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>（仅 settings-parser 解析层/脚本双向映射，
+  // 应用运行时不写该键，本字段直接经 electron-store 存取消费）。未列出的别名 = 未设置，
+  // 圆环分母回落 DEFAULT_CONTEXT_WINDOW（200k）。优先级（hb13-v B7 F-1）：
+  // 用户按别名显式设置 > SDK 上报真实窗口 > 200k。两条下游链路：①圆环占比分母（渲染层
+  // ContextButton getter；主进程 readContextWindow 兜底推送/落库同链）；
+  // ②主进程注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS（生产 query 经 buildSdkOptions→
+  // buildClaudeLinkSettingsBlock 写 settings.env，post-turn 探针经单源函数
+  // computeContextWindowOverrideTokens 写 Options.env；仅显式配置的别名才注入，
+  // 越界钳制 [100k,1M]；CC 不消费 CLAUDE_LINK_* 键名本身）。
   contextWindowByAlias: Partial<Record<ModelAlias, number>>;
   // 默认思考强度档位（新会话与未单独设档的会话回落到此值）。
   // 'auto' 在全局层无意义（全局默认本身就是 auto 的回落目标），用 NonAutoThinkingLevel 编译期拦截。
@@ -86,7 +94,7 @@ export interface ProviderProfile {
 export interface ProviderModel {
   id: string; // 模型 ID（同供应商内唯一，重复添加报错）
   name: string; // display_name，手动添加时 = id
-  maxTokens: number; // 端点返回的 max_output_tokens，未知为 0
+  maxTokens: number; // 端点返回的 max_output_tokens（中转网关缺省时回退 max_tokens/context_length），未知为 0
   source: 'queried' | 'manual';
   addedAt: number;
 }

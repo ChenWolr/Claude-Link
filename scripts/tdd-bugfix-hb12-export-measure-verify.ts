@@ -1,7 +1,7 @@
 // scripts/tdd-bugfix-hb12-export-measure-verify.ts
 // hb12 P1-1（EXP-01）契约：导出分页测量适配 .message-list__inner 包裹层 + 测量数量守卫。
 //
-// 病根（2026-09-12 审计）：0be1cdb（09-08，OPT-6 回底按钮修复）在 scroller 与消息项之间加了
+// 病根（2026-09-12 审计）：OPT-6（09-08，回底按钮修复，原提交哈希已随历史重写失效）在 scroller 与消息项之间加了
 // .message-list__inner 包裹（MessageList.vue，inner 是 scroller 唯一元素子节点），
 // 而 export-runner.ts measureItemHeights 仍迭代 scroller.children → itemHeights 恒为
 // [整文档高] 一项。后果链：①分页退化为「首条单独一页+其余全部一页」；②长会话第二页

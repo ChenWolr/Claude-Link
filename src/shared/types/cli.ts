@@ -159,8 +159,8 @@ export interface CliStreamEvent {
 
 export interface CliResultEvent {
   type: 'result';
-  // CC 真实 subtype：success / error_max_turns / error_during_execution（含中断）/
-  // error_max_budget_usd / error_max_structured_output_retries / error 等。
+  // CC 真实 subtype（SDK 类型全集）：success / error_max_turns / error_during_execution（含中断）/
+  // error_max_budget_usd / error_max_structured_output_retries。'error' 是控制帧 subtype，非 result 子类型。
   // 可选：第三方端点可能缺失，此时保持 undefined 而非无条件补 success（F1），
   // 终态语义由 isSuccessfulCliResult / isErrorCliResult 结合 is_error 判定。
   subtype?: 'success' | 'error' | 'error_max_turns' | 'error_during_execution' | string;
@@ -230,7 +230,11 @@ export type ClaudePlanCliEvent = {
   state: import('./claude-plan').ClaudePlanState;
 };
 
-// 系统横幅类事件（CC 的 system 子类型，非 init）。落库 processKind = system:<subtype>。
+// 系统横幅类事件（CC 的 system 子类型为主，非 init）。经 forwardEvent 的子类型落库为
+// processKind = system:<subtype>（informational 需过 isDisplayableSystemInfo 空文本门控；
+// permission_request 实走下方 CliPermissionEvent，落库 processKind = permission）。
+// api_retry/compacting/compact_result/requesting/thinking_tokens 为瞬态（forwardTransient，
+// 只 IPC 不落库）；compact_error 当前无发射点，数据随 compact_result.compactError 透传。
 export interface CliSystemInfoEvent {
   type: 'system';
   // auto_retry：claude-link 自有子类型（非 CC 事件）——reasoning_replay 自动重试的系统提示。

@@ -56,8 +56,9 @@ async function confirmBatchDelete() {
   selectedIds.value = new Set();
 }
 
-// 单条删除与会话级另外两个入口同守卫（F1）：侧栏单删（AppSidebar confirmDelete）与本页
-// 批量删除（confirmBatchDelete）都走 requestConfirm（danger）确认——删除是不可逆物理删除
+// 单条删除与会话级另外三个入口同守卫（F1）：侧栏单删/侧栏批量删除（AppSidebar
+// confirmDelete / confirmBatchDelete）与本页批量删除（confirmBatchDelete）都走
+// requestConfirm（danger）确认——删除是不可逆物理删除
 // （停 query/队列 → DELETE 级联删库 → 清理附件物理文件），卡片直删按钮紧邻点击区，
 // 误触面真实存在，不得成为无守卫入口。文案逐字对齐 AppSidebar 单删版。
 async function confirmDelete(session: { id: string; name: string }) {
@@ -76,8 +77,10 @@ onMounted(() => {
 });
 
 // H2：搜索防抖定时器随卸载清理——250ms 防抖窗口内导航走后，残留定时器触发
-// searchSessions('旧词') 会给跨路由存活的 AppSidebar 重新置入「不可见过滤器」
-// （聊天页侧栏被静默过滤，直到下一次 loadSessions 才自愈）。对齐 ChatPage noticeTimer 先例。
+// searchSessions('旧词') 会把旧查询经 store.searchQuery 回写进跨路由存活的 AppSidebar
+// 搜索框并套上过滤（hb12-SMG-03 后文本可见，但非用户当下意图）；hb10-SMG-03 后
+// loadSessions 仅在无搜索词时清搜索态，该残留态只能由用户在任一搜索框清空
+// （searchSessions('')）解除。对齐 ChatPage noticeTimer 先例。
 onUnmounted(() => {
   if (debounceTimer) clearTimeout(debounceTimer);
 });
@@ -106,7 +109,7 @@ function handleSearchClear() {
 }
 
 function createAndNavigate() {
-  // 新会话延迟持久化：与会话管理页入口统一走暂态（首条消息发送才落库）。
+  // 新会话延迟持久化：与侧栏/聊天页新会话入口统一走暂态（首条消息发送才落库）。
   store.startTransientSession();
   router.push('/');
 }

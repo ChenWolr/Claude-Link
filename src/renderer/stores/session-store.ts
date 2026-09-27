@@ -69,7 +69,7 @@ export interface CanonicalContextState {
   freshness: ContextUsageFreshness | null;
   consistency: 'reconciled' | 'mismatch' | 'unavailable' | null;
   diagnostic: string | null;
-  /** 采样阶段（review-v4 High-1）：runtime 快照为 query-start/post-turn/post-compaction；其余 null。 */
+  /** 采样阶段（review-v4 High-1）：runtime 快照为 query-start/mid-turn/post-turn/post-compaction；持久化预填（buildPersistedCanonical）恒 'post-turn'；其余 null。 */
   samplePhase: ContextSamplePhase | null;
 }
 
@@ -90,7 +90,7 @@ export interface ContextStatsView {
   freshness: ContextUsageFreshness | null;
   consistency: 'reconciled' | 'mismatch' | 'unavailable' | null;
   diagnostic: string | null;
-  /** 采样阶段（review-v4 High-1）：runtime 快照的 query-start/post-turn/post-compaction；其余 null。 */
+  /** 采样阶段（review-v4 High-1）：runtime 快照为 query-start/mid-turn/post-turn/post-compaction；持久化预填（buildPersistedCanonical）恒 'post-turn'；其余 null。 */
   samplePhase: ContextSamplePhase | null;
 }
 
@@ -172,8 +172,9 @@ export const useSessionStore = defineStore('session', {
     // 暂态会话创建/切换会话置 0；直发乐观消息入列、发送失败回滚、addMessage 消息入列
     //（队列回合经 task-store 调 recomputeTurnStartIndex）、运行中会话切回时按共享口径重算。
     turnStartIndex: 0,
-    // 当前活动会话最近一次 SDK 上报的真实窗口（作 resolveContextWindow 的 lastContextWindow）。
-    // 切会话时从 session.lastContextWindow 初始化，收 usage 回调时用 payload 覆盖。
+    // 当前活动会话最近一次 SDK 上报的真实窗口。contextStats getter 分母回退链的第二级
+    //（用户 contextWindowByAlias 覆盖 > 本值 > resolveContextWindowForSession 默认 200k，
+    // 见 hb13-v B7/F-1）；切会话时从 session.lastContextWindow 初始化，收 usage 回调时用 payload 覆盖。
     contextLastWindow: null as number | null,
     // Task 9：canonical 上下文占用（当前窗口 + turn usage + source/freshness/diagnostic）。
     // 单一真相源：ContextButton 只读这里；切换会话时预填持久化 stale 快照（无持久化值才置 null → pending），会话内新 payload 到达即覆盖。
@@ -717,7 +718,8 @@ export const useSessionStore = defineStore('session', {
       }
     },
     // 会话级权限模式：写入 session.permissionMode（null = 跟随全局默认 config.permissionMode），
-    // spawn 时经 resolveEffectivePermissionMode 回落为实际档后经 --permission-mode 生效。
+    // spawn 时经 resolveEffectivePermissionMode 回落为实际档后经 Options.permissionMode 注入；
+    // 'default' 实际档按 P2-5 不设置该选项（不发 --permission-mode 旗标，让原生 settings 自决）。
     async setActiveSessionPermissionMode(mode: Session['permissionMode']) {
       if (!this.activeSession) return;
       // hb10-PERM-02：入口捕获稳定 sessionId 全程复用——await 往返期间用户可能切走，
@@ -770,8 +772,9 @@ export const useSessionStore = defineStore('session', {
     // P2（effort 可见性）：回合结束后从主进程拉最新 lastEffectiveEffort 合并进 activeSession。
     // 只合并这一个字段——不整体替换 activeSession，避免覆盖 renderer 侧乐观状态。
     // 时序：CLI 把 assistant 事件落盘晚于 result 数秒，主进程在 result 后 2/4/6/8s 延迟重试写
-    // DB；渲染层无法区分「本轮新值」与「上轮旧值」，故按固定时刻表（3.5/6/9s）拉取合并，
-    // 覆盖主进程整个写入窗，最后一次为准。会话切换即放弃，不跨会话误合并。
+    // DB；渲染层无法区分「本轮新值」与「上轮旧值」，故按间隔 3.5/6/9s 顺序拉取合并
+    // （await 逐次叠加，实际拉取时刻 ≈3.5/9.5/18.5s），仍覆盖主进程整个写入窗，末次为准。
+    // 会话切换即放弃，不跨会话误合并。
     async refreshActiveSessionEffort() {
       if (!this.activeSession || this.activeSession.transient) return;
       const sid = this.activeSession.id;
@@ -903,9 +906,9 @@ export const useSessionStore = defineStore('session', {
         };
         // 问题 4：CC 自动压缩事件 → 置标记，ContextButton 弹横幅回显。
         // review-v2 High#3 / review-v3 §5.3 双保险（shouldShowCompactedBanner 共享纯函数）：
-        // compactedJustNow 只在 fresh 快照（freshness==='fresh' 且 source 为 runtime-live/reconciled）
-        // 到达时置位，pending/unavailable/stale 不假称完成。主进程侧仅在 compact_result:success 后的
-        // 同代 fresh 快照附加 compactedJustNow，此处再验一次终态语义。
+        // compactedJustNow 只在 fresh 快照（freshness==='fresh' 且 source 为 runtime-live/reconciled/
+        // native-context，post-turn 官方探针的 fresh 值亦触发）到达时置位，pending/unavailable/stale 不假称完成。
+        // 主进程侧仅在 compact_result:success 后的同代 fresh 快照附加 compactedJustNow，此处再验一次终态语义。
         if (shouldShowCompactedBanner(payload)) {
           this.compactedJustNow = true;
           this.compacting = false; // C：压缩完成，复位实时态

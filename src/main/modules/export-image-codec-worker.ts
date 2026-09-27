@@ -2,7 +2,8 @@
 // 职责：接收主进程生成的段 PNG ArrayBuffer + 已校验几何，逐段 PNG.sync.read → 按行 copy 进整页 RGBA → 丢弃；
 // finish 时 PNG.sync.write 编码，原子写（.tmp→rename）主进程生成的当前页路径。
 // 设计：流式 decode-discard（不保留 NativeImage[]/完整段数组/decoded parts 到页尾），峰值 ≈ 整页 RGBA + 单段解码。
-// 依据：docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md §4 Task 7；
+// 依据：导出图片 v4.1 PNG worker 计划 §4 Task 7（原文档
+// docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）；
 //       阶段零冻结：同步编码阻塞 >>250ms（必须 worker），峰值因子 5.5。
 //
 // 导出的 codec* 纯状态机函数供 scripts/export-image-codec-verify.ts 直接驱动（不经 worker_threads）。

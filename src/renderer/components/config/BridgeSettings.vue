@@ -482,7 +482,7 @@ defineExpose({ refresh: loadAll });
             <li>仅支持私聊；群消息不会响应。</li>
             <li>命令：/new 开启新会话并重新绑定；/stop 中断当前回合。</li>
             <li>短时间连发的多条消息会合并为一次回复（约 2 秒窗口）。</li>
-            <li>关闭通信期间收到的消息不会在重新打开后处理（微信）。</li>
+            <li>关闭通信期间收到的消息不会在重新打开后处理。</li>
             <li>IM 对话内容会在桌面端会话列表中可见与留存（隐私提示）。</li>
             <li>仅授权用户（owner）可触发对话；首个私聊用户将自动成为授权用户。</li>
           </ol>
@@ -543,7 +543,7 @@ defineExpose({ refresh: loadAll });
             <li>短时间连发的多条消息会合并为一次回复（约 2 秒窗口）。</li>
             <li>机器人只能在你最近 24 小时内发过消息后回复你（微信平台限制）。</li>
             <li>图片/文件/视频消息暂不支持查看，会收到占位提示；语音会自动转为文字。</li>
-            <li>关闭通信期间收到的消息不会在重新打开后处理。</li>
+            <li>关闭「微信」开关期间收到的消息不会在重新打开后处理；应用退出期间收到的消息会在下次启动后补处理。</li>
             <li>IM 对话内容会在桌面端会话列表中可见与留存（隐私提示）。</li>
           </ol>
         </details>
@@ -574,7 +574,7 @@ defineExpose({ refresh: loadAll });
             :checked="config?.global.receiptEnabled ?? true"
             @change="save({ global: { receiptEnabled: ($event.target as HTMLInputElement).checked } })"
           />
-          <span class="im-field-hint">开启后，每条消息触发处理时先回一条「（正在处理…）」，长任务等待时不至于无反馈</span>
+          <span class="im-field-hint">开启后，每批消息开始处理时先回一条「（正在处理…）」（连发合并为一批时也只回一条），长任务等待时不至于无反馈</span>
         </label>
       </template>
     </div>

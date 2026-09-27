@@ -1,5 +1,5 @@
 // cli-shared.ts
-// 公共工具函数：env 构造 / stream-json 解析 / 落库。
+// 公共工具函数：env 构造 / CliEvent 落库与回合去重。
 // 被 sdk-backend.ts（默认后端）和 connection-tester.ts 复用。
 //
 // 这是从 process-manager.ts 提取的纯工具函数。process-manager.ts 的 spawn 入口

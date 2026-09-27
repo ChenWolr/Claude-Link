@@ -161,8 +161,8 @@ function runMigrationStatements(db: Database.Database): void {
     if (!hasCol('last_turn_ended_at')) {
       db.exec('ALTER TABLE sessions ADD COLUMN last_turn_ended_at INTEGER DEFAULT NULL');
     }
-    // Skill 管理自愈：会话级 skill 禁用快照（创建时钉住）。免升版（B3 先例），
-    // CURRENT_SCHEMA_VERSION 保持 12，不撞 pin 脚本。
+    // Skill 管理自愈：会话级 skill 禁用快照（创建时钉住）。落地时免升版（B3 先例），
+    // 仅走幂等自愈补列；后续 V13/V14 已另行升版，本列的加列入口仍以本自愈块为准。
     if (!hasCol('skill_overrides')) {
       db.exec('ALTER TABLE sessions ADD COLUMN skill_overrides TEXT DEFAULT NULL');
     }

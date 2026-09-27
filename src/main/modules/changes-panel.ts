@@ -274,8 +274,9 @@ export async function getChangeDiff(workingDir: string | null, path: string, con
 
   let diffText = '';
   try {
-    // P1-11：目录折叠条目兜底（`dir/` 结尾，status.showUntrackedFiles=no 时仍会出现）——
-    // 对目录跑 --no-index 会报错（实测 exit 1 "Could not access"）。枚举目录内文件逐个
+    // P1-11：目录条目兜底（`dir/` 结尾）。listChanges 已用 --untracked-files=all 覆盖
+    // showUntrackedFiles=no 配置，正常链路不再产出 dir/ 折叠条目，本分支仅作防御保留——
+    // 对目录跑 --no-index 会报错（实测 exit 1 "Could not access"），故枚举目录内文件逐个
     // --no-index 拼接整目录新增 diff，交给既有二进制检测/截断流程。
     if (path.endsWith('/')) {
       const absDir = nodePath.join(cwd, path);

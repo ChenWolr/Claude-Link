@@ -159,7 +159,8 @@ export function mergeProjection(
   return merged;
 }
 
-/** 便捷封装：读取现文件（不存在 → {}）→ 合并 → 返回 [合并结果, 供快照写入的下次投影]。 */
+/** 便捷封装：读取现文件（不存在/损坏 → {}）→ 合并 → 返回合并结果（单值）。
+ *  供快照写入的「本次原始投影」由调用方自行保留并另行 writeProjectionSnapshot 落盘。 */
 export function mergeProjectionWithFile(
   workingDir: string,
   nextProjection: Record<string, unknown>,

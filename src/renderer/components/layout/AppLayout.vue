@@ -15,7 +15,7 @@ const isTaskPanelOpen = ref(true);
 const route = useRoute();
 const isChatRoute = computed(() => route.name === 'chat');
 
-// 可拉伸侧栏宽度（px）。默认值与原 --sidebar-width/--task-panel-width 一致。
+// 可拉伸侧栏宽度（px）。sidebar 默认 240 与原 --sidebar-width 一致；task 默认经 320→340 调整（见下），不再等于 variables.css 的 --task-panel-width: 320px（该变量仅存兜底）。
 const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 460;
 const TASK_MIN = 240;

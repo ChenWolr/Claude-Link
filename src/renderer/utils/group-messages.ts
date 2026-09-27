@@ -93,7 +93,9 @@ export function groupMessagesForRender(messages: RenderableMessage[]): RenderIte
     }
   };
   for (const msg of messages) {
-    // R2（问题 5）：权限询问 + 交互回执已由交互弹窗承载，不在聊天流重复渲染（仍落库留审计）。
+    // R2：冗余 system 过程不在聊天流渲染——permission / interaction_response 由交互弹窗承载
+    //（问题 5），system:informational 通用横幅无阅读语义（问题 2），均仍落库留审计；
+    // system:api_retry 已改瞬态状态卡不落库，此处兜底修复前老库残留行（Bug4）。
     // 在此单一瓶颈过滤，同时覆盖主流程（MessageList）与子 Agent 面板（TaskQueuePanel→ProcessGroup）。
     if (isRedundantSystemProcessKind(msg.processKind)) continue;
     // 独立 message 项（打断 fold）：

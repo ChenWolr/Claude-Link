@@ -1,7 +1,8 @@
 // wechat-adapter.ts — 微信 bridge 适配器（包 iLink 协议客户端）。
 // 移植自 openhanako (Apache-2.0) lib/bridge/wechat-adapter.ts 的 adapter 壳（其另参考 MIT 的
 // @tencent-weixin/openclaw-weixin v1.0.2）；协议本体在 wechat-ilink.ts。
-// 任何微信私聊用户即 owner（owner 语义见 owner-policy.ts）。
+// owner 判定不在 adapter 层——消息统一交 manager.handleInbound 按 owner-policy.ts 判定
+//（批次5.2 收窄：仅 profiles.wechat.ownerUserId 精确匹配可触发对话，首个私聊用户自动捕获为 owner）。
 
 import { createIlinkClient, type IlinkClient } from './wechat-ilink';
 import type { BridgeInboundMessage, BridgeAdapterStatus } from '../../../shared/types/bridge';

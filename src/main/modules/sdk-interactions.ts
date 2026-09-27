@@ -585,10 +585,10 @@ export function dialogResultFromInteraction(
 }
 
 // M4：把 ElicitationRequest 构造成交互 payload。url 模式（浏览器认证）SDK 不带 schema，
-// 不回落成文本输入（那会让用户无处完成认证），改成一个纯确认框。注意：URL 仅存于 input.url，
-// 当前 confirm 弹窗不渲染 input（InteractionDetails 仅 permission kind 显示），用户无法从弹窗
-// 复制 URL，只能依赖 description/message 文本；若要在弹窗内展示可复制 URL，需为 confirm kind
-// 增加 input.url 渲染。用户完成 OAuth 后回来点确认。form/text 走通用表单/文本。
+// 不回落成文本输入（那会让用户无处完成认证），改成一个纯确认框。注意：URL 仅存于 input.url；
+// hb10-PERM-07 起 confirm 弹窗在 input.url 存在时渲染专用 URL 核对行（InteractionPrompt 的
+// interaction-url 块——InteractionDetails 仍仅 permission kind 显示），用户可从弹窗查看/复制
+// URL。用户完成 OAuth 后回来点确认。form/text 走通用表单/文本。
 //
 // 注意：SDK 真实的 url-elicit 完成信号是 elicitation_complete 事件；claude-link 目前简化为
 // 「用户点确认即视为完成」（resolve OnElicitation Promise 为 accept）。这是有意的 UX 兜底，

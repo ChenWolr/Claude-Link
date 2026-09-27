@@ -75,7 +75,7 @@ async function fetchPreviewUrl(att: DisplayAttachment, thumbnail: boolean): Prom
   }
 }
 
-// 缩略图：挂载/附件出现时取 thumbnail=true 渲染 <img>。导出模式不加载（隐藏 renderer 复用文件卡片）。
+// 缩略图：挂载/附件出现时取 thumbnail=true 渲染 <img>。导出模式不走本函数（缩略图由 watch 导出分支按 snapshot preview bytes 直接建 URL；无预览图片退化文件卡片）。
 // 失败静默退化 badge（不占位为「不可用」——只有点击取原图失败才占位，避免缩略图抖动到错误态）。
 async function loadThumb(att: DisplayAttachment): Promise<void> {
   if (props.exportMode || isSnapshotAttachment(att) || thumbByAttachmentId[attachmentKey(att)] || thumbLoading[attachmentKey(att)]) return;
@@ -93,7 +93,7 @@ async function loadThumb(att: DisplayAttachment): Promise<void> {
   }
 }
 
-// 图片缩略图：点击进入灯箱时按需取原图。导出模式不加载（隐藏 renderer 复用文件卡片）。
+// 图片缩略图：点击进入灯箱时按需取原图。导出模式不走本函数（缩略图由 watch 导出分支按 snapshot preview bytes 直接建 URL；无预览图片退化文件卡片）。
 async function openPreview(att: DisplayAttachment, trigger: HTMLElement): Promise<void> {
   // hb10-ATT-03：会话归属守卫（对齐 AttachmentDraftList）——非当前活动会话的附件（切走后
   // 的迟到渲染/视图复用）不打开灯箱，防跨会话幽灵灯箱。

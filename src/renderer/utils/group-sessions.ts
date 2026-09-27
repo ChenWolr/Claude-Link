@@ -1,6 +1,6 @@
 // group-sessions.ts
-// 会话管理页「项目分组」的纯聚合逻辑，从 SessionsPage.vue 抽出以便行为测试覆盖
-//（项目无 jest/vitest，靠 tdd-*-verify.ts）。分组依据会话的 workingDir（绝对路径）。
+// 会话侧栏（AppSidebar.vue）「项目分组」的纯聚合逻辑（曾属会话管理页，后随分组入口移入侧栏），
+// 抽出为纯函数以便行为测试覆盖（项目无 jest/vitest，靠 tdd-*-verify.ts）。分组依据会话的 workingDir（绝对路径）。
 
 import type { Session } from '../../shared/types/session';
 

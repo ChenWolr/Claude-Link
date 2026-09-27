@@ -1,6 +1,7 @@
 // 会话附件共享类型：主进程 ↔ 渲染进程 ↔ 导出快照共用。
 // 本文件只放类型，无运行时逻辑、无 Electron/Node/Vue 副作用，regression 脚本可直接导入。
-// 设计依据：docs/superpowers/specs/2026-07-23-chat-attachments-design.md。
+// 设计依据：chat-attachments 设计 spec（原文档
+// docs/superpowers/specs/2026-07-23-chat-attachments-design.md 已不在仓库内）。
 
 /** 附件大类：图片直传模型；文档/源码交给 Claude Code Read；其余为普通文件（同样走 Read）。 */
 export type AttachmentKind = 'image' | 'document' | 'file';

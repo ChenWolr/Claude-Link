@@ -211,8 +211,8 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     (preloadSrc.match(/bridgePlatformRestart/g) ?? []).length >= 2,
     `出现 ${(preloadSrc.match(/bridgePlatformRestart/g) ?? []).length} 次（须 ≥2）`);
   const vueSrc = read('src/renderer/components/config/BridgeSettings.vue');
-  check('H', '⑧', '微信积压语义 dim 文案（关闭通信期间消息不补处理）',
-    vueSrc.includes('关闭通信期间收到的消息不会在重新打开后处理'),
+  check('H', '⑧', '微信积压语义 dim 文案（关闭开关期间不补处理/退出期间补处理）',
+    vueSrc.includes('关闭「微信」开关期间收到的消息不会在重新打开后处理；应用退出期间收到的消息会在下次启动后补处理'),
     '微信开关区缺积压语义说明');
 }
 
@@ -305,9 +305,9 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   const hit = guideKeywords.filter((k) => wechatSection.includes(k));
   check('L', '④', 'B2 微信使用说明关键词 ≥6（扫码登录/授权用户//help/24 小时/暂不支持/隐私提示）',
     hit.length >= 6, `命中=${JSON.stringify(hit)}（飞书面板不含「24 小时」——分块锚定不误伤）`);
-  check('L', '⑤', 'B2 旧积压散置 hint 删除（短语并入说明第 9 条，独立 hint 行不残留）',
+  check('L', '⑤', 'B2 旧积压散置 hint 删除（积压语义并入说明第 9 条限定场景版，独立 hint 行不残留）',
     !/<span class="im-field-hint">关闭通信期间收到的消息不会在重新打开后处理<\/span>/.test(vueSrc)
-      && wechatSection.includes('关闭通信期间收到的消息不会在重新打开后处理'),
+      && wechatSection.includes('关闭「微信」开关期间收到的消息不会在重新打开后处理；应用退出期间收到的消息会在下次启动后补处理'),
     '旧积压 hint 行残留或未并入说明');
   check('L', '⑥', 'B2 分块锚定不误伤（飞书面板不含「24 小时」字样）',
     !feishuSection.includes('24 小时'),

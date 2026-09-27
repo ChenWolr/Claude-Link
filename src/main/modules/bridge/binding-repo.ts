@@ -1,7 +1,7 @@
 // binding-repo.ts — bridge_bindings 表 repo（V14）。
 // IM 平台用户（飞书 open_id / 微信 user id）↔ claude-link 会话行的绑定存取。
 // 解绑语义（V14 墓碑）：deleteBinding 置 unbound_at（行保留、get/list/touch 过滤），
-// 消息被忽略直到该用户发 /new（upsert ON CONFLICT 清墓碑复活）或重新产生绑定。
+// 消息不派发且回 /new 引导提示，直到该用户发 /new（upsert ON CONFLICT 清墓碑复活）或重新产生绑定。
 // 一律接收 db 参数（可测性；生产侧由 bridge/init.ts 传 getConnection()），
 // 不 import connection.ts（避免单例拽进测试）。不 import electron。
 
@@ -80,7 +80,7 @@ export function upsertBinding(
 }
 
 export function getBindingBySessionKey(db: Database.Database, sessionKey: string): BridgeBinding | null {
-  // 墓碑行不可见：解绑后查询等同未绑定（flush 走 isUnbound 分支忽略，不悬空重建）。
+  // 墓碑行不可见：解绑后查询等同未绑定（flush 走 isUnbound 分支拦截：不派发、不悬空重建，回 /new 引导提示）。
   const row = db.prepare('SELECT * FROM bridge_bindings WHERE session_key = ? AND unbound_at IS NULL').get(sessionKey) as
     | BridgeBindingRow
     | undefined;

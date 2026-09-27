@@ -497,7 +497,7 @@ function handleDragReorder() {
             <div v-if="!taskStore.tasks.length" class="task-panel__empty">暂无排队任务；开启队列任务后，回复生成中在会话框发送即入队</div>
           </div>
 
-          <!-- 本次已执行（方案 A：内存态、重启清零、上限 50；默认收起） -->
+          <!-- 本次已执行（方案 A：内存态、重启清零、默认收起；上限 50 仅主进程权威快照成立，本组件镜像 task_started 事件无截断，会话不切换时可瞬时超出，loadOverview 时纠正） -->
           <div v-if="taskStore.executed.length" class="executed-fold">
             <button type="button" class="executed-fold__title" @click="executedCollapsed = !executedCollapsed">
               <span class="executed-fold__arrow" :class="{ 'executed-fold__arrow--open': !executedCollapsed }">›</span>

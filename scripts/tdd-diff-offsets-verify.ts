@@ -1,5 +1,5 @@
 // tdd-diff-offsets-verify.ts
-// computeOffsets 契约：移植 contrast scrollY 焦点 1/3 对齐算法。
+// computeOffsets 契约：焦点 1/3 对齐滚动算法（contrast 参照源未入库）。
 // 运行：npx tsx scripts/tdd-diff-offsets-verify.ts
 import { strict as assert } from 'node:assert';
 import { computeOffsets, bridgePolygon, resolveSearchScrollTop } from '../src/renderer/utils/diff-render';

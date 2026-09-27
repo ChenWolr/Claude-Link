@@ -8,7 +8,7 @@
 // 守卫静默丢旗标=队列任务无轮次上限运行。
 //
 // 修复语义：
-// ① 三路 spawn 组装同源：CHAT_SEND 与重发路径统一 getConfig().maxTurns（与队列路径一致）；
+// ① 三路 spawn 组装同源：CHAT_SEND 与重发路径统一 getConfig().maxTurns（与队列路径一致；bridge 分发器为第四路执行链，不在本脚本断言面）；
 // ② 新增 shared/max-turns.ts 纯函数（DEFAULT_MAX_TURNS=200 + sanitizeMaxTurns），
 //    ConfigPage blur 夹取（清空/非正数回落默认 200）与 config-manager saveConfig/getConfig
 //    兜底清洗共用同一实现（对齐 sanitizeTaskDelayMinutes 先例）。
