@@ -1285,8 +1285,10 @@ console.log('\n=== 42) contextStats getter 化（切模型/改设置即时重算
 console.log('\n=== 43) 浅色主题系统契约（openhanako 真实浅色色板替代深色）===');
 {
   // —— 色板数量与结构 ——
-  check('色板共 9 套（替代旧 11 套深色）', THEME_PALETTES.length === 9, `实际 ${THEME_PALETTES.length}`);
-  check('全部 isDark=false（纯浅色）', THEME_PALETTES.every((p) => p.isDark === false));
+  // 2026-09-27 侧栏 Quiet Console 重设计：追加 quiet-console（浅）+ terminal-pro（深）→ 11 套，
+  // 契约随数据最小同步（5db45f7 先例，与 constants.ts 色板同 commit）。
+  check('色板共 11 套（9 套浅色 + terminal-pro 深色）', THEME_PALETTES.length === 11, `实际 ${THEME_PALETTES.length}`);
+  check('除 terminal-pro 外全部 isDark=false', THEME_PALETTES.every((p) => (p.id === 'terminal-pro' ? p.isDark === true : p.isDark === false)));
   check('默认色板 id 为 warm-paper', DEFAULT_THEME_PALETTE_ID === 'warm-paper', `实际 ${DEFAULT_THEME_PALETTE_ID}`);
   check('第一套色板 id 为 warm-paper', THEME_PALETTES[0]?.id === 'warm-paper');
   check('无旧深色 default-dark 残留', !THEME_PALETTES.some((p) => p.id === 'default-dark'));
@@ -1295,6 +1297,8 @@ console.log('\n=== 43) 浅色主题系统契约（openhanako 真实浅色色板�
   check('每套色板都有 onAccent 字段', THEME_PALETTES.every((p) => typeof p.colors.onAccent === 'string'));
   check('onAccent 按 accent 亮度选黑/白（中亮度 accent 用深色文字过 AA）', THEME_PALETTES.every((p) => {
     const midAccent = ['grass-aroma', 'contemplation', 'absolutely'];
+    // terminal-pro（2026-09-27 新增深色板）亮蓝 accent #4EA1FF 配深蓝黑文字 #0B1220（计划 §2.1）。
+    if (p.id === 'terminal-pro') return p.colors.onAccent === '#0B1220';
     return midAccent.includes(p.id) ? p.colors.onAccent === '#1A1A1A' : p.colors.onAccent === '#FFFFFF';
   }));
 
