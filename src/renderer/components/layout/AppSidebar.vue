@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, computed } from 'vue';
+import { ref, watch, onMounted, onUnmounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { sessionDisplayStatusMeta, type SessionDisplayStatus } from '../../../shared/session-display-status';
 import { groupSessionsByProject, type SessionGroup } from '../../utils/group-sessions';
+import { groupSessionsByDate } from '../../utils/group-sessions-by-date';
+import { formatSessionTime } from '../../utils/format-session-time';
 
 const store = useSessionStore();
 const router = useRouter();
@@ -21,18 +23,16 @@ function statusLabel(sessionId: string): string {
 const searchQuery = ref('');
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
-// 项目分组开关：false=全部（不分组，默认），true=按项目（workingDir）分组展示。
+// 项目分组开关：false=全部（按日期分组，默认），true=按项目（workingDir）分组展示。
 // 点击「项目」切换分组，再点「全部」取消分组。
 const groupByProject = ref(false);
 
-// 分组视图：关闭时返回单个「全部」组（不渲染组头）；开启时按 workingDir 分组。
-// 分组作用于 displayedSessions，天然兼容搜索态（searchResults）。
-const viewGroups = computed<SessionGroup[]>(() => {
-  if (!groupByProject.value) {
-    return [{ key: 'all', label: '', dir: null, sessions: store.displayedSessions }];
-  }
-  return groupSessionsByProject(store.displayedSessions);
-});
+// 「全部」视图改日期分组（今天/昨天/本周更早/更早）；分组作用于 displayedSessions，
+// 天然兼容搜索态（searchResults）。
+const dateGroups = computed(() => groupSessionsByDate(store.displayedSessions));
+
+// 项目分组视图：按 workingDir 分组（逻辑不变）。
+const viewGroups = computed<SessionGroup[]>(() => groupSessionsByProject(store.displayedSessions));
 
 // 批量删除模式：开启后会话显示复选框、点击切换选中（不再跳转会话），
 // 底部批量操作条提供全选/删除所选。删除走 store.deleteSessions → 单个删除同一条
@@ -122,6 +122,22 @@ function handleSearchClear() {
   store.searchSessions('');
 }
 
+// 全局快捷键：Ctrl+N 新会话；/ 聚焦搜索（输入态/IME 组合态/可编辑焦点不触发）。
+// 不监听 Escape——ChatPage 的 Esc 急停通道独占该键，零冲突。
+const searchInputRef = ref<HTMLInputElement | null>(null);
+function isEditableTarget(t: EventTarget | null): boolean {
+  return t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement ||
+    (t instanceof HTMLElement && t.isContentEditable);
+}
+function onGlobalKeydown(e: KeyboardEvent) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') { e.preventDefault(); handleNewSession(); return; }
+  if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !e.isComposing && !isEditableTarget(e.target)) {
+    e.preventDefault(); searchInputRef.value?.focus();
+  }
+}
+onMounted(() => window.addEventListener('keydown', onGlobalKeydown));
+onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown));
+
 // 删除会话：用 interaction 队列的 requestConfirm 确认（避免 window.confirm 导致 Electron 焦点丢失）。
 // 会话及消息由主进程级联清理。
 async function confirmDelete(session: { id: string; name: string }) {
@@ -140,39 +156,55 @@ async function confirmDelete(session: { id: string; name: string }) {
   <aside class="sidebar">
     <div class="sidebar__brand">
       <div class="brand-mark">CL</div>
-      <div>
-        <h1>Claude Link</h1>
-        <p>Task Console</p>
-      </div>
+      <h1>Claude Link</h1>
     </div>
 
-    <input
-      v-model="searchQuery"
-      class="sidebar__search"
-      type="search"
-      placeholder="搜索会话标题"
-      @input="onSearchInput"
-      @search="handleSearchClear"
-    />
+    <button
+      class="new-button"
+      type="button"
+      :class="{ 'new-button--active': store.activeSession?.transient }"
+      @click="handleNewSession"
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 5v14" />
+        <path d="M5 12h14" />
+      </svg>
+      <span>新会话</span>
+      <kbd>Ctrl N</kbd>
+    </button>
 
-    <div class="sidebar__toolbar">
-      <div class="seg" :class="{ 'seg--project': groupByProject }" role="group" aria-label="会话分组方式">
-        <span class="seg__thumb" aria-hidden="true"></span>
-        <button
-          type="button"
-          :class="['seg__btn', { 'seg__btn--active': !groupByProject }]"
-          @click="groupByProject = false"
-        >
-          全部
-        </button>
-        <button
-          type="button"
-          :class="['seg__btn', { 'seg__btn--active': groupByProject }]"
-          @click="groupByProject = true"
-        >
-          项目
-        </button>
-      </div>
+    <div class="sidebar__search-wrap">
+      <svg class="sidebar__search-icon" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="11" cy="11" r="7" />
+        <path d="m20 20-3.5-3.5" />
+      </svg>
+      <input
+        ref="searchInputRef"
+        v-model="searchQuery"
+        class="sidebar__search"
+        type="search"
+        placeholder="搜索会话标题"
+        @input="onSearchInput"
+        @search="handleSearchClear"
+      />
+      <span class="sidebar__search-slash" aria-hidden="true">/</span>
+    </div>
+
+    <div class="sidebar__tabs" role="group" aria-label="会话分组方式">
+      <button
+        type="button"
+        :class="['sidebar__tab', { 'sidebar__tab--active': !groupByProject }]"
+        @click="groupByProject = false"
+      >
+        全部
+      </button>
+      <button
+        type="button"
+        :class="['sidebar__tab', { 'sidebar__tab--active': groupByProject }]"
+        @click="groupByProject = true"
+      >
+        项目
+      </button>
       <button
         type="button"
         class="sidebar__multiselect"
@@ -191,57 +223,114 @@ async function confirmDelete(session: { id: string; name: string }) {
       </button>
     </div>
 
-    <nav class="sidebar__sessions">
-      <template v-for="group in viewGroups" :key="group.key">
-        <div v-if="groupByProject" class="sidebar__group" :title="group.dir ?? undefined">
-          <span class="sidebar__group__label">{{ group.label }}</span>
-          <span class="sidebar__group__count">{{ group.sessions.length }}</span>
-        </div>
-        <div
-          v-for="session in group.sessions"
-          :key="session.id"
-          :class="['session-link', {
-            active: store.activeSession?.id === session.id,
-            'session-link--selected': batchMode && selectedIds.has(session.id),
-            'session-link--running': displayStatus(session.id) === 'running',
-            'session-link--retrying': displayStatus(session.id) === 'retrying',
-            'session-link--completed': displayStatus(session.id) === 'completed',
-            'session-link--network-interrupted': displayStatus(session.id) === 'network_interrupted',
-          }]"
-          @click="batchMode ? toggleSelected(session.id) : openSession(session)"
-        >
-          <input
-            v-if="batchMode"
-            class="session-link__check"
-            type="checkbox"
-            :checked="selectedIds.has(session.id)"
-            @click.stop="toggleSelected(session.id)"
-          />
-          <span
-            v-if="displayStatus(session.id) !== 'idle'"
-            class="session-link__status"
-            :class="[`session-link__status--${displayStatus(session.id)}`]"
-            role="img"
-            :aria-label="statusLabel(session.id)"
-            :title="statusLabel(session.id)"
-          ></span>
-          <span class="session-link__name">{{ session.name }}</span>
-          <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge -->
-          <span
-            v-if="interactionStore.pendingRemoteCountBySession[session.id]"
-            class="session-link__pending"
-            title="该会话有待确认的弹窗"
-          >⏳</span>
-          <button
-            v-if="!batchMode"
-            type="button"
-            class="session-link__delete"
-            title="删除会话"
-            @click.stop="confirmDelete(session)"
+    <nav class="sidebar__sessions" :class="{ batching: batchMode }">
+      <template v-if="!groupByProject">
+        <template v-for="group in dateGroups" :key="group.key">
+          <div class="sidebar__group">
+            <span class="sidebar__group__label">{{ group.label }}</span>
+            <span class="sidebar__group__count">{{ group.sessions.length }}</span>
+          </div>
+          <div
+            v-for="session in group.sessions"
+            :key="session.id"
+            :class="['session-link', {
+              active: store.activeSession?.id === session.id,
+              'session-link--selected': batchMode && selectedIds.has(session.id),
+              'session-link--running': displayStatus(session.id) === 'running',
+              'session-link--retrying': displayStatus(session.id) === 'retrying',
+              'session-link--completed': displayStatus(session.id) === 'completed',
+              'session-link--network-interrupted': displayStatus(session.id) === 'network_interrupted',
+            }]"
+            @click="batchMode ? toggleSelected(session.id) : openSession(session)"
           >
-            ×
-          </button>
-        </div>
+            <input
+              v-if="batchMode"
+              class="session-link__check"
+              type="checkbox"
+              :checked="selectedIds.has(session.id)"
+              @click.stop="toggleSelected(session.id)"
+            />
+            <span
+              v-if="displayStatus(session.id) !== 'idle'"
+              class="session-link__status"
+              :class="[`session-link__status--${displayStatus(session.id)}`]"
+              role="img"
+              :aria-label="statusLabel(session.id)"
+              :title="statusLabel(session.id)"
+            ></span>
+            <span class="session-link__name">{{ session.name }}</span>
+            <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge -->
+            <span
+              v-if="interactionStore.pendingRemoteCountBySession[session.id]"
+              class="session-link__pending"
+              title="该会话有待确认的弹窗"
+            >⏳</span>
+            <span class="session-link__time">{{ formatSessionTime(session.updatedAt) }}</span>
+            <button
+              v-if="!batchMode"
+              type="button"
+              class="session-link__delete"
+              title="删除会话"
+              @click.stop="confirmDelete(session)"
+            >
+              ×
+            </button>
+          </div>
+        </template>
+      </template>
+      <template v-else>
+        <template v-for="group in viewGroups" :key="group.key">
+          <div class="sidebar__group" :title="group.dir ?? undefined">
+            <span class="sidebar__group__label">{{ group.label }}</span>
+            <span class="sidebar__group__count">{{ group.sessions.length }}</span>
+          </div>
+          <div
+            v-for="session in group.sessions"
+            :key="session.id"
+            :class="['session-link', {
+              active: store.activeSession?.id === session.id,
+              'session-link--selected': batchMode && selectedIds.has(session.id),
+              'session-link--running': displayStatus(session.id) === 'running',
+              'session-link--retrying': displayStatus(session.id) === 'retrying',
+              'session-link--completed': displayStatus(session.id) === 'completed',
+              'session-link--network-interrupted': displayStatus(session.id) === 'network_interrupted',
+            }]"
+            @click="batchMode ? toggleSelected(session.id) : openSession(session)"
+          >
+            <input
+              v-if="batchMode"
+              class="session-link__check"
+              type="checkbox"
+              :checked="selectedIds.has(session.id)"
+              @click.stop="toggleSelected(session.id)"
+            />
+            <span
+              v-if="displayStatus(session.id) !== 'idle'"
+              class="session-link__status"
+              :class="[`session-link__status--${displayStatus(session.id)}`]"
+              role="img"
+              :aria-label="statusLabel(session.id)"
+              :title="statusLabel(session.id)"
+            ></span>
+            <span class="session-link__name">{{ session.name }}</span>
+            <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge -->
+            <span
+              v-if="interactionStore.pendingRemoteCountBySession[session.id]"
+              class="session-link__pending"
+              title="该会话有待确认的弹窗"
+            >⏳</span>
+            <span class="session-link__time">{{ formatSessionTime(session.updatedAt) }}</span>
+            <button
+              v-if="!batchMode"
+              type="button"
+              class="session-link__delete"
+              title="删除会话"
+              @click.stop="confirmDelete(session)"
+            >
+              ×
+            </button>
+          </div>
+        </template>
       </template>
       <div v-if="!store.displayedSessions.length" class="sidebar__empty">
         {{ store.searchQuery ? '未找到匹配的会话' : '暂无会话' }}
@@ -264,10 +353,13 @@ async function confirmDelete(session: { id: string; name: string }) {
     </div>
 
     <div class="sidebar__footer">
-      <button class="new-button" type="button" :class="{ 'new-button--active': store.activeSession?.transient }" @click="handleNewSession">+ 新会话</button>
-      <div class="sidebar__footer-links">
-        <RouterLink class="settings-link" to="/config">配置</RouterLink>
-      </div>
+      <RouterLink class="settings-link" to="/config">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+        <span>配置</span>
+      </RouterLink>
     </div>
   </aside>
 </template>
@@ -280,138 +372,211 @@ async function confirmDelete(session: { id: string; name: string }) {
   flex-direction: column;
   border-right: 1px solid var(--color-border-strong);
   background: var(--color-panel);
-  padding: 16px 12px;
+  padding: 14px 12px 12px;
 }
 
+/* 品牌行：20px CL 方标（accent 底）+ 名称，无副标/版本号。 */
 .sidebar__brand {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 18px;
+  gap: 9px;
+  padding: 2px 4px 0;
+  margin-bottom: 14px;
 }
 
 .brand-mark {
   display: grid;
-  width: 36px;
-  height: 36px;
+  width: 20px;
+  height: 20px;
+  flex: none;
   place-items: center;
-  border-radius: var(--radius-md);
+  border-radius: 6px;
   background: var(--color-accent);
-  box-shadow: var(--ring-light-accent), var(--elevation-1);
   color: var(--color-on-accent);
-  font-size: 0.8125rem;
+  font-size: 0.59375rem;
   font-weight: 800;
+  letter-spacing: 0.02em;
 }
 
 .sidebar__brand h1 {
   margin: 0;
-  font-size: 0.9375rem;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
 }
 
-.sidebar__brand p {
-  margin: 2px 0 0;
+/* 主操作上位：新会话（描边扁平按钮 + Ctrl N 快捷键提示）。 */
+.new-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel);
+  color: var(--color-text);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
+}
+
+.new-button:hover {
+  background: var(--color-panel-soft);
+}
+
+.new-button svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  fill: none;
+  stroke: var(--color-text-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.new-button kbd {
+  margin-left: auto;
+  font-family: inherit;
+  font-size: 0.65625rem;
   color: var(--color-text-muted);
-  font-size: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  background: var(--color-bg);
+}
+
+/* 暂态会话激活态（B14）：暂态不进列表、无高亮项，按钮 inset 左缘条标识「正在暂态草稿」。 */
+.new-button--active {
+  border-color: var(--color-accent);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* 搜索框：放大镜 + 输入 + 「/」聚焦提示角标。 */
+.sidebar__search-wrap {
+  position: relative;
+  margin-top: 10px;
+}
+
+.sidebar__search-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: var(--color-text-muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  pointer-events: none;
 }
 
 .sidebar__search {
   width: 100%;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
   background: var(--color-panel-soft);
   color: var(--color-text);
-  padding: 9px 10px;
+  padding: 0 30px 0 28px;
+  font-size: 0.78125rem;
   outline: none;
+  transition: border-color var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out);
 }
 
-/* 工具条：分组开关 + 批量删除按钮一行，紧贴搜索框下方。 */
-.sidebar__toolbar {
+.sidebar__search::placeholder {
+  color: var(--color-text-muted);
+}
+
+.sidebar__search:focus {
+  border-color: var(--color-accent);
+  background: var(--color-panel);
+}
+
+/* 原生 search 清除钮与「/」角标位置重叠，隐藏后清除走键盘/ESC（@search 事件保留）。 */
+.sidebar__search::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.sidebar__search-slash {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.65625rem;
+  color: var(--color-text-muted);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 0 5px;
+  background: var(--color-panel);
+  pointer-events: none;
+}
+
+/* 页签行：文字页签 + 下划线活动态；批量删除图标钮收同一行右端（armed 红底）。 */
+.sidebar__tabs {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-/* 分组开关：等宽左右切换（全部/项目）。seg 相对定位承载滑动滑块 thumb，
-   未选中时 thumb 停在「全部」，选中「项目」时滑到右侧。 */
-.seg {
-  position: relative;
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  height: 32px;
-  padding: 3px;
   gap: 2px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-panel-soft);
-  box-shadow: var(--ring-light);
+  margin-top: 12px;
+  padding: 0 4px;
+  border-bottom: 1px solid var(--color-border);
 }
 
-.seg__thumb {
-  position: absolute;
-  top: 3px;
-  bottom: 3px;
-  left: 3px;
-  width: calc(50% - 4px);
-  border-radius: calc(var(--radius-md) - 3px);
-  background: var(--color-accent);
-  box-shadow: var(--ring-light-accent), var(--elevation-1);
-  transition: transform var(--duration-base) var(--ease-out);
-}
-
-/* 补偿 2px gap，确保滑块精确覆盖「项目」按钮，不露边。 */
-.seg--project .seg__thumb {
-  transform: translateX(calc(100% + 2px));
-}
-
-.seg__btn {
+.sidebar__tab {
   position: relative;
-  z-index: 1;
-  flex: 1;
   border: 0;
-  background: transparent;
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-  font-weight: 600;
-  border-radius: calc(var(--radius-md) - 3px);
+  background: none;
   cursor: pointer;
+  padding: 6px 8px 8px;
+  font-size: 0.78125rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
   transition: color var(--duration-fast) var(--ease-out);
 }
 
-.seg__btn--active {
-  color: var(--color-on-accent);
+.sidebar__tab--active {
+  color: var(--color-text);
 }
 
-/* 批量删除按钮：图标按钮（垃圾桶），进入多选删除模式；激活时红色填充回显。 */
+.sidebar__tab--active::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--color-accent);
+}
+
 .sidebar__multiselect {
-  flex-shrink: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-panel-soft);
+  margin-left: auto;
+  margin-bottom: 3px;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
   transition: color var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out),
-    background-color var(--duration-fast) var(--ease-out),
-    box-shadow var(--duration-fast) var(--ease-out);
+    background-color var(--duration-fast) var(--ease-out);
 }
 
 .sidebar__multiselect:hover {
-  border-color: var(--color-danger);
+  background: var(--color-panel-soft);
   color: var(--color-danger);
 }
 
 .sidebar__multiselect--active {
   background: var(--color-danger);
-  border-color: var(--color-danger);
   color: var(--color-on-accent);
-  box-shadow: var(--ring-light-accent);
 }
 
 .sidebar__multiselect svg {
@@ -419,42 +584,41 @@ async function confirmDelete(session: { id: string; name: string }) {
   height: 14px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 2;
+  stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 
-/* 项目分组头：组名 + 计数，紧贴下一组卡片。 */
+/* 分组头：组名 + 计数（日期分组与项目分组共用）。 */
 .sidebar__group {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 6px;
-  margin-top: 10px;
-  padding: 2px 4px;
+  padding: 14px 6px 5px;
 }
 
 .sidebar__group:first-child {
-  margin-top: 0;
+  padding-top: 6px;
 }
 
 .sidebar__group__label {
   flex: 1;
   min-width: 0;
-  font-size: 0.6875rem;
-  font-weight: 700;
-  color: var(--color-accent-strong);
+  font-size: 0.65625rem;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  color: var(--color-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .sidebar__group__count {
-  flex-shrink: 0;
-  font-size: 0.625rem;
+  flex: none;
+  font-size: 0.65625rem;
+  font-weight: 600;
   color: var(--color-text-muted);
-  background: var(--color-panel-soft);
-  border-radius: 999px;
-  padding: 1px 7px;
+  font-variant-numeric: tabular-nums;
 }
 
 .sidebar__sessions {
@@ -462,12 +626,12 @@ async function confirmDelete(session: { id: string; name: string }) {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 16px;
+  margin-top: 8px;
+  padding: 0 2px 8px;
   overflow-y: auto;
 }
 
-/* 列表 stagger 入场（Layered Console 签名动效）：前 8 项 35ms 阶梯淡入上移，超出无延迟。
+/* 列表 stagger 入场（签名动效）：前 8 项 35ms 阶梯淡入上移，超出无延迟。
    尊重 prefers-reduced-motion（variables.css 已把动效时长压到 1ms，此处再显式关掉位移）。 */
 .session-link {
   animation: session-enter var(--duration-base) var(--ease-out) both;
@@ -485,16 +649,33 @@ async function confirmDelete(session: { id: string; name: string }) {
   to { opacity: 1; transform: none; }
 }
 
+/* 会话行：30px 紧凑单行（状态点 + 名称 + ⏳ + 时间列 + hover 删除 ×）。 */
 .session-link {
   display: flex;
   align-items: center;
-  gap: 6px;
-  border-radius: var(--radius-md);
-  padding: 10px 11px;
+  gap: 8px;
+  height: 30px;
+  flex: none;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
   color: var(--color-text);
   cursor: pointer;
   font-size: 0.8125rem;
-  transition: background var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out);
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.session-link:hover {
+  background: var(--color-panel-soft);
+}
+
+/* 活动行：accent 8% 混色 + 加粗（Quiet Console 无左缘条）。 */
+.session-link.active {
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft));
+  font-weight: 600;
+}
+
+.session-link.active:hover {
+  background: color-mix(in srgb, var(--color-accent) 14%, var(--color-panel-soft));
 }
 
 .session-link__name {
@@ -505,17 +686,61 @@ async function confirmDelete(session: { id: string; name: string }) {
   text-overflow: ellipsis;
 }
 
-/* hb10-PERM-05：后台 pending 弹窗 badge */
+/* hb10-PERM-05：后台 pending 弹窗 badge（⏳ 字面量为契约钉死，勿改图标）。 */
 .session-link__pending {
   flex: none;
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
   line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
+}
+
+.session-link__time {
+  flex: none;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.session-link__delete {
+  flex: none;
+  display: none;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+/* hover 时时间列与删除 × 互斥显隐（纯 CSS）。 */
+.session-link:hover .session-link__delete {
+  display: grid;
+}
+
+.session-link:hover .session-link__time {
+  display: none;
+}
+
+/* 批量模式：删除钮不渲染，hover 隐藏时间列只会留行尾空白——恢复显示。 */
+.sidebar__sessions.batching .session-link:hover .session-link__time {
+  display: inline;
+}
+
+.session-link__delete:hover {
+  background: color-mix(in srgb, var(--color-danger) 18%, transparent);
+  color: var(--color-danger);
 }
 
 .session-link__status {
-  flex-shrink: 0;
-  width: 8px;
-  height: 8px;
+  flex: none;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background: var(--session-status-color, var(--color-warn));
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--session-status-color, var(--color-warn)) 55%, transparent);
@@ -537,7 +762,7 @@ async function confirmDelete(session: { id: string; name: string }) {
   --session-status-color: var(--color-success);
 }
 .session-link__status--completed,
-.session-link__status--network-interrupted {
+.session-link__status--network_interrupted {
   box-shadow: none;
   animation: none;
 }
@@ -565,58 +790,9 @@ async function confirmDelete(session: { id: string; name: string }) {
   }
 }
 
-.session-link__delete {
-  flex-shrink: 0;
-  width: 20px;
-  height: 20px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-muted);
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s, background 0.12s, color 0.12s, transform var(--duration-fast) var(--ease-out);
-}
-
-.session-link:hover .session-link__delete {
-  opacity: 0.8;
-}
-
-.session-link__delete:hover {
-  opacity: 1;
-  background: rgba(239, 100, 97, 0.18);
-  color: var(--color-danger);
-}
-
-.session-link:hover {
-  background: var(--color-panel-soft);
-}
-
-.session-link.active {
-  background: color-mix(in srgb, var(--color-accent) 14%, var(--color-panel-soft));
-  box-shadow: var(--ring-light);
-  border-left: 3px solid var(--color-accent);
-  padding-left: 8px;
-}
-
-/* active 项的 hover 反馈：.active 与 :hover 同特异性，靠源序 active 在后胜出会吃掉 hover。
-   此复合选择器特异性更高，让活动项仍能感知悬停（比 active 的 14% 更深）。 */
-.session-link.active:hover {
-  background: color-mix(in srgb, var(--color-accent) 22%, var(--color-panel-soft));
-}
-
-.sidebar__empty {
-  color: var(--color-text-muted);
-  font-size: 0.8125rem;
-  padding: 12px;
-  text-align: center;
-}
-
-/* 批量删除：复选框 + 选中态高亮。选中态用 accent 描边+淡填充，区别于活动会话的左侧条。 */
+/* 批量删除：复选框 + 选中态高亮。选中态用 accent 描边+淡填充，区别于活动行混色。 */
 .session-link__check {
-  flex-shrink: 0;
+  flex: none;
   width: 16px;
   height: 16px;
   accent-color: var(--color-accent);
@@ -630,6 +806,13 @@ async function confirmDelete(session: { id: string; name: string }) {
 
 .session-link--selected:hover {
   background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+.sidebar__empty {
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  padding: 12px;
+  text-align: center;
 }
 
 /* 批量操作条：多选模式下置底（footer 之上），全选 + 删除所选。 */
@@ -677,46 +860,36 @@ async function confirmDelete(session: { id: string; name: string }) {
   cursor: not-allowed;
 }
 
+/* 页脚：分隔线 + 配置入口（图标+文字）；新会话已上移，无引擎 LED（renderer 无数据源，见计划 §6）。 */
 .sidebar__footer {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border);
 }
 
-/* 底部入口：现在只剩「配置」单入口，占满整行。 */
-.sidebar__footer-links {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
-}
-
-.new-button,
 .settings-link {
-  border-radius: var(--radius-md);
-  padding: 10px 11px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
   color: var(--color-text);
-}
-
-.new-button {
-  border: 0;
-  background: var(--color-accent);
-  box-shadow: var(--ring-light-accent);
-  color: var(--color-on-accent);
-  font-weight: 700;
-}
-
-/* 暂态会话激活态（B14）：暂态不进列表、无高亮项，用按钮描边标识「正在暂态草稿」。 */
-.new-button--active {
-  box-shadow: var(--ring-light-accent), 0 0 0 2px color-mix(in srgb, var(--color-accent) 55%, transparent);
-}
-
-.settings-link {
-  display: block;
-  border: 1px solid var(--color-border);
-  text-align: center;
-  font-size: 0.8125rem;
+  font-size: 0.78125rem;
+  text-decoration: none;
+  transition: background var(--duration-fast) var(--ease-out);
 }
 
 .settings-link:hover {
-  border-color: var(--color-accent);
+  background: var(--color-panel-soft);
+}
+
+.settings-link svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
 }
 </style>
