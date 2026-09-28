@@ -15,6 +15,7 @@ import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
 import { IPC_CHANNELS } from '../shared/constants';
+import { getAppUpdateInfo, checkForAppUpdates, installAppUpdate } from './modules/app-updater';
 import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
@@ -180,6 +181,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       db: `${userData}/claude-link.db`,
     };
   });
+  // 应用内检查更新（electron-updater / GitHub Releases；实现见 modules/app-updater.ts）。
+  ipcMain.handle(IPC_CHANNELS.APP_UPDATE_GET_INFO, async () => getAppUpdateInfo());
+  ipcMain.handle(IPC_CHANNELS.APP_UPDATE_CHECK, async () => checkForAppUpdates());
+  ipcMain.handle(IPC_CHANNELS.APP_UPDATE_INSTALL, async () => installAppUpdate());
   // settings.json 导入/选档/自动检测三条死通道（原 config:importSettings 等三个 channel）
   // 已于 2026-09-20 整链删除：无 UI 入口却保留明文 apiKey 回传渲染进程的通道。
   // 流式测试连接（弹框）已删除：测试收敛到 PROVIDER_TEST_MODEL（模型行内按钮，直返结果）。

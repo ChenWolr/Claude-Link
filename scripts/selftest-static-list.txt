@@ -185,3 +185,4 @@ scripts/tdd-compact-banner-fallback-verify.ts
 scripts/tdd-hold-abort-verify.ts
 scripts/tdd-sidebar-date-group-verify.ts
 scripts/tdd-sidebar-structure-verify.ts
+scripts/tdd-app-updater-verify.ts

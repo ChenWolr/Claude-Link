@@ -4,7 +4,7 @@
 // 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
 // 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
 // 所有滚动发生在面板内部；尺寸除 Skill 双栏区（.skill-md-rail 264px 定宽、滚动条 8px）与个别固定装饰件（保存徽标 spinner 圆点 8px、sr-only 1px 裁剪、tab/列表项 2px 指示边框）外全部 rem（随 fontScale 等比缩放）。
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onMounted, onBeforeUnmount, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useConfigStore, lastSaveFailed } from '../stores/config-store';
 import { useCommandStore } from '../stores/command-store';
@@ -17,6 +17,7 @@ import { sanitizeMaxTurns } from '../../shared/max-turns';
 import { attachUserSkillDirNames, findStaleSkillKeys, isStaleKeyScanReady, loadSkillProjectDirs, normalizeDirKey } from '../../shared/project-skills';
 import { useInteractionStore } from '../stores/interaction-store';
 import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
+import type { AppUpdateInfo, AppUpdateState } from '@shared/types/update';
 
 const store = useConfigStore();
 const commandStore = useCommandStore();
@@ -27,8 +28,8 @@ const toastType = ref<'success' | 'error'>('success');
 // 批次5.1-5：IM tab 切回时经 BridgeSettings.refresh 重拉 config/bindings（owner 首捕获后可见）。
 const bridgeSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
 
-// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）。
-type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im';
+// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）/ 关于（版本+检查更新）。
+type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im' | 'about';
 const activeTab = ref<TabId>('connection');
 
 // 自动保存：监听所有用户可编辑的持久化字段，700ms 防抖落盘，确保所有配置都永久保存。
@@ -511,6 +512,60 @@ async function cleanupStaleSkillKeys(): Promise<void> {
   for (const k of keys) delete next[k];
   store.config.skillOverrides = next;
 }
+
+// 关于 tab：版本展示 + 应用内检查更新（主进程 electron-updater）。
+const updateInfo = ref<AppUpdateInfo | null>(null);
+const checkPending = ref(false);
+let offUpdateState: (() => void) | null = null;
+
+const updateStatus = computed<AppUpdateState['status']>(() => updateInfo.value?.state.status ?? 'idle');
+
+const aboutCheckEnabled = computed(() =>
+  ['idle', 'latest', 'error', 'downloaded'].includes(updateStatus.value) && !checkPending.value);
+
+const updateStatusText = computed(() => {
+  switch (updateStatus.value) {
+    case 'unavailable': return '开发模式下不可用（打包构建后可检查更新）';
+    case 'checking': return '正在检查…';
+    case 'available': return `发现新版本 v${updateInfo.value?.state.newVersion ?? ''}，准备下载…`;
+    case 'downloading': {
+      const p = updateInfo.value?.state.progress;
+      return p ? `正在下载 ${p.percent}%（${Math.round(p.transferred / 1048576)}/${Math.round(p.total / 1048576)} MB）` : '正在下载…';
+    }
+    case 'downloaded': return `新版本 v${updateInfo.value?.state.newVersion ?? ''} 已就绪，点击「重启更新」安装`;
+    case 'installing': return '正在重启安装…';
+    case 'error': return `失败：${updateInfo.value?.state.error ?? '未知错误'}`;
+    case 'latest': return '已是最新版本';
+    default: return '点击按钮检查 GitHub 上的最新版本';
+  }
+});
+
+async function runCheckForUpdate(): Promise<void> {
+  if (checkPending.value) return;
+  checkPending.value = true;
+  try {
+    const state = await window.claudeLink.checkForAppUpdate();
+    if (updateInfo.value) updateInfo.value = { ...updateInfo.value, state };
+  } finally {
+    checkPending.value = false;
+  }
+}
+
+async function runInstallUpdate(): Promise<void> {
+  await window.claudeLink.installAppUpdate();
+}
+
+onMounted(() => {
+  void window.claudeLink.getUpdateInfo().then((info) => { updateInfo.value = info; });
+  offUpdateState = window.claudeLink.onUpdateStateChanged((state) => {
+    updateInfo.value = { currentVersion: updateInfo.value?.currentVersion ?? '', state };
+  });
+});
+
+onUnmounted(() => {
+  offUpdateState?.();
+  window.claudeLink.removeUpdateStateListener();
+});
 </script>
 
 <template>
@@ -578,6 +633,7 @@ async function cleanupStaleSkillKeys(): Promise<void> {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'skill' }]" @click="activeTab = 'skill'">Skill</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'im' }]" @click="activeTab = 'im'">IM</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'about' }]" @click="activeTab = 'about'">关于</button>
       </nav>
       <div class="save-actions">
         <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus === 'projection-failed' ? 'saved' : saveStatus}`]">
@@ -882,6 +938,41 @@ async function cleanupStaleSkillKeys(): Promise<void> {
                   </div>
                 </template>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 关于：版本展示 + 应用内检查更新（electron-updater / GitHub Releases，主进程 modules/app-updater.ts） -->
+        <div v-show="activeTab === 'about'" class="solo-card">
+          <div class="mscroll">
+            <div class="section">
+              <h3 class="section-title">关于</h3>
+              <div class="field">
+                <span class="field-label">当前版本</span>
+                <span class="field-desc" data-testid="about-version">v{{ updateInfo?.currentVersion || '…' }}</span>
+              </div>
+              <div class="field">
+                <span class="field-label">检查更新</span>
+                <span class="field-desc" data-testid="about-status">{{ updateStatusText }}</span>
+                <button
+                  type="button"
+                  class="test-btn"
+                  data-testid="about-check-btn"
+                  :disabled="!aboutCheckEnabled"
+                  @click="runCheckForUpdate"
+                >检查更新</button>
+                <button
+                  v-if="updateStatus === 'downloaded'"
+                  type="button"
+                  class="test-btn"
+                  data-testid="about-install-btn"
+                  @click="runInstallUpdate"
+                >重启更新（v{{ updateInfo?.state.newVersion }}）</button>
+              </div>
+              <details v-if="updateInfo?.state.releaseNotes" class="about-notes">
+                <summary>更新说明</summary>
+                <pre>{{ updateInfo.state.releaseNotes }}</pre>
+              </details>
             </div>
           </div>
         </div>
@@ -2045,6 +2136,15 @@ input.skill-search:focus {
   font-size: 0.72rem;
   color: var(--color-accent-strong);
   overflow-wrap: anywhere;
+}
+
+/* 关于 tab 更新说明：保留换行纯文本（Release body 为 Markdown 源码，v1 不渲染） */
+.about-notes pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0.5rem 0 0;
+  font-size: 0.85rem;
+  opacity: 0.85;
 }
 
 </style>

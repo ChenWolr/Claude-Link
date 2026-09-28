@@ -3,6 +3,12 @@
   productName: "Claude Link",
   copyright: "Copyright © 2026 Claude Link",
 
+  // 应用内检查更新：electron-updater 客户端经 GitHub Releases 拉 latest.yml。
+  // package:win 用 --publish never 只构建不上传，latest.yml 照常生成在 dist-electron/，
+  // 发版时手动连同安装包上传 Release（published、非 prerelease）；客户端 setFeedURL 显式
+  // 指向（modules/app-updater.ts），不依赖打包内嵌 app-update.yml。
+  publish: [{ provider: "github", owner: "ChenWolr", repo: "Claude-Link" }],
+
   directories: {
     output: "dist-electron",
     buildResources: "resources"
