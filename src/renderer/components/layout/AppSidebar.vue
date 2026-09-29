@@ -620,7 +620,7 @@ async function confirmDelete(session: { id: string; name: string }) {
 
 .sidebar__multiselect--active {
   background: var(--color-danger);
-  color: var(--color-on-accent);
+  color: var(--color-on-danger);
 }
 
 .sidebar__multiselect svg {

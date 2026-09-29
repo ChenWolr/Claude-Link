@@ -392,17 +392,13 @@ onUnmounted(() => {
   border-color: color-mix(in srgb, var(--color-fail) 50%, transparent);
 }
 
-.ctl__btn--danger-solid {
-  background: var(--color-danger);
-  border-color: var(--color-danger);
-  color: #1a0606;
-  font-weight: 700;
-}
-
 .ctl__btn--abort {
   position: relative;
-  background: var(--color-danger);
-  border-color: var(--color-danger);
+  /* 底/边同拼黑 20% 加深：终端深色板下白字 3.91:1<AA（O-2 返工），混合后 ≈5.7:1 过；
+     danger 本身仍作色板文字色（不能调色板值，深色主题双向无解）。holding 光环保持纯 danger
+     （比加深后的底亮，按住中可辨）。 */
+  background: color-mix(in srgb, var(--color-danger) 80%, #000000);
+  border-color: color-mix(in srgb, var(--color-danger) 80%, #000000);
   color: #fff;
   font-weight: 700;
 }

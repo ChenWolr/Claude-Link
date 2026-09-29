@@ -132,6 +132,16 @@ check('R2.13 style 段零硬编码色值（全部走 var(--color-*)/color-mix to
   const hexColors = style.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
   assert.deepEqual(hexColors, [], `style 段发现硬编码色值：${hexColors.join(', ')}`);
 });
+check('R2.14 multiselect 激活态白字走 --color-on-danger token（O-1，负向：块内不得回退 on-accent 误用）', () => {
+  assert.ok(sidebar.includes('--color-on-danger'), 'multiselect 激活态白字未引用 on-danger token');
+  // 负向限定在 .sidebar__multiselect--active 样式块切片内（切片法同 tdd-update-presentation-verify W2b）：
+  // 文件级字面会误伤 brand-mark 等合法的 on-accent 配对（accent 底白字，语义正确）。
+  const start = sidebar.indexOf('.sidebar__multiselect--active {');
+  const end = sidebar.indexOf('.sidebar__multiselect svg {');
+  assert.ok(start !== -1 && end > start, '未找到 .sidebar__multiselect--active 样式块');
+  const block = sidebar.slice(start, end);
+  assert.ok(!block.includes('var(--color-on-accent)'), 'multiselect 激活块仍引用 on-accent（色板依赖的近黑字，danger 底上对比度不达 AA）');
+});
 
 console.log('\n=== R3 · 双色板钉（constants.ts + settings-mapping 同步） ===');
 
