@@ -1,7 +1,7 @@
 // scripts/cdp-about-tab-smoke.mjs
-// 关于 tab dev 冒烟：v1 仅验证「设置→关于 tab 可达、版本号展示、开发模式 unavailable、
-// 检查按钮禁用」。更新全链（available→downloading→downloaded→installing）在
-// cdp-update-e2e.mjs 的打包实例上验证。
+// 关于 tab dev 冒烟：v2（更新 UX 增强 2026-09-28）验证「设置→关于 tab 可达、版本号展示、
+// 开发模式 unavailable、检查按钮常可点（R1）、最新版本行=未查询（R3）、侧栏无更新徽标（dev）」。
+// 更新全链（弹窗/徽标/直达/重启安装）在 cdp-update-e2e.mjs 的打包实例上验证。
 // 用法：1) npm run dev:cdp  2) node scripts/cdp-about-tab-smoke.mjs
 import { readFileSync } from 'node:fs';
 
@@ -71,15 +71,25 @@ try {
     if (!text || !text.includes('开发模式下不可用')) throw new Error(`实际：${text}`);
   });
 
-  await check('A4 检查按钮禁用（dev 不可点）', async () => {
+  await check('A4 检查按钮常可点（R1：dev 也可点，不再禁用/忙碌圆圈）', async () => {
     const disabled = await evalExpr(ws, `document.querySelector('[data-testid="about-check-btn"]')?.disabled`);
-    if (disabled !== true) throw new Error(`disabled=${disabled}`);
+    if (disabled !== false) throw new Error(`disabled=${disabled}`);
   });
 
   await check('A5 store 直查 status=unavailable（不经 DOM）', async () => {
     const info = await evalExpr(ws, `window.claudeLink.getUpdateInfo()`);
     if (info?.state?.status !== 'unavailable') throw new Error(`实际 status=${info?.state?.status}`);
     if (typeof info?.currentVersion !== 'string' || !info.currentVersion) throw new Error('currentVersion 缺失');
+  });
+
+  await check('A6 最新版本行显示「未查询」（dev 无检查结果，R3）', async () => {
+    const text = await evalExpr(ws, `document.querySelector('[data-testid="about-latest-version"]')?.textContent?.trim()`);
+    if (text !== '未查询') throw new Error(`实际：${text}`);
+  });
+
+  await check('A7 侧栏无更新徽标（dev unavailable 不亮徽标，R4 负向）', async () => {
+    const exists = await evalExpr(ws, `document.querySelector('[data-testid="update-badge"]') !== null`);
+    if (exists !== false) throw new Error('dev 下不应出现 update-badge');
   });
 } catch (e) {
   if (e instanceof PreconditionError) { log(`前置不满足：${e.message}`); process.exit(2); }

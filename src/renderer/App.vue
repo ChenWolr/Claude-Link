@@ -5,9 +5,11 @@ import InteractionPrompt from './components/chat/InteractionPrompt.vue';
 import ImageLightbox from './components/chat/ImageLightbox.vue';
 import DiffDialog from './components/changes/DiffDialog.vue';
 import ToolDiffDialog from './components/chat/ToolDiffDialog.vue';
+import UpdateDialog from './components/layout/UpdateDialog.vue';
 import { useConfigStore, lastSaveFailed } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useExportImageStore } from './stores/export-image-store';
+import { useUpdateStore } from './stores/update-store';
 import { useChat } from './composables/use-chat';
 import { useCommandStore } from './stores/command-store';
 import { useTaskStore } from './stores/task-store';
@@ -19,6 +21,7 @@ const sessionStore = useSessionStore();
 const exportImageStore = useExportImageStore();
 const commandStore = useCommandStore();
 const taskStore = useTaskStore();
+const updateStore = useUpdateStore();
 const { startListening, stopListening } = useChat();
 let stopExportProgress: (() => void) | null = null;
 let stopCommandChanges: (() => void) | null = null;
@@ -70,6 +73,9 @@ onMounted(async () => {
   startListening();
   // bindContextUpdates 也在全局注册，避免 ChatPage 卸载后 context:update 监听丢失。
   sessionStore.bindContextUpdates();
+  // 更新状态全局单订阅（R2-R5）：update-store 是渲染层唯一 onUpdateStateChanged 订阅者，
+  // 侧栏徽标 / 关于 tab / UpdateDialog 都消费它；本行只在挂载时执行一次（幂等）。
+  updateStore.init();
   // 导出进度监听也在全局注册一次：切换路由/会话不影响进行中的导出 job。
   stopExportProgress = window.claudeLink.onImageExportProgress((p) => exportImageStore.applyProgress(p));
   // 原生 Slash Commands：命令变化全局订阅（ChatPage 卸载/后台会话不丢事件）。主进程 COMMANDS_CHANGED
@@ -112,6 +118,7 @@ onBeforeUnmount(() => {
     <ImageLightbox />
     <DiffDialog />
     <ToolDiffDialog />
+    <UpdateDialog />
     <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">设置保存失败，部分修改可能未保存</div>
   </AppLayout>
 </template>

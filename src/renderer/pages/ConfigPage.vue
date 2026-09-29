@@ -4,8 +4,8 @@
 // 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
 // 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
 // 所有滚动发生在面板内部；尺寸除 Skill 双栏区（.skill-md-rail 264px 定宽、滚动条 8px）与个别固定装饰件（保存徽标 spinner 圆点 8px、sr-only 1px 裁剪、tab/列表项 2px 指示边框）外全部 rem（随 fontScale 等比缩放）。
-import { computed, onMounted, onBeforeUnmount, onUnmounted, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { useConfigStore, lastSaveFailed } from '../stores/config-store';
 import { useCommandStore } from '../stores/command-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
@@ -17,7 +17,9 @@ import { sanitizeMaxTurns } from '../../shared/max-turns';
 import { attachUserSkillDirNames, findStaleSkillKeys, isStaleKeyScanReady, loadSkillProjectDirs, normalizeDirKey } from '../../shared/project-skills';
 import { useInteractionStore } from '../stores/interaction-store';
 import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
-import type { AppUpdateInfo, AppUpdateState } from '@shared/types/update';
+import type { AppUpdateState } from '@shared/types/update';
+import { aboutCheckButtonLabel, latestVersionText } from '../../shared/update-presentation';
+import { useUpdateStore } from '../stores/update-store';
 
 const store = useConfigStore();
 const commandStore = useCommandStore();
@@ -31,6 +33,20 @@ const bridgeSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
 // 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）/ 关于（版本+检查更新）。
 type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im' | 'about';
 const activeTab = ref<TabId>('connection');
+
+// 侧栏「可更新」徽标等外部入口直达指定 tab：/config?tab=about（非法值忽略保持默认）。
+const TAB_IDS = ['connection', 'behavior', 'appearance', 'skill', 'im', 'about'] as const;
+const route = useRoute();
+onMounted(() => {
+  const q = route.query.tab;
+  if (typeof q === 'string' && (TAB_IDS as readonly string[]).includes(q)) activeTab.value = q as TabId;
+});
+// watch 整个 query 对象（每次导航都是新引用）：徽标对象式 push 携带每次变化的 v 参数，
+// 同 query 重复导航也能触发回跳（P3-2 死点击修复）；非法 tab 值忽略逻辑不变。
+watch(() => route.query, (q) => {
+  const t = q.tab;
+  if (typeof t === 'string' && (TAB_IDS as readonly string[]).includes(t)) activeTab.value = t as TabId;
+});
 
 // 自动保存：监听所有用户可编辑的持久化字段，700ms 防抖落盘，确保所有配置都永久保存。
 // 用快照字符串比对建立基线，避免 saveConfig 回写 config 时触发死循环；
@@ -513,59 +529,40 @@ async function cleanupStaleSkillKeys(): Promise<void> {
   store.config.skillOverrides = next;
 }
 
-// 关于 tab：版本展示 + 应用内检查更新（主进程 electron-updater）。
-const updateInfo = ref<AppUpdateInfo | null>(null);
-const checkPending = ref(false);
-let offUpdateState: (() => void) | null = null;
+// 关于 tab：版本展示 + 应用内检查更新（消费全局 update-store——订阅单主化见 store 头注释，
+// 本页不再直接订阅更新广播通道，removeAllListeners 互踩点已消除）。
+const updateStore = useUpdateStore();
 
-const updateStatus = computed<AppUpdateState['status']>(() => updateInfo.value?.state.status ?? 'idle');
+const updateStatus = computed<AppUpdateState['status']>(() => updateStore.status);
 
-const aboutCheckEnabled = computed(() =>
-  ['idle', 'latest', 'error', 'downloaded'].includes(updateStatus.value) && !checkPending.value);
+// R1：按钮常可点——仅 installing 禁用（dev 的 unavailable 也可点，点击后状态文案自解释；
+// checking/available/downloading 的重入由主进程守卫兜底，pending 防抖由 store.check 兜底）。
+const aboutCheckEnabled = computed(() => updateStore.status !== 'installing');
 
 const updateStatusText = computed(() => {
   switch (updateStatus.value) {
     case 'unavailable': return '开发模式下不可用（打包构建后可检查更新）';
     case 'checking': return '正在检查…';
-    case 'available': return `发现新版本 v${updateInfo.value?.state.newVersion ?? ''}，准备下载…`;
+    case 'available': return `发现新版本 v${updateStore.state.newVersion ?? ''}，准备下载…`;
     case 'downloading': {
-      const p = updateInfo.value?.state.progress;
+      const p = updateStore.state.progress;
       return p ? `正在下载 ${p.percent}%（${Math.round(p.transferred / 1048576)}/${Math.round(p.total / 1048576)} MB）` : '正在下载…';
     }
-    case 'downloaded': return `新版本 v${updateInfo.value?.state.newVersion ?? ''} 已就绪，点击「重启更新」安装`;
+    case 'downloaded': return `新版本 v${updateStore.state.newVersion ?? ''} 已就绪，点击「重启更新」安装`;
     case 'installing': return '正在重启安装…';
-    case 'error': return `失败：${updateInfo.value?.state.error ?? '未知错误'}`;
+    case 'error': return `失败：${updateStore.state.error ?? '未知错误'}`;
     case 'latest': return '已是最新版本';
     default: return '点击按钮检查 GitHub 上的最新版本';
   }
 });
 
-async function runCheckForUpdate(): Promise<void> {
-  if (checkPending.value) return;
-  checkPending.value = true;
-  try {
-    const state = await window.claudeLink.checkForAppUpdate();
-    if (updateInfo.value) updateInfo.value = { ...updateInfo.value, state };
-  } finally {
-    checkPending.value = false;
-  }
+function runCheckForUpdate(): void {
+  void updateStore.check();
 }
 
-async function runInstallUpdate(): Promise<void> {
-  await window.claudeLink.installAppUpdate();
+function runInstallUpdate(): void {
+  void updateStore.install();
 }
-
-onMounted(() => {
-  void window.claudeLink.getUpdateInfo().then((info) => { updateInfo.value = info; });
-  offUpdateState = window.claudeLink.onUpdateStateChanged((state) => {
-    updateInfo.value = { currentVersion: updateInfo.value?.currentVersion ?? '', state };
-  });
-});
-
-onUnmounted(() => {
-  offUpdateState?.();
-  window.claudeLink.removeUpdateStateListener();
-});
 </script>
 
 <template>
@@ -949,7 +946,11 @@ onUnmounted(() => {
               <h3 class="section-title">关于</h3>
               <div class="field">
                 <span class="field-label">当前版本</span>
-                <span class="field-desc" data-testid="about-version">v{{ updateInfo?.currentVersion || '…' }}</span>
+                <span class="field-desc" data-testid="about-version">v{{ updateStore.currentVersion || '…' }}</span>
+              </div>
+              <div class="field">
+                <span class="field-label">最新版本</span>
+                <span class="field-desc" data-testid="about-latest-version">{{ latestVersionText(updateStore.state.latestVersion) }}</span>
               </div>
               <div class="field">
                 <span class="field-label">检查更新</span>
@@ -960,18 +961,18 @@ onUnmounted(() => {
                   data-testid="about-check-btn"
                   :disabled="!aboutCheckEnabled"
                   @click="runCheckForUpdate"
-                >检查更新</button>
+                >{{ aboutCheckButtonLabel(updateStore.checkPending) }}</button>
                 <button
                   v-if="updateStatus === 'downloaded'"
                   type="button"
                   class="test-btn"
                   data-testid="about-install-btn"
                   @click="runInstallUpdate"
-                >重启更新（v{{ updateInfo?.state.newVersion }}）</button>
+                >重启更新（v{{ updateStore.state.newVersion }}）</button>
               </div>
-              <details v-if="updateInfo?.state.releaseNotes" class="about-notes">
+              <details v-if="updateStore.state.releaseNotes" class="about-notes">
                 <summary>更新说明</summary>
-                <pre>{{ updateInfo.state.releaseNotes }}</pre>
+                <pre>{{ updateStore.state.releaseNotes }}</pre>
               </details>
             </div>
           </div>
@@ -1134,7 +1135,7 @@ onUnmounted(() => {
 }
 
 .test-btn:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.6;
 }
 

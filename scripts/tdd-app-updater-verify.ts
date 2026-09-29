@@ -35,6 +35,8 @@ const ipcHandlers = readRel('src/main/ipc-handlers.ts');
 const indexMain = readRel('src/main/index.ts');
 const preloadApi = readRel('src/preload/api.ts');
 const configPage = readRel('src/renderer/pages/ConfigPage.vue');
+const updateStore = readRel('src/renderer/stores/update-store.ts');
+const appVue = readRel('src/renderer/App.vue');
 const selftestList = readRel('scripts/selftest-static-list.txt');
 const serveFeed = readRel('scripts/serve-update-feed.mjs');
 const updateE2e = readRel('scripts/cdp-update-e2e.mjs');
@@ -127,8 +129,14 @@ check('6', '关于块 v-show + 版本/按钮 testid',
   && configPage.includes('data-testid="about-check-btn"') && configPage.includes('data-testid="about-install-btn"'));
 check('6', '开发模式提示文案',
   configPage.includes('开发模式下不可用'));
-check('6', '状态订阅 + 卸载清理',
-  configPage.includes('window.claudeLink.onUpdateStateChanged') && configPage.includes('window.claudeLink.removeUpdateStateListener()'));
+check('6', '订阅单主化：update-store 是渲染层唯一 onUpdateStateChanged 订阅者',
+  updateStore.includes('window.claudeLink.onUpdateStateChanged'));
+check('6', '订阅单主化：App.vue onMounted 全局 init 一次',
+  appVue.includes('updateStore.init()'));
+check('6', '订阅单主化：ConfigPage 不再直接订阅（负向，removeUpdateStateListener 互踩点消除）',
+  !configPage.includes('onUpdateStateChanged') && !configPage.includes('removeUpdateStateListener'));
+check('6', '最新版本行 testid（R3）',
+  configPage.includes('data-testid="about-latest-version"'));
 
 console.log('\n=== 7) 修复轮 R1：F1 精确选包 / F2 错误归一 / F3 按 PID 清理 ===');
 check('7', 'feed 按 package.json 版本精确选包（防目录序选中旧包）',

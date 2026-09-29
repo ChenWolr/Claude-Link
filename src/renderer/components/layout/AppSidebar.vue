@@ -3,6 +3,7 @@ import { ref, watch, onMounted, onUnmounted, computed } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
+import { useUpdateStore } from '../../stores/update-store';
 import { sessionDisplayStatusMeta, type SessionDisplayStatus } from '../../../shared/session-display-status';
 import { groupSessionsByProject, type SessionGroup } from '../../utils/group-sessions';
 import { groupSessionsByDate } from '../../utils/group-sessions-by-date';
@@ -11,6 +12,7 @@ import { formatSessionTime } from '../../utils/format-session-time';
 const store = useSessionStore();
 const router = useRouter();
 const interactionStore = useInteractionStore();
+const updateStore = useUpdateStore();
 
 // 侧栏展示状态统一经 store.sessionDisplayStatus 解析（completed > network_interrupted
 // > retrying > running > idle），此处只做投影，供模板绑定 class 与可访问文案。
@@ -159,19 +161,31 @@ async function confirmDelete(session: { id: string; name: string }) {
       <h1>Claude Link</h1>
     </div>
 
-    <button
-      class="new-button"
-      type="button"
-      :class="{ 'new-button--active': store.activeSession?.transient }"
-      @click="handleNewSession"
-    >
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 5v14" />
-        <path d="M5 12h14" />
-      </svg>
-      <span>新会话</span>
-      <kbd>Ctrl N</kbd>
-    </button>
+    <div class="sidebar__new-wrap">
+      <button
+        class="new-button"
+        type="button"
+        :class="{ 'new-button--active': store.activeSession?.transient }"
+        @click="handleNewSession"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 5v14" />
+          <path d="M5 12h14" />
+        </svg>
+        <span>新会话</span>
+        <kbd>Ctrl N</kbd>
+      </button>
+      <!-- R4：绿色「可更新」徽标——new-button 的兄弟绝对定位元素（不嵌 button 进 button）；
+           @click.stop 防冒泡误触发新会话。仅 available/downloading/downloaded 三态可见。 -->
+      <button
+        v-if="updateStore.badgeVisible"
+        class="update-badge"
+        type="button"
+        data-testid="update-badge"
+        :title="`发现新版本 v${updateStore.state.newVersion ?? ''}，点击查看`"
+        @click.stop="router.push({ path: '/config', query: { tab: 'about', v: Date.now().toString(36) } })"
+      >可更新</button>
+    </div>
 
     <div class="sidebar__search-wrap">
       <svg class="sidebar__search-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -452,6 +466,36 @@ async function confirmDelete(session: { id: string; name: string }) {
 .new-button--active {
   border-color: var(--color-accent);
   box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* 徽标容器：new-button 包裹层，作兄弟绝对定位徽标的锚点。 */
+.sidebar__new-wrap {
+  position: relative;
+}
+
+/* 绿色「可更新」徽标：叠加在新会话按钮右上角（R4）。底色 --color-success-strong 恒深绿
+   （不随色板），白字必须用专 token --color-on-success（on-accent 按各色板 accent 亮度选，
+   四套色板下会落到近黑字、对比度 <AA，P3-1）；hover 不换浅底（--color-success 上白字
+   仅 3.31:1），以浮起阴影作反馈。 */
+.update-badge {
+  position: absolute;
+  top: -7px;
+  right: -5px;
+  z-index: 1;
+  border: 1px solid var(--color-success-strong);
+  border-radius: 999px;
+  background: var(--color-success-strong);
+  color: var(--color-on-success);
+  padding: 1px 7px;
+  font-size: 0.625rem;
+  font-weight: 650;
+  line-height: 1.4;
+  cursor: pointer;
+  box-shadow: var(--ring-light);
+}
+
+.update-badge:hover {
+  box-shadow: var(--ring-light), var(--elevation-1);
 }
 
 /* 搜索框：放大镜 + 输入 + 「/」聚焦提示角标。 */

@@ -21,6 +21,7 @@
   --color-info-strong: #2563EB;
   --color-success: #4A9E5E;
   --color-success-strong: #2E7D46;
+  --color-on-success: #FFFFFF; /* success 系实底上的白字（徽标用；success 不随色板恒深底） */
 
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, "Liberation Mono", monospace;
