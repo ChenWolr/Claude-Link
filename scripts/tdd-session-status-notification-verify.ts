@@ -854,7 +854,7 @@ check('AppSidebar 四态颜色经 --session-status-color token 控制（warn/dan
   // 静态态显式 animation:none；running/retrying 共用同一条 pulse keyframes（不复制两套）。
   const pulseDecls = sidebar.split('animation: session-status-pulse 1.2s ease-in-out infinite').length - 1;
   assert.equal(pulseDecls, 1, `pulse 动画声明应恰好 1 条，实际 ${pulseDecls}`);
-  assert.ok(sidebar.includes('session-link__status--network-interrupted'));
+  assert.ok(sidebar.includes('session-link__status--network_interrupted'));
   assert.ok(sidebar.includes('animation: none'));
 });
 check('AppSidebar 状态点带辅助技术可读的 aria-label/title（不只依赖颜色）', () => {

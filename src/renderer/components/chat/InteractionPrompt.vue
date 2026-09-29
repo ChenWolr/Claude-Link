@@ -1010,7 +1010,9 @@ onBeforeUnmount(() => {
 }
 
 .interaction-btn--danger {
-  background: var(--color-danger);
+  /* 拼黑 20% 加深实底：终端深色板下白字 3.91:1<AA（O-2 返工），混合后 ≈5.7:1 过；
+     danger 本身仍作色板文字色（不能调色板值，深色主题双向无解）。 */
+  background: color-mix(in srgb, var(--color-danger) 80%, #000000);
   color: #fff;
 }
 

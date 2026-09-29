@@ -66,7 +66,9 @@ console.log('\n=== 6) 主进程 index.ts：托盘常驻 + 关闭拦截 + 右键�
 check('index.ts 导入 Tray 与 nativeImage', indexMain.includes('import { app, BrowserWindow, Menu, Tray, nativeImage } from \'electron\';'));
 check('声明托盘句柄 let tray: Tray | null', indexMain.includes('let tray: Tray | null = null;'));
 check('声明真正退出标志 let quitting = false', indexMain.includes('let quitting = false;'));
-check('启动即同步托盘（createWindow 后调用 syncTrayWithConfig）', /createWindow\(\);[\s\S]{0,200}syncTrayWithConfig\(\);/.test(indexMain));
+// 2026-09-28 更新UX增强最小同步：index.ts 在 createWindow 后插入 initAppUpdater/scheduleStartupUpdateCheck
+// 两行（应用内更新 R5），createWindow↔syncTrayWithConfig 间距 198→270，邻接窗口 200→320（语义不变：仍紧邻启动序列）。
+check('启动即同步托盘（createWindow 后调用 syncTrayWithConfig）', /createWindow\(\);[\s\S]{0,320}syncTrayWithConfig\(\);/.test(indexMain));
 check('托盘生命周期挂接配置保存回调 onConfigSaved(syncTrayWithConfig)', indexMain.includes('onConfigSaved(syncTrayWithConfig);'));
 check('syncTrayWithConfig：开关开→ensureTray（运行中托盘常驻可见）', /function syncTrayWithConfig\(\): void \{[\s\S]{0,120}ensureTray\(\);/.test(indexMain));
 check('syncTrayWithConfig：开关关且窗口可见→销毁托盘（tray.destroy）', indexMain.includes('tray.destroy();'));

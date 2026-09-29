@@ -196,6 +196,44 @@ export const THEME_PALETTES: ThemePalette[] = [
       danger: '#8B2C1F',
     },
   },
+  {
+    // 侧栏 Quiet Console 重设计（2026-09-27）新增：冷灰浅色「静默」——近黑墨色作 accent，
+    // 主按钮/活动态呈墨色而非彩色的 A 方案语言。
+    id: 'quiet-console',
+    name: '静默',
+    isDark: false,
+    colors: {
+      bg: '#F6F7F8',
+      panel: '#FFFFFF',
+      panelSoft: '#FAFBFC',
+      border: 'rgba(0,0,0,0.09)',
+      text: '#1A1D21',
+      textMuted: '#6B7280', // 对 #FFFFFF 4.8:1 过 AA
+      accent: '#1A1D21', // 近黑主色（A 设计：主按钮/活动态为墨色）
+      accentStrong: '#000000',
+      onAccent: '#FFFFFF',
+      danger: '#DC2626',
+    },
+  },
+  {
+    // 同批新增：深色终端「终端」——isDark: true 驱动 apply-theme 的 colorScheme='dark'
+    // （深色滚动条/原生控件自动跟随）；亮蓝 accent 用深色文字（中亮度 onAccent 规则）。
+    id: 'terminal-pro',
+    name: '终端',
+    isDark: true,
+    colors: {
+      bg: '#0F1115',
+      panel: '#14171C',
+      panelSoft: '#1B2027',
+      border: '#23272F',
+      text: '#D3D8E0',
+      textMuted: '#9AA3B2', // 对 #14171C ≈7:1
+      accent: '#4EA1FF',
+      accentStrong: '#7FBAFF',
+      onAccent: '#0B1220', // 亮蓝 accent 用深色文字（中亮度规则）
+      danger: '#E5484D',
+    },
+  },
 ];
 
 /** OPT-10：引擎后台请求六开关单一常量（env 变量名 ← AppConfig 布尔字段名）。

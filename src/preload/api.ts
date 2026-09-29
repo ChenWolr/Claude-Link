@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（77 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（82 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -11,6 +11,7 @@ import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, Interact
 import type { CliDetectionResult } from '../shared/types/cli';
 import type { SkillProjectDirsPayload } from '../shared/types/command';
 import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatusEntry, WechatQrcodeStatusResult, BridgeFeishuTestResult } from '../shared/types/bridge';
+import type { AppUpdateInfo, AppUpdateState } from '../shared/types/update';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
 
@@ -21,6 +22,13 @@ export interface ClaudeLinkAPI {
   saveConfig: (config: Partial<AppConfig>) => Promise<AppConfig>;
   clearConfig: () => Promise<AppConfig>;
   getStorageInfo: () => Promise<{ userData: string; config: string; workspaces: string; db: string }>;
+  // 应用内检查更新（electron-updater / GitHub Releases）：getInfo 拉当前态，check 触发检查，
+  // install 在 downloaded 态重启安装；stateChanged 事件推送全程状态。
+  getUpdateInfo: () => Promise<AppUpdateInfo>;
+  checkForAppUpdate: () => Promise<AppUpdateState>;
+  installAppUpdate: () => Promise<boolean>;
+  onUpdateStateChanged: (callback: (state: AppUpdateState) => void) => () => void;
+  removeUpdateStateListener: () => void;
   pickWorkspaceDir: () => Promise<string | null>;
   listRecentWorkspaces: () => Promise<string[]>;
   addRecentWorkspace: (dir: string) => Promise<string[]>;
@@ -126,6 +134,15 @@ export function createApi(): ClaudeLinkAPI {
         workspaces: string;
         db: string;
       }>,
+    getUpdateInfo: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_GET_INFO),
+    checkForAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_CHECK),
+    installAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_INSTALL),
+    onUpdateStateChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: AppUpdateState) => callback(state);
+      ipcRenderer.on(IPC_CHANNELS.APP_UPDATE_STATE_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.APP_UPDATE_STATE_CHANGED, listener);
+    },
+    removeUpdateStateListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.APP_UPDATE_STATE_CHANGED),
     pickWorkspaceDir: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_PICK_DIR) as Promise<string | null>,
     listRecentWorkspaces: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_LIST_RECENT) as Promise<string[]>,
     addRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_ADD_RECENT, dir) as Promise<string[]>,

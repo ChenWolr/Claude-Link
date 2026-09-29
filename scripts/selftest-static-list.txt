@@ -183,3 +183,7 @@ scripts/tdd-markdown-indented-code-off-verify.ts
 scripts/tdd-inline-katex-bounded-verify.ts
 scripts/tdd-compact-banner-fallback-verify.ts
 scripts/tdd-hold-abort-verify.ts
+scripts/tdd-sidebar-date-group-verify.ts
+scripts/tdd-sidebar-structure-verify.ts
+scripts/tdd-app-updater-verify.ts
+scripts/tdd-update-presentation-verify.ts

@@ -22,6 +22,11 @@ export const IPC_CHANNELS = {
   CONFIG_SAVE: 'config:save',
   CONFIG_CLEAR: 'config:clear',
   CONFIG_STORAGE_INFO: 'config:storageInfo',
+  // 应用内检查更新（electron-updater / GitHub Releases；实现见 modules/app-updater.ts）。
+  APP_UPDATE_GET_INFO: 'appUpdate:getInfo',
+  APP_UPDATE_CHECK: 'appUpdate:check',
+  APP_UPDATE_INSTALL: 'appUpdate:install',
+  APP_UPDATE_STATE_CHANGED: 'appUpdate:stateChanged',
   // settings.json 导入/自动检测死链路通道（config:importSettings / config:pickSettingsFile /
   // config:autoDetect）已于 2026-09-20 整链删除。
   // 流式测试连接通道已删除（测试收敛到 PROVIDER_TEST_MODEL 行内直返）。

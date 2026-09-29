@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // ConfigPage.vue — 设置页。
 // 结构：标题/标签/工作区同宽一列（宽 = min(100%, --chat-bottom-max-width)，与聊天/会话页同一 800px 契约），
-// 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片。
+// 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片；
+// 关于 tab 为扉页式重设计（2026-09-29 A 案：about-hero 扉页+8 态更新舞台，不走 .section/.field 表单形态）。
 // 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
 // 所有滚动发生在面板内部；尺寸除 Skill 双栏区（.skill-md-rail 264px 定宽、滚动条 8px）与个别固定装饰件（保存徽标 spinner 圆点 8px、sr-only 1px 裁剪、tab/列表项 2px 指示边框）外全部 rem（随 fontScale 等比缩放）。
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { useConfigStore, lastSaveFailed } from '../stores/config-store';
 import { useCommandStore } from '../stores/command-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
@@ -17,6 +18,10 @@ import { sanitizeMaxTurns } from '../../shared/max-turns';
 import { attachUserSkillDirNames, findStaleSkillKeys, isStaleKeyScanReady, loadSkillProjectDirs, normalizeDirKey } from '../../shared/project-skills';
 import { useInteractionStore } from '../stores/interaction-store';
 import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
+import type { AppUpdateState } from '@shared/types/update';
+import { aboutCheckButtonLabel, latestVersionText } from '../../shared/update-presentation';
+import { useUpdateStore } from '../stores/update-store';
+import iconUrl from '../assets/icon.png';
 
 const store = useConfigStore();
 const commandStore = useCommandStore();
@@ -27,9 +32,23 @@ const toastType = ref<'success' | 'error'>('success');
 // 批次5.1-5：IM tab 切回时经 BridgeSettings.refresh 重拉 config/bindings（owner 首捕获后可见）。
 const bridgeSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
 
-// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）。
-type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im';
+// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）/ 关于（扉页：身份+版本+应用内更新）。
+type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im' | 'about';
 const activeTab = ref<TabId>('connection');
+
+// 侧栏「可更新」徽标等外部入口直达指定 tab：/config?tab=about（非法值忽略保持默认）。
+const TAB_IDS = ['connection', 'behavior', 'appearance', 'skill', 'im', 'about'] as const;
+const route = useRoute();
+onMounted(() => {
+  const q = route.query.tab;
+  if (typeof q === 'string' && (TAB_IDS as readonly string[]).includes(q)) activeTab.value = q as TabId;
+});
+// watch 整个 query 对象（每次导航都是新引用）：徽标对象式 push 携带每次变化的 v 参数，
+// 同 query 重复导航也能触发回跳（P3-2 死点击修复）；非法 tab 值忽略逻辑不变。
+watch(() => route.query, (q) => {
+  const t = q.tab;
+  if (typeof t === 'string' && (TAB_IDS as readonly string[]).includes(t)) activeTab.value = t as TabId;
+});
 
 // 自动保存：监听所有用户可编辑的持久化字段，700ms 防抖落盘，确保所有配置都永久保存。
 // 用快照字符串比对建立基线，避免 saveConfig 回写 config 时触发死循环；
@@ -511,6 +530,62 @@ async function cleanupStaleSkillKeys(): Promise<void> {
   for (const k of keys) delete next[k];
   store.config.skillOverrides = next;
 }
+
+// 关于 tab：版本展示 + 应用内检查更新（消费全局 update-store——订阅单主化见 store 头注释，
+// 本页不再直接订阅更新广播通道，removeAllListeners 互踩点已消除）。
+const updateStore = useUpdateStore();
+
+const updateStatus = computed<AppUpdateState['status']>(() => updateStore.status);
+
+// R1：按钮常可点——仅 installing 禁用（dev 的 unavailable 也可点，点击后状态文案自解释；
+// checking/available/downloading 的重入由主进程守卫兜底，pending 防抖由 store.check 兜底）。
+const aboutCheckEnabled = computed(() => updateStore.status !== 'installing');
+
+const updateStatusText = computed(() => {
+  switch (updateStatus.value) {
+    case 'unavailable': return '开发模式下不可用（打包构建后可检查更新）';
+    case 'checking': return '正在检查…';
+    case 'available': return `发现新版本 v${updateStore.state.newVersion ?? ''}，准备下载…`;
+    case 'downloading': {
+      const p = updateStore.state.progress;
+      return p ? `正在下载 ${p.percent}%（${Math.round(p.transferred / 1048576)}/${Math.round(p.total / 1048576)} MB）` : '正在下载…';
+    }
+    case 'downloaded': return `新版本 v${updateStore.state.newVersion ?? ''} 已就绪，点击「重启更新」安装`;
+    case 'installing': return '正在重启安装…';
+    case 'error': return `失败：${updateStore.state.error ?? '未知错误'}`;
+    case 'latest': return '已是最新版本';
+    default: return '点击按钮检查 GitHub 上的最新版本';
+  }
+});
+
+function runCheckForUpdate(): void {
+  void updateStore.check();
+}
+
+function runInstallUpdate(): void {
+  void updateStore.install();
+}
+
+// 扉页静态文案（2026-09-29 A 案）。
+const ABOUT_TAGLINE = '基于 Electron 的 Claude Code 桌面客户端——调用本机 CLI，经 Claude Agent SDK 建立原生会话。';
+// 三个 URL 与主进程 modules/app-updater.ts 的 GITHUB_OWNER/REPO 同源（主进程模块不可被 renderer import，静态重复）。
+const ABOUT_LINKS = {
+  repo: 'https://github.com/ChenWolr/Claude-Link',
+  releases: 'https://github.com/ChenWolr/Claude-Link/releases',
+  license: 'https://github.com/ChenWolr/Claude-Link#license',
+} as const;
+
+// 更新舞台图标章色调（纯展示映射）：八态 → 六色调。
+const updateStageTone = computed(() => {
+  switch (updateStatus.value) {
+    case 'unavailable': return 'warn';
+    case 'checking': case 'installing': case 'downloading': return 'busy';
+    case 'latest': return 'ok';
+    case 'available': case 'downloaded': return 'new';
+    case 'error': return 'fail';
+    default: return 'idle';
+  }
+});
 </script>
 
 <template>
@@ -578,6 +653,7 @@ async function cleanupStaleSkillKeys(): Promise<void> {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'skill' }]" @click="activeTab = 'skill'">Skill</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'im' }]" @click="activeTab = 'im'">IM</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'about' }]" @click="activeTab = 'about'">关于</button>
       </nav>
       <div class="save-actions">
         <span v-if="saveStatus !== 'idle'" :class="['save-badge', `save-badge--${saveStatus === 'projection-failed' ? 'saved' : saveStatus}`]">
@@ -885,6 +961,78 @@ async function cleanupStaleSkillKeys(): Promise<void> {
             </div>
           </div>
         </div>
+
+        <!-- 关于：扉页式（A 案 2026-09-29 重设计）——身份区+8 态更新舞台+链接行；
+             更新链消费 update-store（订阅单主化），链接经 link-guard openExternal 打开（零新 IPC） -->
+        <div v-show="activeTab === 'about'" class="solo-card">
+          <div class="mscroll">
+            <div class="about-hero">
+              <img class="about-hero__icon" :src="iconUrl" alt="Claude Link 应用图标">
+              <h3 class="about-hero__name">Claude Link</h3>
+              <p class="about-hero__tagline">{{ ABOUT_TAGLINE }}</p>
+              <div class="about-hero__pills">
+                <span class="about-pill about-pill--current">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2v4"/><path d="M14 2v4"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M12 12v6"/><path d="M9 18h6"/></svg>
+                  <span data-testid="about-version">v{{ updateStore.currentVersion || '…' }}</span>
+                </span>
+                <span class="about-pill">最新 <span data-testid="about-latest-version">{{ latestVersionText(updateStore.state.latestVersion) }}</span></span>
+                <span class="about-pill">MIT 许可</span>
+              </div>
+              <hr class="about-hero__divider">
+              <div class="about-stage">
+                <span class="about-stage__icon" :class="`about-stage__icon--${updateStageTone}`">
+                  <svg v-if="updateStageTone === 'ok'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+                  <svg v-else-if="updateStageTone === 'new'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
+                  <svg v-else-if="updateStatus === 'downloading'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg>
+                  <svg v-else-if="updateStageTone === 'fail'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg>
+                  <svg v-else-if="updateStageTone === 'warn'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+                  <svg v-else :class="{ 'about-spin': updateStatus === 'checking' || updateStatus === 'installing' || updateStore.checkPending }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                </span>
+                <p class="about-stage__text" aria-live="polite" data-testid="about-status">{{ updateStatusText }}</p>
+                <div v-if="updateStatus === 'downloading' && updateStore.state.progress" class="about-progress">
+                  <div class="about-progress__track">
+                    <div class="about-progress__fill" :style="{ width: `${updateStore.state.progress.percent}%` }"></div>
+                  </div>
+                  <div class="about-progress__meta">
+                    <span>{{ updateStore.state.progress.percent }}%</span>
+                    <span>{{ Math.round(updateStore.state.progress.transferred / 1048576) }}/{{ Math.round(updateStore.state.progress.total / 1048576) }} MB</span>
+                  </div>
+                </div>
+                <div class="about-stage__actions">
+                  <button
+                    v-if="updateStatus === 'downloaded'"
+                    type="button"
+                    class="btn-update btn-update--primary"
+                    data-testid="about-install-btn"
+                    @click="runInstallUpdate"
+                  >重启更新（v{{ updateStore.state.newVersion }}）</button>
+                  <button
+                    type="button"
+                    class="btn-update"
+                    data-testid="about-check-btn"
+                    :disabled="!aboutCheckEnabled"
+                    @click="runCheckForUpdate"
+                  >{{ aboutCheckButtonLabel(updateStore.checkPending) }}</button>
+                </div>
+              </div>
+              <details v-if="updateStore.state.releaseNotes" class="about-notes">
+                <summary>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+                  更新说明
+                </summary>
+                <pre>{{ updateStore.state.releaseNotes }}</pre>
+              </details>
+              <div class="about-hero__links">
+                <a class="about-link" :href="ABOUT_LINKS.repo" target="_blank" rel="noreferrer">
+                  <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" transform="scale(1.5)"/></svg>GitHub 仓库<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7"/><path d="M8 7h9v9"/></svg>
+                </a>
+                <a class="about-link" :href="ABOUT_LINKS.releases" target="_blank" rel="noreferrer">Releases 更新日志</a>
+                <a class="about-link" :href="ABOUT_LINKS.license" target="_blank" rel="noreferrer">开源许可</a>
+              </div>
+              <p class="about-hero__copyright">© {{ new Date().getFullYear() }} Claude Link · MIT License</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
     </div>
@@ -1043,7 +1191,7 @@ async function cleanupStaleSkillKeys(): Promise<void> {
 }
 
 .test-btn:disabled {
-  cursor: wait;
+  cursor: not-allowed;
   opacity: 0.6;
 }
 
@@ -2045,6 +2193,326 @@ input.skill-search:focus {
   font-size: 0.72rem;
   color: var(--color-accent-strong);
   overflow-wrap: anywhere;
+}
+
+/* ════════ 关于 tab 扉页式（2026-09-29 A 案，自 docs/prototypes/about-tab/a-identity-hero.html 移植，
+   px→rem 换算、类名统一 about- 前缀；颜色全部现有 token）════════ */
+.about-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 3rem 2rem 1.75rem;
+}
+
+.about-hero__icon {
+  width: 5.5rem;
+  height: 5.5rem;
+  border-radius: 1.25rem;
+  box-shadow: var(--ring-light-accent), var(--elevation-2);
+  display: block;
+}
+
+.about-hero__name {
+  margin: 1.25rem 0 0;
+  font-size: 1.625rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.about-hero__tagline {
+  margin: 0.5rem 0 0;
+  font-size: 0.875rem;
+  color: var(--color-text-muted);
+  line-height: 1.6;
+  max-width: 42ch;
+}
+
+.about-hero__pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1.125rem;
+}
+
+.about-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.75rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+}
+
+.about-pill svg {
+  width: 13px;
+  height: 13px;
+}
+
+.about-pill--current {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 32%, transparent);
+  color: var(--color-accent-strong);
+}
+
+.about-hero__divider {
+  width: min(28.75rem, 100%);
+  border: 0;
+  border-top: 1px solid var(--color-border);
+  margin: 1.75rem 0 0;
+}
+
+/* 更新舞台：八态共用容器，min-height 预留防态切换布局跳动（CLS）。 */
+.about-stage {
+  width: min(28.75rem, 100%);
+  min-height: 13rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.875rem;
+  padding: 1.5rem 0 0.25rem;
+}
+
+.about-stage__icon {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-pill);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+
+.about-stage__icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.about-stage__icon--idle {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent-strong);
+}
+
+.about-stage__icon--busy {
+  background: color-mix(in srgb, var(--color-info) 12%, transparent);
+  color: var(--color-info-strong);
+}
+
+.about-stage__icon--ok {
+  background: color-mix(in srgb, var(--color-success) 14%, transparent);
+  color: var(--color-success-strong);
+}
+
+.about-stage__icon--new {
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  color: var(--color-accent-strong);
+}
+
+.about-stage__icon--warn {
+  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
+  color: var(--color-warn-strong);
+}
+
+.about-stage__icon--fail {
+  background: color-mix(in srgb, var(--color-fail) 14%, transparent);
+  color: var(--color-fail-strong);
+}
+
+.about-stage__text {
+  font-size: 0.9375rem;
+  line-height: 1.55;
+  color: var(--color-text);
+  max-width: 38ch;
+}
+
+.about-stage__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.625rem;
+}
+
+/* 更新区专用按钮：幽灵=旧 test-btn 形态（border+panel-soft 底），主钮=accent 底白字。 */
+.btn-update {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4375rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+  padding: 0.5rem 1.125rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--duration-fast) var(--ease-out), transform var(--duration-fast) var(--ease-out);
+}
+
+.btn-update:hover {
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft));
+}
+
+.btn-update:active {
+  transform: scale(0.97);
+}
+
+.btn-update:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-update--primary {
+  border-color: var(--color-accent-strong);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-weight: 650;
+  box-shadow: var(--ring-light-accent);
+}
+
+.btn-update--primary:hover {
+  background: var(--color-accent-strong);
+}
+
+.about-spin {
+  /* 检查中/安装中的图标章旋转；@keyframes spin 复用本文件既有声明（注释置行尾——回归钉的
+     动画选择器正则不剥注释，选择器上方黏注释会被整段计入选择器串而误报未覆盖）。 */
+  animation: spin 0.8s linear infinite;
+}
+
+/* 下载进度条（数据源 updateStore.state.progress，仅 downloading 且有进度时渲染）。 */
+.about-progress {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4375rem;
+}
+
+.about-progress__track {
+  height: 0.5rem;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-text-muted) 14%, transparent);
+  overflow: hidden;
+}
+
+.about-progress__fill {
+  height: 100%;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+  transition: width var(--duration-base) var(--ease-out);
+}
+
+.about-progress__meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+/* 更新说明折叠（有 releaseNotes 才渲染，默认折叠）。 */
+.about-notes {
+  width: min(28.75rem, 100%);
+  margin: 1rem 0 0;
+  text-align: left;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  padding: 0.625rem 0.875rem;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
+.about-notes summary {
+  cursor: pointer;
+  user-select: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-weight: 600;
+}
+
+.about-notes summary svg {
+  width: 13px;
+  height: 13px;
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.about-notes[open] summary svg {
+  transform: rotate(90deg);
+}
+
+/* 关于 tab 更新说明 pre：保留换行纯文本（Release body 为 Markdown 源码，v1 不渲染）。 */
+.about-notes pre {
+  margin: 0.5rem 0 0;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.85;
+  max-height: 13.75rem;
+  overflow: auto;
+}
+
+/* 底部链接行 + 版权。 */
+.about-hero__links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 0.25rem 1rem;
+  margin-top: 1.75rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--color-border);
+  width: min(28.75rem, 100%);
+}
+
+.about-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  color: var(--color-text-muted);
+  font-size: 0.78125rem;
+  text-decoration: none;
+  padding: 0.25rem 0.125rem;
+  border-radius: var(--radius-xs);
+  transition: color var(--duration-fast) var(--ease-out);
+}
+
+.about-link svg {
+  width: 13px;
+  height: 13px;
+}
+
+.about-link:hover {
+  color: var(--color-accent-strong);
+}
+
+.about-hero__copyright {
+  margin: 0.875rem 0 0;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  opacity: 0.8;
+}
+
+/* 检查中/安装中的图标章旋转停转（与 .save-badge__dot 的 main.css 全局覆盖同款语义；
+   回归钉要求每个 infinite 动画选择器都有 prefers-reduced-motion 覆盖）。 */
+@media (prefers-reduced-motion: reduce) {
+  .about-spin {
+    animation: none;
+  }
 }
 
 </style>
