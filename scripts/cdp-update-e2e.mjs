@@ -1,9 +1,11 @@
 // scripts/cdp-update-e2e.mjs
-// 应用内检查更新全链 E2E（本地 generic feed，不碰 GitHub）：
+// 应用内检查更新全链 E2E（本地 generic feed，不碰 GitHub）——v2（更新 UX 增强 2026-09-28）：
 //   起 serve-update-feed（伪装 v99.0.0）→ 起 dist-electron/win-unpacked/claude-link.exe
 //   （--user-data-dir 隔离 + --remote-debugging-port=9224 + CLAUDE_LINK_UPDATE_FEED_URL）
-//   → CDP 进设置页关于 tab → 点「检查更新」→ 轮询 state 至 downloaded → 断言「重启更新」按钮
-//   → 点击 → 断言 installing + 应用进程退出 + NSIS 安装器进程出现 → taskkill 安装器收尾。
+//   → E0 启动 ~5s 自动检查发现新版自动弹窗（R5+R2）→ 点「稍后提醒」→ E2 侧栏「可更新」徽标
+//   → E3 点徽标直达设置关于 tab（最新版本行=feed 版本）→ E4 手动点「检查更新」弹窗重弹
+//   （dismissed 不挡主动检查）→ E5 等 downloaded → 点弹窗「立即重启更新」→ 断言 installing
+//   + 应用进程退出 + NSIS 安装器进程出现 → taskkill 安装器收尾。
 // 前置：npm run package:win 已跑（dist-electron/win-unpacked/claude-link.exe 存在）；
 //   dev 实例须关闭（单实例锁按 userData，已用 --user-data-dir 隔离，仍建议关闭减少干扰）。
 // 用法：node scripts/cdp-update-e2e.mjs
@@ -86,37 +88,70 @@ try {
   await new Promise((resolve, reject) => { ws.addEventListener('open', resolve); ws.addEventListener('error', () => reject(new Error('WS connect failed'))); });
   log('打包实例 CDP 已连接');
 
-  await check('B1 打包实例初始态：版本展示 + idle', async () => {
-    await evalExpr(ws, `window.location.hash = '#/config'`);
-    await sleep(1000);
-    await evalExpr(ws, `(() => { const b = [...document.querySelectorAll('.tab')].find(x => x.textContent.trim() === '关于'); if (!b) throw new Error('无关于 tab'); b.click(); })()`);
-    await sleep(600);
+  await check('E0 启动自动检查（R5）：~5s 后发现新版自动弹窗（R2）', async () => {
+    const visible = await waitFor(async () => evalExpr(ws,
+      `(() => { const d = document.querySelector('[data-testid="update-dialog"]'); return !!d && d.offsetParent !== null; })()`), 15000);
+    if (visible !== true) throw new Error('启动 15s 内弹窗未出现');
     const info = await evalExpr(ws, `window.claudeLink.getUpdateInfo()`);
-    if (info?.state?.status !== 'idle') throw new Error(`初始 status=${info?.state?.status}（期望 idle）`);
-    const text = await evalExpr(ws, `document.querySelector('[data-testid="about-version"]')?.textContent?.trim()`);
-    if (!/^v\d/.test(text || '')) throw new Error(`版本展示异常：${text}`);
+    const status = info?.state?.status;
+    if (!['available', 'downloading', 'downloaded'].includes(status)) throw new Error(`status=${status}（期望三态之一）`);
   });
 
-  await check('B2 点「检查更新」→ available → downloading → downloaded', async () => {
-    await evalExpr(ws, `document.querySelector('[data-testid="about-check-btn"]')?.click()`);
+  await check('E1 点「稍后提醒」→ 弹窗关闭', async () => {
+    await evalExpr(ws, `document.querySelector('[data-testid="update-dialog-dismiss"]')?.click()`);
+    const gone = await waitFor(async () => evalExpr(ws,
+      `document.querySelector('[data-testid="update-dialog"]') === null`), 5000);
+    if (gone !== true) throw new Error('点稍后后弹窗未关闭');
+  });
+
+  await check('E2 侧栏「可更新」徽标可见（R4）', async () => {
+    const r = await evalExpr(ws,
+      `(() => { const b = document.querySelector('[data-testid="update-badge"]'); return b ? { visible: b.offsetParent !== null, text: b.textContent.trim() } : null; })()`);
+    if (!r || r.visible !== true) throw new Error('徽标不可见');
+    if (!String(r.text).includes('可更新')) throw new Error(`徽标文本异常：${r.text}`);
+  });
+
+  await check('E3 点徽标直达设置→关于 tab，最新版本行 = feed 版本（R4+R3）', async () => {
+    await evalExpr(ws, `document.querySelector('[data-testid="update-badge"]')?.click()`);
+    const arrived = await waitFor(async () => {
+      const hash = await evalExpr(ws, `window.location.hash`);
+      return typeof hash === 'string' && hash.startsWith('#/config');
+    }, 5000);
+    if (arrived !== true) throw new Error('未跳转到 /config');
+    const aboutVisible = await waitFor(async () => evalExpr(ws,
+      `(() => { const s = document.querySelector('[data-testid="about-status"]'); return !!s && s.offsetParent !== null; })()`), 5000);
+    if (aboutVisible !== true) throw new Error('关于 tab 未激活');
+    const latest = await evalExpr(ws, `document.querySelector('[data-testid="about-latest-version"]')?.textContent?.trim()`);
+    if (latest !== 'v99.0.0') throw new Error(`最新版本行=${latest}（期望 v99.0.0）`);
+    const current = await evalExpr(ws, `document.querySelector('[data-testid="about-version"]')?.textContent?.trim()`);
+    if (!/^v\d/.test(current || '')) throw new Error(`当前版本展示异常：${current}`);
+  });
+
+  await check('E4 手动点「检查更新」→ 弹窗重弹（dismissed 不挡主动检查）', async () => {
+    // 前置：等首轮启动自动下载完成（downloaded 态才允许再次检查，主进程重入守卫放行）。
     const state = await waitFor(async () => {
       const info = await evalExpr(ws, `window.claudeLink.getUpdateInfo()`);
       return ['downloaded', 'error'].includes(info?.state?.status) ? info.state : null;
     }, 180000);
-    if (state.status === 'error') throw new Error(`下载失败：${state.error}`);
-    if (state.newVersion !== '99.0.0') throw new Error(`newVersion=${state.newVersion}`);
+    if (state.status === 'error') throw new Error(`首轮下载失败：${state.error}`);
+    const enabled = await evalExpr(ws, `document.querySelector('[data-testid="about-check-btn"]')?.disabled`);
+    if (enabled !== false) throw new Error(`检查按钮不可点 disabled=${enabled}`);
+    await evalExpr(ws, `document.querySelector('[data-testid="about-check-btn"]')?.click()`);
+    const reopened = await waitFor(async () => evalExpr(ws,
+      `(() => { const d = document.querySelector('[data-testid="update-dialog"]'); return !!d && d.offsetParent !== null; })()`), 30000);
+    if (reopened !== true) throw new Error('手动检查后弹窗未重弹');
   });
 
-  await check('B3 downloaded 态 UI：「重启更新」按钮可见', async () => {
-    const visible = await evalExpr(ws,
-      `(() => { const b = document.querySelector('[data-testid="about-install-btn"]'); return !!b && b.offsetParent !== null; })()`);
-    if (visible !== true) throw new Error('安装按钮不可见');
-    const text = await evalExpr(ws, `document.querySelector('[data-testid="about-status"]')?.textContent?.trim()`);
-    if (!text?.includes('99.0.0')) throw new Error(`状态文案缺版本号：${text}`);
-  });
-
-  await check('B4 点「重启更新」→ installing → 应用退出 → NSIS 安装器进程出现（随即强杀收尾）', async () => {
-    await evalExpr(ws, `document.querySelector('[data-testid="about-install-btn"]')?.click()`);
+  await check('E5 downloaded 后点弹窗「立即重启更新」→ installing → 应用退出 → NSIS 安装器进程出现（随即强杀收尾）', async () => {
+    const state = await waitFor(async () => {
+      const info = await evalExpr(ws, `window.claudeLink.getUpdateInfo()`);
+      return ['downloaded', 'error'].includes(info?.state?.status) ? info.state : null;
+    }, 180000);
+    if (state.status === 'error') throw new Error(`二轮下载失败：${state.error}`);
+    const installEnabled = await waitFor(async () => evalExpr(ws,
+      `document.querySelector('[data-testid="update-dialog-install"]')?.disabled === false`), 30000);
+    if (installEnabled !== true) throw new Error('「立即重启更新」按钮未就绪');
+    await evalExpr(ws, `document.querySelector('[data-testid="update-dialog-install"]')?.click()`);
     await waitFor(async () => appProc.exitCode !== null, 30000).catch(() => {});
     const installer = await waitFor(() => {
       const r = spawnSync('tasklist', ['/FO', 'CSV'], { encoding: 'utf8' });
