@@ -3,9 +3,11 @@
 //   P1-P4  update-presentation 纯函数行为断言（直接 import 真跑）：
 //          updateBadgeVisible 九态 / latestVersionText / aboutCheckButtonLabel /
 //          shouldAutoOpenUpdateDialog 弹窗自动弹出用例矩阵；
-//   W1-W6  接线字面钉：App.vue 挂载与 init / AppSidebar 徽标与直达路由 /
+//   W1-W5  接线字面钉：App.vue 挂载与 init / AppSidebar 徽标与直达路由 /
 //          ConfigPage 最新版本行与 route.query.tab（负向：cursor: wait 根因清除）/
-//          update-store 消费纯函数 / selftest 清单登记。
+//          update-store 消费纯函数 / selftest 清单登记；
+//   W3b-W3d/W3f 关于 tab 扉页式 A 案（2026-09-29）：about-hero 结构与图标接线 /
+//          版本 testid 精确文本形态 / 外链 link-guard 形态与 URL 同源。
 // 运行：npx tsx scripts/tdd-update-presentation-verify.ts（已登记 scripts/selftest-static-list.txt）
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
@@ -121,6 +123,21 @@ check('W3 ConfigPage 含 about-latest-version testid 与 route.query.tab，且 c
   assert.ok(configPage.includes('data-testid="about-latest-version"'), '最新版本行缺失');
   assert.ok(configPage.includes('route.query.tab'), '路由直达缺失');
   assert.ok(!configPage.includes('cursor: wait'), 'ConfigPage 仍存在 cursor: wait（R1 根因未清）');
+});
+check('W3b ConfigPage 关于 tab 扉页式：about-hero 存在且图标资产已接线', () => {
+  assert.ok(configPage.includes('class="about-hero"'), 'about-hero 结构缺失');
+  assert.ok(configPage.includes("from '../assets/icon.png'"), '图标 import 缺失');
+  assert.ok(configPage.includes(':src="iconUrl"'), '图标绑定缺失');
+});
+check('W3c 版本 testid 精确文本形态（E2E textContent 全等断言的模板侧防线）', () => {
+  assert.ok(configPage.includes('<span data-testid="about-version">v{{'), 'about-version 形态漂移');
+  assert.ok(configPage.includes('最新 <span data-testid="about-latest-version">{{ latestVersionText'), 'about-latest-version 形态漂移（含「最新」前缀须在 testid 外）');
+});
+check('W3d 关于页外链走 link-guard（target=_blank + rel=noreferrer，零新 IPC）', () => {
+  assert.ok((configPage.match(/target="_blank" rel="noreferrer"/g) || []).length >= 3, '外链形态缺失');
+});
+check('W3f 关于页外链 URL 与更新源同库（ChenWolr/Claude-Link ×3）', () => {
+  assert.ok((configPage.match(/https:\/\/github\.com\/ChenWolr\/Claude-Link/g) || []).length >= 3, '外链 URL 与 app-updater 常量分叉');
 });
 check('W4 update-store 消费纯函数 + dismissedVersions 记忆', () => {
   assert.ok(updateStore.includes('shouldAutoOpenUpdateDialog'), 'shouldAutoOpenUpdateDialog 缺失');
