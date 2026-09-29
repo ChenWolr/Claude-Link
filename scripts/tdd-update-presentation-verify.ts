@@ -6,8 +6,9 @@
 //   W1-W5  接线字面钉：App.vue 挂载与 init / AppSidebar 徽标与直达路由 /
 //          ConfigPage 最新版本行与 route.query.tab（负向：cursor: wait 根因清除）/
 //          update-store 消费纯函数 / selftest 清单登记；
-//   W3b-W3d/W3f 关于 tab 扉页式 A 案（2026-09-29）：about-hero 结构与图标接线 /
-//          版本 testid 精确文本形态 / 外链 link-guard 形态与 URL 同源。
+//   W3b-W3f 关于 tab 扉页式 A 案（2026-09-29）：about-hero 结构与图标接线 /
+//          版本 testid 精确文本形态 / 外链 link-guard 形态与 URL 同源 /
+//          UpdateDialog 图标章+E2E testid+卸载语义。
 // 运行：npx tsx scripts/tdd-update-presentation-verify.ts（已登记 scripts/selftest-static-list.txt）
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
@@ -97,6 +98,7 @@ const configPage = readRel('src/renderer/pages/ConfigPage.vue');
 const updateStore = readRel('src/renderer/stores/update-store.ts');
 const selftestList = readRel('scripts/selftest-static-list.txt');
 const variablesCss = readRel('src/renderer/assets/styles/variables.css');
+const updateDialogVue = readRel('src/renderer/components/layout/UpdateDialog.vue');
 
 check('W1 App.vue 含 <UpdateDialog /> 与 updateStore.init()', () => {
   assert.ok(appVue.includes('<UpdateDialog />'), 'UpdateDialog 未挂载');
@@ -135,6 +137,14 @@ check('W3c 版本 testid 精确文本形态（E2E textContent 全等断言的模
 });
 check('W3d 关于页外链走 link-guard（target=_blank + rel=noreferrer，零新 IPC）', () => {
   assert.ok((configPage.match(/target="_blank" rel="noreferrer"/g) || []).length >= 3, '外链形态缺失');
+});
+check('W3e UpdateDialog 重排+E2E testid+卸载语义（A 案）', () => {
+  assert.ok(updateDialogVue.includes('class="update-dialog__head-icon"'), '头部图标章缺失');
+  assert.ok(updateDialogVue.includes('data-testid="update-dialog"'), '弹窗容器 testid 缺失');
+  assert.ok(updateDialogVue.includes('data-testid="update-dialog-status"'), '状态区 testid 缺失');
+  assert.ok(updateDialogVue.includes('data-testid="update-dialog-dismiss"'), '稍后提醒 testid 缺失');
+  assert.ok(updateDialogVue.includes('data-testid="update-dialog-install"'), '安装 testid 缺失');
+  assert.ok(updateDialogVue.includes('v-if="updateStore.dialogVisible"'), 'v-if 卸载语义漂移（E1 依赖）');
 });
 check('W3f 关于页外链 URL 与更新源同库（ChenWolr/Claude-Link ×3）', () => {
   assert.ok((configPage.match(/https:\/\/github\.com\/ChenWolr\/Claude-Link/g) || []).length >= 3, '外链 URL 与 app-updater 常量分叉');
