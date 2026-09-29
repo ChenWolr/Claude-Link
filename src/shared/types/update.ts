@@ -21,6 +21,7 @@ export interface AppUpdateProgress {
 export interface AppUpdateState {
   status: AppUpdateStatus;
   newVersion: string | null;
+  latestVersion: string | null; // 最近一次检查从 GitHub 获知的最新版本号，available/not-available 均写入；检查中/失败不清空——「永久显示」语义
   releaseNotes: string | null; // GitHub Release body 原文（Markdown 源码，关于 tab 纯文本展示）
   progress: AppUpdateProgress | null;
   error: string | null;

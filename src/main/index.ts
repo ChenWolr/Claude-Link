@@ -5,7 +5,7 @@ import { electronApp, is, optimizer } from '@electron-toolkit/utils';
 import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
-import { initAppUpdater } from './modules/app-updater';
+import { initAppUpdater, scheduleStartupUpdateCheck } from './modules/app-updater';
 import { initBridge, stopBridge } from './modules/bridge/init';
 import { detectCli } from './modules/cli-detector';
 import { ensureProviderMigration, getConfig, onConfigSaved } from './modules/config-manager';
@@ -311,6 +311,7 @@ app.whenReady().then(async () => {
 
   // 应用内检查更新（electron-updater）：打包后生效，开发模式内部跳过。
   initAppUpdater(() => mainWindow);
+  scheduleStartupUpdateCheck(); // R5：启动 5s 后静默检查一次（dev 内部守卫消化）
 
   // 后台运行开启时托盘常驻：启动即建图标，修复「运行中托盘不可见、关窗后才出现」。
   // 之后设置页每次保存配置（含开关切换）都经 onConfigSaved 重新同步托盘增删。

@@ -52,8 +52,9 @@ check('2', 'AppUpdateStatus 九态齐全',
   updateTypes.includes("'unavailable'") && updateTypes.includes("'idle'") && updateTypes.includes("'checking'")
   && updateTypes.includes("'available'") && updateTypes.includes("'downloading'") && updateTypes.includes("'downloaded'")
   && updateTypes.includes("'installing'") && updateTypes.includes("'error'") && updateTypes.includes("'latest'"));
-check('2', 'AppUpdateState 五字段（status/newVersion/releaseNotes/progress/error）',
+check('2', 'AppUpdateState 六字段（status/newVersion/latestVersion/releaseNotes/progress/error）',
   updateTypes.includes('status: AppUpdateStatus') && updateTypes.includes('newVersion: string | null')
+  && updateTypes.includes('latestVersion: string | null')
   && updateTypes.includes('releaseNotes: string | null') && updateTypes.includes('progress: AppUpdateProgress | null')
   && updateTypes.includes('error: string | null'));
 check('2', 'AppUpdateInfo = { currentVersion, state }',
@@ -86,6 +87,13 @@ check('3', 'install 幂等守卫（非 downloaded 拒绝 + _installPromise 去�
   updaterModule.includes('_installPromise') && updaterModule.includes("getUpdateState().status !== 'downloaded'"));
 check('3', '日志接入 logger',
   updaterModule.includes('autoUpdater.logger') && updaterModule.includes("from '../utils/logger'"));
+check('3', 'check 重入守卫：checking/available/downloading 直接返回当前态（R1 按钮常可点后的主进程兜底）',
+  updaterModule.includes("['checking', 'available', 'downloading'].includes(getUpdateState().status)"));
+check('3', '启动自动检查 scheduleStartupUpdateCheck（R5，延迟 5s）',
+  updaterModule.includes('export function scheduleStartupUpdateCheck') && updaterModule.includes('STARTUP_CHECK_DELAY_MS = 5000'));
+check('3', 'available/not-available 双处理器捕获 latestVersion（R3）',
+  updaterModule.includes('latestVersion: info.version ?? _state.latestVersion')
+  && (updaterModule.match(/latestVersion: info\.version \?\? _state\.latestVersion/g) || []).length >= 2);
 
 console.log('\n=== 4) 主进程接线 ===');
 check('4', 'ipc-handlers 注册三 handler',
@@ -94,6 +102,8 @@ check('4', 'ipc-handlers 注册三 handler',
 check('4', 'index.ts whenReady 内 createWindow 后调 initAppUpdater',
   indexMain.includes("from './modules/app-updater'") && indexMain.includes('initAppUpdater(() => mainWindow)')
   && /createWindow\(\);[\s\S]*initAppUpdater/.test(indexMain));
+check('4', 'index.ts 调 scheduleStartupUpdateCheck（R5 启动自动检查接线）',
+  indexMain.includes('scheduleStartupUpdateCheck();'));
 
 console.log('\n=== 5) preload 桥 ===');
 check('5', '接口五成员（getUpdateInfo/checkForAppUpdate/installAppUpdate/onUpdateStateChanged/removeUpdateStateListener）',

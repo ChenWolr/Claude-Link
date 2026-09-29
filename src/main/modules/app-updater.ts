@@ -6,6 +6,9 @@
 // → 有更新先查磁盘空间（≥500MB）再静默下载（sha512 校验由 electron-updater 完成）→「重启更新」
 // quitAndInstall 由 NSIS 安装器杀旧进程覆盖安装并自启；before-quit 置 quitting 使托盘拦截放行
 // （复用现有退出清理链，无需改 index.ts 退出逻辑）。开发模式（!app.isPackaged）固定 unavailable。
+// 启动自动检查（R5）：whenReady 后延迟 5s 静默查一次（scheduleStartupUpdateCheck），失败只落日志。
+// latestVersion（R3）：最近一次检查获知的最新版本号，available/not-available 均写入且检查中/
+// 失败不清空（setState patch 合并自然保留）——关于 tab「最新版本」跨状态流转永久显示。
 // 禁用差分下载：Release 不上传 blockmap，差分链路必然失败。
 import { app, BrowserWindow } from 'electron';
 import { autoUpdater } from 'electron-updater';
@@ -22,7 +25,7 @@ const STATE_EVENT = IPC_CHANNELS.APP_UPDATE_STATE_CHANGED;
 type GetMainWindow = () => BrowserWindow | null;
 
 function createIdleState(): AppUpdateState {
-  return { status: 'idle', newVersion: null, releaseNotes: null, progress: null, error: null };
+  return { status: 'idle', newVersion: null, latestVersion: null, releaseNotes: null, progress: null, error: null };
 }
 
 let _getMainWindow: GetMainWindow = () => null;
@@ -112,6 +115,7 @@ function configureUpdater(): void {
     setState({
       status: 'available',
       newVersion: info.version ?? null,
+      latestVersion: info.version ?? _state.latestVersion,
       releaseNotes: typeof info.releaseNotes === 'string'
         ? info.releaseNotes
         : Array.isArray(info.releaseNotes)
@@ -146,8 +150,8 @@ function configureUpdater(): void {
     setState({ status: 'downloaded', newVersion: info.version ?? _state.newVersion, progress: null });
   });
 
-  autoUpdater.on('update-not-available', () => {
-    setState({ status: 'latest' });
+  autoUpdater.on('update-not-available', (info) => {
+    setState({ status: 'latest', latestVersion: info.version ?? _state.latestVersion });
   });
 
   autoUpdater.on('error', (err) => {
@@ -181,6 +185,9 @@ export async function checkForAppUpdates(): Promise<AppUpdateState> {
     return getAppUpdateInfo().state;
   }
   if (getUpdateState().status === 'installing') return getUpdateState(); // 安装中拒绝重入
+  // 检查/发现/下载中拒绝重入：渲染层按钮常可点后由这里兜底（重入 electron-updater
+  // 会报 "download in progress" 类错误并把 downloading 态覆盖成 error）。
+  if (['checking', 'available', 'downloading'].includes(getUpdateState().status)) return getUpdateState();
   setState({ status: 'checking', error: null, newVersion: null, releaseNotes: null, progress: null });
   try {
     await autoUpdater.checkForUpdates();
@@ -215,4 +222,15 @@ export async function installAppUpdate(): Promise<boolean> {
     }
   })();
   return _installPromise;
+}
+
+const STARTUP_CHECK_DELAY_MS = 5000;
+
+/** index.ts whenReady 内 createWindow 后调用：延迟 5s 静默检查一次（R5）。
+ *  dev 模式由 checkForAppUpdates 内部守卫消化（unavailable，无网络请求）；
+ *  失败只落日志与 About 状态文案，不弹窗不亮徽标。 */
+export function scheduleStartupUpdateCheck(): void {
+  setTimeout(() => {
+    checkForAppUpdates().catch((err) => logger.warn(`startup update check failed: ${err instanceof Error ? err.message : String(err)}`));
+  }, STARTUP_CHECK_DELAY_MS);
 }
