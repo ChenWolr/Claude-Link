@@ -159,6 +159,17 @@ async function confirmDelete(session: { id: string; name: string }) {
     <div class="sidebar__brand">
       <div class="brand-mark">CL</div>
       <h1>Claude Link</h1>
+      <!-- 绿色「可更新」徽标——品牌行右端并排（2026-09-29 用户反馈：原叠加在新会话按钮
+           右上角，侧栏窄时与按钮/标题重叠）。@click.stop 防冒泡误触发新会话。
+           仅 available/downloading/downloaded 三态可见。 -->
+      <button
+        v-if="updateStore.badgeVisible"
+        class="update-badge"
+        type="button"
+        data-testid="update-badge"
+        :title="`发现新版本 v${updateStore.state.newVersion ?? ''}，点击查看`"
+        @click.stop="router.push({ path: '/config', query: { tab: 'about', v: Date.now().toString(36) } })"
+      >可更新</button>
     </div>
 
     <div class="sidebar__new-wrap">
@@ -175,16 +186,6 @@ async function confirmDelete(session: { id: string; name: string }) {
         <span>新会话</span>
         <kbd>Ctrl N</kbd>
       </button>
-      <!-- R4：绿色「可更新」徽标——new-button 的兄弟绝对定位元素（不嵌 button 进 button）；
-           @click.stop 防冒泡误触发新会话。仅 available/downloading/downloaded 三态可见。 -->
-      <button
-        v-if="updateStore.badgeVisible"
-        class="update-badge"
-        type="button"
-        data-testid="update-badge"
-        :title="`发现新版本 v${updateStore.state.newVersion ?? ''}，点击查看`"
-        @click.stop="router.push({ path: '/config', query: { tab: 'about', v: Date.now().toString(36) } })"
-      >可更新</button>
     </div>
 
     <div class="sidebar__search-wrap">
@@ -389,7 +390,7 @@ async function confirmDelete(session: { id: string; name: string }) {
   padding: 14px 12px 12px;
 }
 
-/* 品牌行：20px CL 方标（accent 底）+ 名称，无副标/版本号。 */
+/* 品牌行：20px CL 方标（accent 底）+ 名称，无副标/版本号；可更新徽标右端并排。 */
 .sidebar__brand {
   display: flex;
   align-items: center;
@@ -468,20 +469,14 @@ async function confirmDelete(session: { id: string; name: string }) {
   box-shadow: inset 2px 0 0 var(--color-accent);
 }
 
-/* 徽标容器：new-button 包裹层，作兄弟绝对定位徽标的锚点。 */
-.sidebar__new-wrap {
-  position: relative;
-}
-
-/* 绿色「可更新」徽标：叠加在新会话按钮右上角（R4）。底色 --color-success-strong 恒深绿
+/* 绿色「可更新」徽标：品牌行右端并排（2026-09-29 用户反馈，原叠加在新会话按钮右上角
+   与按钮/标题重叠，改为文档流内 flex 项）。底色 --color-success-strong 恒深绿
    （不随色板），白字必须用专 token --color-on-success（on-accent 按各色板 accent 亮度选，
    四套色板下会落到近黑字、对比度 <AA，P3-1）；hover 不换浅底（--color-success 上白字
    仅 3.31:1），以浮起阴影作反馈。 */
 .update-badge {
-  position: absolute;
-  top: -7px;
-  right: -5px;
-  z-index: 1;
+  margin-left: auto;
+  flex: none;
   border: 1px solid var(--color-success-strong);
   border-radius: 999px;
   background: var(--color-success-strong);
