@@ -8,11 +8,13 @@ Claude Link 不直接实现一套聊天模型，也不把用户输入原样转�
 
 **主界面**——会话视图、输入工具栏与右侧活动总览：
 
-![主界面：会话视图与活动总览](assets/screenshot-main.png)
+![主界面：会话视图与活动总览](assets/screenshot-config.png)
 
-**配置页**——供应商库、行为、外观与 Skill 管理：
+**配置页**——供应商库、行为、外观、Skill、IM 与关于：
 
-![配置页：供应商与连接设置](assets/screenshot-config.png)
+![配置页：供应商与连接设置](assets/screenshot-main.png)
+
+> 截图摄于较早版本（配置页尚未包含 IM/关于 tab），当前界面以实际应用为准。
 
 ## 主要功能
 
