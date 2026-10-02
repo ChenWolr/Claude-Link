@@ -57,7 +57,7 @@ watch(() => route.query, (q) => {
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
   'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'queueEnabled', 'taskDelayMinutes', 'themePaletteId', 'fontScale', 'contextWindowByAlias', 'defaultThinkingLevel', 'disableAutoMemory', 'disableBackgroundTasks', 'disableCron', 'disableFeedbackSurvey', 'disableTelemetry', 'disableNonessentialTraffic',
-  'notifyOnLeave', 'minimizeToTray', 'skillOverrides',
+  'notifyOnLeave', 'minimizeToTray', 'autoRetryReasoningReplay', 'skillOverrides',
 ] as const;
 
 // hb10-CFG-04：'projection-failed' = 保存本身成功但 settings.local.json 投影失败（可见性）。
@@ -762,6 +762,14 @@ const updateStageTone = computed(() => {
                 <span class="field-label">后台运行</span>
                 <span class="field-desc">开启后托盘图标常驻右下角；关闭窗口最小化到托盘，右键托盘「退出」才结束程序。</span>
                 <input v-model="store.config.minimizeToTray" type="checkbox" />
+              </label>
+              <!-- B10（D11-F1）：README「可关闭」承诺的 UI 入口——开关直写既有配置字段
+                   autoRetryReasoningReplay（默认开），经 PERSISTED_FIELDS 自动保存链落盘；
+                   主进程韧性层每次回合终态点读 getConfig()，保存后对后续错误即时生效。 -->
+              <label class="field field--toggle">
+                <span class="field-label">上游错误自动重试</span>
+                <span class="field-desc">命中 reasoning_replay 等上游错误时自动原样重试一次；关闭后不再自动重发，仅提示错误。</span>
+                <input v-model="store.config.autoRetryReasoningReplay" type="checkbox" />
               </label>
               <!-- A7（D04-F5）：上下文窗口覆盖编辑区——分母最高优先级源的产品内入口（README 承诺兑现）。
                    行式增删，经 shared 纯函数校验投影到 config.contextWindowByAlias（自动保存链）；

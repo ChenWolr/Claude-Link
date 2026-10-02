@@ -211,3 +211,4 @@ scripts/tdd-provider-keyless-clear-verify.ts
 scripts/tdd-provider-keyless-headers-verify.ts
 scripts/tdd-bind-transient-rollback-restore-verify.ts
 scripts/tdd-queue-v3-copy-resume-all-verify.ts
+scripts/tdd-reasoning-replay-autoretry-toggle-verify.ts
