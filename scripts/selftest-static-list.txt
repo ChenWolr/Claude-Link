@@ -188,3 +188,4 @@ scripts/tdd-sidebar-structure-verify.ts
 scripts/tdd-app-updater-verify.ts
 scripts/tdd-update-presentation-verify.ts
 scripts/tdd-subagent-stream-routing-verify.ts
+scripts/tdd-search-clear-guard-verify.ts
