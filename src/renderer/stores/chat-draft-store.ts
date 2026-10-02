@@ -43,6 +43,12 @@ export const useChatDraftStore = defineStore('chatDraft', {
       this.textBySession[sessionId] = '';
       this.attachmentsBySession[sessionId] = [];
     },
+    /** 会话删除终态：连 key 一并移除文字草稿与附件摘要登记（B11/D01-F6）。与 clearAfterAccepted
+     * 的「清值留 key」不同——已删会话的 id 不复用，彻底移除不滞留内存。 */
+    discardDraft(sessionId: string): void {
+      delete this.textBySession[sessionId];
+      delete this.attachmentsBySession[sessionId];
+    },
     getCanSend(sessionId: string): boolean {
       const text = (this.textBySession[sessionId] ?? '').trim();
       const atts = this.attachmentsBySession[sessionId] ?? [];

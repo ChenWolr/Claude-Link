@@ -625,6 +625,10 @@ export const useSessionStore = defineStore('session', {
       planStore.clearSession(id);
       try {
         await window.claudeLink.deleteSession(id);
+        // B11（D01-F6）：删除终态同步清草稿——文字草稿与附件摘要登记（暂态附件内存态）随会话
+        // 一并连 key 移除。暂态会话物化沿用同一 id（createSession 的 id 参数），暂态 id/会话 id
+        // 两种键形态同 key 一次覆盖；仅在成功路径调用，失败（catch 回滚）不动草稿。
+        useChatDraftStore().discardDraft(id);
       } catch (error) {
         // IPC 失败回滚——只恢复静态、仍然真实的状态：列表/搜索/活动会话与其消息、
         // plan、completed/network_interrupted 终态（及常红对应 fallback）。
