@@ -192,3 +192,4 @@ scripts/tdd-search-clear-guard-verify.ts
 scripts/tdd-bridge-sessions-upserted-verify.ts
 scripts/tdd-session-error-toast-verify.ts
 scripts/tdd-provider-models-write-recompute-verify.ts
+scripts/tdd-contextbutton-hold-composable-verify.ts
