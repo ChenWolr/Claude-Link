@@ -209,3 +209,4 @@ scripts/tdd-interaction-initial-focus-verify.ts
 scripts/tdd-connection-tester-async-cleanup-verify.ts
 scripts/tdd-provider-keyless-clear-verify.ts
 scripts/tdd-provider-keyless-headers-verify.ts
+scripts/tdd-bind-transient-rollback-restore-verify.ts

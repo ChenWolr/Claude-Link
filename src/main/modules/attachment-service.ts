@@ -186,25 +186,35 @@ export async function removeTransientAttachment(sessionId: string, id: string): 
  */
 export function bindTransientAttachmentsToSession(sessionId: string, ids: string[]): void {
   const boundIds: string[] = [];
+  // B8（D08-F2）：bindOne 弹出的暂态记录在此留底——失败回滚删行后放回 Map，附件回到
+  // 暂态可重试状态（否则失联 id 重试物化被静默跳过，发送被「部分附件不存在」阻断）。
+  const consumedRecords: AttachmentRecord[] = [];
   try {
     for (const id of ids) {
-      bindOne(sessionId, id, boundIds);
+      bindOne(sessionId, id, boundIds, consumedRecords);
     }
   } catch (err) {
     // hb10-ATT-V01：物化失败回滚已建行（收集已建 id 逐个 deleteAttachment），不再死锁半态。
     for (const id of boundIds) {
       try { attachmentRepo.deleteAttachment(id); } catch { /* 尽力回滚 */ }
     }
+    // B8（D08-F2）：未转正的回暂态 Map（成功位行已删/失败位行未建成）；不在 Map 的 id
+    // （DB 已转正/用户已移除）不在留底名单、保持原状，已转正行不受回滚影响。
+    for (const record of consumedRecords) {
+      transientAttachments.set(record.id, record);
+    }
     throw err;
   }
 }
 
-function bindOne(sessionId: string, id: string, boundIds: string[]): void {
+function bindOne(sessionId: string, id: string, boundIds: string[], consumedRecords: AttachmentRecord[]): void {
   {
     const record = transientAttachments.get(id);
     if (!record) return;
     // hb10-ATT-04（收窄）：归属守卫——记录不属于目标会话（会话 id 传错/复用）跳过。
     if (record.sessionId !== sessionId) return;
+    // B8：留底先于弹出——createAttachment 抛错时记录仍可经回滚放回 Map。
+    consumedRecords.push(record);
     transientAttachments.delete(id);
     attachmentRepo.createAttachment({
       id: record.id,
