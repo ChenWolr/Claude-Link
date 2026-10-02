@@ -15,6 +15,9 @@ import { openImageLightbox } from '../composables/useImageLightbox';
 
 type MermaidApi = typeof import('mermaid')['default'];
 
+// A8（D05-F2）：主题单源——initialize 与内容指纹缓存键共用（键含主题保证主题切换强制全量重渲）。
+const MERMAID_THEME_ID = 'neutral';
+
 let mermaidPromise: Promise<MermaidApi> | null = null;
 
 type MermaidJob = { raw: string; promise: Promise<void> };
@@ -23,6 +26,54 @@ const mermaidJobs = new WeakMap<HTMLElement, MermaidJob>();
 type MermaidState = 'loading' | 'rendered' | 'error' | string | undefined;
 const SVG_NS = 'http://www.w3.org/2000/svg';
 const DEFAULT_MERMAID_TITLE = 'Mermaid 图表';
+
+// ── A8（D05-F2）：内容指纹 LRU 缓存 ──────────────────────────────────────
+// 流式期间 v-html 每 50ms 整树替换，新 .mermaid-block 无 dataset 状态——去重状态机失效，
+// 已完成图反复「闪回源码→重渲」。缓存键 = 主题 id + 内容指纹（FNV-1a + 长度），值 = 已渲染
+// SVG 字符串；命中同步注入（全程微任务内，无源码帧），未命中走渲染并在成功后写入。
+// 失败态不缓存（防毒化；流式半成品 parse 必失败同样不入）；上限 64，命中刷新 recency。
+export class MermaidSvgCache {
+  private entries = new Map<string, string>();
+
+  constructor(private maxEntries = 64) {}
+
+  get(key: string): string | null {
+    const svg = this.entries.get(key);
+    if (svg === undefined) return null;
+    // LRU：命中即刷新 recency（摘除后重插尾部）。
+    this.entries.delete(key);
+    this.entries.set(key, svg);
+    return svg;
+  }
+
+  set(key: string, svg: string): void {
+    if (this.entries.has(key)) this.entries.delete(key);
+    this.entries.set(key, svg);
+    while (this.entries.size > this.maxEntries) {
+      const oldest = this.entries.keys().next().value as string;
+      this.entries.delete(oldest);
+    }
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+}
+
+export const mermaidSvgCache = new MermaidSvgCache();
+
+function fnv1aHash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+export function mermaidCacheKey(raw: string, themeId: string): string {
+  return `${themeId}:${raw.length}:${fnv1aHash(raw)}`;
+}
 
 export function shouldSkipMermaidErrorRetry(state: MermaidState, previousRaw: string | undefined, raw: string): boolean {
   return state === 'error' && previousRaw === raw;
@@ -44,6 +95,10 @@ function addMermaidSvgAccessibility(block: HTMLElement, raw: string): void {
     title = document.createElementNS(SVG_NS, 'title');
     svg.insertBefore(title, svg.firstChild);
   }
+  // P3-13（2026-10-02 对抗 review）：title id 的自增收敛到本函数——缓存命中路径原先复用
+  // 未自增的 renderCounter（只有 fresh 渲染路径自增），同批多图命中（或与仍在 DOM 的上次
+  // 渲染）撞同一 title id，aria-labelledby 指错图题；两条路径在此统一唯一化。
+  renderCounter += 1;
   const titleId = `mermaid-svg-title-${renderCounter}`;
   title.id = titleId;
   title.textContent = summarizeMermaidAccessibleTitle(raw);
@@ -57,7 +112,7 @@ function ensureMermaid(): Promise<MermaidApi> {
       .then((mod) => {
         const api = mod.default;
         // securityLevel:'strict' 禁用 HTML 标签注入，Electron 沙箱下更安全。
-        api.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral' });
+        api.initialize({ startOnLoad: false, securityLevel: 'strict', theme: MERMAID_THEME_ID });
         return api;
       })
       .catch((error) => {
@@ -70,6 +125,8 @@ function ensureMermaid(): Promise<MermaidApi> {
 }
 
 // renderCounter 的生命周期贯穿 renderer，单调递增保证异步/并行旧任务的 SVG ID 永不复用；故意不在容器卸载时重置。
+// P3-13：aria title id 也从此计数器取值（在 addMermaidSvgAccessibility 内自增）——缓存命中
+// 路径复用未自增值会同批多图撞 id（aria-labelledby 指错图题）。
 let renderCounter = 0;
 
 function currentMermaidSource(block: HTMLElement): string {
@@ -94,6 +151,21 @@ async function renderOneMermaidBlock(root: HTMLElement, block: HTMLElement, raw:
   // 错误态对相同源码不重试是有意为之：语法错误重渲染必失败，避免每次 mounted/updated 重跑 parse。
   // ensureMermaid 的 mermaidPromise=null 仅服务 chunk 首次加载失败后的重试（对未进入 error 态、或源码已变的块生效）。
 
+  // A8（D05-F2）：内容指纹命中 → 同步注入缓存 SVG（先于 loading 态——mounted/updated 到注入
+  // 全程微任务内，已完成图不再闪回源码、不再重跑 parse）。注入后重盖唯一 aria title id
+  //（同内容多块并存时旧 id 已随旧节点销毁/可能同 DOM 并存，复用旧 id 会重复）。
+  const cachedSvg = mermaidSvgCache.get(mermaidCacheKey(raw, MERMAID_THEME_ID));
+  if (cachedSvg !== null) {
+    block.innerHTML = cachedSvg;
+    addMermaidSvgAccessibility(block, raw);
+    block.dataset.mermaidState = 'rendered';
+    block.setAttribute('data-mermaid-state', 'rendered');
+    block.dataset.mermaidSource = raw;
+    block.setAttribute('data-mermaid-source', raw);
+    delete block.dataset.mermaidErrorSource;
+    return;
+  }
+
   block.dataset.mermaidState = 'loading';
   block.setAttribute('data-mermaid-state', 'loading');
   block.dataset.mermaidSource = raw;
@@ -113,6 +185,8 @@ async function renderOneMermaidBlock(root: HTMLElement, block: HTMLElement, raw:
       block.dataset.mermaidState = 'rendered';
       block.setAttribute('data-mermaid-state', 'rendered');
       delete block.dataset.mermaidErrorSource;
+      // A8：渲染成功写入内容指纹缓存（title id 重盖后取原始 svg 串；失败态走 catch 不入缓存）。
+      mermaidSvgCache.set(mermaidCacheKey(raw, MERMAID_THEME_ID), svg);
     } catch {
       if (!isCurrentMermaidJob(root, block, job)) return;
       block.dataset.mermaidState = 'error';
