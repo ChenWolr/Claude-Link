@@ -187,3 +187,4 @@ scripts/tdd-sidebar-date-group-verify.ts
 scripts/tdd-sidebar-structure-verify.ts
 scripts/tdd-app-updater-verify.ts
 scripts/tdd-update-presentation-verify.ts
+scripts/tdd-subagent-stream-routing-verify.ts

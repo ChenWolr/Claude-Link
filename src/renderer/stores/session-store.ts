@@ -229,6 +229,9 @@ export const useSessionStore = defineStore('session', {
     // 外层 key=sessionId，内层 key=parentAgentId → 累积思考文本。子 Agent Tab 据此在思考中显示
     // ThinkingBlock；该子 agent 的 message 到达（完整思考落库）或回合结束时清除，避免与落库重复。
     subAgentStreamingThinking: {} as Record<string, Record<string, string>>,
+    // A1（D05-F1）：子 agent 实时正文快照（sessionId → agentId → 文本）。text_delta 按
+    // parentToolUseId 路由进来（与 thinking 同法），主流程 streamingContent 只留主流程正文。
+    subAgentStreamingText: {} as Record<string, Record<string, string>>,
     // 会话侧栏状态灯基础终态：'running'（闪烁黄灯）| 'completed'（静态绿灯）|
     // 'network_interrupted'（静态红灯，retry 真正耗尽）。按 sessionId。
     // 未出现在映射中的会话为 idle（无状态点）——已有会话首次加载不会错误亮灯。
@@ -291,6 +294,11 @@ export const useSessionStore = defineStore('session', {
     activeSubAgentThinking(state): Record<string, string> {
       if (!state.activeSession) return {};
       return state.subAgentStreamingThinking[state.activeSession.id] ?? {};
+    },
+    // A1（D05-F1）：当前活动会话的子 agent 实时正文映射（agentId → 文本）。TaskQueuePanel 据此渲染流式正文预览。
+    activeSubAgentText(state): Record<string, string> {
+      if (!state.activeSession) return {};
+      return state.subAgentStreamingText[state.activeSession.id] ?? {};
     },
     // 上下文统计（Task 9）：从 canonicalContext 派生。圆环只读当前窗口可信值；
     // turn usage 仅作参考。无可信当前窗口时 currentUsedTokens/currentPercent 为 null（pending）。
@@ -572,6 +580,7 @@ export const useSessionStore = defineStore('session', {
       delete this.apiRetryInfo[id];
       delete this.apiRetryTerminalFallback[id];
       delete this.subAgentStreamingThinking[id];
+      delete this.subAgentStreamingText[id];
       // 原生 Slash Commands：清理命令快照（与 UI 同步移除；失败回滚不恢复——主进程 markSessionDeleted
       // 已清 registry，切回该会话时 load 重建）。
       useCommandStore().clear(id);
@@ -984,6 +993,7 @@ export const useSessionStore = defineStore('session', {
       delete this.stalledInfo[sessionId];
       delete this.apiRetryInfo[sessionId];
       delete this.subAgentStreamingThinking[sessionId];
+      delete this.subAgentStreamingText[sessionId];
       if (this.sessionStatus[sessionId] !== 'network_interrupted') {
         this.sessionStatus[sessionId] = 'completed';
       }
@@ -999,6 +1009,7 @@ export const useSessionStore = defineStore('session', {
       delete this.stalledInfo[sessionId];
       delete this.apiRetryInfo[sessionId];
       delete this.subAgentStreamingThinking[sessionId];
+      delete this.subAgentStreamingText[sessionId];
       this.sessionStatus[sessionId] = 'network_interrupted';
     },
     // 根因修复：标记会话执行结束。失败 result / error / aborted 时调用。
@@ -1015,8 +1026,9 @@ export const useSessionStore = defineStore('session', {
       // 卡死横幅随回合结束消失。
       delete this.stalledInfo[sessionId];
       if (!options.preserveApiRetry) delete this.apiRetryInfo[sessionId];
-      // 子 agent 实时思考快照随回合结束清除。
+      // 子 agent 实时思考/正文快照随回合结束清除。
       delete this.subAgentStreamingThinking[sessionId];
+      delete this.subAgentStreamingText[sessionId];
       // 错误/中断/aborted：不保留运行态也不亮绿灯 → 回 idle（无状态点）。
       if (this.sessionStatus[sessionId] === 'running') {
         delete this.sessionStatus[sessionId];
@@ -1083,6 +1095,19 @@ export const useSessionStore = defineStore('session', {
       if (!this.subAgentStreamingThinking[sessionId]) return;
       if (agentId) delete this.subAgentStreamingThinking[sessionId][agentId];
       else delete this.subAgentStreamingThinking[sessionId];
+    },
+    // A1（D05-F1）：累加某子 agent 的实时正文（text_delta 按 parentToolUseId 路由进来，与 thinking 同法）。
+    appendSubAgentText(sessionId: string, agentId: string, text: string) {
+      if (!this.subAgentStreamingText[sessionId]) this.subAgentStreamingText[sessionId] = {};
+      this.subAgentStreamingText[sessionId][agentId] =
+        (this.subAgentStreamingText[sessionId][agentId] ?? '') + text;
+    },
+    // A1（D05-F1）：清除子 agent 实时正文——传 agentId 清单个（其 message 已落库，完整正文接管）；
+    // 不传则清该会话全部（回合结束）。
+    clearSubAgentText(sessionId: string, agentId?: string) {
+      if (!this.subAgentStreamingText[sessionId]) return;
+      if (agentId) delete this.subAgentStreamingText[sessionId][agentId];
+      else delete this.subAgentStreamingText[sessionId];
     },
     // 根因修复：ChatPage 重挂载（路由跳转回来）时重拉 messages + 同步状态。
     // 不重新注册监听（监听已在 App.vue 全局注册），只刷新当前会话数据。

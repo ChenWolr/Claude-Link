@@ -2,8 +2,10 @@
 // CLI 流事件处理：把主进程 sdk-backend 经 CHAT_EVENT 转发的 stream-json 事件分流到 session-store。
 //
 // stream_event: thinking_delta → appendThinking（主流程思考）；带 parentToolUseId 的子 Agent
-//   思考走 appendSubAgentThinking（Bug2 分流）；text_delta → appendStream（正文）；
-//   input_json_delta → appendToolStream（工具入参流式预览）；signature_delta 忽略；
+//   思考走 appendSubAgentThinking（Bug2 分流）；text_delta → appendStream（正文），带
+//   parentToolUseId 的子 Agent 正文走 appendSubAgentText（A1/D05-F1 分流，主气泡不再被子 Agent
+//   正文污染）；input_json_delta → appendToolStream（工具入参流式预览，带 parentToolUseId 的
+//   子 Agent 增量丢弃——完整 tool_use 随 message 落库进「子Agent」Tab）；signature_delta 忽略；
 //   message: 逐 part 落库（text / thinking / redacted_thinking / tool_use /
 //   server_tool_use / tool_result（含 web_search/web_fetch/code_execution 结果族）/ mcp_*）；主流程 text/thinking 落库即清对应流式累加器，
 //   tool_use 落库后清 streamingTool；
@@ -403,6 +405,10 @@ function createChat() {
       case 'stream_event': {
         const delta = event.event?.delta;
         if (!delta) break;
+        // A1（D05-F1）：带 parentToolUseId 的子 agent 增量不进后台快照——切回时快照原样灌回
+        // 主流程流式累加器，混入即污染主气泡；后台期间子 agent live 快照无消费方，直接丢弃，
+        // 切回后由前台分流与落库消息接管。
+        if (event.parentToolUseId) break;
         if (delta.type === 'thinking_delta' && delta.thinking) {
           store.appendBackgroundStream(sid, 'thinking', delta.thinking);
         } else if (delta.type === 'input_json_delta' && delta.partial_json) {
@@ -501,10 +507,22 @@ function createChat() {
         } else if (delta.type === 'signature_delta') {
           // 思考签名不展示
         } else if (delta.type === 'input_json_delta') {
-          // 工具调用参数流式成型（partial_json 逐片），给用户"正在调用工具"的实时反馈。
-          if (delta.partial_json) store.appendToolStream(delta.partial_json);
+          // A1（D05-F1）：带 parentToolUseId 的是子 agent 工具入参增量，不进主流程 streamingTool
+          //（此前会污染主气泡的「调用工具中」阶段徽章与入参预览）。完整 tool_use 随该子 agent 的
+          // message 事件落库进「子Agent」Tab，实时入参预览无消费方，这里直接丢弃。
+          if (!event.parentToolUseId && delta.partial_json) {
+            // 工具调用参数流式成型（partial_json 逐片），给用户"正在调用工具"的实时反馈。
+            store.appendToolStream(delta.partial_json);
+          }
         } else if (delta.text) {
-          store.appendStream(delta.text);
+          // A1（D05-F1）：带 parentToolUseId 的是子 agent 正文增量，与 thinking 同法路由到
+          // 「子Agent」Tab 实时快照（message 落库后按 agentId 精确清）；主流程正文仍进全局
+          // streamingContent——阶段徽章与 finalize 兜底只反映主流程，不再被子 agent 内容污染。
+          if (event.parentToolUseId && store.activeSession) {
+            store.appendSubAgentText(store.activeSession.id, event.parentToolUseId, delta.text);
+          } else {
+            store.appendStream(delta.text);
+          }
         }
         break;
       }
@@ -517,8 +535,12 @@ function createChat() {
         const role = event.role;
         const agentId = event.parentToolUseId ?? null;
         handleMessagePartsFull(event.content ?? [], role, agentId);
-        // Bug2：子 agent 的完整 message 已落库（含思考/正文），清掉它的实时思考快照，避免与落库重复。
-        if (agentId && store.activeSession) store.clearSubAgentThinking(store.activeSession.id, agentId);
+        // Bug2/A1：子 agent 的完整 message 已落库（含思考/正文），清掉它的实时思考与实时正文
+        // 快照，避免与落库重复。
+        if (agentId && store.activeSession) {
+          store.clearSubAgentThinking(store.activeSession.id, agentId);
+          store.clearSubAgentText(store.activeSession.id, agentId);
+        }
         break;
       }
       case 'result': {

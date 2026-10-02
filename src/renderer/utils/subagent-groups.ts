@@ -107,8 +107,11 @@ export interface SubAgentGroupOptions {
   titleByToolUseId: Map<string, string>;
   /** Bug2：子 agent 实时思考快照（agentId → 文本）。子 agent 第一条消息要等它思考完一整轮才到达，
    * 此前 parentAgentId 消息为空、组不存在，思考中的 ThinkingBlock 无处挂载（Tab 空白）。用此快照预建组，
-   * 让思考从第一秒起就可见；落库消息到达后自然并入同一组。 */
+   * 让思考从第一秒起可见；落库消息到达后自然并入同一组。 */
   liveThinkingByAgent?: Record<string, string>;
+  /** A1（D05-F1）：子 agent 实时正文快照（agentId → 文本）。与 liveThinkingByAgent 同法——仅有
+   * live 正文、尚无落库消息的子 agent 也预建组，正文从第一秒起可见。 */
+  liveTextByAgent?: Record<string, string>;
 }
 
 export function buildTitleByToolUseId(allMessages: Message[]): Map<string, string> {
@@ -144,6 +147,15 @@ export function aggregateSubAgentGroups(allMessages: Message[], opts: SubAgentGr
   // 让思考从第一秒起可见；后续落库消息到达后并入同一组（key 相同）。
   if (opts.liveThinkingByAgent) {
     for (const id of Object.keys(opts.liveThinkingByAgent)) {
+      if (!map.has(id)) {
+        map.set(id, []);
+        order.push(id);
+      }
+    }
+  }
+  // A1（D05-F1）：仅有实时正文、尚无落库消息的子 agent 同样预建组（与 thinking 同法）。
+  if (opts.liveTextByAgent) {
+    for (const id of Object.keys(opts.liveTextByAgent)) {
       if (!map.has(id)) {
         map.set(id, []);
         order.push(id);
