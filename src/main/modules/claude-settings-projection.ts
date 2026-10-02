@@ -42,6 +42,17 @@ function stringEnvFrom(value: unknown): Record<string, string> {
   return env;
 }
 
+// B1（D03-F2）：顶层旧版凭据键同清单剔除——...advanced spread 为携带 hooks 有意保留全部
+// 顶层键，但存量/手改 advancedJson 顶层残留的旧版凭据形态（parseClaudeSettings 历史支持的
+// apiKey/apiBaseUrl/baseUrl/apiKeyHelper，导入链删除后无人剥离）不得穿透明文落盘——
+// 与 G1 env 三键同口径：凭据唯一通道是进程 env（buildSpawnEnv）与 SDK Options.settings。
+const CREDENTIAL_TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
+  'apiKey',
+  'apiBaseUrl',
+  'baseUrl',
+  'apiKeyHelper',
+]);
+
 export function buildClaudeSettingsProjection(config: AppConfig): Record<string, unknown> {
   const advanced = recordFromJson(config.advancedJson);
   // env 只保留用户在高级 JSON 里自己写的字符串项（连接加固 P3：端点凭据不投影，
@@ -49,8 +60,14 @@ export function buildClaudeSettingsProjection(config: AppConfig): Record<string,
   const env = stringEnvFrom(advanced.env);
 
   // advancedJson 先 spread（携带用户 hooks 等顶层设置，以及可能已存在的 effortLevel/ultracode）。
+  // B1：spread 前剔除顶层旧版凭据键（不改用户 advancedJson 原文，仅投影侧不携带）。
+  const advancedSafe: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(advanced)) {
+    if (CREDENTIAL_TOP_LEVEL_KEYS.has(key)) continue;
+    advancedSafe[key] = value;
+  }
   const projection: Record<string, unknown> = {
-    ...advanced,
+    ...advancedSafe,
     permissions: buildPermissionSettings({
       permissionMode: config.permissionMode,
       advancedJson: config.advancedJson,
