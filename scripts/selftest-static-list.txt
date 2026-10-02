@@ -202,3 +202,4 @@ scripts/tdd-diffdialog-cache-reload-verify.ts
 scripts/tdd-watchdog-error-deferred-verify.ts
 scripts/tdd-feishu-owner-clear-verify.ts
 scripts/tdd-jpeg-tall-page-verify.ts
+scripts/tdd-window-state-corruption-verify.ts

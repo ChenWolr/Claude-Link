@@ -8,6 +8,8 @@
 
 import ElectronStoreModule from 'electron-store';
 import { app, type BrowserWindow } from 'electron';
+import * as path from 'node:path';
+import { rm } from 'node:fs/promises';
 import { WINDOW_MIN_WIDTH, WINDOW_MIN_HEIGHT } from '../../shared/constants';
 import { logger } from '../utils/logger';
 
@@ -48,9 +50,24 @@ function getStore(): WindowStateStore {
 
 const SAVE_DEBOUNCE_MS = 500;
 
-/** 读取持久化尺寸；不存在或非法返回 null。读出后 clamp 到最小尺寸（防御脏值）。 */
+/** 读取持久化尺寸；不存在或非法返回 null。读出后 clamp 到最小尺寸（防御脏值）。
+ *  B2（D14-F1）：损坏兜底——conf 的 get store() 对损坏 JSON 默认抛 SyntaxError
+ *  （clearInvalidConfig 未启用），而 createWindow 在 whenReady 的 try/catch 之外，
+ *  抛出即中断其后全部初始化（无窗口/无托盘/无更新检查、进程驻留）。此处包 try/catch：
+ *  抛错时 warn 留排障线索、删除损坏文件（conf 下次读按不存在走 defaults，下次 resize
+ *  保存重建文件，自愈闭环）、返回 null 由 index.ts 回落默认 1200×800——把「应用起不来」
+ *  降级为「丢一次窗口尺寸」。 */
 export function loadWindowSize(): WindowSize | null {
-  const raw = getStore().store;
+  let raw: PersistedSize;
+  try {
+    raw = getStore().store;
+  } catch (error) {
+    logger.warn(`读取窗口大小持久化失败（已删除损坏文件并回落默认尺寸）：${error instanceof Error ? error.message : String(error)}`);
+    const corruptPath = path.join(app.getPath('userData'), 'claude-link-window-state.json');
+    void rm(corruptPath, { force: true }).catch(() => { /* 删除失败：留待下次成功保存覆写 */ });
+    store = null; // 单例重置：避免实例缓存态与已删文件失配
+    return null;
+  }
   const width = typeof raw.width === 'number' && Number.isFinite(raw.width) ? raw.width : NaN;
   const height = typeof raw.height === 'number' && Number.isFinite(raw.height) ? raw.height : NaN;
   if (!Number.isFinite(width) || !Number.isFinite(height)) {
