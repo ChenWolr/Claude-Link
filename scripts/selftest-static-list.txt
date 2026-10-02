@@ -213,3 +213,4 @@ scripts/tdd-bind-transient-rollback-restore-verify.ts
 scripts/tdd-queue-v3-copy-resume-all-verify.ts
 scripts/tdd-reasoning-replay-autoretry-toggle-verify.ts
 scripts/tdd-session-delete-draft-cleanup-verify.ts
+scripts/tdd-bridge-surrogate-safe-cut-verify.ts
