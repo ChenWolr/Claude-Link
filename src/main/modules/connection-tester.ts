@@ -120,14 +120,8 @@ function executeCliTest(target: TestTarget): Promise<ProviderModelTestResult> {
   const cliPath = config.cliPath || 'claude';
   const startTime = Date.now();
 
-  if (!target.apiKey) {
-    return Promise.resolve({
-      success: false,
-      message: '未填写 API Key',
-      detail: '请先在「连接」页给供应商配置 API Key。',
-      durationMs: 0,
-    });
-  }
+  // B7（D02-F5）key-less 放行：空 key 不再前置拦截——按无凭据真实 spawn
+  //（applySessionOverrideEnv 显式删 ANTHROPIC_API_KEY），端点侧白名单/外部登录态自行判定。
 
   const args = [
     // 连接加固补丁：完全隔离 settings 文件来源（user/project/local 均不加载）。CC 启动时
@@ -146,7 +140,7 @@ function executeCliTest(target: TestTarget): Promise<ProviderModelTestResult> {
 
   logger.info(
     `testProviderModel: model=${target.model}, baseUrl=${target.override?.apiBaseUrl ?? '(配置投影)'}, ` +
-      `SONNET映射=${target.override ? target.override.modelId : '(无)'}, apiKey=SET`,
+      `SONNET映射=${target.override ? target.override.modelId : '(无)'}, apiKey=${target.apiKey ? 'SET' : '(key-less)'}`,
   );
 
   // P2-3：exe 经 resolveExecutable 解析（Windows .cmd shim → 真实 claude.exe），spawn 走
@@ -322,9 +316,7 @@ export async function runProviderModelTest(providerId: string, modelId: string):
   if (apiKey === DECRYPT_FAILED) {
     return { success: false, message: '密钥损坏，请重新输入', detail: `供应商「${profile.name}」的 API Key 解密失败（换机/重装后常见），请重新输入密钥。`, durationMs: 0 };
   }
-  if (!apiKey) {
-    return { success: false, message: '未填写 API Key', detail: `供应商「${profile.name}」未配置 API Key，无法测试。`, durationMs: 0 };
-  }
+  // B7（D02-F5）key-less 放行：空 key 不拦截，按无凭据真实 spawn，结果由端点决定。
   const override: SessionModelOverride = { apiBaseUrl: profile.apiBaseUrl, apiKey, modelId };
   return executeCliTest({ providerId, override, apiKey, baseUrl: profile.apiBaseUrl, model: modelId, providerName: profile.name });
 }

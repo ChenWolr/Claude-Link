@@ -207,3 +207,5 @@ scripts/tdd-queue-join-notice-verify.ts
 scripts/tdd-export-progress-cancel-verify.ts
 scripts/tdd-interaction-initial-focus-verify.ts
 scripts/tdd-connection-tester-async-cleanup-verify.ts
+scripts/tdd-provider-keyless-clear-verify.ts
+scripts/tdd-provider-keyless-headers-verify.ts

@@ -92,7 +92,7 @@ function startEditing(): void {
   creating.value = false;
 }
 
-async function handleEditorSave(payload: { id?: string; name: string; note: string; apiBaseUrl: string; apiKey?: string }): Promise<void> {
+async function handleEditorSave(payload: { id?: string; name: string; note: string; apiBaseUrl: string; apiKey?: string; clearApiKey?: boolean }): Promise<void> {
   const name = payload.name.trim();
   const note = payload.note.trim();
   const apiBaseUrl = payload.apiBaseUrl.trim();
@@ -114,6 +114,8 @@ async function handleEditorSave(payload: { id?: string; name: string; note: stri
           note,
           apiBaseUrl,
           ...(apiKey ? { apiKey } : {}),
+          // B7（D02-F4）：密钥清除请求透传（表单已确保输入新 key 时不出此标记）。
+          ...(payload.clearApiKey ? { clearApiKey: true } : {}),
           models: latestProvider?.models,
         });
       }
@@ -299,6 +301,7 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
         :initial-name="editing ? current?.name : undefined"
         :initial-note="editing ? current?.note : undefined"
         :initial-api-base-url="editing ? current?.apiBaseUrl : undefined"
+        :has-api-key="editing ? current?.hasApiKey : undefined"
         @save="handleEditorSave"
         @cancel="handleEditorCancel"
       />

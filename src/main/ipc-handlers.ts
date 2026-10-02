@@ -263,7 +263,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     const apiKey = decryptProviderApiKey(profile);
     // hb13-v B2（F-03）：解密哨兵按未配置短路——损坏态不得把哨兵串放进 x-api-key/Bearer 头。
     if (apiKey === DECRYPT_FAILED) throw new Error('该供应商的 API Key 解密失败（密钥损坏，请重新输入），无法查询模型。');
-    if (!apiKey) throw new Error('该供应商未配置 API Key，无法查询；可在下拉框手动输入模型 ID 添加。');
+    // B7（D02-F5）key-less 放行：空 key 不拦截，凭据头由 model-resolver 按 key 门控（空 key 省略）。
     return fetchAvailableModels(profile, apiKey, forceRefresh === true);
   });
   // 模型行内测试（r5）：指定供应商 + 指定模型真实 spawn CLI，直返汇总结果。
