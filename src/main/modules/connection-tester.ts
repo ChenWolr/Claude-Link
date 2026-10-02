@@ -58,21 +58,31 @@ function killTestChild(child: ChildProcess): void {
 // OPT-4：测试隔离临时目录 best-effort 清理（子进程被杀后文件已释放；rm 失败静默）。
 // hb12-CFG-04：win32 taskkill 是异步火忘——紧随其后的同步 rm 会因句柄未释放失败泄漏。
 // 改为：立即尝试一次；失败延迟重试（250ms/1s/4s 三次），仍失败留给 OS 临时目录清理。
+// B6（D02-F2）：延迟重试从同步阻塞睡眠改 setTimeout 异步链——同步睡眠最坏累计 5.25s
+// 冻结主进程事件循环（全部 IPC/定时器停摆）。fire-and-forget：调用点（finishWith/
+// abortActiveTest）不 await，中止/落定路径即时返回，测试行为与档位语义不变。
 function cleanupTestCwd(dir: string): void {
   const delays = [0, 250, 1000, 4000];
-  for (const ms of delays) {
-    try {
-      if (ms > 0) {
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-      }
-      fs.rmSync(dir, { recursive: true, force: true });
-      return; // 成功即返回
-    } catch {
-      // 占用中：进入下一档延迟重试
+  const attempt = (i: number): void => {
+    const ms = delays[i];
+    if (ms === undefined) {
+      // 全部失败：留证（cl-test-* 在系统临时目录，OS 清理兜底）
+      console.warn('[connection-tester] 临时目录清理失败（已重试）：', dir);
+      return;
     }
-  }
-  // 全部失败：留证（cl-test-* 在系统临时目录，OS 清理兜底）
-  console.warn('[connection-tester] 临时目录清理失败（已重试）：', dir);
+    const run = (): void => {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+        // 成功即止
+      } catch {
+        // 占用中：进入下一档延迟重试
+        attempt(i + 1);
+      }
+    };
+    if (ms > 0) setTimeout(run, ms);
+    else run();
+  };
+  attempt(0);
 }
 
 // 中止指定行的在飞测试：杀进程 + 落定「已被取代」（promise 不悬挂，按钮不卡「测试中」）。

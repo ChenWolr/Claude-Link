@@ -206,3 +206,4 @@ scripts/tdd-window-state-corruption-verify.ts
 scripts/tdd-queue-join-notice-verify.ts
 scripts/tdd-export-progress-cancel-verify.ts
 scripts/tdd-interaction-initial-focus-verify.ts
+scripts/tdd-connection-tester-async-cleanup-verify.ts
