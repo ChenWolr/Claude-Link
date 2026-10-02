@@ -415,7 +415,12 @@ export function deriveMaxPageHeightCss(scaleY: number, contentWidthCss: number):
   const physicalWidth = Math.round(contentWidthCss * scaleY);
   const heightByPixels = Math.floor(PIXEL_COUNT_MAX / Math.max(1, physicalWidth));
   const heightByDim = PIXEL_DIMENSION_MAX;
-  return Math.max(480, Math.min(heightByPixels, heightByDim));
+  // P2-2（2026-10-02 对抗 review）：heightByPixels/heightByDim 均为物理像素高，须 ÷scaleY
+  // 转 CSS 再返回（与 deriveMaxPageHeightByMemory 末行同法）——漏除时物理值被消费方
+  // （export-runner 的 JPEG hardCap）当 CSS 上限，DPR>1 屏（1.25）放行页物理像素
+  // = 24M×1.25 超预算，漏到捕获期 checkPixelBudget 迟失败（恰是 A15 要消除的压线漏放）。
+  // DPR=1 时两值一致，行为零回归。
+  return Math.max(480, Math.floor(Math.min(heightByPixels, heightByDim) / scaleY));
 }
 
 /** v4.1 PNG：按内存预算反推单页 CSS 高度上限（替代 canvas 像素预算）。 */

@@ -253,10 +253,11 @@ async function readExportDomGeometry(win: BrowserWindow): Promise<DomGeometry | 
   }
 }
 
-// —— PNG probe：渲染完整页 + 稳定后，读真实视口/位图比例（预算反推用）——
+// —— probe：渲染完整页 + 稳定后，读真实视口/位图比例（预算反推用）。
+// A15（D13-F1）：JPEG 存在超常规页高单条时亦经此反推像素预算硬上限——probe 只读 DOM 几何
+// + capturePage 测比例，与导出格式无关，原 PNG-only 门禁放开（beginPage/finishPage 仍仅 PNG）。 ——
 async function pngProbeSelfImpl(_request: PngProbeSelfRequest): Promise<PngProbeSelfResponse> {
   if (!active) return { ok: false, code: 'no-job', message: '没有进行中的导出任务' };
-  if (active.format !== 'png') return { ok: false, code: 'wrong-format', message: 'probe 仅 PNG 模式' };
   const win = active.exportWindow;
   if (win.isDestroyed()) return { ok: false, code: 'window-gone', message: '导出窗口已销毁' };
   const g = await readExportDomGeometry(win);
@@ -948,8 +949,9 @@ export function registerExportImageHandlers(): void {
     return await captureSelfImpl(request as CaptureSelfRequest);
   });
 
-  // v4.1 PNG 页协议（仅 PNG 模式生效：probe/begin 在 impl 内显式校验 format；finish 无显式校验，
-  // 靠 currentPngPage 仅 PNG 模式非空——JPEG 模式恒 null——间接以 no-page 拒绝）。
+  // v4.1 PNG 页协议：probe 与格式无关（A15 起 JPEG 反推像素预算亦用，见 pngProbeSelfImpl）；
+  // begin 在 impl 内显式校验 format（仅 PNG）；finish 无显式校验，靠 currentPngPage 仅 PNG
+  // 模式非空——JPEG 模式恒 null——间接以 no-page 拒绝。
   ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_PROBE_SELF, async (event, request: PngProbeSelfRequest) => {
     if (!isExportSender(event.sender)) return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies PngProbeSelfResponse;
     if (!request || typeof request.jobId !== 'string') return { ok: false, code: 'bad-request', message: '非法请求参数' } satisfies PngProbeSelfResponse;
