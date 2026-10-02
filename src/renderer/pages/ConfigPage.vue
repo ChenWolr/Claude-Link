@@ -15,6 +15,7 @@ import BridgeSettings from '../components/config/BridgeSettings.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
+import { projectContextWindowOverrides } from '../../shared/context-window-override';
 import { attachUserSkillDirNames, findStaleSkillKeys, isStaleKeyScanReady, loadSkillProjectDirs, normalizeDirKey } from '../../shared/project-skills';
 import { useInteractionStore } from '../stores/interaction-store';
 import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
@@ -119,6 +120,36 @@ async function refreshNativeSettingsDiagnostic(workingDir: string | null): Promi
   await store.loadNativeSettingsDiagnostic(workingDir);
 }
 
+// A7（D04-F5）：上下文窗口覆盖编辑区——本地行态 + shared 纯函数校验投影到
+// config.contextWindowByAlias（顶层持久化字段，已在 PERSISTED_FIELDS 自动保存快照内，
+// 走既有保存链；消费链 model-context-windows 既有）。非法/重复/不完整行不投影（保存被
+// 拦截），行内错误文案由 shared 单源；分母解析与圆环渲染不动。
+interface CtxOverrideRow { key: number; alias: string; value: string }
+let ctxRowSeq = 0;
+const ctxOverrideRows = ref<CtxOverrideRow[]>([]);
+function seedCtxOverrideRows(): void {
+  const map = store.config.contextWindowByAlias ?? {};
+  ctxOverrideRows.value = Object.entries(map).map(([alias, value]) => ({ key: ++ctxRowSeq, alias, value: String(value) }));
+}
+function ctxOverrideInputs(): { alias: string; value: string }[] {
+  return ctxOverrideRows.value.map(({ alias, value }) => ({ alias, value }));
+}
+const ctxOverrideErrors = computed(() => projectContextWindowOverrides(ctxOverrideInputs()).errors);
+function projectCtxOverrideRows(): void {
+  const { map } = projectContextWindowOverrides(ctxOverrideInputs());
+  store.config.contextWindowByAlias = map as typeof store.config.contextWindowByAlias;
+}
+function onCtxOverrideInput(): void {
+  projectCtxOverrideRows();
+}
+function addCtxOverrideRow(): void {
+  ctxOverrideRows.value.push({ key: ++ctxRowSeq, alias: '', value: '' });
+}
+function removeCtxOverrideRow(i: number): void {
+  ctxOverrideRows.value.splice(i, 1);
+  projectCtxOverrideRows();
+}
+
 async function performInit() {
   // H1（F5 重做）：上次保存失败（含卸载 flush 失败）时，先用手头内存值重存一次——
   // config-store 失败时不清内存 config，此刻仍是失败时的编辑值；一旦下方 loadConfig()
@@ -137,6 +168,8 @@ async function performInit() {
     }
   }
   await store.loadConfig();
+  // A7：挂载时从既有配置回填覆盖编辑区（编辑既有映射的入口）。
+  seedCtxOverrideRows();
   await store.detectCli();
   await store.loadStorageInfo();
   await refreshNativeSettingsDiagnostic(store.config.workingDirectory);
@@ -730,6 +763,20 @@ const updateStageTone = computed(() => {
                 <span class="field-desc">开启后托盘图标常驻右下角；关闭窗口最小化到托盘，右键托盘「退出」才结束程序。</span>
                 <input v-model="store.config.minimizeToTray" type="checkbox" />
               </label>
+              <!-- A7（D04-F5）：上下文窗口覆盖编辑区——分母最高优先级源的产品内入口（README 承诺兑现）。
+                   行式增删，经 shared 纯函数校验投影到 config.contextWindowByAlias（自动保存链）；
+                   非法/重复/不完整行不写入，行内提示；分母消费链（model-context-windows）不动。 -->
+              <div class="field">
+                <span class="field-label">上下文窗口覆盖</span>
+                <span class="field-desc">按别名/模型 ID 强制指定上下文窗口（token），分母优先级最高——用于纠正端点误报窗口（如实际 1M 被上报 200k）。留空不覆盖；新回合起生效。</span>
+                <div v-for="(row, i) in ctxOverrideRows" :key="row.key" class="ctx-override-row">
+                  <input v-model="row.alias" placeholder="别名（sonnet / haiku / opus / fable 或模型 ID）" @input="onCtxOverrideInput" />
+                  <input v-model="row.value" class="ctx-override-value" placeholder="token（1000–2000000）" inputmode="numeric" @input="onCtxOverrideInput" />
+                  <button type="button" class="ctx-override-remove" title="删除该行" @click="removeCtxOverrideRow(i)">删除</button>
+                  <span v-if="ctxOverrideErrors[i]" class="ctx-override-error">{{ ctxOverrideErrors[i] }}</span>
+                </div>
+                <button type="button" class="ctx-override-add" @click="addCtxOverrideRow">添加覆盖</button>
+              </div>
             </div>
           </div>
         </div>
@@ -2513,6 +2560,50 @@ input.skill-search:focus {
   .about-spin {
     animation: none;
   }
+}
+
+/* A7（D04-F5）：上下文窗口覆盖编辑区——行式布局（别名/数值/删除 + 行内错误文案）。 */
+.ctx-override-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 11rem auto;
+  gap: 0.5rem;
+  align-items: start;
+}
+.ctx-override-row input {
+  width: 100%;
+  box-sizing: border-box;
+}
+.ctx-override-error {
+  grid-column: 1 / -1;
+  color: var(--color-fail-strong);
+  font-size: 0.75rem;
+}
+.ctx-override-remove {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-soft);
+  color: var(--color-text-muted);
+  padding: 0.25rem 0.625rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.ctx-override-remove:hover {
+  color: var(--color-fail-strong);
+  border-color: var(--color-fail-strong);
+}
+.ctx-override-add {
+  justify-self: start;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 0.3125rem 0.75rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.ctx-override-add:hover {
+  color: var(--color-accent-strong);
+  border-color: var(--color-accent-strong);
 }
 
 </style>
