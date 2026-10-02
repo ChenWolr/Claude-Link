@@ -384,8 +384,14 @@ function createChat() {
     const isCurrent = !!store.activeSession && payload.sessionId === store.activeSession.id;
     clearStalledForSession(payload.sessionId, payload.event);
     if (!isCurrent) {
-      // hb12-SMG-05：已删除会话的后台事件直接丢弃（防幽灵 map 复活；窗口=一个 IPC 往返）。
-      if (!store.sessions.some((s) => s.id === payload.sessionId)) return;
+      // hb12-SMG-05 + A3（D01-F2/D12-F4）守卫收窄：已删除会话的后台事件直接丢弃（防幽灵 map
+      // 复活）。「不在列表」拆两态判定——本运行期已见（knownSessionIds 命中）→ 已删除，丢弃；
+      // 从未见过 → 运行期由主进程新建的会话（桥接首联//new），登记后放行进后台处理，列表由
+      // BRIDGE_SESSIONS_UPSERTED 信号触发的去抖刷新补齐（后续事件按已入列路径处理）。
+      if (!store.sessions.some((s) => s.id === payload.sessionId)) {
+        if (store.knownSessionIds[payload.sessionId]) return;
+        store.knownSessionIds[payload.sessionId] = true;
+      }
       handleBackgroundEvent(payload);
       return;
     }

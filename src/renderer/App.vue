@@ -27,6 +27,7 @@ let stopExportProgress: (() => void) | null = null;
 let stopCommandChanges: (() => void) | null = null;
 let stopGlobalCommandChanges: (() => void) | null = null;
 let stopQueueEvents: (() => void) | null = null;
+let stopBridgeSessionsUpserted: (() => void) | null = null;
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
@@ -97,6 +98,11 @@ onMounted(async () => {
   // markRunning / markStopped（中断收口）/ user_message_created（队列任务消息入列）等
   // 带副作用的队列事件仍须被处理——后台队列执行不因切页丢事件。
   stopQueueEvents = window.claudeLink.onQueueEvent((payload) => taskStore.handleQueueEvent(payload));
+  // A3（D01-F2/D12-F4）：桥接运行期自动建会话信号全局注册——store 内 500ms 去抖重拉列表，
+  // 新桥接会话 ≤1s 进侧栏；完成通知点击在列表刷新后可命中会话。
+  stopBridgeSessionsUpserted = window.claudeLink.onBridgeSessionsUpserted((payload) => {
+    sessionStore.markBridgeSessionUpserted(payload.sessionId);
+  });
 });
 
 onBeforeUnmount(() => {
@@ -107,6 +113,7 @@ onBeforeUnmount(() => {
   if (stopCommandChanges) stopCommandChanges();
   if (stopGlobalCommandChanges) stopGlobalCommandChanges();
   if (stopQueueEvents) stopQueueEvents();
+  if (stopBridgeSessionsUpserted) stopBridgeSessionsUpserted();
   if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
 });
 </script>

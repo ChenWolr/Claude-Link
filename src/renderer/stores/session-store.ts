@@ -134,6 +134,8 @@ function buildPersistedCanonical(session: Session): CanonicalContextState | null
 // 重新置入（AppSidebar 常驻消费，不可见过滤器变体）。发起新查询即换代，晚到旧结果/旧失败
 // 一律丢弃。
 let searchSessionsRequestId = 0;
+// A3（D01-F2/D12-F4）：桥接建会话信号的去抖计时器（模块级，非持久状态）。
+let bridgeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useSessionStore = defineStore('session', {
   state: () => ({
@@ -158,6 +160,9 @@ export const useSessionStore = defineStore('session', {
     runningSessions: [] as string[],
     // per-session 流式快照。切换会话时保存当前流式内容到快照，切回时恢复。
     sessionStreams: {} as Record<string, { content: string; thinking: string; tool: string }>,
+    // A3（D01-F2/D12-F4）：本运行期「已见会话」id 集合（loadSessions 全量、物化入库、use-chat
+    // 守卫放行三处播种，只增不减——删除不摘除，正是「已见消失」的判据数据源；重启随进程清零）。
+    knownSessionIds: {} as Record<string, true>,
     recentWorkspaces: [] as string[],
     // 右侧活动栏筛选：'all'（默认）/ 'plan' / 'queue' / 'subagent' / 'background' / 'changes'。
     // 演进自旧 rightTab 互斥 Tab——保留字段名与 'changes'/'background' 等字面量，仅新增 'all' 默认。
@@ -345,6 +350,8 @@ export const useSessionStore = defineStore('session', {
     async loadSessions() {
       try {
         this.sessions = await window.claudeLink.listSessions();
+        // A3：播种已见集合（幽灵守卫收窄的「已见消失」判据数据源）。
+        for (const s of this.sessions) this.knownSessionIds[s.id] = true;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '加载会话失败';
       }
@@ -354,6 +361,17 @@ export const useSessionStore = defineStore('session', {
         this.searchResults = null;
         this.searchQuery = '';
       }
+    },
+    // A3（D01-F2/D12-F4）：桥接运行期自动建会话信号（BRIDGE_SESSIONS_UPSERTED）处理入口。
+    // 500ms 去抖后重拉会话列表——连发消息/多次建会话合并为一次全量刷新，新会话 ≤1s 进侧栏；
+    // 只替换列表不动选中态（loadSessions 语义即「不覆盖 activeSession」）；桥接关闭时主进程
+    // 不广播，此处天然静默。
+    markBridgeSessionUpserted(_sessionId: string): void {
+      if (bridgeRefreshTimer) clearTimeout(bridgeRefreshTimer);
+      bridgeRefreshTimer = setTimeout(() => {
+        bridgeRefreshTimer = null;
+        void this.loadSessions();
+      }, 500);
     },
     // hb10-SMG-03/V02：就地更新某会话字段（sessions 与 searchResults 双列表同步）——
     // 主题回调/改名等轻量刷新走这里，不再整表 reload（避免搜索态被清/列表闪烁）。
@@ -468,6 +486,8 @@ export const useSessionStore = defineStore('session', {
           bindTransientAttachmentIds: draftIds,
         });
         this.sessions.unshift(session);
+        // A3：物化入库播种已见集合（新 id 即刻成为守卫判据的已知会话）。
+        this.knownSessionIds[session.id] = true;
         // 物化成功：单例暂态退场（下次「新会话」= 全新空白暂态，B6）。
         this.transientDraft = null;
         // M8 配套：物化后该 id 不再是暂态——先注销登记再 load，load() 恢复未过滤原语义

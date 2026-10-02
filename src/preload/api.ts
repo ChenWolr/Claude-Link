@@ -118,6 +118,8 @@ export interface ClaudeLinkAPI {
   bridgeListBindings: () => Promise<BridgeBindingView[]>;
   bridgePlatformRestart: (platform: 'feishu' | 'wechat') => Promise<BridgePlatformStatusEntry[]>;
   onBridgeStatusChanged: (callback: (payload: BridgePlatformStatusEntry[]) => void) => () => void;
+  /** A3（D01-F2/D12-F4）：桥接运行期自动建会话落库推送（载荷含 sessionId）。 */
+  onBridgeSessionsUpserted: (callback: (payload: { sessionId: string }) => void) => () => void;
 }
 
 export function createApi(): ClaudeLinkAPI {
@@ -266,6 +268,11 @@ export function createApi(): ClaudeLinkAPI {
       const listener = (_event: Electron.IpcRendererEvent, payload: BridgePlatformStatusEntry[]) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.BRIDGE_STATUS_CHANGED, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.BRIDGE_STATUS_CHANGED, listener);
+    },
+    onBridgeSessionsUpserted: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { sessionId: string }) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, listener);
     },
   };
 }
