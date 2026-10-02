@@ -199,3 +199,4 @@ scripts/tdd-esc-stack-verify.ts
 scripts/tdd-skill-home-anchor-verify.ts
 scripts/tdd-draft-attachment-quota-verify.ts
 scripts/tdd-diffdialog-cache-reload-verify.ts
+scripts/tdd-watchdog-error-deferred-verify.ts

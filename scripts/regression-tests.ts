@@ -3600,7 +3600,9 @@ function testFinishKillLateArrivalContracts(): void {
   assert.ok(removeIdx !== -1 && wasCurrentIdx < removeIdx, 'wasCurrent 必须先于 removeEntryIfCurrent 捕获（移除后恒假）');
   assert.ok(/if \(wasCurrent\) cleanupSessionStall\(sessionId\);/.test(region), 'cleanupSessionStall 须以 wasCurrent 为门（迟到的 finishKill 不得清掉新回合的卡死 tracker）');
   assert.ok(/wasCurrent && \(reason === 'user' \|\| reason === 'watchdog'\)/.test(region), 'aborted 终态补发须以 wasCurrent 为门（回合已自然收尾时不得再叠加 aborted）');
-  assert.ok(/wasCurrent && \(reason === 'user' \|\| reason === 'watchdog'\)[\s\S]{0,700}schedulePostTurnProbe\(sessionId, mainWindow, entry\.queryInstance/.test(region), 'finishKill 探针调度须以 wasCurrent 为门（新回合在途时旧代际探针作废）');
+  // 窗口 700→1300（A13/D11-F6 5db45f7 最小同步）：gate 与探针间插入 watchdog 挂账兑现
+  //（A13 修复行，~400 字符），断言语义不变（探针仍以 wasCurrent 为门）。
+  assert.ok(/wasCurrent && \(reason === 'user' \|\| reason === 'watchdog'\)[\s\S]{0,1300}schedulePostTurnProbe\(sessionId, mainWindow, entry\.queryInstance/.test(region), 'finishKill 探针调度须以 wasCurrent 为门（新回合在途时旧代际探针作废）');
   assert.ok(/abortEntry\(entry\);/.test(region), 'abortEntry 保持无条件（entry 级、幂等，迟到时杀掉旧回合残留 CLI 仍正确）');
 }
 

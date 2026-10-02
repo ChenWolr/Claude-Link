@@ -198,6 +198,10 @@ interface SessionEntry {
   // hb12-P2-2：回合已知终态（result/合成 aborted 显式结算时置位）。exit 兜底分类据此让位——
   // result 权威 > 显式终态标记 > 退出码兜底，任何路径不得把「已中断」记成 success。
   knownOutcome?: 'success' | 'error' | 'interrupted';
+  // A13（D11-F6）：watchdog「已自动中断」系统消息挂账——watchdogTick 不再触发即落库（两段式
+  // 优雅窗内回合自然完成时该行会成永久误报残留），改为 finishKill 终态确认回合确被中止
+  // （wasCurrent）时兑现转发+落库；优雅完成则永不发出。随 entry 生命周期，不跨回合残留。
+  watchdogErrorPending?: string;
 }
 const nextQueryInstance = { value: 1 };
 
@@ -540,7 +544,16 @@ function watchdogTick(): void {
         verdict.zone === 'tool'
           ? `子任务/工具已 ${secs} 秒无进展，判定卡死（死连接/死锁），已自动中断。可点击「重试」重新发送。`
           : `已 ${secs} 秒无响应，判定模型服务卡死，已自动中断。可点击「重试」重新发送。`;
-      forwardEvent(sessionId, mw, { type: 'error', message: reason });
+      // A13（D11-F6）：不再触发即落库——两段式优雅窗内回合可能自然完成，先行落库的
+      // system:error 行会成永久误报残留（重载可见且无法自愈）。改为挂账到 entry，
+      // finishKill 终态确认回合确被中止（wasCurrent）时才兑现；优雅完成则永不发出
+      // （stalled 横幅仍即时可见，用户反馈不受影响）。entry 缺失兜底保持旧直发语义。
+      const entry = entries.get(sessionId);
+      if (entry) {
+        entry.watchdogErrorPending = reason;
+      } else {
+        forwardEvent(sessionId, mw, { type: 'error', message: reason });
+      }
       logger.error(`[stall] hard auto-abort session ${sessionId}: ${secs}s ${verdict.zone}-zone silence`);
       killProcess(sessionId, 'watchdog', mw);
     }
@@ -4413,6 +4426,13 @@ export function killProcess(
       // 迟到语义（新增）：仅当被杀回合仍 current 时补发；回合已自然收尾（终态已由 result/流末
       // 提供）时不再叠加 aborted，防污染收尾后新回合的 UI 状态。
       if (wasCurrent && (reason === 'user' || reason === 'watchdog') && mainWindow) {
+        // A13（D11-F6）：watchdog「已自动中断」挂账在此兑现——仅当回合确被中止（优雅窗内
+        // 自然完成时 wasCurrent=false 不入此门）才转发+落库 system:error，先于 aborted，
+        // renderer 横幅与终态次序同旧时序；user 中断不消费挂账（语义不动）。
+        if (reason === 'watchdog' && entry.watchdogErrorPending) {
+          forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+          entry.watchdogErrorPending = undefined;
+        }
         forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
         // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
         // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
