@@ -20,6 +20,7 @@ import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderPro
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
 import { collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
+import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
@@ -218,7 +219,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET, async () => {
     // Y-1（2026-09-19 X-123 批评审 §2）：用户根映射先取（独立单槽共享）；null 哨兵=枚举超时——
     // 载荷恒回对象 + 超时标记（渲染层据此不覆盖映射槽/不置就绪旗标），dirs 三源 await 内联不动。
-    const userDirNames = await collectUserSkillDirNames(path.join(os.homedir(), '.claude', 'skills'));
+    // A10（D07-F2）：用户根与全链同口径（effectiveUserHome = 子进程实际生效 USERPROFILE/HOME，
+    // 与证据扫描/command-source-watcher 同源）——advancedJson.env 覆盖 home 时映射不再扫错根；
+    // 无覆盖时二者同值，行为不变。undefined 回退宿主 home（按函数语义核对）。
+    const userDirNames = await collectUserSkillDirNames(path.join(effectiveUserHome() ?? os.homedir(), '.claude', 'skills'));
     return {
       dirs: await collectSkillProjectDirs({
         recentDirs: listRecentWorkspaces(),

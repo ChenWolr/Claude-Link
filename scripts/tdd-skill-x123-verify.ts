@@ -300,7 +300,8 @@ async function main(): Promise<void> {
     if (/withTimeout\(enumerateSkillsRoot\(/.test(src)) sub.push('用户根枚举旧直调形态残留（应经可注入 seam 选择枚举器）');
     // handler 接线：null 哨兵先落 const 再分流——载荷恒回对象 + 超时标记（基线子断言：dirs 三源 await 内联不动）
     const at = ipc.indexOf('ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
-    const region = at >= 0 ? ipc.slice(at, at + 900) : '';
+    // 窗口 900→1060：A10（D07-F2）homedir→effectiveUserHome 修复带 3 行机理注释（5db45f7 最小同步，断言语义不变）。
+    const region = at >= 0 ? ipc.slice(at, at + 1060) : '';
     if (!/const userDirNames = await collectUserSkillDirNames\(/.test(region)) {
       sub.push('handler 缺 const userDirNames = await collectUserSkillDirNames(…)（null 哨兵须先落 const 再分流）');
     }
