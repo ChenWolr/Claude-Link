@@ -637,6 +637,28 @@ export function computeProgressPercent(
   return Math.max(0, Math.min(100, pct));
 }
 
+/** B4（D13-F2）：renderer 侧按「已完成段数/总段数」估算进度。report() 每段调用一次，
+ *  数据（page/totalPages/segment/segmentsInPage）已在进度 payload 中；总段数用
+ *  totalPages×segmentsInPage 近似（页高不均时略偏差，进度条为近似展示）。
+ *  planning/preparing → -1（store indeterminate 分支消费）；done → 100；
+ *  capturing/encoding 单调推进但封顶 99——终态 100 由 manager done 分支显式发出，
+ *  防「100% 还在跑」。非法入参（无页/无段/负数）钳 0。 */
+export function estimateExportPercent(
+  phase: ExportImagePhase,
+  page: number,
+  totalPages: number,
+  segment: number,
+  segmentsInPage: number,
+): number {
+  if (phase === 'planning' || phase === 'preparing') return -1;
+  if (phase === 'done') return 100;
+  if (totalPages <= 0 || segmentsInPage <= 0) return 0;
+  const done = Math.max(0, page - 1) * segmentsInPage + Math.max(0, segment);
+  const total = totalPages * segmentsInPage;
+  const pct = Math.round((done / total) * 100);
+  return Math.max(0, Math.min(99, pct));
+}
+
 /** 迟到事件过滤：jobId 与当前 job 不符 → 丢弃。 */
 export function isStaleEvent(eventJobId: string, currentJobId: string | null): boolean {
   if (!currentJobId) return true;

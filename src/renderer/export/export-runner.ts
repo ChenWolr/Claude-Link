@@ -8,7 +8,7 @@
 // docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）。
 
 import { reactive } from 'vue';
-import { JPEG_CHUNK_BYTES, JPEG_QUALITY, placeSegment, checkPixelBudget, deriveMaxPageHeightByMemory, deriveMaxPageHeightCss, DEFAULT_EXPORT_BUDGET } from '@shared/export-image';
+import { JPEG_CHUNK_BYTES, JPEG_QUALITY, placeSegment, checkPixelBudget, deriveMaxPageHeightByMemory, deriveMaxPageHeightCss, DEFAULT_EXPORT_BUDGET, estimateExportPercent } from '@shared/export-image';
 import type {
   ExportImagePhase,
   PngCaptureSelfResponse,
@@ -137,7 +137,8 @@ function report(
   partial: { phase: ExportImagePhase; page: number; totalPages: number; segment: number; segmentsInPage: number; message: string; percent?: number },
 ): void {
   runnerState.phase = partial.phase;
-  api.reportProgress({ jobId, sessionId: '', sessionName: runnerState.sessionName, percent: partial.percent ?? 0, ...partial });
+  // B4（D13-F2）：进度按已完成段数/总段数推进（payload 数据齐全），不再恒 0 到 done 才跳 100。
+  api.reportProgress({ jobId, sessionId: '', sessionName: runnerState.sessionName, percent: partial.percent ?? estimateExportPercent(partial.phase, partial.page, partial.totalPages, partial.segment, partial.segmentsInPage), ...partial });
 }
 
 export async function runExport(): Promise<void> {

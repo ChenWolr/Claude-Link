@@ -88,6 +88,15 @@ export const useExportImageStore = defineStore('export-image', {
         this.scheduleReset();
       }
     },
+    /** B4（D13-F3）：用户取消当前导出（仅捕获/编码阶段有效；无活动 job/已终态主进程拒绝，
+     * 终态进度事件自然收口）。 */
+    async cancel(): Promise<void> {
+      try {
+        await window.claudeLink.cancelImageExport();
+      } catch {
+        // IPC 失败：job 已死/无活动 job——终态进度（cancelled/error）或复位定时器兜底。
+      }
+    },
     scheduleReset(): void {
       if (this._timer) clearTimeout(this._timer);
       this._timer = setTimeout(() => {

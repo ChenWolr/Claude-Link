@@ -204,3 +204,4 @@ scripts/tdd-feishu-owner-clear-verify.ts
 scripts/tdd-jpeg-tall-page-verify.ts
 scripts/tdd-window-state-corruption-verify.ts
 scripts/tdd-queue-join-notice-verify.ts
+scripts/tdd-export-progress-cancel-verify.ts

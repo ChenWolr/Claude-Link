@@ -96,6 +96,8 @@ export interface ClaudeLinkAPI {
   removeQueueListener: () => void;
   startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
   onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => () => void;
+  // B4（D13-F3）：取消当前导出（仅捕获/编码阶段；无活动 job 或已终态时主进程返回 ok:false）。
+  cancelImageExport: () => Promise<{ ok: boolean }>;
   // 原生 Slash Commands：读取某会话当前命令快照 + 监听全量替换。
   getSessionCommands: (sessionId: string) => Promise<SessionCommandSnapshot>;
   onCommandChanged: (callback: (payload: CommandChangedPayload) => void) => () => void;
@@ -237,6 +239,8 @@ export function createApi(): ClaudeLinkAPI {
       ipcRenderer.on(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
     },
+    // B4（D13-F3）：用户取消导出（仅捕获/编码阶段有效）。
+    cancelImageExport: () => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_CANCEL) as Promise<{ ok: boolean }>,
     getSessionCommands: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.COMMANDS_GET, sessionId) as Promise<SessionCommandSnapshot>,
     onCommandChanged: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: CommandChangedPayload) => callback(payload);
