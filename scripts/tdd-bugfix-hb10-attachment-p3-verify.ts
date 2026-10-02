@@ -65,9 +65,11 @@ check('④ ATT-05：TASK_REMOVE 仅 pending 可删', () => {
   assert.ok(delIdx > guardIdx, '守卫必须先于删除');
 });
 
-// ⑤ ATT-06。
-check('⑤ ATT-06：PICK 截断 10 + draftStore 上限丢弃', () => {
-  assert.match(handlers, /result\.filePaths\.slice\(0, 10\)/, 'PICK 缺截断');
+// ⑤ ATT-06。（A11/D08-F1 5db45f7 同步：截断从「本次多选 ≤10」升级为「草稿余量感知」——
+// room = 10 - listDraftQuotaItems(sessionId).length，余量外文件不读盘直接进 errors 提示；
+// draftStore 上限丢弃子断言不变，仍为第二道防线。）
+check('⑤ ATT-06：PICK 余量截断 10 + draftStore 上限丢弃', () => {
+  assert.match(handlers, /filePaths\.slice\(0, room\)/, 'PICK 缺余量截断（A11 升级形态）');
   assert.match(handlers, /一次最多 10 个附件|hb10-ATT-06/, 'PICK 缺限量注释');
   assert.match(draftStore, /attachments\.slice\(0, room\)/, 'draftStore 缺上限丢弃');
 });

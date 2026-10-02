@@ -6,7 +6,7 @@ import { ipcRenderer } from 'electron';
 import type { AppConfig, ModelInfo, ProviderLibrarySnapshot, ProviderProfileView, ProviderSaveInput } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueOverview } from '../shared/types/task';
-import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult } from '../shared/types/attachment';
+import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult, CloneMessageAttachmentsResult } from '../shared/types/attachment';
 import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import type { SkillProjectDirsPayload } from '../shared/types/command';
@@ -91,7 +91,7 @@ export interface ClaudeLinkAPI {
   stageAttachmentBytes: (input: StageAttachmentBytesInput) => Promise<AttachmentSummary>;
   getAttachmentPreview: (request: AttachmentPreviewRequest) => Promise<AttachmentPreviewResponse>;
   removeDraftAttachment: (sessionId: string, attachmentId: string) => Promise<void>;
-  cloneMessageAttachments: (sessionId: string, messageId: string) => Promise<AttachmentSummary[]>;
+  cloneMessageAttachments: (sessionId: string, messageId: string) => Promise<CloneMessageAttachmentsResult>;
   onQueueEvent: (callback: (payload: QueueEventPayload) => void) => () => void;
   removeQueueListener: () => void;
   startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
@@ -223,7 +223,7 @@ export function createApi(): ClaudeLinkAPI {
     stageAttachmentBytes: (input) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_STAGE_BYTES, input) as Promise<AttachmentSummary>,
     getAttachmentPreview: (request) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PREVIEW, request) as Promise<AttachmentPreviewResponse>,
     removeDraftAttachment: (sessionId, attachmentId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, sessionId, attachmentId),
-    cloneMessageAttachments: (sessionId, messageId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE, sessionId, messageId) as Promise<AttachmentSummary[]>,
+    cloneMessageAttachments: (sessionId, messageId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE, sessionId, messageId) as Promise<CloneMessageAttachmentsResult>,
     onQueueEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: QueueEventPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.QUEUE_EVENT, listener);

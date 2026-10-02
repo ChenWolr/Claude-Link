@@ -1176,10 +1176,15 @@ function createChat() {
     let attachmentIds: string[] = [];
     if (last.attachmentIds.length > 0) {
       try {
-        const cloned = await window.claudeLink.cloneMessageAttachments(sid, last.id);
-        attachmentIds = cloned.map((a) => a.id);
+        // A11（D08-F1）：克隆返回 { created, rejected }——余量预检拒掉的附件不落盘、
+        // 以名单返回；此路径无 notice 通道，以 error 横幅承载提示（发送后由既有机制清理）。
+        const result = await window.claudeLink.cloneMessageAttachments(sid, last.id);
+        attachmentIds = result.created.map((a) => a.id);
         if (attachmentIds.length > 0) {
-          useChatDraftStore().addAttachments(sid, cloned);
+          useChatDraftStore().addAttachments(sid, result.created);
+          if (result.rejected.length > 0) {
+            error.value = `附件余量不足，已恢复 ${result.created.length} 个、忽略 ${result.rejected.length} 个（${result.rejected.map((r) => r.filename).join('、')}）`;
+          }
         } else {
           error.value = '附件恢复失败，已按纯文本重发';
         }

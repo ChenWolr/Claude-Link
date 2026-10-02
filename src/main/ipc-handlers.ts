@@ -66,9 +66,11 @@ import {
   assertAttachmentsReadyForSend,
   cloneMessageAttachmentsToDraft,
   cleanupDetachedAttachments,
+  listDraftQuotaItems,
 } from './modules/attachment-service';
+import { DRAFT_QUOTA_MAX_COUNT } from '../shared/draft-attachment-quota';
 import { prepareAttachmentPrompt } from './modules/attachment-prompt-builder';
-import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
+import type { ChatSendPayload, SendMessageResult, AttachmentSummary, CloneMessageAttachmentsResult } from '../shared/types/attachment';
 import type { BridgeConfigSaveInput } from '../shared/types/bridge';
 import {
   bridgeConfigGet, bridgeConfigSave, bridgeStatusGet, bridgeFeishuTest,
@@ -894,12 +896,17 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       title: '选择附件（图片 / 文档 / 文件）',
     });
     if (result.canceled || !result.filePaths.length) return { attachments: [], errors: [] };
-    // hb10-ATT-06：一次最多 10 个附件——多选超出部分截断（暂存即限量）。
-    if (result.filePaths.length > 10) result.filePaths = result.filePaths.slice(0, 10);
-
+    // A11（D08-F1）+ hb10-ATT-06：一次最多 10 个附件——暂存即限量；旧「本次多选 ≤10」
+    // slice 截断不感知草稿余量且被截断文件无提示，已废——改为按「当前草稿余量」预检：
+    // 余量外的文件不读盘直接进 errors（D08-F10 提示缺口顺带），余量内的才走读盘暂存链。
+    const room = DRAFT_QUOTA_MAX_COUNT - listDraftQuotaItems(sessionId).length;
+    const filePaths = room <= 0 ? [] : result.filePaths.slice(0, room);
     const attachments: AttachmentSummary[] = [];
     const errors: Array<{ filename: string; message: string }> = [];
-    for (const filePath of result.filePaths) {
+    for (const skipped of result.filePaths.slice(filePaths.length)) {
+      errors.push({ filename: path.basename(skipped), message: '草稿附件已达 10 个上限，已忽略' });
+    }
+    for (const filePath of filePaths) {
       const filename = path.basename(filePath);
       try {
         // P1-7：读入内存前先 stat 早退——数 GB 文件不再进 Buffer（防主进程 OOM）。
@@ -971,9 +978,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // 克隆历史消息附件为草稿：异步发送失败后「重新编辑发送」用；跨会话防护在 service 内。
+  // A11（D08-F1）：返回 { created, rejected }——余量预检拒掉的附件以名单返回（不落盘）。
   ipcMain.handle(
     IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE,
-    async (_event, sessionId: string, messageId: string): Promise<AttachmentSummary[]> =>
+    async (_event, sessionId: string, messageId: string): Promise<CloneMessageAttachmentsResult> =>
       cloneMessageAttachmentsToDraft(sessionId, messageId),
   );
 
