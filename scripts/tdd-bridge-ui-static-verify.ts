@@ -250,10 +250,12 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     /feishuAppIdInput/.test(vueSrc)
       && /async function testFeishu[\s\S]{0,300}await save\(\{ feishu: \{ appId: feishuAppIdInput\.value\.trim\(\) \} \}\)/m.test(vueSrc),
     'testFeishu 未用当前输入框值先保存');
-  check('J', '⑤', '微信授权用户展示保留且清除类按钮已撤（wechatOwnerUserId + 无「清除授权」/clearOwner/clearWechatOwner）',
-    vueSrc.includes('wechatOwnerUserId') && !vueSrc.includes('清除授权')
-      && !vueSrc.includes('clearOwner') && !vueSrc.includes('clearWechatOwner'),
-    '授权用户展示丢失，或清除授权入口残留');
+  // ⑤（A14/D12-F2 5db45f7 同步）：「清除授权」全文件禁令废止——飞书 owner 无清除出口即
+  // D12-F2 缺陷本体（收窄过头），A14 在飞书 Owner 行恢复「清除授权用户」两段式按钮（形态由
+  // tdd-feishu-owner-clear-verify 钉）。微信侧禁令保留：微信仍靠「退出登录」兜底，无清除类入口。
+  check('J', '⑤', '微信授权用户展示保留且微信侧清除类按钮已撤（wechatOwnerUserId + 无 clearWechatOwner）；飞书侧清除出口由 A14 契约另钉',
+    vueSrc.includes('wechatOwnerUserId') && !vueSrc.includes('clearWechatOwner'),
+    '授权用户展示丢失，或微信清除授权入口残留');
   check('J', '⑥', '使用说明六条补全（私聊/命令/合并/积压/隐私/owner）',
     ['仅支持私聊', '/new', '/stop', '合并为一次回复', '不会在重新打开后处理', '会话列表中可见', '仅授权用户'].every((t) => vueSrc.includes(t)),
     '使用说明缺批次5.3 新文案');
