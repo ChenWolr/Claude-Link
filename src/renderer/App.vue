@@ -60,6 +60,23 @@ watch(lastSaveFailed, (failed) => {
   }
 });
 
+// A4（D01-F3 + D02-F8）：sessionStore.error 全局出口——删除/搜索/改名/会话内切模型等失败此前
+// 全程静默（渲染层消费点为零，D01-F3 复核修正）。非空时弹 3.5s 全局错误 toast（复用 H1 的
+// .global-toast--error 样式），文案「操作失败：<摘要>」截断至 ~80 字符；连续失败以最新文案
+// 重置计时；空串/null 不弹（成功路径零打扰）；不改 store 写入点，不动 config/changes 既有出口。
+const SESSION_ERROR_TOAST_MS = 3500;
+const SESSION_ERROR_TEXT_MAX = 80;
+const sessionErrorToastVisible = ref(false);
+const sessionErrorToastText = ref('');
+let sessionErrorToastTimer: ReturnType<typeof setTimeout> | null = null;
+watch(() => sessionStore.error, (err) => {
+  if (!err) return;
+  sessionErrorToastText.value = `操作失败：${err.length > SESSION_ERROR_TEXT_MAX ? `${err.slice(0, SESSION_ERROR_TEXT_MAX)}…` : err}`;
+  sessionErrorToastVisible.value = true;
+  if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
+  sessionErrorToastTimer = setTimeout(() => { sessionErrorToastVisible.value = false; }, SESSION_ERROR_TOAST_MS);
+});
+
 onMounted(async () => {
   document.addEventListener('dragover', suppressDragNavigation);
   document.addEventListener('drop', suppressDragNavigation);
@@ -115,6 +132,7 @@ onBeforeUnmount(() => {
   if (stopQueueEvents) stopQueueEvents();
   if (stopBridgeSessionsUpserted) stopBridgeSessionsUpserted();
   if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
+  if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
 });
 </script>
 
@@ -127,6 +145,7 @@ onBeforeUnmount(() => {
     <ToolDiffDialog />
     <UpdateDialog />
     <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">设置保存失败，部分修改可能未保存</div>
+    <div v-if="sessionErrorToastVisible" class="global-toast global-toast--error global-toast--stacked">{{ sessionErrorToastText }}</div>
   </AppLayout>
 </template>
 
@@ -148,5 +167,10 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-fail-strong);
   background: color-mix(in srgb, var(--color-fail) 12%, var(--color-panel));
   color: var(--color-fail-strong);
+}
+
+/* A4：会话错误 toast 与保存失败 toast 同屏时纵向错开，避免重叠（双失败同瞬的边角）。 */
+.global-toast--stacked {
+  top: 3.5rem;
 }
 </style>
