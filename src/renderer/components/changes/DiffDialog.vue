@@ -184,6 +184,18 @@ watch(effectiveContext, (c) => {
   if (state.value?.path) void changesStore.ensureDiff(state.value.path, c);
 });
 
+// A12（D10-F1）：缓存失效自愈——回合结束防抖 refresh(true) 全清 diffCache 时弹窗仍开着，
+// cached 变 undefined 后 path/effectiveContext 均未变、无既有 watcher 会重拉 → 永久「加载中」
+// 死态（hb13-v B8 同类先例）。此 watch：弹窗开着且缓存条目缺失即重拉（in-flight 去重与
+// 代际守卫由 ensureDiff 自带）。仅认 undefined：错误条目（{ok:false}）已呈现错误态，自动重试
+// 会因每次失败写入新对象引用而无限循环；context 不匹配的成功缓存由 effectiveContext watch
+// 负责拉取，此处不越俎。
+watch(cached, (c) => {
+  if (!state.value?.path) return;
+  if (c !== undefined) return;
+  void changesStore.ensureDiff(state.value.path, effectiveContext.value);
+});
+
 // 防残留：切会话 / 当前文件从列表消失 → 关弹窗（sessionGen 守卫 + 清 diffCache 在 store，此为第三层）。
 watch(
   () => sessionStore.activeSession?.id,
