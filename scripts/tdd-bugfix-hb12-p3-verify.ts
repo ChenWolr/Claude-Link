@@ -51,11 +51,18 @@ check('② SMG-02：setActiveSessionWorkingDir 两分支 addRecentWorkspace 独�
 
 // ③ SMG-05。
 check('③ SMG-05：后台事件首行已删会话丢弃', () => {
-  const idx = chat.indexOf('hb12-SMG-05：已删除会话的后台事件直接丢弃');
+  // A3 收窄后注释形态为「hb12-SMG-05 + A3（…）守卫收窄：已删除会话的后台事件直接丢弃」，
+  // 以 'hb12-SMG-05' 作锚定位守卫注释块。
+  const idx = chat.indexOf('hb12-SMG-05');
   assert.ok(idx > -1, '缺丢弃守卫');
-  const guardIdx = chat.indexOf('!store.sessions.some((s) => s.id === payload.sessionId)) return;', idx);
+  // A3（D01-F2/D12-F4）收窄同步（5db45f7 先例最小同步）：守卫改两态块级判定——「不在列表」时
+  // 已见（knownSessionIds 命中=已删除）仍丢弃，未见（桥接运行期新建）登记放行；SMG-05 的
+  // 「删除会话不得复活」语义保留（丢弃分支仍先于 handleBackgroundEvent）。
   const handleIdx = chat.indexOf('handleBackgroundEvent(payload);', idx);
-  assert.ok(guardIdx > -1 && guardIdx < handleIdx, '守卫未在 handleBackgroundEvent 之前');
+  assert.ok(handleIdx > -1, '缺 handleBackgroundEvent 调用');
+  const guardBody = chat.slice(idx, handleIdx);
+  assert.match(guardBody, /!store\.sessions\.some\(\(s\) => s\.id === payload\.sessionId\)/, '缺列表成员判定');
+  assert.match(guardBody, /if \(store\.knownSessionIds\[payload\.sessionId\]\) return;/, '已见（已删除）分支缺丢弃');
 });
 
 // ④ SMG-06。

@@ -4,8 +4,9 @@
      2026-09-29 A 案视觉重排：图标章头部 + 版本对比 pill 行（对照 docs/prototypes/about-tab/a-identity-hero.html）；
      script 逻辑与全部 data-testid 零改动。 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted } from 'vue';
+import { computed, onMounted, onUnmounted, watch } from 'vue';
 import { useUpdateStore } from '../../stores/update-store';
+import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 
 const updateStore = useUpdateStore();
 const status = computed(() => updateStore.status);
@@ -18,11 +19,30 @@ const progressText = computed(() => {
 
 // ESC = 稍后提醒。监听随组件常驻挂载，dialogVisible 守卫兜底：弹窗未开时按 ESC
 // 不得把当前 newVersion 误写进 dismissedVersions（全局键位与 ChatPage Esc 急停并存，互不影响）。
+// A9（D14-F5）：弹窗可见期间注册 Esc 层（1100）——更高层遮罩（交互弹窗 1200/导出格式/灯箱）
+// 在场时让位，Esc 只作用最上层，不把被遮挡、用户从未决策的版本记入 dismissedVersions。
+let escHandle: EscLayerHandle | null = null;
+watch(() => updateStore.dialogVisible, (visible) => {
+  if (visible && !escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.updateDialog);
+  else if (!visible && escHandle) {
+    escHandle.release();
+    escHandle = null;
+  }
+});
+
 function onKeydown(e: KeyboardEvent): void {
-  if (e.key === 'Escape' && updateStore.dialogVisible) updateStore.dismissUpdate();
+  if (e.key !== 'Escape' || !updateStore.dialogVisible) return;
+  // A9（D14-F5）：更高层遮罩在场时让位（不消费、不记 dismissed）。
+  if (escHandle && !escHandle.isTopmost()) return;
+  updateStore.dismissUpdate();
 }
 onMounted(() => window.addEventListener('keydown', onKeydown));
-onUnmounted(() => window.removeEventListener('keydown', onKeydown));
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown);
+  // A9：卸载兜底出栈（release 幂等）。
+  escHandle?.release();
+  escHandle = null;
+});
 </script>
 
 <template>

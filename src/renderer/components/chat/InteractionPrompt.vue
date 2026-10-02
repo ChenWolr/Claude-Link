@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 import type {
   InteractionPromptOption,
   InteractionPromptPayload,
@@ -489,6 +490,9 @@ function handleKeydown(event: KeyboardEvent): void {
     event.preventDefault();
     void submit();
   } else if (event.key === 'Escape') {
+    // A9（D06-F1）：更高层遮罩（灯箱/导出格式）在场时让位——不 preventDefault、不 cancel，
+    // 防被遮挡且用户从未见过的弹窗按「用户拒绝」收口。无更高层时行为与现状一致。
+    if (escHandle && !escHandle.isTopmost()) return;
     event.preventDefault();
     // alert 模式（kind:'confirm' 且只有 confirm 一个选项）Esc 视为"知道了"→提交确定，
     // 与原 ConfirmDialog 的 alert 行为一致；其余 confirm/选择题 Esc→取消。
@@ -551,6 +555,17 @@ void window.claudeLink.getPendingInteractions().then((pending) => {
   for (const request of pending) enqueue(request);
 });
 window.addEventListener('keydown', handleKeydown);
+
+// A9（D06-F1/D14-F5）：交互弹窗可见期间注册 Esc 层（1200）——更高层遮罩（灯箱 9999/导出格式
+// 9000）在场时 Esc 分支让位，Esc 只关最上层，防「用户从未见过的弹窗被按 Esc 误 deny」。
+let escHandle: EscLayerHandle | null = null;
+watch(activeRequest, (req) => {
+  if (req && !escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.interaction);
+  else if (!req && escHandle) {
+    escHandle.release();
+    escHandle = null;
+  }
+});
 
 // V3-3：交互历史持久化——跟随当前会话加载历史，切换会话时刷新。
 // 用自增 token 防竞态：快速切会话 A→B 时，若 A 的 IPC 响应晚于 B 返回，
@@ -623,6 +638,9 @@ onBeforeUnmount(() => {
   cleanupCancel?.();
   window.removeEventListener('keydown', handleKeydown);
   window.removeEventListener('pointermove', onDragMove);
+  // A9：卸载兜底出栈（release 幂等）。
+  escHandle?.release();
+  escHandle = null;
   // V3-2：清理 pending 本地请求（requestConfirm），避免 Promise 永挂。
   interactionStore.cleanupLocalRequests();
 });

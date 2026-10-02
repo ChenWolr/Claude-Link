@@ -5,6 +5,7 @@
 // docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）。
 import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import type { ExportImageFormat } from '@shared/types/export-image';
+import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 
 const props = defineProps<{ open: boolean; busy?: boolean }>();
 const emit = defineEmits<{
@@ -14,11 +15,18 @@ const emit = defineEmits<{
 
 const selected = ref<ExportImageFormat>('jpeg');
 const cardRef = ref<HTMLDivElement | null>(null);
+// A9：弹窗打开即注册 Esc 层（9000，低于灯箱 9999）——灯箱在场时 Esc 让位给灯箱。
+let escHandle: EscLayerHandle | null = null;
 
 function reset(): void { selected.value = 'jpeg'; }
 function onKey(e: KeyboardEvent): void {
   if (!props.open) return;
-  if (e.key === 'Escape') { e.preventDefault(); emit('cancel'); }
+  if (e.key === 'Escape') {
+    // A9：更高层遮罩（灯箱）在场时让位——Esc 只关最上层。
+    if (escHandle && !escHandle.isTopmost()) return;
+    e.preventDefault();
+    emit('cancel');
+  }
   else if (e.key === 'Enter') { e.preventDefault(); confirm(); }
   else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); selected.value = 'png'; }
   else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); selected.value = 'jpeg'; }
@@ -29,11 +37,24 @@ function confirm(): void {
 }
 
 watch(() => props.open, (open) => {
-  if (open) { reset(); void nextTick(() => cardRef.value?.focus()); }
+  if (open) {
+    escHandle?.release();
+    escHandle = pushEscLayer(ESC_LAYER_PRIORITY.exportFormat);
+    reset();
+    void nextTick(() => cardRef.value?.focus());
+  } else {
+    escHandle?.release();
+    escHandle = null;
+  }
 });
 
 onMounted(() => window.addEventListener('keydown', onKey));
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey));
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey);
+  // A9：卸载兜底出栈（release 幂等）。
+  escHandle?.release();
+  escHandle = null;
+});
 </script>
 
 <template>

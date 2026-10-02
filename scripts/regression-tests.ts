@@ -2594,7 +2594,9 @@ function testImageLightboxAccessibilityWiring(): void {
   assert.ok(!state.includes('trigger.focus()'), '焦点恢复应由 ImageLightbox 组件单点负责，composable 只清理状态');
   assert.ok(/value\.trigger\s*\?\?/.test(lightbox), '打开灯箱时须优先保存显式 trigger');
   assert.ok(lightbox.includes('document.activeElement instanceof HTMLElement'), '无 trigger 时须回退当前 activeElement');
-  assert.ok(/else\s*\{\s*await nextTick\(\);\s*restoreFocus\(\);/.test(lightbox), '关闭后须等待 Teleport v-if 移除再恢复焦点');
+  // A9 同步（2026-09-30，5db45f7 先例最小同步）：关闭分支插入 escHandle 出栈调用（use-esc-stack），
+  // 字面窗放宽为有界任意行——语义钉不变：关闭后仍须 await nextTick 再 restoreFocus。
+  assert.ok(/else\s*\{[\s\S]{0,200}?await nextTick\(\);\s*restoreFocus\(\);/.test(lightbox), '关闭后须等待 Teleport v-if 移除再恢复焦点');
   assert.ok(lightbox.includes('target.focus()'), '关闭灯箱后组件须恢复触发图片焦点');
   assert.match(closeRule, /min-width:\s*(?:44px|2\.75rem)/, '关闭按钮须显式保证最小 44px 宽度');
   assert.match(closeRule, /min-height:\s*(?:44px|2\.75rem)/, '关闭按钮须显式保证最小 44px 高度');

@@ -8,6 +8,7 @@
 // 无侧栏文件列表 / git 状态 / 基线 / 「打开」按钮——片段意图 diff 不是文件相对 git 的净改动。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useToolDiffDialog } from '../../composables/useToolDiffDialog';
+import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 import { parseUnifiedDiff } from '../../utils/diff-parser';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import { buildSplitChunks, countChanges, countInlineHunks } from '../../utils/diff-render';
@@ -16,6 +17,15 @@ import { buildDiffSearchMatches, moveSearchIndex } from '../../utils/diff-search
 import DiffBody from '../changes/DiffBody.vue';
 
 const { state, close } = useToolDiffDialog();
+// A9：弹窗打开即注册 Esc 层（1200），关闭/卸载出栈——更高层遮罩在场时 Esc 让位。
+let escHandle: EscLayerHandle | null = null;
+watch(state, (s) => {
+  if (s && !escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.toolDiffDialog);
+  else if (!s && escHandle) {
+    escHandle.release();
+    escHandle = null;
+  }
+});
 
 const CONTEXT_OPTIONS = [3, 5, 10, 20] as const;
 type SearchScope = 'full' | 'context';
@@ -238,17 +248,25 @@ function trapTab(e: KeyboardEvent): void {
 function onKey(e: KeyboardEvent): void {
   if (!state.value) return; // 弹窗未开不响应
   if (e.ctrlKey && e.key.toLowerCase() === 'f') {
+    // P3-5（2026-10-02 对抗 review）：与 Esc 同款让位——更高层遮罩（灯箱/导出格式）在场时
+    // Ctrl+F 不抢焦开搜索框（对被遮挡、用户从未见过的弹窗搜索属不可见操作）。
+    if (escHandle && !escHandle.isTopmost()) return;
     e.preventDefault();
     void openSearch();
     return;
   }
   if (e.key === 'Escape') {
+    // A9：更高层遮罩（灯箱/导出格式）在场时让位——Esc 只关最上层。
+    if (escHandle && !escHandle.isTopmost()) return;
     e.preventDefault();
     if (searchOpen.value) closeSearch();
     else close();
     return;
   }
   if (isTextTarget(e.target)) return;
+  // P3-5：箭头跳转（gotoChange）与 Esc 同款让位——更高层遮罩在场时不改写被遮挡弹窗的
+  // 当前改动位（用户看不见的跳转）；Tab 等其余键维持原行为。
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && escHandle && !escHandle.isTopmost()) return;
   if (e.key === 'ArrowDown') {
     e.preventDefault();
     gotoChange(1);
@@ -269,6 +287,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('resize', onWindowResize);
   if (resizeTimer) clearTimeout(resizeTimer);
+  // A9：卸载兜底出栈（release 幂等）。
+  escHandle?.release();
+  escHandle = null;
 });
 </script>
 
