@@ -717,7 +717,7 @@ const updateStageTone = computed(() => {
               </label>
               <label class="field field--toggle">
                 <span class="field-label">开启队列任务</span>
-                <span class="field-desc">开启后：回复生成中可在会话框继续输入并发送，消息与附件自动加入队列，当前回复结束后按下方间隔自动逐个执行。关闭后：回复生成中禁止发送，队列不自动执行（仍可在队列面板手动「开始」）。</span>
+                <span class="field-desc">开启后：回复生成中可在会话框继续输入并发送，消息与附件自动加入队列，当前回复结束后按下方间隔自动逐个执行。关闭后：回复生成中禁止发送，队列不自动执行；重新开启后点「恢复」/「立即执行」或完成一次会话可重新调度。</span>
                 <input v-model="store.config.queueEnabled" type="checkbox" />
               </label>
               <label class="field">

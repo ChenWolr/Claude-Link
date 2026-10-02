@@ -125,7 +125,9 @@ const queueBarHint = computed<{ text: string; showResumeAll: boolean }>(() => {
       break;
   }
   if (taskStore.tasks.length > 0 && runnableCount.value === 0) {
-    return { text: '所有任务已暂停 · 点恢复/全部恢复后执行', showResumeAll: false };
+    // D09-F9：全部 pending 均暂停即存在可恢复任务——「全部恢复」随文案渲染
+    // （resumeAllTasks：resumeAllPending + armFromUserAction，对该态语义正确）。
+    return { text: '所有任务已暂停 · 点恢复/全部恢复后执行', showResumeAll: true };
   }
   return { text: '待命中', showResumeAll: false };
 });
