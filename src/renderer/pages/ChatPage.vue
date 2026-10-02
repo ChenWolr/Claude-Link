@@ -20,6 +20,8 @@ import AttachmentDraftList from '../components/chat/AttachmentDraftList.vue';
 import ExportImageOverlay from '../components/chat/ExportImageOverlay.vue';
 import type { ChatSendPayload, AttachmentSummary } from '../../shared/types/attachment';
 import { filterDraftAttachmentsByQuota, draftQuotaKindFromMime, type DraftQuotaItem } from '../../shared/draft-attachment-quota';
+import { taskEtaText } from '../../shared/queue-eta';
+import { resolveQueueDelaySeconds } from '../../shared/queue-config';
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
@@ -307,6 +309,7 @@ async function handleSend() {
   sendInflight = true;
   const sessionId = store.activeSession.id;
   let ok = false;
+  let queued = false;
 
   try {
     // v3 两路收敛：
@@ -316,6 +319,7 @@ async function handleSend() {
     const engineRunningThis = taskStore.queueState.sessionId === sessionId && taskStore.queueState.status === 'running';
     if (queueEnabled.value && (sending.value || engineRunningThis)) {
       ok = await taskStore.addTask(sessionId, payload);
+      queued = ok;
     } else {
       ok = await sendMessage(payload);
     }
@@ -325,6 +329,19 @@ async function handleSend() {
 
   if (ok) {
     draftStore.clearAfterAccepted(sessionId);
+    if (queued) {
+      // B3（D09-F7）：入队成功即时反馈——草稿清空后消息要到出队执行才出现在聊天流，
+      // 无反馈易被误读为「消息丢了」。ETA 与任务卡同源（taskEtaText 纯函数，
+      // 口径对齐 TaskQueuePanel.etaFor；addTask 返回即整体替换 tasks，末位即刚入队任务）。
+      const runnable = taskStore.tasks.filter((t) => !t.paused);
+      const eta = taskEtaText({ paused: false }, {
+        status: taskStore.queueState.status,
+        countdownRemaining: taskStore.queueState.countdownRemaining,
+        intervalSeconds: taskStore.queueState.intervalSeconds ?? resolveQueueDelaySeconds(configStore.config.taskDelayMinutes),
+        runnableIndex: runnable.length - 1,
+      });
+      showNotice(`已加入队列${eta ? `，${eta}` : ''}`);
+    }
   } else {
     // 失败：保留文字与附件草稿；错误横幅由 error / taskStore.error 承载，这里补一条 notice 兜底。
     const msg = taskStore.error || error.value;
