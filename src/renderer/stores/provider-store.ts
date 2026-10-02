@@ -4,7 +4,7 @@
 // 会话选择器显示用 resolveSessionModel（shared 纯函数）与主进程 spawn 注入同源，避免两端不一致。
 
 import { defineStore } from 'pinia';
-import type { ModelInfo, ProviderProfileView, ProviderSaveInput } from '../../shared/types/config';
+import type { ModelInfo, ProviderModel, ProviderProfileView, ProviderSaveInput } from '../../shared/types/config';
 import { resolveSessionModel, type ProviderModelSource, type ResolvedSessionModel } from '../../shared/session-model';
 
 export const useProviderStore = defineStore('provider', {
@@ -82,6 +82,24 @@ export const useProviderStore = defineStore('provider', {
       const view = await window.claudeLink.restoreProvider();
       await this.load();
       return view;
+    },
+    // A5（D02-F1）：模型列表写时重算——fn 在保存执行时刻基于 store 最新 models 应用（而非
+    // 调用方点击时的快照），整表替换语义下串行链交错的「后写」不再覆盖「先写」。fn 收到的是
+    // 去代理纯数组（IPC 结构化克隆安全）；档案字段（name/note/apiBaseUrl）同刻现取最新，
+    // 与编辑保存并发时不回盖其他字段。
+    async updateProviderModels(
+      providerId: string,
+      fn: (latest: ProviderModel[]) => ProviderModel[],
+    ): Promise<ProviderProfileView> {
+      const latest = this.providers.find((p) => p.id === providerId);
+      const models = fn(JSON.parse(JSON.stringify(latest?.models ?? [])) as ProviderModel[]);
+      return this.save({
+        id: providerId,
+        name: latest?.name ?? '',
+        note: latest?.note,
+        apiBaseUrl: latest?.apiBaseUrl ?? '',
+        models,
+      });
     },
     async queryModels(providerId: string, forceRefresh = false): Promise<ModelInfo[]> {
       return window.claudeLink.queryProviderModels(providerId, forceRefresh);
