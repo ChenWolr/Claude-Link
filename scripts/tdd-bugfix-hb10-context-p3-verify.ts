@@ -6,7 +6,7 @@
 import { strict as assert } from 'node:assert';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { lookupUserContextWindow } from '../src/shared/model-context-windows';
+import { lookupProviderModelContextWindow } from '../src/shared/model-context-windows';
 
 const repoRoot = path.resolve(__dirname, '..');
 const read = (rel: string): string => fs.readFileSync(path.join(repoRoot, rel), 'utf8');
@@ -29,12 +29,12 @@ check('① CTX-01：computeContextWindowOverrideTokens 单源 + 探针 env 补�
   assert.match(backend, /hb10-CTX-01：探针窗口与生产一致/, '探针注入缺标注');
 });
 
-// ② CTX-02：分母单源。
-check('② CTX-02：contextStats 分母改 resolveContextWindowForSession（模型 ID 会话反查）', () => {
+// ② CTX-02：分母单源（按模型覆盖改造后：per-model 条目查询）。
+check('② CTX-02：contextStats 分母切 per-model 条目查询（lookupProviderModelContextWindow）', () => {
   const idx = sessionStore.indexOf('contextStats(state)');
   const body = sessionStore.slice(idx, idx + 1200);
-  assert.match(body, /resolveContextWindowForSession\(/, 'getter 缺单源函数');
-  assert.match(body, /advancedJson: useConfigStore\(\)\.config\.advancedJson/, '缺 advancedJson 入参');
+  assert.match(body, /lookupProviderModelContextWindow\(/, 'getter 缺 per-model 单源查询');
+  assert.match(body, /useProviderStore\(\)\.resolve\(/, '缺 provider-store 解析数据源');
 });
 
 // ③ CTX-03 收窄。
@@ -81,25 +81,31 @@ check('⑦ CTX-V02：buildPersistedCanonical 预填 source 改 unavailable', () 
   assert.doesNotMatch(body, /source: 'native-context'/, '预填仍伪装 native-context');
 });
 
-// ⑪ hb13-v B7（F-1）：分母优先级恢复「用户 contextWindowByAlias 覆盖 > contextLastWindow > 默认」。
+// ⑪ hb13-v B7（F-1）：分母优先级「供应商库 per-model 手动覆盖 > contextLastWindow > 默认 200k」。
 check('⑪ B7/F-1：用户 1M 覆盖不被 SDK 200k 上报短路（纯函数行为 + getter 接线顺序）', () => {
-  // 行为级（真实共享纯函数）：用户按别名显式覆盖（含 advancedJson 反查路径）必须命中。
+  // 行为级（真实共享纯函数）：模型条目显式覆盖必须命中；等价三态（条目未设/他模型/null
+  // models=无 provider 解析）不得伪造成覆盖。
   assert.equal(
-    lookupUserContextWindow({ aliasOrModel: 'sonnet', advancedJson: '', contextWindowByAlias: { sonnet: 1_000_000 } }),
+    lookupProviderModelContextWindow([{ id: 'glm-4.6', contextWindow: 1_000_000 }], 'glm-4.6'),
     1_000_000,
-    'lookupUserContextWindow 未命中显式覆盖',
+    'lookupProviderModelContextWindow 未命中显式覆盖',
   );
   assert.equal(
-    lookupUserContextWindow({ aliasOrModel: 'sonnet', advancedJson: '', contextWindowByAlias: {} }),
+    lookupProviderModelContextWindow([{ id: 'glm-4.6' }], 'glm-4.6'),
     undefined,
-    '未配置时必须返回 undefined（不得伪造成覆盖）',
+    '条目未设置时必须返回 undefined（不得伪造成覆盖）',
   );
-  // getter 接线：组合顺序 userOverride ?? contextLastWindow ?? resolve——拒绝 contextLastWindow
+  assert.equal(
+    lookupProviderModelContextWindow(null, 'glm-4.6'),
+    undefined,
+    '无 provider 解析（遗留别名会话）必须返回 undefined',
+  );
+  // getter 接线：组合顺序 userOverride ?? contextLastWindow ?? 200_000——拒绝 contextLastWindow
   // 提到 ?? 左侧的优先级反转形态（hb12-CTX-01 实施引入的回归）。
   const idx = sessionStore.indexOf('contextStats(state)');
   const body = sessionStore.slice(idx, idx + 1800);
-  assert.match(body, /userOverride \?\? state\.contextLastWindow \?\? resolveContextWindowForSession\(/, '分母组合顺序不符（F-1 反转形态残留）');
-  assert.match(body, /lookupUserContextWindow\(/, 'getter 缺用户覆盖探测');
+  assert.match(body, /userOverride \?\? state\.contextLastWindow \?\? 200_000/, '分母组合顺序不符（F-1 反转形态残留）');
+  assert.match(body, /lookupProviderModelContextWindow\(/, 'getter 缺用户覆盖探测');
 });
 
 // ⑫ hb13-v B7（F-2）：estimated turn-usage 窗口「只增不减」主进程面（下发+落库同值）。

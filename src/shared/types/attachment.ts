@@ -77,3 +77,12 @@ export interface SendMessageResult {
   messageId: string;
   attachments: AttachmentSummary[];
 }
+
+/**
+ * A11（D08-F1）：克隆消息附件为草稿的返回——余量内逐个克隆成功的草稿 + 超量被拒名单
+ * （rejected 只含 filename 与 reason，不进任何落盘链路；调用方据此 notice 提示）。
+ */
+export interface CloneMessageAttachmentsResult {
+  created: AttachmentSummary[];
+  rejected: Array<{ filename: string; reason: string }>;
+}

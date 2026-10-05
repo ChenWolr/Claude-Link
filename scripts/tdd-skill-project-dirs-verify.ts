@@ -376,10 +376,11 @@ try {
 }
 
 // ⑨ ipc-handlers.ts：SKILL_PROJECT_DIRS_GET 注册 + 三源形态（R-1 起 await collectSkillProjectDirs）
+// 窗口 700→800：A10（D07-F2）homedir→effectiveUserHome 修复带 3 行机理注释（5db45f7 最小同步，断言语义不变）。
 {
   const src = readRel('src/main/ipc-handlers.ts');
   const at = src.indexOf('ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
-  const region = at >= 0 ? src.slice(at, at + 700) : '';
+  const region = at >= 0 ? src.slice(at, at + 800) : '';
   const sub: string[] = [];
   if (at < 0) sub.push('缺 SKILL_PROJECT_DIRS_GET handler 注册');
   else {

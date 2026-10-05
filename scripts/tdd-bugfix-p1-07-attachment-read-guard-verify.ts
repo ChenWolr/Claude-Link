@@ -28,8 +28,10 @@ check('① policy 导出共享守卫常量 ATTACHMENT_READ_GUARD_BYTES = 32MiB',
   /export const ATTACHMENT_READ_GUARD_BYTES = 32 \* 1024 \* 1024;/.test(policy));
 
 // ATTACHMENT_PICK 循环体：stat 守卫在 readFile 之前。
+// 锚更新（A11/D08-F1 5db45f7 最小同步）：循环头改遍历余量预检后的 filePaths 局部列表
+// （旧 result.filePaths 直遍历随「本次 ≤10 截断→草稿余量预检」整改废止），stat 守卫语义不变。
 const pickAt = ipc.indexOf('IPC_CHANNELS.ATTACHMENT_PICK');
-const loopAt = ipc.indexOf('for (const filePath of result.filePaths)', pickAt);
+const loopAt = ipc.indexOf('for (const filePath of filePaths)', pickAt);
 const loopBody = ipc.slice(loopAt, ipc.indexOf('return { attachments, errors }', loopAt));
 check('② 主进程读前 stat 守卫（stat 先于 readFile，超限抛既有形态错误）',
   loopBody.includes('await fsp.stat(filePath)') &&

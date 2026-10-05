@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
+import { useHoldAction } from '../../composables/use-hold-action';
 import { formatCompactionSummary } from '../../../shared/context-usage';
 
 const props = withDefaults(defineProps<{ disabled?: boolean }>(), { disabled: false });
@@ -98,85 +99,28 @@ const compactSummary = computed(() =>
 const compactBannerTitle = computed(() => compactSummary.value.title);
 
 // 长按压缩：按住圈圈 1 秒，红色进度环从 0 画满一圈后触发 /compact（等同旧「点击压缩」行为）。
-// 单击不再触发压缩；只有按满 1 秒才执行，中途松开/移出即取消。
-const HOLD_DURATION_MS = 1000;
-const holding = ref(false);
-const holdProgress = ref(0); // 0–100，驱动红色进度环 stroke-dasharray
-let holdStart = 0;
-let holdRaf = 0;
-let holdDoneTimer: ReturnType<typeof setTimeout> | null = null;
+// 单击不再触发压缩；只有按满 1 秒才执行，中途松开/移出/失焦即取消。
+// A6（D04-F1）：迁移到 useHoldAction composable（1:1 对齐 SessionToolbar 中断按钮接线）——
+// 获得窗口失焦（Alt+Tab）取消、按钮 blur 取消、键盘 Space/Enter 长按与卸载清理；旧自管
+// rAF/定时器/指针捕获/坐标判定全部移交 composable（缺失失焦取消曾致长按中切窗
+// 松手误发不可撤销的 /compact）。指针模板绑定形态不变（P2-20 契约面）。
+const {
+  holding,
+  holdProgress,
+  onPointerDown: startHold,
+  onPointerMove: moveHold,
+  onPointerUp: endHold,
+  onKeydown: onHoldKeydown,
+  onKeyup: onHoldKeyup,
+  onBlur: onHoldBlur,
+  resetHold,
+} = useHoldAction(() => emit('compress'));
 
-function startHold(e: PointerEvent) {
-  if (e.button !== 0 || props.disabled) return;
-  // P2-20（注释模型修正）：捕获指针使 pointerup/pointermove 在指针滑出按钮后仍派发到本按钮
-  //（Pointer Events 规范：捕获期间 pointerleave 被抑制——此前注释宣称「捕获触发隐式
-  // leave」是错的）。滑出取消改由 moveHold/endHold 的边界判定显式实现；capture 失败（旧环境）
-  // 静默降级为原行为（无捕获时滑出后松手事件丢失，pointerleave 兜底取消）。
-  try {
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  } catch {
-    /* no-op */
-  }
-  holding.value = true;
-  holdProgress.value = 0;
-  holdStart = performance.now();
-  const tick = () => {
-    const elapsed = performance.now() - holdStart;
-    const p = Math.min(100, (elapsed / HOLD_DURATION_MS) * 100);
-    holdProgress.value = p;
-    if (p >= 100) {
-      // 红线刚好画满一圈 → 触发压缩（等同 /compact）；完整红圈停留 150ms 再复位，让用户看清画满。
-      holdProgress.value = 100;
-      holdRaf = 0;
-      emit('compress');
-      if (holdDoneTimer) clearTimeout(holdDoneTimer);
-      holdDoneTimer = setTimeout(resetHold, 150);
-      return;
-    }
-    holdRaf = requestAnimationFrame(tick);
-  };
-  holdRaf = requestAnimationFrame(tick);
-}
+// A6（D04-F1）：sending 翻转取消——长按进行中回合开跑（disabled=sending 翻 true）即取消
+// 长按，满 1s 不再 emit('compress')。与 SessionToolbar 中断按钮的 sending watch 同源同语义
+//（resetHold 幂等：未持有时 no-op；恰逢满时长已完成时清掉 doneTimer 不二次触发）。
+watch(() => props.disabled, (v) => { if (v) resetHold(); });
 
-function resetHold() {
-  if (holdRaf) { cancelAnimationFrame(holdRaf); holdRaf = 0; }
-  if (holdDoneTimer) { clearTimeout(holdDoneTimer); holdDoneTimer = null; }
-  holding.value = false;
-  holdProgress.value = 0;
-}
-
-/** P2-20：指针是否已滑出按钮边界（clientX/Y 与 rect 比对）。捕获期间 leave 不触发，
- *  滑出判定只能靠坐标。 */
-function isPointerOutside(e: PointerEvent): boolean {
-  const el = e.currentTarget as HTMLElement | null;
-  if (!el) return false;
-  const rect = el.getBoundingClientRect();
-  return e.clientX < rect.left || e.clientX > rect.right
-    || e.clientY < rect.top || e.clientY > rect.bottom;
-}
-
-/** P2-20：捕获期间 pointermove 仍派发——滑出按钮即取消长按（杀掉「滑出后继续按住满 1s
- *  误发 /compact」的根因；捕获使隐式 pointerleave 失效，坐标判定是唯一可靠出口）。 */
-function moveHold(e: PointerEvent) {
-  if (!holding.value) return;
-  if (isPointerOutside(e)) resetHold();
-}
-
-/** P2-20：pointerup——指针滑出边界 → resetHold 取消（不压缩）；未滑出 → 维持既有完成语义
- *  （进度已满的 150ms 收尾窗口 / 未满即取消）。显式释放捕获，对鼠标拖出场景更干净。 */
-function endHold(e: PointerEvent) {
-  const outside = isPointerOutside(e);
-  try {
-    (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-  } catch {
-    /* 捕获已隐式释放/未捕获 */
-  }
-  if (outside) {
-    resetHold();
-    return;
-  }
-  resetHold();
-}
 </script>
 
 <template>
@@ -192,6 +136,9 @@ function endHold(e: PointerEvent) {
       @pointerup="endHold"
       @pointerleave="resetHold"
       @pointercancel="resetHold"
+      @keydown="onHoldKeydown"
+      @keyup="onHoldKeyup"
+      @blur="onHoldBlur"
     >
       <!-- 圆环可视化：底圈=未占用(整环)，扇形弧=已占用。无可信当前窗口(pct=0)时只显示空底圈。 -->
       <svg class="ctx__ring" viewBox="0 0 36 36" aria-hidden="true">

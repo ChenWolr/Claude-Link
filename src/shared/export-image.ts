@@ -415,7 +415,12 @@ export function deriveMaxPageHeightCss(scaleY: number, contentWidthCss: number):
   const physicalWidth = Math.round(contentWidthCss * scaleY);
   const heightByPixels = Math.floor(PIXEL_COUNT_MAX / Math.max(1, physicalWidth));
   const heightByDim = PIXEL_DIMENSION_MAX;
-  return Math.max(480, Math.min(heightByPixels, heightByDim));
+  // P2-2（2026-10-02 对抗 review）：heightByPixels/heightByDim 均为物理像素高，须 ÷scaleY
+  // 转 CSS 再返回（与 deriveMaxPageHeightByMemory 末行同法）——漏除时物理值被消费方
+  // （export-runner 的 JPEG hardCap）当 CSS 上限，DPR>1 屏（1.25）放行页物理像素
+  // = 24M×1.25 超预算，漏到捕获期 checkPixelBudget 迟失败（恰是 A15 要消除的压线漏放）。
+  // DPR=1 时两值一致，行为零回归。
+  return Math.max(480, Math.floor(Math.min(heightByPixels, heightByDim) / scaleY));
 }
 
 /** v4.1 PNG：按内存预算反推单页 CSS 高度上限（替代 canvas 像素预算）。 */
@@ -630,6 +635,28 @@ export function computeProgressPercent(
   if (totalSteps <= 0) return 0;
   const pct = Math.round((completedSteps / totalSteps) * 100);
   return Math.max(0, Math.min(100, pct));
+}
+
+/** B4（D13-F2）：renderer 侧按「已完成段数/总段数」估算进度。report() 每段调用一次，
+ *  数据（page/totalPages/segment/segmentsInPage）已在进度 payload 中；总段数用
+ *  totalPages×segmentsInPage 近似（页高不均时略偏差，进度条为近似展示）。
+ *  planning/preparing → -1（store indeterminate 分支消费）；done → 100；
+ *  capturing/encoding 单调推进但封顶 99——终态 100 由 manager done 分支显式发出，
+ *  防「100% 还在跑」。非法入参（无页/无段/负数）钳 0。 */
+export function estimateExportPercent(
+  phase: ExportImagePhase,
+  page: number,
+  totalPages: number,
+  segment: number,
+  segmentsInPage: number,
+): number {
+  if (phase === 'planning' || phase === 'preparing') return -1;
+  if (phase === 'done') return 100;
+  if (totalPages <= 0 || segmentsInPage <= 0) return 0;
+  const done = Math.max(0, page - 1) * segmentsInPage + Math.max(0, segment);
+  const total = totalPages * segmentsInPage;
+  const pct = Math.round((done / total) * 100);
+  return Math.max(0, Math.min(99, pct));
 }
 
 /** 迟到事件过滤：jobId 与当前 job 不符 → 丢弃。 */

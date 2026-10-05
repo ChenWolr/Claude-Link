@@ -21,7 +21,6 @@ import { isApiErrorAssistantText } from '../../shared/api-error-text';
 import { isReasoningReplayApiError } from '../../shared/upstream-errors';
 import { noteReasoningReplayError } from './reasoning-replay-auto-retry';
 import { isErrorCliResult } from '../../shared/session-completion';
-import { resolveContextWindowForSession } from '../../shared/model-context-windows';
 import { applySessionOverrideEnv } from '../../shared/session-model';
 
 export interface SpawnOptions {
@@ -410,20 +409,4 @@ export function persistMessageParts(
       logger.warn(`[persistMessageParts] 未识别的 content block 类型，已跳过：${(part as { type: string }).type}`);
     }
   }
-}
-
-// 与 sdk-backend.readContextWindow 同逻辑：按别名/真实模型名查用户设的覆盖，否则 200k。
-// 本函数当前无调用者（process-manager spawn 路径已移除），保留 export 供未来 spawn CLI 路径复用。
-export function readContextWindow(aliasOrModel?: string | null): number {
-  try {
-    const config = getConfig();
-    return resolveContextWindowForSession({
-      aliasOrModel: aliasOrModel ?? null,
-      advancedJson: config.advancedJson,
-      contextWindowByAlias: config.contextWindowByAlias,
-    });
-  } catch {
-    // ignore
-  }
-  return 200000;
 }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 import type {
   InteractionPromptOption,
   InteractionPromptPayload,
@@ -371,7 +372,21 @@ async function submit(optionId?: string): Promise<void> {
   const request = activeRequest.value;
   if (!request || submittingId.value === request.id) return;
   if (optionId) toggleOption(optionId);
-  const ids = optionId && !currentMultiSelect.value ? [optionId] : Array.from(selectedIds.value);
+  let ids = optionId && !currentMultiSelect.value ? [optionId] : Array.from(selectedIds.value);
+  // B5（D06-F2）：Enter 兜底（单选形态）——权限弹窗等刻意不预选（防回车误提交），但聚焦环
+  // 明确落在某选项时 Enter 视为对该项的提交意图（listbox 惯例）。除局部 ids 外同步写回
+  // selectedIds（P2-1，2026-10-02 对抗 review）：wizard 的 persistCurrentQuestionAnswer 读
+  // selectedIds 落账 questionAnswers，只写局部 ids 会把该题记成 selectedOptionIds: []（静默
+  // 空答案）；「不预选」指初始态不预选（optionDefaults 空集、Esc/取消语义不变），写回发生在
+  // 提交路径、不复活误触面；多选维持空集早退（空格才是选择键）。
+  if (
+    !ids.length && !optionId && !currentMultiSelect.value &&
+    !hasStructuredForm.value && !hasTextInput.value && request.kind !== 'confirm' &&
+    focusedOption.value
+  ) {
+    ids = [focusedOption.value.id];
+    selectedIds.value = new Set(ids);
+  }
   if (!ids.length && !hasStructuredForm.value && !hasTextInput.value && request.kind !== 'confirm') return;
   if (ids.includes(OTHER_OPTION_ID) && !otherText.value.trim()) {
     await nextTick();
@@ -452,8 +467,26 @@ function move(delta: number): void {
 }
 
 function focusDialogStart(): void {
-  const first = dialogRef.value?.querySelector<HTMLElement>('[data-dialog-initial-focus]');
-  first?.focus();
+  // B5 补修（核验·遮挡组合回归）：更高层遮罩（灯箱 9999/导出格式 9000）在场时不抢占 DOM
+  // 焦点——弹窗渲染于 z-1200 之下被完全遮挡、用户从未见过，抢焦会把键盘焦点从用户当前
+  // 所见层（灯箱关闭按钮等）劫进不可见弹窗，后续 Enter 经 submit 兜底会静默提交首项
+  // （权限首项=允许本次）。让位判据与 A9 的 Esc 让位同源（escHandle.isTopmost）；
+  // 遮罩关闭后打开的新弹窗/队列前进仍走下方正常聚焦。
+  if (escHandle && !escHandle.isTopmost()) return;
+  // B5（D06-F2）：跳过 disabled 候选——权限弹窗刻意不预选（optionDefaults 空集）时提交按钮
+  // 禁用，对禁用按钮 focus() 是 no-op、真实焦点留在遮罩之外（Tab 逃逸 + Enter 无反应）。
+  const candidates = dialogRef.value?.querySelectorAll<HTMLElement>('[data-dialog-initial-focus]');
+  if (candidates) {
+    for (const el of candidates) {
+      if (!(el as HTMLButtonElement).disabled) {
+        el.focus();
+        return;
+      }
+    }
+  }
+  // 回落：选项列表第一项获得真实 DOM 焦点（focusedIndex 初始为 0，焦点环与 DOM 焦点一致；
+  // listbox 惯例——Enter 由 submit 的 focusedOption 兜底提交该聚焦项）。无选项形态保持现状。
+  dialogRef.value?.querySelector<HTMLElement>('.interaction-option')?.focus();
 }
 
 function trapTab(event: KeyboardEvent): void {
@@ -463,10 +496,14 @@ function trapTab(event: KeyboardEvent): void {
   if (!focusables.length) return;
   const first = focusables[0];
   const last = focusables[focusables.length - 1];
-  if (event.shiftKey && document.activeElement === first) {
+  // B5（D06-F2）：收紧为「模态内循环」——初始焦点落空（activeElement 仍在 body/遮罩外）时
+  // Tab 直接拉回模态首元素，不再按默认 DOM 序逃出 aria-modal 对话框（WCAG 2.4.3）。
+  const active = document.activeElement;
+  const outside = !dialog.contains(active);
+  if (event.shiftKey && (active === first || outside)) {
     event.preventDefault();
     last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
+  } else if (!event.shiftKey && (active === last || outside)) {
     event.preventDefault();
     first.focus();
   }
@@ -475,6 +512,16 @@ function trapTab(event: KeyboardEvent): void {
 function handleKeydown(event: KeyboardEvent): void {
   if (!activeRequest.value) return;
   if (isTextEntryTarget(event.target)) return;
+  // B5 补修（核验·遮挡组合回归）：更高层遮罩在场时操作键整体让位——被遮挡、用户从未见过
+  // 的弹窗不得被 Enter（submit 兜底会静默提交聚焦首项，权限首项=允许本次，误授权比 A9
+  // 设防的误 deny 危害更大）、箭头/空格（move/toggle 改写隐藏选择）、Tab（trapTab 拉焦）
+  // 触碰；判据与 A9 的 Esc 让位同源，Esc 分支守卫保留原位（见下方 Escape 分支）。
+  // 无更高层时零行为变化。
+  if (
+    (event.key === 'Tab' || event.key === 'ArrowDown' || event.key === 'ArrowUp'
+      || event.key === 'Enter' || event.key === ' ')
+    && escHandle && !escHandle.isTopmost()
+  ) return;
   if (event.key === 'Tab') {
     trapTab(event);
     return;
@@ -489,6 +536,9 @@ function handleKeydown(event: KeyboardEvent): void {
     event.preventDefault();
     void submit();
   } else if (event.key === 'Escape') {
+    // A9（D06-F1）：更高层遮罩（灯箱/导出格式）在场时让位——不 preventDefault、不 cancel，
+    // 防被遮挡且用户从未见过的弹窗按「用户拒绝」收口。无更高层时行为与现状一致。
+    if (escHandle && !escHandle.isTopmost()) return;
     event.preventDefault();
     // alert 模式（kind:'confirm' 且只有 confirm 一个选项）Esc 视为"知道了"→提交确定，
     // 与原 ConfirmDialog 的 alert 行为一致；其余 confirm/选择题 Esc→取消。
@@ -551,6 +601,17 @@ void window.claudeLink.getPendingInteractions().then((pending) => {
   for (const request of pending) enqueue(request);
 });
 window.addEventListener('keydown', handleKeydown);
+
+// A9（D06-F1/D14-F5）：交互弹窗可见期间注册 Esc 层（1200）——更高层遮罩（灯箱 9999/导出格式
+// 9000）在场时 Esc 分支让位，Esc 只关最上层，防「用户从未见过的弹窗被按 Esc 误 deny」。
+let escHandle: EscLayerHandle | null = null;
+watch(activeRequest, (req) => {
+  if (req && !escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.interaction);
+  else if (!req && escHandle) {
+    escHandle.release();
+    escHandle = null;
+  }
+});
 
 // V3-3：交互历史持久化——跟随当前会话加载历史，切换会话时刷新。
 // 用自增 token 防竞态：快速切会话 A→B 时，若 A 的 IPC 响应晚于 B 返回，
@@ -623,6 +684,9 @@ onBeforeUnmount(() => {
   cleanupCancel?.();
   window.removeEventListener('keydown', handleKeydown);
   window.removeEventListener('pointermove', onDragMove);
+  // A9：卸载兜底出栈（release 幂等）。
+  escHandle?.release();
+  escHandle = null;
   // V3-2：清理 pending 本地请求（requestConfirm），避免 Promise 永挂。
   interactionStore.cleanupLocalRequests();
 });

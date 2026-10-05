@@ -15,7 +15,7 @@ import {
   type SessionDisplayStatus,
   type SessionStatus,
 } from '../../shared/session-display-status';
-import { lookupUserContextWindow, resolveContextWindowForSession } from '../../shared/model-context-windows';
+import { lookupProviderModelContextWindow } from '../../shared/model-context-windows';
 import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../../shared/context-usage';
 import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';
 import { computeTurnStartIndex } from '../../shared/turn-boundary';
@@ -134,6 +134,8 @@ function buildPersistedCanonical(session: Session): CanonicalContextState | null
 // 重新置入（AppSidebar 常驻消费，不可见过滤器变体）。发起新查询即换代，晚到旧结果/旧失败
 // 一律丢弃。
 let searchSessionsRequestId = 0;
+// A3（D01-F2/D12-F4）：桥接建会话信号的去抖计时器（模块级，非持久状态）。
+let bridgeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useSessionStore = defineStore('session', {
   state: () => ({
@@ -158,6 +160,9 @@ export const useSessionStore = defineStore('session', {
     runningSessions: [] as string[],
     // per-session 流式快照。切换会话时保存当前流式内容到快照，切回时恢复。
     sessionStreams: {} as Record<string, { content: string; thinking: string; tool: string }>,
+    // A3（D01-F2/D12-F4）：本运行期「已见会话」id 集合（loadSessions 全量、物化入库、use-chat
+    // 守卫放行三处播种，只增不减——删除不摘除，正是「已见消失」的判据数据源；重启随进程清零）。
+    knownSessionIds: {} as Record<string, true>,
     recentWorkspaces: [] as string[],
     // 右侧活动栏筛选：'all'（默认）/ 'plan' / 'queue' / 'subagent' / 'background' / 'changes'。
     // 演进自旧 rightTab 互斥 Tab——保留字段名与 'changes'/'background' 等字面量，仅新增 'all' 默认。
@@ -173,8 +178,8 @@ export const useSessionStore = defineStore('session', {
     //（队列回合经 task-store 调 recomputeTurnStartIndex）、运行中会话切回时按共享口径重算。
     turnStartIndex: 0,
     // 当前活动会话最近一次 SDK 上报的真实窗口。contextStats getter 分母回退链的第二级
-    //（用户 contextWindowByAlias 覆盖 > 本值 > resolveContextWindowForSession 默认 200k，
-    // 见 hb13-v B7/F-1）；切会话时从 session.lastContextWindow 初始化，收 usage 回调时用 payload 覆盖。
+    //（供应商库 per-model 手动覆盖 > 本值 > 默认 200k，见 hb13-v B7/F-1）；切会话时从
+    // session.lastContextWindow 初始化，收 usage 回调时用 payload 覆盖。
     contextLastWindow: null as number | null,
     // Task 9：canonical 上下文占用（当前窗口 + turn usage + source/freshness/diagnostic）。
     // 单一真相源：ContextButton 只读这里；切换会话时预填持久化 stale 快照（无持久化值才置 null → pending），会话内新 payload 到达即覆盖。
@@ -229,6 +234,9 @@ export const useSessionStore = defineStore('session', {
     // 外层 key=sessionId，内层 key=parentAgentId → 累积思考文本。子 Agent Tab 据此在思考中显示
     // ThinkingBlock；该子 agent 的 message 到达（完整思考落库）或回合结束时清除，避免与落库重复。
     subAgentStreamingThinking: {} as Record<string, Record<string, string>>,
+    // A1（D05-F1）：子 agent 实时正文快照（sessionId → agentId → 文本）。text_delta 按
+    // parentToolUseId 路由进来（与 thinking 同法），主流程 streamingContent 只留主流程正文。
+    subAgentStreamingText: {} as Record<string, Record<string, string>>,
     // 会话侧栏状态灯基础终态：'running'（闪烁黄灯）| 'completed'（静态绿灯）|
     // 'network_interrupted'（静态红灯，retry 真正耗尽）。按 sessionId。
     // 未出现在映射中的会话为 idle（无状态点）——已有会话首次加载不会错误亮灯。
@@ -292,27 +300,28 @@ export const useSessionStore = defineStore('session', {
       if (!state.activeSession) return {};
       return state.subAgentStreamingThinking[state.activeSession.id] ?? {};
     },
+    // A1（D05-F1）：当前活动会话的子 agent 实时正文映射（agentId → 文本）。TaskQueuePanel 据此渲染流式正文预览。
+    activeSubAgentText(state): Record<string, string> {
+      if (!state.activeSession) return {};
+      return state.subAgentStreamingText[state.activeSession.id] ?? {};
+    },
     // 上下文统计（Task 9）：从 canonicalContext 派生。圆环只读当前窗口可信值；
     // turn usage 仅作参考。无可信当前窗口时 currentUsedTokens/currentPercent 为 null（pending）。
     contextStats(state): ContextStatsView | null {
       if (!state.activeSession) return null;
-      const alias = state.activeSession.modelOverride || state.activeSession.model;
-      // hb10-CTX-02：分母单源化——resolveContextWindowForSession（与主进程 spawn 同源
-      // 的纯函数）替换 byAlias 直查，模型 ID 会话（反查别名）分母不再恒 200k。
-      // hb13-v B7（F-1）：分母优先级恢复「用户 contextWindowByAlias 覆盖 > contextLastWindow
-      // > 默认 200k」（HEAD 契约顺序）——旧实现把 contextLastWindow 提到 ?? 左侧，SDK 误报
-      // 200k 会短路用户 1M 覆盖。lookupUserContextWindow（别名直查 + advancedJson 反查，
-      // 与主进程注入同源）非 undefined 即用户显式覆盖，优先于上报值。
-      const userOverride = lookupUserContextWindow({
-        aliasOrModel: alias,
-        advancedJson: useConfigStore().config.advancedJson,
-        contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
+      // hb10-CTX-02 / hb13-v B7（F-1）：分母优先级「供应商库 per-model 手动覆盖 > contextLastWindow
+      // （SDK 上报）> 默认 200k」——userOverride 经 lookupProviderModelContextWindow 在当回合实际
+      // 连接的供应商模型条目上查（provider-store.resolve 与主进程 spawn 注入同一 resolveSessionModel
+      // 单源），非 undefined 即用户显式覆盖，优先于上报值；旧实现把 contextLastWindow 提到 ?? 左侧，
+      // SDK 误报 200k 会短路用户 1M 覆盖。activeSession.model 为遗留别名（无 provider 解析）时
+      // resolved 无 provider → userOverride=undefined → SDK 上报 > 200k（存量 env 值已由启动迁移
+      // 移植到模型条目，属预期行为）。
+      const resolved = useProviderStore().resolve({
+        providerOverride: state.activeSession.providerOverride ?? null,
+        modelOverride: state.activeSession.modelOverride ?? null,
       });
-      const windowSize = userOverride ?? state.contextLastWindow ?? resolveContextWindowForSession({
-        aliasOrModel: alias,
-        advancedJson: useConfigStore().config.advancedJson,
-        contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
-      });
+      const userOverride = lookupProviderModelContextWindow(resolved?.provider?.models ?? null, resolved?.modelId ?? null);
+      const windowSize = userOverride ?? state.contextLastWindow ?? 200_000;
       const c = state.canonicalContext;
       // review-v2 证据缺口 3：turn usage 只读 canonicalContext，不再回落旧 contextUsage state。
       return {
@@ -337,6 +346,8 @@ export const useSessionStore = defineStore('session', {
     async loadSessions() {
       try {
         this.sessions = await window.claudeLink.listSessions();
+        // A3：播种已见集合（幽灵守卫收窄的「已见消失」判据数据源）。
+        for (const s of this.sessions) this.knownSessionIds[s.id] = true;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '加载会话失败';
       }
@@ -346,6 +357,17 @@ export const useSessionStore = defineStore('session', {
         this.searchResults = null;
         this.searchQuery = '';
       }
+    },
+    // A3（D01-F2/D12-F4）：桥接运行期自动建会话信号（BRIDGE_SESSIONS_UPSERTED）处理入口。
+    // 500ms 去抖后重拉会话列表——连发消息/多次建会话合并为一次全量刷新，新会话 ≤1s 进侧栏；
+    // 只替换列表不动选中态（loadSessions 语义即「不覆盖 activeSession」）；桥接关闭时主进程
+    // 不广播，此处天然静默。
+    markBridgeSessionUpserted(_sessionId: string): void {
+      if (bridgeRefreshTimer) clearTimeout(bridgeRefreshTimer);
+      bridgeRefreshTimer = setTimeout(() => {
+        bridgeRefreshTimer = null;
+        void this.loadSessions();
+      }, 500);
     },
     // hb10-SMG-03/V02：就地更新某会话字段（sessions 与 searchResults 双列表同步）——
     // 主题回调/改名等轻量刷新走这里，不再整表 reload（避免搜索态被清/列表闪烁）。
@@ -460,6 +482,8 @@ export const useSessionStore = defineStore('session', {
           bindTransientAttachmentIds: draftIds,
         });
         this.sessions.unshift(session);
+        // A3：物化入库播种已见集合（新 id 即刻成为守卫判据的已知会话）。
+        this.knownSessionIds[session.id] = true;
         // 物化成功：单例暂态退场（下次「新会话」= 全新空白暂态，B6）。
         this.transientDraft = null;
         // M8 配套：物化后该 id 不再是暂态——先注销登记再 load，load() 恢复未过滤原语义
@@ -572,6 +596,7 @@ export const useSessionStore = defineStore('session', {
       delete this.apiRetryInfo[id];
       delete this.apiRetryTerminalFallback[id];
       delete this.subAgentStreamingThinking[id];
+      delete this.subAgentStreamingText[id];
       // 原生 Slash Commands：清理命令快照（与 UI 同步移除；失败回滚不恢复——主进程 markSessionDeleted
       // 已清 registry，切回该会话时 load 重建）。
       useCommandStore().clear(id);
@@ -596,6 +621,10 @@ export const useSessionStore = defineStore('session', {
       planStore.clearSession(id);
       try {
         await window.claudeLink.deleteSession(id);
+        // B11（D01-F6）：删除终态同步清草稿——文字草稿与附件摘要登记（暂态附件内存态）随会话
+        // 一并连 key 移除。暂态会话物化沿用同一 id（createSession 的 id 参数），暂态 id/会话 id
+        // 两种键形态同 key 一次覆盖；仅在成功路径调用，失败（catch 回滚）不动草稿。
+        useChatDraftStore().discardDraft(id);
       } catch (error) {
         // IPC 失败回滚——只恢复静态、仍然真实的状态：列表/搜索/活动会话与其消息、
         // plan、completed/network_interrupted 终态（及常红对应 fallback）。
@@ -848,9 +877,9 @@ export const useSessionStore = defineStore('session', {
         if (this.activeSession?.id !== payload.sessionId) return;
 
         // 真实窗口容量交给 state（provenance）；windowSize/percent 由 contextStats getter 派生。
-        // hb13-v B7（F-1 注释面同步）：getter 分母优先级为「用户 contextWindowByAlias 覆盖
-        //（lookupUserContextWindow 别名直查+advancedJson 反查）> 本值（contextLastWindow 上报）
-        // > 默认 200k」——payload.windowSize（SDK 上报）只是第二级，不再覆盖用户设置的 1M。
+        // hb13-v B7（F-1 注释面同步）：getter 分母优先级为「供应商库 per-model 手动覆盖
+        //（lookupProviderModelContextWindow 当回合实际连接的模型条目直查）> 本值（contextLastWindow
+        // 上报）> 默认 200k」——payload.windowSize（SDK 上报）只是第二级，不再覆盖用户设置的 1M。
         this.contextLastWindow = payload.windowSize;
         // Task 9：canonical 单一真相源。当前窗口主值只读 canonical 字段；turn usage 单列。
         // 关键：turn-usage-only 事件（message/result，currentContextUsedTokens=null）不得把
@@ -984,6 +1013,7 @@ export const useSessionStore = defineStore('session', {
       delete this.stalledInfo[sessionId];
       delete this.apiRetryInfo[sessionId];
       delete this.subAgentStreamingThinking[sessionId];
+      delete this.subAgentStreamingText[sessionId];
       if (this.sessionStatus[sessionId] !== 'network_interrupted') {
         this.sessionStatus[sessionId] = 'completed';
       }
@@ -999,6 +1029,7 @@ export const useSessionStore = defineStore('session', {
       delete this.stalledInfo[sessionId];
       delete this.apiRetryInfo[sessionId];
       delete this.subAgentStreamingThinking[sessionId];
+      delete this.subAgentStreamingText[sessionId];
       this.sessionStatus[sessionId] = 'network_interrupted';
     },
     // 根因修复：标记会话执行结束。失败 result / error / aborted 时调用。
@@ -1015,8 +1046,9 @@ export const useSessionStore = defineStore('session', {
       // 卡死横幅随回合结束消失。
       delete this.stalledInfo[sessionId];
       if (!options.preserveApiRetry) delete this.apiRetryInfo[sessionId];
-      // 子 agent 实时思考快照随回合结束清除。
+      // 子 agent 实时思考/正文快照随回合结束清除。
       delete this.subAgentStreamingThinking[sessionId];
+      delete this.subAgentStreamingText[sessionId];
       // 错误/中断/aborted：不保留运行态也不亮绿灯 → 回 idle（无状态点）。
       if (this.sessionStatus[sessionId] === 'running') {
         delete this.sessionStatus[sessionId];
@@ -1083,6 +1115,19 @@ export const useSessionStore = defineStore('session', {
       if (!this.subAgentStreamingThinking[sessionId]) return;
       if (agentId) delete this.subAgentStreamingThinking[sessionId][agentId];
       else delete this.subAgentStreamingThinking[sessionId];
+    },
+    // A1（D05-F1）：累加某子 agent 的实时正文（text_delta 按 parentToolUseId 路由进来，与 thinking 同法）。
+    appendSubAgentText(sessionId: string, agentId: string, text: string) {
+      if (!this.subAgentStreamingText[sessionId]) this.subAgentStreamingText[sessionId] = {};
+      this.subAgentStreamingText[sessionId][agentId] =
+        (this.subAgentStreamingText[sessionId][agentId] ?? '') + text;
+    },
+    // A1（D05-F1）：清除子 agent 实时正文——传 agentId 清单个（其 message 已落库，完整正文接管）；
+    // 不传则清该会话全部（回合结束）。
+    clearSubAgentText(sessionId: string, agentId?: string) {
+      if (!this.subAgentStreamingText[sessionId]) return;
+      if (agentId) delete this.subAgentStreamingText[sessionId][agentId];
+      else delete this.subAgentStreamingText[sessionId];
     },
     // 根因修复：ChatPage 重挂载（路由跳转回来）时重拉 messages + 同步状态。
     // 不重新注册监听（监听已在 App.vue 全局注册），只刷新当前会话数据。

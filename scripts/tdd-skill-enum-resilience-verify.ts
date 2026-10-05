@@ -102,7 +102,8 @@ async function main(): Promise<void> {
     check('④', 'project-skills 源形：in-flight 共享 + 负缓存接线 + 字节读 + TTL', sub.length === 0, sub.join('; '));
 
     const at = ipc.indexOf('IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
-    const region = at >= 0 ? ipc.slice(at, at + 700) : '';
+    // 窗口 700→800：A10（D07-F2）homedir→effectiveUserHome 修复带 3 行机理注释（5db45f7 最小同步，断言语义不变）。
+    const region = at >= 0 ? ipc.slice(at, at + 800) : '';
     check('⑤', 'SKILL_PROJECT_DIRS_GET handler 形态不变（await collectSkillProjectDirs 三源）', /dirs:\s*await\s+collectSkillProjectDirs/.test(region) && region.includes('listRecentWorkspaces()') && region.includes('listWorkingDirCounts()'), at < 0 ? '缺 handler' : '');
   }
 

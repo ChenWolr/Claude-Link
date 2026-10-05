@@ -124,8 +124,11 @@ export const useChangesStore = defineStore('changes', () => {
         diffCache.value = { ...diffCache.value, [p]: res };
       } catch (err) {
         // hb10-CHG-V03：失败更新 error 态（不再 unhandled rejection）。
+        // A12（D10-F1）：失败同时写 {ok:false} 错误条目进缓存——cached 消费方（DiffDialog）
+        // 呈现错误态而非永久「加载中」（重拉失败分支），值稳定不改写、无循环。
         if (gen === sessionGen) {
           error.value = err instanceof Error ? err.message : '读取 diff 失败';
+          diffCache.value = { ...diffCache.value, [p]: { ok: false, reason: 'error', message: error.value } };
         }
       }
     })().finally(() => {

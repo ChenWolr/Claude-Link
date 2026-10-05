@@ -14,10 +14,10 @@ import {
   resolveConfiguredActualModel,
   resolveConfiguredDefaultModel,
   peekEnvValue,
-  setContextWindowInAdvancedJson,
 } from '../src/shared/settings-parser';
 import { extractContextTokens, detectCompaction, type CliUsage } from '../src/shared/context-usage';
-import { lookupModelWindow, resolveContextWindow, resolveContextWindowForSession, lookupUserContextWindow } from '../src/shared/model-context-windows';
+import { lookupProviderModelContextWindow, DEFAULT_CONTEXT_WINDOW } from '../src/shared/model-context-windows';
+import { migrateLegacyContextWindowOverrides } from '../src/shared/provider-library';
 import { normalizeDbTime } from '../src/shared/time';
 import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } from '../src/shared/types/cli';
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
@@ -1160,54 +1160,59 @@ console.log('\n=== 39) 上下文窗口 fallback + fable 映射契约 ===');
   check('parseClaudeSettings 只配 fable → defaultModel=fable（不再丢空）', pf.defaultModel === 'fable', `got ${pf.defaultModel}`);
   check('parseClaudeSettings 保留 fable 映射在 advancedJson', pf.advancedJson.includes('ANTHROPIC_DEFAULT_FABLE_MODEL'));
 
-  // C. contextWindowByAlias 按别名双向（setContextWindowInAdvancedJson ↔ parseClaudeSettings peek）
-  const advSonnet = setContextWindowInAdvancedJson('{}', 'sonnet', 1000000);
-  check('setContextWindowInAdvancedJson(sonnet,1M) 写 env.CLAUDE_LINK_CONTEXT_WINDOW_SONNET',
-    JSON.parse(advSonnet).env?.CLAUDE_LINK_CONTEXT_WINDOW_SONNET === '1000000', advSonnet);
-  const advCleared = setContextWindowInAdvancedJson(advSonnet, 'sonnet', null);
-  check('setContextWindowInAdvancedJson(sonnet,null) 删除该 key',
-    JSON.parse(advCleared).env?.CLAUDE_LINK_CONTEXT_WINDOW_SONNET === undefined, advCleared);
-  const advTwo = setContextWindowInAdvancedJson(setContextWindowInAdvancedJson('{}', 'sonnet', 200000), 'fable', 1000000);
-  check('sonnet 与 fable 各自独立写入', JSON.parse(advTwo).env?.CLAUDE_LINK_CONTEXT_WINDOW_SONNET === '200000' && JSON.parse(advTwo).env?.CLAUDE_LINK_CONTEXT_WINDOW_FABLE === '1000000', advTwo);
-  const peeked = parseClaudeSettings(JSON.stringify({ env: { CLAUDE_LINK_CONTEXT_WINDOW_HAIKU: '64000' } }, null, 2));
-  check('parseClaudeSettings 反向回填 contextWindowByAlias.haiku=64000', peeked.contextWindowByAlias?.haiku === 64000, JSON.stringify(peeked.contextWindowByAlias));
-  check('parseClaudeSettings 未设别名不出现在 contextWindowByAlias', peeked.contextWindowByAlias?.sonnet === undefined);
+  // C. 迁移函数往返（2026-10-02 改造：legacy env.CLAUDE_LINK_CONTEXT_WINDOW_* → 模型条目
+  //    contextWindow；setContextWindowInAdvancedJson/别名回填链已删除，契约改钉迁移语义）
+  const advLegacy = JSON.stringify(
+    {
+      env: {
+        ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2',
+        CLAUDE_LINK_CONTEXT_WINDOW_SONNET: '1000000',
+        CLAUDE_LINK_CONTEXT_WINDOW_HAIKU: '64000',
+      },
+    },
+    null,
+    2,
+  );
+  const legacyProfiles = [
+    {
+      id: 'p1',
+      name: 'P1',
+      note: '',
+      apiBaseUrl: 'https://api.example.com/v1',
+      models: [{ id: 'glm-5.2', name: 'glm-5.2', maxTokens: 0, source: 'manual' as const, addedAt: 1 }],
+      createdAt: 1,
+      updatedAt: 1,
+    },
+  ];
+  const mig = migrateLegacyContextWindowOverrides(advLegacy, legacyProfiles);
+  check('迁移：有映射且有模型 → contextWindow 写入条目', mig.profiles[0].models[0].contextWindow === 1000000, JSON.stringify(mig.profiles[0].models[0]));
+  check('迁移：migrated 记录 alias/modelId/window', mig.migrated.length === 1 && mig.migrated[0].alias === 'sonnet' && mig.migrated[0].modelId === 'glm-5.2' && mig.migrated[0].window === 1000000, JSON.stringify(mig.migrated));
+  check('迁移：无映射别名（haiku 无 ANTHROPIC_DEFAULT 映射）记 dropped', mig.dropped.length === 1 && mig.dropped[0].alias === 'haiku' && mig.dropped[0].window === 64000, JSON.stringify(mig.dropped));
+  const migEnv = JSON.parse(mig.advancedJson).env ?? {};
+  check('迁移：legacy 窗口 env 键一律删除', migEnv.CLAUDE_LINK_CONTEXT_WINDOW_SONNET === undefined && migEnv.CLAUDE_LINK_CONTEXT_WINDOW_HAIKU === undefined, mig.advancedJson);
+  check('迁移：ANTHROPIC_DEFAULT 映射键不动', migEnv.ANTHROPIC_DEFAULT_SONNET_MODEL === 'glm-5.2', mig.advancedJson);
+  // 往返（幂等）：用首次迁移结果再跑一次 → 零操作（不新增 migrated/dropped，JSON 原样）
+  const migAgain = migrateLegacyContextWindowOverrides(mig.advancedJson, mig.profiles);
+  check('迁移幂等：二次运行零操作', migAgain.migrated.length === 0 && migAgain.dropped.length === 0 && migAgain.advancedJson === mig.advancedJson, JSON.stringify({ m: migAgain.migrated, d: migAgain.dropped }));
+  check('迁移幂等：已移植条目不被二次改写', migAgain.profiles[0].models[0].contextWindow === 1000000);
 
-  // D. lookupModelWindow 内置表（最长前缀匹配 + 标准化）
-  check('lookupModelWindow(glm-5.2)=1M', lookupModelWindow('glm-5.2') === 1000000, String(lookupModelWindow('glm-5.2')));
-  check('lookupModelWindow 大小写/后缀容错(GLM-5.2-1m)=1M', lookupModelWindow('GLM-5.2-1m') === 1000000);
-  check('lookupModelWindow(claude-fable-5)=1M', lookupModelWindow('claude-fable-5') === 1000000);
-  check('lookupModelWindow(claude-sonnet-4-6)=200k', lookupModelWindow('claude-sonnet-4-6') === 200000);
-  check('lookupModelWindow(deepseek-chat)=64k', lookupModelWindow('deepseek-chat') === 64000);
-  check('lookupModelWindow(未知模型)=null', lookupModelWindow('some-unknown-model') === null);
-  check('lookupModelWindow(null/空)=null', lookupModelWindow(null) === null && lookupModelWindow('') === null);
+  // D.（已删除）原内置模型窗口静态查表 6 条——静态表随按别名覆盖链整体删除，
+  //    运行时不再有内置模型窗口查表（分母回落 SDK 上报 > 200k）。
 
-  // E. resolveContextWindow 优先级（用户别名设置 > lastContextWindow > 200k）
-  check('用户设置优先于 lastContextWindow', resolveContextWindow({ lastContextWindow: 500000, alias: 'sonnet', contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
-  check('无用户设置 走 lastContextWindow', resolveContextWindow({ lastContextWindow: 500000, alias: 'sonnet', contextWindowByAlias: {} }) === 500000);
-  check('无用户设置/无 lastContextWindow → 200k', resolveContextWindow({ alias: 'sonnet', contextWindowByAlias: {} }) === 200000);
-  check('全无 → 200000 兜底', resolveContextWindow({}) === 200000);
-  check('别名未在设置中 走 lastContextWindow', resolveContextWindow({ lastContextWindow: 300000, alias: 'sonnet', contextWindowByAlias: { fable: 1000000 } }) === 300000);
-  check('alias 为 null 但有 lastContextWindow → lastContextWindow', resolveContextWindow({ lastContextWindow: 400000, alias: null, contextWindowByAlias: { sonnet: 1000000 } }) === 400000);
-  check('alias 为 null 且无 lastContextWindow → 200k', resolveContextWindow({ alias: null, contextWindowByAlias: { sonnet: 1000000 } }) === 200000);
-
-  // F. resolveContextWindowForSession（主进程用：真实模型名按 modelMappings 反查别名）
-  const advWithMap = JSON.stringify({ env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2', CLAUDE_LINK_CONTEXT_WINDOW_SONNET: '1000000' } }, null, 2);
-  check('别名直传命中', resolveContextWindowForSession({ aliasOrModel: 'sonnet', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
-  check('真实模型名反查别名命中(glm-5.2→sonnet)', resolveContextWindowForSession({ aliasOrModel: 'glm-5.2', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
-  check('未知真实模型名 → 200k', resolveContextWindowForSession({ aliasOrModel: 'unknown-model', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 200000);
-  check('无 aliasOrModel → 200k', resolveContextWindowForSession({ aliasOrModel: null, advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 200000);
-
-  // G. lookupUserContextWindow（注入 MAX_CONTEXT_TOKENS 用：只返用户显式配置，未命中返 undefined）
-  check('lookupUserContextWindow 别名直传命中', lookupUserContextWindow({ aliasOrModel: 'sonnet', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
-  check('lookupUserContextWindow 真实模型名反查命中(glm-5.2→sonnet)', lookupUserContextWindow({ aliasOrModel: 'glm-5.2', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
-  check('lookupUserContextWindow 未配置别名 → undefined（不注入，避免降级）', lookupUserContextWindow({ aliasOrModel: 'haiku', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === undefined);
-  check('lookupUserContextWindow 未知真实模型名 → undefined', lookupUserContextWindow({ aliasOrModel: 'unknown-model', advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === undefined);
-  check('lookupUserContextWindow 无 aliasOrModel → undefined', lookupUserContextWindow({ aliasOrModel: null, advancedJson: advWithMap, contextWindowByAlias: { sonnet: 1000000 } }) === undefined);
-  check('lookupUserContextWindow 空配置 → undefined', lookupUserContextWindow({ aliasOrModel: 'sonnet', advancedJson: advWithMap, contextWindowByAlias: {} }) === undefined);
-  // [1m] 后缀真实模型名反查（用户实际配置 sonnet→glm-5.2[1m]）
-  const advWith1m = JSON.stringify({ env: { ANTHROPIC_DEFAULT_SONNET_MODEL: 'glm-5.2[1m]', CLAUDE_LINK_CONTEXT_WINDOW_SONNET: '1000000' } }, null, 2);
-  check('lookupUserContextWindow [1m]后缀真实名反查命中(glm-5.2[1m]→sonnet)', lookupUserContextWindow({ aliasOrModel: 'glm-5.2[1m]', advancedJson: advWith1m, contextWindowByAlias: { sonnet: 1000000 } }) === 1000000);
+  // E. per-model 优先级（供应商模型条目手动覆盖 > SDK 上报 contextLastWindow > 200k）
+  const winModels = [
+    { id: 'glm-5.2', contextWindow: 1000000 },
+    { id: 'claude-sonnet-4-6', contextWindow: null },
+    { id: 'claude-haiku-4-5' },
+  ];
+  const denom = (id: string | null, lastWindow: number | null) =>
+    lookupProviderModelContextWindow(winModels, id) ?? lastWindow ?? DEFAULT_CONTEXT_WINDOW;
+  check('per-model 手动覆盖优先于 SDK 上报', denom('glm-5.2', 500000) === 1000000);
+  check('未设覆盖（null）走 SDK 上报', denom('claude-sonnet-4-6', 500000) === 500000);
+  check('未设覆盖且无上报 → 200k 兜底', denom('claude-sonnet-4-6', null) === 200000 && DEFAULT_CONTEXT_WINDOW === 200000);
+  check('模型不在清单 → 走上报/兜底', denom('unknown-model', 300000) === 300000 && denom('unknown-model', null) === 200000);
+  check('缺字段/null/0 的 contextWindow 均视为未设置', lookupProviderModelContextWindow(winModels, 'claude-haiku-4-5') === undefined && lookupProviderModelContextWindow(winModels, 'claude-sonnet-4-6') === undefined && lookupProviderModelContextWindow([{ id: 'x', contextWindow: 0 }], 'x') === undefined);
+  check('未命中显式覆盖 → undefined（不注入，避免降级）', lookupProviderModelContextWindow(winModels, 'unknown-model') === undefined && lookupProviderModelContextWindow(null, 'glm-5.2') === undefined && lookupProviderModelContextWindow(winModels, null) === undefined);
 }
 
 console.log('\n=== 40) UI 简化（r9 定版）：连接页=供应商库 + 会话内不调字号 ===');
@@ -1275,11 +1280,14 @@ console.log('\n=== 42) contextStats getter 化（切模型/改设置即时重算
   check('switchSession/onContextUpdate 不再直接赋值 contextStats', !/this\.contextStats\s*=/.test(ss));
   check('switchSession 改写 contextLastWindow', ss.includes('this.contextLastWindow = session.lastContextWindow'));
   check('onContextUpdate 改写 contextLastWindow（payload.windowSize）', ss.includes('this.contextLastWindow = payload.windowSize'));
-  check('getter 用 modelOverride||model 作 alias', /contextStats\(state\)[\s\S]*?modelOverride\s*\|\|\s*state\.activeSession\.model/.test(ss));
-  // hb10-CTX-02 最小同步：分母单源化——getter 改调 resolveContextWindowForSession（与主进程 spawn 同源纯函数），
-  // 语义不变（getter 内解析窗口分母），仅函数名演化。
-  check('getter 调 resolveContextWindowForSession（分母单源）', /contextStats\(state\)[\s\S]*?resolveContextWindowForSession\(/.test(ss));
-  check('getter 读 configStore.contextWindowByAlias', /contextStats\(state\)[\s\S]*?useConfigStore\(\)\.config\.contextWindowByAlias/.test(ss));
+  // 2026-10-02 按模型覆盖：getter 改经 provider-store resolve 解析当回合模型
+  // （modelOverride ?? null 传入，别名/lastUsed 兜底链在 resolveSessionModel 内），
+  // 旧「modelOverride||model 作别名」直连形态已随按别名窗口链退场。
+  check('getter 经 provider-store resolve 传 modelOverride ?? null', /contextStats\(state\)[\s\S]*?modelOverride:\s*state\.activeSession\.modelOverride \?\? null/.test(ss));
+  // hb10-CTX-02 / 2026-10-02 按模型覆盖：分母单源化——getter 改调 lookupProviderModelContextWindow
+  // （当回合实际连接的供应商模型条目直查，与主进程注入同源），组合顺序 userOverride > contextLastWindow > 200k。
+  check('getter 调 lookupProviderModelContextWindow（分母单源 per-model）', /contextStats\(state\)[\s\S]*?lookupProviderModelContextWindow\(/.test(ss));
+  check('getter 分母组合 userOverride ?? contextLastWindow ?? 200k', /contextStats\(state\)[\s\S]*?userOverride \?\? state\.contextLastWindow \?\? 200_000/.test(ss));
 }
 
 console.log('\n=== 43) 浅色主题系统契约（openhanako 真实浅色色板替代深色）===');

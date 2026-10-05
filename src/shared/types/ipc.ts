@@ -99,6 +99,8 @@ export const IPC_CHANNELS = {
   // 会话导出长图（v3 JPEG / v4.1 PNG 双格式）。可见 renderer ↔ 主进程 ↔ 隐藏 export renderer。
   EXPORT_IMAGE_START: 'export-image:start',
   EXPORT_IMAGE_PROGRESS: 'export-image:progress',
+  // B4（D13-F3）：用户取消导出（仅捕获/编码阶段；保存对话框自带取消不占此通道）。
+  EXPORT_IMAGE_CANCEL: 'export-image:cancel',
   EXPORT_RENDER_GET_JOB: 'export-render:getJob',
   EXPORT_RENDER_CAPTURE_SELF: 'export-render:captureSelf',
   EXPORT_RENDER_PROGRESS: 'export-render:progress',
@@ -130,6 +132,9 @@ export const IPC_CHANNELS = {
   BRIDGE_PLATFORM_RESTART: 'bridge:platformRestart',
   // 主→渲染推送：平台状态变化。
   BRIDGE_STATUS_CHANGED: 'bridge:statusChanged',
+  // 主→渲染推送：桥接运行期自动建会话（首联/悬空重建 /new）成功落库（A3，D01-F2/D12-F4）。
+  // 载荷 { sessionId }；渲染层据此去抖重拉会话列表（新会话 ≤1s 进侧栏）并放行该会话的后台事件。
+  BRIDGE_SESSIONS_UPSERTED: 'bridge:sessionsUpserted',
 } as const;
 
 /** 无引用残留（且类型文件不应有运行时常量）：流式上屏节流间隔真相源在 use-stream.ts 硬编码 50ms（hb12-CHR-01 节流，非防抖），改本值无效。 */

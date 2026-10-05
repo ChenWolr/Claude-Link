@@ -1,6 +1,8 @@
 <script lang="ts">
 // hb10-PRV-05（hb13-v A10 补实施）：persistModels 串行链的模块级承载——跨组件实例共用一条
-// promise 链，连点/并发编辑依次落库不丢更新（后写基于最新列表重算，先到先落）。
+// promise 链，连点/并发编辑依次落库不丢更新。A5（D02-F1）补齐承诺的「后写基于最新列表重算」：
+// 链上只传 mutator（收最新 models 返回新数组的纯函数），落库经 provider-store 的
+// updateProviderModels 写时重算，点击时快照不再进入链内。
 let providerPersistChain: Promise<void> = Promise.resolve();
 
 export default { name: 'ProviderManagerPage' };
@@ -17,6 +19,7 @@ import ProviderEditor from './ProviderEditor.vue';
 import ProviderModelList from './ProviderModelList.vue';
 import ProviderModelPicker from './ProviderModelPicker.vue';
 import type { ModelInfo, ProviderModel, ProviderProfileView } from '../../../shared/types/config';
+import { providerModelWindowInputError } from '../../../shared/model-context-windows';
 
 const store = useProviderStore();
 const interactionStore = useInteractionStore();
@@ -90,7 +93,7 @@ function startEditing(): void {
   creating.value = false;
 }
 
-async function handleEditorSave(payload: { id?: string; name: string; note: string; apiBaseUrl: string; apiKey?: string }): Promise<void> {
+async function handleEditorSave(payload: { id?: string; name: string; note: string; apiBaseUrl: string; apiKey?: string; clearApiKey?: boolean }): Promise<void> {
   const name = payload.name.trim();
   const note = payload.note.trim();
   const apiBaseUrl = payload.apiBaseUrl.trim();
@@ -100,15 +103,37 @@ async function handleEditorSave(payload: { id?: string; name: string; note: stri
     return;
   }
   try {
-    const currentProvider = payload.id ? providers.value.find((p) => p.id === payload.id) : null;
-    const view = await store.save({
-      id: payload.id,
-      name,
-      note,
-      apiBaseUrl,
-      ...(apiKey ? { apiKey } : {}),
-      models: currentProvider?.models,
-    });
+    // A5（D02-F1）：编辑保存入串行链——更新路径在链位执行时现取 store 最新 models（不再携带
+    // 点击时快照），与在飞模型增删不再互相整表覆盖；档案字段（name/note/apiBaseUrl）仍以表单
+    // 为准。新建路径无 models 语义，不入链直接保存。
+    const persist = async (): Promise<ProviderProfileView> => {
+      if (payload.id) {
+        const latestProvider = store.providers.find((p) => p.id === payload.id);
+        return store.save({
+          id: payload.id,
+          name,
+          note,
+          apiBaseUrl,
+          ...(apiKey ? { apiKey } : {}),
+          // B7（D02-F4）：密钥清除请求透传（表单已确保输入新 key 时不出此标记）。
+          ...(payload.clearApiKey ? { clearApiKey: true } : {}),
+          models: latestProvider?.models,
+        });
+      }
+      return store.save({ name, note, apiBaseUrl, ...(apiKey ? { apiKey } : {}) });
+    };
+    // A5 复核补丁：更新路径除入链外还须延伸链头（镜像 persistModels 的续链写法）——否则
+    // 编辑保存在飞窗口内入链的模型操作（如撤销 toast 回添）会挂到已结算旧链头上并发执行，
+    // 整表替换语义下后到者把刚保存的档案字段/模型整条覆盖。结算后归一为 void 续链（编辑
+    // 保存失败同样不断链，错误仍由下方 catch 就地 toast）。
+    let view: ProviderProfileView;
+    if (payload.id) {
+      const chained = providerPersistChain.then(persist);
+      providerPersistChain = chained.then(() => undefined, () => undefined);
+      view = await chained;
+    } else {
+      view = await persist();
+    }
     selectedId.value = view.id;
     creating.value = false;
     editing.value = false;
@@ -158,9 +183,11 @@ async function handleDeleteProvider(): Promise<void> {
 // hb10-PRV-05（hb13-v A10 补实施）：操作入模块级串行链依次落库——旧实现并发保存互相覆盖
 // （连点/添加+撤销交错丢更新）；调用方 await 本函数返回的链位，toast 提示时已真正落库。
 // 单次失败不断链（chained.catch 续链），失败 toast 仍由调用方在自身链位上提示。
-async function persistModels(p: ProviderProfileView, models: ProviderModel[]): Promise<void> {
+// A5（D02-F1）：链内只传 mutator（写时重算）——doPersist 执行时才基于 store 最新 models
+// 应用变更，连续快速添加的后写不再用点击时旧快照整表覆盖先写。
+async function persistModels(providerId: string, mutate: (latest: ProviderModel[]) => ProviderModel[]): Promise<void> {
   const doPersist = async (): Promise<void> => {
-    await store.save({ id: p.id, name: p.name, note: p.note, apiBaseUrl: p.apiBaseUrl, models });
+    await store.updateProviderModels(providerId, mutate);
   };
   const chained = providerPersistChain.then(doPersist);
   providerPersistChain = chained.catch(() => undefined);
@@ -180,12 +207,16 @@ async function handleModelAdd(info: Pick<ModelInfo, 'id' | 'name' | 'maxTokens'>
     pushToast(`「${info.id}」已在列表中，不可重复添加`);
     return;
   }
-  const next: ProviderModel[] = [
-    ...p.models,
-    { id: info.id, name: info.name || info.id, maxTokens: info.maxTokens ?? 0, source, addedAt: Date.now() },
-  ];
+  // A5：链内写时重算——执行时刻基于最新列表再查重（连点同 id 时第二次在链内被拦为 no-op），
+  // 并以最新列表为基底追加，不携带点击时快照。
   try {
-    await persistModels(p, next);
+    await persistModels(p.id, (latest) => {
+      if (latest.some((m) => m.id === info.id)) return latest;
+      return [
+        ...latest,
+        { id: info.id, name: info.name || info.id, maxTokens: info.maxTokens ?? 0, source, addedAt: Date.now() },
+      ];
+    });
     pushToast(`已添加模型 ${info.id} 到「${p.name}」`);
   } catch (error) {
     pushToast(error instanceof Error ? error.message : '添加模型失败');
@@ -203,9 +234,9 @@ function handleManualAdd(id: string): void {
 async function handleModelRemove(model: ProviderModel, index: number): Promise<void> {
   const p = current.value;
   if (!p) return;
-  const next = p.models.filter((_, i) => i !== index);
+  // A5：链内按模型 id 过滤（点击时 index 在交错窗口内不稳定，不作删除依据）。
   try {
-    await persistModels(p, next);
+    await persistModels(p.id, (latest) => latest.filter((m) => m.id !== model.id));
     pushToast(`已删除模型 ${model.id}`, {
       label: '撤销',
       fn: () => {
@@ -214,13 +245,43 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
           pushToast('撤销失败：供应商已不存在');
           return;
         }
-        const restored = [...fresh.models];
-        restored.splice(Math.min(index, restored.length), 0, model);
-        void persistModels(fresh, restored).catch(() => pushToast('撤销失败'));
+        void persistModels(p.id, (latest) => {
+          // A5：链内写时重算回添——已在（并发回添）为 no-op；否则按撤销时 index 插回最新列表。
+          if (latest.some((m) => m.id === model.id)) return latest;
+          const next = [...latest];
+          next.splice(Math.min(index, next.length), 0, model);
+          return next;
+        }).catch(() => pushToast('撤销失败'));
       },
     });
   } catch (error) {
     pushToast(error instanceof Error ? error.message : '删除模型失败');
+  }
+}
+
+// ── 窗口覆盖提交（方案 E2）────────────────────────────────────────────
+// raw 为子组件 trim 后输入（空串 = 清除覆盖）。行内浮层已实时拦截非法值，此处再校验一次
+// 兜底；写入走 persistModels 串行链——链内按 id 对最新列表重查改写（A5 同款纪律，链外
+// 点击时快照不进入），清除写 null 保持键存在（与 sanitize 的未设置语义兼容）。
+async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<void> {
+  const p = current.value;
+  if (!p) return;
+  const error = providerModelWindowInputError(raw);
+  if (error !== null) {
+    pushToast(error);
+    return;
+  }
+  try {
+    await persistModels(p.id, (latest) => latest.map((m) => (
+      m.id === model.id
+        ? { ...m, ...(raw === '' ? { contextWindow: null } : { contextWindow: Number(raw) }) }
+        : m
+    )));
+    pushToast(raw === ''
+      ? `已清除 ${model.id} 上下文窗口覆盖`
+      : `已更新 ${model.id} 上下文窗口 ${Number(raw).toLocaleString()} token`);
+  } catch (saveError) {
+    pushToast(saveError instanceof Error ? saveError.message : '更新上下文窗口失败');
   }
 }
 </script>
@@ -267,6 +328,7 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
         :initial-name="editing ? current?.name : undefined"
         :initial-note="editing ? current?.note : undefined"
         :initial-api-base-url="editing ? current?.apiBaseUrl : undefined"
+        :has-api-key="editing ? current?.hasApiKey : undefined"
         @save="handleEditorSave"
         @cancel="handleEditorCancel"
       />
@@ -311,6 +373,7 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
             :models="current.models"
             @remove="handleModelRemove"
             @toast="(msg: string) => pushToast(msg)"
+            @set-window="handleModelWindowSet"
           />
         </div>
         <div class="pool-note">设置页只维护可选的供应商与模型；会话中可自由选用任意供应商 / 模型。</div>

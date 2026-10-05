@@ -1,8 +1,11 @@
 // wechat-outbound.ts — 微信出站长文本分段（纯函数）。
 // 移植自 openhanako (Apache-2.0) lib/bridge/wechat-adapter.ts:54,613-617 的 MSG_CHUNK_LIMIT
 // 分段循环，抽出为纯函数；分段策略：从左到右贪心，每段 ≤4000 字，段内含换行时优先回退到
-// 段内最后一个 '\n'（把换行留在段尾，下一段从行首开始）；单行超限（无换行可回退）按 4000 硬切。
+// 段内最后一个 '\n'（把换行留在段尾，下一段从行首开始）；单行超限（无换行可回退）按 4000 硬切
+//（硬切点落代理对中间时回退 1，段尾不出孤立高代理——B12/D12-F1，见 safe-cut.ts）。
 // 不做 block 流式——iLink 对连续发消息有速率限制，batch 一次性分段发完更稳（openhanako :627 注释）。
+
+import { safeCutWidth } from './safe-cut';
 
 export const WECHAT_MSG_CHUNK_LIMIT = 4000;
 
@@ -22,7 +25,9 @@ export function splitWechatText(text: string): string[] {
     }
     // 满段：优先回退到段内最后一个换行（含换行符留在本段尾部，下一段从行首开始）。
     const lastNewline = raw.lastIndexOf('\n');
-    const cut = lastNewline > 0 ? lastNewline + 1 : WECHAT_MSG_CHUNK_LIMIT;
+    let cut = lastNewline > 0 ? lastNewline + 1 : WECHAT_MSG_CHUNK_LIMIT;
+    // B12（D12-F1）：切点落星体字符代理对中间时回退 1（换行回退路径切点在 '\n' 后，不受影响）。
+    cut = safeCutWidth(text, i, cut);
     chunks.push(text.slice(i, i + cut));
     i += cut;
   }

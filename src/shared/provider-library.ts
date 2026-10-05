@@ -2,6 +2,8 @@
 // 密钥明文/密文都不经过这里：加密在 config-manager，掩码在这里（纯字符串操作）。
 
 import type { ProviderModel, ProviderProfile } from './types/config';
+import { CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN } from './model-context-windows';
+import { extractModelMappings } from './settings-parser';
 
 // apiKey 掩码：sk-…****<末4位>。空串原样返回（渲染层显示「未设置」）。
 export function maskApiKey(plain: string): string {
@@ -75,7 +77,17 @@ export function sanitizeProviderModels(input: unknown): ProviderModel[] {
       typeof item.maxTokens === 'number' && Number.isFinite(item.maxTokens) && item.maxTokens > 0
         ? Math.floor(item.maxTokens)
         : 0;
-    out.push({
+    // 手动上下文窗口白名单：有限整数且在 [1,000, 2,000,000] 内才保留（Math.floor 后）；
+    // 否则省略该字段（=未设置，不抛错——宽容语义与 maxTokens 一致，坏值随保存静默清理）。
+    const contextWindow =
+      typeof item.contextWindow === 'number' &&
+      Number.isFinite(item.contextWindow) &&
+      Number.isInteger(item.contextWindow) &&
+      item.contextWindow >= CONTEXT_WINDOW_MIN &&
+      item.contextWindow <= CONTEXT_WINDOW_MAX
+        ? Math.floor(item.contextWindow)
+        : undefined;
+    const model: ProviderModel = {
       id,
       name: typeof item.name === 'string' && item.name.trim() ? item.name.trim() : id,
       maxTokens,
@@ -84,7 +96,87 @@ export function sanitizeProviderModels(input: unknown): ProviderModel[] {
         typeof item.addedAt === 'number' && Number.isFinite(item.addedAt) && item.addedAt > 0
           ? item.addedAt
           : Date.now(),
-    });
+    };
+    if (contextWindow !== undefined) model.contextWindow = contextWindow;
+    out.push(model);
   }
   return out;
+}
+
+// ── 一次性迁移：legacy 全局按别名窗口覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>）
+//    → 供应商库内模型条目 contextWindow（计划 2026-10-02 §2.2）。启动时调用一次，幂等。
+export interface LegacyWindowMigrationResult {
+  advancedJson: string;                 // 已删 4 个 CLAUDE_LINK_CONTEXT_WINDOW_* 键
+  profiles: ProviderProfile[];          // 移植成功的模型已写 contextWindow（仅原未设置时）
+  migrated: Array<{ alias: string; modelId: string; window: number }>;
+  dropped: Array<{ alias: string; window: number }>; // 无映射或库内无该模型 → 值废弃仅删键
+}
+
+// 迁移遍历的四别名（与 settings-parser MODEL_ALIASES 同序：sonnet>haiku>opus>fable）。
+const LEGACY_WINDOW_ALIASES = ['sonnet', 'haiku', 'opus', 'fable'] as const;
+
+export function migrateLegacyContextWindowOverrides(
+  advancedJson: string,
+  profiles: ProviderProfile[],
+): LegacyWindowMigrationResult {
+  const migrated: LegacyWindowMigrationResult['migrated'] = [];
+  const dropped: LegacyWindowMigrationResult['dropped'] = [];
+  // 不可变拷贝（纯函数不改入参；迁移只写 models[].contextWindow，拷到模型条目一层即可）。
+  const nextProfiles: ProviderProfile[] = profiles.map((p) => ({
+    ...p,
+    models: p.models.map((m) => ({ ...m })),
+  }));
+
+  // 解析 advancedJson：非法 JSON / 无 env 块 → 无键可处理，原样返回（宽容语义同 parseAdvancedEnv）。
+  let root: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(advancedJson || '{}');
+    root = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return { advancedJson, profiles: nextProfiles, migrated, dropped };
+  }
+  const env =
+    root.env && typeof root.env === 'object' && !Array.isArray(root.env)
+      ? (root.env as Record<string, unknown>)
+      : null;
+  if (!env) return { advancedJson, profiles: nextProfiles, migrated, dropped };
+
+  const mappings = extractModelMappings(advancedJson);
+  let touched = false;
+  for (const alias of LEGACY_WINDOW_ALIASES) {
+    const key = `CLAUDE_LINK_CONTEXT_WINDOW_${alias.toUpperCase()}`;
+    if (!(key in env)) continue;
+    touched = true;
+    const raw = env[key];
+    delete env[key]; // 四种情况（可移植/已设不覆盖/无映射/库内无模型）都一律删该键
+    // 正数数值才值得移植（数值判定与 settings-parser 解析回填同款宽松）。
+    let v: number | null = null;
+    if (typeof raw === 'number' && Number.isFinite(raw) && raw > 0) v = raw;
+    else if (typeof raw === 'string' && Number.isFinite(Number(raw)) && Number(raw) > 0) v = Number(raw);
+    if (v === null) continue; // 非正数/非数值：只删键，值无移植意义
+    const modelId = mappings[alias];
+    if (!modelId) {
+      dropped.push({ alias, window: v }); // 无 ANTHROPIC_DEFAULT_<ALIAS>_MODEL 映射
+      continue;
+    }
+    // 按 models[].id === M 找遍历序首个命中供应商，只写首家（同模型在多家时其余不动）。
+    const target = nextProfiles.find((p) => p.models.some((m) => m.id === modelId));
+    const model = target?.models.find((m) => m.id === modelId);
+    if (!model) {
+      dropped.push({ alias, window: v }); // 库内无该模型
+      continue;
+    }
+    // 原未设置（undefined/null/0）才写；已有正数值不覆盖（也不记 migrated/dropped）。
+    const preset = model.contextWindow;
+    if (typeof preset === 'number' && preset > 0) continue;
+    model.contextWindow = v;
+    migrated.push({ alias, modelId, window: v });
+  }
+
+  if (!touched) return { advancedJson, profiles: nextProfiles, migrated, dropped };
+  if (Object.keys(env).length === 0) delete root.env; // env 删空则整块移除（同 settings-parser 语义）
+  const nextJson = Object.keys(root).length === 0 ? '{}' : JSON.stringify(root, null, 2);
+  return { advancedJson: nextJson, profiles: nextProfiles, migrated, dropped };
 }

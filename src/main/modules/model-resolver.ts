@@ -72,6 +72,19 @@ async function readErrorBody(response: Response): Promise<string> {
   }
 }
 
+// B7（D02-F5）key-less 放行：凭据头按 apiKey 门控——空 key（档案未配 key，认证走端点侧
+// 白名单/外部登录态）省略 x-api-key/Authorization（空头无意义，个别网关见空凭据头反 401）；
+// anthropic-version 属协议版本头非凭据，保留。
+export function buildModelsRequestHeaders(apiKey: string): {
+  anthropic: Record<string, string>;
+  openai: Record<string, string>;
+} {
+  return {
+    anthropic: apiKey ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } : { 'anthropic-version': '2023-06-01' },
+    openai: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+  };
+}
+
 async function fetchModelsOnce(
   url: URL,
   headers: Record<string, string>,
@@ -129,18 +142,16 @@ async function fetchAvailableModelsImpl(
   const url = buildAnthropicApiUrl(profile.apiBaseUrl, 'models');
 
   let models: ModelInfo[];
+  const headers = buildModelsRequestHeaders(apiKey);
   try {
     // 先 Anthropic 风格（官方与大多数中转/网关兼容层）。
-    models = await fetchModelsOnce(url, {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    }, normalizeAnthropicModelsPayload);
+    models = await fetchModelsOnce(url, headers.anthropic, normalizeAnthropicModelsPayload);
   } catch (error) {
     const status = (error as { status?: number }).status;
     // 404（端点无 /models）或 401（只认 Bearer）→ 回退 OpenAI 风格；其余错误直接抛。
     if (status !== 404 && status !== 401) throw error;
     try {
-      models = await fetchModelsOnce(url, { Authorization: `Bearer ${apiKey}` }, normalizeOpenAiModelsPayload);
+      models = await fetchModelsOnce(url, headers.openai, normalizeOpenAiModelsPayload);
     } catch (fallbackError) {
       const f = fallbackError as { status?: number; body?: string; message?: string };
       const primary = error as { message?: string; body?: string };

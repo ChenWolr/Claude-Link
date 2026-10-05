@@ -65,5 +65,28 @@ check('③ 头注释承诺与实现一致（过滤三键在 stringEnvFrom 区域
   }
 });
 
+// B1（D03-F2，2026-09-30 批次 B 扩展）：...advanced spread 为携带 hooks 有意保留全部顶层键，
+// 但存量/手改 advancedJson 顶层残留的旧版凭据形态（parseClaudeSettings 历史支持的
+// apiKey/apiBaseUrl/baseUrl/apiKeyHelper，导入链 2026-09-20 删除后无人剥离）不得穿透
+// 明文落盘——与 G1 env 三键同理由：凭据只走 env+内联。
+check('④ B1（D03-F2）：advancedJson 顶层旧版凭据键不穿透投影（spread 前剔除，hooks 不误伤）', () => {
+  const config = {
+    ...baseConfig,
+    advancedJson: JSON.stringify({
+      apiKey: 'sk-legacy-toplevel',
+      apiBaseUrl: 'https://toplevel.example.com',
+      baseUrl: 'https://toplevel-alt.example.com',
+      apiKeyHelper: '/usr/local/bin/helper.sh',
+      hooks: { PreToolUse: [] },
+    }),
+  };
+  const settings = buildClaudeSettingsProjection(config as never);
+  assert.equal(settings.apiKey, undefined, '顶层 apiKey 不得穿透落盘');
+  assert.equal(settings.apiBaseUrl, undefined, '顶层 apiBaseUrl 不得穿透落盘');
+  assert.equal(settings.baseUrl, undefined, '顶层 baseUrl 不得穿透落盘');
+  assert.equal(settings.apiKeyHelper, undefined, '顶层 apiKeyHelper 不得穿透落盘');
+  assert.ok(Array.isArray((settings.hooks as Record<string, unknown>)?.PreToolUse), '非凭据顶层键（hooks）不受剔除影响');
+});
+
 console.log(`\nverify 结果：${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

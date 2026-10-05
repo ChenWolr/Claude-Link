@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useImageLightbox } from '../../composables/useImageLightbox';
+import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 
 const { state, close } = useImageLightbox();
+// A9（D06-F1）：灯箱打开即注册最高 Esc 层（9999=视觉顶层），关闭/卸载出栈——
+// 灯箱在场时低层（交互弹窗/更新弹窗）的 Esc handler 让位，Esc 只关灯箱。
+let escHandle: EscLayerHandle | null = null;
 const closeButton = ref<HTMLButtonElement | null>(null);
 let previouslyFocused: HTMLElement | null = null;
 let focusRestored = true;
@@ -93,6 +97,9 @@ function onKey(event: KeyboardEvent): void {
 
 watch(state, async (value) => {
   if (value) {
+    // A9：打开注册最高 Esc 层（先于焦点管理副作用）。
+    escHandle?.release();
+    escHandle = pushEscLayer(ESC_LAYER_PRIORITY.imageLightbox);
     // 每次打开复位缩放/平移，避免上次残留。
     resetTransform();
     previouslyFocused = value.trigger
@@ -101,6 +108,9 @@ watch(state, async (value) => {
     await nextTick();
     closeButton.value?.focus();
   } else {
+    // A9：关闭即出栈（Esc 消费后 close() → state null → 此处释放）。
+    escHandle?.release();
+    escHandle = null;
     await nextTick();
     restoreFocus();
   }
@@ -117,6 +127,9 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('mousemove', onMouseMove);
   window.removeEventListener('mouseup', onMouseUp);
+  // A9：卸载兜底出栈（release 幂等）。
+  escHandle?.release();
+  escHandle = null;
   restoreFocus();
 });
 </script>

@@ -27,6 +27,7 @@ let stopExportProgress: (() => void) | null = null;
 let stopCommandChanges: (() => void) | null = null;
 let stopGlobalCommandChanges: (() => void) | null = null;
 let stopQueueEvents: (() => void) | null = null;
+let stopBridgeSessionsUpserted: (() => void) | null = null;
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
@@ -57,6 +58,23 @@ watch(lastSaveFailed, (failed) => {
     if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
     saveFailedToastTimer = null;
   }
+});
+
+// A4（D01-F3 + D02-F8）：sessionStore.error 全局出口——删除/搜索/改名/会话内切模型等失败此前
+// 全程静默（渲染层消费点为零，D01-F3 复核修正）。非空时弹 3.5s 全局错误 toast（复用 H1 的
+// .global-toast--error 样式），文案「操作失败：<摘要>」截断至 ~80 字符；连续失败以最新文案
+// 重置计时；空串/null 不弹（成功路径零打扰）；不改 store 写入点，不动 config/changes 既有出口。
+const SESSION_ERROR_TOAST_MS = 3500;
+const SESSION_ERROR_TEXT_MAX = 80;
+const sessionErrorToastVisible = ref(false);
+const sessionErrorToastText = ref('');
+let sessionErrorToastTimer: ReturnType<typeof setTimeout> | null = null;
+watch(() => sessionStore.error, (err) => {
+  if (!err) return;
+  sessionErrorToastText.value = `操作失败：${err.length > SESSION_ERROR_TEXT_MAX ? `${err.slice(0, SESSION_ERROR_TEXT_MAX)}…` : err}`;
+  sessionErrorToastVisible.value = true;
+  if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
+  sessionErrorToastTimer = setTimeout(() => { sessionErrorToastVisible.value = false; }, SESSION_ERROR_TOAST_MS);
 });
 
 onMounted(async () => {
@@ -97,6 +115,11 @@ onMounted(async () => {
   // markRunning / markStopped（中断收口）/ user_message_created（队列任务消息入列）等
   // 带副作用的队列事件仍须被处理——后台队列执行不因切页丢事件。
   stopQueueEvents = window.claudeLink.onQueueEvent((payload) => taskStore.handleQueueEvent(payload));
+  // A3（D01-F2/D12-F4）：桥接运行期自动建会话信号全局注册——store 内 500ms 去抖重拉列表，
+  // 新桥接会话 ≤1s 进侧栏；完成通知点击在列表刷新后可命中会话。
+  stopBridgeSessionsUpserted = window.claudeLink.onBridgeSessionsUpserted((payload) => {
+    sessionStore.markBridgeSessionUpserted(payload.sessionId);
+  });
 });
 
 onBeforeUnmount(() => {
@@ -107,7 +130,9 @@ onBeforeUnmount(() => {
   if (stopCommandChanges) stopCommandChanges();
   if (stopGlobalCommandChanges) stopGlobalCommandChanges();
   if (stopQueueEvents) stopQueueEvents();
+  if (stopBridgeSessionsUpserted) stopBridgeSessionsUpserted();
   if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
+  if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
 });
 </script>
 
@@ -120,6 +145,7 @@ onBeforeUnmount(() => {
     <ToolDiffDialog />
     <UpdateDialog />
     <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">设置保存失败，部分修改可能未保存</div>
+    <div v-if="sessionErrorToastVisible" class="global-toast global-toast--error global-toast--stacked">{{ sessionErrorToastText }}</div>
   </AppLayout>
 </template>
 
@@ -141,5 +167,10 @@ onBeforeUnmount(() => {
   border: 1px solid var(--color-fail-strong);
   background: color-mix(in srgb, var(--color-fail) 12%, var(--color-panel));
   color: var(--color-fail-strong);
+}
+
+/* A4：会话错误 toast 与保存失败 toast 同屏时纵向错开，避免重叠（双失败同瞬的边角）。 */
+.global-toast--stacked {
+  top: 3.5rem;
 }
 </style>

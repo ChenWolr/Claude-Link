@@ -8,7 +8,7 @@
 // docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）。
 
 import { reactive } from 'vue';
-import { JPEG_CHUNK_BYTES, JPEG_QUALITY, placeSegment, checkPixelBudget, deriveMaxPageHeightByMemory, DEFAULT_EXPORT_BUDGET } from '@shared/export-image';
+import { JPEG_CHUNK_BYTES, JPEG_QUALITY, placeSegment, checkPixelBudget, deriveMaxPageHeightByMemory, deriveMaxPageHeightCss, DEFAULT_EXPORT_BUDGET, estimateExportPercent } from '@shared/export-image';
 import type {
   ExportImagePhase,
   PngCaptureSelfResponse,
@@ -92,18 +92,33 @@ function measureItemHeights(expectedCount: number): number[] | null {
   return itemHeights;
 }
 
-/** 按 item 累积高度切页（item 为原子单元；单项超页预算不再自成一项走到捕获期才失败，
- *  hb10 P2-11：置 runnerState.oversizeItem 提前收口，由 runExport 以 item-over-budget 快速失败）。 */
-function splitPages(itemCount: number, itemHeights: number[], overhead: number, maxHeight: number): { start: number; end: number }[] {
+/** 按 item 累积高度切页（item 为原子单元）。A15（D13-F1）：maxHeight=常规页高（JPEG 1500），
+ *  hardCap=像素预算反推的单页硬上限——超常规页高但未超 hardCap 的长消息自成「变高页」
+ *  （JPEG 各页独立成图无跨页拼接，天然兼容；捕获期 checkPixelBudget 仍逐页兜底），不再
+ *  整单失败；变高页实际渲染高含页固定 overhead（export-header 等），故硬上限预检按
+ *  overhead+h>hardCap 判定（压线变高页不再漏到捕获期才报 page-over-budget）；仅此才置
+ *  runnerState.oversizeItem 提前收口，由 runExport 以 item-over-budget 快速失败（hb10-P2-11
+ *  机制保留）。 */
+function splitPages(itemCount: number, itemHeights: number[], overhead: number, maxHeight: number, hardCap: number): { start: number; end: number }[] {
   runnerState.oversizeItem = null;
   const pages: { start: number; end: number }[] = [];
   let start = 0;
   let acc = 0;
   for (let i = 0; i < itemCount; i++) {
     const h = itemHeights[i] ?? 0;
-    if (h > maxHeight) {
+    if (overhead + h > hardCap) {
       runnerState.oversizeItem = { index: i, heightPx: h };
       return pages;
+    }
+    if (h > maxHeight) {
+      // 变高页：前置内容先成页，超限项独占一页，后续内容重开累积。
+      if (i > start) {
+        pages.push({ start, end: i });
+      }
+      pages.push({ start: i, end: i + 1 });
+      start = i + 1;
+      acc = 0;
+      continue;
     }
     if (i > start && overhead + acc + h > maxHeight) {
       pages.push({ start, end: i });
@@ -112,7 +127,7 @@ function splitPages(itemCount: number, itemHeights: number[], overhead: number, 
     }
     acc += h;
   }
-  pages.push({ start, end: itemCount });
+  if (start < itemCount) pages.push({ start, end: itemCount });
   return pages;
 }
 
@@ -122,7 +137,8 @@ function report(
   partial: { phase: ExportImagePhase; page: number; totalPages: number; segment: number; segmentsInPage: number; message: string; percent?: number },
 ): void {
   runnerState.phase = partial.phase;
-  api.reportProgress({ jobId, sessionId: '', sessionName: runnerState.sessionName, percent: partial.percent ?? 0, ...partial });
+  // B4（D13-F2）：进度按已完成段数/总段数推进（payload 数据齐全），不再恒 0 到 done 才跳 100。
+  api.reportProgress({ jobId, sessionId: '', sessionName: runnerState.sessionName, percent: partial.percent ?? estimateExportPercent(partial.phase, partial.page, partial.totalPages, partial.segment, partial.segmentsInPage), ...partial });
 }
 
 export async function runExport(): Promise<void> {
@@ -181,7 +197,10 @@ export async function runExport(): Promise<void> {
     const overhead = Math.max(0, docHeightAll - itemsContentHeight);
 
     // PNG 规划：先 probe 实测比例，用内存预算反推单页 CSS 高度上限（远大于 JPEG 的 1500）。
+    // A15（D13-F1）：hardCap=单页硬上限——JPEG 仅在存在超常规页高（>1500）的消息时才 probe
+    // 反推（常规导出零新增 IPC 往返），超限消息在预算内自成变高页；PNG 的内存反推值即硬上限。
     let maxPageHeight = PAGE_HEIGHT_CSS;
+    let hardCap = PAGE_HEIGHT_CSS;
     if (job.format === 'png') {
       const probe = await api.probeSelf({ jobId: job.jobId });
       if (!probe.ok) {
@@ -189,11 +208,26 @@ export async function runExport(): Promise<void> {
         return;
       }
       maxPageHeight = deriveMaxPageHeightByMemory(probe.scaleY, probe.viewportWidthCss);
+      hardCap = maxPageHeight;
+    } else {
+      const tallest = itemHeights.reduce((m, h) => Math.max(m, h), 0);
+      if (tallest > PAGE_HEIGHT_CSS) {
+        const probe = await api.probeSelf({ jobId: job.jobId });
+        if (!probe.ok) {
+          await api.finish({ kind: 'failed', jobId: job.jobId, code: probe.code, message: probe.message });
+          return;
+        }
+        hardCap = deriveMaxPageHeightCss(probe.scaleY, probe.viewportWidthCss);
+      }
     }
-    const pages = splitPages(items.length, itemHeights, overhead, maxPageHeight);
-    // hb10 P2-11：超长单条预检快速失败——文案含条目序号，不再走到捕获期报 page-over-budget。
+    const pages = splitPages(items.length, itemHeights, overhead, maxPageHeight, hardCap);
+    // hb10 P2-11：超像素预算硬上限的单条预检快速失败——文案含条目序号，不再走到捕获期报 page-over-budget。
+    // A15：JPEG 分支文案补「改用 PNG」自救指引（PNG 单页上限更高）；PNG 已是兜底格式维持原文案。
     if (runnerState.oversizeItem) {
-      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'item-over-budget', message: `第 ${runnerState.oversizeItem.index + 1} 条消息高度超过单页上限，无法导出` });
+      const message = job.format === 'jpeg'
+        ? `第 ${runnerState.oversizeItem.index + 1} 条消息过高（约 ${runnerState.oversizeItem.heightPx}px），超过 JPEG 单页像素预算，无法导出；请改用 PNG 导出（单页上限更高）或精简会话后重试`
+        : `第 ${runnerState.oversizeItem.index + 1} 条消息高度超过单页上限，无法导出`;
+      await api.finish({ kind: 'failed', jobId: job.jobId, code: 'item-over-budget', message });
       return;
     }
     if (pages.length > MAX_PAGES) {

@@ -259,7 +259,9 @@ async function main(): Promise<void> {
   {
     const src = readRel('src/main/ipc-handlers.ts');
     const at = src.indexOf('ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
-    const region = at >= 0 ? src.slice(at, at + 900) : '';
+    // 窗口 900→1000 + 口径注：A10（D07-F2）rootDir 组装改 effectiveUserHome() ?? os.homedir()
+    // （覆盖时与 watcher/证据链同根；无覆盖时同值）——os.homedir() 字面以回退分支形态仍在窗口内。
+    const region = at >= 0 ? src.slice(at, at + 1000) : '';
     const sub: string[] = [];
     if (at < 0) sub.push('缺 SKILL_PROJECT_DIRS_GET handler 注册');
     else {

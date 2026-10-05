@@ -55,8 +55,8 @@ watch(() => route.query, (q) => {
 // cliPath/cliVersion/workingDirectory 由系统维护（自动检测/未开放编辑），不纳入快照。
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
-  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'queueEnabled', 'taskDelayMinutes', 'themePaletteId', 'fontScale', 'contextWindowByAlias', 'defaultThinkingLevel', 'disableAutoMemory', 'disableBackgroundTasks', 'disableCron', 'disableFeedbackSurvey', 'disableTelemetry', 'disableNonessentialTraffic',
-  'notifyOnLeave', 'minimizeToTray', 'skillOverrides',
+  'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'queueEnabled', 'taskDelayMinutes', 'themePaletteId', 'fontScale', 'defaultThinkingLevel', 'disableAutoMemory', 'disableBackgroundTasks', 'disableCron', 'disableFeedbackSurvey', 'disableTelemetry', 'disableNonessentialTraffic',
+  'notifyOnLeave', 'minimizeToTray', 'autoRetryReasoningReplay', 'skillOverrides',
 ] as const;
 
 // hb10-CFG-04：'projection-failed' = 保存本身成功但 settings.local.json 投影失败（可见性）。
@@ -684,7 +684,7 @@ const updateStageTone = computed(() => {
               </label>
               <label class="field field--toggle">
                 <span class="field-label">开启队列任务</span>
-                <span class="field-desc">开启后：回复生成中可在会话框继续输入并发送，消息与附件自动加入队列，当前回复结束后按下方间隔自动逐个执行。关闭后：回复生成中禁止发送，队列不自动执行（仍可在队列面板手动「开始」）。</span>
+                <span class="field-desc">开启后：回复生成中可在会话框继续输入并发送，消息与附件自动加入队列，当前回复结束后按下方间隔自动逐个执行。关闭后：回复生成中禁止发送，队列不自动执行；重新开启后点「恢复」/「立即执行」或完成一次会话可重新调度。</span>
                 <input v-model="store.config.queueEnabled" type="checkbox" />
               </label>
               <label class="field">
@@ -729,6 +729,14 @@ const updateStageTone = computed(() => {
                 <span class="field-label">后台运行</span>
                 <span class="field-desc">开启后托盘图标常驻右下角；关闭窗口最小化到托盘，右键托盘「退出」才结束程序。</span>
                 <input v-model="store.config.minimizeToTray" type="checkbox" />
+              </label>
+              <!-- B10（D11-F1）：README「可关闭」承诺的 UI 入口——开关直写既有配置字段
+                   autoRetryReasoningReplay（默认开），经 PERSISTED_FIELDS 自动保存链落盘；
+                   主进程韧性层每次回合终态点读 getConfig()，保存后对后续错误即时生效。 -->
+              <label class="field field--toggle">
+                <span class="field-label">上游错误自动重试</span>
+                <span class="field-desc">命中 reasoning_replay 等上游错误时自动原样重试一次；关闭后不再自动重发，仅提示错误。</span>
+                <input v-model="store.config.autoRetryReasoningReplay" type="checkbox" />
               </label>
             </div>
           </div>

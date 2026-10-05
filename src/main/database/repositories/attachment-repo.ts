@@ -250,6 +250,14 @@ export function listDraftAttachments(): AttachmentRecord[] {
   return rows.map(toRecord);
 }
 
+/** A11（D08-F1）：按会话列 draft 附件——暂存余量权威校验的 DB 行侧来源。 */
+export function listDraftAttachmentsBySession(sessionId: string): AttachmentRecord[] {
+  const rows = getConnection()
+    .prepare("SELECT * FROM attachments WHERE session_id = ? AND status = 'draft'")
+    .all(sessionId) as AttachmentRow[];
+  return rows.map(toRecord);
+}
+
 export function listAllStorageKeys(): string[] {
   const rows = getConnection()
     .prepare('SELECT storage_key FROM attachments')

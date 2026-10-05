@@ -2,11 +2,16 @@
 // 不直接暴露文件系统路径给 renderer；绝对路径仅在主进程内部（resolveAttachmentRecords）流转。
 import {
   AttachmentInputError,
+  classifyAttachment,
   detectDirectImageFormat,
   sanitizeAttachmentFilename,
   validateAttachmentBytes,
   validateImageDimensions,
 } from './attachment-policy';
+import {
+  filterDraftAttachmentsByQuota,
+  type DraftQuotaItem,
+} from '../../shared/draft-attachment-quota';
 import {
   type StagedAttachmentInput,
   cleanupStalePartFiles,
@@ -25,9 +30,42 @@ import type {
   AttachmentPreviewResponse,
   AttachmentRecord,
   AttachmentSummary,
+  CloneMessageAttachmentsResult,
   StoredAttachmentFile,
 } from '../../shared/types/attachment';
 import { logger } from '../utils/logger';
+
+/**
+ * A11（D08-F1）：会话当前草稿余量清单——DB draft 行 + 暂态 Map 同会话项合并，
+ * 供暂存权威校验与四入口预检同口径取数（数量 ≤10 / 总预算 50MiB 的「已有」侧基数）。
+ */
+export function listDraftQuotaItems(sessionId: string): DraftQuotaItem[] {
+  const items: DraftQuotaItem[] = attachmentRepo
+    .listDraftAttachmentsBySession(sessionId)
+    .map((r) => ({ filename: r.filename, kind: r.kind, sizeBytes: r.sizeBytes }));
+  for (const r of transientAttachments.values()) {
+    if (r.sessionId === sessionId && r.status === 'draft') {
+      items.push({ filename: r.filename, kind: r.kind, sizeBytes: r.sizeBytes });
+    }
+  }
+  return items;
+}
+
+/**
+ * A11（D08-F1）：暂存权威余量校验——「已有草稿 + 本项」三约束任一超限即抛
+ * AttachmentInputError（发生在校验落盘之前：不写文件、不建行/不进暂态 Map，杜绝不可见草稿）。
+ * kind 按文件名/MIME 近似（classifyAttachment），真实 kind 由随后的字节级校验裁定；
+ * 近似与真实不一致的边缘（无扩展名伪装图片等）误差由发送时 validateSendBudget 兜底。
+ */
+function assertDraftQuotaAllows(sessionId: string, filename: string, mimeType: string | undefined, sizeBytes: number): void {
+  const kind = classifyAttachment(filename, mimeType ?? '');
+  const decision = filterDraftAttachmentsByQuota(listDraftQuotaItems(sessionId), [
+    { filename, kind, sizeBytes },
+  ]);
+  if (decision.rejected.length > 0) {
+    throw new AttachmentInputError(decision.rejected[0].reason);
+  }
+}
 
 /** 校验 + 原子写文件（不建 DB 行）。正式暂存与暂态暂存两条路径共用，保证校验语义不分裂。 */
 async function validateAndStoreAttachment(input: StagedAttachmentInput): Promise<{
@@ -71,6 +109,8 @@ async function validateAndStoreAttachment(input: StagedAttachmentInput): Promise
  * id 由调用方（IPC handler）提供，与 repo 记录、storageKey 共用。
  */
 export async function stageAttachment(input: StagedAttachmentInput): Promise<AttachmentSummary> {
+  // A11（D08-F1）：余量权威校验先于校验落盘（超限即拒：不写文件、不建 draft 行）。
+  assertDraftQuotaAllows(input.sessionId, input.filename, input.mimeType, input.bytes.byteLength);
   const info = await validateAndStoreAttachment(input);
   try {
     return attachmentRepo.createAttachment({
@@ -101,6 +141,8 @@ const transientAttachments = new Map<string, AttachmentRecord>();
 
 /** 暂态暂存：校验+落盘与正式路径完全一致，但记录进内存 Map 而非 DB。 */
 export async function stageTransientAttachment(input: StagedAttachmentInput): Promise<AttachmentSummary> {
+  // A11（D08-F1）：余量权威校验先于校验落盘（超限即拒：不写文件、不进暂态 Map）。
+  assertDraftQuotaAllows(input.sessionId, input.filename, input.mimeType, input.bytes.byteLength);
   const info = await validateAndStoreAttachment(input);
   const record: AttachmentRecord = {
     id: input.id,
@@ -144,25 +186,35 @@ export async function removeTransientAttachment(sessionId: string, id: string): 
  */
 export function bindTransientAttachmentsToSession(sessionId: string, ids: string[]): void {
   const boundIds: string[] = [];
+  // B8（D08-F2）：bindOne 弹出的暂态记录在此留底——失败回滚删行后放回 Map，附件回到
+  // 暂态可重试状态（否则失联 id 重试物化被静默跳过，发送被「部分附件不存在」阻断）。
+  const consumedRecords: AttachmentRecord[] = [];
   try {
     for (const id of ids) {
-      bindOne(sessionId, id, boundIds);
+      bindOne(sessionId, id, boundIds, consumedRecords);
     }
   } catch (err) {
     // hb10-ATT-V01：物化失败回滚已建行（收集已建 id 逐个 deleteAttachment），不再死锁半态。
     for (const id of boundIds) {
       try { attachmentRepo.deleteAttachment(id); } catch { /* 尽力回滚 */ }
     }
+    // B8（D08-F2）：未转正的回暂态 Map（成功位行已删/失败位行未建成）；不在 Map 的 id
+    // （DB 已转正/用户已移除）不在留底名单、保持原状，已转正行不受回滚影响。
+    for (const record of consumedRecords) {
+      transientAttachments.set(record.id, record);
+    }
     throw err;
   }
 }
 
-function bindOne(sessionId: string, id: string, boundIds: string[]): void {
+function bindOne(sessionId: string, id: string, boundIds: string[], consumedRecords: AttachmentRecord[]): void {
   {
     const record = transientAttachments.get(id);
     if (!record) return;
     // hb10-ATT-04（收窄）：归属守卫——记录不属于目标会话（会话 id 传错/复用）跳过。
     if (record.sessionId !== sessionId) return;
+    // B8：留底先于弹出——createAttachment 抛错时记录仍可经回滚放回 Map。
+    consumedRecords.push(record);
     transientAttachments.delete(id);
     attachmentRepo.createAttachment({
       id: record.id,
@@ -271,7 +323,7 @@ export async function getAttachmentPreview(request: {
 export async function cloneMessageAttachmentsToDraft(
   sessionId: string,
   messageId: string,
-): Promise<AttachmentSummary[]> {
+): Promise<CloneMessageAttachmentsResult> {
   const summaries = attachmentRepo.getAttachmentsByMessageIds([messageId]).get(messageId) ?? [];
   logger.info(`cloneMessageAttachmentsToDraft: sessionId=${sessionId} messageId=${messageId} 消息附件数=${summaries.length}`);
   for (const sum of summaries) {
@@ -279,12 +331,27 @@ export async function cloneMessageAttachmentsToDraft(
       throw new AttachmentInputError('消息不属于当前会话');
     }
   }
-  if (summaries.length === 0) return [];
+  if (summaries.length === 0) return { created: [], rejected: [] };
+
+  // A11（D08-F1）：克隆按「克隆后总量」预检——已有草稿 + 本消息附件组合裁定，余量内
+  // 逐个克隆，超量项不读盘不落盘、以 rejected 名单返回（调用方 notice，替代旧的
+  // 「全量克隆后由 renderer store 拒收」——超量克隆件不再滞留为不可见草稿）。
+  // accepted/rejected 元素引用传入对象，据引用相等映射回源摘要。
+  const quotaOf = new Map<AttachmentSummary, DraftQuotaItem>();
+  const incoming = summaries.map((s) => {
+    const q: DraftQuotaItem = { filename: s.filename, kind: s.kind, sizeBytes: s.sizeBytes };
+    quotaOf.set(s, q);
+    return q;
+  });
+  const decision = filterDraftAttachmentsByQuota(listDraftQuotaItems(sessionId), incoming);
+  const allowed = new Set(decision.accepted);
+  const rejected = decision.rejected.map((r) => ({ filename: r.item.filename, reason: r.reason }));
 
   const created: AttachmentSummary[] = [];
   const createdIds: string[] = [];
   try {
     for (const sum of summaries) {
+      if (!allowed.has(quotaOf.get(sum)!)) continue;
       const record = attachmentRepo.getAttachment(sum.id);
       if (!record) throw new AttachmentInputError(`附件「${sum.filename}」记录缺失`);
       const bytes = await readStoredAttachmentBytes(record);
@@ -298,8 +365,8 @@ export async function cloneMessageAttachmentsToDraft(
       created.push(staged);
       createdIds.push(staged.id);
     }
-    logger.info(`cloneMessageAttachmentsToDraft: 成功克隆 ${created.length} 个附件为草稿`);
-    return created;
+    logger.info(`cloneMessageAttachmentsToDraft: 成功克隆 ${created.length} 个附件为草稿（预检拒 ${rejected.length} 个）`);
+    return { created, rejected };
   } catch (err) {
     // 任一失败：清理已产生的 draft 副本（record + file），整组不返回。
     for (const id of createdIds) {

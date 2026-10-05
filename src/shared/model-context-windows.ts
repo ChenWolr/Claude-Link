@@ -1,131 +1,45 @@
-// 内置「模型 → 上下文窗口」静态表 + fallback 解析（主进程与渲染层共享纯逻辑）。
+// 上下文窗口「按供应商模型」覆盖的共享纯逻辑（主进程与渲染层共用，不依赖 electron）。
 //
-// 背景：Anthropic /v1/models 不返回 context_window，model-resolver 只能拿到
-// max_output_tokens；而真实窗口（SDK result.modelUsage.contextWindow）要等连通
-// Claude 后才到达。本表仅作查表工具（selftest 与潜在复用），不参与运行时 fallback：
-// 未设置用户覆盖时严格按 200k（用户要求）。
+// 分母优先级（从高到低）：
+//   1. 供应商库内模型条目 contextWindow —— 用户按模型手动设置（本模块
+//      lookupProviderModelContextWindow 查询；同 ID 模型在不同供应商下互不影响）
+//   2. SDK 上报真实窗口 —— result.modelUsage.contextWindow（会话 lastContextWindow 持久化）
+//   3. DEFAULT_CONTEXT_WINDOW（200k）
 //
-// 命中规则：标准化（小写 + trim）后按「最长前缀」匹配——避免 'glm-5.2' 被更短的
-// 别名抢匹配，也兼容带后缀的变体（glm-5.2-1m、claude-sonnet-4-6 等）。
-// 未命中返回 null。
-//
-// 数值按各家官方文档；新模型按需补充。宁可少放，不要放错——命中错误的窗口比
-// 落到 fallback 更误导。
-
-import { extractModelMappings } from './settings-parser';
-import type { ModelAlias } from './types/config';
+// 历史「全局按别名覆盖」链（按别名的窗口覆盖配置表 + 对应 legacy env 键 + 内置模型静态
+// 查表）已删除；存量 legacy env 值由 migrateLegacyContextWindowOverrides（provider-library）
+// 在启动时一次性移植到对应模型条目或废弃（仅删键）。
 
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
-// [前缀, 窗口大小]。前缀已小写；匹配时对模型名做 toLowerCase + trim。
-export const MODEL_CONTEXT_WINDOWS: ReadonlyArray<readonly [prefix: string, window: number]> = [
-  // Claude 官方（Anthropic）。Fable 5 是 1M 长上下文模型；4.x opus/sonnet/haiku 为 200k。
-  ['claude-fable-5', 1_000_000],
-  ['claude-opus-4', 200_000],
-  ['claude-sonnet-4', 200_000],
-  ['claude-haiku-4', 200_000],
-  // 兜底前缀：覆盖 3.x 及未来未列版本（同族默认仍 200k；fable 族默认 1M）。
-  ['claude-fable', 1_000_000],
-  ['claude-opus', 200_000],
-  ['claude-sonnet', 200_000],
-  ['claude-haiku', 200_000],
+// 手动设置上下文窗口的合法区间（自 context-window-override.ts 迁来，该文件已删除）。
+export const CONTEXT_WINDOW_MIN = 1_000;
+export const CONTEXT_WINDOW_MAX = 2_000_000;
 
-  // 智谱 GLM。glm-5.2 为 1M 上下文（用户环境确认 [1m]）。其它版本暂不入表，落到 fallback。
-  ['glm-5.2', 1_000_000],
-
-  // DeepSeek。V3 / R1 均为 64k。
-  ['deepseek-chat', 64_000],
-  ['deepseek-reasoner', 64_000],
-];
-
-// 标准化模型名后按最长前缀匹配。返回 null 表示未知，交给 fallback 链。
-export function lookupModelWindow(model: string | null | undefined): number | null {
-  if (!model) return null;
-  const m = model.trim().toLowerCase();
-  if (!m) return null;
-  let best: number | null = null;
-  let bestLen = -1;
-  for (const [prefix, win] of MODEL_CONTEXT_WINDOWS) {
-    if (m.startsWith(prefix) && prefix.length > bestLen) {
-      best = win;
-      bestLen = prefix.length;
-    }
-  }
-  return best;
-}
-
-// 上下文窗口 fallback 链（优先级从高到低）：
-//   1. contextWindowByAlias[alias] —— 用户按别名显式设置（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>），
-//                                    即使 SDK 上报真实窗口也覆盖（以设置为准）
-//   2. lastContextWindow           —— 该会话从 SDK result.modelUsage 拿到的真实值（已持久化）
-//   3. DEFAULT_CONTEXT_WINDOW（200000）
-// 注：内置 MODEL_CONTEXT_WINDOWS 表不再参与 fallback（用户要求「未设置严格默认 200k」），
-//     lookupModelWindow 仅保留为查表工具，供 selftest 与未来可能的复用。
-export function resolveContextWindow(opts: {
-  lastContextWindow?: number | null;
-  alias?: string | null;
-  contextWindowByAlias?: Partial<Record<string, number>> | null;
-}): number {
-  const { lastContextWindow, alias, contextWindowByAlias } = opts;
-  // 1. 用户按别名显式设置（最高优先级，「以设置为准」）——即使 SDK 上报了真实窗口，
-  //    用户强制设置的值也覆盖之（解决端点误报 200k、但用户已知模型实际为 1M 的场景）。
-  const byAlias = alias ? contextWindowByAlias?.[alias] : undefined;
-  if (typeof byAlias === 'number' && byAlias > 0) return byAlias;
-  // 2. SDK 真实上报（连通后）
-  if (typeof lastContextWindow === 'number' && lastContextWindow > 0) return lastContextWindow;
-  // 3. 默认 200k
-  return DEFAULT_CONTEXT_WINDOW;
-}
-
-// 主进程用：会话启动时（SDK 尚未上报真实窗口）按当前别名/真实模型名解析初始窗口。
-// aliasOrModel 可能是别名(sonnet)或真实模型名(glm-5.2)；真实模型名时按 modelMappings
-// 反查别名再查 contextWindowByAlias。命中用户按别名设的覆盖则返回，否则 200k。
-// 与渲染层 resolveContextWindow 共享优先级语义（用户设置 > 200k），避免主进程推送的初始
-// windowSize 覆盖前端 switchSession 已算出的正确分母。
-export function resolveContextWindowForSession(opts: {
-  aliasOrModel?: string | null;
-  advancedJson: string;
-  contextWindowByAlias?: Partial<Record<ModelAlias, number>> | null;
-}): number {
-  const { aliasOrModel, advancedJson, contextWindowByAlias } = opts;
-  const byAlias = contextWindowByAlias ?? {};
-  if (aliasOrModel) {
-    const direct = byAlias[aliasOrModel as ModelAlias];
-    if (typeof direct === 'number' && direct > 0) return direct;
-    const mappings = extractModelMappings(advancedJson);
-    const target = aliasOrModel.toLowerCase();
-    for (const [alias, mapped] of Object.entries(mappings)) {
-      if (mapped && mapped.toLowerCase() === target) {
-        const v = byAlias[alias as ModelAlias];
-        if (typeof v === 'number' && v > 0) return v;
-      }
-    }
-  }
-  return DEFAULT_CONTEXT_WINDOW;
-}
-
-// 与 resolveContextWindowForSession 同样的反查逻辑（别名直查 → 真实模型名反查别名），
-// 但未命中用户配置时返回 undefined（而非 200k 默认）。供 buildSdkOptions 注入
-// CLAUDE_CODE_MAX_CONTEXT_TOKENS 用：仅当用户显式配置了该别名的窗口才注入，没配则不注入
-// （让 CC 自决），避免把未配置的官方模型（如 fable 5 的 1M）误降级到 200k。
-export function lookupUserContextWindow(opts: {
-  aliasOrModel?: string | null;
-  advancedJson: string;
-  contextWindowByAlias?: Partial<Record<ModelAlias, number>> | null;
-}): number | undefined {
-  const { aliasOrModel, advancedJson, contextWindowByAlias } = opts;
-  const byAlias = contextWindowByAlias ?? {};
-  if (aliasOrModel) {
-    const direct = byAlias[aliasOrModel as ModelAlias];
-    if (typeof direct === 'number' && direct > 0) return direct;
-    const mappings = extractModelMappings(advancedJson);
-    const target = aliasOrModel.toLowerCase();
-    for (const [alias, mapped] of Object.entries(mappings)) {
-      if (mapped && mapped.toLowerCase() === target) {
-        const v = byAlias[alias as ModelAlias];
-        if (typeof v === 'number' && v > 0) return v;
-      }
+// 在供应商模型列表里按精确 id 查手动覆盖窗口。
+// contextWindow > 0 才视为已设置（undefined/null/0 = 未设置）；其余情况一律 undefined
+// （交给下游链回落 SDK 上报/默认 200k）。精确匹配不做大小写/前缀归一。
+export function lookupProviderModelContextWindow(
+  models: Array<{ id: string; contextWindow?: number | null }> | null | undefined,
+  modelId: string | null | undefined,
+): number | undefined {
+  if (!models || !modelId) return undefined;
+  for (const m of models) {
+    if (m.id === modelId && typeof m.contextWindow === 'number' && m.contextWindow > 0) {
+      return m.contextWindow;
     }
   }
   return undefined;
+}
+
+// UI 输入校验：'' → null（=清除意图）；非十进制数字串/越界（1,000–2,000,000）→ 错误文案。
+// 合法输入返回 null。文案为产品内单源（ProviderModelList 浮层卡就近错误提示同款）。
+export function providerModelWindowInputError(raw: string): string | null {
+  if (raw === '') return null;
+  if (!/^\d+$/.test(raw)) return 'token 数须为 1,000 – 2,000,000 的整数';
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < CONTEXT_WINDOW_MIN || n > CONTEXT_WINDOW_MAX) {
+    return 'token 数须为 1,000 – 2,000,000 的整数';
+  }
+  return null;
 }

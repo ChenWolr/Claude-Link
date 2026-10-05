@@ -256,6 +256,29 @@ async function wechatLogout(): Promise<void> {
   await save({ wechat: { botToken: '' } });
 }
 
+// A14（D12-F2）：清除飞书授权用户——owner 失配（他人抢注/换账号/应用重建）后机器人对所有人
+// 静默且无任何 UI 线索，此前只能手改 profiles.json。传空串走 bridgeSaveConfig 既有清除语义
+//（init.ts ''→null，纯数据落盘不动平台——进行中桥接回合不中断）；manager 每条消息现读
+// profiles，下一个私聊用户自动重新捕获。两段式按钮承载二次确认（渲染层无 window.confirm
+// 先例）：首击进入 armed 态 + 3s 自动退出，二击才执行；保存成功后 Owner 行随
+// config.feishu.ownerOpenId 置 null 消失，回到「等待首个私聊用户」态，重复点击天然幂等。
+const feishuClearArmed = ref(false);
+let feishuClearArmTimer: ReturnType<typeof setTimeout> | null = null;
+async function clearFeishuOwner(): Promise<void> {
+  if (!feishuClearArmed.value) {
+    feishuClearArmed.value = true;
+    if (feishuClearArmTimer) clearTimeout(feishuClearArmTimer);
+    feishuClearArmTimer = setTimeout(() => { feishuClearArmed.value = false; }, 3000);
+    return;
+  }
+  if (feishuClearArmTimer) {
+    clearTimeout(feishuClearArmTimer);
+    feishuClearArmTimer = null;
+  }
+  feishuClearArmed.value = false;
+  await save({ feishu: { ownerOpenId: '' } });
+}
+
 // 批次5.2-5：微信授权用户展示（bindings 匹配 displayName；无匹配回退 userId 前 8 位 + …）。
 const wechatOwnerUserId = computed(() => config.value?.wechat.ownerUserId ?? null);
 const wechatOwnerName = computed(() => {
@@ -303,6 +326,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   qrPollDisposed = true;
   stopQrcodePoll();
+  // A14：清除 armed 态计时器（两段式确认的自动退出定时器）。
+  if (feishuClearArmTimer) {
+    clearTimeout(feishuClearArmTimer);
+    feishuClearArmTimer = null;
+  }
   if (nowTimer !== undefined) {
     window.clearTimeout(nowTimer);
     nowTimer = undefined;
@@ -461,6 +489,10 @@ defineExpose({ refresh: loadAll });
         </label>
         <div v-if="config?.feishu.ownerOpenId" class="im-inline-row">
           <span>Owner：{{ feishuOwnerName || config.feishu.ownerOpenId }}{{ feishuOwnerName ? `（${config.feishu.ownerOpenId}）` : '' }}</span>
+          <button type="button" class="im-act-btn im-act-btn--danger" @click="clearFeishuOwner">
+            {{ feishuClearArmed ? '确认清除？' : '清除授权用户' }}
+          </button>
+          <span v-if="feishuClearArmed" class="im-field-hint">清除后下一个发私聊的用户将自动成为授权用户</span>
         </div>
         <div v-if="feishuTestResult" class="im-inline-row">
           <span v-if="feishuTestResult.ok" class="im-status-pill im-status-pill--ok">连接成功{{ feishuTestResult.botName ? `（机器人：${feishuTestResult.botName}）` : '' }}</span>

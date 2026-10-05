@@ -19,6 +19,9 @@ import SessionToolbar from '../components/chat/SessionToolbar.vue';
 import AttachmentDraftList from '../components/chat/AttachmentDraftList.vue';
 import ExportImageOverlay from '../components/chat/ExportImageOverlay.vue';
 import type { ChatSendPayload, AttachmentSummary } from '../../shared/types/attachment';
+import { filterDraftAttachmentsByQuota, draftQuotaKindFromMime, type DraftQuotaItem } from '../../shared/draft-attachment-quota';
+import { taskEtaText } from '../../shared/queue-eta';
+import { resolveQueueDelaySeconds } from '../../shared/queue-config';
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
@@ -173,9 +176,24 @@ async function stageFiles(files: File[]) {
   if (!store.activeSession || files.length === 0) return;
   if (bridgeLocked.value) return;
   const sessionId = store.activeSession.id;
+  // A11（D08-F1）：暂存前余量预检——「已有草稿 + 本批文件」三约束（数量 10 / 总预算
+  // 50MiB 图片按编码后计 / 单项限额）组合裁定，超量项不发起暂存 IPC，杜绝「先落盘后
+  // 裁剪」产生的不可见草稿滞留。kind 按 MIME 近似（draftQuotaKindFromMime），权威校验
+  // 在主进程 stageAttachment（同样先于落盘）。accepted/rejected 元素引用传入对象，
+  // 据引用相等映射回原 File。
+  const incoming = files.map((f) => ({
+    file: f,
+    quota: { filename: f.name?.trim() || '附件', kind: draftQuotaKindFromMime(f.type), sizeBytes: f.size } as DraftQuotaItem,
+  }));
+  const decision = filterDraftAttachmentsByQuota(draftStore.getAttachments(sessionId), incoming.map((i) => i.quota));
+  const acceptedSet = new Set(decision.accepted);
+  const filesToStage = incoming.filter((i) => acceptedSet.has(i.quota)).map((i) => i.file);
+  if (decision.rejected.length > 0) {
+    showNotice(`附件余量不足，已忽略：${decision.rejected.map((r) => `${r.item.filename}（${r.reason}）`).join('、')}`);
+  }
   const failures: string[] = [];
   const staged: AttachmentSummary[] = [];
-  for (const file of files) {
+  for (const file of filesToStage) {
     try {
       // P1-7：读 bytes 前按 size 早退（与主进程 ATTACHMENT_READ_GUARD_BYTES 同阈值，
       // 渲染层不 import 主进程模块故本地镜像；精确 10/30MiB 区分仍由主进程校验裁定）。
@@ -291,6 +309,7 @@ async function handleSend() {
   sendInflight = true;
   const sessionId = store.activeSession.id;
   let ok = false;
+  let queued = false;
 
   try {
     // v3 两路收敛：
@@ -300,6 +319,7 @@ async function handleSend() {
     const engineRunningThis = taskStore.queueState.sessionId === sessionId && taskStore.queueState.status === 'running';
     if (queueEnabled.value && (sending.value || engineRunningThis)) {
       ok = await taskStore.addTask(sessionId, payload);
+      queued = ok;
     } else {
       ok = await sendMessage(payload);
     }
@@ -309,6 +329,19 @@ async function handleSend() {
 
   if (ok) {
     draftStore.clearAfterAccepted(sessionId);
+    if (queued) {
+      // B3（D09-F7）：入队成功即时反馈——草稿清空后消息要到出队执行才出现在聊天流，
+      // 无反馈易被误读为「消息丢了」。ETA 与任务卡同源（taskEtaText 纯函数，
+      // 口径对齐 TaskQueuePanel.etaFor；addTask 返回即整体替换 tasks，末位即刚入队任务）。
+      const runnable = taskStore.tasks.filter((t) => !t.paused);
+      const eta = taskEtaText({ paused: false }, {
+        status: taskStore.queueState.status,
+        countdownRemaining: taskStore.queueState.countdownRemaining,
+        intervalSeconds: taskStore.queueState.intervalSeconds ?? resolveQueueDelaySeconds(configStore.config.taskDelayMinutes),
+        runnableIndex: runnable.length - 1,
+      });
+      showNotice(`已加入队列${eta ? `，${eta}` : ''}`);
+    }
   } else {
     // 失败：保留文字与附件草稿；错误横幅由 error / taskStore.error 承载，这里补一条 notice 兜底。
     const msg = taskStore.error || error.value;
@@ -326,9 +359,14 @@ async function retryLastFailed() {
   if (last.content) draftStore.setText(sessionId, last.content);
   let recovered = 0;
   try {
-    const cloned = await window.claudeLink.cloneMessageAttachments(sessionId, last.id);
-    recovered = cloned.length;
-    if (recovered > 0) draftStore.addAttachments(sessionId, cloned);
+    // A11（D08-F1）：克隆返回 { created, rejected }——余量预检拒掉的附件不落盘、
+    // 以名单返回（D08-F12 返回值丢弃缺口顺带修复：rejected 弹 notice 而非静默）。
+    const result = await window.claudeLink.cloneMessageAttachments(sessionId, last.id);
+    recovered = result.created.length;
+    if (recovered > 0) draftStore.addAttachments(sessionId, result.created);
+    if (result.rejected.length > 0) {
+      showNotice(`部分附件超限未恢复：${result.rejected.map((r) => r.filename).join('、')}`);
+    }
   } catch (e) {
     showNotice(`附件恢复失败：${e instanceof Error ? e.message : String(e)}`);
   }

@@ -119,7 +119,11 @@ watch(
   },
 );
 
-function handleSearchClear() {
+function handleSearchClear(evt: Event) {
+  // A2（D01-F1）：type=search 的 @search 事件在按 Enter 时同样触发（Chromium 行为）——
+  // 值非空即 Enter 确认，直接 return 保持过滤；点原生 X / 按 Esc 清除时浏览器已把值置空，
+  // 守卫放行走清空逻辑恢复全量列表。
+  if ((evt.target as HTMLInputElement).value !== '') return;
   searchQuery.value = '';
   store.searchSessions('');
 }

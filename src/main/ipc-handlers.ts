@@ -20,6 +20,7 @@ import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderPro
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
 import { collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
+import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
@@ -65,9 +66,11 @@ import {
   assertAttachmentsReadyForSend,
   cloneMessageAttachmentsToDraft,
   cleanupDetachedAttachments,
+  listDraftQuotaItems,
 } from './modules/attachment-service';
+import { DRAFT_QUOTA_MAX_COUNT } from '../shared/draft-attachment-quota';
 import { prepareAttachmentPrompt } from './modules/attachment-prompt-builder';
-import type { ChatSendPayload, SendMessageResult, AttachmentSummary } from '../shared/types/attachment';
+import type { ChatSendPayload, SendMessageResult, AttachmentSummary, CloneMessageAttachmentsResult } from '../shared/types/attachment';
 import type { BridgeConfigSaveInput } from '../shared/types/bridge';
 import {
   bridgeConfigGet, bridgeConfigSave, bridgeStatusGet, bridgeFeishuTest,
@@ -218,7 +221,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET, async () => {
     // Y-1（2026-09-19 X-123 批评审 §2）：用户根映射先取（独立单槽共享）；null 哨兵=枚举超时——
     // 载荷恒回对象 + 超时标记（渲染层据此不覆盖映射槽/不置就绪旗标），dirs 三源 await 内联不动。
-    const userDirNames = await collectUserSkillDirNames(path.join(os.homedir(), '.claude', 'skills'));
+    // A10（D07-F2）：用户根与全链同口径（effectiveUserHome = 子进程实际生效 USERPROFILE/HOME，
+    // 与证据扫描/command-source-watcher 同源）——advancedJson.env 覆盖 home 时映射不再扫错根；
+    // 无覆盖时二者同值，行为不变。undefined 回退宿主 home（按函数语义核对）。
+    const userDirNames = await collectUserSkillDirNames(path.join(effectiveUserHome() ?? os.homedir(), '.claude', 'skills'));
     return {
       dirs: await collectSkillProjectDirs({
         recentDirs: listRecentWorkspaces(),
@@ -257,7 +263,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     const apiKey = decryptProviderApiKey(profile);
     // hb13-v B2（F-03）：解密哨兵按未配置短路——损坏态不得把哨兵串放进 x-api-key/Bearer 头。
     if (apiKey === DECRYPT_FAILED) throw new Error('该供应商的 API Key 解密失败（密钥损坏，请重新输入），无法查询模型。');
-    if (!apiKey) throw new Error('该供应商未配置 API Key，无法查询；可在下拉框手动输入模型 ID 添加。');
+    // B7（D02-F5）key-less 放行：空 key 不拦截，凭据头由 model-resolver 按 key 门控（空 key 省略）。
     return fetchAvailableModels(profile, apiKey, forceRefresh === true);
   });
   // 模型行内测试（r5）：指定供应商 + 指定模型真实 spawn CLI，直返汇总结果。
@@ -890,12 +896,17 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       title: '选择附件（图片 / 文档 / 文件）',
     });
     if (result.canceled || !result.filePaths.length) return { attachments: [], errors: [] };
-    // hb10-ATT-06：一次最多 10 个附件——多选超出部分截断（暂存即限量）。
-    if (result.filePaths.length > 10) result.filePaths = result.filePaths.slice(0, 10);
-
+    // A11（D08-F1）+ hb10-ATT-06：一次最多 10 个附件——暂存即限量；旧「本次多选 ≤10」
+    // slice 截断不感知草稿余量且被截断文件无提示，已废——改为按「当前草稿余量」预检：
+    // 余量外的文件不读盘直接进 errors（D08-F10 提示缺口顺带），余量内的才走读盘暂存链。
+    const room = DRAFT_QUOTA_MAX_COUNT - listDraftQuotaItems(sessionId).length;
+    const filePaths = room <= 0 ? [] : result.filePaths.slice(0, room);
     const attachments: AttachmentSummary[] = [];
     const errors: Array<{ filename: string; message: string }> = [];
-    for (const filePath of result.filePaths) {
+    for (const skipped of result.filePaths.slice(filePaths.length)) {
+      errors.push({ filename: path.basename(skipped), message: '草稿附件已达 10 个上限，已忽略' });
+    }
+    for (const filePath of filePaths) {
       const filename = path.basename(filePath);
       try {
         // P1-7：读入内存前先 stat 早退——数 GB 文件不再进 Buffer（防主进程 OOM）。
@@ -967,9 +978,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // 克隆历史消息附件为草稿：异步发送失败后「重新编辑发送」用；跨会话防护在 service 内。
+  // A11（D08-F1）：返回 { created, rejected }——余量预检拒掉的附件以名单返回（不落盘）。
   ipcMain.handle(
     IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE,
-    async (_event, sessionId: string, messageId: string): Promise<AttachmentSummary[]> =>
+    async (_event, sessionId: string, messageId: string): Promise<CloneMessageAttachmentsResult> =>
       cloneMessageAttachmentsToDraft(sessionId, messageId),
   );
 

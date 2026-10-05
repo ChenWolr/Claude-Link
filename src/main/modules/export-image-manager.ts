@@ -19,6 +19,7 @@ import {
   checkPngMemoryBudget,
   checkSnapshotBudget,
   computeProgressPercent,
+  ExportResults,
   validatePngCaptureRequest,
   validatePngFinishRequest,
 } from '../../shared/export-image';
@@ -108,6 +109,7 @@ interface ActiveJob {
   finishTimer: NodeJS.Timeout;   // R3：reset 看门狗；超时触发 failJob
   noProgressTimer: NodeJS.Timeout; // hb10 P1-1：无进展硬顶定时器（与 finishTimer 同生命周期）
   lastProgressAt: number;        // hb10 P1-1：最近一次进展时间戳（resetWatchdog 维护）
+  lastCapturePercent: number;    // P3-12：最近一次捕获/编码进度估算（钳 [0,99] 单调，保存阶段保持显示用）
   smoke: boolean;
   removeOriginListener: () => void;
 }
@@ -253,10 +255,11 @@ async function readExportDomGeometry(win: BrowserWindow): Promise<DomGeometry | 
   }
 }
 
-// —— PNG probe：渲染完整页 + 稳定后，读真实视口/位图比例（预算反推用）——
+// —— probe：渲染完整页 + 稳定后，读真实视口/位图比例（预算反推用）。
+// A15（D13-F1）：JPEG 存在超常规页高单条时亦经此反推像素预算硬上限——probe 只读 DOM 几何
+// + capturePage 测比例，与导出格式无关，原 PNG-only 门禁放开（beginPage/finishPage 仍仅 PNG）。 ——
 async function pngProbeSelfImpl(_request: PngProbeSelfRequest): Promise<PngProbeSelfResponse> {
   if (!active) return { ok: false, code: 'no-job', message: '没有进行中的导出任务' };
-  if (active.format !== 'png') return { ok: false, code: 'wrong-format', message: 'probe 仅 PNG 模式' };
   const win = active.exportWindow;
   if (win.isDestroyed()) return { ok: false, code: 'window-gone', message: '导出窗口已销毁' };
   const g = await readExportDomGeometry(win);
@@ -535,7 +538,7 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
 
     // 阶段四：保存对话框 + 写入（单张经对话框确认后先删后写可覆盖、多张排他移动不覆盖）+ 冲突处理。result 为判别联合（saved/cancelled/failed）。
     active.phase = 'waitingForDestination';
-    makeProgress({ phase: 'waitingForDestination', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, message: '请选择保存位置…' });
+    makeProgress({ phase: 'waitingForDestination', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, percent: active.lastCapturePercent, message: '请选择保存位置…' });
     const result = await performSave(active, pages);
     if (result.status === 'saved') {
       active.phase = 'done';
@@ -597,7 +600,7 @@ async function performSave(job: ActiveJob, pages: { page: number; path: string; 
   }
 
   job.phase = 'saving';
-  makeProgress({ phase: 'saving', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, message: `正在保存 ${pages.length} 张图片…` });
+  makeProgress({ phase: 'saving', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, percent: job.lastCapturePercent, message: `正在保存 ${pages.length} 张图片…` });
 
   try {
     if (!multi) {
@@ -653,6 +656,23 @@ async function failJob(message: string): Promise<void> {
   logger.error(`[export] job ${active.jobId} 失败：${message}`);
   if (active.doneReject) active.doneReject(new Error(message));
   await cleanup('failed');
+}
+
+/** B4（D13-F3）：用户主动取消——cancelled 终态（对齐「已取消保存」的 resolve 语义，不算失败），
+ * 收口与 failJob 同构：清定时器、发终态进度、cleanup（terminate worker、销毁导出窗口即中断
+ * 捕获循环、删临时目录无残留产物），done promise 以 ExportResults.cancelled() resolve。 */
+async function cancelJob(): Promise<void> {
+  if (!active) return;
+  if (active.terminal) return;
+  active.terminal = true;
+  active.phase = 'cancelled';
+  clearTimeout(active.finishTimer);
+  clearTimeout(active.noProgressTimer);
+  makeProgress({ phase: 'cancelled', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, percent: 0, message: '已取消导出' });
+  logger.info(`[export] job ${active.jobId} 用户取消`);
+  const resolve = active.doneResolve;
+  await cleanup('cancelled');
+  if (resolve) resolve(ExportResults.cancelled());
 }
 
 // —— 统一 cleanup ——
@@ -871,6 +891,7 @@ async function startImageExportImpl(
     finishTimer: setTimeout(() => { void failJob(`导出超时（${WATCHDOG_RESET_MS / 1000} 秒无进展）`); }, WATCHDOG_RESET_MS),
     noProgressTimer: setTimeout(checkNoProgress, WATCHDOG_NO_PROGRESS_MS),
     lastProgressAt: Date.now(),
+    lastCapturePercent: 0,
   };
 
   // 完成 promise：resolve 终态结果（saved/cancelled/failed）。
@@ -927,6 +948,24 @@ export function registerExportImageHandlers(): void {
     return { ok: true, jobId: r.jobId };
   });
 
+  // B4（D13-F3）：EXPORT_IMAGE_CANCEL——用户取消。仅捕获/编码（含 preparing/planning）阶段放行：
+  // waitingForDestination/saving 由保存对话框自身的取消承载（performSave 持有 tempDir 文件句柄，
+  // 中途抽走会把「用户取消」误报成写盘 failed）；终态后迟到点击 no-op。
+  ipcMain.handle(IPC_CHANNELS.EXPORT_IMAGE_CANCEL, async (event) => {
+    if (!event.senderFrame || event.senderFrame.parent !== null) {
+      return { ok: false };
+    }
+    if (!active || active.terminal) return { ok: false };
+    const cancellable =
+      active.phase === 'preparing' ||
+      active.phase === 'planning' ||
+      active.phase === 'capturing' ||
+      active.phase === 'encoding';
+    if (!cancellable) return { ok: false };
+    await cancelJob();
+    return { ok: true };
+  });
+
   // EXPORT_RENDER_GET_JOB：仅当前 job 的 export 窗口可取。
   ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_GET_JOB, async (event) => {
     if (!isExportSender(event.sender)) return null;
@@ -948,8 +987,9 @@ export function registerExportImageHandlers(): void {
     return await captureSelfImpl(request as CaptureSelfRequest);
   });
 
-  // v4.1 PNG 页协议（仅 PNG 模式生效：probe/begin 在 impl 内显式校验 format；finish 无显式校验，
-  // 靠 currentPngPage 仅 PNG 模式非空——JPEG 模式恒 null——间接以 no-page 拒绝）。
+  // v4.1 PNG 页协议：probe 与格式无关（A15 起 JPEG 反推像素预算亦用，见 pngProbeSelfImpl）；
+  // begin 在 impl 内显式校验 format（仅 PNG）；finish 无显式校验，靠 currentPngPage 仅 PNG
+  // 模式非空——JPEG 模式恒 null——间接以 no-page 拒绝。
   ipcMain.handle(IPC_CHANNELS.EXPORT_RENDER_PROBE_SELF, async (event, request: PngProbeSelfRequest) => {
     if (!isExportSender(event.sender)) return { ok: false, code: 'bad-sender', message: '非法 sender' } satisfies PngProbeSelfResponse;
     if (!request || typeof request.jobId !== 'string') return { ok: false, code: 'bad-request', message: '非法请求参数' } satisfies PngProbeSelfResponse;
@@ -990,6 +1030,13 @@ export function registerExportImageHandlers(): void {
     resetWatchdog('render-progress');
     active.phase = payload.phase;
     makeProgress({ phase: payload.phase, page: payload.page, totalPages: payload.totalPages, segment: payload.segment, segmentsInPage: payload.segmentsInPage, percent: payload.percent, message: payload.message });
+    // P3-12（2026-10-02 对抗 review）：记录最近的捕获/编码进度估算（钳 [0,99]、单调）——
+    // waitingForDestination/saving 阶段 makeProgress 以它保持显示，消除 99%→0% 回零跳变；
+    // 封顶 99 与 estimateExportPercent 口径一致（100 只由终态 done 显式发）。
+    // NaN 加固（2026-10-02 复审遗留 P3）：Math.min/max 会把 NaN/非数值传染给 lastCapturePercent
+    // （单调基线一旦 NaN 永久 NaN），故先 Number.isFinite 守卫，非数值跳过本次记录、不毒化。
+    const pct = Number.isFinite(payload.percent) ? Math.max(0, Math.min(99, payload.percent)) : null;
+    if (pct !== null) active.lastCapturePercent = Math.max(active.lastCapturePercent, pct);
   });
 
   // EXPORT_RENDER_FINISH：判别联合，终态一次。

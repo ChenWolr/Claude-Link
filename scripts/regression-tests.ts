@@ -2594,7 +2594,9 @@ function testImageLightboxAccessibilityWiring(): void {
   assert.ok(!state.includes('trigger.focus()'), '焦点恢复应由 ImageLightbox 组件单点负责，composable 只清理状态');
   assert.ok(/value\.trigger\s*\?\?/.test(lightbox), '打开灯箱时须优先保存显式 trigger');
   assert.ok(lightbox.includes('document.activeElement instanceof HTMLElement'), '无 trigger 时须回退当前 activeElement');
-  assert.ok(/else\s*\{\s*await nextTick\(\);\s*restoreFocus\(\);/.test(lightbox), '关闭后须等待 Teleport v-if 移除再恢复焦点');
+  // A9 同步（2026-09-30，5db45f7 先例最小同步）：关闭分支插入 escHandle 出栈调用（use-esc-stack），
+  // 字面窗放宽为有界任意行——语义钉不变：关闭后仍须 await nextTick 再 restoreFocus。
+  assert.ok(/else\s*\{[\s\S]{0,200}?await nextTick\(\);\s*restoreFocus\(\);/.test(lightbox), '关闭后须等待 Teleport v-if 移除再恢复焦点');
   assert.ok(lightbox.includes('target.focus()'), '关闭灯箱后组件须恢复触发图片焦点');
   assert.match(closeRule, /min-width:\s*(?:44px|2\.75rem)/, '关闭按钮须显式保证最小 44px 宽度');
   assert.match(closeRule, /min-height:\s*(?:44px|2\.75rem)/, '关闭按钮须显式保证最小 44px 高度');
@@ -3598,7 +3600,9 @@ function testFinishKillLateArrivalContracts(): void {
   assert.ok(removeIdx !== -1 && wasCurrentIdx < removeIdx, 'wasCurrent 必须先于 removeEntryIfCurrent 捕获（移除后恒假）');
   assert.ok(/if \(wasCurrent\) cleanupSessionStall\(sessionId\);/.test(region), 'cleanupSessionStall 须以 wasCurrent 为门（迟到的 finishKill 不得清掉新回合的卡死 tracker）');
   assert.ok(/wasCurrent && \(reason === 'user' \|\| reason === 'watchdog'\)/.test(region), 'aborted 终态补发须以 wasCurrent 为门（回合已自然收尾时不得再叠加 aborted）');
-  assert.ok(/wasCurrent && \(reason === 'user' \|\| reason === 'watchdog'\)[\s\S]{0,700}schedulePostTurnProbe\(sessionId, mainWindow, entry\.queryInstance/.test(region), 'finishKill 探针调度须以 wasCurrent 为门（新回合在途时旧代际探针作废）');
+  // 窗口 700→1300（A13/D11-F6 5db45f7 最小同步）：gate 与探针间插入 watchdog 挂账兑现
+  //（A13 修复行，~400 字符），断言语义不变（探针仍以 wasCurrent 为门）。
+  assert.ok(/wasCurrent && \(reason === 'user' \|\| reason === 'watchdog'\)[\s\S]{0,1300}schedulePostTurnProbe\(sessionId, mainWindow, entry\.queryInstance/.test(region), 'finishKill 探针调度须以 wasCurrent 为门（新回合在途时旧代际探针作废）');
   assert.ok(/abortEntry\(entry\);/.test(region), 'abortEntry 保持无条件（entry 级、幂等，迟到时杀掉旧回合残留 CLI 仍正确）');
 }
 

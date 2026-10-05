@@ -41,6 +41,19 @@ const terminalTone = computed(() => {
           <span class="export-card__pct">{{ exportStore.indeterminate ? '…' : exportStore.percent + '%' }}</span>
         </div>
       </div>
+      <!-- B4（D13-F3）：长导出逃生口——运行中且未到 100%、且处于主进程可取消阶段
+           （preparing/planning/capturing/encoding）才渲染（终态由主进程 cancelled 收口，
+           临时产物随 cleanup 删除无残留）。P2-3（2026-10-02 对抗 review）：
+           waitingForDestination/saving 须排除——主进程 cancellable 白名单不放行保存阶段
+           （performSave 持 tempDir 句柄，中途抽走会把用户取消误报成写盘 failed），
+           {ok:false} 在 store cancel() 链路被静默吞，按钮照常渲染即成死按钮（保存大文件
+           数秒期间点击无任何反应）；保存阶段对话框自带取消。 -->
+      <button
+        v-if="exportStore.running && exportStore.percent < 100 && exportStore.phase !== 'waitingForDestination' && exportStore.phase !== 'saving'"
+        type="button"
+        class="export-card__cancel"
+        @click="exportStore.cancel()"
+      >取消</button>
     </div>
   </div>
 </template>
@@ -122,6 +135,21 @@ const terminalTone = computed(() => {
   font-variant-numeric: tabular-nums;
   min-width: 36px;
   text-align: right;
+}
+/* B4（D13-F3）：取消按钮——次级形态，悬停转 danger 提示不可逆。 */
+.export-card__cancel {
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+.export-card__cancel:hover {
+  border-color: var(--color-fail);
+  color: var(--color-fail);
 }
 .export-card[data-tone='ok'] {
   border-color: color-mix(in srgb, var(--color-accent) 50%, var(--color-border));

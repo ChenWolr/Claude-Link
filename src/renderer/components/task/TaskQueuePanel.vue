@@ -9,6 +9,8 @@ import { taskEtaText, formatCountdownHuman } from '../../../shared/queue-eta';
 import { resolveQueueDelaySeconds } from '../../../shared/queue-config';
 import type { Task } from '../../../shared/types/task';
 import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
+import { renderMarkdown } from '../../utils/markdown';
+import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 import { useNow } from '../../composables/use-now';
 import TaskItem from './TaskItem.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
@@ -41,6 +43,11 @@ const lastLiveByGroup = ref<Record<string, number>>({});
 // 思考中在组体顶部显 ThinkingBlock；子 agent message 落库后由 store 清空，回落到落库思考气泡。
 function subAgentThinkingText(agentId: string): string {
   return sessionStore.activeSubAgentThinking[agentId] ?? '';
+}
+// A1（D05-F1）：取某子 agent 的实时正文文本（text_delta 按 parentToolUseId 路由来的）。
+// 正文流式期间在组体顶部显 markdown 预览；message 落库后由 store 清空，回落到落库正文气泡。
+function subAgentLiveText(agentId: string): string {
+  return sessionStore.activeSubAgentText[agentId] ?? '';
 }
 // 计时展示：已完成组 → 真实完成跨度（frozenSeconds）；运行中组 → 客户端实时跳动；
 // 回合结束但未完成（中断）→ 兜底冻结 live。逐组判定，并发子 Agent 各自在自身完成时停表，互不串扰。
@@ -118,7 +125,9 @@ const queueBarHint = computed<{ text: string; showResumeAll: boolean }>(() => {
       break;
   }
   if (taskStore.tasks.length > 0 && runnableCount.value === 0) {
-    return { text: '所有任务已暂停 · 点恢复/全部恢复后执行', showResumeAll: false };
+    // D09-F9：全部 pending 均暂停即存在可恢复任务——「全部恢复」随文案渲染
+    // （resumeAllTasks：resumeAllPending + armFromUserAction，对该态语义正确）。
+    return { text: '所有任务已暂停 · 点恢复/全部恢复后执行', showResumeAll: true };
   }
   return { text: '待命中', showResumeAll: false };
 });
@@ -175,6 +184,8 @@ const subAgentGroups = computed(() =>
     titleByToolUseId: buildTitleByToolUseId(sessionStore.messages),
     // Bug2：实时思考快照——让尚无落库消息的子 agent 也建组，思考中即可见 ThinkingBlock。
     liveThinkingByAgent: sessionStore.activeSubAgentThinking,
+    // A1（D05-F1）：实时正文快照——仅有 live 正文、尚无落库消息的子 agent 同样预建组。
+    liveTextByAgent: sessionStore.activeSubAgentText,
   }),
 );
 
@@ -547,6 +558,13 @@ function handleDragReorder() {
               </button>
               <div v-if="isSubAgentGroupExpanded(g.parentAgentId, g.running)" class="subagent-group__body">
                 <ThinkingBlock v-if="subAgentThinkingText(g.parentAgentId)" :content="subAgentThinkingText(g.parentAgentId)" streaming />
+                <!-- A1（D05-F1）：子 agent 实时正文预览（message 落库后由 store 清空，回落到落库正文气泡） -->
+                <div
+                  v-if="subAgentLiveText(g.parentAgentId)"
+                  class="subagent-live-text markdown-body"
+                  v-html="renderMarkdown(subAgentLiveText(g.parentAgentId))"
+                  v-enrich
+                />
                 <template v-for="item in g.items" :key="item.key">
                   <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
                   <MessageBubble v-else :message="item.message" />
@@ -1332,6 +1350,16 @@ function handleDragReorder() {
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
+}
+
+/* A1（D05-F1）：子 agent 实时正文预览（流式中、落库前）；落库后由 store 清空自然消失 */
+.subagent-live-text {
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--color-text);
+  border-left: 2px solid var(--color-accent);
+  padding-left: 8px;
+  word-break: break-word;
 }
 
 @keyframes subagent-dot-pulse {

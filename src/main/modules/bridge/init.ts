@@ -143,7 +143,18 @@ function buildManagerDeps(rt: BridgeRuntime): BridgeManagerDeps {
   return {
     dispatcher: (sessionId: string, text: string): Promise<BridgeTurnResult> =>
       dispatchBridgeTurn(engine, persistenceDeps, sessionId, text),
-    createSession: (name, model, workingDir) => sessionRepo.createSession(name, model, workingDir),
+    // A3（D01-F2/D12-F4）：manager 全部建会话路径（/new、悬空重建）都经此封装——建会话落库
+    // 成功后向主窗口广播 BRIDGE_SESSIONS_UPSERTED（fire-and-forget，webContents 已销毁则静默），
+    // 渲染层据此去抖重拉会话列表，新桥接会话 ≤1s 进侧栏；未覆盖任何 IM 消息语义。
+    createSession: (name, model, workingDir) => {
+      const session = sessionRepo.createSession(name, model, workingDir);
+      try {
+        rt.opts.getWindow()?.webContents.send(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, { sessionId: session.id });
+      } catch {
+        // webContents 可能已销毁
+      }
+      return session;
+    },
     getBinding: (sessionKey) => bindingRepo.getBindingBySessionKey(db, sessionKey),
     upsertBinding: (b) => bindingRepo.upsertBinding(db, b),
     rebind: (sessionKey, newSessionId) => void bindingRepo.rebindSession(db, sessionKey, newSessionId),

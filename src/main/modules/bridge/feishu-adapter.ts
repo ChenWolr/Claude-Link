@@ -8,6 +8,7 @@
 import {
   renderFeishuOutbound,
 } from '../../../shared/bridge/feishu-outbound';
+import { safeCutWidth } from '../../../shared/bridge/safe-cut';
 import type { BridgeInboundMessage, BridgeAdapterStatus } from '../../../shared/types/bridge';
 
 /** @larksuiteoapi/node-sdk 最小使用面（动态 import 后 as 断言；fake 注入同形即可）。 */
@@ -287,9 +288,9 @@ export function createFeishuAdapter(opts: FeishuAdapterOptions): FeishuAdapter {
     }
     if (!text.trim()) return;
 
-    // B2：超长消息截断后照常处理。
+    // B2：超长消息截断后照常处理（B12/D12-F1：切点落代理对中间时回退 1，不出孤立代理）。
     if (text.length > MAX_MSG_SIZE) {
-      text = text.slice(0, MAX_MSG_SIZE);
+      text = text.slice(0, safeCutWidth(text, 0, MAX_MSG_SIZE));
     }
 
     const chatId = message.chat_id || '';
