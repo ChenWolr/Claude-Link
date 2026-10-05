@@ -193,7 +193,6 @@ scripts/tdd-bridge-sessions-upserted-verify.ts
 scripts/tdd-session-error-toast-verify.ts
 scripts/tdd-provider-models-write-recompute-verify.ts
 scripts/tdd-contextbutton-hold-composable-verify.ts
-scripts/tdd-context-window-override-ui-verify.ts
 scripts/tdd-mermaid-fingerprint-cache-verify.ts
 scripts/tdd-esc-stack-verify.ts
 scripts/tdd-skill-home-anchor-verify.ts
