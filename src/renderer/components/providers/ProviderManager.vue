@@ -19,6 +19,7 @@ import ProviderEditor from './ProviderEditor.vue';
 import ProviderModelList from './ProviderModelList.vue';
 import ProviderModelPicker from './ProviderModelPicker.vue';
 import type { ModelInfo, ProviderModel, ProviderProfileView } from '../../../shared/types/config';
+import { providerModelWindowInputError } from '../../../shared/model-context-windows';
 
 const store = useProviderStore();
 const interactionStore = useInteractionStore();
@@ -257,6 +258,32 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
     pushToast(error instanceof Error ? error.message : '删除模型失败');
   }
 }
+
+// ── 窗口覆盖提交（方案 E2）────────────────────────────────────────────
+// raw 为子组件 trim 后输入（空串 = 清除覆盖）。行内浮层已实时拦截非法值，此处再校验一次
+// 兜底；写入走 persistModels 串行链——链内按 id 对最新列表重查改写（A5 同款纪律，链外
+// 点击时快照不进入），清除写 null 保持键存在（与 sanitize 的未设置语义兼容）。
+async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<void> {
+  const p = current.value;
+  if (!p) return;
+  const error = providerModelWindowInputError(raw);
+  if (error !== null) {
+    pushToast(error);
+    return;
+  }
+  try {
+    await persistModels(p.id, (latest) => latest.map((m) => (
+      m.id === model.id
+        ? { ...m, ...(raw === '' ? { contextWindow: null } : { contextWindow: Number(raw) }) }
+        : m
+    )));
+    pushToast(raw === ''
+      ? `已清除 ${model.id} 上下文窗口覆盖`
+      : `已更新 ${model.id} 上下文窗口 ${Number(raw).toLocaleString()} token`);
+  } catch (saveError) {
+    pushToast(saveError instanceof Error ? saveError.message : '更新上下文窗口失败');
+  }
+}
 </script>
 
 <template>
@@ -346,6 +373,7 @@ async function handleModelRemove(model: ProviderModel, index: number): Promise<v
             :models="current.models"
             @remove="handleModelRemove"
             @toast="(msg: string) => pushToast(msg)"
+            @set-window="handleModelWindowSet"
           />
         </div>
         <div class="pool-note">设置页只维护可选的供应商与模型；会话中可自由选用任意供应商 / 模型。</div>
