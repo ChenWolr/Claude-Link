@@ -32,17 +32,6 @@ export interface AppConfig {
   taskDelayMinutes: number;
   themePaletteId: string;
   fontScale: 'small' | 'medium' | 'large';
-  // 按模型类型别名单独设置的上下文窗口（token 数）。在 settings.json 语义下表示为
-  // env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>（仅 settings-parser 解析层/脚本双向映射，
-  // 应用运行时不写该键，本字段直接经 electron-store 存取消费）。未列出的别名 = 未设置，
-  // 圆环分母回落 DEFAULT_CONTEXT_WINDOW（200k）。优先级（hb13-v B7 F-1）：
-  // 用户按别名显式设置 > SDK 上报真实窗口 > 200k。两条下游链路：①圆环占比分母（渲染层
-  // ContextButton getter；主进程 readContextWindow 兜底推送/落库同链）；
-  // ②主进程注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS（生产 query 经 buildSdkOptions→
-  // buildClaudeLinkSettingsBlock 写 settings.env，post-turn 探针经单源函数
-  // computeContextWindowOverrideTokens 写 Options.env；仅显式配置的别名才注入，
-  // 越界钳制 [100k,1M]；CC 不消费 CLAUDE_LINK_* 键名本身）。
-  contextWindowByAlias: Partial<Record<ModelAlias, number>>;
   // 默认思考强度档位（新会话与未单独设档的会话回落到此值）。
   // 'auto' 在全局层无意义（全局默认本身就是 auto 的回落目标），用 NonAutoThinkingLevel 编译期拦截。
   defaultThinkingLevel: NonAutoThinkingLevel;
@@ -97,6 +86,10 @@ export interface ProviderModel {
   maxTokens: number; // 端点返回的 max_output_tokens（中转网关缺省时回退 max_tokens/context_length），未知为 0
   source: 'queried' | 'manual';
   addedAt: number;
+  // 手动指定的上下文窗口（token）；undefined/null/0 = 未设置。分母优先级：
+  // per-model 手动 > SDK 上报（modelUsage.contextWindow）> 默认 200k。
+  // 同 ID 模型在不同供应商下互不影响（窗口配置随各供应商库内自己的模型条目走）。
+  contextWindow?: number | null;
 }
 
 // 落盘形状：encryptedApiKey 与全局 apiKey 同机制（safeStorage 优先，不可用时明文降级）。

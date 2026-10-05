@@ -6,12 +6,14 @@
 // 每次 query 把 ANTHROPIC_DEFAULT_<ALIAS>_MODEL 全部映射到当前实际模型。
 
 // 解析输入：主进程持解密 key；渲染层持 ProviderProfileView（无 key）。apiKey 为空串即无 key。
+// models 结构上带可选 contextWindow（供应商库内完整 p.models 直接传入，仅类型窄化；
+// 供消费方查 per-model 手动窗口覆盖）。
 export interface ProviderModelSource {
   id: string;
   name: string;
   apiBaseUrl: string;
   apiKey: string;
-  models: Array<{ id: string }>;
+  models: Array<{ id: string; contextWindow?: number | null }>;
 }
 
 export interface SessionModelSelection {
@@ -25,7 +27,13 @@ export interface LastUsedModel {
 }
 
 export interface ResolvedSessionModel {
-  provider: { id: string; name: string; apiBaseUrl: string; apiKey: string } | null;
+  provider: {
+    id: string;
+    name: string;
+    apiBaseUrl: string;
+    apiKey: string;
+    models: Array<{ id: string; contextWindow?: number | null }>;
+  } | null;
   modelId: string | null;
   /** 会话 override 指向的供应商/模型已不在库中（发生了回退）——渲染层一次性 toast 用。 */
   invalidOverride: boolean;
@@ -68,7 +76,13 @@ export function resolveSessionModel(
 
   return {
     provider: provider
-      ? { id: provider.id, name: provider.name, apiBaseUrl: provider.apiBaseUrl, apiKey: provider.apiKey }
+      ? {
+          id: provider.id,
+          name: provider.name,
+          apiBaseUrl: provider.apiBaseUrl,
+          apiKey: provider.apiKey,
+          models: provider.models,
+        }
       : null,
     modelId,
     invalidOverride,
