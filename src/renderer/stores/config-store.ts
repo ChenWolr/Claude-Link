@@ -46,7 +46,6 @@ const defaultConfig: AppConfig = {
   taskDelayMinutes: DEFAULT_TASK_DELAY_MINUTES,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
-  contextWindowByAlias: {},
   defaultThinkingLevel: 'medium',
   // 引擎后台请求六开关默认全开（与主进程 config-manager 默认保持同值；UI 已隐藏）。
   disableAutoMemory: true,

@@ -132,6 +132,31 @@ function main(): void {
     assert.ok(!cliShared.includes(LEGACY_SESSION_RESOLVER), `仍残留 ${LEGACY_SESSION_RESOLVER} import`);
   });
 
+  console.log('\n=== ⑦ 迁移接线：窗口迁移不在 getStore 首初始化、晚于 ensureProviderMigration（P1 修复契约） ===');
+  check('config-manager.ts getStore 函数体（含 createSafeStore if 块）不含 migrateLegacy 调用', () => {
+    const configManager = read('../src/main/modules/config-manager.ts');
+    const body = functionBody(configManager, 'getStore');
+    assert.ok(!body.includes('migrateLegacyContextWindowOverridesToProfiles'), 'getStore 内不得调用窗口迁移（会击穿 ensureProviderMigration 守卫）');
+  });
+  check('index.ts：ensureProviderMigration() 调用行号 < migrateLegacyContextWindowOverridesToProfiles() 调用行号', () => {
+    const main = read('../src/main/index.ts');
+    const lineOf = (re: RegExp): number => {
+      const lines = main.split('\n');
+      const i = lines.findIndex((l) => re.test(l));
+      assert.ok(i >= 0, `index.ts 缺 ${re} 调用行`);
+      return i;
+    };
+    const ensure = lineOf(/ensureProviderMigration\(\);/);
+    const migrate = lineOf(/migrateLegacyContextWindowOverridesToProfiles\(\);/);
+    assert.ok(ensure < migrate, `窗口迁移调用（行 ${migrate + 1}）必须晚于 ensureProviderMigration（行 ${ensure + 1}）`);
+  });
+  check('config-manager.ts 迁移函数含 hadKey 防御（不因迁移创建空 providerProfiles 键）', () => {
+    const configManager = read('../src/main/modules/config-manager.ts');
+    const body = functionBody(configManager, 'migrateLegacyContextWindowOverridesToProfiles');
+    assert.ok(/hadKey\s*=\s*s\.has\('providerProfiles'\)/.test(body), '缺 hadKey = s.has(providerProfiles) 防御');
+    assert.ok(/hadKey \|\| result\.profiles\.length > 0/.test(body), '缺 hadKey || profiles.length > 0 条件载荷');
+  });
+
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
   if (pass + fail === 0) {
     console.error('断言计数为 0——脚本自身缺陷');

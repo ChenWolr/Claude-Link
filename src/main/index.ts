@@ -8,7 +8,7 @@ import { registerIpcHandlers } from './ipc-handlers';
 import { initAppUpdater, scheduleStartupUpdateCheck } from './modules/app-updater';
 import { initBridge, stopBridge } from './modules/bridge/init';
 import { detectCli } from './modules/cli-detector';
-import { ensureProviderMigration, getConfig, onConfigSaved } from './modules/config-manager';
+import { ensureProviderMigration, migrateLegacyContextWindowOverridesToProfiles, getConfig, onConfigSaved } from './modules/config-manager';
 import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe, cancelAllCommandProbes, cancelAllPostTurnProbes, effectiveUserHome } from './modules/sdk-backend';
 import { startCommandSourceWatcher, stopCommandSourceWatcher } from './modules/command-source-watcher';
 import * as taskRepo from './database/repositories/task-repo';
@@ -279,6 +279,9 @@ app.whenReady().then(async () => {
 
     // 多供应商库一次性迁移：老单供应商配置 → ProviderProfile（幂等，键存在即跳过）。
     ensureProviderMigration();
+    // legacy 按别名上下文窗口覆盖 → 供应商库模型条目（必须在 ensureProviderMigration 之后：
+    // 供应商档案迁移先建好 defaultModel 档案，窗口迁移才能移植值进去）。
+    migrateLegacyContextWindowOverridesToProfiles();
 
     // Reset any tasks that were running when app was closed
     // (since their processes died with the app)

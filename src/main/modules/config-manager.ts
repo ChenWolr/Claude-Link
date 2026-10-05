@@ -35,7 +35,7 @@ import { clearProviderModelsCache } from './model-resolver';
 import { resetCliDetectionCache } from './cli-detector';
 import * as path from 'path';
 import { clearProjectionSnapshot } from './settings-projection-merge';
-import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels } from '../../shared/provider-library';
+import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels, migrateLegacyContextWindowOverrides } from '../../shared/provider-library';
 import { logger } from '../utils/logger';
 import { createSafeStore } from '../utils/safe-store';
 import { writeClaudeSettings, SKIP_NO_WORKDIR } from './settings-writer';
@@ -91,7 +91,6 @@ const defaultConfig: StoredConfig = {
   taskDelayMinutes: DEFAULT_TASK_DELAY_MINUTES,
   themePaletteId: DEFAULT_THEME_PALETTE_ID,
   fontScale: DEFAULT_FONT_SCALE,
-  contextWindowByAlias: {},
   // 默认思考强度：medium 是五级中位，最接近原硬编码 adaptive 的「平衡」档，
   // 避免默认开高带来成本/延迟意外。投影层对 medium 不投影以尊重 ~/.claude 配置。
   defaultThinkingLevel: 'medium',
@@ -143,11 +142,43 @@ function emitConfigSaved(): void {
 
 function getStore(): ConfigStore {
   // hb10-CFG-V01：坏 JSON 自愈（safe-store helper 统一实现——启动初始化链不再全跳）。
-  store ??= createSafeStore<ConfigStore>({
-    name: 'claude-link-config',
-    defaults: defaultConfig,
-  });
+  if (!store) {
+    store = createSafeStore<ConfigStore>({
+      name: 'claude-link-config',
+      defaults: defaultConfig,
+    });
+  }
   return store;
+}
+
+// 一次性迁移接线（每次进程启动至多执行一次，纯函数本体幂等）：legacy 按别名窗口 env 键
+// （老「全局按别名」窗口覆盖）→ 供应商库模型条目 contextWindow。可移植值落条目；
+// 无 ANTHROPIC_DEFAULT 映射或库内无该模型的值废弃（仅删键）；ANTHROPIC_DEFAULT_*_MODEL
+// 键不动。结果分别写回 advancedJson 与 providerProfiles 并落库。
+// 必须在 ensureProviderMigration() 之后调用（供应商档案迁移先建好 defaultModel 档案，窗口迁移才能移植值；
+// 且先于其执行会在老用户 store 无 providerProfiles 键时写入空数组键、永久击穿 ensureProviderMigration 的 s.has 守卫）。
+// （export 单独成行是有意的：tdd-provider-model-context-window-ui-verify.ts ⑦ 组 functionBody 以顶格
+//   \nfunction 为函数体截取边界，export 与 function 同行会令 getStore 的截取越界误含本函数名、断言失败。）
+export
+function migrateLegacyContextWindowOverridesToProfiles(): void {
+  const s = getStore();
+  const advancedJson =
+    typeof s.store.advancedJson === 'string' && s.store.advancedJson ? s.store.advancedJson : '{}';
+  const result = migrateLegacyContextWindowOverrides(advancedJson, s.store.providerProfiles ?? []);
+  // 幂等零操作守卫：env 键已删净时纯函数原样返回 advancedJson（含非法 JSON 宽容路径），
+  // 不触发任何写库——二次启动零操作。
+  if (result.advancedJson === advancedJson) return;
+  const hadKey = s.has('providerProfiles');
+  s.set({
+    advancedJson: result.advancedJson,
+    // 迁移纯函数按 spread 逐层拷贝档案（加密 blob 等存储字段原样保留），此处仅类型收窄回存储形状。
+    // hadKey 防御：绝不因迁移创建空 providerProfiles 键——那会击穿 ensureProviderMigration 的
+    // s.has('providerProfiles') 迁移守卫（键存在即视为已迁移）。
+    ...(hadKey || result.profiles.length > 0 ? { providerProfiles: result.profiles as StoredProviderProfile[] } : {}),
+  });
+  logger.info(
+    `上下文窗口覆盖迁移：移植 ${result.migrated.length} 条 / 废弃 ${result.dropped.length} 条（legacy 按别名窗口 env 键已清除）`,
+  );
 }
 
 function encryptApiKey(apiKey: string): Pick<StoredConfig, 'encryptedApiKey' | 'apiKeyEncoding'> {
@@ -232,7 +263,6 @@ export function getConfig(): AppConfig {
     taskDelayMinutes: sanitizeTaskDelayMinutes(config.taskDelayMinutes),
     themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,
     fontScale: config.fontScale ?? DEFAULT_FONT_SCALE,
-    contextWindowByAlias: config.contextWindowByAlias ?? {},
     defaultThinkingLevel,
     // 引擎后台请求六开关收敛：默认全开（?? true 兜底，UI 已隐藏）；存量配置显式 false 优先。
     // disableNonessentialTraffic 字段名沿用旧单开关，存量配置免费迁移到第 6 开关

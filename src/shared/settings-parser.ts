@@ -10,14 +10,11 @@
 // shapes may also use top-level apiKey / apiBaseUrl / baseUrl / model — we accept
 // both. Everything not extracted is preserved verbatim in advancedJson.
 
-import type { ModelAlias } from './types/config';
-
 export interface ImportedSettings {
   apiKey?: string;
   apiBaseUrl?: string;
   defaultModel?: string;
   apiKeyHelper?: string;
-  contextWindowByAlias?: Partial<Record<ModelAlias, number>>;
   advancedJson: string;
 }
 
@@ -98,20 +95,6 @@ export function parseClaudeSettings(content: string): ImportedSettings {
     mappedAlias ??
     (env ? peekString(env, ['ANTHROPIC_MODEL']) : undefined);
   if (defaultModel) result.defaultModel = defaultModel;
-
-  // 上下文窗口按别名覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>）：peek 转 number 回填。
-  // peek 不删——保留在 env，与 apiKey/baseUrl/model-mapping 一致（advancedJson 是完整 settings.json）。
-  const contextWindowByAlias: Partial<Record<ModelAlias, number>> = {};
-  if (env) {
-    for (const alias of MODEL_ALIASES) {
-      const raw = env[`CLAUDE_LINK_CONTEXT_WINDOW_${alias.toUpperCase()}`];
-      let n: number | null = null;
-      if (typeof raw === 'number' && raw > 0) n = raw;
-      else if (typeof raw === 'string' && Number.isFinite(Number(raw)) && Number(raw) > 0) n = Number(raw);
-      if (n !== null) contextWindowByAlias[alias] = n;
-    }
-  }
-  if (Object.keys(contextWindowByAlias).length > 0) result.contextWindowByAlias = contextWindowByAlias;
 
   if (envOriginal) {
     if (env && Object.keys(env).length > 0) {
@@ -336,29 +319,9 @@ export function setModelMappingInAdvancedJson(
   return JSON.stringify(adv, null, 2);
 }
 
-// 单个类型别名 → 上下文窗口（token 数）覆盖，写入 env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>。
-// 与 setModelMappingInAdvancedJson 对称：表单字段即时写回 advancedJson（单一真相源；
-// UI 入口已移除，仅脚本消费）。
-// value 为 null/undefined/非正数时删 key（回落 200k 兜底）。
-export function setContextWindowInAdvancedJson(
-  advancedJson: string,
-  alias: string,
-  value: number | null | undefined,
-): string {
-  const adv = cloneAdv(advancedJson);
-  const env = ensureObject(adv, 'env');
-  const key = `CLAUDE_LINK_CONTEXT_WINDOW_${alias.toUpperCase()}`;
-  if (typeof value === 'number' && value > 0) {
-    env[key] = String(value);
-  } else {
-    delete env[key];
-  }
-  dropEmptyEnv(adv);
-  return JSON.stringify(adv, null, 2);
-}
-
-// 清空"连接"相关 env：apiKey / authToken / baseUrl / 四个类型别名映射 /
-// 四个 CLAUDE_LINK_CONTEXT_WINDOW_* 上下文窗口覆盖。
+// 清空"连接"相关 env：apiKey / authToken / baseUrl / 四个类型别名映射。
+// （legacy 按别名窗口覆盖 env 键已随「按供应商模型」改造删除，存量键由启动迁移清理
+// ——见 provider-library migrateLegacyContextWindowOverrides。）
 // 保留 env 里其它键（如 CLAUDE_CODE_*）。原供"清空连接配置"使用（UI 入口已随多供应商化
 // 移除），现仅 selftest-settings-mapping 等脚本消费（保留以保证清除语义可测）。
 export function stripConnectionFromAdvancedJson(advancedJson: string): string {
@@ -373,7 +336,6 @@ export function stripConnectionFromAdvancedJson(advancedJson: string): string {
     delete envObj.ANTHROPIC_BASE_URL;
     for (const alias of ['SONNET', 'HAIKU', 'OPUS', 'FABLE']) {
       delete envObj[`ANTHROPIC_DEFAULT_${alias}_MODEL`];
-      delete envObj[`CLAUDE_LINK_CONTEXT_WINDOW_${alias}`];
     }
     if (Object.keys(envObj).length === 0) delete adv.env;
   }
