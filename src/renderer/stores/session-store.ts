@@ -15,7 +15,7 @@ import {
   type SessionDisplayStatus,
   type SessionStatus,
 } from '../../shared/session-display-status';
-import { lookupUserContextWindow, resolveContextWindowForSession } from '../../shared/model-context-windows';
+import { lookupProviderModelContextWindow } from '../../shared/model-context-windows';
 import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../../shared/context-usage';
 import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';
 import { computeTurnStartIndex } from '../../shared/turn-boundary';
@@ -178,8 +178,8 @@ export const useSessionStore = defineStore('session', {
     //（队列回合经 task-store 调 recomputeTurnStartIndex）、运行中会话切回时按共享口径重算。
     turnStartIndex: 0,
     // 当前活动会话最近一次 SDK 上报的真实窗口。contextStats getter 分母回退链的第二级
-    //（用户 contextWindowByAlias 覆盖 > 本值 > resolveContextWindowForSession 默认 200k，
-    // 见 hb13-v B7/F-1）；切会话时从 session.lastContextWindow 初始化，收 usage 回调时用 payload 覆盖。
+    //（供应商库 per-model 手动覆盖 > 本值 > 默认 200k，见 hb13-v B7/F-1）；切会话时从
+    // session.lastContextWindow 初始化，收 usage 回调时用 payload 覆盖。
     contextLastWindow: null as number | null,
     // Task 9：canonical 上下文占用（当前窗口 + turn usage + source/freshness/diagnostic）。
     // 单一真相源：ContextButton 只读这里；切换会话时预填持久化 stale 快照（无持久化值才置 null → pending），会话内新 payload 到达即覆盖。
@@ -309,23 +309,19 @@ export const useSessionStore = defineStore('session', {
     // turn usage 仅作参考。无可信当前窗口时 currentUsedTokens/currentPercent 为 null（pending）。
     contextStats(state): ContextStatsView | null {
       if (!state.activeSession) return null;
-      const alias = state.activeSession.modelOverride || state.activeSession.model;
-      // hb10-CTX-02：分母单源化——resolveContextWindowForSession（与主进程 spawn 同源
-      // 的纯函数）替换 byAlias 直查，模型 ID 会话（反查别名）分母不再恒 200k。
-      // hb13-v B7（F-1）：分母优先级恢复「用户 contextWindowByAlias 覆盖 > contextLastWindow
-      // > 默认 200k」（HEAD 契约顺序）——旧实现把 contextLastWindow 提到 ?? 左侧，SDK 误报
-      // 200k 会短路用户 1M 覆盖。lookupUserContextWindow（别名直查 + advancedJson 反查，
-      // 与主进程注入同源）非 undefined 即用户显式覆盖，优先于上报值。
-      const userOverride = lookupUserContextWindow({
-        aliasOrModel: alias,
-        advancedJson: useConfigStore().config.advancedJson,
-        contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
+      // hb10-CTX-02 / hb13-v B7（F-1）：分母优先级「供应商库 per-model 手动覆盖 > contextLastWindow
+      // （SDK 上报）> 默认 200k」——userOverride 经 lookupProviderModelContextWindow 在当回合实际
+      // 连接的供应商模型条目上查（provider-store.resolve 与主进程 spawn 注入同一 resolveSessionModel
+      // 单源），非 undefined 即用户显式覆盖，优先于上报值；旧实现把 contextLastWindow 提到 ?? 左侧，
+      // SDK 误报 200k 会短路用户 1M 覆盖。activeSession.model 为遗留别名（无 provider 解析）时
+      // resolved 无 provider → userOverride=undefined → SDK 上报 > 200k（存量 env 值已由启动迁移
+      // 移植到模型条目，属预期行为）。
+      const resolved = useProviderStore().resolve({
+        providerOverride: state.activeSession.providerOverride ?? null,
+        modelOverride: state.activeSession.modelOverride ?? null,
       });
-      const windowSize = userOverride ?? state.contextLastWindow ?? resolveContextWindowForSession({
-        aliasOrModel: alias,
-        advancedJson: useConfigStore().config.advancedJson,
-        contextWindowByAlias: useConfigStore().config.contextWindowByAlias,
-      });
+      const userOverride = lookupProviderModelContextWindow(resolved?.provider?.models ?? null, resolved?.modelId ?? null);
+      const windowSize = userOverride ?? state.contextLastWindow ?? 200_000;
       const c = state.canonicalContext;
       // review-v2 证据缺口 3：turn usage 只读 canonicalContext，不再回落旧 contextUsage state。
       return {
@@ -881,9 +877,9 @@ export const useSessionStore = defineStore('session', {
         if (this.activeSession?.id !== payload.sessionId) return;
 
         // 真实窗口容量交给 state（provenance）；windowSize/percent 由 contextStats getter 派生。
-        // hb13-v B7（F-1 注释面同步）：getter 分母优先级为「用户 contextWindowByAlias 覆盖
-        //（lookupUserContextWindow 别名直查+advancedJson 反查）> 本值（contextLastWindow 上报）
-        // > 默认 200k」——payload.windowSize（SDK 上报）只是第二级，不再覆盖用户设置的 1M。
+        // hb13-v B7（F-1 注释面同步）：getter 分母优先级为「供应商库 per-model 手动覆盖
+        //（lookupProviderModelContextWindow 当回合实际连接的模型条目直查）> 本值（contextLastWindow
+        // 上报）> 默认 200k」——payload.windowSize（SDK 上报）只是第二级，不再覆盖用户设置的 1M。
         this.contextLastWindow = payload.windowSize;
         // Task 9：canonical 单一真相源。当前窗口主值只读 canonical 字段；turn usage 单列。
         // 关键：turn-usage-only 事件（message/result，currentContextUsedTokens=null）不得把

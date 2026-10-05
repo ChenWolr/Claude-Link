@@ -28,8 +28,7 @@ import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride 
 import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
 import { mapAskUserQuestionCancel } from '../../shared/interaction-cancel';
 import { getProjectOriginFingerprint } from './command-source-watcher';
-import { resolveContextWindowForSession, lookupUserContextWindow } from '../../shared/model-context-windows';
-import type { ModelAlias } from '../../shared/types/config';
+import { lookupProviderModelContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { buildPostTurnProbeArgs } from '../../shared/post-turn-probe';
 import { extractLastEffortFromJsonl, extractLastEffortFromText, EFFORT_TAIL_WINDOW_BYTES, mungeProjectDirName } from '../../shared/effort-truth';
@@ -168,8 +167,8 @@ interface SessionEntry {
   // → TerminateProcess（瞬时不可捕获），打不死卡死在死 socket 上的子进程时兜底硬杀。
   abortController: AbortController | null;
   // 启动时解析出的当前实际模型 ID（供应商库解析；库空时为老别名链结果）。
-  // forwardEvent 推送 turn-usage/压缩 pending 的 windowSize 时按它查上下文覆盖；
-  // canUseTool 的 Agent/Task 调用级 model 改写（唯一实际模型·第二层保险）读的是下方 resolvedModel。
+  // canUseTool 的 Agent/Task 调用级 model 改写（唯一实际模型·第二层保险）读的是下方 resolvedModel；
+  // 上下文窗口查询已切到 per-model 条目（下方 resolvedOverride.providerModels），不再按它查。
   requestedAlias: string | null;
   // 本次 query 解析出的「当前实际模型」ID（resolveSessionModel 结果；库空时 null）。
   // 与 requestedAlias 分开存：requestedAlias 兼作上下文窗口查询键，resolvedModel
@@ -179,6 +178,10 @@ interface SessionEntry {
   providerName: string | null;
   // 本次 query 解析出的完整连接覆盖（post-turn 探针复用，保证回合内环境一致）。
   sessionModelOverride: SessionModelOverride | null;
+  // 本次 query 的 resolveSessionOverride 完整结果（含 providerModels）：readContextWindow 按
+  // override.modelId 在其中查 per-model 手动窗口覆盖（turn-usage/压缩 pending 的兜底分母与
+  // 当回合实际连接同源）。entry 消亡随 deleteEntry 自动回收，无需清理钩子。
+  resolvedOverride: ResolvedSessionOverride | null;
   // 本 Query 的代际序号：除日志区分同 Query 内部重试与 stale resume 重建的新 Query 外，
   // 还是行为契约键——上下文 payload 的 queryGeneration、runtime 快照/压缩账单的同代际守卫
   // （review-v3 High-1/High-2）与 post-turn 探针代际（probeInstance）都由它充当，旧代际迟到结果据此让位。
@@ -739,6 +742,7 @@ function createEntry(): SessionEntry {
     resolvedModel: null,
     providerName: null,
     sessionModelOverride: null,
+    resolvedOverride: null,
     streamingPrompt: null,
     forceKill: null,
     queryInstance: nextQueryInstance.value++,
@@ -811,21 +815,13 @@ function deleteEntry(sessionId: string, entry: SessionEntry): void {
 }
 
 // ── 读取初始上下文窗口（SDK 未上报真实值时的兜底）────────────────────
-// 按当前会话请求的别名/真实模型名查用户设的覆盖（env.CLAUDE_LINK_CONTEXT_WINDOW_<ALIAS>），
-// 命中则返回，否则 200k。与渲染层 resolveContextWindow 共享优先级语义，避免主进程推送的
-// 初始值覆盖前端 switchSession 已算出的正确分母。aliasOrModel 来自 entry.requestedAlias。
-function readContextWindow(aliasOrModel?: string | null): number {
-  try {
-    const config = getConfig();
-    return resolveContextWindowForSession({
-      aliasOrModel: aliasOrModel ?? null,
-      advancedJson: config.advancedJson,
-      contextWindowByAlias: config.contextWindowByAlias,
-    });
-  } catch {
-    // ignore
-  }
-  return 200000;
+// 按当回合实际连接（entry.resolvedOverride）在供应商库模型条目上查手动窗口覆盖
+// （lookupProviderModelContextWindow），命中则返回，否则 200k。与渲染层 contextStats getter
+// 共享同一优先级语义（per-model 手动 > SDK 上报 > 200k），避免主进程推送的初始值覆盖
+// 前端 switchSession 已算出的正确分母。
+function readContextWindow(entry?: SessionEntry | null): number {
+  const override = entry?.resolvedOverride ?? null;
+  return lookupProviderModelContextWindow(override?.providerModels ?? null, override?.modelId ?? null) ?? 200000;
 }
 
 // 把 config.cliPath（可能是裸命令名 'claude' 或 'npx claude'）解析成 SDK 能直接 spawn 的绝对路径。
@@ -944,6 +940,9 @@ onConfigSaved(() => {
 interface ResolvedSessionOverride extends SessionModelOverride {
   providerName: string | null;
   providerId: string | null; // hb12-PRV-03：漂移 current 携带供应商 id（同名可区分）
+  // 供应商库内完整模型列表（含 per-model contextWindow）：readContextWindow 与
+  // CLAUDE_CODE_MAX_CONTEXT_TOKENS 注入按 override.modelId 在其中查手动覆盖。
+  providerModels: Array<{ id: string; contextWindow?: number | null }>;
   invalidOverride: boolean;
 }
 
@@ -964,6 +963,7 @@ function resolveSessionOverride(opts: SpawnOptions): ResolvedSessionOverride | n
     modelId: resolved.modelId,
     providerName: resolved.provider.name,
     providerId: resolved.provider.id, // hb12-PRV-03：漂移 current 需 id（同名供应商可区分）
+    providerModels: resolved.provider.models,
     invalidOverride: resolved.invalidOverride,
   };
 }
@@ -1020,15 +1020,14 @@ function notifyEffectiveConnectionDrift(
 
 // hb10-CTX-01：生产 query 与 post-turn 探针共用的窗口 override 计算（单源）——
 // 探针窗口与生产一致（用户覆盖不配置时探针按 200k 计占比的分母漂移修复）。
-// hb13-v 批C 注记（engine-sdk F5）：「一致」仅指本共享函数；入参推导两侧不同源——
-// 探针侧 aliasOrModel 取 override?.modelId ?? fullOpts.model ?? default（不读 opts.modelOverride），
-// 生产侧 modelOverride 优先；有 modelOverride 无 provider 覆盖的会话探针分母可能与生产漂移（仅诊断展示值）。
+// hb13-v 批C 注记（engine-sdk F5）原「入参推导两侧不同源」已收敛（按模型覆盖改造）：
+// 两侧入参同为当回合 resolveSessionOverride 结果（providerModels + modelId），
+// 不再有 aliasOrModel 推导分叉。
 function computeContextWindowOverrideTokens(input: {
-  aliasOrModel: string;
-  advancedJson: string;
-  contextWindowByAlias: Partial<Record<ModelAlias, number>>;
+  providerModels: Array<{ id: string; contextWindow?: number | null }>;
+  modelId: string;
 }): number | null {
-  const userWindow = lookupUserContextWindow(input);
+  const userWindow = lookupProviderModelContextWindow(input.providerModels, input.modelId);
   if (typeof userWindow !== 'number' || userWindow <= 0) return null;
   // 钳制 [1e5, 1e6]：与 SDK autoCompactWindow zod 范围对齐，超界 CC 行为未定义。
   // hb13-v 批C 补注（engine-sdk F7④）：超界钳制丢失的 warn 日志在此恢复（抽取单源时丢失）。
@@ -1052,7 +1051,7 @@ function buildClaudeLinkSettingsBlock(
   opts: SpawnOptions,
   thinkingConfig: ThinkingConfigResult,
   requestedAlias: string,
-  modelOverride: SessionModelOverride | null,
+  modelOverride: ResolvedSessionOverride | null,
   effectivePermissionMode: PermissionMode,
 ): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined } {
   // 内联 settings——claude-link 显式设置叠加在原生来源之上（managed < user < project < local
@@ -1074,20 +1073,20 @@ function buildClaudeLinkSettingsBlock(
     applySessionOverrideEnv(settingsEnv, modelOverride);
   }
 
-  // 按当前模型别名动态注入 CC 的真实窗口 override（CLAUDE_CODE_MAX_CONTEXT_TOKENS）。
+  // 按当回合实际连接的模型条目动态注入 CC 的真实窗口 override（CLAUDE_CODE_MAX_CONTEXT_TOKENS）。
   // CC 对第三方/未知模型名（如 glm-5.2，非 claude- 开头）默认回退 200k → 提前压缩丢上下文。
-  // 用户在配置页按别名设的窗口在此注入，让 CC 按该窗口处理。仅当用户显式配置该别名时注入
-  // （lookupUserContextWindow 返 undefined 则不注入），避免把未配的官方模型（如 fable 5 的 1M）降级。
+  // 供应商库内该模型条目显式设置的 contextWindow 在此注入，让 CC 按该窗口处理。仅当条目显式
+  // 设置时注入（lookupProviderModelContextWindow 返 undefined 则不注入），避免把未设置的官方
+  // 模型（如 fable 5 的 1M）降级。库空/老别名链回合（override null）无 per-model 覆盖可查，不注入。
   // 优先级：flag settings.env（此处）> options.env（buildSpawnEnv）；MAX_CONTEXT_TOKENS > [1m] 后缀。
   // v2.1.193+ 对未知模型名直接生效，无需 DISABLE_COMPACT；若日后改回 claude-* 官方名需配合 DISABLE_COMPACT。
   const clamped = computeContextWindowOverrideTokens({
-    aliasOrModel: requestedAlias,
-    advancedJson: config.advancedJson,
-    contextWindowByAlias: config.contextWindowByAlias,
+    providerModels: modelOverride?.providerModels ?? [],
+    modelId: modelOverride?.modelId ?? '',
   });
   if (clamped != null) {
     settingsEnv.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(clamped);
-    logger.info(`[${sessionId}] 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS=${clamped} (alias=${requestedAlias})`);
+    logger.info(`[${sessionId}] 注入 CLAUDE_CODE_MAX_CONTEXT_TOKENS=${clamped} (model=${modelOverride?.modelId ?? requestedAlias})`);
   }
 
   // 引擎后台请求六开关：勾选时注入 settings.env（SDK 侧最高优先级通道，键级压过
@@ -1163,6 +1162,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   entry.resolvedModel = override?.modelId ?? null;
   entry.providerName = override?.providerName ?? null;
   entry.sessionModelOverride = override;
+  entry.resolvedOverride = override;
   sessionLastTurnOverride.set(sessionId, override);
   notifyEffectiveConnectionDrift(sessionId, mainWindow, override);
   // Task 3 / review-v1 F6：显式 settings 由 buildClaudeLinkSettingsBlock 单一构造，query 与 probe 共用，
@@ -1256,7 +1256,7 @@ function forwardEvent(
       // readContextWindow 兜底值（未配覆盖的 1M 模型=200k）不得缩水 DB 已持久化的更大真实窗口
       //（否则重启后列表/预填分母被拉低）；realWindow 存在仍允许缩小=modelUsage 精确化。
       // 下发 payload 与 updateLastContextWindow 落库同用守卫后的 windowSize。
-      let windowSize = realWindow ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null);
+      let windowSize = realWindow ?? readContextWindow(entries.get(sessionId));
       if (!realWindow) {
         try {
           const persisted = sessionRepo.getSession(sessionId)?.lastContextWindow;
@@ -1333,7 +1333,7 @@ function forwardEvent(
       samplePhase: null,
       inputTokens: lastStats?.inputTokens ?? 0,
       outputTokens: lastStats?.outputTokens ?? 0,
-      windowSize: lastStats?.windowSize ?? readContextWindow(entries.get(sessionId)?.requestedAlias ?? null),
+      windowSize: lastStats?.windowSize ?? readContextWindow(entries.get(sessionId)),
       model: null,
       // 压缩后当前窗口值未知，禁止沿用 stale turn usage 冒充 fresh 快照；不发 compactedJustNow。
       currentContextUsedTokens: null,
@@ -1558,7 +1558,7 @@ async function refreshContextSnapshot(
       samplePhase: opts.samplePhase,
       inputTokens: lastStats?.inputTokens ?? 0,
       outputTokens: lastStats?.outputTokens ?? 0,
-      windowSize: capacity ?? lastStats?.windowSize ?? readContextWindow(entry.requestedAlias ?? null),
+      windowSize: capacity ?? lastStats?.windowSize ?? readContextWindow(entry),
       model: entry.resolvedModel,
       currentContextUsedTokens: used,
       contextWindowCapacityTokens: capacity,
@@ -1652,7 +1652,7 @@ async function refreshContextSnapshot(
         samplePhase: null,
         inputTokens: lastStats?.inputTokens ?? 0,
         outputTokens: lastStats?.outputTokens ?? 0,
-        windowSize: lastStats?.windowSize ?? readContextWindow(entry.requestedAlias ?? null),
+        windowSize: lastStats?.windowSize ?? readContextWindow(entry),
         model: entry.resolvedModel,
         currentContextUsedTokens: null,
         contextWindowCapacityTokens: runtimeCapacity ?? lastStats?.windowSize ?? null,
@@ -1734,7 +1734,7 @@ const postTurnProbeState = new Map<string, PostTurnProbeState>();
 // 回合连接快照（连接加固 Task 6）：buildSdkOptions 在回合起点解析出的连接覆盖，
 // post-turn 探针复用它，保证「探针环境 === 产生该上下文的回合环境」（用户在回合中
 // 切换供应商时，探针不再漂到新连接上）。null 是有意义值（库空走老链），用 has() 区分。
-const sessionLastTurnOverride = new Map<string, SessionModelOverride | null>();
+const sessionLastTurnOverride = new Map<string, ResolvedSessionOverride | null>();
 // 会话上一回合的生效连接（漂移检测用）：跨回合变化时落库一条 system 提示。
 // hb12-PRV-03：增 providerId——仅按 providerName 比对区分不了同名供应商。
 const sessionLastEffective = new Map<string, { providerName: string | null; modelId: string | null; providerId: string | null }>();
@@ -1796,11 +1796,12 @@ async function runPostTurnContextProbe(
     const snap = sessionLastTurnOverride.has(sessionId) ? sessionLastTurnOverride.get(sessionId) : undefined;
     const override = snap !== undefined ? snap : resolveSessionOverride(fullOpts);
     env = buildSpawnEnv(override);
-    // hb10-CTX-01：探针窗口与生产一致——按会话实际模型补注入窗口 override（单源函数）。
+    // hb10-CTX-01：探针窗口与生产一致——按当回合实际连接的模型条目补注入窗口 override
+    // （单源函数，与生产 buildClaudeLinkSettingsBlock 同一入参源 override.providerModels +
+    // override.modelId；override null 不注入）。
     const probeWindow = computeContextWindowOverrideTokens({
-      aliasOrModel: override?.modelId ?? fullOpts.model ?? config.defaultModel,
-      advancedJson: config.advancedJson,
-      contextWindowByAlias: config.contextWindowByAlias,
+      providerModels: override?.providerModels ?? [],
+      modelId: override?.modelId ?? '',
     });
     if (probeWindow != null) env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(probeWindow);
     cwd = fullOpts.workingDir || config.workingDirectory || undefined;
@@ -2034,7 +2035,7 @@ function emitNativeContextReconcile(
     samplePhase: null,
     inputTokens: lastStats?.inputTokens ?? 0,
     outputTokens: lastStats?.outputTokens ?? 0,
-    windowSize: rec.capacityTokens ?? lastStats?.windowSize ?? readContextWindow(entry.requestedAlias ?? null),
+    windowSize: rec.capacityTokens ?? lastStats?.windowSize ?? readContextWindow(entry),
     model: entry.resolvedModel,
     currentContextUsedTokens: rec.usedTokens,
     contextWindowCapacityTokens: rec.capacityTokens,
