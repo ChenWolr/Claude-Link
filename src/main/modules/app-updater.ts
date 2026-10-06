@@ -10,11 +10,13 @@
 // latestVersion（R3）：最近一次检查获知的最新版本号，available/not-available 均写入且检查中/
 // 失败不清空（setState patch 合并自然保留）——关于 tab「最新版本」跨状态流转永久显示。
 // 禁用差分下载：Release 不上传 blockmap，差分链路必然失败。
+// releaseNotes：GitHub 源缺 latest.yml 内嵌时 electron-updater 取 releases.atom 的 HTML 渲染补齐；入态前经 shared/release-notes 归一为可读纯文本（详见模块头注释）。
 import { app, BrowserWindow } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as fs from 'fs';
 import { logger } from '../utils/logger';
 import { IPC_CHANNELS } from '../../shared/constants';
+import { normalizeReleaseNotes } from '../../shared/release-notes';
 import type { AppUpdateInfo, AppUpdateState } from '../../shared/types/update';
 
 const GITHUB_OWNER = 'ChenWolr';
@@ -116,11 +118,10 @@ function configureUpdater(): void {
       status: 'available',
       newVersion: info.version ?? null,
       latestVersion: info.version ?? _state.latestVersion,
-      releaseNotes: typeof info.releaseNotes === 'string'
-        ? info.releaseNotes
-        : Array.isArray(info.releaseNotes)
-          ? info.releaseNotes.map((n) => (typeof n === 'string' ? n : n.note || '')).join('\n')
-          : null,
+      // GitHub 源下 latest.yml 未内嵌 releaseNotes 时，electron-updater 会用 releases.atom
+      // 的 <content>（HTML 渲染）补齐（GitHubProvider.js :139/:182），并非 Markdown 原文；
+      // shared/release-notes 统一归一为可读纯文本，非 HTML（如内嵌的 Markdown）直通。
+      releaseNotes: normalizeReleaseNotes(info.releaseNotes),
       progress: null,
       error: null,
     });

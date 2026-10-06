@@ -2461,7 +2461,7 @@ input.skill-search:focus {
   transform: rotate(90deg);
 }
 
-/* 关于 tab 更新说明 pre：保留换行纯文本（Release body 为 Markdown 源码，v1 不渲染）。 */
+/* 关于 tab 更新说明 pre：保留换行纯文本（主进程已归一为可读纯文本，v1 不渲染）。 */
 .about-notes pre {
   margin: 0.5rem 0 0;
   font-family: var(--font-mono);
