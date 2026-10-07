@@ -1612,6 +1612,9 @@ async function refreshContextSnapshot(
     // P2-9：带 compactedJustNow 的 fresh payload 已实际送达 renderer——通知调用方（双横幅
     // 防重：本回合即时 fresh 已送，探针 fresh 不再携带成功标记）。仅在真正发送成功标记时触发。
     if (opts.compactedJustNow && used != null) {
+      // X18（R04-F1）：同一触发点同步 entry 镜像——killProcess 等非 result 出口读 entry 判定
+      // 双横幅防重（runQuery 回调字面量被 P2-9 契约钉住，镜像收敛在此单一触发点，二者恒同步）。
+      entry.postCompactionFreshSent = true;
       opts.onFreshSent?.();
     }
     if (capacity != null) {
@@ -1958,6 +1961,14 @@ function cancelPostTurnProbe(sessionId: string): void {
 // cancelPostTurnProbe（kill + 推进代际，迟到 close 回调据此丢弃结果）。app before-quit 调用。
 export function cancelAllPostTurnProbes(): void {
   for (const sid of [...postTurnProbeState.keys()]) cancelPostTurnProbe(sid);
+}
+
+// X18（R04-F1）：entry 级压缩标记单源读取——result 之外四处终态出口（流丢 result / resume
+// 重试失败 / SDK 错误 / killProcess 中断兜底）的探针透传用。语义与 result 出口的
+// turnHadCompactSuccess && !postCompactionFreshSent（runQuery 局部变量，P2-9）一致：
+// 本回合 compact_result==='success' 且即时 fresh 未实际送达（双横幅防重）。
+function entryCompactedJustNow(entry: SessionEntry): boolean {
+  return entry.turnHadCompactSuccess === true && entry.postCompactionFreshSent !== true;
 }
 
 export function schedulePostTurnProbe(
@@ -3837,6 +3848,8 @@ async function runQuery(
               // 命令文本 /\/compact\b/，失败的 /compact 不得弹成功横幅）；即时 fresh 实际送达时
               // 置 postCompactionFreshSent，探针 fresh 不再重复带标记（双横幅修复）。
               turnHadCompactSuccess = true;
+              // X18（R04-F1）：镜像 entry（killProcess 等独立函数出口经 entryCompactedJustNow 读取）。
+              entry.turnHadCompactSuccess = true;
               void refreshContextSnapshot(sessionId, mainWindow, entry, query, {
                 compactedJustNow: true,
                 samplePhase: 'post-compaction',
@@ -4149,7 +4162,9 @@ async function runQuery(
       const probeCliSid2 = sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId);
       deleteEntry(sessionId, entry);
       emitExit(null);
-      schedulePostTurnProbe(sessionId, mainWindow, probeInstance2, probeCliSid2);
+      // X18（R04-F1）：流丢 result 出口同样透传压缩成功标记——CU 控制通道失效环境下即时
+      // 快照链必超时，本出口探针是横幅反馈的唯一载体，不得裸调。
+      schedulePostTurnProbe(sessionId, mainWindow, probeInstance2, probeCliSid2, { compactedJustNow: entryCompactedJustNow(entry) });
       // reasoning_replay 韧性层：流丢 result 同样是回合终态（第三方端点常见）→ 命中即重发。
       scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);
       return;
@@ -4179,6 +4194,10 @@ async function runQuery(
         // 压缩成功标记随新 query 作废；不重置会在新回合 compact_result 时误判「连续压缩」双横幅）。
         turnHadCompactSuccess = false;
         postCompactionFreshSent = false;
+        // X18（R04-F1）：entry 镜像同步重置——首个 attempt 的压缩成功标记同样不得泄入新
+        // query 的非 result 出口探针（双横幅防重跨 query 生效）。
+        entry.turnHadCompactSuccess = false;
+        entry.postCompactionFreshSent = false;
         // hb10-ENG-07：stall 计时不跨 query——重试前旧 query 的无活动累计不得带入新 query
         //（否则 resume 重试刚起步就可能被判 stalled 硬杀）。
         resetStallTracker(sessionId);
@@ -4189,7 +4208,9 @@ async function runQuery(
         forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
         emitExit(1);
         // 出口⑤（resume 重试失败）：resume 已清旧 id → cliSessionId 可能已变，探针守卫会兜住。
-        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId));
+        // X18（R04-F1）：透传 entry 级压缩成功标记（首个 attempt 压缩成功后又遇 resume 失败的
+        // 极窄形态下横幅反馈不丢）。
+        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId), { compactedJustNow: entryCompactedJustNow(entry) });
         break;
       }
     }
@@ -4225,7 +4246,9 @@ async function runQuery(
     // 记录 transcript，探针反映会话真实占用（兜底需求 #2）。review-v1 High-1：出口③（用户中断）
     // 的探针已迁移到 killProcess 调度——真实中断流在 removeEntryIfCurrent 后走 catch 的
     // !isCurrentEntry 分支提前退出，到不了这里，此处仅服务 SDK 错误路径。
-    schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId));
+    // X18（R04-F1）：SDK 错误收尾同样透传 entry 级压缩成功标记——本回合刚完成的压缩不因
+    // 出错收尾丢失横幅反馈。
+    schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId), { compactedJustNow: entryCompactedJustNow(entry) });
     break;
   }
   }
@@ -4521,7 +4544,10 @@ export function killProcess(
         // 此处 entry 已被 removeEntryIfCurrent 移除，探针发射守卫「entries.get==null（无新回合在途）」
         // 天然满足；若用户在探针 ~2s 窗口内重发新回合，新回合的 schedule 会 kill 旧探针并推进
         // generation，结果不会污染（可打断单飞机制）。迟到时（wasCurrent=false）直接不调度。
-        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId));
+        // X18（R04-F1）：中断兜底出口透传 entry 级压缩成功标记——turnHadCompactSuccess 局部
+        // 变量在 killProcess 不可见（标志提升为 entry 镜像的动因），中断回合里刚完成的压缩
+        // 也能经探针 fresh 弹出账单横幅。
+        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId), { compactedJustNow: entryCompactedJustNow(entry) });
       }
       // 硬杀兜底：abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
       //（瞬时不可捕获），子进程卡死在死 socket 上时真能打死。
