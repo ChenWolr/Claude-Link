@@ -19,6 +19,9 @@ const DEFAULT_API_TIMEOUT_MS = 15_000;
 const MAX_CONSECUTIVE_FAILURES = 3;
 const BACKOFF_DELAYS = [2000, 5000, 30_000];
 const CONTEXT_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+// 积压跳过窗口上限（R12-F3，约 2 个长轮询周期）：关闭期无积压时空批不消费标志、可无限延续，
+// 超过此时限后的首个非空批按新消息正常派发，避免把重开后第一条真实新消息误当积压丢弃。
+const SKIP_BACKLOG_MAX_MS = 90_000;
 
 // ── iLink 消息类型常量 ──
 const MessageItemType = { TEXT: 1, IMAGE: 2, VOICE: 3, FILE: 4, VIDEO: 5 } as const;
@@ -99,6 +102,7 @@ function atomicWriteSync(filePath: string, content: string): void {
  * 微信积压跳过标记（生命周期修复批次2.3，症状③）：平台禁用时写——重开后的首轮非空拉取整批
  * 丢弃、只前进 cursor，不补处理关闭期间服务端积压的消息。文件名带 token hash8（换号互不误伤），
  * 客户端创建时一次性消费（读后即删）。
+ * createdAt 字段自 Rv4-2 起仅作文件格式兼容保留，消费端已不读取（窗口起点=消费时刻）。
  */
 export function writeWechatSkipBacklogFlag(stateDir: string, botToken: string): void {
   try {
@@ -134,10 +138,19 @@ export function createIlinkClient(botToken: string, deps: IlinkDeps): IlinkClien
 
   // 积压跳过标志（批次2.3）：创建时探测一次性消费（读后即删）——首次非空拉取整批丢弃只进
   // cursor；空批保留标志到下一轮。无标志文件（正常启停/新 token）行为完全不变。
+  // R12-F3：消费时限 90s——超窗后的首个非空批失效标志并正常派发（见 pollOnce），关闭期
+  // 无积压时不再误丢重开后的新消息。
+  // Rv4-2/Rv4-3（2026-10-07 review followup）：①窗口起点改为消费时刻（无条件 now()，不再读
+  // createdAt）——「禁用 >90s 且关闭期真有积压」时旧锚（写入时刻）会把积压当超时新消息补
+  // 处理，违背设置页「关闭期间消息不在重开后处理」承诺；真积压在重开后 1–2 个长轮询周期
+  // （≤80s）内浮出，90s 窗口仍覆盖。②标志文件删除提前到 existsSync 确认后立即执行，不依赖
+  // 读取/解析成功——损坏文件不再每次重开都重新消费一个 90s 丢弃窗口。
   let skipBacklogPending = false;
+  let skipBacklogSince = 0;
   try {
     if (fs.existsSync(skipBacklogPath)) {
       skipBacklogPending = true;
+      skipBacklogSince = now();
       fs.rmSync(skipBacklogPath, { force: true });
     }
   } catch { /* 探测失败按无标志 */ }
@@ -363,11 +376,17 @@ export function createIlinkClient(botToken: string, deps: IlinkDeps): IlinkClien
     const msgs = (resp.msgs as IlinkMsg[] | undefined) ?? [];
     // 积压跳过（批次2.3）：标志在途且首批非空 → 整批丢弃、只前进 cursor（上方已写盘）；
     // 空批保留标志到下一轮（服务端可能尚未吐出积压）。
+    // R12-F3：丢弃前判时限——距标志消费超 90s 仍未等到积压，判定关闭期本无积压，
+    // 失效标志并按新消息正常派发该批（落空回退到下方 for 循环）。
     if (skipBacklogPending) {
       if (msgs.length === 0) return;
       skipBacklogPending = false;
-      console.info(`[wechat-bridge] 跳过积压消息 ${msgs.length} 条（平台关闭期间）`);
-      return;
+      if (now() - skipBacklogSince > SKIP_BACKLOG_MAX_MS) {
+        console.info(`[wechat-bridge] 积压跳过窗口超时（${Math.round((now() - skipBacklogSince) / 1000)}s 无积压），按新消息处理 ${msgs.length} 条`);
+      } else {
+        console.info(`[wechat-bridge] 跳过积压消息 ${msgs.length} 条（平台关闭期间）`);
+        return;
+      }
     }
     for (const msg of msgs) {
       try {

@@ -14,6 +14,12 @@
 //   J. 微信积压跳过：writeWechatSkipBacklogFlag 落盘 skip-backlog-<hash8>.json；客户端创建时
 //      一次性消费（文件删除 + 内部 pending 标志）；首批非空整批丢弃只前进 cursor（不派发）；
 //      空批保留标志到下一轮；标志消费后恢复正常派发（症状③：关通信重开消息涌出）。
+// 第二轮隐藏缺陷修复追加（docs/plans/2026-10-06-hidden-defect-fix-round2-plan.md X12 / R12-F3）：
+//   J⑧/J⑨. 积压跳过标志加 90s 时限：标志在途 + 距消费超 90s + 首非空批 → 失效标志并正常
+//      派发（关闭期无积压时不再误丢重开后第一条新消息）；时限内首非空批仍整批丢弃（真积压照跳）。
+//      2026-10-07 review followup Rv4-2/Rv4-3：时限起算点从标志写入时刻（createdAt）改为消费时
+//      刻（消费端不再读 createdAt，超窗仅由消费后流逝时间决定）；标志文件删除提前到 existsSync
+//      确认后立即执行（不依赖读取/解析成功，损坏文件也能删掉）。
 // 生命周期修复计划追加（docs/plans/2026-09-22-im-bridge-lifecycle-ux-fix-plan.md 批次3.2）：
 //   K. reportStatus 去重：连续同状态只上报一次（消 40s 轮询周期全量广播噪音）；
 //      状态变化后恢复上报（error → connected 重报）。
@@ -477,6 +483,73 @@ async function main(): Promise<void> {
     check('J', '⑦', '无标志文件：首批消息照常派发（既有语义零回归）',
       received4.length === 1 && received4[0]?.text === '正常', JSON.stringify(received4));
     client4.stop();
+
+    // J⑧/J⑨（R12-F3，2026-10-06 第二轮隐藏缺陷修复 X12；2026-10-07 Rv4-2/Rv4-3 followup）：
+    // 标志加 90s 时限（窗口起点=消费时刻）——关闭期无积压时空批不消费标志、可无限延续，
+    // 重开 90s 后用户发的第一条新消息会被误当积压整批丢弃。修后：距消费超 90s 的首个非空批
+    // 失效标志并正常派发；时限内（真积压场景）首非空批仍照跳。
+    // 时钟注入按脚本既有风格（createIlinkClient deps.now）；Rv4-2 起窗口起点锚在消费时刻，
+    // 固定时钟注入下消费与首非空批取到同一时钟值（恒为窗口 0），须改用可变时钟（闭包 fakeNow）。
+    const stateDir5 = path.join(tmpRoot, 'skip-stale');
+    writeWechatSkipBacklogFlag(stateDir5, 'tok-M2');
+    const mock5 = createFetchMock();
+    mock5.queue.push({
+      match: 'getupdates',
+      respond: okResponse({
+        msgs: [{ from_user_id: 'wxid_stale', context_token: 'CTX-ST', item_list: [{ type: 1, text_item: { text: '迟到的第一条新消息' } }] }],
+        get_updates_buf: 'BUF-ST1',
+      }),
+    });
+    mock5.queue.push({
+      match: 'getupdates',
+      respond: okResponse({
+        msgs: [{ from_user_id: 'wxid_stale2', item_list: [{ type: 1, text_item: { text: '再下一条' } }] }],
+        get_updates_buf: 'BUF-ST2',
+      }),
+    });
+    const received5: BridgeInboundMessage[] = [];
+    let fakeNow5 = Date.now();
+    const client5 = createIlinkClient('tok-M2', {
+      fetchFn: makeFetch(mock5), stateDir: stateDir5,
+      now: () => fakeNow5, // 可变时钟：创建即消费标志（since=fakeNow5），之后再推进时间
+      onMessage: (m) => received5.push(m),
+    });
+    fakeNow5 += 91_000; // 距消费 91s（> 90s 窗口）
+    await client5.pollOnce();
+    check('J', '⑧', '标志在途 + 距消费超 90s + 首非空批 → 失效标志并正常派发（不误丢新消息）',
+      received5.length === 1 && received5[0]?.text === '迟到的第一条新消息', JSON.stringify(received5));
+    await client5.pollOnce();
+    check('J', '⑧b', '超时失效后标志已消费：次轮非空批照常派发',
+      received5.length === 2 && received5[1]?.text === '再下一条', JSON.stringify(received5));
+    client5.stop();
+
+    // J⑨（钉死 Rv4-2 缺陷场景）：距写入 >90s 但距消费时限内——真实 Date.now() 写标志后模拟
+    // 禁用 200s 才重开（消费时刻=写入+200s），首非空批距消费仅 10s（<90s）→ 仍整批丢弃（真积压
+    // 语义零回归）。修复前（createdAt 锚）此场景会被误判「超窗新消息」而补派发积压，违背设置页
+    // 「关闭期间消息不在重开后处理」承诺。
+    const stateDir6 = path.join(tmpRoot, 'skip-fresh');
+    const flagWrittenAt6 = Date.now();
+    writeWechatSkipBacklogFlag(stateDir6, 'tok-M3'); // createdAt = flagWrittenAt6（真实写入时刻）
+    const mock6 = createFetchMock();
+    mock6.queue.push({
+      match: 'getupdates',
+      respond: okResponse({
+        msgs: [{ from_user_id: 'wxid_bl2', item_list: [{ type: 1, text_item: { text: '真积压消息' } }] }],
+        get_updates_buf: 'BUF-FR',
+      }),
+    });
+    const received6: BridgeInboundMessage[] = [];
+    let fakeNow6 = flagWrittenAt6 + 200_000; // 模拟禁用 200s 后重开：消费时刻=写入+200s
+    const client6 = createIlinkClient('tok-M3', {
+      fetchFn: makeFetch(mock6), stateDir: stateDir6,
+      now: () => fakeNow6, // 可变时钟（同 J⑧ 风格）
+      onMessage: (m) => received6.push(m),
+    });
+    fakeNow6 += 10_000; // 距消费 10s（< 90s 窗口）：真积压照跳
+    await client6.pollOnce();
+    check('J', '⑨', '距写入 >90s 但距消费 <90s（禁用 200s 重开、真积压）→ 仍整批丢弃（钉死 Rv4-2：窗口起点=消费时刻）',
+      received6.length === 0, JSON.stringify(received6));
+    client6.stop();
   }
 
   // ── K. reportStatus 去重（生命周期修复批次3.2）：走 createIlinkClient 直连
