@@ -10,6 +10,9 @@
 //   · noteReasoningReplayError  ← cli-shared.persistMessageParts（assistant 正文命中共享谓词）
 //   · recordOutgoingUserText    ← sdk-backend.spawnForChat（opts.userCommandText）
 //   · maybeScheduleReasoningReplayRetry ← sdk-backend.runQuery 两个回合终态出口（result / 流丢 result）
+//   · willAutoRetryReasoningReplay / consumeAutoRetryDispatched ← task-queue-engine
+//     （X10/R09-F1 熔断自愈查询：失败回合是否将被自动重试 / 自动重试回合是否已实际发起——
+//     引擎只读查询本层状态，本层仍不反向依赖引擎，环导入边界不变）
 //
 // 不做的事（边界）：不动 thinking-resolver 的 adaptive 行为；不修改 CC transcript；
 // 不重试命令消息（'/' 前缀）；不重试带附件回合（N4：recordOutgoingUserText 对
@@ -97,6 +100,8 @@ export function maybeScheduleReasoningReplayRetry(ctx: ReasoningReplayRetryCtx):
         '检测到上游思考回传不兼容（网关桥接缺陷，reasoning_content 未回传），已自动重试一次。',
       );
       ctx.resendUserText(text);
+      // X10（R09-F1）：重发成功返回后才置「实际发起」标记（见 consumeAutoRetryDispatched 注释）。
+      autoRetryDispatched.add(sessionId);
       logger.info(`[reasoning-replay] session ${sessionId} auto-retried once with identical user text`);
     } catch (err) {
       logger.warn(`[reasoning-replay] auto-retry failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -105,11 +110,38 @@ export function maybeScheduleReasoningReplayRetry(ctx: ReasoningReplayRetryCtx):
   pendingTimers.set(sessionId, timer);
 }
 
+/** X10（R09-F1）：引擎在回合失败熔断点查询「该失败回合是否会被本层自动重试」——命中则熔断
+ *  原因记为引擎内部值 'reasoning-replay'，自动重试成功后据此自愈熔断残留。守卫与
+ *  maybeScheduleReasoningReplayRetry 的同步段逐条对齐（调度点的异步守卫 hasRunningQuery/
+ *  isSessionAlive 无法在此预判；若判定命中但重试实际未发起，由下方 autoRetryDispatched
+ *  「实际发起」二道闸兜底——未发起则成功回调不恢复）。 */
+export function willAutoRetryReasoningReplay(sessionId: string): boolean {
+  if (!turnHasReasoningReplayError.has(sessionId)) return false;
+  if (getConfig().autoRetryReasoningReplay === false) return false;
+  const text = lastUserTextBySession.get(sessionId);
+  if (!text) return false;
+  if (retriedTextBySession.get(sessionId) === text) return false;
+  if (pendingTimers.has(sessionId)) return false;
+  return true;
+}
+
+/** 自动重试「实际发起」标记（X10/R09-F1）：定时回调内 resendUserText 成功返回后置位——
+ *  引擎在该回合终态一次性消费，成功且无人工队列干预则自愈熔断残留。发起之后才置位：
+ *  放弃的调度（延迟窗口内被二次守卫拦截/发起抛错）不置位，后续普通回合的成功不会误触发恢复。 */
+const autoRetryDispatched = new Set<string>();
+
+export function consumeAutoRetryDispatched(sessionId: string): boolean {
+  if (!autoRetryDispatched.has(sessionId)) return false;
+  autoRetryDispatched.delete(sessionId);
+  return true;
+}
+
 /** 会话删除/清理时释放全部状态（防泄漏）。 */
 export function clearReasoningReplayState(sessionId: string): void {
   turnHasReasoningReplayError.delete(sessionId);
   lastUserTextBySession.delete(sessionId);
   retriedTextBySession.delete(sessionId);
+  autoRetryDispatched.delete(sessionId);
   const timer = pendingTimers.get(sessionId);
   if (timer) {
     clearTimeout(timer);
