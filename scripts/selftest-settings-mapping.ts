@@ -23,8 +23,8 @@ import type { CliEvent, CliSystemInfoEvent, CliMessageEvent, CliResultEvent } fr
 import { isDisplayableSystemInfo, isRedundantSystemProcessKind } from '../src/shared/system-info';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind } from '../src/shared/stall-watchdog';
 import { THEME_PALETTES, DEFAULT_THEME_PALETTE_ID } from '../src/shared/constants';
-import { resolveThinkingConfig, resolveEffectiveThinkingLevel } from '../src/shared/thinking-resolver';
-import { THINKING_LEVELS, isValidThinkingLevel } from '../src/shared/types/thinking';
+import { resolveThinkingConfig, resolveEffectiveThinkingLevel, THINKING_SETTINGS_KEYS } from '../src/shared/thinking-resolver';
+import { THINKING_LEVELS, isValidThinkingLevel, type NonAutoThinkingLevel, type ThinkingLevel } from '../src/shared/types/thinking';
 import { PERMISSION_MODES, isValidPermissionMode, resolveEffectivePermissionMode } from '../src/shared/permission-resolver';
 
 let pass = 0;
@@ -1683,6 +1683,83 @@ console.log('\n=== 48) 思考强度接线：持久化层 + 注入层 + IPC 通�
   check('claude-settings-projection import resolveThinkingConfig', projection.includes('resolveThinkingConfig'));
   check('projection selector > advancedJson（Object.assign）', projection.includes('Object.assign(projection, result.settingsPatch)'));
   check('projection max 降级 xhigh 持久化', projection.includes("result.effort === 'max' ? 'xhigh'"));
+}
+
+console.log('\n=== 48-R03F1) 会话思考档键集先剔除再叠加——全局档思考键不残留 ===');
+{
+  const resolverSrc = readRel('src/shared/thinking-resolver.ts');
+  const sdkBackendR03 = readRel('src/main/modules/sdk-backend.ts');
+
+  // 生产形态契约：单源常量 + Object.assign 前剔除（上节 :1675 文本断言钉住的
+  // Object.assign 行本身保持不变，只在它之前加剔除）。
+  check('thinking-resolver 导出 THINKING_SETTINGS_KEYS 单源常量',
+    /export const THINKING_SETTINGS_KEYS: readonly string\[\]/.test(resolverSrc));
+  check('THINKING_SETTINGS_KEYS 覆盖六键（各档 patch 键全集 + 投影层 effortLevel）',
+    ['showThinkingSummaries', 'alwaysThinkingEnabled', 'workflowKeywordTriggerEnabled', 'ultracode', 'enableWorkflows', 'effortLevel']
+      .every((k) => resolverSrc.includes(`'${k}'`)));
+  check('sdk-backend import THINKING_SETTINGS_KEYS', sdkBackendR03.includes('THINKING_SETTINGS_KEYS'));
+  check('sdk-backend Object.assign 前先剔除思考键（R03-F1：会话档对思考键是整体重写）',
+    sdkBackendR03.includes('for (const key of THINKING_SETTINGS_KEYS) delete out[key];') &&
+    sdkBackendR03.indexOf('for (const key of THINKING_SETTINGS_KEYS) delete out[key];')
+      < sdkBackendR03.indexOf('Object.assign(out, thinkingConfig.settingsPatch)'));
+
+  // 行为断言：用真实 resolver 函数模拟 buildClaudeLinkSettingsBlock 的思考键合并语义
+  // （全局投影铺底【对齐 claude-settings-projection：非 medium 档 patch + effortLevel(max→xhigh)】
+  // → 剔除 THINKING_SETTINGS_KEYS → 叠加会话档 patch）。
+  const simulateGlobalBed = (globalLevel: NonAutoThinkingLevel): Record<string, unknown> => {
+    const out: Record<string, unknown> = {};
+    if (globalLevel !== 'medium') {
+      Object.assign(out, resolveThinkingConfig(globalLevel).settingsPatch);
+      out.effortLevel = globalLevel === 'max' ? 'xhigh' : globalLevel;
+    }
+    return out;
+  };
+  // 新语义：先剔除再叠加（R03-F1 修复后生产行为）。
+  const simulateMerge = (globalLevel: NonAutoThinkingLevel, sessionLevel: ThinkingLevel | null): Record<string, unknown> => {
+    const out = simulateGlobalBed(globalLevel);
+    for (const key of THINKING_SETTINGS_KEYS) delete out[key];
+    const patch = resolveThinkingConfig(resolveEffectiveThinkingLevel(sessionLevel, globalLevel)).settingsPatch;
+    if (patch) Object.assign(out, patch);
+    return out;
+  };
+  // 旧语义：纯加法叠加（R03-F1 修复前行为，供等价性对照）。
+  const simulateLegacyMerge = (globalLevel: NonAutoThinkingLevel, sessionLevel: ThinkingLevel | null): Record<string, unknown> => {
+    const out = simulateGlobalBed(globalLevel);
+    const patch = resolveThinkingConfig(resolveEffectiveThinkingLevel(sessionLevel, globalLevel)).settingsPatch;
+    if (patch) Object.assign(out, patch);
+    return out;
+  };
+
+  // 方向 1（实现标准）：全局 ultracode + 会话 low → 最终 settings 无 ultracode/enableWorkflows 残留。
+  const d1 = simulateMerge('ultracode', 'low');
+  check('全局 ultracode + 会话 low：无 ultracode:true 残留', d1.ultracode === undefined, JSON.stringify(d1));
+  check('全局 ultracode + 会话 low：无 enableWorkflows:true 残留', d1.enableWorkflows === undefined, JSON.stringify(d1));
+  check('全局 ultracode + 会话 low：会话 low 档键生效',
+    d1.showThinkingSummaries === true && d1.alwaysThinkingEnabled === true && d1.workflowKeywordTriggerEnabled === false);
+
+  // 方向 2（实现标准）：全局 high + 会话 ultracode → 无 workflowKeywordTriggerEnabled:false 残留。
+  const d2 = simulateMerge('high', 'ultracode');
+  check('全局 high + 会话 ultracode：无 workflowKeywordTriggerEnabled:false 残留',
+    d2.workflowKeywordTriggerEnabled === undefined, JSON.stringify(d2));
+  check('全局 high + 会话 ultracode：ultracode 档键生效', d2.ultracode === true && d2.enableWorkflows === true);
+
+  // 方向 3（实现标准·等价性）：全局 medium + 会话 medium → 与旧加法语义字节级一致。
+  const d3New = simulateMerge('medium', 'medium');
+  const d3Old = simulateLegacyMerge('medium', 'medium');
+  check('全局 medium + 会话 medium：与旧加法语义字节级一致（等价性）',
+    JSON.stringify(d3New) === JSON.stringify(d3Old), `new=${JSON.stringify(d3New)} old=${JSON.stringify(d3Old)}`);
+  check('全局 medium + 会话 medium：仅 workflowKeywordTriggerEnabled:false',
+    Object.keys(d3New).length === 1 && d3New.workflowKeywordTriggerEnabled === false, JSON.stringify(d3New));
+
+  // 跟随全局档等价性（任务书要求执行时验证）：会话 auto(null) 时五思考 patch 键与旧语义一致；
+  // effortLevel 键差异为已验证例外——运行时 effort 一律由 Options.effort 通道承载（effort: thinkingConfig.effort）。
+  const followKeys = ['showThinkingSummaries', 'alwaysThinkingEnabled', 'workflowKeywordTriggerEnabled', 'ultracode', 'enableWorkflows'];
+  for (const lv of ['low', 'high', 'xhigh', 'max', 'ultracode'] as const) {
+    const n = simulateMerge(lv, null);
+    const o = simulateLegacyMerge(lv, null);
+    check(`全局 ${lv} + 会话 auto（跟随全局）：五思考 patch 键值与旧语义一致（effortLevel 改由 Options.effort 运行时通道承载）`,
+      followKeys.every((k) => n[k] === o[k]), `new=${JSON.stringify(n)} old=${JSON.stringify(o)}`);
+  }
 }
 
 console.log('\n=== 49) 思考强度 UI 层：ThinkingLevelSelector + session-store action + 挂载契约 ===');

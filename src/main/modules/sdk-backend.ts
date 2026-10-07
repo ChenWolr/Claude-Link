@@ -29,7 +29,7 @@ import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessag
 import { mapAskUserQuestionCancel } from '../../shared/interaction-cancel';
 import { getProjectOriginFingerprint } from './command-source-watcher';
 import { lookupProviderModelContextWindow } from '../../shared/model-context-windows';
-import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
+import { resolveEffectiveThinkingLevel, resolveThinkingConfig, THINKING_SETTINGS_KEYS, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { buildPostTurnProbeArgs } from '../../shared/post-turn-probe';
 import { extractLastEffortFromJsonl, extractLastEffortFromText, EFFORT_TAIL_WINDOW_BYTES, mungeProjectDirName } from '../../shared/effort-truth';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
@@ -1150,6 +1150,13 @@ function buildClaudeLinkSettingsBlock(
   let out: Record<string, unknown> = { ...settings, permissions };
   // 每会话思考强度 settingsPatch 覆盖全局投影：opts.thinkingLevel 已过 resolveEffectiveThinkingLevel
   // 解析为实际生效档，故此处覆盖优先级最高（query 级 > 全局投影 > advancedJson）。
+  // 会话思考档是「全量覆盖」而非「增量叠加」：先剔除全局投影铺底的思考键（含用户 advancedJson
+  // 手写的同键——思考档拥有这些键的所有权，与文件合并 CL_OWNED_KEYS 语义一致），再叠加会话档
+  // patch——否则反向档位键残留（R03-F1：全局 ultracode 会话降档残留 ultracode/enableWorkflows；
+  // 全局非 ultracode 会话切 ultracode 残留 workflowKeywordTriggerEnabled:false 等）。
+  // effortLevel 剔除后由 Options.effort 运行时通道承载（含 max 的「持久化降级 + 运行时补偿」）。
+  // Object.assign 行保持原样（selftest-settings-mapping :1675 文本断言钉住该机制）。
+  for (const key of THINKING_SETTINGS_KEYS) delete out[key];
   if (thinkingConfig.settingsPatch) {
     Object.assign(out, thinkingConfig.settingsPatch);
   }

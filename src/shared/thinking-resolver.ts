@@ -47,6 +47,26 @@ export function resolveEffectiveThinkingLevel(
 }
 
 /**
+ * 思考档全部可能写入 Options.settings 的键（单源常量，R03-F1）：
+ * 各档 settingsPatch 键全集（showThinkingSummaries/alwaysThinkingEnabled/
+ * workflowKeywordTriggerEnabled/ultracode/enableWorkflows）+ effortLevel
+ * （持久化投影层为非 medium 全局档额外写入的键）。会话档生效前，运行时 settings 组装
+ * （sdk-backend.buildClaudeLinkSettingsBlock）先从全局投影剔除这些键再叠加会话档 patch，
+ * 保证会话档对思考键是「整体重写」而非加法叠加——否则反向档位键残留（如全局 ultracode
+ * 时会话降档后 ultracode/enableWorkflows 仍在、全局非 ultracode 时会话切 ultracode 后
+ * workflowKeywordTriggerEnabled:false 仍在）。effortLevel 剔除后由运行时 Options.effort
+ * 通道承载（含 max 档的「持久化降级 + 运行时补偿」语义）。
+ */
+export const THINKING_SETTINGS_KEYS: readonly string[] = [
+  'showThinkingSummaries',
+  'alwaysThinkingEnabled',
+  'workflowKeywordTriggerEnabled',
+  'ultracode',
+  'enableWorkflows',
+  'effortLevel',
+];
+
+/**
  * 档位 → SDK 注入参数。MVP 所有模型统一 adaptive，不传 budgetTokens。
  *
  * 非中等档：显式开思考摘要 + 常驻思考，并关闭 prompt 关键字触发器
