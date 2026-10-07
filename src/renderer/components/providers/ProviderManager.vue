@@ -315,7 +315,9 @@ async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<
           <span class="mcount">{{ p.models.length }} 模型</span>
         </button>
       </div>
-      <div v-if="providers.length === 0" class="plist-empty">还没有供应商，点上方「新建供应商」创建。</div>
+      <!-- X15（R02-F2）：空态区分——load 失败（store.error 非空）不再误显「还没有供应商」引导
+           重复建档；文案-only（组件内无既有重载按钮/刷新链，重试 = 重进设置页重挂载 ensureLoaded）。 -->
+      <div v-if="providers.length === 0" :class="['plist-empty', { 'plist-empty--error': store.error }]">{{ store.error ? '供应商加载失败，请重试' : '还没有供应商，点上方「新建供应商」创建。' }}</div>
     </aside>
 
     <!-- 右：详情框（查看 / 新建表单，紧挨左栏共享圆角）-->
@@ -380,7 +382,9 @@ async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<
       </div>
 
       <div v-else class="card">
-        <div class="empty">还没有供应商。点左侧<b>「新建供应商」</b>开始。</div>
+        <!-- X15（R02-F2）：同左栏——失败态与真空库区分，不再误导「数据为空」。 -->
+        <div v-if="store.error" class="empty empty--error">供应商加载失败，请重试</div>
+        <div v-else class="empty">还没有供应商。点左侧<b>「新建供应商」</b>开始。</div>
       </div>
     </section>
 
@@ -606,6 +610,11 @@ async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<
   flex: none;
 }
 
+/* X15（R02-F2）：加载失败态文案——danger 色与真空库 muted 引导区分（同 key-broken 徽标引用形态）。 */
+.plist-empty--error {
+  color: var(--color-danger, #d64545);
+}
+
 /* ── 右侧详情框 ── */
 .pdetail {
   flex: 1;
@@ -755,6 +764,11 @@ async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<
 
 .empty b {
   color: var(--color-text);
+}
+
+/* X15（R02-F2）：详情空卡失败态（同左栏 plist-empty--error）。 */
+.empty--error {
+  color: var(--color-danger, #d64545);
 }
 
 .pool-note {
