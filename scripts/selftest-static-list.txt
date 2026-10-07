@@ -223,3 +223,4 @@ scripts/tdd-changes-empty-repo-verify.ts
 scripts/tdd-export-mermaid-settle-verify.ts
 scripts/tdd-queue-autoretry-halt-resume-verify.ts
 scripts/tdd-provider-store-error-outlet-verify.ts
+scripts/tdd-session-error-toast-seq-verify.ts

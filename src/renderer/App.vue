@@ -65,13 +65,16 @@ watch(lastSaveFailed, (failed) => {
 // A4（D01-F3 + D02-F8）：sessionStore.error 全局出口——删除/搜索/改名/会话内切模型等失败此前
 // 全程静默（渲染层消费点为零，D01-F3 复核修正）。非空时弹 3.5s 全局错误 toast（复用 H1 的
 // .global-toast--error 样式），文案「操作失败：<摘要>」截断至 ~80 字符；连续失败以最新文案
-// 重置计时；空串/null 不弹（成功路径零打扰）；不改 store 写入点，不动 config/changes 既有出口。
+// 重置计时；空串/null 不弹（成功路径零打扰）；不动 config/changes 既有出口。
+// X16（R01-F1）：watch 源改为 [error, errorSeq]——Vue 对 primitive 同值不触发，同文案连续
+// 失败（删除失败→立即重试→再失败）此前不再弹；store 写入点统一走 fail()（写 error 同时自增
+// errorSeq，值语义不变），seq 变化即触发本回调、再次弹 toast 并重置计时。
 const SESSION_ERROR_TOAST_MS = 3500;
 const SESSION_ERROR_TEXT_MAX = 80;
 const sessionErrorToastVisible = ref(false);
 const sessionErrorToastText = ref('');
 let sessionErrorToastTimer: ReturnType<typeof setTimeout> | null = null;
-watch(() => sessionStore.error, (err) => {
+watch(() => [sessionStore.error, sessionStore.errorSeq] as const, ([err]) => {
   if (!err) return;
   sessionErrorToastText.value = `操作失败：${err.length > SESSION_ERROR_TEXT_MAX ? `${err.slice(0, SESSION_ERROR_TEXT_MAX)}…` : err}`;
   sessionErrorToastVisible.value = true;
