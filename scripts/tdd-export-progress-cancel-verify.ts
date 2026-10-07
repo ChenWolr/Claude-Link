@@ -27,12 +27,24 @@
 //     为 NaN/非数值时 Math.min/max 把 NaN 传染给 lastCapturePercent（单调基线一旦 NaN，
 //     后续保存阶段进度显示 NaN% 永久毒化）。守卫形态：Number.isFinite 三目先钳 [0,99]，
 //     非数值落 null，pct !== null 才更新——非数值跳过本次记录、不毒化既有估算。
+//  ⑥ X7（R13-F2，2026-10-06）：renderer report() 的 percent 钳制移到 {...base, ...partial}
+//     合并之后——planning/preparing 的 estimateExportPercent 回落 -1（不确定态），旧形态
+//     `percent: <回落>, ...partial` 后经 manager makeProgress 转发（其钳制写在 `...partial`
+//     展开之前属死代码）直通 store，AppHeader 悬停显示「正在导出长图… -1%」。修复：report()
+//     先合并出 merged、再 `merged.percent = Math.max(0, Math.min(100, merged.percent))`，
+//     可见层（AppHeader 悬停/遮罩数值分支）永不出现负值进度；遮罩不确定分支由 phase 驱动
+//     （store indeterminate getter），不受影响。
+//  ⑦ X7 followup（2026-10-07）：manager 本地 makeProgress 的死钳制同修——旧形态
+//     `percent: percent < 0 ? 0 : percent, ...partial` 钳制写在展开之前，partial 携带负
+//     percent 时被覆盖成死代码（renderer 已在 ⑥ 自钳，但 manager 是第二道防线——任何主进程
+//     侧新发射点/直传路径不再依赖调用方自觉）。与 report() 同构：先合并出 merged、再钳
+//     [0,100]、以 merged 调 emitProgress。
 //
 // 运行：npx tsx scripts/tdd-export-progress-cancel-verify.ts
 
 import { readFileSync } from 'node:fs';
 import { strict as assert } from 'node:assert';
-import { estimateExportPercent } from '../src/shared/export-image';
+import { estimateExportPercent, makeProgressPayload } from '../src/shared/export-image';
 
 let pass = 0;
 let fail = 0;
@@ -91,6 +103,45 @@ const overlay = readFileSync(new URL('../src/renderer/components/chat/ExportImag
 
 check('export-runner report() 以 estimateExportPercent 回落（不再恒 0）', () => {
   assert.match(runner, /percent: partial\.percent \?\? estimateExportPercent\(/, 'report 缺 estimateExportPercent 回落');
+});
+check('X7（R13-F2）纯函数：进度构造 percent=-1 输入 → 输出钳 0（≥0）', () => {
+  // makeProgressPayload 是 manager 本地 makeProgress 的导出纯函数同构体（shared/export-image.ts
+  // 注释钉明）；负值 percent 输入必须被钳为 0——主进程侧钳制写在 `...partial` 展开前会先写后
+  // 被覆盖成死代码（R13-F2 根因），纯函数钉住「合并之后钳制」的正确语义。
+  const base = { jobId: 'j1', sessionId: 's1', sessionName: 'n', phase: 'planning' as const, page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, message: 'm' };
+  assert.equal(makeProgressPayload({ ...base, percent: -1 }).percent, 0, 'percent=-1 应钳 0');
+  assert.equal(makeProgressPayload({ ...base, phase: 'preparing', percent: -7 }).percent, 0, '任意负值应钳 0');
+  assert.ok(makeProgressPayload({ ...base, phase: 'capturing', page: 1, totalPages: 2, segment: 1, segmentsInPage: 1 }).percent >= 0, '缺省回落不得为负');
+});
+check('X7（R13-F2）report() 钳制位于 {...base, ...partial} 合并之后（-1 回落不再直通 IPC）', () => {
+  // report() 无法被 tsx 直接 import（@shared 别名在 scripts 运行态不可解析），
+  // 按本脚本既有风格钉源码结构：合并对象 → 钳制 → 以 merged 发送，三段缺一不可。
+  const fnIdx = runner.indexOf('function report(');
+  assert.ok(fnIdx > -1, 'export-runner 缺 report()');
+  const endIdx = runner.indexOf('export async function runExport', fnIdx);
+  const body = runner.slice(fnIdx, endIdx > -1 ? endIdx : fnIdx + 1200);
+  const mergeIdx = body.indexOf('...partial,');
+  assert.ok(mergeIdx > -1, 'report() 缺 ...partial 合并展开');
+  const clampIdx = body.indexOf('merged.percent = Math.max(0, Math.min(100, merged.percent))');
+  assert.ok(clampIdx > -1, '缺合并后钳制 merged.percent = Math.max(0, Math.min(100, merged.percent))');
+  assert.ok(clampIdx > mergeIdx, '钳制必须位于 ...partial 合并之后（先合并再钳，防展开覆盖钳制值）');
+  assert.match(body, /api\.reportProgress\(merged\)/, 'reportProgress 须发送合并并钳制后的 merged（旧内联字面量形态会绕过钳制）');
+});
+check('X7 followup（2026-10-07）manager makeProgress 钳制位于 ...partial 展开之后（主进程侧死钳制同修）', () => {
+  // manager makeProgress 旧形态：`percent: percent < 0 ? 0 : percent, ...partial`——钳制写在
+  // 展开之前，partial 携带负 percent（如 estimateExportPercent 的 -1 不确定态）时被覆盖成
+  // 死代码。与 renderer report() 的 X7 形态同构：合并对象 → 钳 [0,100] → 以 merged 发送。
+  const fnIdx = manager.indexOf('function makeProgress(');
+  assert.ok(fnIdx > -1, 'manager 缺 makeProgress()');
+  const endIdx = manager.indexOf('// —— 运行时校验 ——', fnIdx);
+  const body = manager.slice(fnIdx, endIdx > -1 ? endIdx : fnIdx + 1200);
+  const mergeIdx = body.indexOf('...partial,');
+  assert.ok(mergeIdx > -1, 'makeProgress 缺 ...partial 合并展开');
+  const clampIdx = body.indexOf('merged.percent = Math.max(0, Math.min(100, merged.percent))');
+  assert.ok(clampIdx > -1, '缺合并后钳制 merged.percent = Math.max(0, Math.min(100, merged.percent))');
+  assert.ok(clampIdx > mergeIdx, '钳制必须位于 ...partial 合并之后（先合并再钳，防展开覆盖钳制值）');
+  assert.match(body, /emitProgress\(merged\)/, 'emitProgress 须发送合并并钳制后的 merged');
+  assert.ok(!/percent: percent < 0 \? 0 : percent,/.test(body), '旧死钳制形态（展开前的内联 percent 钳制）不得残存');
 });
 check('IPC 通道 EXPORT_IMAGE_CANCEL 已登记', () => {
   assert.match(ipcTs, /EXPORT_IMAGE_CANCEL: 'export-image:cancel'/, 'ipc.ts 缺 EXPORT_IMAGE_CANCEL');

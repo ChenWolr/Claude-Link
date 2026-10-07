@@ -131,14 +131,19 @@ function emitProgress(payload: ExportImageProgressPayload): void {
 
 function makeProgress(partial: Omit<ExportImageProgressPayload, 'percent' | 'jobId' | 'sessionId' | 'sessionName'> & { percent?: number }): void {
   if (!active) return;
-  const percent = partial.percent ?? computeProgressPercent(partial.phase, 0, 0);
-  emitProgress({
+  // X7 followup（2026-10-07）：percent 钳制放在 {...base, ...partial} 合并之后——旧形态
+  // 钳制写在 ...partial 展开之前，partial 携带负 percent（如 estimateExportPercent 的 -1
+  // 不确定态）时被展开覆盖成死代码。与 renderer export-runner report() 的 X7 形态同构：
+  // 先合并出 merged、再钳 [0,100]，主进程侧发射不再依赖调用方自觉钳制。
+  const merged = {
     jobId: active.jobId,
     sessionId: active.snapshot.sessionId,
     sessionName: active.snapshot.sessionName,
-    percent: percent < 0 ? 0 : percent,
+    percent: partial.percent ?? computeProgressPercent(partial.phase, 0, 0),
     ...partial,
-  } as ExportImageProgressPayload);
+  } as ExportImageProgressPayload;
+  merged.percent = Math.max(0, Math.min(100, merged.percent));
+  emitProgress(merged);
 }
 
 // —— 运行时校验 ——

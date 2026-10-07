@@ -11,6 +11,7 @@ import { reactive } from 'vue';
 import { JPEG_CHUNK_BYTES, JPEG_QUALITY, placeSegment, checkPixelBudget, deriveMaxPageHeightByMemory, deriveMaxPageHeightCss, DEFAULT_EXPORT_BUDGET, estimateExportPercent } from '@shared/export-image';
 import type {
   ExportImagePhase,
+  ExportImageProgressPayload,
   PngCaptureSelfResponse,
 } from '@shared/types/export-image';
 import type { ThemePalette } from '@shared/constants';
@@ -141,7 +142,20 @@ function report(
 ): void {
   runnerState.phase = partial.phase;
   // B4（D13-F2）：进度按已完成段数/总段数推进（payload 数据齐全），不再恒 0 到 done 才跳 100。
-  api.reportProgress({ jobId, sessionId: '', sessionName: runnerState.sessionName, percent: partial.percent ?? estimateExportPercent(partial.phase, partial.page, partial.totalPages, partial.segment, partial.segmentsInPage), ...partial });
+  // X7（R13-F2）：percent 钳制放在 {...base, ...partial} 合并之后——planning/preparing 的
+  // estimateExportPercent 回落为 -1（不确定态），若钳制写在展开之前会被 partial 的显式
+  // percent 覆盖（manager makeProgress 即此死代码形态），-1 直通 store 后 AppHeader 悬停
+  // 显示「正在导出长图… -1%」。先合并出 merged 再钳 [0,100]，可见层永不出现负值进度；
+  // 遮罩不确定分支由 phase 驱动（store indeterminate getter），不受影响。
+  const merged: ExportImageProgressPayload = {
+    jobId,
+    sessionId: '',
+    sessionName: runnerState.sessionName,
+    percent: partial.percent ?? estimateExportPercent(partial.phase, partial.page, partial.totalPages, partial.segment, partial.segmentsInPage),
+    ...partial,
+  };
+  merged.percent = Math.max(0, Math.min(100, merged.percent));
+  api.reportProgress(merged);
 }
 
 export async function runExport(): Promise<void> {
