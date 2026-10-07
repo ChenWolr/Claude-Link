@@ -62,7 +62,14 @@ async function waitStable(): Promise<void> {
   for (let i = 0; i < 8; i++) {
     await twoFrames();
     const h = document.documentElement.scrollHeight;
-    if (h === prev) return;
+    // X8（R05-F2）：mermaid 异步两段式（动态 import chunk + 串行 render）不属 fonts/images；
+    // 未完成的块悬挂为「源码回退态」（新占位无 data-mermaid-state，渲染中为 loading），稳定
+    // 判定必须等它到终态（rendered/error），否则截到源码、或测量按渲染前高度切页裁断内容。
+    // pending 存在时视为未稳定继续迭代；沿用 8 次迭代上限防死等（渲染失败落 error 后放行）。
+    const pendingMermaid = document.querySelectorAll(
+      '.mermaid-block:not([data-mermaid-state="rendered"]):not([data-mermaid-state="error"])'
+    ).length;
+    if (h === prev && pendingMermaid === 0) return;
     prev = h;
   }
 }

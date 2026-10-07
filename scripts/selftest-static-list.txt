@@ -220,3 +220,4 @@ scripts/tdd-interaction-prompt-enter-guard.ts
 scripts/tdd-update-dialog-esc-verify.ts
 scripts/tdd-diff-control-chars-verify.ts
 scripts/tdd-changes-empty-repo-verify.ts
+scripts/tdd-export-mermaid-settle-verify.ts
