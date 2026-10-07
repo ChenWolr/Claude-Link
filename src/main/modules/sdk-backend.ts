@@ -205,6 +205,20 @@ interface SessionEntry {
   // 优雅窗内回合自然完成时该行会成永久误报残留），改为 finishKill 终态确认回合确被中止
   // （wasCurrent）时兑现转发+落库；优雅完成则永不发出。随 entry 生命周期，不跨回合残留。
   watchdogErrorPending?: string;
+  // X9（R11-F1，修法①）：本回合曾被 watchdog 硬杀的标记（watchdogTick 挂账时一并置位）。
+  // 供 finishKill 迟到形态（wasCurrent=false）确认「回合被中止而非自然完成」——必须与
+  // 「无权威终态标记」（!knownOutcome）联用：knownOutcome 已置位（success/error/interrupted）
+  // 时以标记为准，防优雅窗内自然完成（success）被误兑现（b272628 目标）。随 entry 生命周期。
+  watchdogInterrupted?: boolean;
+  // X18（R04-F1）：本回合压缩结果与「即时 fresh 已送」标志的 entry 级镜像——runQuery 局部
+  // turnHadCompactSuccess/postCompactionFreshSent 仍是回合数据源（P2-9 契约钉住局部形态），
+  // 镜像供 killProcess（独立函数，局部变量不可见）等四处非 result 终态出口经
+  // entryCompactedJustNow 读取透传给 post-turn 探针，使「CU 控制通道失效 + 流丢 result /
+  // SDK 错误 / 中断兜底」环境下压缩成功后横幅照常弹出。每回合新 entry（createEntry），
+  // 起步等价 false、无跨回合残留；随 entry 移除（deleteEntry/removeEntryIfCurrent/
+  // markSessionDeleted）自然消亡，不占独立 Map、无需额外清理点。
+  turnHadCompactSuccess?: boolean;
+  postCompactionFreshSent?: boolean;
 }
 const nextQueryInstance = { value: 1 };
 
@@ -552,8 +566,11 @@ function watchdogTick(): void {
       // finishKill 终态确认回合确被中止（wasCurrent）时才兑现；优雅完成则永不发出
       // （stalled 横幅仍即时可见，用户反馈不受影响）。entry 缺失兜底保持旧直发语义。
       const entry = entries.get(sessionId);
+      // X9（R11-F1，修法①）：硬杀标记随挂账一并置位——finishKill 迟到兑现的「回合确被中止」
+      // 确认判据之一（与 !knownOutcome 联用，见 finishKill 兑现门）。
       if (entry) {
         entry.watchdogErrorPending = reason;
+        entry.watchdogInterrupted = true;
       } else {
         forwardEvent(sessionId, mw, { type: 'error', message: reason });
       }
@@ -3967,7 +3984,8 @@ async function runQuery(
             level: 'warn',
           }, entry.queryInstance);
         }
-        forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg), entry.queryInstance);
+        const resultEvent = convertResultMessage(sdkMsg);
+        forwardEvent(sessionId, mainWindow, resultEvent, entry.queryInstance);
         // P2（effort 可见性）：回合 result 后读 CLI 会话 JSONL 尾部 assistant 事件的顶层 effort
         // （静默降级后真值），写 session.lastEffectiveEffort 供 UI「上回合实际生效」显示。
         // 实测（2026-09-04 真窗诊断）：CLI 把 assistant 事件落盘晚于 SDK result 到达数秒，
@@ -4041,6 +4059,20 @@ async function runQuery(
         // P2-9：探针 compactedJustNow 只看本回合 compact_result==='success'（失败/未压缩的
         // /compact 不弹成功横幅），且即时 fresh 已送过则不再重复带标记（双横幅修复）。
         const compactedJustNow = turnHadCompactSuccess && !postCompactionFreshSent;
+        // X9（R11-F1，b272628 回归修复）：interrupt 优雅收尾以 error_during_execution result 终止时，
+        // 在占坑释放前兑现 watchdog 挂账——两段式 race 续体（finishKill）是微任务，必跑在本同步
+        // 段之后，届时 entry 已 deleteEntry、wasCurrent 恒 false，挂账被丢弃，「已自动中断」诊断
+        // 与重试入口在主路径消失。仅 interrupted result 消费（isAbortedCliResult 门）：自然完成
+        //（success result）无中断事实不消费，b272628「优雅完成不残留误报」目标保持；消费即清账，
+        // 迟到的 finishKill 兑现分支自然落空，不产生二次转发。forwardEvent 同步落库 system:error
+        //（hb10-ENG-12），与占坑释放同序列、无 await 插入。
+        // Rv3-1（2026-10-07 review followup）放宽：interrupted result 之外，watchdog 硬杀在途
+        //（watchdogInterrupted 已置位）的 is_error result 同属「回合被中止后收尾」，挂账一并消费
+        // 防随 deleteEntry 消亡丢弃（用户只见 error result、缺「已自动中断」归因）；success result 仍不消费。
+        if (entry.watchdogErrorPending && (isAbortedCliResult(resultEvent) || (resultEvent.is_error && entry.watchdogInterrupted))) {
+          forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+          entry.watchdogErrorPending = undefined;
+        }
         deleteEntry(sessionId, entry);
         emitExit(0);
         // review-v4 High-1 方案 A：post-turn 快照——回合末真实 current 值。5s 超时兜底，
@@ -4087,6 +4119,14 @@ async function runQuery(
       // P2-1：重试烧满后「流丢 result」收尾时补记账——否则 exhausted 终态不落库、红灯与
       // 通知全丢。未烧满/不在重试中时 recordApiRetryExhausted 天然 no-op，普通回合零影响。
       finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
+      // X9（R11-F1）：流丢 result 的 interrupt 优雅收尾同样在 deleteEntry 前兑现 watchdog 挂账
+      //（迟到 finishKill 的 wasCurrent 门在此形态恒 false，同 result 分支根因）；error 先于
+      // aborted 合成转发，与 finishKill 兑现次序一致。本分支只承载「无 result 的中断收尾」，
+      // gotResult=true 的自然完成不进入（result 分支已 return），不存在挂账误报面。
+      if (entry.watchdogErrorPending) {
+        forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+        entry.watchdogErrorPending = undefined;
+      }
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
       // hb12-P2-2（出口② 终态重构）：entry.knownOutcome='interrupted' + 显式结算——无 result 时代码不得伪造 success——
       // exit 兜底（ipc-handlers.ts child.on('exit') 内 getKnownTurnOutcome 处，当前 ~:689 / tqe 出队 child.on('exit') 兜底内同函数处 ~:600）结算为 success（队列假成功+armAfterTurn 自动启动下一任务），
@@ -4156,6 +4196,17 @@ async function runQuery(
         forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
       }
       emitExit(null);
+      // X9（R11-F1，修法② 补齐三出口）：两段式优雅窗在途（forceKill 非空 = watchdog/
+      // upstream_fatal/queue 已接管、finishKill 未跑）而流抛错时，与 result/流末出口同根——
+      // 迟到 finishKill（微任务）届时 wasCurrent 恒 false，挂账必丢。在 finally deleteEntry
+      // 之前消费：emitExit 后仍处同一同步段（resolve exited 只排队微任务，无法插队），清账
+      // 先于 deleteEntry 与 finishKill，时序等价；forceKill 门保持「user 直杀不消费挂账」
+      // 语义（user 的 finishKill 已自清 forceKill），upstream_fatal/queue 无挂账天然 no-op。
+      // 消费即清账，迟到的 finishKill 不产生二次转发（其收窄兑现门见 killProcess 内注释）。
+      if (entry.forceKill != null && entry.watchdogErrorPending) {
+        forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+        entry.watchdogErrorPending = undefined;
+      }
     } else {
       // P2-1：SDK 异常收尾（流抛错）同样补记账——重试烧满后异常时 exhausted 终态不落库。
       finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
@@ -4329,6 +4380,13 @@ export function killProcess(
   reason: KillReason,
   mainWindow?: BrowserWindow,
 ): void {
+  // Rv3-2（2026-10-07 review followup）：用户手动停止时清 watchdog 挂账——5s 优雅窗内
+  // watchdog 迟到的 finishKill 不得经 (watchdogInterrupted && !knownOutcome) 析取在用户
+  // 已见「已中断」后补发 watchdog error（挂账随用户决断作废，与「user 直杀不消费挂账」语义对齐）。
+  if (reason === 'user') {
+    const earlyEntry = entries.get(sessionId);
+    if (earlyEntry) earlyEntry.watchdogErrorPending = undefined;
+  }
   if (reason === 'user' && mainWindow) {
     const current = apiRetryStates.get(sessionId);
     if (current) {
@@ -4416,6 +4474,26 @@ export function killProcess(
       removeEntryIfCurrent(sessionId, entry);
       // 新增 wasCurrent 门（行首加 if，原调用不变）。
       if (wasCurrent) cleanupSessionStall(sessionId);
+      // X9（R11-F1，修法①）：A13 挂账兑现门收窄——wasCurrent 之外补两种「回合确被中止」确认：
+      // 流末兜底已知中断（knownOutcome==='interrupted'，出口② 置位）与本回合曾被 watchdog
+      // 硬杀且无权威终态标记（watchdogInterrupted && !knownOutcome——优雅窗内流抛错的 catch
+      // 收尾形态：先 deleteEntry 后 finishKill、wasCurrent 恒 false 的迟到路径）。兑现仍限定
+      // reason==='watchdog'（user 中断不消费挂账，语义不动）；error 先于下方 wasCurrent 门的
+      // aborted 补发（次序同旧时序）。自然完成（success result，knownOutcome='success'）三态
+      // 皆假不兑现——b272628「优雅完成不残留误报」目标保持：knownOutcome 已置位时以标记为
+      // 准，watchdogInterrupted 不单独构成兑现依据（孤立判据会把优雅窗内成功回合误报成已中断）。
+      // runQuery 三中断出口（result/流末/catch）已在 deleteEntry 前消费挂账（修法②），此处
+      // 是 abort-fallback / forceKill 接管 / 无 query 直杀等 wasCurrent 形态与迟到兜底兑现点。
+      if (
+        reason === 'watchdog' &&
+        mainWindow &&
+        entry.watchdogErrorPending &&
+        (wasCurrent || entry.knownOutcome === 'interrupted' || (entry.watchdogInterrupted === true && !entry.knownOutcome))
+      ) {
+        // A13（D11-F6）语义承接：转发+落库 system:error 后清账（幂等，双兑现点不重复转发）。
+        forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+        entry.watchdogErrorPending = undefined;
+      }
       // Task 4 review P1-2：用户中断/卡死硬杀须显式发幂等 aborted 终态。killProcess 已 abortEntry
       // （state='aborting'）+ removeEntryIfCurrent，isCurrentEntry 此后 false；runQuery 流末兜底
       // （isCurrentEntry 检查）与 catch 段（!isCurrentEntry → emitExit(null)）都不会再发 aborted，
@@ -4423,17 +4501,11 @@ export function killProcess(
       // forwardEvent 对 aborted 只 IPC + 落库 system:aborted（persistCliEvent 有 case，review-v2 §3.7），
       // 前端 markStopped 幂等；
       // runQuery 不会重复发（上述分支已吞掉）。session_cleanup/queue/api_retry_exhausted 不发
-      // （会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
+      //（会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
       // 迟到语义（新增）：仅当被杀回合仍 current 时补发；回合已自然收尾（终态已由 result/流末
-      // 提供）时不再叠加 aborted，防污染收尾后新回合的 UI 状态。
+      // 提供）时不再叠加 aborted，防污染收尾后新回合的 UI 状态。X9 注：aborted/探针等会话级
+      // 副作用保持 wasCurrent 单门不放宽（上方兑现门只管挂账 error，本门形态被 regression 钉死）。
       if (wasCurrent && (reason === 'user' || reason === 'watchdog') && mainWindow) {
-        // A13（D11-F6）：watchdog「已自动中断」挂账在此兑现——仅当回合确被中止（优雅窗内
-        // 自然完成时 wasCurrent=false 不入此门）才转发+落库 system:error，先于 aborted，
-        // renderer 横幅与终态次序同旧时序；user 中断不消费挂账（语义不动）。
-        if (reason === 'watchdog' && entry.watchdogErrorPending) {
-          forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
-          entry.watchdogErrorPending = undefined;
-        }
         forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
         // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
         // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
