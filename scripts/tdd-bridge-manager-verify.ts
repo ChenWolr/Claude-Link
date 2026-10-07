@@ -14,7 +14,9 @@
 //   Q.  /stop 时序真实化（P1）：真实管线中 sdk-backend 置位 knownOutcome 的出口先 deleteEntry 再 emitExit →
 //       dispatcher exit 回调读 known 恒 null、kill 出口 code=null → 中断回合被兜底判 'error'
 //       （时序机制钉在 tdd-bridge-dispatcher-verify [8]）。fake dispatcher 按此真实产出返回
-//       {outcome:'error'}，钉死 manager 须按 interrupted 处理、不得向 IM 发「回复生成失败」。
+//       {outcome:'error'}，钉死 manager 须按 interrupted 处理、不得向 IM 发「回复生成失败」
+//       （Rv4-1：fake 的 replyText 改为非空以钉 /stop 误判 error 场景的静默分流——半截正文
+//        不外发、不追加截断标注）。
 // 收尾追加（2026-09-21 review R2 N1）：
 //   R.  空闲 /stop 不置中断标记：仅该 sessionKey 有在途回合（buffer.running=true）才置
 //       interruptedTurns；空闲 /stop（无 buffer / busy 重试间隙）置标记必残留，被下一个
@@ -50,6 +52,12 @@
 // 2026-09-23 微信扫码重连修复计划追加：U② 语义升级——墓碑吞批改为送达 /new 引导提示
 //   （原『无回复送达』作废，行为随本计划 Commit 2 变更）；新增 UU 组
 //   （wechat 侧同场景 + 提示失败兜底）。
+// 隐藏缺陷修复第二轮追加（docs/plans/2026-10-06-hidden-defect-fix-round2-plan.md X11/R12-F1）：
+//   Y⑪/Y⑫. A3 真实组合端到端：deps.dispatcher 直接接真实 dispatchBridgeTurn（注入 fake
+//   engine/persistence）——硬错误回合（exit≠0 兜底判 error、无显式终态）也提取部分正文
+//   （replyText 不再按 outcome 门控），error+部分正文 → 追加截断标注；error 无正文 → 失败
+//   提示。修复前 dispatcher 仅 success 才取 replyText，该组合生产不可达（[Y⑧]-[Y⑩] 的 fake
+//   注入用例保留，继续钉 manager 分流逻辑本身）。
 // RED 预期（未改树）：manager/owner-policy 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-manager-verify.ts
 
@@ -59,7 +67,7 @@ import * as path from 'node:path';
 import { BridgeManager, type BridgeManagerDeps } from '../src/main/modules/bridge/manager';
 import { isBridgeOwner } from '../src/main/modules/bridge/owner-policy';
 import type { BridgeInboundMessage } from '../src/shared/types/bridge';
-import type { BridgeTurnResult } from '../src/main/modules/bridge/dispatcher';
+import { dispatchBridgeTurn, type BridgeTurnResult, type TurnEngineDeps, type TurnPersistenceDeps } from '../src/main/modules/bridge/dispatcher';
 
 let pass = 0;
 let fail = 0;
@@ -357,8 +365,10 @@ async function main(): Promise<void> {
 
   // ── Q. /stop 中断时序真实化（review P1）：真实管线中 sdk-backend 置位 knownOutcome 的出口先 deleteEntry 再
   // emitExit（/stop kill 路径则由 killProcess 先移除 entry）→ dispatcher 的 exit 回调读 getKnownTurnOutcome 恒 null、kill 出口 code=null →
-  // 中断回合被兜底判 'error'。fake dispatcher 按该真实产出返回 {outcome:'error', replyText:null}，
-  // 钉死 manager：/stop 后不得再向 IM 发「回复生成失败，请稍后重试」（interrupted 分支由此可达）。
+  // 中断回合被兜底判 'error'。fake dispatcher 按该真实产出返回 {outcome:'error', replyText:'中断前的半截正文'}
+  // （Rv4-1：replyText 改为非空以钉 /stop 误判 error 场景的静默分流——若标记判定回归，带半截正文的
+  // 中断回合会走 [Y] A3 路径外发正文+追加截断标注）。钉死 manager：/stop 后不得再向 IM 发
+  // 「回复生成失败，请稍后重试」、不发半截正文、不追加截断标注（interrupted 分支由此可达）。
   {
     const { world, deps } = createWorld();
     world.bindings.set('fs_dm_ou_owner', {
@@ -367,7 +377,7 @@ async function main(): Promise<void> {
     });
     world.sessionRows.set('old-sess', { model: 'm' });
     // 回合在跑：首个 flush 挂起在 dispatcher；放行后按真实时序结算为 error（中断被误判）。
-    world.dispatcherResults.push({ outcome: 'error', replyText: null, __gate: true } as never);
+    world.dispatcherResults.push({ outcome: 'error', replyText: '中断前的半截正文', __gate: true } as never);
     const mgr = new BridgeManager(deps);
     await mgr.startPlatform('feishu');
     mgr.handleInbound(fsMsg({ text: '正在生成的回合' }));
@@ -383,6 +393,13 @@ async function main(): Promise<void> {
     await sleep(60);
     check('Q', '②', '/stop 后中断回合不发「回复生成失败，请稍后重试」',
       !world.feishuAdapter.sentReplies.some((r) => r.text.includes('回复生成失败')),
+      JSON.stringify(world.feishuAdapter.sentReplies));
+    // Rv4-1：error+非空正文形态——标记生效时须整体静默分流，不走 [Y] A3 外发路径。
+    check('Q', '③', '/stop 静默分流不发半截正文（sentReplies 不含「中断前的半截正文」）',
+      !world.feishuAdapter.sentReplies.some((r) => r.text.includes('中断前的半截正文')),
+      JSON.stringify(world.feishuAdapter.sentReplies));
+    check('Q', '④', '/stop 静默分流不追加截断标注（sentReplies 不含「回复中断」字样）',
+      !world.feishuAdapter.sentReplies.some((r) => r.text.includes('回复中断')),
       JSON.stringify(world.feishuAdapter.sentReplies));
   }
 
@@ -970,6 +987,64 @@ async function main(): Promise<void> {
     check('Y', '⑩', 'A3 error 无正文维持「回复生成失败，请稍后重试」',
       worldA3.world.feishuAdapter.sentReplies.some((r) => r.text === '回复生成失败，请稍后重试'),
       JSON.stringify(worldA3.world.feishuAdapter.sentReplies));
+
+    // Y⑪/Y⑫（X11/R12-F1 真实组合端到端）：不用 fake dispatcher 注入结果，而是把真实
+    // dispatchBridgeTurn 接进 deps.dispatcher——硬错误形态：getKnownTurnOutcome 恒 null（真实
+    // 时序：entry 先删再 emitExit）+ exit(1) → 兜底判 'error'；持久层 findReplyText 返回已落库
+    // 部分正文。钉死：error 回合 replyText 照取（不按 outcome 门控），manager A3 追加标注。
+    const runRealCombo = async (replyText: string | null): Promise<string[]> => {
+      const { world, deps } = createWorld();
+      world.bindings.set('fs_dm_ou_owner', {
+        platform: 'feishu', sessionKey: 'fs_dm_ou_owner', userId: 'ou_owner',
+        chatId: 'oc_c', displayName: null, sessionId: 'old-sess',
+      });
+      world.sessionRows.set('old-sess', { model: 'm' });
+      const exitCbs: Array<(code: number | null) => void> = [];
+      const handle = {
+        killed: false,
+        on(event: 'exit' | 'error', cb: (arg: number | null | Error) => void) {
+          if (event === 'exit') exitCbs.push(cb as (code: number | null) => void);
+        },
+        interrupt() { handle.killed = true; },
+      };
+      const engine: TurnEngineDeps = {
+        spawnForChat: () => handle,
+        sendMessage: () => {},
+        getActiveProcess: () => undefined,
+        getKnownTurnOutcome: () => null, // 真实时序：置位 knownOutcome 的出口先 deleteEntry 再 emitExit
+        beginUserTurn: () => {},
+        noteTurnOutcome: () => {},
+        isChatSendLocked: () => false,
+        acquireChatSendLock: () => {},
+        releaseChatSendLock: () => {},
+        getConfigMaxTurns: () => 10,
+        getSessionRow: () => ({
+          model: 'm', modelOverride: null, providerOverride: null, workingDir: null,
+          permissionMode: null, thinkingLevel: null, cliSessionId: null,
+        }),
+      };
+      const persistence: TurnPersistenceDeps = {
+        persistUserMessage: () => {},
+        findReplyText: () => replyText,
+      };
+      deps.dispatcher = (sessionId, text) => dispatchBridgeTurn(engine, persistence, sessionId, text);
+      const mgr = new BridgeManager(deps);
+      await mgr.startPlatform('feishu');
+      mgr.handleInbound(fsMsg({ text: '触发硬错误回合' }));
+      await sleep(30); // debounce(10ms) 后 flush 已进入 dispatchBridgeTurn，exit 回调已注册
+      exitCbs[0]!(1); // 硬错误：exit(1) + known null → 兜底 'error'
+      await sleep(60); // 回合结算 + A3 回复送达
+      return world.feishuAdapter.sentReplies.map((r) => r.text);
+    };
+    const repliesPartial = await runRealCombo('硬错误前已落库的部分正文');
+    check('Y', '⑪', 'X11 真实组合：硬错误回合（exit≠0）+ 部分正文 → 正文带「（回复中断，以上内容可能不完整）」',
+      repliesPartial.some((t) => t.includes('硬错误前已落库的部分正文')
+        && t.includes('（回复中断，以上内容可能不完整）')),
+      JSON.stringify(repliesPartial));
+    const repliesEmpty = await runRealCombo(null);
+    check('Y', '⑫', 'X11 真实组合：硬错误回合无正文 → 维持「回复生成失败，请稍后重试」',
+      repliesEmpty.some((t) => t === '回复生成失败，请稍后重试') && !repliesEmpty.some((t) => t.includes('（回复中断')),
+      JSON.stringify(repliesEmpty));
   }
 
   // ── Z. C2 入站活动性（2026-09-23 批次C）：connectedAt/lastInboundAt 记录清零 + 5s 节流广播。──

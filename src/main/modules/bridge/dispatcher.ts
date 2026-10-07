@@ -114,7 +114,10 @@ export async function dispatchBridgeTurn(
     // runQuery，真正的 exit 回调要等 SDK 流结束才触发，先后不影响终态时序）。
     engine.sendMessage(sessionId, text);
     const outcome = await exitPromise;
-    return { outcome, replyText: outcome === 'success' ? persistence.findReplyText(sessionId) : null };
+    // X11（R12-F1）：回复文本提取不按 outcome 门控——error 回合的已落库部分正文照取，
+    // manager A3 分支据此追加「（回复中断，以上内容可能不完整）」标注；空正文由 manager
+    // 走失败提示（error）/静默（success，B17），/stop 静默由 manager 中断标记消费保证（[Q]）。
+    return { outcome, replyText: persistence.findReplyText(sessionId) };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return { outcome: 'error', replyText: null, busy: msg.includes('仍在执行') }; // B18：spawn 同步拒 → busy
