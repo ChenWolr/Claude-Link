@@ -15,6 +15,11 @@
 //   - session-store.ts：getter 含 lookupProviderModelContextWindow 与
 //     userOverride ?? state.contextLastWindow ?? 200_000 组合形态；旧链符号零残留。
 //   - cli-shared.ts：不含 readContextWindow 与旧链 per-session 窗口解析符号（§3.2 死代码删除）。
+//   - X13（R02-F1/F4，2026-10-06 隐藏缺陷修复第二轮）⑧ 浮层卡区间分叉显式化：草稿值越出
+//     引擎钳制区间 [100k,1M] 时显示说明文案（winForkNotice 条件 + 「圆环按此值显示」），
+//     且引擎钳制（sdk-backend computeContextWindowOverrideTokens [1e5,1e6]）不动；
+//     ⑨ 迁移写入前补 sanitize：config-manager 迁移函数对条目 contextWindow 过
+//     [CONTEXT_WINDOW_MIN, MAX] 整数谓词，越界丢弃 + logger.warn。
 //
 // 运行：npx tsx scripts/tdd-provider-model-context-window-ui-verify.ts
 
@@ -155,6 +160,48 @@ function main(): void {
     const body = functionBody(configManager, 'migrateLegacyContextWindowOverridesToProfiles');
     assert.ok(/hadKey\s*=\s*s\.has\('providerProfiles'\)/.test(body), '缺 hadKey = s.has(providerProfiles) 防御');
     assert.ok(/hadKey \|\| result\.profiles\.length > 0/.test(body), '缺 hadKey || profiles.length > 0 条件载荷');
+  });
+
+  console.log('\n=== ⑧ X13-a（R02-F1）：浮层卡窗口区间分叉显式化 + 引擎钳制不动 ===');
+  check('浮层卡分叉说明：winForkNotice 条件（> 1_000_000 或 < 100_000）+ 文案「圆环按此值显示」+ pop-note 样式', () => {
+    assert.ok(/winForkNotice/.test(modelList), '缺 winForkNotice 分叉说明条件（computed/模板任一）');
+    assert.ok(/1_000_000/.test(modelList), '分叉条件缺引擎上界常量 1_000_000（恰好 1M 不判分叉——引擎不钳制）');
+    assert.ok(/100_000/.test(modelList), '分叉条件缺引擎下界常量 100_000（恰好 100k 不判分叉——引擎不钳制）');
+    assert.ok(modelList.includes('圆环按此值显示'), '缺分叉说明文案「圆环按此值显示」');
+    assert.ok(modelList.includes('100k') && modelList.includes('1M'), '说明文案须含引擎区间表述（100k / 1M）');
+    assert.ok(/pop-note/.test(modelList), '缺 pop-note 说明样式（muted 提示，区别于 pop-err 错误态）');
+    // 说明是 display-only：保存校验仍走 providerModelWindowInputError（录入区间 [1k,2M] 不动）。
+    const saveBody = modelList.slice(
+      modelList.search(/function saveWinPop\b/),
+      modelList.search(/function onDocClick\b/) === -1 ? modelList.length : modelList.search(/function onDocClick\b/),
+    );
+    assert.ok(
+      !/winForkNotice/.test(saveBody),
+      'saveWinPop 不得引用 winForkNotice（分叉说明仅展示，保存行为不动）',
+    );
+  });
+  check('引擎钳制侧不动：sdk-backend computeContextWindowOverrideTokens 仍钳制 [100000, 1000000]', () => {
+    const sdkBackend = read('../src/main/modules/sdk-backend.ts');
+    const body = functionBody(sdkBackend, 'computeContextWindowOverrideTokens');
+    assert.ok(
+      /Math\.max\(100000,\s*Math\.min\(1000000,/.test(body),
+      '缺 Math.max(100000, Math.min(1000000, …)) 钳制（X13 口径决策：注入钳制是 SDK 硬约束，不动）',
+    );
+  });
+
+  console.log('\n=== ⑨ X13-b（R02-F4）：迁移写入模型条目前补 sanitize（越界丢弃 + warn） ===');
+  check('config-manager 迁移函数体：contextWindow 过 [CONTEXT_WINDOW_MIN, MAX] 整数谓词，越界丢弃 + logger.warn，且先于 s.set', () => {
+    const configManager = read('../src/main/modules/config-manager.ts');
+    const body = functionBody(configManager, 'migrateLegacyContextWindowOverridesToProfiles');
+    assert.ok(/CONTEXT_WINDOW_MIN/.test(body), '缺 CONTEXT_WINDOW_MIN 区间判定（sanitize 同源常量）');
+    assert.ok(/CONTEXT_WINDOW_MAX/.test(body), '缺 CONTEXT_WINDOW_MAX 区间判定（sanitize 同源常量）');
+    assert.ok(/Number\.isInteger/.test(body), '缺 Number.isInteger 整数判定（sanitizeProviderModels 同款谓词）');
+    assert.ok(/Number\.isFinite/.test(body), '缺 Number.isFinite 有限性判定（sanitizeProviderModels 同款谓词）');
+    assert.ok(/delete \w+\.contextWindow/.test(body), '越界值须删除条目 contextWindow 字段（未设置语义，同 sanitize）');
+    assert.ok(/logger\.warn\(/.test(body), '越界丢弃须 logger.warn 留痕');
+    const sanitizeIdx = body.indexOf('CONTEXT_WINDOW_MIN');
+    const setIdx = body.indexOf('s.set(');
+    assert.ok(sanitizeIdx >= 0 && setIdx >= 0 && sanitizeIdx < setIdx, 'sanitize 判定必须在 s.set 写库之前');
   });
 
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

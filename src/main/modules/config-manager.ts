@@ -36,6 +36,7 @@ import { resetCliDetectionCache } from './cli-detector';
 import * as path from 'path';
 import { clearProjectionSnapshot } from './settings-projection-merge';
 import { buildLegacyProviderProfile, maskApiKey, sanitizeProviderModels, migrateLegacyContextWindowOverrides } from '../../shared/provider-library';
+import { CONTEXT_WINDOW_MAX, CONTEXT_WINDOW_MIN } from '../../shared/model-context-windows';
 import { logger } from '../utils/logger';
 import { createSafeStore } from '../utils/safe-store';
 import { writeClaudeSettings, SKIP_NO_WORKDIR } from './settings-writer';
@@ -168,16 +169,45 @@ function migrateLegacyContextWindowOverridesToProfiles(): void {
   // 幂等零操作守卫：env 键已删净时纯函数原样返回 advancedJson（含非法 JSON 宽容路径），
   // 不触发任何写库——二次启动零操作。
   if (result.advancedJson === advancedJson) return;
+  // X13-b（R02-F4）迁移补 sanitize：迁移纯函数对窗口值只判「正数」，手改 advancedJson env 的
+  // 越界值（如 500 / 5,000,000）会绕过 sanitizeProviderModels 的 [1k,2M] 整数区间直落条目
+  // （lookupProviderModelContextWindow 的 >0 判定随即视为已设置，圆环分母/注入链拿到怪值）。
+  // 写库前对条目 contextWindow 过 sanitize 同款谓词（有限整数 ∈ [CONTEXT_WINDOW_MIN, MAX]，
+  // 常量同源）；越界非法值丢弃（未设置语义）并 logger.warn 留痕；正常存量/移植值（200k/1M）不变。
+  const droppedWindowValues: string[] = [];
+  const profiles = result.profiles.map((p) => ({
+    ...p,
+    models: p.models.map((m) => {
+      const w = m.contextWindow;
+      if (
+        typeof w !== 'number' ||
+        (Number.isFinite(w) && Number.isInteger(w) && w >= CONTEXT_WINDOW_MIN && w <= CONTEXT_WINDOW_MAX)
+      ) {
+        return m;
+      }
+      droppedWindowValues.push(`${p.id}/${m.id}=${w}`);
+      const sane = { ...m };
+      delete sane.contextWindow;
+      return sane;
+    }),
+  }));
+  for (const dropped of droppedWindowValues) {
+    logger.warn(
+      `上下文窗口覆盖迁移：越界窗口值已丢弃（${dropped}，合法区间 [${CONTEXT_WINDOW_MIN}, ${CONTEXT_WINDOW_MAX}]，同 sanitize 语义）`,
+    );
+  }
   const hadKey = s.has('providerProfiles');
   s.set({
     advancedJson: result.advancedJson,
     // 迁移纯函数按 spread 逐层拷贝档案（加密 blob 等存储字段原样保留），此处仅类型收窄回存储形状。
     // hadKey 防御：绝不因迁移创建空 providerProfiles 键——那会击穿 ensureProviderMigration 的
     // s.has('providerProfiles') 迁移守卫（键存在即视为已迁移）。
-    ...(hadKey || result.profiles.length > 0 ? { providerProfiles: result.profiles as StoredProviderProfile[] } : {}),
+    ...(hadKey || result.profiles.length > 0 ? { providerProfiles: profiles as StoredProviderProfile[] } : {}),
   });
   logger.info(
-    `上下文窗口覆盖迁移：移植 ${result.migrated.length} 条 / 废弃 ${result.dropped.length} 条（legacy 按别名窗口 env 键已清除）`,
+    `上下文窗口覆盖迁移：移植 ${result.migrated.length} 条 / 废弃 ${result.dropped.length} 条（legacy 按别名窗口 env 键已清除${
+      droppedWindowValues.length > 0 ? `；另有 ${droppedWindowValues.length} 个越界窗口值按 sanitize 丢弃` : ''
+    }）`,
   );
 }
 
