@@ -8,6 +8,9 @@
 //          仍各含 <pre>{{ updateStore.state.releaseNotes }}</pre> 纯文本直出）。
 //          P10/W5/W6 review 尾款：pre/嵌套列表/表格分隔、控制实体与大写 hex 守卫、命名实体扩表、
 //          ConfigPage 注释同步、app-updater 嵌式 // 清除。
+//          P11/W7 X19 followup（2026-10-07 规则上收）：details/summary 块级闭合 + img 占位
+//          两条规则由 app-updater 前置补丁上收进 htmlReleaseNotesToText 主链；app-updater
+//          退役 patchAtomHtmlNotes / looksLikeHtmlNotes import，主链单链直归。
 // 运行：npx tsx scripts/tdd-release-notes-verify.ts（已登记 scripts/selftest-static-list.txt）
 // RED 约定（计划 §5.7）：P 组经受保护加载——模块缺失时逐项 fail（fail>0）而非顶层 crash。
 import { strict as assert } from 'node:assert';
@@ -144,6 +147,17 @@ check('P10 RF1 </pre> 换行；RF2 嵌套/平铺列表；RF3 表格分隔；RF4 
   assert.equal(htmlReleaseNotesToText('x &mdash; y'), 'x — y');
 });
 
+console.log('\n=== P11) X19 上收：details/summary 块级闭合 + img 占位（规则在 shared 主链内） ===');
+check('P11 </details>/</summary> → 换行；<img> → [图片：alt]/[图片]；alt 实体随主链解码（纯转换函数直测）', () => {
+  const { htmlReleaseNotesToText } = rel_();
+  assert.equal(htmlReleaseNotesToText('<details><summary>S</summary>v1</details>'), 'S\nv1');
+  assert.equal(htmlReleaseNotesToText('<p>甲</p><details><summary>乙</summary>丙</details>'), '甲\n乙\n丙');
+  assert.equal(htmlReleaseNotesToText('<p><img src="u" alt="截图"></p>'), '[图片：截图]');
+  assert.equal(htmlReleaseNotesToText('<p><img src="u"></p>'), '[图片]');
+  assert.equal(htmlReleaseNotesToText('<p><img src="u" alt=""></p>'), '[图片]');
+  assert.equal(htmlReleaseNotesToText('<p><img src="u" alt="A &amp; B"></p>'), '[图片：A & B]');
+});
+
 console.log('\n=== W) 接线字面钉 ===');
 const appUpdater = readRel('src/main/modules/app-updater.ts');
 const updateTypes = readRel('src/shared/types/update.ts');
@@ -173,6 +187,11 @@ check('W5 ConfigPage：注释同步为「主进程已归一」口径，旧「Mar
 });
 check('W6 app-updater：嵌式 // 笔误清除净（不含 "，//"）', () => {
   assert.ok(!appUpdater.includes('，//'), '嵌式 // 残留');
+});
+check('W7 X19 上收：app-updater 前置补丁退役干净（规则已进 shared 主链）', () => {
+  assert.ok(!appUpdater.includes('patchAtomHtmlNotes'), 'patchAtomHtmlNotes 残留（应退役上收）');
+  assert.ok(!appUpdater.includes('looksLikeHtmlNotes'), 'looksLikeHtmlNotes import 残留（补丁专属依赖）');
+  assert.ok(!appUpdater.includes('info.releaseNotes = '), '前置写回接线残留（应主链单链直归）');
 });
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
