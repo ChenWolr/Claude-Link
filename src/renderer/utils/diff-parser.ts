@@ -62,6 +62,16 @@ export interface ParsedDiffFile {
 // git 二进制标记：整行 meta（无 +/- 前缀），文本 diff 内容行（如 +Binary files…）不会命中。
 const BINARY_RE = /(?:^Binary files .+ differ$|^GIT binary patch$)/m;
 
+// R10-F1：jsdiff parsePatch 以 /\r\n|[\n\v\f\r\x85]/ 拆行（parse.js split 正则），而 git 只按
+// \n 分行——内容行里的 \v\f\x85 裸 \r 被当分隔符后，后半段行首不在 +/-/space/\\ 集合 →
+// parseHunk break，该 hunk 余下行静默丢弃（GBK 文件经主进程 latin1 降级把尾字节 0x85 映射
+// U+0085，常态化命中）。归一为可见占位符（U+2400 系，一对一映射），保证「渲染行数 = git
+// 输出行数」；\r\n 先归一为 \n 避免误伤（与 jsdiff 把 \r\n 当整体分隔符等价，渲染零差异）。
+const CTRL_PLACEHOLDER: Record<string, string> = { '\v': '␋', '\f': '␌', '\r': '␍', '\x85': '␥' };
+function normalizeControlChars(text: string): string {
+  return text.replace(/\r\n/g, '\n').replace(/[\v\f\r\x85]/g, (ch) => CTRL_PLACEHOLDER[ch]!);
+}
+
 // unified diff 文件头取路径：newFileName 形如 'b/src/x.ts'，删除文件时为 '/dev/null'。
 // 去 a// b// 前缀还原仓库根相对路径；newFileName 缺失/为 /dev/null 时退回 oldFileName。
 function extractPath(newFileName: string | undefined, oldFileName: string | undefined): string {
@@ -152,19 +162,22 @@ function buildConflictGroups(lines: string[]): DiffGroup[] {
 export function parseUnifiedDiff(text: string): ParsedDiffFile | null {
   if (!text || !text.trim()) return null;
 
+  // R10-F1：统一入口归一（DiffDialog/ToolDiffDialog 两弹窗与 splitUnifiedDiff 段拆后各段都经
+  // 此函数）——喂 parsePatch 前消灭会被其拆行的控制符，杜绝 hunk 静默丢行。
+  const normalized = normalizeControlChars(text);
   let patches: ReturnType<typeof parsePatch>;
   try {
-    patches = parsePatch(text);
+    patches = parsePatch(normalized);
   } catch {
     return null; // 残缺输入：parsePatch 偶发抛错时降级为「无法解析」
   }
   if (!patches.length) {
-    return BINARY_RE.test(text) ? { path: '', groups: [], binary: true } : null;
+    return BINARY_RE.test(normalized) ? { path: '', groups: [], binary: true } : null;
   }
   const head = patches[0];
   const filePath = extractPath(head.newFileName, head.oldFileName);
   if (!head.hunks || !head.hunks.length) {
-    return BINARY_RE.test(text) ? { path: filePath, groups: [], binary: true } : null;
+    return BINARY_RE.test(normalized) ? { path: filePath, groups: [], binary: true } : null;
   }
 
   const groups: DiffGroup[] = [];

@@ -24,6 +24,11 @@ const nodePath = path;
 const GIT_TIMEOUT_MS = 3000;
 const GIT_MAX_BUFFER = 8 * 1024 * 1024;
 
+// X5（R10-F2）：空树哈希——空仓库（unborn HEAD，无任何提交）的 diff 基线回退。git 内置虚拟对象
+// （对象库无实体也可 diff；`git hash-object -t tree /dev/null` 实算值），空仓库下
+// `diff <空树> -- <path>` exit 0 正常出全新增 diff，而 `diff HEAD` 则 exit 128（ambiguous 'HEAD'）。
+const EMPTY_TREE_HASH = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
 interface RawGitResult {
   stdout: string;
   code: number;
@@ -198,9 +203,12 @@ export async function listChanges(workingDir: string | null, touchedPaths: strin
 
   let baselineRef = '';
   try {
-    baselineRef = (await runGitRaw(root, ['rev-parse', 'HEAD'])).stdout.trim();
+    // X5（R10-F2）：空仓库（unborn HEAD）下 `rev-parse HEAD` exit 128 且 stdout 原样回显 "HEAD"
+    //（非空！fatal 走 stderr）——须按退出码判定，只看 stdout/catch 会把空仓库误判成基线 "HEAD"。
+    const r = await runGitRaw(root, ['rev-parse', 'HEAD']);
+    baselineRef = r.code === 0 ? r.stdout.trim() : '';
   } catch {
-    baselineRef = ''; // 无提交的空仓库
+    baselineRef = ''; // 无提交的空仓库（超时/spawn 失败同按空基线处理）
   }
 
   // workingDir 可能是仓库子目录：只列该子树下的改动（pathspec 相对仓库根，正斜杠）。
@@ -209,19 +217,24 @@ export async function listChanges(workingDir: string | null, touchedPaths: strin
   // status/numstat 超时（>GIT_TIMEOUT_MS）或输出超 maxBuffer → runGit reject；
   // 降级为 ok:false 让面板显可读错误，不让 rejection 冒泡成静默失败（与 getChangeDiff 失败处理同形）。
   let statusOut: string;
-  let numstatOut: string;
+  let numstatOut = '';
   try {
     // hb10 P2-7：status/numstat 非零退出（如损坏 .git/index）不再当成功空输出，返回 git-error 失败态。
     const st = await runGit(root, ['--no-pager', 'status', '--porcelain=v1', '-z', '--ignore-submodules', '--untracked-files=all', ...pathspec]);
     if (st.code !== 0) {
       return { ok: false, reason: 'git-error', message: '扫描改动失败：git 异常退出' };
     }
-    const ns = await runGit(root, ['--no-pager', 'diff', 'HEAD', '--numstat', '-z', '--ignore-submodules', ...pathspec]);
-    if (ns.code !== 0) {
-      return { ok: false, reason: 'git-error', message: '扫描改动失败：git 异常退出' };
-    }
     statusOut = st.stdout;
-    numstatOut = ns.stdout;
+    // X5（R10-F2）：空仓库（unborn HEAD，baselineRef===''）跳过 `diff HEAD --numstat`——空仓库下该
+    // 命令 exit 128（fatal: ambiguous argument 'HEAD'），非零即整体报错会把面板打掉；列表以 status
+    // 为准，全部条目 ± 计数 null（与未跟踪文件现状一致）。
+    if (baselineRef) {
+      const ns = await runGit(root, ['--no-pager', 'diff', 'HEAD', '--numstat', '-z', '--ignore-submodules', ...pathspec]);
+      if (ns.code !== 0) {
+        return { ok: false, reason: 'git-error', message: '扫描改动失败：git 异常退出' };
+      }
+      numstatOut = ns.stdout;
+    }
   } catch {
     return { ok: false, reason: 'error', message: '扫描改动失败（超时或输出过大），请重试' };
   }
@@ -315,7 +328,18 @@ export async function getChangeDiff(workingDir: string | null, path: string, con
       // 双路径 pathspec 的实际价值是呈现完整改名差异（含旧路径侧内容）。）
       const renameEntry = lastListFiles?.find((f) => f.path === path && f.status === 'R' && f.oldPath);
       const pathspecArgs: string[] = renameEntry?.oldPath ? ['--', renameEntry.oldPath, path] : ['--', path];
-      const tracked = await runGit(cwd, ['--no-pager', 'diff', 'HEAD', `-U${context}`, ...pathspecArgs]);
+      // X5（R10-F2）：空仓库（unborn HEAD）下 `diff HEAD` exit 128——先解出基线，无提交时回退空树
+      // 哈希（git 内置虚拟对象，exit 0：已暂存文件直接出全新增 diff；未跟踪文件出空 diff → 走
+      // 下方既有 --no-index /dev/null 兜底出整文件新增）。基线判定按退出码：空仓库
+      // `rev-parse HEAD` exit 128 且 stdout 回显 "HEAD"（非空），只看 stdout 会误判。
+      let baselineRef = '';
+      try {
+        const r = await runGitRaw(cwd, ['rev-parse', 'HEAD']);
+        baselineRef = r.code === 0 ? r.stdout.trim() : '';
+      } catch {
+        baselineRef = ''; // 超时/spawn 失败：按空仓库回退空树基线
+      }
+      const tracked = await runGit(cwd, ['--no-pager', 'diff', baselineRef || EMPTY_TREE_HASH, `-U${context}`, ...pathspecArgs]);
       // hb10 P2-7：diff 非零退出不再当成功空输出（--no-index 差异态 exit 1 在下方分支合法）。
       if (tracked.code !== 0) {
         return { ok: false, reason: 'git-error', message: '读取 diff 失败：git 异常退出' };

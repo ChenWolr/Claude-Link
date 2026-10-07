@@ -3,7 +3,7 @@
 // 来源标签（查询/手动）+ token 数 + 删除。空状态引导查询/手动添加）。
 // 模型行 mtok 与来源标签之间为窗口徽标（方案 E2）：点击在徽标正下方弹出锚定浮层卡，
 // 编辑该模型条目的 contextWindow 覆盖；提交以 set-window 事件上抛父组件走串行落库链。
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import type { ProviderModel } from '../../../shared/types/config';
 import { providerModelWindowInputError } from '../../../shared/model-context-windows';
 
@@ -135,6 +135,23 @@ function applyWinPreset(value: string): void {
   winError.value = providerModelWindowInputError(value);
   inputEl.value?.focus();
 }
+
+// X13-a（R02-F1 分叉显式化）：录入/圆环尊重真实窗口 [1k,2M]，而引擎注入侧
+// （sdk-backend computeContextWindowOverrideTokens）按 SDK autoCompactWindow 范围钳制到
+// [100k,1M]——草稿值越出引擎区间（> 1M 或 < 100k）时浮层卡就地说明分叉。口径决策：
+// 钳制与圆环分母各自语义不动，分叉由本说明弥合；仅对合法草稿（winError 为空且非清除
+// 意图）判分叉，恰好 1M/100k 不判（引擎不钳制、无分叉）。
+const ENGINE_WINDOW_MIN = 100_000;
+const ENGINE_WINDOW_MAX = 1_000_000;
+const winForkNotice = computed<string | null>(() => {
+  const raw = winDraft.value.trim();
+  if (raw === '' || winError.value !== null) return null;
+  const n = Number(raw);
+  if (Number.isFinite(n) && (n > ENGINE_WINDOW_MAX || n < ENGINE_WINDOW_MIN)) {
+    return '引擎压缩窗口按 100k–1M 生效；圆环按此值显示';
+  }
+  return null;
+});
 
 // 卡片轻晃一次：先摘类再下一帧挂回以重放动画；reduced-motion 由 CSS 关动画，定时兜底摘类。
 function shakeWinPop(): void {
@@ -285,6 +302,7 @@ async function runRowTest(model: ProviderModel): Promise<void> {
             @keydown.esc.stop.prevent="closeWinPop"
           >
           <p v-if="winError !== null" class="pop-err">{{ winError }}</p>
+          <p v-if="winForkNotice !== null" class="pop-note">{{ winForkNotice }}</p>
           <div class="pop-pills">
             <button
               v-for="preset in WIN_PRESETS"
@@ -559,6 +577,14 @@ async function runRowTest(model: ProviderModel): Promise<void> {
   margin-top: 0.3125rem;
   font-size: 0.71875rem;
   color: var(--color-danger);
+  line-height: 1.5;
+}
+
+/* 分叉说明（X13-a）：非错误态的 muted 提示——同 pop-err 规格但不动用 danger 色。 */
+.pop-note {
+  margin-top: 0.3125rem;
+  font-size: 0.71875rem;
+  color: var(--color-text-muted);
   line-height: 1.5;
 }
 

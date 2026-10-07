@@ -1176,20 +1176,23 @@ function createChat() {
     let attachmentIds: string[] = [];
     if (last.attachmentIds.length > 0) {
       try {
-        // A11（D08-F1）：克隆返回 { created, rejected }——余量预检拒掉的附件不落盘、
-        // 以名单返回；此路径无 notice 通道，以 error 横幅承载提示（发送后由既有机制清理）。
+        // A11（D08-F1）：克隆返回 { created, rejected }——余量预检拒掉的附件不落盘、以名单返回。
+        // X17（R08-F1）：提示改走 sessionStore.fail——App.vue watch([error, errorSeq]) 弹 3.5s
+        // 全局 toast（A4/X16 既有通道，自动消失、同文案连发可再触发），不受随后 sendMessage 入口
+        // 对本闭包 error 的清空影响（error.value = null 只清回合错误横幅，发送开始时清理而非
+        // 发送后——旧实现写 error 正是因此渲染前被覆写、用户永远看不到）。
         const result = await window.claudeLink.cloneMessageAttachments(sid, last.id);
         attachmentIds = result.created.map((a) => a.id);
         if (attachmentIds.length > 0) {
           useChatDraftStore().addAttachments(sid, result.created);
           if (result.rejected.length > 0) {
-            error.value = `附件余量不足，已恢复 ${result.created.length} 个、忽略 ${result.rejected.length} 个（${result.rejected.map((r) => r.filename).join('、')}）`;
+            store.fail(`附件余量不足，已恢复 ${result.created.length} 个、忽略 ${result.rejected.length} 个（${result.rejected.map((r) => r.filename).join('、')}）`);
           }
         } else {
-          error.value = '附件恢复失败，已按纯文本重发';
+          store.fail('附件恢复失败，已按纯文本重发');
         }
       } catch {
-        error.value = '附件恢复失败，已按纯文本重发';
+        store.fail('附件恢复失败，已按纯文本重发');
       }
     }
     // 卡死重试：重发最后一条用户消息（新回合新 clientMessageId）。

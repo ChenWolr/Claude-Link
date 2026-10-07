@@ -368,6 +368,8 @@ export interface NativeSettingsDiagnostic {
 
 // 队列事件（v3 语义）：state_changed 携带全量 QueueState 快照，是所有状态迁移的权威通道；
 // task_settled 是中断路径（无 result）渲染层更新历史/收口 sending 的唯一信号。
+// queue_auto_resumed（X10 followup）：自愈恢复（主进程内部 resumeAllPending，不经 IPC 返回值）
+// 后的渲染层 paused 翻转信号——与 queue_halted 的置 true 完全对称。
 export type QueueEventType =
   | 'countdown_started'
   | 'countdown_tick'
@@ -375,6 +377,7 @@ export type QueueEventType =
   | 'task_started'
   | 'task_settled'
   | 'queue_halted'
+  | 'queue_auto_resumed'
   | 'user_message_created';
 
 export interface QueueEventPayload {

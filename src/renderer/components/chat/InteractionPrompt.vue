@@ -467,7 +467,7 @@ function move(delta: number): void {
 }
 
 function focusDialogStart(): void {
-  // B5 补修（核验·遮挡组合回归）：更高层遮罩（灯箱 9999/导出格式 9000）在场时不抢占 DOM
+  // B5 补修（核验·遮挡组合回归）：更高层遮罩（灯箱 9999/diff 弹窗 1250/导出格式 9000）在场时不抢占 DOM
   // 焦点——弹窗渲染于 z-1200 之下被完全遮挡、用户从未见过，抢焦会把键盘焦点从用户当前
   // 所见层（灯箱关闭按钮等）劫进不可见弹窗，后续 Enter 经 submit 兜底会静默提交首项
   // （权限首项=允许本次）。让位判据与 A9 的 Esc 让位同源（escHandle.isTopmost）；
@@ -533,6 +533,15 @@ function handleKeydown(event: KeyboardEvent): void {
     event.preventDefault();
     move(-1);
   } else if (event.key === 'Enter' && document.activeElement !== otherInput.value) {
+    // X1（R06-F1）：焦点在本弹窗的真实按钮（footer 上一步/拒绝/提交）或 <summary>（交互历史）上
+    // 时让位——不 preventDefault、不 submit，放行浏览器原生激活（Enter→click），防 window 级兜底
+    // 把「Tab 到拒绝按 Enter」劫持成 B5 提交聚焦首项（权限选项序 allow 在前 = 误授权）、
+    // 「上一步」变推进下一题、<summary> 直接提交整个交互。让位限定 dialogRef 内：焦点在遮罩外
+    // 按钮上不放行其原生激活（与 A9/B5「不可见元素不得被键盘触碰」约束同源）；选项按钮
+    //（button.interaction-option，InteractionOptionList 两形态）不让位：Enter 维持 submit 兜底
+    //（B5 语义），焦点在弹窗空白/body 上同样维持现状。
+    const target = event.target as HTMLElement | null;
+    if (target && dialogRef.value?.contains(target) && target.closest('button, summary') && !target.closest('.interaction-option')) return;
     event.preventDefault();
     void submit();
   } else if (event.key === 'Escape') {
@@ -548,6 +557,11 @@ function handleKeydown(event: KeyboardEvent): void {
     if (isAlert) void submit('confirm');
     else void cancel();
   } else if (event.key === ' ' && currentMultiSelect.value && document.activeElement !== otherInput.value) {
+    // X1（R06-F1）：Space 同族让位——多选形态下焦点在 footer 按钮/<summary> 上时 Space 原被
+    // preventDefault + toggleOption 劫持（按钮激活被吞、隐藏选择被改写）；判据与 Enter 分支
+    // 同款（dialogRef 限定 + 选项按钮除外），选项上 Space 仍 toggleOption（listbox 惯例）。
+    const target = event.target as HTMLElement | null;
+    if (target && dialogRef.value?.contains(target) && target.closest('button, summary') && !target.closest('.interaction-option')) return;
     event.preventDefault();
     const option = focusedOption.value;
     if (option) toggleOption(option.id);

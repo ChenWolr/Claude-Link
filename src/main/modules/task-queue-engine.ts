@@ -37,6 +37,9 @@ import type { PreparedAttachmentPrompt } from './attachment-prompt-builder';
 import { prepareAttachmentPrompt } from './attachment-prompt-builder';
 import { resolveAttachmentRecords } from './attachment-service';
 import { getConfig } from './config-manager';
+// X10（R09-F1）：reasoning_replay 自动重试与熔断语义对齐——引擎经此只读查询韧性层状态
+// （失败回合是否将被自动重试 / 自动重试回合是否已实际发起），韧性层不反向依赖引擎（无环导入）。
+import { willAutoRetryReasoningReplay, consumeAutoRetryDispatched } from './reasoning-replay-auto-retry';
 import * as taskRepo from '../database/repositories/task-repo';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
@@ -55,6 +58,21 @@ const generations = new Map<string, number>();
 const executedHistory = new Map<string, ExecutedTaskInfo[]>();
 
 const EXECUTED_HISTORY_CAP = 50;
+
+/** X10（R09-F1）：熔断原因类型——'reasoning-replay' 为内部值（该失败回合将被韧性层自动重试），
+ *  standbyReason / queue_halted 载荷对外仍归一为 failed 语义，渲染层契约不变。 */
+export type QueueHaltReason = 'failed' | 'interrupted' | 'reasoning-replay';
+/** X10（R09-F1）：最近一次熔断的原因快照（自动重试成功后据此判定是否自愈恢复）。 */
+const lastHaltReasons = new Map<string, QueueHaltReason>();
+/** X10（R09-F1）：熔断发生时的人工干预序号快照（与 manualInterventionSeqs 比对判定「此后无人工干预」）。 */
+const haltInterventionSeqs = new Map<string, number>();
+/** X10（R09-F1）：人工队列操作计数（runTaskNow / resumeAllTasks / armFromUserAction /
+ *  drainCountdownIfNoRunnable 入口递增——恢复单个/全部、立即执行、暂停/删除均视为用户决断）。 */
+const manualInterventionSeqs = new Map<string, number>();
+
+function noteManualQueueIntervention(sessionId: string): void {
+  manualInterventionSeqs.set(sessionId, (manualInterventionSeqs.get(sessionId) ?? 0) + 1);
+}
 
 function getQueueGeneration(sessionId: string): number {
   return generations.get(sessionId) ?? 0;
@@ -263,6 +281,8 @@ function armAfterTurn(sessionId: string, mainWindow: BrowserWindow): void {
  *  且开关开且有未暂停 pending → 全量倒计时。countdown 已在走时 no-op（「不打断不重置」）；
  *  回合中 no-op（交给 armAfterTurn）。 */
 export function armFromUserAction(sessionId: string, mainWindow: BrowserWindow): void {
+  // X10（R09-F1）：TASK_SET_PAUSED 恢复路径的人工动作（无论 arm 是否起计时）都计为用户决断。
+  noteManualQueueIntervention(sessionId);
   const state = queues.get(sessionId);
   if (!state || state.status !== 'standby') return;
   if (getActiveProcess(sessionId)) return;
@@ -281,8 +301,11 @@ export function armFromUserAction(sessionId: string, mainWindow: BrowserWindow):
  *  把 running 收口为 standby(switch_off)，否则回合失败/中断后引擎卡 running（面板假象
  *  「回合执行中…」、armFromUserAction 等 standby 依赖路径被阻塞）。任务状态不动（不
  *  pauseAllPending）、不广播 queue_halted；countdown 理论上不存在（onQueueEnabledChanged(false)
- *  已收口），standby 则 no-op。 */
-export function haltQueue(sessionId: string, reason: 'failed' | 'interrupted', mainWindow: BrowserWindow): void {
+ *  已收口），standby 则 no-op。
+ *  X10（R09-F1）：reason 新增内部值 'reasoning-replay'（该失败回合将被韧性层自动重试一次）——
+ *  standbyReason / queue_halted 对外仍呈 failed 语义；自动重试实际发起且成功、且熔断后无人工
+ *  队列操作时，由 noteTurnOutcome 成功分支的 maybeResumeAfterAutoRetry 自愈熔断残留。 */
+export function haltQueue(sessionId: string, reason: QueueHaltReason, mainWindow: BrowserWindow): void {
   const state = queues.get(sessionId);
   if (!state) return;
   if (getConfig().queueEnabled !== true) {
@@ -300,12 +323,18 @@ export function haltQueue(sessionId: string, reason: 'failed' | 'interrupted', m
   }
   cancelTimers(sessionId);
   taskRepo.pauseAllPending(sessionId);
+  // X10（R09-F1）：记录熔断原因 + 当时的干预序号快照——自动重试成功后仅在「无人工干预」时自愈。
+  lastHaltReasons.set(sessionId, reason);
+  haltInterventionSeqs.set(sessionId, manualInterventionSeqs.get(sessionId) ?? 0);
   state.status = 'standby';
-  state.standbyReason = reason === 'failed' ? 'halt_failed' : 'halt_interrupted';
+  state.standbyReason = reason === 'interrupted' ? 'halt_interrupted' : 'halt_failed';
   state.countdownRemaining = 0;
   logger.info(`[queue] halt session=${sessionId} reason=${reason}`);
   emitStateChanged(mainWindow, sessionId);
-  emitQueueEvent(mainWindow, sessionId, 'queue_halted', undefined, { reason });
+  emitQueueEvent(mainWindow, sessionId, 'queue_halted', undefined, {
+    // 'reasoning-replay' 是引擎内部标记：渲染层 queue_halted 契约仍为 'failed' | 'interrupted'。
+    reason: reason === 'reasoning-replay' ? 'failed' : reason,
+  });
 }
 
 /** CHAT_ABORT 专用熔断挂点（killProcess 仍由 handler 调，引擎不自己 kill）：
@@ -323,6 +352,51 @@ export function abortHalt(sessionId: string, mainWindow: BrowserWindow): void {
   haltQueue(sessionId, 'interrupted', mainWindow);
 }
 
+/** X10（R09-F1）自愈：reasoning_replay 自动重试成功后的熔断残留恢复。条件：上次熔断源于
+ *  「将被自动重试的失败」（lastHaltReason==='reasoning-replay'）且熔断后无任何人工队列操作
+ *  （manualInterventionSeqs 与熔断时快照一致——用户手动恢复/暂停/立即执行/删除过的队列不代作决定）。
+ *  命中则整批 resumeAllPending（任务模型无「暂停来源」字段，无法区分 halt 暂停与人工暂停——按
+ *  计划最小实现取舍整批恢复，偏差见实施报告）；arming 交回紧随其后的 armAfterTurn（pending 已
+ *  恢复 → 正常起倒计时；开关关 → standby(switch_off)，与 resumeAllTasks 的降级语义一致）。
+ *  不命中也消费记录（一次性，不跨熔断残留；后续熔断会重写快照）。
+ *  X10 followup（2026-10-07）：恢复后经 QUEUE_EVENT 补发 queue_auto_resumed——resumeAllPending
+ *  在主进程内部完成、不经 IPC 返回值，渲染层 queue_halted 置的 paused=true 需对称翻转信号，
+ *  否则任务行残留「已暂停」徽标且 etaFor 只数未暂停任务导致无 ETA。
+ *  Rv3-3（2026-10-07 review followup）：实际恢复分支另落一条用户可见 system 提示
+ *  （persisted_message）——自动恢复不再对用户不可见；人工干预跳过路径不发。 */
+function maybeResumeAfterAutoRetry(sessionId: string, mainWindow: BrowserWindow): void {
+  if (lastHaltReasons.get(sessionId) !== 'reasoning-replay') return;
+  const haltSeq = haltInterventionSeqs.get(sessionId) ?? 0;
+  lastHaltReasons.delete(sessionId);
+  haltInterventionSeqs.delete(sessionId);
+  if ((manualInterventionSeqs.get(sessionId) ?? 0) !== haltSeq) {
+    logger.info(`[queue] auto-resume skipped (manual queue intervention) session=${sessionId}`);
+    return;
+  }
+  taskRepo.resumeAllPending(sessionId);
+  logger.info(`[queue] auto-resume after reasoning-replay retry success session=${sessionId}`);
+  emitQueueEvent(mainWindow, sessionId, 'queue_auto_resumed');
+  // Rv3-3（2026-10-07 review followup）：自动恢复对用户不可见（熔断暂停的任务被静默翻回执行
+  // 序列）——照 killProcess interaction_cancelled 落库模式补一条用户可见系统提示。
+  try {
+    const persisted = messageRepo.createMessage({
+      sessionId,
+      role: 'system',
+      content: '上游瞬时错误已自动重试成功，已恢复队列',
+      eventType: 'system',
+      processKind: 'system:queue_auto_resumed',
+      title: '队列已自动恢复',
+      isError: false,
+    });
+    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: { type: 'persisted_message', message: persisted },
+    });
+  } catch (err) {
+    logger.error(`[queue] persist auto-resume notice failed [${sessionId}]`, err);
+  }
+}
+
 /** 中央 result 钩子（sdk-backend forwardEvent 调用）。不设进程存在性守卫——result 事件本身就是
  *  回合结束的权威信号（见文件头注释）。先结算队列任务回合（若有），再按 status==='running'
  *  幂等闸分派：success→armAfterTurn（唤醒事件三）；error/interrupted→haltQueue（熔断）。
@@ -335,10 +409,26 @@ export function noteTurnOutcome(sessionId: string, outcome: 'success' | 'error' 
     settleCurrent(sessionId, outcome === 'error' ? 'failed' : outcome, mainWindow);
   }
   if (!state || state.status !== 'running') return;
+  // X10（R09-F1）：一次性消费「自动重试回合已实际发起」标记——本终态若属自动重试回合且成功，
+  // 下方成功分支据此自愈熔断残留；失败/中断则标记就地作废（重试只一次，回归普通熔断语义）。
+  // 置于 running 闸后与闸前等价：离开 running 的路径必经 haltQueue（重写熔断记录）或
+  // cleanupQueue（连标记一并清），残留标记经下方 lastHaltReason/干预序号双闸也不会误恢复。
+  const wasAutoRetryTurn = consumeAutoRetryDispatched(sessionId);
   if (outcome === 'success') {
+    // 自愈须先于 armAfterTurn：resumeAllPending 后 pending 可数，armAfterTurn 正常起倒计时。
+    if (wasAutoRetryTurn) maybeResumeAfterAutoRetry(sessionId, mainWindow);
     armAfterTurn(sessionId, mainWindow);
   } else {
-    haltQueue(sessionId, outcome === 'interrupted' ? 'interrupted' : 'failed', mainWindow);
+    // X10（R09-F1）：将被韧性层自动重试的失败记内部原因 'reasoning-replay'（横幅/载荷仍 failed）。
+    // Rv3-4（2026-10-07 review followup）：interrupted 形态（流丢 result 的合成中止收尾）同样可能
+    // 是即将被自动重试的 rr 失败回合——谓词命中时同样记 'reasoning-replay'，否则熔断残留无法经
+    // 自动重试成功自愈。谓词为纯查询；此时序（本钩子先于 sdk-backend 的重试调度点）旗标仍在位。
+    const rrRetry = willAutoRetryReasoningReplay(sessionId);
+    haltQueue(
+      sessionId,
+      rrRetry ? 'reasoning-replay' : outcome === 'interrupted' ? 'interrupted' : 'failed',
+      mainWindow,
+    );
   }
 }
 
@@ -354,6 +444,8 @@ export function runTaskNow(taskId: string, mainWindow: BrowserWindow): QueueOver
   if (isUserTurnInFlight(task.sessionId) || state.status === 'running') {
     throw new Error('当前会话有任务执行中，结束后可立即执行');
   }
+  // X10（R09-F1）：守卫全过（用户动作成立）才计人工干预——被拒的尝试不算。
+  noteManualQueueIntervention(task.sessionId);
   cancelTimers(task.sessionId);
   // v3.1：paused 任务允许「立即执行」（主会话空闲守卫已过）——先解除暂停，落位/结算按未暂停处理
   if (task.paused) taskRepo.setTaskPaused(taskId, false);
@@ -370,6 +462,10 @@ export function runTaskNow(taskId: string, mainWindow: BrowserWindow): QueueOver
  * （standby/开关开/无活动回合/有未暂停 pending 四道守卫——开关已关时仅解除暂停不计时；回合中
  *  则交给回合结束 armAfterTurn）。 */
 export function resumeAllTasks(sessionId: string, mainWindow: BrowserWindow): QueueOverview {
+  // X10（R09-F1）：用户手动「全部恢复」——熔断残留已由用户决断收口，清自愈记录并计人工干预。
+  noteManualQueueIntervention(sessionId);
+  lastHaltReasons.delete(sessionId);
+  haltInterventionSeqs.delete(sessionId);
   taskRepo.resumeAllPending(sessionId);
   armFromUserAction(sessionId, mainWindow);
   return getQueueOverview(sessionId);
@@ -400,6 +496,8 @@ export function onQueueEnabledChanged(enabled: boolean, mainWindow: BrowserWindo
 /** 暂停/删除任务后若已无未暂停 pending → 取消倒计时转 standby（语义表 #9/#10 的挂点载体）；
  *  仍有未暂停任务 → 倒计时继续（到期取新队首）。非 countdown 状态 no-op。 */
 export function drainCountdownIfNoRunnable(sessionId: string, mainWindow: BrowserWindow): void {
+  // X10（R09-F1）：TASK_SET_PAUSED 暂停路径 / TASK_REMOVE 的人工动作计为用户决断（无论是否收口倒计时）。
+  noteManualQueueIntervention(sessionId);
   const state = queues.get(sessionId);
   if (!state || state.status !== 'countdown') return;
   if (taskRepo.getPendingTasks(sessionId).length > 0) return;
@@ -426,6 +524,10 @@ export function cleanupQueue(sessionId: string): void {
   cancelTimers(sessionId);
   queues.delete(sessionId);
   executedHistory.delete(sessionId);
+  // X10（R09-F1）：熔断/人工干预记录随会话清理（防跨会话复活误判）。
+  lastHaltReasons.delete(sessionId);
+  haltInterventionSeqs.delete(sessionId);
+  manualInterventionSeqs.delete(sessionId);
   generations.delete(sessionId);
 }
 

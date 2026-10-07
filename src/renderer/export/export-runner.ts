@@ -11,6 +11,7 @@ import { reactive } from 'vue';
 import { JPEG_CHUNK_BYTES, JPEG_QUALITY, placeSegment, checkPixelBudget, deriveMaxPageHeightByMemory, deriveMaxPageHeightCss, DEFAULT_EXPORT_BUDGET, estimateExportPercent } from '@shared/export-image';
 import type {
   ExportImagePhase,
+  ExportImageProgressPayload,
   PngCaptureSelfResponse,
 } from '@shared/types/export-image';
 import type { ThemePalette } from '@shared/constants';
@@ -61,7 +62,14 @@ async function waitStable(): Promise<void> {
   for (let i = 0; i < 8; i++) {
     await twoFrames();
     const h = document.documentElement.scrollHeight;
-    if (h === prev) return;
+    // X8（R05-F2）：mermaid 异步两段式（动态 import chunk + 串行 render）不属 fonts/images；
+    // 未完成的块悬挂为「源码回退态」（新占位无 data-mermaid-state，渲染中为 loading），稳定
+    // 判定必须等它到终态（rendered/error），否则截到源码、或测量按渲染前高度切页裁断内容。
+    // pending 存在时视为未稳定继续迭代；沿用 8 次迭代上限防死等（渲染失败落 error 后放行）。
+    const pendingMermaid = document.querySelectorAll(
+      '.mermaid-block:not([data-mermaid-state="rendered"]):not([data-mermaid-state="error"])'
+    ).length;
+    if (h === prev && pendingMermaid === 0) return;
     prev = h;
   }
 }
@@ -98,7 +106,10 @@ function measureItemHeights(expectedCount: number): number[] | null {
  *  整单失败；变高页实际渲染高含页固定 overhead（export-header 等），故硬上限预检按
  *  overhead+h>hardCap 判定（压线变高页不再漏到捕获期才报 page-over-budget）；仅此才置
  *  runnerState.oversizeItem 提前收口，由 runExport 以 item-over-budget 快速失败（hb10-P2-11
- *  机制保留）。 */
+ *  机制保留）。X6（R13-F1）：预检收窄为仅变高页候选（h > maxHeight 才比对 hardCap）——
+ *  JPEG tallest≤1500 的会话不 probe、hardCap 停默认 1500，全员预检会误杀 h∈(1310,1500]
+ *  的常规消息（v0.4.2 前可导出的回归）；h≤maxHeight 恢复旧行为永不预检失败，变高页
+ *  候选仍受反推后真实像素预算保护。 */
 function splitPages(itemCount: number, itemHeights: number[], overhead: number, maxHeight: number, hardCap: number): { start: number; end: number }[] {
   runnerState.oversizeItem = null;
   const pages: { start: number; end: number }[] = [];
@@ -106,7 +117,7 @@ function splitPages(itemCount: number, itemHeights: number[], overhead: number, 
   let acc = 0;
   for (let i = 0; i < itemCount; i++) {
     const h = itemHeights[i] ?? 0;
-    if (overhead + h > hardCap) {
+    if (h > maxHeight && overhead + h > hardCap) {
       runnerState.oversizeItem = { index: i, heightPx: h };
       return pages;
     }
@@ -138,7 +149,20 @@ function report(
 ): void {
   runnerState.phase = partial.phase;
   // B4（D13-F2）：进度按已完成段数/总段数推进（payload 数据齐全），不再恒 0 到 done 才跳 100。
-  api.reportProgress({ jobId, sessionId: '', sessionName: runnerState.sessionName, percent: partial.percent ?? estimateExportPercent(partial.phase, partial.page, partial.totalPages, partial.segment, partial.segmentsInPage), ...partial });
+  // X7（R13-F2）：percent 钳制放在 {...base, ...partial} 合并之后——planning/preparing 的
+  // estimateExportPercent 回落为 -1（不确定态），若钳制写在展开之前会被 partial 的显式
+  // percent 覆盖（manager makeProgress 即此死代码形态），-1 直通 store 后 AppHeader 悬停
+  // 显示「正在导出长图… -1%」。先合并出 merged 再钳 [0,100]，可见层永不出现负值进度；
+  // 遮罩不确定分支由 phase 驱动（store indeterminate getter），不受影响。
+  const merged: ExportImageProgressPayload = {
+    jobId,
+    sessionId: '',
+    sessionName: runnerState.sessionName,
+    percent: partial.percent ?? estimateExportPercent(partial.phase, partial.page, partial.totalPages, partial.segment, partial.segmentsInPage),
+    ...partial,
+  };
+  merged.percent = Math.max(0, Math.min(100, merged.percent));
+  api.reportProgress(merged);
 }
 
 export async function runExport(): Promise<void> {

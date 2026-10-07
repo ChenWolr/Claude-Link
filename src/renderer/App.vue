@@ -8,6 +8,7 @@ import ToolDiffDialog from './components/chat/ToolDiffDialog.vue';
 import UpdateDialog from './components/layout/UpdateDialog.vue';
 import { useConfigStore, lastSaveFailed } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
+import { useProviderStore } from './stores/provider-store';
 import { useExportImageStore } from './stores/export-image-store';
 import { useUpdateStore } from './stores/update-store';
 import { useChat } from './composables/use-chat';
@@ -18,6 +19,7 @@ import { applyThemePalette, applyFontScale } from './utils/apply-theme';
 
 const configStore = useConfigStore();
 const sessionStore = useSessionStore();
+const providerStore = useProviderStore();
 const exportImageStore = useExportImageStore();
 const commandStore = useCommandStore();
 const taskStore = useTaskStore();
@@ -63,18 +65,36 @@ watch(lastSaveFailed, (failed) => {
 // A4（D01-F3 + D02-F8）：sessionStore.error 全局出口——删除/搜索/改名/会话内切模型等失败此前
 // 全程静默（渲染层消费点为零，D01-F3 复核修正）。非空时弹 3.5s 全局错误 toast（复用 H1 的
 // .global-toast--error 样式），文案「操作失败：<摘要>」截断至 ~80 字符；连续失败以最新文案
-// 重置计时；空串/null 不弹（成功路径零打扰）；不改 store 写入点，不动 config/changes 既有出口。
+// 重置计时；空串/null 不弹（成功路径零打扰）；不动 config/changes 既有出口。
+// X16（R01-F1）：watch 源改为 [error, errorSeq]——Vue 对 primitive 同值不触发，同文案连续
+// 失败（删除失败→立即重试→再失败）此前不再弹；store 写入点统一走 fail()（写 error 同时自增
+// errorSeq，值语义不变），seq 变化即触发本回调、再次弹 toast 并重置计时。
 const SESSION_ERROR_TOAST_MS = 3500;
 const SESSION_ERROR_TEXT_MAX = 80;
 const sessionErrorToastVisible = ref(false);
 const sessionErrorToastText = ref('');
 let sessionErrorToastTimer: ReturnType<typeof setTimeout> | null = null;
-watch(() => sessionStore.error, (err) => {
+watch(() => [sessionStore.error, sessionStore.errorSeq] as const, ([err]) => {
   if (!err) return;
   sessionErrorToastText.value = `操作失败：${err.length > SESSION_ERROR_TEXT_MAX ? `${err.slice(0, SESSION_ERROR_TEXT_MAX)}…` : err}`;
   sessionErrorToastVisible.value = true;
   if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
   sessionErrorToastTimer = setTimeout(() => { sessionErrorToastVisible.value = false; }, SESSION_ERROR_TOAST_MS);
+});
+
+// X15（R02-F2）：providerStore.error 全局出口——与上方 A4 sessionStore.error 同构。load 失败
+// 此前零用户可见出口：设置页误显「还没有供应商」空态（ProviderManager 空态区分另见该组件），
+// 会话选择器触发器因 hb10-PRV-02 防误跳守卫静默 no-op。常量直接复用上方 A4 的
+// SESSION_ERROR_TOAST_MS / SESSION_ERROR_TEXT_MAX（同文件单源；本点白名单收窄不另建共享常量）。
+const providerErrorToastVisible = ref(false);
+const providerErrorToastText = ref('');
+let providerErrorToastTimer: ReturnType<typeof setTimeout> | null = null;
+watch(() => providerStore.error, (err) => {
+  if (!err) return;
+  providerErrorToastText.value = `操作失败：${err.length > SESSION_ERROR_TEXT_MAX ? `${err.slice(0, SESSION_ERROR_TEXT_MAX)}…` : err}`;
+  providerErrorToastVisible.value = true;
+  if (providerErrorToastTimer) clearTimeout(providerErrorToastTimer);
+  providerErrorToastTimer = setTimeout(() => { providerErrorToastVisible.value = false; }, SESSION_ERROR_TOAST_MS);
 });
 
 onMounted(async () => {
@@ -133,6 +153,7 @@ onBeforeUnmount(() => {
   if (stopBridgeSessionsUpserted) stopBridgeSessionsUpserted();
   if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
   if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
+  if (providerErrorToastTimer) clearTimeout(providerErrorToastTimer);
 });
 </script>
 
@@ -146,6 +167,7 @@ onBeforeUnmount(() => {
     <UpdateDialog />
     <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">设置保存失败，部分修改可能未保存</div>
     <div v-if="sessionErrorToastVisible" class="global-toast global-toast--error global-toast--stacked">{{ sessionErrorToastText }}</div>
+    <div v-if="providerErrorToastVisible" class="global-toast global-toast--error global-toast--stacked-3">{{ providerErrorToastText }}</div>
   </AppLayout>
 </template>
 
@@ -172,5 +194,10 @@ onBeforeUnmount(() => {
 /* A4：会话错误 toast 与保存失败 toast 同屏时纵向错开，避免重叠（双失败同瞬的边角）。 */
 .global-toast--stacked {
   top: 3.5rem;
+}
+
+/* X15：供应商库错误 toast 再错开一档（三失败同瞬的边角；复用同一 toast 样式本体）。 */
+.global-toast--stacked-3 {
+  top: 6rem;
 }
 </style>

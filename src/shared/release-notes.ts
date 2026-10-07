@@ -33,12 +33,23 @@ export function htmlReleaseNotesToText(html: string): string {
     '\n' + '#'.repeat(Number(lvl)) + ' ' + inner.trim() + '\n');
   // 5 列表：li → '- ' 项、</li> → 换行
   s = s.replace(/<li[^>]*>/gi, '- ').replace(/<\/li\s*>/gi, '\n');
-  // 6 块级闭合 → 换行
-  s = s.replace(/<\/(p|div|blockquote|ul|ol|table|tr|pre|h[1-6])\s*>/gi, '\n');
+  // 6 块级闭合 → 换行（X19 followup 2026-10-07 上收：details/summary 并入清单——atom 折叠块
+  //   边界解粘连（实证「Full Changelogv0.4.2...」粘连），与 </p> 同姿态；开标签仍由步骤 10
+  //   通用剥残标签兜底剥除）
+  s = s.replace(/<\/(p|div|blockquote|ul|ol|table|tr|pre|h[1-6]|details|summary)\s*>/gi, '\n');
   // 6.5 表格单元格 → 空格竖线分隔：仅当后随另一 th/td 才插入（\s* 跨标签吞源换行，
   //     真实 atom 分行排版亦生效）；行尾不再产生悬挂分隔，步骤 12 无需剥尾。
   //     顺序须保持在步骤 6 之后、步骤 7 之前——6.5 时 <tr> 仍在位保护行边界，跨行不误插。
   s = s.replace(/<\/(th|td)\s*>\s*(?=<(?:th|td)\b)/gi, ' | ');
+  // 6.6 img → 占位（X19 followup 2026-10-07 上收自 app-updater 前置补丁 patchAtomHtmlNotes）：
+  //     <img> 原无任何处理规则、连 alt 一起无痕丢弃，改为 [图片：alt] 占位（alt 缺失或空 →
+  //     [图片]）。必须在步骤 10 通用剥残标签之前（否则标签先被剥、alt 无从提取）；占位文本
+  //     随步骤 11 统一解码实体（alt 内 &amp; 等实体一并还原）。
+  s = s.replace(/<img\b[^>]*>/gi, (m) => {
+    const alt = /\salt=(["'])([^"']*)\1/i.exec(m);
+    const text = alt ? alt[2].trim() : '';
+    return text ? `[图片：${text}]` : '[图片]';
+  });
   // 7 块级开标签：ul/ol → 换行（嵌套列表各行独立；副作用：标题与紧随列表间出一个空行，更利阅读），其余剥除
   s = s.replace(/<(ul|ol)\b[^>]*>/gi, '\n');
   s = s.replace(/<(p|div|blockquote|table|thead|tbody|tr|th|td|pre)\b[^>]*>/gi, '');

@@ -81,6 +81,12 @@ function friendlyCheckErrorMessage(message: string): string {
     .slice(0, 300);
 }
 
+/**
+ * R14-F2/X19：atom 补链 HTML 的 details/summary 与 img 归一化规则已上收 shared 主链
+ * （htmlReleaseNotesToText 步骤 6 块级闭合清单 + 6.6 img 占位，2026-10-07 followup）——
+ * 本文件的前置补丁已退役删除，摄入直走 normalizeReleaseNotes 单链。
+ */
+
 async function hasSufficientDiskSpace(minMB: number): Promise<boolean> {
   try {
     const stats = await fs.promises.statfs(app.getPath('userData'));

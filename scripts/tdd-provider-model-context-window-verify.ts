@@ -11,6 +11,10 @@
 //   - migrateLegacyContextWindowOverrides 4 场景
 //     （可移植写入首个命中供应商且不覆盖已设 / 无 ANTHROPIC_DEFAULT 映射→dropped /
 //      库内无该模型→dropped / 幂等二次零操作）+ env 键必删断言。
+//   - X13（R02-F1，2026-10-06 隐藏缺陷修复第二轮）录入层口径钉住：sanitize 对
+//     2,000,000 / 64,000 原值保留——录入/显示尊重真实窗口 [1k,2M]，引擎注入侧
+//     [1e5,1e6] 钳制与圆环分母均不动，分叉由浮层卡说明弥合（UI/迁移侧静态断言在
+//     tdd-provider-model-context-window-ui-verify.ts ⑧/⑨ 组）。
 //
 // 运行：npx tsx scripts/tdd-provider-model-context-window-verify.ts
 
@@ -270,6 +274,25 @@ async function main(): Promise<void> {
       '二次运行 advancedJson 必须零变化（键已删，无残留可处理）',
     );
     assert.ok(!hasLegacyWindowKey(parseEnv(second.advancedJson)), '二次运行后仍不得有遗留键');
+  });
+
+  // ⑨ X13（R02-F1）录入层口径钉住：sanitize 对 2,000,000 / 64,000 原值保留——口径决策
+  //    「显示与录入尊重真实窗口」：保存仍按 [1k,2M] sanitize（不动）；引擎注入钳制
+  //    [1e5,1e6]（sdk-backend，静态钉住在 ui-verify ⑧b）与圆环分母（userOverride 原值）
+  //    各自语义不动，分叉由浮层卡说明显式化（ui-verify ⑧a）。
+  check('⑨ X13 录入层：sanitize(2_000_000)=2_000_000、sanitize(64_000)=64_000（真实窗口原值保留，钳制分叉交给 UI 说明）', () => {
+    const sanitize = requireFn(lib, 'sanitizeProviderModels') as SanitizeFn;
+    const out = sanitize([
+      { id: 'm-2m', contextWindow: 2_000_000 },
+      { id: 'm-64k', contextWindow: 64_000 },
+    ]);
+    const by = (id: string): Dict => {
+      const m = out.find((x) => x.id === id);
+      assert.ok(m, `sanitize 输出缺条目 ${id}`);
+      return m;
+    };
+    assert.equal(by('m-2m').contextWindow, 2_000_000, '2M（UI 预置一等公民）在录入层须原值保留');
+    assert.equal(by('m-64k').contextWindow, 64_000, '64k（<100k 引擎上钳段）在录入层须原值保留');
   });
 
   console.log(`\nverify 结果：${pass} passed, ${fail} failed`);

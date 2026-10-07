@@ -156,6 +156,11 @@ export const useSessionStore = defineStore('session', {
     // sending 改为 getter（从 runningSessions 派生），这里不再存 state。
     // 保留这个字段名是为了向后兼容（其他地方读 store.sending），但它是 getter 不是 state。
     error: null as string | null,
+    // X16（R01-F1）：error 序列号——每次失败写入（fail action）自增。App.vue 的全局错误
+    // toast watch 以 [error, errorSeq] 为源：Vue 对 primitive 同值不触发（Object.is），
+    // 同文案连续失败（删除失败→立即重试→再失败）此前不再弹 toast；计数器保证每次
+    // 失败写入都触发回调。error 值语义不变，消费方无须关心本字段。
+    errorSeq: 0,
     // 根因修复：per-session 执行状态隔离。监听全局化后，ChatPage 卸载不影响执行。
     runningSessions: [] as string[],
     // per-session 流式快照。切换会话时保存当前流式内容到快照，切回时恢复。
@@ -343,13 +348,20 @@ export const useSessionStore = defineStore('session', {
     },
   },
   actions: {
+    /** X16（R01-F1）：统一失败写入——error 值语义不变（写入点原兜底文案不变），每次写入
+     * 额外自增 errorSeq：App.vue toast watch 以 [error, errorSeq] 为源，同文案连续失败
+     *（重试再败）也能再次触发提示并重置 3.5s 计时。 */
+    fail(msg: string) {
+      this.error = msg;
+      this.errorSeq++;
+    },
     async loadSessions() {
       try {
         this.sessions = await window.claudeLink.listSessions();
         // A3：播种已见集合（幽灵守卫收窄的「已见消失」判据数据源）。
         for (const s of this.sessions) this.knownSessionIds[s.id] = true;
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '加载会话失败';
+        this.fail(error instanceof Error ? error.message : '加载会话失败');
       }
       // hb10-SMG-03：仅在无搜索词时清搜索态——搜索中的自动命名/主题回调触发的 reload
       // 不得把用户的搜索结果清掉（原实现无条件清，自动命名到达=搜索态消失）。
@@ -495,7 +507,7 @@ export const useSessionStore = defineStore('session', {
         if (this.activeSession?.id === session.id) this.activeSession = session;
         return session;
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '创建会话失败';
+        this.fail(error instanceof Error ? error.message : '创建会话失败');
         return null;
       }
     },
@@ -646,7 +658,7 @@ export const useSessionStore = defineStore('session', {
         if (prevPlan) {
           planStore.planBySession[id] = prevPlan;
         }
-        this.error = error instanceof Error ? error.message : '删除会话失败';
+        this.fail(error instanceof Error ? error.message : '删除会话失败');
       }
     },
     // 批量删除：逐个复用 deleteSession 的完整链（乐观更新、执行态清理、主进程
@@ -676,7 +688,7 @@ export const useSessionStore = defineStore('session', {
       } catch (error) {
         // 晚到的旧失败同理：不清新结果、不误报 error。
         if (requestId !== searchSessionsRequestId) return;
-        this.error = error instanceof Error ? error.message : '搜索会话失败';
+        this.fail(error instanceof Error ? error.message : '搜索会话失败');
         // 异常回退全量列表。
         this.searchResults = null;
       }
@@ -707,7 +719,7 @@ export const useSessionStore = defineStore('session', {
           this.patchSessionInLists(updated.id, updated);
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '更新会话模型失败';
+        this.fail(error instanceof Error ? error.message : '更新会话模型失败');
       }
       // hb10 P2-3：写入侧同步——主进程已 recordLastUsed，重拉快照刷新触发器显示态。
       void useProviderStore().ensureReload();
@@ -743,7 +755,7 @@ export const useSessionStore = defineStore('session', {
           }
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '更新工作空间失败';
+        this.fail(error instanceof Error ? error.message : '更新工作空间失败');
       }
     },
     // 会话级权限模式：写入 session.permissionMode（null = 跟随全局默认 config.permissionMode），
@@ -777,7 +789,7 @@ export const useSessionStore = defineStore('session', {
           // 静默回落（IPC 不可达等极端情况）
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '更新权限模式失败';
+        this.fail(error instanceof Error ? error.message : '更新权限模式失败');
       }
     },
     // 会话级思考强度：写入 session.thinkingLevel（null/'auto' = 跟随全局默认），下次 spawn 注入生效。
@@ -795,7 +807,7 @@ export const useSessionStore = defineStore('session', {
           this.sessions = this.sessions.map((session) => (session.id === updated.id ? updated : session));
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '更新思考强度失败';
+        this.fail(error instanceof Error ? error.message : '更新思考强度失败');
       }
     },
     // P2（effort 可见性）：回合结束后从主进程拉最新 lastEffectiveEffort 合并进 activeSession。
@@ -834,7 +846,7 @@ export const useSessionStore = defineStore('session', {
       try {
         this.recentWorkspaces = await window.claudeLink.removeRecentWorkspace(dir);
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '删除目录历史失败';
+        this.fail(error instanceof Error ? error.message : '删除目录历史失败');
       }
     },
     bindContextUpdates() {
@@ -1158,7 +1170,7 @@ export const useSessionStore = defineStore('session', {
           this.patchSessionInLists(updated.id, { name: updated.name });
         }
       } catch (error) {
-        this.error = error instanceof Error ? error.message : '重命名失败';
+        this.fail(error instanceof Error ? error.message : '重命名失败');
       }
     },
     /** P1-3：按共享口径重算回合边界（队列回合的 user_message_created 分支在消息入列后调用）。 */

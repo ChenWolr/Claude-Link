@@ -14,6 +14,10 @@
 //      getKnownTurnOutcome 已恒 null，且 /stop kill 与流丢 result 出口 code=null → 兜底
 //      只能判 'error'。本组钉死该机制本身与 limitation 注释（/stop 的静默由 manager 消费
 //      此结果，钉在 tdd-bridge-manager-verify [Q]）。
+// 隐藏缺陷修复第二轮追加（docs/plans/2026-10-06-hidden-defect-fix-round2-plan.md X11/R12-F1）：
+//   8② 契约锚同步：replyText 提取不再按 outcome 门控（原「无正文」断言作废）——error 回合
+//      也调 findReplyText 取部分正文，供 manager A3 追加「（回复中断…）」标注；outcome 误判
+//      limitation（8③ 注释锚）不在该点范围、保持原样。
 // RED 预期（未改树）：dispatcher 模块不存在 → import 即 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-dispatcher-verify.ts
 
@@ -352,8 +356,11 @@ async function main(): Promise<void> {
     r.outcome === 'error' && engine.notedOutcomes.length === 1
     && engine.notedOutcomes[0]!.outcome === 'error',
     `r=${JSON.stringify(r)} noted=${JSON.stringify(engine.notedOutcomes)}`);
-  check('8', '②', '该结果不带 busy、无正文（/stop 后 manager 不得走 busy 重试，须直接静默）',
-    r.busy !== true && r.replyText === null, JSON.stringify(r));
+  // X11（R12-F1，2026-10-07）：replyText 提取不再按 outcome 门控——error 回合的已落库部分正文
+  // 照取（manager A3 据此追加截断标注）。/stop 静默不再依赖 dispatcher 返回 null 正文，改由
+  // manager 的中断标记消费保证（manager.ts flush 的 userInterrupted 判断，钉在 [Q]）。
+  check('8', '②', '该结果不带 busy；X11：error 回合 replyText 也取持久层文本（不按 outcome 门控）',
+    r.busy !== true && r.replyText === '本回合回复正文', JSON.stringify(r));
   // limitation 文档钉（review P1 附带项）：error-result 出口同样 emitExit(0) 被兜底判 success
   // 的现状，必须在 dispatcher.ts 注释写明（接受现状：有 partial 文本时行为正确）。
   const dispSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src/main/modules/bridge/dispatcher.ts'), 'utf8');

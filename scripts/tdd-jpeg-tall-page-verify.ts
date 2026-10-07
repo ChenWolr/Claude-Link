@@ -25,6 +25,11 @@
 // min(heightByPixels, heightByDim) 后 ÷scaleY 转 CSS（与 deriveMaxPageHeightByMemory 末行同法）；
 // DPR=1 两值一致零回归。
 //
+// X6 追加（2026-10-06 R13-F1 回归修复）：硬上限预检收窄为仅变高页候选——JPEG tallest≤1500
+// 的会话不 probe、hardCap 停默认 1500，全员「overhead+h>hardCap」预检会误杀 h∈(1310,1500]
+// 的常规消息整单失败（v0.4.2 之前可导出的回归）；修法 `h > maxHeight && overhead + h >
+// hardCap`（h≤maxHeight 恢复旧行为永不预检失败；变高页候选仍受反推后真实预算保护）。
+//
 // 运行：npx tsx scripts/tdd-jpeg-tall-page-verify.ts
 
 import { readFileSync } from 'node:fs';
@@ -50,7 +55,9 @@ function splitPagesImpl(itemHeights: number[], overhead: number, maxHeight: numb
   let acc = 0;
   for (let i = 0; i < itemHeights.length; i++) {
     const h = itemHeights[i] ?? 0;
-    if (overhead + h > hardCap) {
+    // X6（R13-F1）：预检仅对变高页候选（h > maxHeight）生效——未探测会话 hardCap 停默认
+    // 1500，全员预检会误杀 h∈(1310,1500] 的常规消息（overhead≈190 计入即超默认 hardCap）。
+    if (h > maxHeight && overhead + h > hardCap) {
       oversize = { index: i, heightPx: h };
       return { pages, oversize };
     }
@@ -140,7 +147,7 @@ check('⑩ splitPages 签名含 hardCap 且变高页分支在位（h > maxHeight
   const fnIdx = runner.indexOf('function splitPages');
   const body = runner.slice(fnIdx, runner.indexOf('\n}', fnIdx));
   assert.match(body, /hardCap: number/, '缺 hardCap 参数');
-  assert.match(body, /if \(overhead \+ h > hardCap\)/, '缺硬上限判定（须计入页固定 overhead）');
+  assert.match(body, /if \(h > maxHeight && overhead \+ h > hardCap\)/, '缺硬上限判定（X6 收窄为仅变高页候选判定，须计入页固定 overhead）');
   assert.match(body, /if \(h > maxHeight\)/, '常规上限判定保留（hb10-P2-11 契约形态）');
   assert.match(body, /pages\.push\(\{ start: i, end: i \+ 1 \}\);/, '缺变高页自成形态');
   assert.match(body, /if \(start < itemCount\) pages\.push/, '缺末尾空页守卫');
@@ -202,6 +209,17 @@ check('⑰ 迟失败消除判据：CSS 上限 × scaleY 反推物理像素 ≤ 2
       `scaleY=${scaleY} width=${width}：css=${css} → 物理 ${physicalWidth}×${physicalHeight} 超像素预算（将漏到捕获期 checkPixelBudget 迟失败）`,
     );
   }
+});
+
+console.log('\n=== 组4 X6（R13-F1，2026-10-06）：硬上限预检收窄为变高页候选 ===');
+check('⑱ 未探测默认 hardCap=1500：h=1400（≤maxHeight）即使 overhead190+h=1590>1500 也不置 oversizeItem（R13-F1 误杀带回归修复）', () => {
+  const r = splitPagesImpl([1400], 190, 1500, 1500);
+  assert.equal(r.oversize, null, 'h≤maxHeight 的常规消息永不触发预检失败（恢复 5dbcdb9 前旧行为）');
+  assert.deepEqual(r.pages, [{ start: 0, end: 1 }], '正常按常规页切页');
+});
+check('⑲ 变高页候选仍受预算保护：h=1501（>maxHeight）且 overhead190+h=1691>hardCap1600（反推后仍不够）→ 置 oversizeItem', () => {
+  const r = splitPagesImpl([1501], 190, 1500, 1600);
+  assert.deepEqual(r.oversize, { index: 0, heightPx: 1501 }, '变高页候选超反推后预算仍须预检收口（不漏到捕获期）');
 });
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

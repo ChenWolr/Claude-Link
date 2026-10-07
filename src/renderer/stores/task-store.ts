@@ -161,6 +161,16 @@ export const useTaskStore = defineStore('task', {
           });
           break;
         }
+        // X10 followup（2026-10-07）：自愈恢复（主进程 maybeResumeAfterAutoRetry 的
+        // resumeAllPending）不经 IPC 返回值——此事件是渲染层 paused 翻转的唯一信号，
+        // 与 queue_halted 的置 true 完全对称（徽标消失、etaFor/runnableCount 自动恢复）。
+        case 'queue_auto_resumed': {
+          if (!isActive) break;
+          this.tasks.forEach((t) => {
+            t.paused = false;
+          });
+          break;
+        }
         case 'user_message_created': {
           // 队列任务到点/立即执行在主进程创建稳定 user message 后经此事件回传，按 id upsert
           // 进会话消息（addMessage 带归属守卫：P1-4 后台/已删会话的消息直接拒绝、不落渲染层存储不串入当前列表，后台会话切回时由 DB 重载补齐）。

@@ -29,7 +29,7 @@ import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessag
 import { mapAskUserQuestionCancel } from '../../shared/interaction-cancel';
 import { getProjectOriginFingerprint } from './command-source-watcher';
 import { lookupProviderModelContextWindow } from '../../shared/model-context-windows';
-import { resolveEffectiveThinkingLevel, resolveThinkingConfig, type ThinkingConfigResult } from '../../shared/thinking-resolver';
+import { resolveEffectiveThinkingLevel, resolveThinkingConfig, THINKING_SETTINGS_KEYS, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { buildPostTurnProbeArgs } from '../../shared/post-turn-probe';
 import { extractLastEffortFromJsonl, extractLastEffortFromText, EFFORT_TAIL_WINDOW_BYTES, mungeProjectDirName } from '../../shared/effort-truth';
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
@@ -205,6 +205,20 @@ interface SessionEntry {
   // 优雅窗内回合自然完成时该行会成永久误报残留），改为 finishKill 终态确认回合确被中止
   // （wasCurrent）时兑现转发+落库；优雅完成则永不发出。随 entry 生命周期，不跨回合残留。
   watchdogErrorPending?: string;
+  // X9（R11-F1，修法①）：本回合曾被 watchdog 硬杀的标记（watchdogTick 挂账时一并置位）。
+  // 供 finishKill 迟到形态（wasCurrent=false）确认「回合被中止而非自然完成」——必须与
+  // 「无权威终态标记」（!knownOutcome）联用：knownOutcome 已置位（success/error/interrupted）
+  // 时以标记为准，防优雅窗内自然完成（success）被误兑现（b272628 目标）。随 entry 生命周期。
+  watchdogInterrupted?: boolean;
+  // X18（R04-F1）：本回合压缩结果与「即时 fresh 已送」标志的 entry 级镜像——runQuery 局部
+  // turnHadCompactSuccess/postCompactionFreshSent 仍是回合数据源（P2-9 契约钉住局部形态），
+  // 镜像供 killProcess（独立函数，局部变量不可见）等四处非 result 终态出口经
+  // entryCompactedJustNow 读取透传给 post-turn 探针，使「CU 控制通道失效 + 流丢 result /
+  // SDK 错误 / 中断兜底」环境下压缩成功后横幅照常弹出。每回合新 entry（createEntry），
+  // 起步等价 false、无跨回合残留；随 entry 移除（deleteEntry/removeEntryIfCurrent/
+  // markSessionDeleted）自然消亡，不占独立 Map、无需额外清理点。
+  turnHadCompactSuccess?: boolean;
+  postCompactionFreshSent?: boolean;
 }
 const nextQueryInstance = { value: 1 };
 
@@ -552,8 +566,11 @@ function watchdogTick(): void {
       // finishKill 终态确认回合确被中止（wasCurrent）时才兑现；优雅完成则永不发出
       // （stalled 横幅仍即时可见，用户反馈不受影响）。entry 缺失兜底保持旧直发语义。
       const entry = entries.get(sessionId);
+      // X9（R11-F1，修法①）：硬杀标记随挂账一并置位——finishKill 迟到兑现的「回合确被中止」
+      // 确认判据之一（与 !knownOutcome 联用，见 finishKill 兑现门）。
       if (entry) {
         entry.watchdogErrorPending = reason;
+        entry.watchdogInterrupted = true;
       } else {
         forwardEvent(sessionId, mw, { type: 'error', message: reason });
       }
@@ -1133,6 +1150,13 @@ function buildClaudeLinkSettingsBlock(
   let out: Record<string, unknown> = { ...settings, permissions };
   // 每会话思考强度 settingsPatch 覆盖全局投影：opts.thinkingLevel 已过 resolveEffectiveThinkingLevel
   // 解析为实际生效档，故此处覆盖优先级最高（query 级 > 全局投影 > advancedJson）。
+  // 会话思考档是「全量覆盖」而非「增量叠加」：先剔除全局投影铺底的思考键（含用户 advancedJson
+  // 手写的同键——思考档拥有这些键的所有权，与文件合并 CL_OWNED_KEYS 语义一致），再叠加会话档
+  // patch——否则反向档位键残留（R03-F1：全局 ultracode 会话降档残留 ultracode/enableWorkflows；
+  // 全局非 ultracode 会话切 ultracode 残留 workflowKeywordTriggerEnabled:false 等）。
+  // effortLevel 剔除后由 Options.effort 运行时通道承载（含 max 的「持久化降级 + 运行时补偿」）。
+  // Object.assign 行保持原样（selftest-settings-mapping :1675 文本断言钉住该机制）。
+  for (const key of THINKING_SETTINGS_KEYS) delete out[key];
   if (thinkingConfig.settingsPatch) {
     Object.assign(out, thinkingConfig.settingsPatch);
   }
@@ -1588,6 +1612,9 @@ async function refreshContextSnapshot(
     // P2-9：带 compactedJustNow 的 fresh payload 已实际送达 renderer——通知调用方（双横幅
     // 防重：本回合即时 fresh 已送，探针 fresh 不再携带成功标记）。仅在真正发送成功标记时触发。
     if (opts.compactedJustNow && used != null) {
+      // X18（R04-F1）：同一触发点同步 entry 镜像——killProcess 等非 result 出口读 entry 判定
+      // 双横幅防重（runQuery 回调字面量被 P2-9 契约钉住，镜像收敛在此单一触发点，二者恒同步）。
+      entry.postCompactionFreshSent = true;
       opts.onFreshSent?.();
     }
     if (capacity != null) {
@@ -1934,6 +1961,14 @@ function cancelPostTurnProbe(sessionId: string): void {
 // cancelPostTurnProbe（kill + 推进代际，迟到 close 回调据此丢弃结果）。app before-quit 调用。
 export function cancelAllPostTurnProbes(): void {
   for (const sid of [...postTurnProbeState.keys()]) cancelPostTurnProbe(sid);
+}
+
+// X18（R04-F1）：entry 级压缩标记单源读取——result 之外四处终态出口（流丢 result / resume
+// 重试失败 / SDK 错误 / killProcess 中断兜底）的探针透传用。语义与 result 出口的
+// turnHadCompactSuccess && !postCompactionFreshSent（runQuery 局部变量，P2-9）一致：
+// 本回合 compact_result==='success' 且即时 fresh 未实际送达（双横幅防重）。
+function entryCompactedJustNow(entry: SessionEntry): boolean {
+  return entry.turnHadCompactSuccess === true && entry.postCompactionFreshSent !== true;
 }
 
 export function schedulePostTurnProbe(
@@ -3813,6 +3848,8 @@ async function runQuery(
               // 命令文本 /\/compact\b/，失败的 /compact 不得弹成功横幅）；即时 fresh 实际送达时
               // 置 postCompactionFreshSent，探针 fresh 不再重复带标记（双横幅修复）。
               turnHadCompactSuccess = true;
+              // X18（R04-F1）：镜像 entry（killProcess 等独立函数出口经 entryCompactedJustNow 读取）。
+              entry.turnHadCompactSuccess = true;
               void refreshContextSnapshot(sessionId, mainWindow, entry, query, {
                 compactedJustNow: true,
                 samplePhase: 'post-compaction',
@@ -3967,7 +4004,8 @@ async function runQuery(
             level: 'warn',
           }, entry.queryInstance);
         }
-        forwardEvent(sessionId, mainWindow, convertResultMessage(sdkMsg), entry.queryInstance);
+        const resultEvent = convertResultMessage(sdkMsg);
+        forwardEvent(sessionId, mainWindow, resultEvent, entry.queryInstance);
         // P2（effort 可见性）：回合 result 后读 CLI 会话 JSONL 尾部 assistant 事件的顶层 effort
         // （静默降级后真值），写 session.lastEffectiveEffort 供 UI「上回合实际生效」显示。
         // 实测（2026-09-04 真窗诊断）：CLI 把 assistant 事件落盘晚于 SDK result 到达数秒，
@@ -4041,6 +4079,20 @@ async function runQuery(
         // P2-9：探针 compactedJustNow 只看本回合 compact_result==='success'（失败/未压缩的
         // /compact 不弹成功横幅），且即时 fresh 已送过则不再重复带标记（双横幅修复）。
         const compactedJustNow = turnHadCompactSuccess && !postCompactionFreshSent;
+        // X9（R11-F1，b272628 回归修复）：interrupt 优雅收尾以 error_during_execution result 终止时，
+        // 在占坑释放前兑现 watchdog 挂账——两段式 race 续体（finishKill）是微任务，必跑在本同步
+        // 段之后，届时 entry 已 deleteEntry、wasCurrent 恒 false，挂账被丢弃，「已自动中断」诊断
+        // 与重试入口在主路径消失。仅 interrupted result 消费（isAbortedCliResult 门）：自然完成
+        //（success result）无中断事实不消费，b272628「优雅完成不残留误报」目标保持；消费即清账，
+        // 迟到的 finishKill 兑现分支自然落空，不产生二次转发。forwardEvent 同步落库 system:error
+        //（hb10-ENG-12），与占坑释放同序列、无 await 插入。
+        // Rv3-1（2026-10-07 review followup）放宽：interrupted result 之外，watchdog 硬杀在途
+        //（watchdogInterrupted 已置位）的 is_error result 同属「回合被中止后收尾」，挂账一并消费
+        // 防随 deleteEntry 消亡丢弃（用户只见 error result、缺「已自动中断」归因）；success result 仍不消费。
+        if (entry.watchdogErrorPending && (isAbortedCliResult(resultEvent) || (resultEvent.is_error && entry.watchdogInterrupted))) {
+          forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+          entry.watchdogErrorPending = undefined;
+        }
         deleteEntry(sessionId, entry);
         emitExit(0);
         // review-v4 High-1 方案 A：post-turn 快照——回合末真实 current 值。5s 超时兜底，
@@ -4087,6 +4139,14 @@ async function runQuery(
       // P2-1：重试烧满后「流丢 result」收尾时补记账——否则 exhausted 终态不落库、红灯与
       // 通知全丢。未烧满/不在重试中时 recordApiRetryExhausted 天然 no-op，普通回合零影响。
       finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
+      // X9（R11-F1）：流丢 result 的 interrupt 优雅收尾同样在 deleteEntry 前兑现 watchdog 挂账
+      //（迟到 finishKill 的 wasCurrent 门在此形态恒 false，同 result 分支根因）；error 先于
+      // aborted 合成转发，与 finishKill 兑现次序一致。本分支只承载「无 result 的中断收尾」，
+      // gotResult=true 的自然完成不进入（result 分支已 return），不存在挂账误报面。
+      if (entry.watchdogErrorPending) {
+        forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+        entry.watchdogErrorPending = undefined;
+      }
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
       // hb12-P2-2（出口② 终态重构）：entry.knownOutcome='interrupted' + 显式结算——无 result 时代码不得伪造 success——
       // exit 兜底（ipc-handlers.ts child.on('exit') 内 getKnownTurnOutcome 处，当前 ~:689 / tqe 出队 child.on('exit') 兜底内同函数处 ~:600）结算为 success（队列假成功+armAfterTurn 自动启动下一任务），
@@ -4102,7 +4162,9 @@ async function runQuery(
       const probeCliSid2 = sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId);
       deleteEntry(sessionId, entry);
       emitExit(null);
-      schedulePostTurnProbe(sessionId, mainWindow, probeInstance2, probeCliSid2);
+      // X18（R04-F1）：流丢 result 出口同样透传压缩成功标记——CU 控制通道失效环境下即时
+      // 快照链必超时，本出口探针是横幅反馈的唯一载体，不得裸调。
+      schedulePostTurnProbe(sessionId, mainWindow, probeInstance2, probeCliSid2, { compactedJustNow: entryCompactedJustNow(entry) });
       // reasoning_replay 韧性层：流丢 result 同样是回合终态（第三方端点常见）→ 命中即重发。
       scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);
       return;
@@ -4132,6 +4194,10 @@ async function runQuery(
         // 压缩成功标记随新 query 作废；不重置会在新回合 compact_result 时误判「连续压缩」双横幅）。
         turnHadCompactSuccess = false;
         postCompactionFreshSent = false;
+        // X18（R04-F1）：entry 镜像同步重置——首个 attempt 的压缩成功标记同样不得泄入新
+        // query 的非 result 出口探针（双横幅防重跨 query 生效）。
+        entry.turnHadCompactSuccess = false;
+        entry.postCompactionFreshSent = false;
         // hb10-ENG-07：stall 计时不跨 query——重试前旧 query 的无活动累计不得带入新 query
         //（否则 resume 重试刚起步就可能被判 stalled 硬杀）。
         resetStallTracker(sessionId);
@@ -4142,7 +4208,9 @@ async function runQuery(
         forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
         emitExit(1);
         // 出口⑤（resume 重试失败）：resume 已清旧 id → cliSessionId 可能已变，探针守卫会兜住。
-        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId));
+        // X18（R04-F1）：透传 entry 级压缩成功标记（首个 attempt 压缩成功后又遇 resume 失败的
+        // 极窄形态下横幅反馈不丢）。
+        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId), { compactedJustNow: entryCompactedJustNow(entry) });
         break;
       }
     }
@@ -4156,6 +4224,17 @@ async function runQuery(
         forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
       }
       emitExit(null);
+      // X9（R11-F1，修法② 补齐三出口）：两段式优雅窗在途（forceKill 非空 = watchdog/
+      // upstream_fatal/queue 已接管、finishKill 未跑）而流抛错时，与 result/流末出口同根——
+      // 迟到 finishKill（微任务）届时 wasCurrent 恒 false，挂账必丢。在 finally deleteEntry
+      // 之前消费：emitExit 后仍处同一同步段（resolve exited 只排队微任务，无法插队），清账
+      // 先于 deleteEntry 与 finishKill，时序等价；forceKill 门保持「user 直杀不消费挂账」
+      // 语义（user 的 finishKill 已自清 forceKill），upstream_fatal/queue 无挂账天然 no-op。
+      // 消费即清账，迟到的 finishKill 不产生二次转发（其收窄兑现门见 killProcess 内注释）。
+      if (entry.forceKill != null && entry.watchdogErrorPending) {
+        forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+        entry.watchdogErrorPending = undefined;
+      }
     } else {
       // P2-1：SDK 异常收尾（流抛错）同样补记账——重试烧满后异常时 exhausted 终态不落库。
       finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
@@ -4167,7 +4246,9 @@ async function runQuery(
     // 记录 transcript，探针反映会话真实占用（兜底需求 #2）。review-v1 High-1：出口③（用户中断）
     // 的探针已迁移到 killProcess 调度——真实中断流在 removeEntryIfCurrent 后走 catch 的
     // !isCurrentEntry 分支提前退出，到不了这里，此处仅服务 SDK 错误路径。
-    schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId));
+    // X18（R04-F1）：SDK 错误收尾同样透传 entry 级压缩成功标记——本回合刚完成的压缩不因
+    // 出错收尾丢失横幅反馈。
+    schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId), { compactedJustNow: entryCompactedJustNow(entry) });
     break;
   }
   }
@@ -4329,6 +4410,13 @@ export function killProcess(
   reason: KillReason,
   mainWindow?: BrowserWindow,
 ): void {
+  // Rv3-2（2026-10-07 review followup）：用户手动停止时清 watchdog 挂账——5s 优雅窗内
+  // watchdog 迟到的 finishKill 不得经 (watchdogInterrupted && !knownOutcome) 析取在用户
+  // 已见「已中断」后补发 watchdog error（挂账随用户决断作废，与「user 直杀不消费挂账」语义对齐）。
+  if (reason === 'user') {
+    const earlyEntry = entries.get(sessionId);
+    if (earlyEntry) earlyEntry.watchdogErrorPending = undefined;
+  }
   if (reason === 'user' && mainWindow) {
     const current = apiRetryStates.get(sessionId);
     if (current) {
@@ -4416,6 +4504,26 @@ export function killProcess(
       removeEntryIfCurrent(sessionId, entry);
       // 新增 wasCurrent 门（行首加 if，原调用不变）。
       if (wasCurrent) cleanupSessionStall(sessionId);
+      // X9（R11-F1，修法①）：A13 挂账兑现门收窄——wasCurrent 之外补两种「回合确被中止」确认：
+      // 流末兜底已知中断（knownOutcome==='interrupted'，出口② 置位）与本回合曾被 watchdog
+      // 硬杀且无权威终态标记（watchdogInterrupted && !knownOutcome——优雅窗内流抛错的 catch
+      // 收尾形态：先 deleteEntry 后 finishKill、wasCurrent 恒 false 的迟到路径）。兑现仍限定
+      // reason==='watchdog'（user 中断不消费挂账，语义不动）；error 先于下方 wasCurrent 门的
+      // aborted 补发（次序同旧时序）。自然完成（success result，knownOutcome='success'）三态
+      // 皆假不兑现——b272628「优雅完成不残留误报」目标保持：knownOutcome 已置位时以标记为
+      // 准，watchdogInterrupted 不单独构成兑现依据（孤立判据会把优雅窗内成功回合误报成已中断）。
+      // runQuery 三中断出口（result/流末/catch）已在 deleteEntry 前消费挂账（修法②），此处
+      // 是 abort-fallback / forceKill 接管 / 无 query 直杀等 wasCurrent 形态与迟到兜底兑现点。
+      if (
+        reason === 'watchdog' &&
+        mainWindow &&
+        entry.watchdogErrorPending &&
+        (wasCurrent || entry.knownOutcome === 'interrupted' || (entry.watchdogInterrupted === true && !entry.knownOutcome))
+      ) {
+        // A13（D11-F6）语义承接：转发+落库 system:error 后清账（幂等，双兑现点不重复转发）。
+        forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
+        entry.watchdogErrorPending = undefined;
+      }
       // Task 4 review P1-2：用户中断/卡死硬杀须显式发幂等 aborted 终态。killProcess 已 abortEntry
       // （state='aborting'）+ removeEntryIfCurrent，isCurrentEntry 此后 false；runQuery 流末兜底
       // （isCurrentEntry 检查）与 catch 段（!isCurrentEntry → emitExit(null)）都不会再发 aborted，
@@ -4423,17 +4531,11 @@ export function killProcess(
       // forwardEvent 对 aborted 只 IPC + 落库 system:aborted（persistCliEvent 有 case，review-v2 §3.7），
       // 前端 markStopped 幂等；
       // runQuery 不会重复发（上述分支已吞掉）。session_cleanup/queue/api_retry_exhausted 不发
-      // （会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
+      //（会话已删 forwardEvent 被 isSessionActive 守卫拦，或新 query 接管负责终态）。
       // 迟到语义（新增）：仅当被杀回合仍 current 时补发；回合已自然收尾（终态已由 result/流末
-      // 提供）时不再叠加 aborted，防污染收尾后新回合的 UI 状态。
+      // 提供）时不再叠加 aborted，防污染收尾后新回合的 UI 状态。X9 注：aborted/探针等会话级
+      // 副作用保持 wasCurrent 单门不放宽（上方兑现门只管挂账 error，本门形态被 regression 钉死）。
       if (wasCurrent && (reason === 'user' || reason === 'watchdog') && mainWindow) {
-        // A13（D11-F6）：watchdog「已自动中断」挂账在此兑现——仅当回合确被中止（优雅窗内
-        // 自然完成时 wasCurrent=false 不入此门）才转发+落库 system:error，先于 aborted，
-        // renderer 横幅与终态次序同旧时序；user 中断不消费挂账（语义不动）。
-        if (reason === 'watchdog' && entry.watchdogErrorPending) {
-          forwardEvent(sessionId, mainWindow, { type: 'error', message: entry.watchdogErrorPending });
-          entry.watchdogErrorPending = undefined;
-        }
         forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
         // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
         // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
@@ -4442,7 +4544,10 @@ export function killProcess(
         // 此处 entry 已被 removeEntryIfCurrent 移除，探针发射守卫「entries.get==null（无新回合在途）」
         // 天然满足；若用户在探针 ~2s 窗口内重发新回合，新回合的 schedule 会 kill 旧探针并推进
         // generation，结果不会污染（可打断单飞机制）。迟到时（wasCurrent=false）直接不调度。
-        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId));
+        // X18（R04-F1）：中断兜底出口透传 entry 级压缩成功标记——turnHadCompactSuccess 局部
+        // 变量在 killProcess 不可见（标志提升为 entry 镜像的动因），中断回合里刚完成的压缩
+        // 也能经探针 fresh 弹出账单横幅。
+        schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId), { compactedJustNow: entryCompactedJustNow(entry) });
       }
       // 硬杀兜底：abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
       //（瞬时不可捕获），子进程卡死在死 socket 上时真能打死。
