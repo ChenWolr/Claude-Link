@@ -34,6 +34,9 @@ function onKeydown(e: KeyboardEvent): void {
   if (e.key !== 'Escape' || !updateStore.dialogVisible) return;
   // A9（D14-F5）：更高层遮罩在场时让位（不消费、不记 dismissed）。
   if (escHandle && !escHandle.isTopmost()) return;
+  // X3（R14-F1）：本组件消费 Esc 时 preventDefault——ChatPage 的 e.defaultPrevented 急停
+  // 守卫随即让位，防一次 Esc 双吞（dismiss 弹窗 + abort 流式回合，队列场景连锁熔断）。
+  e.preventDefault();
   updateStore.dismissUpdate();
 }
 onMounted(() => window.addEventListener('keydown', onKeydown));

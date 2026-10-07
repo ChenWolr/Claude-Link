@@ -217,3 +217,4 @@ scripts/tdd-bridge-surrogate-safe-cut-verify.ts
 scripts/tdd-provider-model-context-window-verify.ts
 scripts/tdd-provider-model-context-window-ui-verify.ts
 scripts/tdd-interaction-prompt-enter-guard.ts
+scripts/tdd-update-dialog-esc-verify.ts
