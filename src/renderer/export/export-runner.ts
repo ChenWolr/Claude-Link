@@ -98,7 +98,10 @@ function measureItemHeights(expectedCount: number): number[] | null {
  *  整单失败；变高页实际渲染高含页固定 overhead（export-header 等），故硬上限预检按
  *  overhead+h>hardCap 判定（压线变高页不再漏到捕获期才报 page-over-budget）；仅此才置
  *  runnerState.oversizeItem 提前收口，由 runExport 以 item-over-budget 快速失败（hb10-P2-11
- *  机制保留）。 */
+ *  机制保留）。X6（R13-F1）：预检收窄为仅变高页候选（h > maxHeight 才比对 hardCap）——
+ *  JPEG tallest≤1500 的会话不 probe、hardCap 停默认 1500，全员预检会误杀 h∈(1310,1500]
+ *  的常规消息（v0.4.2 前可导出的回归）；h≤maxHeight 恢复旧行为永不预检失败，变高页
+ *  候选仍受反推后真实像素预算保护。 */
 function splitPages(itemCount: number, itemHeights: number[], overhead: number, maxHeight: number, hardCap: number): { start: number; end: number }[] {
   runnerState.oversizeItem = null;
   const pages: { start: number; end: number }[] = [];
@@ -106,7 +109,7 @@ function splitPages(itemCount: number, itemHeights: number[], overhead: number, 
   let acc = 0;
   for (let i = 0; i < itemCount; i++) {
     const h = itemHeights[i] ?? 0;
-    if (overhead + h > hardCap) {
+    if (h > maxHeight && overhead + h > hardCap) {
       runnerState.oversizeItem = { index: i, heightPx: h };
       return pages;
     }
