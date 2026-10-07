@@ -8,8 +8,9 @@
 // 与打开先后无关（灯箱后开、权限弹窗先开时灯箱仍在上）。
 //
 // 边界：只改「何时响应」，不改「响应后语义」——interaction-cancel 纯函数与 reason 映射
-// 零改动；栈内无更高层时各 handler 行为与现状完全一致。同优先级互不遮蔽（DiffDialog/
-// ToolDiffDialog/InteractionPrompt 同为 1200，并存时行为与现状相同）。
+// 零改动；栈内无更高层时各 handler 行为与现状完全一致。diff 层 1250 高于交互层 1200
+//（X2/R06-F2）：diff 在场时交互弹窗让位——三者都 Teleport 到 body，同 z 下后挂载的
+// diff 遮罩恒绘制于交互遮罩之上，Esc/Enter/箭头只作用于视觉最上层的 diff。
 
 export interface EscLayerHandle {
   /** 是否允许响应 Esc：本层之上无更高优先级遮罩在场。 */
@@ -24,8 +25,10 @@ const escLayers = new Map<symbol, number>();
 export const ESC_LAYER_PRIORITY = {
   updateDialog: 1100,
   interaction: 1200,
-  diffDialog: 1200,
-  toolDiffDialog: 1200,
+  // X2（R06-F2）：diff 两层提到 1250——高于交互层 1200（同 z 下 diff 遮罩恒盖住交互弹窗），
+  // 与两个 diff 组件遮罩 CSS 的 z-index 同步。
+  diffDialog: 1250,
+  toolDiffDialog: 1250,
   exportFormat: 9000,
   imageLightbox: 9999,
 } as const;

@@ -18,6 +18,13 @@
 // 修法：与 Esc 同款守卫（escHandle && !escHandle.isTopmost() → return），仅收 Ctrl+F 与
 // 箭头两个入口；Tab/其余键维持原行为。
 //
+// X2 追加（R06-F2，2026-10-06）：原「同优先级互不遮蔽（三层同为 1200）」前提与视觉事实相反
+//——三者都 Teleport 到 body，同 z 下后挂载的 diff 遮罩恒绘制于交互遮罩之上，diff 打开期间
+// 后到的交互弹窗被完全盖住，而 Esc/Enter 因双方 isTopmost() 均为 true 同时作用于不可见弹窗
+//（误 deny / 误授权）。契约改为：diffDialog/toolDiffDialog 提至 1250 > interaction 1200，
+// diff 在场时交互层让位；两个 diff 组件遮罩 CSS 的 z-index 同步 1200 → 1250（优先级表与
+// 真实 z-index 保持同源）。
+//
 // 运行：npx tsx scripts/tdd-esc-stack-verify.ts
 
 import { readFileSync } from 'node:fs';
@@ -69,21 +76,29 @@ check('release 幂等 + 释放后 isTopmost=false（异常卸载兜底）', () =
   h.release();
   assert.equal(h.isTopmost(), false);
 });
-check('同优先级互不遮蔽（DiffDialog/ToolDiffDialog/InteractionPrompt 同为 1200）', () => {
-  const a = esc.pushEscLayer(1200);
-  const b = esc.pushEscLayer(1200);
-  assert.equal(a.isTopmost(), true);
-  assert.equal(b.isTopmost(), true);
-  a.release();
-  b.release();
+check('X2/R06-F2：diff 层优先级 > interaction；diff 在场时交互层让位', () => {
+  assert.ok(esc.ESC_LAYER_PRIORITY.diffDialog > esc.ESC_LAYER_PRIORITY.interaction,
+    'diffDialog 优先级须高于 interaction（diff 遮罩视觉恒在上，Esc 层级与视觉一致）');
+  assert.ok(esc.ESC_LAYER_PRIORITY.toolDiffDialog > esc.ESC_LAYER_PRIORITY.interaction,
+    'toolDiffDialog 优先级须高于 interaction');
+  const interaction = esc.pushEscLayer(esc.ESC_LAYER_PRIORITY.interaction);
+  const diff = esc.pushEscLayer(esc.ESC_LAYER_PRIORITY.diffDialog);
+  assert.equal(interaction.isTopmost(), false, 'diff 在场时交互弹窗应让位（Esc 不得作用于被遮挡弹窗）');
+  assert.equal(diff.isTopmost(), true, 'diff 应为顶层');
+  diff.release();
+  assert.equal(interaction.isTopmost(), true, 'diff 关闭后交互弹窗恢复响应（保持待决不被 deny）');
+  interaction.release();
 });
-check('优先级表与真实 z-index 同源（update 1100 / interaction·diff 1200 / export 9000 / lightbox 9999）', () => {
+check('优先级表与真实 z-index 同源（update 1100 / interaction 1200 / diff 1250 / export 9000 / lightbox 9999）', () => {
   assert.equal(esc.ESC_LAYER_PRIORITY.updateDialog, 1100);
   assert.equal(esc.ESC_LAYER_PRIORITY.interaction, 1200);
-  assert.equal(esc.ESC_LAYER_PRIORITY.diffDialog, 1200);
-  assert.equal(esc.ESC_LAYER_PRIORITY.toolDiffDialog, 1200);
+  assert.equal(esc.ESC_LAYER_PRIORITY.diffDialog, 1250);
+  assert.equal(esc.ESC_LAYER_PRIORITY.toolDiffDialog, 1250);
   assert.equal(esc.ESC_LAYER_PRIORITY.exportFormat, 9000);
   assert.equal(esc.ESC_LAYER_PRIORITY.imageLightbox, 9999);
+  // X2：两个 diff 组件遮罩 CSS 须同步 1250（视觉与 Esc 语义一致）。
+  assert.ok(diffDialog.includes('z-index: 1250;'), 'DiffDialog 遮罩 z-index 须为 1250');
+  assert.ok(toolDiffDialog.includes('z-index: 1250;'), 'ToolDiffDialog 遮罩 z-index 须为 1250');
 });
 
 console.log('\n=== A9-②：InteractionPrompt 接线（D06-F1 主场景） ===');

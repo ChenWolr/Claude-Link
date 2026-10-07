@@ -19,7 +19,7 @@ import DiffSidebar from './DiffSidebar.vue';
 import DiffBody from './DiffBody.vue';
 
 const { state, close } = useDiffDialog();
-// A9：弹窗打开即注册 Esc 层（1200），关闭/卸载出栈——更高层遮罩（灯箱/导出格式）在场时 Esc 让位。
+// A9：弹窗打开即注册 Esc 层（1250），关闭/卸载出栈——更高层遮罩（灯箱/导出格式）在场时 Esc 让位。
 let escHandle: EscLayerHandle | null = null;
 watch(state, (s) => {
   if (s && !escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.diffDialog);
@@ -717,7 +717,8 @@ onBeforeUnmount(() => {
 
   position: fixed;
   inset: 0;
-  z-index: 1200;
+  /* X2（R06-F2）：1250 高于交互遮罩 1200——diff 在场时恒为视觉最上层（与 ESC_LAYER_PRIORITY.diffDialog 同源） */
+  z-index: 1250;
   /* 暖色 scrim（D6）：diff 弹窗本地覆盖，不改全局共享的蒙层 token */
   background: color-mix(in srgb, #4A3828 42%, transparent);
   backdrop-filter: blur(9px) saturate(1.04);

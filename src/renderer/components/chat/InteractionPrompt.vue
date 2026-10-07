@@ -467,7 +467,7 @@ function move(delta: number): void {
 }
 
 function focusDialogStart(): void {
-  // B5 补修（核验·遮挡组合回归）：更高层遮罩（灯箱 9999/导出格式 9000）在场时不抢占 DOM
+  // B5 补修（核验·遮挡组合回归）：更高层遮罩（灯箱 9999/diff 弹窗 1250/导出格式 9000）在场时不抢占 DOM
   // 焦点——弹窗渲染于 z-1200 之下被完全遮挡、用户从未见过，抢焦会把键盘焦点从用户当前
   // 所见层（灯箱关闭按钮等）劫进不可见弹窗，后续 Enter 经 submit 兜底会静默提交首项
   // （权限首项=允许本次）。让位判据与 A9 的 Esc 让位同源（escHandle.isTopmost）；

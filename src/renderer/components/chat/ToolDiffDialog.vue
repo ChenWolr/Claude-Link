@@ -17,7 +17,7 @@ import { buildDiffSearchMatches, moveSearchIndex } from '../../utils/diff-search
 import DiffBody from '../changes/DiffBody.vue';
 
 const { state, close } = useToolDiffDialog();
-// A9：弹窗打开即注册 Esc 层（1200），关闭/卸载出栈——更高层遮罩在场时 Esc 让位。
+// A9：弹窗打开即注册 Esc 层（1250），关闭/卸载出栈——更高层遮罩在场时 Esc 让位。
 let escHandle: EscLayerHandle | null = null;
 watch(state, (s) => {
   if (s && !escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.toolDiffDialog);
@@ -489,7 +489,8 @@ onBeforeUnmount(() => {
 
   position: fixed;
   inset: 0;
-  z-index: 1200;
+  /* X2（R06-F2）：1250 高于交互遮罩 1200——diff 在场时恒为视觉最上层（与 ESC_LAYER_PRIORITY.toolDiffDialog 同源） */
+  z-index: 1250;
   background: var(--interaction-overlay-bg, rgba(0, 0, 0, 0.58));
   backdrop-filter: blur(3px);
 }
