@@ -46,8 +46,8 @@ check('1', 'electron-builder.json5 含 publish github ChenWolr/Claude-Link',
   /provider:\s*"github"/.test(builder) && /owner:\s*"ChenWolr"/.test(builder) && /repo:\s*"Claude-Link"/.test(builder));
 check('1', 'package.json dependencies 含 electron-updater',
   /"electron-updater":\s*"\^6\.8\.3"/.test(pkg));
-check('1', 'package:win 保持 --publish never（只构建不上传，发版手动传资产）',
-  pkg.includes('"package:win": "electron-builder --win --publish never"'));
+check('1', 'package:win 保持 --publish never（只构建不上传，发版手动传资产；2026-10-09 起内含 npm run build 前置防陈旧 out/ 上包）',
+  pkg.includes('"package:win": "npm run build && electron-builder --win --publish never"'));
 
 console.log('\n=== 2) 共享类型与 IPC 通道 ===');
 check('2', 'AppUpdateStatus 九态齐全',
@@ -154,6 +154,26 @@ check('7', 'E2E 按 PID 树杀、无同名 taskkill',
 console.log('\n=== 8) 契约链登记 ===');
 check('8', 'selftest-static-list.txt 已登记本脚本',
   selftestList.includes('scripts/tdd-app-updater-verify.ts'));
+
+console.log('\n=== 9) P2-1 downloaded 态检查失败快照-恢复 ===');
+check('9', '模块级 _checkSnapshot 声明（status/newVersion/releaseNotes 三字段快照）',
+  updaterModule.includes('let _checkSnapshot: Pick<AppUpdateState, \'status\' | \'newVersion\' | \'releaseNotes\'> | null = null'));
+check('9', 'checkForAppUpdates 在置 checking 之前快照当前态',
+  /_checkSnapshot = \{ status: _state\.status[\s\S]*?\};\s*\n\s*setState\(\{ status: 'checking'/.test(updaterModule));
+check('9', 'error 事件与 catch 两路均含快照恢复分支（≥2 处 restoring downloaded state）',
+  (updaterModule.match(/restoring downloaded state/g) || []).length >= 2);
+check('9', '恢复分支还原 downloaded 态并清 error/progress（非重入守卫方案）',
+  /setState\(\{ status: 'downloaded', newVersion: _checkSnapshot\.newVersion, releaseNotes: _checkSnapshot\.releaseNotes, error: null, progress: null \}\)/.test(updaterModule)
+  && !/\['checking','available','downloading','downloaded'\]/.test(updaterModule.replace(/\s+/g, '')));
+check('9', 'checkForUpdates 后 finally 清空快照（成功失败皆清）',
+  /finally \{\s*_checkSnapshot = null;\s*\}/.test(updaterModule));
+check('9', '恢复分支先于 verdict 分派（error 事件与 catch 两路 pairwise 顺序）', (() => {
+  const restore = 'update check failed after download ready';
+  const verdict = 'missingMetadataVerdict(message';
+  const r1 = updaterModule.indexOf(restore), v1 = updaterModule.indexOf(verdict);
+  const r2 = updaterModule.indexOf(restore, r1 + 1), v2 = updaterModule.indexOf(verdict, v1 + 1);
+  return r1 !== -1 && v1 !== -1 && r1 < v1 && r2 !== -1 && v2 !== -1 && r2 < v2;
+})());
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 if (fail > 0) process.exit(1);

@@ -4,7 +4,9 @@
 //   （--user-data-dir 隔离 + --remote-debugging-port=9224 + CLAUDE_LINK_UPDATE_FEED_URL）
 //   → E0 启动 ~5s 自动检查发现新版自动弹窗（R5+R2）→ 点「稍后提醒」→ E2 侧栏「可更新」徽标
 //   → E3 点徽标直达设置关于 tab（最新版本行=feed 版本）→ E4 手动点「检查更新」弹窗重弹
-//   （dismissed 不挡主动检查）→ E5 等 downloaded → 点弹窗「立即重启更新」→ 断言 installing
+//   （dismissed 不挡主动检查）→ E4b 关于页更新说明归一化断言（feed 内嵌 HTML 须经
+//   normalizeReleaseNotes 归一：井号标题/列表/链接形态，无标签直出）→ E5 等 downloaded
+//   → 点弹窗「立即重启更新」→ 断言 installing
 //   + 应用进程退出 + NSIS 安装器进程出现 → taskkill 安装器收尾。
 // 前置：npm run package:win 已跑（dist-electron/win-unpacked/claude-link.exe 存在）；
 //   dev 实例须关闭（单实例锁按 userData，已用 --user-data-dir 隔离，仍建议关闭减少干扰）。
@@ -140,6 +142,14 @@ try {
     const reopened = await waitFor(async () => evalExpr(ws,
       `(() => { const d = document.querySelector('[data-testid="update-dialog"]'); return !!d && d.offsetParent !== null; })()`), 30000);
     if (reopened !== true) throw new Error('手动检查后弹窗未重弹');
+  });
+
+  await check('E4b 更新说明归一化（无标签直出）', async () => {
+    const notes = await evalExpr(ws, `document.querySelector('.about-notes pre')?.textContent ?? ''`);
+    if (!notes) throw new Error('关于页更新说明 <pre> 不存在');
+    if (/<(h[1-6]|ul|li|strong|a)\b/i.test(notes)) throw new Error('仍含原始 HTML 标签: ' + notes.slice(0, 120));
+    if (!notes.includes('## 修复（E2E 归一化验证）')) throw new Error('缺少井号标题行');
+    if (!notes.includes('- 列表项一：**加粗**与 链接文本 (https://example.com/a)')) throw new Error('内联标记/链接形态不符: ' + notes.slice(0, 200));
   });
 
   await check('E5 downloaded 后点弹窗「立即重启更新」→ installing → 应用退出 → NSIS 安装器进程出现（随即强杀收尾）', async () => {

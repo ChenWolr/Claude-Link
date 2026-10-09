@@ -1,9 +1,29 @@
 import { resolve } from 'path'
+import { spawnSync } from 'node:child_process'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import vue from '@vitejs/plugin-vue'
 
+// 构建指纹：git short rev（+脏标记）与 UTC 构建时刻，经 define 注入 main/renderer，
+// 供关于页展示与主进程启动日志比对——「装到的二进制≠刚改的源码」从此可被发现。
+// git 不可用/非 git 目录 → 'nogit'，不抛错；脏工作树 → '-dirty' 后缀。
+function computeBuildRev(): string {
+  try {
+    const rev = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout?.trim();
+    if (!rev) return 'nogit';
+    const dirty = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).stdout?.trim() ? '-dirty' : '';
+    return rev + dirty;
+  } catch {
+    return 'nogit';
+  }
+}
+const buildDefine = {
+  __CL_BUILD_REV__: JSON.stringify(computeBuildRev()),
+  __CL_BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+}
+
 export default defineConfig({
   main: {
+    define: buildDefine,
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
@@ -22,6 +42,7 @@ export default defineConfig({
   },
   renderer: {
     root: resolve('src/renderer'),
+    define: buildDefine,
     plugins: [vue()],
     resolve: {
       alias: {

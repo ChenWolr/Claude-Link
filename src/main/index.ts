@@ -20,6 +20,7 @@ import {
   WINDOW_MIN_HEIGHT,
   IPC_CHANNELS,
 } from '../shared/constants';
+import { BUILD_REV, BUILD_TIME } from '../shared/build-info';
 import { loadWindowSize, trackWindowSize } from './modules/window-state';
 import { setupLinkGuard } from './modules/link-guard';
 import { cleanupStaleTempDirs, disposeExportTempDirsSync } from './modules/export-image-manager';
@@ -306,6 +307,7 @@ app.whenReady().then(async () => {
     await detectCli();
 
     logger.info('Application initialized successfully');
+    logger.info(`build ${BUILD_REV} @ ${BUILD_TIME}`);
   } catch (error) {
     logger.error('Failed to initialize application services', error);
   }

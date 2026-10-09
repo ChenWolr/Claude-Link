@@ -19,6 +19,7 @@ import { attachUserSkillDirNames, findStaleSkillKeys, isStaleKeyScanReady, loadS
 import { useInteractionStore } from '../stores/interaction-store';
 import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
 import type { AppUpdateState } from '@shared/types/update';
+import { BUILD_REV, BUILD_TIME } from '@shared/build-info';
 import { aboutCheckButtonLabel, latestVersionText } from '../../shared/update-presentation';
 import { useUpdateStore } from '../stores/update-store';
 import iconUrl from '../assets/icon.png';
@@ -982,6 +983,7 @@ const updateStageTone = computed(() => {
                 <span class="about-pill about-pill--current">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 2v4"/><path d="M14 2v4"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M12 12v6"/><path d="M9 18h6"/></svg>
                   <span data-testid="about-version">v{{ updateStore.currentVersion || '…' }}</span>
+                  <span class="about-hero__build" data-testid="about-build-rev">build {{ BUILD_REV }}{{ BUILD_TIME ? ` · ${BUILD_TIME.slice(0, 16).replace('T', ' ')} UTC` : '' }}</span>
                 </span>
                 <span class="about-pill">最新 <span data-testid="about-latest-version">{{ latestVersionText(updateStore.state.latestVersion) }}</span></span>
                 <span class="about-pill">MIT 许可</span>
@@ -2513,6 +2515,11 @@ input.skill-search:focus {
   font-size: 0.6875rem;
   color: var(--color-text-muted);
   opacity: 0.8;
+}
+
+.about-hero__build {
+  font-size: 0.72rem;
+  opacity: 0.5;
 }
 
 /* 检查中/安装中的图标章旋转停转（与 .save-badge__dot 的 main.css 全局覆盖同款语义；

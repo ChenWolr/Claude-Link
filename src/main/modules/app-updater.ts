@@ -11,12 +11,15 @@
 // 失败不清空（setState patch 合并自然保留）——关于 tab「最新版本」跨状态流转永久显示。
 // 禁用差分下载：Release 不上传 blockmap，差分链路必然失败。
 // releaseNotes：GitHub 源缺 latest.yml 内嵌时 electron-updater 取 releases.atom 的 HTML 渲染补齐；入态前经 shared/release-notes 归一为可读纯文本（详见模块头注释）。
+// P2-1（2026-10-09）：downloaded 态手动重查失败恢复——检查前快照三字段、失败时还原 downloaded
+// （保住「重启更新」入口），成功即清；不采用把 downloaded 加重入守卫的方案（会取消真重查能力）。
 import { app, BrowserWindow } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import * as fs from 'fs';
 import { logger } from '../utils/logger';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { normalizeReleaseNotes } from '../../shared/release-notes';
+import { missingMetadataVerdict } from '../../shared/update-verdict';
 import type { AppUpdateInfo, AppUpdateState } from '../../shared/types/update';
 
 const GITHUB_OWNER = 'ChenWolr';
@@ -34,6 +37,8 @@ let _getMainWindow: GetMainWindow = () => null;
 let _updaterConfigured = false;
 let _installPromise: Promise<boolean> | null = null;
 let _state: AppUpdateState = createIdleState();
+// P2-1：downloaded 态手动重查失败时的就绪态快照（检查前置、失败恢复、成功即清）。
+let _checkSnapshot: Pick<AppUpdateState, 'status' | 'newVersion' | 'releaseNotes'> | null = null;
 
 function getUpdateState(): AppUpdateState {
   return { ..._state };
@@ -163,8 +168,14 @@ function configureUpdater(): void {
 
   autoUpdater.on('error', (err) => {
     const message = err instanceof Error ? err.message : String(err);
+    if (_checkSnapshot?.status === 'downloaded') {
+      logger.warn(`update check failed after download ready, restoring downloaded state: ${message}`);
+      setState({ status: 'downloaded', newVersion: _checkSnapshot.newVersion, releaseNotes: _checkSnapshot.releaseNotes, error: null, progress: null });
+      return;
+    }
     if (isMissingLatestMetadataError(message)) {
-      setState({ status: 'latest' });
+      const verdict = missingMetadataVerdict(message, app.getVersion());
+      setState(verdict.status === 'error' ? { status: 'error', error: verdict.message } : { status: 'latest' });
       return;
     }
     setState({ status: 'error', error: friendlyCheckErrorMessage(message) });
@@ -195,16 +206,25 @@ export async function checkForAppUpdates(): Promise<AppUpdateState> {
   // 检查/发现/下载中拒绝重入：渲染层按钮常可点后由这里兜底（重入 electron-updater
   // 会报 "download in progress" 类错误并把 downloading 态覆盖成 error）。
   if (['checking', 'available', 'downloading'].includes(getUpdateState().status)) return getUpdateState();
+  _checkSnapshot = { status: _state.status, newVersion: _state.newVersion, releaseNotes: _state.releaseNotes };
   setState({ status: 'checking', error: null, newVersion: null, releaseNotes: null, progress: null });
   try {
     await autoUpdater.checkForUpdates();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    if (_checkSnapshot?.status === 'downloaded') {
+      logger.warn(`update check failed after download ready, restoring downloaded state: ${message}`);
+      setState({ status: 'downloaded', newVersion: _checkSnapshot.newVersion, releaseNotes: _checkSnapshot.releaseNotes, error: null, progress: null });
+      return getUpdateState();
+    }
     if (isMissingLatestMetadataError(message)) {
-      setState({ status: 'latest' });
+      const verdict = missingMetadataVerdict(message, app.getVersion());
+      setState(verdict.status === 'error' ? { status: 'error', error: verdict.message } : { status: 'latest' });
     } else {
       setState({ status: 'error', error: friendlyCheckErrorMessage(message) });
     }
+  } finally {
+    _checkSnapshot = null;
   }
   return getUpdateState();
 }

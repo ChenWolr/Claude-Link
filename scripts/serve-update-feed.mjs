@@ -35,6 +35,14 @@ const yml = [
   `path: ${exe}`,
   `sha512: ${sha512}`,
   `releaseDate: '${new Date().toISOString()}'`,
+  // E4b 归一化验证：generic feed 的 releaseNotes 经 electron-updater parseUpdateInfo
+  // 整体透传 → normalizeReleaseNotes 同一归一链（井号标题/列表/链接 text (href) 形态）。
+  'releaseNotes: |',
+  '  <h2>修复（E2E 归一化验证）</h2>',
+  '  <ul>',
+  '  <li>列表项一：<strong>加粗</strong>与 <a href="https://example.com/a">链接文本</a></li>',
+  '  <li>列表项二</li>',
+  '  </ul>',
 ].join('\n');
 
 const server = createServer((req, res) => {

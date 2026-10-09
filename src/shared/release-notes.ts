@@ -7,7 +7,9 @@
 
 /** 是否像 Atom 补链来的 HTML（< 后紧跟字母的已知标签名才认，纯文本 a < b 不误伤）。 */
 export function looksLikeHtmlNotes(s: string): boolean {
-  return /<(?:h[1-6]|ul|ol|li|p|div|blockquote|table|br|pre|hr|strong|em|code|a)\b/i.test(s);
+  // 2026-10-09 扫雷 P2-2：补 details|summary|img——转换器已处理这三类标签，漏检会让仅折叠块/
+  // 仅图片的 HTML 直通直出（v0.4.3 事故同型复发口）。
+  return /<(?:h[1-6]|ul|ol|li|p|div|blockquote|table|br|pre|hr|strong|em|code|a|details|summary|img)\b/i.test(s);
 }
 
 /** 数字实体解码：NaN / 控制字符（<0x20，含 \r 与 NUL）/ DEL(0x7f) / 越界 0x10FFFF+ / 孤立代理（引擎不抛错，显式判）→ 原样保留整段实体。 */
