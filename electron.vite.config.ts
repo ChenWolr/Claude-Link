@@ -10,7 +10,13 @@ function computeBuildRev(): string {
   try {
     const rev = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).stdout?.trim();
     if (!rev) return 'nogit';
-    const dirty = spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).stdout?.trim() ? '-dirty' : '';
+    // vite 加载配置时会先在项目根写临时文件 electron.vite.config.<timestamp>.mjs（加载结束即删），
+    // 而 computeBuildRev 恰在该文件存续窗口内执行——不剔除则干净树恒判 -dirty（指纹自测量干扰）。
+    const dirty = (spawnSync('git', ['status', '--porcelain'], { encoding: 'utf8' }).stdout || '')
+      .split('\n')
+      .some((line) => line.trim() && !/^\?\?\s+electron\.vite\.config\.\d+\.mjs$/.test(line.trim()))
+      ? '-dirty'
+      : '';
     return rev + dirty;
   } catch {
     return 'nogit';
