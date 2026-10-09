@@ -9,14 +9,17 @@
 //   位置在通用剥残标签（步骤 10）之前，占位文本随主链统一解码实体；app-updater 退役
 //   包装函数与 looksLikeHtmlNotes import，接线恢复直传 normalizeReleaseNotes(info.releaseNotes)。
 //   上收增益：数组分支（fullChangelog 形态）的 HTML note 同样获得两条规则（前置补丁只
-//   作用于字符串分支），P8 钉。门谓词 looksLikeHtmlNotes 不变——纯文本/Markdown 直通
-//   字节不变（含 Markdown 里字面 <img> 的既有直通形态）。
+//   作用于字符串分支），P8 钉。门谓词 looksLikeHtmlNotes 在 X19 上收时保持不变；2026-10-09
+//   扫雷 P2-2 补检 details|summary|img——仅折叠块/仅图片的 HTML 不再直通直出（P9 钉），
+//   含字面 <img> 的字符串由直通改为占位转换（P7 已更新）。
 // 分组：
 //   P1-P2  details/summary 粘连解开（P1 为审计 R14-F2 实证 probe 回归锚）；
 //   P3-P5  img 占位（alt 非空 / 无或空 alt / alt 实体解码与单引号形态）；
 //   P6     details 包裹列表仍可读；
 //   P7     影响面守卫：直通字节不变 + 既有转换（p/li/h2/表格/嵌套列表）不漂移；
 //   P8     非字符串形态（null/undefined/数字 → null）+ 数组分支同样获得规则（上收增益）；
+//   P9     门谓词补检（2026-10-09 扫雷 P2-2）：仅 details/summary 折叠块或仅 img 的 HTML
+//          也判 HTML——正则漏检会让这类 body 直通直出（v0.4.3 标签直出事故同型复发口）；
 //   W1-W4  结构钉：shared 规则落点齐备、app-updater 补丁退役干净、兄弟契约字面保留、
 //          清单登记。
 // 运行：npx tsx scripts/tdd-update-notes-normalize.ts（已登记 scripts/selftest-static-list.txt）
@@ -113,11 +116,12 @@ check('P6 summary+列表折叠形态：列表项逐行、零粘连、零标签�
 });
 
 console.log('\n=== P7) 影响面守卫：直通字节不变与既有转换不漂移 ===');
-check('P7 纯文本/Markdown 直通字节不变（含字面 <img> 的 Markdown）；p/li/h2/表格/嵌套列表输出不漂移', () => {
+check('P7 纯文本/Markdown 直通字节不变（字面 <img> 经 P2-2 补检后转占位）；p/li/h2/表格/嵌套列表输出不漂移', () => {
   // 计划实现标准：纯文本 release notes 输出字节不变——补丁只作用于将被 HTML 转换的字符串。
   assert.equal(pipeline('## 新增\n- x\n- y'), '## 新增\n- x\n- y');
   assert.equal(pipeline('a < b 且 c > d'), 'a < b 且 c > d');
-  assert.equal(pipeline('说明 <img src="u"> 见下'), '说明 <img src="u"> 见下');
+  // P2-2（2026-10-09）门谓词补检 img 后，字面 <img> 不再直通——无 alt → 裸 [图片] 占位。
+  assert.equal(pipeline('说明 <img src="u"> 见下'), '说明 [图片] 见下');
   // 既有契约（tdd-release-notes-verify P2/P4/P10 同款样本）不得被前置补丁扰动。
   const { htmlReleaseNotesToText } = rel_();
   assert.equal(htmlReleaseNotesToText('<p>x</p><p>y</p>'), 'x\ny');
@@ -142,6 +146,26 @@ check('P8 null/undefined/数字 → null；数组分支 HTML note 的 details/su
   assert.ok(out !== null && out.includes('S\ny'), `数组分支 details 未解粘连: ${JSON.stringify(out)}`);
   const arrImg = pipeline([{ note: '<p><img src="u" alt="配图"></p>' }]);
   assert.ok(arrImg !== null && arrImg.includes('[图片：配图]'), `数组分支 img 未占位: ${JSON.stringify(arrImg)}`);
+});
+
+console.log('\n=== P9) 门谓词补检 details/summary/img（2026-10-09 扫雷 P2-2） ===');
+check('P9 仅 details/summary 折叠块 → 判 HTML 且转换后无标签、summary 与正文分行', () => {
+  const { looksLikeHtmlNotes } = rel_();
+  const probe = '<details><summary>更新详情</summary>\n纯文本行\n</details>';
+  assert.ok(looksLikeHtmlNotes(probe), '仅折叠块未被检出为 HTML（直通复发口）');
+  const out = pipeline(probe);
+  assert.ok(out !== null, `输出为空: ${JSON.stringify(out)}`);
+  assert.ok(out.includes('更新详情') && out.includes('纯文本行'), `文本丢失: ${JSON.stringify(out)}`);
+  assert.ok(!/<\/?[a-zA-Z][^>]*>/.test(out), `残留标签: ${JSON.stringify(out)}`);
+  // </summary> 转换 \n 与源文本自带 \n 叠加为一空行（3+ 才折叠，算法忠实输出），钉「换行分隔」。
+  assert.ok(/更新详情\n+纯文本行/.test(out), `summary 与正文未分行: ${JSON.stringify(out)}`);
+});
+check('P9 仅 img → 判 HTML 且输出 [图片：alt] 占位', () => {
+  const { looksLikeHtmlNotes } = rel_();
+  const probe = '<img src="x" alt="截图">';
+  assert.ok(looksLikeHtmlNotes(probe), '仅 img 未被检出为 HTML（直通复发口）');
+  const out = pipeline(probe);
+  assert.ok(out === '[图片：截图]', `img 占位形态漂移: ${JSON.stringify(out)}`);
 });
 
 console.log('\n=== W) 结构钉 ===');
