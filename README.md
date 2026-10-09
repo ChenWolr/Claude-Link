@@ -300,9 +300,9 @@ npm run package:win
 - `npm run typecheck:scripts`：检查 scripts/ 目录的独立 TS project
 - `npm run selftest`：运行静态自测（189 段契约脚本）和本地行为契约
 - `npm run selftest:native`：运行静态自测加原生 Claude Code 链路
-- `npm run build`：构建 Electron 应用
+- `npm run build`：构建 Electron 应用（`package:win` 已内含此步，单独执行用于本地验证）
 - `npm run rebuild`：重编译 better-sqlite3 原生模块
-- `npm run package:win`：打包 Windows NSIS 安装包
+- `npm run package:win`：构建并打包 Windows NSIS 安装包（内含 `npm run build`，防止陈旧产物上包；构建失败会短路不打包）
 
 `selftest` 使用 `tsx` 执行，不启动 Electron。静态链由 `scripts/run-selftest-static.ts` 逐行执行 `scripts/selftest-static-list.txt` 中的 189 个契约脚本，覆盖 settings 映射、供应商库、会话模型选择器、连接完整性、上下文用量（含熔断）、队列语义 v3、引擎后台开关、思考强度真值、命令矩阵与原生命令、IM 桥接、Skill 管理、应用内更新、回归场景、卡顿看门狗、权限默认档、图片导出、PNG 编码、diff 渲染器六件套、思考内滚、布局契约等。另有 CDP 门禁：`test:cdp`、`test:cdp:commands-e2e`、`test:cdp:real-window`、`test:cdp:context-e2e`、`test:cdp:readonly-e2e`、`test:cdp:layout`；以及应用内更新全链 E2E 裸脚本 `node scripts/cdp-update-e2e.mjs`（需先 `npm run package:win`，配合 `scripts/serve-update-feed.mjs` 本地伪装更新源）。
 

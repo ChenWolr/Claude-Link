@@ -12,7 +12,7 @@
     "build": "electron-vite build",
     "postinstall": "electron-builder install-app-deps",
     "rebuild": "electron-builder install-app-deps",
-    "package:win": "electron-builder --win --publish never",
+    "package:win": "npm run build && electron-builder --win --publish never",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",

@@ -46,8 +46,8 @@ check('1', 'electron-builder.json5 含 publish github ChenWolr/Claude-Link',
   /provider:\s*"github"/.test(builder) && /owner:\s*"ChenWolr"/.test(builder) && /repo:\s*"Claude-Link"/.test(builder));
 check('1', 'package.json dependencies 含 electron-updater',
   /"electron-updater":\s*"\^6\.8\.3"/.test(pkg));
-check('1', 'package:win 保持 --publish never（只构建不上传，发版手动传资产）',
-  pkg.includes('"package:win": "electron-builder --win --publish never"'));
+check('1', 'package:win 保持 --publish never（只构建不上传，发版手动传资产；2026-10-09 起内含 npm run build 前置防陈旧 out/ 上包）',
+  pkg.includes('"package:win": "npm run build && electron-builder --win --publish never"'));
 
 console.log('\n=== 2) 共享类型与 IPC 通道 ===');
 check('2', 'AppUpdateStatus 九态齐全',
