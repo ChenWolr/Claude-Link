@@ -228,3 +228,4 @@ scripts/tdd-retry-attachment-notice-verify.ts
 scripts/tdd-compact-success-flag-verify.ts
 scripts/tdd-update-notes-normalize.ts
 scripts/selftest-build-freshness.ts
+scripts/tdd-update-verdict-verify.ts

@@ -17,6 +17,7 @@ import * as fs from 'fs';
 import { logger } from '../utils/logger';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { normalizeReleaseNotes } from '../../shared/release-notes';
+import { missingMetadataVerdict } from '../../shared/update-verdict';
 import type { AppUpdateInfo, AppUpdateState } from '../../shared/types/update';
 
 const GITHUB_OWNER = 'ChenWolr';
@@ -164,7 +165,8 @@ function configureUpdater(): void {
   autoUpdater.on('error', (err) => {
     const message = err instanceof Error ? err.message : String(err);
     if (isMissingLatestMetadataError(message)) {
-      setState({ status: 'latest' });
+      const verdict = missingMetadataVerdict(message, app.getVersion());
+      setState(verdict.status === 'error' ? { status: 'error', error: verdict.message } : { status: 'latest' });
       return;
     }
     setState({ status: 'error', error: friendlyCheckErrorMessage(message) });
@@ -201,7 +203,8 @@ export async function checkForAppUpdates(): Promise<AppUpdateState> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (isMissingLatestMetadataError(message)) {
-      setState({ status: 'latest' });
+      const verdict = missingMetadataVerdict(message, app.getVersion());
+      setState(verdict.status === 'error' ? { status: 'error', error: verdict.message } : { status: 'latest' });
     } else {
       setState({ status: 'error', error: friendlyCheckErrorMessage(message) });
     }
