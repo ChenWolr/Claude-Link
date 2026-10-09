@@ -13,6 +13,8 @@
     "postinstall": "electron-builder install-app-deps",
     "rebuild": "electron-builder install-app-deps",
     "package:win": "npm run build && electron-builder --win --publish never",
+    "release:gate": "npm run package:win && tsx scripts/release-gate.ts && node scripts/cdp-update-e2e.mjs",
+    "release:gate:post": "tsx scripts/release-gate.ts --post",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
     "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",

@@ -298,13 +298,13 @@ npm run package:win
 - `npm run dev`：启动开发模式
 - `npm run typecheck`：检查 node 与 web 两个 TypeScript project
 - `npm run typecheck:scripts`：检查 scripts/ 目录的独立 TS project
-- `npm run selftest`：运行静态自测（189 段契约脚本）和本地行为契约
+- `npm run selftest`：运行静态自测（全部静态契约脚本）和本地行为契约
 - `npm run selftest:native`：运行静态自测加原生 Claude Code 链路
 - `npm run build`：构建 Electron 应用（`package:win` 已内含此步，单独执行用于本地验证）
 - `npm run rebuild`：重编译 better-sqlite3 原生模块
 - `npm run package:win`：构建并打包 Windows NSIS 安装包（内含 `npm run build`，防止陈旧产物上包；构建失败会短路不打包）
 
-`selftest` 使用 `tsx` 执行，不启动 Electron。静态链由 `scripts/run-selftest-static.ts` 逐行执行 `scripts/selftest-static-list.txt` 中的 189 个契约脚本，覆盖 settings 映射、供应商库、会话模型选择器、连接完整性、上下文用量（含熔断）、队列语义 v3、引擎后台开关、思考强度真值、命令矩阵与原生命令、IM 桥接、Skill 管理、应用内更新、回归场景、卡顿看门狗、权限默认档、图片导出、PNG 编码、diff 渲染器六件套、思考内滚、布局契约等。另有 CDP 门禁：`test:cdp`、`test:cdp:commands-e2e`、`test:cdp:real-window`、`test:cdp:context-e2e`、`test:cdp:readonly-e2e`、`test:cdp:layout`；以及应用内更新全链 E2E 裸脚本 `node scripts/cdp-update-e2e.mjs`（需先 `npm run package:win`，配合 `scripts/serve-update-feed.mjs` 本地伪装更新源）。
+`selftest` 使用 `tsx` 执行，不启动 Electron。静态链由 `scripts/run-selftest-static.ts` 逐行执行 `scripts/selftest-static-list.txt` 中的全部契约脚本（数量以 scripts/selftest-static-list.txt 为准，当前 231），覆盖 settings 映射、供应商库、会话模型选择器、连接完整性、上下文用量（含熔断）、队列语义 v3、引擎后台开关、思考强度真值、命令矩阵与原生命令、IM 桥接、Skill 管理、应用内更新、回归场景、卡顿看门狗、权限默认档、图片导出、PNG 编码、diff 渲染器六件套、思考内滚、布局契约等。另有 CDP 门禁：`test:cdp`、`test:cdp:commands-e2e`、`test:cdp:real-window`、`test:cdp:context-e2e`、`test:cdp:readonly-e2e`、`test:cdp:layout`；以及应用内更新全链 E2E 裸脚本 `node scripts/cdp-update-e2e.mjs`（需先 `npm run package:win`，配合 `scripts/serve-update-feed.mjs` 本地伪装更新源）。
 
 如果启动时出现 `NODE_MODULE_VERSION` 或 `better-sqlite3` ABI 错误，先执行：
 
@@ -313,6 +313,15 @@ npm run rebuild
 ```
 
 所有缓存、依赖下载和构建临时文件统一放在专用缓存目录，不要把临时产物写入系统盘用户目录或源码目录。
+
+### 发版 runbook
+
+1. bump `package.json` version → commit → `git tag v<version>`（在发版分支打 tag 并推送）。
+2. 关闭 dev 实例后运行 `npm run release:gate`：内含 `package:win` 链构建 + 六项静态断言（干净树 / tag 指向 HEAD / asar 构建指纹无 -dirty / 归一链入包 / latest.yml 与安装包 sha512·size 一致 / 产物存在）+ 更新全链 E2E，全绿才继续。
+3. GitHub 建 Release：选刚推的 tag，贴 release body（尽量用 markdown），上传 `dist-electron/claude-link-<version>-setup.exe` 与 `dist-electron/latest.yml`（blockmap 不必传）。
+4. `npm run release:gate:post` 全绿才算发版完成：远端 latest 指向 / 资产 sha512 一致性 / releases.atom 首 entry 校验，并用上一版 tag 的源码回放真实 atom 内容，当场预览「旧版用户将看到的更新说明」。
+
+直连 GitHub 不可达时，可设 CLAUDE_LINK_PROXY/HTTPS_PROXY 环境变量或用 --proxy 指定代理。
 
 ## 测试约定
 
