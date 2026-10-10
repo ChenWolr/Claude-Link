@@ -55,10 +55,13 @@ export function htmlReleaseNotesToText(html: string): string {
   // 7 块级开标签：ul/ol → 换行（嵌套列表各行独立；副作用：标题与紧随列表间出一个空行，更利阅读），其余剥除
   s = s.replace(/<(ul|ol)\b[^>]*>/gi, '\n');
   s = s.replace(/<(p|div|blockquote|table|thead|tbody|tr|th|td|pre)\b[^>]*>/gi, '');
-  // 8 链接 → text (href)（href 非空且 ≠ text 时；text 先 trim）
+  // 8 链接 → [text](href)（href 非空时一律输出链接形态——含 href===text 的自指裸 URL 自动链接，
+  //   GitHub atom 常见、渲染后保持可点；text 空 → [href](href)——markdown 链接形态，
+  //   渲染层 release-notes-md 据此渲染为可点链接）
   s = s.replace(/<a\b[^>]*href=["']([^"']*)["'][^>]*>([\s\S]*?)<\/a\s*>/gi, (_m, href: string, text: string) => {
     const t = text.trim();
-    return href && href !== t ? `${t} (${href})` : t;
+    if (href) return t ? `[${t}](${href})` : `[${href}](${href})`;
+    return t;
   });
   // 9 内联成对标记：strong/b → **、em/i → *、code → `
   s = s.replace(/<(?:strong|b)\b[^>]*>/gi, '**').replace(/<\/(?:strong|b)\s*>/gi, '**');

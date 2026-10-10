@@ -12,6 +12,8 @@
 //   作用于字符串分支），P8 钉。门谓词 looksLikeHtmlNotes 在 X19 上收时保持不变；2026-10-09
 //   扫雷 P2-2 补检 details|summary|img——仅折叠块/仅图片的 HTML 不再直通直出（P9 钉），
 //   含字面 <img> 的字符串由直通改为占位转换（P7 已更新）。
+//   2026-10-10 渲染预览改造：链接归一形态由 text (href) 改钉 [text](href)（P1）——渲染层
+//   release-notes-md 据此渲染可点链接；summary 与链接文本仍换行分隔（仅形态改钉，不增删断言）。
 // 分组：
 //   P1-P2  details/summary 粘连解开（P1 为审计 R14-F2 实证 probe 回归锚）；
 //   P3-P5  img 占位（alt 非空 / 无或空 alt / alt 实体解码与单引号形态）；
@@ -57,7 +59,7 @@ function pipeline(raw: unknown): string | null {
 }
 
 console.log('\n=== P1) R14-F2 实证 probe：details/summary 折叠 Changelog 粘连解开 ===');
-check('P1 summary 文本与链接文本换行分隔，不再「Full Changelogv0.4.2」粘连', () => {
+check('P1 summary 文本与链接文本换行分隔，不再「Full Changelogv0.4.2」粘连（链接 [text](href) 形态）', () => {
   const probe =
     '<h2>What\'s Changed</h2><ul><li>修复 A</li></ul>' +
     '<details><summary>Full Changelog</summary>' +
@@ -67,8 +69,8 @@ check('P1 summary 文本与链接文本换行分隔，不再「Full Changelogv0.
   assert.ok(out !== null && out.includes('\nFull Changelog'), `summary 未起新行: ${JSON.stringify(out)}`);
   // 回归锚：审计实证的粘连形态必须消失，summary 与链接文本以换行分隔。
   assert.ok(!out.includes('Full Changelogv0.4.2'), `粘连残留: ${JSON.stringify(out)}`);
-  assert.ok(out.includes('Full Changelog\nv0.4.2...v0.4.3'), `summary/链接未换行分隔: ${JSON.stringify(out)}`);
-  assert.ok(out.includes('v0.4.2...v0.4.3 (https://github.com/ChenWolr/Claude-Link/compare/v0.4.2...v0.4.3)'), `链接 text (href) 形态漂移: ${JSON.stringify(out)}`);
+  assert.ok(out.includes('Full Changelog\n[v0.4.2...v0.4.3]'), `summary/链接未换行分隔: ${JSON.stringify(out)}`);
+  assert.ok(out.includes('[v0.4.2...v0.4.3](https://github.com/ChenWolr/Claude-Link/compare/v0.4.2...v0.4.3)'), `链接 [text](href) 形态漂移: ${JSON.stringify(out)}`);
   assert.ok(!/<\/?[a-zA-Z][^>]*>/.test(out), `残留标签: ${JSON.stringify(out)}`);
 });
 

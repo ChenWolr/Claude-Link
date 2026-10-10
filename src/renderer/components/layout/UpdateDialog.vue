@@ -7,6 +7,7 @@
 import { computed, onMounted, onUnmounted, watch } from 'vue';
 import { useUpdateStore } from '../../stores/update-store';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+import ReleaseNotesView from '../common/ReleaseNotesView.vue';
 
 const updateStore = useUpdateStore();
 const status = computed(() => updateStore.status);
@@ -76,7 +77,7 @@ onUnmounted(() => {
 
       <details v-if="updateStore.state.releaseNotes" class="update-dialog__notes">
         <summary>更新说明</summary>
-        <pre>{{ updateStore.state.releaseNotes }}</pre>
+        <ReleaseNotesView :notes="updateStore.state.releaseNotes" />
       </details>
 
       <footer class="update-dialog__footer">
@@ -215,7 +216,7 @@ onUnmounted(() => {
   user-select: none;
 }
 
-.update-dialog__notes pre {
+.update-dialog__notes :deep(.release-notes) {
   max-height: 180px;
   margin: 8px 0 0;
   padding: 10px;
@@ -223,9 +224,6 @@ onUnmounted(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-panel-soft);
-  font-size: 0.75rem;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 
 .update-dialog__footer {
