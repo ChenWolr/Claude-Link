@@ -1,11 +1,11 @@
 // tdd-release-notes-verify.ts
 // 更新说明 HTML 直出修复（2026-10-05 计划 §2.4）TDD 验证脚本：
 //   P1-P9  release-notes 纯函数行为断言（直接加载真跑）：真实 atom 样本转换 / 标题分级 /
-//          链接 text (href) / 结构换行与空行折叠 / 实体安全（解码后置 + &amp; 最后解）/
+//          链接 [text](href) / 结构换行与空行折叠 / 实体安全（解码后置 + &amp; 最后解）/
 //          script-style 整块剥除 / looksLikeHtmlNotes 词边界 / normalizeReleaseNotes 全形态 / CRLF；
 //   W1-W4  接线字面钉：app-updater import+归一化调用+旧三元移除净 / update.ts 注释修正
-//          （releases.atom）/ selftest 清单登记 / 渲染层零改动（UpdateDialog 与 ConfigPage
-//          仍各含 <pre>{{ updateStore.state.releaseNotes }}</pre> 纯文本直出）。
+//          （releases.atom）/ selftest 清单登记 / 渲染层改用 ReleaseNotesView 组件渲染预览
+//          （UpdateDialog 与 ConfigPage 均含 <ReleaseNotesView :notes>，<pre> 直出清零）。
 //          P10/W5/W6 review 尾款：pre/嵌套列表/表格分隔、控制实体与大写 hex 守卫、命名实体扩表、
 //          ConfigPage 注释同步、app-updater 嵌式 // 清除。
 //          P11/W7 X19 followup（2026-10-07 规则上收）：details/summary 块级闭合 + img 占位
@@ -61,10 +61,16 @@ check('P2 h3→### x、h1→# y', () => {
 });
 
 console.log('\n=== P3) 链接 ===');
-check('P3 href 非空且≠text → text (href)；无 href <a> → 纯文本直出', () => {
+check('P3 href 非空且≠text → [text](href)；无 href <a> → 纯文本直出', () => {
   const { htmlReleaseNotesToText } = rel_();
-  assert.equal(htmlReleaseNotesToText('<a href="https://example.com">仓库</a>'), '仓库 (https://example.com)');
+  assert.equal(htmlReleaseNotesToText('<a href="https://example.com">仓库</a>'), '[仓库](https://example.com)');
   assert.equal(htmlReleaseNotesToText('<a>纯文本</a>'), '纯文本');
+});
+
+console.log('\n=== P3b) 自指裸 URL 自动链接保持可点（review P3-4） ===');
+check('P3b <a href="https://e.com">https://e.com</a> → [https://e.com](https://e.com)（href===text 不再回退纯文本）', () => {
+  const { htmlReleaseNotesToText } = rel_();
+  assert.equal(htmlReleaseNotesToText('<a href="https://e.com">https://e.com</a>'), '[https://e.com](https://e.com)');
 });
 
 console.log('\n=== P4) 结构：换行与空行折叠 ===');
@@ -177,12 +183,15 @@ check('W2 update.ts：注释含 releases.atom 且旧「Markdown 源码」注释�
 check('W3 selftest-static-list.txt 已登记本脚本', () => {
   assert.ok(selftestList.includes('scripts/tdd-release-notes-verify.ts'), '清单未登记');
 });
-check('W4 渲染层 <pre> 形态：UpdateDialog 与 ConfigPage 仍各含 <pre> 纯文本直出', () => {
-  assert.ok(updateDialogVue.includes('<pre>{{ updateStore.state.releaseNotes }}</pre>'), 'UpdateDialog <pre> 形态漂移');
-  assert.ok(configPage.includes('<pre>{{ updateStore.state.releaseNotes }}</pre>'), 'ConfigPage <pre> 形态漂移');
+check('W4 渲染层组件形态：UpdateDialog 与 ConfigPage 均改用 ReleaseNotesView，`<pre>` 直出清零', () => {
+  assert.ok(updateDialogVue.includes('<ReleaseNotesView :notes="updateStore.state.releaseNotes" />'), 'UpdateDialog 未改用 ReleaseNotesView');
+  // 负向断言收正则形态（review P3-3）：精确子串可被 <pre class="…">/{{  变体等写法绕过。
+  assert.ok(!/<pre[^>]*>\{\{\s*updateStore\.state\.releaseNotes/.test(updateDialogVue), 'UpdateDialog <pre> 直出残留');
+  assert.ok(configPage.includes('<ReleaseNotesView :notes="updateStore.state.releaseNotes" />'), 'ConfigPage 未改用 ReleaseNotesView');
+  assert.ok(!/<pre[^>]*>\{\{\s*updateStore\.state\.releaseNotes/.test(configPage), 'ConfigPage <pre> 直出残留');
 });
-check('W5 ConfigPage：注释同步为「主进程已归一」口径，旧「Markdown 源码」清除', () => {
-  assert.ok(configPage.includes('<pre>{{ updateStore.state.releaseNotes }}</pre>'), 'ConfigPage <pre> 形态漂移');
+check('W5 ConfigPage：改用 ReleaseNotesView 渲染预览，旧「Markdown 源码」清除', () => {
+  assert.ok(configPage.includes('<ReleaseNotesView :notes="updateStore.state.releaseNotes" />'), 'ConfigPage 未改用 ReleaseNotesView');
   assert.ok(!configPage.includes('Markdown 源码'), 'ConfigPage 旧注释残留');
 });
 check('W6 app-updater：嵌式 // 笔误清除净（不含 "，//"）', () => {

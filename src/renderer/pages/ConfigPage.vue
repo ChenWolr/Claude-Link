@@ -12,6 +12,7 @@ import { useCommandStore } from '../stores/command-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import BridgeSettings from '../components/config/BridgeSettings.vue';
+import ReleaseNotesView from '../components/common/ReleaseNotesView.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
@@ -1030,7 +1031,7 @@ const updateStageTone = computed(() => {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
                   更新说明
                 </summary>
-                <pre>{{ updateStore.state.releaseNotes }}</pre>
+                <ReleaseNotesView :notes="updateStore.state.releaseNotes" />
               </details>
               <div class="about-hero__links">
                 <a class="about-link" :href="ABOUT_LINKS.repo" target="_blank" rel="noreferrer">
@@ -2463,17 +2464,13 @@ input.skill-search:focus {
   transform: rotate(90deg);
 }
 
-/* 关于 tab 更新说明 pre：保留换行纯文本（主进程已归一为可读纯文本，v1 不渲染）。 */
-.about-notes pre {
+/* 关于 tab 更新说明：ReleaseNotesView 渲染预览（主进程归一为 markdown 可读文本，消毒后注入）；
+   限高滚动沿用父级，字体/排版归组件。 */
+.about-notes :deep(.release-notes) {
   margin: 0.5rem 0 0;
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-  opacity: 0.85;
   max-height: 13.75rem;
   overflow: auto;
+  opacity: 0.85;
 }
 
 /* 底部链接行 + 版权。 */
