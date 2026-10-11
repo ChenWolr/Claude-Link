@@ -3,7 +3,7 @@
 // JPEG 走 capturePage + toPNG + renderer Canvas 编码 + 分块顺序写；PNG 走主进程捕获 + codec worker（worker_threads）编码。
 // 统一 cleanup、启动残留清理、阶段四保存对话框 + 排他写入。
 
-import { app, BrowserWindow, dialog, ipcMain, session } from 'electron';
+import { app, BrowserWindow, ipcMain, session } from 'electron';
 import { mkdtemp, readdir, stat, rm } from 'fs/promises';
 import { constants as fsConstants, openSync, closeSync, writeSync, copyFileSync, unlinkSync, existsSync, statSync, readdirSync, rmSync } from 'fs';
 import { join } from 'path';
@@ -51,6 +51,7 @@ import * as messageRepo from '../database/repositories/message-repo';
 import * as attachmentRepo from '../database/repositories/attachment-repo';
 import { readStoredAttachmentPreview } from './attachment-storage';
 import { buildExportAttachmentSnapshots } from './export-attachment-snapshot';
+import type { ExportTargetRequest, ExportTargetResponse } from '../../shared/types/fs-picker';
 import { logger } from '../utils/logger';
 import { setupLinkGuard } from './link-guard';
 
@@ -115,6 +116,53 @@ interface ActiveJob {
 }
 
 let active: ActiveJob | null = null;
+
+// —— 导出目标协商（原生弹窗统一改造 T5）：performSave 不再弹原生 dialog，
+// 经 EXPORT_REQUEST_TARGET 推送给发起窗口的渲染层 FilePickerDialog 选择，
+// 渲染层经 EXPORT_RESOLVE_TARGET 应答。三路收口：用户应答 / 10min 超时 / 发起窗口关闭。 ——
+interface PendingExportTarget {
+  resolve: (resp: ExportTargetResponse) => void;
+  timer: NodeJS.Timeout;
+  onClosed: () => void;
+  win: BrowserWindow;
+}
+const pendingExportTargets = new Map<string, PendingExportTarget>();
+const EXPORT_TARGET_TIMEOUT_MS = 10 * 60_000; // 对齐 interaction-prompts 的 10min pending 兜底
+
+function settleExportTarget(jobId: string, resp: ExportTargetResponse): void {
+  const p = pendingExportTargets.get(jobId);
+  if (!p) return;
+  pendingExportTargets.delete(jobId);
+  clearTimeout(p.timer);
+  try { p.win.removeListener('closed', p.onClosed); } catch { /* ignore */ }
+  p.resolve(resp);
+}
+
+export function resolveExportTarget(jobId: string, resp: ExportTargetResponse): boolean {
+  if (!pendingExportTargets.has(jobId)) return false; // 防重放/伪造他人 job
+  settleExportTarget(jobId, resp);
+  return true;
+}
+
+export async function requestExportTarget(
+  win: BrowserWindow | null,
+  jobId: string,
+  req: ExportTargetRequest,
+): Promise<ExportTargetResponse> {
+  if (!win || win.isDestroyed()) return { kind: 'cancel', reason: 'window-closed' };
+  return new Promise<ExportTargetResponse>((resolve) => {
+    const onClosed = (): void => { settleExportTarget(jobId, { kind: 'cancel', reason: 'window-closed' }); };
+    const timer = setTimeout(() => { settleExportTarget(jobId, { kind: 'cancel', reason: 'timeout' }); }, EXPORT_TARGET_TIMEOUT_MS);
+    pendingExportTargets.set(jobId, { resolve, timer, onClosed, win });
+    win.once('closed', onClosed);
+    try {
+      win.webContents.send(IPC_CHANNELS.EXPORT_REQUEST_TARGET, req);
+    } catch {
+      // 发送失败（renderer 已死等）：按窗口关闭收口。
+      settleExportTarget(jobId, { kind: 'cancel', reason: 'window-closed' });
+    }
+  });
+}
 
 function isActive(): boolean {
   return active !== null;
@@ -564,14 +612,12 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
   }
 }
 
-// —— 保存：单张另存为（P1-13：对话框已确认覆盖意图，目标存在时先删后写，可覆盖）/ 多张目录选择 + 排他移动（不覆盖）；smoke 用 CLAUDE_LINK_EXPORT_SMOKE_DEST 绕过对话框 ——
+// —— 保存：单张另存为（P1-13：保存对话框已确认覆盖意图，目标存在时先删后写，可覆盖）/ 多张目录选择 + 排他移动（不覆盖）；smoke 用 CLAUDE_LINK_EXPORT_SMOKE_DEST 绕过目标协商 ——
 async function performSave(job: ActiveJob, pages: { page: number; path: string; bytes: number }[]): Promise<ExportImageResult> {
   const { sessionName, exportedAt, format } = job.snapshot;
   const smokeDest = job.smoke ? process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST : undefined;
   const originWin = BrowserWindow.fromWebContents(job.origin);
   const extRe = format === 'png' ? /\.(png)$/i : /\.(jpe?g)$/i;
-  const filterName = format === 'png' ? 'PNG' : 'JPEG';
-  const filterExts = format === 'png' ? ['png'] : ['jpg', 'jpeg'];
   const defaultExt = format === 'png' ? 'png' : 'jpg';
 
   // 多张：目录选择；单张：另存为。
@@ -581,27 +627,22 @@ async function performSave(job: ActiveJob, pages: { page: number; path: string; 
 
   if (smokeDest) {
     targetDir = smokeDest;
-  } else if (multi) {
-    const dialogOptions: Electron.OpenDialogOptions = {
-      title: '选择导出图片保存目录',
-      properties: ['openDirectory', 'createDirectory'],
-    };
-    const r = originWin
-      ? await dialog.showOpenDialog(originWin, dialogOptions)
-      : await dialog.showOpenDialog(dialogOptions);
-    if (r.canceled || !r.filePaths.length) return { status: 'cancelled' };
-    targetDir = r.filePaths[0];
   } else {
-    const dialogOptions: Electron.SaveDialogOptions = {
-      title: '保存导出图片',
-      defaultPath: buildExportFilename(sessionName, exportedAt, undefined, undefined, format),
-      filters: [{ name: filterName, extensions: filterExts }],
-    };
-    const r = originWin
-      ? await dialog.showSaveDialog(originWin, dialogOptions)
-      : await dialog.showSaveDialog(dialogOptions);
-    if (r.canceled || !r.filePath) return { status: 'cancelled' };
-    singleTarget = r.filePath;
+    // 原生弹窗统一改造 T5：目标选择改渲染层 FilePickerDialog（主→渲染协商）。
+    // cancel（user/timeout/window-closed）→ 与原生框取消一致 return cancelled。
+    const target = await requestExportTarget(originWin, job.jobId, {
+      jobId: job.jobId,
+      multi,
+      format,
+      suggestedName: buildExportFilename(sessionName, exportedAt, undefined, undefined, format),
+      sessionName,
+    });
+    if (target.kind === 'cancel') return { status: 'cancelled' };
+    if (target.kind === 'directory') {
+      targetDir = target.dir;
+    } else {
+      singleTarget = join(target.dir, target.filename);
+    }
   }
 
   job.phase = 'saving';
@@ -611,9 +652,9 @@ async function performSave(job: ActiveJob, pages: { page: number; path: string; 
     if (!multi) {
       let target = smokeDest ? join(targetDir, buildExportFilename(sessionName, exportedAt, undefined, undefined, format)) : singleTarget!;
       if (!extRe.test(target)) target += '.' + defaultExt;
-      // P1-13：单张目标经系统保存对话框确认——对话框已让用户表达覆盖意图，目标存在时
-      // 先删除再写（存在性复查后 unlink），不再因 COPYFILE_EXCL 报「目标已存在」致导出失败。
-      // 目录批量路径保留排他语义（无逐文件确认，防误覆盖是有意设计）。
+      // P1-13：单张目标的覆盖意图已由渲染层 FilePickerDialog 的覆盖确认表达（T5 前为系统
+      // 保存对话框）——主进程保留先删后写双保险（存在性复查后 unlink），不再因 COPYFILE_EXCL
+      // 报「目标已存在」致导出失败。目录批量路径保留排他语义（无逐文件确认，防误覆盖是有意设计）。
       try {
         if (existsSync(target)) unlinkSync(target);
       } catch {

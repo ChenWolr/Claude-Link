@@ -32,10 +32,18 @@ export const IPC_CHANNELS = {
   // 流式测试连接通道已删除（测试收敛到 PROVIDER_TEST_MODEL 行内直返）。
   // Task 3 Step 5：原生 settings 诊断（resolveSettings 摘要，脱敏：只回来源/路径/键名，绝不含值）。
   SETTINGS_GET_DIAGNOSTIC: 'settings:getDiagnostic',
-  WORKSPACE_PICK_DIR: 'workspace:pickDir',
+  // 工作空间选目录通道（workspace:pickDir）已于 T3 整链删除——选择动作改渲染层自绘 FilePickerDialog。
   WORKSPACE_LIST_RECENT: 'workspace:listRecent',
   WORKSPACE_ADD_RECENT: 'workspace:addRecent',
   WORKSPACE_REMOVE_RECENT: 'workspace:removeRecent',
+  // 自绘 FilePickerDialog 的只读文件系统元数据通道（列根/列目录/新建文件夹/查存在）；文件内容读取仍在主进程。
+  FS_LIST_ROOTS: 'fs:listRoots',
+  FS_LIST_DIR: 'fs:listDir',
+  FS_MKDIR: 'fs:mkdir',
+  FS_STAT: 'fs:stat',
+  // 导出目标协商（主→渲染请求 + 渲染→主应答；#3/#4 原生保存框替换）。
+  EXPORT_RESOLVE_TARGET: 'export-image:resolveTarget',
+  EXPORT_REQUEST_TARGET: 'export-image:requestTarget',
   // 项目级 Skill 管理左栏数据（方案 B 双栏 master-detail）：最近工作区 ∪ 默认工作区（存在性过滤）
   // + 每目录直读 .claude\skills\<子目录>\SKILL.md 的项目 Skill 全集 + 会话计数。只读、无副作用。
   SKILL_PROJECT_DIRS_GET: 'skills:projectDirsGet',
@@ -88,9 +96,10 @@ export const IPC_CHANNELS = {
   QUEUE_EVENT: 'queue:event',
   // Claude 计划快照：按会话读取 TodoWrite / Task 工具的计划状态。
   CLAUDE_PLAN_GET: 'claude-plan:get',
-  // 附件：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
+  // 附件：路径暂存（自绘选中）/ 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
   // 统一发送载荷 ChatSendPayload 经 CHAT_SEND / TASK_ADD 透传，不另设通道。
-  ATTACHMENT_PICK: 'attachment:pick',
+  // 附件路径暂存（自绘选择器渲染层选中后交主进程读盘/校验/暂存；旧原生 dialog 选择通道 attachment:pick 已删除）。
+  ATTACHMENT_STAGE_PATHS: 'attachment:stagePaths',
   ATTACHMENT_STAGE_BYTES: 'attachment:stageBytes',
   ATTACHMENT_PREVIEW: 'attachment:preview',
   ATTACHMENT_REMOVE_DRAFT: 'attachment:removeDraft',

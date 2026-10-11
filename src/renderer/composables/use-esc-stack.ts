@@ -1,7 +1,7 @@
 // use-esc-stack.ts
 // A9（D06-F1 + D14-F5）：全局 ESC 层级裁决注册表——一次 Esc 只作用于视觉最上层的遮罩。
 //
-// 各全屏遮罩（灯箱/更新弹窗/导出格式/两个 Diff 弹窗/交互弹窗）在「打开态」注册一层
+// 各全屏遮罩（灯箱/更新弹窗/导出格式/文件选择/两个 Diff 弹窗/交互弹窗）在「打开态」注册一层
 //（pushEscLayer(priority)），关闭/卸载时释放（release 幂等，异常卸载由 onUnmounted 兜底）；
 // 带 Esc 分支的 window keydown handler 据 isTopmost()（无更高优先级层在场）决定是否响应。
 // priority 与各遮罩真实 z-index 同表（ESC_LAYER_PRIORITY）——裁决顺序恒等于视觉遮挡顺序，
@@ -30,6 +30,10 @@ export const ESC_LAYER_PRIORITY = {
   diffDialog: 1250,
   toolDiffDialog: 1250,
   exportFormat: 9000,
+  // 原生弹窗统一改造 T2：自绘 FilePickerDialog 蒙层 9100——高于导出格式 9000、低于灯箱 9999。
+  // 导出流程中格式弹窗先开（选 JPEG/PNG）、目标选择弹窗后开（选保存位置），两层可同时在场；
+  // 后开的目标弹窗视觉在上（z-index 9100），Esc 应先关它；灯箱（查看图片中触发导出）仍最高。
+  filePicker: 9100,
   imageLightbox: 9999,
 } as const;
 

@@ -6,6 +6,7 @@ import ImageLightbox from './components/chat/ImageLightbox.vue';
 import DiffDialog from './components/changes/DiffDialog.vue';
 import ToolDiffDialog from './components/chat/ToolDiffDialog.vue';
 import UpdateDialog from './components/layout/UpdateDialog.vue';
+import FilePickerDialog from './components/common/FilePickerDialog.vue';
 import { useConfigStore, lastSaveFailed } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useProviderStore } from './stores/provider-store';
@@ -26,6 +27,7 @@ const taskStore = useTaskStore();
 const updateStore = useUpdateStore();
 const { startListening, stopListening } = useChat();
 let stopExportProgress: (() => void) | null = null;
+let stopExportTargetRequest: (() => void) | null = null;
 let stopCommandChanges: (() => void) | null = null;
 let stopGlobalCommandChanges: (() => void) | null = null;
 let stopQueueEvents: (() => void) | null = null;
@@ -116,6 +118,8 @@ onMounted(async () => {
   updateStore.init();
   // 导出进度监听也在全局注册一次：切换路由/会话不影响进行中的导出 job。
   stopExportProgress = window.claudeLink.onImageExportProgress((p) => exportImageStore.applyProgress(p));
+  // T5 导出目标协商：主进程请求选择保存目标 → FilePickerDialog（全局单订阅者，切路由不丢）。
+  stopExportTargetRequest = window.claudeLink.onExportTargetRequested((req) => { void exportImageStore.handleExportTargetRequest(req); });
   // 原生 Slash Commands：命令变化全局订阅（ChatPage 卸载/后台会话不丢事件）。主进程 COMMANDS_CHANGED
   // 推送的 snapshot 按 sessionId 全量替换进 command-store。
   stopCommandChanges = window.claudeLink.onCommandChanged((payload) => commandStore.replaceFromEvent(payload));
@@ -147,6 +151,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('drop', suppressDragNavigation);
   stopListening();
   if (stopExportProgress) stopExportProgress();
+  if (stopExportTargetRequest) stopExportTargetRequest();
   if (stopCommandChanges) stopCommandChanges();
   if (stopGlobalCommandChanges) stopGlobalCommandChanges();
   if (stopQueueEvents) stopQueueEvents();
@@ -165,6 +170,7 @@ onBeforeUnmount(() => {
     <DiffDialog />
     <ToolDiffDialog />
     <UpdateDialog />
+    <FilePickerDialog />
     <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">设置保存失败，部分修改可能未保存</div>
     <div v-if="sessionErrorToastVisible" class="global-toast global-toast--error global-toast--stacked">{{ sessionErrorToastText }}</div>
     <div v-if="providerErrorToastVisible" class="global-toast global-toast--error global-toast--stacked-3">{{ providerErrorToastText }}</div>

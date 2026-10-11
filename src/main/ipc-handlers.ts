@@ -4,7 +4,7 @@
 // 注册 cli / config / workspace / provider / changes / settings / skill / session / message / claude-plan / commands / chat / interaction / task / queue / attachment / bridge 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
-import { BrowserWindow, dialog, ipcMain, app } from 'electron';
+import { BrowserWindow, ipcMain, app } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性/目录校验
@@ -19,6 +19,7 @@ import { getAppUpdateInfo, checkForAppUpdates, installAppUpdate } from './module
 import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
+import { listRoots, listDir, mkdir, statPath, isValidFolderName } from './modules/fs-picker';
 import { collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
 import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
@@ -55,7 +56,7 @@ import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { getPlanState as getClaudePlanState } from './database/repositories/claude-plan-repo';
 import { listChanges, getChangeDiff, openChangeFile } from './modules/changes-panel';
-import { registerExportImageHandlers } from './modules/export-image-manager';
+import { registerExportImageHandlers, resolveExportTarget } from './modules/export-image-manager';
 import { detectDirectImageFormat, validateChatSendPayloadShape, ATTACHMENT_READ_GUARD_BYTES, MAX_FILE_BYTES, formatBytes } from './modules/attachment-policy';
 import {
   stageAttachment,
@@ -102,6 +103,58 @@ function broadcastProvidersChanged(): void {
 function withBridgePlatform<T extends { id: string }>(session: T) {
   const platform = bridgeBindingList().find((b) => b.sessionId === session.id)?.platform ?? null;
   return { ...session, bridgePlatform: platform };
+}
+
+/**
+ * 附件路径暂存链（原附件选择 handler 内 dialog 之后的整段，逻辑逐行保留）：
+ * 草稿余量预检（10 上限）→ stat 早退（ATTACHMENT_READ_GUARD_BYTES）→ 读盘 → 魔数探测 →
+ * 暂态/持久暂存 → 逐项错误收集。选择动作已移渲染层（FilePickerDialog），本函数只负责
+ * 校验/读盘/暂存——路径由渲染层用户选择后传入，与原生框用户选择等价。
+ */
+export async function stageAttachmentPaths(sessionId: string, filePaths: string[]): Promise<PickAttachmentsResult> {
+  // 暂态会话（无 DB 行）：附件走无行暂存（内存 Map + 物理文件），物化时经
+  // bindTransientAttachmentIds 转正；持久会话走原 stageAttachment 建 draft 行。
+  const persisted = sessionRepo.getSession(sessionId);
+  // A11（D08-F1）+ hb10-ATT-06：一次最多 10 个附件——暂存即限量；旧「本次多选 ≤10」
+  // slice 截断不感知草稿余量且被截断文件无提示，已废——改为按「当前草稿余量」预检：
+  // 余量外的文件不读盘直接进 errors（D08-F10 提示缺口顺带），余量内的才走读盘暂存链。
+  const room = DRAFT_QUOTA_MAX_COUNT - listDraftQuotaItems(sessionId).length;
+  const stagedPaths = room <= 0 ? [] : filePaths.slice(0, room);
+  const attachments: AttachmentSummary[] = [];
+  const errors: Array<{ filename: string; message: string }> = [];
+  for (const skipped of filePaths.slice(stagedPaths.length)) {
+    errors.push({ filename: path.basename(skipped), message: '草稿附件已达 10 个上限，已忽略' });
+  }
+  for (const filePath of stagedPaths) {
+    const filename = path.basename(filePath);
+    try {
+      // P1-7：读入内存前先 stat 早退——数 GB 文件不再进 Buffer（防主进程 OOM）。
+      // 错误形态与既有业务校验一致（逐项收集，不含内部路径）；精确的 10/30MiB
+      // 区分仍由 stageAttachment 内的 validateAttachmentBytes 裁定（本守卫不动预算语义）。
+      const st = await fsp.stat(filePath);
+      if (st.size > ATTACHMENT_READ_GUARD_BYTES) {
+        throw new Error(`文件「${filename}」超过 ${formatBytes(MAX_FILE_BYTES)} 上限。`);
+      }
+      const buf = await fsp.readFile(filePath);
+      const bytes = new Uint8Array(buf);
+      // 据魔数识别真实图片格式，避免靠扩展名把伪装图片当 image 直传。
+      const detected = detectDirectImageFormat(bytes);
+      const staged = persisted
+        ? await stageAttachment({ id: randomUUID(), sessionId, filename, mimeType: detected ?? '', bytes })
+        : await stageTransientAttachment({ id: randomUUID(), sessionId, filename, mimeType: detected ?? '', bytes });
+      attachments.push(staged);
+    } catch (e) {
+      // 逐项收集失败：部分成功时 UI 仍展示成功项 + 集中提示失败项（错误文案来自业务校验，不含内部路径）。
+      // hb10-ATT-07：错误文案脱敏——FK/ENOENT 类内部错误串（可能含绝对路径）不出主进程，原文仅 logger。
+      const rawMessage = e instanceof Error ? e.message : String(e);
+      const safeMessage = /ENOENT|no such file|SQLITE_CONSTRAINT|FOREIGN KEY/i.test(rawMessage)
+        ? '部分附件保存失败（可能已被删除）'
+        : rawMessage;
+      if (safeMessage !== rawMessage) logger.warn(`[attachment-pick] sanitized error: ${rawMessage}`);
+      errors.push({ filename, message: safeMessage });
+    }
+  }
+  return { attachments, errors };
 }
 
 export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
@@ -198,21 +251,50 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return getNativeSettingsDiagnostic(cwd);
   });
 
-  // Workspace（工作空间）：选目录 + 最近历史。Claude Code 基于某目录运行，会话可绑定并复用历史目录。
-  ipcMain.handle(IPC_CHANNELS.WORKSPACE_PICK_DIR, async () => {
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openDirectory'],
-      title: '选择 Claude Code 运行目录（工作空间）',
-    });
-    if (result.canceled || !result.filePaths.length) return null;
-    const dir = result.filePaths[0];
-    addRecentWorkspace(dir);
-    return dir;
-  });
+  // Workspace（工作空间）：最近历史。Claude Code 基于某目录运行，会话可绑定并复用历史目录。
+  // 选目录原生弹窗通道（workspace:pickDir）已于 T3 整链删除——两入口改渲染层自绘
+  // FilePickerDialog（fs-picker-store），最近历史经 WORKSPACE_ADD_RECENT 显式回写。
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_LIST_RECENT, async () => listRecentWorkspaces());
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
   // 永久删除某条最近目录历史（只移除历史记录，不触碰磁盘上的目录本体）。
   ipcMain.handle(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => removeRecentWorkspace(dir));
+
+  // 自绘 FilePickerDialog 的只读文件系统元数据（详见 modules/fs-picker.ts）。
+  ipcMain.handle(IPC_CHANNELS.FS_LIST_ROOTS, async () => listRoots());
+  ipcMain.handle(IPC_CHANNELS.FS_LIST_DIR, async (_event, target: string) => {
+    if (typeof target !== 'string' || !target.trim()) throw new Error('Invalid directory path');
+    return listDir(target);
+  });
+  ipcMain.handle(IPC_CHANNELS.FS_MKDIR, async (_event, parent: string, name: string) => {
+    if (typeof parent !== 'string' || !parent.trim() || typeof name !== 'string') throw new Error('Invalid mkdir arguments');
+    return mkdir(parent, name);
+  });
+  ipcMain.handle(IPC_CHANNELS.FS_STAT, async (_event, p: string) => {
+    if (typeof p !== 'string' || !p.trim()) throw new Error('Invalid path');
+    return statPath(p);
+  });
+
+  // 导出目标协商应答（T5）：渲染层 FilePickerDialog 选定后回传；jobId 在 Map 中才有效（防重放/伪造他人 job）。
+  ipcMain.handle(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, async (_event, jobId: unknown, resp: unknown) => {
+    if (typeof jobId !== 'string' || !jobId) throw new Error('Invalid export target jobId');
+    // resp 形状 + 内容校验（P2-1 纵深防御）：directory/save 的 dir 必须绝对路径；save 的 filename
+    // 复用 isValidFolderName（非法字符/结尾点空格/长度 ≤255）——渲染层 FilePickerDialog 本就传
+    // trim 后的合法值，此处仅防被攻破/出 bug 的渲染层传 '..\\..\\x.png'（穿越）或相对 dir。
+    let ok = false;
+    if (resp && typeof resp === 'object') {
+      const r = resp as Record<string, unknown>;
+      if (r.kind === 'directory' && typeof r.dir === 'string' && r.dir.trim() && path.isAbsolute(r.dir)) ok = true;
+      else if (r.kind === 'save' && typeof r.dir === 'string' && r.dir.trim() && path.isAbsolute(r.dir)
+        && typeof r.filename === 'string' && r.filename.trim() && isValidFolderName(r.filename.trim())) ok = true;
+      else if (r.kind === 'cancel' && (r.reason === 'user' || r.reason === 'timeout' || r.reason === 'window-closed')) ok = true;
+    }
+    if (!ok) throw new Error('Invalid export target response');
+    // save 应答的 filename 统一以 trim 后形态下发（下游 performSave join(dir, filename) 用）。
+    const normalized = resp && typeof resp === 'object' && (resp as Record<string, unknown>).kind === 'save'
+      ? { ...(resp as Record<string, unknown>), filename: ((resp as Record<string, unknown>).filename as string).trim() }
+      : resp;
+    return resolveExportTarget(jobId, normalized as import('../shared/types/fs-picker').ExportTargetResponse);
+  });
 
   // 项目级 Skill 管理左栏数据（方案 B 双栏）：最近工作区 ∪ 默认工作区（存在性过滤，
   // 磁盘上已删除的目录不再显示）+ 每目录直读 .claude\skills 的项目 Skill 全集 + 会话计数。
@@ -885,57 +967,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return getQueueOverview(sessionId);
   });
 
-  // 附件 IPC：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
+  // 附件 IPC：路径暂存（自绘选择器选中后）/ 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
   // 文件读取与校验全部在主进程；renderer 只拿不透明附件 ID 与受控预览 bytes。
-  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_PICK, async (_event, sessionId: string): Promise<PickAttachmentsResult> => {
-    // 暂态会话（无 DB 行）：附件走无行暂存（内存 Map + 物理文件），物化时经
-    // bindTransientAttachmentIds 转正；持久会话走原 stageAttachment 建 draft 行。
-    const persisted = sessionRepo.getSession(sessionId);
-    const result = await dialog.showOpenDialog(mainWindow, {
-      properties: ['openFile', 'multiSelections'],
-      title: '选择附件（图片 / 文档 / 文件）',
-    });
-    if (result.canceled || !result.filePaths.length) return { attachments: [], errors: [] };
-    // A11（D08-F1）+ hb10-ATT-06：一次最多 10 个附件——暂存即限量；旧「本次多选 ≤10」
-    // slice 截断不感知草稿余量且被截断文件无提示，已废——改为按「当前草稿余量」预检：
-    // 余量外的文件不读盘直接进 errors（D08-F10 提示缺口顺带），余量内的才走读盘暂存链。
-    const room = DRAFT_QUOTA_MAX_COUNT - listDraftQuotaItems(sessionId).length;
-    const filePaths = room <= 0 ? [] : result.filePaths.slice(0, room);
-    const attachments: AttachmentSummary[] = [];
-    const errors: Array<{ filename: string; message: string }> = [];
-    for (const skipped of result.filePaths.slice(filePaths.length)) {
-      errors.push({ filename: path.basename(skipped), message: '草稿附件已达 10 个上限，已忽略' });
+  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_STAGE_PATHS, async (_event, sessionId: string, paths: unknown): Promise<PickAttachmentsResult> => {
+    // 入参校验：string[]、每项非空字符串、长度 ≤50（一次选择的合理上界，防滥用）。
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !Array.isArray(paths) || paths.length > 50 || !paths.every((p) => typeof p === 'string' && p.trim())) {
+      throw new Error('附件路径参数无效');
     }
-    for (const filePath of filePaths) {
-      const filename = path.basename(filePath);
-      try {
-        // P1-7：读入内存前先 stat 早退——数 GB 文件不再进 Buffer（防主进程 OOM）。
-        // 错误形态与既有业务校验一致（逐项收集，不含内部路径）；精确的 10/30MiB
-        // 区分仍由 stageAttachment 内的 validateAttachmentBytes 裁定（本守卫不动预算语义）。
-        const st = await fsp.stat(filePath);
-        if (st.size > ATTACHMENT_READ_GUARD_BYTES) {
-          throw new Error(`文件「${filename}」超过 ${formatBytes(MAX_FILE_BYTES)} 上限。`);
-        }
-        const buf = await fsp.readFile(filePath);
-        const bytes = new Uint8Array(buf);
-        // 据魔数识别真实图片格式，避免靠扩展名把伪装图片当 image 直传。
-        const detected = detectDirectImageFormat(bytes);
-        const staged = persisted
-          ? await stageAttachment({ id: randomUUID(), sessionId, filename, mimeType: detected ?? '', bytes })
-          : await stageTransientAttachment({ id: randomUUID(), sessionId, filename, mimeType: detected ?? '', bytes });
-        attachments.push(staged);
-      } catch (e) {
-        // 逐项收集失败：部分成功时 UI 仍展示成功项 + 集中提示失败项（错误文案来自业务校验，不含内部路径）。
-        // hb10-ATT-07：错误文案脱敏——FK/ENOENT 类内部错误串（可能含绝对路径）不出主进程，原文仅 logger。
-        const rawMessage = e instanceof Error ? e.message : String(e);
-        const safeMessage = /ENOENT|no such file|SQLITE_CONSTRAINT|FOREIGN KEY/i.test(rawMessage)
-          ? '部分附件保存失败（可能已被删除）'
-          : rawMessage;
-        if (safeMessage !== rawMessage) logger.warn(`[attachment-pick] sanitized error: ${rawMessage}`);
-        errors.push({ filename, message: safeMessage });
-      }
-    }
-    return { attachments, errors };
+    return stageAttachmentPaths(sessionId, paths as string[]);
   });
 
   ipcMain.handle(
