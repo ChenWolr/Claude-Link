@@ -70,6 +70,8 @@ export function buildNativeSdkOptionsCore(input: NativeSdkOptionsCoreInput): Pic
   | 'allowDangerouslySkipPermissions'
   | 'settings'
   | 'additionalDirectories'
+  | 'strictMcpConfig'
+  | 'mcpServers'
 > {
   const options: Pick<
     SdkOptions,
@@ -84,6 +86,8 @@ export function buildNativeSdkOptionsCore(input: NativeSdkOptionsCoreInput): Pic
     | 'allowDangerouslySkipPermissions'
     | 'settings'
     | 'additionalDirectories'
+    | 'strictMcpConfig'
+    | 'mcpServers'
   > = {
     env: input.env,
   };
@@ -104,7 +108,36 @@ export function buildNativeSdkOptionsCore(input: NativeSdkOptionsCoreInput): Pic
       options.allowDangerouslySkipPermissions = true;
     }
   }
-  if (input.settings !== undefined) options.settings = input.settings;
+  if (input.settings !== undefined) {
+    options.settings = input.settings;
+    // D-V1-1 修复（MCP 会话注入通道错配）：strictMcpConfig=true 下引擎只认顶层 Options.mcpServers
+    //（运行时等价 --mcp-config 旗标，sdk.mjs：`Object.keys(mcpServers).length > 0` 才推旗标并经
+    // JSON.stringify 序列化），settings 块内的 mcpServers 键会被忽略——故把 settings.mcpServers
+    // 非空时的归一 map 同步挂到顶层。挂载值为同一引用（mergeMcpServersForSession 归一产物，
+    // 与 settings.mcpServers 同源同值，不另起合并逻辑）；载体为 null 原型对象，Object.keys 计数
+    // 与 JSON 序列化对 null 原型均正常（selftest-mcp-settings I 组钉住）。空配置（三层全空/全被
+    // 禁用）时 merge 链不写 settings.mcpServers 键 → 此处不挂载，保持「空 MCP 配置零注入」
+    // （settings 块空态字节级一致的行为约束不变）。settings 块内 mcpServers 键保留不动（SDK
+    // strict 下忽略它，无害）。
+    const sessionMcpServers = input.settings.mcpServers;
+    if (
+      sessionMcpServers !== undefined &&
+      sessionMcpServers !== null &&
+      typeof sessionMcpServers === 'object' &&
+      !Array.isArray(sessionMcpServers) &&
+      Object.keys(sessionMcpServers as Record<string, unknown>).length > 0
+    ) {
+      options.mcpServers = sessionMcpServers as SdkOptions['mcpServers'];
+    }
+  }
   if (input.additionalDirectories !== undefined) options.additionalDirectories = input.additionalDirectories;
+  // MCP 管理（P5，D-V1-1 修正口径）：claude-link 接管 MCP 集合（三层合并产物经上方挂载进
+  // 顶层 Options.mcpServers——strictMcpConfig=true 下引擎【只】认该顶层键，settings 块内
+  // mcpServers 键被忽略；会话钉住 overrides 见 buildClaudeLinkSettingsBlock 的
+  // mergeMcpServersIntoSettings），strictMcpConfig=true 使「禁用」真正生效——引擎忽略
+  // .mcp.json/用户 settings/插件/云端 connectors 的自有 MCP 集合（sdk.d.ts Options.strictMcpConfig 语义）。
+  // 副作用（§3.13，UI note 由 P7 呈现）：claude.ai 云端 connectors 与插件 MCP 不再自动加载——
+  // 这是「禁用必须生效」的必要代价。
+  options.strictMcpConfig = true;
   return options;
 }
