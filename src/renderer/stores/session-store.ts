@@ -425,6 +425,9 @@ export const useSessionStore = defineStore('session', {
           thinkingLevel: null,
           // 暂态会话未物化=未钉住，按 null（全启用）；物化时由主进程 SESSION_CREATE 钉住。
           skillOverrides: null,
+          // 暂态会话未物化=未钉住，按 null；物化时由主进程 SESSION_CREATE 钉住（注入时存量
+          // null 回退当前全局 mcpOverrides）。
+          mcpOverrides: null,
           createdAt: now,
           updatedAt: now,
           lastContextTokens: null,
