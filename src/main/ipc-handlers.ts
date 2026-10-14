@@ -14,19 +14,36 @@ import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
+import { normalizeDirKey } from '../shared/project-skills';
 import { IPC_CHANNELS } from '../shared/constants';
 import { getAppUpdateInfo, checkForAppUpdates, installAppUpdate } from './modules/app-updater';
 import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
 import { listRoots, listDir, mkdir, statPath, isValidFolderName } from './modules/fs-picker';
-import { collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
+import { badDirCacheHas, badDirCacheMark, collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
 import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
 import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight } from './modules/chat-backend';
 import { buildSessionSkillOverridesForPin } from './modules/sdk-skill-overrides';
+import { buildSessionMcpOverridesForPin } from './modules/mcp/sdk-mcp';
+import {
+  restoreMaskedMcpServers,
+  sanitizeMcpServersConfig,
+  type McpManagedSaveEntry,
+} from './modules/mcp/mcp-config';
+import { collectMcpSnapshot } from './modules/mcp/mcp-scanner';
+import {
+  getCachedProbeReports,
+  hasFreshCache,
+  mcpProbeKey,
+  probeAllManaged,
+  probeMcpServer,
+  type McpProbeInput,
+  type McpProbeReport,
+} from './modules/mcp/mcp-probe';
 import { resolveCommandsGetResult } from '../shared/commands-get';
 import { isChatSendLocked, acquireChatSendLock, releaseChatSendLock } from './modules/chat-send-locks';
 import { getUserOriginFingerprint, getProjectOriginFingerprint } from './modules/command-source-watcher';
@@ -200,6 +217,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // Config
   ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfigForRenderer());
   ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => {
+    // MCP 管理库/启停只经 mcp:managedSave / mcp:overrideSet 专用通道写入——渲染层整包回显携带的
+    // mcpServers/mcpOverrides 可能陈旧（专用通道保存后 store.config 未即时回写），照收会静默回滚
+    // 专用通道的落盘结果（同 hb12-P2-6 lastUsed 剥离理由）。剥离后回包仍下发主进程最新 MCP 值，
+    // 渲染层镜像反而经回包同步为权威态。（置于守卫块之前：与目录校验独立、均先于 saveConfig；
+    // 且 warn 行 [CONFIG_SAVE] 字面量是 tdd-queue-v3 400 字符邻近断言的锚点，其后不可再插入内容。）
+    if (partial) { delete partial.mcpServers; delete partial.mcpOverrides; }
     // hb10-CFG-09：workingDirectory 必须真实存在且为目录——否则丢弃该字段（保留旧值）。
     // 坏目录入库后 spawn/投影/诊断处处失败。丢弃非硬失败：回传值保持旧目录，
     // 渲染层比对所送值与回传值不一致后给 notice（见 config-store.saveConfig）。
@@ -321,6 +344,113 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     };
   });
 
+  // MCP 管理（设置页 MCP Tab）四 handler（docs/plans/2026-10-12-mcp-management-plan.md §2 P4）。
+  // 快照：现查无副作用（同 skills:projectDirsGet 先例，依赖取法完全同源）——用户根
+  // effectiveUserHome() ?? os.homedir()（子进程实际生效 USERPROFILE/HOME）、最近工作区
+  // listRecentWorkspaces()、默认目录 getConfig().workingDirectory、会话计数
+  // sessionRepo.listWorkingDirCounts()、坏目录负缓存与 Skill 共用同一实例
+  //（project-skills badDirCacheHas/badDirCacheMark，语义「目录不可达 60s」）。
+  ipcMain.handle(IPC_CHANNELS.MCP_SNAPSHOT_GET, async () => {
+    const defaultWorkingDir = getConfig().workingDirectory ?? null;
+    return collectMcpSnapshot({
+      userHome: effectiveUserHome() ?? os.homedir(),
+      isDefaultDir: (dir) =>
+        defaultWorkingDir !== null && normalizeDirKey(dir) === normalizeDirKey(defaultWorkingDir),
+      recentWorkspaces: listRecentWorkspaces(),
+      defaultWorkingDir,
+      listWorkingDirCounts: () => sessionRepo.listWorkingDirCounts(),
+      badDirHas: badDirCacheHas,
+      badDirMark: badDirCacheMark,
+    });
+  });
+  // 管理库全量替换：body = McpManagedSaveEntry[]（McpManagedServer + 瞬态改名 hint）→
+  // 先 restoreMaskedMcpServers（§1.3：渲染层提交的未改动字段值是掩码哨兵，按已存条目还原
+  // 原值——哨兵还原必须在 sanitize 前，防哨兵字面量落库；瞬态 hint 随还原剥离）再 sanitize，
+  // 最后走主进程 saveConfig（与渲染层 700ms 防抖 config:save 撞车由 config-store 既有互斥
+  // savingConfig + 漂移补偿保护，§3.12；本 handler 不自带任何绕过互斥的直写 store 操作）。
+  ipcMain.handle(IPC_CHANNELS.MCP_MANAGED_SAVE, async (_event, body: unknown) => {
+    if (!Array.isArray(body)) throw new Error('Invalid MCP managed servers payload');
+    saveConfig({
+      mcpServers: sanitizeMcpServersConfig(restoreMaskedMcpServers(body as McpManagedSaveEntry[], getConfig().mcpServers)),
+    });
+    return { ok: true as const };
+  });
+  // 启停 override 单键翻转：主进程内直接改 config 再 saveConfig——不经渲染层整包 config，
+  // 规避并发覆盖；键须 string 且带作用域前缀（managed:/user:/project:），否则拒绝。
+  // 返回 saveConfig 落盘后的最新全量（渲染层以此为准，不自行拼装）。
+  ipcMain.handle(IPC_CHANNELS.MCP_OVERRIDE_SET, async (_event, body: unknown) => {
+    if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP override payload');
+    const { key, enabled } = body as { key?: unknown; enabled?: unknown };
+    if (typeof key !== 'string' || !/^(managed|user|project):/.test(key)) {
+      throw new Error('Invalid MCP override key');
+    }
+    if (typeof enabled !== 'boolean') throw new Error('Invalid MCP override enabled flag');
+    const overrides = getConfig().mcpOverrides;
+    if (enabled) delete overrides[key];
+    else overrides[key] = 'off';
+    saveConfig({ mcpOverrides: overrides });
+    return { overrides: getConfig().mcpOverrides };
+  });
+  // 探活：all = 管理库逐条构造 inputs（name/transport/command/args/env/url/headers）并发探活，
+  // 60s 缓存逐 key 判定（hasFreshCache 命中直接回缓存报告，未命中才探）；single = 渲染层只传
+  // name（§1.3 渲染层零明文约束），主进程按 name 在 getConfig().mcpServers 定位已存条目、
+  // 自取明文 env/headers 构造探活输入现探（用户显式「测试连接」不走缓存——probeMcpServer
+  // 不传 cacheKey 即只探不缓存）；查无 → 单元素 fail report，不抛。
+  // 返回 McpProbeReport[]（single 恒单元素数组；all 与 getConfig().mcpServers 逐条对齐同序）。
+  ipcMain.handle(IPC_CHANNELS.MCP_PROBE, async (_event, body: unknown): Promise<McpProbeReport[]> => {
+    if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP probe payload');
+    const req = body as { target?: unknown; name?: unknown };
+    if (req.target === 'single') {
+      const name = req.name;
+      if (typeof name !== 'string' || name === '') throw new Error('Invalid MCP probe name');
+      const stored = getConfig().mcpServers.find((server) => server.name === name);
+      if (!stored) {
+        return [
+          { key: mcpProbeKey('managed', null, name), status: 'fail', toolCount: 0, error: `未找到该服务器：${name}`, probedAt: Date.now() },
+        ];
+      }
+      const input: McpProbeInput = {
+        name: stored.name,
+        transport: stored.transport,
+        command: stored.command,
+        args: stored.args,
+        env: stored.env,
+        url: stored.url,
+        headers: stored.headers,
+      };
+      return [await probeMcpServer(input)];
+    }
+    if (req.target !== 'all') throw new Error('Invalid MCP probe target');
+    const cachedByKey = new Map(getCachedProbeReports().map((r) => [r.key, r]));
+    const pending: McpProbeInput[] = [];
+    const slots = getConfig().mcpServers.map((server) => {
+      const input: McpProbeInput = {
+        name: server.name,
+        transport: server.transport,
+        command: server.command,
+        args: server.args,
+        env: server.env,
+        url: server.url,
+        headers: server.headers,
+      };
+      const key = mcpProbeKey('managed', null, input.name);
+      const cached = cachedByKey.get(key);
+      if (cached !== undefined && hasFreshCache(key)) return { key, cached };
+      pending.push(input);
+      return { key, cached: undefined };
+    });
+    // probeAllManaged 逐条以 managed:<name> 键写探活缓存；pending 与 slots 非命中槽一一对应
+    //（保序），probe 后按 key 回填（防御性：万一缺槽回 fail report，不炸整拍）。
+    const probed = await probeAllManaged(pending);
+    const probedByKey = new Map(probed.map((r) => [r.key, r]));
+    return slots.map(({ key, cached }) => {
+      const fresh = probedByKey.get(key);
+      if (fresh !== undefined) return fresh;
+      if (cached !== undefined) return cached;
+      return { key, status: 'fail' as const, toolCount: 0, error: '探活结果缺失', probedAt: Date.now() };
+    });
+  });
+
   // 多供应商模型库：设置页（可选项库）与 会话选择器（只读）共用。
   // 密钥边界：listProviders 只回掩码视图；save 的明文 key 落盘前加密；查询/行内测试都在主进程内解密。
   ipcMain.handle(IPC_CHANNELS.PROVIDER_LIST, async () => getLibrarySnapshot());
@@ -417,6 +547,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if (pinnedSkillOverrides) {
       session = sessionRepo.updateSession(session.id, { skillOverrides: pinnedSkillOverrides }) ?? session;
     }
+    // MCP 管理钉住：同款——新会话创建时复制当前全局 MCP 启停 override（主进程侧取值，
+    // 不信任 renderer）；null = 无需钉住，不写列（与建行默认 NULL 一致）。之后全局配置变更
+    // 不影响本会话；存量会话（功能前建行）该列为 NULL，注入时回退当前全局（§3.14）。
+    const pinnedMcpOverrides = buildSessionMcpOverridesForPin(getConfig().mcpOverrides);
+    if (pinnedMcpOverrides) {
+      session = sessionRepo.updateSession(session.id, { mcpOverrides: pinnedMcpOverrides }) ?? session;
+    }
     // 暂态附件转正：物化建行后外键已满足，绑定为 draft 记录供 CHAT_SEND 校验/升格。
     // hb12-SMG-09：绑定失败必须回滚会话行——只回滚附件不清会话行会留下「附件已指向不存在的
     // 会话行」的死锁半态（hb10-ATT-V01 计划明文：实施时必须叠加本条）。
@@ -473,7 +610,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       _event,
       id: string,
       data: Partial<
-        Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'skillOverrides' | 'providerOverride' | 'modelOverride'>
+        Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'skillOverrides' | 'mcpOverrides' | 'providerOverride' | 'modelOverride'>
       >,
     ) => {
       // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——非字符串 sessionId 直拒。
@@ -505,6 +642,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // skillOverrides（钉住值）不经本通道可写（P2-1）：仅 SESSION_CREATE 依据全局配置落库，
       // 不信任 renderer 传值——renderer 经 IPC 附带的该键一律剔除（上方白名单同款形态）。
       delete data.skillOverrides;
+      // mcpOverrides（钉住值）同款：仅 SESSION_CREATE 依据全局配置落库，SESSION_UPDATE 一律剔除。
+      delete data.mcpOverrides;
       const touchedSelection =
         data.providerOverride !== undefined || data.modelOverride !== undefined;
       const updated = sessionRepo.updateSession(id, data);
