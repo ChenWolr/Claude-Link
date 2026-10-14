@@ -31,6 +31,11 @@ import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/const
 import { sanitizeTaskDelayMinutes, DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
 import { sanitizeSkillOverridesConfig } from './sdk-skill-overrides';
+import {
+  sanitizeMcpServersConfig,
+  sanitizeMcpOverridesConfig,
+  maskMcpServersForRenderer,
+} from './mcp/mcp-config';
 import { clearProviderModelsCache } from './model-resolver';
 import { resetCliDetectionCache } from './cli-detector';
 import * as path from 'path';
@@ -112,6 +117,10 @@ const defaultConfig: StoredConfig = {
   // 清洗为 {}），saveConfig/CONFIG_SAVE 写路径无 skillOverrides 专项清洗、原样落盘
   //（S2 review 核实更正：原「写路径读路径各有一道」与事实不符；现状判定无害，不新增写清洗）。
   skillOverrides: {},
+  // MCP 管理库默认空、启停 override 默认空（= 全启用）；同 skillOverrides 的兜底语义：
+  // 写路径不清洗、读路径 sanitize（getConfig → mcp/mcp-config 两个 sanitize 清洗），旧配置缺键不报错。
+  mcpServers: [],
+  mcpOverrides: {},
   // ⚠️ providerProfiles / lastUsedProviderId / lastUsedModelId 故意不设默认值：
   // electron-store 的 defaults 会并入 store 视图参与 has() 判定，一旦给了默认值
   // （哪怕是 []），「键是否存在」永远是 true，ensureProviderMigration 的迁移守卫
@@ -311,6 +320,10 @@ export function getConfig(): AppConfig {
     autoRetryReasoningReplay: config.autoRetryReasoningReplay ?? true,
     // 全局 skill 禁用开关：脏值（非对象/非法档位）清洗为 {}（= 全启用），存量配置无此键时同样兜底。
     skillOverrides: sanitizeSkillOverridesConfig(config.skillOverrides),
+    // MCP 管理库/启停 override：脏值清洗（非数组/条目非法 → []；非对象/脏值 → {}），
+    // 存量配置无此键时同样兜底（?? 语义的 sanitize 版，缺键读出空值不报错、不迁移不升版）。
+    mcpServers: sanitizeMcpServersConfig(config.mcpServers),
+    mcpOverrides: sanitizeMcpOverridesConfig(config.mcpOverrides),
   };
 }
 
@@ -433,15 +446,19 @@ export function getDecryptedApiKey(): string | null {
   return apiKey || null;
 }
 
-/** P3-6：renderer 出口专用——apiKey 掩码（sk-…****xxxx），主进程内部消费一律走 getConfig()。
- *  渲染层 UI 本就不显示明文 Key；下发掩码配合 saveConfig 的「掩码=不改动」语义防回写污染。 */
+/** P3-6：renderer 出口专用——apiKey 与 mcpServers env/headers 值掩码（§1.3，r3 修复 F2），
+ *  主进程内部消费一律走 getConfig()。渲染层 UI 不显示明文；下发掩码配合「掩码=还原」语义
+ *（mcp:managedSave 的 restoreMaskedMcpServers）防回写污染。 */
 export function getConfigForRenderer(): AppConfig {
   const config = getConfig();
+  // §1.3：mcpServers 的 env/headers 值与 apiKey 掩码同款理由——渲染层出口统一哨兵，明文只在
+  // 主进程内；哨兵还原在 mcp:managedSave 提交方向承接。
+  const base = { ...config, mcpServers: maskMcpServersForRenderer(config.mcpServers) };
   // hb10 P2-4：损坏态掩码不伪造（哨兵串掩码是垃圾值）——apiKey 置空串，损坏可见性走 apiKeyBroken。
   if (config.apiKeyBroken) {
-    return { ...config, apiKey: '' };
+    return { ...base, apiKey: '' };
   }
-  return { ...config, apiKey: maskApiKey(config.apiKey) };
+  return { ...base, apiKey: maskApiKey(config.apiKey) };
 }
 
 export function hasApiKey(): boolean {
