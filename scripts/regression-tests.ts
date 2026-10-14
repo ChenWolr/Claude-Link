@@ -1233,8 +1233,9 @@ function testConnectionSurfaceWhitelistContracts(): void {
     }
   }
 
-  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver, bridge/init}。
+  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver, bridge/init, mcp/mcp-probe}。
   // bridge/init：2026-09-21 IM 机器人计划新增 BRIDGE_FEISHU_TEST 连通测试（POST tenant_access_token/internal）。
+  // mcp/mcp-probe：MCP 管理计划（2026-10-12）新增 mcp:probe 探活的 http/sse 直连（POST JSON-RPC 握手）。
   // （\.request\( 覆盖 topic-analyzer 的 https/http 模块别名 lib.request 形态；该别名全树仅此一处。）
   // 白名单盲区补记（2026-09-21 review P3f）：bridge 的微信三文件（wechat-ilink/wechat-login/
   // wechat-adapter）经 fetchFn 注入形态发起全部 iLink 出站流量，上面的 \bfetch\s*\( 源码正则
@@ -1245,10 +1246,11 @@ function testConnectionSurfaceWhitelistContracts(): void {
     httpHits,
     [
       'main/modules/bridge/init.ts',
+      'main/modules/mcp/mcp-probe.ts',
       'main/modules/model-resolver.ts',
       'main/modules/topic-analyzer.ts',
     ],
-    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单/bridge 连通测试三处外不得新增直连）',
+    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单/bridge 连通测试/MCP 探活四处外不得新增直连）',
   );
 
   // 断言 B2（review R1 P3f 主体）：DI 形态出站面第二扫描——fetch 经 `typeof fetch` 注入
@@ -1267,8 +1269,9 @@ function testConnectionSurfaceWhitelistContracts(): void {
     'DI 形态出站面白名单（typeof fetch 注入）：仅 bridge 微信三文件；新增采用此形态的文件必须在此登记',
   );
 
-  // 断言 C：spawn/execFile 文件 ∈ {connection-tester, sdk-backend, changes-panel, cli-detector}。
+  // 断言 C：spawn/execFile 文件 ∈ {connection-tester, sdk-backend, changes-panel, cli-detector, mcp/mcp-probe}。
   // （\bexecFile\b 含 import/promisify 形态——cli-detector 经 execFileAsync 调用，字面 execFile( 漏检。）
+  // mcp/mcp-probe：MCP 管理计划（2026-10-12）新增 mcp:probe 探活的 stdio spawn + Windows taskkill 树杀（/T /F）。
   const processSpawn = /\bspawn\s*\(|\bexecFile\b/;
   const spawnHits = [...sources.entries()].filter(([, src]) => processSpawn.test(src)).map(([file]) => file).sort();
   assert.deepEqual(
@@ -1277,9 +1280,10 @@ function testConnectionSurfaceWhitelistContracts(): void {
       'main/modules/changes-panel.ts',
       'main/modules/cli-detector.ts',
       'main/modules/connection-tester.ts',
+      'main/modules/mcp/mcp-probe.ts',
       'main/modules/sdk-backend.ts',
     ],
-    'spawn/execFile 文件超出白名单（连接测试/post-turn 探针/打开方式/CLI 检测四处外不得新增子进程）',
+    'spawn/execFile 文件超出白名单（连接测试/post-turn 探针/打开方式/CLI 检测/MCP stdio 探活五处外不得新增子进程）',
   );
 
   // 断言 D：--setting-sources 隔离参数仅存于 connection-tester 与 shared/post-turn-probe，且两处都在。

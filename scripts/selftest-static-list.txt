@@ -231,3 +231,4 @@ scripts/selftest-build-freshness.ts
 scripts/tdd-update-verdict-verify.ts
 scripts/tdd-release-notes-md-verify.ts
 scripts/tdd-fs-picker.ts
+scripts/selftest-mcp-settings.ts
