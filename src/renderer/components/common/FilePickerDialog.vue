@@ -8,9 +8,13 @@
 // Transition 淡入 + 卡片 spring 进场 / trapTab / 焦点管理取 DiffDialog，Esc 层走 use-esc-stack
 //（filePicker 9100：高于导出格式 9000、低于灯箱 9999）。App.vue 单例常驻，v-if 由 store.current 控制。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import type { FsDirEntry, FsDriveInfo, FsListError, FsListResult, FsMkdirResult, FsQuickLocation, FsStatResult } from '@shared/types/fs-picker';
+import type { FsDirEntry, FsDriveInfo, FsListError, FsListResult, FsMkdirResult, FsQuickLocation, FsRenameResult, FsStatResult, FsTrashResult } from '@shared/types/fs-picker';
+import { describeInvalidFsItemName } from '@shared/fs-name-rules';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+import { baseName, joinPath, normalizeAddressInput, parentDir, samePath } from '../../composables/fs-path-utils';
+import { useDialogShell } from '../../composables/use-dialog-shell';
 import { useFsPickerStore } from '../../stores/fs-picker-store';
+import DialogResizeHandles from './DialogResizeHandles.vue';
 
 const store = useFsPickerStore();
 
@@ -41,31 +45,65 @@ const mkdirName = ref('');
 const mkdirError = ref('');
 let mkdirBusy = false;                              // 提交在途时失焦不取消
 
+// ── 重命名状态（行内编辑，模式复用 mkdir：Enter 提交 / Esc 或失焦取消 / busy 失焦不取消）──
+const renaming = ref<string | null>(null);          // 正在编辑的条目名（null=不在编辑）
+const renameInput = ref('');
+const renameError = ref('');
+let renameBusy = false;                             // 提交在途时失焦不取消
+const renameInputRef = ref<HTMLInputElement | null>(null);
+
+// ── 删除状态（inline 确认条：不弹嵌套模态，Esc 层级=确认条 → 弹窗）──
+const deletePending = ref<string[] | null>(null);   // 待确认删除的条目名列表
+const deleteError = ref('');
+const deleteBusy = ref(false);                      // 提交在途时 Esc/取消/重入均守卫（ref 化：确认条按钮禁用/文案需要模板响应）
+const delConfirmBtn = ref<HTMLButtonElement | null>(null);
+
+// ── 右键菜单状态（P5：行/空白两形态，name=null 空白菜单；fixed 定位随开随关） ──
+const ctxMenu = ref<{ x: number; y: number; name: string | null } | null>(null);
+
 // ── DOM ref ──
 const cardRef = ref<HTMLDivElement | null>(null);
 const mkdirInput = ref<HTMLInputElement | null>(null);
 const filenameInput = ref<HTMLInputElement | null>(null);
 const overwriteBackBtn = ref<HTMLButtonElement | null>(null);
+const addrInputRef = ref<HTMLInputElement | null>(null);
+// 路径小工具（joinPath/parentDir/baseName/samePath）已迁出至 composables/fs-path-utils.ts 单源维护（P3）。
 
-// ── 路径小工具（渲染层无 node:path，Windows 盘符路径手写；主进程 listDir 会 resolve 归一） ──
-function joinPath(dir: string, name: string): string {
-  return /[\\/]$/.test(dir) ? dir + name : dir + '\\' + name;
+// ── 弹窗壳（P5：标题栏拖动 / 8 向缩放 / 双击复位居中；关闭按钮在 button 忽略规则内自动豁免拖动） ──
+// 队列换单时 visible 连续 true → shell 不重置 rect（同一弹窗实体保留用户调好的几何，计划 P5 边界值语义）。
+const shell = useDialogShell(computed(() => !!req.value), cardRef, {
+  minW: 560,
+  minH: 360,
+  initialSize: { width: 720, height: 480 },
+});
+const shellStyle = shell.style; // 顶层 ref 模板自动解包（P4 使用方规范）
+
+// ── 地址栏（P3：面包屑 ⇄ 路径输入切换；Enter 导航 / Esc 或失焦切回面包屑；Ctrl+L 进入） ──
+const addrEditing = ref(false);
+const addrInput = ref('');
+const addrError = ref('');
+function startAddrEdit(): void {
+  addrEditing.value = true;
+  addrInput.value = curDir.value;
+  addrError.value = '';
+  void nextTick(() => {
+    addrInputRef.value?.focus();
+    addrInputRef.value?.select();
+  });
 }
-/** 上级目录；盘根（C:\）或非盘符路径返回 null（「上一级」置灰依据）。 */
-function parentDir(p: string): string | null {
-  const m = /^([a-zA-Z]:)([\\/].*)?$/.exec(p);
-  if (!m || !m[2] || m[2] === '\\' || m[2] === '/') return null;
-  const body = m[2].replace(/[\\/]+$/, '');
-  const cut = Math.max(body.lastIndexOf('\\'), body.lastIndexOf('/'));
-  const parentBody = cut <= 0 ? '' : body.slice(0, cut);
-  return `${m[1]}\\${parentBody}`;
+function cancelAddr(): void {
+  addrEditing.value = false;                // 失焦/Esc 只切回面包屑展示，不提交不导航（防误触）
+  addrError.value = '';
 }
-function baseName(p: string): string {
-  const i = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'));
-  return i === -1 ? p : p.slice(i + 1);
-}
-function samePath(a: string, b: string): boolean {
-  return a.replace(/[\\/]+$/, '').toLowerCase() === b.replace(/[\\/]+$/, '').toLowerCase();
+function submitAddr(): void {
+  const norm = normalizeAddressInput(addrInput.value);
+  if (norm === null) {
+    addrError.value = '请输入绝对路径（如 D:\\work 或 \\\\server\\share）';
+    return;
+  }
+  addrEditing.value = false;
+  addrError.value = '';
+  void loadDir(norm);                       // 路径不存在时走列表区既有错误视图（无法访问该文件夹）
 }
 
 // ── 面包屑：当前目录祖先链（C: > Users > foo > bar；当前段高亮不可点） ──
@@ -115,6 +153,10 @@ async function loadDir(dir: string): Promise<void> {
   selectedNames.value = new Set();
   cursorName.value = null;
   overwriteView.value = false;
+  renaming.value = null;                    // 导航离开即取消编辑（行内输入随列表卸载，blur 幂等）
+  renameError.value = '';
+  deletePending.value = null;               // 导航语义变化即取消删除确认条与错误条
+  deleteError.value = '';                   // confirmDelete 的部分失败提示在其 loadDir 调用之后置值，不受本清理影响
   curDir.value = dir;                       // 先置路径：面包屑/底部路径即时跟随（错误视图也显示）
   let r: FsListResult;
   try {
@@ -200,12 +242,9 @@ async function confirmSave(): Promise<void> {
     saveError.value = '请输入文件名';
     return;
   }
-  if (/[\\/:*?"<>|]/.test(name) || name.endsWith('.') || name.endsWith(' ')) {
-    saveError.value = '名称含非法字符（\\ / : * ? " < > |），或以点/空格结尾';
-    return;
-  }
-  if (name.length > 255) {
-    saveError.value = '名称过长（上限 255 字符）';
+  const invalid = describeInvalidFsItemName(name);
+  if (invalid) {
+    saveError.value = invalid;              // 文案单源：@shared/fs-name-rules（与旧内联文案逐字一致）
     return;
   }
   saveError.value = '';
@@ -289,6 +328,170 @@ async function submitMkdir(): Promise<void> {
   } else {
     mkdirError.value = '创建失败，请检查权限';
   }
+}
+
+// ── 重命名（行内编辑：Enter 提交 / Esc 或失焦取消；与 mkdir 编辑互斥；入口 F2 / 工具栏钮） ──
+// 输入框 ref 用函数式绑定：v-for 作用域内的字符串 ref 会被编译器加 ref_for 标记、
+// 运行时按数组填充（runtime-core setRef rawRef.f 分支），字符串 ref + .focus() 静默失效。
+function setRenameInputRef(el: unknown): void {
+  renameInputRef.value = el instanceof HTMLInputElement ? el : null;
+}
+function startRename(name: string): void {
+  if (creating.value) cancelMkdir();        // 两编辑器互斥（重命名开启即收起新建行）
+  renaming.value = name;
+  renameInput.value = name;
+  renameError.value = '';
+  void nextTick(() => {
+    renameInputRef.value?.focus();
+    renameInputRef.value?.select();         // 原生 Windows 行为：进入编辑即全选名称
+  });
+}
+function cancelRename(): void {
+  if (renameBusy) return;
+  renaming.value = null;
+  renameInput.value = '';
+  renameError.value = '';
+}
+function onRenameBlur(): void {
+  if (renaming.value && !renameBusy) cancelRename();
+}
+async function submitRename(): Promise<void> {
+  if (!renaming.value || renameBusy) return;
+  const oldName = renaming.value;
+  const name = renameInput.value.trim();
+  if (!name) {
+    renameError.value = '请输入名称';       // 空名由调用方提示（与 confirmSave「请输入文件名」平行），不走 IPC
+    return;
+  }
+  const invalid = describeInvalidFsItemName(name);
+  if (invalid) {
+    renameError.value = invalid;            // 单源文案（与 confirmSave 同源），不发起 IPC
+    return;
+  }
+  if (name === oldName) {
+    cancelRename();                         // 未变更：直接退出编辑
+    return;
+  }
+  const dir = curDir.value;                 // await 期间 curDir 可能被导航改写，固定取发起时目录
+  const reqId = req.value?.id;              // await 期间换单守卫（同 submitMkdir）
+  renameBusy = true;
+  let r: FsRenameResult;
+  try {
+    r = await window.claudeLink.fsRename(joinPath(dir, oldName), name);
+  } catch {
+    renameBusy = false;
+    if (req.value?.id !== reqId) return;
+    renameError.value = '重命名失败，请重试';
+    return;
+  }
+  renameBusy = false;
+  if (!req.value || req.value.id !== reqId) return; // 弹窗已关或已换单——不再结算/刷新
+  if (r.ok) {
+    cancelRename();
+    pendingSelectName.value = name;         // 刷新完成后选中新名条目
+    if (mode.value === 'save-file' && filename.value === oldName) filename.value = name; // save-file 联动
+    void loadDir(dir);
+  } else if (r.error === 'exists') {
+    renameError.value = '同名项已存在';
+  } else if (r.error === 'invalid-name') {
+    renameError.value = describeInvalidFsItemName(name) ?? '名称含非法字符';
+  } else if (r.error === 'not-found') {
+    cancelRename();
+    void loadDir(dir);                      // loadDir 清理段会清 renameError，故文案在其后置
+    renameError.value = '该项已不存在，列表已刷新';
+  } else {
+    renameError.value = '没有权限重命名';
+  }
+}
+
+// ── 删除（一律移入回收站：inline 确认条确认后走 fsTrash；入口 Del / 工具栏钮）──
+// 目标收集纯函数（无副作用，可被 computed 安全复用）：多选取 选中 ∩ 可选集
+// （directory 模式可选集只含目录 → 文件天然不入列）；无多选回落键盘游标单项。
+function deleteTargets(): string[] {
+  if (overwriteView.value || loading.value || listError.value) return [];
+  const selectable = selectableNames.value;
+  const sel = [...selectedNames.value].filter((n) => selectable.includes(n));
+  if (sel.length) return sel;
+  return cursorName.value ? [cursorName.value] : [];
+}
+const canDelete = computed(() => deleteTargets().length > 0); // computed 化避免模板反复调用
+function startDelete(targets?: string[]): void {
+  const t = targets ?? deleteTargets();     // 显式目标（右键单条变体）优先，否则按选中/游标收集
+  if (!t.length || deleteBusy.value) return;
+  if (renaming.value) cancelRename();       // 行内编辑与确认条互斥（开启删除先收起重命名）
+  deletePending.value = t;
+  deleteError.value = '';
+  void nextTick(() => delConfirmBtn.value?.focus());
+}
+function cancelDelete(): void {
+  if (deleteBusy.value) return;
+  deletePending.value = null;
+  deleteError.value = '';
+}
+async function confirmDelete(): Promise<void> {
+  const names = deletePending.value;
+  if (!names || !names.length || deleteBusy.value) return;
+  const paths = names.map((n) => joinPath(curDir.value, n));
+  const dir = curDir.value;                 // await 期间 curDir 可能被导航改写，固定取发起时目录
+  const reqId = req.value?.id;              // await 期间换单守卫（同 confirmSave）
+  deleteBusy.value = true;
+  let r: FsTrashResult;
+  try {
+    r = await window.claudeLink.fsTrash(paths);
+  } catch {
+    deleteBusy.value = false;
+    if (req.value?.id !== reqId) return;
+    deleteError.value = '删除失败，请重试';  // IPC 异常：确认条保留（deletePending 不清）可重试
+    return;
+  }
+  deleteBusy.value = false;
+  if (!req.value || req.value.id !== reqId) return; // 弹窗已关或已换单——不再结算/刷新
+  deletePending.value = null;
+  if (r.trashed.length > 0) void loadDir(dir);      // 有任何成功即刷新（部分失败只刷已删项）
+  if (r.failed.length > 0) {
+    deleteError.value = r.failed.length === paths.length
+      ? '无法移入回收站（网络位置或权限限制）'
+      : `${r.failed.length} 项未能移入回收站（网络位置或权限限制）`;
+  }
+}
+
+// ── 右键上下文菜单（P5：行/空白两形态；关闭路径=外击/右击/滚轮/滚动/Esc，任一动作后亦关） ──
+function openCtxMenu(evt: MouseEvent, en: FsDirEntry | null): void {
+  if (en && (en.isDir || mode.value !== 'directory')) setSingle(en.name); // 右键即选中（原生语义；灰置行不选中）
+  const x = Math.min(evt.clientX, window.innerWidth - 200); // 视口 clamp 不出屏（宽保守 200）
+  const y = Math.min(evt.clientY, window.innerHeight - 220); // 高度按菜单项数取固定保守值
+  ctxMenu.value = { x, y, name: en?.name ?? null };
+  void nextTick(() => {
+    (cardRef.value?.querySelector<HTMLElement>('.fp-ctx__item:not(:disabled)'))?.focus();
+  });
+}
+function closeCtxMenu(): void {
+  ctxMenu.value = null;
+}
+const ctxItems = computed<Array<{ label: string; disabled?: boolean; run: () => void }>>(() => {
+  const name = ctxMenu.value?.name;
+  if (name === null || name === undefined) {              // 空白（目录背景）菜单
+    return [
+      { label: '新建文件夹', run: () => { startMkdir(); closeCtxMenu(); } },
+      { label: '刷新', run: () => { refreshDir(); closeCtxMenu(); } },
+      { label: '在资源管理器中显示', run: () => { void window.claudeLink.fsShowInExplorer(curDir.value); closeCtxMenu(); } },
+    ];
+  }
+  const en = entries.value.find((e) => e.name === name);
+  const dead = !en || (!en.isDir && mode.value === 'directory'); // 灰置行或条目已消失（列表刷新后）
+  return [
+    {
+      label: '进入',
+      disabled: dead || !en?.isDir,
+      run: () => { if (en?.isDir) void loadDir(joinPath(curDir.value, en.name)); closeCtxMenu(); },
+    },
+    { label: '重命名', disabled: dead, run: () => { startRename(name); closeCtxMenu(); } },
+    { label: '删除', disabled: dead, run: () => { startDelete([name]); closeCtxMenu(); } },
+    { label: '在资源管理器中显示', run: () => { void window.claudeLink.fsShowInExplorer(joinPath(curDir.value, name)); closeCtxMenu(); } },
+  ];
+});
+function refreshDir(): void {
+  void loadDir(curDir.value);               // 清选择刷新（原生语义）
 }
 
 // ── 左栏 / 键盘导航辅助 ──
@@ -384,6 +587,16 @@ function onKey(e: KeyboardEvent): void {
   if (e.key === 'Escape') {
     // 更高层遮罩（灯箱）在场时让位——Esc 只关最上层。
     if (escHandle && !escHandle.isTopmost()) return;
+    if (ctxMenu.value) {
+      e.preventDefault();
+      closeCtxMenu();                         // Esc 最先关右键菜单（层级=菜单>删除确认条>地址栏>弹窗）
+      return;
+    }
+    if (deletePending.value) {
+      e.preventDefault();
+      cancelDelete();                         // Esc 先关删除确认条，再次 Esc 才关弹窗（层级=确认条→弹窗）
+      return;
+    }
     e.preventDefault();
     cancel();
     return;
@@ -392,18 +605,35 @@ function onKey(e: KeyboardEvent): void {
     trapTab(e);
     return;
   }
+  // Ctrl+L 进入地址栏编辑（在 isTextTarget 早退之前判定，输入框聚焦时也能再次触发重选）。
+  if (e.ctrlKey && e.key.toLowerCase() === 'l') {
+    if (escHandle && !escHandle.isTopmost()) return;  // 更高层遮罩在场时让位（与列表操作键同款）
+    e.preventDefault();
+    startAddrEdit();
+    return;
+  }
   if (isTextTarget(e.target)) return;       // 文件名/新建文件夹输入框内的键由输入框自身处理（Enter/Esc 已 stop）
   // 列表操作键与 Esc 同款让位：更高层遮罩在场时不操作被遮挡的弹窗。
   if (escHandle && !escHandle.isTopmost()) return;
-  if (e.key === 'ArrowDown') {
+  if (e.key === 'F2') {
+    e.preventDefault();
+    const name = cursorName.value;
+    if (name && !overwriteView.value) startRename(name);
+  } else if (e.key === 'Delete') {
+    e.preventDefault();
+    startDelete();
+  } else if (e.key === 'F5') {
+    e.preventDefault();
+    refreshDir();
+  } else if (e.key === 'ArrowDown') {
     e.preventDefault();
     moveCursor(1);
   } else if (e.key === 'ArrowUp') {
     e.preventDefault();
     moveCursor(-1);
   } else if (e.key === 'Enter') {
-    // 覆盖确认视图 / 新建行在场时 Enter 交给聚焦元素的原生行为（按钮激活/输入框提交）。
-    if (overwriteView.value || creating.value) return;
+    // 覆盖确认视图 / 新建行 / 重命名行 / 删除确认条 / 右键菜单在场时 Enter 交给聚焦元素的原生行为（按钮激活/输入框提交）。
+    if (overwriteView.value || creating.value || renaming.value || deletePending.value || ctxMenu.value) return;
     e.preventDefault();
     activateCursor();
   } else if (e.key === 'Backspace') {
@@ -437,8 +667,19 @@ function resetView(): void {
   mkdirBusy = false;
   mkdirName.value = '';
   mkdirError.value = '';
+  renaming.value = null;
+  renameBusy = false;
+  renameInput.value = '';
+  renameError.value = '';
+  deletePending.value = null;
+  deleteError.value = '';
+  deleteBusy.value = false;
+  ctxMenu.value = null;
   saveError.value = '';
   filename.value = baseName(store.current?.req.filename ?? '');
+  addrEditing.value = false;                // 地址栏编辑态随换单清理（P3）
+  addrInput.value = '';
+  addrError.value = '';
 }
 watch(() => store.current, async (cur, prev) => {
   if (cur) {
@@ -481,22 +722,44 @@ onBeforeUnmount(() => {
         <div
           ref="cardRef"
           class="fp-card"
+          :style="shellStyle"
           role="dialog"
           aria-modal="true"
           aria-labelledby="fp-dlg-title"
           tabindex="-1"
         >
-          <!-- 头部 -->
-          <header class="fp-header">
+          <!-- 头部（拖动手柄条：关闭按钮在 button 忽略规则内不触发拖动；双击复位居中） -->
+          <header class="fp-header" @pointerdown="shell.beginDrag" @dblclick="shell.resetToCenter">
             <h3 id="fp-dlg-title" class="fp-header__title">{{ req.title }}</h3>
             <button type="button" class="fp-btn fp-btn--ghost fp-header__close" aria-label="关闭" @click="cancel">×</button>
           </header>
 
-          <!-- 工具行：上级 / 新建文件夹 / 面包屑 -->
+          <!-- 工具行：上级 / 新建文件夹 / 面包屑（编辑态切换为地址输入） / 路径切换钮 -->
           <div class="fp-toolbar">
             <button type="button" class="fp-btn fp-btn--ghost fp-btn--sm" :disabled="!parentPath" @click="goParent">← 上级</button>
             <button type="button" class="fp-btn fp-btn--ghost fp-btn--sm" @click="startMkdir">新建文件夹</button>
-            <nav class="fp-crumb" aria-label="当前路径">
+            <button
+              type="button"
+              class="fp-btn fp-btn--ghost fp-btn--sm"
+              :disabled="!cursorName || !!overwriteView"
+              title="重命名 (F2)"
+              @click="cursorName && startRename(cursorName)"
+            >重命名</button>
+            <button
+              type="button"
+              class="fp-btn fp-btn--ghost fp-btn--sm"
+              :disabled="!canDelete"
+              title="删除 (Del)"
+              @click="startDelete()"
+            >删除</button>
+            <button
+              type="button"
+              class="fp-btn fp-btn--ghost fp-btn--sm"
+              :disabled="loading"
+              title="刷新 (F5)"
+              @click="refreshDir"
+            >刷新</button>
+            <nav v-if="!addrEditing" class="fp-crumb" aria-label="当前路径">
               <template v-for="(seg, i) in crumb" :key="seg.path">
                 <span v-if="i > 0" class="fp-crumb__sep" aria-hidden="true">›</span>
                 <button
@@ -509,7 +772,38 @@ onBeforeUnmount(() => {
                 <span v-else class="fp-crumb__seg fp-crumb__seg--cur" aria-current="page" :title="seg.path">{{ seg.label }}</span>
               </template>
             </nav>
+            <input
+              v-else
+              ref="addrInputRef"
+              v-model="addrInput"
+              class="fp-addr__input"
+              type="text"
+              placeholder="输入绝对路径，如 D:\work 或 \\server\share"
+              aria-label="编辑路径"
+              spellcheck="false"
+              @keydown.enter.stop.prevent="submitAddr"
+              @keydown.esc.stop.prevent="cancelAddr"
+              @blur="cancelAddr"
+            />
+            <button
+              type="button"
+              class="fp-btn fp-btn--ghost fp-btn--sm"
+              :title="addrEditing ? '返回面包屑' : '编辑路径 (Ctrl+L)'"
+              @mousedown.prevent
+              @click="addrEditing ? cancelAddr() : startAddrEdit()"
+            >{{ addrEditing ? '面包屑' : '路径' }}</button>
           </div>
+          <!-- 地址栏 inline 错误（仅编辑态出现；占工具行下方独立行） -->
+          <div v-if="addrError" class="fp-inline-error fp-addr__error" role="alert">{{ addrError }}</div>
+          <!-- 删除 inline 确认条（不弹嵌套模态；Esc 先关确认条再关弹窗）与错误行 -->
+          <div v-if="deletePending" class="fp-delbar" role="alertdialog" aria-label="删除确认">
+            <span class="fp-delbar__text">{{ deletePending.length === 1
+              ? `将移入回收站：${deletePending[0]}` : `将把 ${deletePending.length} 项移入回收站` }}</span>
+            <span class="fp-delbar__hint">可在回收站恢复</span>
+            <button ref="delConfirmBtn" type="button" class="fp-btn fp-btn--primary fp-btn--sm" :disabled="deleteBusy" @click="confirmDelete">{{ deleteBusy ? '删除中…' : '移入回收站' }}</button>
+            <button type="button" class="fp-btn fp-btn--ghost fp-btn--sm" :disabled="deleteBusy" @click="cancelDelete">取消</button>
+          </div>
+          <div v-if="deleteError" class="fp-inline-error fp-ops-error" role="alert">{{ deleteError }}</div>
 
           <!-- 主体：左栏（快捷位置 + 驱动器） + 右列（文件列表） -->
           <div class="fp-body">
@@ -533,6 +827,16 @@ onBeforeUnmount(() => {
                 :title="d.path"
                 @click="loadDir(d.path)"
               >{{ d.letter }}:</button>
+              <!-- 降级提示：listRoots 失败（drives 空或 IPC 异常）→ 小字 + 重试（roots 为 null 即重试在途时禁用） -->
+              <div v-if="store.rootsFailed" class="fp-aside__hint fp-aside__hint--retry">
+                <span>未检测到其他驱动器</span>
+                <button
+                  type="button"
+                  class="fp-btn fp-btn--ghost fp-btn--sm"
+                  :disabled="store.roots === null"
+                  @click="store.refreshRoots()"
+                >重试</button>
+              </div>
               <div v-if="!roots" class="fp-aside__hint">位置加载中…</div>
             </aside>
 
@@ -581,6 +885,7 @@ onBeforeUnmount(() => {
                   >确定</button>
                 </div>
                 <div v-if="mkdirError" class="fp-inline-error" role="alert">{{ mkdirError }}</div>
+                <div v-if="renameError" class="fp-inline-error" role="alert">{{ renameError }}</div>
 
                 <div v-if="entries.length === 0" class="fp-state">此文件夹为空</div>
                 <template v-else>
@@ -593,6 +898,8 @@ onBeforeUnmount(() => {
                     aria-label="文件列表"
                     tabindex="0"
                     :aria-activedescendant="activeDescId"
+                    @contextmenu.prevent="openCtxMenu($event, null)"
+                    @scroll="closeCtxMenu()"
                   >
                     <div
                       v-for="(en, idx) in entries"
@@ -610,8 +917,21 @@ onBeforeUnmount(() => {
                       :data-fp-name="en.name"
                       @click="onRowClick(en, $event)"
                       @dblclick="onRowDblClick(en)"
+                      @contextmenu.stop.prevent="openCtxMenu($event, en)"
                     >
-                      <span class="fp-entry__name">
+                      <span v-if="renaming === en.name" class="fp-entry__rename">
+                        <input
+                          :ref="setRenameInputRef"
+                          v-model="renameInput"
+                          class="fp-mkdir__input"
+                          type="text"
+                          aria-label="重命名"
+                          @keydown.enter.stop.prevent="submitRename"
+                          @keydown.esc.stop.prevent="cancelRename"
+                          @blur="onRenameBlur"
+                        />
+                      </span>
+                      <span v-else class="fp-entry__name">
                         <span v-if="en.isDir" class="fp-entry__icon" aria-hidden="true">📁</span>{{ en.name }}
                       </span>
                       <span class="fp-entry__mtime">{{ formatMtime(en) }}</span>
@@ -650,6 +970,18 @@ onBeforeUnmount(() => {
               <button v-else type="button" class="fp-btn fp-btn--primary" :disabled="selectedNames.size === 0" @click="confirmOpen">选择</button>
             </div>
           </footer>
+
+          <!-- 右键上下文菜单（P5 行/空白两形态）：捕层 + 菜单，均 fixed 随开随关；关闭路径=外击/右击/滚轮/滚动/Esc -->
+          <template v-if="ctxMenu">
+            <div class="fp-ctx-overlay" @click="closeCtxMenu" @contextmenu.prevent="closeCtxMenu" @wheel="closeCtxMenu"></div>
+            <div class="fp-ctx" :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }" role="menu">
+              <button v-for="(it, i) in ctxItems" :key="i" type="button" role="menuitem"
+                class="fp-ctx__item" :disabled="it.disabled" @click="it.run">{{ it.label }}</button>
+            </div>
+          </template>
+
+          <!-- 弹窗壳 8 向缩放手柄（卡片内最后一个子元素，P5） -->
+          <DialogResizeHandles :binder="shell" />
         </div>
       </div>
     </Transition>
@@ -668,6 +1000,8 @@ onBeforeUnmount(() => {
   padding: 1rem;
 }
 .fp-card {
+  position: absolute; /* shell rect 绑定后由 :style 定位；未测量帧（rect null）无 inset，静态位置回退 flex 居中 */
+  /* width/height 为 shell 未测量帧回退值——rect 绑定后由 :style 覆盖 */
   width: min(720px, 100%);
   height: min(480px, 80vh);
   display: flex;
@@ -700,13 +1034,15 @@ onBeforeUnmount(() => {
   opacity: 0;
 }
 
-/* 头部 */
+/* 头部（拖动手柄条；关闭按钮自带 cursor:pointer 不受 move 影响） */
 .fp-header {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 0.5rem;
   padding: 0.7rem 0.9rem 0.5rem;
+  cursor: move;
+  touch-action: none;
 }
 .fp-header__title { margin: 0; font-size: 1.02rem; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .fp-header__close { flex: 0 0 auto; width: 1.7rem; height: 1.7rem; padding: 0; font-size: 1rem; line-height: 1; }
@@ -743,6 +1079,69 @@ onBeforeUnmount(() => {
 }
 .fp-crumb__seg:hover { background: rgba(128, 128, 128, 0.15); opacity: 1; }
 .fp-crumb__seg--cur { cursor: default; font-weight: 600; opacity: 1; }
+.fp-addr__input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, Consolas, monospace);
+  font-size: 0.78rem;
+  padding: 0.25rem 0.45rem;
+  border-radius: var(--radius-md, 8px);
+  border: 1px solid var(--color-accent, #4c9aff);
+  background: var(--color-panel, transparent);
+  color: inherit;
+  outline: none;
+}
+.fp-addr__input:focus-visible { outline: none; border-color: var(--color-accent, #4c9aff); }
+.fp-addr__error { padding: 0 0.9rem 0.35rem; }
+
+/* 删除 inline 确认条（P4：flex 行；名文案可截断；主钮用 --danger 色调示破坏性） */
+.fp-delbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.9rem;
+}
+.fp-delbar__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fp-delbar__hint { flex: 0 0 auto; font-size: 0.72rem; opacity: 0.55; }
+.fp-delbar .fp-btn--primary {
+  background: var(--color-danger, #c05656);
+  color: #fff;
+}
+
+/* 右键上下文菜单（P5）：捕层在卡片内容之上、菜单在捕层之上（均 fixed 随开随关，不与 9100 层冲突） */
+.fp-ctx-overlay { position: fixed; inset: 0; z-index: 1; }
+.fp-ctx {
+  position: fixed;
+  z-index: 2;
+  min-width: 160px;
+  background: var(--color-panel, #26262e);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 8px);
+  box-shadow: var(--elevation-2, 0 8px 24px rgba(0, 0, 0, 0.4));
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+}
+.fp-ctx__item {
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 0.8rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.fp-ctx__item:hover:not(:disabled) { background: var(--color-accent-soft); }
+.fp-ctx__item:disabled { opacity: 0.45; cursor: not-allowed; }
 
 /* 主体 */
 .fp-body {
@@ -782,6 +1181,15 @@ onBeforeUnmount(() => {
 }
 .fp-aside__hr { height: 1px; margin: 0.35rem 0.4rem; background: var(--color-border, rgba(128, 128, 128, 0.25)); }
 .fp-aside__hint { font-size: 0.75rem; opacity: 0.55; padding: 0.3rem 0.5rem; }
+.fp-aside__hint--retry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  opacity: 1;                 /* 复用基底字号/内边距；透明度移到文字上，重试按钮保持全强度可点 */
+}
+.fp-aside__hint--retry > span { opacity: 0.55; }
+.fp-aside__hint--retry .fp-btn { flex: 0 0 auto; }
 
 /* 右列列表 */
 .fp-list { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -820,6 +1228,7 @@ onBeforeUnmount(() => {
 .fp-entry.is-hidden { opacity: 0.55; }
 .fp-entry.is-disabled.is-hidden { opacity: 0.3; }
 .fp-entry__name { display: flex; align-items: center; gap: 0.35rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fp-entry__rename { display: flex; align-items: center; min-width: 0; } /* 行内编辑容器：flex 布局使复用的 .fp-mkdir__input（flex:1）撑满名称列 */
 .fp-entry__icon { flex: 0 0 auto; }
 .fp-entry__mtime, .fp-entry__size { font-size: 0.73rem; opacity: 0.65; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
 
