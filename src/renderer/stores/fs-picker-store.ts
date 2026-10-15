@@ -37,9 +37,14 @@ export const useFsPickerStore = defineStore('fs-picker', {
   state: () => ({
     current: null as QueueItem | null,
     queue: [] as QueueItem[],
-    // listRoots 结果缓存：驱动器枚举 1s 预算别反复花——首个请求拉一次，后续复用；
+    // listRoots 结果缓存：驱动器枚举预算别反复花——首个请求拉一次，后续复用；
     // 拉取失败归 null（弹窗用缺省目录仍可用），ensureRoots 幂等可重试。
+    // 降级结果（IPC 异常或 drives 为空）不粘死会话：见 rootsFailed 与 ensureRoots 注释。
     roots: null as FsRootsCache | null,
+    // 一次拉取失败标记：IPC 异常或 drives 为空都置 true；成功且 drives 非空置 false。
+    // true 时 roots 只可能是 quick-only 降级缓存（或 catch 下的 null），ensureRoots 不短路、
+    // 下次调用自动重试覆盖；左栏据此显示「未检测到其他驱动器 + 重试」。
+    rootsFailed: false,
     _rootsPromise: null as Promise<void> | null,
   }),
   actions: {
@@ -68,24 +73,46 @@ export const useFsPickerStore = defineStore('fs-picker', {
       cur.resolve(result);
     },
     /**
-     * 幂等拉取 roots 缓存：已缓存直接返回；在途请求共享同一 Promise（去重并发）；
-     * 失败后清 _rootsPromise，供组件在 roots 为 null 时再试。
+     * 幂等拉取 roots 缓存：正常缓存（成功且 drives 非空）直接返回；
+     * 在途请求共享同一 Promise（去重并发）；失败后清 _rootsPromise 供再试。
+     * 降级语义：ok 但 drives 空（主进程逐盘预算下慢盘全剔除的兜底形态）不缓存空结果粘死
+     * 会话——写 quick-only 降级缓存保快捷位置可用，rootsFailed=true 放行下次重试覆盖。
      */
     async ensureRoots(): Promise<void> {
-      if (this.roots) return;
+      if (this.roots && !this.rootsFailed) return;   // 降级缓存（rootsFailed=true）不短路，重试覆盖
       if (!this._rootsPromise) {
         this._rootsPromise = (async () => {
           try {
             const r: FsRootsResult = await window.claudeLink.fsListRoots();
-            if (r.ok) this.roots = { cwdHome: r.cwdHome, quick: r.quick, drives: r.drives };
+            if (r.ok && r.drives.length > 0) {
+              // 成功且非空：正常缓存。单 C 盘机器 drives=['C'] 非空，照常缓存不受影响。
+              this.roots = { cwdHome: r.cwdHome, quick: r.quick, drives: r.drives };
+              this.rootsFailed = false;
+            } else {
+              // 降级（ok 但空 drives）：quick 与 drives 同 payload，只写 quick-only 缓存
+              // 保证快捷位置可用；rootsFailed=true 使下次 ensureRoots 重试覆盖（不粘死会话）。
+              this.roots = { cwdHome: r.cwdHome, quick: r.quick, drives: [] };
+              this.rootsFailed = true;
+            }
           } catch {
-            // IPC 异常：roots 维持 null，不阻塞选择器打开（defaultPath / C:\ 兜底）。
+            // IPC 异常：roots 维持 null，不阻塞选择器打开（defaultPath / C:\ 兜底）；
+            // rootsFailed=true 供左栏失败态提示与重试。
+            this.rootsFailed = true;
           } finally {
             this._rootsPromise = null;
           }
         })();
       }
       await this._rootsPromise;
+    },
+    /**
+     * 强制重拉 roots（左栏「重试」入口）：清缓存与失败标记后重新拉取；
+     * 并发去重沿用 _rootsPromise 语义——在途时 ensureRoots 共享同一 Promise，不重复发 IPC。
+     */
+    refreshRoots(): void {
+      this.roots = null;
+      this.rootsFailed = false;
+      void this.ensureRoots();
     },
   },
 });
