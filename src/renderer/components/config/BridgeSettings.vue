@@ -5,9 +5,12 @@
 // 状态：挂载时 bridgeGetStatus 拉快照 + onBridgeStatusChanged 订阅增量；
 // v-show 常挂（ConfigPage IM tab 门控），切 tab 不卸载、扫码轮询链不中断。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useFsPickerStore } from '../../stores/fs-picker-store';
 import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatus, BridgePlatformStatusEntry, BridgeFeishuTestResult } from '../../../shared/types/bridge';
 
 const claude = window.claudeLink;
+// 自绘文件选择器（T3）：选目录不再走主进程原生弹窗，改渲染层 FilePickerDialog 单例。
+const fsPickerStore = useFsPickerStore();
 
 const config = ref<BridgeConfigGetResult | null>(null);
 const statuses = ref<BridgePlatformStatusEntry[]>([]);
@@ -297,8 +300,8 @@ const feishuOwnerName = computed(() => {
 });
 
 async function pickWorkingDir(): Promise<void> {
-  const dir = await claude.pickWorkspaceDir();
-  if (dir) await save({ global: { workingDir: dir } });
+  const r = await fsPickerStore.openFilePicker({ mode: 'directory', title: '选择 Claude Code 运行目录（工作空间）' });
+  if (r && r.kind === 'directory') await save({ global: { workingDir: r.dir } });
 }
 
 // 批次3.4：平台重连（bridgePlatformRestart 后端；未启用/凭据缺失由主进程明确抛错）。

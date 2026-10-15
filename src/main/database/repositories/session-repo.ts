@@ -5,6 +5,7 @@ import { isValidPermissionMode } from '../../../shared/permission-resolver';
 import { isAutoSessionName } from '../../../shared/auto-session-name';
 import { getConnection } from '../connection';
 import { parseSessionSkillOverrides } from '../../modules/sdk-skill-overrides';
+import { parseSessionMcpOverrides } from '../../modules/mcp/sdk-mcp';
 import { normalizeSearchText } from '../../utils/search-normalizer';
 import { normalizeDbTime } from '../../../shared/time';
 
@@ -20,6 +21,7 @@ interface SessionRow {
   max_turns: number;
   thinking_level: string | null;
   skill_overrides: string | null;
+  mcp_overrides: string | null;
   created_at: string;
   updated_at: string;
   last_context_tokens: number | null;
@@ -49,6 +51,9 @@ function toSession(row: SessionRow): Session {
     thinkingLevel: isValidThinkingLevel(row.thinking_level) ? row.thinking_level : null,
     // 脏值兜底：NULL/空串/脏 JSON/非法值一律回落 null（= 全启用，与功能前存量会话一致）。
     skillOverrides: parseSessionSkillOverrides(row.skill_overrides),
+    // 脏值兜底：NULL/空串/脏 JSON/无合法条目一律回落 null（= 未钉住/功能前存量，
+    // 注入链回退当前全局 mcpOverrides，§3.14）。
+    mcpOverrides: parseSessionMcpOverrides(row.mcp_overrides),
     createdAt: normalizeDbTime(row.created_at),
     updatedAt: normalizeDbTime(row.updated_at),
     lastContextTokens: row.last_context_tokens,
@@ -106,7 +111,7 @@ export function listSessions(): Session[] {
 export function updateSession(
   id: string,
   partial: Partial<
-    Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'skillOverrides' | 'providerOverride' | 'modelOverride' | 'lastEffectiveEffort'>
+    Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'skillOverrides' | 'mcpOverrides' | 'providerOverride' | 'modelOverride' | 'lastEffectiveEffort'>
   >,
 ): Session | null {
   // hb10-SMG-09：IPC 竞态防线（主进程侧复用 shared 判据）——仅拦截「写入自动形态名覆盖
@@ -157,6 +162,11 @@ export function updateSession(
     updates.push('skill_overrides = @skillOverrides');
     values.skillOverrides = partial.skillOverrides && Object.keys(partial.skillOverrides).length
       ? JSON.stringify(partial.skillOverrides) : null;
+  }
+  if (partial.mcpOverrides !== undefined) {
+    updates.push('mcp_overrides = @mcpOverrides');
+    values.mcpOverrides = partial.mcpOverrides && Object.keys(partial.mcpOverrides).length
+      ? JSON.stringify(partial.mcpOverrides) : null;
   }
   if (partial.lastEffectiveEffort !== undefined) {
     updates.push('last_effective_effort = @lastEffectiveEffort');

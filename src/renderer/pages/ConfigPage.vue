@@ -4,7 +4,7 @@
 // 列在页面水平居中；工作区 flex:1 填满剩余高度，连接页=供应商列表+详情复合面板，行为/外观共用同一 solo 卡片；
 // 关于 tab 为扉页式重设计（2026-09-29 A 案：about-hero 扉页+8 态更新舞台，不走 .section/.field 表单形态）。
 // 行为/外观页内部排版严格保留原字段顺序/文案/控件（r9：仅装入统一面板，禁止重排）。
-// 所有滚动发生在面板内部；尺寸除 Skill 双栏区（.skill-md-rail 264px 定宽、滚动条 8px）与个别固定装饰件（保存徽标 spinner 圆点 8px、sr-only 1px 裁剪、tab/列表项 2px 指示边框）外全部 rem（随 fontScale 等比缩放）。
+// 所有滚动发生在面板内部；尺寸除 Skill/MCP 双栏区（.skill-md-rail/.mcp-rail 264px 定宽、滚动条 8px）与个别固定装饰件（保存徽标 spinner 圆点 8px、sr-only 1px 裁剪、tab/列表项 2px 指示边框）外全部 rem（随 fontScale 等比缩放）。
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { useConfigStore, lastSaveFailed } from '../stores/config-store';
@@ -12,6 +12,7 @@ import { useCommandStore } from '../stores/command-store';
 import ProviderManager from '../components/providers/ProviderManager.vue';
 import ThemeSelector from '../components/config/ThemeSelector.vue';
 import BridgeSettings from '../components/config/BridgeSettings.vue';
+import McpSettings from '../components/config/McpSettings.vue';
 import ReleaseNotesView from '../components/common/ReleaseNotesView.vue';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
@@ -33,13 +34,15 @@ const toast = ref<string | null>(null);
 const toastType = ref<'success' | 'error'>('success');
 // 批次5.1-5：IM tab 切回时经 BridgeSettings.refresh 重拉 config/bindings（owner 首捕获后可见）。
 const bridgeSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
+// MCP tab 切回时经 McpSettings.refresh 重拉快照（v-show 常挂，onMounted 只跑一次）。
+const mcpSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
 
-// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ IM（飞书/微信机器人）/ 关于（扉页：身份+版本+应用内更新）。
-type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'im' | 'about';
+// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ MCP（MCP 服务器管理）/ IM（飞书/微信机器人）/ 关于（扉页：身份+版本+应用内更新）。
+type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'mcp' | 'im' | 'about';
 const activeTab = ref<TabId>('connection');
 
 // 侧栏「可更新」徽标等外部入口直达指定 tab：/config?tab=about（非法值忽略保持默认）。
-const TAB_IDS = ['connection', 'behavior', 'appearance', 'skill', 'im', 'about'] as const;
+const TAB_IDS = ['connection', 'behavior', 'appearance', 'skill', 'mcp', 'im', 'about'] as const;
 const route = useRoute();
 onMounted(() => {
   const q = route.query.tab;
@@ -305,6 +308,8 @@ watch(activeTab, (tab) => {
   if (tab === 'skill') { void commandStore.ensureGlobalSnapshot(); void ensureProjectDirs(); }
   // 批次5.1-5：IM tab 激活重拉（组件 v-show 常挂，onMounted 只跑一次，切 tab 需手动刷新）。
   if (tab === 'im') void bridgeSettingsRef.value?.refresh?.();
+  // MCP tab 激活重拉快照（同上：v-show 常挂，磁盘 ~/.claude.json/.mcp.json 可能已被终端改动）。
+  if (tab === 'mcp') void mcpSettingsRef.value?.refresh?.();
 });
 
 // ── 项目级 Skill 管理（方案 B 双栏 master-detail，2026-09-17）─────────────────
@@ -654,6 +659,7 @@ const updateStageTone = computed(() => {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'behavior' }]" @click="activeTab = 'behavior'">行为</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'skill' }]" @click="activeTab = 'skill'">Skill</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'mcp' }]" @click="activeTab = 'mcp'">MCP</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'im' }]" @click="activeTab = 'im'">IM</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'about' }]" @click="activeTab = 'about'">关于</button>
       </nav>
@@ -970,6 +976,13 @@ const updateStageTone = computed(() => {
               </div>
             </div>
           </div>
+        </div>
+
+        <!-- MCP：作用域 rail + 卡片列表双栏（McpSettings 自管加载与启停，v-show 常挂；视觉基准
+             docs/prototypes/mcp-tab/round3-g13-hybrid.html。启停写 AppConfig.mcpOverrides（键带
+             作用域前缀）经主进程 setMcpOverride 落盘，不经渲染层 config 整包保存链） -->
+        <div v-show="activeTab === 'mcp'" class="solo-card">
+          <McpSettings ref="mcpSettingsRef" />
         </div>
 
         <!-- 关于：扉页式（A 案 2026-09-29 重设计）——身份区+8 态更新舞台+链接行；

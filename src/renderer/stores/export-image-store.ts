@@ -2,9 +2,16 @@
 // 可见 renderer 只接收进度事件，不持有图片数据。
 import { defineStore } from 'pinia';
 import type { ExportImagePhase, ExportImageProgressPayload } from '../../shared/types/export-image';
+import type { ExportTargetRequest } from '../../shared/types/fs-picker';
+import { useFsPickerStore } from './fs-picker-store';
 
 const TERMINAL_PHASES: ExportImagePhase[] = ['done', 'cancelled', 'error'];
 const TERMINAL_HOLD_MS = 1200;
+
+// T5 导出目标协商：最近一次导出目录（内存态，作下次 defaultPath；不持久化）。
+// 刻意放模块级而非 state——scheduleReset 的 this.$reset() 会以 state 工厂重置全部 state，
+// 进 state 会在终态 1.2s 后归空，「跨 job 记住上次目录」永远不生效。
+let lastExportDir = '';
 
 interface ExportImageState {
   jobId: string | null;
@@ -95,6 +102,30 @@ export const useExportImageStore = defineStore('export-image', {
         await window.claudeLink.cancelImageExport();
       } catch {
         // IPC 失败：job 已死/无活动 job——终态进度（cancelled/error）或复位定时器兜底。
+      }
+    },
+    /** T5 导出目标协商：主进程 EXPORT_REQUEST_TARGET 推送 → 自绘 FilePickerDialog 选择 → 应答。
+     *  App.vue onMounted 注册一次订阅（单订阅者），与 applyProgress 同为全局链路。 */
+    async handleExportTargetRequest(req: ExportTargetRequest): Promise<void> {
+      const fsPicker = useFsPickerStore();
+      const r = await fsPicker.openFilePicker({
+        mode: req.multi ? 'directory' : 'save-file',
+        title: req.multi ? '选择导出图片保存目录' : '保存导出图片',
+        filename: req.multi ? undefined : req.suggestedName,
+        defaultPath: lastExportDir || undefined,
+      });
+      try {
+        if (r && r.kind === 'directory') {
+          lastExportDir = r.dir;
+          await window.claudeLink.resolveExportTarget(req.jobId, { kind: 'directory', dir: r.dir });
+        } else if (r && r.kind === 'save') {
+          lastExportDir = r.dir;
+          await window.claudeLink.resolveExportTarget(req.jobId, { kind: 'save', dir: r.dir, filename: r.filename });
+        } else {
+          await window.claudeLink.resolveExportTarget(req.jobId, { kind: 'cancel', reason: 'user' });
+        }
+      } catch {
+        // 应答失败（job 已超时/收口）：主进程 Map 已清，迟到应答被拒——静默。
       }
     },
     scheduleReset(): void {

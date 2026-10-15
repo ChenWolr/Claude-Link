@@ -10,7 +10,7 @@ export const MAX_FILE_BYTES = 30 * 1024 * 1024;
 export const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 export const MAX_IMAGE_LONG_EDGE = 8000;
 /**
- * P1-7 读盘守卫阈值：ATTACHMENT_PICK / 拖放粘贴在读入内存前先按此值早退（超限文件
+ * P1-7 读盘守卫阈值：附件路径选择（stageAttachmentPaths）/ 拖放粘贴在读入内存前先按此值早退（超限文件
  * 不进 Buffer/arrayBuffer，防数 GB 文件把主进程/renderer 打爆）。取两档上限的覆盖最大值
  * （max(图片 10MiB, 文件 30MiB) 再留余量）；精确的 10/30MiB 区分仍由 validateAttachmentBytes 裁定。
  */

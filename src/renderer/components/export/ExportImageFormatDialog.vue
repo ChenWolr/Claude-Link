@@ -3,9 +3,11 @@
 // 复用 theme/interaction tokens；文案诚实：两种格式超长会话都按安全边界分多张，不承诺无限单图。
 // 依据：导出图片 v4.1 PNG worker 计划 §7 Task 12（原文档
 // docs/superpowers/plans/2026-07-21-export-image-v41-png-worker.md 已不在仓库内）。
-import { ref, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { ref, watch, nextTick, onMounted, onBeforeUnmount, toRef } from 'vue';
 import type { ExportImageFormat } from '@shared/types/export-image';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+import { useDialogShell } from '../../composables/use-dialog-shell';
+import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 
 const props = defineProps<{ open: boolean; busy?: boolean }>();
 const emit = defineEmits<{
@@ -15,6 +17,13 @@ const emit = defineEmits<{
 
 const selected = ref<ExportImageFormat>('jpeg');
 const cardRef = ref<HTMLDivElement | null>(null);
+
+// ── 弹窗壳（P6：标题行拖动 / 8 向缩放 / 双击复位居中；无 initialSize → 打开时测卡片自然尺寸，
+// 原 width:min(440px,100%) 保留为未测量帧回退；拖动绑定在 h3 标题行（无独立 header 条，取改动更小者），
+// 两个格式 option 按钮在 button 忽略规则内自动豁免拖动） ──
+const shell = useDialogShell(toRef(props, 'open'), cardRef, { minW: 360, minH: 240 });
+const shellStyle = shell.style; // 顶层 ref 模板自动解包（P4 使用方规范）
+
 // A9：弹窗打开即注册 Esc 层（9000，低于灯箱 9999）——灯箱在场时 Esc 让位给灯箱。
 let escHandle: EscLayerHandle | null = null;
 
@@ -68,12 +77,18 @@ onBeforeUnmount(() => {
       <div
         ref="cardRef"
         class="export-fmt-card"
+        :style="shellStyle"
         role="dialog"
         aria-modal="true"
         aria-labelledby="export-fmt-title"
         tabindex="-1"
       >
-        <h3 id="export-fmt-title" class="export-fmt-title">导出长图格式</h3>
+        <h3
+          id="export-fmt-title"
+          class="export-fmt-title"
+          @pointerdown="shell.beginDrag"
+          @dblclick="shell.resetToCenter"
+        >导出长图格式</h3>
         <p class="export-fmt-sub">选择导出格式。超长会话两种格式都按安全边界分多张，不存在无限单张。</p>
 
         <div class="export-fmt-options" role="radiogroup" aria-labelledby="export-fmt-title">
@@ -118,6 +133,7 @@ onBeforeUnmount(() => {
             {{ busy ? '准备中…' : '开始导出' }}
           </button>
         </div>
+        <DialogResizeHandles :binder="shell" />
       </div>
     </div>
   </Teleport>
@@ -135,7 +151,8 @@ onBeforeUnmount(() => {
   padding: 1rem;
 }
 .export-fmt-card {
-  width: min(440px, 100%);
+  position: absolute; /* shell rect 绑定后由 :style 定位；未测量帧（rect null）无 inset，静态位置回退遮罩 flex 居中 */
+  width: min(440px, 100%); /* shell 未测量帧回退值——rect 绑定后由 :style 覆盖 */
   background: var(--color-panel-soft, #1e1e24);
   color: var(--color-text, #e6e6e6);
   border-radius: var(--radius-lg, 14px);
@@ -144,7 +161,7 @@ onBeforeUnmount(() => {
   outline: none;
   border: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
 }
-.export-fmt-title { margin: 0 0 0.25rem; font-size: 1.05rem; font-weight: 600; }
+.export-fmt-title { margin: 0 0 0.25rem; font-size: 1.05rem; font-weight: 600; cursor: move; touch-action: none; } /* P6：标题行即拖动手柄（margin 处不动） */
 .export-fmt-sub { margin: 0 0 0.9rem; font-size: 0.8rem; opacity: 0.7; line-height: 1.45; }
 .export-fmt-options { display: flex; flex-direction: column; gap: 0.5rem; }
 .export-fmt-option {

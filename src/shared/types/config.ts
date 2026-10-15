@@ -66,6 +66,33 @@ export interface AppConfig {
   //（flag 层）按会话钉住值注入引擎，不写入用户 ~/.claude/settings.json。键为 skill canonical 名。
   // 必填：主进程 getConfig sanitize 恒产出该键、渲染层 defaultConfig 有默认 {}（全启用）。
   skillOverrides: Record<string, 'off'>;
+  // MCP 管理库（docs/plans/2026-10-12-mcp-management-plan.md P1）：Claude Link 自有的
+  // MCP 服务器集合（设置页 MCP Tab 增删改/JSON 导入），默认 []。
+  // 必填：主进程 getConfig sanitize 恒产出该键（同 skillOverrides 的兜底语义：写路径不清洗、
+  // 读路径 sanitize，旧配置缺键不报错读出 []）；渲染层 defaultConfig 有默认 []。
+  mcpServers: McpManagedServer[];
+  // MCP 启停 override（三层作用域共用一张二值表），默认 {}（全启用）。键空间（带作用域前缀）：
+  //   'managed:<name>' | 'user:<name>' | 'project:<normalizeDirKey(dir)>:<name>'
+  // 键存在且值 === 'off' = 禁用；键缺失 = 启用（与 skillOverrides 二值语义一致：拨开=delete、
+  // 拨关=置 'off'）。必填：主进程 getConfig sanitize 恒产出该键、渲染层 defaultConfig 有默认 {}。
+  mcpOverrides: Record<string, 'off'>;
+}
+
+// Claude Link 管理库内的单台 MCP 服务器（§1.1 数据模型）。只承载定义，不含启停状态
+//（启停在 AppConfig.mcpOverrides，按作用域前缀键引用本表 name）。
+export interface McpManagedServer {
+  id: string; // crypto.randomUUID()
+  // 唯一，^[A-Za-z0-9_-]{1,64}$（工具名 mcp__<name>__<tool> 对 name 的约束；重名 sanitize 保留第一条）。
+  name: string;
+  description: string; // 默认 ''
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string; // stdio 必填（transport 与必填不匹配 → sanitize 整条丢弃）
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string; // http/sse 必填
+  headers?: Record<string, string>;
+  createdAt: number;
+  updatedAt: number;
 }
 
 // ── 多供应商 × 无限模型库（设置页 = 可选项库，会话内选用）────────────────

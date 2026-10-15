@@ -9,6 +9,7 @@ import { useChatDraftStore } from '../stores/chat-draft-store';
 import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useCommandStore } from '../stores/command-store';
 import { useInteractionStore } from '../stores/interaction-store';
+import { useFsPickerStore } from '../stores/fs-picker-store';
 import { useDiffDialog } from '../composables/useDiffDialog';
 import { useToolDiffDialog } from '../composables/useToolDiffDialog';
 import { useImageLightbox } from '../composables/useImageLightbox';
@@ -29,6 +30,7 @@ const configStore = useConfigStore();
 const draftStore = useChatDraftStore();
 const planStore = useClaudePlanStore();
 const commandStore = useCommandStore();
+const fsPickerStore = useFsPickerStore();
 const { sending, error, lastFailedBySession, sendMessage, abort } = useChat();
 // 当前会话最近一次【失败】的 user 消息（按会话隔离）：error 置位时抓取，重新编辑据此恢复到主草稿。
 const lastFailedCurrent = computed(() => {
@@ -149,14 +151,18 @@ function ensureWorkspace(): boolean {
   return false;
 }
 
-// 文件选择器：主进程选文件 → 暂存到 userData → 加入草稿（computed 自动刷新视图）。
+// 文件选择器：渲染层自绘选择器选文件 → 主进程 stageAttachmentPaths 暂存到 userData → 加入草稿（computed 自动刷新视图）。
 // 选文件只需暂存，不要求工作空间（与拖放/粘贴一致）；工作空间在发送时才校验。
 async function onPickAttachments() {
   if (!store.activeSession) return;
   if (bridgeLocked.value) return;
   const sessionId = store.activeSession.id;
+  // 自绘选择器（open-file 不过滤扩展名，仅标题提示；上限/大小校验仍在主进程，文案不变）。
+  const r = await fsPickerStore.openFilePicker({ mode: 'open-file', title: '选择附件（图片 / 文档 / 文件）', multiSelect: true });
+  if (!r || r.kind !== 'files' || r.paths.length === 0) return; // 取消/空选不动草稿
   try {
-    const { attachments, errors } = await window.claudeLink.pickAttachments(sessionId);
+    const { attachments, errors } = await window.claudeLink.stageAttachmentPaths(sessionId, r.paths);
+    // ——以下与原实现逐行相同——
     // hb13-v B10.2：超上限被拒项弹 notice（draftStore 返回被拒摘要，不再静默丢弃）。
     const rejected = attachments.length > 0 ? draftStore.addAttachments(sessionId, attachments) : [];
     // 部分失败：成功项已入草稿，失败项集中提示（错误文案来自主进程业务校验，不含内部路径）。

@@ -271,15 +271,16 @@ function testChatSendPayloadShapeContracts(): void {
   const useChat = fs.readFileSync(new URL('../src/renderer/composables/use-chat.ts', import.meta.url), 'utf8');
   const taskStore = fs.readFileSync(new URL('../src/renderer/stores/task-store.ts', import.meta.url), 'utf8');
 
-  // 4 个附件通道
-  assert.ok(ipcTypes.includes("ATTACHMENT_PICK: 'attachment:pick'"), '须有 ATTACHMENT_PICK 通道');
+  // 4 个附件通道（T4 自绘改造：旧原生 dialog 选择通道删除，选择动作移渲染层 FilePickerDialog）
+  assert.ok(ipcTypes.includes("ATTACHMENT_STAGE_PATHS: 'attachment:stagePaths'"), '须有 ATTACHMENT_STAGE_PATHS 通道');
+  assert.ok(!ipcTypes.includes('ATTACHMENT_' + 'PICK'), '旧附件原生选择通道须删除（自绘改造）');
   assert.ok(ipcTypes.includes("ATTACHMENT_STAGE_BYTES: 'attachment:stageBytes'"), '须有 ATTACHMENT_STAGE_BYTES 通道');
   assert.ok(ipcTypes.includes("ATTACHMENT_PREVIEW: 'attachment:preview'"), '须有 ATTACHMENT_PREVIEW 通道');
   assert.ok(ipcTypes.includes("ATTACHMENT_REMOVE_DRAFT: 'attachment:removeDraft'"), '须有 ATTACHMENT_REMOVE_DRAFT 通道');
   assert.ok(ipcTypes.includes('StageAttachmentBytesInput') && ipcTypes.includes('AttachmentPreviewRequest'), '须定义两个附件入参类型');
 
   // preload 暴露 4 方法 + 3 发送改 ChatSendPayload
-  assert.ok(preloadApi.includes('pickAttachments:'), 'preload 须暴露 pickAttachments');
+  assert.ok(preloadApi.includes('stageAttachmentPaths:'), 'preload 须暴露 stageAttachmentPaths');
   assert.ok(preloadApi.includes('stageAttachmentBytes:'), 'preload 须暴露 stageAttachmentBytes');
   assert.ok(preloadApi.includes('getAttachmentPreview:'), 'preload 须暴露 getAttachmentPreview');
   assert.ok(preloadApi.includes('removeDraftAttachment:'), 'preload 须暴露 removeDraftAttachment');
@@ -295,12 +296,13 @@ function testChatSendPayloadShapeContracts(): void {
   assert.ok(readyCheckCount >= 2, `两发送 handler 须各调 assertAttachmentsReadyForSend（实际 ${readyCheckCount}）`);
 
   // 4 附件 handler 注册（按源码字面量匹配，与既有 changes 测试一致）
-  assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_PICK'), '须注册 ATTACHMENT_PICK handler');
+  assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_STAGE_PATHS'), '须注册 ATTACHMENT_STAGE_PATHS handler');
   assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_STAGE_BYTES'), '须注册 ATTACHMENT_STAGE_BYTES handler');
   assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_PREVIEW'), '须注册 ATTACHMENT_PREVIEW handler');
   assert.ok(ipcHandlers.includes('IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT'), '须注册 ATTACHMENT_REMOVE_DRAFT handler');
-  // 选择器用 dialog + 主进程读字节 + 魔数探测，不把路径返回 renderer
-  assert.ok(ipcHandlers.includes('dialog.showOpenDialog'), 'ATTACHMENT_PICK 须用主进程 dialog');
+  // T4 自绘改造：选择动作移渲染层，主进程只留读盘/校验/暂存链（提取函数）；不再用原生 dialog。
+  assert.ok(ipcHandlers.includes('export async function stageAttachmentPaths'), '暂存链须提取为 stageAttachmentPaths 函数');
+  assert.ok(!ipcHandlers.includes('dialog.showOpenDialog'), '主进程附件链路不再用原生 dialog');
   assert.ok(/path\.basename\(filePath\)/.test(ipcHandlers), '须只取 basename，不泄露完整路径');
   assert.ok(ipcHandlers.includes('detectDirectImageFormat(bytes)'), '须据魔数探测真实图片格式');
 
@@ -940,10 +942,11 @@ function testAttachmentTask7AContracts(): void {
 
   // 6) 批量选择逐项结果：成功项 + 失败项（错误文案来自业务校验，不带内部路径）
   assert.ok(ipcTypes.includes('PickAttachmentsResult'), 'ipc.ts 须定义 PickAttachmentsResult');
-  assert.ok(/PickAttachmentsResult\b/.test(preloadApi), 'preload pickAttachments 须返回 PickAttachmentsResult');
-  assert.ok(ipcHandlers.includes('PickAttachmentsResult'), 'ATTACHMENT_PICK handler 须返回逐项结果');
+  assert.ok(/stageAttachmentPaths[\s\S]{0,120}PickAttachmentsResult/.test(preloadApi), 'preload stageAttachmentPaths 须返回 PickAttachmentsResult');
+  assert.ok(/stageAttachmentPaths[\s\S]{0,200}PickAttachmentsResult/.test(ipcHandlers), 'stageAttachmentPaths 提取函数须返回逐项结果');
   assert.ok(ipcHandlers.includes('errors.push({ filename,'), 'handler 须逐项收集失败原因');
-  const pickBlock = chatPage.slice(chatPage.indexOf('onPickAttachments'), chatPage.indexOf('onPickAttachments') + 600);
+  // T4 自绘改造：选择器调起移入函数体（窗口随 picker 前置代码加宽 600→900）。
+  const pickBlock = chatPage.slice(chatPage.indexOf('onPickAttachments'), chatPage.indexOf('onPickAttachments') + 900);
   assert.ok(pickBlock.includes('attachments') && pickBlock.includes('errors'), 'ChatPage 须解构 attachments/errors');
   assert.ok(pickBlock.includes('showNotice'), '部分失败须集中提示');
 
@@ -1230,8 +1233,9 @@ function testConnectionSurfaceWhitelistContracts(): void {
     }
   }
 
-  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver, bridge/init}。
+  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver, bridge/init, mcp/mcp-probe}。
   // bridge/init：2026-09-21 IM 机器人计划新增 BRIDGE_FEISHU_TEST 连通测试（POST tenant_access_token/internal）。
+  // mcp/mcp-probe：MCP 管理计划（2026-10-12）新增 mcp:probe 探活的 http/sse 直连（POST JSON-RPC 握手）。
   // （\.request\( 覆盖 topic-analyzer 的 https/http 模块别名 lib.request 形态；该别名全树仅此一处。）
   // 白名单盲区补记（2026-09-21 review P3f）：bridge 的微信三文件（wechat-ilink/wechat-login/
   // wechat-adapter）经 fetchFn 注入形态发起全部 iLink 出站流量，上面的 \bfetch\s*\( 源码正则
@@ -1242,10 +1246,11 @@ function testConnectionSurfaceWhitelistContracts(): void {
     httpHits,
     [
       'main/modules/bridge/init.ts',
+      'main/modules/mcp/mcp-probe.ts',
       'main/modules/model-resolver.ts',
       'main/modules/topic-analyzer.ts',
     ],
-    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单/bridge 连通测试三处外不得新增直连）',
+    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单/bridge 连通测试/MCP 探活四处外不得新增直连）',
   );
 
   // 断言 B2（review R1 P3f 主体）：DI 形态出站面第二扫描——fetch 经 `typeof fetch` 注入
@@ -1264,8 +1269,9 @@ function testConnectionSurfaceWhitelistContracts(): void {
     'DI 形态出站面白名单（typeof fetch 注入）：仅 bridge 微信三文件；新增采用此形态的文件必须在此登记',
   );
 
-  // 断言 C：spawn/execFile 文件 ∈ {connection-tester, sdk-backend, changes-panel, cli-detector}。
+  // 断言 C：spawn/execFile 文件 ∈ {connection-tester, sdk-backend, changes-panel, cli-detector, mcp/mcp-probe}。
   // （\bexecFile\b 含 import/promisify 形态——cli-detector 经 execFileAsync 调用，字面 execFile( 漏检。）
+  // mcp/mcp-probe：MCP 管理计划（2026-10-12）新增 mcp:probe 探活的 stdio spawn + Windows taskkill 树杀（/T /F）。
   const processSpawn = /\bspawn\s*\(|\bexecFile\b/;
   const spawnHits = [...sources.entries()].filter(([, src]) => processSpawn.test(src)).map(([file]) => file).sort();
   assert.deepEqual(
@@ -1274,9 +1280,10 @@ function testConnectionSurfaceWhitelistContracts(): void {
       'main/modules/changes-panel.ts',
       'main/modules/cli-detector.ts',
       'main/modules/connection-tester.ts',
+      'main/modules/mcp/mcp-probe.ts',
       'main/modules/sdk-backend.ts',
     ],
-    'spawn/execFile 文件超出白名单（连接测试/post-turn 探针/打开方式/CLI 检测四处外不得新增子进程）',
+    'spawn/execFile 文件超出白名单（连接测试/post-turn 探针/打开方式/CLI 检测/MCP stdio 探活五处外不得新增子进程）',
   );
 
   // 断言 D：--setting-sources 隔离参数仅存于 connection-tester 与 shared/post-turn-probe，且两处都在。

@@ -192,12 +192,13 @@ async function main(): Promise<void> {
     assert.ok(body.includes('filterDraftAttachmentsByQuota'), '克隆须组合预检');
     assert.match(body, /return \{ created, rejected/, '返回形态须为 { created, rejected }');
   });
-  check('⑯ PICK：旧 slice(0,10) 截断已废 + 余量预检 + 超余量进 errors（D08-F10 提示顺带）', () => {
-    const at = handlers.indexOf('IPC_CHANNELS.ATTACHMENT_PICK');
-    const body = handlers.slice(at, at + 2200);
+  check('⑯ 路径暂存：旧 slice(0,10) 截断已废 + 余量预检 + 超余量进 errors（D08-F10 提示顺带）', () => {
+    // T4 自绘改造：dialog 选择段移渲染层，暂存链提取为 stageAttachmentPaths 导出函数（锚与窗口随之同步）。
+    const at = handlers.indexOf('export async function stageAttachmentPaths');
+    const body = handlers.slice(at, at + 2600);
     assert.ok(!body.includes('slice(0, 10)'), '旧「本次 ≤10」截断应删除（由余量预检替代）');
     assert.ok(body.includes('listDraftQuotaItems') || body.includes('DRAFT_QUOTA_MAX_COUNT'), '缺余量预检');
-    assert.match(body, /一次最多 10 个附件|hb10-ATT-06/, 'PICK 限量注释锚保留');
+    assert.match(body, /一次最多 10 个附件|hb10-ATT-06/, '路径暂存限量注释锚保留');
     assert.ok(body.includes('errors.push'), '超余量项须进 errors 提示');
   });
   check('⑰ 类型与 preload 同步：CloneMessageAttachmentsResult 双端暴露', () => {

@@ -116,8 +116,17 @@ check('5', '实现绑定到对应通道',
   preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_GET_INFO)') && preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_CHECK)')
   && preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_INSTALL)') && preloadApi.includes('ipcRenderer.on(IPC_CHANNELS.APP_UPDATE_STATE_CHANGED, listener)')
   && preloadApi.includes('ipcRenderer.removeAllListeners(IPC_CHANNELS.APP_UPDATE_STATE_CHANGED)'));
-check('5', 'api.ts 头注释方法数 77→82 同步',
-  preloadApi.includes('82 个方法'));
+check('5', 'api.ts 头注释方法数与 ClaudeLinkAPI 接口成员数一致（原生弹窗统一改造起改动态比对，不再钉死字面量）', (() => {
+  // 契约本意：头注释「N 个方法」须随接口成员增减同步。钉死字面量会在每次增删方法后必破，
+  // 改为解析注释里的 N 与接口体内「name: (」形态成员数动态比对。
+  const header = /(\d+)\s*个方法/.exec(preloadApi);
+  const ifaceAt = preloadApi.indexOf('export interface ClaudeLinkAPI');
+  const ifaceEnd = preloadApi.indexOf('export function createApi');
+  if (!header || ifaceAt === -1 || ifaceEnd === -1) return false;
+  const iface = preloadApi.slice(ifaceAt, ifaceEnd);
+  const members = (iface.match(/^\s+[A-Za-z]+\s*:\s*\(/gm) ?? []).length;
+  return Number(header[1]) === members;
+})());
 
 console.log('\n=== 6) 设置页关于 tab ===');
 check('6', 'TabId 联合类型含 about',

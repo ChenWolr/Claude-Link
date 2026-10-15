@@ -1,7 +1,7 @@
 // tdd-bugfix-p1-07-attachment-read-guard-verify.ts
 // P1-7 契约钉：选附件把整个文件读进内存后才校验大小 → 数 GB 文件可致主进程 OOM。
 //
-// 修复语义：主进程 ATTACHMENT_PICK 读前 fsp.stat 早退（>32MiB 直接按既有文案报错）；
+// 修复语义：主进程附件路径暂存链（stageAttachmentPaths）读前 fsp.stat 早退（>32MiB 直接按既有文案报错）；
 // renderer 拖放/粘贴先查 file.size 同阈值早退。精确 10/30MiB 区分仍由既有校验裁定，
 // ≤32MiB 行为完全不变。
 //
@@ -27,11 +27,12 @@ const chatPage = read('src/renderer/pages/ChatPage.vue');
 check('① policy 导出共享守卫常量 ATTACHMENT_READ_GUARD_BYTES = 32MiB',
   /export const ATTACHMENT_READ_GUARD_BYTES = 32 \* 1024 \* 1024;/.test(policy));
 
-// ATTACHMENT_PICK 循环体：stat 守卫在 readFile 之前。
-// 锚更新（A11/D08-F1 5db45f7 最小同步）：循环头改遍历余量预检后的 filePaths 局部列表
-// （旧 result.filePaths 直遍历随「本次 ≤10 截断→草稿余量预检」整改废止），stat 守卫语义不变。
-const pickAt = ipc.indexOf('IPC_CHANNELS.ATTACHMENT_PICK');
-const loopAt = ipc.indexOf('for (const filePath of filePaths)', pickAt);
+// 附件路径暂存链（stageAttachmentPaths 提取函数）循环体：stat 守卫在 readFile 之前。
+// 锚更新（A11/D08-F1 5db45f7 最小同步）：循环头遍历余量预检后的局部列表（旧直遍历随
+// 「本次 ≤10 截断→草稿余量预检」整改废止），stat 守卫语义不变；T4 自绘改造再同步：
+// dialog 选择段随原生弹窗删除移渲染层，读盘暂存链整体提取为 stageAttachmentPaths 导出函数。
+const pickAt = ipc.indexOf('export async function stageAttachmentPaths');
+const loopAt = ipc.indexOf('for (const filePath of stagedPaths)', pickAt);
 const loopBody = ipc.slice(loopAt, ipc.indexOf('return { attachments, errors }', loopAt));
 check('② 主进程读前 stat 守卫（stat 先于 readFile，超限抛既有形态错误）',
   loopBody.includes('await fsp.stat(filePath)') &&

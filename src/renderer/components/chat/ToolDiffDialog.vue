@@ -9,6 +9,11 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useToolDiffDialog } from '../../composables/useToolDiffDialog';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+// P9：拖动/8 向缩放的几何钳制复用 P4 纯函数；手柄复用 P4 全局组件；binder 类型来自 use-dialog-shell
+// （本组件 rect 自管 {l,t,w,h}，不迁移 useDialogShell——最小影响）。
+import { dragRect, resizeRect, type ResizeDir } from '../../composables/dialog-shell-geometry';
+import DialogResizeHandles from '../common/DialogResizeHandles.vue';
+import type { ResizeHandleBinder } from '../../composables/use-dialog-shell';
 import { parseUnifiedDiff } from '../../utils/diff-parser';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import { buildSplitChunks, countChanges, countInlineHunks } from '../../utils/diff-render';
@@ -187,6 +192,10 @@ function onSearchKeydown(e: KeyboardEvent): void {
 }
 
 // ── 几何 ──
+// P9：约束提升为组件作用域供拖动/缩放/重钳共用。minW 560 / minH 360（无侧栏，比 DiffDialog 680 窄）——
+// clampRect 原 680 同步放宽为 560，与缩放下限一致。
+const MINW = 560;
+const MINH = 360;
 function ensureRect(): void {
   const pad = 8;
   const w = Math.min(1280, window.innerWidth - pad * 2);
@@ -200,8 +209,6 @@ function ensureRect(): void {
 }
 function clampRect(r: { l: number; t: number; w: number; h: number }): { l: number; t: number; w: number; h: number } {
   const pad = 8;
-  const MINW = 680;
-  const MINH = 360;
   const w = Math.max(MINW, Math.min(r.w, window.innerWidth - pad * 2));
   const h = Math.max(MINH, Math.min(r.h, window.innerHeight - pad * 2));
   return {
@@ -218,6 +225,87 @@ function onWindowResize(): void {
   resizeTimer = setTimeout(() => {
     if (rect.value) rect.value = clampRect(rect.value);
   }, 80);
+}
+
+// ── 标题栏拖动 + 8 向缩放（P9）──
+// 豁免选择器与 P4 use-dialog-shell 同款判定：目标落在按钮/输入框等交互元素内不启动拖动。
+const DRAG_IGNORE_SELECTOR = 'button, input, select, textarea, a, [contenteditable], .dlg-no-drag';
+// 会话解绑器（供卸载兜底；pointerup 正常结束时置回 null）。
+let dragUp: (() => void) | null = null;
+let resizeUp: (() => void) | null = null;
+// 本组件 rect 自管 {l,t,w,h}（不迁 useDialogShell）——busy 用 P4 的 body.dlg-shell-busy
+// （main.css 已有全局样式：禁文本选择 + .dlg-rz 手柄退出命中，恰配本组件新用的全局手柄）。
+function toRect(r: { l: number; t: number; w: number; h: number }): { left: number; top: number; width: number; height: number } {
+  return { left: r.l, top: r.t, width: r.w, height: r.h };
+}
+// 拖动：平移量交给 P4 纯函数 dragRect 做视口全钳（永不部分出视口）。
+function startDrag(e: PointerEvent): void {
+  if (!rect.value) return; // 未测量帧（rect null 回退态）不拖
+  if (e.button !== 0) return; // 仅主键
+  const target = e.target as Element | null;
+  if (target && target.closest(DRAG_IGNORE_SELECTOR)) return; // 关闭按钮照常可点
+  e.preventDefault();
+  const start = toRect(rect.value);
+  const sx = e.clientX;
+  const sy = e.clientY;
+  document.body.classList.add('dlg-shell-busy');
+  const move = (ev: PointerEvent): void => {
+    const r = dragRect(start, ev.clientX - sx, ev.clientY - sy, window.innerWidth, window.innerHeight, {
+      minW: MINW,
+      minH: MINH,
+      pad: 8,
+    });
+    rect.value = { l: r.left, t: r.top, w: r.width, h: r.height };
+  };
+  const up = (): void => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    document.body.classList.remove('dlg-shell-busy');
+    dragUp = null;
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+  dragUp = up;
+}
+// 8 向缩放：实现 P4 最小接入接口 ResizeHandleBinder（DialogResizeHandles 用）；几何钳制与
+// n/w 锚定语义全部委托纯函数 resizeRect，自管 rect 只做事件接线。
+const selfBinder: ResizeHandleBinder = {
+  beginResize(dir: ResizeDir, e: PointerEvent): void {
+    if (!rect.value) return;
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const start = toRect(rect.value);
+    const sx = e.clientX;
+    const sy = e.clientY;
+    document.body.classList.add('dlg-shell-busy');
+    const move = (ev: PointerEvent): void => {
+      const r = resizeRect(start, dir, ev.clientX - sx, ev.clientY - sy, window.innerWidth, window.innerHeight, {
+        minW: MINW,
+        minH: MINH,
+        pad: 8,
+      });
+      rect.value = { l: r.left, t: r.top, w: r.width, h: r.height };
+    };
+    const up = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      document.body.classList.remove('dlg-shell-busy');
+      resizeUp = null;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    resizeUp = up;
+  },
+};
+// 双击标题栏 → ensureRect() 复位居中（按钮/输入框内双击不触发复位）。
+function onHeaderDblClick(e: MouseEvent): void {
+  const target = e.target as Element | null;
+  if (target && target.closest(DRAG_IGNORE_SELECTOR)) return;
+  ensureRect();
 }
 
 // ── 键盘 / 焦点 ──
@@ -286,6 +374,8 @@ window.addEventListener('resize', onWindowResize);
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('resize', onWindowResize);
+  dragUp?.(); // 拖动/缩放中卸载兜底：解绑 window 指针监听并清 busy 类
+  resizeUp?.();
   if (resizeTimer) clearTimeout(resizeTimer);
   // A9：卸载兜底出栈（release 幂等）。
   escHandle?.release();
@@ -306,7 +396,7 @@ onBeforeUnmount(() => {
         :style="dialogStyle"
       >
         <div class="diff-main">
-          <header class="diff-header">
+          <header class="diff-header" @pointerdown="startDrag" @dblclick="onHeaderDblClick">
             <div class="diff-header__main">
               <div class="diff-eyebrow">
                 <span class="dot"></span>
@@ -457,6 +547,9 @@ onBeforeUnmount(() => {
             </div>
           </footer>
         </div>
+
+        <!-- P9：8 向缩放手柄（卡片尾、最后子元素；定位贴 .diff-dialog 边，样式在全局 main.css） -->
+        <DialogResizeHandles :binder="selfBinder" />
       </div>
     </div>
     </Transition>
@@ -541,6 +634,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: flex-start;
   gap: 14px;
+  /* P9：标题栏拖动——抓手光标；触屏禁浏览器手势接管（拖动走 pointer 事件） */
+  cursor: move;
+  touch-action: none;
 }
 .diff-header__main {
   flex: 1;

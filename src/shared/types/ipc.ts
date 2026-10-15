@@ -32,13 +32,44 @@ export const IPC_CHANNELS = {
   // 流式测试连接通道已删除（测试收敛到 PROVIDER_TEST_MODEL 行内直返）。
   // Task 3 Step 5：原生 settings 诊断（resolveSettings 摘要，脱敏：只回来源/路径/键名，绝不含值）。
   SETTINGS_GET_DIAGNOSTIC: 'settings:getDiagnostic',
-  WORKSPACE_PICK_DIR: 'workspace:pickDir',
+  // 工作空间选目录通道（workspace:pickDir）已于 T3 整链删除——选择动作改渲染层自绘 FilePickerDialog。
   WORKSPACE_LIST_RECENT: 'workspace:listRecent',
   WORKSPACE_ADD_RECENT: 'workspace:addRecent',
   WORKSPACE_REMOVE_RECENT: 'workspace:removeRecent',
+  // 自绘 FilePickerDialog 的只读文件系统元数据通道（列根/列目录/新建文件夹/查存在）；文件内容读取仍在主进程。
+  FS_LIST_ROOTS: 'fs:listRoots',
+  FS_LIST_DIR: 'fs:listDir',
+  FS_MKDIR: 'fs:mkdir',
+  FS_STAT: 'fs:stat',
+  // 文件操作补齐三通道（docs/plans/2026-10-14-picker-file-ops-idea-parity-plan.md §2 P2）：
+  // rename=同目录重命名（主进程 renamePath）；trash=多选移入回收站（shell.trashItem 串行尽力而为）；
+  // showInExplorer=资源管理器定位（shell.showItemInFolder）。
+  FS_RENAME: 'fs:rename',
+  FS_TRASH: 'fs:trash',
+  FS_SHOW_IN_EXPLORER: 'fs:showInExplorer',
+  // 导出目标协商（主→渲染请求 + 渲染→主应答；#3/#4 原生保存框替换）。
+  EXPORT_RESOLVE_TARGET: 'export-image:resolveTarget',
+  EXPORT_REQUEST_TARGET: 'export-image:requestTarget',
   // 项目级 Skill 管理左栏数据（方案 B 双栏 master-detail）：最近工作区 ∪ 默认工作区（存在性过滤）
   // + 每目录直读 .claude\skills\<子目录>\SKILL.md 的项目 Skill 全集 + 会话计数。只读、无副作用。
   SKILL_PROJECT_DIRS_GET: 'skills:projectDirsGet',
+  // MCP 管理（设置页 MCP Tab）四通道（docs/plans/2026-10-12-mcp-management-plan.md §2 P4）。
+  // SNAPSHOT_GET：无参 invoke → McpSnapshot（{ userServers, projectDirs, userScopeError? }，
+  //   用户级/项目级只读脱敏视图，env/headers 只回 key 列表）；现查无副作用（同上先例）。
+  // MANAGED_SAVE：body = McpManagedSaveEntry[]（管理库全量替换；McpManagedServer + 瞬态改名
+  //   hint envRenameFrom/headersRenameFrom，主进程哨兵还原后剥离）→ { ok: true }；走主进程
+  //   saveConfig 互斥链（复用渲染层 config-store 既有并发保护，handler 不直写 store）。
+  // OVERRIDE_SET：body = { key: string; enabled: boolean }（key 须带作用域前缀
+  //   managed:<name> / user:<name> / project:<dirKey>:<name>）→ { overrides }（最新全量
+  //   mcpOverrides）；主进程内直接改 config 再 saveConfig，不经渲染层整包 config。
+  // PROBE：body = { target: 'all' } | { target: 'single'; name: string } →
+  //   McpProbeReport[]（all=管理库并发探活，60s 缓存逐 key 判定未命中才探；single=主进程按
+  //   name 定位已存条目现探、自取明文 env/headers，单元素数组。§1.3 渲染层零明文约束优先于
+  //   计划 §2 P4 的 server 字面形状——渲染层不回传 server 定义）。
+  MCP_SNAPSHOT_GET: 'mcp:snapshotGet',
+  MCP_MANAGED_SAVE: 'mcp:managedSave',
+  MCP_OVERRIDE_SET: 'mcp:overrideSet',
+  MCP_PROBE: 'mcp:probe',
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，test/query 由主进程自行解密，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',
@@ -88,9 +119,10 @@ export const IPC_CHANNELS = {
   QUEUE_EVENT: 'queue:event',
   // Claude 计划快照：按会话读取 TodoWrite / Task 工具的计划状态。
   CLAUDE_PLAN_GET: 'claude-plan:get',
-  // 附件：选择 / 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
+  // 附件：路径暂存（自绘选中）/ 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
   // 统一发送载荷 ChatSendPayload 经 CHAT_SEND / TASK_ADD 透传，不另设通道。
-  ATTACHMENT_PICK: 'attachment:pick',
+  // 附件路径暂存（自绘选择器渲染层选中后交主进程读盘/校验/暂存；旧原生 dialog 选择通道 attachment:pick 已删除）。
+  ATTACHMENT_STAGE_PATHS: 'attachment:stagePaths',
   ATTACHMENT_STAGE_BYTES: 'attachment:stageBytes',
   ATTACHMENT_PREVIEW: 'attachment:preview',
   ATTACHMENT_REMOVE_DRAFT: 'attachment:removeDraft',

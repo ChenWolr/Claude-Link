@@ -1,9 +1,9 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（82 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（96 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
-import type { AppConfig, ModelInfo, ProviderLibrarySnapshot, ProviderProfileView, ProviderSaveInput } from '../shared/types/config';
+import type { AppConfig, McpManagedServer, ModelInfo, ProviderLibrarySnapshot, ProviderProfileView, ProviderSaveInput } from '../shared/types/config';
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueOverview } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult, CloneMessageAttachmentsResult } from '../shared/types/attachment';
@@ -14,6 +14,71 @@ import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, B
 import type { AppUpdateInfo, AppUpdateState } from '../shared/types/update';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
+import type { FsListResult, FsMkdirResult, FsRenameResult, FsRootsResult, FsShowResult, FsStatResult, FsTrashResult, ExportTargetRequest, ExportTargetResponse } from '../shared/types/fs-picker';
+
+// ── MCP 管理载荷类型（P4；内联镜像主进程 src/main/modules/mcp/mcp-scanner.ts / mcp-probe.ts
+//    的视图导出形状——preload 不 import 主进程模块，type 结构镜像，字段以该两文件实现为准。
+//    §1.3 脱敏：视图 env/headers 只回 key 列表，值不进渲染层）──
+
+/** 作用域条目视图（scanner.McpScopedServerView）：env/headers 只带 key 列表（masked*Keys）。 */
+export interface McpScopedServerView {
+  scope: 'user' | 'project';
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  url?: string;
+  maskedEnvKeys?: string[];
+  maskedHeaderKeys?: string[];
+}
+
+/** 项目目录视图（scanner.McpProjectDirView）：与 Skill ProjectDirEntry 同构 + 本目录服务器。 */
+export interface McpProjectDirView {
+  path: string;
+  name: string;
+  isDefault: boolean;
+  sessionCount: number;
+  servers: McpScopedServerView[];
+}
+
+/** MCP Tab 快照（scanner.McpSnapshot）：用户级列表 + 项目目录列表（+ 可选用户级错误提示）。 */
+export interface McpSnapshot {
+  userServers: McpScopedServerView[];
+  projectDirs: McpProjectDirView[];
+  userScopeError?: string;
+}
+
+/** 单条探活入参（probe.McpProbeInput）：连接侧字段子集。 */
+export interface McpProbeInput {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+}
+
+/** 单条探活结果（probe.McpProbeReport）。 */
+export interface McpProbeReport {
+  key: string;
+  status: 'ok' | 'fail';
+  toolCount: number;
+  error?: string;
+  probedAt: number;
+}
+
+/** probeMcpServers 请求体：all=管理库批量（60s 缓存逐 key 判定）/ single=按 name 现探
+ *  （§1.3 渲染层零明文约束：渲染层只回传 name，明文 env/headers 由主进程自取已存条目）。 */
+export type McpProbeTarget = { target: 'all' } | { target: 'single'; name: string };
+
+/** mcp:managedSave 提交条目（主进程 src/main/modules/mcp/mcp-config.ts:McpManagedSaveEntry
+ *  同构镜像——preload 不 import 主进程模块，结构以该文件为准）：McpManagedServer + 瞬态改名
+ *  hint（payload 键 → 已存原键；主进程哨兵还原后剥离，绝不落盘、绝不出现在渲染层类型面）。 */
+export interface McpManagedSaveEntry extends McpManagedServer {
+  envRenameFrom?: Record<string, string>;
+  headersRenameFrom?: Record<string, string>;
+}
 
 export interface ClaudeLinkAPI {
   detectCli: () => Promise<CliDetectionResult>;
@@ -29,7 +94,6 @@ export interface ClaudeLinkAPI {
   installAppUpdate: () => Promise<boolean>;
   onUpdateStateChanged: (callback: (state: AppUpdateState) => void) => () => void;
   removeUpdateStateListener: () => void;
-  pickWorkspaceDir: () => Promise<string | null>;
   listRecentWorkspaces: () => Promise<string[]>;
   addRecentWorkspace: (dir: string) => Promise<string[]>;
   removeRecentWorkspace: (dir: string) => Promise<string[]>;
@@ -87,7 +151,7 @@ export interface ClaudeLinkAPI {
   resumeAllQueue: (sessionId: string) => Promise<QueueOverview>;
   getQueueOverview: (sessionId: string) => Promise<QueueOverview>;
   getClaudePlanState: (sessionId: string) => Promise<import('../shared/types/claude-plan').ClaudePlanState | null>;
-  pickAttachments: (sessionId: string) => Promise<PickAttachmentsResult>;
+  stageAttachmentPaths: (sessionId: string, paths: string[]) => Promise<PickAttachmentsResult>;
   stageAttachmentBytes: (input: StageAttachmentBytesInput) => Promise<AttachmentSummary>;
   getAttachmentPreview: (request: AttachmentPreviewRequest) => Promise<AttachmentPreviewResponse>;
   removeDraftAttachment: (sessionId: string, attachmentId: string) => Promise<void>;
@@ -110,6 +174,12 @@ export interface ClaudeLinkAPI {
   getCommandDiagnostics: (sessionId: string) => Promise<import('../shared/types/ipc').CommandProvenance>;
   // 项目级 Skill 管理左栏数据（最近工作区 ∪ 默认工作区 + 每目录项目 Skill 全集 + 会话计数）。
   getSkillProjectDirs: () => Promise<SkillProjectDirsPayload>;
+  // MCP 管理（设置页 MCP Tab）：快照现查（只读无副作用）/ 管理库全量保存（主进程 saveConfig
+  // 互斥链）/ 启停 override 单键翻转（返回最新全量，渲染层以此为准）/ 探活（single 恒单元素数组）。
+  getMcpSnapshot: () => Promise<McpSnapshot>;
+  saveMcpManaged: (servers: McpManagedSaveEntry[]) => Promise<{ ok: true }>;
+  setMcpOverride: (key: string, enabled: boolean) => Promise<{ overrides: Record<string, 'off'> }>;
+  probeMcpServers: (target: McpProbeTarget) => Promise<McpProbeReport[]>;
   // IM 机器人（飞书/微信 bridge）：凭据掩码读写 / 状态 / 连通测试 / 扫码登录 / 绑定管理。
   bridgeGetConfig: () => Promise<BridgeConfigGetResult>;
   bridgeSaveConfig: (input: BridgeConfigSaveInput) => Promise<BridgeConfigGetResult>;
@@ -122,6 +192,19 @@ export interface ClaudeLinkAPI {
   onBridgeStatusChanged: (callback: (payload: BridgePlatformStatusEntry[]) => void) => () => void;
   /** A3（D01-F2/D12-F4）：桥接运行期自动建会话落库推送（载荷含 sessionId）。 */
   onBridgeSessionsUpserted: (callback: (payload: { sessionId: string }) => void) => () => void;
+  // 自绘 FilePickerDialog 的只读文件系统元数据（选择动作在渲染层；文件内容读取仍在主进程）。
+  fsListRoots: () => Promise<FsRootsResult>;
+  fsListDir: (target: string) => Promise<FsListResult>;
+  fsMkdir: (parent: string, name: string) => Promise<FsMkdirResult>;
+  fsStat: (path: string) => Promise<FsStatResult>;
+  // 文件操作补齐（P2，docs/plans/2026-10-14-picker-file-ops-idea-parity-plan.md §2 P2）：
+  // 同目录重命名 / 多选移入回收站（部分成功语义）/ 资源管理器定位。
+  fsRename: (oldPath: string, newName: string) => Promise<FsRenameResult>;
+  fsTrash: (paths: string[]) => Promise<FsTrashResult>;
+  fsShowInExplorer: (path: string) => Promise<FsShowResult>;
+  // 导出目标协商（T5）：主→渲染请求选择保存目标；渲染层选定后经 resolveTarget 应答。
+  resolveExportTarget: (jobId: string, resp: ExportTargetResponse) => Promise<boolean>;
+  onExportTargetRequested: (callback: (req: ExportTargetRequest) => void) => () => void;
 }
 
 export function createApi(): ClaudeLinkAPI {
@@ -147,7 +230,6 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.APP_UPDATE_STATE_CHANGED, listener);
     },
     removeUpdateStateListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.APP_UPDATE_STATE_CHANGED),
-    pickWorkspaceDir: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_PICK_DIR) as Promise<string | null>,
     listRecentWorkspaces: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_LIST_RECENT) as Promise<string[]>,
     addRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_ADD_RECENT, dir) as Promise<string[]>,
     removeRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, dir) as Promise<string[]>,
@@ -221,7 +303,7 @@ export function createApi(): ClaudeLinkAPI {
     resumeAllQueue: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_RESUME_ALL, sessionId) as Promise<QueueOverview>,
     getQueueOverview: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.QUEUE_GET_OVERVIEW, sessionId) as Promise<QueueOverview>,
     getClaudePlanState: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_PLAN_GET, sessionId) as Promise<import('../shared/types/claude-plan').ClaudePlanState | null>,
-    pickAttachments: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PICK, sessionId) as Promise<PickAttachmentsResult>,
+    stageAttachmentPaths: (sessionId, paths) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_STAGE_PATHS, sessionId, paths) as Promise<PickAttachmentsResult>,
     stageAttachmentBytes: (input) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_STAGE_BYTES, input) as Promise<AttachmentSummary>,
     getAttachmentPreview: (request) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_PREVIEW, request) as Promise<AttachmentPreviewResponse>,
     removeDraftAttachment: (sessionId, attachmentId) => ipcRenderer.invoke(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, sessionId, attachmentId),
@@ -259,6 +341,12 @@ export function createApi(): ClaudeLinkAPI {
       ipcRenderer.invoke(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, sessionId) as Promise<import('../shared/types/ipc').CommandProvenance>,
     getSkillProjectDirs: () =>
       ipcRenderer.invoke(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET) as Promise<SkillProjectDirsPayload>,
+    // MCP 管理（设置页 MCP Tab）四通道（P4）；OVERRIDE_SET body 为单对象 { key, enabled }。
+    getMcpSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.MCP_SNAPSHOT_GET) as Promise<McpSnapshot>,
+    saveMcpManaged: (servers) => ipcRenderer.invoke(IPC_CHANNELS.MCP_MANAGED_SAVE, servers) as Promise<{ ok: true }>,
+    setMcpOverride: (key, enabled) =>
+      ipcRenderer.invoke(IPC_CHANNELS.MCP_OVERRIDE_SET, { key, enabled }) as Promise<{ overrides: Record<string, 'off'> }>,
+    probeMcpServers: (target) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PROBE, target) as Promise<McpProbeReport[]>,
     // IM 机器人（飞书/微信 bridge）。
     bridgeGetConfig: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_GET) as Promise<BridgeConfigGetResult>,
     bridgeSaveConfig: (input) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, input),
@@ -277,6 +365,22 @@ export function createApi(): ClaudeLinkAPI {
       const listener = (_event: Electron.IpcRendererEvent, payload: { sessionId: string }) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, listener);
+    },
+    // 自绘 FilePickerDialog 的只读文件系统元数据（T2；选择动作在渲染层）。
+    fsListRoots: () => ipcRenderer.invoke(IPC_CHANNELS.FS_LIST_ROOTS) as Promise<FsRootsResult>,
+    fsListDir: (target) => ipcRenderer.invoke(IPC_CHANNELS.FS_LIST_DIR, target) as Promise<FsListResult>,
+    fsMkdir: (parent, name) => ipcRenderer.invoke(IPC_CHANNELS.FS_MKDIR, parent, name) as Promise<FsMkdirResult>,
+    fsStat: (p) => ipcRenderer.invoke(IPC_CHANNELS.FS_STAT, p) as Promise<FsStatResult>,
+    // 文件操作补齐（P2）：两参以上走对象载荷，对齐主进程 handler 入参形状。
+    fsRename: (oldPath, newName) => ipcRenderer.invoke(IPC_CHANNELS.FS_RENAME, { oldPath, newName }) as Promise<FsRenameResult>,
+    fsTrash: (paths) => ipcRenderer.invoke(IPC_CHANNELS.FS_TRASH, { paths }) as Promise<FsTrashResult>,
+    fsShowInExplorer: (path) => ipcRenderer.invoke(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, { path }) as Promise<FsShowResult>,
+    // 导出目标协商（T5）：应答主进程的保存目标请求 / 订阅请求推送（App.vue 全局单订阅者）。
+    resolveExportTarget: (jobId, resp) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, jobId, resp) as Promise<boolean>,
+    onExportTargetRequested: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, req: ExportTargetRequest) => callback(req);
+      ipcRenderer.on(IPC_CHANNELS.EXPORT_REQUEST_TARGET, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.EXPORT_REQUEST_TARGET, listener);
     },
   };
 }

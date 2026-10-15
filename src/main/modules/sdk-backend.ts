@@ -18,11 +18,13 @@
 import type { BrowserWindow } from 'electron';
 import { existsSync, readFileSync } from 'fs';
 import * as fsp from 'node:fs/promises';
+import * as os from 'os';
 import * as path from 'path';
 import { execFileSync, spawn } from 'child_process';
 import { IPC_CHANNELS, ENGINE_BACKGROUND_TOGGLE_ENV } from '../../shared/constants';
 import { getConfig, getProviderModelSources, onConfigSaved } from './config-manager';
 import { mergeSkillOverridesIntoSettings } from './sdk-skill-overrides';
+import { mergeMcpServersIntoSettings } from './mcp/sdk-mcp';
 import { resolveAliasToActualModel, resolveDefaultModel, sensitiveEnvKeys } from '../../shared/settings-parser';
 import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride } from '../../shared/session-model';
 import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
@@ -1166,6 +1168,21 @@ function buildClaudeLinkSettingsBlock(
   // （配置页要完整列表；暂态会话的菜单过滤在渲染层做）。
   const sessionRow = sessionRepo.getSession(sessionId);
   out = mergeSkillOverridesIntoSettings(out, sessionRow?.skillOverrides ?? null);
+  // MCP 管理：按会话钉住值合并 user/project/managed 三层 MCP 服务器集，合并产物经
+  // buildNativeSdkOptionsCore 挂载顶层 Options.mcpServers（strictMcpConfig=true 下 SDK 唯一受认的注入通道；settings 块内 mcpServers 键保留但被 SDK 忽略）。
+  // overrides：会话钉住值优先，null（存量会话/全局探针哨兵行不存在）回退当前全局
+  // config.mcpOverrides（§3.14）。workingDir 与 Options.cwd 同源（opts.workingDir ||
+  // config.workingDirectory）；userHome 与 SDK 子进程 env 同口径（effectiveUserHome() ??
+  // os.homedir()，advancedJson.env 可能覆盖 USERPROFILE/HOME）。
+  // 【字节级一致硬约束】空 MCP 配置（三层全空/全被禁用）下本调用不写 out.mcpServers 键——
+  // settings 块与改动前 JSON.stringify 逐字节相同（T1/E3a 断言钉死，生产 query/probe 零影响）。
+  mergeMcpServersIntoSettings(
+    out,
+    config,
+    { mcpOverrides: sessionRow?.mcpOverrides ?? null },
+    opts.workingDir || config.workingDirectory || null,
+    { userHome: effectiveUserHome() ?? os.homedir() },
+  );
   return { settings: out, additionalDirectories };
 }
 

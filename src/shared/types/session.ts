@@ -24,6 +24,11 @@ export interface Session {
   // 会话级 skill 禁用快照（创建时钉住的全局配置副本）；null = 全启用（含功能前存量会话）；
   // 引擎注入见 buildClaudeLinkSettingsBlock。
   skillOverrides: Record<string, 'off'> | null;
+  // 会话级 MCP 启停快照（创建时钉住的全局 override 副本；键空间带作用域前缀：
+  // 'managed:<name>' | 'user:<name>' | 'project:<normalizeDirKey(dir)>:<name>'）；
+  // null = 未钉住/功能前存量会话（注入时回退当前全局 mcpOverrides，§3.14）；
+  // 引擎注入见 mergeMcpServersIntoSettings（buildClaudeLinkSettingsBlock 内调用）。
+  mcpOverrides: Record<string, 'off'> | null;
   createdAt: string;
   updatedAt: string;
   lastContextTokens: number | null;

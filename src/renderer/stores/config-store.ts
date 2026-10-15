@@ -62,6 +62,10 @@ const defaultConfig: AppConfig = {
   autoRetryReasoningReplay: true,
   // 全局 skill 禁用开关默认全启用（{} = 无禁用项；与主进程 config-manager 默认保持同值）。
   skillOverrides: {},
+  // MCP 管理库默认空、启停 override 默认空（= 全启用；与主进程 config-manager 默认保持同值，
+  // override 键空间见 shared/types/config 的 mcpOverrides 注释）。
+  mcpServers: [],
+  mcpOverrides: {},
 };
 
 export const useConfigStore = defineStore('config', {

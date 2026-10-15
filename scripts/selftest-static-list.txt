@@ -230,3 +230,9 @@ scripts/tdd-update-notes-normalize.ts
 scripts/selftest-build-freshness.ts
 scripts/tdd-update-verdict-verify.ts
 scripts/tdd-release-notes-md-verify.ts
+scripts/tdd-fs-picker.ts
+scripts/selftest-mcp-settings.ts
+scripts/tdd-fs-picker-drive-resilience.ts
+scripts/tdd-fs-path-utils.ts
+scripts/tdd-dialog-shell-geometry.ts
+scripts/tdd-fs-picker-file-ops.ts

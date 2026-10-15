@@ -5,6 +5,7 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useConfigStore } from '../../stores/config-store';
+import { useFsPickerStore } from '../../stores/fs-picker-store';
 import { useHoldAction } from '../../composables/use-hold-action';
 import ProviderModelSelector from './ProviderModelSelector.vue';
 import ThinkingLevelSelector from './ThinkingLevelSelector.vue';
@@ -22,6 +23,8 @@ const emit = defineEmits<{
 }>();
 
 const sessionStore = useSessionStore();
+// 自绘文件选择器（T3）：选目录不再走主进程原生弹窗，改渲染层 FilePickerDialog 单例。
+const fsPickerStore = useFsPickerStore();
 const activeSession = computed(() => sessionStore.activeSession);
 
 // 问题⑥：中断按钮长按 1 秒防误触——单击不再立即 abort（误触曾硬杀当前回合 + 熔断整个
@@ -59,9 +62,14 @@ const workspaceLabel = computed(() => {
 });
 
 async function pickDirectory() {
-  const dir = await window.claudeLink.pickWorkspaceDir();
+  // 先关下拉再弹自绘选择器（时序与旧原生弹窗一致）；原主进程 handler 内的
+  // addRecentWorkspace 副作用改此处显式调用（通道去重置顶语义，幂等安全）。
   showWorkspaceMenu.value = false;
-  if (dir) await sessionStore.setActiveSessionWorkingDir(dir);
+  const r = await fsPickerStore.openFilePicker({ mode: 'directory', title: '选择 Claude Code 运行目录（工作空间）' });
+  if (r && r.kind === 'directory') {
+    await sessionStore.setActiveSessionWorkingDir(r.dir);
+    await window.claudeLink.addRecentWorkspace(r.dir);
+  }
 }
 
 async function chooseRecent(dir: string) {

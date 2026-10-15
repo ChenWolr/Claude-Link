@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+import { useDialogShell } from '../../composables/use-dialog-shell';
 import type {
   InteractionPromptOption,
   InteractionPromptPayload,
@@ -8,6 +9,7 @@ import type {
 import InteractionDetails from './InteractionDetails.vue';
 import InteractionOptionList from './InteractionOptionList.vue';
 import InteractionPreview from './InteractionPreview.vue';
+import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 
@@ -60,13 +62,18 @@ const submittingId = ref<string | null>(null);
 const submitError = ref<string | null>(null);
 const otherInput = ref<HTMLInputElement | HTMLTextAreaElement | null>(null);
 const dialogRef = ref<HTMLElement | null>(null);
-const position = ref<{ x: number; y: number }>({ x: 0, y: 0 });
 let cleanupRequest: (() => void) | null = null;
 let cleanupCancel: (() => void) | null = null;
 let triggerEl: HTMLElement | null = null;
-let dragging: { startX: number; startY: number; baseX: number; baseY: number } | null = null;
 
 const activeRequest = computed(() => currentRequests.value[0] ?? null);
+// ── 弹窗壳（P7：标题栏拖动 / 8 向缩放 / 双击复位居中）——替换原手写拖动块（transform 偏移 +
+// ±320/±220 clamp），拖动范围扩展为全视口。无 initialSize → 打开时测卡片自然尺寸（CSS var 宽度
+// 35rem/wide 57.5rem/narrow 24rem + 内容自然高）；visible false→true 边沿自动重置居中（新请求
+// 不继承上一单拖放位置）；队列换单（A→B 直切无 null 帧）按计划 P7 文本 resetToCenter 重置居中
+// ——FilePicker 队列换单仍保留几何（P5 语义不变），仅本组件按 P7 重置。
+const shell = useDialogShell(computed(() => !!activeRequest.value), dialogRef, { minW: 340, minH: 240 });
+const shellStyle = shell.style; // ComputedRef 须解包为 script 顶层（P4 使用方规范，模板自动解包）
 const wizardQuestions = computed(() => activeRequest.value?.questions ?? []);
 const activeQuestion = computed(() => wizardQuestions.value[wizardIndex.value] ?? null);
 const isWizard = computed(() => wizardQuestions.value.length > 0);
@@ -585,30 +592,6 @@ function previousQuestion(): void {
   loadWizardStep(wizardIndex.value - 1);
 }
 
-function onDragStart(event: PointerEvent): void {
-  if (event.button !== 0) return;
-  dragging = { startX: event.clientX, startY: event.clientY, baseX: position.value.x, baseY: position.value.y };
-  window.addEventListener('pointermove', onDragMove);
-  window.addEventListener('pointerup', onDragEnd, { once: true });
-}
-
-function onDragMove(event: PointerEvent): void {
-  if (!dragging) return;
-  position.value = {
-    x: Math.max(-320, Math.min(320, dragging.baseX + event.clientX - dragging.startX)),
-    y: Math.max(-220, Math.min(220, dragging.baseY + event.clientY - dragging.startY)),
-  };
-}
-
-function onDragEnd(): void {
-  dragging = null;
-  window.removeEventListener('pointermove', onDragMove);
-}
-
-function resetPosition(): void {
-  position.value = { x: 0, y: 0 };
-}
-
 cleanupRequest = window.claudeLink.onInteractionRequest(enqueue);
 cleanupCancel = window.claudeLink.onInteractionCancel(({ id }) => removeRequest(id));
 void window.claudeLink.getPendingInteractions().then((pending) => {
@@ -653,12 +636,15 @@ async function loadHistory(sessionId: string | null): Promise<void> {
   }
 }
 // activeRequest 变化（新请求 / 切换会话导致 currentRequests 重算）时的统一 UI 副作用：
-//  ① position 归零——新弹窗默认居中，拖拽只对当前弹窗临时有效，不持久化、不跨弹窗串扰。
-//  ② initSelection 重置选择态——切会话时前一会话的请求被过滤掉、当前会话的请求浮现，
-//     必须重置 selectedIds/表单，避免显示上一个请求残留的选择。
+//  initSelection 重置选择态——切会话时前一会话的请求被过滤掉、当前会话的请求浮现，
+//  必须重置 selectedIds/表单，避免显示上一个请求残留的选择。
+//  （P7：旧「position 归零」已删——弹窗几何归 useDialogShell 管，visible false→true 边沿
+//  自动重置居中；队列换单连续在场时按计划 P7 文本 resetToCenter 重置居中——保留几何的是 FilePicker 的 P5 队列换单语义，本组件不保留。）
 watch(() => activeRequest.value?.id ?? null, (newId, oldId) => {
-  position.value = { x: 0, y: 0 };
-  if (newId && newId !== oldId && activeRequest.value) initSelection(activeRequest.value);
+  if (newId && newId !== oldId && activeRequest.value) {
+    initSelection(activeRequest.value);
+    shell.resetToCenter(); // 计划 P7：新请求重置居中——A→B 直切无 null 帧，visible 边沿不覆盖（rect null 时本调用为 no-op，首开仍由边沿测量居中）
+  }
 });
 watch(() => sessionStore.activeSession?.id ?? null, (id) => { void loadHistory(id); }, { immediate: true });
 
@@ -697,7 +683,6 @@ onBeforeUnmount(() => {
   cleanupRequest?.();
   cleanupCancel?.();
   window.removeEventListener('keydown', handleKeydown);
-  window.removeEventListener('pointermove', onDragMove);
   // A9：卸载兜底出栈（release 幂等）。
   escHandle?.release();
   escHandle = null;
@@ -716,9 +701,9 @@ onBeforeUnmount(() => {
         role="dialog"
         aria-modal="true"
         :aria-label="activeRequest.title"
-        :style="{ transform: `translate(${position.x}px, ${position.y}px)` }"
+        :style="shellStyle"
       >
-        <header class="interaction-dialog__header" @pointerdown="onDragStart" @dblclick="resetPosition">
+        <header class="interaction-dialog__header" @pointerdown="shell.beginDrag" @dblclick="shell.resetToCenter">
           <span class="interaction-dialog__eyebrow">{{ eyebrow }}</span>
           <h3>{{ currentTitle }}</h3>
           <p v-if="currentDescription">{{ currentDescription }}</p>
@@ -837,6 +822,8 @@ onBeforeUnmount(() => {
             {{ submitLabel }}
           </button>
         </footer>
+
+        <DialogResizeHandles :binder="shell" />
       </section>
     </div>
   </Teleport>
@@ -854,6 +841,9 @@ onBeforeUnmount(() => {
 }
 
 .interaction-dialog {
+  /* P7：shell rect 绑定后由 :style（left/top/width/height px）定位；未测量帧（rect null）无
+     inset，静态位置回退遮罩 grid place-items:center 居中（无闪烁）。 */
+  position: absolute;
   display: flex;
   flex-direction: column;
   width: var(--interaction-panel-width);
@@ -879,6 +869,7 @@ onBeforeUnmount(() => {
 .interaction-dialog__header {
   user-select: none;
   cursor: move;
+  touch-action: none; /* P7：拖动手柄——防触屏/触控板起滚吞掉 pointermove（与 P5/P6 接入一致） */
   padding: var(--interaction-header-pad);
   border-bottom: 1px solid var(--color-border);
   background: linear-gradient(135deg, color-mix(in srgb, var(--color-accent) 12%, transparent), transparent 72%);

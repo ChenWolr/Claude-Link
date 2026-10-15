@@ -166,6 +166,12 @@ function runMigrationStatements(db: Database.Database): void {
     if (!hasCol('skill_overrides')) {
       db.exec('ALTER TABLE sessions ADD COLUMN skill_overrides TEXT DEFAULT NULL');
     }
+    // MCP 管理自愈：会话级 MCP 启停快照（创建时钉住，JSON 序列化 Record<string,'off'>，
+    // 键空间 managed:/user:/project:<dirKey>: 前缀）。免升版（skill_overrides 先例），仅走幂等
+    // 自愈补列；NULL = 未钉住/功能前存量会话（注入时回退当前全局 mcpOverrides，§3.14）。
+    if (!hasCol('mcp_overrides')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN mcp_overrides TEXT DEFAULT NULL');
+    }
   }
 
   // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。

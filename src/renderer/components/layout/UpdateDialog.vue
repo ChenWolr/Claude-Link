@@ -4,12 +4,21 @@
      2026-09-29 A 案视觉重排：图标章头部 + 版本对比 pill 行（对照 docs/prototypes/about-tab/a-identity-hero.html）；
      script 逻辑与全部 data-testid 零改动。 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useUpdateStore } from '../../stores/update-store';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+import { useDialogShell } from '../../composables/use-dialog-shell';
+import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import ReleaseNotesView from '../common/ReleaseNotesView.vue';
 
 const updateStore = useUpdateStore();
+
+// ── 弹窗壳（P6：head 拖动 / 8 向缩放 / 双击复位居中；无 initialSize → 打开时测卡片自然尺寸，
+// 原 width:min(27.5rem,…) 保留为未测量帧回退） ──
+const cardRef = ref<HTMLElement | null>(null);
+const shell = useDialogShell(computed(() => updateStore.dialogVisible), cardRef, { minW: 320, minH: 220 });
+const shellStyle = shell.style; // 顶层 ref 模板自动解包（P4 使用方规范）
+
 const status = computed(() => updateStore.status);
 const progress = computed(() => updateStore.state.progress);
 // 下载进度文案（MB 四舍五入整数，与关于 tab updateStatusText 同口径）。
@@ -51,8 +60,8 @@ onUnmounted(() => {
 
 <template>
   <div v-if="updateStore.dialogVisible" class="update-dialog__overlay" @click.self="updateStore.dismissUpdate()">
-    <div class="update-dialog" data-testid="update-dialog" role="dialog" aria-modal="true" aria-label="发现新版本">
-      <div class="update-dialog__head">
+    <div ref="cardRef" class="update-dialog" :style="shellStyle" data-testid="update-dialog" role="dialog" aria-modal="true" aria-label="发现新版本">
+      <div class="update-dialog__head" @pointerdown="shell.beginDrag" @dblclick="shell.resetToCenter">
         <span class="update-dialog__head-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
         </span>
@@ -95,6 +104,7 @@ onUnmounted(() => {
           @click="updateStore.install()"
         >立即重启更新</button>
       </footer>
+      <DialogResizeHandles :binder="shell" />
     </div>
   </div>
 </template>
@@ -110,10 +120,11 @@ onUnmounted(() => {
 }
 
 .update-dialog {
+  position: absolute; /* shell rect 绑定后由 :style 定位；未测量帧（rect null）无 inset，静态位置回退遮罩网格居中（place-items:center 对 abspos 自动偏移仍生效） */
   display: flex;
   flex-direction: column;
   gap: 10px;
-  width: min(27.5rem, calc(100vw - 3rem)); /* 27.5rem=440px，对齐原型 .ud 与计划意图（R2 备忘：26rem 实为 416px） */
+  width: min(27.5rem, calc(100vw - 3rem)); /* 27.5rem=440px；shell 未测量帧回退值——rect 绑定后由 :style 覆盖 */
   border: 1px solid var(--color-border-strong);
   border-radius: var(--radius-lg);
   background: var(--color-panel);
@@ -122,11 +133,13 @@ onUnmounted(() => {
   box-shadow: var(--ring-light), var(--elevation-3);
 }
 
-/* 头部：图标章 + 标题（2026-09-29 A 案）。 */
+/* 头部：图标章 + 标题（2026-09-29 A 案）；拖动手柄条（P6）——head 内无按钮，关闭动作在 footer（button 忽略规则天然不涉及）。 */
 .update-dialog__head {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  cursor: move;
+  touch-action: none;
 }
 
 .update-dialog__head-icon {
