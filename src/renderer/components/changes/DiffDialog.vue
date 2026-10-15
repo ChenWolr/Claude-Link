@@ -8,6 +8,8 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useDiffDialog } from '../../composables/useDiffDialog';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+// P9：标题栏拖动平移钳制复用 P4 纯函数（不引入第二套几何实现）。
+import { dragRect } from '../../composables/dialog-shell-geometry';
 import { useChangesStore } from '../../stores/changes-store';
 import { useSessionStore } from '../../stores/session-store';
 import { parseUnifiedDiff } from '../../utils/diff-parser';
@@ -281,6 +283,10 @@ function showToast(msg: string): void {
 }
 
 // ── 几何 ──
+// P9：MINW/MINH 从 clampRect/startResize 函数内提升到组件作用域（值不变 680/360）——
+// 拖动（dragRect）/缩放（startResize）/window 重钳（clampRect）共用同一约束。
+const MINW = 680;
+const MINH = 360;
 function ensureRect(): void {
   const pad = 8;
   const w = Math.min(1280, window.innerWidth - pad * 2);
@@ -294,8 +300,6 @@ function ensureRect(): void {
 }
 function clampRect(r: { l: number; t: number; w: number; h: number }): { l: number; t: number; w: number; h: number } {
   const pad = 8;
-  const MINW = 680;
-  const MINH = 360;
   const w = Math.max(MINW, Math.min(r.w, window.innerWidth - pad * 2));
   const h = Math.max(MINH, Math.min(r.h, window.innerHeight - pad * 2));
   return {
@@ -324,8 +328,6 @@ function startResize(e: MouseEvent, dir: string): void {
   const start = { ...rect.value };
   const sx = e.clientX;
   const sy = e.clientY;
-  const MINW = 680;
-  const MINH = 360;
   document.body.classList.add('rz-busy');
   document.body.style.cursor = cursorFor(dir);
   const move = (ev: MouseEvent): void => {
@@ -385,6 +387,50 @@ function startSplitter(e: MouseEvent): void {
   };
   document.addEventListener('mousemove', move);
   document.addEventListener('mouseup', up);
+}
+
+// ── 标题栏拖动（P9）──
+// 豁免选择器与 P4 use-dialog-shell 同款判定：目标落在按钮/输入框等交互元素内不启动拖动。
+const DRAG_IGNORE_SELECTOR = 'button, input, select, textarea, a, [contenteditable], .dlg-no-drag';
+// 拖动会话解绑器（供卸载兜底；pointerup 正常结束时置回 null）。
+let dragUp: (() => void) | null = null;
+// 拖动：平移量交给 P4 纯函数 dragRect 做视口全钳（永不部分出视口）；期间沿用本文件 body.rz-busy
+// 机制（禁文本选择 + .rz 手柄退出命中，全局样式块在本组件底部）。
+function startDrag(e: PointerEvent): void {
+  if (!rect.value) return; // 未测量帧（rect null 回退态）不拖
+  if (e.button !== 0) return; // 仅主键
+  const target = e.target as Element | null;
+  if (target && target.closest(DRAG_IGNORE_SELECTOR)) return; // 关闭/搜索等按钮照常可点
+  e.preventDefault();
+  const start = { left: rect.value.l, top: rect.value.t, width: rect.value.w, height: rect.value.h };
+  const sx = e.clientX;
+  const sy = e.clientY;
+  document.body.classList.add('rz-busy');
+  const move = (ev: PointerEvent): void => {
+    const r = dragRect(start, ev.clientX - sx, ev.clientY - sy, window.innerWidth, window.innerHeight, {
+      minW: MINW,
+      minH: MINH,
+      pad: 8,
+    });
+    rect.value = { l: r.left, t: r.top, w: r.width, h: r.height };
+  };
+  const up = (): void => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    document.body.classList.remove('rz-busy');
+    dragUp = null;
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+  dragUp = up;
+}
+// 双击标题栏 → ensureRect() 复位居中（按钮/输入框内双击不触发复位）。
+function onHeaderDblClick(e: MouseEvent): void {
+  const target = e.target as Element | null;
+  if (target && target.closest(DRAG_IGNORE_SELECTOR)) return;
+  ensureRect();
 }
 
 let resizeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -463,6 +509,7 @@ window.addEventListener('resize', onWindowResize);
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('resize', onWindowResize);
+  dragUp?.(); // 拖动中卸载兜底：解绑 window 指针监听并清 rz-busy
   if (toastTimer) clearTimeout(toastTimer);
   if (resizeTimer) clearTimeout(resizeTimer);
   // A9：卸载兜底出栈（release 幂等）。
@@ -496,7 +543,7 @@ onBeforeUnmount(() => {
         <div ref="splitterEl" class="diff-splitter" title="拖动调整列表宽度" @mousedown="startSplitter"></div>
 
         <div class="diff-main">
-          <header class="diff-header">
+          <header class="diff-header" @pointerdown="startDrag" @dblclick="onHeaderDblClick">
             <div class="diff-header__main">
               <span
                 class="seal"
@@ -816,6 +863,9 @@ onBeforeUnmount(() => {
   padding: 12px 10px 12px 16px;
   border-bottom: 1px solid var(--color-border);
   background: linear-gradient(180deg, color-mix(in srgb, var(--color-panel-soft) 55%, transparent), transparent 80%);
+  /* P9：标题栏拖动——抓手光标；触屏禁浏览器手势接管（拖动走 pointer 事件） */
+  cursor: move;
+  touch-action: none;
 }
 .diff-header__main {
   flex: 1;

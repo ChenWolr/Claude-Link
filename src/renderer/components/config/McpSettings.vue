@@ -19,6 +19,8 @@ import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { useConfigStore } from '../../stores/config-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+import { useDialogShell } from '../../composables/use-dialog-shell';
+import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import { normalizeDirKey } from '../../../shared/project-skills';
 import type { McpManagedServer } from '../../../shared/types/config';
 // preload 视图类型（type-only，env.d.ts 同源先例；字段形状以 src/preload/api.ts 为准）。
@@ -812,6 +814,16 @@ async function confirmImport(): Promise<void> {
   }
 }
 
+// ── 弹窗壳（计划 2026-10-14 §2 P8）：两弹窗各自独立 useDialogShell——标题栏拖动 / 8 向缩放 /
+// 视口重钳 / 双击复位居中；无 initialSize（打开时测卡片自然尺寸，rect null 帧回退 CSS 静态居中）。
+// 两实例 rect 各自独立：交替开关互不污染；纯壳层接线，编辑/导入业务逻辑零触碰。
+const editCardRef = ref<HTMLElement | null>(null);
+const editShell = useDialogShell(showEditDialog, editCardRef, { minW: 480, minH: 360 });
+const editShellStyle = editShell.style; // ComputedRef 须解包为 script 顶层（P4 使用方规范）
+const importCardRef = ref<HTMLElement | null>(null);
+const importShell = useDialogShell(showImportDialog, importCardRef, { minW: 480, minH: 360 });
+const importShellStyle = importShell.style;
+
 // ── 弹窗 Esc（关闭不丢已填内容；关闭为内容保留型操作，与交互弹窗同拍的边缘互不损坏数据）─
 // r3-F7/R6：接入 use-esc-stack 全局层级裁决——弹窗在场注册 mcpDialog 层（Esc 层级 1199，低于
 // 交互层 1200：与待决交互弹窗并存时 Esc 只关交互层；.mcp-mask CSS z-index 仍为 1200，
@@ -1094,8 +1106,8 @@ const scopeNoteHead = computed<string>(() => {
     <Teleport to="body">
       <!-- 添加 / 编辑弹窗（G13 定稿 form-grid；一期保存位置仅管理库可写入） -->
       <div v-if="showEditDialog" class="mcp-mask" role="presentation" @click.self="closeEditDialog">
-        <div class="mcp-modal" role="dialog" aria-modal="true" aria-labelledby="mcp-edit-title">
-          <div class="mcp-modal__head">
+        <div ref="editCardRef" class="mcp-modal" role="dialog" aria-modal="true" aria-labelledby="mcp-edit-title" :style="editShellStyle">
+          <div class="mcp-modal__head" @pointerdown="editShell.beginDrag" @dblclick="editShell.resetToCenter">
             <h3 id="mcp-edit-title" class="mcp-modal__title">{{ isEditMode ? '编辑服务器' : '添加服务器' }}</h3>
             <button class="mcp-modal__close" type="button" aria-label="关闭弹窗" @click="closeEditDialog">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -1219,13 +1231,14 @@ const scopeNoteHead = computed<string>(() => {
             <button class="mcp-btn" type="button" @click="closeEditDialog">取消</button>
             <button class="mcp-btn mcp-btn--primary" type="button" :disabled="!formValid || saving" @click="saveForm">{{ saving ? '保存中…' : '保存并启用' }}</button>
           </div>
+          <DialogResizeHandles :binder="editShell" />
         </div>
       </div>
 
       <!-- 导入 JSON 弹窗（textarea + 解析预览 + 同名跳过标记；导入目标=Claude Link 管理） -->
       <div v-if="showImportDialog" class="mcp-mask" role="presentation" @click.self="closeImportDialog">
-        <div class="mcp-modal" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title">
-          <div class="mcp-modal__head">
+        <div ref="importCardRef" class="mcp-modal" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title" :style="importShellStyle">
+          <div class="mcp-modal__head" @pointerdown="importShell.beginDrag" @dblclick="importShell.resetToCenter">
             <h3 id="mcp-import-title" class="mcp-modal__title">导入 JSON</h3>
             <button class="mcp-modal__close" type="button" aria-label="关闭弹窗" @click="closeImportDialog">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -1272,6 +1285,7 @@ const scopeNoteHead = computed<string>(() => {
             <button class="mcp-btn" type="button" @click="closeImportDialog">取消</button>
             <button class="mcp-btn mcp-btn--primary" type="button" :disabled="selectedImportableCount === 0 || importing" @click="confirmImport">{{ importing ? '导入中…' : selectedImportableCount > 0 ? `导入 ${selectedImportableCount} 台` : '导入' }}</button>
           </div>
+          <DialogResizeHandles :binder="importShell" />
         </div>
       </div>
     </Teleport>
@@ -2032,6 +2046,7 @@ const scopeNoteHead = computed<string>(() => {
 }
 
 .mcp-modal {
+  position: absolute; /* shell rect 绑定后由 :style 定位；未测量帧（rect null）无 inset，静态位置回退遮罩 flex 居中（P8） */
   width: min(35rem, 94vw);
   max-height: min(44rem, 86vh);
   display: flex;
@@ -2065,6 +2080,8 @@ const scopeNoteHead = computed<string>(() => {
   align-items: center;
   padding: 1rem 1.25rem 0.875rem;
   border-bottom: 1px solid var(--color-border);
+  cursor: move; /* 标题栏拖动（P8）；head 内关闭按钮为 button，shell 忽略规则自动豁免 */
+  touch-action: none;
 }
 
 .mcp-modal__title {
