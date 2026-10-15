@@ -359,6 +359,37 @@ a:focus-visible,
   background: rgba(255, 255, 255, 0.24);
 }
 
+/* ── 弹窗壳：8 向缩放手柄 + 拖动/缩放期间 body 态（DialogResizeHandles / use-dialog-shell 专用）──
+   手柄渲染在各弹窗卡片内部，卡片自带 position:absolute（shell rect 绑定后），故此处 absolute 即贴卡片边。 */
+.dlg-rz {
+  position: absolute;
+  z-index: 10;
+  touch-action: none;
+}
+.dlg-rz--n { top: 0; left: 12px; right: 12px; height: 6px; cursor: n-resize; }
+.dlg-rz--s { bottom: 0; left: 12px; right: 12px; height: 6px; cursor: s-resize; }
+.dlg-rz--e { top: 12px; bottom: 12px; right: 0; width: 6px; cursor: e-resize; }
+.dlg-rz--w { top: 12px; bottom: 12px; left: 0; width: 6px; cursor: w-resize; }
+.dlg-rz--ne, .dlg-rz--nw, .dlg-rz--se, .dlg-rz--sw { width: 12px; height: 12px; }
+.dlg-rz--ne { top: 0; right: 0; cursor: ne-resize; }
+.dlg-rz--nw { top: 0; left: 0; cursor: nw-resize; }
+.dlg-rz--se { bottom: 0; right: 0; cursor: se-resize; }
+.dlg-rz--sw { bottom: 0; left: 0; cursor: sw-resize; }
+/* hover 扩大命中：命中基础条后 ::after 外扩 12px，快速拖动不易脱手 */
+.dlg-rz:hover::after {
+  content: '';
+  position: absolute;
+  inset: -12px;
+}
+/* 拖动/缩放期间：禁文本误选；手柄退出命中（防拖动途中误触缩放） */
+body.dlg-shell-busy {
+  user-select: none;
+  cursor: inherit;
+}
+body.dlg-shell-busy .dlg-rz {
+  pointer-events: none;
+}
+
 /* 可访问性：减少动态时关闭所有聊天/工具/任务状态的无限动画，避免持续闪烁。 */
 @media (prefers-reduced-motion: reduce) {
   .cursor,
