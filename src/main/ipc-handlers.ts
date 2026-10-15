@@ -4,7 +4,7 @@
 // 注册 cli / config / workspace / provider / changes / settings / skill / session / message / claude-plan / commands / chat / interaction / task / queue / attachment / bridge 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
-import { BrowserWindow, ipcMain, app } from 'electron';
+import { BrowserWindow, ipcMain, app, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性/目录校验
@@ -20,7 +20,8 @@ import { getAppUpdateInfo, checkForAppUpdates, installAppUpdate } from './module
 import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
-import { listRoots, listDir, mkdir, statPath, isValidFolderName } from './modules/fs-picker';
+import { listRoots, listDir, mkdir, statPath, isValidFolderName, renamePath } from './modules/fs-picker';
+import type { FsTrashFailure } from '../shared/types/fs-picker';
 import { badDirCacheHas, badDirCacheMark, collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
 import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
@@ -295,6 +296,47 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.FS_STAT, async (_event, p: string) => {
     if (typeof p !== 'string' || !p.trim()) throw new Error('Invalid path');
     return statPath(p);
+  });
+  // 文件操作补齐三通道（docs/plans/2026-10-14-picker-file-ops-idea-parity-plan.md §2 P2）。
+  // FS_RENAME：同目录重命名，两参走对象载荷；入参 typeof 校验（既有形态），名称/冲突/存在性判定交给 renamePath。
+  ipcMain.handle(IPC_CHANNELS.FS_RENAME, async (_event, req: unknown) => {
+    const r = (req ?? {}) as Record<string, unknown>;
+    if (typeof r.oldPath !== 'string' || !r.oldPath.trim() || typeof r.newName !== 'string') throw new Error('Invalid rename arguments');
+    return renamePath(r.oldPath, r.newName);
+  });
+  // FS_TRASH：多选移入回收站。入参温和校验（非数组/空数组/超 200/含非 string）→ 不抛异常，返回逐项
+  // error 的温和拒绝结果；随后逐项【串行】await shell.trashItem（回收站 shell 调用不宜并发轰炸），
+  // 失败按 errno 映射（ENOENT→not-found，其余含网络位置不支持→error）入 failed，尽力而为不停（部分成功语义）。
+  ipcMain.handle(IPC_CHANNELS.FS_TRASH, async (_event, req: unknown) => {
+    const r = (req ?? {}) as Record<string, unknown>; // preload 发对象载荷 { paths }（对齐 FS_RENAME 解构形态）
+    const paths = r.paths;
+    const strItems = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : [];
+    if (!Array.isArray(paths) || paths.length === 0 || paths.length > 200 || strItems.length !== paths.length) {
+      return { ok: false, trashed: [] as string[], failed: strItems.map((p) => ({ path: p, error: 'error' as const })) };
+    }
+    const trashed: string[] = [];
+    const failed: FsTrashFailure[] = [];
+    for (const p of strItems) {
+      try {
+        await shell.trashItem(p);
+        trashed.push(p);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        failed.push({ path: p, error: code === 'ENOENT' ? 'not-found' : 'error' });
+      }
+    }
+    return { ok: failed.length === 0, trashed, failed };
+  });
+  // FS_SHOW_IN_EXPLORER：资源管理器定位。路径不存在时 Electron 静默不弹；异常兜底归 ok:false（渲染层静默降级不报错）。
+  ipcMain.handle(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, async (_event, req: unknown) => {
+    const r = (req ?? {}) as Record<string, unknown>; // preload 发对象载荷 { path }（对齐 FS_RENAME 解构形态）
+    if (typeof r.path !== 'string' || !r.path.trim()) throw new Error('Invalid path');
+    try {
+      await shell.showItemInFolder(r.path);
+      return { ok: true };
+    } catch {
+      return { ok: false };
+    }
   });
 
   // 导出目标协商应答（T5）：渲染层 FilePickerDialog 选定后回传；jobId 在 Map 中才有效（防重放/伪造他人 job）。

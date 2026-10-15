@@ -41,6 +41,12 @@ export const IPC_CHANNELS = {
   FS_LIST_DIR: 'fs:listDir',
   FS_MKDIR: 'fs:mkdir',
   FS_STAT: 'fs:stat',
+  // 文件操作补齐三通道（docs/plans/2026-10-14-picker-file-ops-idea-parity-plan.md §2 P2）：
+  // rename=同目录重命名（主进程 renamePath）；trash=多选移入回收站（shell.trashItem 串行尽力而为）；
+  // showInExplorer=资源管理器定位（shell.showItemInFolder）。
+  FS_RENAME: 'fs:rename',
+  FS_TRASH: 'fs:trash',
+  FS_SHOW_IN_EXPLORER: 'fs:showInExplorer',
   // 导出目标协商（主→渲染请求 + 渲染→主应答；#3/#4 原生保存框替换）。
   EXPORT_RESOLVE_TARGET: 'export-image:resolveTarget',
   EXPORT_REQUEST_TARGET: 'export-image:requestTarget',

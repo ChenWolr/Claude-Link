@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（93 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（96 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -14,7 +14,7 @@ import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, B
 import type { AppUpdateInfo, AppUpdateState } from '../shared/types/update';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
-import type { FsListResult, FsMkdirResult, FsRootsResult, FsStatResult, ExportTargetRequest, ExportTargetResponse } from '../shared/types/fs-picker';
+import type { FsListResult, FsMkdirResult, FsRenameResult, FsRootsResult, FsShowResult, FsStatResult, FsTrashResult, ExportTargetRequest, ExportTargetResponse } from '../shared/types/fs-picker';
 
 // ── MCP 管理载荷类型（P4；内联镜像主进程 src/main/modules/mcp/mcp-scanner.ts / mcp-probe.ts
 //    的视图导出形状——preload 不 import 主进程模块，type 结构镜像，字段以该两文件实现为准。
@@ -197,6 +197,11 @@ export interface ClaudeLinkAPI {
   fsListDir: (target: string) => Promise<FsListResult>;
   fsMkdir: (parent: string, name: string) => Promise<FsMkdirResult>;
   fsStat: (path: string) => Promise<FsStatResult>;
+  // 文件操作补齐（P2，docs/plans/2026-10-14-picker-file-ops-idea-parity-plan.md §2 P2）：
+  // 同目录重命名 / 多选移入回收站（部分成功语义）/ 资源管理器定位。
+  fsRename: (oldPath: string, newName: string) => Promise<FsRenameResult>;
+  fsTrash: (paths: string[]) => Promise<FsTrashResult>;
+  fsShowInExplorer: (path: string) => Promise<FsShowResult>;
   // 导出目标协商（T5）：主→渲染请求选择保存目标；渲染层选定后经 resolveTarget 应答。
   resolveExportTarget: (jobId: string, resp: ExportTargetResponse) => Promise<boolean>;
   onExportTargetRequested: (callback: (req: ExportTargetRequest) => void) => () => void;
@@ -366,6 +371,10 @@ export function createApi(): ClaudeLinkAPI {
     fsListDir: (target) => ipcRenderer.invoke(IPC_CHANNELS.FS_LIST_DIR, target) as Promise<FsListResult>,
     fsMkdir: (parent, name) => ipcRenderer.invoke(IPC_CHANNELS.FS_MKDIR, parent, name) as Promise<FsMkdirResult>,
     fsStat: (p) => ipcRenderer.invoke(IPC_CHANNELS.FS_STAT, p) as Promise<FsStatResult>,
+    // 文件操作补齐（P2）：两参以上走对象载荷，对齐主进程 handler 入参形状。
+    fsRename: (oldPath, newName) => ipcRenderer.invoke(IPC_CHANNELS.FS_RENAME, { oldPath, newName }) as Promise<FsRenameResult>,
+    fsTrash: (paths) => ipcRenderer.invoke(IPC_CHANNELS.FS_TRASH, { paths }) as Promise<FsTrashResult>,
+    fsShowInExplorer: (path) => ipcRenderer.invoke(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, { path }) as Promise<FsShowResult>,
     // 导出目标协商（T5）：应答主进程的保存目标请求 / 订阅请求推送（App.vue 全局单订阅者）。
     resolveExportTarget: (jobId, resp) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, jobId, resp) as Promise<boolean>,
     onExportTargetRequested: (callback) => {
