@@ -14,7 +14,7 @@ import type { AppConfig } from '../shared/types/config';
 import type { Session } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
-import { normalizeDirKey } from '../shared/project-skills';
+import { normalizeDirKey, mergeProjectDirs } from '../shared/project-skills';
 import { IPC_CHANNELS } from '../shared/constants';
 import { getAppUpdateInfo, checkForAppUpdates, installAppUpdate } from './modules/app-updater';
 import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
@@ -36,6 +36,7 @@ import {
   type McpManagedSaveEntry,
 } from './modules/mcp/mcp-config';
 import { collectMcpSnapshot } from './modules/mcp/mcp-scanner';
+import { writeScopedMcpServer, type ScopedMcpEntry } from './modules/mcp/mcp-writer';
 import {
   dropProbeCacheByPrefix,
   getCachedProbeReports,
@@ -505,6 +506,31 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (cached !== undefined) return cached;
       return { key, status: 'fail' as const, toolCount: 0, error: '探活结果缺失', probedAt: Date.now() };
     });
+  });
+  // P8 双向写入（用户级/项目级）：body = { scope, dir?, entry, mode } → writeScopedMcpServer
+  //（mcp-writer.ts：user → ~/.claude.json / project → <dir>/.mcp.json 顶层 mcpServers 条目
+  // upsert/remove；哨兵值按原文件还原，瞬态改名 hint 还原后剥离；tmp+rename 原子写 + mtime
+  // 冲突重试）→ { overwrote }。安全边界（必须）：scope=project 时 dir 必须属于已知项目目录集
+  // ——与 MCP_SNAPSHOT_GET 同源（mergeProjectDirs(listRecentWorkspaces(), 默认工作目录) 按
+  // normalizeDirKey 归一比对），防渲染层任意路径写；user 作用域 userHome 由主进程自取
+  // effectiveUserHome() ?? os.homedir()（与注入链同口径），渲染层不可传。
+  ipcMain.handle(IPC_CHANNELS.MCP_WRITE_SCOPED, async (_event, body: unknown): Promise<{ overwrote: boolean }> => {
+    if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP write payload');
+    const req = body as { scope?: unknown; dir?: unknown; entry?: unknown; mode?: unknown };
+    if (req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP write scope');
+    if (req.mode !== 'upsert' && req.mode !== 'remove') throw new Error('Invalid MCP write mode');
+    if (typeof req.entry !== 'object' || req.entry === null) throw new Error('Invalid MCP write entry');
+    const entry = req.entry as ScopedMcpEntry;
+    if (typeof entry.name !== 'string' || entry.name === '') throw new Error('Invalid MCP write entry name');
+    let dir: string | undefined;
+    if (req.scope === 'project') {
+      if (typeof req.dir !== 'string' || req.dir === '') throw new Error('Invalid MCP write dir');
+      const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+      const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
+      if (!knownKeys.has(normalizeDirKey(req.dir))) throw new Error('目标目录不在已知项目目录集中，已拒绝写入');
+      dir = req.dir;
+    }
+    return writeScopedMcpServer({ scope: req.scope, dir, entry, mode: req.mode, userHome: effectiveUserHome() ?? os.homedir() });
   });
 
   // 多供应商模型库：设置页（可选项库）与 会话选择器（只读）共用。
@@ -1152,46 +1178,6 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return runTaskNow(taskId, mainWindow);
   });
 
-  // D 点：后台任务（task_* 编排）终态输出文件只读。入参对象载荷 { outputFile }：
-  // 校验绝对路径 + fs.stat 为常规文件 → 只读打开、最多读前 512KB（超出 truncated:true）。
-  // 安全面：纯 fs.stat/fs.open+read，不执行、不写、无路径拼接（绝对路径直读），512KB 上限封顶。
-  ipcMain.handle(IPC_CHANNELS.TASK_OUTPUT_READ, async (_event, req: unknown): Promise<{ content: string; truncated: boolean }> => {
-    const r = (req ?? {}) as Record<string, unknown>;
-    if (typeof r.outputFile !== 'string' || !r.outputFile.trim() || !path.isAbsolute(r.outputFile)) {
-      throw new Error('输出文件不可读：路径无效');
-    }
-    const outputFile = r.outputFile;
-    const MAX_BYTES = 512 * 1024;
-    let stat: fs.Stats;
-    try {
-      stat = await fsp.stat(outputFile);
-    } catch {
-      throw new Error('输出文件不存在');
-    }
-    if (!stat.isFile()) throw new Error('输出文件不可读：不是常规文件');
-    let handle: fs.promises.FileHandle;
-    try {
-      handle = await fsp.open(outputFile, 'r');
-    } catch {
-      throw new Error('输出文件不可读');
-    }
-    try {
-      const buf = Buffer.alloc(Math.min(stat.size, MAX_BYTES));
-      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
-      return {
-        content: buf.subarray(0, bytesRead).toString('utf8'),
-        truncated: stat.size > bytesRead,
-      };
-    } catch {
-      throw new Error('输出文件不可读');
-    } finally {
-      try {
-        await handle.close();
-      } catch {
-        // 关闭失败不掩盖读取错误（原错误从 try/catch 正常抛出）。
-      }
-    }
-  });
 
   // 熔断提示行「全部恢复」：全部 paused→pending + 立即开始全量倒计时。
   ipcMain.handle(IPC_CHANNELS.QUEUE_RESUME_ALL, async (_event, sessionId: string) => {

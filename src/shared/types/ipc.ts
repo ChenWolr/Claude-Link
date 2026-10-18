@@ -70,6 +70,11 @@ export const IPC_CHANNELS = {
   MCP_MANAGED_SAVE: 'mcp:managedSave',
   MCP_OVERRIDE_SET: 'mcp:overrideSet',
   MCP_PROBE: 'mcp:probe',
+  // P8 双向写入：user → ~/.claude.json / project → <dir>/.mcp.json 顶层 mcpServers 条目
+  // upsert/remove（实现 src/main/modules/mcp/mcp-writer.ts）。body = { scope, dir?, entry, mode }
+  // → { overwrote }；project 的 dir 须属已知项目目录集（与 snapshot 同源列表，防任意路径写）；
+  // 哨兵值由 writer 按原文件还原，瞬态改名 hint 还原后剥离。
+  MCP_WRITE_SCOPED: 'mcp:writeScoped',
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，test/query 由主进程自行解密，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',

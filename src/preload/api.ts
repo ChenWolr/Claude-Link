@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（97 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（98 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -78,6 +78,31 @@ export type McpProbeTarget = { target: 'all' } | { target: 'single'; name: strin
 export interface McpManagedSaveEntry extends McpManagedServer {
   envRenameFrom?: Record<string, string>;
   headersRenameFrom?: Record<string, string>;
+}
+
+/** mcp:writeScoped 提交条目（主进程 src/main/modules/mcp/mcp-writer.ts:ScopedMcpEntry 同构
+ *  镜像——preload 不 import 主进程模块，结构以该文件为准）：瞬态改名 hint（payload 键 → 已存
+ *  原键）供主进程哨兵还原定位原值，还原后剥离、绝不落盘。 */
+export interface McpScopedWriteEntry {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  envRenameFrom?: Record<string, string>;
+  headersRenameFrom?: Record<string, string>;
+}
+
+/** mcp:writeScoped 请求体：user → ~/.claude.json（dir 忽略，userHome 由主进程自取）；
+ *  project → <dir>/.mcp.json（dir 必填，须属已知项目目录集——主进程按 snapshot 同源目录集
+ *  校验，防任意路径写）。 */
+export interface McpWriteScopedPayload {
+  scope: 'user' | 'project';
+  dir?: string;
+  entry: McpScopedWriteEntry;
+  mode: 'upsert' | 'remove';
 }
 
 export interface ClaudeLinkAPI {
@@ -182,6 +207,9 @@ export interface ClaudeLinkAPI {
   saveMcpManaged: (servers: McpManagedSaveEntry[]) => Promise<{ ok: true }>;
   setMcpOverride: (key: string, enabled: boolean) => Promise<{ overrides: Record<string, 'off'> }>;
   probeMcpServers: (target: McpProbeTarget) => Promise<McpProbeReport[]>;
+  // P8 双向写入：用户级/项目级 mcpServers 条目 upsert/remove（哨兵还原在主进程 writer；
+  // overwrote = upsert 命中现有同名，remove 恒 false）。
+  writeMcpScoped: (payload: McpWriteScopedPayload) => Promise<{ overwrote: boolean }>;
   // IM 机器人（飞书/微信 bridge）：凭据掩码读写 / 状态 / 连通测试 / 扫码登录 / 绑定管理。
   bridgeGetConfig: () => Promise<BridgeConfigGetResult>;
   bridgeSaveConfig: (input: BridgeConfigSaveInput) => Promise<BridgeConfigGetResult>;
@@ -352,6 +380,8 @@ export function createApi(): ClaudeLinkAPI {
     setMcpOverride: (key, enabled) =>
       ipcRenderer.invoke(IPC_CHANNELS.MCP_OVERRIDE_SET, { key, enabled }) as Promise<{ overrides: Record<string, 'off'> }>,
     probeMcpServers: (target) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PROBE, target) as Promise<McpProbeReport[]>,
+    // P8 双向写入（对象载荷，对齐主进程 handler 入参形状）。
+    writeMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_WRITE_SCOPED, payload) as Promise<{ overwrote: boolean }>,
     // IM 机器人（飞书/微信 bridge）。
     bridgeGetConfig: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_GET) as Promise<BridgeConfigGetResult>,
     bridgeSaveConfig: (input) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, input),
