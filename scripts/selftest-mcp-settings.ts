@@ -14,6 +14,11 @@
 //   E sdk-mcp 组：buildSessionMcpOverridesForPin / parseSessionMcpOverrides /
 //     mergeMcpServersIntoSettings（空配置字节级一致 / 会话钉住优先 / 存量 null 回退全局 /
 //     幽灵键跳过不崩；io 注入内存 stub，默认实现暂缺不在此路径）。
+//     E3g/E3h（B-1，2026-10-16）：默认 io（readUser/readProject 不覆盖，仅钉 userHome 到临时
+//     目录）的坏目录负缓存——badDirCacheMark 后项目层/用户层缺席，共享负缓存键形态
+//     （项目=原始目录串、用户=mcp-user:<home>）与未标记对照。
+//     E3i（round-002 修复 F2，2026-10-16）：真实读失败（目录形态 .mcp.json，非 ENOENT）→
+//     默认 io 自动 mark + 重调负缓存短路；损坏 JSON / ENOENT 两反例不 mark。
 //   F §1.3 脱敏闭环组（r3 修复 F2 新增）：maskMcpServersForRenderer（值全变哨兵/键保留/
 //     入参不被变异/无该字段不添加）+ restoreMaskedMcpServers（同键哨兵还原/改名 hint/无 hint
 //     丢键/非哨兵透传/id 对位优先 name 兜底/瞬态字段剥离）+ mask→restore 往返 deepEqual。
@@ -25,12 +30,20 @@
 //     三态互斥的静态源码钉（渲染层组件无纯函数可行为级断言，沿 tdd-bridge-ui-static-verify
 //     先例读源码断言）：消失态文案逐字存在、isProjectDirGone 判定含 project 作用域守卫
 //    （消失态不得误报管理库/user/未选目录态）、p4 快照失败占位先于空态块、分支嵌套顺序。
+//     H6（p6 B-3，2026-10-16 新增）：导入归一 normalizeImportEntry 区域值级清洗同步钉——
+//     env/headers 不得以 `as Record<string, string>` 断言透传（与主进程 pickStringRecord
+//     值级清洗防「双处同步」漂移）。
 //   I D-V1-1 注入挂载组（2026-10-13 mcp-followup R4 修复新增）：buildNativeSdkOptionsCore 在
-//     settings.mcpServers 非空时把同一归一 map 挂到顶层 Options.mcpServers（strictMcpConfig=true
-//     下 SDK 只认顶层 mcpServers，settings 块内键被忽略——D-V1-1 根因）；空配置（三层全空/全禁用/
+//     settings.mcpServers 非空时把同一归一 map 挂到顶层 Options.mcpServers（strictMcpConfig 下
+//     SDK 只认顶层 mcpServers，settings 块内键被忽略——D-V1-1 根因）；空配置（三层全空/全禁用/
 //     空对象防御边界）零挂载；挂载载体（null 原型）可被 JSON 无损序列化（SDK --mcp-config 走
 //     JSON.stringify）。全链真实构造：mergeMcpServersIntoSettings 产 settings 块 → 核心工厂产 options。
 //     （sdk-command-options.ts 仅类型 import，纯 node 可直接 import。）
+//     I4/I5（B-2 strict 门控化，2026-10-16 新增）：strictMcpConfig 改为「挂载 ∨ effective
+//     overrides 激活」门控——未接管空配置 strict=false 恢复引擎原生加载（I4）；merged 空+钉住
+//     禁用键仍 strict=true 保底压制（I5）。
+//     I6（round-002 修复 F1，2026-10-16）：sdk-backend 两生产构造点（buildSdkOptions /
+//     buildProbeSdkOptions）钉住优先公式的静态源码钉（防退化回 config.mcpOverrides 直判）。
 //
 // RED 阶段预期（p9a，B/C/D 组函数为 P2 桩、E 组函数为 P5 桩，桩体一律 throw
 // not implemented）：A 组全 PASS，B/C/D/E 组全 FAIL（失败详情为「调用抛错：not
@@ -60,6 +73,8 @@ import {
   mergeMcpServersIntoSettings,
 } from '../src/main/modules/mcp/sdk-mcp';
 import { clearMcpRawCache, readUserMcpServersRawSync } from '../src/main/modules/mcp/mcp-scanner';
+// E3g/E3h（B-1 默认 io 坏目录负缓存，2026-10-16）被测依赖：与 Skill/快照链同实例的共享负缓存。
+import { badDirCacheHas, badDirCacheMark } from '../src/main/modules/project-skills';
 // D-V1-1 注入挂载组（I 组）被测函数：核心 options 工厂（仅类型 import，纯 node 可直接 import）。
 import { buildNativeSdkOptionsCore } from '../src/main/modules/sdk-command-options';
 import type { AppConfig, McpManagedServer } from '../src/shared/types/config';
@@ -616,6 +631,158 @@ const U2_SDK = { type: 'sse', url: 'https://user-u2/sse' };
   check('E3f', '会话钉住含已删除同名服务器键 → 跳过不崩，其余照常注入', sub.length === 0, sub.join('; '));
 }
 
+// E3g 默认 io 坏目录负缓存·项目级（B-1，2026-10-16）：不带 readUser/readProject 覆盖（默认实现）
+// 调 mergeMcpServersIntoSettings——合法 .mcp.json → 项目层注入；badDirCacheMark(dir)（与 Skill/
+// 快照链同实例的共享负缓存，60s TTL 无清理导出——每个 tmpdir 仅消费一次，finally 清理）后再调 →
+// 项目层缺席（结果等价「目录无 .mcp.json」）；第二个全新 tmpdir 作不标记对照。
+// io 仅注入 userHome 钉到临时空目录（生产同形态 effectiveUserHome()），readUser/readProject 均
+// 走默认实现——绝不触真实 ~/.claude.json（本文件纪律）。
+{
+  const sub: string[] = [];
+  const e3gDir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3g-proj-'));
+  const e3gCtrl = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3g-ctrl-'));
+  const e3gHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3g-home-'));
+  const e3gJson = JSON.stringify({ mcpServers: { p3g: { command: 'npx', args: ['-y', 'e3g-one'] } } });
+  const P3G_SDK = { type: 'stdio', command: 'npx', args: ['-y', 'e3g-one'] };
+  try {
+    fs.writeFileSync(path.join(e3gDir, '.mcp.json'), e3gJson, 'utf8');
+    fs.writeFileSync(path.join(e3gCtrl, '.mcp.json'), e3gJson, 'utf8');
+    const cfg: Pick<AppConfig, 'mcpServers' | 'mcpOverrides'> = { mcpServers: [], mcpOverrides: {} };
+    const e3gIo = { userHome: e3gHome }; // 只钉 userHome；readUser/readProject 走默认实现
+    const r1 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, e3gDir, e3gIo);
+      return out;
+    });
+    if (!r1.ok) sub.push(`默认 io 首调抛错：${errMsg(r1.error)}`);
+    else if (!eq(r1.value.mcpServers, { p3g: P3G_SDK })) sub.push(`默认 io 应注入项目层 p3g：${canon(r1.value.mcpServers)}`);
+    const m = call(() => badDirCacheMark(e3gDir));
+    if (!m.ok) sub.push(`badDirCacheMark 抛错：${errMsg(m.error)}`);
+    const r2 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, e3gDir, e3gIo);
+      return out;
+    });
+    if (!r2.ok) sub.push(`标记后重调抛错：${errMsg(r2.error)}`);
+    else if ('mcpServers' in r2.value) sub.push(`负缓存命中后项目层应缺席（等价目录无 .mcp.json）：${canon(r2.value.mcpServers)}`);
+    const r3 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, e3gCtrl, e3gIo);
+      return out;
+    });
+    if (!r3.ok) sub.push(`未标记对照抛错：${errMsg(r3.error)}`);
+    else if (!eq(r3.value.mcpServers, { p3g: P3G_SDK })) sub.push(`未标记对照目录应照常注入 p3g：${canon(r3.value.mcpServers)}`);
+    check('E3g', '默认 io 项目级负缓存：合法 .mcp.json 注入；badDirCacheMark 后缺席（等价无文件）；未标记对照照常', sub.length === 0, sub.join('; '));
+  } finally {
+    fs.rmSync(e3gDir, { recursive: true, force: true });
+    fs.rmSync(e3gCtrl, { recursive: true, force: true });
+    fs.rmSync(e3gHome, { recursive: true, force: true });
+  }
+}
+
+// E3h 默认 io 坏目录负缓存·用户级（B-1）：键 mcp-user:<home>（命名空间隔离，绝不与项目目录键
+// 碰撞）。tmpdir 伪造 .claude.json：默认 io readUser（userHome 钉临时目录）→ 用户层注入；
+// badDirCacheMark(`mcp-user:<home>`) 后再调 → 用户层缺席；第二个全新 home 作不标记对照；
+// 另钉隔离性子断言：标记前缀键后 badDirCacheHas(原始 home) 仍 false（前缀键不波及项目目录键）。
+{
+  const sub: string[] = [];
+  const e3hHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3h-home-'));
+  const e3hCtrl = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3h-ctrl-'));
+  const e3hJson = JSON.stringify({ mcpServers: { u3h: { command: 'node' } } });
+  const U3H_SDK = { type: 'stdio', command: 'node' };
+  try {
+    fs.writeFileSync(path.join(e3hHome, '.claude.json'), e3hJson, 'utf8');
+    fs.writeFileSync(path.join(e3hCtrl, '.claude.json'), e3hJson, 'utf8');
+    const cfg: Pick<AppConfig, 'mcpServers' | 'mcpOverrides'> = { mcpServers: [], mcpOverrides: {} };
+    const r1 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, null, { userHome: e3hHome });
+      return out;
+    });
+    if (!r1.ok) sub.push(`默认 io 首调抛错：${errMsg(r1.error)}`);
+    else if (!eq(r1.value.mcpServers, { u3h: U3H_SDK })) sub.push(`默认 io 应注入用户层 u3h：${canon(r1.value.mcpServers)}`);
+    const m = call(() => badDirCacheMark(`mcp-user:${e3hHome}`));
+    if (!m.ok) sub.push(`badDirCacheMark 抛错：${errMsg(m.error)}`);
+    const r2 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, null, { userHome: e3hHome });
+      return out;
+    });
+    if (!r2.ok) sub.push(`标记后重调抛错：${errMsg(r2.error)}`);
+    else if ('mcpServers' in r2.value) sub.push(`负缓存命中后用户层应缺席：${canon(r2.value.mcpServers)}`);
+    if (badDirCacheHas(e3hHome)) sub.push('隔离性违背：标记 mcp-user:<home> 前缀键后，原始 home 项目目录键不应命中负缓存');
+    const r3 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, null, { userHome: e3hCtrl });
+      return out;
+    });
+    if (!r3.ok) sub.push(`未标记对照抛错：${errMsg(r3.error)}`);
+    else if (!eq(r3.value.mcpServers, { u3h: U3H_SDK })) sub.push(`未标记对照 home 应照常注入 u3h：${canon(r3.value.mcpServers)}`);
+    check('E3h', '默认 io 用户级负缓存（mcp-user:<home> 键）：伪造 .claude.json 注入；标记后缺席；前缀键不波及原始 home 键；未标记对照照常', sub.length === 0, sub.join('; '));
+  } finally {
+    fs.rmSync(e3hHome, { recursive: true, force: true });
+    fs.rmSync(e3hCtrl, { recursive: true, force: true });
+  }
+}
+
+// E3i 默认 io 真实读失败自动 mark（round-002 修复 F2，2026-10-16）：E3g/E3h 只钉「手动 mark →
+// 缺席」与未标记对照，本断言补「真实读失败（非 ENOENT）→ 默认 io 自动 mark + 60s 内短路」链路，
+// 以及损坏/ENOENT 两反例不得 mark（scanner 三态分类：读异常非 ENOENT → readFailed=true；
+// ENOENT=正常空态 / JSON 损坏 → readFailed=false，见 mcp-scanner readMcpServersFileSyncDetail）。
+// ①目录形态 .mcp.json（mkdirSync 造目录，readFileSync 抛 EISDIR/EPERM 非 ENOENT）→ 默认 io
+//   自动 badDirCacheMark → badDirCacheHas(dirA)=true；重调一次负缓存命中 → 产物无 mcpServers 键；
+// ②损坏 JSON `{bad` → 不 mark；③ENOENT（空目录无 .mcp.json）→ 不 mark。
+// 坑位：badDir 60s TTL 无清理导出——三个 tmpdir 互相独立、不与 E3g/E3h 复用，finally 清理。
+{
+  const sub: string[] = [];
+  const e3iDirA = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3i-dirA-'));
+  const e3iDirB = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3i-dirB-'));
+  const e3iDirC = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3i-dirC-'));
+  const e3iHome = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-e3i-home-'));
+  try {
+    fs.mkdirSync(path.join(e3iDirA, '.mcp.json')); // 目录形态：真实读失败（非 ENOENT）
+    fs.writeFileSync(path.join(e3iDirB, '.mcp.json'), '{bad', 'utf8'); // 损坏：readFailed=false
+    // e3iDirC 不写 .mcp.json：ENOENT 正常空态，readFailed=false
+    const cfg: Pick<AppConfig, 'mcpServers' | 'mcpOverrides'> = { mcpServers: [], mcpOverrides: {} };
+    const e3iIo = { userHome: e3iHome }; // 只钉 userHome 到另一临时空目录（readUser 走 ENOENT 空态）；readUser/readProject 均默认实现
+    const r1 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, e3iDirA, e3iIo);
+      return out;
+    });
+    if (!r1.ok) sub.push(`①目录形态首调抛错（应静默空表不崩）：${errMsg(r1.error)}`);
+    else if ('mcpServers' in r1.value) sub.push(`①读失败层应静默空表（不注入）：${canon(r1.value.mcpServers)}`);
+    if (!badDirCacheHas(e3iDirA)) sub.push('①真实读失败（目录形态，非 ENOENT）后 badDirCacheHas(dirA) 应为 true——默认 io 未自动 mark');
+    const r1b = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, e3iDirA, e3iIo);
+      return out;
+    });
+    if (!r1b.ok) sub.push(`①负缓存重调抛错：${errMsg(r1b.error)}`);
+    else if ('mcpServers' in r1b.value) sub.push(`①负缓存短路重调产物应无 mcpServers 键：${canon(r1b.value.mcpServers)}`);
+    const r2 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, e3iDirB, e3iIo);
+      return out;
+    });
+    if (!r2.ok) sub.push(`②损坏 JSON 调用抛错（应静默空表不崩）：${errMsg(r2.error)}`);
+    if (badDirCacheHas(e3iDirB)) sub.push('②损坏 JSON（{bad）不得触发 mark（readFailed=false：损坏不缓存）');
+    const r3 = call(() => {
+      const out: Record<string, unknown> = {};
+      mergeMcpServersIntoSettings(out, cfg, null, e3iDirC, e3iIo);
+      return out;
+    });
+    if (!r3.ok) sub.push(`③ENOENT 调用抛错（应静默空表不崩）：${errMsg(r3.error)}`);
+    if (badDirCacheHas(e3iDirC)) sub.push('③ENOENT（无 .mcp.json 正常空态）不得触发 mark');
+    check('E3i', '默认 io 真实读失败自动 mark（目录形态失败→mark+短路；损坏/ENOENT→不 mark）', sub.length === 0, sub.join('; '));
+  } finally {
+    fs.rmSync(e3iDirA, { recursive: true, force: true });
+    fs.rmSync(e3iDirB, { recursive: true, force: true });
+    fs.rmSync(e3iDirC, { recursive: true, force: true });
+    fs.rmSync(e3iHome, { recursive: true, force: true });
+  }
+}
+
 // ── F. §1.3 脱敏闭环组（r3 修复 F2：renderer 出口掩码 + managedSave 哨兵还原）──
 
 console.log('\n=== F. §1.3 脱敏闭环组（maskMcpServersForRenderer / restoreMaskedMcpServers） ===');
@@ -834,9 +1001,26 @@ console.log('\n=== H. R5 三态文案组（McpSettings.vue 项目空态三态互
   check('H5', '项目空态分支嵌套顺序：isProjectDirGone 守卫 → 消失态文案 → 正常空态文案（互斥呈现）；含 v-else 形态子断言（正常空态须为 <template v-else> 起始 + 文案前缀）',
     src.includes(GUARD) && src.includes(NORMAL_VELSE) && src.indexOf(GUARD) < src.indexOf(DISAPPEARED_TEXT) && src.indexOf(DISAPPEARED_TEXT) < src.indexOf(NORMAL_TEXT),
     '守卫/文案顺序不对，或正常空态非 v-else 形态');
+  // p6 B-3（2026-10-16）：导入归一值级清洗同步钉——normalizeImportEntry 区域（其值级清洗
+  // 助手 pickStringRecordLocal 定义起，至 ImportPreviewEntry 接口止）必须做值级过滤（与主进程
+  // mcp-config pickStringRecord 同语义：值非 string 整键丢弃、清洗后空→字段不设），env/headers
+  // 两处 `as Record<string, string>` 断言透传不得回归（防渲染层/主进程「双处同步」再次漂移）。
+  // D6（round-003）：封堵 round-002 复审指出的部分回退规避窗口——不带 as 的裸透传
+  // （entry.env = cfg.env / entry.headers = cfg.headers）同样封禁；带 as 与裸两负向钉并存，
+  // 同时封堵带 cast 与不带 cast 两条回退路径。
+  const NORM_REGION = src.slice(src.indexOf('function pickStringRecordLocal'), src.indexOf('interface ImportPreviewEntry'));
+  check('H6', '导入归一值级清洗同步：normalizeImportEntry 区域（含 pickStringRecordLocal 助手）含值级过滤（typeof val === \'string\'），env/headers 不再以 as Record<string, string> 断言透传，裸透传亦不存在',
+    src.includes('function pickStringRecordLocal')
+      && NORM_REGION.includes("typeof val === 'string'")
+      && NORM_REGION.includes('pickStringRecordLocal(')
+      && !NORM_REGION.includes('entry.env = cfg.env as Record<string, string>')
+      && !NORM_REGION.includes('entry.headers = cfg.headers as Record<string, string>')
+      && !NORM_REGION.includes('entry.env = cfg.env')
+      && !NORM_REGION.includes('entry.headers = cfg.headers'),
+    src === '' ? 'McpSettings.vue 不可读' : '值级过滤缺失或 env/headers 仍为 as 断言/裸透传');
 }
 
-// ── I. D-V1-1 注入挂载组（options.mcpServers 顶层挂载 / 空配置零挂载 / strict 恒 true）──
+// ── I. D-V1-1 注入挂载组（options.mcpServers 顶层挂载 / 空配置零挂载 / strict 门控：挂载∨overrides 激活）──
 // 缺陷语义（D-V1-1）：strictMcpConfig=true 下 SDK 只认顶层 Options.mcpServers（运行时等价
 // --mcp-config 旗标），settings 块内 mcpServers 键被忽略——若核心工厂只把 settings 块放进
 // Options.settings，所有会话 MCP 注入恒失效（会话内 /mcp 答「No MCP servers are configured」）。
@@ -861,7 +1045,7 @@ function optionsFromMergedSettings(
 
 // I1 非空配置全链：settings.mcpServers 非空 → options.mcpServers 必须挂载，且为同一归一 map
 //    （同源同值同引用——不得另起合并/拷贝）；settings 块内 mcpServers 键保留不动（SDK strict 下
-//    忽略它，无害）；strictMcpConfig 恒 true。
+//    忽略它，无害）；非空挂载态 strictMcpConfig=true（B-2 门控：挂载态保持压制引擎原生加载）。
 {
   const sub: string[] = [];
   const cfg: Pick<AppConfig, 'mcpServers' | 'mcpOverrides'> = { mcpServers: [M1_MANAGED], mcpOverrides: {} };
@@ -875,9 +1059,9 @@ function optionsFromMergedSettings(
       if (options.mcpServers !== settings.mcpServers) sub.push('挂载值应为 settings.mcpServers 同一引用（同源同值，不得另起合并/拷贝）');
       if (!eq(options.mcpServers, { u1: U1_SDK, m1: M1_SDK })) sub.push(`挂载 map 应为三层归一产物（user+managed）：${canon(options.mcpServers)}`);
     }
-    if (options.strictMcpConfig !== true) sub.push(`strictMcpConfig 应恒 true：${canon(options.strictMcpConfig)}`);
+    if (options.strictMcpConfig !== true) sub.push(`strictMcpConfig 应为 true（非空挂载态）：${canon(options.strictMcpConfig)}`);
   }
-  check('I1', '非空配置：options.mcpServers 挂载同一归一 map（同源同值）；settings 块键保留；strictMcpConfig 恒 true', sub.length === 0, sub.join('; '));
+  check('I1', '非空配置：options.mcpServers 挂载同一归一 map（同源同值）；settings 块键保留；strictMcpConfig 非空挂载时 true', sub.length === 0, sub.join('; '));
 }
 
 // I2 空配置零挂载：三层全空 / 全部被 override 禁用 / settings.mcpServers 为空对象（防御边界，
@@ -940,6 +1124,109 @@ function optionsFromMergedSettings(
     }
   }
   check('I3', '挂载载体（null 原型）可被 JSON 无损序列化（SDK --mcp-config 兼容）', sub.length === 0, sub.join('; '));
+}
+
+// I4 未接管空配置 strict 门控（B-2，2026-10-16 新增）：三层 MCP 全空且 effective overrides 全空
+//    （= 用户完全未接管 MCP，input.mcpOverridesActive=false）→ options.mcpServers 缺席（零注入
+//    不回归）且 options.strictMcpConfig === false——恢复引擎原生加载（project .mcp.json/user
+//    settings/插件/frontmatter MCP），与 Claude Code 终端行为一致。全链真实构造：merge
+//   （sessionRow=null 回退全局）→ core（mcpOverridesActive 按钉住优先公式现算，与 sdk-backend
+//    两处 core input 构造点同一公式）。
+{
+  const sub: string[] = [];
+  const cfg: Pick<AppConfig, 'mcpServers' | 'mcpOverrides'> = { mcpServers: [], mcpOverrides: {} };
+  const sessionRow: { mcpOverrides: Record<string, 'off'> | null; workingDir?: string | null } | null = null;
+  const out: Record<string, unknown> = { model: 'claude-x', permissions: { allow: ['Bash'] } };
+  const before = JSON.stringify(out);
+  const r = mergeCall(cfg, sessionRow, ioOf(EMPTY_PROJECT), out);
+  if (!r.ok) sub.push(`全链构造失败（merge）：${r.error.message}`);
+  else {
+    // 钉住优先口径：与 sdk-mcp.ts mergeMcpServersIntoSettings overrides 取值同一公式。
+    const effectiveOverrides = sessionRow?.mcpOverrides ?? cfg.mcpOverrides;
+    const r2 = call(() =>
+      buildNativeSdkOptionsCore({
+        env: {},
+        settings: r.value,
+        mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0,
+      }),
+    );
+    if (!r2.ok) sub.push(`全链构造失败（core）：${r2.error.message}`);
+    else {
+      const options = r2.value;
+      if ('mcpServers' in options) sub.push('空配置零注入回归：options.mcpServers 应缺席');
+      if (options.strictMcpConfig !== false) sub.push(`未接管空配置应 strictMcpConfig=false（恢复引擎原生加载）：${canon(options.strictMcpConfig)}`);
+      if (JSON.stringify(r.value) !== before) sub.push('空配置 settings 块应字节级一致（E3a 硬约束联动回归）');
+    }
+  }
+  check('I4', '未接管空配置（三层空+overrides 空，sessionRow=null）：options.mcpServers 缺席且 strictMcpConfig=false（恢复引擎原生加载）', sub.length === 0, sub.join('; '));
+}
+
+// I5 保底分支（B-2，2026-10-16 新增）：merged 空 + 钉住 overrides 非空（会话钉住 user:ghost 禁用、
+//    三层全空 → 幽灵键跳过 merged={}，E3f 同款形态）→ options.mcpServers 缺席（merged 空仍零
+//    挂载）但 options.strictMcpConfig === true——钉住禁用必须保持 strict 压制引擎原生拉起，否则
+//    禁用失效。反例场景钉死：这也是 core input 构造点禁止改用 config.mcpOverrides 判定的根因
+//   （全局空会误得 strict=false，幽灵禁用被引擎原生重新拉起）。
+{
+  const sub: string[] = [];
+  const cfg: Pick<AppConfig, 'mcpServers' | 'mcpOverrides'> = { mcpServers: [], mcpOverrides: {} };
+  const sessionRow = { mcpOverrides: { 'user:ghost': 'off' } as Record<string, 'off'> | null };
+  const r = mergeCall(cfg, sessionRow, ioOf(EMPTY_PROJECT));
+  if (!r.ok) sub.push(`全链构造失败（merge）：${r.error.message}`);
+  else {
+    if ('mcpServers' in r.value) sub.push('前置失败：幽灵键跳过后 merged 应为空，settings 块不应写 mcpServers 键');
+    const effectiveOverrides = sessionRow.mcpOverrides ?? cfg.mcpOverrides;
+    const r2 = call(() =>
+      buildNativeSdkOptionsCore({
+        env: {},
+        settings: r.value,
+        mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0,
+      }),
+    );
+    if (!r2.ok) sub.push(`全链构造失败（core）：${r2.error.message}`);
+    else {
+      const options = r2.value;
+      if ('mcpServers' in options) sub.push('merged 空仍应零挂载：options.mcpServers 应缺席');
+      if (options.strictMcpConfig !== true) sub.push(`钉住禁用态应 strictMcpConfig=true（压制引擎原生加载，禁用生效）：${canon(options.strictMcpConfig)}`);
+    }
+  }
+  check('I5', '保底分支：merged 空+钉住 overrides 非空（幽灵键）→ mcpServers 缺席且 strictMcpConfig=true（钉住禁用压制引擎原生加载）', sub.length === 0, sub.join('; '));
+}
+
+// I6 sdk-backend 钉住优先公式静态钉（round-002 修复 F1，2026-10-16）：I4/I5 在测试内自算
+// mcpOverridesActive 传 core，core 只消费布尔——生产侧 sdk-backend.ts 两构造点
+// （buildSdkOptions / buildProbeSdkOptions）的公式无行为级入口可断言（依赖 Electron runtime），
+// 沿 H 组读源码静态钉先例：两函数体区域各含代码语句形态
+// `const effectiveOverrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;`
+// 与 `mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0`；全文件不得含
+// `mcpOverridesActive: Object.keys(config.mcpOverrides` 直判形态（防退化回全局判定——I5 反例场景）。
+// 申报：两区域内注释（sdk-backend buildSdkOptions/buildProbeSdkOptions 公式注释行）也含裸公式
+// 字面量，裸字面量在「代码退化、注释保留」时漏报——故钉完整语句形态（全文件恰两处、均在真实
+// 代码行，grep 核实），比裸字面量更严。
+// 区域切片锚点（读文件确定）：buildSdkOptions 起 → function buildProbeSdkOptions 止；
+// buildProbeSdkOptions 起 → 其后第一个函数边界 function isCurrentProbe 止。
+{
+  const sdkBackendRel = path.join('src', 'main', 'modules', 'sdk-backend.ts');
+  let src = '';
+  try {
+    src = fs.readFileSync(path.resolve(__dirname, '..', sdkBackendRel), 'utf8');
+  } catch {
+    // 缺文件/不可读：src 保持空串，下列断言走 FAIL 分支（不抛错、不崩脚本）。
+  }
+  const FORMULA_STMT = 'const effectiveOverrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;';
+  const ACTIVE_LINE = 'mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0';
+  const DIRECT_FORM = 'mcpOverridesActive: Object.keys(config.mcpOverrides';
+  const buildStart = src.indexOf('function buildSdkOptions');
+  const probeStart = src.indexOf('function buildProbeSdkOptions');
+  const probeEnd = src.indexOf('function isCurrentProbe');
+  const buildRegion = buildStart >= 0 && probeStart > buildStart ? src.slice(buildStart, probeStart) : '';
+  const probeRegion = probeStart >= 0 && probeEnd > probeStart ? src.slice(probeStart, probeEnd) : '';
+  check('I6', 'sdk-backend 钉住优先公式静态钉（两构造点各含公式，全文件无 config.mcpOverrides 直判形态）',
+    buildRegion.includes(FORMULA_STMT)
+    && buildRegion.includes(ACTIVE_LINE)
+    && probeRegion.includes(FORMULA_STMT)
+    && probeRegion.includes(ACTIVE_LINE)
+    && !src.includes(DIRECT_FORM),
+    src === '' ? 'sdk-backend.ts 不可读' : '公式缺失/错位（两构造点须各含钉住优先公式语句）或出现 config.mcpOverrides 直判形态');
 }
 
 // ── 汇总与退出码 ─────────────────────────────────────────────────────────────

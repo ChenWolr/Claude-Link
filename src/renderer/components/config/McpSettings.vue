@@ -1,6 +1,8 @@
 <script setup lang="ts">
 // McpSettings.vue — 设置页 MCP tab 内容（计划 §2 P7：p7a UI 骨架 + p7b 弹窗/CRUD/导入/探活接线）。
-// 视觉唯一基准：docs/prototypes/mcp-tab/round3-g13-hybrid.html（G13 融合稿）逐区块移植——
+// 视觉基准：卡片列表区自 2026-10-17 点 C2 起以 docs/prototypes/mcp-tab/round4-slim-c.html
+//（风格 C「分组面板」：按传输分组+组头计数+左侧状态色条+实底小方标+自绘深色气泡 tooltip）
+// 为唯一基准；左栏 rail 与弹窗 chrome 沿用 round3-g13-hybrid.html（G13 融合稿）。
 // px→rem（16 基准）、色值一律 variables.css token（项目紫沿用 ConfigPage skill-md 先例的字面
 // #7C5CFC/#5F3DC4，不新增全局 token）、类名统一 mcp- 前缀防冲突、假数据换真实数据流。
 // 数据流：管理库 = config store 只读投影 + saveMcpManaged 落盘后 getConfig() 回读刷新（本组件
@@ -12,9 +14,12 @@
 // getConfigForRenderer 掩码为哨兵 MASK_SENTINEL（8×U+25CF）；编辑弹窗回显哨兵，提交时哨兵值
 // 照传（键改名附 envRenameFrom/headersRenameFrom 瞬态 hint），由主进程 mcp:managedSave 的
 // restoreMaskedMcpServers 按已存条目还原——渲染层全程零明文，哨兵绝不落配置。
-// 一期边界（P8 前）：添加/编辑弹窗「保存位置」仅 Claude Link 管理可真正写入，用户级/项目级
-// 段位呈现但选即提示（toast + inline hint，交互不死锁可切回）；导入 JSON 在渲染层本地归一
-//（normalizeImportEntry 与主进程 normalizeMcpEntry 规则同步，P8 改走主进程统一解析）。
+// P8 双向写入（2026-10-17）：保存位置三作用域全部可真正写入——user/project 走 mcp:writeScoped
+// （主进程 mcp-writer.ts：~/.claude.json / <dir>/.mcp.json 整树保留写 + 哨兵按原文件还原 +
+// tmp+rename 原子写 + mtime 冲突重试）；保存前 snapshot 预查同名 → requestConfirm 覆盖确认；
+// 删除后 setMcpOverride 拨回启用。user/project 编辑回显：env/headers 行 = snapshot 键列表 +
+// 哨兵值 + sentinelfor（E0-6，渲染层零明文）；描述字段仅管理库有（ScopedMcpEntry 无此键，E0-1）；
+// 「测试连接」探活仍仅管理库（探活器只认管理库明文条目）。
 import { computed, ref, watch, onBeforeUnmount } from 'vue';
 import { useConfigStore } from '../../stores/config-store';
 import { useInteractionStore } from '../../stores/interaction-store';
@@ -25,7 +30,8 @@ import { normalizeDirKey } from '../../../shared/project-skills';
 import type { McpManagedServer } from '../../../shared/types/config';
 // preload 视图类型（type-only，env.d.ts 同源先例；字段形状以 src/preload/api.ts 为准）。
 // McpManagedSaveEntry = managedSave 提交形态（McpManagedServer + 瞬态改名 hint，仅提交方向）。
-import type { McpManagedSaveEntry, McpProbeReport, McpProjectDirView, McpSnapshot } from '../../../preload/api';
+// McpWriteScopedPayload = writeScoped 提交载荷（P8：user/project 作用域 upsert/remove）。
+import type { McpExportScopedPayload, McpManagedSaveEntry, McpProbeReport, McpProjectDirView, McpSnapshot, McpScopedWriteEntry, McpWriteScopedPayload } from '../../../preload/api';
 
 const claude = window.claudeLink;
 const configStore = useConfigStore();
@@ -121,6 +127,9 @@ function isProbing(card: McpCard): boolean {
 type ConnState = 'none' | 'ok' | 'fail' | 'busy';
 function connStateOf(card: McpCard): ConnState {
   if (isProbing(card)) return 'busy';
+  // B-13：批量探测在飞时管理库卡片一律「测试中…」（顺带压掉陈旧旧报告的误导显示；
+  // 键前缀判定天然隔离 user/project 卡）。单台 busy 优先级在前不变。
+  if (probingAll.value && card.key.startsWith('managed:')) return 'busy';
   const report = probeReports.value[card.key];
   if (!report) return 'none';
   return report.status === 'ok' ? 'ok' : 'fail';
@@ -137,7 +146,7 @@ function connTextOf(card: McpCard): string {
 function toolsTextOf(card: McpCard): string {
   const state = connStateOf(card);
   if (state === 'ok') return `${probeReports.value[card.key]?.toolCount ?? 0} 个工具`;
-  if (state === 'fail') return '0 个工具';
+  if (state === 'fail') return '— 个工具'; // B-16②：fail 无工具数概念，「0 个」有误导，改中性占位
   return '— 个工具';
 }
 
@@ -151,7 +160,7 @@ async function handleProbe(card: McpCard): Promise<void> {
     if (disposed || !report) return;
     probeReports.value = { ...probeReports.value, [report.key || card.key]: report };
   } catch (e) {
-    // 单探测 IPC 自身失败也以 fail 报告呈现（错误条可见），不静默。
+    // 单探测 IPC 自身失败也以 fail 报告呈现（⚠ 气泡可见全文），不静默。
     if (disposed) return;
     probeReports.value = {
       ...probeReports.value,
@@ -225,6 +234,18 @@ function isEnabled(card: McpCard): boolean {
   return overrides.value[card.key] !== 'off';
 }
 
+/** B-8/B-6：卡片探活呈现形态——'disabled'（禁用中性「已禁用 · 未探测」，禁用条目主进程
+ *  批量探测已滤除、无结论可显）/'sse'（管理库 sse 卡中性「未探测 · 会话内自动协商」，
+ *  探测协议与 sse 不匹配必显失败，属误报故收敛为中性）/'probe'（正常三态）。
+ *  模板连接区/⚠ 气泡/行状态色条/工具数据此收敛；优先级 禁用 > sse > 三态。判定按当前 transport，
+ *  sse 卡编辑为 http 后自动恢复探测能力呈现。 */
+type ConnMode = 'disabled' | 'sse' | 'probe';
+function connModeOf(card: McpCard): ConnMode {
+  if (!isEnabled(card)) return 'disabled';
+  if (activeScope.value.kind === 'managed' && card.transport === 'sse') return 'sse';
+  return 'probe';
+}
+
 // ── rail 计数（「共 N · N 启用[ · N 会话]」）────────────────────────────────
 function enabledCountOf(cards: McpCard[]): number {
   return cards.filter((c) => overrides.value[c.key] !== 'off').length;
@@ -252,10 +273,10 @@ const scopePath = computed<string>(() => {
 });
 const scopeMeta = computed<string>(() => {
   if (activeScope.value.kind === 'managed') return '对所有项目的会话可用 · 可增删改';
-  if (activeScope.value.kind === 'user') return '来自用户级 Claude Code 配置 · 只读展示，仅可启停';
+  if (activeScope.value.kind === 'user') return '来自用户级 Claude Code 配置 · 可编辑/启停（写入 ~/.claude.json）';
   const dir = activeProjectDir.value;
   if (!dir) return '';
-  return `${dir.sessionCount} 个会话在使用 · ${dir.isDefault ? '默认工作区' : '最近工作区'} · 只读展示，仅可启停`;
+  return `${dir.sessionCount} 个会话在使用 · ${dir.isDefault ? '默认工作区' : '最近工作区'} · 可编辑/启停（写入 .mcp.json）`;
 });
 
 // ── 工具栏：搜索 + 状态 chips + 统计胶囊 ────────────────────────────────────
@@ -271,6 +292,30 @@ const visibleCards = computed<McpCard[]>(() => {
     return true;
   });
 });
+
+// ── 风格 C 分组面板（round4-slim-c.html）：当前过滤后列表按传输类型分组 ──────
+// stdio 一组、http+sse 一组；组头计数=组内卡片数；空组不渲染（搜索/筛选后自然消失）。
+interface CardGroup {
+  id: 'stdio' | 'remote';
+  label: string;
+  cards: McpCard[];
+}
+const cardGroups = computed<CardGroup[]>(() => {
+  const stdio = visibleCards.value.filter((c) => c.transport === 'stdio');
+  const remote = visibleCards.value.filter((c) => c.transport !== 'stdio');
+  const groups: CardGroup[] = [];
+  if (stdio.length > 0) groups.push({ id: 'stdio', label: '本地进程 STDIO', cards: stdio });
+  if (remote.length > 0) groups.push({ id: 'remote', label: 'HTTP / SSE', cards: remote });
+  return groups;
+});
+
+/** 行左侧状态色条类（风格 C：ok 绿/none 灰/busy 黄/fail 红；disabled 淡灰+降透明；
+ *  sse 中性态与未连接同用灰条——对照效果图组2 webresearch 行 grp__row--none）。 */
+function rowStateClass(card: McpCard): string {
+  const mode = connModeOf(card);
+  if (mode === 'disabled') return 'grp__row--off grp__row--disabled';
+  return `grp__row--${mode === 'sse' ? 'none' : connStateOf(card)}`;
+}
 
 // ── 启停：乐观更新 + 失败回滚 + toast ───────────────────────────────────────
 async function handleToggle(card: McpCard, event: Event): Promise<void> {
@@ -328,6 +373,21 @@ function urlPathEndsWithSseLocal(url: string): boolean {
   }
 }
 
+/**
+ * env/headers 值级清洗（与主进程 mcp-config:pickStringRecord 同语义，p6 B-3 导入预览/落库
+ * 键级对齐）：入参非普通对象 → undefined（调用方不设该字段，条目仍有效）；仅保留值
+ * typeof === 'string' 的条目（键序保持原序；空串是合法 string，保留），清洗后为空 → undefined
+ * （字段整体消失，不输出空对象）。值非 string（number/boolean/null/对象/数组）整键丢弃。
+ * 载体与主进程同款 Object.create(null)——不可信键（含 __proto__）作普通自有属性保留，
+ * 双副本零分歧（round-003 D5）。
+ */
+function pickStringRecordLocal(v: unknown): Record<string, string> | undefined {
+  if (!isPlainObjectLocal(v)) return undefined;
+  const out = Object.create(null) as Record<string, string>;
+  for (const [k, val] of Object.entries(v)) if (typeof val === 'string') out[k] = val;
+  return Object.keys(out).length > 0 ? out : undefined; // 清洗后空 → 字段不设（与主进程同语义）
+}
+
 /** 导入归一单条产物（与主进程 ParsedMcpEntry 同构）。 */
 interface ParsedImportEntry {
   name: string;
@@ -342,12 +402,16 @@ interface ParsedImportEntry {
 /**
  * 导入条目归一——主进程 src/main/modules/mcp/mcp-config.ts:normalizeMcpEntry
  *（parseMcpServersJson 的条目级归一）规则同步的渲染层本地副本。一期渲染层不可 import
- * 主进程模块，故复制；P8 导入改走主进程统一解析时删除本副本。规则（逐条同步）：
+ * 主进程模块，故复制；P8 导入改走主进程统一解析时删除本副本。2026-10-16 p6 起 env/headers
+ * 值级清洗已同步（pickStringRecordLocal）；载体与主进程同款 Object.create(null)——不可信键
+ *（含 __proto__）作普通自有属性保留，双副本零分歧（round-003 D5）；且导入仅产本组件内
+ * 预览/落库映射。规则（逐条同步）：
  *   - rawCfg 非普通对象 → null；
  *   - transport：显式 type 优先（'stdio'→stdio；'http'|'streamable-http'→http；'sse'→sse）；
  *     缺失/不可识别 → command→stdio；否则 url（pathname 以 /sse 结尾→sse 否则 http）；两无线索 → null；
- *   - 字段互斥归一：stdio 只留 command/args/env（args 非全字符串数组→丢字段；env 非普通对象→
- *     丢字段；command 空串同缺失→null）；remote 只留 url/headers（url 空串同缺失→null）。name 取 map 键。
+ *   - 字段互斥归一：stdio 只留 command/args/env（args 非全字符串数组→丢字段；env/headers 值级
+ *     清洗 pickStringRecordLocal：非普通对象或清洗后无合法 string 值→丢字段；command 空串同
+ *     缺失→null）；remote 只留 url/headers（url 空串同缺失→null）。name 取 map 键。
  */
 function normalizeImportEntry(name: string, rawCfg: unknown): ParsedImportEntry | null {
   if (!isPlainObjectLocal(rawCfg)) return null;
@@ -368,13 +432,15 @@ function normalizeImportEntry(name: string, rawCfg: unknown): ParsedImportEntry 
     if (command === null) return null; // stdio 必填 command 缺失/空串 → 跳过该条目
     const entry: ParsedImportEntry = { name, transport, command };
     if (Array.isArray(cfg.args) && cfg.args.every((a) => typeof a === 'string')) entry.args = cfg.args;
-    if (isPlainObjectLocal(cfg.env)) entry.env = cfg.env as Record<string, string>;
+    const env = pickStringRecordLocal(cfg.env);
+    if (env !== undefined) entry.env = env;
     return entry;
   }
   const url = typeof cfg.url === 'string' && cfg.url !== '' ? cfg.url : null;
   if (url === null) return null; // http/sse 必填 url 缺失/空串 → 跳过该条目
   const entry: ParsedImportEntry = { name, transport, url };
-  if (isPlainObjectLocal(cfg.headers)) entry.headers = cfg.headers as Record<string, string>;
+  const headers = pickStringRecordLocal(cfg.headers);
+  if (headers !== undefined) entry.headers = headers;
   return entry;
 }
 
@@ -481,7 +547,7 @@ function kvRowsToRecord(rows: Array<{ key: string; value: string; sentinelfor?: 
 }
 // >>>>>>>>>> p7b-pure-end
 
-// ── 添加/编辑弹窗（G13 定稿 modal；一期仅「Claude Link 管理」可真正保存）───────
+// ── 添加/编辑弹窗（G13 定稿 modal；三作用域均可保存，user/project 走 mcp:writeScoped）───────
 type SaveLocation = 'managed' | 'user' | 'project';
 const LOCATION_ORDER: SaveLocation[] = ['managed', 'user', 'project'];
 const TRANSPORT_ORDER = ['stdio', 'http', 'sse'] as const;
@@ -511,31 +577,54 @@ const formUrl = ref('');
 const formEnvRows = ref<KvRow[]>([]);
 const formHeaderRows = ref<KvRow[]>([]);
 const saving = ref(false);
+// 校验 touched 门控：错误红字/红框延迟到「字段失焦过或提交尝试过」才展示，
+// 弹窗刚打开的全空表单不再满屏红。formValid 判禁用仍用原值（不受门控影响）。
+const touchedFields = ref<{ name: boolean; command: boolean; url: boolean }>({ name: false, command: false, url: false });
+const submitAttempted = ref(false);
 
-// 一期保存位置段位：user/project 呈现但不可真正写入（P8 开放）。选即 toast + inline
-// hint + 保存按钮阻断；段位停留可选、可切回（交互不死锁）。
-const PHASE1_LOCATION_TIP = '一期暂不支持写入用户级/项目级文件（P8 开放），请选择 Claude Link 管理';
-const locationSupported = computed<boolean>(() => formLocation.value === 'managed');
-const locationHint = computed<string>(() => (locationSupported.value ? '存入应用配置库，仅 Claude Link 会话可用（经 SDK 注入，优先级最高，推荐）。' : PHASE1_LOCATION_TIP));
+// 保存位置段位：三作用域全部可真正写入（P8 起）。user/project 走 mcp:writeScoped 主进程
+// 写入器（哨兵按原文件还原 + 整树保留写 + 原子写）；managed 走 saveMcpManaged 既有链。
+const locationHint = computed<string>(() => {
+  if (formLocation.value === 'managed') return '存入应用配置库，仅 Claude Link 会话可用（经 SDK 注入，优先级最高，推荐）。';
+  if (formLocation.value === 'user') return '写入 ~/.claude.json，全局 Claude Code 共享（所有项目的新会话可用，运行中会话不重载）。';
+  if (formProjectDir.value !== '') return `写入 ${formProjectDir.value}\\.mcp.json，随仓库共享（仅该目录下的会话可用）。`;
+  return '写入所选项目目录的 .mcp.json，随仓库共享（仅该目录下的会话可用）。';
+});
 
 function switchLocation(loc: SaveLocation): void {
   if (formLocation.value === loc) return;
   formLocation.value = loc;
-  if (loc !== 'managed') pushToast(PHASE1_LOCATION_TIP);
+  if (loc === 'project' && formProjectDir.value === '') formProjectDir.value = projectDirs.value[0]?.path ?? '';
 }
 
-// §3.2 校验：名称必填 + pattern +（新增时）管理库内唯一——重名在 UI 拦截（主进程 sanitize
-// 保留第一条，放行会导致「保存成功但新条目被静默丢弃」）。
+// 传输类型切换：重置 command/url 的 touched（防切回旧传输类型残留显红）；
+// submitAttempted 保留（提交尝试过的「点亮全部」状态不因切换传输而清除）。
+function switchTransport(t: 'stdio' | 'http' | 'sse'): void {
+  if (formTransport.value === t) return;
+  formTransport.value = t;
+  touchedFields.value.command = false;
+  touchedFields.value.url = false;
+}
+
+// §3.2 校验：名称必填 + pattern +（managed 新增时）管理库内唯一——managed 重名在 UI 拦截
+// （主进程 sanitize 保留第一条，放行会导致「保存成功但新条目被静默丢弃」）；user/project
+// 同名不在 UI 拦截、走保存时覆盖确认（E3：重名查仅对 managed 生效）；pattern 仅拦新增
+// （编辑态名称只读，外部文件 pattern 外名称须可原样保存，managed 编辑名经 sanitize 恒合法）。
 const nameError = computed<string>(() => {
   const name = formName.value.trim();
   if (name === '') return '名称必填';
-  if (!NAME_PATTERN.test(name)) return '名称仅限字母、数字、-、_，长度 1–64';
-  if (!isEditMode.value && managedServers.value.some((s) => s.name === name)) return '与现有服务器重名（管理库内名称唯一）';
+  if (!isEditMode.value && !NAME_PATTERN.test(name)) return '名称仅限字母、数字、-、_，长度 1–64';
+  if (formLocation.value === 'managed' && !isEditMode.value && managedServers.value.some((s) => s.name === name)) return '与现有服务器重名（管理库内名称唯一）';
   return '';
 });
 const commandError = computed<string>(() => (formTransport.value === 'stdio' && formCommand.value.trim() === '' ? 'stdio 必填命令' : ''));
 const urlError = computed<string>(() => (formTransport.value !== 'stdio' && formUrl.value.trim() === '' ? 'http/sse 必填 URL' : ''));
-const formValid = computed<boolean>(() => locationSupported.value && !nameError.value && !commandError.value && !urlError.value);
+// P8：project 位置须选定目标项目目录（dir 缺失主进程会拒绝写入）。
+const formValid = computed<boolean>(() => !nameError.value && !commandError.value && !urlError.value && (formLocation.value !== 'project' || formProjectDir.value !== ''));
+// 展示态错误：touched（失焦过）或提交尝试过才透出原错误，否则为空（不渲染红）。
+const nameErrorShown = computed<string>(() => (touchedFields.value.name || submitAttempted.value ? nameError.value : ''));
+const commandErrorShown = computed<string>(() => (touchedFields.value.command || submitAttempted.value ? commandError.value : ''));
+const urlErrorShown = computed<string>(() => (touchedFields.value.url || submitAttempted.value ? urlError.value : ''));
 
 function emptyKvRow(): KvRow {
   return { key: '', value: '' };
@@ -560,6 +649,8 @@ function resetForm(): void {
   formUrl.value = '';
   formEnvRows.value = [emptyKvRow()]; // 对照定稿：环境变量区默认一行空 KV 行
   formHeaderRows.value = [emptyKvRow()];
+  touchedFields.value = { name: false, command: false, url: false };
+  submitAttempted.value = false;
 }
 
 /** 表单是否含用户已填内容（全空 KV 行不算）——「关闭不丢已填内容」的保留判定。 */
@@ -583,10 +674,39 @@ function openAdd(): void {
 }
 
 function openEdit(card: McpCard): void {
+  touchedFields.value = { name: false, command: false, url: false }; // 编辑态预填合法值，不继承上次的 touched
+  submitAttempted.value = false;
+  // P8：user/project 卡按 card.key 前缀分流预填（E0-5）。§1.3 渲染层零明文：snapshot 视图
+  // 只带 maskedEnvKeys/maskedHeaderKeys 键列表——env/headers 行 = 键列表 + 值列固定哨兵 +
+  // sentinelfor（E0-6），提交哨兵照传，主进程 writer 从原文件还原。
+  if (card.key.startsWith('user:') || card.key.startsWith('project:')) {
+    const isUser = card.key.startsWith('user:');
+    const view = isUser
+      ? (snapshot.value?.userServers ?? []).find((s) => s.name === card.name)
+      : (activeProjectDir.value?.servers ?? []).find((s) => s.name === card.name);
+    if (!view) return;
+    dialogMode.value = { kind: 'edit', id: card.key }; // 作用域编辑不消费 id（分流按 formLocation）
+    formLocation.value = isUser ? 'user' : 'project';
+    formProjectDir.value = isUser ? '' : (activeProjectDir.value?.path ?? '');
+    formName.value = view.name; // 编辑态 name 只读（三作用域统一）
+    formTransport.value = view.transport;
+    formDescription.value = ''; // ScopedMcpEntry 无 description（E0-1），弹窗内该字段隐藏
+    formCommand.value = view.command ?? '';
+    formArgsText.value = (view.args ?? []).join('\n');
+    formUrl.value = view.url ?? '';
+    formEnvRows.value = view.maskedEnvKeys && view.maskedEnvKeys.length > 0
+      ? view.maskedEnvKeys.map((k) => ({ key: k, value: MASK_SENTINEL, sentinelfor: k }))
+      : [emptyKvRow()];
+    formHeaderRows.value = view.maskedHeaderKeys && view.maskedHeaderKeys.length > 0
+      ? view.maskedHeaderKeys.map((k) => ({ key: k, value: MASK_SENTINEL, sentinelfor: k }))
+      : [emptyKvRow()];
+    showEditDialog.value = true;
+    return;
+  }
   const stored = managedServers.value.find((s) => s.name === card.name);
   if (!stored) return;
   dialogMode.value = { kind: 'edit', id: stored.id };
-  formLocation.value = 'managed'; // 一期编辑仅支持管理库（P8 开放作用域迁移）
+  formLocation.value = 'managed';
   formProjectDir.value = '';
   formName.value = stored.name; // 编辑态 name 只读（§2 P7/P8 边界）
   formTransport.value = stored.transport;
@@ -617,6 +737,11 @@ async function persistManaged(next: McpManagedSaveEntry[], successMsg: string): 
     //（防专用通道落盘后渲染层镜像陈旧；两键不在 PERSISTED_FIELDS，不触发自动保存链）。
     configStore.config.mcpServers = Array.isArray(fresh.mcpServers) ? fresh.mcpServers : [];
     configStore.config.mcpOverrides = { ...(fresh.mcpOverrides ?? {}) };
+    // B-7：主进程 managedSave 落盘已清 managed: 探活缓存，UI 侧旧结论同步失效（增/删/改/导入
+    // 均经本函数收口）并自动重探取新结论；busy「测试中」态由点5 补齐；probeAllInView 自带
+    // disposed/probeGen 代际守卫，与在飞批量探测并发安全（迟到结果丢弃）。
+    for (const k of Object.keys(probeReports.value)) if (k.startsWith('managed:')) delete probeReports.value[k];
+    void probeAllInView();
     pushToast(successMsg);
     return true;
   } catch (e) {
@@ -625,11 +750,77 @@ async function persistManaged(next: McpManagedSaveEntry[], successMsg: string): 
   }
 }
 
+/**
+ * P8：user/project 作用域保存（mcp:writeScoped 链）。组装 ScopedMcpEntry（不含 description，
+ * E0-1；哨兵值 + rename hint 照传 kvRowsToRecord 产物）→ 保存前按目标作用域 snapshot 预查同名
+ * → 命中 requestConfirm 覆盖确认（E0-2，UI 预查为准）→ writeMcpScoped upsert → getMcpSnapshot()
+ * 刷新 + toast；失败 toast（「文件损坏，已中止写入」等主进程中文错误直显）。
+ */
+async function saveScopedForm(): Promise<void> {
+  // 局部快照 + 断言收窄：调用方 saveForm 已保证 managed 不进本函数（ref 联合类型 TS 不保跨 await 收窄）。
+  const scope = formLocation.value as 'user' | 'project';
+  const entry: McpScopedWriteEntry = { name: formName.value.trim(), transport: formTransport.value };
+  if (formTransport.value === 'stdio') {
+    entry.command = formCommand.value.trim();
+    const args = formArgsText.value.split('\n').map((l) => l.trim()).filter((l) => l !== '');
+    if (args.length > 0) entry.args = args;
+    const env = kvRowsToRecord(formEnvRows.value); // 哨兵值照传（主进程 writer 按原文件还原）
+    if (env) {
+      entry.env = env.value;
+      if (env.renameFrom) entry.envRenameFrom = env.renameFrom;
+    }
+  } else {
+    entry.url = formUrl.value.trim();
+    const headers = kvRowsToRecord(formHeaderRows.value);
+    if (headers) {
+      entry.headers = headers.value;
+      if (headers.renameFrom) entry.headersRenameFrom = headers.renameFrom;
+    }
+  }
+  const dir = scope === 'project' ? formProjectDir.value : undefined;
+  // 覆盖确认（E0-2）：按目标作用域 snapshot 预查同名；命中 → 非危险确认（可取消）。
+  const hasSameName =
+    scope === 'user'
+      ? (snapshot.value?.userServers ?? []).some((s) => s.name === entry.name)
+      : (projectDirs.value.find((d) => d.path === dir)?.servers ?? []).some((s) => s.name === entry.name);
+  if (hasSameName) {
+    const ok = await interactionStore.requestConfirm({
+      title: '覆盖同名服务器',
+      message: `将覆盖${scope === 'user' ? '用户级（~/.claude.json）' : '项目级（.mcp.json）'}中现有同名服务器「${entry.name}」，其现有定义将被替换。`,
+      confirmText: '覆盖保存',
+      cancelText: '取消',
+      danger: false,
+    });
+    if (!ok) return;
+  }
+  const payload: McpWriteScopedPayload = { scope, entry, mode: 'upsert' };
+  if (dir !== undefined) payload.dir = dir;
+  try {
+    await claude.writeMcpScoped(payload);
+    await refresh(); // getMcpSnapshot() 刷新（user/project 清单 + rail 计数）
+    pushToast(`已保存「${entry.name}」到${scope === 'user' ? '用户级（~/.claude.json）' : '项目级（.mcp.json）'}`);
+    showEditDialog.value = false;
+    resetForm();
+    dialogMode.value = null;
+  } catch (e) {
+    pushToast(`保存失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
 async function saveForm(): Promise<void> {
   const mode = dialogMode.value;
-  if (!mode || !formValid.value || saving.value) return; // 空表单/非法 name/非管理位置提交拦截
+  if (!mode || saving.value) return;
+  if (!formValid.value) {
+    submitAttempted.value = true; // 非法提交：点亮全部错误（原为静默 return）
+    return;
+  }
   saving.value = true;
   try {
+    // P8：user/project 分流走 mcp:writeScoped 写入链；managed 维持 saveMcpManaged 既有链。
+    if (formLocation.value !== 'managed') {
+      await saveScopedForm();
+      return;
+    }
     const now = Date.now();
     const stored = mode.kind === 'edit' ? managedServers.value.find((s) => s.id === mode.id) : undefined;
     if (mode.kind === 'edit' && stored) {
@@ -701,8 +892,47 @@ async function saveForm(): Promise<void> {
   }
 }
 
-/** 删除：requestConfirm（danger，文案含服务器名）→ 数组剔除 → saveMcpManaged → 清 override 键。 */
+/** 删除：user/project 分支（P8）→ 确认文案含目标文件路径 → writeMcpScoped remove → setMcpOverride
+ *  拨回启用（E0-3）→ snapshot 刷新；managed 分支维持既有数组剔除 + saveMcpManaged 链。 */
 async function handleDelete(card: McpCard): Promise<void> {
+  if (card.key.startsWith('user:') || card.key.startsWith('project:')) {
+    const isUser = card.key.startsWith('user:');
+    const dir = activeProjectDir.value;
+    // 文件路径展示：project 用绝对路径（snapshot 同源）；user 渲染层不知用户根绝对路径，
+    // 以 ~/.claude.json 惯用形表示（标题行 scopePath 同口径）。
+    const fileLabel = isUser ? '~/.claude.json' : dir ? mcpJsonPathOf(dir) : '.mcp.json';
+    const ok = await interactionStore.requestConfirm({
+      title: '删除 MCP 服务器',
+      message: `确定删除服务器「${card.name}」？将从 ${fileLabel} 移除，此操作不可撤销。`,
+      confirmText: '删除',
+      cancelText: '取消',
+      danger: true,
+    });
+    if (!ok) return;
+    const payload: McpWriteScopedPayload = {
+      scope: isUser ? 'user' : 'project',
+      entry: { name: card.name, transport: card.transport },
+      mode: 'remove',
+    };
+    if (!isUser && dir) payload.dir = dir.path;
+    try {
+      await claude.writeMcpScoped(payload);
+      // 删除后拨回 override 键（E0-3）：残留 'off' 键会让未来同名新增默认禁用；拨回即净。
+      try {
+        const r = await claude.setMcpOverride(card.key, true);
+        overrides.value = { ...r.overrides };
+        // 同 handleToggle：权威回包一并回写 store.config.mcpOverrides 镜像（不触发自动保存链）。
+        configStore.config.mcpOverrides = { ...r.overrides };
+      } catch {
+        // 拨回失败不影响删除结果；残留 'off' 键仅影响未来同名新增的默认态，开关一次即修正。
+      }
+      await refresh();
+      pushToast(`已删除「${card.name}」`);
+    } catch (e) {
+      pushToast(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+    return;
+  }
   const ok = await interactionStore.requestConfirm({
     title: '删除 MCP 服务器',
     message: `确定删除服务器「${card.name}」？将从 Claude Link 管理库移除，此操作不可撤销（用户级/项目级配置文件不受影响）。`,
@@ -722,6 +952,34 @@ async function handleDelete(card: McpCard): Promise<void> {
     configStore.config.mcpOverrides = { ...r.overrides };
   } catch {
     // 拨回失败不影响删除结果；残留 'off' 键仅影响未来同名新增的默认态，开关一次即修正。
+  }
+}
+
+// ── 导出 JSON（2026-10-18）：当前作用域全部定义 → {"mcpServers":{…}} 文本写系统剪贴板 ──
+// 与「导入 JSON」互为逆操作（导入形态①）。明文 env/headers 与 JSON 全程不出主进程（§1.3：
+// 主进程取 config store / 磁盘 raw 真值 → clipboard 写剪贴板），渲染层只拿 count 回显 toast。
+// 导出含全部定义——启停是 Claude Link 专属 override、非标准字段，不参与导出。
+const exporting = ref(false);
+
+async function exportScopeJson(): Promise<void> {
+  if (exporting.value || scopeCards.value.length === 0) return;
+  exporting.value = true;
+  try {
+    const payload: McpExportScopedPayload =
+      activeScope.value.kind === 'project'
+        ? { scope: 'project', dir: activeScope.value.path }
+        : { scope: activeScope.value.kind };
+    const r = await claude.exportMcpScoped(payload);
+    if (r.count === 0) {
+      // 防御性兜底：渲染层按 scopeCards 禁用按钮，正常不可达（如导出瞬间全部被删）。
+      pushToast('当前作用域暂无可导出的服务器');
+      return;
+    }
+    pushToast(`已复制 ${r.count} 台服务器配置 JSON（mcpServers 形态）到剪贴板`);
+  } catch (e) {
+    pushToast(`导出失败：${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    exporting.value = false;
   }
 }
 
@@ -868,16 +1126,18 @@ onBeforeUnmount(() => {
   escLayer = null;
 });
 
-// ── 底部 note（每作用域首段对照定稿 + 三条公共说明：①仅影响新会话 ②严格模式副作用 ③库位与只读；
+// ── 底部 note（每作用域首段对照定稿 + 三条公共说明：①生效粒度——启停仅新会话、定义增删改
+//    下一条消息即时（p6 B-14 修订）②严格模式接管条件与副作用（B-2 门控：Claude Link 侧有
+//    服务器或启停设置才接管，两侧全空按 Claude Code 原生行为加载）③库位与编辑口径（user/project 可直接编辑）；
 //    管理段补「删除前会弹确认框」句，r3 B-M4 对照定稿逐字）─
 const scopeNoteHead = computed<string>(() => {
   if (activeScope.value.kind === 'managed') {
     return '此作用域的服务器由 Claude Link 经 SDK 注入（优先级高于 ~/.claude.json 与 .mcp.json），仅 Claude Link 会话可见。删除前会弹确认框。';
   }
   if (activeScope.value.kind === 'user') {
-    return '此作用域为 Claude Code 用户级配置（终端 claude mcp add -s user 写入），Claude Link 不会修改该文件。禁用仅在 Claude Link 会话内生效；终端裸跑 claude 仍按原配置加载。';
+    return '此作用域为 Claude Code 用户级配置（~/.claude.json，全局共享）。Claude Link 可直接编辑该文件（写入整树保留原字段，新会话生效）；启停仅在 Claude Link 会话内生效，终端裸跑 claude 仍按原配置加载。';
   }
-  return '此作用域为项目根 .mcp.json（团队成员共享、随仓库提交），Claude Link 不会修改该文件。仅在该项目目录下创建的会话才会加载。';
+  return '此作用域为项目根 .mcp.json（团队成员共享、随仓库提交，提交由用户自行操作）。Claude Link 可直接编辑该文件；仅在该项目目录下创建的会话才会加载。';
 });
 </script>
 
@@ -898,10 +1158,8 @@ const scopeNoteHead = computed<string>(() => {
           <span class="mcp-rail-item__name">Claude Link 管理</span>
         </span>
         <span class="mcp-rail-item__path">应用配置（可增删改）</span>
-        <span class="mcp-rail-item__meta">
-          <template v-if="loading">共 … · … 启用</template>
-          <template v-else>共 {{ managedCards.length }} · {{ enabledCountOf(managedCards) }} 启用</template>
-        </span>
+        <!-- B-18：管理库计数来自 config store 恒在，无条件直显（loading 期不给占位假计数）。 -->
+        <span class="mcp-rail-item__meta">共 {{ managedCards.length }} · {{ enabledCountOf(managedCards) }} 启用</span>
       </button>
 
       <button
@@ -916,7 +1174,8 @@ const scopeNoteHead = computed<string>(() => {
         </span>
         <span class="mcp-rail-item__path">~/.claude.json</span>
         <span class="mcp-rail-item__meta">
-          <template v-if="loading">共 … · … 启用</template>
+          <!-- B-18：占位仅首拍（与列表加载态同口径 loading && !snapshot），快照在握后直显真值。 -->
+          <template v-if="loading && !snapshot">共 … · … 启用</template>
           <template v-else>共 {{ userCards.length }} · {{ enabledCountOf(userCards) }} 启用</template>
         </span>
       </button>
@@ -939,12 +1198,13 @@ const scopeNoteHead = computed<string>(() => {
         </span>
         <span class="mcp-rail-item__path">{{ mcpJsonPathOf(dir) }}</span>
         <span class="mcp-rail-item__meta">
-          <template v-if="loading">共 … · … 启用 · {{ dir.sessionCount }} 会话</template>
+          <!-- B-18：占位仅首拍（与列表加载态同口径 loading && !snapshot）。 -->
+          <template v-if="loading && !snapshot">共 … · … 启用 · {{ dir.sessionCount }} 会话</template>
           <template v-else>共 {{ dirCardsOf(dir).length }} · {{ enabledCountOf(dirCardsOf(dir)) }} 启用 · {{ dir.sessionCount }} 会话</template>
         </span>
       </button>
 
-      <div class="mcp-rail__foot">用户级与项目级服务器来自 Claude Code 配置文件（磁盘直读，只读展示）；仅「Claude Link 管理」可增删改。</div>
+      <div class="mcp-rail__foot">用户级与项目级服务器来自 Claude Code 配置文件，可在此直接编辑（写入对应配置文件，新会话生效）；「Claude Link 管理」存应用配置库、仅经 SDK 注入。</div>
     </nav>
 
     <!-- 右侧主区（对照定稿 main：标题行+按钮 → meta → 工具栏 → 滚动卡片列 → note） -->
@@ -954,7 +1214,33 @@ const scopeNoteHead = computed<string>(() => {
           <span :class="['mcp-title-row__dot', { 'mcp-title-row__dot--user': activeScope.kind === 'user', 'mcp-title-row__dot--project': activeScope.kind === 'project' }]"></span>
           <span class="mcp-title-row__name">{{ scopeName }}</span>
           <span class="mcp-title-row__path">{{ scopePath }}</span>
+          <!-- 风格 C 契约2：原底部大段说明整段删除，由标题行尾部 ⓘ 承接（自绘深色气泡，
+               hover 与 :focus-within 双触发、按钮可 Tab 聚焦，键盘可达；对照 round4-slim-c.html）。
+               tip--head 变体：Ⓘ 位于标题行右侧（acts 按钮旁），left:0 向右展开会超出窗口右缘
+               截断（2026-10-18 实测截图回归）——气泡锚定改为标题行右缘、向左展开（见 CSS）。 -->
+          <span class="tip tip--head">
+            <button type="button" class="mcp-info-btn" aria-label="作用域说明">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            </button>
+            <span class="bubble" role="tooltip">
+              <b>{{ scopeNoteHead }}</b>
+              <span>启停开关仅对新会话生效（进行中会话保持创建时的启停快照）；服务器定义的增删改对所有会话的下一条消息即时生效。</span>
+              <span>Claude Link 侧有 MCP 服务器或启停设置时，以严格模式接管会话 MCP 集合，claude.ai 云端 connectors 与插件 MCP 不再自动加载（禁用真正生效的必要代价）；两侧全空时按 Claude Code 原生行为加载全部 MCP 来源（含 .mcp.json、用户配置、插件与云端 connectors）。</span>
+            </span>
+          </span>
           <span class="mcp-title-row__acts">
+            <!-- 导出 JSON：与「导入 JSON」互逆（作用域全部定义 → mcpServers 形态文本进剪贴板；
+                 空作用域禁用；明文不出主进程，见 exportScopeJson）。 -->
+            <button
+              class="mcp-btn"
+              type="button"
+              :disabled="exporting || scopeCards.length === 0"
+              :title="scopeCards.length === 0 ? '当前作用域暂无服务器可导出' : '把当前作用域全部服务器定义复制为 mcpServers 形态 JSON 文本'"
+              @click="exportScopeJson"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              {{ exporting ? '导出中…' : '导出 JSON' }}
+            </button>
             <button class="mcp-btn" type="button" @click="openImport">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               导入 JSON
@@ -992,12 +1278,10 @@ const scopeNoteHead = computed<string>(() => {
             <button type="button" :class="['mcp-chip', { 'mcp-chip--active': filter === 'on' }]" @click="filter = 'on'">已启用</button>
             <button type="button" :class="['mcp-chip', { 'mcp-chip--active': filter === 'off' }]" @click="filter = 'off'">已禁用</button>
           </div>
-          <div class="mcp-statpills" aria-label="统计">
-            <template v-if="!loading">
-              <span class="mcp-statpill">{{ scopeCards.length }} 台</span>
-              <span class="mcp-statpill mcp-statpill--on">{{ enabledCountOf(scopeCards) }} 启用</span>
-              <span v-if="scopeCards.length - enabledCountOf(scopeCards) > 0" class="mcp-statpill mcp-statpill--off">{{ scopeCards.length - enabledCountOf(scopeCards) }} 禁用</span>
-            </template>
+          <!-- 风格 C 契约3：统计胶囊（N 台/N 启用/N 禁用）移除——左栏 rail 已有同数据；
+               仅保留功能性「批量测试中…」在飞指示（B-13）。 -->
+          <div v-if="probingAll" class="mcp-statpills" aria-label="统计">
+            <span class="mcp-statpill" role="status">批量测试中…</span>
           </div>
         </div>
       </div>
@@ -1011,65 +1295,81 @@ const scopeNoteHead = computed<string>(() => {
           MCP 快照不可用，用户级/项目级清单暂无法读取<br />「Claude Link 管理」不受影响，可点顶部「重试」重新拉取
         </div>
         <template v-else>
-          <div class="mcp-grid">
-            <!-- 卡片（G13 无字母块版）：行1 徽标+操作+开关 / 行2 命令行 / 行2.5 errbar（探活失败）
-                 / 行3 描述+连接三态+工具数 -->
-            <div
-              v-for="card in visibleCards"
-              :key="card.key"
-              :class="['mcp-card', { 'mcp-card--off': !isEnabled(card), 'mcp-card--fail': connStateOf(card) === 'fail' }]"
-            >
-              <div class="mcp-card__r1">
-                <span class="mcp-card__name">{{ card.name }}</span>
-                <span :class="['mcp-tchip', { 'mcp-tchip--http': card.transport === 'http', 'mcp-tchip--sse': card.transport === 'sse' }]">{{ card.transport.toUpperCase() }}</span>
-                <span :class="['mcp-scope-badge', { 'mcp-scope-badge--user': activeScope.kind === 'user', 'mcp-scope-badge--project': activeScope.kind === 'project' }]">{{ activeScope.kind === 'managed' ? 'Link 管理' : activeScope.kind === 'user' ? '全局' : '项目' }}</span>
-                <span v-if="!isEnabled(card)" class="mcp-off-badge">已禁用</span>
-                <span class="mcp-spacer"></span>
-                <!-- 管理库作用域：测试连接/编辑/删除（p7b 接线）；其余作用域只读（P8 开放编辑）。 -->
-                <template v-if="activeScope.kind === 'managed'">
-                  <button
-                    class="mcp-iconbtn"
-                    type="button"
-                    :disabled="isProbing(card)"
-                    :aria-label="`测试连接 ${card.name}`"
-                    :title="isProbing(card) ? '探测中…' : `测试连接 ${card.name}`"
-                    @click="handleProbe(card)"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                  </button>
-                  <button class="mcp-iconbtn" type="button" :aria-label="`编辑 ${card.name}`" title="编辑" @click="openEdit(card)">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-                  </button>
-                  <button class="mcp-iconbtn mcp-iconbtn--danger" type="button" :aria-label="`删除 ${card.name}`" title="删除" @click="handleDelete(card)">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-                  </button>
-                </template>
-                <span v-else class="mcp-readonly-hint">定义只读</span>
-                <input
-                  type="checkbox"
-                  class="mcp-switch"
-                  :checked="isEnabled(card)"
-                  :aria-label="`${isEnabled(card) ? '禁用' : '启用'} ${card.name}`"
-                  @change="handleToggle(card, $event)"
-                />
+          <!-- 风格 C 分组面板（round4-slim-c.html）：按传输类型分组（组头计数+组内发丝行），
+               卡片=左状态色条行；行1 徽标+操作+开关 / 行2 命令行 / 行3 描述+连接状态+工具数
+               （原 errbar 整行删除，fail 态改为行3 状态文案旁 ⚠ 图标 + 自绘深色气泡看全文） -->
+          <div class="mcp-groups">
+            <section v-for="grp in cardGroups" :key="grp.id" class="grp" :aria-label="grp.label">
+              <div class="grp__head">{{ grp.label }}<span class="cnt">{{ grp.cards.length }} 台</span></div>
+              <div v-for="card in grp.cards" :key="card.key" :class="['grp__row', rowStateClass(card)]">
+                <div class="row__r1">
+                  <span class="row__name">{{ card.name }}</span>
+                  <span :class="['mcp-tchip', { 'mcp-tchip--http': card.transport === 'http', 'mcp-tchip--sse': card.transport === 'sse' }]">{{ card.transport.toUpperCase() }}</span>
+                  <span :class="['mcp-scope-badge', { 'mcp-scope-badge--user': activeScope.kind === 'user', 'mcp-scope-badge--project': activeScope.kind === 'project' }]">{{ activeScope.kind === 'managed' ? 'Link 管理' : activeScope.kind === 'user' ? '全局' : '项目' }}</span>
+                  <span v-if="!isEnabled(card)" class="mcp-off-badge">已禁用</span>
+                  <span class="spacer"></span>
+                  <!-- 管理库作用域：测试连接/编辑/删除（p7b 接线）。D7：禁用卡「测试连接」按钮
+                       置灰——single 探测虽不滤禁用，但 B-8 中性态不渲染结论，允许点击无反馈属
+                       交互矛盾，故置灰。 -->
+                  <template v-if="activeScope.kind === 'managed'">
+                    <button
+                      class="mcp-iconbtn"
+                      type="button"
+                      :disabled="isProbing(card) || card.transport === 'sse' || !isEnabled(card)"
+                      :aria-label="`测试连接 ${card.name}`"
+                      :title="!isEnabled(card) ? '已禁用 · 启用后可测试连接' : card.transport === 'sse' ? 'SSE 传输暂不支持探测，会话内自动协商' : isProbing(card) ? '探测中…' : `测试连接 ${card.name}`"
+                      @click="handleProbe(card)"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                    </button>
+                    <button class="mcp-iconbtn" type="button" :aria-label="`编辑 ${card.name}`" title="编辑" @click="openEdit(card)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                    </button>
+                    <button class="mcp-iconbtn mcp-iconbtn--danger" type="button" :aria-label="`删除 ${card.name}`" title="删除" @click="handleDelete(card)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                  </template>
+                  <!-- P8：user/project 卡开放「编辑/删除」（同管理库同款按钮；写入对应配置文件）；
+                       「测试连接」仍仅管理库渲染（探活器只认管理库明文条目，E0-4）。 -->
+                  <template v-else>
+                    <button class="mcp-iconbtn" type="button" :aria-label="`编辑 ${card.name}`" title="编辑" @click="openEdit(card)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                    </button>
+                    <button class="mcp-iconbtn mcp-iconbtn--danger" type="button" :aria-label="`删除 ${card.name}`" title="删除" @click="handleDelete(card)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                  </template>
+                  <input
+                    type="checkbox"
+                    class="mcp-switch"
+                    :checked="isEnabled(card)"
+                    :aria-label="`${isEnabled(card) ? '禁用' : '启用'} ${card.name}`"
+                    @change="handleToggle(card, $event)"
+                  />
+                </div>
+                <div class="row__cmd">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                  <span><b>{{ card.display.split(' ')[0] }}</b>{{ card.display.slice(card.display.split(' ')[0].length) }}</span>
+                </div>
+                <div class="row__r3">
+                  <span v-if="card.description" class="row__desc" :title="card.description">{{ card.description }}</span>
+                  <!-- B-8/B-6：禁用卡/sse 卡中性态（无三态/⚠/工具数/色条按中性灰呈现），其余正常三态。 -->
+                  <span v-if="connModeOf(card) === 'disabled'" class="mcp-card__conn mcp-card__conn--off">已禁用 · 未探测</span>
+                  <span v-else-if="connModeOf(card) === 'sse'" class="mcp-card__conn mcp-card__conn--off">未探测 · 会话内自动协商</span>
+                  <span v-else :class="['mcp-card__conn', { 'mcp-card__conn--off': connStateOf(card) === 'none' || connStateOf(card) === 'busy', 'mcp-card__conn--fail': connStateOf(card) === 'fail' }]">{{ connTextOf(card) }}</span>
+                  <!-- 契约1：fail 态 ⚠（errbar 整行删除后，探活错误全文收进自绘深色气泡；
+                       hover 与键盘 focus 双触发；与 errbar 同口径仅 probe 形态渲染——禁用卡/sse 卡
+                       不显示（sse 旧失败报告属协议不匹配误报）。 -->
+                  <span v-if="connModeOf(card) === 'probe' && connStateOf(card) === 'fail' && probeReportOf(card)?.error" class="tip">
+                    <button type="button" class="warnico" aria-label="查看探活错误全文">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path></svg>
+                    </button>
+                    <span class="bubble" role="tooltip"><b>探活错误</b><code>{{ probeReportOf(card)?.error }}</code></span>
+                  </span>
+                  <span v-if="connModeOf(card) === 'probe'" class="mcp-card__tools">{{ toolsTextOf(card) }}</span>
+                </div>
               </div>
-              <div class="mcp-card__cmd">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-                <span><b>{{ card.display.split(' ')[0] }}</b>{{ card.display.slice(card.display.split(' ')[0].length) }}</span>
-              </div>
-              <!-- 行2.5 errbar：探活失败红边框 + 错误条（error 单行截断，悬停 title 看全文）。 -->
-              <div v-if="connStateOf(card) === 'fail' && probeReportOf(card)?.error" class="mcp-card__err">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                <span>连接失败：<code :title="probeReportOf(card)?.error ?? ''">{{ probeReportOf(card)?.error }}</code></span>
-              </div>
-              <div class="mcp-card__r3">
-                <span class="mcp-card__desc" :title="card.description">{{ card.description }}</span>
-                <span :class="['mcp-card__conn', { 'mcp-card__conn--off': connStateOf(card) === 'none' || connStateOf(card) === 'busy', 'mcp-card__conn--fail': connStateOf(card) === 'fail' }]">
-                  <span class="dot"></span>{{ connTextOf(card) }}
-                </span>
-                <span class="mcp-card__tools">{{ toolsTextOf(card) }}</span>
-              </div>
-            </div>
+            </section>
             <!-- 空态：真零（按作用域分化引导）与筛选零。 -->
             <div v-if="visibleCards.length === 0" class="mcp-empty">
               <template v-if="activeScope.kind === 'managed'">
@@ -1092,12 +1392,7 @@ const scopeNoteHead = computed<string>(() => {
               </template>
             </div>
           </div>
-
-          <p class="mcp-note">
-            {{ scopeNoteHead }}
-            <b>本页启停仅影响新会话，进行中的会话不受影响。</b>
-            Claude Link 以严格模式接管会话 MCP 集合，claude.ai 云端 connectors 与插件 MCP 不再自动加载（禁用真正生效的必要代价）。管理库存于 claude-link 应用配置；用户级与项目级来自磁盘文件，只读展示、仅可启停。
-          </p>
+          <!-- 风格 C 契约2：底部大段说明整段删除，由标题行 ⓘ 气泡承接（对照 round4-slim-c.html） -->
         </template>
       </div>
     </section>
@@ -1126,7 +1421,7 @@ const scopeNoteHead = computed<string>(() => {
                     @click="switchLocation(loc)"
                   >{{ locationLabel(loc) }}</button>
                 </div>
-                <span :class="['mcp-ffield__hint', { 'mcp-ffield__hint--danger': !locationSupported }]">{{ locationHint }}</span>
+                <span class="mcp-ffield__hint">{{ locationHint }}</span>
               </div>
               <div v-if="formLocation === 'project'" class="mcp-ffield mcp-ffield--full">
                 <span class="mcp-ffield__label">目标项目目录</span>
@@ -1138,16 +1433,18 @@ const scopeNoteHead = computed<string>(() => {
                 <span v-if="projectDirs.length === 0" class="mcp-ffield__hint">暂无已知项目目录</span>
               </div>
               <label class="mcp-ffield">
-                <span class="mcp-ffield__label">名称<span class="req">*</span></span>
+                <span class="mcp-ffield__label">名称<span class="req-mark">*</span></span>
                 <input
                   v-model="formName"
-                  :class="['mcp-input', 'mcp-input--mono', { 'mcp-input--invalid': nameError !== '' }]"
+                  :class="['mcp-input', 'mcp-input--mono', { 'mcp-input--invalid': nameErrorShown !== '' }]"
                   type="text"
                   placeholder="context7"
                   :disabled="isEditMode"
+                  aria-required="true"
+                  @blur="touchedFields.name = true"
                 />
-                <span :class="['mcp-ffield__hint', { 'mcp-ffield__hint--danger': nameError !== '' }]">
-                  {{ nameError !== '' ? nameError : '工具名形如 mcp__<名称>__<工具>，仅限字母、数字、-、_' }}
+                <span :class="['mcp-ffield__hint', { 'mcp-ffield__hint--danger': nameErrorShown !== '' }]">
+                  {{ nameErrorShown !== '' ? nameErrorShown : '工具名形如 mcp__<名称>__<工具>，仅限字母、数字、-、_' }}
                 </span>
               </label>
               <div class="mcp-ffield">
@@ -1158,24 +1455,27 @@ const scopeNoteHead = computed<string>(() => {
                     :key="t"
                     type="button"
                     :class="['mcp-seg__btn', { 'mcp-seg__btn--active': formTransport === t }]"
-                    @click="formTransport = t"
+                    @click="switchTransport(t)"
                   >{{ transportLabel(t) }}</button>
                 </div>
               </div>
-              <label class="mcp-ffield mcp-ffield--full">
+              <!-- 描述字段仅管理库有（ScopedMcpEntry 无此键，P8 E0-1：user/project 条目不落描述）。 -->
+              <label v-if="formLocation === 'managed'" class="mcp-ffield mcp-ffield--full">
                 <span class="mcp-ffield__label">描述</span>
                 <input v-model="formDescription" class="mcp-input" type="text" placeholder="可选，便于识别用途" />
               </label>
               <template v-if="formTransport === 'stdio'">
                 <label class="mcp-ffield mcp-ffield--full">
-                  <span class="mcp-ffield__label">命令<span class="req">*</span></span>
+                  <span class="mcp-ffield__label">命令<span class="req-mark">*</span></span>
                   <input
                     v-model="formCommand"
-                    :class="['mcp-input', 'mcp-input--mono', { 'mcp-input--invalid': commandError !== '' }]"
+                    :class="['mcp-input', 'mcp-input--mono', { 'mcp-input--invalid': commandErrorShown !== '' }]"
                     type="text"
                     placeholder="npx"
+                    aria-required="true"
+                    @blur="touchedFields.command = true"
                   />
-                  <span v-if="commandError !== ''" class="mcp-ffield__hint mcp-ffield__hint--danger">{{ commandError }}</span>
+                  <span v-if="commandErrorShown !== ''" class="mcp-ffield__hint mcp-ffield__hint--danger">{{ commandErrorShown }}</span>
                 </label>
                 <label class="mcp-ffield mcp-ffield--full">
                   <span class="mcp-ffield__label">参数</span>
@@ -1195,19 +1495,29 @@ const scopeNoteHead = computed<string>(() => {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                     添加变量
                   </button>
-                  <span class="mcp-ffield__hint">编辑时已存值回显为 {{ MASK_SENTINEL }}；保持不变则沿用已存原值，不会重复保存</span>
+                  <!-- 风格 C 契约4：哨兵长句压缩 + ⓘ（自绘深色气泡向上弹出）看完整规则 -->
+                  <span class="mcp-ffield__hint hintrow">已存值回显为 {{ MASK_SENTINEL }}，保持不变沿用原值
+                    <span class="tip tip--up">
+                      <button type="button" class="mcp-info-btn" aria-label="脱敏回显规则说明">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                      </button>
+                      <span class="bubble" role="tooltip"><b>脱敏回显规则</b><span>编辑时已存值回显为 {{ MASK_SENTINEL }}；保持不变则沿用已存原值，不会重复保存</span></span>
+                    </span>
+                  </span>
                 </div>
               </template>
               <template v-else>
                 <label class="mcp-ffield mcp-ffield--full">
-                  <span class="mcp-ffield__label">URL<span class="req">*</span></span>
+                  <span class="mcp-ffield__label">URL<span class="req-mark">*</span></span>
                   <input
                     v-model="formUrl"
-                    :class="['mcp-input', 'mcp-input--mono', { 'mcp-input--invalid': urlError !== '' }]"
+                    :class="['mcp-input', 'mcp-input--mono', { 'mcp-input--invalid': urlErrorShown !== '' }]"
                     type="text"
                     placeholder="https://example.com/mcp"
+                    aria-required="true"
+                    @blur="touchedFields.url = true"
                   />
-                  <span v-if="urlError !== ''" class="mcp-ffield__hint mcp-ffield__hint--danger">{{ urlError }}</span>
+                  <span v-if="urlErrorShown !== ''" class="mcp-ffield__hint mcp-ffield__hint--danger">{{ urlErrorShown }}</span>
                 </label>
                 <div class="mcp-ffield mcp-ffield--full">
                   <span class="mcp-ffield__label">请求头</span>
@@ -1222,7 +1532,15 @@ const scopeNoteHead = computed<string>(() => {
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                     添加请求头
                   </button>
-                  <span class="mcp-ffield__hint">编辑时已存值回显为 {{ MASK_SENTINEL }}；保持不变则沿用已存原值，不会重复保存</span>
+                  <!-- 风格 C 契约4：哨兵长句压缩 + ⓘ（自绘深色气泡向上弹出）看完整规则 -->
+                  <span class="mcp-ffield__hint hintrow">已存值回显为 {{ MASK_SENTINEL }}，保持不变沿用原值
+                    <span class="tip tip--up">
+                      <button type="button" class="mcp-info-btn" aria-label="脱敏回显规则说明">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+                      </button>
+                      <span class="bubble" role="tooltip"><b>脱敏回显规则</b><span>编辑时已存值回显为 {{ MASK_SENTINEL }}；保持不变则沿用已存原值，不会重复保存</span></span>
+                    </span>
+                  </span>
                 </div>
               </template>
             </div>
@@ -1470,6 +1788,7 @@ const scopeNoteHead = computed<string>(() => {
 }
 
 .mcp-title-row {
+  position: relative; /* tip--head 气泡的定位锚（右缘对齐，防 ⓘ 就近 left:0 展开出屏） */
   display: flex;
   align-items: center;
   gap: 0.5rem;
@@ -1531,7 +1850,7 @@ const scopeNoteHead = computed<string>(() => {
   flex-shrink: 0;
 }
 
-/* 统计并入工具栏的胶囊组（取自定稿 G3，省一整行高度）。 */
+/* 工具栏右侧胶囊（风格 C 契约3：统计胶囊已移除，仅存「批量测试中…」在飞指示）。 */
 .mcp-toolbar {
   display: flex;
   align-items: center;
@@ -1556,16 +1875,6 @@ const scopeNoteHead = computed<string>(() => {
   font-variant-numeric: tabular-nums;
   color: var(--color-text-muted);
   background: color-mix(in srgb, var(--color-text-muted) 7%, transparent);
-}
-
-.mcp-statpill--on {
-  color: var(--color-accent-strong);
-  background: color-mix(in srgb, var(--color-accent) 11%, transparent);
-}
-
-.mcp-statpill--off {
-  color: var(--color-fail);
-  background: color-mix(in srgb, var(--color-fail) 9%, transparent);
 }
 
 .mcp-search {
@@ -1609,7 +1918,8 @@ const scopeNoteHead = computed<string>(() => {
   color: var(--color-accent-strong);
 }
 
-/* ── 滚动区 + 卡片（G3 三行密度 × G1 边框质感）────────────────────────── */
+/* ── 滚动区 + 风格 C 分组面板（round4-slim-c.html）：按传输分组 + 组头计数 +
+   组内发丝行 + 左侧状态色条（替代圆点信号）────────────────────────────────── */
 .mcp-main__scroll {
   flex: 1;
   min-height: 0;
@@ -1626,199 +1936,213 @@ const scopeNoteHead = computed<string>(() => {
   background: color-mix(in srgb, var(--color-text-muted) 28%, transparent);
 }
 
-.mcp-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 0.5rem;
+.mcp-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.875rem;
+  max-width: 52rem;
 }
 
-.mcp-card {
+.grp {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+}
+
+.grp__head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4375rem 0.875rem;
+  background: var(--color-panel);
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: var(--color-text);
+  letter-spacing: 0.02em;
+}
+
+.grp__head .cnt {
+  margin-left: auto;
+  font-size: 0.625rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.grp__row {
   display: flex;
   flex-direction: column;
   gap: 0.1875rem;
-  background: var(--color-panel-soft);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 0.6875rem 0.8125rem;
-  transition:
-    border-color var(--duration-fast) var(--ease-out),
-    box-shadow var(--duration-fast) var(--ease-out),
-    transform var(--duration-fast) var(--ease-out);
+  padding: 0.5625rem 0.875rem 0.625rem 1.0625rem;
+  transition: background 0.12s var(--ease-out);
 }
 
-.mcp-card:hover {
-  border-color: color-mix(in srgb, var(--color-accent) 38%, transparent);
-  box-shadow: var(--elevation-2);
-  transform: translateY(-1px);
+.grp__row + .grp__row {
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 55%, transparent);
 }
 
-.mcp-card--off {
+.grp__row:hover {
+  background: color-mix(in srgb, var(--color-accent) 4%, transparent);
+}
+
+/* 组末行承担组底部圆角（.grp 无 overflow:hidden，行内 fail ⚠ 气泡不再被裁剪）。 */
+.grp__row:last-child {
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+
+/* 状态呈现 C：左侧状态色条（ok 绿/none 灰/busy 黄/fail 红/disabled 淡灰+降透明）。 */
+.grp__row--ok {
+  box-shadow: inset 3px 0 0 var(--color-success);
+}
+
+.grp__row--none {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-text-muted) 45%, transparent);
+}
+
+.grp__row--busy {
+  box-shadow: inset 3px 0 0 var(--color-warn);
+}
+
+.grp__row--fail {
+  box-shadow: inset 3px 0 0 var(--color-fail);
+}
+
+.grp__row--off {
   opacity: 0.6;
-  background: transparent;
 }
 
-.mcp-card--off:hover {
+.grp__row--off:hover {
   opacity: 0.85;
 }
 
-/* 行2.5 errbar 卡片态（探活失败红边框）。 */
-.mcp-card--fail {
-  border-color: color-mix(in srgb, var(--color-danger) 40%, transparent);
+.grp__row--disabled {
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-text-muted) 25%, transparent);
 }
 
 /* 行1：名称 + 徽标 | 操作 + 开关 */
-.mcp-card__r1 {
+.row__r1 {
   display: flex;
   align-items: center;
   gap: 0.4375rem;
   min-width: 0;
 }
 
-.mcp-card__name {
-  font-size: 0.875rem;
+.row__name {
+  font-size: 0.8125rem;
   font-weight: 700;
   font-family: var(--font-mono);
   letter-spacing: -0.01em;
   white-space: nowrap;
 }
 
-.mcp-card__r1 .mcp-spacer {
+.spacer {
   flex: 1;
 }
 
-/* 传输 chip（stdio 默认描边 / http info / sse success 三色）。 */
+/* 传输 chip——徽标形态 C：实底小方标（stdio 深中性底白字 / http info-strong / sse success-strong）。 */
 .mcp-tchip {
   display: inline-flex;
   align-items: center;
-  padding: 0.09375rem 0.4375rem;
+  padding: 0.125rem 0.4375rem;
   border-radius: var(--radius-xs);
   font-family: var(--font-mono);
-  font-size: 0.59375rem;
+  font-size: 0.5625rem;
   font-weight: 700;
   letter-spacing: 0.05em;
-  border: 1px solid var(--color-border);
-  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-text) 78%, #000);
+  color: #fcfaf5;
   flex-shrink: 0;
 }
 
 .mcp-tchip--http {
-  color: var(--color-info-strong);
-  border-color: color-mix(in srgb, var(--color-info) 35%, transparent);
-  background: color-mix(in srgb, var(--color-info) 8%, transparent);
+  background: var(--color-info-strong);
+  color: #fff;
 }
 
 .mcp-tchip--sse {
-  color: var(--color-success-strong);
-  border-color: color-mix(in srgb, var(--color-success) 35%, transparent);
-  background: color-mix(in srgb, var(--color-success) 8%, transparent);
+  background: var(--color-success-strong);
+  color: #fff;
 }
 
-/* 作用域徽章（managed accent / user info / project 紫）。 */
+/* 作用域徽章——形态 C：accent 实底（user info-strong / project 紫，随实底语言延伸；
+   效果图仅示 managed 形态，user/project 变体保持既有作用域色相映射）。 */
 .mcp-scope-badge {
   display: inline-flex;
   align-items: center;
-  padding: 0.09375rem 0.5rem;
-  border-radius: var(--radius-pill);
-  font-size: 0.59375rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: var(--radius-xs);
+  font-size: 0.5625rem;
   font-weight: 700;
   letter-spacing: 0.02em;
-  color: var(--color-accent-strong);
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
   flex-shrink: 0;
 }
 
 .mcp-scope-badge--user {
-  color: var(--color-info-strong);
-  background: color-mix(in srgb, var(--color-info) 12%, transparent);
+  background: var(--color-info-strong);
+  color: #fff;
 }
 
 .mcp-scope-badge--project {
-  color: #5f3dc4;
-  background: color-mix(in srgb, #7c5cfc 13%, transparent);
+  background: #7c5cfc;
+  color: #fff;
 }
 
 .mcp-off-badge {
   display: inline-flex;
   align-items: center;
-  padding: 0.09375rem 0.5rem;
-  border-radius: var(--radius-pill);
-  font-size: 0.59375rem;
+  padding: 0.125rem 0.5rem;
+  border-radius: var(--radius-xs);
+  font-size: 0.5625rem;
   font-weight: 700;
-  color: var(--color-fail);
-  background: color-mix(in srgb, var(--color-fail) 10%, transparent);
+  background: var(--color-fail);
+  color: #fff;
   flex-shrink: 0;
 }
 
 /* 行2：命令行 / url。 */
-.mcp-card__cmd {
+.row__cmd {
   display: flex;
   align-items: center;
-  gap: 0.375rem;
+  gap: 0.3125rem;
   font-family: var(--font-mono);
-  font-size: 0.71875rem;
+  font-size: 0.6875rem;
   color: var(--color-text-muted);
   white-space: nowrap;
   overflow: hidden;
 }
 
-.mcp-card__cmd svg {
-  width: 0.75rem;
-  height: 0.75rem;
+.row__cmd svg {
+  width: 0.6875rem;
+  height: 0.6875rem;
   flex-shrink: 0;
   opacity: 0.65;
 }
 
-.mcp-card__cmd span {
+.row__cmd span {
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.mcp-card__cmd b {
+.row__cmd b {
   font-weight: 600;
   color: color-mix(in srgb, var(--color-text-muted) 85%, var(--color-text));
 }
 
-/* 行2.5 errbar（探活失败错误条）：文本单行截断，悬停 title 看全文。 */
-.mcp-card__err {
-  display: flex;
-  gap: 0.3125rem;
-  font-size: 0.6875rem;
-  color: var(--color-danger);
-  line-height: 1.45;
-  min-width: 0;
-}
-
-.mcp-card__err svg {
-  width: 0.8125rem;
-  height: 0.8125rem;
-  flex-shrink: 0;
-  margin-top: 0.0625rem;
-}
-
-.mcp-card__err span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.mcp-card__err code {
-  font-family: var(--font-mono);
-  font-size: 0.65625rem;
-}
-
-/* 行3：描述 | 连接 + 工具。 */
-.mcp-card__r3 {
+/* 行3：描述 | 连接状态（fail 态状态文案旁 ⚠ 深色气泡）+ 工具数。 */
+.row__r3 {
   display: flex;
   align-items: center;
-  gap: 0.625rem;
-  margin-top: 0.0625rem;
+  gap: 0.5625rem;
 }
 
-.mcp-card__desc {
+.row__desc {
   flex: 1;
   min-width: 0;
-  font-size: 0.71875rem;
+  font-size: 0.6875rem;
   color: var(--color-text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -1828,18 +2152,11 @@ const scopeNoteHead = computed<string>(() => {
 .mcp-card__conn {
   display: inline-flex;
   align-items: center;
-  gap: 0.3125rem;
-  font-size: 0.6875rem;
+  gap: 0.25rem;
+  font-size: 0.65625rem;
   font-weight: 600;
   color: var(--color-success-strong);
   flex-shrink: 0;
-}
-
-.mcp-card__conn .dot {
-  width: 0.4375rem;
-  height: 0.4375rem;
-  border-radius: 50%;
-  background: var(--color-success);
 }
 
 .mcp-card__conn--off {
@@ -1847,28 +2164,169 @@ const scopeNoteHead = computed<string>(() => {
   font-weight: 500;
 }
 
-.mcp-card__conn--off .dot {
-  background: var(--color-border-strong);
-}
-
 .mcp-card__conn--fail {
   color: var(--color-danger);
 }
 
-.mcp-card__conn--fail .dot {
-  background: var(--color-fail);
-}
-
 .mcp-card__tools {
-  font-size: 0.65625rem;
+  font-size: 0.625rem;
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
   flex-shrink: 0;
 }
 
-.mcp-readonly-hint {
-  font-size: 0.625rem;
+/* ── 自绘深色气泡 tooltip（风格 C 选型）：--color-text 深底浅字 + elevation-3；
+   hover 与 :focus-within 双触发（Ⓘ/⚠ 为可 Tab 聚焦的 button，键盘可达）──────── */
+.tip {
+  position: relative;
+  display: inline-flex;
+}
+
+.tip .bubble {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  left: 0;
+  width: max-content;
+  max-width: 24rem;
+  z-index: 60;
+  background: var(--color-text);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elevation-3);
+  padding: 0.6875rem 0.875rem;
+  font-size: 0.6875rem;
+  line-height: 1.65;
+  text-align: left;
+  color: color-mix(in srgb, var(--color-panel) 92%, var(--color-text));
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0.1875rem);
+  transition:
+    opacity 0.12s var(--ease-out),
+    transform 0.12s var(--ease-out);
+}
+
+.tip .bubble b {
+  display: block;
+  color: #fcfaf5;
+  font-weight: 600;
+  margin-bottom: 0.3125rem;
+}
+
+.tip .bubble span + span {
+  display: block;
+  margin-top: 0.3125rem;
+}
+
+.tip .bubble code {
+  font-family: var(--font-mono);
+  font-size: 0.65625rem;
+  color: #e8c8c8;
+}
+
+.tip:hover .bubble,
+.tip:focus-within .bubble {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* 气泡向上弹出（弹窗 hint 行内用）。 */
+.tip--up .bubble {
+  top: auto;
+  bottom: calc(100% + 0.5rem);
+  transform: translateY(-0.1875rem);
+}
+
+.tip--up:hover .bubble,
+.tip--up:focus-within .bubble {
+  transform: translateY(0);
+}
+
+/* 标题行 ⓘ 专属变体：Ⓘ 紧邻右侧动作按钮，基础 left:0（自 ⓘ 左缘向右展开 24rem）必超窗口
+   右缘截断（2026-10-18 截图回归）。锚定改到 .mcp-title-row（position:relative 锚）右缘、
+   向左展开；宽度上限再钳制到行宽（极窄面板下 24rem 也放不下时不溢出）。hover/:focus-within
+   触发逻辑不变（bubble 仍是 .tip 的 DOM 子节点）。 */
+.tip--head {
+  position: static; /* 让位：气泡包含块改为 .mcp-title-row */
+}
+
+.tip--head .bubble {
+  left: auto;
+  right: 0;
+  max-width: min(24rem, 100%);
+}
+
+/* ⓘ 说明按钮（标题行作用域说明 + 弹窗 hint 行内规则说明共用）。 */
+.mcp-info-btn {
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
   color: var(--color-text-muted);
+  cursor: pointer;
+  width: 1.375rem;
+  height: 1.375rem;
+  border-radius: var(--radius-xs);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.mcp-info-btn svg {
+  width: 0.75rem;
+  height: 0.75rem;
+}
+
+.mcp-info-btn:hover,
+.mcp-info-btn:focus-visible {
+  color: var(--color-text);
+  border-color: var(--color-border-strong);
+  background: color-mix(in srgb, var(--color-text) 8%, transparent);
+}
+
+.mcp-info-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* fail 态 ⚠ 图标（可 Tab 聚焦的 button；气泡见 .tip）。
+   契约1：errbar 整行删除后探活错误全文的唯一入口。 */
+.warnico {
+  border: 0;
+  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  color: var(--color-warn-strong);
+  cursor: help;
+  flex-shrink: 0;
+  padding: 0;
+  border-radius: var(--radius-xs);
+}
+
+.warnico:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.warnico svg {
+  width: 0.8125rem;
+  height: 0.8125rem;
+}
+
+/* 弹窗 hint 行内 ⓘ（小一号）。 */
+.hintrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+.hintrow .mcp-info-btn {
+  width: 1.125rem;
+  height: 1.125rem;
+}
+
+.hintrow .mcp-info-btn svg {
+  width: 0.6875rem;
+  height: 0.6875rem;
 }
 
 /* ── 按钮（导入 JSON / 添加服务器 / iconbtn）──────────────────────────── */
@@ -1916,8 +2374,8 @@ const scopeNoteHead = computed<string>(() => {
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
-  width: 1.75rem;
-  height: 1.75rem;
+  width: 1.6875rem;
+  height: 1.6875rem;
   border-radius: var(--radius-xs);
   display: inline-flex;
   align-items: center;
@@ -1941,8 +2399,8 @@ const scopeNoteHead = computed<string>(() => {
 }
 
 .mcp-iconbtn svg {
-  width: 0.875rem;
-  height: 0.875rem;
+  width: 0.8125rem;
+  height: 0.8125rem;
 }
 
 /* ── 开关（定稿 .switch 同值移植）────────────────────────────────────── */
@@ -1950,8 +2408,8 @@ const scopeNoteHead = computed<string>(() => {
   appearance: none;
   -webkit-appearance: none;
   position: relative;
-  width: 2.75rem;
-  height: 1.5rem;
+  width: 2.5rem;
+  height: 1.375rem;
   margin: 0;
   border-radius: var(--radius-pill);
   background: var(--color-border-strong);
@@ -1965,8 +2423,8 @@ const scopeNoteHead = computed<string>(() => {
   position: absolute;
   top: 50%;
   left: 0.1875rem;
-  width: 1.125rem;
-  height: 1.125rem;
+  width: 1.0625rem;
+  height: 1.0625rem;
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
@@ -1979,7 +2437,7 @@ const scopeNoteHead = computed<string>(() => {
 }
 
 .mcp-switch:checked::before {
-  transform: translateY(-50%) translateX(1.25rem);
+  transform: translateY(-50%) translateX(1.125rem);
 }
 
 .mcp-switch:focus-visible {
@@ -2019,18 +2477,6 @@ const scopeNoteHead = computed<string>(() => {
 
 .mcp-empty__retry:hover {
   background: color-mix(in srgb, var(--color-warn) 16%, transparent);
-}
-
-.mcp-note {
-  margin: 0.875rem 0 0;
-  font-size: 0.6875rem;
-  color: var(--color-text-muted);
-  line-height: 1.65;
-}
-
-.mcp-note b {
-  color: var(--color-text);
-  font-weight: 600;
 }
 
 /* ── 弹窗（定稿 mask/modal/form/seg/select/kvrow 同值移植，mcp- 前缀）────── */
@@ -2157,11 +2603,6 @@ const scopeNoteHead = computed<string>(() => {
 .mcp-ffield__label {
   font-size: 0.75rem;
   font-weight: 600;
-}
-
-.mcp-ffield__label .req {
-  color: var(--color-fail);
-  margin-left: 0.125rem;
 }
 
 .mcp-ffield__hint {
@@ -2437,7 +2878,7 @@ const scopeNoteHead = computed<string>(() => {
   border-color: var(--color-border-strong);
 }
 
-/* 未勾选（将不导入）行降透明度提示——对照 .mcp-card--off 同值 0.6。 */
+/* 未勾选（将不导入）行降透明度提示——对照 .grp__row--off 同值 0.6。 */
 .mcp-imp__row--unchecked {
   opacity: 0.6;
 }

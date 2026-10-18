@@ -458,3 +458,10 @@ body.dlg-shell-busy .dlg-rz {
 ::-webkit-scrollbar-corner {
   background: transparent;
 }
+
+/* ── 表单必填星号工具类：统一供应商编辑器与 MCP 设置两处必填标记（B 点）── */
+.req-mark {
+  color: var(--color-fail);
+  margin-left: 2px;
+  font-weight: 600;
+}
