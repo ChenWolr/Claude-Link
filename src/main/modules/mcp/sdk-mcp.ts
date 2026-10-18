@@ -15,7 +15,8 @@
 //       会话启动注入：user/project/managed 三层合并（mergeMcpServersForSession），结果非空才写
 //       out.mcpServers（§3.1：空配置下 settings 块与不注入时 JSON.stringify 字节级一致）。
 //       io 参数（可选注入，selftest 用内存 stub 保证确定性——绝不读真实 ~/.claude.json）：
-//       默认实现走 mcp-scanner 的同步 raw 读取器（未脱敏，注入 SDK 需要真值）；
+//       默认实现走 mcp-scanner 的同步 detail 读取器（未脱敏，注入 SDK 需要真值）+ 坏目录负缓存
+//       前置/标记（B-1，与 Skill/快照链同实例，60s TTL）；
 //       userHome 默认 os.homedir()，真正的 userHome 由调用方 sdk-backend 显式传
 //       effectiveUserHome() ?? os.homedir()（与 SDK 子进程 env 同口径，见 effectiveUserHome）。
 //
@@ -26,14 +27,15 @@
 import * as os from 'node:os';
 import type { AppConfig } from '../../../shared/types/config';
 import { normalizeDirKey } from '../../../shared/project-skills';
+import { badDirCacheHas, badDirCacheMark } from '../project-skills';
 import { mergeMcpServersForSession, type ParsedMcpEntry } from './mcp-config';
-import { readProjectMcpServersRawSync, readUserMcpServersRawSync } from './mcp-scanner';
+import { readProjectMcpServersDetailSync, readUserMcpServersDetailSync } from './mcp-scanner';
 
 /** mergeMcpServersIntoSettings 的可选 io 注入面（selftest 用内存 stub；生产走默认实现）。 */
 export interface MergeMcpServersIo {
-  /** 用户级 ~/.claude.json 顶层 mcpServers 读取（未脱敏）。缺省 → readUserMcpServersRawSync(userHome)。 */
+  /** 用户级 ~/.claude.json 顶层 mcpServers 读取（未脱敏）。缺省 → detail 直读 + 坏目录负缓存（B-1）。 */
   readUser?: () => Record<string, ParsedMcpEntry>;
-  /** 项目级 <dir>/.mcp.json 顶层 mcpServers 读取（未脱敏）。缺省 → readProjectMcpServersRawSync(dir)。 */
+  /** 项目级 <dir>/.mcp.json 顶层 mcpServers 读取（未脱敏）。缺省 → detail 直读 + 坏目录负缓存（B-1）。 */
   readProject?: (dir: string) => Record<string, ParsedMcpEntry>;
   /** 用户根目录（~/.claude.json 定位用）。缺省 → os.homedir()；生产调用方传 effectiveUserHome() ?? os.homedir()。 */
   userHome?: string;
@@ -94,7 +96,7 @@ export function parseSessionMcpOverrides(raw: unknown): Record<string, 'off'> | 
  * config.mcpOverrides（§3.14——MCP 因 strictMcpConfig 必须给值，与 skill 的 null=全启用兜底不同）。
  * 项目级：workingDir 非空 → normalizeDirKey 归一为 projectDirKey 并直读该目录 .mcp.json
  *（§3.9 注入链口径：恒取当前会话 workingDir 的 .mcp.json，不经目录集——目录集只是 scanner 视图
- * 概念；目录不存在/不可读 → raw 读取器返回 {} → 项目级自然不参与）。workingDir 空 → 项目级不参与。
+ * 概念；目录不存在/不可读/负缓存命中 → 默认 io 返回 {} → 项目级自然不参与）。workingDir 空 → 项目级不参与。
  * 合并结果非空才写 out.mcpServers（§3.1：空 MCP 配置下 settings 块与改动前 JSON.stringify
  * 逐字节相同——生产 query / probe 零影响，T1/E3a 断言钉死）。
  * 管理库删除同名服务器后，钉住的孤儿 override 键因 merge 只遍历现存定义而自然无效（§3.8，不崩）。
@@ -108,8 +110,32 @@ export function mergeMcpServersIntoSettings(
 ): void {
   const overrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;
   const projectDirKey = workingDir ? normalizeDirKey(workingDir) : null;
-  const readUser = io?.readUser ?? (() => readUserMcpServersRawSync(io?.userHome ?? os.homedir()));
-  const readProject = io?.readProject ?? ((dir: string) => readProjectMcpServersRawSync(dir));
+  // B-1（2026-10-16）默认 io 坏目录负缓存防护：慢速/失联目录（UNC/网络盘/拔出的可移动盘）的
+  // 同步读曾让注入链每次会话启动重付数十秒阻塞——前置 badDirCacheHas（与 Skill/快照链同实例的
+  // 60s 共享负缓存）命中即返回 {}；readFailed（读异常且非 ENOENT/非损坏，mcp-scanner detail
+  // 三态分类）时 badDirCacheMark 快速失败，60s 内不再重复付失败成本。视图链（collectMcpSnapshot
+  // 逐目录 async withTimeout）写同一共享缓存实例——用户进过 MCP/Skill 设置页后，注入链即可吃到
+  // 视图链的超时标记（键形态：normalizeDirKey 在 badDirCache* 内部统一做，两侧传原始串天然一致）。
+  // 申报边界：同步链无法防「首次悬挂」（悬挂不返回、无从 mark）——从未打开设置页的首条消息
+  // 仍可能悬挂一次。
+  const userHome = io?.userHome ?? os.homedir();
+  const readUser =
+    io?.readUser ??
+    (() => {
+      const key = `mcp-user:${userHome}`; // 命名空间隔离，绝不与项目目录键碰撞（绝对路径不可能以 mcp-user: 开头）
+      if (badDirCacheHas(key)) return {};
+      const d = readUserMcpServersDetailSync(userHome);
+      if (d.readFailed) badDirCacheMark(key);
+      return d.servers;
+    });
+  const readProject =
+    io?.readProject ??
+    ((dir: string) => {
+      if (badDirCacheHas(dir)) return {}; // 命中共享负缓存（Skill/快照链同实例写入）
+      const d = readProjectMcpServersDetailSync(dir);
+      if (d.readFailed) badDirCacheMark(dir); // 快速失败也标记，60s 内不再重复付失败成本
+      return d.servers;
+    });
   const userServers = readUser() ?? {};
   const projectServers = projectDirKey !== null ? (readProject(workingDir as string) ?? {}) : {};
   const merged = mergeMcpServersForSession({

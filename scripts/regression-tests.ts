@@ -1692,7 +1692,8 @@ function testPermissionPromptIntegration(): void {
   // 工厂把显式 settings 放入 Options.settings，杜绝两条路径各自重复构造 settings。
   assert.ok(sdkBackend.includes('buildClaudeLinkSettingsBlock'), 'sdk-backend 应有统一 settings 块构造函数（F6）');
   assert.ok(
-    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias(?:,\s*(?:override|modelOverride))?(?:,\s*effectivePermissionMode)?\)/g) ?? []).length >= 2,
+    // round-003 授权例外：D1 起调用点追加第 8 参 sessionRow（去重复读），正则认可可选尾参（钉语义不变）。
+    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias(?:,\s*(?:override|modelOverride))?(?:,\s*effectivePermissionMode)?(?:,\s*sessionRow)?\)/g) ?? []).length >= 2,
     '生产 query 与 probe 必须调用同一个 buildClaudeLinkSettingsBlock（F6：杜绝配置漂移）',
   );
   assert.ok(optionsSrc.includes('settings?: Record<string, unknown>'), '统一 options 工厂输入应含显式 settings（F6）');

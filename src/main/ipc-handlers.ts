@@ -37,11 +37,13 @@ import {
 } from './modules/mcp/mcp-config';
 import { collectMcpSnapshot } from './modules/mcp/mcp-scanner';
 import {
+  dropProbeCacheByPrefix,
   getCachedProbeReports,
   hasFreshCache,
   mcpProbeKey,
   probeAllManaged,
   probeMcpServer,
+  pruneProbeCache,
   type McpProbeInput,
   type McpProbeReport,
 } from './modules/mcp/mcp-probe';
@@ -415,6 +417,9 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     saveConfig({
       mcpServers: sanitizeMcpServersConfig(restoreMaskedMcpServers(body as McpManagedSaveEntry[], getConfig().mcpServers)),
     });
+    // B-7：管理库是全量替换保存，落盘成功后统一清空 managed: 探活缓存（比逐键 diff 简单且
+    // 可预测）——增/删/改后旧定义结论即时失效，批量重探一律取新结论（60s 内同名重添无旧值回显）。
+    dropProbeCacheByPrefix('managed:');
     return { ok: true as const };
   });
   // 启停 override 单键翻转：主进程内直接改 config 再 saveConfig——不经渲染层整包 config，
@@ -434,11 +439,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return { overrides: getConfig().mcpOverrides };
   });
   // 探活：all = 管理库逐条构造 inputs（name/transport/command/args/env/url/headers）并发探活，
-  // 60s 缓存逐 key 判定（hasFreshCache 命中直接回缓存报告，未命中才探）；single = 渲染层只传
-  // name（§1.3 渲染层零明文约束），主进程按 name 在 getConfig().mcpServers 定位已存条目、
-  // 自取明文 env/headers 构造探活输入现探（用户显式「测试连接」不走缓存——probeMcpServer
-  // 不传 cacheKey 即只探不缓存）；查无 → 单元素 fail report，不抛。
-  // 返回 McpProbeReport[]（single 恒单元素数组；all 与 getConfig().mcpServers 逐条对齐同序）。
+  // 60s 缓存逐 key 判定（hasFreshCache 命中直接回缓存报告，未命中才探；入口先 pruneProbeCache
+  // 时间驱动清理）；single = 渲染层只传 name（§1.3 渲染层零明文约束），主进程按 name 在
+  // getConfig().mcpServers 定位已存条目、自取明文 env/headers 构造探活输入现探（用户显式
+  // 「测试连接」只写不读缓存——传 cacheKey 把新结论写进缓存供批量命中，但回包恒为现探值，
+  // 不回旧缓存）；查无 → 单元素 fail report，不抛。
+  // 返回 McpProbeReport[]（single 恒单元素数组；all 与启用条目逐条对齐同序；禁用条目缺槽，
+  // UI 按 key 消费并显示已禁用态。single 为用户显式动作不滤禁用——禁用卡也允许手动测试）。
   ipcMain.handle(IPC_CHANNELS.MCP_PROBE, async (_event, body: unknown): Promise<McpProbeReport[]> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP probe payload');
     const req = body as { target?: unknown; name?: unknown };
@@ -460,12 +467,19 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         url: stored.url,
         headers: stored.headers,
       };
-      return [await probeMcpServer(input)];
+      // 只写不读：新结论写进 managed:<name> 缓存（供 all 批量 60s 命中），回包恒为现探值。
+      return [await probeMcpServer(input, 10_000, mcpProbeKey('managed', null, input.name))];
     }
     if (req.target !== 'all') throw new Error('Invalid MCP probe target');
+    // B-10：批量探测入口顺带时间驱动清理过期缓存（pruneProbeCache 原全仓零调用方，此处接线）。
+    pruneProbeCache(60_000);
     const cachedByKey = new Map(getCachedProbeReports().map((r) => [r.key, r]));
     const pending: McpProbeInput[] = [];
-    const slots = getConfig().mcpServers.map((server) => {
+    // B-8：批量探测只探启用条目（override `managed:<name>` 缺失/非 'off' 即启用）；禁用条目
+    // 不进 pending（零 spawn 零请求）也不进返回数组（UI 按 key 消费、缺槽不炸，显示已禁用态）。
+    const overridesNow = getConfig().mcpOverrides;
+    const enabledServers = getConfig().mcpServers.filter((s) => overridesNow[`managed:${s.name}`] !== 'off');
+    const slots = enabledServers.map((server) => {
       const input: McpProbeInput = {
         name: server.name,
         transport: server.transport,
@@ -1137,6 +1151,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcMain.handle(IPC_CHANNELS.TASK_RUN_NOW, async (_event, taskId: string) => {
     return runTaskNow(taskId, mainWindow);
   });
+
 
   // 熔断提示行「全部恢复」：全部 paused→pending + 立即开始全量倒计时。
   ipcMain.handle(IPC_CHANNELS.QUEUE_RESUME_ALL, async (_event, sessionId: string) => {

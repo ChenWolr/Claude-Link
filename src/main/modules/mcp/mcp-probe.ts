@@ -4,8 +4,9 @@
 // 的 transport/command/args/env/url/headers 侧）做一次「测试连接」：
 //   - stdio：spawn 子进程，行缓冲 JSON-RPC 握手 initialize(id:1) → notifications/initialized
 //     + tools/list(id:2)，以 result.tools.length 为工具数；
-//   - http/sse：POST JSON-RPC 同款两步握手；HTTP 4xx/5xx → fail，4xx 且 sse 时附
-//     「端点可能为 SSE 传输，Claude Code 会自行协商」提示。
+//   - http/sse：POST JSON-RPC 同款两步握手；initialize 响应头 mcp-session-id 存在时回传给
+//     tools/list（B-5）；HTTP 4xx/5xx → fail，4xx 且 sse 时附「端点可能为 SSE 传输，
+//     Claude Code 会自行协商」提示。
 // 任何异常路径（进程秒退/spawn ENOENT/超时/stdout 非 JSON/HTTP 4xx 5xx/网络错误/fetch 不可用/
 // 探活器自身 bug）一律收敛为 fail report（error 截断 200 字符），绝不抛出、绝不炸调用方（§3.7）。
 // 结果内存缓存：key = mcpProbeKey（override 键空间同款：managed:<name> / user:<name> /
@@ -27,6 +28,7 @@
 //                                                   以 managed:<name> 键写缓存）
 //   - getCachedProbeReports() / hasFreshCache(key, maxAgeMs?) / pruneProbeCache(maxAgeMs?)
 //                                                   缓存读取 / 新鲜判定 / 过期清理
+//   - dropProbeCacheByPrefix(prefix)                按前缀删键（managedSave 落盘后调用，防旧定义结论残留）
 
 import { spawn, type ChildProcess } from 'node:child_process';
 
@@ -70,6 +72,11 @@ export function mcpProbeKey(scope: 'managed' | 'user' | 'project', dirKey: strin
 const ERROR_TEXT_MAX = 200;
 /** stderr 只留尾部（供「进程提前退出」错误附言），避免超长输出撑爆 report。 */
 const STDERR_TAIL_MAX = 2000;
+/** stdout 未完行剩余缓冲上限（B-4）：1MB——无换行持续输出在探活超时窗口内的内存上界，
+ *  超限即 fail 不再无界累加；完整行已在判定前逐条切出处理，不计入本守卫（D3）。 */
+const STDOUT_BUF_MAX = 1_000_000;
+/** stdout 单行上限（B-4）：256KB——防超大单行 JSON.parse 的内存峰值。 */
+const STDOUT_LINE_MAX = 262_144;
 /** MCP initialize 握手参数（§2 P6 钉死值）。 */
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const PROBE_CLIENT_INFO = { name: 'claude-link-probe', version: '0.0.0' } as const;
@@ -178,8 +185,9 @@ function isResponseForId(msg: unknown, id: 1 | 2): boolean {
 /**
  * stdio 探活主体：spawn → 发 initialize(id:1) → 收 id:1 响应 → 发 notifications/initialized +
  * tools/list(id:2) → 收 id:2 响应 → ok + toolCount。
- * fail 路径：spawn ENOENT / 总超时 / 进程提前退出（附 stderr 尾部）/ stdout 行非 JSON / 响应带
- * error 字段。stderr 仅记录不判死（很多真实服务器往 stderr 打日志）。
+ * fail 路径：spawn ENOENT / 总超时 / 进程提前退出（附 stderr 尾部）/ stdout 行非 JSON /
+ * stdout 输出超限（B-4：未完行剩余缓冲 >1MB 或单行 >256KB）/ 响应带 error 字段。
+ * stderr 仅记录不判死（很多真实服务器往 stderr 打日志）。
  */
 function probeStdioServer(input: McpProbeInput, timeoutMs: number): Promise<ProbeOutcome> {
   return new Promise((resolve) => {
@@ -259,6 +267,16 @@ function probeStdioServer(input: McpProbeInput, timeoutMs: number): Promise<Prob
       while (idx >= 0) {
         const line = stdoutBuf.slice(0, idx).replace(/\r$/, '').trim();
         stdoutBuf = stdoutBuf.slice(idx + 1);
+        if (line.length > STDOUT_LINE_MAX) {
+          // B-4 防御：单行超限不进 JSON.parse，避免内存峰值。
+          finish({
+            status: 'fail',
+            toolCount: 0,
+            error: truncateError('单行响应超限（>256KB）'),
+            probedAt: Date.now(),
+          });
+          return;
+        }
         if (line !== '') {
           let msg: unknown;
           try {
@@ -276,6 +294,19 @@ function probeStdioServer(input: McpProbeInput, timeoutMs: number): Promise<Prob
           if (settled) return;
         }
         idx = stdoutBuf.indexOf('\n');
+      }
+      if (stdoutBuf.length > STDOUT_BUF_MAX) {
+        // B-4 防御（D3 移位）：总量守卫只对「无换行收尾的剩余缓冲」负责——无换行的持续输出
+        // 在超时窗口内最多堆积 1MB，超限即 fail（finish 内已 off('data') 停累积 + settled
+        // 防重复收官）。完整行洪水不经此路径：非 JSON 行在首次出现即 fail（既有行为），
+        // 合法响应按完整行逐条切出、单行 ≤256KB 各自处理，不再被总量误杀。
+        finish({
+          status: 'fail',
+          toolCount: 0,
+          error: truncateError('stdout 输出超限（>1MB），疑似非 MCP 服务器命令'),
+          probedAt: Date.now(),
+        });
+        return;
       }
     };
 
@@ -359,10 +390,12 @@ async function probeHttpServer(input: McpProbeInput, timeoutMs: number): Promise
   const probedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const postJson = (body: unknown): Promise<Response> =>
+  const postJson = (body: unknown, extraHeaders?: Record<string, string>): Promise<Response> =>
     fetch(input.url as string, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(input.headers ?? {}) },
+      // D4：extraHeaders（服务器签发的 mcp-session-id）有意后置——同名时覆盖用户自定义值，
+      // 会话延续须遵从服务器对本会话的新签发；如需用户优先须产品决策另立。
+      headers: { 'content-type': 'application/json', ...(input.headers ?? {}), ...(extraHeaders ?? {}) },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -375,7 +408,12 @@ async function probeHttpServer(input: McpProbeInput, timeoutMs: number): Promise
     const initErr = rpcErrorMessage(initParsed.msg);
     if (initErr !== null) return { status: 'fail', toolCount: 0, error: truncateError(`initialize 失败：${initErr}`), probedAt };
 
-    const toolsRes = await postJson(toolsListRequest());
+    // B-5：Streamable HTTP 会话延续——initialize 响应头若带 mcp-session-id，第二步 tools/list
+    // 原样回传（严格服务器缺此头会 404）；sid 为 null/空串则不传头（宽松服务器忽略多余头，无副作用）。
+    // D4：sid 与用户自定义头同名时，服务器签发值有意优先（postJson 展开序 input.headers →
+    // extraHeaders）——会话延续须遵从服务器对本会话的新签发；如需用户优先须产品决策另立。
+    const sid = initRes.headers.get('mcp-session-id'); // Headers.get 大小写不敏感
+    const toolsRes = await postJson(toolsListRequest(), sid ? { 'mcp-session-id': sid } : undefined);
     if (!toolsRes.ok) return httpStatusFail(toolsRes.status, toolsRes.statusText, input.transport === 'sse' ? 'sse' : 'http', 'tools/list ');
     const toolsParsed = await parseJsonBody(toolsRes);
     if (!toolsParsed.ok) return { status: 'fail', toolCount: 0, error: `tools/list ${toolsParsed.error}`, probedAt };
@@ -464,4 +502,10 @@ export function pruneProbeCache(maxAgeMs = 60_000): void {
   for (const [key, report] of probeCache) {
     if (now - report.probedAt >= maxAgeMs) probeCache.delete(key);
   }
+}
+
+/** 按前缀删除探活缓存键（managedSave 落盘后调用，防旧定义结论残留）。
+ *  只删命中前缀的键：'managed:' 不影响 user:/project: 键（B-21 留空间）。 */
+export function dropProbeCacheByPrefix(prefix: string): void {
+  for (const k of probeCache.keys()) if (k.startsWith(prefix)) probeCache.delete(k);
 }

@@ -13,8 +13,10 @@
 //   sessionRepo.listWorkingDirCounts、坏目录负缓存 badDirCacheHas/badDirCacheMark——
 //   与 Skill 共用同一缓存实例，语义同「目录不可达 60s 负缓存」）。
 // 同步 raw 读取器的失败路径（文件不存在/损坏/无 mcpServers 键/读取异常）一律静默返回
-// 空表（不抛错）——注入链路不需要区分；视图层才需要 userScopeError（collectMcpSnapshot
-// 自行 async 读 + 分类，不经 raw 读取器）。
+// 空表（不抛错）——raw 读取器本身不区分失败形态；视图层才需要 userScopeError（collectMcpSnapshot
+// 自行 async 读 + 分类，不经 raw 读取器）。B-1（2026-10-16）起另有 detail 包装导出
+//（readProjectMcpServersDetailSync / readUserMcpServersDetailSync）向注入链暴露 readFailed
+// 三态分类（ENOENT/损坏≠失败、其他读异常=失败），供默认 io 落坏目录负缓存。
 
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
@@ -87,34 +89,39 @@ function extractMcpServersTable(root: unknown): Record<string, unknown> | null {
 
 /**
  * 单文件直读归一（详细态）：readFileSync → JSON.parse → 顶层 mcpServers → 逐条 normalizeMcpEntry。
- * 返回 data（归一表；文件不存在/损坏/无键/读取异常 → 空表，不抛错）与 unreadable 标记
+ * 返回 data（归一表；文件不存在/损坏/无键/读取异常 → 空表，不抛错）、unreadable 标记
  * （true = 读取异常或 JSON 损坏，即「未读到有效内容」——该形态的结果不落 mtime 缓存，
- * 下次仍重试；合法 JSON 但无 mcpServers 键属有效内容，可缓存）。
+ * 下次仍重试；合法 JSON 但无 mcpServers 键属有效内容，可缓存）与 readFailed 标记
+ * （B-1，2026-10-16：true = readFileSync 抛错且【非 ENOENT】——注入链据此落坏目录负缓存。
+ * 三态分类与视图链 collectProjectDirsInto 口径一致：ENOENT=正常空态≠失败、JSON 损坏=空表≠失败
+ * （视图链损坏亦不 badDir）、其他读异常（权限/被占用等）=失败可负缓存。
+ * isEnoent 为 function 声明（提升），先于其定义行使用无碍。）
  * 载体用 Object.create(null)：磁盘 JSON 的 map 键不可信（可能恰为 __proto__），普通对象载体
  * 赋值走原型 setter（静默 no-op / 污染面），null 原型载体下写入只是普通自有属性
  * （sanitizeMcpOverridesConfig 同款手法）。
  */
-function readMcpServersFileSyncDetail(file: string): { data: Record<string, ParsedMcpEntry>; unreadable: boolean } {
+function readMcpServersFileSyncDetail(file: string): { data: Record<string, ParsedMcpEntry>; unreadable: boolean; readFailed: boolean } {
   const out = Object.create(null) as Record<string, ParsedMcpEntry>;
   let text: string;
   try {
     text = fs.readFileSync(file, 'utf8');
-  } catch {
-    return { data: out, unreadable: true }; // 不存在/不可读 → 空表（§3.5/§3.6：不抛错不写文件）
+  } catch (e) {
+    // ENOENT（不存在）= 正常空态不置 readFailed；其他读异常 → readFailed（注入链落负缓存）
+    return { data: out, unreadable: true, readFailed: !isEnoent(e) }; // 不存在/不可读 → 空表（§3.5/§3.6：不抛错不写文件）
   }
   let root: unknown;
   try {
     root = JSON.parse(text);
   } catch {
-    return { data: out, unreadable: true }; // 损坏 → 空表且不缓存（是否提示由视图层 collectMcpSnapshot 分类）
+    return { data: out, unreadable: true, readFailed: false }; // 损坏 → 空表且不缓存（是否提示由视图层 collectMcpSnapshot 分类）
   }
   const table = extractMcpServersTable(root);
-  if (!table) return { data: out, unreadable: false };
+  if (!table) return { data: out, unreadable: false, readFailed: false };
   for (const [name, rawCfg] of Object.entries(table)) {
     const entry = normalizeMcpEntry(name, rawCfg);
     if (entry) out[name] = entry;
   }
-  return { data: out, unreadable: false };
+  return { data: out, unreadable: false, readFailed: false };
 }
 
 /** 单文件直读归一（薄壳：丢弃 unreadable 标记；行为与拆分前逐字节等价——项目级读取器沿用现状不缓存）。 */
@@ -161,6 +168,54 @@ export function readUserMcpServersRawSync(userHome: string): Record<string, Pars
 /** 项目级 <dir>/.mcp.json 顶层 mcpServers 原样直读（同步；不存在/损坏/无键 → {}）。 */
 export function readProjectMcpServersRawSync(dir: string): Record<string, ParsedMcpEntry> {
   return readMcpServersFileSync(path.join(dir, '.mcp.json'));
+}
+
+// ── detail 包装导出（B-1，2026-10-16；sdk-mcp 注入链默认 io 的坏目录负缓存用）──────
+
+/**
+ * 项目级 <dir>/.mcp.json 直读详细态包装：servers（归一表，同 readProjectMcpServersRawSync）
+ * + readFailed（readFileSync 抛错且非 ENOENT；ENOENT=正常空态 false、JSON 损坏=false，
+ * 与视图链 badDir 判定口径一致——调用方仅在 readFailed 时落坏目录负缓存）。
+ * 纯增量包装（B-1）：内部即 readMcpServersFileSyncDetail，不改变既有 raw 读取器行为；
+ * 项目级本就不走 mtime 缓存（每次直读），与 readProjectMcpServersRawSync 语义一致。
+ */
+export function readProjectMcpServersDetailSync(dir: string): {
+  servers: Record<string, ParsedMcpEntry>;
+  readFailed: boolean;
+} {
+  const { data, readFailed } = readMcpServersFileSyncDetail(path.join(dir, '.mcp.json'));
+  return { servers: data, readFailed };
+}
+
+/**
+ * 用户级 <userHome>/.claude.json 直读详细态包装：servers + readFailed（同上三态分类）。
+ * D2（2026-10-16）起走 R2 mtime 缓存 read-through（与 readUserMcpServersRawSync 共享同一
+ * mcpRawCache 实例）：先 statSync 取 mtimeMs → 命中且未变 → 缓存直出（缓存只存成功读
+ * !unreadable，mtime 未变 ⇒ 再读也会成功，readFailed=false 成立）；未命中/变化 → 直读，
+ * unreadable/readFailed 形态不落缓存——失败重试语义保留，坏目录由调用方（sdk-mcp 默认 io）
+ * 的负缓存兜底（60s 内 badDirCacheHas 前置短路，不再触盘）；不可 stat（不存在/权限）→
+ * 走直读 detail 现状路径且不缓存。路径解析与 readUserMcpServersRawSync 同款 path.resolve，
+ * 两读取器对同一文件口径一致（同 file 同 mtime 直出同一 data 共享引用，调用方不得变异）。
+ */
+export function readUserMcpServersDetailSync(userHome: string): {
+  servers: Record<string, ParsedMcpEntry>;
+  readFailed: boolean;
+} {
+  const file = path.resolve(userHome, '.claude.json');
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    // 不可 stat（不存在/权限）→ 直读 detail 现状路径（三态分类照旧），不缓存
+    const miss = readMcpServersFileSyncDetail(file);
+    return { servers: miss.data, readFailed: miss.readFailed };
+  }
+  const hit = mcpRawCache.get(file);
+  // 缓存直出为共享引用：调用方不得变异返回表（当前全链只读；变异会污染缓存）。
+  if (hit && hit.mtimeMs === mtimeMs) return { servers: hit.data, readFailed: false };
+  const d = readMcpServersFileSyncDetail(file);
+  if (!d.unreadable) mcpRawCache.set(file, { mtimeMs, data: d.data });
+  return { servers: d.data, readFailed: d.readFailed };
 }
 
 // ── 视图收集（collectMcpSnapshot；脱敏）────────────────────────────────────

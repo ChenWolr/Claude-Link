@@ -1951,8 +1951,9 @@ console.log('\n=== 53) 权限模式全局默认 + 会话覆盖链路（permissio
   // 权限通道对齐（角度D 遗漏修复）：settings.permissions.defaultMode 由 buildClaudeSettingsProjection
   // 用全局 config.permissionMode 构造，会话显式选档时须按会话有效档对齐，否则「UI 所见权限档」与
   // 「settings 块注入档」分叉（全局默认=bypassPermissions、会话显式选 default 时越权放行）。
+  // round-003 D1 起调用点可带可选尾参 sessionRow（去重复读），去右括号以兼容两种形态
   check('buildClaudeLinkSettingsBlock 接收 effectivePermissionMode 参数',
-    sdkBackend.includes('effectivePermissionMode: PermissionMode,') && sdkBackend.includes('override, effectivePermissionMode)'));
+    sdkBackend.includes('effectivePermissionMode: PermissionMode,') && sdkBackend.includes('override, effectivePermissionMode'));
   check('会话显式选档时经 alignPermissionDefaultMode 对齐（sdk-backend 接线）',
     sdkBackend.includes('alignPermissionDefaultMode') && sdkBackend.includes("if (opts.permissionMode != null)") && sdkBackend.includes('permissions = alignPermissionDefaultMode(permissions, effectivePermissionMode)'));
   check('alignPermissionDefaultMode 抽为 sdk-permissions 纯函数（default→显式写 default / 非 default→写有效档 / 不 mutate 入参；N1 修复：删除会让 CLI 回落投影文件的全局宽松档）',
