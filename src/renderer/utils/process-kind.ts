@@ -56,6 +56,25 @@ const TOOL_META: Record<string, ProcessKindMeta> = {
   result: { icon: '🔧', label: '工具结果', color: C.system },
 };
 
+// MCP server 名 → 专属图标表（折叠态可辨识服务器；未命中回退 🔌）。
+// gitea=Git+tea 茶杯 logo；gitlab=tanuki 狐狸 logo。
+const MCP_SERVER_ICONS: Record<string, string> = {
+  github: '🐙', gitea: '🍵', gitee: '🔴', gitlab: '🦊', gitcode: '🔷',
+  atomgit: '⚛️', codeup: '☁️', coding: '🐧', bitbucket: '🪣',
+  codeberg: '🏔️', forgejo: '🔨', gogs: '🐹',
+};
+
+// server 名 → 图标：小写化后先精确查表，未命中按表序（Object.keys 字面顺序）做包含匹配
+//（'my-gitea' 含 'gitea' → 🍵），全部未命中回退 🔌。空串/畸形输入不抛错。
+export function mcpServerIcon(server: string): string {
+  const lower = (server || '').toLowerCase();
+  if (MCP_SERVER_ICONS[lower]) return MCP_SERVER_ICONS[lower];
+  for (const key of Object.keys(MCP_SERVER_ICONS)) {
+    if (lower.includes(key)) return MCP_SERVER_ICONS[key];
+  }
+  return '🔌';
+}
+
 const NEUTRAL: ProcessKindMeta = { icon: '⚙️', label: '', color: C.system };
 
 export function getProcessKindMeta(kind: string | null | undefined): ProcessKindMeta {
@@ -67,13 +86,20 @@ export function getProcessKindMeta(kind: string | null | undefined): ProcessKind
   if (kind.startsWith('tool:')) {
     const name = kind.slice(5);
     if (TOOL_META[name]) return TOOL_META[name];
-    if (name.startsWith('mcp__')) return { icon: '🔌', label: 'MCP', color: C.mcp };
+    if (name.startsWith('mcp__')) {
+      // mcp__<server>__<tool>：按第一个 '__' 切出 server 名（可含单下划线如 web_reader，
+      // 不能 split('_')）；畸形名（mcp__foo，无第二个 '__'）→ server 取剩余整段。
+      const rest = name.slice(5);
+      const sep = rest.indexOf('__');
+      const server = sep >= 0 ? rest.slice(0, sep) : rest;
+      return { icon: mcpServerIcon(server), label: `MCP_${server}`, color: C.mcp };
+    }
     return { icon: '⚙️', label: name, color: C.system }; // 未知工具：⚙️ + 原名
   }
   return NEUTRAL;
 }
 
-// 给一个工具 processKind 追加具体名（如 ✨技能·design / 🔌MCP·github），用于组标题更可读。
+// 给一个工具 processKind 追加具体名（如 ✨技能·design / 🍵 MCP_gitea·list_issues），用于组标题更可读。
 // 当前无调用方（预留）。name 是工具原始名（tool_use 的 part.name）。
 export function decorateToolLabel(kind: string | null | undefined, detail?: string | null): string {
   const meta = getProcessKindMeta(kind);
@@ -147,7 +173,15 @@ export function summarizeToolUse(useContent: string): string {
     case 'TaskCreate':
     case 'TaskUpdate':
       return s(input.subject) || s(input.description);
-    default:
+    default: {
+      // mcp__<server>__<tool> → 工具名段（server 已体现在折叠标签 MCP_<server> 里）；
+      // 畸形名（无第二个 '__'）→ ''。
+      if (name.startsWith('mcp__')) {
+        const rest = name.slice(5);
+        const sep = rest.indexOf('__');
+        return sep >= 0 ? rest.slice(sep + 2) : '';
+      }
       return '';
+    }
   }
 }
