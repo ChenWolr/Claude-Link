@@ -238,3 +238,4 @@ scripts/tdd-dialog-shell-geometry.ts
 scripts/tdd-fs-picker-file-ops.ts
 scripts/selftest-mcp-writer.ts
 scripts/tdd-mcp-tool-label.ts
+scripts/selftest-mcp-export.ts

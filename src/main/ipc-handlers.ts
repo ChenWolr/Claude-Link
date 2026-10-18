@@ -4,7 +4,7 @@
 // 注册 cli / config / workspace / provider / changes / settings / skill / session / message / claude-plan / commands / chat / interaction / task / queue / attachment / bridge 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
-import { BrowserWindow, ipcMain, app, shell } from 'electron';
+import { BrowserWindow, clipboard, ipcMain, app, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性/目录校验
@@ -31,11 +31,12 @@ import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDe
 import { buildSessionSkillOverridesForPin } from './modules/sdk-skill-overrides';
 import { buildSessionMcpOverridesForPin } from './modules/mcp/sdk-mcp';
 import {
+  buildMcpServersExportJson,
   restoreMaskedMcpServers,
   sanitizeMcpServersConfig,
   type McpManagedSaveEntry,
 } from './modules/mcp/mcp-config';
-import { collectMcpSnapshot } from './modules/mcp/mcp-scanner';
+import { collectMcpSnapshot, readProjectMcpServersRawSync, readUserMcpServersRawSync } from './modules/mcp/mcp-scanner';
 import { writeScopedMcpServer, type ScopedMcpEntry } from './modules/mcp/mcp-writer';
 import {
   dropProbeCacheByPrefix,
@@ -531,6 +532,41 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       dir = req.dir;
     }
     return writeScopedMcpServer({ scope: req.scope, dir, entry, mode: req.mode, userHome: effectiveUserHome() ?? os.homedir() });
+  });
+  // 作用域导出 JSON（2026-10-18）：body = { scope, dir? } → { ok, count }。主进程内取明文
+  //（managed = config store 数组按 name 成表 / user、project = scanner raw 直读，未脱敏真值）
+  // → buildMcpServersExportJson（{"mcpServers":{…}} 形态）→ electron clipboard 写剪贴板。
+  // §1.3 渲染层零明文：JSON 文本全程不出主进程，渲染层只拿 count；导出含全部定义（启停
+  // 是 Claude Link 专属 override，非标准字段，不参与导出）。project 的 dir 白名单校验与
+  // WRITE_SCOPED 同源（已知项目目录集，防任意路径读探测）；count = 0 时不动剪贴板
+  //（渲染层按钮已按空表禁用，防御性兜底）。
+  ipcMain.handle(IPC_CHANNELS.MCP_EXPORT_SCOPED, async (_event, body: unknown): Promise<{ ok: true; count: number }> => {
+    if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP export payload');
+    const req = body as { scope?: unknown; dir?: unknown };
+    if (req.scope !== 'managed' && req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP export scope');
+    let dir: string | undefined;
+    if (req.scope === 'project') {
+      if (typeof req.dir !== 'string' || req.dir === '') throw new Error('Invalid MCP export dir');
+      const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+      const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
+      if (!knownKeys.has(normalizeDirKey(req.dir))) throw new Error('目标目录不在已知项目目录集中，已拒绝导出');
+      dir = req.dir;
+    }
+    // 明文数据源按作用域现取（不缓存导出内容）；入参形态均为 toSdkMcpServerConfig 兼容形状。
+    let servers: Parameters<typeof buildMcpServersExportJson>[0];
+    if (req.scope === 'managed') {
+      servers = {};
+      for (const server of getConfig().mcpServers) servers[server.name] = server;
+    } else if (req.scope === 'user') {
+      servers = readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir());
+    } else {
+      // req.scope === 'project'（上方已校验 dir 属已知目录集）
+      servers = readProjectMcpServersRawSync(dir as string);
+    }
+    const count = Object.keys(servers).length;
+    if (count === 0) return { ok: true, count: 0 };
+    clipboard.writeText(buildMcpServersExportJson(servers));
+    return { ok: true, count };
   });
 
   // 多供应商模型库：设置页（可选项库）与 会话选择器（只读）共用。
@@ -1178,6 +1214,46 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return runTaskNow(taskId, mainWindow);
   });
 
+  // D 点：后台任务（task_* 编排）终态输出文件只读。入参对象载荷 { outputFile }：
+  // 校验绝对路径 + fs.stat 为常规文件 → 只读打开、最多读前 512KB（超出 truncated:true）。
+  // 安全面：纯 fs.stat/fs.open+read，不执行、不写、无路径拼接（绝对路径直读），512KB 上限封顶。
+  ipcMain.handle(IPC_CHANNELS.TASK_OUTPUT_READ, async (_event, req: unknown): Promise<{ content: string; truncated: boolean }> => {
+    const r = (req ?? {}) as Record<string, unknown>;
+    if (typeof r.outputFile !== 'string' || !r.outputFile.trim() || !path.isAbsolute(r.outputFile)) {
+      throw new Error('输出文件不可读：路径无效');
+    }
+    const outputFile = r.outputFile;
+    const MAX_BYTES = 512 * 1024;
+    let stat: fs.Stats;
+    try {
+      stat = await fsp.stat(outputFile);
+    } catch {
+      throw new Error('输出文件不存在');
+    }
+    if (!stat.isFile()) throw new Error('输出文件不可读：不是常规文件');
+    let handle: fs.promises.FileHandle;
+    try {
+      handle = await fsp.open(outputFile, 'r');
+    } catch {
+      throw new Error('输出文件不可读');
+    }
+    try {
+      const buf = Buffer.alloc(Math.min(stat.size, MAX_BYTES));
+      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+      return {
+        content: buf.subarray(0, bytesRead).toString('utf8'),
+        truncated: stat.size > bytesRead,
+      };
+    } catch {
+      throw new Error('输出文件不可读');
+    } finally {
+      try {
+        await handle.close();
+      } catch {
+        // 关闭失败不掩盖读取错误（原错误从 try/catch 正常抛出）。
+      }
+    }
+  });
 
   // 熔断提示行「全部恢复」：全部 paused→pending + 立即开始全量倒计时。
   ipcMain.handle(IPC_CHANNELS.QUEUE_RESUME_ALL, async (_event, sessionId: string) => {

@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（98 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（99 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -103,6 +103,14 @@ export interface McpWriteScopedPayload {
   dir?: string;
   entry: McpScopedWriteEntry;
   mode: 'upsert' | 'remove';
+}
+
+/** mcp:exportScoped 请求体：导出当前作用域全部服务器定义为 {"mcpServers":{…}} JSON 并由
+ *  主进程写入系统剪贴板（§1.3 渲染层零明文——JSON 与 env/headers 明文不出主进程，回包只有
+ *  count）。project 的 dir 必填，须属已知项目目录集（主进程与 writeScoped 同源校验）。 */
+export interface McpExportScopedPayload {
+  scope: 'managed' | 'user' | 'project';
+  dir?: string;
 }
 
 export interface ClaudeLinkAPI {
@@ -210,6 +218,9 @@ export interface ClaudeLinkAPI {
   // P8 双向写入：用户级/项目级 mcpServers 条目 upsert/remove（哨兵还原在主进程 writer；
   // overwrote = upsert 命中现有同名，remove 恒 false）。
   writeMcpScoped: (payload: McpWriteScopedPayload) => Promise<{ overwrote: boolean }>;
+  // 作用域导出 JSON：主进程构建 {"mcpServers":{…}} 文本并写系统剪贴板（渲染层零明文，
+  // 回包只有 count；count=0 未动剪贴板）。
+  exportMcpScoped: (payload: McpExportScopedPayload) => Promise<{ ok: true; count: number }>;
   // IM 机器人（飞书/微信 bridge）：凭据掩码读写 / 状态 / 连通测试 / 扫码登录 / 绑定管理。
   bridgeGetConfig: () => Promise<BridgeConfigGetResult>;
   bridgeSaveConfig: (input: BridgeConfigSaveInput) => Promise<BridgeConfigGetResult>;
@@ -382,6 +393,8 @@ export function createApi(): ClaudeLinkAPI {
     probeMcpServers: (target) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PROBE, target) as Promise<McpProbeReport[]>,
     // P8 双向写入（对象载荷，对齐主进程 handler 入参形状）。
     writeMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_WRITE_SCOPED, payload) as Promise<{ overwrote: boolean }>,
+    // 作用域导出 JSON（对象载荷；主进程写剪贴板，回包零明文）。
+    exportMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_EXPORT_SCOPED, payload) as Promise<{ ok: true; count: number }>,
     // IM 机器人（飞书/微信 bridge）。
     bridgeGetConfig: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_GET) as Promise<BridgeConfigGetResult>,
     bridgeSaveConfig: (input) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, input),

@@ -321,6 +321,28 @@ export function mergeMcpServersForSession(input: {
   return result;
 }
 
+// ── 作用域导出 JSON（2026-10-18：设置页「导出 JSON」按钮，mcp:exportScoped 数据源侧）────
+// 断言集见 scripts/selftest-mcp-export.ts（A 组逐条钉住本节行为）。
+
+/**
+ * 作用域服务器表 → 导出 JSON 文本（{"mcpServers":{…}} 形态，导入弹窗三形态之一①，与
+ * Claude Code / Claude Desktop / Cursor / Windsurf 配置文件同形）。逐条经 toSdkMcpServerConfig
+ * 投影为 Claude Code 认识的条目形状（stdio [type,command,args?,env?] / remote [type,url,headers?]，
+ * 空数组/空表省略；描述/启停等 Claude Link 专属字段不进导出）。2 空格缩进 + 尾换行（与
+ * mcp-writer 落盘格式同款）。载体 Object.create(null)（键来自磁盘/config，__proto__ 键防污染）。
+ * 同名键后写覆盖前写（managed 数组理论不重名，user/project 磁盘 map 键本就唯一——由调用方
+ * 保证不重复，此处后写覆盖仅防御性兜底）。
+ */
+export function buildMcpServersExportJson(
+  servers: Record<string, Parameters<typeof toSdkMcpServerConfig>[0]>,
+): string {
+  const out = Object.create(null) as Record<string, ReturnType<typeof toSdkMcpServerConfig>>;
+  for (const [name, server] of Object.entries(servers)) {
+    out[name] = toSdkMcpServerConfig(server);
+  }
+  return JSON.stringify({ mcpServers: out }, null, 2) + '\n';
+}
+
 // ── §1.3 渲染层脱敏闭环（r3 修复 F2）────────────────────────────────────────
 // 断言集见 scripts/selftest-mcp-settings.ts（F 组逐条钉住本节行为）。
 

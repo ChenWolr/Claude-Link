@@ -75,6 +75,13 @@ export const IPC_CHANNELS = {
   // → { overwrote }；project 的 dir 须属已知项目目录集（与 snapshot 同源列表，防任意路径写）；
   // 哨兵值由 writer 按原文件还原，瞬态改名 hint 还原后剥离。
   MCP_WRITE_SCOPED: 'mcp:writeScoped',
+  // 作用域导出 JSON（2026-10-18）：body = { scope: 'managed' | 'user' | 'project', dir? } →
+  // { ok: true, count }。主进程内取明文（managed=config store / user、project=磁盘 raw 直读）
+  // → buildMcpServersExportJson（{"mcpServers":{…}} 形态）→ electron clipboard 写剪贴板。
+  // §1.3 渲染层零明文：JSON 文本与 env/headers 明文全程不出主进程，渲染层只拿 count。
+  // project 的 dir 须属已知项目目录集（与 WRITE_SCOPED 同源校验）；count = 导出条数，
+  // 0 = 当前作用域无服务器（渲染层按钮已按空表禁用，此处防御性兜底，不动剪贴板）。
+  MCP_EXPORT_SCOPED: 'mcp:exportScoped',
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，test/query 由主进程自行解密，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',

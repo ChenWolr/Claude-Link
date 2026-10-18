@@ -26,6 +26,7 @@ Claude Link 不直接实现一套聊天模型，也不把用户输入原样转�
 - **统一交互弹窗**：权限确认、AskUserQuestion、文本/表单输入和本地确认共用同一交互队列，支持 7 种交互形态；启动时恢复未决弹窗。
 - **Slash Commands**：读取 Claude Code SDK 的命令快照并按会话隔离，菜单标注内置命令、用户 Skill、项目命令、插件命令来源，并按 Skill 管理的停用配置过滤；命令目录变更由文件监视器热刷新（全局兜底快照 + 广播），暂态会话也能立即使用命令菜单。
 - **Skill 管理**：设置页独立 tab 双栏管理全局与项目 Skill——左栏作用域清单（全局 `~/.claude/skills` + 最近工作区与默认工作区项目目录），右栏卡片网格：启用/停用开关、搜索筛选、统计卡片、同名跨作用域联动徽章。停用即刻生效于新会话：模型不再加载该 Skill、斜杠菜单不再展示、键入执行被引擎本地拦截；已建会话保持创建时的停用快照。
+- **MCP Server 管理**：设置页独立 tab 管理 MCP 服务器——管理库增删改（经 SDK 注入，仅 Claude Link 会话可见），用户/项目级磁盘配置三作用域查看、启停与行内测试连接，支持 JSON 批量导入（粘贴即解析预览、同名跳过，导入归一口径与落库一致）；启停仅对新会话生效（进行中会话保持创建时的启停快照），服务器定义的增删改对所有会话的下一条消息即时生效。
 - **附件**：图片作为图像内容发送（单张 ≤10 MiB、最长边 8000px，编码后单次请求约 ≤30 MiB；预览缩略图按 EXIF 方向转正），文档和普通文件（单个 ≤30 MiB、单次总预算 50 MiB、最多 10 个）保存到会话附件目录，由 Claude Code 的 Read 工具读取；暂态会话附件在物化时自动转正，草稿区超出上限时明确提示被忽略的文件。
 - **任务队列**：开启队列开关后，回复生成中也能继续发送消息（自动入队）；回合结束后按分钟制间隔（1–60 分钟，默认 5）倒计时串行执行，到点时若回合仍在进行则自动顺延不丢失；支持任务暂停、拖拽排序、插队「立即执行」；回合失败或中断触发熔断（全部任务转暂停，开关关闭时不熔断）；应用重启后队列待命、不自动执行。
 - **代码改动面板**：按需读取工作目录的 Git 状态和 diff，并排/内联双视图、词级 diff、语法高亮（超 1500 行自动关闭）、Ctrl+F 搜索与跳转、上下文行数（3/5/10/20）与全文切换、未跟踪目录逐文件列出、冲突文件显式标注、文件列表超 500 条截断汇总，以及「纸面工坊」视觉（纸卡舞台、SVG 缎带桥、行号中廊贴码）；工具调用与消息详情的 diff 复用同一渲染器弹窗。
@@ -195,7 +196,7 @@ Claude Link 使用 Claude Agent SDK 的命令发现结果，不维护一份独�
 src/
 ├── main/                          # Electron 主进程
 │   ├── index.ts                   # 应用入口、窗口、托盘和数据库初始化
-│   ├── ipc-handlers.ts            # IPC handler 注册（75 个 handle）
+│   ├── ipc-handlers.ts            # IPC handler 注册（79 个 handle）
 │   ├── modules/
 │   │   ├── sdk-backend.ts         # Claude Agent SDK 聊天后端（约 4500 行）
 │   │   ├── cli-shared.ts          # 环境注入、事件持久化等共享逻辑
@@ -218,10 +219,11 @@ src/
 │   │   ├── reasoning-replay-auto-retry.ts # 上游错误自动重试
 │   │   ├── bridge/                # IM 桥接（飞书/微信适配、扫码登录、绑定）
 │   │   ├── app-updater.ts         # 应用内更新（electron-updater）
+│   │   ├── mcp/                   # MCP Server 管理（配置纯函数/扫描/探活/会话注入）
 │   │   ├── cli-detector.ts / window-state.ts / session-completion-notifier.ts / workspace-history.ts
 │   │   └── export-image-*.ts      # 长图导出与 PNG worker
 │   └── database/                  # SQLite 连接、迁移（V14）和 repositories
-├── preload/                       # contextBridge，主窗口 96 方法 + 导出窗口 9 方法
+├── preload/                       # contextBridge，主窗口 99 方法 + 导出窗口 9 方法
 ├── renderer/                      # Vue 页面、组件、Pinia stores
 │   ├── pages/                     # ChatPage、ConfigPage（7 tab）、SessionsPage
 │   ├── components/                # 聊天、配置、供应商、任务、改动面板与 layout（含 UpdateDialog）

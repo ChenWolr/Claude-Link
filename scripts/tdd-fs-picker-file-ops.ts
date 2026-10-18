@@ -132,14 +132,16 @@ async function main(): Promise<void> {
     preloadSrc.includes('fsTrash: (paths) => ipcRenderer.invoke(IPC_CHANNELS.FS_TRASH, { paths })'));
   check('B5 preload fsShowInExplorer 绑定（对象载荷走 FS_SHOW_IN_EXPLORER）',
     preloadSrc.includes('fsShowInExplorer: (path) => ipcRenderer.invoke(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, { path })'));
-  check('B5 preload 头注释含「96 个方法」', preloadSrc.includes('96 个方法'));
+  // 计数快照随点 E（2026-10-17 P8 双向写入）新增 writeMcpScoped 同步：97→98（README handle
+  // 计数一并校准为实数 77——点 D 加 TASK_OUTPUT_READ 时 75 未同步，本点补齐）。
+  check('B5 preload 头注释含「99 个方法」', preloadSrc.includes('99 个方法'));
   const ipcTypesSrc = read('src/shared/types/ipc.ts');
   check("B6 ipc.ts 含 'fs:rename' 字面量", ipcTypesSrc.includes("'fs:rename'"));
   check("B6 ipc.ts 含 'fs:trash' 字面量", ipcTypesSrc.includes("'fs:trash'"));
   check("B6 ipc.ts 含 'fs:showInExplorer' 字面量", ipcTypesSrc.includes("'fs:showInExplorer'"));
   const readmeSrc = read('README.md');
-  check('B7 README.md 含「75 个 handle」', readmeSrc.includes('75 个 handle'));
-  check('B7 README.md 含「96 方法」', readmeSrc.includes('96 方法'));
+  check('B7 README.md 含「79 个 handle」', readmeSrc.includes('79 个 handle'));
+  check('B7 README.md 含「99 方法」', readmeSrc.includes('99 方法'));
 
   // ── B8：round-001 fix1 验收修复钉（2026-10-15）──
   // preload 三绑定（B5）发的是对象载荷（{paths}/{path}），主进程 handler 必须以 req 对象解构
