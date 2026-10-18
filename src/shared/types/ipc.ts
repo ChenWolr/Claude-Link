@@ -112,6 +112,8 @@ export const IPC_CHANNELS = {
   TASK_GET_ALL: 'task:getAll',
   TASK_REORDER: 'task:reorder',
   TASK_SET_PAUSED: 'task:setPaused',
+  // D 点：后台任务（task_* 编排）终态输出文件只读（入参 { outputFile }，主进程 512KB 上限 + 截断标记）。
+  TASK_OUTPUT_READ: 'task:outputRead',
   // v3 语义：跳过倒计时立即出队（非队首=插队）；熔断后一键全部恢复；面板全量数据拉取。
   TASK_RUN_NOW: 'task:run-now',
   QUEUE_RESUME_ALL: 'queue:resumeAll',

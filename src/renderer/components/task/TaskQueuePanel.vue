@@ -8,9 +8,12 @@ import { useConfigStore } from '../../stores/config-store';
 import { taskEtaText, formatCountdownHuman } from '../../../shared/queue-eta';
 import { resolveQueueDelaySeconds } from '../../../shared/queue-config';
 import type { Task } from '../../../shared/types/task';
+import type { BackgroundTask } from '../../stores/session-store';
 import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
+import { useDialogShell } from '../../composables/use-dialog-shell';
+import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import { useNow } from '../../composables/use-now';
 import TaskItem from './TaskItem.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
@@ -33,8 +36,6 @@ const changesCount = computed(() => changesStore.changedCount);
 const expandedGroups = ref<Set<string>>(new Set());
 // 问题 7：用户显式折叠的组（优先级最高，运行中也保持收起）。
 const collapsedGroups = ref<Set<string>>(new Set());
-// 问题 6：客户端实时计时——sending 期间每 100ms 跳动，子 Agent 运行中耗时实时更新。
-const { now } = useNow(() => sessionStore.sending);
 // 问题 4（彻底修复）兜底：仅当回合结束却「未完成」（未收到父 Task 工具 tool_result，如中断/异常端点）
 // 时，才把该组的 live 最终值快照下来冻结——避免回退到偏短的 createdAt 首尾差。正常完成的组用
 // frozenSeconds（= 完成 tool_result.createdAt − startMs，真实跨度），不走这里。下一回合清空防串扰。
@@ -135,6 +136,9 @@ const queueBarHint = computed<{ text: string; showResumeAll: boolean }>(() => {
 // C：后台任务（task_*）列表与计数。
 const backgroundTaskList = computed(() => Object.values(sessionStore.backgroundTasks));
 const backgroundTaskCount = computed(() => backgroundTaskList.value.length);
+// 问题 6：客户端实时计时——sending 期间每 100ms 跳动，子 Agent 运行中耗时实时更新。
+// D 点扩展：后台任务跨回合运行，回合结束（sending=false）后只要有运行中卡（无 status）计时不能停跳。
+const { now } = useNow(() => sessionStore.sending || backgroundTaskList.value.some((t) => !t.status));
 function taskIcon(taskType?: string): string {
   if (taskType === 'local_bash') return '⌨️';
   if (taskType === 'local_agent' || taskType === 'remote_agent') return '🤖';
@@ -188,6 +192,109 @@ const subAgentGroups = computed(() =>
     liveTextByAgent: sessionStore.activeSubAgentText,
   }),
 );
+
+// ── D 点：后台任务卡完整度（关联子 agent 组 / 客户端计时 / 进度时间线 / 输出查看）──
+// agent 类卡按 toolUseId === parentAgentId 关联子 Agent 组（只读复用 subAgentGroups，聚合逻辑零改动）。
+function bgGroupOf(t: BackgroundTask): SubAgentGroup | undefined {
+  if (!t.toolUseId) return undefined;
+  return subAgentGroups.value.find((g) => g.parentAgentId === t.toolUseId);
+}
+function isAgentTask(t: BackgroundTask): boolean {
+  return t.taskType === 'local_agent' || t.taskType === 'remote_agent';
+}
+function bgTaskTitle(t: BackgroundTask): string {
+  if (isAgentTask(t)) {
+    return t.subagentType ? `${t.subagentType} · ${t.description ?? ''}` : (t.description || t.taskId);
+  }
+  return t.description || t.taskId;
+}
+// 计时：运行中 → (now - startedAt) 实时跳动（useNow 已因运行中卡保活）；终态 → usage.durationMs
+// 优先，缺失则用 finishedAt-startedAt 兜底（F6：终态到达时刻已快照），仍缺才不显示。
+function bgTaskDurationText(t: BackgroundTask): string {
+  if (t.status) {
+    const ms = t.usage?.durationMs ?? (t.finishedAt != null && t.startedAt != null ? t.finishedAt - t.startedAt : null);
+    return ms != null ? formatDuration(ms / 1000) : '';
+  }
+  if (t.startedAt) return formatDuration(Math.max((now.value - t.startedAt) / 1000, 0));
+  return '';
+}
+function bgStatusText(t: BackgroundTask): string {
+  switch (t.status) {
+    case 'completed': return '已完成';
+    case 'failed': return '失败';
+    case 'stopped': return '已停止';
+    default: return '运行中';
+  }
+}
+// 进度时间线时间戳：相对 startedAt 的 mm:ss（无 startedAt 退化为相对首条）。
+function bgHistoryTime(at: number, startedAt?: number): string {
+  const ref = startedAt ?? at;
+  const sec = Math.max(0, Math.round((at - ref) / 1000));
+  return `${String(Math.floor(sec / 60)).padStart(2, '0')}:${String(sec % 60).padStart(2, '0')}`;
+}
+function bgPromptText(t: BackgroundTask): string {
+  const p = t.prompt ?? '';
+  return p.length > 120 ? `${p.slice(0, 120)}…` : p;
+}
+// 展开态：与子 Agent 组同款交互（默认运行中展开；用户显式收起优先）。
+const expandedBgTasks = ref<Set<string>>(new Set());
+const collapsedBgTasks = ref<Set<string>>(new Set());
+function isBgTaskExpanded(id: string, running: boolean): boolean {
+  if (collapsedBgTasks.value.has(id)) return false;
+  return expandedBgTasks.value.has(id) || running;
+}
+function toggleBgTask(id: string, running: boolean): void {
+  const open = isBgTaskExpanded(id, running);
+  const nextExp = new Set(expandedBgTasks.value);
+  const nextCol = new Set(collapsedBgTasks.value);
+  if (open) {
+    nextExp.delete(id);
+    nextCol.add(id);
+  } else {
+    nextCol.delete(id);
+    nextExp.add(id);
+  }
+  expandedBgTasks.value = nextExp;
+  collapsedBgTasks.value = nextCol;
+}
+// 复用 focusedSubAgentId 跳转机制：点后台 agent 卡的「在子Agent 页签查看」→ 定位同名组并高亮。
+function focusBgGroup(parentAgentId: string): void {
+  sessionStore.focusSubAgent(parentAgentId);
+}
+
+// 后台任务终态输出只读弹窗（D 点）：useDialogShell 拖动/8 向缩放先例 + DialogResizeHandles。
+const outputVisible = ref(false);
+const outputCardRef = ref<HTMLElement | null>(null);
+const outputShell = useDialogShell(outputVisible, outputCardRef, { minW: 480, minH: 320 });
+const outputShellStyle = outputShell.style; // ComputedRef 须解包为 script 顶层（使用方规范）
+const outputTitle = ref('');
+const outputContent = ref('');
+const outputTruncated = ref(false);
+const outputLoading = ref(false);
+async function openTaskOutput(t: BackgroundTask): Promise<void> {
+  if (!t.outputFile || outputLoading.value) return;
+  outputTitle.value = `任务输出 — ${t.description || t.taskId}`;
+  outputContent.value = '';
+  outputTruncated.value = false;
+  outputVisible.value = true;
+  outputLoading.value = true;
+  try {
+    const r = await window.claudeLink.readTaskOutput(t.outputFile);
+    outputContent.value = r.content;
+    outputTruncated.value = r.truncated;
+  } catch (e) {
+    outputVisible.value = false;
+    // 读取失败 toast（复用交互确认 alert 先例，不阻塞面板）
+    void interactionStore.requestConfirm({
+      title: '查看输出失败',
+      message: e instanceof Error ? e.message : '输出文件不可读',
+      confirmText: '知道了',
+      mode: 'alert',
+    });
+  } finally {
+    outputLoading.value = false;
+  }
+}
 
 // 问题 4 watch（须在 subAgentGroups 定义之后注册，回调里读取其值）：回合 sending 由 true→false
 // 瞬间，仅对「未完成」的组（未收到父 tool_result，如中断/异常）快照 live 最终值。已完成的组用
@@ -574,7 +681,8 @@ function handleDragReorder() {
           </div>
         </section>
 
-        <!-- § 后台任务（task_* 编排：后台 Bash / Monitor / 后台子 Agent） -->
+        <!-- § 后台任务（task_* 编排：后台 Bash / Monitor / 后台子 Agent）。D 点重写：
+             通用卡头（计时/状态徽标）+ agent 类内嵌子 Agent 组体渲染 + bash/monitor 进度时间线与输出查看 -->
         <section v-if="isAll || sessionStore.rightTab === 'background'" class="tp-section" :class="{ 'tp-section--overview': isAll }">
           <div v-if="isAll" class="tp-section__head">
             <span class="tp-section__title">后台任务</span>
@@ -584,18 +692,71 @@ function handleDragReorder() {
           <div v-if="!backgroundTaskList.length" class="task-panel__empty">暂无后台任务</div>
           <div v-else class="subagent-list">
             <div v-for="t in backgroundTaskList" :key="t.taskId" class="subagent-group">
-              <div class="subagent-group__header">
+              <button
+                type="button"
+                class="subagent-group__header"
+                :class="{ 'subagent-group__header--open': isBgTaskExpanded(t.taskId, !t.status) }"
+                @click="toggleBgTask(t.taskId, !t.status)"
+              >
                 <span class="subagent-group__icon">{{ taskIcon(t.taskType) }}</span>
-                <span class="subagent-group__title">{{ t.description || t.taskId }}</span>
+                <span class="subagent-group__title">{{ bgTaskTitle(t) }}</span>
+                <span v-if="bgTaskDurationText(t)" class="subagent-group__duration">⏱{{ bgTaskDurationText(t) }}</span>
                 <span class="subagent-group__status" :class="{ 'subagent-group__status--running': !t.status }">
-                  {{ t.status ? t.status : '运行中' }}
+                  {{ bgStatusText(t) }}
+                  <span v-if="!t.status" class="subagent-running-dots" aria-hidden="true">
+                    <span></span><span></span><span></span>
+                  </span>
                 </span>
-              </div>
-              <div class="subagent-group__body">
-                <div v-if="t.lastToolName" class="bg-task__row">最近工具：{{ t.lastToolName }}</div>
-                <div v-if="t.usage?.durationMs" class="bg-task__row">耗时：{{ (t.usage.durationMs / 1000).toFixed(1) }}s</div>
-                <div v-if="t.usage?.toolUses" class="bg-task__row">工具调用：{{ t.usage.toolUses }}</div>
-                <div v-if="t.summary" class="bg-task__row">{{ t.summary }}</div>
+                <span class="subagent-group__arrow">›</span>
+              </button>
+              <div v-if="isBgTaskExpanded(t.taskId, !t.status)" class="subagent-group__body">
+                <!-- agent 类卡：按 toolUseId === parentAgentId 关联子 Agent 组，内嵌同款渲染；
+                     组未到（消息未落库/远端）→ prompt + usage + summary 兜底 -->
+                <template v-if="isAgentTask(t)">
+                  <template v-for="g in [bgGroupOf(t)]" :key="g ? g.parentAgentId : 'no-group'">
+                    <template v-if="g">
+                      <button type="button" class="bg-task__goto" @click.stop="focusBgGroup(g.parentAgentId)">在子Agent 页签查看 ›</button>
+                      <ThinkingBlock v-if="subAgentThinkingText(g.parentAgentId)" :content="subAgentThinkingText(g.parentAgentId)" streaming />
+                      <div
+                        v-if="subAgentLiveText(g.parentAgentId)"
+                        class="subagent-live-text markdown-body"
+                        v-html="renderMarkdown(subAgentLiveText(g.parentAgentId))"
+                        v-enrich
+                      />
+                      <template v-for="item in g.items" :key="item.key">
+                        <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
+                        <MessageBubble v-else :message="item.message" />
+                      </template>
+                    </template>
+                    <template v-else>
+                      <div v-if="t.prompt" class="bg-task__row">prompt：{{ bgPromptText(t) }}</div>
+                      <div v-if="t.usage?.totalTokens != null || t.usage?.toolUses != null" class="bg-task__row bg-task__usage">
+                        <span v-if="t.usage?.totalTokens != null">token {{ t.usage.totalTokens }}</span>
+                        <span v-if="t.usage?.toolUses != null">工具 {{ t.usage.toolUses }}</span>
+                      </div>
+                      <div v-if="t.summary" class="bg-task__row">{{ t.summary }}</div>
+                    </template>
+                  </template>
+                </template>
+                <!-- bash / monitor 类卡：最近工具 + usage 三项 + 进度时间线 + summary + 终态输出查看 -->
+                <template v-else>
+                  <div v-if="t.lastToolName" class="bg-task__row">最近工具：{{ t.lastToolName }}</div>
+                  <div v-if="t.usage" class="bg-task__row bg-task__usage">
+                    <span v-if="t.usage.totalTokens != null">token {{ t.usage.totalTokens }}</span>
+                    <span v-if="t.usage.toolUses != null">工具 {{ t.usage.toolUses }}</span>
+                    <span v-if="t.usage.durationMs != null">耗时 {{ (t.usage.durationMs / 1000).toFixed(1) }}s</span>
+                  </div>
+                  <ul v-if="t.progressHistory?.length" class="bg-task__timeline">
+                    <li v-for="(h, idx) in t.progressHistory" :key="idx" class="bg-task__timeline-item">
+                      <span class="bg-task__timeline-time">{{ bgHistoryTime(h.at, t.startedAt) }}</span>
+                      <span class="bg-task__timeline-tool">{{ h.lastToolName ?? '—' }}</span>
+                    </li>
+                  </ul>
+                  <div v-if="t.summary" class="bg-task__row">{{ t.summary }}</div>
+                  <div v-if="t.status && t.outputFile" class="bg-task__actions">
+                    <button type="button" class="bg-task__output-btn" @click="openTaskOutput(t)">查看输出</button>
+                  </div>
+                </template>
               </div>
             </div>
           </div>
@@ -743,6 +904,26 @@ function handleDragReorder() {
       </button>
     </nav>
   </aside>
+
+  <!-- D 点：后台任务输出只读弹窗（Teleport 到 body；useDialogShell 拖动/8 向缩放壳，
+       层级 1199 低于交互层 1200，对照 mcp-mask 先例） -->
+  <Teleport to="body">
+    <div v-if="outputVisible" class="bg-output-mask" role="presentation" @click.self="outputVisible = false">
+      <div ref="outputCardRef" class="bg-output-dialog" role="dialog" aria-modal="true" :style="outputShellStyle">
+        <div class="bg-output-dialog__head" @pointerdown="outputShell.beginDrag" @dblclick="outputShell.resetToCenter">
+          <span class="bg-output-dialog__title">{{ outputTitle }}</span>
+          <button type="button" class="bg-output-dialog__close" aria-label="关闭" @click="outputVisible = false">×</button>
+        </div>
+        <div class="bg-output-dialog__body">
+          <div v-if="outputTruncated" class="bg-output-dialog__truncated">输出超过 512KB，仅显示前 512KB</div>
+          <pre v-if="outputContent" class="bg-output-dialog__pre">{{ outputContent }}</pre>
+          <div v-else-if="outputLoading" class="task-panel__empty">读取中…</div>
+          <div v-else class="task-panel__empty">（无输出内容）</div>
+        </div>
+        <DialogResizeHandles :binder="outputShell" />
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -1372,6 +1553,162 @@ function handleDragReorder() {
   font-size: 0.75rem;
   color: var(--color-text-muted);
   padding: 2px 0;
+}
+
+/* D 点：后台任务卡体增强（usage 三项 / 进度时间线 / 输出查看 / 子 Agent 页签跳转） */
+.bg-task__usage {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.bg-task__timeline {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.bg-task__timeline-item {
+  display: flex;
+  gap: 8px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+.bg-task__timeline-time {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.bg-task__timeline-tool {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bg-task__actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.bg-task__output-btn,
+.bg-task__goto {
+  border: 0;
+  background: transparent;
+  color: var(--color-accent-strong);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+}
+
+.bg-task__output-btn:hover,
+.bg-task__goto:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+}
+
+.bg-task__goto {
+  align-self: flex-start;
+  text-align: left;
+}
+
+/* D 点：后台任务输出只读弹窗（层级 1199：低于交互层 1200，对照 mcp-mask 先例） */
+.bg-output-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 1199;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  background: var(--interaction-overlay-bg);
+}
+
+.bg-output-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 90vw);
+  max-height: min(70vh, 640px);
+  background: var(--color-panel);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--ring-light), var(--elevation-1);
+  overflow: hidden;
+}
+
+.bg-output-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+  cursor: grab;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.bg-output-dialog__title {
+  min-width: 0;
+  font-size: 0.8125rem;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bg-output-dialog__close {
+  flex-shrink: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.bg-output-dialog__close:hover {
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-text) 8%, transparent);
+}
+
+.bg-output-dialog__body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bg-output-dialog__truncated {
+  flex-shrink: 0;
+  font-size: 0.6875rem;
+  color: var(--color-warn-strong);
+}
+
+.bg-output-dialog__pre {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text);
 }
 
 .subagent-group__body :deep(.process-fold) {

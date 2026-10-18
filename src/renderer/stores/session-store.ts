@@ -25,7 +25,9 @@ import { useCommandStore } from './command-store';
 import { useChatDraftStore } from './chat-draft-store';
 import { useProviderStore } from './provider-store';
 
-// C：后台任务（task_*），按 taskId。瞬态，task_notification 终态后移除。
+// C：后台任务（task_*），按 taskId。瞬态：终态卡保留到下一次新用户消息发出（回合边界
+// clearBackgroundTasks 只清终态卡，运行中卡跨回合保留），不再 4s 自动删除。startedAt/progressHistory 为客户端
+// 计时与进度时间线（D 点），重启丢失可接受（瞬态不落库语义不变）。
 export interface BackgroundTask {
   taskId: string;
   toolUseId?: string;
@@ -35,6 +37,17 @@ export interface BackgroundTask {
   usage?: { totalTokens?: number; toolUses?: number; durationMs?: number };
   lastToolName?: string;
   summary?: string;
+  // 客户端计时起点（task_started 到达时刻，重复 started 不重置）。
+  startedAt?: number;
+  // 客户端终态时刻（task_notification 到达时刻；durationMs 缺失时兜底 finishedAt-startedAt）。
+  finishedAt?: number;
+  // 进度时间线（task_progress 逐条 push，cap 50 丢最旧）。
+  progressHistory?: Array<{ at: number; lastToolName?: string; totalTokens?: number; toolUses?: number; durationMs?: number }>;
+  // D 点透传字段：子 agent 类型 / 原始 prompt / 输出文件路径（终态后「查看输出」用）。
+  prompt?: string;
+  subagentType?: string;
+  outputFile?: string;
+  skipTranscript?: boolean;
 }
 
 export interface ApiRetryInfo {
@@ -1293,6 +1306,15 @@ export const useSessionStore = defineStore('session', {
     },
     removeBackgroundTask(taskId: string) {
       delete this.backgroundTasks[taskId];
+    },
+    // D 点：回合边界清卡（新用户消息成功发出处调用）——只清上一回合【终态】卡（completed/failed/stopped）；
+    // 运行中卡保留跨回合（新回合的 progress 继续被消费），避免误杀仍在运行的后台任务卡。
+    clearBackgroundTasks() {
+      const next: Record<string, BackgroundTask> = {};
+      for (const [id, t] of Object.entries(this.backgroundTasks)) {
+        if (t.status !== 'completed' && t.status !== 'failed' && t.status !== 'stopped') next[id] = t;
+      }
+      this.backgroundTasks = next;
     },
     // C：实时压缩态。
     setCompacting(v: boolean) {

@@ -42,5 +42,11 @@ export function convertTaskEvent(
       : undefined,
     lastToolName: typeof sdkMsg.last_tool_name === 'string' ? sdkMsg.last_tool_name : undefined,
     summary: typeof sdkMsg.summary === 'string' ? sdkMsg.summary : undefined,
+    // D 点：prompt（task_started）/ subagent_type（started/progress）/ output_file（notification）/
+    // skip_transcript（started/progress/notification）——内务任务（skip_transcript=true）由消费端滤除。
+    prompt: typeof sdkMsg.prompt === 'string' ? sdkMsg.prompt : undefined,
+    subagentType: typeof sdkMsg.subagent_type === 'string' ? sdkMsg.subagent_type : undefined,
+    outputFile: typeof sdkMsg.output_file === 'string' ? sdkMsg.output_file : undefined,
+    skipTranscript: sdkMsg.skip_transcript === true,
   };
 }

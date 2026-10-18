@@ -1152,6 +1152,46 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return runTaskNow(taskId, mainWindow);
   });
 
+  // D 点：后台任务（task_* 编排）终态输出文件只读。入参对象载荷 { outputFile }：
+  // 校验绝对路径 + fs.stat 为常规文件 → 只读打开、最多读前 512KB（超出 truncated:true）。
+  // 安全面：纯 fs.stat/fs.open+read，不执行、不写、无路径拼接（绝对路径直读），512KB 上限封顶。
+  ipcMain.handle(IPC_CHANNELS.TASK_OUTPUT_READ, async (_event, req: unknown): Promise<{ content: string; truncated: boolean }> => {
+    const r = (req ?? {}) as Record<string, unknown>;
+    if (typeof r.outputFile !== 'string' || !r.outputFile.trim() || !path.isAbsolute(r.outputFile)) {
+      throw new Error('输出文件不可读：路径无效');
+    }
+    const outputFile = r.outputFile;
+    const MAX_BYTES = 512 * 1024;
+    let stat: fs.Stats;
+    try {
+      stat = await fsp.stat(outputFile);
+    } catch {
+      throw new Error('输出文件不存在');
+    }
+    if (!stat.isFile()) throw new Error('输出文件不可读：不是常规文件');
+    let handle: fs.promises.FileHandle;
+    try {
+      handle = await fsp.open(outputFile, 'r');
+    } catch {
+      throw new Error('输出文件不可读');
+    }
+    try {
+      const buf = Buffer.alloc(Math.min(stat.size, MAX_BYTES));
+      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+      return {
+        content: buf.subarray(0, bytesRead).toString('utf8'),
+        truncated: stat.size > bytesRead,
+      };
+    } catch {
+      throw new Error('输出文件不可读');
+    } finally {
+      try {
+        await handle.close();
+      } catch {
+        // 关闭失败不掩盖读取错误（原错误从 try/catch 正常抛出）。
+      }
+    }
+  });
 
   // 熔断提示行「全部恢复」：全部 paused→pending + 立即开始全量倒计时。
   ipcMain.handle(IPC_CHANNELS.QUEUE_RESUME_ALL, async (_event, sessionId: string) => {

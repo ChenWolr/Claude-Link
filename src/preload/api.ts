@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（96 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（97 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -143,6 +143,8 @@ export interface ClaudeLinkAPI {
   openChangeFile: (workingDir: string | null, path: string) => Promise<ChangesOpenResult>;
   addTask: (sessionId: string, payload: ChatSendPayload) => Promise<{ task: Task; tasks: Task[] }>;
   removeTask: (taskId: string) => Promise<Task[]>;
+  // D 点：后台任务（task_* 编排）终态输出文件只读（主进程强制绝对路径 + 512KB 上限 + 截断标记）。
+  readTaskOutput: (outputFile: string) => Promise<{ content: string; truncated: boolean }>;
   getTasks: (sessionId: string) => Promise<Task[]>;
   reorderTasks: (sessionId: string, taskIds: string[]) => Promise<Task[]>;
   setTaskPaused: (taskId: string, paused: boolean) => Promise<Task[]>;
@@ -295,6 +297,9 @@ export function createApi(): ClaudeLinkAPI {
     openChangeFile: (workingDir, path) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_OPEN_FILE, workingDir, path),
     addTask: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, payload),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId) as Promise<Task[]>,
+    // D 点：后台任务终态输出文件只读（对象载荷 { outputFile }，对齐主进程 handler 入参形状）。
+    readTaskOutput: (outputFile) =>
+      ipcRenderer.invoke(IPC_CHANNELS.TASK_OUTPUT_READ, { outputFile }) as Promise<{ content: string; truncated: boolean }>,
     getTasks: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_GET_ALL, sessionId),
     reorderTasks: (sessionId, taskIds) =>
       ipcRenderer.invoke(IPC_CHANNELS.TASK_REORDER, sessionId, taskIds) as Promise<Task[]>,

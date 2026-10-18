@@ -219,6 +219,12 @@ export interface CliTaskEvent {
   usage?: { totalTokens?: number; toolUses?: number; durationMs?: number };
   lastToolName?: string;
   summary?: string;
+  // D 点补映射（SDK task_started.prompt / *.subagent_type / task_notification.output_file /
+  // *.skip_transcript）：skip_transcript=true 为内务任务，面板不展示。
+  prompt?: string;
+  subagentType?: string;
+  outputFile?: string;
+  skipTranscript?: boolean;
 }
 
 // Claude 计划事件：TodoWrite / TaskCreate/Update/List/Get / system/task_updated 经纯函数
