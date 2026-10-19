@@ -16,8 +16,11 @@ import {
   type ScopedMcpEntry,
   type WriterIo,
 } from '../src/main/modules/mcp/mcp-writer';
+// R8a（P3 跟进）：哨兵改经 import 引用主进程 re-export（唯一字面定义在 shared/mcp-json.ts
+// 的 MCP_VALUE_MASK）——删除本文件原字面镜像副本。
+import { MCP_MASK_SENTINEL } from '../src/main/modules/mcp/mcp-config';
 
-const MASK = '••••••••'; // 与 mcp-config.MCP_MASK_SENTINEL 同字面量（8×U+25CF）
+const MASK = MCP_MASK_SENTINEL;
 const HOME = '/virtual-home';
 
 let pass = 0;

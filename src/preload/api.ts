@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（99 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（100 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -119,6 +119,26 @@ export interface McpExportScopedPayload {
   dir?: string;
 }
 
+/** mcp:parseMcpJson 回包条目（主进程 src/main/modules/mcp/mcp-config.ts:ParsedMcpEntry 同构
+ *  镜像——preload 不 import 主进程模块，字段以该文件实现为准：name/transport/command/args/
+ *  env/url/headers/timeoutMs 八字段，无 description）。 */
+export interface McpParsedJsonEntry {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+}
+
+/** mcp:parseMcpJson 回包：ok=true 带解析条目；ok=false 带中文错误消息（坏 JSON/根非对象/
+ *  三形态都取不到合法 map），失败不 throw。 */
+export type McpParseJsonResult =
+  | { ok: true; servers: McpParsedJsonEntry[] }
+  | { ok: false; error: string };
+
 export interface ClaudeLinkAPI {
   detectCli: () => Promise<CliDetectionResult>;
   getCliStatus: () => Promise<CliDetectionResult>;
@@ -227,6 +247,9 @@ export interface ClaudeLinkAPI {
   // 作用域导出 JSON：主进程构建 {"mcpServers":{…}} 文本并写系统剪贴板（渲染层零明文，
   // 回包只有 count；count=0 未动剪贴板）。
   exportMcpScoped: (payload: McpExportScopedPayload) => Promise<{ ok: true; count: number }>;
+  // 单服务器 JSON 解析（点2，表单⇄JSON 双模式「JSON → 表单」方向）：文本送主进程
+  // parseMcpServersJson（三形态导入口径同导入弹窗），失败回 { ok: false, error } 不 throw。
+  parseMcpJson: (text: string) => Promise<McpParseJsonResult>;
   // IM 机器人（飞书/微信 bridge）：凭据掩码读写 / 状态 / 连通测试 / 扫码登录 / 绑定管理。
   bridgeGetConfig: () => Promise<BridgeConfigGetResult>;
   bridgeSaveConfig: (input: BridgeConfigSaveInput) => Promise<BridgeConfigGetResult>;
@@ -401,6 +424,8 @@ export function createApi(): ClaudeLinkAPI {
     writeMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_WRITE_SCOPED, payload) as Promise<{ overwrote: boolean }>,
     // 作用域导出 JSON（对象载荷；主进程写剪贴板，回包零明文）。
     exportMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_EXPORT_SCOPED, payload) as Promise<{ ok: true; count: number }>,
+    // 单服务器 JSON 解析（点2；text 原样转发主进程 parseMcpServersJson，失败回包不 throw）。
+    parseMcpJson: (text) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PARSE_JSON, text) as Promise<McpParseJsonResult>,
     // IM 机器人（飞书/微信 bridge）。
     bridgeGetConfig: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_GET) as Promise<BridgeConfigGetResult>,
     bridgeSaveConfig: (input) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, input),

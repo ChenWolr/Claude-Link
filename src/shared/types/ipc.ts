@@ -82,6 +82,11 @@ export const IPC_CHANNELS = {
   // project 的 dir 须属已知项目目录集（与 WRITE_SCOPED 同源校验）；count = 导出条数，
   // 0 = 当前作用域无服务器（渲染层按钮已按空表禁用，此处防御性兜底，不动剪贴板）。
   MCP_EXPORT_SCOPED: 'mcp:exportScoped',
+  // 单服务器 JSON 解析（2026-10-19 mcp-settings-plan-a 点2，表单⇄JSON 双模式的「JSON → 表单」
+  // 方向）：body = string（导入 JSON 文本）→ parseMcpServersJson 直转（{ ok: true, servers } |
+  // { ok: false, error }）。纯解析无副作用：不落盘、不读配置；三形态导入口径与导入弹窗一致
+  //（mcp-config.ts 唯一解析源）。
+  MCP_PARSE_JSON: 'mcp:parseMcpJson',
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，test/query 由主进程自行解密，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',

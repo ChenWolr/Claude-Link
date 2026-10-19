@@ -25,6 +25,9 @@
 //       + mcp:managedSave 提交哨兵还原（含键改名 hint，还原后剥离瞬态字段）。
 
 import type { McpManagedServer } from '../../../shared/types/config';
+// 点6（2026-10-19 mcp-settings-plan-a）：哨兵字面量唯一来源收口 shared——MCP_MASK_SENTINEL
+// 改为 shared MCP_VALUE_MASK 的 re-export（同值同源，两名字一常量），本文件不再持有字面量。
+import { MCP_VALUE_MASK } from '../../../shared/mcp-json';
 
 // name 是工具名 mcp__<name>__<tool> 的中段：仅限字母/数字/下划线/连字符，1-64 字符。
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -381,10 +384,11 @@ export function buildMcpServersExportJson(
 // 断言集见 scripts/selftest-mcp-settings.ts（F 组逐条钉住本节行为）。
 
 /**
- * env/headers 值的编辑回显哨兵：8 个 U+25CF（•）。与渲染层 McpSettings.vue 的 MASK_SENTINEL
- * 同字面量，两处必须同步改。
+ * env/headers 值的编辑回显哨兵：8 个 U+2022（•）。shared/mcp-json.ts:MCP_VALUE_MASK 的
+ * re-export（点6 起同值同源、两名字一常量——本文件原字面量副本已删，全仓唯一字面定义在
+ * shared）；渲染层 McpSettings.vue 经 shared 常量 import 引用同一字面。
  */
-export const MCP_MASK_SENTINEL = '••••••••';
+export const MCP_MASK_SENTINEL = MCP_VALUE_MASK;
 
 /** env/headers 值掩码（键保留、新载体输出；undefined 透传 = 无该字段，不添加）。 */
 function maskRecordValues(record: Record<string, string> | undefined): Record<string, string> | undefined {

@@ -32,6 +32,7 @@ import { buildSessionSkillOverridesForPin } from './modules/sdk-skill-overrides'
 import { buildSessionMcpOverridesForPin } from './modules/mcp/sdk-mcp';
 import {
   buildMcpServersExportJson,
+  parseMcpServersJson,
   restoreMaskedMcpServers,
   sanitizeMcpServersConfig,
   type McpManagedSaveEntry,
@@ -570,6 +571,15 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if (count === 0) return { ok: true, count: 0 };
     clipboard.writeText(buildMcpServersExportJson(servers));
     return { ok: true, count };
+  });
+  // 单服务器 JSON 解析（2026-10-19 mcp-settings-plan-a 点2，表单⇄JSON 双模式的「JSON → 表单」
+  // 方向）：body = string（导入 JSON 文本）→ parseMcpServersJson 直转（一行包装，不做任何新
+  // 逻辑；解析失败走 { ok: false } 回包不 throw；载荷非 string 直接 throw（防御，渲染层已
+  // catch））。纯解析无副作用：不落盘、不读
+  // 配置；与导入弹窗三形态解析同一函数（mcp-config.ts 唯一解析源）。
+  ipcMain.handle(IPC_CHANNELS.MCP_PARSE_JSON, async (_event, text: unknown) => {
+    if (typeof text !== 'string') throw new Error('Invalid MCP parse payload');
+    return parseMcpServersJson(text);
   });
 
   // 多供应商模型库：设置页（可选项库）与 会话选择器（只读）共用。
