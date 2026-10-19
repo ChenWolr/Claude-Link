@@ -30,9 +30,11 @@
 //     三态互斥的静态源码钉（渲染层组件无纯函数可行为级断言，沿 tdd-bridge-ui-static-verify
 //     先例读源码断言）：消失态文案逐字存在、isProjectDirGone 判定含 project 作用域守卫
 //    （消失态不得误报管理库/user/未选目录态）、p4 快照失败占位先于空态块、分支嵌套顺序。
-//     H6（p6 B-3，2026-10-16 新增）：导入归一 normalizeImportEntry 区域值级清洗同步钉——
-//     env/headers 不得以 `as Record<string, string>` 断言透传（与主进程 pickStringRecord
-//     值级清洗防「双处同步」漂移）。
+//     H6（p6 B-3，2026-10-16 新增；2026-10-19 mcp-settings-plan-a 点6 改写）：导入归一值级
+//     清洗防漂移钉——原钉渲染层 normalizeImportEntry 区域值级过滤 + env/headers 不得
+//     `as Record<string, string>` 断言/裸透传（与主进程 pickStringRecord 防「双处同步」漂移）；
+//     点6 删双副本后按保护意图改钉新架构（解析走 claude.parseMcpJson 桥 + 副本函数定义零出现
+//     + 透传负向形态保留），判定语义「防透传、防漂移」不变，详见 H6 处注释。
 //   I D-V1-1 注入挂载组（2026-10-13 mcp-followup R4 修复新增）：buildNativeSdkOptionsCore 在
 //     settings.mcpServers 非空时把同一归一 map 挂到顶层 Options.mcpServers（strictMcpConfig 下
 //     SDK 只认顶层 mcpServers，settings 块内键被忽略——D-V1-1 根因）；空配置（三层全空/全禁用/
@@ -44,11 +46,66 @@
 //     禁用键仍 strict=true 保底压制（I5）。
 //     I6（round-002 修复 F1，2026-10-16）：sdk-backend 两生产构造点（buildSdkOptions /
 //     buildProbeSdkOptions）钉住优先公式的静态源码钉（防退化回 config.mcpOverrides 直判）。
+//   J timeoutMs 全链组（2026-10-19 mcp-settings-plan-a 点1 新增）：sanitize/导出/解析/视图
+//     对 timeoutMs 的透传（配置侧口径：合法=Number.isInteger 且 1..120000，非法静默丢字段、
+//     条目其余字段完好）+ resolveProbeTimeoutMs 参数化（undefined/非法→10000、>=1 整数封顶
+//     120000）+ 注入链防漏钉（J6：带 timeoutMs 条目经 toSdkMcpServerConfig / merge 全链输出
+//     均不含 timeoutMs——会话行为零变化，计划 §1.2 硬约束）。J2（writer 写出含/无 timeoutMs
+//     键）为异步驱动，归位 scripts/selftest-mcp-writer.ts [12]（两断言逐字对应），本组不重复；
+//     J4 另在 scripts/selftest-mcp-export.ts A9 镜像补条。J3 为异步断言（collectMcpSnapshot +
+//     临时目录，沿 G 组惯例绝不触真实 ~/.claude.json）——自本点起汇总移入 finish()，由 J3 的
+//     promise 链收尾调用一次。
+//   K 单服务器导出 JSON 组（2026-10-19 mcp-settings-plan-a 点2 新增）：src/shared/mcp-json.ts
+//     buildSingleServerExportJson（表单⇄JSON 双模式「表单 → JSON」方向的 shared 纯函数）——
+//     {"<name>":{…}} 单服务器形态、2 空格缩进+尾换行、字段序固定、空 args/env/headers 省略键、
+//     description 不导出、数组/嵌套对象单行紧凑（K1 字面比对为准绳）；K5 哨兵经主进程
+//     parseMcpServersJson 回读往返一致（JSON 模式可回填契约）；K6（round-002 F6）description
+//     防漏钉——输入带 description:"x" 输出也不出现该键（沿 J6 先例，写断言即 PASS）。
+//   L 方案 A 列表卡片化组（2026-10-19 mcp-settings-plan-a 点3 新增）：McpSettings.vue 条目区
+//     卡片化（对照原型 .mxA-card）静态源码钉——L1 row__ic/row__st 类与状态点四色修饰类
+//     （row__st--ok/--fail/--busy/--off）存在，且旧结构 mcp-tchip / mcp-scope-badge /
+//     inset 3px 0 0 三者源码零出现；L2=H 组 R5 三态文案钉回归确认（无新断言，不计 check）；
+//     L3 row__spin 存在且同文件含 prefers-reduced-motion 停用其动画规则。点3 RED：L1/L3
+//     因新类未落地而 FAIL（L1 兼负向钉，旧结构未删同 FAIL）；实现后全 PASS。
+//   M 方案 A 编辑器页内化组（2026-10-19 mcp-settings-plan-a 点4 新增）：编辑/新建从 Teleport
+//     弹窗（useDialogShell 拖拽缩放壳）改为主区第二视图（v-show 常挂防丢草稿）静态源码钉——
+//     M1 editorView ref（'list'|'edit'）与双视图 v-show 结构存在；M2 编辑弹窗壳类 mcp-modal
+//     源码零出现（原为编辑/导入两弹窗共用类，编辑壳移除后导入壳类名改名 mcp-import-modal，
+//     "mcp-modal" 不为其子串）+ editCardRef/editShell/showEditDialog 零出现 + 导入弹窗壳
+//    （importCardRef/importShell）仍在；M3 面包屑「返回列表」文案存在；M4 页内 Esc——
+//     @keydown.escape 绑定存在且处理器含 editorView==='edit' 守卫（回 list）。点4 RED：
+//     M1/M3/M4 因新结构不存在 FAIL、M2 因编辑弹窗壳仍在 FAIL；实现后全 PASS。
+//   N 方案 A 表单⇄JSON 双模式 + 超时字段组（2026-10-19 mcp-settings-plan-a 点5 新增）：
+//     McpSettings.vue 编辑器双模式与超时字段的静态源码钉（沿 H/L/M 组读源码先例）——
+//     N1 editMode/jsonText/jsonError/jsonParsing 状态定义存在；N2 分段胶囊「表单」「JSON」
+//     两项文案存在；N3 两条 jsonError 文案字面存在（一次只支持一台 / 编辑态不可改名）；
+//     N4「复制 JSON」按钮本体存在（@click="copyJson" 绑定 + pushToast('已复制 JSON') toast 字面，
+//     R3 改钉）；N5 超时校验文案字面存在（1–120000，en-dash）；N6「由当前
+//     表单配置实时生成」提示条文案字面存在。点5 RED：N1/N3/N4/N5/N6 因新代码未落地而
+//     FAIL（N2 的胶囊壳点4 已建、两项文案先行存在，RED 阶段即 PASS）；实现后全 PASS。
+//     N7（round-002 F1 修复新增）JSON 往返键改名 hint 快照闭环：切 JSON 前 jsonRenameHints
+//     快照改名映射 + kvRowsFromParsed 回填入参 + 哨兵行 hints 回退式 token 存在——round-002
+//     RED：N7 因快照代码未落地 FAIL；实现后 PASS。
+//   O 导入解析收口主进程组（2026-10-19 mcp-settings-plan-a 点6 新增）：McpSettings.vue 删
+//     双副本（导入归一副本 normalizeImportEntry 链 + 本地哨兵字面量）后的静态源码钉（沿
+//     H/L/M/N 组读源码先例，O2/O3 以 node fs 递归遍历 src/renderer 全部 .ts/.vue 断言，
+//     跑完不留临时文件）——O1 normalizeImportEntry 在 McpSettings.vue 源码零出现；O2
+//     mask_sentinel 子串（大小写不敏感，含主进程名 MCP_MASK_SENTINEL 变体；注释提及同算）
+//     在 src/renderer 零出现（渲染层唯一合法引用为 shared 的 MCP_VALUE_MASK，其名不含该
+//     子串）；O3 渲染层无哨兵字面量【定义形态】（赋值/常量定义 = '••••••••' 零命中；UI 文案/
+//     注释中展示性 ••••••••——如点5 JSON 注释行「已存密钥以 •••••••• 脱敏显示」——不属定义、
+//     不算命中）且 src/shared/mcp-json.ts 中 '••••••••'（带引号字面）恰 1 处（唯一字面定义；
+//     主进程 mcp-config.ts:MCP_MASK_SENTINEL 为 shared MCP_VALUE_MASK 的 re-export，两名字
+//     一常量）。点6 RED：O1/O2/O3 因副本仍在而 FAIL；实现后全 PASS。同点 H6 改写（编排器
+//     裁定）：原钉渲染层值级清洗副本的存在性，副本删除后改钉「解析走桥 + 副本定义零出现 +
+//     透传负向保留」，详见 H6 处注释。
 //
 // RED 阶段预期（p9a，B/C/D 组函数为 P2 桩、E 组函数为 P5 桩，桩体一律 throw
 // not implemented）：A 组全 PASS，B/C/D/E 组全 FAIL（失败详情为「调用抛错：not
 // implemented: …」）。P2/P5 实现后应全 PASS（GREEN）。R2 RED：G 组因
 // clearMcpRawCache 未导出而 FAIL（调用抛错），实现后转 GREEN。
+// 点1 RED（2026-10-19）：J1/J3/J4/J5/J7 因 timeoutMs 透传与 resolveProbeTimeoutMs 未实现而
+// FAIL；J6 为防漏钉（实现前即 PASS——toSdkMcpServerConfig 本就不输出该键），A-I 组保持全 PASS。
 //
 // 退出码约定：任一断言 FAIL → 1；全 PASS → 末行打印 `selftest-mcp-settings: OK`，退出码 0。
 // 运行：npx tsx scripts/selftest-mcp-settings.ts
@@ -61,6 +118,7 @@ import {
   parseMcpServersJson,
   toSdkMcpServerConfig,
   mergeMcpServersForSession,
+  buildMcpServersExportJson,
   MCP_MASK_SENTINEL,
   maskMcpServersForRenderer,
   restoreMaskedMcpServers,
@@ -72,7 +130,12 @@ import {
   parseSessionMcpOverrides,
   mergeMcpServersIntoSettings,
 } from '../src/main/modules/mcp/sdk-mcp';
-import { clearMcpRawCache, readUserMcpServersRawSync } from '../src/main/modules/mcp/mcp-scanner';
+import { clearMcpRawCache, collectMcpSnapshot, readUserMcpServersRawSync } from '../src/main/modules/mcp/mcp-scanner';
+// K 组（2026-10-19 mcp-settings-plan-a 点2）被测函数：单服务器导出 JSON 纯函数
+//（shared 纯 TS 模块：renderer/main 两用，严禁 import electron 与 node 内置）。
+import { buildSingleServerExportJson } from '../src/shared/mcp-json';
+// J5（timeoutMs 点1）被测函数：探活生效超时解析（纯 node 模块，仅 import node:child_process）。
+import { resolveProbeTimeoutMs } from '../src/main/modules/mcp/mcp-probe';
 // E3g/E3h（B-1 默认 io 坏目录负缓存，2026-10-16）被测依赖：与 Skill/快照链同实例的共享负缓存。
 import { badDirCacheHas, badDirCacheMark } from '../src/main/modules/project-skills';
 // D-V1-1 注入挂载组（I 组）被测函数：核心 options 工厂（仅类型 import，纯 node 可直接 import）。
@@ -1001,23 +1064,30 @@ console.log('\n=== H. R5 三态文案组（McpSettings.vue 项目空态三态互
   check('H5', '项目空态分支嵌套顺序：isProjectDirGone 守卫 → 消失态文案 → 正常空态文案（互斥呈现）；含 v-else 形态子断言（正常空态须为 <template v-else> 起始 + 文案前缀）',
     src.includes(GUARD) && src.includes(NORMAL_VELSE) && src.indexOf(GUARD) < src.indexOf(DISAPPEARED_TEXT) && src.indexOf(DISAPPEARED_TEXT) < src.indexOf(NORMAL_TEXT),
     '守卫/文案顺序不对，或正常空态非 v-else 形态');
-  // p6 B-3（2026-10-16）：导入归一值级清洗同步钉——normalizeImportEntry 区域（其值级清洗
-  // 助手 pickStringRecordLocal 定义起，至 ImportPreviewEntry 接口止）必须做值级过滤（与主进程
-  // mcp-config pickStringRecord 同语义：值非 string 整键丢弃、清洗后空→字段不设），env/headers
-  // 两处 `as Record<string, string>` 断言透传不得回归（防渲染层/主进程「双处同步」再次漂移）。
-  // D6（round-003）：封堵 round-002 复审指出的部分回退规避窗口——不带 as 的裸透传
-  // （entry.env = cfg.env / entry.headers = cfg.headers）同样封禁；带 as 与裸两负向钉并存，
-  // 同时封堵带 cast 与不带 cast 两条回退路径。
-  const NORM_REGION = src.slice(src.indexOf('function pickStringRecordLocal'), src.indexOf('interface ImportPreviewEntry'));
-  check('H6', '导入归一值级清洗同步：normalizeImportEntry 区域（含 pickStringRecordLocal 助手）含值级过滤（typeof val === \'string\'），env/headers 不再以 as Record<string, string> 断言透传，裸透传亦不存在',
-    src.includes('function pickStringRecordLocal')
-      && NORM_REGION.includes("typeof val === 'string'")
-      && NORM_REGION.includes('pickStringRecordLocal(')
-      && !NORM_REGION.includes('entry.env = cfg.env as Record<string, string>')
-      && !NORM_REGION.includes('entry.headers = cfg.headers as Record<string, string>')
-      && !NORM_REGION.includes('entry.env = cfg.env')
-      && !NORM_REGION.includes('entry.headers = cfg.headers'),
-    src === '' ? 'McpSettings.vue 不可读' : '值级过滤缺失或 env/headers 仍为 as 断言/裸透传');
+  // p6 B-3（2026-10-16）：导入归一值级清洗同步钉——原钉渲染层副本 normalizeImportEntry/
+  // pickStringRecordLocal 的值级过滤（与主进程 pickStringRecord 同语义：值非 string 整键
+  // 丢弃、清洗后空→字段不设）+ env/headers 不得 `as Record<string, string>` 断言透传、
+  // 不得裸透传（D6 round-003 补裸透传封堵；防渲染层/主进程「双处同步」再次漂移）。
+  // 【2026-10-19 mcp-settings-plan-a 点6 改写，编排器裁定】点6 将导入解析收口主进程（删双
+  // 副本），原钉对象（渲染层值级清洗副本）整体删除——本钉按保护意图迁移钉新架构，判定语义
+  // 「防透传、防漂移」不变，断言对象随被钉对象删除而改写：
+  //   ① analyzeImportText 区域含 claude.parseMcpJson( 桥调用（导入弹窗解析与 JSON 编辑器
+  //     parseJsonDraft 同走主进程 parseMcpServersJson 统一管道）；
+  //   ② function normalizeImportEntry / function pickStringRecordLocal 两副本函数定义全文件
+  //     零出现（原「钉存在」反转为「钉缺失」——副本回潮即 FAIL，与 O1 同向）；
+  //   ③ 原 H6 防透传负向形态保留并扩为全文件：as 断言透传与裸透传四形态零出现（四形态为
+  //     副本专属写法，全文件口径无合法出现位，严于原区域口径）。
+  const IMPORT_REGION = src.slice(src.indexOf('async function analyzeImportText'), src.indexOf('interface KvRow'));
+  check('H6', '导入解析收口主进程（点6 改写）：analyzeImportText 区域走 claude.parseMcpJson 桥；normalizeImportEntry/pickStringRecordLocal 副本函数定义零出现；env/headers as 断言/裸透传四形态零出现',
+    src.includes('async function analyzeImportText')
+      && IMPORT_REGION.includes('claude.parseMcpJson(')
+      && !src.includes('function normalizeImportEntry')
+      && !src.includes('function pickStringRecordLocal')
+      && !src.includes('entry.env = cfg.env as Record<string, string>')
+      && !src.includes('entry.headers = cfg.headers as Record<string, string>')
+      && !src.includes('entry.env = cfg.env')
+      && !src.includes('entry.headers = cfg.headers'),
+    src === '' ? 'McpSettings.vue 不可读' : '解析未走桥/副本函数回潮，或 env/headers 仍为 as 断言/裸透传');
 }
 
 // ── I. D-V1-1 注入挂载组（options.mcpServers 顶层挂载 / 空配置零挂载 / strict 门控：挂载∨overrides 激活）──
@@ -1229,12 +1299,748 @@ function optionsFromMergedSettings(
     src === '' ? 'sdk-backend.ts 不可读' : '公式缺失/错位（两构造点须各含钉住优先公式语句）或出现 config.mcpOverrides 直判形态');
 }
 
-// ── 汇总与退出码 ─────────────────────────────────────────────────────────────
+// ── J. timeoutMs 全链组（2026-10-19 mcp-settings-plan-a 点1）────────────────
+// 口径：配置侧合法=Number.isInteger 且 1..120000（isValidMcpTimeoutMs，非法静默丢字段、
+// 条目其余字段完好——与 env/headers 值级清洗容错口径一致）；探活运行时侧
+// resolveProbeTimeoutMs：>=1 整数封顶 120000 生效，undefined/非法一律默认 10000。
+// 硬约束（计划 §1.2/§6）：timeoutMs 绝不注入 SDK 会话（J6 防漏钉）。
 
-console.log(`\n===== selftest-mcp-settings: ${pass} pass / ${fail} fail =====`);
-if (fail > 0) {
-  console.log('（RED 阶段：FAIL 项均为尚未实现的桩（throw not implemented: …）——P2/P5 实现后应全 PASS；A 组为 P1 已实现基线，应保持全 PASS）');
-  process.exit(1);
+console.log('\n=== J. timeoutMs 全链组（sanitize 透传 / 导出 / probe 超时 / 注入防漏钉 / 解析 / 视图） ===');
+
+// J1 sanitize：合法整数（30000、1、120000 边界）保留；0/-5/1.5/'30000'/120001/undefined →
+// 字段被静默丢弃且条目其余字段完好（不整条丢弃、不报错）。
+{
+  const sub: string[] = [];
+  for (const v of [30000, 1, 120000]) {
+    const out = sanitizeMcpServersConfig([{ id: 'j1a', name: 'j1a', transport: 'stdio', command: 'c', timeoutMs: v }]);
+    if (out.length !== 1) { sub.push(`timeoutMs=${v}：合法值条目不应被丢弃`); continue; }
+    if (out[0].timeoutMs !== v) sub.push(`timeoutMs=${v}（合法整数）应保留：${canon(out[0].timeoutMs)}`);
+    if (out[0].command !== 'c') sub.push(`timeoutMs=${v}：条目其余字段应完好`);
+  }
+  for (const bad of [0, -5, 1.5, '30000', 120001, undefined]) {
+    const raw = { id: 'j1b', name: 'j1b', transport: 'http', url: 'https://x/mcp', timeoutMs: bad } as Record<string, unknown>;
+    const out = sanitizeMcpServersConfig([raw])[0];
+    if (!out) { sub.push(`timeoutMs=${String(bad)}：条目不应被整条丢弃（仅丢字段）`); continue; }
+    if ('timeoutMs' in out) sub.push(`timeoutMs=${String(bad)}（非法）应被静默丢弃（字段消失）`);
+    if (out.url !== 'https://x/mcp') sub.push(`timeoutMs=${String(bad)}：丢弃时条目其余字段应完好`);
+  }
+  check('J1', 'sanitize：合法整数（30000/1/120000 边界）保留；0/-5/1.5/"30000"/120001/undefined → 丢字段且条目完好', sub.length === 0, sub.join('; '));
 }
-console.log('selftest-mcp-settings: OK');
-process.exit(0);
+
+// J2 writer：断言归位 scripts/selftest-mcp-writer.ts [12]（writeScopedMcpServer 为异步驱动 +
+// 内存 io stub，属该脚本契约域）：ScopedMcpEntry 带 timeoutMs → 写出 JSON 条目含
+// "timeoutMs": 30000；不带 → 无该键。本组不重复（见文件头 J 组说明）。
+
+// J4 导出：buildMcpServersExportJson 输出条目含 timeoutMs（合法才写键）；无值不写键。
+// （镜像断言另见 scripts/selftest-mcp-export.ts A9。）
+{
+  const sub: string[] = [];
+  const r = call(() => buildMcpServersExportJson({
+    j4a: { transport: 'stdio', command: 'npx', timeoutMs: 30000 },
+    j4b: { transport: 'http', url: 'https://x/mcp' },
+  }));
+  if (!r.ok) sub.push(throwDetail(r));
+  else {
+    const parsed = JSON.parse(r.value) as { mcpServers: Record<string, Record<string, unknown>> };
+    if (parsed.mcpServers.j4a?.timeoutMs !== 30000) sub.push(`含合法 timeoutMs 应导出 "timeoutMs": 30000：${canon(parsed.mcpServers.j4a)}`);
+    if (parsed.mcpServers.j4a?.command !== 'npx') sub.push(`导出条目其余字段应完好：${canon(parsed.mcpServers.j4a)}`);
+    if (parsed.mcpServers.j4b === undefined || 'timeoutMs' in parsed.mcpServers.j4b) sub.push(`无 timeoutMs 不得写键：${canon(parsed.mcpServers.j4b)}`);
+  }
+  check('J4', '导出：条目含合法 timeoutMs → 输出含 "timeoutMs": 30000；无值 → 无该键', sub.length === 0, sub.join('; '));
+}
+
+// J5 probe 超时参数化：resolveProbeTimeoutMs 纯函数直测（直接 import mcp-probe.ts，
+// 该文件仅 import node:child_process，selftest 可纯 node 运行）：
+// undefined/缺省/非法（0/负/小数/字符串/null）→ 10000；5000→5000；1/120000 边界保留；999999→120000 封顶。
+{
+  const sub: string[] = [];
+  const cases: Array<{ label: string; entry: { timeoutMs?: unknown } | undefined; want: number }> = [
+    { label: 'undefined 入参 → 10000', entry: undefined, want: 10000 },
+    { label: '空对象（缺字段）→ 10000', entry: {}, want: 10000 },
+    { label: '字段 undefined → 10000', entry: { timeoutMs: undefined }, want: 10000 },
+    { label: '5000 → 5000', entry: { timeoutMs: 5000 }, want: 5000 },
+    { label: '边界 1 → 1', entry: { timeoutMs: 1 }, want: 1 },
+    { label: '边界 120000 → 120000', entry: { timeoutMs: 120000 }, want: 120000 },
+    { label: '999999 封顶 → 120000', entry: { timeoutMs: 999999 }, want: 120000 },
+    { label: '0 → 10000', entry: { timeoutMs: 0 }, want: 10000 },
+    { label: '-5 → 10000', entry: { timeoutMs: -5 }, want: 10000 },
+    { label: '1.5（小数）→ 10000', entry: { timeoutMs: 1.5 }, want: 10000 },
+    { label: "'x'（字符串）→ 10000", entry: { timeoutMs: 'x' }, want: 10000 },
+    { label: 'null → 10000', entry: { timeoutMs: null }, want: 10000 },
+  ];
+  for (const c of cases) {
+    const r = call(() => resolveProbeTimeoutMs(c.entry));
+    if (!r.ok) { sub.push(`${c.label}：${throwDetail(r)}`); continue; }
+    if (r.value !== c.want) sub.push(`${c.label}：应 ${c.want}，得到 ${String(r.value)}`);
+  }
+  check('J5', 'resolveProbeTimeoutMs：undefined/缺省/非法（0/负/小数/字符串/null）→ 10000；5000→5000；1..120000 边界保留；999999 封顶 120000', sub.length === 0, sub.join('; '));
+}
+
+// J6 注入链防漏钉（计划 §1.2/§6 硬约束，实现前即应 PASS 的守卫断言）：带 timeoutMs 的条目
+// 经 toSdkMcpServerConfig 序列化输出不含 timeoutMs 键（stdio/http 两形），mergeMcpServersForSession
+// 全链产物同钉——会话行为零变化。
+{
+  const sub: string[] = [];
+  const j6stdio: { transport: 'stdio' | 'http' | 'sse'; command?: string; timeoutMs?: number } = { transport: 'stdio', command: 'x', timeoutMs: 30000 };
+  const r1 = call(() => toSdkMcpServerConfig(j6stdio));
+  if (!r1.ok) sub.push(`stdio 形：${throwDetail(r1)}`);
+  else if ('timeoutMs' in r1.value || !eq(r1.value, { type: 'stdio', command: 'x' })) sub.push(`stdio 形输出不得含 timeoutMs：${canon(r1.value)}`);
+  const j6http: { transport: 'stdio' | 'http' | 'sse'; url?: string; timeoutMs?: number } = { transport: 'http', url: 'https://x/mcp', timeoutMs: 30000 };
+  const r2 = call(() => toSdkMcpServerConfig(j6http));
+  if (!r2.ok) sub.push(`http 形：${throwDetail(r2)}`);
+  else if ('timeoutMs' in r2.value || !eq(r2.value, { type: 'http', url: 'https://x/mcp' })) sub.push(`http 形输出不得含 timeoutMs：${canon(r2.value)}`);
+  const r3 = call(() => mergeMcpServersForSession({
+    managed: [mkManaged('j6m', 'stdio', { command: 'c', timeoutMs: 30000 })],
+    userServers: {},
+    projectServers: {},
+    overrides: {},
+    projectDirKey: null,
+  }));
+  if (!r3.ok) sub.push(`merge 全链：${throwDetail(r3)}`);
+  else if (!eq(r3.value.j6m, { type: 'stdio', command: 'c' })) sub.push(`注入链产物不得含 timeoutMs：${canon(r3.value.j6m)}`);
+  check('J6', '注入链防漏钉：带 timeoutMs 条目经 toSdkMcpServerConfig（stdio/http）/ mergeMcpServersForSession 输出均不含 timeoutMs（会话行为零变化）', sub.length === 0, sub.join('; '));
+}
+
+// J7 解析透传：parseMcpServersJson 对 timeoutMs 合法值透传进条目（点5 JSON 模式回填数据源）；
+// 非法值（"timeoutMs":"3万"）→ 条目无 timeoutMs 但其余字段完好（条目级容错，不跳条不报错）。
+{
+  const sub: string[] = [];
+  const r1 = call(() => parseMcpServersJson('{"a":{"type":"stdio","command":"x","timeoutMs":30000}}'));
+  if (!r1.ok) sub.push(`合法值：${throwDetail(r1)}`);
+  else if (!r1.value.ok) sub.push(`合法值应 ok:true：${r1.value.error}`);
+  else if (r1.value.servers.length !== 1 || r1.value.servers[0]?.timeoutMs !== 30000) sub.push(`servers[0].timeoutMs 应为 30000：${canon(r1.value.servers)}`);
+  const r2 = call(() => parseMcpServersJson('{"b":{"type":"stdio","command":"y","timeoutMs":"3万"}}'));
+  if (!r2.ok) sub.push(`非法值：${throwDetail(r2)}`);
+  else if (!r2.value.ok) sub.push(`非法值应 ok:true（条目级容错）：${r2.value.error}`);
+  else {
+    const e = r2.value.servers[0];
+    if (!e || e.name !== 'b') sub.push(`非法值：条目本身不应被跳过：${canon(r2.value.servers)}`);
+    else if ('timeoutMs' in e || e.command !== 'y') sub.push(`非法 timeoutMs 应丢字段且其余字段完好：${canon(e)}`);
+  }
+  check('J7', '解析透传：timeoutMs 合法（30000）→ 条目携带；非法（"3万"）→ 条目无该键但其余字段完好', sub.length === 0, sub.join('; '));
+}
+
+// J3 scanner 视图透传（异步，本组最后执行；其 promise 链收尾调用 finish() 输出汇总与退出码）：
+// 临时目录构造 user ~/.claude.json + project .mcp.json（沿 G 组惯例：os.tmpdir() 自建唯一目录、
+// 跑完清理，绝不触真实 ~/.claude.json；badDir 负缓存注入 no-op stub，不污染共享实例）。断言：
+// 条目含合法 timeoutMs → McpScopedServerView 携带该键（编辑回填数据源）；无键 → 视图无键。
+{
+  const j3Home = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-j3-home-'));
+  const j3Proj = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-link-mcp-selftest-j3-proj-'));
+  const cleanup = (): void => {
+    fs.rmSync(j3Home, { recursive: true, force: true });
+    fs.rmSync(j3Proj, { recursive: true, force: true });
+  };
+  fs.writeFileSync(
+    path.join(j3Home, '.claude.json'),
+    JSON.stringify({ mcpServers: { ju: { command: 'npx', timeoutMs: 30000 }, ju2: { command: 'node' } } }),
+    'utf8',
+  );
+  fs.writeFileSync(
+    path.join(j3Proj, '.mcp.json'),
+    JSON.stringify({ mcpServers: { jp: { command: 'uvx', timeoutMs: 5000 } } }),
+    'utf8',
+  );
+  collectMcpSnapshot({
+    userHome: j3Home,
+    isDefaultDir: () => false,
+    recentWorkspaces: [j3Proj],
+    defaultWorkingDir: null,
+    listWorkingDirCounts: () => new Map<string, number>(),
+    badDirHas: () => false,
+    badDirMark: () => {},
+  }).then(
+    (snapshot) => {
+      const sub: string[] = [];
+      const ju = snapshot.userServers.find((s) => s.name === 'ju');
+      const ju2 = snapshot.userServers.find((s) => s.name === 'ju2');
+      if (!ju) sub.push(`user 视图应含 ju：${canon(snapshot.userServers)}`);
+      else if (ju.timeoutMs !== 30000) sub.push(`user 视图 ju 应携带 timeoutMs=30000：${canon(ju)}`);
+      if (!ju2) sub.push('user 视图应含 ju2');
+      else if ('timeoutMs' in ju2) sub.push(`user 视图无键条目 ju2 不得出现 timeoutMs：${canon(ju2)}`);
+      if (snapshot.projectDirs.length !== 1) sub.push(`project 目录视图应恰 1 个：${canon(snapshot.projectDirs)}`);
+      else {
+        const jp = snapshot.projectDirs[0]?.servers.find((s) => s.name === 'jp');
+        if (!jp) sub.push(`project 视图应含 jp：${canon(snapshot.projectDirs)}`);
+        else if (jp.timeoutMs !== 5000) sub.push(`project 视图 jp 应携带 timeoutMs=5000：${canon(jp)}`);
+      }
+      check('J3', 'scanner 视图透传：user/project 条目含合法 timeoutMs → 视图携带（编辑回填）；无键 → 视图无键（临时目录已清理）', sub.length === 0, sub.join('; '));
+      cleanup();
+      finish();
+    },
+    (e: unknown) => {
+      check('J3', 'scanner 视图透传（collectMcpSnapshot）', false, `调用抛错：${errMsg(e)}`);
+      cleanup();
+      finish();
+    },
+  );
+}
+
+// ── K. 单服务器导出 JSON 组（2026-10-19 mcp-settings-plan-a 点2：src/shared/mcp-json.ts）──
+// 表单⇄JSON 双模式的「表单 → JSON」方向供料：单服务器导出形态 {"<name>":{…}}、2 空格缩进 +
+// 尾换行、字段序固定（type,command,args,env,url,headers,timeoutMs）、空 args/env/headers 省略键、
+// description 一律不导出、数组/嵌套对象（env/headers）单行紧凑（K1 字面比对为准绳）。
+// K5 哨兵序列化后经主进程 parseMcpServersJson（selftest 直接 import，既有先例）回读往返一致
+// ——JSON 模式可回填的解析侧契约（点 5 反方向经 mcp:parseMcpJson 通道走同一函数）。
+
+console.log('\n=== K. 单服务器导出 JSON 组（buildSingleServerExportJson） ===');
+
+// K1 stdio 全字段字面比对（准绳）：顶层 {"context7":{…}}、2 空格缩进、字段序
+// type→command→args→env→timeoutMs、args/env 单行紧凑（", " 分隔、括号内带空格）、末尾换行。
+{
+  const sub: string[] = [];
+  const K1_EXPECTED = '{\n  "context7": {\n    "type": "stdio",\n    "command": "npx",\n    "args": ["-y", "@upstash/context7"],\n    "env": { "K": "••••••••" },\n    "timeoutMs": 30000\n  }\n}\n';
+  const r = call(() => buildSingleServerExportJson({
+    name: 'context7',
+    transport: 'stdio',
+    command: 'npx',
+    args: ['-y', '@upstash/context7'],
+    env: { K: MCP_MASK_SENTINEL },
+    timeoutMs: 30000,
+  }));
+  if (!r.ok) sub.push(throwDetail(r));
+  else if (r.value !== K1_EXPECTED) sub.push(`字面不符——得到 ${JSON.stringify(r.value)}，期望 ${JSON.stringify(K1_EXPECTED)}`);
+  check('K1', 'stdio 全字段：输出恰为字面形态（2 空格缩进+尾换行+字段序固定+args/env 单行紧凑）', sub.length === 0, sub.join('; '));
+}
+
+// K2 http 形：含 url/headers 键；无 command/args/env 键（字段互斥；结构断言走 JSON.parse）。
+{
+  const sub: string[] = [];
+  const r = call(() => buildSingleServerExportJson({
+    name: 'edge-http',
+    transport: 'http',
+    url: 'https://e/mcp',
+    headers: { Authorization: 'Bearer t' },
+    timeoutMs: 5000,
+  }));
+  if (!r.ok) sub.push(throwDetail(r));
+  else {
+    let parsed: Record<string, Record<string, unknown>> | null = null;
+    try { parsed = JSON.parse(r.value) as Record<string, Record<string, unknown>>; }
+    catch (e) { sub.push(`输出应可 JSON.parse：${errMsg(e)}`); }
+    if (parsed) {
+      const entry = parsed['edge-http'];
+      if (!entry) sub.push(`顶层键应为 "edge-http"：${JSON.stringify(r.value.slice(0, 80))}`);
+      else {
+        if (entry.type !== 'http') sub.push(`type 应为 "http"：${canon(entry)}`);
+        if (entry.url !== 'https://e/mcp') sub.push(`http 形应含 url 键：${canon(entry)}`);
+        if (!eq(entry.headers, { Authorization: 'Bearer t' })) sub.push(`http 形应含 headers 键：${canon(entry)}`);
+        for (const absent of ['command', 'args', 'env']) {
+          if (absent in entry) sub.push(`http 形不得含 ${absent} 键：${canon(entry)}`);
+        }
+      }
+    }
+  }
+  check('K2', 'http 形：输出含 url/headers 键，无 command/args/env 键（transport 字段互斥）', sub.length === 0, sub.join('; '));
+}
+
+// K3 空对象省略：args:[] / env:{} / headers:{} → 对应键不出现（其余字段完好）。
+{
+  const sub: string[] = [];
+  const r1 = call(() => buildSingleServerExportJson({ name: 'k3-stdio', transport: 'stdio', command: 'npx', args: [], env: {} }));
+  if (!r1.ok) sub.push(`stdio 空参数：${throwDetail(r1)}`);
+  else {
+    const entry = (JSON.parse(r1.value) as Record<string, Record<string, unknown>>)['k3-stdio'];
+    if (!entry) sub.push(`stdio 空参数：顶层键缺失：${JSON.stringify(r1.value.slice(0, 80))}`);
+    else {
+      for (const absent of ['args', 'env', 'timeoutMs']) {
+        if (absent in entry) sub.push(`空 ${absent} → 键不应出现：${canon(entry)}`);
+      }
+      if (entry.type !== 'stdio' || entry.command !== 'npx') sub.push(`空参数时其余字段应完好：${canon(entry)}`);
+    }
+  }
+  const r2 = call(() => buildSingleServerExportJson({ name: 'k3-http', transport: 'http', url: 'https://e/mcp', headers: {} }));
+  if (!r2.ok) sub.push(`headers 为 {}：${throwDetail(r2)}`);
+  else {
+    const entry = (JSON.parse(r2.value) as Record<string, Record<string, unknown>>)['k3-http'];
+    if (!entry) sub.push('headers 为 {}：顶层键缺失');
+    else if ('headers' in entry) sub.push(`headers 为 {} → 键不应出现：${canon(entry)}`);
+    else if (entry.url !== 'https://e/mcp') sub.push(`headers 为 {}：url 应完好：${canon(entry)}`);
+  }
+  check('K3', '空对象省略：args:[]/env:{}/headers:{} → 对应键不出现（其余字段完好）', sub.length === 0, sub.join('; '));
+}
+
+// K4 name 含特殊字符（'a-b_2'）原样包裹为顶层键（单键 map；JSON.stringify 转义保证键合法）。
+{
+  const sub: string[] = [];
+  const r = call(() => buildSingleServerExportJson({ name: 'a-b_2', transport: 'stdio', command: 'node' }));
+  if (!r.ok) sub.push(throwDetail(r));
+  else {
+    if (!r.value.startsWith('{\n  "a-b_2": {\n')) sub.push(`name 应原样包裹为顶层键：${JSON.stringify(r.value.slice(0, 40))}`);
+    let parsed: Record<string, unknown> | null = null;
+    try { parsed = JSON.parse(r.value) as Record<string, unknown>; }
+    catch (e) { sub.push(`输出应可 JSON.parse：${errMsg(e)}`); }
+    if (parsed && !eq(Object.keys(parsed), ['a-b_2'])) sub.push(`顶层应恰一个键 a-b_2：${canon(Object.keys(parsed))}`);
+    const entry = (parsed?.['a-b_2'] ?? null) as Record<string, unknown> | null;
+    if (!entry || entry.command !== 'node' || entry.type !== 'stdio') sub.push('条目字段应完好（type/command）');
+  }
+  check('K4', 'name 含特殊字符（a-b_2）原样包裹为顶层键（单键 map）', sub.length === 0, sub.join('; '));
+}
+
+// K5 哨兵原样往返（JSON 模式可回填契约）：env 值 •••••••• 序列化输出后经主进程
+// parseMcpServersJson（selftest 直接 import）回读 ok:true 且 env 值仍为 ••••••••（明文新值同钉）。
+{
+  const sub: string[] = [];
+  const r = call(() => buildSingleServerExportJson({
+    name: 'k5-roundtrip',
+    transport: 'stdio',
+    command: 'npx',
+    env: { SECRET: MCP_MASK_SENTINEL, PLAIN: 'plain-v' },
+  }));
+  if (!r.ok) sub.push(throwDetail(r));
+  else {
+    const p = call(() => parseMcpServersJson(r.value));
+    if (!p.ok) sub.push(`parseMcpServersJson 调用抛错：${throwDetail(p)}`);
+    else if (!p.value.ok) sub.push(`回读应 ok:true：${p.value.error}`);
+    else {
+      const e = p.value.servers[0];
+      if (p.value.servers.length !== 1 || !e || e.name !== 'k5-roundtrip') sub.push(`回读应恰 1 条同名条目：${canon(p.value.servers)}`);
+      else if (!eq(e.env, { SECRET: MCP_MASK_SENTINEL, PLAIN: 'plain-v' })) sub.push(`哨兵/明文值应往返一致：${canon(e.env)}`);
+    }
+  }
+  check('K5', '哨兵原样往返：env 值 •••••••• 序列化 → parseMcpServersJson 回读 ok:true 且值仍为哨兵', sub.length === 0, sub.join('; '));
+}
+
+// K6（round-002 F6）description 一律不导出（防漏钉，沿 J6 先例——实现本就不输出该键，写断言
+// 即 PASS，钉住「输入带 description 也不出现」的契约）：导出仅连接语义字段（对齐 ZCode），
+// description 仅入库展示（SingleServerExportInput 可携带，但序列化恒丢弃）。
+{
+  const sub: string[] = [];
+  const r = call(() => buildSingleServerExportJson({ name: 'k6-desc', transport: 'stdio', command: 'npx', description: 'x' }));
+  if (!r.ok) sub.push(throwDetail(r));
+  else {
+    if (r.value.includes('description')) sub.push(`输出文本不得含 description 键：${JSON.stringify(r.value)}`);
+    let parsed: Record<string, unknown> | null = null;
+    try { parsed = JSON.parse(r.value) as Record<string, unknown>; }
+    catch (e) { sub.push(`输出应可 JSON.parse：${errMsg(e)}`); }
+    const entry = (parsed?.['k6-desc'] ?? null) as Record<string, unknown> | null;
+    if (!entry) sub.push('顶层键 k6-desc 缺失');
+    else if ('description' in entry) sub.push(`解析产物不得含 description 键：${canon(entry)}`);
+  }
+  check('K6', 'description 不导出：输入带 description:"x" → 输出文本与解析产物均无 description 键', sub.length === 0, sub.join('; '));
+}
+
+// K7（P3 跟进 R4）保留键名包裹形：name 为 'mcpServers'/'servers' 时裸 map 会被
+// parseMcpServersJson 保留键分支吞掉（ok:true, servers:[]）→ 序列化改用
+// {"mcpServers":{"<name>":{…}}} 包裹形且回读得同名单条目；其余名字维持裸 map（K1 回归）。
+{
+  const sub: string[] = [];
+  for (const reserved of ['mcpServers', 'servers'] as const) {
+    const text = buildSingleServerExportJson({ name: reserved, transport: 'stdio', command: 'npx' });
+    if (!text.includes('"mcpServers"') || !text.includes(`"${reserved}"`)) sub.push(`${reserved}：缺包裹键/同名键`);
+    const back = parseMcpServersJson(text);
+    if (!back.ok || back.servers.length !== 1 || back.servers[0]?.name !== reserved) {
+      sub.push(`${reserved}：回读不符 ${back.ok ? JSON.stringify(back.servers.map((s) => s.name)) : back.error}`);
+    }
+  }
+  check('K7', '保留键名（mcpServers/servers）→ mcpServers 包裹形 + parseMcpServersJson 回读同名单条目', sub.length === 0, sub.join('; '));
+}
+
+// ── L. 方案 A 列表卡片化组（2026-10-19 mcp-settings-plan-a 点3：McpSettings.vue 条目卡片静态钉）──
+// 沿 H 组读源码静态钉先例：条目区改为原型 .mxA-card 同构卡片（36px 图标块+右下状态点 / 中性传输
+// 标签 / 合并工具·状态行 / 右列操作+开关）后——L1 钉新类存在 + 旧结构三字符串零出现（左状态色条
+// inset 3px 0 0、实底传输徽章 mcp-tchip、每卡作用域徽章 mcp-scope-badge）；L3 钉 busy spinner
+// 带 prefers-reduced-motion 停用规则（两字符串同断言 + 停用关系邻近性正则）。
+// L2 无新断言：空态三态文案由 H 组既有 R5 钉（H1-H5）回归确认保持 PASS，本组注释留痕不计 check。
+
+console.log('\n=== L. 方案 A 列表卡片化组（McpSettings.vue 条目卡片静态钉） ===');
+
+{
+  const vueRel = path.join('src', 'renderer', 'components', 'config', 'McpSettings.vue');
+  let src = '';
+  try {
+    src = fs.readFileSync(path.resolve(__dirname, '..', vueRel), 'utf8');
+  } catch {
+    // 缺文件/不可读：src 保持空串，下列断言全部走 FAIL 分支（不抛错、不崩脚本）。
+  }
+  // L1 状态点四色映射修饰类（实际采用类名集）：ok→--ok / fail→--fail / busy→--busy / 其余
+  //（disabled·未探测·未连接·sse 中性态）→--off。
+  const ST_MODIFIERS = ['row__st--ok', 'row__st--fail', 'row__st--busy', 'row__st--off'];
+  const missingSt = ST_MODIFIERS.filter((c) => !src.includes(c));
+  const legacyLeft = ['mcp-tchip', 'mcp-scope-badge', 'inset 3px 0 0'].filter((s) => src.includes(s));
+  check(
+    'L1',
+    '卡片结构钉：row__ic/row__st 类存在；状态点四色修饰类齐（row__st--ok/--fail/--busy/--off）；mcp-tchip、mcp-scope-badge、inset 3px 0 0 三者源码零出现',
+    src.includes('row__ic') && src.includes('row__st') && missingSt.length === 0 && legacyLeft.length === 0,
+    src === '' ? 'McpSettings.vue 不可读' : [missingSt.length > 0 ? `缺修饰类：${missingSt.join(',')}` : '', legacyLeft.length > 0 ? `旧结构残留：${legacyLeft.join(',')}` : ''].filter(Boolean).join('; ') || '缺 row__ic/row__st',
+  );
+  // L2：无新断言——三态文案钉由 H 组 H1-H5 回归确认（上方注释留痕）。
+  // L3 spinner：row__spin 类存在，且 prefers-reduced-motion 块内（邻近性 ≤200 字符）对
+  // .row__spin 写 animation:none（两字符串同时断言 + 停用关系成立）。
+  check(
+    'L3',
+    'busy spinner：row__spin 类存在且同文件含 prefers-reduced-motion 停用规则（.row__spin → animation:none）',
+    src.includes('row__spin') && /prefers-reduced-motion[\s\S]{0,200}\.row__spin\s*\{[^}]*animation:\s*none/.test(src),
+    src === '' ? 'McpSettings.vue 不可读' : '缺 row__spin，或 prefers-reduced-motion 未停用其动画',
+  );
+}
+
+// ── M. 方案 A 编辑器页内化组（2026-10-19 mcp-settings-plan-a 点4：McpSettings.vue 双视图静态钉）──
+// 沿 H/L 组读源码静态钉先例：编辑/新建从 Teleport 弹窗（useDialogShell 拖拽缩放壳）改为主区
+// 第二视图（v-show 常挂——表单 state 常驻防丢草稿）后钉四条——M1 editorView ref + 双视图
+// v-show 结构；M2 编辑弹窗壳移除（mcp-modal 类零出现，编辑壳 refs 零出现）且导入弹窗壳仍在；
+// M3 面包屑「返回列表」；M4 页内 Esc（@keydown.escape 绑定 + editorView==='edit' 守卫，
+// 不再入全局 esc 栈）。表单字段集/校验/touched/保存链零改动不在本组断言域（无行为级入口）。
+
+console.log('\n=== M. 编辑器页内化组（McpSettings.vue 双视图静态钉） ===');
+
+{
+  const vueRel = path.join('src', 'renderer', 'components', 'config', 'McpSettings.vue');
+  let src = '';
+  try {
+    src = fs.readFileSync(path.resolve(__dirname, '..', vueRel), 'utf8');
+  } catch {
+    // 缺文件/不可读：src 保持空串，下列断言全部走 FAIL 分支（不抛错、不崩脚本）。
+  }
+  // M1 editorView ref 定义（'list'|'edit'，初值 'list'）+ 主区双视图 v-show 结构
+  //（v-show 而非 v-if：表单 state 常驻，切视图不丢草稿）。
+  check(
+    'M1',
+    "editorView ref（'list'|'edit'，初值 'list'）存在；主区双视图 v-show（list/edit 两处）存在",
+    src.includes("const editorView = ref<'list' | 'edit'>('list')")
+      && src.includes(`v-show="editorView === 'list'"`)
+      && src.includes(`v-show="editorView === 'edit'"`),
+    src === '' ? 'McpSettings.vue 不可读' : '缺 editorView ref 定义或 v-show 双视图结构',
+  );
+  // M2 编辑弹窗壳移除：mcp-modal 类源码零出现（原为编辑/导入两弹窗共用类——编辑壳移除后
+  // 导入壳类名同步改名为 mcp-import-modal，该字符串不含 "mcp-modal" 子串）；编辑壳标识
+  //（editCardRef/editShell/showEditDialog）零出现；导入弹窗壳仍在（importCardRef/importShell）。
+  check(
+    'M2',
+    '编辑弹窗壳移除：mcp-modal 类源码零出现（共用类改名 mcp-import-modal）；editCardRef/editShell/showEditDialog 零出现；导入弹窗壳仍在（importCardRef/importShell）',
+    !src.includes('mcp-modal')
+      && !src.includes('editCardRef')
+      && !src.includes('editShell')
+      && !src.includes('showEditDialog')
+      && src.includes('importCardRef')
+      && src.includes('importShell'),
+    src === '' ? 'McpSettings.vue 不可读' : 'mcp-modal 或编辑壳标识残留，或导入弹窗壳标识缺失',
+  );
+  // M3 面包屑「返回列表」链接钮文案存在（回 list 的五条路径之一，页内常驻可见）。
+  check(
+    'M3',
+    '编辑器面包屑「返回列表」文案存在',
+    src.includes('返回列表'),
+    src === '' ? 'McpSettings.vue 不可读' : '文案缺失',
+  );
+  // M4 页内 Esc：@keydown.escape 绑定（组件根）存在，且处理器含 editorView==='edit' 守卫
+  // （仅编辑视图回 list；list 视图 Esc 无操作、连续 Esc 无副作用；不入全局 esc 栈）。
+  check(
+    'M4',
+    "页内 Esc：@keydown.escape 绑定存在且处理器含 editorView==='edit' 守卫（回 list）",
+    src.includes('@keydown.escape')
+      && src.includes("if (editorView.value === 'edit') editorView.value = 'list';"),
+    src === '' ? 'McpSettings.vue 不可读' : '缺 @keydown.escape 绑定或 editorView 守卫语句',
+  );
+  // M5（2026-10-19 round-3 T3）编辑器「删除」语义分裂门控：条目原作用域按 dialogMode.id 前缀
+  // 判定（startsWith('user:')/startsWith('project:') → user/project；无前缀 → managed），与
+  // formLocation（保存位置）不一致 → toast「删除不可用」拦截并 return（替换正向删不到条目的
+  // 静默 return / 反向误删原作用域条目）；footer 删除钮 :disabled 同条件绑定（新 computed
+  // deleteBlockedInEditor，saving || deleteBlockedInEditor）。
+  // RED 依据：现状无 id 前缀原作用域判定、无「删除不可用」文案、无 deleteBlockedInEditor、
+  // 删除钮仅 :disabled="saving"。
+  check(
+    'M5',
+    '编辑器删除门控：id 前缀原作用域判定 + 「删除不可用」toast + footer 删除钮 deleteBlockedInEditor disabled 绑定',
+    src.includes("mode.id.startsWith('user:')")
+      && src.includes("mode.id.startsWith('project:')")
+      && src.includes('删除不可用')
+      && src.includes('const deleteBlockedInEditor = computed')
+      && src.includes(':disabled="saving || deleteBlockedInEditor"'),
+    src === '' ? 'McpSettings.vue 不可读' : '缺 id 前缀原作用域判定/「删除不可用」toast/deleteBlockedInEditor disabled 绑定',
+  );
+}
+
+// ── N. 方案 A 表单⇄JSON 双模式 + 超时字段组（2026-10-19 mcp-settings-plan-a 点5）──
+// 沿 H/L/M 组读源码静态钉先例：编辑器「表单 | JSON」双模式（切 JSON 序列化 / 切回表单解析
+// 回填 / JSON 模式保存）与三作用域共用超时字段落地后钉六条——渲染层组件无纯函数可行为级
+// 断言（selftest 不依赖 Electron runtime），只读仓库内源文件，绝不触碰磁盘配置。
+
+console.log('\n=== N. 表单⇄JSON 双模式 + 超时字段组（McpSettings.vue 静态钉） ===');
+
+{
+  const vueRel = path.join('src', 'renderer', 'components', 'config', 'McpSettings.vue');
+  let src = '';
+  try {
+    src = fs.readFileSync(path.resolve(__dirname, '..', vueRel), 'utf8');
+  } catch {
+    // 缺文件/不可读：src 保持空串，下列断言全部走 FAIL 分支（不抛错、不崩脚本）。
+  }
+  // N1 双模式状态定义存在（指令点1 四件套：editMode/jsonText/jsonError/jsonParsing）。
+  check(
+    'N1',
+    "双模式状态定义存在：editMode = ref<'form' | 'json'>('form')、jsonText/jsonError/jsonParsing ref",
+    src.includes("const editMode = ref<'form' | 'json'>('form')")
+      && src.includes("const jsonText = ref('')")
+      && src.includes("const jsonError = ref('')")
+      && src.includes('const jsonParsing = ref(false)'),
+    src === '' ? 'McpSettings.vue 不可读' : '缺 editMode/jsonText/jsonError/jsonParsing 状态定义',
+  );
+  // N2 分段胶囊「表单」「JSON」两项文案存在（可切换实装形态）。
+  check(
+    'N2',
+    '分段胶囊「表单」「JSON」两项文案存在',
+    src.includes('表单</button>') && src.includes('JSON</button>'),
+    src === '' ? 'McpSettings.vue 不可读' : '分段胶囊两项文案缺失',
+  );
+  // N3 两条 jsonError 文案字面存在（servers>1 / 编辑态改名守卫）。
+  check(
+    'N3',
+    'jsonError 文案字面存在：一次只支持一台 / 编辑态不可改名',
+    src.includes('JSON 模式一次只支持编辑一台服务器')
+      && src.includes('编辑态不可改名：JSON 键名必须与当前服务器名称一致'),
+    src === '' ? 'McpSettings.vue 不可读' : 'jsonError 文案缺失',
+  );
+  // N4（2026-10-19 验收 review R3 改钉）「复制 JSON」按钮本体钉：@click="copyJson"（全文唯一）
+  // + toast 文案钉 pushToast('已复制 JSON')（文案钉保留，并入本条 check）。原
+  // src.includes('复制 JSON') 假通通道移除（该子串同时存在于 toast 文案与注释）。
+  check(
+    'N4',
+    '「复制 JSON」按钮本体钉：@click="copyJson" + toast 字面 pushToast(\'已复制 JSON\')',
+    src.includes('@click="copyJson"') && src.includes("pushToast('已复制 JSON')"),
+    src === '' ? 'McpSettings.vue 不可读' : '缺 @click="copyJson" 按钮绑定或已复制 toast 字面',
+  );
+  // N5 超时校验文案字面存在（1–120000 为 en-dash U+2013，与计划/指令逐字一致）。
+  check(
+    'N5',
+    '超时校验文案字面存在（超时须为 1–120000 的整数（毫秒），en-dash）',
+    src.includes('超时须为 1–120000 的整数（毫秒）'),
+    src === '' ? 'McpSettings.vue 不可读' : '超时校验文案缺失',
+  );
+  // N6 提示条文案字面存在（由当前表单配置实时生成）。
+  check(
+    'N6',
+    'JSON 提示条文案字面存在（由当前表单配置实时生成）',
+    src.includes('由当前表单配置实时生成'),
+    src === '' ? 'McpSettings.vue 不可读' : '提示条文案缺失',
+  );
+  // N7（round-002 F1 修复）JSON 往返键改名 hint 快照闭环：切 JSON 前 jsonRenameHints 快照
+  // 当前 KV 行改名映射（renameFrom 不进 JSON 文本，经快照跨 JSON 模式存活）；parseJsonDraft
+  // 回填时哨兵行 sentinelfor = hints[当前键] ?? 当前键（JSON 内二次改名维持无 hint 现状）；
+  // openEditor/resetForm 清空快照（防跨条目污染）。静态钉五类 token：定义 / 快照赋值 /
+  // 回填入参（env+headers 两路）/ 哨兵行回退式。
+  check(
+    'N7',
+    'JSON 往返改名 hint 快照闭环：jsonRenameHints 定义 + 切 JSON 快照 + kvRowsFromParsed 回填入参 + 哨兵行 hints 回退',
+    src.includes('const jsonRenameHints = ref')
+      && src.includes('jsonRenameHints.value = { env: kvRowsRenameHints(formEnvRows.value), headers: kvRowsRenameHints(formHeaderRows.value) }')
+      && src.includes('kvRowsFromParsed(server.env, jsonRenameHints.value.env)')
+      && src.includes('kvRowsFromParsed(server.headers, jsonRenameHints.value.headers)')
+      && src.includes('sentinelfor: hints?.[k] ?? k'),
+    src === '' ? 'McpSettings.vue 不可读' : 'jsonRenameHints 快照/回填 token 缺失',
+  );
+  // N8（2026-10-19 验收 review R1）跨作用域另存撞名防线：nameError 重名分支去掉 !isEditMode
+  // 豁免、必须含 id 豁免比对（编辑管理库自身条目豁免自己；user:/project: 前缀 id 不豁免）；
+  // saveForm 双保险——user/project 条目另存为管理库且撞名时 toast 失败并 return（不进新增
+  // push；主进程 sanitize 保留第一条会静默丢条）。RED 依据：现状缺 `s.id !==` 与该 toast 字面。
+  check(
+    'N8',
+    '跨作用域另存撞名防线：nameError 重名分支 id 豁免比对 + saveForm 撞名失败 toast',
+    src.includes('s.name === name') && src.includes('s.id !==') && src.includes('保存失败：与现有服务器重名（管理库内名称唯一）'),
+    src === '' ? 'McpSettings.vue 不可读' : '缺 id 豁免比对 token 或撞名失败 toast 字面',
+  );
+  // N9（2026-10-19 验收 review R2）JSON 保存停留契约：saveForm 体内 editMode.value = 'form'
+  // 必须出现在 formValid 判定之后（校验失败停留 JSON 侧红条，不翻表单侧）；红条字面
+  // 「表单校验未通过：」存在。静态顺序断言：取 saveForm 函数体切片（至下一函数
+  // handleDelete 起点），体内首个 formValid 代码判定 `if (!formValid.value)` 出现位置必须
+  // 先于 editMode 赋值语句（注释文字不算命中；2026-10-19 round-002 F1 收窄 token，
+  // 防裸 formValid 被切片内注释先命中）。
+  {
+    const n9Start = src.indexOf('async function saveForm');
+    const n9End = src.indexOf('function handleDelete', n9Start);
+    const n9Body = n9Start >= 0 && n9End > n9Start ? src.slice(n9Start, n9End) : '';
+    const n9Valid = n9Body.indexOf('if (!formValid.value)');
+    const n9Switch = n9Body.indexOf("editMode.value = 'form'");
+    check(
+      'N9',
+      'JSON 保存停留契约：saveForm 先 formValid 判定后 editMode 翻回表单侧（失败停留 JSON 侧红条）',
+      n9Body !== '' && n9Valid >= 0 && n9Switch > n9Valid && src.includes('表单校验未通过：'),
+      src === '' ? 'McpSettings.vue 不可读' : '缺 formValid 判定/「表单校验未通过：」红条字面，或语句顺序不符',
+    );
+  }
+  // N10（P3 跟进 R9）JSON 非法超时反馈：parseJsonDraft 对原始 JSON 条目内非法 timeoutMs
+  //（非 1..120000 整数）红条「超时须为 1–120000 的整数（毫秒）：JSON 中的 timeoutMs 未生效」
+  // 停留 JSON 侧（主进程 normalize 静默丢字段，此前保存成功但超时未生效零提示）。
+  check(
+    'N10',
+    'JSON 非法超时红条字面存在（超时须为 1–120000 的整数（毫秒）：JSON 中的 timeoutMs 未生效）',
+    src.includes('超时须为 1–120000 的整数（毫秒）：JSON 中的 timeoutMs 未生效'),
+    src === '' ? 'McpSettings.vue 不可读' : 'JSON 非法超时红条文案缺失',
+  );
+  // N11（2026-10-19 round-3 T2）JSON 保存取消后 editMode 残留负向钉：saveForm 函数体「落盘链
+  // 之前」区段（async function saveForm → saving.value = true）内 editMode.value = 'form' 零
+  // 出现——editMode 翻回表单侧只允许发生在保存成功点（saveScopedForm 成功块 / managed 成功块，
+  // 均在落盘链之后），JSON 分支的校验失败红条与覆盖确认「取消」路径必须停留 JSON 侧（R2 停留
+  // 契约邻接缺口）。切片取落盘链起点 saving.value = true 为界：成功块内的翻转在界后不计。
+  // RED 依据：现状翻转语句位于 JSON 分支内（:1023 附近，先于落盘链）。
+  {
+    const n11Start = src.indexOf('async function saveForm');
+    const n11End = src.indexOf('saving.value = true', n11Start);
+    const n11Body = n11Start >= 0 && n11End > n11Start ? src.slice(n11Start, n11End) : '';
+    check(
+      'N11',
+      "JSON 保存取消后 editMode 残留负向钉：saveForm 落盘链之前区段 editMode.value = 'form' 零出现",
+      n11Body !== '' && !n11Body.includes("editMode.value = 'form'"),
+      src === '' ? 'McpSettings.vue 不可读' : 'saveForm 落盘链之前区段仍存在 editMode 翻转语句（先于落盘链）',
+    );
+  }
+  // N12（2026-10-19 round-3 T1，仿 N9 切片顺序法）P2 陈旧快照覆盖：saveScopedForm 函数体切片
+  //（async function saveScopedForm → async function saveForm）内首个 await refresh() 必须先于
+  // hasSameName 覆盖确认预查（保存时刻拉新快照，编辑器长开期间外部并发写入的同名条目不再被
+  // 陈旧快照静默放行）；且体内含 res.overwrote 消费与兜底 toast 字面「已覆盖保存期间外部写入
+  // 的同名条目」（预查失效时写已发生的兜底告知，防零提示）。
+  // RED 依据：现状 await refresh() 仅存在于写入成功后（先于判定不成立）、res.overwrote 零消费。
+  {
+    const n12Start = src.indexOf('async function saveScopedForm');
+    const n12End = src.indexOf('async function saveForm', n12Start);
+    const n12Body = n12Start >= 0 && n12End > n12Start ? src.slice(n12Start, n12End) : '';
+    const n12Refresh = n12Body.indexOf('await refresh()');
+    const n12Same = n12Body.indexOf('hasSameName');
+    check(
+      'N12',
+      'P2 陈旧快照覆盖修复：saveScopedForm 内 await refresh() 先于 hasSameName 预查 + 消费 res.overwrote + 兜底 toast 字面',
+      n12Body !== ''
+        && n12Refresh >= 0 && n12Same >= 0 && n12Refresh < n12Same
+        && n12Body.includes('res.overwrote')
+        && n12Body.includes('已覆盖保存期间外部写入的同名条目'),
+      src === '' ? 'McpSettings.vue 不可读' : 'await refresh() 未先于 hasSameName 预查，或缺 res.overwrote 消费/兜底 toast 字面',
+    );
+  }
+}
+
+// ── O. 导入解析收口主进程组（2026-10-19 mcp-settings-plan-a 点6：McpSettings.vue 删双副本）──
+// 沿 H/L/M/N 组读源码静态钉先例：导入解析管道收口主进程（window.claudeLink.parseMcpJson 桥）
+// 后钉四条——O1 渲染层导入归一副本函数 normalizeImportEntry 源码零出现；O2 哨兵常量名
+// mask_sentinel（大小写不敏感子串，含主进程名 MCP_MASK_SENTINEL 变体，注释提及同算）在
+// src/renderer 全部 .ts/.vue 零出现（渲染层唯一合法引用为 shared 的 MCP_VALUE_MASK）；O3
+// 渲染层不再有哨兵字面量定义形态（UI 展示文本中的 •••••••• 不属定义、不算命中）且 shared
+// 模块 mcp-json.ts 恰一处字面定义（全仓唯一字面来源）；O4（2026-10-19 验收 review R7 追加）
+// mcp:parseMcpJson 通道四点接线钉（常量→注册→桥→调用，回归钉、四点现状均在、首跑即 PASS）。
+// 点6 RED：O1/O2/O3 因副本仍在而 FAIL；实现后全 PASS。
+
+console.log('\n=== O. 导入解析收口主进程组（McpSettings.vue 删双副本静态钉） ===');
+
+{
+  // O1 导入归一副本清零：normalizeImportEntry 在 McpSettings.vue 源码零出现（含注释——
+  // 副本连同其文档块一并删除）。
+  const oVueRel = path.join('src', 'renderer', 'components', 'config', 'McpSettings.vue');
+  let oVueSrc = '';
+  try {
+    oVueSrc = fs.readFileSync(path.resolve(__dirname, '..', oVueRel), 'utf8');
+  } catch {
+    // 缺文件/不可读：保持空串，O1 走 FAIL 分支（不抛错、不崩脚本）。
+  }
+  check('O1', '导入归一副本清零：normalizeImportEntry 在 McpSettings.vue 源码零出现',
+    oVueSrc !== '' && !oVueSrc.includes('normalizeImportEntry'),
+    oVueSrc === '' ? 'McpSettings.vue 不可读' : 'normalizeImportEntry 残留');
+
+  // O2/O3 共用：node fs 递归遍历 src/renderer 全部 .ts/.vue 源码（沿静态钉先例只读仓库
+  // 源码；结果仅存内存、跑完即弃，不留任何临时文件）。
+  let rendererSources: Array<{ file: string; src: string }> = [];
+  try {
+    const collect = (dir: string): Array<{ file: string; src: string }> => {
+      const out: Array<{ file: string; src: string }> = [];
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const p = path.join(dir, ent.name);
+        if (ent.isDirectory()) out.push(...collect(p));
+        else if (ent.isFile() && (ent.name.endsWith('.ts') || ent.name.endsWith('.vue'))) {
+          out.push({ file: p, src: fs.readFileSync(p, 'utf8') });
+        }
+      }
+      return out;
+    };
+    rendererSources = collect(path.resolve(__dirname, '..', 'src', 'renderer'));
+  } catch {
+    // 目录不可读：保持空数组，O2/O3 走 FAIL 分支。
+  }
+  const rendererRoot = path.resolve(__dirname, '..', 'src', 'renderer');
+  const relOf = (p: string): string => path.relative(rendererRoot, p);
+
+  // O2 哨兵常量名渲染层零出现：mask_sentinel 子串（大小写不敏感——本地副本名 MASK_SENTINEL
+  // 与主进程名变体 MCP_MASK_SENTINEL 一并封禁，注释提及同样算命中）；渲染层唯一合法引用是
+  // shared 的 MCP_VALUE_MASK（该名不含 mask_sentinel 子串）。
+  const o2Hits = rendererSources.filter((s) => /mask_sentinel/i.test(s.src)).map((s) => relOf(s.file));
+  check('O2', '哨兵常量名渲染层零出现：src/renderer 全部 .ts/.vue 无 mask_sentinel 子串（大小写不敏感，含 MCP_MASK_SENTINEL 变体与注释提及）',
+    rendererSources.length > 0 && o2Hits.length === 0,
+    o2Hits.length > 0 ? `残留文件：${o2Hits.join(', ')}` : 'src/renderer 不可读/为空');
+
+  // O3 哨兵字面量渲染层无定义：赋值/常量定义形态 `= '••••••••'` 零出现——UI 文案/注释中的
+  // 展示性 ••••••••（如点5 JSON 注释行「已存密钥以 •••••••• 脱敏显示」）不匹配该定义形态、
+  // 不算命中；且 src/shared/mcp-json.ts 中 '••••••••'（带引号字面）恰 1 处（唯一字面定义；
+  // 主进程 mcp-config.ts:MCP_MASK_SENTINEL 为其 re-export，两名字一常量）。
+  const o3DefineHits = rendererSources.filter((s) => /=\s*'•{8}'/.test(s.src)).map((s) => relOf(s.file));
+  let o3SharedCount = -1;
+  try {
+    o3SharedCount = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'shared', 'mcp-json.ts'), 'utf8').split("'••••••••'").length - 1;
+  } catch {
+    // 不可读：保持 -1 → 走 FAIL 分支。
+  }
+  check('O3', "哨兵字面量渲染层无定义形态（= '••••••••' 零出现，展示性文案不算命中）且 shared/mcp-json.ts 恰 1 处 '••••••••' 字面定义",
+    rendererSources.length > 0 && o3DefineHits.length === 0 && o3SharedCount === 1,
+    o3DefineHits.length > 0 ? `定义残留：${o3DefineHits.join(', ')}` : `shared 字面计数=${o3SharedCount}（应恰 1）`);
+
+  // O4（2026-10-19 验收 review R7）mcp:parseMcpJson 通道接线钉：常量定义（types/ipc.ts）→
+  // ipcMain.handle 注册（ipc-handlers.ts）→ preload 桥（api.ts）→ 渲染层调用
+  // （McpSettings.vue），四点任一缺失 FAIL（防通道拼错/注册丢失无测试可捕）。preload 断言
+  // 钉桥实现形态（ipcRenderer.invoke 该通道），类型/注释命中不算（2026-10-19 round-002
+  // M1 收紧）。属回归钉：
+  // 四点接线现状均在，预期首跑即 PASS（编排器裁定：RED-first 适用于 N8/N9 行为变更项；
+  // O4 钉既有接线，无法对现状 RED，报告中申报即可）。
+  {
+    const o4Read = (rel: string): string => {
+      try {
+        return fs.readFileSync(path.resolve(__dirname, '..', rel), 'utf8');
+      } catch {
+        return '';
+      }
+    };
+    const o4IpcTypes = o4Read(path.join('src', 'shared', 'types', 'ipc.ts'));
+    const o4Handlers = o4Read(path.join('src', 'main', 'ipc-handlers.ts'));
+    const o4Preload = o4Read(path.join('src', 'preload', 'api.ts'));
+    const o4Missing: string[] = [];
+    if (!o4IpcTypes.includes("MCP_PARSE_JSON: 'mcp:parseMcpJson'")) o4Missing.push('ipc.ts 常量');
+    if (!o4Handlers.includes('ipcMain.handle(IPC_CHANNELS.MCP_PARSE_JSON')) o4Missing.push('ipc-handlers 注册');
+    if (!o4Preload.includes('ipcRenderer.invoke(IPC_CHANNELS.MCP_PARSE_JSON')) o4Missing.push('preload 桥');
+    if (!(oVueSrc !== '' && oVueSrc.includes('claude.parseMcpJson('))) o4Missing.push('vue 调用');
+    check(
+      'O4',
+      'mcp:parseMcpJson 通道四点接线：常量 → 注册 → 桥 → 调用',
+      o4Missing.length === 0,
+      o4Missing.length > 0 ? `缺：${o4Missing.join('、')}` : '四点文件不可读',
+    );
+  }
+
+  // O5（2026-10-19 round-3 T4）导入哨兵回导过滤钉：confirmImport 函数体切片
+  //（async function confirmImport → const importCardRef）入库前过滤哨兵值键
+  //（filter(([, v]) => v !== MCP_VALUE_MASK)，env/headers 同款），且旧「原样入库」形态
+  //（item.env = parsed.env / item.headers = parsed.headers）零出现——防「复制 JSON」产出的
+  // 哨兵文本经导入弹窗回导为字面密钥静默入库。正负两向：含过滤形态、不含旧形态。
+  // RED 依据：现状 confirmImport 无过滤、parsed.env/parsed.headers 原样赋值入库两处。
+  {
+    const o5Start = oVueSrc.indexOf('async function confirmImport');
+    const o5End = oVueSrc.indexOf('const importCardRef', o5Start);
+    const o5Body = o5Start >= 0 && o5End > o5Start ? oVueSrc.slice(o5Start, o5End) : '';
+    check(
+      'O5',
+      '导入哨兵回导过滤：confirmImport 切片含 !== MCP_VALUE_MASK 过滤形态且旧「原样入库」形态零出现',
+      o5Body !== ''
+        && o5Body.includes('!== MCP_VALUE_MASK')
+        && !o5Body.includes('item.env = parsed.env')
+        && !o5Body.includes('item.headers = parsed.headers'),
+      oVueSrc === '' ? 'McpSettings.vue 不可读' : 'confirmImport 缺哨兵过滤形态或残留原样入库旧形态',
+    );
+  }
+}
+
+// ── 汇总与退出码 ─────────────────────────────────────────────────────────────
+// J3（2026-10-19 点1 起）为异步断言：汇总移入 finish()，由 J3 的 promise 链收尾调用一次
+//（同步断言全部先于其执行完毕，计数完整后再打印；退出码约定不变）。
+function finish(): void {
+  console.log(`\n===== selftest-mcp-settings: ${pass} pass / ${fail} fail =====`);
+  if (fail > 0) {
+    console.log('（RED 阶段：FAIL 项均为尚未实现的桩（throw not implemented: …）——P2/P5 实现后应全 PASS；A 组为 P1 已实现基线，应保持全 PASS）');
+    process.exit(1);
+  }
+  console.log('selftest-mcp-settings: OK');
+  process.exit(0);
+}
