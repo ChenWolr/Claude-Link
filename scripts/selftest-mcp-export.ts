@@ -122,6 +122,37 @@ function main(): void {
     check('A8 stdio 必填缺失 → 抛中文错', threw && msg === 'stdio 服务器缺少必填 command', msg);
   }
 
+  // A9 timeoutMs 导出（2026-10-19 mcp-settings-plan-a 点1 J4 镜像补条）：含合法 timeoutMs →
+  // 导出条目含 "timeoutMs": 30000（其余字段完好）；无值 → 无该键。
+  {
+    const text = buildMcpServersExportJson({
+      t: { transport: 'stdio', command: 'npx', timeoutMs: 30000 },
+      bare: { transport: 'http', url: 'https://x.test/mcp' },
+    });
+    const parsed = JSON.parse(text) as { mcpServers: Record<string, Record<string, unknown>> };
+    check('A9 含合法 timeoutMs → 导出条目含 "timeoutMs": 30000',
+      parsed.mcpServers.t?.timeoutMs === 30000 && parsed.mcpServers.t?.command === 'npx',
+      JSON.stringify(parsed.mcpServers.t));
+    check('A9 无 timeoutMs → 导出条目无该键',
+      parsed.mcpServers.bare !== undefined && !('timeoutMs' in parsed.mcpServers.bare),
+      JSON.stringify(parsed.mcpServers.bare));
+  }
+
+  // A10（P3 跟进 R6）timeoutMs 负向：非法值（120001 / 1.5）→ 导出条目无该键
+  //（mcp-config 写出口 isValidMcpTimeoutMs 静默丢字段，此前零断言）。
+  {
+    const text = buildMcpServersExportJson({
+      over: { transport: 'stdio', command: 'npx', timeoutMs: 120001 },
+      frac: { transport: 'http', url: 'https://x', timeoutMs: 1.5 },
+    });
+    const parsed = JSON.parse(text) as { mcpServers: Record<string, Record<string, unknown>> };
+    check('A10 非法 timeoutMs（120001/1.5）→ 导出条目无该键',
+      parsed.mcpServers.over !== undefined && !('timeoutMs' in parsed.mcpServers.over)
+        && parsed.mcpServers.frac !== undefined && !('timeoutMs' in parsed.mcpServers.frac)
+        && parsed.mcpServers.over?.command === 'npx' && parsed.mcpServers.frac?.url === 'https://x',
+      JSON.stringify(parsed.mcpServers));
+  }
+
   // ── B 组：静态接线钉（读源码；绝不触真实磁盘配置/剪贴板）──────────────────
   console.log('[B] 静态接线钉（导出 IPC 全链 + 标题行气泡截断修复 CSS）');
   const read = (rel: string): string => fs.readFileSync(path.resolve(__dirname, '..', rel), 'utf8');

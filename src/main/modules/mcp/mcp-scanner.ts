@@ -223,6 +223,9 @@ export function readUserMcpServersDetailSync(userHome: string): {
 /**
  * ParsedMcpEntry → 脱敏视图：显式重建输出对象（不透传 env/headers 值——§1.3「渲染层永不
  * 接触明文」），值侧仅保留 key 列表（maskedEnvKeys/maskedHeaderKeys；无 env/headers 时键省略）。
+ * timeoutMs（2026-10-19 点1）：非敏感数值字段，条目携带时原样透传（McpScopedServerView 经
+ * ParsedMcpEntry 继承该可选字段；normalizeMcpEntry 已保证仅合法值在场）——编辑回填数据源；
+ * 条目无键 → 视图无键。
  */
 function toMaskedView(entry: ParsedMcpEntry, scope: 'user' | 'project'): McpScopedServerView {
   const view: McpScopedServerView = { scope, name: entry.name, transport: entry.transport };
@@ -231,6 +234,7 @@ function toMaskedView(entry: ParsedMcpEntry, scope: 'user' | 'project'): McpScop
   if (entry.url !== undefined) view.url = entry.url;
   if (entry.env !== undefined) view.maskedEnvKeys = Object.keys(entry.env);
   if (entry.headers !== undefined) view.maskedHeaderKeys = Object.keys(entry.headers);
+  if (entry.timeoutMs !== undefined) view.timeoutMs = entry.timeoutMs;
   return view;
 }
 

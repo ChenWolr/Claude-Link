@@ -46,6 +46,7 @@ import {
   probeAllManaged,
   probeMcpServer,
   pruneProbeCache,
+  resolveProbeTimeoutMs,
   type McpProbeInput,
   type McpProbeReport,
 } from './modules/mcp/mcp-probe';
@@ -470,7 +471,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         headers: stored.headers,
       };
       // 只写不读：新结论写进 managed:<name> 缓存（供 all 批量 60s 命中），回包恒为现探值。
-      return [await probeMcpServer(input, 10_000, mcpProbeKey('managed', null, input.name))];
+      // 超时（2026-10-19 点1）：条目 timeoutMs 经 resolveProbeTimeoutMs 生效（非法/缺省 → 10s）。
+      return [await probeMcpServer(input, resolveProbeTimeoutMs(stored), mcpProbeKey('managed', null, input.name))];
     }
     if (req.target !== 'all') throw new Error('Invalid MCP probe target');
     // B-10：批量探测入口顺带时间驱动清理过期缓存（pruneProbeCache 原全仓零调用方，此处接线）。
@@ -490,6 +492,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         env: server.env,
         url: server.url,
         headers: server.headers,
+        timeoutMs: server.timeoutMs, // 点1：per-entry 超时随 input 透传，probeAllManaged 逐条生效
       };
       const key = mcpProbeKey('managed', null, input.name);
       const cached = cachedByKey.get(key);

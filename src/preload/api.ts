@@ -28,6 +28,9 @@ export interface McpScopedServerView {
   command?: string;
   args?: string[];
   url?: string;
+  /** 探活超时覆盖（毫秒，点1 全链透传的非敏感数值；点5 编辑回填数据源——scanner 视图条目
+   *  携带时原样透传，无键缺省）。主进程 McpScopedServerView extends ParsedMcpEntry 同名镜像。 */
+  timeoutMs?: number;
   maskedEnvKeys?: string[];
   maskedHeaderKeys?: string[];
 }
@@ -91,6 +94,9 @@ export interface McpScopedWriteEntry {
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  /** 探活超时覆盖（毫秒，点5 表单装填；主进程 mcp-writer.ts:ScopedMcpEntry 同名镜像——
+   *  合法（1..120000 整数）才写键，非法/缺省不写，与 sanitize 同口径）。 */
+  timeoutMs?: number;
   envRenameFrom?: Record<string, string>;
   headersRenameFrom?: Record<string, string>;
 }

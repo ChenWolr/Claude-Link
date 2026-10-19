@@ -261,6 +261,39 @@ async function main(): Promise<void> {
     check('⑪ dir 缺失 → 抛错', threw);
   }
 
+  // ── ⑫ timeoutMs 透传（2026-10-19 mcp-settings-plan-a 点1 J2）：带合法 timeoutMs →
+  // 写出 JSON 条目含 "timeoutMs": 30000（其余字段完好）；不带 → 无该键。──
+  console.log('\n[12] timeoutMs 透传（带 → 写出键；不带 → 无键）');
+  {
+    const files = new Map<string, VFile>();
+    await writeScopedMcpServer({ scope: 'user', entry: stdioEntry({ timeoutMs: 30000 }), mode: 'upsert', io: makeIo(files) });
+    const withT = JSON.parse(files.get(USER_FILE)?.content ?? '{}') as { mcpServers: Record<string, Record<string, unknown>> };
+    check('⑫ 带 timeoutMs → 条目含 "timeoutMs": 30000（其余字段完好）',
+      withT.mcpServers.dev?.timeoutMs === 30000 && withT.mcpServers.dev?.command === 'npx',
+      JSON.stringify(withT.mcpServers.dev));
+
+    const files2 = new Map<string, VFile>();
+    await writeScopedMcpServer({ scope: 'user', entry: stdioEntry(), mode: 'upsert', io: makeIo(files2) });
+    const noT = JSON.parse(files2.get(USER_FILE)?.content ?? '{}') as { mcpServers: Record<string, Record<string, unknown>> };
+    check('⑫ 不带 timeoutMs → 条目无该键',
+      noT.mcpServers.dev !== undefined && !('timeoutMs' in noT.mcpServers.dev),
+      JSON.stringify(noT.mcpServers.dev));
+  }
+
+  // ── ⑫b（P3 跟进 R6）timeoutMs 负向：ScopedMcpEntry 带非法值（120001 / 1.5）写盘 →
+  // 落盘条目无该键（writer 写出口 isValidMcpTimeoutMs 静默丢字段，此前零断言）。──
+  console.log('\n[12b] timeoutMs 负向（非法值 → 无键，回归钉）');
+  {
+    const files = new Map<string, VFile>();
+    await writeScopedMcpServer({ scope: 'user', entry: stdioEntry({ name: 'over', timeoutMs: 120001 }), mode: 'upsert', io: makeIo(files) });
+    await writeScopedMcpServer({ scope: 'user', entry: stdioEntry({ name: 'frac', timeoutMs: 1.5 }), mode: 'upsert', io: makeIo(files) });
+    const tree = JSON.parse(files.get(USER_FILE)?.content ?? '{}') as { mcpServers: Record<string, Record<string, unknown>> };
+    check('⑫b 非法 timeoutMs（120001/1.5）→ 落盘条目无该键、其余字段完好',
+      tree.mcpServers.over !== undefined && !('timeoutMs' in tree.mcpServers.over) && tree.mcpServers.over?.command === 'npx'
+        && tree.mcpServers.frac !== undefined && !('timeoutMs' in tree.mcpServers.frac) && tree.mcpServers.frac?.command === 'npx',
+      JSON.stringify(tree.mcpServers));
+  }
+
   console.log(`\nselftest-mcp-writer: ${pass} passed, ${fail} failed`);
   if (fail > 0) {
     process.exit(1);

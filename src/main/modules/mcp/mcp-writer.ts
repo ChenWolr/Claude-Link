@@ -15,7 +15,8 @@
 //     抛中文错误「文件损坏，已中止写入」（UI toast 直显）。
 //   - 改：顶层 mcpServers（无则建；键存在但非对象 → 重建为空表后写入，坏类型键不可承载条目）
 //     中 upsert/remove 条目。条目形态仅 Claude Code 认识的键：stdio → {type,command,args?,env?}；
-//     http/sse → {type,url,headers?}（空数组/空表省略）。瞬态改名 hint（envRenameFrom/
+//     http/sse → {type,url,headers?}（空数组/空表省略）；timeoutMs 合法才写键（2026-10-19 点1，
+//     isValidMcpTimeoutMs 口径）。瞬态改名 hint（envRenameFrom/
 //     headersRenameFrom）按构造不进输出（剥离）。哨兵还原：entry.env/headers 中值 ===
 //     MCP_MASK_SENTINEL 的键，按 renameFrom 映射或同名键从原文件 mcpServers[同名].env/headers
 //     取原值回填；原文件无原值 → 丢该键（不把哨兵字面量落盘）。
@@ -36,7 +37,7 @@
 import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { MCP_MASK_SENTINEL } from './mcp-config';
+import { isValidMcpTimeoutMs, MCP_MASK_SENTINEL } from './mcp-config';
 
 /** 提交条目（mcp:writeScoped payload entry；渲染层 McpScopedWriteEntry 同构镜像）。 */
 export interface ScopedMcpEntry {
@@ -47,6 +48,9 @@ export interface ScopedMcpEntry {
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  /** 探活超时覆盖（毫秒，2026-10-19 点1）：合法（1..120000 整数，isValidMcpTimeoutMs 口径）
+   *  才写键，非法/缺省不写（与 sanitize 同口径；remove 路径与本字段无关）。 */
+  timeoutMs?: number;
   /** 瞬态 hint（提交键 → 原文件已存键）：哨兵值还原定位用，还原后按构造剥离、绝不落盘。 */
   envRenameFrom?: Record<string, string>;
   headersRenameFrom?: Record<string, string>;
@@ -116,7 +120,8 @@ function restoreRecordValues(
 
 /**
  * 提交条目 → Claude Code 认识的磁盘条目（键序：stdio [type,command,args,env]；
- * http/sse [type,url,headers]；args 空数组/非全字符串、env/headers 空表省略）。
+ * http/sse [type,url,headers]；args 空数组/非全字符串、env/headers 空表省略；timeoutMs 合法
+ * 才写键、置于末尾（2026-10-19 点1，isValidMcpTimeoutMs 口径）。
  * 瞬态 hint 字段按构造不进输出（还原后剥离）。必填缺失（stdio 无 command / remote 无 url）
  * 抛中文错误（UI 表单校验在前，此处为防御性兜底）。
  */
@@ -132,11 +137,13 @@ function entryToFileShape(
       out.args = [...entry.args];
     }
     if (env !== undefined) out.env = env;
+    if (isValidMcpTimeoutMs(entry.timeoutMs)) out.timeoutMs = entry.timeoutMs; // 点1：合法才写键
     return out;
   }
   if (typeof entry.url !== 'string' || entry.url === '') throw new Error(`${entry.transport} 服务器缺少必填 url`);
   const out: Record<string, unknown> = { type: entry.transport, url: entry.url };
   if (headers !== undefined) out.headers = headers;
+  if (isValidMcpTimeoutMs(entry.timeoutMs)) out.timeoutMs = entry.timeoutMs; // 点1：合法才写键
   return out;
 }
 
