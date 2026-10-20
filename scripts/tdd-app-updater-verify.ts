@@ -129,8 +129,11 @@ check('5', 'api.ts 头注释方法数与 ClaudeLinkAPI 接口成员数一致（�
 })());
 
 console.log('\n=== 6) 设置页关于 tab ===');
-check('6', 'TabId 联合类型含 about',
-  configPage.includes("'im' | 'about'"));
+check('6', 'TabId 联合类型按序含 im…about（round-008 R1-F6：恢复等强度且抗插 tab）',
+  // P5（2026-10-20 网页访问）在 'im' 与 'about' 之间新增 'web'，原字面 'im' | 'about'
+  // 被合法打破——恢复等强度：'im' 与 'about' 有序共现（中间允许插 'web' 等新 tab），
+  // 比「仅含 about」更严（防误删 'im' 或乱序重排仍绿），且后续再插 tab 不破。
+  /type TabId = [^;]*'im'[^;]*'about'/.test(configPage));
 check('6', '导航按钮关于',
   configPage.includes(`activeTab === 'about'`) && configPage.includes('>关于</button>'));
 check('6', '关于块 v-show + 版本/按钮 testid',
