@@ -1226,9 +1226,16 @@ function testConnectionSurfaceWhitelistContracts(): void {
   assert.ok(sources.size > 100, `连接面扫描仅覆盖 ${sources.size} 个文件——src 目录结构变化须同步本契约`);
 
   // 断言 A：渲染层/preload 代码级零直连（fetch / XMLHttpRequest / WebSocket / EventSource）。
+  // 例外白名单（「网页访问（局域网）」P4，docs/plans/2026-10-20-web-access-plan.md §3-P4）：
+  // renderer/web/web-bridge.ts 是计划授权的唯一渲染层 WebSocket 直连面——浏览器模式（无 preload）
+  // 经 WS 把 window.claudeLink 全量代理到主进程；Electron 路径由 main.ts !window.claudeLink 门控，
+  // 该 chunk 不加载、零行为变化。白名单按单文件收口（该文件存在性与形态由
+  // tdd-web-access-wiring-verify §11.5 独立钉死），其余渲染层/preload 文件出现直连 API 仍 fail。
   const directApi = /\bfetch\s*\(|XMLHttpRequest|new WebSocket|new EventSource/;
+  const directApiAllowed = new Set(['renderer/web/web-bridge.ts']);
   for (const [file, src] of sources) {
     if (file.startsWith('renderer/') || file.startsWith('preload/')) {
+      if (directApiAllowed.has(file)) continue;
       assert.ok(!directApi.test(src), `${file} 渲染层/preload 不得出现代码级直连 API`);
     }
   }

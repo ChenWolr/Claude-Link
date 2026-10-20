@@ -147,13 +147,13 @@ check('IPC 通道 EXPORT_IMAGE_CANCEL 已登记', () => {
   assert.match(ipcTs, /EXPORT_IMAGE_CANCEL: 'export-image:cancel'/, 'ipc.ts 缺 EXPORT_IMAGE_CANCEL');
 });
 check('主进程注册 EXPORT_IMAGE_CANCEL handler + cancelJob（cancelled 终态 + cleanup）', () => {
-  assert.match(manager, /ipcMain\.handle\(IPC_CHANNELS\.EXPORT_IMAGE_CANCEL/, 'manager 缺取消 handler');
+  assert.match(manager, /regInvokeHandler\(IPC_CHANNELS\.EXPORT_IMAGE_CANCEL/, 'manager 缺取消 handler');
   assert.match(manager, /async function cancelJob\(/, 'manager 缺 cancelJob');
   assert.match(manager, /phase: 'cancelled',[\s\S]{0,400}已取消导出/, 'cancelJob 缺 cancelled 终态进度');
   assert.match(manager, /ExportResults\.cancelled\(\)/, 'cancelJob 应 resolve ExportResults.cancelled()（对齐保存取消语义，不算失败）');
 });
 check('取消仅在捕获/编码阶段放行（保存链不抽走句柄）', () => {
-  const idx = manager.indexOf('ipcMain.handle(IPC_CHANNELS.EXPORT_IMAGE_CANCEL');
+  const idx = manager.indexOf('regInvokeHandler(IPC_CHANNELS.EXPORT_IMAGE_CANCEL');
   assert.ok(idx > -1, '缺取消 handler');
   const around = manager.slice(idx, idx + 800);
   // 白名单形态：cancellable 只列 preparing/planning/capturing/encoding——

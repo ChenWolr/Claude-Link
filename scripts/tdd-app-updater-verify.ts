@@ -99,8 +99,8 @@ check('3', 'available/not-available 双处理器捕获 latestVersion（R3）',
 
 console.log('\n=== 4) 主进程接线 ===');
 check('4', 'ipc-handlers 注册三 handler',
-  ipcHandlers.includes('ipcMain.handle(IPC_CHANNELS.APP_UPDATE_GET_INFO') && ipcHandlers.includes('ipcMain.handle(IPC_CHANNELS.APP_UPDATE_CHECK')
-  && ipcHandlers.includes('ipcMain.handle(IPC_CHANNELS.APP_UPDATE_INSTALL'));
+  ipcHandlers.includes('regInvokeHandler(IPC_CHANNELS.APP_UPDATE_GET_INFO') && ipcHandlers.includes('regInvokeHandler(IPC_CHANNELS.APP_UPDATE_CHECK')
+  && ipcHandlers.includes('regInvokeHandler(IPC_CHANNELS.APP_UPDATE_INSTALL'));
 check('4', 'index.ts whenReady 内 createWindow 后调 initAppUpdater',
   indexMain.includes("from './modules/app-updater'") && indexMain.includes('initAppUpdater(() => mainWindow)')
   && /createWindow\(\);[\s\S]*initAppUpdater/.test(indexMain));

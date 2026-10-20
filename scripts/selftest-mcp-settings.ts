@@ -1999,7 +1999,7 @@ console.log('\n=== O. 导入解析收口主进程组（McpSettings.vue 删双副
     const o4Preload = o4Read(path.join('src', 'preload', 'api.ts'));
     const o4Missing: string[] = [];
     if (!o4IpcTypes.includes("MCP_PARSE_JSON: 'mcp:parseMcpJson'")) o4Missing.push('ipc.ts 常量');
-    if (!o4Handlers.includes('ipcMain.handle(IPC_CHANNELS.MCP_PARSE_JSON')) o4Missing.push('ipc-handlers 注册');
+    if (!o4Handlers.includes('regInvokeHandler(IPC_CHANNELS.MCP_PARSE_JSON')) o4Missing.push('ipc-handlers 注册');
     if (!o4Preload.includes('ipcRenderer.invoke(IPC_CHANNELS.MCP_PARSE_JSON')) o4Missing.push('preload 桥');
     if (!(oVueSrc !== '' && oVueSrc.includes('claude.parseMcpJson('))) o4Missing.push('vue 调用');
     check(

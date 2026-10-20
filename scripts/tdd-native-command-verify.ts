@@ -1131,7 +1131,7 @@ void (async () => {
   //   语义不变——无 per-session 快照仍触发 probe；此处只钉住该接线仍存在。）
   check('N4 COMMANDS_GET 无快照时异步启动 probe（重启后打开已有会话）', () => {
     const src = readFileSync(path.join('src', 'main', 'ipc-handlers.ts'), 'utf8');
-    const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=ipcMain\.handle)/);
+    const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=regInvokeHandler)/);
     if (!m) throw new Error('COMMANDS_GET handler 未找到');
     assert.ok(m[0].includes('sdkCommandRegistry.has(sessionId)'), 'COMMANDS_GET 应按 per-session 快照判断');
     assert.ok(m[0].includes('startCommandProbe'), '无快照时应触发 probe');
@@ -1219,7 +1219,7 @@ void (async () => {
   // N6 运行期：COMMANDS_GET 无快照 markSessionActive + 兜底回填
   check('N6 运行期：COMMANDS_GET 无快照 markSessionActive + getGlobalFallback 回填', () => {
     const src = readFileSync(path.join('src', 'main', 'ipc-handlers.ts'), 'utf8');
-    const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=ipcMain\.handle)/);
+    const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=regInvokeHandler)/);
     if (!m) throw new Error('COMMANDS_GET handler 未找到');
     assert.ok(m[0].includes('sessionRepo.getSession(sessionId)'), '无快照应先验证 DB 会话存在');
     assert.ok(m[0].includes('markSessionActive(sessionId)'), '已知会话无快照才登记 active 让 probe 下游守卫放行');
@@ -2087,7 +2087,7 @@ void (async () => {
 
   check('D1/D5 结构：COMMANDS_GET 只读分流接线（不 throw + D6 重试 + N6 链保留 + 指纹入参）', () => {
     const src = readFileSync(path.join('src', 'main', 'ipc-handlers.ts'), 'utf8');
-    const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=ipcMain\.handle)/);
+    const m = src.match(/IPC_CHANNELS\.COMMANDS_GET[\s\S]*?(?=regInvokeHandler)/);
     if (!m) throw new Error('COMMANDS_GET handler 未找到');
     assert.ok(m[0].includes('resolveCommandsGetResult'), '分流决策应走 shared 纯函数');
     assert.ok(!/Session \$\{sessionId\} not found/.test(m[0]), '不得因会话不存在而 throw（D1：未知会话走只读分流，语义断言不误伤其它字符串）');

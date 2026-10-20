@@ -100,6 +100,13 @@ function check(name: string, cond: boolean, detail = ''): void {
 (async () => {
   const session = sessionRepoStub.createSession('p201', 'sonnet', null);
   const events: Array<Record<string, unknown>> = [];
+  // P2（web-access 推送总线）同步：CHAT_EVENT 发射已收口 pushToMainWindow——测试改经 webSink
+  // 采集（与原 webContents.send spy 等价；fake win 的 isDestroyed=true 会被总线判空跳过）。
+  const { setWebPushSink } = require('../src/main/modules/push-bus');
+  setWebPushSink((_c: string, args: unknown[]) => {
+    const payload = args[0] as { event?: Record<string, unknown> } | undefined;
+    if (payload?.event) events.push(payload.event);
+  });
   const win = {
     webContents: {
       send: (_c: string, payload: { event?: Record<string, unknown> }) => {

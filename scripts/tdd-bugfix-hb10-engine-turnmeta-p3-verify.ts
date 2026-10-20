@@ -31,7 +31,9 @@ function check(name: string, fn: () => void): void {
 
 // ① ENG-02：turn-usage 裸 send 包 try。
 check('① ENG-02：turn-usage CONTEXT_UPDATE send 包 try（窗口销毁不劫持调用链）', () => {
-  const sendIdx = backend.indexOf('mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);');
+  // P2（web-access 推送总线）同步：发射收口 pushToMainWindow（总线内部自带判空/销毁/try-catch，
+  // 站点外层 try 包裹语义不变，仍钉住不劫持调用链）。
+  const sendIdx = backend.indexOf('pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);');
   const cacheIdx = backend.indexOf('缓存最近一次 turn usage 供诊断');
   assert.ok(sendIdx > -1 && cacheIdx > sendIdx && cacheIdx - sendIdx < 400, '未定位 turn-usage send');
   const tryIdx = backend.lastIndexOf('try {', sendIdx);

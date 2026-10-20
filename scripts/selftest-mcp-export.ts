@@ -162,7 +162,7 @@ function main(): void {
   const vue = read('src/renderer/components/config/McpSettings.vue');
 
   check('B1 ipc.ts 含 MCP_EXPORT_SCOPED 通道常量', ipc.includes("MCP_EXPORT_SCOPED: 'mcp:exportScoped'"));
-  check('B2 ipc-handlers.ts 注册 handler', handlers.includes('ipcMain.handle(IPC_CHANNELS.MCP_EXPORT_SCOPED'));
+  check('B2 ipc-handlers.ts 注册 handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.MCP_EXPORT_SCOPED'));
   check('B2 剪贴板链：主进程 clipboard.writeText(buildMcpServersExportJson(…))',
     handlers.includes('clipboard.writeText(buildMcpServersExportJson(servers))'));
   check('B2 明文数据源三作用域（raw 读取器接线）',
