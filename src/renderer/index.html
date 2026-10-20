@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Claude Link</title>
+    <script>
+      // 网页访问 P4：hash 路由（createWebHashHistory）模块求值会把 #token= 归一成 #/token=，
+      // 必须在其之前消费令牌。Electron 路径 preload 已注入 window.claudeLink，直接跳过。
+      (function () {
+        if (window.claudeLink) return;
+        if (location.hash.indexOf('#token=') !== 0) return;
+        var raw = location.hash.slice(7);
+        history.replaceState(null, '', location.pathname + location.search);
+        try {
+          var t = decodeURIComponent(raw).trim();
+          if (t) { try { localStorage.setItem('clWebToken', t); } catch (e) {} }
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

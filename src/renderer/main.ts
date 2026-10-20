@@ -14,4 +14,14 @@ import './assets/styles/main.css';
 // KaTeX 渲染所需的样式与 woff2 字体（随包打包，无外联）。
 import 'katex/dist/katex.min.css';
 
-createApp(App).use(createPinia()).use(router).mount('#app');
+// 「网页访问」P4（docs/plans/2026-10-20-web-access-plan.md §3-P4-3）：异步引导——浏览器环境
+// （无 preload）先动态加载 web 桥建立 WS 连接（首个 welcome 赋值 window.claudeLink 后放行）；
+// Electron 路径 window.claudeLink 已由 preload 注入，动态 import 不触发，bridge chunk 不加载。
+async function boot(): Promise<void> {
+  if (!window.claudeLink) {
+    const { installWebBridge } = await import('./web/web-bridge');
+    await installWebBridge();
+  }
+  createApp(App).use(createPinia()).use(router).mount('#app');
+}
+void boot();

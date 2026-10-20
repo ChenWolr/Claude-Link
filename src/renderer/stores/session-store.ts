@@ -149,6 +149,9 @@ function buildPersistedCanonical(session: Session): CanonicalContextState | null
 let searchSessionsRequestId = 0;
 // A3（D01-F2/D12-F4）：桥接建会话信号的去抖计时器（模块级，非持久状态）。
 let bridgeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+// 「网页访问」P2 4a/P4：SESSIONS_CHANGED 跨端会话同步信号的去抖计时器（独立于 bridgeRefreshTimer
+// ——两信号源可能同时到达，各自 500ms 去抖互不吞并）。
+let sessionsChangedTimer: ReturnType<typeof setTimeout> | null = null;
 
 export const useSessionStore = defineStore('session', {
   state: () => ({
@@ -391,6 +394,25 @@ export const useSessionStore = defineStore('session', {
       if (bridgeRefreshTimer) clearTimeout(bridgeRefreshTimer);
       bridgeRefreshTimer = setTimeout(() => {
         bridgeRefreshTimer = null;
+        void this.loadSessions();
+      }, 500);
+    },
+    // 「网页访问」P2 4a / P4（docs/plans/2026-10-20-web-access-plan.md §3-P4-4）：跨端会话列表
+    // 同步通用信号（SESSIONS_CHANGED，create/update→upsert、delete→delete）处理入口。与
+    // markBridgeSessionUpserted 同构但独立计时器（勿复用 bridgeRefreshTimer）。桌面自身发起的
+    // 创建/改名/删除同样收到本推送 → 去抖重拉幂等无害。delete 命中当前活动会话：先本地「切回
+    // 暂态」（startTransientSession——主进程已删，不得再调删除 API；该会话的残留流式/运行态由
+    // 幽灵守卫与切换语义自然丢弃），随后 loadSessions()；upsert 直接 loadSessions()（不动选中态，
+    // loadSessions 语义即「不覆盖 activeSession」）。删除时若本地已先行切走（activeSession 已非
+    // 该 id）仅重拉列表。
+    handleSessionsChanged({ kind, sessionId }: { kind: 'upsert' | 'delete'; sessionId: string }): void {
+      if (sessionsChangedTimer) clearTimeout(sessionsChangedTimer);
+      sessionsChangedTimer = setTimeout(() => {
+        sessionsChangedTimer = null;
+        // 命中判定在去抖到期时重查——500ms 窗口内用户可能已自行切走，切走则仅重拉列表。
+        if (kind === 'delete' && this.activeSession?.id === sessionId) {
+          this.startTransientSession();
+        }
         void this.loadSessions();
       }, 500);
     },

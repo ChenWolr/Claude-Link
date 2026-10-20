@@ -32,6 +32,7 @@ let stopCommandChanges: (() => void) | null = null;
 let stopGlobalCommandChanges: (() => void) | null = null;
 let stopQueueEvents: (() => void) | null = null;
 let stopBridgeSessionsUpserted: (() => void) | null = null;
+let stopSessionsChanged: (() => void) | null = null;
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
@@ -144,6 +145,12 @@ onMounted(async () => {
   stopBridgeSessionsUpserted = window.claudeLink.onBridgeSessionsUpserted((payload) => {
     sessionStore.markBridgeSessionUpserted(payload.sessionId);
   });
+  // 「网页访问」P2 4a / P4（docs/plans/2026-10-20-web-access-plan.md §3-P4-4）：跨端会话列表
+  // 同步通用信号（SESSIONS_CHANGED）全局订阅——桌面与网页渲染层同代码同生效。store 内 500ms
+  // 独立去抖重拉列表；delete 命中当前活动会话先本地切回暂态（主进程已删，不再调删除 API）。
+  stopSessionsChanged = window.claudeLink.onSessionsChanged((payload) => {
+    sessionStore.handleSessionsChanged(payload);
+  });
 });
 
 onBeforeUnmount(() => {
@@ -156,6 +163,7 @@ onBeforeUnmount(() => {
   if (stopGlobalCommandChanges) stopGlobalCommandChanges();
   if (stopQueueEvents) stopQueueEvents();
   if (stopBridgeSessionsUpserted) stopBridgeSessionsUpserted();
+  if (stopSessionsChanged) stopSessionsChanged();
   if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
   if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
   if (providerErrorToastTimer) clearTimeout(providerErrorToastTimer);
