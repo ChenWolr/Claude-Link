@@ -18,6 +18,7 @@ import type { AppConfig } from '../../shared/types/config';
 import type { CliDetectionResult } from '../../shared/types/cli';
 import { DEFAULT_THEME_PALETTE_ID, DEFAULT_FONT_SCALE } from '../../shared/constants';
 import { DEFAULT_TASK_DELAY_MINUTES } from '../../shared/queue-config';
+import { WEB_ACCESS_DEFAULT_PORT } from '../../shared/web-access-protocol';
 
 // H1（F5 重做）：设置保存失败跨卸载可感知标志。ConfigPage 组件局部 saveStatus 在页面卸载后
 // 无渲染、其 watch 随 setup 停止——失败对用户不可见，且重进页被 loadConfig 用主进程旧值
@@ -66,6 +67,9 @@ const defaultConfig: AppConfig = {
   // override 键空间见 shared/types/config 的 mcpOverrides 注释）。
   mcpServers: [],
   mcpOverrides: {},
+  // 网页访问（局域网）默认关（形状与主进程 config-manager 默认一致；令牌 token 刻意不在此
+  // 形状内，存主进程 electron-store 独立键 webAccessToken，config:get 永不携带）。
+  webAccess: { enabled: false, port: WEB_ACCESS_DEFAULT_PORT, allowedHosts: [] },
 };
 
 export const useConfigStore = defineStore('config', {

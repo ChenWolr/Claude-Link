@@ -36,6 +36,7 @@ import {
   sanitizeMcpOverridesConfig,
   maskMcpServersForRenderer,
 } from './mcp/mcp-config';
+import { sanitizeWebAccessConfig, WEB_ACCESS_DEFAULT_PORT } from '../../shared/web-access-protocol';
 import { clearProviderModelsCache } from './model-resolver';
 import { resetCliDetectionCache } from './cli-detector';
 import * as path from 'path';
@@ -121,6 +122,10 @@ const defaultConfig: StoredConfig = {
   // 写路径不清洗、读路径 sanitize（getConfig → mcp/mcp-config 两个 sanitize 清洗），旧配置缺键不报错。
   mcpServers: [],
   mcpOverrides: {},
+  // 网页访问（局域网）默认关（enabled=false 时不监听任何端口）；进 defaults，与 queueEnabled
+  // 同型。令牌刻意不进 defaults/本形状：独立键 webAccessToken（getWebAccessToken/setWebAccessToken
+  // 直存直读），config:get 等公开读路径永不携带。
+  webAccess: { enabled: false, port: WEB_ACCESS_DEFAULT_PORT, allowedHosts: [] },
   // ⚠️ providerProfiles / lastUsedProviderId / lastUsedModelId 故意不设默认值：
   // electron-store 的 defaults 会并入 store 视图参与 has() 判定，一旦给了默认值
   // （哪怕是 []），「键是否存在」永远是 true，ensureProviderMigration 的迁移守卫
@@ -324,6 +329,10 @@ export function getConfig(): AppConfig {
     // 存量配置无此键时同样兜底（?? 语义的 sanitize 版，缺键读出空值不报错、不迁移不升版）。
     mcpServers: sanitizeMcpServersConfig(config.mcpServers),
     mcpOverrides: sanitizeMcpOverridesConfig(config.mcpOverrides),
+    // 网页访问：脏值清洗（端口越界回落默认、allowedHosts 剔空/去重/小写/截断），
+    // 老配置缺键读出默认值不报错、不迁移不升版（同 mcpServers 先例；运行时旧库该键
+    // 实际可能缺失/任意，故按 any 读入再 sanitize）。
+    webAccess: sanitizeWebAccessConfig((config as any).webAccess),
   };
 }
 
@@ -727,4 +736,18 @@ export function recordLastUsedProviderModel(providerId: string, modelId: string)
   if (!profile || !profile.models.some((m) => m.id === modelId)) return;
   s.set({ lastUsedProviderId: providerId, lastUsedModelId: modelId });
   projectLegacyFields();
+}
+
+// ── 网页访问令牌（独立 store 键，与 providerProfiles 先例一致）──────────────────
+// 令牌刻意不进 StoredConfig 形状/defaults、不进 AppConfig 公开形状：config:get 等
+// 公开读路径永不携带（docs/plans/2026-10-20-web-access-plan.md §2 安全模型）。
+// 键名 webAccessToken；复用既有 store 实例（不新开存储文件），经 cast 直读直写底层键。
+
+export function getWebAccessToken(): string | null {
+  const raw = (getStore().store as { webAccessToken?: unknown }).webAccessToken;
+  return typeof raw === 'string' && raw.length > 0 ? raw : null;
+}
+
+export function setWebAccessToken(token: string): void {
+  getStore().set({ webAccessToken: token } as unknown as Partial<StoredConfig>);
 }

@@ -3,6 +3,20 @@ export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
 import type { NonAutoThinkingLevel } from './thinking';
 import type { PermissionMode } from '../permission-resolver';
 
+// 网页访问（局域网直连）配置（docs/plans/2026-10-20-web-access-plan.md P1）。默认关：
+// enabled=false 时完全不监听任何端口。allowedHosts 是 Host 白名单（防 DNS rebinding）的
+// 隧道/反代域名预留（默认 []，本期局域网直连不内置 tunnel 客户端）；清洗规则见
+// shared/web-access-protocol.ts 的 sanitizeWebAccessConfig（[1024,65535] 端口、上限 8 条、
+// trim/去重/小写化）。
+// token 刻意不在此形状内：存 electron-store 独立键 webAccessToken（config-manager 的
+// getWebAccessToken/setWebAccessToken 存取），与 providerProfiles 先例一致——不进 defaults、
+// 不进公开 AppConfig 形状，config:get 等公开读路径永不携带。
+export interface WebAccessConfig {
+  enabled: boolean;
+  port: number;
+  allowedHosts: string[];
+}
+
 export interface AppConfig {
   provider: 'anthropic' | 'openrouter' | 'bedrock' | 'vertex';
   providerName: string;
@@ -76,6 +90,11 @@ export interface AppConfig {
   // 键存在且值 === 'off' = 禁用；键缺失 = 启用（与 skillOverrides 二值语义一致：拨开=delete、
   // 拨关=置 'off'）。必填：主进程 getConfig sanitize 恒产出该键、渲染层 defaultConfig 有默认 {}。
   mcpOverrides: Record<string, 'off'>;
+  // 网页访问（局域网）开关，默认关（形状见 WebAccessConfig）。必填：主进程 getConfig sanitize
+  // 恒产出该键（老配置缺键读出默认值不报错、不迁移不升版，同 mcpServers 先例）；渲染层
+  // defaultConfig 有默认值。token 刻意不在此形状内：存 electron-store 独立键 webAccessToken
+  //（与 providerProfiles 先例一致），config:get 永不携带。
+  webAccess: WebAccessConfig;
 }
 
 // Claude Link 管理库内的单台 MCP 服务器（§1.1 数据模型）。只承载定义，不含启停状态
