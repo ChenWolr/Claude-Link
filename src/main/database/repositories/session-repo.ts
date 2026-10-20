@@ -221,8 +221,10 @@ export function searchSessions(query: string): Session[] {
   return sessions.filter((session) => normalizeSearchText(session.name).includes(normalizedQuery));
 }
 
-export function deleteSession(id: string): void {
-  getConnection().prepare('DELETE FROM sessions WHERE id = ?').run(id);
+// round-008 R1-F7：返回是否真删到行（changes>0）——调用方（SESSION_DELETE）据此门控
+// SESSIONS_CHANGED(delete) 广播，未删到行（重复删/未知 id）不发信号。
+export function deleteSession(id: string): boolean {
+  return getConnection().prepare('DELETE FROM sessions WHERE id = ?').run(id).changes > 0;
 }
 
 export function updateCliSessionId(id: string, cliSessionId: string | null): Session | null {

@@ -37,6 +37,8 @@ import { extractLastEffortFromJsonl, extractLastEffortFromText, EFFORT_TAIL_WIND
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
 import { isSuccessfulCliResult, isAbortedCliResult } from '../../shared/session-completion';
 import { noteTurnOutcome, beginUserTurn } from './task-queue-engine';
+// 「网页访问（局域网）」P2：推送总线——webContents.send 等价收口（web 关闭时行为不变）。
+import { pushToMainWindow } from './push-bus';
 import { convertResultMessage } from '../../shared/result-converter';
 import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
@@ -995,7 +997,7 @@ function resolveSessionOverride(opts: SpawnOptions): ResolvedSessionOverride | n
 // hb10-PRV-03：连接切换系统消息构造（首回合 prev='初始化' 也走此通道）。
 function notifyDriftMessage(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   prev: { providerName: string | null; modelId: string | null },
   current: { providerName: string | null; modelId: string | null },
 ): void {
@@ -1011,7 +1013,7 @@ function notifyDriftMessage(
       processKind: 'system:connection_drift',
       title: '连接切换',
     });
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message: persisted },
     });
@@ -1261,7 +1263,7 @@ function forwardEvent(
   if (!isSessionActive(sessionId)) return;
   touchActivityFromEvent(sessionId, event);
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -1349,7 +1351,7 @@ function forwardEvent(
       // hb10-ENG-02（收窄）：包 try 对齐同文件其他 send——窗口销毁（webContents 已
       // destroyed）时此裸 send 抛错会劫持 result 分支/回滚成功发送的调用链。
       try {
-        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+        pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
       } catch (err) {
         logger.warn(`Failed to send turn-usage CONTEXT_UPDATE [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -1407,7 +1409,7 @@ function forwardEvent(
       diagnostic: '压缩完成，等待 fresh 快照',
     };
     try {
-      mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
     } catch {
       // webContents 可能已销毁（窗口关闭），忽略
     }
@@ -1523,7 +1525,7 @@ function recordContextRefreshSuccess(sessionId: string): void {
 
 async function refreshContextSnapshot(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   entry: SessionEntry,
   query: Query,
   opts: { compactedJustNow?: boolean; samplePhase: ContextSamplePhase; onFreshSent?: () => void } = { samplePhase: 'query-start' },
@@ -1637,7 +1639,7 @@ async function refreshContextSnapshot(
         : {}),
     };
     try {
-      mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
     } catch {
       // webContents 已销毁，忽略
     }
@@ -1728,7 +1730,7 @@ async function refreshContextSnapshot(
         diagnostic: fallback.diagnostic,
       };
       try {
-        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+        pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
       } catch {
         // webContents 已销毁，忽略
       }
@@ -1829,7 +1831,7 @@ function extractProbeText(out: string): string {
 
 async function runPostTurnContextProbe(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   probeInstance: number,
   cliSessionId: string,
   opts: { compactedJustNow?: boolean },
@@ -1957,7 +1959,7 @@ async function runPostTurnContextProbe(
         ...compactMetaPayloadFields(sessionId, probeInstance, opts),
       };
       try {
-        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+        pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
       } catch {
         // webContents 已销毁，忽略
         resolve();
@@ -2062,7 +2064,7 @@ function extractAssistantText(parts: CliMessageContentPart[]): string {
 
 function emitNativeContextReconcile(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   entry: SessionEntry,
   nativeText: string,
   // review-v3 High-1：调用方按代际筛选后传入的本回合 runtime 快照（非同代传 null）。
@@ -2123,7 +2125,7 @@ function emitNativeContextReconcile(
     diagnostic: rec.diagnostic,
   };
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+    pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
   } catch {
     // webContents 已销毁，忽略
   }
@@ -2131,11 +2133,11 @@ function emitNativeContextReconcile(
 
 // 瞬态事件（tool_progress / task_* / compacting）：只 IPC 推前端，不落库 messages 表
 // （它们是运行中进度，不是对话历史，落库会污染历史回看）。
-function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: CliEvent): void {
+function forwardTransient(sessionId: string, _mainWindow: BrowserWindow, event: CliEvent): void {
   if (!isSessionActive(sessionId)) return;
   touchActivityFromEvent(sessionId, event);
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -2143,10 +2145,10 @@ function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: C
 
 // 原生 Slash Commands：把 registry 快照经独立 COMMANDS_CHANGED IPC 推前端（不落库、不进 CHAT_EVENT）。
 // 带 isSessionActive 守卫——迟到事件对已删除会话无效（计划 Task 4 §3/§7）。
-function emitCommandChanged(sessionId: string, mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
+function emitCommandChanged(sessionId: string, _mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
   if (!isSessionActive(sessionId)) return;
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.COMMANDS_CHANGED, { sessionId, snapshot } as CommandChangedPayload);
+    pushToMainWindow(IPC_CHANNELS.COMMANDS_CHANGED, { sessionId, snapshot } as CommandChangedPayload);
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -2155,9 +2157,9 @@ function emitCommandChanged(sessionId: string, mainWindow: BrowserWindow, snapsh
 // D4：全局兜底快照热刷新广播（COMMANDS_GLOBAL_CHANGED）。刻意不经 emitCommandChanged 的
 // isSessionActive 守卫——暂态会话不在 activeSessions，但正是它最需要这路广播；renderer 的
 // applyGlobalFallback 自行决定覆盖/回填。webContents 销毁静默忽略。
-function emitGlobalCommandsChanged(mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
+function emitGlobalCommandsChanged(_mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, { snapshot } as CommandGlobalChangedPayload);
+    pushToMainWindow(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, { snapshot } as CommandGlobalChangedPayload);
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -2166,7 +2168,7 @@ function emitGlobalCommandsChanged(mainWindow: BrowserWindow, snapshot: SessionC
 // Task 8：本地命令输出（local_command_output）主进程单一落库。参照 persistApiRetryTerminal：
 // createMessage（role:system, processKind 'system:local_command_output'）+ 推 persisted_message 让 renderer upsert。
 // renderer 不二次落库；result.result 走现有 result 终态兜底（两者并存）。
-function persistLocalCommandOutput(sessionId: string, mainWindow: BrowserWindow, content: string): void {
+function persistLocalCommandOutput(sessionId: string, _mainWindow: BrowserWindow, content: string): void {
   if (!isSessionActive(sessionId)) return;
   let message: ReturnType<typeof messageRepo.createMessage>;
   try {
@@ -2182,7 +2184,7 @@ function persistLocalCommandOutput(sessionId: string, mainWindow: BrowserWindow,
     return;
   }
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message },
     });
@@ -2199,7 +2201,7 @@ const RETRY_PROCESS_KIND: Record<ApiRetryTerminalKind, string> = {
 
 function persistApiRetryTerminal(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   state: ApiRetryState,
 ): void {
   if (!isSessionActive(sessionId) || state.phase !== 'terminal' || !state.terminalKind) return;
@@ -2221,7 +2223,7 @@ function persistApiRetryTerminal(
   } catch (err) {
     logger.error(`Failed to persist API retry terminal [${sessionId}]`, err);
     try {
-      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
         sessionId,
         event: {
           type: 'api_retry_terminal',
@@ -2237,7 +2239,7 @@ function persistApiRetryTerminal(
     return;
   }
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message },
     });
@@ -2297,7 +2299,7 @@ function abortNonRetryableUpstream(
       title: '连接配置错误',
       isError: true,
     });
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message: persisted },
     });
@@ -2348,10 +2350,10 @@ function cleanupToolUseCache(sessionId: string): void {
 }
 
 // 推送计划快照到渲染进程（瞬态：不落库 messages，不调 persistCliEvent）。
-function forwardClaudePlanState(sessionId: string, mainWindow: BrowserWindow, state: ClaudePlanState): void {
+function forwardClaudePlanState(sessionId: string, _mainWindow: BrowserWindow, state: ClaudePlanState): void {
   if (!isSessionActive(sessionId)) return;
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'claude_plan', sessionId, state } as ClaudePlanCliEvent,
     } as { sessionId: string; event: CliEvent });
@@ -4374,7 +4376,7 @@ function scheduleReasoningReplayRetryForTurn(sessionId: string, mainWindow: Brow
       const persisted = messageRepo.createMessage({ sessionId, role: 'user', content: text, eventType: 'message' });
       // hb10-ENG-05：落库后补 persisted_message 推送（对齐 CHAT_SEND 形态）——自动重试回合的
       // 用户气泡立即可见，不再等回合结束重载才出现。
-      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
         sessionId,
         event: { type: 'persisted_message', message: persisted },
       });
@@ -4504,7 +4506,7 @@ export function killProcess(
         title: '权限弹窗已取消',
         isError: true,
       });
-      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
         sessionId,
         event: { type: 'persisted_message', message: persisted },
       });

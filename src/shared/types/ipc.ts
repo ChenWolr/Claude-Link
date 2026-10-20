@@ -186,6 +186,12 @@ export const IPC_CHANNELS = {
   // 主→渲染推送：桥接运行期自动建会话（首联/悬空重建 /new）成功落库（A3，D01-F2/D12-F4）。
   // 载荷 { sessionId }；渲染层据此去抖重拉会话列表（新会话 ≤1s 进侧栏）并放行该会话的后台事件。
   BRIDGE_SESSIONS_UPSERTED: 'bridge:sessionsUpserted',
+  // 主→渲染推送（「网页访问」P2 4a，docs/plans/2026-10-20-web-access-plan.md §3-P2-4a）：
+  // 跨端会话列表同步通用信号——主进程在 SESSION_CREATE/SESSION_UPDATE 成功（upsert）与
+  // SESSION_DELETE 成功（delete）后经 pushToMainWindow 发射。载荷 { kind, sessionId }；
+  // 渲染层（P4）去抖重拉会话列表，delete 命中活动会话先切回暂态。与 BRIDGE_SESSIONS_UPSERTED
+  // 并存不合并（桥接通道语义与消费链保持不动，本通道是通用信号）。
+  SESSIONS_CHANGED: 'sessions:changed',
 } as const;
 
 /** 无引用残留（且类型文件不应有运行时常量）：流式上屏节流间隔真相源在 use-stream.ts 硬编码 50ms（hb12-CHR-01 节流，非防抖），改本值无效。 */

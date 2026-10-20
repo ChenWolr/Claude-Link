@@ -4,8 +4,12 @@
 // 注册 cli / config / workspace / provider / changes / settings / skill / session / message / claude-plan / commands / chat / interaction / task / queue / attachment / bridge 全部 invoke 通道，并委托 registerExportImageHandlers 注册导出窗口专用通道。
 // 渲染进程经 preload 的 window.claudeLink.xxx() → ipcRenderer.invoke → 此处 ipcMain.handle 路由到对应模块。
 
-import { BrowserWindow, clipboard, ipcMain, app, shell } from 'electron';
+import { BrowserWindow, clipboard, app, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
+// 「网页访问（局域网）」P2：invoke 注册表（ipcMain.handle 等价包装 + invokeFromWeb 复用同一份
+// handler）与推送总线（webContents.send 等价收口，web 关闭时退化原行为）。
+import { regInvokeHandler } from './ipc-registry';
+import { pushToMainWindow } from './modules/push-bus';
 import { promises as fsp } from 'node:fs';
 import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性/目录校验
 import path from 'node:path';
@@ -116,7 +120,8 @@ let ipcHandlersRegistered = false;
 /** 供应商库内容变更 → 推送全部渲染方（设置页 + 会话选择器缓存）刷新。 */
 function broadcastProvidersChanged(): void {
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.PROVIDERS_CHANGED);
+    // P2（web-access 推送总线）：webContents.send 等价收口——web 关闭时行为不变。
+    pushToMainWindow(IPC_CHANNELS.PROVIDERS_CHANGED);
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -190,8 +195,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   ipcHandlersRegistered = true;
 
   // CLI
-  ipcMain.handle(IPC_CHANNELS.CLI_DETECT, async () => detectCli(true));
-  ipcMain.handle(IPC_CHANNELS.CLI_GET_STATUS, async () => getCachedCliStatus() ?? detectCli());
+  regInvokeHandler(IPC_CHANNELS.CLI_DETECT, async () => detectCli(true));
+  regInvokeHandler(IPC_CHANNELS.CLI_GET_STATUS, async () => getCachedCliStatus() ?? detectCli());
 
   // 会话改动面板：列出 workingDir 的 git 改动 + 按需取单文件 diff（不抓快照，按需 git diff）。
   // hb10 P2-8：三通道 workingDir 绑定——主进程无「当前活动会话」追踪，允许集=全局配置工作目录
@@ -205,25 +210,25 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if (configDir && normDir(configDir) === normDir(dir)) return true;
     return sessionRepo.listSessions().some((s) => (s.workingDir ? normDir(s.workingDir) === normDir(dir) : false));
   };
-  ipcMain.handle(IPC_CHANNELS.CHANGES_LIST, async (_event, workingDir: string | null, touchedPaths: string[]) => {
+  regInvokeHandler(IPC_CHANNELS.CHANGES_LIST, async (_event, workingDir: string | null, touchedPaths: string[]) => {
     if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
     return listChanges(workingDir, touchedPaths);
   });
-  ipcMain.handle(IPC_CHANNELS.CHANGES_DIFF, async (_event, workingDir: string | null, path: string, context: number) => {
+  regInvokeHandler(IPC_CHANNELS.CHANGES_DIFF, async (_event, workingDir: string | null, path: string, context: number) => {
     if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
     // hb10 P2-7：-U context 钳制——非整数/负数/超界回落默认 3（防 -UNaN「整文件当新增」假象）。
     const safeContext = Number.isInteger(context) && context >= 0 && context <= 100000 ? context : 3;
     return getChangeDiff(workingDir, path, safeContext);
   });
   // 点文件「打开」：shell.openPath 走系统默认程序（仓库根解析 + 越界守卫在 openChangeFile 内）。
-  ipcMain.handle(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) => {
+  regInvokeHandler(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) => {
     if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
     return openChangeFile(workingDir, p);
   });
 
   // Config
-  ipcMain.handle(IPC_CHANNELS.CONFIG_GET, async () => getConfigForRenderer());
-  ipcMain.handle(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => {
+  regInvokeHandler(IPC_CHANNELS.CONFIG_GET, async () => getConfigForRenderer());
+  regInvokeHandler(IPC_CHANNELS.CONFIG_SAVE, async (_event, partial: Partial<AppConfig>) => {
     // MCP 管理库/启停只经 mcp:managedSave / mcp:overrideSet 专用通道写入——渲染层整包回显携带的
     // mcpServers/mcpOverrides 可能陈旧（专用通道保存后 store.config 未即时回写），照收会静默回滚
     // 专用通道的落盘结果（同 hb12-P2-6 lastUsed 剥离理由）。剥离后回包仍下发主进程最新 MCP 值，
@@ -257,8 +262,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 「已保存（投影失败）」徽标条件恒 false（hb10-CFG-04 端到端死代码）。
     return { ...getConfigForRenderer(), projectionOk: saved.projectionOk };
   });
-  ipcMain.handle(IPC_CHANNELS.CONFIG_CLEAR, async () => clearConfig());
-  ipcMain.handle(IPC_CHANNELS.CONFIG_STORAGE_INFO, async () => {
+  regInvokeHandler(IPC_CHANNELS.CONFIG_CLEAR, async () => {
+    const cfg = clearConfig();
+    return cfg;
+  });
+  regInvokeHandler(IPC_CHANNELS.CONFIG_STORAGE_INFO, async () => {
     const userData = app.getPath('userData');
     return {
       userData,
@@ -268,15 +276,15 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     };
   });
   // 应用内检查更新（electron-updater / GitHub Releases；实现见 modules/app-updater.ts）。
-  ipcMain.handle(IPC_CHANNELS.APP_UPDATE_GET_INFO, async () => getAppUpdateInfo());
-  ipcMain.handle(IPC_CHANNELS.APP_UPDATE_CHECK, async () => checkForAppUpdates());
-  ipcMain.handle(IPC_CHANNELS.APP_UPDATE_INSTALL, async () => installAppUpdate());
+  regInvokeHandler(IPC_CHANNELS.APP_UPDATE_GET_INFO, async () => getAppUpdateInfo());
+  regInvokeHandler(IPC_CHANNELS.APP_UPDATE_CHECK, async () => checkForAppUpdates());
+  regInvokeHandler(IPC_CHANNELS.APP_UPDATE_INSTALL, async () => installAppUpdate());
   // settings.json 导入/选档/自动检测三条死通道（原 config:importSettings 等三个 channel）
   // 已于 2026-09-20 整链删除：无 UI 入口却保留明文 apiKey 回传渲染进程的通道。
   // 流式测试连接（弹框）已删除：测试收敛到 PROVIDER_TEST_MODEL（模型行内按钮，直返结果）。
   // Task 3 Step 5：原生 settings 诊断摘要（resolveSettings 脱敏视图：来源/CLAUDE.md 候选/生效键名，
   // 绝不含 effective 值/API key/env）。cwd 只做非空字符串校验——真实路径解析交给 SDK 与 findClaudeMdCandidates。
-  ipcMain.handle(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, async (_event, cwd: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, async (_event, cwd: unknown) => {
     if (typeof cwd !== 'string' || !cwd.trim()) throw new Error('Invalid working directory');
     return getNativeSettingsDiagnostic(cwd);
   });
@@ -284,28 +292,28 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // Workspace（工作空间）：最近历史。Claude Code 基于某目录运行，会话可绑定并复用历史目录。
   // 选目录原生弹窗通道（workspace:pickDir）已于 T3 整链删除——两入口改渲染层自绘
   // FilePickerDialog（fs-picker-store），最近历史经 WORKSPACE_ADD_RECENT 显式回写。
-  ipcMain.handle(IPC_CHANNELS.WORKSPACE_LIST_RECENT, async () => listRecentWorkspaces());
-  ipcMain.handle(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
+  regInvokeHandler(IPC_CHANNELS.WORKSPACE_LIST_RECENT, async () => listRecentWorkspaces());
+  regInvokeHandler(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
   // 永久删除某条最近目录历史（只移除历史记录，不触碰磁盘上的目录本体）。
-  ipcMain.handle(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => removeRecentWorkspace(dir));
+  regInvokeHandler(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => removeRecentWorkspace(dir));
 
   // 自绘 FilePickerDialog 的只读文件系统元数据（详见 modules/fs-picker.ts）。
-  ipcMain.handle(IPC_CHANNELS.FS_LIST_ROOTS, async () => listRoots());
-  ipcMain.handle(IPC_CHANNELS.FS_LIST_DIR, async (_event, target: string) => {
+  regInvokeHandler(IPC_CHANNELS.FS_LIST_ROOTS, async () => listRoots());
+  regInvokeHandler(IPC_CHANNELS.FS_LIST_DIR, async (_event, target: string) => {
     if (typeof target !== 'string' || !target.trim()) throw new Error('Invalid directory path');
     return listDir(target);
   });
-  ipcMain.handle(IPC_CHANNELS.FS_MKDIR, async (_event, parent: string, name: string) => {
+  regInvokeHandler(IPC_CHANNELS.FS_MKDIR, async (_event, parent: string, name: string) => {
     if (typeof parent !== 'string' || !parent.trim() || typeof name !== 'string') throw new Error('Invalid mkdir arguments');
     return mkdir(parent, name);
   });
-  ipcMain.handle(IPC_CHANNELS.FS_STAT, async (_event, p: string) => {
+  regInvokeHandler(IPC_CHANNELS.FS_STAT, async (_event, p: string) => {
     if (typeof p !== 'string' || !p.trim()) throw new Error('Invalid path');
     return statPath(p);
   });
   // 文件操作补齐三通道（docs/plans/2026-10-14-picker-file-ops-idea-parity-plan.md §2 P2）。
   // FS_RENAME：同目录重命名，两参走对象载荷；入参 typeof 校验（既有形态），名称/冲突/存在性判定交给 renamePath。
-  ipcMain.handle(IPC_CHANNELS.FS_RENAME, async (_event, req: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.FS_RENAME, async (_event, req: unknown) => {
     const r = (req ?? {}) as Record<string, unknown>;
     if (typeof r.oldPath !== 'string' || !r.oldPath.trim() || typeof r.newName !== 'string') throw new Error('Invalid rename arguments');
     return renamePath(r.oldPath, r.newName);
@@ -313,7 +321,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // FS_TRASH：多选移入回收站。入参温和校验（非数组/空数组/超 200/含非 string）→ 不抛异常，返回逐项
   // error 的温和拒绝结果；随后逐项【串行】await shell.trashItem（回收站 shell 调用不宜并发轰炸），
   // 失败按 errno 映射（ENOENT→not-found，其余含网络位置不支持→error）入 failed，尽力而为不停（部分成功语义）。
-  ipcMain.handle(IPC_CHANNELS.FS_TRASH, async (_event, req: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.FS_TRASH, async (_event, req: unknown) => {
     const r = (req ?? {}) as Record<string, unknown>; // preload 发对象载荷 { paths }（对齐 FS_RENAME 解构形态）
     const paths = r.paths;
     const strItems = Array.isArray(paths) ? paths.filter((p): p is string => typeof p === 'string') : [];
@@ -334,7 +342,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return { ok: failed.length === 0, trashed, failed };
   });
   // FS_SHOW_IN_EXPLORER：资源管理器定位。路径不存在时 Electron 静默不弹；异常兜底归 ok:false（渲染层静默降级不报错）。
-  ipcMain.handle(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, async (_event, req: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, async (_event, req: unknown) => {
     const r = (req ?? {}) as Record<string, unknown>; // preload 发对象载荷 { path }（对齐 FS_RENAME 解构形态）
     if (typeof r.path !== 'string' || !r.path.trim()) throw new Error('Invalid path');
     try {
@@ -346,7 +354,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // 导出目标协商应答（T5）：渲染层 FilePickerDialog 选定后回传；jobId 在 Map 中才有效（防重放/伪造他人 job）。
-  ipcMain.handle(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, async (_event, jobId: unknown, resp: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, async (_event, jobId: unknown, resp: unknown) => {
     if (typeof jobId !== 'string' || !jobId) throw new Error('Invalid export target jobId');
     // resp 形状 + 内容校验（P2-1 纵深防御）：directory/save 的 dir 必须绝对路径；save 的 filename
     // 复用 isValidFolderName（非法字符/结尾点空格/长度 ≤255）——渲染层 FilePickerDialog 本就传
@@ -371,7 +379,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 磁盘上已删除的目录不再显示）+ 每目录直读 .claude\skills 的项目 Skill 全集 + 会话计数。
   // 只读、无副作用；全链 async + 每目录 3s 超时预算（R-1：不可达 UNC/断连映射盘不再同步
   // 占死主进程），每次进 Skill tab 现查。
-  ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET, async () => {
+  regInvokeHandler(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET, async () => {
     // Y-1（2026-09-19 X-123 批评审 §2）：用户根映射先取（独立单槽共享）；null 哨兵=枚举超时——
     // 载荷恒回对象 + 超时标记（渲染层据此不覆盖映射槽/不置就绪旗标），dirs 三源 await 内联不动。
     // A10（D07-F2）：用户根与全链同口径（effectiveUserHome = 子进程实际生效 USERPROFILE/HOME，
@@ -398,7 +406,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // listRecentWorkspaces()、默认目录 getConfig().workingDirectory、会话计数
   // sessionRepo.listWorkingDirCounts()、坏目录负缓存与 Skill 共用同一实例
   //（project-skills badDirCacheHas/badDirCacheMark，语义「目录不可达 60s」）。
-  ipcMain.handle(IPC_CHANNELS.MCP_SNAPSHOT_GET, async () => {
+  regInvokeHandler(IPC_CHANNELS.MCP_SNAPSHOT_GET, async () => {
     const defaultWorkingDir = getConfig().workingDirectory ?? null;
     return collectMcpSnapshot({
       userHome: effectiveUserHome() ?? os.homedir(),
@@ -416,7 +424,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 原值——哨兵还原必须在 sanitize 前，防哨兵字面量落库；瞬态 hint 随还原剥离）再 sanitize，
   // 最后走主进程 saveConfig（与渲染层 700ms 防抖 config:save 撞车由 config-store 既有互斥
   // savingConfig + 漂移补偿保护，§3.12；本 handler 不自带任何绕过互斥的直写 store 操作）。
-  ipcMain.handle(IPC_CHANNELS.MCP_MANAGED_SAVE, async (_event, body: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.MCP_MANAGED_SAVE, async (_event, body: unknown) => {
     if (!Array.isArray(body)) throw new Error('Invalid MCP managed servers payload');
     saveConfig({
       mcpServers: sanitizeMcpServersConfig(restoreMaskedMcpServers(body as McpManagedSaveEntry[], getConfig().mcpServers)),
@@ -429,7 +437,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 启停 override 单键翻转：主进程内直接改 config 再 saveConfig——不经渲染层整包 config，
   // 规避并发覆盖；键须 string 且带作用域前缀（managed:/user:/project:），否则拒绝。
   // 返回 saveConfig 落盘后的最新全量（渲染层以此为准，不自行拼装）。
-  ipcMain.handle(IPC_CHANNELS.MCP_OVERRIDE_SET, async (_event, body: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.MCP_OVERRIDE_SET, async (_event, body: unknown) => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP override payload');
     const { key, enabled } = body as { key?: unknown; enabled?: unknown };
     if (typeof key !== 'string' || !/^(managed|user|project):/.test(key)) {
@@ -450,7 +458,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 不回旧缓存）；查无 → 单元素 fail report，不抛。
   // 返回 McpProbeReport[]（single 恒单元素数组；all 与启用条目逐条对齐同序；禁用条目缺槽，
   // UI 按 key 消费并显示已禁用态。single 为用户显式动作不滤禁用——禁用卡也允许手动测试）。
-  ipcMain.handle(IPC_CHANNELS.MCP_PROBE, async (_event, body: unknown): Promise<McpProbeReport[]> => {
+  regInvokeHandler(IPC_CHANNELS.MCP_PROBE, async (_event, body: unknown): Promise<McpProbeReport[]> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP probe payload');
     const req = body as { target?: unknown; name?: unknown };
     if (req.target === 'single') {
@@ -519,7 +527,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // ——与 MCP_SNAPSHOT_GET 同源（mergeProjectDirs(listRecentWorkspaces(), 默认工作目录) 按
   // normalizeDirKey 归一比对），防渲染层任意路径写；user 作用域 userHome 由主进程自取
   // effectiveUserHome() ?? os.homedir()（与注入链同口径），渲染层不可传。
-  ipcMain.handle(IPC_CHANNELS.MCP_WRITE_SCOPED, async (_event, body: unknown): Promise<{ overwrote: boolean }> => {
+  regInvokeHandler(IPC_CHANNELS.MCP_WRITE_SCOPED, async (_event, body: unknown): Promise<{ overwrote: boolean }> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP write payload');
     const req = body as { scope?: unknown; dir?: unknown; entry?: unknown; mode?: unknown };
     if (req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP write scope');
@@ -544,7 +552,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 是 Claude Link 专属 override，非标准字段，不参与导出）。project 的 dir 白名单校验与
   // WRITE_SCOPED 同源（已知项目目录集，防任意路径读探测）；count = 0 时不动剪贴板
   //（渲染层按钮已按空表禁用，防御性兜底）。
-  ipcMain.handle(IPC_CHANNELS.MCP_EXPORT_SCOPED, async (_event, body: unknown): Promise<{ ok: true; count: number }> => {
+  regInvokeHandler(IPC_CHANNELS.MCP_EXPORT_SCOPED, async (_event, body: unknown): Promise<{ ok: true; count: number }> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP export payload');
     const req = body as { scope?: unknown; dir?: unknown };
     if (req.scope !== 'managed' && req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP export scope');
@@ -577,29 +585,29 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 逻辑；解析失败走 { ok: false } 回包不 throw；载荷非 string 直接 throw（防御，渲染层已
   // catch））。纯解析无副作用：不落盘、不读
   // 配置；与导入弹窗三形态解析同一函数（mcp-config.ts 唯一解析源）。
-  ipcMain.handle(IPC_CHANNELS.MCP_PARSE_JSON, async (_event, text: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.MCP_PARSE_JSON, async (_event, text: unknown) => {
     if (typeof text !== 'string') throw new Error('Invalid MCP parse payload');
     return parseMcpServersJson(text);
   });
 
   // 多供应商模型库：设置页（可选项库）与 会话选择器（只读）共用。
   // 密钥边界：listProviders 只回掩码视图；save 的明文 key 落盘前加密；查询/行内测试都在主进程内解密。
-  ipcMain.handle(IPC_CHANNELS.PROVIDER_LIST, async () => getLibrarySnapshot());
-  ipcMain.handle(IPC_CHANNELS.PROVIDER_SAVE, async (_event, input) => {
+  regInvokeHandler(IPC_CHANNELS.PROVIDER_LIST, async () => getLibrarySnapshot());
+  regInvokeHandler(IPC_CHANNELS.PROVIDER_SAVE, async (_event, input) => {
     const view = saveProviderProfile(input);
     broadcastProvidersChanged();
     return view;
   });
-  ipcMain.handle(IPC_CHANNELS.PROVIDER_DELETE, async (_event, providerId: string) => {
+  regInvokeHandler(IPC_CHANNELS.PROVIDER_DELETE, async (_event, providerId: string) => {
     deleteProviderProfile(providerId);
     broadcastProvidersChanged();
   });
-  ipcMain.handle(IPC_CHANNELS.PROVIDER_RESTORE, async () => {
+  regInvokeHandler(IPC_CHANNELS.PROVIDER_RESTORE, async () => {
     const view = restoreDeletedProvider();
     broadcastProvidersChanged();
     return view;
   });
-  ipcMain.handle(IPC_CHANNELS.PROVIDER_QUERY_MODELS, async (_event, providerId: string, forceRefresh?: boolean) => {
+  regInvokeHandler(IPC_CHANNELS.PROVIDER_QUERY_MODELS, async (_event, providerId: string, forceRefresh?: boolean) => {
     if (typeof providerId !== 'string' || !providerId.trim()) throw new Error('Invalid provider id');
     const profile = getStoredProviderProfile(providerId);
     if (!profile) throw new Error('供应商不存在');
@@ -610,7 +618,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return fetchAvailableModels(profile, apiKey, forceRefresh === true);
   });
   // 模型行内测试（r5）：指定供应商 + 指定模型真实 spawn CLI，直返汇总结果。
-  ipcMain.handle(IPC_CHANNELS.PROVIDER_TEST_MODEL, async (_event, providerId: string, modelId: string) => {
+  regInvokeHandler(IPC_CHANNELS.PROVIDER_TEST_MODEL, async (_event, providerId: string, modelId: string) => {
     if (typeof providerId !== 'string' || typeof modelId !== 'string') throw new Error('Invalid provider/model id');
     return runProviderModelTest(providerId, modelId);
   });
@@ -619,12 +627,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // bridge 会话本地锁定：以 bridge_bindings 活跃绑定为唯一事实源，给列表行附带
   // bridgePlatform（null=普通会话）；渲染层凭它把绑定会话置为桌面端只读。
   // runtime 未初始化时 bridgeBindingList 返回 []（全不锁，仅退出路径可达）。
-  ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => {
+  regInvokeHandler(IPC_CHANNELS.SESSION_LIST, async () => {
     const sessions = sessionRepo.listSessions();
     const boundPlatformBySessionId = new Map(bridgeBindingList().map((b) => [b.sessionId, b.platform]));
     return sessions.map((s) => ({ ...s, bridgePlatform: boundPlatformBySessionId.get(s.id) ?? null }));
   });
-  ipcMain.handle(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string, spec?: SessionCreateSpec) => {
+  regInvokeHandler(IPC_CHANNELS.SESSION_CREATE, async (_event, name: string, spec?: SessionCreateSpec) => {
     // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——空白名直调 IPC 不再建脏行。
     if (typeof name !== 'string' || !name.trim()) throw new Error('会话名称不能为空');
     const config = getConfig();
@@ -710,13 +718,17 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       permissionMode: session.permissionMode,
       thinkingLevel: session.thinkingLevel,
     });
+    // P2 4a（web-access 跨端会话列表同步）：物化成功后发 SESSIONS_CHANGED(upsert)——
+    // 桌面渲染层自身发起的创建也会收到（去抖重拉幂等，无害）；回滚路径（附件绑定失败上方已
+    // throw）不经过此处。与 BRIDGE_SESSIONS_UPSERTED 并存不合并（桥接通道语义与消费链不动）。
+    pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId: session.id });
     return session;
   });
-  ipcMain.handle(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => {
+  regInvokeHandler(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => {
     const s = sessionRepo.getSession(id);
     return s ? withBridgePlatform(s) : s;
   });
-  ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, id: string) => {
+  regInvokeHandler(IPC_CHANNELS.SESSION_DELETE, async (_event, id: string) => {
     // 删会话必须先让正在跑的 SDK query 停下来，否则它会变孤儿继续往已被级联删空的
     // messages 表 INSERT，外键失败回滚同步阻塞主进程，导致所有输入框假死。
     // 1) 先标记已删：runQuery 下轮迭代检测到立即自停（无需等 interrupt 生效）。
@@ -729,13 +741,18 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     killProcess(id, 'session_cleanup');
     await new Promise((resolve) => setTimeout(resolve, 50));
     const result = sessionRepo.deleteSession(id);
+    // P2 4a（web-access 跨端会话列表同步）：删库成功后发 SESSIONS_CHANGED(delete)——
+    // 正围观该会话的其他端切回暂态 + 列表重拉；本端渲染层自身发起的删除同样收到（幂等无害）。
+    // round-008 R1-F7：门控于删库结果（changes>0），未删到行（重复删/未知 id）不发信号，
+    // 对齐计划 §3-P2-4a「删库成功后」措辞。
+    if (result) pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'delete', sessionId: id });
     // DB 级联删除完成后清理物理文件；失败只记警告，由下次 orphan cleanup 重试。
     await cleanupSessionAttachments(id, attachmentStorageKeys).catch((e) =>
       logger.error(`cleanupSessionAttachments for ${id} failed`, e),
     );
     return result;
   });
-  ipcMain.handle(
+  regInvokeHandler(
     IPC_CHANNELS.SESSION_UPDATE,
     async (
       _event,
@@ -795,6 +812,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (data.workingDir !== undefined) {
         void startCommandProbe(id, mainWindow, { ...data });
       }
+      // P2 4a（web-access 跨端会话列表同步）：更新成功后发 SESSIONS_CHANGED(upsert)——改名/
+      // 自动命名等经 SESSION_UPDATE 的路径同样覆盖；updated falsy（无行）不发。
+      if (updated) {
+        pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId: id });
+      }
       return updated ? withBridgePlatform(updated) : updated;
     },
   );
@@ -803,7 +825,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // costUsd 仅正数可写（非正 → null，端点 0 值不展示 $0.0000 的既有语义）。
   // messageId 允许 null（后台分支无 attach 目标）；仅字符串 messageId 直传（AND session_id 守卫），
   // 命中失败/非字符串/null 一律回落主流程行查找（见 handler 内 B1 审查修复注释）。
-  ipcMain.handle(
+  regInvokeHandler(
     IPC_CHANNELS.SESSION_RECORD_TURN_META,
     async (
       _event,
@@ -849,12 +871,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       return true;
     },
   );
-  ipcMain.handle(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
+  regInvokeHandler(IPC_CHANNELS.SESSION_SEARCH, async (_event, query: string) =>
     sessionRepo.searchSessions(query),
   );
   // OPT-10：会话级「单独改 model_override」的 IPC 死链已删除（模型选用唯一现场=供应商模型选择器，
   // 渲染层经 SESSION_UPDATE 透传 providerOverride/modelOverride；被删通道在 renderer/store/repo 三层均无调用方）。
-  ipcMain.handle(
+  regInvokeHandler(
     IPC_CHANNELS.SESSION_ANALYZE_TOPIC,
     async (_event, sessionId: string, firstMessage: string) => {
       // hb10-SMG-07：入参健壮性校验（对齐 COMMANDS_GET 形态）——空白消息不再触发命名链写库。
@@ -867,7 +889,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   );
 
   // Messages
-  ipcMain.handle(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, async (_event, sessionId: string) => {
+  regInvokeHandler(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, async (_event, sessionId: string) => {
     // hb10-SHL-08/V01：入参校验（对齐 COMMANDS_GET 形态）。
     if (typeof sessionId !== 'string' || !sessionId.trim()) return [];
     return messageRepo.getMessagesBySession(sessionId);
@@ -875,7 +897,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // Claude 计划快照：按会话读取 TodoWrite / Task 工具的计划状态。
   // 独立于手动排队 tasks 表——不复用 task-repo。
-  ipcMain.handle(IPC_CHANNELS.CLAUDE_PLAN_GET, async (_event, sessionId: string) => {
+  regInvokeHandler(IPC_CHANNELS.CLAUDE_PLAN_GET, async (_event, sessionId: string) => {
     // hb10-SHL-08：入参校验（对齐 COMMANDS_GET 形态）。
     if (typeof sessionId !== 'string' || !sessionId.trim()) return null;
     return getClaudePlanState(sessionId);
@@ -883,7 +905,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // 原生 Slash Commands：读取某会话当前命令快照（registry 已清洗 + 去重）。返回纯可克隆 snapshot，
   // 不返回 Query / SDK stream / 未经清洗的消息。
-  ipcMain.handle(IPC_CHANNELS.COMMANDS_GET, async (_event, sessionId: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.COMMANDS_GET, async (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
     // D1 分流：先验证 DB 会话存在，再允许登记 active/启动 probe——不能把任意 renderer 输入当作会话
     // 生命周期事实。无 DB 行（暂态）不再 throw：只读返回全局兜底副本（source:'cache'），不 markSessionActive、
@@ -948,13 +970,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // unknown/hidden 命令名）。只读、无副作用——不 markSessionActive、不触发 probe（区别于 COMMANDS_GET）。
   // sessionId 做非空校验；DB 会话存在性不强制（无快照会话回退全局兜底派生诊断，兜底也未就绪时
   // 才返回 total=0 空诊断；均不抛错）。
-  ipcMain.handle(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, async (_event, sessionId: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, async (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
     return getCommandProvenance(sessionId);
   });
 
   // Chat
-  ipcMain.handle(IPC_CHANNELS.CHAT_SEND, async (_event, sessionId: string, payload: ChatSendPayload) => {
+  regInvokeHandler(IPC_CHANNELS.CHAT_SEND, async (_event, sessionId: string, payload: ChatSendPayload) => {
     // Task 4：校验 → prepare → 落库（附件保持 draft）→ spawn/send → 成功后升格 message。
     // spawn/send 同步失败则回滚消息关联，附件仍 draft，可原样重试（禁止再插第二条用户消息）。
     let locked = false;
@@ -1061,6 +1083,16 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         attachmentRepo.markAttachmentsStatus(prepared.attachmentIds, 'message');
       }
 
+      // P2 4b（web-access 跨端用户消息气泡）：落库行在本回合 spawn 提交成功后补推
+      // persisted_message——围观同会话的其他端实时看到发起端的用户消息气泡（DB 按 id upsert，
+      // 发起端替换乐观消息不重复；addMessage 归属守卫保证未围看端不受影响）。
+      // 位置约束：不得在落库后立刻推（同步失败回滚路径会删行，早推会「气泡闪现又消失」）；
+      // 下方回滚 catch 分支不补发。载荷形态对齐 task-queue-engine 出队路径先例。
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
+        sessionId,
+        event: { type: 'persisted_message', message: created },
+      });
+
       // 返回最新摘要（status 已升格）。
       const attachments =
         prepared.attachmentIds.length > 0
@@ -1101,7 +1133,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.CHAT_ABORT, async (_event, sessionId: string) => {
+  regInvokeHandler(IPC_CHANNELS.CHAT_ABORT, async (_event, sessionId: string) => {
     killProcess(sessionId, 'user', mainWindowRef);
     // v3 熔断挂点：手动中断可能没有 result 事件（两段式 abort 兜底只 emitExit 不发事件），
     // 熔断必须同时挂在 CHAT_ABORT（守卫在 abortHalt 内：非 running 且无活动进程时 no-op）。
@@ -1113,7 +1145,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // F3：白名单纵深防御——本入口曾是唯一不过 isValidPermissionMode 的会话 IPC（对齐
   // SESSION_CREATE/SESSION_UPDATE 先例），非法值丢弃按 null（跟随全局默认）处理并 warn，
   // 不把渲染层传来的未校验值直送 SDK setPermissionMode 控制帧。
-  ipcMain.handle(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE, async (_event, sessionId: string, mode: string | null) => {
+  regInvokeHandler(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE, async (_event, sessionId: string, mode: string | null) => {
     if (mode !== null && !isValidPermissionMode(mode as PermissionMode)) {
       logger.warn(`[permission] invalid running permissionMode, discarding: ${String(mode)}`);
       mode = null;
@@ -1126,18 +1158,18 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return changed;
   });
 
-  ipcMain.handle(IPC_CHANNELS.INTERACTION_RESPOND, async (_event, response) => {
+  regInvokeHandler(IPC_CHANNELS.INTERACTION_RESPOND, async (_event, response) => {
     respondToInteractionPrompt(response);
   });
 
-  ipcMain.handle(IPC_CHANNELS.INTERACTION_GET_PENDING, async () => getPendingInteractionPrompts());
+  regInvokeHandler(IPC_CHANNELS.INTERACTION_GET_PENDING, async () => getPendingInteractionPrompts());
 
   // V3-3：交互历史持久化。输入做最小校验，防止渲染进程传畸形数据撞 NOT NULL 约束。
-  ipcMain.handle(IPC_CHANNELS.INTERACTION_HISTORY_GET, async (_event, sessionId: string) => {
+  regInvokeHandler(IPC_CHANNELS.INTERACTION_HISTORY_GET, async (_event, sessionId: string) => {
     if (typeof sessionId !== 'string' || !sessionId) return [];
     return getInteractionHistory(sessionId);
   });
-  ipcMain.handle(IPC_CHANNELS.INTERACTION_HISTORY_RECORD, async (_event, input) => {
+  regInvokeHandler(IPC_CHANNELS.INTERACTION_HISTORY_RECORD, async (_event, input) => {
     if (!input || typeof input !== 'object') return;
     const { sessionId, title, kind, action } = input as Record<string, unknown>;
     if (typeof sessionId !== 'string' || !sessionId) return;
@@ -1159,7 +1191,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   const pendingTasksOf = (sessionId: string) =>
     taskRepo.getTasksBySession(sessionId).filter((t) => t.status === 'pending');
 
-  ipcMain.handle(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, payload: ChatSendPayload) => {
+  regInvokeHandler(IPC_CHANNELS.TASK_ADD, async (_event, sessionId: string, payload: ChatSendPayload) => {
     // Task 7B：任务附件接入。落库 task + 稳定 clientMessageId + 附件 links（status→task）。
     // 执行时由 popExecute 按 clientMessageId 创建/复用 user message、prepare 带附件的 prompt。
     // v3：返回 { task, tasks }——渲染层以返回的 tasks 为顺序权威（addTask 后立即反映真实排序）。
@@ -1179,7 +1211,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return { task, tasks: pendingTasksOf(sessionId) };
   });
 
-  ipcMain.handle(IPC_CHANNELS.TASK_REMOVE, async (_event, taskId: string) => {
+  regInvokeHandler(IPC_CHANNELS.TASK_REMOVE, async (_event, taskId: string) => {
     // Task 7B：解除 task_attachments 后，零引用附件（未执行的 pending task）删 row+文件；
     // 已升格为 message 的附件仍有引用，保留。
     // v3（语义表 #10）：删除后若该会话已无未暂停 pending → 取消倒计时转 standby；仍有 → 倒计时继续。
@@ -1195,12 +1227,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return task ? pendingTasksOf(task.sessionId) : [];
   });
 
-  ipcMain.handle(IPC_CHANNELS.TASK_GET_ALL, async (_event, sessionId: string) => {
+  regInvokeHandler(IPC_CHANNELS.TASK_GET_ALL, async (_event, sessionId: string) => {
     return pendingTasksOf(sessionId);
   });
 
   // 拖拽排序：只改执行顺序（到期取谁），不触碰倒计时。
-  ipcMain.handle(IPC_CHANNELS.TASK_REORDER, async (_event, sessionId: string, taskIds: string[]) => {
+  regInvokeHandler(IPC_CHANNELS.TASK_REORDER, async (_event, sessionId: string, taskIds: string[]) => {
     taskRepo.reorderTasks(sessionId, taskIds);
     return pendingTasksOf(sessionId);
   });
@@ -1208,7 +1240,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 任务级暂停/恢复（v3 语义表 #7/#9）：
   // 暂停 = 顺延；若已无未暂停 pending → 取消倒计时转 standby，仍有 → 倒计时继续（到期取新队首）。
   // 恢复 = 回待执行序列；standby 且无活动回合且开关开 → 立即全量倒计时；倒计时在走 → 不打断不重置。
-  ipcMain.handle(IPC_CHANNELS.TASK_SET_PAUSED, async (_event, taskId: string, paused: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.TASK_SET_PAUSED, async (_event, taskId: string, paused: unknown) => {
     const task = taskRepo.getTask(taskId);
     if (!task) throw new Error('任务不存在');
     const updated = taskRepo.setTaskPaused(taskId, paused === true);
@@ -1223,14 +1255,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // Queue（v3）
   // 立即执行：跳过倒计时立即出队（非队首=插队）；守卫失败抛错 → 渲染层 notice。
-  ipcMain.handle(IPC_CHANNELS.TASK_RUN_NOW, async (_event, taskId: string) => {
+  regInvokeHandler(IPC_CHANNELS.TASK_RUN_NOW, async (_event, taskId: string) => {
     return runTaskNow(taskId, mainWindow);
   });
 
   // D 点：后台任务（task_* 编排）终态输出文件只读。入参对象载荷 { outputFile }：
   // 校验绝对路径 + fs.stat 为常规文件 → 只读打开、最多读前 512KB（超出 truncated:true）。
   // 安全面：纯 fs.stat/fs.open+read，不执行、不写、无路径拼接（绝对路径直读），512KB 上限封顶。
-  ipcMain.handle(IPC_CHANNELS.TASK_OUTPUT_READ, async (_event, req: unknown): Promise<{ content: string; truncated: boolean }> => {
+  regInvokeHandler(IPC_CHANNELS.TASK_OUTPUT_READ, async (_event, req: unknown): Promise<{ content: string; truncated: boolean }> => {
     const r = (req ?? {}) as Record<string, unknown>;
     if (typeof r.outputFile !== 'string' || !r.outputFile.trim() || !path.isAbsolute(r.outputFile)) {
       throw new Error('输出文件不可读：路径无效');
@@ -1269,18 +1301,18 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // 熔断提示行「全部恢复」：全部 paused→pending + 立即开始全量倒计时。
-  ipcMain.handle(IPC_CHANNELS.QUEUE_RESUME_ALL, async (_event, sessionId: string) => {
+  regInvokeHandler(IPC_CHANNELS.QUEUE_RESUME_ALL, async (_event, sessionId: string) => {
     return resumeAllTasks(sessionId, mainWindow);
   });
 
   // 面板全量数据：状态 + pending 任务 + 本次已执行历史。
-  ipcMain.handle(IPC_CHANNELS.QUEUE_GET_OVERVIEW, async (_event, sessionId: string) => {
+  regInvokeHandler(IPC_CHANNELS.QUEUE_GET_OVERVIEW, async (_event, sessionId: string) => {
     return getQueueOverview(sessionId);
   });
 
   // 附件 IPC：路径暂存（自绘选择器选中后）/ 暂存字节（粘贴·拖放）/ 受控预览 / 移除草稿。
   // 文件读取与校验全部在主进程；renderer 只拿不透明附件 ID 与受控预览 bytes。
-  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_STAGE_PATHS, async (_event, sessionId: string, paths: unknown): Promise<PickAttachmentsResult> => {
+  regInvokeHandler(IPC_CHANNELS.ATTACHMENT_STAGE_PATHS, async (_event, sessionId: string, paths: unknown): Promise<PickAttachmentsResult> => {
     // 入参校验：string[]、每项非空字符串、长度 ≤50（一次选择的合理上界，防滥用）。
     if (typeof sessionId !== 'string' || !sessionId.trim() || !Array.isArray(paths) || paths.length > 50 || !paths.every((p) => typeof p === 'string' && p.trim())) {
       throw new Error('附件路径参数无效');
@@ -1288,7 +1320,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return stageAttachmentPaths(sessionId, paths as string[]);
   });
 
-  ipcMain.handle(
+  regInvokeHandler(
     IPC_CHANNELS.ATTACHMENT_STAGE_BYTES,
     async (_event, input: StageAttachmentBytesInput): Promise<AttachmentSummary> => {
       // hb10-ATT-09：主进程字节上界——超过 32MiB 早退拒绝（不进校验/落盘链路）。
@@ -1318,25 +1350,28 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     },
   );
 
-  ipcMain.handle(
+  regInvokeHandler(
     IPC_CHANNELS.ATTACHMENT_PREVIEW,
     async (_event, request: AttachmentPreviewRequest) => getAttachmentPreview(request),
   );
 
-  ipcMain.handle(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, async (_event, sessionId: string, attachmentId: string) => {
+  regInvokeHandler(IPC_CHANNELS.ATTACHMENT_REMOVE_DRAFT, async (_event, sessionId: string, attachmentId: string) => {
     await removeDraftAttachment(sessionId, attachmentId);
   });
 
   // 克隆历史消息附件为草稿：异步发送失败后「重新编辑发送」用；跨会话防护在 service 内。
   // A11（D08-F1）：返回 { created, rejected }——余量预检拒掉的附件以名单返回（不落盘）。
-  ipcMain.handle(
+  regInvokeHandler(
     IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE,
     async (_event, sessionId: string, messageId: string): Promise<CloneMessageAttachmentsResult> =>
       cloneMessageAttachmentsToDraft(sessionId, messageId),
   );
 
   // 会话导出长图（v3 JPEG / v4.1 PNG 双格式）：注册主窗口开始 + 隐藏 renderer 专用 IPC。
-  registerExportImageHandlers();
+  // P2（web-access）：START/CANCEL 改经注册表；getMainWindow 供网页端（event=null）回落发起窗。
+  // round-008 R1-F3：传模块级 live 变量 mainWindow（非本次形参闭包）——macOS 窗口重建后
+  // registerIpcHandlers 重入在 F6 守卫早退前刷新 mainWindow，getter 每次调用取到新窗口。
+  registerExportImageHandlers(() => mainWindow);
 
   // IM 机器人（飞书/微信 bridge）通道：逻辑在 modules/bridge/init.ts（凭据只回掩码，不回明文/密文）。
   registerBridgeIpcHandlers();
@@ -1344,13 +1379,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
 /** bridge IPC 注册（由 registerIpcHandlers 尾部调用一次，F6 幂等守卫天然覆盖）。 */
 function registerBridgeIpcHandlers(): void {
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_CONFIG_GET, async () => bridgeConfigGet());
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, async (_event, input: BridgeConfigSaveInput) => bridgeConfigSave(input));
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_STATUS_GET, async () => bridgeStatusGet());
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_FEISHU_TEST, async (_event, input: { appId?: string; appSecret?: string }) => bridgeFeishuTest(input));
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE, async () => bridgeWechatQrcode());
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE_STATUS, async (_event, qrcodeId: string) => bridgeWechatQrcodeStatus(qrcodeId));
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_BINDING_LIST, async () => bridgeBindingList());
-  ipcMain.handle(IPC_CHANNELS.BRIDGE_PLATFORM_RESTART, async (_event, platform: string) =>
+  regInvokeHandler(IPC_CHANNELS.BRIDGE_CONFIG_GET, async () => bridgeConfigGet());
+  regInvokeHandler(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, async (_event, input: BridgeConfigSaveInput) => bridgeConfigSave(input));
+  regInvokeHandler(IPC_CHANNELS.BRIDGE_STATUS_GET, async () => bridgeStatusGet());
+  regInvokeHandler(IPC_CHANNELS.BRIDGE_FEISHU_TEST, async (_event, input: { appId?: string; appSecret?: string }) => bridgeFeishuTest(input));
+  regInvokeHandler(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE, async () => bridgeWechatQrcode());
+  regInvokeHandler(IPC_CHANNELS.BRIDGE_WECHAT_QRCODE_STATUS, async (_event, qrcodeId: string) => bridgeWechatQrcodeStatus(qrcodeId));
+  regInvokeHandler(IPC_CHANNELS.BRIDGE_BINDING_LIST, async () => bridgeBindingList());
+  regInvokeHandler(IPC_CHANNELS.BRIDGE_PLATFORM_RESTART, async (_event, platform: string) =>
     bridgePlatformRestart(platform === 'wechat' ? 'wechat' : 'feishu'));
 }

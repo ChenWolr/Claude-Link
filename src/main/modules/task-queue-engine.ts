@@ -37,6 +37,8 @@ import type { PreparedAttachmentPrompt } from './attachment-prompt-builder';
 import { prepareAttachmentPrompt } from './attachment-prompt-builder';
 import { resolveAttachmentRecords } from './attachment-service';
 import { getConfig } from './config-manager';
+// 「网页访问（局域网）」P2：推送总线——webContents.send 等价收口（web 关闭时行为不变）。
+import { pushToMainWindow } from './push-bus';
 // X10（R09-F1）：reasoning_replay 自动重试与熔断语义对齐——引擎经此只读查询韧性层状态
 // （失败回合是否将被自动重试 / 自动重试回合是否已实际发起），韧性层不反向依赖引擎（无环导入）。
 import { willAutoRetryReasoningReplay, consumeAutoRetryDispatched } from './reasoning-replay-auto-retry';
@@ -83,13 +85,14 @@ function isQueueGenerationActive(sessionId: string, generation: number): boolean
 }
 
 function emitQueueEvent(
-  mainWindow: BrowserWindow,
+  // P2：推送目标改由 push-bus 的主窗口 getter 统一供给，参数保留占位（调用点签名不动）。
+  _mainWindow: BrowserWindow,
   sessionId: string,
   type: string,
   taskId?: string,
   data?: Record<string, unknown>,
 ): void {
-  mainWindow.webContents.send(IPC_CHANNELS.QUEUE_EVENT, {
+  pushToMainWindow(IPC_CHANNELS.QUEUE_EVENT, {
     sessionId,
     type,
     taskId,
@@ -388,7 +391,7 @@ function maybeResumeAfterAutoRetry(sessionId: string, mainWindow: BrowserWindow)
       title: '队列已自动恢复',
       isError: false,
     });
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message: persisted },
     });

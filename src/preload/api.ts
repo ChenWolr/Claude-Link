@@ -262,6 +262,9 @@ export interface ClaudeLinkAPI {
   onBridgeStatusChanged: (callback: (payload: BridgePlatformStatusEntry[]) => void) => () => void;
   /** A3（D01-F2/D12-F4）：桥接运行期自动建会话落库推送（载荷含 sessionId）。 */
   onBridgeSessionsUpserted: (callback: (payload: { sessionId: string }) => void) => () => void;
+  /** 「网页访问」P2 4a：跨端会话列表同步通用信号（create/update→upsert、delete→delete）。
+   *  桌面端自身发起的建/改/删同样收到（去抖重拉幂等，无害）；消费链 P4 接入。 */
+  onSessionsChanged: (callback: (payload: { kind: 'upsert' | 'delete'; sessionId: string }) => void) => () => void;
   // 自绘 FilePickerDialog 的只读文件系统元数据（选择动作在渲染层；文件内容读取仍在主进程）。
   fsListRoots: () => Promise<FsRootsResult>;
   fsListDir: (target: string) => Promise<FsListResult>;
@@ -444,6 +447,12 @@ export function createApi(): ClaudeLinkAPI {
       const listener = (_event: Electron.IpcRendererEvent, payload: { sessionId: string }) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, listener);
+    },
+    // 「网页访问」P2 4a：跨端会话列表同步（on* 模式照抄邻近成员）。
+    onSessionsChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { kind: 'upsert' | 'delete'; sessionId: string }) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.SESSIONS_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.SESSIONS_CHANGED, listener);
     },
     // 自绘 FilePickerDialog 的只读文件系统元数据（T2；选择动作在渲染层）。
     fsListRoots: () => ipcRenderer.invoke(IPC_CHANNELS.FS_LIST_ROOTS) as Promise<FsRootsResult>,

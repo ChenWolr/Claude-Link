@@ -5,6 +5,7 @@ import { electronApp, is, optimizer } from '@electron-toolkit/utils';
 import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
+import { initPushBus, pushToMainWindow } from './modules/push-bus';
 import { initAppUpdater, scheduleStartupUpdateCheck } from './modules/app-updater';
 import { initBridge, stopBridge } from './modules/bridge/init';
 import { detectCli } from './modules/cli-detector';
@@ -219,12 +220,10 @@ function createWindow(): void {
   // hb12-SHL-03：携带 sessionId——聚焦后经 CHAT_EVENT 导航事件让渲染层切换到对应会话。
   setNotificationFocusHook((sessionId) => {
     showMainWindow();
-    if (sessionId && mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event: { type: 'navigate' } });
-      } catch {
-        // ignore
-      }
+    if (sessionId) {
+      // P2（web-access 推送总线）：webContents.send 等价收口——判空/销毁竞态/try-catch 在总线的
+      // pushToMainWindow 内统一处理（web 关闭时行为不变）。
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, { sessionId, event: { type: 'navigate' } });
     }
   });
 
@@ -311,6 +310,10 @@ app.whenReady().then(async () => {
   } catch (error) {
     logger.error('Failed to initialize application services', error);
   }
+
+  // 「网页访问（局域网）」P2：推送总线初始化——闭包引用局部 let mainWindow，窗口重建自动跟随；
+  // 必须先于 createWindow()（registerIpcHandlers 等推送站点首推前就绪）。
+  initPushBus(() => mainWindow);
 
   createWindow();
 

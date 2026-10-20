@@ -11,6 +11,8 @@ import { IPC_CHANNELS } from '../../../shared/constants';
 import { resolveDefaultModel } from '../../../shared/settings-parser';
 import type { BridgeConfigSaveInput, BridgePlatformStatusEntry, BridgeBindingView, WechatQrcodeStatusResult, BridgeConfigGetResult, BridgeFeishuTestResult } from '../../../shared/types/bridge';
 import { getConfig } from '../config-manager';
+// 「网页访问（局域网）」P2：推送总线——webContents.send 等价收口（web 关闭时行为不变）。
+import { pushToMainWindow } from '../push-bus';
 import { getConnection } from '../../database/connection';
 import * as sessionRepo from '../../database/repositories/session-repo';
 import * as messageRepo from '../../database/repositories/message-repo';
@@ -78,7 +80,8 @@ function persistProfiles(rt: BridgeRuntime): void {
 
 function pushStatusChanged(rt: BridgeRuntime): void {
   try {
-    rt.opts.getWindow()?.webContents.send(IPC_CHANNELS.BRIDGE_STATUS_CHANGED, rt.manager.getStatus());
+    // P2（web-access 推送总线）：webContents.send 等价收口——判空/销毁竞态在总线内统一处理。
+    pushToMainWindow(IPC_CHANNELS.BRIDGE_STATUS_CHANGED, rt.manager.getStatus());
   } catch {
     // webContents 可能已销毁
   }
@@ -149,7 +152,8 @@ function buildManagerDeps(rt: BridgeRuntime): BridgeManagerDeps {
     createSession: (name, model, workingDir) => {
       const session = sessionRepo.createSession(name, model, workingDir);
       try {
-        rt.opts.getWindow()?.webContents.send(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, { sessionId: session.id });
+        // P2（web-access 推送总线）：webContents.send 等价收口——建会话广播对已认证网页端同样可见。
+        pushToMainWindow(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, { sessionId: session.id });
       } catch {
         // webContents 可能已销毁
       }
