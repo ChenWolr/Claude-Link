@@ -6,6 +6,7 @@ import { closeConnection, getConnection } from './database/connection';
 import { runMigrations } from './database/migrations';
 import { registerIpcHandlers } from './ipc-handlers';
 import { initPushBus, pushToMainWindow } from './modules/push-bus';
+import { syncWebAccessServer, stopWebAccessServer } from './modules/web-access/web-access-server';
 import { initAppUpdater, scheduleStartupUpdateCheck } from './modules/app-updater';
 import { initBridge, stopBridge } from './modules/bridge/init';
 import { detectCli } from './modules/cli-detector';
@@ -317,6 +318,10 @@ app.whenReady().then(async () => {
 
   createWindow();
 
+  // 「网页访问（局域网）」P3：主窗口就绪后同步 Web 服务器（enabled=false 幂等停服；enabled=true
+  // 且 token 为空时自动生成，计划 §4 #1）。闭包引用局部 let mainWindow，窗口重建自动跟随。
+  syncWebAccessServer(getConfig(), { getMainWindow: () => mainWindow });
+
   // 应用内检查更新（electron-updater）：打包后生效，开发模式内部跳过。
   initAppUpdater(() => mainWindow);
   scheduleStartupUpdateCheck(); // R5：启动 5s 后静默检查一次（dev 内部守卫消化）
@@ -379,6 +384,12 @@ app.on('before-quit', () => {
   // OPT-9：退出前同步 best-effort 清导出临时目录（原 void 异步调用退出前可能跑不完）。
   disposeExportTempDirsSync();
   closeConnection();
+});
+
+// 「网页访问（局域网）」P3：退出收口——先向全部 WS 发 bye(server-stopping) 再关 HTTP/WS 服务
+//（计划 §3-P3-5 / §4 #13）。置于 before-quit 之后的独立 will-quit 监听，不动既有退出链。
+app.on('will-quit', () => {
+  stopWebAccessServer();
 });
 
 // Global error handlers

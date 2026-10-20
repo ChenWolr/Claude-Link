@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（100 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（104 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -7,7 +7,7 @@ import type { AppConfig, McpManagedServer, ModelInfo, ProviderLibrarySnapshot, P
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueOverview } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult, CloneMessageAttachmentsResult } from '../shared/types/attachment';
-import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec, WebAccessInfoView } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import type { SkillProjectDirsPayload } from '../shared/types/command';
 import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatusEntry, WechatQrcodeStatusResult, BridgeFeishuTestResult } from '../shared/types/bridge';
@@ -265,6 +265,12 @@ export interface ClaudeLinkAPI {
   /** 「网页访问」P2 4a：跨端会话列表同步通用信号（create/update→upsert、delete→delete）。
    *  桌面端自身发起的建/改/删同样收到（去抖重拉幂等，无害）；消费链 P4 接入。 */
   onSessionsChanged: (callback: (payload: { kind: 'upsert' | 'delete'; sessionId: string }) => void) => () => void;
+  // 「网页访问（局域网）」P3（docs/plans/2026-10-20-web-access-plan.md §3-P3-4）：设置页
+  // 信息卡（URL/二维码/令牌，token 走 URL hash）/ 令牌重生成（主进程同步踢全部已认证连接）/
+  // 复制链接（主进程白名单校验：url ∈ 本次构建的 urls 才写剪贴板）。
+  webAccessGetInfo: () => Promise<WebAccessInfoView>;
+  webAccessRegenerateToken: () => Promise<{ token: string }>;
+  webAccessCopyLink: (url: string) => Promise<{ ok: boolean }>;
   // 自绘 FilePickerDialog 的只读文件系统元数据（选择动作在渲染层；文件内容读取仍在主进程）。
   fsListRoots: () => Promise<FsRootsResult>;
   fsListDir: (target: string) => Promise<FsListResult>;
@@ -294,6 +300,13 @@ export function createApi(): ClaudeLinkAPI {
         workspaces: string;
         db: string;
       }>,
+    // 「网页访问（局域网）」P3：信息卡 / 令牌重生成 / 复制链接（CONFIG_* 邻近区域）。
+    webAccessGetInfo: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.WEB_ACCESS_GET_INFO) as Promise<WebAccessInfoView>,
+    webAccessRegenerateToken: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.WEB_ACCESS_REGENERATE_TOKEN) as Promise<{ token: string }>,
+    webAccessCopyLink: (url) =>
+      ipcRenderer.invoke(IPC_CHANNELS.WEB_ACCESS_COPY_LINK, url) as Promise<{ ok: boolean }>,
     getUpdateInfo: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_GET_INFO),
     checkForAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_CHECK),
     installAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_INSTALL),

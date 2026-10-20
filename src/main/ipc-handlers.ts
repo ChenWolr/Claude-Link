@@ -21,7 +21,11 @@ import { isValidPermissionMode } from '../shared/permission-resolver';
 import { normalizeDirKey, mergeProjectDirs } from '../shared/project-skills';
 import { IPC_CHANNELS } from '../shared/constants';
 import { getAppUpdateInfo, checkForAppUpdates, installAppUpdate } from './modules/app-updater';
-import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, DECRYPT_FAILED } from './modules/config-manager';
+import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderProfile, deleteProviderProfile, restoreDeletedProvider, getStoredProviderProfile, decryptProviderApiKey, recordLastUsedProviderModel, getConfigForRenderer, setWebAccessToken, DECRYPT_FAILED } from './modules/config-manager';
+// 「网页访问（局域网）」P3：服务器生命周期 sync（CONFIG_SAVE 驱动点）+ 信息构建 + 三通道实现。
+// 依赖方向（计划 §2 无环）：ipc-handlers → web-access-server/info → config-manager/ipc-registry/push-bus。
+import { syncWebAccessServer, kickAllWebClients, randomWebAccessToken, type WebAccessSyncHooks } from './modules/web-access/web-access-server';
+import { buildWebAccessInfo, currentWebAccessUrls } from './modules/web-access/web-access-info';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
 import { listRoots, listDir, mkdir, statPath, isValidFolderName, renamePath } from './modules/fs-picker';
@@ -194,6 +198,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   if (ipcHandlersRegistered) return;
   ipcHandlersRegistered = true;
 
+  // 「网页访问（局域网）」P3：sync 钩子——从本函数 mainWindowRef 闭包构造（计划 §3-P3-5）。
+  // CONFIG_SAVE 保存成功返回前经 syncWebAccessServer 驱动 Web 服务器启停/重启监听。
+  const webAccessHooks: WebAccessSyncHooks = { getMainWindow: () => mainWindowRef };
+
   // CLI
   regInvokeHandler(IPC_CHANNELS.CLI_DETECT, async () => detectCli(true));
   regInvokeHandler(IPC_CHANNELS.CLI_GET_STATUS, async () => getCachedCliStatus() ?? detectCli());
@@ -260,10 +268,17 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // P3-6：回传给 renderer 的配置同样只带掩码（渲染层 UI 不显示明文 Key）。
     // hb13-v B3（F-04）：回传补带 projectionOk——getConfigForRenderer 不含该字段，旧回传使
     // 「已保存（投影失败）」徽标条件恒 false（hb10-CFG-04 端到端死代码）。
+    // 「网页访问（局域网）」P3：保存成功返回前同步 Web 服务器（启停/重启监听，幂等）。
+    // webAccess 仅经本通道变更；MCP override 等其它内部 saveConfig 路径不动 webAccess，
+    // 即便驱动 sync 也是幂等 no-op（计划 §3-P3-5）。
+    syncWebAccessServer(getConfig(), webAccessHooks);
     return { ...getConfigForRenderer(), projectionOk: saved.projectionOk };
   });
+  // round-008 R1-F2：恢复出厂（clearConfig 返回 getConfig()，webAccess 复位 enabled=false）
+  // 同样驱动 sync——stop 分支踢线停服，不让服务带着已失效配置继续监听（对齐 CONFIG_SAVE 驱动）。
   regInvokeHandler(IPC_CHANNELS.CONFIG_CLEAR, async () => {
     const cfg = clearConfig();
+    syncWebAccessServer(cfg, webAccessHooks);
     return cfg;
   });
   regInvokeHandler(IPC_CHANNELS.CONFIG_STORAGE_INFO, async () => {
@@ -274,6 +289,22 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       workspaces: `${userData}/claude-link-workspaces.json`,
       db: `${userData}/claude-link.db`,
     };
+  });
+  // 「网页访问（局域网）」（P3，计划 §3-P3-4，CONFIG_* 邻近区域）：信息卡 / 令牌重生成 / 复制链接。
+  regInvokeHandler(IPC_CHANNELS.WEB_ACCESS_GET_INFO, async () => buildWebAccessInfo());
+  regInvokeHandler(IPC_CHANNELS.WEB_ACCESS_REGENERATE_TOKEN, async () => {
+    // 重新生成令牌并立即踢掉全部已认证连接（close 4001，网页端清本地令牌回登录浮层，§4 #7）
+    const token = randomWebAccessToken();
+    setWebAccessToken(token);
+    kickAllWebClients('token-rotated');
+    return { token };
+  });
+  regInvokeHandler(IPC_CHANNELS.WEB_ACCESS_COPY_LINK, async (_event, url: unknown) => {
+    // 白名单校验：只允许复制本次构建出的 URL（防任意文本写剪贴板 + 与当前配置一致性）
+    const target = typeof url === 'string' ? url : '';
+    if (!target || !currentWebAccessUrls().includes(target)) return { ok: false };
+    clipboard.writeText(target);
+    return { ok: true };
   });
   // 应用内检查更新（electron-updater / GitHub Releases；实现见 modules/app-updater.ts）。
   regInvokeHandler(IPC_CHANNELS.APP_UPDATE_GET_INFO, async () => getAppUpdateInfo());

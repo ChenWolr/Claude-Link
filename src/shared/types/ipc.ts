@@ -192,6 +192,11 @@ export const IPC_CHANNELS = {
   // 渲染层（P4）去抖重拉会话列表，delete 命中活动会话先切回暂态。与 BRIDGE_SESSIONS_UPSERTED
   // 并存不合并（桥接通道语义与消费链保持不动，本通道是通用信号）。
   SESSIONS_CHANGED: 'sessions:changed',
+  // 「网页访问（局域网）」P3（docs/plans/2026-10-20-web-access-plan.md §3-P3-4）：设置页
+  // 信息卡（URL/二维码/令牌）/ 令牌重生成（踢全部已认证连接）/ 复制链接（白名单校验）。
+  WEB_ACCESS_GET_INFO: 'webAccess:getInfo',
+  WEB_ACCESS_REGENERATE_TOKEN: 'webAccess:regenerateToken',
+  WEB_ACCESS_COPY_LINK: 'webAccess:copyLink',
 } as const;
 
 /** 无引用残留（且类型文件不应有运行时常量）：流式上屏节流间隔真相源在 use-stream.ts 硬编码 50ms（hb12-CHR-01 节流，非防抖），改本值无效。 */
@@ -448,3 +453,23 @@ export interface QueueEventPayload {
 // 测试收敛到 PROVIDER_TEST_MODEL（模型行内按钮，invoke 直返 ProviderModelTestResult）。
 
 export type CliDetectionResultAlias = CliDetectionResult;
+
+// ── 「网页访问（局域网）」P3 视图类型（docs/plans/2026-10-20-web-access-plan.md §3-P3-3/4）──
+// 单一真相源：main 侧 web-access-server.ts 的 WebAccessRuntimeStatus 为本类型别名，
+// preload 类型面（ClaudeLinkAPI.webAccessGetInfo 回包）与主进程同源零漂移。
+
+export type WebAccessRuntimeStatusView =
+  | { state: 'off' }
+  | { state: 'running'; port: number }
+  | { state: 'error'; port: number; message: string };
+
+export interface WebAccessInfoView {
+  enabled: boolean;
+  status: WebAccessRuntimeStatusView;
+  /** http://<IPv4>:<port>/#token=<token>（token 走 hash 片段，计划 §2；仅非 internal IPv4）。 */
+  urls: string[];
+  /** 令牌明文（桌面设置页展示/复制用；已认证网页端也可调，等同信任域——计划 §3-P3-4 注）。 */
+  token: string | null;
+  /** 首 URL 二维码 data URL（qrcode toDataURL；生成失败为 null，urls 仍可复制）。 */
+  qrDataUrl: string | null;
+}
