@@ -153,6 +153,28 @@ let bridgeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 // ——两信号源可能同时到达，各自 500ms 去抖互不吞并）。
 let sessionsChangedTimer: ReturnType<typeof setTimeout> | null = null;
 
+// 「网页访问」P1-5：web 模式 active 会话恢复（渲染层 sessionStorage 方案，主进程常驻不感知）。
+// web 桥安装时置位 window.__claudeLinkWebBridge（web-bridge.ts createWebApi；该文件仅网页端
+// 加载，桌面 Electron 恒无标记 → 以下工具在桌面全 no-op、零存储读写）。暂态会话不落 key
+//（刷新回默认态，符合预期）；物化后随切换/物化路径补记持久 id。
+const WEB_ACTIVE_KEY = 'clWebActiveSession';
+
+/** web 模式判定：web 桥已安装（桌面恒 false——web-bridge 仅网页端加载）。 */
+function isWebMode(): boolean {
+  return !!(window as any).__claudeLinkWebBridge;
+}
+
+/** web 模式下持久化 active 会话 id（null=清除）；非 web 模式与隐私模式存储异常均静默 no-op。 */
+function persistWebActive(sessionId: string | null): void {
+  if (!isWebMode()) return;
+  try {
+    if (sessionId) sessionStorage.setItem(WEB_ACTIVE_KEY, sessionId);
+    else sessionStorage.removeItem(WEB_ACTIVE_KEY);
+  } catch {
+    // 隐私模式等存储异常忽略，仅失去刷新恢复
+  }
+}
+
 export const useSessionStore = defineStore('session', {
   state: () => ({
     sessions: [] as Session[],
@@ -441,6 +463,10 @@ export const useSessionStore = defineStore('session', {
           tool: this.streamingTool,
         };
       }
+      // 「网页访问」P1-5：确认进入暂态切换即清恢复 key（暂态会话刷新不恢复，回默认态）。
+      // 置于快照保存之后不动上方契约窗口；单例复用早退路径无需再清——首次进入暂态必经
+      // 此处已清空。桌面 no-op。
+      persistWebActive(null);
       if (this.transientDraft) {
         // B5：切到已有会话后暂态在后台存活——回到同一对象（同 id，文字/附件草稿按 id 存于
         // chat-draft-store 天然找回；暂态期间选定的 override/工作空间就在对象上）。
@@ -536,6 +562,10 @@ export const useSessionStore = defineStore('session', {
         this.knownSessionIds[session.id] = true;
         // 物化成功：单例暂态退场（下次「新会话」= 全新空白暂态，B6）。
         this.transientDraft = null;
+        // 「网页访问」P1-5：物化成功且仍在本会话 → 补记持久 id（暂态期 key 已清，此处转为
+        // 可恢复的持久态）；await 期间用户已切走则不覆盖——那次切换已写入其目标 id
+        //（与下方 activeSession 替换的竞态守卫同口径）。桌面 no-op。
+        if (this.activeSession?.id === session.id) persistWebActive(session.id);
         // M8 配套：物化后该 id 不再是暂态——先注销登记再 load，load() 恢复未过滤原语义
         //（后续命令集由 per-session probe 经 COMMANDS_CHANGED 接管）。
         useCommandStore().unmarkTransientSession(session.id);
@@ -561,6 +591,12 @@ export const useSessionStore = defineStore('session', {
         };
       }
       this.activeSession = session;
+      // 「网页访问」P1-5：切换生效即记录目标 id（web 刷新恢复用；桌面 no-op）。
+      // F8（审查修正）：暂态会话不写恢复 key——暂态本就刷新不恢复（startTransientSession
+      // 已清 key），此写是一次无效写且可能把暂态 id 留进 sessionStorage；最终行为不变
+      //（暂态刷新回默认态），仅消除无效写。物化路径（materializeActiveTransient）补记
+      // 持久 id 的逻辑不受影响。
+      if (!session.transient) persistWebActive(session.id);
       // N4：切到已有会话（应用重启后 registry 为空）时触发命令快照加载；主进程 COMMANDS_GET
       // 对无快照会话会异步启动探测。
       void useCommandStore().load(session.id);
@@ -617,6 +653,28 @@ export const useSessionStore = defineStore('session', {
       // hb10-SMG-06：物化回补——目标会话仍为自动名且恰 1 条 user 消息（首轮）时补触发
       // 主题分析（物化 await 窗口切走会漏触发；此处消息已加载，条件不满足时为 no-op）。
       this.maybeAnalyzeTopicForFirstUserMessage(this.messages.find((m) => m.role === 'user') ?? null);
+    },
+    // 「网页访问」P1-5：刷新后恢复 active 会话（仅 web 模式；ChatPage onMounted 在
+    // loadSessions 完成后调用）。key 指向的会话在列表中存在 → 复用 switchSession 同一切换
+    // 路径回切（不复制加载逻辑）；不存在（已删除/跨端清理）→ 静默忽略并清残留 key
+    //（防脏数据累积）走默认态。桌面模式直接返回（isWebMode()=false）。
+    async restoreWebActiveSession(): Promise<void> {
+      if (!isWebMode()) return;
+      let savedId: string | null = null;
+      try {
+        savedId = sessionStorage.getItem(WEB_ACTIVE_KEY);
+      } catch {
+        return; // 隐私模式等读取失败：保持默认态
+      }
+      if (!savedId) return;
+      // 已在该会话（路由重挂载等场景）：无需重切，避免冗余消息重载与瞬态重置。
+      if (this.activeSession?.id === savedId) return;
+      const target = this.sessions.find((s) => s.id === savedId);
+      if (target) {
+        await this.switchSession(target);
+      } else {
+        persistWebActive(null);
+      }
     },
     async deleteSession(id: string) {
       // 乐观更新：先从 UI 移除（列表/搜索态/activeSession/执行状态），让会话瞬间从侧栏消失，

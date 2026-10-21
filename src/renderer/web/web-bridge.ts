@@ -313,6 +313,9 @@ function invokeOverWire(channel: string, args: unknown[]): Promise<unknown> {
 // ── window.claudeLink 全量代理构建 ──
 
 function createWebApi(): ClaudeLinkAPI {
+  // P1-5：web 形态标记——渲染层（session-store）据此判定 web 模式（sessionStorage 恢复
+  // active 会话）；本文件仅网页端加载（桌面 Electron 路径不含本 chunk），桌面恒无此标记。
+  ;(window as any).__claudeLinkWebBridge = true;
   const api: Record<string, unknown> = {};
   for (const key of Object.keys(WEB_CHANNEL_TABLE) as Array<keyof ClaudeLinkAPI>) {
     const channel = WEB_CHANNEL_TABLE[key];
@@ -559,6 +562,14 @@ async function runBridgeLifecycle(): Promise<void> {
         else connectFailed = true;
       }
       if (!authFail && !connectFailed) {
+        // P0-3：welcome 成功即 token 已被服务端验证有效——手输令牌同样回写 localStorage
+        //（刷新免重输）。与 4001 分支不冲突（有效才存、无效即清）；hash 入口的写入逻辑
+        // 在上方保留不动。
+        try {
+          localStorage.setItem(TOKEN_STORAGE_KEY, token);
+        } catch {
+          // 隐私模式等持久化失败不阻断连接,仅失去刷新免登录
+        }
         // welcome：赋值 window.claudeLink（仅首次；订阅/待决表模块级跨重连存活）→ 收起浮层
         hideOverlay();
         if (!apiInstalled) {

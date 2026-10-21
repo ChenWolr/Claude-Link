@@ -117,13 +117,17 @@ function onGlobalKeydown(e: KeyboardEvent): void {
   void abort();
 }
 
-onMounted(() => {
-  store.loadSessions();
+onMounted(async () => {
+  // V2：监听器须在首个 await 之前同步注册——否则 async 窗口内 onUnmounted 先行时
+  // remove 为 no-op，await 返回后 add 照常执行，window 级监听器永久泄漏。
+  window.addEventListener('keydown', onGlobalKeydown);
+  await store.loadSessions();
+  // 「网页访问」P1-5：列表就绪后恢复 web 上次的 active 会话（桌面模式内部 no-op）。
+  await store.restoreWebActiveSession();
   // 根因修复：监听已在 App.vue 全局注册，这里只刷新当前会话数据（重拉 messages）。
   store.refreshActiveSession();
   // 加载 Claude 计划快照（独立于手动排队 tasks 表）。
   if (store.activeSession?.id) planStore.loadPlan(store.activeSession.id);
-  window.addEventListener('keydown', onGlobalKeydown);
 });
 
 // 切换会话时清掉上一会话残留的错误横幅与提示、复位拖放态与计数（草稿视图由 computed 自动切换）。

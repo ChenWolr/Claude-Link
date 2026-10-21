@@ -1149,6 +1149,7 @@ const updateStageTone = computed(() => {
                     <li v-for="url in webAccessInfo?.urls ?? []" :key="url"><code>{{ url }}</code></li>
                   </ol>
                   <p v-if="(webAccessInfo?.urls ?? []).length === 0" class="webacc-status__line">未发现可用的局域网 IPv4 地址（本机可能仅有虚拟网卡）。</p>
+                  <p class="webacc-status__line">若上述地址无法打开：请确认应用正在运行、访问的 IP 与列表一致（VPN/虚拟网卡地址也在此列）；仍不通时需在 Windows 防火墙放行该端口（管理员运行：netsh advfirewall firewall add rule name="Claude Link Web Access" dir=in action=allow protocol=TCP localport=&lt;端口&gt; profile=any）。</p>
                 </template>
                 <div v-else-if="waStatusError" class="webacc-status__line webacc-status__line--error">
                   启动失败（端口 {{ waStatusError.port }}）：{{ waStatusError.message }}
