@@ -2,6 +2,8 @@ import type { BrowserWindow } from 'electron';
 import { IPC_CHANNELS } from '../../shared/constants';
 import type { InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload } from '../../shared/types/ipc';
 import { logger } from '../utils/logger';
+// 「网页访问（局域网）」P2：推送总线——webContents.send 等价收口（web 关闭时行为不变）。
+import { pushToMainWindow } from './push-bus';
 // hb13-v B9（F4 / hb12-PERM-05）：系统取消路径的 cancel 历史落库（与 sdk-backend killProcess
 // 同款通道）。渲染崩溃（cancelAllPendingInteractions）与 10min 超时两路径不再缺历史行。
 import { createInteractionHistory } from '../database/repositories/interaction-history-repo';
@@ -59,7 +61,8 @@ export function requestInteraction(
 
     const notifyCancel = (cancelPayload: InteractionPromptCancelPayload): void => {
       try {
-        mainWindow.webContents.send(IPC_CHANNELS.INTERACTION_CANCEL, cancelPayload);
+        // P2（web-access 推送总线）：webContents.send 等价收口——判空/销毁竞态在总线内统一处理。
+        pushToMainWindow(IPC_CHANNELS.INTERACTION_CANCEL, cancelPayload);
       } catch {
         // 窗口可能已关闭；主进程 promise 已经会被 resolve，不需要再处理。
       }
@@ -101,7 +104,8 @@ export function requestInteraction(
     notifyCountChanged();
 
     try {
-      mainWindow.webContents.send(IPC_CHANNELS.INTERACTION_REQUEST, payload);
+      // P2（web-access 推送总线）：webContents.send 等价收口——弹窗请求对已认证网页端同步可见。
+      pushToMainWindow(IPC_CHANNELS.INTERACTION_REQUEST, payload);
     } catch (err) {
       logger.warn(`Interaction request send failed: ${err instanceof Error ? err.message : String(err)}`);
       finish({ id: payload.id, action: 'cancel', reason: 'abort' });

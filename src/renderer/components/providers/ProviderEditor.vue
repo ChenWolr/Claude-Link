@@ -69,8 +69,8 @@ function submit(): void {
     </div>
     <form class="pform" @submit.prevent="submit">
       <div class="grid2">
-        <label class="req">名称<input ref="nameInput" v-model="name" placeholder="例如：DeepSeek 官方" /></label>
-        <label class="req">请求地址（Base URL）<input v-model="apiBaseUrl" placeholder="https://api.deepseek.com/anthropic" /></label>
+        <label>名称<span class="req-mark">*</span><input ref="nameInput" v-model="name" placeholder="例如：DeepSeek 官方" aria-required="true" /></label>
+        <label>请求地址（Base URL）<span class="req-mark">*</span><input v-model="apiBaseUrl" placeholder="https://api.deepseek.com/anthropic" aria-required="true" /></label>
       </div>
       <label>备注<input v-model="note" placeholder="可选" /></label>
       <label>API Key<input v-model="apiKey" type="password" :placeholder="props.id ? '留空以保留现有密钥' : 'sk-…'" autocomplete="off" /></label>
@@ -172,11 +172,6 @@ function submit(): void {
 .pform input:focus {
   outline: none;
   border-color: var(--color-accent);
-}
-
-.req::after {
-  content: ' *';
-  color: var(--color-danger);
 }
 
 .frow {

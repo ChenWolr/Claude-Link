@@ -11,6 +11,9 @@ import { randomUUID } from 'crypto';
 import { Worker } from 'worker_threads';
 import type { WebContents } from 'electron';
 import { IPC_CHANNELS, THEME_PALETTES } from '../../shared/constants';
+// 「网页访问（局域网）」P2：invoke 注册表（START/CANCEL 入注册表）+ 推送总线（主窗推送收口）。
+import { regInvokeHandler } from '../ipc-registry';
+import { pushToMainWindow } from './push-bus';
 import {
   JPEG_PAGE_MAX_BYTES,
   SNAPSHOT_TOTAL_BYTES_MAX,
@@ -156,7 +159,9 @@ export async function requestExportTarget(
     pendingExportTargets.set(jobId, { resolve, timer, onClosed, win });
     win.once('closed', onClosed);
     try {
-      win.webContents.send(IPC_CHANNELS.EXPORT_REQUEST_TARGET, req);
+      // P2（web-access 推送总线）：EXPORT_REQUEST_TARGET 等价收口——桌面 origin 即主窗口行为
+      // 不变；网页端发起的导出（P3）目标请求对已认证连接广播。
+      pushToMainWindow(IPC_CHANNELS.EXPORT_REQUEST_TARGET, req);
     } catch {
       // 发送失败（renderer 已死等）：按窗口关闭收口。
       settleExportTarget(jobId, { kind: 'cancel', reason: 'window-closed' });
@@ -170,11 +175,10 @@ function isActive(): boolean {
 
 function emitProgress(payload: ExportImageProgressPayload): void {
   if (!active) return;
-  // 只转发给仍存活的 origin。
-  const origin = active.origin;
-  if (!origin.isDestroyed()) {
-    origin.send(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, payload);
-  }
+  // P2（web-access 推送总线）：进度转发等价收口——桌面 origin 恒为主窗口 webContents，行为
+  // 不变（判空/销毁/竞态吞噬移入 pushToMainWindow）；origin 的 job 生命周期绑定
+  //（startImageExportImpl 内 once('destroyed')）不动。网页端（P3）已认证连接同步收到进度。
+  pushToMainWindow(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, payload);
 }
 
 function makeProgress(partial: Omit<ExportImageProgressPayload, 'percent' | 'jobId' | 'sessionId' | 'sessionName'> & { percent?: number }): void {
@@ -979,17 +983,28 @@ async function loadExportPage(win: BrowserWindow): Promise<string | null> {
 }
 
 // —— IPC handler 注册（由 ipc-handlers 调用） ——
-export function registerExportImageHandlers(): void {
-  // EXPORT_IMAGE_START：来自可见 renderer 顶层 frame。format 白名单仅 jpeg|png。
-  ipcMain.handle(IPC_CHANNELS.EXPORT_IMAGE_START, async (event, sessionId: string, format: unknown) => {
-    if (!event.senderFrame || event.senderFrame.parent !== null) {
+// P2（web-access）：EXPORT_IMAGE_START/CANCEL 改经 regInvokeHandler 入注册表（网页端可发起
+// 导出）；getMainWindow 供 event=null（网页路径）回落主窗口 webContents 作 origin。
+// EXPORT_RENDER_* 7 通道保持 ipcMain.handle 裸注册（不进注册表 → 天然不可被网页调用）。
+export function registerExportImageHandlers(getMainWindow: () => BrowserWindow | null): void {
+  // EXPORT_IMAGE_START：桌面来自可见 renderer 顶层 frame；网页路径 origin 回落主窗口。
+  // format 白名单仅 jpeg|png。
+  regInvokeHandler(IPC_CHANNELS.EXPORT_IMAGE_START, async (event, sessionId: string, format: unknown) => {
+    // origin：桌面路径取真实 sender（webContents 同一性校验链不变）；网页路径（event=null，
+    // P3）回落当前主窗口 webContents。空/已销毁一律拒绝（对齐 startImageExportImpl 的 bad-origin）。
+    const origin = event ? event.sender : getMainWindow()?.webContents ?? null;
+    if (!origin || origin.isDestroyed()) {
+      return { ok: false, code: 'bad-origin', message: '发起窗口不可用' };
+    }
+    // senderFrame 防嵌套校验仅在桌面路径（event 非空）执行——网页路径无 frame 概念。
+    if (event && (!event.senderFrame || event.senderFrame.parent !== null)) {
       return { ok: false, code: 'bad-frame', message: '非法 frame' };
     }
     if (format !== 'jpeg' && format !== 'png') {
       return { ok: false, code: 'bad-format', message: `非法导出格式：${String(format)}（仅 jpeg|png）` };
     }
     // 注意：smoke 模式由主进程内部直接调用 startImageExport（带 smoke:true），不经此 handler。
-    const r = await startImageExport(event.sender, sessionId, format);
+    const r = await startImageExport(origin, sessionId, format);
     if (!r.ok) return r;
     return { ok: true, jobId: r.jobId };
   });
@@ -997,8 +1012,8 @@ export function registerExportImageHandlers(): void {
   // B4（D13-F3）：EXPORT_IMAGE_CANCEL——用户取消。仅捕获/编码（含 preparing/planning）阶段放行：
   // waitingForDestination/saving 由保存对话框自身的取消承载（performSave 持有 tempDir 文件句柄，
   // 中途抽走会把「用户取消」误报成写盘 failed）；终态后迟到点击 no-op。
-  ipcMain.handle(IPC_CHANNELS.EXPORT_IMAGE_CANCEL, async (event) => {
-    if (!event.senderFrame || event.senderFrame.parent !== null) {
+  regInvokeHandler(IPC_CHANNELS.EXPORT_IMAGE_CANCEL, async (event) => {
+    if (event && (!event.senderFrame || event.senderFrame.parent !== null)) {
       return { ok: false };
     }
     if (!active || active.terminal) return { ok: false };

@@ -289,6 +289,23 @@ async function waitFor(label: string, fn: () => boolean, timeoutMs = 6000): Prom
   const engine = require('../src/main/modules/task-queue-engine');
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const retry = require('../src/main/modules/reasoning-replay-auto-retry');
+  // P2（web-access 推送总线）同步：QUEUE_EVENT/CHAT_EVENT 发射已收口 pushToMainWindow——
+  // 测试改经 webSink 采集（与原 webContents.send spy 等价逻辑；fake win 无 isDestroyed 字段）。
+  const { setWebPushSink } = require('../src/main/modules/push-bus');
+  setWebPushSink((ch: string, args: unknown[]) => {
+    const payload = args[0] as {
+      sessionId?: string;
+      type?: string;
+      data?: Record<string, unknown>;
+      event?: { type?: string; message?: unknown };
+    } | undefined;
+    if (!payload) return;
+    const t = payload.type ?? payload.event?.type;
+    if (t) queueEvents.push({ sessionId: payload.sessionId ?? '', type: t, ch, data: payload.data });
+    if (payload.event?.type === 'persisted_message') {
+      persistedNotices.push({ sessionId: payload.sessionId ?? '', message: payload.event.message });
+    }
+  });
   const win = {
     webContents: {
       // Rv3-3（2026-10-07）：persisted_message（CHAT_EVENT 形态）的 type 在 payload.event.type——

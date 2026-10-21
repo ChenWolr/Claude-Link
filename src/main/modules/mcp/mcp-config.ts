@@ -25,6 +25,9 @@
 //       + mcp:managedSave 提交哨兵还原（含键改名 hint，还原后剥离瞬态字段）。
 
 import type { McpManagedServer } from '../../../shared/types/config';
+// 点6（2026-10-19 mcp-settings-plan-a）：哨兵字面量唯一来源收口 shared——MCP_MASK_SENTINEL
+// 改为 shared MCP_VALUE_MASK 的 re-export（同值同源，两名字一常量），本文件不再持有字面量。
+import { MCP_VALUE_MASK } from '../../../shared/mcp-json';
 
 // name 是工具名 mcp__<name>__<tool> 的中段：仅限字母/数字/下划线/连字符，1-64 字符。
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -52,6 +55,18 @@ function pickStringRecord(value: unknown): Record<string, string> | undefined {
 }
 
 /**
+ * timeoutMs 字段合法性（2026-10-19 mcp-settings-plan-a 点1）：整数且 1..120000（毫秒）。
+ * 配置侧统一口径（sanitizeMcpServersConfig / normalizeMcpEntry / buildMcpServersExportJson /
+ * mcp-writer 写出共用，mcp-writer 经 import 复用）：非法值一律【静默丢弃该字段】，条目其余
+ * 字段完好（与 env/headers 值级清洗容错口径一致，不整体失败）。探活运行时侧口径见
+ * mcp-probe.resolveProbeTimeoutMs（>=1 整数封顶 120000 生效，而非丢弃——两侧分工：配置侧管
+ * 落库合法性，探活侧管运行时生效值）。
+ */
+export function isValidMcpTimeoutMs(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 120000;
+}
+
+/**
  * 配置读路径 sanitize（config-manager.getConfig）：非数组 → []；逐条校验，任一硬性条件
  * 不过 → 丢弃整条（不部分修复身份字段）：
  *   - 条目非普通对象（null/数组/标量）；
@@ -62,6 +77,8 @@ function pickStringRecord(value: unknown): Record<string, string> | undefined {
  *   - stdio 丢 url/headers；remote（http/sse）丢 command/args/env；
  *   - args 非字符串数组 → 删除该字段；env/headers 值级清洗（pickStringRecord）：非普通对象，
  *     或清洗后无合法 string 值 → 删除该字段（值全非法时字段消失，非空对象）；
+ *   - timeoutMs 非合法整数（Number.isInteger 且 1..120000，isValidMcpTimeoutMs）→ 删除该字段
+ *    （2026-10-19 点1：静默丢字段，条目其余字段完好，不整体失败）；
  *   - description 非字符串 → ''；createdAt/updatedAt 非有限数字 → Date.now() 兜底
  *    （NaN/Infinity 不是合法时间戳，按「非数字」处理）。
  * name 重复 → 保留第一条。undefined/null/空数组 → []（旧配置缺键不报错）。
@@ -105,6 +122,12 @@ export function sanitizeMcpServersConfig(input: unknown): McpManagedServer[] {
       }
     }
 
+    // timeoutMs 透传（2026-10-19 点1）：与 transport 无关的公共可选字段，合法才保留，
+    // 非法静默丢字段（isValidMcpTimeoutMs 口径，两 transport 共用同一行判定）。
+    if (isValidMcpTimeoutMs(raw.timeoutMs)) {
+      server.timeoutMs = raw.timeoutMs;
+    }
+
     if (seenNames.has(name)) continue; // 重名保留第一条
     seenNames.add(name);
     out.push(server);
@@ -142,6 +165,9 @@ export type ParsedMcpEntry = {
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  /** 探活超时覆盖（毫秒，2026-10-19 点1）：原始条目含合法值（isValidMcpTimeoutMs 口径）才透传；
+   *  非法/缺省无此键（下游：scanner 视图编辑回填、探活 per-entry 超时；不进 SDK 注入链）。 */
+  timeoutMs?: number;
 };
 
 /** SDK Settings.mcpServers 条目（@anthropic-ai/claude-agent-sdk Settings.mcpServers 三形）。 */
@@ -169,7 +195,8 @@ function urlPathEndsWithSse(url: string): boolean {
  *   - 字段互斥归一（与 sanitizeMcpServersConfig 同款）：按 transport 只拷贝所属侧字段——stdio 只留
  *     command/args/env、remote 只留 url/headers；args 非全字符串数组→丢字段；env/headers 值级清洗
  *    （pickStringRecord）：非普通对象或清洗后无合法 string 值→丢字段；command/url 空串同「缺失」
- *    （必填缺失 → null）。name 取 map 键原样透传。
+ *    （必填缺失 → null）。timeoutMs 合法（isValidMcpTimeoutMs 口径）才透传、非法丢弃（2026-10-19
+ *    点1：JSON 模式回填与探活 per-entry 超时的数据源；不进 SDK 注入链）。name 取 map 键原样透传。
  */
 export function normalizeMcpEntry(name: string, rawCfg: unknown): ParsedMcpEntry | null {
   if (!isPlainObject(rawCfg)) return null;
@@ -194,6 +221,7 @@ export function normalizeMcpEntry(name: string, rawCfg: unknown): ParsedMcpEntry
     if (Array.isArray(cfg.args) && cfg.args.every((a) => typeof a === 'string')) entry.args = cfg.args;
     const env = pickStringRecord(cfg.env);
     if (env !== undefined) entry.env = env;
+    if (isValidMcpTimeoutMs(cfg.timeoutMs)) entry.timeoutMs = cfg.timeoutMs; // 点1：合法才透传
     return entry;
   }
   const url = typeof cfg.url === 'string' && cfg.url !== '' ? cfg.url : null;
@@ -201,6 +229,7 @@ export function normalizeMcpEntry(name: string, rawCfg: unknown): ParsedMcpEntry
   const entry: ParsedMcpEntry = { name, transport, url };
   const headers = pickStringRecord(cfg.headers);
   if (headers !== undefined) entry.headers = headers;
+  if (isValidMcpTimeoutMs(cfg.timeoutMs)) entry.timeoutMs = cfg.timeoutMs; // 点1：合法才透传
   return entry;
 }
 
@@ -321,14 +350,45 @@ export function mergeMcpServersForSession(input: {
   return result;
 }
 
+// ── 作用域导出 JSON（2026-10-18：设置页「导出 JSON」按钮，mcp:exportScoped 数据源侧）────
+// 断言集见 scripts/selftest-mcp-export.ts（A 组逐条钉住本节行为）。
+
+/**
+ * 作用域服务器表 → 导出 JSON 文本（{"mcpServers":{…}} 形态，导入弹窗三形态之一①，与
+ * Claude Code / Claude Desktop / Cursor / Windsurf 配置文件同形）。逐条经 toSdkMcpServerConfig
+ * 投影为 Claude Code 认识的条目形状（stdio [type,command,args?,env?] / remote [type,url,headers?]，
+ * 空数组/空表省略；描述/启停等 Claude Link 专属字段不进导出）。2 空格缩进 + 尾换行（与
+ * mcp-writer 落盘格式同款）。载体 Object.create(null)（键来自磁盘/config，__proto__ 键防污染）。
+ * 同名键后写覆盖前写（managed 数组理论不重名，user/project 磁盘 map 键本就唯一——由调用方
+ * 保证不重复，此处后写覆盖仅防御性兜底）。
+ * timeoutMs（2026-10-19 点1）：入参条目含合法 timeoutMs（isValidMcpTimeoutMs 口径）→ 投影后
+ * 附加 "timeoutMs" 键；无值/非法不写键。投影本体仍为 toSdkMcpServerConfig（三形不变，该函数
+ * 不携带 timeoutMs）；SDK 会话注入链不经本函数，会话行为零变化。
+ */
+export function buildMcpServersExportJson(
+  servers: Record<string, Parameters<typeof toSdkMcpServerConfig>[0] & { timeoutMs?: unknown }>,
+): string {
+  const out = Object.create(null) as Record<string, ReturnType<typeof toSdkMcpServerConfig> & { timeoutMs?: number }>;
+  for (const [name, server] of Object.entries(servers)) {
+    // projected 显式标注为「投影 ∪ timeoutMs 可选」：toSdkMcpServerConfig 返回类型本身不含
+    // timeoutMs（会话注入形状不动），附加键只在导出侧发生（对投影产物本体的安全变异——该对象
+    // 为本函数内新建，无共享引用）。
+    const projected: ReturnType<typeof toSdkMcpServerConfig> & { timeoutMs?: number } = toSdkMcpServerConfig(server);
+    if (isValidMcpTimeoutMs(server.timeoutMs)) projected.timeoutMs = server.timeoutMs;
+    out[name] = projected;
+  }
+  return JSON.stringify({ mcpServers: out }, null, 2) + '\n';
+}
+
 // ── §1.3 渲染层脱敏闭环（r3 修复 F2）────────────────────────────────────────
 // 断言集见 scripts/selftest-mcp-settings.ts（F 组逐条钉住本节行为）。
 
 /**
- * env/headers 值的编辑回显哨兵：8 个 U+25CF（•）。与渲染层 McpSettings.vue 的 MASK_SENTINEL
- * 同字面量，两处必须同步改。
+ * env/headers 值的编辑回显哨兵：8 个 U+2022（•）。shared/mcp-json.ts:MCP_VALUE_MASK 的
+ * re-export（点6 起同值同源、两名字一常量——本文件原字面量副本已删，全仓唯一字面定义在
+ * shared）；渲染层 McpSettings.vue 经 shared 常量 import 引用同一字面。
  */
-export const MCP_MASK_SENTINEL = '••••••••';
+export const MCP_MASK_SENTINEL = MCP_VALUE_MASK;
 
 /** env/headers 值掩码（键保留、新载体输出；undefined 透传 = 无该字段，不添加）。 */
 function maskRecordValues(record: Record<string, string> | undefined): Record<string, string> | undefined {

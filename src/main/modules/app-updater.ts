@@ -18,6 +18,8 @@ import { autoUpdater } from 'electron-updater';
 import * as fs from 'fs';
 import { logger } from '../utils/logger';
 import { IPC_CHANNELS } from '../../shared/constants';
+// 「网页访问（局域网）」P2：推送总线——主窗口事件改经总线（web 已认证连接同步收到）。
+import { getCurrentMainWindow, pushToMainWindow } from './push-bus';
 import { normalizeReleaseNotes } from '../../shared/release-notes';
 import { missingMetadataVerdict } from '../../shared/update-verdict';
 import type { AppUpdateInfo, AppUpdateState } from '../../shared/types/update';
@@ -45,13 +47,20 @@ function getUpdateState(): AppUpdateState {
 }
 
 function sendStateToRenderers(state: AppUpdateState): void {
+  // P2（web-access 推送总线）：主窗口改经 pushToMainWindow（web 已认证连接同步收到更新态）；
+  // 其余窗口（隐藏导出窗）仍走原循环直发。STATE_EVENT 为文件顶部局部常量（IPC_CHANNELS 别名），
+  // 行为等价：主窗口本就在 getAllWindows() 内，拆成「循环跳过 + 循环后总线单发」语义不变。
+  const current = getCurrentMainWindow();
   for (const win of BrowserWindow.getAllWindows()) {
     try {
-      if (!win.isDestroyed()) win.webContents.send(STATE_EVENT, state);
+      if (win.isDestroyed()) continue;
+      if (current && !current.isDestroyed() && win === current) continue; // 主窗口经总线
+      win.webContents.send(STATE_EVENT, state);
     } catch {
       // 窗口销毁竞态：忽略单窗发送失败
     }
   }
+  pushToMainWindow(STATE_EVENT, state);
 }
 
 function setState(patch: Partial<AppUpdateState>): void {

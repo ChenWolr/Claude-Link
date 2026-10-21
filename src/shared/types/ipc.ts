@@ -70,6 +70,23 @@ export const IPC_CHANNELS = {
   MCP_MANAGED_SAVE: 'mcp:managedSave',
   MCP_OVERRIDE_SET: 'mcp:overrideSet',
   MCP_PROBE: 'mcp:probe',
+  // P8 双向写入：user → ~/.claude.json / project → <dir>/.mcp.json 顶层 mcpServers 条目
+  // upsert/remove（实现 src/main/modules/mcp/mcp-writer.ts）。body = { scope, dir?, entry, mode }
+  // → { overwrote }；project 的 dir 须属已知项目目录集（与 snapshot 同源列表，防任意路径写）；
+  // 哨兵值由 writer 按原文件还原，瞬态改名 hint 还原后剥离。
+  MCP_WRITE_SCOPED: 'mcp:writeScoped',
+  // 作用域导出 JSON（2026-10-18）：body = { scope: 'managed' | 'user' | 'project', dir? } →
+  // { ok: true, count }。主进程内取明文（managed=config store / user、project=磁盘 raw 直读）
+  // → buildMcpServersExportJson（{"mcpServers":{…}} 形态）→ electron clipboard 写剪贴板。
+  // §1.3 渲染层零明文：JSON 文本与 env/headers 明文全程不出主进程，渲染层只拿 count。
+  // project 的 dir 须属已知项目目录集（与 WRITE_SCOPED 同源校验）；count = 导出条数，
+  // 0 = 当前作用域无服务器（渲染层按钮已按空表禁用，此处防御性兜底，不动剪贴板）。
+  MCP_EXPORT_SCOPED: 'mcp:exportScoped',
+  // 单服务器 JSON 解析（2026-10-19 mcp-settings-plan-a 点2，表单⇄JSON 双模式的「JSON → 表单」
+  // 方向）：body = string（导入 JSON 文本）→ parseMcpServersJson 直转（{ ok: true, servers } |
+  // { ok: false, error }）。纯解析无副作用：不落盘、不读配置；三形态导入口径与导入弹窗一致
+  //（mcp-config.ts 唯一解析源）。
+  MCP_PARSE_JSON: 'mcp:parseMcpJson',
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，test/query 由主进程自行解密，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',
@@ -112,6 +129,8 @@ export const IPC_CHANNELS = {
   TASK_GET_ALL: 'task:getAll',
   TASK_REORDER: 'task:reorder',
   TASK_SET_PAUSED: 'task:setPaused',
+  // D 点：后台任务（task_* 编排）终态输出文件只读（入参 { outputFile }，主进程 512KB 上限 + 截断标记）。
+  TASK_OUTPUT_READ: 'task:outputRead',
   // v3 语义：跳过倒计时立即出队（非队首=插队）；熔断后一键全部恢复；面板全量数据拉取。
   TASK_RUN_NOW: 'task:run-now',
   QUEUE_RESUME_ALL: 'queue:resumeAll',
@@ -167,6 +186,17 @@ export const IPC_CHANNELS = {
   // 主→渲染推送：桥接运行期自动建会话（首联/悬空重建 /new）成功落库（A3，D01-F2/D12-F4）。
   // 载荷 { sessionId }；渲染层据此去抖重拉会话列表（新会话 ≤1s 进侧栏）并放行该会话的后台事件。
   BRIDGE_SESSIONS_UPSERTED: 'bridge:sessionsUpserted',
+  // 主→渲染推送（「网页访问」P2 4a，docs/plans/2026-10-20-web-access-plan.md §3-P2-4a）：
+  // 跨端会话列表同步通用信号——主进程在 SESSION_CREATE/SESSION_UPDATE 成功（upsert）与
+  // SESSION_DELETE 成功（delete）后经 pushToMainWindow 发射。载荷 { kind, sessionId }；
+  // 渲染层（P4）去抖重拉会话列表，delete 命中活动会话先切回暂态。与 BRIDGE_SESSIONS_UPSERTED
+  // 并存不合并（桥接通道语义与消费链保持不动，本通道是通用信号）。
+  SESSIONS_CHANGED: 'sessions:changed',
+  // 「网页访问（局域网）」P3（docs/plans/2026-10-20-web-access-plan.md §3-P3-4）：设置页
+  // 信息卡（URL/二维码/令牌）/ 令牌重生成（踢全部已认证连接）/ 复制链接（白名单校验）。
+  WEB_ACCESS_GET_INFO: 'webAccess:getInfo',
+  WEB_ACCESS_REGENERATE_TOKEN: 'webAccess:regenerateToken',
+  WEB_ACCESS_COPY_LINK: 'webAccess:copyLink',
 } as const;
 
 /** 无引用残留（且类型文件不应有运行时常量）：流式上屏节流间隔真相源在 use-stream.ts 硬编码 50ms（hb12-CHR-01 节流，非防抖），改本值无效。 */
@@ -423,3 +453,23 @@ export interface QueueEventPayload {
 // 测试收敛到 PROVIDER_TEST_MODEL（模型行内按钮，invoke 直返 ProviderModelTestResult）。
 
 export type CliDetectionResultAlias = CliDetectionResult;
+
+// ── 「网页访问（局域网）」P3 视图类型（docs/plans/2026-10-20-web-access-plan.md §3-P3-3/4）──
+// 单一真相源：main 侧 web-access-server.ts 的 WebAccessRuntimeStatus 为本类型别名，
+// preload 类型面（ClaudeLinkAPI.webAccessGetInfo 回包）与主进程同源零漂移。
+
+export type WebAccessRuntimeStatusView =
+  | { state: 'off' }
+  | { state: 'running'; port: number }
+  | { state: 'error'; port: number; message: string };
+
+export interface WebAccessInfoView {
+  enabled: boolean;
+  status: WebAccessRuntimeStatusView;
+  /** http://<IPv4>:<port>/#token=<token>（token 走 hash 片段，计划 §2；仅非 internal IPv4）。 */
+  urls: string[];
+  /** 令牌明文（桌面设置页展示/复制用；已认证网页端也可调，等同信任域——计划 §3-P3-4 注）。 */
+  token: string | null;
+  /** 首 URL 二维码 data URL（qrcode toDataURL；生成失败为 null，urls 仍可复制）。 */
+  qrDataUrl: string | null;
+}

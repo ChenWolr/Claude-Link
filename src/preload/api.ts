@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（96 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（104 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -7,7 +7,7 @@ import type { AppConfig, McpManagedServer, ModelInfo, ProviderLibrarySnapshot, P
 import type { Session, Message } from '../shared/types/session';
 import type { Task, QueueOverview } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult, CloneMessageAttachmentsResult } from '../shared/types/attachment';
-import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec } from '../shared/types/ipc';
+import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec, WebAccessInfoView } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
 import type { SkillProjectDirsPayload } from '../shared/types/command';
 import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatusEntry, WechatQrcodeStatusResult, BridgeFeishuTestResult } from '../shared/types/bridge';
@@ -28,6 +28,9 @@ export interface McpScopedServerView {
   command?: string;
   args?: string[];
   url?: string;
+  /** 探活超时覆盖（毫秒，点1 全链透传的非敏感数值；点5 编辑回填数据源——scanner 视图条目
+   *  携带时原样透传，无键缺省）。主进程 McpScopedServerView extends ParsedMcpEntry 同名镜像。 */
+  timeoutMs?: number;
   maskedEnvKeys?: string[];
   maskedHeaderKeys?: string[];
 }
@@ -79,6 +82,62 @@ export interface McpManagedSaveEntry extends McpManagedServer {
   envRenameFrom?: Record<string, string>;
   headersRenameFrom?: Record<string, string>;
 }
+
+/** mcp:writeScoped 提交条目（主进程 src/main/modules/mcp/mcp-writer.ts:ScopedMcpEntry 同构
+ *  镜像——preload 不 import 主进程模块，结构以该文件为准）：瞬态改名 hint（payload 键 → 已存
+ *  原键）供主进程哨兵还原定位原值，还原后剥离、绝不落盘。 */
+export interface McpScopedWriteEntry {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  /** 探活超时覆盖（毫秒，点5 表单装填；主进程 mcp-writer.ts:ScopedMcpEntry 同名镜像——
+   *  合法（1..120000 整数）才写键，非法/缺省不写，与 sanitize 同口径）。 */
+  timeoutMs?: number;
+  envRenameFrom?: Record<string, string>;
+  headersRenameFrom?: Record<string, string>;
+}
+
+/** mcp:writeScoped 请求体：user → ~/.claude.json（dir 忽略，userHome 由主进程自取）；
+ *  project → <dir>/.mcp.json（dir 必填，须属已知项目目录集——主进程按 snapshot 同源目录集
+ *  校验，防任意路径写）。 */
+export interface McpWriteScopedPayload {
+  scope: 'user' | 'project';
+  dir?: string;
+  entry: McpScopedWriteEntry;
+  mode: 'upsert' | 'remove';
+}
+
+/** mcp:exportScoped 请求体：导出当前作用域全部服务器定义为 {"mcpServers":{…}} JSON 并由
+ *  主进程写入系统剪贴板（§1.3 渲染层零明文——JSON 与 env/headers 明文不出主进程，回包只有
+ *  count）。project 的 dir 必填，须属已知项目目录集（主进程与 writeScoped 同源校验）。 */
+export interface McpExportScopedPayload {
+  scope: 'managed' | 'user' | 'project';
+  dir?: string;
+}
+
+/** mcp:parseMcpJson 回包条目（主进程 src/main/modules/mcp/mcp-config.ts:ParsedMcpEntry 同构
+ *  镜像——preload 不 import 主进程模块，字段以该文件实现为准：name/transport/command/args/
+ *  env/url/headers/timeoutMs 八字段，无 description）。 */
+export interface McpParsedJsonEntry {
+  name: string;
+  transport: 'stdio' | 'http' | 'sse';
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+}
+
+/** mcp:parseMcpJson 回包：ok=true 带解析条目；ok=false 带中文错误消息（坏 JSON/根非对象/
+ *  三形态都取不到合法 map），失败不 throw。 */
+export type McpParseJsonResult =
+  | { ok: true; servers: McpParsedJsonEntry[] }
+  | { ok: false; error: string };
 
 export interface ClaudeLinkAPI {
   detectCli: () => Promise<CliDetectionResult>;
@@ -143,6 +202,8 @@ export interface ClaudeLinkAPI {
   openChangeFile: (workingDir: string | null, path: string) => Promise<ChangesOpenResult>;
   addTask: (sessionId: string, payload: ChatSendPayload) => Promise<{ task: Task; tasks: Task[] }>;
   removeTask: (taskId: string) => Promise<Task[]>;
+  // D 点：后台任务（task_* 编排）终态输出文件只读（主进程强制绝对路径 + 512KB 上限 + 截断标记）。
+  readTaskOutput: (outputFile: string) => Promise<{ content: string; truncated: boolean }>;
   getTasks: (sessionId: string) => Promise<Task[]>;
   reorderTasks: (sessionId: string, taskIds: string[]) => Promise<Task[]>;
   setTaskPaused: (taskId: string, paused: boolean) => Promise<Task[]>;
@@ -180,6 +241,15 @@ export interface ClaudeLinkAPI {
   saveMcpManaged: (servers: McpManagedSaveEntry[]) => Promise<{ ok: true }>;
   setMcpOverride: (key: string, enabled: boolean) => Promise<{ overrides: Record<string, 'off'> }>;
   probeMcpServers: (target: McpProbeTarget) => Promise<McpProbeReport[]>;
+  // P8 双向写入：用户级/项目级 mcpServers 条目 upsert/remove（哨兵还原在主进程 writer；
+  // overwrote = upsert 命中现有同名，remove 恒 false）。
+  writeMcpScoped: (payload: McpWriteScopedPayload) => Promise<{ overwrote: boolean }>;
+  // 作用域导出 JSON：主进程构建 {"mcpServers":{…}} 文本并写系统剪贴板（渲染层零明文，
+  // 回包只有 count；count=0 未动剪贴板）。
+  exportMcpScoped: (payload: McpExportScopedPayload) => Promise<{ ok: true; count: number }>;
+  // 单服务器 JSON 解析（点2，表单⇄JSON 双模式「JSON → 表单」方向）：文本送主进程
+  // parseMcpServersJson（三形态导入口径同导入弹窗），失败回 { ok: false, error } 不 throw。
+  parseMcpJson: (text: string) => Promise<McpParseJsonResult>;
   // IM 机器人（飞书/微信 bridge）：凭据掩码读写 / 状态 / 连通测试 / 扫码登录 / 绑定管理。
   bridgeGetConfig: () => Promise<BridgeConfigGetResult>;
   bridgeSaveConfig: (input: BridgeConfigSaveInput) => Promise<BridgeConfigGetResult>;
@@ -192,6 +262,15 @@ export interface ClaudeLinkAPI {
   onBridgeStatusChanged: (callback: (payload: BridgePlatformStatusEntry[]) => void) => () => void;
   /** A3（D01-F2/D12-F4）：桥接运行期自动建会话落库推送（载荷含 sessionId）。 */
   onBridgeSessionsUpserted: (callback: (payload: { sessionId: string }) => void) => () => void;
+  /** 「网页访问」P2 4a：跨端会话列表同步通用信号（create/update→upsert、delete→delete）。
+   *  桌面端自身发起的建/改/删同样收到（去抖重拉幂等，无害）；消费链 P4 接入。 */
+  onSessionsChanged: (callback: (payload: { kind: 'upsert' | 'delete'; sessionId: string }) => void) => () => void;
+  // 「网页访问（局域网）」P3（docs/plans/2026-10-20-web-access-plan.md §3-P3-4）：设置页
+  // 信息卡（URL/二维码/令牌，token 走 URL hash）/ 令牌重生成（主进程同步踢全部已认证连接）/
+  // 复制链接（主进程白名单校验：url ∈ 本次构建的 urls 才写剪贴板）。
+  webAccessGetInfo: () => Promise<WebAccessInfoView>;
+  webAccessRegenerateToken: () => Promise<{ token: string }>;
+  webAccessCopyLink: (url: string) => Promise<{ ok: boolean }>;
   // 自绘 FilePickerDialog 的只读文件系统元数据（选择动作在渲染层；文件内容读取仍在主进程）。
   fsListRoots: () => Promise<FsRootsResult>;
   fsListDir: (target: string) => Promise<FsListResult>;
@@ -221,6 +300,13 @@ export function createApi(): ClaudeLinkAPI {
         workspaces: string;
         db: string;
       }>,
+    // 「网页访问（局域网）」P3：信息卡 / 令牌重生成 / 复制链接（CONFIG_* 邻近区域）。
+    webAccessGetInfo: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.WEB_ACCESS_GET_INFO) as Promise<WebAccessInfoView>,
+    webAccessRegenerateToken: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.WEB_ACCESS_REGENERATE_TOKEN) as Promise<{ token: string }>,
+    webAccessCopyLink: (url) =>
+      ipcRenderer.invoke(IPC_CHANNELS.WEB_ACCESS_COPY_LINK, url) as Promise<{ ok: boolean }>,
     getUpdateInfo: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_GET_INFO),
     checkForAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_CHECK),
     installAppUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.APP_UPDATE_INSTALL),
@@ -295,6 +381,9 @@ export function createApi(): ClaudeLinkAPI {
     openChangeFile: (workingDir, path) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_OPEN_FILE, workingDir, path),
     addTask: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, payload),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId) as Promise<Task[]>,
+    // D 点：后台任务终态输出文件只读（对象载荷 { outputFile }，对齐主进程 handler 入参形状）。
+    readTaskOutput: (outputFile) =>
+      ipcRenderer.invoke(IPC_CHANNELS.TASK_OUTPUT_READ, { outputFile }) as Promise<{ content: string; truncated: boolean }>,
     getTasks: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_GET_ALL, sessionId),
     reorderTasks: (sessionId, taskIds) =>
       ipcRenderer.invoke(IPC_CHANNELS.TASK_REORDER, sessionId, taskIds) as Promise<Task[]>,
@@ -347,6 +436,12 @@ export function createApi(): ClaudeLinkAPI {
     setMcpOverride: (key, enabled) =>
       ipcRenderer.invoke(IPC_CHANNELS.MCP_OVERRIDE_SET, { key, enabled }) as Promise<{ overrides: Record<string, 'off'> }>,
     probeMcpServers: (target) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PROBE, target) as Promise<McpProbeReport[]>,
+    // P8 双向写入（对象载荷，对齐主进程 handler 入参形状）。
+    writeMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_WRITE_SCOPED, payload) as Promise<{ overwrote: boolean }>,
+    // 作用域导出 JSON（对象载荷；主进程写剪贴板，回包零明文）。
+    exportMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_EXPORT_SCOPED, payload) as Promise<{ ok: true; count: number }>,
+    // 单服务器 JSON 解析（点2；text 原样转发主进程 parseMcpServersJson，失败回包不 throw）。
+    parseMcpJson: (text) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PARSE_JSON, text) as Promise<McpParseJsonResult>,
     // IM 机器人（飞书/微信 bridge）。
     bridgeGetConfig: () => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_GET) as Promise<BridgeConfigGetResult>,
     bridgeSaveConfig: (input) => ipcRenderer.invoke(IPC_CHANNELS.BRIDGE_CONFIG_SAVE, input),
@@ -365,6 +460,12 @@ export function createApi(): ClaudeLinkAPI {
       const listener = (_event: Electron.IpcRendererEvent, payload: { sessionId: string }) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.BRIDGE_SESSIONS_UPSERTED, listener);
+    },
+    // 「网页访问」P2 4a：跨端会话列表同步（on* 模式照抄邻近成员）。
+    onSessionsChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: { kind: 'upsert' | 'delete'; sessionId: string }) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.SESSIONS_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.SESSIONS_CHANGED, listener);
     },
     // 自绘 FilePickerDialog 的只读文件系统元数据（T2；选择动作在渲染层）。
     fsListRoots: () => ipcRenderer.invoke(IPC_CHANNELS.FS_LIST_ROOTS) as Promise<FsRootsResult>,

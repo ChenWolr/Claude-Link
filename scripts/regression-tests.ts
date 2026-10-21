@@ -1226,9 +1226,16 @@ function testConnectionSurfaceWhitelistContracts(): void {
   assert.ok(sources.size > 100, `连接面扫描仅覆盖 ${sources.size} 个文件——src 目录结构变化须同步本契约`);
 
   // 断言 A：渲染层/preload 代码级零直连（fetch / XMLHttpRequest / WebSocket / EventSource）。
+  // 例外白名单（「网页访问（局域网）」P4，docs/plans/2026-10-20-web-access-plan.md §3-P4）：
+  // renderer/web/web-bridge.ts 是计划授权的唯一渲染层 WebSocket 直连面——浏览器模式（无 preload）
+  // 经 WS 把 window.claudeLink 全量代理到主进程；Electron 路径由 main.ts !window.claudeLink 门控，
+  // 该 chunk 不加载、零行为变化。白名单按单文件收口（该文件存在性与形态由
+  // tdd-web-access-wiring-verify §11.5 独立钉死），其余渲染层/preload 文件出现直连 API 仍 fail。
   const directApi = /\bfetch\s*\(|XMLHttpRequest|new WebSocket|new EventSource/;
+  const directApiAllowed = new Set(['renderer/web/web-bridge.ts']);
   for (const [file, src] of sources) {
     if (file.startsWith('renderer/') || file.startsWith('preload/')) {
+      if (directApiAllowed.has(file)) continue;
       assert.ok(!directApi.test(src), `${file} 渲染层/preload 不得出现代码级直连 API`);
     }
   }
@@ -1692,7 +1699,8 @@ function testPermissionPromptIntegration(): void {
   // 工厂把显式 settings 放入 Options.settings，杜绝两条路径各自重复构造 settings。
   assert.ok(sdkBackend.includes('buildClaudeLinkSettingsBlock'), 'sdk-backend 应有统一 settings 块构造函数（F6）');
   assert.ok(
-    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias(?:,\s*(?:override|modelOverride))?(?:,\s*effectivePermissionMode)?\)/g) ?? []).length >= 2,
+    // round-003 授权例外：D1 起调用点追加第 8 参 sessionRow（去重复读），正则认可可选尾参（钉语义不变）。
+    (sdkBackend.match(/buildClaudeLinkSettingsBlock\(config,\s*sessionId,\s*opts,\s*thinkingConfig,\s*requestedAlias(?:,\s*(?:override|modelOverride))?(?:,\s*effectivePermissionMode)?(?:,\s*sessionRow)?\)/g) ?? []).length >= 2,
     '生产 query 与 probe 必须调用同一个 buildClaudeLinkSettingsBlock（F6：杜绝配置漂移）',
   );
   assert.ok(optionsSrc.includes('settings?: Record<string, unknown>'), '统一 options 工厂输入应含显式 settings（F6）');

@@ -4,8 +4,9 @@
 // 的 transport/command/args/env/url/headers 侧）做一次「测试连接」：
 //   - stdio：spawn 子进程，行缓冲 JSON-RPC 握手 initialize(id:1) → notifications/initialized
 //     + tools/list(id:2)，以 result.tools.length 为工具数；
-//   - http/sse：POST JSON-RPC 同款两步握手；HTTP 4xx/5xx → fail，4xx 且 sse 时附
-//     「端点可能为 SSE 传输，Claude Code 会自行协商」提示。
+//   - http/sse：POST JSON-RPC 同款两步握手；initialize 响应头 mcp-session-id 存在时回传给
+//     tools/list（B-5）；HTTP 4xx/5xx → fail，4xx 且 sse 时附「端点可能为 SSE 传输，
+//     Claude Code 会自行协商」提示。
 // 任何异常路径（进程秒退/spawn ENOENT/超时/stdout 非 JSON/HTTP 4xx 5xx/网络错误/fetch 不可用/
 // 探活器自身 bug）一律收敛为 fail report（error 截断 200 字符），绝不抛出、绝不炸调用方（§3.7）。
 // 结果内存缓存：key = mcpProbeKey（override 键空间同款：managed:<name> / user:<name> /
@@ -19,14 +20,19 @@
 // 本文件导出清单：
 //   - McpProbeInput / McpProbeReport（类型）
 //   - mcpProbeKey(scope, dirKey, name)              统一探活缓存键（与 override 键空间同款）
+//   - resolveProbeTimeoutMs(entry?)                 探活生效超时解析（2026-10-19 点1：条目
+//                                                   timeoutMs 合法整数 → min(v, 120000) 封顶；
+//                                                   undefined/非法 → 默认 10000）
 //   - probeMcpServer(input, timeoutMs?, cacheKey?)  单服务器探活；第 3 参可选——传入非空字符串时
 //                                                   写入探活缓存并回填 report.key（供调用方持有
 //                                                   正确键空间时使用；不传则只探不缓存，
 //                                                   key 回填 managed 键空间的推导默认值）
 //   - probeAllManaged(inputs, timeoutMs?)           管理库并发探活（Promise.allSettled，逐条
-//                                                   以 managed:<name> 键写缓存）
+//                                                   以 managed:<name> 键写缓存；条目自带合法
+//                                                   timeoutMs 时逐条生效——2026-10-19 点1）
 //   - getCachedProbeReports() / hasFreshCache(key, maxAgeMs?) / pruneProbeCache(maxAgeMs?)
 //                                                   缓存读取 / 新鲜判定 / 过期清理
+//   - dropProbeCacheByPrefix(prefix)                按前缀删键（managedSave 落盘后调用，防旧定义结论残留）
 
 import { spawn, type ChildProcess } from 'node:child_process';
 
@@ -41,6 +47,9 @@ export interface McpProbeInput {
   env?: Record<string, string>;
   url?: string;
   headers?: Record<string, string>;
+  /** 探活超时覆盖（毫秒，2026-10-19 点1）：条目级可选；probeAllManaged 逐条经
+   *  resolveProbeTimeoutMs 生效（非法/缺省回落批量参数或默认 10s）。不参与缓存键。 */
+  timeoutMs?: number;
 }
 
 /** 单条探活结果：status ok 仅在完成两步 JSON-RPC 握手并取得 tools 时出现；probedAt 写入时间。 */
@@ -70,6 +79,11 @@ export function mcpProbeKey(scope: 'managed' | 'user' | 'project', dirKey: strin
 const ERROR_TEXT_MAX = 200;
 /** stderr 只留尾部（供「进程提前退出」错误附言），避免超长输出撑爆 report。 */
 const STDERR_TAIL_MAX = 2000;
+/** stdout 未完行剩余缓冲上限（B-4）：1MB——无换行持续输出在探活超时窗口内的内存上界，
+ *  超限即 fail 不再无界累加；完整行已在判定前逐条切出处理，不计入本守卫（D3）。 */
+const STDOUT_BUF_MAX = 1_000_000;
+/** stdout 单行上限（B-4）：256KB——防超大单行 JSON.parse 的内存峰值。 */
+const STDOUT_LINE_MAX = 262_144;
 /** MCP initialize 握手参数（§2 P6 钉死值）。 */
 const MCP_PROTOCOL_VERSION = '2025-06-18';
 const PROBE_CLIENT_INFO = { name: 'claude-link-probe', version: '0.0.0' } as const;
@@ -178,8 +192,9 @@ function isResponseForId(msg: unknown, id: 1 | 2): boolean {
 /**
  * stdio 探活主体：spawn → 发 initialize(id:1) → 收 id:1 响应 → 发 notifications/initialized +
  * tools/list(id:2) → 收 id:2 响应 → ok + toolCount。
- * fail 路径：spawn ENOENT / 总超时 / 进程提前退出（附 stderr 尾部）/ stdout 行非 JSON / 响应带
- * error 字段。stderr 仅记录不判死（很多真实服务器往 stderr 打日志）。
+ * fail 路径：spawn ENOENT / 总超时 / 进程提前退出（附 stderr 尾部）/ stdout 行非 JSON /
+ * stdout 输出超限（B-4：未完行剩余缓冲 >1MB 或单行 >256KB）/ 响应带 error 字段。
+ * stderr 仅记录不判死（很多真实服务器往 stderr 打日志）。
  */
 function probeStdioServer(input: McpProbeInput, timeoutMs: number): Promise<ProbeOutcome> {
   return new Promise((resolve) => {
@@ -259,6 +274,16 @@ function probeStdioServer(input: McpProbeInput, timeoutMs: number): Promise<Prob
       while (idx >= 0) {
         const line = stdoutBuf.slice(0, idx).replace(/\r$/, '').trim();
         stdoutBuf = stdoutBuf.slice(idx + 1);
+        if (line.length > STDOUT_LINE_MAX) {
+          // B-4 防御：单行超限不进 JSON.parse，避免内存峰值。
+          finish({
+            status: 'fail',
+            toolCount: 0,
+            error: truncateError('单行响应超限（>256KB）'),
+            probedAt: Date.now(),
+          });
+          return;
+        }
         if (line !== '') {
           let msg: unknown;
           try {
@@ -276,6 +301,19 @@ function probeStdioServer(input: McpProbeInput, timeoutMs: number): Promise<Prob
           if (settled) return;
         }
         idx = stdoutBuf.indexOf('\n');
+      }
+      if (stdoutBuf.length > STDOUT_BUF_MAX) {
+        // B-4 防御（D3 移位）：总量守卫只对「无换行收尾的剩余缓冲」负责——无换行的持续输出
+        // 在超时窗口内最多堆积 1MB，超限即 fail（finish 内已 off('data') 停累积 + settled
+        // 防重复收官）。完整行洪水不经此路径：非 JSON 行在首次出现即 fail（既有行为），
+        // 合法响应按完整行逐条切出、单行 ≤256KB 各自处理，不再被总量误杀。
+        finish({
+          status: 'fail',
+          toolCount: 0,
+          error: truncateError('stdout 输出超限（>1MB），疑似非 MCP 服务器命令'),
+          probedAt: Date.now(),
+        });
+        return;
       }
     };
 
@@ -359,10 +397,12 @@ async function probeHttpServer(input: McpProbeInput, timeoutMs: number): Promise
   const probedAt = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const postJson = (body: unknown): Promise<Response> =>
+  const postJson = (body: unknown, extraHeaders?: Record<string, string>): Promise<Response> =>
     fetch(input.url as string, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(input.headers ?? {}) },
+      // D4：extraHeaders（服务器签发的 mcp-session-id）有意后置——同名时覆盖用户自定义值，
+      // 会话延续须遵从服务器对本会话的新签发；如需用户优先须产品决策另立。
+      headers: { 'content-type': 'application/json', ...(input.headers ?? {}), ...(extraHeaders ?? {}) },
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -375,7 +415,12 @@ async function probeHttpServer(input: McpProbeInput, timeoutMs: number): Promise
     const initErr = rpcErrorMessage(initParsed.msg);
     if (initErr !== null) return { status: 'fail', toolCount: 0, error: truncateError(`initialize 失败：${initErr}`), probedAt };
 
-    const toolsRes = await postJson(toolsListRequest());
+    // B-5：Streamable HTTP 会话延续——initialize 响应头若带 mcp-session-id，第二步 tools/list
+    // 原样回传（严格服务器缺此头会 404）；sid 为 null/空串则不传头（宽松服务器忽略多余头，无副作用）。
+    // D4：sid 与用户自定义头同名时，服务器签发值有意优先（postJson 展开序 input.headers →
+    // extraHeaders）——会话延续须遵从服务器对本会话的新签发；如需用户优先须产品决策另立。
+    const sid = initRes.headers.get('mcp-session-id'); // Headers.get 大小写不敏感
+    const toolsRes = await postJson(toolsListRequest(), sid ? { 'mcp-session-id': sid } : undefined);
     if (!toolsRes.ok) return httpStatusFail(toolsRes.status, toolsRes.statusText, input.transport === 'sse' ? 'sse' : 'http', 'tools/list ');
     const toolsParsed = await parseJsonBody(toolsRes);
     if (!toolsParsed.ok) return { status: 'fail', toolCount: 0, error: `tools/list ${toolsParsed.error}`, probedAt };
@@ -400,17 +445,32 @@ async function probeHttpServer(input: McpProbeInput, timeoutMs: number): Promise
 // ── 对外入口（整体 try/catch 兜底 + 缓存）──────────────────────────────────
 
 /**
+ * 探活生效超时解析（2026-10-19 mcp-settings-plan-a 点1）：条目 timeoutMs 为合法整数
+ *（Number.isInteger 且 >=1）→ Math.min(v, 120000)（超配封顶 120s 防呆）；undefined / 缺字段 /
+ * 非法（0/负/小数/字符串/null）→ 默认 10000。与配置侧 mcp-config.isValidMcpTimeoutMs（1..120000
+ * 之外静默丢字段）分工：配置侧管落库合法性，本函数管运行时生效值（宁可封顶执行，不丢探活）。
+ */
+export function resolveProbeTimeoutMs(entry?: { timeoutMs?: unknown }): number {
+  const v = entry?.timeoutMs;
+  if (typeof v === 'number' && Number.isInteger(v) && v >= 1) return Math.min(v, 120_000);
+  return 10_000;
+}
+
+/**
  * 单服务器探活（§2 P6）：整体 try/catch，任何未预期异常 → fail report（绝不炸调用方，§3.7）。
  * cacheKey 传入非空字符串 → report.key = cacheKey 并写入探活缓存（供「测试连接」等需要缓存
  * 最近值的调用方）；不传 → 只探不缓存，key 回填 managed 键空间推导值（仅作关联用途）。
+ * 生效超时（2026-10-19 点1）：Math.min(timeoutMs ?? 10000, 120000)——入参为「生效值」，此处仅对
+ * 超配/缺省统一兜底封顶（resolveProbeTimeoutMs 同语义）；不传沿用既有默认 10s，行为不变。
  */
 export async function probeMcpServer(input: McpProbeInput, timeoutMs = 10_000, cacheKey?: string): Promise<McpProbeReport> {
+  const effectiveTimeoutMs = Math.min(timeoutMs ?? 10_000, 120_000);
   let outcome: ProbeOutcome;
   try {
     outcome =
       input.transport === 'stdio'
-        ? await probeStdioServer(input, timeoutMs)
-        : await probeHttpServer(input, timeoutMs);
+        ? await probeStdioServer(input, effectiveTimeoutMs)
+        : await probeHttpServer(input, effectiveTimeoutMs);
   } catch (e) {
     outcome = { status: 'fail', toolCount: 0, error: truncateError(`探活器内部异常：${errMessage(e)}`), probedAt: Date.now() };
   }
@@ -425,10 +485,18 @@ export async function probeMcpServer(input: McpProbeInput, timeoutMs = 10_000, c
 /**
  * 管理库并发探活（§2 P6）：Promise.allSettled 并发，逐条以 managed:<name> 键写缓存；
  * 某条若意外 rejected（probeMcpServer 自身已兜底，此处为防御性第二道）→ 该条 fail report。
+ * per-entry 超时（2026-10-19 点1）：条目自带合法 timeoutMs（>=1 整数）→ 以 resolveProbeTimeoutMs
+ * 逐条生效（封顶在 probeMcpServer 内统一执行）；未带/非法 → 沿用批量参数 timeoutMs（缺省
+ * undefined → probeMcpServer 默认 10s，既有行为不变）。缓存键不变：mcpProbeKey 同台同键，
+ * 超时差异不参与新鲜判定（60s 缓存语义维持）。
  */
 export async function probeAllManaged(inputs: McpProbeInput[], timeoutMs?: number): Promise<McpProbeReport[]> {
   const settled = await Promise.allSettled(
-    inputs.map((input) => probeMcpServer(input, timeoutMs, mcpProbeKey('managed', null, input.name))),
+    inputs.map((input) => {
+      const hasOwnTimeout = typeof input.timeoutMs === 'number' && Number.isInteger(input.timeoutMs) && input.timeoutMs >= 1;
+      const effective = hasOwnTimeout ? resolveProbeTimeoutMs(input) : timeoutMs;
+      return probeMcpServer(input, effective, mcpProbeKey('managed', null, input.name));
+    }),
   );
   return settled.map((r, i) => {
     if (r.status === 'fulfilled') return r.value;
@@ -464,4 +532,10 @@ export function pruneProbeCache(maxAgeMs = 60_000): void {
   for (const [key, report] of probeCache) {
     if (now - report.probedAt >= maxAgeMs) probeCache.delete(key);
   }
+}
+
+/** 按前缀删除探活缓存键（managedSave 落盘后调用，防旧定义结论残留）。
+ *  只删命中前缀的键：'managed:' 不影响 user:/project: 键（B-21 留空间）。 */
+export function dropProbeCacheByPrefix(prefix: string): void {
+  for (const k of probeCache.keys()) if (k.startsWith(prefix)) probeCache.delete(k);
 }

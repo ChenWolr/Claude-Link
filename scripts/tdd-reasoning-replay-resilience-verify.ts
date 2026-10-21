@@ -86,6 +86,13 @@ const ERROR_TEXT = 'API Error: 400 The `reasoning_content` in the thinking mode 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function makeSpyWindow(sink: Record<string, unknown>[]) {
+  // P2（web-access 推送总线）同步：CHAT_EVENT 发射已收口 pushToMainWindow——测试改经 webSink
+  // 采集（与原 webContents.send spy 等价；本脚本仅 makeSpyWindow 一次，单例 sink 覆盖安全）。
+  const { setWebPushSink } = require('../src/main/modules/push-bus');
+  setWebPushSink((_channel: string, args: unknown[]) => {
+    const payload = args[0] as { event?: Record<string, unknown> } | undefined;
+    if (payload && payload.event) sink.push(payload.event);
+  });
   return {
     webContents: {
       send: (_channel: string, payload: { sessionId: string; event: Record<string, unknown> }) => {

@@ -46,6 +46,15 @@ export type NativeSdkOptionsCoreInput = Pick<
   settings?: Record<string, unknown>;
   /** 用户配置与附件目录并集；非空时需同时写顶层 Options 与 settings.permissions（调用方已写后者）。 */
   additionalDirectories?: string[];
+  /**
+   * strictMcpConfig 门控信号（B-2）：钉住优先的 effective overrides 非空（存在禁用键）——
+   * `sessionRow?.mcpOverrides ?? config.mcpOverrides` 口径，由调用方（sdk-backend 两处 core
+   * input 构造点：buildSdkOptions / buildProbeSdkOptions，注释互指）计算传入。true 时必须保持
+   * strict 压制引擎原生加载（project .mcp.json/user settings/插件/frontmatter MCP），否则
+   * 「禁用」与 UI 禁用键失效；未传/false 且未挂载顶层 mcpServers（未接管态）→ strict=false，
+   * 恢复引擎原生加载（与 Claude Code 终端行为一致）。
+   */
+  mcpOverridesActive?: boolean;
 };
 
 /**
@@ -131,13 +140,18 @@ export function buildNativeSdkOptionsCore(input: NativeSdkOptionsCoreInput): Pic
     }
   }
   if (input.additionalDirectories !== undefined) options.additionalDirectories = input.additionalDirectories;
-  // MCP 管理（P5，D-V1-1 修正口径）：claude-link 接管 MCP 集合（三层合并产物经上方挂载进
-  // 顶层 Options.mcpServers——strictMcpConfig=true 下引擎【只】认该顶层键，settings 块内
-  // mcpServers 键被忽略；会话钉住 overrides 见 buildClaudeLinkSettingsBlock 的
-  // mergeMcpServersIntoSettings），strictMcpConfig=true 使「禁用」真正生效——引擎忽略
-  // .mcp.json/用户 settings/插件/云端 connectors 的自有 MCP 集合（sdk.d.ts Options.strictMcpConfig 语义）。
-  // 副作用（§3.13，UI note 由 P7 呈现）：claude.ai 云端 connectors 与插件 MCP 不再自动加载——
-  // 这是「禁用必须生效」的必要代价。
-  options.strictMcpConfig = true;
+  // MCP 管理（P5，D-V1-1 修正口径 + B-2 门控化）：strict 取「已挂载 ∨ overrides 激活」——
+  // - 接管态 A（挂载）：三层合并产物非空、经上方挂载进顶层 Options.mcpServers（strict=true 下
+  //   引擎【只】认该顶层键，settings 块内 mcpServers 键被忽略；会话钉住 overrides 见
+  //   buildClaudeLinkSettingsBlock 的 mergeMcpServersIntoSettings）。
+  // - 接管态 B（overrides 激活，input.mcpOverridesActive=true）：effective overrides 非空（存在
+  //   禁用键）但 merged 可能为空（钉住禁用+其余全空/幽灵键）——必须仍 strict=true 压制引擎
+  //   原生拉起，否则「禁用」失效（UI 禁用键失真，selftest-mcp-settings I5 钉死该保底分支）。
+  // - 未接管态（两者皆无 = 用户完全未接管 MCP）：strict=false，恢复引擎原生加载（project
+  //   .mcp.json/user settings/插件/frontmatter MCP），与 Claude Code 终端行为一致——strict=true
+  //   会把这些原生来源全部静默丢弃（selftest-mcp-settings I4 钉死）。
+  // strict=true 副作用（§3.13，UI note 由 P7 呈现）：claude.ai 云端 connectors 与插件 MCP 不再
+  // 自动加载——这是「禁用必须生效」的必要代价。
+  options.strictMcpConfig = options.mcpServers !== undefined || input.mcpOverridesActive === true;
   return options;
 }

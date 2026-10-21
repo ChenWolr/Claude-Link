@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
+import { copyTextToClipboard } from '../../utils/clipboard';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 import { formatDurationMs, formatEndedAt } from '../../../shared/format-duration';
 import { isReasoningReplayApiError } from '../../../shared/upstream-errors';
@@ -46,11 +47,11 @@ async function copyMessage(): Promise<void> {
   if (names.length > 0) parts.push(`[附件] ${names.join('、')}`);
   const out = parts.join('\n');
   if (!out.trim()) return;
-  // hb12-CHR-04：复制失败置错误态，不再静默。（hb13-v 批C 注释纠偏：仅「权限拒绝」路径会进
-  // catch——非安全上下文 clipboard 为 undefined，?. 链静默无操作、不进失败态。）
-  try {
-    await navigator.clipboard?.writeText(out);
-  } catch {
+  // hb12-CHR-04：复制失败置错误态，不再静默。（SA-2：改走 copyTextToClipboard 统一回退——
+  // 网页端非安全上下文 clipboard 为 undefined 时降级 execCommand，仍失败返回 false 进此分支，
+  // 不再是 ?. 链静默无操作。）
+  const ok = await copyTextToClipboard(out);
+  if (!ok) {
     copyFailed.value = true;
     window.setTimeout(() => {
       copyFailed.value = false;

@@ -37,6 +37,8 @@ import { extractLastEffortFromJsonl, extractLastEffortFromText, EFFORT_TAIL_WIND
 import { resolveEffectivePermissionMode, type PermissionMode } from '../../shared/permission-resolver';
 import { isSuccessfulCliResult, isAbortedCliResult } from '../../shared/session-completion';
 import { noteTurnOutcome, beginUserTurn } from './task-queue-engine';
+// 「网页访问（局域网）」P2：推送总线——webContents.send 等价收口（web 关闭时行为不变）。
+import { pushToMainWindow } from './push-bus';
 import { convertResultMessage } from '../../shared/result-converter';
 import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
@@ -995,7 +997,7 @@ function resolveSessionOverride(opts: SpawnOptions): ResolvedSessionOverride | n
 // hb10-PRV-03：连接切换系统消息构造（首回合 prev='初始化' 也走此通道）。
 function notifyDriftMessage(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   prev: { providerName: string | null; modelId: string | null },
   current: { providerName: string | null; modelId: string | null },
 ): void {
@@ -1011,7 +1013,7 @@ function notifyDriftMessage(
       processKind: 'system:connection_drift',
       title: '连接切换',
     });
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message: persisted },
     });
@@ -1072,6 +1074,10 @@ function buildClaudeLinkSettingsBlock(
   requestedAlias: string,
   modelOverride: ResolvedSessionOverride | null,
   effectivePermissionMode: PermissionMode,
+  // D1 去重：调用方（buildSdkOptions / buildProbeSdkOptions）已读的 session 行直接复用，避免同一
+  // 回合/探测构造 options 时对同一 sessionId 重复执行 prepared 索引 SELECT；未传参（undefined/null）
+  // 时保持原状回读，防御未来新调用方。类型即 sessionRepo.getSession 的返回（shared Session | null）。
+  sessionRowIn?: ReturnType<typeof sessionRepo.getSession>,
 ): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined } {
   // 内联 settings——claude-link 显式设置叠加在原生来源之上（managed < user < project < local
   // < Options.settings）。与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），
@@ -1166,7 +1172,9 @@ function buildClaudeLinkSettingsBlock(
   // 空/ null 不加键——空配置下 settings 块与现状字节级一致。sessionId 为全局探针哨兵
   // （'__global_command_probe__'）时 getSession 返回 null → 全局兜底快照保持未过滤
   // （配置页要完整列表；暂态会话的菜单过滤在渲染层做）。
-  const sessionRow = sessionRepo.getSession(sessionId);
+  // D1 去重：调用方已读到行则复用（非空行短路回读）；传 null 或未传参（undefined）时回读——
+  // 结果与旧实现一致（同 id 无并发写时读值相同），仅多一次索引 SELECT。
+  const sessionRow = sessionRowIn ?? sessionRepo.getSession(sessionId);
   out = mergeSkillOverridesIntoSettings(out, sessionRow?.skillOverrides ?? null);
   // MCP 管理：按会话钉住值合并 user/project/managed 三层 MCP 服务器集，合并产物经
   // buildNativeSdkOptionsCore 挂载顶层 Options.mcpServers（strictMcpConfig=true 下 SDK 唯一受认的注入通道；settings 块内 mcpServers 键保留但被 SDK 忽略）。
@@ -1209,7 +1217,15 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // Task 3 / review-v1 F6：显式 settings 由 buildClaudeLinkSettingsBlock 单一构造，query 与 probe 共用，
   // 经 buildNativeSdkOptionsCore 统一放入 Options（原生 settings 来源——不传 settingSources，SDK 默认
   // 加载 user/project/local）。
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode);
+  // D1 去重：同一 sessionRow 亦传入 settings 块构造，消除重复读（先读一行，喂给两处消费）。
+  const sessionRow = sessionRepo.getSession(sessionId);
+  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
+  // B-2 strict 门控信号：钉住优先 effective overrides（与 sdk-mcp.ts mergeMcpServersIntoSettings
+  // 的 overrides 取值同一公式——`sessionRow?.mcpOverrides ?? config.mcpOverrides`，改则同步改；
+  // sessionRow 缺省/无行经 ?. 自然回退全局）。关键坑：不得改用 config.mcpOverrides 单独判定——
+  // 「会话钉住 user:foo 禁用+全局空+merged 空」场景下全局判定会误得 strict=false，引擎原生拉起
+  // foo，钉住禁用失效（selftest-mcp-settings I5 钉死）（D1：同一 sessionRow 亦传入 settings 块构造，消除重复读）。
+  const effectiveOverrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
     env: buildSpawnEnv(override),
     exe: resolveExecutable(config.cliPath),
@@ -1221,6 +1237,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     permissionMode: effectivePermissionMode as SdkOptions['permissionMode'],
     settings,
     additionalDirectories,
+    mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0, // 钉住优先口径，与 buildProbeSdkOptions 的 core 构造点互指，改则同步改
   });
   // 生产 query 特有：流式增量（stream_event）、子 agent 思考透传、统一交互弹窗 hook。
   options.includePartialMessages = true;
@@ -1246,7 +1263,7 @@ function forwardEvent(
   if (!isSessionActive(sessionId)) return;
   touchActivityFromEvent(sessionId, event);
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -1334,7 +1351,7 @@ function forwardEvent(
       // hb10-ENG-02（收窄）：包 try 对齐同文件其他 send——窗口销毁（webContents 已
       // destroyed）时此裸 send 抛错会劫持 result 分支/回滚成功发送的调用链。
       try {
-        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+        pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
       } catch (err) {
         logger.warn(`Failed to send turn-usage CONTEXT_UPDATE [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
       }
@@ -1392,7 +1409,7 @@ function forwardEvent(
       diagnostic: '压缩完成，等待 fresh 快照',
     };
     try {
-      mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
     } catch {
       // webContents 可能已销毁（窗口关闭），忽略
     }
@@ -1508,7 +1525,7 @@ function recordContextRefreshSuccess(sessionId: string): void {
 
 async function refreshContextSnapshot(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   entry: SessionEntry,
   query: Query,
   opts: { compactedJustNow?: boolean; samplePhase: ContextSamplePhase; onFreshSent?: () => void } = { samplePhase: 'query-start' },
@@ -1622,7 +1639,7 @@ async function refreshContextSnapshot(
         : {}),
     };
     try {
-      mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+      pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
     } catch {
       // webContents 已销毁，忽略
     }
@@ -1713,7 +1730,7 @@ async function refreshContextSnapshot(
         diagnostic: fallback.diagnostic,
       };
       try {
-        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+        pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
       } catch {
         // webContents 已销毁，忽略
       }
@@ -1814,7 +1831,7 @@ function extractProbeText(out: string): string {
 
 async function runPostTurnContextProbe(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   probeInstance: number,
   cliSessionId: string,
   opts: { compactedJustNow?: boolean },
@@ -1942,7 +1959,7 @@ async function runPostTurnContextProbe(
         ...compactMetaPayloadFields(sessionId, probeInstance, opts),
       };
       try {
-        mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+        pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
       } catch {
         // webContents 已销毁，忽略
         resolve();
@@ -2047,7 +2064,7 @@ function extractAssistantText(parts: CliMessageContentPart[]): string {
 
 function emitNativeContextReconcile(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   entry: SessionEntry,
   nativeText: string,
   // review-v3 High-1：调用方按代际筛选后传入的本回合 runtime 快照（非同代传 null）。
@@ -2108,7 +2125,7 @@ function emitNativeContextReconcile(
     diagnostic: rec.diagnostic,
   };
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CONTEXT_UPDATE, payload);
+    pushToMainWindow(IPC_CHANNELS.CONTEXT_UPDATE, payload);
   } catch {
     // webContents 已销毁，忽略
   }
@@ -2116,11 +2133,11 @@ function emitNativeContextReconcile(
 
 // 瞬态事件（tool_progress / task_* / compacting）：只 IPC 推前端，不落库 messages 表
 // （它们是运行中进度，不是对话历史，落库会污染历史回看）。
-function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: CliEvent): void {
+function forwardTransient(sessionId: string, _mainWindow: BrowserWindow, event: CliEvent): void {
   if (!isSessionActive(sessionId)) return;
   touchActivityFromEvent(sessionId, event);
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -2128,10 +2145,10 @@ function forwardTransient(sessionId: string, mainWindow: BrowserWindow, event: C
 
 // 原生 Slash Commands：把 registry 快照经独立 COMMANDS_CHANGED IPC 推前端（不落库、不进 CHAT_EVENT）。
 // 带 isSessionActive 守卫——迟到事件对已删除会话无效（计划 Task 4 §3/§7）。
-function emitCommandChanged(sessionId: string, mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
+function emitCommandChanged(sessionId: string, _mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
   if (!isSessionActive(sessionId)) return;
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.COMMANDS_CHANGED, { sessionId, snapshot } as CommandChangedPayload);
+    pushToMainWindow(IPC_CHANNELS.COMMANDS_CHANGED, { sessionId, snapshot } as CommandChangedPayload);
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -2140,9 +2157,9 @@ function emitCommandChanged(sessionId: string, mainWindow: BrowserWindow, snapsh
 // D4：全局兜底快照热刷新广播（COMMANDS_GLOBAL_CHANGED）。刻意不经 emitCommandChanged 的
 // isSessionActive 守卫——暂态会话不在 activeSessions，但正是它最需要这路广播；renderer 的
 // applyGlobalFallback 自行决定覆盖/回填。webContents 销毁静默忽略。
-function emitGlobalCommandsChanged(mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
+function emitGlobalCommandsChanged(_mainWindow: BrowserWindow, snapshot: SessionCommandSnapshot): void {
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, { snapshot } as CommandGlobalChangedPayload);
+    pushToMainWindow(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, { snapshot } as CommandGlobalChangedPayload);
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
   }
@@ -2151,7 +2168,7 @@ function emitGlobalCommandsChanged(mainWindow: BrowserWindow, snapshot: SessionC
 // Task 8：本地命令输出（local_command_output）主进程单一落库。参照 persistApiRetryTerminal：
 // createMessage（role:system, processKind 'system:local_command_output'）+ 推 persisted_message 让 renderer upsert。
 // renderer 不二次落库；result.result 走现有 result 终态兜底（两者并存）。
-function persistLocalCommandOutput(sessionId: string, mainWindow: BrowserWindow, content: string): void {
+function persistLocalCommandOutput(sessionId: string, _mainWindow: BrowserWindow, content: string): void {
   if (!isSessionActive(sessionId)) return;
   let message: ReturnType<typeof messageRepo.createMessage>;
   try {
@@ -2167,7 +2184,7 @@ function persistLocalCommandOutput(sessionId: string, mainWindow: BrowserWindow,
     return;
   }
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message },
     });
@@ -2184,7 +2201,7 @@ const RETRY_PROCESS_KIND: Record<ApiRetryTerminalKind, string> = {
 
 function persistApiRetryTerminal(
   sessionId: string,
-  mainWindow: BrowserWindow,
+  _mainWindow: BrowserWindow,
   state: ApiRetryState,
 ): void {
   if (!isSessionActive(sessionId) || state.phase !== 'terminal' || !state.terminalKind) return;
@@ -2206,7 +2223,7 @@ function persistApiRetryTerminal(
   } catch (err) {
     logger.error(`Failed to persist API retry terminal [${sessionId}]`, err);
     try {
-      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
         sessionId,
         event: {
           type: 'api_retry_terminal',
@@ -2222,7 +2239,7 @@ function persistApiRetryTerminal(
     return;
   }
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message },
     });
@@ -2282,7 +2299,7 @@ function abortNonRetryableUpstream(
       title: '连接配置错误',
       isError: true,
     });
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'persisted_message', message: persisted },
     });
@@ -2333,10 +2350,10 @@ function cleanupToolUseCache(sessionId: string): void {
 }
 
 // 推送计划快照到渲染进程（瞬态：不落库 messages，不调 persistCliEvent）。
-function forwardClaudePlanState(sessionId: string, mainWindow: BrowserWindow, state: ClaudePlanState): void {
+function forwardClaudePlanState(sessionId: string, _mainWindow: BrowserWindow, state: ClaudePlanState): void {
   if (!isSessionActive(sessionId)) return;
   try {
-    mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
       sessionId,
       event: { type: 'claude_plan', sessionId, state } as ClaudePlanCliEvent,
     } as { sessionId: string; event: CliEvent });
@@ -2765,7 +2782,15 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
   const requestedAlias = override?.modelId ?? (opts.modelOverride || opts.model || resolveDefaultModel(config.advancedJson));
   // Task 3 / review-v1 F6：与生产 query 同一核心构造（原生 settings 来源，不传 settingSources 数组；
   // 显式 settings 共用 buildClaudeLinkSettingsBlock，经工厂统一放入 Options）。
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode);
+  // D1 去重：同一 sessionRow 亦传入 settings 块构造，消除重复读（先读一行，喂给两处消费）。
+  const sessionRow = sessionRepo.getSession(sessionId);
+  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
+  // B-2 strict 门控信号：与 buildSdkOptions 的 core 构造点互指（同一钉住优先公式——
+  // `sessionRow?.mcpOverrides ?? config.mcpOverrides`，与 sdk-mcp.ts mergeMcpServersIntoSettings
+  // 同口径，改则同步改）。不得改用 config.mcpOverrides 单独判定（反例见 buildSdkOptions 处注释，
+  // selftest-mcp-settings I5 钉死）；probe 的哨兵 sessionId 无行时经 ?. 自然回退全局
+  //（D1：同一 sessionRow 亦传入 settings 块构造，消除重复读）。
+  const effectiveOverrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
     env: buildSpawnEnv(override),
     exe,
@@ -2777,6 +2802,7 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
     permissionMode: effectivePermissionMode as SdkOptions['permissionMode'],
     settings,
     additionalDirectories,
+    mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0, // 钉住优先口径，与 buildSdkOptions 的 core 构造点互指，改则同步改
   });
 
   return { options, exe };
@@ -4350,7 +4376,7 @@ function scheduleReasoningReplayRetryForTurn(sessionId: string, mainWindow: Brow
       const persisted = messageRepo.createMessage({ sessionId, role: 'user', content: text, eventType: 'message' });
       // hb10-ENG-05：落库后补 persisted_message 推送（对齐 CHAT_SEND 形态）——自动重试回合的
       // 用户气泡立即可见，不再等回合结束重载才出现。
-      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
         sessionId,
         event: { type: 'persisted_message', message: persisted },
       });
@@ -4480,7 +4506,7 @@ export function killProcess(
         title: '权限弹窗已取消',
         isError: true,
       });
-      mainWindow.webContents.send(IPC_CHANNELS.CHAT_EVENT, {
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
         sessionId,
         event: { type: 'persisted_message', message: persisted },
       });

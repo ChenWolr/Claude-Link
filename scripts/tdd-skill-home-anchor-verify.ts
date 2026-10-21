@@ -28,7 +28,7 @@ const index = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'ut
 
 console.log('\n=== A10（D07-F2）：Skill 映射用户根锚点与引擎同源 ===');
 check('SKILL_PROJECT_DIRS_GET 用户根改 effectiveUserHome() ?? os.homedir()', () => {
-  const at = ipc.indexOf('ipcMain.handle(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
+  const at = ipc.indexOf('regInvokeHandler(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
   assert.ok(at > -1, '缺 handler 注册');
   const region = ipc.slice(at, at + 900);
   assert.match(region, /collectUserSkillDirNames\(path\.join\(\s*effectiveUserHome\(\) \?\? os\.homedir\(\),\s*'\.claude',\s*'skills'\s*\)\)/, '映射扫描未改用 effectiveUserHome 同源口径');

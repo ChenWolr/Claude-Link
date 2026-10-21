@@ -4,6 +4,46 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Claude Link</title>
+    <script>
+      // 网页访问 P4：hash 路由（createWebHashHistory）模块求值会把 #token= 归一成 #/token=，
+      // 必须在其之前消费令牌。Electron 路径 preload 已注入 window.claudeLink，直接跳过。
+      (function () {
+        if (window.claudeLink) return;
+        if (location.hash.indexOf('#token=') !== 0) return;
+        var raw = location.hash.slice(7);
+        history.replaceState(null, '', location.pathname + location.search);
+        try {
+          var t = decodeURIComponent(raw).trim();
+          if (t) { try { localStorage.setItem('clWebToken', t); } catch (e) {} }
+        } catch (e) {}
+      })();
+    </script>
+    <script>
+      // http://局域网IP 非安全上下文无 crypto.randomUUID(secure-only)，渲染层 9 处直调会抛 TypeError。
+      // crypto.getRandomValues 在非安全上下文可用，据此补 UUID v4 polyfill；
+      // Electron 窗口是安全上下文、原生存在，本脚本不触发，桌面行为零变化。
+      (function () {
+        if (typeof crypto === 'undefined') return;
+        if (typeof crypto.randomUUID === 'function') return;
+        if (typeof crypto.getRandomValues !== 'function') return;
+        var uuidV4 = function () {
+          var b = new Uint8Array(16);
+          crypto.getRandomValues(b);
+          b[6] = (b[6] & 0x0f) | 0x40;
+          b[8] = (b[8] & 0x3f) | 0x80;
+          var h = Array.prototype.map.call(b, function (x) {
+            return ('0' + x.toString(16)).slice(-2);
+          }).join('');
+          return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) +
+            '-' + h.slice(16, 20) + '-' + h.slice(20);
+        };
+        try {
+          Object.defineProperty(crypto, 'randomUUID', {
+            value: uuidV4, writable: true, configurable: true,
+          });
+        } catch (e) { /* 极端环境定义失败则放弃，业务行为与补丁前一致 */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

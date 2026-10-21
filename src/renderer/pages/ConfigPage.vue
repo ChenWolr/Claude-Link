@@ -18,6 +18,10 @@ import { THEME_PALETTES, FONT_SCALE_SIZES } from '../../shared/constants';
 import { sanitizeTaskDelayMinutes } from '../../shared/queue-config';
 import { sanitizeMaxTurns } from '../../shared/max-turns';
 import { attachUserSkillDirNames, findStaleSkillKeys, isStaleKeyScanReady, loadSkillProjectDirs, normalizeDirKey } from '../../shared/project-skills';
+// 网页访问（局域网）P5：sanitize 与主进程同源（端口夹取/Host 归一）；信息卡视图类型。
+import { sanitizeWebAccessConfig, WEB_ACCESS_DEFAULT_PORT } from '../../shared/web-access-protocol';
+import type { WebAccessConfig } from '../../shared/types/config';
+import type { WebAccessInfoView } from '../../shared/types/ipc';
 import { useInteractionStore } from '../stores/interaction-store';
 import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
 import type { AppUpdateState } from '@shared/types/update';
@@ -37,12 +41,12 @@ const bridgeSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
 // MCP tab 切回时经 McpSettings.refresh 重拉快照（v-show 常挂，onMounted 只跑一次）。
 const mcpSettingsRef = ref<{ refresh: () => Promise<void> } | null>(null);
 
-// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ MCP（MCP 服务器管理）/ IM（飞书/微信机器人）/ 关于（扉页：身份+版本+应用内更新）。
-type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'mcp' | 'im' | 'about';
+// 分类标签页：连接（供应商/模型可选项库）/ 行为 / 外观 / Skill（Skill 管理独立设置页）/ MCP（MCP 服务器管理）/ IM（飞书/微信机器人）/ 网页访问（局域网直连服务）/ 关于（扉页：身份+版本+应用内更新）。
+type TabId = 'connection' | 'behavior' | 'appearance' | 'skill' | 'mcp' | 'im' | 'web' | 'about';
 const activeTab = ref<TabId>('connection');
 
 // 侧栏「可更新」徽标等外部入口直达指定 tab：/config?tab=about（非法值忽略保持默认）。
-const TAB_IDS = ['connection', 'behavior', 'appearance', 'skill', 'mcp', 'im', 'about'] as const;
+const TAB_IDS = ['connection', 'behavior', 'appearance', 'skill', 'mcp', 'im', 'web', 'about'] as const;
 const route = useRoute();
 onMounted(() => {
   const q = route.query.tab;
@@ -62,6 +66,10 @@ const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
   'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'queueEnabled', 'taskDelayMinutes', 'themePaletteId', 'fontScale', 'defaultThinkingLevel', 'disableAutoMemory', 'disableBackgroundTasks', 'disableCron', 'disableFeedbackSurvey', 'disableTelemetry', 'disableNonessentialTraffic',
   'notifyOnLeave', 'minimizeToTray', 'autoRetryReasoningReplay', 'skillOverrides',
+  // 网页访问（局域网）P5：开关/端口/allowedHosts 写 store.config.webAccess（纯 JSON 形状，
+  // 结构化克隆兼容），经同一快照比对走既有 700ms 防抖自动保存链；主进程 CONFIG_SAVE 落地前
+  // syncWebAccessServer 即时启停（P3 接线），保存完成信号驱动本页状态卡刷新（见下方 watch）。
+  'webAccess',
 ] as const;
 
 // hb10-CFG-04：'projection-failed' = 保存本身成功但 settings.local.json 投影失败（可见性）。
@@ -310,6 +318,9 @@ watch(activeTab, (tab) => {
   if (tab === 'im') void bridgeSettingsRef.value?.refresh?.();
   // MCP tab 激活重拉快照（同上：v-show 常挂，磁盘 ~/.claude.json/.mcp.json 可能已被终端改动）。
   if (tab === 'mcp') void mcpSettingsRef.value?.refresh?.();
+  // P5 网页访问 tab 激活重拉状态卡（运行状态/URL/令牌是主进程侧易变数据；保存完成后的
+  // 刷新另由 watch(saveStatus) 承担）。
+  if (tab === 'web') void refreshWebAccessInfo();
 });
 
 // ── 项目级 Skill 管理（方案 B 双栏 master-detail，2026-09-17）─────────────────
@@ -538,9 +549,128 @@ async function cleanupStaleSkillKeys(): Promise<void> {
   store.config.skillOverrides = next;
 }
 
+// ── 网页访问（局域网）（P5，docs/plans/2026-10-20-web-access-plan.md §3-P5）────────────
+// 三个配置字段（enabled/port/allowedHosts）经 writable computed 直写 store.config.webAccess
+//（整体替换对象 → 纯 JSON 形状，saveConfig 的 JSON 往返脱代理兼容），纳入 PERSISTED_FIELDS
+// 走既有自动保存链；主进程保存落地前 sync 即时启停。状态卡数据 = webAccessGetInfo()。
+// 缺失/非法兜底：读侧 `?.` + 默认值（渲染期零副作用写），写侧整体替换确保键恒为合法对象。
+const webAccessInfo = ref<WebAccessInfoView | null>(null);
+const webAccessInfoError = ref<string | null>(null);
+// 「显示」切换：本地组件态持明文（来自 getInfo），重生成后复位隐藏（令牌卫生）。
+const showWebAccessToken = ref(false);
+
+async function refreshWebAccessInfo(): Promise<void> {
+  try {
+    webAccessInfo.value = await window.claudeLink.webAccessGetInfo();
+    webAccessInfoError.value = null;
+  } catch (e) {
+    // 状态获取失败不崩页：保留旧数据 + 独立错误行提示。
+    webAccessInfoError.value = e instanceof Error ? e.message : '网页访问状态获取失败';
+  }
+}
+
+// 写基准：以当前值（缺失回落默认）展开，调用方叠加补丁后整体替换。
+function waRaw(): WebAccessConfig {
+  return {
+    enabled: store.config.webAccess?.enabled ?? false,
+    port: store.config.webAccess?.port ?? WEB_ACCESS_DEFAULT_PORT,
+    allowedHosts: store.config.webAccess?.allowedHosts ?? [],
+  };
+}
+
+// 启用开关：写后由快照 watch 触发自动保存（700ms 防抖）→ 主进程保存落地前 sync 即时启停。
+const waEnabled = computed({
+  get: () => store.config.webAccess?.enabled ?? false,
+  set: (enabled: boolean) => {
+    store.config.webAccess = sanitizeWebAccessConfig({ ...waRaw(), enabled });
+  },
+});
+
+// 端口：输入中不做归一（避免逐键把中间态夹回 8790 干扰输入），失焦时夹取。
+const waPort = computed({
+  get: () => store.config.webAccess?.port ?? WEB_ACCESS_DEFAULT_PORT,
+  set: (port: number) => {
+    store.config.webAccess = { ...waRaw(), port };
+  },
+});
+// 失焦夹取：非有限整数/越界（<1024 或 >65535）回落 8790，与主进程 sanitize 同源。
+function clampWaPort(): void {
+  store.config.webAccess = sanitizeWebAccessConfig(waRaw());
+}
+
+// Host 白名单：文本框逗号（半/全角）分隔 ⇄ string[]；输入中仅做拆分剔除空段，
+// 失焦时走同一 sanitize 归一（小写化/去重/上限 8 条）。
+const waAllowedHostsText = computed({
+  get: () => (store.config.webAccess?.allowedHosts ?? []).join(', '),
+  set: (text: string) => {
+    const allowedHosts = text
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    store.config.webAccess = { ...waRaw(), allowedHosts };
+  },
+});
+function normalizeWaAllowedHosts(): void {
+  store.config.webAccess = sanitizeWebAccessConfig(waRaw());
+}
+
+// 保存完成即刷新状态卡（含投影失败——配置已落 store，sync 已按新值执行）。
+watch(saveStatus, (status) => {
+  if (status === 'saved' || status === 'projection-failed') void refreshWebAccessInfo();
+});
+
+// 状态卡三态收窄（模板不做联合类型收窄，vue-tsc 稳妥）：running/error 各自取出带判别字段的
+// 具体成员，off/空态走兜底分支。
+const waRunning = computed(() =>
+  webAccessInfo.value?.status?.state === 'running' ? webAccessInfo.value.status : null,
+);
+const waStatusError = computed(() =>
+  webAccessInfo.value?.status?.state === 'error' ? webAccessInfo.value.status : null,
+);
+
+// 令牌掩码：前 4 + **** + 后 4（≤8 字符整体打码；正常 32 字符令牌不触该分支）。
+function maskWebAccessToken(token: string): string {
+  if (token.length <= 8) return '****';
+  return `${token.slice(0, 4)}****${token.slice(-4)}`;
+}
+
+// 重新生成令牌：渲染层 requestConfirm 本地二次确认（不经主进程）→ 重生成（主进程同时踢掉
+// 全部已认证网页连接）→ 刷新状态卡（新令牌/新 URL/新二维码）。
+async function regenerateWebAccessToken(): Promise<void> {
+  const ok = await interactionStore.requestConfirm({
+    title: '重新生成网页访问令牌',
+    message: '重新生成后旧令牌立即失效，所有已连接的网页端将被断开，需用新令牌重新登录。确认重新生成？',
+    confirmText: '重新生成',
+    cancelText: '取消',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await window.claudeLink.webAccessRegenerateToken();
+    showToast('网页访问令牌已重新生成，网页端需用新令牌重新登录');
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : '令牌重新生成失败', 'error');
+  }
+  showWebAccessToken.value = false;
+  await refreshWebAccessInfo();
+}
+
+// 复制链接：交主进程 webAccess:copyLink 落主机剪贴板（通道内做 URL 白名单校验）。
+async function copyWebAccessLink(): Promise<void> {
+  const url = webAccessInfo.value?.urls?.[0];
+  if (!url) return;
+  try {
+    await window.claudeLink.webAccessCopyLink(url);
+    showToast('连接链接已复制到剪贴板');
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : '复制失败', 'error');
+  }
+}
+
 // 关于 tab：版本展示 + 应用内检查更新（消费全局 update-store——订阅单主化见 store 头注释，
 // 本页不再直接订阅更新广播通道，removeAllListeners 互踩点已消除）。
 const updateStore = useUpdateStore();
+
 
 const updateStatus = computed<AppUpdateState['status']>(() => updateStore.status);
 
@@ -661,6 +791,7 @@ const updateStageTone = computed(() => {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'skill' }]" @click="activeTab = 'skill'">Skill</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'mcp' }]" @click="activeTab = 'mcp'">MCP</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'im' }]" @click="activeTab = 'im'">IM</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'web' }]" @click="activeTab = 'web'">网页访问</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'about' }]" @click="activeTab = 'about'">关于</button>
       </nav>
       <div class="save-actions">
@@ -983,6 +1114,72 @@ const updateStageTone = computed(() => {
              作用域前缀）经主进程 setMcpOverride 落盘，不经渲染层 config 整包保存链） -->
         <div v-show="activeTab === 'mcp'" class="solo-card">
           <McpSettings ref="mcpSettingsRef" />
+        </div>
+
+        <!-- 网页访问（局域网）：开关/端口/状态卡（URL+二维码）/令牌管理/Host 白名单
+             （P5，docs/plans/2026-10-20-web-access-plan.md §3-P5。字段写 store.config.webAccess
+             走 PERSISTED_FIELDS 自动保存链；主进程 CONFIG_SAVE 落地前 sync 即时启停，保存完成
+             信号驱动状态卡刷新；web tab 激活时重拉 getInfo） -->
+        <div v-show="activeTab === 'web'" class="solo-card">
+          <div class="mscroll">
+            <div class="section" data-testid="web-access-section">
+              <h3 class="section-title">网页访问（局域网）</h3>
+              <p class="webacc-note webacc-note--warn">开启后局域网内持有令牌的设备可完全操控本机 Claude Link（含文件浏览与发送），请仅在可信网络使用。</p>
+              <p class="webacc-note">仅限可信局域网使用（明文 HTTP）。</p>
+
+              <label class="field field--toggle">
+                <span class="field-label">启用网页访问</span>
+                <span class="field-desc">开启后本机在下方端口提供网页版界面，局域网设备扫码或复制链接（令牌在链接中）即可完整使用 Claude Link；关闭后立即停止监听并断开全部网页连接。</span>
+                <input v-model="waEnabled" type="checkbox" />
+              </label>
+
+              <label class="field">
+                <span class="field-label">端口</span>
+                <span class="field-desc">1024–65535，保存后按新端口重启监听。网页端自行改端口会断开自身连接，建议在本机修改网页访问设置。</span>
+                <input v-model.number="waPort" type="number" min="1024" max="65535" @blur="clampWaPort" />
+              </label>
+
+              <!-- 状态卡：off「未开启」/ running 逐条 URL（首条带二维码）/ error message -->
+              <div class="webacc-status" data-testid="web-access-status">
+                <div v-if="webAccessInfoError" class="webacc-status__line webacc-status__line--error">状态获取失败：{{ webAccessInfoError }}</div>
+                <template v-if="waRunning">
+                  <div class="webacc-status__line webacc-status__line--ok">运行中 · 端口 {{ waRunning.port }}</div>
+                  <img v-if="webAccessInfo?.qrDataUrl" class="webacc-qr" :src="webAccessInfo.qrDataUrl" alt="网页访问连接二维码（扫码直达）" />
+                  <ol class="webacc-urls">
+                    <li v-for="url in webAccessInfo?.urls ?? []" :key="url"><code>{{ url }}</code></li>
+                  </ol>
+                  <p v-if="(webAccessInfo?.urls ?? []).length === 0" class="webacc-status__line">未发现可用的局域网 IPv4 地址（本机可能仅有虚拟网卡）。</p>
+                  <p class="webacc-status__line">若上述地址无法打开：请确认应用正在运行、访问的 IP 与列表一致（VPN/虚拟网卡地址也在此列）；仍不通时需在 Windows 防火墙放行该端口（管理员运行：netsh advfirewall firewall add rule name="Claude Link Web Access" dir=in action=allow protocol=TCP localport=&lt;端口&gt; profile=any）。</p>
+                </template>
+                <div v-else-if="waStatusError" class="webacc-status__line webacc-status__line--error">
+                  启动失败（端口 {{ waStatusError.port }}）：{{ waStatusError.message }}
+                </div>
+                <div v-else class="webacc-status__line">未开启</div>
+              </div>
+
+              <!-- 令牌区：掩码/显示切换/复制链接/重新生成（requestConfirm 本地二次确认） -->
+              <div class="field webacc-token">
+                <span class="field-label">访问令牌</span>
+                <span class="field-desc">令牌是网页端登录本机的唯一凭据；疑似泄漏请立即重新生成，所有网页端将被断开。</span>
+                <div class="webacc-token__row">
+                  <code class="webacc-token__value">{{ webAccessInfo?.token ? (showWebAccessToken ? webAccessInfo.token : maskWebAccessToken(webAccessInfo.token)) : '（未生成，开启网页访问后自动生成）' }}</code>
+                  <button v-if="webAccessInfo?.token" type="button" class="webacc-btn" @click="showWebAccessToken = !showWebAccessToken">{{ showWebAccessToken ? '隐藏' : '显示' }}</button>
+                  <button type="button" class="webacc-btn" :disabled="!(webAccessInfo?.urls?.length)" @click="copyWebAccessLink()">复制链接</button>
+                  <button type="button" class="webacc-btn webacc-btn--danger" @click="regenerateWebAccessToken()">重新生成令牌</button>
+                </div>
+              </div>
+
+              <!-- 高级：allowedHosts（隧道/反代域名）折叠行 -->
+              <details class="webacc-advanced">
+                <summary>高级</summary>
+                <label class="field">
+                  <span class="field-label">Host 白名单（allowedHosts）</span>
+                  <span class="field-desc">除 localhost 与局域网 IP 外额外放行的 Host，逗号分隔（用于隧道/反向代理域名）；最多 8 条，失焦自动小写化并去重。</span>
+                  <input v-model="waAllowedHostsText" type="text" placeholder="隧道/反代域名，如 link.example.top" @blur="normalizeWaAllowedHosts" />
+                </label>
+              </details>
+            </div>
+          </div>
         </div>
 
         <!-- 关于：扉页式（A 案 2026-09-29 重设计）——身份区+8 态更新舞台+链接行；
@@ -2538,6 +2735,120 @@ input.skill-search:focus {
   .about-spin {
     animation: none;
   }
+}
+
+/* ── 网页访问（局域网）节（P5）：仅状态卡/二维码/令牌行/折叠行小件；
+   开关行/端口行/Host 白名单行复用既有 .field/.field--toggle/.section 体系。 ── */
+.webacc-note {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin: 0.25rem 0 0;
+}
+
+.webacc-note--warn {
+  color: var(--color-danger);
+}
+
+.webacc-status {
+  display: grid;
+  gap: 0.625rem;
+  padding: 0.875rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  margin: 0.875rem 0;
+}
+
+.webacc-status__line {
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.webacc-status__line--ok {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.webacc-status__line--error {
+  color: var(--color-danger);
+}
+
+.webacc-qr {
+  width: 9rem;
+  height: 9rem;
+  padding: 0.375rem;
+  border-radius: var(--radius-md);
+  background: #fff;
+  justify-self: start;
+}
+
+.webacc-urls {
+  margin: 0;
+  padding-left: 1.25rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.webacc-urls code {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  word-break: break-all;
+}
+
+.webacc-token {
+  border-top: 1px solid var(--color-border);
+}
+
+.webacc-token__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.webacc-token__value {
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  word-break: break-all;
+}
+
+.webacc-btn {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+  padding: 0.375rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.webacc-btn:hover {
+  border-color: var(--color-accent);
+}
+
+.webacc-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.webacc-btn--danger {
+  color: var(--color-danger);
+}
+
+.webacc-advanced summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 0.5rem 0;
+}
+
+.webacc-advanced summary:hover {
+  color: var(--color-text);
 }
 
 </style>

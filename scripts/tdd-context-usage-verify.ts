@@ -726,8 +726,9 @@ check('探针失败路径无 payload 发送（失败只 logger.debug，不发 CO
   const probeFnStart = sdkBackendSrc.indexOf('async function runPostTurnContextProbe(');
   const probeFnEnd = sdkBackendSrc.indexOf('export function schedulePostTurnProbe(', probeFnStart);
   const probeFn = sdkBackendSrc.slice(probeFnStart, probeFnEnd);
-  // 失败路径（解析失败/守卫拒绝/超时）在 return 前都不得出现 webContents.send。
-  const sendSites = [...probeFn.matchAll(/webContents\.send\(IPC_CHANNELS\.CONTEXT_UPDATE/g)];
+  // 失败路径（解析失败/守卫拒绝/超时）在 return 前都不得出现推送发射点。
+  // P2（web-access 推送总线）同步：成功路径发射收口 pushToMainWindow（原 webContents.send）。
+  const sendSites = [...probeFn.matchAll(/pushToMainWindow\(IPC_CHANNELS\.CONTEXT_UPDATE/g)];
   assert.equal(sendSites.length, 1, '探针函数应只有成功路径一处 CONTEXT_UPDATE 发送点');
 });
 check('renderer 预填只写 stale 不写 fresh（buildPersistedCanonical）', () => {

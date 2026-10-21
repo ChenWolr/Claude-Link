@@ -14,9 +14,9 @@
 
 import { computed, ref, watch } from 'vue';
 import { useSessionStore } from '../stores/session-store';
+import type { BackgroundTask } from '../stores/session-store';
 import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useChatDraftStore } from '../stores/chat-draft-store';
-import type { BackgroundTask } from '../stores/session-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliApiRetryTerminalFallbackEvent, CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
@@ -131,7 +131,15 @@ export function applyApiRetryTerminalFallbackEvent(
 }
 
 // C：把进度类事件（tool_progress / compacting / compact_result / task_*）映射到 store。纯函数（不依赖闭包），可单测。
-// task_notification 终态：先 upsert 终态卡片，4 秒后移除（淡出，避免列表残留已完成任务）。
+// D 点语义：skip_transcript 内务任务完全滤除；started 建卡（重复 started 不重置计时/历史）；
+// progress 仅消费有卡且未终态的任务（push progressHistory cap 50）；notification 终态卡保留
+// （不再 4s 自动删除，保留下回合边界 clearBackgroundTasks）。
+// 后台任务终态判定（completed/failed/stopped）。模块级纯函数：applyProgressEvent 各分支
+// 与回合边界清卡/失败恢复（F7）共用，保证「终态」口径单源。
+function isTerminalTaskStatus(s?: string): boolean {
+  return s === 'completed' || s === 'failed' || s === 'stopped';
+}
+
 export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, event: CliEvent): void {
   if (event.type === 'tool_progress') {
     if (event.toolUseId) store.setToolProgress(event.toolUseId, event.elapsedSeconds);
@@ -154,21 +162,70 @@ export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, ev
       event.subtype === 'task_progress' ||
       event.subtype === 'task_notification'
     ) {
-      const task: BackgroundTask = {
-        taskId: event.taskId,
-        toolUseId: event.toolUseId,
-        description: event.description,
-        taskType: event.taskType,
-        status: event.status,
-        usage: event.usage,
-        lastToolName: event.lastToolName,
-        summary: event.summary,
-      };
-      store.upsertBackgroundTask(task);
-      if (event.subtype === 'task_notification') {
-        const tid = event.taskId;
-        setTimeout(() => store.removeBackgroundTask(tid), 4000);
+      // 内务任务（skip_transcript=true）完全不出现在面板：started 不建卡、notification 不落终态卡
+      // （progress 本就要求有卡才消费）。严格等于 true——缺字段/undefined 一律视作普通任务。
+      if (event.skipTranscript === true) return;
+      const existing = store.backgroundTasks[event.taskId];
+      if (event.subtype === 'task_started') {
+        // F5：终态守卫——迟到的重复/乱序 started 不得把已终态卡复活为永久运行中
+        // （started 分支的 upsert 不带 status，覆盖会丢终态字段；与 progress 分支守卫对称）。
+        if (existing && isTerminalTaskStatus(existing.status)) return;
+        // 幂等建卡：startedAt/progressHistory 取旧值兜底（重复 started 不重置计时）。
+        store.upsertBackgroundTask({
+          taskId: event.taskId,
+          toolUseId: event.toolUseId ?? existing?.toolUseId,
+          description: event.description ?? existing?.description,
+          taskType: event.taskType ?? existing?.taskType,
+          usage: event.usage ?? existing?.usage,
+          lastToolName: existing?.lastToolName,
+          summary: existing?.summary,
+          subagentType: event.subagentType ?? existing?.subagentType,
+          prompt: event.prompt ?? existing?.prompt,
+          startedAt: existing?.startedAt ?? Date.now(),
+          progressHistory: existing?.progressHistory ?? [],
+        });
+        return;
       }
+      if (event.subtype === 'task_progress') {
+        // 无卡（未 started/被滤/已清）或已终态（notification 先到的迟到 progress）→ 忽略。
+        if (!existing || isTerminalTaskStatus(existing.status)) return;
+        const history = [
+          ...(existing.progressHistory ?? []),
+          {
+            at: Date.now(),
+            lastToolName: event.lastToolName,
+            totalTokens: event.usage?.totalTokens,
+            toolUses: event.usage?.toolUses,
+            durationMs: event.usage?.durationMs,
+          },
+        ];
+        // cap 50：超出丢最旧。
+        if (history.length > 50) history.splice(0, history.length - 50);
+        store.upsertBackgroundTask({
+          ...existing,
+          usage: event.usage ?? existing.usage,
+          lastToolName: event.lastToolName ?? existing.lastToolName,
+          subagentType: event.subagentType ?? existing.subagentType,
+          description: event.description ?? existing.description,
+          progressHistory: history,
+        });
+        return;
+      }
+      // task_notification：upsert 终态卡并保留（删除原 4s setTimeout 移除逻辑——
+      // 终态卡保留到下一次新用户消息发出，由回合边界 clearBackgroundTasks 收口）。
+      // F6：终态到达时刻快照 finishedAt（重复 notification 保留首个），供时长兜底。
+      store.upsertBackgroundTask({
+        ...existing,
+        taskId: event.taskId,
+        toolUseId: event.toolUseId ?? existing?.toolUseId,
+        description: event.description ?? existing?.description,
+        taskType: event.taskType ?? existing?.taskType,
+        status: event.status,
+        usage: event.usage ?? existing?.usage,
+        summary: event.summary ?? existing?.summary,
+        outputFile: event.outputFile ?? existing?.outputFile,
+        finishedAt: existing?.finishedAt ?? Date.now(),
+      });
       return;
     }
   }
@@ -1049,6 +1106,11 @@ function createChat() {
         )
       : [];
 
+    // D 点回合边界（F4）：新用户消息发出即清上一回合【终态】后台任务卡；运行中卡保留跨回合
+    // （其 progress 在新回合继续被消费）。F7：clear 前快照终态卡——发送失败（catch）时原样恢复，
+    // 失败路径不再误删终态卡；恢复的仍是终态卡，与 F4 新语义不冲突（下次发送照常被清）。
+    // （快照声明在 stillOnSender 判定外：await 期间切走时未清卡，catch 恢复自然为 no-op。）
+    let clearedTerminalTasks: Record<string, BackgroundTask> = {};
     if (stillOnSender) {
       persistMessage({
         id: payload.clientMessageId,
@@ -1062,6 +1124,10 @@ function createChat() {
       // （且对应流式非空）隐藏本回合已落库的 text/thinking，避免与流式块重复显示。
       // P1-3：口径收口到共享纯函数（与切回恢复/队列回合同一实现）。
       store.turnStartIndex = computeTurnStartIndex(store.messages);
+      clearedTerminalTasks = Object.fromEntries(
+        Object.entries(store.backgroundTasks).filter(([, t]) => isTerminalTaskStatus(t.status)),
+      );
+      store.clearBackgroundTasks();
     }
 
     try {
@@ -1077,6 +1143,8 @@ function createChat() {
       store.turnStartIndex = computeTurnStartIndex(store.messages);
       // F3：必须用稳定 sessionId，不能用 store.activeSession（await 期间可能已切走）。
       store.markStopped(sessionId);
+      // F7：发送失败 → 回合未真正开始，恢复刚被回合边界清掉的终态卡（仅终态卡，原样回填）。
+      Object.assign(store.backgroundTasks, clearedTerminalTasks);
       return false;
     }
   }
