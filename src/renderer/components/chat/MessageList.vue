@@ -8,6 +8,7 @@ import ThinkingBlock from './ThinkingBlock.vue';
 import StalledBanner from './StalledBanner.vue';
 import ApiRetryBanner from './ApiRetryBanner.vue';
 import { groupMessagesForRender, computeStats, type RenderItem } from '../../utils/group-messages';
+import { copyTextToClipboard } from '../../utils/clipboard';
 import { useSessionStore } from '../../stores/session-store';
 import { shouldHidePersistedForStreaming } from '../../../shared/turn-boundary';
 
@@ -195,7 +196,7 @@ function isStreamTransition(): boolean {
   return getEffectiveRole(items[items.length - 1]) === 'user';
 }
 
-function handleCopyClick(event: MouseEvent): void {
+async function handleCopyClick(event: MouseEvent): Promise<void> {
   const target = event.target as HTMLElement;
   const button = target.closest<HTMLButtonElement>('.code-block__copy');
   if (!button) return;
@@ -203,22 +204,21 @@ function handleCopyClick(event: MouseEvent): void {
   const code = button.dataset.code;
   if (!code) return;
 
-  navigator.clipboard
-    .writeText(code)
-    .then(() => {
-      button.textContent = '已复制';
-      button.classList.add('code-block__copy--copied');
-      setTimeout(() => {
-        button.textContent = '复制';
-        button.classList.remove('code-block__copy--copied');
-      }, 1500);
-    })
-    .catch(() => {
-      button.textContent = '失败';
-      setTimeout(() => {
-        button.textContent = '复制';
-      }, 1500);
-    });
+  // SA-2：统一走 copyTextToClipboard（网页端非安全上下文降级 execCommand）；失败分支保留原按钮反馈。
+  const ok = await copyTextToClipboard(code);
+  if (ok) {
+    button.textContent = '已复制';
+    button.classList.add('code-block__copy--copied');
+    setTimeout(() => {
+      button.textContent = '复制';
+      button.classList.remove('code-block__copy--copied');
+    }, 1500);
+  } else {
+    button.textContent = '失败';
+    setTimeout(() => {
+      button.textContent = '复制';
+    }, 1500);
+  }
 }
 </script>
 

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import hljs from 'highlight.js';
 import type { InteractionPromptPreview } from '../../../shared/types/ipc';
 import { createPreviewMarkdownRenderer, renderDiffHtml } from '../../utils/markdown';
+import { copyTextToClipboard } from '../../utils/clipboard';
 
 const props = defineProps<{
   preview?: string | InteractionPromptPreview;
@@ -10,6 +11,8 @@ const props = defineProps<{
 }>();
 
 const copied = ref(false);
+// SA-2：复制失败态（复用 copied 的限时反馈机制，与 MessageBubble 同款式）。
+const copyFailed = ref(false);
 const markdown = createPreviewMarkdownRenderer();
 
 const normalized = computed<InteractionPromptPreview | null>(() => {
@@ -42,7 +45,15 @@ const renderedDiff = computed(() => renderDiffHtml(normalized.value?.content ?? 
 
 async function copyPreview(): Promise<void> {
   if (!copyText.value) return;
-  await navigator.clipboard?.writeText(copyText.value);
+  // SA-2：统一走 copyTextToClipboard（网页端非安全上下文降级 execCommand）；失败短暂提示。
+  const ok = await copyTextToClipboard(copyText.value);
+  if (!ok) {
+    copyFailed.value = true;
+    window.setTimeout(() => {
+      copyFailed.value = false;
+    }, 1200);
+    return;
+  }
   copied.value = true;
   window.setTimeout(() => {
     copied.value = false;
@@ -59,7 +70,7 @@ async function copyPreview(): Promise<void> {
         <small v-else-if="normalized">{{ normalized.type }}</small>
       </div>
       <button type="button" class="interaction-preview__copy" :disabled="!copyText" @click="copyPreview">
-        {{ copied ? '已复制' : '复制' }}
+        {{ copied ? '已复制' : copyFailed ? '失败' : '复制' }}
       </button>
     </div>
 

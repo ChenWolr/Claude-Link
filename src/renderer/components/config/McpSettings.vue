@@ -33,6 +33,7 @@ import { normalizeDirKey } from '../../../shared/project-skills';
 // 导入弹窗解析（点6）走主进程 parseMcpServersJson（经 window.claudeLink.parseMcpJson IPC），
 // 两侧口径互为往返——见 scripts/selftest-mcp-settings.ts K 组。
 import { buildSingleServerExportJson, MCP_VALUE_MASK, type SingleServerExportInput } from '../../../shared/mcp-json';
+import { copyTextToClipboard } from '../../utils/clipboard';
 import type { McpManagedServer } from '../../../shared/types/config';
 // preload 视图类型（type-only，env.d.ts 同源先例；字段形状以 src/preload/api.ts 为准）。
 // McpManagedSaveEntry = managedSave 提交形态（McpManagedServer + 瞬态改名 hint，仅提交方向）。
@@ -797,14 +798,12 @@ function kvRowsRenameHints(rows: KvRow[]): Record<string, string> {
   return out;
 }
 
-/** 「复制 JSON」（点5）：jsonText 写系统剪贴板；toast 沿用组件内现有栈。 */
+/** 「复制 JSON」（点5）：jsonText 写系统剪贴板；toast 沿用组件内现有栈。
+ * SA-2：走 copyTextToClipboard 统一回退（网页端非安全上下文降级 execCommand）。 */
 async function copyJson(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(jsonText.value);
-    pushToast('已复制 JSON');
-  } catch {
-    pushToast('复制失败，请手动全选复制');
-  }
+  const ok = await copyTextToClipboard(jsonText.value);
+  if (ok) pushToast('已复制 JSON');
+  else pushToast('复制失败，请手动全选复制');
 }
 
 function emptyKvRow(): KvRow {
