@@ -12,6 +12,8 @@ import { resolveConfiguredDefaultModel } from '../../shared/settings-parser';
 import { resolveSessionModel } from '../../shared/session-model';
 import { isAutoSessionName } from '../../shared/auto-session-name';
 import { maskApiKey } from '../../shared/provider-library';
+import { pushToMainWindow } from './push-bus';
+import { IPC_CHANNELS } from '../../shared/constants';
 import {
   TOPIC_ATTEMPT_LADDER,
   buildTopicRequestBody,
@@ -34,7 +36,7 @@ class HttpStatusError extends Error {
 // F4：自动命名竞态守卫——命名门槛在发送瞬间判定（渲染层 isAutoSessionName），而本模块
 // 全流程最多 2 次串行 HTTP 请求（每次超时 10s，正常窗口上界约 20s；总 Deadline 30s 兜底，
 // 见下方 hb10-SMG-02）；用户在此窗口手动重命名后，
-// 迟到的主题/兜底名不得覆盖（写前重查兜底）。
+// 迟到的主题/短输入名不得覆盖（写前重查兜底；SA-4 后出口 = LLM 主题 + 短输入直写）。
 // 主进程侧收口：每次写 name 前重查当前名仍为「会话 N」自动形态才写（手动名一律让位）。
 // H3：判据抽 shared 纯函数（三端同源）并收紧为精确形态——「会话」前缀匹配会被
 // 「会话备份」等自然命名绕过，误判为自动名槽位后迟到主题照样覆盖。
@@ -50,6 +52,22 @@ const TOPIC_TOTAL_DEADLINE_MS = 30 * 1000;
 const TOPIC_RESPONSE_MAX_BYTES = 1024 * 1024;
 
 export async function analyzeTopic(sessionId: string, firstMessage: string): Promise<string | null> {
+  // SA-4/P6-乙（短输入跳过）：首条消息 trim 后 ≤8 字符不值得 LLM 概括——直接以原文为名写库
+  // 返回，不发起 LLM 请求。写前门与既有写点一致（F4 惯例：用户已手动改名则让位）；sk- 前缀
+  // 形态条件掩码为边界加固（防密钥碎片入标题）。空串（trim 后 0 字）不走本路径（>0 守卫，
+  // IPC 入口已对空白消息拦截，此处为防御性重复）。
+  const trimmed = firstMessage.trim();
+  if (trimmed.length > 0 && trimmed.length <= 8) {
+    const name = /^sk-[A-Za-z0-9_\-]{8,}/.test(trimmed) ? maskApiKey(trimmed) : trimmed;
+    if (isAutoNameSlot(sessionId)) {
+      sessionRepo.updateSession(sessionId, { name });
+      // P6-乙（写库后补推送）：与 SESSION_UPDATE 路径同形态——写库成功即广播 upsert（跨端
+      // 列表同步标题变更）；推送失败由 push-bus 内部吞噬，不阻塞写库结果。
+      pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId });
+    }
+    return name;
+  }
+
   const config = getConfig();
 
   // 供应商库解析（会话 override > 最近使用 > 库首）；库为空时回落老字段/别名链。
@@ -68,7 +86,7 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   // 才回落 config 老字段——两者永不交叉。
   const apiKey = resolved.provider ? resolved.provider.apiKey : config.apiKey;
   // hb13-v B2（F-03）：解密哨兵按未配置处理——供应商分支的 apiKey 已由 getProviderModelSources
-  // 守卫为空串，此处兜住老字段链；损坏态直接跳过分析走首句兜底（不空耗 HTTP）。
+  // 守卫为空串，此处兜住老字段链；损坏态直接跳过分析返回 null（不空耗 HTTP）。
   if (!apiKey || apiKey === DECRYPT_FAILED) {
     logger.warn('No API key configured; skipping topic analysis');
     return null;
@@ -97,10 +115,10 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   // 验收梯（有界，全流程最多 2 次 HTTP）：思考型模型会把思考过程泄漏进 text 块并烧光
   // max_tokens 截断（详见 shared/topic-analyzer-core.ts 头注释），答卷必须先验收再落库。
   // 答卷被拒 → 升预算重试；首梯 4xx → 换 legacy 形态（无 thinking 字段）重试；
-  // 超时/5xx/网络错误/JSON 解析失败 → 不重试，直达首句兜底。
+  // 超时/5xx/网络错误/JSON 解析失败 → 不重试，直达失败返回（P6-乙：兜底不再写库）。
   let spec: TopicAttemptSpec | null = TOPIC_ATTEMPT_LADDER[0];
   let specIndex: 0 | 1 = 0;
-  // hb10-SMG-02/V01：总 Deadline 竞速——到点按超时路径走首句兜底（与单请求超时同归）。
+  // hb10-SMG-02/V01：总 Deadline 竞速——到点按超时路径走失败返回（与单请求超时同归）。
   let deadlineReject: (e: Error) => void = () => {};
   const overallDeadline = new Promise<never>((_, reject) => { deadlineReject = reject; });
   const deadlineTimer = setTimeout(() => deadlineReject(new Error(`Topic analysis overall deadline (${TOPIC_TOTAL_DEADLINE_MS}ms)`)), TOPIC_TOTAL_DEADLINE_MS);
@@ -114,6 +132,9 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
           // 出口①（LLM 主题）：F4 写前门保留
           if (isAutoNameSlot(sessionId)) {
             sessionRepo.updateSession(sessionId, { name: verdict.topic });
+            // P6-乙（写库后补推送）：同短输入点——写库成功即广播 upsert（跨端列表同步）；
+            // 推送失败由 push-bus 内部吞噬，不阻塞写库结果。
+            pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId });
           }
           return verdict.topic;
         }
@@ -129,7 +150,7 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
           specIndex = 1;
           continue;
         }
-        logger.warn(`Topic analysis failed, using heuristic fallback: ${error instanceof Error ? error.message : String(error)}`);
+        logger.warn(`Topic analysis failed, keeping auto-name slot (no fallback write): ${error instanceof Error ? error.message : String(error)}`);
         break;
       }
     }
@@ -138,22 +159,11 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
     clearTimeout(deadlineTimer);
   }
 
-  // 兜底：取首句前 15 个字符（「首句」系历史措辞——实现并无句子切分，实为整条首条消息压缩空白后的前 15 字符，多句消息会跨句截断），压缩空白避免标题里出现换行。
-  // 出口②（首句兜底）：与修复前逐字等价（F4/H3 写前门保留）。
-  // hb10-SMG-07：fallback 为空串（消息全是空白）时不写库，保持原名并返回 null。
-  // hb10-SHL-07：兜底名过 maskApiKey——用户粘贴密钥当首句时不落明文（掩码后再截断）。
-  // hb13-v A4：①空白压缩正则必须 /\s+/g（旧实现 /s+/g 反斜杠丢失按字母 s 替换，兜底标题
-  // 所有小写 s 变空格且落库）；②无条件掩码降为条件掩码——maskApiKey 把任意非空输入变
-  // sk-…**** 形态，正常兜底标题全部被毁，仅首句呈 API key 形态（sk- 前缀+≥8 位键字符）才掩码。
-  const rawFallback = firstMessage.replace(/\s+/g, ' ').trim().slice(0, 15);
-  const fallback = (/^sk-[A-Za-z0-9_\-]{8,}/.test(rawFallback) ? maskApiKey(rawFallback) : rawFallback).slice(0, 15);
-  if (!fallback) {
-    return null;
-  }
-  if (isAutoNameSlot(sessionId)) {
-    sessionRepo.updateSession(sessionId, { name: fallback });
-  }
-  return fallback;
+  // SA-4/P6-乙（兜底不落库，2026-10-21）：失败路径不再截断首句写库——原「首句前 15 字符」
+  // 兜底名质量差（跨句截断/复制原文碎片），且覆盖「会话 N」槽位后回补链不再重试。改为
+  // return null：DB 保留「会话 N」槽位 → 既有 switchSession 回补链可重试；渲染层
+  // .then(topic => { if (topic) ... }) 与 catch 已对 null 静默，零渲染层改动。
+  return null;
 }
 
 function makeHttpRequest(

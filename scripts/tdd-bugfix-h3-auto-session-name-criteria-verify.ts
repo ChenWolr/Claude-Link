@@ -90,8 +90,10 @@ console.log('=== 回归：F4 竞态守卫语义不弱化 ===');
 {
   const analyzer = read('src/main/modules/topic-analyzer.ts');
   const sessionStore = read('src/renderer/stores/session-store.ts');
-  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name:/g) || []).length;
-  check('主进程仍保留两处 name 写入出口（LLM 主题+首句兜底）', writeCount === 2);
+  // SA-4/P6-乙 同步（2026-10-21）：出口构成变化——首句兜底出口移除、短输入直写出口（≤8 字符
+  // 不发起 LLM 直接写库，shorthand 形态 { name }）新增；计数形态泛化以兼容 shorthand。
+  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name(?:\s*:[^}]+)?\s*\}\)/g) || []).length;
+  check('主进程仍保留两处 name 写入出口（SA-4 后构成 = LLM 主题+短输入直写）', writeCount === 2);
   const gateCount = (analyzer.match(/isAutoNameSlot\(sessionId\)/g) || []).length;
   check('主进程两处出口仍各有守卫（实际 %s 处）'.replace('%s', String(gateCount)), gateCount >= 2);
   check('analyzeTopic(sessionId, textContent) 调用形态不变', sessionStore.includes('analyzeTopic(sessionId, textContent)'));

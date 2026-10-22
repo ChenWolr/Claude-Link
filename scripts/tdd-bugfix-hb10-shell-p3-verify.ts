@@ -28,8 +28,10 @@ function check(name: string, fn: () => void): void {
 // ① SHL-07：topic 兜底名过条件掩码（hb13-v A4 必要同步）——旧钉 maskApiKey(rawFallback)
 // 文字钉住无条件掩码缺陷形态（任意非空输入变 sk-…****，全部兜底标题被毁）；新谓词仅
 // sk- key 形态才掩码（保留原防泄露意图），断言为旧意图的精确化、非弱化。
-check('① SHL-07：topic-analyzer fallback 过条件掩码（sk- key 形态才掩码，掩码后截断）', () => {
-  assert.match(analyzer, /\^sk-\[A-Za-z0-9_\\-\]\{8,\}\/\.test\(rawFallback\) \? maskApiKey\(rawFallback\) : rawFallback\)\.slice\(0, 15\);/, '兜底名未过条件掩码（sk- 形态判定 ? maskApiKey : 原样）');
+// [SA-4/P6-乙 同步 2026-10-21]：首句兜底写库路径已移除；条件掩码不变式随短输入直写路径
+//（P6-2）保持——sk- 前缀+≥8 位键字符形态才掩码，其余原样（防密钥碎片入标题）。
+check('① SHL-07：topic-analyzer 短输入直写路径过条件掩码（sk- key 形态才掩码，正常短输入原样）', () => {
+  assert.match(analyzer, /const name = \/\^sk-\[A-Za-z0-9_\\-\]\{8,\}\/\.test\(trimmed\) \? maskApiKey\(trimmed\) : trimmed;/, '短输入名未过条件掩码（sk- 形态判定 ? maskApiKey : 原样）');
   assert.match(analyzer, /maskApiKey/, '缺 maskApiKey import');
 });
 
