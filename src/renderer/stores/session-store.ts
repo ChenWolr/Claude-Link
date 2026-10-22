@@ -20,6 +20,9 @@ import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } fr
 import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';
 import { computeTurnStartIndex } from '../../shared/turn-boundary';
 import { isAutoSessionName, isMaterializableAutoName, maxAutoSessionNumber } from '../../shared/auto-session-name';import { useConfigStore } from './config-store';
+// SA-3（turn-projection）：preload 镜像类型（type-only，McpSettings.vue 同源先例）——快照/概览
+// 恢复 action 的载荷形状，字段以 src/preload/api.ts 为准（其本身镜像主进程 turn-projection.ts）。
+import type { TurnProjectionSnapshotView, TurnRunningOverviewEntry } from '../../preload/api';
 import { useClaudePlanStore } from './claude-plan-store';
 import { useCommandStore } from './command-store';
 import { useChatDraftStore } from './chat-draft-store';
@@ -258,7 +261,14 @@ export const useSessionStore = defineStore('session', {
     thinkingTokens: null as number | null,
     // 问题 2：本回合开始时间戳（按 sessionId）。markRunning 置位、markStopped 清除。
     // 渲染层（TurnTimer）据此 + useNow 跳动时钟算实时耗时，sending 期间在状态头条常驻显示递增计时。
+    // SA-3（turn-projection）：startedAt 可能是服务端时钟值（turn_started 校正 / 快照恢复传入），
+    // 计时读取必须走「本地时钟 + serverClockOffset」协议，不得裸用 Date.now() 相减。
     turnStartedAt: {} as Record<string, number>,
+    // SA-3（turn-projection）：每会话服务端时钟偏移 serverClockOffset = serverNow - Date.now()
+    //（turn_started 事件与投影快照每次到达即刷新；缺省视为 0——桌面单机两钟同源，等价现状零回归）。
+    // 计时统一 displayElapsed = (Date.now() + serverClockOffset[sid]) - turnStartedAt[sid]，
+    // 禁止直接用本地时钟减服务端 startedAt（跨机时钟偏差会出负数/跳变）。
+    serverClockOffset: {} as Record<string, number>,
     // B1：最近一回合的耗时/结束时刻（按 sessionId）。回合 result 到达时由 use-chat 经
     // setLastTurnMeta 写入，同一刻就地补写 sessions/activeSession 对象的 lastTurn* 字段
     //（两处无新鲜度差）；TurnTimer 完成态优先读这里，读不到（重启后内存 map 为空）回落 Session 字段。
@@ -303,6 +313,12 @@ export const useSessionStore = defineStore('session', {
     activeTurnStartedAt(state): number | null {
       if (!state.activeSession) return null;
       return state.turnStartedAt[state.activeSession.id] ?? null;
+    },
+    // SA-3（turn-projection）：当前活动会话的服务端时钟偏移（无记录视为 0——桌面单机等价现状）。
+    // TurnTimer 等计时读取处统一 (now + 本值) - startedAt，收口时钟协议计算式。
+    activeTurnClockOffset(state): number {
+      if (!state.activeSession) return 0;
+      return state.serverClockOffset[state.activeSession.id] ?? 0;
     },
     // B1：当前活动会话的最近回合元数据。内存 map 优先（本启动周期内最新），
     // 否则回落 Session 持久化字段（重启恢复/切回）。都无 → null（完成态不渲染）。
@@ -711,6 +727,8 @@ export const useSessionStore = defineStore('session', {
       // 状态灯与回合计时随会话删除一并清理，避免迟到的完成态串到其它会话。
       delete this.sessionStatus[id];
       delete this.turnStartedAt[id];
+      // SA-3：服务端时钟偏移随会话删除一并清理（防内存泄漏）。
+      delete this.serverClockOffset[id];
       delete this.turnGeneration[id];
       // B1：最近回合元数据随会话删除一并清理（DB 行由级联删除处理）。
       delete this.lastTurnMeta[id];
@@ -1067,7 +1085,17 @@ export const useSessionStore = defineStore('session', {
     },
     // 根因修复：标记会话为执行中。sendMessage 时调用。
     // sending 是 getter（从 runningSessions 派生），无需手动设 this.sending。
-    markRunning(sessionId: string) {
+    // SA-3（turn-projection）：可选参数扩展，既有单参调用零破坏——
+    //  - 缺省 startedAt：行为保持现状（Date.now() 且「仅新加入时置位」，本端 sendMessage 乐观调用）；
+    //  - 传入 startedAt（turn_started 校正 / 快照恢复）：turnStartedAt[sid] 无条件写传入值
+    //    （幂等覆盖——供服务器权威起点覆盖本端乐观值；不触碰流式累加器，同回合重复信号不重置内容）；
+    //    该形态若已在 runningSessions 则不递增 turnGeneration（R7：同回合同代，防 abort finally
+    //    守卫错位卡 running）；
+    //  - serverNow（可选第三参）：同步刷新该会话 serverClockOffset = serverNow - Date.now()。
+    markRunning(sessionId: string, startedAt?: number, serverNow?: number) {
+      if (typeof serverNow === 'number' && Number.isFinite(serverNow)) {
+        this.serverClockOffset[sessionId] = serverNow - Date.now();
+      }
       // 新回合开始时，上一回合仅运行期可见的终态兜底失效。
       delete this.apiRetryTerminalFallback[sessionId];
       // 新回合开始：上一回合的完成态（绿灯）与网络中断常红一起失效
@@ -1078,7 +1106,12 @@ export const useSessionStore = defineStore('session', {
       if (!this.runningSessions.includes(sessionId)) {
         this.runningSessions.push(sessionId);
         // 问题 2：记录本回合开始时间（仅新加入时置位，避免重复 send 覆盖）。
-        this.turnStartedAt[sessionId] = Date.now();
+        // SA-3：传入服务器 startedAt 时用权威值替代本地 Date.now()。
+        if (typeof startedAt === 'number' && Number.isFinite(startedAt)) {
+          this.turnStartedAt[sessionId] = startedAt;
+        } else {
+          this.turnStartedAt[sessionId] = Date.now();
+        }
         // 第四态阶段徽章配套：全新回合清空工具进度残留（中断 aborted 后 tool_result 不到达会遗留旧
         // toolUseId → 阶段徽章误判「工具执行中」）。toolProgress 是全局 map（仅活动会话的 tool_progress
         // 事件写入），故只在「活动会话」开启全新回合时清——后台会话 B 的队列 markRunning(B) 不得清掉
@@ -1087,12 +1120,112 @@ export const useSessionStore = defineStore('session', {
         if (sessionId === this.activeSession?.id) {
           this.toolProgress = {};
         }
+        // v2-F3：每次 markRunning 递增回合 generation（新回合边界）。abort finally 兜底
+        // 据此识别「被中断的那一代」，旧 finally 不会误停新回合。
+        // R7（round-001）：递增移入「新加入 runningSessions」分支——只有真正的新回合边界才换一代；
+        // 「已 running + 传入 startedAt 幂等覆盖」（turn_started 校正 / 快照恢复）不递增，否则
+        // abort finally 的代际守卫错位、新回合被误判为「旧中断迟到」而卡 running。
+        this.turnGeneration[sessionId] = (this.turnGeneration[sessionId] ?? 0) + 1;
+      } else if (typeof startedAt === 'number' && Number.isFinite(startedAt)) {
+        // 已在 runningSessions（重复 turn_started / 快照恢复 / 本端乐观置位后校正）：
+        // 仍无条件覆盖权威起点（幂等）；同回合同代，generation 不递增（R7，见上分支注）。
+        this.turnStartedAt[sessionId] = startedAt;
+      } else {
+        // 已 running 且未传 startedAt 的重复调用（防御路径：现状调用图 sendMessage/task-store 均
+        // 新回合、不会走到；为保持旧语义完全等价仍递增）。
+        this.turnGeneration[sessionId] = (this.turnGeneration[sessionId] ?? 0) + 1;
       }
-      // v2-F3：每次 markRunning 递增回合 generation（新回合边界）。abort finally 兜底
-      // 据此识别「被中断的那一代」，旧 finally 不会误停新回合。
-      this.turnGeneration[sessionId] = (this.turnGeneration[sessionId] ?? 0) + 1;
       // 侧栏黄灯：无论重复 send 与否都保持 running 状态。
       this.sessionStatus[sessionId] = 'running';
+    },
+    // SA-3（turn-projection）：投影快照恢复落地点（SA-4 启动/刷新接线调用）。竞态协议（计划 §1.3，
+    // append-only）：恢复顺序固定「先订阅（CHAT_EVENT 订阅不变）→ 后拉快照」；客户端按长度规则
+    // 采用快照——本地累加器长度 < 快照存储长度 → 整体采用快照为基线；本地更长（订阅后事件已超越
+    // 快照）→ 保留本地；相等保守保留本地。长度比较即可，不引入 seq。
+    // 累加器落位以既有切会话恢复机制的形态为准：active 会话灌前台流式态（streamingContent/
+    // streamingThinking/streamingTool），后台会话灌后台快照态（sessionStreams），不新建平行状态。
+    applyRuntimeSnapshot(snap: TurnProjectionSnapshotView) {
+      // 终态快照（60s 保留期内可查到 endedAt 非空）不做运行置位——置位会点亮无收口方的黄灯；
+      // 已结束回合的展示由 DB 重载路径接管。
+      if (snap.endedAt != null) return;
+      const sid = snap.sessionId;
+      const isActive = this.activeSession?.id === sid;
+      // 本地三路累加器（前台流式态 / 后台快照态；sessionStreams 既有键形态 content/thinking/tool）。
+      const local = isActive
+        ? { content: this.streamingContent, thinking: this.streamingThinking, tool: this.streamingTool }
+        : this.sessionStreams[sid] ?? { content: '', thinking: '', tool: '' };
+      // 快照 tool 路为 Record<toolUseId, string>（主进程按 index/子 agent 分键累积）；渲染层既有
+      // 累加器是单条连接字符串（streamingTool / sessionStreams[].tool，消费方只做「有无 + 入参预览」）
+      // ——无分键对应态，按插入序拼接为单串落位（最小落点，不新建平行状态）。
+      // R8（round-001）：`sub:` 前缀键是子 agent 累积文本，不灌回主流程累加器——否则子 agent 大段
+      // 文本会被误当主流程工具流展示。
+      const snapToolText = Object.entries(snap.streamTool)
+        .filter(([k]) => !k.startsWith('sub:'))
+        .map(([, v]) => v)
+        .join('');
+      // 长度比较：text/thinking 用快照存储长度（截断后长度=上限，能正确识别「本地落后于快照」）；
+      // tool 无存储长度字段，用拼接长度（截断时偏小 → 保守偏向保留本地，可接受）。
+      const next = { content: local.content, thinking: local.thinking, tool: local.tool };
+      if (local.content.length < snap.streamTextLength) next.content = snap.streamText;
+      if (local.thinking.length < snap.streamThinkingLength) next.thinking = snap.streamThinking;
+      if (local.tool.length < snapToolText.length) next.tool = snapToolText;
+      if (isActive) {
+        this.streamingContent = next.content;
+        this.streamingThinking = next.thinking;
+        this.streamingTool = next.tool;
+      } else {
+        this.sessionStreams[sid] = next;
+      }
+      // 运行置位必须走既有 markRunning action（承担清终态/清 toolProgress/递增 generation 副作用，
+      // 不得旁路另写）；传入服务器 startedAt + serverNow（同时刷新时钟偏移）。
+      // R4（round-001）：先 markRunning 再落瞬态——markRunning 体内无条件 delete apiRetryInfo，
+      // 瞬态先写会被同 tick 抹除（快照恢复的 API 重试横幅永不生效）。stalled/backgroundTasks 虽
+      // 不受 markRunning 影响，一并后移保持「先运行置位、后瞬态置位」的一致顺序。
+      this.markRunning(sid, snap.startedAt, snap.serverNow);
+      // 瞬态置位：快照是查询时刻的权威值，订阅后新事件到达自然覆盖；null 表示该瞬态不存在 → 清除
+      //（本地若有同键记录必早于快照拉取，属过期值）。apiRetry 需 count/limit 齐全才构成有效
+      // ApiRetryInfo（侧栏/横幅消费的必填字段），缺任一则按无 retry 处理。
+      if (snap.apiRetry && typeof snap.apiRetry.retryCount === 'number' && typeof snap.apiRetry.retryLimit === 'number') {
+        this.apiRetryInfo[sid] = {
+          retryCount: snap.apiRetry.retryCount,
+          retryLimit: snap.apiRetry.retryLimit,
+          nextRetryAt: snap.apiRetry.nextRetryAt,
+          retryDelayMs: snap.apiRetry.retryDelayMs,
+          errorStatus: snap.apiRetry.errorStatus,
+          error: snap.apiRetry.error,
+          stopping: false,
+        };
+      } else {
+        delete this.apiRetryInfo[sid];
+      }
+      if (snap.stalled) this.markStalled(sid, snap.stalled);
+      else this.clearStalled(sid);
+      // 后台任务置位：startedAtServer 是主进程时钟，按本快照偏移换算为客户端等价时刻
+      //（TaskQueuePanel 计时用 now - startedAt 客户端口径）。本地已有卡（事件建立的，信息更全）
+      // 只补缺的 startedAt，不整卡覆盖。
+      const snapOffset = snap.serverNow - Date.now();
+      for (const [taskId, task] of Object.entries(snap.backgroundTasks)) {
+        const startedClient = task.startedAtServer - snapOffset;
+        const existing = this.backgroundTasks[taskId];
+        if (existing) {
+          if (existing.startedAt == null) existing.startedAt = startedClient;
+        } else {
+          this.backgroundTasks[taskId] = { taskId, startedAt: startedClient };
+        }
+      }
+    },
+    // SA-3（turn-projection）：进行中回合概览落地点（SA-4 启动恢复接线调用）。对列表内会话逐个
+    // 置运行态：非 active 会话 markRunning(sid, startedAt)（黄灯/侧栏计时）；active 会话同样置位
+    //（细恢复由 SA-4 对 active 再走 getRuntimeSnapshot → applyRuntimeSnapshot）。
+    // 概览条目不带 serverNow（仅 sessionId/startedAt/generation），offset 待 turn_started 事件或
+    // 快照到达再刷新；桌面单机两钟同源零影响。已在 runningSessions 的会话跳过——「先订阅后拉」
+    // 协议下本地 running 态来自更早到达的 turn_started（含 serverNow 校正，数据不旧于概览），
+    // 重复 markRunning 会无谓递增 generation 并清掉事件已建立的瞬态。
+    applyRunningOverview(list: TurnRunningOverviewEntry[]) {
+      for (const entry of list) {
+        if (this.runningSessions.includes(entry.sessionId)) continue;
+        this.markRunning(entry.sessionId, entry.startedAt);
+      }
     },
     // B1：写入最近回合元数据（内存态 + 就地补 sessions/activeSession 对象字段，保持侧栏数据一致）。
     // P2-2 语义收口：只记「完整有效记录」——耗时无效（null/非正/非有限数）一律早退、保持上一条

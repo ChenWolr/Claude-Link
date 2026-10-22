@@ -510,6 +510,38 @@ function createChat() {
         planStore.applyPlanState(sid, event.state);
         break;
       }
+      case 'turn_started': {
+        // SA-3（turn-projection）：回合起点权威伴生信号（对端/桌面/web 全通；后台会话同样置位
+        // ——黄灯/侧栏计时点亮，runningSessions 是 sending getter 的派生源）。markRunning 承担
+        // 清终态/清 toolProgress（仅活动会话，既有守卫）/递增 generation 副作用；传入服务器
+        // startedAt 无条件覆盖（幂等，不触碰流式累加器）+ serverNow 刷新该会话时钟偏移。
+        store.markRunning(sid, event.startedAt, event.serverNow);
+        break;
+      }
+      case 'turn_ended': {
+        // SA-3：迟到终态幂等收口。常规时序终态事件先到（主进程 forwardEvent 先推 result/
+        // error/aborted、后发 turn_ended 伴生信号），此时 running 已被既有分支摘除 → 直接忽略
+        //（迟到终态幂等，不依赖 turn_started 前置）；终态事件丢失（web 断线等）时 running 仍在，
+        // 按 outcome 照既有后台 result/error 分支形态收口。
+        if (!store.runningSessions.includes(sid)) break;
+        clearAbortTimer(sid);
+        if (event.outcome === 'success') {
+          // 载荷自带主进程权威 durationMs/endedAt——先写 meta 再 markCompleted（后者 delete
+          // turnStartedAt，晚读恒为 null；顺序硬要求与上方后台 result 分支同源）。P2-2 无效耗时
+          //（null/非正/非有限）由 setLastTurnMeta 早退兜住。
+          store.setLastTurnMeta(sid, { durationMs: event.durationMs, endedAt: event.endedAt });
+          window.claudeLink.recordTurnMeta(sid, {
+            messageId: null,
+            costUsd: null,
+            durationMs: event.durationMs,
+            endedAt: event.endedAt,
+          }).catch(() => {});
+          store.markCompleted(sid);
+        } else {
+          store.markStopped(sid);
+        }
+        break;
+      }
       case 'result': {
         // hb10-TM-07（收窄）：已删除的会话直接丢弃内存写（防幽灵 map 复活）。
         if (!store.sessions.some((s) => s.id === sid)) break;
@@ -523,7 +555,7 @@ function createChat() {
         const startedAt = store.turnStartedAt[sid] ?? null;
         const dur = typeof event.duration_ms === 'number' && event.duration_ms > 0
           ? event.duration_ms
-          : (startedAt ? Date.now() - startedAt : null);
+          : (startedAt ? (Date.now() + (store.serverClockOffset[sid] ?? 0)) - startedAt : null);
         const endedAt = Date.now();
         if (isSuccessfulCliResult(event)) {
           // hb10-TM-01（渲染层守卫）：turnStartedAt 已清（=已结算/已被新回合覆盖）时跳过 meta 写。
@@ -720,6 +752,50 @@ function createChat() {
         // 主进程看门狗判定无响应：记录卡死信息，StalledBanner 显形。
         // 不动 sending（回合仍在「运行」，只是无响应）；markStopped 时横幅自动消失。
         if (store.activeSession) applyStalledEvent(store, store.activeSession.id, event);
+        break;
+      }
+      case 'turn_started': {
+        // SA-3（turn-projection）：回合起点权威伴生信号——本端 sendMessage 的乐观置位被同回合
+        // 服务器 startedAt 幂等覆盖（校正为权威起点），serverNow 刷新时钟偏移；markRunning 照常
+        // 承担清终态/递增 generation 副作用，流式内容不动（同回合重复信号不重置累加器）。
+        if (store.activeSession) {
+          store.markRunning(store.activeSession.id, event.startedAt, event.serverNow);
+        }
+        break;
+      }
+      case 'turn_ended': {
+        // SA-3：迟到终态幂等收口。常规时序终态事件（result/error/aborted）先到并已完成收口与
+        // meta 记账（主进程先推终态事件、后发 turn_ended 伴生信号）→ running 已摘除，直接忽略，
+        // 绝不触碰既有 result 收尾管线（attachResultMetadata 的 turnStartedAt 守卫语义保持）；
+        // 终态事件丢失时 running 仍在：照既有 result/aborted 分支形态收口（finalize + 清流式 +
+        // meta 先读后清 + 按 outcome mark）。turn_ended 可先于 turn_started 到达（迟到终态），
+        // 非 running 忽略即幂等。
+        if (!store.activeSession) break;
+        const sid = store.activeSession.id;
+        if (!store.runningSessions.includes(sid)) break;
+        clearAbortTimer(sid);
+        finalizeAssistantStream();
+        store.clearStream();
+        store.clearThinking();
+        store.clearToolStream();
+        store.setThinkingTokens(null);
+        if (event.outcome === 'success') {
+          // 载荷自带主进程权威 durationMs/endedAt——先写 meta 再 markCompleted（后者 delete
+          // turnStartedAt，晚读恒为 null；顺序硬要求与 attachResultMetadata 同源）。
+          store.setLastTurnMeta(sid, { durationMs: event.durationMs, endedAt: event.endedAt });
+          window.claudeLink.recordTurnMeta(sid, {
+            messageId: null,
+            costUsd: null,
+            durationMs: event.durationMs,
+            endedAt: event.endedAt,
+          }).catch(() => {});
+          store.markCompleted(sid);
+        } else {
+          store.markStopped(sid);
+        }
+        // P2（effort 可见性）：与 result 分支同形，回合结束拉取「上回合实际生效思考强度」。
+        void store.refreshActiveSessionEffort();
+        resetTurnCache();
         break;
       }
       case 'init': {
@@ -1007,7 +1083,10 @@ function createChat() {
     // 兜底，保证气泡始终能展示「花了多少时间」。result 到达时 turnStartedAt 尚未清除。
     const sid = store.activeSession?.id;
     const startedAt = sid ? store.turnStartedAt[sid] : null;
-    const clientMs = startedAt ? Date.now() - startedAt : null;
+    // R6（round-001）：客户端计时兜底按 serverClockOffset 换算到服务器时钟口径——turnStartedAt
+    // 来自 turn_started 的服务器起点（Date.now() 直接相减在双钟偏差下会出现负数/回跳）。
+    // startedAt 非空 ⇒ sid 非空（上方三元保证），&& sid 仅为 TS 索引收窄。
+    const clientMs = startedAt && sid ? (Date.now() + (store.serverClockOffset[sid] ?? 0)) - startedAt : null;
     // B3：回合结束时刻一次性捕获，内存脚注与持久化共用同一值（前台 attach 与后台分支同语义）。
     const endedAt = Date.now();
     // R1（二次修复）：sdk-backend 把缺失的 total_cost_usd/duration_ms 补成 0（非 undefined），
@@ -1264,8 +1343,8 @@ function createChat() {
       }
     }
     // 卡死重试：重发最后一条用户消息（新回合新 clientMessageId）。
-    // hb12-SMG-06：显式清 turnStartedAt——残留的旧值会让新回合耗时计算（Date.now() - startedAt）
-    // 虚高（从上一卡死回合起算），且旧值守卫（TM-01）会误拒新回合 meta。
+    // hb12-SMG-06：显式清 turnStartedAt——残留的旧值会让新回合耗时计算（客户端 now 换算服务器
+    // 口径后减 startedAt，R6）虚高（从上一卡死回合起算），且旧值守卫（TM-01）会误拒新回合 meta。
     delete store.turnStartedAt[sid];
     await sendMessage({ text: last.content, attachmentIds, clientMessageId: crypto.randomUUID() });
   }

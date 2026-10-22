@@ -26,7 +26,10 @@ import {
   getKnownTurnOutcome,
   isChatSendLocked,
   hasPendingFirstPrompt,
+  getCurrentQueryInstance,
 } from './chat-backend';
+// SA-1（turn-projection）：队列回合起点投影登记（turn_started 伴生信号在 popExecute 发射）。
+import { noteTurnStarted } from './turn-projection';
 
 // hb12-P2-11：队列出队谓词——chatSendLocks ∪ pendingFirstPrompt ∪ active entry。
 // 三者任一为真 = 用户回合在飞（直发 prepare 窗口/占坑未发/spawn 完成），队列不得放行。
@@ -668,6 +671,23 @@ async function popExecute(sessionId: string, mainWindow: BrowserWindow, task: Ta
       resumeSessionId: resolveCliSessionId(sessionId),
       additionalDirectories: prepared.additionalDirectories,
       userCommandText: task.prompt,
+    });
+    // SA-1（turn-projection）：队列回合起点——spawn 成功即登记流式投影并伴生 turn_started
+    //（旁路追加：不经 forwardEvent、不落库；generation 取该会话当前 query 代际，与
+    // sdk-backend 既有 generation 机制同源；startedAt 为投影记录的权威起点）。
+    const turnGeneration = getCurrentQueryInstance(sessionId) ?? -1;
+    const turnStartedAt = noteTurnStarted(sessionId, turnGeneration);
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: {
+        type: 'turn_started',
+        // A2（P3）：generation<0 兜底时投影不登记（noteTurnStarted 返 null），事件照发、
+        // startedAt 以发射点时钟兜底（详见 turn-projection.ts noteTurnStarted 头注释）。
+        startedAt: turnStartedAt ?? Date.now(),
+        serverNow: Date.now(),
+        turnKind: 'queue',
+        generation: turnGeneration,
+      },
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -70,7 +70,9 @@ check('② 物化：暂态非自动名透传；自动名用 maxAutoSessionNumber
 });
 
 // ③ SMG-02/V01/hb12-SMG-07：topic-analyzer 三防线。
-check('③ topic-analyzer：res error/aborted 监听 + 1MiB 响应上限 + 总 Deadline 30s + fallback 空串不写库', () => {
+// [SA-4/P6-乙 同步 2026-10-21]：首句兜底段已整体移除（兜底不落库）——原「fallback 空串不写库」
+// 子钉随之改为失败路径不写库形态（analyzeTopic 段以 return null 收口、无 rawFallback 截断写库）。
+check('③ topic-analyzer：res error/aborted 监听 + 1MiB 响应上限 + 总 Deadline 30s + 失败不写库', () => {
   const reqIdx = analyzer.indexOf('function makeHttpRequest');
   const reqBody = analyzer.slice(reqIdx, analyzer.indexOf('\n}', reqIdx + 10));
   assert.match(reqBody, /res\.on\('error', reject\)/, '缺 res error 监听（SMG-V01）');
@@ -78,9 +80,11 @@ check('③ topic-analyzer：res error/aborted 监听 + 1MiB 响应上限 + 总 D
   assert.match(reqBody, /TOPIC_RESPONSE_MAX_BYTES/, '缺响应字节上限（hb12-SMG-07）');
   assert.match(analyzer, /TOPIC_TOTAL_DEADLINE_MS\s*=\s*30_000|TOPIC_TOTAL_DEADLINE_MS\s*=\s*30 \* 1000/, '缺 30s 总 Deadline 常量');
   assert.match(analyzer, /Promise\.race\(\[makeHttpRequest/, 'analyzeTopic 缺 Deadline 竞速');
-  const fbIdx = analyzer.indexOf('// 兜底：取首句前 15 个字符');
-  const fbBody = analyzer.slice(fbIdx, analyzer.indexOf('\n}', fbIdx));
-  assert.match(fbBody, /if \(!fallback\)\s*\{\s*return null;\s*\}/, 'fallback 空串未跳过写库（SMG-07）');
+  const analyzeIdx = analyzer.indexOf('export async function analyzeTopic');
+  assert.ok(analyzeIdx > -1, '未找到 analyzeTopic');
+  const analyzeBody = analyzer.slice(analyzeIdx, analyzer.indexOf('\n}', analyzeIdx));
+  assert.match(analyzeBody, /return null;\s*$/, '失败路径应以 return null 收口（P6-乙：兜底不写库）');
+  assert.ok(!analyzeBody.includes('rawFallback'), '兜底截断写库形态残留');
 });
 
 // ④ SMG-07/V04：IPC 入参校验。

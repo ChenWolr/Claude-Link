@@ -124,6 +124,21 @@ onMounted(async () => {
   await store.loadSessions();
   // 「网页访问」P1-5：列表就绪后恢复 web 上次的 active 会话（桌面模式内部 no-op）。
   await store.restoreWebActiveSession();
+  // SA-4（P5 恢复接线）：启动/刷新（含 render-process-gone 自动 reload）后投影态恢复——
+  // 与 web-bridge runRealignSequence 同两步：① running 概览（后台黄灯/计时；无 running 会话
+  // 时为 no-op）；② active 为持久会话且在 running 清单内时拉细快照（applyRuntimeSnapshot 按
+  // 长度规则采用）。桌面模式 window.claudeLink 来自 preload，两方法同样可用。失败静默不阻断挂载。
+  try {
+    const overview = await window.claudeLink.getRunningOverview();
+    store.applyRunningOverview(overview);
+    const active = store.activeSession;
+    if (active && !active.transient && overview.some((e) => e.sessionId === active.id)) {
+      const snap = await window.claudeLink.getRuntimeSnapshot(active.id);
+      if (snap) store.applyRuntimeSnapshot(snap);
+    }
+  } catch {
+    // 投影恢复失败不致命
+  }
   // 根因修复：监听已在 App.vue 全局注册，这里只刷新当前会话数据（重拉 messages）。
   store.refreshActiveSession();
   // 加载 Claude 计划快照（独立于手动排队 tasks 表）。

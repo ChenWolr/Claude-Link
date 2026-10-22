@@ -314,6 +314,33 @@ export interface CliLocalCommandOutputEvent {
   command?: string;
 }
 
+// SA-1（turn-projection）：回合起止伴生信号——主进程投影模块（modules/turn-projection.ts）
+// 的伴生事件，由发射点直推 CHAT_EVENT（不经 forwardEvent/persistCliEvent，**不落库**——
+// 它们是回合计时/标题质量取数的信号载体，不是对话历史）。turn_started 在 CHAT_SEND
+//（turnKind:'user'）与队列出队 popExecute（turnKind:'queue'）spawn 成功后发射；
+// turn_ended 在三终态出口（result 映射 / killProcess 合成 aborted→interrupted / runQuery
+// catch 的 error 发射点）由主进程权威计算 durationMs 后发射。
+export interface CliTurnStartedEvent {
+  type: 'turn_started';
+  /** 回合起点（主进程 Date.now()，权威值）。 */
+  startedAt: number;
+  /** 发射时刻主进程时钟（供渲染端时钟偏移校正）。 */
+  serverNow: number;
+  /** 回合来源：用户直发或队列出队。 */
+  turnKind: 'user' | 'queue';
+  /** 回合代际（sdk-backend SessionEntry.queryInstance）：旧回合迟到信号据此被拒收。 */
+  generation: number;
+}
+
+export interface CliTurnEndedEvent {
+  type: 'turn_ended';
+  /** 回合终点（主进程 Date.now()）。 */
+  endedAt: number;
+  /** 主进程权威时长（endedAt - 投影 startedAt；投影无记录时为发射点近似值）。 */
+  durationMs: number;
+  outcome: 'success' | 'error' | 'interrupted';
+}
+
 export type CliEvent =
   | CliInitEvent
   | CliSystemInitEvent
@@ -329,7 +356,9 @@ export type CliEvent =
   | CliTaskEvent
   | ClaudePlanCliEvent
   | CliPersistedMessageEvent
-  | CliApiRetryTerminalFallbackEvent;
+  | CliApiRetryTerminalFallbackEvent
+  | CliTurnStartedEvent
+  | CliTurnEndedEvent;
 
 export interface CliDetectionResult {
   installed: boolean;

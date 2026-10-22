@@ -14,6 +14,8 @@
 //    不得重复（逐字或前 40 字符相同）；主题不得以元语言开场（The user…/我需要… 软判据）。
 // ③ 纯逻辑抽 src/shared/topic-analyzer-core.ts（零运行时依赖，契约脚本直接 import 单测）。
 // ④ F4/H3 既有契约不破：updateSession(name:) 恰好 2 处出口、isAutoNameSlot 写前门 ≥ 2 处。
+//    [SA-4/P6-乙 同步 2026-10-21]：出口构成变化——首句兜底出口移除、短输入直写出口（≤8 字符
+//    不发起 LLM 直接写库，shorthand 形态 { name }）新增，计数仍为 2；失败路径直达 return null。
 //
 // 契约：本脚本 A 节行为断言（import core 纯函数）+ B 节主进程静态钉 + C 节渲染层零改动钉。
 //
@@ -161,8 +163,10 @@ console.log('=== A4. 升档策略（有界：全流程最多 2 次 HTTP） ===')
 
 console.log('=== B. topic-analyzer.ts 静态钉（主进程） ===');
 {
-  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name:/g) || []).length;
-  check(`updateSession(name:) 恰好 2 处出口（实际 ${writeCount} 处，F4 契约互证）`, writeCount === 2);
+  // SA-4/P6-乙 同步：计数形态泛化——LLM 出口为 { name: verdict.topic }，短输入直写出口为
+  // shorthand { name }（旧正则只认冒号形态会漏计）。两处出口 = LLM 主题 + 短输入直写。
+  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name(?:\s*:[^}]+)?\s*\}\)/g) || []).length;
+  check(`updateSession(name:) 恰好 2 处出口（实际 ${writeCount} 处，F4 契约互证；SA-4 后构成 = LLM 主题 + 短输入直写）`, writeCount === 2);
   const gateCount = (analyzer.match(/if \(isAutoNameSlot\(sessionId\)\)/g) || []).length;
   check(`isAutoNameSlot 写前门 ≥ 2 处（实际 ${gateCount} 处）`, gateCount >= 2);
   check('resolveSessionModel 解析链保留', analyzer.includes('resolveSessionModel'));

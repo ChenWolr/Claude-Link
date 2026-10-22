@@ -39,6 +39,10 @@ import { isSuccessfulCliResult, isAbortedCliResult } from '../../shared/session-
 import { noteTurnOutcome, beginUserTurn } from './task-queue-engine';
 // 「网页访问（局域网）」P2：推送总线——webContents.send 等价收口（web 关闭时行为不变）。
 import { pushToMainWindow } from './push-bus';
+// SA-1（turn-projection）：回合流式投影缓存——forwardEvent/forwardTransient 推送后旁路喂数
+//（noteTurnEvent），回合计时由发射点显式驱动（noteTurnStarted/noteTurnEnded + turn_started/
+// turn_ended 伴生信号；R3（round-001）起 reasoning_replay 重发路径也在本文件发射起点）。纯内存不落库。
+import { noteTurnStarted, noteTurnEvent, noteTurnEnded, getSnapshot, clearSession } from './turn-projection';
 import { convertResultMessage } from '../../shared/result-converter';
 import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
@@ -622,6 +626,7 @@ export function markSessionDeleted(sessionId: string): void {
   cleanupSessionStall(sessionId);
   apiRetryStates.delete(sessionId);
   sessionThinkingTokenThrottle.delete(sessionId);
+  clearSession(sessionId); // SA-1（turn-projection）：回合流式投影随会话删除收口清理
 }
 /** P1-6：已标记删除的会话拒绝复活（markSessionActive 不再登记、返回 false）。 */
 export function isSessionMarkedDeleted(sessionId: string): boolean {
@@ -1251,6 +1256,45 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
 }
 
 // ── SDKMessage → CliEvent 转换 + 落库 + 推前端 ───────────────────────
+// SA-1（turn-projection）：turn_ended 伴生信号发射收口——三终态出口共用（下方 forwardEvent
+// 的 result 钩子 / killProcess finishKill 的合成 aborted / runQuery catch 的 error 发射点）。
+// durationMs 以投影 startedAt 为主进程权威起点计算；投影无该会话记录时按计划用发射点可得的
+// 近似值（result 的 SDK duration_ms）补发，其余终态无近似值则不发。旁路追加：不经
+// forwardEvent/persistCliEvent（不落库），直推 CHAT_EVENT，不触碰既有事件流顺序与载荷。
+// generation 为事件所属回合代际——与投影代际不符（旧回合迟到终态）时不结算新回合投影。
+function emitTurnEnded(
+  sessionId: string,
+  outcome: 'success' | 'error' | 'interrupted',
+  generation?: number,
+  approxDurationMs?: number,
+): void {
+  try {
+    const snap = getSnapshot(sessionId);
+    if (!snap) {
+      // 投影无记录（未过 noteTurnStarted 的回合，如 reasoning_replay 直接重发路径）：
+      // 仅 result 终态有 SDK duration_ms 可作近似，其余不发（计划允许）。
+      if (typeof approxDurationMs === 'number') {
+        pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
+          sessionId,
+          event: { type: 'turn_ended', endedAt: Date.now(), durationMs: approxDurationMs, outcome },
+        });
+      }
+      return;
+    }
+    if (snap.endedAt != null) return; // 已结算：防同回合双终态重复发射
+    if (typeof generation === 'number' && snap.generation !== generation) return; // 旧回合迟到终态
+    const endedAt = Date.now();
+    const durationMs = Math.max(0, endedAt - snap.startedAt); // 短回合/时钟回拨钳到 ≥0
+    noteTurnEnded(sessionId, snap.generation, outcome);
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: { type: 'turn_ended', endedAt, durationMs, outcome },
+    });
+  } catch {
+    // 伴生信号可丢：发射/投影异常不得阻塞既有终态路径
+  }
+}
+
 function forwardEvent(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -1266,6 +1310,13 @@ function forwardEvent(
     pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
+  }
+  // SA-1（turn-projection）：流式投影旁路挂点——全部经 forwardEvent 的事件在推送后单点喂给
+  // 投影缓存（纯内存累积，不参与落库；try 隔离，投影异常不得阻塞转发/落库链）。
+  try {
+    noteTurnEvent(sessionId, event);
+  } catch {
+    // 投影是可丢缓存：异常静默忽略
   }
   try {
     persistCliEvent(sessionId, event);
@@ -1292,6 +1343,9 @@ function forwardEvent(
     } catch (err) {
       logger.error(`queue noteTurnOutcome failed [${sessionId}]`, err);
     }
+    // SA-1（turn-projection）：result 终态 → turn_ended 伴生信号（旁路追加不落库；durationMs
+    // 由投影 startedAt 权威计算，投影无记录时用 SDK duration_ms 近似补发）。
+    emitTurnEnded(sessionId, outcome, queryInstance ?? entries.get(sessionId)?.queryInstance, event.duration_ms);
   }
   // 上下文用量：message/result 的 usage 是「本轮 turn usage」（input + cache），**不是当前窗口已用**。
   // 黑盒证据（run-2026-08-21-205616）：turn usage 可高达 104k 而当前窗口仅 40.1k，二者不相等。
@@ -2140,6 +2194,13 @@ function forwardTransient(sessionId: string, _mainWindow: BrowserWindow, event: 
     pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, { sessionId, event });
   } catch {
     // webContents 可能已销毁（窗口关闭），忽略
+  }
+  // SA-1（turn-projection）：瞬态事件同样旁路喂投影（api_retry/stalled/task_* 等进行态信号
+  // 走 forwardTransient 不落库，但投影需要它们）；try 隔离同 forwardEvent 挂点。
+  try {
+    noteTurnEvent(sessionId, event);
+  } catch {
+    // 投影是可丢缓存：异常静默忽略
   }
 }
 
@@ -4191,6 +4252,10 @@ async function runQuery(
         entry.watchdogErrorPending = undefined;
       }
       forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '回合已结束' });
+      // SA-1（turn-projection）R1（round-001）：流丢 result 合成 aborted 终态 → turn_ended
+      //（interrupted；投影无记录时不发）。此前该出口无 emitTurnEnded 跟随，投影永久未 ended，
+      // 污染 getRunningOverview（僵尸投影）。emitTurnEnded 自带 endedAt 幂等与代际门，无双发面。
+      emitTurnEnded(sessionId, 'interrupted', entry.queryInstance);
       // hb12-P2-2（出口② 终态重构）：entry.knownOutcome='interrupted' + 显式结算——无 result 时代码不得伪造 success——
       // exit 兜底（ipc-handlers.ts child.on('exit') 内 getKnownTurnOutcome 处，当前 ~:689 / tqe 出队 child.on('exit') 兜底内同函数处 ~:600）结算为 success（队列假成功+armAfterTurn 自动启动下一任务），
       // 与用户看到的「回合已结束」矛盾。改 emitExit(null)（系统杀语义），同序列显式结算
@@ -4249,6 +4314,9 @@ async function runQuery(
       } catch (retryErr) {
         const msg = retryErr instanceof Error ? retryErr.message : String(retryErr);
         forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
+        // SA-1（turn-projection）R1（round-001）：resume 重试失败 error 终态 → turn_ended
+        //（error；投影无记录时不发）。照出口④ 形态补齐，防投影未 ended 僵尸。
+        emitTurnEnded(sessionId, 'error', entry.queryInstance);
         emitExit(1);
         // 出口⑤（resume 重试失败）：resume 已清旧 id → cliSessionId 可能已变，探针守卫会兜住。
         // X18（R04-F1）：透传 entry 级压缩成功标记（首个 attempt 压缩成功后又遇 resume 失败的
@@ -4267,6 +4335,11 @@ async function runQuery(
         forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
       }
       emitExit(null);
+      // SA-1/R1（round-002 复审 P2-1）：两段式优雅中断窗内流抛错——迟到 finishKill 因 entry
+      // 已被 finally deleteEntry 移除而 wasCurrent 恒 false，跳过 finishKill 收口门；此处为该
+      // 形态唯一投影收口点。emitTurnEnded 自带 endedAt 幂等+代际门。
+      // 置 emitExit 后（X9 同款同步段；不挤 p3-01 前窗）。
+      emitTurnEnded(sessionId, 'interrupted', entry.queryInstance);
       // X9（R11-F1，修法② 补齐三出口）：两段式优雅窗在途（forceKill 非空 = watchdog/
       // upstream_fatal/queue 已接管、finishKill 未跑）而流抛错时，与 result/流末出口同根——
       // 迟到 finishKill（微任务）届时 wasCurrent 恒 false，挂账必丢。在 finally deleteEntry
@@ -4283,6 +4356,8 @@ async function runQuery(
       finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
       const msg = err instanceof Error ? err.message : String(err);
       forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${msg}` });
+      // SA-1（turn-projection）：SDK 错误终态 → turn_ended（error；投影无记录时不发）。
+      emitTurnEnded(sessionId, 'error', entry.queryInstance);
       emitExit(1);
     }
     // 出口④（真实 SDK 执行出错，isCurrentEntry 仍为 true 才到达此处）：出错的部分内容引擎已
@@ -4302,6 +4377,9 @@ async function runQuery(
     if (isCurrentEntry(sessionId, entry)) {
       const message = err instanceof Error ? err.message : String(err);
       forwardEvent(sessionId, mainWindow, { type: 'error', message: `SDK 执行出错：${message}` });
+      // SA-1（turn-projection）R1（round-001）：启动阶段外层 catch error 终态 → turn_ended
+      //（error；投影无记录时不发）。照出口④ 形态补齐，防投影未 ended 僵尸。
+      emitTurnEnded(sessionId, 'error', entry.queryInstance);
       emitError(err instanceof Error ? err : new Error(message));
       emitExit(1);
     } else {
@@ -4395,6 +4473,24 @@ function scheduleReasoningReplayRetryForTurn(sessionId: string, mainWindow: Brow
       // hb12-ENG-02（收窄）：resend 绕过 CHAT_SEND 的调度挂点——spawn 占坑后补 beginUserTurn
       //（等价 CHAT_SEND 语义：插话顶掉倒计时 + 引擎置 running），重发回合正常结算。
       beginUserTurn(sessionId, mainWindow);
+      // SA-1（turn-projection）R3（round-001）：重发回合同样绕过 CHAT_SEND 的 turn_started
+      // 发射点——spawn 占坑成功后补登记投影 + 伴生 turn_started（照抄 ipc-handlers CHAT_SEND
+      // 发射块形态；turnKind 'user'，generation 取该会话当前 query 代际，startedAt 为投影权威
+      // 起点。置于 beginUserTurn 之后：同步引擎记账先收口，hb12-ENG-02 既有契约钉不放宽）。
+      const turnGeneration = getCurrentQueryInstance(sessionId) ?? -1;
+      const turnStartedAt = noteTurnStarted(sessionId, turnGeneration);
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
+        sessionId,
+        event: {
+          type: 'turn_started',
+          // A2（P3）：generation<0 兜底时投影不登记（noteTurnStarted 返 null），事件照发、
+          // startedAt 以发射点时钟兜底（详见 turn-projection.ts noteTurnStarted 头注释）。
+          startedAt: turnStartedAt ?? Date.now(),
+          serverNow: Date.now(),
+          turnKind: 'user',
+          generation: turnGeneration,
+        },
+      });
       sendMessage(sessionId, text);
     },
   });
@@ -4580,6 +4676,9 @@ export function killProcess(
       // 副作用保持 wasCurrent 单门不放宽（上方兑现门只管挂账 error，本门形态被 regression 钉死）。
       if (wasCurrent && (reason === 'user' || reason === 'watchdog') && mainWindow) {
         forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });
+        // SA-1（turn-projection）：中断终态 → turn_ended（interrupted；durationMs 由投影
+        // startedAt 权威计算；投影代际落后于本 entry 时为旧回合迟到终态，emitTurnEnded 内拒发）。
+        emitTurnEnded(sessionId, 'interrupted', entry.queryInstance);
         // review-v1 High-1：中断兜底探针必须在此处调度（killProcess 路径），而非 runQuery 的
         // catch 段——removeEntryIfCurrent 后，runQuery 的 for-await 抛错进 catch 会在更早的
         // !isCurrentEntry 分支（state='aborting' 且 entries 已移除）提前 emitExit(null) 退出，
@@ -4591,6 +4690,25 @@ export function killProcess(
         // 变量在 killProcess 不可见（标志提升为 entry 镜像的动因），中断回合里刚完成的压缩
         // 也能经探针 fresh 弹出账单横幅。
         schedulePostTurnProbe(sessionId, mainWindow, entry.queryInstance, resolveCliSessionId(sessionId), { compactedJustNow: entryCompactedJustNow(entry) });
+      }
+      // SA-1（turn-projection）R1（round-001）：wasCurrent 投影收口——user/watchdog 门之外的一切
+      // kill 形态（session_cleanup / upstream_fatal / queue / api_retry_exhausted）同属回合终局：
+      // 被杀回合仍是 current 时投影必须在此 ended，否则永久污染 getRunningOverview（僵尸投影，
+      // 刷新后幽灵运行态）。emitTurnEnded 自带 endedAt 幂等与代际门：user/watchdog 既有发射
+      //（上方）不双发；自然收尾后的迟到 kill 因 wasCurrent=false 不触发本门。
+      if (wasCurrent) {
+        try {
+          // A1（review-round1 P3 语义修正）：kill 终态 outcome 按 KillReason 语义映射——
+          // upstream_fatal / api_retry_exhausted 属上游致命错误/重试耗尽的 error 语义终局，
+          // 不再误标为用户中断；其余系统杀（session_cleanup / queue 等）保持 interrupted。
+          // user/watchdog 已在上方既有门以 interrupted 发射，emitTurnEnded 内 endedAt 幂等
+          // 拒双发，故此处对二者为 no-op（该既有门不受本映射影响）。
+          const endedOutcome: 'error' | 'interrupted' =
+            reason === 'upstream_fatal' || reason === 'api_retry_exhausted' ? 'error' : 'interrupted';
+          emitTurnEnded(sessionId, endedOutcome, entry.queryInstance);
+        } catch {
+          // 伴生信号可丢：投影收口异常不得阻塞 kill 链
+        }
       }
       // 硬杀兜底：abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
       //（瞬时不可捕获），子进程卡死在死 socket 上时真能打死。
@@ -4673,6 +4791,14 @@ export function hasPendingFirstPrompt(sessionId: string): boolean {
 // entry 缺失（已 deleteEntry）或无标记时返回 null，由兜底方按退出码分类。
 export function getKnownTurnOutcome(sessionId: string): 'success' | 'error' | 'interrupted' | null {
   return entries.get(sessionId)?.knownOutcome ?? null;
+}
+
+// SA-1（turn-projection）：读会话当前 query 代际（SessionEntry.queryInstance，含
+// pendingFirstPrompt 占坑形态——spawnForChat 已 entries.set）。回合起点发射点
+//（CHAT_SEND / popExecute）据此取与 sdk-backend 既有 generation 机制同源的代际；
+// 无 entry（异常形态）返回 null，调用方兜底 -1。
+export function getCurrentQueryInstance(sessionId: string): number | null {
+  return entries.get(sessionId)?.queryInstance ?? null;
 }
 
 export function getActiveProcess(sessionId: string): SdkQueryHandle | undefined {

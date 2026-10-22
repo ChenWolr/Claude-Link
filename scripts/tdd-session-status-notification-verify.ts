@@ -813,9 +813,12 @@ check('use-chat 当前会话 result 成功调 markCompleted、失败调 markStop
 check('use-chat 后台会话 result 成功调 markCompleted(sid)', () => {
   assert.ok(useChatSource.includes('store.markCompleted(sid);'));
 });
-check('use-chat 错误/中断分支保持 markStopped（markCompleted 仅出现在两个 result 分支）', () => {
+check('use-chat 错误/中断分支保持 markStopped（markCompleted 仅出现在成功上下文）', () => {
   const markCompletedCount = useChatSource.split('store.markCompleted(').length - 1;
-  assert.equal(markCompletedCount, 2, `store.markCompleted 调用应恰好出现 2 次（当前+后台 result），实际 ${markCompletedCount}`);
+  // SA-3（turn-projection）：turn_ended 双路径（当前+后台）outcome==='success' 分支各新增一处
+  // markCompleted 收口（终态事件丢失时的恢复路径，计划 §P4 明确 success→markCompleted），
+  // 成功上下文调用点由 2（当前+后台 result）扩为 4；错误/中断分支仍恒 markStopped。
+  assert.equal(markCompletedCount, 4, `store.markCompleted 调用应恰好出现 4 次（当前+后台 result + 当前+后台 turn_ended success），实际 ${markCompletedCount}`);
 });
 check('use-chat sendMessage 捕获稳定 sessionId（F3）', () => {
   assert.ok(useChatSource.includes('const sessionId = store.activeSession.id;'));

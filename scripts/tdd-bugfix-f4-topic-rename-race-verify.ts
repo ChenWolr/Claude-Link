@@ -5,7 +5,7 @@
 // 用标题栏 ✎ 重命名（发完顺手改名是自然动作序列），5 字自动主题会覆盖用户起的名字（DB+视图）。
 //
 // 修复语义：
-// ① 主进程收口（最稳）：topic-analyzer 两处出口（LLM 主题/首句兜底）写前重查
+// ① 主进程收口（最稳）：topic-analyzer 两处出口（SA-4 后：LLM 主题/短输入直写）写前重查
 //    sessionRepo.getSession(sessionId).name 仍 startsWith('会话') 才写；
 // ② 渲染层同门槛：analyzeTopic .then 与附件名命名 .then 在覆盖 activeSession.name 前
 //    加同一 startsWith('会话') 检查。
@@ -45,9 +45,11 @@ console.log('=== F4-① topic-analyzer 主进程写前重查 ===');
   check('竞态守卫函数存在（重查当前名）', /function isAutoNameSlot\(\s*sessionId[\s\S]{0,200}isAutoSessionName\(sessionRepo\.getSession\(sessionId\)\?\.name\)/.test(analyzer));
   const gateCount = (analyzer.match(/if \(\w*[Aa]uto[Nn]ame\w*\(sessionId\)\)/g) || []).length;
   check(`两处 updateSession 出口都有守卫（实际 ${gateCount} 处）`, gateCount >= 2);
-  // 两处出口 = LLM 主题 + 首句兜底，都写 name
-  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name:/g) || []).length;
-  check('仍保留两处 name 写入出口（不误删兜底）', writeCount === 2);
+  // SA-4/P6-乙 同步（2026-10-21）：出口构成变化——首句兜底出口移除、短输入直写出口（≤8 字符
+  // 不发起 LLM 直接写库，shorthand 形态 { name }）新增；两处出口 = LLM 主题 + 短输入直写，
+  // 都写 name 且都有 isAutoNameSlot 写前门（守卫语义不变：迟到写让位手动名）。
+  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name(?:\s*:[^}]+)?\s*\}\)/g) || []).length;
+  check('仍保留两处 name 写入出口（LLM 主题 + 短输入直写，SA-4 同步）', writeCount === 2);
   // 回归：模型解析链既有契约（selftest-settings-mapping 40 段前后）不受影响
   check('resolveSessionModel 解析链保留', analyzer.includes('resolveSessionModel'));
   check('老链路兜底 resolveConfiguredDefaultModel 保留', analyzer.includes('resolveConfiguredDefaultModel'));

@@ -45,7 +45,7 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   const getIdx = handlersSrc.indexOf('IPC_CHANNELS.SESSION_GET');
   check('S', '④', 'SESSION_UPDATE/SESSION_GET 出口统一装饰（withBridgePlatform，防整体替换丢锁）',
     handlersSrc.includes('function withBridgePlatform')
-      && updIdx >= 0 && handlersSrc.slice(updIdx, updIdx + 3500).includes('withBridgePlatform')
+      && updIdx >= 0 && handlersSrc.slice(updIdx, updIdx + 4000).includes('withBridgePlatform')
       && getIdx >= 0 && handlersSrc.slice(getIdx, getIdx + 500).includes('withBridgePlatform'),
     'SESSION_UPDATE/SESSION_GET 返回未装饰行，改名等整体替换路径会丢 bridgePlatform');
 }

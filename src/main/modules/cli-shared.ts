@@ -189,6 +189,13 @@ export function persistCliEvent(sessionId: string, event: CliEvent): void {
     case 'stream_event':
       break;
 
+    // SA-1/SA-2（turn-projection）：回合起止伴生信号——投影计时/取数载体，非对话历史。
+    // 发射点直推 CHAT_EVENT、本就不经 forwardEvent 进此函数；显式跳过 case 自文档化，
+    // 防未来有人把落库分流误加到这里。
+    case 'turn_started':
+    case 'turn_ended':
+      break;
+
     case 'aborted': {
       // review-v2 §3.7：aborted 终态（用户中断/硬杀「已中断」——P3-1 统一文案 / 回合结束「回合已结束」）
       // 此前未落库——forwardEvent 推了 IPC 但 persistCliEvent 缺 case，导致重开会话后中断文本消失。

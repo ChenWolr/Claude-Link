@@ -17,7 +17,9 @@ const { now } = useNow(() => sending.value);
 const elapsedMs = computed(() => {
   const start = sessionStore.activeTurnStartedAt;
   if (!start) return 0;
-  return Math.max(0, now.value - start);
+  // SA-3（turn-projection）：时钟协议——(本地时钟 + serverClockOffset) - 服务端 startedAt，
+  // 跨机时钟偏差不出负数/跳变；offset 缺省 0（桌面单机）时等价现状。useNow 的 tick 机制不变。
+  return Math.max(0, now.value + sessionStore.activeTurnClockOffset - start);
 });
 const streamingContent = computed(() => sessionStore.streamingContent);
 const streamingTool = computed(() => sessionStore.streamingTool);
