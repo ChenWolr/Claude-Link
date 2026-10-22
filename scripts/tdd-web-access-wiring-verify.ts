@@ -6,7 +6,7 @@
 // P5 再增量。全部为纯 node:assert/计数 check 的源码文本/结构断言，不 import Electron。
 //
 // 覆盖：
-//   ① ipc-handlers.ts：ipcMain.handle( 字面归零；regInvokeHandler( === 82（计算式见断言注释）；
+//   ① ipc-handlers.ts：ipcMain.handle( 字面归零；regInvokeHandler( === 84（计算式见断言注释）；
 //   ② export-image-manager.ts：ipcMain.handle( === 7（EXPORT_RENDER_* 裸注册，天然不可被网页
 //      调用）；regInvokeHandler( === 2（EXPORT_IMAGE_START/CANCEL 经注册表）；
 //   ③ src/main/** 全目录 webContents.send(IPC_CHANNELS. 字面仅出现在 push-bus.ts
@@ -79,11 +79,12 @@ const preloadApi = read('src/preload/api.ts');
 
 // ── ① ipc-handlers.ts：注册表全量替换 ──
 console.log('=== 1) ipc-handlers.ts：ipcMain.handle( → regInvokeHandler( 全量替换 ===');
-// 计算式：regInvokeHandler( === 82 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
-// §3-P3-4）；ipcMain.handle( === 0：注释行无该带括号字面。
+// 计算式：regInvokeHandler( === 84 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
+// §3-P3-4）+ SA-2 回合投影只读查询两通道 CHAT_RUNTIME_SNAPSHOT/CHAT_RUNNING_OVERVIEW
+//（计划 2026-10-21「回合投影 + 标题质量」）；ipcMain.handle( === 0：注释行无该带括号字面。
 check('ipc-handlers.ts ipcMain.handle( 出现次数 === 0', countOccurrences(handlers, 'ipcMain.handle(') === 0,
   `实际 ${countOccurrences(handlers, 'ipcMain.handle(')}`);
-check('ipc-handlers.ts regInvokeHandler( 出现次数 === 82', countOccurrences(handlers, 'regInvokeHandler(') === 82,
+check('ipc-handlers.ts regInvokeHandler( 出现次数 === 84', countOccurrences(handlers, 'regInvokeHandler(') === 84,
   `实际 ${countOccurrences(handlers, 'regInvokeHandler(')}`);
 check('ipc-handlers.ts 从 ./ipc-registry 导入 regInvokeHandler',
   /import\s*\{[^}]*regInvokeHandler[^}]*\}\s*from\s*'\.\/ipc-registry'/.test(handlers));

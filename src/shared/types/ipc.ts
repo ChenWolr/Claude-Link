@@ -112,6 +112,12 @@ export const IPC_CHANNELS = {
   // 批次二 #3：运行中回合中途切权限档（streaming input 控制请求，setPermissionMode）。
   CHAT_SET_PERMISSION_MODE: 'chat:setPermissionMode',
   CHAT_EVENT: 'chat:event',
+  // SA-2（回合投影只读查询，计划 2026-10-21「回合投影 + 标题质量」）：主进程内存投影旁路
+  // 快照/概览。RUNTIME_SNAPSHOT：body = sessionId → TurnProjectionSnapshot | null（无记录/
+  // 终态保留期满返回 null）；RUNNING_OVERVIEW：无参 → TurnRunningEntry[]（仅未 ended 投影，
+  // 无在跑回合为空数组）。只读、无副作用，不影响既有事件流与落库。
+  CHAT_RUNTIME_SNAPSHOT: 'chat:getRuntimeSnapshot',
+  CHAT_RUNNING_OVERVIEW: 'chat:getRunningOverview',
   INTERACTION_REQUEST: 'interaction:request',
   INTERACTION_RESPOND: 'interaction:respond',
   INTERACTION_CANCEL: 'interaction:cancel',

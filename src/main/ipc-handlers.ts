@@ -35,7 +35,10 @@ import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight, getCurrentQueryInstance } from './modules/chat-backend';
+// SA-1（turn-projection）：回合起点投影登记（turn_started 伴生信号在此发射）。
+// SA-2：快照/概览只读查询两通道经同一模块导出（getSnapshot/getRunningOverview）。
+import { noteTurnStarted, getSnapshot, getRunningOverview } from './modules/turn-projection';
 import { buildSessionSkillOverridesForPin } from './modules/sdk-skill-overrides';
 import { buildSessionMcpOverridesForPin } from './modules/mcp/sdk-mcp';
 import {
@@ -1077,6 +1080,23 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         hasAttachments: prepared.attachmentIds.length > 0,
       });
       spawned = true;
+      // SA-1（turn-projection）：回合起点——spawn 占坑成功即登记流式投影并伴生 turn_started
+      //（旁路追加：不经 forwardEvent、不落库；generation 取该会话当前 query 代际，与
+      // sdk-backend 既有 generation 机制同源；startedAt 为投影记录的权威起点）。
+      const turnGeneration = getCurrentQueryInstance(sessionId) ?? -1;
+      const turnStartedAt = noteTurnStarted(sessionId, turnGeneration);
+      pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
+        sessionId,
+        event: {
+          type: 'turn_started',
+          // A2（P3）：generation<0 兜底时投影不登记（noteTurnStarted 返 null），事件照发、
+          // startedAt 以发射点时钟兜底（详见 turn-projection.ts noteTurnStarted 头注释）。
+          startedAt: turnStartedAt ?? Date.now(),
+          serverNow: Date.now(),
+          turnKind: 'user',
+          generation: turnGeneration,
+        },
+      });
       // v3 调度挂点：占坑成功即回合开始——插话顶掉倒计时 + 引擎置 running（规则 #4/#5）。
       beginUserTurn(sessionId, mainWindow);
       // exit 兜底：防普通回合 result 永久丢失时引擎 status 僵尸卡 running。
@@ -1188,6 +1208,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if (changed) clearSessionPermissionBook(sessionId);
     return changed;
   });
+
+  // SA-2（回合投影只读查询）：快照/概览两通道——直读主进程内存投影，纯只读无副作用。
+  // getSnapshot 对暂态/无回合/终态保留期满会话返回 null（模块内已如此）；getRunningOverview
+  // 任何时候可用（无在跑回合返回空数组）。
+  regInvokeHandler(IPC_CHANNELS.CHAT_RUNTIME_SNAPSHOT, async (_event, sessionId: string) => getSnapshot(sessionId));
+  regInvokeHandler(IPC_CHANNELS.CHAT_RUNNING_OVERVIEW, async () => getRunningOverview());
 
   regInvokeHandler(IPC_CHANNELS.INTERACTION_RESPOND, async (_event, response) => {
     respondToInteractionPrompt(response);

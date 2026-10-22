@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（104 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（106 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -15,6 +15,9 @@ import type { AppUpdateInfo, AppUpdateState } from '../shared/types/update';
 import { IPC_CHANNELS } from '../shared/constants';
 import type { ChangesListResult, ChangesDiffResult, ChangesOpenResult } from '../shared/types/changes';
 import type { FsListResult, FsMkdirResult, FsRenameResult, FsRootsResult, FsShowResult, FsStatResult, FsTrashResult, ExportTargetRequest, ExportTargetResponse } from '../shared/types/fs-picker';
+// SA-2：回合投影镜像类型的 stalled 字段复用 shared StallInfo（主进程 turn-projection.ts
+// import 同一 shared 类型；type-only，无运行时引入）。
+import type { StallInfo } from '../shared/stall-watchdog';
 
 // ── MCP 管理载荷类型（P4；内联镜像主进程 src/main/modules/mcp/mcp-scanner.ts / mcp-probe.ts
 //    的视图导出形状——preload 不 import 主进程模块，type 结构镜像，字段以该两文件实现为准。
@@ -139,6 +142,65 @@ export type McpParseJsonResult =
   | { ok: true; servers: McpParsedJsonEntry[] }
   | { ok: false; error: string };
 
+// ── 回合投影载荷类型（SA-2；内联镜像主进程 src/main/modules/turn-projection.ts 的
+//    TurnProjectionSnapshot / TurnRunningEntry 及其嵌套形状——preload 不 import 主进程
+//    模块，type 结构镜像，字段以其实现为准。stalled 复用 shared/stall-watchdog 的
+//    StallInfo（主进程模块本身 import 同一 shared 类型，非镜像漂移点）──
+
+/** api_retry 瞬态快照（turn-projection.TurnApiRetryTransient 镜像：system subtype==='api_retry' 的有效子集）。 */
+export interface TurnApiRetryTransientView {
+  /** 主进程记录时刻。 */
+  observedAt: number;
+  retryCount?: number;
+  retryLimit?: number;
+  nextRetryAt?: number;
+  retryDelayMs?: number;
+  error?: string;
+  errorStatus?: number | null;
+  sdkAttempt?: number;
+  sdkMaxRetries?: number;
+}
+
+/** 后台任务（system task_*）记录（turn-projection.TurnBackgroundTask 镜像）。 */
+export interface TurnBackgroundTaskView {
+  startedAtServer: number;
+  lastProgress?: unknown;
+}
+
+/** 回合投影快照（turn-projection.TurnProjectionSnapshot 镜像；serverNow 由查询时刻回填，
+ *  供渲染端时钟偏移校正）。三路累加器全文 + 存储长度（截断后长度=上限）+ 瞬态与终态字段。 */
+export interface TurnProjectionSnapshotView {
+  sessionId: string;
+  /** 回合代际（= SessionEntry.queryInstance）：防旧回合迟到快照污染新回合。 */
+  generation: number;
+  /** 回合起点（主进程 Date.now()，权威值）。 */
+  startedAt: number;
+  /** 查询时刻主进程时钟。 */
+  serverNow: number;
+  /** 回合阶段：由最近一条流事件推导（text→generating / thinking→thinking / tool 入参→tool）。 */
+  phase: 'thinking' | 'tool' | 'generating';
+  streamText: string;
+  streamTextLength: number;
+  truncatedText: boolean;
+  streamThinking: string;
+  streamThinkingLength: number;
+  truncatedThinking: boolean;
+  streamTool: Record<string, string>;
+  truncatedTool: Record<string, boolean>;
+  apiRetry: TurnApiRetryTransientView | null;
+  stalled: StallInfo | null;
+  backgroundTasks: Record<string, TurnBackgroundTaskView>;
+  endedAt: number | null;
+  outcome: 'success' | 'error' | 'interrupted' | null;
+}
+
+/** 进行中回合概览条目（turn-projection.TurnRunningEntry 镜像：仅未 ended 的投影）。 */
+export interface TurnRunningOverviewEntry {
+  sessionId: string;
+  startedAt: number;
+  generation: number;
+}
+
 export interface ClaudeLinkAPI {
   detectCli: () => Promise<CliDetectionResult>;
   getCliStatus: () => Promise<CliDetectionResult>;
@@ -187,6 +249,11 @@ export interface ClaudeLinkAPI {
   abortChat: (sessionId: string) => Promise<void>;
   /** 批次二 #3：运行中回合中途切权限档（streaming 控制请求）；无运行回合返回 false。 */
   setRunningPermissionMode: (sessionId: string, mode: string | null) => Promise<boolean>;
+  /** SA-2：回合投影快照（主进程内存投影只读旁路；运行中或终态 60s 保留期可查，
+   *  暂态/无回合/保留期满返回 null）。 */
+  getRuntimeSnapshot: (sessionId: string) => Promise<TurnProjectionSnapshotView | null>;
+  /** SA-2：进行中回合概览（仅未 ended 投影；无在跑回合返回空数组）。 */
+  getRunningOverview: () => Promise<TurnRunningOverviewEntry[]>;
   onChatEvent: (callback: (payload: ChatEventPayload) => void) => () => void;
   removeChatListener: () => void;
   onInteractionRequest: (callback: (payload: InteractionPromptPayload) => void) => () => void;
@@ -350,6 +417,11 @@ export function createApi(): ClaudeLinkAPI {
     sendMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, payload),
     abortChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ABORT, sessionId),
     setRunningPermissionMode: (sessionId, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE, sessionId, mode),
+    // SA-2（回合投影只读查询）：两通道直连主进程内存投影，无 DB/事件流副作用。
+    getRuntimeSnapshot: (sessionId) =>
+      ipcRenderer.invoke(IPC_CHANNELS.CHAT_RUNTIME_SNAPSHOT, sessionId) as Promise<TurnProjectionSnapshotView | null>,
+    getRunningOverview: () =>
+      ipcRenderer.invoke(IPC_CHANNELS.CHAT_RUNNING_OVERVIEW) as Promise<TurnRunningOverviewEntry[]>,
     onChatEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: ChatEventPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.CHAT_EVENT, listener);

@@ -242,3 +242,4 @@ scripts/selftest-mcp-export.ts
 scripts/selftest-web-access-protocol.ts
 scripts/tdd-web-access-wiring-verify.ts
 scripts/tdd-web-secure-context-verify.ts
+scripts/tdd-turn-projection-verify.ts
