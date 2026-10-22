@@ -1,6 +1,6 @@
 // web-bridge.ts
 // 「网页访问（局域网）」P4：渲染层 web 桥（docs/plans/2026-10-20-web-access-plan.md §3-P4）。
-// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 104 方法
+// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 106 方法
 // 代理到主进程 WS RPC（invoke 分发 + 全量事件广播客户端本地过滤），并负责：
 //   - token 读取：location.hash #token=（扫码/复制链接入口）→ localStorage.clWebToken →
 //     history.replaceState 清除地址栏 hash（token 不进任何 HTTP 请求行，仅 WS 升级 query）；
@@ -98,6 +98,9 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   sendMessage: IPC_CHANNELS.CHAT_SEND,
   abortChat: IPC_CHANNELS.CHAT_ABORT,
   setRunningPermissionMode: IPC_CHANNELS.CHAT_SET_PERMISSION_MODE,
+  // SA-2（回合投影只读查询）：快照/概览两通道（值直引 IPC_CHANNELS 常量）。
+  getRuntimeSnapshot: IPC_CHANNELS.CHAT_RUNTIME_SNAPSHOT,
+  getRunningOverview: IPC_CHANNELS.CHAT_RUNNING_OVERVIEW,
   onChatEvent: IPC_CHANNELS.CHAT_EVENT,
   removeChatListener: IPC_CHANNELS.CHAT_EVENT,
   onInteractionRequest: IPC_CHANNELS.INTERACTION_REQUEST,
@@ -504,6 +507,23 @@ async function runRealignSequence(): Promise<void> {
     if (active && !active.transient) {
       const fresh = sessionStore.sessions.find((s) => s.id === active.id) ?? active;
       await sessionStore.switchSession(fresh);
+    }
+    // SA-4（P5 恢复接线）追加①：running 概览重对齐——断线期间开始的回合在重连后恢复侧栏
+    // 黄灯/计时（无 running 会话时 overview=[] 为 no-op；已在 runningSessions 的会话由
+    // action 内部跳过，不重复 markRunning）。追加②：active 为持久会话且在 running 清单内时
+    // 拉细快照灌流式累加器与瞬态（applyRuntimeSnapshot 按长度规则采用，终态快照内部自拒）。
+    // 顺序：先订阅（App.vue 挂载（先于 loadConfig/恢复接线）注册 CHAT_EVENT 订阅，断线不注销）→ 后拉快照，与 SA-3
+    // 竞态协议一致。独立 try/catch：投影对齐失败静默，不阻断后续 reconcile/updateInfo 步骤。
+    try {
+      const overview = await window.claudeLink.getRunningOverview();
+      sessionStore.applyRunningOverview(overview);
+      const current = sessionStore.activeSession;
+      if (current && !current.transient && overview.some((e) => e.sessionId === current.id)) {
+        const snap = await window.claudeLink.getRuntimeSnapshot(current.id);
+        if (snap) sessionStore.applyRuntimeSnapshot(snap);
+      }
+    } catch {
+      // 概览/快照对齐失败不致命
     }
     void useInteractionStore().reconcile();
     const info = await window.claudeLink.getUpdateInfo();

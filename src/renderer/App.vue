@@ -103,15 +103,18 @@ watch(() => providerStore.error, (err) => {
 onMounted(async () => {
   document.addEventListener('dragover', suppressDragNavigation);
   document.addEventListener('drop', suppressDragNavigation);
+  // 根因修复：chat:event 监听在 App.vue 全局注册，生命周期与 app 等长。
+  // ChatPage 卸载（路由跳转到配置页/会话管理页）不影响监听，后台执行的会话事件不丢失。
+  // R9（round-001）：startListening 只依赖 window.claudeLink.onChatEvent（无 config 依赖），
+  // 上移到 loadConfig 之前——首载「先订阅后拉快照」（P5 恢复接线/SA-3 竞态协议）从「统计性
+  // 保证」变为确定性保证：任何后续快照/概览拉取发生时 CHAT_EVENT 订阅必已就绪。
+  startListening();
   await configStore.loadConfig();
   const root = document.documentElement;
   const palette = THEME_PALETTES.find((p) => p.id === configStore.config.themePaletteId);
   if (palette) applyThemePalette(palette, root);
   // 字体大小：根据 config.fontScale 动态设置 --font-size-base，所有 rem 单位随此缩放。
   applyFontScale(configStore.config.fontScale, FONT_SCALE_SIZES, root);
-  // 根因修复：chat:event 监听在 App.vue 全局注册，生命周期与 app 等长。
-  // ChatPage 卸载（路由跳转到配置页/会话管理页）不影响监听，后台执行的会话事件不丢失。
-  startListening();
   // bindContextUpdates 也在全局注册，避免 ChatPage 卸载后 context:update 监听丢失。
   sessionStore.bindContextUpdates();
   // 更新状态全局单订阅（R2-R5）：update-store 是渲染层唯一 onUpdateStateChanged 订阅者，
