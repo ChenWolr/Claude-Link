@@ -243,3 +243,4 @@ scripts/selftest-web-access-protocol.ts
 scripts/tdd-web-access-wiring-verify.ts
 scripts/tdd-web-secure-context-verify.ts
 scripts/tdd-turn-projection-verify.ts
+scripts/tdd-background-task-session-scope-verify.ts

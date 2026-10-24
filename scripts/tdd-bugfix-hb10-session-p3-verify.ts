@@ -117,13 +117,15 @@ check('⑤ loadSessions 条件清搜索态 + patchSessionInLists 轻量刷新 + 
   assert.match(renameBody, /patchSessionInLists|searchResults/, 'renameActiveSession 缺搜索视图同步');
 });
 
-// ⑥ SMG-05：deleteSession 清四瞬态。
-check('⑥ deleteSession：清 toolProgress/backgroundTasks/compacting/thinkingTokens（对齐 switchSession 清单）', () => {
+// ⑥ SMG-05：deleteSession 清四瞬态。（P5 2026-10-22：backgroundTasks 已按会话分桶——
+// 断言从整表清空收窄为按桶删，其他会话的任务卡不受删会话影响。）
+check('⑥ deleteSession：清 toolProgress/compacting/thinkingTokens + backgroundTasks 按桶删', () => {
   const idx = store.indexOf('async deleteSession(id: string) {');
   const end = store.indexOf('async deleteSessions(', idx);
   const body = store.slice(idx, end > idx ? end : undefined);
   assert.match(body, /this\.toolProgress = \{\};/, '缺 toolProgress 清理');
-  assert.match(body, /this\.backgroundTasks = \{\};/, '缺 backgroundTasks 清理');
+  assert.match(body, /delete this\.backgroundTasks\[id\];/, '缺 backgroundTasks 按桶清理');
+  assert.ok(!body.includes('this.backgroundTasks = {}'), 'deleteSession 不得整表清空其他会话的任务桶');
   assert.match(body, /this\.compacting = false;/, '缺 compacting 复位');
   assert.match(body, /this\.thinkingTokens = null;/, '缺 thinkingTokens 清理');
 });

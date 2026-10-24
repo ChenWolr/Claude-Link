@@ -251,8 +251,10 @@ export const useSessionStore = defineStore('session', {
     // 新回合 markRunning 整表清（中断回合的残留由此收口）；切换/暂态会话整表清。
     // 回合结束（markStopped/markCompleted）不清。
     toolProgress: {} as Record<string, number>,
-    // C：后台任务编排（task_*），按 taskId。task_notification 终态后移除。
-    backgroundTasks: {} as Record<string, BackgroundTask>,
+    // C：后台任务编排（task_*）。P5（2026-10-22）按会话维度两层索引（外层 sessionId → 内层
+    // taskId，对齐 subAgentStreamingThinking 形态）：task_notification 终态后保留到本会话
+    // 下一次新回合边界；切换会话不清（各会话桶互不可见，修 A/B 面板串扰与跨会话误清）。
+    backgroundTasks: {} as Record<string, Record<string, BackgroundTask>>,
     // C：实时压缩进行中（system:compacting）。compact_result（成功/失败）复位为 false；压缩横幅快照
     // 到达（shouldShowCompactedBanner）时同样复位。compact_boundary 不在此复位，仅落库为过程消息。
     compacting: false as boolean,
@@ -363,6 +365,11 @@ export const useSessionStore = defineStore('session', {
     activeSubAgentText(state): Record<string, string> {
       if (!state.activeSession) return {};
       return state.subAgentStreamingText[state.activeSession.id] ?? {};
+    },
+    // C/P5（2026-10-22）：当前活动会话的后台任务桶（taskId → BackgroundTask）。TaskQueuePanel
+    // 与 ProcessGroup 只消费本桶——后台任务卡按会话隔离（修 A/B 会话任务卡串扰）。
+    activeBackgroundTasks(state): Record<string, BackgroundTask> {
+      return state.backgroundTasks[state.activeSession?.id ?? ''] ?? {};
     },
     // 上下文统计（Task 9）：从 canonicalContext 派生。圆环只读当前窗口可信值；
     // turn usage 仅作参考。无可信当前窗口时 currentUsedTokens/currentPercent 为 null（pending）。
@@ -530,7 +537,8 @@ export const useSessionStore = defineStore('session', {
       this.compactedJustNow = false;
       this.lastCompactionSummary = null;
       this.toolProgress = {};
-      this.backgroundTasks = {};
+      // P5（2026-10-22）：backgroundTasks 已按会话分桶——新建暂态（全新 id、空桶）与切换
+      // 会话同构，不再整表清空（否则会误清其他会话的后台任务卡）。
       this.compacting = false;
       this.thinkingTokens = null;
       this.contextLastWindow = null;
@@ -636,9 +644,10 @@ export const useSessionStore = defineStore('session', {
       this.compactedJustNow = false;
       // compact metadata display：压缩账单显示态随会话切换清空（与 compactedJustNow 复位同处）。
       this.lastCompactionSummary = null;
-      // C：切换会话清理瞬态进度状态，避免会话 A 的工具耗时/后台任务/压缩态串扰到会话 B。
+      // C：切换会话清理瞬态进度状态，避免会话 A 的工具耗时/压缩态串扰到会话 B。
+      // P5（2026-10-22）：backgroundTasks 已按会话分桶（activeBackgroundTasks 只暴露本会话桶），
+      // 不再整表清空——切换后其他会话的任务卡保留，切回该会话仍可见（含运行中卡计时恢复）。
       this.toolProgress = {};
-      this.backgroundTasks = {};
       this.compacting = false;
       // 批次 B：清思考 token 估算，避免会话 A 的思考峰值串扰到会话 B 的 ContextButton。
       this.thinkingTokens = null;
@@ -735,10 +744,10 @@ export const useSessionStore = defineStore('session', {
       // review-v3 High-2：已删会话的 context 代际记录一并清理（防内存泄漏；会话已删，
       // 主进程不会再发该会话的 CONTEXT_UPDATE，无需保留 known generation 拒收旧值）。
       delete this.contextQueryGenerations[id];
-      // hb10-SMG-05：删除运行中会话的幽灵任务卡/工具耗时/压缩态/思考峰值瞬态
-      //（对齐 switchSession 清单——全局 map，删除后残留会在当前视图显示已死会话的任务卡）。
+      // hb10-SMG-05：删除运行中会话的幽灵任务卡/工具耗时/压缩态/思考峰值瞬态。
+      // P5（2026-10-22）：backgroundTasks 按会话分桶——只删本会话桶（其他会话的任务卡保留）。
       this.toolProgress = {};
-      this.backgroundTasks = {};
+      delete this.backgroundTasks[id];
       this.compacting = false;
       this.thinkingTokens = null;
       // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
@@ -1202,15 +1211,17 @@ export const useSessionStore = defineStore('session', {
       else this.clearStalled(sid);
       // 后台任务置位：startedAtServer 是主进程时钟，按本快照偏移换算为客户端等价时刻
       //（TaskQueuePanel 计时用 now - startedAt 客户端口径）。本地已有卡（事件建立的，信息更全）
-      // 只补缺的 startedAt，不整卡覆盖。
+      // 只补缺的 startedAt，不整卡覆盖。P5（2026-10-22）：按快照会话 id 落本会话桶（该函数当前
+      // 仅对 active 会话调用——ChatPage 挂载恢复 / web-bridge realign，按 snap.sessionId 落桶等价）。
       const snapOffset = snap.serverNow - Date.now();
       for (const [taskId, task] of Object.entries(snap.backgroundTasks)) {
         const startedClient = task.startedAtServer - snapOffset;
-        const existing = this.backgroundTasks[taskId];
+        const taskBucket = (this.backgroundTasks[sid] ??= {});
+        const existing = taskBucket[taskId];
         if (existing) {
           if (existing.startedAt == null) existing.startedAt = startedClient;
         } else {
-          this.backgroundTasks[taskId] = { taskId, startedAt: startedClient };
+          taskBucket[taskId] = { taskId, startedAt: startedClient };
         }
       }
     },
@@ -1513,21 +1524,29 @@ export const useSessionStore = defineStore('session', {
     clearToolProgress(toolUseId: string) {
       delete this.toolProgress[toolUseId];
     },
-    // C：后台任务（task_*）。
-    upsertBackgroundTask(task: BackgroundTask) {
-      this.backgroundTasks[task.taskId] = task;
+    // C：后台任务（task_*）——P5（2026-10-22）按会话维度两层索引（外层 sessionId → 内层
+    // taskId，对齐 subAgentStreamingThinking 形态）。所有写入必须带会话 id：前台路径传
+    // activeSession.id，后台路径传事件 payload.sessionId（修 A/B 会话任务卡串扰 + 跨会话误清）。
+    upsertBackgroundTask(sessionId: string, task: BackgroundTask) {
+      this.backgroundTasks[sessionId] ??= {};
+      this.backgroundTasks[sessionId][task.taskId] = task;
     },
-    removeBackgroundTask(taskId: string) {
-      delete this.backgroundTasks[taskId];
+    removeBackgroundTask(sessionId: string, taskId: string) {
+      delete this.backgroundTasks[sessionId]?.[taskId];
     },
-    // D 点：回合边界清卡（新用户消息成功发出处调用）——只清上一回合【终态】卡（completed/failed/stopped）；
-    // 运行中卡保留跨回合（新回合的 progress 继续被消费），避免误杀仍在运行的后台任务卡。
-    clearBackgroundTasks() {
+    // D 点：回合边界清卡（新用户消息成功发出处调用）——只清【本会话】上一回合【终态】卡
+    // （completed/failed/stopped）；运行中卡保留跨回合（新回合的 progress 继续被消费）；
+    // 其他会话的桶一律不动（P5：1973d30「运行中卡跨回合保留」语义保留、作用域收窄到本会话）。
+    clearBackgroundTasks(sessionId: string) {
+      const bucket = this.backgroundTasks[sessionId];
+      if (!bucket) return;
       const next: Record<string, BackgroundTask> = {};
-      for (const [id, t] of Object.entries(this.backgroundTasks)) {
+      for (const [id, t] of Object.entries(bucket)) {
         if (t.status !== 'completed' && t.status !== 'failed' && t.status !== 'stopped') next[id] = t;
       }
-      this.backgroundTasks = next;
+      // F6（round-002 review）：过滤后桶空则删键不留空壳对象（卫生；缺桶早退路径不变）。
+      if (Object.keys(next).length === 0) delete this.backgroundTasks[sessionId];
+      else this.backgroundTasks[sessionId] = next;
     },
     // C：实时压缩态。
     setCompacting(v: boolean) {

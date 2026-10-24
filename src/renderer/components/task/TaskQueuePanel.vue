@@ -133,11 +133,13 @@ const queueBarHint = computed<{ text: string; showResumeAll: boolean }>(() => {
   return { text: '待命中', showResumeAll: false };
 });
 
-// C：后台任务（task_*）列表与计数。
-const backgroundTaskList = computed(() => Object.values(sessionStore.backgroundTasks));
+// C：后台任务（task_*）列表与计数。P5（2026-10-22）：只取当前活动会话的桶（activeBackgroundTasks）
+// ——后台任务卡按会话隔离，A 会话的任务卡不再出现在 B 会话面板（切回 A 仍可见）。
+const backgroundTaskList = computed(() => Object.values(sessionStore.activeBackgroundTasks));
 const backgroundTaskCount = computed(() => backgroundTaskList.value.length);
 // 问题 6：客户端实时计时——sending 期间每 100ms 跳动，子 Agent 运行中耗时实时更新。
-// D 点扩展：后台任务跨回合运行，回合结束（sending=false）后只要有运行中卡（无 status）计时不能停跳。
+// D 点扩展：后台任务跨回合运行，回合结束（sending=false）后只要有运行中卡（无 status）计时不能停跳
+// （P5：backgroundTaskList 已是活动会话桶，保活条件随之只看本会话运行卡）。
 const { now } = useNow(() => sessionStore.sending || backgroundTaskList.value.some((t) => !t.status));
 function taskIcon(taskType?: string): string {
   if (taskType === 'local_bash') return '⌨️';
