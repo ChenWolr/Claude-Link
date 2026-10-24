@@ -244,3 +244,4 @@ scripts/tdd-web-access-wiring-verify.ts
 scripts/tdd-web-secure-context-verify.ts
 scripts/tdd-turn-projection-verify.ts
 scripts/tdd-background-task-session-scope-verify.ts
+scripts/tdd-user-message-time-verify.ts

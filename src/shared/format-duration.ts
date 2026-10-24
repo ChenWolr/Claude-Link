@@ -1,5 +1,7 @@
 // format-duration.ts
 // 回复耗时（durationMs）→ 展示文案的共享纯函数，仅主流程使用：TurnTimer 实时/完成态与气泡脚注共用。
+// 另含 formatSentAt（2026-10-22 六问题计划 P1 点 S3）：用户消息发送时刻（created_at ISO 字符串）
+// → 「发送于」脚注文案，见文末。
 // 子 Agent 组耗时用 subagent-groups.ts 的 formatDuration（秒一档，无分：秒），工具行耗时在
 // ToolCallBlock 内联格式化，三者口径不互通。
 //
@@ -33,4 +35,22 @@ export function formatEndedAt(ts: number | null | undefined, now: number = Date.
     return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** S3（2026-10-22 六问题计划 P1）：用户消息发送时刻展示（气泡脚注「发送于」单源）。
+ *  入参是 ISO 8601 字符串（DB created_at 经 normalizeDbTime 规范为带 Z 的 UTC，或内存乐观消息
+ *  的 toISOString 毫秒级），与 formatEndedAt（epoch ms 入参，TurnTimer 在用、签名不动）口径一致
+ *  但类型不同，故独立成函数：当天 HH:mm（分钟级，发送时刻秒无参照意义），跨天 M/d HH:mm。
+ *  空 / Date.parse 为 NaN 返回空串（诚实不造数，调用处 v-if 不渲染、无空行残留）。 */
+export function formatSentAt(iso: string | null | undefined): string {
+  if (!iso) return '';
+  const ts = Date.parse(iso);
+  if (Number.isNaN(ts)) return '';
+  const d = new Date(ts);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  const sameDay = new Date().toDateString() === d.toDateString();
+  if (!sameDay) {
+    return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
