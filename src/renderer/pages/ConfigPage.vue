@@ -861,7 +861,7 @@ const updateStageTone = computed(() => {
               </label>
               <label class="field field--toggle">
                 <span class="field-label">离开会话后通知</span>
-                <span class="field-desc">窗口失焦时，任务完成/网络中断弹系统通知。</span>
+                <span class="field-desc">窗口失焦时，任务完成/网络中断弹系统通知并闪烁任务栏。若不弹横幅，请检查 Windows 设置 → 系统 → 通知 → Claude Link 的『显示通知横幅』与专注助手。</span>
                 <input v-model="store.config.notifyOnLeave" type="checkbox" />
               </label>
               <label class="field field--toggle">

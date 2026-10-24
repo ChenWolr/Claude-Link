@@ -919,6 +919,28 @@ check('session-completion-notifier 公共守卫输入 + 两个语义化包装函
   assert.ok(notifier.includes("'任务已完成'"));
   assert.ok(notifier.includes("'网络异常，已中断'"));
 });
+check('S2：失焦完成通知附任务栏闪烁兜底（flash 在构造成功后、show 之前，不依赖横幅放行）', () => {
+  const notifier = readFileSync(new URL('../src/main/modules/session-completion-notifier.ts', import.meta.url), 'utf8');
+  // 守卫输入须提为 ctx 变量：flash 门复用与通知判定同源的 windowFocused，避免二次 isFocused() 产生判定分叉。
+  assert.ok(notifier.includes('const ctx = {'), '守卫输入应提为 ctx 变量供 flash 复用');
+  assert.ok(notifier.includes('!ctx.windowFocused'), 'flash 必须以 ctx.windowFocused（失焦）为门');
+  assert.ok(notifier.includes('mainWindow.flashFrame(true)'), '失焦时必须闪烁任务栏兜底');
+  const flashIdx = notifier.indexOf('mainWindow.flashFrame(true)');
+  const showIdx = notifier.indexOf('notification.show()');
+  assert.ok(flashIdx >= 0 && showIdx > flashIdx, `flash(${flashIdx}) 必须先于 show(${showIdx})`);
+  // show() 单独 try-catch：横幅被系统压制（每应用开关/专注助手）时 show 失败只记日志，不反向取消闪烁。
+  const tryIdx = notifier.lastIndexOf('try {', showIdx);
+  const catchIdx = notifier.indexOf('catch (err)', showIdx);
+  assert.ok(tryIdx >= 0 && catchIdx > showIdx, 'show() 后应有 catch 分支');
+  assert.ok(notifier.slice(tryIdx, catchIdx).includes('notification.show()'), 'show() 须包裹在独立 try-catch 内');
+});
+check('S2：index.ts createWindow 注册 focus 事件清除任务栏闪烁', () => {
+  const indexSrc = readFileSync(new URL('../src/main/index.ts', import.meta.url), 'utf8');
+  const focusIdx = indexSrc.indexOf("mainWindow.on('focus'");
+  assert.ok(focusIdx >= 0, 'createWindow 必须注册 focus 监听');
+  const focusSnippet = indexSrc.slice(focusIdx, focusIdx + 200);
+  assert.ok(focusSnippet.includes('flashFrame(false)'), 'focus 回调必须 flashFrame(false) 清除闪烁');
+});
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);

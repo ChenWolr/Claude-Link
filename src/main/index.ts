@@ -158,6 +158,12 @@ function createWindow(): void {
     mainWindow = null;
   });
 
+  // S2：失焦通知的任务栏闪烁兜底（session-completion-notifier flashFrame(true)）——
+  // 窗口聚焦即统一清除闪烁；flashFrame(false) 幂等，重复聚焦无害。
+  mainWindow.on('focus', () => {
+    mainWindow?.flashFrame(false);
+  });
+
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show();
     if (process.platform === 'win32') {

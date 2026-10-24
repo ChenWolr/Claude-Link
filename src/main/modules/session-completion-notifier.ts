@@ -38,17 +38,16 @@ export function setNotificationFocusHook(fn: FocusMainWindow): void {
 function notifySession(mainWindow: BrowserWindow, sessionId: string, body: string): void {
   try {
     const session = sessionRepo.getSession(sessionId);
-    const payload = buildSessionNotification(
-      {
-        // 用户配置「离开会话后通知」开关（notifyOnLeave）；false 时纯函数直接返回 null 不弹通知。
-        notifyEnabled: getConfig().notifyOnLeave,
-        notificationSupported: Notification.isSupported(),
-        windowDestroyed: mainWindow.isDestroyed(),
-        windowFocused: mainWindow.isFocused(),
-        sessionName: session ? session.name : null,
-      },
-      body,
-    );
+    // S2：守卫输入提为 ctx——flash 兜底复用与通知判定同源的 windowFocused，避免二次 isFocused() 判定分叉。
+    const ctx = {
+      // 用户配置「离开会话后通知」开关（notifyOnLeave）；false 时纯函数直接返回 null 不弹通知。
+      notifyEnabled: getConfig().notifyOnLeave,
+      notificationSupported: Notification.isSupported(),
+      windowDestroyed: mainWindow.isDestroyed(),
+      windowFocused: mainWindow.isFocused(),
+      sessionName: session ? session.name : null,
+    };
+    const payload = buildSessionNotification(ctx, body);
     if (!payload) return;
     const notification = new Notification({ title: payload.title, body: payload.body });
     // P2-18：点击 toast → 聚焦主窗（restore/show/focus）。未注入（测试环境）时 no-op。
@@ -60,7 +59,18 @@ function notifySession(mainWindow: BrowserWindow, sessionId: string, body: strin
         logger.warn(`[notify] 点击通知聚焦主窗失败 ${err instanceof Error ? err.message : String(err)}`);
       }
     });
-    notification.show();
+    // S2：横幅可能被 Windows 系统层压制（每应用「显示通知横幅」开关/专注助手），任务栏闪烁是
+    // 应用侧兜底——构造成功即闪，不依赖 show() 成败；flashFrame(true) 幂等，聚焦时由 index.ts
+    // 的 focus 监听 flashFrame(false) 统一清除。
+    if (!ctx.windowFocused && !mainWindow.isDestroyed()) {
+      mainWindow.flashFrame(true);
+    }
+    // S2：show() 单独 try-catch——show 失败只记日志（静默原则不变），不反向取消已执行的闪烁。
+    try {
+      notification.show();
+    } catch (err) {
+      logger.warn(`[notify] 通知 show 失败 [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
+    }
   } catch (err) {
     logger.warn(`[notify] 会话系统通知失败 [${sessionId}] ${err instanceof Error ? err.message : String(err)}`);
   }
