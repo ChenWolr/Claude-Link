@@ -178,6 +178,10 @@ export const IPC_CHANNELS = {
   // D4：全局兜底快照热刷新广播（globalFallback 变化时主→渲染推送）。不经 isSessionActive 守卫——
   // 暂态会话不在 activeSessions，但正是它最需要这路广播；renderer 自行决定覆盖/回填。
   COMMANDS_GLOBAL_CHANGED: 'commands:globalChanged',
+  // S5（2026-10-22 six-issues §7.1）：Skill 页「立即刷新」——绕过 60s 节流与「仅空时生效」条件
+  // 直接重探全局兜底快照，返回探测后快照（成功 ready/empty；失败 degraded/error 显式终态）。
+  // 在飞去重：探测中等待同一 promise，不并发 spawn。
+  COMMANDS_REFRESH_GLOBAL: 'commands:refreshGlobal',
   // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
   // unknown/hidden 命令名，不含 Query 句柄或原始数据）。只读、无副作用，不触发 probe。
   COMMANDS_GET_DIAGNOSTIC: 'commands:getDiagnostic',

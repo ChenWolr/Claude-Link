@@ -261,8 +261,11 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
     '使用说明缺批次5.3 新文案');
 
   const pageSrc = read('src/renderer/pages/ConfigPage.vue');
+  // 距离预算 {0,400}（原 {0,200}）：2026-10-22 六点改动在 watch(activeTab) 的 skill 分支行内
+  // 追加 resetSkillFreshState()，同一回调内「watch{ → tab==='im'」实际间距增至 221 字符；
+  // 断言语义不变（watch 与 im 分支仍须按序同块、后接 bridgeSettingsRef.refresh），仅放宽距离。
   check('J', '⑦', 'ConfigPage 切回 IM tab 重拉（watch im 分支 + bridgeSettingsRef + refresh expose）',
-    /watch\(activeTab, \(tab\) => \{[\s\S]{0,200}tab === 'im'[\s\S]{0,120}bridgeSettingsRef[\s\S]{0,80}refresh/m.test(pageSrc)
+    /watch\(activeTab, \(tab\) => \{[\s\S]{0,400}tab === 'im'[\s\S]{0,120}bridgeSettingsRef[\s\S]{0,80}refresh/m.test(pageSrc)
       && /<BridgeSettings ref="bridgeSettingsRef" \/>/.test(pageSrc),
     'ConfigPage 缺 im 分支 watch 或模板 ref');
   check('J', '⑧', 'BridgeSettings defineExpose refresh（loadAll）',

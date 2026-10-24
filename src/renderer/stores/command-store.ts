@@ -23,6 +23,47 @@ const GLOBAL_FALLBACK_SESSION_ID = '__global_command_fallback__';
 // 单 Pinia 实例，模块级可变量即进程级单例）。
 let globalEnsureInFlight: Promise<void> | null = null;
 
+// ── S5（2026-10-22 six-issues §7.1）：全局 user-skill 命名集 diff（「本次刷新 +N」/卡片「新增」徽标数据源）──
+
+/** 快照中 origin==='user-skill' 的命名集合（diff 基底；null 快照容错为空集）。 */
+function userSkillNameSet(snapshot: SessionCommandSnapshot | null): Set<string> {
+  const names = new Set<string>();
+  for (const c of snapshot?.commands ?? []) {
+    if (c.origin === 'user-skill') names.add(c.name);
+  }
+  return names;
+}
+
+/** 对比刷新前后 globalSnapshot 的 user-skill 命名集合，返回新增名列表（去重、发现序）。 */
+function diffUserSkills(before: SessionCommandSnapshot | null, after: SessionCommandSnapshot | null): string[] {
+  const prev = userSkillNameSet(before);
+  const added: string[] = [];
+  for (const c of after?.commands ?? []) {
+    if (c.origin === 'user-skill' && !prev.has(c.name) && !added.includes(c.name)) added.push(c.name);
+  }
+  return added;
+}
+
+// F3（round-002 review）：基线可用性——仅定态成功快照（ready/stale/empty，与 ensureGlobalSnapshot
+// 的「定态」集一致）可作 diff 基线；null/loading/degraded/error 一律视为「无基线」（首拍=建基线，
+// 不计 delta）。loading/degraded 占位快照（只读分流：探测在飞返回默认 loading、CLI 缺失/探测失败
+// 返回 degraded，commands 必为空集）会经 load() 哨兵回填写入基线槽位——若当作基线 diff，会把
+// 全部既有 Skill 误标「新增」。
+function hasUsableBaseline(snapshot: SessionCommandSnapshot | null): boolean {
+  return (
+    snapshot !== null &&
+    snapshot.status !== 'loading' &&
+    snapshot.status !== 'degraded' &&
+    snapshot.status !== 'error'
+  );
+}
+
+// 广播消费的 before 基线（模块级非响应式，与 globalEnsureInFlight 同款进程级单例）。App.vue 在调用
+// applyGlobalFallback 前已把 globalSnapshot 覆写为新快照，故「上一拍」快照只能由此模块级变量承载：
+// 每个快照写入点（applyGlobalFallback / load 哨兵回填 / refreshGlobal）落定即同步，广播 diff 各以自己
+// 记录的 before 集计算，与手动刷新并发安全（快照幂等 REPLACE）。
+let prevGlobalUserSkillSnapshot: SessionCommandSnapshot | null = null;
+
 export const useCommandStore = defineStore('command', {
   state: () => ({
     snapshotsBySession: {} as Record<string, SessionCommandSnapshot>,
@@ -42,6 +83,14 @@ export const useCommandStore = defineStore('command', {
     // Skill 页为空对象——菜单过滤拿不到映射时回退 slash 名口径（fm==dir 公共形态同键，
     // fm≠dir 且映射不可得的残面由引擎键入本地拦截兜底，登记已知限制）。
     userSkillDirNames: {} as Record<string, string>,
+    // S5：Skill 页「立即刷新」进行中态（短时操作态，跟随快照应用即复位，无跨端同步需求）。
+    globalRefreshing: false,
+    // S5：最近一次刷新新增 user-skill 数（同步条 delta 徽标 + rail「全局 Skill」条目徽标；
+    // v-if > 0 渲染；重进 Skill tab 清零防陈旧常驻）。
+    globalSkillDelta: 0,
+    // S5：最近一次刷新新增 user-skill 名列表（卡片「新增」徽标判属；仅全局作用域消费，
+    // 项目作用域卡片不受影响——磁盘现查语义）。
+    lastAddedSkillNames: [] as string[],
   }),
   getters: {
     // 返回函数的 getter（sessionId 入参）。未加载时返回默认 loading 快照——不抛错、不阻塞 UI。
@@ -83,6 +132,21 @@ export const useCommandStore = defineStore('command', {
     //   对齐 setStatusPreservingCommands 语义）；非空不动——per-session 精确集优先，
     //   避免全局 cwd 的命令集覆盖 per-cwd 精确集。非活跃会话不消费（切回时 load 自然拿最新）。
     applyGlobalFallback(snapshot: SessionCommandSnapshot, active: Session | null, skillOverrides?: Record<string, 'off'> | null) {
+      // S5：watcher 自动同步的发现同样计入「本次刷新 +N」（同步条 delta 徽标 / 卡片「新增」徽标）。
+      // App.vue 在调用本方法前已把 globalSnapshot 覆写为新快照，故 before 取模块级
+      // prevGlobalUserSkillSnapshot（上一拍同步点），不读 this.globalSnapshot；watcher 重探已被主进程
+      // skillAutoSync 门控，渲染层无需重复判断。diff 与基线同步在既有早退分支之前执行——无活跃会话/
+      // 无快照的广播同样推进基线，不产生跨拍假新增；失败终态不经此路径（setGlobalFallback 只产
+      // ready/empty）。首拍/无基线时 diff 结果被丢弃（见下方 F3 守卫），有基线才消费。
+      const added = diffUserSkills(prevGlobalUserSkillSnapshot, snapshot);
+      // F3（round-002 review）：首拍/无基线只建基线不计 delta——下方 delta/lastAdded 写入被守卫跳过，
+      // 全部既有 Skill 不标「新增」；有基线才消费 diff 结果。
+      const firstShot = !hasUsableBaseline(prevGlobalUserSkillSnapshot);
+      if (snapshot) prevGlobalUserSkillSnapshot = snapshot;
+      if (!firstShot) {
+        this.lastAddedSkillNames = added;
+        this.globalSkillDelta = added.length;
+      }
       if (!snapshot) return;
       if (active?.transient) {
         // 暂态会话菜单按当前全局禁用配置过滤（物化后由引擎 per-session probe 接管，
@@ -140,6 +204,12 @@ export const useCommandStore = defineStore('command', {
           if (snapshot.source === 'cache') {
             this.globalSnapshot = { ...snapshot, sessionId: GLOBAL_FALLBACK_SESSION_ID };
           }
+          // S5：cache 派生响应已回填哨兵快照 → 同步广播 before 基线（'/' 菜单拉取路径刷新快照后，
+          // 下一次广播 diff 不把更早已落定条目误报为「本次新增」）。同步语句放 cache 块外，保住既有
+          // tdd-skill-overrides-verify ⑳ 的邻接契约钉（cache 块内仅允许哨兵回填赋值一条语句）。
+          if (snapshot.source === 'cache' && this.globalSnapshot) {
+            prevGlobalUserSkillSnapshot = this.globalSnapshot;
+          }
         }
       } catch {
         // 拉取失败保留既有 snapshot；UI 用 activeSnapshot 的默认 loading，不抛到页面。
@@ -177,6 +247,57 @@ export const useCommandStore = defineStore('command', {
         }
       })();
       return globalEnsureInFlight;
+    },
+    // S5（2026-10-22 six-issues §7.1）：Skill 页「立即刷新」——经 COMMANDS_REFRESH_GLOBAL 绕过主进程
+    // 60s 节流与「仅空时生效」条件直接重探全局兜底快照（主进程在飞去重：探测中等待同一 promise）。
+    // 记录刷新前 user-skill 名集合（before）→ invoke → 应用快照 → diff 出本次新增写入 delta/lastAdded
+    // （同步条与卡片徽标数据源）。F3：无基线（before 为 null/loading/degraded/error 占位）时成功只写
+    // 快照与基线、不写 delta/lastAdded（首拍=基线建立，不视为「本次刷新发现」）。失败两路均沿
+    // globalSnapshot status='error'/'degraded' 既有 snap-status
+    // 错误条通道呈现，按钮恢复可点（globalRefreshing finally 复位）；失败时 delta/lastAdded 不更新
+    //（沿用上次值，不误报 +0）。重置时机：下一次刷新覆盖；重进 Skill tab 由 ConfigPage 调
+    // resetSkillFreshState() 清零（防陈旧徽标常驻）。
+    async refreshGlobal(): Promise<void> {
+      if (this.globalRefreshing) return; // UI disabled + 在飞守卫双保险
+      this.globalRefreshing = true;
+      const before = this.globalSnapshot;
+      try {
+        const snapshot = await window.claudeLink.refreshGlobalCommands();
+        if (snapshot && snapshot.status !== 'degraded' && snapshot.status !== 'error') {
+          // 成功：registry 哨兵快照 REPLACE（幂等），基线同步供下一次广播 diff。
+          this.globalSnapshot = snapshot;
+          prevGlobalUserSkillSnapshot = snapshot;
+          // F3（round-002 review）：无基线（before 为 null/loading/degraded/error 占位）时成功只写
+          // 快照与基线、不写 delta/lastAdded（保持默认 0/[]）——首拍=基线建立，不视为「本次刷新发现」。
+          if (hasUsableBaseline(before)) {
+            this.lastAddedSkillNames = diffUserSkills(before, snapshot);
+            this.globalSkillDelta = this.lastAddedSkillNames.length;
+          }
+        } else {
+          // 失败终态（degraded=CLI 缺失 / error=探测失败）：快照不整体 REPLACE——旧命令集保留展示
+          //（status/error 取失败终态），错误条呈现；delta/lastAdded 不动（不误报 +0）。
+          this.globalSnapshot = {
+            ...(this.globalSnapshot ?? createDefaultCommandSnapshot(GLOBAL_FALLBACK_SESSION_ID)),
+            status: snapshot?.status ?? 'error',
+            error: snapshot?.error ?? 'Global Skill 刷新失败，请稍后重试',
+          };
+        }
+      } catch (e) {
+        // invoke 本身失败（web 桥未连接等）：同走错误条通道，快照不 REPLACE。
+        this.globalSnapshot = {
+          ...(this.globalSnapshot ?? createDefaultCommandSnapshot(GLOBAL_FALLBACK_SESSION_ID)),
+          status: 'error',
+          error: e instanceof Error ? e.message : 'Global Skill 刷新失败',
+        };
+      } finally {
+        this.globalRefreshing = false;
+      }
+    },
+    // S5：重进 Skill tab 清零 delta/lastAdded（ConfigPage watch(activeTab) skill 分支调用）——
+    // 徽标只在「停留在 Skill 页期间发生刷新」的窗口内可见，防陈旧徽标常驻；下一次刷新覆盖重算。
+    resetSkillFreshState(): void {
+      this.globalSkillDelta = 0;
+      this.lastAddedSkillNames = [];
     },
     // Task 8：拉取命令来源诊断（按需，UI 展示来源徽章时调）。失败静默保留既有诊断，不抛到页面。
     async loadDiagnostics(sessionId: string) {

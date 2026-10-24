@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（107 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（108 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -299,6 +299,8 @@ export interface ClaudeLinkAPI {
   removeCommandListener: () => void;
   // D4：全局兜底快照热刷新广播（暂态会话命令菜单的实时更新通道）。
   onGlobalCommandsChanged: (callback: (payload: CommandGlobalChangedPayload) => void) => () => void;
+  // S5：Skill 页「立即刷新」——绕过节流重探全局兜底快照，返回探测后快照（degraded/error 为失败终态）。
+  refreshGlobalCommands: () => Promise<SessionCommandSnapshot>;
   // Task 3 Step 5：原生 settings 诊断摘要（脱敏，只回来源/CLAUDE.md 候选/生效键名）。
   getNativeSettingsDiagnostic: (cwd: string) => Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>;
   // Task 8：命令来源 provenance 诊断（origin/availability 计数 + unknown/hidden 命令名，脱敏派生视图）。
@@ -501,6 +503,7 @@ export function createApi(): ClaudeLinkAPI {
       ipcRenderer.on(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, listener);
     },
+    refreshGlobalCommands: () => ipcRenderer.invoke(IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL) as Promise<SessionCommandSnapshot>,
     getNativeSettingsDiagnostic: (cwd) =>
       ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, cwd) as Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>,
     getCommandDiagnostics: (sessionId) =>

@@ -35,7 +35,7 @@ import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight, getCurrentQueryInstance } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight, getCurrentQueryInstance, refreshGlobalCommands } from './modules/chat-backend';
 // SA-1（turn-projection）：回合起点投影登记（turn_started 伴生信号在此发射）。
 // SA-2：快照/概览只读查询两通道经同一模块导出（getSnapshot/getRunningOverview）。
 import { noteTurnStarted, getSnapshot, getRunningOverview } from './modules/turn-projection';
@@ -1023,6 +1023,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   regInvokeHandler(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, async (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
     return getCommandProvenance(sessionId);
+  });
+  // S5（2026-10-22 six-issues §7.1）：Skill 页「立即刷新」——绕过 60s 节流与「仅空时生效」条件
+  // 直接重探全局兜底快照（在飞去重：探测中等待同一 promise）。返回探测后快照（成功 ready/empty；
+  // CLI 缺失/探测失败为 degraded/error 显式终态，渲染层沿既有 snap-status 错误条呈现）。
+  // 副作用与 runGlobalCommandProbe 既有链一致（写 globalFallback + COMMANDS_GLOBAL_CHANGED 广播 +
+  // 空命令会话回填），零新增广播通道。
+  regInvokeHandler(IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL, async () => {
+    return refreshGlobalCommands(mainWindow);
   });
 
   // Chat

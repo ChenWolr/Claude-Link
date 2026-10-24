@@ -95,6 +95,11 @@ export interface AppConfig {
   // defaultConfig 有默认值。token 刻意不在此形状内：存 electron-store 独立键 webAccessToken
   //（与 providerProfiles 先例一致），config:get 永不携带。
   webAccess: WebAccessConfig;
+  // S5（2026-10-22 six-issues §7.1）：Skill 自动同步开关，默认 true。仅控制 skills 目录 watcher
+  // 变更触发的全局重探（index.ts triggerGlobalProbe 注入回调处每次触发现读配置守卫，拨动即刻生效、
+  // 无需重启）；关闭后目录变化需手动「立即刷新」（COMMANDS_REFRESH_GLOBAL 通道）。
+  // 启动时初始全局探测与 ensureGlobalCommandProbeFresh 空快照兜底不受此开关影响（保底能力不变）。
+  skillAutoSync: boolean;
 }
 
 // Claude Link 管理库内的单台 MCP 服务器（§1.1 数据模型）。只承载定义，不含启停状态

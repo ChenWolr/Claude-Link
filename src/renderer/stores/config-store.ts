@@ -70,6 +70,8 @@ const defaultConfig: AppConfig = {
   // 网页访问（局域网）默认关（形状与主进程 config-manager 默认一致；令牌 token 刻意不在此
   // 形状内，存主进程 electron-store 独立键 webAccessToken，config:get 永不携带）。
   webAccess: { enabled: false, port: WEB_ACCESS_DEFAULT_PORT, allowedHosts: [] },
+  // S5：Skill 自动同步默认开（与主进程 config-manager 默认保持同值）。
+  skillAutoSync: true,
 };
 
 export const useConfigStore = defineStore('config', {

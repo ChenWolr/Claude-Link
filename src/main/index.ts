@@ -263,8 +263,19 @@ function startGlobalCommandPipeline(): void {
   startCommandSourceWatcher({
     getUserHome: effectiveUserHome,
     getWorkingDirectory: () => getConfig().workingDirectory,
-    // 透传幂等结果（true=启动 / false=被吞）：watcher 据此在被吞时延迟重试（review-v1 发现1）。
-    triggerGlobalProbe: () => (mainWindow ? runGlobalCommandProbe(mainWindow) : false),
+    // 透传幂等结果（true=已启动或已处置 / false=被幂等锁吞掉）：watcher 据此在被吞时延迟重试
+    //（review-v1 发现1）。
+    // S5（2026-10-22 six-issues §7.1）：自动同步门——config.skillAutoSync 关闭后目录变化不触发重探
+    //（手动「立即刷新」COMMANDS_REFRESH_GLOBAL 通道独立可用）。每次触发现读配置，开关拨动即刻生效、
+    // 无需重启。F2（2026-10-24 review）：关闭时返回 true（=本次触发已处置、无需重试）——若返回 false
+    // 会触发 watcher swallowedRetryTimer 每 10s 永续空转重试；关闭期间磁盘变更不自动重探，拨回开后由
+    // 下一次变更事件触发（首拍有启动初始探测与 ensureGlobalCommandProbeFresh 空快照兜底，保底能力不变）。
+    // 启动时初始探测（上方 runGlobalCommandProbe 直调）与 ensureGlobalCommandProbeFresh 兜底不经此
+    // 回调，不受该门控制。
+    triggerGlobalProbe: () => {
+      if (!getConfig().skillAutoSync) return true;
+      return mainWindow ? runGlobalCommandProbe(mainWindow) : false;
+    },
     onConfigSaved,
     logger,
   });

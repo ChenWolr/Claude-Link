@@ -115,7 +115,7 @@ import {
   type PermissionUpdate,
   type SdkPermissionSettings,
 } from './sdk-permissions';
-import { sdkCommandRegistry } from './sdk-command-registry';
+import { GLOBAL_FALLBACK_SESSION_ID, sdkCommandRegistry } from './sdk-command-registry';
 import { getUserOriginFingerprint } from './command-source-watcher';
 import { buildNativeSdkOptionsCore, mergeSpawnOptions } from './sdk-command-options';
 import { buildCommandOriginEvidence } from './sdk-command-origin';
@@ -3350,6 +3350,61 @@ export function ensureGlobalCommandProbeFresh(mainWindow: BrowserWindow, maxAgeM
   if (sdkCommandRegistry.getGlobalFallback()) return; // 已有兜底：无需重试
   if (Date.now() - lastGlobalProbeAttemptAt < maxAgeMs) return; // 节流：距上次尝试不足 maxAgeMs
   runGlobalCommandProbe(mainWindow);
+}
+
+/**
+ * S5（2026-10-22 six-issues §7.1）：显式刷新通道——Skill 页「立即刷新」经 COMMANDS_REFRESH_GLOBAL
+ * 到此。与 ensureGlobalCommandProbeFresh 的差异：绕过 60s 节流与「仅 globalFallback 为空时生效」
+ * 条件，无条件跑一次探测（用户显式意图，probe spawn 成本可接受）；复用 runGlobalCommandProbe 幂等锁
+ * 做在飞去重——探测已在跑则 await 同一 donePromise（不并发 spawn、不打断在飞探测），与 watcher 自动
+ * 重探/手动刷新并发安全。完成后既有 applyGlobalProbeCommands → emitGlobalCommandsChanged 自动广播
+ * （快照 REPLACE 幂等，渲染层 diff 各以自己记录的 before 集计算）。手动刷新成功顺带在 runGlobalCommandProbe
+ * 入口推进 lastGlobalProbeAttemptAt，后续 D6 节流窗口自然顺延。
+ * 失败不 throw：CLI 缺失 / hb10-CMD-07 三路失败旗标置位时，不以 registry 兜底为 null 为前提——即使存在
+ * 旧快照也返回显式失败终态快照（degraded/error，commands 空、哨兵 sessionId；F1，2026-10-24 review），
+ * 错误文案对齐 shared/commands-get.ts 只读分流 degraded 快照——渲染层沿既有 snap-status 错误条呈现，
+ * 不崩溃。
+ */
+export async function refreshGlobalCommands(mainWindow: BrowserWindow): Promise<SessionCommandSnapshot> {
+  if (!globalProbe) runGlobalCommandProbe(mainWindow);
+  const entry = globalProbe;
+  if (entry) await entry.donePromise;
+  // F1（2026-10-24 review）：手动刷新所 await 的探测失败时，不得把探测前的旧 ready 快照当成功返回。
+  // 旗标在 runGlobalCommandProbe 入口清位，此刻的值精确反映刚结束的这次探测；显式失败终态快照
+  // 让渲染层沿 snap-status 错误条呈现、delta/lastAdded 不被误清（计划 §7.4）。watcher 后台路径
+  // 不受影响（emitGlobalCommandsChanged 只在成功写 registry 后广播）。
+  if (globalCliMissing || isGlobalProbeFailed()) {
+    return {
+      sessionId: GLOBAL_FALLBACK_SESSION_ID,
+      commands: [],
+      status: globalCliMissing ? 'degraded' : 'error',
+      source: 'cache',
+      updatedAt: new Date().toISOString(),
+      error: globalCliMissing
+        ? '未检测到本地 Claude Code，无法发现 Slash 命令'
+        : '命令探测失败，可重试（点「立即刷新」重试）',
+    };
+  }
+  const fallback = sdkCommandRegistry.getGlobalFallback();
+  if (fallback) return fallback;
+  if (globalCliMissing) {
+    return {
+      sessionId: GLOBAL_FALLBACK_SESSION_ID,
+      commands: [],
+      status: 'degraded',
+      source: 'cache',
+      updatedAt: new Date().toISOString(),
+      error: '未检测到本地 Claude Code，无法发现 Slash 命令',
+    };
+  }
+  return {
+    sessionId: GLOBAL_FALLBACK_SESSION_ID,
+    commands: [],
+    status: 'error',
+    source: 'cache',
+    updatedAt: new Date().toISOString(),
+    error: '命令探测失败，可重试（点「立即刷新」重试）',
+  };
 }
 
 /**

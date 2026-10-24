@@ -238,13 +238,13 @@ check('ClaudeLinkAPI 含 getRuntimeSnapshot/getRunningOverview 成员',
 check('preload 实现两方法（invoke 对应通道）',
   preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.CHAT_RUNTIME_SNAPSHOT, sessionId)') &&
   preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.CHAT_RUNNING_OVERVIEW)'));
-check('api.ts 头注释「107 个方法」且与 ClaudeLinkAPI 成员数一致（动态比对；P2 会话置顶点 S4 增 setSessionPinned 同步 106→107）', (() => {
+check('api.ts 头注释「108 个方法」且与 ClaudeLinkAPI 成员数一致（动态比对；P2 会话置顶点 S4 增 setSessionPinned 同步 106→107，2026-10-22 六点 S5 增 refreshGlobalCommands 同步 107→108）', (() => {
   const header = /(\d+)\s*个方法/.exec(preloadApi);
   const ifaceAt = preloadApi.indexOf('export interface ClaudeLinkAPI');
   const ifaceEnd = preloadApi.indexOf('export function createApi');
   if (!header || ifaceAt === -1 || ifaceEnd === -1) return false;
   const members = (preloadApi.slice(ifaceAt, ifaceEnd).match(/^\s+[A-Za-z]+\s*:\s*\(/gm) ?? []).length;
-  return Number(header[1]) === 107 && members === 107;
+  return Number(header[1]) === 108 && members === 108;
 })());
 check('api.ts 导出镜像类型 TurnProjectionSnapshotView / TurnRunningOverviewEntry',
   /export interface TurnProjectionSnapshotView\b/.test(preloadApi) &&

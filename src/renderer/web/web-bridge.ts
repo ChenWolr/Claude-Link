@@ -1,6 +1,6 @@
 // web-bridge.ts
 // 「网页访问（局域网）」P4：渲染层 web 桥（docs/plans/2026-10-20-web-access-plan.md §3-P4）。
-// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 107 方法
+// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 108 方法
 // 代理到主进程 WS RPC（invoke 分发 + 全量事件广播客户端本地过滤），并负责：
 //   - token 读取：location.hash #token=（扫码/复制链接入口）→ localStorage.clWebToken →
 //     history.replaceState 清除地址栏 hash（token 不进任何 HTTP 请求行，仅 WS 升级 query）；
@@ -140,6 +140,8 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   onCommandChanged: IPC_CHANNELS.COMMANDS_CHANGED,
   removeCommandListener: IPC_CHANNELS.COMMANDS_CHANGED,
   onGlobalCommandsChanged: IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED,
+  // S5：Skill 页「立即刷新」（绕过节流重探全局兜底快照；键集完备性契约由 tdd-web-access-wiring-verify §11.2 钉死）。
+  refreshGlobalCommands: IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL,
   getNativeSettingsDiagnostic: IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC,
   getCommandDiagnostics: IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC,
   getSkillProjectDirs: IPC_CHANNELS.SKILL_PROJECT_DIRS_GET,
