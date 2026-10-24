@@ -24,8 +24,8 @@ function check(name: string, fn: () => void): void {
 function iso(y: number, m: number, d: number, hh = 12, mm = 0): string {
   return new Date(y, m - 1, d, hh, mm, 0).toISOString();
 }
-function session(id: string, updatedAt: string): Session {
-  // 最小 Session 形（分组/格式化只消费 id + updatedAt；其余字段给类型合法的中性值）
+function session(id: string, updatedAt: string, pinnedAt: number | null = null): Session {
+  // 最小 Session 形（分组/格式化只消费 id + updatedAt + pinnedAt；其余字段给类型合法的中性值）
   return {
     id,
     name: `会话-${id}`,
@@ -38,6 +38,7 @@ function session(id: string, updatedAt: string): Session {
     maxTurns: 0,
     thinkingLevel: null,
     skillOverrides: null,
+    pinnedAt,
     createdAt: updatedAt,
     updatedAt,
     lastContextTokens: null,
@@ -116,8 +117,63 @@ check('G8 now 注入生效（不读真实时钟）', () => {
   const groups = groupSessionsByDate([session('x', iso(2026, 1, 15, 8, 0))], new Date(2026, 0, 15, 22, 0, 0));
   assert.deepEqual(keys(groups), ['today']);
 });
-check('G9 DATE_GROUP_LABELS 四键齐全', () => {
-  assert.deepEqual(DATE_GROUP_LABELS, { today: '今天', yesterday: '昨天', week: '本周更早', older: '更早' });
+check('G9 DATE_GROUP_LABELS 五键齐全（P2 置顶组新增 pinned 键）', () => {
+  assert.deepEqual(DATE_GROUP_LABELS, { pinned: '置顶', today: '今天', yesterday: '昨天', week: '本周更早', older: '更早' });
+});
+
+console.log('\n=== P1–P5 · groupSessionsByDate 置顶分组（P2 会话置顶，计划点 S4） ===');
+
+check('P1 置顶会话不进日期桶，自成「置顶」组且组序在最前', () => {
+  const groups = groupSessionsByDate(
+    [session('p1', iso(2026, 9, 23, 9, 0), 1727000000000), session('t', iso(2026, 9, 23, 10, 0))],
+    NOW,
+  );
+  assert.deepEqual(keys(groups), ['pinned', 'today']);
+  assert.equal(groups[0].label, '置顶');
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['p1']);
+  assert.deepEqual(groups[1].sessions.map((s) => s.id), ['t']);
+});
+check('P2 置顶组内按 pinnedAt DESC（后置顶在前），与传入序无关', () => {
+  const groups = groupSessionsByDate(
+    [
+      session('old-pin', iso(2026, 9, 20, 9, 0), 1000),
+      session('new-pin', iso(2026, 9, 21, 9, 0), 2000),
+    ],
+    NOW,
+  );
+  assert.deepEqual(keys(groups), ['pinned']);
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['new-pin', 'old-pin']);
+});
+check('P3 空置顶无置顶组（不输出空组）', () => {
+  const groups = groupSessionsByDate([session('a', iso(2026, 9, 23, 9, 0))], NOW);
+  assert.deepEqual(keys(groups), ['today']);
+});
+check('P4 置顶 + 未置顶跨桶混合：置顶组在最前，today/yesterday/older 桶组成不变', () => {
+  const groups = groupSessionsByDate(
+    [
+      session('older', iso(2026, 9, 15, 10, 0)),
+      session('pin-a', iso(2026, 9, 15, 11, 0), 3000),
+      session('yesterday', iso(2026, 9, 22, 10, 0)),
+      session('pin-b', iso(2026, 9, 22, 11, 0), 1000),
+      session('today', iso(2026, 9, 23, 10, 0)),
+    ],
+    NOW,
+  );
+  assert.deepEqual(keys(groups), ['pinned', 'today', 'yesterday', 'older']);
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['pin-a', 'pin-b']);
+  assert.deepEqual(groups[1].sessions.map((s) => s.id), ['today']);
+  assert.deepEqual(groups[2].sessions.map((s) => s.id), ['yesterday']);
+  assert.deepEqual(groups[3].sessions.map((s) => s.id), ['older']);
+});
+check('P5 pinnedAt 为 null 与 undefined（旧数据缺字段）一致按未置顶处理', () => {
+  const noField = session('nofield', iso(2026, 9, 23, 9, 0));
+  delete (noField as { pinnedAt?: number | null }).pinnedAt; // 旧数据可能无该字段
+  const groups = groupSessionsByDate(
+    [noField, session('null-pin', iso(2026, 9, 23, 10, 0), null)],
+    NOW,
+  );
+  assert.deepEqual(keys(groups), ['today']);
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['nofield', 'null-pin']);
 });
 
 console.log('\n=== T1–T7 · formatSessionTime 时间列格式化 ===');

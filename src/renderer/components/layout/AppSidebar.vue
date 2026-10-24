@@ -277,6 +277,10 @@ async function confirmDelete(session: { id: string; name: string }) {
               :aria-label="statusLabel(session.id)"
               :title="statusLabel(session.id)"
             ></span>
+            <!-- P2 会话置顶（点 S4）：置顶行名称前 pin 标识（10px accent 填充）。 -->
+            <svg class="session-link__pinned" v-if="session.pinnedAt != null" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
+            </svg>
             <span class="session-link__name">{{ session.name }}</span>
             <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge -->
             <span
@@ -285,6 +289,19 @@ async function confirmDelete(session: { id: string; name: string }) {
               title="该会话有待确认的弹窗"
             >⏳</span>
             <span class="session-link__time">{{ formatSessionTime(session.updatedAt) }}</span>
+            <!-- P2 会话置顶（点 S4）：与删除钮同款 hover 显隐；暂态（未落库）/批量模式隐藏。 -->
+            <button
+              v-if="!batchMode && !session.transient"
+              type="button"
+              class="session-link__pinbtn"
+              :title="session.pinnedAt != null ? '取消置顶' : '置顶会话'"
+              :aria-label="(session.pinnedAt != null ? '取消置顶 ' : '置顶会话 ') + session.name"
+              @click.stop="store.togglePin(session.id)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
+              </svg>
+            </button>
             <button
               v-if="!batchMode"
               type="button"
@@ -331,6 +348,10 @@ async function confirmDelete(session: { id: string; name: string }) {
               :aria-label="statusLabel(session.id)"
               :title="statusLabel(session.id)"
             ></span>
+            <!-- P2 会话置顶（点 S4）：置顶行名称前 pin 标识（10px accent 填充）。 -->
+            <svg class="session-link__pinned" v-if="session.pinnedAt != null" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
+            </svg>
             <span class="session-link__name">{{ session.name }}</span>
             <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge -->
             <span
@@ -339,6 +360,19 @@ async function confirmDelete(session: { id: string; name: string }) {
               title="该会话有待确认的弹窗"
             >⏳</span>
             <span class="session-link__time">{{ formatSessionTime(session.updatedAt) }}</span>
+            <!-- P2 会话置顶（点 S4）：与删除钮同款 hover 显隐；暂态（未落库）/批量模式隐藏。 -->
+            <button
+              v-if="!batchMode && !session.transient"
+              type="button"
+              class="session-link__pinbtn"
+              :title="session.pinnedAt != null ? '取消置顶' : '置顶会话'"
+              :aria-label="(session.pinnedAt != null ? '取消置顶 ' : '置顶会话 ') + session.name"
+              @click.stop="store.togglePin(session.id)"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
+              </svg>
+            </button>
             <button
               v-if="!batchMode"
               type="button"
@@ -761,7 +795,15 @@ async function confirmDelete(session: { id: string; name: string }) {
   cursor: pointer;
 }
 
-/* hover 时时间列与删除 × 互斥显隐（纯 CSS）。 */
+/* hover 时时间列与删除 × 互斥显隐（纯 CSS）。P2 置顶钮（点 S4）：hover / 键盘聚焦（:focus-visible）
+   显现置顶钮（width 0 隐藏形态恢复可见可点），与删除 × 显隐规则并排。 */
+.session-link:hover .session-link__pinbtn,
+.session-link__pinbtn:focus-visible {
+  width: 18px;
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .session-link:hover .session-link__delete {
   display: grid;
 }
@@ -778,6 +820,53 @@ async function confirmDelete(session: { id: string; name: string }) {
 .session-link__delete:hover {
   background: color-mix(in srgb, var(--color-danger) 18%, transparent);
   color: var(--color-danger);
+}
+
+/* ── P2 会话置顶（点 S4）── */
+
+/* 置顶行标识：状态灯后、名称前的 10px accent 填充 pin 图标。 */
+.session-link__pinned {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  fill: var(--color-accent);
+}
+
+/* 置顶钮：与删除 × 同款 hover 显隐语义，但不用 display:none——display:none 脱离 Tab 序，
+   icon-only 钮将永远无法键盘触达；改 width 0 + opacity 0 隐藏（非 hover 态不占宽度，仅引入
+   一个 8px flex gap），hover / :focus-visible 恢复可见可点。 */
+.session-link__pinbtn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 0;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  cursor: pointer;
+  transition: width var(--duration-fast) var(--ease-out), opacity var(--duration-fast) var(--ease-out);
+}
+
+.session-link__pinbtn svg {
+  width: 12px;
+  height: 12px;
+  fill: currentColor;
+}
+
+.session-link__pinbtn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.session-link__pinbtn:hover {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  color: var(--color-accent);
 }
 
 .session-link__status {

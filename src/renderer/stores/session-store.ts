@@ -512,6 +512,8 @@ export const useSessionStore = defineStore('session', {
           // 暂态会话未物化=未钉住，按 null；物化时由主进程 SESSION_CREATE 钉住（注入时存量
           // null 回退当前全局 mcpOverrides）。
           mcpOverrides: null,
+          // P2 会话置顶（点 S4）：暂态会话未落库不可置顶（置顶钮 UI 守卫 + togglePin 双保险），恒 null。
+          pinnedAt: null,
           createdAt: now,
           updatedAt: now,
           lastContextTokens: null,
@@ -1411,6 +1413,30 @@ export const useSessionStore = defineStore('session', {
         }
       } catch (error) {
         this.fail(error instanceof Error ? error.message : '重命名失败');
+      }
+    },
+    // P2 会话置顶（点 S4，方案 A）：置顶/取消置顶翻转入口。乐观 patch pinnedAt（列表与搜索
+    // 视图同步，UI 即时反馈）→ IPC setSessionPinned → 成功后 loadSessions() 整表重拉（排序
+    // 权威在 listSessions SQL ORDER BY，置顶分组/组内浮顶随传入序自然生效；loadSessions 契约
+    // 不动 activeSession，当前会话不被切走）。失败回滚 patch 并 console.error（置顶失败不值得
+    // 打断用户的 error toast，静默可重试）。模式对齐 renameActiveSession。
+    async togglePin(sessionId: string) {
+      const target = this.sessions.find((s) => s.id === sessionId);
+      // 暂态会话不可置顶（未落库）：UI v-if 守卫之外再守一道（防御直调）。
+      if (!target || target.transient) return;
+      const wasPinned = target.pinnedAt != null;
+      const prevPinnedAt = target.pinnedAt;
+      this.patchSessionInLists(sessionId, { pinnedAt: wasPinned ? null : Date.now() });
+      try {
+        const updated = await window.claudeLink.setSessionPinned(sessionId, !wasPinned);
+        // await 往返期间仍在本会话时同步活动会话对象（保持 pinnedAt 与 DB 一致；列表权威序由下方重拉给全）。
+        if (updated && this.activeSession?.id === sessionId) {
+          this.activeSession = updated;
+        }
+        await this.loadSessions();
+      } catch (error) {
+        this.patchSessionInLists(sessionId, { pinnedAt: prevPinnedAt });
+        console.error('[session-store] togglePin failed', error);
       }
     },
     /** P1-3：按共享口径重算回合边界（队列回合的 user_message_created 分支在消息入列后调用）。 */

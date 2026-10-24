@@ -172,6 +172,12 @@ function runMigrationStatements(db: Database.Database): void {
     if (!hasCol('mcp_overrides')) {
       db.exec('ALTER TABLE sessions ADD COLUMN mcp_overrides TEXT DEFAULT NULL');
     }
+    // P2 会话置顶（点 S4，方案 A）：置顶时刻 epoch ms；NULL = 未置顶。免升版（skill_overrides
+    // 先例），仅走幂等自愈补列；排序消费在 session-repo.listSessions ORDER BY（置顶优先），
+    // 取消置顶写 NULL（不删列），排序回归 updated_at。
+    if (!hasCol('pinned_at')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN pinned_at INTEGER');
+    }
   }
 
   // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。

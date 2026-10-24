@@ -854,6 +854,22 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       return updated ? withBridgePlatform(updated) : updated;
     },
   );
+  // P2 会话置顶（点 S4，方案 A）：pinned=true 写当前时刻（epoch ms），false 写 NULL（= 未置顶）。
+  // 专用通道 + sessionRepo.setSessionPinned（不 bump updated_at，置顶不打乱「最近操作」排序语义）；
+  // 成功后复用 SESSIONS_CHANGED 广播链（upsert，SESSION_UPDATE :849-853 同款）——跨端/本端渲染层
+  // 去抖重拉列表，排序权威在 listSessions ORDER BY。单行出口 withBridgePlatform 装饰（对齐
+  // SESSION_GET/SESSION_UPDATE，防整体替换列表行丢 bridgePlatform 锁定标记）。
+  regInvokeHandler(IPC_CHANNELS.SESSION_SET_PINNED, async (_event, id: string, pinned: boolean) => {
+    // 入参健壮性校验（对齐 SESSION_UPDATE hb10-SMG-07 形态）：非字符串 id / 非布尔 pinned 直拒。
+    if (typeof id !== 'string' || !id.trim()) throw new Error('非法会话 id');
+    if (typeof pinned !== 'boolean') throw new Error('非法置顶参数');
+    if (!sessionRepo.getSession(id)) return null;
+    const updated = sessionRepo.setSessionPinned(id, pinned ? Date.now() : null);
+    if (updated) {
+      pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId: id });
+    }
+    return updated ? withBridgePlatform(updated) : updated;
+  });
   // B1：回合元数据持久化（渲染层在 result 到达时 fire-and-forget 调用）。
   // 校验：会话必须存在；durationMs/endedAt 仅正数可写（非正/NaN/非 number → null）；
   // costUsd 仅正数可写（非正 → null，端点 0 值不展示 $0.0000 的既有语义）。

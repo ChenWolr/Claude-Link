@@ -79,12 +79,13 @@ const preloadApi = read('src/preload/api.ts');
 
 // ── ① ipc-handlers.ts：注册表全量替换 ──
 console.log('=== 1) ipc-handlers.ts：ipcMain.handle( → regInvokeHandler( 全量替换 ===');
-// 计算式：regInvokeHandler( === 84 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
+// 计算式：regInvokeHandler( === 85 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
 // §3-P3-4）+ SA-2 回合投影只读查询两通道 CHAT_RUNTIME_SNAPSHOT/CHAT_RUNNING_OVERVIEW
-//（计划 2026-10-21「回合投影 + 标题质量」）；ipcMain.handle( === 0：注释行无该带括号字面。
+//（计划 2026-10-21「回合投影 + 标题质量」）+ P2 会话置顶 SESSION_SET_PINNED（计划 2026-10-22 six-issues 点 S4）；
+// ipcMain.handle( === 0：注释行无该带括号字面。
 check('ipc-handlers.ts ipcMain.handle( 出现次数 === 0', countOccurrences(handlers, 'ipcMain.handle(') === 0,
   `实际 ${countOccurrences(handlers, 'ipcMain.handle(')}`);
-check('ipc-handlers.ts regInvokeHandler( 出现次数 === 84', countOccurrences(handlers, 'regInvokeHandler(') === 84,
+check('ipc-handlers.ts regInvokeHandler( 出现次数 === 85', countOccurrences(handlers, 'regInvokeHandler(') === 85,
   `实际 ${countOccurrences(handlers, 'regInvokeHandler(')}`);
 check('ipc-handlers.ts 从 ./ipc-registry 导入 regInvokeHandler',
   /import\s*\{[^}]*regInvokeHandler[^}]*\}\s*from\s*'\.\/ipc-registry'/.test(handlers));
@@ -195,11 +196,11 @@ check('ClaudeLinkAPI 含 onSessionsChanged 成员（upsert|delete 载荷）',
   /onSessionsChanged:\s*\(callback:\s*\(payload:\s*\{\s*kind:\s*'upsert'\s*\|\s*'delete';\s*sessionId:\s*string\s*\}\)\s*=>\s*void\)\s*=>\s*\(\)\s*=>\s*void;/.test(preloadApi));
 check('preload/api.ts 实现 onSessionsChanged（ipcRenderer.on 模式）',
   /onSessionsChanged:\s*\(callback\)\s*=>\s*\{[\s\S]*?ipcRenderer\.on\(IPC_CHANNELS\.SESSIONS_CHANGED,\s*listener\);[\s\S]*?return\s*\(\)\s*=>\s*ipcRenderer\.off\(IPC_CHANNELS\.SESSIONS_CHANGED,\s*listener\);/.test(preloadApi));
-check('ipc-handlers.ts 三处 pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED 发射',
-  countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED') === 3,
+check('ipc-handlers.ts 四处 pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED 发射（create/update/setPinned/delete，P2 会话置顶点 S4 +1）',
+  countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED') === 4,
   `实际 ${countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED')}`);
-check("发射形态含 upsert×2 + delete×1",
-  countOccurrences(handlers, "{ kind: 'upsert', sessionId") === 2 &&
+check("发射形态含 upsert×3 + delete×1（P2 会话置顶点 S4 新增 setPinned upsert 一处）",
+  countOccurrences(handlers, "{ kind: 'upsert', sessionId") === 3 &&
   countOccurrences(handlers, "{ kind: 'delete', sessionId") === 1);
 // 发射点落位：SESSION_CREATE 物化成功后（return session 之前）、SESSION_UPDATE 成功后
 //（return updated ? 之前）、SESSION_DELETE 删库成功后（deleteSession 之后）。
@@ -380,6 +381,12 @@ check('installWebBridge 引导位于 createApp(App) mount 之前',
   rendererMain.indexOf('installWebBridge') < rendererMain.indexOf('createApp(App)'));
 
 // 11.2 键集对等契约：WEB_CHANNEL_TABLE 键集 === ClaudeLinkAPI 接口成员集（多键/少键均 fail）
+// P2 会话置顶（点 S4）新通道 SESSION_SET_PINNED 五处一致性由下方键集对等（表键 ↔ 接口成员）
+// + 注册计数 85 覆盖；此处再显式钉三字面（ipc 常量 / 表项 / handler 注册）防键集对等被并行
+// 改动绕过。
+check("IPC_CHANNELS 含 SESSION_SET_PINNED: 'session:setPinned'", ipcConst.includes("SESSION_SET_PINNED: 'session:setPinned'"));
+check('WEB_CHANNEL_TABLE 含 setSessionPinned 表项', webBridge.includes('setSessionPinned: IPC_CHANNELS.SESSION_SET_PINNED'));
+check('ipc-handlers 注册 SESSION_SET_PINNED handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.SESSION_SET_PINNED'));
 const tableStart = webBridge.indexOf('const WEB_CHANNEL_TABLE');
 const tableEnd = webBridge.indexOf('\n};', tableStart);
 check('web-bridge.ts 含 WEB_CHANNEL_TABLE（Record<keyof ClaudeLinkAPI, string>）',

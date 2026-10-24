@@ -101,6 +101,10 @@ export const IPC_CHANNELS = {
   SESSION_GET: 'session:get',
   SESSION_DELETE: 'session:delete',
   SESSION_UPDATE: 'session:update',
+  // P2 会话置顶（点 S4，方案 A）：body = (sessionId: string, pinned: boolean) → Session | null
+  //（null = 会话不存在）。pinned=true 主进程写 Date.now()（epoch ms），false 写 NULL；专用通道 +
+  // repo.setSessionPinned（不 bump updated_at）；成功后广播 SESSIONS_CHANGED(upsert) 跨端同步。
+  SESSION_SET_PINNED: 'session:setPinned',
   // B1：回合元数据持久化（渲染层回合 result 到达时 fire-and-forget 调用，一次写 messages 三列 cost_usd/duration_ms/ended_at + sessions 两列 last_turn_duration_ms/last_turn_ended_at）。
   SESSION_RECORD_TURN_META: 'session:recordTurnMeta',
   // OPT-10：会话级「单独改 model_override」通道（'session:updateModelOverride'）已删除——全链无调用方。

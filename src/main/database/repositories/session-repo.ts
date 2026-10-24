@@ -22,6 +22,8 @@ interface SessionRow {
   thinking_level: string | null;
   skill_overrides: string | null;
   mcp_overrides: string | null;
+  // P2 会话置顶（点 S4）：置顶时刻 epoch ms；NULL = 未置顶。
+  pinned_at: number | null;
   created_at: string;
   updated_at: string;
   last_context_tokens: number | null;
@@ -54,6 +56,8 @@ function toSession(row: SessionRow): Session {
     // 脏值兜底：NULL/空串/脏 JSON/无合法条目一律回落 null（= 未钉住/功能前存量，
     // 注入链回退当前全局 mcpOverrides，§3.14）。
     mcpOverrides: parseSessionMcpOverrides(row.mcp_overrides),
+    // P2 会话置顶：epoch ms；NULL = 未置顶（功能前存量会话天然未置顶）。
+    pinnedAt: row.pinned_at ?? null,
     createdAt: normalizeDbTime(row.created_at),
     updatedAt: normalizeDbTime(row.updated_at),
     lastContextTokens: row.last_context_tokens,
@@ -103,7 +107,10 @@ export function getSession(id: string): Session | null {
 
 export function listSessions(): Session[] {
   const rows = getConnection()
-    .prepare('SELECT * FROM sessions ORDER BY updated_at DESC, rowid DESC')
+    // P2 会话置顶（点 S4）：置顶行最前（组序权威在 SQL，渲染层分组/视图只消费传入序），
+    // 组内按置顶时刻 DESC（后置顶在前）；未置顶保持原 updated_at DESC, rowid DESC（p2-16 tiebreaker 保留）。
+    // searchSessions 复用本函数，搜索态天然继承置顶排序。
+    .prepare('SELECT * FROM sessions ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC, rowid DESC')
     .all() as SessionRow[];
   return rows.map(toSession);
 }
@@ -194,6 +201,15 @@ export function updateTurnMeta(
   getConnection()
     .prepare('UPDATE sessions SET last_turn_duration_ms = ?, last_turn_ended_at = ? WHERE id = ?')
     .run(meta.durationMs, meta.endedAt, id);
+}
+
+// P2 会话置顶（点 S4）：专用写入口，不并入 updateSession 通用通道——通用通道每次写都会
+// bump 侧栏「最近操作」时间戳，置顶/取消置顶会因此打乱「最近操作」排序语义；对齐
+// updateTurnMeta 轻量写先例。pinnedAt = epoch ms（置顶）| null（取消置顶，语义=未置顶，
+// 排序回归按最近操作时间）。函数体注释随实现，本块说明不落函数体。
+export function setSessionPinned(id: string, pinnedAt: number | null): Session | null {
+  getConnection().prepare('UPDATE sessions SET pinned_at = ? WHERE id = ?').run(pinnedAt, id);
+  return getSession(id);
 }
 
 // 项目级 Skill 管理左栏的会话计数：working_dir 原文分组计数（不做归一，归一在

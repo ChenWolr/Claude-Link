@@ -31,6 +31,10 @@ export interface Session {
   mcpOverrides: Record<string, 'off'> | null;
   createdAt: string;
   updatedAt: string;
+  // P2 会话置顶（点 S4）：置顶时刻（epoch ms）；null = 未置顶（功能前存量会话/已取消）。
+  // 排序权威在 listSessions ORDER BY（置顶优先）；侧栏「全部」视图归入「置顶」分组、
+  // 项目视图浮到组内顶部，渲染层不自行排序。取消置顶写 null（不删列）。
+  pinnedAt: number | null;
   lastContextTokens: number | null;
   lastContextUpdatedAt: string | null;
   // 该会话的上下文窗口容量（持久化）：优先取 SDK result.modelUsage.contextWindow 真值；
