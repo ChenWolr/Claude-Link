@@ -41,6 +41,7 @@ import type {
   ExportPageFinishRequest,
   ExportPageFinishResponse,
   ExportRenderFinishPayload,
+  ExportWebDownloadFile,
   PageChunkPayload,
   PngCaptureSelfRequest,
   PngCaptureSelfResponse,
@@ -55,6 +56,8 @@ import * as attachmentRepo from '../database/repositories/attachment-repo';
 import { readStoredAttachmentPreview } from './attachment-storage';
 import { buildExportAttachmentSnapshots } from './export-attachment-snapshot';
 import type { ExportTargetRequest, ExportTargetResponse } from '../../shared/types/fs-picker';
+// P5（网页版导出）：一次性下载票据签发/摘除 + TTL（tempDir web 延迟清理同刻）。
+import { createTicket, purgeJob, WEB_DOWNLOAD_TTL_MS } from './export-web-tickets';
 import { logger } from '../utils/logger';
 import { setupLinkGuard } from './link-guard';
 
@@ -115,6 +118,12 @@ interface ActiveJob {
   lastProgressAt: number;        // hb10 P1-1：最近一次进展时间戳（resetWatchdog 维护）
   lastCapturePercent: number;    // P3-12：最近一次捕获/编码进度估算（钳 [0,99] 单调，保存阶段保持显示用）
   smoke: boolean;
+  // P5（网页版导出）：发起端是否网页端（EXPORT_IMAGE_START 第 4 参 ===true 才置位）。
+  // true 时保存阶段免目标协商（performWebSave），产物留 tempDir 经一次性票据 HTTP 下载。
+  webOrigin: boolean;
+  // round-001 review-report FIX-2a：网页端 start 的一次性 nonce（handler 校验 1–64 字符）——
+  // performWebSave 原样回填 webDownloads.originNonce，发起端比对命中才下载。桌面不传 → undefined。
+  originNonce?: string;
   removeOriginListener: () => void;
 }
 
@@ -599,7 +608,12 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
     const result = await performSave(active, pages);
     if (result.status === 'saved') {
       active.phase = 'done';
-      makeProgress({ phase: 'done', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, percent: 100, message: `导出完成（${result.paths.length} 张）` });
+      if (active.webOrigin && result.webDownloads) {
+        // P5：web 发起——done 相携带一次性票据下载清单（发起网页端据此逐文件下载）。
+        makeProgress({ phase: 'done', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, percent: 100, message: '导出完成，正在通过浏览器下载…', webDownloads: result.webDownloads });
+      } else {
+        makeProgress({ phase: 'done', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, percent: 100, message: `导出完成（${result.paths.length} 张）` });
+      }
     } else if (result.status === 'cancelled') {
       active.phase = 'cancelled';
       makeProgress({ phase: 'cancelled', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, message: '已取消保存' });
@@ -609,8 +623,16 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
     }
     logger.info(`[export] job ${active.jobId} 终态：${result.status}`);
     const resolve = active.doneResolve;
-    await cleanup('finished');
-    if (resolve) resolve(result);
+    if (active.webOrigin && result.status === 'saved' && result.webDownloads) {
+      // P5：web job 不立即 cleanup——tempDir 产物是 /api/export-download 的下载源，延迟到
+      // 票据过期同刻回收；窗口/worker/active 槽位由 scheduleWebArtifactCleanup 立即收口
+      //（busy 语义不随下载窗口延长）。桌面路径仍走下方 cleanup，行为零变化。
+      scheduleWebArtifactCleanup(active);
+      if (resolve) resolve(result);
+    } else {
+      await cleanup('finished');
+      if (resolve) resolve(result);
+    }
   } else {
     await failJob(`导出失败：${payload.code} — ${payload.message}`);
   }
@@ -620,6 +642,11 @@ async function handleFinishImpl(payload: ExportRenderFinishPayload): Promise<voi
 async function performSave(job: ActiveJob, pages: { page: number; path: string; bytes: number }[]): Promise<ExportImageResult> {
   const { sessionName, exportedAt, format } = job.snapshot;
   const smokeDest = job.smoke ? process.env.CLAUDE_LINK_EXPORT_SMOKE_DEST : undefined;
+  // P5（网页版导出）：web 发起的 job 走免协商保存（performWebSave）——全程不调
+  // requestExportTarget（桌面主窗不再收到该 job 的选择器推送，修复广播抢答）。置于 smoke
+  // 判定之后：smokeDest 非空时 smoke 优先（web+smoke 现实不可达——smoke 仅主进程内部构造
+  // 且恒非 web 发起；防御性保持 smoke 语义）。
+  if (!smokeDest && job.webOrigin) return performWebSave(job, pages);
   const originWin = BrowserWindow.fromWebContents(job.origin);
   const extRe = format === 'png' ? /\.(png)$/i : /\.(jpe?g)$/i;
   const defaultExt = format === 'png' ? 'png' : 'jpg';
@@ -686,6 +713,23 @@ async function performSave(job: ActiveJob, pages: { page: number; path: string; 
   }
 }
 
+// —— P5（网页版导出）：web 发起 job 的免协商保存 ——
+// 跳过目标协商（不发 EXPORT_REQUEST_TARGET）；不 copy/move 文件——产物留 tempDir，为每页
+// 签发一次性下载票据，done 相经进度事件把 URL 清单带给发起的网页端，由浏览器
+// fetch→a[download] 逐文件落 B 机本地（文件名与桌面导出一致，同一 buildExportFilename）。
+function performWebSave(job: ActiveJob, pages: { page: number; path: string; bytes: number }[]): ExportImageResult {
+  const { sessionName, exportedAt, format } = job.snapshot;
+  const multi = pages.length > 1;
+  const files: ExportWebDownloadFile[] = pages.map((page, i) =>
+    createTicket(job.jobId, page.path, buildExportFilename(sessionName, exportedAt, multi ? i + 1 : undefined, pages.length, format)),
+  );
+  job.phase = 'saving';
+  makeProgress({ phase: 'saving', page: pages.length, totalPages: pages.length, segment: 0, segmentsInPage: 0, percent: job.lastCapturePercent, message: `正在生成下载链接（${pages.length} 张）…` });
+  // round-001 review-report FIX-2a：原样回填发起端 nonce——发起端比对 pendingWebNonce 命中
+  // 才触发本端下载（多网页客户端同收 done 广播的抢答防护）；桌面 job 无 nonce（undefined）。
+  return { status: 'saved', paths: [], webDownloads: { files, expiresAt: Date.now() + WEB_DOWNLOAD_TTL_MS, originNonce: job.originNonce } };
+}
+
 /** 排他移动：copyFileSync(COPYFILE_EXCL) 目标已存在则失败（不覆盖，无 TOCTOU），跨卷安全；成功后删源。 */
 async function moveExclusive(src: string, dest: string): Promise<void> {
   if (existsSync(dest)) {
@@ -725,11 +769,26 @@ async function cancelJob(): Promise<void> {
   if (resolve) resolve(ExportResults.cancelled());
 }
 
-// —— 统一 cleanup ——
-async function cleanup(_reason: string): Promise<void> {
-  if (!active) return;
-  const job = active;
-  active = null;
+// —— P5：web job 终态延迟清理 ——
+// done 后 tempDir 产物是 /api/export-download 的下载源，须保留到票据过期同刻（10min）回收；
+// 其余资源（导出窗/codec worker/文件句柄/origin 监听/active 槽位/看门狗定时器）立即收口——
+// active 槽位若随下载窗口滞留 10min，下一轮导出（桌面或网页）会持续 busy，违背「串行 job
+// 可先后各自导出」。unref：回收定时器不阻止进程退出（quit 兜底 disposeExportTempDirsSync
+// 会同步删 tempDir；票据由过期定时器/懒消费自清）。
+const WEB_ARTIFACT_TTL_MS = 10 * 60_000; // 与 WEB_DOWNLOAD_TTL_MS 同刻（下载窗口关闭即回收）
+
+function scheduleWebArtifactCleanup(job: ActiveJob): void {
+  if (active === job) active = null;
+  disposeJobResources(job);
+  const timer = setTimeout(() => {
+    void rm(job.tempDir, { recursive: true, force: true }).catch(() => { /* ignore */ });
+  }, WEB_ARTIFACT_TTL_MS);
+  timer.unref();
+}
+
+// —— job 资源收口（P5 自 cleanup 原样抽取：tempDir 以外的窗口/worker/句柄/监听/定时器；
+// 桌面 cleanup 序列不变，web 延迟清理路径复用）——
+function disposeJobResources(job: ActiveJob): void {
   // 终止 codec worker（PNG 路径）。
   if (job.codecWorker) {
     const w = job.codecWorker;
@@ -748,12 +807,23 @@ async function cleanup(_reason: string): Promise<void> {
   try {
     if (!job.exportWindow.isDestroyed()) job.exportWindow.destroy();
   } catch { /* ignore */ }
+  clearTimeout(job.finishTimer);
+  clearTimeout(job.noProgressTimer);
+}
+
+// —— 统一 cleanup ——
+async function cleanup(_reason: string): Promise<void> {
+  if (!active) return;
+  const job = active;
+  active = null;
+  disposeJobResources(job);
+  // P5：票据随即失效——cancel/error 路径 tempDir 同步删除，票据不得残留（桌面 job 无票据
+  // 时 no-op）；web job 正常 done 走 scheduleWebArtifactCleanup 不经此处，票据存活至过期。
+  purgeJob(job.jobId);
   // 删除临时目录（阶段二 smoke 在 resolve 后由外部触发 cleanup；此处兜底）。
   try {
     await rm(job.tempDir, { recursive: true, force: true });
   } catch { /* ignore */ }
-  clearTimeout(job.finishTimer);
-  clearTimeout(job.noProgressTimer);
 }
 
 /** 供 smoke 等外部路径显式清理当前 job；会无条件删除临时目录，正常 done 路径在 resolve 前已自行 cleanup，此调用通常为兜底 no-op。 */
@@ -765,6 +835,9 @@ export async function cleanupActiveJob(): Promise<void> {
 export interface StartExportOptions {
   /** smoke 模式：保存阶段用 CLAUDE_LINK_EXPORT_SMOKE_DEST 绕过对话框直接落盘，且 startImageExport 返回值附带导出快照供冒烟校验；done promise 对所有任务均创建，终态时 settle（非 smoke 专属）。 */
   smoke?: boolean;
+  /** round-001 review-report FIX-2a：网页端 start 生成的一次性 nonce（handler 校验 1–64 字符
+   *  后透传）——回填 webDownloads.originNonce 供发起端防多客户端抢答比对；桌面不传（undefined）。 */
+  originNonce?: string;
 }
 
 export type StartExportResult =
@@ -780,14 +853,15 @@ export async function startImageExport(
   origin: WebContents,
   sessionId: string,
   format: ExportImageFormat = 'jpeg',
-  _options: StartExportOptions = {},
+  options: StartExportOptions = {},
+  webOrigin = false,
 ): Promise<StartExportResult> {
   if (starting || isActive()) {
     return { ok: false, code: 'busy', message: '已有导出任务正在运行' };
   }
   starting = true;
   try {
-    return await startImageExportImpl(origin, sessionId, format, _options);
+    return await startImageExportImpl(origin, sessionId, format, options, webOrigin);
   } finally {
     starting = false;
   }
@@ -797,7 +871,8 @@ async function startImageExportImpl(
   origin: WebContents,
   sessionId: string,
   format: ExportImageFormat,
-  _options: StartExportOptions,
+  options: StartExportOptions,
+  webOrigin: boolean,
 ): Promise<StartExportResult> {
   // 校验 origin。
   if (origin.isDestroyed()) {
@@ -936,7 +1011,10 @@ async function startImageExportImpl(
     codecWorker: null,
     currentPngPage: null,
     terminal: false,
-    smoke: _options.smoke === true,
+    smoke: options.smoke === true,
+    webOrigin,
+    // round-001 review-report FIX-2a：nonce 透传进 ActiveJob（桌面 undefined → 全旧行为）。
+    originNonce: options.originNonce,
     removeOriginListener,
     finishTimer: setTimeout(() => { void failJob(`导出超时（${WATCHDOG_RESET_MS / 1000} 秒无进展）`); }, WATCHDOG_RESET_MS),
     noProgressTimer: setTimeout(checkNoProgress, WATCHDOG_NO_PROGRESS_MS),
@@ -961,7 +1039,7 @@ async function startImageExportImpl(
 
   makeProgress({ phase: 'preparing', page: 0, totalPages: 0, segment: 0, segmentsInPage: 0, message: '正在准备会话…' });
 
-  return { ok: true, jobId, done, snapshot: _options.smoke ? snapshot : undefined };
+  return { ok: true, jobId, done, snapshot: options.smoke ? snapshot : undefined };
 }
 
 function pad2(n: number): string {
@@ -988,8 +1066,11 @@ async function loadExportPage(win: BrowserWindow): Promise<string | null> {
 // EXPORT_RENDER_* 7 通道保持 ipcMain.handle 裸注册（不进注册表 → 天然不可被网页调用）。
 export function registerExportImageHandlers(getMainWindow: () => BrowserWindow | null): void {
   // EXPORT_IMAGE_START：桌面来自可见 renderer 顶层 frame；网页路径 origin 回落主窗口。
-  // format 白名单仅 jpeg|png。
-  regInvokeHandler(IPC_CHANNELS.EXPORT_IMAGE_START, async (event, sessionId: string, format: unknown) => {
+  // format 白名单仅 jpeg|png。P5：第 4 参 webOrigin 仅 ===true 才置位（桌面 preload 不传
+  // → undefined → false，全旧行为）。round-001 review-report FIX-2a：第 5 参 originNonce
+  // 仅接受 1–64 字符字符串（网页端 start 的一次性 nonce，防多客户端票据抢答）；
+  // 非法/缺省一律 undefined（桌面不传 → 全旧行为）。
+  regInvokeHandler(IPC_CHANNELS.EXPORT_IMAGE_START, async (event, sessionId: string, format: unknown, webOrigin: unknown, originNonce: unknown) => {
     // origin：桌面路径取真实 sender（webContents 同一性校验链不变）；网页路径（event=null，
     // P3）回落当前主窗口 webContents。空/已销毁一律拒绝（对齐 startImageExportImpl 的 bad-origin）。
     const origin = event ? event.sender : getMainWindow()?.webContents ?? null;
@@ -1003,8 +1084,12 @@ export function registerExportImageHandlers(getMainWindow: () => BrowserWindow |
     if (format !== 'jpeg' && format !== 'png') {
       return { ok: false, code: 'bad-format', message: `非法导出格式：${String(format)}（仅 jpeg|png）` };
     }
+    // round-001 review-report FIX-2a：nonce 校验——空串视同非法（否则未 start 的网页端
+    // pendingWebNonce='' 会与空 nonce 撞门，抢答防护失效）。
+    const nonce = typeof originNonce === 'string' && originNonce.length >= 1 && originNonce.length <= 64 ? originNonce : undefined;
     // 注意：smoke 模式由主进程内部直接调用 startImageExport（带 smoke:true），不经此 handler。
-    const r = await startImageExport(origin, sessionId, format);
+    const isWeb = webOrigin === true;
+    const r = await startImageExport(origin, sessionId, format, { originNonce: nonce }, isWeb);
     if (!r.ok) return r;
     return { ok: true, jobId: r.jobId };
   });

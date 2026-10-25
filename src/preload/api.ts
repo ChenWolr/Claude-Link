@@ -297,7 +297,11 @@ export interface ClaudeLinkAPI {
   cloneMessageAttachments: (sessionId: string, messageId: string) => Promise<CloneMessageAttachmentsResult>;
   onQueueEvent: (callback: (payload: QueueEventPayload) => void) => () => void;
   removeQueueListener: () => void;
-  startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
+  // P5：第 3 参 webOrigin（可选）——仅网页端 store 传 true（!!window.__claudeLinkWebBridge），
+  // 主进程据此走免协商保存 + 一次性票据 HTTP 下载；桌面不传（undefined → false，全旧行为）。
+  // round-001 review-report FIX-2a：第 4 参 originNonce（可选）——网页端 start 生成的一次性
+  // nonce 透传（主进程回填 webDownloads.originNonce 供发起端防抢答比对）；桌面不传。
+  startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat, webOrigin?: boolean, originNonce?: string) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
   onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => () => void;
   // B4（D13-F3）：取消当前导出（仅捕获/编码阶段；无活动 job 或已终态时主进程返回 ok:false）。
   cancelImageExport: () => Promise<{ ok: boolean }>;
@@ -500,7 +504,9 @@ export function createApi(): ClaudeLinkAPI {
     },
     removeQueueListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.QUEUE_EVENT),
     // 会话导出长图（v3 JPEG / v4.1 PNG 双格式）：可见 renderer 请求开始 + 接收进度。图片数据不经过可见 renderer。
-    startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId, format),
+    // P5：webOrigin 透传（无新方法，头注释方法数不变）。
+    // round-001 review-report FIX-2a：originNonce 第 4 参透传（无新方法，头注释方法数 111 不变）。
+    startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat, webOrigin?: boolean, originNonce?: string) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId, format, webOrigin, originNonce),
     onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: import('../shared/types/export-image').ExportImageProgressPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);

@@ -139,6 +139,8 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   cloneMessageAttachments: IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE,
   onQueueEvent: IPC_CHANNELS.QUEUE_EVENT,
   removeQueueListener: IPC_CHANNELS.QUEUE_EVENT,
+  // P5：第 3 参 webOrigin 经下方泛型分派（...args → invokeOverWire(channel, args)）透传，
+  // 通道名不变、无表新键；wire codec 对 boolean 原样透传（encode/decode 原始值直通）。
   startImageExport: IPC_CHANNELS.EXPORT_IMAGE_START,
   onImageExportProgress: IPC_CHANNELS.EXPORT_IMAGE_PROGRESS,
   cancelImageExport: IPC_CHANNELS.EXPORT_IMAGE_CANCEL,

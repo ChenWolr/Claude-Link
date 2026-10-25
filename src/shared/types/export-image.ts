@@ -68,6 +68,22 @@ export type ExportImagePhase =
   | 'cancelled'
   | 'error';
 
+// —— P5（网页版导出）：一次性票据下载清单 ——
+// 仅 web 发起（webOrigin）的 job 携带：done 相进度与 saved 结果把票据 URL 清单交给发起网页端，
+// 由浏览器 fetch→a[download] 逐文件落本机；桌面分支不读这些字段。票据本身（ticket 即凭证，
+// 不含路径信息）由主进程 export-web-tickets 签发/消费，此处只放线上形状。
+export interface ExportWebDownloadFile {
+  filename: string;
+  url: string;   // /api/export-download?ticket=…（相对当前 web 源）
+}
+export interface ExportWebDownloads {
+  files: ExportWebDownloadFile[];
+  expiresAt: number;   // epoch ms；与票据 TTL 同刻（10min）
+  // round-001 review-report FIX-2a：发起端 start 时生成的一次性 nonce——主进程原样回填，
+  // 发起端比对本地 pendingWebNonce 命中才触发下载（多网页客户端同收 done 广播的抢答防护）。
+  originNonce?: string;
+}
+
 // 进度事件：主进程 → 可见 renderer（EXPORT_IMAGE_PROGRESS），
 // 以及隐藏 renderer → 主进程（EXPORT_RENDER_PROGRESS）共用同一形状。
 export interface ExportImageProgressPayload {
@@ -81,11 +97,13 @@ export interface ExportImageProgressPayload {
   segmentsInPage: number;
   percent: number;     // 0–100；planning 阶段忽略（不确定进度）
   message: string;     // 用户文案
+  // P5：仅 done 相位且 web 发起时携带——网页端据此触发逐文件下载。
+  webDownloads?: ExportWebDownloads;
 }
 
 // —— 终态结果（saved / cancelled / failed 必须判别联合，不混淆）——
 export type ExportImageResult =
-  | { status: 'saved'; paths: string[] }
+  | { status: 'saved'; paths: string[]; webDownloads?: ExportWebDownloads }
   | { status: 'cancelled' }
   | { status: 'failed'; code: string; message: string };
 

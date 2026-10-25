@@ -30,6 +30,8 @@ import {
   STATIC_MIME,
 } from '../../../shared/web-access-protocol';
 import { getWebAccessToken, setWebAccessToken } from '../config-manager';
+// P5（网页版导出）：一次性下载票据消费（ticket 即凭证，单次、10min 过期、不含路径信息）。
+import { consumeTicket } from '../export-web-tickets';
 import { invokeFromWeb } from '../../ipc-registry';
 import { setWebPushSink } from '../push-bus';
 import { logger } from '../../utils/logger';
@@ -215,6 +217,13 @@ function handleRequest(req: http.IncomingMessage, res: http.ServerResponse, allo
       return;
     }
     const urlPath = (req.url ?? '/').split('?')[0]!.split('#')[0]!;
+    // P5（网页版导出）：一次性票据下载端点——ticket 即凭证（192bit 随机、单次、10min 过期），
+    // 不复用 WS token（a[download]/fetch 的 GET 无法携带 WS 鉴权）；仅暴露本 job 产物文件。
+    // 置于 Host 白名单/方法门之后、静态解析之前（/api 命中不依赖渲染层构建产物）。
+    if (urlPath === '/api/export-download') {
+      serveExportDownload(req, res, method);
+      return;
+    }
     const rootDir = path.join(app.getAppPath(), 'out', 'renderer');
     if (!fs.existsSync(rootDir)) {
       // dev 未 build（§4 #4）：200 纯文本提示页
@@ -274,6 +283,58 @@ function plain(res: http.ServerResponse, code: number, text: string): void {
     'X-Content-Type-Options': 'nosniff',
   });
   res.end(text);
+}
+
+// ── P5：导出产物一次性票据下载 ────────────────────────────────────────────────────
+// 消费即摘票（伪造/过期/已用/重放统一 404 固定文案，无路径/状态泄漏）；命中后 statSync
+// 预检（缺失 → 410，如 tempDir 已被清理），再按静态流同形态附件下发（Content-Length +
+// nosniff + createReadStream pipe，流错误 destroy）。下载走 HTTP 流，不受 WS 48MiB 帧上限。
+function serveExportDownload(req: http.IncomingMessage, res: http.ServerResponse, method: string): void {
+  let ticket = '';
+  try {
+    ticket = new URL(req.url ?? '/', 'http://localhost').searchParams.get('ticket') ?? '';
+  } catch {
+    ticket = '';
+  }
+  const hit = consumeTicket(ticket);
+  if (!hit) {
+    // 固定文案：查无/过期/已用/伪造不区分——零信息泄漏（计划 §4.3）。
+    plain(res, 404, 'Not Found（链接无效或已使用）');
+    return;
+  }
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(hit.filePath);
+  } catch {
+    plain(res, 410, 'Gone（文件已清理）');
+    return;
+  }
+  if (!stat.isFile()) {
+    plain(res, 410, 'Gone（文件已清理）');
+    return;
+  }
+  const ext = path.extname(hit.filename).slice(1).toLowerCase();
+  const mime = ext === 'png' ? 'image/png' : 'image/jpeg';
+  // Content-Disposition：filename*（RFC 5987）承载原名（会话名可含非 ASCII）；filename 兜底
+  // ASCII 回退（老客户端）。
+  const asciiFallback = hit.filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+  res.writeHead(200, {
+    'Content-Type': mime,
+    'Content-Length': stat.size,
+    'Content-Disposition': `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(hit.filename)}`,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  if (method === 'HEAD') {
+    res.end();
+    return;
+  }
+  const stream = fs.createReadStream(hit.filePath);
+  stream.on('error', (err) => {
+    logger.error('[web-access] export download stream failed', err);
+    res.destroy();
+  });
+  stream.pipe(res);
 }
 
 // ── WS 升级（鉴权四路径：对 token / 错 token / 超限 / 坏 Host，计划 §6-6）─────────
