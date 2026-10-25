@@ -19,6 +19,13 @@ export interface TurnEngineDeps {
   getActiveProcess(sessionId: string): BridgeQueryHandle | undefined;
   getKnownTurnOutcome(sessionId: string): 'success' | 'error' | 'interrupted' | null;
   beginUserTurn(sessionId: string): void;
+  // P1-G5（2026-10-24 网页运行态同步）：桥接回合进投影体系——spawn 占坑成功后登记投影起点
+  //（生产接线 sdk-backend.noteTurnStartedAndEmit，伴生 turn_started）；exit 结算后收口终态
+  //（生产接线 sdk-backend.emitTurnEnded，endedAt 幂等）。busy/校验早退分支不调（未 spawn 无投影）。
+  // P1-1（2026-10-25 代际守卫）：beginTurnProjection 返回本回合 generation；emitTurnEndedFor
+  // 可选第三参透传该代际，旧回合迟到终态被 emitTurnEnded 的代际门拒绝。
+  beginTurnProjection(sessionId: string): number;
+  emitTurnEndedFor(sessionId: string, outcome: 'success' | 'error' | 'interrupted', generation?: number): void;
   noteTurnOutcome(sessionId: string, outcome: 'success' | 'error' | 'interrupted'): void;
   isChatSendLocked(sessionId: string): boolean;
   acquireChatSendLock(sessionId: string): void;
@@ -109,11 +116,27 @@ export async function dispatchBridgeTurn(
         resolve(engine.getKnownTurnOutcome(sessionId) ?? 'error');
       });
     });
+    // P1-G5（网页运行态同步）：spawn 占坑成功即登记投影起点（伴生 turn_started，双端黄灯/计时
+    // 恢复数据源）；置于 beginUserTurn 之前，与 CHAT_SEND 发射块→beginUserTurn 顺序同构。
+    // P1-1（代际守卫）：捕获返回的本回合 generation，供终态透传——旧回合 exit 迟到时
+    // emitTurnEnded 的代际门据此拒绝其结算新回合投影。
+    const turnGen = engine.beginTurnProjection(sessionId);
     engine.beginUserTurn(sessionId);
     // 与 CHAT_SEND 同步序列：spawn 占坑后立即喂首 prompt（sendMessage 只把 pending 交给
     // runQuery，真正的 exit 回调要等 SDK 流结束才触发，先后不影响终态时序）。
     engine.sendMessage(sessionId, text);
     const outcome = await exitPromise;
+    // P1-G5（网页运行态同步）：回合终态收口投影（emitTurnEnded 幂等：正常路径 result 钩子已先
+    // 结算则 no-op；result 丢失/兜底结算路径由此防桥接僵尸投影污染 getRunningOverview）。
+    // P1-1（代际守卫）：透传 spawn 时捕获的 generation，旧回合迟到终态被代际门拒绝；负值
+    //（投影未登记，A2 兜底语义）传 undefined——emitTurnEnded 对 undefined 跳过代际门按当前
+    // 投影结算，与「-1 时不建投影项、终态走无记录分支」自洽。
+    // try 包裹：投影终态可丢，不阻塞桥接回合返回。
+    try {
+      engine.emitTurnEndedFor(sessionId, outcome, turnGen >= 0 ? turnGen : undefined);
+    } catch {
+      // 投影终态可丢：不阻塞返回
+    }
     // X11（R12-F1）：回复文本提取不按 outcome 门控——error 回合的已落库部分正文照取，
     // manager A3 分支据此追加「（回复中断，以上内容可能不完整）」标注；空正文由 manager
     // 走失败提示（error）/静默（success，B17），/stop 静默由 manager 中断标记消费保证（[Q]）。

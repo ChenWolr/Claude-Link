@@ -90,6 +90,11 @@ interface FakeEngine extends TurnEngineDeps {
   sentMessage: string | null;
   notedOutcomes: Array<{ sessionId: string; outcome: string }>;
   lastHandle: FakeHandle | null;
+  // P1-G5（2026-10-24 网页运行态同步）：投影接线记录——emitTurnEndedFor 的 outcome 透传。
+  // P1-1（2026-10-25 代际守卫）：endedForCalls 增记 generation（dispatcher 透传 spawn 时
+  // beginTurnProjection 返回的本回合代际）；projectionGen 为 fake 投影登记返回的可配置代际。
+  endedForCalls: Array<{ sessionId: string; outcome: string; generation?: number }>;
+  projectionGen: number;
 }
 
 function createFakeEngine(overrides: Partial<FakeEngine> = {}): FakeEngine {
@@ -111,6 +116,8 @@ function createFakeEngine(overrides: Partial<FakeEngine> = {}): FakeEngine {
     sentMessage: null,
     notedOutcomes: [],
     lastHandle: null,
+    endedForCalls: [],
+    projectionGen: 1,
     getSessionRow(sessionId) {
       void sessionId;
       engine.calls.push('getSessionRow');
@@ -146,6 +153,19 @@ function createFakeEngine(overrides: Partial<FakeEngine> = {}): FakeEngine {
     beginUserTurn(sessionId) {
       void sessionId;
       engine.calls.push('beginUserTurn');
+    },
+    // P1-G5（2026-10-24 网页运行态同步）：投影起点/终态注入位——真实接线为
+    // sdk-backend.noteTurnStartedAndEmit / sdk-backend.emitTurnEnded（bridge/init.ts）。
+    // P1-1（2026-10-25 代际守卫）：beginTurnProjection 返回本回合 generation（projectionGen）；
+    // emitTurnEndedFor 第三参 generation 原样记入 endedForCalls。
+    beginTurnProjection(sessionId) {
+      void sessionId;
+      engine.calls.push('beginTurnProjection');
+      return engine.projectionGen;
+    },
+    emitTurnEndedFor(sessionId, outcome, generation) {
+      engine.calls.push('emitTurnEndedFor');
+      engine.endedForCalls.push({ sessionId, outcome, generation });
     },
     sendMessage(sessionId, prompt) {
       void sessionId;
@@ -307,7 +327,10 @@ async function main(): Promise<void> {
 
 // ── 5. 代际守卫 ──
 {
-  const engine = createFakeEngine({ knownOutcome: 'success', activeAtExit: createFakeHandle() });
+  // P1-1（2026-10-25）：projectionGen=7 增强区分度——spawn 时捕获的本回合代际必须原样透传
+  // 到终态 emitTurnEndedFor（generation 为数字而非 undefined），供 emitTurnEnded 代际门拒绝
+  // 旧回合迟到终态。
+  const engine = createFakeEngine({ knownOutcome: 'success', activeAtExit: createFakeHandle(), projectionGen: 7 });
   const p = dispatchBridgeTurn(engine, createFakePersistence('迟到窗回复'), 's', 'x');
   emitAtExit(engine, 0);
   const r = await p;
@@ -315,6 +338,10 @@ async function main(): Promise<void> {
     engine.notedOutcomes.length === 0, JSON.stringify(engine.notedOutcomes));
   check('5', '②', 'Promise 仍以 knownOutcome 结算（success）',
     r.outcome === 'success' && r.replyText === '迟到窗回复', JSON.stringify(r));
+  check('5', '③', 'P1-1 代际透传：spawn 捕获的 turnGen=projectionGen(7) 数字透传至 emitTurnEndedFor',
+    engine.endedForCalls[0]?.generation === engine.projectionGen
+      && typeof engine.endedForCalls[0]?.generation === 'number',
+    JSON.stringify(engine.endedForCalls));
 }
 
 // ── 6. spawn 抛「仍在执行」→ busy ──
@@ -366,6 +393,56 @@ async function main(): Promise<void> {
   const dispSrc = fs.readFileSync(path.resolve(__dirname, '..', 'src/main/modules/bridge/dispatcher.ts'), 'utf8');
   check('8', '③', 'dispatcher.ts 注释写明「error-result 出口 emitExit(0) 误判 success」limitation',
     dispSrc.includes('emitExit(0)') && dispSrc.includes('误判'), '缺 limitation 注释');
+}
+
+// ── 9. 投影接线（P1-G5，2026-10-24 网页运行态同步计划 §1.2.5）──
+{
+  // 9①/9② 正常回合：spawn 成功后、beginUserTurn 之前调 beginTurnProjection；
+  // exit 结算后、return 前调 emitTurnEndedFor（outcome 原样透传）。
+  const engine = createFakeEngine({ knownOutcome: 'success' });
+  const p = dispatchBridgeTurn(engine, createFakePersistence('投影回合正文'), 'sess-proj', '投影消息');
+  emitAtExit(engine, 0);
+  const r = await p;
+  const idx = (name: string) => engine.calls.indexOf(name);
+  check('9', '①', 'spawn 成功路径：beginTurnProjection 被调且先于 beginUserTurn（spawn 之后）',
+    idx('spawnForChat') < idx('beginTurnProjection') && idx('beginTurnProjection') < idx('beginUserTurn'),
+    engine.calls.join(','));
+  check('9', '②', 'exit 结算路径：emitTurnEndedFor 被调一次、在 sendMessage 之后、sessionId+outcome=success 透传、generation=projectionGen 透传',
+    r.outcome === 'success' && idx('emitTurnEndedFor') > idx('sendMessage') &&
+    engine.endedForCalls.length === 1 && engine.endedForCalls[0]!.sessionId === 'sess-proj' &&
+    engine.endedForCalls[0]!.outcome === 'success' &&
+    engine.endedForCalls[0]!.generation === engine.projectionGen,
+    `calls=${engine.calls.join(',')} endedFor=${JSON.stringify(engine.endedForCalls)}`);
+
+  // 9③ busy 早退：锁占用 → 未 spawn 无投影，两方法均不调。
+  const engineBusy = createFakeEngine({ lockedFlag: true });
+  await dispatchBridgeTurn(engineBusy, createFakePersistence(), 's', 'x');
+  check('9', '③', 'busy 早退：beginTurnProjection/emitTurnEndedFor 均不调用',
+    !engineBusy.calls.includes('beginTurnProjection') && engineBusy.endedForCalls.length === 0,
+    engineBusy.calls.join(','));
+
+  // 9④ 校验早退：session 行缺失 → 不登记投影（未 spawn）。
+  const engineMissing = createFakeEngine({ sessionMissing: true });
+  await dispatchBridgeTurn(engineMissing, createFakePersistence(), 'gone', 'x');
+  check('9', '④', 'session 行缺失早退：beginTurnProjection 不调用',
+    !engineMissing.calls.includes('beginTurnProjection'), engineMissing.calls.join(','));
+
+  // 9⑤ spawn 同步拒绝：beginTurnProjection 不调（spawn 未成功）、catch 早退不调 emitTurnEndedFor。
+  const engineSpawnThrow = createFakeEngine({ spawnThrows: new Error('当前回合仍在执行，请等待结束或中断后重试') });
+  await dispatchBridgeTurn(engineSpawnThrow, createFakePersistence(), 's', 'x');
+  check('9', '⑤', 'spawn 同步拒：beginTurnProjection/emitTurnEndedFor 均不调用',
+    !engineSpawnThrow.calls.includes('beginTurnProjection') && engineSpawnThrow.endedForCalls.length === 0,
+    engineSpawnThrow.calls.join(','));
+
+  // 9⑥ error 结算：exit(非0)+known null 兜底 error → outcome='error' 原样透传、generation 同步透传。
+  const engineErr = createFakeEngine({ knownOutcome: null });
+  const pErr = dispatchBridgeTurn(engineErr, createFakePersistence(), 'sess-err', '出错消息');
+  emitAtExit(engineErr, 1);
+  const rErr = await pErr;
+  check('9', '⑥', 'exit(非0) 兜底 error → emitTurnEndedFor 收 error 且 generation=projectionGen 透传',
+    rErr.outcome === 'error' && engineErr.endedForCalls[0]?.outcome === 'error'
+      && engineErr.endedForCalls[0]?.generation === engineErr.projectionGen,
+    JSON.stringify(engineErr.endedForCalls));
 }
 
 assert.ok(true);

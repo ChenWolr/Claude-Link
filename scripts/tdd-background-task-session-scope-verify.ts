@@ -106,7 +106,10 @@ check('store actions 带会话维度签名（upsert/remove/clear 均 sessionId �
   assert.match(storeSrc, /clearBackgroundTasks\(sessionId: string\)/);
 });
 check('applyRuntimeSnapshot 快照恢复按 snap.sessionId 落桶', () => {
-  const idx = storeSrc.indexOf('applyRuntimeSnapshot(');
+  // P1-G2（2026-10-24 网页运行态同步）定位锚收窄：switchSession 新增的快照拉取调用点
+  //（this.applyRuntimeSnapshot(snap)）先于 action 定义出现，裸 indexOf 会切到调用处——
+  // 改钉定义签名，断言语义不变（快照恢复按会话 id 落本会话桶）。
+  const idx = storeSrc.indexOf('applyRuntimeSnapshot(snap: TurnProjectionSnapshotView)');
   const body = storeSrc.slice(idx, storeSrc.indexOf('\n    },', idx));
   assert.match(body, /this\.backgroundTasks\[sid\]/, '快照恢复未按会话 id 落桶');
 });

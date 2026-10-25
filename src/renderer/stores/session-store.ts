@@ -271,6 +271,10 @@ export const useSessionStore = defineStore('session', {
     // 计时统一 displayElapsed = (Date.now() + serverClockOffset[sid]) - turnStartedAt[sid]，
     // 禁止直接用本地时钟减服务端 startedAt（跨机时钟偏差会出负数/跳变）。
     serverClockOffset: {} as Record<string, number>,
+    // P1-G4（2026-10-24 网页运行态同步）：主进程 turn_ended 的 endedAt（epoch ms），与投影
+    // startedAt 同钟域，概览迟到对账用（applyRunningOverview skip 条件，防把已结束回合重新
+    // 点亮黄灯）。单调取 max（noteTurnEndedServer 收口写入）；deleteSession 随会话清理。
+    lastTurnEndedServerAt: {} as Record<string, number>,
     // B1：最近一回合的耗时/结束时刻（按 sessionId）。回合 result 到达时由 use-chat 经
     // setLastTurnMeta 写入，同一刻就地补写 sessions/activeSession 对象的 lastTurn* 字段
     //（两处无新鲜度差）；TurnTimer 完成态优先读这里，读不到（重启后内存 map 为空）回落 Session 字段。
@@ -674,6 +678,18 @@ export const useSessionStore = defineStore('session', {
       } catch {
         // session may have no messages yet
       }
+      // P1-G2（网页运行态同步）：切到运行中会话时拉投影细快照——恢复已流出内容/瞬态/权威计时。
+      // 桌面不关窗时靠事件流累积本就无需；网页重开/断线重连后点进 running 会话全靠这里。
+      // applyRuntimeSnapshot 终态快照内部自拒（endedAt 前置 return），markRunning 幂等分支刷新
+      // 权威 startedAt + serverNow；再次竞态守卫防 IPC 往返期间用户又切走。
+      if (this.runningSessions.includes(session.id)) {
+        try {
+          const snap = await window.claudeLink.getRuntimeSnapshot(session.id);
+          if (snap && this.activeSession?.id === session.id) this.applyRuntimeSnapshot(snap);
+        } catch {
+          // 投影恢复失败不致命：黄灯/计时由 overview 路径兜底
+        }
+      }
       // hb10 P2-3：读取侧同步——切会话时重拉供应商快照，触发器按最新 lastUsed 解析显示，
       // 与实际 spawn 的解析（会话 override > 最近使用 > 库首）同源一致。
       void useProviderStore().ensureReload();
@@ -740,6 +756,8 @@ export const useSessionStore = defineStore('session', {
       delete this.turnStartedAt[id];
       // SA-3：服务端时钟偏移随会话删除一并清理（防内存泄漏）。
       delete this.serverClockOffset[id];
+      // P1-G4：终态对账记录随会话删除一并清理（防内存泄漏；已删会话不会再收 turn_ended）。
+      delete this.lastTurnEndedServerAt[id];
       delete this.turnGeneration[id];
       // B1：最近回合元数据随会话删除一并清理（DB 行由级联删除处理）。
       delete this.lastTurnMeta[id];
@@ -1228,17 +1246,31 @@ export const useSessionStore = defineStore('session', {
       }
     },
     // SA-3（turn-projection）：进行中回合概览落地点（SA-4 启动恢复接线调用）。对列表内会话逐个
-    // 置运行态：非 active 会话 markRunning(sid, startedAt)（黄灯/侧栏计时）；active 会话同样置位
-    //（细恢复由 SA-4 对 active 再走 getRuntimeSnapshot → applyRuntimeSnapshot）。
-    // 概览条目不带 serverNow（仅 sessionId/startedAt/generation），offset 待 turn_started 事件或
-    // 快照到达再刷新；桌面单机两钟同源零影响。已在 runningSessions 的会话跳过——「先订阅后拉」
-    // 协议下本地 running 态来自更早到达的 turn_started（含 serverNow 校正，数据不旧于概览），
-    // 重复 markRunning 会无谓递增 generation 并清掉事件已建立的瞬态。
+    // 置运行态：非 active 会话 markRunning(sid, startedAt, serverNow)（黄灯/侧栏计时）；active 会话
+    // 同样置位（细恢复由 SA-4 对 active 再走 getRuntimeSnapshot → applyRuntimeSnapshot）。
+    // P1-G3：概览条目现携带 serverNow（捕获时刻主进程时钟），此处透传 markRunning 第三参即刷新
+    // serverClockOffset——跨机时钟差不再全额进计时（此前须等 turn_started 事件或快照到达）。
+    // 已在 runningSessions 的会话跳过——「先订阅后拉」协议下本地 running 态来自更早到达的
+    // turn_started（含 serverNow 校正，数据不旧于概览），重复 markRunning 会无谓递增 generation
+    // 并清掉事件已建立的瞬态。
     applyRunningOverview(list: TurnRunningOverviewEntry[]) {
       for (const entry of list) {
         if (this.runningSessions.includes(entry.sessionId)) continue;
-        this.markRunning(entry.sessionId, entry.startedAt);
+        // P1-G4：概览捕获早于 turn_ended 到达的对账——同钟域（均主进程 epoch ms）比较，
+        // endedAt ≥ entry.startedAt ⇒ 该 entry 描述的回合已结束，不得重新点亮黄灯。
+        const endedAt = this.lastTurnEndedServerAt[entry.sessionId];
+        if (endedAt != null && endedAt >= entry.startedAt) continue;
+        this.markRunning(entry.sessionId, entry.startedAt, entry.serverNow);
       }
+    },
+    // P1-G4（网页运行态同步）：记录主进程 turn_ended 的权威 endedAt（epoch ms，与投影 startedAt
+    // 同钟域）。概览可能捕获早于、到达晚于 turn_ended（IPC 往返竞态）——applyRunningOverview 据
+    // 此对账跳过已结束回合。数值有限才写；单调取 max（同会话多回合只增不减，新回合
+    // startedAt > 旧 endedAt 时对账自然放行）。
+    noteTurnEndedServer(sessionId: string, endedAt: number) {
+      if (typeof endedAt !== 'number' || !Number.isFinite(endedAt)) return;
+      const prev = this.lastTurnEndedServerAt[sessionId];
+      this.lastTurnEndedServerAt[sessionId] = Math.max(prev ?? 0, endedAt);
     },
     // B1：写入最近回合元数据（内存态 + 就地补 sessions/activeSession 对象字段，保持侧栏数据一致）。
     // P2-2 语义收口：只记「完整有效记录」——耗时无效（null/非正/非有限数）一律早退、保持上一条

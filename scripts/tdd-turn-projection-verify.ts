@@ -14,6 +14,9 @@
 // markRunning（R4）/ markRunning generation 递增收窄至新回合边界（R7）/ 快照 tool 路
 // sub: 过滤（R8）/ 耗时兜底双点 serverClockOffset 换算（R6）/ TOPIC_PROMPT_PREFIX
 // 全角标点钉（R5，§7）/ App.vue 先订阅后 loadConfig 顺序钉（R9）。
+// §10 增补（2026-10-24 P1 网页运行态同步计划 §1）：G3 概览条目 serverNow（含 preload 镜像）+
+// G5 sdk-backend 导出面（noteTurnStartedAndEmit 新函数 / emitTurnEnded 加 export；
+// §3 sdk-backend turn_started 计数随之 1→2）。
 //
 // 全部为纯 node:assert/计数 check 的源码文本/结构断言，不 import Electron。
 // 既有事件流不变以「关键既有调用行原文仍在原函数段内 + 段内顺序不变」钉住
@@ -169,8 +172,11 @@ check("task-queue-engine.ts turnKind: 'queue'", taskQueue.includes("turnKind: 'q
 check('task-queue-engine.ts turn_started 序在 spawnForTask 成功之后',
   taskQueue.indexOf('spawnForTask(task.id') !== -1 &&
   taskQueue.indexOf('spawnForTask(task.id') < taskQueue.indexOf("type: 'turn_started'"));
-check("sdk-backend 内 turn_started 发射恰好 1 处（R3：resendUserText 第三发射点）",
-  countOccurrences(sdkBackend, "type: 'turn_started'") === 1,
+// P1-G5（2026-10-24 网页运行态同步）：桥接回合进投影体系——sdk-backend 新增导出
+// noteTurnStartedAndEmit（bridge/init.ts 接线为 dispatcher beginTurnProjection），
+// sdk-backend 内 turn_started 发射点由 1（R3 重发）增为 2（重发 + 桥接）。
+check("sdk-backend 内 turn_started 发射恰好 2 处（R3 重发 + G5 桥接 noteTurnStartedAndEmit）",
+  countOccurrences(sdkBackend, "type: 'turn_started'") === 2,
   `实际 ${countOccurrences(sdkBackend, "type: 'turn_started'")}`);
 // A2（P3 收尾批）：noteTurnStarted 对 generation<0（getCurrentQueryInstance 取不到
 // queryInstance 的兜底值）不登记投影——早退 null、不建 Map 项；三发射点 turn_started
@@ -444,6 +450,34 @@ check('R6：use-chat 不含未换算形态 Date.now() - startedAt', !useChatSrc.
 check('R9：App.vue startListening() 调用先于 await configStore.loadConfig()',
   appVue.indexOf('startListening();') !== -1 &&
   appVue.indexOf('startListening();') < appVue.indexOf('await configStore.loadConfig()'));
+
+// ── §10 P1 网页运行态同步（2026-10-24 计划 §1）：G3 概览 serverNow + G5 桥接投影导出面 ──
+console.log('=== 10) P1-G3/G5：概览条目 serverNow + noteTurnStartedAndEmit/emitTurnEnded 导出 ===');
+// G3：概览条目带捕获时刻主进程时钟，渲染端 applyRunningOverview 透传 markRunning 第三参
+// 即刷新 serverClockOffset（跨机计时校正不再依赖后续 turn_started/快照到达）。
+check('G3：TurnRunningEntry 含 serverNow 数值字段（sessionId/startedAt/generation 之后）',
+  /export interface TurnRunningEntry \{[\s\S]*?sessionId: string;[\s\S]*?startedAt: number;[\s\S]*?generation: number;[\s\S]*?serverNow: number;[\s\S]*?\}/.test(turnProjection));
+check('G3：getRunningOverview 段内捕获 serverNow（const serverNow = Date.now()）并逐条填充',
+  (() => {
+    const seg = topLevelFunction(turnProjection, 'export function getRunningOverview(');
+    return seg !== '' && seg.includes('const serverNow = Date.now();') && seg.includes('serverNow');
+  })());
+check('G3：preload 镜像 TurnRunningOverviewEntry 含 serverNow: number',
+  /export interface TurnRunningOverviewEntry \{[\s\S]*?serverNow: number;[\s\S]*?\}/.test(preloadApi));
+// G5：桥接回合投影收口——sdk-backend 导出 noteTurnStartedAndEmit（起点）与 emitTurnEnded（终态），
+// 供 bridge/init.ts 接线 dispatcher 的 beginTurnProjection/emitTurnEndedFor。
+check('G5：noteTurnStartedAndEmit 导出存在（桥接回合投影起点，P1-1 起返回本回合 generation）',
+  /export function noteTurnStartedAndEmit\(sessionId: string\): number \{/.test(sdkBackend));
+check('G5：noteTurnStartedAndEmit 段内 noteTurnStarted 登记 + turn_started 发射（turnKind user + generation）且 try 包裹',
+  (() => {
+    const seg = topLevelFunction(sdkBackend, 'export function noteTurnStartedAndEmit(');
+    return seg !== '' && seg.includes('noteTurnStarted(sessionId,') &&
+      seg.includes("type: 'turn_started'") && seg.includes("turnKind: 'user'") &&
+      seg.includes('generation: gen') && seg.includes('startedAt: startedAt ?? Date.now(),') &&
+      /export function noteTurnStartedAndEmit\(sessionId: string\): number \{\s*(?:let gen = -1;\s*)?try \{/.test(seg);
+  })());
+check('G5：emitTurnEnded 加 export（bridge/init.ts 跨模块接线终态收口）',
+  /export function emitTurnEnded\(/.test(sdkBackend));
 
 console.log(`\n[turn-projection SA-1] pass=${pass} fail=${fail}`);
 if (fail > 0) {

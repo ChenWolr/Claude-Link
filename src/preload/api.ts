@@ -199,6 +199,8 @@ export interface TurnRunningOverviewEntry {
   sessionId: string;
   startedAt: number;
   generation: number;
+  /** 概览捕获时刻主进程时钟（与快照 serverNow 同语义，供渲染端时钟偏移校正）。 */
+  serverNow: number;
 }
 
 export interface ClaudeLinkAPI {

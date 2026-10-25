@@ -17,6 +17,10 @@ import { getConnection } from '../../database/connection';
 import * as sessionRepo from '../../database/repositories/session-repo';
 import * as messageRepo from '../../database/repositories/message-repo';
 import { spawnForChat, sendMessage, getActiveProcess, getKnownTurnOutcome, killProcess } from '../chat-backend';
+// P1-G5（2026-10-24 网页运行态同步）：桥接回合投影起点/终态接线（sdk-backend 直引——
+// noteTurnStartedAndEmit 伴生 turn_started + 投影登记，emitTurnEnded 终态收口；两者均 try 包裹
+// 不阻塞回合）。经 chat-backend（export * from './sdk-backend'）引出，直接引 sdk-backend 同义。
+import { noteTurnStartedAndEmit, emitTurnEnded } from '../sdk-backend';
 import { beginUserTurn, noteTurnOutcome } from '../task-queue-engine';
 import { isChatSendLocked, acquireChatSendLock, releaseChatSendLock } from '../chat-send-locks';
 import { logger } from '../../utils/logger';
@@ -104,6 +108,11 @@ function buildEngineDeps(rt: BridgeRuntime): TurnEngineDeps {
       const win = getWindow();
       if (win) beginUserTurn(sessionId, win);
     },
+    // P1-G5（网页运行态同步）：桥接回合投影起点/终态——dispatcher 在 spawn 成功后/exit 结算后调用。
+    // P1-1（代际守卫）：beginTurnProjection 返回本回合 generation 天然透传；终态收口补第三参
+    // generation 透传，emitTurnEnded 的代际门据此拒绝旧回合迟到终态。
+    beginTurnProjection: (sessionId) => noteTurnStartedAndEmit(sessionId),
+    emitTurnEndedFor: (sessionId, outcome, generation) => emitTurnEnded(sessionId, outcome, generation),
     noteTurnOutcome: (sessionId, outcome) => {
       const win = getWindow();
       if (win) noteTurnOutcome(sessionId, outcome, win);

@@ -1262,7 +1262,9 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
 // 近似值（result 的 SDK duration_ms）补发，其余终态无近似值则不发。旁路追加：不经
 // forwardEvent/persistCliEvent（不落库），直推 CHAT_EVENT，不触碰既有事件流顺序与载荷。
 // generation 为事件所属回合代际——与投影代际不符（旧回合迟到终态）时不结算新回合投影。
-function emitTurnEnded(
+// P1-G5（2026-10-24 网页运行态同步）加 export：bridge/init.ts 接线为 dispatcher
+// emitTurnEndedFor，桥接回合终态同样收口投影（幂等：正常路径 result 已先结算则 no-op）。
+export function emitTurnEnded(
   sessionId: string,
   outcome: 'success' | 'error' | 'interrupted',
   generation?: number,
@@ -1293,6 +1295,33 @@ function emitTurnEnded(
   } catch {
     // 伴生信号可丢：发射/投影异常不得阻塞既有终态路径
   }
+}
+
+// P1-G5（2026-10-24 网页运行态同步）：桥接回合投影起点——bridge dispatcher 经 TurnEngineDeps
+// 注入调用（bridge/init.ts 接线，dispatcher 自身不 import 本模块）。发射形态完全对齐 CHAT_SEND
+// 直发发射块（ipc-handlers.ts turn_started 块）：generation 取该会当前 query 代际（spawnForChat
+// 已同步建 entry，正常可达）；generation<0 兜底时投影不登记（noteTurnStarted 返 null）、事件照发、
+// startedAt 以发射点时钟兜底（A2 语义保持）。try 包裹：投影登记/发射异常不阻塞桥接回合。
+// 返回本回合 generation（<0 为兜底值），供 dispatcher 终态透传做代际守卫（P1-1）。
+export function noteTurnStartedAndEmit(sessionId: string): number {
+  let gen = -1;
+  try {
+    gen = getCurrentQueryInstance(sessionId) ?? -1;
+    const startedAt = noteTurnStarted(sessionId, gen);
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: {
+        type: 'turn_started',
+        startedAt: startedAt ?? Date.now(),
+        serverNow: Date.now(),
+        turnKind: 'user',
+        generation: gen,
+      },
+    });
+  } catch {
+    // 伴生信号可丢：异常不阻塞桥接回合（gen 已算出则仍返回已算出值，未算出返回 -1）
+  }
+  return gen;
 }
 
 function forwardEvent(

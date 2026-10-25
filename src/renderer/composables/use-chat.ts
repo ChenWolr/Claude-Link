@@ -522,6 +522,10 @@ function createChat() {
         break;
       }
       case 'turn_ended': {
+        // P1-G4（网页运行态同步）：进 case 先记主进程权威 endedAt（对账账本，见 session-store
+        // applyRunningOverview 的概览 skip 条件）——被下方守卫忽略的迟到 turn_ended 也要入账，
+        // 概览迟到时才能正确对账。
+        store.noteTurnEndedServer(sid, event.endedAt);
         // SA-3：迟到终态幂等收口。常规时序终态事件先到（主进程 forwardEvent 先推 result/
         // error/aborted、后发 turn_ended 伴生信号），此时 running 已被既有分支摘除 → 直接忽略
         //（迟到终态幂等，不依赖 turn_started 前置）；终态事件丢失（web 断线等）时 running 仍在，
@@ -778,6 +782,10 @@ function createChat() {
         // 非 running 忽略即幂等。
         if (!store.activeSession) break;
         const sid = store.activeSession.id;
+        // P1-G4（网页运行态同步）：sid 绑定后第一时间记主进程权威 endedAt（对账账本，见
+        // session-store applyRunningOverview 的概览 skip 条件）——被下方守卫忽略的迟到
+        // turn_ended 也要入账，概览迟到时才能正确对账。
+        store.noteTurnEndedServer(sid, event.endedAt);
         if (!store.runningSessions.includes(sid)) break;
         clearAbortTimer(sid);
         finalizeAssistantStream();

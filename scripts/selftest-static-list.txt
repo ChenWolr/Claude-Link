@@ -247,3 +247,4 @@ scripts/tdd-background-task-session-scope-verify.ts
 scripts/tdd-user-message-time-verify.ts
 scripts/tdd-session-pin-verify.ts
 scripts/tdd-skill-refresh-verify.ts
+scripts/tdd-web-reopen-runtime-verify.ts
