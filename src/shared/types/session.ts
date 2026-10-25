@@ -3,9 +3,18 @@ import type { ThinkingLevel } from './thinking';
 import type { PermissionMode } from '../permission-resolver';
 import type { BridgePlatform } from './bridge';
 
+/** P4 会话自动命名：名源值域（判定函数在 shared/auto-session-name.ts；类型放本文件与
+ *  Session 接口同源，申报：计划二选一取 session.ts 方案）。 */
+export type SessionNameSource = 'slot' | 'first_input' | 'generated' | 'custom';
+
 export interface Session {
   id: string;
   name: string;
+  // P4 会话自动命名（计划 2026-10-24-web-sync §3.2.1-3）：名源。DB 列 name_source NULL=存量行
+  // （session-repo 读取侧经 deriveNameSource 按名称形态派生）；'slot'=「会话 N」未命名槽位、
+  // 'first_input'=首输入兜底名、'generated'=LLM 概括名、'custom'=用户命名（自动命名永不覆盖）。
+  // 渲染层 transient 草稿恒 'slot'。
+  nameSource: SessionNameSource;
   cliSessionId: string | null;
   model: string;
   // 会话级供应商选用（ProviderProfile.id）；null = 用全局「最近使用」记忆。

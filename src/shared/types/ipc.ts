@@ -109,6 +109,11 @@ export const IPC_CHANNELS = {
   //（null = 会话不存在）。pinned=true 主进程写 Date.now()（epoch ms），false 写 NULL；专用通道 +
   // repo.setSessionPinned（不 bump updated_at）；成功后广播 SESSIONS_CHANGED(upsert) 跨端同步。
   SESSION_SET_PINNED: 'session:setPinned',
+  // P4 会话自动命名（计划 2026-10-24-web-sync §3.2.1-6）：首输入兜底名写入。
+  // body = (sessionId: string, text: string) → boolean（false = 会话不存在 / 名源不可升级
+  // slot|first_input / 文本归一后为空）。主进程 buildFirstInputSessionName 归一（首行/折叠
+  // 空白/≤20 截断）；成功后广播 SESSIONS_CHANGED(upsert) 跨端同步标题。
+  SESSION_SET_FALLBACK_NAME: 'session:setFallbackName',
   // B1：回合元数据持久化（渲染层回合 result 到达时 fire-and-forget 调用，一次写 messages 三列 cost_usd/duration_ms/ended_at + sessions 两列 last_turn_duration_ms/last_turn_ended_at）。
   SESSION_RECORD_TURN_META: 'session:recordTurnMeta',
   // OPT-10：会话级「单独改 model_override」通道（'session:updateModelOverride'）已删除——全链无调用方。

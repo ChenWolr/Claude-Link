@@ -80,8 +80,11 @@ check('③ topic-analyzer：res error/aborted 监听 + 1MiB 响应上限 + 总 D
   assert.match(reqBody, /TOPIC_RESPONSE_MAX_BYTES/, '缺响应字节上限（hb12-SMG-07）');
   assert.match(analyzer, /TOPIC_TOTAL_DEADLINE_MS\s*=\s*30_000|TOPIC_TOTAL_DEADLINE_MS\s*=\s*30 \* 1000/, '缺 30s 总 Deadline 常量');
   assert.match(analyzer, /Promise\.race\(\[makeHttpRequest/, 'analyzeTopic 缺 Deadline 竞速');
-  const analyzeIdx = analyzer.indexOf('export async function analyzeTopic');
-  assert.ok(analyzeIdx > -1, '未找到 analyzeTopic');
+  // [P4 连带同步 2026-10-24]：analyzeTopic 拆为「入口（在飞互斥 + 尝试预算 + finally 清理，
+  // 计划 2026-10-24-web-sync §3.2.2-1）+ analyzeTopicAttempt（原主体原样迁移）」，失败路径
+  // return null 不写库契约（P6-乙）不变——断言切片目标随之改指主体函数。
+  const analyzeIdx = analyzer.indexOf('async function analyzeTopicAttempt');
+  assert.ok(analyzeIdx > -1, '未找到 analyzeTopicAttempt（P4 拆分后主体）');
   const analyzeBody = analyzer.slice(analyzeIdx, analyzer.indexOf('\n}', analyzeIdx));
   assert.match(analyzeBody, /return null;\s*$/, '失败路径应以 return null 收口（P6-乙：兜底不写库）');
   assert.ok(!analyzeBody.includes('rawFallback'), '兜底截断写库形态残留');

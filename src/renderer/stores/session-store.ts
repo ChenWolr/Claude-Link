@@ -19,7 +19,7 @@ import { lookupProviderModelContextWindow } from '../../shared/model-context-win
 import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../../shared/context-usage';
 import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';
 import { computeTurnStartIndex } from '../../shared/turn-boundary';
-import { isAutoSessionName, isMaterializableAutoName, maxAutoSessionNumber } from '../../shared/auto-session-name';import { useConfigStore } from './config-store';
+import { isAutoSessionName, isMaterializableAutoName, isUpgradableSession, maxAutoSessionNumber } from '../../shared/auto-session-name';import { useConfigStore } from './config-store';
 // SA-3（turn-projection）：preload 镜像类型（type-only，McpSettings.vue 同源先例）——快照/概览
 // 恢复 action 的载荷形状，字段以 src/preload/api.ts 为准（其本身镜像主进程 turn-projection.ts）。
 import type { TurnProjectionSnapshotView, TurnRunningOverviewEntry } from '../../preload/api';
@@ -503,6 +503,8 @@ export const useSessionStore = defineStore('session', {
         this.transientDraft = {
           id: crypto.randomUUID(),
           name: '新会话',
+          // P4：transient 草稿名源恒 'slot'（未命名槽位；物化建行时按名称形态落列）。
+          nameSource: 'slot',
           cliSessionId: null,
           model: '',
           providerOverride: null,
@@ -1499,39 +1501,49 @@ export const useSessionStore = defineStore('session', {
       // hb10-SMG-06：触发逻辑抽为 action（switchSession 物化回补共用同一实现）。
       if (isNew) this.maybeAnalyzeTopicForFirstUserMessage(message);
     },
-    /** hb10-SMG-06：首轮自动命名触发——仅自动名 × 恰 1 条 user 消息时触发。
+    /** P4（hb10-SMG-06 基础上放宽，计划 2026-10-24-web-sync §3.2.1-9）：首轮自动命名触发——
+     *  门槛从「恰 1 条 user + isAutoSessionName(name)」改为「名源可升级（slot/first_input）+
+     *  消息为 user + 归属 active」——首轮 LLM 失败后第 2/3 轮仍在槽位即可重试（「恰 1 条」原是
+     *  首轮代理判据，槽位未消失即仍需命名）；喂给 analyzeTopic 的文本恒为**第一条 user 消息**
+     *  （message 参数仅作触发信号保留）。触发先经 setFallbackSessionName 落首输入兜底名
+     *  （≤1s 内标题即脱离「会话 N」，LLM 成功后升级覆盖；兜底/LLM 双失败 DB 仍留槽位）。
      *  正常路径由 addMessage（isNew）调用；物化 await 期间切走的会话由 switchSession
      *  加载消息后回补（该窗口乐观消息未入列，原实现会漏触发导致永远保持自动名）。 */
     maybeAnalyzeTopicForFirstUserMessage(message: Message | null) {
-      // hb10-SMG-06：首条触发条件保留原字面（恰 1 条 user 消息，tdd-bugfix-topic-thinking-leak 契约钉）。
-      const isFirstUserTurn = this.messages.filter((m) => m.role === 'user').length === 1;
       if (
         !message ||
         message.role !== 'user' ||
         message.sessionId !== this.activeSession?.id ||
-        !isFirstUserTurn ||
-        !isAutoSessionName(this.activeSession?.name)
+        // 名源可升级门槛：nameSource 缺省的历史对象按名称形态派生兜底（isUpgradableSession，
+        // 自然名一律让位——与 DB 存量行派生同判据，见 shared/auto-session-name）。
+        !isUpgradableSession(this.activeSession)
       ) {
         return;
       }
       const sessionId = this.activeSession.id;
-      const textContent = message.content.trim();
+      const firstUser = this.messages.find((m) => m.role === 'user');
+      const textContent = firstUser?.content.trim() ?? '';
       const firstName = message.attachments?.[0]?.filename?.trim();
       if (textContent) {
+        // 先落兜底名（fire-and-forget，失败静默不阻塞 LLM 链；upgradable 才写，custom/generated no-op）。
+        // 可选调用（?.）：生产桌面/网页桥恒有该方法；测试 stub/降级宿主缺方法时 no-op 不抛
+        //（Promise.resolve 兜住 undefined 的 .catch）。
+        void Promise.resolve(window.claudeLink.setFallbackSessionName?.(sessionId, textContent)).catch(() => {});
         // 有文字：LLM 概括主题（仅传正文文字，不传附件 bytes/路径）。
         window.claudeLink.analyzeTopic(sessionId, textContent).then((topic) => {
           if (topic) {
             // Only update if still on the same session
             // F4：发送瞬间到主题返回之间用户可能已手动重命名——迟到的主题不覆盖
-            // （与主进程 topic-analyzer 写前重查同门槛）。H3：判据收紧为
-            // isAutoSessionName 精确形态，「会话备份」等自然命名一律让位。
-            if (this.activeSession?.id === sessionId && isAutoSessionName(this.activeSession.name)) {
+            // （与主进程 topic-analyzer 写前重查同门槛）。P4：判据升级为名源可升级
+            // （slot/first_input 才覆盖；custom/generated 一律让位）。
+            if (this.activeSession?.id === sessionId && isUpgradableSession(this.activeSession)) {
               this.activeSession.name = topic;
+              this.activeSession.nameSource = 'generated';
             }
             // hb13-v B10.1（session-mgmt F4）：列表 patch 同门槛——主进程写前门拒绝（用户已改名）
             // 时返回的 topic 不得写进列表名（旧实现无条件 patch，侧栏与 DB/activeSession 分叉）。
             const listItem = this.sessions.find((s) => s.id === sessionId);
-            if (listItem && isAutoSessionName(listItem.name)) {
+            if (listItem && isUpgradableSession(listItem)) {
               this.patchSessionInLists(sessionId, { name: topic });
             }
           }

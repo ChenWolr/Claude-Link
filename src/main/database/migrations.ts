@@ -178,6 +178,13 @@ function runMigrationStatements(db: Database.Database): void {
     if (!hasCol('pinned_at')) {
       db.exec('ALTER TABLE sessions ADD COLUMN pinned_at INTEGER');
     }
+    // P4 会话自动命名（计划 2026-10-24-web-sync §3.2.1-1）：名源标记
+    //（'slot'|'first_input'|'generated'|'custom'）。免升版（pinned_at 先例），仅走幂等自愈补列；
+    // NULL = 功能前存量行，session-repo 读取侧经 deriveNameSource 按名称形态派生
+    //（isAutoSessionName → slot 可升级，否则 custom 永不自动改名）——存量会话零扰动。
+    if (!hasCol('name_source')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN name_source TEXT DEFAULT NULL');
+    }
   }
 
   // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。

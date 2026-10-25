@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（110 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（111 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -244,6 +244,9 @@ export interface ClaudeLinkAPI {
   // P2 会话置顶（点 S4）：pinned=true 主进程写 Date.now()，false 写 NULL；返回更新后的会话
   //（withBridgePlatform 装饰；null = 会话不存在）。不 bump updated_at（repo 专用入口）。
   setSessionPinned: (sessionId: string, pinned: boolean) => Promise<Session | null>;
+  // P4 会话自动命名：首输入兜底名写入。false = 会话不存在 / 名源不可升级（slot|first_input
+  // 之外）/ 文本归一后为空（主进程截断/折叠，渲染层不预处理）；成功后主进程广播 SESSIONS_CHANGED。
+  setFallbackSessionName: (sessionId: string, text: string) => Promise<boolean>;
   // B1：回合元数据持久化（回合 result 到达时 fire-and-forget）。主进程 handler 成功时固定返回 true，
   // sessionId 非法/会话不存在返回 null（hb10-OPT-1：布尔返回省一次全行读）。下方 Promise<Session | null>
   // 仅为历史形态，运行时实际返回 true | null；调用方均 fire-and-forget，不消费返回值。
@@ -430,6 +433,8 @@ export function createApi(): ClaudeLinkAPI {
     updateSession: (id, data) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE, id, data),
     // P2 会话置顶（点 S4）：两参透传，主进程负责校验与广播。
     setSessionPinned: (sessionId, pinned) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SET_PINNED, sessionId, pinned),
+    // P4 会话自动命名：首输入兜底名（两参透传，主进程负责校验/归一/广播）。
+    setFallbackSessionName: (sessionId, text) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SET_FALLBACK_NAME, sessionId, text),
     recordTurnMeta: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_RECORD_TURN_META, sessionId, payload),
     searchSessions: (query) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SEARCH, query),
     analyzeTopic: (sessionId, firstMessage) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_ANALYZE_TOPIC, sessionId, firstMessage),

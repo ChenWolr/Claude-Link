@@ -98,6 +98,8 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   updateSession: IPC_CHANNELS.SESSION_UPDATE,
   // P2 会话置顶（点 S4）：网页端与桌面同能力（键集完备性契约由 tdd-web-access-wiring-verify §11.2 钉死）。
   setSessionPinned: IPC_CHANNELS.SESSION_SET_PINNED,
+  // P4 会话自动命名：首输入兜底名写入（网页端同能力；invoke 通道照相邻键形态）。
+  setFallbackSessionName: IPC_CHANNELS.SESSION_SET_FALLBACK_NAME,
   recordTurnMeta: IPC_CHANNELS.SESSION_RECORD_TURN_META,
   searchSessions: IPC_CHANNELS.SESSION_SEARCH,
   analyzeTopic: IPC_CHANNELS.SESSION_ANALYZE_TOPIC,

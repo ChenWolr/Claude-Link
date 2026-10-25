@@ -46,6 +46,7 @@ import { noteTurnStarted, noteTurnEvent, noteTurnEnded, getSnapshot, clearSessio
 import { convertResultMessage } from '../../shared/result-converter';
 import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
+import { maybeRetrySessionNaming } from './topic-analyzer';
 import { logger } from '../utils/logger';
 import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState, clearReasoningReplayTurnFlag } from './reasoning-replay-auto-retry';
 import * as sessionRepo from '../database/repositories/session-repo';
@@ -1358,6 +1359,16 @@ function forwardEvent(
   // 已删除会话因上方 isSessionActive 守卫提前 return，不会弹陈旧通知。
   if (event.type === 'result' && isSuccessfulCliResult(event)) {
     notifySessionCompleted(mainWindow, sessionId);
+    // P4-A（计划 2026-10-24-web-sync §3.2.2-2）：回复结束自动重试命名——与失焦通知完全同点位、
+    // 同「不阻塞业务」原则（同步调用不 await、异常吞噬）。内部自带闸序：仅可升级名源
+    //（slot/first_input）+ 尝试预算 <3 + 无在飞分析才动作；custom/generated 会话 no-op。
+    // 行为变化（有意，计划 §3.2.2-3）：此前仅渲染层首条 user 消息触发命名，本边沿使
+    // 「首轮失败后继续对话」「无渲染层触发者的回合」也会被升级命名。
+    try {
+      maybeRetrySessionNaming(sessionId);
+    } catch {
+      // 同通知原则：不阻塞业务
+    }
   }
   // v3 队列调度中央钩子：result 是回合结束的权威信号（到达时进程可能尚未退出，
   // 绝不以进程存在性做守卫）。三态映射后交引擎状态机分派（arm/halt，幂等闸在引擎内）。

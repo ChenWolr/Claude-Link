@@ -53,19 +53,29 @@ console.log('=== H3-① isAutoSessionName 纯函数行为（三端同源判据�
 
 console.log('=== H3-① 四处判据替换（接线契约）===');
 {
+  // [P4 连带同步 2026-10-24]：自动命名主链判据升级为名源判定（计划 2026-10-24-web-sync
+  // §3.2.1-8/9：主进程 isAutoNameSlot 走 isUpgradableNameSource、渲染层三门槛走
+  // isUpgradableSession——缺省名源对象经 deriveNameSource 按名称形态派生兜底，自然名仍让位）；
+  // isAutoSessionName 精确形态判据保留于附件命名双门 + shared 派生函数内部。H3 本意
+  // 「判据 shared 同源、精确形态、自然命名不绕过」不变，本节断言随判据源升级同步改钉。
   const analyzer = read('src/main/modules/topic-analyzer.ts');
   const sessionStore = read('src/renderer/stores/session-store.ts');
   const sharedFn = read('src/shared/auto-session-name.ts');
 
   check('shared 纯函数存在且形态正确', /export function isAutoSessionName\(name: string \| null \| undefined\): boolean \{[\s\S]*\/\^会话 \\d\+\$\/\.test\(name\.trim\(\)\)/.test(sharedFn));
 
-  check('topic-analyzer 引入 isAutoSessionName', /import\s*\{\s*isAutoSessionName\s*\}\s*from\s*'\.\.\/\.\.\/shared\/auto-session-name'/.test(analyzer));
-  check('isAutoNameSlot 重查改走 isAutoSessionName', /isAutoSessionName\(sessionRepo\.getSession\(sessionId\)\?\.name\)/.test(analyzer));
+  check('topic-analyzer 从 shared 引入名源判据（isUpgradableNameSource）',
+    /import\s*\{\s*isUpgradableNameSource\s*\}\s*from\s*'\.\.\/\.\.\/shared\/auto-session-name'/.test(analyzer));
+  check('isAutoNameSlot 重查改走名源判定（isUpgradableNameSource）',
+    /isUpgradableNameSource\(\w+\.nameSource\)/.test(analyzer));
   check('topic-analyzer 无残留前缀判据', !analyzer.includes(".startsWith('会话')"));
 
-  check('session-store 引入 isAutoSessionName', /import\s*\{[^}]*\bisAutoSessionName\b[^}]*\}\s*from\s*'(\.\.\/)+shared\/auto-session-name'/.test(sessionStore));
+  check('session-store 从 shared 引入判据（isAutoSessionName + isUpgradableSession）',
+    /import\s*\{[^}]*\bisAutoSessionName\b[^}]*\bisUpgradableSession\b[^}]*\}\s*from\s*'(\.\.\/)+shared\/auto-session-name'/.test(sessionStore));
+  const upgradableCount = (sessionStore.match(/isUpgradableSession\(/g) || []).length;
+  check(`命名门槛走名源判定 ≥3 处（触发+LLM 视图+列表 patch，实际 ${upgradableCount} 处）`, upgradableCount >= 3);
   const gateCount = (sessionStore.match(/isAutoSessionName\(/g) || []).length;
-  check(`session-store 判据调用 ≥4 处（触发+LLM 视图+附件写前+附件视图，实际 ${gateCount} 处）`, gateCount >= 4);
+  check(`附件命名双门保留 isAutoSessionName 精确形态（写前+视图，实际 ${gateCount} 处）`, gateCount >= 2);
   check('session-store 无残留前缀判据', !sessionStore.includes(".startsWith('会话')"));
 }
 
@@ -92,7 +102,9 @@ console.log('=== 回归：F4 竞态守卫语义不弱化 ===');
   const sessionStore = read('src/renderer/stores/session-store.ts');
   // SA-4/P6-乙 同步（2026-10-21）：出口构成变化——首句兜底出口移除、短输入直写出口（≤8 字符
   // 不发起 LLM 直接写库，shorthand 形态 { name }）新增；计数形态泛化以兼容 shorthand。
-  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name(?:\s*:[^}]+)?\s*\}\)/g) || []).length;
+  // [P4 连带同步 2026-10-24]：两出口追加 nameSource: 'generated'（多键形态），正则放宽为
+  // \{ name[^}]*\}（理由同 tdd-bugfix-topic-thinking-leak B 节：计数约束出口数不约束键形状）。
+  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name[^}]*\}\)/g) || []).length;
   check('主进程仍保留两处 name 写入出口（SA-4 后构成 = LLM 主题+短输入直写）', writeCount === 2);
   const gateCount = (analyzer.match(/isAutoNameSlot\(sessionId\)/g) || []).length;
   check('主进程两处出口仍各有守卫（实际 %s 处）'.replace('%s', String(gateCount)), gateCount >= 2);
@@ -118,8 +130,11 @@ console.log('=== hb13-v A5：物化判定两形态并集 + 物化分支接线 ==
   });
   check('materializeActiveTransient 物化分支改用 isMaterializableAutoName', /transient\.name && !isMaterializableAutoName\(transient\.name\)/.test(sessionStore));
   check('session-store 引入 isMaterializableAutoName', /import\s*\{[^}]*\bisMaterializableAutoName\b[^}]*\}\s*from\s*'(\.\.\/)+shared\/auto-session-name'/.test(sessionStore));
-  const gateCount = (sessionStore.match(/isAutoSessionName\(/g) || []).length;
-  check(`既有 isAutoSessionName 判据门仍 ≥4 处（实际 ${gateCount} 处）`, gateCount >= 4);
+  // [P4 连带同步 2026-10-24]：原「isAutoSessionName 判据门 ≥4」（触发+LLM 视图+附件双门）
+  // 随主链判据名源化收敛为附件双门 2 处（精确形态判据同时活在 shared deriveNameSource 内），
+  // ≥2 与 H3-① 附件双门断言互证。
+  const gateCount2 = (sessionStore.match(/isAutoSessionName\(/g) || []).length;
+  check(`既有 isAutoSessionName 判据门仍 ≥2 处（附件双门；实际 ${gateCount2} 处）`, gateCount2 >= 2);
 }
 
 console.log(`\nverify 结果：${pass} passed, ${fail} failed`);

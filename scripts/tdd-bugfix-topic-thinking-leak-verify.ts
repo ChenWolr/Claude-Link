@@ -165,7 +165,11 @@ console.log('=== B. topic-analyzer.ts 静态钉（主进程） ===');
 {
   // SA-4/P6-乙 同步：计数形态泛化——LLM 出口为 { name: verdict.topic }，短输入直写出口为
   // shorthand { name }（旧正则只认冒号形态会漏计）。两处出口 = LLM 主题 + 短输入直写。
-  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name(?:\s*:[^}]+)?\s*\}\)/g) || []).length;
+  // [P4 同步 2026-10-24]：两出口追加 nameSource: 'generated' 键（短输入出口改多键形态
+  // { name, nameSource: 'generated' }，冒号形态正则漏计）——正则放宽为 \{ name[^}]*\}（匹配
+  // name 起始的任意键组合），出口计数仍为 2；放宽理由：计数本意是「写库出口恰好两处」，
+  // 不约束键形状（键形状由 tdd-session-name-source-verify ⑤ 钉 nameSource:'generated'×2）。
+  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name[^}]*\}\)/g) || []).length;
   check(`updateSession(name:) 恰好 2 处出口（实际 ${writeCount} 处，F4 契约互证；SA-4 后构成 = LLM 主题 + 短输入直写）`, writeCount === 2);
   const gateCount = (analyzer.match(/if \(isAutoNameSlot\(sessionId\)\)/g) || []).length;
   check(`isAutoNameSlot 写前门 ≥ 2 处（实际 ${gateCount} 处）`, gateCount >= 2);
@@ -177,11 +181,17 @@ console.log('=== B. topic-analyzer.ts 静态钉（主进程） ===');
   check('makeHttpRequest 10s 超时保留', analyzer.includes('makeHttpRequest(url, requestBody, headers, 10000)'));
 }
 
-console.log('=== C. session-store.ts 零改动钉（渲染层） ===');
+console.log('=== C. session-store.ts 触发链钉（渲染层） ===');
 {
   check('analyzeTopic(sessionId, textContent) 调用形态不变', sessionStore.includes('analyzeTopic(sessionId, textContent)'));
-  check('首条触发条件 filter((m) => m.role === \'user\').length === 1 保留',
-    sessionStore.includes("filter((m) => m.role === 'user').length === 1"));
+  // [P4 放宽同步 2026-10-24]：「恰 1 条 user」首轮代理判据退役（计划 2026-10-24-web-sync
+  // §3.2.1-9）——首轮 LLM 失败后第 2/3 轮仍在槽位即可重试，门槛改为 nameSource 可升级
+  // （upgradable），喂给 analyzeTopic 的文本恒取第一条 user 消息。原字面钉
+  // filter((m) => m.role === 'user').length === 1 随之退役，改钉新门槛两字面。
+  check('触发门槛为名源可升级（isUpgradableSession：缺省名源按名称形态派生）',
+    sessionStore.includes('isUpgradableSession(this.activeSession)'));
+  check('喂给 analyzeTopic 的文本恒为第一条 user 消息',
+    sessionStore.includes("this.messages.find((m) => m.role === 'user')"));
 }
 
 console.log(`\nverify 结果：${pass} passed, ${fail} failed`);

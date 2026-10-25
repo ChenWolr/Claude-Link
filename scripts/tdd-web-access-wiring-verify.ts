@@ -82,14 +82,15 @@ const preloadApi = read('src/preload/api.ts');
 
 // ── ① ipc-handlers.ts：注册表全量替换 ──
 console.log('=== 1) ipc-handlers.ts：ipcMain.handle( → regInvokeHandler( 全量替换 ===');
-// 计算式：regInvokeHandler( === 86 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
+// 计算式：regInvokeHandler( === 87 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
 // §3-P3-4）+ SA-2 回合投影只读查询两通道 CHAT_RUNTIME_SNAPSHOT/CHAT_RUNNING_OVERVIEW
 //（计划 2026-10-21「回合投影 + 标题质量」）+ P2 会话置顶 SESSION_SET_PINNED（计划 2026-10-22
-// six-issues 点 S4）+ P6 Skill 刷新 COMMANDS_REFRESH_GLOBAL（同计划点 S5，方案 C 同步条）；
+// six-issues 点 S4）+ P6 Skill 刷新 COMMANDS_REFRESH_GLOBAL（同计划点 S5，方案 C 同步条）
+// + P4 会话命名兜底 SESSION_SET_FALLBACK_NAME（计划 2026-10-24-web-sync §3.2.1-6）；
 // ipcMain.handle( === 0：注释行无该带括号字面。
 check('ipc-handlers.ts ipcMain.handle( 出现次数 === 0', countOccurrences(handlers, 'ipcMain.handle(') === 0,
   `实际 ${countOccurrences(handlers, 'ipcMain.handle(')}`);
-check('ipc-handlers.ts regInvokeHandler( 出现次数 === 86', countOccurrences(handlers, 'regInvokeHandler(') === 86,
+check('ipc-handlers.ts regInvokeHandler( 出现次数 === 87', countOccurrences(handlers, 'regInvokeHandler(') === 87,
   `实际 ${countOccurrences(handlers, 'regInvokeHandler(')}`);
 check('ipc-handlers.ts 从 ./ipc-registry 导入 regInvokeHandler',
   /import\s*\{[^}]*regInvokeHandler[^}]*\}\s*from\s*'\.\/ipc-registry'/.test(handlers));
@@ -200,11 +201,13 @@ check('ClaudeLinkAPI 含 onSessionsChanged 成员（upsert|delete 载荷）',
   /onSessionsChanged:\s*\(callback:\s*\(payload:\s*\{\s*kind:\s*'upsert'\s*\|\s*'delete';\s*sessionId:\s*string\s*\}\)\s*=>\s*void\)\s*=>\s*\(\)\s*=>\s*void;/.test(preloadApi));
 check('preload/api.ts 实现 onSessionsChanged（ipcRenderer.on 模式）',
   /onSessionsChanged:\s*\(callback\)\s*=>\s*\{[\s\S]*?ipcRenderer\.on\(IPC_CHANNELS\.SESSIONS_CHANGED,\s*listener\);[\s\S]*?return\s*\(\)\s*=>\s*ipcRenderer\.off\(IPC_CHANNELS\.SESSIONS_CHANGED,\s*listener\);/.test(preloadApi));
-check('ipc-handlers.ts 四处 pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED 发射（create/update/setPinned/delete，P2 会话置顶点 S4 +1）',
-  countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED') === 4,
+// [P4 连带同步 2026-10-24]：新 handler SESSION_SET_FALLBACK_NAME 成功后广播 upsert 一处
+//（计划 2026-10-24-web-sync §3.2.1-6「upgradable 才写 + 成功后广播」），发射 4→5（upsert×4 + delete×1）。
+check('ipc-handlers.ts 五处 pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED 发射（create/update/setPinned/fallback/delete，P4 兜底命名 +1）',
+  countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED') === 5,
   `实际 ${countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED')}`);
-check("发射形态含 upsert×3 + delete×1（P2 会话置顶点 S4 新增 setPinned upsert 一处）",
-  countOccurrences(handlers, "{ kind: 'upsert', sessionId") === 3 &&
+check("发射形态含 upsert×4 + delete×1（P2 置顶 upsert + P4 兜底命名 upsert）",
+  countOccurrences(handlers, "{ kind: 'upsert', sessionId") === 4 &&
   countOccurrences(handlers, "{ kind: 'delete', sessionId") === 1);
 // 发射点落位：SESSION_CREATE 物化成功后（return session 之前）、SESSION_UPDATE 成功后
 //（return updated ? 之前）、SESSION_DELETE 删库成功后（deleteSession 之后）。

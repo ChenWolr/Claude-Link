@@ -22,14 +22,19 @@ function check(name: string, fn: () => void): void {
   catch (e) { fail += 1; console.log(`  ❌ ${name} — ${(e as Error).message.slice(0, 240)}`); }
 }
 
-check('B10.1：LLM 主题回调列表 patch 前判列表项现名仍是自动形态', () => {
+check('B10.1：LLM 主题回调列表 patch 前判列表项现名仍可自动升级', () => {
   const cbIdx = store.indexOf("window.claudeLink.analyzeTopic(sessionId, textContent)");
   assert.ok(cbIdx > -1, '未找到 analyzeTopic 回调');
-  const cbBody = store.slice(cbIdx, cbIdx + 900);
+  // [P4 连带同步 2026-10-24]：窗口 900→1200——.then 内门槛升级为名源判定并追加兜底名注释
+  //（计划 2026-10-24-web-sync §3.2.1-9），patch 调用与回调起点距离实测 902 字符。
+  const cbBody = store.slice(cbIdx, cbIdx + 1200);
   const patchIdx = cbBody.indexOf('this.patchSessionInLists(sessionId, { name: topic })');
   assert.ok(patchIdx > -1, 'patch 调用丢失（命名能力被误删）');
   const seg = cbBody.slice(0, patchIdx);
-  assert.match(seg, /listItem && isAutoSessionName\(listItem\.name\)/, '列表 patch 前缺「列表项现名仍是自动形态」门槛（F4 显示分叉形态）');
+  // [P4 连带同步 2026-10-24]：门槛从 isAutoSessionName(listItem.name) 升级为名源判定
+  // isUpgradableSession(listItem)（计划 2026-10-24-web-sync §3.2.1-9「列表 patch 同门槛名源化」）
+  // ——守卫语义不变（generated/custom 一律让位，迟到主题不覆盖）。
+  assert.match(seg, /listItem && isUpgradableSession\(listItem\)/, '列表 patch 前缺「列表项名源可升级」门槛（F4 显示分叉形态）');
 });
 
 console.log(`\nverify 结果：${pass} passed, ${fail} failed`);

@@ -6,11 +6,12 @@ import https from 'https';
 import http from 'http';
 import { getConfig, getProviderModelSources, DECRYPT_FAILED } from './config-manager';
 import * as sessionRepo from '../database/repositories/session-repo';
+import * as messageRepo from '../database/repositories/message-repo';
 import { logger } from '../utils/logger';
 import { buildAnthropicApiUrl, isOfficialAnthropicBaseUrl } from './api-url';
 import { resolveConfiguredDefaultModel } from '../../shared/settings-parser';
 import { resolveSessionModel } from '../../shared/session-model';
-import { isAutoSessionName } from '../../shared/auto-session-name';
+import { isUpgradableNameSource } from '../../shared/auto-session-name';
 import { maskApiKey } from '../../shared/provider-library';
 import { pushToMainWindow } from './push-bus';
 import { IPC_CHANNELS } from '../../shared/constants';
@@ -33,16 +34,26 @@ class HttpStatusError extends Error {
   }
 }
 
-// F4：自动命名竞态守卫——命名门槛在发送瞬间判定（渲染层 isAutoSessionName），而本模块
+// F4：自动命名竞态守卫——命名门槛在发送瞬间判定（渲染层名源门槛），而本模块
 // 全流程最多 2 次串行 HTTP 请求（每次超时 10s，正常窗口上界约 20s；总 Deadline 30s 兜底，
 // 见下方 hb10-SMG-02）；用户在此窗口手动重命名后，
 // 迟到的主题/短输入名不得覆盖（写前重查兜底；SA-4 后出口 = LLM 主题 + 短输入直写）。
-// 主进程侧收口：每次写 name 前重查当前名仍为「会话 N」自动形态才写（手动名一律让位）。
-// H3：判据抽 shared 纯函数（三端同源）并收紧为精确形态——「会话」前缀匹配会被
-// 「会话备份」等自然命名绕过，误判为自动名槽位后迟到主题照样覆盖。
+// 主进程侧收口：每次写 name 前重查当前名源仍可升级（slot/first_input）才写——
+// custom（用户命名，含存量派生）与 generated（已概括）一律让位。
+// H3：判据抽 shared 纯函数（三端同源）——P4 升级为 nameSource 判定（计划 §3.2.1-8）。
 function isAutoNameSlot(sessionId: string): boolean {
-  return isAutoSessionName(sessionRepo.getSession(sessionId)?.name);
+  const s = sessionRepo.getSession(sessionId);
+  return !!s && isUpgradableNameSource(s.nameSource);
 }
+
+// P4-A（计划 §3.2.2-1）：每会话每进程的命名尝试预算与在飞互斥——LLM 失败（限流/超时/
+// 验收两连拒）后由回复结束边沿（maybeRetrySessionNaming）与渲染层后续轮次触发共同重试；
+// attempts 达 3（含首发与短输入直写，直写也是一次「命名尝试」）后本进程内永不重试，
+// 防无限重试烧配额；重启进程计数清零（可接受，计划 §3.3）。topicInFlight 拦多端并发 /
+// 双边沿重入（同会话同刻只允许一次分析在跑）。
+const topicAttempts = new Map<string, number>();
+const topicInFlight = new Set<string>();
+const TOPIC_MAX_ATTEMPTS = 3;
 
 // hb10-SMG-02/V01（hb12-SMG-07 同函数）：总 Deadline 30s（复用既有 10s×2 语义上界）——
 // 慢滴（持续低速流入使 socket idle 型 10s 超时永不触发）等异常令 promise 长期悬挂（干净断连
@@ -52,6 +63,22 @@ const TOPIC_TOTAL_DEADLINE_MS = 30 * 1000;
 const TOPIC_RESPONSE_MAX_BYTES = 1024 * 1024;
 
 export async function analyzeTopic(sessionId: string, firstMessage: string): Promise<string | null> {
+  // P4-A（计划 §3.2.2-1）：入口统一收口——在飞互斥（同会话重入直接 null）+ 尝试预算计数
+  // （短输入直用分支同计数，含首发）+ finally 必清在飞标记（异常路径不泄漏）。主体逻辑在
+  // analyzeTopicAttempt（原 analyzeTopic 主体原样迁移，P6-乙 失败 return null 不写库契约不变）。
+  if (topicInFlight.has(sessionId)) return null;
+  topicInFlight.add(sessionId);
+  try {
+    const n = (topicAttempts.get(sessionId) ?? 0) + 1;
+    topicAttempts.set(sessionId, n);
+    if (n > TOPIC_MAX_ATTEMPTS) return null;
+    return await analyzeTopicAttempt(sessionId, firstMessage);
+  } finally {
+    topicInFlight.delete(sessionId);
+  }
+}
+
+async function analyzeTopicAttempt(sessionId: string, firstMessage: string): Promise<string | null> {
   // SA-4/P6-乙（短输入跳过）：首条消息 trim 后 ≤8 字符不值得 LLM 概括——直接以原文为名写库
   // 返回，不发起 LLM 请求。写前门与既有写点一致（F4 惯例：用户已手动改名则让位）；sk- 前缀
   // 形态条件掩码为边界加固（防密钥碎片入标题）。空串（trim 后 0 字）不走本路径（>0 守卫，
@@ -60,7 +87,8 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   if (trimmed.length > 0 && trimmed.length <= 8) {
     const name = /^sk-[A-Za-z0-9_\-]{8,}/.test(trimmed) ? maskApiKey(trimmed) : trimmed;
     if (isAutoNameSlot(sessionId)) {
-      sessionRepo.updateSession(sessionId, { name });
+      // P4（计划 §3.2.1-8）：写库带 nameSource='generated'（短输入直写也是一次命名升级）。
+      sessionRepo.updateSession(sessionId, { name, nameSource: 'generated' });
       // P6-乙（写库后补推送）：与 SESSION_UPDATE 路径同形态——写库成功即广播 upsert（跨端
       // 列表同步标题变更）；推送失败由 push-bus 内部吞噬，不阻塞写库结果。
       pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId });
@@ -131,7 +159,8 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
         if (verdict.ok && verdict.topic) {
           // 出口①（LLM 主题）：F4 写前门保留
           if (isAutoNameSlot(sessionId)) {
-            sessionRepo.updateSession(sessionId, { name: verdict.topic });
+            // P4（计划 §3.2.1-8）：写库带 nameSource='generated'（已概括，此后自动写让位）。
+            sessionRepo.updateSession(sessionId, { name: verdict.topic, nameSource: 'generated' });
             // P6-乙（写库后补推送）：同短输入点——写库成功即广播 upsert（跨端列表同步）；
             // 推送失败由 push-bus 内部吞噬，不阻塞写库结果。
             pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId });
@@ -163,7 +192,29 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   // 兜底名质量差（跨句截断/复制原文碎片），且覆盖「会话 N」槽位后回补链不再重试。改为
   // return null：DB 保留「会话 N」槽位 → 既有 switchSession 回补链可重试；渲染层
   // .then(topic => { if (topic) ... }) 与 catch 已对 null 静默，零渲染层改动。
+  // [P4 修订] 「槽位」在名源语义下含 slot 与 first_input（兜底名）两态，均仍可升级。
   return null;
+}
+
+/** P4-A（计划 §3.2.2-1）：回复结束自动重试命名——sdk-backend forwardEvent 成功 result 边沿
+ *  调用（与 notifySessionCompleted 同点位、同「不阻塞业务」原则），覆盖无渲染层触发者的
+ *  桥接回合与「首轮 LLM 失败后用户继续对话」的桌面会话。闸序：会话存在且名源可升级
+ *  （slot/first_input）→ 预算未耗尽（attempts < 3）→ 无在飞分析 → 取 DB 首条 user 消息文本
+ *  （无/空则放弃）；slot 先落首输入兜底名（桥接会话无渲染层触发者替它调兜底通道），再发起
+ *  LLM 升级。任何异常静默——命名失败不影响回合业务。 */
+export function maybeRetrySessionNaming(sessionId: string): void {
+  try {
+    const s = sessionRepo.getSession(sessionId);
+    if (!s || !isUpgradableNameSource(s.nameSource)) return;
+    if ((topicAttempts.get(sessionId) ?? 0) >= TOPIC_MAX_ATTEMPTS || topicInFlight.has(sessionId)) return;
+    const first = messageRepo.getMessagesBySession(sessionId).find((m) => m.role === 'user');
+    if (!first || !first.content.trim()) return;
+    const text = first.content.trim();
+    if (s.nameSource === 'slot') void sessionRepo.setFirstInputFallbackName(sessionId, text);
+    void analyzeTopic(sessionId, text);
+  } catch {
+    /* 命名重试失败静默 */
+  }
 }
 
 function makeHttpRequest(

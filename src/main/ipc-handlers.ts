@@ -15,7 +15,7 @@ import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性
 import path from 'node:path';
 import os from 'node:os';
 import type { AppConfig } from '../shared/types/config';
-import type { Session } from '../shared/types/session';
+import type { Session, SessionNameSource } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
 import { normalizeDirKey, mergeProjectDirs } from '../shared/project-skills';
@@ -813,6 +813,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // 白名单访问会 TypeError → invoke reject；渲染层 6 处恒传对象（当前不可达），此处仅兜底
       // 拒绝（return false 与 updateSession 无行 falsy 返回同形态），不抛错。
       if (!data || typeof data !== 'object') return false;
+      // P4（计划 §3.2.1-5）：凡经用户改名通道携带 name 的写一律注入 nameSource=custom——
+      // 用户命名（含附件名命名等经本通道的写）永不被自动命名/重试覆盖（repo 名源守卫 +
+      // 渲染层补丁门槛双保险的权威标记源）。不信任 renderer 传值：即便渲染层携带 nameSource
+      // 也被此注入覆盖（本通道无「自动写」语义）。
+      if (data.name !== undefined) (data as { nameSource?: SessionNameSource }).nameSource = 'custom';
+      // round-001 review-report FIX-1b（无 name 剥离残值 nameSource：本通道无自动写语义，对齐 delete 惯例）
+      else delete (data as { nameSource?: SessionNameSource }).nameSource;
       // 白名单校验（review-v2 F11）：不信任 renderer 传值，非法 thinkingLevel 丢弃，
       // 合法 null（跟随默认）/ 有效档位放行。
       if (data.thinkingLevel !== undefined && data.thinkingLevel !== null && !isValidThinkingLevel(data.thinkingLevel)) {
@@ -881,6 +888,19 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId: id });
     }
     return updated ? withBridgePlatform(updated) : updated;
+  });
+  // P4 会话自动命名（计划 §3.2.1-6）：首输入兜底名写入——upgradable（slot/first_input）才写 +
+  // 成功后广播 SESSIONS_CHANGED(upsert)（repo 不依赖 push-bus，广播收口在 handler 层）。
+  // 入参健壮性校验：非字符串/空白 id 或文本按 false 拒绝（不抛错——渲染层 .catch(() => {}) 静默，
+  // 网页端同通道；语义「未写」而非「出错」）。
+  regInvokeHandler(IPC_CHANNELS.SESSION_SET_FALLBACK_NAME, async (_event, sessionId: string, text: string) => {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) return false;
+    if (typeof text !== 'string' || !text.trim()) return false;
+    const ok = sessionRepo.setFirstInputFallbackName(sessionId, text);
+    if (ok) {
+      pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId });
+    }
+    return ok;
   });
   // B1：回合元数据持久化（渲染层在 result 到达时 fire-and-forget 调用）。
   // 校验：会话必须存在；durationMs/endedAt 仅正数可写（非正/NaN/非 number → null）；
