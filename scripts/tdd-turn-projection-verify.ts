@@ -281,7 +281,10 @@ check('extractTopicCandidate 截断上限 20 保持不变（slice(0, 20)）', to
 check('META_PREAMBLE_PATTERNS 保留', topicCore.includes('META_PREAMBLE_PATTERNS'));
 
 // P6-2/3/4 topic-analyzer.ts analyzeTopic 函数段（段级收口，不受模块内其他函数干扰）。
-const analyzeSeg = topLevelFunction(topicAnalyzer, 'export async function analyzeTopic(');
+// [P4 连带同步 2026-10-24]：analyzeTopic 拆为「入口（在飞互斥 + 尝试预算 + finally 清理，
+// 计划 2026-10-24-web-sync §3.2.2-1）+ analyzeTopicAttempt（原主体原样迁移）」——短输入守卫/
+// 两处写库/两处补推送全部位于主体，切片目标随之改指主体函数（契约内容不变）。
+const analyzeSeg = topLevelFunction(topicAnalyzer, 'async function analyzeTopicAttempt(');
 check('analyzeTopic 函数段提取非空', analyzeSeg !== '');
 check('短输入跳过：段内含 trimmed.length <= 8 守卫', analyzeSeg.includes('trimmed.length <= 8'));
 check('短输入跳过：空串守卫（trimmed.length > 0，纯空白不走短输入写库路径）',
