@@ -78,6 +78,10 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   listRecentWorkspaces: IPC_CHANNELS.WORKSPACE_LIST_RECENT,
   addRecentWorkspace: IPC_CHANNELS.WORKSPACE_ADD_RECENT,
   removeRecentWorkspace: IPC_CHANNELS.WORKSPACE_REMOVE_RECENT,
+  // P2 目录历史跨端同步：WORKSPACES_CHANGED 信号（on* 本地订阅 / remove*Listener 清订阅由
+  // createWebApi 泛型分派处理，与 onSessionsChanged 同一机制；空载荷 {}，渲染层收到重拉列表）。
+  onWorkspacesChanged: IPC_CHANNELS.WORKSPACES_CHANGED,
+  removeWorkspacesListener: IPC_CHANNELS.WORKSPACES_CHANGED,
   listProviders: IPC_CHANNELS.PROVIDER_LIST,
   saveProvider: IPC_CHANNELS.PROVIDER_SAVE,
   deleteProvider: IPC_CHANNELS.PROVIDER_DELETE,

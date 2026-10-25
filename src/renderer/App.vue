@@ -33,6 +33,7 @@ let stopGlobalCommandChanges: (() => void) | null = null;
 let stopQueueEvents: (() => void) | null = null;
 let stopBridgeSessionsUpserted: (() => void) | null = null;
 let stopSessionsChanged: (() => void) | null = null;
+let stopWorkspacesChanged: (() => void) | null = null;
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
@@ -154,6 +155,11 @@ onMounted(async () => {
   stopSessionsChanged = window.claudeLink.onSessionsChanged((payload) => {
     sessionStore.handleSessionsChanged(payload);
   });
+  // P2 目录历史跨端同步（2026-10-24 web-sync 计划 §2.2）：WORKSPACES_CHANGED 信号全局订阅——
+  // 桌面/网页任一端增删最近目录后收到信号重拉 listRecentWorkspaces（幂等读，无载荷竞态）。
+  stopWorkspacesChanged = window.claudeLink.onWorkspacesChanged(() => {
+    void sessionStore.loadRecentWorkspaces();
+  });
 });
 
 onBeforeUnmount(() => {
@@ -167,6 +173,7 @@ onBeforeUnmount(() => {
   if (stopQueueEvents) stopQueueEvents();
   if (stopBridgeSessionsUpserted) stopBridgeSessionsUpserted();
   if (stopSessionsChanged) stopSessionsChanged();
+  if (stopWorkspacesChanged) stopWorkspacesChanged();
   if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
   if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
   if (providerErrorToastTimer) clearTimeout(providerErrorToastTimer);

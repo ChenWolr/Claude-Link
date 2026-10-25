@@ -327,9 +327,21 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 选目录原生弹窗通道（workspace:pickDir）已于 T3 整链删除——两入口改渲染层自绘
   // FilePickerDialog（fs-picker-store），最近历史经 WORKSPACE_ADD_RECENT 显式回写。
   regInvokeHandler(IPC_CHANNELS.WORKSPACE_LIST_RECENT, async () => listRecentWorkspaces());
-  regInvokeHandler(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
+  // P2 目录历史跨端同步（2026-10-24 web-sync 计划 §2.2）：ADD/REMOVE 成功返回前广播
+  // WORKSPACES_CHANGED 信号（空载荷 {}，渲染层重拉 listRecentWorkspaces）；写盘抛错时不达
+  // 发射点（信号只随成功走）。LIST 只读不推。
+  regInvokeHandler(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => {
+    const list = addRecentWorkspace(dir);
+    pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED, {});
+    return list;
+  });
   // 永久删除某条最近目录历史（只移除历史记录，不触碰磁盘上的目录本体）。
-  regInvokeHandler(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => removeRecentWorkspace(dir));
+  regInvokeHandler(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => {
+    const list = removeRecentWorkspace(dir);
+    // 删不存在的目录列表不变，仍推送（无害信号，渲染层重拉幂等）。
+    pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED, {});
+    return list;
+  });
 
   // 自绘 FilePickerDialog 的只读文件系统元数据（详见 modules/fs-picker.ts）。
   regInvokeHandler(IPC_CHANNELS.FS_LIST_ROOTS, async () => listRoots());

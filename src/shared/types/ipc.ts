@@ -36,6 +36,10 @@ export const IPC_CHANNELS = {
   WORKSPACE_LIST_RECENT: 'workspace:listRecent',
   WORKSPACE_ADD_RECENT: 'workspace:addRecent',
   WORKSPACE_REMOVE_RECENT: 'workspace:removeRecent',
+  // 主→渲染推送：最近目录历史变更信号（ADD/REMOVE 成功返回前发射，LIST 不推）。信号型空载荷
+  // {}——渲染层收到后重拉 listRecentWorkspaces（不带列表载荷，避免与重拉竞态）；桌面/网页
+  // 渲染层同代码同生效（2026-10-24 web-sync 计划 §2）。
+  WORKSPACES_CHANGED: 'workspaces:changed',
   // 自绘 FilePickerDialog 的只读文件系统元数据通道（列根/列目录/新建文件夹/查存在）；文件内容读取仍在主进程。
   FS_LIST_ROOTS: 'fs:listRoots',
   FS_LIST_DIR: 'fs:listDir',

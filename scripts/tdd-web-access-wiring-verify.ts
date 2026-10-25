@@ -41,6 +41,9 @@
 //      defaultConfig 含 webAccess 默认值。
 //   ⑬ round-008 修复钉（R1-F2/F3/F4/F7）：CONFIG_CLEAR 驱动 sync、导出窗注册点改 live 变量、
 //      push-bus webSink 转发 try 包裹、SESSION_DELETE 删库结果门控 delete 信号。
+//   ⑭ 目录历史跨端同步（2026-10-24 web-sync 计划 §2，正文节 13）：WORKSPACES_CHANGED 三处同步
+//      （ipc 常量 + preload on/off 两成员 + web-bridge 表两键）+ ADD/REMOVE 两 handler 发射
+//      （=== 2，LIST 不推）+ App.vue 订阅/注销 + SessionToolbar 打开下拉现拉兜底。
 //
 // 运行：npx tsx scripts/tdd-web-access-wiring-verify.ts（已追加 selftest-static-list.txt 尾部）
 
@@ -561,6 +564,57 @@ check('config-store defaultConfig 含 webAccess 默认值（enabled:false/port:W
   /webAccess:\s*\{\s*enabled:\s*false,\s*port:\s*WEB_ACCESS_DEFAULT_PORT,\s*allowedHosts:\s*\[\]\s*,?\s*\}/.test(configStoreSrc));
 check('config-store 从 shared/web-access-protocol 导入 WEB_ACCESS_DEFAULT_PORT',
   /import\s*\{[^}]*WEB_ACCESS_DEFAULT_PORT[^}]*\}\s*from\s*'\.\.\/\.\.\/shared\/web-access-protocol'/.test(configStoreSrc));
+
+// ── ⑬ P2 目录历史跨端同步（docs/plans/2026-10-24-web-sync-directory-naming-export-plan.md §2）：
+//   WORKSPACES_CHANGED 新推送通道三处同步（IPC_CHANNELS 常量 + ClaudeLinkAPI on/off 两成员 +
+//   WEB_CHANNEL_TABLE 两键）+ ipc-handlers.ts ADD/REMOVE 两 handler 成功返回前发射（=== 2，LIST
+//   不推）+ App.vue 全局订阅/注销 + SessionToolbar 打开下拉现拉兜底。对齐 §7 SESSIONS_CHANGED 写法。
+console.log('=== 13) WORKSPACES_CHANGED：三处同步 + 两处发射 + App.vue/SessionToolbar 消费 ===');
+const sessionToolbar = read('src/renderer/components/chat/SessionToolbar.vue');
+check("IPC_CHANNELS 含 WORKSPACES_CHANGED: 'workspaces:changed'",
+  ipcTypes.includes("WORKSPACES_CHANGED: 'workspaces:changed'"));
+check('ClaudeLinkAPI 含 onWorkspacesChanged 成员（无参回调 → 反注册函数）',
+  /onWorkspacesChanged:\s*\(callback:\s*\(\)\s*=>\s*void\)\s*=>\s*\(\)\s*=>\s*void;/.test(preloadApi));
+check('ClaudeLinkAPI 含 removeWorkspacesListener 成员',
+  /removeWorkspacesListener:\s*\(\)\s*=>\s*void;/.test(preloadApi));
+check('preload/api.ts 实现 onWorkspacesChanged（ipcRenderer.on/off 模式照 onProvidersChanged）',
+  /onWorkspacesChanged:\s*\(callback\)\s*=>\s*\{\s*const listener = \(\) => callback\(\);\s*ipcRenderer\.on\(IPC_CHANNELS\.WORKSPACES_CHANGED,\s*listener\);\s*return \(\) => ipcRenderer\.off\(IPC_CHANNELS\.WORKSPACES_CHANGED,\s*listener\);/.test(preloadApi.replace(/\r?\n/g, ' ')));
+check('preload/api.ts 实现 removeWorkspacesListener（removeAllListeners 形态）',
+  preloadApi.includes('removeWorkspacesListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.WORKSPACES_CHANGED)'));
+check('WEB_CHANNEL_TABLE 含 onWorkspacesChanged / removeWorkspacesListener 两键（键集对等由 §11.2 钉死）',
+  webBridge.includes('onWorkspacesChanged: IPC_CHANNELS.WORKSPACES_CHANGED') &&
+  webBridge.includes('removeWorkspacesListener: IPC_CHANNELS.WORKSPACES_CHANGED'));
+check('ipc-handlers.ts 两处 pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED 发射（ADD/REMOVE；LIST 不推）',
+  countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') === 2,
+  `实际 ${countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED')}`);
+{
+  const addStart = handlers.indexOf('regInvokeHandler(IPC_CHANNELS.WORKSPACE_ADD_RECENT');
+  const addEnd = handlers.indexOf('regInvokeHandler(', addStart + 10);
+  const addSeg = addStart > -1 && addEnd > addStart ? handlers.slice(addStart, addEnd) : '';
+  check('WORKSPACE_ADD_RECENT：WORKSPACES_CHANGED 发射位于 addRecentWorkspace(dir) 之后（成功返回前）',
+    addSeg.includes('pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') &&
+    addSeg.indexOf('addRecentWorkspace(dir)') > -1 &&
+    addSeg.indexOf('pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') > addSeg.indexOf('addRecentWorkspace(dir)'));
+  const rmStart = handlers.indexOf('regInvokeHandler(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT');
+  const rmEnd = handlers.indexOf('regInvokeHandler(', rmStart + 10);
+  const rmSeg = rmStart > -1 && rmEnd > rmStart ? handlers.slice(rmStart, rmEnd) : '';
+  check('WORKSPACE_REMOVE_RECENT：WORKSPACES_CHANGED 发射位于 removeRecentWorkspace(dir) 之后（删不存在目录仍推送，无害）',
+    rmSeg.includes('pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') &&
+    rmSeg.indexOf('removeRecentWorkspace(dir)') > -1 &&
+    rmSeg.indexOf('pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') > rmSeg.indexOf('removeRecentWorkspace(dir)'));
+}
+check('App.vue 全局订阅 onWorkspacesChanged → sessionStore.loadRecentWorkspaces（信号型重拉，幂等）',
+  /stopWorkspacesChanged\s*=\s*window\.claudeLink\.onWorkspacesChanged\(\(\)\s*=>\s*\{\s*void sessionStore\.loadRecentWorkspaces\(\);/.test(appVue.replace(/\r?\n/g, ' ')));
+check('App.vue onBeforeUnmount 注销 stopWorkspacesChanged',
+  /if\s*\(stopWorkspacesChanged\)\s*stopWorkspacesChanged\(\);/.test(appVue) &&
+  appVue.indexOf('onBeforeUnmount(') < appVue.indexOf('stopWorkspacesChanged();'));
+check('SessionToolbar 目录按钮改 toggleWorkspaceMenu()（裸布尔翻转字面移除）',
+  sessionToolbar.includes('@click="toggleWorkspaceMenu()"') &&
+  !sessionToolbar.includes('@click="showWorkspaceMenu = !showWorkspaceMenu"'));
+check('SessionToolbar toggleWorkspaceMenu：打开时现拉 loadRecentWorkspaces（断线错过推送的兜底）',
+  /function toggleWorkspaceMenu\(\): void \{\s*showWorkspaceMenu\.value = !showWorkspaceMenu\.value;\s*(?:\/\/[^\r\n]*\s*)?if \(showWorkspaceMenu\.value\) void sessionStore\.loadRecentWorkspaces\(\);/.test(sessionToolbar));
+check('ClaudeLinkAPI 成员集含 onWorkspacesChanged / removeWorkspacesListener（apiMembers 抽取闭环，下限断言 ≥100 不变）',
+  apiMembers.includes('onWorkspacesChanged') && apiMembers.includes('removeWorkspacesListener') && apiMembers.length >= 100);
 
 console.log(`\n[P2+P3+P4+P5 接线契约] 通过 ${pass} / 失败 ${fail}`);
 if (fail > 0) process.exit(1);

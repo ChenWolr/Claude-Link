@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（108 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（110 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -220,6 +220,9 @@ export interface ClaudeLinkAPI {
   listRecentWorkspaces: () => Promise<string[]>;
   addRecentWorkspace: (dir: string) => Promise<string[]>;
   removeRecentWorkspace: (dir: string) => Promise<string[]>;
+  // P2 目录历史跨端同步：WORKSPACES_CHANGED 信号订阅（空载荷 {}，收到后重拉 listRecentWorkspaces）。
+  onWorkspacesChanged: (callback: () => void) => () => void;
+  removeWorkspacesListener: () => void;
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，list 只回掩码）。
   listProviders: () => Promise<ProviderLibrarySnapshot>;
   saveProvider: (input: ProviderSaveInput) => Promise<ProviderProfileView>;
@@ -393,6 +396,13 @@ export function createApi(): ClaudeLinkAPI {
     listRecentWorkspaces: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_LIST_RECENT) as Promise<string[]>,
     addRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_ADD_RECENT, dir) as Promise<string[]>,
     removeRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, dir) as Promise<string[]>,
+    // P2 目录历史跨端同步（on* 模式照抄 onProvidersChanged）。
+    onWorkspacesChanged: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on(IPC_CHANNELS.WORKSPACES_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.WORKSPACES_CHANGED, listener);
+    },
+    removeWorkspacesListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.WORKSPACES_CHANGED),
     listProviders: () => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_LIST) as Promise<ProviderLibrarySnapshot>,
     saveProvider: (input) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_SAVE, input) as Promise<ProviderProfileView>,
     deleteProvider: (providerId) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_DELETE, providerId),
