@@ -13,7 +13,7 @@ import type { WebContents } from 'electron';
 import { IPC_CHANNELS, THEME_PALETTES } from '../../shared/constants';
 // 「网页访问（局域网）」P2：invoke 注册表（START/CANCEL 入注册表）+ 推送总线（主窗推送收口）。
 import { regInvokeHandler } from '../ipc-registry';
-import { pushToMainWindow } from './push-bus';
+import { pushToMainWindow, pushToWindow } from './push-bus';
 import {
   JPEG_PAGE_MAX_BYTES,
   SNAPSHOT_TOTAL_BYTES_MAX,
@@ -168,9 +168,8 @@ export async function requestExportTarget(
     pendingExportTargets.set(jobId, { resolve, timer, onClosed, win });
     win.once('closed', onClosed);
     try {
-      // P2（web-access 推送总线）：EXPORT_REQUEST_TARGET 等价收口——桌面 origin 即主窗口行为
-      // 不变；网页端发起的导出（P3）目标请求对已认证连接广播。
-      pushToMainWindow(IPC_CHANNELS.EXPORT_REQUEST_TARGET, req);
+      // 桌面发起只在桌面主窗弹选择器，不再广播到网页端（2026-10-24 用户问题5补丁）。
+      pushToWindow(win, IPC_CHANNELS.EXPORT_REQUEST_TARGET, req);
     } catch {
       // 发送失败（renderer 已死等）：按窗口关闭收口。
       settleExportTarget(jobId, { kind: 'cancel', reason: 'window-closed' });

@@ -45,3 +45,12 @@ export function pushToMainWindow(channel: string, ...args: unknown[]): void {
     /* sink 侧序列化/发送失败不得影响主窗口推送与业务链 */
   }
 }
+
+/** P5b（导出目标协商双端独立）：指定窗口单播——只发该窗口，不转发 webSink（origin 单播语义，
+ * 与 pushToMainWindow 的「主窗 + web 全量广播」相对，谁发起谁应答的通道专用）。
+ * 与 pushToMainWindow 的差异是承重设计：不判空/不判销毁/不吞噬发送异常（纯直通）——调用方
+ * （如 requestExportTarget）依赖 send 抛错触发自身 catch 收口（window-closed settle），
+ * 本函数若吞错会使 pending 协商挂到超时。 */
+export function pushToWindow(win: BrowserWindow, channel: string, ...args: unknown[]): void {
+  win.webContents.send(channel, ...args);
+}

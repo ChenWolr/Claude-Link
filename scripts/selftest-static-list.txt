@@ -250,3 +250,4 @@ scripts/tdd-skill-refresh-verify.ts
 scripts/tdd-web-reopen-runtime-verify.ts
 scripts/tdd-session-name-source-verify.ts
 scripts/tdd-export-web-download-verify.ts
+scripts/tdd-export-target-unicast-verify.ts

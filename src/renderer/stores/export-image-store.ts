@@ -37,6 +37,8 @@ interface ExportImageState {
   percent: number;
   message: string;
   _timer: ReturnType<typeof setTimeout> | null;
+  // P5b 双端互不弹窗/互不干扰：本端是否发起了当前导出（$reset 复位为 false）。
+  localStarted: boolean;
 }
 
 export const useExportImageStore = defineStore('export-image', {
@@ -52,6 +54,7 @@ export const useExportImageStore = defineStore('export-image', {
     percent: 0,
     message: '',
     _timer: null,
+    localStarted: false,
   }),
   getters: {
     running(state): boolean {
@@ -65,8 +68,14 @@ export const useExportImageStore = defineStore('export-image', {
     },
   },
   actions: {
-    /** 应用一条进度事件：迟到 jobId 丢弃；终态保持 1.2s 后复位。 */
+    /** 应用一条进度事件：未发起导出的端不收养他端 job；迟到 jobId 丢弃；终态保持 1.2s 后复位。 */
     applyProgress(payload: ExportImageProgressPayload): void {
+      // 未发起导出的端不再显示另一端发起的导出进度/完成文案（双端独立原则）。
+      if (!this.localStarted) return;
+      // P5b 审查 F1 窗 a：他端 job 终态迟到竞态（本端已置位、自端首条进度未达的窗口）不收养。
+      // 自端首事件恒为 preparing 非终态；自端「首事件即终态」（导出窗加载失败等）由 invoke
+      // 失败分支置 error UI 兜底，此处丢弃不损 UX。
+      if (!this.jobId && TERMINAL_PHASES.includes(payload.phase)) return;
       if (this.jobId && payload.jobId !== this.jobId) return; // 迟到事件丢弃
       this.jobId = payload.jobId;
       this.sessionId = payload.sessionId;
@@ -106,6 +115,8 @@ export const useExportImageStore = defineStore('export-image', {
       // 到点把本 job 刚置的 preparing 态抹掉（遮罩闪烁消失）。新 start 必须先取消遗留定时器。
       if (this._timer) clearTimeout(this._timer);
       this.$reset();
+      // 本端发起标记（$reset 复位为 false，重复 start 语义自洽）：applyProgress 只收养本端发起的 job。
+      this.localStarted = true;
       this.phase = 'preparing';
       this.sessionId = sessionId;
       this.sessionName = sessionName;
@@ -118,12 +129,16 @@ export const useExportImageStore = defineStore('export-image', {
         pendingWebNonce = nonce;
         const r = await window.claudeLink.startImageExport(sessionId, format, isWebMode(), isWebMode() ? nonce : undefined);
         if (!r.ok) {
+          // P5b 审查 F1 窗 b：失败即回置——error 驻留 1.2s 内不收养他端 job。
+          this.localStarted = false;
           this.phase = 'error';
           this.message = r.message;
           this.scheduleReset();
         }
         // 成功：jobId 由第一条进度事件（preparing/planning）回填。
       } catch (e) {
+        // P5b 审查 F1 窗 b：失败即回置——error 驻留 1.2s 内不收养他端 job。
+        this.localStarted = false;
         this.phase = 'error';
         this.message = String((e as Error)?.message || e);
         this.scheduleReset();
