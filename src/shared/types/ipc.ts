@@ -143,6 +143,12 @@ export const IPC_CHANNELS = {
   CHANGES_DIFF: 'changes:diff',
   // 点文件「打开」：shell.openPath 用系统默认程序打开，失败时 Windows 降级弹「打开方式」对话框（仓库根解析 + 越界守卫，绝不 resolve(workingDir, rel)）。
   CHANGES_OPEN_FILE: 'changes:openFile',
+  // 轮末文件改动（turn-diff，docs/plans/2026-10-26-turn-file-changes-diff-and-web-changes-fix-plan §3.4）：
+  // LIST=按会话聚合每轮每文件轻量摘要（轮区间由主进程从 messages 表推导——主流程 user 消息分界，
+  // plan-notes N2）；FILE_PATCH=单文件懒加载 patch（渲染层显式传 turnStart/endMessageId，rowid 转区间；
+  // 'unavailable' 回空 patch 不抛错）。只读、无副作用、不新推 WS 事件。
+  TURN_DIFF_LIST_SUMMARIES: 'turnDiff:listSummaries',
+  TURN_DIFF_FILE_PATCH: 'turnDiff:filePatch',
   TASK_ADD: 'task:add',
   TASK_REMOVE: 'task:remove',
   TASK_GET_ALL: 'task:getAll',

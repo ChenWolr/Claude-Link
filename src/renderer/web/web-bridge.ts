@@ -1,6 +1,6 @@
 // web-bridge.ts
 // 「网页访问（局域网）」P4：渲染层 web 桥（docs/plans/2026-10-20-web-access-plan.md §3-P4）。
-// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 108 方法
+// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 113 方法
 // 代理到主进程 WS RPC（invoke 分发 + 全量事件广播客户端本地过滤），并负责：
 //   - token 读取：location.hash #token=（扫码/复制链接入口）→ localStorage.clWebToken →
 //     history.replaceState 清除地址栏 hash（token 不进任何 HTTP 请求行，仅 WS 升级 query）；
@@ -122,6 +122,10 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   listChanges: IPC_CHANNELS.CHANGES_LIST,
   getChangeDiff: IPC_CHANNELS.CHANGES_DIFF,
   openChangeFile: IPC_CHANNELS.CHANGES_OPEN_FILE,
+  // 轮末文件改动（turn-diff）：摘要列表 + 单文件懒加载 patch（invoke 通道；键集完备性契约由
+  // tdd-web-access-wiring-verify §11.2 钉死，网页版与桌面同能力）。
+  listTurnDiffSummaries: IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES,
+  getTurnFilePatch: IPC_CHANNELS.TURN_DIFF_FILE_PATCH,
   addTask: IPC_CHANNELS.TASK_ADD,
   removeTask: IPC_CHANNELS.TASK_REMOVE,
   readTaskOutput: IPC_CHANNELS.TASK_OUTPUT_READ,
@@ -542,6 +546,35 @@ async function runRealignSequence(): Promise<void> {
     useUpdateStore().applyState(info.state);
   } catch {
     // 对齐失败不致命
+  }
+  // P6-R1：对齐序列收口即通知（放在 try/catch 之后——部分对齐步骤失败被上方兜底吞掉时，
+  // 重连本身已成立，changes 强制重拉是保守自愈，不因部分失败而豁免）。
+  notifyRealigned();
+}
+
+// ── 重连对齐完成回调（P6-R1：changes-store 断线自愈挂钩）──
+
+/** 已注册的重连对齐回调（Set 保序；模块级，与订阅/待决表同生命周期——跨重连存活）。 */
+const realignedCallbacks = new Set<() => void>();
+
+/** P6-R1：注册「重连对齐序列收口」回调（changes-store 借此在断线重连后强制重拉当前会话
+ *  改动）。返回解绑函数；通知由 notifyRealigned 在 runRealignSequence 收尾依次发出。 */
+export function onRealigned(cb: () => void): () => void {
+  realignedCallbacks.add(cb);
+  return () => {
+    realignedCallbacks.delete(cb);
+  };
+}
+
+/** 依次通知已注册回调：每个回调独立 try 包裹——单个异常不阻断后续（重连风暴下多次通知
+ *  即多次重拉，invoke 轻量可接受）。导出仅供契约脚本最小桩验证调用序。 */
+export function notifyRealigned(): void {
+  for (const cb of [...realignedCallbacks]) {
+    try {
+      cb();
+    } catch {
+      // 单个回调异常不阻断后续通知
+    }
   }
 }
 

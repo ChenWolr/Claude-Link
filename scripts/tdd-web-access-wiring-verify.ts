@@ -6,7 +6,7 @@
 // P5 再增量。全部为纯 node:assert/计数 check 的源码文本/结构断言，不 import Electron。
 //
 // 覆盖：
-//   ① ipc-handlers.ts：ipcMain.handle( 字面归零；regInvokeHandler( === 84（计算式见断言注释）；
+//   ① ipc-handlers.ts：ipcMain.handle( 字面归零；regInvokeHandler( 计数以 1) 节计算式断言为准（不在此硬编码）；
 //   ② export-image-manager.ts：ipcMain.handle( === 7（EXPORT_RENDER_* 裸注册，天然不可被网页
 //      调用）；regInvokeHandler( === 2（EXPORT_IMAGE_START/CANCEL 经注册表）；
 //   ③ src/main/** 全目录 webContents.send(IPC_CHANNELS. 字面仅出现在 push-bus.ts
@@ -44,6 +44,9 @@
 //   ⑭ 目录历史跨端同步（2026-10-24 web-sync 计划 §2，正文节 13）：WORKSPACES_CHANGED 三处同步
 //      （ipc 常量 + preload on/off 两成员 + web-bridge 表两键）+ ADD/REMOVE 两 handler 发射
 //      （=== 2，LIST 不推）+ App.vue 订阅/注销 + SessionToolbar 打开下拉现拉兜底。
+//   ⑮ 轮末文件改动两通道（2026-10-26-turn-file-changes 计划 §3.4）：TURN_DIFF_LIST_SUMMARIES /
+//      TURN_DIFF_FILE_PATCH 常量 + ClaudeLinkAPI 两成员 + preload 实现 + WEB_CHANNEL_TABLE 两键
+//      + ipc-handlers 两 handler 注册（键集对等由 §11.2 双向断言自动覆盖新键）。
 //
 // 运行：npx tsx scripts/tdd-web-access-wiring-verify.ts（已追加 selftest-static-list.txt 尾部）
 
@@ -82,15 +85,16 @@ const preloadApi = read('src/preload/api.ts');
 
 // ── ① ipc-handlers.ts：注册表全量替换 ──
 console.log('=== 1) ipc-handlers.ts：ipcMain.handle( → regInvokeHandler( 全量替换 ===');
-// 计算式：regInvokeHandler( === 87 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
+// 计算式：regInvokeHandler( === 89 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
 // §3-P3-4）+ SA-2 回合投影只读查询两通道 CHAT_RUNTIME_SNAPSHOT/CHAT_RUNNING_OVERVIEW
 //（计划 2026-10-21「回合投影 + 标题质量」）+ P2 会话置顶 SESSION_SET_PINNED（计划 2026-10-22
 // six-issues 点 S4）+ P6 Skill 刷新 COMMANDS_REFRESH_GLOBAL（同计划点 S5，方案 C 同步条）
-// + P4 会话命名兜底 SESSION_SET_FALLBACK_NAME（计划 2026-10-24-web-sync §3.2.1-6）；
+// + P4 会话命名兜底 SESSION_SET_FALLBACK_NAME（计划 2026-10-24-web-sync §3.2.1-6）
+// + 轮末文件改动两通道 TURN_DIFF_*（计划 2026-10-26-turn-file-changes §3.4）；
 // ipcMain.handle( === 0：注释行无该带括号字面。
 check('ipc-handlers.ts ipcMain.handle( 出现次数 === 0', countOccurrences(handlers, 'ipcMain.handle(') === 0,
   `实际 ${countOccurrences(handlers, 'ipcMain.handle(')}`);
-check('ipc-handlers.ts regInvokeHandler( 出现次数 === 87', countOccurrences(handlers, 'regInvokeHandler(') === 87,
+check('ipc-handlers.ts regInvokeHandler( 出现次数 === 89', countOccurrences(handlers, 'regInvokeHandler(') === 89,
   `实际 ${countOccurrences(handlers, 'regInvokeHandler(')}`);
 check('ipc-handlers.ts 从 ./ipc-registry 导入 regInvokeHandler',
   /import\s*\{[^}]*regInvokeHandler[^}]*\}\s*from\s*'\.\/ipc-registry'/.test(handlers));
@@ -389,8 +393,9 @@ check('installWebBridge 引导位于 createApp(App) mount 之前',
 
 // 11.2 键集对等契约：WEB_CHANNEL_TABLE 键集 === ClaudeLinkAPI 接口成员集（多键/少键均 fail）
 // P2 会话置顶（点 S4）新通道 SESSION_SET_PINNED 五处一致性由下方键集对等（表键 ↔ 接口成员）
-// + 注册计数 86 覆盖；此处再显式钉三字面（ipc 常量 / 表项 / handler 注册）防键集对等被并行
-// 改动绕过。
+// + 注册计数断言覆盖（计数以 1) 节 regInvokeHandler( === 89 的计算式断言为准，此处不重复
+// 硬编码，防通道增减后再陈旧）；此处再显式钉三字面（ipc 常量 / 表项 / handler 注册）防键集
+// 对等被并行改动绕过。
 check("IPC_CHANNELS 含 SESSION_SET_PINNED: 'session:setPinned'", ipcConst.includes("SESSION_SET_PINNED: 'session:setPinned'"));
 check('WEB_CHANNEL_TABLE 含 setSessionPinned 表项', webBridge.includes('setSessionPinned: IPC_CHANNELS.SESSION_SET_PINNED'));
 check('ipc-handlers 注册 SESSION_SET_PINNED handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.SESSION_SET_PINNED'));
@@ -618,6 +623,25 @@ check('SessionToolbar toggleWorkspaceMenu：打开时现拉 loadRecentWorkspaces
   /function toggleWorkspaceMenu\(\): void \{\s*showWorkspaceMenu\.value = !showWorkspaceMenu\.value;\s*(?:\/\/[^\r\n]*\s*)?if \(showWorkspaceMenu\.value\) void sessionStore\.loadRecentWorkspaces\(\);/.test(sessionToolbar));
 check('ClaudeLinkAPI 成员集含 onWorkspacesChanged / removeWorkspacesListener（apiMembers 抽取闭环，下限断言 ≥100 不变）',
   apiMembers.includes('onWorkspacesChanged') && apiMembers.includes('removeWorkspacesListener') && apiMembers.length >= 100);
+
+// ── ⑮ 轮末文件改动两通道（docs/plans/2026-10-26-turn-file-changes-diff-and-web-changes-fix-plan §3.4）──
+console.log('=== 15) TURN_DIFF_*：轮末文件改动两通道三处同步 ===');
+check("IPC_CHANNELS 含 TURN_DIFF_LIST_SUMMARIES: 'turnDiff:listSummaries'",
+  ipcTypes.includes("TURN_DIFF_LIST_SUMMARIES: 'turnDiff:listSummaries'"));
+check("IPC_CHANNELS 含 TURN_DIFF_FILE_PATCH: 'turnDiff:filePatch'",
+  ipcTypes.includes("TURN_DIFF_FILE_PATCH: 'turnDiff:filePatch'"));
+check('ClaudeLinkAPI 含 listTurnDiffSummaries / getTurnFilePatch 成员',
+  /listTurnDiffSummaries:\s*\(sessionId:\s*string\)\s*=>\s*Promise<import\('\.\.\/shared\/types\/turn-file-diff'\)\.TurnFileDiffTurnSummary\[\]>;/.test(preloadApi) &&
+  /getTurnFilePatch:\s*\(sessionId:\s*string,\s*turnStartMessageId:\s*string,\s*endMessageId:\s*string\s*\|\s*null,\s*path:\s*string\)/.test(preloadApi));
+check('preload 实现两方法（invoke 对应通道）',
+  preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES, sessionId)') &&
+  preloadApi.includes('IPC_CHANNELS.TURN_DIFF_FILE_PATCH, sessionId, turnStartMessageId, endMessageId, path'));
+check('WEB_CHANNEL_TABLE 含 listTurnDiffSummaries / getTurnFilePatch 两键（键集对等由 §11.2 双向断言自动覆盖）',
+  webBridge.includes('listTurnDiffSummaries: IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES') &&
+  webBridge.includes('getTurnFilePatch: IPC_CHANNELS.TURN_DIFF_FILE_PATCH'));
+check('ipc-handlers 注册 TURN_DIFF 两通道（regInvokeHandler 形态）',
+  handlers.includes('regInvokeHandler(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES') &&
+  handlers.includes('regInvokeHandler(IPC_CHANNELS.TURN_DIFF_FILE_PATCH'));
 
 console.log(`\n[P2+P3+P4+P5 接线契约] 通过 ${pass} / 失败 ${fail}`);
 if (fail > 0) process.exit(1);

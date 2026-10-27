@@ -43,6 +43,8 @@ import { pushToMainWindow } from './push-bus';
 //（noteTurnEvent），回合计时由发射点显式驱动（noteTurnStarted/noteTurnEnded + turn_started/
 // turn_ended 伴生信号；R3（round-001）起 reasoning_replay 重发路径也在本文件发射起点）。纯内存不落库。
 import { noteTurnStarted, noteTurnEvent, noteTurnEnded, getSnapshot, clearSession } from './turn-projection';
+// P3（turn-file-changes 计划 §4-P3）：checkpoint 记录器旁路（写文件工具 after 快照落库）。
+import { noteCheckpointEvent, disposeSession } from './turn-diff-checkpoint';
 import { convertResultMessage } from '../../shared/result-converter';
 import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
@@ -628,6 +630,7 @@ export function markSessionDeleted(sessionId: string): void {
   apiRetryStates.delete(sessionId);
   sessionThinkingTokenThrottle.delete(sessionId);
   clearSession(sessionId); // SA-1（turn-projection）：回合流式投影随会话删除收口清理
+  disposeSession(sessionId); // P3（turn-file-changes）：checkpoint 记录器内存暂存随会话删除收口清理（DB 行靠 sessions CASCADE）
 }
 /** P1-6：已标记删除的会话拒绝复活（markSessionActive 不再登记、返回 false）。 */
 export function isSessionMarkedDeleted(sessionId: string): boolean {
@@ -1347,6 +1350,13 @@ function forwardEvent(
     noteTurnEvent(sessionId, event);
   } catch {
     // 投影是可丢缓存：异常静默忽略
+  }
+  // P3（turn-file-changes 计划 §4-P3）：checkpoint 记录器旁路——写文件类工具的 tool_use /
+  // tool_result 事件喂给记录器（内部全 try/catch 吞错；此处再独立 try 隔离，异常不得阻塞转发/落库链）。
+  try {
+    noteCheckpointEvent(sessionId, event);
+  } catch {
+    // checkpoint 可丢：异常静默忽略
   }
   try {
     persistCliEvent(sessionId, event);

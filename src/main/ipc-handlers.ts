@@ -91,6 +91,8 @@ import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { getPlanState as getClaudePlanState } from './database/repositories/claude-plan-repo';
 import { listChanges, getChangeDiff, openChangeFile } from './modules/changes-panel';
+// 轮末文件改动（turn-diff，2026-10-26 计划 §4-P4）：摘要聚合与单文件 patch 两只读通道的实现模块。
+import * as turnDiff from './modules/turn-diff';
 import { registerExportImageHandlers, resolveExportTarget } from './modules/export-image-manager';
 import { detectDirectImageFormat, validateChatSendPayloadShape, ATTACHMENT_READ_GUARD_BYTES, MAX_FILE_BYTES, formatBytes } from './modules/attachment-policy';
 import {
@@ -235,6 +237,38 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   regInvokeHandler(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) => {
     if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
     return openChangeFile(workingDir, p);
+  });
+
+  // 轮末文件改动（turn-diff，2026-10-26 计划 §4-P4）：只读查询两通道（web 经注册表自动可达）。
+  // N2 裁定：LIST 的轮区间由主进程从 messages 表推导（主流程 user 消息分界），渲染层只传 sessionId；
+  // FILE_PATCH 由渲染层显式传 turnStart/endMessageId（rowid 转区间）。handler 内 try/catch 兜底，
+  // 异常降级为空摘要 / unavailable，不向渲染层抛未捕获异常。
+  regInvokeHandler(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES, async (_event, sessionId: unknown) => {
+    try {
+      if (typeof sessionId !== 'string' || !sessionId.trim()) return [];
+      return turnDiff.listSummaries(sessionId);
+    } catch (e) {
+      logger.warn(`[turnDiff:listSummaries] 聚合失败：${e instanceof Error ? e.message : String(e)}`);
+      return [];
+    }
+  });
+  regInvokeHandler(IPC_CHANNELS.TURN_DIFF_FILE_PATCH, async (_event, sessionId: unknown, turnStartMessageId: unknown, endMessageId: unknown, path: unknown) => {
+    try {
+      // 参数校验：sessionId/turnStartMessageId/path 须非空字符串；endMessageId 合法形态为
+      // string | null（null = 上界 +∞）。非法一律回 unavailable，不抛错（风格对齐 MESSAGE_GET_BY_SESSION）。
+      if (
+        typeof sessionId !== 'string' || !sessionId.trim()
+        || typeof turnStartMessageId !== 'string' || !turnStartMessageId.trim()
+        || (endMessageId !== null && typeof endMessageId !== 'string')
+        || typeof path !== 'string' || !path
+      ) {
+        return { mode: 'unavailable', patch: '', truncated: false };
+      }
+      return turnDiff.getPatch(sessionId, turnStartMessageId, endMessageId, path);
+    } catch (e) {
+      logger.warn(`[turnDiff:filePatch] 取 patch 失败：${e instanceof Error ? e.message : String(e)}`);
+      return { mode: 'unavailable', patch: '', truncated: false };
+    }
   });
 
   // Config
