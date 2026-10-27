@@ -84,14 +84,17 @@ const MSG_LONG = '请写一篇约3000字的中文长文,主题为「HTTP协议�
 const MSG_TITLE = '帮我写一个快速排序的 Python 实现并解释思路'; // C4 首条 >8 字
 const MSG_SHORT = '你好'; // C6 短输入（≤8 字，短路径直写标题不发 LLM）
 
-// ── 超时常量（waitFor 默认 250ms 轮询；C4/C6 标题轮询 ≤60s；其余用例 20-30s 上限）──
+// ── 超时常量（waitFor 默认 250ms 轮询；C4/C6 标题轮询 ≤60s；C2/C4 回合终态等待 300s（R-1：
+//    回合耗时受上游 LLM 延迟支配，见 TURN_WAIT_TIMEOUT_S 注）；其余用例 20-30s 上限）──
 const WAIT_INTERVAL_MS = 250;
 const TOTAL_TIMEOUT_MS = 900_000; // 全链兜底（C1~C6 含两次 LLM 回合 + 60s×2 标题轮询）
 const WS_CONNECT_TIMEOUT_MS = 10_000;
 const CDP_CALL_TIMEOUT_MS = 30_000;
 const TIMER_SAMPLE_GAP_MS = 1_300; // 计时两次采样间隔 ≥1.2s（取 1.3s）
 const TITLE_POLL_TIMEOUT_MS = 60_000; // C4/C6 标题轮询上限
-const TURN_WAIT_TIMEOUT_S = 120; // C4 回合终态等待上限
+// R-1（round-003）：回合自然终态耗时受上游 LLM 延迟支配（实测慢回合 durationMs=141262ms≈141s），
+// C4 终态帧等待预算 120→300s（覆盖实测慢上游 ×2 余量）；仅耗时预算放宽，功能断言不变。
+const TURN_WAIT_TIMEOUT_S = 300; // C4 回合终态帧等待上限（回合耗时受上游 LLM 延迟支配，见上）
 
 // ── 参数与本机网卡事实程序派生（F10 脱敏：不硬编码任何本机 IP/绝对路径）──
 const argOf = (k, d) => {
@@ -536,7 +539,9 @@ async function main() {
   try {
     await newSessionOn(pageA);
     c1.startSeq = frameSeq;
-    // R(round-003): 42 短回合实测最快 4.9s，TurnTimer 两采样窗需 ≥5s 存活回合，改用长文消息保证前提，断言不变
+    // R-1（round-003）：C1 前提=MSG_LONG 长文回合——短回合（42）实测最快 ~5s 即自然终态，
+    // 撑不满 TurnTimer 双采样窗（≥5s）；长文回合存活期受上游 LLM 延迟支配（实测 ≈141s），
+    // 后续等终态预算按「覆盖慢上游 ×2」口径取 300s（C2/C4），断言不变。
     await sendMessage(pageA, MSG_LONG);
     c1.sid = await waitMaterialized(pageA, 'C1');
     log(`  C1 会话已物化 sid=${c1.sid}，B 进入围观位`);
@@ -581,9 +586,11 @@ async function main() {
     record('C2', 'SKIP', 'C1 未通过，无进行中回合可跨端中断（依赖 C1 回合）');
   } else {
     try {
-      // 确定性前置（复跑 2 根因：C1 的 42 短回合 ~10s 即自然终态，中断等待预算烧完时回合早已终态）：
-      // 先无条件等 C1 回合自然终态（~10-30s；若已结束立即返回），再发长任务保证中断窗口充足。
-      await waitFrame('C1 短回合自然终态', c1.sid, (ev) => isTerminalEvent(ev) || ev?.type === 'turn_ended', 90, c1.startSeq);
+      // 确定性前置（R-1 修正，round-003）：C1 为 MSG_LONG 长文回合，自然终态耗时受上游 LLM
+      // 延迟支配（实测 durationMs=141262ms≈141s；旧注释「42 短回合 ~10s」系 C1 改 MSG_LONG
+      // 前的口径，与前提失配致 90s 预算必超——run9/run10 复现）。预算 300s=覆盖实测慢上游
+      // ×2 余量；若回合已结束则立即返回，随后再发长任务保证中断窗口充足。
+      await waitFrame('C1 短回合自然终态', c1.sid, (ev) => isTerminalEvent(ev) || ev?.type === 'turn_ended', 300, c1.startSeq);
       const seqMark = frameSeq;
       await sendMessage(pageA, MSG_LONG);
       await waitFrame('C2 长任务 turn_started 帧', c1.sid, (ev) => ev?.type === 'turn_started', 30, seqMark);
@@ -657,6 +664,10 @@ async function main() {
       let branchNote;
       if (running) {
         // ① 回合仍 running：TurnTimer 恢复且计时递增（两次采样差>0）
+        // R-1 核查结论（round-003）：此 15s 为「刷新后运行态计时器 DOM 恢复」等待，非回合耗时
+        // 预算——回合存活期由 C2 中断链终结，常规流 C3 走终态分支，此分支仅在 C2 中断失败时
+        // 触达；run9/run10 此处超时系 C2 前置失败连带（回合在窗口内外均存活、DOM 未恢复），
+        // 与上游 LLM 延迟无耦合，故不随 MSG_LONG 前提调整，依据留档 round-003 报告。
         await waitFor('A 运行态 TurnTimer 恢复', () => pageA.evalOk(runningTimerExpr), 15);
         const t1raw = await pageA.eval(readTimerExpr);
         const t1 = parseDurationText(t1raw);
