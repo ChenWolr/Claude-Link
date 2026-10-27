@@ -56,8 +56,8 @@ check('自愈块含 hasCol(\'pinned_at\') 守卫 + ALTER TABLE sessions ADD COLU
 check('守卫先于 ALTER（同一块内，防重复加列抛错）',
   migrations.indexOf("hasCol('pinned_at')") > -1 &&
   migrations.indexOf("hasCol('pinned_at')") < migrations.indexOf('ALTER TABLE sessions ADD COLUMN pinned_at INTEGER'));
-check('免升版：CURRENT_SCHEMA_VERSION 仍为 14（skill_overrides 免升版先例）',
-  /CURRENT_SCHEMA_VERSION = 14;/.test(migrations),
+check('免升版：CURRENT_SCHEMA_VERSION 仍为 15（skill_overrides 免升版先例；14→15 为 V15 落地同步，pin 本身仍免升版）',
+  /CURRENT_SCHEMA_VERSION = 15;/.test(migrations),
   `实际 ${migrations.match(/CURRENT_SCHEMA_VERSION = \d+;/)?.[0] ?? '未找到'}`);
 
 // ── ② session-repo.ts：映射 + setSessionPinned（不 bump updated_at）+ ORDER BY ──

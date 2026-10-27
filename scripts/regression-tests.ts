@@ -1541,7 +1541,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 14); // V14（bridge_bindings 解绑墓碑列）落地后同步
+  assert.equal(schemaVersion, 15); // V15（turn_file_checkpoints 回合文件快照）落地后同步
   assert.ok(sessionColumns.has('provider_override'), 'V8：迁移后须补 provider_override 列');
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
@@ -1605,7 +1605,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 14, '迁移后 schema version 须升到当前（V14 bridge_bindings 解绑墓碑列落地后=14）');
+  assert.equal(schemaVersion, 15, '迁移后 schema version 须升到当前（V15 turn_file_checkpoints 落地后=15）');
   assert.ok(sessionsColumns.has('provider_override'), 'V8：老库迁移须补 provider_override 列');
   assert.ok(allExecSql.some((sql) => sql.includes('model_override = NULL')), 'V8：须执行 model_override 别名清洗 SQL');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');
