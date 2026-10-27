@@ -252,3 +252,4 @@ scripts/tdd-session-name-source-verify.ts
 scripts/tdd-export-web-download-verify.ts
 scripts/tdd-export-target-unicast-verify.ts
 scripts/tdd-turn-file-diff-verify.ts
+scripts/tdd-changes-web-resilience-verify.ts

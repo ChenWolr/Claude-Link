@@ -16,6 +16,12 @@ export const useChangesStore = defineStore('changes', () => {
   const files = ref<ChangedFile[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  // round-002（F2）：失败语义标记——error 与 ensureDiff 共享（写入文本/位置契约钉死不动），
+  // 且 !wd 分支的「当前没有活动会话或工作目录」是提示态非失败态；面板失败横条改由本标记驱动：
+  // 仅 refresh 真实失败（reject catch / res.ok=false）置 true，成功与 !wd 分支复位 false。
+  // sessionless 标记 !wd 分支（空态三级化：显「当前没有活动会话或工作目录」而非「工作目录无改动」）。
+  const refreshFailed = ref(false);
+  const sessionless = ref(false);
   const baselineRef = ref('');
   const diffCache = ref<Record<string, ChangesDiffResult>>({});
 
@@ -53,13 +59,29 @@ export const useChangesStore = defineStore('changes', () => {
   // await 返回后若已变（期间切了会话）→ 丢弃结果，不把旧会话数据写进新会话状态。
   let sessionGen = 0;
 
-  async function refresh(invalidateDiffs = false): Promise<void> {
+  // P6-R1：refresh 直呼路径的 F-5 同源守卫状态（距上次实际发起拉取的 id/wd）。
+  // 与 watch 侧 lastWatchedId/lastWatchedWd 互补：watch 守卫防整对象替换触发会话重置，
+  // 本守卫防同 id/wd 直呼 refresh() 的冗余重拉；force / invalidateDiffs 可绕过（见 refresh 注）。
+  let lastRefreshedId: string | null | undefined = undefined;
+  let lastRefreshedWd: string | null | undefined = undefined;
+
+  async function refresh(invalidateDiffs = false, force = false): Promise<void> {
+    const id = sessionStore.activeSession?.id;
     const wd = sessionStore.activeSession?.workingDir ?? null;
+    // P6-R1：F-5 同源早退守卫（refresh 直呼路径）——距上次实际拉取 id+wd 均未变且非 force /
+    // 非 invalidateDiffs → 跳过（防冗余全量 git 扫描）；force=true 或 invalidateDiffs=true
+    //（回合结束刷新 / 重连对齐重拉 / 面板「重试」）绕过守卫强制重拉——断线窗口错过的刷新由
+    // onRealigned → refresh(true) 在此自愈。watch 侧 F-5 短路守卫（hb13-v B8）保持原位不动。
+    if (!force && !invalidateDiffs && lastRefreshedId !== undefined && id === lastRefreshedId && wd === lastRefreshedWd) return;
+    lastRefreshedId = id;
+    lastRefreshedWd = wd;
     if (!wd) {
       files.value = [];
       error.value = '当前没有活动会话或工作目录';
       baselineRef.value = '';
       diffCache.value = {};
+      refreshFailed.value = false; // round-002 F2：无会话是提示态非失败态——横条不出
+      sessionless.value = true; // round-002 F2：空态显「当前没有活动会话或工作目录」
       return;
     }
     // 抓代际：await 期间若切会话（sessionGen 自增），本次结果作废，不污染新会话状态。
@@ -76,10 +98,18 @@ export const useChangesStore = defineStore('changes', () => {
         error.value = res.message;
         baselineRef.value = '';
         diffCache.value = {};
+        refreshFailed.value = true; // round-002 F2：真实失败（明确失败结果）→ 横条
+        sessionless.value = false;
+        // round-002 F3：失败不留「已拉取」假象——重置 F-5 同源守卫，重挂载 onMounted
+        // refresh()（同 id/wd 直呼）不被守卫短路，可自愈重拉。
+        lastRefreshedId = undefined;
+        lastRefreshedWd = undefined;
       } else {
         files.value = res.files;
         baselineRef.value = res.baselineRef;
         error.value = null;
+        refreshFailed.value = false; // round-002 F2：成功复位（横条收起）
+        sessionless.value = false;
         if (invalidateDiffs) {
           // hb10 P2-8：回合结束（sending 下降沿）刷新成功=全部 diff 可能变化 → 全清缓存。
           diffCache.value = {};
@@ -92,6 +122,21 @@ export const useChangesStore = defineStore('changes', () => {
           }
           diffCache.value = preserved;
         }
+      }
+    } catch (err) {
+      // P6-R1：web 桥断线（重连退避窗口 1-15s）恰逢刷新时 listChanges reject——此前无 catch
+      // 成为 unhandled rejection，且 files 停留旧值但 error=null 时面板呈假空态「工作目录无改动」。
+      // 现补 catch：落 error 态 + **保留旧 files**（陈旧优于假空态），不重抛（调用方均为
+      // void refresh()，吞掉即消灭 unhandled rejection）。陈旧代际（期间已切会话/有更新 refresh）
+      // 不写，交给最新一次请求收口。桌面 ipcMain.invoke 无 reject 路径，本分支不触发，行为零变化。
+      if (gen === sessionGen && reqId === refreshRequestId) {
+        error.value = err instanceof Error ? err.message : '刷新改动列表失败';
+        refreshFailed.value = true; // round-002 F2：reject（传输层断线）→ 横条 + 保留旧 files
+        sessionless.value = false;
+        // round-002 F3：同 !res.ok 分支——失败重置 F-5 同源守卫，重挂载 refresh() 可自愈。
+        // 与 error 同置于陈旧代际守卫内：陈旧失败不得清掉最新一次请求已写好的守卫状态。
+        lastRefreshedId = undefined;
+        lastRefreshedWd = undefined;
       }
     } finally {
       // 仅最新一次 refresh 复位 loading，避免陈旧 refresh 提前清掉在途刷新的 spinner。
@@ -186,5 +231,19 @@ export const useChangesStore = defineStore('changes', () => {
     },
   );
 
-  return { files, loading, error, baselineRef, diffCache, changedCount, refresh, ensureDiff };
+  // P6-R1：断线重连对齐挂钩——仅网页端注册（web-bridge 安装时置 __claudeLinkWebBridge 标记，
+  // 且 main.ts boot 先 await installWebBridge 再 mount，早于任何 store 初始化，时序恒成立）。
+  // 重连对齐序列跑完 → 强制重拉当前会话改动（refresh(true)：invalidateDiffs 绕过 F-5 同源守卫，
+  // 成功后顺带全清 diff 缓存——断线期间 diff 内容可能已变化，保守重拉）。断线窗口错过的刷新
+  //（防抖刷新/切会话刷新撞上 reject）在此自愈；重连风暴下每次通知都重拉，invoke 本身轻量可接受。
+  // 桌面端无标记 → 不动态 import，web-bridge chunk 不加载，行为零变化。
+  if (typeof window !== 'undefined' && (window as any).__claudeLinkWebBridge === true) {
+    void import('../web/web-bridge')
+      .then(({ onRealigned }) => onRealigned(() => { void refresh(true); }))
+      .catch(() => {
+        // web-bridge chunk 加载失败（理论不可达）→ 放弃注册；既有刷新路径不受影响。
+      });
+  }
+
+  return { files, loading, error, baselineRef, diffCache, changedCount, refreshFailed, sessionless, refresh, ensureDiff };
 });

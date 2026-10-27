@@ -29,15 +29,29 @@ onMounted(() => {
       <h2>改动 <span class="changes__count">{{ store.changedCount }}</span></h2>
       <p v-if="baselineShort" class="changes__baseline" title="diff 对比基线">对比 HEAD {{ baselineShort }}</p>
     </div>
-    <button type="button" class="btn" :disabled="store.loading" title="重新扫描工作目录改动" @click="store.refresh()">
+    <!-- round-002 F1：force=true 绕 F-5 同源守卫——这是用户唯一的手动强制重扫入口，
+         同 id/wd 点击不得被直呼守卫短路；不 invalidateDiffs，保留 diffCache 收窄逻辑。 -->
+    <button type="button" class="btn" :disabled="store.loading" title="重新扫描工作目录改动" @click="store.refresh(false, true)">
       {{ store.loading ? '刷新中…' : '刷新' }}
     </button>
   </header>
 
-  <div v-if="store.error" class="changes__empty">{{ store.error }}</div>
-  <div v-else-if="!store.files.length && !store.loading" class="changes__empty">工作目录无改动</div>
+  <!-- P6-R1 + round-002 F2：失败横条 keyed on refreshFailed（非失败态 error——如 !wd 的
+       「无会话」提示、ensureDiff 的共享写入——不再被误渲染成「刷新失败…已保留上次列表」）；
+       「已保留上次列表」仅 files 非空（reject 保留旧列表，陈旧优于假空态）时拼接，not-ok
+       清空后不误述。「重试」refresh(true)：invalidateDiffs 绕过 F-5 同源守卫强制重拉。
+       error 写入文本与位置一律不动（既有契约，ensureDiff 兼容）。 -->
+  <div v-if="store.refreshFailed" class="changes__error">
+    <span class="changes__error-text">刷新失败：{{ store.error }}{{ store.files.length > 0 ? '，已保留上次列表' : '' }}</span>
+    <button type="button" class="btn" :disabled="store.loading" title="重新拉取改动列表" @click="store.refresh(true)">重试</button>
+  </div>
+  <!-- 空态三级化（round-002 F2）：无会话/无 wd → 「当前没有活动会话或工作目录」；
+       失败且列表空 → 横条已示错，不再叠加「工作目录无改动」假象；
+       仅非失败、非加载且确无改动才显「工作目录无改动」。 -->
+  <div v-if="store.sessionless" class="changes__empty">当前没有活动会话或工作目录</div>
+  <div v-else-if="!store.refreshFailed && !store.files.length && !store.loading" class="changes__empty">工作目录无改动</div>
 
-  <ul v-else class="changes__list">
+  <ul v-if="store.files.length" class="changes__list">
     <!-- hb10-CHG-11：万级文件截断——前 500 条 + 汇总行（列表冻结防护） -->
     <li
       v-for="f in store.files.slice(0, 500)"
@@ -124,6 +138,28 @@ onMounted(() => {
   text-align: center;
   font-size: 0.8rem;
   color: var(--color-text-muted);
+}
+
+/* P6-R1：刷新失败横条——对齐面板既有 token（--color-danger / --radius-sm / color-mix），
+   横条形态对齐 changes__baseline 等顶部信息行的紧凑密度；重试按钮复用 .btn。 */
+.changes__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 12px 6px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+}
+.changes__error-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-danger);
+  word-break: break-word;
 }
 
 .changes__list {
