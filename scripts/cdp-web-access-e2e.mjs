@@ -1,5 +1,5 @@
 // scripts/cdp-web-access-e2e.mjs
-// 「网页访问」浏览器图形级 E2E（P0-6b / 计划 §3-6b，B1-B8）。
+// 「网页访问」浏览器图形级 E2E（P0-6b / 计划 §3-6b，B1-B8；2026-10-26 增 W-changes-panel：web 端改动面板）。
 //
 // 用法（编排器/复现者手动准备环境，脚本只做断言）：
 //   1. npm run build && npx electron . --remote-debugging-port=9223   （应用运行，8790 监听）
@@ -10,12 +10,12 @@
 //   3. npm run test:cdp:web-access
 //
 // 退出协议：
-//   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）。
-//   - exit 1：任一 B1-B8 断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或 console error）。
+//   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）+ W-changes-panel PASS。
+//   - exit 1：任一 B1-B8 / W-changes-panel 断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或 console error）。
 //   - exit 2：前置条件不满足（Chrome 9224 / 应用 8790 / 配置 token 不可用）。
 //
 // 技术纪律（用户约束）：纯 CDP 原生（Input/Runtime/Network/Page），不依赖 computer-use 等 skill。
-// 证据落盘：docs/reports/web-e2e-screenshots/B*.png + 同目录 run-B1-B8.log。
+// 证据落盘：docs/reports/web-e2e-screenshots/B*.png、W-changes-panel.png + 同目录 run-B1-B8.log。
 // 敏感纪律：token 从 %APPDATA%/claude-link/claude-link-config.json 顶层键 webAccessToken 读取，
 // 一切输出（含 URL 日志）掩码为前 4 后 4。
 
@@ -495,6 +495,131 @@ async function main() {
     }
   }
 
+  // ── W-changes-panel：web 端选中带 git 改动 workingDir 的会话 → 右侧「改动」面板出现文件行 ──
+  // 放 B8 之后：不干扰 B1-B8 的导航/会话流。B7 结束时页面已在局域网 origin（B8 PASS 被导航到
+  // TS IP 时由步骤 0 拉回）。用例自造 untracked 探针文件为载体，干净树可复跑：在 workingDir
+  // （npm run 执行 cwd）写入 .e2e-changes-probe.tmp（untracked → git status 可见 → 面板出行），
+  // finally 必清不残留；写入失败（只读挂载等）退化为面板挂载 + listChanges ok:true 兜底断言。
+  currentCase = 'W-changes-panel';
+  try {
+    const exceptionsBeforeW = exceptions.length;
+    const WS_TARGET = path.resolve(process.cwd());
+    // 0) 确保在局域网 origin + 桥连接。
+    if ((await evalExpr(ws, 'location.host')) !== `${LAN_IP}:${PORT}`) {
+      await navigate(ws, urls.lan);
+      await waitFor('W 前置：页面渲染+桥连接（局域网）', () => evalOk(ws, connectedExpr), 30);
+    }
+    // 1) 确保右侧活动面板展开（AppLayout 关闭态下只有 .reopen-task-panel「队列」按钮；已开时为 null，no-op）。
+    await evalExpr(ws, `document.querySelector('.reopen-task-panel')?.click(), true`);
+    await waitFor('W 前置：右侧活动面板展开（图标轨在位）', () => evalOk(ws, `!!document.querySelector('.rail')`), 10);
+    // 2) 选中 workingDir 指向仓库根的会话：优先在会话列表中找现成的点选（真实用户路径）；
+    //    列表无此类会话时，按 B3 既有兜底语义经 pinia 直设 activeSession.workingDir
+    //    （与 chooseRecent→setActiveSessionWorkingDir 同一状态位，用例内注明退化原因）。
+    const targetSessionName = await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      if (!st) return '';
+      const hit = (st.sessions || []).find((s) => s.workingDir === ${JSON.stringify(WS_TARGET)});
+      if (hit) {
+        if (!st.activeSession || st.activeSession.id !== hit.id) {
+          const link = [...document.querySelectorAll('.session-link')].find((l) => l.querySelector('.session-link__name')?.innerText === hit.name);
+          if (link) link.click();
+        }
+        return hit.name;
+      }
+      return '';
+    })()`);
+    if (targetSessionName) {
+      await waitFor(`W 前置：会话「${targetSessionName}」激活`, () => evalOk(ws, `document.querySelector('.session-link.active .session-link__name')?.innerText === ${JSON.stringify(targetSessionName)}`), 10)
+        .catch(() => { throw new Error(`点选带改动会话「${targetSessionName}」未激活`); });
+    } else {
+      log('  会话列表无 workingDir=仓库根的会话，按 B3 兜底语义直设 activeSession.workingDir（环境退化注明）');
+      const set = await evalExpr(ws, `(() => {
+        const app = document.querySelector('#app');
+        const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+        const st = pinia && pinia._s ? pinia._s.get('session') : null;
+        if (st && st.activeSession) { st.activeSession.workingDir = ${JSON.stringify(WS_TARGET)}; return true; }
+        return false;
+      })()`);
+      if (set !== true) throw new Error('无活动会话且列表无带改动会话，无法建立改动载体');
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    // 2.5) 自造脏载体（干净树可复跑）：在 workingDir 写 untracked 探针文件（.gitignore 未忽略、
+    //      git status --untracked-files=all 可见 → 面板出行）。写入失败（只读挂载等）置
+    //      probeWritten=false 走退化断言；finally 必清探针，任何断言失败也不残留。
+    const PROBE_PATH = path.join(WS_TARGET, '.e2e-changes-probe.tmp');
+    let probeWritten = false;
+    try {
+      fs.writeFileSync(PROBE_PATH, 'probe');
+      probeWritten = true;
+    } catch (e) {
+      log(`  探针文件写入失败（${String(e.message).slice(0, 120)}）→ 退化断言：面板挂载 + listChanges ok:true，不校验文件行`);
+    }
+    try {
+      // 3) 切「改动」Tab：rightTab 每次加载重置为 'all'，仅当尚未在 changes 时点图标轨按钮
+      //    （再点当前激活同类会回 all，故不可盲点）。→ ChangesPanel 挂载（onMounted 即 refresh）。
+      const needClick = await evalOk(ws, `(() => {
+        const app = document.querySelector('#app');
+        const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+        const st = pinia && pinia._s ? pinia._s.get('session') : null;
+        return st ? st.rightTab !== 'changes' : false;
+      })()`);
+      if (needClick === true) {
+        const railClicked = await evalExpr(ws, `(() => {
+          const btn = document.querySelector('button[aria-label="改动"]');
+          if (!btn) return false;
+          btn.click();
+          return true;
+        })()`);
+        if (railClicked !== true) throw new Error('未找到右侧活动栏「改动」按钮（button[aria-label="改动"]）');
+      }
+      if (probeWritten) {
+        // 4) 断言（探针在位）：面板文件行非空（DOM 列表项选择器非空）+ 文件行列表含探针行（见下方加强说明）。
+        //    挂载 onMounted→refresh；若撞 F-5 同源守卫（同 id+wd 刚拉过）或挂载早于切会话的 watch
+        //    收口而列表暂空，经 pinia 触发 changesStore.refresh(true)（面板「重试」同参，invalidateDiffs
+        //    绕过守卫强制重拉）后复验——补拉是用户可达操作，不算放宽断言。
+        const rowExpr = `document.querySelectorAll('.changes__list .changes__row').length >= 1`;
+        const rowsShown = await waitFor('改动面板文件行渲染', () => evalOk(ws, rowExpr), 20, 300).then(() => true).catch(() => false);
+        if (!rowsShown) {
+          const nudged = await evalExpr(ws, `(() => {
+            const app = document.querySelector('#app');
+            const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+            const st = pinia && pinia._s ? pinia._s.get('changes') : null;
+            if (st) { void st.refresh(true); return true; }
+            return false;
+          })()`);
+          log(`  面板首拉未出行，changesStore.refresh(true) 补拉（nudged=${nudged}）`);
+          await waitFor('改动面板文件行渲染（补拉后）', () => evalOk(ws, rowExpr), 20, 300);
+        }
+        // 断言加强（2026-10-27）：由「首行路径非空」升级为「文件行列表含探针行」——遍历全部
+        // .changes__path 的 innerText，至少一条含 .e2e-changes-probe.tmp（面板路径可能按字母序
+        // 排列，探针未必在首行，故不能只看首行）。JSON 往返对 Windows 反斜杠路径安全。
+        const PROBE_NAME = '.e2e-changes-probe.tmp';
+        const pathTextsRaw = await evalExpr(ws, `JSON.stringify([...document.querySelectorAll('.changes__list .changes__row .changes__path')].map((n) => String(n.innerText)))`);
+        let pathTexts = [];
+        try { pathTexts = JSON.parse(String(pathTextsRaw)); } catch { pathTexts = []; }
+        const probeHit = Array.isArray(pathTexts) ? pathTexts.find((t) => t.includes(PROBE_NAME)) : undefined;
+        if (!probeHit) throw new Error(`改动面板文件行不含探针 ${PROBE_NAME}（共 ${Array.isArray(pathTexts) ? pathTexts.length : 0} 行：${(Array.isArray(pathTexts) ? pathTexts : []).join(' | ').slice(0, 160)}）`);
+        if (exceptions.length > exceptionsBeforeW) throw new Error('W 用例期间出现 exceptionThrown');
+        record('W-changes-panel', 'PASS', `改动面板文件行 ≥1 且含探针行（${PROBE_NAME} 命中=${String(probeHit).slice(0, 60)}；行数=${pathTexts.length}；workingDir=…${path.sep}${path.basename(WS_TARGET)}；会话来源=${targetSessionName ? '列表点选' : 'pinia兜底'}）`);
+      } else {
+        // 4') 退化断言（探针写入失败，见 2.5 log）：面板组件挂载 + listChanges 返回 ok:true，
+        //     不依赖文件行数 ≥1（干净树下面板可能合法为空）。
+        await waitFor('改动面板挂载（.changes__header 在位）', () => evalOk(ws, `!!document.querySelector('.changes__header')`), 10);
+        const listOk = await evalOk(ws, `window.claudeLink.listChanges(${JSON.stringify(WS_TARGET)}, []).then((r) => r && r.ok === true)`);
+        if (listOk !== true) throw new Error('退化断言失败：listChanges 未返回 ok:true');
+        if (exceptions.length > exceptionsBeforeW) throw new Error('W 用例期间出现 exceptionThrown');
+        record('W-changes-panel', 'PASS', `退化断言 PASS：面板挂载 + listChanges ok:true（探针写入失败，未校验文件行；workingDir=…${path.sep}${path.basename(WS_TARGET)}；会话来源=${targetSessionName ? '列表点选' : 'pinia兜底'}）`);
+      }
+    } finally {
+      // 无条件清理（不设 probeWritten 守卫）：写中途失败残留的半创建探针文件也必清；
+      // force: true 对不存在的路径是安全 no-op。
+      fs.rmSync(PROBE_PATH, { force: true });
+    }
+  } catch (e) { record('W-changes-panel', 'FAIL', e.message); }
+  await screenshot(ws, 'W-changes-panel');
+
   // ── 全程异常终审（console error 即 FAIL；exceptionThrown 即 FAIL）──
   currentCase = '(final)';
   if (exceptions.length > 0) {
@@ -507,7 +632,7 @@ async function main() {
   // ── 汇总 ──
   const failCount = results.filter((r) => r.status === 'FAIL').length;
   const skipCount = results.filter((r) => r.status === 'SKIP').length;
-  log('==== B1-B8 汇总 ====');
+  log('==== B1-B8 + W-changes-panel 汇总 ====');
   for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
   log(`PASS ${results.filter((r) => r.status === 'PASS').length} / FAIL ${failCount} / SKIP ${skipCount}（证据目录 ${SHOT_DIR}）`);
   flushLog();
