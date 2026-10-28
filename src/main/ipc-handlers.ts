@@ -546,6 +546,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (typeof name !== 'string' || name === '') throw new Error('Invalid MCP probe name');
       const stored = getConfig().mcpServers.find((server) => server.name === name);
       if (!stored) {
+        logger.info(`[mcp-probe] single 未找到服务器 name=${name}`);
         return [
           { key: mcpProbeKey('managed', null, name), status: 'fail', toolCount: 0, error: `未找到该服务器：${name}`, probedAt: Date.now() },
         ];
@@ -560,8 +561,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         headers: stored.headers,
       };
       // 只写不读：新结论写进 managed:<name> 缓存（供 all 批量 60s 命中），回包恒为现探值。
-      // 超时（2026-10-19 点1）：条目 timeoutMs 经 resolveProbeTimeoutMs 生效（非法/缺省 → 10s）。
-      return [await probeMcpServer(input, resolveProbeTimeoutMs(stored), mcpProbeKey('managed', null, input.name))];
+      // 超时（2026-10-19 点1；p2 2026-10-27 默认 30s）：条目 timeoutMs 经 resolveProbeTimeoutMs
+      // 生效（非法/缺省 → 默认 30s，DEFAULT_PROBE_TIMEOUT_MS）。
+      const reports = [await probeMcpServer(input, resolveProbeTimeoutMs(stored), mcpProbeKey('managed', null, input.name))];
+      for (const r of reports) if (r.status === 'fail') logger.info(`[mcp-probe] 探活失败 key=${r.key}: ${r.error}`);
+      return reports;
     }
     if (req.target !== 'all') throw new Error('Invalid MCP probe target');
     // B-10：批量探测入口顺带时间驱动清理过期缓存（pruneProbeCache 原全仓零调用方，此处接线）。
@@ -593,12 +597,20 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     //（保序），probe 后按 key 回填（防御性：万一缺槽回 fail report，不炸整拍）。
     const probed = await probeAllManaged(pending);
     const probedByKey = new Map(probed.map((r) => [r.key, r]));
-    return slots.map(({ key, cached }) => {
+    const reports = slots.map(({ key, cached }) => {
       const fresh = probedByKey.get(key);
       if (fresh !== undefined) return fresh;
       if (cached !== undefined) return cached;
       return { key, status: 'fail' as const, toolCount: 0, error: '探活结果缺失', probedAt: Date.now() };
     });
+    // p2（2026-10-27）：探活失败落日志（此前失败零日志、报障无据可查）；日志在 IPC 层而非
+    // mcp-probe.ts——后者是纯 node 模块（不得 import electron 依赖的 logger，契约脚本 tsx 直跑）。
+    // R2 跟进（2026-10-29 日志卫生）：仅对本次现探 fail 落日志——60s 缓存命中的旧 fail 已在首次现探时记录过，批量轮询不重复刷。
+    for (const { key } of slots) {
+      const fresh = probedByKey.get(key);
+      if (fresh !== undefined && fresh.status === 'fail') logger.info(`[mcp-probe] 探活失败 key=${fresh.key}: ${fresh.error}`);
+    }
+    return reports;
   });
   // P8 双向写入（用户级/项目级）：body = { scope, dir?, entry, mode } → writeScopedMcpServer
   //（mcp-writer.ts：user → ~/.claude.json / project → <dir>/.mcp.json 顶层 mcpServers 条目

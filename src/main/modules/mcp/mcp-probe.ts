@@ -22,7 +22,7 @@
 //   - mcpProbeKey(scope, dirKey, name)              统一探活缓存键（与 override 键空间同款）
 //   - resolveProbeTimeoutMs(entry?)                 探活生效超时解析（2026-10-19 点1：条目
 //                                                   timeoutMs 合法整数 → min(v, 120000) 封顶；
-//                                                   undefined/非法 → 默认 10000）
+//                                                   undefined/非法 → 默认 30000（DEFAULT_PROBE_TIMEOUT_MS））
 //   - probeMcpServer(input, timeoutMs?, cacheKey?)  单服务器探活；第 3 参可选——传入非空字符串时
 //                                                   写入探活缓存并回填 report.key（供调用方持有
 //                                                   正确键空间时使用；不传则只探不缓存，
@@ -48,7 +48,8 @@ export interface McpProbeInput {
   url?: string;
   headers?: Record<string, string>;
   /** 探活超时覆盖（毫秒，2026-10-19 点1）：条目级可选；probeAllManaged 逐条经
-   *  resolveProbeTimeoutMs 生效（非法/缺省回落批量参数或默认 10s）。不参与缓存键。 */
+   *  resolveProbeTimeoutMs 生效（非法/缺省回落批量参数或默认 30s——DEFAULT_PROBE_TIMEOUT_MS，
+   *  p2 2026-10-27 对齐）。不参与缓存键。 */
   timeoutMs?: number;
 }
 
@@ -91,6 +92,9 @@ const PROBE_CLIENT_INFO = { name: 'claude-link-probe', version: '0.0.0' } as con
 /** Windows 下必须经 cmd.exe 包裹的裸命令名（无扩展名；§3.11——npx 等在 Windows 是 .cmd 垫片，
  *  CreateProcess 不解析 PATHEXT，直接 spawn 必 ENOENT）。 */
 const STDIO_SHELL_WRAP_BASENAMES = new Set(['npx', 'npm', 'uvx', 'pnpm', 'yarn']);
+/** 默认探活超时（p2 2026-10-27：10s → 30s）：对齐 Claude Code CLI MCP_TIMEOUT 与 ZCode 默认
+ *  30s（npx -y pkg@latest 联网解析+启动常态超 10s）；条目级 timeoutMs（1..120000）仍可覆盖。 */
+export const DEFAULT_PROBE_TIMEOUT_MS = 30_000;
 /** 「Node 运行时族」裸命令名：spawn ENOENT 时 error 文案改为「未检测到 Node.js…」（§3.11）。 */
 const NODE_RUNTIME_BASENAMES = new Set(['node', 'npm', 'npx', 'uvx', 'pnpm', 'yarn']);
 
@@ -445,26 +449,29 @@ async function probeHttpServer(input: McpProbeInput, timeoutMs: number): Promise
 // ── 对外入口（整体 try/catch 兜底 + 缓存）──────────────────────────────────
 
 /**
- * 探活生效超时解析（2026-10-19 mcp-settings-plan-a 点1）：条目 timeoutMs 为合法整数
- *（Number.isInteger 且 >=1）→ Math.min(v, 120000)（超配封顶 120s 防呆）；undefined / 缺字段 /
- * 非法（0/负/小数/字符串/null）→ 默认 10000。与配置侧 mcp-config.isValidMcpTimeoutMs（1..120000
- * 之外静默丢字段）分工：配置侧管落库合法性，本函数管运行时生效值（宁可封顶执行，不丢探活）。
+ * 探活生效超时解析（2026-10-19 mcp-settings-plan-a 点1；p2 2026-10-27 默认 10s→30s）：
+ * 条目 timeoutMs 为合法整数（Number.isInteger 且 >=1）→ Math.min(v, 120000)（超配封顶 120s
+ * 防呆）；undefined / 缺字段 / 非法（0/负/小数/字符串/null）→ 默认 30000
+ *（DEFAULT_PROBE_TIMEOUT_MS，对齐 Claude Code CLI / ZCode 30s 口径）。与配置侧
+ * mcp-config.isValidMcpTimeoutMs（1..120000 之外静默丢字段）分工：配置侧管落库合法性，
+ * 本函数管运行时生效值（宁可封顶执行，不丢探活）。
  */
 export function resolveProbeTimeoutMs(entry?: { timeoutMs?: unknown }): number {
   const v = entry?.timeoutMs;
   if (typeof v === 'number' && Number.isInteger(v) && v >= 1) return Math.min(v, 120_000);
-  return 10_000;
+  return DEFAULT_PROBE_TIMEOUT_MS;
 }
 
 /**
  * 单服务器探活（§2 P6）：整体 try/catch，任何未预期异常 → fail report（绝不炸调用方，§3.7）。
  * cacheKey 传入非空字符串 → report.key = cacheKey 并写入探活缓存（供「测试连接」等需要缓存
  * 最近值的调用方）；不传 → 只探不缓存，key 回填 managed 键空间推导值（仅作关联用途）。
- * 生效超时（2026-10-19 点1）：Math.min(timeoutMs ?? 10000, 120000)——入参为「生效值」，此处仅对
- * 超配/缺省统一兜底封顶（resolveProbeTimeoutMs 同语义）；不传沿用既有默认 10s，行为不变。
+ * 生效超时（2026-10-19 点1；p2 2026-10-27 默认 30s）：Math.min(timeoutMs ?? 30000, 120000)
+ * ——入参为「生效值」，此处仅对超配/缺省统一兜底封顶（resolveProbeTimeoutMs 同语义）；
+ * 不传沿用 DEFAULT_PROBE_TIMEOUT_MS（30s）。
  */
-export async function probeMcpServer(input: McpProbeInput, timeoutMs = 10_000, cacheKey?: string): Promise<McpProbeReport> {
-  const effectiveTimeoutMs = Math.min(timeoutMs ?? 10_000, 120_000);
+export async function probeMcpServer(input: McpProbeInput, timeoutMs = DEFAULT_PROBE_TIMEOUT_MS, cacheKey?: string): Promise<McpProbeReport> {
+  const effectiveTimeoutMs = Math.min(timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS, 120_000);
   let outcome: ProbeOutcome;
   try {
     outcome =
@@ -487,8 +494,8 @@ export async function probeMcpServer(input: McpProbeInput, timeoutMs = 10_000, c
  * 某条若意外 rejected（probeMcpServer 自身已兜底，此处为防御性第二道）→ 该条 fail report。
  * per-entry 超时（2026-10-19 点1）：条目自带合法 timeoutMs（>=1 整数）→ 以 resolveProbeTimeoutMs
  * 逐条生效（封顶在 probeMcpServer 内统一执行）；未带/非法 → 沿用批量参数 timeoutMs（缺省
- * undefined → probeMcpServer 默认 10s，既有行为不变）。缓存键不变：mcpProbeKey 同台同键，
- * 超时差异不参与新鲜判定（60s 缓存语义维持）。
+ * undefined → probeMcpServer 默认 DEFAULT_PROBE_TIMEOUT_MS=30s，p2 2026-10-27 起生效）。
+ * 缓存键不变：mcpProbeKey 同台同键，超时差异不参与新鲜判定（60s 缓存语义维持）。
  */
 export async function probeAllManaged(inputs: McpProbeInput[], timeoutMs?: number): Promise<McpProbeReport[]> {
   const settled = await Promise.allSettled(

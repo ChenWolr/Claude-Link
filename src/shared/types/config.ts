@@ -115,8 +115,8 @@ export interface McpManagedServer {
   env?: Record<string, string>;
   url?: string; // http/sse 必填
   headers?: Record<string, string>;
-  // 探活超时覆盖（2026-10-19 mcp-settings-plan-a 点1）：可选正整数（1..120000，毫秒），
-  // 缺省沿用探活默认 10s（运行时生效值经 mcp-probe resolveProbeTimeoutMs：非法/缺省 → 10000、
+  // 探活超时覆盖（2026-10-19 mcp-settings-plan-a 点1；2026-10-27 p2 默认 10s→30s）：可选正整数（1..120000，毫秒），
+  // 缺省沿用探活默认 30s（运行时生效值经 mcp-probe resolveProbeTimeoutMs：非法/缺省 → 30000（DEFAULT_PROBE_TIMEOUT_MS）、
   // 超配封顶 120000）。仅影响探活与导出/写盘（sanitize/export/writer/视图/解析全链透传），
   // 不注入 SDK 会话（toSdkMcpServerConfig 不携带本字段，会话行为零变化）。
   timeoutMs?: number;

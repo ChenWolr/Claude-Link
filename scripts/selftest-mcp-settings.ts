@@ -48,7 +48,7 @@
 //     buildProbeSdkOptions）钉住优先公式的静态源码钉（防退化回 config.mcpOverrides 直判）。
 //   J timeoutMs 全链组（2026-10-19 mcp-settings-plan-a 点1 新增）：sanitize/导出/解析/视图
 //     对 timeoutMs 的透传（配置侧口径：合法=Number.isInteger 且 1..120000，非法静默丢字段、
-//     条目其余字段完好）+ resolveProbeTimeoutMs 参数化（undefined/非法→10000、>=1 整数封顶
+//     条目其余字段完好）+ resolveProbeTimeoutMs 参数化（undefined/非法→30000、>=1 整数封顶
 //     120000）+ 注入链防漏钉（J6：带 timeoutMs 条目经 toSdkMcpServerConfig / merge 全链输出
 //     均不含 timeoutMs——会话行为零变化，计划 §1.2 硬约束）。J2（writer 写出含/无 timeoutMs
 //     键）为异步驱动，归位 scripts/selftest-mcp-writer.ts [12]（两断言逐字对应），本组不重复；
@@ -1088,6 +1088,19 @@ console.log('\n=== H. R5 三态文案组（McpSettings.vue 项目空态三态互
       && !src.includes('entry.env = cfg.env')
       && !src.includes('entry.headers = cfg.headers'),
     src === '' ? 'McpSettings.vue 不可读' : '解析未走桥/副本函数回潮，或 env/headers 仍为 as 断言/裸透传');
+  // H7（2026-10-29 clone 修复钉）：persistManaged 必须对 next 做 JSON 脱壳后再传 saveMcpManaged
+  // ——managedServers 是深响应式 ref，map/filter/摊派出的元素是 Vue Proxy，contextBridge/ipcRenderer
+  // 结构化克隆不接受 Proxy（"An object could not be cloned"，2026-10-27 用户报障活体复现）。
+  // 钉形说明：脱壳是 saveMcpManaged 调用的实参（先于 IPC 交接求值），故钉「连续调用点形态」+
+  // 「裸 next 直传旧形态零出现」双断言，任一漂移即 FAIL。
+  const pmStart = src.indexOf('async function persistManaged');
+  const pmEnd = src.indexOf('async function saveScopedForm');
+  const pmBody = pmStart >= 0 && pmEnd > pmStart ? src.slice(pmStart, pmEnd) : '';
+  check('H7', '管理库保存脱壳：persistManaged 传给 saveMcpManaged 的实参为 JSON.parse(JSON.stringify(next)) 脱壳产物，裸 next 直传零出现',
+    pmBody !== ''
+      && pmBody.includes('claude.saveMcpManaged(JSON.parse(JSON.stringify(next))')
+      && !pmBody.includes('claude.saveMcpManaged(next)'),
+    src === '' ? 'McpSettings.vue 不可读' : 'persistManaged 缺 JSON 脱壳或裸 next 直传回潮');
 }
 
 // ── I. D-V1-1 注入挂载组（options.mcpServers 顶层挂载 / 空配置零挂载 / strict 门控：挂载∨overrides 激活）──
@@ -1302,7 +1315,8 @@ function optionsFromMergedSettings(
 // ── J. timeoutMs 全链组（2026-10-19 mcp-settings-plan-a 点1）────────────────
 // 口径：配置侧合法=Number.isInteger 且 1..120000（isValidMcpTimeoutMs，非法静默丢字段、
 // 条目其余字段完好——与 env/headers 值级清洗容错口径一致）；探活运行时侧
-// resolveProbeTimeoutMs：>=1 整数封顶 120000 生效，undefined/非法一律默认 10000。
+// resolveProbeTimeoutMs：>=1 整数封顶 120000 生效，undefined/非法一律默认 30000
+//（p2 探活超时对齐 2026-10-27：默认 10000 → 30000，对齐 Claude Code CLI / ZCode 30s 口径）。
 // 硬约束（计划 §1.2/§6）：timeoutMs 绝不注入 SDK 会话（J6 防漏钉）。
 
 console.log('\n=== J. timeoutMs 全链组（sanitize 透传 / 导出 / probe 超时 / 注入防漏钉 / 解析 / 视图） ===');
@@ -1351,29 +1365,29 @@ console.log('\n=== J. timeoutMs 全链组（sanitize 透传 / 导出 / probe 超
 
 // J5 probe 超时参数化：resolveProbeTimeoutMs 纯函数直测（直接 import mcp-probe.ts，
 // 该文件仅 import node:child_process，selftest 可纯 node 运行）：
-// undefined/缺省/非法（0/负/小数/字符串/null）→ 10000；5000→5000；1/120000 边界保留；999999→120000 封顶。
+// undefined/缺省/非法（0/负/小数/字符串/null）→ 30000；5000→5000；1/120000 边界保留；999999→120000 封顶。
 {
   const sub: string[] = [];
   const cases: Array<{ label: string; entry: { timeoutMs?: unknown } | undefined; want: number }> = [
-    { label: 'undefined 入参 → 10000', entry: undefined, want: 10000 },
-    { label: '空对象（缺字段）→ 10000', entry: {}, want: 10000 },
-    { label: '字段 undefined → 10000', entry: { timeoutMs: undefined }, want: 10000 },
+    { label: 'undefined 入参 → 30000', entry: undefined, want: 30000 },
+    { label: '空对象（缺字段）→ 30000', entry: {}, want: 30000 },
+    { label: '字段 undefined → 30000', entry: { timeoutMs: undefined }, want: 30000 },
     { label: '5000 → 5000', entry: { timeoutMs: 5000 }, want: 5000 },
     { label: '边界 1 → 1', entry: { timeoutMs: 1 }, want: 1 },
     { label: '边界 120000 → 120000', entry: { timeoutMs: 120000 }, want: 120000 },
     { label: '999999 封顶 → 120000', entry: { timeoutMs: 999999 }, want: 120000 },
-    { label: '0 → 10000', entry: { timeoutMs: 0 }, want: 10000 },
-    { label: '-5 → 10000', entry: { timeoutMs: -5 }, want: 10000 },
-    { label: '1.5（小数）→ 10000', entry: { timeoutMs: 1.5 }, want: 10000 },
-    { label: "'x'（字符串）→ 10000", entry: { timeoutMs: 'x' }, want: 10000 },
-    { label: 'null → 10000', entry: { timeoutMs: null }, want: 10000 },
+    { label: '0 → 30000', entry: { timeoutMs: 0 }, want: 30000 },
+    { label: '-5 → 30000', entry: { timeoutMs: -5 }, want: 30000 },
+    { label: '1.5（小数）→ 30000', entry: { timeoutMs: 1.5 }, want: 30000 },
+    { label: "'x'（字符串）→ 30000", entry: { timeoutMs: 'x' }, want: 30000 },
+    { label: 'null → 30000', entry: { timeoutMs: null }, want: 30000 },
   ];
   for (const c of cases) {
     const r = call(() => resolveProbeTimeoutMs(c.entry));
     if (!r.ok) { sub.push(`${c.label}：${throwDetail(r)}`); continue; }
     if (r.value !== c.want) sub.push(`${c.label}：应 ${c.want}，得到 ${String(r.value)}`);
   }
-  check('J5', 'resolveProbeTimeoutMs：undefined/缺省/非法（0/负/小数/字符串/null）→ 10000；5000→5000；1..120000 边界保留；999999 封顶 120000', sub.length === 0, sub.join('; '));
+  check('J5', 'resolveProbeTimeoutMs：undefined/缺省/非法（0/负/小数/字符串/null）→ 30000；5000→5000；1..120000 边界保留；999999 封顶 120000', sub.length === 0, sub.join('; '));
 }
 
 // J6 注入链防漏钉（计划 §1.2/§6 硬约束，实现前即应 PASS 的守卫断言）：带 timeoutMs 的条目

@@ -915,7 +915,11 @@ function closeEditDialog(): void {
  *  McpManagedServer[] 调用方（删除/导入）结构兼容直传。 */
 async function persistManaged(next: McpManagedSaveEntry[], successMsg: string): Promise<boolean> {
   try {
-    await claude.saveMcpManaged(next);
+    // managedServers 是深响应式 ref，map/filter/摊派出的元素仍是 Proxy——contextBridge/ipcRenderer
+    // 结构化克隆不接受 Proxy（"An object could not be cloned"，2026-10-27 用户报障活体复现）；
+    // 与 config-store.ts 保存链同款 JSON 脱壳：字段全为 string/number 无损，undefined 可选键
+    // 丢弃与主进程 sanitize「缺键=不带」口径一致。
+    await claude.saveMcpManaged(JSON.parse(JSON.stringify(next)) as McpManagedSaveEntry[]);
     const fresh = await claude.getConfig();
     if (disposed) return true;
     managedServers.value = Array.isArray(fresh.mcpServers) ? fresh.mcpServers : [];
@@ -1815,7 +1819,7 @@ const scopeNoteHead = computed<string>(() => {
                 v-model="formTimeoutMs"
                 :class="['mcp-input', { 'mcp-input--invalid': timeoutErrorShown !== '' }]"
                 type="number"
-                placeholder="10000"
+                placeholder="30000"
                 aria-label="超时（毫秒）"
                 @blur="touchedFields.timeout = true"
               />
