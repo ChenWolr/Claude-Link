@@ -875,7 +875,11 @@ function runSegmentD(): void {
       check('D③m', '首改合成：MultiEdit edits[] 逐条例', false, why);
       check('D③x', '首改降级：input 缺失 / input_truncated=1 → unavailable', false, why);
       check('D③t', '首改合成截断（N3）：>MAX_DIFF_LINES → truncated=true、± 为截断前全量', false, why);
-      check('D④', 'binary=1 / failed → unavailable、±=0', false, why);
+      check('D④', 'binary=1 / failed → intent（意图兜底）、±>0', false, why);
+      check('D④b', 'binary 且意图缺失（input NULL/截断）→ unavailable、±=0', false, why);
+      check('D④c', '区间全 binary + 区间前可用 before → intent（不产 full）', false, why);
+      check('D-ui', 'TurnFileChangesCard intent 徽标 + 三态 title', false, why);
+      check('D-ui2', 'TurnDiffDialog intent 徽标 + 新空态文案', false, why);
       check('D⑤', 'endRow=null → 覆盖到末尾', false, why);
       check('D⑥', '空区间轮不出现在结果', false, why);
       check('D⑦', 'deriveTurnRanges：主流程 user 分界 / 末回合 endRow=null / 子 agent user 不分界', false, why);
@@ -1017,21 +1021,71 @@ function runSegmentD(): void {
         `truncated=${String(frZ.truncated)} ±=${frZ.additions}/${frZ.deletions} 正文行=${zBodyLines}`);
     }
 
-    // d) binary=1 行（及全部 failed 行）→ mode=unavailable、±=0（区间前有 before 也不算 after 来源）。
+    // d) p5 重钉（2026-10-27 五问题 §6.4）：binary=1 / snapshot_state='failed' 行 → 快照缺失时按
+    //    编辑意图合成兜底 mode=intent（±>0、patch 含 hunk、truncated=false）；区间前有可用 before
+    //    也不再产 full（以意图为准；与过程工具行「查看改动对比」同源 input_json + 同一合成器）。
     {
       const rows = [
         mkRow(1, { mrow: 50, path: 'E', after_content: 'E-before\n' }),
-        mkRow(2, { mrow: 101, path: 'E', binary: 1, after_content: null }),
-        mkRow(3, { mrow: 102, path: 'F', snapshot_state: 'failed', after_content: null }),
+        mkRow(2, { mrow: 101, path: 'E', binary: 1, after_content: null, input_json: '{"file_path":"E","content":"l1\\nl2\\nl3\\n"}' }),
+        mkRow(3, { mrow: 102, path: 'F', snapshot_state: 'failed', after_content: null, tool_name: 'Edit', input_json: '{"file_path":"F","old_string":"o","new_string":"n"}' }),
       ];
       const out = aggregate(rows, [{ turnStartMessageId: 'tb', startRow: 100, endRow: 200 }]);
       const e = out[0]?.items.find((i) => i.path === 'E');
       const f = out[0]?.items.find((i) => i.path === 'F');
-      check('D④', 'binary=1 / failed 行：mode=unavailable、±=0（before 存在也不产出 full）',
+      const frE = fileDiff(rows, 100, 200, 'E');
+      check('D④', 'binary=1 / failed 行：mode=intent（意图兜底）、±>0、patch 含 hunk、truncated=false；before 存在不产 full',
         out.length === 1
-          && e?.mode === 'unavailable' && e?.additions === 0 && e?.deletions === 0 && e?.writeCount === 1
-          && f?.mode === 'unavailable' && f?.additions === 0 && f?.deletions === 0,
+          && e?.mode === 'intent' && (e?.additions ?? 0) > 0 && e?.writeCount === 1
+          && f?.mode === 'intent' && (f?.additions ?? 0) > 0
+          && frE.mode === 'intent' && frE.truncated === false
+          && frE.patch.split('\n').some((l) => l.startsWith('@@')) && frE.patch.split('\n').includes('+l1'),
+        `out=${JSON.stringify(out)} fr=${JSON.stringify(frE)}`);
+    }
+
+    // d2) p5 新增：快照缺失且意图也不可用（input_json NULL / input_truncated=1）→ 仍 unavailable、±=0
+    //    （既有 D③x 降级语义在快照缺失场景的延伸钉，防止兜底掩盖入参不可用）。
+    {
+      const rows = [
+        mkRow(1, { mrow: 101, path: 'X', binary: 1, after_content: null, input_json: null }),
+        mkRow(2, { mrow: 102, path: 'Y', binary: 1, after_content: null, input_json: '{"file_path":"Y","content":"y"}', input_truncated: 1 }),
+      ];
+      const out = aggregate(rows, [{ turnStartMessageId: 'tb2', startRow: 100, endRow: 200 }]);
+      const x = out[0]?.items.find((i) => i.path === 'X');
+      const y = out[0]?.items.find((i) => i.path === 'Y');
+      check('D④b', 'binary 且意图缺失（input NULL / 截断）→ mode=unavailable、±=0（既有语义保留）',
+        x?.mode === 'unavailable' && x?.additions === 0 && x?.deletions === 0
+          && y?.mode === 'unavailable' && y?.additions === 0 && y?.deletions === 0,
         `out=${JSON.stringify(out)}`);
+    }
+
+    // d3) p5 新增：区间内全部行 binary（after 全缺）+ 区间前可用 before 存在 → 仍 mode=intent
+    //    （不再产 full——中途才变加密的文件以编辑意图为准）。
+    {
+      const rows = [
+        mkRow(1, { mrow: 90, path: 'B', after_content: 'B-before\n' }),
+        mkRow(2, { mrow: 101, path: 'B', binary: 1, after_content: null, tool_name: 'Edit', input_json: '{"file_path":"B","old_string":"a\\n","new_string":"b\\n"}' }),
+      ];
+      const fr = fileDiff(rows, 100, 200, 'B');
+      check('D④c', '区间内全 binary + 区间前可用 before → mode=intent（不再产 full）',
+        fr.mode === 'intent' && fr.additions === 1 && fr.deletions === 1,
+        `fr=${JSON.stringify(fr)}`);
+    }
+
+    // d4) p5 静态 UI 钉：卡片徽标/标题三态 + 弹窗徽标/空态文案（mode='intent' 的渲染层呈现）。
+    {
+      const cardSrc = fs.readFileSync(path.join(repoRoot, 'src', 'renderer', 'components', 'chat', 'TurnFileChangesCard.vue'), 'utf8');
+      const dlgSrc = fs.readFileSync(path.join(repoRoot, 'src', 'renderer', 'components', 'chat', 'TurnDiffDialog.vue'), 'utf8');
+      check('D-ui', 'TurnFileChangesCard：intent 徽标「意图 diff」+ title 三态（含「快照缺失（二进制）」）',
+        cardSrc.includes('>意图 diff</span>')
+          && cardSrc.includes("item.mode === 'intent'")
+          && cardSrc.includes('快照缺失（二进制）'),
+        'card 缺 intent 徽标或三态 title');
+      check('D-ui2', 'TurnDiffDialog：「编辑意图（快照缺失）」徽标 + 空态文案更新（含「且编辑意图不可用」）',
+        dlgSrc.includes('编辑意图（快照缺失）')
+          && dlgSrc.includes("mode === 'intent'")
+          && dlgSrc.includes('且编辑意图不可用'),
+        'dialog 缺 intent 徽标或新空态文案');
     }
 
     // e) endRow=null → 覆盖到末尾（区间内两行都计入，after=末条）。

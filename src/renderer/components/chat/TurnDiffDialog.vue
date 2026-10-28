@@ -6,7 +6,8 @@
 // 结构对齐 ToolDiffDialog.vue：弹窗壳（overlay + role=dialog + Tab trap + ESC/Ctrl+F/↑↓）、
 // split/inline 切换、上下文 3/5/10/20、Ctrl+F 搜索 + 结果导航。差异点（本组件职责内新增）：
 //  - 异步数据态：懒加载 spinner / invoke 失败错误态+重试按钮 / mode='unavailable' 空态；
-//  - 标题 = 文件路径 + mode 徽标（「首改（编辑意图）」/「与上一轮的差异」）。
+//  - 标题 = 文件路径 + mode 徽标，三态（p5 2026-10-27 增 intent）：first-change →
+//    「首改（编辑意图）」；intent →「编辑意图（快照缺失）」；其余（full）→「与上一轮的差异」。
 // 无侧栏文件列表 / git 状态 / 拖动缩放 / 多段切换——单文件 patch 一次性呈现。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useTurnDiffStore, turnDiffPatchKey, type TurnDiffPatchTarget } from '../../stores/turn-diff-store';
@@ -62,8 +63,12 @@ const pathParts = computed(() => {
   const name = segs.pop() ?? filePath.value;
   return { dir: segs.join('/'), name };
 });
-// mode 徽标文案：first-change → 首改（编辑意图）；full → 与上一轮的差异。
-const modeBadge = computed(() => (entry.value?.mode === 'first-change' ? '首改（编辑意图）' : '与上一轮的差异'));
+// mode 徽标文案（p5 2026-10-27 增 intent 态）：first-change → 首改（编辑意图）；
+// intent → 编辑意图（快照缺失）；full → 与上一轮的差异。
+const modeBadge = computed(() =>
+  entry.value?.mode === 'first-change' ? '首改（编辑意图）'
+    : entry.value?.mode === 'intent' ? '编辑意图（快照缺失）'
+    : '与上一轮的差异');
 const SPLIT_HL_MAX_LINES = 1500;
 const language = computed(() => {
   const totalLines = parsed.value?.groups.reduce((a, g) => a + g.L.length + g.R.length, 0) ?? 0;
@@ -377,7 +382,7 @@ onBeforeUnmount(() => {
                     </svg>
                   </div>
                   <h3>暂时无法预览这份 Diff。</h3>
-                  <p>该文件是二进制，或本轮缺少可对比的快照（编辑意图不可用）。</p>
+                  <p>该文件是二进制，或本轮缺少可对比的快照，且编辑意图不可用（入参缺失或被截断）。</p>
                 </div>
                 <!-- 就绪（parsed 为 null 时 DiffBody 自带「无可显示差异」空态） -->
                 <DiffBody

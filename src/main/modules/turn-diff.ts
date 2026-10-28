@@ -17,8 +17,10 @@
 //   - first-change（本会话首次改写：区间前无该 path 可用 disk 快照）：按区间内该 path 各行
 //     input_json 顺序合成编辑意图 hunk（Write→content 整文件 vs 空串 / Edit→old_string→
 //     new_string / MultiEdit→edits[] 逐条），每片段经 diff-core buildTwoFilePatch 生成 hunk
-//     顺序拼接（单一文件头 + 多 hunk，parseUnifiedDiff 可解析形态）；无可用 input
-//     （input_json 缺失或 input_truncated=1，全部行皆不可用）→ 该文件降级 'unavailable'。
+//     顺序拼接（单一文件头 + 多 hunk，parseUnifiedDiff 可解析形态）；
+//     after 为 null 且入参可用时按意图合成（mode 'intent'，± 与 patch 皆来自合成结果）；
+//     无可用 input（input_json 缺失或 input_truncated=1，全部行皆不可用）→ 该文件降级
+//     'unavailable'。
 //
 // 分层纪律：aggregateFromCheckpoints / computeFileDiff 为纯函数（不触 DB，可直测）；DB 侧
 // （deriveTurnRanges / listSummaries / getPatch）只读查询；异常由 ipc-handlers 的 handler
@@ -196,7 +198,14 @@ export function computeFileDiff(
     }
   }
   if (after === null) {
-    return { mode: 'unavailable', additions: 0, deletions: 0, writeCount, patch: '', truncated: false };
+    // p5（2026-10-27）：快照全缺（二进制/加密含 \0 或读盘 failed）不再早退——按编辑意图合成兜底
+    //（与工具行「查看改动对比」同源 input_json + 同一 buildTwoFilePatch；± 为截断前累计，N3）。
+    // 入参也缺失/截断（synth null）才维持 unavailable。
+    const synth = synthesizeFirstChange(path, inRange);
+    if (synth === null) {
+      return { mode: 'unavailable', additions: 0, deletions: 0, writeCount, patch: '', truncated: false };
+    }
+    return { mode: 'intent', additions: synth.additions, deletions: synth.deletions, writeCount, patch: synth.patch, truncated: synth.truncated };
   }
   // before：startRow 之前（全 session 范围）mrow 最大的一条可用 disk 快照（同样与落库时序解耦）。
   let before: string | null = null;

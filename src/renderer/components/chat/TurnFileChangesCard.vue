@@ -4,7 +4,8 @@
 // emit('open') 交父级（MessageList）打开 TurnDiffDialog 懒加载 patch。
 //
 // 口径：mode='unavailable' 文件计入 N 但不计入 ±（无可靠计数）；+a/-d 仅 >0 才显示；
-// 'unavailable' 行禁用点击（无 patch 可看）。样式 token 复用现有体系：折叠徽标语义对齐
+// intent=快照缺失（二进制/failed）时按 tool_use 入参合成的编辑意图 diff，行可点、± 计入合计；
+// 'unavailable' 行才禁用点击（无 patch 可看）。样式 token 复用现有体系：折叠徽标语义对齐
 // ToolCallBlock 折叠 +/−（等宽小字 + tabular-nums + 绿/红），容器/行格配色对齐 TaskQueuePanel
 // 指标格（panel-soft + border 圆角格）；不引新依赖。
 import { computed, ref, useId } from 'vue';
@@ -74,7 +75,9 @@ function onRowClick(item: TurnFileDiffItem): void {
           type="button"
           class="turn-diff-card__row"
           :disabled="item.mode === 'unavailable'"
-          :title="item.mode === 'unavailable' ? '二进制或快照缺失，无法对比' : `${dirOf(item.path)}/${basename(item.path)}`"
+          :title="item.mode === 'unavailable' ? '二进制或快照缺失，且编辑意图不可用，无法对比'
+            : item.mode === 'intent' ? '快照缺失（二进制），已按编辑意图合成 diff'
+            : `${dirOf(item.path)}/${basename(item.path)}`"
           @click="onRowClick(item)"
         >
           <span class="turn-diff-card__file">
@@ -85,6 +88,7 @@ function onRowClick(item: TurnFileDiffItem): void {
             <span v-if="item.deletions > 0" class="turn-diff-card__del">−{{ item.deletions }}</span>
             <span class="turn-diff-card__writes">{{ item.writeCount }} 次编辑</span>
             <span v-if="item.mode === 'first-change'" class="turn-diff-card__badge">首改</span>
+            <span v-else-if="item.mode === 'intent'" class="turn-diff-card__badge turn-diff-card__badge--muted">意图 diff</span>
             <span v-else-if="item.mode === 'unavailable'" class="turn-diff-card__badge turn-diff-card__badge--muted">二进制或快照缺失</span>
           </span>
         </button>
@@ -227,7 +231,7 @@ function onRowClick(item: TurnFileDiffItem): void {
 .turn-diff-card__writes {
   color: var(--color-text-muted);
 }
-/* mode 徽标：first-change → 首改（accent）；unavailable → 二进制或快照缺失（muted） */
+/* mode 徽标：first-change → 首改（accent）；intent → 意图合成（muted）；unavailable → 二进制或快照缺失（muted） */
 .turn-diff-card__badge {
   flex: 0 0 auto;
   padding: 1px 6px;
