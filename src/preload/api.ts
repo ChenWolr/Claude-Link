@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（113 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（114 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -368,6 +368,7 @@ export interface ClaudeLinkAPI {
   fsRename: (oldPath: string, newName: string) => Promise<FsRenameResult>;
   fsTrash: (paths: string[]) => Promise<FsTrashResult>;
   fsShowInExplorer: (path: string) => Promise<FsShowResult>;
+  fsOpenPath: (absPath: string, mode: 'default' | 'choose') => Promise<ChangesOpenResult>;
   // 导出目标协商（T5）：主→渲染请求选择保存目标；渲染层选定后经 resolveTarget 应答。
   resolveExportTarget: (jobId: string, resp: ExportTargetResponse) => Promise<boolean>;
   onExportTargetRequested: (callback: (req: ExportTargetRequest) => void) => () => void;
@@ -585,6 +586,7 @@ export function createApi(): ClaudeLinkAPI {
     fsRename: (oldPath, newName) => ipcRenderer.invoke(IPC_CHANNELS.FS_RENAME, { oldPath, newName }) as Promise<FsRenameResult>,
     fsTrash: (paths) => ipcRenderer.invoke(IPC_CHANNELS.FS_TRASH, { paths }) as Promise<FsTrashResult>,
     fsShowInExplorer: (path) => ipcRenderer.invoke(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, { path }) as Promise<FsShowResult>,
+    fsOpenPath: (absPath, mode) => ipcRenderer.invoke(IPC_CHANNELS.FS_OPEN_PATH, absPath, mode) as Promise<ChangesOpenResult>,
     // 导出目标协商（T5）：应答主进程的保存目标请求 / 订阅请求推送（App.vue 全局单订阅者）。
     resolveExportTarget: (jobId, resp) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, jobId, resp) as Promise<boolean>,
     onExportTargetRequested: (callback) => {

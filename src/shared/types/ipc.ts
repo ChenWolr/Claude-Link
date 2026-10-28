@@ -51,6 +51,9 @@ export const IPC_CHANNELS = {
   FS_RENAME: 'fs:rename',
   FS_TRASH: 'fs:trash',
   FS_SHOW_IN_EXPLORER: 'fs:showInExplorer',
+  // 聊天工具行打开生成文件（p3 2026-10-27）：绝对路径直达（default=系统默认程序+win 降级 /
+  // choose=win 原生打开方式对话框）。
+  FS_OPEN_PATH: 'fs:openPath',
   // 导出目标协商（主→渲染请求 + 渲染→主应答；#3/#4 原生保存框替换）。
   EXPORT_RESOLVE_TARGET: 'export-image:resolveTarget',
   EXPORT_REQUEST_TARGET: 'export-image:requestTarget',

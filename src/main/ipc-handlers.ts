@@ -90,7 +90,8 @@ import * as attachmentRepo from './database/repositories/attachment-repo';
 import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { getPlanState as getClaudePlanState } from './database/repositories/claude-plan-repo';
-import { listChanges, getChangeDiff, openChangeFile } from './modules/changes-panel';
+import { listChanges, getChangeDiff, openChangeFile, openAbsoluteFile } from './modules/changes-panel';
+import type { ChangesOpenResult } from '../shared/types/changes';
 // 轮末文件改动（turn-diff，2026-10-26 计划 §4-P4）：摘要聚合与单文件 patch 两只读通道的实现模块。
 import * as turnDiff from './modules/turn-diff';
 import { registerExportImageHandlers, resolveExportTarget } from './modules/export-image-manager';
@@ -433,6 +434,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     } catch {
       return { ok: false };
     }
+  });
+  // FS_OPEN_PATH（p3 2026-10-27 聊天工具行 chip）：绝对路径直达打开（信任级同 fs:trash 任意路径
+  // 通道：web 仅已认证连接可达；远控语义——网页版点击作用于桌面主机）。default=系统默认程序
+  //（失败时 win 降级「打开方式」对话框）；choose=直达系统「打开方式」对话框；mode 非法收敛 default。
+  // 守卫（绝对路径 / realpathSync 穿透 symlink / 已存在常规文件）在 openAbsoluteFile 内。
+  regInvokeHandler(IPC_CHANNELS.FS_OPEN_PATH, async (_event, absPath: unknown, mode: unknown): Promise<ChangesOpenResult> => {
+    if (typeof absPath !== 'string') return { ok: false, reason: 'no-such-file', message: '未指定文件' };
+    return openAbsoluteFile(absPath, mode === 'choose' ? 'choose' : 'default');
   });
 
   // 导出目标协商应答（T5）：渲染层 FilePickerDialog 选定后回传；jobId 在 Map 中才有效（防重放/伪造他人 job）。

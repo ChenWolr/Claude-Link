@@ -3,7 +3,7 @@
 // 默认一行：图标 + 标签 + mono 细节（summarizeToolUse 提取的文件名/命令/查询）+ ✓/✗/···；
 // 点击展开看完整入参与结果（保留 claude-link 的详情能力 + 长结果渐进披露）。
 // 子 Agent（Agent/Task/Workflow/Skill，见 SUB_AGENT_TOOL_NAMES）行带「查看过程 →」锚点，点击定位右侧子Agent Tab。
-import { computed, ref, watch, nextTick, useId } from 'vue';
+import { computed, ref, watch, nextTick, onBeforeUnmount, useId } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { isDiffContent, renderMarkdown } from '../../utils/markdown';
 import { synthesizeToolDiff } from '../../utils/tool-diff';
@@ -47,6 +47,46 @@ const toolName = computed(() => useParsed.value?.name ?? '工具');
 const meta = computed(() => getProcessKindMeta(`tool:${toolName.value}`));
 // 行内 mono 细节（对齐 openhanako extractToolDetail：read→文件名、bash→命令…）。
 const detail = computed(() => (props.use ? summarizeToolUse(props.use.content) : ''));
+// p3（2026-10-27）：生成文件工具家族——折叠态 basename 升级为可点击 chip（点击弹「默认打开 /
+// 选择打开方式」迷你菜单）。chip 只依赖 file_path/notebook_path 存在，不依赖 diff 合成家族。
+const FILE_TOOLS: readonly string[] = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
+const filePath = computed<string | null>(() => {
+  if (!useParsed.value || !FILE_TOOLS.includes(useParsed.value.name ?? '')) return null;
+  const input = useParsed.value.input;
+  if (!input || typeof input !== 'object') return null;
+  const p = (input as Record<string, unknown>).file_path ?? (input as Record<string, unknown>).notebook_path;
+  return typeof p === 'string' && p.length > 0 ? p : null;
+});
+const fileBase = computed(() => (filePath.value ? (filePath.value.split(/[\\/]/).pop() ?? '') : ''));
+const fileMenuOpen = ref(false);
+const fileToast = ref('');
+let fileToastTimer: ReturnType<typeof setTimeout> | null = null;
+async function openGeneratedFile(mode: 'default' | 'choose'): Promise<void> {
+  if (!filePath.value) return;
+  fileMenuOpen.value = false;
+  try {
+    const res = await window.claudeLink.fsOpenPath(filePath.value, mode);
+    fileToast.value = res.ok ? (mode === 'choose' ? `已调起打开方式：${fileBase.value}` : `已打开 ${fileBase.value}`) : res.message;
+  } catch (e) {
+    fileToast.value = `打开失败：${(e as Error).message ?? e}`;
+  }
+  if (fileToastTimer) clearTimeout(fileToastTimer);
+  fileToastTimer = setTimeout(() => { fileToast.value = ''; }, 4000);
+}
+// 菜单外点关闭（head/ chip 内的点交由 @click.stop 自管，这里只关菜单）。
+function onFileMenuDocDown(e: PointerEvent): void {
+  if ((e.target as Element | null)?.closest?.('.tool-row__filewrap')) return;
+  fileMenuOpen.value = false;
+}
+watch(fileMenuOpen, (v) => {
+  if (v) document.addEventListener('pointerdown', onFileMenuDocDown);
+  else document.removeEventListener('pointerdown', onFileMenuDocDown);
+});
+// round-002 M1：卸载时同时清 pending 的 fileToastTimer，避免卸载后 4s 对已卸载组件 ref 赋值。
+onBeforeUnmount(() => {
+  if (fileToastTimer) clearTimeout(fileToastTimer);
+  document.removeEventListener('pointerdown', onFileMenuDocDown);
+});
 // 与 process-kind.isSubAgentToolUse 共用同一份工具名清单：Agent/Task/Workflow/Skill 派生的
 // 子 agent 都显示「查看过程」锚点（原先只认 Agent/Task，Workflow/Skill 漏掉）。
 const isSubAgent = computed(() => (SUB_AGENT_TOOL_NAMES as readonly string[]).includes(toolName.value));
@@ -119,7 +159,13 @@ watch([expanded, displayedSource], () => {
       <button type="button" class="tool-row__head" :aria-expanded="expanded" :aria-controls="bodyId" @click="toggleExpand">
         <span class="tool-row__icon">{{ meta.icon }}</span>
         <span class="tool-row__desc">{{ meta.label }}</span>
-        <span v-if="detail" class="tool-row__detail">{{ detail }}</span>
+        <span v-if="filePath" class="tool-row__filewrap dlg-no-drag">
+          <span class="tool-row__file" role="button" tabindex="0" :title="filePath"
+            @click.stop="!exportMode && (fileMenuOpen = !fileMenuOpen)"
+            @keydown.enter.stop.prevent="!exportMode && (fileMenuOpen = !fileMenuOpen)"
+            @keydown.space.stop.prevent="!exportMode && (fileMenuOpen = !fileMenuOpen)">{{ fileBase }}</span>
+        </span>
+        <span v-else-if="detail" class="tool-row__detail">{{ detail }}</span>
         <span v-if="diffCounts" class="tool-row__diffcounts" :title="`新增 +${diffCounts.additions} · 删除 −${diffCounts.deletions}`">
           <span class="tool-row__diffcounts-add">+{{ diffCounts.additions }}</span>
           <span class="tool-row__diffcounts-del">−{{ diffCounts.deletions }}</span>
@@ -134,6 +180,13 @@ watch([expanded, displayedSource], () => {
       </button>
       <button v-if="!exportMode && isSubAgent && use?.toolUseId" type="button" class="tool-row__anchor" @click="focusSubAgent">查看过程 →</button>
     </div>
+    <!-- p3（2026-10-27）：生成文件迷你菜单 + toast——tool-row 级（controls wrapper 外），
+         不触 regression「控件 wrapper 内恰 2 button」钉；head 内 chip 是 span 非 button，HTML 合法。 -->
+    <div v-if="fileMenuOpen" class="tool-row__filemenu" role="menu" aria-label="打开生成文件">
+      <button type="button" role="menuitem" @click="openGeneratedFile('default')">用默认程序打开</button>
+      <button type="button" role="menuitem" @click="openGeneratedFile('choose')">选择打开方式…</button>
+    </div>
+    <div v-if="fileToast" class="tool-row__filetoast" role="status">{{ fileToast }}</div>
     <div v-if="everExpanded" v-show="expanded" :id="bodyId" class="tool-row__body">
       <div v-if="useParsed" class="tool-row__json">
         <pre>{{ JSON.stringify(useParsed.input ?? {}, null, 2) }}</pre>
@@ -172,6 +225,7 @@ watch([expanded, displayedSource], () => {
 
 <style scoped>
 .tool-row {
+  position: relative; /* p3：filemenu/filetoast 绝对定位锚点 */
   width: 100%;
 }
 
@@ -226,6 +280,69 @@ watch([expanded, displayedSource], () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* p3（2026-10-27）：生成文件 chip（accent 特殊色 + 下划线，ZCode 文件链接观感）+ 迷你菜单 + toast。 */
+.tool-row__filewrap {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  overflow: hidden;
+}
+.tool-row__file {
+  color: var(--color-accent-strong);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-row__file:hover,
+.tool-row__file:focus-visible {
+  color: var(--color-accent);
+}
+.tool-row__filemenu {
+  position: absolute;
+  left: 0; /* R1-F8：贴 tool-row 左缘、chip 行下方下拉（.tool-row 已有 position:relative 锚点）。 */
+  top: 100%;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  min-width: 10rem;
+  padding: 4px;
+  gap: 2px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+  box-shadow: var(--elevation-2);
+}
+.tool-row__filemenu button {
+  all: unset;
+  cursor: pointer;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  color: var(--color-text);
+}
+.tool-row__filemenu button:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  color: var(--color-accent-strong);
+}
+.tool-row__filetoast {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  max-width: 100%;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+  font-size: 0.72rem;
+  box-shadow: var(--elevation-2);
 }
 
 /* 折叠态 +/− 行数徽标：一眼看出改动规模（additions/deletions 由渲染层 tool-diff.ts 本地统计，截断前按全量变更计数）。 */

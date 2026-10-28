@@ -90,11 +90,12 @@ console.log('=== 1) ipc-handlers.ts：ipcMain.handle( → regInvokeHandler( 全�
 //（计划 2026-10-21「回合投影 + 标题质量」）+ P2 会话置顶 SESSION_SET_PINNED（计划 2026-10-22
 // six-issues 点 S4）+ P6 Skill 刷新 COMMANDS_REFRESH_GLOBAL（同计划点 S5，方案 C 同步条）
 // + P4 会话命名兜底 SESSION_SET_FALLBACK_NAME（计划 2026-10-24-web-sync §3.2.1-6）
-// + 轮末文件改动两通道 TURN_DIFF_*（计划 2026-10-26-turn-file-changes §3.4）；
+// + 轮末文件改动两通道 TURN_DIFF_*（计划 2026-10-26-turn-file-changes §3.4）
+// + FS_OPEN_PATH（2026-10-27 五问题 p3：聊天工具行生成文件打开，绝对路径直达）；
 // ipcMain.handle( === 0：注释行无该带括号字面。
 check('ipc-handlers.ts ipcMain.handle( 出现次数 === 0', countOccurrences(handlers, 'ipcMain.handle(') === 0,
   `实际 ${countOccurrences(handlers, 'ipcMain.handle(')}`);
-check('ipc-handlers.ts regInvokeHandler( 出现次数 === 89', countOccurrences(handlers, 'regInvokeHandler(') === 89,
+check('ipc-handlers.ts regInvokeHandler( 出现次数 === 90', countOccurrences(handlers, 'regInvokeHandler(') === 90,
   `实际 ${countOccurrences(handlers, 'regInvokeHandler(')}`);
 check('ipc-handlers.ts 从 ./ipc-registry 导入 regInvokeHandler',
   /import\s*\{[^}]*regInvokeHandler[^}]*\}\s*from\s*'\.\/ipc-registry'/.test(handlers));
@@ -393,12 +394,16 @@ check('installWebBridge 引导位于 createApp(App) mount 之前',
 
 // 11.2 键集对等契约：WEB_CHANNEL_TABLE 键集 === ClaudeLinkAPI 接口成员集（多键/少键均 fail）
 // P2 会话置顶（点 S4）新通道 SESSION_SET_PINNED 五处一致性由下方键集对等（表键 ↔ 接口成员）
-// + 注册计数断言覆盖（计数以 1) 节 regInvokeHandler( === 89 的计算式断言为准，此处不重复
+// + 注册计数断言覆盖（计数以 1) 节 regInvokeHandler( === 90 的计算式断言为准，此处不重复
 // 硬编码，防通道增减后再陈旧）；此处再显式钉三字面（ipc 常量 / 表项 / handler 注册）防键集
 // 对等被并行改动绕过。
 check("IPC_CHANNELS 含 SESSION_SET_PINNED: 'session:setPinned'", ipcConst.includes("SESSION_SET_PINNED: 'session:setPinned'"));
 check('WEB_CHANNEL_TABLE 含 setSessionPinned 表项', webBridge.includes('setSessionPinned: IPC_CHANNELS.SESSION_SET_PINNED'));
 check('ipc-handlers 注册 SESSION_SET_PINNED handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.SESSION_SET_PINNED'));
+// P3（2026-10-27 五问题）：FS_OPEN_PATH 新通道显式三字面钉（同 SESSION_SET_PINNED 先例防漂移）。
+check("IPC_CHANNELS 含 FS_OPEN_PATH: 'fs:openPath'", ipcConst.includes("FS_OPEN_PATH: 'fs:openPath'"));
+check('WEB_CHANNEL_TABLE 含 fsOpenPath 表项', webBridge.includes('fsOpenPath: IPC_CHANNELS.FS_OPEN_PATH'));
+check('ipc-handlers 注册 FS_OPEN_PATH handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.FS_OPEN_PATH'));
 const tableStart = webBridge.indexOf('const WEB_CHANNEL_TABLE');
 const tableEnd = webBridge.indexOf('\n};', tableStart);
 check('web-bridge.ts 含 WEB_CHANNEL_TABLE（Record<keyof ClaudeLinkAPI, string>）',

@@ -185,6 +185,7 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   fsRename: IPC_CHANNELS.FS_RENAME,
   fsTrash: IPC_CHANNELS.FS_TRASH,
   fsShowInExplorer: IPC_CHANNELS.FS_SHOW_IN_EXPLORER,
+  fsOpenPath: IPC_CHANNELS.FS_OPEN_PATH,
   resolveExportTarget: IPC_CHANNELS.EXPORT_RESOLVE_TARGET,
   onExportTargetRequested: IPC_CHANNELS.EXPORT_REQUEST_TARGET,
 };
