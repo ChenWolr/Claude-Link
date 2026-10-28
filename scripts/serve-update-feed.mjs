@@ -43,6 +43,9 @@ const yml = [
   '  <ul>',
   '  <li>列表项一：<strong>加粗</strong>与 <a href="https://example.com/a">链接文本</a></li>',
   '  <li>列表项二</li>',
+  // P1（autoHeight E2E）：追加 30 条撑高内容——展开后 notes 内滚（>180px）且卡片总高逼近
+  // max-height 上限，让 E4c 的溢出断言有分辨力（旧 fixture 仅 2 条，撑不破任何边界）。
+  ...Array.from({ length: 30 }, (_, i) => `  <li>修复与改进条目 ${i + 1}：稳定性与体验优化说明占位文本，用于撑高更新说明内容高度。</li>`),
   '  </ul>',
   '  <p>注入样例：[显式链接](https://example.com/b)、内嵌脚本 <script>alert(1)</script> 与图片 <img src=x onerror=alert(1)> 已消毒</p>',
 ].join('\n');
