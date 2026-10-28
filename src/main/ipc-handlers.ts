@@ -234,9 +234,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return getChangeDiff(workingDir, path, safeContext);
   });
   // 点文件「打开」：shell.openPath 走系统默认程序（仓库根解析 + 越界守卫在 openChangeFile 内）。
-  regInvokeHandler(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) => {
+  // mode（p4 2026-10-27 双按钮）：'choose' → 直达系统「打开方式」对话框；非法/缺省收敛为 'default'
+  //（web 直发任意第三参不炸，与既有 invokeFromWeb 逐参展开兼容）。
+  regInvokeHandler(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string, mode: unknown) => {
     if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
-    return openChangeFile(workingDir, p);
+    return openChangeFile(workingDir, p, mode === 'choose' ? 'choose' : 'default');
   });
 
   // 轮末文件改动（turn-diff，2026-10-26 计划 §4-P4）：只读查询两通道（web 经注册表自动可达）。

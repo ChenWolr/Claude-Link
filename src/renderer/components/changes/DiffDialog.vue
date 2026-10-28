@@ -258,13 +258,14 @@ function onSearchKeydown(e: KeyboardEvent): void {
     gotoSearch(e.shiftKey ? -1 : 1);
   }
 }
-// 「打开」文件：shell.openPath 走系统默认程序；失败时主进程 Windows 降级弹「打开方式」对话框。
-async function openExternally(): Promise<void> {
+// 「打开」文件：default=shell.openPath 走系统默认程序（失败时主进程 Windows 降级弹「打开方式」
+// 对话框）；choose=直达系统「打开方式」对话框（p4 双按钮，2026-10-27；非 win32 主进程回文案）。
+async function openExternally(mode: 'default' | 'choose' = 'default'): Promise<void> {
   if (!currentFile.value) return;
   const wd = sessionStore.activeSession?.workingDir ?? null;
   try {
-    const res = await window.claudeLink.openChangeFile(wd, currentFile.value.path);
-    showToast(res.ok ? `已用默认程序打开 ${pathParts.value.name}` : res.message);
+    const res = await window.claudeLink.openChangeFile(wd, currentFile.value.path, mode);
+    showToast(res.ok ? (mode === 'choose' ? '已调起打开方式对话框' : `已用默认程序打开 ${pathParts.value.name}`) : res.message);
   } catch (e) {
     showToast(`打开失败：${(e as Error).message ?? e}`);
   }
@@ -722,7 +723,10 @@ onBeforeUnmount(() => {
               <span><i class="lg-mod"></i>修改</span>
             </div>
             <div class="diff-footer__actions">
-              <button class="btn btn--primary" type="button" :disabled="!currentFile || currentFile.status === 'D'" :title="currentFile && currentFile.status === 'D' ? '已删除文件无法打开' : ''" @click="openExternally">
+              <button class="btn" type="button" :disabled="!currentFile || currentFile.status === 'D'" :title="currentFile && currentFile.status === 'D' ? '已删除文件无法打开' : '选择用于打开此文件的程序'" @click="openExternally('choose')">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="3.5" cy="6" r="0.5"/><circle cx="3.5" cy="12" r="0.5"/><circle cx="3.5" cy="18" r="0.5"/></svg>打开方式…
+              </button>
+              <button class="btn btn--primary" type="button" :disabled="!currentFile || currentFile.status === 'D'" :title="currentFile && currentFile.status === 'D' ? '已删除文件无法打开' : ''" @click="openExternally()">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>打开
               </button>
             </div>
