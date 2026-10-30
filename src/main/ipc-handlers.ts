@@ -27,7 +27,7 @@ import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderPro
 import { syncWebAccessServer, kickAllWebClients, randomWebAccessToken, type WebAccessSyncHooks } from './modules/web-access/web-access-server';
 import { buildWebAccessInfo, currentWebAccessUrls } from './modules/web-access/web-access-info';
 import { runProviderModelTest } from './modules/connection-tester';
-import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
+import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace, MAX_ENTRIES } from './modules/workspace-history';
 import { listRoots, listDir, mkdir, statPath, isValidFolderName, renamePath } from './modules/fs-picker';
 import type { FsTrashFailure } from '../shared/types/fs-picker';
 import { badDirCacheHas, badDirCacheMark, collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
@@ -643,7 +643,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (typeof req.dir !== 'string' || req.dir === '') throw new Error('Invalid MCP write dir');
       const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
       const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
-      if (!knownKeys.has(normalizeDirKey(req.dir))) throw new Error('目标目录不在已知项目目录集中，已拒绝写入');
+      if (!knownKeys.has(normalizeDirKey(req.dir))) throw new Error(`目标目录不在已知项目目录集中，已拒绝写入：该目录已不在最近工作区（上限 ${MAX_ENTRIES} 条），在对应目录重新打开会话后重试`);
       dir = req.dir;
     }
     return writeScopedMcpServer({ scope: req.scope, dir, entry, mode: req.mode, userHome: effectiveUserHome() ?? os.homedir() });

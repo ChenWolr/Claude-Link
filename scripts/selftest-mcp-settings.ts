@@ -2208,6 +2208,35 @@ console.log('\n=== P. 保存位置联动组（openAdd 联动 / resetForm 去预�
       pSrc === '' ? 'McpSettings.vue 不可读' : 'saveForm 缺新增态哨兵行拦截分支、缺 V2 载体分化（JSON→jsonError 红条 / 表单→toast，共用 SENTINEL_BLOCK_MSG）、拦截未以 return 退出，或拦截位于落盘链 saving.value = true 之后（失效）',
     );
   }
+
+  // P5（2026-10-29 mcp-scope-misplacement-fix P3-A，H5）WRITE 白名单拒绝文案补「最近工作区上限」
+  // 说明：ipc-handlers.ts MCP_WRITE_SCOPED 拒绝路径为模板串「目标目录不在已知项目目录集中，已拒绝
+  // 写入：该目录已不在最近工作区（上限 ${MAX_ENTRIES} 条），在对应目录重新打开会话后重试」（上限
+  // 随常量演进，不与实际上限漂移）；MAX_ENTRIES 经 workspace-history import 行引入；负向：
+  // 旧文案整串（'目标目录不在已知项目目录集中，已拒绝写入'）零出现（防只留半句旧文案；新模板串
+  // 以旧文案为前缀但呈反引号模板形态，前缀后随全角冒号不误伤）。round-001 F6：负向放宽为三种
+  // 引号形态（'/"/`）整串零出现的正则——旧文案无论用哪种引号还原为独立整串都 FAIL。
+  // MCP_EXPORT_SCOPED 同款文案
+  //（「已拒绝导出」）按计划边界不改，不在本钉范围。
+  {
+    const p5Rel = path.join('src', 'main', 'ipc-handlers.ts');
+    let p5Src = '';
+    try {
+      p5Src = fs.readFileSync(path.resolve(__dirname, '..', p5Rel), 'utf8');
+    } catch {
+      // 缺文件/不可读：保持空串，P5 走 FAIL 分支（不抛错、不崩脚本）。
+    }
+    const p5ImportLine = p5Src.split('\n').find((l) => l.includes("from './modules/workspace-history'")) ?? '';
+    check(
+      'P5',
+      'WRITE 白名单拒绝文案补「最近工作区上限」说明：MCP_WRITE_SCOPED 拒绝为含 ${MAX_ENTRIES} 插值模板串 + workspace-history import 引入 MAX_ENTRIES + 旧文案整串（三种引号形态）零出现',
+      p5Src !== ''
+        && p5Src.includes('该目录已不在最近工作区（上限 ${MAX_ENTRIES} 条）')
+        && /MAX_ENTRIES\s*[,}]/.test(p5ImportLine)
+        && !/['"`]目标目录不在已知项目目录集中，已拒绝写入['"`]/.test(p5Src),
+      p5Src === '' ? 'ipc-handlers.ts 不可读' : 'MCP_WRITE_SCOPED 拒绝文案未补上限说明、缺 MAX_ENTRIES import 或旧文案整串残留',
+    );
+  }
 }
 
 // ── 汇总与退出码 ─────────────────────────────────────────────────────────────
