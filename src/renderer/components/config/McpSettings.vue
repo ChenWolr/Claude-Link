@@ -1329,7 +1329,7 @@ function closeImportDialog(): void {
 }
 
 async function parseImportPreview(): Promise<void> {
-  const result = await analyzeImportText(importText.value, managedServers.value);
+  const result = await analyzeImportText(importText.value, importTargetList.value);
   importPreview.value = result;
   // p3-R3：每次（重新）解析 → 勾选重置为默认全选（解析失败无条目可勾，保持现状不动）。
   if (!('error' in result)) {
@@ -1346,30 +1346,50 @@ const selectedImportableCount = computed<number>(() => {
   return p.entries.filter((e) => !e.skip && importChecked.value[e.name] === true).length;
 });
 
+/**
+ * 确认导入（计划 2026-10-29 mcp-import-scope-and-segment-lock §3.B.4）：导入目标作用域跟随
+ * 当前入口 rail——managed 栏走既有 persistManaged 链（零改动回归底线）；user/project 栏逐条
+ * writeMcpScoped upsert 落盘到 ~/.claude.json / <dir>/.mcp.json。
+ * 边界：逐条原子写各自独立——部分失败不回滚，toast 明示成败数；同名条目的覆盖由主进程
+ * upsert 语义决定（负缓存陈旧快照下预览可能漏标同名 → 透明计入 overwriteCount，不弹确认）。
+ */
 async function confirmImport(): Promise<void> {
   if (importing.value || selectedImportableCount.value === 0) return;
   importing.value = true;
   try {
     // 与预览同源解析：预览后文本可能又被改动，以确认瞬间解析为准（§3.3 同名跳过同源）。
-    const fresh = await analyzeImportText(importText.value, managedServers.value);
+    const fresh = await analyzeImportText(importText.value, importTargetList.value);
     if ('error' in fresh) {
       importPreview.value = fresh;
       pushToast(`导入失败：${fresh.error}`);
       return;
     }
-    const now = Date.now();
     // p3-R3：只导入「勾选且非 skip」的条目。勾选集按 name 对齐 fresh；预览后改文本未重新
     // 解析的病态路径下，勾选集里没有的新条目视为未勾选不导入（宁可少导不误导）。
-    const created: McpManagedServer[] = fresh.entries
+    // T4（round-3）：入库前过滤哨兵值键——「复制 JSON」产出的哨兵文本（值 = MCP_VALUE_MASK）
+    // 经导入弹窗回导时不得作为字面密钥静默入库（否则会话注入错误凭据、运行时认证失败难排查）。
+    // 过滤后为空对象则不设 env/headers（与原「空则不带键」口径一致）。
+    const picked = fresh.entries
       .filter((e) => !e.skip && importChecked.value[e.name] === true)
       .map((e) => {
         const parsed = e.source;
+        return {
+          parsed,
+          cleanEnv: Object.fromEntries(Object.entries(parsed.env ?? {}).filter(([, v]) => v !== MCP_VALUE_MASK)),
+          cleanHeaders: Object.fromEntries(Object.entries(parsed.headers ?? {}).filter(([, v]) => v !== MCP_VALUE_MASK)),
+        };
+      });
+    // 空 JSON / 全同名跳过 / 全不勾选：user/project 与 managed 同走此前置拦截（不进写盘循环）。
+    if (picked.length === 0) {
+      pushToast('没有可导入的服务器（全部被跳过）');
+      return;
+    }
+    const scope = activeScope.value.kind;
+    if (scope === 'managed') {
+      // ── managed 栏：既有 created 构造 + persistManaged 链（零改动）────────────────
+      const now = Date.now();
+      const created: McpManagedServer[] = picked.map(({ parsed, cleanEnv, cleanHeaders }) => {
         const item: McpManagedServer = { id: crypto.randomUUID(), name: parsed.name, description: '', transport: parsed.transport, createdAt: now, updatedAt: now };
-        // T4（round-3）：入库前过滤哨兵值键——「复制 JSON」产出的哨兵文本（值 = MCP_VALUE_MASK）
-        // 经导入弹窗回导时不得作为字面密钥静默入库（否则会话注入错误凭据、运行时认证失败难排查）。
-        // 过滤后为空对象则不设 env/headers（与原「空则不带键」口径一致）。
-        const cleanEnv = Object.fromEntries(Object.entries(parsed.env ?? {}).filter(([, v]) => v !== MCP_VALUE_MASK));
-        const cleanHeaders = Object.fromEntries(Object.entries(parsed.headers ?? {}).filter(([, v]) => v !== MCP_VALUE_MASK));
         if (parsed.transport === 'stdio') {
           item.command = parsed.command ?? '';
           if (parsed.args && parsed.args.length > 0) item.args = parsed.args;
@@ -1380,18 +1400,97 @@ async function confirmImport(): Promise<void> {
         }
         return item;
       });
-    if (created.length === 0) {
-      pushToast('没有可导入的服务器（全部被跳过）');
+      const next = [...managedServers.value, ...created];
+      const skipped = fresh.entries.length - created.length;
+      const saved = await persistManaged(next, `已导入 ${created.length} 台${skipped > 0 ? `（未导入 ${skipped} 台：同名/名称非法或未勾选）` : ''}`);
+      if (saved) {
+        showImportDialog.value = false;
+        importText.value = ''; // 导入已完成消费，文本与预览清空
+        importPreview.value = null;
+        importChecked.value = {}; // p3-R3：勾选状态一并清空
+      }
       return;
     }
-    const next = [...managedServers.value, ...created];
-    const skipped = fresh.entries.length - created.length;
-    const saved = await persistManaged(next, `已导入 ${created.length} 台${skipped > 0 ? `（未导入 ${skipped} 台：同名/名称非法或未勾选）` : ''}`);
-    if (saved) {
+    // ── user / project 栏：逐条 writeMcpScoped upsert（串行，写盘顺序确定）─────────
+    // project 栏前置目录可用性判定：目录已从最近工作区消失（activeProjectDir 为 null）→
+    // 不触盘直接拦截（与添加/编辑链同一降级口径）。
+    if (scope === 'project' && activeProjectDir.value === null) {
+      pushToast('目标目录不可用，无法导入');
+      return;
+    }
+    const targetDir = scope === 'project' ? activeProjectDir.value?.path : undefined;
+    const locationText = scope === 'user' ? '用户级（~/.claude.json）' : '项目级（.mcp.json）';
+    let okCount = 0;
+    let failCount = 0;
+    let overwriteCount = 0;
+    let firstError = '';
+    // round-001 m4：本次导入被覆盖的同名条目名单——writeMcpScoped 逐条回 { overwrote: boolean }
+    //（主进程 writer：upsert 命中现有同名 → true，见 mcp-writer.ts），串行循环内即可精确定位，
+    // 无须退化为「本栏全部本次写入条目重探」。
+    const overwrittenNames: string[] = [];
+    for (const { parsed, cleanEnv, cleanHeaders } of picked) {
+      // ScopedMcpEntry 形态：无 id/createdAt/description；timeoutMs 存在才透传（主进程
+      // isValidMcpTimeoutMs 同口径写键）。
+      const entry: McpScopedWriteEntry = { name: parsed.name, transport: parsed.transport };
+      if (parsed.transport === 'stdio') {
+        entry.command = parsed.command ?? '';
+        if (parsed.args && parsed.args.length > 0) entry.args = parsed.args;
+        if (Object.keys(cleanEnv).length > 0) entry.env = cleanEnv;
+      } else {
+        entry.url = parsed.url ?? '';
+        if (Object.keys(cleanHeaders).length > 0) entry.headers = cleanHeaders;
+      }
+      if (parsed.timeoutMs !== undefined) entry.timeoutMs = parsed.timeoutMs;
+      const payload: McpWriteScopedPayload = { scope, entry, mode: 'upsert' };
+      if (targetDir !== undefined) payload.dir = targetDir;
+      try {
+        // 串行 await：不并发（写盘顺序确定、失败逐条计入；部分失败不回滚）。
+        const res = await claude.writeMcpScoped(payload);
+        okCount += 1;
+        // 负缓存陈旧快照下预览漏标同名 → upsert 覆盖 → 透明计数（不弹确认，计划 §1.4 决定②）。
+        if (res.overwrote === true) {
+          overwriteCount += 1;
+          overwrittenNames.push(parsed.name);
+        }
+      } catch (e) {
+        failCount += 1;
+        if (firstError === '') firstError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    pushToast(
+      `已导入 ${okCount} 台到${locationText}${overwriteCount > 0 ? `（其中覆盖同名 ${overwriteCount} 台）` : ''}${failCount > 0 ? `；${failCount} 台失败：${firstError}` : ''}`,
+    );
+    await refresh();
+    // round-001 m4：被覆盖同名条目补 single 现探——upsert 覆盖后旧定义的探活结论可能仍在 60s
+    // 批量缓存（refresh 尾探 scoped 批量命中即陈旧误显）。镜像 saveScopedForm 既有 fire-and-forget
+    // single 模式：scope/dir 推导同 handleProbe（user → {scope:'user'}；project → 当前栏位原始
+    // 路径，兜底 ''）；disposed 守卫；回包按报告 key 回填 probeReports；IPC 自身失败静默（结论
+    // 维持现状，导入成功 toast 不受影响）。新增条目无缓存可陈旧（尾探批量即现探），无须重探。
+    // 竞态闭环：回填与 P2-2 的批量 dispatchAt fresh 保留 + probedAt 仲裁互锁，批量缓存旧结论
+    // 后到不覆盖 single 现探新结论。
+    if (!disposed && overwrittenNames.length > 0) {
+      for (const name of overwrittenNames) {
+        if (scope === 'user') {
+          void claude.probeMcpServers({ target: 'single', name, scope: 'user' }).then((rs) => {
+            const r = rs[0];
+            if (disposed || !r) return;
+            probeReports.value = { ...probeReports.value, [r.key || `user:${name}`]: r };
+          }, () => {});
+        } else {
+          void claude.probeMcpServers({ target: 'single', name, scope: 'project', dir: targetDir ?? '' }).then((rs) => {
+            const r = rs[0];
+            if (disposed || !r) return;
+            probeReports.value = { ...probeReports.value, [r.key || `project:${normalizeDirKey(targetDir ?? '')}:${name}`]: r };
+          }, () => {});
+        }
+      }
+    }
+    // 收尾：有成功 → 关闭弹窗并清空（与 managed 分支同收尾）；全部失败 → 弹窗与文本保留。
+    if (okCount > 0) {
       showImportDialog.value = false;
-      importText.value = ''; // 导入已完成消费，文本与预览清空
+      importText.value = '';
       importPreview.value = null;
-      importChecked.value = {}; // p3-R3：勾选状态一并清空
+      importChecked.value = {};
     }
   } finally {
     importing.value = false;
@@ -1975,7 +2074,7 @@ const scopeNoteHead = computed<string>(() => {
 
     <!-- 弹窗（Teleport 到 body）：方案 A 点4 起仅导入 JSON 弹窗仍走弹窗壳（编辑器已页内化） -->
     <Teleport to="body">
-      <!-- 导入 JSON 弹窗（textarea + 解析预览 + 同名跳过标记；导入目标=Claude Link 管理） -->
+      <!-- 导入 JSON 弹窗（textarea + 解析预览 + 同名跳过标记；导入目标跟随当前栏位） -->
       <div v-if="showImportDialog" class="mcp-mask" role="presentation" @click.self="closeImportDialog">
         <div ref="importCardRef" class="mcp-import-modal" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title" :style="importShellStyle">
           <div class="mcp-import-modal__head" @pointerdown="importShell.beginDrag" @dblclick="importShell.resetToCenter">
@@ -1992,7 +2091,13 @@ const scopeNoteHead = computed<string>(() => {
                 class="mcp-textarea mcp-textarea--tall"
                 placeholder='{"mcpServers": { "context7": { "command": "npx", "args": ["-y", "@upstash/context7-mcp"] } }}'
               ></textarea>
-              <span class="mcp-ffield__hint">支持 {"mcpServers":{…}}（Claude Desktop/Cursor/Windsurf）、{"servers":{…}}（VS Code）与裸 {名称:配置} 三种形态；导入到「Claude Link 管理」。</span>
+              <span class="mcp-ffield__hint">支持 {"mcpServers":{…}}（Claude Desktop/Cursor/Windsurf）、{"servers":{…}}（VS Code）与裸 {名称:配置} 三种形态；导入目标跟随当前栏位。</span>
+              <!-- 导入目标位置（计划 2026-10-29 §3.B.3）：跟随当前入口 rail 三形态，同名判定同源 -->
+              <span class="mcp-ffield__hint mcp-imp__target" data-testid="mcp-import-target">
+                <template v-if="activeScope.kind === 'managed'">将导入到：Claude Link 管理（全局生效）</template>
+                <template v-else-if="activeScope.kind === 'user'">将导入到：用户级 ~/.claude.json（Claude Code 全局共享）</template>
+                <template v-else>将导入到：项目级 {{ activeProjectDir ? activeProjectDir.path : '' }}\.mcp.json（仅该目录会话）</template>
+              </span>
             </div>
             <button class="mcp-btn" type="button" :disabled="importText.trim() === ''" @click="parseImportPreview">解析预览</button>
             <div v-if="importPreview" class="mcp-imp">
@@ -3513,6 +3618,13 @@ const scopeNoteHead = computed<string>(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-panel-soft);
+}
+
+/* 导入目标位置行（2026-10-29 §3.B.3）：跟随入口 rail 的落点说明，与上方形态说明同段但语义更强。 */
+.mcp-imp__target {
+  color: var(--color-accent-strong);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .mcp-imp__name {

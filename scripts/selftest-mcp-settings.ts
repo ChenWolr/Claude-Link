@@ -2237,6 +2237,56 @@ console.log('\n=== P. 保存位置联动组（openAdd 联动 / resetForm 去预�
       p5Src === '' ? 'ipc-handlers.ts 不可读' : 'MCP_WRITE_SCOPED 拒绝文案未补上限说明、缺 MAX_ENTRIES import 或旧文案整串残留',
     );
   }
+
+  // P6 导入作用域跟随栏位（2026-10-29 mcp-import-scope-and-segment-lock 改动点 C 新增；计划
+  // §3.B 改动点 B 的静态契约钉）：导入目标不再恒为管理库，改为跟随当前入口 rail——
+  // managed 栏走既有 persistManaged（零改动回归底线）、user/project 栏走 writeMcpScoped 逐条
+  // 落盘。三组子断言：
+  //   ① confirmImport 函数体切片（async function confirmImport → const importCardRef，与 O5 同源
+  //      切片）含 writeMcpScoped 调用 + importTargetList.value 消费（预览同名判定换源）+
+  //      activeProjectDir.value === null 前置判定（project 栏目录消失态拦截，不触盘）+ overwrote
+  //      覆盖计数消费（负缓存陈旧快照下预览漏标同名 → upsert 覆盖 → 透明计数）；
+  //   ② 负向：预览侧切片（function openImport → const selectedImportableCount，含 openImport /
+  //      closeImportDialog / parseImportPreview——预览解析的第二参就在其中）与 confirmImport 切片
+  //      中旧形态 analyzeImportText(importText.value, managedServers.value) 零出现（第二参统一
+  //      改传 importTargetList.value）；预览侧另正向钉 importTargetList.value 在位；
+  //   ③ 模板区（根 <template> → 末个 </template>）含「将导入到：」前缀文案与三形态目标位置字面
+  //      （Claude Link 管理（全局生效）/ 用户级 ~/.claude.json（Claude Code 全局共享）/ 项目级 …
+  //      .mcp.json（仅该目录会话）；项目形态中目录路径为插值，故断言其后半段字面）。
+  // RED 依据（本点前的现状）：confirmImport 恒构造 McpManagedServer[] + persistManaged 写管理库、
+  // 无 writeMcpScoped/importTargetList/activeProjectDir 判定/overwrote 计数，预览第二参恒
+  // managedServers.value，弹窗无目标位置文案 —— 本钉应 FAIL。
+  {
+    const p6BodyStart = pSrc.indexOf('async function confirmImport');
+    const p6BodyEnd = pSrc.indexOf('const importCardRef', p6BodyStart);
+    const p6Body = p6BodyStart >= 0 && p6BodyEnd > p6BodyStart ? pSrc.slice(p6BodyStart, p6BodyEnd) : '';
+    const p6PrevStart = pSrc.indexOf('function openImport');
+    const p6PrevEnd = pSrc.indexOf('const selectedImportableCount', p6PrevStart);
+    const p6Prev = p6PrevStart >= 0 && p6PrevEnd > p6PrevStart ? pSrc.slice(p6PrevStart, p6PrevEnd) : '';
+    const p6OldSecondArg = 'analyzeImportText(importText.value, managedServers.value)';
+    const p6TplStart = pSrc.search(/^<template>[ \t\r]*$/m);
+    const p6TplEnd = pSrc.lastIndexOf('</template>');
+    const p6Tpl = p6TplStart >= 0 && p6TplEnd > p6TplStart ? pSrc.slice(p6TplStart, p6TplEnd) : '';
+    check(
+      'P6',
+      '导入作用域跟随栏位：confirmImport 切片含 writeMcpScoped 调用 + importTargetList.value + activeProjectDir.value === null 前置判定 + overwrote 覆盖计数；预览/确认切片旧第二参 managedServers.value 零出现；模板区含「将导入到：」三形态目标位置文案',
+      p6Body !== ''
+        && p6Prev !== ''
+        && p6Body.includes('writeMcpScoped')
+        && p6Body.includes('importTargetList.value')
+        && p6Body.includes('activeProjectDir.value === null')
+        && p6Body.includes('overwrote')
+        && p6Prev.includes('importTargetList.value')
+        && !p6Prev.includes(p6OldSecondArg)
+        && !p6Body.includes(p6OldSecondArg)
+        && p6Tpl !== ''
+        && p6Tpl.includes('将导入到：')
+        && p6Tpl.includes('Claude Link 管理（全局生效）')
+        && p6Tpl.includes('用户级 ~/.claude.json（Claude Code 全局共享）')
+        && p6Tpl.includes('.mcp.json（仅该目录会话）'),
+      pSrc === '' ? 'McpSettings.vue 不可读' : 'confirmImport 仍恒写管理库（缺 writeMcpScoped/importTargetList/activeProjectDir 判定/overwrote 计数）、预览仍传 managedServers.value 旧第二参，或弹窗缺「将导入到：」三形态目标位置文案',
+    );
+  }
 }
 
 // ── 汇总与退出码 ─────────────────────────────────────────────────────────────
