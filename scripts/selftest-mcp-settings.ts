@@ -111,6 +111,79 @@
 //     一常量）。点6 RED：O1/O2/O3 因副本仍在而 FAIL；实现后全 PASS。同点 H6 改写（编排器
 //     裁定）：原钉渲染层值级清洗副本的存在性，副本删除后改钉「解析走桥 + 副本定义零出现 +
 //     透传负向保留」，详见 H6 处注释。
+//   P 保存位置联动组（2026-10-29 mcp-scope-misplacement-fix P1-A，R1/R2/H3）：McpSettings.vue
+//     保存位置三态与入口 rail 联动的静态源码钉（沿 H/L/M/N 组读源码先例）——P1 openAdd 保存
+//     位置三态无条件随入口 rail 联动（activeScope 取值 + project/user·managed 双分支赋值，联动
+//     赋值在 resetForm() 之后防 clobber，且不受 formHasContent 门控——负向钉去注释后判定）；
+//     P2 resetForm 去除 projectDirs[0] 预填（恰含一次 formProjectDir.value = '' 且不再含
+//     projectDirs.value[0]）；P3 保存位置段位锁定恒态（2026-10-29 mcp-import-scope-and-segment-lock
+//     改动点 C 改写，见下）：LOCATION_ORDER 三段按钮退化为只读指示——无 @click/switchLocation
+//     绑定、静态 disabled（无 :disabled= 动态形态）、全文件 switchLocation 零出现（含原「编辑态
+//     锁定」历史语义并入：编辑态与新建态均锁定）；
+//     P4 新增态哨兵 KV 行拦截（2026-10-29 mcp-scope-misplacement-fix P1-B，H1；V2 载体分化）：
+//     saveForm 函数体含「检测到残留的加密占位值」拦截（V2：JSON 模式走 jsonError 红条
+//     「表单校验未通过：」前缀 + return 停留 JSON 侧，与 N9/N11 停留契约统一；表单模式走
+//     toast + return）两种载体共用模块级常量 SENTINEL_BLOCK_MSG（防双处字面漂移）+
+//     !isEditMode.value 门控 + 值 === MCP_VALUE_MASK 行判定，且提示载体位置先于落盘链起点
+//     saving.value = true；P5（2026-10-29
+//     mcp-scope-misplacement-fix P3-A，H5）：MCP_WRITE_SCOPED 白名单拒绝文案钉——ipc-handlers.ts
+//     拒绝错误为含 ${MAX_ENTRIES} 插值的模板串（补「最近工作区上限」说明），MAX_ENTRIES 经
+//     workspace-history import 引入，旧文案整串（三种引号形态）零出现；
+//     P6 导入作用域跟随栏位（2026-10-29 mcp-import-scope-and-segment-lock 改动点 C 新增，
+//     计划 §3.B）：confirmImport 切片含 writeMcpScoped 调用 + importTargetList.value 消费 +
+//     activeProjectDir.value === null 前置判定 + overwrote 覆盖计数；预览/确认切片旧形态
+//     analyzeImportText(importText.value, managedServers.value) 零出现（第二参改传
+//     importTargetList.value）；模板区含「将导入到：」三形态目标位置文案（管理（全局生效）/
+//     用户级 ~/.claude.json / 项目级 .mcp.json）。
+//     点 RED：P1/P2/P3 因新代码未落地而 FAIL；实现后全 PASS。
+//     P3 改写 RED（2026-10-29 改动点 C）：旧实现仍带 @click="switchLocation(loc)" + 动态
+//     :disabled 且 switchLocation 全文件在场 → P3 FAIL；P6 RED：现状 confirmImport 恒
+//     persistManaged 写管理库、预览第二参恒 managedServers.value、弹窗无目标位置文案 → P6 FAIL。
+//     P3/P6 对应的 McpSettings.vue 实现（改动点 A/B）落地后应转 GREEN；本组最终口径为全 pass
+//     / 0 fail（P6 新增后本文件 check 总数 100 → 101，GREEN 时 101 pass / 0 fail）。
+//   Q MCP 探活扩展用户级/项目级组（2026-10-29 mcp-probe-all-scopes-plan 点 p1：RED 钉先行）：
+//     MCP_PROBE 三作用域取源（计划 §1.A）与 UI 测试入口放开（计划 §1.B）的静态源码钉（沿
+//     H/L/M/N/O/P 组读源码先例）——
+//     Q1 handler 钉（ipc-handlers.ts）：MCP_PROBE 切片（IPC_CHANNELS.MCP_PROBE 注册行 →
+//     MCP_WRITE_SCOPED 注册行）含 target === 'scoped' 分支；取源区域（handler 切片 ∪
+//     resolveProbeSource 辅助函数体——计划 §1.A.2 新增内部辅助，定义形态 function/const/
+//     async function 兼容）消费 readUserMcpServersRawSync( / readProjectMcpServersRawSync(
+//    （user/project 从磁盘 raw 取明文）、mcpProbeKey( 调用含 scope 实参与 normalizeDirKey(
+//     dirKey 实参（第二实参内联 normalizeDirKey( 形态，计划 §1.A.2 cacheKey 形态）、project
+//     白名单（mergeProjectDirs + normalizeDirKey 在取源路径）、badDirCacheHas( 前置于 project
+//     读盘（计划 §1.A.4 防慢目录）；
+//     Q2 UI 钉（McpSettings.vue）：①卡片操作区（row__acts → </section>）内「测试连接」按钮
+//    （handleProbe(card) 点击绑定）不再被「仅管理库」<template v-if="activeScope.kind ===
+//     'managed'"> 先行限定——按钮上移三作用域共用区（门在按钮之后/门消失）或 managed/else 两
+//     分支各渲染一枚均可；旧限定注释「仍仅管理库」全文件零出现；handleProbe 切片含 scope 实参
+//    （scope/dir 由 card.key 前缀与 activeScope 推导，计划 §1.B.1）；②probeAllInView 切片按
+//     activeScope 分流，含 target:'scoped' + scope:'user' + scope:'project' 形态（managed 栏
+//     target:'all' 现状保留，计划 §1.B.2）；③saveScopedForm 成功块（writeMcpScoped await →
+//     } catch 之间）含 probeMcpServers({ target:'single' … scope … }) 现探刷新（计划 §1.B.3）；
+//     Q3 负向现状钉（本点即 PASS，防后续误改）：all 分支（req.target !== 'all' 校验行起，至
+//     handler 切片收尾或楔入其中的 resolveProbeSource 定义处止）仍只遍历 getConfig().mcpServers
+//     ——user/project raw 读取与 'scoped' 分支零混入（计划 §1.A.3「target:'all' 保持现状」）。
+//     点 p1 RED 预期：Q1/Q2 因 scoped 分支、raw 消费、UI 放开形态未落地而 FAIL，Q3 PASS，
+//     其余既有 101 钉全 pass（整体 102 pass / 2 fail、退出码 1）；下一实现点落地后 104 pass /
+//     0 fail（本文件 check 总数 101 → 104）。RED 窗口内本脚本已在 selftest-static-list 清单
+//    （第 234 行）中，selftest:static 会随本脚本红——属钉先行预期，由实现点转绿。
+//     Q4（round-001 review 修复钉，2026-10-29 fix-probe 点；①语义 2026-10-29 review round-4
+//     F1 反转改写——sse 中性门拆除，sse 卡回归 'probe' 与其他 transport 同权可测）：四项修复的
+//     落位形态钉——①connModeOf sse 中性门零出现（反转钉：connModeOf 切片不含任何
+//     card.transport === 'sse' 返回门——无限定形与旧 managed∧sse 合取形均零出现，旧形全文件
+//     查；ConnMode 类型行不含 'sse' 成员；「会话内自动协商」「SSE 传输暂不支持探测」文案全
+//     文件零出现）；②probeAllInView scoped 回写
+//     竞态闭环（P2-2：dispatchAt 捕获 + dropOwnPrefix fresh 保留 probedAt > dispatchAt + 回填
+//     probedAt 仲裁 prev.probedAt <= r.probedAt）；③confirmImport 覆盖同名条目补 single 现探
+//    （m4：切片含 target: 'single'）；④渲染层 cast 收口（m3：全文件 claude.probeMcpServers as
+//     零出现，载荷契约镜像上移 preload McpProbeTarget）。修复 RED：Q4 因四形态未齐 FAIL（既有
+//     104 全 pass，整体 104 pass / 1 fail）；实现落地后 105 pass / 0 fail（check 总数 104 → 105）。
+//     round-4 F1 改写窗口（2026-10-29）：sse 门拆除前 Q4 因门/成员/文案残留 FAIL（105 pass /
+//     1 fail，退出码 1）；McpSettings.vue 拆门后 106 pass / 0 fail。
+//     Q4b（round-002 复审备忘-2 负向现状钉，2026-10-29，本点即 PASS 沿 Q3 先例）：probeAllInView
+//     managed 分支切片（函数体起点 → scoped 分界，取 scoped 首行代码 scope.kind === 'user'
+//     首现处止）保持无仲裁回填形态——prev.probedAt / probedAt <= 仲裁形零出现 +
+//     next[r.key] = r; 现状回填在位（计划硬约束「管理库探活行为零变化」）；check 总数 105 → 106。
 //
 // RED 阶段预期（p9a，B/C/D 组函数为 P2 桩、E 组函数为 P5 桩，桩体一律 throw
 // not implemented）：A 组全 PASS，B/C/D/E 组全 FAIL（失败详情为「调用抛错：not
@@ -2063,12 +2136,13 @@ console.log('\n=== N. 表单⇄JSON 双模式 + 超时字段组（McpSettings.vu
       src === '' ? 'McpSettings.vue 不可读' : 'saveForm 落盘链之前区段仍存在 editMode 翻转语句（先于落盘链）',
     );
   }
-  // N12（2026-10-19 round-3 T1，仿 N9 切片顺序法）P2 陈旧快照覆盖：saveScopedForm 函数体切片
-  //（async function saveScopedForm → async function saveForm）内首个 await refresh() 必须先于
-  // hasSameName 覆盖确认预查（保存时刻拉新快照，编辑器长开期间外部并发写入的同名条目不再被
-  // 陈旧快照静默放行）；且体内含 res.overwrote 消费与兜底 toast 字面「已覆盖保存期间外部写入
-  // 的同名条目」（预查失效时写已发生的兜底告知，防零提示）。
-  // RED 依据：现状 await refresh() 仅存在于写入成功后（先于判定不成立）、res.overwrote 零消费。
+  // N12（2026-10-19 round-3 T1，仿 N9 切片顺序法；2026-10-29 P3-A 改钉兜底 toast 字面）P2 陈旧
+  // 快照覆盖：saveScopedForm 函数体切片（async function saveScopedForm → async function saveForm）
+  // 内首个 await refresh() 必须先于 hasSameName 覆盖确认预查（保存时刻拉新快照，编辑器长开期间
+  // 外部并发写入的同名条目不再被陈旧快照静默放行）；且体内含 res.overwrote 消费与兜底 toast
+  // 字面「已覆盖同名条目（列表可能未及时刷新）」（兜底告知中性化，H4——预查快照负缓存盲区下
+  // 不归因外部写入，防零提示；toast 时长 3200ms 与中文括号全角形态按字面钉）。
+  // RED 依据（历史）：现状 await refresh() 仅存在于写入成功后（先于判定不成立）、res.overwrote 零消费。
   {
     const n12Start = src.indexOf('async function saveScopedForm');
     const n12End = src.indexOf('async function saveForm', n12Start);
@@ -2081,7 +2155,7 @@ console.log('\n=== N. 表单⇄JSON 双模式 + 超时字段组（McpSettings.vu
       n12Body !== ''
         && n12Refresh >= 0 && n12Same >= 0 && n12Refresh < n12Same
         && n12Body.includes('res.overwrote')
-        && n12Body.includes('已覆盖保存期间外部写入的同名条目'),
+        && n12Body.includes('已覆盖同名条目（列表可能未及时刷新）'),
       src === '' ? 'McpSettings.vue 不可读' : 'await refresh() 未先于 hasSameName 预查，或缺 res.overwrote 消费/兜底 toast 字面',
     );
   }
@@ -2454,13 +2528,211 @@ console.log('\n=== P. 保存位置联动组（openAdd 联动 / resetForm 去预�
   }
 }
 
+// ── Q. MCP 探活扩展用户级/项目级组（2026-10-29 mcp-probe-all-scopes-plan 点 p1：RED 钉先行）──
+// 计划 docs/plans/2026-10-29-mcp-probe-all-scopes-plan.md §1.C。RED 是本点预期产物：Q1/Q2
+// 断言的 scoped 分支、raw 读取消费、scope·dirKey 实参形态、UI 放开形态均未落地 → Q1/Q2 FAIL、
+// Q3（all 分支负向现状钉）PASS；对应实现（下一实现点）落地后转全 PASS。
+
+console.log('\n=== Q. MCP 探活扩展组（MCP_PROBE 三作用域取源 / UI 测试入口放开 / all 分支负向） ===');
+
+{
+  // Q1：ipc-handlers.ts MCP_PROBE handler 切片（IPC_CHANNELS.MCP_PROBE 注册行 → MCP_WRITE_SCOPED
+  // 注册行）；若按计划 §1.A.2 抽出 resolveProbeSource 辅助（位于 handler 注册区之外），其函数体
+  // 并入「取源区域」参与 raw 读取 / mcpProbeKey 形态 / 白名单 / 负缓存前置断言。
+  const q1Rel = path.join('src', 'main', 'ipc-handlers.ts');
+  let q1Src = '';
+  try {
+    q1Src = fs.readFileSync(path.resolve(__dirname, '..', q1Rel), 'utf8');
+  } catch {
+    // 缺文件/不可读：保持空串，Q1 走 FAIL 分支（不抛错、不崩脚本）。
+  }
+  const q1Start = q1Src.indexOf('IPC_CHANNELS.MCP_PROBE');
+  const q1End = q1Src.indexOf('IPC_CHANNELS.MCP_WRITE_SCOPED', q1Start);
+  const q1Body = q1Start >= 0 && q1End > q1Start ? q1Src.slice(q1Start, q1End) : '';
+  const q1HelperStart = q1Src.search(/(?:async function|function|const) resolveProbeSource\b/);
+  const q1HelperEnd = q1HelperStart >= 0 ? q1Src.indexOf('regInvokeHandler(', q1HelperStart) : -1;
+  const q1Helper = q1HelperStart >= 0 && q1HelperEnd > q1HelperStart ? q1Src.slice(q1HelperStart, q1HelperEnd) : '';
+  const q1Region = q1Body + q1Helper;
+  const q1ScopedBranch = /target\s*===\s*'scoped'/.test(q1Body);
+  const q1UserRaw = q1Region.includes('readUserMcpServersRawSync(');
+  const q1ProjectRaw = q1Region.includes('readProjectMcpServersRawSync(');
+  // mcpProbeKey( 调用形态：首实参为 scope 标识符（非 'managed' 字面量）且第二实参内联
+  // normalizeDirKey(（计划 §1.A.2 cacheKey：mcpProbeKey(scope, scope==='project' ?
+  // normalizeDirKey(dir) : null, name)；[^,)]* 容忍三元条件与空格写法差异）。
+  const q1KeyShape = /mcpProbeKey\(\s*scope\s*,\s*[^,)]*normalizeDirKey\(/.test(q1Region);
+  const q1Whitelist = q1Region.includes('mergeProjectDirs(') && q1Region.includes('normalizeDirKey(');
+  const q1BadIdx = q1Region.indexOf('badDirCacheHas(');
+  const q1ProjRawIdx = q1Region.indexOf('readProjectMcpServersRawSync(');
+  const q1BadBefore = q1BadIdx >= 0 && q1ProjRawIdx >= 0 && q1BadIdx < q1ProjRawIdx;
+  const q1Subs: string[] = [];
+  if (!q1ScopedBranch) q1Subs.push("缺 target === 'scoped' 分支");
+  if (!(q1UserRaw && q1ProjectRaw)) q1Subs.push('未消费 readUserMcpServersRawSync(/readProjectMcpServersRawSync(');
+  if (!q1KeyShape) q1Subs.push('mcpProbeKey( 缺 scope 实参 + normalizeDirKey( dirKey 实参形态');
+  if (!q1Whitelist) q1Subs.push('project 白名单（mergeProjectDirs/normalizeDirKey）不在探活取源路径');
+  if (!q1BadBefore) q1Subs.push('badDirCacheHas( 未前置于 project 读盘');
+  check(
+    'Q1',
+    'MCP_PROBE handler 三作用域取源（计划 §1.A）：切片含 target === \'scoped\' 分支 + 取源区域消费 readUserMcpServersRawSync(/readProjectMcpServersRawSync( + mcpProbeKey( 含 scope 实参与 normalizeDirKey( dirKey 实参 + project 白名单（mergeProjectDirs/normalizeDirKey）在取源路径 + badDirCacheHas( 前置于 project 读盘',
+    q1Body !== '' && q1ScopedBranch && q1UserRaw && q1ProjectRaw && q1KeyShape && q1Whitelist && q1BadBefore,
+    q1Src === '' ? 'ipc-handlers.ts 不可读' : `MCP_PROBE 取源扩展未落地（RED 预期）：${q1Subs.join('；')}`,
+  );
+
+  // Q2：McpSettings.vue 三形态——①测试连接按钮放开（不再仅管理库）；②probeAllInView 分流；
+  // ③saveScopedForm 成功块 single 现探。
+  const q2Rel = path.join('src', 'renderer', 'components', 'config', 'McpSettings.vue');
+  let q2Src = '';
+  try {
+    q2Src = fs.readFileSync(path.resolve(__dirname, '..', q2Rel), 'utf8');
+  } catch {
+    // 缺文件/不可读：保持空串，Q2 走 FAIL 分支（不抛错、不崩脚本）。
+  }
+  // ① 卡片操作区（class="row__acts" → </section>）内 probe 点击绑定（handleProbe(card)）不得被
+  //   「仅管理库」<template v-if="activeScope.kind === 'managed'"> 先行限定：门消失 / 门在按钮
+  //   之后（按钮上移三作用域共用区）/ managed 门闭合后的 else 分支亦渲染按钮（三作用域各一枚）
+  //   三形态均可；负向：旧限定注释「仍仅管理库」全文件零出现。
+  const q2ActsStart = q2Src.indexOf('class="row__acts"');
+  const q2ActsEnd = q2Src.indexOf('</section>', q2ActsStart);
+  const q2Acts = q2ActsStart >= 0 && q2ActsEnd > q2ActsStart ? q2Src.slice(q2ActsStart, q2ActsEnd) : '';
+  const q2ProbeIdx = q2Acts.indexOf('handleProbe(card)');
+  const q2GateIdx = q2Acts.indexOf('<template v-if="activeScope.kind === \'managed\'">');
+  const q2GateClose = q2GateIdx >= 0 ? q2Acts.indexOf('</template>', q2GateIdx) : -1;
+  const q2Ungated = q2ProbeIdx >= 0
+    && (q2GateIdx < 0
+      || q2ProbeIdx < q2GateIdx
+      || (q2GateClose > q2GateIdx && q2Acts.lastIndexOf('handleProbe(card)') > q2GateClose));
+  const q2NoOldComment = q2Src !== '' && !q2Src.includes('仍仅管理库');
+  // handleProbe 切片（async function handleProbe → function managedCardOf）含 scope 实参
+  //  （scope/dir 由 card.key 前缀与 activeScope 推导，计划 §1.B.1——否则 user/project 卡单探
+  //   仍落 managed 查找，必报「未找到该服务器」）。
+  const q2HpStart = q2Src.indexOf('async function handleProbe');
+  const q2HpEnd = q2Src.indexOf('function managedCardOf', q2HpStart);
+  const q2Hp = q2HpStart >= 0 && q2HpEnd > q2HpStart ? q2Src.slice(q2HpStart, q2HpEnd) : '';
+  const q2HpScope = q2Hp !== '' && /\bscope\b/.test(q2Hp);
+  // ② probeAllInView 切片（async function probeAllInView → function probeReportOf）：按
+  //   activeScope 分流 + scoped/user/project 形态在位 + managed 栏 target:'all' 现状保留。
+  const q2PavStart = q2Src.indexOf('async function probeAllInView');
+  const q2PavEnd = q2Src.indexOf('function probeReportOf', q2PavStart);
+  const q2Pav = q2PavStart >= 0 && q2PavEnd > q2PavStart ? q2Src.slice(q2PavStart, q2PavEnd) : '';
+  const q2PavOk = q2Pav !== ''
+    && q2Pav.includes('activeScope')
+    && /target:\s*'scoped'/.test(q2Pav)
+    && /scope:\s*'user'/.test(q2Pav)
+    && /scope:\s*'project'/.test(q2Pav)
+    && /target:\s*'all'/.test(q2Pav);
+  // ③ saveScopedForm 成功块（await claude.writeMcpScoped(payload) → } catch 之间）含 single
+  //   现探（probeMcpServers({ target:'single' … }) 且带 scope 实参，计划 §1.B.3）。
+  const q2SsfStart = q2Src.indexOf('async function saveScopedForm');
+  const q2SsfEnd = q2Src.indexOf('async function saveForm', q2SsfStart);
+  const q2Ssf = q2SsfStart >= 0 && q2SsfEnd > q2SsfStart ? q2Src.slice(q2SsfStart, q2SsfEnd) : '';
+  const q2OkStart = q2Ssf.indexOf('await claude.writeMcpScoped(payload)');
+  const q2OkEnd = q2Ssf.indexOf('} catch (e) {', q2OkStart);
+  const q2Ok = q2OkStart >= 0 && q2OkEnd > q2OkStart ? q2Ssf.slice(q2OkStart, q2OkEnd) : '';
+  const q2OkSingle = /probeMcpServers\(\{[^}]*target:\s*'single'/.test(q2Ok) && /\bscope\b/.test(q2Ok);
+  const q2Subs: string[] = [];
+  if (!(q2Acts !== '' && q2Ungated)) q2Subs.push('测试连接按钮仍被仅管理库门先行限定');
+  if (!q2NoOldComment) q2Subs.push('旧限定注释「仍仅管理库」残留');
+  if (!q2HpScope) q2Subs.push('handleProbe 切片缺 scope 实参');
+  if (!q2PavOk) q2Subs.push("probeAllInView 缺 scoped 分流（target:'scoped' + scope:'user'/'project'）");
+  if (!q2OkSingle) q2Subs.push("saveScopedForm 成功块缺 single 现探（target: 'single'）");
+  check(
+    'Q2',
+    'UI 测试入口放开（计划 §1.B）：①测试连接按钮不再被仅管理库 v-if 先行限定（上移共用区/门消失/else 分支亦渲染均可）+ 旧限定注释「仍仅管理库」零出现 + handleProbe 含 scope 实参；②probeAllInView 按 activeScope 分流含 target:\'scoped\' + scope:\'user\'/\'project\'（managed 栏 target:\'all\' 保留）；③saveScopedForm 成功块含 probeMcpServers({ target:\'single\' … scope … }) 现探',
+    q2Src !== '' && q2Ungated && q2NoOldComment && q2HpScope && q2PavOk && q2OkSingle,
+    q2Src === '' ? 'McpSettings.vue 不可读' : `UI 探活扩展未落地（RED 预期）：${q2Subs.join('；')}`,
+  );
+
+  // Q3：负向现状钉（本点即 PASS，防后续误改）：all 分支（req.target !== 'all' 校验行起）仍只
+  //   遍历管理库 config.mcpServers——user/project raw 读取与 'scoped' 分支零混入。all 分支终点
+  //   为 handler 切片收尾；若 resolveProbeSource 定义楔在 all 分支之后、MCP_WRITE_SCOPED 之前
+  //  （q1Body 内部），在其定义处截断（辅助函数体不算 all 分支内容）。
+  const q3AllIdx = q1Body.indexOf("req.target !== 'all'");
+  const q3HelperInBody = q1HelperStart >= 0 && q1HelperStart > q1Start && q1HelperStart < q1End;
+  const q3HelperOff = q3HelperInBody ? q1HelperStart - q1Start : q1Body.length;
+  const q3End = q3HelperOff > q3AllIdx ? q3HelperOff : q1Body.length;
+  const q3Body = q3AllIdx >= 0 && q3End > q3AllIdx ? q1Body.slice(q3AllIdx, q3End) : '';
+  check(
+    'Q3',
+    "all 分支负向现状钉（防误改）：仍只遍历 getConfig().mcpServers（管理库 enabledServers 过滤形态在位），user/project raw 读取与 'scoped' 分支零混入",
+    q3Body !== ''
+      && q3Body.includes('getConfig().mcpServers')
+      && !q3Body.includes('readUserMcpServersRawSync')
+      && !q3Body.includes('readProjectMcpServersRawSync')
+      && !q3Body.includes("'scoped'"),
+    q1Body === '' ? 'ipc-handlers.ts 不可读或 MCP_PROBE 切片缺失' : "all 分支被混入 user/project raw 读取或 scoped 分支（计划 §1.A.3：target:'all' 保持现状）",
+  );
+
+  // Q4（round-001 review 修复钉，2026-10-29 fix-probe 点；①语义 2026-10-29 round-4 F1 反转
+  //   改写，RED→GREEN）——
+  // ① connModeOf sse 中性门零出现（反转钉）：connModeOf 切片不含任何 card.transport === 'sse'
+  //   返回门（无限定形零出现；旧 managed∧sse 合取形全文件零出现）；ConnMode 类型行不含 'sse'
+  //   成员；「会话内自动协商」「SSE 传输暂不支持探测」文案全文件零出现（row__stat 与按钮
+  //   title 一并覆盖）。拆除依据：探活器 mcp-probe.ts 已实现 sse POST 两步握手（4xx 附专属
+  //   提示），round-001 P2-1「sse 探测必失败属误报」前提不成立（review round-4 F1）；
+  // ② probeAllInView scoped 回写竞态闭环（P2-2）：切片含 dispatchAt 捕获
+  //   （const dispatchAt = Date.now()）+ dropOwnPrefix fresh 保留（probedAt > dispatchAt）+
+  //   批量回填 probedAt 仲裁（prev.probedAt <= r.probedAt）；
+  // ③ confirmImport 覆盖同名条目补 single 现探（m4）：切片含 target: 'single'；
+  // ④ 渲染层 cast 收口（m3）：全文件 claude.probeMcpServers as cast 形态零出现
+  //   （载荷契约镜像已上移 preload McpProbeTarget）。
+  const q4CmStart = q2Src.indexOf('function connModeOf');
+  const q4CmEnd = q2Src.indexOf('function enabledCountOf', q4CmStart);
+  const q4Cm = q4CmStart >= 0 && q4CmEnd > q4CmStart ? q2Src.slice(q4CmStart, q4CmEnd) : '';
+  const q4NoSseGate = q2Src !== '' && q4Cm !== ''
+    && !/card\.transport\s*===\s*'sse'/.test(q4Cm)
+    && !/activeScope\.value\.kind\s*===\s*'managed'\s*&&\s*card\.transport\s*===\s*'sse'/.test(q2Src);
+  const q4TypeM = q2Src.match(/type ConnMode = [^;]*;/);
+  const q4TypeNoSse = q4TypeM !== null && !q4TypeM[0].includes("'sse'");
+  const q4NoSseCopy = q2Src !== '' && !q2Src.includes('会话内自动协商') && !q2Src.includes('SSE 传输暂不支持探测');
+  const q4PavDispatch = /const dispatchAt = Date\.now\(\)/.test(q2Pav);
+  const q4PavFresh = /probedAt\s*>\s*dispatchAt/.test(q2Pav);
+  const q4PavArb = /prev\.probedAt\s*<=\s*r\.probedAt/.test(q2Pav);
+  const q4CiStart = q2Src.indexOf('async function confirmImport');
+  const q4CiEnd = q2Src.indexOf('const importCardRef', q4CiStart);
+  const q4Ci = q4CiStart >= 0 && q4CiEnd > q4CiStart ? q2Src.slice(q4CiStart, q4CiEnd) : '';
+  const q4CiSingle = q4Ci.includes("target: 'single'");
+  const q4NoCast = q2Src !== '' && !q2Src.includes('claude.probeMcpServers as');
+  const q4Subs: string[] = [];
+  if (!q4NoSseGate) q4Subs.push("connModeOf 仍含 sse 中性门（card.transport === 'sse' 返回门或旧 managed∧sse 形残留）");
+  if (!q4TypeNoSse) q4Subs.push("ConnMode 类型行仍含 'sse' 成员");
+  if (!q4NoSseCopy) q4Subs.push('「会话内自动协商」「SSE 传输暂不支持探测」文案残留');
+  if (!(q4PavDispatch && q4PavFresh && q4PavArb)) q4Subs.push('probeAllInView 缺 dispatchAt 捕获 / dropOwnPrefix fresh 保留 / 回填 probedAt 仲裁');
+  if (!q4CiSingle) q4Subs.push("confirmImport 缺覆盖同名条目 single 现探（target: 'single'）");
+  if (!q4NoCast) q4Subs.push('claude.probeMcpServers as cast 残留');
+  check(
+    'Q4',
+    "round-001 修复钉（① round-4 F1 反转改写）：①connModeOf sse 中性门零出现（切片不含 card.transport === 'sse' 返回门，旧 managed∧sse 形全文件零出现）+ ConnMode 类型行不含 'sse' 成员 + 「会话内自动协商」「SSE 传输暂不支持探测」文案全文件零出现；②probeAllInView 含 dispatchAt 捕获 + dropOwnPrefix fresh 保留（probedAt > dispatchAt）+ 回填 probedAt 仲裁（prev.probedAt <= r.probedAt）；③confirmImport 切片含 target: 'single' 现探；④全文件 claude.probeMcpServers as cast 零出现",
+    q2Src !== '' && q4NoSseGate && q4TypeNoSse && q4NoSseCopy && q4PavDispatch && q4PavFresh && q4PavArb && q4CiSingle && q4NoCast,
+    q2Src === '' ? 'McpSettings.vue 不可读' : `修复落位形态未齐（RED 预期）：${q4Subs.join('；')}`,
+  );
+
+  // Q4b（round-002 复审备忘-2 负向现状钉，2026-10-29，本点即 PASS 沿 Q3 先例，防后续误改）：
+  //   managed 分支回填保持无仲裁形态（计划硬约束「管理库探活行为零变化」）。managed 切片 =
+  //   probeAllInView 函数体起点 → scoped 分支分界（scoped 首行代码 scope.kind === 'user'
+  //   首现处止）：managed 早退/回填/catch/finally 全覆盖；scoped 分支（dispatchAt/dropOwnPrefix/
+  //   prev.probedAt <= r.probedAt 仲裁）不得落入切片——其仲裁形态属预期，混入即钉失效。
+  const q4bScopedStart = q2Pav.indexOf("scope.kind === 'user'");
+  const q4bManaged = q4bScopedStart > 0 ? q2Pav.slice(0, q4bScopedStart) : '';
+  check(
+    'Q4b',
+    'managed 分支负向现状钉（防误改）：probeAllInView managed 切片保持无仲裁回填形态——prev.probedAt / probedAt <= 仲裁形零出现 + next[r.key] = r; 现状回填在位',
+    q2Src !== ''
+      && q4bManaged !== ''
+      && !q4bManaged.includes('prev.probedAt')
+      && !/probedAt\s*<=/.test(q4bManaged)
+      && q4bManaged.includes('next[r.key] = r;'),
+    q2Src === ''
+      ? 'McpSettings.vue 不可读'
+      : 'managed 分支被混入 probedAt 仲裁或现状无仲裁回填形态消失（计划硬约束：管理库探活行为零变化）',
+  );
+}
+
 // ── 汇总与退出码 ─────────────────────────────────────────────────────────────
 // J3（2026-10-19 点1 起）为异步断言：汇总移入 finish()，由 J3 的 promise 链收尾调用一次
 //（同步断言全部先于其执行完毕，计数完整后再打印；退出码约定不变）。
 function finish(): void {
   console.log(`\n===== selftest-mcp-settings: ${pass} pass / ${fail} fail =====`);
   if (fail > 0) {
-    console.log('（RED 阶段：FAIL 项均为尚未实现的桩（throw not implemented: …）——P2/P5 实现后应全 PASS；A 组为 P1 已实现基线，应保持全 PASS）');
+    console.log('（存在 FAIL 项：请按失败详情对照当前计划核验归因）');
     process.exit(1);
   }
   console.log('selftest-mcp-settings: OK');

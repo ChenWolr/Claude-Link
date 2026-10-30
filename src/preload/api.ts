@@ -74,9 +74,14 @@ export interface McpProbeReport {
   probedAt: number;
 }
 
-/** probeMcpServers 请求体：all=管理库批量（60s 缓存逐 key 判定）/ single=按 name 现探
- *  （§1.3 渲染层零明文约束：渲染层只回传 name，明文 env/headers 由主进程自取已存条目）。 */
-export type McpProbeTarget = { target: 'all' } | { target: 'single'; name: string };
+/** probeMcpServers 请求体（round-001 m3：与主进程 ipc-handlers.ts MCP_PROBE handler 契约对齐）：
+ *  all=管理库批量（60s 缓存逐 key 判定）/ single=按 name 现探（scope 缺省视为 managed，向后
+ *  兼容既有 {target:'single', name} 调用）/ scoped=按栏位（user/project）整批探活。
+ *  §1.3 渲染层零明文约束：渲染层只回传 name/scope/dir，明文 env/headers 由主进程自取已存条目。 */
+export type McpProbeTarget =
+  | { target: 'all' }
+  | { target: 'single'; name: string; scope?: 'user' | 'project'; dir?: string }
+  | { target: 'scoped'; scope: 'user' | 'project'; dir?: string };
 
 /** mcp:managedSave 提交条目（主进程 src/main/modules/mcp/mcp-config.ts:McpManagedSaveEntry
  *  同构镜像——preload 不 import 主进程模块，结构以该文件为准）：McpManagedServer + 瞬态改名

@@ -47,8 +47,14 @@ import {
   restoreMaskedMcpServers,
   sanitizeMcpServersConfig,
   type McpManagedSaveEntry,
+  type ParsedMcpEntry,
 } from './modules/mcp/mcp-config';
-import { collectMcpSnapshot, readProjectMcpServersRawSync, readUserMcpServersRawSync } from './modules/mcp/mcp-scanner';
+import {
+  collectMcpSnapshot,
+  readProjectMcpServersDetailSync,
+  readProjectMcpServersRawSync,
+  readUserMcpServersRawSync,
+} from './modules/mcp/mcp-scanner';
 import { writeScopedMcpServer, type ScopedMcpEntry } from './modules/mcp/mcp-writer';
 import {
   dropProbeCacheByPrefix,
@@ -543,23 +549,33 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   // 探活：all = 管理库逐条构造 inputs（name/transport/command/args/env/url/headers）并发探活，
   // 60s 缓存逐 key 判定（hasFreshCache 命中直接回缓存报告，未命中才探；入口先 pruneProbeCache
-  // 时间驱动清理）；single = 渲染层只传 name（§1.3 渲染层零明文约束），主进程按 name 在
-  // getConfig().mcpServers 定位已存条目、自取明文 env/headers 构造探活输入现探（用户显式
-  // 「测试连接」只写不读缓存——传 cacheKey 把新结论写进缓存供批量命中，但回包恒为现探值，
-  // 不回旧缓存）；查无 → 单元素 fail report，不抛。
+  // 时间驱动清理）；single = 渲染层只传 name（§1.3 渲染层零明文约束），主进程按 name 定位
+  // 已存条目、自取明文 env/headers 构造探活输入现探（用户显式「测试连接」只写不读缓存——
+  // 传 cacheKey 把新结论写进缓存供批量命中，但回包恒为现探值，不回旧缓存）；查无 → 单元素
+  // fail report，不抛。
+  // p2-2026-10-29（计划 §1.A）：协议扩展为 { target: 'single'|'all'|'scoped', name?, scope?, dir? }
+  // ——scope 缺省视为 'managed'（向后兼容：既有 single/all 调用零改动）；single 三作用域经取源
+  // 辅助从管理库 / 用户级 ~/.claude.json / 项目级 .mcp.json 取明文；scoped = 按栏位（user/project）
+  // 整批探活（禁用条目不探不占槽）。明文不出主进程：回包仍只有 status/toolCount/error。
   // 返回 McpProbeReport[]（single 恒单元素数组；all 与启用条目逐条对齐同序；禁用条目缺槽，
   // UI 按 key 消费并显示已禁用态。single 为用户显式动作不滤禁用——禁用卡也允许手动测试）。
   regInvokeHandler(IPC_CHANNELS.MCP_PROBE, async (_event, body: unknown): Promise<McpProbeReport[]> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP probe payload');
-    const req = body as { target?: unknown; name?: unknown };
+    const req = body as { target?: unknown; name?: unknown; scope?: unknown; dir?: unknown };
     if (req.target === 'single') {
       const name = req.name;
       if (typeof name !== 'string' || name === '') throw new Error('Invalid MCP probe name');
-      const stored = getConfig().mcpServers.find((server) => server.name === name);
+      // p2-2026-10-29（计划 §1.A.2）：scope 缺省视为 managed（既有 {target:'single', name} 调用
+      // 零改动）；三作用域经取源辅助取明文（managed=管理库查找现状 / user·project=磁盘 raw）。
+      const scope = req.scope === 'user' || req.scope === 'project' ? req.scope : 'managed';
+      const dir = typeof req.dir === 'string' && req.dir !== '' ? req.dir : '';
+      const stored = resolveProbeSource(scope, dir)?.[name];
       if (!stored) {
-        logger.info(`[mcp-probe] single 未找到服务器 name=${name}`);
+        logger.info(`[mcp-probe] single 未找到服务器 scope=${scope} name=${name}`);
+        // 查无/白名单拒绝 → 单元素 fail report：key 用对应作用域键空间
+        //（managed:<name> / user:<name> / project:<dirKey>:<name>）。
         return [
-          { key: mcpProbeKey('managed', null, name), status: 'fail', toolCount: 0, error: `未找到该服务器：${name}`, probedAt: Date.now() },
+          { key: mcpProbeKey(scope, scope === 'project' ? normalizeDirKey(dir) : null, name), status: 'fail', toolCount: 0, error: `未找到该服务器：${name}`, probedAt: Date.now() },
         ];
       }
       const input: McpProbeInput = {
@@ -571,11 +587,93 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         url: stored.url,
         headers: stored.headers,
       };
-      // 只写不读：新结论写进 managed:<name> 缓存（供 all 批量 60s 命中），回包恒为现探值。
+      // 只写不读：新结论写进对应作用域键空间缓存（供批量 60s 命中），回包恒为现探值。
       // 超时（2026-10-19 点1；p2 2026-10-27 默认 30s）：条目 timeoutMs 经 resolveProbeTimeoutMs
       // 生效（非法/缺省 → 默认 30s，DEFAULT_PROBE_TIMEOUT_MS）。
-      const reports = [await probeMcpServer(input, resolveProbeTimeoutMs(stored), mcpProbeKey('managed', null, input.name))];
+      const reports = [await probeMcpServer(input, resolveProbeTimeoutMs(stored), mcpProbeKey(scope, scope === 'project' ? normalizeDirKey(dir) : null, input.name))];
       for (const r of reports) if (r.status === 'fail') logger.info(`[mcp-probe] 探活失败 key=${r.key}: ${r.error}`);
+      return reports;
+    }
+    // p2-2026-10-29（计划 §1.A.3）：按栏位整批探活（user/project 两作用域）；all 分支（管理库）
+    // 保持现状零改动。禁用条目（override 值 'off'）不探不占槽（同 all 分支 B-8 语义）。
+    if (req.target === 'scoped') {
+      if (req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP probe scope');
+      const scope = req.scope;
+      const dir = typeof req.dir === 'string' && req.dir !== '' ? req.dir : '';
+      // 批量入口顺带时间驱动清理过期缓存（写法对齐 all 分支现状）。
+      pruneProbeCache(60_000);
+      const cachedByKey = new Map(getCachedProbeReports().map((r) => [r.key, r]));
+      const overridesNow = getConfig().mcpOverrides;
+      // 取源：user = 用户级 ~/.claude.json raw 全量（userHome 主进程自取）；project = 白名单
+      // 校验（同 MCP_WRITE_SCOPED，拒绝 → 空数组，UI 全「未连接」不炸）+ 坏目录负缓存短路
+      // + <dir>/.mcp.json raw 全量（真实读失败 → 落负缓存，与注入链 B-1 同模式）。
+      let raw: Record<string, ParsedMcpEntry>;
+      let dirKey: string | null = null;
+      if (scope === 'user') {
+        raw = readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir());
+      } else {
+        const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+        const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
+        if (dir === '' || !knownKeys.has(normalizeDirKey(dir))) return [];
+        dirKey = normalizeDirKey(dir);
+        // 防慢目录：坏目录 60s 负缓存命中 → 空表短路（本轮不探，下轮栏位进入重试）。
+        if (badDirCacheHas(dir)) return [];
+        const detail = readProjectMcpServersDetailSync(dir);
+        // 真实读失败（scanner 三态 readFailed，非 ENOENT/损坏）→ 落坏目录负缓存。
+        if (detail.readFailed) badDirCacheMark(dir);
+        raw = detail.servers;
+      }
+      // 禁用条目不进 pending 也不进返回数组（override 前缀 user:/project:<dirKey>: 值 'off'），
+      // UI 按 key 消费、缺槽显示禁用态（同 all 分支）。
+      const overridePrefix = dirKey === null ? 'user:' : `project:${dirKey}:`;
+      const entries = Object.entries(raw).filter(([entryName]) => overridesNow[`${overridePrefix}${entryName}`] !== 'off');
+      const slots: Array<{ key: string; cached: McpProbeReport | undefined }> = [];
+      const pending: Array<{ input: McpProbeInput; key: string }> = [];
+      for (const [entryName, entry] of entries) {
+        const key = mcpProbeKey(scope, dirKey, entryName);
+        const cached = cachedByKey.get(key);
+        if (cached !== undefined && hasFreshCache(key)) {
+          slots.push({ key, cached });
+          continue;
+        }
+        pending.push({
+          input: {
+            name: entry.name,
+            transport: entry.transport,
+            command: entry.command,
+            args: entry.args,
+            env: entry.env,
+            url: entry.url,
+            headers: entry.headers,
+            timeoutMs: entry.timeoutMs, // 条目级超时随 input 透传，逐条经 resolveProbeTimeoutMs 生效
+          },
+          key,
+        });
+        slots.push({ key, cached: undefined });
+      }
+      // 逐条并发现探（probeMcpServer 自身整体兜底不 reject，allSettled 为防御性第二道，同
+      // probeAllManaged 契约），按 key 回填（防御性：万一缺槽回 fail report，不炸整拍）。
+      const settled = await Promise.allSettled(
+        pending.map(({ input, key }) => probeMcpServer(input, resolveProbeTimeoutMs(input), key)),
+      );
+      const probedByKey = new Map<string, McpProbeReport>();
+      settled.forEach((r, i) => {
+        const at = pending[i];
+        if (!at) return;
+        if (r.status === 'fulfilled') probedByKey.set(at.key, r.value);
+        else probedByKey.set(at.key, { key: at.key, status: 'fail', toolCount: 0, error: `探活器内部异常：${String(r.reason)}`, probedAt: Date.now() });
+      });
+      const reports = slots.map(({ key, cached }) => {
+        const fresh = probedByKey.get(key);
+        if (fresh !== undefined) return fresh;
+        if (cached !== undefined) return cached;
+        return { key, status: 'fail' as const, toolCount: 0, error: '探活结果缺失', probedAt: Date.now() };
+      });
+      // 探活失败落日志（同现状：仅对本次现探 fail 落日志，缓存命中的旧 fail 不重复刷）。
+      for (const { key } of slots) {
+        const fresh = probedByKey.get(key);
+        if (fresh !== undefined && fresh.status === 'fail') logger.info(`[mcp-probe] 探活失败 key=${fresh.key}: ${fresh.error}`);
+      }
       return reports;
     }
     if (req.target !== 'all') throw new Error('Invalid MCP probe target');
@@ -623,6 +721,38 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     }
     return reports;
   });
+  // p2-2026-10-29（计划 §1.A.2）：single 探活三作用域取源辅助——managed = 管理库 config store
+  // 按 name 成表；user = 用户级 ~/.claude.json raw 直读（userHome 主进程自取，渲染层不可传）；
+  // project = 白名单校验（同 MCP_WRITE_SCOPED：mergeProjectDirs(listRecentWorkspaces(),
+  // workingDirectory) 按 normalizeDirKey 归一比对）→ 坏目录 60s 负缓存短路 → <dir>/.mcp.json
+  // raw 直读按 name 取。查无/白名单拒绝/坏目录短路 → null（single 落单元素 fail report）。
+  // 明文全程不出主进程：辅助仅在主进程内取明文构造探活输入，回包仍只有 status/toolCount/error。
+  function resolveProbeSource(scope: 'managed' | 'user' | 'project', dir: string): Record<string, ParsedMcpEntry> | null {
+    if (scope === 'managed') {
+      const table: Record<string, ParsedMcpEntry> = {};
+      for (const server of getConfig().mcpServers) {
+        table[server.name] = {
+          name: server.name,
+          transport: server.transport,
+          command: server.command,
+          args: server.args,
+          env: server.env,
+          url: server.url,
+          headers: server.headers,
+          timeoutMs: server.timeoutMs,
+        };
+      }
+      return table;
+    }
+    if (scope === 'user') return readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir());
+    // project：白名单（同 MCP_WRITE_SCOPED）→ 坏目录负缓存短路 → raw 直读。
+    if (dir === '') return null;
+    const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+    const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
+    if (!knownKeys.has(normalizeDirKey(dir))) return null;
+    if (badDirCacheHas(dir)) return null;
+    return readProjectMcpServersRawSync(dir);
+  }
   // P8 双向写入（用户级/项目级）：body = { scope, dir?, entry, mode } → writeScopedMcpServer
   //（mcp-writer.ts：user → ~/.claude.json / project → <dir>/.mcp.json 顶层 mcpServers 条目
   // upsert/remove；哨兵值按原文件还原，瞬态改名 hint 还原后剥离；tmp+rename 原子写 + mtime
