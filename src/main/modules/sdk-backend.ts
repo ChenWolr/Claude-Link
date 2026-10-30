@@ -1073,7 +1073,11 @@ function computeContextWindowOverrideTokens(input: {
  * 优先级：Claude Code managed < user < project < local < 此处 claude-link 显式 Options.settings。
  * 返回：
  *   settings —— 完整显式 settings（projection 顶层 + 会话级 permissions + 动态注入 env + thinking patch + 会话钉住 skillOverrides）；
- *   additionalDirectories —— 用户配置与附件目录并集（非空时同时写顶层 Options 与 settings.permissions）。
+ *   additionalDirectories —— 用户配置与附件目录并集（非空时同时写顶层 Options 与 settings.permissions）；
+ *   mcpOverridesActive —— H2 收紧（2026-10-29）：mergeMcpServersIntoSettings 返回的
+ *   overridesHitExisting（effective overrides 中至少一个值==='off' 的键命中三层现存定义，
+ *   孤儿键不算；B-M1 加固同轮：默认 io 读失败/负缓存短路层不可观测且存在 'off' 键时保守
+ *   true），供 buildNativeSdkOptionsCore 计算 strictMcpConfig 门控信号。
  */
 function buildClaudeLinkSettingsBlock(
   config: AppConfig,
@@ -1087,7 +1091,7 @@ function buildClaudeLinkSettingsBlock(
   // 回合/探测构造 options 时对同一 sessionId 重复执行 prepared 索引 SELECT；未传参（undefined/null）
   // 时保持原状回读，防御未来新调用方。类型即 sessionRepo.getSession 的返回（shared Session | null）。
   sessionRowIn?: ReturnType<typeof sessionRepo.getSession>,
-): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined } {
+): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined; mcpOverridesActive: boolean } {
   // 内联 settings——claude-link 显式设置叠加在原生来源之上（managed < user < project < local
   // < Options.settings）。与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），
   // 避免 SDK 路径丢 hooks 等 advancedJson 顶层设置；投影内含 env（仅 advancedJson.env 的非凭据
@@ -1193,14 +1197,16 @@ function buildClaudeLinkSettingsBlock(
   // os.homedir()，advancedJson.env 可能覆盖 USERPROFILE/HOME）。
   // 【字节级一致硬约束】空 MCP 配置（三层全空/全被禁用）下本调用不写 out.mcpServers 键——
   // settings 块与改动前 JSON.stringify 逐字节相同（T1/E3a 断言钉死，生产 query/probe 零影响）。
-  mergeMcpServersIntoSettings(
+  // 返回值 overridesHitExisting（H2 收紧，2026-10-29）：effective overrides 中至少一个值==='off'
+  // 的键命中三层现存定义（孤儿键不算），经本函数返回值 mcpOverridesActive 供 core 构造点算 strict。
+  const mcpMerge = mergeMcpServersIntoSettings(
     out,
     config,
     { mcpOverrides: sessionRow?.mcpOverrides ?? null },
     opts.workingDir || config.workingDirectory || null,
     { userHome: effectiveUserHome() ?? os.homedir() },
   );
-  return { settings: out, additionalDirectories };
+  return { settings: out, additionalDirectories, mcpOverridesActive: mcpMerge.overridesHitExisting };
 }
 
 function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow, entry: SessionEntry): Record<string, unknown> {
@@ -1228,13 +1234,15 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // 加载 user/project/local）。
   // D1 去重：同一 sessionRow 亦传入 settings 块构造，消除重复读（先读一行，喂给两处消费）。
   const sessionRow = sessionRepo.getSession(sessionId);
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
-  // B-2 strict 门控信号：钉住优先 effective overrides（与 sdk-mcp.ts mergeMcpServersIntoSettings
-  // 的 overrides 取值同一公式——`sessionRow?.mcpOverrides ?? config.mcpOverrides`，改则同步改；
-  // sessionRow 缺省/无行经 ?. 自然回退全局）。关键坑：不得改用 config.mcpOverrides 单独判定——
-  // 「会话钉住 user:foo 禁用+全局空+merged 空」场景下全局判定会误得 strict=false，引擎原生拉起
-  // foo，钉住禁用失效（selftest-mcp-settings I5 钉死）（D1：同一 sessionRow 亦传入 settings 块构造，消除重复读）。
-  const effectiveOverrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;
+  // B-2 strict 门控信号（2026-10-29 H2 收紧）：构造点不再自算 effective overrides——信号源改为
+  // settings 块构造内 mergeMcpServersIntoSettings 返回的 overridesHitExisting（钉住优先取值公式
+  // 在该 merge 函数内：`sessionRow?.mcpOverrides ?? config.mcpOverrides`，sessionRow 缺省/无行
+  // 自然回退全局，与注入链同一 effective overrides，杜绝两处口径漂移）。新口径：effective
+  // overrides 中至少一个值==='off' 的键命中三层现存定义才算「接管激活」——孤儿键（外部删除后
+  // 残留的纯 'off' 键）不命中现存定义，不再触发 strictMcpConfig、不再静默丢弃引擎原生 MCP 来源
+  // （claude.ai 云端 connectors/插件 MCP 恢复加载）；命中定义的禁用键仍 strict=true（「禁用生效」
+  // 保底。selftest-mcp-settings I5 新口径钉死、I7 直测返回值、I6 钉形态）。
+  const { settings, additionalDirectories, mcpOverridesActive } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
     env: buildSpawnEnv(override),
     exe: resolveExecutable(config.cliPath),
@@ -1246,7 +1254,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     permissionMode: effectivePermissionMode as SdkOptions['permissionMode'],
     settings,
     additionalDirectories,
-    mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0, // 钉住优先口径，与 buildProbeSdkOptions 的 core 构造点互指，改则同步改
+    mcpOverridesActive,
   });
   // 生产 query 特有：流式增量（stream_event）、子 agent 思考透传、统一交互弹窗 hook。
   options.includePartialMessages = true;
@@ -2895,13 +2903,14 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
   // 显式 settings 共用 buildClaudeLinkSettingsBlock，经工厂统一放入 Options）。
   // D1 去重：同一 sessionRow 亦传入 settings 块构造，消除重复读（先读一行，喂给两处消费）。
   const sessionRow = sessionRepo.getSession(sessionId);
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
-  // B-2 strict 门控信号：与 buildSdkOptions 的 core 构造点互指（同一钉住优先公式——
-  // `sessionRow?.mcpOverrides ?? config.mcpOverrides`，与 sdk-mcp.ts mergeMcpServersIntoSettings
-  // 同口径，改则同步改）。不得改用 config.mcpOverrides 单独判定（反例见 buildSdkOptions 处注释，
-  // selftest-mcp-settings I5 钉死）；probe 的哨兵 sessionId 无行时经 ?. 自然回退全局
-  //（D1：同一 sessionRow 亦传入 settings 块构造，消除重复读）。
-  const effectiveOverrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;
+  // B-2 strict 门控信号：与 buildSdkOptions 的 core 构造点互指（2026-10-29 H2 收紧同款改法）——
+  // 信号源改为 settings 块构造内 mergeMcpServersIntoSettings 返回的 overridesHitExisting（钉住
+  // 优先取值公式在该 merge 函数内：`sessionRow?.mcpOverrides ?? config.mcpOverrides`，probe 的
+  // 哨兵 sessionId 无行时自然回退全局，与注入链同一 effective overrides）。新口径：effective
+  // overrides 中至少一个值==='off' 的键命中三层现存定义才算「接管激活」，孤儿键不命中现存定义
+  // 不再触发 strict（不得改用全局 overrides 单独判定的反例见 buildSdkOptions 处注释，
+  // selftest-mcp-settings I5 新口径钉死、I6 钉形态）。
+  const { settings, additionalDirectories, mcpOverridesActive } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
     env: buildSpawnEnv(override),
     exe,
@@ -2913,7 +2922,7 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
     permissionMode: effectivePermissionMode as SdkOptions['permissionMode'],
     settings,
     additionalDirectories,
-    mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0, // 钉住优先口径，与 buildSdkOptions 的 core 构造点互指，改则同步改
+    mcpOverridesActive,
   });
 
   return { options, exe };

@@ -47,12 +47,13 @@ export type NativeSdkOptionsCoreInput = Pick<
   /** 用户配置与附件目录并集；非空时需同时写顶层 Options 与 settings.permissions（调用方已写后者）。 */
   additionalDirectories?: string[];
   /**
-   * strictMcpConfig 门控信号（B-2）：钉住优先的 effective overrides 非空（存在禁用键）——
-   * `sessionRow?.mcpOverrides ?? config.mcpOverrides` 口径，由调用方（sdk-backend 两处 core
-   * input 构造点：buildSdkOptions / buildProbeSdkOptions，注释互指）计算传入。true 时必须保持
-   * strict 压制引擎原生加载（project .mcp.json/user settings/插件/frontmatter MCP），否则
-   * 「禁用」与 UI 禁用键失效；未传/false 且未挂载顶层 mcpServers（未接管态）→ strict=false，
-   * 恢复引擎原生加载（与 Claude Code 终端行为一致）。
+   * strictMcpConfig 门控信号（B-2，2026-10-29 H2 收紧口径）：effective overrides 中至少一键命中
+   * 三层现存定义（孤儿键不算；B-M1 加固同轮：读失败/负缓存短路层不可观测且存在 'off' 键时
+   * 上游亦保守置 true），由上游 mergeMcpServersIntoSettings.overridesHitExisting 计算、
+   * 经调用方（sdk-backend 两处 core input 构造点：buildSdkOptions / buildProbeSdkOptions，注释
+   * 互指）传入。true 时必须保持 strict 压制引擎原生加载（project .mcp.json/user settings/插件/
+   * frontmatter MCP），否则「禁用」与 UI 禁用键失效；未传/false 且未挂载顶层 mcpServers（未接管
+   * 态）→ strict=false，恢复引擎原生加载（与 Claude Code 终端行为一致）。
    */
   mcpOverridesActive?: boolean;
 };
@@ -144,9 +145,12 @@ export function buildNativeSdkOptionsCore(input: NativeSdkOptionsCoreInput): Pic
   // - 接管态 A（挂载）：三层合并产物非空、经上方挂载进顶层 Options.mcpServers（strict=true 下
   //   引擎【只】认该顶层键，settings 块内 mcpServers 键被忽略；会话钉住 overrides 见
   //   buildClaudeLinkSettingsBlock 的 mergeMcpServersIntoSettings）。
-  // - 接管态 B（overrides 激活，input.mcpOverridesActive=true）：effective overrides 非空（存在
-  //   禁用键）但 merged 可能为空（钉住禁用+其余全空/幽灵键）——必须仍 strict=true 压制引擎
-  //   原生拉起，否则「禁用」失效（UI 禁用键失真，selftest-mcp-settings I5 钉死该保底分支）。
+  // - 接管态 B（overrides 激活，input.mcpOverridesActive=true）：effective overrides 中至少一键
+  //   命中现存定义（孤儿键不算——H2 收紧，2026-10-29，由上游 mergeMcpServersIntoSettings 的
+  //   overridesHitExisting 计算）但 merged 可能为空（钉住禁用+其余全空）——必须仍 strict=true
+  //   压制引擎原生拉起，否则「禁用」失效（UI 禁用键失真，selftest-mcp-settings I5 钉死该保底
+  //   分支）。孤儿键（外部删除后残留的纯 'off' 键）不命中现存定义 → 不触发 strict（H2：引擎
+  //   原生来源恢复加载，不再被静默丢弃）。
   // - 未接管态（两者皆无 = 用户完全未接管 MCP）：strict=false，恢复引擎原生加载（project
   //   .mcp.json/user settings/插件/frontmatter MCP），与 Claude Code 终端行为一致——strict=true
   //   会把这些原生来源全部静默丢弃（selftest-mcp-settings I4 钉死）。

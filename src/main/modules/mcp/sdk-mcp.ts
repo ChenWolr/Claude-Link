@@ -11,9 +11,16 @@
 //   - parseSessionMcpOverrides(raw)
 //       sessions.mcp_overrides 脏值兜底（session-repo.toSession 专用）：null/undefined/JSON 字符串
 //       解析失败/非对象/无合法条目 → null；合法 → 清洗副本（Object.create(null) 载体）。
-//   - mergeMcpServersIntoSettings(out, config, sessionRow, workingDir, io?)
+//   - mergeMcpServersIntoSettings(out, config, sessionRow, workingDir, io?) → MergeMcpResult
 //       会话启动注入：user/project/managed 三层合并（mergeMcpServersForSession），结果非空才写
 //       out.mcpServers（§3.1：空配置下 settings 块与不注入时 JSON.stringify 字节级一致）。
+//       返回值 overridesHitExisting（H2 收紧，2026-10-29）：effective overrides 中至少一个
+//       值==='off' 的键命中三层现存定义才 true——sdk-backend 两处 core input 构造点据此算
+//       strictMcpConfig 门控信号（孤儿键不再触发 strict）。
+//       B-M1 加固（2026-10-29）：默认 io 读失败（readFailed）/ 坏目录负缓存短路层视为「定义
+//       不可观测」，此时只要 effective overrides 存在任意值==='off' 的键也保守置 true（宁可
+//       短暂 strict，不放行引擎原生拉起破坏用户显式禁用语义）；ENOENT / JSON 损坏两条正常空态
+//       不保守（层可观测即「确实无定义」）。
 //       io 参数（可选注入，selftest 用内存 stub 保证确定性——绝不读真实 ~/.claude.json）：
 //       默认实现走 mcp-scanner 的同步 detail 读取器（未脱敏，注入 SDK 需要真值）+ 坏目录负缓存
 //       前置/标记（B-1，与 Skill/快照链同实例，60s TTL）；
@@ -39,6 +46,21 @@ export interface MergeMcpServersIo {
   readProject?: (dir: string) => Record<string, ParsedMcpEntry>;
   /** 用户根目录（~/.claude.json 定位用）。缺省 → os.homedir()；生产调用方传 effectiveUserHome() ?? os.homedir()。 */
   userHome?: string;
+}
+
+/** mergeMcpServersIntoSettings 的返回值（H2 收紧口径的 strict 门控信号）。 */
+export interface MergeMcpResult {
+  /** effective overrides 中至少一个值==='off' 的键命中三层现存定义（键构造与
+   *  mergeMcpServersForSession 应用侧同口径：managed:<name>/user:<name>/project:<dirKey>:<name>，
+   *  project 仅会话目录键）。纯孤儿键/跨目录键/非 'off' 脏值键不算——merged 空且无命中键时
+   *  strictMcpConfig=false，引擎原生来源（云端 connectors/插件 MCP）恢复加载。
+   *
+   *  B-M1（2026-10-29）保守分支：默认 io 的读失败层（readFailed=true）与坏目录负缓存短路层
+   *  视为「定义不可观测」（该层真实被禁用的键唯一定义恰在其中，definitionKeys 无法覆盖）；
+   *  存在任意值==='off' 的键时保守置 true（宁可短暂 strict，不放行引擎原生拉起破坏禁用语义）。
+   *  overrides 无 'off' 键时仍 false（H2：未接管 → 恢复引擎原生加载）；ENOENT / JSON 损坏
+   *  两条路径不置保守标志（层可观测 = 确实无定义，mcp-scanner 三态分类口径不变）。 */
+  overridesHitExisting: boolean;
 }
 
 /** 核心清洗：只保留 string 键且值 === 'off' 的条目（Object.entries 只产 string 键，值需显式判）。 */
@@ -100,6 +122,17 @@ export function parseSessionMcpOverrides(raw: unknown): Record<string, 'off'> | 
  * 合并结果非空才写 out.mcpServers（§3.1：空 MCP 配置下 settings 块与改动前 JSON.stringify
  * 逐字节相同——生产 query / probe 零影响，T1/E3a 断言钉死）。
  * 管理库删除同名服务器后，钉住的孤儿 override 键因 merge 只遍历现存定义而自然无效（§3.8，不崩）。
+ * 返回 MergeMcpResult（H2 收紧，2026-10-29）：overridesHitExisting = effective overrides 中
+ * 至少一个值==='off' 的键命中三层现存定义（键构造与 mergeMcpServersForSession 应用侧同口径：
+ * managed:<name>/user:<name>/project:<projectDirKey>:<name>，project 仅会话目录键——跨目录键
+ * 不进集合，D5；纯孤儿键/非 'off' 脏值键不算）。sdk-backend 两处 core input 构造点据此计算
+ * strictMcpConfig 门控信号：merged 空且无命中键 → strict=false（引擎原生来源恢复加载）；
+ * 命中定义的禁用键仍 strict=true（「禁用生效」保底，selftest-mcp-settings I5/I7 钉死）。
+ * B-M1 加固（2026-10-29）：默认 io 的读失败层（readFailed=true）与坏目录负缓存短路层不可观测
+ *（该层真实被禁用的键唯一定义恰在其中，definitionKeys 覆盖不到）——effective overrides 存在
+ * 任意值==='off' 的键时保守置 true（宁可短暂 strict，不放行原生拉起破坏禁用语义）；ENOENT /
+ * JSON 损坏两条路径不置（层可观测 = 确实无定义，三态分类口径不变）；overrides 无 'off' 键时
+ * 仍 false（H2 未接管恢复原生加载不回归）。selftest-mcp-settings I8 钉死。
  */
 export function mergeMcpServersIntoSettings(
   out: Record<string, unknown>,
@@ -107,7 +140,7 @@ export function mergeMcpServersIntoSettings(
   sessionRow: { mcpOverrides: Record<string, 'off'> | null; workingDir?: string | null } | null,
   workingDir: string | null | undefined,
   io?: MergeMcpServersIo,
-): void {
+): MergeMcpResult {
   const overrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;
   const projectDirKey = workingDir ? normalizeDirKey(workingDir) : null;
   // B-1（2026-10-16）默认 io 坏目录负缓存防护：慢速/失联目录（UNC/网络盘/拔出的可移动盘）的
@@ -119,25 +152,64 @@ export function mergeMcpServersIntoSettings(
   // 申报边界：同步链无法防「首次悬挂」（悬挂不返回、无从 mark）——从未打开设置页的首条消息
   // 仍可能悬挂一次。
   const userHome = io?.userHome ?? os.homedir();
+  // B-M1（2026-10-29）不可观测定义层标志：仅默认 io（未注入 io.readUser / io.readProject）走进
+  // ① 坏目录负缓存短路（badDirCacheHas 命中——该层本轮没有任何可观测定义，正是读失败后的 60s
+  // 窗口）或 ② detail 读取器返回 readFailed=true（读异常且非 ENOENT、非 JSON 损坏）时置 true。
+  // ENOENT（正常空态）/ JSON 损坏（坏内容）不置：这两态层内容是可观测的「确实无定义」，
+  // mcp-scanner 的三态分类口径不变。注入式 io（selftest 内存 stub）完全不受影响。
+  let unknownDefinitionLayer = false;
   const readUser =
     io?.readUser ??
     (() => {
       const key = `mcp-user:${userHome}`; // 命名空间隔离，绝不与项目目录键碰撞（绝对路径不可能以 mcp-user: 开头）
-      if (badDirCacheHas(key)) return {};
+      if (badDirCacheHas(key)) {
+        unknownDefinitionLayer = true;
+        return {};
+      }
       const d = readUserMcpServersDetailSync(userHome);
-      if (d.readFailed) badDirCacheMark(key);
+      if (d.readFailed) {
+        unknownDefinitionLayer = true;
+        badDirCacheMark(key);
+      }
       return d.servers;
     });
   const readProject =
     io?.readProject ??
     ((dir: string) => {
-      if (badDirCacheHas(dir)) return {}; // 命中共享负缓存（Skill/快照链同实例写入）
+      if (badDirCacheHas(dir)) {
+        // 命中共享负缓存（Skill/快照链同实例写入）
+        unknownDefinitionLayer = true;
+        return {};
+      }
       const d = readProjectMcpServersDetailSync(dir);
-      if (d.readFailed) badDirCacheMark(dir); // 快速失败也标记，60s 内不再重复付失败成本
+      if (d.readFailed) {
+        unknownDefinitionLayer = true;
+        badDirCacheMark(dir); // 快速失败也标记，60s 内不再重复付失败成本
+      }
       return d.servers;
     });
   const userServers = readUser() ?? {};
   const projectServers = projectDirKey !== null ? (readProject(workingDir as string) ?? {}) : {};
+  // H2（2026-10-29）strict 门控信号收紧：构造三层现存定义的 override 键全集，effective
+  // overrides 中至少一个值==='off' 的键命中该集合才算「接管激活」——孤儿键（外部删除后残留）
+  // 不再触发 strictMcpConfig、不再静默丢弃引擎原生 MCP 来源；命中定义的禁用键仍激活（禁用
+  // 必须生效）。键构造与下方 mergeMcpServersForSession 应用侧逐字同口径；跨目录 project 键
+  // 不进集合（D5：跨目录 override 不生效）。
+  const definitionKeys = new Set<string>();
+  for (const s of Array.isArray(config.mcpServers) ? config.mcpServers : []) definitionKeys.add(`managed:${s.name}`);
+  for (const name of Object.keys(userServers)) definitionKeys.add(`user:${name}`);
+  if (projectDirKey !== null) for (const name of Object.keys(projectServers)) definitionKeys.add(`project:${projectDirKey}:${name}`);
+  let hasOffOverride = false;
+  let hitExisting = false;
+  for (const [key, val] of Object.entries(overrides ?? {})) {
+    if (val !== 'off') continue;
+    hasOffOverride = true;
+    if (definitionKeys.has(key)) { hitExisting = true; break; }
+  }
+  // B-M1：不可观测层（读失败 / 负缓存短路）+ 存在任意 'off' 键 → 保守 true（宁可短暂 strict，
+  // 不放行引擎原生拉起破坏禁用语义）；overrides 全空时保持 H2 既有语义（未接管 → strict=false，
+  // 恢复引擎原生加载），避免读失败时无意义地压制原生 MCP。
+  const overridesHitExisting = hitExisting || (unknownDefinitionLayer && hasOffOverride);
   const merged = mergeMcpServersForSession({
     managed: config.mcpServers,
     userServers,
@@ -148,4 +220,5 @@ export function mergeMcpServersIntoSettings(
   if (Object.keys(merged).length > 0) {
     out.mcpServers = merged;
   }
+  return { overridesHitExisting };
 }
