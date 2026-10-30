@@ -2046,6 +2046,170 @@ console.log('\n=== O. 导入解析收口主进程组（McpSettings.vue 删双副
   }
 }
 
+// ── P. 保存位置联动组（2026-10-29 mcp-scope-misplacement-fix P1-A：R1/R2/H3；P1-B 补 P4：H1；P3-A 补 P5：H5；2026-10-29 mcp-import-scope-and-segment-lock 改动点 C：P3 改写 + P6 新增）──
+// 沿 H/L/M/N 组读源码静态钉先例：openAdd 保存位置三态无条件随入口 rail 联动 + resetForm 去预填
+// + 保存位置段位锁定恒态 + 导入作用域跟随栏位。缺陷背景（docs/plans/2026-10-29-mcp-scope-misplacement-review-report.md
+// R1/R2/H3）：openAdd 不设 formLocation 且仅 formHasContent()===false 才 resetForm()——上次编辑
+// user/project 条目或手动切段位后取消，从管理库 rail 再点「添加服务器」时保存位置残留「项目级×
+// 上次目录」，保存写进错误目录的 .mcp.json；另 resetForm 恒预填 projectDirs[0]，使
+// switchLocation('project') 的空值预选分支成死代码。P5（P3-A 补，H5）：MCP_WRITE_SCOPED 白名单
+// 拒绝文案补「最近工作区上限」说明——ipc-handlers.ts 拒绝错误改为含 ${MAX_ENTRIES} 插值的模板串
+//（上限随常量演进，不与实际上限漂移），MAX_ENTRIES 经 workspace-history import 引入，旧
+// 文案整串（三种引号形态）零出现。
+// 改动点 C（2026-10-29 mcp-import-scope-and-segment-lock）：段位切换器整体退化为只读指示
+//（switchLocation 删除，P3 改钉锁定恒态）；导入目标作用域跟随 entry rail（P6 新增钉，对
+// 改动点 B 前的旧实现判 FAIL）。
+
+console.log('\n=== P. 保存位置联动组（openAdd 联动 / resetForm 去预填 / 段位锁定恒态 / 导入作用域跟随） ===');
+
+{
+  const pVueRel = path.join('src', 'renderer', 'components', 'config', 'McpSettings.vue');
+  let pSrc = '';
+  try {
+    pSrc = fs.readFileSync(path.resolve(__dirname, '..', pVueRel), 'utf8');
+  } catch {
+    // 缺文件/不可读：src 保持空串，下列断言全部走 FAIL 分支（不抛错、不崩脚本）。
+  }
+
+  // P1 openAdd 联动：函数体切片（function openAdd → function openEdit）含 activeScope 取值与
+  // formLocation 两条联动赋值（project rail 直取该目录 path / managed·user rail 取 scope.kind），
+  // 且联动赋值出现在 resetForm() 调用之后（resetForm 亦写 formLocation='managed'，先联动会被
+  // clobber）；负向：去行注释切片内 resetForm() 之后不得再出现 formHasContent（联动不得被
+  // formHasContent 门控——钉「不依赖 formHasContent」语义；注释提及不算命中）。
+  // round-001 F1/F2 加固：①两条联动赋值必须位于轨道 if/else 直下的一层嵌套缩进（现实现为
+  // 4 空格，恰 2 行）——若被并进 if (!formHasContent()) 块内会整体再深一层缩进，计数归零即
+  // FAIL；②formHasContent 守卫行必须是「if (!formHasContent()) resetForm();」无块单语句形态
+  //（块化即联动有处可进，直接 FAIL）；③formProjectDir 两条联动赋值 token（project rail 直取
+  // scope.path / 非 project rail 清空）缺一即 FAIL（防单删该行钉全绿）。
+  {
+    const p1Start = pSrc.indexOf('function openAdd');
+    const p1End = pSrc.indexOf('function openEdit', p1Start);
+    const p1Body = p1Start >= 0 && p1End > p1Start ? pSrc.slice(p1Start, p1End) : '';
+    const p1Stripped = p1Body.replace(/\/\/[^\n]*/g, ''); // 去行注释：负向判定只认代码
+    const p1Reset = p1Stripped.indexOf('resetForm()');
+    const p1LocProject = p1Stripped.indexOf("formLocation.value = 'project'");
+    const p1LocKind = p1Stripped.indexOf('formLocation.value = scope.kind');
+    const p1GatedAfterReset = p1Reset >= 0 && p1Stripped.indexOf('formHasContent', p1Reset) !== -1;
+    const p1IndentHits = (p1Stripped.match(/^ {4}formLocation\.value = /gm) ?? []).length;
+    const p1GateLine = p1Stripped.split('\n').find((l) => l.includes('if (!formHasContent())')) ?? '';
+    const p1GateBare = /if \(!formHasContent\(\)\) resetForm\(\);\s*$/.test(p1GateLine);
+    check(
+      'P1',
+      'openAdd 保存位置三态无条件随入口 rail 联动（activeScope 取值 + project/managed·user 双分支赋值，联动在 resetForm() 之后、不受 formHasContent 门控、两条 formLocation 联动赋值位于轨道 if/else 直下一层缩进、守卫行为无块单语句、formProjectDir 双 token 在位）',
+      p1Body !== ''
+        && p1Stripped.includes('activeScope.value')
+        && p1LocProject >= 0 && p1LocKind >= 0
+        && p1Reset >= 0 && p1Reset < p1LocProject && p1Reset < p1LocKind
+        && !p1GatedAfterReset
+        && p1IndentHits === 2
+        && p1GateBare
+        && p1Stripped.includes('formProjectDir.value = scope.path')
+        && p1Stripped.includes("formProjectDir.value = ''"),
+      pSrc === '' ? 'McpSettings.vue 不可读' : 'openAdd 缺 rail 联动赋值、联动先于 resetForm()（会被 clobber）、联动被 formHasContent 门控或并入其 if 块、formProjectDir 联动赋值缺失',
+    );
+  }
+
+  // P2 resetForm 去预填：函数体切片（function resetForm → /** 表单是否含用户已填内容）恰含
+  // 一次 formProjectDir.value = ''（清空而非预填；project 目录仅由 openAdd 按入口 rail 联动写入，
+  // 空值由 formValid 的非空判定拦截保存），且切片不再含 projectDirs.value[0] 子串
+  //（projectDirs 为空数组时 formValid 的 formProjectDir 非空判定拦截保存，既有「暂无已知项目
+  // 目录」hint 兜底）。
+  // 2026-10-29 改动点 C：措辞同步（段位切换器已退化为只读指示、switchLocation 预选分支随函数
+  // 一并删除，本钉原引用的「预选改由 switchLocation('project') 预选 projectDirs[0] 承担」表述
+  // 已失效）；断言主体一字未改。
+  {
+    const p2Start = pSrc.indexOf('function resetForm');
+    const p2End = pSrc.indexOf('/** 表单是否含用户已填内容', p2Start);
+    const p2Body = p2Start >= 0 && p2End > p2Start ? pSrc.slice(p2Start, p2End) : '';
+    const p2AssignCount = p2Body.split("formProjectDir.value = '';").length - 1;
+    // round-001 F4：负向子断言改用去行注释切片（先例：P1 p1Stripped）——注释含 projectDirs.value[0]
+    // 字样不再误报；正向清空赋值计数维持 p2Body 判定（计数语义：真实代码恰一处）。
+    const p2Stripped = p2Body.replace(/\/\/[^\n]*/g, '');
+    check(
+      'P2',
+      "resetForm 去预填：切片恰含一次 formProjectDir.value = '' 且不再含 projectDirs.value[0]",
+      p2Body !== '' && p2AssignCount === 1 && !p2Stripped.includes('projectDirs.value[0]'),
+      pSrc === '' ? 'McpSettings.vue 不可读' : `resetForm 仍预填 projectDirs[0] 或清空赋值形态不符（计数=${p2AssignCount}）`,
+    );
+  }
+
+  // P3 保存位置段位锁定恒态（2026-10-29 mcp-import-scope-and-segment-lock 改动点 C 改写）：
+  // 原钉「编辑态锁定」（:disabled="isEditMode" + switchLocation 首行 isEditMode 守卫）升级为
+  // 「锁定恒态（编辑态与新建态均锁定）」——段位切换器退化为只读指示，仅指示保存位置，入口 rail
+  // 是唯一决定落点的手段（计划 §1.3/§3.A）。三段子断言：
+  //   ① 模板 mcp-seg 区（保存位置 role="group" 的 .mcp-seg 开标签 → 副标题 hint 之间，
+  //      防误匹配他处同 token）内 v-for="loc in LOCATION_ORDER" 仍在（三段指示本体未删）；
+  //   ② 负向：该区内无 @click="switchLocation(loc)"，且任何 switchLocation( 调用绑定零出现
+  //      （段位不再可交互）；
+  //   ③ 按钮为静态 disabled 属性（出现 disabled、不出现 :disabled= 动态绑定形态——恒只读，
+  //      不随 isEditMode 开关）；
+  //   ④ 负向（全文件）：switchLocation 零出现——函数定义（含旧 projectDirs[0] 预选分支）与
+  //      全部引用一并删除，防「删了点击绑定但函数留着」的回退半态。
+  {
+    const p3SegStart = pSrc.indexOf('class="mcp-seg" role="group" aria-label="保存位置"');
+    const p3SegEnd = pSrc.indexOf('{{ locationHint }}', p3SegStart);
+    const p3Seg = p3SegStart >= 0 && p3SegEnd > p3SegStart ? pSrc.slice(p3SegStart, p3SegEnd) : '';
+    const p3NoClick = !p3Seg.includes('@click="switchLocation(loc)"') && !/switchLocation\s*\(/.test(p3Seg);
+    // 静态 disabled 属性：裸 `disabled` 或 `disabled="disabled"` 皆可（后随空白/`>`/`=`）；
+    // 前导 `\s` 保证不误命中 `:disabled`（其前一字符为冒号，非空白），动态形态另由下方排除。
+    const p3StaticDisabled = /\sdisabled(?=[\s>=])/.test(p3Seg) && !p3Seg.includes(':disabled=');
+    check(
+      'P3',
+      '保存位置段位锁定恒态（编辑态与新建态均锁定，退化为只读指示）：LOCATION_ORDER 按钮保留 + 无 @click/switchLocation 绑定 + 静态 disabled（无 :disabled= 动态形态）+ 全文件 switchLocation 零出现',
+      p3Seg !== ''
+        && p3Seg.includes('v-for="loc in LOCATION_ORDER"')
+        && p3NoClick
+        && p3StaticDisabled
+        && !pSrc.includes('switchLocation'),
+      pSrc === '' ? 'McpSettings.vue 不可读' : '段位按钮仍有 @click/switchLocation 绑定、仍是 :disabled 动态形态、或全文件仍残留 switchLocation（函数定义/引用）',
+    );
+  }
+
+  // P4 新增态哨兵 KV 行拦截（P1-B，H1；V2 载体分化）：saveForm 函数体切片（async function
+  // saveForm → function handleDelete）含 !isEditMode.value 门控（编辑态哨兵照传由主进程还原，
+  // 行为零改动）与 r.value === MCP_VALUE_MASK 行判定形态（仅拦键非空的哨兵行）；拦截提示字面
+  // 「检测到残留的加密占位值，请清空对应行后重新填写」落在模块级常量 SENTINEL_BLOCK_MSG
+  // 定义处（位于 saveForm 切片之外，故用 pSrc 断言），切片内两种载体均消费该常量：
+  //   · JSON 模式（V2）：jsonError.value = `表单校验未通过：${SENTINEL_BLOCK_MSG}` + return，
+  //     提示载体与既有 JSON 校验失败（表单校验未通过：前缀）同形，停留 JSON 侧（不 toast、
+  //     不翻 editMode、不置 submitAttempted，与 N9/N11 停留契约统一）；门控 editMode.value === 'json'；
+  //   · 表单模式：pushToast(SENTINEL_BLOCK_MSG) + return（与既有保存失败 toast 形态一致）。
+  // 两种载体均必须以 return 收束（只提示不 return 会继续落盘、静默丢 env 哨兵行），且均先于
+  // 切片内 saving.value = true（挪到落盘链之后即失效；本分支不清表单、不翻 editMode、不翻
+  // 转 saving 态）。
+  // RED 依据：现状 saveForm 无该拦截分支，env/headers 哨兵行在新增态被主进程
+  // restoreMaskedMcpServers 按「无已存条目」静默丢弃，保存谎报成功。
+  // V2 RED 依据：现状两种载体未分化（JSON 模式也在走 toast），无 SENTINEL_BLOCK_MSG 常量。
+  {
+    const p4Start = pSrc.indexOf('async function saveForm');
+    const p4End = pSrc.indexOf('function handleDelete', p4Start);
+    const p4Body = p4Start >= 0 && p4End > p4Start ? pSrc.slice(p4Start, p4End) : '';
+    const p4MsgUse = p4Body.indexOf('SENTINEL_BLOCK_MSG');
+    const p4Save = p4Body.indexOf('saving.value = true');
+    // 字面落在模块级常量定义处（saveForm 切片之外）→ 用整份源码断言。
+    const p4Literal = pSrc.includes('检测到残留的加密占位值，请清空对应行后重新填写');
+    // 表单模式载体：pushToast(SENTINEL_BLOCK_MSG) 后紧跟 return;（\s* 覆盖 CRLF 与缩进）。
+    const p4FormCarrier = /pushToast\(SENTINEL_BLOCK_MSG\);\s*\n\s*return;/.test(p4Body);
+    // JSON 模式载体：jsonError.value = `表单校验未通过：${SENTINEL_BLOCK_MSG}`; 后紧跟 return;
+    // （\$\{ 匹配字面 ${，非正则分组）。
+    const p4JsonCarrier = /jsonError\.value = `表单校验未通过：\$\{SENTINEL_BLOCK_MSG\}`;\s*\n\s*return;/.test(p4Body);
+    check(
+      'P4',
+      '新增态哨兵 KV 行拦截两种载体：JSON 模式 jsonError 红条（表单校验未通过：前缀，门控 editMode.value === \'json\'）+ 表单模式 toast，共用 SENTINEL_BLOCK_MSG 常量；均以 return 收束且先于 saving.value = true；含 !isEditMode 门控 + 值===MCP_VALUE_MASK 行判定',
+      p4Body !== ''
+        && p4Literal
+        && p4Body.includes('!isEditMode.value')
+        && p4Body.includes('r.value === MCP_VALUE_MASK')
+        && p4Body.includes('SENTINEL_BLOCK_MSG')
+        && p4Body.includes("editMode.value === 'json'")
+        && p4FormCarrier
+        && p4JsonCarrier
+        && p4Save >= 0 && p4MsgUse >= 0 && p4MsgUse < p4Save,
+      pSrc === '' ? 'McpSettings.vue 不可读' : 'saveForm 缺新增态哨兵行拦截分支、缺 V2 载体分化（JSON→jsonError 红条 / 表单→toast，共用 SENTINEL_BLOCK_MSG）、拦截未以 return 退出，或拦截位于落盘链 saving.value = true 之后（失效）',
+    );
+  }
+}
+
 // ── 汇总与退出码 ─────────────────────────────────────────────────────────────
 // J3（2026-10-19 点1 起）为异步断言：汇总移入 finish()，由 J3 的 promise 链收尾调用一次
 //（同步断言全部先于其执行完毕，计数完整后再打印；退出码约定不变）。

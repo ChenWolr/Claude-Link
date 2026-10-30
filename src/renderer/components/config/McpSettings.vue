@@ -493,6 +493,10 @@ type SaveLocation = 'managed' | 'user' | 'project';
 const LOCATION_ORDER: SaveLocation[] = ['managed', 'user', 'project'];
 const TRANSPORT_ORDER = ['stdio', 'http', 'sse'] as const;
 
+/** H1 新增态哨兵残留拦截提示（V2：JSON 模式走 jsonError 红条、表单模式走 toast，两种载体
+ *  共用同一字面防双处漂移）。 */
+const SENTINEL_BLOCK_MSG = '检测到残留的加密占位值，请清空对应行后重新填写';
+
 function locationLabel(loc: SaveLocation): string {
   if (loc === 'managed') return 'Claude Link 管理';
   return loc === 'user' ? '用户级' : '项目级';
@@ -579,12 +583,6 @@ const editorSubline = computed<string>(() => {
     : locationLabel(formLocation.value);
   return isEditMode.value ? `${formName.value} · ${loc}` : `保存位置：${loc}`;
 });
-
-function switchLocation(loc: SaveLocation): void {
-  if (formLocation.value === loc) return;
-  formLocation.value = loc;
-  if (loc === 'project' && formProjectDir.value === '') formProjectDir.value = projectDirs.value[0]?.path ?? '';
-}
 
 // 传输类型切换：重置 command/url 的 touched（防切回旧传输类型残留显红）；
 // submitAttempted 保留（提交尝试过的「点亮全部」状态不因切换传输而清除）。
@@ -820,7 +818,9 @@ function removeKvRow(rows: KvRow[], index: number): void {
 
 function resetForm(): void {
   formLocation.value = 'managed';
-  formProjectDir.value = projectDirs.value[0]?.path ?? '';
+  // project 目录不预填（R1/R2）：仅由 openAdd 按入口 rail 联动写入；空值由 formValid 非空判定
+  // 拦截保存（既有「暂无已知项目目录」hint 兜底）。
+  formProjectDir.value = '';
   formName.value = '';
   formTransport.value = 'stdio';
   formDescription.value = '';
@@ -853,6 +853,17 @@ function openAdd(): void {
   dialogMode.value = { kind: 'add' };
   // Esc/取消/面包屑返回均不清表单（关闭不丢已填内容）；仅在上次以保存收尾或表单为空时重置。
   if (!formHasContent()) resetForm();
+  // R1/R2：保存位置三态无条件随入口 rail 联动（不依赖 formHasContent）——上次编辑 user/project
+  // 条目或手动切段位的残留不再影响新开添加的默认位置；project rail 直取该目录 path。
+  // 联动必须放在条件 resetForm 之后：resetForm 也写 formLocation='managed'，先联动会被 clobber。
+  const scope = activeScope.value;
+  if (scope.kind === 'project') {
+    formLocation.value = 'project';
+    formProjectDir.value = scope.path;
+  } else {
+    formLocation.value = scope.kind; // 'managed' | 'user'
+    formProjectDir.value = '';
+  }
   openEditor();
 }
 
@@ -1039,6 +1050,22 @@ async function saveForm(): Promise<void> {
   }
   if (!formValid.value) {
     submitAttempted.value = true; // 非法提交：点亮全部错误（原为静默 return）
+    return;
+  }
+  // H1：新增态无已存条目可还原——KV 行残留哨兵值时拦截保存（编辑态主进程按已存条目/原文件
+  // 还原哨兵，不受影响）。空键行 kvRowsToRecord 本就丢弃，不误拦。
+  if (
+    !isEditMode.value &&
+    (formEnvRows.value.some((r) => r.key.trim() !== '' && r.value === MCP_VALUE_MASK) ||
+      formHeaderRows.value.some((r) => r.key.trim() !== '' && r.value === MCP_VALUE_MASK))
+  ) {
+    // V2（2026-10-29）载体按模式分化：JSON 模式走红条并停留 JSON 侧（与 N9/N11 停留契约统一，
+    // 提示载体与其它 JSON 校验失败一致）；表单模式维持 toast。拦截位置/exit 语义零改动。
+    if (editMode.value === 'json') {
+      jsonError.value = `表单校验未通过：${SENTINEL_BLOCK_MSG}`;
+      return;
+    }
+    pushToast(SENTINEL_BLOCK_MSG);
     return;
   }
   saving.value = true;
@@ -1770,7 +1797,7 @@ const scopeNoteHead = computed<string>(() => {
                   :key="loc"
                   type="button"
                   :class="['mcp-seg__btn', { 'mcp-seg__btn--active': formLocation === loc }]"
-                  @click="switchLocation(loc)"
+                  disabled
                 >{{ locationLabel(loc) }}</button>
               </div>
               <span class="mcp-ffield__hint">{{ locationHint }}</span>
@@ -3334,6 +3361,12 @@ const scopeNoteHead = computed<string>(() => {
   font-size: 0.75rem;
   font-weight: 600;
   font-family: inherit;
+}
+
+/* 保存位置段位恒只读（静态 disabled，2026-10-29 改动点 A）：与可用态区分（round-001 F5）。 */
+.mcp-seg__btn:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 .mcp-seg__btn--active {
