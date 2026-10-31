@@ -9,9 +9,12 @@
 //   - 移动端生命周期加速：online / visibilitychange(visible) 立即重试、跳过当次退避等待；
 //   - 断线期间所有 invoke reject new Error('Web 桥未连接')；
 //   - 重连 welcome 后执行状态对齐序列（loadSessions / switchSession 重入 /
-//     interaction reconcile 重水合 / update-store 幂等重拉，见 runRealignSequence 注）。
+//     interaction reconcile 重水合 / update-store 幂等重拉，见 runRealignSequence 注）；
+//   - welcome 帧 buildRev 捕获（welcomedBuildRevRef）：供 App.vue「渲染产物滞后」诊断横条
+//     比对渲染 bundle 的 BUILD_REV（2026-10-30 计划 §1.B；纯可见化，不改构建管线）。
 // 仅在无 window.claudeLink 的浏览器环境由 main.ts 动态 import 触发（Electron 路径本 chunk 不加载）。
 
+import { ref, type Ref } from 'vue';
 import type { ClaudeLinkAPI } from '../../preload/api';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { encodeWireValue, decodeWireValue } from '../../shared/web-access-protocol';
@@ -59,6 +62,15 @@ let reconnectAttempt = 0;
 let cancelBackoffWait: (() => void) | null = null;
 let lifecycleBound = false;
 let installPromise: Promise<void> | null = null;
+
+/** welcome 帧携带的主进程 buildRev（'' = 尚未收到 welcome）。ref 化：App.vue 横条随重连 welcome 自动更新。 */
+const welcomedBuildRev = ref('');
+/** 供非响应式读取方（诊断/测试）取当前值。 */
+export function getWelcomedBuildRev(): string {
+  return welcomedBuildRev.value;
+}
+/** 供渲染层模板消费的响应式引用（App.vue 产物滞后横条）。 */
+export const welcomedBuildRevRef: Ref<string> = welcomedBuildRev;
 
 // ── 全量通道表：键集 === ClaudeLinkAPI 成员集（Record<keyof, string> 由 TS 强制完备，
 //    值全部引用 IPC_CHANNELS 常量；键集对等契约由 scripts/tdd-web-access-wiring-verify.ts
@@ -269,6 +281,9 @@ function openConnection(token: string): BridgeConnection {
       return; // 非 JSON 帧（理论不可达）忽略
     }
     if (frame.kind === 'welcome') {
+      // 产物滞后诊断：捕获主进程 buildRev——重连 welcome 同样更新（与「重连 welcome 后再对齐」
+      // 语义一致），故写在 if (!settled) 之外。
+      welcomedBuildRev.value = typeof frame.buildRev === 'string' ? frame.buildRev : '';
       if (!settled) {
         settled = true;
         resolveWelcome();

@@ -654,5 +654,25 @@ check('ipc-handlers TURN_DIFF_FILE_PATCH 第 5 参 context: unknown + 钳制 1..
 check('turn-diff getPatch/computeFileDiff 声明含 context 默认参（context = 3 ≥ 2 处）',
   countOccurrences(turnDiffSrc, 'context = 3') >= 2);
 
+// ── ⑯ web 产物滞后横条（2026-10-30 计划 §1.B / §7-S14）──
+console.log('=== 16) web 产物滞后横条（P4）===');
+// W1：web-bridge welcome 分支捕获主进程 buildRev（重连 welcome 亦更新），并以 getter + 响应式 ref 双出口暴露。
+check('W1 web-bridge 捕获 welcome buildRev（welcomedBuildRev / frame.buildRev / getWelcomedBuildRev / welcomedBuildRevRef 四要素）',
+  webBridge.includes('welcomedBuildRev') &&
+  webBridge.includes('frame.buildRev') &&
+  webBridge.includes('export function getWelcomedBuildRev') &&
+  webBridge.includes('export const welcomedBuildRevRef'));
+// W2：App.vue web 独占门控（桌面恒不渲染）+ 与渲染 bundle BUILD_REV 比对 + 可关闭（localStorage 记住 rev 对）。
+check('W2 App.vue 门控与比对（__claudeLinkWebBridge === true / BUILD_REV / shared/build-info / 不等比对 / 关闭键 / @click）',
+  appVue.includes('__claudeLinkWebBridge === true') &&
+  appVue.includes('BUILD_REV') &&
+  appVue.includes('shared/build-info') &&
+  appVue.includes('welcomedRev.value !== BUILD_REV') &&
+  appVue.includes('clWebRevWarnDismissed') &&
+  appVue.includes('@click="dismissRevWarn"'));
+// W3：本点纯「可见化」——不新增 IPC 通道（welcome 帧字段不是通道键；键集主防线见 §11.2 双向断言）。
+check('W3 通道键集零变化（buildRev 仅作 welcome 帧字段，无 IPC_CHANNELS.BUILD_REV）',
+  webBridge.includes('buildRev') && !webBridge.includes('IPC_CHANNELS.BUILD_REV'));
+
 console.log(`\n[P2+P3+P4+P5 接线契约] 通过 ${pass} / 失败 ${fail}`);
 if (fail > 0) process.exit(1);

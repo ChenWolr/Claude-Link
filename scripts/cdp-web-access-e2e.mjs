@@ -1,5 +1,6 @@
 // scripts/cdp-web-access-e2e.mjs
-// 「网页访问」浏览器图形级 E2E（P0-6b / 计划 §3-6b，B1-B8；2026-10-26 增 W-changes-panel：web 端改动面板）。
+// 「网页访问」浏览器图形级 E2E（P0-6b / 计划 §3-6b，B1-B8；2026-10-26 增 W-changes-panel：web 端改动面板；
+// 2026-10-30 增 W-mcp-settings：web 端设置 → MCP tab 渲染 + 协议级双探针，只读不写配置）。
 //
 // 用法（编排器/复现者手动准备环境，脚本只做断言）：
 //   1. npm run build && npx electron . --remote-debugging-port=9223   （应用运行，8790 监听）
@@ -9,23 +10,35 @@
 //        --user-data-dir=<自选临时目录> --no-first-run --no-default-browser-check about:blank
 //   3. npm run test:cdp:web-access
 //
+//   隔离跑（推荐，符合仓库 AGENTS.md：不得写用户真实配置）：
+//     npx electron . --user-data-dir=<临时目录> --remote-debugging-port=9223
+//     node scripts/cdp-web-access-e2e.mjs --config <临时目录>/claude-link-config.json
+//
 // 退出协议：
-//   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）+ W-changes-panel PASS。
-//   - exit 1：任一 B1-B8 / W-changes-panel 断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或 console error）。
-//   - exit 2：前置条件不满足（Chrome 9224 / 应用 8790 / 配置 token 不可用）。
+//   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）+ W-changes-panel PASS + W-mcp-settings PASS。
+//   - exit 1：任一 B1-B8 / W-changes-panel / W-mcp-settings 断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或 console error）。
+//   - exit 2：前置条件不满足（Chrome 9224 / 应用 8790 / 配置 token 不可用）。--config 未指定时读 %APPDATA%/claude-link/claude-link-config.json。
 //
 // 技术纪律（用户约束）：纯 CDP 原生（Input/Runtime/Network/Page），不依赖 computer-use 等 skill。
-// 证据落盘：docs/reports/web-e2e-screenshots/B*.png、W-changes-panel.png + 同目录 run-B1-B8.log。
-// 敏感纪律：token 从 %APPDATA%/claude-link/claude-link-config.json 顶层键 webAccessToken 读取，
-// 一切输出（含 URL 日志）掩码为前 4 后 4。
+// 证据落盘：docs/reports/web-e2e-screenshots/B*.png、W-changes-panel.png、W-mcp-settings.png + 同目录 run-B1-B8.log。
+// 敏感纪律：token 从 %APPDATA%/claude-link/claude-link-config.json 顶层键 webAccessToken 读取
+// （--config 指定时为该路径，隔离 profile 用），一切输出（含 URL 日志）掩码为前 4 后 4。
 
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
+// CLI 参数读取（--k v）——必须在 CONFIG_PATH 之前定义：CONFIG_PATH 经 argOf('--config') 求值，
+// 而 const 箭头函数不提升（原先定义在文件靠下，移到此处以满足求值顺序；调用形态不变）。
+const argOf = (k, d) => { const i = process.argv.indexOf(k); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
+
 const CHROME_CDP_PORT = 9224;
-const CONFIG_PATH = path.join(process.env.APPDATA ?? '', 'claude-link', 'claude-link-config.json');
+// 配置路径可覆盖（--config）：E2E 必须在隔离 --user-data-dir 上跑（仓库 AGENTS.md：不得写用户
+// 真实配置），隔离实例的配置与 token 都在隔离目录里，故需能把配置路径指过去。
+// 未指定 --config 时仍读 %APPDATA%/claude-link/claude-link-config.json（默认行为不变）。
+const DEFAULT_CONFIG_PATH = path.join(process.env.APPDATA ?? '', 'claude-link', 'claude-link-config.json');
+const CONFIG_PATH = argOf('--config', DEFAULT_CONFIG_PATH);
 const SHOT_DIR = path.resolve('docs/reports/web-e2e-screenshots');
 const LOG_PATH = path.join(SHOT_DIR, 'run-B1-B8.log');
 const E2E_MESSAGE_TEXT = '请只回复数字 42,不要使用任何工具';
@@ -35,7 +48,7 @@ const E2E_MESSAGE_TEXT = '请只回复数字 42,不要使用任何工具';
 //             与计划「主战场=局域网 IP」一致；100.64/10 段留给 TS）；
 //   TS  默认 = 100.64.0.0/10 CGNAT 段内的 IPv4（Tailscale 网卡地址段），无则 null
 //             （null 且无 --ts-ip 时 B8 记 SKIP「未发现 Tailscale 网卡」）。
-const argOf = (k, d) => { const i = process.argv.indexOf(k); return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : d; };
+// argOf 已上移至文件顶部（CONFIG_PATH 求值前，见上）。
 function deriveLanIp() {
   for (const list of Object.values(os.networkInterfaces())) {
     for (const iface of list ?? []) {
@@ -620,6 +633,69 @@ async function main() {
   } catch (e) { record('W-changes-panel', 'FAIL', e.message); }
   await screenshot(ws, 'W-changes-panel');
 
+  // ── W-mcp-settings：web 端设置 → MCP tab 渲染 + 协议级双探针（只读，不写任何配置）──
+  // 证明「MCP 探活/测试连接在网页版可用」：DOM 侧 rail/卡片容器在位，协议侧经真实网页上下文
+  // 走一遍 getMcpSnapshot / probeMcpServers(target:'scoped', scope:'user')。
+  // 只读纪律：不调 saveManaged/writeMcpScoped/setMcpOverride，不写用户配置。
+  currentCase = 'W-mcp-settings';
+  try {
+    const exceptionsBeforeM = exceptions.length;
+    // 0) 确保在局域网 origin + 桥连接。
+    if ((await evalExpr(ws, 'location.host')) !== `${LAN_IP}:${PORT}`) {
+      await navigate(ws, urls.lan);
+      await waitFor('W-mcp 前置：页面渲染+桥连接（局域网）', () => evalOk(ws, connectedExpr), 30);
+    }
+    // 1) 设置页 → MCP tab（hash 路由：#/config?tab=mcp 由 ConfigPage onMounted 读 query）。
+    await evalExpr(ws, `(location.hash = '#/config?tab=mcp'), true`);
+    await waitFor('设置页 MCP tab 就绪（作用域 rail 在位）', () => evalOk(ws, `!!document.querySelector('.mcp-rail')`), 20);
+    await waitFor('MCP 卡片容器在位（.mcp-main）', () => evalOk(ws, `!!document.querySelector('.mcp-main')`), 10);
+    // 1.5) 等列表加载收口（快照首拍「正在读取 MCP 服务器清单…」退场）：卡片计数与「测试连接」
+    //      按钮存在性都依赖本栏卡片已渲染，加载态下量到 0 卡会误判；settling 等待失败不致命（仅提示）。
+    await waitFor('MCP 列表加载收口（退出「正在读取」占位）', () => evalOk(ws, `(() => {
+      return ![...document.querySelectorAll('.mcp-empty')].some((el) => (el.textContent || '').includes('正在读取'));
+    })()`), 15).catch(() => { log('  MCP 列表加载态 15s 未收口（按当前 DOM 继续断言）'); });
+    // 2) rail 三作用域条目 + 「测试连接」按钮在位（c70809b 三作用域能力的存在性证据）。
+    //    DOM 事实（2026-10-30 核实 src/renderer/components/config/McpSettings.vue L1911-1917）：
+    //    「测试连接」是纯图标按钮（class=mcp-iconbtn，按钮内只有 SVG），文字只存在于
+    //    aria-label/title（`测试连接 ${card.name}`），textContent 恒为空——按按钮文字匹配必然
+    //    取不到，故以 aria-label 前缀选择器为准；卡片数以 .grp__row 计（卡片存在才有该按钮）。
+    const railInfo = await evalExpr(ws, `(() => {
+      const items = [...document.querySelectorAll('.mcp-rail-item')];
+      const names = items.map((el) => el.querySelector('.mcp-rail-item__name')?.textContent?.trim() ?? '');
+      const btns = [...document.querySelectorAll('button')].map((b) => (b.textContent || '').trim());
+      const probeBtns = [...document.querySelectorAll('button[aria-label^="测试连接"]')];
+      const cardCount = document.querySelectorAll('.grp__row').length;
+      return JSON.stringify({ railCount: items.length, names, cardCount, hasProbeBtn: probeBtns.length > 0, hasExportBtn: btns.some((t) => t.includes('导出 JSON')) });
+    })()`);
+    const rail = JSON.parse(String(railInfo));
+    if (!(rail.railCount >= 2)) throw new Error(`作用域 rail 条目数 ${rail.railCount} < 2（期望 ≥2：Claude Link 管理 / 用户级 / 项目目录）`);
+    // 仅当本栏有卡片时才要求「测试连接」按钮在位（空作用域合法无按钮，隔离 profile 常见）。
+    if (rail.cardCount > 0 && rail.hasProbeBtn !== true) throw new Error(`MCP tab 有 ${rail.cardCount} 张卡片但未见「测试连接」按钮（三作用域测试入口缺失）`);
+    // 3) 协议级双探针（同一网页上下文、只读）。
+    const snap = await evalExpr(ws, `window.claudeLink.getMcpSnapshot().then((r) => JSON.stringify({
+      isObj: !!r && typeof r === 'object',
+      hasUserServers: !!r && Array.isArray(r.userServers),
+      hasProjectDirs: !!r && Array.isArray(r.projectDirs),
+      userServerCount: r && Array.isArray(r.userServers) ? r.userServers.length : -1,
+      projectDirCount: r && Array.isArray(r.projectDirs) ? r.projectDirs.length : -1,
+    }))`);
+    const snapObj = JSON.parse(String(snap));
+    if (!snapObj.isObj || !snapObj.hasUserServers || !snapObj.hasProjectDirs) {
+      throw new Error(`getMcpSnapshot 返回形状不符（${String(snap).slice(0, 200)}）`);
+    }
+    const probe = await evalExpr(ws, `window.claudeLink.probeMcpServers({ target: 'scoped', scope: 'user' }).then((r) => JSON.stringify({
+      isArr: Array.isArray(r),
+      len: Array.isArray(r) ? r.length : -1,
+      okCount: Array.isArray(r) ? r.filter((x) => x && x.status === 'ok').length : -1,
+      shapeOk: Array.isArray(r) ? r.every((x) => x && typeof x.key === 'string' && (x.status === 'ok' || x.status === 'fail') && typeof x.toolCount === 'number') : false,
+    }))`);
+    const probeObj = JSON.parse(String(probe));
+    if (!probeObj.isArr || !probeObj.shapeOk) throw new Error(`probeMcpServers(scoped,user) 回包形状不符（${String(probe).slice(0, 200)}）`);
+    if (exceptions.length > exceptionsBeforeM) throw new Error('W-mcp-settings 用例期间出现 exceptionThrown');
+    record('W-mcp-settings', 'PASS', `MCP tab 渲染（rail ${rail.railCount} 条：${rail.names.join('/')}；卡片 ${rail.cardCount} 台；测试连接按钮=${String(rail.hasProbeBtn)}；导出按钮=${String(rail.hasExportBtn)}）+ 双探针 OK（snapshot userServers=${snapObj.userServerCount} projectDirs=${snapObj.projectDirCount}；probe scoped/user 回数组 len=${probeObj.len} ok=${probeObj.okCount}；只读未写配置）`);
+  } catch (e) { record('W-mcp-settings', 'FAIL', e.message); }
+  await screenshot(ws, 'W-mcp-settings');
+
   // ── 全程异常终审（console error 即 FAIL；exceptionThrown 即 FAIL）──
   currentCase = '(final)';
   if (exceptions.length > 0) {
@@ -632,7 +708,7 @@ async function main() {
   // ── 汇总 ──
   const failCount = results.filter((r) => r.status === 'FAIL').length;
   const skipCount = results.filter((r) => r.status === 'SKIP').length;
-  log('==== B1-B8 + W-changes-panel 汇总 ====');
+  log('==== B1-B8 + W-changes-panel + W-mcp-settings 汇总 ====');
   for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
   log(`PASS ${results.filter((r) => r.status === 'PASS').length} / FAIL ${failCount} / SKIP ${skipCount}（证据目录 ${SHOT_DIR}）`);
   flushLog();

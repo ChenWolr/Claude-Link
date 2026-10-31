@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref, shallowRef, watch, type Ref } from 'vue';
 import AppLayout from './components/layout/AppLayout.vue';
 import InteractionPrompt from './components/chat/InteractionPrompt.vue';
 import ImageLightbox from './components/chat/ImageLightbox.vue';
@@ -16,6 +16,7 @@ import { useChat } from './composables/use-chat';
 import { useCommandStore } from './stores/command-store';
 import { useTaskStore } from './stores/task-store';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../shared/constants';
+import { BUILD_REV } from '../shared/build-info';
 import { applyThemePalette, applyFontScale } from './utils/apply-theme';
 
 const configStore = useConfigStore();
@@ -34,6 +35,35 @@ let stopQueueEvents: (() => void) | null = null;
 let stopBridgeSessionsUpserted: (() => void) | null = null;
 let stopSessionsChanged: (() => void) | null = null;
 let stopWorkspacesChanged: (() => void) | null = null;
+
+// B（2026-10-30）：网页版渲染产物滞后可见化。web-bridge 收到的主进程 welcome buildRev 与渲染
+// bundle 的 BUILD_REV 不一致 ⟺ 网页版在吃上次构建产物（dev 未重建 / 主进程与产物错代）。
+// 桌面端恒不渲染（__claudeLinkWebBridge 标记门控）；横条可关闭，同一 rev 对经 localStorage 记住不再弹。
+// 仅诊断、不阻塞任何操作。
+const isWebRuntime = typeof window !== 'undefined' && (window as any).__claudeLinkWebBridge === true;
+const REV_WARN_DISMISS_KEY = 'clWebRevWarnDismissed';
+const revWarnDismissed = ref(false);
+// holder 用 shallowRef（对象包一层避免 Vue 类型层把 Ref 展开成 string，也避免运行时深层响应化）：
+// null → ref 的迁移由异步 import 的 .then 完成，若非响应式 let 承接，首次渲染（import 未完成时）
+// 算出的 false 会被 computed 永久缓存、横条永不出现（实现偏差，报告申报）。
+const bridgeRevHolder = shallowRef<{ rev: Ref<string> } | null>(null);
+if (isWebRuntime) {
+  // 动态 import：桌面端不加载 web-bridge chunk（与 turn-diff-store 的 web 独占注册同款）。
+  void import('./web/web-bridge')
+    .then((mod) => { bridgeRevHolder.value = { rev: mod.welcomedBuildRevRef }; })
+    .catch(() => { bridgeRevHolder.value = null; });
+}
+const welcomedRev = computed(() => bridgeRevHolder.value?.rev.value ?? '');
+const revPair = computed(() => `${welcomedRev.value}|${BUILD_REV}`);
+function readDismissed(): string {
+  try { return localStorage.getItem(REV_WARN_DISMISS_KEY) ?? ''; } catch { return ''; }
+}
+const showRevWarn = computed(() => isWebRuntime && welcomedRev.value !== '' && welcomedRev.value !== BUILD_REV
+  && !revWarnDismissed.value && readDismissed() !== revPair.value);
+function dismissRevWarn(): void {
+  revWarnDismissed.value = true;
+  try { localStorage.setItem(REV_WARN_DISMISS_KEY, revPair.value); } catch { /* 隐私模式：仅本次生效 */ }
+}
 
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
@@ -182,6 +212,10 @@ onBeforeUnmount(() => {
 
 <template>
   <AppLayout>
+    <div v-if="showRevWarn" class="web-rev-warn" role="status">
+      <span class="web-rev-warn__text">⚠ 网页版渲染产物（rev {{ welcomedRev }}）与主进程（rev {{ BUILD_REV }}）不一致——开发模式请重新 <code>npm run build</code>；正式使用请更新应用</span>
+      <button class="web-rev-warn__close" type="button" aria-label="关闭提示" @click="dismissRevWarn">✕</button>
+    </div>
     <router-view />
     <InteractionPrompt />
     <ImageLightbox />
@@ -224,4 +258,33 @@ onBeforeUnmount(() => {
 .global-toast--stacked-3 {
   top: 6rem;
 }
+
+/* B：网页版产物滞后诊断横条（web 独占；不阻塞任何操作） */
+.web-rev-warn {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 6px 0 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-warn-strong);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-warn) 12%, var(--color-panel));
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.web-rev-warn__text { flex: 1; min-width: 0; }
+.web-rev-warn code { font-family: var(--font-mono); font-size: 11.5px; }
+.web-rev-warn__close {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+}
+.web-rev-warn__close:hover { color: var(--color-text); background: color-mix(in srgb, var(--color-text) 8%, transparent); }
 </style>
