@@ -4,7 +4,7 @@
 
 import { createSafeStore } from '../utils/safe-store';
 
-const MAX_ENTRIES = 12;
+export const MAX_ENTRIES = 12;
 
 type WorkspaceStore = { store: { recentDirs: string[] }; set: (v: { recentDirs: string[] }) => void };
 let store: WorkspaceStore | null = null;

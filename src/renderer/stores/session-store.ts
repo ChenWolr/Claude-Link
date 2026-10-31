@@ -19,7 +19,7 @@ import { lookupProviderModelContextWindow } from '../../shared/model-context-win
 import type { ContextUsageSource, ContextUsageFreshness, ContextSamplePhase } from '../../shared/context-usage';
 import { shouldAcceptContextPayload, shouldShowCompactedBanner, hasCompleteCanonicalFields } from '../../shared/context-usage';
 import { computeTurnStartIndex } from '../../shared/turn-boundary';
-import { isAutoSessionName, isMaterializableAutoName, maxAutoSessionNumber } from '../../shared/auto-session-name';import { useConfigStore } from './config-store';
+import { isAutoSessionName, isMaterializableAutoName, isUpgradableSession, maxAutoSessionNumber } from '../../shared/auto-session-name';import { useConfigStore } from './config-store';
 // SA-3（turn-projection）：preload 镜像类型（type-only，McpSettings.vue 同源先例）——快照/概览
 // 恢复 action 的载荷形状，字段以 src/preload/api.ts 为准（其本身镜像主进程 turn-projection.ts）。
 import type { TurnProjectionSnapshotView, TurnRunningOverviewEntry } from '../../preload/api';
@@ -251,8 +251,10 @@ export const useSessionStore = defineStore('session', {
     // 新回合 markRunning 整表清（中断回合的残留由此收口）；切换/暂态会话整表清。
     // 回合结束（markStopped/markCompleted）不清。
     toolProgress: {} as Record<string, number>,
-    // C：后台任务编排（task_*），按 taskId。task_notification 终态后移除。
-    backgroundTasks: {} as Record<string, BackgroundTask>,
+    // C：后台任务编排（task_*）。P5（2026-10-22）按会话维度两层索引（外层 sessionId → 内层
+    // taskId，对齐 subAgentStreamingThinking 形态）：task_notification 终态后保留到本会话
+    // 下一次新回合边界；切换会话不清（各会话桶互不可见，修 A/B 面板串扰与跨会话误清）。
+    backgroundTasks: {} as Record<string, Record<string, BackgroundTask>>,
     // C：实时压缩进行中（system:compacting）。compact_result（成功/失败）复位为 false；压缩横幅快照
     // 到达（shouldShowCompactedBanner）时同样复位。compact_boundary 不在此复位，仅落库为过程消息。
     compacting: false as boolean,
@@ -269,6 +271,10 @@ export const useSessionStore = defineStore('session', {
     // 计时统一 displayElapsed = (Date.now() + serverClockOffset[sid]) - turnStartedAt[sid]，
     // 禁止直接用本地时钟减服务端 startedAt（跨机时钟偏差会出负数/跳变）。
     serverClockOffset: {} as Record<string, number>,
+    // P1-G4（2026-10-24 网页运行态同步）：主进程 turn_ended 的 endedAt（epoch ms），与投影
+    // startedAt 同钟域，概览迟到对账用（applyRunningOverview skip 条件，防把已结束回合重新
+    // 点亮黄灯）。单调取 max（noteTurnEndedServer 收口写入）；deleteSession 随会话清理。
+    lastTurnEndedServerAt: {} as Record<string, number>,
     // B1：最近一回合的耗时/结束时刻（按 sessionId）。回合 result 到达时由 use-chat 经
     // setLastTurnMeta 写入，同一刻就地补写 sessions/activeSession 对象的 lastTurn* 字段
     //（两处无新鲜度差）；TurnTimer 完成态优先读这里，读不到（重启后内存 map 为空）回落 Session 字段。
@@ -363,6 +369,11 @@ export const useSessionStore = defineStore('session', {
     activeSubAgentText(state): Record<string, string> {
       if (!state.activeSession) return {};
       return state.subAgentStreamingText[state.activeSession.id] ?? {};
+    },
+    // C/P5（2026-10-22）：当前活动会话的后台任务桶（taskId → BackgroundTask）。TaskQueuePanel
+    // 与 ProcessGroup 只消费本桶——后台任务卡按会话隔离（修 A/B 会话任务卡串扰）。
+    activeBackgroundTasks(state): Record<string, BackgroundTask> {
+      return state.backgroundTasks[state.activeSession?.id ?? ''] ?? {};
     },
     // 上下文统计（Task 9）：从 canonicalContext 派生。圆环只读当前窗口可信值；
     // turn usage 仅作参考。无可信当前窗口时 currentUsedTokens/currentPercent 为 null（pending）。
@@ -492,6 +503,8 @@ export const useSessionStore = defineStore('session', {
         this.transientDraft = {
           id: crypto.randomUUID(),
           name: '新会话',
+          // P4：transient 草稿名源恒 'slot'（未命名槽位；物化建行时按名称形态落列）。
+          nameSource: 'slot',
           cliSessionId: null,
           model: '',
           providerOverride: null,
@@ -505,6 +518,8 @@ export const useSessionStore = defineStore('session', {
           // 暂态会话未物化=未钉住，按 null；物化时由主进程 SESSION_CREATE 钉住（注入时存量
           // null 回退当前全局 mcpOverrides）。
           mcpOverrides: null,
+          // P2 会话置顶（点 S4）：暂态会话未落库不可置顶（置顶钮 UI 守卫 + togglePin 双保险），恒 null。
+          pinnedAt: null,
           createdAt: now,
           updatedAt: now,
           lastContextTokens: null,
@@ -530,7 +545,8 @@ export const useSessionStore = defineStore('session', {
       this.compactedJustNow = false;
       this.lastCompactionSummary = null;
       this.toolProgress = {};
-      this.backgroundTasks = {};
+      // P5（2026-10-22）：backgroundTasks 已按会话分桶——新建暂态（全新 id、空桶）与切换
+      // 会话同构，不再整表清空（否则会误清其他会话的后台任务卡）。
       this.compacting = false;
       this.thinkingTokens = null;
       this.contextLastWindow = null;
@@ -636,9 +652,10 @@ export const useSessionStore = defineStore('session', {
       this.compactedJustNow = false;
       // compact metadata display：压缩账单显示态随会话切换清空（与 compactedJustNow 复位同处）。
       this.lastCompactionSummary = null;
-      // C：切换会话清理瞬态进度状态，避免会话 A 的工具耗时/后台任务/压缩态串扰到会话 B。
+      // C：切换会话清理瞬态进度状态，避免会话 A 的工具耗时/压缩态串扰到会话 B。
+      // P5（2026-10-22）：backgroundTasks 已按会话分桶（activeBackgroundTasks 只暴露本会话桶），
+      // 不再整表清空——切换后其他会话的任务卡保留，切回该会话仍可见（含运行中卡计时恢复）。
       this.toolProgress = {};
-      this.backgroundTasks = {};
       this.compacting = false;
       // 批次 B：清思考 token 估算，避免会话 A 的思考峰值串扰到会话 B 的 ContextButton。
       this.thinkingTokens = null;
@@ -662,6 +679,18 @@ export const useSessionStore = defineStore('session', {
         }
       } catch {
         // session may have no messages yet
+      }
+      // P1-G2（网页运行态同步）：切到运行中会话时拉投影细快照——恢复已流出内容/瞬态/权威计时。
+      // 桌面不关窗时靠事件流累积本就无需；网页重开/断线重连后点进 running 会话全靠这里。
+      // applyRuntimeSnapshot 终态快照内部自拒（endedAt 前置 return），markRunning 幂等分支刷新
+      // 权威 startedAt + serverNow；再次竞态守卫防 IPC 往返期间用户又切走。
+      if (this.runningSessions.includes(session.id)) {
+        try {
+          const snap = await window.claudeLink.getRuntimeSnapshot(session.id);
+          if (snap && this.activeSession?.id === session.id) this.applyRuntimeSnapshot(snap);
+        } catch {
+          // 投影恢复失败不致命：黄灯/计时由 overview 路径兜底
+        }
       }
       // hb10 P2-3：读取侧同步——切会话时重拉供应商快照，触发器按最新 lastUsed 解析显示，
       // 与实际 spawn 的解析（会话 override > 最近使用 > 库首）同源一致。
@@ -729,16 +758,18 @@ export const useSessionStore = defineStore('session', {
       delete this.turnStartedAt[id];
       // SA-3：服务端时钟偏移随会话删除一并清理（防内存泄漏）。
       delete this.serverClockOffset[id];
+      // P1-G4：终态对账记录随会话删除一并清理（防内存泄漏；已删会话不会再收 turn_ended）。
+      delete this.lastTurnEndedServerAt[id];
       delete this.turnGeneration[id];
       // B1：最近回合元数据随会话删除一并清理（DB 行由级联删除处理）。
       delete this.lastTurnMeta[id];
       // review-v3 High-2：已删会话的 context 代际记录一并清理（防内存泄漏；会话已删，
       // 主进程不会再发该会话的 CONTEXT_UPDATE，无需保留 known generation 拒收旧值）。
       delete this.contextQueryGenerations[id];
-      // hb10-SMG-05：删除运行中会话的幽灵任务卡/工具耗时/压缩态/思考峰值瞬态
-      //（对齐 switchSession 清单——全局 map，删除后残留会在当前视图显示已死会话的任务卡）。
+      // hb10-SMG-05：删除运行中会话的幽灵任务卡/工具耗时/压缩态/思考峰值瞬态。
+      // P5（2026-10-22）：backgroundTasks 按会话分桶——只删本会话桶（其他会话的任务卡保留）。
       this.toolProgress = {};
-      this.backgroundTasks = {};
+      delete this.backgroundTasks[id];
       this.compacting = false;
       this.thinkingTokens = null;
       // 清理 Claude 计划状态（独立于手动排队 tasks 表）。
@@ -1202,30 +1233,46 @@ export const useSessionStore = defineStore('session', {
       else this.clearStalled(sid);
       // 后台任务置位：startedAtServer 是主进程时钟，按本快照偏移换算为客户端等价时刻
       //（TaskQueuePanel 计时用 now - startedAt 客户端口径）。本地已有卡（事件建立的，信息更全）
-      // 只补缺的 startedAt，不整卡覆盖。
+      // 只补缺的 startedAt，不整卡覆盖。P5（2026-10-22）：按快照会话 id 落本会话桶（该函数当前
+      // 仅对 active 会话调用——ChatPage 挂载恢复 / web-bridge realign，按 snap.sessionId 落桶等价）。
       const snapOffset = snap.serverNow - Date.now();
       for (const [taskId, task] of Object.entries(snap.backgroundTasks)) {
         const startedClient = task.startedAtServer - snapOffset;
-        const existing = this.backgroundTasks[taskId];
+        const taskBucket = (this.backgroundTasks[sid] ??= {});
+        const existing = taskBucket[taskId];
         if (existing) {
           if (existing.startedAt == null) existing.startedAt = startedClient;
         } else {
-          this.backgroundTasks[taskId] = { taskId, startedAt: startedClient };
+          taskBucket[taskId] = { taskId, startedAt: startedClient };
         }
       }
     },
     // SA-3（turn-projection）：进行中回合概览落地点（SA-4 启动恢复接线调用）。对列表内会话逐个
-    // 置运行态：非 active 会话 markRunning(sid, startedAt)（黄灯/侧栏计时）；active 会话同样置位
-    //（细恢复由 SA-4 对 active 再走 getRuntimeSnapshot → applyRuntimeSnapshot）。
-    // 概览条目不带 serverNow（仅 sessionId/startedAt/generation），offset 待 turn_started 事件或
-    // 快照到达再刷新；桌面单机两钟同源零影响。已在 runningSessions 的会话跳过——「先订阅后拉」
-    // 协议下本地 running 态来自更早到达的 turn_started（含 serverNow 校正，数据不旧于概览），
-    // 重复 markRunning 会无谓递增 generation 并清掉事件已建立的瞬态。
+    // 置运行态：非 active 会话 markRunning(sid, startedAt, serverNow)（黄灯/侧栏计时）；active 会话
+    // 同样置位（细恢复由 SA-4 对 active 再走 getRuntimeSnapshot → applyRuntimeSnapshot）。
+    // P1-G3：概览条目现携带 serverNow（捕获时刻主进程时钟），此处透传 markRunning 第三参即刷新
+    // serverClockOffset——跨机时钟差不再全额进计时（此前须等 turn_started 事件或快照到达）。
+    // 已在 runningSessions 的会话跳过——「先订阅后拉」协议下本地 running 态来自更早到达的
+    // turn_started（含 serverNow 校正，数据不旧于概览），重复 markRunning 会无谓递增 generation
+    // 并清掉事件已建立的瞬态。
     applyRunningOverview(list: TurnRunningOverviewEntry[]) {
       for (const entry of list) {
         if (this.runningSessions.includes(entry.sessionId)) continue;
-        this.markRunning(entry.sessionId, entry.startedAt);
+        // P1-G4：概览捕获早于 turn_ended 到达的对账——同钟域（均主进程 epoch ms）比较，
+        // endedAt ≥ entry.startedAt ⇒ 该 entry 描述的回合已结束，不得重新点亮黄灯。
+        const endedAt = this.lastTurnEndedServerAt[entry.sessionId];
+        if (endedAt != null && endedAt >= entry.startedAt) continue;
+        this.markRunning(entry.sessionId, entry.startedAt, entry.serverNow);
       }
+    },
+    // P1-G4（网页运行态同步）：记录主进程 turn_ended 的权威 endedAt（epoch ms，与投影 startedAt
+    // 同钟域）。概览可能捕获早于、到达晚于 turn_ended（IPC 往返竞态）——applyRunningOverview 据
+    // 此对账跳过已结束回合。数值有限才写；单调取 max（同会话多回合只增不减，新回合
+    // startedAt > 旧 endedAt 时对账自然放行）。
+    noteTurnEndedServer(sessionId: string, endedAt: number) {
+      if (typeof endedAt !== 'number' || !Number.isFinite(endedAt)) return;
+      const prev = this.lastTurnEndedServerAt[sessionId];
+      this.lastTurnEndedServerAt[sessionId] = Math.max(prev ?? 0, endedAt);
     },
     // B1：写入最近回合元数据（内存态 + 就地补 sessions/activeSession 对象字段，保持侧栏数据一致）。
     // P2-2 语义收口：只记「完整有效记录」——耗时无效（null/非正/非有限数）一律早退、保持上一条
@@ -1402,6 +1449,30 @@ export const useSessionStore = defineStore('session', {
         this.fail(error instanceof Error ? error.message : '重命名失败');
       }
     },
+    // P2 会话置顶（点 S4，方案 A）：置顶/取消置顶翻转入口。乐观 patch pinnedAt（列表与搜索
+    // 视图同步，UI 即时反馈）→ IPC setSessionPinned → 成功后 loadSessions() 整表重拉（排序
+    // 权威在 listSessions SQL ORDER BY，置顶分组/组内浮顶随传入序自然生效；loadSessions 契约
+    // 不动 activeSession，当前会话不被切走）。失败回滚 patch 并 console.error（置顶失败不值得
+    // 打断用户的 error toast，静默可重试）。模式对齐 renameActiveSession。
+    async togglePin(sessionId: string) {
+      const target = this.sessions.find((s) => s.id === sessionId);
+      // 暂态会话不可置顶（未落库）：UI v-if 守卫之外再守一道（防御直调）。
+      if (!target || target.transient) return;
+      const wasPinned = target.pinnedAt != null;
+      const prevPinnedAt = target.pinnedAt;
+      this.patchSessionInLists(sessionId, { pinnedAt: wasPinned ? null : Date.now() });
+      try {
+        const updated = await window.claudeLink.setSessionPinned(sessionId, !wasPinned);
+        // await 往返期间仍在本会话时同步活动会话对象（保持 pinnedAt 与 DB 一致；列表权威序由下方重拉给全）。
+        if (updated && this.activeSession?.id === sessionId) {
+          this.activeSession = updated;
+        }
+        await this.loadSessions();
+      } catch (error) {
+        this.patchSessionInLists(sessionId, { pinnedAt: prevPinnedAt });
+        console.error('[session-store] togglePin failed', error);
+      }
+    },
     /** P1-3：按共享口径重算回合边界（队列回合的 user_message_created 分支在消息入列后调用）。 */
     recomputeTurnStartIndex() {
       this.turnStartIndex = computeTurnStartIndex(this.messages);
@@ -1430,39 +1501,49 @@ export const useSessionStore = defineStore('session', {
       // hb10-SMG-06：触发逻辑抽为 action（switchSession 物化回补共用同一实现）。
       if (isNew) this.maybeAnalyzeTopicForFirstUserMessage(message);
     },
-    /** hb10-SMG-06：首轮自动命名触发——仅自动名 × 恰 1 条 user 消息时触发。
+    /** P4（hb10-SMG-06 基础上放宽，计划 2026-10-24-web-sync §3.2.1-9）：首轮自动命名触发——
+     *  门槛从「恰 1 条 user + isAutoSessionName(name)」改为「名源可升级（slot/first_input）+
+     *  消息为 user + 归属 active」——首轮 LLM 失败后第 2/3 轮仍在槽位即可重试（「恰 1 条」原是
+     *  首轮代理判据，槽位未消失即仍需命名）；喂给 analyzeTopic 的文本恒为**第一条 user 消息**
+     *  （message 参数仅作触发信号保留）。触发先经 setFallbackSessionName 落首输入兜底名
+     *  （≤1s 内标题即脱离「会话 N」，LLM 成功后升级覆盖；兜底/LLM 双失败 DB 仍留槽位）。
      *  正常路径由 addMessage（isNew）调用；物化 await 期间切走的会话由 switchSession
      *  加载消息后回补（该窗口乐观消息未入列，原实现会漏触发导致永远保持自动名）。 */
     maybeAnalyzeTopicForFirstUserMessage(message: Message | null) {
-      // hb10-SMG-06：首条触发条件保留原字面（恰 1 条 user 消息，tdd-bugfix-topic-thinking-leak 契约钉）。
-      const isFirstUserTurn = this.messages.filter((m) => m.role === 'user').length === 1;
       if (
         !message ||
         message.role !== 'user' ||
         message.sessionId !== this.activeSession?.id ||
-        !isFirstUserTurn ||
-        !isAutoSessionName(this.activeSession?.name)
+        // 名源可升级门槛：nameSource 缺省的历史对象按名称形态派生兜底（isUpgradableSession，
+        // 自然名一律让位——与 DB 存量行派生同判据，见 shared/auto-session-name）。
+        !isUpgradableSession(this.activeSession)
       ) {
         return;
       }
       const sessionId = this.activeSession.id;
-      const textContent = message.content.trim();
+      const firstUser = this.messages.find((m) => m.role === 'user');
+      const textContent = firstUser?.content.trim() ?? '';
       const firstName = message.attachments?.[0]?.filename?.trim();
       if (textContent) {
+        // 先落兜底名（fire-and-forget，失败静默不阻塞 LLM 链；upgradable 才写，custom/generated no-op）。
+        // 可选调用（?.）：生产桌面/网页桥恒有该方法；测试 stub/降级宿主缺方法时 no-op 不抛
+        //（Promise.resolve 兜住 undefined 的 .catch）。
+        void Promise.resolve(window.claudeLink.setFallbackSessionName?.(sessionId, textContent)).catch(() => {});
         // 有文字：LLM 概括主题（仅传正文文字，不传附件 bytes/路径）。
         window.claudeLink.analyzeTopic(sessionId, textContent).then((topic) => {
           if (topic) {
             // Only update if still on the same session
             // F4：发送瞬间到主题返回之间用户可能已手动重命名——迟到的主题不覆盖
-            // （与主进程 topic-analyzer 写前重查同门槛）。H3：判据收紧为
-            // isAutoSessionName 精确形态，「会话备份」等自然命名一律让位。
-            if (this.activeSession?.id === sessionId && isAutoSessionName(this.activeSession.name)) {
+            // （与主进程 topic-analyzer 写前重查同门槛）。P4：判据升级为名源可升级
+            // （slot/first_input 才覆盖；custom/generated 一律让位）。
+            if (this.activeSession?.id === sessionId && isUpgradableSession(this.activeSession)) {
               this.activeSession.name = topic;
+              this.activeSession.nameSource = 'generated';
             }
             // hb13-v B10.1（session-mgmt F4）：列表 patch 同门槛——主进程写前门拒绝（用户已改名）
             // 时返回的 topic 不得写进列表名（旧实现无条件 patch，侧栏与 DB/activeSession 分叉）。
             const listItem = this.sessions.find((s) => s.id === sessionId);
-            if (listItem && isAutoSessionName(listItem.name)) {
+            if (listItem && isUpgradableSession(listItem)) {
               this.patchSessionInLists(sessionId, { name: topic });
             }
           }
@@ -1513,21 +1594,29 @@ export const useSessionStore = defineStore('session', {
     clearToolProgress(toolUseId: string) {
       delete this.toolProgress[toolUseId];
     },
-    // C：后台任务（task_*）。
-    upsertBackgroundTask(task: BackgroundTask) {
-      this.backgroundTasks[task.taskId] = task;
+    // C：后台任务（task_*）——P5（2026-10-22）按会话维度两层索引（外层 sessionId → 内层
+    // taskId，对齐 subAgentStreamingThinking 形态）。所有写入必须带会话 id：前台路径传
+    // activeSession.id，后台路径传事件 payload.sessionId（修 A/B 会话任务卡串扰 + 跨会话误清）。
+    upsertBackgroundTask(sessionId: string, task: BackgroundTask) {
+      this.backgroundTasks[sessionId] ??= {};
+      this.backgroundTasks[sessionId][task.taskId] = task;
     },
-    removeBackgroundTask(taskId: string) {
-      delete this.backgroundTasks[taskId];
+    removeBackgroundTask(sessionId: string, taskId: string) {
+      delete this.backgroundTasks[sessionId]?.[taskId];
     },
-    // D 点：回合边界清卡（新用户消息成功发出处调用）——只清上一回合【终态】卡（completed/failed/stopped）；
-    // 运行中卡保留跨回合（新回合的 progress 继续被消费），避免误杀仍在运行的后台任务卡。
-    clearBackgroundTasks() {
+    // D 点：回合边界清卡（新用户消息成功发出处调用）——只清【本会话】上一回合【终态】卡
+    // （completed/failed/stopped）；运行中卡保留跨回合（新回合的 progress 继续被消费）；
+    // 其他会话的桶一律不动（P5：1973d30「运行中卡跨回合保留」语义保留、作用域收窄到本会话）。
+    clearBackgroundTasks(sessionId: string) {
+      const bucket = this.backgroundTasks[sessionId];
+      if (!bucket) return;
       const next: Record<string, BackgroundTask> = {};
-      for (const [id, t] of Object.entries(this.backgroundTasks)) {
+      for (const [id, t] of Object.entries(bucket)) {
         if (t.status !== 'completed' && t.status !== 'failed' && t.status !== 'stopped') next[id] = t;
       }
-      this.backgroundTasks = next;
+      // F6（round-002 review）：过滤后桶空则删键不留空壳对象（卫生；缺桶早退路径不变）。
+      if (Object.keys(next).length === 0) delete this.backgroundTasks[sessionId];
+      else this.backgroundTasks[sessionId] = next;
     },
     // C：实时压缩态。
     setCompacting(v: boolean) {

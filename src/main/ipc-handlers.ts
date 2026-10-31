@@ -15,7 +15,7 @@ import * as fs from 'node:fs'; // hb10-CFG-09：workingDirectory 同步存在性
 import path from 'node:path';
 import os from 'node:os';
 import type { AppConfig } from '../shared/types/config';
-import type { Session } from '../shared/types/session';
+import type { Session, SessionNameSource } from '../shared/types/session';
 import { isValidThinkingLevel } from '../shared/types/thinking';
 import { isValidPermissionMode } from '../shared/permission-resolver';
 import { normalizeDirKey, mergeProjectDirs } from '../shared/project-skills';
@@ -27,7 +27,7 @@ import { clearConfig, getConfig, saveConfig, getLibrarySnapshot, saveProviderPro
 import { syncWebAccessServer, kickAllWebClients, randomWebAccessToken, type WebAccessSyncHooks } from './modules/web-access/web-access-server';
 import { buildWebAccessInfo, currentWebAccessUrls } from './modules/web-access/web-access-info';
 import { runProviderModelTest } from './modules/connection-tester';
-import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace } from './modules/workspace-history';
+import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace, MAX_ENTRIES } from './modules/workspace-history';
 import { listRoots, listDir, mkdir, statPath, isValidFolderName, renamePath } from './modules/fs-picker';
 import type { FsTrashFailure } from '../shared/types/fs-picker';
 import { badDirCacheHas, badDirCacheMark, collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
@@ -35,7 +35,7 @@ import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
 import { fetchAvailableModels } from './modules/model-resolver';
-import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight, getCurrentQueryInstance } from './modules/chat-backend';
+import { spawnForChat, sendMessage, killProcess, getActiveProcess, markSessionDeleted, markSessionActive, startCommandProbe, getNativeSettingsDiagnostic, schedulePostTurnProbe, resolveCliSessionId, setRunningQueryPermissionMode, ensureGlobalCommandProbeFresh, isGlobalCliMissing, clearSessionPermissionBook, getKnownTurnOutcome, isGlobalProbeFailed, isCommandProbeInFlight, getCurrentQueryInstance, refreshGlobalCommands } from './modules/chat-backend';
 // SA-1（turn-projection）：回合起点投影登记（turn_started 伴生信号在此发射）。
 // SA-2：快照/概览只读查询两通道经同一模块导出（getSnapshot/getRunningOverview）。
 import { noteTurnStarted, getSnapshot, getRunningOverview } from './modules/turn-projection';
@@ -47,8 +47,14 @@ import {
   restoreMaskedMcpServers,
   sanitizeMcpServersConfig,
   type McpManagedSaveEntry,
+  type ParsedMcpEntry,
 } from './modules/mcp/mcp-config';
-import { collectMcpSnapshot, readProjectMcpServersRawSync, readUserMcpServersRawSync } from './modules/mcp/mcp-scanner';
+import {
+  collectMcpSnapshot,
+  readProjectMcpServersDetailSync,
+  readProjectMcpServersRawSync,
+  readUserMcpServersRawSync,
+} from './modules/mcp/mcp-scanner';
 import { writeScopedMcpServer, type ScopedMcpEntry } from './modules/mcp/mcp-writer';
 import {
   dropProbeCacheByPrefix,
@@ -90,8 +96,13 @@ import * as attachmentRepo from './database/repositories/attachment-repo';
 import { cleanupSessionAttachments } from './modules/attachment-service';
 import { createInteractionHistory, getInteractionHistory } from './database/repositories/interaction-history-repo';
 import { getPlanState as getClaudePlanState } from './database/repositories/claude-plan-repo';
-import { listChanges, getChangeDiff, openChangeFile } from './modules/changes-panel';
+import { listChanges, getChangeDiff, openChangeFile, openAbsoluteFile } from './modules/changes-panel';
+import type { ChangesOpenResult } from '../shared/types/changes';
+// 轮末文件改动（turn-diff，2026-10-26 计划 §4-P4）：摘要聚合与单文件 patch 两只读通道的实现模块。
+import * as turnDiff from './modules/turn-diff';
 import { registerExportImageHandlers, resolveExportTarget } from './modules/export-image-manager';
+// MCP 导出 JSON 网页路径（P3，2026-10-30）：内存正文一次性下载票据（/api/export-download）。
+import { createTicketForContent } from './modules/export-web-tickets';
 import { detectDirectImageFormat, validateChatSendPayloadShape, ATTACHMENT_READ_GUARD_BYTES, MAX_FILE_BYTES, formatBytes } from './modules/attachment-policy';
 import {
   stageAttachment,
@@ -232,9 +243,46 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     return getChangeDiff(workingDir, path, safeContext);
   });
   // 点文件「打开」：shell.openPath 走系统默认程序（仓库根解析 + 越界守卫在 openChangeFile 内）。
-  regInvokeHandler(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string) => {
+  // mode（p4 2026-10-27 双按钮）：'choose' → 直达系统「打开方式」对话框；非法/缺省收敛为 'default'
+  //（web 直发任意第三参不炸，与既有 invokeFromWeb 逐参展开兼容）。
+  regInvokeHandler(IPC_CHANNELS.CHANGES_OPEN_FILE, async (_event, workingDir: string | null, p: string, mode: unknown) => {
     if (!isBoundWorkingDir(workingDir)) return { ok: false, reason: 'error', message: '工作目录不在允许列表' };
-    return openChangeFile(workingDir, p);
+    return openChangeFile(workingDir, p, mode === 'choose' ? 'choose' : 'default');
+  });
+
+  // 轮末文件改动（turn-diff，2026-10-26 计划 §4-P4）：只读查询两通道（web 经注册表自动可达）。
+  // N2 裁定：LIST 的轮区间由主进程从 messages 表推导（主流程 user 消息分界），渲染层只传 sessionId；
+  // FILE_PATCH 由渲染层显式传 turnStart/endMessageId（rowid 转区间）。handler 内 try/catch 兜底，
+  // 异常降级为空摘要 / unavailable，不向渲染层抛未捕获异常。
+  regInvokeHandler(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES, async (_event, sessionId: unknown) => {
+    try {
+      if (typeof sessionId !== 'string' || !sessionId.trim()) return [];
+      return turnDiff.listSummaries(sessionId);
+    } catch (e) {
+      logger.warn(`[turnDiff:listSummaries] 聚合失败：${e instanceof Error ? e.message : String(e)}`);
+      return [];
+    }
+  });
+  regInvokeHandler(IPC_CHANNELS.TURN_DIFF_FILE_PATCH, async (_event, sessionId: unknown, turnStartMessageId: unknown, endMessageId: unknown, path: unknown, context: unknown) => {
+    try {
+      // 参数校验：sessionId/turnStartMessageId/path 须非空字符串；endMessageId 合法形态为
+      // string | null（null = 上界 +∞）。非法一律回 unavailable，不抛错（风格对齐 MESSAGE_GET_BY_SESSION）。
+      if (
+        typeof sessionId !== 'string' || !sessionId.trim()
+        || typeof turnStartMessageId !== 'string' || !turnStartMessageId.trim()
+        || (endMessageId !== null && typeof endMessageId !== 'string')
+        || typeof path !== 'string' || !path
+      ) {
+        return { mode: 'unavailable', patch: '', truncated: false };
+      }
+      // 第 5 参 context（hunk 上下文行数）：1..100000 整数否则回退 3，不抛错（100000 =
+      // 渲染层「全文」档 FULL_CONTEXT 同值；缺省/非法/0/负数/小数/超界一律 3）。
+      const ctx = typeof context === 'number' && Number.isInteger(context) && context >= 1 && context <= 100000 ? context : 3;
+      return turnDiff.getPatch(sessionId, turnStartMessageId, endMessageId, path, ctx);
+    } catch (e) {
+      logger.warn(`[turnDiff:filePatch] 取 patch 失败：${e instanceof Error ? e.message : String(e)}`);
+      return { mode: 'unavailable', patch: '', truncated: false };
+    }
   });
 
   // Config
@@ -327,9 +375,21 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 选目录原生弹窗通道（workspace:pickDir）已于 T3 整链删除——两入口改渲染层自绘
   // FilePickerDialog（fs-picker-store），最近历史经 WORKSPACE_ADD_RECENT 显式回写。
   regInvokeHandler(IPC_CHANNELS.WORKSPACE_LIST_RECENT, async () => listRecentWorkspaces());
-  regInvokeHandler(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => addRecentWorkspace(dir));
+  // P2 目录历史跨端同步（2026-10-24 web-sync 计划 §2.2）：ADD/REMOVE 成功返回前广播
+  // WORKSPACES_CHANGED 信号（空载荷 {}，渲染层重拉 listRecentWorkspaces）；写盘抛错时不达
+  // 发射点（信号只随成功走）。LIST 只读不推。
+  regInvokeHandler(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => {
+    const list = addRecentWorkspace(dir);
+    pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED, {});
+    return list;
+  });
   // 永久删除某条最近目录历史（只移除历史记录，不触碰磁盘上的目录本体）。
-  regInvokeHandler(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => removeRecentWorkspace(dir));
+  regInvokeHandler(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, async (_event, dir: string) => {
+    const list = removeRecentWorkspace(dir);
+    // 删不存在的目录列表不变，仍推送（无害信号，渲染层重拉幂等）。
+    pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED, {});
+    return list;
+  });
 
   // 自绘 FilePickerDialog 的只读文件系统元数据（详见 modules/fs-picker.ts）。
   regInvokeHandler(IPC_CHANNELS.FS_LIST_ROOTS, async () => listRoots());
@@ -385,6 +445,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     } catch {
       return { ok: false };
     }
+  });
+  // FS_OPEN_PATH（p3 2026-10-27 聊天工具行 chip）：绝对路径直达打开（信任级同 fs:trash 任意路径
+  // 通道：web 仅已认证连接可达；远控语义——网页版点击作用于桌面主机）。default=系统默认程序
+  //（失败时 win 降级「打开方式」对话框）；choose=直达系统「打开方式」对话框；mode 非法收敛 default。
+  // 守卫（绝对路径 / realpathSync 穿透 symlink / 已存在常规文件）在 openAbsoluteFile 内。
+  regInvokeHandler(IPC_CHANNELS.FS_OPEN_PATH, async (_event, absPath: unknown, mode: unknown): Promise<ChangesOpenResult> => {
+    if (typeof absPath !== 'string') return { ok: false, reason: 'no-such-file', message: '未指定文件' };
+    return openAbsoluteFile(absPath, mode === 'choose' ? 'choose' : 'default');
   });
 
   // 导出目标协商应答（T5）：渲染层 FilePickerDialog 选定后回传；jobId 在 Map 中才有效（防重放/伪造他人 job）。
@@ -486,22 +554,33 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   // 探活：all = 管理库逐条构造 inputs（name/transport/command/args/env/url/headers）并发探活，
   // 60s 缓存逐 key 判定（hasFreshCache 命中直接回缓存报告，未命中才探；入口先 pruneProbeCache
-  // 时间驱动清理）；single = 渲染层只传 name（§1.3 渲染层零明文约束），主进程按 name 在
-  // getConfig().mcpServers 定位已存条目、自取明文 env/headers 构造探活输入现探（用户显式
-  // 「测试连接」只写不读缓存——传 cacheKey 把新结论写进缓存供批量命中，但回包恒为现探值，
-  // 不回旧缓存）；查无 → 单元素 fail report，不抛。
+  // 时间驱动清理）；single = 渲染层只传 name（§1.3 渲染层零明文约束），主进程按 name 定位
+  // 已存条目、自取明文 env/headers 构造探活输入现探（用户显式「测试连接」只写不读缓存——
+  // 传 cacheKey 把新结论写进缓存供批量命中，但回包恒为现探值，不回旧缓存）；查无 → 单元素
+  // fail report，不抛。
+  // p2-2026-10-29（计划 §1.A）：协议扩展为 { target: 'single'|'all'|'scoped', name?, scope?, dir? }
+  // ——scope 缺省视为 'managed'（向后兼容：既有 single/all 调用零改动）；single 三作用域经取源
+  // 辅助从管理库 / 用户级 ~/.claude.json / 项目级 .mcp.json 取明文；scoped = 按栏位（user/project）
+  // 整批探活（禁用条目不探不占槽）。明文不出主进程：回包仍只有 status/toolCount/error。
   // 返回 McpProbeReport[]（single 恒单元素数组；all 与启用条目逐条对齐同序；禁用条目缺槽，
   // UI 按 key 消费并显示已禁用态。single 为用户显式动作不滤禁用——禁用卡也允许手动测试）。
   regInvokeHandler(IPC_CHANNELS.MCP_PROBE, async (_event, body: unknown): Promise<McpProbeReport[]> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP probe payload');
-    const req = body as { target?: unknown; name?: unknown };
+    const req = body as { target?: unknown; name?: unknown; scope?: unknown; dir?: unknown };
     if (req.target === 'single') {
       const name = req.name;
       if (typeof name !== 'string' || name === '') throw new Error('Invalid MCP probe name');
-      const stored = getConfig().mcpServers.find((server) => server.name === name);
+      // p2-2026-10-29（计划 §1.A.2）：scope 缺省视为 managed（既有 {target:'single', name} 调用
+      // 零改动）；三作用域经取源辅助取明文（managed=管理库查找现状 / user·project=磁盘 raw）。
+      const scope = req.scope === 'user' || req.scope === 'project' ? req.scope : 'managed';
+      const dir = typeof req.dir === 'string' && req.dir !== '' ? req.dir : '';
+      const stored = resolveProbeSource(scope, dir)?.[name];
       if (!stored) {
+        logger.info(`[mcp-probe] single 未找到服务器 scope=${scope} name=${name}`);
+        // 查无/白名单拒绝 → 单元素 fail report：key 用对应作用域键空间
+        //（managed:<name> / user:<name> / project:<dirKey>:<name>）。
         return [
-          { key: mcpProbeKey('managed', null, name), status: 'fail', toolCount: 0, error: `未找到该服务器：${name}`, probedAt: Date.now() },
+          { key: mcpProbeKey(scope, scope === 'project' ? normalizeDirKey(dir) : null, name), status: 'fail', toolCount: 0, error: `未找到该服务器：${name}`, probedAt: Date.now() },
         ];
       }
       const input: McpProbeInput = {
@@ -513,9 +592,94 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
         url: stored.url,
         headers: stored.headers,
       };
-      // 只写不读：新结论写进 managed:<name> 缓存（供 all 批量 60s 命中），回包恒为现探值。
-      // 超时（2026-10-19 点1）：条目 timeoutMs 经 resolveProbeTimeoutMs 生效（非法/缺省 → 10s）。
-      return [await probeMcpServer(input, resolveProbeTimeoutMs(stored), mcpProbeKey('managed', null, input.name))];
+      // 只写不读：新结论写进对应作用域键空间缓存（供批量 60s 命中），回包恒为现探值。
+      // 超时（2026-10-19 点1；p2 2026-10-27 默认 30s）：条目 timeoutMs 经 resolveProbeTimeoutMs
+      // 生效（非法/缺省 → 默认 30s，DEFAULT_PROBE_TIMEOUT_MS）。
+      const reports = [await probeMcpServer(input, resolveProbeTimeoutMs(stored), mcpProbeKey(scope, scope === 'project' ? normalizeDirKey(dir) : null, input.name))];
+      for (const r of reports) if (r.status === 'fail') logger.info(`[mcp-probe] 探活失败 key=${r.key}: ${r.error}`);
+      return reports;
+    }
+    // p2-2026-10-29（计划 §1.A.3）：按栏位整批探活（user/project 两作用域）；all 分支（管理库）
+    // 保持现状零改动。禁用条目（override 值 'off'）不探不占槽（同 all 分支 B-8 语义）。
+    if (req.target === 'scoped') {
+      if (req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP probe scope');
+      const scope = req.scope;
+      const dir = typeof req.dir === 'string' && req.dir !== '' ? req.dir : '';
+      // 批量入口顺带时间驱动清理过期缓存（写法对齐 all 分支现状）。
+      pruneProbeCache(60_000);
+      const cachedByKey = new Map(getCachedProbeReports().map((r) => [r.key, r]));
+      const overridesNow = getConfig().mcpOverrides;
+      // 取源：user = 用户级 ~/.claude.json raw 全量（userHome 主进程自取）；project = 白名单
+      // 校验（同 MCP_WRITE_SCOPED，拒绝 → 空数组，UI 全「未连接」不炸）+ 坏目录负缓存短路
+      // + <dir>/.mcp.json raw 全量（真实读失败 → 落负缓存，与注入链 B-1 同模式）。
+      let raw: Record<string, ParsedMcpEntry>;
+      let dirKey: string | null = null;
+      if (scope === 'user') {
+        raw = readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir());
+      } else {
+        const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+        const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
+        if (dir === '' || !knownKeys.has(normalizeDirKey(dir))) return [];
+        dirKey = normalizeDirKey(dir);
+        // 防慢目录：坏目录 60s 负缓存命中 → 空表短路（本轮不探，下轮栏位进入重试）。
+        if (badDirCacheHas(dir)) return [];
+        const detail = readProjectMcpServersDetailSync(dir);
+        // 真实读失败（scanner 三态 readFailed，非 ENOENT/损坏）→ 落坏目录负缓存。
+        if (detail.readFailed) badDirCacheMark(dir);
+        raw = detail.servers;
+      }
+      // 禁用条目不进 pending 也不进返回数组（override 前缀 user:/project:<dirKey>: 值 'off'），
+      // UI 按 key 消费、缺槽显示禁用态（同 all 分支）。
+      const overridePrefix = dirKey === null ? 'user:' : `project:${dirKey}:`;
+      const entries = Object.entries(raw).filter(([entryName]) => overridesNow[`${overridePrefix}${entryName}`] !== 'off');
+      const slots: Array<{ key: string; cached: McpProbeReport | undefined }> = [];
+      const pending: Array<{ input: McpProbeInput; key: string }> = [];
+      for (const [entryName, entry] of entries) {
+        const key = mcpProbeKey(scope, dirKey, entryName);
+        const cached = cachedByKey.get(key);
+        if (cached !== undefined && hasFreshCache(key)) {
+          slots.push({ key, cached });
+          continue;
+        }
+        pending.push({
+          input: {
+            name: entry.name,
+            transport: entry.transport,
+            command: entry.command,
+            args: entry.args,
+            env: entry.env,
+            url: entry.url,
+            headers: entry.headers,
+            timeoutMs: entry.timeoutMs, // 条目级超时随 input 透传，逐条经 resolveProbeTimeoutMs 生效
+          },
+          key,
+        });
+        slots.push({ key, cached: undefined });
+      }
+      // 逐条并发现探（probeMcpServer 自身整体兜底不 reject，allSettled 为防御性第二道，同
+      // probeAllManaged 契约），按 key 回填（防御性：万一缺槽回 fail report，不炸整拍）。
+      const settled = await Promise.allSettled(
+        pending.map(({ input, key }) => probeMcpServer(input, resolveProbeTimeoutMs(input), key)),
+      );
+      const probedByKey = new Map<string, McpProbeReport>();
+      settled.forEach((r, i) => {
+        const at = pending[i];
+        if (!at) return;
+        if (r.status === 'fulfilled') probedByKey.set(at.key, r.value);
+        else probedByKey.set(at.key, { key: at.key, status: 'fail', toolCount: 0, error: `探活器内部异常：${String(r.reason)}`, probedAt: Date.now() });
+      });
+      const reports = slots.map(({ key, cached }) => {
+        const fresh = probedByKey.get(key);
+        if (fresh !== undefined) return fresh;
+        if (cached !== undefined) return cached;
+        return { key, status: 'fail' as const, toolCount: 0, error: '探活结果缺失', probedAt: Date.now() };
+      });
+      // 探活失败落日志（同现状：仅对本次现探 fail 落日志，缓存命中的旧 fail 不重复刷）。
+      for (const { key } of slots) {
+        const fresh = probedByKey.get(key);
+        if (fresh !== undefined && fresh.status === 'fail') logger.info(`[mcp-probe] 探活失败 key=${fresh.key}: ${fresh.error}`);
+      }
+      return reports;
     }
     if (req.target !== 'all') throw new Error('Invalid MCP probe target');
     // B-10：批量探测入口顺带时间驱动清理过期缓存（pruneProbeCache 原全仓零调用方，此处接线）。
@@ -547,13 +711,53 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     //（保序），probe 后按 key 回填（防御性：万一缺槽回 fail report，不炸整拍）。
     const probed = await probeAllManaged(pending);
     const probedByKey = new Map(probed.map((r) => [r.key, r]));
-    return slots.map(({ key, cached }) => {
+    const reports = slots.map(({ key, cached }) => {
       const fresh = probedByKey.get(key);
       if (fresh !== undefined) return fresh;
       if (cached !== undefined) return cached;
       return { key, status: 'fail' as const, toolCount: 0, error: '探活结果缺失', probedAt: Date.now() };
     });
+    // p2（2026-10-27）：探活失败落日志（此前失败零日志、报障无据可查）；日志在 IPC 层而非
+    // mcp-probe.ts——后者是纯 node 模块（不得 import electron 依赖的 logger，契约脚本 tsx 直跑）。
+    // R2 跟进（2026-10-29 日志卫生）：仅对本次现探 fail 落日志——60s 缓存命中的旧 fail 已在首次现探时记录过，批量轮询不重复刷。
+    for (const { key } of slots) {
+      const fresh = probedByKey.get(key);
+      if (fresh !== undefined && fresh.status === 'fail') logger.info(`[mcp-probe] 探活失败 key=${fresh.key}: ${fresh.error}`);
+    }
+    return reports;
   });
+  // p2-2026-10-29（计划 §1.A.2）：single 探活三作用域取源辅助——managed = 管理库 config store
+  // 按 name 成表；user = 用户级 ~/.claude.json raw 直读（userHome 主进程自取，渲染层不可传）；
+  // project = 白名单校验（同 MCP_WRITE_SCOPED：mergeProjectDirs(listRecentWorkspaces(),
+  // workingDirectory) 按 normalizeDirKey 归一比对）→ 坏目录 60s 负缓存短路 → <dir>/.mcp.json
+  // raw 直读按 name 取。查无/白名单拒绝/坏目录短路 → null（single 落单元素 fail report）。
+  // 明文全程不出主进程：辅助仅在主进程内取明文构造探活输入，回包仍只有 status/toolCount/error。
+  function resolveProbeSource(scope: 'managed' | 'user' | 'project', dir: string): Record<string, ParsedMcpEntry> | null {
+    if (scope === 'managed') {
+      const table: Record<string, ParsedMcpEntry> = {};
+      for (const server of getConfig().mcpServers) {
+        table[server.name] = {
+          name: server.name,
+          transport: server.transport,
+          command: server.command,
+          args: server.args,
+          env: server.env,
+          url: server.url,
+          headers: server.headers,
+          timeoutMs: server.timeoutMs,
+        };
+      }
+      return table;
+    }
+    if (scope === 'user') return readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir());
+    // project：白名单（同 MCP_WRITE_SCOPED）→ 坏目录负缓存短路 → raw 直读。
+    if (dir === '') return null;
+    const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+    const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
+    if (!knownKeys.has(normalizeDirKey(dir))) return null;
+    if (badDirCacheHas(dir)) return null;
+    return readProjectMcpServersRawSync(dir);
+  }
   // P8 双向写入（用户级/项目级）：body = { scope, dir?, entry, mode } → writeScopedMcpServer
   //（mcp-writer.ts：user → ~/.claude.json / project → <dir>/.mcp.json 顶层 mcpServers 条目
   // upsert/remove；哨兵值按原文件还原，瞬态改名 hint 还原后剥离；tmp+rename 原子写 + mtime
@@ -574,19 +778,21 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (typeof req.dir !== 'string' || req.dir === '') throw new Error('Invalid MCP write dir');
       const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
       const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
-      if (!knownKeys.has(normalizeDirKey(req.dir))) throw new Error('目标目录不在已知项目目录集中，已拒绝写入');
+      if (!knownKeys.has(normalizeDirKey(req.dir))) throw new Error(`目标目录不在已知项目目录集中，已拒绝写入：该目录已不在最近工作区（上限 ${MAX_ENTRIES} 条），在对应目录重新打开会话后重试`);
       dir = req.dir;
     }
     return writeScopedMcpServer({ scope: req.scope, dir, entry, mode: req.mode, userHome: effectiveUserHome() ?? os.homedir() });
   });
-  // 作用域导出 JSON（2026-10-18）：body = { scope, dir? } → { ok, count }。主进程内取明文
-  //（managed = config store 数组按 name 成表 / user、project = scanner raw 直读，未脱敏真值）
-  // → buildMcpServersExportJson（{"mcpServers":{…}} 形态）→ electron clipboard 写剪贴板。
-  // §1.3 渲染层零明文：JSON 文本全程不出主进程，渲染层只拿 count；导出含全部定义（启停
+  // 作用域导出 JSON（2026-10-18）：body = { scope, dir? } → { ok, count, downloadUrl? }。主进程内取
+  // 明文（managed = config store 数组按 name 成表 / user、project = scanner raw 直读，未脱敏真值）
+  // → buildMcpServersExportJson（{"mcpServers":{…}} 形态）：桌面路径写 electron clipboard；网页路径
+  //（event === null，唯一来源 invokeFromWeb，2026-10-30 P3）改签一次性票据回 downloadUrl，由浏览器
+  // 同源 GET /api/export-download 取正文（写桌面主机剪贴板对网页用户无意义——远控语义修正）。
+  // §1.3 渲染层零明文：JSON 文本全程不出主进程，渲染层只拿 count / 票据 URL；导出含全部定义（启停
   // 是 Claude Link 专属 override，非标准字段，不参与导出）。project 的 dir 白名单校验与
-  // WRITE_SCOPED 同源（已知项目目录集，防任意路径读探测）；count = 0 时不动剪贴板
+  // WRITE_SCOPED 同源（已知项目目录集，防任意路径读探测）；count = 0 时不动剪贴板也不签票据
   //（渲染层按钮已按空表禁用，防御性兜底）。
-  regInvokeHandler(IPC_CHANNELS.MCP_EXPORT_SCOPED, async (_event, body: unknown): Promise<{ ok: true; count: number }> => {
+  regInvokeHandler(IPC_CHANNELS.MCP_EXPORT_SCOPED, async (event, body: unknown): Promise<{ ok: true; count: number; downloadUrl?: string }> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP export payload');
     const req = body as { scope?: unknown; dir?: unknown };
     if (req.scope !== 'managed' && req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP export scope');
@@ -611,7 +817,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     }
     const count = Object.keys(servers).length;
     if (count === 0) return { ok: true, count: 0 };
-    clipboard.writeText(buildMcpServersExportJson(servers));
+    const json = buildMcpServersExportJson(servers);
+    if (event === null) {
+      // 网页路径（唯一来源 = invokeFromWeb）：一次性票据下载，不写桌面主机剪贴板（远控语义修正）。
+      // 明文边界：JSON 文本只经 /api/export-download 响应体直达浏览器，不进渲染层状态。
+      const ticket = createTicketForContent(`mcp-servers-${req.scope}.json`, json, 'application/json');
+      return { ok: true, count, downloadUrl: ticket.url };
+    }
+    clipboard.writeText(json);
     return { ok: true, count };
   });
   // 单服务器 JSON 解析（2026-10-19 mcp-settings-plan-a 点2，表单⇄JSON 双模式的「JSON → 表单」
@@ -801,6 +1014,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // 白名单访问会 TypeError → invoke reject；渲染层 6 处恒传对象（当前不可达），此处仅兜底
       // 拒绝（return false 与 updateSession 无行 falsy 返回同形态），不抛错。
       if (!data || typeof data !== 'object') return false;
+      // P4（计划 §3.2.1-5）：凡经用户改名通道携带 name 的写一律注入 nameSource=custom——
+      // 用户命名（含附件名命名等经本通道的写）永不被自动命名/重试覆盖（repo 名源守卫 +
+      // 渲染层补丁门槛双保险的权威标记源）。不信任 renderer 传值：即便渲染层携带 nameSource
+      // 也被此注入覆盖（本通道无「自动写」语义）。
+      if (data.name !== undefined) (data as { nameSource?: SessionNameSource }).nameSource = 'custom';
+      // round-001 review-report FIX-1b（无 name 剥离残值 nameSource：本通道无自动写语义，对齐 delete 惯例）
+      else delete (data as { nameSource?: SessionNameSource }).nameSource;
       // 白名单校验（review-v2 F11）：不信任 renderer 传值，非法 thinkingLevel 丢弃，
       // 合法 null（跟随默认）/ 有效档位放行。
       if (data.thinkingLevel !== undefined && data.thinkingLevel !== null && !isValidThinkingLevel(data.thinkingLevel)) {
@@ -854,6 +1074,35 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       return updated ? withBridgePlatform(updated) : updated;
     },
   );
+  // P2 会话置顶（点 S4，方案 A）：pinned=true 写当前时刻（epoch ms），false 写 NULL（= 未置顶）。
+  // 专用通道 + sessionRepo.setSessionPinned（不 bump updated_at，置顶不打乱「最近操作」排序语义）；
+  // 成功后复用 SESSIONS_CHANGED 广播链（upsert，SESSION_UPDATE :849-853 同款）——跨端/本端渲染层
+  // 去抖重拉列表，排序权威在 listSessions ORDER BY。单行出口 withBridgePlatform 装饰（对齐
+  // SESSION_GET/SESSION_UPDATE，防整体替换列表行丢 bridgePlatform 锁定标记）。
+  regInvokeHandler(IPC_CHANNELS.SESSION_SET_PINNED, async (_event, id: string, pinned: boolean) => {
+    // 入参健壮性校验（对齐 SESSION_UPDATE hb10-SMG-07 形态）：非字符串 id / 非布尔 pinned 直拒。
+    if (typeof id !== 'string' || !id.trim()) throw new Error('非法会话 id');
+    if (typeof pinned !== 'boolean') throw new Error('非法置顶参数');
+    if (!sessionRepo.getSession(id)) return null;
+    const updated = sessionRepo.setSessionPinned(id, pinned ? Date.now() : null);
+    if (updated) {
+      pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId: id });
+    }
+    return updated ? withBridgePlatform(updated) : updated;
+  });
+  // P4 会话自动命名（计划 §3.2.1-6）：首输入兜底名写入——upgradable（slot/first_input）才写 +
+  // 成功后广播 SESSIONS_CHANGED(upsert)（repo 不依赖 push-bus，广播收口在 handler 层）。
+  // 入参健壮性校验：非字符串/空白 id 或文本按 false 拒绝（不抛错——渲染层 .catch(() => {}) 静默，
+  // 网页端同通道；语义「未写」而非「出错」）。
+  regInvokeHandler(IPC_CHANNELS.SESSION_SET_FALLBACK_NAME, async (_event, sessionId: string, text: string) => {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) return false;
+    if (typeof text !== 'string' || !text.trim()) return false;
+    const ok = sessionRepo.setFirstInputFallbackName(sessionId, text);
+    if (ok) {
+      pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId });
+    }
+    return ok;
+  });
   // B1：回合元数据持久化（渲染层在 result 到达时 fire-and-forget 调用）。
   // 校验：会话必须存在；durationMs/endedAt 仅正数可写（非正/NaN/非 number → null）；
   // costUsd 仅正数可写（非正 → null，端点 0 值不展示 $0.0000 的既有语义）。
@@ -1007,6 +1256,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   regInvokeHandler(IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC, async (_event, sessionId: unknown) => {
     if (typeof sessionId !== 'string' || !sessionId.trim()) throw new Error('Invalid session id');
     return getCommandProvenance(sessionId);
+  });
+  // S5（2026-10-22 six-issues §7.1）：Skill 页「立即刷新」——绕过 60s 节流与「仅空时生效」条件
+  // 直接重探全局兜底快照（在飞去重：探测中等待同一 promise）。返回探测后快照（成功 ready/empty；
+  // CLI 缺失/探测失败为 degraded/error 显式终态，渲染层沿既有 snap-status 错误条呈现）。
+  // 副作用与 runGlobalCommandProbe 既有链一致（写 globalFallback + COMMANDS_GLOBAL_CHANGED 广播 +
+  // 空命令会话回填），零新增广播通道。
+  regInvokeHandler(IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL, async () => {
+    return refreshGlobalCommands(mainWindow);
   });
 
   // Chat

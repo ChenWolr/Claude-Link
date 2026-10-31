@@ -36,6 +36,8 @@ export interface UseDialogShellOptions {
   minH: number;
   /** 缺省 → 打开时测量卡片自然尺寸（offsetWidth/offsetHeight 布局尺寸） */
   initialSize?: { width?: number; height?: number };
+  /** true → style 不输出 height 键（卡片高度随内容自适应；自然高度测量保留，仅用于打开时垂直居中）。opt-in：不影响既有使用方。 */
+  autoHeight?: boolean;
 }
 
 /** 手柄组件的最小接入接口（duck-typed：useDialogShell 返回值天然满足；ToolDiffDialog 自管 rect 也实现它） */
@@ -72,12 +74,13 @@ export function useDialogShell(
   const style = computed<Record<string, string>>(() => {
     const r = rect.value;
     if (!r) return EMPTY_STYLE;
-    return {
+    const s: Record<string, string> = {
       left: `${r.left}px`,
       top: `${r.top}px`,
       width: `${r.width}px`,
-      height: `${r.height}px`,
     };
+    if (!opts.autoHeight) s.height = `${r.height}px`;
+    return s;
   });
 
   // ── 打开/关闭：测量 → 居中 → 钳制；关闭置 null（重开重置） ──

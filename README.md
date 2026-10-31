@@ -349,6 +349,14 @@ Claude Link 的部分功能实现参考了以下开源项目：
 - [contrast](https://github.com/stewartlord/contrast)：Electron 编写的 Diff 工具，为代码改动面板与 Diff 渲染提供参考。
 - [desktop-cc-gui](https://github.com/zhukunpenglinyutong/desktop-cc-gui)：基于 Tauri 的多引擎 AI 编程桌面客户端（Claude Code、Codex、Gemini、OpenCode 等），为桌面客户端形态与多供应商接入提供参考。
 
+## 通知
+
+窗口失焦时，任务完成/网络中断会发送 Windows 系统通知并闪烁任务栏（开关见设置页「离开会话后通知」）。若通知中心有记录但右下角横幅不弹，属于 Windows 系统层压制，请依次自查：
+
+1. **每应用横幅开关**：Windows 设置 → 系统 → 通知 → Claude Link → 开启「显示通知横幅」。
+2. **专注助手**：开启勿扰/仅优先时横幅会被静默（通知中心仍有记录），需调整专注助手设置。
+3. **开发模式（`npm run dev`）**：dev 下 `electron.exe` 没有关联 AUMID 的开始菜单快捷方式，横幅可能不弹或异常；打包版已在主进程设置 `com.clauedelink.app`（AUMID 链路完整），横幅问题请以打包版验证为准。
+
 ## License
 
 MIT

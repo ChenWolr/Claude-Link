@@ -1,6 +1,9 @@
 // tdd-progress-verify.ts
 // C（进度状态层）行为测试：纯逻辑（progress-events 转换、store 状态、事件→store 映射）。
 // Vue 组件无测试框架（项目无 jest/vitest），由 selftest 第 34 节结构契约 + typecheck 覆盖。
+// P5（2026-10-22）：backgroundTasks 按会话分桶（外层 sessionId → 内层 taskId）——本文件用例
+// 均为单会话语境，统一传本会话 id SID；跨会话桶隔离/切回可见性由
+// tdd-background-task-session-scope-verify.ts 专测。
 // 运行：npx tsx scripts/tdd-progress-verify.ts
 import { strict as assert } from 'node:assert';
 import { setActivePinia, createPinia } from 'pinia';
@@ -9,6 +12,9 @@ import { useSessionStore } from '../src/renderer/stores/session-store';
 import { applyProgressEvent } from '../src/renderer/composables/use-chat';
 
 setActivePinia(createPinia());
+
+// 单会话语境的固定会话 id（backgroundTasks 桶键；见文件头 P5 说明）。
+const SID = 'sess_tdd';
 
 let pass = 0;
 let fail = 0;
@@ -126,55 +132,55 @@ check('clearBackgroundTasks 只清终态卡：started → 清 → 运行卡仍�
   const store = useSessionStore();
   withFakeNow((advance) => {
     // F4 新语义：回合边界只清上一回合终态卡；运行中卡保留跨回合（progress 继续被消费）。
-    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 'bg_c1', description: 'run', taskType: 'local_bash' });
-    store.clearBackgroundTasks();
-    assert.ok(store.backgroundTasks['bg_c1'], '运行中卡不得被回合边界 clearBackgroundTasks 清掉');
+    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 'bg_c1', description: 'run', taskType: 'local_bash' }, SID);
+    store.clearBackgroundTasks(SID);
+    assert.ok(store.backgroundTasks[SID]?.['bg_c1'], '运行中卡不得被回合边界 clearBackgroundTasks 清掉');
     advance(1_000);
     applyProgressEvent(store, {
       type: 'system', subtype: 'task_progress', taskId: 'bg_c1', usage: { totalTokens: 10, toolUses: 1 }, lastToolName: 'Bash',
-    });
-    assert.equal((store.backgroundTasks['bg_c1'].progressHistory as unknown[]).length, 1, '清后运行卡的 progress 仍应被消费（history 增长）');
+    }, SID);
+    assert.equal((store.backgroundTasks[SID]?.['bg_c1'].progressHistory as unknown[]).length, 1, '清后运行卡的 progress 仍应被消费（history 增长）');
     applyProgressEvent(store, {
       type: 'system', subtype: 'task_notification', taskId: 'bg_c1', status: 'completed', usage: { totalTokens: 10, toolUses: 1, durationMs: 900 },
-    });
-    assert.equal(store.backgroundTasks['bg_c1'].status, 'completed');
-    store.clearBackgroundTasks();
-    assert.equal(store.backgroundTasks['bg_c1'], undefined, '终态卡在下次回合边界被清');
+    }, SID);
+    assert.equal(store.backgroundTasks[SID]?.['bg_c1'].status, 'completed');
+    store.clearBackgroundTasks(SID);
+    assert.equal(store.backgroundTasks[SID]?.['bg_c1'], undefined, '终态卡在下次回合边界被清');
   });
 });
 check('clearBackgroundTasks 终态+运行混合：只删终态卡，运行中卡保留', () => {
   const store = useSessionStore();
-  applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 'bg_mix_run', description: 'running', taskType: 'local_bash' });
-  applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 'bg_mix_done', description: 'done', taskType: 'local_bash' });
-  applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 'bg_mix_fail', description: 'fail', taskType: 'local_bash' });
-  applyProgressEvent(store, { type: 'system', subtype: 'task_notification', taskId: 'bg_mix_done', status: 'completed' });
-  applyProgressEvent(store, { type: 'system', subtype: 'task_notification', taskId: 'bg_mix_fail', status: 'failed' });
-  store.clearBackgroundTasks();
-  assert.ok(store.backgroundTasks['bg_mix_run'], '无 status（运行中）卡应保留');
-  assert.equal(store.backgroundTasks['bg_mix_done'], undefined, 'completed 终态卡应被清');
-  assert.equal(store.backgroundTasks['bg_mix_fail'], undefined, 'failed 终态卡应被清');
+  applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 'bg_mix_run', description: 'running', taskType: 'local_bash' }, SID);
+  applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 'bg_mix_done', description: 'done', taskType: 'local_bash' }, SID);
+  applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 'bg_mix_fail', description: 'fail', taskType: 'local_bash' }, SID);
+  applyProgressEvent(store, { type: 'system', subtype: 'task_notification', taskId: 'bg_mix_done', status: 'completed' }, SID);
+  applyProgressEvent(store, { type: 'system', subtype: 'task_notification', taskId: 'bg_mix_fail', status: 'failed' }, SID);
+  store.clearBackgroundTasks(SID);
+  assert.ok(store.backgroundTasks[SID]?.['bg_mix_run'], '无 status（运行中）卡应保留');
+  assert.equal(store.backgroundTasks[SID]?.['bg_mix_done'], undefined, 'completed 终态卡应被清');
+  assert.equal(store.backgroundTasks[SID]?.['bg_mix_fail'], undefined, 'failed 终态卡应被清');
 });
 check('task_started skipTranscript=true 内务任务不建卡', () => {
   const store = useSessionStore();
   applyProgressEvent(store, {
     type: 'system', subtype: 'task_started', taskId: 't_hk', description: 'housekeeping', taskType: 'local_bash', skipTranscript: true,
-  });
-  assert.equal(store.backgroundTasks['t_hk'], undefined);
+  }, SID);
+  assert.equal(store.backgroundTasks[SID]?.['t_hk'], undefined);
 });
 check('task_notification skipTranscript=true 同样滤除（内务完全不出现在面板）', () => {
   const store = useSessionStore();
   applyProgressEvent(store, {
     type: 'system', subtype: 'task_notification', taskId: 't_hk2', status: 'completed', skipTranscript: true, summary: 'hk done',
-  });
-  assert.equal(store.backgroundTasks['t_hk2'], undefined);
+  }, SID);
+  assert.equal(store.backgroundTasks[SID]?.['t_hk2'], undefined);
 });
 check('task_started 建 startedAt/progressHistory/prompt/subagentType；重复 started 不重置计时', () => {
   const store = useSessionStore();
   withFakeNow((advance) => {
     applyProgressEvent(store, {
       type: 'system', subtype: 'task_started', taskId: 't_dup', description: 'x', taskType: 'local_agent', subagentType: 'Explore', prompt: 'p',
-    });
-    const first = store.backgroundTasks['t_dup'];
+    }, SID);
+    const first = store.backgroundTasks[SID]?.['t_dup'];
     assert.equal(first.startedAt, 1_700_000_000_000);
     assert.deepEqual(first.progressHistory, []);
     assert.equal(first.subagentType, 'Explore');
@@ -183,8 +189,8 @@ check('task_started 建 startedAt/progressHistory/prompt/subagentType；重复 s
     // 重复 started（SDK 重发/迟到）：startedAt 保留旧值，progressHistory 不被清空
     applyProgressEvent(store, {
       type: 'system', subtype: 'task_started', taskId: 't_dup', description: 'x again', taskType: 'local_agent',
-    });
-    const again = store.backgroundTasks['t_dup'];
+    }, SID);
+    const again = store.backgroundTasks[SID]?.['t_dup'];
     assert.equal(again.startedAt, 1_700_000_000_000);
     assert.deepEqual(again.progressHistory, []);
     assert.equal(again.description, 'x again'); // 其余字段照常 upsert
@@ -195,15 +201,15 @@ check('task_progress push progressHistory（cap 50 丢最旧）+ usage/lastToolN
   withFakeNow((advance) => {
     applyProgressEvent(store, {
       type: 'system', subtype: 'task_started', taskId: 't_cap', description: 'cap', taskType: 'local_bash',
-    });
+    }, SID);
     for (let i = 1; i <= 55; i += 1) {
       advance(100);
       applyProgressEvent(store, {
         type: 'system', subtype: 'task_progress', taskId: 't_cap', subagentType: i === 20 ? 'Explore' : undefined,
         usage: { totalTokens: i * 10, toolUses: i, durationMs: i * 100 }, lastToolName: `T${i}`,
-      });
+      }, SID);
     }
-    const card = store.backgroundTasks['t_cap'];
+    const card = store.backgroundTasks[SID]?.['t_cap'];
     const hist = card.progressHistory as Array<Record<string, number | string | undefined>>;
     assert.equal(hist.length, 50);
     assert.equal((hist[0].lastToolName as string), 'T6'); // 前 5 条被挤出（丢最旧）
@@ -218,15 +224,15 @@ check('task_progress 无卡忽略；终态卡后的迟到 progress 忽略（事�
   const store = useSessionStore();
   withFakeNow(() => {
     // 无卡（未 started）：忽略不建卡
-    applyProgressEvent(store, { type: 'system', subtype: 'task_progress', taskId: 't_ghost', usage: { totalTokens: 1 } });
-    assert.equal(store.backgroundTasks['t_ghost'], undefined);
+    applyProgressEvent(store, { type: 'system', subtype: 'task_progress', taskId: 't_ghost', usage: { totalTokens: 1 } }, SID);
+    assert.equal(store.backgroundTasks[SID]?.['t_ghost'], undefined);
     // started → notification 终态 → 迟到 progress：不追加历史、不复活、status 不变
-    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_late', description: 'late', taskType: 'local_bash' });
+    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_late', description: 'late', taskType: 'local_bash' }, SID);
     applyProgressEvent(store, {
       type: 'system', subtype: 'task_notification', taskId: 't_late', status: 'completed', usage: { totalTokens: 5, toolUses: 1, durationMs: 100 },
-    });
-    applyProgressEvent(store, { type: 'system', subtype: 'task_progress', taskId: 't_late', usage: { totalTokens: 99, toolUses: 9 }, lastToolName: 'Late' });
-    const card = store.backgroundTasks['t_late'];
+    }, SID);
+    applyProgressEvent(store, { type: 'system', subtype: 'task_progress', taskId: 't_late', usage: { totalTokens: 99, toolUses: 9 }, lastToolName: 'Late' }, SID);
+    const card = store.backgroundTasks[SID]?.['t_late'];
     assert.equal(card.status, 'completed');
     assert.equal((card.progressHistory as unknown[]).length, 0);
     assert.equal(card.lastToolName, undefined);
@@ -236,13 +242,13 @@ check('task_progress 无卡忽略；终态卡后的迟到 progress 忽略（事�
 check('迟到/重复 task_started 不复活终态卡（status/startedAt/progressHistory 不变）', () => {
   const store = useSessionStore();
   withFakeNow((advance) => {
-    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_late_start', description: 'first', taskType: 'local_bash' });
-    const startedAt = store.backgroundTasks['t_late_start'].startedAt;
-    applyProgressEvent(store, { type: 'system', subtype: 'task_notification', taskId: 't_late_start', status: 'completed', summary: 'done' });
+    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_late_start', description: 'first', taskType: 'local_bash' }, SID);
+    const startedAt = store.backgroundTasks[SID]?.['t_late_start'].startedAt;
+    applyProgressEvent(store, { type: 'system', subtype: 'task_notification', taskId: 't_late_start', status: 'completed', summary: 'done' }, SID);
     advance(5_000);
     // F5：终态守卫——迟到的重复 started 不得把 completed 卡复活为永久运行中
-    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_late_start', description: 'late again', taskType: 'local_bash' });
-    const card = store.backgroundTasks['t_late_start'];
+    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_late_start', description: 'late again', taskType: 'local_bash' }, SID);
+    const card = store.backgroundTasks[SID]?.['t_late_start'];
     assert.equal(card.status, 'completed', '终态不得被迟到 started 覆盖');
     assert.equal(card.startedAt, startedAt, 'startedAt 不变');
     assert.deepEqual(card.progressHistory, [], 'progressHistory 不变');
@@ -260,12 +266,12 @@ check('task_notification 终态卡保留（无 4s 自动删除定时器）+ stat
     return 0 as unknown as ReturnType<typeof setTimeout>;
   }) as typeof setTimeout;
   try {
-    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_fin', description: 'fin', taskType: 'local_bash' });
+    applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_fin', description: 'fin', taskType: 'local_bash' }, SID);
     applyProgressEvent(store, {
       type: 'system', subtype: 'task_notification', taskId: 't_fin', status: 'completed',
       outputFile: 'C:/tmp/out.log', summary: 'done', usage: { totalTokens: 9, toolUses: 2, durationMs: 800 },
-    });
-    const card = store.backgroundTasks['t_fin'];
+    }, SID);
+    const card = store.backgroundTasks[SID]?.['t_fin'];
     assert.equal(card.status, 'completed');
     // F6：终态计时兜底——finishedAt 在终态到达时刻快照，存在且 ≥ startedAt（durationMs 缺失时兜底用）。
     assert.ok(card.finishedAt != null, '终态卡应有 finishedAt');
@@ -275,7 +281,7 @@ check('task_notification 终态卡保留（无 4s 自动删除定时器）+ stat
     assert.equal(card.summary, 'done');
     assert.equal(card.usage?.durationMs, 800);
     for (const fn of scheduled) fn(); // flush 全部挂起定时器
-    assert.ok(store.backgroundTasks['t_fin'], '终态卡应保留，不得 4s 自动删除');
+    assert.ok(store.backgroundTasks[SID]?.['t_fin'], '终态卡应保留，不得 4s 自动删除');
     assert.equal(scheduled.length, 0, '不应再排自动删除定时器');
   } finally {
     globalThis.setTimeout = realSetTimeout;
@@ -292,16 +298,16 @@ check('setToolProgress 写入 + clearToolProgress 清除', () => {
   assert.equal(store.toolProgress['toolu_tp'], undefined);
 });
 
-console.log('\n=== session-store: backgroundTasks（C）===');
-check('upsert 写入 + 覆盖 + remove 清除', () => {
+console.log('\n=== session-store: backgroundTasks（C，P5 起按会话分桶）===');
+check('upsert 写入 + 覆盖 + remove 清除（本会话桶内）', () => {
   const store = useSessionStore();
-  store.upsertBackgroundTask({ taskId: 'bg_1', description: 'run tests', taskType: 'local_bash' });
-  assert.equal(store.backgroundTasks['bg_1'].description, 'run tests');
-  store.upsertBackgroundTask({ taskId: 'bg_1', description: 'build', lastToolName: 'Bash' });
-  assert.equal(store.backgroundTasks['bg_1'].description, 'build');
-  assert.equal(store.backgroundTasks['bg_1'].lastToolName, 'Bash');
-  store.removeBackgroundTask('bg_1');
-  assert.equal(store.backgroundTasks['bg_1'], undefined);
+  store.upsertBackgroundTask(SID, { taskId: 'bg_1', description: 'run tests', taskType: 'local_bash' });
+  assert.equal(store.backgroundTasks[SID]?.['bg_1'].description, 'run tests');
+  store.upsertBackgroundTask(SID, { taskId: 'bg_1', description: 'build', lastToolName: 'Bash' });
+  assert.equal(store.backgroundTasks[SID]?.['bg_1'].description, 'build');
+  assert.equal(store.backgroundTasks[SID]?.['bg_1'].lastToolName, 'Bash');
+  store.removeBackgroundTask(SID, 'bg_1');
+  assert.equal(store.backgroundTasks[SID]?.['bg_1'], undefined);
 });
 
 console.log('\n=== session-store: compacting（C）===');
@@ -317,27 +323,27 @@ check('setCompacting 切换', () => {
 console.log('\n=== applyProgressEvent：事件 → store 映射 ===');
 check('tool_progress → setToolProgress', () => {
   const store = useSessionStore();
-  applyProgressEvent(store, { type: 'tool_progress', toolUseId: 'tu_ap', elapsedSeconds: 5 });
+  applyProgressEvent(store, { type: 'tool_progress', toolUseId: 'tu_ap', elapsedSeconds: 5 }, SID);
   assert.equal(store.toolProgress['tu_ap'], 5);
   store.clearToolProgress('tu_ap');
 });
 check('compacting → setCompacting(true)', () => {
   const store = useSessionStore();
   store.setCompacting(false);
-  applyProgressEvent(store, { type: 'system', subtype: 'compacting' });
+  applyProgressEvent(store, { type: 'system', subtype: 'compacting' }, SID);
   assert.equal(store.compacting, true);
   store.setCompacting(false);
 });
-check('task_started → upsertBackgroundTask', () => {
+check('task_started → upsertBackgroundTask（入本会话桶）', () => {
   const store = useSessionStore();
-  applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_ap', description: 'build', taskType: 'local_bash' });
-  assert.equal(store.backgroundTasks['t_ap'].description, 'build');
-  store.removeBackgroundTask('t_ap');
+  applyProgressEvent(store, { type: 'system', subtype: 'task_started', taskId: 't_ap', description: 'build', taskType: 'local_bash' }, SID);
+  assert.equal(store.backgroundTasks[SID]?.['t_ap'].description, 'build');
+  store.removeBackgroundTask(SID, 't_ap');
 });
 check('非进度事件不改动（result 不抛错、不动 compacting）', () => {
   const store = useSessionStore();
   store.setCompacting(false);
-  applyProgressEvent(store, { type: 'result', subtype: 'success', result: '', total_cost_usd: 0, duration_ms: 0, num_turns: 0, session_id: '', is_error: false });
+  applyProgressEvent(store, { type: 'result', subtype: 'success', result: '', total_cost_usd: 0, duration_ms: 0, num_turns: 0, session_id: '', is_error: false }, SID);
   assert.equal(store.compacting, false);
 });
 

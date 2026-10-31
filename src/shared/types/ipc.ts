@@ -36,6 +36,10 @@ export const IPC_CHANNELS = {
   WORKSPACE_LIST_RECENT: 'workspace:listRecent',
   WORKSPACE_ADD_RECENT: 'workspace:addRecent',
   WORKSPACE_REMOVE_RECENT: 'workspace:removeRecent',
+  // 主→渲染推送：最近目录历史变更信号（ADD/REMOVE 成功返回前发射，LIST 不推）。信号型空载荷
+  // {}——渲染层收到后重拉 listRecentWorkspaces（不带列表载荷，避免与重拉竞态）；桌面/网页
+  // 渲染层同代码同生效（2026-10-24 web-sync 计划 §2）。
+  WORKSPACES_CHANGED: 'workspaces:changed',
   // 自绘 FilePickerDialog 的只读文件系统元数据通道（列根/列目录/新建文件夹/查存在）；文件内容读取仍在主进程。
   FS_LIST_ROOTS: 'fs:listRoots',
   FS_LIST_DIR: 'fs:listDir',
@@ -47,6 +51,9 @@ export const IPC_CHANNELS = {
   FS_RENAME: 'fs:rename',
   FS_TRASH: 'fs:trash',
   FS_SHOW_IN_EXPLORER: 'fs:showInExplorer',
+  // 聊天工具行打开生成文件（p3 2026-10-27）：绝对路径直达（default=系统默认程序+win 降级 /
+  // choose=win 原生打开方式对话框）。
+  FS_OPEN_PATH: 'fs:openPath',
   // 导出目标协商（主→渲染请求 + 渲染→主应答；#3/#4 原生保存框替换）。
   EXPORT_RESOLVE_TARGET: 'export-image:resolveTarget',
   EXPORT_REQUEST_TARGET: 'export-image:requestTarget',
@@ -101,6 +108,15 @@ export const IPC_CHANNELS = {
   SESSION_GET: 'session:get',
   SESSION_DELETE: 'session:delete',
   SESSION_UPDATE: 'session:update',
+  // P2 会话置顶（点 S4，方案 A）：body = (sessionId: string, pinned: boolean) → Session | null
+  //（null = 会话不存在）。pinned=true 主进程写 Date.now()（epoch ms），false 写 NULL；专用通道 +
+  // repo.setSessionPinned（不 bump updated_at）；成功后广播 SESSIONS_CHANGED(upsert) 跨端同步。
+  SESSION_SET_PINNED: 'session:setPinned',
+  // P4 会话自动命名（计划 2026-10-24-web-sync §3.2.1-6）：首输入兜底名写入。
+  // body = (sessionId: string, text: string) → boolean（false = 会话不存在 / 名源不可升级
+  // slot|first_input / 文本归一后为空）。主进程 buildFirstInputSessionName 归一（首行/折叠
+  // 空白/≤20 截断）；成功后广播 SESSIONS_CHANGED(upsert) 跨端同步标题。
+  SESSION_SET_FALLBACK_NAME: 'session:setFallbackName',
   // B1：回合元数据持久化（渲染层回合 result 到达时 fire-and-forget 调用，一次写 messages 三列 cost_usd/duration_ms/ended_at + sessions 两列 last_turn_duration_ms/last_turn_ended_at）。
   SESSION_RECORD_TURN_META: 'session:recordTurnMeta',
   // OPT-10：会话级「单独改 model_override」通道（'session:updateModelOverride'）已删除——全链无调用方。
@@ -130,6 +146,12 @@ export const IPC_CHANNELS = {
   CHANGES_DIFF: 'changes:diff',
   // 点文件「打开」：shell.openPath 用系统默认程序打开，失败时 Windows 降级弹「打开方式」对话框（仓库根解析 + 越界守卫，绝不 resolve(workingDir, rel)）。
   CHANGES_OPEN_FILE: 'changes:openFile',
+  // 轮末文件改动（turn-diff，docs/plans/2026-10-26-turn-file-changes-diff-and-web-changes-fix-plan §3.4）：
+  // LIST=按会话聚合每轮每文件轻量摘要（轮区间由主进程从 messages 表推导——主流程 user 消息分界，
+  // plan-notes N2）；FILE_PATCH=单文件懒加载 patch（渲染层显式传 turnStart/endMessageId，rowid 转区间；
+  // 'unavailable' 回空 patch 不抛错）。只读、无副作用、不新推 WS 事件。
+  TURN_DIFF_LIST_SUMMARIES: 'turnDiff:listSummaries',
+  TURN_DIFF_FILE_PATCH: 'turnDiff:filePatch',
   TASK_ADD: 'task:add',
   TASK_REMOVE: 'task:remove',
   TASK_GET_ALL: 'task:getAll',
@@ -174,6 +196,10 @@ export const IPC_CHANNELS = {
   // D4：全局兜底快照热刷新广播（globalFallback 变化时主→渲染推送）。不经 isSessionActive 守卫——
   // 暂态会话不在 activeSessions，但正是它最需要这路广播；renderer 自行决定覆盖/回填。
   COMMANDS_GLOBAL_CHANGED: 'commands:globalChanged',
+  // S5（2026-10-22 six-issues §7.1）：Skill 页「立即刷新」——绕过 60s 节流与「仅空时生效」条件
+  // 直接重探全局兜底快照，返回探测后快照（成功 ready/empty；失败 degraded/error 显式终态）。
+  // 在飞去重：探测中等待同一 promise，不并发 spawn。
+  COMMANDS_REFRESH_GLOBAL: 'commands:refreshGlobal',
   // Task 8：命令来源 provenance 诊断（从已清洗快照派生的脱敏视图：origin/availability 计数 +
   // unknown/hidden 命令名，不含 Query 句柄或原始数据）。只读、无副作用，不触发 probe。
   COMMANDS_GET_DIAGNOSTIC: 'commands:getDiagnostic',

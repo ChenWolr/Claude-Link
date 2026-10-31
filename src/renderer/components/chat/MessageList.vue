@@ -1,15 +1,20 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, computed, onMounted, onBeforeUnmount } from 'vue';
 import type { Message } from '../../../shared/types/session';
+import type { TurnFileDiffItem, TurnFileDiffTurnSummary } from '../../../shared/types/turn-file-diff';
 import MessageBubble from './MessageBubble.vue';
 import StreamRenderer from './StreamRenderer.vue';
 import ProcessGroup from './ProcessGroup.vue';
 import ThinkingBlock from './ThinkingBlock.vue';
 import StalledBanner from './StalledBanner.vue';
 import ApiRetryBanner from './ApiRetryBanner.vue';
+import TurnFileChangesCard from './TurnFileChangesCard.vue';
+import TurnDiffDialog from './TurnDiffDialog.vue';
 import { groupMessagesForRender, computeStats, type RenderItem } from '../../utils/group-messages';
 import { copyTextToClipboard } from '../../utils/clipboard';
+import { mapFinalTextToTurnStart } from '../../utils/turn-diff-attach';
 import { useSessionStore } from '../../stores/session-store';
+import { useTurnDiffStore, type TurnDiffPatchTarget } from '../../stores/turn-diff-store';
 import { shouldHidePersistedForStreaming } from '../../../shared/turn-boundary';
 
 const props = defineProps<{
@@ -32,6 +37,81 @@ const innerRef = ref<HTMLElement | null>(null);
 // 主聊天流：parentAgentId === null 的消息（子 agent 过程抽到右侧「子Agent」Tab）。
 // 分组规则（最小颗粒度 + 因果配对 + 正文独立气泡）见 utils/group-messages.ts。
 const mainFlowMessages = computed(() => props.messages.filter((m) => !m.parentAgentId));
+
+// ── 轮末文件改动卡片（turn-diff，计划 §4-P5）──
+// 挂载链：回合最终 assistant 正文（attachMap 锚点）→ summary 命中该回合 → 卡片挂正文气泡后；
+// 行点击打开 TurnDiffDialog（单例，懒加载单文件 patch）。fold 项后不挂；导出模式不挂。
+const turnDiffStore = useTurnDiffStore();
+// 挂载锚点：回合最终 assistant 正文消息 id → { turnStartMessageId, endMessageId }。
+const turnDiffAttachMap = computed(() => mapFinalTextToTurnStart(mainFlowMessages.value));
+// 当前活动会话的摘要按回合起点索引（null=尚未拉到 → 整体不出卡片）。
+const summariesByTurnStart = computed<Map<string, TurnFileDiffTurnSummary> | null>(() => {
+  const sid = sessionStore.activeSession?.id;
+  if (!sid) return null;
+  const list = turnDiffStore.summariesBySession[sid];
+  if (!list) return null;
+  const map = new Map<string, TurnFileDiffTurnSummary>();
+  for (const s of list) map.set(s.turnStartMessageId, s);
+  return map;
+});
+// 消息 id → 该消息之后要挂的卡片 summary。条件：attachMap 命中 + summary 存在且 items 非空
+// + 非进行中回合（sending && 该回合起点 === 当前回合起点 → 上一轮 summary 可能是陈旧数据，
+// 回合结束防抖重拉后自然显形）。
+const turnDiffCards = computed<Map<string, TurnFileDiffTurnSummary>>(() => {
+  const out = new Map<string, TurnFileDiffTurnSummary>();
+  if (props.exportMode) return out;
+  const byTurn = summariesByTurnStart.value;
+  if (!byTurn) return out;
+  for (const item of renderItems.value) {
+    if (item.type !== 'message') continue;
+    const attach = turnDiffAttachMap.value.get(item.message.id);
+    if (!attach) continue;
+    const summary = byTurn.get(attach.turnStartMessageId);
+    if (!summary || summary.items.length === 0) continue;
+    if (props.sending && summary.turnStartMessageId === turnDiffStore.currentTurnStartMessageId) continue;
+    out.set(item.message.id, summary);
+  }
+  return out;
+});
+// R3：摘要拉取失败轻提示行——attachMap 命中但该轮 summary 未加载成功（该回合摘要缺席）且
+// summariesError 非空时，在该轮正文气泡后出一条轻提示 +「重试」。样式对齐 ChangesPanel error
+// 横条 token（--color-danger / --radius-sm / color-mix）。导出模式不出（与卡片一致）；
+// 进行中回合不出（该轮尚未结束，摘要本就不存在，不得误报失败）；该轮已有 summary
+//（含 items 为空的「无改动轮」）不出——那是合法空态，不是失败。
+const turnDiffErrorRows = computed<Set<string>>(() => {
+  const out = new Set<string>();
+  if (props.exportMode) return out;
+  if (!turnDiffStore.summariesError) return out;
+  const byTurn = summariesByTurnStart.value;
+  for (const item of renderItems.value) {
+    if (item.type !== 'message') continue;
+    const attach = turnDiffAttachMap.value.get(item.message.id);
+    if (!attach) continue;
+    if (byTurn?.has(attach.turnStartMessageId)) continue;
+    if (props.sending && attach.turnStartMessageId === turnDiffStore.currentTurnStartMessageId) continue;
+    out.add(item.message.id);
+  }
+  return out;
+});
+// 「重试」：强制重拉当前会话摘要（force 绕过缓存早退；失败不缓存故重拉即重试）。
+function retryTurnDiffSummaries(): void {
+  const sid = sessionStore.activeSession?.id;
+  if (!sid) return;
+  void turnDiffStore.loadSummaries(sid, true);
+}
+// 弹窗打开目标（单例 ref，弹窗挂本组件同级；关闭置 null 还原焦点）。
+const turnDiffTarget = ref<TurnDiffPatchTarget | null>(null);
+function openTurnDiff(messageId: string, item: TurnFileDiffItem): void {
+  const sid = sessionStore.activeSession?.id;
+  const attach = turnDiffAttachMap.value.get(messageId);
+  if (!sid || !attach) return;
+  turnDiffTarget.value = {
+    sessionId: sid,
+    turnStartMessageId: attach.turnStartMessageId,
+    endMessageId: attach.endMessageId,
+    path: item.path,
+  };
+}
 
 // 力度② turn-boundary 去重：发送中，若对应流式块非空（流式端点），隐藏本回合已落库的
 // text/thinking（message 事件已即时落库为唯一真相，流式块负责实时预览，二者不重复显示）；
@@ -238,6 +318,23 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
             :exportMode="exportMode"
           />
           <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" :exportMode="exportMode" />
+          <!-- 轮末文件改动卡（turn-diff）：仅挂 message 项后（fold 项不挂），见 turnDiffCards 计算注释。
+               数据未拉到 / 进行中回合 / 无 summary 时整体缺席（sending 下降沿防抖重拉后自然显形）。 -->
+          <TurnFileChangesCard
+            v-if="item.type === 'message' && turnDiffCards.has(item.message.id)"
+            :summary="turnDiffCards.get(item.message.id)!"
+            @open="openTurnDiff(item.message.id, $event)"
+          />
+          <!-- R3：摘要拉取失败轻提示行（样式对齐 ChangesPanel error 横条 token）：attachMap 命中
+               但该轮 summary 未加载成功且 summariesError 非空时出，「重试」强制重拉当前会话摘要。 -->
+          <div
+            v-else-if="item.type === 'message' && turnDiffErrorRows.has(item.message.id)"
+            class="turn-diff-error"
+            data-testid="turn-diff-error-row"
+          >
+            <span class="turn-diff-error__text">轮末改动摘要加载失败</span>
+            <button type="button" class="turn-diff-error__retry" title="重新拉取轮末改动摘要" @click="retryTurnDiffSummaries">重试</button>
+          </div>
         </template>
         <div v-if="streamingContent || streamingThinking || streamingTool || sessionStore.activeStalledInfo || sessionStore.activeApiRetryInfo || sessionStore.activeApiRetryTerminalFallback" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
           <!-- 卡死检测横幅：主进程看门狗判定无响应时显形，提供 继续等待/重试/中断。 -->
@@ -265,6 +362,8 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
       data-testid="back-to-bottom"
       @click="scrollToBottom"
     >↓ 回到底部</button>
+    <!-- 轮末改动 diff 弹窗（单例，挂本组件同级；Teleport 到 body，开启时才渲染内容） -->
+    <TurnDiffDialog :target="turnDiffTarget" @close="turnDiffTarget = null" />
   </div>
 </template>
 
@@ -335,6 +434,42 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+}
+
+/* R3：轮末改动摘要加载失败轻提示——token 对齐 ChangesPanel .changes__error 横条
+   （--color-danger / --radius-sm / color-mix），宽度对齐轮末改动卡片（max-width: 752px），
+   作为消息流内的行内轻提示（区别于面板顶部横条，不占面板布局）。 */
+.turn-diff-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+  max-width: 752px;
+}
+.turn-diff-error__text {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-danger);
+  word-break: break-word;
+}
+.turn-diff-error__retry {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel);
+  color: var(--color-text);
+  font-size: 0.75rem;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+.turn-diff-error__retry:hover {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
 }
 
 /* 消息少时贴底、消息多时可自由向上滚动。

@@ -2,7 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import type { Session } from '../../../shared/types/session';
 import { isValidThinkingLevel } from '../../../shared/types/thinking';
 import { isValidPermissionMode } from '../../../shared/permission-resolver';
-import { isAutoSessionName } from '../../../shared/auto-session-name';
+import { isAutoSessionName, deriveNameSource, isUpgradableNameSource, buildFirstInputSessionName } from '../../../shared/auto-session-name';
+import type { SessionNameSource } from '../../../shared/types/session';
 import { getConnection } from '../connection';
 import { parseSessionSkillOverrides } from '../../modules/sdk-skill-overrides';
 import { parseSessionMcpOverrides } from '../../modules/mcp/sdk-mcp';
@@ -12,6 +13,8 @@ import { normalizeDbTime } from '../../../shared/time';
 interface SessionRow {
   id: string;
   name: string;
+  // P4 会话自动命名：名源标记（NULL = 功能前存量行，toSession 读取侧派生）。
+  name_source: string | null;
   cli_session_id: string | null;
   model: string;
   provider_override: string | null;
@@ -22,6 +25,8 @@ interface SessionRow {
   thinking_level: string | null;
   skill_overrides: string | null;
   mcp_overrides: string | null;
+  // P2 会话置顶（点 S4）：置顶时刻 epoch ms；NULL = 未置顶。
+  pinned_at: number | null;
   created_at: string;
   updated_at: string;
   last_context_tokens: number | null;
@@ -39,6 +44,8 @@ function toSession(row: SessionRow): Session {
   return {
     id: row.id,
     name: row.name,
+    // P4：名源——DB 显式值直用；NULL/脏值按名称形态派生（存量行零扰动）。
+    nameSource: deriveNameSource(row.name_source, row.name),
     cliSessionId: row.cli_session_id,
     model: row.model,
     providerOverride: row.provider_override ?? null,
@@ -54,6 +61,8 @@ function toSession(row: SessionRow): Session {
     // 脏值兜底：NULL/空串/脏 JSON/无合法条目一律回落 null（= 未钉住/功能前存量，
     // 注入链回退当前全局 mcpOverrides，§3.14）。
     mcpOverrides: parseSessionMcpOverrides(row.mcp_overrides),
+    // P2 会话置顶：epoch ms；NULL = 未置顶（功能前存量会话天然未置顶）。
+    pinnedAt: row.pinned_at ?? null,
     createdAt: normalizeDbTime(row.created_at),
     updatedAt: normalizeDbTime(row.updated_at),
     lastContextTokens: row.last_context_tokens,
@@ -81,10 +90,16 @@ export function createSession(
 
   // permission_mode 显式写 NULL（= 跟随全局默认 AppConfig.permissionMode），
   // 不落 'default'——否则会钉死新会话为默认档，全局默认权限永远不生效。
+  // P4（nameSource）：建行即落名源——物化名「会话 N」→ 'slot'（可升级）；用户暂态期间手工
+  // 命名（自然名透传，hb13-v A5 物化契约）与桥接会话（`[平台] 昵称`，批次4.4 前缀 UX）→
+  // 'custom'（自动命名/重试永不覆盖，对齐 F4 语义与实现标准 #3）。申报：计划 §3.2.1-4 字面为
+  // 「显式写 'slot'」，会把上述两类自然名会话误标可升级（首输入兜底会覆盖用户名/桥接前缀名），
+  // 故按名称形态派生，与 NULL 存量行读取侧 deriveNameSource 同一判据。
+  const nameSource: SessionNameSource = isAutoSessionName(name) ? 'slot' : 'custom';
   db.prepare(
-    `INSERT INTO sessions (id, name, model, working_dir, permission_mode)
-     VALUES (@id, @name, @model, @workingDir, NULL)`,
-  ).run({ id: sessionId, name, model, workingDir });
+    `INSERT INTO sessions (id, name, model, working_dir, permission_mode, name_source)
+     VALUES (@id, @name, @model, @workingDir, NULL, @nameSource)`,
+  ).run({ id: sessionId, name, model, workingDir, nameSource });
 
   const session = getSession(sessionId);
   if (!session) {
@@ -103,7 +118,10 @@ export function getSession(id: string): Session | null {
 
 export function listSessions(): Session[] {
   const rows = getConnection()
-    .prepare('SELECT * FROM sessions ORDER BY updated_at DESC, rowid DESC')
+    // P2 会话置顶（点 S4）：置顶行最前（组序权威在 SQL，渲染层分组/视图只消费传入序），
+    // 组内按置顶时刻 DESC（后置顶在前）；未置顶保持原 updated_at DESC, rowid DESC（p2-16 tiebreaker 保留）。
+    // searchSessions 复用本函数，搜索态天然继承置顶排序。
+    .prepare('SELECT * FROM sessions ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC, rowid DESC')
     .all() as SessionRow[];
   return rows.map(toSession);
 }
@@ -111,16 +129,30 @@ export function listSessions(): Session[] {
 export function updateSession(
   id: string,
   partial: Partial<
-    Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'skillOverrides' | 'mcpOverrides' | 'providerOverride' | 'modelOverride' | 'lastEffectiveEffort'>
+    Pick<Session, 'name' | 'nameSource' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'skillOverrides' | 'mcpOverrides' | 'providerOverride' | 'modelOverride' | 'lastEffectiveEffort'>
   >,
 ): Session | null {
   // hb10-SMG-09：IPC 竞态防线（主进程侧复用 shared 判据）——仅拦截「写入自动形态名覆盖
   // 非自动名」方向：迟到的自动命名（analyzeTopic/附件名/物化名）不得抹掉用户手动名；
-  // 用户手动改名（非自动形态）与「自动名→新自动名」照常放行。
+  // 用户手动改名（非自动形态）与「自动名→新自动名」照常放行。（P4 起为旧形态守卫，
+  // 兼容不传 nameSource 的存量调用方；新形态守卫见下方名源判定。）
   if (partial.name !== undefined && isAutoSessionName(partial.name)) {
     const existing = getSession(id);
     if (existing && !isAutoSessionName(existing.name)) {
       partial = { ...partial, name: undefined };
+    }
+  }
+  // P4（计划 §3.2.1-4）名源守卫：自动写（nameSource 非 custom）不得覆盖用户命名（custom）——
+  // existing 经 toSession 已含 NULL 派生（存量行 custom/slot 判定与名称形态一致）。剥离
+  // name+nameSource 双键，本次调用退化为无 name 写（其余键照常生效）。
+  if (
+    partial.name !== undefined &&
+    partial.nameSource !== undefined &&
+    partial.nameSource !== 'custom'
+  ) {
+    const existing = getSession(id);
+    if (existing && existing.nameSource === 'custom') {
+      partial = { ...partial, name: undefined, nameSource: undefined };
     }
   }
   const updates: string[] = [];
@@ -129,6 +161,10 @@ export function updateSession(
   if (partial.name !== undefined) {
     updates.push('name = @name');
     values.name = partial.name;
+  }
+  if (partial.nameSource !== undefined) {
+    updates.push('name_source = @nameSource');
+    values.nameSource = partial.nameSource;
   }
   if (partial.model !== undefined) {
     updates.push('model = @model');
@@ -185,6 +221,24 @@ export function updateSession(
   return getSession(id);
 }
 
+/** P4（计划 §3.2.1-6）：首输入兜底名写入——仅可升级名源（slot/first_input）生效；文本经
+ *  buildFirstInputSessionName 归一（首行/折叠空白/≤20 截断），空文本不写（保持槽位）。
+ *  repo 不依赖 push-bus：成功与否返回 boolean，SESSIONS_CHANGED 广播由 IPC handler 层做
+ *  （原则：upgradable 才写 + 成功后广播）。守卫语义：existing 为 custom（含存量派生）时
+ *  updateSession 名源守卫剥离 name+nameSource，此处仍可能返回 true（其余键为空的 no-op 写），
+ *  广播无害（幂等 upsert 信号）。 */
+export function setFirstInputFallbackName(id: string, text: string): boolean {
+  const s = getSession(id);
+  if (!s || !isUpgradableNameSource(s.nameSource)) return false;
+  const n = buildFirstInputSessionName(text);
+  if (!n) return false;
+  // round-001 review-report FIX-1c：first_input 同值短路——已写过同值兜底名不重写
+  // （不写库不 bump updated_at，侧栏排序不被重试链扰动）；slot→first_input 首写不受影响。
+  if (s.nameSource === 'first_input' && s.name === n) return true;
+  updateSession(id, { name: n, nameSource: 'first_input' });
+  return true;
+}
+
 /** B1：记录会话最近一回合的耗时/结束时刻（epoch ms）。不 bump updated_at——
  *  侧栏排序由用户操作驱动，回合结束不得把会话顶到列表最前。 */
 export function updateTurnMeta(
@@ -194,6 +248,15 @@ export function updateTurnMeta(
   getConnection()
     .prepare('UPDATE sessions SET last_turn_duration_ms = ?, last_turn_ended_at = ? WHERE id = ?')
     .run(meta.durationMs, meta.endedAt, id);
+}
+
+// P2 会话置顶（点 S4）：专用写入口，不并入 updateSession 通用通道——通用通道每次写都会
+// bump 侧栏「最近操作」时间戳，置顶/取消置顶会因此打乱「最近操作」排序语义；对齐
+// updateTurnMeta 轻量写先例。pinnedAt = epoch ms（置顶）| null（取消置顶，语义=未置顶，
+// 排序回归按最近操作时间）。函数体注释随实现，本块说明不落函数体。
+export function setSessionPinned(id: string, pinnedAt: number | null): Session | null {
+  getConnection().prepare('UPDATE sessions SET pinned_at = ? WHERE id = ?').run(pinnedAt, id);
+  return getSession(id);
 }
 
 // 项目级 Skill 管理左栏的会话计数：working_dir 原文分组计数（不做归一，归一在

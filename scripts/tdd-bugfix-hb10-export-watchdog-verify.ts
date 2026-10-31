@@ -77,13 +77,18 @@ check('③ WATCHDOG_NO_PROGRESS_MS 常量 + 「无进展」failJob 文案 + 到�
 });
 
 // ④ 生命周期收口：三处 clearTimeout + job 启动初始化（Impl 拆分后按位置钉：初始化位于 startImageExport 声明之后）。
+// P5（2026-10-24）cleanup 拆分：tempDir 外资源收口抽至 disposeJobResources（web 延迟清理复用），
+// noProgressTimer/finishTimer 的清理随迁——cleanup 直含或经 disposeJobResources 委托均算清理。
 check('④ handleFinishImpl / failJob / cleanup 三处均清理 noProgressTimer（与 finishTimer 同点）', () => {
   const finish = fnBody(manager, 'async function handleFinishImpl');
   assert.match(finish, /clearTimeout\(active\.noProgressTimer\)/, 'handleFinishImpl 缺 noProgressTimer 清理（保存对话框停留 >5min 会被误杀——hb12 WARN-3）');
   const fail = fnBody(manager, 'async function failJob');
   assert.match(fail, /clearTimeout\(active\.noProgressTimer\)/, 'failJob 缺 noProgressTimer 清理');
   const clean = fnBody(manager, 'async function cleanup(_reason');
-  assert.match(clean, /clearTimeout\(job\.noProgressTimer\)/, 'cleanup 缺 noProgressTimer 清理（定时器泄漏）');
+  const dispose = fnBody(manager, 'function disposeJobResources');
+  const cleared = /clearTimeout\(job\.noProgressTimer\)/.test(clean)
+    || (/clearTimeout\(job\.noProgressTimer\)/.test(dispose) && /disposeJobResources\(job\)/.test(clean));
+  assert.ok(cleared, 'cleanup 缺 noProgressTimer 清理（直含或经 disposeJobResources 委托；定时器泄漏）');
   const startIdx = manager.indexOf('export async function startImageExport');
   const timerIdx = manager.indexOf('noProgressTimer: setTimeout(checkNoProgress');
   const lastIdx = manager.indexOf('lastProgressAt: Date.now()');

@@ -42,13 +42,18 @@ console.log('=== F4-① topic-analyzer 主进程写前重查 ===');
 {
   // H3 判据加固同步：重查判据从字面前缀匹配改为 shared 纯函数 isAutoSessionName
   // （精确形态 /^会话 \d+$/，防「会话备份」等自然命名绕过）。
-  check('竞态守卫函数存在（重查当前名）', /function isAutoNameSlot\(\s*sessionId[\s\S]{0,200}isAutoSessionName\(sessionRepo\.getSession\(sessionId\)\?\.name\)/.test(analyzer));
+  // [P4 同步 2026-10-24]：重查判据再升级为 nameSource 判定（isUpgradableNameSource——
+  // slot/first_input 可升级，generated/custom 让位）；竞态守卫语义（迟到写让位手动名）不变。
+  check('竞态守卫函数存在（重查当前名源）',
+    /function isAutoNameSlot\(\s*sessionId[\s\S]{0,200}isUpgradableNameSource\(\w+\.nameSource\)/.test(analyzer));
   const gateCount = (analyzer.match(/if \(\w*[Aa]uto[Nn]ame\w*\(sessionId\)\)/g) || []).length;
   check(`两处 updateSession 出口都有守卫（实际 ${gateCount} 处）`, gateCount >= 2);
   // SA-4/P6-乙 同步（2026-10-21）：出口构成变化——首句兜底出口移除、短输入直写出口（≤8 字符
   // 不发起 LLM 直接写库，shorthand 形态 { name }）新增；两处出口 = LLM 主题 + 短输入直写，
   // 都写 name 且都有 isAutoNameSlot 写前门（守卫语义不变：迟到写让位手动名）。
-  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name(?:\s*:[^}]+)?\s*\}\)/g) || []).length;
+  // [P4 同步 2026-10-24]：两出口追加 nameSource: 'generated'（多键形态），正则放宽为
+  // \{ name[^}]*\}（理由同 tdd-bugfix-topic-thinking-leak B 节：计数约束出口数不约束键形状）。
+  const writeCount = (analyzer.match(/sessionRepo\.updateSession\(sessionId, \{ name[^}]*\}\)/g) || []).length;
   check('仍保留两处 name 写入出口（LLM 主题 + 短输入直写，SA-4 同步）', writeCount === 2);
   // 回归：模型解析链既有契约（selftest-settings-mapping 40 段前后）不受影响
   check('resolveSessionModel 解析链保留', analyzer.includes('resolveSessionModel'));
@@ -60,12 +65,15 @@ console.log('=== F4-② 渲染层 .then 覆盖同门槛 ===');
   // H3 判据加固同步：三处门槛（发送触发 / LLM 视图覆盖 / 附件名视图覆盖）均改走
   // isAutoSessionName；竞态守卫语义（迟到写让位手动名）不变。
   // LLM 主题路径：analyzeTopic(...).then 内覆盖 activeSession.name 前查自动名形态
-  check('analyzeTopic .then 覆盖前加会话名门槛',
-    /analyzeTopic\(sessionId, textContent\)\.then\(\(topic\) => \{[\s\S]{0,500}isAutoSessionName\(this\.activeSession\.name\)[\s\S]{0,300}this\.activeSession\.name = topic;/.test(sessionStore));
-  // 附件名路径：updateSession({name}).then 内同样加门槛
+  // [P4 同步 2026-10-24]：LLM 视图覆盖门槛升级为名源判定（isUpgradableNameSource——
+  // slot/first_input 可升级；generated/custom 一律让位），守卫语义不变。
+  check('analyzeTopic .then 覆盖前加名源门槛（custom/generated 不被迟到主题覆盖）',
+    /analyzeTopic\(sessionId, textContent\)\.then\(\(topic\) => \{[\s\S]{0,600}isUpgradableSession\(this\.activeSession\)[\s\S]{0,300}this\.activeSession\.name = topic;/.test(sessionStore));
+  // 附件名路径：updateSession({name}).then 内同样加门槛（P4 未动：附件名即自然名，
+  // isAutoSessionName 门槛语义与名源判定在此等价——附件名会话经 SESSION_UPDATE 已置 custom）
   check('附件名 .then 覆盖前加会话名门槛',
     /updateSession\(sessionId, \{ name: topic \}\)\.then\(\(updated\) => \{[\s\S]{0,400}isAutoSessionName\(this\.activeSession\.name\)[\s\S]{0,300}this\.activeSession\.name = updated\.name;/.test(sessionStore));
-  // 回归：发送瞬间的既有门槛保留（触发条件不放宽）
+  // 回归：附件分支写前门槛保留（触发条件不放宽）
   check('发送瞬间自动名门槛保留', /isAutoSessionName\(this\.activeSession\?\.name\)/.test(sessionStore));
   // 回归：regression-tests 钉的 analyzeTopic 调用形态不变
   check('analyzeTopic(sessionId, textContent) 调用形态不变', sessionStore.includes('analyzeTopic(sessionId, textContent)'));

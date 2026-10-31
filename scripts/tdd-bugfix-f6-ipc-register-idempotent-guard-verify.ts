@@ -48,7 +48,13 @@ console.log('=== F6-② activate 路径恢复命令管线 ===');
 {
   check('startGlobalCommandPipeline helper 存在（首启/重启共用依赖注入）', /function startGlobalCommandPipeline\(\)/.test(mainIndex));
   const helperAt = mainIndex.indexOf('function startGlobalCommandPipeline()');
-  const helperBody = mainIndex.slice(helperAt, mainIndex.indexOf('}', mainIndex.indexOf('startCommandSourceWatcher({', helperAt)) + 1);
+  // 切片边界取 startCommandSourceWatcher({...}) 调用语句的收口「});」而非「首个 }」：
+  // S5 把 triggerGlobalProbe 从单行三元改为多行块体后，注入对象内部出现了「}」，
+  // 旧的「首个 }」切片会提前截断、把 onConfigSaved/logger 切出 helperBody 造成误报；
+  // 「});」当前只出现在注入对象收口。若未来对象内部再嵌套以「});」收口的语句，须改用
+  // 括号配对扫描，勿回退到「首个 }」。
+  const watcherAt = mainIndex.indexOf('startCommandSourceWatcher({', helperAt);
+  const helperBody = mainIndex.slice(helperAt, mainIndex.indexOf('});', watcherAt) + 3);
   check('helper 内启动全局兜底探测', helperBody.includes('runGlobalCommandProbe('));
   check('helper 内启动命令源监视', helperBody.includes('startCommandSourceWatcher({'));
   check('helper 注入 getUserHome/workingDirectory/onConfigSaved',

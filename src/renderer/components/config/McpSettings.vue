@@ -20,7 +20,9 @@
 // tmp+rename 原子写 + mtime 冲突重试）；保存前 snapshot 预查同名 → requestConfirm 覆盖确认；
 // 删除后 setMcpOverride 拨回启用。user/project 编辑回显：env/headers 行 = snapshot 键列表 +
 // 哨兵值 + sentinelfor（E0-6，渲染层零明文）；描述字段仅管理库有（ScopedMcpEntry 无此键，E0-1）；
-// 「测试连接」探活仍仅管理库（探活器只认管理库明文条目）。
+// 「测试连接」探活三作用域（2026-10-29 mcp-probe-all-scopes p3：卡片按钮三作用域共用，
+// scope/dir 由 card.key 前缀与 activeScope 推导；主进程自对应磁盘 raw 现取明文，渲染层
+// 全程零明文——载荷只含 name/scope/dir，回包只有 status/toolCount/error）。
 import { computed, nextTick, ref, watch, onBeforeUnmount } from 'vue';
 import { useConfigStore } from '../../stores/config-store';
 import { useInteractionStore } from '../../stores/interaction-store';
@@ -88,37 +90,99 @@ async function refresh(): Promise<void> {
   } finally {
     if (gen === refreshGen) loading.value = false;
   }
-  // 探活批量（p7b）：进 Tab 对管理库 probeMcpServers({target:'all'})；60s 新鲜度由主进程
-  // 缓存负责（hasFreshCache 命中直接回缓存报告），UI 每次进 Tab 直接调即可。不阻塞清单渲染。
+  // 探活批量（p7b 进 Tab；p3 按当前栏分流）：managed 栏 probeMcpServers({target:'all'}) 现状；
+  // user/project 栏 scoped 批量（switchScope 切栏进入同样触发，见 switchScope）。60s 新鲜度由
+  // 主进程缓存负责（hasFreshCache 命中直接回缓存报告），UI 每次进 Tab/切栏直接调即可。不阻塞清单渲染。
   void probeAllInView();
 }
 
 defineExpose({ refresh });
 
-// ── 探活（p7b）：管理库批量 + 卡片单台「测试连接」────────────────────────────
-// 报告按 key（= override 键空间 managed:<name>）映射到卡片；无报告 = 未连接。
+// ── 探活（p7b 管理库批量 + p3 三作用域扩展）：栏位批量 + 卡片单台「测试连接」────────────
+// 报告按 key（= override 键空间 managed:<name> / user:<name> / project:<dirKey>:<name>）映射到
+// 卡片；无报告 = 未连接。三作用域键前缀天然隔离，同名条目互不串报告（计划 §4）。
 const probeReports = ref<Record<string, McpProbeReport>>({});
 const probingAll = ref(false);
 const probingSingle = ref<Record<string, boolean>>({});
 let probeGen = 0;
 
+// p3（计划 §1.B）：MCP_PROBE 请求载荷契约以 preload/api.ts 的 McpProbeTarget 为准（round-001
+// m3：该 union 已随主进程 p2 契约扩展——single 三作用域 + scoped 按栏批量——渲染层直接调用
+// claude.probeMcpServers，不再本地镜像 McpProbeRequest / 桥接 cast）。明文不出渲染层：载荷
+// 只含 name/scope/dir，回包只有 status/toolCount/error（§1.3 不破坏）。
+
+// p3：在飞批量所属键前缀（批量起点同步捕获；probingAll 翻转触发重渲染时读到一致值）——
+// connStateOf 的批量 busy 判定按前缀圈定当前栏卡片（B-13 原仅管理库批量的 hardcoded
+// 'managed:' 前缀由此泛化；managed 批量前缀值不变，行为零变化）。
+let probingBatchPrefix = 'managed:';
+
 async function probeAllInView(): Promise<void> {
-  if (managedServers.value.length === 0) {
-    probeReports.value = {};
+  const scope = activeScope.value; // 局部快照：await 后 union 不再保收窄（同 activeProjectDir 先例）
+  if (scope.kind === 'managed') {
+    if (managedServers.value.length === 0) {
+      probeReports.value = {};
+      return;
+    }
+    probingBatchPrefix = 'managed:';
+    const gen = ++probeGen;
+    probingAll.value = true;
+    try {
+      const reports = await claude.probeMcpServers({ target: 'all' });
+      if (disposed || gen !== probeGen) return; // 卸载/刷新后代际守卫：迟到结果丢弃
+      const next: Record<string, McpProbeReport> = {};
+      for (const r of reports) next[r.key] = r;
+      probeReports.value = next;
+    } catch {
+      // 探活失败降级为「未连接」全空表，不打断清单展示（§3.7：探活器异常不炸 UI）。
+      if (disposed || gen !== probeGen) return;
+      probeReports.value = {};
+    } finally {
+      if (gen === probeGen) probingAll.value = false;
+    }
     return;
   }
+  // p3（计划 §1.B.2）：user/project 栏 → 主进程 scoped 批量（60s 缓存主进程侧生效；禁用条目
+  // 不探不占槽，缺槽显示禁用态）。回包报告 key（user:<name> / project:<dirKey>:<name>）与
+  // card.key 前缀同构，按 key 映射无须特判；本栏前缀旧键先清（防已删条目残留旧结论），
+  // 他栏既有报告保留（切栏往返结论不丢）。栏内零条目（空文件/目录消失/快照未含）→ 无槽
+  // 可探，仅清本栏旧报告即返回（不空发 IPC）。
+  const prefix = scope.kind === 'user' ? 'user:' : `project:${normalizeDirKey(scope.path)}:`;
+  // round-001 P2-2①：批量派发时刻锚点（进入 await 前捕获）——晚于该时刻落库的 single 现探
+  // 结论（probedAt > dispatchAt）视为 fresh，dropOwnPrefix 不剥（保存后 single 现探新结论不被
+  // 本轮批量回写竞态剥掉）；早退/降级路径同以该闭包为底，fresh 结论保留。
+  const dispatchAt = Date.now();
+  const dropOwnPrefix = (): Record<string, McpProbeReport> => {
+    const kept: Record<string, McpProbeReport> = {};
+    for (const [k, v] of Object.entries(probeReports.value)) {
+      if (!k.startsWith(prefix) || v.probedAt > dispatchAt) kept[k] = v;
+    }
+    return kept;
+  };
+  if (scopeCards.value.length === 0) {
+    probeReports.value = dropOwnPrefix();
+    return;
+  }
+  probingBatchPrefix = prefix;
   const gen = ++probeGen;
   probingAll.value = true;
   try {
-    const reports = await claude.probeMcpServers({ target: 'all' });
+    const payload: { target: 'scoped'; scope: 'user' | 'project'; dir?: string } =
+      scope.kind === 'project' ? { target: 'scoped', scope: 'project', dir: scope.path } : { target: 'scoped', scope: 'user' };
+    const reports = await claude.probeMcpServers(payload);
     if (disposed || gen !== probeGen) return; // 卸载/刷新后代际守卫：迟到结果丢弃
-    const next: Record<string, McpProbeReport> = {};
-    for (const r of reports) next[r.key] = r;
+    const next = dropOwnPrefix();
+    // round-001 P2-2③：回填改 probedAt 仲裁——批量缓存命中报告的 probedAt 为旧值，晚于批量
+    // 派发的 single 现探新结论必更大（同 key 全等时间戳重复回填无害），防旧缓存结论覆盖现探。
+    for (const r of reports) {
+      const prev = next[r.key];
+      if (prev === undefined || prev.probedAt <= r.probedAt) next[r.key] = r;
+    }
     probeReports.value = next;
   } catch {
-    // 探活失败降级为「未连接」全空表，不打断清单展示（§3.7：探活器异常不炸 UI）。
+    // 探活失败降级为本栏「未连接」（清本栏旧报告，他栏不动；同 §3.7 探活器异常不炸 UI）。
+    // round-001 P2-2：降级路径同以新 dropOwnPrefix 为底（fresh 结论保留）。
     if (disposed || gen !== probeGen) return;
-    probeReports.value = {};
+    probeReports.value = dropOwnPrefix();
   } finally {
     if (gen === probeGen) probingAll.value = false;
   }
@@ -136,9 +200,10 @@ function isProbing(card: McpCard): boolean {
 type ConnState = 'none' | 'ok' | 'fail' | 'busy';
 function connStateOf(card: McpCard): ConnState {
   if (isProbing(card)) return 'busy';
-  // B-13：批量探测在飞时管理库卡片一律「测试中…」（顺带压掉陈旧旧报告的误导显示；
-  // 键前缀判定天然隔离 user/project 卡）。单台 busy 优先级在前不变。
-  if (probingAll.value && card.key.startsWith('managed:')) return 'busy';
+  // B-13：批量探测在飞时当前栏卡片一律「测试中…」（顺带压掉陈旧旧报告的误导显示；p3：前缀
+  // 随批量栏位——probingBatchPrefix 在批量起点捕获，managed 批量判定形态不变）。单台 busy
+  // 优先级在前不变。
+  if (probingAll.value && card.key.startsWith(probingBatchPrefix)) return 'busy';
   const report = probeReports.value[card.key];
   if (!report) return 'none';
   return report.status === 'ok' ? 'ok' : 'fail';
@@ -159,13 +224,32 @@ function toolsTextOf(card: McpCard): string {
   return '— 个工具';
 }
 
-/** 卡片「测试连接」：单台现探（§1.3 零明文：只传 name，主进程按 name 定位已存条目自取明文
- *  env/headers；不走缓存），结果按报告 key 更新该卡。 */
+/** 卡片「测试连接」：单台现探（§1.3 零明文：只传 name/scope/dir，主进程按作用域定位已存
+ *  条目自取明文 env/headers；不走缓存），结果按报告 key 更新该卡。p3（计划 §1.B.1）：scope/dir
+ *  由 card.key 前缀与 activeScope 推导——`user:` 前缀 → scope 'user'；`project:` 前缀 →
+ *  scope 'project' + dir 取当前栏位原始路径（activeScope.path，不从 dirKey 反解）；managed 卡
+ *  现状调用不变（scope 缺省主进程视为 managed）。scope/dir 在点击瞬间同步推导，await 期间
+ *  切栏不影响本次取源参数。single 不滤禁用为主进程语义（D7 的 UI 置灰门在按钮 disabled 上）。 */
 async function handleProbe(card: McpCard): Promise<void> {
   if (isProbing(card)) return;
+  let req: { target: 'single'; name: string; scope?: 'user' | 'project'; dir?: string };
+  if (card.key.startsWith('user:')) {
+    req = { target: 'single', name: card.name, scope: 'user' };
+  } else if (card.key.startsWith('project:')) {
+    // project 卡归属当前栏位目录；防御路径（activeScope 已非 project，如点击瞬间切栏）→
+    // 取快照侧目录原始路径，再兜底空串（主进程白名单拒绝 → 单元素 fail report，不炸）。
+    req = {
+      target: 'single',
+      name: card.name,
+      scope: 'project',
+      dir: activeScope.value.kind === 'project' ? activeScope.value.path : (activeProjectDir.value?.path ?? ''),
+    };
+  } else {
+    req = { target: 'single', name: card.name }; // managed 现状调用不变
+  }
   probingSingle.value = { ...probingSingle.value, [card.key]: true };
   try {
-    const [report] = await claude.probeMcpServers({ target: 'single', name: card.name });
+    const [report] = await claude.probeMcpServers(req);
     if (disposed || !report) return;
     probeReports.value = { ...probeReports.value, [report.key || card.key]: report };
   } catch (e) {
@@ -243,15 +327,15 @@ function isEnabled(card: McpCard): boolean {
   return overrides.value[card.key] !== 'off';
 }
 
-/** B-8/B-6：卡片探活呈现形态——'disabled'（禁用中性「已禁用 · 未探测」，禁用条目主进程
- *  批量探测已滤除、无结论可显）/'sse'（管理库 sse 卡中性「未探测 · 会话内自动协商」，
- *  探测协议与 sse 不匹配必显失败，属误报故收敛为中性）/'probe'（正常三态）。
- *  模板连接区/⚠ 气泡/行状态色条/工具数据此收敛；优先级 禁用 > sse > 三态。判定按当前 transport，
- *  sse 卡编辑为 http 后自动恢复探测能力呈现。 */
-type ConnMode = 'disabled' | 'sse' | 'probe';
+/** B-8/B-6（round-001 P2-1 引入 sse 中性门；review round-4 F1 撤销：探活器 mcp-probe.ts 已实现
+ *  sse 探活——POST JSON-RPC 两步握手，4xx 报告附「端点可能为 SSE 传输」专属提示，「sse 探测
+ *  必失败属误报」前提不成立，sse 卡回归 'probe' 与其他 transport 同权）：卡片探活呈现形态——
+ *  'disabled'（禁用中性「已禁用 · 未探测」，禁用条目主进程批量探测已滤除、无结论可显）/
+ *  'probe'（正常三态：未连接 none/测试中 busy/已连接 ok/连接失败 fail，fail 错误全文经 ⚠ 气泡
+ *  可见）。模板连接区/⚠ 气泡/行状态色条/工具数据此判定；优先级 禁用 > 三态。 */
+type ConnMode = 'disabled' | 'probe';
 function connModeOf(card: McpCard): ConnMode {
   if (!isEnabled(card)) return 'disabled';
-  if (activeScope.value.kind === 'managed' && card.transport === 'sse') return 'sse';
   return 'probe';
 }
 
@@ -319,11 +403,11 @@ const cardGroups = computed<CardGroup[]>(() => {
 });
 
 /** 行左侧状态色条类（风格 C：ok 绿/none 灰/busy 黄/fail 红；disabled 淡灰+降透明；
- *  sse 中性态与未连接同用灰条——对照效果图组2 webresearch 行 grp__row--none）。 */
+ *  sse 卡随 round-4 F1 拆门回归三态着色，与未连接同用灰条仅限未探测时）。 */
 function rowStateClass(card: McpCard): string {
   const mode = connModeOf(card);
   if (mode === 'disabled') return 'grp__row--off grp__row--disabled';
-  return `grp__row--${mode === 'sse' ? 'none' : connStateOf(card)}`;
+  return `grp__row--${connStateOf(card)}`;
 }
 
 // ── 启停：乐观更新 + 失败回滚 + toast ───────────────────────────────────────
@@ -493,6 +577,10 @@ type SaveLocation = 'managed' | 'user' | 'project';
 const LOCATION_ORDER: SaveLocation[] = ['managed', 'user', 'project'];
 const TRANSPORT_ORDER = ['stdio', 'http', 'sse'] as const;
 
+/** H1 新增态哨兵残留拦截提示（V2：JSON 模式走 jsonError 红条、表单模式走 toast，两种载体
+ *  共用同一字面防双处漂移）。 */
+const SENTINEL_BLOCK_MSG = '检测到残留的加密占位值，请清空对应行后重新填写';
+
 function locationLabel(loc: SaveLocation): string {
   if (loc === 'managed') return 'Claude Link 管理';
   return loc === 'user' ? '用户级' : '项目级';
@@ -510,10 +598,13 @@ const editorView = ref<'list' | 'edit'>('list');
 const dialogMode = ref<DialogMode | null>(null);
 const isEditMode = computed<boolean>(() => dialogMode.value?.kind === 'edit');
 
-/** rail 切作用域：同拍把编辑器视图拨回列表（编辑态属旧作用域条目，不跨作用域残留）。 */
+/** rail 切作用域：同拍把编辑器视图拨回列表（编辑态属旧作用域条目，不跨作用域残留）。
+ *  p3（计划 §1.B.3）：切到 user/project 栏进入即批量探活（60s 缓存命中由主进程消化，重复
+ *  进入近零成本）；managed 栏探活触发点现状不动（进 Tab 与 persistManaged 后重探）。 */
 function switchScope(scope: ScopeId): void {
   activeScope.value = scope;
   editorView.value = 'list';
+  if (scope.kind !== 'managed') void probeAllInView();
 }
 
 // 页内 Esc（点4）：仅编辑器视图回列表；list 视图无操作（连续 Esc 无副作用）；编辑器不再入
@@ -579,12 +670,6 @@ const editorSubline = computed<string>(() => {
     : locationLabel(formLocation.value);
   return isEditMode.value ? `${formName.value} · ${loc}` : `保存位置：${loc}`;
 });
-
-function switchLocation(loc: SaveLocation): void {
-  if (formLocation.value === loc) return;
-  formLocation.value = loc;
-  if (loc === 'project' && formProjectDir.value === '') formProjectDir.value = projectDirs.value[0]?.path ?? '';
-}
 
 // 传输类型切换：重置 command/url 的 touched（防切回旧传输类型残留显红）；
 // submitAttempted 保留（提交尝试过的「点亮全部」状态不因切换传输而清除）。
@@ -820,7 +905,9 @@ function removeKvRow(rows: KvRow[], index: number): void {
 
 function resetForm(): void {
   formLocation.value = 'managed';
-  formProjectDir.value = projectDirs.value[0]?.path ?? '';
+  // project 目录不预填（R1/R2）：仅由 openAdd 按入口 rail 联动写入；空值由 formValid 非空判定
+  // 拦截保存（既有「暂无已知项目目录」hint 兜底）。
+  formProjectDir.value = '';
   formName.value = '';
   formTransport.value = 'stdio';
   formDescription.value = '';
@@ -853,6 +940,17 @@ function openAdd(): void {
   dialogMode.value = { kind: 'add' };
   // Esc/取消/面包屑返回均不清表单（关闭不丢已填内容）；仅在上次以保存收尾或表单为空时重置。
   if (!formHasContent()) resetForm();
+  // R1/R2：保存位置三态无条件随入口 rail 联动（不依赖 formHasContent）——上次编辑 user/project
+  // 条目或手动切段位的残留不再影响新开添加的默认位置；project rail 直取该目录 path。
+  // 联动必须放在条件 resetForm 之后：resetForm 也写 formLocation='managed'，先联动会被 clobber。
+  const scope = activeScope.value;
+  if (scope.kind === 'project') {
+    formLocation.value = 'project';
+    formProjectDir.value = scope.path;
+  } else {
+    formLocation.value = scope.kind; // 'managed' | 'user'
+    formProjectDir.value = '';
+  }
   openEditor();
 }
 
@@ -915,7 +1013,11 @@ function closeEditDialog(): void {
  *  McpManagedServer[] 调用方（删除/导入）结构兼容直传。 */
 async function persistManaged(next: McpManagedSaveEntry[], successMsg: string): Promise<boolean> {
   try {
-    await claude.saveMcpManaged(next);
+    // managedServers 是深响应式 ref，map/filter/摊派出的元素仍是 Proxy——contextBridge/ipcRenderer
+    // 结构化克隆不接受 Proxy（"An object could not be cloned"，2026-10-27 用户报障活体复现）；
+    // 与 config-store.ts 保存链同款 JSON 脱壳：字段全为 string/number 无损，undefined 可选键
+    // 丢弃与主进程 sanitize「缺键=不带」口径一致。
+    await claude.saveMcpManaged(JSON.parse(JSON.stringify(next)) as McpManagedSaveEntry[]);
     const fresh = await claude.getConfig();
     if (disposed) return true;
     managedServers.value = Array.isArray(fresh.mcpServers) ? fresh.mcpServers : [];
@@ -990,11 +1092,29 @@ async function saveScopedForm(): Promise<void> {
   if (dir !== undefined) payload.dir = dir;
   try {
     const res = await claude.writeMcpScoped(payload);
-    // T1（round-3）兜底告知：预查无同名（hasSameName=false）但 writer 命中现有同名 → 保存期间
-    // 外部并发写入被 upsert 覆盖，写已发生，至少提示防零提示；hasSameName=true 时覆盖已经
-    // 确认对话框明示，不双报。
-    if (res.overwrote && !hasSameName) pushToast('注意：已覆盖保存期间外部写入的同名条目');
-    await refresh(); // getMcpSnapshot() 刷新（user/project 清单 + rail 计数）
+    // T1（round-3）兜底告知中性化（H4）——预查走快照，坏目录负缓存/陈旧快照下可能漏判同名，
+    // toast 不归因外部写入：预查无同名（hasSameName=false）但 writer 命中现有同名 → upsert 覆盖
+    // 已发生，至少提示防零提示；hasSameName=true 时覆盖已经确认对话框明示，不双报。
+    if (res.overwrote && !hasSameName) pushToast('已覆盖同名条目（列表可能未及时刷新）');
+    await refresh(); // getMcpSnapshot() 刷新（user/project 清单 + rail 计数；尾探按当前栏分流→scoped 批量）
+    // p3（计划 §1.B.3）：保存成功后对该条目 single 现探刷新结论——批量 60s 缓存可能命中
+    // 保存前的旧结论（60s 内编辑场景），single「只写不读」现探保证该卡结论即保存后真值并
+    // 随写缓存（后续批量 60s 命中取新结论）。零明文：只传 name/scope/dir（dir 仅 project 携带，
+    // formValid 已保证非空，?? '' 仅为 TS 形态收窄）。fire-and-forget 不阻塞保存收尾；
+    // IPC 自身失败静默（结论维持「未连接」，保存成功 toast 不受影响）。
+    if (scope === 'user') {
+      void claude.probeMcpServers({ target: 'single', name: entry.name, scope: 'user' }).then((rs) => {
+        const r = rs[0];
+        if (disposed || !r) return;
+        probeReports.value = { ...probeReports.value, [r.key || `user:${entry.name}`]: r };
+      }, () => {});
+    } else {
+      void claude.probeMcpServers({ target: 'single', name: entry.name, scope: 'project', dir: dir ?? '' }).then((rs) => {
+        const r = rs[0];
+        if (disposed || !r) return;
+        probeReports.value = { ...probeReports.value, [r.key || `project:${normalizeDirKey(dir ?? '')}:${entry.name}`]: r };
+      }, () => {});
+    }
     pushToast(`已保存「${entry.name}」到${scope === 'user' ? '用户级（~/.claude.json）' : '项目级（.mcp.json）'}`);
     editorView.value = 'list';
     editMode.value = 'form'; // T2（round-3）：翻转挪至保存成功点（JSON 侧取消/失败路径停留 JSON 侧）
@@ -1035,6 +1155,22 @@ async function saveForm(): Promise<void> {
   }
   if (!formValid.value) {
     submitAttempted.value = true; // 非法提交：点亮全部错误（原为静默 return）
+    return;
+  }
+  // H1：新增态无已存条目可还原——KV 行残留哨兵值时拦截保存（编辑态主进程按已存条目/原文件
+  // 还原哨兵，不受影响）。空键行 kvRowsToRecord 本就丢弃，不误拦。
+  if (
+    !isEditMode.value &&
+    (formEnvRows.value.some((r) => r.key.trim() !== '' && r.value === MCP_VALUE_MASK) ||
+      formHeaderRows.value.some((r) => r.key.trim() !== '' && r.value === MCP_VALUE_MASK))
+  ) {
+    // V2（2026-10-29）载体按模式分化：JSON 模式走红条并停留 JSON 侧（与 N9/N11 停留契约统一，
+    // 提示载体与其它 JSON 校验失败一致）；表单模式维持 toast。拦截位置/exit 语义零改动。
+    if (editMode.value === 'json') {
+      jsonError.value = `表单校验未通过：${SENTINEL_BLOCK_MSG}`;
+      return;
+    }
+    pushToast(SENTINEL_BLOCK_MSG);
     return;
   }
   saving.value = true;
@@ -1263,7 +1399,16 @@ async function exportScopeJson(): Promise<void> {
       pushToast('当前作用域暂无可导出的服务器');
       return;
     }
-    pushToast(`已复制 ${r.count} 台服务器配置 JSON（mcpServers 形态）到剪贴板`);
+    if (r.downloadUrl) {
+      // 网页形态：同源一次性票据下载（不写 clipboard——那是桌面主机剪贴板，网页用户拿不到）。
+      const a = document.createElement('a');
+      a.href = r.downloadUrl;
+      a.download = '';
+      a.click();
+      pushToast(`已下载 ${r.count} 台服务器配置 JSON（mcpServers 形态）`);
+    } else {
+      pushToast(`已复制 ${r.count} 台服务器配置 JSON（mcpServers 形态）到剪贴板`);
+    }
   } catch (e) {
     pushToast(`导出失败：${e instanceof Error ? e.message : String(e)}`);
   } finally {
@@ -1280,6 +1425,19 @@ const importing = ref(false);
 // （UI disabled 不可交互，计数恒排除）；生命周期与预览同源——每次解析成功（含重开弹窗的
 // 重新对齐）重置为默认全选，导入成功清空；取消关闭保留（与「关闭不丢内容」同拍）。
 const importChecked = ref<Record<string, boolean>>({});
+
+/**
+ * 导入目标栏位现有条目（计划 2026-10-29 mcp-import-scope-and-segment-lock §3.B.1）：
+ * 预览与确认的同名跳过判定源跟随当前入口 rail——managed 栏 → 管理库；user 栏 →
+ * 用户级快照；project 栏 → 当前项目目录的 .mcp.json 视图。语义=与目标栏位现有条目同名 →
+ * 将跳过（与原「与管理库同名 → 将跳过」同一套预览文案，判定源换成本栏位）。
+ * analyzeImportText 的 existing 形参为 Array<{ name: string }>，三类视图结构兼容。
+ */
+const importTargetList = computed<Array<{ name: string }>>(() => {
+  if (activeScope.value.kind === 'managed') return managedServers.value;
+  if (activeScope.value.kind === 'user') return snapshot.value?.userServers ?? [];
+  return activeProjectDir.value?.servers ?? [];
+});
 
 function openImport(): void {
   showImportDialog.value = true;
@@ -1298,7 +1456,7 @@ function closeImportDialog(): void {
 }
 
 async function parseImportPreview(): Promise<void> {
-  const result = await analyzeImportText(importText.value, managedServers.value);
+  const result = await analyzeImportText(importText.value, importTargetList.value);
   importPreview.value = result;
   // p3-R3：每次（重新）解析 → 勾选重置为默认全选（解析失败无条目可勾，保持现状不动）。
   if (!('error' in result)) {
@@ -1315,30 +1473,50 @@ const selectedImportableCount = computed<number>(() => {
   return p.entries.filter((e) => !e.skip && importChecked.value[e.name] === true).length;
 });
 
+/**
+ * 确认导入（计划 2026-10-29 mcp-import-scope-and-segment-lock §3.B.4）：导入目标作用域跟随
+ * 当前入口 rail——managed 栏走既有 persistManaged 链（零改动回归底线）；user/project 栏逐条
+ * writeMcpScoped upsert 落盘到 ~/.claude.json / <dir>/.mcp.json。
+ * 边界：逐条原子写各自独立——部分失败不回滚，toast 明示成败数；同名条目的覆盖由主进程
+ * upsert 语义决定（负缓存陈旧快照下预览可能漏标同名 → 透明计入 overwriteCount，不弹确认）。
+ */
 async function confirmImport(): Promise<void> {
   if (importing.value || selectedImportableCount.value === 0) return;
   importing.value = true;
   try {
     // 与预览同源解析：预览后文本可能又被改动，以确认瞬间解析为准（§3.3 同名跳过同源）。
-    const fresh = await analyzeImportText(importText.value, managedServers.value);
+    const fresh = await analyzeImportText(importText.value, importTargetList.value);
     if ('error' in fresh) {
       importPreview.value = fresh;
       pushToast(`导入失败：${fresh.error}`);
       return;
     }
-    const now = Date.now();
     // p3-R3：只导入「勾选且非 skip」的条目。勾选集按 name 对齐 fresh；预览后改文本未重新
     // 解析的病态路径下，勾选集里没有的新条目视为未勾选不导入（宁可少导不误导）。
-    const created: McpManagedServer[] = fresh.entries
+    // T4（round-3）：入库前过滤哨兵值键——「复制 JSON」产出的哨兵文本（值 = MCP_VALUE_MASK）
+    // 经导入弹窗回导时不得作为字面密钥静默入库（否则会话注入错误凭据、运行时认证失败难排查）。
+    // 过滤后为空对象则不设 env/headers（与原「空则不带键」口径一致）。
+    const picked = fresh.entries
       .filter((e) => !e.skip && importChecked.value[e.name] === true)
       .map((e) => {
         const parsed = e.source;
+        return {
+          parsed,
+          cleanEnv: Object.fromEntries(Object.entries(parsed.env ?? {}).filter(([, v]) => v !== MCP_VALUE_MASK)),
+          cleanHeaders: Object.fromEntries(Object.entries(parsed.headers ?? {}).filter(([, v]) => v !== MCP_VALUE_MASK)),
+        };
+      });
+    // 空 JSON / 全同名跳过 / 全不勾选：user/project 与 managed 同走此前置拦截（不进写盘循环）。
+    if (picked.length === 0) {
+      pushToast('没有可导入的服务器（全部被跳过）');
+      return;
+    }
+    const scope = activeScope.value.kind;
+    if (scope === 'managed') {
+      // ── managed 栏：既有 created 构造 + persistManaged 链（零改动）────────────────
+      const now = Date.now();
+      const created: McpManagedServer[] = picked.map(({ parsed, cleanEnv, cleanHeaders }) => {
         const item: McpManagedServer = { id: crypto.randomUUID(), name: parsed.name, description: '', transport: parsed.transport, createdAt: now, updatedAt: now };
-        // T4（round-3）：入库前过滤哨兵值键——「复制 JSON」产出的哨兵文本（值 = MCP_VALUE_MASK）
-        // 经导入弹窗回导时不得作为字面密钥静默入库（否则会话注入错误凭据、运行时认证失败难排查）。
-        // 过滤后为空对象则不设 env/headers（与原「空则不带键」口径一致）。
-        const cleanEnv = Object.fromEntries(Object.entries(parsed.env ?? {}).filter(([, v]) => v !== MCP_VALUE_MASK));
-        const cleanHeaders = Object.fromEntries(Object.entries(parsed.headers ?? {}).filter(([, v]) => v !== MCP_VALUE_MASK));
         if (parsed.transport === 'stdio') {
           item.command = parsed.command ?? '';
           if (parsed.args && parsed.args.length > 0) item.args = parsed.args;
@@ -1349,18 +1527,97 @@ async function confirmImport(): Promise<void> {
         }
         return item;
       });
-    if (created.length === 0) {
-      pushToast('没有可导入的服务器（全部被跳过）');
+      const next = [...managedServers.value, ...created];
+      const skipped = fresh.entries.length - created.length;
+      const saved = await persistManaged(next, `已导入 ${created.length} 台${skipped > 0 ? `（未导入 ${skipped} 台：同名/名称非法或未勾选）` : ''}`);
+      if (saved) {
+        showImportDialog.value = false;
+        importText.value = ''; // 导入已完成消费，文本与预览清空
+        importPreview.value = null;
+        importChecked.value = {}; // p3-R3：勾选状态一并清空
+      }
       return;
     }
-    const next = [...managedServers.value, ...created];
-    const skipped = fresh.entries.length - created.length;
-    const saved = await persistManaged(next, `已导入 ${created.length} 台${skipped > 0 ? `（未导入 ${skipped} 台：同名/名称非法或未勾选）` : ''}`);
-    if (saved) {
+    // ── user / project 栏：逐条 writeMcpScoped upsert（串行，写盘顺序确定）─────────
+    // project 栏前置目录可用性判定：目录已从最近工作区消失（activeProjectDir 为 null）→
+    // 不触盘直接拦截（与添加/编辑链同一降级口径）。
+    if (scope === 'project' && activeProjectDir.value === null) {
+      pushToast('目标目录不可用，无法导入');
+      return;
+    }
+    const targetDir = scope === 'project' ? activeProjectDir.value?.path : undefined;
+    const locationText = scope === 'user' ? '用户级（~/.claude.json）' : '项目级（.mcp.json）';
+    let okCount = 0;
+    let failCount = 0;
+    let overwriteCount = 0;
+    let firstError = '';
+    // round-001 m4：本次导入被覆盖的同名条目名单——writeMcpScoped 逐条回 { overwrote: boolean }
+    //（主进程 writer：upsert 命中现有同名 → true，见 mcp-writer.ts），串行循环内即可精确定位，
+    // 无须退化为「本栏全部本次写入条目重探」。
+    const overwrittenNames: string[] = [];
+    for (const { parsed, cleanEnv, cleanHeaders } of picked) {
+      // ScopedMcpEntry 形态：无 id/createdAt/description；timeoutMs 存在才透传（主进程
+      // isValidMcpTimeoutMs 同口径写键）。
+      const entry: McpScopedWriteEntry = { name: parsed.name, transport: parsed.transport };
+      if (parsed.transport === 'stdio') {
+        entry.command = parsed.command ?? '';
+        if (parsed.args && parsed.args.length > 0) entry.args = parsed.args;
+        if (Object.keys(cleanEnv).length > 0) entry.env = cleanEnv;
+      } else {
+        entry.url = parsed.url ?? '';
+        if (Object.keys(cleanHeaders).length > 0) entry.headers = cleanHeaders;
+      }
+      if (parsed.timeoutMs !== undefined) entry.timeoutMs = parsed.timeoutMs;
+      const payload: McpWriteScopedPayload = { scope, entry, mode: 'upsert' };
+      if (targetDir !== undefined) payload.dir = targetDir;
+      try {
+        // 串行 await：不并发（写盘顺序确定、失败逐条计入；部分失败不回滚）。
+        const res = await claude.writeMcpScoped(payload);
+        okCount += 1;
+        // 负缓存陈旧快照下预览漏标同名 → upsert 覆盖 → 透明计数（不弹确认，计划 §1.4 决定②）。
+        if (res.overwrote === true) {
+          overwriteCount += 1;
+          overwrittenNames.push(parsed.name);
+        }
+      } catch (e) {
+        failCount += 1;
+        if (firstError === '') firstError = e instanceof Error ? e.message : String(e);
+      }
+    }
+    pushToast(
+      `已导入 ${okCount} 台到${locationText}${overwriteCount > 0 ? `（其中覆盖同名 ${overwriteCount} 台）` : ''}${failCount > 0 ? `；${failCount} 台失败：${firstError}` : ''}`,
+    );
+    await refresh();
+    // round-001 m4：被覆盖同名条目补 single 现探——upsert 覆盖后旧定义的探活结论可能仍在 60s
+    // 批量缓存（refresh 尾探 scoped 批量命中即陈旧误显）。镜像 saveScopedForm 既有 fire-and-forget
+    // single 模式：scope/dir 推导同 handleProbe（user → {scope:'user'}；project → 当前栏位原始
+    // 路径，兜底 ''）；disposed 守卫；回包按报告 key 回填 probeReports；IPC 自身失败静默（结论
+    // 维持现状，导入成功 toast 不受影响）。新增条目无缓存可陈旧（尾探批量即现探），无须重探。
+    // 竞态闭环：回填与 P2-2 的批量 dispatchAt fresh 保留 + probedAt 仲裁互锁，批量缓存旧结论
+    // 后到不覆盖 single 现探新结论。
+    if (!disposed && overwrittenNames.length > 0) {
+      for (const name of overwrittenNames) {
+        if (scope === 'user') {
+          void claude.probeMcpServers({ target: 'single', name, scope: 'user' }).then((rs) => {
+            const r = rs[0];
+            if (disposed || !r) return;
+            probeReports.value = { ...probeReports.value, [r.key || `user:${name}`]: r };
+          }, () => {});
+        } else {
+          void claude.probeMcpServers({ target: 'single', name, scope: 'project', dir: targetDir ?? '' }).then((rs) => {
+            const r = rs[0];
+            if (disposed || !r) return;
+            probeReports.value = { ...probeReports.value, [r.key || `project:${normalizeDirKey(targetDir ?? '')}:${name}`]: r };
+          }, () => {});
+        }
+      }
+    }
+    // 收尾：有成功 → 关闭弹窗并清空（与 managed 分支同收尾）；全部失败 → 弹窗与文本保留。
+    if (okCount > 0) {
       showImportDialog.value = false;
-      importText.value = ''; // 导入已完成消费，文本与预览清空
+      importText.value = '';
       importPreview.value = null;
-      importChecked.value = {}; // p3-R3：勾选状态一并清空
+      importChecked.value = {};
     }
   } finally {
     importing.value = false;
@@ -1597,7 +1854,7 @@ const scopeNoteHead = computed<string>(() => {
                    防误触进编辑（原型同款交互约束） -->
               <div v-for="card in grp.cards" :key="card.key" :class="['grp__row', rowStateClass(card)]" @click="openEdit(card)">
                 <!-- 图标块：stdio→terminal / http·sse→globe（内联 SVG，stroke=currentColor 惯例）；
-                     右下状态点四色：ok 绿 / fail 红 / busy 黄 / 其余（disabled·sse 中性·未连接·未探测）灰 -->
+                     右下状态点四色：ok 绿 / fail 红 / busy 黄 / 其余（disabled·未连接·未探测）灰 -->
                 <div class="row__ic">
                   <svg v-if="card.transport === 'stdio'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
                   <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
@@ -1614,9 +1871,8 @@ const scopeNoteHead = computed<string>(() => {
                     <span v-if="!isEnabled(card)" class="mcp-off-badge">已禁用</span>
                     <!-- 工具数·状态合并行（判定沿用 connModeOf/connStateOf/connTextOf/toolsTextOf，仅换呈现）：
                          ok=`N 个工具 · 已连接`；busy=spinner+`测试中…`；fail=`连接失败`；
-                         sse=`未探测 · 会话内自动协商`；禁用=`已禁用 · 未探测`；其余=`未连接` -->
+                         禁用=`已禁用 · 未探测`；其余=`未连接`（sse 卡 round-4 F1 拆门后同落三态链） -->
                     <span v-if="connModeOf(card) === 'disabled'" class="row__stat">已禁用 · 未探测</span>
-                    <span v-else-if="connModeOf(card) === 'sse'" class="row__stat">未探测 · 会话内自动协商</span>
                     <span v-else-if="connStateOf(card) === 'busy'" class="row__stat"><span class="row__spin" aria-hidden="true"></span>{{ connTextOf(card) }}</span>
                     <span v-else-if="connStateOf(card) === 'ok'" class="row__stat row__stat--ok">{{ toolsTextOf(card) }} · {{ connTextOf(card) }}</span>
                     <span v-else-if="connStateOf(card) === 'fail'" class="row__stat row__stat--fail">{{ connTextOf(card) }}</span>
@@ -1631,7 +1887,7 @@ const scopeNoteHead = computed<string>(() => {
                     <template v-if="connModeOf(card) === 'probe' && connStateOf(card) === 'fail' && probeReportOf(card)?.error">
                       <span class="row__errtext">{{ probeReportOf(card)?.error }}</span>
                       <!-- 契约1：fail 态 ⚠（探活错误全文收进自绘深色气泡；hover 与键盘 focus 双触发；
-                           仅 probe 形态渲染——禁用卡/sse 卡不显示）。 -->
+                           仅 probe 形态渲染——禁用卡不显示；sse 卡 round-4 F1 拆门后同属 probe 形态）。 -->
                       <span class="tip">
                         <button type="button" class="warnico" aria-label="查看探活错误全文" @click.stop>
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"></path><path d="M12 17h.01"></path><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"></path></svg>
@@ -1643,20 +1899,26 @@ const scopeNoteHead = computed<string>(() => {
                   </div>
                 </div>
                 <div class="row__acts">
-                  <!-- 管理库作用域：测试连接/编辑/删除（p7b 接线）。D7：禁用卡「测试连接」按钮
-                       置灰——single 探测虽不滤禁用，但 B-8 中性态不渲染结论，允许点击无反馈属
-                       交互矛盾，故置灰。 -->
+                  <!-- p3（计划 §1.B.1）：「测试连接」按钮三作用域共用（原仅管理库渲染；探活协议
+                       扩展后主进程可自 user/project 磁盘 raw 现取明文，渲染层零明文只传
+                       name/scope/dir，scope/dir 推导在 handleProbe 内）。按钮语义与管理库 D7
+                       完全一致：禁用卡置灰（single 探测虽不滤禁用，但 B-8 中性态不渲染结论，
+                       允许点击无反馈属交互矛盾）、探测中置灰；sse 卡同权可测（review round-4
+                       F1 拆除 round-001 P2-1 中性门：探活器 mcp-probe.ts 已实现 sse POST
+                       两步握手，4xx 报告附「端点可能为 SSE 传输」专属提示，经行内 fail 行与
+                       ⚠ 气泡可见，不再允许点击无反馈）。 -->
+                  <button
+                    class="mcp-iconbtn"
+                    type="button"
+                    :disabled="isProbing(card) || !isEnabled(card)"
+                    :aria-label="`测试连接 ${card.name}`"
+                    :title="!isEnabled(card) ? '已禁用 · 启用后可测试连接' : isProbing(card) ? '探测中…' : `测试连接 ${card.name}`"
+                    @click.stop="handleProbe(card)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                  </button>
+                  <!-- 管理库作用域：编辑/删除（p7b 接线）。 -->
                   <template v-if="activeScope.kind === 'managed'">
-                    <button
-                      class="mcp-iconbtn"
-                      type="button"
-                      :disabled="isProbing(card) || card.transport === 'sse' || !isEnabled(card)"
-                      :aria-label="`测试连接 ${card.name}`"
-                      :title="!isEnabled(card) ? '已禁用 · 启用后可测试连接' : card.transport === 'sse' ? 'SSE 传输暂不支持探测，会话内自动协商' : isProbing(card) ? '探测中…' : `测试连接 ${card.name}`"
-                      @click.stop="handleProbe(card)"
-                    >
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                    </button>
                     <button class="mcp-iconbtn" type="button" :aria-label="`编辑 ${card.name}`" title="编辑" @click.stop="openEdit(card)">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
                     </button>
@@ -1664,8 +1926,7 @@ const scopeNoteHead = computed<string>(() => {
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                     </button>
                   </template>
-                  <!-- P8：user/project 卡开放「编辑/删除」（同管理库同款按钮；写入对应配置文件）；
-                       「测试连接」仍仅管理库渲染（探活器只认管理库明文条目，E0-4）。 -->
+                  <!-- P8：user/project 卡开放「编辑/删除」（同管理库同款按钮；写入对应配置文件）。 -->
                   <template v-else>
                     <button class="mcp-iconbtn" type="button" :aria-label="`编辑 ${card.name}`" title="编辑" @click.stop="openEdit(card)">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
@@ -1766,7 +2027,7 @@ const scopeNoteHead = computed<string>(() => {
                   :key="loc"
                   type="button"
                   :class="['mcp-seg__btn', { 'mcp-seg__btn--active': formLocation === loc }]"
-                  @click="switchLocation(loc)"
+                  disabled
                 >{{ locationLabel(loc) }}</button>
               </div>
               <span class="mcp-ffield__hint">{{ locationHint }}</span>
@@ -1815,7 +2076,7 @@ const scopeNoteHead = computed<string>(() => {
                 v-model="formTimeoutMs"
                 :class="['mcp-input', { 'mcp-input--invalid': timeoutErrorShown !== '' }]"
                 type="number"
-                placeholder="10000"
+                placeholder="30000"
                 aria-label="超时（毫秒）"
                 @blur="touchedFields.timeout = true"
               />
@@ -1944,7 +2205,7 @@ const scopeNoteHead = computed<string>(() => {
 
     <!-- 弹窗（Teleport 到 body）：方案 A 点4 起仅导入 JSON 弹窗仍走弹窗壳（编辑器已页内化） -->
     <Teleport to="body">
-      <!-- 导入 JSON 弹窗（textarea + 解析预览 + 同名跳过标记；导入目标=Claude Link 管理） -->
+      <!-- 导入 JSON 弹窗（textarea + 解析预览 + 同名跳过标记；导入目标跟随当前栏位） -->
       <div v-if="showImportDialog" class="mcp-mask" role="presentation" @click.self="closeImportDialog">
         <div ref="importCardRef" class="mcp-import-modal" role="dialog" aria-modal="true" aria-labelledby="mcp-import-title" :style="importShellStyle">
           <div class="mcp-import-modal__head" @pointerdown="importShell.beginDrag" @dblclick="importShell.resetToCenter">
@@ -1961,7 +2222,13 @@ const scopeNoteHead = computed<string>(() => {
                 class="mcp-textarea mcp-textarea--tall"
                 placeholder='{"mcpServers": { "context7": { "command": "npx", "args": ["-y", "@upstash/context7-mcp"] } }}'
               ></textarea>
-              <span class="mcp-ffield__hint">支持 {"mcpServers":{…}}（Claude Desktop/Cursor/Windsurf）、{"servers":{…}}（VS Code）与裸 {名称:配置} 三种形态；导入到「Claude Link 管理」。</span>
+              <span class="mcp-ffield__hint">支持 {"mcpServers":{…}}（Claude Desktop/Cursor/Windsurf）、{"servers":{…}}（VS Code）与裸 {名称:配置} 三种形态；导入目标跟随当前栏位。</span>
+              <!-- 导入目标位置（计划 2026-10-29 §3.B.3）：跟随当前入口 rail 三形态，同名判定同源 -->
+              <span class="mcp-ffield__hint mcp-imp__target" data-testid="mcp-import-target">
+                <template v-if="activeScope.kind === 'managed'">将导入到：Claude Link 管理（全局生效）</template>
+                <template v-else-if="activeScope.kind === 'user'">将导入到：用户级 ~/.claude.json（Claude Code 全局共享）</template>
+                <template v-else>将导入到：项目级 {{ activeProjectDir ? activeProjectDir.path : '' }}\.mcp.json（仅该目录会话）</template>
+              </span>
             </div>
             <button class="mcp-btn" type="button" :disabled="importText.trim() === ''" @click="parseImportPreview">解析预览</button>
             <div v-if="importPreview" class="mcp-imp">
@@ -3332,6 +3599,12 @@ const scopeNoteHead = computed<string>(() => {
   font-family: inherit;
 }
 
+/* 保存位置段位恒只读（静态 disabled，2026-10-29 改动点 A）：与可用态区分（round-001 F5）。 */
+.mcp-seg__btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
 .mcp-seg__btn--active {
   background: var(--color-panel);
   color: var(--color-accent-strong);
@@ -3476,6 +3749,13 @@ const scopeNoteHead = computed<string>(() => {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
   background: var(--color-panel-soft);
+}
+
+/* 导入目标位置行（2026-10-29 §3.B.3）：跟随入口 rail 的落点说明，与上方形态说明同段但语义更强。 */
+.mcp-imp__target {
+  color: var(--color-accent-strong);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .mcp-imp__name {

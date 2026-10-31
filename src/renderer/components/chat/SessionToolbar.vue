@@ -54,6 +54,12 @@ watch(() => props.sending, (v) => { if (!v) resetAbortHold(); });
 const showWorkspaceMenu = ref(false);
 const workspaceRef = ref<HTMLElement | null>(null);
 
+function toggleWorkspaceMenu(): void {
+  showWorkspaceMenu.value = !showWorkspaceMenu.value;
+  // P2 目录历史跨端同步：打开时现拉一次（订阅链兜底；断线期间错过的推送由此补齐）。
+  if (showWorkspaceMenu.value) void sessionStore.loadRecentWorkspaces();
+}
+
 const workspaceLabel = computed(() => {
   const dir = activeSession.value?.workingDir;
   if (!dir) return '未选择';
@@ -178,7 +184,7 @@ onUnmounted(() => {
         :class="['ctl__btn', { 'ctl__btn--warn': !activeSession.workingDir }]"
         :disabled="sending"
         :title="activeSession.workingDir ?? '未选择工作空间（运行前必须选择）'"
-        @click="showWorkspaceMenu = !showWorkspaceMenu"
+        @click="toggleWorkspaceMenu()"
       >
         {{ workspaceLabel }} <span class="caret">▾</span>
       </button>

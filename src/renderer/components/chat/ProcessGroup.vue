@@ -29,9 +29,10 @@ const panelId = useId();
 
 // C：后台任务反查——该 toolUseId 是否有运行中的后台任务（task_* 的 toolUseId 匹配）。
 // 主流程工具行据此标注「后台运行中」（后台 Bash 的 tool_result 已回但实际后台仍在跑）。
+// P5（2026-10-22）：只反查当前活动会话的后台任务桶（activeBackgroundTasks）。
 const backgroundToolUseIds = computed(() => {
   const ids = new Set<string>();
-  for (const t of Object.values(store.backgroundTasks)) {
+  for (const t of Object.values(store.activeBackgroundTasks)) {
     if (t.toolUseId && !t.status) ids.add(t.toolUseId);
   }
   return ids;

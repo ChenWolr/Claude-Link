@@ -418,12 +418,26 @@ function spawnOpenWithDialog(command: string, args: string[]): Promise<void> {
   });
 }
 
+// 直达系统「打开方式」对话框（win32 rundll32 OpenAs_RunDLL）；非 win32 无等价 API。
+async function openChooseDialog(absPath: string): Promise<ChangesOpenResult> {
+  const cmd = openWithCommand(absPath);
+  if (!cmd) return { ok: false, reason: 'error', message: '当前平台暂不支持选择打开方式' };
+  try {
+    await spawnOpenWithDialog(cmd.command, cmd.args);
+    return { ok: true };
+  } catch {
+    return { ok: false, reason: 'error', message: '打开方式对话框启动失败' };
+  }
+}
+
 // 「打开」文件：优先走 shell.openPath 用系统默认程序打开；失败时（无默认程序 / 文件不存在等）
 // 在 Windows 降级用 rundll32 弹原生「打开方式」对话框让用户选程序，其他平台无等价 API 直接返回错误。
+// mode（p4 2026-10-27 双按钮）：default=上述默认路径（既有行为逐字不动）；choose=跳过默认打开，
+// 守卫通过后直达系统「打开方式」对话框（同款 rundll32，用户显式选择程序）。
 // 安全要点：ChangedFile.path 是仓库根相对（正斜杠），workingDir 可能是仓库子目录 →
 // 绝不能 path.resolve(workingDir, rel)，必须经仓库根 resolve，并 startsWith(root+sep)
 // 防 .. 越界逃逸。openPath 成功返回空串，失败返回 ErrorDescription 字符串。
-export async function openChangeFile(workingDir: string | null, relPath: string): Promise<ChangesOpenResult> {
+export async function openChangeFile(workingDir: string | null, relPath: string, mode: 'default' | 'choose' = 'default'): Promise<ChangesOpenResult> {
   if (!relPath) return { ok: false, reason: 'no-such-file', message: '未指定文件' };
   const root = await ensureRepo(workingDir);
   if (!root) {
@@ -442,6 +456,7 @@ export async function openChangeFile(workingDir: string | null, relPath: string)
   if (!isPathInsideRoot(abs, root)) {
     return { ok: false, reason: 'no-such-file', message: '文件不在仓库目录内' };
   }
+  if (mode === 'choose') return openChooseDialog(abs);
   try {
     const err = await shell.openPath(abs);
     if (!err) return { ok: true };
@@ -454,6 +469,31 @@ export async function openChangeFile(workingDir: string | null, relPath: string)
       } catch {
         return { ok: false, reason: 'error', message: `无法打开：${err}` };
       }
+    }
+    return { ok: false, reason: 'error', message: `无法打开：${err}` };
+  } catch {
+    return { ok: false, reason: 'error', message: '打开文件失败' };
+  }
+}
+
+// 打开绝对路径文件（聊天工具行 chip 用，p3 2026-10-27）：default=系统默认程序（失败时 win 降级
+// 「打开方式」对话框）；choose=直达系统「打开方式」对话框（复用 openChooseDialog）。
+// 守卫：必须绝对路径（拒相对路径防 cwd 语义漂移）、realpathSync 穿透 symlink、必须已存在常规
+// 文件（目录/悬空链接拒绝）。信任级与 fs:trash 任意路径通道同档（调用方为已认证渲染层/网页端）。
+export async function openAbsoluteFile(absPath: string, mode: 'default' | 'choose' = 'default'): Promise<ChangesOpenResult> {
+  if (!absPath || !path.isAbsolute(absPath)) return { ok: false, reason: 'no-such-file', message: '仅支持绝对路径' };
+  let abs = absPath;
+  try { abs = fs.realpathSync(absPath); } catch { return { ok: false, reason: 'no-such-file', message: '文件不存在或链接失效' }; }
+  let st: fs.Stats;
+  try { st = fs.statSync(abs); } catch { return { ok: false, reason: 'no-such-file', message: '文件不存在' }; }
+  if (!st.isFile()) return { ok: false, reason: 'no-such-file', message: '不是常规文件' };
+  if (mode === 'choose') return openChooseDialog(abs);
+  try {
+    const err = await shell.openPath(abs);
+    if (!err) return { ok: true };
+    const fallback = openWithCommand(abs);
+    if (fallback) {
+      try { await spawnOpenWithDialog(fallback.command, fallback.args); return { ok: true }; } catch { /* 降级失败回原错误 */ }
     }
     return { ok: false, reason: 'error', message: `无法打开：${err}` };
   } catch {

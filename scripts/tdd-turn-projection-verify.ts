@@ -14,6 +14,9 @@
 // markRunning（R4）/ markRunning generation 递增收窄至新回合边界（R7）/ 快照 tool 路
 // sub: 过滤（R8）/ 耗时兜底双点 serverClockOffset 换算（R6）/ TOPIC_PROMPT_PREFIX
 // 全角标点钉（R5，§7）/ App.vue 先订阅后 loadConfig 顺序钉（R9）。
+// §10 增补（2026-10-24 P1 网页运行态同步计划 §1）：G3 概览条目 serverNow（含 preload 镜像）+
+// G5 sdk-backend 导出面（noteTurnStartedAndEmit 新函数 / emitTurnEnded 加 export；
+// §3 sdk-backend turn_started 计数随之 1→2）。
 //
 // 全部为纯 node:assert/计数 check 的源码文本/结构断言，不 import Electron。
 // 既有事件流不变以「关键既有调用行原文仍在原函数段内 + 段内顺序不变」钉住
@@ -169,8 +172,11 @@ check("task-queue-engine.ts turnKind: 'queue'", taskQueue.includes("turnKind: 'q
 check('task-queue-engine.ts turn_started 序在 spawnForTask 成功之后',
   taskQueue.indexOf('spawnForTask(task.id') !== -1 &&
   taskQueue.indexOf('spawnForTask(task.id') < taskQueue.indexOf("type: 'turn_started'"));
-check("sdk-backend 内 turn_started 发射恰好 1 处（R3：resendUserText 第三发射点）",
-  countOccurrences(sdkBackend, "type: 'turn_started'") === 1,
+// P1-G5（2026-10-24 网页运行态同步）：桥接回合进投影体系——sdk-backend 新增导出
+// noteTurnStartedAndEmit（bridge/init.ts 接线为 dispatcher beginTurnProjection），
+// sdk-backend 内 turn_started 发射点由 1（R3 重发）增为 2（重发 + 桥接）。
+check("sdk-backend 内 turn_started 发射恰好 2 处（R3 重发 + G5 桥接 noteTurnStartedAndEmit）",
+  countOccurrences(sdkBackend, "type: 'turn_started'") === 2,
   `实际 ${countOccurrences(sdkBackend, "type: 'turn_started'")}`);
 // A2（P3 收尾批）：noteTurnStarted 对 generation<0（getCurrentQueryInstance 取不到
 // queryInstance 的兜底值）不登记投影——早退 null、不建 Map 项；三发射点 turn_started
@@ -238,13 +244,13 @@ check('ClaudeLinkAPI 含 getRuntimeSnapshot/getRunningOverview 成员',
 check('preload 实现两方法（invoke 对应通道）',
   preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.CHAT_RUNTIME_SNAPSHOT, sessionId)') &&
   preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.CHAT_RUNNING_OVERVIEW)'));
-check('api.ts 头注释「106 个方法」且与 ClaudeLinkAPI 成员数一致（动态比对）', (() => {
+check('api.ts 头注释方法数与 ClaudeLinkAPI 成员数一致（动态比对；历史：P2 会话置顶点 S4 增 setSessionPinned 同步 106→107，2026-10-22 六点 S5 增 refreshGlobalCommands 同步 107→108，2026-10-24 目录同步 P2 增 onWorkspacesChanged/removeWorkspacesListener 同步 108→110——原「=== 108」字面钉在增员后必破，改按 tdd-app-updater-verify check5 / tdd-fs-picker-file-ops B5 同款动态比对）', (() => {
   const header = /(\d+)\s*个方法/.exec(preloadApi);
   const ifaceAt = preloadApi.indexOf('export interface ClaudeLinkAPI');
   const ifaceEnd = preloadApi.indexOf('export function createApi');
   if (!header || ifaceAt === -1 || ifaceEnd === -1) return false;
   const members = (preloadApi.slice(ifaceAt, ifaceEnd).match(/^\s+[A-Za-z]+\s*:\s*\(/gm) ?? []).length;
-  return Number(header[1]) === 106 && members === 106;
+  return Number(header[1]) === members;
 })());
 check('api.ts 导出镜像类型 TurnProjectionSnapshotView / TurnRunningOverviewEntry',
   /export interface TurnProjectionSnapshotView\b/.test(preloadApi) &&
@@ -275,7 +281,10 @@ check('extractTopicCandidate 截断上限 20 保持不变（slice(0, 20)）', to
 check('META_PREAMBLE_PATTERNS 保留', topicCore.includes('META_PREAMBLE_PATTERNS'));
 
 // P6-2/3/4 topic-analyzer.ts analyzeTopic 函数段（段级收口，不受模块内其他函数干扰）。
-const analyzeSeg = topLevelFunction(topicAnalyzer, 'export async function analyzeTopic(');
+// [P4 连带同步 2026-10-24]：analyzeTopic 拆为「入口（在飞互斥 + 尝试预算 + finally 清理，
+// 计划 2026-10-24-web-sync §3.2.2-1）+ analyzeTopicAttempt（原主体原样迁移）」——短输入守卫/
+// 两处写库/两处补推送全部位于主体，切片目标随之改指主体函数（契约内容不变）。
+const analyzeSeg = topLevelFunction(topicAnalyzer, 'async function analyzeTopicAttempt(');
 check('analyzeTopic 函数段提取非空', analyzeSeg !== '');
 check('短输入跳过：段内含 trimmed.length <= 8 守卫', analyzeSeg.includes('trimmed.length <= 8'));
 check('短输入跳过：空串守卫（trimmed.length > 0，纯空白不走短输入写库路径）',
@@ -444,6 +453,34 @@ check('R6：use-chat 不含未换算形态 Date.now() - startedAt', !useChatSrc.
 check('R9：App.vue startListening() 调用先于 await configStore.loadConfig()',
   appVue.indexOf('startListening();') !== -1 &&
   appVue.indexOf('startListening();') < appVue.indexOf('await configStore.loadConfig()'));
+
+// ── §10 P1 网页运行态同步（2026-10-24 计划 §1）：G3 概览 serverNow + G5 桥接投影导出面 ──
+console.log('=== 10) P1-G3/G5：概览条目 serverNow + noteTurnStartedAndEmit/emitTurnEnded 导出 ===');
+// G3：概览条目带捕获时刻主进程时钟，渲染端 applyRunningOverview 透传 markRunning 第三参
+// 即刷新 serverClockOffset（跨机计时校正不再依赖后续 turn_started/快照到达）。
+check('G3：TurnRunningEntry 含 serverNow 数值字段（sessionId/startedAt/generation 之后）',
+  /export interface TurnRunningEntry \{[\s\S]*?sessionId: string;[\s\S]*?startedAt: number;[\s\S]*?generation: number;[\s\S]*?serverNow: number;[\s\S]*?\}/.test(turnProjection));
+check('G3：getRunningOverview 段内捕获 serverNow（const serverNow = Date.now()）并逐条填充',
+  (() => {
+    const seg = topLevelFunction(turnProjection, 'export function getRunningOverview(');
+    return seg !== '' && seg.includes('const serverNow = Date.now();') && seg.includes('serverNow');
+  })());
+check('G3：preload 镜像 TurnRunningOverviewEntry 含 serverNow: number',
+  /export interface TurnRunningOverviewEntry \{[\s\S]*?serverNow: number;[\s\S]*?\}/.test(preloadApi));
+// G5：桥接回合投影收口——sdk-backend 导出 noteTurnStartedAndEmit（起点）与 emitTurnEnded（终态），
+// 供 bridge/init.ts 接线 dispatcher 的 beginTurnProjection/emitTurnEndedFor。
+check('G5：noteTurnStartedAndEmit 导出存在（桥接回合投影起点，P1-1 起返回本回合 generation）',
+  /export function noteTurnStartedAndEmit\(sessionId: string\): number \{/.test(sdkBackend));
+check('G5：noteTurnStartedAndEmit 段内 noteTurnStarted 登记 + turn_started 发射（turnKind user + generation）且 try 包裹',
+  (() => {
+    const seg = topLevelFunction(sdkBackend, 'export function noteTurnStartedAndEmit(');
+    return seg !== '' && seg.includes('noteTurnStarted(sessionId,') &&
+      seg.includes("type: 'turn_started'") && seg.includes("turnKind: 'user'") &&
+      seg.includes('generation: gen') && seg.includes('startedAt: startedAt ?? Date.now(),') &&
+      /export function noteTurnStartedAndEmit\(sessionId: string\): number \{\s*(?:let gen = -1;\s*)?try \{/.test(seg);
+  })());
+check('G5：emitTurnEnded 加 export（bridge/init.ts 跨模块接线终态收口）',
+  /export function emitTurnEnded\(/.test(sdkBackend));
 
 console.log(`\n[turn-projection SA-1] pass=${pass} fail=${fail}`);
 if (fail > 0) {

@@ -181,10 +181,25 @@ async function openSession(session: { id: string }) {
           :checked="selectedIds.has(session.id)"
           @click.stop="toggleSelected(session.id)"
         />
-        <div class="session-card__name">{{ session.name }}</div>
+        <!-- P2 会话置顶（点 S4）：名称旁 pin 小标识（置顶时显示）。 -->
+        <div class="session-card__name">
+          <svg class="session-card__pinicon" v-if="session.pinnedAt != null" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
+          </svg>
+          <span>{{ session.name }}</span>
+        </div>
         <div class="session-card__meta">
           {{ session.model }} · {{ new Date(session.updatedAt).toLocaleString() }}
         </div>
+        <!-- P2 会话置顶（点 S4）：置顶文本钮（与删除钮同款文本钮形态），列表平铺继承 SQL 序自动置顶在前。 -->
+        <button
+          v-if="!batchMode"
+          type="button"
+          class="session-card__pin"
+          @click.stop="store.togglePin(session.id)"
+        >
+          {{ session.pinnedAt != null ? '取消置顶' : '置顶' }}
+        </button>
         <button
           v-if="!batchMode"
           type="button"
@@ -336,7 +351,19 @@ async function openSession(session: { id: string }) {
 }
 
 .session-card__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-weight: 600;
+  min-width: 0;
+}
+
+/* P2 会话置顶（点 S4）：名称旁 pin 小标识（accent 填充）。 */
+.session-card__pinicon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  fill: var(--color-accent);
 }
 
 .session-card__meta {
@@ -344,8 +371,28 @@ async function openSession(session: { id: string }) {
   font-size: 0.75rem;
 }
 
-.session-card__delete {
+/* P2 会话置顶（点 S4）：置顶文本钮——右推锚点由本钮承担（margin-left:auto），删除钮紧随其后
+   （卡片 gap 12px）；批量模式下两钮均不渲染，无「删除钮失去右推锚点」形态。 */
+.session-card__pin {
   margin-left: auto;
+  flex-shrink: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+}
+
+.session-card__pin:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.session-card__delete {
+  flex-shrink: 0;
   border: 1px solid var(--color-danger);
   border-radius: var(--radius-sm);
   background: transparent;

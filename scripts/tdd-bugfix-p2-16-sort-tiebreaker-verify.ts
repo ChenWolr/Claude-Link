@@ -46,8 +46,8 @@ function check(name: string, fn: () => void): void {
 
 // ── 结构：三处 ORDER BY 与 nextSortOrder ──
 const read = (p: string) => fs.readFileSync(path.resolve(__dirname, '..', p), 'utf8');
-check('① session-repo ORDER BY updated_at DESC, rowid DESC', () =>
-  assert_ok(read('src/main/database/repositories/session-repo.ts').includes('ORDER BY updated_at DESC, rowid DESC')));
+check('① session-repo ORDER BY 置顶前缀 + updated_at DESC, rowid DESC（P2 会话置顶点 S4 同步：置顶优先，尾缀 tiebreaker 语义保留）', () =>
+  assert_ok(read('src/main/database/repositories/session-repo.ts').includes('ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC, updated_at DESC, rowid DESC')));
 check('② interaction-history ORDER BY created_at DESC, rowid DESC', () =>
   assert_ok(read('src/main/database/repositories/interaction-history-repo.ts').includes('ORDER BY created_at DESC, rowid DESC')));
 check('③ task-repo 两条 ORDER BY 补 rowid ASC', () => {

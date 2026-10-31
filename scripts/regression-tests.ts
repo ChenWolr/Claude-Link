@@ -1225,20 +1225,42 @@ function testConnectionSurfaceWhitelistContracts(): void {
   }
   assert.ok(sources.size > 100, `连接面扫描仅覆盖 ${sources.size} 个文件——src 目录结构变化须同步本契约`);
 
-  // 断言 A：渲染层/preload 代码级零直连（fetch / XMLHttpRequest / WebSocket / EventSource）。
+  // 断言 A：渲染层/preload 代码级零直连（fetch / XMLHttpRequest / WebSocket / EventSource /
+  // http(s).request / http(s).get / .request( 调用形态）。
+  // round-001 review-report FIX-2c：哨兵正则扩展——新增 https?.request / https?.get /
+  // .request( 三类直连形态（Node http 模块别名调用与 .request( 通用调用点），扫描前已对
+  // renderer/preload 全量现有源码预扫零命中（扩展不引入既有误报）；两个白名单文件跳过逻辑
+  // 不变、export-image-store「fetch 恰 1 处」断言不变。
   // 例外白名单（「网页访问（局域网）」P4，docs/plans/2026-10-20-web-access-plan.md §3-P4）：
   // renderer/web/web-bridge.ts 是计划授权的唯一渲染层 WebSocket 直连面——浏览器模式（无 preload）
   // 经 WS 把 window.claudeLink 全量代理到主进程；Electron 路径由 main.ts !window.claudeLink 门控，
   // 该 chunk 不加载、零行为变化。白名单按单文件收口（该文件存在性与形态由
   // tdd-web-access-wiring-verify §11.5 独立钉死），其余渲染层/preload 文件出现直连 API 仍 fail。
-  const directApi = /\bfetch\s*\(|XMLHttpRequest|new WebSocket|new EventSource/;
-  const directApiAllowed = new Set(['renderer/web/web-bridge.ts']);
+  // 例外白名单 2（P5 网页版导出，docs/plans/2026-10-24-web-sync-directory-naming-export-plan.md
+  // §4.2-7/§5 问3）：export-image-store.ts 的 fetch 仅为 downloadWebFiles 的票据下载
+  // （fetch→blob→a[download]，仅 web 模式 done 相触发；桌面分支不触发）——单文件 + 单调用点
+  // 由紧随断言钉死，出现第二处 fetch 即 fail。
+  const directApi = /\bfetch\s*\(|XMLHttpRequest|new WebSocket|new EventSource|https?\.request|https?\.get|\.request\s*\(/;
+  const directApiAllowed = new Set([
+    'renderer/web/web-bridge.ts',
+    'renderer/stores/export-image-store.ts',
+  ]);
   for (const [file, src] of sources) {
     if (file.startsWith('renderer/') || file.startsWith('preload/')) {
       if (directApiAllowed.has(file)) continue;
       assert.ok(!directApi.test(src), `${file} 渲染层/preload 不得出现代码级直连 API`);
     }
   }
+  const exportStoreSrc = sources.get('renderer/stores/export-image-store.ts') ?? '';
+  assert.equal(
+    (exportStoreSrc.match(/\bfetch\s*\(/g) ?? []).length,
+    1,
+    'export-image-store 的 fetch 仅限 P5 downloadWebFiles 一处（新增出站须重审本契约）',
+  );
+  assert.ok(
+    /downloadWebFiles[\s\S]{0,600}await fetch\(/.test(exportStoreSrc),
+    'export-image-store 的 fetch 必须位于 downloadWebFiles（P5 票据下载）内',
+  );
 
   // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver, bridge/init, mcp/mcp-probe}。
   // bridge/init：2026-09-21 IM 机器人计划新增 BRIDGE_FEISHU_TEST 连通测试（POST tenant_access_token/internal）。
@@ -1248,7 +1270,13 @@ function testConnectionSurfaceWhitelistContracts(): void {
   // wechat-adapter）经 fetchFn 注入形态发起全部 iLink 出站流量，上面的 \bfetch\s*\( 源码正则
   // 看不见——该面已由下方断言 B2 的 typeof fetch 第二扫描登记收口，新增出站点先过 B2。
   const httpDirect = /\bfetch\s*\(|https\.request|http\.request|https\.get|http\.get|\.request\s*\(/;
-  const httpHits = [...sources.entries()].filter(([, src]) => httpDirect.test(src)).map(([file]) => file).sort();
+  // P5 起（2026-10-24）渲染层存在授权 fetch 面（断言 A 白名单收口 export-image-store），
+  // 本断言按其声明口径只扫主进程+shared（渲染层/preload 出站面由断言 A 独家管辖）。
+  const httpHits = [...sources.entries()]
+    .filter(([file]) => file.startsWith('main/') || file.startsWith('shared/'))
+    .filter(([, src]) => httpDirect.test(src))
+    .map(([file]) => file)
+    .sort();
   assert.deepEqual(
     httpHits,
     [
@@ -1513,7 +1541,7 @@ function testMigrationsHandlePartiallyAppliedContextColumns(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 14); // V14（bridge_bindings 解绑墓碑列）落地后同步
+  assert.equal(schemaVersion, 15); // V15（turn_file_checkpoints 回合文件快照）落地后同步
   assert.ok(sessionColumns.has('provider_override'), 'V8：迁移后须补 provider_override 列');
   assert.ok(sessionColumns.has('last_context_tokens'));
   assert.ok(sessionColumns.has('last_context_updated_at'));
@@ -1577,7 +1605,7 @@ function testAttachmentMigrationsCreateTablesAndAreIdempotent(): void {
   };
 
   assert.doesNotThrow(() => runMigrations(db as never));
-  assert.equal(schemaVersion, 14, '迁移后 schema version 须升到当前（V14 bridge_bindings 解绑墓碑列落地后=14）');
+  assert.equal(schemaVersion, 15, '迁移后 schema version 须升到当前（V15 turn_file_checkpoints 落地后=15）');
   assert.ok(sessionsColumns.has('provider_override'), 'V8：老库迁移须补 provider_override 列');
   assert.ok(allExecSql.some((sql) => sql.includes('model_override = NULL')), 'V8：须执行 model_override 别名清洗 SQL');
   assert.ok(createdTables.has('attachments'), '须建 attachments 表');

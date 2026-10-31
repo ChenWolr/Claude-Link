@@ -1,6 +1,6 @@
 // web-bridge.ts
 // 「网页访问（局域网）」P4：渲染层 web 桥（docs/plans/2026-10-20-web-access-plan.md §3-P4）。
-// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 106 方法
+// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 113 方法
 // 代理到主进程 WS RPC（invoke 分发 + 全量事件广播客户端本地过滤），并负责：
 //   - token 读取：location.hash #token=（扫码/复制链接入口）→ localStorage.clWebToken →
 //     history.replaceState 清除地址栏 hash（token 不进任何 HTTP 请求行，仅 WS 升级 query）；
@@ -9,9 +9,12 @@
 //   - 移动端生命周期加速：online / visibilitychange(visible) 立即重试、跳过当次退避等待；
 //   - 断线期间所有 invoke reject new Error('Web 桥未连接')；
 //   - 重连 welcome 后执行状态对齐序列（loadSessions / switchSession 重入 /
-//     interaction reconcile 重水合 / update-store 幂等重拉，见 runRealignSequence 注）。
+//     interaction reconcile 重水合 / update-store 幂等重拉，见 runRealignSequence 注）；
+//   - welcome 帧 buildRev 捕获（welcomedBuildRevRef）：供 App.vue「渲染产物滞后」诊断横条
+//     比对渲染 bundle 的 BUILD_REV（2026-10-30 计划 §1.B；纯可见化，不改构建管线）。
 // 仅在无 window.claudeLink 的浏览器环境由 main.ts 动态 import 触发（Electron 路径本 chunk 不加载）。
 
+import { ref, type Ref } from 'vue';
 import type { ClaudeLinkAPI } from '../../preload/api';
 import { IPC_CHANNELS } from '../../shared/constants';
 import { encodeWireValue, decodeWireValue } from '../../shared/web-access-protocol';
@@ -60,6 +63,15 @@ let cancelBackoffWait: (() => void) | null = null;
 let lifecycleBound = false;
 let installPromise: Promise<void> | null = null;
 
+/** welcome 帧携带的主进程 buildRev（'' = 尚未收到 welcome）。ref 化：App.vue 横条随重连 welcome 自动更新。 */
+const welcomedBuildRev = ref('');
+/** 供非响应式读取方（诊断/测试）取当前值。 */
+export function getWelcomedBuildRev(): string {
+  return welcomedBuildRev.value;
+}
+/** 供渲染层模板消费的响应式引用（App.vue 产物滞后横条）。 */
+export const welcomedBuildRevRef: Ref<string> = welcomedBuildRev;
+
 // ── 全量通道表：键集 === ClaudeLinkAPI 成员集（Record<keyof, string> 由 TS 强制完备，
 //    值全部引用 IPC_CHANNELS 常量；键集对等契约由 scripts/tdd-web-access-wiring-verify.ts
 //    §11.2 与 preload/api.ts 双向比对钉死）。通道对应关系逐一对照 preload/api.ts createApi。 ──
@@ -78,6 +90,10 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   listRecentWorkspaces: IPC_CHANNELS.WORKSPACE_LIST_RECENT,
   addRecentWorkspace: IPC_CHANNELS.WORKSPACE_ADD_RECENT,
   removeRecentWorkspace: IPC_CHANNELS.WORKSPACE_REMOVE_RECENT,
+  // P2 目录历史跨端同步：WORKSPACES_CHANGED 信号（on* 本地订阅 / remove*Listener 清订阅由
+  // createWebApi 泛型分派处理，与 onSessionsChanged 同一机制；空载荷 {}，渲染层收到重拉列表）。
+  onWorkspacesChanged: IPC_CHANNELS.WORKSPACES_CHANGED,
+  removeWorkspacesListener: IPC_CHANNELS.WORKSPACES_CHANGED,
   listProviders: IPC_CHANNELS.PROVIDER_LIST,
   saveProvider: IPC_CHANNELS.PROVIDER_SAVE,
   deleteProvider: IPC_CHANNELS.PROVIDER_DELETE,
@@ -92,6 +108,10 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   getSessionMessages: IPC_CHANNELS.MESSAGE_GET_BY_SESSION,
   deleteSession: IPC_CHANNELS.SESSION_DELETE,
   updateSession: IPC_CHANNELS.SESSION_UPDATE,
+  // P2 会话置顶（点 S4）：网页端与桌面同能力（键集完备性契约由 tdd-web-access-wiring-verify §11.2 钉死）。
+  setSessionPinned: IPC_CHANNELS.SESSION_SET_PINNED,
+  // P4 会话自动命名：首输入兜底名写入（网页端同能力；invoke 通道照相邻键形态）。
+  setFallbackSessionName: IPC_CHANNELS.SESSION_SET_FALLBACK_NAME,
   recordTurnMeta: IPC_CHANNELS.SESSION_RECORD_TURN_META,
   searchSessions: IPC_CHANNELS.SESSION_SEARCH,
   analyzeTopic: IPC_CHANNELS.SESSION_ANALYZE_TOPIC,
@@ -114,6 +134,10 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   listChanges: IPC_CHANNELS.CHANGES_LIST,
   getChangeDiff: IPC_CHANNELS.CHANGES_DIFF,
   openChangeFile: IPC_CHANNELS.CHANGES_OPEN_FILE,
+  // 轮末文件改动（turn-diff）：摘要列表 + 单文件懒加载 patch（invoke 通道；键集完备性契约由
+  // tdd-web-access-wiring-verify §11.2 钉死，网页版与桌面同能力）。
+  listTurnDiffSummaries: IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES,
+  getTurnFilePatch: IPC_CHANNELS.TURN_DIFF_FILE_PATCH,
   addTask: IPC_CHANNELS.TASK_ADD,
   removeTask: IPC_CHANNELS.TASK_REMOVE,
   readTaskOutput: IPC_CHANNELS.TASK_OUTPUT_READ,
@@ -131,6 +155,8 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   cloneMessageAttachments: IPC_CHANNELS.ATTACHMENT_CLONE_MESSAGE,
   onQueueEvent: IPC_CHANNELS.QUEUE_EVENT,
   removeQueueListener: IPC_CHANNELS.QUEUE_EVENT,
+  // P5：第 3 参 webOrigin 经下方泛型分派（...args → invokeOverWire(channel, args)）透传，
+  // 通道名不变、无表新键；wire codec 对 boolean 原样透传（encode/decode 原始值直通）。
   startImageExport: IPC_CHANNELS.EXPORT_IMAGE_START,
   onImageExportProgress: IPC_CHANNELS.EXPORT_IMAGE_PROGRESS,
   cancelImageExport: IPC_CHANNELS.EXPORT_IMAGE_CANCEL,
@@ -138,6 +164,8 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   onCommandChanged: IPC_CHANNELS.COMMANDS_CHANGED,
   removeCommandListener: IPC_CHANNELS.COMMANDS_CHANGED,
   onGlobalCommandsChanged: IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED,
+  // S5：Skill 页「立即刷新」（绕过节流重探全局兜底快照；键集完备性契约由 tdd-web-access-wiring-verify §11.2 钉死）。
+  refreshGlobalCommands: IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL,
   getNativeSettingsDiagnostic: IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC,
   getCommandDiagnostics: IPC_CHANNELS.COMMANDS_GET_DIAGNOSTIC,
   getSkillProjectDirs: IPC_CHANNELS.SKILL_PROJECT_DIRS_GET,
@@ -169,6 +197,7 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   fsRename: IPC_CHANNELS.FS_RENAME,
   fsTrash: IPC_CHANNELS.FS_TRASH,
   fsShowInExplorer: IPC_CHANNELS.FS_SHOW_IN_EXPLORER,
+  fsOpenPath: IPC_CHANNELS.FS_OPEN_PATH,
   resolveExportTarget: IPC_CHANNELS.EXPORT_RESOLVE_TARGET,
   onExportTargetRequested: IPC_CHANNELS.EXPORT_REQUEST_TARGET,
 };
@@ -252,6 +281,9 @@ function openConnection(token: string): BridgeConnection {
       return; // 非 JSON 帧（理论不可达）忽略
     }
     if (frame.kind === 'welcome') {
+      // 产物滞后诊断：捕获主进程 buildRev——重连 welcome 同样更新（与「重连 welcome 后再对齐」
+      // 语义一致），故写在 if (!settled) 之外。
+      welcomedBuildRev.value = typeof frame.buildRev === 'string' ? frame.buildRev : '';
       if (!settled) {
         settled = true;
         resolveWelcome();
@@ -530,6 +562,35 @@ async function runRealignSequence(): Promise<void> {
     useUpdateStore().applyState(info.state);
   } catch {
     // 对齐失败不致命
+  }
+  // P6-R1：对齐序列收口即通知（放在 try/catch 之后——部分对齐步骤失败被上方兜底吞掉时，
+  // 重连本身已成立，changes 强制重拉是保守自愈，不因部分失败而豁免）。
+  notifyRealigned();
+}
+
+// ── 重连对齐完成回调（P6-R1：changes-store 断线自愈挂钩）──
+
+/** 已注册的重连对齐回调（Set 保序；模块级，与订阅/待决表同生命周期——跨重连存活）。 */
+const realignedCallbacks = new Set<() => void>();
+
+/** P6-R1：注册「重连对齐序列收口」回调（changes-store 借此在断线重连后强制重拉当前会话
+ *  改动）。返回解绑函数；通知由 notifyRealigned 在 runRealignSequence 收尾依次发出。 */
+export function onRealigned(cb: () => void): () => void {
+  realignedCallbacks.add(cb);
+  return () => {
+    realignedCallbacks.delete(cb);
+  };
+}
+
+/** 依次通知已注册回调：每个回调独立 try 包裹——单个异常不阻断后续（重连风暴下多次通知
+ *  即多次重拉，invoke 轻量可接受）。导出仅供契约脚本最小桩验证调用序。 */
+export function notifyRealigned(): void {
+  for (const cb of [...realignedCallbacks]) {
+    try {
+      cb();
+    } catch {
+      // 单个回调异常不阻断后续通知
+    }
   }
 }
 

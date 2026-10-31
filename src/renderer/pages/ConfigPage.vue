@@ -65,7 +65,7 @@ watch(() => route.query, (q) => {
 const PERSISTED_FIELDS = [
   'provider', 'providerName', 'providerNote', 'apiKey', 'apiBaseUrl',
   'defaultModel', 'advancedJson', 'permissionMode', 'maxTurns', 'queueEnabled', 'taskDelayMinutes', 'themePaletteId', 'fontScale', 'defaultThinkingLevel', 'disableAutoMemory', 'disableBackgroundTasks', 'disableCron', 'disableFeedbackSurvey', 'disableTelemetry', 'disableNonessentialTraffic',
-  'notifyOnLeave', 'minimizeToTray', 'autoRetryReasoningReplay', 'skillOverrides',
+  'notifyOnLeave', 'minimizeToTray', 'autoRetryReasoningReplay', 'skillOverrides', 'skillAutoSync',
   // 网页访问（局域网）P5：开关/端口/allowedHosts 写 store.config.webAccess（纯 JSON 形状，
   // 结构化克隆兼容），经同一快照比对走既有 700ms 防抖自动保存链；主进程 CONFIG_SAVE 落地前
   // syncWebAccessServer 即时启停（P3 接线），保存完成信号驱动本页状态卡刷新（见下方 watch）。
@@ -313,7 +313,7 @@ const skillProbePending = computed(() => {
 // （ready/empty/stale 定态直接返回 + in-flight 锁；loading/degraded/error 放行，失败态重拉见 B-1），反复切 tab 不产生拉取风暴。
 // 项目目录同拍现查（2026-09-17 方案 B）：新目录自然纳入、被删目录自然消失（窗口 = 一次进 tab）。
 watch(activeTab, (tab) => {
-  if (tab === 'skill') { void commandStore.ensureGlobalSnapshot(); void ensureProjectDirs(); }
+  if (tab === 'skill') { commandStore.resetSkillFreshState(); void commandStore.ensureGlobalSnapshot(); void ensureProjectDirs(); }
   // 批次5.1-5：IM tab 激活重拉（组件 v-show 常挂，onMounted 只跑一次，切 tab 需手动刷新）。
   if (tab === 'im') void bridgeSettingsRef.value?.refresh?.();
   // MCP tab 激活重拉快照（同上：v-show 常挂，磁盘 ~/.claude.json/.mcp.json 可能已被终端改动）。
@@ -861,7 +861,7 @@ const updateStageTone = computed(() => {
               </label>
               <label class="field field--toggle">
                 <span class="field-label">离开会话后通知</span>
-                <span class="field-desc">窗口失焦时，任务完成/网络中断弹系统通知。</span>
+                <span class="field-desc">窗口失焦时，任务完成/网络中断弹系统通知并闪烁任务栏。若不弹横幅，请检查 Windows 设置 → 系统 → 通知 → Claude Link 的『显示通知横幅』与专注助手。</span>
                 <input v-model="store.config.notifyOnLeave" type="checkbox" />
               </label>
               <label class="field field--toggle">
@@ -930,6 +930,8 @@ const updateStageTone = computed(() => {
                   <template v-if="skillProbePending">共 … · … 启用</template>
                   <template v-else>共 {{ userSkills.length }} · {{ globalEnabledCount }} 启用</template>
                 </span>
+                <!-- S5：本次刷新新增数徽标（重进 tab 清零防陈旧常驻） -->
+                <span v-if="commandStore.globalSkillDelta > 0" class="skill-md-item__delta">+{{ commandStore.globalSkillDelta }}</span>
               </button>
               <!-- C-5：项目目录装载状态行（pending 占位 / error 显错+重试，重调 ensureProjectDirs） -->
               <div v-if="projectDirsPending" class="skill-md-rail__status">项目目录读取中…</div>
@@ -983,6 +985,35 @@ const updateStageTone = computed(() => {
                 <div class="skill-md-title__meta">
                   <template v-if="skillScope.kind === 'global'">对所有项目的会话可用</template>
                   <template v-else-if="activeProjectDir">{{ activeProjectDir.sessionCount }} 个会话在使用 · {{ activeProjectDir.isDefault ? '默认工作区' : '最近目录' }}</template>
+                </div>
+
+                <!-- S5（方案 C：同步条，仅全局作用域；视觉基准 docs/prototypes/pin-time-skill-2026-10-22/plan-c-timeline-sync.html）：
+                     自动同步开关（写 config.skillAutoSync 走 PERSISTED_FIELDS 既有自动保存链；主进程 watcher
+                     注入回调每次触发现读配置，拨动即刻生效）+ 本次刷新 delta + 手动「立即刷新」（独立通道，
+                     开关关闭时同样可用）。 -->
+                <div v-if="skillScope.kind === 'global'" class="skill-sync-bar" data-testid="skill-sync-bar">
+                  <span class="skill-sync-bar__label">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path>
+                    </svg>
+                    自动同步
+                  </span>
+                  <input type="checkbox" class="switch" v-model="store.config.skillAutoSync" aria-label="自动同步 Skill 变更" />
+                  <span class="skill-sync-bar__hint">{{ store.config.skillAutoSync ? '监听 ~/.claude/skills 与全局工作目录 .claude/skills，变化自动重新探测' : '已暂停自动同步，目录变化需手动刷新' }}</span>
+                  <span class="skill-sync-bar__spacer"></span>
+                  <span class="skill-sync-bar__delta" v-if="commandStore.globalSkillDelta > 0">本次刷新 +{{ commandStore.globalSkillDelta }}</span>
+                  <button
+                    type="button"
+                    :class="['skill-sync-bar__now', { 'skill-sync-bar__now--busy': commandStore.globalRefreshing }]"
+                    data-testid="skill-refresh-button"
+                    :disabled="commandStore.globalRefreshing || skillProbePending"
+                    @click="commandStore.refreshGlobal()"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path>
+                    </svg>
+                    {{ commandStore.globalRefreshing ? '刷新中…' : '立即刷新' }}
+                  </button>
                 </div>
 
                 <!-- 快照状态条（页面级 v-if 链）：探测中（null/loading 同占位）/ degraded+error（B-1 附显式重试）；
@@ -1048,10 +1079,16 @@ const updateStageTone = computed(() => {
                     <div
                       v-for="skill in visibleSkills"
                       :key="skill.name"
-                      :class="['skill-card', { 'skill-card--off': !isSkillEnabled(skillKey(skill)) }]"
+                      :class="['skill-card', { 'skill-card--off': !isSkillEnabled(skillKey(skill)), 'skill-card--fresh': skillScope.kind === 'global' && commandStore.lastAddedSkillNames.includes(skill.name) }]"
                     >
                       <div class="skill-card__head">
                         <span class="skill-card__name">{{ skill.name }}</span>
+                        <!-- S5：本次刷新新增徽标（仅全局作用域消费；项目作用域卡片不受影响——磁盘现查语义） -->
+                        <span
+                          v-if="skillScope.kind === 'global' && commandStore.lastAddedSkillNames.includes(skill.name)"
+                          class="skill-card__fresh-badge"
+                          title="本次刷新新发现的 Skill"
+                        >新增</span>
                         <!-- R-1：fm≠dir 条目「键名=目录名」小字提示（开关键口径=目录名；fm==dir 不显示） -->
                         <span
                           v-if="skill.dirName !== undefined && skill.dirName !== skill.name"
@@ -2354,6 +2391,131 @@ input.skill-search:focus {
   margin: 0.25rem 0 0;
   font-size: 0.6875rem;
   color: var(--color-text-muted);
+}
+
+/* ── S5（方案 C：同步条，2026-10-22 six-issues §7.1）：自动同步开关 + 本次刷新 delta + 手动
+   「立即刷新」。warn 系染色对齐效果图 docs/prototypes/pin-time-skill-2026-10-22/plan-c-timeline-sync.html
+   的 CSS 变量用法（--color-warn / --color-warn-strong / color-mix 徽底）。 ── */
+.skill-sync-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0.625rem 0 0;
+  padding: 0.5rem 0.875rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+}
+
+.skill-sync-bar__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.skill-sync-bar__label svg {
+  width: 0.8125rem;
+  height: 0.8125rem;
+  stroke: var(--color-accent-strong);
+}
+
+.skill-sync-bar__hint {
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+}
+
+.skill-sync-bar__spacer {
+  flex: 1;
+}
+
+.skill-sync-bar__delta {
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--color-warn-strong);
+  background: color-mix(in srgb, var(--color-warn) 18%, transparent);
+  border-radius: var(--radius-pill);
+  padding: 0.0625rem 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.skill-sync-bar__now {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.3125rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent-strong);
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+
+.skill-sync-bar__now:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+}
+
+.skill-sync-bar__now:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.skill-sync-bar__now svg {
+  width: 0.8125rem;
+  height: 0.8125rem;
+}
+
+.skill-sync-bar__now--busy svg {
+  animation: skill-sync-spin 0.9s linear infinite;
+}
+
+/* busy 态 svg 旋转；prefers-reduced-motion 下停用（对齐 variables.css :68-75 无障碍约定）。
+   注意：本注释不得紧贴 .skill-sync-bar__now--busy svg 规则之前——regression-tests 的
+   reduced-motion 覆盖扫描会把「注释+选择器」整体记为待覆盖 selector，导致误报漏覆盖。 */
+@keyframes skill-sync-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skill-sync-bar__now--busy svg {
+    animation: none;
+  }
+}
+
+/* rail「全局 Skill」条目右上角 delta 徽标（.skill-md-item 已 position: relative）。 */
+.skill-md-item__delta {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  color: var(--color-warn-strong);
+  background: color-mix(in srgb, var(--color-warn) 18%, transparent);
+  border-radius: var(--radius-pill);
+  padding: 0 0.375rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 本次刷新新增卡片：warn 描边 + 「新增」徽标（仅全局作用域消费；项目作用域卡片不受影响）。 */
+.skill-card--fresh {
+  border-color: color-mix(in srgb, var(--color-warn) 45%, var(--color-border));
+}
+
+.skill-card__fresh-badge {
+  flex-shrink: 0;
+  font-size: 0.625rem;
+  padding: 0.0625rem 0.4375rem;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-warn) 18%, transparent);
+  color: var(--color-warn-strong);
+  font-weight: 600;
 }
 
 .skill-md-main__scroll {

@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（106 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（114 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -74,9 +74,14 @@ export interface McpProbeReport {
   probedAt: number;
 }
 
-/** probeMcpServers 请求体：all=管理库批量（60s 缓存逐 key 判定）/ single=按 name 现探
- *  （§1.3 渲染层零明文约束：渲染层只回传 name，明文 env/headers 由主进程自取已存条目）。 */
-export type McpProbeTarget = { target: 'all' } | { target: 'single'; name: string };
+/** probeMcpServers 请求体（round-001 m3：与主进程 ipc-handlers.ts MCP_PROBE handler 契约对齐）：
+ *  all=管理库批量（60s 缓存逐 key 判定）/ single=按 name 现探（scope 缺省视为 managed，向后
+ *  兼容既有 {target:'single', name} 调用）/ scoped=按栏位（user/project）整批探活。
+ *  §1.3 渲染层零明文约束：渲染层只回传 name/scope/dir，明文 env/headers 由主进程自取已存条目。 */
+export type McpProbeTarget =
+  | { target: 'all' }
+  | { target: 'single'; name: string; scope?: 'user' | 'project'; dir?: string }
+  | { target: 'scoped'; scope: 'user' | 'project'; dir?: string };
 
 /** mcp:managedSave 提交条目（主进程 src/main/modules/mcp/mcp-config.ts:McpManagedSaveEntry
  *  同构镜像——preload 不 import 主进程模块，结构以该文件为准）：McpManagedServer + 瞬态改名
@@ -199,6 +204,8 @@ export interface TurnRunningOverviewEntry {
   sessionId: string;
   startedAt: number;
   generation: number;
+  /** 概览捕获时刻主进程时钟（与快照 serverNow 同语义，供渲染端时钟偏移校正）。 */
+  serverNow: number;
 }
 
 export interface ClaudeLinkAPI {
@@ -218,6 +225,9 @@ export interface ClaudeLinkAPI {
   listRecentWorkspaces: () => Promise<string[]>;
   addRecentWorkspace: (dir: string) => Promise<string[]>;
   removeRecentWorkspace: (dir: string) => Promise<string[]>;
+  // P2 目录历史跨端同步：WORKSPACES_CHANGED 信号订阅（空载荷 {}，收到后重拉 listRecentWorkspaces）。
+  onWorkspacesChanged: (callback: () => void) => () => void;
+  removeWorkspacesListener: () => void;
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，list 只回掩码）。
   listProviders: () => Promise<ProviderLibrarySnapshot>;
   saveProvider: (input: ProviderSaveInput) => Promise<ProviderProfileView>;
@@ -236,6 +246,12 @@ export interface ClaudeLinkAPI {
     id: string,
     data: Partial<Pick<Session, 'name' | 'model' | 'workingDir' | 'permissionMode' | 'maxTurns' | 'thinkingLevel' | 'providerOverride' | 'modelOverride'>>,
   ) => Promise<Session | null>;
+  // P2 会话置顶（点 S4）：pinned=true 主进程写 Date.now()，false 写 NULL；返回更新后的会话
+  //（withBridgePlatform 装饰；null = 会话不存在）。不 bump updated_at（repo 专用入口）。
+  setSessionPinned: (sessionId: string, pinned: boolean) => Promise<Session | null>;
+  // P4 会话自动命名：首输入兜底名写入。false = 会话不存在 / 名源不可升级（slot|first_input
+  // 之外）/ 文本归一后为空（主进程截断/折叠，渲染层不预处理）；成功后主进程广播 SESSIONS_CHANGED。
+  setFallbackSessionName: (sessionId: string, text: string) => Promise<boolean>;
   // B1：回合元数据持久化（回合 result 到达时 fire-and-forget）。主进程 handler 成功时固定返回 true，
   // sessionId 非法/会话不存在返回 null（hb10-OPT-1：布尔返回省一次全行读）。下方 Promise<Session | null>
   // 仅为历史形态，运行时实际返回 true | null；调用方均 fire-and-forget，不消费返回值。
@@ -266,7 +282,10 @@ export interface ClaudeLinkAPI {
   removeContextListener: () => void;
   listChanges: (workingDir: string | null, touchedPaths: string[]) => Promise<ChangesListResult>;
   getChangeDiff: (workingDir: string | null, path: string, context: number) => Promise<ChangesDiffResult>;
-  openChangeFile: (workingDir: string | null, path: string) => Promise<ChangesOpenResult>;
+  openChangeFile: (workingDir: string | null, path: string, mode?: 'default' | 'choose') => Promise<ChangesOpenResult>;
+  // 轮末文件改动（turn-diff）：回合摘要列表 + 单文件 patch 懒加载（网页版经 web-bridge 同通道可达）。
+  listTurnDiffSummaries: (sessionId: string) => Promise<import('../shared/types/turn-file-diff').TurnFileDiffTurnSummary[]>;
+  getTurnFilePatch: (sessionId: string, turnStartMessageId: string, endMessageId: string | null, path: string, context?: number) => Promise<{ mode: import('../shared/types/turn-file-diff').TurnFileDiffMode; patch: string; truncated: boolean }>;
   addTask: (sessionId: string, payload: ChatSendPayload) => Promise<{ task: Task; tasks: Task[] }>;
   removeTask: (taskId: string) => Promise<Task[]>;
   // D 点：后台任务（task_* 编排）终态输出文件只读（主进程强制绝对路径 + 512KB 上限 + 截断标记）。
@@ -286,7 +305,11 @@ export interface ClaudeLinkAPI {
   cloneMessageAttachments: (sessionId: string, messageId: string) => Promise<CloneMessageAttachmentsResult>;
   onQueueEvent: (callback: (payload: QueueEventPayload) => void) => () => void;
   removeQueueListener: () => void;
-  startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
+  // P5：第 3 参 webOrigin（可选）——仅网页端 store 传 true（!!window.__claudeLinkWebBridge），
+  // 主进程据此走免协商保存 + 一次性票据 HTTP 下载；桌面不传（undefined → false，全旧行为）。
+  // round-001 review-report FIX-2a：第 4 参 originNonce（可选）——网页端 start 生成的一次性
+  // nonce 透传（主进程回填 webDownloads.originNonce 供发起端防抢答比对）；桌面不传。
+  startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat, webOrigin?: boolean, originNonce?: string) => Promise<{ ok: true; jobId: string } | { ok: false; code: string; message: string }>;
   onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => () => void;
   // B4（D13-F3）：取消当前导出（仅捕获/编码阶段；无活动 job 或已终态时主进程返回 ok:false）。
   cancelImageExport: () => Promise<{ ok: boolean }>;
@@ -296,6 +319,8 @@ export interface ClaudeLinkAPI {
   removeCommandListener: () => void;
   // D4：全局兜底快照热刷新广播（暂态会话命令菜单的实时更新通道）。
   onGlobalCommandsChanged: (callback: (payload: CommandGlobalChangedPayload) => void) => () => void;
+  // S5：Skill 页「立即刷新」——绕过节流重探全局兜底快照，返回探测后快照（degraded/error 为失败终态）。
+  refreshGlobalCommands: () => Promise<SessionCommandSnapshot>;
   // Task 3 Step 5：原生 settings 诊断摘要（脱敏，只回来源/CLAUDE.md 候选/生效键名）。
   getNativeSettingsDiagnostic: (cwd: string) => Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>;
   // Task 8：命令来源 provenance 诊断（origin/availability 计数 + unknown/hidden 命令名，脱敏派生视图）。
@@ -311,9 +336,10 @@ export interface ClaudeLinkAPI {
   // P8 双向写入：用户级/项目级 mcpServers 条目 upsert/remove（哨兵还原在主进程 writer；
   // overwrote = upsert 命中现有同名，remove 恒 false）。
   writeMcpScoped: (payload: McpWriteScopedPayload) => Promise<{ overwrote: boolean }>;
-  // 作用域导出 JSON：主进程构建 {"mcpServers":{…}} 文本并写系统剪贴板（渲染层零明文，
-  // 回包只有 count；count=0 未动剪贴板）。
-  exportMcpScoped: (payload: McpExportScopedPayload) => Promise<{ ok: true; count: number }>;
+  // 作用域导出 JSON：主进程构建 {"mcpServers":{…}} 文本，桌面路径写系统剪贴板（渲染层零明文，
+  // 回包只有 count；count=0 未动剪贴板）；网页路径（主进程 event===null）不写剪贴板，回
+  // downloadUrl（一次性票据 URL，浏览器同源下载）——仅网页路径出现该字段。
+  exportMcpScoped: (payload: McpExportScopedPayload) => Promise<{ ok: true; count: number; downloadUrl?: string }>;
   // 单服务器 JSON 解析（点2，表单⇄JSON 双模式「JSON → 表单」方向）：文本送主进程
   // parseMcpServersJson（三形态导入口径同导入弹窗），失败回 { ok: false, error } 不 throw。
   parseMcpJson: (text: string) => Promise<McpParseJsonResult>;
@@ -348,6 +374,7 @@ export interface ClaudeLinkAPI {
   fsRename: (oldPath: string, newName: string) => Promise<FsRenameResult>;
   fsTrash: (paths: string[]) => Promise<FsTrashResult>;
   fsShowInExplorer: (path: string) => Promise<FsShowResult>;
+  fsOpenPath: (absPath: string, mode: 'default' | 'choose') => Promise<ChangesOpenResult>;
   // 导出目标协商（T5）：主→渲染请求选择保存目标；渲染层选定后经 resolveTarget 应答。
   resolveExportTarget: (jobId: string, resp: ExportTargetResponse) => Promise<boolean>;
   onExportTargetRequested: (callback: (req: ExportTargetRequest) => void) => () => void;
@@ -386,6 +413,13 @@ export function createApi(): ClaudeLinkAPI {
     listRecentWorkspaces: () => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_LIST_RECENT) as Promise<string[]>,
     addRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_ADD_RECENT, dir) as Promise<string[]>,
     removeRecentWorkspace: (dir) => ipcRenderer.invoke(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT, dir) as Promise<string[]>,
+    // P2 目录历史跨端同步（on* 模式照抄 onProvidersChanged）。
+    onWorkspacesChanged: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on(IPC_CHANNELS.WORKSPACES_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.WORKSPACES_CHANGED, listener);
+    },
+    removeWorkspacesListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.WORKSPACES_CHANGED),
     listProviders: () => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_LIST) as Promise<ProviderLibrarySnapshot>,
     saveProvider: (input) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_SAVE, input) as Promise<ProviderProfileView>,
     deleteProvider: (providerId) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_DELETE, providerId),
@@ -411,6 +445,10 @@ export function createApi(): ClaudeLinkAPI {
     getSessionMessages: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, sessionId),
     deleteSession: (id) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_DELETE, id),
     updateSession: (id, data) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_UPDATE, id, data),
+    // P2 会话置顶（点 S4）：两参透传，主进程负责校验与广播。
+    setSessionPinned: (sessionId, pinned) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SET_PINNED, sessionId, pinned),
+    // P4 会话自动命名：首输入兜底名（两参透传，主进程负责校验/归一/广播）。
+    setFallbackSessionName: (sessionId, text) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SET_FALLBACK_NAME, sessionId, text),
     recordTurnMeta: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_RECORD_TURN_META, sessionId, payload),
     searchSessions: (query) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SEARCH, query),
     analyzeTopic: (sessionId, firstMessage) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_ANALYZE_TOPIC, sessionId, firstMessage),
@@ -450,7 +488,10 @@ export function createApi(): ClaudeLinkAPI {
     removeContextListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.CONTEXT_UPDATE),
     listChanges: (workingDir, touchedPaths) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_LIST, workingDir, touchedPaths),
     getChangeDiff: (workingDir, path, context) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_DIFF, workingDir, path, context),
-    openChangeFile: (workingDir, path) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_OPEN_FILE, workingDir, path),
+    openChangeFile: (workingDir, path, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_OPEN_FILE, workingDir, path, mode),
+    listTurnDiffSummaries: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES, sessionId),
+    getTurnFilePatch: (sessionId, turnStartMessageId, endMessageId, path, context) =>
+      ipcRenderer.invoke(IPC_CHANNELS.TURN_DIFF_FILE_PATCH, sessionId, turnStartMessageId, endMessageId, path, context ?? 3),
     addTask: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, payload),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId) as Promise<Task[]>,
     // D 点：后台任务终态输出文件只读（对象载荷 { outputFile }，对齐主进程 handler 入参形状）。
@@ -476,7 +517,9 @@ export function createApi(): ClaudeLinkAPI {
     },
     removeQueueListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.QUEUE_EVENT),
     // 会话导出长图（v3 JPEG / v4.1 PNG 双格式）：可见 renderer 请求开始 + 接收进度。图片数据不经过可见 renderer。
-    startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId, format),
+    // P5：webOrigin 透传（无新方法，头注释方法数不变）。
+    // round-001 review-report FIX-2a：originNonce 第 4 参透传（无新方法，头注释方法数 111 不变）。
+    startImageExport: (sessionId: string, format: import('../shared/types/export-image').ExportImageFormat, webOrigin?: boolean, originNonce?: string) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_IMAGE_START, sessionId, format, webOrigin, originNonce),
     onImageExportProgress: (callback: (payload: import('../shared/types/export-image').ExportImageProgressPayload) => void) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: import('../shared/types/export-image').ExportImageProgressPayload) => callback(payload);
       ipcRenderer.on(IPC_CHANNELS.EXPORT_IMAGE_PROGRESS, listener);
@@ -496,6 +539,7 @@ export function createApi(): ClaudeLinkAPI {
       ipcRenderer.on(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, listener);
       return () => ipcRenderer.off(IPC_CHANNELS.COMMANDS_GLOBAL_CHANGED, listener);
     },
+    refreshGlobalCommands: () => ipcRenderer.invoke(IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL) as Promise<SessionCommandSnapshot>,
     getNativeSettingsDiagnostic: (cwd) =>
       ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_GET_DIAGNOSTIC, cwd) as Promise<import('../shared/types/ipc').NativeSettingsDiagnostic>,
     getCommandDiagnostics: (sessionId) =>
@@ -510,8 +554,8 @@ export function createApi(): ClaudeLinkAPI {
     probeMcpServers: (target) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PROBE, target) as Promise<McpProbeReport[]>,
     // P8 双向写入（对象载荷，对齐主进程 handler 入参形状）。
     writeMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_WRITE_SCOPED, payload) as Promise<{ overwrote: boolean }>,
-    // 作用域导出 JSON（对象载荷；主进程写剪贴板，回包零明文）。
-    exportMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_EXPORT_SCOPED, payload) as Promise<{ ok: true; count: number }>,
+    // 作用域导出 JSON（对象载荷；桌面写剪贴板、网页回一次性票据 URL，回包零明文）。
+    exportMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_EXPORT_SCOPED, payload) as Promise<{ ok: true; count: number; downloadUrl?: string }>,
     // 单服务器 JSON 解析（点2；text 原样转发主进程 parseMcpServersJson，失败回包不 throw）。
     parseMcpJson: (text) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PARSE_JSON, text) as Promise<McpParseJsonResult>,
     // IM 机器人（飞书/微信 bridge）。
@@ -548,6 +592,7 @@ export function createApi(): ClaudeLinkAPI {
     fsRename: (oldPath, newName) => ipcRenderer.invoke(IPC_CHANNELS.FS_RENAME, { oldPath, newName }) as Promise<FsRenameResult>,
     fsTrash: (paths) => ipcRenderer.invoke(IPC_CHANNELS.FS_TRASH, { paths }) as Promise<FsTrashResult>,
     fsShowInExplorer: (path) => ipcRenderer.invoke(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, { path }) as Promise<FsShowResult>,
+    fsOpenPath: (absPath, mode) => ipcRenderer.invoke(IPC_CHANNELS.FS_OPEN_PATH, absPath, mode) as Promise<ChangesOpenResult>,
     // 导出目标协商（T5）：应答主进程的保存目标请求 / 订阅请求推送（App.vue 全局单订阅者）。
     resolveExportTarget: (jobId, resp) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, jobId, resp) as Promise<boolean>,
     onExportTargetRequested: (callback) => {

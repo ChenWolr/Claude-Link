@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 14;
+const CURRENT_SCHEMA_VERSION = 15;
 
 /** P1-10：表列集合查询（版本块守卫与自愈块共用同一谓词，防「列已存在」中间态复现抛错）。 */
 function tableColumns(db: Database.Database, table: string): Set<string> {
@@ -172,6 +172,19 @@ function runMigrationStatements(db: Database.Database): void {
     if (!hasCol('mcp_overrides')) {
       db.exec('ALTER TABLE sessions ADD COLUMN mcp_overrides TEXT DEFAULT NULL');
     }
+    // P2 会话置顶（点 S4，方案 A）：置顶时刻 epoch ms；NULL = 未置顶。免升版（skill_overrides
+    // 先例），仅走幂等自愈补列；排序消费在 session-repo.listSessions ORDER BY（置顶优先），
+    // 取消置顶写 NULL（不删列），排序回归 updated_at。
+    if (!hasCol('pinned_at')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN pinned_at INTEGER');
+    }
+    // P4 会话自动命名（计划 2026-10-24-web-sync §3.2.1-1）：名源标记
+    //（'slot'|'first_input'|'generated'|'custom'）。免升版（pinned_at 先例），仅走幂等自愈补列；
+    // NULL = 功能前存量行，session-repo 读取侧经 deriveNameSource 按名称形态派生
+    //（isAutoSessionName → slot 可升级，否则 custom 永不自动改名）——存量会话零扰动。
+    if (!hasCol('name_source')) {
+      db.exec('ALTER TABLE sessions ADD COLUMN name_source TEXT DEFAULT NULL');
+    }
   }
 
   // V8 别名清洗同样做幂等自愈：schema_version 已是 8 但列后补的库（或手工库）也清一遍。
@@ -301,6 +314,33 @@ function runMigrationStatements(db: Database.Database): void {
     if (!tableColumns(db, 'bridge_bindings').has('unbound_at')) {
       db.exec('ALTER TABLE bridge_bindings ADD COLUMN unbound_at INTEGER');
     }
+  }
+
+  // V15（回合文件改动 diff，计划 2026-10-26-turn-file-changes-diff-and-web-changes-fix-plan §3.3）：
+  // turn_file_checkpoints——写文件类工具（Write/Edit 等）每次落盘成功的文件快照行，供回合级
+  // diff 聚合（P4 经 JOIN messages 取 m.rowid 做回合区间比较）。message_id 不设外键（异常落库
+  // 的孤儿行在聚合 JOIN 时自然丢弃，不得抛错）；session_id 级联：删会话 → 快照行随之消失。
+  // 建表 SQL 与计划 §3.3 逐字一致；沿用事务化 + CREATE TABLE IF NOT EXISTS 守卫风格
+  //（V13 bridge_bindings 同款：迁移整体事务化后无「表已建、版本未写」半应用态，无需自愈块）。
+  if (currentVersion < 15) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS turn_file_checkpoints (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        message_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        tool_use_id TEXT NOT NULL,
+        input_json TEXT,
+        input_truncated INTEGER NOT NULL DEFAULT 0,
+        after_content TEXT,
+        after_truncated INTEGER NOT NULL DEFAULT 0,
+        binary INTEGER NOT NULL DEFAULT 0,
+        snapshot_state TEXT NOT NULL DEFAULT 'disk'
+      );
+      CREATE INDEX IF NOT EXISTS idx_tfc_session ON turn_file_checkpoints(session_id, id);
+      CREATE INDEX IF NOT EXISTS idx_tfc_session_path ON turn_file_checkpoints(session_id, path, id);
+    `);
   }
 
   // V3-3：交互历史持久化表。每次用户提交/取消交互弹窗落库一条，

@@ -6,7 +6,7 @@
 // P5 再增量。全部为纯 node:assert/计数 check 的源码文本/结构断言，不 import Electron。
 //
 // 覆盖：
-//   ① ipc-handlers.ts：ipcMain.handle( 字面归零；regInvokeHandler( === 84（计算式见断言注释）；
+//   ① ipc-handlers.ts：ipcMain.handle( 字面归零；regInvokeHandler( 计数以 1) 节计算式断言为准（不在此硬编码）；
 //   ② export-image-manager.ts：ipcMain.handle( === 7（EXPORT_RENDER_* 裸注册，天然不可被网页
 //      调用）；regInvokeHandler( === 2（EXPORT_IMAGE_START/CANCEL 经注册表）；
 //   ③ src/main/** 全目录 webContents.send(IPC_CHANNELS. 字面仅出现在 push-bus.ts
@@ -41,6 +41,12 @@
 //      defaultConfig 含 webAccess 默认值。
 //   ⑬ round-008 修复钉（R1-F2/F3/F4/F7）：CONFIG_CLEAR 驱动 sync、导出窗注册点改 live 变量、
 //      push-bus webSink 转发 try 包裹、SESSION_DELETE 删库结果门控 delete 信号。
+//   ⑭ 目录历史跨端同步（2026-10-24 web-sync 计划 §2，正文节 13）：WORKSPACES_CHANGED 三处同步
+//      （ipc 常量 + preload on/off 两成员 + web-bridge 表两键）+ ADD/REMOVE 两 handler 发射
+//      （=== 2，LIST 不推）+ App.vue 订阅/注销 + SessionToolbar 打开下拉现拉兜底。
+//   ⑮ 轮末文件改动两通道（2026-10-26-turn-file-changes 计划 §3.4）：TURN_DIFF_LIST_SUMMARIES /
+//      TURN_DIFF_FILE_PATCH 常量 + ClaudeLinkAPI 两成员 + preload 实现 + WEB_CHANNEL_TABLE 两键
+//      + ipc-handlers 两 handler 注册（键集对等由 §11.2 双向断言自动覆盖新键）。
 //
 // 运行：npx tsx scripts/tdd-web-access-wiring-verify.ts（已追加 selftest-static-list.txt 尾部）
 
@@ -76,15 +82,21 @@ const interactionPrompts = read('src/main/modules/interaction-prompts.ts');
 const bridgeInit = read('src/main/modules/bridge/init.ts');
 const ipcTypes = read('src/shared/types/ipc.ts');
 const preloadApi = read('src/preload/api.ts');
+const turnDiffSrc = read('src/main/modules/turn-diff.ts');
 
 // ── ① ipc-handlers.ts：注册表全量替换 ──
 console.log('=== 1) ipc-handlers.ts：ipcMain.handle( → regInvokeHandler( 全量替换 ===');
-// 计算式：regInvokeHandler( === 84 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
+// 计算式：regInvokeHandler( === 89 = P2 替换后实测 79 + P3 新增 WEB_ACCESS_* 三通道（计划
 // §3-P3-4）+ SA-2 回合投影只读查询两通道 CHAT_RUNTIME_SNAPSHOT/CHAT_RUNNING_OVERVIEW
-//（计划 2026-10-21「回合投影 + 标题质量」）；ipcMain.handle( === 0：注释行无该带括号字面。
+//（计划 2026-10-21「回合投影 + 标题质量」）+ P2 会话置顶 SESSION_SET_PINNED（计划 2026-10-22
+// six-issues 点 S4）+ P6 Skill 刷新 COMMANDS_REFRESH_GLOBAL（同计划点 S5，方案 C 同步条）
+// + P4 会话命名兜底 SESSION_SET_FALLBACK_NAME（计划 2026-10-24-web-sync §3.2.1-6）
+// + 轮末文件改动两通道 TURN_DIFF_*（计划 2026-10-26-turn-file-changes §3.4）
+// + FS_OPEN_PATH（2026-10-27 五问题 p3：聊天工具行生成文件打开，绝对路径直达）；
+// ipcMain.handle( === 0：注释行无该带括号字面。
 check('ipc-handlers.ts ipcMain.handle( 出现次数 === 0', countOccurrences(handlers, 'ipcMain.handle(') === 0,
   `实际 ${countOccurrences(handlers, 'ipcMain.handle(')}`);
-check('ipc-handlers.ts regInvokeHandler( 出现次数 === 84', countOccurrences(handlers, 'regInvokeHandler(') === 84,
+check('ipc-handlers.ts regInvokeHandler( 出现次数 === 90', countOccurrences(handlers, 'regInvokeHandler(') === 90,
   `实际 ${countOccurrences(handlers, 'regInvokeHandler(')}`);
 check('ipc-handlers.ts 从 ./ipc-registry 导入 regInvokeHandler',
   /import\s*\{[^}]*regInvokeHandler[^}]*\}\s*from\s*'\.\/ipc-registry'/.test(handlers));
@@ -195,11 +207,13 @@ check('ClaudeLinkAPI 含 onSessionsChanged 成员（upsert|delete 载荷）',
   /onSessionsChanged:\s*\(callback:\s*\(payload:\s*\{\s*kind:\s*'upsert'\s*\|\s*'delete';\s*sessionId:\s*string\s*\}\)\s*=>\s*void\)\s*=>\s*\(\)\s*=>\s*void;/.test(preloadApi));
 check('preload/api.ts 实现 onSessionsChanged（ipcRenderer.on 模式）',
   /onSessionsChanged:\s*\(callback\)\s*=>\s*\{[\s\S]*?ipcRenderer\.on\(IPC_CHANNELS\.SESSIONS_CHANGED,\s*listener\);[\s\S]*?return\s*\(\)\s*=>\s*ipcRenderer\.off\(IPC_CHANNELS\.SESSIONS_CHANGED,\s*listener\);/.test(preloadApi));
-check('ipc-handlers.ts 三处 pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED 发射',
-  countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED') === 3,
+// [P4 连带同步 2026-10-24]：新 handler SESSION_SET_FALLBACK_NAME 成功后广播 upsert 一处
+//（计划 2026-10-24-web-sync §3.2.1-6「upgradable 才写 + 成功后广播」），发射 4→5（upsert×4 + delete×1）。
+check('ipc-handlers.ts 五处 pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED 发射（create/update/setPinned/fallback/delete，P4 兜底命名 +1）',
+  countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED') === 5,
   `实际 ${countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED')}`);
-check("发射形态含 upsert×2 + delete×1",
-  countOccurrences(handlers, "{ kind: 'upsert', sessionId") === 2 &&
+check("发射形态含 upsert×4 + delete×1（P2 置顶 upsert + P4 兜底命名 upsert）",
+  countOccurrences(handlers, "{ kind: 'upsert', sessionId") === 4 &&
   countOccurrences(handlers, "{ kind: 'delete', sessionId") === 1);
 // 发射点落位：SESSION_CREATE 物化成功后（return session 之前）、SESSION_UPDATE 成功后
 //（return updated ? 之前）、SESSION_DELETE 删库成功后（deleteSession 之后）。
@@ -380,6 +394,17 @@ check('installWebBridge 引导位于 createApp(App) mount 之前',
   rendererMain.indexOf('installWebBridge') < rendererMain.indexOf('createApp(App)'));
 
 // 11.2 键集对等契约：WEB_CHANNEL_TABLE 键集 === ClaudeLinkAPI 接口成员集（多键/少键均 fail）
+// P2 会话置顶（点 S4）新通道 SESSION_SET_PINNED 五处一致性由下方键集对等（表键 ↔ 接口成员）
+// + 注册计数断言覆盖（计数以 1) 节 regInvokeHandler( === 90 的计算式断言为准，此处不重复
+// 硬编码，防通道增减后再陈旧）；此处再显式钉三字面（ipc 常量 / 表项 / handler 注册）防键集
+// 对等被并行改动绕过。
+check("IPC_CHANNELS 含 SESSION_SET_PINNED: 'session:setPinned'", ipcConst.includes("SESSION_SET_PINNED: 'session:setPinned'"));
+check('WEB_CHANNEL_TABLE 含 setSessionPinned 表项', webBridge.includes('setSessionPinned: IPC_CHANNELS.SESSION_SET_PINNED'));
+check('ipc-handlers 注册 SESSION_SET_PINNED handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.SESSION_SET_PINNED'));
+// P3（2026-10-27 五问题）：FS_OPEN_PATH 新通道显式三字面钉（同 SESSION_SET_PINNED 先例防漂移）。
+check("IPC_CHANNELS 含 FS_OPEN_PATH: 'fs:openPath'", ipcConst.includes("FS_OPEN_PATH: 'fs:openPath'"));
+check('WEB_CHANNEL_TABLE 含 fsOpenPath 表项', webBridge.includes('fsOpenPath: IPC_CHANNELS.FS_OPEN_PATH'));
+check('ipc-handlers 注册 FS_OPEN_PATH handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.FS_OPEN_PATH'));
 const tableStart = webBridge.indexOf('const WEB_CHANNEL_TABLE');
 const tableEnd = webBridge.indexOf('\n};', tableStart);
 check('web-bridge.ts 含 WEB_CHANNEL_TABLE（Record<keyof ClaudeLinkAPI, string>）',
@@ -553,6 +578,101 @@ check('config-store defaultConfig 含 webAccess 默认值（enabled:false/port:W
   /webAccess:\s*\{\s*enabled:\s*false,\s*port:\s*WEB_ACCESS_DEFAULT_PORT,\s*allowedHosts:\s*\[\]\s*,?\s*\}/.test(configStoreSrc));
 check('config-store 从 shared/web-access-protocol 导入 WEB_ACCESS_DEFAULT_PORT',
   /import\s*\{[^}]*WEB_ACCESS_DEFAULT_PORT[^}]*\}\s*from\s*'\.\.\/\.\.\/shared\/web-access-protocol'/.test(configStoreSrc));
+
+// ── ⑬ P2 目录历史跨端同步（docs/plans/2026-10-24-web-sync-directory-naming-export-plan.md §2）：
+//   WORKSPACES_CHANGED 新推送通道三处同步（IPC_CHANNELS 常量 + ClaudeLinkAPI on/off 两成员 +
+//   WEB_CHANNEL_TABLE 两键）+ ipc-handlers.ts ADD/REMOVE 两 handler 成功返回前发射（=== 2，LIST
+//   不推）+ App.vue 全局订阅/注销 + SessionToolbar 打开下拉现拉兜底。对齐 §7 SESSIONS_CHANGED 写法。
+console.log('=== 13) WORKSPACES_CHANGED：三处同步 + 两处发射 + App.vue/SessionToolbar 消费 ===');
+const sessionToolbar = read('src/renderer/components/chat/SessionToolbar.vue');
+check("IPC_CHANNELS 含 WORKSPACES_CHANGED: 'workspaces:changed'",
+  ipcTypes.includes("WORKSPACES_CHANGED: 'workspaces:changed'"));
+check('ClaudeLinkAPI 含 onWorkspacesChanged 成员（无参回调 → 反注册函数）',
+  /onWorkspacesChanged:\s*\(callback:\s*\(\)\s*=>\s*void\)\s*=>\s*\(\)\s*=>\s*void;/.test(preloadApi));
+check('ClaudeLinkAPI 含 removeWorkspacesListener 成员',
+  /removeWorkspacesListener:\s*\(\)\s*=>\s*void;/.test(preloadApi));
+check('preload/api.ts 实现 onWorkspacesChanged（ipcRenderer.on/off 模式照 onProvidersChanged）',
+  /onWorkspacesChanged:\s*\(callback\)\s*=>\s*\{\s*const listener = \(\) => callback\(\);\s*ipcRenderer\.on\(IPC_CHANNELS\.WORKSPACES_CHANGED,\s*listener\);\s*return \(\) => ipcRenderer\.off\(IPC_CHANNELS\.WORKSPACES_CHANGED,\s*listener\);/.test(preloadApi.replace(/\r?\n/g, ' ')));
+check('preload/api.ts 实现 removeWorkspacesListener（removeAllListeners 形态）',
+  preloadApi.includes('removeWorkspacesListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.WORKSPACES_CHANGED)'));
+check('WEB_CHANNEL_TABLE 含 onWorkspacesChanged / removeWorkspacesListener 两键（键集对等由 §11.2 钉死）',
+  webBridge.includes('onWorkspacesChanged: IPC_CHANNELS.WORKSPACES_CHANGED') &&
+  webBridge.includes('removeWorkspacesListener: IPC_CHANNELS.WORKSPACES_CHANGED'));
+check('ipc-handlers.ts 两处 pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED 发射（ADD/REMOVE；LIST 不推）',
+  countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') === 2,
+  `实际 ${countOccurrences(handlers, 'pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED')}`);
+{
+  const addStart = handlers.indexOf('regInvokeHandler(IPC_CHANNELS.WORKSPACE_ADD_RECENT');
+  const addEnd = handlers.indexOf('regInvokeHandler(', addStart + 10);
+  const addSeg = addStart > -1 && addEnd > addStart ? handlers.slice(addStart, addEnd) : '';
+  check('WORKSPACE_ADD_RECENT：WORKSPACES_CHANGED 发射位于 addRecentWorkspace(dir) 之后（成功返回前）',
+    addSeg.includes('pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') &&
+    addSeg.indexOf('addRecentWorkspace(dir)') > -1 &&
+    addSeg.indexOf('pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') > addSeg.indexOf('addRecentWorkspace(dir)'));
+  const rmStart = handlers.indexOf('regInvokeHandler(IPC_CHANNELS.WORKSPACE_REMOVE_RECENT');
+  const rmEnd = handlers.indexOf('regInvokeHandler(', rmStart + 10);
+  const rmSeg = rmStart > -1 && rmEnd > rmStart ? handlers.slice(rmStart, rmEnd) : '';
+  check('WORKSPACE_REMOVE_RECENT：WORKSPACES_CHANGED 发射位于 removeRecentWorkspace(dir) 之后（删不存在目录仍推送，无害）',
+    rmSeg.includes('pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') &&
+    rmSeg.indexOf('removeRecentWorkspace(dir)') > -1 &&
+    rmSeg.indexOf('pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED') > rmSeg.indexOf('removeRecentWorkspace(dir)'));
+}
+check('App.vue 全局订阅 onWorkspacesChanged → sessionStore.loadRecentWorkspaces（信号型重拉，幂等）',
+  /stopWorkspacesChanged\s*=\s*window\.claudeLink\.onWorkspacesChanged\(\(\)\s*=>\s*\{\s*void sessionStore\.loadRecentWorkspaces\(\);/.test(appVue.replace(/\r?\n/g, ' ')));
+check('App.vue onBeforeUnmount 注销 stopWorkspacesChanged',
+  /if\s*\(stopWorkspacesChanged\)\s*stopWorkspacesChanged\(\);/.test(appVue) &&
+  appVue.indexOf('onBeforeUnmount(') < appVue.indexOf('stopWorkspacesChanged();'));
+check('SessionToolbar 目录按钮改 toggleWorkspaceMenu()（裸布尔翻转字面移除）',
+  sessionToolbar.includes('@click="toggleWorkspaceMenu()"') &&
+  !sessionToolbar.includes('@click="showWorkspaceMenu = !showWorkspaceMenu"'));
+check('SessionToolbar toggleWorkspaceMenu：打开时现拉 loadRecentWorkspaces（断线错过推送的兜底）',
+  /function toggleWorkspaceMenu\(\): void \{\s*showWorkspaceMenu\.value = !showWorkspaceMenu\.value;\s*(?:\/\/[^\r\n]*\s*)?if \(showWorkspaceMenu\.value\) void sessionStore\.loadRecentWorkspaces\(\);/.test(sessionToolbar));
+check('ClaudeLinkAPI 成员集含 onWorkspacesChanged / removeWorkspacesListener（apiMembers 抽取闭环，下限断言 ≥100 不变）',
+  apiMembers.includes('onWorkspacesChanged') && apiMembers.includes('removeWorkspacesListener') && apiMembers.length >= 100);
+
+// ── ⑮ 轮末文件改动两通道（docs/plans/2026-10-26-turn-file-changes-diff-and-web-changes-fix-plan §3.4）──
+console.log('=== 15) TURN_DIFF_*：轮末文件改动两通道三处同步 ===');
+check("IPC_CHANNELS 含 TURN_DIFF_LIST_SUMMARIES: 'turnDiff:listSummaries'",
+  ipcTypes.includes("TURN_DIFF_LIST_SUMMARIES: 'turnDiff:listSummaries'"));
+check("IPC_CHANNELS 含 TURN_DIFF_FILE_PATCH: 'turnDiff:filePatch'",
+  ipcTypes.includes("TURN_DIFF_FILE_PATCH: 'turnDiff:filePatch'"));
+check('ClaudeLinkAPI 含 listTurnDiffSummaries / getTurnFilePatch 成员',
+  /listTurnDiffSummaries:\s*\(sessionId:\s*string\)\s*=>\s*Promise<import\('\.\.\/shared\/types\/turn-file-diff'\)\.TurnFileDiffTurnSummary\[\]>;/.test(preloadApi) &&
+  /getTurnFilePatch:\s*\(sessionId:\s*string,\s*turnStartMessageId:\s*string,\s*endMessageId:\s*string\s*\|\s*null,\s*path:\s*string,\s*context\?:\s*number\)/.test(preloadApi));
+check('preload 实现两方法（invoke 对应通道）',
+  preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES, sessionId)') &&
+  preloadApi.includes('IPC_CHANNELS.TURN_DIFF_FILE_PATCH, sessionId, turnStartMessageId, endMessageId, path, context ?? 3'));
+check('WEB_CHANNEL_TABLE 含 listTurnDiffSummaries / getTurnFilePatch 两键（键集对等由 §11.2 双向断言自动覆盖）',
+  webBridge.includes('listTurnDiffSummaries: IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES') &&
+  webBridge.includes('getTurnFilePatch: IPC_CHANNELS.TURN_DIFF_FILE_PATCH'));
+check('ipc-handlers 注册 TURN_DIFF 两通道（regInvokeHandler 形态）',
+  handlers.includes('regInvokeHandler(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES') &&
+  handlers.includes('regInvokeHandler(IPC_CHANNELS.TURN_DIFF_FILE_PATCH'));
+check('ipc-handlers TURN_DIFF_FILE_PATCH 第 5 参 context: unknown + 钳制 1..100000 否则 3（2026-10-30 意图 diff 计划 §2.3）',
+  handlers.includes('path: unknown, context: unknown') &&
+  handlers.includes('context >= 1 && context <= 100000 ? context : 3'));
+check('turn-diff getPatch/computeFileDiff 声明含 context 默认参（context = 3 ≥ 2 处）',
+  countOccurrences(turnDiffSrc, 'context = 3') >= 2);
+
+// ── ⑯ web 产物滞后横条（2026-10-30 计划 §1.B / §7-S14）──
+console.log('=== 16) web 产物滞后横条（P4）===');
+// W1：web-bridge welcome 分支捕获主进程 buildRev（重连 welcome 亦更新），并以 getter + 响应式 ref 双出口暴露。
+check('W1 web-bridge 捕获 welcome buildRev（welcomedBuildRev / frame.buildRev / getWelcomedBuildRev / welcomedBuildRevRef 四要素）',
+  webBridge.includes('welcomedBuildRev') &&
+  webBridge.includes('frame.buildRev') &&
+  webBridge.includes('export function getWelcomedBuildRev') &&
+  webBridge.includes('export const welcomedBuildRevRef'));
+// W2：App.vue web 独占门控（桌面恒不渲染）+ 与渲染 bundle BUILD_REV 比对 + 可关闭（localStorage 记住 rev 对）。
+check('W2 App.vue 门控与比对（__claudeLinkWebBridge === true / BUILD_REV / shared/build-info / 不等比对 / 关闭键 / @click）',
+  appVue.includes('__claudeLinkWebBridge === true') &&
+  appVue.includes('BUILD_REV') &&
+  appVue.includes('shared/build-info') &&
+  appVue.includes('welcomedRev.value !== BUILD_REV') &&
+  appVue.includes('clWebRevWarnDismissed') &&
+  appVue.includes('@click="dismissRevWarn"'));
+// W3：本点纯「可见化」——不新增 IPC 通道（welcome 帧字段不是通道键；键集主防线见 §11.2 双向断言）。
+check('W3 通道键集零变化（buildRev 仅作 welcome 帧字段，无 IPC_CHANNELS.BUILD_REV）',
+  webBridge.includes('buildRev') && !webBridge.includes('IPC_CHANNELS.BUILD_REV'));
 
 console.log(`\n[P2+P3+P4+P5 接线契约] 通过 ${pass} / 失败 ${fail}`);
 if (fail > 0) process.exit(1);

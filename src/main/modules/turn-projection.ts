@@ -106,6 +106,8 @@ export interface TurnRunningEntry {
   sessionId: string;
   startedAt: number;
   generation: number;
+  /** 概览捕获时刻主进程时钟（与快照 serverNow 同语义，供渲染端时钟偏移校正）。 */
+  serverNow: number;
 }
 
 const projections = new Map<string, TurnProjection>();
@@ -341,10 +343,14 @@ export function getSnapshot(sessionId: string): TurnProjectionSnapshot | null {
 
 /** 进行中回合概览（仅未 ended 的投影；供「哪些回合在跑」类查询）。 */
 export function getRunningOverview(): TurnRunningEntry[] {
+  // P1-G3（2026-10-24 网页运行态同步）：概览捕获时刻统一取一次主进程时钟——渲染端
+  // applyRunningOverview 透传 markRunning 第三参即刷新 serverClockOffset，跨机计时
+  // 校正不再依赖后续 turn_started/快照到达。
+  const serverNow = Date.now();
   const running: TurnRunningEntry[] = [];
   for (const p of projections.values()) {
     if (p.endedAt != null) continue;
-    running.push({ sessionId: p.sessionId, startedAt: p.startedAt, generation: p.generation });
+    running.push({ sessionId: p.sessionId, startedAt: p.startedAt, generation: p.generation, serverNow });
   }
   return running;
 }

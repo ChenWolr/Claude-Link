@@ -4,7 +4,7 @@ import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
-import { formatDurationMs, formatEndedAt } from '../../../shared/format-duration';
+import { formatDurationMs, formatEndedAt, formatSentAt } from '../../../shared/format-duration';
 import { isReasoningReplayApiError } from '../../../shared/upstream-errors';
 import MessageAttachments from './MessageAttachments.vue';
 
@@ -33,6 +33,12 @@ const durationText = computed(() =>
 // B3：回合结束时刻（ended_at 持久化）文案；与 TurnTimer 完成态同口径（zh-CN 24 小时制）。
 // 老消息/中断回合无记录时不显示（诚实不造数）。
 const endedAtText = computed(() => formatEndedAt(props.message.endedAt));
+
+// S3：用户消息发送时刻（created_at，DB 带 Z UTC / 内存乐观毫秒级 ISO）文案，气泡脚注「发送于」。
+// 仅 user 气泡显示；缺失/非法返回空串不渲染（诚实不造数，与 endedAt 同原则）。
+const sentAtText = computed(() =>
+  props.message.role === 'user' ? formatSentAt(props.message.createdAt) : '',
+);
 
 // 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）。
 // 复制内容 = 正文 + 附件文件名列表；不含绝对路径/Base64/附件 ID。
@@ -83,6 +89,13 @@ async function copyMessage(): Promise<void> {
     <div v-if="hasContent && message.role === 'user'" class="bubble__content">{{ message.content }}</div>
     <!-- assistant/系统/工具仍走 markdown 渲染（v-html + 灯箱/mermaid 增强），行为零变化。 -->
     <div v-else-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
+    <!-- S3：user 气泡「发送于」脚注（created_at）。置于内容 v-if/v-else-if 链之后——插进两分支
+         之间会拆散 v-else-if 邻接（编译报错）。缺失/非法时 sentAtText 为空串，整块不渲染、
+         无空行残留；样式复用下方 .bubble__meta / .bubble__meta-clock，零新增。 -->
+    <div v-if="message.role === 'user' && sentAtText" class="bubble__meta">
+      <svg class="bubble__meta-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+      <span>发送于 {{ sentAtText }}</span>
+    </div>
     <div v-if="reasoningReplayAdviceVisible" class="bubble__advice" data-testid="reasoning-replay-advice">
       <div class="bubble__advice-title">已自动重试一次；若仍失败，可：</div>
       <ul class="bubble__advice-list">

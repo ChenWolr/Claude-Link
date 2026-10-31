@@ -1013,6 +1013,11 @@ async function main(): Promise<void> {
         getActiveProcess: () => undefined,
         getKnownTurnOutcome: () => null, // 真实时序：置位 knownOutcome 的出口先 deleteEntry 再 emitExit
         beginUserTurn: () => {},
+        // P1-G5（2026-10-24 网页运行态同步）：deps 形状扩展同步——投影接线在本 fake 场景无观察点，
+        // no-op 即可（行为钉在 tdd-bridge-dispatcher-verify 组 9）。P1-1（2026-10-25 代际守卫）：
+        // beginTurnProjection 新形状返回固定代际 1（否则 typecheck 红）；终态代际透传无观察点，emitTurnEndedFor 维持无参 fake。
+        beginTurnProjection: () => 1,
+        emitTurnEndedFor: () => {},
         noteTurnOutcome: () => {},
         isChatSendLocked: () => false,
         acquireChatSendLock: () => {},

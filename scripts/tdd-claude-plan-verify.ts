@@ -391,7 +391,12 @@ test('todos_replace 替换并递增 revision', () => {
   });
   assert.equal(next.todos.length, 2);
   assert.equal(next.revision, 1);
-  assert.notEqual(next.updatedAt, state.updatedAt);
+  // [P4 连带修复 2026-10-24]：原 assert.notEqual(next.updatedAt, state.updatedAt) 为时钟
+  // 分辨率 flake——updatedAt 取 new Date().toISOString()（毫秒精度，src/shared/types/
+  // claude-plan.ts :352/:419），createEmptyPlanState 与 applyPlanEvent 连续同步调用落在同一
+  // 毫秒时两值相等（实测约 3/10 次失败，与被测语义无关的偶发红灯）。契约本意是「事件刷新
+  // updatedAt 且单调不减」，改为 ISO 串字典序 ≥ 断言（等值允许，倒退拒绝）。
+  assert.ok(next.updatedAt >= state.updatedAt, `updatedAt 倒退：${next.updatedAt} < ${state.updatedAt}`);
 });
 
 test('task_upsert 新增任务', () => {

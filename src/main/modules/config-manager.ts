@@ -126,6 +126,8 @@ const defaultConfig: StoredConfig = {
   // 同型。令牌刻意不进 defaults/本形状：独立键 webAccessToken（getWebAccessToken/setWebAccessToken
   // 直存直读），config:get 等公开读路径永不携带。
   webAccess: { enabled: false, port: WEB_ACCESS_DEFAULT_PORT, allowedHosts: [] },
+  // S5：Skill 自动同步默认开（与渲染层 defaultConfig 同值；读路径 ?? true 双保险，老配置零迁移）。
+  skillAutoSync: true,
   // ⚠️ providerProfiles / lastUsedProviderId / lastUsedModelId 故意不设默认值：
   // electron-store 的 defaults 会并入 store 视图参与 has() 判定，一旦给了默认值
   // （哪怕是 []），「键是否存在」永远是 true，ensureProviderMigration 的迁移守卫
@@ -333,6 +335,8 @@ export function getConfig(): AppConfig {
     // 老配置缺键读出默认值不报错、不迁移不升版（同 mcpServers 先例；运行时旧库该键
     // 实际可能缺失/任意，故按 any 读入再 sanitize）。
     webAccess: sanitizeWebAccessConfig((config as any).webAccess),
+    // S5：Skill 自动同步开关——老配置缺键读出默认开（?? true，行为与无开关时一致，零迁移）。
+    skillAutoSync: config.skillAutoSync ?? true,
   };
 }
 

@@ -2,7 +2,9 @@
      挂载/卸载。z-index 1100：低于 interaction 1200（引擎权限审批优先级更高），高于普通内容；
      全局 toast 3000 最顶。ESC 与遮罩点击 =「稍后提醒」（dismissedVersions 本次运行内记忆）。
      2026-09-29 A 案视觉重排：图标章头部 + 版本对比 pill 行（对照 docs/prototypes/about-tab/a-identity-hero.html）；
-     script 逻辑与全部 data-testid 零改动。 -->
+     script 逻辑与全部 data-testid 零改动。
+     F1（2026-10-27 五问题计划 round-002）：autoHeight 下壳层 rect.height 为打开瞬间折叠态测量值，
+     本组件按真实渲染盒兜底校正 top（@toggle / 缩窗 / 双击复位 / 全局 pointerup 四路径），壳层零改动。 -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useUpdateStore } from '../../stores/update-store';
@@ -14,10 +16,33 @@ import ReleaseNotesView from '../common/ReleaseNotesView.vue';
 const updateStore = useUpdateStore();
 
 // ── 弹窗壳（P6：head 拖动 / 8 向缩放 / 双击复位居中；无 initialSize → 打开时测卡片自然尺寸，
-// 原 width:min(27.5rem,…) 保留为未测量帧回退） ──
+// 原 width:min(27.5rem,…) 保留为未测量帧回退）。autoHeight：卡片高度随内容自适应
+// （更新说明展开不把内容顶出卡片外），卡片 CSS max-height + overflow 兜底极矮视口；
+// 竖向缩放对自适应高度无视觉反馈，手柄只留 e/w 横向。 ──
 const cardRef = ref<HTMLElement | null>(null);
-const shell = useDialogShell(computed(() => updateStore.dialogVisible), cardRef, { minW: 320, minH: 220 });
+const shell = useDialogShell(computed(() => updateStore.dialogVisible), cardRef, { minW: 320, minH: 220, autoHeight: true });
 const shellStyle = shell.style; // 顶层 ref 模板自动解包（P4 使用方规范）
+
+// F1（round-001 审查）：autoHeight 下卡片高度随内容/视口变化，壳层 rect.height 停留在打开瞬间
+// 折叠态测量值（仅 window resize 触发且用旧高度重钳）——展开说明、缩窗、双击复位、全局 pointerup
+// 四条路径都可能把 footer 顶出视口。此处按真实渲染盒兜底校正 top（壳层零改动，不动测量/钳制逻辑）。
+function reclampCardBottom(): void {
+  const el = cardRef.value;
+  if (!el || !shell.rect.value) return;
+  const overBottom = el.getBoundingClientRect().bottom - (window.innerHeight - 4);
+  if (overBottom > 0) shell.rect.value = { ...shell.rect.value, top: Math.max(8, shell.rect.value.top - overBottom) };
+}
+function onNotesToggle(): void { requestAnimationFrame(reclampCardBottom); }
+function onHeadDblClick(): void { shell.resetToCenter(); requestAnimationFrame(reclampCardBottom); }
+let reclampTimer: ReturnType<typeof setTimeout> | null = null;
+function onWinResize(): void {
+  if (reclampTimer !== null) clearTimeout(reclampTimer);
+  reclampTimer = setTimeout(reclampCardBottom, 120); // 晚于壳层 80ms 重钳，按真实盒二次校正
+}
+// 壳层拖动与 e/w 横向缩放会话的 pointerup 在 use-dialog-shell.ts 内部收尾，使用方组件无钩子——
+// 组件级全局 pointerup 兜底重钳（一次接线同时覆盖拖动与缩放两种会话结束）。
+// reclampCardBottom 幂等（仅 overBottom>0 才改 top），全局触发无害；弹窗关闭时 cardRef 为 null 早退。
+function onPointerUpReclamp(): void { requestAnimationFrame(reclampCardBottom); }
 
 const status = computed(() => updateStore.status);
 const progress = computed(() => updateStore.state.progress);
@@ -49,9 +74,16 @@ function onKeydown(e: KeyboardEvent): void {
   e.preventDefault();
   updateStore.dismissUpdate();
 }
-onMounted(() => window.addEventListener('keydown', onKeydown));
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown);
+  window.addEventListener('resize', onWinResize);
+  window.addEventListener('pointerup', onPointerUpReclamp);
+});
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown);
+  window.removeEventListener('resize', onWinResize);
+  window.removeEventListener('pointerup', onPointerUpReclamp);
+  if (reclampTimer !== null) clearTimeout(reclampTimer);
   // A9：卸载兜底出栈（release 幂等）。
   escHandle?.release();
   escHandle = null;
@@ -61,7 +93,7 @@ onUnmounted(() => {
 <template>
   <div v-if="updateStore.dialogVisible" class="update-dialog__overlay" @click.self="updateStore.dismissUpdate()">
     <div ref="cardRef" class="update-dialog" :style="shellStyle" data-testid="update-dialog" role="dialog" aria-modal="true" aria-label="发现新版本">
-      <div class="update-dialog__head" @pointerdown="shell.beginDrag" @dblclick="shell.resetToCenter">
+      <div class="update-dialog__head" @pointerdown="shell.beginDrag" @dblclick="onHeadDblClick">
         <span class="update-dialog__head-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
         </span>
@@ -84,7 +116,7 @@ onUnmounted(() => {
         <template v-else-if="status === 'downloaded'">已下载就绪，重启应用后安装。</template>
       </div>
 
-      <details v-if="updateStore.state.releaseNotes" class="update-dialog__notes">
+      <details v-if="updateStore.state.releaseNotes" class="update-dialog__notes" @toggle="onNotesToggle">
         <summary>更新说明</summary>
         <ReleaseNotesView :notes="updateStore.state.releaseNotes" />
       </details>
@@ -104,7 +136,7 @@ onUnmounted(() => {
           @click="updateStore.install()"
         >立即重启更新</button>
       </footer>
-      <DialogResizeHandles :binder="shell" />
+      <DialogResizeHandles :binder="shell" :dirs="['e', 'w']" />
     </div>
   </div>
 </template>
@@ -131,6 +163,8 @@ onUnmounted(() => {
   color: var(--color-text);
   padding: 1.125rem 1.375rem;
   box-shadow: var(--ring-light), var(--elevation-3);
+  max-height: calc(100vh - 2.5rem); /* 视口兜底：极矮视口内卡片自身滚动，绝不越界 */
+  overflow: auto;
 }
 
 /* 头部：图标章 + 标题（2026-09-29 A 案）；拖动手柄条（P6）——head 内无按钮，关闭动作在 footer（button 忽略规则天然不涉及）。 */

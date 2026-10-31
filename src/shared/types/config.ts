@@ -95,6 +95,11 @@ export interface AppConfig {
   // defaultConfig 有默认值。token 刻意不在此形状内：存 electron-store 独立键 webAccessToken
   //（与 providerProfiles 先例一致），config:get 永不携带。
   webAccess: WebAccessConfig;
+  // S5（2026-10-22 six-issues §7.1）：Skill 自动同步开关，默认 true。仅控制 skills 目录 watcher
+  // 变更触发的全局重探（index.ts triggerGlobalProbe 注入回调处每次触发现读配置守卫，拨动即刻生效、
+  // 无需重启）；关闭后目录变化需手动「立即刷新」（COMMANDS_REFRESH_GLOBAL 通道）。
+  // 启动时初始全局探测与 ensureGlobalCommandProbeFresh 空快照兜底不受此开关影响（保底能力不变）。
+  skillAutoSync: boolean;
 }
 
 // Claude Link 管理库内的单台 MCP 服务器（§1.1 数据模型）。只承载定义，不含启停状态
@@ -110,8 +115,8 @@ export interface McpManagedServer {
   env?: Record<string, string>;
   url?: string; // http/sse 必填
   headers?: Record<string, string>;
-  // 探活超时覆盖（2026-10-19 mcp-settings-plan-a 点1）：可选正整数（1..120000，毫秒），
-  // 缺省沿用探活默认 10s（运行时生效值经 mcp-probe resolveProbeTimeoutMs：非法/缺省 → 10000、
+  // 探活超时覆盖（2026-10-19 mcp-settings-plan-a 点1；2026-10-27 p2 默认 10s→30s）：可选正整数（1..120000，毫秒），
+  // 缺省沿用探活默认 30s（运行时生效值经 mcp-probe resolveProbeTimeoutMs：非法/缺省 → 30000（DEFAULT_PROBE_TIMEOUT_MS）、
   // 超配封顶 120000）。仅影响探活与导出/写盘（sanitize/export/writer/视图/解析全链透传），
   // 不注入 SDK 会话（toSdkMcpServerConfig 不携带本字段，会话行为零变化）。
   timeoutMs?: number;

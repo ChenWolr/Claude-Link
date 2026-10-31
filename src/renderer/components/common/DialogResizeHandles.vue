@@ -1,6 +1,6 @@
 <template>
   <div
-    v-for="dir in DIRS"
+    v-for="dir in (props.dirs ?? DIRS_ALL)"
     :key="dir"
     class="dlg-rz"
     :class="`dlg-rz--${dir}`"
@@ -17,7 +17,9 @@ import type { ResizeHandleBinder } from '../../composables/use-dialog-shell';
 // - props 用最小接入接口 ResizeHandleBinder（duck-typed：useDialogShell 返回值整体传入即满足）；
 // - 定位/光标/hover 扩大命中样式在全局 main.css 的 .dlg-rz 段（手柄渲染在各类弹窗卡片内，须全局类）；
 // - 无插槽无文案，aria-hidden（纯指针交互，无键盘语义）。
-defineProps<{ binder: ResizeHandleBinder }>();
+// - dirs 可选（缺省全 8 向，既有使用方零改动）：autoHeight 弹窗（UpdateDialog）竖向缩放
+//   无视觉反馈，只渲染 e/w 横向手柄防误导。
+const props = defineProps<{ binder: ResizeHandleBinder; dirs?: ResizeDir[] }>();
 
-const DIRS: ResizeDir[] = ['n', 'e', 's', 'w', 'ne', 'nw', 'se', 'sw'];
+const DIRS_ALL: ResizeDir[] = ['n', 'e', 's', 'w', 'ne', 'nw', 'se', 'sw'];
 </script>

@@ -43,9 +43,12 @@ import { pushToMainWindow } from './push-bus';
 //（noteTurnEvent），回合计时由发射点显式驱动（noteTurnStarted/noteTurnEnded + turn_started/
 // turn_ended 伴生信号；R3（round-001）起 reasoning_replay 重发路径也在本文件发射起点）。纯内存不落库。
 import { noteTurnStarted, noteTurnEvent, noteTurnEnded, getSnapshot, clearSession } from './turn-projection';
+// P3（turn-file-changes 计划 §4-P3）：checkpoint 记录器旁路（写文件工具 after 快照落库）。
+import { noteCheckpointEvent, disposeSession } from './turn-diff-checkpoint';
 import { convertResultMessage } from '../../shared/result-converter';
 import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
+import { maybeRetrySessionNaming } from './topic-analyzer';
 import { logger } from '../utils/logger';
 import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState, clearReasoningReplayTurnFlag } from './reasoning-replay-auto-retry';
 import * as sessionRepo from '../database/repositories/session-repo';
@@ -115,7 +118,7 @@ import {
   type PermissionUpdate,
   type SdkPermissionSettings,
 } from './sdk-permissions';
-import { sdkCommandRegistry } from './sdk-command-registry';
+import { GLOBAL_FALLBACK_SESSION_ID, sdkCommandRegistry } from './sdk-command-registry';
 import { getUserOriginFingerprint } from './command-source-watcher';
 import { buildNativeSdkOptionsCore, mergeSpawnOptions } from './sdk-command-options';
 import { buildCommandOriginEvidence } from './sdk-command-origin';
@@ -627,6 +630,7 @@ export function markSessionDeleted(sessionId: string): void {
   apiRetryStates.delete(sessionId);
   sessionThinkingTokenThrottle.delete(sessionId);
   clearSession(sessionId); // SA-1（turn-projection）：回合流式投影随会话删除收口清理
+  disposeSession(sessionId); // P3（turn-file-changes）：checkpoint 记录器内存暂存随会话删除收口清理（DB 行靠 sessions CASCADE）
 }
 /** P1-6：已标记删除的会话拒绝复活（markSessionActive 不再登记、返回 false）。 */
 export function isSessionMarkedDeleted(sessionId: string): boolean {
@@ -1069,7 +1073,11 @@ function computeContextWindowOverrideTokens(input: {
  * 优先级：Claude Code managed < user < project < local < 此处 claude-link 显式 Options.settings。
  * 返回：
  *   settings —— 完整显式 settings（projection 顶层 + 会话级 permissions + 动态注入 env + thinking patch + 会话钉住 skillOverrides）；
- *   additionalDirectories —— 用户配置与附件目录并集（非空时同时写顶层 Options 与 settings.permissions）。
+ *   additionalDirectories —— 用户配置与附件目录并集（非空时同时写顶层 Options 与 settings.permissions）；
+ *   mcpOverridesActive —— H2 收紧（2026-10-29）：mergeMcpServersIntoSettings 返回的
+ *   overridesHitExisting（effective overrides 中至少一个值==='off' 的键命中三层现存定义，
+ *   孤儿键不算；B-M1 加固同轮：默认 io 读失败/负缓存短路层不可观测且存在 'off' 键时保守
+ *   true），供 buildNativeSdkOptionsCore 计算 strictMcpConfig 门控信号。
  */
 function buildClaudeLinkSettingsBlock(
   config: AppConfig,
@@ -1083,7 +1091,7 @@ function buildClaudeLinkSettingsBlock(
   // 回合/探测构造 options 时对同一 sessionId 重复执行 prepared 索引 SELECT；未传参（undefined/null）
   // 时保持原状回读，防御未来新调用方。类型即 sessionRepo.getSession 的返回（shared Session | null）。
   sessionRowIn?: ReturnType<typeof sessionRepo.getSession>,
-): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined } {
+): { settings: Record<string, unknown>; additionalDirectories: string[] | undefined; mcpOverridesActive: boolean } {
   // 内联 settings——claude-link 显式设置叠加在原生来源之上（managed < user < project < local
   // < Options.settings）。与 settings-writer.writeClaudeSettings 共用完整投影（buildClaudeSettingsProjection），
   // 避免 SDK 路径丢 hooks 等 advancedJson 顶层设置；投影内含 env（仅 advancedJson.env 的非凭据
@@ -1189,14 +1197,16 @@ function buildClaudeLinkSettingsBlock(
   // os.homedir()，advancedJson.env 可能覆盖 USERPROFILE/HOME）。
   // 【字节级一致硬约束】空 MCP 配置（三层全空/全被禁用）下本调用不写 out.mcpServers 键——
   // settings 块与改动前 JSON.stringify 逐字节相同（T1/E3a 断言钉死，生产 query/probe 零影响）。
-  mergeMcpServersIntoSettings(
+  // 返回值 overridesHitExisting（H2 收紧，2026-10-29）：effective overrides 中至少一个值==='off'
+  // 的键命中三层现存定义（孤儿键不算），经本函数返回值 mcpOverridesActive 供 core 构造点算 strict。
+  const mcpMerge = mergeMcpServersIntoSettings(
     out,
     config,
     { mcpOverrides: sessionRow?.mcpOverrides ?? null },
     opts.workingDir || config.workingDirectory || null,
     { userHome: effectiveUserHome() ?? os.homedir() },
   );
-  return { settings: out, additionalDirectories };
+  return { settings: out, additionalDirectories, mcpOverridesActive: mcpMerge.overridesHitExisting };
 }
 
 function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: BrowserWindow, entry: SessionEntry): Record<string, unknown> {
@@ -1224,13 +1234,15 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
   // 加载 user/project/local）。
   // D1 去重：同一 sessionRow 亦传入 settings 块构造，消除重复读（先读一行，喂给两处消费）。
   const sessionRow = sessionRepo.getSession(sessionId);
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
-  // B-2 strict 门控信号：钉住优先 effective overrides（与 sdk-mcp.ts mergeMcpServersIntoSettings
-  // 的 overrides 取值同一公式——`sessionRow?.mcpOverrides ?? config.mcpOverrides`，改则同步改；
-  // sessionRow 缺省/无行经 ?. 自然回退全局）。关键坑：不得改用 config.mcpOverrides 单独判定——
-  // 「会话钉住 user:foo 禁用+全局空+merged 空」场景下全局判定会误得 strict=false，引擎原生拉起
-  // foo，钉住禁用失效（selftest-mcp-settings I5 钉死）（D1：同一 sessionRow 亦传入 settings 块构造，消除重复读）。
-  const effectiveOverrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;
+  // B-2 strict 门控信号（2026-10-29 H2 收紧）：构造点不再自算 effective overrides——信号源改为
+  // settings 块构造内 mergeMcpServersIntoSettings 返回的 overridesHitExisting（钉住优先取值公式
+  // 在该 merge 函数内：`sessionRow?.mcpOverrides ?? config.mcpOverrides`，sessionRow 缺省/无行
+  // 自然回退全局，与注入链同一 effective overrides，杜绝两处口径漂移）。新口径：effective
+  // overrides 中至少一个值==='off' 的键命中三层现存定义才算「接管激活」——孤儿键（外部删除后
+  // 残留的纯 'off' 键）不命中现存定义，不再触发 strictMcpConfig、不再静默丢弃引擎原生 MCP 来源
+  // （claude.ai 云端 connectors/插件 MCP 恢复加载）；命中定义的禁用键仍 strict=true（「禁用生效」
+  // 保底。selftest-mcp-settings I5 新口径钉死、I7 直测返回值、I6 钉形态）。
+  const { settings, additionalDirectories, mcpOverridesActive } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
     env: buildSpawnEnv(override),
     exe: resolveExecutable(config.cliPath),
@@ -1242,7 +1254,7 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     permissionMode: effectivePermissionMode as SdkOptions['permissionMode'],
     settings,
     additionalDirectories,
-    mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0, // 钉住优先口径，与 buildProbeSdkOptions 的 core 构造点互指，改则同步改
+    mcpOverridesActive,
   });
   // 生产 query 特有：流式增量（stream_event）、子 agent 思考透传、统一交互弹窗 hook。
   options.includePartialMessages = true;
@@ -1262,7 +1274,9 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
 // 近似值（result 的 SDK duration_ms）补发，其余终态无近似值则不发。旁路追加：不经
 // forwardEvent/persistCliEvent（不落库），直推 CHAT_EVENT，不触碰既有事件流顺序与载荷。
 // generation 为事件所属回合代际——与投影代际不符（旧回合迟到终态）时不结算新回合投影。
-function emitTurnEnded(
+// P1-G5（2026-10-24 网页运行态同步）加 export：bridge/init.ts 接线为 dispatcher
+// emitTurnEndedFor，桥接回合终态同样收口投影（幂等：正常路径 result 已先结算则 no-op）。
+export function emitTurnEnded(
   sessionId: string,
   outcome: 'success' | 'error' | 'interrupted',
   generation?: number,
@@ -1295,6 +1309,33 @@ function emitTurnEnded(
   }
 }
 
+// P1-G5（2026-10-24 网页运行态同步）：桥接回合投影起点——bridge dispatcher 经 TurnEngineDeps
+// 注入调用（bridge/init.ts 接线，dispatcher 自身不 import 本模块）。发射形态完全对齐 CHAT_SEND
+// 直发发射块（ipc-handlers.ts turn_started 块）：generation 取该会当前 query 代际（spawnForChat
+// 已同步建 entry，正常可达）；generation<0 兜底时投影不登记（noteTurnStarted 返 null）、事件照发、
+// startedAt 以发射点时钟兜底（A2 语义保持）。try 包裹：投影登记/发射异常不阻塞桥接回合。
+// 返回本回合 generation（<0 为兜底值），供 dispatcher 终态透传做代际守卫（P1-1）。
+export function noteTurnStartedAndEmit(sessionId: string): number {
+  let gen = -1;
+  try {
+    gen = getCurrentQueryInstance(sessionId) ?? -1;
+    const startedAt = noteTurnStarted(sessionId, gen);
+    pushToMainWindow(IPC_CHANNELS.CHAT_EVENT, {
+      sessionId,
+      event: {
+        type: 'turn_started',
+        startedAt: startedAt ?? Date.now(),
+        serverNow: Date.now(),
+        turnKind: 'user',
+        generation: gen,
+      },
+    });
+  } catch {
+    // 伴生信号可丢：异常不阻塞桥接回合（gen 已算出则仍返回已算出值，未算出返回 -1）
+  }
+  return gen;
+}
+
 function forwardEvent(
   sessionId: string,
   mainWindow: BrowserWindow,
@@ -1318,6 +1359,13 @@ function forwardEvent(
   } catch {
     // 投影是可丢缓存：异常静默忽略
   }
+  // P3（turn-file-changes 计划 §4-P3）：checkpoint 记录器旁路——写文件类工具的 tool_use /
+  // tool_result 事件喂给记录器（内部全 try/catch 吞错；此处再独立 try 隔离，异常不得阻塞转发/落库链）。
+  try {
+    noteCheckpointEvent(sessionId, event);
+  } catch {
+    // checkpoint 可丢：异常静默忽略
+  }
   try {
     persistCliEvent(sessionId, event);
   } catch (err) {
@@ -1329,6 +1377,16 @@ function forwardEvent(
   // 已删除会话因上方 isSessionActive 守卫提前 return，不会弹陈旧通知。
   if (event.type === 'result' && isSuccessfulCliResult(event)) {
     notifySessionCompleted(mainWindow, sessionId);
+    // P4-A（计划 2026-10-24-web-sync §3.2.2-2）：回复结束自动重试命名——与失焦通知完全同点位、
+    // 同「不阻塞业务」原则（同步调用不 await、异常吞噬）。内部自带闸序：仅可升级名源
+    //（slot/first_input）+ 尝试预算 <3 + 无在飞分析才动作；custom/generated 会话 no-op。
+    // 行为变化（有意，计划 §3.2.2-3）：此前仅渲染层首条 user 消息触发命名，本边沿使
+    // 「首轮失败后继续对话」「无渲染层触发者的回合」也会被升级命名。
+    try {
+      maybeRetrySessionNaming(sessionId);
+    } catch {
+      // 同通知原则：不阻塞业务
+    }
   }
   // v3 队列调度中央钩子：result 是回合结束的权威信号（到达时进程可能尚未退出，
   // 绝不以进程存在性做守卫）。三态映射后交引擎状态机分派（arm/halt，幂等闸在引擎内）。
@@ -2845,13 +2903,14 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
   // 显式 settings 共用 buildClaudeLinkSettingsBlock，经工厂统一放入 Options）。
   // D1 去重：同一 sessionRow 亦传入 settings 块构造，消除重复读（先读一行，喂给两处消费）。
   const sessionRow = sessionRepo.getSession(sessionId);
-  const { settings, additionalDirectories } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
-  // B-2 strict 门控信号：与 buildSdkOptions 的 core 构造点互指（同一钉住优先公式——
-  // `sessionRow?.mcpOverrides ?? config.mcpOverrides`，与 sdk-mcp.ts mergeMcpServersIntoSettings
-  // 同口径，改则同步改）。不得改用 config.mcpOverrides 单独判定（反例见 buildSdkOptions 处注释，
-  // selftest-mcp-settings I5 钉死）；probe 的哨兵 sessionId 无行时经 ?. 自然回退全局
-  //（D1：同一 sessionRow 亦传入 settings 块构造，消除重复读）。
-  const effectiveOverrides = sessionRow?.mcpOverrides ?? config.mcpOverrides;
+  // B-2 strict 门控信号：与 buildSdkOptions 的 core 构造点互指（2026-10-29 H2 收紧同款改法）——
+  // 信号源改为 settings 块构造内 mergeMcpServersIntoSettings 返回的 overridesHitExisting（钉住
+  // 优先取值公式在该 merge 函数内：`sessionRow?.mcpOverrides ?? config.mcpOverrides`，probe 的
+  // 哨兵 sessionId 无行时自然回退全局，与注入链同一 effective overrides）。新口径：effective
+  // overrides 中至少一个值==='off' 的键命中三层现存定义才算「接管激活」，孤儿键不命中现存定义
+  // 不再触发 strict（不得改用全局 overrides 单独判定的反例见 buildSdkOptions 处注释，
+  // selftest-mcp-settings I5 新口径钉死、I6 钉形态）。
+  const { settings, additionalDirectories, mcpOverridesActive } = buildClaudeLinkSettingsBlock(config, sessionId, opts, thinkingConfig, requestedAlias, override, effectivePermissionMode, sessionRow);
   const options: Record<string, unknown> = buildNativeSdkOptionsCore({
     env: buildSpawnEnv(override),
     exe,
@@ -2863,7 +2922,7 @@ function buildProbeSdkOptions(opts: SpawnOptions, sessionId: string): { options:
     permissionMode: effectivePermissionMode as SdkOptions['permissionMode'],
     settings,
     additionalDirectories,
-    mcpOverridesActive: Object.keys(effectiveOverrides ?? {}).length > 0, // 钉住优先口径，与 buildSdkOptions 的 core 构造点互指，改则同步改
+    mcpOverridesActive,
   });
 
   return { options, exe };
@@ -3350,6 +3409,61 @@ export function ensureGlobalCommandProbeFresh(mainWindow: BrowserWindow, maxAgeM
   if (sdkCommandRegistry.getGlobalFallback()) return; // 已有兜底：无需重试
   if (Date.now() - lastGlobalProbeAttemptAt < maxAgeMs) return; // 节流：距上次尝试不足 maxAgeMs
   runGlobalCommandProbe(mainWindow);
+}
+
+/**
+ * S5（2026-10-22 six-issues §7.1）：显式刷新通道——Skill 页「立即刷新」经 COMMANDS_REFRESH_GLOBAL
+ * 到此。与 ensureGlobalCommandProbeFresh 的差异：绕过 60s 节流与「仅 globalFallback 为空时生效」
+ * 条件，无条件跑一次探测（用户显式意图，probe spawn 成本可接受）；复用 runGlobalCommandProbe 幂等锁
+ * 做在飞去重——探测已在跑则 await 同一 donePromise（不并发 spawn、不打断在飞探测），与 watcher 自动
+ * 重探/手动刷新并发安全。完成后既有 applyGlobalProbeCommands → emitGlobalCommandsChanged 自动广播
+ * （快照 REPLACE 幂等，渲染层 diff 各以自己记录的 before 集计算）。手动刷新成功顺带在 runGlobalCommandProbe
+ * 入口推进 lastGlobalProbeAttemptAt，后续 D6 节流窗口自然顺延。
+ * 失败不 throw：CLI 缺失 / hb10-CMD-07 三路失败旗标置位时，不以 registry 兜底为 null 为前提——即使存在
+ * 旧快照也返回显式失败终态快照（degraded/error，commands 空、哨兵 sessionId；F1，2026-10-24 review），
+ * 错误文案对齐 shared/commands-get.ts 只读分流 degraded 快照——渲染层沿既有 snap-status 错误条呈现，
+ * 不崩溃。
+ */
+export async function refreshGlobalCommands(mainWindow: BrowserWindow): Promise<SessionCommandSnapshot> {
+  if (!globalProbe) runGlobalCommandProbe(mainWindow);
+  const entry = globalProbe;
+  if (entry) await entry.donePromise;
+  // F1（2026-10-24 review）：手动刷新所 await 的探测失败时，不得把探测前的旧 ready 快照当成功返回。
+  // 旗标在 runGlobalCommandProbe 入口清位，此刻的值精确反映刚结束的这次探测；显式失败终态快照
+  // 让渲染层沿 snap-status 错误条呈现、delta/lastAdded 不被误清（计划 §7.4）。watcher 后台路径
+  // 不受影响（emitGlobalCommandsChanged 只在成功写 registry 后广播）。
+  if (globalCliMissing || isGlobalProbeFailed()) {
+    return {
+      sessionId: GLOBAL_FALLBACK_SESSION_ID,
+      commands: [],
+      status: globalCliMissing ? 'degraded' : 'error',
+      source: 'cache',
+      updatedAt: new Date().toISOString(),
+      error: globalCliMissing
+        ? '未检测到本地 Claude Code，无法发现 Slash 命令'
+        : '命令探测失败，可重试（点「立即刷新」重试）',
+    };
+  }
+  const fallback = sdkCommandRegistry.getGlobalFallback();
+  if (fallback) return fallback;
+  if (globalCliMissing) {
+    return {
+      sessionId: GLOBAL_FALLBACK_SESSION_ID,
+      commands: [],
+      status: 'degraded',
+      source: 'cache',
+      updatedAt: new Date().toISOString(),
+      error: '未检测到本地 Claude Code，无法发现 Slash 命令',
+    };
+  }
+  return {
+    sessionId: GLOBAL_FALLBACK_SESSION_ID,
+    commands: [],
+    status: 'error',
+    source: 'cache',
+    updatedAt: new Date().toISOString(),
+    error: '命令探测失败，可重试（点「立即刷新」重试）',
+  };
 }
 
 /**

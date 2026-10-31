@@ -243,3 +243,16 @@ scripts/selftest-web-access-protocol.ts
 scripts/tdd-web-access-wiring-verify.ts
 scripts/tdd-web-secure-context-verify.ts
 scripts/tdd-turn-projection-verify.ts
+scripts/tdd-background-task-session-scope-verify.ts
+scripts/tdd-user-message-time-verify.ts
+scripts/tdd-session-pin-verify.ts
+scripts/tdd-skill-refresh-verify.ts
+scripts/tdd-web-reopen-runtime-verify.ts
+scripts/tdd-session-name-source-verify.ts
+scripts/tdd-export-web-download-verify.ts
+scripts/tdd-export-target-unicast-verify.ts
+scripts/tdd-turn-file-diff-verify.ts
+scripts/tdd-changes-web-resilience-verify.ts
+scripts/tdd-update-dialog-autoheight-verify.ts
+scripts/tdd-mcp-probe-spawn-verify.ts
+scripts/tdd-chat-file-open-verify.ts

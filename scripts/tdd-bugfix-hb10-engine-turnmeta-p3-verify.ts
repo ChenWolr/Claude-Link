@@ -87,7 +87,8 @@ check('⑥ ENG-10：handleBackgroundEvent 补 task_started/progress/notification
   const bgEnd = chat.indexOf('function handleCliEvent');
   const body = chat.slice(bgIdx, bgEnd);
   assert.match(body, /event\.subtype === 'task_started'/, '缺 task_started 分支');
-  assert.match(body, /applyProgressEvent\(store, event\);/, '缺任务卡片 upsert 接线');
+  // P5（2026-10-22）按会话分桶：后台分支透传 payload.sessionId（sid）到 applyProgressEvent。
+  assert.match(body, /applyProgressEvent\(store, event, sid\);/, '缺任务卡片 upsert 接线（含会话 id 透传）');
 });
 
 // ⑦ ENG-12：persistCliEvent error case。
