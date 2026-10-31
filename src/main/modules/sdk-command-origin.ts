@@ -117,7 +117,7 @@ function scanSkillTree(
  * commands 目录扫描（P1-9 递归化）：`.claude/commands/<dir>/<cmd>.md` 形态的命名空间命令
  * 之前只扫根层 → 磁盘无证据 → origin=unknown → availability hidden → 从菜单消失。
  * 子目录命令 name 形态经真实 SDK probe 确证为「目录:basename」冒号拼接
- *（scripts/p1-09-subdir-command-probe.ts：commands/devtool/buildcmd.md → `devtool:buildcmd`，
+ *（commands/devtool/buildcmd.md → `devtool:buildcmd`，
  * system.init.slash_commands 与 supportedCommands 双源一致）。
  * 证据同时记录「冒号拼接全名」与「basename」两个键，classifyOrigin 命中任一即可；
  * 限深 6 层防爆炸（hb10-CMD-09 由 3 调到 6，见下方 COMMAND_SCAN_MAX_DEPTH），symlink 目录跳过（与 scanSkillTree 同防环手法）。
