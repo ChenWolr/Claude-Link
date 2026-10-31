@@ -261,7 +261,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       return [];
     }
   });
-  regInvokeHandler(IPC_CHANNELS.TURN_DIFF_FILE_PATCH, async (_event, sessionId: unknown, turnStartMessageId: unknown, endMessageId: unknown, path: unknown) => {
+  regInvokeHandler(IPC_CHANNELS.TURN_DIFF_FILE_PATCH, async (_event, sessionId: unknown, turnStartMessageId: unknown, endMessageId: unknown, path: unknown, context: unknown) => {
     try {
       // 参数校验：sessionId/turnStartMessageId/path 须非空字符串；endMessageId 合法形态为
       // string | null（null = 上界 +∞）。非法一律回 unavailable，不抛错（风格对齐 MESSAGE_GET_BY_SESSION）。
@@ -273,7 +273,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       ) {
         return { mode: 'unavailable', patch: '', truncated: false };
       }
-      return turnDiff.getPatch(sessionId, turnStartMessageId, endMessageId, path);
+      // 第 5 参 context（hunk 上下文行数）：1..100000 整数否则回退 3，不抛错（100000 =
+      // 渲染层「全文」档 FULL_CONTEXT 同值；缺省/非法/0/负数/小数/超界一律 3）。
+      const ctx = typeof context === 'number' && Number.isInteger(context) && context >= 1 && context <= 100000 ? context : 3;
+      return turnDiff.getPatch(sessionId, turnStartMessageId, endMessageId, path, ctx);
     } catch (e) {
       logger.warn(`[turnDiff:filePatch] 取 patch 失败：${e instanceof Error ? e.message : String(e)}`);
       return { mode: 'unavailable', patch: '', truncated: false };

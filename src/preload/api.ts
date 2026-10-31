@@ -285,7 +285,7 @@ export interface ClaudeLinkAPI {
   openChangeFile: (workingDir: string | null, path: string, mode?: 'default' | 'choose') => Promise<ChangesOpenResult>;
   // 轮末文件改动（turn-diff）：回合摘要列表 + 单文件 patch 懒加载（网页版经 web-bridge 同通道可达）。
   listTurnDiffSummaries: (sessionId: string) => Promise<import('../shared/types/turn-file-diff').TurnFileDiffTurnSummary[]>;
-  getTurnFilePatch: (sessionId: string, turnStartMessageId: string, endMessageId: string | null, path: string) => Promise<{ mode: import('../shared/types/turn-file-diff').TurnFileDiffMode; patch: string; truncated: boolean }>;
+  getTurnFilePatch: (sessionId: string, turnStartMessageId: string, endMessageId: string | null, path: string, context?: number) => Promise<{ mode: import('../shared/types/turn-file-diff').TurnFileDiffMode; patch: string; truncated: boolean }>;
   addTask: (sessionId: string, payload: ChatSendPayload) => Promise<{ task: Task; tasks: Task[] }>;
   removeTask: (taskId: string) => Promise<Task[]>;
   // D 点：后台任务（task_* 编排）终态输出文件只读（主进程强制绝对路径 + 512KB 上限 + 截断标记）。
@@ -489,8 +489,8 @@ export function createApi(): ClaudeLinkAPI {
     getChangeDiff: (workingDir, path, context) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_DIFF, workingDir, path, context),
     openChangeFile: (workingDir, path, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHANGES_OPEN_FILE, workingDir, path, mode),
     listTurnDiffSummaries: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES, sessionId),
-    getTurnFilePatch: (sessionId, turnStartMessageId, endMessageId, path) =>
-      ipcRenderer.invoke(IPC_CHANNELS.TURN_DIFF_FILE_PATCH, sessionId, turnStartMessageId, endMessageId, path),
+    getTurnFilePatch: (sessionId, turnStartMessageId, endMessageId, path, context) =>
+      ipcRenderer.invoke(IPC_CHANNELS.TURN_DIFF_FILE_PATCH, sessionId, turnStartMessageId, endMessageId, path, context ?? 3),
     addTask: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.TASK_ADD, sessionId, payload),
     removeTask: (taskId) => ipcRenderer.invoke(IPC_CHANNELS.TASK_REMOVE, taskId) as Promise<Task[]>,
     // D 点：后台任务终态输出文件只读（对象载荷 { outputFile }，对齐主进程 handler 入参形状）。

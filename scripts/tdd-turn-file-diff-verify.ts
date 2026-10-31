@@ -13,6 +13,11 @@
 //             + deriveTurnRanges/getPatch/listSummaries 临时库侧）。
 //   段D round-001 R1 追加 D-ro①/D-ro②：同轮/跨轮乱序落库（数组序=id 序 ≠ mrow 序）时
 //             after/before 一律按 mrow（消息序）最大者选取的回归钉。
+//   段E（P1，2026-10-30 意图合成器重写计划 §2.2/§2.3）：synthesizeFirstChange 虚拟文档链
+//             ——E1 mrow 排序治乱序（S2）/ E2 hunk 头锚定真实行号（S3）/ E3 context 透传生效（S1）/
+//             E4 多 Write ± 净计（H3 有意修正）/ E5 截断与 ± 全量（S5/N3）/ E6 getPatch context
+//             端到端（S6 DB 侧）/ E7 未命中追加兜底（S4）。
+//             E8 合成 patch 喂渲染层 parseUnifiedDiff 解析链契约钉（review-round1 F-1 跟进）。
 //
 // 运行：npx tsx scripts/tdd-turn-file-diff-verify.ts
 // （better-sqlite3 为 Electron ABI：当前 node 不匹配时自动以 ELECTRON_RUN_AS_NODE 重 spawn 本脚本——
@@ -24,6 +29,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { parseUnifiedDiff } from '../src/renderer/utils/diff-parser';
 
 const repoRoot = path.resolve(__dirname, '..');
 
@@ -1262,6 +1268,298 @@ function runSegmentD(): void {
 }
 
 runSegmentD();
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 段E（P1，2026-10-30 意图合成器重写计划 §2.2/§2.3）：虚拟文档链 + mrow 排序 + context 透传。
+// 纯函数直测（内存 rows）+ E6 走真实临时库 getPatch。hunk 头用 @@ -a,b +c,d @@ 正则抽取断言。
+// E8 另把合成 patch 直接喂渲染层 parseUnifiedDiff，钉渲染解析契约（组序/skip 分隔/行号单调/乱序治愈）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\n=== 段E 意图合成器重写（锚定/排序/context） ===');
+
+type ComputeCtxFn = (rows: unknown[], startRow: number, endRow: number | null, path: string, context?: number) => FileDiffResult;
+type GetPatchCtxFn = (sessionId: string, turnStartMessageId: string, endMessageId: string | null, path: string, context?: number) =>
+  { mode: string; patch: string; truncated: boolean };
+
+interface HunkHeader { oldStart: number; oldCount: number; newStart: number; newCount: number }
+
+const E_HUNK_RE = /^@@ -(\d+),(\d+) \+(\d+),(\d+) @@$/;
+
+/** 从 patch 抽全部 hunk 头（@@ -oldStart,oldCount +newStart,newCount @@）。 */
+function hunkHeadersOf(patch: string): HunkHeader[] {
+  const out: HunkHeader[] = [];
+  for (const line of patch.split('\n')) {
+    const m = E_HUNK_RE.exec(line);
+    if (m) out.push({ oldStart: Number(m[1]), oldCount: Number(m[2]), newStart: Number(m[3]), newCount: Number(m[4]) });
+  }
+  return out;
+}
+
+/** 按 @@ 头切 section，返回各 hunk 的正文行（跳过空行；文件头 ---/+++ 在首个 @@ 之前，不落入任何 section）。 */
+function hunkBodiesOf(patch: string): string[][] {
+  const bodies: string[][] = [];
+  let cur: string[] | null = null;
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('@@')) { cur = []; bodies.push(cur); continue; }
+    if (cur !== null && line !== '') cur.push(line);
+  }
+  return bodies;
+}
+
+{
+  const fileDiffCtx = computeFileDiff as ComputeCtxFn | undefined;
+  const getPatchCtx = turnDiffMod?.getPatch as GetPatchCtxFn | undefined;
+
+  if (typeof fileDiffCtx !== 'function') {
+    const why = `computeFileDiff 不可用${turnDiffErr ? `（模块加载失败：${turnDiffErr.slice(0, 160)}）` : ''}`;
+    check('E1', '乱序治愈（S2）：mrow 序重排后 hunk 按文件位置升序', false, why);
+    check('E2', '行号真实（S3）：Edit 第 7 行 → hunk newStart=7', false, why);
+    check('E3', 'context 生效（S1）：ctx=3 → 8 行 / ctx=10 → 11 行、编辑 hunk ±=1/1', false, why);
+    check('E4', '多 Write ± 净计（H3）：4/0 而非重复整计 7/0', false, why);
+    check('E5', '截断与 ±（S5/N3）：3000 行 Write → truncated、±=3000/0、正文 ≤2000', false, why);
+    check('E6', 'getPatch context 端到端（S6 DB 侧）：ctx=10 正文 > ctx=3、mode 均 full', false, why);
+    check('E7', '未命中追加（S4 兜底）：newStart=6 + 命中片段 newStart=3 升序', false, why);
+    check('E8', '合成 patch 喂渲染层解析链（F-1 钉）：parseUnifiedDiff 非 null 非 binary、含 skip 组、mod 组行号单调不重置、-L2 组先于 -L9 组', false, why);
+  } else {
+    // a) E1 乱序治愈（S2）：rows 按 t.id 序给出（数组序=id 序）、mrow 与数组序相反——
+    //    t.id1=Edit L9（mrow 103）、t.id2=Edit L2（mrow 102）、t.id3=Write 10 行文档（mrow 101）。
+    //    Write 行带可用 disk 快照（after_content=文档全文）→ mode=first-change。
+    //    期望：重排后 Write→L2→L9 虚拟文档链锚定，hunk newStart 全体严格升序；
+    //    修改型 hunk（oldStart>0，排除 Write 的 @@ -0,0 新建 hunk）恰 2 个且 newStart=[2,9]。
+    {
+      const doc10 = Array.from({ length: 10 }, (_, i) => `L${i + 1}`).join('\n') + '\n';
+      const rows = [
+        mkRow(1, { mrow: 103, path: 'PE1', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'PE1', old_string: 'L9', new_string: 'L9X' }) }),
+        mkRow(2, { mrow: 102, path: 'PE1', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'PE1', old_string: 'L2', new_string: 'L2X' }) }),
+        mkRow(3, { mrow: 101, path: 'PE1', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'PE1', content: doc10 }), after_content: doc10 }),
+      ];
+      const fr = fileDiffCtx(rows, 100, 200, 'PE1');
+      const headers = hunkHeadersOf(fr.patch);
+      const newStarts = headers.map((h) => h.newStart);
+      const modHunks = headers.filter((h) => h.oldStart > 0);
+      const strictlyAsc = newStarts.every((v, i) => i === 0 || v > newStarts[i - 1]!);
+      check('E1', '乱序治愈（S2）：mrow 与数组序相反 → hunk newStart 严格升序、修改型 hunk 恰 2 个且 newStart=[2,9]（旧实现反序且恒 1）、mode=first-change、truncated=false',
+        fr.mode === 'first-change' && fr.truncated === false
+          && strictlyAsc && modHunks.length === 2
+          && modHunks[0]?.newStart === 2 && modHunks[1]?.newStart === 9
+          && fr.patch.includes('-L2') && fr.patch.includes('+L2X') && fr.patch.includes('-L9') && fr.patch.includes('+L9X'),
+        `mode=${fr.mode} headers=${JSON.stringify(headers)} modNewStarts=[${modHunks.map((h) => h.newStart).join(',')}]`);
+    }
+
+    // b) E2 行号真实连续（S3）：10 行 Write 后 Edit 第 7 行（L7→L7X）→ 该 hunk newStart===7（不是 1）。
+    {
+      const doc10 = Array.from({ length: 10 }, (_, i) => `L${i + 1}`).join('\n') + '\n';
+      const rows = [
+        mkRow(1, { mrow: 101, path: 'PE2', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'PE2', content: doc10 }) }),
+        mkRow(2, { mrow: 102, path: 'PE2', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'PE2', old_string: 'L7', new_string: 'L7X' }) }),
+      ];
+      const fr = fileDiffCtx(rows, 100, 200, 'PE2');
+      const headers = hunkHeadersOf(fr.patch);
+      const editHunk = headers.find((h) => h.newStart === 7);
+      check('E2', '行号真实（S3）：10 行 Write 后 Edit 第 7 行 → 该 hunk newStart=7（不是 1）、patch 含 -L7/+L7X',
+        editHunk !== undefined && editHunk.oldStart === 7
+          && fr.patch.split('\n').includes('-L7') && fr.patch.split('\n').includes('+L7X'),
+        `headers=${JSON.stringify(headers)}`);
+    }
+
+    // c) E3 context 生效（S1）：20 行 Write + Edit 前 10 行块（仅 L5→L5X，锚定第 1 行）。
+    //    编辑 hunk 正文行数随 context 增（3→8 行、10→11 行），编辑改动本身 ± 恒 1/1——
+    //    证明 context 从 computeFileDiff 一路透传进 buildTwoFilePatch。
+    {
+      const doc20 = Array.from({ length: 20 }, (_, i) => `L${i + 1}`).join('\n') + '\n';
+      const oldBlock = Array.from({ length: 10 }, (_, i) => `L${i + 1}`).join('\n');
+      const newBlock = oldBlock.replace('L5', 'L5X');
+      const rows = [
+        mkRow(1, { mrow: 101, path: 'PE3', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'PE3', content: doc20 }) }),
+        mkRow(2, { mrow: 102, path: 'PE3', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'PE3', old_string: oldBlock, new_string: newBlock }) }),
+      ];
+      const fr3 = fileDiffCtx(rows, 100, 200, 'PE3', 3);
+      const fr10 = fileDiffCtx(rows, 100, 200, 'PE3', 10);
+      // 编辑 hunk = 含 -L5 的那个 section（Write 在前、Edit 锚定同 1 行但时序在后）。
+      const editBody = (fr: FileDiffResult): string[] =>
+        hunkBodiesOf(fr.patch).find((body) => body.includes('-L5')) ?? [];
+      const b3 = editBody(fr3);
+      const b10 = editBody(fr10);
+      const plusMinusOf = (body: string[]): string => `${body.filter((l) => l.startsWith('-')).length}/${body.filter((l) => l.startsWith('+')).length}`;
+      check('E3', 'context 生效（S1）：编辑 hunk 正文 ctx=3 → 8 行 / ctx=10 → 11 行、两档编辑 hunk ± 同为 1/1（-L5/+L5X）',
+        b3.length === 8 && b10.length === 11
+          && plusMinusOf(b3) === '1/1' && plusMinusOf(b10) === '1/1'
+          && b3.includes('-L5') && b3.includes('+L5X') && b10.includes('+L5X'),
+        `ctx3 正文=${b3.length}（±${plusMinusOf(b3)}） ctx10 正文=${b10.length}（±${plusMinusOf(b10)}）`);
+    }
+
+    // d) E4 多 Write ± 净计（H3 有意修正）：同 path 两次 Write，第一片 +3（vs 空）、
+    //    第二片对虚拟文档 diff 净 +1 → 合计 additions=4/deletions=0（旧口径重复整计 7/0）。
+    {
+      const rows = [
+        mkRow(1, { mrow: 101, path: 'PE4', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'PE4', content: 'a\nb\nc\n' }) }),
+        mkRow(2, { mrow: 102, path: 'PE4', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'PE4', content: 'a\nb\nc\nd\n' }) }),
+      ];
+      const fr = fileDiffCtx(rows, 100, 200, 'PE4');
+      check('E4', '多 Write ± 净计（H3）：Write a,b,c → Write a,b,c,d → additions=4/deletions=0（旧口径 7）、patch 含 +d',
+        fr.additions === 4 && fr.deletions === 0 && fr.patch.split('\n').includes('+d'),
+        `±=${fr.additions}/${fr.deletions} patch=[${fr.patch.split('\n').join(' ⏎ ')}]`);
+    }
+
+    // e) E5 截断与 ±（S5/N3）：单 Write 3000 行（context=10 一并验证透传不破坏截断）：
+    //    truncated=true、additions=3000（截断前全量）、deletions=0、正文行数 ≤2000 且 >0。
+    {
+      const big = Array.from({ length: 3000 }, (_, i) => `L${i + 1}`).join('\n') + '\n';
+      const rows = [
+        mkRow(1, { mrow: 101, path: 'PE5', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'PE5', content: big }) }),
+      ];
+      const fr = fileDiffCtx(rows, 100, 200, 'PE5', 10);
+      const bodyCount = hunkBodiesOf(fr.patch).reduce((acc, body) => acc + body.length, 0);
+      check('E5', '截断与 ±（S5/N3）：3000 行 Write（ctx=10）→ truncated=true、±=3000/0（截断前全量）、正文 0<行数≤2000',
+        fr.truncated === true && fr.additions === 3000 && fr.deletions === 0 && bodyCount > 0 && bodyCount <= 2000,
+        `truncated=${String(fr.truncated)} ±=${fr.additions}/${fr.deletions} 正文=${bodyCount}`);
+    }
+
+    // f) E6 getPatch context 端到端（S6 DB 侧）：真实临时库上造「full 模式」样本——
+    //    区间前 before 快照（mrow<startRow）+ 区间内 after 快照，前后留 ≥6 行公共上下文
+    //    （before=K1..K10，after 仅 K6→K6X）。ctx=10 的 hunk 正文行数必须 > ctx=3（3→8、10→11），
+    //    两次 mode 均 full、±（正文 +/- 计数）相同。
+    {
+      const sid = 'sess-e-ctx';
+      db.prepare("INSERT INTO sessions (id, name, model) VALUES (?, '段E-getPatch-context测试', 'claude-sonnet-4-6')").run(sid);
+      const insMsg = db.prepare(
+        'INSERT INTO messages (id, session_id, role, content, parent_agent_id) VALUES (?, ?, ?, ?, ?)',
+      );
+      insMsg.run('e-pre', sid, 'assistant', '轮前基线写', null);
+      insMsg.run('e-u1', sid, 'user', '第一轮', null);
+      insMsg.run('e-m1', sid, 'assistant', '轮内改写', null);
+      const insertCkE = checkpointRepo?.insert as ((row: Record<string, unknown>) => unknown) | undefined;
+      const before10 = Array.from({ length: 10 }, (_, i) => `K${i + 1}`).join('\n') + '\n';
+      const after10 = before10.replace('K6', 'K6X');
+      if (typeof insertCkE !== 'function') throw new Error('repo.insert 不可用');
+      insertCkE({
+        session_id: sid, message_id: 'e-pre', path: 'K', tool_name: 'Write', tool_use_id: 'tu-e-pre',
+        input_json: JSON.stringify({ file_path: 'K', content: before10 }), input_truncated: 0,
+        after_content: before10, after_truncated: 0, binary: 0, snapshot_state: 'disk',
+      });
+      insertCkE({
+        session_id: sid, message_id: 'e-m1', path: 'K', tool_name: 'Write', tool_use_id: 'tu-e-m1',
+        input_json: JSON.stringify({ file_path: 'K', content: after10 }), input_truncated: 0,
+        after_content: after10, after_truncated: 0, binary: 0, snapshot_state: 'disk',
+      });
+      const p3 = getPatchCtx!(sid, 'e-u1', null, 'K', 3);
+      const p10 = getPatchCtx!(sid, 'e-u1', null, 'K', 10);
+      const b3 = hunkBodiesOf(p3.patch).reduce((acc, body) => acc + body.length, 0);
+      const b10 = hunkBodiesOf(p10.patch).reduce((acc, body) => acc + body.length, 0);
+      const pmOf = (p: { patch: string }): string =>
+        `${p.patch.split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---')).length}/${p.patch.split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length}`;
+      check('E6', 'getPatch context 端到端（S6 DB 侧）：full 模式下 ctx=10 hunk 正文（11）> ctx=3（8）、两次 mode=full、± 相同（1/1）',
+        p3.mode === 'full' && p10.mode === 'full'
+          && b3 === 8 && b10 === 11 && b10 > b3
+          && pmOf(p3) === pmOf(p10) && pmOf(p3) === '1/1',
+        `mode=${p3.mode}/${p10.mode} ctx3 正文=${b3} ctx10 正文=${b10} ±=${pmOf(p3)}/${pmOf(p10)}`);
+    }
+
+    // g) E7 未命中追加（S4 兜底）：5 行 Write 后 Edit old_string 未命中 → 追加到尾部下一行
+    //    （anchor = countLF(doc)+2 = 4+2 = 6）；再补一条命中 L3 的 Edit → newStart=3。
+    //    两 hunk newStart 升序（[3,6]）；patch 含 -NOT-PRESENT/+Z。
+    {
+      const doc5 = 'L1\nL2\nL3\nL4\nL5';
+      const rows = [
+        mkRow(1, { mrow: 101, path: 'PE7', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'PE7', content: doc5 }) }),
+        mkRow(2, { mrow: 102, path: 'PE7', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'PE7', old_string: 'NOT-PRESENT', new_string: 'Z' }) }),
+        mkRow(3, { mrow: 103, path: 'PE7', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'PE7', old_string: 'L3', new_string: 'L3Y' }) }),
+      ];
+      const fr = fileDiffCtx(rows, 100, 200, 'PE7');
+      const headers = hunkHeadersOf(fr.patch);
+      const zHunk = headers.find((h) => h.newStart === 6);
+      const hitHunk = headers.find((h) => h.newStart === 3);
+      const newStarts = headers.map((h) => h.newStart);
+      const asc = newStarts.every((v, i) => i === 0 || v > newStarts[i - 1]!);
+      check('E7', '未命中追加（S4 兜底）：未命中 Edit 追加尾部 hunk newStart=6、命中 L3 hunk newStart=3、两 hunk newStart 升序、patch 含 -NOT-PRESENT/+Z/-L3/+L3Y',
+        zHunk !== undefined && hitHunk !== undefined && asc
+          && fr.patch.split('\n').includes('-NOT-PRESENT') && fr.patch.split('\n').includes('+Z')
+          && fr.patch.split('\n').includes('-L3') && fr.patch.split('\n').includes('+L3Y'),
+        `headers=${JSON.stringify(headers)} newStarts=[${newStarts.join(',')}]`);
+    }
+
+    // h) E8 合成 patch → 渲染层解析链契约钉（review-round1 F-1 跟进）：与 E1 同款乱序输入但
+    //    全行 binary=1+snapshot_state='failed' → intent 模式；把合成 patch 喂渲染层真正的
+    //    parseUnifiedDiff（diff-parser 自述无 DOM/Vue 依赖可被 tsx 直 import），断言解析层
+    //    非 binary / skip 分隔恢复 / mod 行号单调不重置 / 乱序治愈组序 四点。
+    {
+      const doc10 = Array.from({ length: 10 }, (_, i) => `L${i + 1}`).join('\n') + '\n';
+      const rows = [
+        mkRow(1, { mrow: 103, path: 'PE8', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'PE8', old_string: 'L9', new_string: 'L9X' }), binary: 1, snapshot_state: 'failed' }),
+        mkRow(2, { mrow: 102, path: 'PE8', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'PE8', old_string: 'L2', new_string: 'L2X' }), binary: 1, snapshot_state: 'failed' }),
+        mkRow(3, { mrow: 101, path: 'PE8', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'PE8', content: doc10 }), binary: 1, snapshot_state: 'failed' }),
+      ];
+      const fr = fileDiffCtx(rows, 100, 200, 'PE8', 3);
+      const parsed = parseUnifiedDiff(fr.patch);
+      const groups = parsed?.groups ?? [];
+      // 组概要（诊断用）：k 序列 + 各组首行号/skipCount
+      const gs = (g: (typeof groups)[number]): string =>
+        g.k === 'skip' ? `skip(${g.skipCount})` : `${g.k}[L${g.L[0]?.n ?? '-'}|R${g.R[0]?.n ?? '-'}]`;
+      const groupsSummary = `mode=${fr.mode} groups=[${groups.map(gs).join(',')}]`;
+      const modGroups = groups.filter((g) => g.k === 'mod');
+      const lOld = modGroups.flatMap((g) => g.L.map((l) => l.n).filter((n): n is number => n !== null));
+      const rNew = modGroups.flatMap((g) => g.R.map((r) => r.n).filter((n): n is number => n !== null));
+      const nonDec = (arr: number[]): boolean => arr.every((v, i) => i === 0 || v >= arr[i - 1]!);
+      const l1Count = modGroups.filter((g) => (g.L[0]?.n ?? null) === 1).length;
+      const l2Idx = groups.findIndex((g) => g.L.some((l) => l.t === 'L2'));
+      const l9Idx = groups.findIndex((g) => g.L.some((l) => l.t === 'L9'));
+      check('E8', '合成 patch 喂渲染层解析链（F-1 钉）：parseUnifiedDiff 非 null 非 binary、组序含 skip 组、mod 组旧/新行号各按组序单调不降且无「每块从 1 重置」（不存在两个 L 首行号=1 的 mod 组）、含 -L2 的组先于含 -L9 的组',
+        parsed !== null && parsed.binary === false
+          && groups.some((g) => g.k === 'skip' && (g.skipCount ?? 0) > 0)
+          && nonDec(lOld) && nonDec(rNew) && l1Count <= 1
+          && l2Idx >= 0 && l9Idx > l2Idx,
+        groupsSummary);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 段F（P2，2026-10-30 mcp-web-parity-and-turn-diff-intent-fix 计划 §2.3.5/§2.3.6）：
+// 渲染层源形状钉——turn-diff-store 缓存键带 context 维度 + TurnDiffDialog 全文/切档重拉。
+// 与段 D-ui/D-ui2 同款静态断言（读源码文本子串），钉住渲染层接线不被回退。
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\n=== 段F 渲染层源形状（P2） ===');
+
+{
+  const dlgSrcF = fs.readFileSync(path.join(repoRoot, 'src', 'renderer', 'components', 'chat', 'TurnDiffDialog.vue'), 'utf8');
+  const storeSrcF = fs.readFileSync(path.join(repoRoot, 'src', 'renderer', 'stores', 'turn-diff-store.ts'), 'utf8');
+  const preloadSrcF = fs.readFileSync(path.join(repoRoot, 'src', 'preload', 'api.ts'), 'utf8');
+
+  // F1 全文/重拉全链：FULL_CONTEXT 常量、effectiveContext 派生、切档 watch 重拉、setFullText、
+  // 「全文」按钮、DiffBody 双绑定、打开复位路径懒加载带 effectiveContext。
+  check('F1', 'TurnDiffDialog 全文/重拉全链：FULL_CONTEXT=100000 / effectiveContext / watch(effectiveContext) 重拉 / setFullText / 全文按钮 / :context="effectiveContext" / :full-text="fullText" / 打开路径 getPatch 带 effectiveContext',
+    dlgSrcF.includes('const FULL_CONTEXT = 100000')
+    && dlgSrcF.includes('const effectiveContext = computed(')
+    && dlgSrcF.includes('watch(effectiveContext,')
+    && dlgSrcF.includes('setFullText')
+    && dlgSrcF.includes('全文</button>')
+    && dlgSrcF.includes(':context="effectiveContext"')
+    && dlgSrcF.includes(':full-text="fullText"')
+    && dlgSrcF.includes('store.getPatch(t.sessionId, t.turnStartMessageId, t.endMessageId, t.path, effectiveContext.value)'),
+    'TurnDiffDialog 缺全文/重拉接线之一');
+
+  // F2 上下文不匹配守卫：bodyState（!== 视为 loading）与 parsed（=== 才渲染）两处都在。
+  check('F2', 'TurnDiffDialog 上下文不匹配守卫：bodyState 含 entry.value.context !== effectiveContext.value、parsed 含 entry.value.context === effectiveContext.value',
+    dlgSrcF.includes('entry.value.context !== effectiveContext.value')
+    && dlgSrcF.includes('entry.value.context === effectiveContext.value'),
+    'TurnDiffDialog 缺上下文不匹配守卫（bodyState / parsed）');
+
+  // F3 store 三段键 + context 字段：键 `${turnStartMessageId}|${path}|${context}`、接口字段、
+  // getPatch 三参键调用、缓存写入补 context。
+  check('F3', 'turn-diff-store 三段键 + context 字段：键模板 turnStartMessageId|path|context / TurnFilePatch.context: number / getPatch 用 turnDiffPatchKey(turnStartMessageId, path, context) / 缓存写入 { ...res, context }',
+    storeSrcF.includes('`${turnStartMessageId}|${path}|${context}`')
+    && storeSrcF.includes('context: number;')
+    && storeSrcF.includes('turnDiffPatchKey(turnStartMessageId, path, context)')
+    && storeSrcF.includes('{ ...res, context }'),
+    'turn-diff-store 缺三段键或 context 字段');
+
+  // F4 preload 五参 + 缺省 3（P1 已落地，此处防回退）：声明带 context?: number、实现透传 context ?? 3。
+  check('F4', 'preload getTurnFilePatch 五参 + 缺省 3：声明含 context?: number、invoke 含 path, context ?? 3',
+    preloadSrcF.includes('context?: number')
+    && preloadSrcF.includes('IPC_CHANNELS.TURN_DIFF_FILE_PATCH, sessionId, turnStartMessageId, endMessageId, path, context ?? 3'),
+    'preload 缺五参声明或缺省 3 透传');
+}
 
 // ── 后续点追加区 ──
 // 段C 为异步收尾段（快照是 fire-and-forget 续体），故 finish 统一在 .then 里收口清理与汇总。

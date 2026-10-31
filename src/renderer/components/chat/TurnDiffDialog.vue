@@ -32,6 +32,11 @@ const CONTEXT_OPTIONS = [3, 5, 10, 20] as const;
 // 视图状态
 const mode = ref<'split' | 'inline'>('split');
 const context = ref(3);
+// 全文开关（与并排/内联独立）：开启后以极大上下文（FULL_CONTEXT）重拉 patch，整文件行全部可见。
+const fullText = ref(false);
+const FULL_CONTEXT = 100000;
+// 实际用于拉取/渲染的上下文：fullText 开启时恒为 FULL_CONTEXT，其余跟随用户选择。
+const effectiveContext = computed(() => (fullText.value ? FULL_CONTEXT : context.value));
 const curChange = ref(0);
 const searchOpen = ref(false);
 const searchQuery = ref('');
@@ -44,19 +49,24 @@ const closeBtn = ref<HTMLButtonElement | null>(null);
 let lastFocus: HTMLElement | null = null;
 
 // —— 数据态（turn-diff-store）——
-const patchKey = computed(() => (props.target ? turnDiffPatchKey(props.target.turnStartMessageId, props.target.path) : ''));
+const patchKey = computed(() => (props.target ? turnDiffPatchKey(props.target.turnStartMessageId, props.target.path, effectiveContext.value) : ''));
 const entry = computed(() => (props.target ? store.patchCache.get(patchKey.value) ?? null : null));
 const loadError = computed(() => store.patchErrors[patchKey.value] ?? null);
 const loading = computed(() => !!store.patchLoading[patchKey.value]);
 // 优先级：loading > error > unavailable > ready；parsed 为 null（空 patch 等）落 DiffBody 自带空态。
 const bodyState = computed<'loading' | 'error' | 'unavailable' | 'ready'>(() => {
   if (loading.value) return 'loading';
+  if (entry.value && entry.value.context !== effectiveContext.value) return 'loading'; // 上下文不匹配旧缓存
   if (loadError.value) return 'error';
   if (entry.value?.mode === 'unavailable') return 'unavailable';
   return 'ready';
 });
 
-const parsed = computed<ParsedDiffFile | null>(() => (entry.value?.patch ? parseUnifiedDiff(entry.value.patch) : null));
+const parsed = computed<ParsedDiffFile | null>(() =>
+  entry.value && entry.value.context === effectiveContext.value && entry.value.patch
+    ? parseUnifiedDiff(entry.value.patch)
+    : null,
+);
 const filePath = computed(() => props.target?.path ?? '');
 const pathParts = computed(() => {
   const segs = filePath.value.split(/[\\/]/);
@@ -83,7 +93,7 @@ const searchCountText = computed(() => {
 const counts = computed(() => (parsed.value ? countChanges(parsed.value) : { add: 0, del: 0 }));
 const navTotal = computed(() => {
   if (!parsed.value) return 0;
-  if (mode.value === 'inline') return countInlineHunks(parsed.value, context.value);
+  if (mode.value === 'inline') return countInlineHunks(parsed.value, effectiveContext.value);
   const lay = buildSplitChunks(parsed.value);
   return lay.chunks.reduce((a, c) => a + (c.navIndex != null ? 1 : 0), 0);
 });
@@ -96,6 +106,7 @@ watch(
       if (!escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.toolDiffDialog);
       mode.value = 'split';
       context.value = 3;
+      fullText.value = false;
       curChange.value = 0;
       searchOpen.value = false;
       searchQuery.value = '';
@@ -104,7 +115,7 @@ watch(
       await nextTick();
       closeBtn.value?.focus();
       // 懒加载：缓存命中即时返回；失败落 store 错误态（弹窗错误态 + 重试按钮消费）。
-      void store.getPatch(t.sessionId, t.turnStartMessageId, t.endMessageId, t.path);
+      void store.getPatch(t.sessionId, t.turnStartMessageId, t.endMessageId, t.path, effectiveContext.value);
     } else {
       if (escHandle) {
         escHandle.release();
@@ -121,6 +132,12 @@ watch(
 watch(navTotal, (n) => {
   if (curChange.value > n - 1) curChange.value = Math.max(0, n - 1);
 });
+// 切上下文档位 / 开全文 → 按 effectiveContext 重拉 patch；缓存键含 context 维度，
+// 各档位缓存互不覆盖，切回旧档位命中旧缓存不重拉。
+watch(effectiveContext, (c) => {
+  const t = props.target;
+  if (t) void store.getPatch(t.sessionId, t.turnStartMessageId, t.endMessageId, t.path, c);
+});
 watch([searchQuery, patchKey], () => {
   currentSearchIndex.value = 0;
 });
@@ -135,7 +152,11 @@ function setMode(m: 'split' | 'inline'): void {
   curChange.value = 0;
 }
 function setContext(n: number): void {
+  fullText.value = false;
   context.value = n;
+}
+function setFullText(): void {
+  fullText.value = true;
 }
 function gotoChange(delta: number): void {
   const n = navTotal.value;
@@ -170,7 +191,7 @@ function close(): void {
 function retry(): void {
   const t = props.target;
   if (!t) return;
-  void store.getPatch(t.sessionId, t.turnStartMessageId, t.endMessageId, t.path);
+  void store.getPatch(t.sessionId, t.turnStartMessageId, t.endMessageId, t.path, effectiveContext.value);
 }
 
 // ── 键盘 / 焦点（对齐 ToolDiffDialog：Tab trap、ESC 分层让位、Ctrl+F、↑↓ 导航）──
@@ -291,7 +312,8 @@ onBeforeUnmount(() => {
               <div class="ctx-group" title="上下文行数：每处改动周围显示多少未变更行">
                 <span class="ctx-group__label">上下文</span>
                 <div class="seg">
-                  <button v-for="n in CONTEXT_OPTIONS" :key="n" type="button" :class="{ active: context === n }" @click="setContext(n)">{{ n }}</button>
+                  <button v-for="n in CONTEXT_OPTIONS" :key="n" type="button" :class="{ active: context === n && !fullText }" @click="setContext(n)">{{ n }}</button>
+                  <button type="button" :class="{ active: fullText }" title="展示文件完整内容" @click="setFullText">全文</button>
                 </div>
               </div>
 
@@ -389,8 +411,8 @@ onBeforeUnmount(() => {
                   v-else
                   :parsed="parsed"
                   :mode="mode"
-                  :context="context"
-                  :full-text="false"
+                  :context="effectiveContext"
+                  :full-text="fullText"
                   :cur-change="curChange"
                   :language="language"
                   :search-matches="searchMatches"

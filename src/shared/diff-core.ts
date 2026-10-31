@@ -188,7 +188,13 @@ export function buildTwoFilePatch(filePath: string, oldText: string, newText: st
 // additions/deletions 按「以 '+'/'-' 开头且非 '+++'/'---' 头的行」口径从截断前完整 patch 统计
 //（buildTwoFilePatch 对 add/del op 的计数与该口径恒等——每个 op 恰好产出一行 '+'/'-'，
 //  文件头 '--- '/'+++ ' 均以三连字符开头被口径排除）——编排器口径 plan-notes.md N3。
-export function diffFull(before: string, after: string, path: string): { patch: string; additions: number; deletions: number; truncated: boolean } {
-  const result = buildTwoFilePatch(path, before, after);
+// context（hunk 上下文行数）可参数化透传给 buildTwoFilePatch，默认 3（既有调用方零改动）。
+export function diffFull(
+  before: string,
+  after: string,
+  path: string,
+  context = 3,
+): { patch: string; additions: number; deletions: number; truncated: boolean } {
+  const result = buildTwoFilePatch(path, before, after, context);
   return { patch: result.diff, additions: result.additions, deletions: result.deletions, truncated: result.truncated };
 }

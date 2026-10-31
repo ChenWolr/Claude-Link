@@ -82,6 +82,7 @@ const interactionPrompts = read('src/main/modules/interaction-prompts.ts');
 const bridgeInit = read('src/main/modules/bridge/init.ts');
 const ipcTypes = read('src/shared/types/ipc.ts');
 const preloadApi = read('src/preload/api.ts');
+const turnDiffSrc = read('src/main/modules/turn-diff.ts');
 
 // ── ① ipc-handlers.ts：注册表全量替换 ──
 console.log('=== 1) ipc-handlers.ts：ipcMain.handle( → regInvokeHandler( 全量替换 ===');
@@ -637,16 +638,21 @@ check("IPC_CHANNELS 含 TURN_DIFF_FILE_PATCH: 'turnDiff:filePatch'",
   ipcTypes.includes("TURN_DIFF_FILE_PATCH: 'turnDiff:filePatch'"));
 check('ClaudeLinkAPI 含 listTurnDiffSummaries / getTurnFilePatch 成员',
   /listTurnDiffSummaries:\s*\(sessionId:\s*string\)\s*=>\s*Promise<import\('\.\.\/shared\/types\/turn-file-diff'\)\.TurnFileDiffTurnSummary\[\]>;/.test(preloadApi) &&
-  /getTurnFilePatch:\s*\(sessionId:\s*string,\s*turnStartMessageId:\s*string,\s*endMessageId:\s*string\s*\|\s*null,\s*path:\s*string\)/.test(preloadApi));
+  /getTurnFilePatch:\s*\(sessionId:\s*string,\s*turnStartMessageId:\s*string,\s*endMessageId:\s*string\s*\|\s*null,\s*path:\s*string,\s*context\?:\s*number\)/.test(preloadApi));
 check('preload 实现两方法（invoke 对应通道）',
   preloadApi.includes('ipcRenderer.invoke(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES, sessionId)') &&
-  preloadApi.includes('IPC_CHANNELS.TURN_DIFF_FILE_PATCH, sessionId, turnStartMessageId, endMessageId, path'));
+  preloadApi.includes('IPC_CHANNELS.TURN_DIFF_FILE_PATCH, sessionId, turnStartMessageId, endMessageId, path, context ?? 3'));
 check('WEB_CHANNEL_TABLE 含 listTurnDiffSummaries / getTurnFilePatch 两键（键集对等由 §11.2 双向断言自动覆盖）',
   webBridge.includes('listTurnDiffSummaries: IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES') &&
   webBridge.includes('getTurnFilePatch: IPC_CHANNELS.TURN_DIFF_FILE_PATCH'));
 check('ipc-handlers 注册 TURN_DIFF 两通道（regInvokeHandler 形态）',
   handlers.includes('regInvokeHandler(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES') &&
   handlers.includes('regInvokeHandler(IPC_CHANNELS.TURN_DIFF_FILE_PATCH'));
+check('ipc-handlers TURN_DIFF_FILE_PATCH 第 5 参 context: unknown + 钳制 1..100000 否则 3（2026-10-30 意图 diff 计划 §2.3）',
+  handlers.includes('path: unknown, context: unknown') &&
+  handlers.includes('context >= 1 && context <= 100000 ? context : 3'));
+check('turn-diff getPatch/computeFileDiff 声明含 context 默认参（context = 3 ≥ 2 处）',
+  countOccurrences(turnDiffSrc, 'context = 3') >= 2);
 
 console.log(`\n[P2+P3+P4+P5 接线契约] 通过 ${pass} / 失败 ${fail}`);
 if (fail > 0) process.exit(1);

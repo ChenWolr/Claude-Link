@@ -17,6 +17,8 @@ export interface TurnFilePatch {
   mode: TurnFileDiffMode;
   patch: string;
   truncated: boolean;
+  /** 缓存条目的上下文档位，与请求 context 一致；上下文不匹配的缓存不可直接渲染。 */
+  context: number;
 }
 
 /** 弹窗打开目标（MessageList → TurnDiffDialog）：回合区间 + 文件路径。 */
@@ -27,9 +29,9 @@ export interface TurnDiffPatchTarget {
   path: string;
 }
 
-/** patchCache / patchErrors / patchLoading 的键：turnStartMessageId + '|' + path。 */
-export function turnDiffPatchKey(turnStartMessageId: string, path: string): string {
-  return `${turnStartMessageId}|${path}`;
+/** patchCache / patchErrors / patchLoading 的键：turnStartMessageId + '|' + path + '|' + context。 */
+export function turnDiffPatchKey(turnStartMessageId: string, path: string, context: number): string {
+  return `${turnStartMessageId}|${path}|${context}`;
 }
 
 export const useTurnDiffStore = defineStore('turn-diff', () => {
@@ -99,8 +101,9 @@ export const useTurnDiffStore = defineStore('turn-diff', () => {
     turnStartMessageId: string,
     endMessageId: string | null,
     path: string,
+    context: number,
   ): Promise<TurnFilePatch | null> {
-    const key = turnDiffPatchKey(turnStartMessageId, path);
+    const key = turnDiffPatchKey(turnStartMessageId, path, context);
     const cached = patchCache.value.get(key);
     if (cached) return cached;
     const existing = inflightPatches.get(key);
@@ -114,9 +117,10 @@ export const useTurnDiffStore = defineStore('turn-diff', () => {
         patchErrors.value = nextErrs;
       }
       try {
-        const res = await window.claudeLink.getTurnFilePatch(sessionId, turnStartMessageId, endMessageId, path);
-        patchCache.value.set(key, res);
-        return res;
+        const res = await window.claudeLink.getTurnFilePatch(sessionId, turnStartMessageId, endMessageId, path, context);
+        // 主进程回包无 context 字段，缓存写入时补上（与请求档位一致，供渲染层一致性守卫比对）。
+        patchCache.value.set(key, { ...res, context });
+        return { ...res, context };
       } catch (err) {
         patchErrors.value = { ...patchErrors.value, [key]: err instanceof Error ? err.message : '读取轮末 Diff 失败' };
         return null;

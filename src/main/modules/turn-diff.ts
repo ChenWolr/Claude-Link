@@ -17,7 +17,10 @@
 //   - first-change（本会话首次改写：区间前无该 path 可用 disk 快照）：按区间内该 path 各行
 //     input_json 顺序合成编辑意图 hunk（Write→content 整文件 vs 空串 / Edit→old_string→
 //     new_string / MultiEdit→edits[] 逐条），每片段经 diff-core buildTwoFilePatch 生成 hunk
-//     顺序拼接（单一文件头 + 多 hunk，parseUnifiedDiff 可解析形态）；
+//     拼接为单一文件头 + 多 hunk（parseUnifiedDiff 可解析形态）；片段先按 mrow 升序稳定排序
+//     （治多工具并发落库时 t.id 序 ≠ 消息序的乱序）→ 虚拟文档链锚定（Write 建链/Edit 命中
+//     定位、未命中追加尾部）→ hunk 头按锚定行号整体平移（治局部行号每块从 1 重复）→ 按
+//     锚定行号升序输出（文件位置序）；context 参数可透传（hunk 上下文行数，默认 3）；
 //     after 为 null 且入参可用时按意图合成（mode 'intent'，± 与 patch 皆来自合成结果）；
 //     无可用 input（input_json 缺失或 input_truncated=1，全部行皆不可用）→ 该文件降级
 //     'unavailable'。
@@ -82,26 +85,70 @@ interface SynthResult {
   truncated: boolean;
 }
 
+interface SynthFragment {
+  kind: 'write' | 'edit';
+  old: string; // write 片段恒为 ''
+  new: string; // write 片段 = content
+}
+
+/** 字符串内换行符个数（虚拟文档行数推导用）。 */
+function countLF(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n++;
+  return n;
+}
+
+const HUNK_HEADER_RE = /^@@ -(\d+),(\d+) \+(\d+),(\d+) @@$/;
+
+/** 片段局部 hunk 头（行号恒从 1 起）平移到文件锚定位置：@@ -a,b +c,d @@ → @@ -(a+anchor-1),b +(c+anchor-1),d @@。 */
+function offsetHunkHeaders(lines: readonly string[], anchor: number): string[] {
+  const shift = anchor - 1;
+  return lines.map((line) => {
+    const m = HUNK_HEADER_RE.exec(line);
+    if (!m) return line;
+    return `@@ -${Number(m[1]) + shift},${Number(m[2])} +${Number(m[3]) + shift},${Number(m[4])} @@`;
+  });
+}
+
+/** 首个 hunk 头的 newStart（整文档 diff 分支的排序锚）。 */
+function firstNewStart(lines: readonly string[]): number {
+  for (const line of lines) {
+    const m = HUNK_HEADER_RE.exec(line);
+    if (m) return Number(m[3]);
+  }
+  return 0;
+}
+
 /**
- * first-change 合成：按行序从各行 input_json 提取编辑意图片段（input 缺失/截断的行跳过，
- * 全部行皆不可用 → null 降级 unavailable），每片段 buildTwoFilePatch 生成 hunk，顺序拼接为
- * 「单一文件头 + 多 hunk」patch；± 从截断前的全部片段累计（N3），正文按 MAX_DIFF_LINES 截断。
- * 输入可用但所有片段零变更 → 回空 patch（first-change 语义仍成立）。
+ * first-change 合成（虚拟文档链，2026-10-30 意图合成器重写 §2.2）：行先按 mrow 升序稳定排序
+ * （ES2019+ sort 稳定：mrow 相同保持 t.id 序，治多工具并发落库乱序），再按行序从 input_json
+ * 提取编辑意图片段（input 缺失/截断的行跳过，全部行皆不可用 → null 降级 unavailable）。
+ * 片段逐条推进一份内存虚拟文档（doc，null=前置内容未知）：Write 建链/整替换，Edit 命中 doc
+ * 则按首现位置锚定替换、未命中（或 doc 未知）追加到尾部下一行（确定性兜底）——由此拿到每片段
+ * 的文件内真实锚定行号；片段局部 hunk 头（行号恒从 1 起）按锚点整体平移，最后按锚定行号升序
+ * **稳定**输出（同 anchor 保持片段时序，MultiEdit 天然保序）——治乱序与「每块行号从 1 重复」。
+ * ± 从截断前的全部片段累计（N3；回合内多次 Write 时第二片起对虚拟文档 diff 计净变更，H3 有意修正），
+ * 正文按 MAX_DIFF_LINES 截断。输入可用但所有片段零变更 → 回空 patch（first-change 语义仍成立）。
  */
-function synthesizeFirstChange(path: string, rows: readonly TurnFileCheckpointRow[]): SynthResult | null {
-  const fragments: Array<{ old: string; new: string }> = [];
-  for (const row of rows) {
+function synthesizeFirstChange(
+  path: string,
+  rows: readonly TurnFileCheckpointRow[],
+  context = 3,
+): SynthResult | null {
+  const ordered = [...rows].sort((a, b) => a.mrow - b.mrow); // ES2019+ sort 稳定：mrow 相同保持 t.id 序
+  const fragments: SynthFragment[] = [];
+  for (const row of ordered) {
     if (!row.input_json || row.input_truncated === 1) continue;
     const input = parseInputObject(row.input_json);
     if (input === null) continue;
     const tool = row.tool_name.trim().toLowerCase();
     if (tool === 'write') {
       const content = typeof input.content === 'string' ? input.content : null;
-      if (content !== null) fragments.push({ old: '', new: content });
+      if (content !== null) fragments.push({ kind: 'write', old: '', new: content });
     } else if (tool === 'edit') {
       const oldString = typeof input.old_string === 'string' ? input.old_string : null;
       const newString = typeof input.new_string === 'string' ? input.new_string : null;
-      if (oldString !== null && newString !== null) fragments.push({ old: oldString, new: newString });
+      if (oldString !== null && newString !== null) fragments.push({ kind: 'edit', old: oldString, new: newString });
     } else if (tool === 'multiedit' || tool === 'multi_edit') {
       const edits = Array.isArray(input.edits) ? input.edits : [];
       for (const edit of edits) {
@@ -109,7 +156,7 @@ function synthesizeFirstChange(path: string, rows: readonly TurnFileCheckpointRo
         const oldString = (edit as Record<string, unknown>).old_string;
         const newString = (edit as Record<string, unknown>).new_string;
         if (typeof oldString === 'string' && typeof newString === 'string') {
-          fragments.push({ old: oldString, new: newString });
+          fragments.push({ kind: 'edit', old: oldString, new: newString });
         }
       }
     }
@@ -117,15 +164,37 @@ function synthesizeFirstChange(path: string, rows: readonly TurnFileCheckpointRo
   }
   if (fragments.length === 0) return null;
 
+  let doc: string | null = null; // null = 前置内容未知
   let additions = 0;
   let deletions = 0;
-  let header: string[] | null = null;
   let truncated = false;
-  const hunkSections: string[][] = [];
-  for (const fragment of fragments) {
-    const r = buildTwoFilePatch(path, fragment.old, fragment.new);
-    if (r.diff === '') continue; // 零变更片段（如 Write 空内容）不贡献
-    additions += r.additions;
+  let header: string[] | null = null;
+  const placed: Array<{ anchor: number; hunkLines: string[] }> = [];
+  for (const frag of fragments) {
+    let r: ReturnType<typeof buildTwoFilePatch>;
+    let anchor: number | null;
+    if (frag.kind === 'write') {
+      if (doc === null) {
+        r = buildTwoFilePatch(path, '', frag.new, context); // 回合首个写：old 侧未知按空
+        anchor = 1;
+      } else {
+        r = buildTwoFilePatch(path, doc, frag.new, context); // 回合内再次 Write = 整文件替换
+        anchor = null; // 整文档 diff，行号天然真实，无需偏移
+      }
+      doc = frag.new;
+    } else {
+      if (doc !== null && doc.includes(frag.old)) {
+        const charIdx = doc.indexOf(frag.old);           // 首次出现替换（对齐 CLI Edit 语义）
+        anchor = 1 + countLF(doc.slice(0, charIdx));     // 1-based 文件行号
+        doc = doc.slice(0, charIdx) + frag.new + doc.slice(charIdx + frag.old.length);
+      } else {
+        anchor = doc === null || doc === '' ? 1 : countLF(doc) + 2; // 追加到尾部下一行
+        doc = doc === null || doc === '' ? frag.new : doc + '\n' + frag.new;
+      }
+      r = buildTwoFilePatch(path, frag.old, frag.new, context);
+    }
+    if (r.diff === '') continue; // 零变更片段不贡献（现有语义保留）
+    additions += r.additions;    // N3：± 恒为截断前全量累计
     deletions += r.deletions;
     // 片段自身超 MAX_DIFF_LINES 被 buildTwoFilePatch 内部截断 → 整体即截断（N3：± 仍为截断前全量）。
     if (r.truncated) truncated = true;
@@ -134,20 +203,23 @@ function synthesizeFirstChange(path: string, rows: readonly TurnFileCheckpointRo
       // 同一 path 各片段的 ---/+++ 头一致，取首个片段的头（buildTwoFilePatch 已做路径归一）。
       header = [lines[0] ?? '', lines[1] ?? ''];
     }
-    hunkSections.push(lines.slice(2));
+    let hunkLines = lines.slice(2);
+    if (anchor !== null) hunkLines = offsetHunkHeaders(hunkLines, anchor);
+    placed.push({ anchor: anchor ?? firstNewStart(hunkLines), hunkLines });
   }
-  if (header === null || hunkSections.length === 0) {
-    return { patch: '', additions: 0, deletions: 0, truncated: false };
+  if (header === null || placed.length === 0) {
+    return { patch: '', additions: 0, deletions: 0, truncated: false }; // 全部零变更（现有语义保留）
   }
+  placed.sort((a, b) => a.anchor - b.anchor); // 稳定排序：同 anchor 保持片段时序（MultiEdit 保序）
 
   const out: string[] = [...header];
   let emitted = 0;
-  outer: for (const section of hunkSections) {
+  outer: for (const section of placed) {
     if (emitted >= MAX_DIFF_LINES) {
       truncated = true;
       break;
     }
-    for (const line of section) {
+    for (const line of section.hunkLines) {
       if (line === '') continue;
       if (line.startsWith('@@')) {
         out.push(line);
@@ -176,6 +248,7 @@ export function computeFileDiff(
   startRow: number,
   endRow: number | null,
   path: string,
+  context = 3,
 ): TurnFileDiffFileResult {
   const upper = endRow === null ? Number.POSITIVE_INFINITY : endRow;
   const inRange: TurnFileCheckpointRow[] = [];
@@ -201,7 +274,7 @@ export function computeFileDiff(
     // p5（2026-10-27）：快照全缺（二进制/加密含 \0 或读盘 failed）不再早退——按编辑意图合成兜底
     //（与工具行「查看改动对比」同源 input_json + 同一 buildTwoFilePatch；± 为截断前累计，N3）。
     // 入参也缺失/截断（synth null）才维持 unavailable。
-    const synth = synthesizeFirstChange(path, inRange);
+    const synth = synthesizeFirstChange(path, inRange, context);
     if (synth === null) {
       return { mode: 'unavailable', additions: 0, deletions: 0, writeCount, patch: '', truncated: false };
     }
@@ -217,10 +290,10 @@ export function computeFileDiff(
     }
   }
   if (before !== null) {
-    const r = diffFull(before, after, path);
+    const r = diffFull(before, after, path, context);
     return { mode: 'full', additions: r.additions, deletions: r.deletions, writeCount, patch: r.patch, truncated: r.truncated };
   }
-  const synth = synthesizeFirstChange(path, inRange);
+  const synth = synthesizeFirstChange(path, inRange, context);
   if (synth === null) {
     return { mode: 'unavailable', additions: 0, deletions: 0, writeCount, patch: '', truncated: false };
   }
@@ -292,13 +365,15 @@ export function listSummaries(sessionId: string): TurnFileDiffTurnSummary[] {
 /**
  * 单文件懒加载重算（handler 直调）：turnStartMessageId/endMessageId 经 messages 表 rowid 查询
  * 转区间。turnStart 查不到 → {mode:'unavailable', patch:'', truncated:false}；endMessageId
- * 查不到 → 上界 +∞（N2 裁定）。'unavailable' 返回 mode 与空 patch，不抛错。
+ * 查不到 → 上界 +∞（N2 裁定）。context 为 hunk 上下文行数（默认 3，弹窗「全文」档传大值）。
+ * 'unavailable' 返回 mode 与空 patch，不抛错。
  */
 export function getPatch(
   sessionId: string,
   turnStartMessageId: string,
   endMessageId: string | null,
   path: string,
+  context = 3,
 ): TurnFilePatchResult {
   const db = getConnection();
   const start = db
@@ -313,6 +388,6 @@ export function getPatch(
     if (end) endRow = end.r; // 查不到 → 保持 +∞
   }
   const rows = checkpointRepo.listBySession(sessionId);
-  const r = computeFileDiff(rows, start.r, endRow, path);
+  const r = computeFileDiff(rows, start.r, endRow, path, context);
   return { mode: r.mode, patch: r.patch, truncated: r.truncated };
 }
