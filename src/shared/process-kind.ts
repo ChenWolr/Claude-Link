@@ -53,7 +53,7 @@ export function processKindFromPart(part: CliMessageContentPart): string | null 
 export const SUB_AGENT_TOOL_NAMES = ['Agent', 'Task', 'Workflow', 'Skill'] as const;
 
 // 工具结果 diff 的编辑工具名：renderer 片段 diff 合成（tool-diff.ts）与 changes-panel 触碰集采集共用，避免集合漂移。
-export const TOOL_DIFF_TOOL_NAMES = ['Edit', 'MultiEdit', 'Write', 'edit', 'multiedit', 'multi_edit', 'write'] as const;
+export const TOOL_DIFF_TOOL_NAMES = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'multiedit', 'multi_edit', 'write', 'notebookedit'] as const;
 
 // diff 体行数上限：main changes-panel 截断与 renderer tool-diff 截断共用同一常量，避免两处各定义一份。
 export const MAX_DIFF_LINES = 2000;

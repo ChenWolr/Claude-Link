@@ -3115,8 +3115,8 @@ function testChangesPanelContracts(): void {
   // 共享工具名集合（触碰集采集与片段 diff 入口过滤共用）
   assert.deepEqual(
     [...TOOL_DIFF_TOOL_NAMES].sort(),
-    ['Edit', 'MultiEdit', 'Write', 'edit', 'multi_edit', 'multiedit', 'write'].sort(),
-    'TOOL_DIFF_TOOL_NAMES 须覆盖两种大小写与 MultiEdit 别名',
+    ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'multi_edit', 'multiedit', 'notebookedit', 'write'].sort(),
+    'TOOL_DIFF_TOOL_NAMES 须覆盖两种大小写、MultiEdit 别名与 NotebookEdit',
   );
 
   // === unified-diff 纯解析器契约（diff-parser）===

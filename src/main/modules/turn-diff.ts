@@ -65,6 +65,23 @@ function isUsableDiskRow(row: TurnFileCheckpointRow): boolean {
   return row.snapshot_state === 'disk' && row.binary === 0 && typeof row.after_content === 'string';
 }
 
+/** 聚合分组用的 path 归一比较键：win32 折叠反斜杠为正斜杠（POSIX 不折叠——反斜杠是合法文件名
+ *  字符）→ cwd 存在且非绝对时解析为绝对（win32 绝对 = 盘符前缀或 `//` 开头即 UNC 折叠后形态）
+ *  → NFC → win32 大小写折叠（POSIX 不折叠——大小写敏感文件系统上 A.ts/a.ts 是两个文件）。
+ *  platform 参数仅供测试注入（默认 process.platform），保证双分支可直测。
+ *  已知残余：含 `..` 段的相对路径不做 realpath 级消解；working_dir 为 NULL 的会话相对路径不解析。 */
+export function pathKey(p: string, cwd: string | null, platform: NodeJS.Platform = process.platform): string {
+  let s = p.trim();
+  if (platform === 'win32') s = s.replace(/\\/g, '/');
+  const isAbs = platform === 'win32' ? /^[a-zA-Z]:\//.test(s) || s.startsWith('//') : s.startsWith('/');
+  if (!isAbs && cwd) {
+    const c = (platform === 'win32' ? cwd.replace(/\\/g, '/') : cwd).replace(/\/+$/, '');
+    s = `${c}/${s.replace(/^\.?\//, '')}`;
+  }
+  s = s.normalize('NFC');
+  return platform === 'win32' ? s.toLowerCase() : s;
+}
+
 /** input JSON 文本 → 对象（解析失败/非对象返回 null：截断前缀等非法 JSON）。 */
 function parseInputObject(jsonText: string): Record<string, unknown> | null {
   try {
@@ -160,7 +177,9 @@ function synthesizeFirstChange(
         }
       }
     }
-    // 其它工具名不合成（记录器只收 TOOL_DIFF_TOOL_NAMES，理论不可达，防御性忽略）。
+    // notebookedit 行有意不产片段（白名单加入 NotebookEdit 后此处可达，勿「顺手补分支」）：
+    // 其入参只有 new_source/cell_id，无改前内容，合成必然撒谎；无 before 快照时由
+    // computeFileDiff 落 'unavailable'（诚实降级）。其它未知工具名同样不合成（防御性忽略）。
   }
   if (fragments.length === 0) return null;
 
@@ -240,6 +259,8 @@ function synthesizeFirstChange(
 /**
  * 纯函数：单文件聚合（供 aggregateFromCheckpoints 与 getPatch 共用）。
  * rows = listBySession 全 session 行；区间 [startRow, endRow)（endRow=null 到 +∞）之外的行忽略。
+ * 行过滤按 pathKey 归一键比较（cwd 为会话工作目录，可能 null）——同一文件的拼写变体
+ * （大小写/斜杠/相对绝对/NFC）命中同一集合；区间内外（after/before 来源）一律按此口径。
  * after/before 一律按 mrow（消息序）最大者选取，与落库时序（异步读盘完成序）解耦——同轮多次写
  * 乱序落库时仍取轮末/前轮末快照。
  */
@@ -249,11 +270,13 @@ export function computeFileDiff(
   endRow: number | null,
   path: string,
   context = 3,
+  cwd: string | null = null,
 ): TurnFileDiffFileResult {
   const upper = endRow === null ? Number.POSITIVE_INFINITY : endRow;
+  const targetKey = pathKey(path, cwd); // 目标键提前归一一次，不在循环里重复归一
   const inRange: TurnFileCheckpointRow[] = [];
   for (const row of rows) {
-    if (row.path === path && row.mrow >= startRow && row.mrow < upper) inRange.push(row);
+    if (pathKey(row.path, cwd) === targetKey && row.mrow >= startRow && row.mrow < upper) inRange.push(row);
   }
   const writeCount = inRange.length;
   if (writeCount === 0) {
@@ -280,11 +303,12 @@ export function computeFileDiff(
     }
     return { mode: 'intent', additions: synth.additions, deletions: synth.deletions, writeCount, patch: synth.patch, truncated: synth.truncated };
   }
-  // before：startRow 之前（全 session 范围）mrow 最大的一条可用 disk 快照（同样与落库时序解耦）。
+  // before：startRow 之前（全 session 范围）mrow 最大的一条可用 disk 快照（同样与落库时序解耦；
+  // 行过滤同按 pathKey 归一键命中全组——before 行拼写与目标拼写不同也可作来源）。
   let before: string | null = null;
   let beforeMaxMrow = Number.NEGATIVE_INFINITY;
   for (const row of rows) {
-    if (row.path === path && row.mrow < startRow && row.mrow > beforeMaxMrow && isUsableDiskRow(row)) {
+    if (pathKey(row.path, cwd) === targetKey && row.mrow < startRow && row.mrow > beforeMaxMrow && isUsableDiskRow(row)) {
       before = row.after_content;
       beforeMaxMrow = row.mrow;
     }
@@ -301,28 +325,33 @@ export function computeFileDiff(
 }
 
 /**
- * 纯函数：全回合聚合。turnRanges 之外（mrow 不落任何区间）的行忽略；每区间按 path 归并
- * （items 顺序 = path 在行序中首次出现序，确定性）；空 items 的轮不出现在返回。
+ * 纯函数：全回合聚合。turnRanges 之外（mrow 不落任何区间）的行忽略；每区间按 pathKey 归一键
+ * 归并（同文件拼写变体合为一组；display = 该键首次入组行的 path 原文，Map 插入序即行序首次
+ * 出现序，items 顺序确定性）；cwd 为会话工作目录（可能 null，透传给行过滤归一）；空 items 的
+ * 轮不出现在返回。
  */
 export function aggregateFromCheckpoints(
   rows: readonly TurnFileCheckpointRow[],
   turnRanges: readonly TurnRange[],
+  cwd: string | null = null,
 ): TurnFileDiffTurnSummary[] {
   const out: TurnFileDiffTurnSummary[] = [];
   for (const range of turnRanges) {
     const upper = range.endRow === null ? Number.POSITIVE_INFINITY : range.endRow;
-    const byPath = new Map<string, TurnFileCheckpointRow[]>();
+    const byPath = new Map<string, { display: string; rows: TurnFileCheckpointRow[] }>();
     for (const row of rows) {
       if (row.mrow >= range.startRow && row.mrow < upper) {
-        const list = byPath.get(row.path);
-        if (list) list.push(row);
-        else byPath.set(row.path, [row]);
+        const key = pathKey(row.path, cwd);
+        const group = byPath.get(key);
+        if (group) group.rows.push(row);
+        else byPath.set(key, { display: row.path, rows: [row] });
       }
     }
     const items: TurnFileDiffItem[] = [];
-    for (const path of byPath.keys()) {
-      const r = computeFileDiff(rows, range.startRow, range.endRow, path);
-      items.push({ path, additions: r.additions, deletions: r.deletions, writeCount: r.writeCount, mode: r.mode });
+    for (const group of byPath.values()) {
+      // display 原文参与 diff 头路径（行为不变）；行过滤按归一键命中全组。
+      const r = computeFileDiff(rows, range.startRow, range.endRow, group.display, 3, cwd);
+      items.push({ path: group.display, additions: r.additions, deletions: r.deletions, writeCount: r.writeCount, mode: r.mode });
     }
     if (items.length > 0) out.push({ turnStartMessageId: range.turnStartMessageId, items });
   }
@@ -355,11 +384,15 @@ export function deriveTurnRanges(sessionId: string): TurnRange[] {
   return out;
 }
 
-/** listSummaries 组装（handler 直调）：listBySession + 主进程推导轮区间 + 纯函数聚合。 */
+/** listSummaries 组装（handler 直调）：listBySession + 主进程推导轮区间 + 纯函数聚合。
+ *  cwd 取 sessions.working_dir（查无行/NULL → null，退化为纯词法归一），供相对路径变体合并。 */
 export function listSummaries(sessionId: string): TurnFileDiffTurnSummary[] {
   const rows = checkpointRepo.listBySession(sessionId);
   if (rows.length === 0) return [];
-  return aggregateFromCheckpoints(rows, deriveTurnRanges(sessionId));
+  const cwdRow = getConnection()
+    .prepare('SELECT working_dir FROM sessions WHERE id = ?')
+    .get(sessionId) as { working_dir: string | null } | undefined;
+  return aggregateFromCheckpoints(rows, deriveTurnRanges(sessionId), cwdRow?.working_dir ?? null);
 }
 
 /**
@@ -387,7 +420,12 @@ export function getPatch(
       .get(endMessageId, sessionId) as { r: number } | undefined;
     if (end) endRow = end.r; // 查不到 → 保持 +∞
   }
+  // cwd 同 listSummaries 口径：sessions.working_dir（查无行/NULL → null）。渲染层传回的 item.path
+  // 是组内某行原文，pathKey 归一后必命中同组（拼写变体亦可查中）。
+  const cwdRow = db
+    .prepare('SELECT working_dir FROM sessions WHERE id = ?')
+    .get(sessionId) as { working_dir: string | null } | undefined;
   const rows = checkpointRepo.listBySession(sessionId);
-  const r = computeFileDiff(rows, start.r, endRow, path, context);
+  const r = computeFileDiff(rows, start.r, endRow, path, context, cwdRow?.working_dir ?? null);
   return { mode: r.mode, patch: r.patch, truncated: r.truncated };
 }

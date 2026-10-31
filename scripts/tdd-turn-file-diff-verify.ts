@@ -1561,13 +1561,402 @@ console.log('\n=== 段F 渲染层源形状（P2） ===');
     'preload 缺五参声明或缺省 3 透传');
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// 段F（点A，2026-10-31 turn-diff-notebookedit-and-pathkey 计划 §3.6 段F）：NotebookEdit 追踪。
+// 注：上文已有「段F 渲染层源形状」（P2，check 编号 F1-F4）占用段名，本段沿用计划原文命名
+// 「段F（NotebookEdit）」、check 编号用圈号 F①-F⑥，与 F1-F4 无冲突。
+// F①/F②/F⑤ 直喂记录器（伪事件 + stubUserDataDir 下临时真实文件）；F③/F④ 走真实临时库全链
+//（记录器 → listBySession → deriveTurnRanges → aggregateFromCheckpoints/computeFileDiff 直测）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\n=== 段F NotebookEdit 追踪（点A） ===');
+
+const segFDir = path.join(stubUserDataDir, 'seg-f-files');
+
+/** 段F 用：主流程 user 轮起点消息行（deriveTurnRanges 分界前提，parent_agent_id=NULL）。 */
+function seedUserMessageF(sessionId: string, messageId: string, content: string): void {
+  db.prepare(
+    "INSERT INTO messages (id, session_id, role, content, parent_agent_id) VALUES (?, ?, 'user', ?, NULL)",
+  ).run(messageId, sessionId, content);
+}
+
+function seedSessionF(id: string): void {
+  db.prepare("INSERT INTO sessions (id, name, model) VALUES (?, '段F-NotebookEdit测试', 'claude-sonnet-4-6')").run(id);
+}
+
+async function runSegmentF(): Promise<void> {
+  fs.mkdirSync(segFDir, { recursive: true });
+  const note = noteCheckpointEvent;
+  const listBySessionF = checkpointRepo?.listBySession as
+    | ((id: string) => Array<Record<string, unknown>>)
+    | undefined;
+  const deriveF = turnDiffMod?.deriveTurnRanges as DeriveFn | undefined;
+  const aggregateF = aggregateFromCheckpoints;
+
+  if (
+    typeof note !== 'function' || typeof listBySessionF !== 'function'
+    || typeof deriveF !== 'function' || typeof aggregateF !== 'function'
+    || typeof computeFileDiff !== 'function'
+  ) {
+    const why = `记录器/turn-diff 导出不可用${recorderErr ? `（recorder 加载失败：${recorderErr.slice(0, 120)}）` : ''}${turnDiffErr ? `（turn-diff 加载失败：${turnDiffErr.slice(0, 120)}）` : ''}`;
+    check('F①', 'tool_use(NotebookEdit)+成功 result → 1 条 disk 快照', false, why);
+    check('F②', 'NotebookEdit 无 notebook_path → 不落库', false, why);
+    check('F③', '聚合 unavailable：仅一轮 NotebookEdit 行', false, why);
+    check('F④', '聚合 full：前轮 Edit 行 + 本轮 NotebookEdit 行', false, why);
+    check('F⑤', '白名单回归：Bash/Read 仍不落库', false, why);
+    check('F⑥', 'NotebookEdit input >512KiB：input_truncated=1 且正则兜底 → 行落库、path=notebook_path 值', false, why);
+    return;
+  }
+
+  // a) F① 记录器正例：tool_use(NotebookEdit, input.notebook_path=临时目录真实文件) + 成功 result
+  //    → 1 条 disk 快照：path=notebook_path 值、after_content=磁盘内容、tool_name=NotebookEdit。
+  {
+    const sid = 'sess-f-a';
+    seedSessionF(sid);
+    const nbPath = path.join(segFDir, 'f-a.ipynb');
+    const nbBody = '{"cells":[]}\n';
+    fs.writeFileSync(nbPath, nbBody, 'utf-8');
+    const toolUseId = 'tu-f-a';
+    note(sid, { type: 'message', role: 'assistant', content: [{ type: 'tool_use', name: 'NotebookEdit', id: toolUseId, input: { notebook_path: nbPath, cell_id: 'c1', new_source: 'x' } }] });
+    note(sid, { type: 'message', role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'ok' }] });
+    seedToolResultMessage(sid, 'msg-f-a', toolUseId);
+    try { await waitForC(() => checkpointCountC(sid) === 1, 'F① 快照落库'); } catch { /* RED：未落库 */ }
+    const rows = checkpointRowsC(sid);
+    const r = rows[0] ?? {};
+    check('F①', 'tool_use(NotebookEdit)+成功 result：1 条 disk 快照，path=notebook_path 值、after_content=磁盘内容、tool_name=NotebookEdit',
+      rows.length === 1 && r.snapshot_state === 'disk' && r.path === nbPath
+        && r.after_content === nbBody && r.tool_name === 'NotebookEdit',
+      `rows=${JSON.stringify(rows).slice(0, 300)}`);
+  }
+
+  // b) F② 记录器负例：NotebookEdit 但 input 无 notebook_path 字段 → extractFilePath 提不出
+  //    （JSON 分支与正则兜底均无命中）→ 不暂存，成功 result 也不落库。
+  {
+    const sid = 'sess-f-b';
+    seedSessionF(sid);
+    const toolUseId = 'tu-f-b';
+    note(sid, { type: 'message', role: 'assistant', content: [{ type: 'tool_use', name: 'NotebookEdit', id: toolUseId, input: { cell_id: 'c1', new_source: 'x' } }] });
+    note(sid, { type: 'message', role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'ok' }] });
+    seedToolResultMessage(sid, 'msg-f-b', toolUseId);
+    await settleC();
+    check('F②', 'NotebookEdit input 无 notebook_path 字段：不落库（count=0）',
+      checkpointCountC(sid) === 0, `count=${checkpointCountC(sid)}`);
+  }
+
+  // c) F③ 聚合 unavailable（真实临时库全链）：仅一轮 NotebookEdit 行（区间前无该 path 可用
+  //    disk 行）→ NotebookEdit 入参只有 new_source/cell_id、无改前内容，synth 不产片段 →
+  //    items 含该 path、mode=unavailable、writeCount=1、±=0（诚实降级，不合成假 diff）。
+  {
+    const sid = 'sess-f-c';
+    seedSessionF(sid);
+    seedUserMessageF(sid, 'fu3-u1', '第一轮');
+    const nbPath = path.join(segFDir, 'f-c.ipynb');
+    fs.writeFileSync(nbPath, '{"cells":["c1"]}\n', 'utf-8');
+    const toolUseId = 'tu-f-c';
+    note(sid, { type: 'message', role: 'assistant', content: [{ type: 'tool_use', name: 'NotebookEdit', id: toolUseId, input: { notebook_path: nbPath, cell_id: 'c1', new_source: 'print(42)' } }] });
+    note(sid, { type: 'message', role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'ok' }] });
+    seedToolResultMessage(sid, 'msg-f-c', toolUseId);
+    try { await waitForC(() => checkpointCountC(sid) === 1, 'F③ 快照落库'); } catch { /* RED：未落库 */ }
+    const rows = listBySessionF(sid);
+    const out = aggregateF(rows, deriveF(sid));
+    const item = out[0]?.items[0];
+    check('F③', '聚合 unavailable：仅一轮 NotebookEdit 行（区间前无可用 disk 行）→ items 含该 path、mode=unavailable、writeCount=1、±=0',
+      out.length === 1 && item?.path === nbPath && item?.mode === 'unavailable'
+        && item?.writeCount === 1 && item?.additions === 0 && item?.deletions === 0,
+      `out=${JSON.stringify(out)}`);
+  }
+
+  // d) F④ 聚合 full（真实临时库全链）：前一轮 Edit 造同 path 可用 disk 行（after=A），本轮
+  //    NotebookEdit 行（after=B）→ mode=full、patch 含 A→B 真实差异行、writeCount=1（本区间 1 行）。
+  //    时序纪律：先等 Edit 行落库（读盘续体已终结）再覆盖文件为 B，防快照竞态读到新内容。
+  {
+    const sid = 'sess-f-d';
+    seedSessionF(sid);
+    seedUserMessageF(sid, 'fu4-u1', '第一轮');
+    const nbPath = path.join(segFDir, 'f-d.ipynb');
+    fs.writeFileSync(nbPath, 'old-line\n', 'utf-8'); // Edit 后磁盘内容 = A
+    const editUseId = 'tu-f-d-edit';
+    note(sid, { type: 'message', role: 'assistant', content: [{ type: 'tool_use', name: 'Edit', id: editUseId, input: { file_path: nbPath, old_string: 'a', new_string: 'b' } }] });
+    note(sid, { type: 'message', role: 'user', content: [{ type: 'tool_result', tool_use_id: editUseId, content: 'ok' }] });
+    seedToolResultMessage(sid, 'msg-f-d-edit', editUseId);
+    await waitForC(() => checkpointCountC(sid) === 1, 'F④ Edit 行落库'); // Edit 行在白名单内，RED 阶段也应落库
+    seedUserMessageF(sid, 'fu4-u2', '第二轮');
+    fs.writeFileSync(nbPath, 'new-line\n', 'utf-8'); // NotebookEdit 后磁盘内容 = B
+    const nbUseId = 'tu-f-d-nb';
+    note(sid, { type: 'message', role: 'assistant', content: [{ type: 'tool_use', name: 'NotebookEdit', id: nbUseId, input: { notebook_path: nbPath, cell_id: 'c1', new_source: 'x' } }] });
+    note(sid, { type: 'message', role: 'user', content: [{ type: 'tool_result', tool_use_id: nbUseId, content: 'ok' }] });
+    seedToolResultMessage(sid, 'msg-f-d-nb', nbUseId);
+    try { await waitForC(() => checkpointCountC(sid) === 2, 'F④ NotebookEdit 行落库'); } catch { /* RED：未落库 */ }
+    const rows = listBySessionF(sid);
+    const turn2 = deriveF(sid).find((rg) => rg.turnStartMessageId === 'fu4-u2');
+    const out = aggregateF(rows, turn2 ? [turn2] : []);
+    const item = out[0]?.items[0];
+    const fr = turn2 ? computeFileDiff(rows, turn2.startRow, turn2.endRow, nbPath) : null;
+    check('F④', '聚合 full：前轮 Edit 行（after=A=old-line）+ 本轮 NotebookEdit 行（after=B=new-line）→ mode=full、patch 含 -old-line/+new-line 真实差异行、±=1/1、writeCount=1',
+      out.length === 1 && item?.path === nbPath && item?.mode === 'full' && item?.writeCount === 1
+        && item?.additions === 1 && item?.deletions === 1
+        && fr !== null && fr.mode === 'full'
+        && fr.patch.split('\n').includes('-old-line') && fr.patch.split('\n').includes('+new-line'),
+      `out=${JSON.stringify(out)} fr=${JSON.stringify(fr)}`);
+  }
+
+  // e) F⑤ 白名单回归（防白名单数组改动误伤）：Bash/Read 伪事件仍不落行（既有 C⑩ 语义不回退）。
+  {
+    const sid = 'sess-f-e';
+    seedSessionF(sid);
+    const readFile = path.join(segFDir, 'f-e.txt');
+    fs.writeFileSync(readFile, 'f-e-body\n', 'utf-8');
+    const bashUseId = 'tu-f-e-bash';
+    const readUseId = 'tu-f-e-read';
+    note(sid, { type: 'message', role: 'assistant', content: [
+      { type: 'tool_use', name: 'Bash', id: bashUseId, input: { command: 'echo f' } },
+      { type: 'tool_use', name: 'Read', id: readUseId, input: { file_path: readFile } },
+    ] });
+    note(sid, { type: 'message', role: 'user', content: [
+      { type: 'tool_result', tool_use_id: bashUseId, content: 'f' },
+      { type: 'tool_result', tool_use_id: readUseId, content: 'ok' },
+    ] });
+    seedToolResultMessage(sid, 'msg-f-e-bash', bashUseId);
+    seedToolResultMessage(sid, 'msg-f-e-read', readUseId);
+    await settleC();
+    check('F⑤', '白名单回归：Bash/Read 伪事件仍不落行（count=0，C⑩ 语义不回退）',
+      checkpointCountC(sid) === 0, `count=${checkpointCountC(sid)}`);
+  }
+
+  // f) F⑥ 截断钉板（备忘-3）：NotebookEdit input >512KiB（new_source 大字段致 JSON.stringify
+  //    超 INPUT_JSON_LIMIT=512KiB）→ 落库 input_json 为截断前缀（非法 JSON）→ extractFilePath
+  //    JSON.parse 分支 null，正则兜底从前缀文本提取 notebook_path（notebook_path 放 input 最前，
+  //    保证落在 512KiB 前缀内；Windows 路径反斜杠经 JSON 转义为 \\，由 (?:[^"\\]|\\.)* 消化）
+  //    → 行落库：path=notebook_path 值、input_truncated=1、tool_name=NotebookEdit。
+  {
+    const sid = 'sess-f-f';
+    seedSessionF(sid);
+    const nbPath = path.join(segFDir, 'f-f.ipynb');
+    fs.writeFileSync(nbPath, '{"cells":[]}\n', 'utf-8');
+    const toolUseId = 'tu-f-f';
+    note(sid, { type: 'message', role: 'assistant', content: [{ type: 'tool_use', name: 'NotebookEdit', id: toolUseId, input: { notebook_path: nbPath, cell_id: 'c1', new_source: 'x'.repeat(600 * 1024) } }] });
+    note(sid, { type: 'message', role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'ok' }] });
+    seedToolResultMessage(sid, 'msg-f-f', toolUseId);
+    try { await waitForC(() => checkpointCountC(sid) === 1, 'F⑥ 截断快照落库'); } catch { /* RED：未落库 */ }
+    const rows = checkpointRowsC(sid);
+    const r = rows[0] ?? {};
+    check('F⑥', 'NotebookEdit input >512KiB：input_truncated=1 且截断前缀下 notebook_path 正则兜底生效——行落库、path=notebook_path 值',
+      rows.length === 1 && r.path === nbPath && r.input_truncated === 1 && r.tool_name === 'NotebookEdit',
+      `count=${rows.length}、path=${String(r.path)}、input_truncated=${String(r.input_truncated)}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 段G（点B，2026-10-31 turn-diff-notebookedit-and-pathkey 计划 §3.6 段G）：pathKey 归一化。
+// G①②③ 纯函数直测 pathKey（内存字符串）；G④ 聚合合并纯函数直测（内存 rows + cwd 入参）；
+// G⑤ getPatch 双拼写（真实临时库，直接 repo.insert 落行）；G⑥ cwd=null 回归钉（纯函数不传
+// cwd 逐字节一致 + working_dir NULL 会话 listSummaries 不回归）；G⑦ 语义收紧（备忘-1+2）：
+// win32 UNC 两拼写同键且不被前置 cwd；POSIX 反斜杠是合法文件名字符不折叠。全部同步执行，
+// 不依赖段C/段F 的异步快照续体。
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\n=== 段G pathKey 归一化（点B） ===');
+
+type PathKeyFnG = (p: string, cwd: string | null, platform?: string) => string;
+type AggregateCwdFnG = (rows: unknown[], ranges: unknown[], cwd?: string | null) => AggSummary[];
+type ComputeCwdFnG = (
+  rows: unknown[], startRow: number, endRow: number | null, path: string, context?: number, cwd?: string | null,
+) => FileDiffResult;
+
+const pathKeyG = turnDiffMod?.pathKey as PathKeyFnG | undefined;
+const aggregateCwdG = aggregateFromCheckpoints as AggregateCwdFnG | undefined;
+const fileDiffCwdG = computeFileDiff as ComputeCwdFnG | undefined;
+
+/** 段G 用：剥掉 ---/+++ 文件头行（头路径按 display 原文呈现、大小写不折叠是既有设计行为）。 */
+function patchBodyG(patch: string): string[] {
+  return patch.split('\n').filter((l) => !l.startsWith('--- ') && !l.startsWith('+++ '));
+}
+
+function runSegmentG(): void {
+  try {
+    if (typeof pathKeyG !== 'function' || typeof aggregateCwdG !== 'function' || typeof fileDiffCwdG !== 'function') {
+      const why = `pathKey/aggregateFromCheckpoints/computeFileDiff 导出不可用${turnDiffErr ? `（turn-diff 加载失败：${turnDiffErr.slice(0, 160)}）` : ''}`;
+      check('G①', "pathKey win32：'D:\\A\\B.ts' 与 'd:/a/b.ts' 同键；platform='linux' 注入时不同键", false, why);
+      check('G②', "pathKey 相对：cwd='/w' 时 'src/x.ts' 与 '/w/src/x.ts' 同键；cwd=null 相对不解析（残余限制钉板）", false, why);
+      check('G③', 'pathKey NFC/斜杠：NFD 组合形与 NFC 规范形同键；正反斜杠混用同键', false, why);
+      check('G④', '聚合合并：大小写变体两行 → items 仅 1 条 / writeCount=2 / ± 为合并行集净差 / item.path=首行原文', false, why);
+      check('G⑤', 'getPatch 双拼写：命中同组、同一 patch、mode 一致', false, why);
+      check('G⑥', 'cwd=null 回归：不传 cwd 同拼写行为逐字节一致；working_dir NULL 会话 listSummaries 不回归', false, why);
+      check('G⑦', 'pathKey win32：UNC 两拼写同键且不被前置 cwd；linux：含反斜杠文件名与斜杠子路径不同键', false, why);
+      return;
+    }
+
+    // a) G① win32 大小写折叠 + platform 注入（计划 §3.6 G①）。
+    {
+      const k1 = pathKeyG('D:\\A\\B.ts', null);
+      const k2 = pathKeyG('d:/a/b.ts', null);
+      const l1 = pathKeyG('D:\\A\\B.ts', null, 'linux');
+      const l2 = pathKeyG('d:/a/b.ts', null, 'linux');
+      check('G①', "pathKey win32：'D:\\A\\B.ts' 与 'd:/a/b.ts' 同键（统一斜杠+折叠大小写）；platform='linux' 注入时不同键（POSIX 大小写敏感不折叠）",
+        k1 === k2 && l1 !== l2,
+        `win32: [${k1}] vs [${k2}]；linux: [${l1}] vs [${l2}]`);
+    }
+
+    // b) G② 相对路径解析：cwd 存在时解析为绝对后同键；cwd=null 不解析（两键不同——§11 残余限制钉板）。
+    {
+      const kRel = pathKeyG('src/x.ts', '/w');
+      const kAbs = pathKeyG('/w/src/x.ts', null);
+      const kRelNoCwd = pathKeyG('src/x.ts', null);
+      const kAbsNoCwd = pathKeyG('/w/src/x.ts', null);
+      check('G②', "pathKey 相对：cwd='/w' 时 'src/x.ts' 与 '/w/src/x.ts' 同键；cwd=null 时相对路径不解析（两键不同——§11 残余限制钉板）",
+        kRel === kAbs && kRelNoCwd !== kAbsNoCwd,
+        `cwd=/w: [${kRel}] vs [${kAbs}]；cwd=null: [${kRelNoCwd}] vs [${kAbsNoCwd}]`);
+    }
+
+    // c) G③ NFC 归一（NFD 组合字符形 vs NFC 规范形）+ 正反斜杠混用。
+    {
+      const nfc = pathKeyG('D:\\Dir\\caf\u00e9.ts', null); // NFC 规范形（U+00E9）
+      const nfd = pathKeyG('D:/Dir/cafe\u0301.ts', null);  // NFD 分解形（e + U+0301 组合符）
+      const s1 = pathKeyG('D:\\A\\B.ts', null);
+      const s2 = pathKeyG('D:/A/B.ts', null);
+      check('G③', 'pathKey NFC/斜杠：NFD 组合字符形与 NFC 规范形同键（normalize NFC）；正反斜杠混用同键',
+        nfc === nfd && s1 === s2,
+        `nfc: [${nfc}] vs [${nfd}]；slash: [${s1}] vs [${s2}]`);
+    }
+
+    // d) G④ 聚合合并（计划 §3.6 G④）：前轮 before 行（pUpper）+ 同回合两行同文件（pUpper/pLower
+    //    大小写不同、cwd 传临时目录）→ items 仅 1 条、writeCount=2、± 为合并行集净差
+    //   （before=BASE vs after=mrow 最大行的 BASE v1 v2）、item.path=首行原文 pUpper。
+    {
+      const segGDir = path.join(stubUserDataDir, 'seg-g-files');
+      const pUpper = path.join(segGDir, 'GCase.txt');
+      const pLower = path.join(segGDir, 'gcase.txt');
+      const rows = [
+        mkRow(1, { mrow: 10, path: pUpper, after_content: 'BASE\n' }),
+        mkRow(2, { mrow: 101, path: pUpper, after_content: 'BASE\nv1\n' }),
+        mkRow(3, { mrow: 102, path: pLower, after_content: 'BASE\nv1\nv2\n' }),
+      ];
+      const out = aggregateCwdG(rows, [{ turnStartMessageId: 'tg4', startRow: 100, endRow: 200 }], segGDir);
+      const item = out[0]?.items[0];
+      const exp = (diffCore?.diffFull as DiffFullFn | undefined)?.('BASE\n', 'BASE\nv1\nv2\n', pUpper);
+      const ok = out.length === 1 && out[0]!.items.length === 1
+        && item?.path === pUpper && item?.mode === 'full' && item?.writeCount === 2
+        && item?.additions === (exp?.additions ?? -1) && item?.deletions === (exp?.deletions ?? -1);
+      check('G④', '聚合合并：同回合两行同文件（大小写变体，cwd=临时目录）→ items 仅 1 条、writeCount=2、mode=full、± 为合并行集净差（diffFull(BASE, BASE v1 v2)）、item.path=首行原文',
+        ok, `out=${JSON.stringify(out)} exp=${JSON.stringify(exp)}`);
+    }
+
+    // e) G⑤ getPatch 双拼写（真实临时库，G④ 同款数据落库；session.working_dir=临时目录）：
+    //    pUpper 与其正斜杠变体调 getPatch → 命中同组、同一 patch（diff-core 文件头把反斜杠归一为
+    //    正斜杠，两拼写头一致 → 逐字节相等）、mode 一致（均 full）；再用 pLower 调一次 → mode 一致、
+    //    patch 正文（剥 ---/+++ 头）逐行相同（头路径按 display 原文呈现，大小写不折叠是既有设计）。
+    {
+      const sid = 'sess-g-patch';
+      const segGDir5 = path.join(stubUserDataDir, 'seg-g-files');
+      const pUpper5 = path.join(segGDir5, 'GCase.txt');
+      const pLower5 = path.join(segGDir5, 'gcase.txt');
+      db.prepare("INSERT INTO sessions (id, name, model, working_dir) VALUES (?, '段G-getPatch双拼写', 'claude-sonnet-4-6', ?)").run(sid, segGDir5);
+      const insMsgG = db.prepare('INSERT INTO messages (id, session_id, role, content, parent_agent_id) VALUES (?, ?, ?, ?, ?)');
+      insMsgG.run('gu5-pre', sid, 'assistant', '轮前基线写', null);
+      insMsgG.run('gu5-u1', sid, 'user', '第一轮', null);
+      insMsgG.run('gu5-m1', sid, 'assistant', '写1', null);
+      insMsgG.run('gu5-m2', sid, 'assistant', '写2', null);
+      const insertCkG = checkpointRepo?.insert as ((row: Record<string, unknown>) => unknown) | undefined;
+      if (typeof insertCkG !== 'function') throw new Error('repo.insert 不可用');
+      const ckG = (messageId: string, p: string, after: string): void => {
+        insertCkG({
+          session_id: sid, message_id: messageId, path: p, tool_name: 'Write',
+          tool_use_id: `tu-g5-${messageId}`, input_json: JSON.stringify({ file_path: p, content: after }),
+          input_truncated: 0, after_content: after, after_truncated: 0, binary: 0, snapshot_state: 'disk',
+        });
+      };
+      ckG('gu5-pre', pUpper5, 'BASE\n');
+      ckG('gu5-m1', pUpper5, 'BASE\nv1\n');
+      ckG('gu5-m2', pLower5, 'BASE\nv1\nv2\n');
+      const getPatchG = turnDiffMod!.getPatch as GetPatchFn;
+      const rUp = getPatchG(sid, 'gu5-u1', null, pUpper5);
+      const rFwd = getPatchG(sid, 'gu5-u1', null, pUpper5.replace(/\\/g, '/'));
+      const rLow = getPatchG(sid, 'gu5-u1', null, pLower5);
+      check('G⑤', 'getPatch 双拼写：pUpper 与正斜杠变体 → 同一 patch（逐字节）、mode 一致（均 full）；pLower → mode 一致、patch 正文（剥文件头）逐行相同',
+        rUp.mode === 'full' && rFwd.mode === rUp.mode && rLow.mode === rUp.mode
+          && rUp.patch === rFwd.patch
+          && JSON.stringify(patchBodyG(rUp.patch)) === JSON.stringify(patchBodyG(rLow.patch))
+          && rUp.patch.split('\n').includes('+v2'),
+        `rUp=${JSON.stringify(rUp).slice(0, 240)} rFwd=${JSON.stringify(rFwd).slice(0, 240)} rLow=${JSON.stringify(rLow).slice(0, 240)}`);
+    }
+
+    // f) G⑥ cwd=null 回归钉（计划 §3.6 G⑥，既有段D 用例天然覆盖、此条显式钉）：
+    //    ①纯函数不传 cwd——D① 同款同拼写数据，结果与现状逐字节一致（patch 与 diffFull 全等）；
+    //    ②working_dir 为 NULL 的会话（sessions 默认不填 working_dir）listSummaries 照常聚合不回归。
+    {
+      const rows = [
+        mkRow(1, { mrow: 10, path: 'A', after_content: 'alpha\n' }),
+        mkRow(2, { mrow: 101, path: 'A', after_content: 'alpha\nv1\n' }),
+        mkRow(3, { mrow: 102, path: 'A', after_content: 'alpha\nv2-mid\n' }),
+        mkRow(4, { mrow: 103, path: 'A', after_content: 'alpha\nbeta\n' }),
+      ];
+      const fr = fileDiffCwdG(rows, 100, 200, 'A'); // 不传 cwd（缺省 null）
+      const exp = (diffCore?.diffFull as DiffFullFn | undefined)?.('alpha\n', 'alpha\nbeta\n', 'A');
+      const out = aggregateCwdG(rows, [{ turnStartMessageId: 'tg6', startRow: 100, endRow: 200 }]); // 不传 cwd
+      const pureOk = fr.mode === 'full' && fr.writeCount === 3 && fr.truncated === false
+        && exp !== undefined && fr.patch === exp.patch && fr.additions === exp.additions && fr.deletions === exp.deletions
+        && out.length === 1 && out[0]!.items.length === 1
+        && out[0]!.items[0]!.writeCount === 3 && out[0]!.items[0]!.mode === 'full';
+
+      const sid = 'sess-g-nullcwd';
+      db.prepare("INSERT INTO sessions (id, name, model) VALUES (?, '段G-working_dir-NULL', 'claude-sonnet-4-6')").run(sid); // working_dir 默认 NULL
+      const insMsgG6 = db.prepare('INSERT INTO messages (id, session_id, role, content, parent_agent_id) VALUES (?, ?, ?, ?, ?)');
+      insMsgG6.run('gu6-pre', sid, 'assistant', '轮前基线写', null);
+      insMsgG6.run('gu6-u1', sid, 'user', '第一轮', null);
+      insMsgG6.run('gu6-m1', sid, 'assistant', '写1', null);
+      const insertCkG6 = checkpointRepo?.insert as ((row: Record<string, unknown>) => unknown) | undefined;
+      if (typeof insertCkG6 !== 'function') throw new Error('repo.insert 不可用');
+      const ckG6 = (messageId: string, p: string, after: string): void => {
+        insertCkG6({
+          session_id: sid, message_id: messageId, path: p, tool_name: 'Write',
+          tool_use_id: `tu-g6-${messageId}`, input_json: JSON.stringify({ file_path: p, content: after }),
+          input_truncated: 0, after_content: after, after_truncated: 0, binary: 0, snapshot_state: 'disk',
+        });
+      };
+      ckG6('gu6-pre', 'SG6.txt', 'S0\n');
+      ckG6('gu6-m1', 'SG6.txt', 'S1\n');
+      const listSummariesG6 = turnDiffMod!.listSummaries as ListSummariesFn;
+      const out6 = listSummariesG6(sid);
+      const item6 = out6[0]?.items[0];
+      const dbOk = out6.length === 1 && item6?.path === 'SG6.txt' && item6?.mode === 'full'
+        && item6?.writeCount === 1 && item6?.additions === 1 && item6?.deletions === 1;
+      check('G⑥', 'cwd=null 回归：不传 cwd 直调 computeFileDiff/aggregate → 同拼写行为与现状逐字节一致（patch 与 diffFull 全等、writeCount=3）；working_dir NULL 会话 listSummaries 照常聚合不回归',
+        pureOk && dbOk, `pure: fr=${JSON.stringify(fr)} out=${JSON.stringify(out)}；db: out=${JSON.stringify(out6)}`);
+    }
+
+    // g) G⑦ pathKey 语义收紧（备忘-1+2）：win32 下 UNC 两拼写（\\srv\share\f.txt 折叠后 //srv/share/f.txt）
+    //    同键且视为绝对不前置 cwd；POSIX 上反斜杠是合法文件名字符，不与斜杠子路径折叠同键。
+    {
+      const uBack = pathKeyG('\\\\srv\\share\\f.txt', null, 'win32'); // TS 字面量，实际值 \\srv\share\f.txt
+      const uFwd = pathKeyG('//srv/share/f.txt', null, 'win32');
+      const uCwd = pathKeyG('\\\\srv\\share\\f.txt', '/w', 'win32');
+      const pBack = pathKeyG('weird\\name.ts', null, 'linux');
+      const pFwd = pathKeyG('weird/name.ts', null, 'linux');
+      check('G⑦', 'pathKey win32：UNC 两拼写同键且不被前置 cwd；linux：含反斜杠文件名与斜杠子路径不同键',
+        uBack === uFwd && uCwd === uBack && pBack !== pFwd,
+        `unc: [${uBack}] vs [${uFwd}]；unc+cwd=/w: [${uCwd}]；linux: [${pBack}] vs [${pFwd}]`);
+    }
+  } catch (e) {
+    fail += 1;
+    console.log(`  ❌ 段G 异常：${errMsg(e)}`);
+  }
+}
+
+runSegmentG();
+
 // ── 后续点追加区 ──
-// 段C 为异步收尾段（快照是 fire-and-forget 续体），故 finish 统一在 .then 里收口清理与汇总。
+// 段C 与段F（点A）均为异步收尾段（快照是 fire-and-forget 续体），故 finish 统一在 .then 里
+// 收口清理与汇总；段F 续在段C 之后、清理之前执行（依赖临时库与临时目录仍存活）。
 
 void runSegmentC()
   .catch((e: unknown) => {
     fail += 1;
     console.log(`  ❌ 段C 异步驱动异常：${errMsg(e)}`);
+  })
+  .then(() => runSegmentF())
+  .catch((e: unknown) => {
+    fail += 1;
+    console.log(`  ❌ 段F 异步驱动异常：${errMsg(e)}`);
   })
   .then(() => {
     // 先放掉 db 句柄再删目录：段A/段C/段D（含 checkpointRepo/turn-diff-checkpoint/turn-diff）

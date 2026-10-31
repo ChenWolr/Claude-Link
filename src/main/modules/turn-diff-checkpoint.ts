@@ -76,19 +76,20 @@ function appendCapped(current: string, chunk: string, limit: number): { text: st
 }
 
 /**
- * 从 input JSON 文本提取 file_path（字段别名 file_path/path，对齐 tool-diff.ts 的 file_path
- * 提取规则并按计划扩 path 别名）。JSON.parse 失败（截断前缀非法 JSON）时正则兜底——尽力而为：
+ * 从 input JSON 文本提取目标文件路径（字段别名 file_path/path/notebook_path——notebook_path
+ * 为 NotebookEdit 工具入参；对齐 tool-diff.ts 的 file_path 提取规则并按计划扩 path/notebook_path
+ * 别名）。JSON.parse 失败（截断前缀非法 JSON）时正则兜底——尽力而为：
  * first-change 合成对 input_json 本就是「缺失/截断照存」。
  */
 function extractFilePath(jsonText: string): string {
   try {
     const obj = JSON.parse(jsonText) as Record<string, unknown>;
-    const direct = obj != null && typeof obj === 'object' ? (obj.file_path ?? obj.path) : null;
+    const direct = obj != null && typeof obj === 'object' ? (obj.file_path ?? obj.path ?? obj.notebook_path) : null;
     if (typeof direct === 'string') return direct;
   } catch {
     // 截断前缀非法 JSON：走正则兜底
   }
-  const m = jsonText.match(/"(?:file_path|path)"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  const m = jsonText.match(/"(?:file_path|notebook_path|path)"\s*:\s*"((?:[^"\\]|\\.)*)"/);
   if (!m || m[1] === undefined) return '';
   try {
     const decoded = JSON.parse(`"${m[1]}"`) as unknown;
