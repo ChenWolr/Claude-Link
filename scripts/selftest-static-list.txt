@@ -256,3 +256,5 @@ scripts/tdd-changes-web-resilience-verify.ts
 scripts/tdd-update-dialog-autoheight-verify.ts
 scripts/tdd-mcp-probe-spawn-verify.ts
 scripts/tdd-chat-file-open-verify.ts
+scripts/tdd-progress-verify.ts
+scripts/tdd-subagent-verify.ts
