@@ -336,9 +336,10 @@ export interface ClaudeLinkAPI {
   // P8 双向写入：用户级/项目级 mcpServers 条目 upsert/remove（哨兵还原在主进程 writer；
   // overwrote = upsert 命中现有同名，remove 恒 false）。
   writeMcpScoped: (payload: McpWriteScopedPayload) => Promise<{ overwrote: boolean }>;
-  // 作用域导出 JSON：主进程构建 {"mcpServers":{…}} 文本并写系统剪贴板（渲染层零明文，
-  // 回包只有 count；count=0 未动剪贴板）。
-  exportMcpScoped: (payload: McpExportScopedPayload) => Promise<{ ok: true; count: number }>;
+  // 作用域导出 JSON：主进程构建 {"mcpServers":{…}} 文本，桌面路径写系统剪贴板（渲染层零明文，
+  // 回包只有 count；count=0 未动剪贴板）；网页路径（主进程 event===null）不写剪贴板，回
+  // downloadUrl（一次性票据 URL，浏览器同源下载）——仅网页路径出现该字段。
+  exportMcpScoped: (payload: McpExportScopedPayload) => Promise<{ ok: true; count: number; downloadUrl?: string }>;
   // 单服务器 JSON 解析（点2，表单⇄JSON 双模式「JSON → 表单」方向）：文本送主进程
   // parseMcpServersJson（三形态导入口径同导入弹窗），失败回 { ok: false, error } 不 throw。
   parseMcpJson: (text: string) => Promise<McpParseJsonResult>;
@@ -553,8 +554,8 @@ export function createApi(): ClaudeLinkAPI {
     probeMcpServers: (target) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PROBE, target) as Promise<McpProbeReport[]>,
     // P8 双向写入（对象载荷，对齐主进程 handler 入参形状）。
     writeMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_WRITE_SCOPED, payload) as Promise<{ overwrote: boolean }>,
-    // 作用域导出 JSON（对象载荷；主进程写剪贴板，回包零明文）。
-    exportMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_EXPORT_SCOPED, payload) as Promise<{ ok: true; count: number }>,
+    // 作用域导出 JSON（对象载荷；桌面写剪贴板、网页回一次性票据 URL，回包零明文）。
+    exportMcpScoped: (payload) => ipcRenderer.invoke(IPC_CHANNELS.MCP_EXPORT_SCOPED, payload) as Promise<{ ok: true; count: number; downloadUrl?: string }>,
     // 单服务器 JSON 解析（点2；text 原样转发主进程 parseMcpServersJson，失败回包不 throw）。
     parseMcpJson: (text) => ipcRenderer.invoke(IPC_CHANNELS.MCP_PARSE_JSON, text) as Promise<McpParseJsonResult>,
     // IM 机器人（飞书/微信 bridge）。

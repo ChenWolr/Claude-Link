@@ -302,6 +302,25 @@ function serveExportDownload(req: http.IncomingMessage, res: http.ServerResponse
     plain(res, 404, 'Not Found（链接无效或已使用）');
     return;
   }
+  // content 型票据（MCP 导出 JSON 网页路径，P3）：正文只在主进程内存，无文件可 stat，故先于
+  // statSync 判定；响应体直达浏览器（不进渲染层状态）。
+  if (typeof hit.content === 'string') {
+    const body = Buffer.from(hit.content, 'utf8');
+    const asciiFallback = hit.filename.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+    res.writeHead(200, {
+      'Content-Type': `${hit.mime}; charset=utf-8`,
+      'Content-Length': body.length,
+      'Content-Disposition': `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodeURIComponent(hit.filename)}`,
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    if (method === 'HEAD') {
+      res.end();
+      return;
+    }
+    res.end(body);
+    return;
+  }
   let stat: fs.Stats;
   try {
     stat = fs.statSync(hit.filePath);

@@ -15,8 +15,10 @@ export const WEB_DOWNLOAD_TTL_MS = 10 * 60_000;
 
 interface TicketRecord {
   jobId: string;
-  filePath: string;
+  filePath: string;   // content 型票据为 ''
   filename: string;
+  content?: string;   // content 型票据的内存正文（不出主进程）
+  mime?: string;      // content 型票据的 MIME
   expiresAt: number;
   used: boolean;
 }
@@ -33,8 +35,28 @@ export function createTicket(jobId: string, filePath: string, filename: string):
   return { filename, url: `/api/export-download?ticket=${ticket}` };
 }
 
+/** 一次性票据的命中视图（判别字段：content 存在即内存正文型，否则为文件型）。
+ *  文件型票据消费结果保持既有 { filePath, filename } 形状（既有下载链零变化）。 */
+export type TicketHit =
+  | { filePath: string; filename: string; content?: undefined; mime?: undefined }
+  | { content: string; mime: string; filename: string; filePath?: undefined };
+
+/** 为内存正文签发一次性下载票据（MCP 导出 JSON 网页路径）：正文只存主进程内存，URL 不含内容。 */
+export function createTicketForContent(
+  filename: string,
+  content: string,
+  mime: string,
+): { filename: string; url: string } {
+  const ticket = randomBytes(24).toString('base64url');
+  // jobId 用空串哨兵：purgeJob(真实 jobId) 永不命中，避免导出产物清理误摘内容票据。
+  tickets.set(ticket, { jobId: '', filePath: '', filename, content, mime, expiresAt: Date.now() + WEB_DOWNLOAD_TTL_MS, used: false });
+  const timer = setTimeout(() => { tickets.delete(ticket); }, WEB_DOWNLOAD_TTL_MS);
+  timer.unref();
+  return { filename, url: `/api/export-download?ticket=${ticket}` };
+}
+
 /** 单次消费：查无 / 过期 / 已用 → null（过期/已用顺手摘除条目）；命中标记 used 后返回。 */
-export function consumeTicket(ticket: string): { filePath: string; filename: string } | null {
+export function consumeTicket(ticket: string): TicketHit | null {
   const rec = tickets.get(ticket);
   if (!rec) return null;
   if (rec.used || Date.now() > rec.expiresAt) {
@@ -42,6 +64,9 @@ export function consumeTicket(ticket: string): { filePath: string; filename: str
     return null;
   }
   rec.used = true;
+  if (typeof rec.content === 'string') {
+    return { content: rec.content, mime: rec.mime ?? 'application/octet-stream', filename: rec.filename };
+  }
   return { filePath: rec.filePath, filename: rec.filename };
 }
 

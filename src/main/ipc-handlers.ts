@@ -101,6 +101,8 @@ import type { ChangesOpenResult } from '../shared/types/changes';
 // 轮末文件改动（turn-diff，2026-10-26 计划 §4-P4）：摘要聚合与单文件 patch 两只读通道的实现模块。
 import * as turnDiff from './modules/turn-diff';
 import { registerExportImageHandlers, resolveExportTarget } from './modules/export-image-manager';
+// MCP 导出 JSON 网页路径（P3，2026-10-30）：内存正文一次性下载票据（/api/export-download）。
+import { createTicketForContent } from './modules/export-web-tickets';
 import { detectDirectImageFormat, validateChatSendPayloadShape, ATTACHMENT_READ_GUARD_BYTES, MAX_FILE_BYTES, formatBytes } from './modules/attachment-policy';
 import {
   stageAttachment,
@@ -781,14 +783,16 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     }
     return writeScopedMcpServer({ scope: req.scope, dir, entry, mode: req.mode, userHome: effectiveUserHome() ?? os.homedir() });
   });
-  // 作用域导出 JSON（2026-10-18）：body = { scope, dir? } → { ok, count }。主进程内取明文
-  //（managed = config store 数组按 name 成表 / user、project = scanner raw 直读，未脱敏真值）
-  // → buildMcpServersExportJson（{"mcpServers":{…}} 形态）→ electron clipboard 写剪贴板。
-  // §1.3 渲染层零明文：JSON 文本全程不出主进程，渲染层只拿 count；导出含全部定义（启停
+  // 作用域导出 JSON（2026-10-18）：body = { scope, dir? } → { ok, count, downloadUrl? }。主进程内取
+  // 明文（managed = config store 数组按 name 成表 / user、project = scanner raw 直读，未脱敏真值）
+  // → buildMcpServersExportJson（{"mcpServers":{…}} 形态）：桌面路径写 electron clipboard；网页路径
+  //（event === null，唯一来源 invokeFromWeb，2026-10-30 P3）改签一次性票据回 downloadUrl，由浏览器
+  // 同源 GET /api/export-download 取正文（写桌面主机剪贴板对网页用户无意义——远控语义修正）。
+  // §1.3 渲染层零明文：JSON 文本全程不出主进程，渲染层只拿 count / 票据 URL；导出含全部定义（启停
   // 是 Claude Link 专属 override，非标准字段，不参与导出）。project 的 dir 白名单校验与
-  // WRITE_SCOPED 同源（已知项目目录集，防任意路径读探测）；count = 0 时不动剪贴板
+  // WRITE_SCOPED 同源（已知项目目录集，防任意路径读探测）；count = 0 时不动剪贴板也不签票据
   //（渲染层按钮已按空表禁用，防御性兜底）。
-  regInvokeHandler(IPC_CHANNELS.MCP_EXPORT_SCOPED, async (_event, body: unknown): Promise<{ ok: true; count: number }> => {
+  regInvokeHandler(IPC_CHANNELS.MCP_EXPORT_SCOPED, async (event, body: unknown): Promise<{ ok: true; count: number; downloadUrl?: string }> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP export payload');
     const req = body as { scope?: unknown; dir?: unknown };
     if (req.scope !== 'managed' && req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP export scope');
@@ -813,7 +817,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     }
     const count = Object.keys(servers).length;
     if (count === 0) return { ok: true, count: 0 };
-    clipboard.writeText(buildMcpServersExportJson(servers));
+    const json = buildMcpServersExportJson(servers);
+    if (event === null) {
+      // 网页路径（唯一来源 = invokeFromWeb）：一次性票据下载，不写桌面主机剪贴板（远控语义修正）。
+      // 明文边界：JSON 文本只经 /api/export-download 响应体直达浏览器，不进渲染层状态。
+      const ticket = createTicketForContent(`mcp-servers-${req.scope}.json`, json, 'application/json');
+      return { ok: true, count, downloadUrl: ticket.url };
+    }
+    clipboard.writeText(json);
     return { ok: true, count };
   });
   // 单服务器 JSON 解析（2026-10-19 mcp-settings-plan-a 点2，表单⇄JSON 双模式的「JSON → 表单」

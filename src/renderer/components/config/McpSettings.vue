@@ -1399,7 +1399,16 @@ async function exportScopeJson(): Promise<void> {
       pushToast('当前作用域暂无可导出的服务器');
       return;
     }
-    pushToast(`已复制 ${r.count} 台服务器配置 JSON（mcpServers 形态）到剪贴板`);
+    if (r.downloadUrl) {
+      // 网页形态：同源一次性票据下载（不写 clipboard——那是桌面主机剪贴板，网页用户拿不到）。
+      const a = document.createElement('a');
+      a.href = r.downloadUrl;
+      a.download = '';
+      a.click();
+      pushToast(`已下载 ${r.count} 台服务器配置 JSON（mcpServers 形态）`);
+    } else {
+      pushToast(`已复制 ${r.count} 台服务器配置 JSON（mcpServers 形态）到剪贴板`);
+    }
   } catch (e) {
     pushToast(`导出失败：${e instanceof Error ? e.message : String(e)}`);
   } finally {

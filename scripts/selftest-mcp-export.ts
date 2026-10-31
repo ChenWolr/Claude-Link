@@ -10,15 +10,20 @@
 //   B 组（静态接线钉，先例 selftest-mcp-settings.ts H 组读源码静态钉；只读仓库内源文件，
 //     绝不触真实磁盘/剪贴板/配置）：
 //     ①shared/types/ipc.ts 含 MCP_EXPORT_SCOPED 通道常量 ②ipc-handlers.ts 含 handler +
-//     clipboard.writeText(buildMcpServersExportJson( 主进程剪贴板链 + project dir 白名单
+//     buildMcpServersExportJson → clipboard.writeText(json) 主进程剪贴板链 + project dir 白名单
 //     （'已拒绝导出'）③preload/api.ts 含 exportMcpScoped 桥 + McpExportScopedPayload
 //     ④McpSettings.vue 含「导出 JSON」按钮 + exportScopeJson + 空表禁用 ⑤标题行 ⓘ 气泡
 //     右缘锚定 CSS 钉（tip--head 变体——2026-10-18 截断回归的防线）。
+//   C 组（P3 网页版一次性票据下载，2026-10-30）：①createTicketForContent 行为级（content/mime
+//     单次消费、URL 不含内容）②文件型票据不被污染 ③handler 网页分支（event===null 早于
+//     clipboard.writeText(json)）④server content 分支（早于 fs.statSync）⑤渲染层下载分支
+//     ⑥preload downloadUrl?: string 类型扩展。
 // 运行：npx tsx scripts/selftest-mcp-export.ts
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { buildMcpServersExportJson } from '../src/main/modules/mcp/mcp-config';
+import { createTicketForContent, createTicket, consumeTicket, reset } from '../src/main/modules/export-web-tickets';
 
 let pass = 0;
 let fail = 0;
@@ -163,8 +168,10 @@ function main(): void {
 
   check('B1 ipc.ts 含 MCP_EXPORT_SCOPED 通道常量', ipc.includes("MCP_EXPORT_SCOPED: 'mcp:exportScoped'"));
   check('B2 ipc-handlers.ts 注册 handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.MCP_EXPORT_SCOPED'));
-  check('B2 剪贴板链：主进程 clipboard.writeText(buildMcpServersExportJson(…))',
-    handlers.includes('clipboard.writeText(buildMcpServersExportJson(servers))'));
+  // B2 剪贴板链（P3 起形态：先构建一次 JSON，桌面分支写剪贴板 / 网页分支签票据——原
+  // 'clipboard.writeText(buildMcpServersExportJson(servers))' 单行形态随分支化改写为两段，语义不变）
+  check('B2 剪贴板链：主进程 buildMcpServersExportJson(servers) → clipboard.writeText(json)',
+    handlers.includes('const json = buildMcpServersExportJson(servers);') && handlers.includes('clipboard.writeText(json)'));
   check('B2 明文数据源三作用域（raw 读取器接线）',
     handlers.includes('readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir())') && handlers.includes('readProjectMcpServersRawSync(dir as string)'));
   check('B2 project dir 白名单（已拒绝导出）', handlers.includes('已拒绝导出'));
@@ -179,6 +186,94 @@ function main(): void {
     /\.tip--head \{\r?\n  position: static;/.test(vue) && /\.tip--head \.bubble \{\r?\n  left: auto;\r?\n  right: 0;/.test(vue));
   check('B5 标题行 relative 锚（.mcp-title-row position:relative）',
     /\.mcp-title-row \{\r?\n  position: relative;/.test(vue));
+
+  // ── C 组：网页版一次性票据下载契约（P3，2026-10-30）──────────────────────────
+  console.log('[C] 网页版一次性票据下载契约（P3）');
+  const serverSrc = read('src/main/modules/web-access/web-access-server.ts');
+
+  // C1 行为级 content 票据：URL 形态（不含正文/文件名以外的内容）/ filename 原样 / 首次消费
+  //    还原 content+mime、filePath 缺省 / 二次消费 null（单次消费）。
+  {
+    reset();
+    const body = '{"mcpServers":{}}';
+    let issued: { filename: string; url: string } | null = null;
+    let issueErr = '';
+    try {
+      issued = createTicketForContent('mcp-servers-user.json', body, 'application/json');
+    } catch (e) {
+      issueErr = e instanceof Error ? e.message : String(e);
+    }
+    const ticket = issued && issued.url.includes('ticket=') ? issued.url.split('ticket=')[1]! : '';
+    const first = ticket ? consumeTicket(ticket) : null;
+    const second = ticket ? consumeTicket(ticket) : null;
+    check('C1 createTicketForContent：URL 形态/不含内容/filename 原样；首消还原 content+mime、filePath 缺省；二消 null',
+      issued !== null
+        && /^\/api\/export-download\?ticket=[A-Za-z0-9_-]+$/.test(issued.url)
+        && !issued.url.includes('mcpServers')
+        && issued.filename === 'mcp-servers-user.json'
+        && first !== null
+        && first.content === body
+        && first.mime === 'application/json'
+        && first.filePath === undefined
+        && second === null,
+      issueErr || JSON.stringify({ issued, first, second }));
+  }
+
+  // C2 文件型票据不被污染：filePath/filename 原样、content 缺省。
+  {
+    reset();
+    const f = createTicket('job-x', '/tmp/a.png', 'a.png');
+    const hit = consumeTicket(f.url.split('ticket=')[1]!);
+    check('C2 文件型票据不被污染（filePath/filename 原样、content 缺省）',
+      hit !== null && hit.filePath === '/tmp/a.png' && hit.filename === 'a.png' && hit.content === undefined,
+      JSON.stringify(hit));
+  }
+
+  // C3 handler 网页分支静态钉：createTicketForContent 签发 + downloadUrl?: string 回包 +
+  //    event === null 分支在 clipboard.writeText(json) 之前（html 路径绝不写桌面剪贴板）。
+  {
+    const webAt = handlers.indexOf('if (event === null) {');
+    const clipAt = handlers.indexOf('clipboard.writeText(json)');
+    check('C3 handler：createTicketForContent / downloadUrl?: string / event===null 早于 clipboard.writeText(json)',
+      handlers.includes('createTicketForContent(')
+        && handlers.includes('downloadUrl?: string')
+        && webAt > -1
+        && clipAt > -1
+        && webAt < clipAt,
+      `createTicketForContent=${handlers.includes('createTicketForContent(')} downloadUrl=${handlers.includes('downloadUrl?: string')} eventAt=${webAt} clipAt=${clipAt}`);
+  }
+
+  // C4 server content 分支静态钉：typeof hit.content 判别 + hit.mime + Content-Disposition，
+  //    且 content 分支在 fs.statSync(hit.filePath) 之前（content 型无文件，先 stat 必 410）。
+  {
+    const contentAt = serverSrc.indexOf("typeof hit.content === 'string'");
+    const statAt = serverSrc.indexOf('fs.statSync(hit.filePath)');
+    check('C4 server content 分支：typeof hit.content / hit.mime / Content-Disposition 且早于 fs.statSync(hit.filePath)',
+      contentAt > -1
+        && serverSrc.includes('hit.mime')
+        && serverSrc.includes('Content-Disposition')
+        && statAt > -1
+        && contentAt < statAt,
+      `contentAt=${contentAt} statAt=${statAt}`);
+  }
+
+  // C5 渲染层下载分支静态钉：r.downloadUrl → a[download] 同源下载 + 已下载 toast；
+  //    else 分支既有「已复制…到剪贴板」文案保留（桌面路径不回归）。
+  {
+    check('C5 McpSettings.vue：r.downloadUrl / document.createElement(\'a\') / 已下载 toast；else 保留已复制…到剪贴板',
+      vue.includes('r.downloadUrl')
+        && vue.includes("document.createElement('a')")
+        && vue.includes('已下载 ')
+        && vue.includes(' 台服务器配置 JSON')
+        && vue.includes('已复制 ')
+        && vue.includes(' 台服务器配置 JSON（mcpServers 形态）到剪贴板'));
+  }
+
+  // C6 preload 类型扩展：声明 + 实现两处 downloadUrl?: string。
+  {
+    const n = (preload.match(/downloadUrl\?: string/g) ?? []).length;
+    check('C6 preload downloadUrl?: string 类型扩展（声明 + 实现 ≥2 处）', n >= 2, `现状 ${n} 处`);
+  }
 
   console.log(`\nselftest-mcp-export: ${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
