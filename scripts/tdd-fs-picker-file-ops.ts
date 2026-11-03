@@ -136,7 +136,7 @@ async function main(): Promise<void> {
   // 计数一并校准为实数 77——点 D 加 TASK_OUTPUT_READ 时 75 未同步，本点补齐）。
   // P2（web-access）同步：原「含 100 个方法」字面钉在 onSessionsChanged 增员后必破——改按
   // tdd-app-updater-verify check5 同款动态比对（头注释 N === ClaudeLinkAPI 接口成员数）。
-  check('B5 preload 头注释方法数与 ClaudeLinkAPI 接口成员数一致（动态比对，当前 101）', (() => {
+  check('B5 preload 头注释方法数与 ClaudeLinkAPI 接口成员数一致（动态比对）', (() => {
     const header = /(\d+)\s*个方法/.exec(preloadSrc);
     const ifaceAt = preloadSrc.indexOf('export interface ClaudeLinkAPI');
     const ifaceEnd = preloadSrc.indexOf('export function createApi');
@@ -149,8 +149,20 @@ async function main(): Promise<void> {
   check("B6 ipc.ts 含 'fs:trash' 字面量", ipcTypesSrc.includes("'fs:trash'"));
   check("B6 ipc.ts 含 'fs:showInExplorer' 字面量", ipcTypesSrc.includes("'fs:showInExplorer'"));
   const readmeSrc = read('README.md');
-  check('B7 README.md 含「79 个 handle」', readmeSrc.includes('79 个 handle'));
-  check('B7 README.md 含「100 方法」', readmeSrc.includes('100 方法'));
+  // B7（2026-11-03 review P1-3）：README 功能清单刷新后字面钉「79 个 handle」「100 方法」必红，
+  // 且旧字面值本就与实况长期脱节（实为 90 处 regInvokeHandler( 注册）——改动态计数比对
+  // （B5 先例手法）：README 计数 === 源码实数，README 再刷新时只改文档即可，钉子不再破。
+  // 方法数 check 锚定「主窗口」前缀提取，防 README 同条目「导出窗口 9 方法」串排在前被宽松 /(\d+)\s*方法/ 误匹配（q1 加固，零行为差异）。
+  check('B7 README handler 数 === ipc-handlers.ts regInvokeHandler( 注册数（动态比对）', (() => {
+    const m = /(\d+)\s*个\s*regInvokeHandler/.exec(readmeSrc);
+    const n = (handlersSrc.match(/regInvokeHandler\(/g) ?? []).length;
+    return m !== null && Number(m[1]) === n;
+  })());
+  check('B7 README 主窗口方法数 === preload 头注释方法数（动态比对，锚定「主窗口」防同条目「导出窗口 9 方法」排前错位；B5 已钉头注释===接口成员数）', (() => {
+    const rm = /主窗口\s*(\d+)\s*方法/.exec(readmeSrc);
+    const pm = /(\d+)\s*个方法/.exec(preloadSrc);
+    return rm !== null && pm !== null && Number(rm[1]) === Number(pm[1]);
+  })());
 
   // ── B8：round-001 fix1 验收修复钉（2026-10-15）──
   // preload 三绑定（B5）发的是对象载荷（{paths}/{path}），主进程 handler 必须以 req 对象解构
