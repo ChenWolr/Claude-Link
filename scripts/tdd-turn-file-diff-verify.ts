@@ -25,7 +25,7 @@
 //   解析到 scripts/electron-stub.cjs，app.getPath 由 CLAUDE_LINK_TEST_USERDATA 指向 Cache 临时目录，
 //   真实 connection/runMigrations/repo 在临时库上跑，绝不触碰真实用户库。）
 
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -150,7 +150,7 @@ const db = connectionMod.getConnection() as {
   const ver = versionOf(db);
   check('A①', '临时目录库 runMigrations×2：不抛错（幂等）', migrateThrew === '', migrateThrew.slice(0, 160));
   check('A②', 'turn_file_checkpoints 表存在', tableExists, '迁移后表缺失');
-  check('A③', '版本记录 = 15', ver === 15, `实际=${String(ver)}`);
+  check('A③', '版本记录 = 16（V16 turn_file_git_baselines 落地后同步，2026-11-02 git 基线计划）', ver === 16, `实际=${String(ver)}`);
 }
 
 // 列集与索引、外键（建表 SQL 逐字契约的物理形态）。
@@ -222,12 +222,12 @@ function seedLegacyV14Db(): { prepare: (sql: string) => { run: (...args: unknown
   const legacySessionsIntact = tableCols(legacy, 'sessions').includes('id')
     && (legacy.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n === 0;
   const legacyVer = versionOf(legacy);
-  check('A⑦', '老库 v14 自动升级：不抛错；turn_file_checkpoints 补建；版本升 15；既有表不受损',
-    upgradeThrew === '' && newTableExists && legacySessionsIntact && legacyVer === 15,
+  check('A⑦', '老库 v14 自动升级：不抛错；turn_file_checkpoints 补建；版本升 16；既有表不受损',
+    upgradeThrew === '' && newTableExists && legacySessionsIntact && legacyVer === 16,
     [upgradeThrew ? `抛错：${upgradeThrew.slice(0, 120)}` : '',
       newTableExists ? '' : '新表未建',
       legacySessionsIntact ? '' : 'sessions 表受损',
-      legacyVer !== 15 ? `版本=${legacyVer}` : ''].filter(Boolean).join('; '));
+      legacyVer !== 16 ? `版本=${legacyVer}` : ''].filter(Boolean).join('; '));
   legacy.close();
 }
 
@@ -864,7 +864,7 @@ function mkRow(seq: number, over: Record<string, unknown>): Record<string, unkno
   };
 }
 
-function runSegmentD(): void {
+async function runSegmentD(): Promise<void> {
   try {
     if (
       typeof aggregateFromCheckpoints !== 'function' || typeof computeFileDiff !== 'function'
@@ -1178,25 +1178,25 @@ function runSegmentD(): void {
       ck(4, 'dp-m1', 'Q', 'Q1\n', { file_path: 'Q', content: 'Q1\n' });
 
       const getPatch = turnDiffMod!.getPatch as GetPatchFn;
-      const p12 = getPatch(sid, 'dp-u1', 'dp-u2', 'P');
+      const p12 = await getPatch(sid, 'dp-u1', 'dp-u2', 'P');
       check('D⑧a', "getPatch 轮1：mode=full、patch=基线P0→末P2（'-P0'/'+P2'，P1/P3 不出现）",
         p12.mode === 'full' && p12.truncated === false
           && p12.patch.split('\n').includes('-P0') && p12.patch.split('\n').includes('+P2')
           && !p12.patch.includes('P1') && !p12.patch.includes('P3'),
         `p12=${JSON.stringify(p12)}`);
-      const p23 = getPatch(sid, 'dp-u2', null, 'P');
+      const p23 = await getPatch(sid, 'dp-u2', null, 'P');
       check('D⑧b', "getPatch 轮2（end=null）：before=轮1 末 P2 → patch '-P2'/'+P3'",
         p23.mode === 'full' && p23.patch.split('\n').includes('-P2') && p23.patch.split('\n').includes('+P3'),
         `p23=${JSON.stringify(p23)}`);
-      const pInf = getPatch(sid, 'dp-u2', 'dp-missing-end', 'P');
+      const pInf = await getPatch(sid, 'dp-u2', 'dp-missing-end', 'P');
       check('D⑧c', 'endMessageId 查不到 → 上界 +∞（与 end=null 同结果）',
         pInf.mode === 'full' && pInf.patch === p23.patch,
         `pInf=${JSON.stringify(pInf)}`);
-      const pNoTurn = getPatch(sid, 'dp-missing-turn', null, 'P');
+      const pNoTurn = await getPatch(sid, 'dp-missing-turn', null, 'P');
       check('D⑧d', "turnStartMessageId 查不到 → {mode:'unavailable', patch:'', truncated:false} 不抛错",
         pNoTurn.mode === 'unavailable' && pNoTurn.patch === '' && pNoTurn.truncated === false,
         `pNoTurn=${JSON.stringify(pNoTurn)}`);
-      const q1 = getPatch(sid, 'dp-u1', 'dp-u2', 'Q');
+      const q1 = await getPatch(sid, 'dp-u1', 'dp-u2', 'Q');
       check('D⑧e', 'getPatch 首改（Q 区间前无记录）→ first-change、patch 含 +Q1',
         q1.mode === 'first-change' && q1.patch.split('\n').includes('+Q1'),
         `q1=${JSON.stringify(q1)}`);
@@ -1205,7 +1205,7 @@ function runSegmentD(): void {
     // i) listSummaries（DB 组装全链）：主进程从 messages 表推导轮区间（N2 裁定）。
     {
       const listSummaries = turnDiffMod!.listSummaries as ListSummariesFn;
-      const out = listSummaries('sess-d-patch');
+      const out = await listSummaries('sess-d-patch');
       const t1 = out.find((s) => s.turnStartMessageId === 'dp-u1');
       const t2 = out.find((s) => s.turnStartMessageId === 'dp-u2');
       check('D⑨', 'listSummaries：主进程推导轮区间 → 两轮摘要（轮1 P+Q、轮2 P）',
@@ -1267,8 +1267,6 @@ function runSegmentD(): void {
   }
 }
 
-runSegmentD();
-
 // ═══════════════════════════════════════════════════════════════════════════
 // 段E（P1，2026-10-30 意图合成器重写计划 §2.2/§2.3）：虚拟文档链 + mrow 排序 + context 透传。
 // 纯函数直测（内存 rows）+ E6 走真实临时库 getPatch。hunk 头用 @@ -a,b +c,d @@ 正则抽取断言。
@@ -1306,7 +1304,7 @@ function hunkBodiesOf(patch: string): string[][] {
   return bodies;
 }
 
-{
+async function runSegmentE(): Promise<void> {
   const fileDiffCtx = computeFileDiff as ComputeCtxFn | undefined;
   const getPatchCtx = turnDiffMod?.getPatch as GetPatchCtxFn | undefined;
 
@@ -1442,8 +1440,8 @@ function hunkBodiesOf(patch: string): string[][] {
         input_json: JSON.stringify({ file_path: 'K', content: after10 }), input_truncated: 0,
         after_content: after10, after_truncated: 0, binary: 0, snapshot_state: 'disk',
       });
-      const p3 = getPatchCtx!(sid, 'e-u1', null, 'K', 3);
-      const p10 = getPatchCtx!(sid, 'e-u1', null, 'K', 10);
+      const p3 = await getPatchCtx!(sid, 'e-u1', null, 'K', 3);
+      const p10 = await getPatchCtx!(sid, 'e-u1', null, 'K', 10);
       const b3 = hunkBodiesOf(p3.patch).reduce((acc, body) => acc + body.length, 0);
       const b10 = hunkBodiesOf(p10.patch).reduce((acc, body) => acc + body.length, 0);
       const pmOf = (p: { patch: string }): string =>
@@ -1772,7 +1770,7 @@ function patchBodyG(patch: string): string[] {
   return patch.split('\n').filter((l) => !l.startsWith('--- ') && !l.startsWith('+++ '));
 }
 
-function runSegmentG(): void {
+async function runSegmentG(): Promise<void> {
   try {
     if (typeof pathKeyG !== 'function' || typeof aggregateCwdG !== 'function' || typeof fileDiffCwdG !== 'function') {
       const why = `pathKey/aggregateFromCheckpoints/computeFileDiff 导出不可用${turnDiffErr ? `（turn-diff 加载失败：${turnDiffErr.slice(0, 160)}）` : ''}`;
@@ -1869,9 +1867,9 @@ function runSegmentG(): void {
       ckG('gu5-m1', pUpper5, 'BASE\nv1\n');
       ckG('gu5-m2', pLower5, 'BASE\nv1\nv2\n');
       const getPatchG = turnDiffMod!.getPatch as GetPatchFn;
-      const rUp = getPatchG(sid, 'gu5-u1', null, pUpper5);
-      const rFwd = getPatchG(sid, 'gu5-u1', null, pUpper5.replace(/\\/g, '/'));
-      const rLow = getPatchG(sid, 'gu5-u1', null, pLower5);
+      const rUp = await getPatchG(sid, 'gu5-u1', null, pUpper5);
+      const rFwd = await getPatchG(sid, 'gu5-u1', null, pUpper5.replace(/\\/g, '/'));
+      const rLow = await getPatchG(sid, 'gu5-u1', null, pLower5);
       check('G⑤', 'getPatch 双拼写：pUpper 与正斜杠变体 → 同一 patch（逐字节）、mode 一致（均 full）；pLower → mode 一致、patch 正文（剥文件头）逐行相同',
         rUp.mode === 'full' && rFwd.mode === rUp.mode && rLow.mode === rUp.mode
           && rUp.patch === rFwd.patch
@@ -1916,7 +1914,7 @@ function runSegmentG(): void {
       ckG6('gu6-pre', 'SG6.txt', 'S0\n');
       ckG6('gu6-m1', 'SG6.txt', 'S1\n');
       const listSummariesG6 = turnDiffMod!.listSummaries as ListSummariesFn;
-      const out6 = listSummariesG6(sid);
+      const out6 = await listSummariesG6(sid);
       const item6 = out6[0]?.items[0];
       const dbOk = out6.length === 1 && item6?.path === 'SG6.txt' && item6?.mode === 'full'
         && item6?.writeCount === 1 && item6?.additions === 1 && item6?.deletions === 1;
@@ -1942,13 +1940,430 @@ function runSegmentG(): void {
   }
 }
 
-runSegmentG();
+// ═══════════════════════════════════════════════════════════════════════════
+// 段F（git 基线，2026-11-02 turn-diff-first-turn-git-baseline 计划 §4-P4）：首改 git HEAD 基线。
+// 注：本文件已有两处「段F」命名（F1-F4 渲染层源形状 / F①-F⑥ NotebookEdit），本段沿用计划原文
+// 命名、check 编号用 F-merge/F-base/F-mig/F-rtl 前缀，与前两者无冲突（NotebookEdit 段先例）。
+// F-merge①②/F-base① 为现状语义回归钉（RED 阶段即应绿）；F-base②④⑤/F-mig⑦/F-rtl⑥ 为新行为
+// 断言（RED 阶段红）。git 用例真实跑 execFile git（临时仓库置于 stubUserDataDir 下随尾部清理；
+// 提交身份 -c user.email=t@t -c user.name=t 内联注入，不依赖全局 git 配置）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+console.log('\n=== 段F 首改 git 基线（2026-11-02 计划 §4-P4） ===');
+
+// git 基线 repo（p1 新文件契约）：RED 阶段模块不存在 → require 失败降级为断言 FAIL，不 crash。
+let baselineRepo: Record<string, unknown> | null = null;
+let baselineRepoErr = '';
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  baselineRepo = require(path.resolve(repoRoot, 'src', 'main', 'database', 'repositories', 'turn-file-git-baseline-repo.ts')) as Record<string, unknown>;
+} catch (e) {
+  baselineRepoErr = errMsg(e);
+}
+const getGitBaseline = baselineRepo?.getGitBaseline as
+  | ((sessionId: string, key: string) => string | null | undefined)
+  | undefined;
+const setGitBaseline = baselineRepo?.setGitBaseline as
+  | ((sessionId: string, key: string, content: string | null) => void)
+  | undefined;
+// L1 缓存测试钩子（p1 导出契约；F-base⑤「清 L1 Map 再调用仍一致」依赖它模拟重启语义）。
+const clearGitBaselineL1 = turnDiffMod?.clearGitBaselineL1ForTests as (() => void) | undefined;
+
+// getPatch/listSummaries 在 p1 后变 async（await 对同步结果也是 no-op，RED/GREEN 两态兼容）。
+type GetPatchGBFn = (sessionId: string, turnStartMessageId: string, endMessageId: string | null, path: string, context?: number) =>
+  { mode: string; patch: string; truncated: boolean } | Promise<{ mode: string; patch: string; truncated: boolean }>;
+type ListSummariesGBFn = (sessionId: string) => AggSummary[] | Promise<AggSummary[]>;
+type ComputeGBFn = (
+  rows: unknown[], startRow: number, endRow: number | null, path: string, context?: number, cwd?: string | null, gitBaseline?: string | null,
+) => FileDiffResult;
+type DiffFullCtxGBFn = (before: string, after: string, path: string, context?: number) => DiffFullRet;
+const getPatchGB = turnDiffMod?.getPatch as GetPatchGBFn | undefined;
+const listSummariesGB = turnDiffMod?.listSummaries as ListSummariesGBFn | undefined;
+const fileDiffGB = turnDiffMod?.computeFileDiff as ComputeGBFn | undefined;
+const diffFullGB = diffCore?.diffFull as DiffFullCtxGBFn | undefined;
+const pathKeyGB = turnDiffMod?.pathKey as PathKeyFnG | undefined;
+
+const segGitDir = path.join(stubUserDataDir, 'seg-git');
+
+/** 真跑一次 git（execFile 数组参数 + timeout + windowsHide + GIT_TERMINAL_PROMPT=0；utf8 文本）。 */
+function gitExecGB(dir: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'git',
+      ['-C', dir, ...args],
+      {
+        timeout: 8000,
+        maxBuffer: 8 * 1024 * 1024,
+        windowsHide: true,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+        encoding: 'utf8',
+      },
+      (err, stdout) => {
+        if (err) reject(err instanceof Error ? err : new Error(String(err)));
+        else resolve(stdout as string);
+      },
+    );
+  });
+}
+
+/** 造真实临时 git 仓库：init + 写 fileRel=v1 内容 + add + commit（身份/gpgsign 内联注入）。 */
+async function makeGitRepoGB(repoDir: string, fileRel: string, v1: string | Buffer): Promise<void> {
+  fs.mkdirSync(repoDir, { recursive: true });
+  await gitExecGB(repoDir, ['init']);
+  fs.writeFileSync(path.join(repoDir, fileRel), v1);
+  await gitExecGB(repoDir, ['add', '--', fileRel]);
+  await gitExecGB(repoDir, ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-m', 'v1']);
+}
+
+/** 段F-git 用：种会话行（带 working_dir，resolveGitBaseline 的 cwd 来源）。 */
+function seedSessionGB(id: string, workingDir: string | null): void {
+  db.prepare("INSERT INTO sessions (id, name, model, working_dir) VALUES (?, '段F-git基线测试', 'claude-sonnet-4-6', ?)").run(id, workingDir);
+}
+
+/** 段F-git 用：种主流程 user 轮起点消息行（deriveTurnRanges 分界前提）。 */
+function seedUserMessageGB(sessionId: string, messageId: string): void {
+  db.prepare(
+    "INSERT INTO messages (id, session_id, role, content, parent_agent_id) VALUES (?, ?, 'user', '改一下文件', NULL)",
+  ).run(messageId, sessionId);
+}
+
+/** 段F-git 用：种 assistant 消息行并挂一条 checkpoint 快照（段D-h ck 同款）。 */
+function seedCkGB(sessionId: string, messageId: string, seq: number, p: string, after: string, toolInput: Record<string, unknown>): void {
+  db.prepare(
+    "INSERT INTO messages (id, session_id, role, content, parent_agent_id) VALUES (?, ?, 'assistant', '写文件', NULL)",
+  ).run(messageId, sessionId);
+  const insertCkGB = checkpointRepo?.insert as ((row: Record<string, unknown>) => unknown) | undefined;
+  if (typeof insertCkGB !== 'function') throw new Error('repo.insert 不可用');
+  insertCkGB({
+    session_id: sessionId, message_id: messageId, path: p, tool_name: 'Write',
+    tool_use_id: `tu-gb-${sessionId}-${seq}`, input_json: JSON.stringify(toolInput), input_truncated: 0,
+    after_content: after, after_truncated: 0, binary: 0, snapshot_state: 'disk',
+  });
+}
+
+/** messages.id → rowid（startRow 构造）。 */
+function rowOfGB(messageId: string): number {
+  return (db.prepare('SELECT rowid AS r FROM messages WHERE id = ?').get(messageId) as { r: number }).r;
+}
+
+/** patch 正文行数合计（hunk 复用段E helper，跳过空行与 @@/---/+++ 头）。 */
+function bodyLineCountGB(patch: string): number {
+  return hunkBodiesOf(patch).reduce((acc, body) => acc + body.length, 0);
+}
+
+/** v15 老库最小形态（含 turn_file_checkpoints 一行）：F-mig⑦ 升级路径用（段A seedLegacyV14Db 同款手法）。 */
+function seedLegacyV15Db(): { prepare: (sql: string) => { run: (...args: unknown[]) => unknown; get: (...args: unknown[]) => unknown; all: (...args: unknown[]) => unknown[] }; exec: (sql: string) => void; close: () => void } {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Database = require('better-sqlite3');
+  const d = new Database(':memory:');
+  d.exec(`
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, model TEXT NOT NULL DEFAULT 'claude-sonnet-4-6', working_dir TEXT,
+      permission_mode TEXT DEFAULT NULL, max_turns INTEGER DEFAULT 200,
+      model_override TEXT DEFAULT NULL, provider_override TEXT DEFAULT NULL, thinking_level TEXT DEFAULT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE messages (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      role TEXT NOT NULL, content TEXT NOT NULL, parent_task_id TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE tasks (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      prompt TEXT NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE turn_file_checkpoints (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      message_id TEXT NOT NULL, path TEXT NOT NULL, tool_name TEXT NOT NULL, tool_use_id TEXT NOT NULL,
+      input_json TEXT, input_truncated INTEGER NOT NULL DEFAULT 0, after_content TEXT,
+      after_truncated INTEGER NOT NULL DEFAULT 0, binary INTEGER NOT NULL DEFAULT 0,
+      snapshot_state TEXT NOT NULL DEFAULT 'disk'
+    );
+    INSERT INTO schema_version (version) VALUES (15);
+  `);
+  d.prepare("INSERT INTO sessions (id, name, model) VALUES ('s15', 'legacy15', 'claude-sonnet-4-6')").run();
+  d.prepare("INSERT INTO messages (id, session_id, role, content) VALUES ('m15', 's15', 'user', 'x')").run();
+  d.prepare("INSERT INTO turn_file_checkpoints (session_id, message_id, path, tool_name, tool_use_id) VALUES ('s15', 'm15', 'a.txt', 'Write', 'tu15')").run();
+  return d;
+}
+
+async function runSegmentGB(): Promise<void> {
+  fs.mkdirSync(segGitDir, { recursive: true });
+
+  // a) F-merge①（现状回归钉，用户原始诉求）：同回合「Write 建链在前 + 3 次 Edit」共 4 次编辑同文件
+  //    （同拼写）→ aggregateFromCheckpoints 恰 1 条：writeCount=4、mode='first-change'、
+  //    ±=片段累计（Write 'W1' vs 空 +1/0；3 次 Edit 各 1/1 → 4/3）。
+  {
+    const rows = [
+      mkRow(1, { mrow: 101, path: 'FM1.txt', after_content: 'snap\n', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'FM1.txt', content: 'W1\n' }) }),
+      mkRow(2, { mrow: 102, path: 'FM1.txt', after_content: 'snap\n', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'FM1.txt', old_string: 'W1', new_string: 'E1' }) }),
+      mkRow(3, { mrow: 103, path: 'FM1.txt', after_content: 'snap\n', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'FM1.txt', old_string: 'E1', new_string: 'E2' }) }),
+      mkRow(4, { mrow: 104, path: 'FM1.txt', after_content: 'snap\n', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'FM1.txt', old_string: 'E2', new_string: 'E3' }) }),
+    ];
+    const out = aggregateFromCheckpoints!(rows, [{ turnStartMessageId: 'tfm1', startRow: 100, endRow: 200 }]);
+    const item = out[0]?.items[0];
+    check('F-merge①', '同回合 4 次编辑同文件（Write 建链在前 + 3 Edit）：恰 1 条、writeCount=4、mode=first-change、±=片段累计 4/3',
+      out.length === 1 && out[0]!.items.length === 1
+        && item?.writeCount === 4 && item?.mode === 'first-change'
+        && item?.additions === 4 && item?.deletions === 3,
+      `out=${JSON.stringify(out)}`);
+  }
+
+  // b) F-merge②（918e928 回归钉）：同文件拼写变体（win32 大小写/反斜杠/行尾空格 + NFC）→ 仍各 1 条。
+  {
+    const rows = [
+      mkRow(1, { mrow: 101, path: 'D:/w/pkgA/Menus.json', after_content: 's\n', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'D:/w/pkgA/Menus.json', content: 'm\n' }) }),
+      mkRow(2, { mrow: 102, path: 'd:\\w\\pkgA\\Menus.json', after_content: 's\n', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'd:\\w\\pkgA\\Menus.json', old_string: 'm', new_string: 'm2' }) }),
+      mkRow(3, { mrow: 103, path: 'D:/w/pkgA/Menus.json ', after_content: 's\n', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'D:/w/pkgA/Menus.json', old_string: 'm2', new_string: 'm3' }) }),
+      mkRow(4, { mrow: 104, path: 'D:/w/pkgB/caf\u00e9.json', after_content: 's\n', tool_name: 'Write', input_json: JSON.stringify({ file_path: 'D:/w/pkgB/caf\u00e9.json', content: 'c\n' }) }),
+      mkRow(5, { mrow: 105, path: 'd:/w/pkgb/cafe\u0301.json', after_content: 's\n', tool_name: 'Edit', input_json: JSON.stringify({ file_path: 'd:/w/pkgb/cafe\u0301.json', old_string: 'c', new_string: 'c2' }) }),
+    ];
+    const out = aggregateFromCheckpoints!(rows, [{ turnStartMessageId: 'tfm2', startRow: 100, endRow: 200 }], 'D:/w');
+    const menus = out[0]?.items.find((i) => i.path.startsWith('D:/w/pkgA'));
+    const cafe = out[0]?.items.find((i) => i.path.startsWith('D:/w/pkgB'));
+    check('F-merge②', '拼写变体（大小写段/反斜杠/行尾空格 → menus 组 1 条 writeCount=3；NFC/NFD → café 组 1 条 writeCount=2）',
+      out.length === 1 && out[0]!.items.length === 2
+        && menus?.writeCount === 3 && menus?.mode === 'first-change'
+        && cafe?.writeCount === 2 && cafe?.mode === 'first-change',
+      `out=${JSON.stringify(out)}`);
+  }
+
+  // c) F-base①（跨回合原子态语义钉，用户补充口径）：T1 Write、T2 无改动、T3 Edit →
+  //    T3 的 getPatch mode='full' 且 patch === diffFull(T1 末快照, T3 末快照)（不要求相邻回合）。
+  {
+    const sid = 'sess-gb-t13';
+    const plainDir = path.join(segGitDir, 'plain-t13');
+    fs.mkdirSync(plainDir, { recursive: true });
+    seedSessionGB(sid, plainDir);
+    seedUserMessageGB(sid, 'gb-u1');
+    const t1After = 'A1\nA2\nA3\n';
+    const t3After = 'B1\nA2\nB3\n';
+    seedCkGB(sid, 'gb-m1', 1, 'T13.txt', t1After, { file_path: 'T13.txt', content: t1After });
+    seedUserMessageGB(sid, 'gb-u2'); // T2：无该文件改动
+    seedUserMessageGB(sid, 'gb-u3');
+    seedCkGB(sid, 'gb-m3', 3, 'T13.txt', t3After, { file_path: 'T13.txt', old_string: 'A1\nA2\nA3', new_string: 'B1\nA2\nB3' });
+    const r = await getPatchGB!(sid, 'gb-u3', null, 'T13.txt', 3);
+    const exp = diffFullGB!(t1After, t3After, 'T13.txt', 3);
+    const summ = await listSummariesGB!(sid);
+    const t3Item = summ.find((s) => s.turnStartMessageId === 'gb-u3')?.items[0];
+    check('F-base①', '跨回合原子态：T1 Write→T3 Edit（T2 空）→ getPatch mode=full、patch===diffFull(T1末,T3末)、listSummaries t3 同 full',
+      r.mode === 'full' && r.patch === exp.patch && r.truncated === exp.truncated
+        && t3Item?.mode === 'full' && t3Item?.additions === exp.additions && t3Item?.deletions === exp.deletions,
+      `r=${JSON.stringify(r)} exp=±${exp.additions}/${exp.deletions} t3Item=${JSON.stringify(t3Item)}`);
+  }
+
+  // d) F-base②（git 基线主链，真实临时 git 仓库）：提交 v1（30 行，第 15 行变更）+ 会话内 Write v2 →
+  //    getPatch mode='git-baseline' 且 patch === diffFull(v1, v2, ctx)；context 档位真实生效
+  //   （单行替换 = 1 删 + 1 增两行正文：ctx=3 → 8 行 / ctx=10 → 22 行 / ctx=100000 → 29 上下文
+  //    + 1 删 + 1 增 = 31 行——「档位不能用」修复证明钉；初版口算 7/21/30 少计替换对，已修正）；
+  //    listSummaries 该条 mode='git-baseline'、± 与 getPatch 解析同源。
+  {
+    const sid = 'sess-gb-main';
+    const repoA = path.join(segGitDir, 'repoA');
+    const lines = Array.from({ length: 30 }, (_, i) => `K${i + 1}`);
+    const v1 = `${lines.join('\n')}\n`;
+    const v2 = v1.replace('K15\n', 'K15X\n');
+    await makeGitRepoGB(repoA, 'f2.txt', v1);
+    const absF2 = path.join(repoA, 'f2.txt');
+    seedSessionGB(sid, repoA);
+    seedUserMessageGB(sid, 'gbm-u1');
+    seedCkGB(sid, 'gbm-m1', 1, absF2, v2, { file_path: absF2, content: v2 });
+    const p3 = await getPatchGB!(sid, 'gbm-u1', null, absF2, 3);
+    const exp3 = diffFullGB!(v1, v2, absF2, 3);
+    const p10 = await getPatchGB!(sid, 'gbm-u1', null, absF2, 10);
+    const exp10 = diffFullGB!(v1, v2, absF2, 10);
+    const pFull = await getPatchGB!(sid, 'gbm-u1', null, absF2, 100000);
+    const expFull = diffFullGB!(v1, v2, absF2, 100000);
+    const b3 = bodyLineCountGB(p3.patch);
+    const b10 = bodyLineCountGB(p10.patch);
+    const bFull = bodyLineCountGB(pFull.patch);
+    const summ = await listSummariesGB!(sid);
+    const item = summ[0]?.items.find((i) => i.path === absF2);
+    check('F-base②', 'git 基线主链：getPatch mode=git-baseline、patch===diffFull(HEAD v1, v2)（ctx=3 逐字节）；listSummaries 该条同 mode、± 同源、writeCount=1',
+      p3.mode === 'git-baseline' && p3.patch === exp3.patch && p3.truncated === exp3.truncated
+        && item?.mode === 'git-baseline' && item?.additions === exp3.additions && item?.deletions === exp3.deletions
+        && item?.writeCount === 1,
+      `p3=${JSON.stringify(p3).slice(0, 160)} exp3±=${exp3.additions}/${exp3.deletions} item=${JSON.stringify(item)}`);
+    check('F-base②-ctx', 'context 档位真实生效（首改场景）：ctx=10 patch===diffFull(...,10) 且正文 22 行 > ctx=3 的 8 行；ctx=100000 全文形态（正文 31 行=29 上下文+1删+1增）',
+      p10.mode === 'git-baseline' && p10.patch === exp10.patch && b3 === 8 && b10 === 22 && b10 > b3
+        && pFull.mode === 'git-baseline' && pFull.patch === expFull.patch && bFull === 31,
+      `b3=${b3} b10=${b10} bFull=${bFull} modes=${p10.mode}/${pFull.mode}`);
+  }
+
+  // e) F-base③（负缓存降级=回归红线）：非 git 目录首改 → 保持 first-change，输出与
+  //    computeFileDiff(..., gitBaseline=null) 逐字节一致；负结果冻结（V16 表 content IS NULL 行）。
+  {
+    const sid = 'sess-gb-plain';
+    const plainDir = path.join(segGitDir, 'plain-nogit');
+    fs.mkdirSync(plainDir, { recursive: true });
+    seedSessionGB(sid, plainDir);
+    seedUserMessageGB(sid, 'gbp-u1');
+    const absP = path.join(plainDir, 'p3.txt');
+    seedCkGB(sid, 'gbp-m1', 1, absP, 'plain-v2\n', { file_path: absP, content: 'plain-v2\n' });
+    const r = await getPatchGB!(sid, 'gbp-u1', null, absP, 3);
+    const rows = (checkpointRepo?.listBySession as ((id: string) => Array<Record<string, unknown>>) | undefined)?.(sid) ?? [];
+    const frNull = fileDiffGB!(rows, rowOfGB('gbp-u1'), null, absP, 3, plainDir, null);
+    const negFrozen = typeof getGitBaseline === 'function' && typeof pathKeyGB === 'function'
+      && getGitBaseline(sid, pathKeyGB(absP, plainDir)) === null;
+    check('F-base③', '非 git 目录首改：mode 保持 first-change；输出与 gitBaseline=null 逐字节一致（回归红线）；负结果已冻结（库行 content IS NULL）',
+      r.mode === 'first-change' && r.patch === frNull.patch && r.truncated === frNull.truncated
+        && frNull.mode === 'first-change' && negFrozen,
+      `r=${JSON.stringify(r).slice(0, 160)} frNull=${JSON.stringify(frNull).slice(0, 160)} negFrozen=${String(negFrozen)}${baselineRepoErr ? ` repo加载失败:${baselineRepoErr.slice(0, 120)}` : ''}`);
+  }
+
+  // f) F-base④：HEAD blob 含 \0（真实提交二进制文件）→ 负缓存 → 意图合成（mode 回 first-change）。
+  {
+    const sid = 'sess-gb-bin';
+    const repoB = path.join(segGitDir, 'repoB');
+    await makeGitRepoGB(repoB, 'b.bin', Buffer.from('a\0b\0c', 'latin1'));
+    const absB = path.join(repoB, 'b.bin');
+    seedSessionGB(sid, repoB);
+    seedUserMessageGB(sid, 'gbb-u1');
+    seedCkGB(sid, 'gbb-m1', 1, absB, 'text-after\n', { file_path: absB, content: 'text-after\n' });
+    const r = await getPatchGB!(sid, 'gbb-u1', null, absB, 3);
+    const negFrozen = typeof getGitBaseline === 'function' && typeof pathKeyGB === 'function'
+      && getGitBaseline(sid, pathKeyGB(absB, repoB)) === null;
+    check('F-base④', 'HEAD blob 含 \\0：负缓存 → 意图合成（mode=first-change、patch 含 +text-after）、库行冻结 content IS NULL',
+      r.mode === 'first-change' && r.patch.split('\n').includes('+text-after') && negFrozen,
+      `r.mode=${r.mode} negFrozen=${String(negFrozen)}`);
+  }
+
+  // g) F-base⑤（冻结=任何时候看都一样）：解析一次 → 真实 git commit 移动 HEAD → 二次调用基线
+  //    与首次逐字节一致（走库行不重读 git）；清 L1 Map 再调用仍一致（重启语义由落库保证）；
+  //    库行 content === 首次时点的 v1（不是移动后的 v3）。
+  {
+    const sid = 'sess-gb-freeze';
+    const repoC = path.join(segGitDir, 'repoC');
+    const v1 = 'F5-base\nline2\n';
+    const v2 = 'F5-modified\nline2\n';
+    const v3 = 'F5-total\nother\n';
+    await makeGitRepoGB(repoC, 'f5.txt', v1);
+    const abs5 = path.join(repoC, 'f5.txt');
+    seedSessionGB(sid, repoC);
+    seedUserMessageGB(sid, 'gbf-u1');
+    seedCkGB(sid, 'gbf-m1', 1, abs5, v2, { file_path: abs5, content: v2 });
+    const r1 = await getPatchGB!(sid, 'gbf-u1', null, abs5, 3);
+    // 模拟用户 commit：文件改 v3 后提交，HEAD 前移（基线若不冻结会读到 v3 甚至清零 diff）。
+    fs.writeFileSync(abs5, v3, 'utf-8');
+    await gitExecGB(repoC, ['add', '--', 'f5.txt']);
+    await gitExecGB(repoC, ['-c', 'user.email=t@t', '-c', 'user.name=t', '-c', 'commit.gpgsign=false', 'commit', '-m', 'v3']);
+    const r2 = await getPatchGB!(sid, 'gbf-u1', null, abs5, 3);
+    let r3: { mode: string; patch: string; truncated: boolean } | null = null;
+    if (typeof clearGitBaselineL1 === 'function') {
+      clearGitBaselineL1();
+      r3 = await getPatchGB!(sid, 'gbf-u1', null, abs5, 3);
+    }
+    const frozenRow = typeof getGitBaseline === 'function' && typeof pathKeyGB === 'function'
+      && getGitBaseline(sid, pathKeyGB(abs5, repoC)) === v1;
+    check('F-base⑤', '基线冻结：commit 移动 HEAD 后二次调用 patch 逐字节一致；清 L1 Map 再调用仍一致（走库）；库行=首次时点 v1（≠v3）',
+      r1.mode === 'git-baseline' && r2.mode === 'git-baseline' && r2.patch === r1.patch
+        && r3 !== null && r3.mode === 'git-baseline' && r3.patch === r1.patch
+        && frozenRow && v1 !== v3,
+      `r1.mode=${r1.mode} r2===r1:${String(r2.patch === r1.patch)} r3===r1:${String(r3 !== null && r3.patch === r1.patch)} frozenRow=${String(frozenRow)}${typeof clearGitBaselineL1 === 'function' ? '' : '（clearGitBaselineL1ForTests 未导出）'}`);
+  }
+
+  // h) F-mig⑦（V16 迁移）：幂等、版本 15→16、表形态（列/复合主键/级联外键）、
+  //    老库 v15 升级不丢 turn_file_checkpoints 行、setGitBaseline INSERT OR IGNORE 不覆盖首值、
+  //    负结果（null）冻结、sessions 级联清理。
+  {
+    let reThrew = '';
+    try { runMigrations(db); } catch (e) { reThrew = errMsg(e); }
+    const colsGB = tableCols(db, 'turn_file_git_baselines');
+    const colsOk = colsGB.length === 3 && colsGB.includes('session_id') && colsGB.includes('path_key') && colsGB.includes('content');
+    const pkRows = db.prepare('PRAGMA table_info(turn_file_git_baselines)').all() as Array<{ name: string; pk: number }>;
+    const pkOk = pkRows.find((c) => c.name === 'session_id')?.pk === 1
+      && pkRows.find((c) => c.name === 'path_key')?.pk === 2
+      && pkRows.find((c) => c.name === 'content')?.pk === 0;
+    const fkGB = db.prepare('PRAGMA foreign_key_list(turn_file_git_baselines)').all() as
+      Array<{ table: string; to: string; on_delete: string }>;
+    const fkOk = fkGB.length === 1 && fkGB[0]!.table === 'sessions' && fkGB[0]!.to === 'id' && fkGB[0]!.on_delete === 'CASCADE';
+    const verGB = versionOf(db);
+    check('F-mig⑦a', 'V16 迁移：共享临时库 runMigrations 再跑不抛错（幂等）；版本=16；turn_file_git_baselines 列集=[session_id,path_key,content]、复合主键(session_id,path_key)、sessions ON DELETE CASCADE',
+      reThrew === '' && verGB === 16 && colsOk && pkOk && fkOk,
+      [reThrew ? `抛错：${reThrew.slice(0, 120)}` : '', `版本=${verGB}`, `cols=[${colsGB.join(',')}]`, `pk=${JSON.stringify(pkRows.map((c) => `${c.name}:${c.pk}`))}`, `fk=${JSON.stringify(fkGB)}`].filter(Boolean).join('; '));
+
+    let upgradeThrew = '';
+    const legacy15 = seedLegacyV15Db();
+    try { runMigrations(legacy15); } catch (e) { upgradeThrew = errMsg(e); }
+    const ckKept = (legacy15.prepare('SELECT COUNT(*) AS n FROM turn_file_checkpoints').get() as { n: number }).n === 1;
+    const newTable = tableCols(legacy15, 'turn_file_git_baselines').includes('path_key');
+    const legacyVer = versionOf(legacy15);
+    check('F-mig⑦b', '老库 v15 升级：不抛错；版本 16；turn_file_checkpoints 行保留（1 行）；turn_file_git_baselines 补建',
+      upgradeThrew === '' && legacyVer === 16 && ckKept && newTable,
+      [upgradeThrew ? `抛错：${upgradeThrew.slice(0, 120)}` : '', `版本=${legacyVer}`, `ck保留=${String(ckKept)}`, `新表=${String(newTable)}`].filter(Boolean).join('; '));
+    legacy15.close();
+
+    const sid = 'sess-gb-mig';
+    seedSessionGB(sid, null);
+    if (typeof setGitBaseline !== 'function' || typeof getGitBaseline !== 'function') {
+      check('F-mig⑦c', 'repo 语义：无行 undefined / INSERT OR IGNORE 不覆盖首值 / 负结果 null 冻结 / sessions 级联清理', false,
+        `setGitBaseline/getGitBaseline 不可用${baselineRepoErr ? `（模块加载失败：${baselineRepoErr.slice(0, 120)}）` : ''}`);
+    } else {
+      const noRow = getGitBaseline(sid, 'k1') === undefined;
+      setGitBaseline(sid, 'k1', 'A');
+      const first = getGitBaseline(sid, 'k1') === 'A';
+      setGitBaseline(sid, 'k1', 'B'); // INSERT OR IGNORE：不得覆盖首值
+      const keepFirst = getGitBaseline(sid, 'k1') === 'A';
+      setGitBaseline(sid, 'k2', null); // 负结果冻结
+      const negRow = getGitBaseline(sid, 'k2') === null;
+      // 同 (session_id, path_key) 二次直插必须被复合主键挡下（PK 形态的行为证明）。
+      let dupThrew = false;
+      try {
+        db.prepare("INSERT INTO turn_file_git_baselines (session_id, path_key, content) VALUES (?, 'k1', 'dup')").run(sid);
+      } catch { dupThrew = true; }
+      db.prepare('DELETE FROM sessions WHERE id = ?').run(sid);
+      const cascaded = (db.prepare('SELECT COUNT(*) AS n FROM turn_file_git_baselines WHERE session_id = ?').get(sid) as { n: number }).n === 0;
+      check('F-mig⑦c', 'repo 语义：无行 undefined / INSERT OR IGNORE 不覆盖首值 / 负结果 null 冻结 / 复合主键挡重复 / sessions 级联清理',
+        noRow && first && keepFirst && negRow && dupThrew && cascaded,
+        `noRow=${String(noRow)} first=${String(first)} keepFirst=${String(keepFirst)} negRow=${String(negRow)} dupThrew=${String(dupThrew)} cascaded=${String(cascaded)}`);
+    }
+  }
+
+  // i) F-rtl⑥（渲染层源形状钉，p23 点）：卡片 dir 头部省略（rtl 消歧）+ 两组件 git-baseline 徽标
+  //    + 弹窗 ctx-group 片段级提示。
+  {
+    const cardSrc6 = fs.readFileSync(path.join(repoRoot, 'src', 'renderer', 'components', 'chat', 'TurnFileChangesCard.vue'), 'utf8');
+    const dlgSrc6 = fs.readFileSync(path.join(repoRoot, 'src', 'renderer', 'components', 'chat', 'TurnDiffDialog.vue'), 'utf8');
+    check('F-rtl⑥', '渲染层：卡片 dir rtl 消歧（dir span 自身 direction:rtl + unicode-bidi:isolate，容器未动——plan-defect-rtl-probe 修正配方）；卡片与弹窗含 git-baseline 徽标文案（git 基线 / 对比 git 基线（HEAD））；弹窗 ctx-group 含片段级提示文案',
+      cardSrc6.includes('direction: rtl') && cardSrc6.includes('unicode-bidi: isolate')
+        && cardSrc6.includes("item.mode === 'git-baseline'") && cardSrc6.includes('git 基线')
+        && cardSrc6.includes('以 git HEAD 为基线')
+        && dlgSrc6.includes("'git-baseline'") && dlgSrc6.includes('对比 git 基线（HEAD）')
+        && dlgSrc6.includes('片段级 diff：编辑意图仅含变更片段，无更多上下文可展开'),
+      '卡片/弹窗缺 rtl 消歧、git-baseline 徽标或片段级提示之一');
+  }
+
+  // F-awa①（2026-11-03 review P1-1 回归钉，方案 a：源码 includes 钉——工程直测 handler 层需闭库注入，
+  // 静态钉防回退足够）：listSummaries/getPatch async 化后，两 handler 必须 `return await`——
+  // 裸 return 的 rejected Promise 会绕过 try/catch，打破「异常降级为空摘要 / unavailable」契约。
+  {
+    const handlersSrcGB = fs.readFileSync(path.join(repoRoot, 'src', 'main', 'ipc-handlers.ts'), 'utf8');
+    check('F-awa①', 'TURN_DIFF 两 handler 降级契约钉（方案 a：源码 includes）：LIST_SUMMARIES 与 FILE_PATCH 均 return await turnDiff.*，rejection 进 catch',
+      handlersSrcGB.includes('return await turnDiff.listSummaries(sessionId);')
+      && handlersSrcGB.includes('return await turnDiff.getPatch(sessionId, turnStartMessageId, endMessageId, path, ctx);'),
+      'handler 存在裸 return turnDiff.*（P1-1 回退）');
+  }
+}
 
 // ── 后续点追加区 ──
-// 段C 与段F（点A）均为异步收尾段（快照是 fire-and-forget 续体），故 finish 统一在 .then 里
-// 收口清理与汇总；段F 续在段C 之后、清理之前执行（依赖临时库与临时目录仍存活）。
+// p1（2026-11-02 git 基线计划）起 getPatch/listSummaries 变 async，段D/段E/段G 一并由异步链
+// 串行驱动（段C/段F(点A) 本就是异步收尾段——快照是 fire-and-forget 续体；段F(GB) 依赖临时库
+// 与临时目录存活）；finish 统一在链尾 .then 里收口清理与汇总。顺序：D → E → C → F(NB) → G → GB。
 
-void runSegmentC()
+void runSegmentD()
+  .catch((e: unknown) => {
+    fail += 1;
+    console.log(`  ❌ 段D 异步驱动异常：${errMsg(e)}`);
+  })
+  .then(() => runSegmentE())
+  .catch((e: unknown) => {
+    fail += 1;
+    console.log(`  ❌ 段E 异步驱动异常：${errMsg(e)}`);
+  })
+  .then(() => runSegmentC())
   .catch((e: unknown) => {
     fail += 1;
     console.log(`  ❌ 段C 异步驱动异常：${errMsg(e)}`);
@@ -1957,6 +2372,16 @@ void runSegmentC()
   .catch((e: unknown) => {
     fail += 1;
     console.log(`  ❌ 段F 异步驱动异常：${errMsg(e)}`);
+  })
+  .then(() => runSegmentG())
+  .catch((e: unknown) => {
+    fail += 1;
+    console.log(`  ❌ 段G 异步驱动异常：${errMsg(e)}`);
+  })
+  .then(() => runSegmentGB())
+  .catch((e: unknown) => {
+    fail += 1;
+    console.log(`  ❌ 段F-git基线 异步驱动异常：${errMsg(e)}`);
   })
   .then(() => {
     // 先放掉 db 句柄再删目录：段A/段C/段D（含 checkpointRepo/turn-diff-checkpoint/turn-diff）

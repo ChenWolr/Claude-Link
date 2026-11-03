@@ -29,14 +29,16 @@ const GIT_MAX_BUFFER = 8 * 1024 * 1024;
 // `diff <空树> -- <path>` exit 0 正常出全新增 diff，而 `diff HEAD` 则 exit 128（ambiguous 'HEAD'）。
 const EMPTY_TREE_HASH = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
-interface RawGitResult {
+// 导出供 turn-diff 复用（git 基线链），逻辑零改动。
+export interface RawGitResult {
   stdout: string;
   code: number;
 }
 
 // 跑一次 git；退出码 0/1（--no-index 文件不同时为 1）都当成功返回 stdout，
 // 仅 spawn 失败 / 超时（err.code 非 number）才 reject。
-function runGitRaw(cwd: string, args: string[]): Promise<RawGitResult> {
+// 导出供 turn-diff 复用（git 基线链），函数体与逻辑零改动。
+export function runGitRaw(cwd: string, args: string[]): Promise<RawGitResult> {
   return new Promise((resolve, reject) => {
     execFile(
       'git',

@@ -4,10 +4,12 @@
 // 单一真相源：主进程聚合模块 src/main/modules/turn-diff.ts 产形，preload / web-bridge / 渲染层
 // 三处共用本类型（type-only，无运行时代码）。
 
-// mode（p5 2026-10-27 增 'intent'）：full=磁盘快照对比；first-change=快照在但无 before（首改，
-// 按编辑意图合成）；intent=快照缺失（二进制含 \0 / 读盘 failed）时按 tool_use 入参合成的编辑意图
-// diff（与工具行逐次 diff 同源）；unavailable=快照与意图均不可用（入参缺失/被截断）。
-export type TurnFileDiffMode = 'full' | 'first-change' | 'intent' | 'unavailable';
+// mode（p5 2026-10-27 增 'intent'；2026-11-02 增 'git-baseline'）：full=磁盘快照对比；
+// first-change=快照在但无 before（首改，按编辑意图合成）；intent=快照缺失（二进制含 \0 / 读盘
+// failed）时按 tool_use 入参合成的编辑意图 diff（与工具行逐次 diff 同源）；git-baseline=首改且
+// 会话内无 before 快照时以 git HEAD 内容（首次解析时点冻结，V16 落库）为基线的正式 unified diff
+//（git 不可得时回退 first-change）；unavailable=快照与意图均不可用（入参缺失/被截断）。
+export type TurnFileDiffMode = 'full' | 'first-change' | 'intent' | 'git-baseline' | 'unavailable';
 
 export interface TurnFileDiffItem {
   path: string;

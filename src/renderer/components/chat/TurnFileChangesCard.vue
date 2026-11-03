@@ -5,7 +5,9 @@
 //
 // 口径：mode='unavailable' 文件计入 N 但不计入 ±（无可靠计数）；+a/-d 仅 >0 才显示；
 // intent=快照缺失（二进制/failed）时按 tool_use 入参合成的编辑意图 diff，行可点、± 计入合计；
-// 'unavailable' 行才禁用点击（无 patch 可看）。样式 token 复用现有体系：折叠徽标语义对齐
+// git-baseline=会话内首改以 git HEAD 为基线的正式 diff（行可点、± 计入合计，徽标样式复用
+// first-change 档，2026-11-02 git 基线计划 §4-P2）；'unavailable' 行才禁用点击（无 patch
+// 可看）。样式 token 复用现有体系：折叠徽标语义对齐
 // ToolCallBlock 折叠 +/−（等宽小字 + tabular-nums + 绿/红），容器/行格配色对齐 TaskQueuePanel
 // 指标格（panel-soft + border 圆角格）；不引新依赖。
 import { computed, ref, useId } from 'vue';
@@ -77,17 +79,19 @@ function onRowClick(item: TurnFileDiffItem): void {
           :disabled="item.mode === 'unavailable'"
           :title="item.mode === 'unavailable' ? '二进制或快照缺失，且编辑意图不可用，无法对比'
             : item.mode === 'intent' ? '快照缺失（二进制），已按编辑意图合成 diff'
+            : item.mode === 'git-baseline' ? `以 git HEAD 为基线 · ${dirOf(item.path)}/${basename(item.path)}`
             : `${dirOf(item.path)}/${basename(item.path)}`"
           @click="onRowClick(item)"
         >
           <span class="turn-diff-card__file">
-            <span v-if="dirOf(item.path)" class="turn-diff-card__dir">{{ dirOf(item.path) }}/</span><b class="turn-diff-card__name">{{ basename(item.path) }}</b>
+            <span v-if="dirOf(item.path)" class="turn-diff-card__dir">{{ dirOf(item.path) }}</span><span v-if="dirOf(item.path)" class="turn-diff-card__sep">/</span><b class="turn-diff-card__name">{{ basename(item.path) }}</b>
           </span>
           <span class="turn-diff-card__meta">
             <span v-if="item.additions > 0" class="turn-diff-card__add">+{{ item.additions }}</span>
             <span v-if="item.deletions > 0" class="turn-diff-card__del">−{{ item.deletions }}</span>
             <span class="turn-diff-card__writes">{{ item.writeCount }} 次编辑</span>
             <span v-if="item.mode === 'first-change'" class="turn-diff-card__badge">首改</span>
+            <span v-else-if="item.mode === 'git-baseline'" class="turn-diff-card__badge">git 基线</span>
             <span v-else-if="item.mode === 'intent'" class="turn-diff-card__badge turn-diff-card__badge--muted">意图 diff</span>
             <span v-else-if="item.mode === 'unavailable'" class="turn-diff-card__badge turn-diff-card__badge--muted">二进制或快照缺失</span>
           </span>
@@ -205,13 +209,24 @@ function onRowClick(item: TurnFileDiffItem): void {
   overflow: hidden;
   white-space: nowrap;
 }
-/* 目录前缀：浅色 truncate（超长时截尾），文件名粗体不截断 */
+/* 目录前缀：浅色 truncate，超长时头部省略（保留尾部区分段），文件名粗体不截断。
+   保留尾部的头部省略（同名不同包一眼可辨）：dir 自身 rtl → LTR 路径整体右锚定、
+   溢出向左、省略号出在左端（Chromium 实测验证，2026-11-02 git 基线计划 §4-P3；
+   注意：TurnDiffDialog 的容器级 rtl 写法实测为裁尾+顺序翻转，勿照搬）。
+   分隔符在 rtl span 之外（UBA 会把 span 内尾随 / 翻转到头部，2026-11-03 review P1-2）。 */
 .turn-diff-card__dir {
   min-width: 0;
   flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  direction: rtl;
+  unicode-bidi: isolate;
+  color: var(--color-text-muted);
+  opacity: 0.8;
+}
+.turn-diff-card__sep {
+  flex: 0 0 auto;
   color: var(--color-text-muted);
   opacity: 0.8;
 }
@@ -231,7 +246,8 @@ function onRowClick(item: TurnFileDiffItem): void {
 .turn-diff-card__writes {
   color: var(--color-text-muted);
 }
-/* mode 徽标：first-change → 首改（accent）；intent → 意图合成（muted）；unavailable → 二进制或快照缺失（muted） */
+/* mode 徽标：first-change → 首改（accent）；git-baseline → git 基线（accent，样式复用 first-change 档）；
+   intent → 意图合成（muted）；unavailable → 二进制或快照缺失（muted） */
 .turn-diff-card__badge {
   flex: 0 0 auto;
   padding: 1px 6px;

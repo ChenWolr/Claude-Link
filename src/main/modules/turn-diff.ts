@@ -24,6 +24,12 @@
 //     after 为 null 且入参可用时按意图合成（mode 'intent'，± 与 patch 皆来自合成结果）；
 //     无可用 input（input_json 缺失或 input_truncated=1，全部行皆不可用）→ 该文件降级
 //     'unavailable'。
+//   - git-baseline（2026-11-02 首改 git 基线计划 §4-P1）：首改（区间前无 before 快照）且 git HEAD
+//     基线可得时，以「首次解析时点冻结的 HEAD 内容」（V16 turn_file_git_baselines 表，repo 见
+//     turn-file-git-baseline-repo；冻结 = INSERT OR IGNORE 一次性写入，此后 commit 前移/重启恒读
+//     冻结值）为 before 出正式 unified diff（diffFull 同源，mode='git-baseline'）。负结果（非 git/
+//     未跟踪/含 \0/超时）落 content IS NULL 行永久免重试，回退 first-change 意图合成（输出逐字节
+//     与无基线时一致——回归红线）。
 //
 // 分层纪律：aggregateFromCheckpoints / computeFileDiff 为纯函数（不触 DB，可直测）；DB 侧
 // （deriveTurnRanges / listSummaries / getPatch）只读查询；异常由 ipc-handlers 的 handler
@@ -32,6 +38,8 @@
 import { getConnection } from '../database/connection';
 import * as checkpointRepo from '../database/repositories/turn-file-checkpoint-repo';
 import type { TurnFileCheckpointRow } from '../database/repositories/turn-file-checkpoint-repo';
+import { getGitBaseline, setGitBaseline } from '../database/repositories/turn-file-git-baseline-repo';
+import { runGitRaw } from './changes-panel';
 import { buildTwoFilePatch, diffFull } from '../../shared/diff-core';
 import { MAX_DIFF_LINES } from '../../shared/process-kind';
 import type { TurnFileDiffItem, TurnFileDiffMode, TurnFileDiffTurnSummary } from '../../shared/types/turn-file-diff';
@@ -263,6 +271,10 @@ function synthesizeFirstChange(
  * （大小写/斜杠/相对绝对/NFC）命中同一集合；区间内外（after/before 来源）一律按此口径。
  * after/before 一律按 mrow（消息序）最大者选取，与落库时序（异步读盘完成序）解耦——同轮多次写
  * 乱序落库时仍取轮末/前轮末快照。
+ * 第 7 参 gitBaseline（2026-11-02 计划 §4-P1，缺省 null）：首改（before 无会话内快照）且 after
+ * 存在时，若调用方已解析到非 null 非空串的 git HEAD 基线，则以基线为 before 出正式 unified diff
+ * （mode='git-baseline'，diffFull 同源）。基线解析/冻结在 resolveGitBaseline（DB+git 侧）完成，
+ * 本函数保持纯函数只消费；null（缺省）时一切既有输出不变（回归红线）。
  */
 export function computeFileDiff(
   rows: readonly TurnFileCheckpointRow[],
@@ -271,6 +283,7 @@ export function computeFileDiff(
   path: string,
   context = 3,
   cwd: string | null = null,
+  gitBaseline: string | null = null,
 ): TurnFileDiffFileResult {
   const upper = endRow === null ? Number.POSITIVE_INFINITY : endRow;
   const targetKey = pathKey(path, cwd); // 目标键提前归一一次，不在循环里重复归一
@@ -317,6 +330,13 @@ export function computeFileDiff(
     const r = diffFull(before, after, path, context);
     return { mode: 'full', additions: r.additions, deletions: r.deletions, writeCount, patch: r.patch, truncated: r.truncated };
   }
+  // git HEAD 基线（2026-11-02 计划 §4-P1）：首改（会话内无 before 快照）且调用方传入已冻结的
+  // git 基线（非 null 非空串）时，以基线为 before 出正式 unified diff（mode='git-baseline'）。
+  // null（缺省）时落到下方 first-change 意图合成，输出与既有逐字节一致（回归红线）。
+  if (gitBaseline !== null && gitBaseline !== '') {
+    const r = diffFull(gitBaseline, after, path, context);
+    return { mode: 'git-baseline', additions: r.additions, deletions: r.deletions, writeCount, patch: r.patch, truncated: r.truncated };
+  }
   const synth = synthesizeFirstChange(path, inRange, context);
   if (synth === null) {
     return { mode: 'unavailable', additions: 0, deletions: 0, writeCount, patch: '', truncated: false };
@@ -358,6 +378,109 @@ export function aggregateFromCheckpoints(
   return out;
 }
 
+// ── 首改 git HEAD 基线（2026-11-02 计划 §4-P1）─────────────────────────────
+
+// L1 读缓存：防 listSummaries 循环内重复 SELECT/spawn。键 `${sessionId}|${targetKey}`，
+// 值 string | null（null = 负结果同样命中缓存）。模块级（进程生命周期）；重启语义由 V16 落库保证。
+// 进程生命周期无淘汰，单条上限受 maxBuffer=8MiB 隐式约束。
+const gitBaselineL1 = new Map<string, string | null>();
+
+/** 自测专用：清 L1 缓存（scripts/tdd-turn-file-diff-verify.ts F-base⑤ 模拟重启语义）。 */
+export function clearGitBaselineL1ForTests(): void {
+  gitBaselineL1.clear();
+}
+
+/**
+ * 解析首改文件的 git HEAD 基线（冻结语义，计划 §4-P1.2）：
+ * 1. L1 命中（含 null 负结果）→ 直接返回；
+ * 2. 库行有值（string 正基线 / null 负结果）→ 写 L1 直接返回，**不碰 git**（冻结语义：首次解析
+ *    时点已定格，此后 commit 前移 HEAD、重启、任何时候再看都读冻结值）；查库自身异常 → 当无行继续；
+ * 3. 无行：cwd 为 null → 冻结 null；
+ * 4. `git rev-parse --show-toplevel` 失败（git 缺失/spawn 失败/超时/非 0/空输出）→ 冻结 null；
+ * 5. 按 pathKey 同款折叠求 root 相对正斜杠路径（targetKey 已是该折叠域的绝对归一键）；前缀不
+ *    匹配（文件在仓库外/`..` 越界/大小写不同盘符等）→ 冻结 null；rel='' 表示目标是仓库根目录，
+ *    交给 git show 自然失败 → 负结果；
+ * 6. `git show HEAD:<rel>` 失败（reject/非 0）或 stdout 含 \0（二进制 blob）或为空串（空输出按
+ *    负结果，不作为空文件基线——计划 §4-P1.1「非空非空串」口径）→ 冻结 null；
+ * 7. 成功内容 ≤2MiB → 落库冻结 + L1 + 返回；>2MiB → **不落库**（防大 blob 撑库），仅写 L1 返回
+ *    （本会话内有效，重启后重试解析——计划 §5 边界）。
+ * 整个函数不向外抛异常（所有 git/lib 调用逐段 try/catch，异常路径一律落冻结 null）。
+ */
+export async function resolveGitBaseline(
+  sessionId: string,
+  path: string,
+  cwd: string | null,
+  targetKey: string,
+): Promise<string | null> {
+  void path; // 签名保留 path 与行过滤调用方对齐；折叠一律走 targetKey（已是绝对归一键）
+  const l1Key = `${sessionId}|${targetKey}`;
+  const cached = gitBaselineL1.get(l1Key);
+  if (cached !== undefined) return cached;
+  /** 冻结：落库（best-effort，落库异常不阻断——L1 仍保本进程语义）+ 写 L1 + 返回。 */
+  const freeze = (content: string | null): string | null => {
+    try {
+      setGitBaseline(sessionId, targetKey, content);
+    } catch {
+      // 落库失败不向外抛：L1 兜底本进程，进程重启后重试解析
+    }
+    gitBaselineL1.set(l1Key, content);
+    return content;
+  };
+  // 2. 库行优先（冻结语义）：有行（string 或 null）直接采信，不碰 git。
+  try {
+    const frozenRow = getGitBaseline(sessionId, targetKey);
+    if (frozenRow !== undefined) {
+      gitBaselineL1.set(l1Key, frozenRow);
+      return frozenRow;
+    }
+  } catch {
+    // 查库异常：当无行继续（走下方 git 解析 + 负结果路径冻结）
+  }
+  // 3. 无 cwd 可解析：冻结 null。
+  if (cwd === null) return freeze(null);
+  // 4. 仓库根探测：reject（git 缺失/spawn 失败/超时）/ code!==0 / stdout trim 为空 → 冻结 null。
+  let root = '';
+  try {
+    const r = await runGitRaw(cwd, ['rev-parse', '--show-toplevel']);
+    if (r.code !== 0) return freeze(null);
+    root = r.stdout.trim();
+    if (root === '') return freeze(null);
+  } catch {
+    return freeze(null);
+  }
+  // 5. pathKey 同款折叠（win32：反斜杠→正斜杠 + lowercase；NFC）求 root 相对正斜杠路径。
+  //    注意折叠域 = pathKey 的折叠域：targetKey 已是该域的绝对归一键，无需再解析相对段。
+  const fold = (p: string): string => {
+    let s = p.trim();
+    if (process.platform === 'win32') s = s.replace(/\\/g, '/').toLowerCase();
+    return s.normalize('NFC');
+  };
+  const rootF = fold(root);
+  const prefix = rootF.endsWith('/') ? rootF : `${rootF}/`;
+  const absF = fold(targetKey);
+  // 前缀不匹配（文件在仓库外/`..` 越界/大小写不同盘符等）→ 冻结 null。
+  if (absF !== rootF && !absF.startsWith(prefix)) return freeze(null);
+  const rel = absF === rootF ? '' : absF.slice(prefix.length);
+  // 6/7. 取 HEAD blob：失败/含 \0/空串 → 冻结 null；成功 ≤2MiB 落库冻结，>2MiB 仅写 L1
+  //（2MiB 按 UTF-8 字节数计，2026-11-03 review P3-1——content.length 是 UTF-16 code units，
+  // CJK 内容字节预算被稀释约 2 倍）。
+  try {
+    const r = await runGitRaw(root, ['show', `HEAD:${rel}`]);
+    if (r.code !== 0) return freeze(null);
+    const content = r.stdout;
+    if (content.includes('\0') || content === '') return freeze(null);
+    if (Buffer.byteLength(content, 'utf8') > 2 * 1024 * 1024) {
+      // >2MiB 不落库（防大 blob 撑库）：仅 L1（本会话内有效），重启后重试解析（计划 §5 边界）。
+      // >8MiB（runGitRaw maxBuffer 上限）文本 blob 会 reject 走负结果永久冻结，仅 2–8MiB 带「仅 L1、重启后重试」。
+      gitBaselineL1.set(l1Key, content);
+      return content;
+    }
+    return freeze(content);
+  } catch {
+    return freeze(null);
+  }
+}
+
 /**
  * 轮区间推导（N2，供 listSummaries 与渲染层对照）：主流程 user 消息（role='user' 且
  * parent_agent_id IS NULL，识别依据见文件头注释）按 rowid 升序，第 i 回合 startRow=该 user
@@ -384,30 +507,67 @@ export function deriveTurnRanges(sessionId: string): TurnRange[] {
   return out;
 }
 
-/** listSummaries 组装（handler 直调）：listBySession + 主进程推导轮区间 + 纯函数聚合。
+/** listSummaries 组装（handler 直调，p1 起 async——git 基线解析含 git 子进程调用）：
+ *  listBySession + 主进程推导轮区间 + 纯函数聚合（aggregateFromCheckpoints 签名与行为零改动），
+ *  随后仅对 mode='first-change' 的 item 并发解析 git HEAD 基线（单条 2s 超时封顶：超时保持原
+ *  first-change 值，后台解析继续落库不影响）；命中非空者以同源 computeFileDiff 重算并原地替换
+ *  item 的 mode/additions/deletions/writeCount，未命中保持原值，items 顺序不变。
  *  cwd 取 sessions.working_dir（查无行/NULL → null，退化为纯词法归一），供相对路径变体合并。 */
-export function listSummaries(sessionId: string): TurnFileDiffTurnSummary[] {
+export async function listSummaries(sessionId: string): Promise<TurnFileDiffTurnSummary[]> {
   const rows = checkpointRepo.listBySession(sessionId);
   if (rows.length === 0) return [];
   const cwdRow = getConnection()
     .prepare('SELECT working_dir FROM sessions WHERE id = ?')
     .get(sessionId) as { working_dir: string | null } | undefined;
-  return aggregateFromCheckpoints(rows, deriveTurnRanges(sessionId), cwdRow?.working_dir ?? null);
+  const cwd = cwdRow?.working_dir ?? null;
+  const ranges = deriveTurnRanges(sessionId);
+  const summaries = aggregateFromCheckpoints(rows, ranges, cwd);
+  const rangeByTurn = new Map<string, TurnRange>();
+  for (const range of ranges) rangeByTurn.set(range.turnStartMessageId, range);
+  await Promise.all(
+    summaries.flatMap((summary) =>
+      summary.items.map(async (item) => {
+        if (item.mode !== 'first-change') return;
+        const range = rangeByTurn.get(summary.turnStartMessageId);
+        if (!range) return; // 防御：summaries 的轮必来自 ranges，不应发生
+        // 单条 2s 超时封顶：超时按 null（保持原 first-change 值）；resolveGitBaseline 不被取消，
+        // 后台继续完成解析与落库（下次调用即命中冻结行）。timer unref：不阻延进程退出。
+        const baseline = await Promise.race([
+          resolveGitBaseline(sessionId, item.path, cwd, pathKey(item.path, cwd)),
+          new Promise<null>((resolveNull) => {
+            const timer = setTimeout(() => resolveNull(null), 2000);
+            timer.unref();
+          }),
+        ]);
+        if (baseline === null || baseline === '') return;
+        const r = computeFileDiff(rows, range.startRow, range.endRow, item.path, 3, cwd, baseline);
+        item.mode = r.mode;
+        item.additions = r.additions;
+        item.deletions = r.deletions;
+        item.writeCount = r.writeCount;
+      }),
+    ),
+  );
+  return summaries;
 }
 
 /**
- * 单文件懒加载重算（handler 直调）：turnStartMessageId/endMessageId 经 messages 表 rowid 查询
- * 转区间。turnStart 查不到 → {mode:'unavailable', patch:'', truncated:false}；endMessageId
- * 查不到 → 上界 +∞（N2 裁定）。context 为 hunk 上下文行数（默认 3，弹窗「全文」档传大值）。
+ * 单文件懒加载重算（handler 直调，p1 起 async——首改可能触发 git 基线解析）：
+ * turnStartMessageId/endMessageId 经 messages 表 rowid 查询转区间。turnStart 查不到 →
+ * {mode:'unavailable', patch:'', truncated:false}；endMessageId 查不到 → 上界 +∞（N2 裁定）。
+ * context 为 hunk 上下文行数（默认 3，弹窗「全文」档传大值）。
+ * 首改增强（2026-11-02 计划 §4-P1）：首次计算 mode='first-change' 时解析 git HEAD 基线
+ * （targetKey 与行过滤同口径 = pathKey(path, cwd)），baseline 非空非空串 → 带基线重算一次返回
+ * （mode='git-baseline'）；否则（null/''——负结果冻结或超时）原样返回 first-change。
  * 'unavailable' 返回 mode 与空 patch，不抛错。
  */
-export function getPatch(
+export async function getPatch(
   sessionId: string,
   turnStartMessageId: string,
   endMessageId: string | null,
   path: string,
   context = 3,
-): TurnFilePatchResult {
+): Promise<TurnFilePatchResult> {
   const db = getConnection();
   const start = db
     .prepare('SELECT rowid AS r FROM messages WHERE id = ? AND session_id = ? LIMIT 1')
@@ -425,7 +585,15 @@ export function getPatch(
   const cwdRow = db
     .prepare('SELECT working_dir FROM sessions WHERE id = ?')
     .get(sessionId) as { working_dir: string | null } | undefined;
+  const cwd = cwdRow?.working_dir ?? null;
   const rows = checkpointRepo.listBySession(sessionId);
-  const r = computeFileDiff(rows, start.r, endRow, path, context, cwdRow?.working_dir ?? null);
+  const r = computeFileDiff(rows, start.r, endRow, path, context, cwd, null);
+  if (r.mode === 'first-change') {
+    const baseline = await resolveGitBaseline(sessionId, path, cwd, pathKey(path, cwd));
+    if (baseline !== null && baseline !== '') {
+      const rb = computeFileDiff(rows, start.r, endRow, path, context, cwd, baseline);
+      return { mode: rb.mode, patch: rb.patch, truncated: rb.truncated };
+    }
+  }
   return { mode: r.mode, patch: r.patch, truncated: r.truncated };
 }

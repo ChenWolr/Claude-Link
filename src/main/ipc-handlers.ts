@@ -257,7 +257,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   regInvokeHandler(IPC_CHANNELS.TURN_DIFF_LIST_SUMMARIES, async (_event, sessionId: unknown) => {
     try {
       if (typeof sessionId !== 'string' || !sessionId.trim()) return [];
-      return turnDiff.listSummaries(sessionId);
+      // await 使 rejection 进入下方 catch，维持降级契约（2026-11-03 review P1-1）。
+      return await turnDiff.listSummaries(sessionId);
     } catch (e) {
       logger.warn(`[turnDiff:listSummaries] 聚合失败：${e instanceof Error ? e.message : String(e)}`);
       return [];
@@ -278,7 +279,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // 第 5 参 context（hunk 上下文行数）：1..100000 整数否则回退 3，不抛错（100000 =
       // 渲染层「全文」档 FULL_CONTEXT 同值；缺省/非法/0/负数/小数/超界一律 3）。
       const ctx = typeof context === 'number' && Number.isInteger(context) && context >= 1 && context <= 100000 ? context : 3;
-      return turnDiff.getPatch(sessionId, turnStartMessageId, endMessageId, path, ctx);
+      // await 使 rejection 进入下方 catch，维持降级契约（2026-11-03 review P1-1）。
+      return await turnDiff.getPatch(sessionId, turnStartMessageId, endMessageId, path, ctx);
     } catch (e) {
       logger.warn(`[turnDiff:filePatch] 取 patch 失败：${e instanceof Error ? e.message : String(e)}`);
       return { mode: 'unavailable', patch: '', truncated: false };

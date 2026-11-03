@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 
-const CURRENT_SCHEMA_VERSION = 15;
+const CURRENT_SCHEMA_VERSION = 16;
 
 /** P1-10：表列集合查询（版本块守卫与自愈块共用同一谓词，防「列已存在」中间态复现抛错）。 */
 function tableColumns(db: Database.Database, table: string): Set<string> {
@@ -340,6 +340,23 @@ function runMigrationStatements(db: Database.Database): void {
       );
       CREATE INDEX IF NOT EXISTS idx_tfc_session ON turn_file_checkpoints(session_id, id);
       CREATE INDEX IF NOT EXISTS idx_tfc_session_path ON turn_file_checkpoints(session_id, path, id);
+    `);
+  }
+
+  // V16（首改 git 基线，计划 docs/plans/2026-11-02-turn-diff-first-turn-git-baseline-plan.md §3/§4-P1）：
+  // turn_file_git_baselines——首改文件 git HEAD 基线内容的首次解析时点冻结表。INSERT OR IGNORE
+  // 一次性写入：正基线 = 首次解析时点 HEAD 内容；负结果（非 git/未跟踪/含 \0/超时等）落
+  // content IS NULL 行永久免重试。此后 commit 前移 HEAD、重启、隔天再看，历史首改 diff 恒不漂移。
+  // session_id 级联：删会话 → 基线行随之消失。列集/复合主键/外键形态由
+  // scripts/tdd-turn-file-diff-verify.ts F-mig⑦a 钉板（声明顺序不可变）。
+  if (currentVersion < 16) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS turn_file_git_baselines (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        path_key TEXT NOT NULL,
+        content TEXT,
+        PRIMARY KEY(session_id, path_key)
+      );
     `);
   }
 
