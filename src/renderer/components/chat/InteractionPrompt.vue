@@ -829,7 +829,7 @@ onBeforeUnmount(() => {
               />
             </label>
 
-            <details v-if="history.length" class="interaction-history" :open="showHistory" @toggle="showHistory = ($event.target as HTMLDetailsElement).open">
+            <details v-if="history.length && activeRequest.kind !== 'confirm'" class="interaction-history" :open="showHistory" @toggle="showHistory = ($event.target as HTMLDetailsElement).open">
               <summary>交互历史（{{ history.length }}）</summary>
               <ol>
                 <li v-for="item in history" :key="item.id">
