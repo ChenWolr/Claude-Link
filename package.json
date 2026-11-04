@@ -31,6 +31,7 @@
     "test:cdp:web-access": "node scripts/cdp-web-access-e2e.mjs"
   },
   "dependencies": {
+    "@aiden0z/pptx-renderer": "^1.4.0",
     "@anthropic-ai/claude-agent-sdk": "^0.3.191",
     "@electron-toolkit/preload": "^3.0.1",
     "@electron-toolkit/utils": "^4.0.0",
@@ -39,6 +40,7 @@
     "better-sqlite3": "^11.9.1",
     "diff": "^5.2.2",
     "diff2html": "^3.4.48",
+    "docx-preview": "^0.4.1",
     "electron-store": "^10.0.0",
     "electron-updater": "^6.8.3",
     "highlight.js": "^11.11.1",
@@ -46,6 +48,7 @@
     "markdown-it": "^14.1.0",
     "markdown-it-task-lists": "^2.1.1",
     "mermaid": "^11.16.0",
+    "pdfjs-dist": "^6.5.438",
     "pinia": "^3.0.2",
     "pngjs": "^5.0.0",
     "qrcode": "^1.5.4",
@@ -54,7 +57,8 @@
     "vue": "^3.5.13",
     "vue-draggable-plus": "^0.6.0",
     "vue-router": "^4.5.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@electron-toolkit/tsconfig": "^1.0.1",
@@ -71,6 +75,7 @@
     "electron": "^35.7.5",
     "electron-builder": "^26.0.12",
     "electron-vite": "^3.1.0",
+    "jszip": "^3.10.2",
     "tsx": "^4.20.3",
     "typescript": "^5.8.3",
     "vue-tsc": "^2.2.8"
