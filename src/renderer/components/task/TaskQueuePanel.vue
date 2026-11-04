@@ -12,6 +12,8 @@ import type { BackgroundTask } from '../../stores/session-store';
 import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
+// p5（2026-11-04）：子 agent 实时正文 md 文件链接点击委托入口（与 MessageBubble 同款薄壳）。
+import { useFilePreview } from '../../composables/useFilePreview';
 import { useDialogShell } from '../../composables/use-dialog-shell';
 import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import { useNow } from '../../composables/use-now';
@@ -432,6 +434,17 @@ function openSummaryFile(path: string, e: Event): void {
   openDiffDialog(path, e.currentTarget instanceof HTMLElement ? e.currentTarget : null);
 }
 
+// p5（2026-11-04）：子 agent 实时正文 md 文件链接点击委托——与 MessageBubble.onContentClick
+// 同款手法（closest('.md-file-link') 命中后取 data-clip-path 开预览抽屉），非文件链接不拦截。
+// 面板内其余 md 渲染面（MessageBubble/ThinkingBlock 子组件）自带同款委托，无需在此处理；
+// 无 data-clip-path（异常渲染）时静默忽略，不抛错。
+function onLiveTextClick(e: MouseEvent): void {
+  const el = (e.target as HTMLElement | null)?.closest?.('.md-file-link') as HTMLElement | null;
+  if (!el) return;
+  const p = el.getAttribute('data-clip-path');
+  if (p) useFilePreview().open(p);
+}
+
 onMounted(() => {
   loadOverview();
   // 面板常驻（默认 all 总览），改动数据须随挂载即拉，供轨 badge / 指标格 / 总览摘要。
@@ -673,6 +686,7 @@ function handleDragReorder() {
                   class="subagent-live-text markdown-body"
                   v-html="renderMarkdown(subAgentLiveText(g.parentAgentId))"
                   v-enrich
+                  @click="onLiveTextClick"
                 />
                 <template v-for="item in g.items" :key="item.key">
                   <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
@@ -724,6 +738,7 @@ function handleDragReorder() {
                         class="subagent-live-text markdown-body"
                         v-html="renderMarkdown(subAgentLiveText(g.parentAgentId))"
                         v-enrich
+                        @click="onLiveTextClick"
                       />
                       <template v-for="item in g.items" :key="item.key">
                         <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
@@ -1543,6 +1558,23 @@ function handleDragReorder() {
   border-left: 2px solid var(--color-accent);
   padding-left: 8px;
   word-break: break-word;
+}
+
+/* 文件链接（p5，2026-11-04）：与 MessageBubble .bubble__content :deep(.md-file-link) 同款——
+   accent 色 + 点状下划线标示「可点开预览」，与普通网页外链区分；v-html 内容须 :deep 穿透。
+   hover 切实线下划线给明确可点反馈。 */
+.subagent-live-text :deep(.md-file-link) {
+  color: var(--color-accent-strong);
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  text-underline-offset: 4px;
+}
+
+.subagent-live-text :deep(.md-file-link:hover) {
+  text-decoration-style: solid;
+  color: var(--color-accent);
 }
 
 @keyframes subagent-dot-pulse {

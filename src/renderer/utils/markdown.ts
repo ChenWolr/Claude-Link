@@ -5,6 +5,7 @@ import { html as diff2htmlHtml } from 'diff2html';
 import taskLists from 'markdown-it-task-lists';
 import markdownItKatex from '@traptitech/markdown-it-katex';
 import { isAllowedMarkdownImageUrl } from '../../shared/external-links';
+import { resolveFileLinkHref } from './file-link';
 
 export type MarkdownProfile = 'rich' | 'static' | 'export';
 
@@ -67,6 +68,20 @@ md.block.ruler.at('math_block', (state, start, end, silent) => {
   return true;
 }, { alt: ['paragraph', 'reference', 'blockquote', 'list'] });
 applyExternalLinkTarget(md);
+
+// fix-2 F3：markdown-it 默认 validateLink 硬拦 file:（lib/index.mjs BAD_PROTO_RE 含 file），
+// file:/// 文件链接根本不产出 <a>、文件预览链路死路。对 md 单例覆盖 validateLink：复制默认
+// 逻辑并去掉 file 拦截——放行理由：命中 resolveFileLinkHref 的文件链接由 link_open 规则接管，
+// href 置 javascript:void(0) 不产生导航；未命中时 file:/// 本就是绝对路径链接，点击经
+// will-navigate 落到主进程 link-guard（file: 不属 EXTERNAL_PROTOCOLS → block）fail-closed 兜底。
+// vbscript/javascript 照拦；data: 仅放行位图（GOOD_DATA_RE），与 markdown-it 默认完全一致。
+// 仅覆盖 md 单例：createPreviewMarkdownRenderer 不动（预览渲染无文件链接按钮化需求）。
+const FIX2_BAD_PROTO_RE = /^(vbscript|javascript|data):/;
+const FIX2_GOOD_DATA_RE = /^data:image\/(gif|png|jpeg|webp);/;
+md.validateLink = (url: string): boolean => {
+  const str = url.trim().toLowerCase();
+  return FIX2_BAD_PROTO_RE.test(str) ? FIX2_GOOD_DATA_RE.test(str) : true;
+};
 
 export function createPreviewMarkdownRenderer(): MarkdownIt {
   const previewMarkdown = new MarkdownIt({
@@ -160,6 +175,40 @@ md.renderer.rules.image = (tokens, idx, options, env, self) => {
   return defaultImageRule
     ? defaultImageRule(tokens, idx, options, env, self)
     : self.renderToken(tokens, idx, options);
+};
+
+// 文件链接（p3/W2）：markdown 正文中的文件链接（相对/绝对/file:///）经 resolveFileLinkHref
+// 解析出绝对路径后按钮化（.md-file-link + data-clip-path，href 置 javascript:void(0)），点击
+// 委托由 MessageBubble.vue 的 onContentClick 接 useFilePreview().open。
+// fileLinkWorkspaceRoot 用模块级单例而非 env 传参：比计划原案的 env 更单点——活动会话唯一
+// 渲染源、renderMarkdown 无需逐调用方传根；未调用 setFileLinkWorkspaceRoot 的窗口实例
+// （导出窗等）保持 null，相对链接解析天然返回 null、不可点。
+let fileLinkWorkspaceRoot: string | null = null;
+export function setFileLinkWorkspaceRoot(root: string | null | undefined): void {
+  fileLinkWorkspaceRoot = root ?? null;
+}
+
+// 必须在 applyExternalLinkTarget(md)（顶部已调用，target=_blank 逻辑已挂上）与既有 image rule
+// 定制之后捕获 link_open：fileLinkBaseRule 已含外链 target 逻辑。未命中文件链接时透传基础规则
+//（B15：http 外链照旧 target=_blank；fence/代码块不走 inline renderer，B14 天然无影响）。
+const fileLinkBaseRule = md.renderer.rules.link_open;
+md.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
+  const href = tokens[idx].attrGet('href') ?? '';
+  const resolved = resolveFileLinkHref(href, fileLinkWorkspaceRoot);
+  if (!resolved) {
+    return fileLinkBaseRule
+      ? fileLinkBaseRule(tokens, idx, options, env, renderer)
+      : renderer.renderToken(tokens, idx, options);
+  }
+  tokens[idx].attrSet('class', 'md-file-link');
+  // fix-2 F2：不再包 escapeAttribute——markdown-it renderToken→renderAttrs 对属性值已做
+  // escapeHtml（& < > "），此处再包一层会把 & 渲染成 &amp;amp;（双重转义，DOM 取值得到
+  // a&amp;b 而非 a&b）。其余 escapeAttribute 调用点（mermaid/code-block 等）不动。
+  tokens[idx].attrSet('data-clip-path', resolved.path);
+  tokens[idx].attrSet('href', 'javascript:void(0)');
+  return fileLinkBaseRule
+    ? fileLinkBaseRule(tokens, idx, options, env, renderer)
+    : renderer.renderToken(tokens, idx, options);
 };
 
 export function applyExternalLinkTarget(instance: MarkdownIt): void {

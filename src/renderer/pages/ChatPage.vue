@@ -24,6 +24,7 @@ import type { ChatSendPayload, AttachmentSummary } from '../../shared/types/atta
 import { filterDraftAttachmentsByQuota, draftQuotaKindFromMime, type DraftQuotaItem } from '../../shared/draft-attachment-quota';
 import { taskEtaText } from '../../shared/queue-eta';
 import { resolveQueueDelaySeconds } from '../../shared/queue-config';
+import { setFileLinkWorkspaceRoot } from '../utils/markdown';
 
 const store = useSessionStore();
 const taskStore = useTaskStore();
@@ -128,6 +129,9 @@ onMounted(async () => {
   await store.loadSessions();
   // 「网页访问」P1-5：列表就绪后恢复 web 上次的 active 会话（桌面模式内部 no-op）。
   await store.restoreWebActiveSession();
+  // p3/W2：markdown 文件链接解析基准挂载即同步一次（会话恢复后才准）；暂态会话 workingDir
+  // 可能 null → 传 null 合法（相对路径文件链接不可点）。
+  setFileLinkWorkspaceRoot(store.activeSession?.workingDir ?? null);
   // SA-4（P5 恢复接线）：启动/刷新（含 render-process-gone 自动 reload）后投影态恢复——
   // 与 web-bridge runRealignSequence 同两步：① running 概览（后台黄灯/计时；无 running 会话
   // 时为 no-op）；② active 为持久会话且在 running 清单内时拉细快照（applyRuntimeSnapshot 按
@@ -160,6 +164,13 @@ watch(
     // 切换会话时加载该会话的 Claude 计划快照。
     if (newId) planStore.loadPlan(newId);
   },
+);
+
+// p3/W2：workingDir 变化（切换会话/更换工作区）时同步 markdown.ts 模块级单例，
+// 相对路径文件链接始终以当前会话工作区为解析基准。
+watch(
+  () => store.activeSession?.workingDir,
+  (dir) => setFileLinkWorkspaceRoot(dir ?? null),
 );
 
 onUnmounted(() => {

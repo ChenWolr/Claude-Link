@@ -4,6 +4,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
 import { createFollowController, type FollowController } from '../../utils/follow-scroll';
 import { renderMarkdown } from '../../utils/markdown';
+// p5（2026-11-04）：思考正文 md 文件链接点击委托入口（与 MessageBubble 同款薄壳）。
+import { useFilePreview } from '../../composables/useFilePreview';
 
 const props = defineProps<{ content: string; streaming?: boolean; sealed?: boolean; defaultOpen?: boolean; exportMode?: boolean }>();
 
@@ -60,6 +62,16 @@ function onPillClick(): void {
   syncPill();
 }
 
+// p5（2026-11-04）：思考正文 md 文件链接点击委托——与 MessageBubble.onContentClick 同款手法
+//（closest('.md-file-link') 命中后取 data-clip-path 开预览抽屉）。非文件链接不拦截；
+// 无 data-clip-path（异常渲染）时静默忽略，不抛错。
+function onBodyClick(e: MouseEvent): void {
+  const el = (e.target as HTMLElement | null)?.closest?.('.md-file-link') as HTMLElement | null;
+  if (!el) return;
+  const p = el.getAttribute('data-clip-path');
+  if (p) useFilePreview().open(p);
+}
+
 onMounted(() => {
   if (bodyEl.value) ctrl = createFollowController(bodyEl.value);
   ctrl?.setLive(active.value); // immediate 语义：挂载即对齐当前流式状态
@@ -111,6 +123,7 @@ watch(open, async (v) => {
         role="region"
         :aria-label="active ? '思考过程内容，生成中，可滚动查看' : '思考过程内容，可滚动查看'"
         v-html="rendered"
+        @click="onBodyClick"
         @scroll="onBodyScroll"
       />
       <button v-if="pillVisible" type="button" class="think-row__pill" @click="onPillClick">↓ 回到最新</button>
@@ -303,5 +316,22 @@ watch(open, async (v) => {
 
 .think-row__body :deep(p:last-child) {
   margin-bottom: 0;
+}
+
+/* 文件链接（p5，2026-11-04）：与 MessageBubble .bubble__content :deep(.md-file-link) 同款——
+   accent 色 + 点状下划线标示「可点开预览」，与普通网页外链区分；v-html 内容须 :deep 穿透。
+   hover 切实线下划线给明确可点反馈。 */
+.think-row__body :deep(.md-file-link) {
+  color: var(--color-accent-strong);
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  text-underline-offset: 4px;
+}
+
+.think-row__body :deep(.md-file-link:hover) {
+  text-decoration-style: solid;
+  color: var(--color-accent);
 }
 </style>

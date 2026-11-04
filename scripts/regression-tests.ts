@@ -2552,9 +2552,21 @@ function testMarkdownRenderProfiles(): void {
 function testMarkdownSecurityAndProtocolContracts(): void {
   const rawHtml = renderMarkdown('<script>alert(1)</script>');
   assert.ok(!rawHtml.includes('<script>'));
-  for (const unsafe of ['javascript:alert(1)', 'vbscript:msgbox(1)', 'data:text/html,x', 'file:///D:/secret']) {
+  // fix-2 F3 契约变更：markdown-it 默认 validateLink 硬拦 file: 使 file:/// 文件链接根本不产出
+  // <a>（文件预览链路死路），markdown.ts 对 md 单例覆盖 validateLink 放行 file:，安全边界移至
+  // 「按钮化接管：href 置 javascript:void(0)，点击走文件预览抽屉/主进程 FS fail-closed」+ 残余
+  // file: 导航由主进程 link-guard block（shouldOpenExternally/getNavigationDisposition 对 file:
+  // 的钉保留在本文件上方，即该兜底仍在）。因此 javascript/vbscript/data:text/html 仍断言「不产出
+  // <a」；file: 改断言「输出不得携带可导航 href」。
+  for (const unsafe of ['javascript:alert(1)', 'vbscript:msgbox(1)', 'data:text/html,x']) {
     assert.ok(!renderMarkdown(`[x](${unsafe})`).includes('<a '), `危险链接必须拒绝: ${unsafe}`);
   }
+  const fileLinkOut = renderMarkdown('[x](file:///D:/secret)');
+  assert.ok(
+    fileLinkOut.includes('<a ') && fileLinkOut.includes('href="javascript:void(0)"'),
+    'file: 链接（F3 放行）必须按钮化接管：href 置 javascript:void(0)（点击不产生导航）',
+  );
+  assert.ok(!fileLinkOut.includes('href="file:'), 'file: 链接不得保留可导航的 href="file:…"');
   assert.ok(renderMarkdown('![x](data:image/png;base64,AAAA)').includes('<img'), '明确允许栅格 data image');
   assert.ok(!renderMarkdown('![x](data:image/svg+xml,<svg/>)').includes('<img'), '拒绝 SVG data URL');
   assert.equal(shouldOpenExternally('tel:+8612345'), true, 'tel 链接应与 renderer 注释一致走系统协议');

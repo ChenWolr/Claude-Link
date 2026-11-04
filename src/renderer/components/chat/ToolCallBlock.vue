@@ -98,6 +98,16 @@ function focusSubAgent(): void {
   if (props.use?.toolUseId) store.focusSubAgent(props.use.toolUseId);
 }
 
+// p5（2026-11-04）：tool_result md 文件链接点击委托——与 MessageBubble.onContentClick 同款手法
+//（closest('.md-file-link') 命中后取 data-clip-path 开预览抽屉）。挂在 .tool-row__result 容器上，
+// head 折叠/展开按钮与「展开全部」按钮不受影响（closest 不命中即直接返回）。
+function onResultClick(e: MouseEvent): void {
+  const el = (e.target as HTMLElement | null)?.closest?.('.md-file-link') as HTMLElement | null;
+  if (!el) return;
+  const p = el.getAttribute('data-clip-path');
+  if (p) useFilePreview().open(p);
+}
+
 const resultContent = computed(() => props.result?.content ?? '');
 const isDiff = computed(() => !!props.result && isDiffContent(props.result.content));
 // Edit/Write/MultiEdit 的 tool_result 只是一句成功提示（无 diff），从 tool_use 入参合成片段意图 diff。
@@ -211,7 +221,7 @@ watch([expanded, displayedSource], () => {
           差异过大（{{ toolDiff.changeCount }} 行变更），弹窗中仅显示前部分
         </div>
       </div>
-      <div v-else-if="resultContent" class="tool-row__result" :class="{ 'tool-row__result--expanded': resultExpanded }">
+      <div v-else-if="resultContent" class="tool-row__result" :class="{ 'tool-row__result--expanded': resultExpanded }" @click="onResultClick">
         <div ref="resultInnerRef" class="tool-row__result-inner">
           <div class="markdown-body" v-html="renderedMarkdown" />
         </div>
@@ -590,5 +600,22 @@ watch([expanded, displayedSource], () => {
 
 .tool-row__body :deep(.markdown-body p) {
   margin: 0 0 0.375rem;
+}
+
+/* 文件链接（p5，2026-11-04）：与 MessageBubble .bubble__content :deep(.md-file-link) 同款——
+   accent 色 + 点状下划线标示「可点开预览」，与普通网页外链区分；v-html 内容须 :deep 穿透。
+   hover 切实线下划线给明确可点反馈。 */
+.tool-row__result :deep(.md-file-link) {
+  color: var(--color-accent-strong);
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  text-underline-offset: 4px;
+}
+
+.tool-row__result :deep(.md-file-link:hover) {
+  text-decoration-style: solid;
+  color: var(--color-accent);
 }
 </style>

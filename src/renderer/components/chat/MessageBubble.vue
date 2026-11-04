@@ -3,6 +3,7 @@ import { computed, ref } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { copyTextToClipboard } from '../../utils/clipboard';
+import { useFilePreview } from '../../composables/useFilePreview';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 import { formatDurationMs, formatEndedAt, formatSentAt } from '../../../shared/format-duration';
 import { isReasoningReplayApiError } from '../../../shared/upstream-errors';
@@ -39,6 +40,15 @@ const endedAtText = computed(() => formatEndedAt(props.message.endedAt));
 const sentAtText = computed(() =>
   props.message.role === 'user' ? formatSentAt(props.message.createdAt) : '',
 );
+
+// p3/W2：markdown 正文文件链接点击委托（事件冒泡到内容容器，.md-file-link 由 markdown.ts
+// link_open 规则产出、data-clip-path 携带解析后的绝对路径）。非文件链接不拦截，外链照旧。
+function onContentClick(e: MouseEvent): void {
+  const el = (e.target as HTMLElement | null)?.closest?.('.md-file-link') as HTMLElement | null;
+  if (!el) return;
+  const p = el.getAttribute('data-clip-path');
+  if (p) useFilePreview().open(p);
+}
 
 // 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）。
 // 复制内容 = 正文 + 附件文件名列表；不含绝对路径/Base64/附件 ID。
@@ -88,7 +98,7 @@ async function copyMessage(): Promise<void> {
          （纯文本无子元素，其语义失效）。 -->
     <div v-if="hasContent && message.role === 'user'" class="bubble__content">{{ message.content }}</div>
     <!-- assistant/系统/工具仍走 markdown 渲染（v-html + 灯箱/mermaid 增强），行为零变化。 -->
-    <div v-else-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich />
+    <div v-else-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich @click="onContentClick" />
     <!-- S3：user 气泡「发送于」脚注（created_at）。置于内容 v-if/v-else-if 链之后——插进两分支
          之间会拆散 v-else-if 邻接（编译报错）。缺失/非法时 sentAtText 为空串，整块不渲染、
          无空行残留；样式复用下方 .bubble__meta / .bubble__meta-clock，零新增。 -->
@@ -268,6 +278,23 @@ async function copyMessage(): Promise<void> {
 
 .bubble__content :deep(pre) {
   margin: 0;
+}
+
+/* 文件链接（p3/W2）：markdown 正文中的文件链接按钮化样式（对齐效果图 .file-link）——
+   accent 色 + 点状下划线标示「可点开预览」，与普通网页外链区分；v-html 内容须 :deep
+   穿透。hover 切实线下划线给明确可点反馈。 */
+.bubble__content :deep(.md-file-link) {
+  color: var(--color-accent-strong);
+  font-weight: 500;
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  text-underline-offset: 4px;
+}
+
+.bubble__content :deep(.md-file-link:hover) {
+  text-decoration-style: solid;
+  color: var(--color-accent);
 }
 
 /* 回复脚注（耗时 + 结束时间，B3 起不再展示费用）：紧贴内容下方，细分隔线不打断正文流；
