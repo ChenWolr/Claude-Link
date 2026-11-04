@@ -259,3 +259,4 @@ scripts/tdd-chat-file-open-verify.ts
 scripts/tdd-progress-verify.ts
 scripts/tdd-subagent-verify.ts
 scripts/tdd-file-preview-verify.ts
+scripts/tdd-wizard-step-jump-verify.ts
