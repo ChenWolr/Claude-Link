@@ -17,13 +17,18 @@
 // 退出协议：
 //   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）+ W-changes-panel PASS + W-mcp-settings PASS。
 //   - exit 1：任一 B1-B8 / W-changes-panel / W-mcp-settings 断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或 console error）。
-//   - exit 2：前置条件不满足（Chrome 9224 / 应用 8790 / 配置 token 不可用）。--config 未指定时读 %APPDATA%/claude-link/claude-link-config.json。
+//   - exit 2：前置条件不满足（Chrome 9224 / 应用 8790 / 配置 token 不可用），或实例新鲜度校验不通过
+//             （P3-B：未构建 / 实例未起 / 监听进程启动时间不可读 / 实例过旧——8790 逐个校验全部 LISTENING
+//             PID，任一 PID 启动时间 ≥ out/renderer mtime 即放行，全部 PID 过旧（或启动时间均不可读）
+//             即判不通过，防「遗留实例 × 重建后 hash 轮换」缓存投毒假红；脚本只校验+指引，
+//             不自动重启任何实例）。--config 未指定时读 %APPDATA%/claude-link/claude-link-config.json。
 //
 // 技术纪律（用户约束）：纯 CDP 原生（Input/Runtime/Network/Page），不依赖 computer-use 等 skill。
 // 证据落盘：docs/reports/web-e2e-screenshots/B*.png、W-changes-panel.png、W-mcp-settings.png + 同目录 run-B1-B8.log。
 // 敏感纪律：token 从 %APPDATA%/claude-link/claude-link-config.json 顶层键 webAccessToken 读取
 // （--config 指定时为该路径，隔离 profile 用），一切输出（含 URL 日志）掩码为前 4 后 4。
 
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -209,8 +214,98 @@ const overlayVisibleExpr = `(() => {
   return false;
 })()`;
 
+// ── 实例新鲜度校验（P3-B：防「遗留实例 × 重建后 hash 轮换」缓存投毒假红）──
+// 背景（评审 §4 根因链）：本脚本不自起实例，依赖手工预起 app（8790）+ headless Chrome（9224）。
+// 已复现事故形态：遗留实例（启动时间早于最后一次构建）内存里的 index.html 引用旧 hash 的
+// immutable 资产，重建后 hash 轮换/旧资产被清 → dynamic fetch web-bridge-*.js 失败 → B 链 0/11 级联假红。
+// 规则（只校验 + 指引，FAIL-fast；不做任何「自动重启实例」的越界行为；逐个校验全部 LISTENING PID）：
+//   out/renderer 不存在                              → 未构建（exit 2）
+//   PORT 无 LISTENING 进程                           → 实例未起（exit 2）
+//   全部监听 PID 启动时间均不可读                    → 校验不通过（exit 2）
+//   全部监听 PID 启动时间均 < out/renderer mtime     → 实例过旧 = 旧构建产物（缓存投毒风险）（exit 2）
+//   任一监听 PID 启动时间 ≥ out/renderer mtime       → 通过（fail-safe：不可读/过旧 PID 被其余新鲜 PID
+//                                                      覆盖放行），继续既有流程。
+// 实现注记：Windows-only（netstat -ano / PowerShell Get-CimInstance）；netstat 多行匹配只取
+// State=LISTENING 的 TCP 行（UDP 行无 State 列，列序不同，须跳过），收集全部唯一 PID（electron 单实例
+// 以同一 PID 绑定 v4/v6 双栈，通常仅 1 个；多 PID 时逐个取启动时间判定，任一新鲜即放行）；时间比较统一
+// 毫秒时间戳（PowerShell ToFileTime() 100ns → BigInt/10000 − 1601→1970 纪元差，BigInt 防 >2^53 失精度）。
+const BUILD_DIR = path.resolve('out/renderer');
+const WIN_EPOCH_DIFF_MS = 11_644_473_600_000; // 1601-01-01 → 1970-01-01 的毫秒差
+
+function findListenerPids(port) {
+  let out;
+  try {
+    out = execFileSync('netstat.exe', ['-ano'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
+  } catch {
+    return null; // netstat 执行失败（非 Windows / 权限异常）→ 调用方按校验不通过处理
+  }
+  const pids = [];
+  for (const lineRaw of out.split(/\r?\n/)) {
+    const line = lineRaw.trim();
+    if (!line.toUpperCase().startsWith('TCP')) continue; // 只看 TCP 行；UDP 行无 State 列
+    const parts = line.split(/\s+/);
+    // TCP 行列序：Proto / LocalAddress / ForeignAddress / State / PID
+    if (parts.length < 5 || parts[3].toUpperCase() !== 'LISTENING') continue;
+    const m = parts[1].match(/:(\d+)$/); // IPv4（0.0.0.0:8790）与 IPv6（[::]:8790）均以 :port 结尾
+    if (!m || Number(m[1]) !== port) continue;
+    const pid = Number(parts[4]);
+    if (Number.isInteger(pid) && pid > 0 && !pids.includes(pid)) pids.push(pid);
+  }
+  return pids;
+}
+
+function getProcessStartMs(pid) {
+  try {
+    const out = execFileSync('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command',
+        `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CreationDate.ToFileTime()`],
+      { encoding: 'utf8', windowsHide: true, timeout: 20_000 }).trim();
+    // 进程已退出 / CreationDate 为空时 PowerShell 报错（非零退出）或输出非纯数字 → 视为不可读。
+    if (!/^\d{10,}$/.test(out)) return null;
+    return Number(BigInt(out) / 10000n - BigInt(WIN_EPOCH_DIFF_MS)); // fileTime(100ns) → Unix epoch ms
+  } catch {
+    return null;
+  }
+}
+
+function assertFreshInstances() {
+  const fail = (reason, detail) => {
+    log(`实例新鲜度校验不通过：${reason}${detail}`);
+    throw new PreconditionError(
+      `实例新鲜度校验不通过（${reason}）${detail}——存在缓存投毒风险，拒绝继续。`
+      + `修复（一行）：如刚改过前端代码先 npm run build，再重启 Electron app（npx electron . --remote-debugging-port=9223）与 headless Chrome（9224），然后重跑本脚本。`);
+  };
+  // ② 构建产物在位（目录不存在 = 未构建，实例新鲜度无从谈起）。
+  let buildMs;
+  try { buildMs = fs.statSync(BUILD_DIR).mtimeMs; }
+  catch { fail('未构建', `：${BUILD_DIR} 不存在，请先 npm run build`); }
+  // ① PORT 监听进程定位（netstat -ano 多行匹配取 LISTENING 行）。
+  const pids = findListenerPids(PORT);
+  if (pids === null) fail('校验手段不可用', '：netstat 执行失败（本校验仅支持 Windows）');
+  if (pids.length === 0) fail('实例未起', `：端口 ${PORT} 无 LISTENING 进程（应用实例未启动）`);
+  // ①' 监听进程启动时间（PowerShell Win32_Process CreationDate）——逐 PID 取，覆盖端口上多个
+  //     LISTENING PID 的理论形态；不可读记 null（fail-safe：有任一新鲜即放行）。
+  const startByPid = pids.map((pid) => ({ pid, startMs: getProcessStartMs(pid) }));
+  const describe = (pid, startMs) => startMs === null
+    ? `PID ${pid} 启动时间不可读`
+    : `PID ${pid} 启动 ${new Date(startMs).toISOString()}${startMs >= buildMs ? '（新鲜）' : '（过旧）'}`;
+  // ③ 判定：任一监听 PID 启动 ≥ 最新构建即放行；全部 PID 过旧或启动时间均不可读才 FAIL-fast
+  //     （fail-safe 方向与单 PID 版一致，§4 事故形态）。
+  const anyFresh = startByPid.some((e) => e.startMs !== null && e.startMs >= buildMs);
+  if (!anyFresh) {
+    const all = startByPid.map((e) => describe(e.pid, e.startMs)).join('、');
+    if (startByPid.some((e) => e.startMs !== null)) {
+      fail('实例过旧', `：${all}——无一监听 PID 达到最新构建 ${new Date(buildMs).toISOString()}（${BUILD_DIR} mtime），按旧构建产物实例处理（缓存投毒风险）`);
+    }
+    fail('监听进程启动时间不可读', `：${all}（进程可能刚退出或权限不足，无一可判定新鲜）`);
+  }
+  log(`实例新鲜度校验通过：${startByPid.map((e) => describe(e.pid, e.startMs)).join('、')}；最新构建 ${new Date(buildMs).toISOString()}（${BUILD_DIR} mtime）`);
+}
+
 // ── 主流程 ──
 async function main() {
+  // P3-B：连接既有实例之前先做新鲜度校验（遗留实例 × 重建 = 缓存投毒假红根因，见上方注记）。
+  assertFreshInstances();
   precondition(TOKEN.length > 0, `配置 ${CONFIG_PATH} 顶层键 webAccessToken 缺失或为空`);
   precondition(LAN_IP && net.isIP(LAN_IP), `LAN IP 不可用：网卡未发现非 internal IPv4 且未提供合法 --lan-ip（当前=${LAN_IP}）`);
   if (TS_IP) precondition(net.isIP(TS_IP), `--ts-ip 非法：${TS_IP}`);
