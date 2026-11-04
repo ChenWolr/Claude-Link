@@ -29,7 +29,7 @@ check('① 草稿 watch 源仅草稿字段（activeRequest 已移出源数组）
   const watchIdx = prompt.indexOf('// hb12-PERM-04：草稿变化即入缓存');
   assert.ok(watchIdx > -1, '未找到草稿 watch 段');
   const seg = prompt.slice(watchIdx, watchIdx + 900);
-  assert.match(seg, /watch\(\s*\[selectedIds, otherText, questionAnswers, fieldValues\] as const/, 'watch 源形态不符');
+  assert.match(seg, /watch\(\s*\[selectedIds, otherText, wizardIndex, questionAnswers, fieldValues\] as const/, 'watch 源形态不符');
   assert.ok(!/activeRequest\] as const/.test(seg), 'watch 源仍含 activeRequest（A→B 换位污染向量）');
 });
 

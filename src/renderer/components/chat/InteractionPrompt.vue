@@ -121,6 +121,7 @@ const currentTitle = computed(() => activeQuestion.value?.title ?? activeRequest
 const currentDescription = computed(() => activeQuestion.value?.description ?? activeRequest.value?.description);
 const submitLabel = computed(() => {
   if (isWizard.value && wizardIndex.value < wizardQuestions.value.length - 1) return '下一题';
+  if (isWizard.value && !allQuestionsAnswered.value) return '下一题'; // 末步未答全：点击=跳转首个未答题
   if (activeRequest.value?.kind === 'permission') return selectedOption.value?.label ?? '提交选择';
   if (activeRequest.value?.kind === 'multi-choice') return '提交选择';
   return '确认';
@@ -140,6 +141,19 @@ const canSubmit = computed(() => {
   if (hasTextInput.value) return otherText.value.trim().length > 0;
   if (showOtherInput.value) return otherText.value.trim().length > 0;
   return selectedIds.value.size > 0 || request.kind === 'confirm';
+});
+
+// 向导完整性（C-W1 末步守卫）：当前题看进行中的选择（persist 尚未发生），其余题看 questionAnswers
+// 账本。非 wizard 形态恒 false（不参与提交守卫）。多选零选中经 isQuestionAnswered 判为未答。
+const allQuestionsAnswered = computed(() => {
+  if (!isWizard.value) return false;
+  return wizardQuestions.value.every((question, index) => {
+    if (index === wizardIndex.value) {
+      if (selectedIds.value.has(OTHER_OPTION_ID)) return otherText.value.trim().length > 0;
+      return selectedIds.value.size > 0;
+    }
+    return isQuestionAnswered(questionAnswers.value[question.id]);
+  });
 });
 
 function isTextEntryTarget(target: EventTarget | null): boolean {
@@ -192,7 +206,7 @@ function optionDefaults(
 }
 
 // hb12-PERM-04：按 request.id 缓存草稿（表单切换/临时切走后恢复用户已填内容）。
-const draftCache = new Map<string, { selectedIds: Set<string>; otherText: string; questionAnswers: Record<string, QuestionAnswer>; fieldValues: Record<string, string | boolean> }>();
+const draftCache = new Map<string, { selectedIds: Set<string>; otherText: string; wizardIndex: number; questionAnswers: Record<string, QuestionAnswer>; fieldValues: Record<string, string | boolean> }>();
 
 function initSelection(request: InteractionPromptPayload): void {
   // hb13-v B9：新请求初始化即清除上次提交失败提示（错误只属于触发它的那一次提交）。
@@ -202,8 +216,9 @@ function initSelection(request: InteractionPromptPayload): void {
   displayedRequestId = request.id;
   const cached = draftCache.get(request.id);
   if (cached) {
-    // 恢复草稿（不重置 focus 到起点——用户已在填写中）。
-    wizardIndex.value = 0;
+    // 恢复草稿（不重置 focus 到起点——用户已在填写中）。wizardIndex 一并恢复
+    //（C-W1：切走再切回停留在离开时的题号）；非缓存分支维持 wizardIndex.value = 0 不动。
+    wizardIndex.value = cached.wizardIndex;
     selectedIds.value = cached.selectedIds;
     otherText.value = cached.otherText;
     questionAnswers.value = cached.questionAnswers;
@@ -237,12 +252,13 @@ function initSelection(request: InteractionPromptPayload): void {
 // 为键；null（无已初始化请求）不写。
 let displayedRequestId: string | null = null;
 watch(
-  [selectedIds, otherText, questionAnswers, fieldValues] as const,
+  [selectedIds, otherText, wizardIndex, questionAnswers, fieldValues] as const,
   () => {
     if (!displayedRequestId) return;
     draftCache.set(displayedRequestId, {
       selectedIds: new Set(selectedIds.value),
       otherText: otherText.value,
+      wizardIndex: wizardIndex.value,
       questionAnswers: JSON.parse(JSON.stringify(questionAnswers.value)) as Record<string, QuestionAnswer>,
       fieldValues: JSON.parse(JSON.stringify(fieldValues.value)) as Record<string, string | boolean>,
     });
@@ -309,6 +325,12 @@ function toggleOption(optionId: string): void {
 // 当前 wizard 问题的 id（用于把本题答案存进 questionAnswers）。非 wizard / 无当前题时返回 undefined。
 function currentQuestionId(): string | undefined {
   return activeQuestion.value?.id;
+}
+
+// 单题作答有效性（C-W1）：非空选项 或 非空 Other 文本。多选零选中（空数组）不算已答，
+// 防自由跳转后空答案静默提交给模型。
+function isQuestionAnswered(answer?: QuestionAnswer): boolean {
+  return (answer?.selectedOptionIds?.length ?? 0) > 0 || Boolean(answer?.otherText?.trim());
 }
 
 function persistCurrentQuestionAnswer(): boolean {
@@ -413,6 +435,15 @@ async function submit(optionId?: string): Promise<void> {
     }
     if (wizardIndex.value < wizardQuestions.value.length - 1) {
       loadWizardStep(wizardIndex.value + 1);
+      return;
+    }
+    // 末步守卫（C-W1）：自由跳转放开后「顺序作答保证全答完」不再成立，未答全时跳到第一个
+    // 未答题，不放行空答案提交（isQuestionAnswered 把多选空数组挡在外面）。
+    if (!allQuestionsAnswered.value) {
+      const firstUnanswered = wizardQuestions.value.findIndex(
+        (question) => !isQuestionAnswered(questionAnswers.value[question.id]),
+      );
+      if (firstUnanswered >= 0) loadWizardStep(firstUnanswered);
       return;
     }
   }
@@ -586,10 +617,17 @@ function removeRequest(id: string): void {
   if (next) initSelection(next);
 }
 
-function previousQuestion(): void {
-  if (wizardIndex.value <= 0) return;
+// 步骤圆点 / 上一步共用的题间跳转入口（C-W1）：越界与原地跳转 no-op；
+// 跳走前把当前题进行中作答落账（与原 previousQuestion 的 persist 语义一致）。
+function jumpToQuestion(index: number): void {
+  if (index < 0 || index >= wizardQuestions.value.length || index === wizardIndex.value) return;
   void persistCurrentQuestionAnswer();
-  loadWizardStep(wizardIndex.value - 1);
+  loadWizardStep(index);
+}
+
+// 函数名与模板 @click="previousQuestion" 绑定原样保留（tdd-interaction-prompt-enter-guard.ts 契约钉死）。
+function previousQuestion(): void {
+  jumpToQuestion(wizardIndex.value - 1);
 }
 
 cleanupRequest = window.claudeLink.onInteractionRequest(enqueue);
@@ -708,12 +746,21 @@ onBeforeUnmount(() => {
           <h3>{{ currentTitle }}</h3>
           <p v-if="currentDescription">{{ currentDescription }}</p>
           <div v-if="isWizard" class="interaction-steps" aria-label="问题进度">
-            <span
+            <!-- C-W1（B1）：圆点按钮化，任意题双向自由跳转；--done 改按「该题已有有效作答」点亮
+                 （自由跳转后位置序不再等于作答序）。Enter/Space 经 X1 让位路径原生激活跳转。 -->
+            <button
               v-for="(question, index) in wizardQuestions"
               :key="question.id"
+              type="button"
               class="interaction-step"
-              :class="{ 'interaction-step--active': index === wizardIndex, 'interaction-step--done': index < wizardIndex }"
-            >{{ index + 1 }}</span>
+              :class="{
+                'interaction-step--active': index === wizardIndex,
+                'interaction-step--done': index !== wizardIndex && isQuestionAnswered(questionAnswers[question.id]),
+              }"
+              :title="`跳到第 ${index + 1} 题`"
+              :aria-label="`跳到第 ${index + 1} 题`"
+              @click="jumpToQuestion(index)"
+            >{{ index + 1 }}</button>
           </div>
         </header>
 
@@ -913,6 +960,13 @@ onBeforeUnmount(() => {
   color: var(--color-text-muted);
   font-size: 0.6875rem;
   font-weight: 800;
+  /* C1（C-W1）：span→button 后清除浏览器按钮默认样式回归（底色/内边距/字体/指针）；
+     --active/--done 的 background 覆盖保持其后、优先级不变。 */
+  appearance: none;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
 }
 
 .interaction-step--active,
