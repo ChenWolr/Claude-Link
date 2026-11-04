@@ -54,6 +54,8 @@ export const IPC_CHANNELS = {
   // 聊天工具行打开生成文件（p3 2026-10-27）：绝对路径直达（default=系统默认程序+win 降级 /
   // choose=win 原生打开方式对话框）。
   FS_OPEN_PATH: 'fs:openPath',
+  // 文件预览面板只读读取通道（2026-11-04）：主进程强制 workspace 边界校验（fail-closed）。
+  FS_READ_PREVIEW: 'fs:readPreview',
   // 导出目标协商（主→渲染请求 + 渲染→主应答；#3/#4 原生保存框替换）。
   EXPORT_RESOLVE_TARGET: 'export-image:resolveTarget',
   EXPORT_REQUEST_TARGET: 'export-image:requestTarget',
@@ -230,6 +232,19 @@ export const IPC_CHANNELS = {
   WEB_ACCESS_REGENERATE_TOKEN: 'webAccess:regenerateToken',
   WEB_ACCESS_COPY_LINK: 'webAccess:copyLink',
 } as const;
+
+// ── 文件预览（fs:readPreview）载荷类型：主进程 modules/fs-preview.ts 为实现真相源，桌面/网页渲染层共用。 ──
+// （请求载荷为 invoke 直传 path 字符串，无接口形。）
+
+/** blob 类预览的分类（决定展示组件与上限档）。 */
+export type FsPreviewBlobCategory = 'image' | 'media' | 'pdf' | 'docx' | 'xlsx' | 'pptx';
+
+/** 文件预览结果（判别联合）：文本（≤256KB，可截断）/ blob（base64，分类上限截停）/ missing / 失败。 */
+export type FsPreviewResult =
+  | { ok: true; kind: 'text'; content: string; size: number; truncated: boolean }
+  | { ok: true; kind: 'blob'; category: FsPreviewBlobCategory; base64: string; mime: string; size: number }
+  | { ok: true; kind: 'missing' }
+  | { ok: false; message: string };
 
 /** 无引用残留（且类型文件不应有运行时常量）：流式上屏节流间隔真相源在 use-stream.ts 硬编码 50ms（hb12-CHR-01 节流，非防抖），改本值无效。 */
 export const STREAM_DEBOUNCE_MS = 50;

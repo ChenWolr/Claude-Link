@@ -29,6 +29,7 @@ import { buildWebAccessInfo, currentWebAccessUrls } from './modules/web-access/w
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace, MAX_ENTRIES } from './modules/workspace-history';
 import { listRoots, listDir, mkdir, statPath, isValidFolderName, renamePath } from './modules/fs-picker';
+import { previewFile } from './modules/fs-preview';
 import type { FsTrashFailure } from '../shared/types/fs-picker';
 import { badDirCacheHas, badDirCacheMark, collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
 import { effectiveUserHome } from './modules/sdk-backend';
@@ -456,6 +457,24 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if (typeof absPath !== 'string') return { ok: false, reason: 'no-such-file', message: '未指定文件' };
     return openAbsoluteFile(absPath, mode === 'choose' ? 'choose' : 'default');
   });
+  // 文件预览边界（fs:readPreview 专用）：允许集 = 全局配置工作目录 ∪ 会话库全部工作目录
+  //（去重合并，分隔符/大小写归一比对同 isBoundWorkingDir 口径；空项过滤）。
+  // 计划原文「复用 fs:listRoots」经核实为文件选择器盘根枚举而非工作区集，按事实修正为同源允许集。
+  const collectPreviewRoots = (): string[] => {
+    const roots: string[] = [];
+    const cfgDir = getConfig().workingDirectory;
+    if (cfgDir && cfgDir.trim()) roots.push(cfgDir);
+    for (const s of sessionRepo.listSessions()) {
+      if (s.workingDir && s.workingDir.trim() && !roots.some((r) => normDir(r) === normDir(s.workingDir as string))) {
+        roots.push(s.workingDir);
+      }
+    }
+    return roots;
+  };
+  // FS_READ_PREVIEW（2026-11-04 文件预览面板 p1）：只读读取，边界校验/截断/上限全在
+  // modules/fs-preview.ts。安全红线 fail-closed——本通道经注册表暴露给网页客户端，handler
+  // 不校验 roots = 网页端可读任意磁盘文件，故每次调用现取允许集。
+  regInvokeHandler(IPC_CHANNELS.FS_READ_PREVIEW, async (_event, p: unknown) => previewFile(p, { roots: collectPreviewRoots() }));
 
   // 导出目标协商应答（T5）：渲染层 FilePickerDialog 选定后回传；jobId 在 Map 中才有效（防重放/伪造他人 job）。
   regInvokeHandler(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, async (_event, jobId: unknown, resp: unknown) => {
