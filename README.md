@@ -213,7 +213,7 @@ Claude Link 使用 Claude Agent SDK 的命令发现结果，不维护一份独�
 src/
 ├── main/                          # Electron 主进程
 │   ├── index.ts                   # 应用入口、窗口、托盘和数据库初始化
-│   ├── ipc-handlers.ts            # IPC handler 注册（90 个 regInvokeHandler，另 export-image-manager 2 个经注册表 + 7 个裸 handle，全进程共 99 个 invoke + 1 个单向 on）
+│   ├── ipc-handlers.ts            # IPC handler 注册（91 个 regInvokeHandler，另 export-image-manager 2 个经注册表 + 7 个裸 handle，全进程共 100 个 invoke + 1 个单向 on）
 │   ├── ipc-registry.ts            # invoke 注册表（ipcMain.handle 等价包装 + 网页端 invokeFromWeb 复用）
 │   ├── modules/
 │   │   ├── sdk-backend.ts         # Claude Agent SDK 聊天后端（约 5000 行）
@@ -245,7 +245,7 @@ src/
 │   │   ├── fs-picker.ts / interaction-prompts.ts / link-guard.ts / chat-backend.ts # 选择器元数据、交互弹窗队列、导航拦截、后端 re-export
 │   │   └── export-image-*.ts      # 长图导出与 PNG worker
 │   └── database/                  # SQLite 连接、迁移（V16）和 repositories
-├── preload/                       # contextBridge，主窗口 114 方法 + 导出窗口 9 方法
+├── preload/                       # contextBridge，主窗口 115 方法 + 导出窗口 9 方法
 ├── renderer/                      # Vue 页面、组件、Pinia stores
 │   ├── pages/                     # ChatPage、ConfigPage（8 tab）、SessionsPage
 │   ├── components/                # 聊天、配置、供应商、任务、改动面板与 layout（含 UpdateDialog）
