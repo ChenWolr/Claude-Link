@@ -7,6 +7,7 @@ import DiffDialog from './components/changes/DiffDialog.vue';
 import ToolDiffDialog from './components/chat/ToolDiffDialog.vue';
 import UpdateDialog from './components/layout/UpdateDialog.vue';
 import FilePickerDialog from './components/common/FilePickerDialog.vue';
+import FilePreviewDrawer from './components/preview/FilePreviewDrawer.vue';
 import { useConfigStore, lastSaveFailed } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useProviderStore } from './stores/provider-store';
@@ -223,6 +224,7 @@ onBeforeUnmount(() => {
     <ToolDiffDialog />
     <UpdateDialog />
     <FilePickerDialog />
+    <FilePreviewDrawer />
     <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">设置保存失败，部分修改可能未保存</div>
     <div v-if="sessionErrorToastVisible" class="global-toast global-toast--error global-toast--stacked">{{ sessionErrorToastText }}</div>
     <div v-if="providerErrorToastVisible" class="global-toast global-toast--error global-toast--stacked-3">{{ providerErrorToastText }}</div>

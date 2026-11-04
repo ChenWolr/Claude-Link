@@ -5,3 +5,9 @@ declare module '*.png' {
   const src: string;
   export default src;
 }
+
+// Vite ?url 资产导入（.mjs 后缀 + query）：pdf worker URL 字符串（PdfPreview.vue）。
+declare module '*.mjs?url' {
+  const src: string;
+  export default src;
+}

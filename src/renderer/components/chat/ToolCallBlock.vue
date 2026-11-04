@@ -11,6 +11,8 @@ import { getProcessKindMeta, summarizeToolUse } from '../../utils/process-kind';
 import { SUB_AGENT_TOOL_NAMES } from '../../../shared/process-kind';
 import { useSessionStore } from '../../stores/session-store';
 import { openToolDiffDialog } from '../../composables/useToolDiffDialog';
+// p4（2026-11-04）：chip 单击打开文件预览抽屉（与 MessageBubble 文件链接同款薄壳入口）。
+import { useFilePreview } from '../../composables/useFilePreview';
 
 const props = defineProps<{
   use: RenderableMessage | null;
@@ -47,8 +49,9 @@ const toolName = computed(() => useParsed.value?.name ?? '工具');
 const meta = computed(() => getProcessKindMeta(`tool:${toolName.value}`));
 // 行内 mono 细节（对齐 openhanako extractToolDetail：read→文件名、bash→命令…）。
 const detail = computed(() => (props.use ? summarizeToolUse(props.use.content) : ''));
-// p3（2026-10-27）：生成文件工具家族——折叠态 basename 升级为可点击 chip（点击弹「默认打开 /
-// 选择打开方式」迷你菜单）。chip 只依赖 file_path/notebook_path 存在，不依赖 diff 合成家族。
+// p3（2026-10-27）：生成文件工具家族——折叠态 basename 升级为可点击 chip。
+// p4（2026-11-04）：chip 单击改开预览抽屉；「默认打开 / 选择打开方式」迷你菜单改由 chip 右键与 ▾ 触发。
+// chip 只依赖 file_path/notebook_path 存在，不依赖 diff 合成家族。
 const FILE_TOOLS: readonly string[] = ['Write', 'Edit', 'MultiEdit', 'NotebookEdit'];
 const filePath = computed<string | null>(() => {
   if (!useParsed.value || !FILE_TOOLS.includes(useParsed.value.name ?? '')) return null;
@@ -160,10 +163,13 @@ watch([expanded, displayedSource], () => {
         <span class="tool-row__icon">{{ meta.icon }}</span>
         <span class="tool-row__desc">{{ meta.label }}</span>
         <span v-if="filePath" class="tool-row__filewrap dlg-no-drag">
+          <!-- p4（2026-11-04）：chip 单击=预览抽屉；「打开方式」菜单移到 chip 右键与 ▾ 入口。 -->
           <span class="tool-row__file" role="button" tabindex="0" :title="filePath"
-            @click.stop="!exportMode && (fileMenuOpen = !fileMenuOpen)"
-            @keydown.enter.stop.prevent="!exportMode && (fileMenuOpen = !fileMenuOpen)"
-            @keydown.space.stop.prevent="!exportMode && (fileMenuOpen = !fileMenuOpen)">{{ fileBase }}</span>
+            @click.stop="!exportMode && useFilePreview().open(filePath)"
+            @keydown.enter.stop.prevent="!exportMode && useFilePreview().open(filePath)"
+            @keydown.space.stop.prevent="!exportMode && useFilePreview().open(filePath)"
+            @contextmenu.prevent="!exportMode && (fileMenuOpen = !fileMenuOpen)">{{ fileBase }}</span>
+          <span v-if="!exportMode" class="tool-row__filemore" role="button" tabindex="0" title="打开方式" aria-label="打开方式菜单" @click.stop="!exportMode && (fileMenuOpen = !fileMenuOpen)" @contextmenu.prevent="!exportMode && (fileMenuOpen = true)" @keydown.enter.stop.prevent="!exportMode && (fileMenuOpen = !fileMenuOpen)" @keydown.space.stop.prevent="!exportMode && (fileMenuOpen = !fileMenuOpen)">▾</span>
         </span>
         <span v-else-if="detail" class="tool-row__detail">{{ detail }}</span>
         <span v-if="diffCounts" class="tool-row__diffcounts" :title="`新增 +${diffCounts.additions} · 删除 −${diffCounts.deletions}`">
@@ -181,7 +187,7 @@ watch([expanded, displayedSource], () => {
       <button v-if="!exportMode && isSubAgent && use?.toolUseId" type="button" class="tool-row__anchor" @click="focusSubAgent">查看过程 →</button>
     </div>
     <!-- p3（2026-10-27）：生成文件迷你菜单 + toast——tool-row 级（controls wrapper 外），
-         不触 regression「控件 wrapper 内恰 2 button」钉；head 内 chip 是 span 非 button，HTML 合法。 -->
+         不触 regression「控件 wrapper 内恰 2 button」钉；head 内 chip/▾ 是 span 非 button，HTML 合法。 -->
     <div v-if="fileMenuOpen" class="tool-row__filemenu" role="menu" aria-label="打开生成文件">
       <button type="button" role="menuitem" @click="openGeneratedFile('default')">用默认程序打开</button>
       <button type="button" role="menuitem" @click="openGeneratedFile('choose')">选择打开方式…</button>
@@ -303,6 +309,19 @@ watch([expanded, displayedSource], () => {
 .tool-row__file:hover,
 .tool-row__file:focus-visible {
   color: var(--color-accent);
+}
+/* p4：▾「打开方式」入口（chip 右键同款菜单），弱化灰色不与 chip 争夺视觉焦点。 */
+.tool-row__filemore {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 0.6rem;
+  padding: 0 2px;
+  line-height: 1;
+}
+.tool-row__filemore:hover,
+.tool-row__filemore:focus-visible {
+  color: var(--color-text);
 }
 .tool-row__filemenu {
   position: absolute;

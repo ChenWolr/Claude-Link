@@ -10,6 +10,7 @@ import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useCommandStore } from '../stores/command-store';
 import { useInteractionStore } from '../stores/interaction-store';
 import { useFsPickerStore } from '../stores/fs-picker-store';
+import { usePreviewStore } from '../stores/preview-store';
 import { useDiffDialog } from '../composables/useDiffDialog';
 import { useToolDiffDialog } from '../composables/useToolDiffDialog';
 import { useImageLightbox } from '../composables/useImageLightbox';
@@ -86,6 +87,7 @@ const chatInputRef = ref<InstanceType<typeof ChatInput> | null>(null);
 // 单例状态；斜杠菜单/工具栏与选择器下拉/导出遮罩 v-if 才在 DOM，用选择器探测。桥接只读
 // 会话不让桌面中断（中断由 IM 客户端 /stop 驱动）。
 const interactionStore = useInteractionStore();
+const filePreviewStore = usePreviewStore();
 const { state: diffDialogState } = useDiffDialog();
 const { state: toolDiffDialogState } = useToolDiffDialog();
 const { state: imageLightboxState } = useImageLightbox();
@@ -95,6 +97,8 @@ function escConsumerOpen(): boolean {
   if (diffDialogState.value != null) return true;
   if (toolDiffDialogState.value != null) return true;
   if (imageLightboxState.value != null) return true;
+  // 文件预览抽屉打开时 Esc 归抽屉（关闭预览），不触发会话急停（p2 抽屉自身已注册 1040 Esc 层）。
+  if (filePreviewStore.open) return true;
   if (document.querySelector('.slash-menu')) return true;
   if (document.querySelector('.menu, .perm-menu, .tl-menu, .cascade')) return true;
   if (document.querySelector('.export-overlay')) return true;

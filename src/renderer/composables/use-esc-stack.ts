@@ -36,6 +36,9 @@ export const ESC_LAYER_PRIORITY = {
   // 与两个 diff 组件遮罩 CSS 的 z-index 同步。
   diffDialog: 1250,
   toolDiffDialog: 1250,
+  // 文件预览抽屉（2026-11-04 计划 p2）：抽屉浮于内容/活动栏之上，低于 updateDialog 1100 /
+  // interaction 1200 / diff 1250 / filePicker 9100 / imageLightbox 9999，与 CSS z-index 同表。
+  filePreviewDrawer: 1040,
   exportFormat: 9000,
   // 原生弹窗统一改造 T2：自绘 FilePickerDialog 蒙层 9100——高于导出格式 9000、低于灯箱 9999。
   // 导出流程中格式弹窗先开（选 JPEG/PNG）、目标选择弹窗后开（选保存位置），两层可同时在场；
