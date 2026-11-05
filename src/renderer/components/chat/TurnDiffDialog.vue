@@ -6,9 +6,10 @@
 // 结构对齐 ToolDiffDialog.vue：弹窗壳（overlay + role=dialog + Tab trap + ESC/Ctrl+F/↑↓）、
 // split/inline 切换、上下文 3/5/10/20、Ctrl+F 搜索 + 结果导航。差异点（本组件职责内新增）：
 //  - 异步数据态：懒加载 spinner / invoke 失败错误态+重试按钮 / mode='unavailable' 空态；
-//  - 标题 = 文件路径 + mode 徽标，四态（p5 2026-10-27 增 intent；2026-11-02 增 git-baseline）：
-//    first-change →「首改（编辑意图）」；git-baseline →「对比 git 基线（HEAD）」；intent →
-//    「编辑意图（快照缺失）」；其余（full）→「与上一轮的差异」。
+//  - 标题 = 文件路径 + mode 徽标，五态（p5 2026-10-27 增 intent；2026-11-02 增 git-baseline；
+//    2026-11-05 计划增 reconstructed）：first-change →「首改（编辑意图）」；reconstructed →
+//    「首改（重建对比）」（轮内纯 Edit 意图反向重建轮初内容，真 unified diff）；git-baseline →
+//    「对比 git 基线（HEAD）」；intent →「编辑意图（快照缺失）」；其余（full）→「与上一轮的差异」。
 // 无侧栏文件列表 / git 状态 / 拖动缩放 / 多段切换——单文件 patch 一次性呈现。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useTurnDiffStore, turnDiffPatchKey, type TurnDiffPatchTarget } from '../../stores/turn-diff-store';
@@ -74,14 +75,18 @@ const pathParts = computed(() => {
   const name = segs.pop() ?? filePath.value;
   return { dir: segs.join('/'), name };
 });
-// mode 徽标文案（p5 2026-10-27 增 intent 态；2026-11-02 增 git-baseline 态）：
-// first-change → 首改（编辑意图）；git-baseline → 对比 git 基线（HEAD）；intent →
-// 编辑意图（快照缺失）；full → 与上一轮的差异。
+// mode 徽标文案（p5 2026-10-27 增 intent 态；2026-11-02 增 git-baseline 态；2026-11-05 计划增 reconstructed 态）：
+// first-change → 首改（编辑意图）；reconstructed → 首改（重建对比）；git-baseline → 对比 git 基线（HEAD）；
+// intent → 编辑意图（快照缺失）；full → 与上一轮的差异。
 const modeBadge = computed(() =>
   entry.value?.mode === 'first-change' ? '首改（编辑意图）'
+    : entry.value?.mode === 'reconstructed' ? '首改（重建对比）'
     : entry.value?.mode === 'git-baseline' ? '对比 git 基线（HEAD）'
     : entry.value?.mode === 'intent' ? '编辑意图（快照缺失）'
     : '与上一轮的差异');
+// 合成模式（first-change/intent）只含编辑片段、无文件上下文可展开，ctx-group 上下文按钮禁用
+// ——计划 §2.5/RC3（2026-11-05）；reconstructed/full/git-baseline 为真 unified diff，不禁用。
+const ctxSynthOnly = computed(() => entry.value?.mode === 'first-change' || entry.value?.mode === 'intent');
 const SPLIT_HL_MAX_LINES = 1500;
 const language = computed(() => {
   const totalLines = parsed.value?.groups.reduce((a, g) => a + g.L.length + g.R.length, 0) ?? 0;
@@ -278,7 +283,7 @@ onBeforeUnmount(() => {
                 <div class="diff-eyebrow">
                   <span class="dot"></span>
                   轮末文件改动
-                  <span class="diff-eyebrow__badge" :class="{ 'diff-eyebrow__badge--first': entry?.mode === 'first-change' || entry?.mode === 'git-baseline' }">{{ modeBadge }}</span>
+                  <span class="diff-eyebrow__badge" :class="{ 'diff-eyebrow__badge--first': entry?.mode === 'first-change' || entry?.mode === 'git-baseline' || entry?.mode === 'reconstructed' }">{{ modeBadge }}</span>
                 </div>
                 <h2 class="diff-title">
                   <span v-if="pathParts.dir" class="diff-title__dir">{{ pathParts.dir }}/</span><b>{{ pathParts.name || '—' }}</b>
@@ -316,12 +321,14 @@ onBeforeUnmount(() => {
                 class="ctx-group"
                 :title="entry?.mode === 'first-change' || entry?.mode === 'intent'
                   ? '片段级 diff：编辑意图仅含变更片段，无更多上下文可展开'
+                  : entry?.mode === 'reconstructed'
+                  ? '轮内重建对比：真实文件行号，上下文可展开'
                   : '上下文行数：每处改动周围显示多少未变更行'"
               >
                 <span class="ctx-group__label">上下文</span>
                 <div class="seg">
-                  <button v-for="n in CONTEXT_OPTIONS" :key="n" type="button" :class="{ active: context === n && !fullText }" @click="setContext(n)">{{ n }}</button>
-                  <button type="button" :class="{ active: fullText }" title="展示文件完整内容" @click="setFullText">全文</button>
+                  <button v-for="n in CONTEXT_OPTIONS" :key="n" type="button" :disabled="ctxSynthOnly" :class="{ active: context === n && !fullText }" @click="setContext(n)">{{ n }}</button>
+                  <button type="button" :disabled="ctxSynthOnly" :class="{ active: fullText }" title="展示文件完整内容" @click="setFullText">全文</button>
                 </div>
               </div>
 
@@ -549,8 +556,9 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   background: var(--color-warn-strong);
 }
-/* mode 徽标：首改（编辑意图）/ git 基线 / 编辑意图（快照缺失）/ 与上一轮的差异；
-   --first 强调档由 first-change 与 git-baseline 共用（沿用首改强调色，2026-11-02 git 基线计划）。 */
+/* mode 徽标：首改（编辑意图）/ 首改（重建对比）/ git 基线 / 编辑意图（快照缺失）/ 与上一轮的差异；
+   --first 强调档由 first-change、git-baseline 与 reconstructed 共用（沿用首改强调色，
+   2026-11-02 git 基线计划；reconstructed 同为首改族，2026-11-05 计划增）。 */
 .diff-eyebrow__badge {
   padding: 1px 8px;
   border-radius: 999px;
@@ -700,6 +708,11 @@ onBeforeUnmount(() => {
 .seg button:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 1px;
+}
+/* 合成模式（first-change/intent）下 ctx-group 上下文按钮禁用置灰——计划 §2.5/RC3（2026-11-05） */
+.seg button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .ctx-group {
   display: inline-flex;
