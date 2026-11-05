@@ -977,9 +977,12 @@ async function runSegmentD(): Promise<void> {
         }),
       ];
       const frE = fileDiff(editRows, 100, 200, 'D');
-      check('D③e', '首改 Edit：patch 含 -x/+y 合成 hunk、±=1/1、mode=first-change',
-        frE.mode === 'first-change' && frE.additions === 1 && frE.deletions === 1
-          && frE.patch.split('\n').includes('-x') && frE.patch.split('\n').includes('+y'),
+      // 2026-11-05 计划 §2.8 期望值适配：纯 Edit 首改在 reconstructed 落地后出真 diff——mode 期望
+      // first-change→reconstructed；patch 期望由片段级 '-x'/'+y' 改为重建 before（'file-with-x\n'）
+      // 与 after 的正式 unified diff 行 '-file-with-x'/'+file-with-y'（± 仍 1/1）。构造不动。
+      check('D③e', '首改 Edit（2026-11-05 §2.8 适配 reconstructed）：真 diff 行 -file-with-x/+file-with-y、±=1/1、mode=reconstructed',
+        frE.mode === 'reconstructed' && frE.additions === 1 && frE.deletions === 1
+          && frE.patch.split('\n').includes('-file-with-x') && frE.patch.split('\n').includes('+file-with-y'),
         `fr=${JSON.stringify(frE)}`);
 
       // MultiEdit 例：edits[] 逐条片段顺序拼接，± 累计。
@@ -993,10 +996,12 @@ async function runSegmentD(): Promise<void> {
         }),
       ];
       const frM = fileDiff(multiRows, 100, 200, 'M');
-      check('D③m', '首改 MultiEdit：两片段 hunk 顺序拼接、±=2/2、patch 含 -m1/+n1/-m2/+n2',
-        frM.mode === 'first-change' && frM.additions === 2 && frM.deletions === 2
-          && frM.patch.split('\n').includes('-m1') && frM.patch.split('\n').includes('+n1')
-          && frM.patch.split('\n').includes('-m2') && frM.patch.split('\n').includes('+n2'),
+      // 2026-11-05 计划 §2.8 期望值适配：纯 MultiEdit 首改在 reconstructed 落地后出真 diff——mode
+      // 期望 first-change→reconstructed；重建 before='m1m2' vs after='n1n2' 为单行文件整行替换，
+      // ± 期望 2/2→1/1；patch 期望由片段级 '-m1/+n1/-m2/+n2' 改为真 diff 行 '-m1m2'/'+n1n2'。构造不动。
+      check('D③m', '首改 MultiEdit（2026-11-05 §2.8 适配 reconstructed）：真 diff 行 -m1m2/+n1n2、±=1/1、mode=reconstructed',
+        frM.mode === 'reconstructed' && frM.additions === 1 && frM.deletions === 1
+          && frM.patch.split('\n').includes('-m1m2') && frM.patch.split('\n').includes('+n1n2'),
         `fr=${JSON.stringify(frM)}`);
 
       // 降级：input_json 缺失 / input_truncated=1 → unavailable（无可用 input）。

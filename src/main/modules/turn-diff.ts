@@ -30,6 +30,12 @@
 //     冻结值）为 before 出正式 unified diff（diffFull 同源，mode='git-baseline'）。负结果（非 git/
 //     未跟踪/含 \0/超时）落 content IS NULL 行永久免重试，回退 first-change 意图合成（输出逐字节
 //     与无基线时一致——回归红线）。
+//   - reconstructed（2026-11-05 轮 diff 质量升级计划 §2.3）：首改（无 before 快照、无 git 基线）且
+//     轮内为纯 Edit/MultiEdit 写（无 Write、input 链完整可解析）时，从轮末快照 after 反向撤销全部
+//     编辑意图重建轮初内容（正向重放校验兜底错位猜测），以重建值为 before 出 diffFull 同源正式
+//     unified diff——真行号、上下文真实可展开；重建不可行（删除型/校验不过/含 Write/input 断链）
+//     时回落意图合成，既有各 mode 输出路径逐字节不变（回归红线）。插入位置：git 基线之后、
+//     意图合成之前（真 VCS 事实优先于重建，重建优先于合成）。
 //
 // 分层纪律：aggregateFromCheckpoints / computeFileDiff 为纯函数（不触 DB，可直测）；DB 侧
 // （deriveTurnRanges / listSummaries / getPatch）只读查询；异常由 ipc-handlers 的 handler
@@ -114,6 +120,9 @@ interface SynthFragment {
   kind: 'write' | 'edit';
   old: string; // write 片段恒为 ''
   new: string; // write 片段 = content
+  replaceAll?: boolean; // Edit/MultiEdit 顶层 input.replace_all === true（write 片段恒 false；
+  //   Multiedit 子项无此字段）。2026-11-05 计划 §2.3 增：仅 reconstructTurnBefore 消费，
+  //   synthesizeFirstChange 不读——既有合成行为零变化。
 }
 
 /** 字符串内换行符个数（虚拟文档行数推导用）。 */
@@ -169,19 +178,23 @@ function synthesizeFirstChange(
     const tool = row.tool_name.trim().toLowerCase();
     if (tool === 'write') {
       const content = typeof input.content === 'string' ? input.content : null;
-      if (content !== null) fragments.push({ kind: 'write', old: '', new: content });
+      if (content !== null) fragments.push({ kind: 'write', old: '', new: content, replaceAll: false });
     } else if (tool === 'edit') {
       const oldString = typeof input.old_string === 'string' ? input.old_string : null;
       const newString = typeof input.new_string === 'string' ? input.new_string : null;
-      if (oldString !== null && newString !== null) fragments.push({ kind: 'edit', old: oldString, new: newString });
+      if (oldString !== null && newString !== null) {
+        fragments.push({ kind: 'edit', old: oldString, new: newString, replaceAll: input.replace_all === true });
+      }
     } else if (tool === 'multiedit' || tool === 'multi_edit') {
+      // replace_all 只认顶层 input（Multiedit 子项无此字段）——2026-11-05 计划 §2.3 口径。
+      const rowReplaceAll = input.replace_all === true;
       const edits = Array.isArray(input.edits) ? input.edits : [];
       for (const edit of edits) {
         if (edit === null || typeof edit !== 'object') continue;
         const oldString = (edit as Record<string, unknown>).old_string;
         const newString = (edit as Record<string, unknown>).new_string;
         if (typeof oldString === 'string' && typeof newString === 'string') {
-          fragments.push({ kind: 'edit', old: oldString, new: newString });
+          fragments.push({ kind: 'edit', old: oldString, new: newString, replaceAll: rowReplaceAll });
         }
       }
     }
@@ -265,6 +278,82 @@ function synthesizeFirstChange(
 }
 
 /**
+ * 首改轮内反向重建轮初内容（2026-11-05 轮 diff 质量升级计划 §2.3，不导出、经 computeFileDiff
+ * 驱测）：对「本回合纯 Edit/MultiEdit 写、轮末快照 after 已知」的行集，从 after 反向撤销全部编辑
+ * 意图得轮初内容。重建本质是**错位猜测**（同一片段在文档多处出现时，反向首替位置可能与真实
+ * 编辑位置不同），由**正向重放校验兜底**：重建值经片段正序重放必须逐字节回到 after，否则视为
+ * 猜错放弃（null）——宁缺毋假，放弃时回落 first-change 意图合成（输出与既有逐字节一致）。
+ *
+ * 前置否决（全有或全无，任一行命中即 null）：
+ *   - 任一行 tool_name（trim+小写）为 'write'——Write 整文件替换后轮初内容不可知；
+ *   - 任一行 input_json 缺失或 input_truncated=1——链条断一环即不可重建；
+ *   - parseInputObject 返回 null 的行——非法 JSON 同样断链。
+ *
+ * 片段提取与 synthesizeFirstChange 完全同源（edit: old_string/new_string；multiedit/multi_edit:
+ * edits[] 逐条、非法项跳过；replaceAll 取顶层 input.replace_all === true——Multiedit 子项无此字段）。
+ * 无片段（行全被跳过，如全部为未知工具名）→ null。old_string === new_string（无变化 Edit）反向/
+ * 正向恒等 → 重建成功（diff 为空属真实无变化，可接受）。
+ */
+function reconstructTurnBefore(after: string, rows: readonly TurnFileCheckpointRow[]): string | null {
+  const ordered = [...rows].sort((a, b) => a.mrow - b.mrow); // 同 synthesizeFirstChange：mrow 升序稳定
+  const fragments: SynthFragment[] = [];
+  for (const row of ordered) {
+    const tool = row.tool_name.trim().toLowerCase();
+    if (tool === 'write') return null; // Write 整替换后轮初不可知
+    if (!row.input_json || row.input_truncated === 1) return null; // 链条断一环即不可重建
+    const input = parseInputObject(row.input_json);
+    if (input === null) return null; // 非法 JSON 同样断链
+    if (tool === 'edit') {
+      const oldString = typeof input.old_string === 'string' ? input.old_string : null;
+      const newString = typeof input.new_string === 'string' ? input.new_string : null;
+      if (oldString !== null && newString !== null) {
+        fragments.push({ kind: 'edit', old: oldString, new: newString, replaceAll: input.replace_all === true });
+      }
+    } else if (tool === 'multiedit' || tool === 'multi_edit') {
+      const rowReplaceAll = input.replace_all === true;
+      const edits = Array.isArray(input.edits) ? input.edits : [];
+      for (const edit of edits) {
+        if (edit === null || typeof edit !== 'object') continue;
+        const oldString = (edit as Record<string, unknown>).old_string;
+        const newString = (edit as Record<string, unknown>).new_string;
+        if (typeof oldString === 'string' && typeof newString === 'string') {
+          fragments.push({ kind: 'edit', old: oldString, new: newString, replaceAll: rowReplaceAll });
+        }
+      }
+    }
+    // 其它未知工具名不产片段（同 synthesizeFirstChange 白名单口径）；全部行皆无片段 → 下方 null。
+  }
+  if (fragments.length === 0) return null;
+
+  // 反向：doc = after，片段逆序撤销（replaceAll 全替 / 否则仅替换首次出现）。
+  let doc = after;
+  for (let i = fragments.length - 1; i >= 0; i--) {
+    const frag = fragments[i]!;
+    if (frag.new === '') return null; // 删除型无法定位插入点
+    if (frag.replaceAll === true) {
+      doc = doc.split(frag.new).join(frag.old);
+      continue;
+    }
+    const at = doc.indexOf(frag.new);
+    if (at < 0) return null; // new 未命中：意图与 after 不符
+    doc = doc.slice(0, at) + frag.old + doc.slice(at + frag.new.length);
+  }
+
+  // 正向校验兜底错位猜测：重建值经片段正序重放，必须逐字节回到 after。
+  let doc2 = doc;
+  for (const frag of fragments) {
+    if (frag.replaceAll === true) {
+      doc2 = doc2.split(frag.old).join(frag.new);
+      continue;
+    }
+    const at = doc2.indexOf(frag.old);
+    if (at < 0) return null; // old 未命中：重建值不可信
+    doc2 = doc2.slice(0, at) + frag.new + doc2.slice(at + frag.old.length);
+  }
+  return doc2 === after ? doc : null;
+}
+
+/**
  * 纯函数：单文件聚合（供 aggregateFromCheckpoints 与 getPatch 共用）。
  * rows = listBySession 全 session 行；区间 [startRow, endRow)（endRow=null 到 +∞）之外的行忽略。
  * 行过滤按 pathKey 归一键比较（cwd 为会话工作目录，可能 null）——同一文件的拼写变体
@@ -275,6 +364,11 @@ function synthesizeFirstChange(
  * 存在时，若调用方已解析到非 null 非空串的 git HEAD 基线，则以基线为 before 出正式 unified diff
  * （mode='git-baseline'，diffFull 同源）。基线解析/冻结在 resolveGitBaseline（DB+git 侧）完成，
  * 本函数保持纯函数只消费；null（缺省）时一切既有输出不变（回归红线）。
+ * reconstructed（2026-11-05 计划 §2.3）：git 基线分支之后、意图合成之前插入——首改且无基线时
+ * 先试 reconstructTurnBefore(after, inRange)（轮内纯 Edit/MultiEdit、无 Write、input 链完整，
+ * 反向重建 + 正向重放校验通过），成功以重建值为 before 出 diffFull 正式 diff；失败落回意图合成，
+ * 既有四 mode（full/first-change/intent/unavailable 及带基线时 git-baseline）输出路径逐字节不变
+ *（回归红线）。
  */
 export function computeFileDiff(
   rows: readonly TurnFileCheckpointRow[],
@@ -336,6 +430,16 @@ export function computeFileDiff(
   if (gitBaseline !== null && gitBaseline !== '') {
     const r = diffFull(gitBaseline, after, path, context);
     return { mode: 'git-baseline', additions: r.additions, deletions: r.deletions, writeCount, patch: r.patch, truncated: r.truncated };
+  }
+  // 首改轮内反向重建（2026-11-05 计划 §2.3）：插入位置在 git 基线（真 VCS 事实）之后、意图合成
+  // 之前——顺序不变量：git 基线 > 重建 > 意图合成。轮内纯 Edit/MultiEdit 且可从 after 反向重建
+  // 轮初内容（正向重放校验通过）时，以重建值为 before 出 diffFull 同源正式 unified diff
+  //（mode='reconstructed'，真行号、上下文可展开）。重建不可行（删除型/含 Write/input 断链/校验
+  // 不过）→ 落回下方意图合成，既有输出路径逐字节不变（回归红线）。
+  const beforeRebuilt = reconstructTurnBefore(after, inRange);
+  if (beforeRebuilt !== null) {
+    const r = diffFull(beforeRebuilt, after, path, context);
+    return { mode: 'reconstructed', additions: r.additions, deletions: r.deletions, writeCount, patch: r.patch, truncated: r.truncated };
   }
   const synth = synthesizeFirstChange(path, inRange, context);
   if (synth === null) {
