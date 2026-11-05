@@ -2,6 +2,8 @@
 // 主进程 checkpoint 记录器（计划 2026-10-26-turn-file-changes-diff-and-web-changes-fix-plan §4-P3）：
 // 写文件类工具（TOOL_DIFF_TOOL_NAMES）每次成功落盘，把工具结果时的文件 after 快照落库
 // turn_file_checkpoints（repo 见 database/repositories/turn-file-checkpoint-repo.ts）。
+// UTF-16 BOM 文件转码后落库（2026-11-05 计划）：读盘改用 decodeTextBuffer（shared/text-decode），
+// UTF-16LE/BE（带 BOM）转码为 UTF-8 文本落库，binary 判定语义不变（解码文本含 \0 即 binary）。
 //
 // 挂点与纪律（对齐 turn-projection 旁路）：sdk-backend 的 forwardEvent 在推送后、persistCliEvent
 // 之前以独立 try 调 noteCheckpointEvent——内部全 try/catch 吞错，旁路异常绝不上抛、绝不阻塞
@@ -30,6 +32,7 @@ import * as fs from 'node:fs';
 import { getConnection } from '../database/connection';
 import * as checkpointRepo from '../database/repositories/turn-file-checkpoint-repo';
 import { TOOL_DIFF_TOOL_NAMES } from '../../shared/process-kind';
+import { decodeTextBuffer } from '../../shared/text-decode';
 import type { CliEvent, CliMessageEvent, CliMessageContentToolResultPart, CliMessageContentToolUsePart, CliStreamEvent } from '../../shared/types/cli';
 
 /** tool_use 入参累积上限（字符数）：与 turn-projection.ts STREAM_TOOL_VALUE_LIMIT 同值（512KiB）。
@@ -222,18 +225,22 @@ async function snapshotAndInsert(sessionId: string, toolUseId: string, pending: 
     let binary = 0;
     let snapshotState: 'disk' | 'failed' = 'disk';
     try {
-      const raw = await fs.promises.readFile(pending.path, 'utf-8');
-      // binary 判定先于截断（round-002 M-A3）：对 raw 全量查 \0——无论 \0 位于何处，含 \0 即
-      // binary=1、after_content=NULL。若先截到 2MiB 前缀再查（旧序），\0 在 2MiB 之后的二进制
-      // 文件会以 mojibake 文本落库（binary=0），与「内容含 \0 → binary=1」语义偏差。
-      if (raw.includes('\0')) {
+      const buf = await fs.promises.readFile(pending.path);
+      // binary 判定先于截断（round-002 M-A3）：decodeTextBuffer 内部已对解码文本（UTF-16 BOM
+      // 转码后或 UTF-8 原样）查 \0，含 \0 即 binary=1、after_content=NULL；该判定发生在截断之前
+      // （无论 \0 位于解码文本何处，若先截 2MiB 前缀再查，\0 在 2MiB 后的文件会以 mojibake 文本
+      // 落库 binary=0，与「内容含 \0 → binary=1」语义偏差）。UTF-16LE/BE（带 BOM）文件转码为
+      // UTF-8 文本后走既有截断链（2026-11-05 计划）；无 BOM UTF-8 路径与旧实现
+      //（readFile utf-8 + includes('\0')）逐字节一致。
+      const decoded = decodeTextBuffer(buf);
+      if (decoded.binary) {
         binary = 1;
         afterContent = null;
-      } else if (raw.length > AFTER_CONTENT_LIMIT) {
-        afterContent = raw.slice(0, AFTER_CONTENT_LIMIT);
+      } else if (decoded.text.length > AFTER_CONTENT_LIMIT) {
+        afterContent = decoded.text.slice(0, AFTER_CONTENT_LIMIT);
         afterTruncated = 1;
       } else {
-        afterContent = raw;
+        afterContent = decoded.text;
       }
     } catch {
       // 读盘异常：failed 快照（聚合侧跳过该行）

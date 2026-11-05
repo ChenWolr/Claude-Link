@@ -10,9 +10,12 @@
 //
 // 约束：仅 import node:fs/promises + node:path + shared 类型，禁 import electron——
 // 契约脚本 scripts/tdd-file-preview-verify.ts 以 tsx 直测本模块导出（main 进程模块无 electron 依赖）。
+// UTF-16 BOM 文本预览（2026-11-05 计划 §2.6）：文本分支读盘后先过 BOM 感知解码器
+//（shared/text-decode），UTF-16LE/BE（带 BOM）转码返回；UTF-8 / 拒绝路径逻辑零改动。
 
 import { open, readFile, realpath, stat } from 'node:fs/promises';
 import * as path from 'node:path';
+import { decodeTextBuffer } from '../../shared/text-decode';
 import type { FsPreviewBlobCategory, FsPreviewResult } from '../../shared/types/ipc';
 
 /** 文本预览字节上限（256KB；超出截断，多字节 UTF-8 边界去尾部 U+FFFD）。 */
@@ -132,6 +135,13 @@ export async function previewFile(absPath: unknown, opts: { roots: string[] }): 
     try {
       const buf = Buffer.alloc(MAX_TEXT + 1);
       const { bytesRead } = await fh.read(buf, 0, MAX_TEXT + 1, 0);
+      // UTF-16 BOM 文本（2026-11-05 计划 §2.6）：BOM 感知解码器命中（binary:false 且 bom 非空）
+      // → 转码文本直接返回（转码文本无残缺序列，不做 U+FFFD 尾修剪）。
+      const decoded = decodeTextBuffer(buf.subarray(0, bytesRead));
+      if (decoded.binary === false && decoded.bom !== null) {
+        const truncated = decoded.text.length > MAX_TEXT || st.size > MAX_TEXT;
+        return { ok: true, kind: 'text', content: decoded.text.slice(0, MAX_TEXT), size: st.size, truncated };
+      }
       if (isProbablyBinary(buf.subarray(0, bytesRead))) return { ok: false, message: '二进制文件不支持预览' };
       if (st.size === 0) return { ok: true, kind: 'text', content: '', size: 0, truncated: false };
       const truncated = st.size > MAX_TEXT;
