@@ -159,3 +159,17 @@ export function buildNativeSdkOptionsCore(input: NativeSdkOptionsCoreInput): Pic
   options.strictMcpConfig = options.mcpServers !== undefined || input.mcpOverridesActive === true;
   return options;
 }
+
+/**
+ * 文件引用输出引导文案（file-linkify 计划 §4-A1）单一事实源：生产回合由 sdk-backend 的
+ * buildSdkOptions 以 preset 追加语义注入（默认基线不动、仅 append 本块）；probe 路径
+ * （buildProbeSdkOptions / post-turn /context 探针）不引用本常量，天然不注入。
+ * 纯字符串零依赖（可直接函数级测试）；示例统一正斜杠——Markdown 链接目的串中反斜杠是
+ * 转义符，正斜杠由渲染层 file-link.ts 归一为零损失。
+ */
+export const FILE_REF_SYSTEM_PROMPT_APPEND: string = [
+  '### File references (claude-link)',
+  '- Unless otherwise specified, always return references to local files you created or edited as Markdown links instead of bare paths wrapped in backticks, e.g. [name.ext](C:/absolute/path/name.ext) on Windows or [name.ext](/absolute/path/name.ext) elsewhere.',
+  '- The link target must be an absolute path, or a workspace-relative path that includes the directory segment, e.g. [main.ts](src/main.ts).',
+  '- Return local web URLs (dev servers, etc.) as Markdown links too, e.g. [label](http://127.0.0.1:8080).',
+].join('\n');

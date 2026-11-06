@@ -120,7 +120,7 @@ import {
 } from './sdk-permissions';
 import { GLOBAL_FALLBACK_SESSION_ID, sdkCommandRegistry } from './sdk-command-registry';
 import { getUserOriginFingerprint } from './command-source-watcher';
-import { buildNativeSdkOptionsCore, mergeSpawnOptions } from './sdk-command-options';
+import { buildNativeSdkOptionsCore, mergeSpawnOptions, FILE_REF_SYSTEM_PROMPT_APPEND } from './sdk-command-options';
 import { buildCommandOriginEvidence } from './sdk-command-origin';
 import { isSubAgentToolUse } from '../../shared/process-kind';
 import { classifyStall, DEFAULT_STALL_THRESHOLDS, isBusinessStallActivityKind, shouldPauseStallWatchdog, type StallInfo, type StallThresholds } from '../../shared/stall-watchdog';
@@ -1256,6 +1256,13 @@ function buildSdkOptions(opts: SpawnOptions, sessionId: string, mainWindow: Brow
     additionalDirectories,
     mcpOverridesActive,
   });
+  // 文件引用输出引导（file-linkify 计划 §4-A1）：preset 追加形态——默认基线不动、仅 append 引导块；
+  // probe 路径（buildProbeSdkOptions / post-turn /context 探针）不经本函数，天然不注入。
+  options.systemPrompt = {
+    type: 'preset',
+    preset: 'claude_code',
+    append: FILE_REF_SYSTEM_PROMPT_APPEND,
+  } as SdkOptions['systemPrompt'];
   // 生产 query 特有：流式增量（stream_event）、子 agent 思考透传、统一交互弹窗 hook。
   options.includePartialMessages = true;
   options.forwardSubagentText = true;
