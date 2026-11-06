@@ -1,0 +1,17 @@
+// 本回路产物（2026-11-06 文件点击打开链路修复）的类型闸门；
+// 其余 ~249 个既有 tdd-* 脚本的覆盖缺口经探针实测 338 错误/83 文件（esnext/bundler 档），另行立项，不在本配置范围。
+{
+  "extends": "./tsconfig.scripts.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "target": "esnext",
+    "types": ["node"]
+  },
+  "include": [
+    "scripts/tdd-code-inline-fileref-verify.ts",
+    "scripts/tdd-file-preview-verify.ts",
+    "src/renderer/env.d.ts"
+  ]
+}

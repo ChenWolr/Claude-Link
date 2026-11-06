@@ -17,7 +17,7 @@
     "release:gate:post": "tsx scripts/release-gate.ts --post",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "vue-tsc --noEmit -p tsconfig.web.json",
-    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json",
+    "typecheck:scripts": "tsc --noEmit -p tsconfig.scripts.json && tsc --noEmit -p tsconfig.tdd.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
     "selftest:static": "tsx scripts/run-selftest-static.ts",
     "selftest": "npm run selftest:static && node scripts/run-native-if-env.mjs",
