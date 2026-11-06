@@ -207,7 +207,8 @@ const mermaidHtml = computed(() => {
 
 // text→blob（html web 的 iframe / svg preview 的 img）：按 ext:mode 缓存避免重复生成，
 // 生成后统一进 allBlobUrls（close/换文件/卸载全量 revoke）。mime：html 用 text/html
-// （iframe sandbox="" 禁脚本/同源/表单，B9）；svg 用 image/svg+xml（img 上下文脚本天然不执行，B25）。
+// （iframe sandbox="allow-scripts allow-forms" 隔离沙箱运行脚本/表单、不授同源，B9）；
+// svg 用 image/svg+xml（img 上下文脚本天然不执行，B25）。
 const textBlobCache = new Map<string, string>();
 function getTextBlobUrl(): string | null {
   const res = textResult.value;
@@ -331,7 +332,7 @@ onBeforeUnmount(() => {
           <span class="fpreview-empty__icon">⚠</span>
           <span class="fpreview-empty__text">文件不存在</span>
         </div>
-        <!-- p9 text 类分发表：md preview → markdown-it + v-enrich；html web → sandbox iframe（B9）；
+        <!-- p9 text 类分发表：md preview → markdown-it + v-enrich；html web → sandbox iframe（隔离沙箱运行脚本/表单、不授同源，B9）；
              svg preview → img（B25）；mmd graph → mermaid 占位（v-enrich 管线）；
              其余（md/html/svg/mmd 的 source 态、plain 全模式）统一源码视图。 -->
         <template v-else-if="textResult">
@@ -343,7 +344,7 @@ onBeforeUnmount(() => {
           <template v-else>
             <div v-if="textResult.truncated" class="fpreview-banner">文件过大，仅显示前 256 KB</div>
             <div v-if="textKind === 'md' && store.mode === 'preview'" class="fpreview-md markdown-body" @click="onMdLinkClick" v-html="mdHtml" v-enrich></div>
-            <iframe v-else-if="frameUrl" :src="frameUrl" sandbox="" title="网页预览" class="fpreview-frame"></iframe>
+            <iframe v-else-if="frameUrl" :src="frameUrl" sandbox="allow-scripts allow-forms" title="网页预览" class="fpreview-frame"></iframe>
             <div v-else-if="svgImageUrl" class="fpreview-image-wrap">
               <img :src="svgImageUrl" class="fpreview-image" :alt="baseName">
             </div>
@@ -372,7 +373,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="fpreview-foot">
         <span><kbd>Esc</kbd> 关闭</span><span>·</span><span>内容只读，改动请走会话</span>
-        <template v-if="isWebPreviewMode"><span>·</span><span class="fpreview-foot-note">网页预览已禁用脚本；外部相对资源不保证加载</span></template>
+        <template v-if="isWebPreviewMode"><span>·</span><span class="fpreview-foot-note">网页预览在隔离沙箱中运行脚本（无法访问应用数据与本机文件）；外部相对资源不保证加载</span></template>
         <span v-if="copyStatus" class="fpreview-copy-status">{{ copyStatus }}</span>
         <div class="fpreview-foot-actions">
           <button v-if="!isWebRuntime" type="button" @click="openExternal">↗ 外部打开</button>
@@ -576,7 +577,7 @@ onBeforeUnmount(() => {
 .fpreview-md {
   padding: 16px;
 }
-/* html web：sandbox iframe 占满 body（禁脚本/同源/表单，B9），衬底页面自身内容 */
+/* html web：sandbox iframe 占满 body（隔离沙箱运行脚本/表单、不授同源，B9），衬底页面自身内容 */
 .fpreview-frame {
   display: block;
   width: 100%;

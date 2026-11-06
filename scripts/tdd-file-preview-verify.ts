@@ -593,8 +593,11 @@ void (async (): Promise<void> => {
     check('文件存在：src/renderer/components/preview/FilePreviewDrawer.vue', () => {
       assert.ok(exists, 'FilePreviewDrawer.vue 不存在');
     });
-    check("含 'sandbox=\"\"' 字面（iframe 静态禁脚本/同源/表单，B9）", () => {
-      assert.ok(src.includes('sandbox=""'), 'iframe 缺 sandbox="" 静态钉（B9）');
+    check("含 'sandbox=\"allow-scripts allow-forms\"' 字面（iframe 静态钉：隔离沙箱运行脚本与表单、不授同源，B9·A3 更新）", () => {
+      assert.ok(src.includes('sandbox="allow-scripts allow-forms"'), 'iframe 缺 sandbox="allow-scripts allow-forms" 静态钉（B9·A3）');
+    });
+    check('源码不含 allow-same-origin 字面（opaque origin 隔离：预览页不可触达宿主 DOM/存储/cookie，宿主读 contentDocument 仍被拒，B9·A3）', () => {
+      assert.ok(!src.includes('allow-same-origin'), '源码出现 allow-same-origin，B9 隔离红线被破坏');
     });
     check('含四重组件 import 字面（PdfPreview/DocxPreview/XlsxPreview/PptxPreview）', () => {
       assert.ok(src.includes("import PdfPreview from './PdfPreview.vue'"), '缺 PdfPreview import 行');
@@ -613,8 +616,8 @@ void (async (): Promise<void> => {
       assert.ok(src.includes('text/html'), "缺 'text/html' mime");
       assert.ok(src.includes('image/svg+xml'), "缺 'image/svg+xml' mime");
     });
-    check('含「网页预览已禁用脚本」字面（B10 foot 注记）', () => {
-      assert.ok(src.includes('网页预览已禁用脚本'), '缺 B10 网页预览注记');
+    check('含「网页预览在隔离沙箱中运行脚本」字面（B10 foot 注记·A3 更新）', () => {
+      assert.ok(src.includes('网页预览在隔离沙箱中运行脚本'), '缺 B10 网页预览注记（A3 新文案）');
     });
     check('含 :size= 传参字面（重组件 props 契约 { base64, size }）', () => {
       assert.ok(src.includes(':size='), '缺重组件 :size= 传参字面');
