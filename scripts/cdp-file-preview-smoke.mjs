@@ -9,6 +9,12 @@
 //     + P3-G（round-001 p11）：Target.setAutoAttach(flatten) 自动附加页面派生的 worker 子会话
 //       （pdfjs worker 等），其 Runtime.exceptionThrown / console.error(level=error) 并入与页面
 //       会话相同的异常池——X 用例终审因此覆盖「最易出错的 PDF 解析面」，不再只看页面会话）。
+//     + A3/A4/A5 运行时组（2026-11-06 文件 linkify 计划 p6）：A3 沙箱运行时（脚本执行 frame 级
+//       断言 / 下拉框→确认→内嵌 iframe 交互链 / 同源不授予 / 弹窗·顶层导航·下载禁用）、
+//       A4 死链反馈（不存在/越界/未设根相对链接/目录，操作一律 pinia 注入消息→气泡真实点击）、
+//       A5 真实形态全链（反引号绝对路径消息→链接→点击→抽屉→脚本标志三断言一体 / 已设根相对
+//       路径 / 连点两链接终态一致）。沙箱阻止动作时 Chromium 自身的 console error 反馈按内容
+//       豁免（exemptExpectedSandboxConsole，非应用回归），四类正面判据不依赖豁免。
 //
 // 关键事实（源码已核，2026-11-04）：
 //   - preview-store id = 'filePreview'（src/renderer/stores/preview-store.ts defineStore 字面）；
@@ -20,7 +26,8 @@
 //     把 fixture 工作目录注册进隔离 profile 的全局配置（profile 用后即删，不碰真实配置）；
 //     B6（非工作区路径拒绝）在注册前先断 handler 层 {ok:false,'路径不在工作区内'} + 抽屉层
 //     .fpreview-empty 同文案，另以从未注册的 outside 目录音再断一次 handler 层。
-//   - B9 = iframe[sandbox=""]（attribute 恒为空串）；B25 = svg 双模式（preview img blob:/source 源码）；
+//   - B9 = iframe[sandbox="allow-scripts allow-forms"]（隔离沙箱运行脚本/表单、不授 allow-same-origin，
+//     opaque origin 隔离语义保留；A3 2026-11-06 更新）；B25 = svg 双模式（preview img blob:/source 源码）；
 //     B16 = 抽屉复用换内容（连续 openPreview 不关抽屉，头部文件名跟随切换）；B8 = open 大文件后
 //     立即 open 小文件的竞态守卫（终态只落最后一次请求内容）。
 //
@@ -61,14 +68,33 @@ const PDF_WORD = 'CLAUDELINK_E2E_PDF';
 const MD_H2_MARK = 'CLAUDELINK_E2E_MD_H2';
 const HTML_H1_MARK = 'CLAUDELINK_E2E_HTML_H1';
 const HELLO_MARK = 'CLAUDELINK_E2E_HELLO';
+const REL_HELLO_MARK = 'CLAUDELINK_E2E_REL_HELLO'; // A5-2：已设根会话相对路径 fixture 内容标志
 
 // ── 结果记账（用例只有 PASS/FAIL 两态）──
 let pass = 0, fail = 0;
 const consoleErrors = [];
 const exceptions = [];
+// A3/A5 组（2026-11-06 文件 linkify 计划 p6）三项事件采集：
+//   - frameContexts：Runtime.executionContextCreated 收集（contextId → context），供沙箱 iframe
+//     的 frame 级运行时断言兜底路径（opaque origin 下宿主 JS 读不到 frame 内部，须按 contextId
+//     或子会话求值——见 frameSessions 注）；
+//   - dialogEvents：Page.javascriptDialogOpening（A3-4a 判据 = 集合为空；同时立即 dismiss 防
+//     沙箱坏情形下真 dialog 挂死 frame）；
+//   - downloadEvents：Browser.downloadWillBegin（A3-4c 判据之一 = 集合为空；主判据为受控
+//     下载目录 fs 观测，事件通道若不可达 page session 则如实申报退化为 fs 判据）。
+const frameContexts = new Map();
+const dialogEvents = [];
+const downloadEvents = [];
 // p11（P3-G）：已跟踪的 worker 子会话表（sessionId → targetType）。flatten 模式下子会话
 // 与页面会话共用同一条 WebSocket，靠消息顶层 sessionId 区分；只有此表中的会话事件才入池。
 const childSessions = new Map();
+// A3/A5 组（2026-11-06 p6）：沙箱预览 iframe 子会话表（sessionId → targetType）。探针实证：
+// sandboxed blob iframe 为 OOPIF——Target.attachedToTarget type='iframe'（targetInfo.url 空）、
+// 其 Runtime.executionContextCreated 不达 page session、Page.getFrameTree 不含该子 frame——
+// frame 级求值必须挂到 iframe 子会话上做（Runtime.evaluate 带 sessionId，落其主世界）。
+// 异常池语义不变：iframe 会话事件仍不入池（下方过滤只放行无 sessionId 的页面事件与
+// childSessions 表中的 worker 会话，iframe sessionId 不在表内，天然排除）。
+const frameSessions = new Map();
 let currentCase = '(pre)';
 const log = (m) => console.log(`[fpreview-smoke] ${m}`);
 async function check(name, fn) {
@@ -161,6 +187,28 @@ async function proveWorkerExceptionChannel() {
   }
 }
 
+// ── A3-4 系（沙箱禁用断言）预期浏览器反馈豁免：sandbox 未授 allow-modals/top-navigation/
+//    downloads 时，Chromium 阻止动作的同时自会在页面 console 落一条 error 级反馈
+//    （'Ignored call to ...' / 'Blocked frame navigation ...' / 'Download is disallowed ...'）
+//    ——这是「阻止生效」的直接证据而非应用回归。按内容过滤剔除（同 proveWorkerExceptionChannel
+//    的按内容复原先例，round-002 fix-2），剔除数 log 申报；X 终审判的仍是应用自身异常面。
+//    四类正面判据（A3-1/A5-1 脚本标志、A3-4a dialogEvents 空、A3-4b location 不变、
+//    A3-4c 下载目录空）不依赖本豁免，sandbox token 回归仍会被各自用例抓住。
+//    round-002 fix-4（F6）：豁免面收窄到用例窗口——只豁免「A3-4 组开跑前基线快照之后新增
+//    （索引 ≥ 快照长度）」的匹配条目，快照前旧条目永不豁免（按子串匹配理论上可掩蔽恰好
+//    含同串的应用自身异常，收窄后旧条目掩蔽面为零）。 ──
+function exemptExpectedSandboxConsole(mark, baseline) {
+  const hit = (x) => String(x.text).includes(mark);
+  let n = 0;
+  // 基线语义：baseline.<pool> = A3-4 组开跑时该池的长度；只有索引 ≥ 基线的条目可被剔除。
+  // 自尾向头遍历，只会在 [基线, 长度) 区间内命中剔除——基线以下条目永不移动（splice 只删
+  // 高位条目，低位索引不变）；若基线 > 当前长度则循环不执行（fail-safe：宁可不豁免）。
+  for (let i = exceptions.length - 1; i >= baseline.exceptions; i--) { if (hit(exceptions[i])) { exceptions.splice(i, 1); n++; } }
+  for (let i = consoleErrors.length - 1; i >= baseline.consoleErrors; i--) { if (hit(consoleErrors[i])) { consoleErrors.splice(i, 1); n++; } }
+  if (n > 0) log(`  预期沙箱阻止反馈豁免 ${n} 条（标记「${mark}」，浏览器自身反馈非应用回归；仅限 A3-4 组开跑基线快照后新增）`);
+  return n;
+}
+
 // ── pinia store 表达式（选型依据见文件头注释）──
 const STORE_GET = '(document.querySelector("#app").__vue_app__.config.globalProperties.$pinia._s.get("filePreview"))';
 function storeExpr(body) { return `(() => { const st = ${STORE_GET}; if (!st) return null; ${body} })()`; }
@@ -201,6 +249,138 @@ async function waitForHeavy(label, expr) {
     const state = await heavyStateText();
     throw new Error(`${e.message}；重组件态=${state}`);
   }
+}
+
+// ── A3/A5 frame 级运行时断言基建（2026-11-06 p6）：沙箱 iframe 为 opaque origin，宿主 JS
+//    读不到 frame 内部（A3-3 正是要钉这一点），frame 内求值须经 CDP 进入。探针实证（本轮
+//    run 前置诊断）：sandboxed blob iframe 为 OOPIF——Target.attachedToTarget type='iframe'
+//    子会话（targetInfo.url 空）、其 executionContextCreated 不达 page session、Page.getFrameTree
+//    不含子 frame——主路径 = 对 frameSessions 表中的 iframe 子会话 Runtime.evaluate（flatten
+//    模式带 sessionId，落其主世界）。page-session 的 contextId/isolated 路径仅留作同进程
+//    非 OOPIF 情形的兜底。 ──
+function findBlobFrameId(node) {
+  if (!node) return null;
+  if (String(node.frame?.url || '').startsWith('blob:')) return node.frame.id;
+  for (const ch of node.childFrames ?? []) { const hit = findBlobFrameId(ch); if (hit) return hit; }
+  return null;
+}
+/** 在沙箱预览 frame 内求值：逐个尝试 iframe（OOPIF）子会话（会话可能已随换文件销毁，求值
+ *  被拒/异常则跳过下一个）；全部不可达时退化为 page-session blob: 主世界上下文 → isolated
+ *  world 兜底（共享同一 DOM）。所有路径都拿不到值 → 抛错如实暴露。 */
+async function evalInPreviewFrame(expr) {
+  let lastErr = null;
+  for (const sid of frameSessions.keys()) {
+    try {
+      const r = await cdpSend('Runtime.evaluate', { expression: expr, returnByValue: true }, sid);
+      if (r.exceptionDetails) { lastErr = new Error('iframe 会话求值异常: ' + (r.exceptionDetails.exception?.description || '').slice(0, 160)); continue; }
+      if (r.result?.value !== undefined) return r.result.value;
+      lastErr = new Error('iframe 会话求值返回 undefined');
+    } catch (e) { lastErr = e; }
+  }
+  const blobCtx = [];
+  for (const [id, c] of frameContexts) {
+    if (String(c.url || '').startsWith('blob:')) blobCtx.push(id);
+  }
+  for (const id of blobCtx) {
+    try {
+      const r = await cdpSend('Runtime.evaluate', { expression: expr, returnByValue: true, contextId: id });
+      if (r.exceptionDetails) { lastErr = new Error('frame eval 异常: ' + (r.exceptionDetails.exception?.description || '').slice(0, 200)); continue; }
+      return r.result?.value;
+    } catch (e) { lastErr = e; }
+  }
+  const tree = await cdpSend('Page.getFrameTree');
+  const frameId = findBlobFrameId(tree.frameTree);
+  if (!frameId) {
+    throw new Error(`frame 求值不可达：iframe 子会话 ${frameSessions.size} 个全不可用${lastErr ? `（最后错误 ${String(lastErr.message).slice(0, 140)}）` : ''}`);
+  }
+  const world = await cdpSend('Page.createIsolatedWorld', { frameId });
+  const r2 = await cdpSend('Runtime.evaluate', { expression: expr, returnByValue: true, contextId: world.executionContextId });
+  if (r2.exceptionDetails) throw new Error('frame eval(isolated): ' + (r2.exceptionDetails.exception?.description || '').slice(0, 300));
+  return r2.result?.value;
+}
+/** 在沙箱预览 frame 的主世界求值（无 isolated 兜底）：安全语义类断言（A3-3 parent/cookie
+ *  访问）必须落在真实主世界。iframe 子会话的 Runtime.evaluate 即其主世界；若 OOPIF 路径
+ *  不可用，退而用 page-session 的 blob: 主世界上下文（同进程情形）；都没有 → 抛错如实暴露。 */
+async function evalInPreviewFrameMain(expr) {
+  for (const sid of frameSessions.keys()) {
+    try {
+      const r = await cdpSend('Runtime.evaluate', { expression: expr, returnByValue: true }, sid);
+      if (r.exceptionDetails) throw new Error('frame eval(main): ' + (r.exceptionDetails.exception?.description || '').slice(0, 300));
+      return r.result?.value;
+    } catch { /* 该会话已销毁或求值失败，试下一个 */ }
+  }
+  for (const [id, c] of frameContexts) {
+    if (!String(c.url || '').startsWith('blob:')) continue;
+    if (c.auxData && c.auxData.isDefault === false) continue; // 仅主世界
+    const r = await cdpSend('Runtime.evaluate', { expression: expr, returnByValue: true, contextId: id });
+    if (r.exceptionDetails) throw new Error('frame eval(main): ' + (r.exceptionDetails.exception?.description || '').slice(0, 300));
+    return r.result?.value;
+  }
+  throw new Error('frame 主世界不可达（无 iframe 子会话也无 blob: 主世界上下文）');
+}
+/** 轮询版 frame 求值（iframe 上下文建立晚于抽屉打开，轮询到标志出现或超时）。 */
+async function waitForFrame(label, expr, timeoutMs = OPEN_TIMEOUT_MS) {
+  const deadline = Date.now() + timeoutMs;
+  let last = '';
+  while (Date.now() < deadline) {
+    try {
+      const v = await evalInPreviewFrame(expr);
+      if (v) return v;
+      last = `falsy=${JSON.stringify(v)?.slice(0, 80)}`;
+    } catch (e) { last = String(e.message).slice(0, 140); }
+    await sleep(300);
+  }
+  throw new Error(`等待超时（${Math.round(timeoutMs / 1000)}s）：${label}；最后状态 ${last}`);
+}
+
+// ── A4/A5 消息注入与气泡真实点击基建（操作一律「pinia 注入消息 → 气泡真实点击」完整用户
+//    路径；session store 取法同 cdp-web-access-e2e.mjs:411/650 的 _s.get('session') 先例）──
+const SESSION_GET = '(document.querySelector("#app").__vue_app__.config.globalProperties.$pinia._s.get("session"))';
+/** 建立聊天面：ChatPage 仅在 activeSession 存在时渲染消息列表（ChatPage.vue v-if）——冷启动
+ *  无会话，经 store.startTransientSession() 建暂态（幂等：已有暂态则复用同对象），不落库。 */
+async function ensureChatSurface() {
+  await evalExpr(`(() => { const st = ${SESSION_GET}; if (!st) return null; st.startTransientSession(); return true; })()`);
+  await waitFor('消息列表挂载（.message-list__inner）', `!!document.querySelector('.message-list__inner')`, OPEN_TIMEOUT_MS);
+}
+/** 注入一条 assistant Markdown 消息（真实模型输出形态渲染：code_inline 链接化/link_open 死链
+ *  分支均由 markdown.ts 真实规则承接），并等气泡渲染出测试标志。标志（mark）织入正文尾部——
+ *  它是本用例气泡的等待判据（markdown 纯文本尾缀不影响反引号/链接形态）。消息对象填渲染必需
+ *  字段：RenderableMessage role/content + eventType:'message'/processKind:null（group-messages
+ *  的 isAssistantBodyText 判据——缺了会被折进过程组不渲染气泡）+ Message rawEvent/parentTaskId；
+ *  且注入时刻为最后一条 assistant 正文 → protectedFinalTextIds 必标 → 独立成条。纯内存不落库。 */
+async function injectAssistantMd(mark, md) {
+  const full = `${md}（${mark}）`;
+  await evalExpr(`(() => {
+    const st = ${SESSION_GET};
+    st.messages.push({ id: crypto.randomUUID(), role: 'assistant', content: ${JSON.stringify(full)}, eventType: 'message', processKind: null, rawEvent: null, parentTaskId: null });
+    return true;
+  })()`);
+  await waitFor(`气泡渲染出测试标志（${mark}）`, `(() => {
+    const b = [...document.querySelectorAll('.bubble--assistant .bubble__content')];
+    return b.some((el) => (el.textContent || '').includes(${JSON.stringify(mark)}));
+  })()`, OPEN_TIMEOUT_MS);
+}
+/** 等气泡中出现 data-clip-path 精确匹配的文件链接（querySelector 属性值含反斜杠转义地狱，
+ *  改 JS 遍历精确比较），返回 { cls, href } JSON。 */
+async function waitForFileLink(clipPath, label) {
+  return await waitFor(label ?? `文件链接渲染（data-clip-path=${clipPath}）`, `(() => {
+    const p = ${JSON.stringify(clipPath)};
+    const el = [...document.querySelectorAll('.bubble__content .md-file-link')].find((a) => a.getAttribute('data-clip-path') === p);
+    return el ? JSON.stringify({ cls: el.className, href: el.getAttribute('href') || '' }) : null;
+  })()`, OPEN_TIMEOUT_MS);
+}
+/** 气泡真实点击：对 .md-file-link 元素调原生 click()——事件冒泡到内容容器 onContentClick
+ *  委托（MessageBubble.vue），走 useFilePreview().open → store.openPreview 完整用户路径。 */
+async function clickFileLinkReal(clipPath) {
+  const clicked = await evalExpr(`(() => {
+    const p = ${JSON.stringify(clipPath)};
+    const el = [...document.querySelectorAll('.bubble__content .md-file-link')].find((a) => a.getAttribute('data-clip-path') === p);
+    if (!el) return false;
+    el.click();
+    return true;
+  })()`);
+  if (clicked !== true) throw new Error(`未找到可点链接（data-clip-path=${clipPath}）`);
+  await waitFor('抽屉打开（气泡点击委托路径）', `!!document.querySelector('.fpreview-drawer.open')`, OPEN_TIMEOUT_MS);
 }
 
 // ── fixture 生成 ──
@@ -312,9 +492,10 @@ async function writeFixtures(wsDir, outsideDir) {
   const outsideFile = path.join(outsideDir, 'secret-outside.txt');
   writeFileSync(f('hello.txt'), `${HELLO_MARK}\n第一行\n第二行\n`, 'utf8');
   writeFileSync(f('report.md'), `# 一级标题\n\n正文段落。\n\n## ${MD_H2_MARK}\n\n- 列表项 A\n- 列表项 B\n`, 'utf8');
-  // B9 探针说明：opaque origin（sandbox=""）下父页面不可读 contentDocument，脚本不执行由
-  // sandbox 属性与浏览器强制语义保证，dataset.scriptRan 仅留作人工 DevTools 检查
-  // （自动化运行时断言走父页面侧 iframe load 事件，见主流程 html 用例）。
+  // B9 探针说明（A3 2026-11-06 更新）：sandbox="allow-scripts allow-forms" 不授 allow-same-origin，
+  // 仍为 opaque origin——父页面不可读 contentDocument、预览页不可触达宿主 DOM/存储/cookie；
+  // 脚本真实执行（allow-scripts，会置 dataset.scriptRan，但父页面读不到，frame 级运行时断言
+  // 由 A5 扩充用例经 frame 执行上下文承接），隔离性由不授同源 + 浏览器强制语义保证。
   writeFileSync(f('page.html'), `<!doctype html>\n<html><head><meta charset="utf-8"><title>e2e</title></head>\n<body><h1>${HTML_H1_MARK}</h1>\n<script>document.documentElement.dataset.scriptRan='1'</script>\n</body></html>\n`, 'utf8');
   writeFileSync(f('icon.svg'), `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><path d="M8 56 L32 8 L56 56 Z" fill="#e74c3c"/></svg>\n`, 'utf8');
   writeFileSync(f('flow.mmd'), 'graph TD\n  A[开始] --> B[结束]\n', 'utf8');
@@ -337,12 +518,40 @@ async function writeFixtures(wsDir, outsideDir) {
   writeFileSync(f('corrupt.docx'), Buffer.from('not-a-zip-contents'), 'utf8');
   writeFileSync(f('broken.pdf'), 'this is not a pdf', 'utf8');
   writeFileSync(f('big.txt'), 'x'.repeat(70 * 1024), 'utf8');
+  // ── A3/A5 组 fixture（2026-11-06 p6）：全部在沙箱 iframe 内真实执行 ──
+  // A3-1：脚本执行标志（独立 fixture，与 A5-1 用的 page.html 互不污染诊断）。
+  writeFileSync(f('a3-runtime.html'), `<!doctype html>\n<html><head><meta charset="utf-8"><title>a3-runtime</title></head>\n<body><h1>a3-runtime-probe</h1>\n<script>document.documentElement.dataset.scriptRan='1'</script>\n</body></html>\n`, 'utf8');
+  // A3-2：「下拉框→确认→内嵌 iframe」交互链。探针实证（本轮 run 前置诊断）：沙箱 opaque 页内
+  // about:blank / srcdoc / blob 子 iframe 的 contentDocument 一律不可读（null）——Chromium 对
+  // 不授 allow-same-origin 页面的嵌套 iframe 一律跨 origin 隔离（A3-3 正是要钉的语义，宿主侧
+  // 同样读不到主预览 frame）。故「iframe 内容变化」改经消息通道断言：交互把 srcdoc 换成带脚本
+  // 的新文档（沙箱 flags 继承 → allow-scripts 可执行），inner 脚本 parent.postMessage → 父页
+  // 收消息置标志——inner 文档真实加载 + 脚本真实执行 + 与父页真实通信，三重证据。
+  writeFileSync(f('a3-chain.html'), `<!doctype html>\n<html><head><meta charset="utf-8"><title>a3-chain</title></head>\n<body>\n<select id="srcSel"><option value="a">Alpha</option><option value="b">Beta</option></select>\n<button id="goBtn" type="button" onclick="loadInner()">加载</button>\n<iframe id="inner" title="inner"></iframe>\n<div id="status">pending</div>\n<script>\ndocument.documentElement.dataset.scriptRan='1';\nwindow.__innerMsgs = [];\nwindow.addEventListener('message', function (e) {\n  var d = String(e.data);\n  window.__innerMsgs.push(d);\n  document.getElementById('status').textContent = d;\n  document.documentElement.dataset.innerLoaded = d;\n});\nfunction loadInner() {\n  var v = document.getElementById('srcSel').value;\n  document.getElementById('inner').srcdoc = '<scr' + 'ipt>parent.postMessage("loaded:' + v + '", "*")<\\/scr' + 'ipt>';\n}\n</script>\n</body></html>\n`, 'utf8');
+  // A3-3：同源不授予隔离探针页（断言分宿主/frame 两侧，fixture 只需可执行脚本确立前提）。
+  writeFileSync(f('a3-iso.html'), `<!doctype html>\n<html><head><meta charset="utf-8"><title>a3-iso</title></head>\n<body><h1>a3-iso-probe</h1>\n<script>document.documentElement.dataset.scriptRan='1'</script>\n</body></html>\n`, 'utf8');
+  // A3-4a：弹窗禁用探针（300ms 后尝试 alert；阻止生效 → 无 javascriptDialogOpening 事件）。
+  writeFileSync(f('a3-dialog.html'), `<!doctype html>\n<html><head><meta charset="utf-8"><title>a3-dialog</title></head>\n<body><h1>a3-dialog-probe</h1>\n<script>document.documentElement.dataset.scriptRan='1'; setTimeout(function(){ alert('CLAUDELINK_E2E_DIALOG_PROBE'); }, 300);</script>\n</body></html>\n`, 'utf8');
+  // A3-4b：顶层导航禁用探针（300ms 后尝试改 top.location；阻止生效 → 宿主 location 不变）。
+  writeFileSync(f('a3-nav.html'), `<!doctype html>\n<html><head><meta charset="utf-8"><title>a3-nav</title></head>\n<body><h1>a3-nav-probe</h1>\n<script>document.documentElement.dataset.scriptRan='1'; setTimeout(function(){ try { top.location.href = 'about:blank#CLAUDELINK_NAV_ATTEMPT'; } catch (e) {} }, 300);</script>\n</body></html>\n`, 'utf8');
+  // A3-4c：下载禁用探针（300ms 后 click download 锚点；阻止生效 → 受控下载目录保持为空）。
+  writeFileSync(f('a3-dl.html'), `<!doctype html>\n<html><head><meta charset="utf-8"><title>a3-dl</title></head>\n<body><h1>a3-dl-probe</h1>\n<script>document.documentElement.dataset.scriptRan='1'; setTimeout(function(){\n  var a = document.createElement('a');\n  a.href = URL.createObjectURL(new Blob(['dl-probe'], {type: 'text/plain'}));\n  a.download = 'e2e-dl-probe.txt';\n  document.body.appendChild(a); a.click();\n}, 300);</script>\n</body></html>\n`, 'utf8');
+  // A5-2：已设根会话相对路径目标（rel/hello.md，根内相对子目录形态）。
+  mkdirSync(f('rel'), { recursive: true });
+  writeFileSync(f(path.join('rel', 'hello.md')), `# 相对根内文件\n\n${REL_HELLO_MARK}\n`, 'utf8');
   writeFileSync(outsideFile, 'outside-secret', 'utf8');
   return {
     outsideFile,
     hello: f('hello.txt'),
     md: f('report.md'),
     html: f('page.html'),
+    a3Runtime: f('a3-runtime.html'),
+    a3Chain: f('a3-chain.html'),
+    a3Iso: f('a3-iso.html'),
+    a3Dialog: f('a3-dialog.html'),
+    a3Nav: f('a3-nav.html'),
+    a3Dl: f('a3-dl.html'),
+    relHello: f(path.join('rel', 'hello.md')),
     svg: f('icon.svg'),
     mmd: f('flow.mmd'),
     png: f('pic.png'),
@@ -469,12 +678,18 @@ async function main() {
         cdpSend('Runtime.enable', {}, sid).catch((e) => {
           if (childSessions.has(sid)) log(`警告：worker 子会话（${type}）Runtime.enable 失败：${String(e.message).slice(0, 120)}`);
         });
+      } else if (type === 'iframe') {
+        // A3/A5 组：沙箱预览 iframe（OOPIF）子会话——开 Runtime 仅用于 frame 级求值
+        //（其事件不入异常池，见 frameSessions 注）。同 worker：失败仅记录不抛。
+        frameSessions.set(sid, type);
+        cdpSend('Runtime.enable', {}, sid).catch(() => { /* detached 竞态，尽力而为 */ });
       }
       return;
     }
     if (msg.method === 'Target.detachedFromTarget') {
       const sid = msg.params.sessionId;
       childSessions.delete(sid); // 妥善清理：迟到的子会话事件因不在表内被忽略（不误报）
+      frameSessions.delete(sid); // A3/A5：预览 iframe 会话随销毁/换文件移除（迟求值被 pending 拒绝后跳过）
       // 该子会话上的未决调用立即以明确原因拒绝（典型：Runtime.enable 未返回 worker 已销毁）。
       for (const [id, p] of pending) {
         if (p.sessionId === sid) { clearTimeout(p.timer); pending.delete(id); p.reject(new Error('worker 子会话已销毁（detachedFromTarget）')); }
@@ -483,6 +698,21 @@ async function main() {
     }
     // ── 渲染层异常收集：页面会话（无顶层 sessionId）与已跟踪 worker 子会话入同一池；
     //    已分离子会话的迟到事件（sessionId 不在表内）忽略，防止会话关闭竞态误报。 ──
+    // ── A3/A5 组事件采集（frame 上下文 / 弹窗 / 下载）──
+    if (msg.method === 'Runtime.executionContextCreated') {
+      const c = msg.params.context;
+      if (c) frameContexts.set(c.id, c);
+    } else if (msg.method === 'Runtime.executionContextDestroyed') {
+      frameContexts.delete(msg.params.executionContextId); // 防随 iframe 销毁/重载积累 stale 上下文
+    } else if (msg.method === 'Runtime.executionContextsCleared') {
+      frameContexts.clear();
+    } else if (msg.method === 'Page.javascriptDialogOpening') {
+      // A3-4a 判据池 + 自保护：沙箱坏情形下真 dialog 会挂死 frame——立即 dismiss 防挂死。
+      dialogEvents.push({ case: currentCase, message: msg.params.message || '' });
+      cdpSend('Page.handleJavaScriptDialog', { accept: false }).catch(() => { /* 尽力而为 */ });
+    } else if (msg.method === 'Browser.downloadWillBegin') {
+      downloadEvents.push({ case: currentCase, suggestedFilename: msg.params.suggestedFilename || '' });
+    }
     if (msg.method === 'Runtime.exceptionThrown') {
       if (msg.sessionId && !childSessions.has(msg.sessionId)) return;
       const tag = msg.sessionId ? `[worker:${childSessions.get(msg.sessionId)}] ` : '';
@@ -495,6 +725,25 @@ async function main() {
   });
   await cdpSend('Runtime.enable');
   await cdpSend('Page.enable');
+  // A3-4c 受控下载观测面：behavior=allow + downloadPath 指进隔离目录（与 profile 一并删除，
+  // 绝不写用户真实 Downloads）；eventsEnabled 让 downloadWillBegin 进 downloadEvents 池。
+  // 若 eventsEnabled 参数不被当前 CDP 版本接受，退化重试纯 allow（fs 观测判据保留）；设置
+  // 彻底失败不吞——A3-4c 用例内显式失败（观测面缺失即该用例不可判，不静默弱判）。
+  const downloadsDir = path.join(isoDir, 'downloads');
+  mkdirSync(downloadsDir, { recursive: true });
+  let downloadBehaviorOk = false;
+  try {
+    await cdpSend('Browser.setDownloadBehavior', { behavior: 'allow', eventsEnabled: true, downloadPath: downloadsDir });
+    downloadBehaviorOk = true;
+  } catch {
+    try {
+      await cdpSend('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloadsDir });
+      downloadBehaviorOk = true;
+      log('Browser.setDownloadBehavior：eventsEnabled 不支持，退化为纯 fs 观测（A3-4c 判据主体不变）');
+    } catch (e2) {
+      log(`警告：Browser.setDownloadBehavior 不可用（${String(e2.message).slice(0, 120)}）——A3-4c 将如实失败`);
+    }
+  }
   // p11（P3-G）：在页面会话上开 autoAttach——页面派生的 worker（pdfjs 解析 worker 等）
   // 一创建即自动附加（flatten：子会话消息复用本条 WS，靠顶层 sessionId 路由）；
   // waitForDebuggerOnStart=false 保证 worker 照常启动、不因附加被挂起。
@@ -582,8 +831,16 @@ async function main() {
     await closeDrawer();
   });
 
-  // ── html：默认 web → iframe[sandbox=""]（B9：属性值为空串 + load 事件运行时触发）；切 code → 源码 ──
-  await check('html：page.html 默认 web → iframe[sandbox=""]（B9：属性值空串 + load 事件触发）', async () => {
+  // ── html：默认 web → iframe[sandbox="allow-scripts allow-forms"]（B9·A3：隔离沙箱运行脚本/表单、
+  //    不授 allow-same-origin，token 集运行时断言 + load 事件触发）；切 code → 源码 ──
+  await check('html：page.html 默认 web → iframe sandbox token 集 {allow-scripts, allow-forms}（B9·A3：隔离沙箱允许脚本/表单、不授同源 + load 事件触发）', async () => {
+    // token 集比较：按空白 split 后与期望集合相等（顺序无关、不多不少），null/缺失属性同样判负。
+    const expectSandboxTokens = (actual, label) => {
+      const toks = String(actual ?? '').split(/\s+/).filter(Boolean);
+      const want = ['allow-scripts', 'allow-forms'];
+      const ok = toks.length === want.length && want.every((t) => toks.includes(t));
+      if (!ok) throw new Error(`${label} sandbox token 集不符：${JSON.stringify(actual)}（期望 allow-scripts + allow-forms，不得含 allow-same-origin，B9·A3）`);
+    };
     await openPreview(F.html);
     const probe = await waitFor('sandbox iframe 出现', `(() => {
       const fr = document.querySelector('.fpreview-drawer.open iframe.fpreview-frame');
@@ -591,11 +848,11 @@ async function main() {
       return JSON.stringify({ sandbox: fr.getAttribute('sandbox'), src: (fr.getAttribute('src') || '').slice(0, 12) });
     })()`, OPEN_TIMEOUT_MS);
     const v = JSON.parse(String(probe));
-    if (v.sandbox !== '') throw new Error(`sandbox 属性值非空串：${JSON.stringify(v.sandbox)}（B9）`);
+    expectSandboxTokens(v.sandbox, 'iframe 属性');
     if (!v.src.startsWith('blob:')) throw new Error(`iframe src 非 blob:：${v.src}`);
-    // B9 运行时断言（D-F6）：sandbox="" 为 opaque origin，父页面读不到 contentDocument，
-    // load 事件是父页面侧唯一合法观测面。首载可能在挂监听前已完成，故用经典 iframe.src
-    // 重赋法重放一次可观测的 load（armed 前的既有 load 不误计）。
+    // B9 运行时断言（D-F6）：不授 allow-same-origin 仍为 opaque origin，父页面读不到
+    // contentDocument，load 事件是父页面侧唯一合法观测面。首载可能在挂监听前已完成，
+    // 故用经典 iframe.src 重赋法重放一次可观测的 load（armed 前的既有 load 不误计）。
     const loadProbe = await evalExpr(`(() => new Promise((resolve) => {
       const fr = document.querySelector('.fpreview-drawer.open iframe.fpreview-frame');
       if (!fr) { resolve(JSON.stringify({ fired: false, why: 'no-frame', sandbox: null })); return; }
@@ -606,7 +863,7 @@ async function main() {
       setTimeout(() => finish('timeout'), 5000);
     }))()`);
     const lv = JSON.parse(String(loadProbe));
-    if (lv.sandbox !== '') throw new Error(`load 时 sandbox 属性非空串：${JSON.stringify(lv.sandbox)}（B9）`);
+    expectSandboxTokens(lv.sandbox, 'load 时 iframe 属性');
     if (lv.fired !== true) throw new Error(`iframe load 事件未触发：${lv.why}（B9 运行时断言）`);
   });
   await check('html：setMode(code) → 源码视图（html H1 测试词在源码中）', async () => {
@@ -876,6 +1133,281 @@ async function main() {
     })()`, OPEN_TIMEOUT_MS);
     const path0 = await evalExpr(storeExpr(`return st.path;`));
     if (!path0.endsWith('hello.txt')) throw new Error(`终态 path=${path0}`);
+  });
+
+  // ══ A3/A4/A5 运行时用例组（2026-11-06 文件 linkify 计划 p6：docs/plans/2026-11-06-file-linkify-entry-plan.md §4 A3-A5 / §5）══
+  // A3 组经 store openPreview 开抽屉后做 frame 级运行时断言（沙箱 iframe opaque origin，宿主 JS
+  // 读不到 frame 内部——这正是 A3-3 要钉的隔离性——故经 CDP 执行上下文进入，见 evalInPreviewFrame 注）。
+  // A4/A5 组操作一律「pinia 注入消息 → 气泡真实点击」完整用户路径（ensureChatSurface/injectAssistantMd/
+  // clickFileLinkReal，session store 取法同 cdp-web-access-e2e.mjs:411/650 先例）。
+
+  // ── A3-1 预览页脚本真实执行（frame 级运行时断言；p5 已把 B9 钉改为 token 集断言，此处补
+  //    「脚本真的跑了」的运行时证据）──
+  await check('A3-1 a3-runtime.html → 沙箱 iframe 内脚本真实执行（frame 级 dataset.scriptRan）', async () => {
+    await openPreview(F.a3Runtime);
+    await waitFor('sandbox iframe 出现', `!!document.querySelector('.fpreview-drawer.open iframe.fpreview-frame')`, OPEN_TIMEOUT_MS);
+    const ran = await waitForFrame('frame 内脚本执行标志', `document.documentElement.dataset.scriptRan`);
+    if (ran !== '1') throw new Error(`frame 内 scriptRan=${JSON.stringify(ran)}（脚本未真实执行？）`);
+    await closeDrawer();
+  });
+
+  // ── A3-2 「下拉框→确认→内嵌 iframe」交互链真实工作 ──
+  await check('A3-2 a3-chain.html → 下拉框选 b + 点击「加载」→ 内嵌 iframe 内容真实变化', async () => {
+    await openPreview(F.a3Chain);
+    await waitFor('sandbox iframe 出现', `!!document.querySelector('.fpreview-drawer.open iframe.fpreview-frame')`, OPEN_TIMEOUT_MS);
+    const ran = await waitForFrame('frame 内脚本执行（交互前提）', `document.documentElement.dataset.scriptRan`);
+    if (ran !== '1') throw new Error(`frame 内 scriptRan=${JSON.stringify(ran)}`);
+    // 真实驱动交互：select 置 b + 派发 change + 点击「加载」按钮（作用于 frame 真实 DOM）。
+    await evalInPreviewFrame(`(() => {
+      const sel = document.getElementById('srcSel');
+      sel.value = 'b';
+      sel.dispatchEvent(new Event('change'));
+      document.getElementById('goBtn').click();
+      return true;
+    })()`);
+    const loaded = await waitForFrame('交互完成（dataset.innerLoaded）', `document.documentElement.dataset.innerLoaded`);
+    if (loaded !== 'loaded:b') throw new Error(`交互后 innerLoaded=${JSON.stringify(loaded)}（期望 'loaded:b'）`);
+    // 三断言：父页收到 inner 文档的消息（内容变化证据）+ 状态文本更新 + inner iframe 确实换上了
+    // 带 loaded 值的 srcdoc。contentDocument 直读在沙箱内不可行（探针实证一律 null，见 fixture 注）。
+    const probe = await evalInPreviewFrame(`(() => {
+      const status = document.getElementById('status');
+      const inner = document.getElementById('inner');
+      return JSON.stringify({
+        msgs: window.__innerMsgs || [],
+        status: status ? status.textContent : null,
+        srcdocHas: /loaded:b/.test(String(inner.getAttribute('srcdoc') || '')),
+      });
+    })()`);
+    const v = JSON.parse(String(probe));
+    if (!Array.isArray(v.msgs) || !v.msgs.includes('loaded:b')) throw new Error(`内嵌 iframe postMessage 未到达：${JSON.stringify(v.msgs)}（交互链未真实工作）`);
+    if (v.status !== 'loaded:b') throw new Error(`status=${JSON.stringify(v.status)}`);
+    if (v.srcdocHas !== true) throw new Error('inner iframe srcdoc 未按交互更新');
+    await closeDrawer();
+  });
+
+  // ── A3-3 同源不授予：宿主/frame 两侧隔离证据 ──
+  await check('A3-3 a3-iso.html → 同源不授予：宿主读 frame 被拒 + frame 访问 parent 失败 + cookie 不可读', async () => {
+    await openPreview(F.a3Iso);
+    await waitFor('sandbox iframe 出现', `!!document.querySelector('.fpreview-drawer.open iframe.fpreview-frame')`, OPEN_TIMEOUT_MS);
+    await waitForFrame('frame 内脚本执行（断言前提）', `document.documentElement.dataset.scriptRan`);
+    // 宿主侧：contentDocument 为 null（规范：跨 origin 访问返回 null 而非抛异常——这里按规范
+    // 语义断「拒绝」；contentWindow.location.href 访问则真实抛 SecurityError，作为 try/catch 异常证据）。
+    const host = await evalExpr(`(() => {
+      const fr = document.querySelector('.fpreview-drawer.open iframe.fpreview-frame');
+      if (!fr) return JSON.stringify({ ok: false, docNull: null, loc: null });
+      let loc = null;
+      try { loc = 'READABLE:' + String(fr.contentWindow.location.href); } catch (e) { loc = 'DENIED:' + (e.name || 'Error'); }
+      return JSON.stringify({ ok: true, docNull: fr.contentDocument === null, loc });
+    })()`);
+    const hv = JSON.parse(String(host));
+    if (!hv.ok) throw new Error('宿主侧未找到 sandbox iframe');
+    if (hv.docNull !== true) throw new Error(`宿主可读 fr.contentDocument（${JSON.stringify(hv.docNull)}）——同源未被拒绝`);
+    if (!String(hv.loc).startsWith('DENIED:')) throw new Error(`宿主可读 contentWindow.location：${hv.loc}`);
+    // frame 侧（主世界求值，安全语义保真——isolated world 的包装不可替代）：parent document
+    // 访问被拒 + cookie 不可读。cookie 判据按浏览器实现两形态放行：抛 SecurityError（DENIED:）
+    // 或空串（opaque origin 读不到任何 cookie）——两者都意味着「不可读」。
+    const fr = await evalInPreviewFrameMain(`(() => {
+      const out = { parent: null, cookie: null };
+      try { window.parent.document && window.parent.document.body && window.parent.document.body.childElementCount; out.parent = 'READABLE'; }
+      catch (e) { out.parent = 'DENIED:' + (e.name || 'Error'); }
+      try { out.cookie = 'READABLE:' + JSON.stringify(String(window.document.cookie)); } catch (e) { out.cookie = 'DENIED:' + (e.name || 'Error'); }
+      return JSON.stringify(out);
+    })()`);
+    const fv = JSON.parse(String(fr));
+    if (!String(fv.parent).startsWith('DENIED:')) throw new Error(`预览页可访问 parent.document：${fv.parent}`);
+    const cookieDenied = String(fv.cookie).startsWith('DENIED:') || fv.cookie === 'READABLE:""';
+    if (!cookieDenied) throw new Error(`预览页可读 document.cookie：${fv.cookie}`);
+    await closeDrawer();
+  });
+
+  // ── round-002 fix-4（F6）：A3-4 组开跑前对异常/console 两池各拍一次长度基线快照 ──
+  //    A3-4a/b/c 三处 exemptExpectedSandboxConsole 调用共享本快照（同组开跑、三调用之间
+  //    无其他入池源差异，同基线判据一致、申报口径统一）；快照前旧条目（含更早用例偶发
+  //    积累与 worker 自证窗口内的真实异常）永不豁免。
+  const A34_POOL_BASELINE = { exceptions: exceptions.length, consoleErrors: consoleErrors.length };
+  log(`A3-4 组豁免基线快照：exceptions=${A34_POOL_BASELINE.exceptions} / consoleErrors=${A34_POOL_BASELINE.consoleErrors}（仅豁免快照后新增匹配条目）`);
+
+  // ── A3-4a 弹窗禁用（CDP javascriptDialogOpening 不触发）──
+  await check('A3-4a a3-dialog.html → 脚本执行前提下无 javascriptDialogOpening（弹窗禁用）', async () => {
+    await openPreview(F.a3Dialog);
+    await waitFor('sandbox iframe 出现', `!!document.querySelector('.fpreview-drawer.open iframe.fpreview-frame')`, OPEN_TIMEOUT_MS);
+    const ran = await waitForFrame('frame 内脚本执行（alert 尝试前提）', `document.documentElement.dataset.scriptRan`);
+    if (ran !== '1') throw new Error(`frame 内 scriptRan=${JSON.stringify(ran)}`);
+    await sleep(2500); // alert 尝试在脚本加载后 300ms，2.5s 窗口足够 CDP 事件到达
+    if (dialogEvents.length > 0) {
+      throw new Error(`弹窗未被禁用：javascriptDialogOpening ${dialogEvents.length} 条（${dialogEvents.map((d) => d.message).join(' | ').slice(0, 160)}）`);
+    }
+    exemptExpectedSandboxConsole('Ignored call to', A34_POOL_BASELINE);
+    await closeDrawer();
+  });
+
+  // ── A3-4b 顶层导航禁用 ──
+  await check('A3-4b a3-nav.html → 顶层导航尝试被禁（宿主 location/抽屉/iframe 均不变）', async () => {
+    await openPreview(F.a3Nav);
+    await waitFor('sandbox iframe 出现', `!!document.querySelector('.fpreview-drawer.open iframe.fpreview-frame')`, OPEN_TIMEOUT_MS);
+    const ran = await waitForFrame('frame 内脚本执行（导航尝试前提）', `document.documentElement.dataset.scriptRan`);
+    if (ran !== '1') throw new Error(`frame 内 scriptRan=${JSON.stringify(ran)}`);
+    await sleep(2500); // 导航尝试在脚本加载后 300ms
+    const probe = await evalExpr(`(() => JSON.stringify({
+      loc: location.href,
+      drawerOpen: !!document.querySelector('.fpreview-drawer.open'),
+      frameSrc: (document.querySelector('.fpreview-drawer.open iframe.fpreview-frame')?.getAttribute('src') || '').slice(0, 5),
+    }))()`);
+    const v = JSON.parse(String(probe));
+    if (!/index\.html/i.test(v.loc)) throw new Error(`宿主被导航离开：${v.loc}（顶层导航未被禁）`);
+    if (v.drawerOpen !== true) throw new Error('抽屉消失（宿主页面被导航重载？）');
+    if (!v.frameSrc.startsWith('blob:')) throw new Error(`iframe src 异常：${JSON.stringify(v.frameSrc)}`);
+    exemptExpectedSandboxConsole('Blocked frame navigation', A34_POOL_BASELINE);
+    await closeDrawer().catch(() => { /* 沙箱坏情形下抽屉可能已随导航消失，此处不追加报错 */ });
+  });
+
+  // ── A3-4c 下载禁用 ──
+  await check('A3-4c a3-dl.html → 下载尝试被禁（受控下载目录空 + 无 downloadWillBegin）', async () => {
+    if (!downloadBehaviorOk) throw new Error('Browser.setDownloadBehavior 不可用——下载观测面缺失，本用例不可判（如实失败）');
+    await openPreview(F.a3Dl);
+    await waitFor('sandbox iframe 出现', `!!document.querySelector('.fpreview-drawer.open iframe.fpreview-frame')`, OPEN_TIMEOUT_MS);
+    const ran = await waitForFrame('frame 内脚本执行（下载尝试前提）', `document.documentElement.dataset.scriptRan`);
+    if (ran !== '1') throw new Error(`frame 内 scriptRan=${JSON.stringify(ran)}`);
+    await sleep(2500); // 下载尝试在脚本加载后 300ms
+    if (downloadEvents.length > 0) {
+      throw new Error(`下载未被禁用：downloadWillBegin ${downloadEvents.length} 条（${downloadEvents.map((d) => d.suggestedFilename).join(' | ')}）`);
+    }
+    const leaked = fs.readdirSync(downloadsDir).filter((n) => !n.startsWith('.'));
+    if (leaked.length > 0) throw new Error(`受控下载目录出现文件（下载未被禁）：${leaked.join(', ')}`);
+    exemptExpectedSandboxConsole('Download is disallowed', A34_POOL_BASELINE);
+    await closeDrawer();
+  });
+
+  // ── A4 组（4 条；此时 transient 会话 workingDir=null → fileLinkWorkspaceRoot=null，未设根形态）──
+  await ensureChatSurface();
+
+  // ── A4-1 点击不存在文件 → 明确错误反馈非静默 ──
+  // round-002 fix-4（F7）：fixture 去 X: 盘依赖——改用隔离目录内「先建后删」的确定不存在路径
+  // （<isoDir>\deleted\missing.html：创建 → 立即删除 → 注入反引号消息）。渲染形态已小探针验证
+  //（resolveCodeInlinePath 对盘符绝对路径原文态走 S5d → data-clip-path 恒为原样反斜杠形态，
+  // 与旧 X: 形态同分支；mkdtemp 后缀仅字母数字无空格，无转义歧义）。主进程 stat 早于 workspace
+  // 边界检查，stat ENOENT → kind:'missing'（src/main/modules/fs-preview.ts:157）→ 抽屉
+  // 「文件不存在」——与原 X: 盘形态同一错误语义，不再假设机器盘符布局（原形态在恰有 X: 盘
+  // 且路径存在的机器会假失败，失败方向无假绿风险，本轮按指令消除该环境假设）。
+  await check('A4-1 点击不存在绝对路径链接（隔离目录 deleted/missing.html 先建后删）→ 抽屉错误卡「文件不存在」', async () => {
+    const deletedPath = path.join(isoDir, 'deleted', 'missing.html');
+    mkdirSync(path.join(isoDir, 'deleted'), { recursive: true });
+    writeFileSync(deletedPath, 'A4-1 fixture: created then deleted', 'utf8');
+    rmSync(deletedPath, { force: true });
+    await injectAssistantMd('A4-1', `已创建 \`${deletedPath}\`，请查看。`);
+    await clickFileLinkReal(deletedPath);
+    await waitFor('.fpreview-empty 出现「文件不存在」', `(() => {
+      const e = document.querySelector('.fpreview-empty');
+      return !!e && (e.textContent || '').includes('文件不存在');
+    })()`, OPEN_TIMEOUT_MS);
+    await closeDrawer();
+  });
+
+  // ── A4-2 越界路径（会话根外）→ 「路径不在工作区内」 ──
+  await check('A4-2 点击工作区外存在文件链接 → 抽屉错误卡「路径不在工作区内」', async () => {
+    const href = F.outsideFile.replaceAll('\\', '/'); // markdown link 形态用正斜杠（CommonMark 无转义歧义）
+    await injectAssistantMd('A4-2', `秘密文件 [secret](<${href}>) 在外面。`);
+    await clickFileLinkReal(F.outsideFile);
+    await waitFor('.fpreview-empty 出现「路径不在工作区内」', `(() => {
+      const e = document.querySelector('.fpreview-empty');
+      return !!e && (e.textContent || '').includes('路径不在工作区内');
+    })()`, OPEN_TIMEOUT_MS);
+    await closeDrawer();
+  });
+
+  // ── A4-3 未设根会话点击相对 markdown 链接 → 死链形态 + 「未设置工作区根」错误卡 ──
+  await check('A4-3 未设根会话点击相对 markdown 链接 → 死链形态渲染 + 「未设置工作区根」错误卡', async () => {
+    await injectAssistantMd('A4-3', `配置手册见 [手册](rel/guide.md)。`);
+    // 死链形态：class 含 md-file-link--dead + data-clip-path 存原始相对路径 + href=javascript:void(0)。
+    const link = await waitForFileLink('rel/guide.md', 'A4-3 死链形态渲染');
+    const v = JSON.parse(String(link));
+    if (!String(v.cls).includes('md-file-link--dead')) throw new Error(`死链 class 缺失：${v.cls}`);
+    if (v.href !== 'javascript:void(0)') throw new Error(`死链 href 异常：${v.href}`);
+    await clickFileLinkReal('rel/guide.md');
+    await waitFor('.fpreview-empty 出现「未设置工作区根」错误文案', `(() => {
+      const e = document.querySelector('.fpreview-empty');
+      return !!e && (e.textContent || '').includes('当前会话未设置工作区根');
+    })()`, OPEN_TIMEOUT_MS);
+    await closeDrawer();
+  });
+
+  // ── A4-4 目录路径 → 明确反馈 ──
+  await check('A4-4 点击目录路径链接 → 抽屉错误卡「目录不支持预览」（明确反馈非静默）', async () => {
+    const href = wsDir.replaceAll('\\', '/');
+    await injectAssistantMd('A4-4', `输出目录 [ws](<${href}>) 已生成。`);
+    await clickFileLinkReal(wsDir);
+    await waitFor('.fpreview-empty 出现「目录不支持预览」', `(() => {
+      const e = document.querySelector('.fpreview-empty');
+      return !!e && (e.textContent || '').includes('目录不支持预览');
+    })()`, OPEN_TIMEOUT_MS);
+    await closeDrawer();
+  });
+
+  // ── A5-1 真实形态全链：反引号绝对路径消息 → 链接渲染 → 真实点击 → 抽屉 → 脚本执行标志（三断言一体）──
+  await check('A5-1 真实形态全链：注入「已创建 `page.html 绝对路径`」→ 链接渲染 → 点击开抽屉 → frame 级脚本执行标志', async () => {
+    await injectAssistantMd('A5-1', `已创建 \`${F.html}\`，可直接预览。`);
+    // 断言①：正文渲染出可点链接（与 link_open 按钮化同形：.md-file-link + data-clip-path + void(0)）。
+    const link = await waitForFileLink(F.html, 'A5-1 断言① 链接渲染');
+    const v = JSON.parse(String(link));
+    if (!String(v.cls).includes('md-file-link')) throw new Error(`链接 class 异常：${v.cls}`);
+    if (v.href !== 'javascript:void(0)') throw new Error(`href 异常：${v.href}`);
+    // 断言②③：真实点击 → 抽屉打开 → frame 级脚本执行标志可见。
+    await clickFileLinkReal(F.html);
+    await waitFor('A5-1 断言② 抽屉内 iframe 就位', `!!document.querySelector('.fpreview-drawer.open iframe.fpreview-frame')`, OPEN_TIMEOUT_MS);
+    const ran = await waitForFrame('A5-1 断言③ 脚本执行标志', `document.documentElement.dataset.scriptRan`);
+    if (ran !== '1') throw new Error(`frame 内 scriptRan=${JSON.stringify(ran)}`);
+    await closeDrawer();
+  });
+
+  // ── A5-2 已设根会话相对路径真实打开 ──
+  await check('A5-2 已设根会话：相对路径反引号消息 → 链接渲染（解析为绝对）→ 点击真实打开', async () => {
+    // 直设 activeSession.workingDir（cdp-web-access-e2e.mjs:412/650 兜底先例形态）；ChatPage 对
+    // workingDir 的 watch（pinia reactive 属性变更可观测）随之触发 setFileLinkWorkspaceRoot。
+    const set = await evalExpr(`(() => { const st = ${SESSION_GET}; if (!st.activeSession) return false; st.activeSession.workingDir = ${JSON.stringify(wsDir)}; return true; })()`);
+    if (set !== true) throw new Error('无活动会话，无法设工作区根');
+    await sleep(400); // watch flush（pre 模式微任务级，400ms 宽裕）
+    const relJoined = wsDir.replace(/[\\/]+$/, '') + '\\rel\\hello.md';
+    await injectAssistantMd('A5-2', `请看 \`rel/hello.md\`。`);
+    const link = await waitForFileLink(relJoined, 'A5-2 相对路径链接渲染（已解析为绝对）');
+    const v = JSON.parse(String(link));
+    if (!String(v.cls).includes('md-file-link')) throw new Error(`链接 class 异常（未设根时此处应保持 <code> 不可点）：${v.cls}`);
+    await clickFileLinkReal(relJoined);
+    await waitFor('A5-2 抽屉渲染出 md 内容', `(() => {
+      const b = document.querySelector('.fpreview-drawer.open .markdown-body');
+      return !!b && (b.textContent || '').includes(${JSON.stringify(REL_HELLO_MARK)});
+    })()`, OPEN_TIMEOUT_MS);
+    const path0 = await evalExpr(storeExpr(`return st.path;`));
+    if (path0 !== relJoined) throw new Error(`终态 path=${path0}（期望 ${relJoined}）`);
+    await closeDrawer();
+  });
+
+  // ── A5-3 连点两个文件链接，终态抽屉内容与最后点击一致（最终一致判定，不假设点击时序）──
+  await check('A5-3 连点两个文件链接（背靠背真实点击）→ 终态抽屉内容与最后点击一致', async () => {
+    await injectAssistantMd('A5-3', `对比 \`${F.hello}\` 与 \`${F.bigTxt}\`。`);
+    await waitForFileLink(F.bigTxt, 'A5-3 两个链接渲染（以后者出现为全渲染标志）');
+    // 背靠背连点（同一 eval 内两次原生 click，间隔 < 1ms，模拟连点竞态——B8 store 层先例的
+    // 真实点击路径版）；终态按「最终一致」判定：path 与内容均落最后点击的 big.txt。
+    const clicks = await evalExpr(`(() => {
+      const want = [${JSON.stringify(F.hello)}, ${JSON.stringify(F.bigTxt)}];
+      let n = 0;
+      for (const p of want) {
+        const el = [...document.querySelectorAll('.bubble__content .md-file-link')].find((a) => a.getAttribute('data-clip-path') === p);
+        if (el) { el.click(); n++; }
+      }
+      return n;
+    })()`);
+    if (clicks !== 2) throw new Error(`有效连点次数 ${clicks} ≠ 2`);
+    await waitFor('A5-3 终态源码视图渲染', `!!document.querySelector('.fpreview-drawer.open .fpreview-src')`, OPEN_TIMEOUT_MS);
+    const path0 = await evalExpr(storeExpr(`return st.path;`));
+    if (!String(path0).endsWith('big.txt')) throw new Error(`终态 path=${path0}（期望最后点击的 big.txt）`);
+    const stale = await evalExpr(`(() => JSON.stringify({
+      empty: !!document.querySelector('.fpreview-drawer.open .fpreview-empty'),
+      len: (document.querySelector('.fpreview-drawer.open .fpreview-src')?.textContent || '').length,
+    }))()`);
+    const sv = JSON.parse(String(stale));
+    if (sv.empty) throw new Error('终态出现错误卡（连点竞态污染）');
+    if (sv.len !== 70 * 1024) throw new Error(`终态内容长度 ${sv.len} ≠ ${70 * 1024}（非最后点击的 big.txt）`);
+    await closeDrawer();
   });
 
   // ── 渲染层异常终审（exceptionThrown / console error 即 FAIL，对齐仓库先例）──
