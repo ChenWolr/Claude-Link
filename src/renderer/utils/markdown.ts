@@ -5,7 +5,7 @@ import { html as diff2htmlHtml } from 'diff2html';
 import taskLists from 'markdown-it-task-lists';
 import markdownItKatex from '@traptitech/markdown-it-katex';
 import { isAllowedMarkdownImageUrl } from '../../shared/external-links';
-import { resolveFileLinkHref } from './file-link';
+import { resolveFileLinkHref, resolveCodeInlinePath, isPathLikeRelativeHref } from './file-link';
 
 export type MarkdownProfile = 'rich' | 'static' | 'export';
 
@@ -134,9 +134,10 @@ md.renderer.rules.code_block = (tokens, idx) => {
   return wrapCodeBlock(escapeHtml(code), 'plaintext', code);
 };
 
-// 判断当前 image token 是否位于 link_open/link_close 之间：反向扫描同段 inline children，depth 计数
-// 处理「同段已闭合链接后的图片」与嵌套链接。
-function isImageInsideLink(tokens: Token[], idx: number): boolean {
+// 判断当前 inline token（image / code_inline）是否位于 link_open/link_close 之间：反向扫描同段
+// inline children，depth 计数处理「同段已闭合链接后的元素」与嵌套链接。image 的 md-img 判定与
+// code_inline 的 A2 反引号路径链接化共用本助手——链接内跳过链接化，防 <a> 嵌套 <a>。
+function inLinkContext(tokens: Token[], idx: number): boolean {
   let depth = 0;
   for (let i = idx - 1; i >= 0; i--) {
     const t = tokens[i];
@@ -170,7 +171,7 @@ md.renderer.rules.image = (tokens, idx, options, env, self) => {
   const profile = (env as MarkdownEnv | undefined)?.profile ?? 'rich';
   // 链接内图片不加 md-img：避免 <a> 内嵌按钮化（role=button）+ 点击 preventDefault 劫持链接导航。
   // export profile 不加 md-img（导出窗口无灯箱），并 eager 加载保证捕获前就绪。
-  if (profile === 'rich' && !isImageInsideLink(tokens, idx)) token.attrSet('class', 'md-img');
+  if (profile === 'rich' && !inLinkContext(tokens, idx)) token.attrSet('class', 'md-img');
   token.attrSet('loading', profile === 'export' ? 'eager' : 'lazy');
   return defaultImageRule
     ? defaultImageRule(tokens, idx, options, env, self)
@@ -187,6 +188,10 @@ let fileLinkWorkspaceRoot: string | null = null;
 export function setFileLinkWorkspaceRoot(root: string | null | undefined): void {
   fileLinkWorkspaceRoot = root ?? null;
 }
+// 只读 getter（round-002 fix-3 F5）：供抽屉预检按根状态分述相对路径错误文案（零行为变更）。
+export function getFileLinkWorkspaceRoot(): string | null {
+  return fileLinkWorkspaceRoot;
+}
 
 // 必须在 applyExternalLinkTarget(md)（顶部已调用，target=_blank 逻辑已挂上）与既有 image rule
 // 定制之后捕获 link_open：fileLinkBaseRule 已含外链 target 逻辑。未命中文件链接时透传基础规则
@@ -196,6 +201,27 @@ md.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
   const href = tokens[idx].attrGet('href') ?? '';
   const resolved = resolveFileLinkHref(href, fileLinkWorkspaceRoot);
   if (!resolved) {
+    // A4（2026-11-06 file linkify 计划）：唯一静默死链 = 「相对路径 + 未设工作区根」——
+    // resolveFileLinkHref 相对分支因无根返回 null，基线 <a> 保留相对 href、点击被导航守卫
+    // 静默吞。此处改判死链形态：class md-file-link--dead + data-clip-path 存解码去尾 #?
+    // 片段的原始相对路径 + href 置 javascript:void(0)，点击经既有委托（closest('.md-file-link')
+    // 读 data-clip-path）开抽屉出「未设置工作区根」错误卡，不再静默。root 存在但解析失败
+    // （含 '..'/非法 scheme——isPathLikeRelativeHref 拒绝）保持基线 <a> 原样；解码失败
+    //（如 %E4%B8 不完整 UTF-8 转义）同样回退基线，不进死链通道。attrSet 值由 renderToken
+    // →renderAttrs 统一 escapeHtml（同下方 fix-2 F2 注），此处不重复包 escapeAttribute。
+    // 编码态 '..'（如 %2e%2e）按词面相对形态进死链通道、clip 解码还原——设计决定：可见反馈优先于通道字面分类（2026-11-06 审查裁定），真实 '..' 词面仍被 isPathLikeRelativeHref 拒绝。
+    if (!fileLinkWorkspaceRoot?.trim() && isPathLikeRelativeHref(href)) {
+      try {
+        const clip = decodeURIComponent(href.trim()).replace(/[#?].*$/, '');
+        if (clip) {
+          tokens[idx].attrSet('class', 'md-file-link md-file-link--dead');
+          tokens[idx].attrSet('data-clip-path', clip);
+          tokens[idx].attrSet('href', 'javascript:void(0)');
+        }
+      } catch {
+        // 解码失败：保持基线 <a>（与本分支改造前的回退输出逐字节一致）。
+      }
+    }
     return fileLinkBaseRule
       ? fileLinkBaseRule(tokens, idx, options, env, renderer)
       : renderer.renderToken(tokens, idx, options);
@@ -209,6 +235,28 @@ md.renderer.rules.link_open = (tokens, idx, options, env, renderer) => {
   return fileLinkBaseRule
     ? fileLinkBaseRule(tokens, idx, options, env, renderer)
     : renderer.renderToken(tokens, idx, options);
+};
+
+// A2（2026-11-06 文件点击打开链路计划）：反引号 code_inline 内的路径形态 → 文件链接，与
+// link_open 按钮化完全同形（class="md-file-link" + data-clip-path + href=javascript:void(0)），
+// 6 处既有点击委托组件零改动自动接入；可见文本保留路径原文且 <code> 包裹保留。命中判定见
+// file-link.ts resolveCodeInlinePath（内容是模型原文态，skip 百分号解码）。链接内 code_inline
+// 跳过（inLinkContext 与 image 共用同段反向扫描）防 <a> 嵌套；未命中回退基线规则（捕获于覆盖
+// 之前，未命中路径输出与改造前逐字节一致）。fence/code_block/缩进代码块不走 inline renderer
+// 天然不链接化；流式未闭合反引号整段落为 text token 同样安全；export profile 与 rich 同一
+// 覆盖同形输出（无分叉）。
+const codeInlineBaseRule = md.renderer.rules.code_inline;
+md.renderer.rules.code_inline = (tokens, idx, options, env, renderer) => {
+  const content = tokens[idx].content;
+  const resolved = inLinkContext(tokens, idx)
+    ? null
+    : resolveCodeInlinePath(content, fileLinkWorkspaceRoot);
+  if (!resolved) {
+    return codeInlineBaseRule
+      ? codeInlineBaseRule(tokens, idx, options, env, renderer)
+      : `<code>${escapeHtml(content)}</code>`;
+  }
+  return `<a class="md-file-link" href="javascript:void(0)" data-clip-path="${escapeAttribute(resolved.path)}"><code>${escapeHtml(content)}</code></a>`;
 };
 
 export function applyExternalLinkTarget(instance: MarkdownIt): void {

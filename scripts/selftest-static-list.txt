@@ -261,3 +261,4 @@ scripts/tdd-subagent-verify.ts
 scripts/tdd-file-preview-verify.ts
 scripts/tdd-wizard-step-jump-verify.ts
 scripts/tdd-turn-diff-quality-verify.ts
+scripts/tdd-code-inline-fileref-verify.ts

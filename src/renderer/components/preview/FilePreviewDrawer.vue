@@ -13,7 +13,8 @@ import { useFilePreview } from '../../composables/useFilePreview';
 import { extOfPath, previewFormatInfo, base64ToUint8Array, type PreviewMode } from '../../utils/preview-format';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 import { copyTextToClipboard } from '../../utils/clipboard';
-import { renderMarkdown } from '../../utils/markdown';
+import { renderMarkdown, getFileLinkWorkspaceRoot } from '../../utils/markdown';
+import { isAbsolutePathForm } from '../../utils/file-link';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
 import PdfPreview from './PdfPreview.vue';
 import DocxPreview from './DocxPreview.vue';
@@ -41,6 +42,26 @@ async function load(): Promise<void> {
   categoryRef.value = null;
   // 换文件：旧文件的 text→blob 缓存随内容失效（键不含文件身份），立即 revoke 防泄漏。
   clearTextBlobCache();
+  // A4 预检（2026-11-06 file linkify 计划）：入参路径非盘符/UNC/POSIX 根形态（即相对路径）→
+  // 本地合成错误卡不发 IPC——主进程无法独立定位相对路径，读取必然错误。相对路径有两个来源
+  //（round-002 fix-3 F5 修正原「唯一来源是死链分支」的过宽假设）：markdown.ts link_open
+  // 死链分支（未设根，clip 存原始相对路径）+ ToolCallBlock chip 直取 tool_use 入参的相对
+  // 路径违约形态（Write/Edit 契约要求绝对路径，模型违约时 root 已设仍可能传入相对路径）。
+  // 故文案按根状态分述成因：未设根 → 「未设置工作区根」；已设根 → 相对路径本身无法解析
+  //（预览目标需要绝对路径）。同步段无 await，seq===reqSeq 恒成立；守卫写法与下方 IPC 路径
+  // 同构，竞态语义不变（不发 IPC、不进 try）。
+  if (!isAbsolutePathForm(store.path)) {
+    if (seq === reqSeq) {
+      result.value = {
+        ok: false,
+        message: getFileLinkWorkspaceRoot()?.trim()
+          ? '无法定位文件：相对路径无法解析（预览目标需要绝对路径）'
+          : '无法定位文件：当前会话未设置工作区根，相对路径无法解析',
+      };
+      loading.value = false;
+    }
+    return;
+  }
   try {
     const res = await window.claudeLink.readFilePreview(store.path);
     if (seq !== reqSeq) return;

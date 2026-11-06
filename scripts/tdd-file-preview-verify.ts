@@ -28,7 +28,7 @@ import {
   previewFile,
 } from '../src/main/modules/fs-preview';
 import { previewFormatInfo, extOfPath, base64ToUint8Array } from '../src/renderer/utils/preview-format';
-import { resolveFileLinkHref } from '../src/renderer/utils/file-link';
+import { resolveFileLinkHref, isAbsolutePathForm } from '../src/renderer/utils/file-link';
 import { renderMarkdown, setFileLinkWorkspaceRoot } from '../src/renderer/utils/markdown';
 
 let pass = 0;
@@ -779,6 +779,283 @@ void (async (): Promise<void> => {
       assert.ok(body.includes('totalRows > EXTRACT_ROWS_CAP'), 'isBlankSheet 缺 totalRows > EXTRACT_ROWS_CAP 守卫');
     });
   }
+
+  console.log('\n=== ⑰ A2 行为组扩充节（2026-11-06 文件点击打开链路计划·反引号路径链接化，RED 先行） ===');
+  {
+    // 行为级断言（函数级 renderMarkdown）。A2 实现落盘前：正例（A2-1~A2-5、A2-9）预期红；
+    // 负样本/流式中途态/围栏守卫（A2-6/A2-6b/A2-7）现状即绿，属对照性质，防实现后误链接化。
+    // A2-8（既有链接管线回归）为引用性质：由既有 ⑮ 组 ①—⑩ 与 ⑦ resolve 矩阵承接，本节零新增。
+    // fileLinkWorkspaceRoot 为模块级单例（⑮ 遗留 'D:\\tmp-ws'）：本节每小节显式 set 再断言，收尾归零。
+    const decodeAttrEntities17 = (html: string): string =>
+      html
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&');
+    const clipOf17 = (html: string): string | null => {
+      const m = html.match(/data-clip-path="([^"]*)"/);
+      return m ? decodeAttrEntities17(m[1]) : null;
+    };
+    // 临时目录形态根（脱敏：2026-11-05 F3 同款纪律，不硬编码本机盘符路径；词法 join 无需真实存在）。
+    const TMP_ROOT = fs.realpathSync(os.tmpdir()).replace(/[\\/]+$/, '');
+    /** 反引号路径正例断言：md-file-link 产出 + clip 为期望归一路径。 */
+    const expectCodeLink = (text: string, expectedClip: string): void => {
+      const html = renderMarkdown(text);
+      assert.ok(html.includes('md-file-link'), `应渲染为 .md-file-link（RED：A2 未实施），实际：${html}`);
+      assert.strictEqual(clipOf17(html), expectedClip, `data-clip-path 应为 ${expectedClip}`);
+    };
+
+    // —— A2-1 盘符绝对路径四形态（未设根 setFileLinkWorkspaceRoot(null) 亦命中） ——
+    setFileLinkWorkspaceRoot(null);
+    check('A2-1a 反引号反斜杠字面绝对路径（`C:\\Users\\demo\\Desktop\\cccc.html`）→ 链接化，clip 归一', () => {
+      expectCodeLink('已创建 `C:\\Users\\demo\\Desktop\\cccc.html`，已测试', 'C:\\Users\\demo\\Desktop\\cccc.html');
+    });
+    check('A2-1b 反引号正斜杠字面绝对路径（`C:/Users/demo/Desktop/cccc.html`）→ 链接化，clip 归一反斜杠', () => {
+      expectCodeLink('已创建 `C:/Users/demo/Desktop/cccc.html`，已测试', 'C:\\Users\\demo\\Desktop\\cccc.html');
+    });
+    check('A2-1c 含空格绝对路径（`C:/Users/demo/Desktop/my file.html`）→ 链接化，原文透传', () => {
+      expectCodeLink('已创建 `C:/Users/demo/Desktop/my file.html`，已测试', 'C:\\Users\\demo\\Desktop\\my file.html');
+    });
+    check('A2-1d 含中文绝对路径（`C:/Users/demo/Desktop/中文文件.html`）→ 链接化，原文透传', () => {
+      expectCodeLink('已创建 `C:/Users/demo/Desktop/中文文件.html`，已测试', 'C:\\Users\\demo\\Desktop\\中文文件.html');
+    });
+    // A2-1e/f（round-002 fix-1 F1）：尖括号包裹形态。头部剥 '<' 后原配平尾 '>' 转未配平，须在第 2
+    // 轮尾剥（与 '(C:\\x.md)' 同机制）；对照 A2-1f 钉平衡 HTML 形态不被误链接化。
+    check('A2-1e 反引号尖括号包裹绝对路径（`<C:\\x\\a.md>`）→ 链接化且 data-clip-path 恰为 C:\\x\\a.md（尾 > 剥净）', () => {
+      expectCodeLink('已创建 `<C:\\x\\a.md>`，已测试', 'C:\\x\\a.md');
+    });
+    check('A2-1f 对照：平衡尖括号形态（`<div>`）不产出路径链接（保持纯 <code>，不被链接化）', () => {
+      const html = renderMarkdown('路径 `<div>` 结束');
+      assert.ok(!html.includes('md-file-link'), `平衡 <div> 形态不应链接化，实际：${html}`);
+      assert.ok(!html.includes('data-clip-path'), '平衡 <div> 形态不应产出 data-clip-path');
+      assert.ok(html.includes('<code>&lt;div&gt;</code>'), `平衡 <div> 应保持纯 <code> 形态，实际：${html}`);
+    });
+
+    // —— A2-2 UNC ——
+    check('A2-2 反引号 UNC（`\\\\server\\share\\x.md`）→ 链接化，clip 保留 UNC 形态', () => {
+      expectCodeLink('已创建 `\\\\server\\share\\x.md`，已测试', '\\\\server\\share\\x.md');
+    });
+
+    // —— A2-3 file:/// ——
+    check('A2-3 反引号 file:///（`file:///C:/Users/demo/Desktop/cccc.html`）→ 链接化，clip 去前缀归一', () => {
+      expectCodeLink('已创建 `file:///C:/Users/demo/Desktop/cccc.html`，已测试', 'C:\\Users\\demo\\Desktop\\cccc.html');
+    });
+
+    // —— A2-4 已设根（临时目录形态根）相对形态四例 ——
+    setFileLinkWorkspaceRoot(TMP_ROOT);
+    check('A2-4a 已设根：含分隔无扩展（`src/main.ts`）→ 链接化，clip=根拼接', () => {
+      expectCodeLink('入口在 `src/main.ts`，已测试', `${TMP_ROOT}\\src\\main.ts`);
+    });
+    check('A2-4b 已设根：裸名+可预览扩展（`readme.md`）→ 链接化，clip=根拼接', () => {
+      expectCodeLink('说明在 `readme.md`，已测试', `${TMP_ROOT}\\readme.md`);
+    });
+    check('A2-4c 已设根：深嵌套（`a/b/c.ts`）→ 链接化，clip=根拼接', () => {
+      expectCodeLink('样例在 `a/b/c.ts`，已测试', `${TMP_ROOT}\\a\\b\\c.ts`);
+    });
+    check('A2-4d 已设根：带空格（`my file.md`）→ 链接化，clip=根拼接原文', () => {
+      expectCodeLink('说明在 `my file.md`，已测试', `${TMP_ROOT}\\my file.md`);
+    });
+
+    // —— A2-5 未设根：相对与裸名不链接化（纯 <code>），绝对仍可点 ——
+    setFileLinkWorkspaceRoot(null);
+    check('A2-5a 未设根：相对（`src/main.ts`）与裸名（`readme.md`）不链接化，保持纯 <code>', () => {
+      const rel = renderMarkdown('入口在 `src/main.ts`，已测试');
+      const bare = renderMarkdown('说明在 `readme.md`，已测试');
+      const cases: Array<[string, string]> = [[rel, 'src/main.ts'], [bare, 'readme.md']];
+      for (const [html, name] of cases) {
+        assert.ok(!html.includes('md-file-link'), `未设根时 ${name} 不应链接化，实际：${html}`);
+        assert.ok(!html.includes('data-clip-path'), `未设根时 ${name} 不应产出 data-clip-path`);
+        assert.ok(html.includes(`<code>${name}</code>`), `未设根时 ${name} 应保持纯 <code> 形态，实际：${html}`);
+      }
+    });
+    check('A2-5b 未设根：绝对路径（`C:/Users/demo/Desktop/cccc.html`）仍可点', () => {
+      expectCodeLink('已创建 `C:/Users/demo/Desktop/cccc.html`，已测试', 'C:\\Users\\demo\\Desktop\\cccc.html');
+    });
+
+    // —— A2-6 负样本表 15 形态全不链接化（未设根；相对三例依赖 A2-5 语义，scheme/POSIX 根无关） ——
+    const NEG_SAMPLES: readonly string[] = [
+      'https://x.com/a.md',
+      'mailto:user@example.com',
+      'javascript:void(0)',
+      '/etc/hosts',
+      '/D:/x.md',
+      '../a.md',
+      'a/../b.md',
+      './a.md',
+      'Makefile',
+      'foo_bar',
+      '123',
+      'npm run test',
+      'foo()',
+      'v1.2.3',
+      'data.unknownext',
+    ];
+    NEG_SAMPLES.forEach((sample, i) => {
+      check(`A2-6[${i + 1}/15] 负样本「${sample}」不链接化（保持纯 <code>）`, () => {
+        const html = renderMarkdown('路径 `' + sample + '` 结束');
+        assert.ok(!html.includes('md-file-link'), `负样本 ${sample} 不应链接化，实际：${html}`);
+        assert.ok(!html.includes('data-clip-path'), `负样本 ${sample} 不应产出 data-clip-path，实际：${html}`);
+        assert.ok(html.includes(`<code>${sample}</code>`), `负样本 ${sample} 应保持纯 <code> 形态，实际：${html}`);
+      });
+    });
+
+    // —— A2-6b 围栏代码块内路径不链接化（裁决补充；fence 不走 inline renderer） ——
+    check('A2-6b 围栏代码块内路径不链接化（``` 包裹 C:\\Users\\demo\\Desktop\\cccc.html）', () => {
+      const html = renderMarkdown('```\nC:\\Users\\demo\\Desktop\\cccc.html\n```');
+      assert.ok(!html.includes('md-file-link'), '围栏内路径不应链接化，实际：' + html);
+      assert.ok(!html.includes('data-clip-path'), '围栏内路径不应产出 data-clip-path');
+      assert.ok(html.includes('C:\\Users\\demo\\Desktop\\cccc.html'), '围栏内容应原样保留');
+    });
+
+    // —— A2-7 未闭合反引号整体纯文本（流式中途态） ——
+    check('A2-7 未闭合反引号整体纯文本，无链接产出（流式中途态安全）', () => {
+      const html = renderMarkdown('已创建 `C:/Users/demo/Desktop/cccc.html 并已在浏览器中测试通过');
+      assert.ok(!html.includes('md-file-link'), '未闭合反引号不得链接化，实际：' + html);
+      assert.ok(!html.includes('data-clip-path'), '未闭合反引号不得产出 data-clip-path');
+      assert.ok(html.includes('`C:/Users/demo/Desktop/cccc.html'), '未闭合反引号应按纯文本原样保留（含反引号字符）');
+    });
+
+    // —— A2-9 export 与 rich 同形（裁决补充；导出面观测） ——
+    check("A2-9 renderMarkdown(text,'export') 与 'rich' 对反引号绝对路径输出同形且均链接化", () => {
+      const text = '已创建 `C:/Users/demo/Desktop/cccc.html`，测试通过';
+      const rich = renderMarkdown(text, 'rich');
+      const exported = renderMarkdown(text, 'export');
+      assert.ok(rich.includes('md-file-link'), 'rich 未产出文件链接（RED：A2 未实施），实际：' + rich);
+      assert.ok(exported.includes('md-file-link'), 'export 未产出文件链接（导出面丢失链接化），实际：' + exported);
+      assert.strictEqual(exported, rich, 'export 与 rich 输出应逐字节同形');
+    });
+
+    setFileLinkWorkspaceRoot(null); // 收尾归零：不向后续分组遗留根状态
+  }
+
+  console.log('\n=== ⑱ A4 死链反馈组（2026-11-06 file linkify 计划·点击失败可见反馈，RED 先行） ===');
+  {
+    // 唯一静默死链 = 「相对 href + 未设工作区根」：resolveFileLinkHref 相对分支因无根返回
+    // null，基线 <a> 保留相对 href、点击被导航守卫静默吞。A4 落盘前：死链形态正例（A4-1~
+    // A4-3、A4-6a）与结构钉（A4-8）预期红；负样本/对照（A4-4/A4-5/A4-6b/A4-7）现状即绿，
+    // 防实现后误进死链通道。root 单例沿用 ⑰ 收尾 null；本节显式 set 并收尾归零。
+    const decodeAttrEntities18 = (html: string): string =>
+      html
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&');
+    const clipOf18 = (html: string): string | null => {
+      const m = html.match(/data-clip-path="([^"]*)"/);
+      return m ? decodeAttrEntities18(m[1]) : null;
+    };
+
+    // —— A4-1~A4-3 未设根：相对 markdown 链接 → 死链形态（RED：A4 未实施） ——
+    setFileLinkWorkspaceRoot(null);
+    check('A4-1 未设根：相对链接 [r](docs/a.md) → md-file-link--dead + clip==原始相对路径 + href=javascript:void(0)', () => {
+      const html = renderMarkdown('[r](docs/a.md)');
+      assert.ok(html.includes('md-file-link--dead'), `应渲染死链形态（RED：A4 未实施），实际：${html}`);
+      assert.ok(html.includes('class="md-file-link md-file-link--dead"'), `类应为 md-file-link md-file-link--dead 组合，实际：${html}`);
+      assert.strictEqual(clipOf18(html), 'docs/a.md', 'data-clip-path 应存解码去尾 #? 的原始相对路径（非根拼接）');
+      assert.ok(html.includes('href="javascript:void(0)"'), '死链 href 应置 javascript:void(0)（点击走委托不开导航）');
+    });
+    check('A4-2 未设根 + 尾缀：[f](docs/a.md#frag) → dead 且 clip 去尾片段', () => {
+      const html = renderMarkdown('[f](docs/a.md#frag)');
+      assert.ok(html.includes('md-file-link--dead'), `应渲染死链形态，实际：${html}`);
+      assert.strictEqual(clipOf18(html), 'docs/a.md', 'data-clip-path 应为剥掉 #frag 后的原始相对路径');
+    });
+    check('A4-3 未设根 + 编码态：[c](<docs/中文 文档.md>) → dead 且 clip 为解码后原文（%20/中文还原）', () => {
+      const html = renderMarkdown('[c](<docs/中文 文档.md>)');
+      assert.ok(html.includes('md-file-link--dead'), `应渲染死链形态，实际：${html}`);
+      assert.strictEqual(clipOf18(html), 'docs/中文 文档.md', 'data-clip-path 应为恰好一次解码的原始相对路径');
+    });
+
+    // —— A4-4~A4-6 未设根负样本：不进死链通道（现状即绿，防误捕获） ——
+    check("A4-4 未设根 + '..' 越界：[e](../evil.md) → 无 md-file-link（不进死链通道，保持普通 <a>）", () => {
+      const html = renderMarkdown('[e](../evil.md)');
+      assert.ok(!html.includes('md-file-link'), `含 '..' 的 href 不应进死链通道，实际：${html}`);
+      assert.ok(!html.includes('data-clip-path'), "含 '..' 的 href 不应产出 data-clip-path");
+    });
+    check('A4-5 未设根 + scheme：[w](https://x.com/f.txt) → 无 md-file-link 且 target=_blank 保留（外链照旧）', () => {
+      const html = renderMarkdown('[w](https://x.com/f.txt)');
+      assert.ok(!html.includes('md-file-link'), 'scheme href 不应进死链通道');
+      assert.ok(!html.includes('data-clip-path'), 'scheme href 不应产出 data-clip-path');
+      assert.ok(html.includes('target="_blank"'), '外链应保留 target=_blank');
+    });
+    check('A4-6a 未设根 + %ZZ href：normalizeLink 重编码为 %25ZZ、解码不抛 → 进死链通道且 clip 还原 %ZZ 原文', () => {
+      const html = renderMarkdown('[z](docs/%ZZ.md)');
+      assert.ok(html.includes('md-file-link--dead'), `%ZZ 经 %25ZZ 重编码解码不抛，应进死链通道，实际：${html}`);
+      assert.strictEqual(clipOf18(html), 'docs/%ZZ.md', 'data-clip-path 应为解码还原的原始相对路径');
+    });
+    check('A4-6b 未设根 + 不完整 UTF-8 转义（%E4%B8）：decodeURIComponent 抛 URIError → 不进死链通道（保持普通 <a>，不崩溃）', () => {
+      const html = renderMarkdown('[z2](docs/%E4%B8.md)');
+      assert.ok(!html.includes('md-file-link'), `解码失败不应进死链通道（回退基线 <a>），实际：${html}`);
+      assert.ok(!html.includes('data-clip-path'), '解码失败不应产出 data-clip-path');
+    });
+
+    // —— A4-7 有根对照：相对链接正常解析，绝不带 --dead 类 ——
+    const TMP_ROOT_18 = fs.realpathSync(os.tmpdir()).replace(/[\\/]+$/, '');
+    check('A4-7 有根对照：[r](docs/a.md) → 正常 md-file-link（无 --dead）且 clip=根拼接', () => {
+      setFileLinkWorkspaceRoot(TMP_ROOT_18);
+      const html = renderMarkdown('[r](docs/a.md)');
+      assert.ok(html.includes('md-file-link'), '有根相对链接应正常按钮化');
+      assert.ok(!html.includes('md-file-link--dead'), '有根解析成功不得带死链类');
+      assert.strictEqual(clipOf18(html), `${TMP_ROOT_18}\\docs\\a.md`);
+      setFileLinkWorkspaceRoot(null); // 对照后即归零，不向后续检查遗留根状态
+    });
+
+    // —— A4-8b 未设根 + 编码态 '..'（round-002 fix-1 F2 对照钉，现状即绿）：%2e%2e 经
+    // isPathLikeRelativeHref 词面判定按相对形态进死链通道、clip 解码还原 '../a.md'——设计决定：
+    // 可见反馈优先（2026-11-06 审查裁定），此处钉死防回归 ——
+    check("A4-8b 未设根 + 编码态 '..'：[x](%2e%2e/a.md) → 进死链通道（md-file-link--dead）且 clip === '../a.md'（设计决定：编码态 .. 视同相对死链，可见反馈优先（2026-11-06 审查裁定））", () => {
+      setFileLinkWorkspaceRoot(null);
+      const html = renderMarkdown('[x](%2e%2e/a.md)');
+      assert.ok(html.includes('md-file-link--dead'), `编码态 '..' 应进死链通道（对照钉，现状即绿），实际：${html}`);
+      assert.strictEqual(clipOf18(html), '../a.md', "data-clip-path 应为解码还原的 '../a.md'");
+    });
+
+    // —— A4-8 结构钉：markdown.ts 死链分支 + 抽屉预检接线（RED：A4 未实施） ——
+    check('结构钉：markdown.ts 死链分支（md-file-link--dead / isPathLikeRelativeHref 接线）', () => {
+      const src = fs.readFileSync(new URL('../src/renderer/utils/markdown.ts', import.meta.url), 'utf8');
+      assert.ok(src.includes('md-file-link--dead'), 'markdown.ts 缺 md-file-link--dead 死链类');
+      assert.ok(src.includes('isPathLikeRelativeHref'), 'markdown.ts 未接线 isPathLikeRelativeHref');
+    });
+    check('结构钉：FilePreviewDrawer.vue load() 预检（isAbsolutePathForm + 未设根错误文案）', () => {
+      const src = fs.readFileSync(new URL('../src/renderer/components/preview/FilePreviewDrawer.vue', import.meta.url), 'utf8');
+      assert.ok(src.includes('isAbsolutePathForm'), 'FilePreviewDrawer.vue 未接线 isAbsolutePathForm 预检');
+      assert.ok(src.includes('无法定位文件：当前会话未设置工作区根，相对路径无法解析'), 'FilePreviewDrawer.vue 缺未设根预检错误文案');
+    });
+    // —— round-002 fix-3 F5 结构钉 2 检：getter 导出 + 预检文案按根状态条件化 ——
+    check('结构钉：markdown.ts 导出 getFileLinkWorkspaceRoot（round-002 fix-3 F5）', () => {
+      const src = fs.readFileSync(new URL('../src/renderer/utils/markdown.ts', import.meta.url), 'utf8');
+      assert.ok(src.includes('export function getFileLinkWorkspaceRoot'), 'markdown.ts 缺 getFileLinkWorkspaceRoot 导出（F5 文案条件化依赖）');
+    });
+    check('结构钉：FilePreviewDrawer.vue 预检双文案并存（未设根文案 + 已设根相对路径文案，round-002 fix-3 F5）', () => {
+      const src = fs.readFileSync(new URL('../src/renderer/components/preview/FilePreviewDrawer.vue', import.meta.url), 'utf8');
+      assert.ok(src.includes('当前会话未设置工作区根'), 'FilePreviewDrawer.vue 缺未设根文案字面');
+      assert.ok(src.includes('预览目标需要绝对路径'), 'FilePreviewDrawer.vue 缺已设根相对路径文案字面');
+    });
+
+    setFileLinkWorkspaceRoot(null); // 收尾归零：不向后续分组遗留根状态
+  }
+
+  console.log('\n=== ⑲ A4 抽屉预检形态判定（isAbsolutePathForm 单元组） ===');
+  check('绝对四形态：盘符反斜杠 / 盘符正斜杠 / UNC / POSIX 根 → true', () => {
+    assert.strictEqual(isAbsolutePathForm('C:\\ws\\a.md'), true);
+    assert.strictEqual(isAbsolutePathForm('C:/ws/a.md'), true);
+    assert.strictEqual(isAbsolutePathForm('\\\\srv\\share\\a.md'), true);
+    assert.strictEqual(isAbsolutePathForm('/usr/local/a.md'), true);
+  });
+  check('相对形态：子目录 / ./ 前缀 / 裸名 / 盘符相对（C:foo）→ false（主进程无法独立定位）', () => {
+    assert.strictEqual(isAbsolutePathForm('docs/a.md'), false);
+    assert.strictEqual(isAbsolutePathForm('./a.md'), false);
+    assert.strictEqual(isAbsolutePathForm('a.md'), false);
+    assert.strictEqual(isAbsolutePathForm('C:foo.md'), false);
+  });
+  check('空值边界：空串 / 纯空白 → false', () => {
+    assert.strictEqual(isAbsolutePathForm(''), false);
+    assert.strictEqual(isAbsolutePathForm('   '), false);
+  });
+  check('首尾空白容错：\' C:\\ws\\a.md \' → true（trim 后判定，同 store.path 消费侧宽松度）', () => {
+    assert.strictEqual(isAbsolutePathForm(' C:\\ws\\a.md '), true);
+  });
 
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
   if (fail > 0) process.exit(1);
