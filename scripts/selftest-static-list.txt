@@ -263,3 +263,4 @@ scripts/tdd-wizard-step-jump-verify.ts
 scripts/tdd-turn-diff-quality-verify.ts
 scripts/tdd-code-inline-fileref-verify.ts
 scripts/tdd-preview-outside-root-verify.ts
+scripts/tdd-adjacent-text-merge-verify.ts
