@@ -376,7 +376,8 @@ export interface ClaudeLinkAPI {
   fsShowInExplorer: (path: string) => Promise<FsShowResult>;
   fsOpenPath: (absPath: string, mode: 'default' | 'choose') => Promise<ChangesOpenResult>;
   // 文件预览面板只读读取通道（2026-11-04）：主进程强制 workspace 边界校验 + 分类上限截停。
-  readFilePreview: (path: string) => Promise<FsPreviewResult>;
+  // confirmOutsideRoot：用户已确认工作区外预览（抽屉「仍然预览」）；缺省 false 走 fail-closed，桌面/网页同参透传。
+  readFilePreview: (path: string, confirmOutsideRoot?: boolean) => Promise<FsPreviewResult>;
   // 导出目标协商（T5）：主→渲染请求选择保存目标；渲染层选定后经 resolveTarget 应答。
   resolveExportTarget: (jobId: string, resp: ExportTargetResponse) => Promise<boolean>;
   onExportTargetRequested: (callback: (req: ExportTargetRequest) => void) => () => void;
@@ -596,7 +597,8 @@ export function createApi(): ClaudeLinkAPI {
     fsShowInExplorer: (path) => ipcRenderer.invoke(IPC_CHANNELS.FS_SHOW_IN_EXPLORER, { path }) as Promise<FsShowResult>,
     fsOpenPath: (absPath, mode) => ipcRenderer.invoke(IPC_CHANNELS.FS_OPEN_PATH, absPath, mode) as Promise<ChangesOpenResult>,
     // 文件预览面板只读读取通道（2026-11-04）：workspace 边界校验与截断/上限逻辑全在主进程。
-    readFilePreview: (path) => ipcRenderer.invoke(IPC_CHANNELS.FS_READ_PREVIEW, path) as Promise<FsPreviewResult>,
+    // 恒发布尔而非 undefined：Electron 结构化克隆与 web wire JSON 序列化下形状都确定（2026-11-06 点1）。
+    readFilePreview: (path, confirmOutsideRoot) => ipcRenderer.invoke(IPC_CHANNELS.FS_READ_PREVIEW, path, confirmOutsideRoot === true) as Promise<FsPreviewResult>,
     // 导出目标协商（T5）：应答主进程的保存目标请求 / 订阅请求推送（App.vue 全局单订阅者）。
     resolveExportTarget: (jobId, resp) => ipcRenderer.invoke(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, jobId, resp) as Promise<boolean>,
     onExportTargetRequested: (callback) => {

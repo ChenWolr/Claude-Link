@@ -474,7 +474,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // FS_READ_PREVIEW（2026-11-04 文件预览面板 p1）：只读读取，边界校验/截断/上限全在
   // modules/fs-preview.ts。安全红线 fail-closed——本通道经注册表暴露给网页客户端，handler
   // 不校验 roots = 网页端可读任意磁盘文件，故每次调用现取允许集。
-  regInvokeHandler(IPC_CHANNELS.FS_READ_PREVIEW, async (_event, p: unknown) => previewFile(p, { roots: collectPreviewRoots() }));
+  // 确认旁路（2026-11-06 点1）：第 2 参 confirmOutsideRoot 由渲染层在用户于抽屉点击「仍然预览」
+  // 后传 true；handler 侧 === true 归一（wire 上任何脏值都不得放行）。旁路仅作用于 fs-preview.ts
+  // 内的 roots 包含判定，其余校验全在模块内不变。
+  regInvokeHandler(IPC_CHANNELS.FS_READ_PREVIEW, async (_event, p: unknown, confirmOutsideRoot: unknown) =>
+    previewFile(p, { roots: collectPreviewRoots(), confirmOutsideRoot: confirmOutsideRoot === true }));
 
   // 导出目标协商应答（T5）：渲染层 FilePickerDialog 选定后回传；jobId 在 Map 中才有效（防重放/伪造他人 job）。
   regInvokeHandler(IPC_CHANNELS.EXPORT_RESOLVE_TARGET, async (_event, jobId: unknown, resp: unknown) => {

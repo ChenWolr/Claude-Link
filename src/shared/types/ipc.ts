@@ -234,17 +234,18 @@ export const IPC_CHANNELS = {
 } as const;
 
 // ── 文件预览（fs:readPreview）载荷类型：主进程 modules/fs-preview.ts 为实现真相源，桌面/网页渲染层共用。 ──
-// （请求载荷为 invoke 直传 path 字符串，无接口形。）
+// （请求载荷为 invoke 直传 [path, confirmOutsideRoot?]：path 字符串 + 可选布尔（用户已在抽屉确认工作区外预览，默认缺省=false 走 fail-closed）；无接口形。）
 
 /** blob 类预览的分类（决定展示组件与上限档）。 */
 export type FsPreviewBlobCategory = 'image' | 'media' | 'pdf' | 'docx' | 'xlsx' | 'pptx';
 
-/** 文件预览结果（判别联合）：文本（≤256KB，可截断）/ blob（base64，分类上限截停）/ missing / 失败。 */
+/** 文件预览结果（判别联合）：文本（≤256KB，可截断）/ blob（base64，分类上限截停）/ missing / 失败。
+ * 失败形态仅 containment 拒绝携带 code:'outside-root'（2026-11-06 点1：抽屉据此渲染「仍然预览」行动项）；其余失败恒无 code，按 message 消费的既有调用方零影响。 */
 export type FsPreviewResult =
   | { ok: true; kind: 'text'; content: string; size: number; truncated: boolean }
   | { ok: true; kind: 'blob'; category: FsPreviewBlobCategory; base64: string; mime: string; size: number }
   | { ok: true; kind: 'missing' }
-  | { ok: false; message: string };
+  | { ok: false; message: string; code?: 'outside-root' };
 
 /** 无引用残留（且类型文件不应有运行时常量）：流式上屏节流间隔真相源在 use-stream.ts 硬编码 50ms（hb12-CHR-01 节流，非防抖），改本值无效。 */
 export const STREAM_DEBOUNCE_MS = 50;

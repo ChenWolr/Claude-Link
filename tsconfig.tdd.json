@@ -12,6 +12,7 @@
   "include": [
     "scripts/tdd-code-inline-fileref-verify.ts",
     "scripts/tdd-file-preview-verify.ts",
+    "scripts/tdd-preview-outside-root-verify.ts",
     "src/renderer/env.d.ts"
   ]
 }

@@ -4,6 +4,10 @@
 // 全程强制 workspace 边界校验（fail-closed）——本通道经 ipc-registry 注册表暴露给网页客户端，
 // handler 不校验 = 网页端可读任意磁盘文件，故校验在模块内而非调用方。
 // containment 走 realpath 规范化（symlink/junction 跟链后的真实位置必须仍在允许根内）。
+// 工作区外「确认后预览」旁路（2026-11-06 两缺陷修复计划 点1）：opts.confirmOutsideRoot===true
+// 时仅跳过 roots 包含判定（③），①②④⑤⑥⑦其余校验全保留——确认语义=用户确认读该路径的
+// 真实位置（symlink 确认后指向根外同样放行）；非严格 true 的任何脏值一律走原 fail-closed 判定，
+// containment 拒绝形态带 code:'outside-root' 供抽屉渲染「仍然预览」行动项。
 //
 // 上限表（超出即拒绝，请用外部程序打开）：
 //   文本 MAX_TEXT 256KB ｜ image 8MB ｜ media 8MB ｜ pdf 24MB ｜ docx 8MB ｜ xlsx 8MB ｜ pptx 30MB
@@ -83,7 +87,7 @@ export function isProbablyBinary(buf: Buffer): boolean {
  * realpath 规范化再判（防根内 symlink/junction 指向根外的词法逃逸），win 大小写/分隔符归一
  * 由 path.relative 对规范化结果保证。
  */
-export async function previewFile(absPath: unknown, opts: { roots: string[] }): Promise<FsPreviewResult> {
+export async function previewFile(absPath: unknown, opts: { roots: string[]; confirmOutsideRoot?: boolean }): Promise<FsPreviewResult> {
   // ① 入参形状与绝对路径守卫。
   if (typeof absPath !== 'string' || !absPath.trim() || !path.isAbsolute(absPath)) {
     return { ok: false, message: '路径无效' };
@@ -99,22 +103,27 @@ export async function previewFile(absPath: unknown, opts: { roots: string[] }): 
     //   '..'+path.sep 开头（宽判 startsWith('..') 会误伤根下名为 '..foo.txt' 的合法文件——
     //   Windows 合法文件名，rel 返回 '..foo.txt'）。
     const realTarget = await realpath(resolved);
-    let inside = false;
-    for (const root of roots) {
-      if (typeof root !== 'string' || !root.trim()) continue;
-      let realRoot: string;
-      try {
-        realRoot = await realpath(root);
-      } catch {
-        continue; // 该根不存在/不可达，跳过该根
+    // 工作区外预览确认旁路（2026-11-06 点1）：confirmOutsideRoot===true 时仅跳过「roots 包含
+    // 判定」——①绝对路径守卫、②stat、realpath、④扩展分流、⑤大小上限、⑥二进制启发/截断、
+    // ⑦fs 异常归一全部保留；非 true（含 undefined/null/'true' 字符串等脏值）一律走原判定。
+    if (opts?.confirmOutsideRoot !== true) {
+      let inside = false;
+      for (const root of roots) {
+        if (typeof root !== 'string' || !root.trim()) continue;
+        let realRoot: string;
+        try {
+          realRoot = await realpath(root);
+        } catch {
+          continue; // 该根不存在/不可达，跳过该根
+        }
+        const rel = path.relative(realRoot, realTarget);
+        if (rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel)) {
+          inside = true;
+          break;
+        }
       }
-      const rel = path.relative(realRoot, realTarget);
-      if (rel !== '' && rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel)) {
-        inside = true;
-        break;
-      }
+      if (!inside) return { ok: false, message: '路径不在工作区内', code: 'outside-root' };
     }
-    if (!inside) return { ok: false, message: '路径不在工作区内' };
     // ④ 扩展名分流（小写去点）；旧版 Office 二进制不在可预览集合，明确拒并给转存建议。
     const ext = path.extname(resolved).toLowerCase().replace(/^\./, '');
     if (ext === 'doc' || ext === 'ppt') {

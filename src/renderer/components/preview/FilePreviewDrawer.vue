@@ -32,8 +32,12 @@ const allBlobUrls: string[] = [];
 // blob 类预览 category：本点由 blob 结果回填，仅供 pill 判定（blob body 渲染 p9 接）。
 const categoryRef = ref<FsPreviewBlobCategory | null>(null);
 
-// 并发序号：换文件/快速开关时旧请求晚到不回写（模块级单例递增，setup 外）。
+// 并发序号：换文件/快速开关时旧请求晚到不回写（<script setup> 顶层为每实例状态，随组件实例存在）。
 let reqSeq = 0;
+
+// 工作区外预览确认位（2026-11-06 点1）：仅当前抽屉会话内有效——open/path 任一变化即复位
+//（换文件、关闭后重开、A→B→A 往返都重新确认）；「仍然预览」点击置 true 后仅本次 load 携带。
+let outsideRootConfirmed = false;
 
 async function load(): Promise<void> {
   const seq = ++reqSeq;
@@ -63,7 +67,7 @@ async function load(): Promise<void> {
     return;
   }
   try {
-    const res = await window.claudeLink.readFilePreview(store.path);
+    const res = await window.claudeLink.readFilePreview(store.path, outsideRootConfirmed);
     if (seq !== reqSeq) return;
     result.value = res;
     if (res.ok && res.kind === 'blob') {
@@ -93,6 +97,13 @@ function revokeAllBlobUrls(): void {
   // text→blob 缓存键登记的 URL 已随 allBlobUrls 全量 revoke，仅清表防旧键命中（revoke 幂等）。
   textBlobCache.clear();
   currentBlobUrl.value = null;
+}
+
+// 「仍然预览」（2026-11-06 点1）：置确认位后重跑 load()（按钮仅在 outside-root 错误卡上渲染，
+// 点击时无在途 load；重入双击由 reqSeq 序号守卫兜底，后到者胜、结果一致）。
+function confirmOutsideRootPreview(): void {
+  outsideRootConfirmed = true;
+  void load();
 }
 
 // 关闭统一入口（遮罩/关闭钮/Esc 共用）：翻 store 开关位 + 统一 revoke 全部 blobUrl。
@@ -280,6 +291,7 @@ function onKey(e: KeyboardEvent): void {
 
 watch(() => [store.open, store.path] as const, ([open]) => {
   if (open) {
+    outsideRootConfirmed = false; // 换文件/重开抽屉：确认位随本次抽屉会话结束失效（2026-11-06 点1）
     escHandle?.release();
     escHandle = pushEscLayer(ESC_LAYER_PRIORITY.filePreviewDrawer);
     void load();
@@ -327,6 +339,13 @@ onBeforeUnmount(() => {
         <div v-else-if="result && !result.ok" class="fpreview-empty">
           <span class="fpreview-empty__icon">⚠</span>
           <span class="fpreview-empty__text">{{ result.message }}</span>
+          <!-- outside-root 错误卡专属行动项（2026-11-06 点1）：其余失败形态无 code 不渲染 -->
+          <button
+            v-if="result.code === 'outside-root'"
+            type="button"
+            class="fpreview-empty__action"
+            @click="confirmOutsideRootPreview"
+          >仍然预览</button>
         </div>
         <div v-else-if="result && result.ok && result.kind === 'missing'" class="fpreview-empty">
           <span class="fpreview-empty__icon">⚠</span>
@@ -538,6 +557,20 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 .fpreview-empty__icon { font-size: 1.5rem; }
+/* outside-root 错误卡「仍然预览」行动钮（2026-11-06 点1）：全 token 化，无硬编码色值 */
+.fpreview-empty__action {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-panel) 88%, transparent);
+  padding: 5px 14px;
+  font-size: 0.75rem;
+  font-family: inherit;
+  color: var(--color-text);
+  cursor: pointer;
+}
+.fpreview-empty__action:hover {
+  background: var(--color-panel);
+}
 .fpreview-banner {
   flex-shrink: 0;
   padding: 6px 16px;
