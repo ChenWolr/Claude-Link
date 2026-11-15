@@ -30,6 +30,8 @@ import { resolveSessionModel, applySessionOverrideEnv, decideAgentModelOverride 
 import { classifyUpstreamError, isNonRetryableUpstreamError, upstreamFatalMessage, type UpstreamErrorClassification } from '../../shared/upstream-errors';
 import { mapAskUserQuestionCancel } from '../../shared/interaction-cancel';
 import { getProjectOriginFingerprint } from './command-source-watcher';
+// UI13-P7：Windows 进程树击杀兜底（resume UUID 匹配命令行 → taskkill /T /F，spawn+unref 非 detached）。
+import { scheduleWindowsTreeKill } from './win-tree-kill';
 import { lookupProviderModelContextWindow } from '../../shared/model-context-windows';
 import { resolveEffectiveThinkingLevel, resolveThinkingConfig, THINKING_SETTINGS_KEYS, type ThinkingConfigResult } from '../../shared/thinking-resolver';
 import { buildPostTurnProbeArgs } from '../../shared/post-turn-probe';
@@ -174,8 +176,8 @@ interface SessionEntry {
   state: 'pending' | 'running' | 'aborting' | 'finished';
   emitExit: (code: number | null) => void;
   emitError: (err: Error) => void;
-  // 官方 Options.abortController：query() 传入后，abort() 会在 Windows 上经 SDK
-  // → TerminateProcess（瞬时不可捕获），打不死卡死在死 socket 上的子进程时兜底硬杀。
+  // 官方 Options.abortController：query() 传入后，SDK 0.3.191 win32 abort = 关 stdin → 2s → 再 5s → TerminateProcess（仅直接子进程；孙进程成孤儿——由 scheduleWindowsTreeKill 兜底），
+  // 打不死卡死在死 socket 上的子进程时兜底硬杀。
   abortController: AbortController | null;
   // 启动时解析出的当前实际模型 ID（供应商库解析；库空时为老别名链结果）。
   // canUseTool 的 Agent/Task 调用级 model 改写（唯一实际模型·第二层保险）读的是下方 resolvedModel；
@@ -3806,7 +3808,7 @@ async function runQuery(
   const contextTurn = isContextCommand(initCommandText);
   let contextTurnNativeText = '';
   // 卡死检测/硬杀：每会话一个 AbortController，传入 Options.abortController。
-  // killProcess 在软中断之外调 .abort()，Windows 上 → TerminateProcess 真硬杀。
+  // killProcess 在软中断之外调 .abort()：SDK 0.3.191 win32 abort = 关 stdin → 2s → 再 5s → TerminateProcess（仅直接子进程；孙进程成孤儿——由 scheduleWindowsTreeKill 兜底）。
   entry.abortController = new AbortController();
   sdkOptions.abortController = entry.abortController;
   // 项目宗旨：要求用户本地安装 Claude Code，不内嵌二进制。本地没装（pathToClaudeCodeExecutable
@@ -4831,25 +4833,28 @@ export function killProcess(
           // 伴生信号可丢：投影收口异常不得阻塞 kill 链
         }
       }
-      // 硬杀兜底：abortController.abort() 经 SDK 在 Windows 上 → TerminateProcess
-      //（瞬时不可捕获），子进程卡死在死 socket 上时真能打死。
+      // 硬杀兜底：abortController.abort() 经 SDK 0.3.191 win32 abort = 关 stdin → 2s → 再 5s → TerminateProcess（仅直接子进程；孙进程成孤儿——由 scheduleWindowsTreeKill 兜底），子进程卡死在死 socket 上时真能打死。
       logger.info(`Interrupted SDK query for session ${sessionId} (reason=${reason}, abort signaled${wasCurrent ? '' : ', late-finish skipped session-scoped effects'})`);
     };
-    // 批次二 #4 两段式中止：watchdog / upstream_fatal / queue 先 interrupt() 给 CLI 优雅
-    // 落盘窗口——硬杀（abort → TerminateProcess）会把进行中的 thinking 轮撕成残缺
-    // transcript，resume 回传被上游 400 拒收（实测报告场景 C 的机制链）。有界等待 ≤5s
-    // 流自然结束；超时或 interrupt 不可达再走 finishKill 硬杀兜底。
+    // 批次二 #4 两段式中止 + UI13-P7：watchdog / upstream_fatal / queue / user 先 interrupt()
+    // 给 CLI 优雅落盘窗口——abort 兜底（SDK 0.3.191 win32 = 关 stdin → 2s → 再 5s →
+    // TerminateProcess 直接子进程；孙进程成孤儿——由 scheduleWindowsTreeKill 兜底）会把
+    // 进行中的 thinking 轮撕成残缺 transcript，resume 回传被上游 400 拒收（实测报告场景 C
+    // 的机制链）。有界等待：watchdog 族 ≤5000ms 流自然结束；user 短窗 ≤1500ms（用户要的
+    // 就是尽快停，防误触延迟敏感）；超时或 interrupt 不可达再走 finishKill 硬杀兜底。
     // R6 实测修正：记账必须延迟到优雅窗口之后——runQuery 的 for-await 在 !isCurrentEntry
     // 时 break 会触发 SDK 生成器 return() → cleanup() → 拒绝一切在途控制请求（interrupt
     // 的 ACK 直接变 "Query closed before response received"）。保持 entry current，让
-    // interrupt 真正被 CLI 消化、流自然收尾。user 维持现状（用户要的就是立刻停）；
+    // interrupt 真正被 CLI 消化、流自然收尾。user 已并入两段式（1500ms 短窗）；
     // session_cleanup 是应用退出路径，延迟 abort 的浮动 promise 会随进程消亡，保持
-    // 确定性立即硬杀。
+    // 确定性立即硬杀（树杀子进程 spawn+unref 非 detached，进程消亡后仍能收尾）。
     const query = entry.query;
-    if (query && (reason === 'watchdog' || reason === 'upstream_fatal' || reason === 'queue')) {
+    const twoPhaseReasons = reason === 'watchdog' || reason === 'upstream_fatal' || reason === 'queue';
+    if (query && (twoPhaseReasons || reason === 'user')) {
       // F1：优雅窗口内重发的强制接管句柄（finishKill 自清 + 幂等）。
       entry.forceKill = finishKill;
-      const deadline = Date.now() + 5000;
+      const graceMs = reason === 'user' ? 1500 : 5000; // UI13-P7：user 短窗（防误触延迟敏感）
+      const deadline = Date.now() + graceMs;
       const waitUntil = (ms: number): Promise<void> =>
         new Promise((resolve) => {
           const timer = setTimeout(resolve, Math.max(ms, 0));
@@ -4868,7 +4873,7 @@ export function killProcess(
               () => 'ack' as const,
               (err: unknown) => `rejected:${err instanceof Error ? err.message : String(err)}` as const,
             ),
-            waitUntil(5000).then(() => 'no-ack' as const),
+            waitUntil(graceMs).then(() => 'no-ack' as const),
           ]);
           // 无论 ACK 与否，deadline 前持续观察流是否自然收尾——R6 实测 CLI 在生成中
           // 不回控制请求 ACK（与 context refresh 超时同因），但 interrupt 写入已被
@@ -4885,11 +4890,19 @@ export function killProcess(
           }
         } finally {
           finishKill(); // 幂等兜底：流已优雅结束时对已退出进程 abort 无害
+          // UI13-P7：树杀兜底——孙进程成孤儿，按 resume UUID 扫进程命令行整杀（含探针）。
+          // F2（P1-B）接管守卫：优雅窗内重发经 spawnForChat forceKill 接管后，新回合 entry 已
+          // 同步在位（entries.has(sessionId)），同会话每回合 resume 同一 UUID——此刻按 UUID 扫
+          // 命令行整杀会命中新回合进程树（taskkill /T /F 误杀），新回合在途时跳过；自然收尾
+          // 路径 entry 已删（deleteEntry / removeEntryIfCurrent）且无新回合在途 → 照发扫孤儿残留。
+          if (reason === 'user' && !entries.has(sessionId)) scheduleWindowsTreeKill(sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId) ?? null);
           logger.info(`[two-phase-interrupt] session=${sessionId} reason=${reason} outcome=${how}`);
         }
       })();
     } else {
       finishKill();
+      // UI13-P7 契约#3：应用退出/删会话兜底——CLI 残树（脱离 Electron 子进程表的进程（探针等））不随 entry 消亡。
+      if (reason === 'session_cleanup') scheduleWindowsTreeKill(sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId) ?? null);
     }
   }
   // killProcess 会先移除当前 entry，迟到的 deleteEntry 因 identity guard 不再清理；

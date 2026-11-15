@@ -70,6 +70,20 @@ export interface CommandSourceWatcherDeps {
   /** 项目级根锚点：getConfig().workingDirectory（全局默认工作目录）。 */
   getWorkingDirectory(): string | null;
   /**
+   * UI13-P8：项目 skill 目录清单（最近工作区 ∪ 会话 distinct 工作目录 ∪ 默认目录；
+   * index.ts 注入，与 SKILL_PROJECT_DIRS_GET 同源口径）。清单内每目录的 .claude/skills
+   * 追加监听——只加 skills 不加 commands（契约 #4 只要求 skills；命令侧项目监听维持现状
+   * 仅默认目录）。缺省（旧 deps 形态 / 行为测试）→ 不追加，行为与现状一致。
+   */
+  getProjectSkillDirs?(): string[];
+  /**
+   * UI13-P8：项目 skill 目录变化广播联动（queueProbe 处调用——指纹已确认变化）。
+   * index.ts 注入为 skills:projectDirsChanged 推送（渲染层 Skill tab 活跃时重拉项目清单）。
+   * 广播不受 skillAutoSync 门控（R7 裁决：项目清单 fs 重拉 ≠ 引擎重探；重探门控在
+   * triggerGlobalProbe 注入侧既有早退）。
+   */
+  onProjectSkillsChanged?(): void;
+  /**
    * 触发全局兜底探测（包装 runGlobalCommandProbe(mainWindow)）。
    * 返回 true = 本次真正启动；false = 已有探测在跑被幂等锁吞掉——watcher 据此延迟重试，
    * 否则该次磁盘变更永久丢失（review-v1 发现1：指纹已更新为最新，后续无新事件不再比对）。
@@ -85,7 +99,9 @@ export interface CommandSourceWatcherDeps {
 export interface CommandSourceRoots {
   /** 用户级两根（D5 指纹只算这两根：用户级变更影响所有会话）。 */
   userRoots: string[];
-  /** watch 与全根指纹目标 = 用户级 + 项目级。 */
+  /** UI13-P8：清单内每目录的 .claude/skills（不含 commands；与既有根同键去重后追加）。 */
+  projectSkillRoots: string[];
+  /** watch 与全根指纹目标 = 用户级 + 项目级 + 项目 skills（清单内 skills 变化一并改变全根指纹）。 */
   allRoots: string[];
 }
 
@@ -99,11 +115,26 @@ export function commandSourceRoots(deps: CommandSourceWatcherDeps): CommandSourc
   const projectRoots = cwd
     ? [path.join(cwd, '.claude', 'commands'), path.join(cwd, '.claude', 'skills')]
     : [];
-  return { userRoots, allRoots: [...userRoots, ...projectRoots] };
+  // UI13-P8（契约 #4）：项目目录清单内每目录的 .claude/skills 追加监听（只加 skills 不加
+  // commands）。与既有根（及清单内彼此）按小写同键去重——默认目录既经 getWorkingDirectory
+  // 产出 skills 根、又常在清单内，不去重会同根双 watch（事件翻倍）。目录不存在的根由
+  // mountRoot pendingRoots 慢重试兜底；清单新增根由 refreshFingerprints→syncMountedRoots
+  // 增量挂载（P2-D：mountAll 仅启动/onConfigSaved/错误重挂三处触发，覆盖不到清单增长）。
+  const seenKeys = new Set([...userRoots, ...projectRoots].map((r) => r.toLowerCase()));
+  const projectSkillRoots: string[] = [];
+  for (const dir of deps.getProjectSkillDirs?.() ?? []) {
+    const root = path.join(dir, '.claude', 'skills');
+    const key = root.toLowerCase();
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    projectSkillRoots.push(root);
+  }
+  return { userRoots, projectSkillRoots, allRoots: [...userRoots, ...projectRoots, ...projectSkillRoots] };
 }
 
 interface CommandSourceWatcherState {
-  watchers: FSWatcher[];
+  /** 按根登记的已挂载句柄（key=根小写；P2-D 增量挂载的「本次 roots vs 已挂载」差集比对前提）。 */
+  mountedRoots: Map<string, FSWatcher[]>;
   /** 全根上次指纹；null = 尚未算过（首个刷新只建立基准，不触发探测）。 */
   fingerprint: string | null;
   /** 用户级两根指纹（D5 写 per-session 快照附带）；undefined = 尚未算出（字段缺省不比对）。 */
@@ -159,7 +190,7 @@ export async function getProjectOriginFingerprint(cwd: string | null | undefined
 export function startCommandSourceWatcher(deps: CommandSourceWatcherDeps): void {
   if (state) return;
   state = {
-    watchers: [],
+    mountedRoots: new Map<string, FSWatcher[]>(),
     fingerprint: null,
     userFingerprint: undefined,
     debounceTimer: null,
@@ -211,14 +242,24 @@ export function stopCommandSourceWatcher(): void {
 }
 
 function closeWatchers(s: CommandSourceWatcherState): void {
-  for (const w of s.watchers) {
-    try {
-      w.close();
-    } catch {
-      // ignore：句柄可能已失效
+  for (const ws of s.mountedRoots.values()) {
+    for (const w of ws) {
+      try {
+        w.close();
+      } catch {
+        // ignore：句柄可能已失效
+      }
     }
   }
-  s.watchers = [];
+  s.mountedRoots.clear();
+}
+
+/** 按根登记已挂载句柄（非递归降级路径的子目录句柄同样归属其根，便于整根增量摘除）。 */
+function registerMounted(s: CommandSourceWatcherState, root: string, w: FSWatcher): void {
+  const key = root.toLowerCase();
+  const list = s.mountedRoots.get(key);
+  if (list) list.push(w);
+  else s.mountedRoots.set(key, [w]);
 }
 
 function handleConfigSaved(deps: CommandSourceWatcherDeps): void {
@@ -253,7 +294,7 @@ function mountRoot(root: string, deps: CommandSourceWatcherDeps): void {
   // 挂载成功即从待重挂集合移除（mountAll/兜底重试共用同一登记口径）。
   const mounted = (w: FSWatcher): void => {
     w.on('error', (err) => handleWatcherError(root, deps, err));
-    s.watchers.push(w);
+    registerMounted(s, root, w);
     if (s.pendingRoots.delete(root) && s.pendingRoots.size === 0 && s.pendingRetryTimer) {
       clearInterval(s.pendingRetryTimer);
       s.pendingRetryTimer = null;
@@ -287,7 +328,7 @@ function mountRoot(root: string, deps: CommandSourceWatcherDeps): void {
     try {
       const cw = watch(path.join(root, d.name), onEvent);
       cw.on('error', (err) => handleWatcherError(path.join(root, d.name), deps, err));
-      s.watchers.push(cw);
+      registerMounted(s, root, cw);
     } catch {
       // 单个子目录挂载失败不阻塞其它根。
     }
@@ -362,6 +403,52 @@ function scheduleRefresh(deps: CommandSourceWatcherDeps): void {
   if (s.debounceTimer && typeof s.debounceTimer.unref === 'function') s.debounceTimer.unref();
 }
 
+/**
+ * P2-D（UI13 批评审）：挂载对齐本次 commandSourceRoots——差集增量挂载/摘除。
+ * 旧实现挂载是启动快照：mountAll 仅 start/onConfigSaved/watcher 出错重挂三处触发，
+ * 清单动态增长（新项目首次使用进 listRecentWorkingDirs）后新根无 watch 句柄，其
+ * .claude/skills 变化不产生 fs 事件，契约 P8#4 对启动后新增目录静默失效。refreshFingerprints
+ * 每轮先经本函数对齐：
+ * - 新增根复用既有单根挂载 mountRoot（目录不存在 → pendingRoots 慢重试兜底，同一机制）；
+ * - 已消失根整根摘除：句柄按既有 close 清理路径关闭，pending 登记一并撤销（清单已不含该根，
+ *   慢重试循环对其重试无意义）。
+ * 前置约束：调用点与本函数全程同步执行（JS 单线程，无两次差集互踩）；pendingRoots 已登记的根
+ * 归慢重试循环管，此处按小写同键跳过，避免同根双 watch。大小写归一与 commandSourceRoots
+ * 去重口径一致（win32 不敏感）。
+ */
+function syncMountedRoots(deps: CommandSourceWatcherDeps, allRoots: string[]): void {
+  const s = state;
+  if (!s || s.stopped) return;
+  const currentKeys = new Set(allRoots.map((r) => r.toLowerCase()));
+  // 已消失根：关闭句柄并摘除登记。
+  for (const [key, ws] of [...s.mountedRoots]) {
+    if (currentKeys.has(key)) continue;
+    for (const w of ws) {
+      try {
+        w.close();
+      } catch {
+        // ignore：句柄可能已失效
+      }
+    }
+    s.mountedRoots.delete(key);
+  }
+  // 已消失根若尚在 pending 慢重试，一并撤销；清空后停掉低频循环（登记口径与 mountAll 对齐）。
+  for (const root of [...s.pendingRoots]) {
+    if (!currentKeys.has(root.toLowerCase())) s.pendingRoots.delete(root);
+  }
+  if (s.pendingRoots.size === 0 && s.pendingRetryTimer) {
+    clearInterval(s.pendingRetryTimer);
+    s.pendingRetryTimer = null;
+  }
+  // 新增根：增量挂载（已挂/已在 pending 的根跳过——pending 归慢重试循环，避免同根双 watch）。
+  const pendingKeys = new Set([...s.pendingRoots].map((r) => r.toLowerCase()));
+  for (const root of allRoots) {
+    const key = root.toLowerCase();
+    if (s.mountedRoots.has(key) || pendingKeys.has(key)) continue;
+    mountRoot(root, deps);
+  }
+}
+
 // hb10-CMD-V03：单调序号——并发 refresh 仅最新完成者写基线（乱序旧结果不覆盖新基线）。
 let refreshSeq = 0;
 
@@ -370,6 +457,10 @@ async function refreshFingerprints(deps: CommandSourceWatcherDeps): Promise<void
   if (!s || s.stopped) return;
   const mySeq = ++refreshSeq;
   const { userRoots, allRoots } = commandSourceRoots(deps);
+  // P2-D：挂载对齐本次清单（差集增量挂载/摘除）在指纹计算前完成——与上方 roots 解析同段
+  // 同步执行，不引入新 await 窗口；新根既有文件随本轮指纹进入基线（首拍只建基准不探测），
+  // 后续变化经 fs 事件正常触发刷新。旧实现只刷指纹不补挂载（启动快照）。
+  syncMountedRoots(deps, allRoots);
   const [allFp, userFp] = await Promise.all([
     computeCommandRootsFingerprint(allRoots),
     computeCommandRootsFingerprint(userRoots),
@@ -391,6 +482,12 @@ async function refreshFingerprints(deps: CommandSourceWatcherDeps): Promise<void
 function queueProbe(deps: CommandSourceWatcherDeps): void {
   const s = state;
   if (!s || s.stopped) return;
+  // UI13-P8（契约 #4/#7，R7 裁决）：指纹确认变化即广播 skills:projectDirsChanged——渲染层
+  // Skill tab 活跃时收到即重拉项目清单（廉价 fs 读）。01 已申报轻微过量：用户级 commands-only
+  // 变化也会触发一次项目清单重拉（幂等无害）。广播不受 skillAutoSync 门控（项目清单 fs 重拉
+  // ≠ 引擎重探）；全局引擎重探仍由下方 fireProbe→triggerGlobalProbe（index.ts 注入侧
+  // skillAutoSync 早退）门控，语义不回退。
+  deps.onProjectSkillsChanged?.();
   const now = Date.now();
   const wait = s.lastProbeStartedAt + WATCHER_PROBE_MIN_INTERVAL_MS - now;
   if (wait > 0) {

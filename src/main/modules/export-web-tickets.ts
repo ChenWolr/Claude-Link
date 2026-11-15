@@ -64,6 +64,10 @@ export function consumeTicket(ticket: string): TicketHit | null {
     return null;
   }
   rec.used = true;
+  // UI13-P11（条目 9）：命中即删（一次性语义更严格——消费后条目立即离场，不等 TTL 定时器；
+  // 二次消费同 ticket 直接查无 → null。过期/已用分支本就删，purgeJob/过期定时器对已删键
+  // 是 Map.delete 幂等 no-op）。
+  tickets.delete(ticket);
   if (typeof rec.content === 'string') {
     return { content: rec.content, mime: rec.mime ?? 'application/octet-stream', filename: rec.filename };
   }

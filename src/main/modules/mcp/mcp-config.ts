@@ -10,15 +10,17 @@
 //   - sanitizeMcpOverridesConfig(input: unknown): Record<string, 'off'>   【P1 本点已实现】
 //       配置读路径 sanitize：只保留 string 键且值 === 'off'，null 原型载体防 __proto__/constructor。
 //   - ParsedMcpEntry（type）                                               【P2 p9a 已导出】
-//   - parseMcpServersJson(text: string)                                    【P2 本点已实现】
-//       兼容 {"mcpServers":{...}} / 裸 map / {"servers":{...}} 三种导入形态。
+//   - parseMcpServersJson(text: string)                                    【P2 本点已实现；UI13-P9 扩展】
+//       兼容 {"mcpServers":{...}} / 裸 map / {"servers":{...}} 三种导入形态；ok:true 载荷
+//       附 skipped（条目级跳过明细 name+中文原因）与 fieldNotes（args/env 字段级忽略提示）。
 //   - toSdkMcpServerConfig(s)                                              【P2 本点已实现】
 //       McpManagedServer 形状 → SDK Settings.mcpServers 条目（stdio/http/sse 三形）。
 //   - mergeMcpServersForSession(input)                                     【P2 本点已实现】
 //       user → project → managed 三层合并 + override 过滤（同名优先级 managed > project > user）。
-//   - normalizeMcpEntry(name, rawCfg)                                      【P3 本点提炼导出】
-//       单条磁盘/导入条目 unknown → ParsedMcpEntry | null（parseMcpServersJson 内部逻辑提炼，
-//       mcp-scanner 的 raw 读取器复用同一归一；行为与提炼前逐条一致）。
+//   - normalizeMcpEntry(name, rawCfg)                                      【P3 本点提炼导出；UI13-P9 判别返回】
+//       单条磁盘/导入条目 unknown → NormalizeMcpEntryResult（ok:true 携带 entry [+fieldNotes
+//       字段级忽略提示]；ok:false 携带 name+中文跳过原因；mcp-scanner 消费侧 .ok 判别，
+//       归一判定与提炼前逐条一致）。
 //   - MCP_MASK_SENTINEL / maskMcpServersForRenderer / McpManagedSaveEntry /
 //     restoreMaskedMcpServers                                                【r3 修复 F2 已实现】
 //       §1.3 渲染层脱敏闭环：renderer 出口掩码（config:get/save 回包 env/headers 值 → 哨兵）
@@ -186,20 +188,35 @@ function urlPathEndsWithSse(url: string): boolean {
 }
 
 /**
+ * 单条条目归一的判别返回（UI13-P9「跳过原因可见」）：ok=false 携带中文跳过原因与可识别的
+ * 条目名（map 键原样透传——rawCfg 非对象时 name 也取键，渲染层可展示「将跳过：<name>」）；
+ * ok=true 携带归一条目，args/env 字段级非法时附加 fieldNotes（条目仍导入、仅丢字段——
+ * 2026-11-14 裁决 R6：字段级非法=提示级，不构成跳过；scanner 消费侧只看 ok 分支）。
+ */
+export type NormalizeMcpEntryResult =
+  | { ok: true; entry: ParsedMcpEntry; fieldNotes?: string[] }
+  | { ok: false; reason: string; name: string };
+
+/**
  * 单条条目归一（P3 从 parseMcpServersJson 的条目循环原样提炼，供 mcp-scanner 的 raw 读取器
- * 与本函数共用同一归一口径；行为与提炼前逐条一致，null 即「跳过该条目」）：
- *   - rawCfg 非普通对象（标量/null/数组）→ null；
+ * 与本函数共用同一归一口径；UI13-P9 起返回判别形态，跳过原因显式携带——扫描器消费侧
+ * `.ok ? .entry : null` 与提炼前 null 语义逐条等价，归一判定本身零变化）：
+ *   - rawCfg 非普通对象（标量/null/数组）→ ok:false「条目不是对象」；
  *   - transport 判定：显式 type 优先（'stdio'→stdio；'http'|'streamable-http'→http；'sse'→sse）；
  *     type 缺失或无法识别 → command/url 启发式（有 command→stdio；否则有 url→路径 /sse 结尾→sse
- *     否则 http；两无线索 → null）；
+ *     否则 http；两无线索 → ok:false「无法识别传输类型（缺少 command/url）」）；
  *   - 字段互斥归一（与 sanitizeMcpServersConfig 同款）：按 transport 只拷贝所属侧字段——stdio 只留
  *     command/args/env、remote 只留 url/headers；args 非全字符串数组→丢字段；env/headers 值级清洗
  *    （pickStringRecord）：非普通对象或清洗后无合法 string 值→丢字段；command/url 空串同「缺失」
- *    （必填缺失 → null）。timeoutMs 合法（isValidMcpTimeoutMs 口径）才透传、非法丢弃（2026-10-19
- *    点1：JSON 模式回填与探活 per-entry 超时的数据源；不进 SDK 注入链）。name 取 map 键原样透传。
+ *    （必填缺失 → ok:false「stdio 服务器缺少 command」/「http/sse 服务器缺少 url」）。
+ *    UI13-P9：args 非字符串数组 / env 含非字符串值（含 env 整体非对象）→ 字段照旧丢弃、
+ *    条目照常返回，ok 分支附加 fieldNotes 中文提示（「该字段已忽略」义）供渲染层提示级展示。
+ * timeoutMs 合法（isValidMcpTimeoutMs 口径）才透传、非法丢弃（2026-10-19 点1：JSON 模式回填与
+ * 探活 per-entry 超时的数据源；不进 SDK 注入链）。name 取 map 键原样透传（名称合法性校验在
+ * parseMcpServersJson 解析侧——扫描器读路径不加名称校验，行为与提炼前逐条等价）。
  */
-export function normalizeMcpEntry(name: string, rawCfg: unknown): ParsedMcpEntry | null {
-  if (!isPlainObject(rawCfg)) return null;
+export function normalizeMcpEntry(name: string, rawCfg: unknown): NormalizeMcpEntryResult {
+  if (!isPlainObject(rawCfg)) return { ok: false, reason: '条目不是对象', name };
   const cfg = rawCfg as Record<string, unknown>;
   // transport 判定：显式 type 优先；缺失或无法识别 → command/url 启发式。
   let transport: 'stdio' | 'http' | 'sse' | null = null;
@@ -211,37 +228,62 @@ export function normalizeMcpEntry(name: string, rawCfg: unknown): ParsedMcpEntry
     const url = typeof cfg.url === 'string' && cfg.url !== '' ? cfg.url : null;
     if (command !== null) transport = 'stdio';
     else if (url !== null) transport = urlPathEndsWithSse(url) ? 'sse' : 'http';
-    else return null; // 无 type 且 command/url 两无线索 → 跳过该条目（不报错）
+    else return { ok: false, reason: '无法识别传输类型（缺少 command/url）', name }; // 两无线索 → 跳过该条目
   }
   // 字段互斥归一（与 sanitizeMcpServersConfig 同款）：按 transport 只拷贝所属侧字段。
   if (transport === 'stdio') {
     const command = typeof cfg.command === 'string' && cfg.command !== '' ? cfg.command : null;
-    if (command === null) return null; // stdio 必填 command 缺失/空串 → 跳过该条目
+    if (command === null) return { ok: false, reason: 'stdio 服务器缺少 command', name }; // 必填缺失/空串 → 跳过该条目
     const entry: ParsedMcpEntry = { name, transport, command };
+    const fieldNotes: string[] = [];
     if (Array.isArray(cfg.args) && cfg.args.every((a) => typeof a === 'string')) entry.args = cfg.args;
+    else if (Object.prototype.hasOwnProperty.call(cfg, 'args')) {
+      // UI13-P9（裁决 R6）：字段级非法=提示级，条目仍导入，仅丢该字段（现状清洗语义不变）。
+      fieldNotes.push('args 不是字符串数组（该字段已忽略，其余字段仍导入）');
+    }
     const env = pickStringRecord(cfg.env);
     if (env !== undefined) entry.env = env;
+    if (
+      Object.prototype.hasOwnProperty.call(cfg, 'env')
+      && !(isPlainObject(cfg.env) && Object.keys(cfg.env as Record<string, unknown>).length === 0)
+      && (env === undefined || Object.values(cfg.env as Record<string, unknown>).some((v) => typeof v !== 'string'))
+    ) {
+      // UI13-P9：env 整体非法（非对象/值全非法）或含部分非法键（合法键照常保留）→ 提示级；
+      // env 缺省或空对象 {}（无非法内容）不提示。
+      fieldNotes.push('env 含非字符串值（已忽略非法键）');
+    }
     if (isValidMcpTimeoutMs(cfg.timeoutMs)) entry.timeoutMs = cfg.timeoutMs; // 点1：合法才透传
-    return entry;
+    return fieldNotes.length > 0 ? { ok: true, entry, fieldNotes } : { ok: true, entry };
   }
   const url = typeof cfg.url === 'string' && cfg.url !== '' ? cfg.url : null;
-  if (url === null) return null; // http/sse 必填 url 缺失/空串 → 跳过该条目
+  if (url === null) return { ok: false, reason: 'http/sse 服务器缺少 url', name }; // 必填缺失/空串 → 跳过该条目
   const entry: ParsedMcpEntry = { name, transport, url };
   const headers = pickStringRecord(cfg.headers);
   if (headers !== undefined) entry.headers = headers;
   if (isValidMcpTimeoutMs(cfg.timeoutMs)) entry.timeoutMs = cfg.timeoutMs; // 点1：合法才透传
-  return entry;
+  return { ok: true, entry };
 }
 
 /**
  * 导入 JSON / 磁盘直读解析（P7 导入弹窗、P3 扫描器的数据源侧归一）。
  * 兼容三种形态（依次尝试）：① {"mcpServers":{…}}（Claude Desktop/Cursor/Windsurf）
  * ② 裸 {名称:配置} map ③ {"servers":{…}}（VS Code）。
- * 失败形态（JSON.parse 失败 / 根非对象 / 三形态都取不到合法 map）→ {ok:false, error:中文消息}。
- * 条目级容错：单条 transport 判不出 / 必填缺失 → 仅跳过该条目，不整体失败（name 取 map 键；
- * 单条归一逻辑见 normalizeMcpEntry——本函数只负责形态识别与条目循环）。
+ * 失败形态（JSON.parse 失败 / 根非对象 / 三形态都取不到合法 map）→ {ok:false, error:中文消息}
+ * （三条文案逐字节钉住：selftest B 组 + tdd-mcp-import-skip-visible-verify T9-F）。
+ * 条目级容错（UI13-P9 跳过原因可见）：单条 transport 判不出 / 必填缺失 / 名称非法 → 仅跳过
+ * 该条目不整体失败，跳过明细进 skipped（name=map 键 + 中文原因；同名去重首个原因胜出——
+ * map 键本应唯一，防御 JSON 载体键唯一性之外的重复）；args/env 字段级非法（裁决 R6：字段
+ * 丢弃、条目仍导入）进 fieldNotes 提示级。全部条目被跳过时 ok 仍 true + servers 空 + skipped
+ * 携带（报错文案由渲染层组合，主进程不造新错误分支——selftest B 组钉的 ok:false 文案不破）。
+ * 名称合法性（MCP_SERVER_NAME_PATTERN，与渲染层 NAME_PATTERN / sanitize 同一口径）在本解析侧
+ * 校验——扫描器读路径（normalizeMcpEntry 消费）不加名称校验，读行为零变化。
  */
-export function parseMcpServersJson(text: string): { ok: true; servers: ParsedMcpEntry[] } | { ok: false; error: string } {
+export function parseMcpServersJson(text: string): {
+  ok: true;
+  servers: ParsedMcpEntry[];
+  skipped: Array<{ name: string; reason: string }>;
+  fieldNotes: Array<{ name: string; reason: string }>;
+} | { ok: false; error: string } {
   let root: unknown;
   try {
     root = JSON.parse(text);
@@ -270,11 +312,31 @@ export function parseMcpServersJson(text: string): { ok: true; servers: ParsedMc
   }
 
   const servers: ParsedMcpEntry[] = [];
+  const skipped: Array<{ name: string; reason: string }> = [];
+  const fieldNotes: Array<{ name: string; reason: string }> = [];
+  const seenSkipped = new Set<string>(); // 同名去重：首个原因胜出（防御性——map 键本应唯一）
   for (const [name, rawCfg] of Object.entries(map)) {
-    const entry = normalizeMcpEntry(name, rawCfg);
-    if (entry) servers.push(entry);
+    if (!MCP_SERVER_NAME_PATTERN.test(name)) {
+      if (!seenSkipped.has(name)) {
+        seenSkipped.add(name);
+        skipped.push({ name, reason: '名称非法（仅限字母/数字/下划线/连字符，1-64 字符）' });
+      }
+      continue;
+    }
+    const normalized = normalizeMcpEntry(name, rawCfg);
+    if (!normalized.ok) {
+      if (!seenSkipped.has(name)) {
+        seenSkipped.add(name);
+        skipped.push({ name, reason: normalized.reason });
+      }
+      continue;
+    }
+    servers.push(normalized.entry);
+    for (const note of normalized.fieldNotes ?? []) {
+      fieldNotes.push({ name: normalized.entry.name, reason: note });
+    }
   }
-  return { ok: true, servers };
+  return { ok: true, servers, skipped, fieldNotes };
 }
 
 /**

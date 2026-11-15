@@ -307,7 +307,13 @@ export function getConfig(): AppConfig {
     maxTurns: sanitizeMaxTurns(config.maxTurns),
     queueEnabled: config.queueEnabled ?? false,
     taskDelayMinutes: sanitizeTaskDelayMinutes(config.taskDelayMinutes),
-    themePaletteId: config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID,
+    // 墨石默认切换（2026-11-08 方案C 墨石 Slate · A1，裁决②）：存量 warm-paper（旧默认值）读路径
+    // 一次性内存映射到新默认 inkstone——不写回 settings.json（下次任意保存自然落盘）；其余存值
+    // （其他合法板 id / 脏值）原样透传，维持「?? 只兜空值」的现状行为，最小影响面。
+    themePaletteId:
+      config.themePaletteId === 'warm-paper'
+        ? DEFAULT_THEME_PALETTE_ID
+        : (config.themePaletteId ?? DEFAULT_THEME_PALETTE_ID),
     fontScale: config.fontScale ?? DEFAULT_FONT_SCALE,
     defaultThinkingLevel,
     // 引擎后台请求六开关收敛：默认全开（?? true 兜底，UI 已隐藏）；存量配置显式 false 优先。

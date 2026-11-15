@@ -54,3 +54,17 @@ export function formatSentAt(iso: string | null | undefined): string {
   }
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
+
+/** C6（UI 补全，slate-ui-completion-1108-1428）：中断回合脚注「结束于」分钟级单源
+ *  （正常回合仍用 formatEndedAt 的 HH:mm:ss 口径，其签名被 tdd-user-message-time S2 钉死勿动）。
+ *  与 formatSentAt 同分钟级口径：当天 HH:mm，跨天 M/d HH:mm；无效值返回空串（诚实不造数）。 */
+export function formatEndedAtMinute(ts: number | null | undefined, now: number = Date.now()): string {
+  if (ts == null || !Number.isFinite(ts) || ts <= 0) return '';
+  const d = new Date(ts);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  const sameDay = new Date(now).toDateString() === d.toDateString();
+  if (!sameDay) {
+    return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}

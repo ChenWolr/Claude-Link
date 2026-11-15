@@ -56,20 +56,20 @@ function serializeCompact(value: unknown): string {
 }
 
 /**
- * 单服务器导出 JSON 文本（点 5「切到 JSON」方向的数据源）：顶层形如
- * `{"<name>": { …单条… }}`，对象层级（根 + 条目两级）2 空格缩进 + 末尾换行；字段序固定
+ * 单服务器导出 JSON 文本（点 5「切到 JSON」方向的数据源；UI13-P10 起恒为可导入形）：恒为
+ * `{"mcpServers":{"<name>": { …单条… }}` 包裹形（与导入格式/作用域级导出同构），缩进层级
+ * root 0 / "mcpServers" 2 / "<name>" 4 / 字段 6 + 末尾换行；字段序固定
  * `type, command, args, env, url, headers, timeoutMs`，按 transport 互斥取侧（stdio 形无
  * url/headers 键；http/sse 形无 command/args/env 键）；空 args([])/env({})/headers({})
  * 省略键；description 一律不导出（对齐 ZCode：仅连接语义字段）；env/headers 值原样输出
- *（哨兵 •••••••• 即字面输出）；timeoutMs 仅合法值（isValidTimeoutMs 口径）输出。
+ *（哨兵 •••••••• 即字面输出——完整可导入 JSON 走列表卡片「导出此服务器」的主进程明文链）；
+ * timeoutMs 仅合法值（isValidTimeoutMs 口径）输出。
  * 数组与嵌套对象（args/env/headers）呈单行紧凑形态（JSON.stringify(…, null, 2) 会把数组
- * 逐行展开，与字面期望不符——故自拼序列化，K1 字面比对为准绳）。输出为合法 JSON，可被
- * parseMcpServersJson 的裸 map 形态回读（K5 往返一致）。
- * 例外（P3 跟进 R4）：name 恰为保留键 'mcpServers'/'servers' 时改用
- * `{"mcpServers":{"<name>":{…}}}` 包裹形（缩进层级随之递增 2 空格：root 0 / "mcpServers" 2 /
- * "<name>" 4 / 字段 6）——否则裸 map 顶层键会被 parseMcpServersJson 的保留键分支吞掉
- *（ok:true, servers:[] →「未找到有效的服务器配置」）；包裹形经三形态解析的 mcpServers 分支
- * 回读同名条目（K7 往返断言）。其余名字维持裸 map 逐字节不变。
+ * 逐行展开，与字面期望不符——故自拼序列化，K1 字面比对为准绳）。输出为合法 JSON，经
+ * parseMcpServersJson 三形态解析的 mcpServers 分支回读（K5 往返一致）。
+ * 保留键名（UI13-P10 合流，原 P3 跟进 R4 双形态裁撤）：name 为 'mcpServers'/'servers' 时
+ * 裸 map 顶层键会被 parseMcpServersJson 保留键分支吞掉（ok:true, servers:[]）——恒包裹形下
+ * `"mcpServers": { "mcpServers": {...} }` 合法可回读，保留名与普通名同形无特例（K7 断言）。
  */
 export function buildSingleServerExportJson(input: SingleServerExportInput): string {
   const entry: Record<string, unknown> = { type: input.transport };
@@ -84,14 +84,9 @@ export function buildSingleServerExportJson(input: SingleServerExportInput): str
   if (isValidTimeoutMs(input.timeoutMs)) entry.timeoutMs = input.timeoutMs;
 
   const fields = Object.entries(entry);
-  // 字段行拼装两形态共享：缩进随包裹层级传参（裸形 4 空格 / 包裹形 6 空格），末字段无逗号。
+  // 字段行拼装：缩进恒为包裹形 6 空格，末字段无逗号。
   const fieldLines = (indent: string): string[] =>
     fields.map(([key, value], i) => `${indent}${JSON.stringify(key)}: ${serializeCompact(value)}${i < fields.length - 1 ? ',' : ''}`);
-  // P3 跟进 R4：保留键名的裸 map 顶层键会被 parseMcpServersJson 保留键分支吞掉 →
-  // 改用 mcpServers 包裹形（回读走三形态解析的 mcpServers 分支，K7 往返断言）。
-  if (input.name === 'mcpServers' || input.name === 'servers') {
-    const inner = [`    ${JSON.stringify(input.name)}: {`, ...fieldLines('      '), '    }'];
-    return ['{', '  "mcpServers": {', ...inner, '  }', '}'].join('\n') + '\n';
-  }
-  return ['{', `  ${JSON.stringify(input.name)}: {`, ...fieldLines('    '), '  }', '}'].join('\n') + '\n';
+  const inner = [`    ${JSON.stringify(input.name)}: {`, ...fieldLines('      '), '    }'];
+  return ['{', '  "mcpServers": {', ...inner, '  }', '}'].join('\n') + '\n';
 }

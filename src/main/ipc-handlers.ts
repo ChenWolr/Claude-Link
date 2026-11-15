@@ -83,6 +83,7 @@ import {
   runTaskNow,
   resumeAllTasks,
   getQueueOverview,
+  broadcastTasksChanged,
   onQueueEnabledChanged,
   drainCountdownIfNoRunnable,
   cleanupQueue,
@@ -513,9 +514,17 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 与证据扫描/command-source-watcher 同源）——advancedJson.env 覆盖 home 时映射不再扫错根；
     // 无覆盖时二者同值，行为不变。undefined 回退宿主 home（按函数语义核对）。
     const userDirNames = await collectUserSkillDirNames(path.join(effectiveUserHome() ?? os.homedir(), '.claude', 'skills'));
+    // UI13-P8（契约 #3）：目录源扩为 最近工作区 ∪ 会话 distinct 工作目录（listRecentWorkingDirs，
+    // normalizeDirKey 去重、保序 recent 在前）∪ 默认目录（下方 defaultDir）——总量封顶 20
+    //（会话内 agent 自建 skill 的目录必然进清单）；sessionCounts 仍为展示元数据（每目录会话计数）。
+    const recent = listRecentWorkspaces();
+    const seen = new Set(recent.map(normalizeDirKey));
+    const sessionDirs = sessionRepo.listRecentWorkingDirs(20).filter((d) => !seen.has(normalizeDirKey(d)));
+    const dirCap = 20;
+    const recentDirs = [...recent, ...sessionDirs].slice(0, dirCap);
     return {
       dirs: await collectSkillProjectDirs({
-        recentDirs: listRecentWorkspaces(),
+        recentDirs,
         defaultDir: getConfig().workingDirectory ?? null,
         sessionCounts: sessionRepo.listWorkingDirCounts(),
       }),
@@ -816,10 +825,12 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // §1.3 渲染层零明文：JSON 文本全程不出主进程，渲染层只拿 count / 票据 URL；导出含全部定义（启停
   // 是 Claude Link 专属 override，非标准字段，不参与导出）。project 的 dir 白名单校验与
   // WRITE_SCOPED 同源（已知项目目录集，防任意路径读探测）；count = 0 时不动剪贴板也不签票据
-  //（渲染层按钮已按空表禁用，防御性兜底）。
+  //（渲染层按钮已按空表禁用，防御性兜底）。UI13-P10 起 body 可携带可选 name：存在=单服务器
+  // 导出（收窄后产物同构 {"mcpServers":{"<name>":{…}}}，count 恒 1，桌面/网页两路径零新逻辑），
+  // 缺省=整作用域导出（下方行为逐字节不变）。
   regInvokeHandler(IPC_CHANNELS.MCP_EXPORT_SCOPED, async (event, body: unknown): Promise<{ ok: true; count: number; downloadUrl?: string }> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP export payload');
-    const req = body as { scope?: unknown; dir?: unknown };
+    const req = body as { scope?: unknown; dir?: unknown; name?: unknown };
     if (req.scope !== 'managed' && req.scope !== 'user' && req.scope !== 'project') throw new Error('Invalid MCP export scope');
     let dir: string | undefined;
     if (req.scope === 'project') {
@@ -832,7 +843,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 明文数据源按作用域现取（不缓存导出内容）；入参形态均为 toSdkMcpServerConfig 兼容形状。
     let servers: Parameters<typeof buildMcpServersExportJson>[0];
     if (req.scope === 'managed') {
-      servers = {};
+      // null 原型载体：__proto__ 名服务器经计算键落 own 属性（{} 字面量会触发 Object.prototype
+      // 的 __proto__ setter——键落原型槽位：count=Object.keys 漏计、单服务器导出误报「目标服务
+      // 器不存在」，UI13 评审 P3-4）。与 raw 读取器（mcp-scanner）/导出投影（mcp-config）载体同款口径。
+      servers = Object.create(null);
       for (const server of getConfig().mcpServers) servers[server.name] = server;
     } else if (req.scope === 'user') {
       servers = readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir());
@@ -840,8 +854,23 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // req.scope === 'project'（上方已校验 dir 属已知目录集）
       servers = readProjectMcpServersRawSync(dir as string);
     }
-    const count = Object.keys(servers).length;
+    let count = Object.keys(servers).length;
     if (count === 0) return { ok: true, count: 0 };
+    // UI13-P10 单服务器导出（载荷超集，缺省=整作用域导出、既有语义零变化）：name 存在 → 校验
+    // 非空字符串且在当前作用域 servers 键集内（陈旧卡片名——已删/改名——抛中文错，渲染层 toast），
+    // 命中后收窄为单键 map（null 载体防 __proto__ 计算键置原型——与 raw 读取器载体同款口径），
+    // count 恒 1；导出产物与作用域级同构 {"mcpServers":{"<name>":{…}}}（buildMcpServersExportJson
+    // 同一函数，明文真值——user/project 读 raw、managed 读 config store，链路零改动）。
+    const reqName = req.name;
+    if (reqName !== undefined) {
+      if (typeof reqName !== 'string' || reqName === '' || !Object.prototype.hasOwnProperty.call(servers, reqName)) {
+        throw new Error('目标服务器不存在');
+      }
+      const narrowed = Object.create(null) as typeof servers;
+      narrowed[reqName] = servers[reqName];
+      servers = narrowed;
+      count = 1;
+    }
     const json = buildMcpServersExportJson(servers);
     if (event === null) {
       // 网页路径（唯一来源 = invokeFromWeb）：一次性票据下载，不写桌面主机剪贴板（远控语义修正）。
@@ -1547,6 +1576,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       payload.attachmentIds,
       payload.clientMessageId,
     );
+    // UI13-P1：落库成功即广播全量 pending 列表（他端跨端同步；抛错路径不广播）。
+    broadcastTasksChanged(sessionId, mainWindow);
     return { task, tasks: pendingTasksOf(sessionId) };
   });
 
@@ -1563,6 +1594,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     const attachmentIds = taskRepo.deleteTask(taskId);
     await cleanupDetachedAttachments(attachmentIds);
     if (task) drainCountdownIfNoRunnable(task.sessionId, mainWindow);
+    // UI13-P1：删除成功即广播（空列表合法——删到最后一个任务）。
+    broadcastTasksChanged(task.sessionId, mainWindow);
     return task ? pendingTasksOf(task.sessionId) : [];
   });
 
@@ -1573,6 +1606,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   // 拖拽排序：只改执行顺序（到期取谁），不触碰倒计时。
   regInvokeHandler(IPC_CHANNELS.TASK_REORDER, async (_event, sessionId: string, taskIds: string[]) => {
     taskRepo.reorderTasks(sessionId, taskIds);
+    broadcastTasksChanged(sessionId, mainWindow);
     return pendingTasksOf(sessionId);
   });
 
@@ -1589,13 +1623,19 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     } else {
       armFromUserAction(task.sessionId, mainWindow);
     }
+    // UI13-P1：暂停/恢复落库成功后广播（恢复路径 arm 的 countdown_started/state_changed
+    // 与本事件并存无冲突——前者改 queueState、后者整替 tasks）。
+    broadcastTasksChanged(task.sessionId, mainWindow);
     return pendingTasksOf(task.sessionId);
   });
 
   // Queue（v3）
   // 立即执行：跳过倒计时立即出队（非队首=插队）；守卫失败抛错 → 渲染层 notice。
   regInvokeHandler(IPC_CHANNELS.TASK_RUN_NOW, async (_event, taskId: string) => {
-    return runTaskNow(taskId, mainWindow);
+    const overview = runTaskNow(taskId, mainWindow);
+    // UI13-P1：runTaskNow 返回后广播（内部已插队到首位 + 解除暂停，列表已变）。
+    broadcastTasksChanged(overview.state.sessionId, mainWindow);
+    return overview;
   });
 
   // D 点：后台任务（task_* 编排）终态输出文件只读。入参对象载荷 { outputFile }：
@@ -1641,7 +1681,10 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
 
   // 熔断提示行「全部恢复」：全部 paused→pending + 立即开始全量倒计时。
   regInvokeHandler(IPC_CHANNELS.QUEUE_RESUME_ALL, async (_event, sessionId: string) => {
-    return resumeAllTasks(sessionId, mainWindow);
+    const overview = resumeAllTasks(sessionId, mainWindow);
+    // UI13-P1：paused→pending 全量翻转后广播（arm 的倒计时事件与本事件并存无冲突）。
+    broadcastTasksChanged(sessionId, mainWindow);
+    return overview;
   });
 
   // 面板全量数据：状态 + pending 任务 + 本次已执行历史。

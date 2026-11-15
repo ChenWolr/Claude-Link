@@ -118,8 +118,10 @@ function readMcpServersFileSyncDetail(file: string): { data: Record<string, Pars
   const table = extractMcpServersTable(root);
   if (!table) return { data: out, unreadable: false, readFailed: false };
   for (const [name, rawCfg] of Object.entries(table)) {
-    const entry = normalizeMcpEntry(name, rawCfg);
-    if (entry) out[name] = entry;
+    // UI13-P9：normalizeMcpEntry 改判别返回（携带跳过原因）——读路径仍只看 ok 分支，
+    // `.ok ? .entry : null` 与提炼前 null 语义逐条等价（扫描器不展示跳过原因，行为零变化）。
+    const normalized = normalizeMcpEntry(name, rawCfg);
+    if (normalized.ok) out[name] = normalized.entry;
   }
   return { data: out, unreadable: false, readFailed: false };
 }
@@ -268,8 +270,9 @@ async function collectUserServers(
   if (table) {
     const servers: McpScopedServerView[] = [];
     for (const [name, rawCfg] of Object.entries(table)) {
-      const entry = normalizeMcpEntry(name, rawCfg);
-      if (entry) servers.push(toMaskedView(entry, 'user'));
+      // UI13-P9 判别返回适配（同 readMcpServersFileSyncDetail：只看 ok 分支，行为等价）。
+      const normalized = normalizeMcpEntry(name, rawCfg);
+      if (normalized.ok) servers.push(toMaskedView(normalized.entry, 'user'));
     }
     return { servers };
   }
@@ -341,8 +344,9 @@ async function collectProjectDirsInto(
     const table = extractMcpServersTable(root);
     if (!table) continue; // 无 mcpServers 键（或表非对象）→ servers=[]（正常态）
     for (const [name, rawCfg] of Object.entries(table)) {
-      const entry = normalizeMcpEntry(name, rawCfg);
-      if (entry) view.servers.push(toMaskedView(entry, 'project'));
+      // UI13-P9 判别返回适配（同上：只看 ok 分支，行为等价）。
+      const normalized = normalizeMcpEntry(name, rawCfg);
+      if (normalized.ok) view.servers.push(toMaskedView(normalized.entry, 'project'));
     }
   }
   return out;

@@ -62,6 +62,11 @@ export const IPC_CHANNELS = {
   // 项目级 Skill 管理左栏数据（方案 B 双栏 master-detail）：最近工作区 ∪ 默认工作区（存在性过滤）
   // + 每目录直读 .claude\skills\<子目录>\SKILL.md 的项目 Skill 全集 + 会话计数。只读、无副作用。
   SKILL_PROJECT_DIRS_GET: 'skills:projectDirsGet',
+  // UI13-P8 主→渲染推送：项目 Skill 目录清单/内容变化信号（command-source-watcher 指纹变化
+  // 即广播；空载荷 {}，渲染层 Skill tab 活跃时收到即重拉 SKILL_PROJECT_DIRS_GET）。广播不受
+  // skillAutoSync 门控（项目清单 fs 重拉 ≠ 引擎重探）；桌面/网页渲染层同代码同生效
+  //（WORKSPACES_CHANGED 同款推送形态）。
+  SKILL_PROJECT_DIRS_CHANGED: 'skills:projectDirsChanged',
   // MCP 管理（设置页 MCP Tab）四通道（docs/plans/2026-10-12-mcp-management-plan.md §2 P4）。
   // SNAPSHOT_GET：无参 invoke → McpSnapshot（{ userServers, projectDirs, userScopeError? }，
   //   用户级/项目级只读脱敏视图，env/headers 只回 key 列表）；现查无副作用（同上先例）。
@@ -480,6 +485,8 @@ export interface NativeSettingsDiagnostic {
 // task_settled 是中断路径（无 result）渲染层更新历史/收口 sending 的唯一信号。
 // queue_auto_resumed（X10 followup）：自愈恢复（主进程内部 resumeAllPending，不经 IPC 返回值）
 // 后的渲染层 paused 翻转信号——与 queue_halted 的置 true 完全对称。
+// tasks_changed（UI13-P1）：任务列表跨端同步——任一端 CRUD 成功后广播该会话最新全量 pending
+// 列表（data.tasks），渲染层整体替换 tasks（含顺序与暂停态）。
 export type QueueEventType =
   | 'countdown_started'
   | 'countdown_tick'
@@ -488,7 +495,8 @@ export type QueueEventType =
   | 'task_settled'
   | 'queue_halted'
   | 'queue_auto_resumed'
-  | 'user_message_created';
+  | 'user_message_created'
+  | 'tasks_changed';
 
 export interface QueueEventPayload {
   sessionId: string;

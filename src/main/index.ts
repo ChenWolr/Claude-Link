@@ -13,6 +13,9 @@ import { detectCli } from './modules/cli-detector';
 import { ensureProviderMigration, migrateLegacyContextWindowOverridesToProfiles, getConfig, onConfigSaved } from './modules/config-manager';
 import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe, cancelAllCommandProbes, cancelAllPostTurnProbes, effectiveUserHome } from './modules/sdk-backend';
 import { startCommandSourceWatcher, stopCommandSourceWatcher } from './modules/command-source-watcher';
+import { listRecentWorkspaces } from './modules/workspace-history';
+import { listRecentWorkingDirs } from './database/repositories/session-repo';
+import { normalizeDirKey } from '../shared/project-skills';
 import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
 import {
@@ -275,6 +278,20 @@ function startGlobalCommandPipeline(): void {
     triggerGlobalProbe: () => {
       if (!getConfig().skillAutoSync) return true;
       return mainWindow ? runGlobalCommandProbe(mainWindow) : false;
+    },
+    // UI13-P8：项目 skill 目录清单（与 SKILL_PROJECT_DIRS_GET 同源口径：最近工作区 ∪ 会话
+    // distinct 工作目录去重封顶 20 ∪ 默认目录）——watcher 据此对每目录 .claude/skills 建监听。
+    getProjectSkillDirs: () => {
+      const recent = listRecentWorkspaces();
+      const seen = new Set(recent.map(normalizeDirKey));
+      const dirs = [...recent, ...listRecentWorkingDirs(20).filter((d) => !seen.has(normalizeDirKey(d)))].slice(0, 20);
+      const def = getConfig().workingDirectory;
+      return dirs.concat(def && !seen.has(normalizeDirKey(def)) ? [def] : []);
+    },
+    // UI13-P8（R7 裁决）：项目清单变更广播不受 skillAutoSync 门控（项目清单 fs 重拉 ≠ 引擎
+    // 重探）——渲染层 Skill tab 活跃时收到即重拉；重探门控在上方 triggerGlobalProbe 既有早退。
+    onProjectSkillsChanged: () => {
+      if (mainWindow) pushToMainWindow(IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED, {});
     },
     onConfigSaved,
     logger,

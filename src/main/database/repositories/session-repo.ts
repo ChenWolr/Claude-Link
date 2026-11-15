@@ -270,6 +270,14 @@ export function listWorkingDirCounts(): Map<string, number> {
   return new Map(rows.map((r) => [r.dir, r.c]));
 }
 
+/** UI13-P8：会话表 distinct 工作目录（按最近活动 MAX(updated_at) DESC，限量）。 */
+export function listRecentWorkingDirs(limit = 20): string[] {
+  const rows = getConnection()
+    .prepare("SELECT working_dir AS dir, MAX(updated_at) AS latest FROM sessions WHERE working_dir IS NOT NULL AND working_dir != '' GROUP BY working_dir ORDER BY latest DESC LIMIT ?")
+    .all(limit) as Array<{ dir: string }>;
+  return rows.map((r) => r.dir);
+}
+
 export function searchSessions(query: string): Session[] {
   const normalizedQuery = normalizeSearchText(query);
   const sessions = listSessions();

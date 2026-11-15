@@ -39,7 +39,7 @@ export function extractLastEffortFromText(tailText: string): string | null {
 
 /**
  * CLI 会话项目目录名 munge：cwd 逐字符把非 [A-Za-z0-9] 替换为 '-'（与 Claude Code 落盘一致，
- * 实测：D:\software\code\claude-link → D--software-code-claude-link；
+ * 实测：Windows 盘符路径（如 C:\demo\my-proj）→ C--demo-my-proj 形式；
  *       C:\Users\...\Temp\claude-probe-cwd → C--Users-...-Temp-claude-probe-cwd）。
  */
 export function mungeProjectDirName(cwd: string): string {

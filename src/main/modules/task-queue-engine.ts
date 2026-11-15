@@ -524,6 +524,13 @@ export function getQueueOverview(sessionId: string): QueueOverview {
   };
 }
 
+/** UI13-P1：任务列表跨端同步——CRUD 成功后广播该会话最新全量 pending 列表。 */
+export function broadcastTasksChanged(sessionId: string, mainWindow: BrowserWindow): void {
+  emitQueueEvent(mainWindow, sessionId, 'tasks_changed', undefined, {
+    tasks: taskRepo.getTasksBySession(sessionId).filter((t) => t.status === 'pending'),
+  });
+}
+
 /** 会话删除：清全部五张 per-session Map（generations 键直接删除，代际比对恒过 0===0，旧 child 迟到 exit 由 isQueueGenerationActive 的会话存在性子句兜底失效）。 */
 export function cleanupQueue(sessionId: string): void {
   generations.set(sessionId, getQueueGeneration(sessionId) + 1);

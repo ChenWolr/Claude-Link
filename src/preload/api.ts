@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（115 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（117 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -121,10 +121,14 @@ export interface McpWriteScopedPayload {
 
 /** mcp:exportScoped 请求体：导出当前作用域全部服务器定义为 {"mcpServers":{…}} JSON 并由
  *  主进程写入系统剪贴板（§1.3 渲染层零明文——JSON 与 env/headers 明文不出主进程，回包只有
- *  count）。project 的 dir 必填，须属已知项目目录集（主进程与 writeScoped 同源校验）。 */
+ *  count）。project 的 dir 必填，须属已知项目目录集（主进程与 writeScoped 同源校验）。
+ *  UI13-P10：可选 name——缺省=整作用域导出；存在=单服务器导出（产物同构
+ *  {"mcpServers":{"<name>":{…}}}，count 恒 1；name 须为该作用域现存服务器名，否则主进程
+ *  throw「目标服务器不存在」）。 */
 export interface McpExportScopedPayload {
   scope: 'managed' | 'user' | 'project';
   dir?: string;
+  name?: string;
 }
 
 /** mcp:parseMcpJson 回包条目（主进程 src/main/modules/mcp/mcp-config.ts:ParsedMcpEntry 同构
@@ -141,10 +145,20 @@ export interface McpParsedJsonEntry {
   timeoutMs?: number;
 }
 
-/** mcp:parseMcpJson 回包：ok=true 带解析条目；ok=false 带中文错误消息（坏 JSON/根非对象/
- *  三形态都取不到合法 map），失败不 throw。 */
+/** mcp:parseMcpJson 回包（主进程 mcp-config.ts:parseMcpServersJson 唯一解析源，handler 一行
+ *  直转）。ok=true：servers=解析条目（McpParsedJsonEntry[]，可为空）；可选明细两键——
+ *  result.skipped=条目级跳过明细（name=map 键 + 中文原因；单条 transport 判不出/必填缺失/
+ *  名称非法仅跳过该条目、不整体失败——UI13-P9 跳过原因可见化），result.fieldNotes=args/env
+ *  字段级忽略提示（裁决 R6：字段丢弃、条目仍导入）；两键类型上可选（主进程恒携带、可为空
+ *  数组，渲染层 ?? [] 容错），全部条目被跳过时 ok 仍 true（servers 空、skipped 携带）。
+ *  ok=false：error=中文错误消息（坏 JSON/根非对象/三形态都取不到合法 map），失败不 throw。 */
 export type McpParseJsonResult =
-  | { ok: true; servers: McpParsedJsonEntry[] }
+  | {
+      ok: true;
+      servers: McpParsedJsonEntry[];
+      skipped?: Array<{ name: string; reason: string }>;
+      fieldNotes?: Array<{ name: string; reason: string }>;
+    }
   | { ok: false; error: string };
 
 // ── 回合投影载荷类型（SA-2；内联镜像主进程 src/main/modules/turn-projection.ts 的
@@ -228,6 +242,11 @@ export interface ClaudeLinkAPI {
   // P2 目录历史跨端同步：WORKSPACES_CHANGED 信号订阅（空载荷 {}，收到后重拉 listRecentWorkspaces）。
   onWorkspacesChanged: (callback: () => void) => () => void;
   removeWorkspacesListener: () => void;
+  // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，list 只回掩码）。
+  // UI13-P8：项目 Skill 目录清单变化信号订阅（skills:projectDirsChanged，空载荷 {}——Skill tab
+  // 活跃时收到即重拉 getSkillProjectDirs；on*/remove*Listener 形态照 onWorkspacesChanged）。
+  onSkillsProjectDirsChanged: (callback: () => void) => () => void;
+  removeSkillsProjectDirsListener: () => void;
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，list 只回掩码）。
   listProviders: () => Promise<ProviderLibrarySnapshot>;
   saveProvider: (input: ProviderSaveInput) => Promise<ProviderProfileView>;
@@ -423,6 +442,13 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.WORKSPACES_CHANGED, listener);
     },
     removeWorkspacesListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.WORKSPACES_CHANGED),
+    // UI13-P8：项目 Skill 目录清单变化信号（on* 模式照抄 onWorkspacesChanged）。
+    onSkillsProjectDirsChanged: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on(IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED, listener);
+    },
+    removeSkillsProjectDirsListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED),
     listProviders: () => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_LIST) as Promise<ProviderLibrarySnapshot>,
     saveProvider: (input) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_SAVE, input) as Promise<ProviderProfileView>,
     deleteProvider: (providerId) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_DELETE, providerId),

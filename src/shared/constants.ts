@@ -1,6 +1,6 @@
 export { IPC_CHANNELS } from './types/ipc';
 
-export const DEFAULT_THEME_PALETTE_ID = 'warm-paper';
+export const DEFAULT_THEME_PALETTE_ID = 'inkstone';
 export const DEFAULT_FONT_SCALE = 'medium';
 export const FONT_SCALE_SIZES: Record<string, string> = {
   small: '14px',
@@ -28,11 +28,19 @@ export interface ThemePalette {
     panel: string;
     panelSoft: string;
     border: string;
+    /** 可选：大区分隔线（--color-border-strong）。缺省回退 'rgba(0, 0, 0, 0.12)'（= variables.css 原静态值，11 套旧板观感不变）。 */
+    borderStrong?: string;
     text: string;
     textMuted: string;
+    /** 可选：弱注小字（--color-text-sub，小字须 ≥4.5:1）。缺省回退 textMuted。 */
+    textSub?: string;
     accent: string;
     accentStrong: string;
     onAccent: string;
+    /** 可选：主按钮底（--color-btn-ink，00-review-summary K3）。缺省回退 accent（11 套旧板观感=现状）。 */
+    btnInk?: string;
+    /** 可选：主按钮字/图标（--color-on-btn-ink）。缺省回退 onAccent。 */
+    onBtnInk?: string;
     danger: string;
   };
 }
@@ -43,6 +51,30 @@ export interface ThemePalette {
 // bg→--color-bg, panel→--color-panel, panelSoft→--color-panel-soft, border→--color-border,
 // accent→--color-accent, accentStrong→--color-accent-strong, onAccent→按 accent 亮度选 #FFFFFF/#1A1A1A.
 export const THEME_PALETTES: ThemePalette[] = [
+  {
+    // 方案C「墨石 Slate」（UI 补全 A1，2026-11-07 裁决）：第 12 套、应用默认、居数组首位
+    // （export-image-manager.ts:932 未知 id 兜底取 THEME_PALETTES[0]，首位=默认保证兜底一致）。
+    // 色值来源：v8.1 任务书【二】墨石 token 速查 + 10-behavior-specs.md A1。
+    id: 'inkstone',
+    name: '墨石',
+    isDark: false,
+    colors: {
+      bg: '#EFF1F4',
+      panel: '#F6F7F9',
+      panelSoft: '#FFFFFF',
+      border: '#E4E7EC',
+      borderStrong: '#D5DAE1',
+      text: '#17181A',
+      textMuted: '#667085',
+      textSub: '#5B6779', // 对 bg #EFF1F4 ≈5.0:1，过 AA 小字
+      accent: '#EA580C',
+      accentStrong: '#C2410C', // accent 文字用（白底 ≈5.2:1 过 AA），任务书【二】
+      onAccent: '#FFFFFF', // 白 on #EA580C ≈3.58:1（AA 大字号）；主按钮走 btnInk 不走 accent 实底
+      btnInk: '#17181A', // A2：主按钮近黑底（K3 裁决）
+      onBtnInk: '#FFFFFF', // A2：白 on #17181A ≈17.8:1 AAA
+      danger: '#DC2626',
+    },
+  },
   {
     id: 'warm-paper',
     name: '暖纸',

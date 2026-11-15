@@ -1,10 +1,11 @@
 // 阶段二 fixture smoke（仅 env CLAUDE_LINK_EXPORT_SMOKE=<消息条数> 时运行，不进正常启动路径）。
 // 种子一个会话 + N 条消息，依次跑 JPEG 与 PNG 两个真实 job（smoke:true），等 done，校验落盘到 smokeDest 的最终产物，
-// 写结果 JSON 到 D:\software\Cache，清理后退出。验证主进程管理器 + 隐藏窗口 + IPC + 捕获/拼接/编码全链路（含 v4.1 PNG worker 路径）。
+// 写结果 JSON 到系统临时目录，清理后退出。验证主进程管理器 + 隐藏窗口 + IPC + 捕获/拼接/编码全链路（含 v4.1 PNG worker 路径）。
 // v4.1：PNG 路径校验 PNG magic / pngjs 可解码 / 尺寸非零；JPEG 沿用 v3 校验。
 
 import { app } from 'electron';
 import { promises as fs } from 'fs';
+import os from 'os';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import type { WebContents } from 'electron';
@@ -18,7 +19,7 @@ import { stageAttachment } from './attachment-service';
 import { removeAttachmentFile } from './attachment-storage';
 import { logger } from '../utils/logger';
 
-const RESULT_DIR = 'D:\\software\\Cache\\claude-link-spike';
+const RESULT_DIR = join(os.tmpdir(), 'claude-link-spike');
 const RESULT_PATH = join(RESULT_DIR, 'phase2-smoke-result.json');
 
 export async function runExportSmokeIfRequested(origin: WebContents | undefined): Promise<void> {
