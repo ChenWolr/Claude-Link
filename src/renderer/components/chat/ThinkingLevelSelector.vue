@@ -100,12 +100,16 @@ onUnmounted(() => {
   <div ref="menuRef" class="tl-selector">
     <button
       type="button"
+      data-testid="thinking-trigger"
       :class="['tl-btn', { 'tl-btn--custom': isCustom }]"
       :disabled="props.disabled"
       :title="triggerTitle"
       @click="showMenu = !showMenu"
     >
-      {{ triggerLabel }} <span class="tl-caret">▾</span>
+      <svg class="tl-btn__icon" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" />
+      </svg>
+      {{ triggerLabel }}
     </button>
     <div v-if="showMenu" class="tl-menu">
       <button
@@ -118,8 +122,10 @@ onUnmounted(() => {
         <span class="tl-item__text">
           <span class="tl-item__label">
             {{ opt.value === 'auto' ? `默认：${globalDefaultLabel}` : opt.label }}
+            <!-- E3：「工作流」Beta 标（00-review-summary D3-07 裁决）——desc 退出渲染后
+                 Beta 语义由 chip 承载；desc 数据保留（title 仍消费）。 -->
+            <span v-if="opt.value === 'ultracode'" class="tl-item__beta">Beta</span>
           </span>
-          <span class="tl-item__desc">{{ opt.desc }}</span>
         </span>
         <svg
           v-if="opt.value === activeValue"
@@ -166,9 +172,18 @@ onUnmounted(() => {
   cursor: not-allowed;
 }
 
-.tl-caret {
-  opacity: 0.6;
-  font-size: 0.625rem;
+/* E2 一体化：触发钮内图标（stroke 用 currentColor——tl-btn--custom 自定义态文字为
+   accent-strong，图标随其走；与 .ctl__btn-icon 同款 stroke 规则）。 */
+.tl-btn__icon {
+  flex-shrink: 0;
+  width: 0.875rem;
+  height: 0.875rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
 }
 
 /* 非自动档：触发按钮加 accent 边框，提示本会话已设自定义思考强度 */
@@ -234,11 +249,19 @@ onUnmounted(() => {
   line-height: 1.2;
 }
 
-.tl-item__desc {
-  font-size: 0.6875rem;
-  color: var(--color-text-muted);
-  line-height: 1.3;
-  white-space: normal;
+/* 「工作流」Beta 标（E3，00-review-summary D3-07 裁决）：desc 退出渲染后 Beta 语义由 chip 承载；
+   fail/danger 语义族（03-doc §4.2 token 钉），不随色板漂移。 */
+.tl-item__beta {
+  margin-left: 0.375rem;
+  padding: 0.0625rem 0.3125rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid color-mix(in srgb, var(--color-fail) 30%, transparent);
+  background: color-mix(in srgb, var(--color-fail) 10%, transparent);
+  color: var(--color-fail-strong);
+  font-size: 0.5625rem;
+  font-weight: 700;
+  line-height: 1;
+  vertical-align: middle;
 }
 
 .tl-item__check {

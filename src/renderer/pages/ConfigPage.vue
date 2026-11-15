@@ -389,6 +389,20 @@ watch(projectDirs, (dirs) => {
   if (scope.kind === 'project' && !dirs.some((d) => normalizeDirKey(d.path) === normalizeDirKey(scope.path))) skillScope.value = { kind: 'global' };
 });
 
+// UI13-P8（契约 #4 后半）：项目 Skill 目录清单变化信号（skills:projectDirsChanged）——Skill tab
+// 活跃时收到即重拉项目清单（主进程 watcher 指纹变化 → 广播，含会话自建目录；非活跃 tab 忽略，
+// 进 tab 时既有现查兜底）。订阅生命周期随页面（ConfigPage 路由级挂载）；stop 句柄卸载反注册。
+let stopSkillDirsChanged: (() => void) | null = null;
+onMounted(() => {
+  stopSkillDirsChanged = window.claudeLink.onSkillsProjectDirsChanged(() => {
+    if (activeTab.value === 'skill') void ensureProjectDirs();
+  });
+});
+onBeforeUnmount(() => {
+  stopSkillDirsChanged?.();
+  stopSkillDirsChanged = null;
+});
+
 // 当前选中的项目目录条目（全局作用域 / 目录已被现查淘汰 → null）；匹配同走归一键（A-2/D-10）。
 const activeProjectDir = computed(() =>
   skillScope.value.kind === 'project'
@@ -950,7 +964,7 @@ const updateStageTone = computed(() => {
                 <button type="button" class="skill-md-rail__status-retry" @click="ensureProjectDirs()">重试</button>
               </div>
               <div class="skill-md-rail__head">
-                <span>项目目录 · 来自最近工作区</span><span>{{ projectDirs.length }} 个</span>
+                <span>项目目录 · 来自最近工作区与会话工作目录</span><span>{{ projectDirs.length }} 个</span>
               </div>
               <button
                 v-for="dir in projectDirs"
@@ -969,7 +983,7 @@ const updateStageTone = computed(() => {
                 <span class="skill-md-item__path">{{ dir.path }}</span>
                 <span class="skill-md-item__meta">共 {{ dir.skills.length }} · {{ projectEnabledCount(dir) }} 启用 · {{ dir.sessionCount }} 会话</span>
               </button>
-              <div class="skill-md-rail__foot">目录自动来自最近工作区并集与默认工作区；已删除的目录不再显示。开关按 Skill 名全局生效。</div>
+              <div class="skill-md-rail__foot">目录自动来自最近工作区、会话工作目录与默认工作区；已删除的目录不再显示。开关按 Skill 名全局生效。</div>
             </nav>
 
             <!-- 右栏：所选作用域详情 -->
@@ -985,6 +999,17 @@ const updateStageTone = computed(() => {
                 <div class="skill-md-title__meta">
                   <template v-if="skillScope.kind === 'global'">对所有项目的会话可用</template>
                   <template v-else-if="activeProjectDir">{{ activeProjectDir.sessionCount }} 个会话在使用 · {{ activeProjectDir.isDefault ? '默认工作区' : '最近目录' }}</template>
+                  <!-- UI13-P8（契约 #1）：全作用域刷新——项目作用域「重新枚举」复用 ensureProjectDirs 整表
+                       重拉（等价重新枚举该项目清单；最小实现不按目录粒度拆 IPC），随 projectDirsPending 忙态禁用。 -->
+                  <button
+                    v-if="skillScope.kind === 'project'"
+                    type="button"
+                    class="skill-sync-bar__now"
+                    :disabled="projectDirsPending"
+                    data-testid="skill-project-refresh"
+                    title="重新枚举项目 Skill 清单"
+                    @click="ensureProjectDirs()"
+                  >重新枚举</button>
                 </div>
 
                 <!-- S5（方案 C：同步条，仅全局作用域；视觉基准 docs/prototypes/pin-time-skill-2026-10-22/plan-c-timeline-sync.html）：
@@ -999,7 +1024,9 @@ const updateStageTone = computed(() => {
                     自动同步
                   </span>
                   <input type="checkbox" class="switch" v-model="store.config.skillAutoSync" aria-label="自动同步 Skill 变更" />
-                  <span class="skill-sync-bar__hint">{{ store.config.skillAutoSync ? '监听 ~/.claude/skills 与全局工作目录 .claude/skills，变化自动重新探测' : '已暂停自动同步，目录变化需手动刷新' }}</span>
+                  <!-- UI13-P8（契约 #2）：目录监听范围已扩至全部项目清单（不再只两处），整句「监听
+                       ~/.claude/skills 与全局工作目录 …」移除——hint 单态化两态短文案。 -->
+                  <span class="skill-sync-bar__hint">{{ store.config.skillAutoSync ? '目录变化自动重新探测' : '已暂停自动同步，目录变化需手动刷新' }}</span>
                   <span class="skill-sync-bar__spacer"></span>
                   <span class="skill-sync-bar__delta" v-if="commandStore.globalSkillDelta > 0">本次刷新 +{{ commandStore.globalSkillDelta }}</span>
                   <button
@@ -1133,7 +1160,7 @@ const updateStageTone = computed(() => {
                     </div>
                   </div>
 
-                  <p class="skill-note">项目目录自动来自最近工作区与默认工作区（已删除的目录不再显示）；开关按 Skill 名全局生效，同名 Skill 跨作用域联动。禁用仅对 Claude Link 内新建的会话生效；开关即刻保存，新会话即刻生效。</p>
+                  <p class="skill-note">项目目录自动来自最近工作区、会话工作目录与默认工作区（已删除的目录不再显示）；开关按 Skill 名全局生效，同名 Skill 跨作用域联动。禁用仅对 Claude Link 内新建的会话生效；开关即刻保存，新会话即刻生效。</p>
 
                   <!-- D-1：死键清理入口（手动确认式，不做自动清理；确认弹窗列出疑似键明细） -->
                   <div v-if="staleSkillKeys.length > 0" class="skill-stale-row">
@@ -1176,7 +1203,7 @@ const updateStageTone = computed(() => {
                 <input v-model.number="waPort" type="number" min="1024" max="65535" @blur="clampWaPort" />
               </label>
 
-              <!-- 状态卡：off「未开启」/ running 逐条 URL（首条带二维码）/ error message -->
+              <!-- 状态卡：off 警示行 / running 逐条 URL（首条带二维码）/ error message -->
               <div class="webacc-status" data-testid="web-access-status">
                 <div v-if="webAccessInfoError" class="webacc-status__line webacc-status__line--error">状态获取失败：{{ webAccessInfoError }}</div>
                 <template v-if="waRunning">
@@ -1191,7 +1218,7 @@ const updateStageTone = computed(() => {
                 <div v-else-if="waStatusError" class="webacc-status__line webacc-status__line--error">
                   启动失败（端口 {{ waStatusError.port }}）：{{ waStatusError.message }}
                 </div>
-                <div v-else class="webacc-status__line">未开启</div>
+                <div v-else class="webacc-status__line">网页访问已关闭 · 局域网设备无法连接；已连接设备将被断开</div>
               </div>
 
               <!-- 令牌区：掩码/显示切换/复制链接/重新生成（requestConfirm 本地二次确认） -->

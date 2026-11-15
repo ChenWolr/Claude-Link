@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, reactive, watch, onBeforeUnmount } from 'vue';
+import { closeImageLightbox, openImageLightbox, useImageLightbox } from '../../composables/useImageLightbox';
+import type { AttachmentSummary } from '../../../shared/types/attachment';
 import type { Task } from '../../../shared/types/task';
 import TaskStatusBadge from './TaskStatusBadge.vue';
 
@@ -24,6 +26,125 @@ const emit = defineEmits<{
 }>();
 
 const expanded = ref(false);
+
+// ── 附件图片预览（复用 AttachmentDraftList 范式 + 全局 ImageLightbox 单例）──
+// 预览经受控 IPC（attachment:preview，网页版桥接表同键）取 bytes → Blob URL；
+// 灯箱/原图/缩略图 URL 生命周期见各函数注释。
+const { state: lightboxState } = useImageLightbox();
+// 缩略图 Blob URL（attachmentId -> url，响应式，模板 <img> 直接绑定）
+const thumbUrls = reactive<Record<string, string>>({});
+// 原图 Blob URL（非响应式，不参与模板渲染）
+const fullUrls = new Map<string, string>();
+const thumbLoading = reactive<Record<string, boolean>>({}); // 缩略图读取态（静默，失败退化 placeholder）
+const loading = reactive<Record<string, boolean>>({});      // 原图灯箱读取态（在飞去重）
+const errors = reactive<Record<string, string>>({});        // 原图预览失败（静默保留，允许重试）
+// 组件存活标志：IPC 在飞期间卡可能随任务删除卸载，卸载后回跳的 promise 不得建 URL/开灯箱。
+let alive = true;
+
+// IPC 跨 realm 传来的 bytes 类型为 Uint8Array<ArrayBufferLike>，不能直接当 BlobPart（可能 SharedArrayBuffer）；
+// 复制成当前 realm 的 ArrayBuffer 再交给 Blob（对齐 AttachmentDraftList）。
+function toBlobPart(bytes: Uint8Array): ArrayBuffer {
+  return Uint8Array.from(bytes).buffer;
+}
+
+function revokeAll(): void {
+  for (const url of fullUrls.values()) URL.revokeObjectURL(url);
+  for (const id of Object.keys(thumbUrls)) {
+    URL.revokeObjectURL(thumbUrls[id]);
+    delete thumbUrls[id];
+  }
+  fullUrls.clear();
+}
+
+// revoke 单个原图 URL，但跳过灯箱正在显示的那张（否则灯箱变 broken image）；
+// 被跳过的那张由组件卸载（revokeAll 无条件收）兜底回收。
+function safeRevokeFull(id: string, url: string): void {
+  if (lightboxState.value?.src === url) return;
+  URL.revokeObjectURL(url);
+  fullUrls.delete(id);
+}
+
+// 缩略图：展开 / 附件出现时取 thumbnail=true 渲染 <img>。失败静默（退化 placeholder 文件名）。
+async function loadThumb(att: AttachmentSummary): Promise<void> {
+  if (thumbUrls[att.id] || thumbLoading[att.id]) return;
+  thumbLoading[att.id] = true;
+  try {
+    // sessionId 取任务自带字段（非 activeSession.id）：任务必属其所在会话，抗切会话竞态。
+    const res = await window.claudeLink.getAttachmentPreview({ sessionId: props.task.sessionId, attachmentId: att.id, thumbnail: true });
+    // await 期间任务可能被删除/整替（附件消失）：丢弃过期结果，防孤儿 URL 泄漏至卸载。
+    if (!alive || !props.task.attachments.some((a) => a.id === att.id)) return;
+    thumbUrls[att.id] = URL.createObjectURL(new Blob([toBlobPart(res.bytes)], { type: res.mimeType }));
+  } catch {
+    // 静默：退化 placeholder 文件名，无弹窗、无 console.error
+  } finally {
+    delete thumbLoading[att.id];
+  }
+}
+
+// 缩略图点击：经 IPC 取原图 → Blob URL → 复用全局灯箱单例（Esc/遮罩/焦点陷阱与聊天附件一致）。
+async function previewImage(att: AttachmentSummary, trigger: HTMLElement): Promise<void> {
+  if (loading[att.id]) return; // 防双击：避免 IPC 在飞时重复请求 + 首个 Blob URL 泄漏
+  let url = fullUrls.get(att.id);
+  if (!url) {
+    loading[att.id] = true;
+    delete errors[att.id]; // 清旧错误，允许失败后再次点击重试
+    try {
+      const res = await window.claudeLink.getAttachmentPreview({ sessionId: props.task.sessionId, attachmentId: att.id, thumbnail: false });
+      // await 期间任务删除/整替：丢弃过期结果，不开幽灵灯箱、不建孤儿 URL。
+      if (!alive || !props.task.attachments.some((a) => a.id === att.id)) return;
+      url = URL.createObjectURL(new Blob([toBlobPart(res.bytes)], { type: res.mimeType }));
+      fullUrls.set(att.id, url);
+    } catch {
+      errors[att.id] = '预览不可用';
+      return;
+    } finally {
+      loading[att.id] = false;
+    }
+  }
+  openImageLightbox(url, att.filename, trigger);
+}
+
+// 展开才加载缩略图（折叠卡零 IPC 零 Blob）；幂等守卫在 loadThumb 内（已加载/在飞直接 return）。
+watch(expanded, (v) => {
+  if (!v) return;
+  for (const att of props.task.attachments) {
+    if (att.kind === 'image' && att.previewAvailable) void loadThumb(att);
+  }
+});
+
+// 任务整替/附件变化（P1 tasks_changed 换新对象时 :key=task.id 不重建卡，attachments 引用换新
+// 触发本 watch）：撤销已消失附件的 URL（原图 safeRevokeFull 跳过灯箱占用、缩略图直接 revoke）；
+// 详情已展开时为新出现的图片附件补载。watch 源是 id:kind 串，同集整替不触发（零多余 IPC）。
+watch(
+  () => props.task.attachments.map((a) => `${a.id}:${a.kind}`).join('\n'),
+  () => {
+    const ids = new Set(props.task.attachments.map((a) => a.id));
+    for (const [id, url] of [...fullUrls]) {
+      if (!ids.has(id)) safeRevokeFull(id, url);
+    }
+    for (const id of Object.keys(thumbUrls)) {
+      if (!ids.has(id)) {
+        URL.revokeObjectURL(thumbUrls[id]);
+        delete thumbUrls[id];
+      }
+    }
+    if (expanded.value) {
+      for (const att of props.task.attachments) {
+        if (att.kind === 'image' && att.previewAvailable) void loadThumb(att);
+      }
+    }
+  },
+);
+
+onBeforeUnmount(() => {
+  alive = false;
+  // 本卡打开的灯箱（src 属于本卡 URL）才随卸载关闭，避免 A 卡卸载关掉 B 卡刚打开的灯箱；
+  // 判据须在 revokeAll 之前取（revokeAll 会清空两个 URL 池）。
+  const shown = lightboxState.value?.src ?? '';
+  const ownedByThisCard = [...fullUrls.values(), ...Object.values(thumbUrls)].includes(shown);
+  revokeAll();
+  if (ownedByThisCard) closeImageLightbox();
+});
 
 // 「立即执行」置灰原因（优先级从高到低）；queuePaused 的禁用是渲染层策略，主进程 runTaskNow
 // 无对应守卫（仅 pending/开关/忙碌三道闸），两者并非一一对应。
@@ -75,7 +196,21 @@ const runNowTitle = computed(() => {
       <div class="task-item__full-prompt">{{ task.prompt }}</div>
       <template v-if="task.attachments.length > 0">
         <div class="task-item__att-files">
-          <span v-for="a in task.attachments" :key="a.id" class="task-item__att-file" :title="a.filename">{{ a.filename }}</span>
+          <template v-for="a in task.attachments" :key="a.id">
+            <!-- 图片且预览可用：缩略图按钮（点击开全局灯箱看原图） -->
+            <button
+              v-if="a.kind === 'image' && a.previewAvailable"
+              type="button"
+              class="task-item__att-thumb"
+              :title="`预览 ${a.filename}`"
+              @click="previewImage(a, $event.currentTarget as HTMLElement)"
+            >
+              <img v-if="thumbUrls[a.id]" :src="thumbUrls[a.id]" :alt="a.filename" />
+              <span v-else class="task-item__att-thumb-placeholder">{{ a.filename }}</span>
+            </button>
+            <!-- 非图片 / 预览不可用 / 加载失败：维持文件名文本行 -->
+            <span v-else class="task-item__att-file" :title="a.filename">{{ a.filename }}</span>
+          </template>
         </div>
         <div class="task-item__atts-note">附件 {{ task.attachments.length }} 个（执行时随消息一并发送）</div>
       </template>
@@ -215,6 +350,46 @@ const runNowTitle = computed(() => {
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 6px;
+}
+
+/* 详情区缩略图：2.5rem 方块（对齐 .att-card__thumb-img），token 全走主题变量 */
+.task-item__att-thumb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-panel-soft);
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.task-item__att-thumb:hover {
+  border-color: var(--color-accent);
+}
+
+.task-item__att-thumb img {
+  display: block;
+  width: 2.5rem;
+  height: 2.5rem;
+  object-fit: cover;
+}
+
+.task-item__att-thumb-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.5625rem;
+  color: var(--color-text-muted);
 }
 
 .task-item__att-file {

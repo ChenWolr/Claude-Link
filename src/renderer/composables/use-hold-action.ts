@@ -2,8 +2,9 @@
 // 长按动作 composable（问题⑥）：按住 durationMs（默认 1000ms）后触发一次 onComplete，
 // holdProgress 0–100 供按钮内横向填充/进度环消费。形态抽取自 ContextButton 长按压缩实现。
 //
-// 指针语义（P2-20 同款）：pointerdown 由调用方 .prevent 吃掉原生 click（单击不再触发按钮
-// 默认行为）；setPointerCapture 失败（旧环境）静默降级——捕获期间 pointerleave 被抑制，
+// 指针语义（P2-20 同款）：.prevent 抑制 mousedown 等兼容性事件与默认行为，click 仍会派发，
+// 调用方需自行 @click.stop 阻冒泡（父级挂 @click 时短按会误触发——P2-B）；
+// setPointerCapture 失败（旧环境）静默降级——捕获期间 pointerleave 被抑制，
 // 滑出取消由 move/up 的坐标判定显式实现，pointerleave/pointercancel 兜底取消。
 // 键盘语义：Space/Enter 且 !repeat 按下启动（preventDefault 防页面滚动与按钮原生激活），
 // 松开未满即取消。

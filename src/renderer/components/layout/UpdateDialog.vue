@@ -6,7 +6,7 @@
      F1（2026-10-27 五问题计划 round-002）：autoHeight 下壳层 rect.height 为打开瞬间折叠态测量值，
      本组件按真实渲染盒兜底校正 top（@toggle / 缩窗 / 双击复位 / 全局 pointerup 四路径），壳层零改动。 -->
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useUpdateStore } from '../../stores/update-store';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 import { useDialogShell } from '../../composables/use-dialog-shell';
@@ -57,11 +57,23 @@ const progressText = computed(() => {
 // A9（D14-F5）：弹窗可见期间注册 Esc 层（1100）——更高层遮罩（交互弹窗 1200/导出格式/灯箱）
 // 在场时让位，Esc 只作用最上层，不把被遮挡、用户从未决策的版本记入 dismissedVersions。
 let escHandle: EscLayerHandle | null = null;
+// I5（弹窗焦点还原补全）：lastFocus 记录/还原并入本 watch（同源同帧，避免双 watch 次序耦合）——
+// 打开边沿记打开前触发元素（仅记录，不新增聚焦，打开期焦点行为零变化）；关闭边沿 nextTick 内
+// document.contains 守卫还原（还原目标已卸载则自然落 body，不兜底 focus）、用后清位。
+// 还原放 nextTick：关闭帧内 dialogVisible 已 false、v-if 卡片将卸载，先出栈再还原避免焦点被
+// 将卸载的卡片截留。三关闭路径（footer 稍后提醒/遮罩点击/Esc）全走 dismissUpdate→dialogVisible
+// 边沿，还原统一收口于本 watch，无需改 onKeydown。
+let lastFocus: HTMLElement | null = null;
 watch(() => updateStore.dialogVisible, (visible) => {
-  if (visible && !escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.updateDialog);
-  else if (!visible && escHandle) {
-    escHandle.release();
-    escHandle = null;
+  if (visible) {
+    lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (!escHandle) escHandle = pushEscLayer(ESC_LAYER_PRIORITY.updateDialog);
+  } else {
+    if (escHandle) { escHandle.release(); escHandle = null; }
+    void nextTick(() => {
+      if (lastFocus && document.contains(lastFocus)) lastFocus.focus(); // 卸载目标安全降级
+      lastFocus = null;
+    });
   }
 });
 
@@ -92,12 +104,12 @@ onUnmounted(() => {
 
 <template>
   <div v-if="updateStore.dialogVisible" class="update-dialog__overlay" @click.self="updateStore.dismissUpdate()">
-    <div ref="cardRef" class="update-dialog" :style="shellStyle" data-testid="update-dialog" role="dialog" aria-modal="true" aria-label="发现新版本">
+    <div ref="cardRef" class="update-dialog" :style="shellStyle" data-testid="update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-dlg-title">
       <div class="update-dialog__head" @pointerdown="shell.beginDrag" @dblclick="onHeadDblClick">
         <span class="update-dialog__head-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>
         </span>
-        <h3 class="update-dialog__title">发现新版本</h3>
+        <h3 id="update-dlg-title" class="update-dialog__title">发现新版本</h3>
       </div>
       <div class="update-dialog__version">
         <span class="update-dialog__v">v{{ updateStore.currentVersion }}</span>

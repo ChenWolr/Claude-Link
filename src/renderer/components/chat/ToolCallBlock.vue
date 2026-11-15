@@ -164,6 +164,26 @@ function measureResultOverflow(): void {
 watch([expanded, displayedSource], () => {
   if (expanded.value) nextTick(measureResultOverflow);
 });
+
+// C7③：入参 JSON 封顶 220px + 底部渐隐 + 展开切换（结果区既有封顶不变）。
+// 溢出判定复用结果区的 DOM 实测口径（scrollHeight > 预览高 + 2），天然适配字号缩放。
+// 冲突 C-C：展开钮文案复用结果区既有逐字。裁决 C7-7：不溢出不出钮（v-if 门控）。
+const JSON_PREVIEW_PX = 220;
+const jsonExpanded = ref(false);
+const jsonInnerRef = ref<HTMLElement | null>(null);
+const jsonOverflow = ref(false);
+const jsonText = computed(() => {
+  if (useParsed.value) return JSON.stringify(useParsed.value.input ?? {}, null, 2);
+  return props.use?.content ?? ''; // hb12-CHR-03 非 JSON 回退原文，同一测量面
+});
+const jsonLineCount = computed(() => (jsonText.value ? jsonText.value.split('\n').length : 0));
+function measureJsonOverflow(): void {
+  const el = jsonInnerRef.value;
+  jsonOverflow.value = !!el && el.scrollHeight > JSON_PREVIEW_PX + 2;
+}
+watch([expanded, jsonText], () => {
+  if (expanded.value) nextTick(measureJsonOverflow);
+});
 </script>
 
 <template>
@@ -189,6 +209,10 @@ watch([expanded, displayedSource], () => {
         <span class="tool-row__status">
           <span v-if="running && elapsedSeconds != null" class="tool-row__elapsed">⏱{{ elapsedSeconds.toFixed(1) }}s</span>
           <span v-else-if="running" class="tool-row__dots"><span></span><span></span><span></span></span>
+          <!-- C3（真实缺陷修复 + 设计收编）：sending 结束后仍未回结果的 tool_use 行——
+               不再假「运行中」，显示中止态（fail 语义色；对齐原型 toolRowHtml 已中断态）。
+               use 在（有 tool_use）且 result 缺席即推得，无需新数据、零 IPC。 -->
+          <span v-else-if="use && !result" class="tool-row__interrupt">✗ 已中断</span>
           <span v-else-if="backgroundRunning" class="tool-row__bg">🔁后台</span>
           <span v-else-if="result && result.isError" class="tool-row__fail">✗</span>
           <span v-else-if="result" class="tool-row__done">✓</span>
@@ -204,12 +228,18 @@ watch([expanded, displayedSource], () => {
     </div>
     <div v-if="fileToast" class="tool-row__filetoast" role="status">{{ fileToast }}</div>
     <div v-if="everExpanded" v-show="expanded" :id="bodyId" class="tool-row__body">
-      <div v-if="useParsed" class="tool-row__json">
-        <pre>{{ JSON.stringify(useParsed.input ?? {}, null, 2) }}</pre>
-      </div>
-      <!-- hb12-CHR-03：use 非 JSON（异常历史数据/截断行）时回退展示原文，不再整体空缺。 -->
-      <div v-else-if="use" class="tool-row__json">
-        <pre>{{ use.content }}</pre>
+      <!-- C7③：入参 JSON 封顶 220px + 底部渐隐 + 展开切换。jsonText 已覆盖 useParsed 与
+           非 JSON 回退原文两形态（hb12-CHR-03 语义不变）。裁决 C7-7：不溢出/导出不出钮；
+           冲突 C-C：按钮文案复用结果区既有逐字（展开全部（N 行）▾ / 收起 ▴ / 展开全部 ▾）。 -->
+      <div v-if="jsonText" class="tool-row__json" :class="{ 'tool-row__json--expanded': jsonExpanded }">
+        <div ref="jsonInnerRef" class="tool-row__json-inner">
+          <pre>{{ jsonText }}</pre>
+        </div>
+        <div v-if="jsonOverflow && !exportMode" class="tool-row__result-fade">
+          <button type="button" class="tool-row__expand" @click.stop="jsonExpanded = !jsonExpanded">
+            {{ jsonExpanded ? '收起 ▴' : (jsonLineCount > 1 ? `展开全部（${jsonLineCount} 行）▾` : '展开全部 ▾') }}
+          </button>
+        </div>
       </div>
       <div v-if="hasDiffView" class="tool-row__diffcta">
         <button ref="diffBtn" type="button" class="tool-row__diffbtn" @click="openDiff">
@@ -298,7 +328,11 @@ watch([expanded, displayedSource], () => {
   white-space: nowrap;
 }
 
-/* p3（2026-10-27）：生成文件 chip（accent 特殊色 + 下划线，ZCode 文件链接观感）+ 迷你菜单 + toast。 */
+/* p3（2026-10-27）：生成文件 chip + 迷你菜单 + toast。
+   C7②：chip 胶囊化（描边 + mono + hover accent 弱底，旧 accent 下划线形态删除）；
+   单击预览（@click.stop→useFilePreview）/右键菜单（@contextmenu）/键盘 Enter/Space/▾
+   （tool-row__filemore）/title=filePath 全部零触碰，仅换皮——tdd-chat-file-open-verify
+   钉模板接线逐字保全。 */
 .tool-row__filewrap {
   flex: 1;
   min-width: 0;
@@ -306,19 +340,23 @@ watch([expanded, displayedSource], () => {
   overflow: hidden;
 }
 .tool-row__file {
-  color: var(--color-accent-strong);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
+  color: var(--color-text);
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-pill);
+  padding: 1px 8px;
+  cursor: pointer;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .tool-row__file:hover,
 .tool-row__file:focus-visible {
-  color: var(--color-accent);
+  /* hover accent 弱底（10% 混 transparent）+ 描边/文字切 accent-strong。 */
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  border-color: var(--color-accent-strong);
+  color: var(--color-accent-strong);
 }
 /* p4：▾「打开方式」入口（chip 右键同款菜单），弱化灰色不与 chip 争夺视觉焦点。 */
 .tool-row__filemore {
@@ -466,6 +504,14 @@ watch([expanded, displayedSource], () => {
   font-weight: 700;
 }
 
+/* C3：中止态（回合结束后 tool_use 永未回结果——被中断或异常终止）。 */
+.tool-row__interrupt {
+  font-size: 0.6875rem;
+  color: var(--color-fail-strong);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 /* C：工具运行实时耗时（tool_progress）。 */
 .tool-row__elapsed {
   font-size: 0.6875rem;
@@ -494,6 +540,22 @@ watch([expanded, displayedSource], () => {
   white-space: pre-wrap;
   word-break: break-word;
   box-shadow: inset 0 1px 2px rgba(0,0,0,0.08);
+}
+
+/* C7③：入参 JSON 封顶 220px（结果区既有封顶零触碰，镜像其形态）。
+   渐隐层复用 .tool-row__result-fade 类（scoped 按类命中，与宿主容器无关）；
+   展开态转为静态，同结果区镜像。 */
+.tool-row__json {
+  position: relative;
+}
+.tool-row__json:not(.tool-row__json--expanded) .tool-row__json-inner {
+  max-height: 220px;
+  overflow: hidden;
+}
+.tool-row__json--expanded .tool-row__result-fade {
+  position: static;
+  padding-top: 8px;
+  background: none;
 }
 
 .tool-row__result {

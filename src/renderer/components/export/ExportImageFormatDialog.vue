@@ -45,8 +45,15 @@ function confirm(): void {
   emit('confirm', selected.value);
 }
 
+// I5（弹窗焦点还原补全）：lastFocus 记录/还原并入本 watch（同源同帧，避免双 watch 次序耦合）——
+// 打开边沿记打开前触发元素（初始聚焦行为不变，仍聚焦卡片）；关闭边沿 nextTick 内
+// document.contains 守卫还原（还原目标已卸载则自然落 body，不兜底 focus）、用后清位。
+// 取消钮/遮罩/Esc（emit cancel）与确认（emit confirm 后父级置 open=false）各关闭通道全部经
+// open 边沿收敛于本 watch，还原统一收口，无需改 onKey/confirm。
+let lastFocus: HTMLElement | null = null;
 watch(() => props.open, (open) => {
   if (open) {
+    lastFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     escHandle?.release();
     escHandle = pushEscLayer(ESC_LAYER_PRIORITY.exportFormat);
     reset();
@@ -54,6 +61,10 @@ watch(() => props.open, (open) => {
   } else {
     escHandle?.release();
     escHandle = null;
+    void nextTick(() => {
+      if (lastFocus && document.contains(lastFocus)) lastFocus.focus(); // 卸载目标安全降级
+      lastFocus = null;
+    });
   }
 });
 

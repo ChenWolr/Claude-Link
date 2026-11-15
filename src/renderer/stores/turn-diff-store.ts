@@ -34,6 +34,20 @@ export function turnDiffPatchKey(turnStartMessageId: string, path: string, conte
   return `${turnStartMessageId}|${path}|${context}`;
 }
 
+/** patchCache 的 LRU 上限（UI13-P11 条目 9：长会话 diff 补丁全量驻留的历史泄漏点；补丁是
+ *  有界事实集，超过上限的最旧条目按插入序淘汰。导出供契约脚本结构钉与注入直测）。 */
+export const PATCH_CACHE_LIMIT = 32;
+
+/** LRU 淘汰：Map 迭代序=插入序，超 limit 时自最旧（首个键）逐出至 ≤limit。纯函数导出
+ *  （getPatch 写入路径调用；契约脚本 tdd-memleak-fixes-verify 注入式直测 T11-A/B）。 */
+export function evictLruToLimit<K, V>(map: Map<K, V>, limit: number): void {
+  while (map.size > limit) {
+    const oldest = map.keys().next().value;
+    if (oldest === undefined) break;
+    map.delete(oldest);
+  }
+}
+
 export const useTurnDiffStore = defineStore('turn-diff', () => {
   const sessionStore = useSessionStore();
 
@@ -105,7 +119,12 @@ export const useTurnDiffStore = defineStore('turn-diff', () => {
   ): Promise<TurnFilePatch | null> {
     const key = turnDiffPatchKey(turnStartMessageId, path, context);
     const cached = patchCache.value.get(key);
-    if (cached) return cached;
+    if (cached) {
+      // UI13-P11 LRU：命中重插（删后重 set 置插入序末尾=最近使用），热点键不因命中被误淘。
+      patchCache.value.delete(key);
+      patchCache.value.set(key, cached);
+      return cached;
+    }
     const existing = inflightPatches.get(key);
     if (existing) return existing;
     const promise = (async () => {
@@ -120,6 +139,8 @@ export const useTurnDiffStore = defineStore('turn-diff', () => {
         const res = await window.claudeLink.getTurnFilePatch(sessionId, turnStartMessageId, endMessageId, path, context);
         // 主进程回包无 context 字段，缓存写入时补上（与请求档位一致，供渲染层一致性守卫比对）。
         patchCache.value.set(key, { ...res, context });
+        // UI13-P11 LRU：写入后超限删最旧（缓存是有界事实集，不随长会话无限增长）。
+        evictLruToLimit(patchCache.value, PATCH_CACHE_LIMIT);
         return { ...res, context };
       } catch (err) {
         patchErrors.value = { ...patchErrors.value, [key]: err instanceof Error ? err.message : '读取轮末 Diff 失败' };
@@ -157,6 +178,15 @@ export const useTurnDiffStore = defineStore('turn-diff', () => {
         clearTimeout(summariesTimer);
         summariesTimer = null;
       }
+      // UI13-P11（条目 9 / 裁决 R8）：切会话随 summaries 失效一并三清 patch 面——patchCache
+      // （旧会话补丁不再驻留）、patchErrors/patchLoading（旧会话错误/加载旗标键防脏）、
+      // inflightPatches（在飞 Promise 键；在飞自身有 finally 身份比较自清，这里提前清防切
+      // 会话瞬间复用旧会话在飞请求）。旧会话在飞 Promise 稍后回包只会写入已清空的缓存并被
+      // LRU 上限兜底，不产生跨会话键泄漏。
+      patchCache.value.clear();
+      patchErrors.value = {};
+      patchLoading.value = {};
+      inflightPatches.clear();
       summariesLoading.value = false;
       if (id) {
         // summariesError 非会话键控：切会话即清旧会话错误态，在途窗口不得拿旧会话错误在新会话

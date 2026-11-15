@@ -215,6 +215,9 @@ export const useSessionStore = defineStore('session', {
     rightTab: 'all' as 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes',
     // 活动总览折叠态：true=只留 rail 图标轨、隐藏主体内容（rail 底部双箭头按钮切换）。
     overviewCollapsed: false,
+    // 左侧栏折叠态（UI13-P4）：true=侧栏收为 48px 图标轨。与 overviewCollapsed 同生命周期
+    // ——pinia 内存态、重启复位展开（不进 config 持久化、不写 localStorage）。
+    sidebarCollapsed: false,
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
@@ -1633,6 +1636,10 @@ export const useSessionStore = defineStore('session', {
     // 折叠/展开活动总览主体（保留 rail 图标轨）。
     toggleOverviewCollapsed() {
       this.overviewCollapsed = !this.overviewCollapsed;
+    },
+    // 折叠/展开左侧栏（UI13-P4）：同步布尔翻转，无异步中间态（连点最终态=最后一次点击）。
+    toggleSidebarCollapsed() {
+      this.sidebarCollapsed = !this.sidebarCollapsed;
     },
     // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。
     focusSubAgent(parentAgentId: string) {

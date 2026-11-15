@@ -1,6 +1,6 @@
 // web-bridge.ts
 // 「网页访问（局域网）」P4：渲染层 web 桥（docs/plans/2026-10-20-web-access-plan.md §3-P4）。
-// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 113 方法
+// 浏览器（局域网设备）无 preload——本模块经 WebSocket 把 window.claudeLink 的全部 117 方法
 // 代理到主进程 WS RPC（invoke 分发 + 全量事件广播客户端本地过滤），并负责：
 //   - token 读取：location.hash #token=（扫码/复制链接入口）→ localStorage.clWebToken →
 //     history.replaceState 清除地址栏 hash（token 不进任何 HTTP 请求行，仅 WS 升级 query）；
@@ -33,6 +33,60 @@ type WireServerFrame =
 interface PendingInvoke {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
+}
+
+/** 单条 invoke 的默认超时毫秒（UI13-P11 条目 9：服务端丢帧时 pending promise 永悬 +
+ *  Map 条目长存的历史泄漏点；导出供契约脚本结构钉）。 */
+export const INVOKE_TIMEOUT_MS = 60_000;
+
+/** 通道级超时覆盖表（UI13-P2-C）：默认 60s 会腰斩已知合法长操作——testProviderModel 上游
+ *  90s 封顶（connection-tester.ts 防误报特意留的余量）、probeMcpServers 合法可配至 120s
+ *  （mcp-probe.ts），网页端 60s 先到先斩。键与 WEB_CHANNEL_TABLE 同源取 IPC_CHANNELS 常量，
+ *  未列通道回落 INVOKE_TIMEOUT_MS 60s 默认。导出供契约脚本结构钉。 */
+export const CHANNEL_TIMEOUT_MS: Record<string, number> = {
+  [IPC_CHANNELS.PROVIDER_TEST_MODEL]: 100_000,
+  [IPC_CHANNELS.MCP_PROBE]: 130_000,
+};
+
+/** 契约脚本注入用的计时器接口（签名与 globalThis 同形；生产恒用默认 globalThis）。 */
+interface InvokeTimerApi {
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+/** 注册一条带 60s 超时的 pending invoke，返回包装后的 { resolve, reject }（调用方
+ *  pendingInvokes.set(id, …)）：
+ *  - 超时回调：身份比较（map.get(id)?.reject === wrapped.reject）命中才删键并 reject——
+ *    已回包/已断线清理的条目到期 no-op，不误删后来者（id 随机不重，防御性）；
+ *  - 正常回包（dispatchServerFrame）与断线批量 fail（failAllPendingInvokes）走包装后的
+ *    resolve/reject → clearTimeout，无悬挂定时器（T11-F 竞态面）。
+ *  timeoutMs / timers 仅契约脚本 tdd-memleak-fixes-verify 注入直测（T11-D/E/F fake timer），
+ *  生产调用恒省略取默认值。 */
+export function armPendingInvoke(
+  id: string,
+  map: Pick<Map<string, PendingInvoke>, 'get' | 'delete'>,
+  resolve: (value: unknown) => void,
+  reject: (error: Error) => void,
+  timeoutMs: number = INVOKE_TIMEOUT_MS,
+  timers: InvokeTimerApi = globalThis as unknown as InvokeTimerApi,
+): PendingInvoke {
+  const timer = timers.setTimeout(() => {
+    if (map.get(id)?.reject === wrapped.reject) {
+      map.delete(id);
+      reject(new Error('invoke 超时'));
+    }
+  }, timeoutMs);
+  const wrapped: PendingInvoke = {
+    resolve: (value: unknown) => {
+      timers.clearTimeout(timer);
+      resolve(value);
+    },
+    reject: (error: Error) => {
+      timers.clearTimeout(timer);
+      reject(error);
+    },
+  };
+  return wrapped;
 }
 
 interface BridgeConnection {
@@ -94,6 +148,11 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   // createWebApi 泛型分派处理，与 onSessionsChanged 同一机制；空载荷 {}，渲染层收到重拉列表）。
   onWorkspacesChanged: IPC_CHANNELS.WORKSPACES_CHANGED,
   removeWorkspacesListener: IPC_CHANNELS.WORKSPACES_CHANGED,
+  // UI13-P8：项目 Skill 目录清单变化信号（同 WORKSPACES_CHANGED 机制——on* 本地订阅 /
+  // remove*Listener 清订阅由 createWebApi 泛型分派处理；web-access-server 经 push-bus webSink
+  // 全量广播自动到达，服务端零改动；Skill tab 活跃时渲染层收到即重拉项目清单）。
+  onSkillsProjectDirsChanged: IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED,
+  removeSkillsProjectDirsListener: IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED,
   listProviders: IPC_CHANNELS.PROVIDER_LIST,
   saveProvider: IPC_CHANNELS.PROVIDER_SAVE,
   deleteProvider: IPC_CHANNELS.PROVIDER_DELETE,
@@ -329,7 +388,10 @@ function invokeOverWire(channel: string, args: unknown[]): Promise<unknown> {
   }
   const id = newInvokeId();
   return new Promise<unknown>((resolve, reject) => {
-    pendingInvokes.set(id, { resolve, reject });
+    // UI13-P11/P2-C：pending 条目带超时（armPendingInvoke 包装 resolve/reject——回包/断线
+    // 批量 fail 走包装即 clearTimeout；超时身份比较防误删后来者）。超时窗按通道取
+    // CHANNEL_TIMEOUT_MS 覆盖值（testProviderModel 100s / probeMcpServers 130s），未列通道 60s 默认。
+    pendingInvokes.set(id, armPendingInvoke(id, pendingInvokes, resolve, reject, CHANNEL_TIMEOUT_MS[channel] ?? INVOKE_TIMEOUT_MS));
     try {
       // encodeWireValue 对数组整体编解码（返回 unknown；此处入参恒为数组，断言回数组形状）
       ws.send(JSON.stringify({
@@ -540,6 +602,15 @@ async function runRealignSequence(): Promise<void> {
     if (active && !active.transient) {
       const fresh = sessionStore.sessions.find((s) => s.id === active.id) ?? active;
       await sessionStore.switchSession(fresh);
+    }
+    // UI13-P1：重连对齐补拉队列——同 id 重入 switchSession 不触发 activeSession?.id watch，
+    // TaskQueuePanel 的 loadOverview 不重跑，断线窗口内错过的 tasks_changed 由这里补拉
+    // （幂等全量替换）覆盖。active 会话非空才拉；失败静默，不阻断后续对齐步骤。
+    try {
+      const { useTaskStore } = await import('../stores/task-store');
+      if (sessionStore.activeSession) useTaskStore().loadOverview(sessionStore.activeSession.id);
+    } catch {
+      /* 队列对齐失败不致命 */
     }
     // SA-4（P5 恢复接线）追加①：running 概览重对齐——断线期间开始的回合在重连后恢复侧栏
     // 黄灯/计时（无 running 会话时 overview=[] 为 no-op；已在 runningSessions 的会话由

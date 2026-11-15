@@ -565,6 +565,22 @@ function isTextTarget(t: EventTarget | null): boolean {
     (t instanceof HTMLElement && t.isContentEditable)
   );
 }
+// I2：IME 组词守卫（统一口径 isComposing || keyCode === 229，与主输入区同源；本地复制不抽共享 util）。
+// 四输入入口一律改绑下方包装方法——submitMkdir/cancelMkdir 等底层函数被按钮 click / blur /
+// 互斥入口复用（无 KeyboardEvent），守卫不能塞进其本体；文件名框 Esc 无本地 handler（守卫
+// 在 window onKey Escape 分支首行，见 onKey）。
+function isImeComposing(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229;
+}
+
+function onAddrEnter(e: KeyboardEvent): void { if (isImeComposing(e)) return; submitAddr(); }
+function onAddrEsc(e: KeyboardEvent): void { if (isImeComposing(e)) return; cancelAddr(); }
+function onMkdirEnter(e: KeyboardEvent): void { if (isImeComposing(e)) return; void submitMkdir(); }
+function onMkdirEsc(e: KeyboardEvent): void { if (isImeComposing(e)) return; cancelMkdir(); }
+function onRenameEnter(e: KeyboardEvent): void { if (isImeComposing(e)) return; void submitRename(); }
+function onRenameEsc(e: KeyboardEvent): void { if (isImeComposing(e)) return; cancelRename(); }
+function onFilenameEnter(e: KeyboardEvent): void { if (isImeComposing(e)) return; void confirmSave(); }
+
 function trapTab(e: KeyboardEvent): void {
   const dlg = cardRef.value;
   if (!dlg) return;
@@ -574,10 +590,15 @@ function trapTab(e: KeyboardEvent): void {
   if (!focusables.length) return;
   const first = focusables[0];
   const last = focusables[focusables.length - 1];
-  if (e.shiftKey && document.activeElement === first) {
+  // I7：焦点逃逸重捕——activeElement 已不在卡片 DOM（点留白落 body 等）时 Tab 仍拉回
+  // （容器外 Shift+Tab→末、Tab→首；容器内首末回绕不受影响）。右键菜单/删除确认条/覆盖确认
+  // 均为 cardRef 子树内焦点，outside=false 行为不变。口径同 InteractionPrompt B5/I3-04。
+  const active = document.activeElement;
+  const outside = !dlg.contains(active);
+  if (e.shiftKey && (active === first || outside)) {
     e.preventDefault();
     last.focus();
-  } else if (!e.shiftKey && document.activeElement === last) {
+  } else if (!e.shiftKey && (active === last || outside)) {
     e.preventDefault();
     first.focus();
   }
@@ -585,6 +606,8 @@ function trapTab(e: KeyboardEvent): void {
 function onKey(e: KeyboardEvent): void {
   if (!req.value) return; // 弹窗未开不响应，避免与 InteractionPrompt 等的 Esc 抢
   if (e.key === 'Escape') {
+    // I2：组词中按 Esc 是取消候选词，不取消编辑/不关弹窗（文件名框无本地 Esc handler 的唯一外层守卫点）。
+    if (isImeComposing(e)) return;
     // 更高层遮罩（灯箱）在场时让位——Esc 只关最上层。
     if (escHandle && !escHandle.isTopmost()) return;
     if (ctxMenu.value) {
@@ -781,8 +804,8 @@ onBeforeUnmount(() => {
               placeholder="输入绝对路径，如 D:\work 或 \\server\share"
               aria-label="编辑路径"
               spellcheck="false"
-              @keydown.enter.stop.prevent="submitAddr"
-              @keydown.esc.stop.prevent="cancelAddr"
+              @keydown.enter.stop.prevent="onAddrEnter"
+              @keydown.esc.stop.prevent="onAddrEsc"
               @blur="cancelAddr"
             />
             <button
@@ -873,8 +896,8 @@ onBeforeUnmount(() => {
                     type="text"
                     placeholder="输入文件夹名称"
                     aria-label="新文件夹名称"
-                    @keydown.enter.stop.prevent="submitMkdir"
-                    @keydown.esc.stop.prevent="cancelMkdir"
+                    @keydown.enter.stop.prevent="onMkdirEnter"
+                    @keydown.esc.stop.prevent="onMkdirEsc"
                     @blur="onMkdirBlur"
                   />
                   <button
@@ -926,8 +949,8 @@ onBeforeUnmount(() => {
                           class="fp-mkdir__input"
                           type="text"
                           aria-label="重命名"
-                          @keydown.enter.stop.prevent="submitRename"
-                          @keydown.esc.stop.prevent="cancelRename"
+                          @keydown.enter.stop.prevent="onRenameEnter"
+                          @keydown.esc.stop.prevent="onRenameEsc"
                           @blur="onRenameBlur"
                         />
                       </span>
@@ -956,7 +979,7 @@ onBeforeUnmount(() => {
                 type="text"
                 placeholder="文件名"
                 aria-label="文件名"
-                @keydown.enter.stop.prevent="confirmSave"
+                @keydown.enter.stop.prevent="onFilenameEnter"
               />
               <div v-if="saveError" class="fp-inline-error" role="alert">{{ saveError }}</div>
             </div>
@@ -1112,7 +1135,7 @@ onBeforeUnmount(() => {
 }
 .fp-delbar__hint { flex: 0 0 auto; font-size: 0.72rem; opacity: 0.55; }
 .fp-delbar .fp-btn--primary {
-  background: var(--color-danger, #c05656);
+  background: var(--color-danger);
   color: #fff;
 }
 
@@ -1271,7 +1294,7 @@ onBeforeUnmount(() => {
 .fp-inline-error {
   flex: 0 0 auto;
   font-size: 0.74rem;
-  color: var(--color-danger, #c05656);
+  color: var(--color-danger);
   padding: 0 0.75rem 0.25rem;
 }
 

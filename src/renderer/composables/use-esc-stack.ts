@@ -32,6 +32,11 @@ export const ESC_LAYER_PRIORITY = {
   // 与 diffDialog 1250 的关系不变（1250 仍更高）。Esc 裁决层级与 CSS z-index 解耦——.mcp-mask
   // 遮罩 CSS z-index 仍为 1200，本表只裁决 Esc 让位、不参与绘制。
   mcpDialog: 1199,
+  // F1（活动面板组）：后台任务终态输出只读弹窗（TaskQueuePanel .bg-output-mask）——与
+  // mcpDialog 同层值 1199 但路由互斥（MCP 弹窗在配置页、输出弹窗在会话页，两遮罩不存在
+  // 同时在场，同值安全）；低于 interaction 1200（与待决交互弹窗并存时 Esc 只关交互层）。
+  // .bg-output-mask CSS z-index 亦为 1199，与层值同表（非 mcpDialog 那类解耦例外）。
+  bgOutputDialog: 1199,
   // X2（R06-F2）：diff 两层提到 1250——高于交互层 1200（同 z 下 diff 遮罩恒盖住交互弹窗），
   // 与两个 diff 组件遮罩 CSS 的 z-index 同步。
   diffDialog: 1250,

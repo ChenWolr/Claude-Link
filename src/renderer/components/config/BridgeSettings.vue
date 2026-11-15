@@ -6,11 +6,14 @@
 // v-show 常挂（ConfigPage IM tab 门控），切 tab 不卸载、扫码轮询链不中断。
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useFsPickerStore } from '../../stores/fs-picker-store';
+import { useInteractionStore } from '../../stores/interaction-store';
 import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatus, BridgePlatformStatusEntry, BridgeFeishuTestResult } from '../../../shared/types/bridge';
 
 const claude = window.claudeLink;
 // 自绘文件选择器（T3）：选目录不再走主进程原生弹窗，改渲染层 FilePickerDialog 单例。
 const fsPickerStore = useFsPickerStore();
+// H5：统一确认体系（requestConfirm 渲染进程内 confirm，不经主进程）——微信退出登录 danger 二次确认载体。
+const interactionStore = useInteractionStore();
 
 const config = ref<BridgeConfigGetResult | null>(null);
 const statuses = ref<BridgePlatformStatusEntry[]>([]);
@@ -254,6 +257,16 @@ function stopQrcodePoll(): void {
 }
 
 async function wechatLogout(): Promise<void> {
+  // H5：退出前 danger 二次确认（统一确认体系 requestConfirm，渲染层本地、不经主进程；
+  // 两选项 confirm 非 alert 形态 → InteractionPrompt Esc 分支判定 cancel，Esc=取消零新增代码）。
+  const ok = await interactionStore.requestConfirm({
+    title: '退出微信登录',
+    message: '退出后微信私聊不再同步；重新扫码登录即可恢复。',
+    confirmText: '退出登录',
+    cancelText: '取消',
+    danger: true,
+  });
+  if (!ok) return;
   // 清 token=存空串（主进程 resolveSecretPatch 空串→null）。
   qrDataUrl.value = '';
   await save({ wechat: { botToken: '' } });

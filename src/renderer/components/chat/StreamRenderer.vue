@@ -20,35 +20,19 @@ function onContentClick(e: MouseEvent): void {
 </script>
 
 <template>
+  <!-- C2②/③：角色名已外置到 MessageList stream-group 的 .msg-label 标签行（本组件不再渲染
+       角色行）；外壳（底/描边/圆角/内边距/阴影/限宽）归 ai-card，.stream 只承载正文排版。 -->
   <div class="stream">
-    <div class="stream__role">Claude</div>
     <div class="stream__content markdown-body" v-html="renderedContent" v-enrich @click="onContentClick" /><span class="cursor">▊</span>
   </div>
 </template>
 
 <style scoped>
+/* C2③ 去壳：.stream 只留正文度量（word-break + line-height 1.8，随 AI 卡行高统一——
+   settings-mapping「StreamRenderer line-height:1.8」同步钉；卡壳归 MessageList .ai-card）。 */
 .stream {
-  align-self: flex-start;
-  max-width: 75%;
-  padding: 12px 16px;
-  border-radius: var(--radius-md);
-  background: var(--color-panel-soft);
-  border: 1px solid var(--color-border);
-  box-shadow: var(--ring-light), var(--elevation-1);
-}
-
-.stream__role {
-  font-size: 0.6875rem;
-  font-weight: 700;
-  color: var(--color-accent-strong);
-  text-transform: uppercase;
-  margin-bottom: 6px;
-  opacity: 0.7;
-}
-
-.stream__content {
   word-break: break-word;
-  line-height: 1.5;
+  line-height: 1.8;
 }
 
 .stream__content :deep(p) {

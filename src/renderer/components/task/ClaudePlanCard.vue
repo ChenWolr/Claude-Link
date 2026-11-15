@@ -21,7 +21,9 @@ const plan = computed(() => planStore.activePlan);
 const todoCount = computed(() => plan.value?.todos.length ?? 0);
 const todoCompleted = computed(() => plan.value?.todos.filter((t) => t.status === 'completed').length ?? 0);
 const taskCount = computed(() => plan.value?.tasks.length ?? 0);
-const hasPlan = computed(() => todoCount.value > 0 || taskCount.value > 0);
+// F5⑦（裁决 D4⑥）：原 hasPlan computed + 卡内「尚未创建计划任务」空态块已删——面板侧
+// `<ClaudePlanCard v-if="planTotalCount" />` 守卫使该分支永不可达（planTotalCount===0 时
+// 面板渲染自己的空态「Claude 尚未创建计划」，卡片根本不挂载），删除不产生新可达路径。
 
 // 展开的任务 ID 集合
 const expandedTaskIds = ref<Set<string>>(new Set());
@@ -72,11 +74,7 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
 
 <template>
   <div class="claude-plan-card">
-    <div v-if="!hasPlan" class="claude-plan-card__empty">
-      Claude 尚未创建计划任务
-    </div>
-    <template v-else>
-      <!-- TodoWrite 清单 -->
+    <!-- TodoWrite 清单 -->
       <div v-if="todoCount > 0" class="plan-todos">
         <div class="plan-todos__header">
           <svg class="plan-todos__icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -149,7 +147,6 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
           </li>
         </ul>
       </div>
-    </template>
   </div>
 </template>
 
@@ -158,13 +155,6 @@ function taskStatusClass(status: ClaudePlanTask['status']): string {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.claude-plan-card__empty {
-  color: var(--color-text-muted);
-  font-size: 0.85em;
-  padding: 12px 4px;
-  text-align: center;
 }
 
 /* TodoWrite 清单 */

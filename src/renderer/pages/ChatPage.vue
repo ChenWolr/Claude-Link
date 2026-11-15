@@ -103,6 +103,11 @@ function escConsumerOpen(): boolean {
   if (document.querySelector('.slash-menu')) return true;
   if (document.querySelector('.menu, .perm-menu, .tl-menu, .cascade')) return true;
   if (document.querySelector('.export-overlay')) return true;
+  // F1（活动面板组）：后台任务输出弹窗在场时 Esc 归弹窗（弹窗自身 Esc 分支关闭+焦点还原
+  // 并 preventDefault 是第一道让位），此处 DOM 探测为第二道兜底——覆盖两 window 监听注册
+  // 顺序分叉，防 Esc 双吞（弹窗开 + 回合运行按 Esc 只关弹窗、不得中断回合）。与 slash-menu
+  // 等探测同型（v-if 弹层同步派发期间仍在 DOM）。
+  if (document.querySelector('.bg-output-mask')) return true;
   return false;
 }
 
@@ -451,12 +456,11 @@ function handleNewSession() {
         <span>❌ {{ error }}<button v-if="lastFailedCurrent" type="button" class="chat-error__retry" @click="retryLastFailed">重新编辑发送</button></span>
       </div>
 
-      <!-- 附件草稿：位于 .chat-composer 上方，自身无横向外层边框 -->
-      <AttachmentDraftList :attachments="draftAttachments" />
-
       <div class="chat-composer" :class="{ 'chat-composer--drag': dragActive }">
         <!-- 实时计时器（方案 A 状态头条）：浮岛第一行，sending 期间展开显示本回合耗时 + 阶段徽章。 -->
         <TurnTimer />
+        <!-- 附件草稿（E6）：移入浮岛卡片内部上方（原在浮岛外）；空列表 v-if 不渲染不占位。 -->
+        <AttachmentDraftList :attachments="draftAttachments" />
         <!-- IM 桥接会话：桌面端只读，输入区/工具栏收起（发言仅限 IM 客户端）。 -->
         <div v-if="bridgeLocked" class="bridge-lock" role="status">
           该会话由{{ bridgePlatformLabel }}桥接驱动：请在{{ bridgePlatformLabel }}客户端中与机器人对话，桌面端仅可查看。

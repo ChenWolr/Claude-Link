@@ -9,6 +9,9 @@
   --color-border-strong: rgba(0, 0, 0, 0.12); /* 大区分隔（侧栏/表头）用 */
   --color-text: #3B3D3F;
   --color-text-muted: #6A6C70; /* warm-paper 默认：对 bg 约 4.8:1 过 AA（openhanako 原值 #8E9196 仅 2.9:1 已加深） */
+  /* 弱注小字（UI 补全 A1）：静态默认=当前暖纸 textMuted 同值（var 单源）；运行时由 apply-theme 按板
+     textSub 字段覆写（墨石 #5B6779），11 套旧板回退=各板 textMuted（JS 层 ?? 回退，切板不残留）。 */
+  --color-text-sub: var(--color-text-muted);
   --color-accent: #537D96; /* 钢蓝 */
   --color-accent-strong: #456A80;
   --color-on-accent: #FFFFFF; /* 强调色上的白色文字（按钮用，粗体过 AA 大字号） */
@@ -23,6 +26,19 @@
   --color-success-strong: #2E7D46;
   --color-on-success: #FFFFFF; /* success 系实底上的白字（徽标用；success 不随色板恒深底） */
   --color-on-danger: #FFFFFF; /* danger 系实底上的白字（multiselect 激活态等；11 套色板 danger 恒深红） */
+
+  /* 主按钮 ink 语义对（UI 补全 A2 / 00-review-summary K3 裁决）：
+     静态默认回退 accent/on-accent（首绘 + 11 套旧板观感=现状）；
+     墨石由色板字段覆写为近黑（apply-theme 无条件写入，切板不残留）。 */
+  --color-btn-ink: var(--color-accent);
+  --color-on-btn-ink: var(--color-on-accent);
+
+  /* 用户气泡固定浅蓝语义对（UI 补全 A3）：不随色板——12 套色板（含终端暗板）下恒为此二值，
+     浅蓝亮块在暗板下属设计意图，禁止为 terminal-pro 加 isDark 分支或覆写；
+     字面值声明（非 var 派生、非 accent 派生），禁止加入 ThemePalette 接口与 apply-theme 写入链
+     （constants.ts/apply-theme.ts/ConfigPage.vue 零改动，消费方 C1 才换色）。 */
+  --color-bubble-user-bg: #D9E9ED;
+  --color-bubble-user-ink: #17181A;
 
   --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, "Liberation Mono", monospace;

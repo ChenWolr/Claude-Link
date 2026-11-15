@@ -1,13 +1,31 @@
 <script setup lang="ts">
 // 应用骨架：左侧栏（会话）+ 中间工作区 + 右侧任务队列。
 // 左右两侧栏宽度可拖拽调整；聊天区与两侧栏保留间距；窗口缩放时中间工作区等比伸缩。
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 import { useRoute } from 'vue-router';
 import AppHeader from './AppHeader.vue';
 import AppSidebar from './AppSidebar.vue';
 import TaskQueuePanel from '../task/TaskQueuePanel.vue';
+import { useSessionStore } from '../../stores/session-store';
+import { useTaskStore } from '../../stores/task-store';
 
-const isTaskPanelOpen = ref(true);
+const sessionStore = useSessionStore();
+const taskStore = useTaskStore();
+
+// B4 两级断点（K6）面板半：≤1100 强制收活动面板。JS matchMedia 而非纯 CSS——
+// 唤回条显隐是行为态；标志仅视口态，渲染层合法（五问 2）。
+// 〔边界申报：≤800 侧栏 overlay 半（mqSidebar/sidebarForceHidden/sidebarOverlayOpen/AppHeader
+// toggle 钮）与 AppSidebar B1-B3/B6 重排同属 slate 回路未落盘工作，无 selftest 清单钉，本点不实施。〕
+const mqPanel = window.matchMedia('(max-width: 1100px)');
+const panelForceHidden = ref(mqPanel.matches);      // 初值取 matches，窄窗首绘无闪变
+const panelRecalled = ref(false);                   // ≤1100 下用户点击唤回的覆盖标志（B-C1）
+
+function onMqPanelChange(e: MediaQueryListEvent) { panelForceHidden.value = e.matches; if (!e.matches) panelRecalled.value = false; }
+// 兜底复位（与 onMqPanelChange 内复位双保险，防漏接 change 时序）
+watch(panelForceHidden, (hidden) => { if (!hidden) panelRecalled.value = false; });
+
+// UI13-P4：侧栏折叠态（内存态，store 持有）——折叠时隐藏左侧栏拖宽手柄（sidebarWidth ref 不动，
+// 展开恢复用户此前拖拽宽度；折叠宽由 AppSidebar .sidebar--collapsed 固定 48px 覆盖）。
 
 // 右侧活动栏（队列/子Agent/后台/改动）是会话工作区的一部分：仅 chat 路由渲染；
 // 配置页/会话管理页隐藏（AppHeader 同款路由感知，右栏此前遗漏）。
@@ -67,10 +85,12 @@ function onMouseUp() {
 onMounted(() => {
   document.addEventListener('mousemove', onMouseMove);
   document.addEventListener('mouseup', onMouseUp);
+  mqPanel.addEventListener('change', onMqPanelChange);
 });
 onUnmounted(() => {
   document.removeEventListener('mousemove', onMouseMove);
   document.removeEventListener('mouseup', onMouseUp);
+  mqPanel.removeEventListener('change', onMqPanelChange);
 });
 </script>
 
@@ -80,7 +100,8 @@ onUnmounted(() => {
     :style="{ '--sidebar-width': sidebarWidth + 'px', '--task-panel-width': taskWidth + 'px' }"
   >
     <AppSidebar />
-    <div class="resize-handle resize-handle--sidebar" @mousedown="onSidebarResizeStart" title="拖动调整侧栏宽度" />
+    <!-- UI13-P4：折叠期间手柄隐藏（v-if 门控，折叠态不可拖宽；sidebarWidth 不被折叠触碰，展开恢复） -->
+    <div v-if="!sessionStore.sidebarCollapsed" class="resize-handle resize-handle--sidebar" @mousedown="onSidebarResizeStart" title="拖动调整侧栏宽度" />
 
     <section class="workspace">
       <AppHeader />
@@ -89,11 +110,23 @@ onUnmounted(() => {
       </main>
     </section>
 
-    <template v-if="isTaskPanelOpen && isChatRoute">
+    <template v-if="isChatRoute && (!panelForceHidden || panelRecalled)">
       <div class="resize-handle resize-handle--task" @mousedown="onTaskResizeStart" title="拖动调整队列宽度" />
       <TaskQueuePanel />
     </template>
-    <button v-else-if="isChatRoute" class="reopen-task-panel" type="button" @click="isTaskPanelOpen = true">队列</button>
+    <!-- B4：≤1100 断点强制隐藏后的唤回条 pill（裁决 B-C1 内联回唤；K6/D1-07 图标+队列+计数角标；
+         计数源 taskStore.tasks=当前活动会话 pending 任务视图，0 计数角标不渲染、图标+「队列」恒显）。 -->
+    <button
+      v-else-if="isChatRoute && panelForceHidden && !panelRecalled"
+      class="reopen-task-panel"
+      type="button"
+      aria-label="队列"
+      @click="panelRecalled = true"
+    >
+      <svg class="reopen-task-panel__icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
+      <span>队列</span>
+      <span v-if="taskStore.tasks.length" class="reopen-task-panel__badge">{{ taskStore.tasks.length }}</span>
+    </button>
   </div>
 </template>
 
@@ -137,15 +170,42 @@ onUnmounted(() => {
   background: var(--color-accent);
 }
 
+/* B4 唤回条改 pill（K6/D1-07）：图标 + 队列 + 计数角标；位置沿用现状 right:12/top:84 */
 .reopen-task-panel {
   position: fixed;
   right: 12px;
   top: 84px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-pill);
   background: var(--color-panel-soft);
   box-shadow: var(--elevation-2), var(--ring-light);
   color: var(--color-text);
-  padding: 8px 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+.reopen-task-panel__icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.reopen-task-panel__badge {
+  min-width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 0.65625rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
 }
 </style>

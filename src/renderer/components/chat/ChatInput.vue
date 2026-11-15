@@ -187,6 +187,21 @@ function selectSlashCommand(cmd: SdkCommand): void {
   }
   showSlashMenu.value = false;
   resetCommandPagination();
+  // E4③：键盘/点击选中插入命令后焦点回 textarea（原型 input.focus() 收编，03-doc D3-22⑥）。
+  // nextTick 等 :value 绑定写入 DOM 后再把光标钉在末尾（含尾随空格）；键盘路径焦点本在
+  // textarea，nextTick focus 为幂等无害。函数头与上方逻辑零触碰（n3-ime 以本函数头为切片边界）。
+  // typeof 守卫：hb10-CMD-08 ⑥b 行为级 harness 把本函数体切进 vm 实调（deps 只供
+  // emit/showSlashMenu/resetCommandPagination），typeof 对未声明标识符安全返回 'undefined'
+  // 不抛 ReferenceError；组件内 nextTick 为静态 import 恒为 function，守卫恒真语义不变。
+  if (typeof nextTick === 'function') {
+    void nextTick(() => {
+      const ta = textareaRef.value;
+      if (!ta) return;
+      const pos = ta.value.length;
+      ta.focus();
+      ta.setSelectionRange(pos, pos);
+    });
+  }
 }
 
 function handleInput(e: Event): void {
@@ -306,6 +321,13 @@ onUnmounted(() => {
 
 <template>
   <div ref="wrapperRef" class="chat-input-wrapper">
+    <!-- E4（slate-ui-completion-1108-1428）：斜杠菜单 desc 渲染 + listbox 三件套 + 选中回焦。
+         裁决 E-C3：role="listbox" 挂内层容器 .slash-menu__list——status/hint/provenance 不是
+         option，放容器外侧才满足 ARIA；外层 .slash-menu 保持滚动容器（max-height 预算 +
+         @scroll 触底 + ChatPage escConsumerOpen '.slash-menu' 探测类名均零触碰）。
+         项 id="slash-opt-{i}" 与容器 :aria-activedescendant 同源 selectedSlashIndex
+         （hoverCommand 写同一 ref → aria 跟随悬停）。testid/data-command/origin 徽章/含空格
+         注记逐字保留（cdp-commands-e2e 与 regression-tests 依赖）。 -->
     <div
       v-if="showSlashMenu"
       ref="slashMenuRef"
@@ -314,22 +336,35 @@ onUnmounted(() => {
       @scroll="handleSlashMenuScroll"
     >
       <div
-        v-for="(cmd, i) in visibleCommands"
-        :key="cmd.name"
-        :class="['slash-menu__item', { active: i === selectedSlashIndex }]"
-        data-testid="slash-menu-item"
-        :data-command="cmd.name"
-        @click="selectSlashCommand(cmd)"
-        @mouseenter="hoverCommand(i)"
+        class="slash-menu__list"
+        role="listbox"
+        :aria-activedescendant="`slash-opt-${selectedSlashIndex}`"
+        aria-label="斜杠命令联想"
       >
-        <span class="slash-menu__name">/{{ cmd.name }}</span>
-        <span v-if="/\s/.test(cmd.name)" class="slash-menu__name" title="命令名含空格，点击仅插入首段，需手动输入完整名">（含空格，需手动输入）</span>
-        <span
-          v-if="originLabel(cmd.origin)"
-          class="slash-menu__origin"
-          data-testid="slash-menu-origin"
-          :data-origin="cmd.origin"
-        >{{ originLabel(cmd.origin) }}</span>
+        <div
+          v-for="(cmd, i) in visibleCommands"
+          :key="cmd.name"
+          :id="`slash-opt-${i}`"
+          role="option"
+          :aria-selected="i === selectedSlashIndex"
+          :class="['slash-menu__item', { active: i === selectedSlashIndex }]"
+          data-testid="slash-menu-item"
+          :data-command="cmd.name"
+          @click="selectSlashCommand(cmd)"
+          @mouseenter="hoverCommand(i)"
+        >
+          <span class="slash-menu__row">
+            <span class="slash-menu__name">/{{ cmd.name }}</span>
+            <span v-if="/\s/.test(cmd.name)" class="slash-menu__name" title="命令名含空格，点击仅插入首段，需手动输入完整名">（含空格，需手动输入）</span>
+            <span
+              v-if="originLabel(cmd.origin)"
+              class="slash-menu__origin"
+              data-testid="slash-menu-origin"
+              :data-origin="cmd.origin"
+            >{{ originLabel(cmd.origin) }}</span>
+          </span>
+          <span v-if="cmd.description" class="slash-menu__desc">{{ cmd.description }}</span>
+        </div>
       </div>
       <div v-if="matchingCommands.length === 0" class="slash-menu__status">
         <span v-if="commandStatus === 'loading'">正在读取 Claude Code 命令…</span>
@@ -354,7 +389,16 @@ onUnmounted(() => {
         @keydown="handleKeydown"
         @input="handleInput"
       />
-      <button type="button" data-testid="chat-send-button" :disabled="disabled || (!modelValue.trim() && !hasAttachments)" @click="submit">发送</button>
+      <!-- E1（slate-ui-completion-1108-1428）：发送文本后追加 Enter 角标（corner-down-left 语义），
+           纯视觉无新增文案；aria-hidden 装饰性标记——角标语义由按钮自身「发送」承载。
+           testid/:disabled 表达式/@click 逐字保留（CDP 8 处依赖 testid；regression-tests.ts
+           disabled 正则钉同源）。 -->
+      <button type="button" data-testid="chat-send-button" :disabled="disabled || (!modelValue.trim() && !hasAttachments)" @click="submit">
+        发送
+        <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 10 4 15l5 5 M20 4v7a4 4 0 0 1-4 4H4" />
+        </svg>
+      </button>
     </div>
   </div>
 </template>
@@ -385,17 +429,45 @@ onUnmounted(() => {
   gap: 2px;
 }
 
+/* E4：listbox 内层容器——承载 role="listbox"（裁决 E-C3）；status/hint/provenance 在其外侧，
+   由外层 .slash-menu 的 flex column + 2px gap 排布（外层 gap 保留供两容器间间距）。 */
+.slash-menu__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* E4：item 改列布局（名行 + desc 行）；padding 0.5rem→0.3125rem——desc 入列后单项仍 ≤2.5rem，
+   保住既有 max-height 预算（算式见上方 .slash-menu 注释；预算字面零改动）。 */
 .slash-menu__item {
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.5rem 0.875rem;
+  flex-direction: column;
+  gap: 0.125rem;
+  padding: 0.3125rem 0.875rem;
   cursor: pointer;
 }
 
 .slash-menu__item:hover,
 .slash-menu__item.active {
   background: var(--color-panel-soft);
+}
+
+/* E4：名行（命令名 + 含空格注记 + 来源徽章）横向排布；origin 的 margin-left:auto 在行内右靠。 */
+.slash-menu__row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+/* E4：命令 desc muted 小字渲染在命令名下；超长 nowrap + ellipsis 截断（不撑破菜单宽度/爆高）。 */
+.slash-menu__desc {
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .slash-menu__name {
@@ -474,19 +546,45 @@ textarea {
   overflow-y: auto;
 }
 
+/* E1：发送钮 ink 化——底/字走 A2 ink 语义对（墨石近黑/白，11 套旧板经 variables.css
+   回退 accent/on-accent，观感与改版前一致）；不再挂 box-shadow: var(--ring-light-accent)，
+   该 inset 暗边语义属「强调色表面」（variables.css），ink 近黑表面无高光需求且原型 .send
+   亦无。聚焦环不在此声明（main.css 全局 button:focus-visible 2px accent outline 承担），
+   本块不得加 outline:none。 */
 button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   align-self: flex-end;
   border: 0;
   border-radius: var(--radius-md);
-  background: var(--color-accent);
-  box-shadow: var(--ring-light-accent);
-  color: var(--color-on-accent);
+  background: var(--color-btn-ink);
+  color: var(--color-on-btn-ink);
   padding: 10px 20px;
   font-weight: 700;
+  transition: filter var(--duration-fast) var(--ease-out);
+}
+
+/* hover 加深（实现稿 §1.2 裁决 brightness 手法：对 var 底色不做 color-mix 猜测，
+   12 板统一成立）；reduced-motion 下 --duration-fast 全局降为 1ms。 */
+button:hover:not(:disabled) {
+  filter: brightness(0.92);
 }
 
 button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+/* Enter 角标：stroke 随 currentColor 走钮字色（ink 对），0.875rem 与钮字号同档。 */
+.send-icon {
+  width: 0.875rem;
+  height: 0.875rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.9;
 }
 </style>

@@ -3,12 +3,42 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { useSessionStore } from '../stores/session-store';
 import { useInteractionStore } from '../stores/interaction-store';
+import { sessionDisplayStatusMeta, type SessionDisplayStatus } from '../../shared/session-display-status';
+import { formatSessionTime } from '../utils/format-session-time';
+import { projectLabel } from '../utils/group-sessions';
 
 const store = useSessionStore();
 const interactionStore = useInteractionStore();
 const router = useRouter();
 const searchQuery = ref('');
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+// 状态灯投影（B3）：与侧栏（AppSidebar）同源消费 store.sessionDisplayStatus + sessionDisplayStatusMeta
+// ——四态文案唯一事实源在 src/shared/session-display-status.ts，页面不另写死字符串（与侧栏逐字一致由同源保证）。
+function displayStatus(sessionId: string): SessionDisplayStatus {
+  return store.sessionDisplayStatus(sessionId);
+}
+function statusLabel(sessionId: string): string {
+  return sessionDisplayStatusMeta(displayStatus(sessionId)).label;
+}
+
+// meta 换源（B3）：项目 chip（workingDir 末段目录名；空值返回 null → v-if 不渲染空壳）。
+function projectChip(session: { workingDir: string | null }): string | null {
+  return session.workingDir ? projectLabel(session.workingDir) : null;
+}
+
+// 卡片键盘可达（B3，B2 同款委托）：Enter/Space 命中 .session-card 容器转发 click；
+// 原生控件（复选框/按钮等）自行处理，排除防双触发（排除先于 closest，B2-11 同序）。
+function onListKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const t = e.target;
+  if (t instanceof HTMLInputElement || t instanceof HTMLButtonElement ||
+      t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || t instanceof HTMLAnchorElement) return;
+  const row = (t as HTMLElement | null)?.closest('.session-card') as HTMLElement | null;
+  if (!row) return;
+  e.preventDefault();
+  row.click();
+}
 
 // 批量管理模式：开启后卡片显示复选框、点击卡片切换选中（不再跳转会话），
 // 顶部工具条提供全选/删除所选。删除走 store.deleteSessions → 单个删除同一条
@@ -41,8 +71,11 @@ function toggleSelectAll() {
 }
 
 async function confirmBatchDelete() {
-  const count = selectedIds.value.size;
-  if (!count) return;
+  // B5：提交前过滤悬空 id（批量中/确认弹窗打开期间会话可能被外部删除——跨端
+  // SESSIONS_CHANGED delete）。守卫必须在 requestConfirm 之前=组件层。
+  const ids = [...selectedIds.value].filter((id) => store.sessions.some((s) => s.id === id));
+  const count = ids.length; // 计数按过滤后
+  if (!count) return; // 过滤后为空：不弹窗、不报错、不退出批量模式
   const ok = await interactionStore.requestConfirm({
     title: '批量删除会话',
     message: `确定删除选中的 ${count} 个会话？会话及其全部消息、任务与附件将被永久删除，此操作不可撤销。`,
@@ -51,10 +84,21 @@ async function confirmBatchDelete() {
     danger: true,
   });
   if (!ok) return;
-  await store.deleteSessions([...selectedIds.value]);
+  await store.deleteSessions(ids);
   batchMode.value = false;
   selectedIds.value = new Set();
 }
+
+// B5：外部删除（跨端信号）后批量选中集合自动修剪——计数徽标与确认文案不再出现幽灵条目。
+watch(
+  () => store.sessions.map((s) => s.id),
+  (ids) => {
+    if (!batchMode.value || selectedIds.value.size === 0) return;
+    const alive = new Set(ids);
+    const next = new Set([...selectedIds.value].filter((id) => alive.has(id)));
+    if (next.size !== selectedIds.value.size) selectedIds.value = next;
+  },
+);
 
 // 单条删除与会话级另外三个入口同守卫（F1）：侧栏单删/侧栏批量删除（AppSidebar
 // confirmDelete / confirmBatchDelete）与本页批量删除（confirmBatchDelete）都走
@@ -130,6 +174,11 @@ async function openSession(session: { id: string }) {
 <template>
   <section class="sessions-page">
     <header class="sessions-page__header">
+      <div class="sessions-page__left">
+        <!-- 返回钮在 header 内、列表外：列表空时仍可达（B3-7 边界）。文案逐字对齐 ConfigPage .back-button。 -->
+        <button type="button" class="sessions-page__back" @click="router.push('/')">← 返回会话</button>
+        <span class="sessions-page__count">全部 · {{ store.displayedSessions.length }}</span>
+      </div>
       <div class="sessions-page__actions">
         <button
           type="button"
@@ -167,11 +216,15 @@ async function openSession(session: { id: string }) {
       @input="onSearchInput"
       @search="handleSearchClear"
     />
-    <div class="sessions-list">
+    <div class="sessions-list" @keydown="onListKeydown">
       <div
         v-for="session in store.displayedSessions"
         :key="session.id"
         :class="['session-card', { 'session-card--selected': batchMode && selectedIds.has(session.id) }]"
+        :role="batchMode ? 'checkbox' : 'button'"
+        :tabindex="0"
+        :aria-checked="batchMode ? selectedIds.has(session.id) : undefined"
+        :aria-label="batchMode ? '选择 ' + session.name : session.name"
         @click="batchMode ? toggleSelected(session.id) : openSession(session)"
       >
         <input
@@ -181,33 +234,35 @@ async function openSession(session: { id: string }) {
           :checked="selectedIds.has(session.id)"
           @click.stop="toggleSelected(session.id)"
         />
-        <!-- P2 会话置顶（点 S4）：名称旁 pin 小标识（置顶时显示）。 -->
-        <div class="session-card__name">
+        <div class="session-card__r1">
+          <span
+            v-if="displayStatus(session.id) !== 'idle'"
+            class="session-card__status"
+            :class="[`session-card__status--${displayStatus(session.id)}`]"
+            role="img"
+            :aria-label="statusLabel(session.id)"
+            :title="statusLabel(session.id)"
+          ></span>
+          <!-- P2 会话置顶（点 S4）：名称旁 pin 小标识（置顶时显示）。 -->
           <svg class="session-card__pinicon" v-if="session.pinnedAt != null" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
           </svg>
-          <span>{{ session.name }}</span>
+          <span class="session-card__name">{{ session.name }}</span>
         </div>
-        <div class="session-card__meta">
-          {{ session.model }} · {{ new Date(session.updatedAt).toLocaleString() }}
+        <div class="session-card__r2">
+          <span v-if="projectChip(session)" class="session-card__chip" :title="projectChip(session) ?? undefined">{{ projectChip(session) }}</span>
+          <span class="session-card__time">{{ formatSessionTime(session.updatedAt) }}</span>
+          <!-- P2 会话置顶（点 S4）：置顶文本钮（与删除钮同款文本钮形态），列表平铺继承 SQL 序自动置顶在前。 -->
+          <button
+            v-if="!batchMode"
+            type="button"
+            class="session-card__pin"
+            @click.stop="store.togglePin(session.id)"
+          >
+            {{ session.pinnedAt != null ? '取消置顶' : '置顶' }}
+          </button>
+          <button v-if="!batchMode" type="button" class="session-card__delete" @click.stop="confirmDelete(session)">删除</button>
         </div>
-        <!-- P2 会话置顶（点 S4）：置顶文本钮（与删除钮同款文本钮形态），列表平铺继承 SQL 序自动置顶在前。 -->
-        <button
-          v-if="!batchMode"
-          type="button"
-          class="session-card__pin"
-          @click.stop="store.togglePin(session.id)"
-        >
-          {{ session.pinnedAt != null ? '取消置顶' : '置顶' }}
-        </button>
-        <button
-          v-if="!batchMode"
-          type="button"
-          class="session-card__delete"
-          @click.stop="confirmDelete(session)"
-        >
-          删除
-        </button>
       </div>
       <div v-if="!store.displayedSessions.length" class="empty">
         {{ store.searchQuery ? '未找到匹配的会话' : '暂无会话' }}
@@ -232,8 +287,38 @@ async function openSession(session: { id: string }) {
 .sessions-page__header {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
   margin-bottom: 24px;
+}
+
+/* 左组（B3）：返回钮 + 「全部 · N」计数头。返回钮在 header 内、列表外，列表空时恒可达。 */
+.sessions-page__left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* 返回钮：对齐 ConfigPage .back-button 文本钮形态（透明底、border、hover panel-soft）。 */
+.sessions-page__back {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text);
+  padding: 0.5rem 1rem;
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: background 0.15s, transform var(--duration-fast) var(--ease-out);
+}
+
+.sessions-page__back:hover {
+  background: var(--color-panel-soft);
+}
+
+/* 「全部 · N」计数头：N 绑定 displayedSessions.length，随搜索过滤联动（裁决 B3-5）。 */
+.sessions-page__count {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
 }
 
 .sessions-page__actions {
@@ -321,9 +406,12 @@ async function openSession(session: { id: string }) {
 }
 
 .session-card {
+  /* B3 双行卡：r1=状态灯+pin 标识+标题，r2=chip+时间+行尾操作；卡片本体由 flex row 改纵向两行，
+     描边/panel-soft/radius-md/elevation/hover accent 描边 token 全保留（现状已 token 化）。 */
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-panel-soft);
@@ -350,12 +438,28 @@ async function openSession(session: { id: string }) {
   cursor: pointer;
 }
 
-.session-card__name {
+/* 双行行容器（B3，B2 同形态）：r1=状态灯+pin 标识+标题；r2=chip+时间+行尾操作。 */
+.session-card__r1 {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-weight: 600;
   min-width: 0;
+}
+
+.session-card__r2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.session-card__name {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* P2 会话置顶（点 S4）：名称旁 pin 小标识（accent 填充）。 */
@@ -366,9 +470,76 @@ async function openSession(session: { id: string }) {
   fill: var(--color-accent);
 }
 
-.session-card__meta {
+/* meta 换源（B3）：r2 chip（项目 chip，胶囊小标签形态对齐侧栏）+ formatSessionTime 短时间。 */
+.session-card__chip {
+  flex: none;
+  max-width: 45%;
+  font-size: 0.65625rem;
+  line-height: 1.4;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xs);
   color: var(--color-text-muted);
-  font-size: 0.75rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-card__time {
+  flex: none;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.session-card__status {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--session-status-color, var(--color-warn));
+  box-shadow: 0 0 0 0 color-mix(in srgb, var(--session-status-color, var(--color-warn)) 55%, transparent);
+  animation: session-card-status-pulse 1.2s ease-in-out infinite;
+}
+/* 会话状态灯（B3，自 AppSidebar 状态灯块逐行迁移）：类名换 session-card__status、keyframes 改名
+   session-card-status-pulse、颜色经 --session-status-color 变量继承于 span 自身修饰类（规范卡片模板
+   不含容器四态修饰绑定，色映射落在状态灯自身修饰类上）。
+   running=黄灯呼吸；retrying=红灯呼吸（同一条 pulse）；completed=静态绿灯；network_interrupted=静态红灯
+   （显式 animation:none）。idle 不渲染；文案经共享 util 的 aria-label/title 提供辅助可读（颜色不可省文案）。 */
+.session-card__status--running {
+  --session-status-color: var(--color-warn);
+}
+.session-card__status--retrying,
+.session-card__status--network_interrupted {
+  --session-status-color: var(--color-danger);
+}
+.session-card__status--completed {
+  --session-status-color: var(--color-success);
+}
+.session-card__status--completed,
+.session-card__status--network_interrupted {
+  box-shadow: none;
+  animation: none;
+}
+
+@keyframes session-card-status-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--session-status-color, var(--color-warn)) 55%, transparent);
+  }
+  50% {
+    opacity: 0.55;
+    box-shadow: 0 0 0 4px transparent;
+  }
+}
+
+/* reduced-motion 降级：必须位于基础动画声明与 keyframes 之后（同特异性后者胜，B2-13 同序钉）。
+   卡片无入场动画（侧栏 stagger 为侧栏专属），只关状态灯 pulse。 */
+@media (prefers-reduced-motion: reduce) {
+  .session-card__status {
+    animation: none;
+  }
 }
 
 /* P2 会话置顶（点 S4）：置顶文本钮——右推锚点由本钮承担（margin-left:auto），删除钮紧随其后

@@ -11,6 +11,7 @@ import ApiRetryBanner from './ApiRetryBanner.vue';
 import TurnFileChangesCard from './TurnFileChangesCard.vue';
 import TurnDiffDialog from './TurnDiffDialog.vue';
 import { groupMessagesForRender, computeStats, type RenderItem } from '../../utils/group-messages';
+import type { RenderableMessage } from '../../../shared/types/export-image';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { mapFinalTextToTurnStart } from '../../utils/turn-diff-attach';
 import { useSessionStore } from '../../stores/session-store';
@@ -37,6 +38,30 @@ const innerRef = ref<HTMLElement | null>(null);
 // 主聊天流：parentAgentId === null 的消息（子 agent 过程抽到右侧「子Agent」Tab）。
 // 分组规则（最小颗粒度 + 因果配对 + 正文独立气泡）见 utils/group-messages.ts。
 const mainFlowMessages = computed(() => props.messages.filter((m) => !m.parentAgentId));
+
+// C6（UI 补全）：中断回合最终正文 id 集合。渲染层推断（00-review-summary §5-D2② 裁决）：
+// 本回合存在中止系统行（system:aborted，cli-shared.ts:208 单点）且该气泡为回合最终正文，
+// 零 IPC/落库改动。合并单元沿用末段 id（ec67675）→ 推断 id 与渲染气泡 message.id 恒等。
+const interruptedFinalTextIds = computed<Set<string>>(() => {
+  const source: RenderableMessage[] = props.exportItems
+    ? props.exportItems.flatMap((it) => (it.type === 'fold' ? it.messages : [it.message]))
+    : mainFlowMessages.value;
+  const out = new Set<string>();
+  let aborted = false;
+  let lastBodyId: string | null = null;
+  const settle = (): void => {
+    if (aborted && lastBodyId) out.add(lastBodyId);
+    aborted = false;
+    lastBodyId = null;
+  };
+  for (const m of source) {
+    if (m.role === 'user') { settle(); continue; } // 新回合边界：结算上一回合
+    if (m.eventType === 'system' && m.processKind === 'system:aborted') aborted = true;
+    if (m.role === 'assistant' && m.eventType === 'message' && m.processKind === null) lastBodyId = m.id;
+  }
+  settle(); // 末回合
+  return out;
+});
 
 // ── 轮末文件改动卡片（turn-diff，计划 §4-P5）──
 // 挂载链：回合最终 assistant 正文（attachMap 锚点）→ summary 命中该回合 → 卡片挂正文气泡后；
@@ -246,6 +271,10 @@ onMounted(() => {
   if (innerRef.value) resizeObserver.observe(innerRef.value);
 });
 
+// UI13-P11（条目 9）：代码块复制反馈 1.5s 计时器句柄收敛（成功/失败两路共用）——卸载全清，
+// 按钮已随 DOM 销毁，timer 到点不再触达已脱离的按钮元素。
+const copyResetTimers = new Set<ReturnType<typeof setTimeout>>();
+
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   resizeObserver = null;
@@ -254,6 +283,9 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(scrollRafId);
     scrollRafId = null;
   }
+  // UI13-P11：代码块复制反馈计时器全清（含未到点的反馈窗口）。
+  for (const timer of copyResetTimers) clearTimeout(timer);
+  copyResetTimers.clear();
 });
 
 // 发送者角色：fold（思考/工具过程）算 assistant 侧，message 按 role 判断。
@@ -289,15 +321,19 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
   if (ok) {
     button.textContent = '已复制';
     button.classList.add('code-block__copy--copied');
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      copyResetTimers.delete(timer);
       button.textContent = '复制';
       button.classList.remove('code-block__copy--copied');
     }, 1500);
+    copyResetTimers.add(timer);
   } else {
     button.textContent = '失败';
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      copyResetTimers.delete(timer);
       button.textContent = '复制';
     }, 1500);
+    copyResetTimers.add(timer);
   }
 }
 </script>
@@ -317,7 +353,7 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
             :active="item.key === activeFoldId"
             :exportMode="exportMode"
           />
-          <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" :exportMode="exportMode" />
+          <MessageBubble v-else :class="{ 'msg-transition': isSenderTransition(idx) }" :message="item.message" :exportMode="exportMode" :interrupted="interruptedFinalTextIds.has(item.message.id)" />
           <!-- 轮末文件改动卡（turn-diff）：仅挂 message 项后（fold 项不挂），见 turnDiffCards 计算注释。
                数据未拉到 / 进行中回合 / 无 summary 时整体缺席（sending 下降沿防抖重拉后自然显形）。 -->
           <TurnFileChangesCard

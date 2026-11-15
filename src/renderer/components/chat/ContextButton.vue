@@ -8,7 +8,12 @@ const props = withDefaults(defineProps<{ disabled?: boolean }>(), { disabled: fa
 const emit = defineEmits<{ compress: [] }>();
 const store = useSessionStore();
 
-const showPopover = ref(false);
+// E5：popover 显隐 = hover ∪ 键盘 focus 两条件并集（03-doc D3-25③：focus 显隐对键盘用户更可达）。
+// 两 ref 分治避免「聚焦中鼠标掠过离开」把焦点态误清（mouseleave 只清 hoverPopover，
+// focusPopover 由 focusout 复位）；模板 v-if="showPopover" 字面不变。
+const hoverPopover = ref(false);
+const focusPopover = ref(false);
+const showPopover = computed(() => hoverPopover.value || focusPopover.value);
 // 问题 4：CC 自动压缩横幅。store.compactedJustNow 变 true 时显示，3 秒后自动消失并复位。
 // switchSession 会把 compactedJustNow 置 false——watch 的 false 分支也清横幅，
 // 避免切到新会话后旧横幅残留最多 3 秒误导用户。
@@ -124,7 +129,16 @@ watch(() => props.disabled, (v) => { if (v) resetHold(); });
 </script>
 
 <template>
-  <div class="ctx" @mouseenter="showPopover = true" @mouseleave="showPopover = false">
+  <!-- E5：hover ∪ focus 并集显隐。wrapper 级 focusin/focusout（冒泡语义）而非按钮级 @focus——
+       按钮 @blur="onHoldBlur" 是长按失焦取消链（tdd-contextbutton-hold-composable 精确钉），
+       一字不动；wrapper 级监听与之零冲突，focusout 在按钮 blur（含长按取消 blur 路径）时自动复位。 -->
+  <div
+    class="ctx"
+    @mouseenter="hoverPopover = true"
+    @mouseleave="hoverPopover = false"
+    @focusin="focusPopover = true"
+    @focusout="focusPopover = false"
+  >
     <button
       type="button"
       class="ctx__btn"

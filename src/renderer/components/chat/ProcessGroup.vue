@@ -164,7 +164,7 @@ const items = computed<GroupItem[]>(() => {
           v-else
           :use="item.use ?? null"
           :result="item.result ?? null"
-          :running="stats.running && !item.result"
+          :running="stats.running && !item.result && store.sending"
           :elapsedSeconds="item.use?.toolUseId ? store.toolProgress[item.use.toolUseId] : undefined"
           :backgroundRunning="item.use?.toolUseId ? backgroundToolUseIds.has(item.use.toolUseId) : false"
           :exportMode="exportMode"
@@ -180,26 +180,30 @@ const items = computed<GroupItem[]>(() => {
   width: 100%;
 }
 
+/* C7①：灰底胶囊条形态（原型 .procbar 基准；文案「✨ Claude 忙活了一阵子 · …」与
+   running「···」逐字不变——tdd 钉：摘要文案在 ProcessGroup.summary computed，未触碰）。
+   impl 字面 display:inline-flex 在块级父容器下 auto 水平边距解析为 0（CSS2.1 §10.3.6，
+   inline 级盒不参与 auto margin 居中），胶囊会贴左、违背「居中摘要」语义——改 display:flex
+   （块级 flex + fit-content + margin:0 auto 居中）保居中，申报见点报告。 */
 .process-fold__summary {
-  width: 100%;
+  width: fit-content;
+  margin: 0 auto;
   display: flex;
   align-items: center;
-  justify-content: center;
-  /* R-issue3：过程摘要与相邻回复气泡收紧到近贴合（仅留容器 gap）。原 margin: 2px 0。 */
-  margin: 0;
-  padding: 6px 12px;
-  background: transparent;
-  border: 0;
+  padding: 5px 14px;
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-text) 6%, var(--color-panel-soft));
   color: var(--color-text-muted);
   font-size: 0.8125rem;
   cursor: pointer;
+  border: 0;
   font-family: inherit;
-  border-radius: var(--radius-sm);
   transition: background 0.15s, color 0.15s, transform var(--duration-fast) var(--ease-out);
 }
 
 .process-fold__summary:hover {
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  /* 胶囊 hover：同系加深（原 accent 12% hover 改同系，避免胶囊上色斑化）。 */
+  background: color-mix(in srgb, var(--color-text) 10%, var(--color-panel-soft));
   color: var(--color-text);
 }
 

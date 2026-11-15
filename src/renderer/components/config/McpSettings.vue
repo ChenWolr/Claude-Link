@@ -439,12 +439,17 @@ interface ToastItem {
 }
 const toasts = ref<ToastItem[]>([]);
 let toastSeq = 0;
+// UI13-P11（条目 9）：toast 3.2s 过期计时器句柄按 key 收敛——卸载时遍历全清（组件销毁后
+// timer 到点不再触碰 reactive 列表；到点路径本为 filter no-op，清理属防御 + 语义干净）。
+const toastTimers = new Map<number, number>();
 function pushToast(message: string): void {
   const key = ++toastSeq;
   toasts.value.push({ key, message });
-  window.setTimeout(() => {
+  const timer = window.setTimeout(() => {
+    toastTimers.delete(key);
     toasts.value = toasts.value.filter((t) => t.key !== key);
   }, 3200);
+  toastTimers.set(key, timer);
 }
 
 // ═══ 哨兵还原 + 导入预览辅助纯函数区（p7b；与组件其余部分无闭包耦合）════════════
@@ -470,6 +475,12 @@ interface ImportPreviewEntry {
   source: McpParsedJsonEntry;
 }
 
+/** 解析级跳过/字段忽略明细行（UI13-P9 跳过原因可见）：name=map 键，reason=主进程中文原因。 */
+interface ImportSkipRow {
+  name: string;
+  reason: string;
+}
+
 /**
  * 导入文本分析（预览与确认导入同源调用；点6 起解析管道收口主进程）：三形态识别与条目归一
  * 全部由主进程 parseMcpServersJson（window.claudeLink.parseMcpJson 桥）完成——渲染层不再
@@ -478,14 +489,19 @@ interface ImportPreviewEntry {
  *     与文案与改前本地解析逐字一致，selftest B 组钉主进程侧行为）；
  *   - IPC 自身异常为防御路径（正常不达：handler 仅拒非 string 入参），同「JSON 解析失败：…」
  *     呈现，不加后缀（对齐改前本地 JSON.parse 失败文案形态）；
- *   - 条目级容错在主进程内（归一不出 → 该条不出现在 servers，等价改前「静默跳过该条」）。
- * 渲染层仅保留两件展示/标记用轻逻辑：
+ *   - 条目级容错在主进程内（UI13-P9 起不再静默：归一不出的条目随回包 skipped 明细携带——
+ *     name=map 键 + 中文原因，本函数原样转 skippedRows 供预览列表与既有 skip 行同一机制展示；
+ *     按 name 去重首个原因胜出——map 键本应唯一，防御性去重）。
+ * 渲染层仅保留展示/标记用轻逻辑：
  *   - shape 形态标签（detectImportShapeLabel，仅预览摘要展示文案）；
- *   - skip 规则标记：与现有管理库同名 →「与现有同名 → 将跳过」（§3.3）；name 不匹配 §1.1
- *     pattern →「名称非法 → 将跳过」（主进程 sanitize 会丢弃，预览如实标记，防「预览说导入、
- *     实存少一条」）。
+ *   - skip 规则标记：与现有目标栏位同名 →「与现有同名 → 将跳过」（§3.3，既有判定顺序优先）；
+ *     name 不匹配 §1.1 pattern →「名称非法 → 将跳过」（防御保留——主进程解析侧现已拦名称
+ *     非法条目进 skipped，正常不达；判定顺序保持不变）；
+ *   - skippedRows：主进程条目级跳过明细（契约「将跳过：<name> — <原因>」数据源）；
+ *   - fieldNotes：主进程 args/env 字段级忽略提示（裁决 R6：字段丢弃、条目仍导入），
+ *     提示级展示（非跳过行）。
  */
-async function analyzeImportText(text: string, existing: Array<{ name: string }>): Promise<{ shape: string; entries: ImportPreviewEntry[] } | { error: string }> {
+async function analyzeImportText(text: string, existing: Array<{ name: string }>): Promise<{ shape: string; entries: ImportPreviewEntry[]; skippedRows: ImportSkipRow[]; fieldNotes: ImportSkipRow[] } | { error: string }> {
   let result: Awaited<ReturnType<typeof claude.parseMcpJson>>;
   try {
     result = await claude.parseMcpJson(text);
@@ -504,7 +520,24 @@ async function analyzeImportText(text: string, existing: Array<{ name: string }>
       entries.push({ name: parsed.name, transport: parsed.transport, skip: false, skipReason: '', source: parsed });
     }
   }
-  return { shape: detectImportShapeLabel(text), entries };
+  // UI13-P9：主进程条目级跳过明细 → skippedRows（同名/名称非法渲染层判定优先——明细条目不在
+  // servers，与 entries 行按 name 天然不相交；去重仅防御首个原因胜出）。
+  const skippedRows: ImportSkipRow[] = [];
+  const seenSkip = new Set<string>();
+  for (const s of result.skipped ?? []) {
+    if (seenSkip.has(s.name)) continue;
+    seenSkip.add(s.name);
+    skippedRows.push({ name: s.name, reason: s.reason });
+  }
+  const fieldNotes: ImportSkipRow[] = [];
+  const seenNote = new Set<string>();
+  for (const n of result.fieldNotes ?? []) {
+    const key = `${n.name}\n${n.reason}`;
+    if (seenNote.has(key)) continue;
+    seenNote.add(key);
+    fieldNotes.push({ name: n.name, reason: n.reason });
+  }
+  return { shape: detectImportShapeLabel(text), entries, skippedRows, fieldNotes };
 }
 
 /**
@@ -1416,10 +1449,61 @@ async function exportScopeJson(): Promise<void> {
   }
 }
 
+// ── UI13-P10 单服务器导出：卡片「导出此服务器」→ {"mcpServers":{"<name>":{…}}} 可导入 JSON ──
+// 复用 MCP_EXPORT_SCOPED 通道（载荷超集 +name，通道/键集零新增）；明文链与作用域级导出同构：
+// 主进程按作用域现取真值（user/project 读 raw、managed 读 config store）→ 桌面写剪贴板 /
+// 网页一次性票据下载，渲染层零明文（§1.3）——编辑器 JSON 的脱敏哨兵文本不可作完整版使用，
+// 完整密钥只经此入口获得。票据下载分支形态与 exportScopeJson 同款；name 按当前栏位组装
+// （project 带 dir，作用域在点击瞬间同步推导，await 期间切栏不影响本次取源参数）。
+async function exportSingleServer(card: McpCard): Promise<void> {
+  if (exporting.value) return;
+  exporting.value = true;
+  try {
+    const payload: McpExportScopedPayload =
+      activeScope.value.kind === 'project'
+        ? { scope: 'project', dir: activeScope.value.path, name: card.name }
+        : { scope: activeScope.value.kind, name: card.name };
+    const r = await claude.exportMcpScoped(payload);
+    if (r.count === 0) {
+      // 防御性兜底：卡片在场则作用域非空（如导出瞬间该台被删走 name 校验抛错路径，此处不达）。
+      pushToast('当前作用域暂无可导出的服务器');
+      return;
+    }
+    if (r.downloadUrl) {
+      // 网页形态：同源一次性票据下载（不写 clipboard——那是桌面主机剪贴板，网页用户拿不到）。
+      const a = document.createElement('a');
+      a.href = r.downloadUrl;
+      a.download = '';
+      a.click();
+      pushToast(`已下载服务器 ${card.name} 的可导入 JSON（mcpServers 形态，含明文密钥）`);
+    } else {
+      pushToast(`已复制服务器 ${card.name} 的可导入 JSON（mcpServers 形态，含明文密钥）`);
+    }
+  } catch (e) {
+    pushToast(`导出失败：${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    exporting.value = false;
+  }
+}
+
 // ── 导入 JSON 弹窗（§3.3：解析预览 + 同名跳过标记；确认与预览同源解析）─────────
 const showImportDialog = ref(false);
 const importText = ref('');
 const importPreview = ref<Awaited<ReturnType<typeof analyzeImportText>> | null>(null);
+// UI13-P9 跳过原因可见：args/env 字段级忽略提示（裁决 R6：字段丢弃、条目仍导入）独立 ref，
+// 与预览同源生命周期（解析成功回填、解析失败/关闭/导入完成清空）——仅提示级展示，不影响勾选。
+const importFieldNotes = ref<Array<{ name: string; reason: string }>>([]);
+// 全跳过报错行数据源：条目级跳过计数与首要（第一个）跳过原因（skippedRows 顺序=主进程 map 序）。
+const skippedCount = computed<number>(() => {
+  const p = importPreview.value;
+  if (!p || 'error' in p) return 0;
+  return p.skippedRows.length;
+});
+const firstSkipReason = computed<string>(() => {
+  const p = importPreview.value;
+  if (!p || 'error' in p || p.skippedRows.length === 0) return '';
+  return p.skippedRows[0].reason;
+});
 const importing = ref(false);
 // p3-R3 逐条勾选：name → 是否勾选（预览条目键唯一：JSON map 键不重复）。skip 行也置 true
 // （UI disabled 不可交互，计数恒排除）；生命周期与预览同源——每次解析成功（含重开弹窗的
@@ -1447,6 +1531,7 @@ function openImport(): void {
   if (importText.value.trim() !== '') void parseImportPreview();
   else {
     importPreview.value = null;
+    importFieldNotes.value = [];
     importChecked.value = {};
   }
 }
@@ -1458,6 +1543,8 @@ function closeImportDialog(): void {
 async function parseImportPreview(): Promise<void> {
   const result = await analyzeImportText(importText.value, importTargetList.value);
   importPreview.value = result;
+  // UI13-P9：字段级忽略提示随预览同源回填/清空。
+  importFieldNotes.value = 'error' in result ? [] : result.fieldNotes;
   // p3-R3：每次（重新）解析 → 勾选重置为默认全选（解析失败无条目可勾，保持现状不动）。
   if (!('error' in result)) {
     const next: Record<string, boolean> = {};
@@ -1534,6 +1621,7 @@ async function confirmImport(): Promise<void> {
         showImportDialog.value = false;
         importText.value = ''; // 导入已完成消费，文本与预览清空
         importPreview.value = null;
+        importFieldNotes.value = []; // UI13-P9：字段忽略提示同拍清空
         importChecked.value = {}; // p3-R3：勾选状态一并清空
       }
       return;
@@ -1617,6 +1705,7 @@ async function confirmImport(): Promise<void> {
       showImportDialog.value = false;
       importText.value = '';
       importPreview.value = null;
+      importFieldNotes.value = []; // UI13-P9：字段忽略提示同拍清空
       importChecked.value = {};
     }
   } finally {
@@ -1670,6 +1759,9 @@ onBeforeUnmount(() => {
   }
   escLayer?.release();
   escLayer = null;
+  // UI13-P11（条目 9）：toast 过期计时器全清。
+  for (const toastTimer of toastTimers.values()) clearTimeout(toastTimer);
+  toastTimers.clear();
 });
 
 // ── 底部 note（每作用域首段对照定稿 + 三条公共说明：①生效粒度——启停仅新会话、定义增删改
@@ -1916,6 +2008,20 @@ const scopeNoteHead = computed<string>(() => {
                     @click.stop="handleProbe(card)"
                   >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                  </button>
+                  <!-- UI13-P10：单服务器「导出此服务器」（三作用域共用区，与「测试连接」同区——
+                       门之前渲染，managed/user/project 每卡一枚）。主进程按作用域现取明文真值 →
+                       {"mcpServers":{"<name>":{…}}} 可导入 JSON；桌面写剪贴板 / 网页一次性票据
+                       下载，明文不出渲染层（exportSingleServer）。导出的是定义本身与启停无关，
+                       禁用卡同样可导出（不设 disabled）。 -->
+                  <button
+                    class="mcp-iconbtn"
+                    type="button"
+                    :aria-label="`导出 ${card.name} 可导入 JSON`"
+                    :title="`导出 ${card.name} 可导入 JSON`"
+                    @click.stop="exportSingleServer(card)"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                   </button>
                   <!-- 管理库作用域：编辑/删除（p7b 接线）。 -->
                   <template v-if="activeScope.kind === 'managed'">
@@ -2193,7 +2299,7 @@ const scopeNoteHead = computed<string>(() => {
                取消/保存——保存恒可点（点击时先解析回填校验，失败红条停留），仅 jsonParsing/saving 在飞禁用；
                删除入口在表单侧与列表卡片提供（JSON 侧对照原型不设删除） -->
           <div v-else class="mcp-editor__foot">
-            <span class="mcp-jsonnote">已存密钥以 {{ MCP_VALUE_MASK }} 脱敏显示；保持不变则沿用原值</span>
+            <span class="mcp-jsonnote">已存密钥以 {{ MCP_VALUE_MASK }} 脱敏显示；完整可导入 JSON 请用列表卡片「导出此服务器」</span>
             <span class="mcp-editor__spacer" aria-hidden="true"></span>
             <button class="mcp-btn" type="button" :disabled="jsonParsing" @click="copyJson">复制 JSON</button>
             <button class="mcp-btn" type="button" @click="closeEditDialog">取消</button>
@@ -2235,6 +2341,13 @@ const scopeNoteHead = computed<string>(() => {
               <div v-if="'error' in importPreview" class="mcp-ffield__hint mcp-ffield__hint--danger">{{ importPreview.error }}</div>
               <template v-else>
                 <p class="mcp-imp__sum">识别形态 {{ importPreview.shape }} · 共 {{ importPreview.entries.length }} 台 · 将导入 {{ selectedImportableCount }} 台</p>
+                <!-- UI13-P9 跳过原因可见：全部条目被跳过（无 servers 条目且存在解析级跳过）→ 显式报错含首要原因；
+                     空表（mcpServers:{}，skippedCount=0）不触发。 -->
+                <p v-if="importPreview.entries.length === 0 && skippedCount > 0" class="mcp-ffield__hint mcp-ffield__hint--danger">未找到有效的 MCP 服务器表：全部 {{ skippedCount }} 个条目将被跳过（首要原因：{{ firstSkipReason }}）</p>
+                <!-- UI13-P9（裁决 R6）：args/env 字段级忽略提示（条目仍导入）——中性 hint 逐条 name — reason。 -->
+                <ul v-if="importFieldNotes.length > 0" class="mcp-imp__notes">
+                  <li v-for="n in importFieldNotes" :key="`${n.name}:${n.reason}`">{{ n.name }} — {{ n.reason }}</li>
+                </ul>
                 <ul class="mcp-imp__list">
                   <li
                     v-for="e in importPreview.entries"
@@ -2253,6 +2366,22 @@ const scopeNoteHead = computed<string>(() => {
                     <span class="row__tt">{{ e.transport.toUpperCase() }}</span>
                     <span v-if="e.skip" class="mcp-off-badge">{{ e.skipReason }}</span>
                     <span v-else class="mcp-imp__ok">将导入</span>
+                  </li>
+                  <!-- UI13-P9：解析级跳过条目行（条目不是对象/无法识别传输类型/缺 command/缺 url/名称非法）
+                       ——与既有同名/名称非法 skip 行同一列表同一徽章机制；不可勾选（disabled），不计入导入数。 -->
+                  <li
+                    v-for="s in importPreview.skippedRows"
+                    :key="'skip-' + s.name"
+                    class="mcp-imp__row"
+                  >
+                    <input
+                      class="mcp-imp__check"
+                      type="checkbox"
+                      disabled
+                      :aria-label="`不可导入 ${s.name}（将跳过：${s.reason}）`"
+                    />
+                    <span class="mcp-imp__name">{{ s.name }}</span>
+                    <span class="mcp-off-badge">将跳过：{{ s.reason }}</span>
                   </li>
                 </ul>
               </template>
@@ -3728,6 +3857,15 @@ const scopeNoteHead = computed<string>(() => {
   margin: 0;
   font-size: 0.75rem;
   color: var(--color-text-muted);
+}
+
+/* UI13-P9：字段级忽略提示列表（args/env 非法→字段丢弃、条目仍导入）——中性 hint 逐条展示。 */
+.mcp-imp__notes {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  line-height: 1.5;
 }
 
 .mcp-imp__list {

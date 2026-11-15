@@ -10,10 +10,14 @@
 //    2026-11-05 计划增 reconstructed）：first-change →「首改（编辑意图）」；reconstructed →
 //    「首改（重建对比）」（轮内纯 Edit 意图反向重建轮初内容，真 unified diff）；git-baseline →
 //    「对比 git 基线（HEAD）」；intent →「编辑意图（快照缺失）」；其余（full）→「与上一轮的差异」。
-// 无侧栏文件列表 / git 状态 / 拖动缩放 / 多段切换——单文件 patch 一次性呈现。
+// 无侧栏文件列表 / git 状态 / 多段切换——单文件 patch 一次性呈现。
+// 壳基座（I4）：拖动/双击复位/8 向缩放走 useDialogShell（与 InteractionPrompt/UpdateDialog/FilePicker
+// 同轨），几何钳制零自写；既有 Esc 层/键盘（Ctrl+F/↑↓）/seg 链路零变化。
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { useTurnDiffStore, turnDiffPatchKey, type TurnDiffPatchTarget } from '../../stores/turn-diff-store';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
+import { useDialogShell } from '../../composables/use-dialog-shell';
+import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import { parseUnifiedDiff } from '../../utils/diff-parser';
 import type { ParsedDiffFile } from '../../utils/diff-parser';
 import { buildSplitChunks, countChanges, countInlineHunks } from '../../utils/diff-render';
@@ -49,6 +53,17 @@ const overlayEl = ref<HTMLElement | null>(null);
 const dialogEl = ref<HTMLElement | null>(null);
 const closeBtn = ref<HTMLButtonElement | null>(null);
 let lastFocus: HTMLElement | null = null;
+
+// ── 壳基座（I4）：拖动 / 双击复位居中 / 8 向缩放，几何钳制全在 useDialogShell（零自写）──
+// visible = target 开关：关闭置 null（壳内部 visible 边沿）→ 重开重居中不继承旧几何；
+// initialSize {1280,840} 逐值对齐既有 CSS min(1280px,·)×min(840px,·)，视口内 pad 8 钳制同源；
+// min 560×360 与同族 ToolDiffDialog 下限一致（spec 约 560×360）。
+const shell = useDialogShell(
+  computed(() => !!props.target),
+  dialogEl,
+  { minW: 560, minH: 360, initialSize: { width: 1280, height: 840 } },
+);
+const shellStyle = shell.style; // ComputedRef 须解包为 script 顶层（P4 使用方规范，模板自动 unwrap）
 
 // —— 数据态（turn-diff-store）——
 const patchKey = computed(() => (props.target ? turnDiffPatchKey(props.target.turnStartMessageId, props.target.path, effectiveContext.value) : ''));
@@ -184,6 +199,13 @@ function gotoSearch(delta: number): void {
   currentSearchIndex.value = moveSearchIndex(currentSearchIndex.value, delta, searchMatches.value.length);
 }
 function onSearchKeydown(e: KeyboardEvent): void {
+  // I2：组词中消费按键（preventDefault+stopPropagation）——外层 window onKey 的 Escape 分支
+  // 在 isTextTarget 早退之前，朴素 return 会让组词 Esc 冒泡关闭搜索栏/弹窗。
+  if (isImeComposing(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   if (e.key === 'Escape') {
     e.preventDefault();
     e.stopPropagation();
@@ -210,6 +232,10 @@ function isTextTarget(t: EventTarget | null): boolean {
     (t instanceof HTMLElement && t.isContentEditable)
   );
 }
+// I2：IME 组词守卫（统一口径 isComposing || keyCode === 229，与主输入区同源；本地复制不抽共享 util）。
+function isImeComposing(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229;
+}
 function trapTab(e: KeyboardEvent): void {
   const dlg = dialogEl.value;
   if (!dlg) return;
@@ -219,10 +245,14 @@ function trapTab(e: KeyboardEvent): void {
   if (!focusables.length) return;
   const first = focusables[0];
   const last = focusables[focusables.length - 1];
-  if (e.shiftKey && document.activeElement === first) {
+  // I7：焦点逃逸重捕——activeElement 已不在弹窗 DOM（点留白落 body 等）时 Tab 仍拉回
+  // （容器外 Shift+Tab→末、Tab→首；容器内首末回绕不受影响）。口径同 InteractionPrompt B5/I3-04。
+  const active = document.activeElement;
+  const outside = !dlg.contains(active);
+  if (e.shiftKey && (active === first || outside)) {
     e.preventDefault();
     last.focus();
-  } else if (!e.shiftKey && document.activeElement === last) {
+  } else if (!e.shiftKey && (active === last || outside)) {
     e.preventDefault();
     first.focus();
   }
@@ -275,17 +305,18 @@ onBeforeUnmount(() => {
           class="diff-dialog"
           role="dialog"
           aria-modal="true"
-          :aria-label="`轮末改动对比 ${filePath}`"
+          aria-labelledby="turn-diff-dlg-title"
+          :style="shellStyle"
         >
           <div class="diff-main">
-            <header class="diff-header">
+            <header class="diff-header" @pointerdown="shell.beginDrag" @dblclick="shell.resetToCenter">
               <div class="diff-header__main">
                 <div class="diff-eyebrow">
                   <span class="dot"></span>
                   轮末文件改动
                   <span class="diff-eyebrow__badge" :class="{ 'diff-eyebrow__badge--first': entry?.mode === 'first-change' || entry?.mode === 'git-baseline' || entry?.mode === 'reconstructed' }">{{ modeBadge }}</span>
                 </div>
-                <h2 class="diff-title">
+                <h2 id="turn-diff-dlg-title" class="diff-title">
                   <span v-if="pathParts.dir" class="diff-title__dir">{{ pathParts.dir }}/</span><b>{{ pathParts.name || '—' }}</b>
                 </h2>
                 <p class="diff-meta">
@@ -445,6 +476,9 @@ onBeforeUnmount(() => {
               </div>
             </footer>
           </div>
+
+          <!-- I4：8 向缩放手柄（卡片尾、diff-main 之后；定位贴 .diff-dialog 边，样式在全局 main.css） -->
+          <DialogResizeHandles :binder="shell" />
         </div>
       </div>
     </Transition>
@@ -495,6 +529,10 @@ onBeforeUnmount(() => {
 }
 
 .diff-dialog {
+  /* I4 壳基座：rect 绑定后靠 left/top 定位；position:absolute 使 .dlg-rz 手柄
+     （main.css 全局 absolute）以本卡片为包含块才能贴卡——必改项。
+     既有 width/height min(...) 保留为 rect 未测量帧（rect null）回退。 */
+  position: absolute;
   /* 几何对齐 ToolDiffDialog ensureRect（1280×840 视口内自适应，pad 8） */
   width: min(1280px, calc(100vw - 16px));
   height: min(840px, calc(100vh - 16px));
@@ -534,6 +572,9 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: flex-start;
   gap: 14px;
+  /* P9：标题栏拖动——抓手光标；触屏禁浏览器手势接管（拖动走 pointer 事件） */
+  cursor: move;
+  touch-action: none;
 }
 .diff-header__main {
   flex: 1;
@@ -1016,6 +1057,10 @@ onBeforeUnmount(() => {
   .diff-dialog {
     width: 100vw !important;
     height: 100vh !important;
+    /* I4：rect 绑定后内联 left/top/width/height px 与媒体查询竞争，!important 覆盖内联
+       四键 → 窄窗全屏无 8px 偏移、无水平溢出（ToolDiffDialog 同款已验证形态）。 */
+    left: 0 !important;
+    top: 0 !important;
     border-radius: 0;
   }
 }

@@ -149,10 +149,12 @@ function formatCtx(maxTokens: number): string {
 
 <template>
   <div ref="wrapRef" class="model-wrap">
-    <!-- 触发器：a2 model-trigger（accent 描边），显示 供应商名 / 模型ID（mono）+ ⌃ -->
+    <!-- 触发器：a2 model-trigger（accent 描边），E2 一体化「图标+值」pill（图标入钮、无 caret），
+         data-testid 供 CDP 结构定位 -->
     <button
       type="button"
       class="model-trigger"
+      data-testid="model-trigger"
       :disabled="props.disabled"
       :title="followsDefault
         ? '切换本会话使用的供应商与模型（下一条消息起生效）；当前跟随默认（最近使用），未在本会话固定'
@@ -162,11 +164,13 @@ function formatCtx(maxTokens: number): string {
       @click="toggleOpen"
     >
       <template v-if="hasLibrary">
+        <svg class="model-trigger__icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 5h14v14H5z M9 9h6v6H9z" />
+        </svg>
         <span class="model-trigger__provider">{{ resolved.provider?.name ?? '未选择' }}</span>
         <span class="model-trigger__sep">/</span>
         <strong class="model-trigger__model">{{ resolved.modelId ?? '未选择' }}</strong>
         <span v-if="followsDefault" class="model-trigger__tag">默认</span>
-        <span class="model-trigger__caret" aria-hidden="true">⌃</span>
       </template>
       <template v-else>
         <span>未配置模型 → 前往设置</span>
@@ -278,9 +282,18 @@ function formatCtx(maxTokens: number): string {
   text-overflow: ellipsis;
 }
 
-.model-trigger__caret {
-  opacity: 0.6;
-  font-size: 0.625rem;
+/* E2 一体化：触发钮内图标（stroke 用 currentColor——model-trigger 文字为 accent-strong，
+   图标随其走；与 .ctl__btn-icon 同款 stroke 规则）。 */
+.model-trigger__icon {
+  flex-shrink: 0;
+  width: 0.875rem;
+  height: 0.875rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
 }
 
 /* 「跟随默认」徽标（D3）：与「已钉住」显示同值时区分语义。 */

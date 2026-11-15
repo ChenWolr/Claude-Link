@@ -132,6 +132,24 @@ watch(() => providerStore.error, (err) => {
   providerErrorToastTimer = setTimeout(() => { providerErrorToastVisible.value = false; }, SESSION_ERROR_TOAST_MS);
 });
 
+// I10（2026-11-08 ui-completion 轮）：三层 toast 手动关闭入口——× 点击置 visible=false 并
+// 显式清各自 timer（防「已手动关但旧 timer 到点又写 visible」的竞态残留）。三层各自独立
+//（visible/timer/dismiss 各一套，多条堆叠互不影响）；既有三组 watch 零改动：手动关后同源
+// 再次失败（errorSeq 变化 / false→true 边沿）会重新弹，逻辑自洽；自然到期路径不变
+//（timer 回调只置 visible=false）。
+function dismissSaveFailedToast(): void {
+  saveFailedToastVisible.value = false;
+  if (saveFailedToastTimer) { clearTimeout(saveFailedToastTimer); saveFailedToastTimer = null; }
+}
+function dismissSessionErrorToast(): void {
+  sessionErrorToastVisible.value = false;
+  if (sessionErrorToastTimer) { clearTimeout(sessionErrorToastTimer); sessionErrorToastTimer = null; }
+}
+function dismissProviderErrorToast(): void {
+  providerErrorToastVisible.value = false;
+  if (providerErrorToastTimer) { clearTimeout(providerErrorToastTimer); providerErrorToastTimer = null; }
+}
+
 onMounted(async () => {
   document.addEventListener('dragover', suppressDragNavigation);
   document.addEventListener('drop', suppressDragNavigation);
@@ -225,25 +243,57 @@ onBeforeUnmount(() => {
     <UpdateDialog />
     <FilePickerDialog />
     <FilePreviewDrawer />
-    <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">设置保存失败，部分修改可能未保存</div>
-    <div v-if="sessionErrorToastVisible" class="global-toast global-toast--error global-toast--stacked">{{ sessionErrorToastText }}</div>
-    <div v-if="providerErrorToastVisible" class="global-toast global-toast--error global-toast--stacked-3">{{ providerErrorToastText }}</div>
+    <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">
+      <svg class="global-toast__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+      <span class="global-toast__text">设置保存失败，部分修改可能未保存</span>
+      <button class="global-toast__close" type="button" aria-label="关闭提示" @click="dismissSaveFailedToast">×</button>
+    </div>
+    <div v-if="sessionErrorToastVisible" class="global-toast global-toast--error global-toast--stacked">
+      <svg class="global-toast__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+      <span class="global-toast__text">{{ sessionErrorToastText }}</span>
+      <button class="global-toast__close" type="button" aria-label="关闭提示" @click="dismissSessionErrorToast">×</button>
+    </div>
+    <div v-if="providerErrorToastVisible" class="global-toast global-toast--error global-toast--stacked-3">
+      <svg class="global-toast__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+      <span class="global-toast__text">{{ providerErrorToastText }}</span>
+      <button class="global-toast__close" type="button" aria-label="关闭提示" @click="dismissProviderErrorToast">×</button>
+    </div>
   </AppLayout>
 </template>
 
 <style scoped>
-/* H1：全局保存失败 toast——固定顶部居中，盖在所有路由内容之上（App.vue 无其它全局浮层样式）。 */
+/* H1：全局保存失败 toast——固定顶部居中，盖在所有路由内容之上（App.vue 无其它全局浮层样式）。
+   I10：改 flex 容器承载 error 图标 + 文本 + × 关闭钮三子元素；既有定位/层叠/z-index 不变。 */
 .global-toast {
   position: fixed;
   top: 1rem;
   left: 50%;
   transform: translateX(-50%);
   z-index: 3000;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   border-radius: var(--radius-md);
   padding: 0.625rem 0.875rem;
   font-size: 0.8125rem;
   box-shadow: var(--ring-light), var(--elevation-2);
 }
+
+/* I10：alert-circle 内联 SVG 图标（stroke=currentColor 继承 --color-fail-strong 错误色）。 */
+.global-toast__icon { width: 15px; height: 15px; flex: none; }
+.global-toast__text { flex: 1; min-width: 0; }
+.global-toast__close {
+  flex: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 0.875rem;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.global-toast__close:hover { background: color-mix(in srgb, var(--color-text) 10%, transparent); }
 
 .global-toast--error {
   border: 1px solid var(--color-fail-strong);

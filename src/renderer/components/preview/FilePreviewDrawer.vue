@@ -6,7 +6,7 @@
 // 占位管线，其余源码视图）+ blob 类（image/img、media/video|audio、pdf/docx/xlsx/pptx 四重组件）。
 // 开关态由 preview-store.open 驱动 .open class（遮罩透明度 + 抽屉 translateX 过渡）；
 // Esc 层 1040（见 use-esc-stack.ts 注释），window keydown 全局监听、isTopmost() 裁决后消费。
-import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue';
 import hljs from 'highlight.js';
 import { usePreviewStore } from '../../stores/preview-store';
 import { useFilePreview } from '../../composables/useFilePreview';
@@ -280,24 +280,79 @@ function openExternal(): void {
 // 打开注册 1040 层，关闭/卸载出栈（release 幂等）。
 let escHandle: EscLayerHandle | null = null;
 
+// ── 焦点三件套（slate-ui-completion 点 I3）：初始焦点 / 触发元素还原 / Tab 焦点陷阱 ──
+// 先例口径：restoreFocus 降级守卫与 InteractionPrompt 同形（document.contains + typeof focus），
+// trapTab 与 I7 收紧口径同族（InteractionPrompt B5/D06-F2「模态内循环」——容器外拉回）。
+const closeButtonRef = ref<HTMLButtonElement | null>(null);
+const drawerRef = ref<HTMLElement | null>(null);
+// I3-03：打开前触发元素——仅由 open false→true 边沿记录（抽屉开着换文件走 B16 嵌套复用链，
+// open 恒 true，不重记），关闭 true→false 边沿还原；嵌套换文件后关闭仍还原到抽屉外原触发卡。
+let lastFocused: HTMLElement | null = null;
+
+// I3-02/I3-06：关闭时还原到打开前触发元素。目标已卸载（document.contains=false）→ 不 focus
+// 任何兜底元素、不抛错，焦点自然落 body（spec「落 body」= 自然降级）；还原后清位防旧目标复用。
+function restoreFocus(): void {
+  void nextTick(() => {
+    if (lastFocused && document.contains(lastFocused) && typeof lastFocused.focus === 'function') {
+      lastFocused.focus();
+    }
+    lastFocused = null;
+  });
+}
+
+// I3-04：Tab 在抽屉容器内循环（焦点陷阱）。与 InteractionPrompt trapTab 收紧口径同形：
+// Shift+Tab 首→末、Tab 末→首回绕；焦点已在容器外（body/遮罩层，如点留白后）时拉回抽屉，
+// 不逃出 aria-modal 对话框（WCAG 2.4.3）。
+function trapTab(e: KeyboardEvent): void {
+  const drawer = drawerRef.value;
+  if (!drawer) return;
+  const focusables = Array.from(drawer.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex="-1"])'));
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  const active = document.activeElement;
+  const outside = !drawer.contains(active);
+  if (e.shiftKey && (active === first || outside)) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && (active === last || outside)) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
 function onKey(e: KeyboardEvent): void {
   if (!store.open) return;
   if (e.key === 'Escape' && !e.isComposing && !e.defaultPrevented && escHandle?.isTopmost()) {
     // ImageLightbox 先例：只 preventDefault、不 stopPropagation（ChatPage 让位由 p10 补）。
     e.preventDefault();
     close();
+    return;
+  }
+  // I3-04：Tab 焦点陷阱——更高层 Esc 层在场时让位（InteractionPrompt B5/A9 同款判据：被遮挡
+  // 抽屉不得抢拉焦点，否则与上层弹窗自身 Tab 循环互抢）；无更高层时抽屉容器内回绕。
+  if (e.key === 'Tab') {
+    if (escHandle && !escHandle.isTopmost()) return;
+    trapTab(e);
   }
 }
 
-watch(() => [store.open, store.path] as const, ([open]) => {
+watch(() => [store.open, store.path] as const, ([open], [prevOpen]) => {
   if (open) {
     outsideRootConfirmed = false; // 换文件/重开抽屉：确认位随本次抽屉会话结束失效（2026-11-06 点1）
+    // I3-03：触发元素仅由 open false→true 边沿记录——换文件（open 恒 true）不重记。
+    if (!prevOpen) lastFocused = document.activeElement as HTMLElement | null;
     escHandle?.release();
     escHandle = pushEscLayer(ESC_LAYER_PRIORITY.filePreviewDrawer);
     void load();
+    // I3-01：初始焦点落关闭钮（spec 点名关闭钮，非首个交互元素）；nextTick 等 DOM 就绪防落空。
+    void nextTick(() => closeButtonRef.value?.focus());
   } else {
     escHandle?.release();
     escHandle = null;
+    // I3-02：close 边沿（true→false）还原触发元素——三通道（遮罩点击/关闭钮/Esc）统一经
+    // close()→store.close() 驱动本边沿，还原不被旁路；组件卸载路径不还原（App 全局单例）。
+    if (prevOpen) restoreFocus();
   }
 });
 
@@ -317,7 +372,7 @@ onBeforeUnmount(() => {
 <template>
   <Teleport to="body">
     <div class="fpreview-mask" :class="{ open: store.open }" @click="close"></div>
-    <aside class="fpreview-drawer" :class="{ open: store.open }" role="dialog" aria-label="文件预览" @click.stop>
+    <aside ref="drawerRef" class="fpreview-drawer" :class="{ open: store.open }" role="dialog" aria-modal="true" aria-label="文件预览" @click.stop>
       <div class="fpreview-head">
         <div class="fpreview-name">
           <span class="fpreview-name__text">{{ baseName }}</span>
@@ -332,7 +387,7 @@ onBeforeUnmount(() => {
             @click="store.setMode(m)"
           >{{ MODE_LABEL[m] }}</button>
         </div>
-        <button class="fpreview-close" type="button" title="关闭（Esc）" aria-label="关闭文件预览" @click="close">✕</button>
+        <button ref="closeButtonRef" class="fpreview-close" type="button" title="关闭（Esc）" aria-label="关闭文件预览" @click="close">✕</button>
       </div>
       <div class="fpreview-body">
         <div v-if="loading" class="fpreview-loading">加载中…</div>

@@ -1,15 +1,15 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { useFilePreview } from '../../composables/useFilePreview';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
-import { formatDurationMs, formatEndedAt, formatSentAt } from '../../../shared/format-duration';
+import { formatDurationMs, formatEndedAt, formatEndedAtMinute, formatSentAt } from '../../../shared/format-duration';
 import { isReasoningReplayApiError } from '../../../shared/upstream-errors';
 import MessageAttachments from './MessageAttachments.vue';
 
-const props = defineProps<{ message: RenderableMessage; exportMode?: boolean }>();
+const props = defineProps<{ message: RenderableMessage; exportMode?: boolean; interrupted?: boolean }>();
 
 // 导出模式用 export profile：Mermaid 渲染、代码换行、图片 eager、无灯箱按钮化。
 // 第五轮方案替换（2026-09-27）：user 气泡不再走 markdown 渲染——CommonMark 把 ≥2 连续空行
@@ -35,7 +35,18 @@ const durationText = computed(() =>
 // 老消息/中断回合无记录时不显示（诚实不造数）。
 const endedAtText = computed(() => formatEndedAt(props.message.endedAt));
 
-// S3：用户消息发送时刻（created_at，DB 带 Z UTC / 内存乐观毫秒级 ISO）文案，气泡脚注「发送于」。
+// C6：中断回合脚注。分钟级结束时刻（正常回合保持 formatEndedAt 的 HH:mm:ss 口径，
+// 其签名被 tdd-user-message-time-verify S2 钉死勿动——分钟级走新单源 formatEndedAtMinute）。
+// isError 气泡不叠中断脚注（发送失败红条路径不与此混淆——规范 C6 边界）。
+const interruptedVisible = computed(() =>
+  props.interrupted === true && props.message.role === 'assistant' && props.message.isError !== true,
+);
+const endedAtMinuteText = computed(() =>
+  interruptedVisible.value ? formatEndedAtMinute(props.message.endedAt) : '',
+);
+
+// S3：用户消息发送时刻（created_at，DB 带 Z UTC / 内存乐观毫秒级 ISO）文案——UI13-P5 起渲染于
+// 气泡正下方 caption 行「你 · 发送于 {HH:mm}」（原气泡内「发送于」脚注已移除）。
 // 仅 user 气泡显示；缺失/非法返回空串不渲染（诚实不造数，与 endedAt 同原则）。
 const sentAtText = computed(() =>
   props.message.role === 'user' ? formatSentAt(props.message.createdAt) : '',
@@ -55,6 +66,22 @@ function onContentClick(e: MouseEvent): void {
 const copied = ref(false);
 // hb12-CHR-04：复制失败态（复用 copied 的限时反馈机制）。
 const copyFailed = ref(false);
+// UI13-P11（条目 9）：复制反馈 1.2s 计时器句柄组件级收敛——重复点击先清旧 timer（反馈窗口
+// 不叠加），卸载清除（长会话滚动中气泡销毁后 timer 不再触达 reactive 状态）。
+let copyFeedbackTimer: number | null = null;
+function scheduleCopyFeedbackReset(reset: () => void): void {
+  if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer);
+  copyFeedbackTimer = window.setTimeout(() => {
+    copyFeedbackTimer = null;
+    reset();
+  }, 1200);
+}
+onBeforeUnmount(() => {
+  if (copyFeedbackTimer) {
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+  }
+});
 async function copyMessage(): Promise<void> {
   const text = props.message.content;
   const names = attachments.value.map((a) => a.filename);
@@ -69,82 +96,128 @@ async function copyMessage(): Promise<void> {
   const ok = await copyTextToClipboard(out);
   if (!ok) {
     copyFailed.value = true;
-    window.setTimeout(() => {
+    scheduleCopyFeedbackReset(() => {
       copyFailed.value = false;
-    }, 1200);
+    });
     return;
   }
   copied.value = true;
-  window.setTimeout(() => {
+  scheduleCopyFeedbackReset(() => {
     copied.value = false;
-  }, 1200);
+  });
 }
 </script>
 
 <template>
-  <div :class="['bubble', `bubble--${message.role}`, { 'bubble--error': message.isError === true }]">
-    <div v-if="message.role !== 'system'" class="bubble__role">
-      <span>{{ message.role === 'user' ? '你' : 'Claude' }}</span>
+  <!-- UI13-P5：根元素包一层 bubble-wrap wrapper（单根保 attrs 透传——MessageList 的 msg-transition
+       class 走 fallthrough，多根 fragment 会静默丢类）。对齐方向自 .bubble--* 迁移到 wrap：
+       wrap 承接原 align-self，气泡与下方元信息行（caption）经 align-items 同侧对齐。 -->
+  <div :class="['bubble-wrap', `bubble-wrap--${message.role}`]"
+       :data-testid="message.role === 'user' ? 'user-bubble-wrap' : undefined">
+    <div :class="['bubble', `bubble--${message.role}`, { 'bubble--error': message.isError === true }]">
+      <!-- UI13-P5：user 的「你」角色头移除（元信息并入气泡下方 caption 行）；system 本无角色头，
+           assistant/tool 的「Claude」头保留（渲染逐字节不变）。v-if 排除 user 后 role 类型收窄，
+           原 `role === 'user' ? '你' : 'Claude'` 三元成不可达死代码且 vue-tsc 报 TS2367，
+           故直书 Claude 字面。 -->
+      <div v-if="message.role !== 'system' && message.role !== 'user'" class="bubble__role">
+        <span>Claude</span>
+      </div>
+      <!-- user 气泡纯文本逐字回显（第五轮方案，2026-09-27）：插值自动 HTML 转义防 XSS，
+           white-space: pre-wrap 按原文显示——气泡显示文本 === 实际发送文本 === 落库文本。
+           不挂 v-enrich（mermaid/灯箱增强仅适用 markdown HTML）、不挂 markdown-body
+           （纯文本无子元素，其语义失效）。 -->
+      <div v-if="hasContent && message.role === 'user'" class="bubble__content">{{ message.content }}</div>
+      <!-- assistant/系统/工具仍走 markdown 渲染（v-html + 灯箱/mermaid 增强），行为零变化。 -->
+      <div v-else-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich @click="onContentClick" />
+      <!-- S3→UI13-P5：user「发送于」时刻不再渲染为气泡内 .bubble__meta 脚注（原块已删除），
+           改为气泡正下方 caption 行「你 · 发送于 {HH:mm}」（见 wrapper 尾部）；caption 门控
+           同口径（缺失/非法 sentAtText 空串整行不渲染、无空行残留）。 -->
+      <div v-if="reasoningReplayAdviceVisible" class="bubble__advice" data-testid="reasoning-replay-advice">
+        <div class="bubble__advice-title">已自动重试一次；若仍失败，可：</div>
+        <ul class="bubble__advice-list">
+          <li>手动重试（重新发送上一条消息）</li>
+          <li>压缩会话后重试（/compact，缩短需回传的思考历史）</li>
+          <li>更换供应商：Anthropic 直连或 GLM Anthropic 端点（不经 OpenAI 转换桥）</li>
+        </ul>
+      </div>
+      <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
+      <!-- C6：中断回合脚注——「已中断 · 结束于 {HH:MM}」；endedAt 缺失（老数据）只显「已中断」
+           （无数据不造数）。中断回合 durationMs/endedAt 虽照常落库，此处不再显示正常耗时。
+           B3：正常块只展示 耗时 + 结束时间（费用不再展示）；门控 durationMs || endedAt（hb13-v 批C
+           注释纠偏：原「门控仅 durationMs」漏 B3 扩的 endedAt 半边），老消息无结束时刻只显示耗时。 -->
+      <div v-if="interruptedVisible" class="bubble__meta" data-testid="bubble-meta-interrupted">
+        <span class="bubble__meta-interrupted">已中断</span>
+        <span v-if="endedAtMinuteText" class="bubble__meta-end">· 结束于 {{ endedAtMinuteText }}</span>
+      </div>
+      <div v-else-if="message.durationMs || message.endedAt" class="bubble__meta">
+        <svg v-if="durationText" class="bubble__meta-clock" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 7v5l3.5 2" />
+        </svg>
+        <span v-if="durationText" class="bubble__meta-duration">{{ durationText }}</span>
+        <span v-if="endedAtText" class="bubble__meta-end">· 结束于 {{ endedAtText }}</span>
+      </div>
+      <!-- 仅 user / assistant 消息提供复制按钮；tool / system 不需要。
+           流式布局放在内容正下方独立一行，避免与正文重叠。 -->
+      <button
+        v-if="!exportMode && (message.role === 'user' || message.role === 'assistant')"
+        type="button"
+        class="bubble__copy"
+        :title="copyFailed ? '复制失败' : copied ? '已复制' : '复制消息'"
+        @click="copyMessage"
+      >
+        <svg v-if="!copied" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M16 1H4a2 2 0 0 0-2 2v12h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z" />
+        </svg>
+        <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
+        </svg>
+      </button>
+    </div>
+    <!-- UI13-P5：user 消息元信息行（气泡正下方、随气泡右对齐）——「你 · 发送于 {HH:mm}」
+         （formatSentAt 单源：当天 HH:mm、跨天 M/d HH:mm；缺失/非法为空串整行不渲染，诚实不造数）
+         +「来自队列」标签（自原角色头迁入，导出快照不含运行态标签）。 -->
+    <div v-if="message.role === 'user' && sentAtText" class="bubble-caption">
+      你 · 发送于 {{ sentAtText }}
       <!-- 队列任务到点/立即执行发出的消息标（导出快照不含运行态标签） -->
       <span
-        v-if="!exportMode && message.role === 'user' && message.parentTaskId"
+        v-if="!exportMode && message.parentTaskId"
         class="bubble__queue-tag"
         title="此消息由队列任务到点/立即执行时发送"
       >来自队列</span>
     </div>
-    <!-- user 气泡纯文本逐字回显（第五轮方案，2026-09-27）：插值自动 HTML 转义防 XSS，
-         white-space: pre-wrap 按原文显示——气泡显示文本 === 实际发送文本 === 落库文本。
-         不挂 v-enrich（mermaid/灯箱增强仅适用 markdown HTML）、不挂 markdown-body
-         （纯文本无子元素，其语义失效）。 -->
-    <div v-if="hasContent && message.role === 'user'" class="bubble__content">{{ message.content }}</div>
-    <!-- assistant/系统/工具仍走 markdown 渲染（v-html + 灯箱/mermaid 增强），行为零变化。 -->
-    <div v-else-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich @click="onContentClick" />
-    <!-- S3：user 气泡「发送于」脚注（created_at）。置于内容 v-if/v-else-if 链之后——插进两分支
-         之间会拆散 v-else-if 邻接（编译报错）。缺失/非法时 sentAtText 为空串，整块不渲染、
-         无空行残留；样式复用下方 .bubble__meta / .bubble__meta-clock，零新增。 -->
-    <div v-if="message.role === 'user' && sentAtText" class="bubble__meta">
-      <svg class="bubble__meta-clock" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
-      <span>发送于 {{ sentAtText }}</span>
-    </div>
-    <div v-if="reasoningReplayAdviceVisible" class="bubble__advice" data-testid="reasoning-replay-advice">
-      <div class="bubble__advice-title">已自动重试一次；若仍失败，可：</div>
-      <ul class="bubble__advice-list">
-        <li>手动重试（重新发送上一条消息）</li>
-        <li>压缩会话后重试（/compact，缩短需回传的思考历史）</li>
-        <li>更换供应商：Anthropic 直连或 GLM Anthropic 端点（不经 OpenAI 转换桥）</li>
-      </ul>
-    </div>
-    <MessageAttachments v-if="attachments.length" :attachments="attachments" :export-mode="exportMode" />
-    <!-- B3：脚注只展示 耗时 + 结束时间（费用不再展示）；门控 durationMs || endedAt（hb13-v 批C
-         注释纠偏：原「门控仅 durationMs」漏 B3 扩的 endedAt 半边），老消息无结束时刻只显示耗时。 -->
-    <div v-if="message.durationMs || message.endedAt" class="bubble__meta">
-      <svg v-if="durationText" class="bubble__meta-clock" viewBox="0 0 24 24" aria-hidden="true">
-        <circle cx="12" cy="12" r="9" />
-        <path d="M12 7v5l3.5 2" />
-      </svg>
-      <span v-if="durationText" class="bubble__meta-duration">{{ durationText }}</span>
-      <span v-if="endedAtText" class="bubble__meta-end">· 结束于 {{ endedAtText }}</span>
-    </div>
-    <!-- 仅 user / assistant 消息提供复制按钮；tool / system 不需要。
-         流式布局放在内容正下方独立一行，避免与正文重叠。 -->
-    <button
-      v-if="!exportMode && (message.role === 'user' || message.role === 'assistant')"
-      type="button"
-      class="bubble__copy"
-      :title="copyFailed ? '复制失败' : copied ? '已复制' : '复制消息'"
-      @click="copyMessage"
-    >
-      <svg v-if="!copied" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M16 1H4a2 2 0 0 0-2 2v12h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z" />
-      </svg>
-      <svg v-else viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
-      </svg>
-    </button>
   </div>
 </template>
 
 <style scoped>
+/* UI13-P5：消息根 wrapper（气泡 + 气泡下方元信息行）。原 .bubble--* 的对齐方向迁移至此——
+   MessageList 列布局（.message-list__inner flex column）下 wrap 成为直接子项：wrap 承接
+   原 align-self，内部气泡与 caption 经 align-items 同侧对齐；TaskQueuePanel 子 agent 域有
+   :deep(.bubble-wrap){width:100%;align-self:stretch} 覆盖（wrap 先撑满、气泡 100% 仍成立）。 */
+.bubble-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.bubble-wrap--user {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.bubble-wrap--assistant,
+.bubble-wrap--tool {
+  align-self: flex-start;
+  align-items: flex-start;
+}
+
+/* UI13 评审 r1 P3-2：system 气泡恢复批次前水平居中——原 .bubble--system{align-self:center}
+   在收缩 wrap 内成 no-op，居中须由 wrap 承接（align-self: center 使 wrap 在列内水平居中，
+   align-items: center 使内部气泡与 caption 行随之居中）。 */
+.bubble-wrap--system {
+  align-self: center;
+  align-items: center;
+}
+
 .bubble {
   max-width: 75%;
   padding: 12px 16px;
@@ -155,7 +228,7 @@ async function copyMessage(): Promise<void> {
    color-mix 跟随主题变量，9 套主题自动适配；不再写死 accent 实心填充，避免饱和
    纯色块在暖纸/草香等柔和主题上突兀廉价。右色条镜像助手气泡左色条，共享卡片语言。 */
 .bubble--user {
-  align-self: flex-end;
+  /* UI13-P5：align-self: flex-end 迁移至 .bubble-wrap--user（wrap 承接，气泡经 align-items 同侧） */
   max-width: 80%;
   background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-soft));
   color: var(--color-text);
@@ -168,7 +241,7 @@ async function copyMessage(): Promise<void> {
    左侧 accent 色条作为「Claude 回复」强标识，让每条回复边界一眼可辨（claude-link
    无头像行，需靠色条+容器替代 openhanako 的头像锚点）。 */
 .bubble--assistant {
-  align-self: flex-start;
+  /* UI13-P5：align-self: flex-start 迁移至 .bubble-wrap--assistant（wrap 承接，气泡经 align-items 同侧） */
   max-width: 85%;
   padding: 12px 16px;
   background: var(--color-panel-soft);
@@ -311,6 +384,12 @@ async function copyMessage(): Promise<void> {
   font-variant-numeric: tabular-nums;
 }
 
+/* C6：中断回合脚注「已中断」字样（fail 语义色 + 加粗，与 ToolCallBlock ✗ 已中断同族）。 */
+.bubble__meta-interrupted {
+  color: var(--color-fail-strong);
+  font-weight: 600;
+}
+
 .bubble__meta-clock {
   width: 0.75rem;
   height: 0.75rem;
@@ -329,6 +408,21 @@ async function copyMessage(): Promise<void> {
 
 .bubble__meta-end {
   opacity: 0.8;
+}
+
+/* UI13-P5：user 气泡下方元信息行（「你 · 发送于」+「来自队列」标）。muted 色 + tabular-nums
+   与 .bubble__meta 同口径；padding-right 让出气泡右下角外侧的复制按钮宽度（按钮 bottom:-26px
+   与本行同区域、hover 才现，让位避免视觉重叠）。caption 在文档流占位，不参与 .bubble:hover
+   命中区（hover 桥 ::after 在其下层，复制钮 z-index:1 在其上，按钮可达性不受影响）。 */
+.bubble-caption {
+  margin-top: 4px;
+  padding-right: 44px;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
 }
 
 /* 复制按钮：定位到气泡右下角外侧（贴近消息但浮在背景区上）。

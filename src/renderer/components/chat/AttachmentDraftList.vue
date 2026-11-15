@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 输入框上方的附件草稿列表：图片缩略图按钮 + 文件卡片 + 移除。
-// 放在 .chat-composer 之前；自身不设横向满宽背景/边框/阴影，每个附件卡片只有自身边框。
+// 放在 .chat-composer 浮岛内部上方（E6，TurnTimer 之后）；自身不设满宽背景/边框/阴影，每个附件卡片只有自身边框。
 // 不持有文件系统路径/bytes；预览经 preload 受控 IPC 取缩略图/原图 bytes（读侧无显式 maxBytes 预检，
 // 上界间接来自图片暂存 10MiB 上限），生成 Blob URL 进现有灯箱。
 import { onBeforeUnmount, reactive, watch } from 'vue';
@@ -200,15 +200,15 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-/* 列表：横向排列、可换行；不设满宽背景/边框/阴影，不包住全部附件的大卡片。 */
+/* 列表：横向排列、可换行；位于浮岛卡片内部上方——宽度/左右内边距由外层 .chat-composer
+   统一约束，本容器只做行内间距；不设满宽背景/边框/阴影，不包住全部附件的大卡片。 */
 .attachment-draft-list {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  width: 100%;
-  max-width: var(--chat-bottom-max-width);
-  margin: 0.5rem auto 0;
-  padding: 0 var(--chat-bottom-pad-x);
+  width: auto;
+  max-width: 100%;
+  padding: 0.5rem var(--chat-bottom-pad-x) 0;
   box-sizing: border-box;
 }
 

@@ -58,6 +58,10 @@ const touchedCheckboxFields = ref<Set<string>>(new Set());
 const history = ref<HistoryEntry[]>([]);
 const showHistory = ref(false);
 const submittingId = ref<string | null>(null);
+// UI13-P6 双击/连点防重：直提短窗时间戳——submittingId 在 finally 清零（IPC 回包可能先于双击
+// 第二击），01 边界值「第一次 click 已提交关窗，第二次落空」的完整兑现靠本短窗兜住
+//（向导中途前进路径不置 submittingId、换请求换单后第二击落在新请求上下文，同理）。
+let lastDirectSubmitAt = 0;
 // hb10-PERM-03：IPC 失败提示（请求留队可重试；成功提交/取消后清除）。
 const submitError = ref<string | null>(null);
 const otherInput = ref<HTMLInputElement | HTMLTextAreaElement | null>(null);
@@ -120,11 +124,19 @@ const eyebrow = computed(() => {
 const currentTitle = computed(() => activeQuestion.value?.title ?? activeRequest.value?.title ?? 'Claude Code 需要你选择');
 const currentDescription = computed(() => activeQuestion.value?.description ?? activeRequest.value?.description);
 const submitLabel = computed(() => {
-  if (isWizard.value && wizardIndex.value < wizardQuestions.value.length - 1) return '下一题';
-  if (isWizard.value && !allQuestionsAnswered.value) return '下一题'; // 末步未答全：点击=跳转首个未答题
+  if (isWizard.value && wizardIndex.value < wizardQuestions.value.length - 1) return '下一题';   // UI13-P6：仅 multiSelect 当前题可见（主按钮 v-if=showFooterPrimary）
+  if (isWizard.value) return '确认';
   if (activeRequest.value?.kind === 'permission') return selectedOption.value?.label ?? '提交选择';
   if (activeRequest.value?.kind === 'multi-choice') return '提交选择';
   return '确认';
+});
+// UI13-P6 直选直提后无需主按钮的形态：非向导单选题（未激活 Other）、向导当前单选题（未激活 Other）
+// ——单选单击即答，footer 无提交钮；Other 激活时保留「确认」（文本非空守卫在 canSubmit）。
+const showFooterPrimary = computed(() => {
+  if (hasStructuredForm.value || hasTextInput.value) return true;
+  if (activeRequest.value?.kind === 'permission' || activeRequest.value?.kind === 'confirm') return true;
+  if (currentMultiSelect.value) return true;              // 多选（含向导 multiSelect 题与 kind multi-choice）
+  return showOtherInput.value;                            // 单选激活 Other → 「确认」提交
 });
 const cancelLabel = computed(() => activeRequest.value?.kind === 'permission' ? '拒绝' : '取消');
 const canSubmit = computed(() => {
@@ -305,11 +317,21 @@ function focusOption(index: number): void {
   focusedIndex.value = Math.max(0, Math.min(index, filteredOptionEntries.value.length - 1));
 }
 
+// UI13-P6 直选直提：单选形态（非向导 single-choice / 向导当前题非 multiSelect）单击普通选项
+// = 选中并立即提交；Other 与多选、permission/confirm/form/text 等形态不在此列（裁决 R2：
+// 权限/alert 形态保留「拒绝+所选 label 主按钮」现状）。
+function isDirectSubmitChoice(): boolean {
+  const req = activeRequest.value;
+  if (!req || currentMultiSelect.value) return false;
+  if (hasStructuredForm.value || hasTextInput.value) return false;
+  if (req.kind === 'permission' || req.kind === 'confirm') return false;
+  if (isWizard.value) return true;              // kind 'form' + questions，当前题单选
+  return req.kind === 'single-choice';
+}
+
 function toggleOption(optionId: string): void {
   const request = activeRequest.value;
   if (!request) return;
-  const optionIndex = filteredOptionEntries.value.findIndex((option) => option.id === optionId);
-  if (optionIndex >= 0) focusOption(optionIndex);
 
   if (currentMultiSelect.value) {
     const next = new Set(selectedIds.value);
@@ -319,7 +341,23 @@ function toggleOption(optionId: string): void {
     return;
   }
 
+  // UI13-P6 直选直提：普通选项选中即提交（submit 无参走已写回的 selectedIds，无双 toggle）；
+  // Other 只展开输入不提交（submit 内 OTHER 空文本守卫天然兜住，但显式跳过更清晰）。
+  // 双击/连点防重：短窗守卫必须置于 updateSelected 之前——第二击不得先污染新请求/新题的
+  // 选中态（IPC 回包可能先于双击第二击，submittingId 已在 finally 清零；向导中途前进路径
+  // 不置 submittingId）。只挡直提点击路径：Enter 提交/多选 toggle/Other 流程不经此分支。
+  // P1-A：submit(optionId) 同位加同款守卫（dblclick 直发不经此处即直构 ids），本处保留双保险。
+  // P3-1：focusOption 移到守卫之后——被吞的第二击不得污染聚焦态（鼠标路径聚焦由选项
+  // @mouseenter 驱动、键盘路径经 move()，此处 focusOption 对两路径均冗余，仅直提放行时补齐）。
+  const direct = isDirectSubmitChoice() && optionId !== OTHER_OPTION_ID;
+  if (direct && Date.now() - lastDirectSubmitAt < 300) return;
+  const optionIndex = filteredOptionEntries.value.findIndex((option) => option.id === optionId);
+  if (optionIndex >= 0) focusOption(optionIndex);
   updateSelected(new Set([optionId]));
+  if (direct) {
+    lastDirectSubmitAt = Date.now();
+    void submit();
+  }
 }
 
 // 当前 wizard 问题的 id（用于把本题答案存进 questionAnswers）。非 wizard / 无当前题时返回 undefined。
@@ -400,6 +438,11 @@ function pushHistory(request: InteractionPromptPayload, action: 'submit' | 'canc
 async function submit(optionId?: string): Promise<void> {
   const request = activeRequest.value;
   if (!request || submittingId.value === request.id) return;
+  // P1-A：dblclick 直发 emit('submit', id) 的第二击不经 toggleOption 守卫即按 optionId 直构
+  // ids 走全链——多题向导题间/队列下一请求复用同 key DOM 时，会把默认项/recommended 预选
+  // 静默落账甚至整单向导带脏答案提交。direct 形态整体早退（守卫上移），toggleOption 内守卫
+  // 保留为双保险。
+  if (optionId && isDirectSubmitChoice() && optionId !== OTHER_OPTION_ID && Date.now() - lastDirectSubmitAt < 300) return;
   if (optionId) toggleOption(optionId);
   let ids = optionId && !currentMultiSelect.value ? [optionId] : Array.from(selectedIds.value);
   // B5（D06-F2）：Enter 兜底（单选形态）——权限弹窗等刻意不预选（防回车误提交），但聚焦环
@@ -829,7 +872,7 @@ onBeforeUnmount(() => {
               />
             </label>
 
-            <details v-if="history.length && activeRequest.kind !== 'confirm'" class="interaction-history" :open="showHistory" @toggle="showHistory = ($event.target as HTMLDetailsElement).open">
+            <details v-if="history.length" class="interaction-history" :open="showHistory" @toggle="showHistory = ($event.target as HTMLDetailsElement).open">
               <summary>交互历史（{{ history.length }}）</summary>
               <ol>
                 <li v-for="item in history" :key="item.id">
@@ -859,6 +902,7 @@ onBeforeUnmount(() => {
           <button v-if="isWizard && wizardIndex > 0" type="button" class="interaction-btn interaction-btn--ghost" @click="previousQuestion">上一步</button>
           <button type="button" class="interaction-btn interaction-btn--ghost" @click="cancel">{{ cancelLabel }}</button>
           <button
+            v-if="showFooterPrimary"
             type="button"
             class="interaction-btn"
             :class="selectedOption?.danger ? 'interaction-btn--danger' : 'interaction-btn--primary'"

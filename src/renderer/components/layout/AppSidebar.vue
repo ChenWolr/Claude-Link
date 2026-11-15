@@ -5,9 +5,11 @@ import { useSessionStore } from '../../stores/session-store';
 import { useInteractionStore } from '../../stores/interaction-store';
 import { useUpdateStore } from '../../stores/update-store';
 import { sessionDisplayStatusMeta, type SessionDisplayStatus } from '../../../shared/session-display-status';
-import { groupSessionsByProject, type SessionGroup } from '../../utils/group-sessions';
+import { groupSessionsByProject, projectLabel, type SessionGroup } from '../../utils/group-sessions';
 import { groupSessionsByDate } from '../../utils/group-sessions-by-date';
 import { formatSessionTime } from '../../utils/format-session-time';
+import { useHoldAction } from '../../composables/use-hold-action';
+import { useChat } from '../../composables/use-chat';
 
 const store = useSessionStore();
 const router = useRouter();
@@ -20,7 +22,32 @@ function displayStatus(sessionId: string): SessionDisplayStatus {
   return store.sessionDisplayStatus(sessionId);
 }
 function statusLabel(sessionId: string): string {
-  return sessionDisplayStatusMeta(displayStatus(sessionId)).label;
+  const label = sessionDisplayStatusMeta(displayStatus(sessionId)).label;
+  // idle 元数据 label 为空串；卡片化后 idle 也渲染灰状态块（效果图 A），补可访问文案。
+  return label || '空闲';
+}
+
+// ── UI13-P3：侧栏中断（委托式长按，条目 12 + 契约 #3）──
+// v-for 内不能每行各持一个 useHoldAction 实例——单一 hold 状态 + holdTargetId 单槽位委托：
+// @pointerdown 先把目标会话 id 写入槽位再启动计时，完成回调按槽位触发中断（canInterrupt 复查
+// 防幽灵 abort：长按进行中回合自然结束、按钮 v-if 卸载后 rAF 仍在跑，最迟 1s 迟发——复查
+// 终态已翻 false 即 no-op）。活动会话走 useChat().abort()（乐观清流式/复位 sending 全套，
+// 与聊天区 SessionToolbar 同链路）；后台会话直调 abortChat IPC，终态由主进程 aborted 事件
+// 收口（后台事件按 sessionId 停表投影），侧栏不乐观改态。
+const holdTargetId = ref<string | null>(null);
+const { abort: abortActive } = useChat();
+async function interruptSession(session: { id: string }): Promise<void> {
+  if (session.id === store.activeSession?.id) await abortActive();
+  else await window.claudeLink.abortChat(session.id).catch(() => { /* 终态事件兜底，IPC 失败静默 */ });
+}
+const interruptHold = useHoldAction(() => {
+  const target = holdTargetId.value;
+  if (target && canInterrupt(target)) void interruptSession({ id: target });
+});
+const { holdProgress: interruptHoldProgress, holding: interruptHolding } = interruptHold;
+function canInterrupt(sessionId: string): boolean {
+  const s = displayStatus(sessionId);
+  return s === 'running' || s === 'retrying';
 }
 const searchQuery = ref('');
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -33,8 +60,14 @@ const groupByProject = ref(false);
 // 天然兼容搜索态（searchResults）。
 const dateGroups = computed(() => groupSessionsByDate(store.displayedSessions));
 
-// 项目分组视图：按 workingDir 分组（逻辑不变）。
+// 项目分组视图：按 workingDir 分组（UI13-P3 起置顶跨组提取为 __pinned__ 组）。
 const viewGroups = computed<SessionGroup[]>(() => groupSessionsByProject(store.displayedSessions));
+
+// UI13-P3：双视图模板收敛——日期组（DateSessionGroup 无 dir 字段）归一为 SessionGroup 形态
+//（dir: null，分组头 :title 不渲染），单一卡片模板 v-for renderGroups 消除日期/项目两份重复块。
+const renderGroups = computed<SessionGroup[]>(() =>
+  groupByProject.value ? viewGroups.value : dateGroups.value.map((g) => ({ key: g.key, label: g.label, dir: null, sessions: g.sessions })),
+);
 
 // 批量删除模式：开启后会话显示复选框、点击切换选中（不再跳转会话），
 // 底部批量操作条提供全选/删除所选。删除走 store.deleteSessions → 单个删除同一条
@@ -142,7 +175,15 @@ function onGlobalKeydown(e: KeyboardEvent) {
   }
 }
 onMounted(() => window.addEventListener('keydown', onGlobalKeydown));
-onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown));
+onUnmounted(() => {
+  window.removeEventListener('keydown', onGlobalKeydown);
+  // UI13-P11（条目 9）：卸载清搜索防抖计时器（设置页↔聊天往返卸载重挂不留悬挂 timer）。
+  // P3 侧栏卡片化改版重写本组件时必须保留此清理。
+  if (debounceTimer) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
+});
 
 // 删除会话：用 interaction 队列的 requestConfirm 确认（避免 window.confirm 导致 Electron 焦点丢失）。
 // 会话及消息由主进程级联清理。
@@ -159,7 +200,13 @@ async function confirmDelete(session: { id: string; name: string }) {
 </script>
 
 <template>
-  <aside class="sidebar">
+  <aside class="sidebar" :class="{ 'sidebar--collapsed': store.sidebarCollapsed }">
+    <!-- UI13-P4 折叠：根类 sidebar--collapsed 由 store.sidebarCollapsed 驱动（窄轨 48px，
+         本组件固定宽覆盖 AppLayout 的 --sidebar-width 记忆宽，展开即恢复）。折叠仅 v-if
+         卸载展开态主体 DOM（R1 裁决：契约只要求状态不丢）——会话推送订阅全在 App.vue 全局
+         （CHAT_EVENT/SESSIONS_CHANGED），store 数据持续更新，展开后列表/状态即时正确；
+         批量模式 batchMode/selectedIds 为本组件 setup 层 ref，不随 v-if 卸载丢失。 -->
+    <template v-if="!store.sidebarCollapsed">
     <div class="sidebar__brand">
       <div class="brand-mark">CL</div>
       <h1>Claude Link</h1>
@@ -243,147 +290,113 @@ async function confirmDelete(session: { id: string; name: string }) {
     </div>
 
     <nav class="sidebar__sessions" :class="{ batching: batchMode }">
-      <template v-if="!groupByProject">
-        <template v-for="group in dateGroups" :key="group.key">
-          <div class="sidebar__group">
-            <span class="sidebar__group__label">{{ group.label }}</span>
-            <span class="sidebar__group__count">{{ group.sessions.length }}</span>
-          </div>
-          <div
-            v-for="session in group.sessions"
-            :key="session.id"
-            :class="['session-link', {
-              active: store.activeSession?.id === session.id,
-              'session-link--selected': batchMode && selectedIds.has(session.id),
-              'session-link--running': displayStatus(session.id) === 'running',
-              'session-link--retrying': displayStatus(session.id) === 'retrying',
-              'session-link--completed': displayStatus(session.id) === 'completed',
-              'session-link--network-interrupted': displayStatus(session.id) === 'network_interrupted',
-            }]"
-            @click="batchMode ? toggleSelected(session.id) : openSession(session)"
-          >
+      <!-- UI13-P3：双视图收敛——日期/项目两视图统一走 renderGroups，单一卡片模板（变体 A 两行卡）。
+           卡片点击：批量模式 checkbox 接管（toggleSelected），否则打开会话。 -->
+      <template v-for="group in renderGroups" :key="group.key">
+        <div class="sidebar__group" :title="group.dir ?? undefined">
+          <span class="sidebar__group__label">{{ group.label }}</span>
+          <span class="sidebar__group__count">{{ group.sessions.length }}</span>
+        </div>
+        <div
+          v-for="session in group.sessions"
+          :key="session.id"
+          :class="['session-card', {
+            active: store.activeSession?.id === session.id,
+            'session-card--selected': batchMode && selectedIds.has(session.id),
+            'session-card--running': displayStatus(session.id) === 'running',
+            'session-card--retrying': displayStatus(session.id) === 'retrying',
+            'session-card--completed': displayStatus(session.id) === 'completed',
+            'session-card--network-interrupted': displayStatus(session.id) === 'network_interrupted',
+          }]"
+          @click="batchMode ? toggleSelected(session.id) : openSession(session)"
+        >
+          <div class="session-card__row1">
             <input
               v-if="batchMode"
-              class="session-link__check"
+              class="session-card__check"
               type="checkbox"
               :checked="selectedIds.has(session.id)"
               @click.stop="toggleSelected(session.id)"
             />
+            <!-- 状态块（22px 圆角）：四态经 --session-status-color 变量着色（idle 灰块无动画，
+                 running/retrying 呼吸）；role="img" + aria/title 供辅助技术读取（不只依赖颜色）。 -->
             <span
-              v-if="displayStatus(session.id) !== 'idle'"
-              class="session-link__status"
-              :class="[`session-link__status--${displayStatus(session.id)}`]"
+              class="session-card__status"
+              :class="[`session-card__status--${displayStatus(session.id)}`]"
               role="img"
               :aria-label="statusLabel(session.id)"
               :title="statusLabel(session.id)"
             ></span>
-            <!-- P2 会话置顶（点 S4）：置顶行名称前 pin 标识（10px accent 填充）。 -->
-            <svg class="session-link__pinned" v-if="session.pinnedAt != null" viewBox="0 0 24 24" aria-hidden="true">
+            <!-- UI13-P3：置顶标识 pin 图标常驻标题左侧（accent 填充，非 hover 显隐）。 -->
+            <svg class="session-card__pin-mark" v-if="session.pinnedAt != null" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
             </svg>
-            <span class="session-link__name">{{ session.name }}</span>
-            <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge -->
+            <span class="session-card__name">{{ session.name }}</span>
+            <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge（⏳ 字面量为契约钉死，勿改图标） -->
             <span
               v-if="interactionStore.pendingRemoteCountBySession[session.id]"
-              class="session-link__pending"
+              class="session-card__pending"
               title="该会话有待确认的弹窗"
             >⏳</span>
-            <span class="session-link__time">{{ formatSessionTime(session.updatedAt) }}</span>
-            <!-- P2 会话置顶（点 S4）：与删除钮同款 hover 显隐；暂态（未落库）/批量模式隐藏。 -->
-            <button
-              v-if="!batchMode && !session.transient"
-              type="button"
-              class="session-link__pinbtn"
-              :title="session.pinnedAt != null ? '取消置顶' : '置顶会话'"
-              :aria-label="(session.pinnedAt != null ? '取消置顶 ' : '置顶会话 ') + session.name"
-              @click.stop="store.togglePin(session.id)"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
-              </svg>
-            </button>
-            <button
-              v-if="!batchMode"
-              type="button"
-              class="session-link__delete"
-              title="删除会话"
-              @click.stop="confirmDelete(session)"
-            >
-              ×
-            </button>
+            <!-- 右上角操作组：hover / focus-within 显隐（opacity 键盘可达）；批量模式整组隐藏
+                 （中断钮批量不可达防误杀）。中断钮仅 running/retrying，长按 1 秒防误触；
+                 @click.stop 阻短按 click 冒泡（.prevent 不拦 click 派发，冒泡到卡片 @click 会误开会话——P2-B）。 -->
+            <div v-if="!batchMode" class="session-card__ops">
+              <button
+                v-if="canInterrupt(session.id)"
+                type="button"
+                class="session-card__interrupt"
+                :class="{ 'session-card__interrupt--holding': interruptHolding && holdTargetId === session.id }"
+                title="长按 1 秒中断"
+                :aria-label="'中断会话 ' + session.name"
+                @pointerdown.prevent="holdTargetId = session.id; interruptHold.onPointerDown($event)"
+                @pointermove="interruptHold.onPointerMove($event)"
+                @pointerup="interruptHold.onPointerUp($event)"
+                @pointerleave="interruptHold.onPointerLeave()"
+                @pointercancel="interruptHold.onPointerCancel()"
+                @click.stop
+                @keydown="interruptHold.onKeydown($event)"
+                @keyup="interruptHold.onKeyup($event)"
+                @blur="interruptHold.onBlur()"
+              >
+                <span class="session-card__interrupt-fill" :style="{ width: interruptHolding && holdTargetId === session.id ? `${interruptHoldProgress}%` : '0%' }" aria-hidden="true"></span>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="6" y="6" width="12" height="12" rx="1.5" />
+                </svg>
+              </button>
+              <!-- P2 会话置顶（点 S4）语义沿用：暂态（未落库）隐藏；title/aria 随态切换。 -->
+              <button
+                v-if="!session.transient"
+                type="button"
+                class="session-card__pinbtn"
+                :title="session.pinnedAt != null ? '取消置顶' : '置顶会话'"
+                :aria-label="(session.pinnedAt != null ? '取消置顶 ' : '置顶会话 ') + session.name"
+                @click.stop="store.togglePin(session.id)"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                class="session-card__delete"
+                title="删除会话"
+                @click.stop="confirmDelete(session)"
+              >
+                ×
+              </button>
+            </div>
           </div>
-        </template>
-      </template>
-      <template v-else>
-        <template v-for="group in viewGroups" :key="group.key">
-          <div class="sidebar__group" :title="group.dir ?? undefined">
-            <span class="sidebar__group__label">{{ group.label }}</span>
-            <span class="sidebar__group__count">{{ group.sessions.length }}</span>
-          </div>
-          <div
-            v-for="session in group.sessions"
-            :key="session.id"
-            :class="['session-link', {
-              active: store.activeSession?.id === session.id,
-              'session-link--selected': batchMode && selectedIds.has(session.id),
-              'session-link--running': displayStatus(session.id) === 'running',
-              'session-link--retrying': displayStatus(session.id) === 'retrying',
-              'session-link--completed': displayStatus(session.id) === 'completed',
-              'session-link--network-interrupted': displayStatus(session.id) === 'network_interrupted',
-            }]"
-            @click="batchMode ? toggleSelected(session.id) : openSession(session)"
-          >
-            <input
-              v-if="batchMode"
-              class="session-link__check"
-              type="checkbox"
-              :checked="selectedIds.has(session.id)"
-              @click.stop="toggleSelected(session.id)"
-            />
+          <div class="session-card__row2">
+            <!-- 项目徽章 pill：workingDir 经 projectLabel（末段目录名）；null 不渲染。 -->
             <span
-              v-if="displayStatus(session.id) !== 'idle'"
-              class="session-link__status"
-              :class="[`session-link__status--${displayStatus(session.id)}`]"
-              role="img"
-              :aria-label="statusLabel(session.id)"
-              :title="statusLabel(session.id)"
-            ></span>
-            <!-- P2 会话置顶（点 S4）：置顶行名称前 pin 标识（10px accent 填充）。 -->
-            <svg class="session-link__pinned" v-if="session.pinnedAt != null" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
-            </svg>
-            <span class="session-link__name">{{ session.name }}</span>
-            <!-- hb10-PERM-05：后台会话 pending 弹窗可见性 badge -->
-            <span
-              v-if="interactionStore.pendingRemoteCountBySession[session.id]"
-              class="session-link__pending"
-              title="该会话有待确认的弹窗"
-            >⏳</span>
-            <span class="session-link__time">{{ formatSessionTime(session.updatedAt) }}</span>
-            <!-- P2 会话置顶（点 S4）：与删除钮同款 hover 显隐；暂态（未落库）/批量模式隐藏。 -->
-            <button
-              v-if="!batchMode && !session.transient"
-              type="button"
-              class="session-link__pinbtn"
-              :title="session.pinnedAt != null ? '取消置顶' : '置顶会话'"
-              :aria-label="(session.pinnedAt != null ? '取消置顶 ' : '置顶会话 ') + session.name"
-              @click.stop="store.togglePin(session.id)"
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z" />
-              </svg>
-            </button>
-            <button
-              v-if="!batchMode"
-              type="button"
-              class="session-link__delete"
-              title="删除会话"
-              @click.stop="confirmDelete(session)"
-            >
-              ×
-            </button>
+              v-if="session.workingDir"
+              class="session-card__proj"
+              :title="session.workingDir"
+            >{{ projectLabel(session.workingDir) }}</span>
+            <span class="session-card__time">{{ formatSessionTime(session.updatedAt) }}</span>
           </div>
-        </template>
+        </div>
       </template>
       <div v-if="!store.displayedSessions.length" class="sidebar__empty">
         {{ store.searchQuery ? '未找到匹配的会话' : '暂无会话' }}
@@ -413,7 +426,57 @@ async function confirmDelete(session: { id: string; name: string }) {
         </svg>
         <span>配置</span>
       </RouterLink>
+      <!-- UI13-P4：底缘折叠触发器（页脚尾追加，与右栏 rail 底部折叠钮镜像对称）——
+           « 双箭头指左 = 把侧栏向左收起 -->
+      <button
+        type="button"
+        class="sidebar__collapse"
+        title="折叠侧栏"
+        aria-label="折叠侧栏"
+        @click="store.toggleSidebarCollapsed()"
+      >
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10.5 4 7 8l3.5 4M6.5 4 3 8l3.5 4" />
+        </svg>
+      </button>
     </div>
+    </template>
+
+    <!-- UI13-P4：折叠窄轨（48px 图标轨）——顶部 brand 方标（点击=展开）+ 新建会话图标钮 +
+         底部「»」展开钮（与右栏 rail 底部折叠钮镜像对称，» 双箭头指右 = 把侧栏向右展开）。 -->
+    <nav v-else class="sidebar__rail" aria-label="侧栏折叠轨">
+      <button
+        type="button"
+        class="sidebar__rail__mark"
+        title="展开侧栏"
+        aria-label="展开侧栏"
+        @click="store.toggleSidebarCollapsed()"
+      >CL</button>
+      <button
+        type="button"
+        class="sidebar__rail__new"
+        title="新建会话"
+        aria-label="新建会话"
+        @click="handleNewSession"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 5v14" />
+          <path d="M5 12h14" />
+        </svg>
+      </button>
+      <div class="sidebar__rail__spacer" aria-hidden="true"></div>
+      <button
+        type="button"
+        class="sidebar__rail__expand"
+        title="展开侧栏"
+        aria-label="展开侧栏"
+        @click="store.toggleSidebarCollapsed()"
+      >
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M5.5 4 9 8l-3.5 4M9.5 4 13 8l-3.5 4" />
+        </svg>
+      </button>
+    </nav>
   </aside>
 </template>
 
@@ -708,193 +771,109 @@ async function confirmDelete(session: { id: string; name: string }) {
   overflow-y: auto;
 }
 
+/* ── UI13-P3 会话卡片化（变体 A：两行卡 ~52px，结构 1:1 对齐 prototypes/sidebar-card-variant-a.html）── */
+
 /* 列表 stagger 入场（签名动效）：前 8 项 35ms 阶梯淡入上移，超出无延迟。
    尊重 prefers-reduced-motion（variables.css 已把动效时长压到 1ms，此处再显式关掉位移）。 */
-.session-link {
+.session-card {
   animation: session-enter var(--duration-base) var(--ease-out) both;
 }
-.session-link:nth-child(2) { animation-delay: 35ms; }
-.session-link:nth-child(3) { animation-delay: 70ms; }
-.session-link:nth-child(4) { animation-delay: 105ms; }
-.session-link:nth-child(5) { animation-delay: 140ms; }
-.session-link:nth-child(6) { animation-delay: 175ms; }
-.session-link:nth-child(7) { animation-delay: 210ms; }
-.session-link:nth-child(8) { animation-delay: 245ms; }
+.session-card:nth-child(2) { animation-delay: 35ms; }
+.session-card:nth-child(3) { animation-delay: 70ms; }
+.session-card:nth-child(4) { animation-delay: 105ms; }
+.session-card:nth-child(5) { animation-delay: 140ms; }
+.session-card:nth-child(6) { animation-delay: 175ms; }
+.session-card:nth-child(7) { animation-delay: 210ms; }
+.session-card:nth-child(8) { animation-delay: 245ms; }
 
 @keyframes session-enter {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: none; }
 }
 
-/* 会话行：30px 紧凑单行（状态点 + 名称 + ⏳ + 时间列 + hover 删除 ×）。 */
-.session-link {
+/* 会话卡基座：圆角 + panel 底 + ring/elevation 浮起（效果图 A 卡片语言）。 */
+.session-card {
+  position: relative;
   display: flex;
-  align-items: center;
-  gap: 8px;
-  height: 30px;
-  flex: none;
-  padding: 0 8px;
-  border-radius: var(--radius-sm);
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+  box-shadow: var(--ring-light), var(--elevation-1);
+  border: 1px solid transparent;
   color: var(--color-text);
   cursor: pointer;
   font-size: 0.8125rem;
-  transition: background var(--duration-fast) var(--ease-out);
+  transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
 }
 
-.session-link:hover {
-  background: var(--color-panel-soft);
+.session-card:hover {
+  background: color-mix(in srgb, var(--color-text) 4%, var(--color-panel));
 }
 
-/* 活动行：accent 8% 混色 + 加粗（Quiet Console 无左缘条）。 */
-.session-link.active {
+/* 活动卡：accent 8% 混色（Quiet Console 配色语言延续）+ accent 45% 描边（效果图 A）。 */
+.session-card.active {
   background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft));
+  border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+}
+
+.session-card.active .session-card__name {
   font-weight: 600;
 }
 
-.session-link.active:hover {
-  background: color-mix(in srgb, var(--color-accent) 14%, var(--color-panel-soft));
+.session-card__row1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
-.session-link__name {
+.session-card__name {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  font-weight: 500;
 }
 
-/* hb10-PERM-05：后台 pending 弹窗 badge（⏳ 字面量为契约钉死，勿改图标）。 */
-.session-link__pending {
+.session-card__status {
+  /* 状态块：22px 圆角小方块（running/retrying 呼吸；completed/network_interrupted/idle 静态——基础声明 + 显式关停组）。 */
   flex: none;
-  font-size: 0.6875rem;
-  line-height: 1;
-  padding: 2px 4px;
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
-}
-
-.session-link__time {
-  flex: none;
-  font-size: 0.6875rem;
-  color: var(--color-text-muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.session-link__delete {
-  flex: none;
-  display: none;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-muted);
-  font-size: 0.8125rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-/* hover 时时间列与删除 × 互斥显隐（纯 CSS）。P2 置顶钮（点 S4）：hover / 键盘聚焦（:focus-visible）
-   显现置顶钮（width 0 隐藏形态恢复可见可点），与删除 × 显隐规则并排。 */
-.session-link:hover .session-link__pinbtn,
-.session-link__pinbtn:focus-visible {
-  width: 18px;
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.session-link:hover .session-link__delete {
-  display: grid;
-}
-
-.session-link:hover .session-link__time {
-  display: none;
-}
-
-/* 批量模式：删除钮不渲染，hover 隐藏时间列只会留行尾空白——恢复显示。 */
-.sidebar__sessions.batching .session-link:hover .session-link__time {
-  display: inline;
-}
-
-.session-link__delete:hover {
-  background: color-mix(in srgb, var(--color-danger) 18%, transparent);
-  color: var(--color-danger);
-}
-
-/* ── P2 会话置顶（点 S4）── */
-
-/* 置顶行标识：状态灯后、名称前的 10px accent 填充 pin 图标。 */
-.session-link__pinned {
-  flex: none;
-  width: 10px;
-  height: 10px;
-  fill: var(--color-accent);
-}
-
-/* 置顶钮：与删除 × 同款 hover 显隐语义，但不用 display:none——display:none 脱离 Tab 序，
-   icon-only 钮将永远无法键盘触达；改 width 0 + opacity 0 隐藏（非 hover 态不占宽度，仅引入
-   一个 8px flex gap），hover / :focus-visible 恢复可见可点。 */
-.session-link__pinbtn {
-  flex: none;
-  display: grid;
-  place-items: center;
-  width: 0;
-  height: 18px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-muted);
-  opacity: 0;
-  overflow: hidden;
-  pointer-events: none;
-  cursor: pointer;
-  transition: width var(--duration-fast) var(--ease-out), opacity var(--duration-fast) var(--ease-out);
-}
-
-.session-link__pinbtn svg {
-  width: 12px;
-  height: 12px;
-  fill: currentColor;
-}
-
-.session-link__pinbtn:focus-visible {
-  outline: 2px solid var(--color-accent);
-  outline-offset: 1px;
-}
-
-.session-link__pinbtn:hover {
-  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
-  color: var(--color-accent);
-}
-
-.session-link__status {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--session-status-color, var(--color-warn));
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: var(--session-status-color, var(--color-border));
   box-shadow: 0 0 0 0 color-mix(in srgb, var(--session-status-color, var(--color-warn)) 55%, transparent);
   animation: session-status-pulse 1.2s ease-in-out infinite;
 }
-/* 会话状态灯四态（颜色经 --session-status-color 继承，圆点/pulse 阴影共用变量）：
-   running = 黄灯呼吸闪烁；retrying = 红灯呼吸闪烁（同一条 pulse keyframes）；
-   completed = 静态绿灯；network_interrupted = 静态红灯（显式 animation: none）。
-   idle 不渲染（无状态点）；颜色不只依赖颜色本身——状态点带 role="img" +
-   aria-label/title 供辅助技术读取（reduced-motion 下红闪/黄闪会停动画，文案不可省）。 */
-.session-link--running {
+
+/* 状态四态着色（颜色经 --session-status-color 继承，块底/pulse 阴影共用变量）：
+   running = 黄呼吸；retrying = 红呼吸（同一条 pulse keyframes）；completed = 静态绿；
+   network_interrupted = 静态红；idle 无着色类 → 灰块（--color-border fallback）。
+   completed/network_interrupted/idle 三静态态均经状态块修饰类显式关停；--idle 由模板
+   :class 动态修饰类恒生成（评审 P2-A：关停规则缺位即运行态样式泄漏到静态态）。
+   颜色不只依赖颜色本身——状态块带 role="img" + aria-label/title 供辅助技术读取
+  （reduced-motion 下呼吸会停，文案不可省）。 */
+.session-card--running {
   --session-status-color: var(--color-warn);
 }
-.session-link--retrying,
-.session-link--network-interrupted {
+.session-card--retrying,
+.session-card--network-interrupted {
   --session-status-color: var(--color-danger);
 }
-.session-link--completed {
+.session-card--completed {
   --session-status-color: var(--color-success);
 }
-.session-link__status--completed,
-.session-link__status--network_interrupted {
+.session-card__status--completed,
+.session-card__status--network_interrupted {
+  box-shadow: none;
+  animation: none;
+}
+/* idle 静态化（评审 P2-A）：模板动态修饰类对 idle 恒生成 --idle，缺关停规则则继承基础
+   呼吸动画 + box-shadow fallback（--color-warn）呈永久黄光环——运行态样式泄漏到静态态。 */
+.session-card__status--idle {
   box-shadow: none;
   animation: none;
 }
@@ -911,19 +890,134 @@ async function confirmDelete(session: { id: string; name: string }) {
   }
 }
 
-/* F4：reduced-motion 块必须位于状态灯基础动画声明与 keyframes 之后——媒体查询与基础规则
+/* F4：reduced-motion 块必须位于状态块基础动画声明与 keyframes 之后——媒体查询与基础规则
    同特异性时后声明的规则胜出，放前面会让 pulse 动画覆盖 animation: none，降级失效。 */
 @media (prefers-reduced-motion: reduce) {
-  .session-link {
+  .session-card {
     animation: none;
   }
-  .session-link__status {
+  .session-card__status {
     animation: none;
   }
 }
 
-/* 批量删除：复选框 + 选中态高亮。选中态用 accent 描边+淡填充，区别于活动行混色。 */
-.session-link__check {
+/* 置顶标识：标题左侧 12px accent 填充 pin 图标（常驻，非 hover 显隐——置顶态一眼可辨）。 */
+.session-card__pin-mark {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  fill: var(--color-accent);
+}
+
+/* hb10-PERM-05：后台 pending 弹窗 badge（⏳ 字面量为契约钉死，勿改图标）。 */
+.session-card__pending {
+  flex: none;
+  font-size: 0.6875rem;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--color-warn) 16%, transparent);
+}
+
+/* 右上操作组：hover / focus-within 显隐（opacity 不脱 Tab 序，键盘聚焦即显现）；批量模式
+   整组 v-if 隐藏（模板层，中断钮批量不可达防误杀）。 */
+.session-card__ops {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.session-card:hover .session-card__ops,
+.session-card:focus-within .session-card__ops {
+  opacity: 1;
+}
+
+.session-card__ops button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  overflow: hidden;
+  transition: background var(--duration-fast) var(--ease-out), color var(--duration-fast) var(--ease-out);
+}
+
+.session-card__ops button:hover {
+  background: color-mix(in srgb, var(--color-text) 8%, var(--color-panel-soft));
+  color: var(--color-text);
+}
+
+.session-card__ops button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+.session-card__ops svg {
+  width: 13px;
+  height: 13px;
+  fill: currentColor;
+}
+
+/* 中断钮：hover 红（危险语义）；内层进度填充 span 长按可视（width 0→100%）。 */
+.session-card__interrupt:hover {
+  color: var(--color-danger);
+}
+
+.session-card__interrupt--holding {
+  color: var(--color-danger);
+}
+
+.session-card__interrupt-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: color-mix(in srgb, var(--color-danger) 30%, transparent);
+  pointer-events: none;
+}
+
+.session-card__row2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* 项目徽章 pill：panel-soft 底 + border 描边（workingDir null 不渲染，模板层 v-if）。 */
+.session-card__proj {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.6875rem;
+  line-height: 1.6;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--color-panel-soft);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
+.session-card__time {
+  margin-left: auto;
+  flex: none;
+  font-size: 0.6875rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 批量删除：复选框 + 选中态高亮（accent 虚线描边，区别于活动卡混色）。 */
+.session-card__check {
   flex: none;
   width: 16px;
   height: 16px;
@@ -931,13 +1025,13 @@ async function confirmDelete(session: { id: string; name: string }) {
   cursor: pointer;
 }
 
-.session-link--selected {
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
-  box-shadow: inset 0 0 0 1px var(--color-accent);
+.session-card--selected {
+  outline: 1.5px dashed color-mix(in srgb, var(--color-accent) 55%, transparent);
+  outline-offset: -3px;
 }
 
-.session-link--selected:hover {
-  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+.session-card--selected:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel));
 }
 
 .sidebar__empty {
@@ -1023,5 +1117,131 @@ async function confirmDelete(session: { id: string; name: string }) {
   fill: none;
   stroke: currentColor;
   stroke-width: 1.7;
+}
+
+/* ── UI13-P4 左侧栏可折叠 ──
+   折叠窄轨 48px：本类与 .sidebar 基础规则同特异性（单类），后声明胜出——固定宽覆盖
+   width/min-width: var(--sidebar-width)，AppLayout 的 --sidebar-width 记忆宽不动，展开即恢复。
+   契约 #4：折叠/展开瞬时切换，无 transition（对齐右栏 rail 折叠决策；T4-E 钉）。 */
+.sidebar--collapsed {
+  width: 48px;
+  min-width: 48px;
+  padding: 14px 8px 12px;
+  align-items: center;
+}
+
+/* 窄轨：纵向图标列（方标 / 新建 / 弹性占位 / 底部展开钮）。 */
+.sidebar__rail {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  gap: 10px;
+}
+
+.sidebar__rail__mark {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 0.625rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.sidebar__rail__new {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.sidebar__rail__new:hover {
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+}
+
+.sidebar__rail__new svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.sidebar__rail__spacer {
+  flex: 1;
+}
+
+.sidebar__rail__expand {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.sidebar__rail__expand:hover {
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+}
+
+.sidebar__rail__expand svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 底缘折叠钮（展开态页脚尾，右端并排）：« 双箭头指左 = 向左收起侧栏。 */
+.sidebar__collapse {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.sidebar__collapse:hover {
+  background: var(--color-panel-soft);
+  color: var(--color-text);
+}
+
+.sidebar__collapse svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 </style>

@@ -1,7 +1,7 @@
 // group-sessions-by-date.ts
 // 「全部」视图的日期分组纯函数：置顶（P2 会话置顶，点 S4）/ 今天 / 昨天 / 本周更早 / 更早
-// （本地时区零点为界，「本周」为周一起算的 ISO 周）。组内保持传入顺序（与 groupSessionsByProject
-// 行为一致，依赖 store.displayedSessions 的 SQL 权威序）。now 可注入供测试。
+// （本地时区零点为界，「本周」为周一起算的 ISO 周）。组内保持传入顺序（依赖
+// store.displayedSessions 的 SQL 权威序）。now 可注入供测试。
 
 import type { Session } from '../../shared/types/session';
 

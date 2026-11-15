@@ -20,12 +20,18 @@ export function projectLabel(dir: string): string {
 
 // 按 workingDir 分组，保持首次出现的顺序；无工作空间的会话归入「未选择工作空间」。
 // key 把反斜杠折成正斜杠再比较：Windows 下两种分隔符指向同一目录，须归入同一组。
-// P2 会话置顶（点 S4）：项目视图不做跨组提取（置顶会话仍留在其项目组内，组数与归属不变）；
-// 每个组内部排序改为「置顶优先（pinnedAt DESC，后置顶在前），其余保持传入序」——组序权威
-// 仍在 listSessions SQL，此处按字段二次保证。undefined（旧数据缺字段）与 null 一致按未置顶。
+// UI13-P3（条目 4）：置顶跨组提取——置顶会话不再留在各自项目组组内浮顶，而是全部抽出组成
+// `__pinned__` 组 unshift 到返回数组最前（仅非空时输出），与日期视图行为对齐：两视图置顶一律
+// 浮顶整个列表最前，组内按置顶时刻 DESC（后置顶在前）。组序权威仍在 listSessions SQL
+//（置顶前缀 ORDER BY），此处按字段二次保证（防御传入序非权威的调用方）。
+// undefined（旧数据缺字段）与 null 一致按未置顶（留在原项目组）。
 export function groupSessionsByProject(sessions: Session[]): SessionGroup[] {
+  // filter 产出新数组，sort 只重排该副本——不触碰原传入序。
+  const pinned = sessions.filter((s) => s.pinnedAt != null)
+    .sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0));
   const map = new Map<string, SessionGroup>();
   for (const s of sessions) {
+    if (s.pinnedAt != null) continue; // UI13-P3：置顶跨组提取，不进项目组
     const dir = s.workingDir;
     const key = dir ? dir.replace(/\\/g, '/') : '__none__';
     let group = map.get(key);
@@ -35,12 +41,10 @@ export function groupSessionsByProject(sessions: Session[]): SessionGroup[] {
     }
     group.sessions.push(s);
   }
-  for (const group of map.values()) {
-    // filter 产出新数组，sort 只重排该副本——不触碰原传入序；rest 保持传入序不变。
-    const pinned = group.sessions.filter((s) => s.pinnedAt != null)
-      .sort((a, b) => (b.pinnedAt ?? 0) - (a.pinnedAt ?? 0));
-    const rest = group.sessions.filter((s) => s.pinnedAt == null);
-    group.sessions = [...pinned, ...rest];
+  const groups = [...map.values()];
+  // '__pinned__' 不会与真实目录归一键冲突（目录键是 normalize 后的路径或 '__none__'）。
+  if (pinned.length > 0) {
+    groups.unshift({ key: '__pinned__', label: '置顶', dir: null, sessions: pinned });
   }
-  return [...map.values()];
+  return groups;
 }

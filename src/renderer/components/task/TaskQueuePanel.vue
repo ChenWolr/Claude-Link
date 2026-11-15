@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import { VueDraggable } from 'vue-draggable-plus';
 import { useTaskStore } from '../../stores/task-store';
 import { useSessionStore } from '../../stores/session-store';
@@ -17,6 +17,8 @@ import { useFilePreview } from '../../composables/useFilePreview';
 import { useDialogShell } from '../../composables/use-dialog-shell';
 import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import { useNow } from '../../composables/use-now';
+// F1（活动面板组）：输出弹窗接 Esc 栈——层值 1199 与 .bg-output-mask CSS z-index 同表。
+import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 import TaskItem from './TaskItem.vue';
 import ProcessGroup from '../chat/ProcessGroup.vue';
 import MessageBubble from '../chat/MessageBubble.vue';
@@ -163,6 +165,13 @@ function subAgentStatusText(g: SubAgentGroup): string {
   return g.completed ? '已完成' : '未完成';
 }
 
+// F4：组卡状态徽章三态类映射（进行中=accent 系 / 已完成=success / 未完成=warn）。
+// subAgentStatusText 函数体不动——tdd-subagent-verify 钉 `g.completed ? '已完成' : '未完成'` 字面。
+function subAgentStatusClass(g: SubAgentGroup): string {
+  if (g.running) return 'subagent-group__status--running';
+  return g.completed ? 'subagent-group__status--done' : 'subagent-group__status--incomplete';
+}
+
 function toggleSubAgentGroup(id: string, running: boolean): void {
   const open = isSubAgentGroupExpanded(id, running);
   const nextExp = new Set(expandedGroups.value);
@@ -275,7 +284,37 @@ const outputTitle = ref('');
 const outputContent = ref('');
 const outputTruncated = ref(false);
 const outputLoading = ref(false);
-async function openTaskOutput(t: BackgroundTask): Promise<void> {
+
+// F1（活动面板组）：输出弹窗 Esc 层接线（注册/释放/消费/兜底四件套，照 UpdateDialog 先例）。
+// 层值 1199 与 .bg-output-mask CSS z-index 同表；与 mcpDialog 同值但路由互斥（MCP 弹窗仅配置
+// 页路由、输出弹窗仅会话页路由，不可能同时在场），同值层 isTopmost 只让位「严格更高」。
+const outputTriggerEl = ref<HTMLElement | null>(null);
+let escLayer: EscLayerHandle | null = null;
+function onOutputEscKeydown(e: KeyboardEvent): void {
+  if (e.key !== 'Escape' || !outputVisible.value) return;
+  // 更高层在场（interaction 1200 / diff 1250 / filePicker 9100 / 灯箱 9999…）让位，不消费。
+  if (escLayer && !escLayer.isTopmost()) return;
+  // X3 同款：本组件消费 Esc 时 preventDefault——ChatPage 的 e.defaultPrevented 急停守卫
+  // 随即让位，防一次 Esc 双吞（关弹窗 + 中止流式回合）。
+  e.preventDefault();
+  outputVisible.value = false;
+  // F1 焦点还原：规范钉「Esc 关闭时焦点还原到触发钮」，在关闭之后执行；触发钮已卸载时 ?.
+  // 安全降级（不落 body、不抛错）。
+  outputTriggerEl.value?.focus();
+}
+watch(outputVisible, (v) => {
+  if (v && !escLayer) escLayer = pushEscLayer(ESC_LAYER_PRIORITY.bgOutputDialog);
+  else if (!v && escLayer) {
+    escLayer.release();
+    escLayer = null;
+    // ×/遮罩关闭路径复用同一还原（Esc 路径已在 handler 内还原，重复 focus 同元素无副作用）。
+    outputTriggerEl.value?.focus();
+  }
+});
+
+async function openTaskOutput(t: BackgroundTask, e?: MouseEvent): Promise<void> {
+  // F1 焦点还原目标：记录触发「查看输出」的按钮（先于早退捕获，读取失败 alert 路径同样可还原）。
+  if (e?.currentTarget instanceof HTMLElement) outputTriggerEl.value = (e.currentTarget as HTMLElement);
   if (!t.outputFile || outputLoading.value) return;
   outputTitle.value = `任务输出 — ${t.description || t.taskId}`;
   outputContent.value = '';
@@ -449,6 +488,15 @@ onMounted(() => {
   loadOverview();
   // 面板常驻（默认 all 总览），改动数据须随挂载即拉，供轨 badge / 指标格 / 总览摘要。
   void changesStore.refresh();
+  // F1：输出弹窗 Esc 分支 window 监听（同步注册，onMounted 内无 await 先行）。
+  window.addEventListener('keydown', onOutputEscKeydown);
+});
+
+// F1 卸载兜底：面板仅 chat 路由挂载，切路由卸载时移除 window 监听并释放 Esc 层（release 幂等）。
+onUnmounted(() => {
+  window.removeEventListener('keydown', onOutputEscKeydown);
+  escLayer?.release();
+  escLayer = null;
 });
 
 // 队列事件监听已全局化到 App.vue（onQueueEvent → taskStore.handleQueueEvent），面板卸载
@@ -670,7 +718,7 @@ function handleDragReorder() {
                 <span class="subagent-group__icon">🤖</span>
                 <span class="subagent-group__title">{{ g.title }}</span>
                 <span class="subagent-group__duration">⏱{{ subAgentDurationText(g) }}</span>
-                <span class="subagent-group__status" :class="{ 'subagent-group__status--running': g.running }">
+                <span class="subagent-group__status" :class="subAgentStatusClass(g)">
                   {{ subAgentStatusText(g) }}
                   <span v-if="g.running" class="subagent-running-dots" aria-hidden="true">
                     <span></span><span></span><span></span>
@@ -771,7 +819,7 @@ function handleDragReorder() {
                   </ul>
                   <div v-if="t.summary" class="bg-task__row">{{ t.summary }}</div>
                   <div v-if="t.status && t.outputFile" class="bg-task__actions">
-                    <button type="button" class="bg-task__output-btn" @click="openTaskOutput(t)">查看输出</button>
+                    <button type="button" class="bg-task__output-btn" @click="openTaskOutput(t, $event)">查看输出</button>
                   </div>
                 </template>
               </div>
@@ -1510,6 +1558,18 @@ function handleDragReorder() {
   border-color: var(--color-accent-strong);
 }
 
+.subagent-group__status--done {
+  color: var(--color-success-strong);
+  border-color: var(--color-success-strong);
+}
+
+/* 「未完成」= 回合结束未收到父 tool_result（中断/异常）——warn 语义色（裁决 D4-06 token 钉） */
+.subagent-group__status--incomplete {
+  color: var(--color-warn-strong);
+  border-color: var(--color-warn-strong);
+  background: color-mix(in srgb, var(--color-warn) 10%, transparent);
+}
+
 .subagent-running-dots {
   display: inline-flex;
   gap: 2px;
@@ -1753,6 +1813,14 @@ function handleDragReorder() {
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
+  align-self: stretch;
+}
+
+/* UI13-P5：MessageBubble 根元素包了 .bubble-wrap wrapper——wrap 须与 .bubble 同宽同拉伸
+   （本规则优先级高于组件内 .bubble-wrap--user 的 align-self:flex-end），否则子 agent 消息
+   落进收缩 wrap 丢 100% 宽、布局破坏；内部 .bubble 的 width:100% 以 wrap 为参照仍成立。 */
+.subagent-group__body :deep(.bubble-wrap) {
+  width: 100%;
   align-self: stretch;
 }
 

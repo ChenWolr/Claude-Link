@@ -181,6 +181,13 @@ function gotoSearch(delta: number): void {
   currentSearchIndex.value = moveSearchIndex(currentSearchIndex.value, delta, searchMatches.value.length);
 }
 function onSearchKeydown(e: KeyboardEvent): void {
+  // I2：组词中消费按键（preventDefault+stopPropagation）——外层 window onKey 的 Escape 分支
+  // 在 isTextTarget 早退之前，朴素 return 会让组词 Esc 冒泡关闭搜索栏/弹窗。
+  if (isImeComposing(e)) {
+    e.preventDefault();
+    e.stopPropagation();
+    return;
+  }
   if (e.key === 'Escape') {
     e.preventDefault();
     e.stopPropagation();
@@ -316,6 +323,10 @@ function isTextTarget(t: EventTarget | null): boolean {
     (t instanceof HTMLElement && t.isContentEditable)
   );
 }
+// I2：IME 组词守卫（统一口径 isComposing || keyCode === 229，与主输入区同源；本地复制不抽共享 util）。
+function isImeComposing(e: KeyboardEvent): boolean {
+  return e.isComposing || e.keyCode === 229;
+}
 function trapTab(e: KeyboardEvent): void {
   const dlg = dialogEl.value;
   if (!dlg) return;
@@ -325,10 +336,14 @@ function trapTab(e: KeyboardEvent): void {
   if (!focusables.length) return;
   const first = focusables[0];
   const last = focusables[focusables.length - 1];
-  if (e.shiftKey && document.activeElement === first) {
+  // I7：焦点逃逸重捕——activeElement 已不在弹窗 DOM（点留白落 body 等）时 Tab 仍拉回
+  // （容器外 Shift+Tab→末、Tab→首；容器内首末回绕不受影响）。口径同 InteractionPrompt B5/I3-04。
+  const active = document.activeElement;
+  const outside = !dlg.contains(active);
+  if (e.shiftKey && (active === first || outside)) {
     e.preventDefault();
     last.focus();
-  } else if (!e.shiftKey && document.activeElement === last) {
+  } else if (!e.shiftKey && (active === last || outside)) {
     e.preventDefault();
     first.focus();
   }
@@ -392,7 +407,7 @@ onBeforeUnmount(() => {
         class="diff-dialog"
         role="dialog"
         aria-modal="true"
-        :aria-label="`改动对比 ${effectiveTitle}`"
+        aria-labelledby="tool-diff-dlg-title"
         :style="dialogStyle"
       >
         <div class="diff-main">
@@ -402,7 +417,7 @@ onBeforeUnmount(() => {
                 <span class="dot"></span>
                 本次改动 · 对比
               </div>
-              <h2 class="diff-title">
+              <h2 id="tool-diff-dlg-title" class="diff-title">
                 <span v-if="pathParts.dir" class="diff-title__dir">{{ pathParts.dir }}/</span><b>{{ pathParts.name || '—' }}</b>
               </h2>
               <p class="diff-meta">

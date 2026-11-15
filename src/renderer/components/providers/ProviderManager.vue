@@ -588,7 +588,7 @@ async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<
 .pitem .meta .key-broken {
   display: block;
   font-size: 0.6875rem;
-  color: var(--color-danger, #d64545);
+  color: var(--color-danger);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -612,7 +612,7 @@ async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<
 
 /* X15（R02-F2）：加载失败态文案——danger 色与真空库 muted 引导区分（同 key-broken 徽标引用形态）。 */
 .plist-empty--error {
-  color: var(--color-danger, #d64545);
+  color: var(--color-danger);
 }
 
 /* ── 右侧详情框 ── */
@@ -768,7 +768,7 @@ async function handleModelWindowSet(model: ProviderModel, raw: string): Promise<
 
 /* X15（R02-F2）：详情空卡失败态（同左栏 plist-empty--error）。 */
 .empty--error {
-  color: var(--color-danger, #d64545);
+  color: var(--color-danger);
 }
 
 .pool-note {

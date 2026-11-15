@@ -174,19 +174,21 @@ onUnmounted(() => {
       <ContextButton :disabled="sending" @compress="emit('compress')" />
     </div>
 
-    <!-- 工作空间 -->
+    <!-- 工作空间：E2 一体化——图标入钮构成「图标+值」pill（无外置 label、无 caret 下拉指示）；
+         data-testid 供 CDP 结构定位（原 caret 文本定位随 caret 退场）。 -->
     <div ref="workspaceRef" class="ctl">
-      <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M3 6l2-2h5l2 2h9v12H3z" />
-      </svg>
       <button
         type="button"
+        data-testid="workspace-trigger"
         :class="['ctl__btn', { 'ctl__btn--warn': !activeSession.workingDir }]"
         :disabled="sending"
         :title="activeSession.workingDir ?? '未选择工作空间（运行前必须选择）'"
         @click="toggleWorkspaceMenu()"
       >
-        {{ workspaceLabel }} <span class="caret">▾</span>
+        <svg class="ctl__btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 6l2-2h5l2 2h9v12H3z" />
+        </svg>
+        {{ workspaceLabel }}
       </button>
       <div v-if="showWorkspaceMenu" class="menu">
         <button type="button" class="menu__item menu__item--accent" @click="pickDirectory">📁 选择目录…</button>
@@ -225,34 +227,31 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 模型：供应商 × 模型二级级联（向上弹出；整个会话统一当前实际模型） -->
+    <!-- 模型：供应商 × 模型二级级联（向上弹出；整个会话统一当前实际模型）。
+         E2 一体化：图标迁入 ProviderModelSelector 触发钮内（外置 label 图标退场）。 -->
     <div class="ctl">
-      <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M5 5h14v14H5z M9 9h6v6H9z" />
-      </svg>
       <ProviderModelSelector />
     </div>
 
-    <!-- 思考强度：每会话切档（低=快速响应 … 工作流=xhigh+动态编排）；默认跟随全局配置 -->
+    <!-- 思考强度：每会话切档（低=快速响应 … 工作流=xhigh+动态编排）；默认跟随全局配置。
+         E2 一体化：图标迁入 ThinkingLevelSelector 触发钮内（外置 label 图标退场）。 -->
     <div class="ctl">
-      <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" />
-      </svg>
       <ThinkingLevelSelector />
     </div>
 
-    <!-- 权限：触发按钮显示当前模式，点击向上展开卡片面板 -->
+    <!-- 权限：触发按钮显示当前模式，点击向上展开卡片面板（图标入钮 + data-testid，同工作空间钮） -->
     <div ref="permissionRef" class="ctl">
-      <svg class="ctl__label-icon" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M5 11h14v10H5z M8 11V7a4 4 0 0 1 8 0v4" />
-      </svg>
       <button
         type="button"
+        data-testid="permission-trigger"
         class="ctl__btn"
         :title="`本会话 Claude Code 权限模式（${activeSession.permissionMode === null ? `跟随全局默认：${globalDefaultPermissionLabel}` : activePermission.label}）；运行中切换即时生效`"
         @click="showPermissionMenu = !showPermissionMenu"
       >
-        {{ permissionTriggerLabel }} <span class="caret">▾</span>
+        <svg class="ctl__btn-icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M5 11h14v10H5z M8 11V7a4 4 0 0 1 8 0v4" />
+        </svg>
+        {{ permissionTriggerLabel }}
       </button>
       <div v-if="showPermissionMenu" class="perm-menu">
         <button
@@ -269,7 +268,6 @@ onUnmounted(() => {
             <span class="perm-item__label">
               {{ p.value === null ? `默认：${globalDefaultPermissionLabel}` : p.label }}
             </span>
-            <span class="perm-item__desc">{{ p.desc }}</span>
           </span>
           <svg
             v-if="p.value === activeSession.permissionMode"
@@ -354,12 +352,14 @@ onUnmounted(() => {
   margin-left: auto;
 }
 
-.ctl__label-icon {
+/* E2 一体化：chip 内图标（stroke 用 currentColor 随钮文字色走——warn 态图标随 warn-strong、
+   disabled 随整体半透明；与值同钮构成「图标+值」一体 pill）。 */
+.ctl__btn-icon {
   flex-shrink: 0;
   width: 0.875rem;
   height: 0.875rem;
   fill: none;
-  stroke: var(--color-text-muted);
+  stroke: currentColor;
   stroke-width: 2;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -401,6 +401,13 @@ onUnmounted(() => {
   color: var(--color-warn-strong);
 }
 
+/* E2-09：warn 态与 hover 态叠加可辨——显式声明 warn hover 走全值 warn 描边（须排在
+   .ctl__btn:hover 之后，同优先级后写胜出），修掉「hover accent 描边覆盖 warn 描边、
+   文字仍 warn」的异色叠加；hover 反馈与 warn 语义并存。 */
+.ctl__btn--warn:hover {
+  border-color: var(--color-warn);
+}
+
 .ctl__btn--danger {
   color: var(--color-danger);
   border-color: color-mix(in srgb, var(--color-fail) 50%, transparent);
@@ -438,11 +445,6 @@ onUnmounted(() => {
 .ctl__btn--abort-holding {
   border-color: var(--color-danger);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-danger) 35%, transparent);
-}
-
-.caret {
-  opacity: 0.6;
-  font-size: 0.625rem;
 }
 
 .menu {
@@ -659,13 +661,6 @@ onUnmounted(() => {
   font-size: 0.8125rem;
   font-weight: 600;
   line-height: 1.2;
-}
-
-.perm-item__desc {
-  font-size: 0.6875rem;
-  color: var(--color-text-muted);
-  line-height: 1.3;
-  white-space: normal;
 }
 
 .perm-item__check {

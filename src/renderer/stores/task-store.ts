@@ -171,6 +171,15 @@ export const useTaskStore = defineStore('task', {
           });
           break;
         }
+        case 'tasks_changed': {
+          // UI13-P1：任一端 CRUD 后的全量权威列表（含顺序与暂停态），仅当前面板会话生效。
+          // 空数组合法（删到最后一个任务），勿用 length 守卫误吞；发起端 invoke 回包与
+          // 本事件同源同值，任意顺序等价（幂等整替、无回退/闪烁）。
+          if (!isActive) break;
+          const tasks = payload.data?.tasks as Task[] | undefined;
+          if (Array.isArray(tasks)) this.tasks = tasks;
+          break;
+        }
         case 'user_message_created': {
           // 队列任务到点/立即执行在主进程创建稳定 user message 后经此事件回传，按 id upsert
           // 进会话消息（addMessage 带归属守卫：P1-4 后台/已删会话的消息直接拒绝、不落渲染层存储不串入当前列表，后台会话切回时由 DB 重载补齐）。
