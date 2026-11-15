@@ -1,9 +1,11 @@
 // scripts/cdp-interrupt-resume-e2e.mjs
 // S6（2026-10-22 计划 §4.2）：P3「thinking 中断后立即发新消息能否接住」E2E——验证优先、条件修复。
 //
-// 疑点 A（计划 §4.1）：user 中断即时硬杀（TerminateProcess）可能把进行中的 thinking 轮撕成残缺
-// transcript，紧接的新回合 resume 同一 cliSessionId 时被上游 400 拒收（机制注释见
-// sdk-backend.ts 两段式中止块；实测记录当时场景是 watchdog 而非 user）。本脚本连跑 5 轮：
+// 疑点 A（计划 §4.1；UI13-P7 后机制更新）：user 中断现为两段式——先 SDK interrupt()（≤1500ms
+// 优雅窗），超时才 abort 兜底（SDK 0.3.191 win32 abort = 关 stdin → 2s → 再 5s → TerminateProcess，
+// 仅直接子进程；孙进程由 scheduleWindowsTreeKill 兜底）；紧接的新回合 resume 同一 cliSessionId
+// 被上游 400 拒收的疑点由本脚本持续回归（机制注释见 sdk-backend.ts 两段式中止块；实测记录
+// 当时场景是 watchdog 而非 user）。本脚本连跑 5 轮：
 //   建会话（自动模式 + 高思考档）→ 发长 thinking prompt → 等 thinking_delta 流式出现 →
 //   点中断（真实长按）→ 立即（<1s）发送第二条 prompt → 断言接住。
 //

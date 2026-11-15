@@ -1,9 +1,11 @@
 // scripts/diagnose-interrupt-transcript.mjs
 // S6（2026-10-22 计划 §4.2 阶段一）：中断撕裂 transcript 诊断器（纯 node，无 Electron 依赖）。
 //
-// 背景（计划 §4.1 疑点 A）：user 中断走 killProcess 立即硬杀（TerminateProcess），可能把进行中的
-// thinking 轮撕成残缺 transcript（~/.claude/projects/**/<cliSessionId>.jsonl 末行半截 JSON）；
-// 紧接的新回合 resume 同一 cliSessionId 时被上游 400 拒收（机制注释见 sdk-backend.ts 两段式中止块）。
+// 背景（计划 §4.1 疑点 A；UI13-P7 后机制更新）：user 中断走 killProcess 两段式——先 interrupt()
+// ≤1500ms 优雅窗，超时才 abort 兜底（SDK 0.3.191 win32 = 关 stdin → 2s → 再 5s → TerminateProcess，
+// 仅直接子进程），仍可能把进行中的 thinking 轮撕成残缺 transcript（~/.claude/projects/**/
+// <cliSessionId>.jsonl 末行半截 JSON）；紧接的新回合 resume 同一 cliSessionId 时被上游 400
+// 拒收（机制注释见 sdk-backend.ts 两段式中止块）。
 // 本脚本对 transcript 做逐行 JSON.parse 体检，产出「末行是否可解析 / 末行 type(subtype) /
 // 是否存在疑似被截断的 assistant/thinking 行」，供 E2E（cdp-interrupt-resume-e2e.mjs）与人工取证。
 //

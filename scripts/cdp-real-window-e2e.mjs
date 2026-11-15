@@ -12,7 +12,7 @@
 //   - exit 3：环境受限场景未执行（如 /compact 无法达到可压缩阈值）——阻止「Task 9 完成」声明。
 //
 // 场景（review-v9 §5 顺序）：
-//   1. 临时工作目录 $CLAUDE_LINK_CACHE_ROOT/claude-link/e2e/<run-id>/cwd（/init 副作用只允许在此）。
+//   1. 临时工作目录 <CACHE_ROOT>/e2e/<run-id>/cwd（CACHE_ROOT = CLAUDE_LINK_CACHE_ROOT ?? <系统临时目录>/claude-link-cache；/init 副作用只允许在此）。
 //   2. UI 建会话 + 设置工作目录 + /init 落盘断言（CLAUDE.md 存在且非空；无文件须有
 //      init_write_skipped 或原生失败，不允许文字回复当成功）。
 //   3. 记录消息数/命令快照/诊断摘要 → 切走再切回（重开会话）→ 断言恢复。
@@ -33,7 +33,10 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 const CDP_PORT = 9223;
-const E2E_ROOT = 'D:/software/Cache/claude-link/e2e';
+// R3（2026-11-11 脱敏收尾，对齐 aceadb3 先例）：缓存根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 未设时落 os.tmpdir() 子目录——去盘符硬编码，读写自身目录语义不变。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const E2E_ROOT = path.join(CACHE_ROOT, 'e2e');
 const RUN_ID = `real-window-${Date.now()}`;
 const FIXTURE_ROOT = path.join(E2E_ROOT, RUN_ID);
 const CWD = path.join(FIXTURE_ROOT, 'cwd').replace(/\\/g, '/');
@@ -169,8 +172,7 @@ async function setWorkingDir(ws, sid, dir) {
   await evalExpr(ws, `(document.querySelector('.session-link.active') || document.querySelector('.session-link'))?.click(), true`);
   await waitFor('回到聊天页（工具栏出现）', () => evalOk(ws, `!!document.querySelector('.session-toolbar')`), 15);
   await evalExpr(ws, `(() => {
-    const btns = [...document.querySelectorAll('.session-toolbar .ctl__btn')];
-    const wsBtn = btns.find((b) => (b.textContent || '').includes('▾'));
+    const wsBtn = document.querySelector('[data-testid="workspace-trigger"]');
     if (!wsBtn) throw new Error('工作空间按钮未找到');
     wsBtn.click();
     return true;
@@ -495,7 +497,7 @@ async function main() {
     const appPkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
     let ccV = '?'; let sdkV = '?';
     try {
-      const b = JSON.parse(fs.readFileSync('D:/software/Cache/claude-link/command-baseline.json', 'utf8'));
+      const b = JSON.parse(fs.readFileSync(path.join(CACHE_ROOT, 'claude-link', 'command-baseline.json'), 'utf8'));
       ccV = b?.environment?.claudeCodeVersion ?? '?';
       sdkV = b?.environment?.sdkVersion ?? '?';
     } catch { /* baseline 缺失如实显示 ? */ }

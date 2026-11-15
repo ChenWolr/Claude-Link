@@ -127,8 +127,7 @@ async function setWorkingDirViaUI(ws, dir) {
   await evalExpr(ws, `(document.querySelector('.session-link.active') || document.querySelector('.session-link'))?.click(), true`);
   await waitFor('回到聊天页（工具栏出现）', () => evalOk(ws, `!!document.querySelector('.session-toolbar')`), 15);
   await evalExpr(ws, `(() => {
-    const btns = [...document.querySelectorAll('.session-toolbar .ctl__btn')];
-    const wsBtn = btns.find((b) => (b.textContent || '').includes('▾'));
+    const wsBtn = document.querySelector('[data-testid="workspace-trigger"]');
     if (!wsBtn) throw new Error('工作空间按钮未找到');
     wsBtn.click();
     return true;

@@ -9,11 +9,12 @@
 //   ③ shared/types/session.ts：Session 接口含 pinnedAt: number | null；
 //   ④ SESSION_SET_PINNED 通道五处落点一致（ipc.ts 常量 / preload 接口签名 / preload 实现 /
 //      ipc-handlers handler（存在校验 + Date.now()/null + SESSIONS_CHANGED 广播）/ web-bridge 通道表）；
-//   ⑤ AppSidebar.vue 两处会话行模板（全部/项目）各含置顶钮（!batchMode && !session.transient 守卫、
-//      togglePin 调用、:focus-visible 焦点环）与置顶行 pin 标识；SessionsPage.vue 卡片置顶文本钮 + 名称旁 pin 标识；
+//   ⑤ AppSidebar.vue 卡片模板（UI13-P3 收敛为单模板）含置顶钮（!session.transient 守卫 +
+//      togglePin 调用 + ops 焦点环）与置顶卡 pin 标识；SessionsPage.vue 卡片置顶文本钮 + 名称旁 pin 标识；
 //   ⑥ session-store.ts：暂态对象 pinnedAt: null；togglePin action（乐观 patch → IPC → loadSessions
 //      权威重拉 → 失败回滚）；
-//   ⑦ 两个分组纯函数：日期分组置顶组（key 'pinned'，不进日期桶）+ 项目组内置顶优先排序。
+//   ⑦ 两个分组纯函数：日期分组置顶组（key 'pinned'，不进日期桶）+ 项目分组置顶跨组提取
+//      （__pinned__ 组 unshift 最前，UI13-P3 起）。
 //
 // 运行：npx tsx scripts/tdd-session-pin-verify.ts（已登记 scripts/selftest-static-list.txt 尾部）
 
@@ -135,29 +136,32 @@ check('ipc-handlers 注册 SESSION_SET_PINNED handler（regInvokeHandler 形态�
 check('web-bridge WEB_CHANNEL_TABLE 含 setSessionPinned: IPC_CHANNELS.SESSION_SET_PINNED（键集契约由 tdd-web-access-wiring-verify §11.2 双向对等钉死）',
   webBridge.includes('setSessionPinned: IPC_CHANNELS.SESSION_SET_PINNED'));
 
-// ── ⑤ AppSidebar.vue 两处模板 + SessionsPage.vue ──
-console.log('=== 5) 侧栏两处模板 + 会话管理页 ===');
-check('AppSidebar 置顶钮（session-link__pinbtn）两处模板各一个（恰 2 处 class 使用）',
-  countOccurrences(sidebar, 'class="session-link__pinbtn"') === 2,
-  `实际 ${countOccurrences(sidebar, 'class="session-link__pinbtn"')}`);
-check('两处置顶钮均带 !batchMode && !session.transient 守卫（暂态/批量模式隐藏，恰 2 处）',
-  countOccurrences(sidebar, 'v-if="!batchMode && !session.transient"') === 2,
-  `实际 ${countOccurrences(sidebar, 'v-if="!batchMode && !session.transient"')}`);
-check('两处置顶钮均调 store.togglePin(session.id) 且 @click.stop',
-  countOccurrences(sidebar, '@click.stop="store.togglePin(session.id)"') === 2,
-  `实际 ${countOccurrences(sidebar, '@click.stop="store.togglePin(session.id)"')}`);
+// ── ⑤ AppSidebar.vue 卡片模板 + SessionsPage.vue ──
+// UI13-P3 改钉记录：侧栏卡片化（变体 A）后双视图模板收敛为单模板（renderGroups），类名前缀
+// session-link__ → session-card__；置顶钮 batchMode 守卫上移到 ops 容器（v-if="!batchMode"），
+// 钮自身守卫为 v-if="!session.transient"；pin 标识类名 __pinned → __pin-mark；ops 组显隐改为
+// hover/focus-within opacity（键盘可达）。改钉仅随契约结构走，语义不变。
+console.log('=== 5) 侧栏卡片模板 + 会话管理页 ===');
+check('AppSidebar 置顶钮（session-card__pinbtn）收敛后单模板恰 1 处 class 使用',
+  countOccurrences(sidebar, 'class="session-card__pinbtn"') === 1,
+  `实际 ${countOccurrences(sidebar, 'class="session-card__pinbtn"')}`);
+check('置顶钮守卫：自身 !session.transient（暂态隐藏），批量隐藏由 ops 容器 v-if="!batchMode" 承担',
+  countOccurrences(sidebar, 'v-if="!session.transient"') === 1 &&
+  sidebar.indexOf('class="session-card__ops"') > sidebar.indexOf('v-if="!batchMode"'));
+check('置顶钮调 store.togglePin(session.id) 且 @click.stop（恰 1 处）',
+  countOccurrences(sidebar, '@click.stop="store.togglePin(session.id)"') === 1);
 check('置顶钮 title 随态切换（取消置顶/置顶会话）',
-  countOccurrences(sidebar, "session.pinnedAt != null ? '取消置顶' : '置顶会话'") === 2);
-check('置顶行 pin 标识（session-link__pinned，v-if pinnedAt != null）两处模板各一个',
-  countOccurrences(sidebar, 'class="session-link__pinned"') === 2 &&
-  countOccurrences(sidebar, 'session-link__pinned" v-if="session.pinnedAt != null"') === 2,
-  `class=${countOccurrences(sidebar, 'class="session-link__pinned"')} v-if=${countOccurrences(sidebar, 'session-link__pinned" v-if="session.pinnedAt != null"')}`);
-check('pinbtn :focus-visible 焦点环（icon-only 钮可键盘触达）',
-  /\.session-link__pinbtn:focus-visible \{/.test(sidebar));
-check('hover 互斥扩展：时间列隐藏 + 两钮显示（hover 规则同时覆盖 pinbtn 与 delete）',
-  /\.session-link:hover \.session-link__pinbtn[\s\S]{0,120}\.session-link:hover \.session-link__delete|\.session-link:hover \.session-link__delete,[\s\S]{0,40}\.session-link__pinbtn/.test(sidebar));
-check('置顶组头渲染无需改动（复用 sidebar__group v-for dateGroups），全部/项目两视图 v-for 保留',
-  sidebar.includes('v-for="group in dateGroups"') && sidebar.includes('v-for="group in viewGroups"'));
+  countOccurrences(sidebar, "session.pinnedAt != null ? '取消置顶' : '置顶会话'") === 1);
+check('置顶卡 pin 标识（session-card__pin-mark，v-if pinnedAt != null）单模板恰 1 处',
+  countOccurrences(sidebar, 'class="session-card__pin-mark"') === 1 &&
+  countOccurrences(sidebar, 'class="session-card__pin-mark" v-if="session.pinnedAt != null"') === 1,
+  `class=${countOccurrences(sidebar, 'class="session-card__pin-mark"')} v-if=${countOccurrences(sidebar, 'class="session-card__pin-mark" v-if="session.pinnedAt != null"')}`);
+check('ops 组按钮 :focus-visible 焦点环（icon-only 钮可键盘触达）',
+  /\.session-card__ops button:focus-visible \{/.test(sidebar));
+check('ops 组 hover/focus-within 显隐（键盘可达；取代旧行内 pinbtn/delete 互斥显隐）',
+  /\.session-card:hover \.session-card__ops[\s\S]{0,120}\.session-card:focus-within \.session-card__ops/.test(sidebar));
+check('分组头复用 sidebar__group，单模板 v-for="group in renderGroups"（双视图归一）',
+  countOccurrences(sidebar, 'v-for="group in renderGroups"') === 1);
 check('SessionsPage 卡片置顶文本钮（store.togglePin + 取消置顶/置顶 随态文案）',
   sessionsPage.includes('store.togglePin(session.id)') &&
   sessionsPage.includes("session.pinnedAt != null ? '取消置顶' : '置顶'"));
@@ -201,16 +205,20 @@ check('togglePin action 存在（async togglePin(sessionId: string)）',
 }
 
 // ── ⑦ 两个分组纯函数 ──
-console.log('=== 7) 分组纯函数：置顶组 / 组内置顶优先 ===');
+// UI13-P3 改钉记录：项目分组置顶行为从「组内置顶优先（不跨组提取）」改为「置顶跨组提取」
+//（契约 #4：两视图置顶一律浮顶整列表最前）——`__pinned__` 组 unshift 最前 + 组内 continue
+// 跳过置顶 + pinnedAt DESC。日期分组函数未动，原断言保留。
+console.log('=== 7) 分组纯函数：置顶组（日期）/ 跨组提取（项目） ===');
 check('group-sessions-by-date：置顶组 key \'pinned\' + label 置顶 + pinnedAt 过滤（!= null）',
   groupByDate.includes("key: 'pinned'") && groupByDate.includes("pinned: '置顶'") &&
   /pinnedAt != null/.test(groupByDate));
 check('group-sessions-by-date：置顶组内按 pinnedAt DESC 排序',
   /pinnedAt DESC|sort\(\(a, b\) => \(b\.pinnedAt [\s\S]{0,40}- \(a\.pinnedAt/.test(groupByDate));
-check('group-sessions：项目组内不做跨组提取，组内置顶优先（pinned 前置 + pinnedAt DESC + 其余保持传入序）',
-  groupByProject.includes('pinnedAt != null') &&
-  /sort\(\(a, b\) => \(b\.pinnedAt [\s\S]{0,40}- \(a\.pinnedAt/.test(groupByProject) &&
-  groupByProject.includes('[...pinned, ...rest]'));
+check('group-sessions：置顶跨组提取——__pinned__ 组 unshift 最前（仅非空）+ 组内 continue 跳过置顶 + pinnedAt DESC',
+  groupByProject.includes("key: '__pinned__'") &&
+  groupByProject.includes('groups.unshift(') &&
+  groupByProject.includes('if (s.pinnedAt != null) continue;') &&
+  /sort\(\(a, b\) => \(b\.pinnedAt [\s\S]{0,40}- \(a\.pinnedAt/.test(groupByProject));
 
 console.log(`\n[P2 会话置顶契约] 通过 ${pass} / 失败 ${fail}`);
 process.exit(fail === 0 ? 0 : 1);

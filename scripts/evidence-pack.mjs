@@ -1,6 +1,7 @@
 // scripts/evidence-pack.mjs
 // review-v9 §7：正式验收证据包。每次执行发布级验收时，在
-// $CLAUDE_LINK_CACHE_ROOT/claude-link/evidence/<run-id>/ 固化：输入、输出、版本与工作树状态。
+// <CACHE_ROOT>/evidence/<run-id>/ 固化（CACHE_ROOT = CLAUDE_LINK_CACHE_ROOT ?? <系统临时目录>/claude-link-cache）：
+// 输入、输出、版本与工作树状态。
 //
 // 用法：
 //   node scripts/evidence-pack.mjs                        # 默认集：typecheck + selftest:static + 矩阵门禁
@@ -19,7 +20,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const EVIDENCE_ROOT = 'D:/software/Cache/claude-link/evidence';
+// R3（2026-11-11 脱敏收尾，对齐 aceadb3 先例）：缓存根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 未设时落 os.tmpdir() 子目录——去盘符硬编码，读写自身目录语义不变。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const EVIDENCE_ROOT = path.join(CACHE_ROOT, 'evidence');
 const RUN_ID = `run-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}`;
 const OUT_DIR = path.join(EVIDENCE_ROOT, RUN_ID);
 
@@ -59,7 +63,7 @@ async function main() {
     runId: RUN_ID,
     startedAt: new Date().toISOString(),
     commands,
-    fixtureRoot: 'D:/software/Cache/claude-link/e2e',
+    fixtureRoot: path.join(CACHE_ROOT, 'e2e'),
     settingsSources: ['user', 'project', 'local'],
   };
   try {
@@ -96,8 +100,8 @@ async function main() {
 
   // ── 复制 manifest 工件（若存在）──
   const artifacts = [
-    ['D:/software/Cache/claude-link/command-verification.json', 'command-verification.json'],
-    ['D:/software/Cache/claude-link/command-baseline.json', 'baseline.json'],
+    [path.join(CACHE_ROOT, 'claude-link', 'command-verification.json'), 'command-verification.json'],
+    [path.join(CACHE_ROOT, 'claude-link', 'command-baseline.json'), 'baseline.json'],
   ];
   for (const [src, dest] of artifacts) {
     if (fs.existsSync(src)) {
@@ -110,7 +114,7 @@ async function main() {
 
   // baseline 里的版本信息补进 metadata。
   try {
-    const b = JSON.parse(fs.readFileSync('D:/software/Cache/claude-link/command-baseline.json', 'utf8'));
+    const b = JSON.parse(fs.readFileSync(path.join(CACHE_ROOT, 'claude-link', 'command-baseline.json'), 'utf8'));
     metadata.claudeCodeVersion = b?.environment?.claudeCodeVersion;
     if (!metadata.agentSdkVersion) metadata.agentSdkVersion = b?.environment?.sdkVersion;
   } catch { /* 已尽力 */ }

@@ -16,6 +16,7 @@
 // 运行时覆盖由 selftest:native 的 baseline + --require-runtime-match 以真实 supportedCommands 验证。
 import { strict as assert } from 'node:assert';
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 // review-v2 P1-2：baseline 过期/缺失时在门禁内重新采集，版本绑定当前 executable/SDK，不依赖旧缓存时间戳。
 import { collectBaselineToFile } from './claude-code-command-baseline';
@@ -699,9 +700,13 @@ function requireNoUnexplainedGap(): void {
 //      条件是 runtime-only 命令无法分类（unknown/缺失），此时无法生成规格。
 //   ③ origin 交叉校验（交集）：矩阵 expectedOrigin 必须与运行时分类一致（真正的契约），仍硬校验。
 //   ④ 差集报告显式打印，让版本/环境漂移对门禁可见。
-const BASELINE_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 'command-baseline.json');
-const PENDING_MATRIX_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 'command-matrix-pending.json');
-const EFFECTIVE_MATRIX_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 'command-matrix-effective.json');
+// R4（2026-11-11 脱敏收尾，对齐 F16/aceadb3 先例）：缓存根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 缺省 = <系统临时目录>/claude-link-cache——与 claude-code-command-baseline.ts 的 CACHE_ROOT
+// 同源解析，baseline 写 / 本矩阵读保持同位（仅 --require-* 门禁模式消费，静态链不触达）。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const BASELINE_OUT_FILE = path.join(CACHE_ROOT, 'claude-link', 'command-baseline.json');
+const PENDING_MATRIX_OUT_FILE = path.join(CACHE_ROOT, 'claude-link', 'command-matrix-pending.json');
+const EFFECTIVE_MATRIX_OUT_FILE = path.join(CACHE_ROOT, 'claude-link', 'command-matrix-effective.json');
 
 type BaselineJsonCommand = { name?: string; description?: string; argumentHint?: string; aliases?: string[]; origin?: string };
 
@@ -873,7 +878,7 @@ async function requireRuntimeMatch(): Promise<void> {
 // review-v1 §4.1/§4.2：本门禁证明「分类覆盖」（每条命令有明确标签），**不**证明「行为覆盖」
 // （成功/失败/取消/副作用/重开全部验证）。行为覆盖由 --require-behavioral-coverage 单独检查；
 // 此处打印行为覆盖汇总，让 gap 对门禁可见，阻止「全量已验证」的虚假表述。
-const VERIFICATION_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 'command-verification.json');
+const VERIFICATION_OUT_FILE = path.join(CACHE_ROOT, 'claude-link', 'command-verification.json');
 
 type BehavioralDimensions = {
   discovery: boolean;

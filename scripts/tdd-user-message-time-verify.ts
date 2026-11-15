@@ -1,13 +1,17 @@
 // tdd-user-message-time-verify.ts
-// 六问题修 P1「用户消息增加发送时间」（2026-10-22 计划 §2.7，方案 A 气泡内『发送于』脚注，点 S3）
+// 六问题修 P1「用户消息增加发送时间」（2026-10-22 计划 §2.7，点 S3）
+// UI13-P5 改钉（2026-11-14）：「发送于」自气泡内 .bubble__meta 脚注迁至气泡正下方 caption 行
+// 「你 · 发送于 {HH:mm}」——S4 重写为新位置钉（含负向断言防双时间戳/双「你」回退），
+// S1/S2/S3 与 F1–F5 原样保留（formatSentAt 单源与口径未变）。
 // TDD 验证脚本：
 //   S1–S4  源码契约——format-duration.ts 新导出 formatSentAt（ISO 字符串入参、空/NaN 返空串）
 //          且 formatEndedAt 签名未变（TurnTimer/气泡脚注在用，epoch ms 入参不动）；
-//          MessageBubble.vue 引用 formatSentAt 并渲染「发送于」user 门控脚注（复用 .bubble__meta）。
+//          MessageBubble.vue 引用 formatSentAt 并把「你 · 发送于 {{ sentAtText }}」渲染于
+//          气泡正下方 bubble-caption 行（user 门控；气泡内不再含「你」角色头与「发送于」脚注）。
 //   F1–F5  formatSentAt 纯函数用例——空/非法串返空串、当天 HH:mm（两位补零、分钟级无秒）、
 //          跨天 M/d HH:mm（月日不补零）、带 Z 的 UTC ISO 本地化显示；
 //          F5 formatEndedAt 行为回归钉（当天 HH:mm:ss / 跨天 M/d HH:mm，签名改动即红）。
-// 边界自查（计划 §2.4）：createdAt 缺失/非法 → '' → 脚注 v-if 不渲染；跨时区由 normalizeDbTime
+// 边界自查（计划 §2.4）：createdAt 缺失/非法 → '' → caption 行 v-if 不渲染；跨时区由 normalizeDbTime
 // 保证带 Z，函数内 new Date() 本地化；DB 秒级 vs 乐观消息毫秒级 ISO 均可解析。
 // 运行：npx tsx scripts/tdd-user-message-time-verify.ts（已登记 scripts/selftest-static-list.txt）
 import { strict as assert } from 'node:assert';
@@ -55,15 +59,31 @@ check('S3 MessageBubble.vue 引用 formatSentAt（import/computed）', () => {
     'MessageBubble.vue 应有 sentAtText computed',
   );
 });
-check('S4 MessageBubble.vue 渲染「发送于」脚注（user 门控 + 复用 bubble__meta）', () => {
-  assert.ok(bubbleSrc.includes('发送于 {{ sentAtText }}'), '脚注文案应为「发送于 {{ sentAtText }}」');
+check('S4 MessageBubble.vue 渲染「你 · 发送于」caption 行（气泡正下方，user 门控；UI13-P5 新位置钉）', () => {
+  // 新位置：气泡正下方一行「你 · 发送于 {HH:mm}」（bubble-caption），随 user 气泡右对齐。
+  assert.ok(bubbleSrc.includes('你 · 发送于 {{ sentAtText }}'), 'caption 行文案应为「你 · 发送于 {{ sentAtText }}」');
   assert.ok(
     bubbleSrc.includes("message.role === 'user' && sentAtText"),
-    '脚注应以 message.role === \'user\' && sentAtText 门控',
+    'caption 应以 message.role === \'user\' && sentAtText 门控',
   );
-  // 脚注元素复用既有样式类，零新增 CSS
-  assert.ok(/v-if="message\.role === 'user' && sentAtText" class="bubble__meta"/.test(bubbleSrc), '脚注应复用 .bubble__meta');
-  assert.ok(/bubble__meta-clock/.test(bubbleSrc), '脚注应复用 .bubble__meta-clock 图标类');
+  assert.ok(
+    /v-if="message\.role === 'user' && sentAtText" class="bubble-caption"/.test(bubbleSrc),
+    'caption 应挂 bubble-caption 类（气泡下方独立行，非气泡内脚注）',
+  );
+  // 负向断言：user 气泡内部不再渲染「你」角色头与「发送于」脚注（防双时间戳/双「你」回退）。
+  const roleMatch = bubbleSrc.match(/<div v-if="([^"]+)" class="bubble__role">/);
+  assert.ok(
+    roleMatch !== null && roleMatch[1].includes("message.role !== 'user'"),
+    '.bubble__role 角色头必须排除 user（user 气泡内不再渲染「你」角色头）',
+  );
+  assert.ok(
+    !bubbleSrc.includes('<span>发送于 {{ sentAtText }}</span>'),
+    '气泡内「发送于 {{ sentAtText }}」脚注应已删除（时间戳只在气泡下方 caption 行）',
+  );
+  assert.ok(
+    !/v-if="message\.role === 'user' && sentAtText" class="bubble__meta"/.test(bubbleSrc),
+    '旧「user 门控 + bubble__meta」脚注块应已删除',
+  );
 });
 
 console.log('\n=== F1–F5 · formatSentAt 纯函数用例 ===');

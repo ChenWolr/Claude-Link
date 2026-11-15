@@ -736,12 +736,16 @@ function testAttachmentDraftUiContracts(): void {
   const draftStore = readFileSync(new URL('../src/renderer/stores/chat-draft-store.ts', import.meta.url), 'utf8');
   const appVue = readFileSync(new URL('../src/renderer/App.vue', import.meta.url), 'utf8');
 
-  // 1) AttachmentDraftList 出现在 .chat-composer 之前
-  const idxList = chatPage.indexOf('<AttachmentDraftList');
+  // 1) AttachmentDraftList 附件浮岛位置（slate-ui-completion E6/裁决 E-C5 连带改钉：「composer 之前」
+  //    旧位已退场——附件行入岛，composer 开标签之后；TurnTimer 之后/输入行之前的细序链由
+  //    tdd-ui-e-input-area-verify.ts E6-01 ① 钉，此处按 E-input-area-impl.md §6.5 处方补全四索引链）。
   const idxComposer = chatPage.indexOf('class="chat-composer"');
+  const idxList = chatPage.indexOf('<AttachmentDraftList');
+  const idxTimer = chatPage.indexOf('<TurnTimer');
+  const idxInput = chatPage.indexOf('<ChatInput');
   assert.ok(idxList >= 0, 'ChatPage 须挂载 AttachmentDraftList');
   assert.ok(idxComposer >= 0, 'ChatPage 须有 .chat-composer');
-  assert.ok(idxList < idxComposer, '附件草稿列表须在 .chat-composer 之前');
+  assert.ok(idxComposer < idxList && idxTimer < idxList && idxList < idxInput, '附件草稿列表须在浮岛内（TurnTimer 之后、ChatInput 之前）');
 
   // 2) 拖放高亮 class（非常驻边框）
   assert.ok(chatPage.includes("'chat-composer--drag'"), '须有拖放高亮 class');
@@ -1317,6 +1321,7 @@ function testConnectionSurfaceWhitelistContracts(): void {
       'main/modules/connection-tester.ts',
       'main/modules/mcp/mcp-probe.ts',
       'main/modules/sdk-backend.ts',
+      'main/modules/win-tree-kill.ts',
     ],
     'spawn/execFile 文件超出白名单（连接测试/post-turn 探针/打开方式/CLI 检测/MCP stdio 探活五处外不得新增子进程）',
   );

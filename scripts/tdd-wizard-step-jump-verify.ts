@@ -18,7 +18,8 @@
 //  ⑥ .interaction-step 补 button 重置（appearance/padding/background/cursor/font-family），
 //     --active/--done 的 background 覆盖保持其后，视觉与 span 时代一致。
 //
-// 断言 1-6/8/9 属点 1（wizard 导航）；断言 7（confirm 隐藏历史区，计划 §3.1-B2）由点 2 追加。
+// 断言 1-6/8/9 属点 1（wizard 导航）；断言 7 原钉「confirm 隐藏历史区」（计划 §3.1-B2），已由
+// slate-ui 回路点 I6 改钉（2026-11-10 编排器裁定：与 I6 裁决 §5-D7③ confirm 放开互斥）。
 //
 // 运行：npx tsx scripts/tdd-wizard-step-jump-verify.ts
 
@@ -204,15 +205,15 @@ check('6 isQuestionAnswered 含 selectedOptionIds?.length 与 otherText 双判�
   assert.ok(body.includes('otherText'), '缺 Other 文本判据');
   assert.ok(body.includes('trim()'), 'Other 判据须 trim（纯空白不算已答）');
 });
-check("7 历史区 <details> 的 v-if 含 history.length && activeRequest.kind !== 'confirm'（点 2：C-W2）", () => {
+check('7 历史区 <details> 的 v-if 恰为 history.length（I6：confirm 不再隐藏历史区）', () => {
   const detailsIdx = src.indexOf('<details');
   assert.ok(detailsIdx > -1, '缺历史区 <details');
   const tag = src.slice(detailsIdx, src.indexOf('>', detailsIdx));
   assert.ok(tag.includes('class="interaction-history"'), '首个 <details 非交互历史区（切片漂移）');
-  assert.ok(
-    tag.includes("v-if=\"history.length && activeRequest.kind !== 'confirm'\""),
-    "历史区 v-if 须为 history.length && activeRequest.kind !== 'confirm'（confirm 类弹窗隐藏历史区）",
-  );
+  const vif = tag.match(/v-if="([^"]*)"/);
+  assert.ok(vif, '历史区缺 v-if');
+  assert.equal(vif[1], 'history.length', '历史区 v-if 须恰为 history.length（空守卫保留、confirm 排除条件移除后不得放宽）');
+  assert.ok(!tag.includes("kind !== 'confirm'"), 'confirm 排除条件残留（I6 裁决 §5-D7③：confirm 型弹窗不再隐藏历史区）');
 });
 check('8 draftCache 类型与 watch 源/写入/恢复均含 wizardIndex', () => {
   assert.match(

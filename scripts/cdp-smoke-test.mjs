@@ -16,6 +16,7 @@
 // review-v4 §5.2 扩展：§6.3 ⑤⑥⑦ 增加真实动态 commands_changed E2E 断言（add/remove/isolation）。
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
@@ -94,6 +95,16 @@ function writeSkill(cwd, skillName, description) {
 }
 function removeSkill(cwd, skillName) {
   fs.rmSync(path.join(cwd, '.claude', 'skills', skillName), { recursive: true, force: true });
+}
+// F17（R3 2026-11-11）：Windows 下 Chrome/Electron profile 句柄延迟释放会让 rmSync 静默失败留下
+// 残留目录——失败后等 250ms 重试一次；仍失败则放弃（进程退出前 best-effort 语义不变）。
+async function rmdirBestEffort(dir) {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    await new Promise((r) => setTimeout(r, 250));
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* 尽力而为：仍被占用则放弃 */ }
+  }
 }
 async function waitForProbe(ws, sid, timeoutS = 30) {
   for (let i = 0; i < timeoutS; i++) {
@@ -226,7 +237,7 @@ async function main() {
   // ── review-v4 §5.2: 动态 commands_changed 真实链路 E2E ──
   console.log('\n  --- §6.3 ⑤⑥⑦ 动态 commands_changed 真实 E2E（add/remove/isolation）---');
 
-  const DYN_CWD = path.join('D:/software/Cache/temp', `cdp-dynamic-${Date.now()}`).replace(/\\/g, '/');
+  const DYN_CWD = path.join(os.tmpdir(), `cdp-dynamic-${Date.now()}`).replace(/\\/g, '/');
   const SKILL_A = 'test-cdp-skill-a';
   const SKILL_B = 'test-cdp-skill-b';
   let dynSid = null;
@@ -307,32 +318,38 @@ async function main() {
   await checkAsyncSkip('§6.3 ⑦ 会话隔离：不同 cwd 的会话命令集不串', async () => {
     if (!dynSid) throw new SkipError('⑤ 未成功创建动态测试会话');
 
-    const cwd2 = path.join('D:/software/Cache/temp', `cdp-iso-${Date.now()}`).replace(/\\/g, '/');
-    writeSkill(cwd2, 'test-cdp-iso-skill', 'Isolation test skill');
+    const cwd2 = path.join(os.tmpdir(), `cdp-iso-${Date.now()}`).replace(/\\/g, '/');
+    let session2 = null;
+    try {
+      writeSkill(cwd2, 'test-cdp-iso-skill', 'Isolation test skill');
 
-    const session2 = await evalExpr(ws, `window.claudeLink.createSession('cdp-iso-dyn')`);
-    if (!session2?.id) throw new Error('第二个会话创建失败');
-    await evalExpr(ws, `window.claudeLink.updateSession(${JSON.stringify(session2.id)}, ${JSON.stringify({ workingDir: cwd2 })})`);
+      session2 = await evalExpr(ws, `window.claudeLink.createSession('cdp-iso-dyn')`);
+      if (!session2?.id) throw new Error('第二个会话创建失败');
+      await evalExpr(ws, `window.claudeLink.updateSession(${JSON.stringify(session2.id)}, ${JSON.stringify({ workingDir: cwd2 })})`);
 
-    const snap2 = await waitForProbe(ws, session2.id);
-    if (!snap2) throw new SkipError('第二个会话探测未完成');
+      const snap2 = await waitForProbe(ws, session2.id);
+      if (!snap2) throw new SkipError('第二个会话探测未完成');
 
-    const names2 = (snap2.commands ?? []).map((c) => c.name);
-    if (!names2.includes('test-cdp-iso-skill')) throw new SkipError(`session 2 未发现 test-cdp-iso-skill`);
-    if (names2.includes(SKILL_A) || names2.includes(SKILL_B)) {
-      throw new Error(`session 2 不应含 ${SKILL_A}/${SKILL_B}（会话隔离失败）`);
+      const names2 = (snap2.commands ?? []).map((c) => c.name);
+      if (!names2.includes('test-cdp-iso-skill')) throw new SkipError(`session 2 未发现 test-cdp-iso-skill`);
+      if (names2.includes(SKILL_A) || names2.includes(SKILL_B)) {
+        throw new Error(`session 2 不应含 ${SKILL_A}/${SKILL_B}（会话隔离失败）`);
+      }
+
+      // session 1 should NOT have test-cdp-iso-skill
+      const snap1 = await evalExpr(ws, `window.claudeLink.getSessionCommands(${JSON.stringify(dynSid)})`);
+      const names1 = (snap1.commands ?? []).map((c) => c.name);
+      if (names1.includes('test-cdp-iso-skill')) {
+        throw new Error(`session 1 不应含 test-cdp-iso-skill（会话隔离失败）`);
+      }
+
+      console.log(`  ℹ session1=${names1.length}命令 session2=${names2.length}命令，互不交叉`);
+    } finally {
+      // 善后（含 SKIP/Error 路径）：测试会话与临时 cwd 必清——SKIP 提前 return 会跳过尾部清理，
+      // 残留空会话会累积挤占 web-access B4 的候选窗（首 10 个非激活会话全是空会话即误报失败）。
+      if (session2?.id) { try { await evalExpr(ws, `window.claudeLink.deleteSession(${JSON.stringify(session2.id)})`); } catch {} }
+      await rmdirBestEffort(cwd2);
     }
-
-    // session 1 should NOT have test-cdp-iso-skill
-    const snap1 = await evalExpr(ws, `window.claudeLink.getSessionCommands(${JSON.stringify(dynSid)})`);
-    const names1 = (snap1.commands ?? []).map((c) => c.name);
-    if (names1.includes('test-cdp-iso-skill')) {
-      throw new Error(`session 1 不应含 test-cdp-iso-skill（会话隔离失败）`);
-    }
-
-    try { await evalExpr(ws, `window.claudeLink.deleteSession(${JSON.stringify(session2.id)})`); } catch {}
-    try { fs.rmSync(cwd2, { recursive: true, force: true }); } catch {}
-    console.log(`  ℹ session1=${names1.length}命令 session2=${names2.length}命令，互不交叉`);
   });
 
   // Cleanup dynamic test
@@ -340,7 +357,7 @@ async function main() {
   if (dynSid) {
     try { await evalExpr(ws, `window.claudeLink.deleteSession(${JSON.stringify(dynSid)})`); } catch {}
   }
-  try { fs.rmSync(DYN_CWD, { recursive: true, force: true }); } catch {}
+  await rmdirBestEffort(DYN_CWD);
 
   // Cleanup
   if (sid) {

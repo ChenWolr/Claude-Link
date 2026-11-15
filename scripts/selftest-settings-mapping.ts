@@ -586,7 +586,9 @@ console.log('\n=== 30) 三问题修复：会话切换隔离 / 行间距 / 执行
   // 问题 2：行间距
   check('MessageBubble line-height:1.5', mb.includes('line-height: 1.5') || mb.includes('line-height:1.5'));
   check('MessageBubble p margin 0.25rem', mb.includes('0 0 0.25rem'));
-  check('StreamRenderer line-height:1.5', sr.includes('line-height: 1.5') || sr.includes('line-height:1.5'));
+  // UI13 批次 C2③ 连带改钉：.stream 行高随 AI 卡统一为 1.8（StreamRenderer.vue:31-35 源注释点名本钉），
+  // MessageBubble/ThinkingBlock 仍 1.5 不变。
+  check('StreamRenderer line-height:1.8', sr.includes('line-height: 1.8') || sr.includes('line-height:1.8'));
   check('ThinkingBlock line-height:1.5', tb.includes('line-height: 1.5') || tb.includes('line-height:1.5'));
   check('MessageList gap:0.25rem', ml.includes('gap: 0.25rem') || ml.includes('gap:0.25rem'));
 
@@ -837,7 +839,8 @@ console.log('\n=== 36) 实时计时器 + 子 Agent 折叠（问题 1/2/6/7）===
   check('markRunning 清 toolProgress 仅限活动会话（防后台队列跨会话误清）', ss.includes('sessionId === this.activeSession?.id'));
   check('TurnTimer 实时计时器（turn-timer + formatDurationMs + useNow）', tt.includes('turn-timer') && tt.includes('formatDurationMs') && tt.includes('useNow'));
   // hb10-TM-04 最小同步：门控放宽 durationMs||endedAt（(cost,NULL,ended_at) 行可见；语义=费用仍不参与门控）。
-  check('MessageBubble 脚注只由 duration/endedAt 门控（B3：费用不再展示）', mb.includes('v-if="message.durationMs || message.endedAt" class="bubble__meta"'));
+  // C6 同步（slate-ui-completion-1108-1428，与 b3 ⑦/hb10 TM-04 同款单行同步）：中断分支在前后正常块改 v-else-if。
+  check('MessageBubble 脚注只由 duration/endedAt 门控（B3：费用不再展示；C6 中断分支在前、正常块改 v-else-if）', mb.includes('v-else-if="message.durationMs || message.endedAt" class="bubble__meta"'));
   check('use-chat 客户端时长兜底（clientMs）', uc.includes('clientMs'));
   check('subagent-groups 含 startMs / frozenSeconds', sg.includes('startMs') && sg.includes('frozenSeconds'));
   check('TaskQueuePanel 实时计时 + 运行中可折叠', tqp.includes('subAgentDurationText') && tqp.includes('collapsedGroups'));
@@ -1295,10 +1298,12 @@ console.log('\n=== 43) 浅色主题系统契约（openhanako 真实浅色色板�
   // —— 色板数量与结构 ——
   // 2026-09-27 侧栏 Quiet Console 重设计：追加 quiet-console（浅）+ terminal-pro（深）→ 11 套，
   // 契约随数据最小同步（5db45f7 先例，与 constants.ts 色板同 commit）。
-  check('色板共 11 套（9 套浅色 + terminal-pro 深色）', THEME_PALETTES.length === 11, `实际 ${THEME_PALETTES.length}`);
+  // 墨石 Slate（方案C UI 补全 A1，2026-11-07 裁决；UI13 批次验收基线 277 全绿含本钉形态）连带改钉：
+  // 追加第 12 套 inkstone（浅）、应用默认、居数组首位（export-image-manager 未知 id 兜底取 [0] 一致）。
+  check('色板共 12 套（11 套浅色 + terminal-pro 深色）', THEME_PALETTES.length === 12, `实际 ${THEME_PALETTES.length}`);
   check('除 terminal-pro 外全部 isDark=false', THEME_PALETTES.every((p) => (p.id === 'terminal-pro' ? p.isDark === true : p.isDark === false)));
-  check('默认色板 id 为 warm-paper', DEFAULT_THEME_PALETTE_ID === 'warm-paper', `实际 ${DEFAULT_THEME_PALETTE_ID}`);
-  check('第一套色板 id 为 warm-paper', THEME_PALETTES[0]?.id === 'warm-paper');
+  check('默认色板 id 为 inkstone', DEFAULT_THEME_PALETTE_ID === 'inkstone', `实际 ${DEFAULT_THEME_PALETTE_ID}`);
+  check('第一套色板 id 为 inkstone（=默认，export-image-manager 未知 id 兜底取 [0] 一致）', THEME_PALETTES[0]?.id === 'inkstone');
   check('无旧深色 default-dark 残留', !THEME_PALETTES.some((p) => p.id === 'default-dark'));
 
   // —— onAccent 新字段 ——
@@ -2093,10 +2098,13 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
   check('SessionEntry 挂 streamingPrompt 句柄 + markEntryAborting settle',
     sdkBackend.includes('streamingPrompt: StreamingPromptHandle | null;') &&
     /markEntryAborting[\s\S]{0,200}?entry\.streamingPrompt\?\.settle\(\);/.test(sdkBackend));
-  check('两段式 killProcess：watchdog/upstream_fatal/queue 先 interrupt、有界 5000ms、记账延迟到优雅窗口后',
+  // UI13-P7 连带改钉：user 中断改两段式优雅窗（interrupt ≤1500ms，watchdog/upstream_fatal/queue 仍 5000ms），
+  // 旧字面 `Date.now() + 5000` 被 graceMs 形态取代——断言语义升级为「有界优雅窗」双常量钉。
+  check('两段式 killProcess：watchdog/upstream_fatal/queue 先 interrupt、有界优雅窗（user 1500ms / 其余 5000ms）、记账延迟到优雅窗口后',
     sdkBackend.includes("reason === 'watchdog' || reason === 'upstream_fatal' || reason === 'queue'") &&
     /query\.interrupt\(\)[\s\S]{0,900}?finishKill\(\)/.test(sdkBackend) &&
-    /const deadline = Date\.now\(\) \+ 5000;/.test(sdkBackend) &&
+    /const graceMs = reason === 'user' \? 1500 : 5000;/.test(sdkBackend) &&
+    /const deadline = Date\.now\(\) \+ graceMs;/.test(sdkBackend) &&
     sdkBackend.includes('const finishKill = () => {'));
   check('权限中途切换：CHAT_SET_PERMISSION_MODE 通道 + 主进程解析有效档',
     ipcTypes.includes("CHAT_SET_PERMISSION_MODE: 'chat:setPermissionMode'") &&

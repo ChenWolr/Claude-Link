@@ -16,19 +16,20 @@
 // 运行：npx tsx scripts/tdd-skill-overrides-verify.ts（不启动 Electron；better-sqlite3 为
 // Electron ABI、当前 node 不匹配时自动以 ELECTRON_RUN_AS_NODE 重spawn 本脚本——n2 先例）。
 // ⑦ session-repo 往返用 electron-stub（house pattern：Module._load 把 'electron' 解析到
-// scripts/electron-stub.cjs，app.getPath 由 CLAUDE_LINK_TEST_USERDATA 指向 Cache 临时目录），
+// scripts/electron-stub.cjs，app.getPath 由 CLAUDE_LINK_TEST_USERDATA 指向系统临时目录），
 // 真实 connection/session-repo 在临时库上跑，绝不触碰真实用户库。
 // 版本检查用 schema_version 表（项目真实版本机制；migrations.ts 不使用 PRAGMA user_version，
 // n2 的 versionOf 手法即读该表）。
 
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
 const repoRoot = path.resolve(__dirname, '..');
 
 // —— electron-stub 安装（tdd-bugfix-p1-01/n4 先例）：必须在 require 任何主进程模块之前 ——
-const stubUserDataDir = path.join('D:\\software\\Cache', 'claude-link', 'skill-verify', `tmp-userdata-${process.pid}-${Date.now()}`);
+const stubUserDataDir = path.join(os.tmpdir(), 'claude-link', 'skill-verify', `tmp-userdata-${process.pid}-${Date.now()}`);
 fs.mkdirSync(stubUserDataDir, { recursive: true });
 process.env.CLAUDE_LINK_TEST_USERDATA = stubUserDataDir;
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -527,7 +528,7 @@ console.log('\n=== S2 review P2 修复源形契约（load() 现值过滤 / 回�
 
 // ── 冷启动自愈正式化源形契约（组3 风格，㉒㉓㉔）─────────────────────────────
 // 2026-09-15 生产缺陷「冷启动零交互直进 Skill 管理页永不加载」（根因报告：
-// D:\software\Cache\claude-link\skill-verify\rootcause-coldstart\rootcause-report.md）：
+// <系统临时目录>/claude-link/skill-verify/rootcause-coldstart/rootcause-report.md）：
 // COMMANDS_GLOBAL_CHANGED 一次性推送早于 App.vue 订阅注册即永久丢失，而 load() 全部调用点
 // 交互驱动、Skill 页纯被动——修复 = ensureGlobalSnapshot 幂等按需拉取（复用 COMMANDS_GET
 // 哨兵只读分流，零新增 IPC）+ Skill tab 激活接线 + App.vue 订阅就绪后补拉。

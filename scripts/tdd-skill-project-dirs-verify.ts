@@ -377,10 +377,12 @@ try {
 
 // ⑨ ipc-handlers.ts：SKILL_PROJECT_DIRS_GET 注册 + 三源形态（R-1 起 await collectSkillProjectDirs）
 // 窗口 700→800：A10（D07-F2）homedir→effectiveUserHome 修复带 3 行机理注释（5db45f7 最小同步，断言语义不变）。
+// 窗口 800→1400：UI13-P8 handler 内联 recent ∪ sessionDirs 并集块（listWorkingDirCounts 后移至
+// ~1225），断言语义不变 + 补 listRecentWorkingDirs 会话目录源断言（01-P8 契约钉冲突表）。
 {
   const src = readRel('src/main/ipc-handlers.ts');
   const at = src.indexOf('regInvokeHandler(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
-  const region = at >= 0 ? src.slice(at, at + 800) : '';
+  const region = at >= 0 ? src.slice(at, at + 1400) : '';
   const sub: string[] = [];
   if (at < 0) sub.push('缺 SKILL_PROJECT_DIRS_GET handler 注册');
   else {
@@ -388,8 +390,10 @@ try {
     if (!region.includes('listRecentWorkspaces()')) sub.push('缺 listRecentWorkspaces() 来源');
     if (!region.includes('workingDirectory')) sub.push('缺 config.workingDirectory 来源');
     if (!region.includes('listWorkingDirCounts()')) sub.push('缺 listWorkingDirCounts() 来源');
+    if (!region.includes('listRecentWorkingDirs(20)')) sub.push('缺 listRecentWorkingDirs(20) 会话 distinct 工作目录源（UI13-P8 并集）');
+    if (!region.includes('slice(0, dirCap)')) sub.push('缺 slice(0, dirCap) 总量封顶（UI13-P8 ≤20）');
   }
-  check('⑨', 'ipc-handlers.ts：SKILL_PROJECT_DIRS_GET 注册在位，await 三源齐（recent/default/counts）', sub.length === 0, sub.join('; '));
+  check('⑨', 'ipc-handlers.ts：SKILL_PROJECT_DIRS_GET 注册在位，await 三源齐（recent/default/counts）+ 会话目录源并集封顶', sub.length === 0, sub.join('; '));
 }
 
 // ⑩ session-repo.ts：listWorkingDirCounts 只读函数 + GROUP BY 形态
@@ -448,7 +452,9 @@ console.log('\n=== 组3 渲染层形态钉（ConfigPage.vue 双栏 master-detail
   if (footAt < 0) sub.push('缺 skill-md-rail__foot 底注');
   else {
     if (!foot.includes('不再显示')) sub.push('rail foot 应含「已删除的目录不再显示」存在性语义文案');
-    if (!foot.includes('最近工作区')) sub.push('rail foot 应说明目录来源（最近工作区并集与默认工作区）');
+    // UI13-P8 口径改述：目录来源 = 最近工作区 ∪ 会话工作目录 ∪ 默认工作区。
+    if (!foot.includes('最近工作区')) sub.push('rail foot 应说明目录来源（最近工作区）');
+    if (!foot.includes('会话工作目录')) sub.push('rail foot 应说明会话工作目录来源（UI13-P8 三源口径）');
   }
   if (!/skill-md-item__meta[\s\S]{0,300}?会话/.test(src) && !src.includes('dir.sessionCount')) sub.push('目录行 meta 应含会话计数（sessionCount）');
   if (!src.includes('共 {{')) sub.push('目录行 meta 应含「共 N」计数形态');

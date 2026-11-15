@@ -321,7 +321,7 @@ await check('C1 title 常驻「长按 1 秒中断」', () => {
   assert.ok(toolbarSrc!.includes('title="长按 1 秒中断"'), '中断按钮缺常驻 title');
 });
 
-await check('C2 指针五件套 + 键盘两件接入；pointerdown 带 .prevent 吃原生 click', () => {
+await check('C2 指针五件套 + 键盘两件接入；pointerdown 带 .prevent 抑制默认行为，click 仍派发（阻冒泡由调用方 @click.stop 承担）', () => {
   for (const binding of [
     '@pointerdown.prevent="onAbortPointerDown"',
     '@pointermove="onAbortPointerMove"',

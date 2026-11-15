@@ -1239,12 +1239,15 @@ void (async () => {
     assert.ok(src.includes('runGlobalCommandProbe'), 'app.whenReady 应触发全局探测');
     assert.ok(src.includes('cancelGlobalCommandProbe'), '退出时应 cancelGlobalCommandProbe 防孤儿进程');
   });
-  // 菜单精简：仅 /命令名
-  check('菜单精简：ChatInput 仅 /命令名，无 desc/hint-arg', () => {
+  // 菜单：仅 /命令名（无 hint-arg）；E4 渲染 muted desc。
+  // 钉反转恢复（slate-ui-completion-1108-1428 裁决 E-C2「历史钉反转采纳」+ impl 报告 E4「反转钉同步」，
+  // 同回路口径见 tdd-ui-e-input-area-verify.ts §E4-01：命令 desc muted 小字渲染在命令名下；
+  // 历史精简钉的反转曾随该回路落盘并全绿，后被本脚本他点改钉覆盖丢失，此处按原裁决恢复反转语义）。
+  check('菜单：仅 /命令名（无 hint-arg）；E4 渲染 muted desc（UI 补全行为规范）', () => {
     const src = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'ChatInput.vue'), 'utf8');
-    assert.ok(!src.includes('slash-menu__desc'), '不应再有 slash-menu__desc');
-    assert.ok(!src.includes('slash-menu__hint-arg'), '不应再有 slash-menu__hint-arg');
+    assert.ok(!src.includes('slash-menu__hint-arg'), '不应有 slash-menu__hint-arg');
     assert.ok(src.includes('/{{ cmd.name }}'), '菜单应显示 /命令名');
+    assert.ok(src.includes('slash-menu__desc'), 'E4：命令 desc 以 muted 小字渲染（slash-menu__desc 在场）');
   });
 
   console.log('=== 20) Review-v5 N7：globalFallback 不被 loading/degraded 清空 ===');
@@ -1457,8 +1460,13 @@ void (async () => {
     const group = readFileSync(path.join('src', 'renderer', 'utils', 'group-messages.ts'), 'utf8');
     assert.ok(group.includes("'system:init_write_skipped'"), 'group-messages 应让 init_write_skipped 独立展示（不进 fold）');
     // MessageBubble 对 system role 隐藏 bubble__role（避免「Claude」误导居中横幅）。
+    // UI13-P5 改钉（2026-11-14）：user「你」角色头移至气泡下方 caption 行，v-if 升格为同时
+    // 排除 system 与 user——system 隐藏语义不变，user 排除是 UI13-P5 新增契约（比原钉更严）。
     const bubble = readFileSync(path.join('src', 'renderer', 'components', 'chat', 'MessageBubble.vue'), 'utf8');
-    assert.ok(/v-if="message\.role !== 'system'"/.test(bubble), 'MessageBubble 对 system role 应隐藏 bubble__role');
+    assert.ok(
+      /v-if="message\.role !== 'system' && message\.role !== 'user'"/.test(bubble),
+      'MessageBubble 对 system/user role 应隐藏 bubble__role（UI13-P5：user 角色头已移至气泡下方 caption）',
+    );
   });
 
   // v3-P1（review-v3 P1）：plan/权限拒绝导致 /init 未写入（is_error=true）时也须发 init_write_skipped。

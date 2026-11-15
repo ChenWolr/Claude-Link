@@ -69,7 +69,8 @@
 //     promise 链收尾调用一次。
 //   K 单服务器导出 JSON 组（2026-10-19 mcp-settings-plan-a 点2 新增）：src/shared/mcp-json.ts
 //     buildSingleServerExportJson（表单⇄JSON 双模式「表单 → JSON」方向的 shared 纯函数）——
-//     {"<name>":{…}} 单服务器形态、2 空格缩进+尾换行、字段序固定、空 args/env/headers 省略键、
+//     UI13-P10 起恒为 {"mcpServers":{"<name>":{…}}} 可导入包裹形（与导入格式同构）、root 0 /
+//     mcpServers 2 / name 4 / 字段 6 缩进+尾换行、字段序固定、空 args/env/headers 省略键、
 //     description 不导出、数组/嵌套对象单行紧凑（K1 字面比对为准绳）；K5 哨兵经主进程
 //     parseMcpServersJson 回读往返一致（JSON 模式可回填契约）；K6（round-002 F6）description
 //     防漏钉——输入带 description:"x" 输出也不出现该键（沿 J6 先例，写断言即 PASS）。
@@ -1729,19 +1730,22 @@ console.log('\n=== J. timeoutMs 全链组（sanitize 透传 / 导出 / probe 超
 }
 
 // ── K. 单服务器导出 JSON 组（2026-10-19 mcp-settings-plan-a 点2：src/shared/mcp-json.ts）──
-// 表单⇄JSON 双模式的「表单 → JSON」方向供料：单服务器导出形态 {"<name>":{…}}、2 空格缩进 +
-// 尾换行、字段序固定（type,command,args,env,url,headers,timeoutMs）、空 args/env/headers 省略键、
+// 表单⇄JSON 双模式的「表单 → JSON」方向供料：单服务器导出形态（UI13-P10 起恒为可导入包裹形
+// {"mcpServers":{"<name>":{…}}}，与导入格式/作用域级导出同构；原「裸 map 默认 + 保留名包裹」
+// 双形态随 P10 合流裁撤）、root 0 / mcpServers 2 / name 4 / 字段 6 缩进 + 尾换行、字段序固定
+//（type,command,args,env,url,headers,timeoutMs）、空 args/env/headers 省略键、
 // description 一律不导出、数组/嵌套对象（env/headers）单行紧凑（K1 字面比对为准绳）。
 // K5 哨兵序列化后经主进程 parseMcpServersJson（selftest 直接 import，既有先例）回读往返一致
 // ——JSON 模式可回填的解析侧契约（点 5 反方向经 mcp:parseMcpJson 通道走同一函数）。
 
 console.log('\n=== K. 单服务器导出 JSON 组（buildSingleServerExportJson） ===');
 
-// K1 stdio 全字段字面比对（准绳）：顶层 {"context7":{…}}、2 空格缩进、字段序
+// K1 stdio 全字段字面比对（准绳；UI13-P10 改钉：恒包裹形）：顶层 {"mcpServers":{"context7":{…}}}、
+// 缩进层级 root 0 / mcpServers 2 / name 4 / 字段 6、字段序
 // type→command→args→env→timeoutMs、args/env 单行紧凑（", " 分隔、括号内带空格）、末尾换行。
 {
   const sub: string[] = [];
-  const K1_EXPECTED = '{\n  "context7": {\n    "type": "stdio",\n    "command": "npx",\n    "args": ["-y", "@upstash/context7"],\n    "env": { "K": "••••••••" },\n    "timeoutMs": 30000\n  }\n}\n';
+  const K1_EXPECTED = '{\n  "mcpServers": {\n    "context7": {\n      "type": "stdio",\n      "command": "npx",\n      "args": ["-y", "@upstash/context7"],\n      "env": { "K": "••••••••" },\n      "timeoutMs": 30000\n    }\n  }\n}\n';
   const r = call(() => buildSingleServerExportJson({
     name: 'context7',
     transport: 'stdio',
@@ -1755,7 +1759,8 @@ console.log('\n=== K. 单服务器导出 JSON 组（buildSingleServerExportJson�
   check('K1', 'stdio 全字段：输出恰为字面形态（2 空格缩进+尾换行+字段序固定+args/env 单行紧凑）', sub.length === 0, sub.join('; '));
 }
 
-// K2 http 形：含 url/headers 键；无 command/args/env 键（字段互斥；结构断言走 JSON.parse）。
+// K2 http 形：含 url/headers 键；无 command/args/env 键（字段互斥；结构断言走 JSON.parse；
+// UI13-P10 改钉：条目在 mcpServers 包裹层下取）。
 {
   const sub: string[] = [];
   const r = call(() => buildSingleServerExportJson({
@@ -1767,12 +1772,12 @@ console.log('\n=== K. 单服务器导出 JSON 组（buildSingleServerExportJson�
   }));
   if (!r.ok) sub.push(throwDetail(r));
   else {
-    let parsed: Record<string, Record<string, unknown>> | null = null;
-    try { parsed = JSON.parse(r.value) as Record<string, Record<string, unknown>>; }
+    let parsed: { mcpServers?: Record<string, Record<string, unknown>> } | null = null;
+    try { parsed = JSON.parse(r.value) as { mcpServers?: Record<string, Record<string, unknown>> }; }
     catch (e) { sub.push(`输出应可 JSON.parse：${errMsg(e)}`); }
     if (parsed) {
-      const entry = parsed['edge-http'];
-      if (!entry) sub.push(`顶层键应为 "edge-http"：${JSON.stringify(r.value.slice(0, 80))}`);
+      const entry = parsed.mcpServers?.['edge-http'];
+      if (!entry) sub.push(`mcpServers 层下应有键 "edge-http"：${JSON.stringify(r.value.slice(0, 80))}`);
       else {
         if (entry.type !== 'http') sub.push(`type 应为 "http"：${canon(entry)}`);
         if (entry.url !== 'https://e/mcp') sub.push(`http 形应含 url 键：${canon(entry)}`);
@@ -1786,14 +1791,15 @@ console.log('\n=== K. 单服务器导出 JSON 组（buildSingleServerExportJson�
   check('K2', 'http 形：输出含 url/headers 键，无 command/args/env 键（transport 字段互斥）', sub.length === 0, sub.join('; '));
 }
 
-// K3 空对象省略：args:[] / env:{} / headers:{} → 对应键不出现（其余字段完好）。
+// K3 空对象省略：args:[] / env:{} / headers:{} → 对应键不出现（其余字段完好；UI13-P10 改钉：
+// 条目在 mcpServers 包裹层下取）。
 {
   const sub: string[] = [];
   const r1 = call(() => buildSingleServerExportJson({ name: 'k3-stdio', transport: 'stdio', command: 'npx', args: [], env: {} }));
   if (!r1.ok) sub.push(`stdio 空参数：${throwDetail(r1)}`);
   else {
-    const entry = (JSON.parse(r1.value) as Record<string, Record<string, unknown>>)['k3-stdio'];
-    if (!entry) sub.push(`stdio 空参数：顶层键缺失：${JSON.stringify(r1.value.slice(0, 80))}`);
+    const entry = (JSON.parse(r1.value) as { mcpServers?: Record<string, Record<string, unknown>> }).mcpServers?.['k3-stdio'];
+    if (!entry) sub.push(`stdio 空参数：mcpServers 层下键缺失：${JSON.stringify(r1.value.slice(0, 80))}`);
     else {
       for (const absent of ['args', 'env', 'timeoutMs']) {
         if (absent in entry) sub.push(`空 ${absent} → 键不应出现：${canon(entry)}`);
@@ -1804,29 +1810,30 @@ console.log('\n=== K. 单服务器导出 JSON 组（buildSingleServerExportJson�
   const r2 = call(() => buildSingleServerExportJson({ name: 'k3-http', transport: 'http', url: 'https://e/mcp', headers: {} }));
   if (!r2.ok) sub.push(`headers 为 {}：${throwDetail(r2)}`);
   else {
-    const entry = (JSON.parse(r2.value) as Record<string, Record<string, unknown>>)['k3-http'];
-    if (!entry) sub.push('headers 为 {}：顶层键缺失');
+    const entry = (JSON.parse(r2.value) as { mcpServers?: Record<string, Record<string, unknown>> }).mcpServers?.['k3-http'];
+    if (!entry) sub.push('headers 为 {}：mcpServers 层下键缺失');
     else if ('headers' in entry) sub.push(`headers 为 {} → 键不应出现：${canon(entry)}`);
     else if (entry.url !== 'https://e/mcp') sub.push(`headers 为 {}：url 应完好：${canon(entry)}`);
   }
   check('K3', '空对象省略：args:[]/env:{}/headers:{} → 对应键不出现（其余字段完好）', sub.length === 0, sub.join('; '));
 }
 
-// K4 name 含特殊字符（'a-b_2'）原样包裹为顶层键（单键 map；JSON.stringify 转义保证键合法）。
+// K4 name 含特殊字符（'a-b_2'）原样为 mcpServers 层下单键（UI13-P10 改钉：恒包裹形，条目在
+// mcpServers 层下；JSON.stringify 转义保证键合法）。
 {
   const sub: string[] = [];
   const r = call(() => buildSingleServerExportJson({ name: 'a-b_2', transport: 'stdio', command: 'node' }));
   if (!r.ok) sub.push(throwDetail(r));
   else {
-    if (!r.value.startsWith('{\n  "a-b_2": {\n')) sub.push(`name 应原样包裹为顶层键：${JSON.stringify(r.value.slice(0, 40))}`);
-    let parsed: Record<string, unknown> | null = null;
-    try { parsed = JSON.parse(r.value) as Record<string, unknown>; }
+    if (!r.value.startsWith('{\n  "mcpServers": {\n    "a-b_2": {\n')) sub.push(`name 应原样为 mcpServers 层下单键：${JSON.stringify(r.value.slice(0, 60))}`);
+    let parsed: { mcpServers?: Record<string, unknown> } | null = null;
+    try { parsed = JSON.parse(r.value) as { mcpServers?: Record<string, unknown> }; }
     catch (e) { sub.push(`输出应可 JSON.parse：${errMsg(e)}`); }
-    if (parsed && !eq(Object.keys(parsed), ['a-b_2'])) sub.push(`顶层应恰一个键 a-b_2：${canon(Object.keys(parsed))}`);
-    const entry = (parsed?.['a-b_2'] ?? null) as Record<string, unknown> | null;
+    if (parsed && !eq(Object.keys(parsed.mcpServers ?? {}), ['a-b_2'])) sub.push(`mcpServers 层应恰一个键 a-b_2：${canon(Object.keys(parsed.mcpServers ?? {}))}`);
+    const entry = (parsed?.mcpServers?.['a-b_2'] ?? null) as Record<string, unknown> | null;
     if (!entry || entry.command !== 'node' || entry.type !== 'stdio') sub.push('条目字段应完好（type/command）');
   }
-  check('K4', 'name 含特殊字符（a-b_2）原样包裹为顶层键（单键 map）', sub.length === 0, sub.join('; '));
+  check('K4', 'name 含特殊字符（a-b_2）原样为 mcpServers 层下单键（包裹形单键 map）', sub.length === 0, sub.join('; '));
 }
 
 // K5 哨兵原样往返（JSON 模式可回填契约）：env 值 •••••••• 序列化输出后经主进程
@@ -1862,30 +1869,34 @@ console.log('\n=== K. 单服务器导出 JSON 组（buildSingleServerExportJson�
   if (!r.ok) sub.push(throwDetail(r));
   else {
     if (r.value.includes('description')) sub.push(`输出文本不得含 description 键：${JSON.stringify(r.value)}`);
-    let parsed: Record<string, unknown> | null = null;
-    try { parsed = JSON.parse(r.value) as Record<string, unknown>; }
+    let parsed: { mcpServers?: Record<string, unknown> } | null = null;
+    try { parsed = JSON.parse(r.value) as { mcpServers?: Record<string, unknown> }; }
     catch (e) { sub.push(`输出应可 JSON.parse：${errMsg(e)}`); }
-    const entry = (parsed?.['k6-desc'] ?? null) as Record<string, unknown> | null;
-    if (!entry) sub.push('顶层键 k6-desc 缺失');
+    const entry = (parsed?.mcpServers?.['k6-desc'] ?? null) as Record<string, unknown> | null;
+    if (!entry) sub.push('mcpServers 层下键 k6-desc 缺失');
     else if ('description' in entry) sub.push(`解析产物不得含 description 键：${canon(entry)}`);
   }
   check('K6', 'description 不导出：输入带 description:"x" → 输出文本与解析产物均无 description 键', sub.length === 0, sub.join('; '));
 }
 
-// K7（P3 跟进 R4）保留键名包裹形：name 为 'mcpServers'/'servers' 时裸 map 会被
-// parseMcpServersJson 保留键分支吞掉（ok:true, servers:[]）→ 序列化改用
-// {"mcpServers":{"<name>":{…}}} 包裹形且回读得同名单条目；其余名字维持裸 map（K1 回归）。
+// K7（P3 跟进 R4 → UI13-P10 合流改钉）保留键名与普通名同形：恒包裹形下保留名无特例——
+// name 为 'mcpServers'/'servers' 的导出与普通名导出逐字节同构（仅键名替换），且回读走
+// parseMcpServersJson 三形态解析的 mcpServers 分支得同名单条目（原「保留名包裹特例」断言
+// 随双形态裁撤失效，改为同形断言）。
 {
   const sub: string[] = [];
+  const refText = buildSingleServerExportJson({ name: 'ref-name', transport: 'stdio', command: 'npx' });
+  if (!refText.includes('"mcpServers"')) sub.push(`参照（普通名）导出应为包裹形，同形断言基准失效：${JSON.stringify(refText.slice(0, 60))}`);
   for (const reserved of ['mcpServers', 'servers'] as const) {
     const text = buildSingleServerExportJson({ name: reserved, transport: 'stdio', command: 'npx' });
-    if (!text.includes('"mcpServers"') || !text.includes(`"${reserved}"`)) sub.push(`${reserved}：缺包裹键/同名键`);
+    const refSameShape = refText.replace('"ref-name"', JSON.stringify(reserved));
+    if (text !== refSameShape) sub.push(`${reserved}：与普通名不同形——得到 ${JSON.stringify(text.slice(0, 60))}，参照 ${JSON.stringify(refSameShape.slice(0, 60))}`);
     const back = parseMcpServersJson(text);
     if (!back.ok || back.servers.length !== 1 || back.servers[0]?.name !== reserved) {
       sub.push(`${reserved}：回读不符 ${back.ok ? JSON.stringify(back.servers.map((s) => s.name)) : back.error}`);
     }
   }
-  check('K7', '保留键名（mcpServers/servers）→ mcpServers 包裹形 + parseMcpServersJson 回读同名单条目', sub.length === 0, sub.join('; '));
+  check('K7', '保留键名（mcpServers/servers）与普通名同形（恒包裹形无特例）+ parseMcpServersJson 回读同名单条目', sub.length === 0, sub.join('; '));
 }
 
 // ── L. 方案 A 列表卡片化组（2026-10-19 mcp-settings-plan-a 点3：McpSettings.vue 条目卡片静态钉）──

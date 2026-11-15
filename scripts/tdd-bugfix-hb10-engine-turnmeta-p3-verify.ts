@@ -125,7 +125,9 @@ check('⑨ TM-03：walk 未命中主流程 assistant 行时仍 recordTurnMeta(me
 
 // ⑩ TM-04/05/06。
 check('⑩ TM-04/05/06：脚注门控 durationMs||endedAt；formatEndedAt 单源；小时档', () => {
-  assert.match(bubble, /v-if="message\.durationMs \|\| message\.endedAt" class="bubble__meta"/, 'TM-04 门控不符');
+  // C6 同步（slate-ui-completion-1108-1428，与 b3 ⑦ 同款单行同步）：中断脚注分支在前后，
+  // 正常脚注门控改 v-else-if（durationMs||endedAt 表达式字面不变，费用仍不参与门控——语义不变）。
+  assert.match(bubble, /v-else-if="message\.durationMs \|\| message\.endedAt" class="bubble__meta"/, 'TM-04 门控不符');
   assert.match(bubble, /formatEndedAt\(props\.message\.endedAt\)/, 'MessageBubble 缺 formatEndedAt 单源');
   assert.match(turnTimer, /formatEndedAt\(lastMeta\.value\?\.endedAt\)/, 'TurnTimer 缺 formatEndedAt 单源');
   assert.match(fmt, /if \(s >= 3600\)/, '缺小时档');

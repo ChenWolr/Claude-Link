@@ -261,7 +261,9 @@ async function main(): Promise<void> {
     const at = src.indexOf('regInvokeHandler(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
     // 窗口 900→1000 + 口径注：A10（D07-F2）rootDir 组装改 effectiveUserHome() ?? os.homedir()
     // （覆盖时与 watcher/证据链同根；无覆盖时同值）——os.homedir() 字面以回退分支形态仍在窗口内。
-    const region = at >= 0 ? src.slice(at, at + 1000) : '';
+    // 窗口 1000→1600：UI13-P8 handler 内联 recent ∪ sessionDirs 并集块（userSkillDirNames 载荷行
+    // 后移至 ~1435），断言语义不变（仍钉 const userDirNames 现查 + 载荷 userSkillDirNames 同拍）。
+    const region = at >= 0 ? src.slice(at, at + 1600) : '';
     const sub: string[] = [];
     if (at < 0) sub.push('缺 SKILL_PROJECT_DIRS_GET handler 注册');
     else {

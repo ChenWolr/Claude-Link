@@ -44,6 +44,8 @@ const updateDialog = read('../src/renderer/components/layout/UpdateDialog.vue');
 const diffDialog = read('../src/renderer/components/changes/DiffDialog.vue');
 const toolDiffDialog = read('../src/renderer/components/chat/ToolDiffDialog.vue');
 const exportFormat = read('../src/renderer/components/export/ExportImageFormatDialog.vue');
+// F1（活动面板组）：输出弹窗接 Esc 栈——TaskQueuePanel 注册形态钉。
+const taskQueuePanel = read('../src/renderer/components/task/TaskQueuePanel.vue');
 
 // use-esc-stack 模块（行为检查；RED 阶段文件不存在 → require 失败按失败计）
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -96,6 +98,10 @@ check('优先级表与真实 z-index 同源（update 1100 / interaction 1200 / d
   assert.equal(esc.ESC_LAYER_PRIORITY.toolDiffDialog, 1250);
   assert.equal(esc.ESC_LAYER_PRIORITY.exportFormat, 9000);
   assert.equal(esc.ESC_LAYER_PRIORITY.imageLightbox, 9999);
+  // F1（活动面板组）：输出弹窗层值 1199——与 .bg-output-mask CSS z-index 同表（非 mcpDialog
+  // 那类解耦例外）。
+  assert.equal(esc.ESC_LAYER_PRIORITY.bgOutputDialog, 1199);
+  assert.ok(taskQueuePanel.includes('z-index: 1199;'), '.bg-output-mask 遮罩 z-index 须为 1199（与层值同表）');
   // X2：两个 diff 组件遮罩 CSS 须同步 1250（视觉与 Esc 语义一致）。
   assert.ok(diffDialog.includes('z-index: 1250;'), 'DiffDialog 遮罩 z-index 须为 1250');
   assert.ok(toolDiffDialog.includes('z-index: 1250;'), 'ToolDiffDialog 遮罩 z-index 须为 1250');
@@ -171,6 +177,28 @@ check('ExportImageFormatDialog：open 驱动注册/释放 + Esc 守卫', () => {
   const escIdx = exportFormat.indexOf("e.key === 'Escape'");
   const branch = exportFormat.slice(escIdx, exportFormat.indexOf('else if', escIdx));
   assert.match(branch, /isTopmost\(\)/, 'Esc 分支缺栈顶守卫');
+});
+
+console.log('\n=== F1（活动面板组）：TaskQueuePanel 输出弹窗注册形态 ===');
+check('F1：输出弹窗 bgOutputDialog 层注册 + watch 驱动注册/释放 + onUnmounted 卸载兜底', () => {
+  assert.match(taskQueuePanel, /pushEscLayer\(ESC_LAYER_PRIORITY\.bgOutputDialog\)/, '缺输出弹窗层注册');
+  assert.match(taskQueuePanel, /from '\.\.\/\.\.\/composables\/use-esc-stack';/, '缺 composable import');
+  assert.match(taskQueuePanel, /watch\(\s*outputVisible/, '缺 outputVisible watch 注册/释放接线');
+  assert.match(taskQueuePanel, /onUnmounted\(/, '缺卸载兜底钩子');
+  assert.match(taskQueuePanel, /escLayer\?\.release\(\)/, '缺卸载兜底层释放（release 幂等惯例）');
+});
+check('F1：Esc 分支守卫先于 preventDefault；焦点还原（?. 降级）在关闭之后', () => {
+  const fnIdx = taskQueuePanel.indexOf('function onOutputEscKey');
+  assert.ok(fnIdx > -1, '缺 onOutputEscKey Esc 分支');
+  const fnBody = taskQueuePanel.slice(fnIdx, taskQueuePanel.indexOf('watch(outputVisible', fnIdx));
+  const guardIdx = fnBody.indexOf('isTopmost()');
+  const pdIdx = fnBody.indexOf('e.preventDefault()');
+  const closeIdx = fnBody.indexOf('outputVisible.value = false');
+  const focusIdx = fnBody.indexOf('outputTriggerEl.value?.focus()');
+  assert.ok(guardIdx > -1, 'Esc 分支缺 isTopmost 让位守卫');
+  assert.ok(pdIdx > guardIdx, '守卫必须先于 preventDefault（让位时不得消费事件）');
+  assert.ok(closeIdx > pdIdx, '关闭须在 preventDefault 之后（消费事件后关弹窗）');
+  assert.ok(focusIdx > closeIdx, '焦点还原须在弹窗关闭之后');
 });
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

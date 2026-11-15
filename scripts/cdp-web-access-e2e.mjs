@@ -1,6 +1,9 @@
 // scripts/cdp-web-access-e2e.mjs
 // 「网页访问」浏览器图形级 E2E（P0-6b / 计划 §3-6b，B1-B8；2026-10-26 增 W-changes-panel：web 端改动面板；
-// 2026-10-30 增 W-mcp-settings：web 端设置 → MCP tab 渲染 + 协议级双探针，只读不写配置）。
+// 2026-10-30 增 W-mcp-settings：web 端设置 → MCP tab 渲染 + 协议级双探针，只读不写配置；
+// 2026-11-14 UI13-P12 增四个 W 用例：W-queue-panel（队列面板 + getQueueOverview 回包形状 + tasks_changed
+// 帧级证据含 T12-H 帧时序）/ W-sidebar-actions（卡片置顶→取消→删除收尾）/ W-sidebar-collapse（侧栏折叠展开
+// DOM 断言）/ W-user-timestamp（用户气泡「你 · 发送于」caption 两向断言）。
 //
 // 用法（编排器/复现者手动准备环境，脚本只做断言）：
 //   1. npm run build && npx electron . --remote-debugging-port=9223   （应用运行，8790 监听）
@@ -15,8 +18,10 @@
 //     node scripts/cdp-web-access-e2e.mjs --config <临时目录>/claude-link-config.json
 //
 // 退出协议：
-//   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）+ W-changes-panel PASS + W-mcp-settings PASS。
-//   - exit 1：任一 B1-B8 / W-changes-panel / W-mcp-settings 断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或 console error）。
+//   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）+ W-changes-panel PASS + W-mcp-settings PASS
+//             + W-queue-panel PASS + W-sidebar-actions PASS + W-sidebar-collapse PASS + W-user-timestamp PASS。
+//   - exit 1：任一 B1-B8 / W-changes-panel / W-mcp-settings / W-queue-panel / W-sidebar-actions / W-sidebar-collapse /
+//             W-user-timestamp 断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或 console error）。
 //   - exit 2：前置条件不满足（Chrome 9224 / 应用 8790 / 配置 token 不可用），或实例新鲜度校验不通过
 //             （P3-B：未构建 / 实例未起 / 监听进程启动时间不可读 / 实例过旧——8790 逐个校验全部 LISTENING
 //             PID，任一 PID 启动时间 ≥ out/renderer mtime 即放行，全部 PID 过旧（或启动时间均不可读）
@@ -24,7 +29,8 @@
 //             不自动重启任何实例）。--config 未指定时读 %APPDATA%/claude-link/claude-link-config.json。
 //
 // 技术纪律（用户约束）：纯 CDP 原生（Input/Runtime/Network/Page），不依赖 computer-use 等 skill。
-// 证据落盘：docs/reports/web-e2e-screenshots/B*.png、W-changes-panel.png、W-mcp-settings.png + 同目录 run-B1-B8.log。
+// 证据落盘：docs/reports/web-e2e-screenshots/B*.png、W-changes-panel.png、W-mcp-settings.png、
+//           W-queue-panel*.png、W-sidebar-actions*.png、W-sidebar-collapse*.png、W-user-timestamp*.png + 同目录 run-B1-B8.log。
 // 敏感纪律：token 从 %APPDATA%/claude-link/claude-link-config.json 顶层键 webAccessToken 读取
 // （--config 指定时为该路径，隔离 profile 用），一切输出（含 URL 日志）掩码为前 4 后 4。
 
@@ -214,6 +220,108 @@ const overlayVisibleExpr = `(() => {
   return false;
 })()`;
 
+// ── UI13-P12 W 用例共用辅助 ──
+// 帧解析：把 baseline 之后的 queue:event/tasks_changed 回帧解析为 {sessionId,type,data} 数组
+// （帧线格式 web-access-server.broadcastEvent：{v:1,kind:'event',channel:'queue:event',args:[payload]}）。
+function queueChangedFramesSince(baseline) {
+  return frameEvidence.received.slice(baseline)
+    .map((p) => { try { return JSON.parse(p); } catch { return null; } })
+    .filter((f) => f && f.kind === 'event' && f.channel === 'queue:event'
+      && f.args && Array.isArray(f.args) && f.args[0] && f.args[0].type === 'tasks_changed')
+    .map((f) => f.args[0]);
+}
+// 前置：确保在局域网 origin + 桥连接（W-changes-panel 同款步骤 0，提炼复用）。
+// 注意：不引用 main() 内的 urls 局部变量，lan URL 就地构造（同一形态）。
+async function ensureLanBridge(ws, label) {
+  if ((await evalExpr(ws, 'location.host')) !== `${LAN_IP}:${PORT}`) {
+    await navigate(ws, `http://${LAN_IP}:${PORT}/#token=${TOKEN}`);
+    await waitFor(`${label} 前置：页面渲染+桥连接（局域网）`, () => evalOk(ws, connectedExpr), 30);
+  }
+}
+// 会话物化链（B3 同款路径提炼：新建会话 → 选工作空间（菜单优先/pinia 兜底）→ 发送 → 等回合终态）。
+// 返回物化后的会话名（侧栏 active 卡名）。B3 本体不动（已绿链最小影响面），仅 W 用例复用。
+const W_WAKE_TEXT = '请只回复数字 42,不要使用任何工具';
+async function materializeSession(ws, label, messageText) {
+  const WS_TARGET = path.resolve(process.cwd());
+  await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`);
+  await waitFor(`${label}：新会话输入框出现`, () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 15);
+  // 工作空间：先走真实菜单路径（SessionToolbar 第一个 .ctl → 「最近使用」中指向本仓库根的条目），
+  // 失败退化为 pinia 直设 activeSession.workingDir（与 chooseRecent→setActiveSessionWorkingDir 同一状态位）。
+  let wsPicked = false;
+  await evalExpr(ws, `document.querySelector('.ctl .ctl__btn')?.click(), true`);
+  const menuRow = await waitFor(`${label}：工作空间菜单出现`, () => evalOk(ws, `!!document.querySelector('.menu__item--dir')`), 5, 200)
+    .then(() => evalExpr(ws, `[...document.querySelectorAll('.menu__item--dir')].find((b) => b.title === ${JSON.stringify(WS_TARGET)})?.click(), true`))
+    .catch(() => false);
+  if (menuRow === true) {
+    wsPicked = await waitFor(`${label}：工作空间已选中`, () => evalOk(ws, `(() => {
+      const btn = document.querySelector('.ctl .ctl__btn');
+      const t = btn?.title ?? '';
+      return t.length > 0 && !t.includes('未选择');
+    })()`), 8).then(() => true).catch(() => false);
+  }
+  if (!wsPicked) {
+    log(`  ${label}：工作空间菜单无仓库目录项，pinia 直设 workingDir（兜底路径）`);
+    await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      if (st && st.activeSession) { st.activeSession.workingDir = ${JSON.stringify(WS_TARGET)}; return true; }
+      return false;
+    })()`);
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  // 输入并发送。
+  await evalExpr(ws, `(() => {
+    const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+    ta.value = ${JSON.stringify(messageText)};
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  await evalExpr(ws, `document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
+  // 物化证据：侧栏出现 active 卡（user 消息落库 → 会话持久化）。落库瞬间会话会被自动重命名
+  // （transient 默认名「会话 N」→ 首条消息文本截断），故读两次（间隔 800ms）一致才算稳定，
+  // 防止拿到重命名窗口前的旧名导致后续按名定位失配。
+  const sessionName = await waitFor(`${label}：会话物化（侧栏 active 卡稳定出现）`, async () => {
+    const n1 = await evalExpr(ws, `document.querySelector('.session-card.active .session-card__name')?.innerText ?? ''`);
+    if (!n1) return false;
+    await new Promise((r) => setTimeout(r, 800));
+    const n2 = await evalExpr(ws, `document.querySelector('.session-card.active .session-card__name')?.innerText ?? ''`);
+    return n2 && n1 === n2 ? n2 : false;
+  }, 20);
+  // 回合终态：assistant 终态含 42 且流式组退场（≤120s，B3 同款轮询）。
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    if (Date.now() > deadline) break;
+    const done = await evalExpr(ws, `(() => {
+      const bubbles = document.querySelectorAll('.bubble--assistant');
+      const last = bubbles[bubbles.length - 1];
+      return !!(last && (last.innerText || '').includes('42')) && !document.querySelector('.stream-group');
+    })()`);
+    if (done === true) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const finalText = await evalExpr(ws, `(() => {
+    const b = document.querySelectorAll('.bubble--assistant');
+    return b.length ? (b[b.length - 1].innerText || '') : '';
+  })()`);
+  if (!finalText.includes('42')) throw new Error(`${label}：assistant 终态不含「42」（text=${finalText.slice(0, 80)}）`);
+  return { sessionName, wsPicked };
+}
+// 善后：经 store deleteSession 删当前活动会话（B3 善后同款，避免污染真实会话列表）。
+async function deleteActiveSessionViaStore(ws) {
+  try {
+    await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      const id = st?.activeSession?.id;
+      if (st && id) { void st.deleteSession(id); return true; }
+      return false;
+    })()`);
+    return true;
+  } catch { return false; }
+}
+
 // ── 实例新鲜度校验（P3-B：防「遗留实例 × 重建后 hash 轮换」缓存投毒假红）──
 // 背景（评审 §4 根因链）：本脚本不自起实例，依赖手工预起 app（8790）+ headless Chrome（9224）。
 // 已复现事故形态：遗留实例（启动时间早于最后一次构建）内存里的 index.html 引用旧 hash 的
@@ -382,6 +490,7 @@ async function main() {
   // 行为一致，必须先经 SessionToolbar 工作空间菜单选「最近使用」目录。
   currentCase = 'B3';
   let b3SessionName = '';
+  let b3SessionId = ''; // P12 增：B3 物化会话权威 id（终审前清理块按 id 删，防名字漂移/重名误删）。
   try {
     await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`);
     await waitFor('新会话输入框出现', () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 15);
@@ -469,22 +578,36 @@ async function main() {
     // 误报；故采用 DOM 增长 ≥1 + 帧层 text_delta ≥1 + chat:event ≥2 的确定性组合。
     if ((growths ?? -1) < 1) throw new Error(`流式 DOM 文本增长次数 ${growths} < 1（流式未逐帧上 DOM）`);
     if (textDeltaCount < 1) throw new Error(`chat:event 帧中未见 text_delta 文本增量帧（count=${textDeltaCount}）`);
-    b3SessionName = await evalExpr(ws, `document.querySelector('.session-link.active .session-link__name')?.innerText ?? ''`) || '';
+    b3SessionName = await evalExpr(ws, `document.querySelector('.session-card.active .session-card__name')?.innerText ?? ''`) || '';
+    // P12 增：记 b3 会话权威 id（名字会因落库重命名漂移；终审前清理按 id 删，不按名）。
+    b3SessionId = await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      return st?.activeSession?.id ?? '';
+    })()`) || '';
     record('B3', 'PASS', `发送→流式 DOM 增长 ${growths} 次、text_delta 帧 ${textDeltaCount} 条、chat:event 回帧 ${chatEventCount} 条(≥2)→终态含 42；工作空间=${wsPicked ? '菜单选择' : 'pinia兜底'}；口径:增长≥1+text_delta≥1+chat:event≥2(计数稳定性裁定见报告)`);
     // F5（截图顺序修正）：断言通过、终态（含 42 的回合完成态）在屏即截——B3.png 必须对应
     // 回合完成态，先于下方善后 deleteSession。
     await screenshot(ws, 'B3');
-    // 善后：删除本用例物化的测试会话（经 store deleteSession，避免污染真实会话列表）
+    // 善后（P12 条件化）：删除本用例物化的测试会话，避免污染真实会话列表；但干净 profile
+    // （列表除本会话外无其他持久会话）时保留——B4「切换历史会话」需要非 active 历史会话、
+    // B5/B6/W-changes-panel 依赖其消息与 workingDir，保留会话由终审前清理块按 id 删除收尾。
+    // 真实 profile（已有用户会话）行为与旧版完全一致（删自己）。
     try {
-      await evalExpr(ws, `(() => {
+      const deleted = await evalExpr(ws, `(() => {
         const app = document.querySelector('#app');
         const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
         const st = pinia && pinia._s ? pinia._s.get('session') : null;
         const id = st?.activeSession?.id;
-        if (st && id) { void st.deleteSession(id); return true; }
-        return false;
+        if (!st || !id) return 'no-session';
+        const others = (st.sessions || []).filter((s) => s.id !== id).length;
+        if (others > 0) { void st.deleteSession(id); return 'deleted'; }
+        return 'kept';
       })()`);
-      log('  B3 测试会话已请求删除（善后）');
+      if (deleted === 'deleted') log('  B3 测试会话已请求删除（善后；列表存在其他持久会话）');
+      else if (deleted === 'kept') log('  B3 测试会话保留（干净 profile：列表无其他持久会话，供 B4-B6/W-changes-panel 消费；终审前按 id 清理）');
+      else log('  B3 无活动会话可删（善后 no-op）');
     } catch { log('  B3 测试会话删除失败（不影响断言，遗留人工清理）'); }
     // 善后删除后的界面状态（可选留证，非 B3 主证据）。
     await screenshot(ws, 'B3-cleaned');
@@ -494,11 +617,25 @@ async function main() {
   currentCase = 'B4';
   try {
     let switched = '';
-    const candidates = await evalExpr(ws, `[...document.querySelectorAll('.session-link')].filter((l) => !l.classList.contains('active')).slice(0, 10).map((l) => l.querySelector('.session-link__name')?.innerText ?? '')`);
+    // UI13-P3 侧栏卡片化适配：.session-link/.session-link__name → .session-card/.session-card__name
+    // （P3 点报告 §5 只收编了契约钉，E2E 选择器适配落在本点 P12 验收门内）。
+    let candidates = await evalExpr(ws, `[...document.querySelectorAll('.session-card')].filter((l) => !l.classList.contains('active')).slice(0, 10).map((l) => l.querySelector('.session-card__name')?.innerText ?? '')`);
+    // P12 干净 profile 兜底：B3 条件保留时唯一历史会话可能正是 active 卡（B3 刚物化完）——
+    // 经 new-button 新建 transient（真实用户「新建再切回」同路径）使原会话转为非 active 历史卡
+    // 后重取候选。transient 不落库不进列表，原会话卡成为唯一候选。
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      log('  B4 兜底：无非 active 历史卡（干净 profile，B3 会话为 active），新建 transient 后重取候选');
+      await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`);
+      await waitFor('B4 兜底：原会话转为非 active 历史卡', () => evalOk(ws, `(() => {
+        const cards = [...document.querySelectorAll('.session-card')];
+        return cards.length >= 1 && cards.some((c) => !c.classList.contains('active'));
+      })()`), 10);
+      candidates = await evalExpr(ws, `[...document.querySelectorAll('.session-card')].filter((l) => !l.classList.contains('active')).slice(0, 10).map((l) => l.querySelector('.session-card__name')?.innerText ?? '')`);
+    }
     if (!Array.isArray(candidates) || candidates.length === 0) throw new Error('侧栏无可切换的历史会话');
     for (const name of candidates) {
-      await evalExpr(ws, `[...document.querySelectorAll('.session-link')].find((l) => l.querySelector('.session-link__name')?.innerText === ${JSON.stringify(name)})?.click(), true`);
-      const activated = await waitFor(`切换到「${name}」激活`, () => evalOk(ws, `document.querySelector('.session-link.active .session-link__name')?.innerText === ${JSON.stringify(name)}`), 10).then(() => true).catch(() => false);
+      await evalExpr(ws, `[...document.querySelectorAll('.session-card')].find((l) => (l.querySelector('.session-card__name')?.innerText ?? '') === ${JSON.stringify(name)})?.click(), true`);
+      const activated = await waitFor(`切换到「${name}」激活`, () => evalOk(ws, `document.querySelector('.session-card.active .session-card__name')?.innerText === ${JSON.stringify(name)}`), 10).then(() => true).catch(() => false);
       if (!activated) continue;
       const hasBubbles = await waitFor(`「${name}」历史消息渲染`, () => evalOk(ws, `document.querySelectorAll('.bubble').length >= 1`), 8).then(() => true).catch(() => false);
       if (hasBubbles) { switched = name; break; }
@@ -515,7 +652,7 @@ async function main() {
     if (!b3SessionName) throw new Error('前置 B4 未取得会话名，无法断言恢复');
     await cdpSend(ws, 'Page.reload');
     await waitFor('刷新后桥连接恢复', () => evalOk(ws, connectedExpr), 30);
-    await waitFor('刷新后 active 会话恢复', () => evalOk(ws, `document.querySelector('.session-link.active .session-link__name')?.innerText === ${JSON.stringify(b3SessionName)}`), 20);
+    await waitFor('刷新后 active 会话恢复', () => evalOk(ws, `document.querySelector('.session-card.active .session-card__name')?.innerText === ${JSON.stringify(b3SessionName)}`), 20);
     await waitFor('刷新后消息可见', () => evalOk(ws, `document.querySelectorAll('.bubble').length >= 1`), 20);
     record('B5', 'PASS', `刷新后 active 会话仍为「${b3SessionName}」且消息可见（P1-5 生效）`);
   } catch (e) { record('B5', 'FAIL', e.message); }
@@ -631,7 +768,8 @@ async function main() {
       const hit = (st.sessions || []).find((s) => s.workingDir === ${JSON.stringify(WS_TARGET)});
       if (hit) {
         if (!st.activeSession || st.activeSession.id !== hit.id) {
-          const link = [...document.querySelectorAll('.session-link')].find((l) => l.querySelector('.session-link__name')?.innerText === hit.name);
+          // UI13-P3 侧栏卡片化适配：点选入口 .session-link → .session-card。
+          const link = [...document.querySelectorAll('.session-card')].find((l) => (l.querySelector('.session-card__name')?.innerText ?? '') === hit.name);
           if (link) link.click();
         }
         return hit.name;
@@ -639,7 +777,7 @@ async function main() {
       return '';
     })()`);
     if (targetSessionName) {
-      await waitFor(`W 前置：会话「${targetSessionName}」激活`, () => evalOk(ws, `document.querySelector('.session-link.active .session-link__name')?.innerText === ${JSON.stringify(targetSessionName)}`), 10)
+      await waitFor(`W 前置：会话「${targetSessionName}」激活`, () => evalOk(ws, `document.querySelector('.session-card.active .session-card__name')?.innerText === ${JSON.stringify(targetSessionName)}`), 10)
         .catch(() => { throw new Error(`点选带改动会话「${targetSessionName}」未激活`); });
     } else {
       log('  会话列表无 workingDir=仓库根的会话，按 B3 兜底语义直设 activeSession.workingDir（环境退化注明）');
@@ -791,6 +929,371 @@ async function main() {
   } catch (e) { record('W-mcp-settings', 'FAIL', e.message); }
   await screenshot(ws, 'W-mcp-settings');
 
+  // ── W-queue-panel：web 端队列面板 + getQueueOverview 回包形状 + tasks_changed 帧级证据（UI13-P12；T12-A/B/H）──
+  // 物化一个专用会话（materializeSession，B3 同款链路）作为队列挂载点：transient 未物化会话 addTask
+  // 会落库孤儿任务（会话删除后无主），物化后 addTask 安全；收尾 removeTask ×2 删净任务，会话本体
+  // 留给 W-sidebar-actions 做 pin/unpin/删除收尾（该会话为用例自建，删除不触用户数据）。
+  currentCase = 'W-queue-panel';
+  let wqpSessionName = '';
+  let wqpSessionId = ''; // 会话权威标识（名字会因落库自动重命名漂移，id 不变）——留给 W-sidebar-actions。
+  try {
+    const exceptionsBeforeQ = exceptions.length;
+    await ensureLanBridge(ws, 'W-queue-panel');
+    // 0) 回 chat 路由（W-mcp-settings 结束时停在 #/config?tab=mcp）。
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-queue-panel：chat 路由就绪（新会话按钮在位）', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+    // 1) 物化会话（发送 42 式消息 → 会话落库 → 回合终态）。
+    const mat = await materializeSession(ws, 'W-queue-panel', W_WAKE_TEXT);
+    wqpSessionName = mat.sessionName;
+    // 2) 右侧活动面板展开（AppLayout 关闭态下只有 .reopen-task-panel；已开时为 null，no-op）。
+    await evalExpr(ws, `document.querySelector('.reopen-task-panel')?.click(), true`);
+    await waitFor('W-queue-panel：右侧活动面板展开（.rail 在位）', () => evalOk(ws, `!!document.querySelector('.rail')`), 10);
+    // 3) 切 queue Tab（rightTab==='queue' 才渲染 .queue-bar；已在 queue 时不可盲点——再点同类回 all）。
+    const needQueueClick = await evalOk(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      return st ? st.rightTab !== 'queue' : false;
+    })()`);
+    if (needQueueClick === true) {
+      const qClicked = await evalExpr(ws, `(() => {
+        const btn = document.querySelector('button[aria-label="排队任务"]');
+        if (!btn) return false;
+        btn.click();
+        return true;
+      })()`);
+      if (qClicked !== true) throw new Error('未找到图标轨「排队任务」按钮（button[aria-label="排队任务"]）');
+    }
+    await waitFor('W-queue-panel：.queue-bar 排队状态条渲染', () => evalOk(ws, `!!document.querySelector('.queue-bar')`), 10);
+    // 4) getQueueOverview 回包形状断言（对任意 sessionId 空态也成立：state.standby + 空数组）。
+    const sid = await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      return st?.activeSession?.id ?? '';
+    })()`);
+    if (!sid) throw new Error('无法取得 activeSession id（物化会话未激活？）');
+    const ov = await evalExpr(ws, `window.claudeLink.getQueueOverview(${JSON.stringify(sid)}).then((r) => JSON.stringify({
+      hasState: !!r.state && typeof r.state === 'object',
+      statusOk: ['standby', 'countdown', 'running'].includes(r.state && r.state.status),
+      tasksArr: Array.isArray(r.tasks),
+      executedArr: Array.isArray(r.executed),
+    }))`);
+    const ovObj = JSON.parse(String(ov));
+    if (!ovObj.hasState || !ovObj.statusOk || !ovObj.tasksArr || !ovObj.executedArr) {
+      throw new Error(`getQueueOverview 回包形状不符（${String(ov).slice(0, 200)}）`);
+    }
+    // 5) addTask#1：回包形状（T12-B）+ tasks_changed 帧#1（T12-A：含新任务 id/status、sessionId 会话匹配）+ DOM 卡出现。
+    const frameBaseline1 = frameEvidence.received.length;
+    const add1 = await evalExpr(ws, `window.claudeLink.addTask(${JSON.stringify(sid)}, { text: 'e2e-p1-sync-1', attachmentIds: [], clientMessageId: crypto.randomUUID() }).then((r) => JSON.stringify({
+      hasTask: !!r.task && typeof r.task.id === 'string' && r.task.id.length > 0,
+      taskPending: r.task && r.task.status === 'pending',
+      tasksArr: Array.isArray(r.tasks),
+      taskId: (r.task && r.task.id) || '',
+    }))`);
+    const add1Obj = JSON.parse(String(add1));
+    if (!add1Obj.hasTask || add1Obj.taskPending !== true || add1Obj.tasksArr !== true) {
+      throw new Error(`addTask 回包形状不符（期望 {task:{id,status:'pending'},tasks[]}，实际 ${String(add1).slice(0, 200)}）`);
+    }
+    const frame1 = await waitFor('W-queue-panel：tasks_changed 帧#1 到达', () => queueChangedFramesSince(frameBaseline1).length >= 1, 10, 100)
+      .then(() => queueChangedFramesSince(frameBaseline1)[0]);
+    const f1Tasks = Array.isArray(frame1.data && frame1.data.tasks) ? frame1.data.tasks : [];
+    if (frame1.sessionId !== sid) throw new Error(`帧#1 sessionId 不符（帧=${frame1.sessionId} 期望=${sid}）`);
+    if (!f1Tasks.some((t) => t && t.id === add1Obj.taskId && t.status === 'pending')) {
+      throw new Error(`帧#1 tasks 不含新任务 ${add1Obj.taskId}（帧 tasks=${JSON.stringify(f1Tasks).slice(0, 200)}）`);
+    }
+    await waitFor('W-queue-panel：任务卡#1 渲染（e2e-p1-sync-1）', () => evalOk(ws, `[...document.querySelectorAll('.task-item .task-item__prompt')].some((n) => (n.textContent || '').includes('e2e-p1-sync-1'))`), 10);
+    // 面板/会话不被重开/切换（T12-A）：active 会话（按权威 id 比对——名字会因落库重命名漂移）仍为物化会话。
+    wqpSessionId = sid;
+    const activeIdAfter = await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      return st?.activeSession?.id ?? '';
+    })()`);
+    if (activeIdAfter !== sid) throw new Error(`addTask 后 active 会话被切换（当前 id=${activeIdAfter} 期望=${sid}）`);
+    // 6) addTask#2（T12-H 帧时序：末次 tasks_changed 帧 tasks 长度=2、顺序与末次回包一致——帧不乱序/不携带陈旧列表）。
+    const frameBaseline2 = frameEvidence.received.length;
+    const add2 = await evalExpr(ws, `window.claudeLink.addTask(${JSON.stringify(sid)}, { text: 'e2e-p1-sync-2', attachmentIds: [], clientMessageId: crypto.randomUUID() }).then((r) => JSON.stringify({
+      taskId: (r.task && r.task.id) || '',
+      order: Array.isArray(r.tasks) ? r.tasks.map((t) => t.id) : [],
+    }))`);
+    const add2Obj = JSON.parse(String(add2));
+    const frame2 = await waitFor('W-queue-panel：tasks_changed 帧#2 到达', () => queueChangedFramesSince(frameBaseline2).length >= 1, 10, 100)
+      .then(() => { const arr = queueChangedFramesSince(frameBaseline2); return arr[arr.length - 1]; });
+    const f2Tasks = Array.isArray(frame2.data && frame2.data.tasks) ? frame2.data.tasks : [];
+    if (f2Tasks.length !== 2) throw new Error(`帧#2 tasks 长度 ${f2Tasks.length} ≠ 2（T12-H：帧携带陈旧列表）`);
+    if (JSON.stringify(f2Tasks.map((t) => t.id)) !== JSON.stringify(add2Obj.order)) {
+      throw new Error(`帧#2 tasks 顺序与末次回包不一致（帧=${JSON.stringify(f2Tasks.map((t) => t.id))} 回包=${JSON.stringify(add2Obj.order)}）`);
+    }
+    // 7) 收尾：removeTask ×2（删除后 tasks_changed 帧到达 + 卡消失，善后不残留）。
+    const frameBaseline3 = frameEvidence.received.length;
+    const rm1 = await evalExpr(ws, `window.claudeLink.removeTask(${JSON.stringify(add2Obj.taskId)}).then((r) => Array.isArray(r))`);
+    if (rm1 !== true) throw new Error('removeTask#1 回包非数组');
+    const rm2 = await evalExpr(ws, `window.claudeLink.removeTask(${JSON.stringify(add1Obj.taskId)}).then((r) => Array.isArray(r) && r.length === 0)`);
+    if (rm2 !== true) throw new Error('removeTask#2 回包非空数组（任务未删净）');
+    await waitFor('W-queue-panel：删除后 tasks_changed 帧到达', () => queueChangedFramesSince(frameBaseline3).length >= 1, 10, 100);
+    await waitFor('W-queue-panel：任务卡已消失', () => evalOk(ws, `![...document.querySelectorAll('.task-item .task-item__prompt')].some((n) => (n.textContent || '').includes('e2e-p1-sync'))`), 10);
+    if (exceptions.length > exceptionsBeforeQ) throw new Error('W-queue-panel 用例期间出现 exceptionThrown');
+    record('W-queue-panel', 'PASS', `队列面板（.queue-bar 在位）+ getQueueOverview 形状 OK（state/statusOk/tasks/executed）+ addTask 回包 {task:{id,status:'pending'},tasks[]} + tasks_changed 帧×3（帧#1 含新任务 id/status 且 sessionId 匹配、帧#2 len=2 且顺序=回包【T12-H】、删除收尾帧）+ DOM 卡出现/消失 + 会话未被切换；物化会话=${wqpSessionName}（留给 W-sidebar-actions）`);
+  } catch (e) { record('W-queue-panel', 'FAIL', e.message); }
+  await screenshot(ws, 'W-queue-panel');
+
+  // ── W-sidebar-actions：web 端卡片置顶 → 取消置顶 → 删除收尾（UI13-P12；T12-C）──
+  // 用 W-queue-panel 物化的会话（wqpSessionId 权威标识，用例自建——删除收尾不触用户数据）；若其未
+  // 取得（W-queue-panel 失败/被跳），直接 FAIL 前置缺失，不拿既有用户会话冒险。
+  // 定位锚 = active 卡（.session-card.active）+ 前置 id 校验：会话名会因落库自动重命名漂移，且隔离
+  // profile 可能残留上一轮同名测试卡（按名字定位有歧义），id 是唯一权威；置顶/取消置顶只改排序
+  // 不改 activeSession.id，active 类随 id 走，全程定位稳定。
+  // 视图固定「全部」（日期视图）：置顶组跨组浮顶在项目视图的形态由 P3 单元契约背书，E2E 不重复。
+  currentCase = 'W-sidebar-actions';
+  let wsaDeletedName = '';
+  try {
+    const exceptionsBeforeS = exceptions.length;
+    await ensureLanBridge(ws, 'W-sidebar-actions');
+    if (!wqpSessionId) throw new Error('前置 W-queue-panel 未取得物化会话 id（该用例未 PASS 或未执行），无自建会话可操作');
+    // 0) 前置校验：active 会话即物化会话（id 比对）。
+    const activeIdPre = await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      return st?.activeSession?.id ?? '';
+    })()`);
+    if (activeIdPre !== wqpSessionId) throw new Error(`active 会话非 W-queue-panel 物化会话（id=${activeIdPre} 期望=${wqpSessionId}）`);
+    // 0.5) 确保「全部」tab 激活（groupByProject 默认 false；被前序用例改动时点回）。
+    const tabAllExpr = `(() => {
+      const tabs = [...document.querySelectorAll('.sidebar__tab')];
+      const allTab = tabs.find((t) => (t.textContent || '').trim() === '全部');
+      return !!(allTab && allTab.classList.contains('sidebar__tab--active'));
+    })()`;
+    if ((await evalOk(ws, tabAllExpr)) !== true) {
+      const clicked = await evalExpr(ws, `[...document.querySelectorAll('.sidebar__tab')].find((t) => (t.textContent || '').trim() === '全部')?.click(), true`);
+      if (clicked !== true) throw new Error('未找到「全部」分组 tab');
+      await waitFor('W-sidebar-actions：全部视图生效', () => evalOk(ws, tabAllExpr), 5);
+    }
+    const activeCardFound = await waitFor('W-sidebar-actions：active 物化卡在列表', () => evalOk(ws, `!!document.querySelector('.session-card.active .session-card__name')`), 10);
+    if (!activeCardFound) throw new Error('列表未找到 active 会话卡');
+    // 1) 置顶：点 active 卡 pin 钮（.session-card__pinbtn，title=置顶会话）。
+    const pinClicked = await evalExpr(ws, `(() => {
+      const card = document.querySelector('.session-card.active');
+      const btn = card && card.querySelector('.session-card__pinbtn');
+      if (!btn || btn.getAttribute('title') !== '置顶会话') return false;
+      btn.click();
+      return true;
+    })()`);
+    if (pinClicked !== true) throw new Error('未点到卡片 pin 钮（.session-card__pinbtn title=置顶会话）');
+    // 2) 断言：首分组头「置顶」出现 + 该卡为全列表首卡（首分组首卡且带 active 类，active 类随 id 走）+ pin 标识在位。
+    // DOM 结构事实（AppSidebar.vue 模板）：template v-for 平铺——组头 div.sidebar__group 与该组卡片
+    // div.session-card 是平级兄弟（组头不是卡的父级），首卡 = 首个组头节点的 nextElementSibling。
+    const firstCardExpr = `(document.querySelector('.sidebar__group')?.nextElementSibling ?? null)`;
+    await waitFor('W-sidebar-actions：置顶组头出现', () => evalOk(ws, `(() => {
+      const g = document.querySelector('.sidebar__group .sidebar__group__label');
+      return !!g && (g.textContent || '').trim() === '置顶';
+    })()`), 10);
+    const pinState = await waitFor('W-sidebar-actions：置顶组首卡渲染', () => evalOk(ws, `!!(${firstCardExpr} && (${firstCardExpr}).classList.contains('active'))`), 10)
+      .then(() => evalExpr(ws, `(() => {
+        const firstCard = ${firstCardExpr};
+        return JSON.stringify({
+          firstCardActive: !!(firstCard && firstCard.classList.contains('active')),
+          firstCardName: firstCard ? ((firstCard.querySelector('.session-card__name')?.innerText ?? '').trim()) : '',
+          pinMark: !!(firstCard && firstCard.querySelector('.session-card__pin-mark')),
+        });
+      })()`));
+    const pinObj = JSON.parse(String(pinState));
+    if (pinObj.firstCardActive !== true) throw new Error(`置顶组首卡非 active 卡（目标会话未浮到列表第一位，首卡名=${pinObj.firstCardName}）`);
+    if (pinObj.pinMark !== true) throw new Error('置顶组首卡缺 pin 标识（.session-card__pin-mark）');
+    await screenshot(ws, 'W-sidebar-actions-pinned');
+    // 3) 取消置顶：同卡 pin 钮（title 已变「取消置顶」）→「置顶」组头退场 + pin 标识退场。
+    const unpinClicked = await evalExpr(ws, `(() => {
+      const card = document.querySelector('.session-card.active');
+      const btn = card && card.querySelector('.session-card__pinbtn');
+      if (!btn || btn.getAttribute('title') !== '取消置顶') return false;
+      btn.click();
+      return true;
+    })()`);
+    if (unpinClicked !== true) throw new Error('未点到取消置顶钮（title=取消置顶）');
+    await waitFor('W-sidebar-actions：置顶组头退场', () => evalOk(ws, `[...document.querySelectorAll('.sidebar__group .sidebar__group__label')].every((l) => (l.textContent || '').trim() !== '置顶')`), 10);
+    await waitFor('W-sidebar-actions：pin 标识退场', () => evalOk(ws, `!(document.querySelector('.session-card.active')?.querySelector('.session-card__pin-mark'))`), 10);
+    // 3.5) P3-10：卡回原日期组——「今天」组内含该卡名。组头与卡片是平级兄弟（见上方 DOM 结构事实），
+    //      组内卡 = 组头之后至下一组头之间的兄弟 session-card；会话为本用例运行当日物化，取消置顶
+    //      后应回到「今天」日期组（卡名取置顶态捕获的 firstCardName，与列表实际渲染名一致）。
+    await waitFor('W-sidebar-actions：卡回原日期组（「今天」组内含该卡名）', () => evalOk(ws, `(() => {
+      const todayGroup = [...document.querySelectorAll('.sidebar__group')].find((g) => (g.querySelector('.sidebar__group__label')?.textContent || '').trim() === '今天');
+      if (!todayGroup) return false;
+      let el = todayGroup.nextElementSibling;
+      while (el && !el.classList.contains('sidebar__group')) {
+        if (el.classList.contains('session-card') && ((el.querySelector('.session-card__name')?.innerText ?? '').trim() === ${JSON.stringify(pinObj.firstCardName)})) return true;
+        el = el.nextElementSibling;
+      }
+      return false;
+    })()`), 10);
+    // 4) 删除收尾：点卡删除 × → InteractionPrompt confirm（kind='confirm'，danger 选项「删除」）
+    //    → 程序化 dblclick 提交（InteractionOptionList @dblclick emit submit——单选形态双击直提路径）。
+    //    删除成功判定走权威状态位：pinia sessions 不再含 wqpSessionId。
+    wsaDeletedName = wqpSessionName;
+    const delClicked = await evalExpr(ws, `(() => {
+      const card = document.querySelector('.session-card.active');
+      const btn = card && card.querySelector('.session-card__delete');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()`);
+    if (delClicked !== true) throw new Error('未点到卡片删除钮（.session-card__delete）');
+    await waitFor('W-sidebar-actions：删除确认弹窗出现', () => evalOk(ws, `!!document.querySelector('.interaction-option--danger')`), 10);
+    const optText = await evalExpr(ws, `document.querySelector('.interaction-option--danger')?.textContent ?? ''`);
+    if (!(String(optText) || '').includes('删除')) throw new Error(`danger 选项非「删除」（text=${String(optText).slice(0, 40)}）`);
+    const submitted = await evalExpr(ws, `(() => {
+      const opt = document.querySelector('.interaction-option--danger');
+      opt.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      return true;
+    })()`);
+    if (submitted !== true) throw new Error('双击「删除」danger 选项提交失败');
+    await waitFor('W-sidebar-actions：会话从列表移除（pinia sessions 无该 id）', () => evalOk(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      return st ? !(st.sessions || []).some((s) => s.id === ${JSON.stringify(wqpSessionId)}) : false;
+    })()`), 15);
+    await waitFor('W-sidebar-actions：置顶组无残留', () => evalOk(ws, `[...document.querySelectorAll('.sidebar__group .sidebar__group__label')].every((l) => (l.textContent || '').trim() !== '置顶')`), 10);
+    wqpSessionId = '';
+    wqpSessionName = '';
+    if (exceptions.length > exceptionsBeforeS) throw new Error('W-sidebar-actions 用例期间出现 exceptionThrown');
+    record('W-sidebar-actions', 'PASS', `卡片置顶（首分组头「置顶」+ 组内首卡=active 卡 ${pinObj.firstCardName} + pin-mark）→ 取消置顶（组头/pin-mark 退场，卡回「今天」日期组）→ 删除收尾（InteractionPrompt「删除」danger 双击提交，pinia sessions 无该 id、置顶组无残留）；删除会话=${wsaDeletedName}（用例自建物化卡）`);
+  } catch (e) { record('W-sidebar-actions', 'FAIL', e.message); }
+  await screenshot(ws, 'W-sidebar-actions');
+
+  // ── W-sidebar-collapse：侧栏折叠/展开 DOM 断言（UI13-P12；T12-D）──
+  // P4 实现事实（AppSidebar.vue/AppLayout.vue）：折叠钮 button[title="折叠侧栏"] → 根类 .sidebar--collapsed
+  // + 窄轨 .sidebar__rail（48px，含展开钮/新建会话入口）v-if 顶替展开态主体；拖宽手柄
+  // .resize-handle--sidebar 为 AppLayout v-if 门控——折叠态从 DOM 移除（比 01 设想的
+  // display:none 更强，断言「手柄不在 DOM」等价且严格）。
+  currentCase = 'W-sidebar-collapse';
+  try {
+    const exceptionsBeforeC = exceptions.length;
+    await ensureLanBridge(ws, 'W-sidebar-collapse');
+    // 1) 折叠。
+    const collapseClicked = await evalExpr(ws, `(() => {
+      const btn = document.querySelector('button[title="折叠侧栏"]');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()`);
+    if (collapseClicked !== true) throw new Error('未找到侧栏折叠钮（button[title="折叠侧栏"]）');
+    await waitFor('W-sidebar-collapse：折叠态根类在位', () => evalOk(ws, `!!document.querySelector('.sidebar--collapsed')`), 10);
+    const collapsedState = await evalExpr(ws, `(() => {
+      const aside = document.querySelector('.sidebar');
+      return JSON.stringify({
+        width: aside ? aside.offsetWidth : -1,
+        hasRail: !!document.querySelector('.sidebar__rail'),
+        hasExpand: !!document.querySelector('.sidebar__rail__expand'),
+        hasNew: !!document.querySelector('.sidebar__rail__new'),
+        handleGone: !document.querySelector('.resize-handle--sidebar'),
+      });
+    })()`);
+    const cObj = JSON.parse(String(collapsedState));
+    if (cObj.width < 0 || cObj.width > 80) throw new Error(`折叠态侧栏宽度 ${cObj.width}px 超出窄轨阈值（≤80px，实现 48px）`);
+    if (cObj.hasRail !== true || cObj.hasExpand !== true || cObj.hasNew !== true) {
+      throw new Error(`折叠窄轨组件缺失（rail=${cObj.hasRail} 展开钮=${cObj.hasExpand} 新建入口=${cObj.hasNew}）`);
+    }
+    if (cObj.handleGone !== true) throw new Error('折叠态拖宽手柄 .resize-handle--sidebar 仍在 DOM（P4 v-if 门控失效）');
+    await screenshot(ws, 'W-sidebar-collapse-collapsed');
+    // 2) 展开：窄轨「»」展开钮 → .sidebar 恢复全宽 + 手柄回归 DOM。
+    const expandClicked = await evalExpr(ws, `(() => {
+      const btn = document.querySelector('.sidebar__rail__expand');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()`);
+    if (expandClicked !== true) throw new Error('未找到窄轨展开钮（.sidebar__rail__expand）');
+    await waitFor('W-sidebar-collapse：展开态恢复', () => evalOk(ws, `!document.querySelector('.sidebar--collapsed') && !!document.querySelector('.sidebar__footer')`), 10);
+    const expandedState = await evalExpr(ws, `(() => {
+      const aside = document.querySelector('.sidebar');
+      return JSON.stringify({ width: aside ? aside.offsetWidth : -1, handleBack: !!document.querySelector('.resize-handle--sidebar') });
+    })()`);
+    const eObj = JSON.parse(String(expandedState));
+    if (eObj.width <= 100) throw new Error(`展开态侧栏宽度 ${eObj.width}px 未恢复全宽`);
+    if (eObj.handleBack !== true) throw new Error('展开后拖宽手柄未回归 DOM');
+    if (exceptions.length > exceptionsBeforeC) throw new Error('W-sidebar-collapse 用例期间出现 exceptionThrown');
+    record('W-sidebar-collapse', 'PASS', `折叠（.sidebar--collapsed + 窄轨 ${cObj.width}px + 展开钮/新建入口在位 + 手柄 v-if 移除）→ 展开（全宽 ${eObj.width}px 恢复 + 手柄回归）`);
+  } catch (e) { record('W-sidebar-collapse', 'FAIL', e.message); }
+  await screenshot(ws, 'W-sidebar-collapse');
+
+  // ── W-user-timestamp：用户气泡「你 · 发送于」caption 两向断言（UI13-P12；T12-E）──
+  // 物化路径：materializeSession 复用（新会话发 e2e-p5-timestamp 前缀消息——发送即渲染 user 气泡，
+  // helper 内已完成 assistant 终态等待）；断言最后一张 user wrap 的 caption 形态 + 气泡内无「发送于」
+  // 脚本（双向）；收尾删除自建物化会话。
+  currentCase = 'W-user-timestamp';
+  try {
+    const exceptionsBeforeT = exceptions.length;
+    await ensureLanBridge(ws, 'W-user-timestamp');
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    const msgText = 'e2e-p5-timestamp：请只回复数字 42,不要使用任何工具';
+    const mat = await materializeSession(ws, 'W-user-timestamp', msgText);
+    const capState = await evalExpr(ws, `(() => {
+      const wraps = [...document.querySelectorAll('.bubble-wrap--user')];
+      const last = wraps[wraps.length - 1];
+      if (!last) return JSON.stringify({ hasWrap: false });
+      const cap = last.querySelector('.bubble-caption');
+      const bubble = last.querySelector('.bubble');
+      return JSON.stringify({
+        hasWrap: true,
+        hasCaption: !!cap,
+        capText: cap ? (cap.textContent || '').trim() : '',
+        bubbleHasFootnote: bubble ? (bubble.textContent || '').includes('发送于') : null,
+      });
+    })()`);
+    const capObj = JSON.parse(String(capState));
+    if (capObj.hasWrap !== true) throw new Error('页面无 .bubble-wrap--user（物化消息未渲染 user 气泡）');
+    if (capObj.hasCaption !== true) throw new Error('user 气泡下方无 .bubble-caption（P5 caption 未渲染）');
+    if (!/你 · 发送于 \d{1,2}:\d{2}/.test(String(capObj.capText))) {
+      throw new Error(`caption 文本不符（期望「你 · 发送于 HH:mm」，实际「${String(capObj.capText).slice(0, 60)}」）`);
+    }
+    if (capObj.bubbleHasFootnote !== false) {
+      throw new Error(`气泡内仍含「发送于」脚注（双向断言负向失败，bubbleHasFootnote=${capObj.bubbleHasFootnote}）`);
+    }
+    if (exceptions.length > exceptionsBeforeT) throw new Error('W-user-timestamp 用例期间出现 exceptionThrown');
+    record('W-user-timestamp', 'PASS', `caption 两向断言 OK（「${capObj.capText}」匹配 /你 · 发送于 \\d{1,2}:\\d{2}/；气泡内无「发送于」）；会话=${mat.sessionName}`);
+    await screenshot(ws, 'W-user-timestamp');
+    // 善后：删除自建物化会话（不污染真实会话列表）。
+    const cleaned = await deleteActiveSessionViaStore(ws);
+    log(`  W-user-timestamp 测试会话删除请求${cleaned ? '已发（善后）' : '失败（遗留人工清理）'}`);
+    await screenshot(ws, 'W-user-timestamp-cleaned');
+  } catch (e) { record('W-user-timestamp', 'FAIL', e.message); await screenshot(ws, 'W-user-timestamp-failed'); }
+
+  // ── 终审前清理块（P12 增）：B3 条件保留的会话（干净 profile 时供 B4-B6/W-changes-panel 消费）
+  // 在此按 id 删除收尾——E2E 不留垃圾会话（隔离/真实 profile 同纪律）。保留前提消失（已删/不在
+  // 列表）时为 no-op。不 record（非断言用例，仅善后）；清理失败只 log 不影响退出码。
+  currentCase = '(cleanup)';
+  if (b3SessionId) {
+    try {
+      const exists = await evalExpr(ws, `(() => {
+        const app = document.querySelector('#app');
+        const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+        const st = pinia && pinia._s ? pinia._s.get('session') : null;
+        return st ? (st.sessions || []).some((s) => s.id === ${JSON.stringify(b3SessionId)}) : false;
+      })()`);
+      if (exists === true) {
+        await evalExpr(ws, `(() => {
+          const app = document.querySelector('#app');
+          const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+          const st = pinia && pinia._s ? pinia._s.get('session') : null;
+          if (st) { void st.deleteSession(${JSON.stringify(b3SessionId)}); return true; }
+          return false;
+        })()`);
+        await waitFor('清理：B3 保留会话从列表移除', () => evalOk(ws, `(() => {
+          const app = document.querySelector('#app');
+          const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+          const st = pinia && pinia._s ? pinia._s.get('session') : null;
+          return st ? !(st.sessions || []).some((s) => s.id === ${JSON.stringify(b3SessionId)}) : true;
+        })()`), 10);
+        log('  终审前清理：B3 保留会话已按 id 删除');
+      } else {
+        log('  终审前清理：B3 保留会话已不在列表（B3 善后已删，no-op）');
+      }
+    } catch (e) { log(`  终审前清理失败（遗留人工清理）：${String(e.message).slice(0, 120)}`); }
+  }
+  await screenshot(ws, 'cleanup-final');
+
   // ── 全程异常终审（console error 即 FAIL；exceptionThrown 即 FAIL）──
   currentCase = '(final)';
   if (exceptions.length > 0) {
@@ -803,7 +1306,7 @@ async function main() {
   // ── 汇总 ──
   const failCount = results.filter((r) => r.status === 'FAIL').length;
   const skipCount = results.filter((r) => r.status === 'SKIP').length;
-  log('==== B1-B8 + W-changes-panel + W-mcp-settings 汇总 ====');
+  log('==== B1-B8 + W-changes-panel + W-mcp-settings + W-queue-panel + W-sidebar-actions + W-sidebar-collapse + W-user-timestamp 汇总 ====');
   for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
   log(`PASS ${results.filter((r) => r.status === 'PASS').length} / FAIL ${failCount} / SKIP ${skipCount}（证据目录 ${SHOT_DIR}）`);
   flushLog();

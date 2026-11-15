@@ -841,12 +841,14 @@ check('sdk-backend 从共享层导入 convertResultMessage，不再本地补 sub
   assert.ok(!sdkBackend.includes('function convertResultMessage'), '本地转换函数应移除');
   assert.ok(!sdkBackend.includes("(sdkMsg.subtype as string) ?? 'success'"), '无条件 ?? success 应移除');
 });
+// UI13-P3 改钉记录：侧栏卡片化后类名前缀 session-link → session-card（状态点 → 22px 状态块），
+// 状态语义（四态类/--session-status-color/pulse 恰 1 条/静态态 animation:none）不变。
 check('AppSidebar 四态类 + 状态点 + pulse 动画', () => {
-  assert.ok(sidebar.includes("'session-link--running'"));
-  assert.ok(sidebar.includes("'session-link--retrying'"));
-  assert.ok(sidebar.includes("'session-link--completed'"));
-  assert.ok(sidebar.includes("'session-link--network-interrupted'"));
-  assert.ok(sidebar.includes('class="session-link__status"'));
+  assert.ok(sidebar.includes("'session-card--running'"));
+  assert.ok(sidebar.includes("'session-card--retrying'"));
+  assert.ok(sidebar.includes("'session-card--completed'"));
+  assert.ok(sidebar.includes("'session-card--network-interrupted'"));
+  assert.ok(sidebar.includes('class="session-card__status"'));
   assert.ok(sidebar.includes('session-status-pulse'));
   assert.ok(sidebar.includes('aria-label'));
 });
@@ -857,7 +859,7 @@ check('AppSidebar 四态颜色经 --session-status-color token 控制（warn/dan
   // 静态态显式 animation:none；running/retrying 共用同一条 pulse keyframes（不复制两套）。
   const pulseDecls = sidebar.split('animation: session-status-pulse 1.2s ease-in-out infinite').length - 1;
   assert.equal(pulseDecls, 1, `pulse 动画声明应恰好 1 条，实际 ${pulseDecls}`);
-  assert.ok(sidebar.includes('session-link__status--network_interrupted'));
+  assert.ok(sidebar.includes('session-card__status--network_interrupted'));
   assert.ok(sidebar.includes('animation: none'));
 });
 check('AppSidebar 状态点带辅助技术可读的 aria-label/title（不只依赖颜色）', () => {

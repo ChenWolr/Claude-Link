@@ -3,11 +3,16 @@
 //   phase=persist：建会话 + 发消息 + 记录 session name/cliSessionId/lastContextTokens/lastContextWindow，不删会话。
 //   phase=resume ：重启后找到该会话，切到它，采 contextStats 与 DOM，验证是否把 last-known 伪装成 fresh。
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
 const CDP_PORT = 9223;
-const OUT = 'D:/software/Cache/claude-link/context-research/run-2026-08-21-205616';
+// R4（2026-11-11 脱敏收尾，对齐 F16/aceadb3 先例）：证据根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 缺省 = <系统临时目录>/claude-link-cache。历史 run 时间戳子目录保留（persist/resume 两阶段
+// 跨重启按同一常量定位证据，路径形状不变，仅落点随缓存根解析）。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const OUT = path.join(CACHE_ROOT, 'claude-link', 'context-research', 'run-2026-08-21-205616');
 const MARKER = 'S12-restart-marker.json';
 const SESSION_NAME = 'S12-restart-resume-probe';
 
@@ -57,7 +62,7 @@ async function main() {
     await new Promise((r) => setTimeout(r, 800));
     await evalExpr(ws, `(document.querySelector('.session-link.active') || document.querySelector('.session-link'))?.click(), true`);
     await waitFor('toolbar', () => evalOk(ws, `!!document.querySelector('.session-toolbar')`), 15);
-    await evalExpr(ws, `(() => { const btns = [...document.querySelectorAll('.session-toolbar .ctl__btn')]; const b = btns.find((x) => (x.textContent || '').includes('▾')); if (!b) throw new Error('ws btn'); b.click(); return true; })()`);
+    await evalExpr(ws, `(() => { const b = document.querySelector('[data-testid="workspace-trigger"]'); if (!b) throw new Error('ws btn'); b.click(); return true; })()`);
     const cwdOk = await evalExpr(ws, `(() => { const items = [...document.querySelectorAll('.session-toolbar .menu__item')]; const t = items.find((i) => i.getAttribute('title') === ${JSON.stringify(isoCwd)}); if (t) { t.click(); return true; } return false; })()`);
     if (!cwdOk) { console.error('无法设置 S12 会话工作目录（菜单项未找到）：' + isoCwd); process.exit(2); }
     const sessCheck = await evalExpr(ws, `window.claudeLink.getSession(${JSON.stringify(sid)})`);

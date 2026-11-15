@@ -6,10 +6,16 @@
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 const REPO = process.cwd();
-const EVID_ROOT = 'D:/software/Cache/claude-link/context-research';
+// R3（2026-11-11 脱敏收尾）级联：EVID_ROOT 必须与 cdp-context-e2e.mjs 的 EVIDENCE_DIR 父目录
+// 同源解析（CLAUDE_LINK_CACHE_ROOT ?? <系统临时目录>/claude-link-cache），否则证据落点漂移后本链核验失明。
+const EVID_ROOT = join(
+  process.env.CLAUDE_LINK_CACHE_ROOT ?? join(tmpdir(), 'claude-link-cache'),
+  'context-research',
+);
 
 let pass = 0;
 let fail = 0;

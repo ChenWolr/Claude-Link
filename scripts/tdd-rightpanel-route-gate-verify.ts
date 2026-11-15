@@ -52,14 +52,17 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   const hasComputed = layout.includes('isChatRoute') && layout.includes("route.name === 'chat'");
   check('C', '①', 'AppLayout 含 isChatRoute（route.name === \'chat\'）', hasComputed,
     '缺 useRoute + isChatRoute computed');
-  const gate = layout.includes('v-if="isTaskPanelOpen && isChatRoute"');
-  check('C', '②', '右栏手柄+面板模板门 v-if="isTaskPanelOpen && isChatRoute"', gate,
-    'resize-handle--task/TaskQueuePanel 仍不感知路由');
-  const reopenGate = layout.includes('v-else-if="isChatRoute"');
-  check('C', '③', 'reopen 按钮仅 chat 页 v-else-if="isChatRoute"', reopenGate,
-    '「队列」悬浮按钮仍出现在非 chat 路由');
+  const gate = layout.includes('v-if="isChatRoute && (!panelForceHidden || panelRecalled)"');
+  check('C', '②', '右栏手柄+面板模板门 v-if="isChatRoute && (!panelForceHidden || panelRecalled)"', gate,
+    '面板门未接 B4 断点状态机（panelForceHidden/panelRecalled）');
+  const reopenGate = layout.includes('v-else-if="isChatRoute && panelForceHidden && !panelRecalled"');
+  check('C', '③', '唤回条仅 chat 页且仅断点隐藏未唤回时 v-else-if="isChatRoute && panelForceHidden && !panelRecalled"', reopenGate,
+    '唤回条门未接断点状态机（宽窗恒开语义破坏）');
   const widthPinned = /taskWidth\s*=\s*ref\(340\)/.test(layout);
   check('C', '④', 'taskWidth = ref(340) 契约不回归', widthPinned, '宽度契约（selftest-settings-mapping 1406）钉死');
+  const noDeadState = !layout.includes('isTaskPanelOpen');
+  check('C', '⑤', 'isTaskPanelOpen 死状态已整体删除（B4-K4 现状死入口代码消化）', noDeadState,
+    'isTaskPanelOpen 残留（死状态复活）');
 }
 
 // D. use-task-queue.ts 已删除，且 src/renderer 内无 'use-task-queue' 残留引用（防死代码复活）。

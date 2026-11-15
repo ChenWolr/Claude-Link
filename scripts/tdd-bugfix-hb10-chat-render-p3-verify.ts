@@ -159,12 +159,19 @@ check('⑩ CHR-01：use-stream 三 watch 改节流（首条立即+50ms 间隔+tr
   assert.match(useStreamSrc, /pushTool\(content\)/, 'tool watch 未接节流');
   assert.doesNotMatch(useStreamSrc, /\}, 50\);/, '旧 50ms 防抖形态须移除');
 });
-check('⑫ CHR-03：ToolCallBlock parse 失败回退展示原文 pre', () => {
-  const idx = tcb.indexOf('v-if="useParsed"');
-  assert.ok(idx > -1, '缺 useParsed 分支');
-  const body = tcb.slice(idx, idx + 300);
-  assert.match(body, /v-else-if="use"/, '缺 parse 失败原文回退分支');
-  assert.match(body, /\{\{ use\.content \}\}/, '回退分支未展示原文');
+// ⑫ hb12-CHR-03（2026-11-09 C7 模板合并改钉，编排器裁定）：入参 JSON 展示模板已由旧
+// 「v-if=useParsed / v-else-if=use 两分支 + {{ use.content }}」合并为 jsonText computed
+// 单测量面（useParsed 命中 → JSON.stringify(input)；parse 失败/非 JSON → props.use?.content
+// 原文回退）。parse 失败回退展示原文的语义不变，仅改钉法：钉 jsonText computed 两分支字面 +
+// pre 渲染 {{ jsonText }}；旧两分支字面残留清零（负向钉）。
+check('⑫ CHR-03：ToolCallBlock parse 失败回退展示原文 pre（C7 jsonText 合并形态）', () => {
+  const fnIdx = tcb.indexOf('const jsonText = computed(() => {');
+  assert.ok(fnIdx > -1, '缺 jsonText computed（C7 合并形态前提）');
+  const body = tcb.slice(fnIdx, fnIdx + 400);
+  assert.match(body, /if \(useParsed\.value\) return JSON\.stringify\(useParsed\.value\.input \?\? \{\}, null, 2\);/, '缺 useParsed JSON 序列化分支');
+  assert.match(body, /return props\.use\?\.content \?\? '';/, '缺 parse 失败原文回退分支（CHR-03 语义本体）');
+  assert.match(tcb, /<pre>\{\{ jsonText \}\}<\/pre>/, '原文回退未接 pre 展示面（{{ jsonText }} 缺失）');
+  assert.doesNotMatch(tcb, /\{\{ use\.content \}\}/, '旧原文分支字面残留（模板应已合并）');
 });
 
 // ⑬ hb13-v B10.3：折叠豁免清单补 system:error——失败原因独立成条不被折进过程组（错误可见性）。

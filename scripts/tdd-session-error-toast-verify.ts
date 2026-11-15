@@ -56,8 +56,18 @@ check('连续失败重置计时（clearTimeout + 3.5s 窗），卸载清理定�
   const unmountIdx = app.indexOf('onBeforeUnmount(');
   assert.ok(unmountIdx > -1 && /if \(sessionErrorToastTimer\) clearTimeout\(sessionErrorToastTimer\);/.test(app.slice(unmountIdx)), '卸载缺定时器清理');
 });
-check('模板含 sessionErrorToast 节点（复用 global-toast--error 样式，纯展示不拦截交互）', () => {
-  assert.match(app, /<div v-if="sessionErrorToastVisible" class="global-toast global-toast--error[^"]*">\{\{ sessionErrorToastText \}\}<\/div>/, '缺 toast 模板节点');
+check('模板含 sessionErrorToast 节点（复用 global-toast--error 样式；I10 起节点带 error 图标 + × 关闭钮 + 文本子节点）', () => {
+  // I10 同步（原精确 regex 要求文本直挂 div 同行闭合，节点结构变后失配）：语义不变，
+  // 结构放宽到新目标态——节点存在 + error 样式/错位类 + 图标 + × 钮（aria-label=关闭提示）+ 文本绑定子节点。
+  const start = app.indexOf('<div v-if="sessionErrorToastVisible"');
+  assert.ok(start > -1, '缺 toast 模板节点');
+  const block = app.slice(start, app.indexOf('</div>', start));
+  assert.match(block, /class="global-toast global-toast--error[^"]*"/, '未复用 global-toast--error 样式');
+  assert.ok(block.includes('global-toast--stacked'), '缺 stacked 错位类');
+  assert.ok(block.includes('class="global-toast__icon"'), '缺 error 图标（I10）');
+  assert.ok(block.includes('class="global-toast__close"'), '缺 × 关闭钮（I10）');
+  assert.ok(block.includes('aria-label="关闭提示"'), '关闭钮 aria-label 漂移（须「关闭提示」）');
+  assert.ok(block.includes('<span class="global-toast__text">{{ sessionErrorToastText }}</span>'), '缺文本绑定子节点');
 });
 check('双 toast 同屏纵向错开（stacked 修饰类）', () => {
   assert.match(app, /global-toast--stacked/, '缺 stacked 修饰类');

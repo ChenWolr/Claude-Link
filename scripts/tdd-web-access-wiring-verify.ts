@@ -35,7 +35,7 @@
 //      + web-bridge hash token/退避/生命周期重试/断线 reject/重连对齐序列。
 //   ⑫ P5：ConfigPage「网页访问（局域网）」节——webAccess 保存路径（PERSISTED_FIELDS 快照 +
 //      store.config.webAccess 整体替换写）、webAccessGetInfo/RegenerateToken/CopyLink 三调用、
-//      requestConfirm 本地二次确认序、状态卡三态（未开启/urls+qrDataUrl/error message）、令牌
+//      requestConfirm 本地二次确认序、状态卡三态（off 警示行/urls+qrDataUrl/error message）、令牌
 //      掩码（前4+****+后4）与「显示」切换、端口 1024–65535 失焦 sanitize、allowedHosts 逗号
 //      分隔 + placeholder、安全文案两条、保存后/web tab 激活刷新状态卡；config-store
 //      defaultConfig 含 webAccess 默认值。
@@ -536,8 +536,10 @@ check('ConfigPage 含 webAccessCopyLink 调用', configPage.includes('window.cla
   check('regenerate 后刷新状态卡（refreshWebAccessInfo）', regenSeg.includes('refreshWebAccessInfo()'));
 }
 
-// 12.3 状态卡三态：off「未开启」/ running 逐条 urls + 首条二维码 qrDataUrl / error message
-check('状态卡 off 文案「未开启」', configPage.includes('未开启'));
+// 12.3 状态卡三态：off 警示行（H6 替换执行裁决 2026-11-10：原「未开启」行替换为 warn 警示行）/
+//   running 逐条 urls + 首条二维码 qrDataUrl / error message
+check('状态卡 off 警示行文案「网页访问已关闭 · 局域网设备无法连接；已连接设备将被断开」（H6 替换「未开启」）',
+  configPage.includes('网页访问已关闭 · 局域网设备无法连接；已连接设备将被断开'));
 check('状态卡 running 逐条列出 urls（v-for）', /v-for="url in webAccessInfo\?\.urls \?\? \[\]"/.test(configPage));
 check('首条 URL 带二维码（v-if qrDataUrl 守卫 + img :src）',
   /<img v-if="webAccessInfo\?\.qrDataUrl"[^>]*:src="webAccessInfo\.qrDataUrl"/.test(configPage));

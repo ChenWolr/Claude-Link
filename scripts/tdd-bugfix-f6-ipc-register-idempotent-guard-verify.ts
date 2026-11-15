@@ -48,13 +48,26 @@ console.log('=== F6-② activate 路径恢复命令管线 ===');
 {
   check('startGlobalCommandPipeline helper 存在（首启/重启共用依赖注入）', /function startGlobalCommandPipeline\(\)/.test(mainIndex));
   const helperAt = mainIndex.indexOf('function startGlobalCommandPipeline()');
-  // 切片边界取 startCommandSourceWatcher({...}) 调用语句的收口「});」而非「首个 }」：
-  // S5 把 triggerGlobalProbe 从单行三元改为多行块体后，注入对象内部出现了「}」，
-  // 旧的「首个 }」切片会提前截断、把 onConfigSaved/logger 切出 helperBody 造成误报；
-  // 「});」当前只出现在注入对象收口。若未来对象内部再嵌套以「});」收口的语句，须改用
-  // 括号配对扫描，勿回退到「首个 }」。
+  // 切片边界取 startCommandSourceWatcher({...}) 调用语句的收口而非「首个 }」：
+  // S5 把 triggerGlobalProbe 从单行三元改为多行块体后，「首个 }」会提前截断（当时改「首个 });」）；
+  // UI13-P8 注入对象内新增 getProjectSkillDirs/onProjectSkillsChanged 箭头函数属性，其函数体内
+  // 出现以「{});」收口的 pushToMainWindow(..., {}) 语句，「首个 });」切片同样提前截断（切在
+  // onConfigSaved/logger 之前，三键注入断言误报）——按本切片既定演进方向改括号配对扫描。
   const watcherAt = mainIndex.indexOf('startCommandSourceWatcher({', helperAt);
-  const helperBody = mainIndex.slice(helperAt, mainIndex.indexOf('});', watcherAt) + 3);
+  let helperBody = '';
+  {
+    const openIdx = mainIndex.indexOf('{', watcherAt);
+    let depth = 0;
+    for (let i = openIdx; i > -1 && i < mainIndex.length; i += 1) {
+      const ch = mainIndex[i];
+      if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) { helperBody = mainIndex.slice(helperAt, i + 1); break; }
+      }
+    }
+  }
+  if (!helperBody) helperBody = mainIndex.slice(helperAt, mainIndex.indexOf('});', watcherAt) + 3);
   check('helper 内启动全局兜底探测', helperBody.includes('runGlobalCommandProbe('));
   check('helper 内启动命令源监视', helperBody.includes('startCommandSourceWatcher({'));
   check('helper 注入 getUserHome/workingDirectory/onConfigSaved',

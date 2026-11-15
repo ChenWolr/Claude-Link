@@ -1,7 +1,7 @@
 // claude-code-command-e2e-verify.ts
 // Claude Code 命令真实端到端验证（Task 3 起逐 Task 扩展）。
 //
-// 职责：用本地真实 claude.exe + D:\software\Cache\temp 隔离目录做真实 SDK 行为验证，断言磁盘
+// 职责：用本地真实 claude.exe + <系统临时目录>（TEMP_ROOT = os.tmpdir()，R5 脱敏）隔离目录做真实 SDK 行为验证，断言磁盘
 // 结果与事件终态，而不是只检查字符串包含。目前实现 --settings（Task 3）、--command（Task 4）、
 // --init-matrix（Task 5）；后续 Task 追加：--replacements（Task 6）、--all（Task 7）。
 //
@@ -10,7 +10,7 @@
 //   - 未触发：SKIP + exit 0。
 //   - 触发但 claude.exe 缺失 → 中文前置条件错误 + exit 2。
 //   - 触发且断言失败 → exit 1。
-//   - 真实目录/配置一律位于 D:\software\Cache\temp，测试结束清理。
+//   - 真实目录/配置一律位于 <系统临时目录>（TEMP_ROOT = os.tmpdir()，R5 脱敏），测试结束清理。
 //
 // 运行：CLAUDE_LINK_RUN_NATIVE_E2E=1 npx tsx scripts/claude-code-command-e2e-verify.ts --settings
 import { strict as assert } from 'node:assert';
@@ -30,16 +30,27 @@ import {
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 // Task 6：候选平替等价性规格单一真相源（矩阵只存测试规格，e2e 以真实 SDK 证据断言它）。
 // review-v9 §3：行为契约（sideEffects required/not-applicable）同样以矩阵为单一真相源。
 import { REPLACEMENT_CANDIDATES, behaviorContractOf, type ReplacementField, type SideEffectObservable } from './claude-code-command-matrix';
 
 const RUN_NATIVE =
   process.argv.includes('--native') || process.env.CLAUDE_LINK_RUN_NATIVE_E2E === '1';
-const TEMP_ROOT = 'D:/software/Cache/temp';
-// demo 目标环境 executable（与 claude-code-command-baseline.ts 同源）。
+// R5（2026-11-11 脱敏收尾，对齐 F16/F19/aceadb3 先例）：缓存根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 缺省 = <系统临时目录>/claude-link-cache。与 claude-code-command-baseline.ts / claude-code-command-matrix.ts
+// 的 CACHE_ROOT 同源解析——baseline 写 / 本文件读（command-baseline.json），落点同位是 --require-all 门禁链对齐的前提。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+// R5 脱敏（对齐 aceadb3 先例）：临时根取系统临时目录（尊重 TMP/TEMP 环境变量可重定向），
+// 不硬编码本机盘符；mkdtemp 父目录语义不变（系统临时目录恒存在），隔离/清扫语义不变。
+const TEMP_ROOT = os.tmpdir();
+// demo 目标环境 executable（与 claude-code-command-baseline.ts 同源）。R5 脱敏：可经 CLAUDE_CODE_BIN
+// 覆盖；缺省为缓存根下 npm-global 布局（脱敏后通常不存在，属预期）——本指针在 resolveClaudeExe
+// 中为 existsSync 优先尝试项，落空走既有 PATH(.cmd shim)/npm 全局兜底（与 baseline R4 裁定同款：
+// 改成 env 缺省即报错会废掉兜底链，属行为退化）。
 const DEMO_EXE_PATH =
-  'D:/software/Cache/npm-global/node_modules/@anthropic-ai/claude-code/bin/claude.exe';
+  process.env.CLAUDE_CODE_BIN ??
+  path.join(CACHE_ROOT, 'npm-global', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
 
 // ── exe 解析（复刻 baseline 的最小版：显式 > demo > PATH(.cmd shim) > npm 全局）─────────
 function isExe(p: string): boolean {
@@ -1923,7 +1934,7 @@ type SideEffectEvidence = {
 //   - hidden（removed/internal）：验证 origin 分类 + 菜单不展示语义（结构契约）。
 //   - commands_changed：在测试 cwd 新增 skill + /reload-skills，断言真实 commands_changed 事件。
 // 任一命令不得停留在「未验证」状态——环境无法验证的（如缺凭据）记 explicit-skip 并写明原因。
-const VERIFICATION_OUT_FILE = path.join('D:/software/Cache', 'claude-link', 'command-verification.json');
+const VERIFICATION_OUT_FILE = path.join(CACHE_ROOT, 'claude-link', 'command-verification.json');
 
 type VerificationStatus =
   | 'verified' // 真实 SDK 行为证据（result 终态 + 事件/副作用）
@@ -1984,7 +1995,7 @@ function readBaselineJson(): {
   slashCommands: string[];
 } | null {
   try {
-    const raw = readFileSync(path.join('D:/software/Cache', 'claude-link', 'command-baseline.json'), 'utf8');
+    const raw = readFileSync(path.join(CACHE_ROOT, 'claude-link', 'command-baseline.json'), 'utf8');
     const b = JSON.parse(raw) as Record<string, unknown>;
     const env = (b.environment ?? {}) as Record<string, unknown>;
     const commands = (b.commands ?? []) as Array<{ name: string; description?: string; argumentHint?: string; origin?: string }>;
@@ -2035,7 +2046,7 @@ async function runAllMode(exe: string): Promise<void> {
     generatedAt: new Date().toISOString(),
     ccVersion: baseline.ccVersion,
     sdkVersion: baseline.sdkVersion,
-    baselineFile: path.join('D:/software/Cache', 'claude-link', 'command-baseline.json'),
+    baselineFile: path.join(CACHE_ROOT, 'claude-link', 'command-baseline.json'),
     entries: {},
   };
   const mark = (name: string, entry: VerificationEntry): void => {

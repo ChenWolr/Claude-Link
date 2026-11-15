@@ -21,20 +21,30 @@
 //   4. 删除 b → 再 /reload-skills → DOM 中 b 消失、a 保留、命令数符合新快照（不 concat）。
 //   5. 第二会话（不同 cwd）只显示自己的 fixture；切回第一会话再次确认（会话隔离）。
 //   6. 延迟 probe：probe 未返回前触发 commands_changed，确认旧 probe 不把 DOM 回退到旧 revision。
+//   7. E4（slate-ui-completion-1108-1428）：斜杠菜单 listbox 三件套（aria-activedescendant 随
+//      ArrowDown 同步）+ 命令 desc muted 小字渲染与超长 ellipsis 采样 + 键盘/点击选中后焦点回
+//      textarea（光标钉尾）+ 空态状态行不混入 option 语义。既有场景 1~6 断言零触碰。
 //
 // 记录：每步输出 sessionId、snapshot revision（source+updatedAt+count 组合代理）、
 // DOM 菜单命令名、来源徽章、时间戳与最终 exit code。不记录 API key/完整 settings/用户文件内容。
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
 const CDP_PORT = 9223;
-const E2E_ROOT = 'D:/software/Cache/claude-link/e2e';
+// R3（2026-11-11 脱敏收尾，对齐 aceadb3 先例）：缓存根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 未设时落 os.tmpdir() 子目录——去盘符硬编码，读写自身目录语义不变。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const E2E_ROOT = path.join(CACHE_ROOT, 'e2e');
 const RUN_ID = `cdp-cmds-${Date.now()}`;
 const FIXTURE_A = path.join(E2E_ROOT, RUN_ID, 'cwd-a').replace(/\\/g, '/');
 const FIXTURE_B = path.join(E2E_ROOT, RUN_ID, 'cwd-b').replace(/\\/g, '/');
 const SKILL_A = 'test-cdp-skill-a';
+// E4-05 超长 desc fixture：desc 足够长（≈600+ 字符）以保证菜单宽度内必溢出，
+// ellipsis 采样（scrollWidth > clientWidth）确定性成立；文本前缀供 desc 渲染断言锚定。
+const SKILL_A_DESC = 'E4 long-desc fixture: ' + 'ellipsis-overflow-sample.'.repeat(24);
 const SKILL_B = 'test-cdp-skill-b';
 const SKILL_C = 'test-cdp-skill-c';
 
@@ -172,8 +182,7 @@ async function setWorkingDirViaUI(ws, sid, dir) {
   await waitFor('回到聊天页（工具栏出现）', () => evalOk(ws, `!!document.querySelector('.session-toolbar')`), 15);
   // 打开工作空间菜单，点击「最近使用」中的目标目录（真实 UI 路径：chooseRecent → store.setActiveSessionWorkingDir）。
   await evalExpr(ws, `(() => {
-    const btns = [...document.querySelectorAll('.session-toolbar .ctl__btn')];
-    const wsBtn = btns.find((b) => (b.textContent || '').includes('▾'));
+    const wsBtn = document.querySelector('[data-testid="workspace-trigger"]');
     if (!wsBtn) throw new Error('工作空间按钮未找到');
     wsBtn.click();
     return true;
@@ -191,7 +200,8 @@ async function setWorkingDirViaUI(ws, sid, dir) {
   })()`), 15);
 }
 
-/** 在真实输入框键入文本（focus → 清空 → Input.insertText 触发真实 input 事件 → Vue 渲染菜单）。 */
+/** 在真实输入框键入文本（focus → 清空 → Input.insertText 触发真实 input 事件 → Vue 渲染菜单）。
+ *  空文本只清空不 insertText（CDP Input.insertText 空串行为未定义，场景7 清理草稿用到）。 */
 async function typeInChatInput(ws, text) {
   await evalExpr(ws, `(() => {
     const ta = document.querySelector('[data-testid="chat-input-textarea"]');
@@ -202,7 +212,7 @@ async function typeInChatInput(ws, text) {
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     return true;
   })()`);
-  await insertText(ws, text);
+  if (text) await insertText(ws, text);
   await new Promise((r) => setTimeout(r, 300));
 }
 
@@ -277,7 +287,7 @@ async function main() {
   precondition(hasBridge, 'preload bridge (window.claudeLink) 不可用——Electron/preload 未正常启动。无法执行，exit 2。');
 
   // 夹具：cwd-a 带 skill-a；cwd-b 带独立 skill；延迟 probe 场景用 cwd-a 下后加 skill-c。
-  writeSkill(FIXTURE_A, SKILL_A, 'CDP commands-e2e skill A');
+  writeSkill(FIXTURE_A, SKILL_A, SKILL_A_DESC);
   writeSkill(FIXTURE_B, 'test-cdp-iso-fixture', 'CDP commands-e2e isolation fixture');
 
   const created = [];
@@ -423,6 +433,109 @@ async function main() {
         const r = await menuHasItem(ws, SKILL_C);
         return r && !r.present ? true : null;
       }, 60, 1000);
+    });
+
+    // ── 场景7（E4 slate-ui-completion-1108-1428）：listbox 三件套 + muted desc + 超长 ellipsis
+    //    + 键盘/点击选中回焦 + 空态不混入 option 语义。用例正本 = E-input-area-cases.md §E4
+    //    （E4-01③/E4-03/E4-04/E4-05/E4-10）；静态侧钉在 tdd-ui-e-input-area-verify.ts E4 节。
+    await check('场景7（E4）listbox aria 同步 + desc 渲染/超长 ellipsis + 选中回焦 textarea + 空态 option 语义', async () => {
+      const readMenuState = `(() => {
+        const list = document.querySelector('[role="listbox"]');
+        if (!list) return { open: false };
+        const opts = [...list.querySelectorAll('[role="option"]')];
+        return {
+          open: true,
+          active: list.getAttribute('aria-activedescendant'),
+          activeResolves: !!(list.getAttribute('aria-activedescendant') && document.getElementById(list.getAttribute('aria-activedescendant'))),
+          count: opts.length,
+          first: opts[0] ? { id: opts[0].id, sel: opts[0].getAttribute('aria-selected'), cmd: opts[0].dataset.command } : null,
+          second: opts[1] ? { id: opts[1].id, sel: opts[1].getAttribute('aria-selected'), cmd: opts[1].dataset.command } : null,
+        };
+      })()`;
+      // ① 打开菜单（空过滤词）→ option ≥2（E4-03 前置：菜单打开、≥2 个命令）。
+      await typeInChatInput(ws, '/');
+      const s0 = await waitFor('菜单打开且 option ≥2', async () => {
+        const s = await evalExpr(ws, readMenuState);
+        return s.open && s.count >= 2 ? s : null;
+      }, 30);
+      if (s0.active !== s0.first.id) throw new Error(`初始 aria-activedescendant=${s0.active} ≠ 首项 id=${s0.first.id}（E4-02 结构）`);
+      if (s0.first.sel !== 'true' || s0.second.sel !== 'false') throw new Error(`初始 aria-selected 不符：first=${s0.first.sel} second=${s0.second.sel}（期望 true/false）`);
+      // ② E4-03 键盘同步：ArrowDown 一次 → activedescendant/aria-selected 随选中移动。
+      await evalExpr(ws, `(() => { document.querySelector('[data-testid="chat-input-textarea"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true })); return true; })()`);
+      const s1 = await waitFor('ArrowDown 后 aria 跟随', async () => {
+        const s = await evalExpr(ws, readMenuState);
+        return s.active === s0.second.id && s.second.sel === 'true' && s.first.sel === 'false' ? s : null;
+      }, 10, 100);
+      log(`  ℹ aria 同步：activedescendant ${s0.first.id} → ${s1.active}；first.sel=${s1.first.sel} second.sel=${s1.second.sel}`);
+      // ③ E4-04 键盘路径：Enter 选中 → 焦点回 textarea、值=插入命令、光标钉尾、菜单关闭。
+      await evalExpr(ws, `(() => { document.querySelector('[data-testid="chat-input-textarea"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); return true; })()`);
+      const kb = await waitFor('Enter 选中后焦点回 textarea', async () => evalExpr(ws, `(() => {
+        const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+        return {
+          focused: document.activeElement === ta,
+          value: ta ? ta.value : null,
+          pos: ta ? ta.selectionStart : null,
+          menuOpen: !!document.querySelector('[role="listbox"]'),
+        };
+      })()`).then((r) => (r.focused && !r.menuOpen && r.value === '/' + s0.second.cmd + ' ' ? r : null)), 10, 100);
+      if (kb.pos !== kb.value.length) throw new Error(`光标未钉尾：pos=${kb.pos} len=${kb.value.length}（E4-04 键盘路径）`);
+      log(`  ℹ 键盘路径回焦：value=${JSON.stringify(kb.value)} 光标=${kb.pos} activeElement=textarea ✔`);
+      // ④ E4-01③/E4-05：desc 渲染（fixture 前缀锚定）+ muted 小字 + 超长 ellipsis 采样
+      //    （过滤到 skill-a 保证入列可见——全量列表首屏可能不含 test-* 尾部命令）。
+      await typeInChatInput(ws, `/${SKILL_A}`);
+      const descInfo = await waitFor('skill-a 项 desc 采样', async () => {
+        const d = await evalExpr(ws, `(() => {
+          const item = document.querySelector('[data-testid="slash-menu-item"][data-command=${JSON.stringify(SKILL_A)}]');
+          if (!item) return null;
+          const desc = item.querySelector('.slash-menu__desc');
+          if (!desc) return { hasDesc: false };
+          const cs = getComputedStyle(desc);
+          const name = item.querySelector('.slash-menu__name');
+          return { hasDesc: true, text: desc.textContent, textOverflow: cs.textOverflow, whiteSpace: cs.whiteSpace, overflow: cs.overflow, scrollW: desc.scrollWidth, clientW: desc.clientWidth, fontSize: cs.fontSize, nameFontSize: name ? getComputedStyle(name).fontSize : null };
+        })()`);
+        return d && d.hasDesc ? d : null;
+      }, 30);
+      if (!descInfo.text.startsWith('E4 long-desc fixture:')) throw new Error(`desc 文本不符 fixture（E4-01③）：${JSON.stringify(String(descInfo.text).slice(0, 60))}`);
+      if (descInfo.textOverflow !== 'ellipsis' || descInfo.whiteSpace !== 'nowrap' || descInfo.overflow !== 'hidden') throw new Error(`desc 截断 computed 不符（E4-05）：textOverflow=${descInfo.textOverflow} whiteSpace=${descInfo.whiteSpace} overflow=${descInfo.overflow}`);
+      if (!(descInfo.scrollW > descInfo.clientW)) throw new Error(`超长 desc 未溢出（scrollW=${descInfo.scrollW} clientW=${descInfo.clientW}）——ellipsis 无从验证`);
+      const fsNum = (v) => parseFloat(String(v));
+      if (!(fsNum(descInfo.fontSize) < fsNum(descInfo.nameFontSize))) throw new Error(`desc 字号未小于命令名（E4-01②）：desc=${descInfo.fontSize} name=${descInfo.nameFontSize}`);
+      log(`  ℹ desc fontSize=${descInfo.fontSize}（name=${descInfo.nameFontSize}）；超长采样 scrollW=${descInfo.scrollW}>clientW=${descInfo.clientW} ellipsis ✔`);
+      // ⑤ E4-04 点击路径：真实 click 选中 → 焦点回 textarea、值=插入命令、光标钉尾。
+      await typeInChatInput(ws, '/');
+      const s2 = await waitFor('菜单重新打开', async () => {
+        const s = await evalExpr(ws, readMenuState);
+        return s.open && s.count >= 1 ? s : null;
+      }, 30);
+      await evalExpr(ws, `document.querySelector('[data-testid="slash-menu-item"]').click(), true`);
+      const cl = await waitFor('点击选中后焦点回 textarea', async () => evalExpr(ws, `(() => {
+        const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+        return { focused: document.activeElement === ta, value: ta ? ta.value : null, pos: ta ? ta.selectionStart : null, menuOpen: !!document.querySelector('[role="listbox"]') };
+      })()`).then((r) => (r.focused && !r.menuOpen ? r : null)), 10, 100);
+      if (cl.value !== '/' + s2.first.cmd + ' ') throw new Error(`点击插入值不符：${JSON.stringify(cl.value)} ≠ /${s2.first.cmd} `);
+      if (cl.pos !== cl.value.length) throw new Error(`点击路径光标未钉尾：pos=${cl.pos} len=${cl.value.length}`);
+      log(`  ℹ 点击路径回焦：value=${JSON.stringify(cl.value)} 光标=${cl.pos} ✔`);
+      // ⑥ E4-10 空态：无匹配过滤词 → 状态行出现且不混入 option 语义。
+      await typeInChatInput(ws, '/zzz-no-such-cmd-e4');
+      const empty = await waitFor('空态状态行出现', async () => {
+        const e = await evalExpr(ws, `(() => {
+          const list = document.querySelector('[role="listbox"]');
+          const status = document.querySelector('.slash-menu__status');
+          return {
+            optCount: list ? list.querySelectorAll('[role="option"]').length : null,
+            statusText: status ? status.textContent.trim() : null,
+            tailHasAriaSelected: [...document.querySelectorAll('.slash-menu__status, .slash-menu__hint, .slash-menu__provenance')].some((el) => el.hasAttribute('aria-selected')),
+            activeDangling: list && list.getAttribute('aria-activedescendant') ? !document.getElementById(list.getAttribute('aria-activedescendant')) : null,
+          };
+        })()`);
+        return e.statusText ? e : null;
+      }, 15);
+      if (empty.optCount !== 0) throw new Error(`空态 listbox 仍有 ${empty.optCount} 个 option（E4-10）`);
+      if (empty.statusText !== '当前会话没有可用 Slash Command（仍可直接输入发送）') throw new Error(`空态文案被动：${JSON.stringify(empty.statusText)}`);
+      if (empty.tailHasAriaSelected) throw new Error('状态/提示区行带 aria-selected（option 语义污染，E4-10）');
+      if (empty.activeDangling !== true) throw new Error(`空态 activedescendant 应指向不存在的 id（或空）：dangling=${empty.activeDangling}`);
+      log(`  ℹ 空态：status 文案逐字、option=0、尾部行无 aria-selected、activedescendant 悬空 ✔`);
+      await typeInChatInput(ws, ''); // 清理草稿
     });
   } finally {
     await cleanup();

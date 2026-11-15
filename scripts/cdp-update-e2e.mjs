@@ -15,12 +15,17 @@
 // 用法：node scripts/cdp-update-e2e.mjs
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const CDP_PORT = 9224;
 const FEED_PORT = 8788;
 const EXE = 'dist-electron/win-unpacked/claude-link.exe';
-const ISO_DIR = 'D:/software/Cache/claude-link-update-e2e-userdata';
+// R3（2026-11-11 脱敏收尾，对齐 aceadb3 先例）：隔离 userData 根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 未设时落 os.tmpdir() 子目录——去盘符硬编码，隔离目录读写自身语义不变。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const ISO_DIR = path.join(CACHE_ROOT, 'claude-link-update-e2e-userdata');
 let pass = 0, fail = 0;
 const log = (m) => console.log(`[update-e2e] ${m}`);
 async function check(name, fn) {

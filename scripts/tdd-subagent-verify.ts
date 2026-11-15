@@ -49,6 +49,24 @@ function msg(partial: Partial<Message> & { id: string }): Message {
   };
 }
 
+// F4（附 A-1 同步用）：大括号配平提取 SFC 内 startMarker 起始的完整函数体
+//（嵌套安全：函数体无字符串含括号——形态同 tdd-activity-f1-f5-verify 同名工具）。
+function extractBracedFn(src: string, startMarker: string): string {
+  const idx = src.indexOf(startMarker);
+  assert.ok(idx > -1, `源码缺 ${startMarker}（实现缺口）`);
+  let depth = 0;
+  let started = false;
+  for (let i = idx; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') { depth += 1; started = true; }
+    else if (ch === '}') {
+      depth -= 1;
+      if (started && depth === 0) return src.slice(idx, i + 1);
+    }
+  }
+  assert.ok(false, `${startMarker} 函数体提取失败（大括号配平未闭合）`);
+}
+
 console.log('\n=== formatDuration ===');
 check('null → 「—」', () => {
   assert.equal(formatDuration(null), '—');
@@ -282,10 +300,25 @@ check('TaskQueuePanel 只保留一处子Agent耗时文本', () => {
   assert.equal(tqp.includes('subagent-group__meta'), false);
   assert.equal(tqp.includes('subAgentDurationText(g)'), true);
 });
-check('TaskQueuePanel 未完成组不误显示「已完成」', () => {
+check('TaskQueuePanel 子Agent 状态徽章三态可分，未完成组不误显示「已完成」（F4 附 A-1 同步：三态等价断言）', () => {
   const tqp = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');
+  // 文字三态保全：subAgentStatusText 三分支逐字（running→进行中；completed ? '已完成' : '未完成' 字面在位）。
   assert.equal(tqp.includes('subAgentStatusText(g)'), true);
   assert.equal(tqp.includes("g.completed ? '已完成' : '未完成'"), true);
+  // 类三态等价：subAgentStatusClass 真实执行——running≠已完成≠未完成，未完成组不落「已完成」类。
+  const fnSrc = extractBracedFn(tqp, 'function subAgentStatusClass');
+  const js = fnSrc.replace(/^function subAgentStatusClass\([^)]*\)[^{]*\{/, 'function (g) {');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const cls = (new Function(`"use strict"; return (${js});`) as any)() as (g: { running?: boolean; completed?: boolean }) => string;
+  const running = cls({ running: true, completed: false });
+  const done = cls({ running: false, completed: true });
+  const incomplete = cls({ running: false, completed: false });
+  assert.equal(String(running).includes('subagent-group__status--running'), true);
+  assert.equal(String(done).includes('subagent-group__status--done'), true);
+  assert.equal(String(incomplete).includes('subagent-group__status--incomplete'), true);
+  assert.notEqual(incomplete, done, '未完成组不得落「已完成」类（不误显已完成）');
+  assert.notEqual(running, done, '三态互斥破坏：running 与 done 同类');
+  assert.notEqual(running, incomplete, '三态互斥破坏：running 与 incomplete 同类');
 });
 check('子Agent 正文/总结气泡在右侧栏内横向撑满', () => {
   const tqp = readFileSync(new URL('../src/renderer/components/task/TaskQueuePanel.vue', import.meta.url), 'utf8');

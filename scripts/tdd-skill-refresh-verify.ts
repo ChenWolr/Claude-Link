@@ -210,8 +210,10 @@ check('同步条仅全局作用域渲染（v-if skillScope.kind === \'global\'�
 check('同步条开关绑定 store.config.skillAutoSync（复用既有自动保存链）',
   configPage.includes('v-model="store.config.skillAutoSync"'));
 check('开关 aria-label「自动同步 Skill 变更」', configPage.includes('aria-label="自动同步 Skill 变更"'));
-check('hint 文案随开关分化（监听目录 / 已暂停自动同步需手动刷新）',
-  configPage.includes('监听 ~/.claude/skills 与全局工作目录 .claude/skills') &&
+// UI13-P8 改钉：监听范围已扩至全部项目目录清单，整句「监听 ~/.claude/skills 与全局工作目录 …」
+// 移除（契约 #2 不再展示）——hint 两态改钉新字面（'目录变化自动重新探测' + '已暂停自动同步'）。
+check('hint 文案随开关分化（目录变化自动重新探测 / 已暂停自动同步需手动刷新）',
+  configPage.includes('目录变化自动重新探测') &&
   configPage.includes('已暂停自动同步'));
 check('「立即刷新」按钮 data-testid="skill-refresh-button"（busy 禁用 + 调 commandStore.refreshGlobal()）',
   /data-testid="skill-refresh-button"/.test(configPage) &&

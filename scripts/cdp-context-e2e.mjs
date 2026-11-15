@@ -26,6 +26,8 @@
 //   S11 中断重发（A 中断、B 重发、A 迟到 payload 不污染 B）
 //   S12 restart/resume（需外部重启编排，本脚本记录原因，语义由 context-research-restart.mjs 覆盖）
 //   S13 两 session 隔离（A/B generation、payload、DOM 不串）
+//   E5  圆环 popover focus 显隐（slate-ui-completion-1108-1428 点 E5：focus 显隐 + 并集语义 +
+//       「全部上下文」动态窗口值注入断言 + Esc 不被捕获；独立空会话，不发消息）
 //
 // 证据落盘（EVIDENCE_DIR，review-v3 §4.8/§6.2）：
 //   context-payloads.json —— 全量 CONTEXT_UPDATE payload（脱敏，含 queryGeneration/source/freshness）
@@ -36,15 +38,19 @@
 // 复用共享 parser：scripts/native-context-parser-runner.ts（禁止本文件复制 used/max regex）。
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 // CDP_PORT 在「CDP 基础」区块定义（支持 CDP_PORT 环境变量覆盖）。
-const E2E_ROOT = 'D:/software/Cache/claude-link/e2e';
+// R3（2026-11-11 脱敏收尾，对齐 aceadb3 先例）：缓存根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 未设时落 os.tmpdir() 子目录——去盘符硬编码，读写自身目录语义不变。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const E2E_ROOT = path.join(CACHE_ROOT, 'e2e');
 const RUN_ID = `cdp-ctx-${Date.now()}`;
 const FIXTURE_ROOT = path.join(E2E_ROOT, RUN_ID);
 const CWD = path.join(FIXTURE_ROOT, 'cwd').replace(/\\/g, '/');
-const EVIDENCE_DIR = path.join('D:/software/Cache/claude-link/context-research', `e2e-${RUN_ID}`);
+const EVIDENCE_DIR = path.join(CACHE_ROOT, 'context-research', `e2e-${RUN_ID}`);
 
 let pass = 0;
 let fail = 0;
@@ -284,8 +290,7 @@ async function setWorkingDir(ws, dir) {
   await evalExpr(ws, `(document.querySelector('.session-link.active') || document.querySelector('.session-link') || (document.querySelector('.session-link') ? null : document.querySelector('.new-button')))?.click(), true`);
   await waitFor('回到聊天页（工具栏出现）', () => evalOk(ws, `!!document.querySelector('.session-toolbar')`), 15);
   await evalExpr(ws, `(() => {
-    const btns = [...document.querySelectorAll('.session-toolbar .ctl__btn')];
-    const wsBtn = btns.find((b) => (b.textContent || '').includes('▾'));
+    const wsBtn = document.querySelector('[data-testid="workspace-trigger"]');
     if (!wsBtn) throw new Error('工作空间按钮未找到');
     wsBtn.click(); return true;
   })()`);
@@ -438,12 +443,58 @@ async function assertDiagAndTitle(ws, expectStale) {
     throw new Error(`popover 应恰好三行 ${JSON.stringify(EXPECTED_POPOVER_LABELS)}（实际 ${JSON.stringify(labels)}）`);
   }
   if (pop.rows.some((r) => r.label === '诊断')) throw new Error('popover 不得再渲染「诊断」行（context-circle-v2 D4 已删）');
-  if (expectStale) {
-    if (!pop.title || !pop.title.includes('上次采样')) throw new Error(`stale 态 title 应标注「上次采样」（实际：${pop.title}）`);
-  } else if (pop.title && pop.title.includes('上次采样')) {
-    throw new Error(`fresh 终态 title 不应标注「上次采样」（实际：${pop.title}）`);
+  // E2 修复轮（TOCTOU 修复）：title 判定基准由「调用前 lastPayload 快照推算的 expectStale」
+  // 改为「与 title 同一 CDP eval 内原子读取的 payload 尾状态」。原形态下回合尾
+  // runtime-live/fresh 采样落在快照捕获→title 读取窗口内（实测 1-2s）时，title 已翻实时而
+  // 期望仍按旧快照计算 → 假红（2026-11-09 S3 3/3 误红实证）；payload 到达与 Vue patch 之间
+  // 的亚秒级时差以短重试豁免（真实语义倒置会持续存在，重试窗耗尽后照常红）。传入的
+  // expectStale 保留为调用侧语义注记（S1/S9 的探针 fresh 终态与同刻尾状态一致，判定结果
+  // 不变；S3/S8 的快照推算值在状态窗口内合法翻面时不再作为判定基准）。
+  let lastSnap = null;
+  for (let i = 0; i < 6; i++) {
+    const snap = await evalExpr(ws, `(() => {
+      const ups = (window.__ctxE2E && window.__ctxE2E.updates) || [];
+      const last = ups[ups.length - 1] || null;
+      return {
+        title: document.querySelector('.ctx__btn')?.getAttribute('title') ?? null,
+        lastSource: last ? (last.source ?? null) : null,
+        lastFreshness: last ? (last.freshness ?? null) : null,
+        lastUsed: last ? (last.currentContextUsedTokens ?? null) : null,
+      };
+    })()`);
+    lastSnap = snap;
+    // title 三态（ContextButton.vue L45-47/L75-82 btnTitle）：待刷新（无可信当前）/ 上次采样标记
+    // （可信 + freshness!=='fresh'）/ plain-fresh（可信 + fresh）。store 的 currentUsedTokens 是
+    // 跨载荷 last-known（L45-46），环尾镜像无权判定「无可信」分支——故判定收缩为环可决定的双向
+    // 排他：尾 fresh ⇒ title 不得标「上次采样」（S1/S9 探针终态契约原样）；尾非 fresh ⇒ title
+    // 排他：尾 fresh ⇒ title 必须恰为 plain-fresh（S1/S9 探针终态契约原样）；尾非 fresh ⇒ title
+    // 不得是 plain-fresh 形态（freshness 翻面回归即红）。来源无关（2026-11-09 run3 实证按来源
+    // 窄判会把 S1/S9 的 native-context/fresh 误判；run4 实证按环尾 used 判 untrusted 会把 S8 的
+    // last-known 标记态误判）。
+    const marked = !!snap.title && snap.title.includes('上次采样');
+    const pendingTitle = !!snap.title && snap.title.includes('待刷新') && !marked;
+    const plainFresh = !!snap.title && !snap.title.includes('待刷新') && !marked;
+    const tailFresh = snap.lastFreshness === 'fresh';
+    // 尾 fresh ⇒ title 必须恰为 plain-fresh（fresh 载荷必带 used，store 置信后不得呈现
+    // 待刷新/上次采样任一退化态）；尾非 fresh ⇒ title 不得为 plain-fresh（标记态或待刷新态
+    // 皆可——store 的 last-known 置信历史环不可见，不越权判定）。
+    const consistent = tailFresh ? plainFresh : !plainFresh;
+    if (consistent) {
+      return { title: snap.title, rows: pop.rows, tailSource: snap.lastSource, tailFreshness: snap.lastFreshness, expectedStale: expectStale };
+    }
+    await new Promise((r) => setTimeout(r, 300));
   }
-  return pop;
+  const markedFinal = !!lastSnap.title && lastSnap.title.includes('上次采样');
+  const pendingFinal = !!lastSnap.title && lastSnap.title.includes('待刷新') && !markedFinal;
+  const plainFreshFinal = !!lastSnap.title && !lastSnap.title.includes('待刷新') && !markedFinal;
+  const tailFreshFinal = lastSnap.lastFreshness === 'fresh';
+  if (tailFreshFinal) {
+    throw new Error(`fresh 终态 title 不应标注「上次采样」（实际：${lastSnap.title}；同刻 payload 尾 ${lastSnap.lastSource}/${lastSnap.lastFreshness}；调用侧期望 stale=${expectStale}）`);
+  }
+  if (plainFreshFinal) {
+    throw new Error(`非 fresh 尾（${lastSnap.lastSource}/${lastSnap.lastFreshness}）title 不得为 plain-fresh 形态「上下文已用 X%」（实际：${lastSnap.title}；调用侧期望 stale=${expectStale}）`);
+  }
+  throw new Error(`title 应为「上次采样」标记态或待刷新态（实际：${lastSnap.title}；同刻 payload 尾 ${lastSnap.lastSource}/${lastSnap.lastFreshness}；调用侧期望 stale=${expectStale}）`);
 }
 async function readUpdates(ws) {
   const updates = (await evalExpr(ws, `window.__ctxE2E?.updates ?? []`)) ?? [];
@@ -513,6 +564,164 @@ async function runTurnWithEvidence(ws, sid, scenarioId, prompt, timeoutS = 300) 
   const lastMsg = [...msgs].reverse().find((m) => m.role === 'assistant' || (m.role === 'system' && /result|aborted|local_command/.test(m.processKind || ''))) ?? null;
   const after = await snapshotEvidence(ws, sid, `${scenarioId}:after`);
   return { before, after, lastMsg };
+}
+
+// ═══ E5：圆环 popover focus 显隐（slate-ui-completion-1108-1428 点 E5）═══
+// 用例正本 = docs/ui-completion/tests/E-input-area-cases.md §E5。行为面四例落本链：
+//   E5-01 键盘 focus 显示 popover、blur（且未 hover）后消失 + 并集语义（焦点保持时鼠标
+//         掠过离开不消失——mouseleave 只清 hoverPopover，不得误清焦点态）。
+//   E5-02 hover 显隐既有路径保持（mouseenter 开 / mouseleave 关，无焦点参与）。
+//   E5-03 「全部上下文」动态取窗口值：Pinia store 注入 contextLastWindow=1_000_000 +
+//         trusted used=50_000（页面上下文既有通道，同 newSessionViaUI 的 store 访问路径；
+//         本环境 provider 库无 per-model contextWindow 覆盖，getter 链
+//         userOverride ?? contextLastWindow ?? 200k 生效）→ 行值 = fmt(1_000_000) = '1.0m'。
+//         重注入重试窗兜底：真实 CONTEXT_UPDATE 事件若落在注入→读窗内会覆写注入态
+//         （重试重注入；写死值回归则持续存在，重试耗尽照常红）。
+//   E5-07 popover 展开中 Esc 不被捕获：对 popover/按钮各派发**不冒泡** keydown Escape
+//         （只有元素自身监听器可消费），断言 defaultPrevented=false——长按 composable 只
+//         消费 Space/Enter（use-hold-action.ts onKeydown），Esc 被吞即越权。
+// E5-04/05/06 为静态钉（tdd-ui-e-input-area-verify.ts E5 节）；E5-02/E5-06 的「保全」
+// 证据同时由本链既有 S1/S3/S8/S9 的 assertDiagAndTitle（三行 label 集 + 无诊断行）保持绿。
+// 附1 #7 红线：EXPECTED_POPOVER_LABELS 恰三行 label 集原样，只加 focus 显隐与数值动态，不增删行。
+const E5_STORE = `(() => {
+  const app = document.querySelector('#app');
+  const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+  const st = pinia && pinia._s ? pinia._s.get('session') : null;
+  if (!st) throw new Error('session store 未挂载');
+  return st;
+})()`;
+async function e5PopoverVisible(ws) {
+  return evalOk(ws, `!!document.querySelector('.ctx__popover')`);
+}
+async function runE5Scenarios(ws) {
+  // 前置：无 hover 无 focus 时 popover 不在（干净起点；上一点残留显隐态即红）。
+  if (await e5PopoverVisible(ws)) throw new Error('E5 前置：popover 在无 hover/无 focus 时已显示（显隐初值非 false）');
+
+  // ── E5-01：键盘 focus 显隐 + 并集语义 ──
+  await check('E5-01 键盘 focus 显示 popover、blur 后消失；焦点保持时鼠标掠过离开不消失（hover ∪ focus）', async () => {
+    // wrapper 级监听语义验证：focusin 冒泡到 .ctx（@focusin 的接收路径；按钮级 @focus 不冒泡，
+    // 若实现误落按钮级则此处 hit=false 红）。
+    const focusinReached = await evalExpr(ws, `(() => {
+      const w = document.querySelector('.ctx');
+      const b = document.querySelector('.ctx__btn');
+      if (!w || !b) return null;
+      let hit = false;
+      const h = () => { hit = true; };
+      w.addEventListener('focusin', h);
+      b.focus();
+      w.removeEventListener('focusin', h);
+      return hit;
+    })()`);
+    if (focusinReached !== true) throw new Error(`focusin 未冒泡到 .ctx wrapper（hit=${focusinReached}）——@focusin 落点错误或 focus 路径未接`);
+    await waitFor('focus 后 popover 出现', () => e5PopoverVisible(ws), 5, 200);
+    // 并集语义：focus 保持，hover 进→出（mouseleave 只清 hoverPopover，焦点态仍在）。
+    await evalExpr(ws, `document.querySelector('.ctx')?.dispatchEvent(new MouseEvent('mouseenter')), true`);
+    await evalExpr(ws, `document.querySelector('.ctx')?.dispatchEvent(new MouseEvent('mouseleave')), true`);
+    await new Promise((r) => setTimeout(r, 400));
+    if (!(await e5PopoverVisible(ws))) {
+      throw new Error('焦点保持时鼠标离开后 popover 消失（并集破缺：mouseleave 误清焦点态）');
+    }
+    // blur（且未 hover）→ 消失（focusout 复位）。
+    await evalExpr(ws, `document.querySelector('.ctx__btn')?.blur(), true`);
+    await waitFor('blur 后 popover 消失', async () => !(await e5PopoverVisible(ws)), 5, 200);
+    recordScenario('E5-01', { focusinReached: true, unionHoldAfterMouseLeave: true, popoverAfterBlur: false, dom: await sampleDom(ws) });
+    return 'focus 开 / 并集保持 / blur 关';
+  });
+
+  // ── E5-02：hover 显隐既有路径保持（无焦点参与） ──
+  await check('E5-02 hover 显隐既有路径保持（mouseenter 开 / mouseleave 关）', async () => {
+    await evalExpr(ws, `document.querySelector('.ctx')?.dispatchEvent(new MouseEvent('mouseenter')), true`);
+    await waitFor('hover 后 popover 出现', () => e5PopoverVisible(ws), 5, 200);
+    await evalExpr(ws, `document.querySelector('.ctx')?.dispatchEvent(new MouseEvent('mouseleave')), true`);
+    await waitFor('hover 离开后 popover 消失', async () => !(await e5PopoverVisible(ws)), 5, 200);
+    recordScenario('E5-02', { hoverOpen: true, hoverClose: true });
+    return 'mouseenter 开 / mouseleave 关';
+  });
+
+  // ── E5-03：「全部上下文」动态取窗口值（注入 1M → '1.0m'） ──
+  await check('E5-03 「全部上下文」动态取窗口值：注入 1M 窗口 + trusted used → 行值 50.0k/1.0m/5%', async () => {
+    // 快照 → 注入 → 断言 → 恢复（store 直写；E5 独立空会话无回合噪声，重试窗仅为兜底）。
+    const prev = await evalExpr(ws, `(() => {
+      const st = ${E5_STORE};
+      return {
+        clw: st.contextLastWindow ?? null,
+        cc: st.canonicalContext ? JSON.parse(JSON.stringify(st.canonicalContext)) : null,
+        windowSize: st.contextStats ? st.contextStats.windowSize : null,
+      };
+    })()`);
+    const fmtLike = (n) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}m` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+    const inject = `(() => {
+      const st = ${E5_STORE};
+      st.contextLastWindow = 1000000;
+      st.canonicalContext = {
+        currentContextUsedTokens: 50000,
+        currentContextUsedPercent: 5,
+        contextWindowCapacityTokens: 1000000,
+        currentContextRemainingTokens: 950000,
+        currentContextRemainingPercent: 95,
+        turnInputTokens: null,
+        turnCacheReadTokens: null,
+        turnCacheCreationTokens: null,
+        turnOutputTokens: null,
+        source: 'runtime-live',
+        freshness: 'fresh',
+        consistency: null,
+        diagnostic: null,
+        samplePhase: null,
+      };
+      return st.contextStats ? st.contextStats.windowSize : null;
+    })()`;
+    const expected = { '已用上下文': fmtLike(50_000), '全部上下文': fmtLike(1_000_000), '占比': '5%' };
+    let injectedWindowSize = null;
+    let pop = null;
+    for (let i = 0; i < 5; i++) {
+      injectedWindowSize = await evalExpr(ws, inject);
+      pop = await samplePopover(ws);
+      const got = Object.fromEntries(pop.rows.map((r) => [r.label, r.value]));
+      if (JSON.stringify(got) === JSON.stringify(expected)) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    const got = Object.fromEntries(pop.rows.map((r) => [r.label, r.value]));
+    recordScenario('E5-03', { injectedWindowSize, rows: pop.rows, expected, prevWindowBeforeInject: prev.windowSize });
+    if (injectedWindowSize !== 1_000_000) {
+      throw new Error(`注入后 getter windowSize=${injectedWindowSize} ≠ 1_000_000（contextLastWindow 注入链未生效——provider 覆盖抢占？）`);
+    }
+    for (const [label, want] of Object.entries(expected)) {
+      if (got[label] !== want) throw new Error(`「${label}」行值=${got[label]} ≠ ${want}（「全部」行未动态取窗口值或 fmt 分档漂移）`);
+    }
+    // 恢复注入前状态（快照回写；幂等——会话清理不依赖此步）。
+    await evalExpr(ws, `(() => {
+      const st = ${E5_STORE};
+      st.contextLastWindow = ${prev.clw == null ? 'null' : Number(prev.clw)};
+      st.canonicalContext = ${prev.cc ? JSON.stringify(prev.cc) : 'null'};
+      return true;
+    })()`);
+    return `rows=${JSON.stringify(got)}`;
+  });
+
+  // ── E5-07：popover 展开中 Esc 不被捕获 ──
+  await check('E5-07 popover 展开中 Esc 不被捕获（popover/按钮非冒泡 keydown Escape defaultPrevented=false）', async () => {
+    await evalExpr(ws, `document.querySelector('.ctx__btn')?.focus(), true`);
+    await waitFor('focus 后 popover 出现（E5-07 前置）', () => e5PopoverVisible(ws), 5, 200);
+    // 不冒泡（bubbles:false）：事件只到达目标元素自身监听器——直接检验「该元素是否消费 Esc」。
+    const escaped = await evalExpr(ws, `(() => {
+      const dispatchOn = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const e = new KeyboardEvent('keydown', { key: 'Escape', bubbles: false, cancelable: true });
+        el.dispatchEvent(e);
+        return e.defaultPrevented;
+      };
+      return { popover: dispatchOn('.ctx__popover'), button: dispatchOn('.ctx__btn') };
+    })()`);
+    if (escaped.popover !== false) throw new Error(`popover 元素消费了 Esc keydown（defaultPrevented=${escaped.popover}）——越权捕获急停键`);
+    if (escaped.button !== false) throw new Error(`ContextButton 键盘链消费了 Esc（defaultPrevented=${escaped.button}）——长按 composable 只许消费 Space/Enter`);
+    if (!(await e5PopoverVisible(ws))) throw new Error('Esc keydown 后 popover 自行消失（越权显隐行为）');
+    await evalExpr(ws, `document.querySelector('.ctx__btn')?.blur(), true`);
+    await waitFor('blur 后 popover 消失（E5-07 收尾）', async () => !(await e5PopoverVisible(ws)), 5, 200);
+    recordScenario('E5-07', { escDefaultPrevented: escaped, popoverStillOpen: true });
+    return `popover=${escaped.popover} button=${escaped.button}（均未消费）`;
+  });
 }
 
 async function main() {
@@ -669,6 +878,9 @@ async function main() {
       // review-v4 5.6-4：结果必须包含唯一 marker，证明真实读到 fixture cwd 的文件。
       if (!reply.includes('SMALL-FILE-LINE-1')) throw new Error(`回复未包含 small.txt 第一行 marker（实际：${reply.slice(0, 80)}）`);
       // review-v5 Low-1：工具回合结束后的 stale title 语义（post-turn 兜底为常态）。
+      // E2 修复轮：title 判定基准已收进 assertDiagAndTitle 内部（同刻 payload 尾一致性，
+      // 修复回合尾 runtime-live fresh 落窗内时的 TOCTOU 假红，见该函数注）；本调用形态
+      // 由 tdd-context-usage-verify「S3 应按终态断言 title 语义」钉定，保持原样。
       const lp3 = r.after.lastPayload;
       const pop3 = await assertDiagAndTitle(ws, !(lp3?.source === 'runtime-live' && lp3?.freshness === 'fresh'));
       recordScenario('S3', { prompt: 'Read small.txt', hasToolTrace, replyPreview: scrubString(reply.slice(0, 120)), cwd: r.after.workingDir, permissionMode: r.after.permissionMode, before: r.before, after: r.after, popover: pop3 });
@@ -705,12 +917,19 @@ async function main() {
       const midTurn = EVID.payloads.filter((p) => p.sessionId === scrubSessionId(sid) && p.samplePhase === 'mid-turn');
       const midTurnLive = midTurn.filter((p) => p.source === 'runtime-live' && p.freshness === 'fresh');
       if (midTurnLive.length === 0) {
-        const liveEver = EVID.payloads.some((p) => p.sessionId === scrubSessionId(sid) && p.source === 'runtime-live' && p.freshness === 'fresh');
-        if (!liveEver) {
-          const reason = 'S4 mid-turn：SDK 控制通道死（本会话无任何 runtime-live 快照）——runtime 快照超时属基线预期（context-circle-v2 计划 §1.3），环境受限非实现回归';
+        // E2 修复轮：通道活性代理收窄为 mid-turn 相位。被断言的现象是「回合中途」的
+        // runtime-live 快照送达；query-start/post-turn 快照走的是采样链路的其他相位，其活性
+        // 不能证明 mid-turn 通路（2026-11-09 实测一轮：S4 判定时刻会话已有 query-start×13 +
+        // post-turn×9 而 mid-turn=0，其余 2 个 mid-turn 快照出现在更晚回合——相位无关代理把
+        // §1.3 基线预期「mid-turn 快照超时属预期」误路由进严格红分支）。mid-turn 活性已证实
+        // 时严格分支原样保持严格；仅当 mid-turn 相位从未产出 live 快照时按通道能力未证实
+        // 路由环境受限（与 §1.3「runtime 快照超时属预期，不是回归」同判）。
+        const liveEverMidTurn = EVID.payloads.some((p) => p.sessionId === scrubSessionId(sid) && p.source === 'runtime-live' && p.freshness === 'fresh' && p.samplePhase === 'mid-turn');
+        if (!liveEverMidTurn) {
+          const reason = 'S4 mid-turn：SDK 控制通道 mid-turn 相位未产出 runtime-live 快照（通道能力未证实）——runtime 快照超时属基线预期（context-circle-v2 计划 §1.3），环境受限非实现回归';
           envLimited = envLimited ?? reason;
           recordScenario('S4', { status: 'environment-limited', reason, midTurnHits: midTurn.length });
-          return `mid-turn 断言环境受限跳过（控制通道死，mid-turn 命中 ${midTurn.length} 次）；Read 与 /context 断言已过`;
+          return `mid-turn 断言环境受限跳过（mid-turn 通道能力未证实，mid-turn 命中 ${midTurn.length} 次）；Read 与 /context 断言已过`;
         }
         throw new Error(`S4 未捕获 mid-turn live payload（samplePhase=mid-turn, source=runtime-live, freshness=fresh）——mid-turn 命中 ${midTurn.length} 次但均非 live/fresh（节流/值变化门限可能抑制）`);
       }
@@ -785,6 +1004,8 @@ async function main() {
       }
       if (r.after.dom.present === false) throw new Error('回合后 ContextButton 消失');
       // review-v5 Low-1：thinking 回合结束后的 stale title 语义。
+      // E2 修复轮：与 S3 同款——判定基准已收进 assertDiagAndTitle 内部（同刻 payload 尾一致性），
+      // 调用形态保持原样。
       const terminalFresh8 = last != null && last.source === 'runtime-live' && last.freshness === 'fresh';
       const pop8 = await assertDiagAndTitle(ws, !terminalFresh8);
       recordScenario('S8', { before: r.before, after: r.after, replyPreview: scrubString(String(r.lastMsg?.content ?? '').slice(0, 30)), recentPayloads: mine, popover: pop8 });
@@ -1031,6 +1252,16 @@ async function main() {
       if (domB.present === false) throw new Error('B 会话 ContextButton 缺失');
       return `B 代际 ${Math.min(...gensB)}–${Math.max(...gensB)}`;
     });
+
+    // ── E5：圆环 popover focus 显隐（slate-ui-completion-1108-1428 点 E5）──
+    // 独立新空会话：sending=false（钮可聚焦）、无回合 payload 噪声、pending 态——focus 显隐
+    // 与注入断言不受前序场景残留干扰。不发任何消息（无权限/回合依赖）。
+    await (async () => {
+      const sidE5 = await newSessionViaUI(ws);
+      created.push(sidE5);
+      await waitFor('E5 会话 ContextButton 出现', () => evalOk(ws, `!!document.querySelector('.ctx__btn')`), 15);
+      await runE5Scenarios(ws);
+    })();
   } finally {
     await cleanup();
   }

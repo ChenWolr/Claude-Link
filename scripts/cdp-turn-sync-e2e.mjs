@@ -32,13 +32,13 @@
 // |------------------------------------------|-----------------------------------------------|
 // | #app + window.claudeLink                 | index.html / web-bridge.ts（页面就绪探针）    |
 // | button.new-button                        | components/layout/AppSidebar.vue L181（新会话）|
-// | .ctl .ctl__btn（首个匹配）+ .menu__item--dir | components/chat/SessionToolbar.vue L176/L198
+// | .ctl .ctl__btn（首个匹配）+ .menu__item--dir | components/chat/SessionToolbar.vue L179/L193
 // |                                          |（工作空间下拉；※见下方校准 1）                |
 // | [data-testid="chat-input-textarea"]      | components/chat/ChatInput.vue L351（输入框）  |
-// | [data-testid="chat-send-button"]         | components/chat/ChatInput.vue L357（发送）    |
+// | [data-testid="chat-send-button"]         | components/chat/ChatInput.vue L361（发送）    |
 // | .turn-timer / .turn-timer--done /        | components/chat/TurnTimer.vue L57/L68         |
 // |   .turn-timer__time（计时文本）          |（运行态无 --done 修饰；完成态带 --done）      |
-// | .ctl__btn--abort                         | components/chat/SessionToolbar.vue L308       |
+// | .ctl__btn--abort                         | components/chat/SessionToolbar.vue L313       |
 // |                                          |（发送态中断按钮；长按 1s 触发，※校准 2）      |
 // | .session-link / .session-link__name /    | components/layout/AppSidebar.vue L255/L280    |
 // |   .session-link.active /                 |                                               |

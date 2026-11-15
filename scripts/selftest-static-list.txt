@@ -264,3 +264,14 @@ scripts/tdd-turn-diff-quality-verify.ts
 scripts/tdd-code-inline-fileref-verify.ts
 scripts/tdd-preview-outside-root-verify.ts
 scripts/tdd-adjacent-text-merge-verify.ts
+scripts/tdd-user-timestamp-below-bubble-verify.ts
+scripts/tdd-interaction-direct-submit-verify.ts
+scripts/tdd-queue-task-image-preview-verify.ts
+scripts/tdd-queue-tasks-sync-verify.ts
+scripts/tdd-mcp-import-skip-visible-verify.ts
+scripts/tdd-mcp-single-server-export-verify.ts
+scripts/tdd-memleak-fixes-verify.ts
+scripts/tdd-interrupt-subagent-treekill-verify.ts
+scripts/tdd-skill-per-project-refresh-verify.ts
+scripts/tdd-sidebar-card-pin-verify.ts
+scripts/tdd-sidebar-collapse-verify.ts

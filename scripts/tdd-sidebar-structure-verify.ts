@@ -2,7 +2,8 @@
 // 侧栏 Quiet Console 重设计（2026-09-27 计划 §2.5/§2.6/§3）源码契约脚本：
 //   R1  §3 钉死字面量全量复查（状态四态类/状态点/pulse/watch 同步/暂态链路/⏳ pending/双删确认文案与顺序）
 //   R2  新结构钉（日期分组/时间列接线、Ctrl+N 与 / 快捷键守卫、新会话按钮位于搜索框之前、页脚配置、无引擎 LED）
-//   R3  色板钉（quiet-console / terminal-pro 入 constants、isDark 正确、settings-mapping 数量断言 11）
+//   R3  色板钉（quiet-console / terminal-pro 入 constants、isDark 正确、settings-mapping 数量断言 12——
+//       墨石 inkstone 第 12 套默认居首（2026-11-07 裁决 A1）连带改钉，tdd-tokens-inkstone-verify.ts:267 同步要求）
 // 运行：npx tsx scripts/tdd-sidebar-structure-verify.ts（已登记 scripts/selftest-static-list.txt）
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
@@ -26,15 +27,17 @@ const tplEnd = sidebar.lastIndexOf('</template>');
 const template = sidebar.slice(tplStart, tplEnd);
 
 console.log('\n=== R1 · §3 钉死字面量全量复查 ===');
+// UI13-P3 改钉记录：侧栏卡片化后类名前缀 session-link → session-card（R1.1/R1.2/R2.9 随契约
+// 结构同步改钉，语义不变）；R2.12 双视图分支收敛为 renderGroups 单模板归一。
 
 check('R1.1 状态四态修饰类保留（running/retrying/completed/network-interrupted）', () => {
-  assert.ok(sidebar.includes("'session-link--running'"));
-  assert.ok(sidebar.includes("'session-link--retrying'"));
-  assert.ok(sidebar.includes("'session-link--completed'"));
-  assert.ok(sidebar.includes("'session-link--network-interrupted'"));
+  assert.ok(sidebar.includes("'session-card--running'"));
+  assert.ok(sidebar.includes("'session-card--retrying'"));
+  assert.ok(sidebar.includes("'session-card--completed'"));
+  assert.ok(sidebar.includes("'session-card--network-interrupted'"));
 });
 check('R1.2 状态点静态类 + aria-label/title + role=img', () => {
-  assert.ok(sidebar.includes('class="session-link__status"'));
+  assert.ok(sidebar.includes('class="session-card__status"'));
   assert.ok(sidebar.includes(':aria-label='));
   assert.ok(sidebar.includes('role="img"'));
   assert.ok(sidebar.includes('statusLabel(session.id)'));
@@ -108,9 +111,10 @@ check('R2.8 页脚配置入口 to="/config" 且无引擎 LED（「引擎已连�
   assert.match(template, /to="\/config"/);
   assert.ok(!sidebar.includes('引擎已连接'), '页脚不得出现引擎 LED 文案（计划 §6 偏差 1）');
 });
-check('R2.9 活动行 = accent 8% 混色（无左缘 border-left 条）', () => {
+check('R2.9 活动卡 = accent 8% 混色（无左缘 border-left 条）', () => {
   assert.match(sidebar, /color-mix\(in srgb, var\(--color-accent\) 8%, var\(--color-panel-soft\)\)/);
-  const activeIdx = sidebar.indexOf('.session-link.active {');
+  const activeIdx = sidebar.indexOf('.session-card.active {');
+  assert.ok(activeIdx > -1, '未找到 .session-card.active 样式块（UI13-P3 改钉锚点）');
   const block = sidebar.slice(activeIdx, activeIdx + 200);
   assert.ok(!block.includes('border-left'), '活动行不得带左缘条（那是 B 方案语言）');
 });
@@ -122,10 +126,12 @@ check('R2.11 批量操作条逻辑字面保留（全选/删除(n)/0 选中 disab
   assert.ok(sidebar.includes('confirmBatchDelete'));
   assert.match(sidebar, /:disabled="!selectedIds\.size"/);
 });
-check('R2.12 日期分组视图分支存在（v-if="!groupByProject" 走 dateGroups）', () => {
-  assert.match(template, /v-if="!groupByProject"/);
-  assert.match(template, /v-for="group in dateGroups"/);
-  assert.match(template, /v-for="group in viewGroups"/);
+check('R2.12 双视图归一（UI13-P3）：renderGroups computed 按 groupByProject 二元切换 + 单模板消费', () => {
+  assert.match(sidebar, /groupByProject\.value \? viewGroups\.value : dateGroups\.value/);
+  assert.match(template, /v-for="group in renderGroups"/);
+  // 日期/项目两条分组链路仍各自存在（归一消费，不删数据源）
+  assert.match(sidebar, /groupSessionsByDate\(store\.displayedSessions\)/);
+  assert.match(sidebar, /groupSessionsByProject\(store\.displayedSessions\)/);
 });
 check('R2.13 style 段零硬编码色值（全部走 var(--color-*)/color-mix token）', () => {
   const style = sidebar.slice(sidebar.indexOf('<style'));
@@ -157,14 +163,15 @@ check('R3.2 constants.ts 含 terminal-pro（终端，isDark: true）', () => {
   assert.match(block, /isDark: true/);
   assert.ok(block.includes('终端'), '缺中文名');
 });
-check('R3.3 两色板位于数组末尾（warm-paper 仍居首、默认色板不变）', () => {
-  const firstIdx = constants.indexOf("id: 'warm-paper'");
+check('R3.3 色板序（墨石 inkstone 居首默认；warm-paper…quiet-console → terminal-pro 既有序不变）', () => {
+  const inkIdx = constants.indexOf("id: 'inkstone'");
+  const wpIdx = constants.indexOf("id: 'warm-paper'");
   const qcIdx = constants.indexOf("id: 'quiet-console'");
   const tpIdx = constants.indexOf("id: 'terminal-pro'");
-  assert.ok(firstIdx !== -1 && firstIdx < qcIdx && qcIdx < tpIdx, '色板顺序应为 warm-paper … quiet-console → terminal-pro');
+  assert.ok(inkIdx !== -1 && wpIdx !== -1 && inkIdx < wpIdx && wpIdx < qcIdx && qcIdx < tpIdx, '色板顺序应为 inkstone → warm-paper … quiet-console → terminal-pro');
 });
-check('R3.4 settings-mapping 数量契约同步为 11 套', () => {
-  assert.match(mapping, /THEME_PALETTES\.length === 11/);
+check('R3.4 settings-mapping 数量契约同步为 12 套', () => {
+  assert.match(mapping, /THEME_PALETTES\.length === 12/);
   assert.ok(mapping.includes("'terminal-pro' ? p.isDark === true : p.isDark === false"), '缺 terminal-pro 深色豁免分支');
 });
 

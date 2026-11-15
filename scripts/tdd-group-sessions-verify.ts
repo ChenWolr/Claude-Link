@@ -83,28 +83,34 @@ check('空列表返回空数组', () => {
   assert.deepEqual(groupSessionsByProject([]), []);
 });
 
-// ── P2 会话置顶（计划点 S4）：项目视图不做跨组提取，组内置顶优先 ──
+// ── UI13-P3 置顶跨组提取（原 P2 点 S4「组内置顶优先」行为按条目 4 升级：置顶一律浮顶整列表
+//    最前，改钉记录见 docs/plans/2026-11-14-ui13-batch）──
 
-check('组内置顶优先：pinned 会话浮到所在项目组顶部（不跨组提取，组归属不变）', () => {
+check('置顶跨组提取：置顶会话齐集 __pinned__ 首组，原项目组不含置顶（组归属随提取变更）', () => {
   const a1 = session('a1', '/d/p1');
   const a2pin = session('a2-pin', '/d/p1', 2000);
   const b1 = session('b1', '/d/p2');
   const a3 = session('a3', '/d/p1');
   const groups = groupSessionsByProject([a1, a2pin, b1, a3]);
-  assert.equal(groups.length, 2); // 不因置顶新增组（不做跨组提取）
-  assert.deepEqual(groups.map((g) => g.label), ['p1', 'p2']);
-  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['a2-pin', 'a1', 'a3']);
-  assert.deepEqual(groups[1].sessions.map((s) => s.id), ['b1']);
+  assert.equal(groups.length, 3); // __pinned__ + p1 + p2（置顶提取不新建项目组）
+  assert.equal(groups[0].key, '__pinned__');
+  assert.equal(groups[0].label, '置顶');
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['a2-pin']);
+  assert.deepEqual(groups[1].sessions.map((s) => s.id), ['a1', 'a3']); // p1 不含置顶
+  assert.deepEqual(groups[2].sessions.map((s) => s.id), ['b1']); // p2 不含置顶
 });
 
-check('组内多个置顶按 pinnedAt DESC；其余保持传入序', () => {
+check('置顶组内按 pinnedAt DESC（后置顶在前，跨项目混合排序）', () => {
   const rest1 = session('r1', '/d/p1');
   const pinOld = session('pin-old', '/d/p1', 100);
-  const rest2 = session('r2', '/d/p1');
-  const pinNew = session('pin-new', '/d/p1', 900);
+  const rest2 = session('r2', '/d/p2');
+  const pinNew = session('pin-new', '/d/p2', 900);
   const groups = groupSessionsByProject([rest1, pinOld, rest2, pinNew]);
-  assert.equal(groups.length, 1);
-  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['pin-new', 'pin-old', 'r1', 'r2']);
+  assert.equal(groups.length, 3);
+  assert.equal(groups[0].key, '__pinned__');
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['pin-new', 'pin-old']);
+  assert.deepEqual(groups[1].sessions.map((s) => s.id), ['r1']); // p1
+  assert.deepEqual(groups[2].sessions.map((s) => s.id), ['r2']); // p2
 });
 
 check('无 pinnedAt 字段（旧数据 undefined）与 null 一致按未置顶处理', () => {
@@ -112,17 +118,19 @@ check('无 pinnedAt 字段（旧数据 undefined）与 null 一致按未置顶�
   delete (noField as { pinnedAt?: number | null }).pinnedAt;
   const plain = session('plain', '/d/p1', null);
   const groups = groupSessionsByProject([noField, plain]);
-  assert.equal(groups.length, 1);
+  assert.equal(groups.length, 1); // 无 __pinned__ 组
   assert.deepEqual(groups[0].sessions.map((s) => s.id), ['nofield', 'plain']);
 });
 
-check('「未选择工作空间」组同样适用组内置顶优先', () => {
+check('「未选择工作空间」的置顶会话同样跨组提取（null workingDir 不影响 __pinned__ 归集）', () => {
   const n1 = session('n1', null);
   const n2pin = session('n2-pin', null, 500);
   const n3 = session('n3', null);
   const groups = groupSessionsByProject([n1, n2pin, n3]);
+  assert.equal(groups[0].key, '__pinned__');
+  assert.deepEqual(groups[0].sessions.map((s) => s.id), ['n2-pin']);
   const none = groups.find((g) => g.key === '__none__')!;
-  assert.deepEqual(none.sessions.map((s) => s.id), ['n2-pin', 'n1', 'n3']);
+  assert.deepEqual(none.sessions.map((s) => s.id), ['n1', 'n3']);
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

@@ -103,7 +103,9 @@ async function main(): Promise<void> {
 
     const at = ipc.indexOf('IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
     // 窗口 700→800：A10（D07-F2）homedir→effectiveUserHome 修复带 3 行机理注释（5db45f7 最小同步，断言语义不变）。
-    const region = at >= 0 ? ipc.slice(at, at + 800) : '';
+    // 窗口 800→1400：UI13-P8 handler 内联 recent ∪ sessionDirs 并集块（~430 字符，listWorkingDirCounts
+    // 后移至 ~1208），断言语义不变（仍钉 await collectSkillProjectDirs 三源在位）。
+    const region = at >= 0 ? ipc.slice(at, at + 1400) : '';
     check('⑤', 'SKILL_PROJECT_DIRS_GET handler 形态不变（await collectSkillProjectDirs 三源）', /dirs:\s*await\s+collectSkillProjectDirs/.test(region) && region.includes('listRecentWorkspaces()') && region.includes('listWorkingDirCounts()'), at < 0 ? '缺 handler' : '');
   }
 

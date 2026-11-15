@@ -9,7 +9,8 @@
 //     SDK 若将来提供结构化 provenance 则优先透传），无法判断者标 unknown（显式差异，非完成）；
 //   - resolveSettings({cwd}) 的来源级联摘要（脱敏：只取 source 名 + path + effective 键名），
 //     并在 native 模式下作为硬门禁（必须可用且能看到 project/local 来源）。
-// 机器可比对 JSON 输出到 D:\software\Cache\claude-link\command-baseline.json（不入仓库）。
+// 机器可比对 JSON 输出到 <CACHE_ROOT>/claude-link/command-baseline.json（不入仓库；
+// CACHE_ROOT = CLAUDE_LINK_CACHE_ROOT ?? <系统临时目录>/claude-link-cache，R4 脱敏）。
 //
 // review-v1 修复点：
 //   F1   Query 清理收口到 finally：supportedCommands 超时/失败/断言异常都只 close 一次（防进程/资源泄漏）。
@@ -41,23 +42,31 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import os, { homedir } from 'node:os';
 import path from 'node:path';
 import { buildCommandOriginEvidence } from '../src/main/modules/sdk-command-origin';
 
 const RUN_NATIVE =
   process.argv.includes('--native') || process.env.CLAUDE_LINK_RUN_NATIVE_E2E === '1';
-const CACHE_ROOT = 'D:/software/Cache';
+// R4（2026-11-11 脱敏收尾，对齐 F16/aceadb3 先例）：缓存根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 缺省 = <系统临时目录>/claude-link-cache（隔离/输出语义不变，去本机盘符硬编码）。
+// 与 claude-code-command-matrix.ts 的 CACHE_ROOT 同源解析——baseline 写、matrix 读保持同位。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
 const TEMP_ROOT = path.join(CACHE_ROOT, 'temp');
 const OUT_DIR = path.join(CACHE_ROOT, 'claude-link');
 const OUT_FILE = path.join(OUT_DIR, 'command-baseline.json');
 
 // demo 目标环境（Task 1 基线以此为准；plan 要求使用 demo 的真实 claude.exe）。
-const DEMO_DIR = 'D:/software/Cache/claude-link-goal-demo';
+const DEMO_DIR = path.join(CACHE_ROOT, 'claude-link-goal-demo');
 const DEMO_SDK_PACKAGE = path.join(DEMO_DIR, 'sdk-package.json');
-// demo 脚本（goal-demo.mjs / probe-*.mjs）硬编码的 executable 路径。
+// demo 脚本（goal-demo.mjs / probe-*.mjs）指定的 executable 路径。R4 脱敏：可经 CLAUDE_CODE_BIN
+// 覆盖；缺省为缓存根下 npm-global 布局（脱敏后通常不存在，属预期）——本指针在 resolveClaudeExe
+// 中仅为①号优先尝试项（existsSync 不通过即落②PATH/③npm root -g 兜底），全部落空时另有
+// 「前置条件缺失」中文报错 + exit 2（头注「门禁约定」第 28 行），不会把不存在的路径伪装成可用
+// 目标；故不采用「env 缺省即报错」形态——那会废掉既有兜底链，属行为退化。
 const DEMO_EXE_PATH =
-  'D:/software/Cache/npm-global/node_modules/@anthropic-ai/claude-code/bin/claude.exe';
+  process.env.CLAUDE_CODE_BIN ??
+  path.join(CACHE_ROOT, 'npm-global', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
 
 // ── 来源分类（可验证；review-v1 F3）────────────────────────────────────────────────
 type CommandOrigin =

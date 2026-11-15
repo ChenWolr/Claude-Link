@@ -19,7 +19,11 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 const CDP_PORT = 9223;
-const RESEARCH_ROOT = 'D:/software/Cache/claude-link/context-research';
+// R5（2026-11-11 脱敏收尾，对齐 F16/F19/aceadb3 先例）：证据根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 缺省 = <系统临时目录>/claude-link-cache。与 scripts/context-research-restart.mjs 的 CACHE_ROOT
+// 同源解析——restart persist 写 / 本 harness 按 runId 建目录，落点形状不变（仅落点随缓存根解析）。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const RESEARCH_ROOT = path.join(CACHE_ROOT, 'claude-link', 'context-research');
 
 const HOME_DIRS = [process.env.USERPROFILE, process.env.HOME, os.homedir()]
   .filter(Boolean).map(String)
@@ -141,8 +145,7 @@ async function setWorkingDir(ws, dir) {
   await evalExpr(ws, `(document.querySelector('.session-link.active') || document.querySelector('.session-link'))?.click(), true`);
   await waitFor('回到聊天页（工具栏出现）', () => evalOk(ws, `!!document.querySelector('.session-toolbar')`), 15);
   await evalExpr(ws, `(() => {
-    const btns = [...document.querySelectorAll('.session-toolbar .ctl__btn')];
-    const wsBtn = btns.find((b) => (b.textContent || '').includes('▾'));
+    const wsBtn = document.querySelector('[data-testid="workspace-trigger"]');
     if (!wsBtn) throw new Error('工作空间按钮未找到');
     wsBtn.click(); return true;
   })()`);

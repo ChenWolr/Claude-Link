@@ -17,7 +17,7 @@
 //      desktop-9223-config-web.png。
 //   ③ 开关拨关（DOM click [data-testid="web-access-section"] label.field--toggle
 //      input[type="checkbox"]）→ 轮询 node:net connect 127.0.0.1:<port> 直到不通（≤15s）→
-//      断言状态卡「未开启」→ 拨开 → 轮询恢复监听（≤15s）→ 状态卡恢复「运行中」→ 掩码后再截
+//      断言状态卡「网页访问已关闭」→ 拨开 → 轮询恢复监听（≤15s）→ 状态卡恢复「运行中」→ 掩码后再截
 //      desktop-9223-config-web-restored.png。任一步失败也会尽力把开关拨回开启（善后恢复）。
 //
 // 敏感纪律：port/token 从 %APPDATA%/claude-link/claude-link-config.json 读取
@@ -264,15 +264,15 @@ async function main() {
     stepOk('D2', '掩码后截图 desktop-9223-config-web.png');
   } catch (e) { stepFail('D2', e.message); }
 
-  // ── ③ 开关拨关 → 端口不通 + 「未开启」→ 拨开 → 恢复监听 + 「运行中」→ 掩码再截 ──
+  // ── ③ 开关拨关 → 端口不通 + 「网页访问已关闭」→ 拨开 → 恢复监听 + 「运行中」→ 掩码再截 ──
   currentStep = 'D3';
   const toggleExpr = `document.querySelector('[data-testid="web-access-section"] label.field--toggle input[type="checkbox"]')?.click(), true`;
   try {
     await evalExpr(ws, toggleExpr);
     await waitFor(`127.0.0.1:${PORT} 监听停止（≤15s）`, async () => !(await tcpReachable(PORT)), 15, 250);
     stepOk('D3', '拨关后 TCP 探测不通');
-    await waitFor('状态卡「未开启」', () => evalExpr(ws, statusTextExpr).then((t) => (t.includes('未开启') ? t : null)), 15);
-    stepOk('D3', '状态卡转为「未开启」');
+    await waitFor('状态卡「网页访问已关闭」', () => evalExpr(ws, statusTextExpr).then((t) => (t.includes('网页访问已关闭') ? t : null)), 15);
+    stepOk('D3', '状态卡转为「网页访问已关闭」');
     await evalExpr(ws, toggleExpr);
     await waitFor(`127.0.0.1:${PORT} 监听恢复（≤15s）`, () => tcpReachable(PORT), 15, 250);
     stepOk('D3', '拨开后 TCP 探测恢复连通');

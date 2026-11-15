@@ -22,7 +22,7 @@
 // 运行：npx tsx scripts/tdd-turn-file-diff-verify.ts
 // （better-sqlite3 为 Electron ABI：当前 node 不匹配时自动以 ELECTRON_RUN_AS_NODE 重 spawn 本脚本——
 //   n2 / skill-overrides 先例。DB 行为用 electron-stub（house pattern）：Module._load 把 'electron'
-//   解析到 scripts/electron-stub.cjs，app.getPath 由 CLAUDE_LINK_TEST_USERDATA 指向 Cache 临时目录，
+//   解析到 scripts/electron-stub.cjs，app.getPath 由 CLAUDE_LINK_TEST_USERDATA 指向系统临时目录，
 //   真实 connection/runMigrations/repo 在临时库上跑，绝不触碰真实用户库。）
 
 import { execFile, spawnSync } from 'node:child_process';
@@ -35,7 +35,7 @@ const repoRoot = path.resolve(__dirname, '..');
 
 // —— electron-stub 安装（tdd-skill-overrides / p1-01 / n4 先例）：必须在 require 任何主进程模块之前 ——
 const stubUserDataDir = path.join(
-  'D:\\software\\Cache',
+  os.tmpdir(),
   'claude-link',
   'turn-file-diff-verify',
   `tmp-userdata-${process.pid}-${Date.now()}`,

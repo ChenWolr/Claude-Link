@@ -137,7 +137,9 @@ check('⑦ MessageBubble：脚注门控仅 durationMs + 模板无 costUsd/$ + �
   const tpl = messageBubble.slice(tplIdx);
   // hb10-TM-04 最小同步：门控放宽为 durationMs || endedAt——(cost,NULL,ended_at) 行可见；
   // 原断言语义（cost 不参与门控、费用不展示）保持不变。
-  assert.match(tpl, /v-if="message\.durationMs \|\| message\.endedAt" class="bubble__meta"/, '脚注门控 durationMs||endedAt（cost 不参与门控）');
+  // C6 同步（slate-ui-completion-1108-1428）：中断脚注分支在前，正常耗时脚注改 v-else-if
+  //（门控表达式字面不变——cost 仍不参与门控）。
+  assert.match(tpl, /v-else-if="message\.durationMs \|\| message\.endedAt" class="bubble__meta"/, '脚注门控 durationMs||endedAt（cost 不参与门控；C6 中断分支在前后正常块改 v-else-if）');
   assert.ok(!tpl.includes('costUsd'), '模板不得再出现 costUsd（费用不展示）');
   // $ 检查只扫脚注块本身（模板其它处的 ${} 类绑定如 bubble--${role} 与费用无关）。
   const metaIdx = tpl.indexOf('class="bubble__meta"');

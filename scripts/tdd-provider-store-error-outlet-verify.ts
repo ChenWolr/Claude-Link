@@ -77,11 +77,14 @@ check('toast 时长复用 SESSION_ERROR_TOAST_MS（3.5s，A4 同款节奏）', (
 check('连续失败以最新文案重置计时（setTimeout 前 clearTimeout）', () => {
   assert.ok(providerErrorWatch !== null && providerErrorWatch.includes('clearTimeout(providerErrorToastTimer)'), 'clearTimeout 缺失（旧计时器不清会提前隐藏新 toast）');
 });
-check('模板含 providerErrorToastVisible 的 toast 节点且复用 .global-toast--error 样式', () => {
-  const toastLine = appVue.split('\n').find((l) => l.includes('v-if="providerErrorToastVisible"'));
-  assert.ok(toastLine, 'toast 模板节点缺失');
-  assert.ok(toastLine.includes('global-toast--error'), '未复用 global-toast--error 样式类');
-  assert.ok(toastLine.includes('{{ providerErrorToastText }}'), 'toast 未绑定 providerErrorToastText');
+check('模板含 providerErrorToastVisible 的 toast 节点且复用 .global-toast--error 样式（I10 起文本绑定在节点块子节点内）', () => {
+  // I10 同步（原 toastLine 单行 includes 断言，文本挪 global-toast__text 子节点新行后失配）：
+  // 开标签行仍判 error 样式类；文本绑定改在节点块（v-if 开标签至首个闭合 </div>）内断言。
+  const startIdx = appVue.indexOf('<div v-if="providerErrorToastVisible"');
+  assert.ok(startIdx > -1, 'toast 模板节点缺失');
+  const block = appVue.slice(startIdx, appVue.indexOf('</div>', startIdx));
+  assert.ok(block.includes('global-toast--error'), '未复用 global-toast--error 样式类');
+  assert.ok(block.includes('{{ providerErrorToastText }}'), 'toast 未绑定 providerErrorToastText（节点块内文本子节点）');
 });
 check('三档 toast 纵向错开（供应商错误 toast 不与保存失败/会话错误 toast 同位重叠）', () => {
   const toastLine = appVue.split('\n').find((l) => l.includes('v-if="providerErrorToastVisible"'));

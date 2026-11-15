@@ -20,13 +20,19 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const USER = 'ClaudeLinkROE2E';
 const PASS = 'ClaudeLink!RO2026';
-const RO_ROOT = 'D:/software/Cache/claude-link/readonly-e2e';
+// R5（2026-11-11 脱敏收尾，对齐 F16/F19/aceadb3 先例）：夹具根可经 CLAUDE_LINK_CACHE_ROOT 覆盖；
+// 缺省 = <系统临时目录>/claude-link-cache（ACL 夹具落点形状不变，仅落点随缓存根解析）。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT ?? path.join(os.tmpdir(), 'claude-link-cache');
+const RO_ROOT = path.join(CACHE_ROOT, 'claude-link', 'readonly-e2e');
 const REPO = 'D:/software/code/claude-link';
-const CLI_EXE = 'D:/software/Cache/npm-global/node_modules/@anthropic-ai/claude-code/bin/claude.exe';
+// R5 脱敏：CLI 指针可经 CLAUDE_CODE_BIN 覆盖；缺省为缓存根下 npm-global 布局（脱敏后通常不存在，
+// 属预期）——消费侧下方 existsSync 前置校验即「缺省清晰报错」承担者（「前置条件不满足：CLI 不存在」→ exit 2）。
+const CLI_EXE = process.env.CLAUDE_CODE_BIN ?? path.join(CACHE_ROOT, 'npm-global', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
 const CDP_PORT = 9224;
 const PURGE = process.argv.includes('--purge');
 const KEEP_APP = process.argv.includes('--keep-app');
