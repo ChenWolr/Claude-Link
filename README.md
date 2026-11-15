@@ -245,7 +245,7 @@ src/
 │   │   ├── fs-picker.ts / interaction-prompts.ts / link-guard.ts / chat-backend.ts # 选择器元数据、交互弹窗队列、导航拦截、后端 re-export
 │   │   └── export-image-*.ts      # 长图导出与 PNG worker
 │   └── database/                  # SQLite 连接、迁移（V16）和 repositories
-├── preload/                       # contextBridge，主窗口 115 方法 + 导出窗口 9 方法
+├── preload/                       # contextBridge，主窗口 117 方法 + 导出窗口 9 方法
 ├── renderer/                      # Vue 页面、组件、Pinia stores
 │   ├── pages/                     # ChatPage、ConfigPage（8 tab）、SessionsPage
 │   ├── components/                # 聊天、配置、供应商、任务、改动面板与 layout（含 UpdateDialog）
