@@ -14,6 +14,16 @@
     "scripts/tdd-file-preview-verify.ts",
     "scripts/tdd-preview-outside-root-verify.ts",
     "scripts/tdd-adjacent-text-merge-verify.ts",
+    "scripts/tdd-tokens-inkstone-verify.ts",
+    "scripts/tdd-b-layout-sidebar-verify.ts",
+    "scripts/tdd-r1r2-restore-verify.ts",
+    "scripts/tdd-c-chat-stream-verify.ts",
+    "scripts/tdd-ui-e-input-area-verify.ts",
+    "scripts/tdd-command-probe-cwd-refresh-verify.ts",
+    "scripts/tdd-activity-f1-f5-verify.ts",
+    "scripts/tdd-config-core-g1-g5-verify.ts",
+    "scripts/tdd-config-h1-h7-verify.ts",
+    "scripts/tdd-dialogs-i1-i10-verify.ts",
     "src/renderer/env.d.ts"
   ]
 }
