@@ -1,60 +1,71 @@
 // tdd-interaction-direct-submit-verify.ts
-// UI13 批次 P6「交互弹窗选项直选直提」（2026-11-14 计划，用例正本 03-test-cases.md §P6；
-// 实现权威 01-impl-details.md §P6；裁决 R2/R3 与 T6-B 的 01 语义修正按 04-实施计划.md §3 应用）。
+// C3 重写版（2026-11-15 eight-issues 批次 C3 点；用例正本 03b-test-cases-renderer.md §6 C3-1/C3-4
+// 与 §5 C2-1/C2-5；行为权威 00-behavior-specs.md 域 C C2/C3 节；实现权威 02-impl-details-renderer.md
+// §4/§5.1。前史：UI13-P6 版（2026-11-14，T6-A~O）钉向导分页态直提链；C1 变体 2「左侧题号导航栏」
+// 重构（2026-11-16 已落）移除向导分页实现，本脚本按重写纪律重组（登记名不变，selftest 清单行沿用）。
 //
-// 行为契约（00-behavior-specs §P6 八条）：单选题单击普通选项=选中并立即提交（弹窗关闭）；
-// Other 单击仅展开输入（Enter/footer「确认」提交）；多选维持 toggle+footer「提交选择」；
-// 向导单选题单击=作答并自动前进、末题单击=整体提交关闭、multiSelect 题不自动前进
-//（footer「下一题/末题确认」）；「上一步」「取消」「步骤圆点跳转」保留；Enter/Esc 全键盘
-// 路径不变；提交载荷形态不变（主进程零改动）；自动前进前答案落草稿；permission/confirm/
-// text/long-text/form(fields) 五形态 UI 不变。
+// 保留面（单题五形态直提现状不变=C1 契约 9 零触碰面，逐字钉）：
+//  T6-M 五形态 eyebrow/渲染锚点；T6-A R2 permission/confirm 排除链；T6-E 多选 toggle+footer+
+//  canSubmit 守卫；T6-C/T6-D Other 展开与空文本守卫/置换直提；T6-N 在飞防重 submittingId；
+//  T6-O alert Esc 语义；T6-K respondAndRemove 载荷三元式+sdk-interactions 零波及；R3/P1-A/P3-1
+//  双击防重守卫位次（单题直提边沿=C2-1 白名单成员）；单题（非 wizard）footer 模板零触碰。
 //
-// 裁决应用：
-//  R2——直提范围排除 permission/confirm（契约 #8 权限弹窗「拒绝+所选 label 主按钮」形态保留）；
-//  R3——不钉「@dblclick 字面删除」，钉行为「单选直提后双击不产生二次提交」（submittingId
-//       在飞守卫 + 300ms 短窗守卫；修正原表述：dblclick 经队列下一请求/向导题间复用 DOM 可达，
-//       「弹窗已关使链不可达」假设不成立——守卫已上移 submit(optionId)，toggleOption 内保留双保险）；
-//  T6-B 01 语义修正——单选形态主按钮门控为「未激活 Other 时缺席、Other 激活时有『确认』」
-//      （showFooterPrimary），不按 03 字面「单选形态无主按钮」绝对化。
-//  边缘守卫补丁（编排裁定回执）——直提 300ms 短窗守卫（lastDirectSubmitAt）：submittingId
-//      仅覆盖 IPC 在飞窗口，双击第二击/换请求换单的第二击可能落在守卫清零后；守卫置于
-//      updateSelected 之前防第二击污染新请求/新题选中态。属实现标准「边界处理」项，
-//      03 用例未显式覆盖（T6-N 只钉 submittingId 在飞守卫），锚定于 T6-A 两条 check。
+// 重写面（变体 2 直提新形态+C2 守卫口径）：
+//  · wizard 单选直提调用图：wizardToggleOption 普通选项=守卫→updateAnswer(selectedOptionIds:
+//    [optionId])+出集清 Other→写时间戳→advanceToNextUnanswered（点击即作答+自动前进，契约 5）；
+//  · wizard 多选不直提（谓词 currentMultiSelect 早退 + wizardToggleOption 多选分支 return 双断言）；
+//  · C2-1 守卫调用点白名单（C2 报告回填锚点 2026-11-16）：读点恰三处=toggleOption :386 /
+//    wizardToggleOption :448 / submit(optionId) :534；写点恰两处 :391/:450；全文件 lastDirectSubmitAt
+//    恰 6 处（声明+3 读+2 写）；负向零命中面=jumpToQuestion/previousQuestion/submitWizard/
+//    requestDiscard/cancel/handleKeydown/两处多选分支切片；
+//  · C2-5 窗值钉：lastDirectSubmitAt 声明保留 + `< 300` 严格小于字面（契约 3 防误触双击目的不变）；
+//  · C3-4①footer 顺序钉：wizard footer 取消 ghost 最左→进度文本→上一题 ghost→下一题/提交 primary
+//    最右（取消不夹上下一步中间，治抱怨④）；C3-4②取消不居中钉：取消钮无 margin:auto/居中形态，
+//    .wizard-foot-progress margin-right:auto（原型 .foot .hint 形态=提示占左、按钮组居右）。
 //
-// P1-A 补钉（评审缺陷：dblclick 绕过 300ms 直提守卫——幽灵作答/幽灵提交）：toggleOption 内
-//      守卫只挡 toggle 路径；submit(optionId) 在 toggleOption 被吞后仍按 optionId 直构 ids 走
-//      全链（多题向导题切换/队列下一请求复用同 key DOM 时第二击可达）——守卫上移 submit：
-//      direct 形态整体早退位于在飞早退之后、toggleOption(optionId) 之前；toggleOption 内守卫
-//      保留（双保险）；focusOption(optionIndex) 随之移到守卫之后（P3-1：被吞第二击不得污染
-//      聚焦态；鼠标路径聚焦已由 InteractionOptionList @mouseenter 驱动，键盘路径经 move()）。
+// 废卷面（C1 重构移除，随本重写废止并在此留痕——勿再按旧锚补钉）：
+//  T6-B showFooterPrimary 旧门控两钉（旧 footer 切片 marker `<footer class="interaction-dialog__footer">`
+//    已随 v-if/v-else 分支化失效；「单选未激活 Other 无主按钮」在 wizard 形态被契约 4 反转——非 wizard
+//    footer 门控改由「单题 footer 零触碰」钉承接）；
+//  T6-F 向导 persist+自动前进链（persistCurrentQuestionAnswer/loadWizardStep 已移除）；
+//  T6-G 末题单击整体提交（submitWizard 承担，见 wizard-step-jump 重写版⑨）；
+//  T6-H「下一题仅 multiSelect 当前题可见」（变体 2 主按钮恒渲染=契约 4，语义反转）；
+//  T6-J Enter/X1 键盘钉（迁 enter-guard 重写版）；T6-L wizard persist 链（同 T6-F）；
+//  T6-I 圆点保留钉（圆点行已移除，左栏 wizard-nav 承担——见 wizard-step-jump 重写版②③），其
+//  spawn enter-guard 回归门保留为 T6-I 后继。
 //
-// 用例映射（T6-A~O）：T6-A 单选直提（含 R2 排除链/R3 行为钉）；T6-B footer 主按钮门控+
-// submitLabel；T6-C Other 展开不提交；T6-D Other 激活点普通选项直提；T6-E 多选 toggle+footer；
-// T6-F 向导自动前进；T6-G 末题整体提交；T6-H multiSelect 不前进+「下一题」专属；T6-I 上一步/
-// 取消/圆点保留（spawn enter-guard）；T6-J Enter/Esc 不变（spawn esc-stack/initial-focus/
-// hb13-v-perm-draft）；T6-K 载荷结构+主进程零波及；T6-L 自动前进前落草稿；T6-M 五形态 UI；
-// T6-N 提交在飞防重；T6-O alert 边界。
+// 「对旧实现必红」自证（内置，C3-1 期望条款）：spawnSync git show 取批次基线提交 3be0d7d
+//（04-实施计划 §0；指令原文 HEAD: 在 2026-11-16 实施期与之等价——C1/C2 改动未提交，HEAD 即
+// 重构前实现。固定取基线提交快照是为防本批提交入库后 HEAD 指向新实现、新钉对新实现全绿而使
+// 自证断言自毁、selftest 永红）旧源码写临时文件 .plan-loop/.../scratch/c3-old-InteractionPrompt-*.vue
+// 留痕，对重写面新钉（redOnOld 标记）跑旧源码断言至少一条 FAIL（逐条输出留痕），随后对当前
+// 实现全绿。
 //
-// RED 期望桶（对未实现工作树）：T6-A/B/F/G/H 必红（派发要求最低集）；T6-C/D 因用例语义
-// 含直选断言（Other 排除条件/置换后直提）同根因先红；T6-E/I/J/K/L/M/N/O 为回归钉现状即绿。
-//
-// 运行：npx tsx scripts/tdd-interaction-direct-submit-verify.ts（登记 scripts/selftest-static-list.txt）
+// 运行：npx tsx scripts/tdd-interaction-direct-submit-verify.ts（登记 scripts/selftest-static-list.txt:268）
 
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
-const src = readFileSync(new URL('../src/renderer/components/chat/InteractionPrompt.vue', import.meta.url), 'utf8');
 const optionListSrc = readFileSync(new URL('../src/renderer/components/chat/InteractionOptionList.vue', import.meta.url), 'utf8');
 const sdkInteractionsSrc = readFileSync(new URL('../src/main/modules/sdk-interactions.ts', import.meta.url), 'utf8');
 
+let src = readFileSync(new URL('../src/renderer/components/chat/InteractionPrompt.vue', import.meta.url), 'utf8');
+
+interface CheckItem { name: string; fn: () => void; redOnOld: boolean; group: string }
+const checks: CheckItem[] = [];
+let pendingGroup = '';
+function group(title: string): void { pendingGroup = title; }
 let pass = 0;
 let fail = 0;
-function check(name: string, fn: () => void): void {
-  try { fn(); pass++; console.log(`  ✅ ${name}`); }
-  catch (e) { fail++; console.log(`  ❌ ${name} — ${(e as Error).message}`); }
+function check(name: string, fn: () => void, redOnOld = false): void {
+  checks.push({ name, fn, redOnOld, group: pendingGroup });
+}
+function runCheck(item: CheckItem): void {
+  try { item.fn(); pass++; console.log(`  ✅ ${item.name}`); }
+  catch (e) { fail++; console.log(`  ❌ ${item.name} — ${(e as Error).message}`); }
 }
 
 /** 切片函数体：自 `function <name>(` 起、至首个 `\n}`（顶层闭合）。 */
@@ -114,13 +125,62 @@ function toggleMultiBlock(): string {
   assert.ok(false, 'multiSelect 分支花括号配对失败');
 }
 
-function footerBlock(): string {
-  const marker = '<footer class="interaction-dialog__footer">';
+/** 切片 wizardToggleOption 内 multiSelect 分支（if (question.multiSelect) { … } 配对体）。 */
+function wizardMultiBlock(): string {
+  const body = functionBody('wizardToggleOption');
+  const marker = 'if (question.multiSelect) {';
+  const start = body.indexOf(marker);
+  assert.ok(start > -1, 'wizardToggleOption 缺 multiSelect 分支');
+  let depth = 0;
+  let cursor = start + marker.length - 1;
+  while (cursor < body.length) {
+    const ch = body[cursor];
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return body.slice(start, cursor + 1);
+    }
+    cursor++;
+  }
+  assert.ok(false, 'wizardToggleOption multiSelect 分支花括号配对失败');
+}
+
+/** 切片 wizard footer（C1 变体 2 契约 4 专钉面）。 */
+function wizardFooterBlock(): string {
+  const marker = '<footer v-if="isWizard" class="interaction-dialog__footer interaction-dialog__footer--wizard">';
   const idx = src.indexOf(marker);
-  assert.ok(idx > -1, '缺 footer');
+  assert.ok(idx > -1, '缺 wizard footer（C1 变体 2 重排面）');
   const end = src.indexOf('</footer>', idx);
-  assert.ok(end > idx, 'footer 闭合切片失败');
+  assert.ok(end > idx, 'wizard footer 闭合切片失败');
   return src.slice(idx, end);
+}
+
+/** 切片单题（非 wizard）footer——C1 契约 9 零触碰面。 */
+function singleFooterBlock(): string {
+  const marker = '<footer v-else class="interaction-dialog__footer">';
+  const idx = src.indexOf(marker);
+  assert.ok(idx > -1, '缺单题 footer（v-else 分支）');
+  const end = src.indexOf('</footer>', idx);
+  assert.ok(end > idx, '单题 footer 闭合切片失败');
+  return src.slice(idx, end);
+}
+
+/** 提取样式规则体：自选择器起至首个 `}`。 */
+function styleRule(selector: string): string {
+  const idx = src.indexOf(selector);
+  assert.ok(idx > -1, `缺样式规则 ${selector}`);
+  return src.slice(idx, src.indexOf('}', idx));
+}
+
+/** 按钮开标签切片：footer 切片内含 needle 的 `<button` 起至 `>`。 */
+function buttonOpenTag(block: string, needle: string): string {
+  const at = block.indexOf(needle);
+  assert.ok(at > -1, `footer 缺 ${needle}`);
+  const open = block.lastIndexOf('<button', at);
+  assert.ok(open > -1, `${needle} 前缺 <button 开标签`);
+  const gt = block.indexOf('>', at);
+  assert.ok(gt > -1, `${needle} 开标签未闭合`);
+  return block.slice(open, gt + 1);
 }
 
 function spawnAssert(script: string): void {
@@ -129,235 +189,8 @@ function spawnAssert(script: string): void {
   assert.equal(r.status, 0, `${script} 退出码 ${r.status}（连带契约被波及）\n${tail}`);
 }
 
-console.log('\n=== UI13-P6 T6-A 单选直提（含 R2 排除链 / R3 双击行为钉） ===');
-check('T6-A isDirectSubmitChoice 判定：非 multi/form/text/permission/confirm；向导单选或 single-choice', () => {
-  const body = functionBody('isDirectSubmitChoice');
-  assert.ok(body.includes('currentMultiSelect.value'), '缺 multiSelect 排除（多选不得直提）');
-  assert.ok(body.includes('hasStructuredForm.value'), '缺结构表单排除');
-  assert.ok(body.includes('hasTextInput.value'), '缺文本输入排除');
-  assert.ok(body.includes("req.kind === 'permission'"), "缺 permission 排除（裁决 R2：权限形态不变）");
-  assert.ok(body.includes("req.kind === 'confirm'"), "缺 confirm 排除（裁决 R2：alert 形态不变）");
-  assert.ok(body.includes('isWizard.value'), '缺向导当前题单选直提分支（kind form+questions）');
-  assert.ok(body.includes("req.kind === 'single-choice'"), '缺单题 single-choice 直提分支');
-});
-check('T6-A toggleOption 直选调用：void submit() 在 updateSelected 写回之后（submit 读刚写回的 selectedIds）；短窗守卫在写回之前（编排裁定：防第二击污染新请求/新题选中态）', () => {
-  const body = functionBody('toggleOption');
-  const updateIdx = body.indexOf('updateSelected(new Set([optionId]))');
-  assert.ok(updateIdx > -1, '缺普通选项 updateSelected 写回');
-  const directIdx = body.indexOf('isDirectSubmitChoice()');
-  assert.ok(directIdx > -1, '缺直选判定调用（单击仍只选中、需 footer 确认=条目 5 原抱怨形态）');
-  const submitIdx = body.indexOf('void submit()');
-  assert.ok(submitIdx > updateIdx, 'void submit() 必须在 updateSelected 写回之后（submit 读刚写回的 selectedIds）');
-  const guardIdx = body.indexOf('Date.now() - lastDirectSubmitAt < 300');
-  assert.ok(guardIdx > -1, '缺直提 300ms 短窗守卫（01 边界值「第二击落空」的完整兑现，边缘守卫补丁）');
-  assert.ok(guardIdx < updateIdx, '短窗守卫必须先于 updateSelected（防第二击污染新请求/新题选中态，编排裁定）');
-});
-check('T6-A/R3 单选直提后双击不二次提交：submittingId 在飞守卫 + 直提短窗时间戳（dblclick 经队列下一请求/向导题间复用 DOM 可达，幂等由守卫保证）', () => {
-  const sub = submitBody();
-  assert.ok(sub.includes('submittingId.value === request.id'), 'submit 缺在飞守卫（双击二次提交面）');
-  assert.match(src, /let lastDirectSubmitAt = 0;/, '缺直提短窗时间戳声明（边缘守卫补丁）');
-  // R3：不钉子组件 @dblclick 字面删除；行为幂等由守卫保证，提交链保留（多选 Enter 等消费面）。
-  assert.match(src, /@submit="submit"/, 'InteractionOptionList 的 @submit 消费链须保留');
-  assert.match(optionListSrc, /@dblclick="!multiSelect && emit\('submit', entry\.option\.id\)"/, '虚拟形态 dblclick 提交链保留（幂等由守卫保证）');
-  assert.match(optionListSrc, /@dblclick="!multiSelect && emit\('submit', option\.id\)"/, '非虚拟形态 dblclick 提交链保留');
-});
-check('P1-A 守卫上移 submit(optionId)：direct 形态 300ms 整体早退，位于在飞早退之后、toggleOption(optionId) 之前（第二击直构 ids 幽灵提交面）', () => {
-  const sub = submitBody();
-  const inFlightIdx = sub.indexOf('if (!request || submittingId.value === request.id) return;');
-  assert.ok(inFlightIdx > -1, 'submit 缺在飞早退（函数体开头既有早退被波及）');
-  const guardIdx = sub.indexOf('if (optionId && isDirectSubmitChoice() && optionId !== OTHER_OPTION_ID && Date.now() - lastDirectSubmitAt < 300) return;');
-  assert.ok(guardIdx > -1, 'submit 缺 direct 形态 300ms 整体早退守卫（toggleOption 被吞后 submit 仍按 optionId 直构 ids 走全链——多题向导/队列下一请求 DOM 复用时第二击可达）');
-  const toggleIdx = sub.indexOf('if (optionId) toggleOption(optionId)');
-  assert.ok(toggleIdx > -1, 'submit 缺 toggleOption(optionId) 委托（结构被波及）');
-  assert.ok(guardIdx > inFlightIdx, '守卫须位于在飞早退之后（既有早退保留在前）');
-  assert.ok(guardIdx < toggleIdx, '守卫必须位于 toggleOption(optionId) 之前（晚于 toggleOption 则 ids 仍按 optionId 直构，幽灵提交不挡）');
-});
-check('P1-A/P3-1 被吞第二击不得污染聚焦态：toggleOption 内 focusOption(optionIndex) 移到 300ms 短窗守卫之后', () => {
-  const body = functionBody('toggleOption');
-  const guardIdx = body.indexOf('Date.now() - lastDirectSubmitAt < 300');
-  assert.ok(guardIdx > -1, '缺 300ms 短窗守卫（前置结构被波及）');
-  const focusIdx = body.indexOf('focusOption(optionIndex)');
-  assert.ok(focusIdx > -1, '缺 focusOption(optionIndex)（键盘导航起点丢失）');
-  assert.ok(focusIdx > guardIdx, 'focusOption 必须在 300ms 守卫之后（守卫吞掉的第二击不得改写 focusedIndex）');
-});
-
-console.log('\n=== UI13-P6 T6-B 单选形态 footer 主按钮门控（01 语义：Other 未激活缺席/激活有「确认」） ===');
-check('T6-B showFooterPrimary 形态门控：form/text/permission/confirm/multi 恒真，其余=Other 激活', () => {
-  const body = computedBody('showFooterPrimary');
-  assert.ok(body.includes('hasStructuredForm.value || hasTextInput.value'), '缺 form/text 恒真分支');
-  assert.ok(body.includes("kind === 'permission'") && body.includes("kind === 'confirm'"), '缺 permission/confirm 恒真（裁决 R2：权限「拒绝+所选 label」形态保留）');
-  assert.ok(body.includes('if (currentMultiSelect.value) return true;'), '缺多选恒真分支（含向导 multiSelect 题与 kind multi-choice）');
-  assert.ok(body.includes('return showOtherInput.value;'), '单选形态须门控在 Other 激活（未激活 Other 无主按钮）');
-});
-check('T6-B footer 主按钮 v-if="showFooterPrimary"（「取消」ghost /「上一步」模板字面逐字保留）', () => {
-  const footer = footerBlock();
-  assert.ok(footer.includes('v-if="showFooterPrimary"'), '主按钮缺 showFooterPrimary 门控（单选未激活 Other 仍渲染提交钮）');
-  assert.match(
-    src,
-    /<button type="button" class="interaction-btn interaction-btn--ghost" @click="cancel">/,
-    '「取消」ghost 按钮字面须逐字保留（enter-guard 契约钉）',
-  );
-  assert.match(
-    src,
-    /<button v-if="isWizard && wizardIndex > 0"[^>]*@click="previousQuestion">/,
-    '「上一步」按钮字面须逐字保留（wizard-step-jump #4 钉）',
-  );
-});
-check('T6-B submitLabel 按 01 重写：向导非末「下一题」/末「确认」；permission 所选 label；multi-choice「提交选择」；其余「确认」', () => {
-  const body = computedBody('submitLabel');
-  assert.ok(body.includes("wizardIndex.value < wizardQuestions.value.length - 1) return '下一题'"), '缺向导非末「下一题」（仅 multiSelect 题可见）');
-  assert.ok(body.includes("if (isWizard.value) return '确认'"), '缺向导（含末题）「确认」分支');
-  assert.match(body, /kind === 'permission'\)\s*return selectedOption\.value\?\.label \?\? '提交选择'/, '缺 permission 所选 label 文案');
-  assert.ok(body.includes("kind === 'multi-choice') return '提交选择'"), '缺 multi-choice「提交选择」');
-  assert.ok(body.includes("return '确认'"), '缺兜底「确认」（单选 Other 激活形态）');
-  assert.ok(!body.includes('allQuestionsAnswered'), 'submitLabel 不再依赖 allQuestionsAnswered（末步未答全跳转守卫由 submit 承担，01 权威版无此行）');
-});
-
-console.log('\n=== UI13-P6 T6-C Other 展开不提交 / T6-D Other 激活点普通选项直提 ===');
-check('T6-C 直选排除 OTHER_OPTION_ID；submit Other 空文本守卫（聚焦输入不提交）保留', () => {
-  const body = functionBody('toggleOption');
-  const directIdx = body.indexOf('isDirectSubmitChoice()');
-  assert.ok(directIdx > -1, '缺直选判定');
-  const exclIdx = body.indexOf('optionId !== OTHER_OPTION_ID');
-  assert.ok(exclIdx > -1, '直选缺 Other 排除（Other 单击被误提交/空文本误提交面）');
-  const sub = submitBody();
-  const guardIdx = sub.indexOf('ids.includes(OTHER_OPTION_ID) && !otherText.value.trim()');
-  assert.ok(guardIdx > -1, 'submit 缺 Other 空文本守卫');
-  assert.ok(sub.slice(guardIdx, guardIdx + 200).includes('otherInput.value?.focus()'), 'Other 空文本守卫须聚焦输入框而非提交');
-});
-check('T6-C Other 展开链保留：showOtherInput 门控 + updateSelected Other 出集清文本 + 输入区渲染', () => {
-  assert.match(src, /const showOtherInput = computed\(\(\) => selectedIds\.value\.has\(OTHER_OPTION_ID\)\);/, '缺 Other 激活门控');
-  const upd = functionBody('updateSelected');
-  assert.match(upd, /if \(!next\.has\(OTHER_OPTION_ID\)\) otherText\.value = '';/, 'Other 出集清文本语义保留');
-  assert.match(src, /v-if="showOtherInput \|\| hasTextInput" class="interaction-other"/, 'Other/文本输入区渲染门控保留');
-});
-check('T6-D Other 激活时点普通选项=置换并直提：updateSelected 置换在 multiSelect 分支之后、先于直选', () => {
-  const body = functionBody('toggleOption');
-  const multiBlock = toggleMultiBlock();
-  const multiEnd = body.indexOf(multiBlock) + multiBlock.length;
-  const updateIdx = body.indexOf('updateSelected(new Set([optionId]))');
-  assert.ok(updateIdx > multiEnd, '普通选项置换须在多选分支之后（单选路径）');
-  const directIdx = body.indexOf('void submit()');
-  assert.ok(directIdx > updateIdx, '置换后须直选提交（Other 出集、该普通选项被直接提交）');
-});
-
-console.log('\n=== UI13-P6 T6-E 多选维持 toggle+footer（回归钉） ===');
-check('T6-E multiSelect 分支仅增删集 + return，无直选调用；canSubmit 空集早退守卫保留', () => {
-  const multiBlock = toggleMultiBlock();
-  assert.ok(multiBlock.includes('next.add(optionId)') && multiBlock.includes('next.delete(optionId)'), '多选 toggle 增删语义保留');
-  assert.ok(multiBlock.includes('return;'), '多选分支须 return（不落入直选）');
-  assert.ok(!multiBlock.includes('isDirectSubmitChoice'), '多选分支不得直选（零选中/半选误提交面）');
-  const can = computedBody('canSubmit');
-  assert.match(can, /selectedIds\.value\.size > 0 \|\| request\.kind === 'confirm'/, 'canSubmit 空集早退守卫保留（≥1 选中才可提交）');
-  assert.match(can, /submittingId\.value === request\.id\)\s*return false/, 'canSubmit 在飞禁用保留');
-});
-check('T6-E footer 多选形态「提交选择」主按钮与「取消」保留', () => {
-  const label = computedBody('submitLabel');
-  assert.ok(label.includes("kind === 'multi-choice') return '提交选择'"), '多选主按钮「提交选择」文案保留');
-  assert.match(src, /@click="cancel">\{\{ cancelLabel \}\}/, '「取消」按钮保留');
-});
-
-console.log('\n=== UI13-P6 T6-F 向导自动前进 / T6-G 末题整体提交 ===');
-check('T6-F 直选 void submit() 无参 → submit wizard 分支 persist+前进链承担（与 Enter 等价）', () => {
-  const body = functionBody('toggleOption');
-  assert.match(body, /void submit\(\);/, '直选须无参 submit（走 wizard 分支前进/末题提交）');
-  const sub = submitBody();
-  assert.match(sub, /if \(isWizard\.value\) \{/, 'submit 缺 wizard 分支');
-  assert.ok(sub.indexOf('persistCurrentQuestionAnswer()') > -1, 'wizard 分支缺 persist（前进前落账）');
-  assert.ok(sub.includes('loadWizardStep(wizardIndex.value + 1)'), '缺自动前进 loadWizardStep(index+1)');
-});
-check('T6-G 向导末题单击=整体提交：末步 allQuestionsAnswered 守卫 + questionAnswers 载荷 + 直选入口', () => {
-  const sub = submitBody();
-  assert.ok(sub.includes('!allQuestionsAnswered.value'), '缺末步完整性守卫（未答全不放行）');
-  assert.match(sub, /questionAnswers: isWizard\.value\s*\?\s*JSON\.parse\(JSON\.stringify\(questionAnswers\.value\)\)/, '向导整体提交 questionAnswers 载荷保留');
-  const body = functionBody('toggleOption');
-  assert.ok(body.includes('void submit()'), '末题单击的直选入口缺失（答完卡在最后一步）');
-});
-
-console.log('\n=== UI13-P6 T6-H multiSelect 题不自动前进 +「下一题」专属 ===');
-check('T6-H 多选分支 return 先于直选判定（multiSelect 题单击 toggle 不前进）', () => {
-  const body = functionBody('toggleOption');
-  const multiBlock = toggleMultiBlock();
-  const multiEnd = body.indexOf(multiBlock) + multiBlock.length;
-  const directIdx = body.indexOf('isDirectSubmitChoice()');
-  assert.ok(directIdx > -1, '缺直选判定');
-  assert.ok(directIdx > multiEnd, '直选必须在多选分支之后（multiSelect 题不自动前进）');
-});
-check('T6-H 「下一题/末题确认」仅 multiSelect 当前题可见：showFooterPrimary 多选恒真 + 单选非 Other 无主按钮', () => {
-  const show = computedBody('showFooterPrimary');
-  assert.ok(show.includes('if (currentMultiSelect.value) return true;'), '缺多选恒真（「下一题」按钮在单选题也出现=回归）');
-  assert.ok(show.includes('return showOtherInput.value;'), '单选非 Other 形态须无主按钮');
-  const label = computedBody('submitLabel');
-  assert.ok(label.includes("return '下一题'") && label.includes("if (isWizard.value) return '确认'"), '缺「下一题」/末题「确认」文案分支');
-});
-
-console.log('\n=== UI13-P6 T6-I 「上一步」「取消」「圆点」保留（回归钉 + 既有契约脚本） ===');
-check('T6-I 上一步/取消/圆点跳转/cancelLabel/previousQuestion 委托全保留', () => {
-  assert.match(src, /<button v-if="isWizard && wizardIndex > 0"[^>]*@click="previousQuestion">上一步</, '「上一步」按钮字面保留');
-  assert.match(src, /@click="cancel">\{\{ cancelLabel \}\}/, '「取消」按钮保留');
-  assert.match(src, /const cancelLabel = computed\(\(\) => activeRequest\.value\?\.kind === 'permission' \? '拒绝' : '取消'\);/, 'cancelLabel 双文案保留');
-  assert.match(src, /@click="jumpToQuestion\(index\)"/, '步骤圆点跳转保留');
-  const prev = functionBody('previousQuestion');
-  assert.ok(prev.includes('jumpToQuestion(wizardIndex.value - 1)'), 'previousQuestion 委托保留');
-});
-check('T6-I 既有契约脚本回归门：npx tsx scripts/tdd-interaction-prompt-enter-guard.ts 退出码 0', () => {
-  spawnAssert('scripts/tdd-interaction-prompt-enter-guard.ts');
-});
-
-console.log('\n=== UI13-P6 T6-J Enter/Esc 全键盘路径不变（回归钉 + 既有契约脚本） ===');
-check('T6-J Enter 分支不动：X1 让位（button/summary、选项除外）+ void submit() 兜底', () => {
-  const body = functionBody('handleKeydown');
-  const enterIdx = body.indexOf("event.key === 'Enter'");
-  assert.ok(enterIdx > -1, '缺 Enter 分支');
-  const seg = body.slice(enterIdx, body.indexOf("event.key === 'Escape'"));
-  assert.ok(seg.includes("closest('button, summary')"), 'Enter X1 让位保留');
-  assert.ok(seg.includes("!target.closest('.interaction-option')"), '选项按钮不让人让位判定保留');
-  assert.ok(seg.includes('void submit()'), 'Enter submit 兜底保留（Enter=提交/前进与单击等价）');
-});
-check('T6-J Esc 让位与 alert 语义不动：isTopmost 守卫 + isAlert submit(\'confirm\')', () => {
-  const body = functionBody('handleKeydown');
-  const escIdx = body.indexOf("event.key === 'Escape'");
-  assert.ok(escIdx > -1, '缺 Esc 分支');
-  const seg = body.slice(escIdx);
-  assert.ok(seg.includes('!escHandle.isTopmost()'), 'Esc 让位守卫保留');
-  assert.match(seg, /const isAlert = activeRequest\.value\.kind === 'confirm'/, 'alert 判定保留');
-  assert.ok(seg.includes("submit('confirm')"), 'alert Esc=提交 confirm 保留');
-});
-check('T6-J 既有契约脚本回归门：esc-stack / initial-focus / hb13-v-perm-draft 全绿', () => {
-  spawnAssert('scripts/tdd-esc-stack-verify.ts');
-  spawnAssert('scripts/tdd-interaction-initial-focus-verify.ts');
-  spawnAssert('scripts/tdd-bugfix-hb13-v-perm-draft-verify.ts');
-});
-
-console.log('\n=== UI13-P6 T6-K 载荷结构不变 / T6-L 自动前进前落草稿 ===');
-check('T6-K respondAndRemove 载荷 { id, action, selectedOptionIds|questionAnswers, fieldValues, otherText } 不变', () => {
-  const sub = submitBody();
-  assert.match(sub, /action: 'submit',/, 'action 字面变动');
-  assert.match(sub, /selectedOptionIds: isWizard\.value \? undefined : ids/, '单题 selectedOptionIds 字段变动');
-  assert.match(sub, /questionAnswers: isWizard\.value/, '向导 questionAnswers 字段变动');
-  assert.match(sub, /fieldValues: hasStructuredForm\.value/, '表单 fieldValues 字段变动');
-  assert.match(sub, /otherText: otherText\.value\.trim\(\) \|\| undefined/, 'otherText 字段变动');
-});
-check('T6-K 主进程交互文件零波及：sdk-interactions 载荷映射/解析字面仍在', () => {
-  assert.ok(sdkInteractionsSrc.includes('selectedOptionIds: response.selectedOptionIds'), '主进程 selectedOptionIds 映射被波及');
-  assert.ok(sdkInteractionsSrc.includes('questionAnswers?.[questionId]'), '主进程 questionAnswers 解析被波及');
-});
-check('T6-L submit wizard 分支 persist 先于前进/提交；draftCache wizardIndex/questionAnswers 链保留', () => {
-  const sub = submitBody();
-  const wizIdx = sub.indexOf('if (isWizard.value) {');
-  assert.ok(wizIdx > -1, '缺 wizard 分支');
-  const persistIdx = sub.indexOf('persistCurrentQuestionAnswer()', wizIdx);
-  assert.ok(persistIdx > -1, 'wizard 分支缺 persist');
-  const advanceIdx = sub.indexOf('loadWizardStep(wizardIndex.value + 1)', wizIdx);
-  assert.ok(advanceIdx > persistIdx, 'persist 必须先于自动前进（草稿落账语义）');
-  const submittingIdx = sub.indexOf('submittingId.value = request.id;', wizIdx);
-  assert.ok(submittingIdx > persistIdx, 'persist 必须先于整体提交路径');
-  assert.match(src, /const draftCache = new Map<string, \{ selectedIds: Set<string>; otherText: string; wizardIndex: number; questionAnswers/, 'draftCache 值类型含 wizardIndex/questionAnswers');
-  assert.match(src, /watch\(\s*\[selectedIds, otherText, wizardIndex, questionAnswers, fieldValues\] as const/, '草稿 watch 源完整（切回恢复链）');
-});
-
-console.log('\n=== UI13-P6 T6-M 五形态 UI 一致 / T6-N 在飞防重 / T6-O alert 边界（回归钉） ===');
-check('T6-M 五形态 eyebrow 标题文案字面保留', () => {
+group('===保留面：单题五形态 T6-M（eyebrow/渲染锚点，C1 契约 9 零触碰） ===');
+check('T6-M 五形态 eyebrow 文案字面保留（permission/多选/输入/参数/选择兜底）', () => {
   const eyebrow = computedBody('eyebrow');
   for (const need of ["kind === 'permission') return 'Claude Code 需要确认'", "'Claude Code 需要你多选'", "'Claude Code 需要你输入'", "'Claude Code 需要参数'"]) {
     assert.ok(eyebrow.includes(need), `eyebrow 缺 ${need}`);
@@ -370,18 +203,286 @@ check('T6-M 五形态渲染锚点不变：permission 详情 / 表单 / 选项列
   assert.match(src, /<InteractionOptionList/, '选项列表组件保留');
   assert.match(src, /v-if="hasPreview" :preview/, '预览面板保留');
 });
-check('T6-N submit/cancel 入口 submittingId 早退守卫保留（在飞再点不重复提交）', () => {
+
+group('===保留面：单题直提 T6-A R2 排除链 + R3/P1-A/P3-1 守卫位次（C2-1 白名单成员） ===');
+check('T6-A R2 isDirectSubmitChoice 排除链：非 multi/form/text/permission/confirm；单题 single-choice', () => {
+  const body = functionBody('isDirectSubmitChoice');
+  assert.ok(body.includes('currentMultiSelect.value'), '缺 multiSelect 排除（多选不得直提）');
+  assert.ok(body.includes('hasStructuredForm.value'), '缺结构表单排除');
+  assert.ok(body.includes('hasTextInput.value'), '缺文本输入排除');
+  assert.ok(body.includes("req.kind === 'permission'"), "缺 permission 排除（裁决 R2：权限形态不变）");
+  assert.ok(body.includes("req.kind === 'confirm'"), "缺 confirm 排除（裁决 R2：alert 形态不变）");
+  assert.ok(body.includes("req.kind === 'single-choice'"), '缺单题 single-choice 直提分支');
+});
+check('T6-A toggleOption 直选调用序：updateSelected 写回→void submit()；300ms 守卫先于写回', () => {
+  const body = functionBody('toggleOption');
+  const updateIdx = body.indexOf('updateSelected(new Set([optionId]))');
+  assert.ok(updateIdx > -1, '缺普通选项 updateSelected 写回');
+  const directIdx = body.indexOf('isDirectSubmitChoice()');
+  assert.ok(directIdx > -1, '缺直选判定调用');
+  const submitIdx = body.indexOf('void submit()');
+  assert.ok(submitIdx > updateIdx, 'void submit() 必须在 updateSelected 写回之后（submit 读刚写回的 selectedIds）');
+  const guardIdx = body.indexOf('Date.now() - lastDirectSubmitAt < 300');
+  assert.ok(guardIdx > -1, '缺直提 300ms 短窗守卫（C2-5 白名单读点）');
+  assert.ok(guardIdx < updateIdx, '短窗守卫必须先于 updateSelected（防第二击污染新请求/新题选中态）');
+});
+check('R3 直提幂等：submittingId 在飞守卫 + lastDirectSubmitAt 声明 + dblclick 提交链保留', () => {
+  const sub = submitBody();
+  assert.ok(sub.includes('submittingId.value === request.id'), 'submit 缺在飞守卫（双击二次提交面）');
+  assert.match(src, /let lastDirectSubmitAt = 0;/, '缺直提短窗时间戳声明（C2-5）');
+  assert.match(src, /@submit="submit"/, 'InteractionOptionList 的 @submit 消费链须保留');
+  assert.match(optionListSrc, /@dblclick="!multiSelect && emit\('submit', entry\.option\.id\)"/, '虚拟形态 dblclick 提交链保留（幂等由守卫保证）');
+  assert.match(optionListSrc, /@dblclick="!multiSelect && emit\('submit', option\.id\)"/, '非虚拟形态 dblclick 提交链保留');
+});
+check('P1-A submit(optionId) 直提守卫：位于在飞早退之后、toggleOption(optionId) 之前（单题直提边沿白名单）', () => {
+  const sub = submitBody();
+  const inFlightIdx = sub.indexOf('if (!request || submittingId.value === request.id) return;');
+  assert.ok(inFlightIdx > -1, 'submit 缺在飞早退');
+  const guardIdx = sub.indexOf('if (optionId && isDirectSubmitChoice() && optionId !== OTHER_OPTION_ID && Date.now() - lastDirectSubmitAt < 300) return;');
+  assert.ok(guardIdx > -1, 'submit 缺 direct 形态 300ms 整体早退守卫（C2-1 白名单读点 :534）');
+  const toggleIdx = sub.indexOf('if (optionId) toggleOption(optionId)');
+  assert.ok(toggleIdx > -1, 'submit 缺 toggleOption(optionId) 委托');
+  assert.ok(guardIdx > inFlightIdx, '守卫须位于在飞早退之后');
+  assert.ok(guardIdx < toggleIdx, '守卫必须位于 toggleOption(optionId) 之前（幽灵提交不挡）');
+});
+check('P3-1 被吞第二击不污染聚焦态：toggleOption 内 focusOption(optionIndex) 在 300ms 守卫之后', () => {
+  const body = functionBody('toggleOption');
+  const guardIdx = body.indexOf('Date.now() - lastDirectSubmitAt < 300');
+  assert.ok(guardIdx > -1, '缺 300ms 短窗守卫');
+  const focusIdx = body.indexOf('focusOption(optionIndex)');
+  assert.ok(focusIdx > -1, '缺 focusOption(optionIndex)');
+  assert.ok(focusIdx > guardIdx, 'focusOption 必须在 300ms 守卫之后');
+});
+
+group('===保留面：T6-E 多选 toggle+footer / T6-C/T6-D Other 链 ===');
+check('T6-E multiSelect 分支仅增删集+return 无直选；canSubmit 空集早退+在飞禁用', () => {
+  const multiBlock = toggleMultiBlock();
+  assert.ok(multiBlock.includes('next.add(optionId)') && multiBlock.includes('next.delete(optionId)'), '多选 toggle 增删语义保留');
+  assert.ok(multiBlock.includes('return;'), '多选分支须 return（不落入直选）');
+  assert.ok(!multiBlock.includes('isDirectSubmitChoice'), '多选分支不得直选');
+  assert.ok(!multiBlock.includes('lastDirectSubmitAt'), 'C2-1 负向：多选分支切片零守卫出现（快速连点不吞）');
+  const can = computedBody('canSubmit');
+  assert.match(can, /selectedIds\.value\.size > 0 \|\| request\.kind === 'confirm'/, 'canSubmit 空集早退守卫保留');
+  assert.match(can, /submittingId\.value === request\.id\)\s*return false/, 'canSubmit 在飞禁用保留');
+});
+check('T6-E footer 多选「提交选择」文案 + 取消钮/cancelLabel 双文案保留', () => {
+  const label = computedBody('submitLabel');
+  assert.ok(label.includes("kind === 'multi-choice') return '提交选择'"), '多选主按钮「提交选择」文案保留');
+  assert.match(src, /@click="cancel">\{\{ cancelLabel \}\}/, '「取消」按钮保留');
+  assert.match(src, /const cancelLabel = computed\(\(\) => activeRequest\.value\?\.kind === 'permission' \? '拒绝' : '取消'\);/, 'cancelLabel 双文案保留');
+});
+check('T6-C 直选排除 OTHER；submit Other 空文本守卫（聚焦输入不提交）保留', () => {
+  const body = functionBody('toggleOption');
+  assert.ok(body.indexOf('optionId !== OTHER_OPTION_ID') > -1, '直选缺 Other 排除');
+  const sub = submitBody();
+  const guardIdx = sub.indexOf('ids.includes(OTHER_OPTION_ID) && !otherText.value.trim()');
+  assert.ok(guardIdx > -1, 'submit 缺 Other 空文本守卫');
+  assert.ok(sub.slice(guardIdx, guardIdx + 200).includes('otherInput.value?.focus()'), 'Other 空文本守卫须聚焦输入框而非提交');
+});
+check('T6-C Other 展开链：showOtherInput 门控 + updateSelected 出集清文本 + 输入区渲染', () => {
+  assert.match(src, /const showOtherInput = computed\(\(\) => selectedIds\.value\.has\(OTHER_OPTION_ID\)\);/, '缺 Other 激活门控');
+  const upd = functionBody('updateSelected');
+  assert.match(upd, /if \(!next\.has\(OTHER_OPTION_ID\)\) otherText\.value = '';/, 'Other 出集清文本语义保留（单题出集路径）');
+  assert.match(src, /v-if="showOtherInput \|\| hasTextInput" class="interaction-other"/, 'Other/文本输入区渲染门控保留');
+});
+check('T6-D Other 激活时点普通选项=置换并直提：updateSelected 置换在 multiSelect 分支之后、先于直选', () => {
+  const body = functionBody('toggleOption');
+  const multiBlock = toggleMultiBlock();
+  const multiEnd = body.indexOf(multiBlock) + multiBlock.length;
+  const updateIdx = body.indexOf('updateSelected(new Set([optionId]))');
+  assert.ok(updateIdx > multiEnd, '普通选项置换须在多选分支之后（单选路径）');
+  const directIdx = body.indexOf('void submit()');
+  assert.ok(directIdx > updateIdx, '置换后须直选提交');
+});
+
+group('===保留面：T6-N 在飞防重 / T6-O alert Esc / T6-K 载荷链零波及 ===');
+check('T6-N submit/cancel 入口 submittingId 早退守卫保留', () => {
   assert.match(submitBody(), /if \(!request \|\| submittingId\.value === request\.id\) return;/, 'submit 缺在飞守卫');
   const cancelBody = functionBody('cancel');
   assert.match(cancelBody, /if \(!request \|\| submittingId\.value === request\.id\) return;/, 'cancel 缺在飞守卫');
 });
-check('T6-O alert 边界（confirm 单选项）Esc=提交 confirm 保留（confirm 不直选由 T6-A R2 排除链钉）', () => {
+check('T6-O alert 边界（confirm 单选项）Esc=提交 confirm 保留', () => {
   const body = functionBody('handleKeydown');
-  const escIdx = body.indexOf("event.key === 'Escape'");
-  const seg = body.slice(escIdx);
+  const seg = body.slice(body.indexOf("event.key === 'Escape'"));
   assert.match(seg, /activeRequest\.value\.options\?\.length === 1\s*&&\s*activeRequest\.value\.options\[0\]\?\.id === 'confirm'/, 'alert 单选项判定保留');
   assert.ok(seg.includes("submit('confirm')"), 'alert Esc=提交 confirm 保留');
 });
+check('T6-K respondAndRemove 载荷三元式 { id, action, selectedOptionIds|questionAnswers, fieldValues, otherText } 不变', () => {
+  const sub = submitBody();
+  assert.match(sub, /action: 'submit',/, 'action 字面变动');
+  assert.match(sub, /selectedOptionIds: isWizard\.value \? undefined : ids/, '单题 selectedOptionIds 字段变动');
+  assert.match(sub, /questionAnswers: isWizard\.value/, '向导 questionAnswers 字段变动');
+  assert.match(sub, /fieldValues: hasStructuredForm\.value/, '表单 fieldValues 字段变动');
+  assert.match(sub, /otherText: otherText\.value\.trim\(\) \|\| undefined/, 'otherText 字段变动');
+});
+check('T6-K 主进程交互文件零波及：sdk-interactions 载荷映射/解析字面仍在', () => {
+  assert.ok(sdkInteractionsSrc.includes('selectedOptionIds: response.selectedOptionIds'), '主进程 selectedOptionIds 映射被波及');
+  assert.ok(sdkInteractionsSrc.includes('questionAnswers?.[questionId]'), '主进程 questionAnswers 解析被波及');
+});
+
+group('===重写面：单题 footer 零触碰（C1 契约 9，承接废卷 T6-B 的存活语义） ===');
+check('单题（非 wizard）footer 模板零触碰：上一步死字面/取消 ghost/主按钮 showFooterPrimary 门控+canSubmit 禁用+submit() 调用', () => {
+  const footer = singleFooterBlock();
+  assert.ok(footer.includes('<button v-if="isWizard && wizardIndex > 0"'), '「上一步」死字面保留（enter-guard 契约锚）');
+  assert.ok(footer.includes('@click="cancel">{{ cancelLabel }}'), '取消 ghost 钮保留');
+  assert.ok(footer.includes('v-if="showFooterPrimary"'), '主按钮 showFooterPrimary 门控保留（非 wizard 门控语义不变）');
+  assert.ok(footer.includes(':disabled="!canSubmit"'), '主按钮 canSubmit 禁用保留');
+  assert.ok(footer.includes('data-dialog-initial-focus'), '主按钮初始焦点锚保留');
+  assert.ok(footer.includes('@click="submit()"'), '主按钮 submit() 调用保留（无 optionId=不触发 P1-A 守卫，C2 口径）');
+  assert.ok(footer.includes('{{ submitLabel }}'), '主按钮 submitLabel 保留');
+}, true);
+
+group('===重写面：wizard 单选直提调用图 + 多选不直提（变体 2 契约 5/C2 口径） ===');
+check('wizard 单选直提调用图：wizardToggleOption 普通选项=守卫→updateAnswer([optionId],Other 出集)→写时间戳→advanceToNextUnanswered', () => {
+  const body = functionBody('wizardToggleOption');
+  const guardIdx = body.indexOf('if (Date.now() - lastDirectSubmitAt < 300) return;');
+  assert.ok(guardIdx > -1, '缺 300ms 守卫（C2-1 白名单读点 ：448）');
+  const updateIdx = body.indexOf('updateAnswer(qid, { selectedOptionIds: [optionId], otherText: undefined });');
+  assert.ok(updateIdx > -1, '缺单选作答写账（selectedOptionIds:[optionId] + Other 出集清空）');
+  const stampIdx = body.indexOf('lastDirectSubmitAt = Date.now();');
+  assert.ok(stampIdx > -1, '缺守卫放行后时间戳写入（C2-1 白名单写点 :450）');
+  const advanceIdx = body.indexOf('advanceToNextUnanswered();');
+  assert.ok(advanceIdx > -1, '缺自动前进（契约 5：点击即作答+自动前进）');
+  assert.ok(guardIdx < updateIdx && updateIdx < stampIdx && stampIdx < advanceIdx, '调用图序错乱：守卫→写账→写时间戳→前进');
+}, true);
+check('wizard Other 点击=展开聚焦不写账本：OTHER 分支在守卫之前 return 且切片内零 updateAnswer', () => {
+  const body = functionBody('wizardToggleOption');
+  const marker = 'if (optionId === OTHER_OPTION_ID) {';
+  const otherIdx = body.indexOf(marker);
+  assert.ok(otherIdx > -1, '缺 Other 展开分支');
+  let depth = 0;
+  let cursor = otherIdx + marker.length - 1;
+  let end = -1;
+  while (cursor < body.length) {
+    const ch = body[cursor];
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { end = cursor; break; } }
+    cursor++;
+  }
+  assert.ok(end > otherIdx, 'Other 分支配对失败');
+  const otherBlock = body.slice(otherIdx, end + 1);
+  assert.ok(otherBlock.includes('wizardOtherExpanded.value = true;'), 'Other 分支须展开输入');
+  assert.ok(otherBlock.includes('wizardOtherInput.value?.focus()'), 'Other 分支须聚焦输入框');
+  assert.ok(otherBlock.includes('return;'), 'Other 分支须 return');
+  assert.ok(!otherBlock.includes('updateAnswer'), 'Other 点击不得写账（空文本 Other 不得记成已答）');
+  const guardIdx = body.indexOf('if (Date.now() - lastDirectSubmitAt < 300) return;');
+  assert.ok(guardIdx > otherIdx, 'Other 展开须在守卫之前 return（C2 口径：Other 流程不经守卫）');
+}, true);
+check('wizard 多选不直提双断言：谓词 currentMultiSelect 早退 + wizardToggleOption 多选分支 return 无前进无守卫', () => {
+  const pred = functionBody('isDirectSubmitChoice');
+  assert.ok(pred.includes('if (!req || currentMultiSelect.value) return false;'), '谓词缺多选早退（02 §4.2-1 谓词层双保险）');
+  const multiBlock = wizardMultiBlock();
+  assert.ok(multiBlock.includes('updateAnswer'), '多选分支须写账（勾选切换）');
+  assert.ok(multiBlock.includes('return;'), '多选分支须 return（不落入单选直提）');
+  assert.ok(!multiBlock.includes('advanceToNextUnanswered'), '多选 toggle 不得自动前进（显式「下一题」前进）');
+  assert.ok(!multiBlock.includes('lastDirectSubmitAt'), 'C2-1 负向：wizard 多选分支切片零守卫出现（C2-3 连点不吞的结构面）');
+}, true);
+check('advanceToNextUnanswered 只向前找首个未答题：index > wizardIndex 且 !isQuestionAnswered，有则跳无则原地', () => {
+  const body = functionBody('advanceToNextUnanswered');
+  assert.match(body, /findIndex\(\s*\(question, index\) => index > wizardIndex\.value && !isQuestionAnswered\(questionAnswers\.value\[question\.id\]\)/, '自动前进判据不符（只向前+未答）');
+  assert.ok(body.includes('if (next >= 0) {'), '缺 next>=0 门（无未答题原地停留）');
+  assert.ok(body.includes('wizardIndex.value = next;'), '缺跳转');
+  assert.ok(!body.includes('submittingId'), '自动前进路径不得置 submittingId（在飞守卫面）');
+}, true);
+
+group('===重写面：C2-1 守卫调用点白名单（正/负向）+ C2-5 窗值钉 ===');
+check('C2-5 守卫窗值语义不变：lastDirectSubmitAt 声明保留 + < 300 严格小于字面 + 白名单非空（三读点）', () => {
+  assert.match(src, /let lastDirectSubmitAt = 0;/, '缺声明（守卫被整体删除=收窄过度反转）');
+  const reads = [functionBody('toggleOption'), functionBody('wizardToggleOption'), submitBody()].map((body) => body.includes('Date.now() - lastDirectSubmitAt < 300'));
+  assert.ok(reads.every(Boolean), `守卫读点白名单残缺 toggleOption=${reads[0]} wizardToggleOption=${reads[1]} submit=${reads[2]}`);
+  assert.match(src, /< 300\)? return;/, '缺 < 300 严格小于字面（边界行为逐字一致）');
+}, true);
+check('C2-1 全文件 lastDirectSubmitAt 恰 6 处（声明 1+读 3+写 2）——新调用点入白名单须经本钉同步评审', () => {
+  const count = (src.match(/lastDirectSubmitAt/g) ?? []).length;
+  assert.equal(count, 6, `守卫符号出现 ${count} 处（白名单外新增读/写点=守卫口径扩大，C2-1 违约；删点=白名单残缺）`);
+}, true);
+check('C2-1 负向白名单：显式导航/提交/丢弃/键盘 handler 切片 lastDirectSubmitAt 零出现', () => {
+  for (const name of ['jumpToQuestion', 'previousQuestion', 'submitWizard', 'requestDiscard', 'cancel', 'handleKeydown']) {
+    const body = functionBody(name);
+    assert.ok(!body.includes('lastDirectSubmitAt'), `${name} 切片出现守卫符号（显式导航/提交/丢弃路径被吞面，C2-1 违约）`);
+  }
+}, true);
+
+group('===重写面：C3-4①wizard footer 顺序 + C3-4②取消不居中 ===');
+check('C3-4① wizard footer 顺序：取消 ghost 最左（首钮）→进度文本→上一题 ghost→下一题/提交 primary 最右（取消不夹中间）', () => {
+  const footer = wizardFooterBlock();
+  const cancelIdx = footer.indexOf('data-testid="wizard-cancel-btn"');
+  const progressIdx = footer.indexOf('class="wizard-foot-progress"');
+  const prevIdx = footer.indexOf('data-testid="wizard-prev-btn"');
+  const nextIdx = footer.indexOf('data-testid="wizard-next-btn"');
+  assert.ok(cancelIdx > -1 && progressIdx > -1 && prevIdx > -1 && nextIdx > -1, 'wizard footer 四元素残缺');
+  assert.ok(cancelIdx < progressIdx && progressIdx < prevIdx && prevIdx < nextIdx, 'footer 顺序违约（取消须最左、primary 须最右）');
+  const firstOpen = buttonOpenTag(footer, 'data-testid="wizard-cancel-btn"');
+  assert.ok(footer.indexOf('<button') < cancelIdx && firstOpen.includes('interaction-btn--ghost'), '首钮须为取消 ghost（@click="requestDiscard"）');
+  assert.ok(firstOpen.includes('@click="requestDiscard"'), '取消钮须走丢弃保护门（契约 6）');
+  assert.ok(buttonOpenTag(footer, 'data-testid="wizard-prev-btn"').includes('interaction-btn--ghost'), '上一题须 ghost');
+  assert.ok(buttonOpenTag(footer, 'data-testid="wizard-next-btn"').includes('interaction-btn--primary'), '下一题/提交须 primary（全局惯例）');
+}, true);
+check('C3-4② 取消不居中：取消钮开标签无 margin/居中样式；.wizard-foot-progress margin-right:auto（提示占左、按钮组居右）', () => {
+  const footer = wizardFooterBlock();
+  const cancelTag = buttonOpenTag(footer, 'data-testid="wizard-cancel-btn"');
+  assert.ok(!cancelTag.includes('margin'), '取消钮开标签不得带 margin（居中形态回归）');
+  assert.ok(!cancelTag.includes('align-self'), '取消钮不得 align-self 居中');
+  const progress = styleRule('.wizard-foot-progress {');
+  assert.match(progress, /margin-right: auto;/, '缺进度文本 margin-right:auto（原型 .foot .hint 形态：提示占左、按钮组居右）');
+  const footerStyle = styleRule('.interaction-dialog__footer {');
+  assert.match(footerStyle, /justify-content: flex-end;/, 'footer 按钮组须居右（取消不居中的布局面）');
+}, true);
+
+group('===C3-5 姊妹门回归门（spawn，沿用 T6-I/T6-J 手法） ===');
+check('C3-5 姊妹门：esc-stack / initial-focus / hb13-v-perm-draft 全绿', () => {
+  spawnAssert('scripts/tdd-esc-stack-verify.ts');
+  spawnAssert('scripts/tdd-interaction-initial-focus-verify.ts');
+  spawnAssert('scripts/tdd-bugfix-hb13-v-perm-draft-verify.ts');
+});
+check('T6-I 后继回归门：enter-guard（C3 重写版）exit 0', () => {
+  spawnAssert('scripts/tdd-interaction-prompt-enter-guard.ts');
+});
+
+// ── 「对旧实现必红」自证（C3-1 期望条款；机制见头注）──
+function loadOldSource(): string {
+  const baselineRef = '3be0d7d'; // 04-实施计划 §0 批次基线（2026-11-15 实施期 HEAD=C1/C2 改动未提交）
+  const r = spawnSync('git', ['show', `${baselineRef}:src/renderer/components/chat/InteractionPrompt.vue`], {
+    cwd: repoRoot, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
+  });
+  assert.equal(r.status, 0, `git show ${baselineRef} 旧源码失败：${r.stderr?.slice(0, 300)}`);
+  const old = r.stdout;
+  assert.ok(old.length > 1000, '旧源码快照异常（空/过短）');
+  try {
+    const scratchDirUrl = new URL('../.plan-loop/eight-issues-batch-1115-1714/scratch/', import.meta.url);
+    mkdirSync(scratchDirUrl, { recursive: true });
+    writeFileSync(new URL('c3-old-InteractionPrompt-direct-submit.vue', scratchDirUrl), old, 'utf8');
+  } catch { /* scratch 只读等场景：留痕失败不阻断自证本体 */ }
+  return old;
+}
+
+console.log('\n=== 「对旧实现必红」自证：重写面新钉 × 基线提交 3be0d7d 旧源码 ===');
+const currentSrc = src;
+const oldSrc = loadOldSource();
+assert.notEqual(oldSrc, currentSrc, '旧源码快照与当前实现一致（基线提交取错或组件已回退）——必红自证失去意义，拒绝空转');
+src = oldSrc;
+let oldFail = 0;
+let oldTotal = 0;
+const oldPassed: string[] = [];
+try {
+  for (const item of checks) {
+    if (!item.redOnOld) continue;
+    oldTotal++;
+    try { item.fn(); oldPassed.push(item.name); }
+    catch { oldFail++; console.log(`  🔴 [旧实现必红] ${item.name} — FAIL（新结构在基线快照中不存在/形态不符）`); }
+  }
+} finally {
+  src = currentSrc;
+}
+assert.ok(oldFail >= 1, `必红自证失败：${oldTotal} 条新钉在旧源码上全部 PASS（基线快照取错或新钉全部退化）`);
+console.log(`  自证结论：${oldTotal} 条新钉对旧实现 ${oldFail} 条 FAIL${oldPassed.length ? `；意外 PASS ${oldPassed.length} 条（保留面重叠，可接受）：${oldPassed.join('；')}` : '（无意外 PASS）'}`);
+
+console.log('\n=== 正式卷：对当前实现全绿 ===');
+let lastGroup = '';
+for (const item of checks) {
+  if (item.group && item.group !== lastGroup) { console.log(`\n${item.group}`); lastGroup = item.group; }
+  runCheck(item);
+}
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);

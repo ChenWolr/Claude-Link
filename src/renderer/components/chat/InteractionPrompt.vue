@@ -5,6 +5,7 @@ import { useDialogShell } from '../../composables/use-dialog-shell';
 import type {
   InteractionPromptOption,
   InteractionPromptPayload,
+  InteractionPromptQuestion,
 } from '../../../shared/types/ipc';
 import InteractionDetails from './InteractionDetails.vue';
 import InteractionOptionList from './InteractionOptionList.vue';
@@ -51,6 +52,17 @@ const selectedIds = ref<Set<string>>(new Set());
 const otherText = ref('');
 const searchText = ref('');
 const wizardIndex = ref(0);
+// C1 变体 2「左侧题号导航栏」（2026-11-15 用户拍板）wizard 态专属状态：
+//  - wizardFlaggedIndex：提交校验（未答齐）命中的左栏红色警示描边题号（瞬态，initSelection 重置）；
+//  - discardConfirmVisible / discardCounts：丢弃保护二次确认层（契约 6）——取消/X/Esc（非输入焦点）
+//    在有任一作答时先确认再丢弃；
+//  - wizardOtherExpanded：Other 行内输入展开态（点击 __other__ 仅展开+聚焦、不写入账本——空文本
+//    Other 不得被 isQuestionAnswered 记成已答）。
+const wizardFlaggedIndex = ref<number | null>(null);
+const discardConfirmVisible = ref(false);
+const discardCounts = ref(0);
+const wizardOtherExpanded = ref(false);
+const wizardOtherInput = ref<HTMLInputElement | null>(null);
 const questionAnswers = ref<Record<string, QuestionAnswer>>({});
 const fieldValues = ref<Record<string, string | boolean>>({});
 // P3-8：已交互过的 checkbox 字段 id（change 事件登记）；required checkbox 据此放行 false 答案。
@@ -115,14 +127,22 @@ const hasStructuredForm = computed(() => Boolean(activeRequest.value?.kind === '
 const hasTextInput = computed(() => activeRequest.value?.kind === 'text' || activeRequest.value?.kind === 'long-text');
 const eyebrow = computed(() => {
   if (activeRequest.value?.kind === 'permission') return 'Claude Code 需要确认';
-  if (isWizard.value) return `Claude Code 需要你选择 · ${wizardIndex.value + 1}/${wizardQuestions.value.length}`;
+  // C1 变体 2：wizard 态 eyebrow 恒显总题数（题号位置移入右栏 count 行与头部进度 chip）。
+  if (isWizard.value) return `Claude Code 需要你回答 ${wizardQuestions.value.length} 个问题`;
   if (activeRequest.value?.kind === 'multi-choice') return 'Claude Code 需要你多选';
   if (activeRequest.value?.kind === 'text' || activeRequest.value?.kind === 'long-text') return 'Claude Code 需要你输入';
   if (activeRequest.value?.kind === 'form') return 'Claude Code 需要参数';
   return 'Claude Code 需要你选择';
 });
-const currentTitle = computed(() => activeQuestion.value?.title ?? activeRequest.value?.title ?? 'Claude Code 需要你选择');
-const currentDescription = computed(() => activeQuestion.value?.description ?? activeRequest.value?.description);
+// C1 变体 2：wizard 态 h3=payload.title（题干移入右栏 wizard-qtext）；非 wizard 维持原逻辑。
+const currentTitle = computed(() => {
+  if (isWizard.value) return activeRequest.value?.title ?? 'Claude Code 需要你选择';
+  return activeQuestion.value?.title ?? activeRequest.value?.title ?? 'Claude Code 需要你选择';
+});
+const currentDescription = computed(() => {
+  if (isWizard.value) return activeRequest.value?.description;
+  return activeQuestion.value?.description ?? activeRequest.value?.description;
+});
 const submitLabel = computed(() => {
   if (isWizard.value && wizardIndex.value < wizardQuestions.value.length - 1) return '下一题';   // UI13-P6：仅 multiSelect 当前题可见（主按钮 v-if=showFooterPrimary）
   if (isWizard.value) return '确认';
@@ -155,18 +175,29 @@ const canSubmit = computed(() => {
   return selectedIds.value.size > 0 || request.kind === 'confirm';
 });
 
-// 向导完整性（C-W1 末步守卫）：当前题看进行中的选择（persist 尚未发生），其余题看 questionAnswers
-// 账本。非 wizard 形态恒 false（不参与提交守卫）。多选零选中经 isQuestionAnswered 判为未答。
-const allQuestionsAnswered = computed(() => {
-  if (!isWizard.value) return false;
-  return wizardQuestions.value.every((question, index) => {
-    if (index === wizardIndex.value) {
-      if (selectedIds.value.has(OTHER_OPTION_ID)) return otherText.value.trim().length > 0;
-      return selectedIds.value.size > 0;
-    }
-    return isQuestionAnswered(questionAnswers.value[question.id]);
-  });
+// C1 变体 2（契约 3/4）：wizard 已答数与任一作答门——判据 isQuestionAnswered（多选空数组/空
+// Other 文本=未答）；非 wizard 形态恒 0/false（不参与 wizard 提交与丢弃保护面）。
+const answeredCount = computed(() => wizardQuestions.value.filter((question) => isQuestionAnswered(questionAnswers.value[question.id])).length);
+const hasAnyAnswer = computed(() => answeredCount.value > 0);
+// wizard footer 主按钮 label（契约 4）：非最后题=「下一题」恒可点；最后题=答齐「提交」/未答齐
+// 「提交（N/M）」（点击走 submitWizard 跳转首个未答题+左栏警示）。
+const wizardPrimaryLabel = computed(() => {
+  if (wizardIndex.value < wizardQuestions.value.length - 1) return '下一题';
+  return answeredCount.value === wizardQuestions.value.length
+    ? '提交'
+    : `提交（${answeredCount.value}/${wizardQuestions.value.length}）`;
 });
+// 变体 2 右栏渲染派生：当前题答案账本条目 / 选中集（InteractionOptionList selected-ids）/ Other
+// 展开门（__other__ 选中或已有文本，或刚点击 __other__ 尚未输入的瞬态展开）。
+const wizardAnswer = computed(() => (activeQuestion.value ? questionAnswers.value[activeQuestion.value.id] : undefined));
+const wizardSelectedIds = computed(() => wizardAnswer.value?.selectedOptionIds ?? []);
+const wizardShowOther = computed(() => {
+  if (!activeQuestion.value) return false;
+  return wizardOtherExpanded.value
+    || wizardSelectedIds.value.includes(OTHER_OPTION_ID)
+    || Boolean(wizardAnswer.value?.otherText?.trim());
+});
+const wizardOtherText = computed(() => wizardAnswer.value?.otherText ?? '');
 
 function isTextEntryTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement
@@ -179,12 +210,6 @@ function syncFocusedSelection(): void {
   if (currentMultiSelect.value) return;
   const selectedIndex = selectedVisibleIndex.value;
   if (selectedIndex >= 0) focusedIndex.value = selectedIndex;
-}
-
-function applyAnswer(answer?: QuestionAnswer): void {
-  selectedIds.value = new Set(answer?.selectedOptionIds ?? []);
-  otherText.value = answer?.otherText ?? '';
-  syncFocusedSelection();
 }
 
 function initFields(request: InteractionPromptPayload): void {
@@ -235,6 +260,11 @@ function initSelection(request: InteractionPromptPayload): void {
     otherText.value = cached.otherText;
     questionAnswers.value = cached.questionAnswers;
     fieldValues.value = cached.fieldValues;
+    // C1 变体 2：wizardFlaggedIndex/丢弃确认层/Other 展开态为瞬态 UI 面，不跨换单/切会话恢复
+    //（02 §3.8「draftCache 恢复后 flagged 残留」边界值处理）。
+    wizardFlaggedIndex.value = null;
+    discardConfirmVisible.value = false;
+    wizardOtherExpanded.value = false;
     searchText.value = '';
     focusedIndex.value = 0;
     syncFocusedSelection();
@@ -242,15 +272,18 @@ function initSelection(request: InteractionPromptPayload): void {
   }
   wizardIndex.value = 0;
   questionAnswers.value = {};
+  // C1 变体 2（02 §3.3 initSelection wizard 分支）：警示描边/丢弃确认层/Other 展开态随新单清零。
+  wizardFlaggedIndex.value = null;
+  discardConfirmVisible.value = false;
+  wizardOtherExpanded.value = false;
   searchText.value = '';
   focusedIndex.value = 0;
   initFields(request);
-  const firstQuestion = request.questions?.[0];
-  if (firstQuestion) {
-    selectedIds.value = optionDefaults(firstQuestion.options, firstQuestion.defaultOptionIds, firstQuestion.multiSelect);
-  } else {
-    selectedIds.value = optionDefaults(request.options ?? [], request.defaultOptionIds, request.multiSelect);
-  }
+  // 变体 2：wizard 无预选——草稿账本即答即写（questionAnswers 空账本起步，defaultOptionIds 不
+  // 预选，提交以显式作答为准）；非 wizard 形态维持 optionDefaults 预选（权限/单题语义不变）。
+  selectedIds.value = isWizard.value
+    ? new Set()
+    : optionDefaults(request.options ?? [], request.defaultOptionIds, request.multiSelect);
   otherText.value = '';
   syncFocusedSelection();
   void nextTick(focusDialogStart);
@@ -360,44 +393,94 @@ function toggleOption(optionId: string): void {
   }
 }
 
-// 当前 wizard 问题的 id（用于把本题答案存进 questionAnswers）。非 wizard / 无当前题时返回 undefined。
-function currentQuestionId(): string | undefined {
-  return activeQuestion.value?.id;
-}
-
 // 单题作答有效性（C-W1）：非空选项 或 非空 Other 文本。多选零选中（空数组）不算已答，
 // 防自由跳转后空答案静默提交给模型。
 function isQuestionAnswered(answer?: QuestionAnswer): boolean {
   return (answer?.selectedOptionIds?.length ?? 0) > 0 || Boolean(answer?.otherText?.trim());
 }
 
-function persistCurrentQuestionAnswer(): boolean {
-  const id = currentQuestionId();
-  if (!id) return true;
-  if (selectedIds.value.has(OTHER_OPTION_ID) && !otherText.value.trim()) return false;
-  questionAnswers.value = {
-    ...questionAnswers.value,
-    [id]: {
-      selectedOptionIds: Array.from(selectedIds.value),
-      otherText: otherText.value.trim() || undefined,
-    },
-  };
-  return true;
+// ── C1 变体 2「左侧题号导航栏」wizard 函数组（2026-11-15 用户拍板；02-impl-details-renderer §3.3）──
+
+// 变体 2 草稿账本唯一写入点（契约 5）：右栏选项点击/Other 输入即时落账 questionAnswers[qid]，
+// 无翻页落账中间态——翻页/跳转/切换不丢（结构性保证）；载荷与主进程 questionAnswers 链同形。
+function updateAnswer(qid: string, patch: { selectedOptionIds?: string[]; otherText?: string }): void {
+  const prev = questionAnswers.value[qid] ?? {};
+  questionAnswers.value = { ...questionAnswers.value, [qid]: { ...prev, ...patch } };
 }
 
-function loadWizardStep(index: number): void {
-  const question = wizardQuestions.value[index];
-  if (!question) return;
-  wizardIndex.value = index;
-  searchText.value = '';
-  focusedIndex.value = 0;
-  const stored = questionAnswers.value[question.id];
-  if (stored) applyAnswer(stored);
-  else {
-    selectedIds.value = optionDefaults(question.options, question.defaultOptionIds, question.multiSelect);
-    otherText.value = '';
+// 单选作答自动前进（契约 5，守卫放行后执行）：跳到当前题之后的首个未答题；没有则原地停留。
+function advanceToNextUnanswered(): void {
+  const next = wizardQuestions.value.findIndex(
+    (question, index) => index > wizardIndex.value && !isQuestionAnswered(questionAnswers.value[question.id]),
+  );
+  if (next >= 0) {
+    wizardIndex.value = next;
+    wizardOtherExpanded.value = false;
+    focusedIndex.value = 0; // 备忘(a)：自动前进翻题后焦点环复位首项（防残留 --focused 落在新题中间项）
   }
-  syncFocusedSelection();
+}
+
+// 变体 2 右栏选项点击入口：多选=勾选切换（守卫之外，不前进）；Other=展开输入+聚焦（守卫之外，
+// 不写入账本——空文本 Other 不得被记成已答）；单选普通选项=点击即作答（草稿账本）+ 自动前进，
+// 300ms 短窗守卫护「作答+自动前进」边沿（防自动前进后双击把第二击落进下一题；显式导航/多选/
+// Other/提交按钮均不经此守卫——C2 口径）。Other 文本让位语义与旧 updateSelected 一致：
+// 单选改选普通选项即清 Other 草稿；多选移除 __other__ 即清 Other 草稿。
+function wizardToggleOption(optionId: string): void {
+  const question = activeQuestion.value;
+  if (!question) return;
+  const qid = question.id;
+  if (question.multiSelect) {
+    const prevIds = questionAnswers.value[qid]?.selectedOptionIds ?? [];
+    const removing = prevIds.includes(optionId);
+    const nextIds = removing ? prevIds.filter((id) => id !== optionId) : [...prevIds, optionId];
+    updateAnswer(qid, {
+      selectedOptionIds: nextIds,
+      ...(removing && optionId === OTHER_OPTION_ID ? { otherText: undefined } : {}),
+    });
+    wizardOtherExpanded.value = false;
+    return;
+  }
+  if (optionId === OTHER_OPTION_ID) {
+    wizardOtherExpanded.value = true;
+    void nextTick(() => wizardOtherInput.value?.focus());
+    return;
+  }
+  if (Date.now() - lastDirectSubmitAt < 300) return;
+  updateAnswer(qid, { selectedOptionIds: [optionId], otherText: undefined });
+  lastDirectSubmitAt = Date.now();
+  advanceToNextUnanswered();
+}
+
+// Other 行内输入即时暂存（契约 5）：文本非空 → selectedOptionIds 纳入 __other__（未选时补选）；
+// 清空 → 移出 __other__（多选其余选择保留）——与主进程 answerFromSelection 消费形对齐
+//（otherText 仅在 ids 含 __other__ 时被读取）。
+function onWizardOtherInput(event: Event): void {
+  const question = activeQuestion.value;
+  if (!question) return;
+  const text = (event.target as HTMLInputElement).value;
+  const prevIds = questionAnswers.value[question.id]?.selectedOptionIds ?? [];
+  const hasOther = prevIds.includes(OTHER_OPTION_ID);
+  const nextIds = text.trim()
+    ? (hasOther ? prevIds : [...prevIds, OTHER_OPTION_ID])
+    : prevIds.filter((id) => id !== OTHER_OPTION_ID);
+  updateAnswer(question.id, { selectedOptionIds: nextIds, otherText: text || undefined });
+}
+
+// 左栏状态行摘要（契约 3）：未答=「未作答」muted；单选普通选项=「已选「label」」；Other=自定义
+// 文本截 24 码点；多选=「已选 N 项」（N 含 __other__，对齐原型 answerText 形态）。
+function wizardNavSummary(question: InteractionPromptQuestion): string {
+  const answer = questionAnswers.value[question.id];
+  if (!isQuestionAnswered(answer)) return '未作答';
+  const ids = answer?.selectedOptionIds ?? [];
+  const otherText = answer?.otherText?.trim() ?? '';
+  if (question.multiSelect) return `已选 ${ids.length} 项`;
+  if (otherText) {
+    const chars = Array.from(otherText);
+    const truncated = chars.length > 24 ? `${chars.slice(0, 24).join('')}…` : otherText;
+    return `自定义 · ${truncated}`;
+  }
+  const label = question.options.find((option) => option.id === ids[0])?.label ?? ids[0] ?? '';
+  return `已选「${label}」`;
 }
 
 function buildSummary(request: InteractionPromptPayload, ids: string[]): string {
@@ -405,8 +488,14 @@ function buildSummary(request: InteractionPromptPayload, ids: string[]): string 
     return request.fields.map((field) => `${field.label}: ${String(fieldValues.value[field.id] ?? '')}`).join(' · ');
   }
   if (request.questions?.length) {
-    return Object.values(questionAnswers.value)
-      .map((answer) => [...(answer.selectedOptionIds ?? []), answer.otherText].filter(Boolean).join(','))
+    // C1 变体 2：按题序遍历映射 questionAnswers——翻页落账移除后账本插入序不再等价题序，
+    // 历史摘要以载荷题序为准（响应载荷本身即题序）。
+    return wizardQuestions.value
+      .map((question) => {
+        const answer = questionAnswers.value[question.id];
+        if (!answer) return '';
+        return [...(answer.selectedOptionIds ?? []), answer.otherText].filter(Boolean).join(',');
+      })
       .filter(Boolean)
       .join(' / ');
   }
@@ -445,12 +534,13 @@ async function submit(optionId?: string): Promise<void> {
   if (optionId && isDirectSubmitChoice() && optionId !== OTHER_OPTION_ID && Date.now() - lastDirectSubmitAt < 300) return;
   if (optionId) toggleOption(optionId);
   let ids = optionId && !currentMultiSelect.value ? [optionId] : Array.from(selectedIds.value);
-  // B5（D06-F2）：Enter 兜底（单选形态）——权限弹窗等刻意不预选（防回车误提交），但聚焦环
-  // 明确落在某选项时 Enter 视为对该项的提交意图（listbox 惯例）。除局部 ids 外同步写回
-  // selectedIds（P2-1，2026-10-02 对抗 review）：wizard 的 persistCurrentQuestionAnswer 读
-  // selectedIds 落账 questionAnswers，只写局部 ids 会把该题记成 selectedOptionIds: []（静默
-  // 空答案）；「不预选」指初始态不预选（optionDefaults 空集、Esc/取消语义不变），写回发生在
-  // 提交路径、不复活误触面；多选维持空集早退（空格才是选择键）。
+  // B5（D06-F2）：Enter 兜底（单选形态，非 wizard）——权限弹窗等刻意不预选（防回车误提交），
+  // 但聚焦环明确落在某选项时 Enter 视为对该项的提交意图（listbox 惯例）。除局部 ids 外同步
+  // 写回 selectedIds（P2-1，2026-10-02 对抗 review）：落账链读 selectedIds，只写局部 ids 会把
+  // 该题记成空集（静默空答案）；「不预选」指初始态不预选（optionDefaults 空集、Esc/取消语义
+  // 不变），写回发生在提交路径、不复活误触面；多选维持空集早退（空格才是选择键）。
+  // C1 变体 2（2026-11-16）：wizard 态 Enter 由 handleKeydown wizard 分流吞掉（无 Enter 兜底，
+  // 契约 7），本函数不再服务 wizard——wizard 作答走 questionAnswers 账本直写、提交走 submitWizard。
   if (
     !ids.length && !optionId && !currentMultiSelect.value &&
     !hasStructuredForm.value && !hasTextInput.value && request.kind !== 'confirm' &&
@@ -470,26 +560,9 @@ async function submit(optionId?: string): Promise<void> {
     otherInput.value?.focus();
     return;
   }
-  if (isWizard.value) {
-    if (!persistCurrentQuestionAnswer()) {
-      await nextTick();
-      otherInput.value?.focus();
-      return;
-    }
-    if (wizardIndex.value < wizardQuestions.value.length - 1) {
-      loadWizardStep(wizardIndex.value + 1);
-      return;
-    }
-    // 末步守卫（C-W1）：自由跳转放开后「顺序作答保证全答完」不再成立，未答全时跳到第一个
-    // 未答题，不放行空答案提交（isQuestionAnswered 把多选空数组挡在外面）。
-    if (!allQuestionsAnswered.value) {
-      const firstUnanswered = wizardQuestions.value.findIndex(
-        (question) => !isQuestionAnswered(questionAnswers.value[question.id]),
-      );
-      if (firstUnanswered >= 0) loadWizardStep(firstUnanswered);
-      return;
-    }
-  }
+  // C1 变体 2：wizard 路径整体移除（原 persist+翻页+末步守卫块）——wizard 作答即时写入
+  // questionAnswers 账本（updateAnswer），前进由 wizardToggleOption/advanceToNextUnanswered
+  // 承担，整体提交由 footer 主按钮 submitWizard 承担（未答齐时定位跳转+左栏警示）。
 
   submittingId.value = request.id;
   try {
@@ -532,6 +605,65 @@ async function cancel(): Promise<void> {
     // hb10-PERM-03：取消失败同样留队可重试。
     console.error('Interaction cancel failed', err);
     submitError.value = '取消失败（连接异常），请重试';
+  } finally {
+    submittingId.value = null;
+  }
+}
+
+// ── C1 变体 2：丢弃保护（契约 6）+ wizard 整体提交（契约 4）──
+
+// 丢弃保护门：取消（footer 最左钮）在有任一作答时先二次确认；零作答直接走既有 cancel 链。
+// wizard 态 Esc（非输入焦点）与 X 同语义经本入口（确认层在场时 Esc 由 handleKeydown 分流 dismiss）。
+function requestDiscard(): void {
+  if (!hasAnyAnswer.value) {
+    void cancel();
+    return;
+  }
+  discardCounts.value = answeredCount.value;
+  discardConfirmVisible.value = true;
+}
+
+function confirmDiscard(): void {
+  discardConfirmVisible.value = false;
+  void cancel();
+}
+
+// 继续作答 / 确认层遮罩点击 / 确认层 Esc（handleKeydown wizard 分流）——只关确认层，不动草稿。
+function dismissDiscard(): void {
+  discardConfirmVisible.value = false;
+}
+
+// wizard 整体提交（契约 4）：未答齐 → 跳转首个未答题 + 左栏警示描边（不弹 toast、不置
+// submittingId、不阻断其余操作，主按钮恒可点故本早退可达）；答齐 → 既有 respondAndRemove 链
+// 逐题回传（questionAnswers 深拷贝过 IPC，载荷经主进程 buildAskUserQuestionResult 对位）。
+async function submitWizard(): Promise<void> {
+  const request = activeRequest.value;
+  if (!request || submittingId.value === request.id) return;
+  const firstUnanswered = wizardQuestions.value.findIndex(
+    (question) => !isQuestionAnswered(questionAnswers.value[question.id]),
+  );
+  if (firstUnanswered >= 0) {
+    wizardFlaggedIndex.value = firstUnanswered;
+    wizardIndex.value = firstUnanswered;
+    wizardOtherExpanded.value = false;
+    focusedIndex.value = 0; // 备忘(e)（round-005）：未答齐跳题第四路径焦点环复位首项（同 jumpToQuestion/goNext，防残留 --focused 落在新题中间项）
+    return;
+  }
+  submittingId.value = request.id;
+  try {
+    await interactionStore.respondAndRemove({
+      id: request.id,
+      action: 'submit',
+      selectedOptionIds: undefined, // wizard 恒走 questionAnswers 逐题账本
+      questionAnswers: JSON.parse(JSON.stringify(questionAnswers.value)) as Record<string, QuestionAnswer>,
+      otherText: undefined, // 顶层 otherText 恒空（逐题答案在 questionAnswers 内）
+    });
+    pushHistory(request, 'submit', []);
+    advanceQueueUI();
+  } catch (err) {
+    // hb10-PERM-03：IPC 失败时请求已留队（store 不再失败移除），不前进队列——用户可重试提交。
+    console.error('Interaction submit failed', err);
+    submitError.value = '提交失败（连接异常），请重试';
   } finally {
     submittingId.value = null;
   }
@@ -592,21 +724,46 @@ function trapTab(event: KeyboardEvent): void {
 
 function handleKeydown(event: KeyboardEvent): void {
   if (!activeRequest.value) return;
-  if (isTextEntryTarget(event.target)) return;
   // B5 补修（核验·遮挡组合回归）：更高层遮罩在场时操作键整体让位——被遮挡、用户从未见过
   // 的弹窗不得被 Enter（submit 兜底会静默提交聚焦首项，权限首项=允许本次，误授权比 A9
   // 设防的误 deny 危害更大）、箭头/空格（move/toggle 改写隐藏选择）、Tab（trapTab 拉焦）
   // 触碰；判据与 A9 的 Esc 让位同源，Esc 分支守卫保留原位（见下方 Escape 分支）。
   // 无更高层时零行为变化。
+  // （C1 变体 2 注：原首行 isTextEntryTarget 早退移至 wizard 分流之后——wizard 输入框内 Esc
+  // 须进分域处理（失焦不关单）；两者早退结果等价，非 wizard 行为零变化。）
   if (
     (event.key === 'Tab' || event.key === 'ArrowDown' || event.key === 'ArrowUp'
       || event.key === 'Enter' || event.key === ' ')
     && escHandle && !escHandle.isTopmost()
   ) return;
+  // C1 变体 2：Tab trap 先于 wizard 分流执行（wizard 亦困于模态，WCAG 2.4.3）；文本输入内
+  // Tab 维持浏览器默认（与旧 textEntry 首行早退等价）。
   if (event.key === 'Tab') {
+    if (isTextEntryTarget(event.target)) return;
     trapTab(event);
     return;
   }
+  // C1 变体 2（契约 6/7/8）wizard 早退分流：Esc 分域——丢弃确认层在场=关确认层；输入焦点内
+  // =失焦不关整单；其余=丢弃保护（有作答→确认层，零作答→直接 cancel）。分流整体 return：
+  // ArrowUp/ArrowDown/Enter/Space 全部不拦截——箭头键交还焦点容器原生滚动（不 move、不改写
+  // 选中，契约 8），Enter/Space 交还选项钮/左栏项浏览器原生激活（等同点击，无 Enter 兜底，
+  // 契约 7）。非 wizard 形态以下各分支逐字不动。
+  if (isWizard.value) {
+    if (event.key === 'Escape' && (!escHandle || escHandle.isTopmost())) {
+      event.preventDefault();
+      if (discardConfirmVisible.value) {
+        dismissDiscard();
+        return;
+      }
+      if (isTextEntryTarget(event.target)) {
+        (event.target as HTMLElement).blur();
+        return;
+      }
+      requestDiscard();
+    }
+    return;
+  }
+  if (isTextEntryTarget(event.target)) return;
   if (event.key === 'ArrowDown') {
     event.preventDefault();
     move(1);
@@ -660,17 +817,31 @@ function removeRequest(id: string): void {
   if (next) initSelection(next);
 }
 
-// 步骤圆点 / 上一步共用的题间跳转入口（C-W1）：越界与原地跳转 no-op；
-// 跳走前把当前题进行中作答落账（与原 previousQuestion 的 persist 语义一致）。
+// 左栏题号导航 / 上一步共用的题间跳转入口（C1 变体 2 重设计版）：越界与原地跳转 no-op；
+// 自由直达、无翻页落账步骤（草稿账本即答即写，翻页/跳转不丢——契约 5）；跳转命中警示题时
+// 清除（原地作答自动前进不清，下次提交校验重定或整单提交消亡）；翻题复位焦点环首项（备忘(a)）。
 function jumpToQuestion(index: number): void {
   if (index < 0 || index >= wizardQuestions.value.length || index === wizardIndex.value) return;
-  void persistCurrentQuestionAnswer();
-  loadWizardStep(index);
+  wizardIndex.value = index;
+  if (wizardFlaggedIndex.value === index) wizardFlaggedIndex.value = null;
+  wizardOtherExpanded.value = false;
+  focusedIndex.value = 0; // 备忘(a)：跳题后焦点环复位首项（防残留 --focused 落在新题中间项）
 }
 
 // 函数名与模板 @click="previousQuestion" 绑定原样保留（tdd-interaction-prompt-enter-guard.ts 契约钉死）。
 function previousQuestion(): void {
   jumpToQuestion(wizardIndex.value - 1);
+}
+
+// footer 主按钮非末题分支（R4-1，C1 契约 2 跳过语义）：「下一题」恒可点——前进一格且不校验
+// 当前题已答（跳过语义，未答亦可前进）、不触碰 wizardFlaggedIndex（警示仅由末题 submitWizard
+// 校验置位/由 jumpToQuestion 命中警示题清除）；末题不进本函数（footer @click 三元分流至
+// submitWizard：未答齐定位+警示，答齐整卷提交）。
+function goNext(): void {
+  if (wizardIndex.value >= wizardQuestions.value.length - 1) return;
+  wizardIndex.value += 1;
+  wizardOtherExpanded.value = false;
+  focusedIndex.value = 0; // 备忘(a)：前进翻题后焦点环复位首项
 }
 
 cleanupRequest = window.claudeLink.onInteractionRequest(enqueue);
@@ -778,7 +949,7 @@ onBeforeUnmount(() => {
       <section
         ref="dialogRef"
         class="interaction-dialog"
-        :class="{ 'interaction-dialog--wide': hasPreview, 'interaction-dialog--narrow': activeRequest.kind === 'confirm' }"
+        :class="{ 'interaction-dialog--wizard': isWizard, 'interaction-dialog--wide': hasPreview, 'interaction-dialog--narrow': activeRequest.kind === 'confirm' }"
         role="dialog"
         aria-modal="true"
         :aria-label="activeRequest.title"
@@ -786,28 +957,74 @@ onBeforeUnmount(() => {
       >
         <header class="interaction-dialog__header" @pointerdown="shell.beginDrag" @dblclick="shell.resetToCenter">
           <span class="interaction-dialog__eyebrow">{{ eyebrow }}</span>
+          <!-- C1 变体 2：头部进度 chip 常显「已答 N/M」（对齐原型 .head .chip）——题间三态标识
+               移入左栏状态行；旧圆点进度行移除。 -->
+          <span v-if="isWizard" class="wizard-progress-chip" data-testid="wizard-progress-chip">已答 {{ answeredCount }}/{{ wizardQuestions.length }}</span>
           <h3>{{ currentTitle }}</h3>
           <p v-if="currentDescription">{{ currentDescription }}</p>
-          <div v-if="isWizard" class="interaction-steps" aria-label="问题进度">
-            <!-- C-W1（B1）：圆点按钮化，任意题双向自由跳转；--done 改按「该题已有有效作答」点亮
-                 （自由跳转后位置序不再等于作答序）。Enter/Space 经 X1 让位路径原生激活跳转。 -->
+        </header>
+
+        <!-- C1 变体 2（用户 2026-11-15 拍板，基准 prototypes/question-dialog-variant-2-sidenav.html）：
+             wizard（kind form 多题）态=宽面板左右分栏——左栏题号导航（三态+状态行+直达）+ 右栏单题
+             内容（分页保留，一次一题）；作答即时写入 questionAnswers 账本，无翻页落账。
+             单题（非 form）形态走 v-else 原 body，模板与逻辑逐字不动（契约 9 硬约束）。 -->
+        <div v-if="isWizard" class="interaction-dialog__body--wizard">
+          <nav class="wizard-nav" data-testid="wizard-nav" aria-label="题目导航">
             <button
               v-for="(question, index) in wizardQuestions"
               :key="question.id"
               type="button"
-              class="interaction-step"
+              class="wizard-nav__item"
               :class="{
-                'interaction-step--active': index === wizardIndex,
-                'interaction-step--done': index !== wizardIndex && isQuestionAnswered(questionAnswers[question.id]),
+                answered: isQuestionAnswered(questionAnswers[question.id]),
+                current: wizardIndex === index,
+                'wizard-nav__item--flagged': wizardFlaggedIndex === index,
               }"
               :title="`跳到第 ${index + 1} 题`"
-              :aria-label="`跳到第 ${index + 1} 题`"
+              :aria-label="`跳到第 ${index + 1} 题：${wizardNavSummary(question)}`"
+              data-testid="wizard-nav-item"
               @click="jumpToQuestion(index)"
-            >{{ index + 1 }}</button>
+            >
+              <span class="row1">
+                <span class="n">{{ isQuestionAnswered(questionAnswers[question.id]) ? '✓' : index + 1 }}</span>
+                <span class="t">{{ question.title }}</span>
+              </span>
+              <span class="row2">{{ wizardNavSummary(question) }}</span>
+            </button>
+          </nav>
+          <div class="wizard-content" data-testid="wizard-content">
+            <div class="wizard-qhead">
+              <span class="wizard-count">第 {{ wizardIndex + 1 }} 题 / 共 {{ wizardQuestions.length }} 题</span>
+              <span class="wizard-qtag">{{ currentMultiSelect ? '多选' : '单选 · 点击即作答' }}</span>
+            </div>
+            <div class="wizard-qtext">{{ activeQuestion?.title }}</div>
+            <p v-if="activeQuestion?.description" class="wizard-qdesc">{{ activeQuestion.description }}</p>
+            <InteractionOptionList
+              v-if="filteredOptions.length"
+              :options="filteredOptions"
+              :focused-index="focusedIndex"
+              :selected-ids="wizardSelectedIds"
+              :multi-select="currentMultiSelect"
+              :virtual="useVirtualOptions"
+              @focus="focusOption"
+              @toggle="wizardToggleOption"
+            />
+            <div v-else-if="activeOptions.length" class="interaction-empty">没有匹配的选项</div>
+            <label v-if="wizardShowOther" class="interaction-other wizard-other">
+              <span>{{ activeQuestion?.otherLabel ?? activeRequest.otherLabel ?? 'Other' }}</span>
+              <input
+                ref="wizardOtherInput"
+                :value="wizardOtherText"
+                type="text"
+                placeholder="输入自定义答案..."
+                @input="onWizardOtherInput"
+                @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+              />
+            </label>
+            <p class="wizard-skipnote">可跳过本题稍后再答；提交前需答完全部 {{ wizardQuestions.length }} 题。</p>
           </div>
-        </header>
-
-        <div class="interaction-dialog__body" :class="{ 'interaction-dialog__body--preview': hasPreview }">
+        </div>
+        <div v-else class="interaction-dialog__body" :class="{ 'interaction-dialog__body--preview': hasPreview }">
           <div class="interaction-dialog__choices">
             <label v-if="activeOptions.length > 8" class="interaction-search">
               <span>过滤选项</span>
@@ -898,7 +1115,17 @@ onBeforeUnmount(() => {
 
         <p v-if="submitError" class="interaction-dialog__submit-error" role="alert">{{ submitError }}</p>
 
-        <footer class="interaction-dialog__footer">
+        <!-- C1 变体 2 footer 重排（契约 4：取消最左，治「取消夹在上下一步中间」）：
+             [取消 ghost][进度文本][上一题 ghost][下一题/提交 primary]；主按钮恒可点——非末题点击
+             =前进 goNext（跳过语义，R4-1）；末题点击=submitWizard（未答齐定位+警示）。
+             单题（非 form）形态 footer 原排布字面不动。 -->
+        <footer v-if="isWizard" class="interaction-dialog__footer interaction-dialog__footer--wizard">
+          <button type="button" class="interaction-btn interaction-btn--ghost" data-testid="wizard-cancel-btn" @click="requestDiscard">{{ cancelLabel }}</button>
+          <span class="wizard-foot-progress">已答 {{ answeredCount }}/{{ wizardQuestions.length }}</span>
+          <button type="button" class="interaction-btn interaction-btn--ghost" data-testid="wizard-prev-btn" :disabled="wizardIndex === 0" @click="previousQuestion">上一题</button>
+          <button type="button" class="interaction-btn interaction-btn--primary" data-testid="wizard-next-btn" data-dialog-initial-focus @click="wizardIndex < wizardQuestions.length - 1 ? goNext() : submitWizard()">{{ wizardPrimaryLabel }}</button>
+        </footer>
+        <footer v-else class="interaction-dialog__footer">
           <button v-if="isWizard && wizardIndex > 0" type="button" class="interaction-btn interaction-btn--ghost" @click="previousQuestion">上一步</button>
           <button type="button" class="interaction-btn interaction-btn--ghost" @click="cancel">{{ cancelLabel }}</button>
           <button
@@ -913,6 +1140,19 @@ onBeforeUnmount(() => {
             {{ submitLabel }}
           </button>
         </footer>
+
+        <!-- C1 契约 6：丢弃保护二次确认（面板内浮层，对齐原型 .confirm；文案沿用原型 h3，
+             已答数 N 落正文——03b §4 差异点①口径）。 -->
+        <div v-if="discardConfirmVisible" class="wizard-discard-confirm" data-testid="wizard-discard-confirm" @click.self="dismissDiscard">
+          <div class="wizard-discard-confirm__box" role="alertdialog" aria-modal="true" aria-label="丢弃本次作答确认">
+            <h3>丢弃本次作答？</h3>
+            <p>已作答的 {{ discardCounts }} 题内容将被丢弃，模型不会收到任何回答。</p>
+            <div class="wizard-discard-confirm__row">
+              <button type="button" class="interaction-btn interaction-btn--ghost" @click="dismissDiscard">继续作答</button>
+              <button type="button" class="interaction-btn interaction-btn--danger" @click="confirmDiscard">丢弃</button>
+            </div>
+          </div>
+        </div>
 
         <DialogResizeHandles :binder="shell" />
       </section>
@@ -957,6 +1197,12 @@ onBeforeUnmount(() => {
   width: min(24rem, 94vw);
 }
 
+/* C1 变体 2：wizard（kind form 多题）态宽面板分栏——57.5rem 宽档（对齐原型 .panel），
+   与 --wide 同值但独立类（wizard 分栏形态专属钉面）。 */
+.interaction-dialog--wizard {
+  width: var(--interaction-panel-width-wide);
+}
+
 .interaction-dialog__header {
   user-select: none;
   cursor: move;
@@ -988,36 +1234,218 @@ onBeforeUnmount(() => {
   line-height: 1.55;
 }
 
-.interaction-steps {
-  display: flex;
-  gap: 0.375rem;
-  margin-top: 0.75rem;
-}
+/* ── C1 变体 2「左侧题号导航栏」（2026-11-15 用户拍板）：宽面板左右分栏 ──
+   全 token 化（00 契约 10）：浅色 warm-paper / 深色 terminal-pro 双板经既有 palette 变量生效，
+   无写死色值（实底白字前景共两处用途，均如实：success/accent 实底经 --color-on-success /
+   --color-on-accent token 生效（token 值即 #FFFFFF，variables.css）；danger 实底由
+   .interaction-btn--danger 直接写死 #fff（拼黑 20% 加深底上的白字先例）。 */
 
-.interaction-step {
-  display: grid;
-  width: 1.25rem;
-  height: 1.25rem;
-  place-items: center;
+/* 头部进度 chip（对齐原型 .head .chip）：muted 小字 pill，常显「已答 N/M」。 */
+.wizard-progress-chip {
+  display: inline-flex;
+  margin-left: 0.5rem;
+  padding: 0.125rem 0.625rem;
   border: 1px solid var(--color-border);
   border-radius: 999px;
   color: var(--color-text-muted);
   font-size: 0.6875rem;
-  font-weight: 800;
-  /* C1（C-W1）：span→button 后清除浏览器按钮默认样式回归（底色/内边距/字体/指针）；
-     --active/--done 的 background 覆盖保持其后、优先级不变。 */
-  appearance: none;
-  padding: 0;
-  background: transparent;
-  cursor: pointer;
-  font-family: inherit;
+  font-variant-numeric: tabular-nums;
 }
 
-.interaction-step--active,
-.interaction-step--done {
-  border-color: var(--color-accent-strong);
-  background: color-mix(in srgb, var(--color-accent) 20%, transparent);
+/* 左右分栏主体：左栏题号导航（自身滚动）+ 右栏单题内容（分页保留，一次一题）。 */
+.interaction-dialog__body--wizard {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.wizard-nav {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 0.375rem;
+  width: var(--interaction-wizard-nav-w);
+  overflow-y: auto;
+  padding: 0.625rem;
+  border-right: 1px solid var(--color-border);
+  background: var(--color-panel-soft);
+}
+
+.wizard-nav__item {
+  padding: 0.5rem 0.625rem;
+  border: 1.5px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.wizard-nav__item:hover {
+  background: color-mix(in srgb, var(--color-text) 5%, transparent);
+}
+
+.wizard-nav__item .row1 {
+  display: flex;
+  align-items: center;
+  gap: 0.4375rem;
+}
+
+.wizard-nav__item .n {
+  display: grid;
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  place-items: center;
+  border: 1.5px solid currentColor;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 800;
+}
+
+.wizard-nav__item .t {
+  overflow: hidden;
+  font-size: 0.78125rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.wizard-nav__item .row2 {
+  overflow: hidden;
+  margin: 0.25rem 0 0 1.6875rem;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 三态色彻底分离（契约 3）：已答=绿✓实心+摘要行 success；当前=accent 描边+浅底+accent 实底
+   编号圈；未答=空心编号+「未作答」muted；flagged=danger 描边警示（提交校验命中）。 */
+.wizard-nav__item.answered {
   color: var(--color-text);
+}
+
+.wizard-nav__item.answered .n {
+  border-color: var(--color-success);
+  background: var(--color-success);
+  color: var(--color-on-success);
+}
+
+.wizard-nav__item.answered .row2 {
+  color: var(--color-success);
+}
+
+.wizard-nav__item.current {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel));
+  color: var(--color-text);
+}
+
+.wizard-nav__item.current .n {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.wizard-nav__item--flagged {
+  border-color: var(--color-danger);
+}
+
+/* 右栏题面（复用单题 body 渲染结构：InteractionOptionList 选项 + Other 行内输入）。 */
+.wizard-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+}
+
+.wizard-qhead {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-bottom: 0.25rem;
+}
+
+.wizard-count {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.wizard-qtag {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+}
+
+.wizard-qtext {
+  margin: 0 0 0.75rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.wizard-qdesc {
+  margin: 0 0 0.75rem;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
+.wizard-skipnote {
+  margin-top: 0.625rem;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+}
+
+/* footer 进度文本（margin-right:auto 把按钮组推右；取消 ghost 最左）。 */
+.wizard-foot-progress {
+  margin-right: auto;
+  align-self: center;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 丢弃确认层（契约 6；对齐原型 .confirm）：面板内浮层 z 10，遮罩点击=继续作答。 */
+.wizard-discard-confirm {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  border-radius: var(--interaction-panel-radius);
+  background: var(--interaction-overlay-bg);
+}
+
+.wizard-discard-confirm__box {
+  width: 20rem;
+  padding: 1rem;
+  border-radius: var(--radius-md);
+  background: var(--color-panel);
+  box-shadow: var(--interaction-shadow);
+}
+
+.wizard-discard-confirm__box h3 {
+  margin: 0 0 0.375rem;
+  font-size: 0.875rem;
+}
+
+.wizard-discard-confirm__box p {
+  margin: 0 0 0.875rem;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.wizard-discard-confirm__row {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
 }
 
 .interaction-dialog__body {

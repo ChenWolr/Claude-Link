@@ -15,6 +15,9 @@
      （属例外清单：box-shadow 不随字号缩放，视觉影响可忽略）。 */
   --interaction-panel-width: min(35rem, 94vw);
   --interaction-panel-width-wide: min(57.5rem, 94vw);
+  /* C1 变体 2「左侧题号导航栏」（2026-11-15 用户拍板）：wizard 态左栏题号导航宽度（≈208px，
+     随字号等比缩放；原型 .qnav 208px 对应值）。其余 wizard 面均复用上方既有 token。 */
+  --interaction-wizard-nav-w: 13rem;
   --interaction-panel-radius: 1rem;
   --interaction-shadow: 0 18px 60px rgba(0, 0, 0, 0.46);
 

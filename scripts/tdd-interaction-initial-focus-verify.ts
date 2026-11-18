@@ -24,6 +24,13 @@
 //     经 ③ 兜底静默提交首项（权限首项=允许本次，误授权）；判据与 A9 的 Esc 让位同源
 //     （escHandle.isTopmost），无更高层时零行为变化。
 //
+// C1 同步（2026-11-16，变体 2「左侧题号导航栏」重构，02-impl-details-renderer §3.3）：
+// wizard 落账改 questionAnswers 账本直写（updateAnswer）+ 整体提交走 submitWizard——
+// persistCurrentQuestionAnswer 移除、submit() 不再含 wizard 分支。P2-1 的「写回先于
+// persistCurrentQuestionAnswer 调用」保序断言按最小同步原则改为「写回先于 respondAndRemove
+// 载荷构造」（submit 现仅服务非 wizard 形态，旧 wizard 落账路径已不存在=废卷）；
+// 兜底写回本体 / Tab 困陷 / 遮挡让位语义零变化（非 wizard 形态逐字保留）。
+//
 // 运行：npx tsx scripts/tdd-interaction-initial-focus-verify.ts
 
 import { readFileSync } from 'node:fs';
@@ -70,25 +77,25 @@ check('Enter 兜底：单选形态 ids 空时以 focusedOption 提交（预选�
   assert.match(body, /focusedOption\.value/, 'submit 应消费 focusedOption 兜底');
   assert.match(body, /!currentMultiSelect\.value/, '兜底应限单选形态');
 });
-check('P2-1：兜底分支同步写回 selectedIds（wizard Enter 落真实选择，不落空答案）', () => {
+check('P2-1：兜底分支同步写回 selectedIds（落账链读真实选择，不落空答案）', () => {
   const idx = src.indexOf('async function submit(optionId?: string)');
   assert.ok(idx > -1, '缺 submit');
-  // 窗口 2200：须覆盖到 submit 内 wizard 落账路径（persistCurrentQuestionAnswer 调用点）。
   const body = src.slice(idx, idx + 2200);
-  // 兜底先写局部 ids（let ids 可重写），再同步写回 selectedIds——否则 wizard 形态
-  // persistCurrentQuestionAnswer 读到的 selectedIds 仍是空集，questionAnswers 记
-  // selectedOptionIds: []（静默错误回答，2026-10-02 对抗 review P2-1）。
+  // 兜底先写局部 ids（let ids 可重写），再同步写回 selectedIds——落账链读 selectedIds，
+  // 只写局部 ids 会把该题记成空集（静默错误回答，2026-10-02 对抗 review P2-1）。
   assert.match(body, /let ids =/, 'ids 应为可兜底重写的局部变量');
   assert.match(
     body,
     /ids = \[focusedOption\.value\.id\];\s*selectedIds\.value = new Set\(ids\);/,
     '兜底分支须在 ids = [focusedOption.value.id] 之后同步写回 selectedIds.value = new Set(ids)',
   );
-  // 写回须先于 wizard 落账路径（persistCurrentQuestionAnswer 在 submit 内随后执行）。
+  // C1 变体 2 同步（2026-11-16）：wizard 落账已改 questionAnswers 账本直写（updateAnswer），
+  // persistCurrentQuestionAnswer 移除、submit 不再含 wizard 分支（wizard 提交走 submitWizard）；
+  // 写回保序断言改为「先于 respondAndRemove 载荷构造」（submit 现仅服务非 wizard 形态）。
   const writeBackIdx = body.indexOf('selectedIds.value = new Set(ids)');
-  const persistIdx = body.indexOf('persistCurrentQuestionAnswer()');
-  assert.ok(persistIdx > -1, '窗口应覆盖 persistCurrentQuestionAnswer 调用点');
-  assert.ok(writeBackIdx > -1 && writeBackIdx < persistIdx, '写回须先于 persistCurrentQuestionAnswer 调用');
+  const respondIdx = body.indexOf('respondAndRemove(');
+  assert.ok(respondIdx > -1, '窗口应覆盖 respondAndRemove 载荷构造点');
+  assert.ok(writeBackIdx > -1 && writeBackIdx < respondIdx, '写回须先于 respondAndRemove 载荷构造');
 });
 check('遮挡让位：更高层遮罩在场时 focusDialogStart 不抢焦（守卫先于候选遍历）', () => {
   const idx = src.indexOf('function focusDialogStart()');
