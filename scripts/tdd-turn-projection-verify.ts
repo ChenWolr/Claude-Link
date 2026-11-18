@@ -365,19 +365,23 @@ check('R1 全局：emitTurnEnded( 全文件恰好 9 处（1 定义 + 8 调用）
 // round-003 FIX-D（round-002 复审 P2-1）：runQuery catch interruptedQueries 分支（两段式优雅
 // 窗内流抛错）——迟到 finishKill 因 entry 已被 finally deleteEntry 移除而 wasCurrent 恒 false，
 // 其收口门被跳过；分支内 emitTurnEnded(interrupted) 为该形态唯一投影收口点。
-// 窗口申报：分支锚点 interruptedQueries.has(query)（全文件唯一）到 emitTurnEnded 实距 754
+// 窗口申报：分支锚点 if (interruptedQueries.has(query)) {（唯一分支形态）到 emitTurnEnded 实距 754
 // （分支头 5 行既有注释 + forceKill 块 + emitExit + CRLF；LF 下亦 ≈740 >400），超 400 窗；照
 // 出口①/⑤/⑥「从终态发射行起量」惯例改从分支内 aborted 发射行起量 ≤400 窗（实距 364），分支
 // 归属另由唯一分支锚点钉住（indexOf === lastIndexOf）。emitTurnEnded 置 emitExit(null) 之后：
 // p3-01 契约钉要求 emitExit 留在分支前 700 窗（位置不可推后），watchdog ⑬ X9 消费块同款先例。
-const intrAnchorIdx = sdkBackend.indexOf('interruptedQueries.has(query)');
+// B1 契约同步（round-001 a1-修复1，b3 报告 §6-5 修复指令）：B1 于 sdk-backend 新增 3 处
+// interruptedQueries.has(query) 裸字面（闩回调 ×2 + 注释 ×1），裸字面计数 1→4 不再唯一
+// → 锚与 uniqueness 子条件改钉唯一分支形态 if (interruptedQueries.has(query)) {（B1 三处
+// 新增均为 () => interruptedQueries.has(query) 回调形态，不与分支形态冲突）。
+const intrAnchorIdx = sdkBackend.indexOf('if (interruptedQueries.has(query)) {');
 const intrAbortedIdx = intrAnchorIdx === -1 ? -1
   : sdkBackend.indexOf("forwardEvent(sessionId, mainWindow, { type: 'aborted', message: '已中断' });", intrAnchorIdx);
 const intrEndedIdx = intrAbortedIdx === -1 ? -1
   : sdkBackend.indexOf("emitTurnEnded(sessionId, 'interrupted',", intrAbortedIdx);
 check('P2-1 interruptedQueries 分支：分支锚点唯一 + aborted 发射行后紧跟 emitTurnEnded(interrupted)（≤400 字符内）',
   intrAnchorIdx !== -1 && intrAbortedIdx !== -1 && intrEndedIdx !== -1 && intrEndedIdx - intrAbortedIdx <= 400 &&
-  sdkBackend.indexOf('interruptedQueries.has(query)') === sdkBackend.lastIndexOf('interruptedQueries.has(query)'),
+  sdkBackend.indexOf('if (interruptedQueries.has(query)) {') === sdkBackend.lastIndexOf('if (interruptedQueries.has(query)) {'),
   intrAnchorIdx === -1 ? '分支锚点缺失' : intrAbortedIdx === -1 ? 'aborted 发射点缺失' : intrEndedIdx === -1 ? 'emitTurnEnded 缺失' : `间距 ${intrEndedIdx - intrAbortedIdx}`);
 // R2：toolIndexKeys 命名空间键——注册/查询两侧同规则 `${parentToolUseId ?? ''}#${index}`。
 check('R2：toolIndexKeys 类型 Map<string, string>（命名空间键）',
