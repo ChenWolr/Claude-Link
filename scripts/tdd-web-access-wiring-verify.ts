@@ -410,6 +410,16 @@ check('ipc-handlers 注册 FS_OPEN_PATH handler', handlers.includes('regInvokeHa
 check("IPC_CHANNELS 含 FS_READ_PREVIEW: 'fs:readPreview'", ipcConst.includes("FS_READ_PREVIEW: 'fs:readPreview'"));
 check('WEB_CHANNEL_TABLE 含 readFilePreview 表项', webBridge.includes('readFilePreview: IPC_CHANNELS.FS_READ_PREVIEW'));
 check('ipc-handlers 注册 FS_READ_PREVIEW handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.FS_READ_PREVIEW'));
+// E2（2026-11-15 eight-issues）：MCP_SNAPSHOT_CHANGED 推送通道三字面钉（同 FS_OPEN_PATH 先例防
+// 漂移；推送型通道无 invoke handler——第三钉改钉 preload 双成员实现，键集对等由上方 §11.2
+// 双向断言自动覆盖 +2 表键/+2 接口成员）。
+check("IPC_CHANNELS 含 MCP_SNAPSHOT_CHANGED: 'mcp:snapshotChanged'", ipcConst.includes("MCP_SNAPSHOT_CHANGED: 'mcp:snapshotChanged'"));
+check('WEB_CHANNEL_TABLE 含 onMcpSnapshotChanged/removeMcpSnapshotListener 表项',
+  webBridge.includes('onMcpSnapshotChanged: IPC_CHANNELS.MCP_SNAPSHOT_CHANGED') &&
+  webBridge.includes('removeMcpSnapshotListener: IPC_CHANNELS.MCP_SNAPSHOT_CHANGED'));
+check('preload 双成员实现（on* 订阅返回注销句柄 + remove*Listener removeAllListeners）',
+  preloadApi.includes('onMcpSnapshotChanged: (callback) =>') &&
+  preloadApi.includes('removeMcpSnapshotListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.MCP_SNAPSHOT_CHANGED)'));
 const tableStart = webBridge.indexOf('const WEB_CHANNEL_TABLE');
 const tableEnd = webBridge.indexOf('\n};', tableStart);
 check('web-bridge.ts 含 WEB_CHANNEL_TABLE（Record<keyof ClaudeLinkAPI, string>）',
@@ -662,6 +672,8 @@ check('turn-diff getPatch/computeFileDiff 声明含 context 默认参（context 
   countOccurrences(turnDiffSrc, 'context = 3') >= 2);
 
 // ── ⑯ web 产物滞后横条（2026-10-30 计划 §1.B / §7-S14）──
+// D2（八问题批次）登记：本节 W1-W3 由 scripts/tdd-dev-stale-banner-verify.ts 以 spawn 形态
+// 作为「生产 buildRev 横幅语义不变」回归门引用——改钉前先核对该门（03b §8 D2-2）。
 console.log('=== 16) web 产物滞后横条（P4）===');
 // W1：web-bridge welcome 分支捕获主进程 buildRev（重连 welcome 亦更新），并以 getter + 响应式 ref 双出口暴露。
 check('W1 web-bridge 捕获 welcome buildRev（welcomedBuildRev / frame.buildRev / getWelcomedBuildRev / welcomedBuildRevRef 四要素）',

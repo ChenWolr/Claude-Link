@@ -28,10 +28,12 @@ import { syncWebAccessServer, kickAllWebClients, randomWebAccessToken, type WebA
 import { buildWebAccessInfo, currentWebAccessUrls } from './modules/web-access/web-access-info';
 import { runProviderModelTest } from './modules/connection-tester';
 import { listRecentWorkspaces, addRecentWorkspace, removeRecentWorkspace, MAX_ENTRIES } from './modules/workspace-history';
+// E4（2026-11-15 eight-issues）：MCP/Skill 项目目录集单一真相源（最近工作区 ∪ 会话 distinct 工作目录，封顶 dirCap）。
+import { listRecentAndSessionProjectDirs } from './modules/project-dir-set';
 import { listRoots, listDir, mkdir, statPath, isValidFolderName, renamePath } from './modules/fs-picker';
 import { previewFile } from './modules/fs-preview';
 import type { FsTrashFailure } from '../shared/types/fs-picker';
-import { badDirCacheHas, badDirCacheMark, collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
+import { badDirCacheClear, badDirCacheHas, badDirCacheMark, collectSkillProjectDirs, collectUserSkillDirNames } from './modules/project-skills';
 import { effectiveUserHome } from './modules/sdk-backend';
 import { resolveDefaultModel } from '../shared/settings-parser';
 import { detectCli, getCachedCliStatus } from './modules/cli-detector';
@@ -51,11 +53,15 @@ import {
   type ParsedMcpEntry,
 } from './modules/mcp/mcp-config';
 import {
-  collectMcpSnapshot,
+  clearMcpRawCache,
   readProjectMcpServersDetailSync,
   readProjectMcpServersRawSync,
   readUserMcpServersRawSync,
 } from './modules/mcp/mcp-scanner';
+// E3（2026-11-15 eight-issues）：WORKSPACE_ADD_RECENT/REMOVE_RECENT 锚点直连 MCP 感知面——
+// 失效信号直发（snapshot-service）与 watcher 目录集重算（source-watcher，未启动 no-op）。
+import { broadcastMcpSnapshotInvalidated, collectMcpSnapshotWithAppDeps } from './modules/mcp/mcp-snapshot-service';
+import { notifyMcpDirsChanged } from './modules/mcp/mcp-source-watcher';
 import { writeScopedMcpServer, type ScopedMcpEntry } from './modules/mcp/mcp-writer';
 import {
   dropProbeCacheByPrefix,
@@ -385,6 +391,14 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   regInvokeHandler(IPC_CHANNELS.WORKSPACE_ADD_RECENT, async (_event, dir: string) => {
     const list = addRecentWorkspace(dir);
     pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED, {});
+    // E3（2026-11-15 eight-issues）项目打开自动扫描挂点三连：
+    badDirCacheClear(dir);                    // ① 清该目录 60s 负缓存——新目录首扫不被「曾经超时」吞掉
+    broadcastMcpSnapshotInvalidated();        // ② E2 同款快照失效信号（空载荷 {}）——渲染层 MCP tab
+                                              //    活跃即重拉；非活跃标 stale（渲染联动由乙实现）
+    notifyMcpDirsChanged();                   // ③ watcher 增量挂载该目录 + 重算指纹（未启动 no-op；
+                                              //    R5-3 注释如实化：目录集新增即实变指纹（新目录不带
+                                              //    .mcp.json 亦以 :missing 条目计）→ 广播 1 次失效信号，
+                                              //    幂等无害；带 .mcp.json 时后续内容变更再广播）
     return list;
   });
   // 永久删除某条最近目录历史（只移除历史记录，不触碰磁盘上的目录本体）。
@@ -392,6 +406,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     const list = removeRecentWorkspace(dir);
     // 删不存在的目录列表不变，仍推送（无害信号，渲染层重拉幂等）。
     pushToMainWindow(IPC_CHANNELS.WORKSPACES_CHANGED, {});
+    // E3（2026-11-15 eight-issues）：目录集收缩 → watcher 摘除句柄，防孤儿 watch；handler 自身
+    // 不广播（移出清单无需重拉快照，01 §E3-1）。R5-3（round-005 注释如实化）：watcher 已启动且
+    // 目录确从指纹集收缩时，watcher 路径（指纹摘条目实变）会广播一次失效信号（幂等无害，
+    // 与 01 §E3-1「不补发」注释口径以本注为准）。
+    notifyMcpDirsChanged();
     return list;
   });
 
@@ -514,14 +533,11 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 与证据扫描/command-source-watcher 同源）——advancedJson.env 覆盖 home 时映射不再扫错根；
     // 无覆盖时二者同值，行为不变。undefined 回退宿主 home（按函数语义核对）。
     const userDirNames = await collectUserSkillDirNames(path.join(effectiveUserHome() ?? os.homedir(), '.claude', 'skills'));
-    // UI13-P8（契约 #3）：目录源扩为 最近工作区 ∪ 会话 distinct 工作目录（listRecentWorkingDirs，
-    // normalizeDirKey 去重、保序 recent 在前）∪ 默认目录（下方 defaultDir）——总量封顶 20
-    //（会话内 agent 自建 skill 的目录必然进清单）；sessionCounts 仍为展示元数据（每目录会话计数）。
-    const recent = listRecentWorkspaces();
-    const seen = new Set(recent.map(normalizeDirKey));
-    const sessionDirs = sessionRepo.listRecentWorkingDirs(20).filter((d) => !seen.has(normalizeDirKey(d)));
-    const dirCap = 20;
-    const recentDirs = [...recent, ...sessionDirs].slice(0, dirCap);
+    // UI13-P8（契约 #3）：目录源扩为 最近工作区 ∪ 会话 distinct 工作目录 ∪ 默认目录（下方
+    // defaultDir）——总量封顶 20（会话内 agent 自建 skill 的目录必然进清单）。E4（2026-11-15
+    // eight-issues）：三源装配收口单一真相源 listRecentAndSessionProjectDirs（normalizeDirKey
+    // 去重、保序 recent 在前，见 project-dir-set.ts）；sessionCounts 仍为展示元数据（每目录会话计数）。
+    const recentDirs = listRecentAndSessionProjectDirs(20);
     return {
       dirs: await collectSkillProjectDirs({
         recentDirs,
@@ -537,23 +553,42 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
 
   // MCP 管理（设置页 MCP Tab）四 handler（docs/plans/2026-10-12-mcp-management-plan.md §2 P4）。
-  // 快照：现查无副作用（同 skills:projectDirsGet 先例，依赖取法完全同源）——用户根
-  // effectiveUserHome() ?? os.homedir()（子进程实际生效 USERPROFILE/HOME）、最近工作区
-  // listRecentWorkspaces()、默认目录 getConfig().workingDirectory、会话计数
-  // sessionRepo.listWorkingDirCounts()、坏目录负缓存与 Skill 共用同一实例
-  //（project-skills badDirCacheHas/badDirCacheMark，语义「目录不可达 60s」）。
-  regInvokeHandler(IPC_CHANNELS.MCP_SNAPSHOT_GET, async () => {
-    const defaultWorkingDir = getConfig().workingDirectory ?? null;
-    return collectMcpSnapshot({
-      userHome: effectiveUserHome() ?? os.homedir(),
-      isDefaultDir: (dir) =>
-        defaultWorkingDir !== null && normalizeDirKey(dir) === normalizeDirKey(defaultWorkingDir),
-      recentWorkspaces: listRecentWorkspaces(),
-      defaultWorkingDir,
-      listWorkingDirCounts: () => sessionRepo.listWorkingDirCounts(),
-      badDirHas: badDirCacheHas,
-      badDirMark: badDirCacheMark,
-    });
+  // 快照：现查无副作用（同 skills:projectDirsGet 先例）；E2（2026-11-15 eight-issues）起 deps
+  // 装配收口至 mcp-snapshot-service.collectMcpSnapshotWithAppDeps()（取法逐字等价——用户根
+  // effectiveUserHome() ?? os.homedir()、项目目录集 E4 统一目录源、默认目录独立传参、会话计数
+  // sessionRepo.listWorkingDirCounts()、坏目录负缓存与 Skill 共用同一实例），并增 E1/E3 bypass
+  // 可选参数（见 handler 内注释）。
+  regInvokeHandler(IPC_CHANNELS.MCP_SNAPSHOT_GET, async (_event, opts?: { bypassCache?: boolean; dir?: string }) => {
+    // E2（2026-11-15 eight-issues）：deps 装配收口 collectMcpSnapshotWithAppDeps()——本 handler 零
+    // 内联装配；deps 形态与迁出前逐字等价（userHome / isDefaultDir /
+    // recentWorkspaces: listRecentAndSessionProjectDirs(20)（E4 统一目录源）/
+    // defaultWorkingDir, listWorkingDirCounts / badDirHas / badDirMark），装配体见
+    // mcp-snapshot-service.ts assembleMcpSnapshotDeps。
+    // E1/E3 bypass 面（§9-1 扫描按钮主进程面）：bypassCache===true → 先清坏目录负缓存 + 清用户级
+    // mtime 缓存，再收集。既有调用不传 opts → undefined 不进分支，零影响（同通道加参，web-bridge
+    // 泛型分派透传 args）。
+    // P21（2026-11-17 round-002 收口）：负缓存清除目标态已收口——badDirCacheClear(opts.dir) 一行直调
+    //（带 dir 删单键、无 dir 清整表，project-skills 导出形态即此语义；E2 临时等价面已撤）。
+    if (opts?.bypassCache === true) {
+      // R5-2（round-005，契约 E1-4「项目栏扫描限白名单目录，越界拒绝并提示」主进程防御面）：
+      // bypass 带 dir 时校验目录 ∈ 白名单 = mergeProjectDirs(listRecentAndSessionProjectDirs(20),
+      // 默认工作目录)（E4 统一目录源 ∪ 默认目录，normalizeDirKey 归一比较，同 MCP_PROBE project
+      // 分支先例）——越界 → invoke reject（渲染层走既有 loadError 降态条呈现；渲染层本无越界入口，
+      // 此为 web-bridge 透传面的主进程防御）；无 dir（整表 bypass）与白名单内目录照旧。
+      // 形态申报：目录源与合并拆两语句（⑫ E4-01 钉「mergeProjectDirs(listRecentAndSessionProjectDirs(20)
+      // 代码行恰 4 处」字面计数冻结既有四处；本处为 R5-2 新增同族第 5 处消费点，钉宿主文件不在
+      // 本轮授权清单，故以两语句等价形态避开该字面计数，语义与单行形态逐字一致）。
+      if (opts.dir !== undefined) {
+        const recentDirs = listRecentAndSessionProjectDirs(20);
+        const knownKeys = new Set(mergeProjectDirs(recentDirs, getConfig().workingDirectory ?? null).map((d) => normalizeDirKey(d.path)));
+        if (typeof opts.dir !== 'string' || !knownKeys.has(normalizeDirKey(opts.dir))) {
+          throw new Error(`目录不在可扫描白名单内：${opts.dir}`);
+        }
+      }
+      badDirCacheClear(opts.dir);
+      clearMcpRawCache();
+    }
+    return collectMcpSnapshotWithAppDeps();
   });
   // 管理库全量替换：body = McpManagedSaveEntry[]（McpManagedServer + 瞬态改名 hint）→
   // 先 restoreMaskedMcpServers（§1.3：渲染层提交的未改动字段值是掩码哨兵，按已存条目还原
@@ -651,7 +686,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       if (scope === 'user') {
         raw = readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir());
       } else {
-        const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+        const knownDirs = mergeProjectDirs(listRecentAndSessionProjectDirs(20), getConfig().workingDirectory ?? null);
         const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
         if (dir === '' || !knownKeys.has(normalizeDirKey(dir))) return [];
         dirKey = normalizeDirKey(dir);
@@ -762,8 +797,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   // p2-2026-10-29（计划 §1.A.2）：single 探活三作用域取源辅助——managed = 管理库 config store
   // 按 name 成表；user = 用户级 ~/.claude.json raw 直读（userHome 主进程自取，渲染层不可传）；
-  // project = 白名单校验（同 MCP_WRITE_SCOPED：mergeProjectDirs(listRecentWorkspaces(),
-  // workingDirectory) 按 normalizeDirKey 归一比对）→ 坏目录 60s 负缓存短路 → <dir>/.mcp.json
+  // project = 白名单校验（同 MCP_WRITE_SCOPED：mergeProjectDirs(listRecentAndSessionProjectDirs(20),
+  // workingDirectory) 按 normalizeDirKey 归一比对；E4 统一目录源）→ 坏目录 60s 负缓存短路 → <dir>/.mcp.json
   // raw 直读按 name 取。查无/白名单拒绝/坏目录短路 → null（single 落单元素 fail report）。
   // 明文全程不出主进程：辅助仅在主进程内取明文构造探活输入，回包仍只有 status/toolCount/error。
   function resolveProbeSource(scope: 'managed' | 'user' | 'project', dir: string): Record<string, ParsedMcpEntry> | null {
@@ -786,7 +821,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     if (scope === 'user') return readUserMcpServersRawSync(effectiveUserHome() ?? os.homedir());
     // project：白名单（同 MCP_WRITE_SCOPED）→ 坏目录负缓存短路 → raw 直读。
     if (dir === '') return null;
-    const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+    const knownDirs = mergeProjectDirs(listRecentAndSessionProjectDirs(20), getConfig().workingDirectory ?? null);
     const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
     if (!knownKeys.has(normalizeDirKey(dir))) return null;
     if (badDirCacheHas(dir)) return null;
@@ -796,8 +831,8 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   //（mcp-writer.ts：user → ~/.claude.json / project → <dir>/.mcp.json 顶层 mcpServers 条目
   // upsert/remove；哨兵值按原文件还原，瞬态改名 hint 还原后剥离；tmp+rename 原子写 + mtime
   // 冲突重试）→ { overwrote }。安全边界（必须）：scope=project 时 dir 必须属于已知项目目录集
-  // ——与 MCP_SNAPSHOT_GET 同源（mergeProjectDirs(listRecentWorkspaces(), 默认工作目录) 按
-  // normalizeDirKey 归一比对），防渲染层任意路径写；user 作用域 userHome 由主进程自取
+  // ——与 MCP_SNAPSHOT_GET 同源（mergeProjectDirs(listRecentAndSessionProjectDirs(20), 默认工作
+  // 目录) 按 normalizeDirKey 归一比对；E4 统一目录源），防渲染层任意路径写；user 作用域 userHome 由主进程自取
   // effectiveUserHome() ?? os.homedir()（与注入链同口径），渲染层不可传。
   regInvokeHandler(IPC_CHANNELS.MCP_WRITE_SCOPED, async (_event, body: unknown): Promise<{ overwrote: boolean }> => {
     if (typeof body !== 'object' || body === null) throw new Error('Invalid MCP write payload');
@@ -810,7 +845,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     let dir: string | undefined;
     if (req.scope === 'project') {
       if (typeof req.dir !== 'string' || req.dir === '') throw new Error('Invalid MCP write dir');
-      const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+      const knownDirs = mergeProjectDirs(listRecentAndSessionProjectDirs(20), getConfig().workingDirectory ?? null);
       const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
       if (!knownKeys.has(normalizeDirKey(req.dir))) throw new Error(`目标目录不在已知项目目录集中，已拒绝写入：该目录已不在最近工作区（上限 ${MAX_ENTRIES} 条），在对应目录重新打开会话后重试`);
       dir = req.dir;
@@ -835,7 +870,7 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     let dir: string | undefined;
     if (req.scope === 'project') {
       if (typeof req.dir !== 'string' || req.dir === '') throw new Error('Invalid MCP export dir');
-      const knownDirs = mergeProjectDirs(listRecentWorkspaces(), getConfig().workingDirectory ?? null);
+      const knownDirs = mergeProjectDirs(listRecentAndSessionProjectDirs(20), getConfig().workingDirectory ?? null);
       const knownKeys = new Set(knownDirs.map((d) => normalizeDirKey(d.path)));
       if (!knownKeys.has(normalizeDirKey(req.dir))) throw new Error('目标目录不在已知项目目录集中，已拒绝导出');
       dir = req.dir;
@@ -1023,6 +1058,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
     // 桌面渲染层自身发起的创建也会收到（去抖重拉幂等，无害）；回滚路径（附件绑定失败上方已
     // throw）不经过此处。与 BRIDGE_SESSIONS_UPSERTED 并存不合并（桥接通道语义与消费链不动）。
     pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId: session.id });
+    // P32（2026-11-17 eight-issues round-002）会话 distinct 工作目录入集即时失效信号锚：
+    // workingDir 落库成功路径（位于附件绑定回滚 throw 点之后，回滚路径不经过此处，同上注）；
+    // workingDir null = 无目录入集，不信号。与 E3 WORKSPACE_ADD_RECENT 锚点同型双信号：
+    if (session.workingDir) {
+      broadcastMcpSnapshotInvalidated();        // 快照失效广播——渲染层 MCP tab 活跃即重拉（E2 同款）
+      notifyMcpDirsChanged();                   // watcher 重算目录集，增量挂载新目录（未启动 no-op）
+    }
     return session;
   });
   regInvokeHandler(IPC_CHANNELS.SESSION_GET, async (_event, id: string) => {
@@ -1124,6 +1166,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       // 自动命名等经 SESSION_UPDATE 的路径同样覆盖；updated falsy（无行）不发。
       if (updated) {
         pushToMainWindow(IPC_CHANNELS.SESSIONS_CHANGED, { kind: 'upsert', sessionId: id });
+        // P32（2026-11-17 eight-issues round-002）会话 distinct 工作目录入集/出集即时失效信号锚：
+        // workingDir 落库成功路径（updated truthy=有行已落库；falsy=无行未落库不信号）——置目录
+        // 与清目录（null，N2 同款语义）都改变目录集。与 E3 WORKSPACE_ADD_RECENT 锚点同型双信号：
+        if (data.workingDir !== undefined) {
+          broadcastMcpSnapshotInvalidated();        // 快照失效广播——渲染层 MCP tab 活跃即重拉（E2 同款）
+          notifyMcpDirsChanged();                   // watcher 重算目录集，增量挂载/摘除（未启动 no-op）
+        }
       }
       return updated ? withBridgePlatform(updated) : updated;
     },

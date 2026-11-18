@@ -101,6 +101,11 @@ export const IPC_CHANNELS = {
   // { ok: false, error }）。纯解析无副作用：不落盘、不读配置；三形态导入口径与导入弹窗一致
   //（mcp-config.ts 唯一解析源）。
   MCP_PARSE_JSON: 'mcp:parseMcpJson',
+  // E2（2026-11-15 eight-issues）主→渲染推送：MCP 配置外部变更/目录集变更快照失效信号。
+  // 空载荷 {}——渲染层 MCP tab 活跃时收到即重拉 MCP_SNAPSHOT_GET；非活跃仅标 stale，
+  // 进 tab 时既有现查兜底。发射源：mcp-source-watcher 指纹实变 / WORKSPACE_ADD_RECENT
+  // 锚点（E3）。桌面/网页渲染层同代码同生效（SKILL_PROJECT_DIRS_CHANGED 同款形态）。
+  MCP_SNAPSHOT_CHANGED: 'mcp:snapshotChanged',
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，test/query 由主进程自行解密，出主进程只有掩码视图）。
   PROVIDER_LIST: 'config:listProviders',
   PROVIDER_SAVE: 'config:saveProvider',

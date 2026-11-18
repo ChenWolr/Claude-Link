@@ -69,7 +69,11 @@ const managedServers = ref<McpManagedServer[]>([]);
 let refreshGen = 0;
 let disposed = false;
 
-async function refresh(): Promise<void> {
+// E1（2026-11-15 eight-issues）：签名扩参 opts?——manualScan 扫描走 bypass 调用（主进程
+// MCP_SNAPSHOT_GET bypassCache===true → 清坏目录负缓存（user 栏 dir 缺省=整表 / project 栏
+// 只清 dir 一条）+ 清用户级 mtime 缓存再收集）；其余既有调用点（进 tab/切栏/保存链/错误重试）
+// 全部无参 → 传 undefined，wire 形态不变（同通道加参，主进程对 undefined 按无 bypass 处理）。
+async function refresh(opts?: { bypassCache?: boolean; dir?: string }): Promise<void> {
   const gen = ++refreshGen;
   loading.value = true;
   loadError.value = '';
@@ -77,7 +81,7 @@ async function refresh(): Promise<void> {
     // 管理库投影自 config store（App.vue 初始化 loadConfig 后即为最新；本组件不回写）。
     managedServers.value = Array.isArray(configStore.config.mcpServers) ? configStore.config.mcpServers : [];
     overrides.value = { ...(configStore.config.mcpOverrides ?? {}) };
-    const snap = await claude.getMcpSnapshot();
+    const snap = await claude.getMcpSnapshot(opts?.bypassCache ? { bypassCache: true, dir: opts.dir } : undefined);
     if (gen !== refreshGen || disposed) return; // 已有更新请求在途/组件已卸载，丢弃旧响应
     snapshot.value = snap;
   } catch (e) {
@@ -97,6 +101,46 @@ async function refresh(): Promise<void> {
 }
 
 defineExpose({ refresh });
+
+// ── E1 手动扫描（2026-11-15 eight-issues：契约 00 §E1，实现细节 02 §10）─────────────
+// 扫描 = bypass 版 refresh：清相关负缓存/mtime 缓存 → 重拉快照 → 视图整替，完成以 toast 反馈
+// ±N 计数（最小化提示形态，与 Skill 全局「+N」徽标先例的数字反馈面对齐）。managed 栏由
+// 模板 v-if 排除入口（配置实时生效、无扫描语义），函数层再守一道（防御直调）。
+
+/** 作用域条目计数：user=userServers / project=匹配目录（normalizeDirKey 双侧归一）servers。 */
+function scopeEntryCount(snap: McpSnapshot | null, scope: ScopeId): number {
+  if (!snap) return 0;
+  if (scope.kind === 'user') return snap.userServers.length;
+  if (scope.kind === 'project') {
+    return snap.projectDirs.find((d) => normalizeDirKey(d.path) === normalizeDirKey(scope.path))?.servers.length ?? 0;
+  }
+  return 0;
+}
+
+/** 扫描反馈文案：±N 计数三态（新增/移除/无变化），失败态不走本函数（见 manualScan）。 */
+function scanFeedbackText(before: number, after: number): string {
+  const delta = after - before;
+  if (delta > 0) return `扫描完成：新增 ${delta} 台服务器`;
+  if (delta < 0) return `扫描完成：移除 ${-delta} 台服务器`;
+  return `扫描完成，清单无变化（共 ${after} 台）`;
+}
+
+async function manualScan(): Promise<void> {
+  const scope = activeScope.value; // await 前捕获（切栏竞态，对齐 probeAllInView 局部快照先例）
+  if (scope.kind === 'managed') return;
+  const before = scopeEntryCount(snapshot.value, scope);
+  // M-R6-4（round-006）：同栏并发计数 toast 守卫——扫描在飞时 ConfigPage onMcpSnapshotChanged
+  // 信号触发 refresh 会前移代际，snapshot 已非本请求数据、±N 计数失真。此处捕获「本请求代际」
+  //（refresh 入口 ++refreshGen 自增后即此值，故 = 前值 + 1），计数 toast 前比较、被顶替即放弃。
+  const gen = refreshGen + 1;
+  await refresh({ bypassCache: true, dir: scope.kind === 'project' ? scope.path : undefined });
+  if (disposed) return; // 卸载守卫：回包丢弃后 toast 不再触发（对齐探活/保存在途守卫先例）
+  if (activeScope.value !== scope) return; // 备忘(c)（round-005）：切栏竞态——作用域已切走则跳过计数 toast（本请求代际被顶替，snapshot 已非本栏数据，±N 计数必失真）
+  if (loadError.value) { pushToast('扫描失败，详见错误提示条'); return; } // 失败跳过计数（02 §10.3 裁定）
+  if (gen !== refreshGen) return; // M-R6-4（round-006）：代际被顶替（如同栏信号触发 refresh），本请求回包已被丢弃、snapshot 已非本请求数据——放弃 ±N 反馈
+  const after = scopeEntryCount(snapshot.value, scope); // refresh 代际守卫保证 snapshot 已整替
+  pushToast(scanFeedbackText(before, after));
+}
 
 // ── 探活（p7b 管理库批量 + p3 三作用域扩展）：栏位批量 + 卡片单台「测试连接」────────────
 // 报告按 key（= override 键空间 managed:<name> / user:<name> / project:<dirKey>:<name>）映射到
@@ -1770,7 +1814,8 @@ onBeforeUnmount(() => {
 //    管理段补「删除前会弹确认框」句，r3 B-M4 对照定稿逐字）─
 const scopeNoteHead = computed<string>(() => {
   if (activeScope.value.kind === 'managed') {
-    return '此作用域的服务器由 Claude Link 经 SDK 注入（优先级高于 ~/.claude.json 与 .mcp.json），仅 Claude Link 会话可见。删除前会弹确认框。';
+    // E1-2：managed 栏不设扫描钮，文案补句说明缘由（契约「link 配置实时生效，无需扫描」）。
+    return '此作用域的服务器由 Claude Link 经 SDK 注入（优先级高于 ~/.claude.json 与 .mcp.json），仅 Claude Link 会话可见。删除前会弹确认框。link 配置实时生效，无需扫描。';
   }
   if (activeScope.value.kind === 'user') {
     return '此作用域为 Claude Code 用户级配置（~/.claude.json，全局共享）。Claude Link 可直接编辑该文件（写入整树保留原字段，新会话生效）；启停仅在 Claude Link 会话内生效，终端裸跑 claude 仍按原配置加载。';
@@ -1870,6 +1915,21 @@ const scopeNoteHead = computed<string>(() => {
             </span>
           </span>
           <span class="mcp-title-row__acts">
+            <!-- E1 手动扫描：清相关负缓存/mtime 缓存 → 重拉快照（bypass refresh，见 manualScan）；
+                 managed 栏配置实时生效、无扫描语义（v-if 排除 + scopeNoteHead 说明补句）。
+                 loading 态复用既有降态条/骨架形态（rail 占位/列表 loading && !snapshot）。 -->
+            <button
+              v-if="activeScope.kind !== 'managed'"
+              class="mcp-btn"
+              type="button"
+              data-testid="mcp-scan-button"
+              :disabled="loading"
+              :title="activeScope.kind === 'user' ? '清除缓存并重扫 ~/.claude.json' : '清除该目录负缓存并重扫 .mcp.json'"
+              @click="manualScan()"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              {{ loading ? '扫描中…' : '扫描' }}
+            </button>
             <!-- 导出 JSON：与「导入 JSON」互逆（作用域全部定义 → mcpServers 形态文本进剪贴板；
                  空作用域禁用；明文不出主进程，见 exportScopeJson）。 -->
             <button

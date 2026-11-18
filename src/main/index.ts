@@ -13,8 +13,11 @@ import { detectCli } from './modules/cli-detector';
 import { ensureProviderMigration, migrateLegacyContextWindowOverridesToProfiles, getConfig, onConfigSaved } from './modules/config-manager';
 import { killAllProcesses, runGlobalCommandProbe, cancelGlobalCommandProbe, cancelAllCommandProbes, cancelAllPostTurnProbes, effectiveUserHome } from './modules/sdk-backend';
 import { startCommandSourceWatcher, stopCommandSourceWatcher } from './modules/command-source-watcher';
-import { listRecentWorkspaces } from './modules/workspace-history';
-import { listRecentWorkingDirs } from './database/repositories/session-repo';
+// E2（2026-11-15 eight-issues）：MCP 配置外部变更 watcher + 快照预热 + 失效信号广播。
+import { startMcpSourceWatcher, stopMcpSourceWatcher } from './modules/mcp/mcp-source-watcher';
+import { broadcastMcpSnapshotInvalidated, warmMcpSnapshot } from './modules/mcp/mcp-snapshot-service';
+// E4（2026-11-15 eight-issues）：MCP/Skill 项目目录集单一真相源（最近工作区 ∪ 会话 distinct 工作目录，封顶 dirCap）。
+import { listRecentAndSessionProjectDirs } from './modules/project-dir-set';
 import { normalizeDirKey } from '../shared/project-skills';
 import * as taskRepo from './database/repositories/task-repo';
 import { logger } from './utils/logger';
@@ -281,12 +284,12 @@ function startGlobalCommandPipeline(): void {
     },
     // UI13-P8：项目 skill 目录清单（与 SKILL_PROJECT_DIRS_GET 同源口径：最近工作区 ∪ 会话
     // distinct 工作目录去重封顶 20 ∪ 默认目录）——watcher 据此对每目录 .claude/skills 建监听。
+    // E4（2026-11-15 eight-issues）：装配收口单一真相源 listRecentAndSessionProjectDirs(20)，
+    // 默认目录保留 concat 尾巴并入（判重按 normalizeDirKey 全集比对，§E4-2 形态）。
     getProjectSkillDirs: () => {
-      const recent = listRecentWorkspaces();
-      const seen = new Set(recent.map(normalizeDirKey));
-      const dirs = [...recent, ...listRecentWorkingDirs(20).filter((d) => !seen.has(normalizeDirKey(d)))].slice(0, 20);
+      const dirs = listRecentAndSessionProjectDirs(20);
       const def = getConfig().workingDirectory;
-      return dirs.concat(def && !seen.has(normalizeDirKey(def)) ? [def] : []);
+      return def && !dirs.some((d) => normalizeDirKey(d) === normalizeDirKey(def)) ? dirs.concat(def) : dirs;
     },
     // UI13-P8（R7 裁决）：项目清单变更广播不受 skillAutoSync 门控（项目清单 fs 重拉 ≠ 引擎
     // 重探）——渲染层 Skill tab 活跃时收到即重拉；重探门控在上方 triggerGlobalProbe 既有早退。
@@ -294,6 +297,27 @@ function startGlobalCommandPipeline(): void {
       if (mainWindow) pushToMainWindow(IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED, {});
     },
     onConfigSaved,
+    logger,
+  });
+}
+
+// E2（2026-11-15 eight-issues）：MCP 配置外部变更 watcher 的统一启动点（startGlobalCommandPipeline
+// 同款「whenReady 首启 + mac activate 复用」形态——window-all-closed 停 watcher 后 darwin 重开
+// 路径必须在此恢复，否则外部变更感知在本进程剩余生命周期内永久失效）。
+function startMcpSourceWatcherPipeline(): void {
+  startMcpSourceWatcher({
+    // effectiveUserHome 取现值注入（advancedJson.env 覆盖 USERPROFILE/HOME 时用户级根随 refresh
+    // 重解析生效；禁裸 homedir()）。
+    getUserHome: effectiveUserHome,
+    // E4 统一目录集 ∪ 默认目录（去重 concat 尾巴；getProjectSkillDirs 同款形态 §E4-2）——watcher
+    // 据此对用户级 ~/.claude.json + 每目录 .mcp.json 建监听（mcp-source-watcher 内部再按小写键去重）。
+    getProjectDirs: () => {
+      const dirs = listRecentAndSessionProjectDirs(20);
+      const def = getConfig().workingDirectory;
+      return def && !dirs.some((d) => normalizeDirKey(d) === normalizeDirKey(def)) ? dirs.concat(def) : dirs;
+    },
+    // 指纹实变 → mcp:snapshotChanged 空载荷广播（E2 失效信号；E3 WORKSPACE_ADD_RECENT 锚点复用）。
+    onMcpSnapshotInvalidated: broadcastMcpSnapshotInvalidated,
     logger,
   });
 }
@@ -366,6 +390,12 @@ app.whenReady().then(async () => {
   onConfigSaved(syncTrayWithConfig);
 
   startGlobalCommandPipeline();
+  startMcpSourceWatcherPipeline();
+  // E2（2026-11-15 eight-issues）契约 #1：启动预热（默认工作目录+最近工作区集后台快照，静默失败）
+  // —— fire-and-forget 不 await，不阻塞启动窗口（whenReady 链内同类 fire-and-forget 先例）。
+  // 备忘(b)（round-005，01 §E2-5 括注「try/catch 静默 logger.debug」）：warmMcpSnapshot 失败吞错
+  // 返 null（服务侧无 logger 参数），本侧以 debug 旁路留痕——启动链不打扰、渲染层现查兜底不变。
+  void warmMcpSnapshot().then((snap) => { if (snap === null) logger.debug('[mcp] 快照预热失败（渲染层现查兜底）'); });
 
   // hb10-PERM-05：订阅 pending 弹窗数量变化（requestInteraction/cleanup 触发）。
   setInteractionCountChangedHook(() => updateTrayPendingHint());
@@ -388,6 +418,8 @@ app.whenReady().then(async () => {
       // 监视（darwin 不退出进程），重开走 activate——createWindow 后必须恢复命令管线，
       // 否则 watcher 与全局兜底永久失效。IPC 注册经 registerIpcHandlers 幂等守卫安全重入。
       startGlobalCommandPipeline();
+      // E2：MCP 配置变更 watcher 同理恢复（window-all-closed 已停，darwin 重开路径必须重挂）。
+      startMcpSourceWatcherPipeline();
     }
   });
 });
@@ -396,6 +428,7 @@ app.on('window-all-closed', () => {
   killAllProcesses();
   void cancelGlobalCommandProbe(); // 取消全局兜底探测，避免孤儿 claude 子进程（killAllProcesses 不扫 probe）
   stopCommandSourceWatcher(); // D3：停命令来源监视，释放 fs.watch 句柄
+  stopMcpSourceWatcher(); // E2：停 MCP 配置变更监视，释放 fs.watch 句柄
   closeConnection();
 
   if (process.platform !== 'darwin') {
@@ -415,6 +448,7 @@ app.on('before-quit', () => {
   void cancelAllCommandProbes();
   cancelAllPostTurnProbes();
   stopCommandSourceWatcher(); // D3：停命令来源监视，释放 fs.watch 句柄
+  stopMcpSourceWatcher(); // E2：停 MCP 配置变更监视（幂等；与 command watcher 同款退出卫生）
   // OPT-9：退出前同步 best-effort 清导出临时目录（原 void 异步调用退出前可能跑不完）。
   disposeExportTempDirsSync();
   closeConnection();

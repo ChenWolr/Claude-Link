@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（117 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（119 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -247,6 +247,11 @@ export interface ClaudeLinkAPI {
   // 活跃时收到即重拉 getSkillProjectDirs；on*/remove*Listener 形态照 onWorkspacesChanged）。
   onSkillsProjectDirsChanged: (callback: () => void) => () => void;
   removeSkillsProjectDirsListener: () => void;
+  // E2（2026-11-15 eight-issues）：MCP 快照失效信号（mcp:snapshotChanged，空载荷 {}——MCP tab
+  // 活跃时收到即重拉 getMcpSnapshot；非活跃仅标 stale 进 tab 现查兜底；on*/remove*Listener
+  // 形态照 onWorkspacesChanged）。
+  onMcpSnapshotChanged: (callback: (payload: Record<string, never>) => void) => () => void;
+  removeMcpSnapshotListener: () => void;
   // 多供应商模型库（设置页=可选项库；密钥明文只在 save 时进主进程，list 只回掩码）。
   listProviders: () => Promise<ProviderLibrarySnapshot>;
   saveProvider: (input: ProviderSaveInput) => Promise<ProviderProfileView>;
@@ -348,7 +353,7 @@ export interface ClaudeLinkAPI {
   getSkillProjectDirs: () => Promise<SkillProjectDirsPayload>;
   // MCP 管理（设置页 MCP Tab）：快照现查（只读无副作用）/ 管理库全量保存（主进程 saveConfig
   // 互斥链）/ 启停 override 单键翻转（返回最新全量，渲染层以此为准）/ 探活（single 恒单元素数组）。
-  getMcpSnapshot: () => Promise<McpSnapshot>;
+  getMcpSnapshot: (opts?: { bypassCache?: boolean; dir?: string }) => Promise<McpSnapshot>;
   saveMcpManaged: (servers: McpManagedSaveEntry[]) => Promise<{ ok: true }>;
   setMcpOverride: (key: string, enabled: boolean) => Promise<{ overrides: Record<string, 'off'> }>;
   probeMcpServers: (target: McpProbeTarget) => Promise<McpProbeReport[]>;
@@ -449,6 +454,13 @@ export function createApi(): ClaudeLinkAPI {
       return () => ipcRenderer.off(IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED, listener);
     },
     removeSkillsProjectDirsListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED),
+    // E2：MCP 快照失效信号（on* 模式照抄 onWorkspacesChanged）。
+    onMcpSnapshotChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Record<string, never>) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.MCP_SNAPSHOT_CHANGED, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.MCP_SNAPSHOT_CHANGED, listener);
+    },
+    removeMcpSnapshotListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.MCP_SNAPSHOT_CHANGED),
     listProviders: () => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_LIST) as Promise<ProviderLibrarySnapshot>,
     saveProvider: (input) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_SAVE, input) as Promise<ProviderProfileView>,
     deleteProvider: (providerId) => ipcRenderer.invoke(IPC_CHANNELS.PROVIDER_DELETE, providerId),
@@ -576,7 +588,7 @@ export function createApi(): ClaudeLinkAPI {
     getSkillProjectDirs: () =>
       ipcRenderer.invoke(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET) as Promise<SkillProjectDirsPayload>,
     // MCP 管理（设置页 MCP Tab）四通道（P4）；OVERRIDE_SET body 为单对象 { key, enabled }。
-    getMcpSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.MCP_SNAPSHOT_GET) as Promise<McpSnapshot>,
+    getMcpSnapshot: (opts) => ipcRenderer.invoke(IPC_CHANNELS.MCP_SNAPSHOT_GET, opts) as Promise<McpSnapshot>,
     saveMcpManaged: (servers) => ipcRenderer.invoke(IPC_CHANNELS.MCP_MANAGED_SAVE, servers) as Promise<{ ok: true }>,
     setMcpOverride: (key, enabled) =>
       ipcRenderer.invoke(IPC_CHANNELS.MCP_OVERRIDE_SET, { key, enabled }) as Promise<{ overrides: Record<string, 'off'> }>,

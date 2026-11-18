@@ -63,6 +63,19 @@ export function badDirCacheHas(dir: string, now: number = Date.now()): boolean {
 }
 
 /**
+ * E3（2026-11-15 eight-issues）负缓存清除出口：WORKSPACE_ADD_RECENT 锚点/E1 手动扫描 bypassCache
+ * 面用——带 dir 删单键（该目录重新首扫不被「曾经超时」吞掉），无 dir 清整表（手动全量重扫）。
+ * mark/Has 语义不动（仅超时进缓存、TTL 惰性过期均维持）。
+ */
+export function badDirCacheClear(dir?: string): void {
+  if (dir !== undefined) {
+    badDirUntil.delete(normalizeDirKey(dir));
+    return;
+  }
+  badDirUntil.clear();
+}
+
+/**
  * 项目作用域单目录枚举（§3.2 口径）：直读 <dir>\.claude\skills，主体在 enumerateSkillsRoot
  * （R-1 起抽出——全局作用域 collectUserSkillDirNames 以同一主体直读 ~/.claude/skills，
  * junction/symlink/大小写去重等口径天然同源）。

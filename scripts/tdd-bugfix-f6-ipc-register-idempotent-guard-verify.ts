@@ -11,6 +11,11 @@
 // ② index.ts activate 路径 createWindow 后补 startGlobalCommandPipeline()（全局兜底探测 +
 //    startCommandSourceWatcher 重启，依赖注入与 whenReady 首启共用同一 helper）。
 //
+// [钉面同步 2026-11-17 eight-issues-batch]：index.ts 新增 startMcpSourceWatcherPipeline（E2
+// MCP 外部变更监听管线，whenReady+activate 各 1 处调用）复用同款注入形态，全文件
+// getUserHome 注入由 1 份变 2 份（命令管线 helper + MCP watcher 管线各 1）——计数断言随新
+// 形态同步；MCP 管线注入形态由 scripts/tdd-mcp-external-change-watch-verify.ts 钉（04 §4.1）。
+//
 // 运行：npx tsx scripts/tdd-bugfix-f6-ipc-register-idempotent-guard-verify.ts
 
 import { strict as assert } from 'node:assert';
@@ -79,9 +84,11 @@ console.log('=== F6-② activate 路径恢复命令管线 ===');
   const activateBody = mainIndex.slice(activateAt, mainIndex.indexOf('});', activateAt));
   check('activate 在 createWindow 后重启命令管线', /createWindow\(\);[\s\S]{0,300}startGlobalCommandPipeline\(\);/.test(activateBody));
 
-  // 依赖注入去重：whenReady 首启与 activate 共用 helper，注入对象全文件只出现一份
+  // 依赖注入去重：whenReady 首启与 activate 共用 helper（命令管线注入全文件仅 helper 内一份）；
+  // [钉面同步 2026-11-17] E2 新增 startMcpSourceWatcherPipeline 管线自带同款注入（第二份），
+  // 计数由 1 放宽为恰 2（命令管线 + MCP watcher 管线各 1，形态由 mcp-external-change-watch 钉）。
   const injectionCount = (mainIndex.match(/getUserHome: effectiveUserHome/g) || []).length;
-  check(`依赖注入对象唯一（实际 ${injectionCount} 份，应为 1）`, injectionCount === 1);
+  check(`依赖注入对象恰好 2 份（命令管线 helper + MCP watcher 管线各 1，实际 ${injectionCount} 份）`, injectionCount === 2);
 
   // 回归：window-all-closed / before-quit 的停机链不受影响
   const wacAt = mainIndex.indexOf("app.on('window-all-closed'");
