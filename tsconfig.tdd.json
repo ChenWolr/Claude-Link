@@ -1,5 +1,6 @@
 // 本回路产物（2026-11-06 文件点击打开链路修复）的类型闸门；
 // 其余 ~249 个既有 tdd-* 脚本的覆盖缺口经探针实测 338 错误/83 文件（esnext/bundler 档），另行立项，不在本配置范围。
+// 收纳留痕（备忘(a)，round-005）：2026-11-15 eight-issues 批次 16 条新契约脚本入编译面（cae9441/ec67675/e5cbe15/3be0d7d 先例延续）=include :28-43 行（tdd-late-event-generation-guard / tdd-rr-autoretry-interrupt-mutex / tdd-treekill-symmetry-probe-order / tdd-session-naming-inflight-cancel / tdd-mcp-external-change-watch / tdd-mcp-workspace-scan-hook / tdd-mcp-skill-dirset-unify / tdd-send-route / tdd-queue-restore-gate / tdd-question-dialog-sidenav / tdd-collapse-unify / tdd-dev-stale-banner / tdd-web-parity-gaps / tdd-mcp-manual-scan / tdd-skill-three-level / tdd-turn-final-footnote）。
 {
   "extends": "./tsconfig.scripts.json",
   "compilerOptions": {
@@ -24,6 +25,22 @@
     "scripts/tdd-config-core-g1-g5-verify.ts",
     "scripts/tdd-config-h1-h7-verify.ts",
     "scripts/tdd-dialogs-i1-i10-verify.ts",
+    "scripts/tdd-late-event-generation-guard-verify.ts",
+    "scripts/tdd-rr-autoretry-interrupt-mutex-verify.ts",
+    "scripts/tdd-treekill-symmetry-probe-order-verify.ts",
+    "scripts/tdd-session-naming-inflight-cancel-verify.ts",
+    "scripts/tdd-mcp-external-change-watch-verify.ts",
+    "scripts/tdd-mcp-workspace-scan-hook-verify.ts",
+    "scripts/tdd-mcp-skill-dirset-unify-verify.ts",
+    "scripts/tdd-send-route-verify.ts",
+    "scripts/tdd-queue-restore-gate-verify.ts",
+    "scripts/tdd-question-dialog-sidenav-verify.ts",
+    "scripts/tdd-collapse-unify-verify.ts",
+    "scripts/tdd-dev-stale-banner-verify.ts",
+    "scripts/tdd-web-parity-gaps-verify.ts",
+    "scripts/tdd-mcp-manual-scan-verify.ts",
+    "scripts/tdd-skill-three-level-verify.ts",
+    "scripts/tdd-turn-final-footnote-verify.ts",
     "src/renderer/env.d.ts"
   ]
 }

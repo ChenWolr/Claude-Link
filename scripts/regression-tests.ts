@@ -3616,13 +3616,18 @@ function testWorkspaceHistoryRemoveContracts(): void {
 // （deleteEntry+emitExit），post-turn 快照 await 只能在释放之后；探针调度须带空闲守卫。
 // 背景：旧顺序下 5s 快照超时卡在 result 与 deleteEntry 之间，UI 空闲后 2–3s 发消息被
 // 「当前回合仍在执行」拒绝。本钉锁死代码顺序，防回归。
+// [2026-11-15 eight-issues 批次 A2 点最小同步] endMarker 定位锚由旧两参字面
+// `scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);` 改为 B1 点（RR 中断互斥，
+// 见 scripts/tdd-rr-autoretry-interrupt-mutex-verify.ts）落定的新三参形态
+// `…(sessionId, mainWindow, () => interruptedQueries.has(query));`——原两参字面在 sdk-backend.ts
+// 已零残留，旧锚致本契约必红（e4 点实施报告已取证跨点债）；仅同步定位锚字面，切片顺序断言零改动。
 function testTurnEntrySyncReleaseContracts(): void {
   const { readFileSync } = require('node:fs') as typeof import('node:fs');
   const sdkBackend = readFileSync(new URL('../src/main/modules/sdk-backend.ts', import.meta.url), 'utf8');
   // result 分支切片：从「同步释放占坑」锚注释到本分支末尾的 scheduleReasoningReplayRetryForTurn。
   const marker = sdkBackend.indexOf('—— 同步释放占坑');
   assert.ok(marker !== -1, 'result 分支须保留「—— 同步释放占坑」锚注释（本契约的定位锚）');
-  const endMarker = sdkBackend.indexOf('scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);', marker);
+  const endMarker = sdkBackend.indexOf('scheduleReasoningReplayRetryForTurn(sessionId, mainWindow, () => interruptedQueries.has(query));', marker);
   assert.ok(endMarker !== -1, 'result 分支末尾须有 scheduleReasoningReplayRetryForTurn 调用');
   const branch = sdkBackend.slice(marker, endMarker);
   const releaseIdx = branch.indexOf('deleteEntry(sessionId, entry);');

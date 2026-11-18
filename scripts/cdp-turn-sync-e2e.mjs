@@ -1,15 +1,24 @@
 // scripts/cdp-turn-sync-e2e.mjs
 // 「回合投影 + 标题质量」双端围观 E2E（SA-5 / 计划 §6-7，C1-C6）。
 //
-// 用法（编排器/复现者手动准备环境，脚本只做断言；运行命令：node scripts/cdp-turn-sync-e2e.mjs）：
-//   1. npm run build && npx electron . --remote-debugging-port=9223   （应用运行，8790 监听）
-//   2. 启动 Chrome headless（可执行路径按本机安装位置准备；user-data-dir 自选临时目录）：
-//      "<Chrome 可执行路径>" --headless=new --remote-debugging-port=9224 ^
-//        --user-data-dir=<自选临时目录> --no-first-run --no-default-browser-check about:blank
-//   3. node scripts/cdp-turn-sync-e2e.mjs [--lan-ip <IPv4>] [--app-log <应用主进程日志路径>]
+// 用法（两种形态，2026-11-17 t1clp 点起；先例 = cdp-web-access-e2e.mjs ISO 自举层）：
+//   · 裸跑（默认，ISO 模式）：node scripts/cdp-turn-sync-e2e.mjs [--lan-ip <IPv4>] [--app-log <路径>]
+//     脚本自举隔离环境：构建新鲜度检查（src 比 out/renderer 新才 npm run build）→ 隔离 seed
+//     （真实配置只读底稿 → <ISO>/app/claude-link-config.json，仅改 webAccess.port=空闲端口/
+//     queueEnabled=true/taskDelayMinutes=60（3600s 倒计时窗，T1C 断言期内任务不弹出不扰断言）/
+//     workingDirectory=<ISO 夹具>/permissionMode=bypassPermissions）→ 拉起 electron
+//     （--user-data-dir=<ISO>/app，--remote-debugging-port=9223 供桌面 page attach）→ 拉起
+//     headless Chrome（9224，--user-data-dir=<ISO>/chrome）→ 跑套件 → 按 PID taskkill /T /F
+//     收口 + rmSync <ISO> 整目录（用后删除，AGENTS.md 隔离纪律）。真实配置全程只读。
+//   · 外部备环境（--config <路径>）：保持旧版行为（脚本只做断言，环境自备）：
+//     1. npm run build && npx electron . --remote-debugging-port=9223   （应用运行，8790 监听）
+//     2. Chrome headless：--headless=new --remote-debugging-port=9224 --user-data-dir=<临时目录>
+//     3. node scripts/cdp-turn-sync-e2e.mjs --config <配置路径> [--lan-ip <IPv4>] [--app-log <路径>]
 //
-// 双 target：对 Chrome 9224 开两个 page（A=发起端，B=围观端），各自独立 CDP WebSocket 会话，
-// 两 page 同 URL（http://<LAN-IP>:8790/#token=<token>，一切日志中 token 掩码前 4 后 4）。
+// 双端联动（t1clp 点新增）：桌面 page = attach Electron 9223 主窗口 page target（※首跑校准：
+// /json 首个非 devtools page；attach 不可得时降级「网页发起端+网页围观端」双 page 口径并在
+// 结果 note 与实施报告申报）。双 target（Chrome 9224）：A=发起端，B=围观端，各自独立 CDP
+// WebSocket 会话，两 page 同 URL（http://<LAN-IP>:<port>/#token=<token>，一切日志中 token 掩码前 4 后 4）。
 // 帧证据通道：脚本自持第三条 WS（带 token 鉴权，照 scripts/web-access-e2e-probe.ts 的客户端
 // 形态），订阅 chat:event 广播，按 JSONL 逐行追加 docs/reports/web-e2e-screenshots/run-C1-C6.log
 // （帧时间戳 + sessionId + event.type 摘要 + 关键字段；内容截断 200 字符；token 掩码）——
@@ -17,10 +26,12 @@
 // 同目录 run-C1-C6-console.log（截图 C1-*.png…C6-*.png 亦同目录）。
 //
 // 退出协议：
-//   - exit 0：C1-C6 全 PASS（含 C4 计划允许的 degraded 降级 PASS；SKIP 须带原因单独列出）。
+//   - exit 0：C1-C6 + T1C-1/2/3 全 PASS（含 C4 计划允许的 degraded 降级 PASS；SKIP 须带原因
+//             单独列出；T1C 降级口径（attach 不可得→双 web page）在 note 标注 [降级]）。
 //   - exit 1：任一用例 FAIL / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或
 //             console error，X-render 终审记账）。
-//   - exit 2：前置条件不满足（Chrome 9224 / 应用 8790 / 配置 token / 帧证据 WS 不可用）。
+//   - exit 2：前置条件不满足（ISO 自举失败 / Chrome 9224 / 应用端口 / 配置 token / 帧证据 WS
+//             不可用）。
 //
 // 技术纪律（对齐 scripts/cdp-web-access-e2e.mjs B1-B8 链）：纯 CDP 原生
 // （Input/Runtime/Page），不依赖 computer-use 等 skill；precondition 前置不满足 exit 2；
@@ -40,10 +51,16 @@
 // |   .turn-timer__time（计时文本）          |（运行态无 --done 修饰；完成态带 --done）      |
 // | .ctl__btn--abort                         | components/chat/SessionToolbar.vue L313       |
 // |                                          |（发送态中断按钮；长按 1s 触发，※校准 2）      |
-// | .session-link / .session-link__name /    | components/layout/AppSidebar.vue L255/L280    |
-// |   .session-link.active /                 |                                               |
-// |   .session-link--running（黄灯运行态）   |                                               |
-// | .session-link__status（状态点 role=img） | components/layout/AppSidebar.vue L274         |
+// | .session-card / .session-card__name /    | components/layout/AppSidebar.vue :303/:334    |
+// |   .session-card.active /                 |                                               |
+// |   .session-card--running（黄灯运行态）   |                                               |
+// | .session-card__status（状态点 role=img） | components/layout/AppSidebar.vue :324         |
+// |                                          |                                               |
+// | 【t1clp 既有用例同步留痕，2026-11-17】上表 .session-link* 三行原为 .session-link 系选择器，
+// | 与现行 AppSidebar.vue（R1 分组改版后 .session-card 系）漂移，run1 实测 C1/C4/C6 全数假红
+// | （B 侧栏运行态标识缺失 / 两端标题 A=null B=null）。按最小同步原则改钉本脚本内四处表达式与
+// | switchPageToSession 定位链（断言意图不变，仅锚点跟随现行实现），非静默适配——本头注与实施
+// | 报告双留痕。 |
 // | .message-list / .bubble--user /          | components/chat/MessageList.vue L226 /        |
 // |   .bubble--assistant                     | components/chat/MessageBubble.vue L66         |
 // | pinia session store（app.__vue_app__…）  | stores/session-store.ts（B3 链同款兜底入口）  |
@@ -71,12 +88,29 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 
 const CHROME_CDP_PORT = 9224;
-const CONFIG_PATH = path.join(process.env.APPDATA ?? '', 'claude-link', 'claude-link-config.json');
+const ISO_APP_CDP_PORT = 9223; // ISO 自举 electron 调试端口：T1C 桌面 page attach 源（头注对照）
+const DEFAULT_CONFIG_PATH = path.join(process.env.APPDATA ?? '', 'claude-link', 'claude-link-config.json');
+// t1clp：CONFIG_PATH/rawConfig/PORT/TOKEN 四元组可变——ISO 模式 seed 落盘后同轮整体重派生
+//（对齐 B 链「必须同源同轮更新，防半新半旧」纪律）；外部备环境（--config）只覆写 CONFIG_PATH。
+let CONFIG_PATH = DEFAULT_CONFIG_PATH;
+let rawConfig = null;
+try { rawConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { rawConfig = null; }
+if (process.argv.includes('--config')) {
+  const i = process.argv.indexOf('--config');
+  const p = i >= 0 ? process.argv[i + 1] : null;
+  if (p && fs.existsSync(p)) { CONFIG_PATH = p; try { rawConfig = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { rawConfig = null; } }
+}
+let PORT = rawConfig?.webAccess?.port ?? 8790;
+let TOKEN = typeof rawConfig?.webAccessToken === 'string' ? rawConfig.webAccessToken : '';
 const SHOT_DIR = path.resolve('docs/reports/web-e2e-screenshots');
 const FRAME_LOG_PATH = path.join(SHOT_DIR, 'run-C1-C6.log');
 const CONSOLE_LOG_PATH = path.join(SHOT_DIR, 'run-C1-C6-console.log');
+// t1clp：ISO 模式（裸跑默认）= 脚本自举隔离环境；--config 外部备环境模式保持旧版行为。
+const ISO_MODE = !process.argv.includes('--config');
 
 // ── 消息常量（计划 §6-7 逐字）──
 const MSG_42 = '请只回复数字 42,不要使用任何工具'; // C1 普通回合
@@ -87,7 +121,9 @@ const MSG_SHORT = '你好'; // C6 短输入（≤8 字，短路径直写标题�
 // ── 超时常量（waitFor 默认 250ms 轮询；C4/C6 标题轮询 ≤60s；C2/C4 回合终态等待 300s（R-1：
 //    回合耗时受上游 LLM 延迟支配，见 TURN_WAIT_TIMEOUT_S 注）；其余用例 20-30s 上限）──
 const WAIT_INTERVAL_MS = 250;
-const TOTAL_TIMEOUT_MS = 900_000; // 全链兜底（C1~C6 含两次 LLM 回合 + 60s×2 标题轮询）
+// t1clp：900s→1500s——T1C-1/2/3 新增（1 次物化回合 + 3 组入队断言 + 收尾清队），与 C1~C6
+// （两次 LLM 长回合 + 60s×2 标题轮询）合计预算放宽；仅耗时预算放宽，断言不变（申报留痕）。
+const TOTAL_TIMEOUT_MS = 1_500_000; // 全链兜底（C1~C6 + T1C 含多次 LLM 回合 + 60s×2 标题轮询）
 const WS_CONNECT_TIMEOUT_MS = 10_000;
 const CDP_CALL_TIMEOUT_MS = 30_000;
 const TIMER_SAMPLE_GAP_MS = 1_300; // 计时两次采样间隔 ≥1.2s（取 1.3s）
@@ -95,6 +131,9 @@ const TITLE_POLL_TIMEOUT_MS = 60_000; // C4/C6 标题轮询上限
 // R-1（round-003）：回合自然终态耗时受上游 LLM 延迟支配（实测慢回合 durationMs=141262ms≈141s），
 // C4 终态帧等待预算 120→300s（覆盖实测慢上游 ×2 余量）；仅耗时预算放宽，功能断言不变。
 const TURN_WAIT_TIMEOUT_S = 300; // C4 回合终态帧等待上限（回合耗时受上游 LLM 延迟支配，见上）
+// t1clp：ISO 自举独立看门狗（构建+拉起上限 15 分钟，对齐 B 链）；套件总看门狗改为延迟武装
+//（ISO 在自举成功后武装、外部备环境模式模块加载即武装——自举时间不挤占套件预算）。
+const BOOTSTRAP_TIMEOUT_MS = 900_000;
 
 // ── 参数与本机网卡事实程序派生（F10 脱敏：不硬编码任何本机 IP/绝对路径）──
 const argOf = (k, d) => {
@@ -118,10 +157,6 @@ const APP_LOG_PATH = argOf('--app-log', null); // 可选：应用主进程日志
 const WS_TARGET = path.resolve(process.cwd()); // 新会话工作空间（npm run/在仓库根执行时即仓库根）
 
 // ── 配置与掩码 ──
-let rawConfig;
-try { rawConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { rawConfig = null; }
-const PORT = rawConfig?.webAccess?.port ?? 8790;
-const TOKEN = typeof rawConfig?.webAccessToken === 'string' ? rawConfig.webAccessToken : '';
 const maskTok = () => (TOKEN ? `${TOKEN.slice(0, 4)}****${TOKEN.slice(-4)}` : '(无)');
 const sanitize = (text) => (TOKEN ? String(text).split(TOKEN).join(maskTok()) : String(text));
 
@@ -155,14 +190,19 @@ class PreconditionError extends Error {}
 function precondition(cond, msg) { if (!cond) throw new PreconditionError(msg); }
 
 // V-总超时兜底（对齐 B 链/probe 的 TOTAL_TIMEOUT_MS 做法）：超时打印汇总后 exit 1，绝不无声挂死。
-const totalTimer = setTimeout(() => {
-  log(`[总超时] ${TOTAL_TIMEOUT_MS}ms 到，脚本自杀退出（防挂死）`);
-  log('==== 超时时刻已完成的用例汇总 ====');
-  for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
-  flushLog();
-  process.exit(1);
-}, TOTAL_TIMEOUT_MS);
-totalTimer.unref();
+// t1clp：武装时机延迟化（ISO 自举可能含一次分钟级构建，不挤占套件预算——B 链同款）。
+function armSuiteWatchdog() {
+  const totalTimer = setTimeout(() => {
+    log(`[总超时] ${TOTAL_TIMEOUT_MS}ms 到，脚本自杀退出（防挂死）`);
+    log('==== 超时时刻已完成的用例汇总 ====');
+    for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
+    flushLog();
+    try { isoTeardown(); } catch { /* 尽力而为 */ }
+    process.exit(1);
+  }, TOTAL_TIMEOUT_MS);
+  totalTimer.unref();
+}
+if (!ISO_MODE) armSuiteWatchdog();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -278,9 +318,12 @@ async function navigate(page, url) {
   await page.send('Page.navigate', { url });
 }
 
-// ══ 帧证据通道（第三条 WS：token 鉴权 + chat:event 广播 → JSONL 落盘）══
+// ══ 帧证据通道（第三条 WS：token 鉴权 + chat:event/queue:event 广播 → JSONL 落盘）══
 let frameSeq = 0;
 const chatFrames = []; // {seq, ts, sessionId, event}
+// t1clp：queue:event 帧证据（tasks_changed 双向断言面）——服务端向全部已认证连接广播全部通道
+//（web-access-e2e-probe.ts 协议事实：事件无 subscribe 帧），同一条帧 WS 原样携带 queue:event。
+const queueFrames = []; // {seq, ts, sessionId, type, taskId, dataTasks}
 let frameChannelClosed = null; // 非空=通道已断开（原因）
 function appendFrameLine(line) {
   try { fs.mkdirSync(SHOT_DIR, { recursive: true }); fs.appendFileSync(FRAME_LOG_PATH, sanitize(line) + '\n'); } catch { /* 尽力而为 */ }
@@ -307,6 +350,28 @@ function recordChatFrame(args) {
   chatFrames.push({ seq: entry.seq, ts: entry.ts, sessionId: entry.sessionId, event: ev && typeof ev === 'object' ? ev : null });
   appendFrameLine(JSON.stringify(entry));
 }
+/** queue:event 帧记账（t1clp）：tasks_changed 等队列广播——载荷 {sessionId,type,taskId?,data?}。 */
+function recordQueueFrame(args) {
+  const env = args && args[0];
+  const entry = {
+    ts: new Date().toISOString(),
+    seq: ++frameSeq,
+    channel: 'queue:event',
+    sessionId: env && typeof env.sessionId === 'string' ? env.sessionId : null,
+    type: env && typeof env.type === 'string' ? env.type : null,
+  };
+  const tasks = env?.data?.tasks;
+  if (Array.isArray(tasks)) {
+    entry.tasks = tasks.map((t) => ({
+      id: typeof t?.id === 'string' ? t.id : null,
+      prompt: typeof t?.prompt === 'string' ? t.prompt.slice(0, 60) : null,
+      paused: t?.paused === true,
+    }));
+  }
+  if (typeof env?.taskId === 'string') entry.taskId = env.taskId;
+  queueFrames.push(entry);
+  appendFrameLine(sanitize(JSON.stringify(entry)));
+}
 function connectFrameChannel(url) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
@@ -318,6 +383,7 @@ function connectFrameChannel(url) {
       let f; try { f = JSON.parse(event.data); } catch { return; }
       if (f.kind === 'welcome') { clearTimeout(timer); resolve(ws); return; }
       if (f.kind === 'event' && f.channel === 'chat:event') recordChatFrame(f.args);
+      else if (f.kind === 'event' && f.channel === 'queue:event') recordQueueFrame(f.args);
       else if (f.kind === 'bye') { frameChannelClosed = `bye(${f.reason})`; log(`  [帧通道] 服务端 bye：${f.reason}`); }
     });
     ws.addEventListener('close', () => {
@@ -348,6 +414,16 @@ function turnRunningSince(sid, minSeq = 0) {
   return running;
 }
 
+// ── queue:event 帧助手（t1clp：T1C-1/2/3 tasks_changed 双向断言面）──
+/** 等待一条满足谓词的 queue:event 帧（该会话、minSeq 之后）。 */
+async function waitQueueFrame(label, sid, pred, timeoutS = 20, minSeq = 0) {
+  if (frameChannelClosed) throw new Error(`帧证据通道已断开（${frameChannelClosed}），无法等待队列帧：${label}`);
+  return waitFor(label, () => {
+    if (frameChannelClosed) throw new Error(`帧证据通道已断开（${frameChannelClosed}）`);
+    return queueFrames.find((f) => f.seq > minSeq && f.sessionId === sid && pred(f)) || null;
+  }, timeoutS, 100);
+}
+
 // ══ 页面侧表达式（选择器见头部对照表）══
 const connectedExpr = `(() => {
   const app = document.querySelector('#app');
@@ -367,13 +443,13 @@ const piniaStateExpr = `(() => { ${PINIA_PRELUDE}
 // 运行态计时文本（TurnTimer 运行态无 --done 修饰；完成态 .turn-timer--done 不取）
 const readTimerExpr = `(() => { const el = document.querySelector('.turn-timer:not(.turn-timer--done) .turn-timer__time'); return el ? (el.textContent || '').trim() : null; })()`;
 const runningTimerExpr = `!!document.querySelector('.turn-timer:not(.turn-timer--done)')`;
-const sidebarActiveExpr = `(() => { const el = document.querySelector('.session-link.active'); if (!el) return null; return {
-  running: el.classList.contains('session-link--running'),
-  statusDot: !!el.querySelector('.session-link__status'),
-  name: (el.querySelector('.session-link__name')?.textContent || '').trim(),
+const sidebarActiveExpr = `(() => { const el = document.querySelector('.session-card.active'); if (!el) return null; return {
+  running: el.classList.contains('session-card--running'),
+  statusDot: !!el.querySelector('.session-card__status'),
+  name: (el.querySelector('.session-card__name')?.textContent || '').trim(),
 }; })()`;
-const activeTitleExpr = `(() => { const el = document.querySelector('.session-link.active .session-link__name'); return el ? (el.textContent || '').trim() : null; })()`;
-const activeStatusClassExpr = `(() => { const el = document.querySelector('.session-link.active'); if (!el) return '(无 active)'; const m = [...el.classList].find((c) => c.startsWith('session-link--')); return m ?? 'idle'; })()`;
+const activeTitleExpr = `(() => { const el = document.querySelector('.session-card.active .session-card__name'); return el ? (el.textContent || '').trim() : null; })()`;
+const activeStatusClassExpr = `(() => { const el = document.querySelector('.session-card.active'); if (!el) return '(无 active)'; const m = [...el.classList].find((c) => c.startsWith('session-card--')); return m ?? 'idle'; })()`;
 const abortVisibleExpr = `(() => { const b = document.querySelector('.ctl__btn--abort'); if (!b) return false; return b.getClientRects().length > 0; })()`;
 
 /** 计时文本 → 可比秒数（formatDurationMs 三态：「x.ys」/「m:ss」/「h:mm:ss」）。 */
@@ -446,7 +522,7 @@ async function switchPageToSession(page, sid, label) {
     const s = piniaSt();
     const target = s && s.sessions ? s.sessions.find((x) => x.id === ${JSON.stringify(sid)}) : null;
     if (!target) return false;
-    const el = [...document.querySelectorAll('.session-link')].find((l) => (l.querySelector('.session-link__name')?.textContent || '').trim() === target.name);
+    const el = [...document.querySelectorAll('.session-card')].find((l) => (l.querySelector('.session-card__name')?.textContent || '').trim() === target.name);
     if (!el) return false;
     el.click();
     return true;
@@ -486,8 +562,307 @@ function countTopicLines() {
   return text.split(/\r?\n/).filter((l) => l.includes('Topic analysis')).length;
 }
 
+// ══ T1C 双端联动助手（t1clp：CdpPage 版队列/通知/入队操作；形态对齐 B 链 W-queue 助手）══
+/** 队列权威快照（page 桥直取；桌面 page 与 web page 同 API 面）。 */
+async function queueOverviewOf(page, sid) {
+  const raw = await page.eval(`window.claudeLink.getQueueOverview(${JSON.stringify(sid)}).then((r) => JSON.stringify(r))`);
+  return JSON.parse(String(raw));
+}
+/** 轮询主进程权威快照至谓词成立（B 链 pollOverview 同款）。 */
+async function pollOverviewOf(page, sid, label, pred, timeoutS = 30, intervalMs = 400) {
+  const deadline = Date.now() + timeoutS * 1000;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await queueOverviewOf(page, sid);
+    try { if (pred(last)) return last; } catch { /* 谓词异常按未满足继续 */ }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`等待超时（${timeoutS}s）：${label}；末次快照 status=${last?.state?.status} tasks=${(last?.tasks ?? []).length}`);
+}
+/** ChatPage 即时 notice 横条（入队「已加入队列」反馈；4s 自动消失，须发送后立即轮询）。 */
+async function noticeOf(page) {
+  const raw = await page.eval(`(() => { const el = document.querySelector('.notice'); return JSON.stringify({ present: !!el, text: el ? (el.textContent || '').trim() : '' }); })()`);
+  return JSON.parse(String(raw));
+}
+/** 输入框门态（A2-7 边界行 3「无锁死/无未定义态」断言面：textarea disabled 权威反射）。 */
+async function inputGateOf(page) {
+  const raw = await page.eval(`(() => { const ta = document.querySelector('[data-testid="chat-input-textarea"]'); return JSON.stringify({ hasInput: !!ta, disabled: ta ? ta.disabled : null }); })()`);
+  return JSON.parse(String(raw));
+}
+/** 右侧活动面板展开 + 切 queue Tab（B 链 openQueuePanelTab 同款；任务卡 .task-item 仅在 queue tab 渲染）。 */
+async function openQueueTabOn(page, label) {
+  await page.eval(`document.querySelector('.reopen-task-panel')?.click(), true`);
+  await waitFor(`${label}：右侧活动面板展开（.rail 在位）`, () => page.evalOk(`!!document.querySelector('.rail')`), 10);
+  const needClick = await page.eval(`(() => { ${PINIA_PRELUDE}
+    const st = piniaSt(); return st ? st.rightTab !== 'queue' : false; })()`);
+  if (needClick === true) {
+    const ok = await page.eval(`(() => { const btn = document.querySelector('button[aria-label="排队任务"]'); if (!btn) return false; btn.click(); return true; })()`);
+    if (ok !== true) throw new Error(`${label}：未找到图标轨「排队任务」按钮（button[aria-label="排队任务"]）`);
+  }
+  await waitFor(`${label}：.queue-bar 排队状态条渲染`, () => page.evalOk(`!!document.querySelector('.queue-bar')`), 10);
+}
+/** 任务卡可见性探针（prompt 文本匹配）。 */
+async function taskCardVisible(page, prompt) {
+  return page.evalOk(`[...document.querySelectorAll('.task-item .task-item__prompt')].some((n) => (n.textContent || '').includes(${JSON.stringify(prompt)}))`);
+}
+/** 填字 + 点击发送（B3 链形态；T1C 发送动作统一入口）。 */
+async function sendOn(page, text) {
+  await page.eval(`(() => {
+    const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+    if (!ta) return false;
+    ta.value = ${JSON.stringify(text)};
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  await page.eval(`document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
+}
+/** 仅预填输入框不点发送（T1C-3 双端近同时发送：先两端填字、再背靠背点击）。 */
+async function prefillInput(page, text) {
+  const ok = await page.eval(`(() => {
+    const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+    if (!ta || ta.disabled) return false;
+    ta.value = ${JSON.stringify(text)};
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  if (ok !== true) throw new Error(`预填输入失败（输入框缺失或禁用）`);
+}
+/** 确保队列忙窗（countdown/running）：不在窗内时以「暂停→恢复」真实用户动作链重 arm（B 链校准同款）。 */
+async function ensureQueueBusyWindow(page, sid, task0Id, label) {
+  try {
+    return await pollOverviewOf(page, sid, `${label}：队列忙窗在位`, (o) => o.state?.status === 'countdown' || o.state?.status === 'running', 3, 300);
+  } catch {
+    log(`  [${label}] 忙窗不在（倒计时已收口），以 TASK_SET_PAUSED true→false 重 arm`);
+    await page.eval(`window.claudeLink.setTaskPaused(${JSON.stringify(task0Id)}, true).then(() => true)`);
+    await page.eval(`window.claudeLink.setTaskPaused(${JSON.stringify(task0Id)}, false).then(() => true)`);
+    return pollOverviewOf(page, sid, `${label}：重 arm 后进入 countdown`, (o) => o.state?.status === 'countdown' || o.state?.status === 'running', 15);
+  }
+}
+
+// ══ ISO 自举（裸跑默认；--config 外部备环境模式不走此路径；t1clp 点新增，先例 = B 链同款层）══
+// 背景：闸门命令为裸 `node scripts/cdp-turn-sync-e2e.mjs`，旧版在此形态下只会校验前置条件
+// （实例未起 → exit 2），环境靠人工预先准备——闸门环境无人备环境，必红（基线实测 exit 2/FATAL）。
+// 修复：裸跑时脚本自举隔离环境（构建新鲜度→隔离 seed→electron 9223（兼作桌面 attach 源）+
+// Chrome 9224→跑套件→按 PID 收口删目录）。隔离纪律：真实配置只读不改，一切写入落 ISO 目录。
+// CACHE_ROOT：env 覆盖惯例对齐 cdp-update-e2e.mjs；默认优先 D:\software\Cache（全局指令：临时
+// 文件一律放该目录），目录不存在回落 os.tmpdir()。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT
+  ?? (fs.existsSync('D:/software/Cache') ? 'D:/software/Cache/claude-link-cache' : path.join(os.tmpdir(), 'claude-link-cache'));
+const ISO_DIR = path.join(CACHE_ROOT, 'claude-link-turnsync-e2e-iso');
+const ISO_APP_DIR = path.join(ISO_DIR, 'app'); // electron --user-data-dir：配置随 userData 隔离（单实例锁按 userData）
+const ISO_CHROME_DIR = path.join(ISO_DIR, 'chrome');
+const ISO_FIXTURE_DIR = path.join(ISO_DIR, 'fixture'); // seed workingDirectory：与用户真实默认工作目录隔离
+const ISO_CONFIG_PATH = path.join(ISO_APP_DIR, 'claude-link-config.json');
+
+let isoElectronProc = null;
+let isoChromeProc = null;
+let isoCleaned = false;
+function isoTeardown() {
+  if (isoCleaned) return;
+  isoCleaned = true;
+  // 按 PID 精确收口（禁按映像名，防误伤用户日常实例——cdp-update-e2e.mjs 同款纪律）。
+  for (const [name, proc] of [['electron', isoElectronProc], ['chrome', isoChromeProc]]) {
+    if (proc?.pid) {
+      try { spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { encoding: 'utf8', windowsHide: true, timeout: 20_000 }); log(`  [iso-teardown] ${name} PID ${proc.pid} 已 taskkill /T /F`); } catch { /* 尽力而为 */ }
+    }
+  }
+  try { fs.rmSync(ISO_DIR, { recursive: true, force: true }); log(`  [iso-teardown] 隔离目录已删除：${ISO_DIR}`); } catch (e) { log(`  [iso-teardown] 隔离目录删除失败（申报留人工清理）：${String(e.message).slice(0, 120)}`); }
+  try { flushLog(); } catch { /* 尽力而为 */ }
+}
+if (ISO_MODE) {
+  process.on('exit', isoTeardown);
+  process.on('SIGINT', () => { isoTeardown(); process.exit(130); });
+  process.on('SIGTERM', () => { isoTeardown(); process.exit(143); });
+}
+
+function findListenerPids(port) {
+  let out;
+  try {
+    out = execFileSync('netstat.exe', ['-ano'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
+  } catch {
+    return null; // netstat 执行失败 → 调用方按校验不通过处理
+  }
+  const pids = [];
+  for (const lineRaw of out.split(/\r?\n/)) {
+    const line = lineRaw.trim();
+    if (!line.toUpperCase().startsWith('TCP')) continue;
+    const parts = line.split(/\s+/);
+    if (parts.length < 5 || parts[3].toUpperCase() !== 'LISTENING') continue;
+    const m = parts[1].match(/:(\d+)$/);
+    if (!m || Number(m[1]) !== port) continue;
+    const pid = Number(parts[4]);
+    if (Number.isInteger(pid) && pid > 0 && !pids.includes(pid)) pids.push(pid);
+  }
+  return pids;
+}
+
+function pickFreePort(start) {
+  for (let p = start; p < start + 20; p++) {
+    const pids = findListenerPids(p);
+    if (pids === null) throw new PreconditionError('netstat 校验手段不可用——ISO 自举端口选择无法进行');
+    if (pids.length === 0) return p;
+  }
+  return null;
+}
+
+function ensureBuildFresh() {
+  let buildMs = 0;
+  try { buildMs = fs.statSync(path.join(process.cwd(), 'out', 'renderer')).mtimeMs; } catch { buildMs = 0; }
+  let newestSrc = 0;
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else { try { const m = fs.statSync(p).mtimeMs; if (m > newestSrc) newestSrc = m; } catch { /* 尽力而为 */ } }
+    }
+  };
+  try { walk(path.resolve('src')); } catch { /* src 不可读：交由构建失败路径报错 */ }
+  if (buildMs === 0 || newestSrc > buildMs) {
+    log(`  [iso-build] out/renderer ${buildMs ? new Date(buildMs).toISOString() : '不存在'} 落后于 src 最新 ${new Date(newestSrc).toISOString()} → npm run build`);
+    // shell:true 单命令串形态：Node ≥18.20 对 .cmd 直接 spawnSync 抛 EINVAL（CVE-2024-27980）。
+    const r = spawnSync('npm run build', { shell: true, stdio: 'inherit', windowsHide: true, timeout: 600_000 });
+    if (r.error || r.status !== 0) throw new PreconditionError(`npm run build 失败（status=${r.status ?? 'N/A'}${r.error ? ` error=${r.error}` : ''}）——ISO 自举中止`);
+  } else {
+    log(`  [iso-build] 产物新鲜（out/renderer ${new Date(buildMs).toISOString()} ≥ src 最新 ${new Date(newestSrc).toISOString()}），跳过重建`);
+  }
+}
+
+function seedIsoConfig(port) {
+  const base = rawConfig;
+  if (!base || typeof base.webAccessToken !== 'string' || base.webAccessToken.length === 0) {
+    throw new PreconditionError(`ISO 自举需真实配置 ${DEFAULT_CONFIG_PATH} 含非空 webAccessToken 作底稿（只读不改）——或改用 --config 外部备环境模式`);
+  }
+  fs.mkdirSync(ISO_APP_DIR, { recursive: true });
+  fs.mkdirSync(ISO_FIXTURE_DIR, { recursive: true });
+  // seed = 真实配置浅拷贝 + 五项覆盖：port=空闲端口防撞；queueEnabled=true（T1C 前提，默认 false
+  // 显式开启）；taskDelayMinutes=60（resolveQueueDelaySeconds 夹取 [1,60] 分钟 → 3600s 倒计时窗，
+  // T1C 断言期内无任务弹出、计数稳定）；workingDirectory=ISO 夹具；permissionMode=bypassPermissions
+  //（回合类场景前置，经隔离配置注入 = AGENTS.md 认可的等效注入形态）。
+  const seed = { ...base };
+  seed.webAccess = { ...(base.webAccess ?? {}), enabled: true, port };
+  seed.queueEnabled = true;
+  seed.taskDelayMinutes = 60;
+  seed.workingDirectory = ISO_FIXTURE_DIR;
+  seed.permissionMode = 'bypassPermissions';
+  fs.writeFileSync(ISO_CONFIG_PATH, JSON.stringify(seed, null, 2), 'utf8');
+  return seed;
+}
+
+function launchIsoElectron() {
+  const electronBin = createRequire(import.meta.url)('electron');
+  if (typeof electronBin !== 'string' || !fs.existsSync(electronBin)) {
+    throw new PreconditionError(`electron 二进制不可解析（require('electron')=${String(electronBin)}）——node_modules 未安装？`);
+  }
+  return spawn(electronBin, ['.', `--user-data-dir=${ISO_APP_DIR}`, `--remote-debugging-port=${ISO_APP_CDP_PORT}`],
+    { cwd: process.cwd(), stdio: 'ignore', windowsHide: true });
+}
+
+function findChromiumBinary() {
+  const candidates = [
+    process.env.CLAUDE_LINK_E2E_CHROME,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    path.join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe', // Chromium 系回落（CDP 兼容）
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  ].filter(Boolean);
+  for (const c of candidates) { try { if (fs.existsSync(c)) return c; } catch { /* 尽力而为 */ } }
+  return null;
+}
+
+function launchIsoChrome(chromeBin) {
+  return spawn(chromeBin, [
+    '--headless=new', `--remote-debugging-port=${CHROME_CDP_PORT}`, `--user-data-dir=${ISO_CHROME_DIR}`,
+    '--no-first-run', '--no-default-browser-check', '--window-size=1440,900', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+}
+
+async function waitForListener(port, timeoutMs, what, proc) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const pids = findListenerPids(port);
+    if (pids && pids.length > 0) return;
+    if (proc && proc.exitCode !== null) {
+      throw new PreconditionError(`${what}：进程已退出（code=${proc.exitCode}）但端口 ${port} 未监听——启动失败`);
+    }
+    if (Date.now() > deadline) {
+      throw new PreconditionError(`${what}：端口 ${port} 在 ${timeoutMs}ms 内未进入 LISTENING——启动超时`);
+    }
+    await sleep(500);
+  }
+}
+
+async function waitForChromeTarget(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try { const t = await listPageTargets(); if (t.length >= 1) return t; } catch { /* 未就绪，继续轮询 */ }
+    if (Date.now() > deadline) throw new PreconditionError(`Chrome CDP ${CHROME_CDP_PORT} 在 ${timeoutMs}ms 内无 page target——headless Chrome 可能启动失败`);
+    await sleep(500);
+  }
+}
+
+/** 桌面 page attach（t1clp）：Electron 调试端口 9223 /json 的首个非 devtools page target。
+ *  ※首跑校准项：main window 是 9223 上唯一常规 page（tray/隐藏窗无 page target）；attach 不可得
+ *  返回 null（T1C 降级「网页发起端+网页围观端」双 page 口径，note 标注 [降级] + 报告申报）。 */
+async function findDesktopPageTarget() {
+  try {
+    const resp = await fetch(`http://127.0.0.1:${ISO_APP_CDP_PORT}/json`);
+    if (!resp.ok) return null;
+    const targets = await resp.json();
+    const pages = (Array.isArray(targets) ? targets : []).filter((t) => t.type === 'page' && !String(t.url).startsWith('devtools'));
+    return pages[0] ?? null;
+  } catch { return null; }
+}
+
+async function ensureIsoEnvironment() {
+  // 自举独立看门狗（构建+拉起上限 15 分钟；超时 exit 2，绝不无声挂死）。
+  const guard = setTimeout(() => {
+    console.error(`[自举超时] ${BOOTSTRAP_TIMEOUT_MS}ms 未完成——exit 2`);
+    isoTeardown();
+    process.exit(2);
+  }, BOOTSTRAP_TIMEOUT_MS);
+  guard.unref();
+  try {
+    log(`ISO 自举开始（裸跑模式：脚本自建隔离环境；真实配置 ${DEFAULT_CONFIG_PATH} 只读，写入全部落 ${ISO_DIR}）`);
+    // 0. Chrome 调试端口占用预检：外部实例复用 = 跨轮 profile 污染（B 链先例），拒绝复用。
+    const chromePids = findListenerPids(CHROME_CDP_PORT);
+    precondition(chromePids !== null, 'netstat 校验手段不可用——ISO 自举无法进行');
+    precondition(chromePids.length === 0, `端口 ${CHROME_CDP_PORT} 已被占用（PID ${chromePids.join(',')}，疑似外部 headless Chrome）——ISO 模式拒绝复用（防跨轮 profile 污染），请先释放该端口`);
+    const appPids = findListenerPids(ISO_APP_CDP_PORT);
+    precondition(appPids !== null && appPids.length === 0, `端口 ${ISO_APP_CDP_PORT} 已被占用（PID ${appPids?.join(',')}，疑似外部 Electron 实例）——ISO 模式拒绝复用，请先释放该端口`);
+    // 1. 构建新鲜度（src 比 out/renderer 新才重建；自举实例启动晚于构建 → 产物新鲜度天然成立）。
+    ensureBuildFresh();
+    // 2. 空闲 web access 端口（8791 起，避开真实实例 8790）。
+    const port = pickFreePort(8791);
+    precondition(port !== null, '8791-8810 无空闲端口——ISO 自举无法选口');
+    // 3. seed 配置 + 配置四元组同轮重派生（CONFIG_PATH/rawConfig/PORT/TOKEN 必须同源，防半新半旧）。
+    const seed = seedIsoConfig(port);
+    CONFIG_PATH = ISO_CONFIG_PATH;
+    rawConfig = seed;
+    PORT = port;
+    TOKEN = seed.webAccessToken;
+    // 4. electron（--user-data-dir 隔离；9223 调试口供 T1C 桌面 page attach）。
+    isoElectronProc = launchIsoElectron();
+    await waitForListener(port, 90_000, 'electron web access', isoElectronProc);
+    // 5. headless Chrome（双 web page 用）。
+    const chromeBin = findChromiumBinary();
+    precondition(chromeBin, '未发现 Chrome/Edge 可执行文件（搜索过 Program Files/LOCALAPPDATA 标准路径；可用 CLAUDE_LINK_E2E_CHROME 显式指定）');
+    isoChromeProc = launchIsoChrome(chromeBin);
+    await waitForChromeTarget(30_000);
+    log(`ISO 自举完成：web access 端口=${port}，electron PID=${isoElectronProc?.pid}（9223 桌面 attach 源），chrome PID=${isoChromeProc?.pid}（${chromeBin}），ISO 目录用后删除`);
+  } finally {
+    clearTimeout(guard);
+  }
+}
+
 // ══ 主流程 ══
 async function main() {
+  // ISO 自举（裸跑默认）：先拉起隔离实例再校验——自举实例启动晚于构建，产物新鲜度天然成立。
+  // 外部备环境跑（--config）不走此路径，保持旧版「只校验+指引」行为（t1clp 对齐 B 链口径）。
+  if (ISO_MODE) {
+    await ensureIsoEnvironment();
+    armSuiteWatchdog();
+  }
   precondition(TOKEN.length > 0, `配置 ${CONFIG_PATH} 顶层键 webAccessToken 缺失或为空`);
   precondition(LAN_IP && net.isIP(LAN_IP), `LAN IP 不可用：网卡未发现非 internal IPv4 且未提供合法 --lan-ip（当前=${LAN_IP}）`);
   if (APP_LOG_PATH) precondition(fs.existsSync(APP_LOG_PATH), `--app-log 路径不存在：${APP_LOG_PATH}`);
@@ -505,6 +880,27 @@ async function main() {
     const created = await createPageTarget();
     precondition(created, `Chrome CDP ${CHROME_CDP_PORT} 无法新建第二个 page target（/json/new PUT/GET 均失败），当前 page 数=${pages.length}`);
     pages = await listPageTargets();
+  }
+  // ── t1clp：桌面 page attach（T1C 双端联动）——ISO 自举实例 9223 必有主窗口 page；外部备环境
+  // 模式下 9223 可能未开调试口 → attach 不可得 → T1C 降级「网页发起端+网页围观端」口径申报。
+  const desktopTarget = await findDesktopPageTarget();
+  let desktopPage = null;
+  let desktopDegraded = false;
+  if (desktopTarget) {
+    try {
+      desktopPage = new CdpPage(await connectWS(desktopTarget.webSocketDebuggerUrl), 'D');
+      await desktopPage.send('Runtime.enable');
+      await desktopPage.send('Page.enable');
+      await waitFor('桌面 page 渲染+桥连接（Electron 9223 attach）', () => desktopPage.evalOk(connectedExpr), 20);
+    } catch (e) {
+      log(`  [T1C] 桌面 page attach 失败（${String(e.message).slice(0, 120)}）→ 降级「网页发起端+网页围观端」口径`);
+      try { desktopPage.ws.close(); } catch { /* 尽力而为 */ }
+      desktopPage = null;
+    }
+  }
+  if (!desktopPage) {
+    desktopDegraded = true;
+    log('  [T1C] 桌面 page attach 不可得（9223 无 page target 或连接失败）→ T1C-1/2/3 降级双 web page 口径（A=发起端 B=围观端），报告申报');
   }
   // 帧证据通道（前置：token 有效性由 welcome 帧验证，失败 exit 2）
   const frameUrl = `ws://${LAN_IP}:${PORT}/ws?token=${encodeURIComponent(TOKEN)}`;
@@ -572,7 +968,7 @@ async function main() {
     if (abortVis !== true) throw new Error('B 中断按钮不可见（.ctl__btn--abort）');
     await screenshot(pageA, 'C1-A');
     await screenshot(pageB, 'C1-B');
-    record('C1', 'PASS', `B 围观成功：TurnTimer 在场且计时递增 ${c1.sample1Raw}→${c1.sample2Raw}（差 ${+(s2 - c1.sample1).toFixed(1)}s）、侧栏黄灯（session-link--running + 状态点）、中断按钮可见`);
+    record('C1', 'PASS', `B 围观成功：TurnTimer 在场且计时递增 ${c1.sample1Raw}→${c1.sample2Raw}（差 ${+(s2 - c1.sample1).toFixed(1)}s）、侧栏黄灯（session-card--running + 状态点）、中断按钮可见`);
   } catch (e) {
     record('C1', 'FAIL', e.message);
     await screenshot(pageA, 'C1-A-failed').catch(() => {});
@@ -817,8 +1213,174 @@ async function main() {
     await screenshot(pageA, 'C6-A-failed').catch(() => {});
   }
 
+  // ── T1C 双端联动（t1clp）：桌面入队网页可见 / 网页入队桌面可见 / 双端同时发送各自入队 ──
+  // 规范 T1.2 + 03b §1 T1C-1/2/3 + A2-7 边界行 3（收尾并入）：入队路由跨端可达（tasks_changed
+  // 双向）、尾部追加顺序稳定无锁死、一端清空队列另一端无未定义态。
+  // 发起端 = 桌面 page（attach 可得时）或 pageA（降级口径，note 标注 [降级]）；围观端 = pageB。
+  // 夹具：物化专用会话（真实回合 standby 直发）→ addTask#0 + 暂停→恢复 arm 倒计时（B 链校准同款
+  // 真实用户动作链；seed taskDelayMinutes=60 → 3600s 窗，断言期内无任务弹出、计数稳定）。
+  currentCase = 'T1C';
+  const T1C_TASK0 = 'e2e-t1c-task0-请只回复数字0';
+  const T1C_MSG1 = 'e2e-t1c1-桌面入队-请只回复数字1';
+  const T1C_MSG2 = 'e2e-t1c2-网页入队-请只回复数字2';
+  const T1C_MSG3A = 'e2e-t1c3a-桌面并发入队';
+  const T1C_MSG3B = 'e2e-t1c3b-网页并发入队';
+  let t1cSid = null;
+  let t1cTask0Id = null;
+  let t1cTaskIds = []; // 收尾清队清单（A2-7 边界行 3）
+  const initiator = desktopPage ?? pageA;
+  const initiatorKind = desktopPage ? '桌面(Electron9223 attach)' : '网页A[降级口径]';
+  try {
+    // 0) 夹具：发起端建会话 + 真物化回合（standby 直发）→ 观围观端对齐。
+    await newSessionOn(initiator);
+    const t1cStartSeq = frameSeq;
+    await sendMessage(initiator, MSG_42);
+    t1cSid = await waitMaterialized(initiator, 'T1C');
+    log(`  T1C 会话已物化 sid=${t1cSid}（发起端=${initiatorKind}，围观端=网页B）`);
+    await waitFrame('T1C 物化回合终态', t1cSid, (ev) => isTerminalEvent(ev), TURN_WAIT_TIMEOUT_S, t1cStartSeq);
+    await switchPageToSession(pageB, t1cSid, 'B');
+    // 1) 基线：standby 空态（轮询收口，B 链同款——DOM 终态可先于主进程 result 落地）。
+    await pollOverviewOf(initiator, t1cSid, 'T1C 基线空态 standby', (o) => o.state?.status === 'standby' && (o.tasks ?? []).length === 0, 30);
+    // 2) addTask#0 + 暂停→恢复 arm 倒计时（TASK_SET_PAUSED true→false → armFromUserAction）。
+    const add0 = JSON.parse(String(await initiator.eval(`window.claudeLink.addTask(${JSON.stringify(t1cSid)}, { text: ${JSON.stringify(T1C_TASK0)}, attachmentIds: [], clientMessageId: crypto.randomUUID() }).then((r) => JSON.stringify({ taskId: (r.task && r.task.id) || '' }))`)));
+    if (!add0.taskId) throw new Error('T1C addTask#0 回包无 taskId');
+    t1cTask0Id = add0.taskId;
+    t1cTaskIds.push(t1cTask0Id);
+    await initiator.eval(`window.claudeLink.setTaskPaused(${JSON.stringify(t1cTask0Id)}, true).then(() => true)`);
+    await initiator.eval(`window.claudeLink.setTaskPaused(${JSON.stringify(t1cTask0Id)}, false).then(() => true)`);
+    const armed = await pollOverviewOf(initiator, t1cSid, 'T1C task#0 进入 countdown（暂停→恢复 arm）', (o) => o.state?.status === 'countdown', 15);
+    log(`  倒计时窗在位（remaining=${armed.state.countdownRemaining}s interval=${armed.state.intervalSeconds}s）`);
+    await openQueueTabOn(pageB, 'T1C 围观端面板');
+    await screenshot(pageB, 'T1C-fixture');
+    record('T1C-fixture', 'PASS', `夹具就绪：sid=${t1cSid.slice(0, 8)}… 物化回合终态 + task#0 arm 倒计时 + 观围观端 queue tab 在位（发起端=${initiatorKind}）`);
+  } catch (e) {
+    record('T1C-fixture', 'FAIL', e.message);
+    record('T1C-1', 'SKIP', 'T1C 夹具失败，双端联动断言无前提');
+    record('T1C-2', 'SKIP', 'T1C 夹具失败，双端联动断言无前提');
+    record('T1C-3', 'SKIP', 'T1C 夹具失败，双端联动断言无前提');
+    await screenshot(pageB, 'T1C-fixture-failed').catch(() => {});
+  }
+
+  if (resultOf('T1C-fixture')?.status === 'PASS') {
+    // ── T1C-1 桌面入队网页可见：发起端倒计时窗内发送 → 围观网页 tasks_changed 帧后任务卡可见、计数一致 ──
+    try {
+      const seqMark = frameSeq;
+      await sendOn(initiator, T1C_MSG1);
+      const notice = await waitFor('T1C-1 发起端入队反馈（已加入队列）', async () => {
+        const n = await noticeOf(initiator);
+        return n.present && n.text.includes('已加入队列') ? n.text : null;
+      }, 8, 200);
+      const frame = await waitQueueFrame('T1C-1 tasks_changed 帧（含新任务）', t1cSid, (f) => f.type === 'tasks_changed' && (f.tasks ?? []).some((t) => (t.prompt || '').includes(T1C_MSG1)), 20, seqMark);
+      const ovInit = await queueOverviewOf(initiator, t1cSid);
+      const ovObs = await queueOverviewOf(pageB, t1cSid);
+      if ((ovInit.tasks ?? []).length !== (ovObs.tasks ?? []).length) {
+        throw new Error(`两端任务计数不一致：发起端=${(ovInit.tasks ?? []).length} 围观端=${(ovObs.tasks ?? []).length}`);
+      }
+      const sameIds = JSON.stringify((ovInit.tasks ?? []).map((t) => t.id)) === JSON.stringify((ovObs.tasks ?? []).map((t) => t.id));
+      if (!sameIds) throw new Error('两端任务 id 序列不一致（tasks_changed 未达围观端或顺序分叉）');
+      await waitFor('T1C-1 围观端任务卡渲染', () => taskCardVisible(pageB, T1C_MSG1), 10);
+      const cardCount = await pageB.eval(`document.querySelectorAll('.task-item').length`);
+      if (cardCount !== (ovObs.tasks ?? []).length) {
+        throw new Error(`围观端任务卡数 ${cardCount} ≠ 快照任务数 ${(ovObs.tasks ?? []).length}`);
+      }
+      t1cTaskIds.push(...(ovInit.tasks ?? []).filter((t) => (t.prompt || '').includes(T1C_MSG1)).map((t) => t.id));
+      await screenshot(pageB, 'T1C-1-B');
+      record('T1C-1', 'PASS', `入队跨端可见（发起端=${initiatorKind}）：notice「${String(notice).slice(0, 24)}」+ tasks_changed 帧 seq=${frame.seq} + 围观端任务卡可见 + 两端计数一致（${(ovObs.tasks ?? []).length} 条）且 id 序列一致`);
+    } catch (e) {
+      record('T1C-1', 'FAIL', e.message);
+      await screenshot(pageB, 'T1C-1-B-failed').catch(() => {});
+    }
+
+    // ── T1C-2 网页入队桌面可见：围观端（网页）入队 → 发起端（桌面）任务面板可见同任务 ──
+    try {
+      await ensureQueueBusyWindow(initiator, t1cSid, t1cTask0Id, 'T1C-2');
+      const seqMark = frameSeq;
+      await sendOn(pageB, T1C_MSG2);
+      const notice = await waitFor('T1C-2 网页端入队反馈（已加入队列）', async () => {
+        const n = await noticeOf(pageB);
+        return n.present && n.text.includes('已加入队列') ? n.text : null;
+      }, 8, 200);
+      await waitQueueFrame('T1C-2 tasks_changed 帧（含网页端新任务）', t1cSid, (f) => f.type === 'tasks_changed' && (f.tasks ?? []).some((t) => (t.prompt || '').includes(T1C_MSG2)), 20, seqMark);
+      // 发起端（桌面）：任务面板可见同任务 + 权威快照计数反映。
+      await openQueueTabOn(initiator, 'T1C-2 发起端面板');
+      await waitFor('T1C-2 发起端任务卡渲染（网页入队的任务）', () => taskCardVisible(initiator, T1C_MSG2), 10);
+      const ovInit = await queueOverviewOf(initiator, t1cSid);
+      if (!(ovInit.tasks ?? []).some((t) => (t.prompt || '').includes(T1C_MSG2))) {
+        throw new Error(`发起端权威快照无网页入队任务（tasks=${(ovInit.tasks ?? []).length} 条）`);
+      }
+      t1cTaskIds.push(...(ovInit.tasks ?? []).filter((t) => (t.prompt || '').includes(T1C_MSG2)).map((t) => t.id));
+      await screenshot(initiator, 'T1C-2-initiator');
+      record('T1C-2', 'PASS', `网页入队反向可见（tasks_changed 双向）：网页 notice「${String(notice).slice(0, 24)}」+ 发起端（${initiatorKind}）任务面板同任务可见 + 权威快照 ${(ovInit.tasks ?? []).length} 条含新任务`);
+    } catch (e) {
+      record('T1C-2', 'FAIL', e.message);
+      await screenshot(initiator, 'T1C-2-initiator-failed').catch(() => {});
+    }
+
+    // ── T1C-3 双端同时发送各自入队（tasks 恰 +2、尾部追加顺序稳定、无锁死）+ A2-7 边界行 3 收尾 ──
+    try {
+      await ensureQueueBusyWindow(initiator, t1cSid, t1cTask0Id, 'T1C-3');
+      const baseline = await queueOverviewOf(initiator, t1cSid);
+      const baseLen = (baseline.tasks ?? []).length;
+      // 双端近同时发送：先两端预填输入（校验可用性），再背靠背点击发送（跨进程无法严格同时，
+      // 取「两端均落在同一忙窗内、互不踩踏」为口径——规范 T1.2「双端同时发送各自入队」语义）。
+      await prefillInput(initiator, T1C_MSG3A);
+      await prefillInput(pageB, T1C_MSG3B);
+      const errCountBeforeT3 = { init: renderErrorCount(initiator.tag), obs: renderErrorCount('B') };
+      await initiator.eval(`document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
+      await pageB.eval(`document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
+      // 各自「已加入队列」反馈（4s 存活窗，紧轮询）。
+      const nA = await waitFor('T1C-3 发起端入队反馈', async () => { const n = await noticeOf(initiator); return n.present && n.text.includes('已加入队列') ? n.text : null; }, 8, 150);
+      const nB = await waitFor('T1C-3 网页端入队反馈', async () => { const n = await noticeOf(pageB); return n.present && n.text.includes('已加入队列') ? n.text : null; }, 8, 150);
+      // tasks 恰 +2：快照轮询至两条新任务都在（尾部追加）。
+      const s1 = await pollOverviewOf(pageB, t1cSid, 'T1C-3 两端任务均入队', (o) => {
+        const ts = o.tasks ?? [];
+        return ts.some((t) => (t.prompt || '').includes(T1C_MSG3A)) && ts.some((t) => (t.prompt || '').includes(T1C_MSG3B));
+      }, 20);
+      const s1Tasks = s1.tasks ?? [];
+      if (s1Tasks.length !== baseLen + 2) throw new Error(`队列 tasks ${s1Tasks.length} ≠ 基线 ${baseLen}+2（丢失或多余）`);
+      const idxA = s1Tasks.findIndex((t) => (t.prompt || '').includes(T1C_MSG3A));
+      const idxB = s1Tasks.findIndex((t) => (t.prompt || '').includes(T1C_MSG3B));
+      if (Math.min(idxA, idxB) < baseLen) throw new Error(`新任务出现插队首（idx A=${idxA} B=${idxB}，基线长=${baseLen}）——违背尾部追加`);
+      // 尾部追加顺序稳定：1.2s 后二采快照 id 序列一致（无丢失/无重排）。
+      await sleep(1200);
+      const s2 = await queueOverviewOf(pageB, t1cSid);
+      const s2Ids = JSON.stringify((s2.tasks ?? []).map((t) => t.id));
+      const s1Ids = JSON.stringify(s1Tasks.map((t) => t.id));
+      if (s2Ids !== s1Ids) throw new Error(`追加顺序不稳定：S1=${s1Ids} → S2=${s2Ids}`);
+      // 无锁死：两端输入框均恢复可用。
+      await waitFor('T1C-3 发起端输入框恢复可用', async () => (await inputGateOf(initiator)).disabled === false, 10, 300);
+      await waitFor('T1C-3 网页端输入框恢复可用', async () => (await inputGateOf(pageB)).disabled === false, 10, 300);
+      const t3Note = `双端同时发送各自入队：两端 notice 齐（「${String(nA).slice(0, 18)}」/「${String(nB).slice(0, 18)}」）+ tasks 恰 +2（${baseLen}→${s1Tasks.length}）+ 尾部追加（idx ${idxA}/${idxB} ≥ 基线长）+ 1.2s 二采序列稳定 + 两端输入框恢复可用`;
+      // ── A2-7 边界行 3 收尾：一端清空队列 → 另一端输入框可用、无未定义态报错（console error
+      // 记账口径同 B 链：发起端/围观端渲染层异常增量均为 0）。 ──
+      const clearFrameSeq = frameSeq;
+      const t1cIdsNow = (s2.tasks ?? []).map((t) => t.id);
+      for (const tid of t1cIdsNow) {
+        await initiator.eval(`window.claudeLink.removeTask(${JSON.stringify(tid)}).then(() => true)`);
+      }
+      await pollOverviewOf(pageB, t1cSid, 'A2-7 边界行3：队列清空同步到对端', (o) => (o.tasks ?? []).length === 0, 15);
+      const gateObs = await inputGateOf(pageB);
+      if (gateObs.disabled === true) throw new Error('队列清空后围观端输入框仍禁用（锁死/未定义态）');
+      const dInit = renderErrorCount(initiator.tag) - errCountBeforeT3.init;
+      const dObs = renderErrorCount('B') - errCountBeforeT3.obs;
+      if (dInit > 0 || dObs > 0) {
+        const added = [...renderErrors.filter((x) => x.page === initiator.tag).slice(errCountBeforeT3.init), ...renderErrors.filter((x) => x.page === 'B').slice(errCountBeforeT3.obs)];
+        throw new Error(`清队窗口渲染层异常：发起端 +${dInit} 围观端 +${dObs}：` + added.slice(0, 4).map((x) => `[${x.kind}] ${String(x.text).slice(0, 80)}`).join(' | '));
+      }
+      t1cTaskIds = []; // 已清空，收尾无需再删
+      await screenshot(pageB, 'T1C-3-B');
+      record('T1C-3', 'PASS', `${t3Note}；A2-7 边界行3 收尾：发起端清空队列 → 对端快照 0 条同步 + 输入框可用 + 渲染层异常增量 0（发起端/围观端双页记账）`);
+    } catch (e) {
+      record('T1C-3', 'FAIL', e.message);
+      await screenshot(pageB, 'T1C-3-B-failed').catch(() => {});
+    }
+  }
+  if (desktopDegraded) {
+    log('  [T1C 申报] 桌面 page attach 不可得，T1C-1/2/3 以「网页发起端+网页围观端」双 page 口径执行（跨端同步语义保留，桌面真实窗口面未覆盖）——见实施报告');
+  }
+
   // ── 善后：尽力删除本次物化的测试会话（经 store deleteSession，B3 链同款；不参与断言）──
-  for (const sid of [c1.sid, c4Sid, c6Sid].filter(Boolean)) {
+  for (const sid of [c1.sid, c4Sid, c6Sid, t1cSid].filter(Boolean)) {
     try {
       await pageA.eval(`(() => { ${PINIA_PRELUDE}
         const st = piniaSt();

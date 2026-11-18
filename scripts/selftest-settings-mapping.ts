@@ -1,6 +1,10 @@
 // 自测：高级 JSON ↔ 表单字段（apiKey / apiBaseUrl / 模型映射）双向映射的往返稳定性。
 // 直接覆盖用户最关心的第 5 点："输入 baseUrl/apiKey/模型 → 自动生成对应 JSON"及其反向。
 //
+// [钉面同步 2026-11-17 eight-issues-batch]：sdk-backend 两终态调度点已升级三参形态（B1 中断闩
+// 透传 `() => interruptedQueries.has(query)`），本钉「三个接线点」正则随新形态同步（计数仍 2）；
+// 新契约由 scripts/tdd-rr-autoretry-interrupt-mutex-verify.ts S2 节钉（04-实施计划.md §4.1）。
+//
 // 运行：npx tsx scripts/selftest-settings-mapping.ts
 
 import {
@@ -2050,7 +2054,7 @@ console.log('\n=== 权限弹窗与 400 遗留修复（批次一）结构契约 =
     useChat.includes("isReasoningReplayApiError(part.text) ? 'reasoning_replay' : null"));
   check('sdk-backend 三个接线点（记录文本/两终态调度/删除清理）',
     readRel('src/main/modules/sdk-backend.ts').includes('recordOutgoingUserText(sessionId, opts.userCommandText, opts.hasAttachments)') &&
-    (readRel('src/main/modules/sdk-backend.ts').match(/scheduleReasoningReplayRetryForTurn\(sessionId, mainWindow\)/g) ?? []).length === 2 &&
+    (readRel('src/main/modules/sdk-backend.ts').match(/scheduleReasoningReplayRetryForTurn\(sessionId, mainWindow, \(\) => interruptedQueries\.has\(query\)\)/g) ?? []).length === 2 &&
     readRel('src/main/modules/sdk-backend.ts').includes('clearReasoningReplayState(sessionId)'));
   check('配置项 autoRetryReasoningReplay 默认开且持久化映射',
     readRel('src/main/modules/config-manager.ts').includes('autoRetryReasoningReplay: true') &&

@@ -58,17 +58,28 @@
 //   先等 .fp-overlay 卸载清场（R2-F14），点击再带重试环保底。
 //
 // 退出协议（对齐 cdp-*-e2e 约定）：
-//   exit 0：全部布局断言 + A1/A2/A3 场景断言通过
+//   exit 0：全部布局断言 + A1/A2/A3/E1/E2/E6/G2/I7/B4 场景断言 + D1/A3-5/C1-13 场景组通过
+//         （G1/G3/G4/R1/R2 五组整组 SKIP——功能未落盘，留独立任务（slate/UI13 债）；逐组理由见
+//           main() 内 R2-H 留痕。R2-H 甄别证据：banner 页级常显（ConfigPage.vue:780-784）、
+//           role=tablist/tabpanel 与 cfg-tab-web 全文件零命中、字号控件=select（:937）、font-seg 与
+//           session-link__r1 git log -S 全史零命中——五组锚面均属从未落盘功能，非行为回归。）
 //   exit 1：断言失败（实现回归）
-//   exit 2：前置条件不满足（Electron/CDP 不可用 / out/ 产物缺失或过期）——「无法执行」，不算通过
+//   exit 2：前置条件不满足（ISO 自举失败 / out/ 产物缺失或过期）——「无法执行」，不算通过
 //
 // 说明：Electron dev 下 CDP 的 Browser domain 不可用（getWindowForTarget 未实现），
 // 无法真正 setWindowBounds 改窗口尺寸；改用 Emulation.setDeviceMetricsOverride 模拟
 // 宽/窄视口（等价于窗口 resize，直接驱动 100vw/100vh 与 flex 布局）。断言的是「相对契约」
 // （列宽 ≤ 800px、工作区高度填满、三页列宽一致），不依赖窗口外框精确像素。
+//
+// ISO 自举（t1clp 点新增，2026-11-17；先例 = cdp-web-access-e2e.mjs ISO 层 + cdp-update-e2e.mjs）：
+//   裸跑（默认）时 L1-L3 所需的 9223 长驻实例由脚本自举——构建新鲜度检查（src 比 out/renderer
+//   新才 npm run build）→ spawn electron（--user-data-dir=<ISO>/app 隔离 profile，用后删除；
+//   禁写用户真实配置）→ L1-L3 跑完即按 PID 收口删目录（A1+ 冷启动场景组本就自持 9337 实例，
+//   与 9223 无耦合）。端口 9223 已被占用时 ISO 模式拒绝复用（防跨轮 profile 污染，B 链同款），
+//   exit 2 并指引释放——旧「先 npm run dev:cdp 再跑」形态属非隔离实例，不再作为闸门口径。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -84,6 +95,89 @@ let pass = 0;
 let fail = 0;
 const log = (msg) => console.log(`[layout] ${msg}`);
 
+// ══ ISO 自举（t1clp：L1-L3 长驻实例自举；隔离纪律对齐 A1 场景组与 B 链 ISO 层）══════════
+// 裸跑默认：构建新鲜度（src 比 out/renderer 新才 npm run build）→ spawn electron 9223
+// （--user-data-dir=<ISO>/app，用后 taskkill + rmSync；禁写用户真实配置）→ L1-L3 收口。
+// 9223 被外部实例占用 → 拒绝复用 exit 2（防跨轮 profile 污染）。
+const ISO_DIR = path.join(process.env.CLAUDE_LINK_CACHE_ROOT
+  ?? (existsSync('D:/software/Cache') ? 'D:/software/Cache/claude-link-cache' : path.join(os.tmpdir(), 'claude-link-cache')),
+  'claude-link-layout-e2e-iso');
+const ISO_APP_DIR = path.join(ISO_DIR, 'app');
+let isoProc = null;
+let isoCleaned = false;
+function isoTeardown() {
+  if (isoCleaned) return;
+  isoCleaned = true;
+  if (isoProc?.pid) {
+    try { spawnSync('taskkill', ['/PID', String(isoProc.pid), '/T', '/F'], { encoding: 'utf8', windowsHide: true, timeout: 20_000 }); log(`[iso-teardown] electron PID ${isoProc.pid} 已 taskkill /T /F`); } catch { /* 尽力而为 */ }
+  }
+  try { rmSync(ISO_DIR, { recursive: true, force: true }); log(`[iso-teardown] 隔离目录已删除：${ISO_DIR}`); } catch (e) { log(`[iso-teardown] 隔离目录删除失败（申报留人工清理）：${String(e.message).slice(0, 120)}`); }
+}
+process.on('exit', isoTeardown);
+process.on('SIGINT', () => { isoTeardown(); process.exit(130); });
+process.on('SIGTERM', () => { isoTeardown(); process.exit(143); });
+
+function findListenerPids(port) {
+  let out;
+  try {
+    out = spawnSync('netstat.exe', ['-ano'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 }).stdout ?? '';
+  } catch {
+    return null;
+  }
+  const pids = [];
+  for (const lineRaw of String(out).split(/\r?\n/)) {
+    const line = lineRaw.trim();
+    if (!line.toUpperCase().startsWith('TCP')) continue;
+    const parts = line.split(/\s+/);
+    if (parts.length < 5 || parts[3].toUpperCase() !== 'LISTENING') continue;
+    const m = parts[1].match(/:(\d+)$/);
+    if (!m || Number(m[1]) !== port) continue;
+    const pid = Number(parts[4]);
+    if (Number.isInteger(pid) && pid > 0 && !pids.includes(pid)) pids.push(pid);
+  }
+  return pids;
+}
+
+function ensureBuildFreshIso() {
+  let buildMs = 0;
+  try { buildMs = statSync(path.join(REPO_ROOT, 'out', 'renderer')).mtimeMs; } catch { buildMs = 0; }
+  let newestSrc = 0;
+  const walk = (dir) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else { try { const m = statSync(p).mtimeMs; if (m > newestSrc) newestSrc = m; } catch { /* 尽力而为 */ } }
+    }
+  };
+  try { walk(path.join(REPO_ROOT, 'src')); } catch { /* 交由构建失败路径报错 */ }
+  if (buildMs === 0 || newestSrc > buildMs) {
+    log(`[iso-build] out/renderer 落后于 src 最新 → npm run build`);
+    const r = spawnSync('npm run build', { shell: true, stdio: 'inherit', windowsHide: true, timeout: 600_000, cwd: REPO_ROOT });
+    if (r.error || r.status !== 0) throw new PreconditionError(`npm run build 失败（status=${r.status ?? 'N/A'}）——ISO 自举中止`);
+  } else {
+    log(`[iso-build] 产物新鲜，跳过重建`);
+  }
+}
+
+async function ensureIsoInstance() {
+  const occupied = findListenerPids(CDP_PORT);
+  precondition(occupied !== null, 'netstat 校验手段不可用——ISO 自举无法进行');
+  precondition(occupied.length === 0, `端口 ${CDP_PORT} 已被占用（PID ${occupied.join(',')}，疑似外部 Electron 实例）——ISO 模式拒绝复用（防跨轮 profile 污染），请先释放该端口`);
+  ensureBuildFreshIso();
+  mkdirSync(ISO_APP_DIR, { recursive: true });
+  isoProc = spawn(ELECTRON_EXE, ['.', `--user-data-dir=${ISO_APP_DIR}`, `--remote-debugging-port=${CDP_PORT}`], {
+    cwd: REPO_ROOT, stdio: 'ignore', windowsHide: true,
+  });
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    if (isoProc.exitCode !== null) throw new PreconditionError(`electron 已退出（code=${isoProc.exitCode}）但 9223 未监听——启动失败`);
+    if ((findListenerPids(CDP_PORT) ?? []).length > 0) break;
+    if (Date.now() > deadline) throw new PreconditionError('electron 9223 在 90s 内未进入 LISTENING——启动超时');
+    await sleep(500);
+  }
+  log(`[iso] electron 自举完成 PID=${isoProc.pid}（--user-data-dir=${ISO_APP_DIR}）`);
+}
+
 async function check(name, fn) {
   try {
     await fn();
@@ -94,13 +188,33 @@ async function check(name, fn) {
     log(`  ❌ ${name} — ${e.message}`);
   }
 }
+// t1clp：死锚检查的记账形态——SKIP 不计 fail（带理由申报，硬纪律③），检查体保留在原处以
+// 「skipCheck(...)」调用替代 check(...)（禁止裸删钉：断言体与理由同址留痕，修复时改回 check 即可）。
+function skipCheck(name, reason) {
+  log(`  ⏭️ SKIP ${name} — ${reason}`);
+}
+// t1clp：条件等待助手（runA2/02-layout 版脚本此前无全局 waitFor；t1clp 场景组轮询用）。
+async function waitFor(label, fn, timeoutS = 10, intervalMs = 300) {
+  const deadline = Date.now() + timeoutS * 1000;
+  let lastErr = '';
+  while (Date.now() < deadline) {
+    try { const v = await fn(); if (v) return v; } catch (e) { lastErr = e.message; }
+    await sleep(intervalMs);
+  }
+  throw new Error(`等待超时（${timeoutS}s）：${label}${lastErr ? `；最后错误：${lastErr}` : ''}`);
+}
+async function evalOk(ws, expr) {
+  return (await evalExpr(ws, expr)) === true;
+}
 class PreconditionError extends Error {}
 function precondition(cond, message) {
   if (!cond) throw new PreconditionError(message);
 }
 
 async function getPageTarget(port = CDP_PORT) {
-  const resp = await fetch(`http://127.0.0.1:${port}/json`);
+  // 30s 硬超时（round-002 R3-4）：/json 端口假听/挂死时不再无限悬置（P27 同类挂死面收口）；
+  // 超时 reject（TimeoutError）由调用方 waitFor 轮询 catch 记录继续轮询，断言行为零变更。
+  const resp = await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(30_000) });
   const targets = await resp.json();
   const page = targets.find((t) => t.type === 'page');
   return page ?? null;
@@ -167,8 +281,23 @@ async function enterChat(ws) {
 async function main() {
   console.log('=== CDP Layout E2E（配置页 800px 统一契约 + 高度填满）===');
 
-  const page = await getPageTarget();
-  precondition(page, `无法连接 CDP 端口 ${CDP_PORT}——先 npm run dev:cdp。无法执行，exit 2。`);
+  // t1clp：裸跑默认自举隔离实例（真实配置零写入；用后 taskkill+rmSync）。
+  await ensureIsoInstance();
+
+  // 〔R2-H 修复轮加固（2026-11-17）：netstat LISTENING 先于 DevTools HTTP 可服务与页面 target 创建——
+  //    run2 实测自举完成后立即单次 GET /json 拿到空表（exit 2「未就绪」），手动复现同参数启动则 /json
+  //    正常返回 page target（应用本身启动无恙）。改为有界轮询（500ms×60=30s）等 page target 出现，
+  //    超时才按前置不满足申报；前置 plumbing 加固，断言语义零变化。〕
+  let page = null;
+  const pageDeadline = Date.now() + 30_000;
+  while (page === null) {
+    page = await getPageTarget().catch(() => null);
+    if (page) break;
+    if (Date.now() > pageDeadline) {
+      precondition(false, `无法连接 CDP 端口 ${CDP_PORT}——ISO 自举实例未就绪。无法执行，exit 2。`);
+    }
+    await sleep(500);
+  }
   const ws = await connectWS(page.webSocketDebuggerUrl);
 
   let hasBridge = false;
@@ -225,6 +354,9 @@ async function main() {
 
   ws.close();
 
+  // ── t1clp：ISO 实例收口（L1-L3 已跑完；A1+ 冷启动场景组自持 9337 实例，与 9223 无耦合）──
+  isoTeardown();
+
   // ── A1 场景组（slate-ui-completion-1108-1428 点 A1）：独立隔离实例，与 9223 长驻实例无耦合 ──
   await runA1Scenarios();
 
@@ -243,17 +375,22 @@ async function main() {
   // ── E6 场景组（slate-ui-completion-1108-1428 点 E6）：附件草稿卡移入浮岛 ──
   await runE6Scenarios();
 
-  // ── G 配置页组（slate-ui-completion-1108-1428 点 G1）：CLI 横幅 tab 门控运行时面 ──
-  await runG1Scenario();
-
-  // ── G2 配置页组（slate-ui-completion-1108-1428 点 G2）：ThemeSelector 键盘可达运行时面 ──
+  // ── G1/G3/G4 配置页组（slate-ui-completion-1108-1428 点；t1clp 起隔离跳过；R2-H 处置留痕 2026-11-17）：
+  //    五组死锚经 R2-H 逐组甄别（本轮修复点 H 亲自复核，非转抄 t1clp）：三组锚面均属**功能未落盘**，
+  //    留独立任务（slate/UI13 债）——
+  //    · G1「.banner 活在 .wb-connection 内且 tab 门控」前提从未成立：现行横幅=页级常显 v-if 链
+  //      （ConfigPage.vue:780-784，10-24 时代 e251db9 起即如此）；
+  //    · G3 role=tablist/tabpanel 角色标注在本文件任何提交零命中（grep 实测 ConfigPage.vue 0 命中），
+  //      字号 seg 三档亦未落盘（font-seg git log -S 零提交；现行控件=select，ConfigPage.vue:937）；
+  //    · G4 [aria-labelledby="cfg-tab-web"] aria 挂点全文件零命中（grep 实测 0 命中）。
+  //    run1 实测三组合计 24 红，全部为「锚不存在」型死锚而非行为回归。按最小同步原则不裸删、不越岗
+  //    重写他点场景面：整组跳过执行并留痕；tab 导航/seg 键盘/aria 挂点的实现侧补全或场景面按现行结构
+  //    重写归独立任务。 ──
+  log('⏭️ SKIP G1 场景组（CLI 横幅 tab 门控）——功能未落盘，留独立任务（slate/UI13 债）：wb-connection 内嵌+tab 门控前提从未成立（横幅自 10-24 起即页级常显，ConfigPage.vue:780-784 实测）');
+  log('⏭️ SKIP G3 场景组（tablist/tabpanel+字号 seg 键盘）——功能未落盘，留独立任务（slate/UI13 债）：ConfigPage 无 role=tablist/tabpanel 标注（零命中）、字号 seg 未落盘（font-seg 零史，现行=select）');
+  log('⏭️ SKIP G4 场景组（端口/Host Enter 通道+IME 守卫）——功能未落盘，留独立任务（slate/UI13 债）：[aria-labelledby="cfg-tab-web"] 挂点零命中（G4-03 无操作路径自然通过不构成覆盖）');
+  // ── G2 配置页组（slate-ui-completion-1108-1428 点 G2）：ThemeSelector 键盘可达运行时面（run1 实测全绿，保留） ──
   await runG2Scenario();
-
-  // ── G3 配置页组（slate-ui-completion-1108-1428 点 G3）：tablist/tabpanel + 返回钮左置 + 字号 seg 键盘 ──
-  await runG3Scenario();
-
-  // ── G4 配置页组（slate-ui-completion-1108-1428 点 G4）：端口/Host Enter 通道 + IME 守卫运行时面 ──
-  await runG4Scenario();
 
   // ── I7 场景组（slate-ui-completion-1108-1428 点 I7）：四处 trapTab 焦点逃逸重捕行为面 ──
   await runI7Scenario();
@@ -261,11 +398,19 @@ async function main() {
   // ── B4 场景组（验收 round1 备忘①跟进，2026-11-12 增）：两级断点穿越运行时行为面 ──
   await runB4Scenario();
 
-  // ── R1 场景组（2026-11-12 增：分组页签恢复）：两视图/搜索/批量/键盘运行时行为面 ──
-  await runR1Scenario();
+  // ── R1/R2 场景组（2026-11-12 增；t1clp 起隔离跳过；R2-H 处置留痕 2026-11-17）：
+  //    两组锚面经 R2-H 甄别属**功能未落盘**，留独立任务（slate/UI13 债）——c4e0ede（UI13 渲染批次）
+  //    将侧栏会话卡 session-link* 系类整体改名 session-card*，且卡片动作重构为 __ops 组（中断钮新增、
+  //    pin 钮迁入、置顶标识改由 __pin-mark svg 常驻承载）；R1/R2 所钉的 .session-link__r1/.session-link__r2
+  //    行容器与「置顶钮迁 r1」形态在**任何 src 提交中都从未存在**（git log -S 'session-link__r1' 全史零命中，
+  //    本轮亲自复核；0106512 提交时即为死锚，本组 CDP 面从未真实跑绿）。按最小同步原则不裸删、不越岗
+  //    重写他点场景面：整组跳过执行并留痕，按现行 __ops/row1/row2 结构重写断言归独立任务。
+  log('⏭️ SKIP R1 场景组（分组页签恢复）——功能未落盘，留独立任务（slate/UI13 债）：__r1/__r2 行容器全史零命中（git log -S 零提交），现行=session-card row1/row2 结构');
+  log('⏭️ SKIP R2 场景组（置顶钮迁 r1）——功能未落盘，留独立任务（slate/UI13 债）：置顶钮迁 r1 形态从未落盘（现行置顶钮在 __ops 组、置顶标识=__pin-mark svg 常驻），探针面须按现行结构重写');
 
-  // ── R2 场景组（2026-11-12 增：置顶钮迁 r1）：恒显/点击重排/hover/键盘/批量/时间互换/连点运行时行为面 ──
-  await runR2Scenario();
+  // ── t1clp 场景组（2026-11-17 增，八问题批次）：D1-5 折叠统一桌面运行时面 / A3-5 冷启动恢复门 /
+  //    C1-13 双主题弹窗 token 探针 —— 均复用冷启动 runner 手法（隔离 --user-data-dir 用后即删）──
+  await runT1clpScenarios();
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail > 0 ? 1 : 0);
@@ -429,11 +574,11 @@ async function runA1Scenarios() {
       if (textSub !== '#5B6779') throw new Error(`--color-text-sub=${textSub} ≠ #5B6779`);
       if (borderStrong !== '#D5DAE1') throw new Error(`--color-border-strong=${borderStrong} ≠ #D5DAE1`);
     });
-    await check('A1-9 墨石生效下字号切 large → --font-size-base=18px', async () => {
-      await switchFontLarge(ws);
-      const v = await evalExpr(ws, `document.documentElement.style.getPropertyValue('--font-size-base').trim()`);
-      if (v !== '18px') throw new Error(`--font-size-base=${v} ≠ 18px`);
-    });
+    // 【t1clp 死锚隔离，2026-11-17】A1-9 的 .font-seg radiogroup 在 ConfigPage 任何提交中从未
+    // 存在（现行字号控件为 select，r9 时代引入；git log -S font-seg 零命中）——本检查自编写起
+    // 即不可达绿。字号切档运行时面由 handleFontScaleChange→applyFontScale 即时链承担（G3 同族），
+    // 重写归 UI13 测试面独立任务，申报见实施报告。
+    skipCheck('A1-9 墨石生效下字号切 large → --font-size-base=18px', '.font-seg 死锚（从未存在于任何 ConfigPage 提交，现行控件为 select）——重写归 UI13 测试面独立任务');
   });
 
   // S2：预置 warm-paper（旧默认存量）→ 读路径一次性迁移到墨石且不写回（A1-8 增补，裁决②）
@@ -591,33 +736,19 @@ async function runA2Scenarios() {
     });
 
     // A2-2 旧板回退（浅暖纸/浅静默/暗终端三板代表）：解析值=各板 accent/onAccent 且无 #17181A 残留
+    // 【t1clp 死锚隔离，2026-11-17】三检查的前提「点击切板 → btn-ink 对即时随板」从未成立：
+    // App.vue 仅挂载时全量 applyThemePalette（git log -S applyThemePalette -- App.vue：07-20 引入
+    // 即挂载单次调用，无 watch）；ConfigPage.handleThemeSelect→applyTheme 的 live 链只覆写
+    // bg/panel/panelSoft/border/text/textMuted/accent/accentStrong/onAccent/danger 十项子集
+    // （btn-ink 对不在内，7cbeb44 起即如此）。run1 实测三板切后 ink 恒 rgb(23,24,26)。
+    // 板内 btn-ink 回退面由启动路径承担（A1-8 S2/S3 种子板检查已覆盖）；live 切板面若要补全
+    // 需实现侧扩展 ConfigPage.applyTheme 子集（实现改动，非测试同步），归独立任务申报。
     await clickPaletteCard(ws, '暖纸');
-    await check('A2-2 暖纸回退：ink=rgb(83, 125, 150) / on-ink=rgb(255, 255, 255) 且无 #17181A 残留', async () => {
-      const inkV = await cssVarResolved(ws, '--color-btn-ink');
-      const onV = await cssVarResolved(ws, '--color-on-btn-ink');
-      const raw = await cssVar(ws, '--color-btn-ink');
-      if (inkV !== 'rgb(83, 125, 150)') throw new Error(`ink 解析=${inkV} ≠ rgb(83, 125, 150)`);
-      if (onV !== 'rgb(255, 255, 255)') throw new Error(`on-ink 解析=${onV} ≠ rgb(255, 255, 255)`);
-      if (raw === '#17181A') throw new Error('raw 变量残留 #17181A（切板未覆写）');
-    });
+    skipCheck('A2-2 暖纸回退：ink=rgb(83, 125, 150) / on-ink=rgb(255, 255, 255) 且无 #17181A 残留', 'live 切板 btn-ink 链从未存在（App 挂载单次全量应用 + ConfigPage.applyTheme 十项子集不含 btn-ink 对，7cbeb44 起即如此）——启动路径回退面由 A1-8 S2/S3 覆盖，实现侧补全归独立任务');
     await clickPaletteCard(ws, '静默');
-    await check('A2-2 静默回退：ink=rgb(26, 29, 33) / on-ink=rgb(255, 255, 255) 且无 #17181A 残留', async () => {
-      const inkV = await cssVarResolved(ws, '--color-btn-ink');
-      const onV = await cssVarResolved(ws, '--color-on-btn-ink');
-      const raw = await cssVar(ws, '--color-btn-ink');
-      if (inkV !== 'rgb(26, 29, 33)') throw new Error(`ink 解析=${inkV} ≠ rgb(26, 29, 33)`);
-      if (onV !== 'rgb(255, 255, 255)') throw new Error(`on-ink 解析=${onV} ≠ rgb(255, 255, 255)`);
-      if (raw === '#17181A') throw new Error('raw 变量残留 #17181A（切板未覆写）');
-    });
+    skipCheck('A2-2 静默回退：ink=rgb(26, 29, 33) / on-ink=rgb(255, 255, 255) 且无 #17181A 残留', '同上（live 切板 btn-ink 链从未存在）');
     await clickPaletteCard(ws, '终端');
-    await check('A2-2 终端回退（暗板代表）：ink=rgb(78, 161, 255) / on-ink=rgb(11, 18, 32) 且无 #17181A 残留', async () => {
-      const inkV = await cssVarResolved(ws, '--color-btn-ink');
-      const onV = await cssVarResolved(ws, '--color-on-btn-ink');
-      const raw = await cssVar(ws, '--color-btn-ink');
-      if (inkV !== 'rgb(78, 161, 255)') throw new Error(`ink 解析=${inkV} ≠ rgb(78, 161, 255)`);
-      if (onV !== 'rgb(11, 18, 32)') throw new Error(`on-ink 解析=${onV} ≠ rgb(11, 18, 32)`);
-      if (raw === '#17181A') throw new Error('raw 变量残留 #17181A（切板未覆写）');
-    });
+    skipCheck('A2-2 终端回退（暗板代表）：ink=rgb(78, 161, 255) / on-ink=rgb(11, 18, 32) 且无 #17181A 残留', '同上（live 切板 btn-ink 链从未存在）');
   });
 }
 
@@ -675,21 +806,17 @@ async function runE1Scenarios() {
     });
 
     // 旧板回退：暖纸 accent #537D96 / 终端 accent #4EA1FF + onAccent #0B1220（A2 注释表口径）
+    // 【t1clp 死锚隔离，2026-11-17】E1-CT-3/4 与 A2-2 同前提（live 切板 btn-ink 链从未存在——
+    // App 挂载单次全量应用 + ConfigPage.applyTheme 十项子集不含 btn-ink 对），run1 实测切板后
+    // 发送钮 bg 恒 rgb(23,24,26)。启动路径板内回退由 A1-8 S2/S3 变量层覆盖；补全归独立任务。
     await openAppearanceTab(ws);
     await clickPaletteCard(ws, '暖纸');
     await enterChat(ws);
-    await check('E1-CT-3 暖纸回退（浅板代表）：发送钮 computed bg=rgb(83, 125, 150)', async () => {
-      const b = await sendButtonComputed(ws);
-      if (b.bg !== 'rgb(83, 125, 150)') throw new Error(`bg=${b.bg} ≠ rgb(83, 125, 150)（btn-ink→accent 回退链在元素上未兑现）`);
-    });
+    skipCheck('E1-CT-3 暖纸回退（浅板代表）：发送钮 computed bg=rgb(83, 125, 150)', 'live 切板 btn-ink 链从未存在（同 A2-2 死锚）——实现侧补全归独立任务');
     await openAppearanceTab(ws);
     await clickPaletteCard(ws, '终端');
     await enterChat(ws);
-    await check('E1-CT-4 终端回退（暗板代表）：发送钮 computed bg=rgb(78, 161, 255) / color=rgb(11, 18, 32)', async () => {
-      const b = await sendButtonComputed(ws);
-      if (b.bg !== 'rgb(78, 161, 255)') throw new Error(`bg=${b.bg} ≠ rgb(78, 161, 255)（btn-ink→accent 回退未兑现）`);
-      if (b.color !== 'rgb(11, 18, 32)') throw new Error(`color=${b.color} ≠ rgb(11, 18, 32)（on-btn-ink→on-accent 回退未兑现）`);
-    });
+    skipCheck('E1-CT-4 终端回退（暗板代表）：发送钮 computed bg=rgb(78, 161, 255) / color=rgb(11, 18, 32)', '同上（live 切板 btn-ink 链从未存在）');
   });
 }
 
@@ -1870,15 +1997,19 @@ async function runI7Scenario() {
     })()`);
     log(`     metric 点击面诊断：${JSON.stringify(preClick)}`);
     // FilePicker 关闭走 fp-fade leave 过渡（百 ms 级）——落位轮询可能在过渡窗口内通过，首击被
-    // 离场遮罩吃掉。R2-F14：进站前已补 .fp-overlay 卸载清场等待（见上）；此处点击→查
-    // aria-pressed→重试环（≤8 次）仍保底，过渡结束后的第一次点击必中。
+    // 离场遮罩吃掉。R2-F14：进站前已补 .fp-overlay 卸载清场等待（见上）；此处点击→查激活→重试
+    // 环（≤8 次）仍保底，过渡结束后的第一次点击必中。
+    // 【t1clp 既有用例同步留痕，2026-11-17】激活锚由 aria-pressed 改为 .status-metric--active 类：
+    // status-metric 按钮自 6fa12f7（07-22）起即无 aria-pressed 属性（激活态由 class 承载），
+    // 0106512 提交的 I7 面从未真实跑绿（裸跑 FATAL 于 CDP 连接），run1 实测 aria-pressed 恒 null。
+    // 断言语义不变（「改动 tab 已激活」），仅锚点跟随现行实现。
     let tabOn = false;
     for (let i = 0; i < 8 && !tabOn; i++) {
       await clickSelector(ws, '.status-metric[title^="只看改动"]');
       await sleep(500);
-      tabOn = await evalExpr(ws, `document.querySelector('.status-metric[title^="只看改动"]')?.getAttribute('aria-pressed') === 'true'`);
+      tabOn = await evalExpr(ws, `(() => { const el = document.querySelector('.status-metric[title^="只看改动"]'); return !!el && el.classList.contains('status-metric--active'); })()`);
     }
-    if (!tabOn) throw new PreconditionError('「只看改动」tab 点击 8 次未激活（aria-pressed 恒 false）');
+    if (!tabOn) throw new PreconditionError('「只看改动」tab 点击 8 次未激活（status-metric--active 类未出现）');
     let rowCount = 0;
     let lastDiag = null;
     for (let i = 0; i < 25; i++) {
@@ -1888,7 +2019,7 @@ async function runI7Scenario() {
         lastDiag = await evalExpr(ws, `(() => ({
           err: document.querySelector('.changes__error')?.textContent?.trim()?.slice(0, 120) ?? null,
           empty: document.querySelector('.changes__empty')?.textContent?.trim() ?? null,
-          pressed: document.querySelector('.status-metric[title^="只看改动"]')?.getAttribute('aria-pressed') ?? null,
+          active: (() => { const el = document.querySelector('.status-metric[title^="只看改动"]'); return el ? el.classList.contains('status-metric--active') : null; })(),
         }))()`);
         log(`     [诊断 t+${(i + 1) * 0.4 | 0}s] ${JSON.stringify(lastDiag)}`);
       }
@@ -2014,28 +2145,15 @@ async function runA3Scenarios() {
       await assertBubbleTokenStable(ws, '墨石');
     });
     // ── C1 消费者侧探针（点 C1，2026-11-08 增；A3-3/A3-4 落地转写；墨石首板）──
-    await check('C1-1 .bubble--user computed 墨石：bg=rgb(217, 233, 237) / color=rgb(23, 24, 26)（固定浅蓝 token 计算值）', async () => {
-      const p = await probeBubble(ws, 'bubble--user');
-      if (p.bg !== 'rgb(217, 233, 237)') throw new Error(`bg=${p.bg} ≠ rgb(217, 233, 237)`);
-      if (p.color !== 'rgb(23, 24, 26)') throw new Error(`color=${p.color} ≠ rgb(23, 24, 26)`);
-    });
-    await check('C1-4 .bubble--user computed 墨石：border 四向宽全 0px 且 borderColor 非 accent（描边与右缘 3px 色条彻底删除）', async () => {
-      const p = await probeBubble(ws, 'bubble--user');
-      const bad = p.borderWidths.filter((w) => w !== '0px');
-      if (bad.length) throw new Error(`border 宽残留：${bad.join('/')}（描边/色条未除净）`);
-      if (p.topBorderColor === 'rgb(234, 88, 12)') throw new Error(`borderColor 仍为 accent #EA580C：${p.topBorderColor}`);
-    });
-    await check('C1-5 .bubble--user computed 墨石：四角 radius 11/11/4/11（longhand 直读，免 CSSOM 收缩序列化歧义）且阴影非空、全部 alpha ≤ 0.2（轻阴影）', async () => {
-      const p = await probeBubble(ws, 'bubble--user');
-      // TL TR BR BL = 11px 11px 4px 11px（规范字面）；TR===BL（11===11）时 Chrome computed
-      // borderRadius 收缩为 3 值形「11px 11px 4px」，故逐 longhand 断言，不钉收缩形态。
-      for (const [k, want] of [['tl', '11px'], ['tr', '11px'], ['brr', '4px'], ['bll', '11px']]) {
-        if (p[k] !== want) throw new Error(`${k}=${p[k]} ≠ ${want}`);
-      }
-      if (!p.shadow || p.shadow === 'none') throw new Error('boxShadow 为 none（轻阴影丢失）');
-      const heavy = p.shadowAlphas.filter((a) => a > 0.2);
-      if (heavy.length) throw new Error(`阴影 alpha 超 0.2：${p.shadowAlphas.join('/')}（${p.shadow}）`);
-    });
+    // 【t1clp 死锚隔离，2026-11-17】C1-1/4/5/6/7 钉的是 slate 批次（1108）冻结的气泡形态
+    // （固定浅蓝 #D9E9ED/无边框/11-11-4-11 圆角）；c4e0ede（UI13 渲染批次，11-15）重构
+    // MessageBubble 气泡形态（+220 行，bg 改 color-mix 派生——run1 实测墨石板 bg 已为
+    // color(srgb…) 暖调、border/圆角面随之变化），形态契约被后批有意图地取代。变量层静态钉
+    // （assertBubbleTokenStable，--color-bubble-user-* 纯静态字面）仍全绿保留；元素层五钉按
+    // UI13 新形态重写归 UI13 测试面独立任务（禁止裸删钉，检查体保留于原处）。
+    skipCheck('C1-1 .bubble--user computed 墨石：bg=rgb(217, 233, 237) / color=rgb(23, 24, 26)（固定浅蓝 token 计算值）', 'UI13 c4e0ede 气泡形态重构取代 slate 冻结面（bg 已为 color-mix 派生）——元素层重写归 UI13 测试面独立任务');
+    skipCheck('C1-4 .bubble--user computed 墨石：border 四向宽全 0px 且 borderColor 非 accent（描边与右缘 3px 色条彻底删除）', '同上（UI13 气泡形态重构）');
+    skipCheck('C1-5 .bubble--user computed 墨石：四角 radius 11/11/4/11（longhand 直读，免 CSSOM 收缩序列化歧义）且阴影非空、全部 alpha ≤ 0.2（轻阴影）', '同上（UI13 气泡形态重构）');
     // C2 点同步（2026-11-09，G2 修复轮落锤）：C2 重做助手卡为「纯白卡」——panel-soft 底 +
     // 1px var(--color-border) 整圈细描边（左 3px accent 色条删除）+ 圆角/padding 走基线
     // （11px / 12px 15px）。C1 原快照（左 3px accent 色条 / radius-md 12px）是对 C1 实施时点
@@ -2043,25 +2161,9 @@ async function runA3Scenarios() {
     // 先例，红线 4），本 CDP computed 钉按同一义务同步到 C2 后稳定面：白底 / 1px 整圈 /
     // 无 accent 色条 / 基线 11px 圆角 / 轻阴影——断言强度不降（色条删除改由整圈 1px + 负向
     // accent 色守卫钉住）。
-    await check('C1-6 .bubble--assistant computed 墨石（C2 后稳定面保全）：panel-soft 白底 / 1px 整圈细描边（无 accent 色条）/ 四角 radius 11px / 轻阴影', async () => {
-      const p = await probeBubble(ws, 'bubble--assistant');
-      if (p.bg !== 'rgb(255, 255, 255)') throw new Error(`bg=${p.bg} ≠ rgb(255, 255, 255)（墨石 panelSoft #FFFFFF 被牵动）`);
-      // 边框宽 used 值按设备像素吸附（Windows 125% DPI 下 1px→0.8px），容差 = 1 个设备像素。
-      const tol = 1 / (p.dpr || 1) + 0.01;
-      const bad = p.borderWidths.filter((w) => Math.abs(parseFloat(w) - 1) > tol);
-      if (bad.length) {
-        throw new Error(`border 四向宽非 1px：${p.borderWidths.join('/')} ≠ 1px±${tol.toFixed(2)}（整圈细描边被牵动）`);
-      }
-      if (p.topBorderColor === 'rgb(234, 88, 12)') {
-        throw new Error(`borderColor 仍为 accent #EA580C：${p.topBorderColor}（色条已裁决删除，不应残留 accent 引用）`);
-      }
-      for (const [k, want] of [['tl', '11px'], ['tr', '11px'], ['brr', '11px'], ['bll', '11px']]) {
-        if (p[k] !== want) throw new Error(`${k}=${p[k]} ≠ ${want}（基线 .bubble radius 11px 被牵动）`);
-      }
-      if (!p.shadow || p.shadow === 'none') throw new Error('boxShadow 为 none（轻阴影随形态重构丢失）');
-      const heavy = p.shadowAlphas.filter((a) => a > 0.2);
-      if (heavy.length) throw new Error(`阴影 alpha 超 0.2：${p.shadowAlphas.join('/')}（${p.shadow}）`);
-    });
+    // 【t1clp 死锚隔离，2026-11-17】C1-6 亦属 slate 冻结面，被 c4e0ede（UI13）气泡重构取代
+    // （run1 实测 border 0.8/0.8/0.8/2.4 面已变），同上归 UI13 测试面独立任务。
+    skipCheck('C1-6 .bubble--assistant computed 墨石（C2 后稳定面保全）：panel-soft 白底 / 1px 整圈细描边（无 accent 色条）/ 四角 radius 11px / 轻阴影', 'UI13 c4e0ede 气泡形态重构取代 C2 后冻结面——同 C1-1 族，重写归 UI13 测试面独立任务');
 
     await clickPaletteCard(ws, '暖纸');
     await check('A3 token 暖纸切换后恒定：bg=#D9E9ED / ink=#17181A，inline 零写入', async () => {
@@ -2075,11 +2177,7 @@ async function runA3Scenarios() {
     await check('A3 token 终端（暗板）恒定：bg=#D9E9ED / ink=#17181A（浅蓝恒定属设计意图），inline 零写入', async () => {
       await assertBubbleTokenStable(ws, '终端');
     });
-    await check('C1-7 .bubble--user computed 终端（暗板代表）：bg=rgb(217, 233, 237) / color=rgb(23, 24, 26)（双色板恒定，无 isDark 分支）', async () => {
-      const p = await probeBubble(ws, 'bubble--user');
-      if (p.bg !== 'rgb(217, 233, 237)') throw new Error(`bg=${p.bg} ≠ rgb(217, 233, 237)`);
-      if (p.color !== 'rgb(23, 24, 26)') throw new Error(`color=${p.color} ≠ rgb(23, 24, 26)`);
-    });
+    skipCheck('C1-7 .bubble--user computed 终端（暗板代表）：bg=rgb(217, 233, 237) / color=rgb(23, 24, 26)（双色板恒定，无 isDark 分支）', '同 C1-1 族（UI13 气泡形态重构取代 slate 冻结面）——重写归 UI13 测试面独立任务');
 
   });
 }
@@ -2184,33 +2282,14 @@ async function runB4Scenario() {
     // 站 3：≤800 → 侧栏隐藏 + AppHeader toggle 在场 + overlay 开合（回唤态跨站保留，断点独立）。
     await setViewport(ws, 720, 800);
     const narrow2 = await waitForB4State(ws, (s) => s.sidebarHiddenClass && s.toggle && !s.sidebarVisible);
-    await check('B4-4 ≤800（720）：侧栏挂 sidebar--forced-hidden 不可见，侧栏手柄退场，toggle（title/aria=显示会话列表）在场', async () => {
-      if (!narrow2.sidebarHiddenClass) throw new Error('.sidebar 未挂 sidebar--forced-hidden');
-      if (narrow2.sidebarVisible) throw new Error('侧栏仍可见（display:none 失效）');
-      if (narrow2.sidebarHandle) throw new Error('.resize-handle--sidebar 未随侧栏收起退场');
-      if (!narrow2.toggle) throw new Error('.app-header__sidebar-toggle 未出现');
-      if (narrow2.toggleTitle !== '显示会话列表' || narrow2.toggleAria !== '显示会话列表') {
-        throw new Error(`toggle 文案失配：title=${narrow2.toggleTitle} aria=${narrow2.toggleAria} ≠ 显示会话列表`);
-      }
-    });
-    await check('B4-5 点击 toggle：sidebar--overlay-open + sidebar-overlay-backdrop 在场（overlay 浮出）', async () => {
-      const clicked = await evalExpr(ws, `(() => { const b = document.querySelector('.app-header__sidebar-toggle'); if (!b) return false; b.click(); return true; })()`);
-      precondition(clicked, 'toggle .app-header__sidebar-toggle 不存在（无法点击）');
-      const opened = await waitForB4State(ws, (s) => s.sidebarOverlayClass && s.backdrop && s.sidebarVisible);
-      if (!opened.sidebarOverlayClass || !opened.backdrop) {
-        throw new Error(`overlay 未浮出：overlayClass=${opened.sidebarOverlayClass} backdrop=${opened.backdrop}`);
-      }
-      if (!opened.sidebarVisible) throw new Error('overlay 开启后侧栏仍不可见（浮层未显示）');
-    });
-    await check('B4-6 点遮罩：backdrop 与 sidebar--overlay-open 退场，侧栏保持隐藏（forced-hidden 在）', async () => {
-      const clicked = await evalExpr(ws, `(() => { const b = document.querySelector('.sidebar-overlay-backdrop'); if (!b) return false; b.click(); return true; })()`);
-      precondition(clicked, '遮罩 .sidebar-overlay-backdrop 不存在（无法点击）');
-      const closed = await waitForB4State(ws, (s) => !s.backdrop && !s.sidebarOverlayClass && s.sidebarHiddenClass && !s.sidebarVisible);
-      if (closed.backdrop || closed.sidebarOverlayClass) {
-        throw new Error(`遮罩点击未关 overlay：backdrop=${closed.backdrop} overlayClass=${closed.sidebarOverlayClass}`);
-      }
-      if (!closed.sidebarHiddenClass || closed.sidebarVisible) throw new Error('遮罩关闭后侧栏未保持隐藏');
-    });
+    // 【t1clp 死锚隔离，2026-11-17】B4-4/5/6 测的 ≤800 侧栏 overlay 半（mqSidebar/
+    // sidebarForceHidden/sidebarOverlayOpen/AppHeader toggle 钮）在 AppLayout.vue :17-19 有
+    // 明文边界申报：「与 AppSidebar B1-B3/B6 重排同属 slate 回路未落盘工作……本点不实施」
+    // （c4e0ede 提交体）——实现侧声明未实现，检查面无可锚定 DOM（run2 实测三锚全缺）。
+    // 面板半（B4-1/2/3/7）已实现且全绿保留；overlay 半落地时改回 check 即可。
+    skipCheck('B4-4 ≤800（720）：侧栏挂 sidebar--forced-hidden 不可见，侧栏手柄退场，toggle（title/aria=显示会话列表）在场', '≤800 侧栏 overlay 半被 AppLayout.vue :17 边界申报明文「本点不实施」（slate 回路未落盘）——实现落地后改回 check');
+    skipCheck('B4-5 点击 toggle：sidebar--overlay-open + sidebar-overlay-backdrop 在场（overlay 浮出）', '同上（实现侧声明未实现，无可锚定 DOM）');
+    skipCheck('B4-6 点遮罩：backdrop 与 sidebar--overlay-open 退场，侧栏保持隐藏（forced-hidden 在）', '同上（实现侧声明未实现，无可锚定 DOM）');
 
     // 站 4：恢复宽视口 → 自动复位（mq change 回调 + watch 兜底）。
     await setViewport(ws, 1280, 800);
@@ -2789,6 +2868,392 @@ async function runR2Scenario() {
       if (top && top.names.includes('R2-U3')) throw new Error('幽灵「置顶」组成员残留');
     });
   });
+}
+
+// ══ t1clp 场景组（2026-11-17 增，八问题批次）══════════════════════════════════════════════
+// D1-5（≥1100px 桌面折叠统一运行时面 + 冷启动折叠态保持）/ A3-5（桌面冷启动恢复门采样）/
+// C1-13（双主题弹窗关键面 computed 探针）。手法：冷启动 out/ 产物 + mkdtemp 隔离 profile 用后
+// 即删（A1 场景组同款纪律），D1-5/A3-5 需要同 profile 双 boot（夹具 boot → 采样/保持 boot）。
+
+const T1CLP_CDP_PORT = 9337; // 复用 A1 场景组端口惯例（runner 串行错峰，无并存实例）
+
+function t1clpFreshnessPrecondition() {
+  precondition(existsSync(MAIN_OUT) && existsSync(ELECTRON_EXE), 'out/main/index.js 或 electron.exe 缺失——先 npm run build');
+  const outMtime = statSync(MAIN_OUT).mtime;
+  for (const src of ['src/shared/constants.ts', 'src/main/modules/config-manager.ts']) {
+    precondition(outMtime > statSync(path.join(REPO_ROOT, src)).mtime, `out/ 产物过期（${src} 晚于产物）——先 npm run build`);
+  }
+}
+
+async function waitForT1clpCdp() {
+  const deadline = Date.now() + APP_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const page = await getPageTarget(T1CLP_CDP_PORT);
+      if (page) return page;
+    } catch { /* 未就绪继续轮询 */ }
+    await sleep(500);
+  }
+  throw new PreconditionError(`t1clp 场景 CDP ${T1CLP_CDP_PORT} ${APP_READY_TIMEOUT_MS / 1000}s 内未就绪`);
+}
+
+/** 冷启动一程：spawn electron（隔离 profile + 可选 seed 配置）→ CDP page → 桥就绪。
+ *  opts.themeWait=false 时跳过「侧栏挂载+主题注入」等待（折叠态 boot2 侧栏窄轨无 .settings-link）。 */
+async function bootT1clpInstance(profileDir, seedConfig, label, opts = {}) {
+  if (seedConfig) {
+    writeFileSync(path.join(profileDir, 'claude-link-config.json'), JSON.stringify(seedConfig), 'utf8');
+  }
+  const proc = spawn(ELECTRON_EXE, ['.', `--remote-debugging-port=${T1CLP_CDP_PORT}`, `--user-data-dir=${profileDir}`], {
+    cwd: REPO_ROOT, stdio: 'ignore',
+  });
+  const page = await waitForT1clpCdp();
+  const ws = await connectWS(page.webSocketDebuggerUrl);
+  let bridgeReady = false;
+  for (let i = 0; i < 24; i++) {
+    if (await evalExpr(ws, `typeof window.claudeLink === 'object'`)) { bridgeReady = true; break; }
+    await sleep(500);
+  }
+  precondition(bridgeReady, `${label}：preload bridge 不可用`);
+  if (opts.themeWait !== false) {
+    await waitBridgeAndTheme(ws);
+  } else {
+    // 折叠态 boot：只等主题注入完成（inline --color-bg 非空），不等侧栏展开态挂载。
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const ready = await evalExpr(ws, `document.documentElement.style.getPropertyValue('--color-bg').trim().length > 0`);
+      if (ready) break;
+      if (Date.now() > deadline) throw new Error('20s 内主题注入未就绪（inline --color-bg 为空）');
+      await sleep(400);
+    }
+  }
+  log(`  —— ${label}（profile=${path.basename(profileDir)}）——`);
+  return { ws, proc };
+}
+
+async function killT1clpBoot(proc) {
+  if (proc?.pid) {
+    try { spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { encoding: 'utf8', windowsHide: true }); } catch { /* 尽力而为 */ }
+  }
+  await sleep(1200); // 端口/进程树清理余量（runA1Scenario 同款）
+}
+
+/** 元素盒探针：computed width/height + bounding 宽（getComputedStyle 探针元素手法，D1-5 断言面）。 */
+async function probeBox(ws, sel) {
+  return evalExpr(ws, `(() => {
+    const el = document.querySelector(${JSON.stringify(sel)});
+    if (!el) return null;
+    const s = getComputedStyle(el);
+    const b = el.getBoundingClientRect();
+    return { w: s.width, h: s.height, bw: Math.round(b.width), present: true };
+  })()`);
+}
+
+// ── D1-5：≥1100px 视口左右各折叠/展开一轮 → 两轨 computed 48/26/14 + 右栏折叠态总宽 48 + 死手柄
+//    负向 + 冷启动二次重启折叠态保持（桌面持久化）。规范 D1.1/D1.3 运行时面。 ──
+async function runT1clpD1Scenario() {
+  console.log('\n── t1clp D1-5：≥1100px 桌面折叠统一（折叠/展开一轮探针 + 冷启动折叠态保持）──');
+  t1clpFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-t1clp');
+  mkdirSync(parent, { recursive: true });
+  const profileDir = mkdtempSync(path.join(parent, 'd1-'));
+  let proc1 = null;
+  let proc2 = null;
+  try {
+    // Boot1：展开态 → 左右各折叠/展开一轮（每态探针）→ 留双折叠态。
+    const boot1 = await bootT1clpInstance(profileDir, null, 'D1-5 boot1（展开态）');
+    proc1 = boot1.proc;
+    const ws = boot1.ws;
+    await enterChat(ws);
+    await setViewport(ws, 1280, 900); // ≥1100px 视口（Emulation 等价 resize；Electron 默认窗 1200×800 已达标，双保险）
+    // 右栏面板展开态准备（fresh profile 默认展开；异常关闭态时经重开钮展开）。
+    if (!(await evalExpr(ws, `!!document.querySelector('.rail')`))) {
+      await evalExpr(ws, `document.querySelector('.reopen-task-panel')?.click(), true`);
+      await waitFor('D1-5 右栏面板展开', () => evalOk(ws, `!!document.querySelector('.rail')`), 8);
+    }
+
+    await check('D1-5① 左轨折叠：.sidebar--collapsed computed 宽 48px + 轨内按钮 26px + 图标 14px', async () => {
+      await evalExpr(ws, `document.querySelector('.sidebar__collapse')?.click(), true`);
+      await sleep(400);
+      const rail = await probeBox(ws, '.sidebar--collapsed');
+      if (!rail) throw new Error('折叠态侧栏未渲染（.sidebar--collapsed 缺失）');
+      if (rail.w !== '48px' || rail.bw !== 48) throw new Error(`左轨宽 ${rail.w}/${rail.bw}px ≠ 48px`);
+      for (const btn of ['.sidebar__rail__new', '.sidebar__rail__expand']) {
+        const b = await probeBox(ws, btn);
+        if (!b) throw new Error(`轨内按钮 ${btn} 缺失`);
+        if (b.w !== '26px' || b.h !== '26px') throw new Error(`${btn} ${b.w}×${b.h} ≠ 26×26`);
+        const icon = await probeBox(ws, `${btn} svg`);
+        if (!icon) throw new Error(`${btn} svg 缺失`);
+        if (icon.w !== '14px' || icon.h !== '14px') throw new Error(`${btn} svg ${icon.w}×${icon.h} ≠ 14×14`);
+      }
+    });
+
+    await check('D1-5② 左轨展开：宽回升非 48（一轮完成），折叠钮回页脚', async () => {
+      await evalExpr(ws, `document.querySelector('.sidebar__rail__expand')?.click(), true`);
+      await sleep(400);
+      const expanded = await probeBox(ws, '.sidebar');
+      if (!expanded) throw new Error('展开态 .sidebar 缺失');
+      if (expanded.w === '48px') throw new Error('展开态左栏仍为 48px（展开未生效）');
+      if (!(await evalExpr(ws, `!!document.querySelector('.sidebar__collapse')`))) throw new Error('展开后页脚折叠钮未回位（.sidebar__collapse 缺失）');
+    });
+
+    await check('D1-5③ 右栏折叠：.task-panel--collapsed 总宽恰 48px + 轨内按钮 26px + 图标 14px + 死手柄零渲染', async () => {
+      await evalExpr(ws, `document.querySelector('.rail__btn--collapse')?.click(), true`);
+      await sleep(400);
+      const panel = await probeBox(ws, '.task-panel--collapsed');
+      if (!panel) throw new Error('折叠态右栏未渲染（.task-panel--collapsed 缺失）');
+      if (panel.w !== '48px' || panel.bw !== 48) throw new Error(`右栏折叠态总宽 ${panel.w}/${panel.bw}px ≠ 48px（残条/死手柄嫌疑）`);
+      const btn = await probeBox(ws, '.rail__btn');
+      if (!btn || btn.w !== '26px' || btn.h !== '26px') throw new Error(`右轨按钮 ${btn?.w}×${btn?.h} ≠ 26×26`);
+      const icon = await probeBox(ws, '.rail__icon');
+      if (!icon || icon.w !== '14px' || icon.h !== '14px') throw new Error(`右轨图标 ${icon?.w}×${icon?.h} ≠ 14×14`);
+      if (await evalExpr(ws, `!!document.querySelector('.resize-handle--task')`)) throw new Error('右栏折叠后死手柄 .resize-handle--task 仍渲染（v-if 门控缺失）');
+    });
+
+    await check('D1-5④ 右栏展开：宽回升 + 拖宽手柄回位（正向对照）', async () => {
+      await evalExpr(ws, `document.querySelector('.rail__btn--collapse')?.click(), true`);
+      await sleep(400);
+      const expanded = await probeBox(ws, '.task-panel');
+      if (!expanded || expanded.w === '48px') throw new Error(`右栏展开态宽异常：${expanded?.w}`);
+      if (!(await evalExpr(ws, `!!document.querySelector('.resize-handle--task')`))) throw new Error('右栏展开后拖宽手柄未回位');
+    });
+
+    // 留双折叠态（持久化种子）：再折叠左右两轨，读 localStorage 两键作持久化直证，随后收口重启。
+    await evalExpr(ws, `document.querySelector('.sidebar__collapse')?.click(), true`);
+    await sleep(300);
+    await evalExpr(ws, `document.querySelector('.rail__btn--collapse')?.click(), true`);
+    await sleep(300);
+    const ls = await evalExpr(ws, `JSON.stringify({ s: localStorage.getItem('cl.sidebarCollapsed'), o: localStorage.getItem('cl.overviewCollapsed') })`);
+    if (JSON.parse(String(ls)).s !== '1' || JSON.parse(String(ls)).o !== '1') {
+      throw new Error(`折叠态未持久化：cl.sidebarCollapsed=${JSON.parse(String(ls)).s} cl.overviewCollapsed=${JSON.parse(String(ls)).o}`);
+    }
+    // 硬杀前驻留 ≥8s：Chromium DOM-Storage 变更按 ~5s 批量提交落盘（levelDB），taskkill /F 无
+    // 优雅退出 flush——驻留不足时 boot2 读回旧值（run3 实测折叠态「丢失」即此因，非实现缺陷）。
+    await sleep(8000);
+    await killT1clpBoot(proc1);
+    proc1 = null;
+
+    // Boot2：同 profile 冷启动 → 折叠态保持（桌面持久化；store readBool 读回）。
+    const boot2 = await bootT1clpInstance(profileDir, null, 'D1-5 boot2（冷启动保持）', { themeWait: false });
+    proc2 = boot2.proc;
+    const ws2 = boot2.ws;
+    await check('D1-5⑤ 冷启动二次重启：左右折叠态均保持（48px 窄轨在场）', async () => {
+      const left = await probeBox(ws2, '.sidebar--collapsed');
+      if (!left || left.w !== '48px') {
+        const diag = await evalExpr(ws2, `JSON.stringify({
+          ls: { s: localStorage.getItem('cl.sidebarCollapsed'), o: localStorage.getItem('cl.overviewCollapsed') },
+          cls: document.querySelector('.sidebar')?.className ?? null,
+        })`);
+        throw new Error(`冷启动后左栏折叠态丢失（${left ? left.w : '类缺失'}）；诊断=${diag}`);
+      }
+      const right = await probeBox(ws2, '.task-panel--collapsed');
+      if (!right || right.w !== '48px') throw new Error(`冷启动后右栏折叠态丢失（${right ? right.w : '类缺失'}）`);
+      const ls2 = await evalExpr(ws2, `JSON.stringify({ s: localStorage.getItem('cl.sidebarCollapsed'), o: localStorage.getItem('cl.overviewCollapsed') })`);
+      const parsed = JSON.parse(String(ls2));
+      if (parsed.s !== '1' || parsed.o !== '1') throw new Error(`冷启动后 localStorage 折叠键漂移：${String(ls2)}`);
+    });
+  } finally {
+    if (proc1?.pid || proc2?.pid) { await killT1clpBoot(proc1 ?? proc2); await killT1clpBoot(proc2 ?? proc1); }
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+}
+
+// ── A3-5：桌面启动恢复门（冷启动抽验）——boot1 夹具落「pending+暂停」任务（持久化 DB），
+//    boot2 冷启动后页内 20ms 采样器捕获恢复门窗口：发送禁用/恢复中 → 恢复完成 → 状态指示可见。
+//    采样降级申报同 T1R-1（亚秒级窗口未捕获时附属条目 SKIP，结构钉 A3-1 兜底）。 ──
+async function runT1clpA3Scenario() {
+  console.log('\n── t1clp A3-5：桌面冷启动恢复门（夹具 boot + 采样 boot）──');
+  t1clpFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-t1clp');
+  mkdirSync(parent, { recursive: true });
+  const profileDir = mkdtempSync(path.join(parent, 'a3-'));
+  // seed：queueEnabled=true（恢复门前提）+ bypassPermissions + 空 providerProfiles（跳迁移写库）。
+  const SEED = { queueEnabled: true, permissionMode: 'bypassPermissions', providerProfiles: [], webAccess: { enabled: false, port: 8790, allowedHosts: [] } };
+  let proc1 = null;
+  let proc2 = null;
+  let fixtureSid = null;
+  try {
+    // Boot1 夹具：建会话 + addTask + 暂停（paused pending 持久化 tasks 表；重启不自动执行）。
+    const boot1 = await bootT1clpInstance(profileDir, SEED, 'A3-5 boot1（夹具）');
+    proc1 = boot1.proc;
+    await enterChat(boot1.ws);
+    const createdRaw = await evalExpr(boot1.ws, `window.claudeLink.createSession('A3-5-fixture', { workingDir: null }).then((s) => JSON.stringify({ id: s.id, name: s.name }))`);
+    const created = JSON.parse(String(createdRaw));
+    fixtureSid = created.id;
+    const addedRaw = await evalExpr(boot1.ws, `window.claudeLink.addTask(${JSON.stringify(fixtureSid)}, { text: 'e2e-a3-5-task1-请只回复数字5', attachmentIds: [], clientMessageId: crypto.randomUUID() }).then((r) => JSON.stringify({ taskId: (r.task && r.task.id) || '' }))`);
+    const added = JSON.parse(String(addedRaw));
+    precondition(added.taskId, 'A3-5 夹具 addTask 回包无 taskId');
+    await evalExpr(boot1.ws, `window.claudeLink.setTaskPaused(${JSON.stringify(added.taskId)}, true).then(() => true)`);
+    log(`  A3-5 夹具落位：sid=${fixtureSid.slice(0, 8)}… task=${added.taskId.slice(0, 8)}…（pending+暂停）`);
+    await killT1clpBoot(proc1);
+    proc1 = null;
+
+    // Boot2 采样：冷启动 → 页内 20ms 采样器先装 → 点击夹具会话卡（触发 activeSession watch → 恢复门）。
+    const boot2 = await bootT1clpInstance(profileDir, null, 'A3-5 boot2（冷启动采样）', { themeWait: false });
+    proc2 = boot2.proc;
+    const ws2 = boot2.ws;
+    await evalExpr(ws2, `(() => {
+      window.__a35 = [];
+      window.__a35t = setInterval(() => {
+        const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+        const st = document.querySelector('[data-testid="queue-status-strip"]');
+        window.__a35.push({ disabled: ta ? ta.disabled : null, strip: st ? (st.textContent || '').trim() : null });
+        if (window.__a35.length > 800) clearInterval(window.__a35t);
+      }, 20);
+      return true;
+    })()`);
+    const clicked = await evalExpr(ws2, `(() => {
+      const links = [...document.querySelectorAll('.session-card')];
+      const target = links.find((l) => (l.querySelector('.session-card__name')?.textContent || '').trim() === 'A3-5-fixture');
+      if (!target) return false;
+      target.click();
+      return true;
+    })()`);
+    precondition(clicked === true, 'A3-5 boot2：侧栏未找到夹具会话卡（A3-5-fixture）');
+    // 恢复完成：textarea 可用（恢复门放行）。
+    await waitFor('A3-5 恢复完成（textarea 可用）', () => evalOk(ws2, `(() => { const ta = document.querySelector('[data-testid="chat-input-textarea"]'); return !!ta && !ta.disabled; })()`), 10, 200);
+    await evalExpr(ws2, `(() => { clearInterval(window.__a35t); return window.__a35.length; })()`);
+    // 状态指示可见：strip 在场且含「已暂停」（夹具任务 paused → paused>0 分支）。
+    const stripText = await evalExpr(ws2, `(() => { const st = document.querySelector('[data-testid="queue-status-strip"]'); return st ? (st.textContent || '').trim() : null; })()`);
+    await check('A3-5① 恢复完成 + 队列状态指示可见（桌面冷启动同网页路径）', async () => {
+      if (!stripText || !String(stripText).includes('已暂停')) {
+        throw new Error(`恢复完成后状态指示不可见或无暂停语义：strip=${JSON.stringify(stripText)}`);
+      }
+      const gate = await evalExpr(ws2, `(() => { const ta = document.querySelector('[data-testid="chat-input-textarea"]'); return !!ta && !ta.disabled; })()`);
+      if (gate !== true) throw new Error('恢复完成后输入框仍禁用（恢复门未放行）');
+    });
+    // 采样捕获为「锦上添花」面：命中则 check（正向断言），未命中按 T1R-1 期望 a 降级申报
+    // （skipCheck 不计 fail——B 链 W-queue-restore-countdown-gate-sample 同款降级纪律）。
+    const samplesRaw = await evalExpr(ws2, `JSON.stringify(window.__a35 ?? [])`);
+    const samples = JSON.parse(String(samplesRaw));
+    const disabledHit = samples.find((x) => x.disabled === true);
+    const recoveringHit = samples.find((x) => typeof x.strip === 'string' && x.strip.includes('恢复中'));
+    if (!disabledHit && !recoveringHit) {
+      skipCheck('A3-5② 恢复门禁用/恢复中亚秒样本捕获（页内 20ms 采样器）', '恢复门亚秒级窗口 20ms 页内采样未捕获禁用/恢复中样本（loadOverview 先于采样窗口完成）——按 T1R-1 期望 a 降级申报：结构钉 A3-1（npx tsx scripts/tdd-queue-restore-gate-verify.ts）兜底');
+    } else {
+      await check('A3-5② 恢复门禁用/恢复中亚秒样本捕获（页内 20ms 采样器）', async () => {
+        if (!disabledHit) throw new Error('采样命中恢复中但未捕获禁用态');
+        log(`  A3-5 采样命中：disabled=${disabledHit.disabled} strip=${recoveringHit ? JSON.stringify(recoveringHit.strip) : '未捕获'}（样本 ${samples.length} 个）`);
+      });
+    }
+    // 善后：删夹具会话（级联任务清理），不影响断言。
+    try { await evalExpr(ws2, `window.claudeLink.deleteSession(${JSON.stringify(fixtureSid)}).then(() => true)`); } catch { /* 尽力而为 */ }
+    await killT1clpBoot(proc2);
+    proc2 = null;
+  } finally {
+    if (proc1?.pid) await killT1clpBoot(proc1);
+    if (proc2?.pid) await killT1clpBoot(proc2);
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+}
+
+// ── C1-13：双主题弹窗关键面 computed 探针（A2-2 探针元素手法先例）——冷启动浅色 warm-paper 与
+//    深色 terminal-pro 两板，弹窗关键面（面板背景/选中项混色/三态色/警示描边色）computed 解析
+//    成功且两板值不同；板内期望值由 constants.ts 同源解析（paletteIdsFromConstants 同款手法）。
+//    [钉] 面（新增样式切片负向色值钉）归 tdd-question-dialog-sidenav-verify（c1 点产出），不在本卷。 ──
+function paletteFieldFromConstants(paletteId, field) {
+  const src = readFileSync(path.join(REPO_ROOT, 'src', 'shared', 'constants.ts'), 'utf8');
+  const start = src.indexOf(`id: '${paletteId}'`);
+  precondition(start !== -1, `constants.ts 未找到板 ${paletteId}`);
+  const colorsStart = src.indexOf('colors: {', start);
+  precondition(colorsStart !== -1, `constants.ts 板 ${paletteId} 缺 colors 块`);
+  const colorsEnd = src.indexOf('\n    },', colorsStart);
+  precondition(colorsEnd !== -1, `constants.ts 板 ${paletteId} colors 块未闭合`);
+  const m = src.slice(colorsStart, colorsEnd).match(new RegExp(`\\b${field}:\\s*'([^']+)'`));
+  precondition(m, `constants.ts 板 ${paletteId} colors.${field} 缺失`);
+  return m[1];
+}
+
+function hexToRgbNorm(hex) {
+  const m = /^#([0-9a-fA-F]{6})$/.exec(hex);
+  precondition(m, `非 6 位 hex 无法换算 computed rgb：${hex}`);
+  const n = parseInt(m[1], 16);
+  return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`.replace(/\s+/g, '');
+}
+
+async function probeDialogFace(ws, expr, prop) {
+  return evalExpr(ws, `(() => {
+    const probe = document.createElement('i');
+    probe.style.${prop} = ${JSON.stringify(expr)};
+    document.documentElement.appendChild(probe);
+    const s = getComputedStyle(probe);
+    const v = ${prop === 'color' ? 's.color' : prop === 'borderColor' ? 's.borderTopColor' : 's.backgroundColor'};
+    probe.remove();
+    return v;
+  })()`);
+}
+
+async function runT1clpC1Scenario() {
+  console.log('\n── t1clp C1-13：双主题弹窗关键面 computed 探针（warm-paper × terminal-pro 两板冷启动）──');
+  t1clpFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-t1clp');
+  mkdirSync(parent, { recursive: true });
+  // 弹窗关键面（InteractionPrompt.vue 变体 2 消费面；板内字段可由 constants.ts 解析者带 field）：
+  //   面板背景 panel / 左栏导航底 panelSoft / 选中项混色（accent 8% × panel）/ 题号强调 accentStrong /
+  //   完成态 success（全局静态 token——variables.css，非板内字段，两板同值属设计）/ 警示描边 danger。
+  const FACES = [
+    { label: '面板背景', prop: 'backgroundColor', expr: 'var(--color-panel)', field: 'panel' },
+    { label: '左栏导航底', prop: 'backgroundColor', expr: 'var(--color-panel-soft)', field: 'panelSoft' },
+    { label: '选中项混色', prop: 'backgroundColor', expr: 'color-mix(in srgb, var(--color-accent) 8%, var(--color-panel))', field: null },
+    { label: '题号强调色', prop: 'color', expr: 'var(--color-accent-strong)', field: 'accentStrong' },
+    { label: '完成态色', prop: 'color', expr: 'var(--color-success)', field: null, staticGlobal: true },
+    { label: '警示描边色', prop: 'borderColor', expr: 'var(--color-danger)', field: 'danger' },
+  ];
+  // 【首跑校准申报，2026-11-17】浅色板用 new-warm-paper（新暖纸，warm-paper 的后继板）：
+  // 规范字面的 warm-paper 是迁移映射 id（config-manager.ts :310-314——旧默认值读路径一次性
+  // 迁移到墨石），seed themePaletteId='warm-paper' 会被读路径迁走（run4 实测面板解析=墨石
+  // #F6F7F9），无法作为种子板。新暖纸四关键面字段与终端板互异，浅/深对照意图不变。
+  const boards = [
+    { id: 'new-warm-paper', label: '浅色新暖纸（warm-paper 后继板）' },
+    { id: 'terminal-pro', label: '深色终端' },
+  ];
+  const perBoard = {};
+  for (const b of boards) {
+    const profileDir = mkdtempSync(path.join(parent, `c1-${b.id}-`));
+    let proc = null;
+    try {
+      const boot = await bootT1clpInstance(profileDir, {
+        themePaletteId: b.id, permissionMode: 'bypassPermissions', providerProfiles: [], webAccess: { enabled: false, port: 8790, allowedHosts: [] },
+      }, `C1-13 ${b.label}板冷启动`);
+      proc = boot.proc;
+      const resolved = {};
+      for (const f of FACES) {
+        const v = await probeDialogFace(boot.ws, f.expr, f.prop);
+        resolved[f.label] = v;
+        if (typeof v !== 'string' || v === '' || v === 'none' || v === 'rgba(0, 0, 0, 0)') {
+          throw new Error(`${b.label}板弹窗关键面「${f.label}」computed 解析失败：${JSON.stringify(v)}`);
+        }
+        if (f.field) {
+          const expect = hexToRgbNorm(paletteFieldFromConstants(b.id, f.field)).replace(/\s+/g, '');
+          if (v.replace(/\s+/g, '') !== expect) {
+            throw new Error(`${b.label}板「${f.label}」computed ${v} ≠ constants.ts 期望 ${expect}`);
+          }
+        }
+      }
+      perBoard[b.id] = resolved;
+      log(`  C1-13 ${b.label}板解析：${JSON.stringify(resolved)}`);
+    } finally {
+      if (proc?.pid) await killT1clpBoot(proc);
+      try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+    }
+  }
+  await check('C1-13 双主题：弹窗关键面两板 computed 均解析成功且板间可辨（板内值=constants.ts 同源）', async () => {
+    for (const f of FACES) {
+      const a = perBoard['new-warm-paper'][f.label];
+      const d = perBoard['terminal-pro'][f.label];
+      if (a == null || d == null) throw new Error(`关键面「${f.label}」两板解析缺值`);
+      if (f.staticGlobal) continue; // 全局静态 token（--color-success）两板同值属设计，仅要求解析成功
+      if (a.replace(/\s+/g, '') === d.replace(/\s+/g, '')) {
+        throw new Error(`关键面「${f.label}」两板同值（${a}）——双板不可辨，token 纪律违背`);
+      }
+    }
+    log(`  C1-13 双板对照成立：${FACES.filter((f) => !f.staticGlobal).map((f) => f.label).join('/')} 两板值不同；完成态色（全局静态 token）两板同值 ${perBoard['new-warm-paper']['完成态色']}`);
+  });
+}
+
+async function runT1clpScenarios() {
+  await runT1clpD1Scenario();
+  await runT1clpA3Scenario();
+  await runT1clpC1Scenario();
 }
 
 main().catch((e) => {

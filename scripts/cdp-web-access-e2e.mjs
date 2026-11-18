@@ -4,41 +4,71 @@
 // 2026-11-14 UI13-P12 增四个 W 用例：W-queue-panel（队列面板 + getQueueOverview 回包形状 + tasks_changed
 // 帧级证据含 T12-H 帧时序）/ W-sidebar-actions（卡片置顶→取消→删除收尾）/ W-sidebar-collapse（侧栏折叠展开
 // DOM 断言）/ W-user-timestamp（用户气泡「你 · 发送于」caption 两向断言）。
+// 2026-11-16 八问题批次 T1B 增 13 个 W 场景（03b §1/§4/§7/§8/§11/§12/§13 + 03 §5 E2-06）：
+//   W-dev-stale-banner（D2-3 dev 横幅五步）/ W-mcp-scan（E1-5 扫描钮+零写入只读纪律）/
+//   W-skill-refresh-web（E5-2 全局刷新 busy→复位）/ W-mcp-external-change（E2-06 外部改 .mcp.json →
+//   MCP tab 重拉可见）/ W-collapse-persist（D1-4 折叠+宽度 localStorage 持久化三步）/
+//   W-queue-restore-countdown（T1R-1 倒计时刷新→恢复门→发送=入队，含 A2-3/A2-4/A3-3）/
+//   W-queue-restore-running（T1R-2 running 刷新→发送=入队 + A2-4）/ W-queue-restore-standby（T1R-3
+//   standby 发送=直发）/ W-turn-footnote（F1-2a 成功正文+F1-2b 工具结尾+F1-3 仅最新回合）/
+//   W-question-sidenav / W-question-guard / W-question-submit / W-question-single（C1-14 四场景；
+//   夹具=interaction store 注入真实 AskUserQuestion payload 形状 + respondInteraction 页内 stub，
+//   见各场景头注与 t1b 点报告降级申报）。
 //
-// 用法（编排器/复现者手动准备环境，脚本只做断言）：
-//   1. npm run build && npx electron . --remote-debugging-port=9223   （应用运行，8790 监听）
-//   2. 启动 Chrome headless（Chrome 可执行路径按本机安装位置准备，或自行为命令赋值；
-//      user-data-dir 自选临时目录）：
-//      "<Chrome 可执行路径>" --headless=new --remote-debugging-port=9224 ^
-//        --user-data-dir=<自选临时目录> --no-first-run --no-default-browser-check about:blank
-//   3. npm run test:cdp:web-access
+// 用法（两种模式，2026-11-16 T1B 闸门修复重构）：
 //
-//   隔离跑（推荐，符合仓库 AGENTS.md：不得写用户真实配置）：
-//     npx electron . --user-data-dir=<临时目录> --remote-debugging-port=9223
-//     node scripts/cdp-web-access-e2e.mjs --config <临时目录>/claude-link-config.json
+//   ① 裸跑（默认，闸门形态 `npm run test:cdp:web-access` / `node scripts/cdp-web-access-e2e.mjs`）：
+//      自举隔离环境（ISO 模式）——脚本自行完成：构建新鲜度检查（src 比 out/renderer 新才重建）→
+//      隔离 profile seed（读 %APPDATA% 真实配置为底稿，只改 webAccess.port=空闲端口(8791+)、
+//      workingDirectory=<ISO 夹具目录>、permissionMode=bypassPermissions 三项，落 <ISO>/app/claude-link-config.json，
+//      全程不写真实配置）→ 拉起 electron（--user-data-dir=<ISO>/app，electron-store 随 userData 隔离，
+//      单实例锁按 userData 不与真实实例冲突）→ 拉起 headless Chrome（9224，--user-data-dir=<ISO>/chrome）→
+//      跑套件 → 按 PID taskkill /T /F 收口 + rmSync <ISO> 整目录（用后删除，AGENTS.md 隔离纪律）。
+//      先例：scripts/cdp-update-e2e.mjs 的 ISO_DIR 自举做法（仓库 AGENTS.md 认可）。
+//
+//   ② 外部备环境跑（--config 指定时，行为与旧版完全一致，脚本只做断言不做拉起）：
+//      1. npm run build && npx electron . --remote-debugging-port=9223   （应用运行，8790 监听）
+//      2. 启动 Chrome headless（Chrome 可执行路径按本机安装位置准备，或自行为命令赋值；
+//         user-data-dir 自选临时目录）：
+//         "<Chrome 可执行路径>" --headless=new --remote-debugging-port=9224 ^
+//           --user-data-dir=<自选临时目录> --no-first-run --no-default-browser-check about:blank
+//      3. node scripts/cdp-web-access-e2e.mjs --config <临时目录>/claude-link-config.json
 //
 // 退出协议：
 //   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）+ W-changes-panel PASS + W-mcp-settings PASS
-//             + W-queue-panel PASS + W-sidebar-actions PASS + W-sidebar-collapse PASS + W-user-timestamp PASS。
-//   - exit 1：任一 B1-B8 / W-changes-panel / W-mcp-settings / W-queue-panel / W-sidebar-actions / W-sidebar-collapse /
-//             W-user-timestamp 断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常（exceptionThrown 或 console error）。
-//   - exit 2：前置条件不满足（Chrome 9224 / 应用 8790 / 配置 token 不可用），或实例新鲜度校验不通过
-//             （P3-B：未构建 / 实例未起 / 监听进程启动时间不可读 / 实例过旧——8790 逐个校验全部 LISTENING
-//             PID，任一 PID 启动时间 ≥ out/renderer mtime 即放行，全部 PID 过旧（或启动时间均不可读）
-//             即判不通过，防「遗留实例 × 重建后 hash 轮换」缓存投毒假红；脚本只校验+指引，
-//             不自动重启任何实例）。--config 未指定时读 %APPDATA%/claude-link/claude-link-config.json。
+//             + W-queue-panel PASS + W-sidebar-actions PASS + W-sidebar-collapse PASS + W-user-timestamp PASS
+//             + 八问题批次 T1B 的 13 个 W 场景（W-dev-stale-banner / W-mcp-scan / W-skill-refresh-web /
+//             W-mcp-external-change / W-collapse-persist / W-queue-restore-{countdown,running,standby} /
+//             W-turn-footnote / W-question-{sidenav,guard,submit,single}）全 PASS 或带理由 SKIP
+//             （W-queue-restore-countdown-gate-sample / W-turn-footnote-tooltail 为采样降级/夹具降级的
+//             附属记账条目，SKIP 必须带原因；SKIP 汇总单独列出）。
+//   - exit 1：任一 B1-B8 / W-* / 上述 13 个 T1B 场景断言失败 / 截图失败（*-shot 记账）/ 出现渲染层异常
+//             （exceptionThrown 或 console error）。
+//   - exit 2：前置条件不满足。外部备环境跑（--config）下同旧版：Chrome 9224 / 应用 8790 / 配置 token
+//             不可用，或实例新鲜度校验不通过（P3-B：未构建 / 实例未起 / 监听进程启动时间不可读 / 实例过旧
+//             ——PORT 逐个校验全部 LISTENING PID，任一 PID 启动时间 ≥ out/renderer mtime 即放行，全部 PID
+//             过旧（或启动时间均不可读）即判不通过，防「遗留实例 × 重建后 hash 轮换」缓存投毒假红）。
+//             裸跑（ISO 模式）下 exit 2 仅剩：真实配置缺 webAccessToken / 构建失败 / electron 或 Chrome
+//             拉起后端口迟迟不监听 / 9224 已被外部进程占用（防复用污染）——实例由脚本自行拉起，
+//             新鲜度校验对自举实例恒真（启动时间晚于构建）。
+//             --config 未指定时真实配置底稿读 %APPDATA%/claude-link/claude-link-config.json（只读，
+//             写入全部落在 ISO 目录）。
 //
 // 技术纪律（用户约束）：纯 CDP 原生（Input/Runtime/Network/Page），不依赖 computer-use 等 skill。
 // 证据落盘：docs/reports/web-e2e-screenshots/B*.png、W-changes-panel.png、W-mcp-settings.png、
-//           W-queue-panel*.png、W-sidebar-actions*.png、W-sidebar-collapse*.png、W-user-timestamp*.png + 同目录 run-B1-B8.log。
+//           W-queue-panel*.png、W-sidebar-actions*.png、W-sidebar-collapse*.png、W-user-timestamp*.png、
+//           T1B 新场景同目录 W-dev-stale-banner*.png / W-mcp-scan*.png / W-skill-refresh-web*.png /
+//           W-mcp-external-change*.png / W-collapse-persist*.png / W-queue-restore-*.png /
+//           W-turn-footnote*.png / W-question-*.png + 同目录 run-B1-B8.log。
 // 敏感纪律：token 从 %APPDATA%/claude-link/claude-link-config.json 顶层键 webAccessToken 读取
 // （--config 指定时为该路径，隔离 profile 用），一切输出（含 URL 日志）掩码为前 4 后 4。
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
 // CLI 参数读取（--k v）——必须在 CONFIG_PATH 之前定义：CONFIG_PATH 经 argOf('--config') 求值，
 // 而 const 箭头函数不提升（原先定义在文件靠下，移到此处以满足求值顺序；调用形态不变）。
@@ -49,7 +79,10 @@ const CHROME_CDP_PORT = 9224;
 // 真实配置），隔离实例的配置与 token 都在隔离目录里，故需能把配置路径指过去。
 // 未指定 --config 时仍读 %APPDATA%/claude-link/claude-link-config.json（默认行为不变）。
 const DEFAULT_CONFIG_PATH = path.join(process.env.APPDATA ?? '', 'claude-link', 'claude-link-config.json');
-const CONFIG_PATH = argOf('--config', DEFAULT_CONFIG_PATH);
+// ISO 模式（裸跑默认）：未指定 --config 时自举隔离环境（拉实例+seed 配置）；--config 指定时保持旧版
+// 「外部备环境、脚本只断言」行为（2026-11-16 T1B 闸门修复，见头注释用法①）。
+const ISO_MODE = !process.argv.includes('--config');
+let CONFIG_PATH = argOf('--config', DEFAULT_CONFIG_PATH);
 const SHOT_DIR = path.resolve('docs/reports/web-e2e-screenshots');
 const LOG_PATH = path.join(SHOT_DIR, 'run-B1-B8.log');
 const E2E_MESSAGE_TEXT = '请只回复数字 42,不要使用任何工具';
@@ -87,10 +120,12 @@ const LAN_IP = argOf('--lan-ip', deriveLanIp());
 const TS_IP = argOf('--ts-ip', deriveTsIp());
 
 // ── 配置与掩码 ──
+// ISO 模式下这三个值先按真实配置读出（仅作缺 token 早探），自举 seed 落盘后在 ensureIsoEnvironment()
+// 内整体重派生指向 ISO seed（CONFIG_PATH/rawConfig/PORT/TOKEN 三者必须同源同轮更新，防半新半旧）。
 let rawConfig;
 try { rawConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); } catch { rawConfig = null; }
-const PORT = rawConfig?.webAccess?.port ?? 8790;
-const TOKEN = typeof rawConfig?.webAccessToken === 'string' ? rawConfig.webAccessToken : '';
+let PORT = rawConfig?.webAccess?.port ?? 8790;
+let TOKEN = typeof rawConfig?.webAccessToken === 'string' ? rawConfig.webAccessToken : '';
 const maskTok = () => (TOKEN ? `${TOKEN.slice(0, 4)}****${TOKEN.slice(-4)}` : '(无)');
 const sanitize = (text) => (TOKEN ? String(text).split(TOKEN).join(maskTok()) : String(text));
 
@@ -115,15 +150,24 @@ function precondition(cond, msg) { if (!cond) throw new PreconditionError(msg); 
 
 // V1：脚本级总超时兜底（对齐 scripts/web-access-e2e-probe.ts 的 TOTAL_TIMEOUT_MS 做法），
 // 超时打印已完成用例汇总后 exit 1，绝不无声挂死。
-const TOTAL_TIMEOUT_MS = 600_000;
-const totalTimer = setTimeout(() => {
-  log(`[总超时] ${TOTAL_TIMEOUT_MS}ms 到，脚本自杀退出（防挂死）`);
-  log('==== 超时时刻已完成的用例汇总 ====');
-  for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
-  flushLog();
-  process.exit(1);
-}, TOTAL_TIMEOUT_MS);
-totalTimer.unref();
+// T1B（2026-11-16）：套件增至 13 个 W 场景后含 3 次真实队列倒计时窗（taskDelayMinutes=1 → 60s/窗）
+// 与多个真实回合，600s 预算不够——提高到 1200s（申报见 t1b 点报告）。
+const TOTAL_TIMEOUT_MS = 1_200_000;
+// T1B 闸门修复（2026-11-16）：ISO 自举可能含一次构建（分钟级），不应挤占套件预算——总看门狗改为
+// armSuiteWatchdog() 延迟武装（ISO 模式在 ensureIsoEnvironment() 成功后、外部备环境模式维持模块加载即武装，
+// 与旧版行为一致）；自举自身由 BOOTSTRAP_TIMEOUT_MS 独立兜底（挂死 exit 2，见 ensureIsoEnvironment）。
+function armSuiteWatchdog() {
+  const totalTimer = setTimeout(() => {
+    log(`[总超时] ${TOTAL_TIMEOUT_MS}ms 到，脚本自杀退出（防挂死）`);
+    log('==== 超时时刻已完成的用例汇总 ====');
+    for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
+    flushLog();
+    process.exit(1);
+  }, TOTAL_TIMEOUT_MS);
+  totalTimer.unref();
+}
+const BOOTSTRAP_TIMEOUT_MS = 900_000; // 自举（含可选构建）上限 15 分钟，超时 exit 2（前置条件不满足）
+if (!ISO_MODE) armSuiteWatchdog();
 
 // ── CDP 基础（连接写法对齐 scripts/cdp-real-window-e2e.mjs）──
 async function getPageTarget() {
@@ -199,6 +243,9 @@ async function navigate(ws, url) {
 // ── WS 帧证据收集（Network.webSocketFrameSent / Received）──
 const frameEvidence = { sent: [], received: [] };
 function resetFrameEvidence() { frameEvidence.sent.length = 0; frameEvidence.received.length = 0; }
+// ── Page.loadEventFired 计数（P24 修复的刷新完成事件源；Page.enable 于主 ws 连接后即启用，
+// reload/导航每次完成加载各递增一次——waitReloadComplete 以「计数越过发送前基线」判定刷新完成）──
+const pageLoadTicks = { count: 0 };
 
 // ── 页面就绪探针 ──
 const connectedExpr = `(() => {
@@ -322,6 +369,199 @@ async function deleteActiveSessionViaStore(ws) {
   } catch { return false; }
 }
 
+// ── 八问题批次 T1B W 用例共用辅助（2026-11-16；形态沿用既有 W 辅助与 pinia 直读惯例）──
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// pinia session store 直读权威状态位（既有用例同款形态，提炼复用）。
+async function activeSessionId(ws) {
+  return evalExpr(ws, `(() => {
+    const app = document.querySelector('#app');
+    const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+    const st = pinia && pinia._s ? pinia._s.get('session') : null;
+    return st?.activeSession?.id ?? '';
+  })()`);
+}
+// 队列权威快照（A2/A3 状态源=主进程权威快照；经 web 桥真实通道取回）。
+async function queueOverview(ws, sid) {
+  const raw = await evalExpr(ws, `window.claudeLink.getQueueOverview(${JSON.stringify(sid)}).then((r) => JSON.stringify(r))`);
+  return JSON.parse(String(raw));
+}
+// 轮询主进程权威快照至谓词成立（返回首份满足的快照；超时抛 waitFor 风格错误）。
+async function pollOverview(ws, sid, label, pred, timeoutS = 90, intervalMs = 400) {
+  const deadline = Date.now() + timeoutS * 1000;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await queueOverview(ws, sid);
+    try { if (pred(last)) return last; } catch { /* 谓词内部异常按未满足继续轮询 */ }
+    await sleep(intervalMs);
+  }
+  throw new Error(`等待超时（${timeoutS}s）：${label}；末次快照 status=${last?.state?.status} tasks=${(last?.tasks ?? []).length}`);
+}
+// ChatInput 门态（A3 恢复门断言面：textarea/send 按钮 disabled 权威反射）。
+async function chatInputGate(ws) {
+  const raw = await evalExpr(ws, `(() => {
+    const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+    const btn = document.querySelector('[data-testid="chat-send-button"]');
+    return JSON.stringify({ hasInput: !!ta, textareaDisabled: ta ? ta.disabled : null, sendDisabled: btn ? btn.disabled : null });
+  })()`);
+  return JSON.parse(String(raw));
+}
+// A3 队列状态轻量指示条（queue-status-strip + 文本）。
+async function queueStripState(ws) {
+  const raw = await evalExpr(ws, `(() => {
+    const el = document.querySelector('[data-testid="queue-status-strip"]');
+    return JSON.stringify({ present: !!el, text: el ? ((el.querySelector('.queue-strip__text')?.textContent ?? el.textContent) || '').trim() : '' });
+  })()`);
+  return JSON.parse(String(raw));
+}
+// ChatPage 即时 notice 横条（入队「已加入队列」反馈；4s 自动消失，须发送后立即轮询）。
+async function noticeState(ws) {
+  const raw = await evalExpr(ws, `(() => {
+    const el = document.querySelector('.notice');
+    return JSON.stringify({ present: !!el, text: el ? (el.textContent || '').trim() : '' });
+  })()`);
+  return JSON.parse(String(raw));
+}
+async function assistantBubbleCount(ws) {
+  return evalExpr(ws, `document.querySelectorAll('.bubble--assistant').length`);
+}
+async function userBubbleTexts(ws) {
+  const raw = await evalExpr(ws, `JSON.stringify([...document.querySelectorAll('.bubble-wrap--user .bubble')].map((b) => (b.innerText || '')))`);
+  try { return JSON.parse(String(raw)); } catch { return []; }
+}
+// ChatInput 填字 + 发送（既有 B3 同款两步，提炼复用）。
+async function setChatInput(ws, text) {
+  await evalExpr(ws, `(() => {
+    const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+    ta.value = ${JSON.stringify(text)};
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+}
+async function clickSend(ws) {
+  await evalExpr(ws, `document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
+}
+// 右侧活动面板展开 + 切 queue Tab（W-queue-panel 同款步骤，提炼复用；reload 后 rightTab 重置
+// 'all'，任务卡 .task-item 仅在 queue tab 渲染——T1B 队列场景断言任务卡前必走）。
+async function openQueuePanelTab(ws, label) {
+  await evalExpr(ws, `document.querySelector('.reopen-task-panel')?.click(), true`);
+  await waitFor(`${label}：右侧活动面板展开（.rail 在位）`, () => evalOk(ws, `!!document.querySelector('.rail')`), 10);
+  const needQueueClick = await evalOk(ws, `(() => {
+    const app = document.querySelector('#app');
+    const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+    const st = pinia && pinia._s ? pinia._s.get('session') : null;
+    return st ? st.rightTab !== 'queue' : false;
+  })()`);
+  if (needQueueClick === true) {
+    const qClicked = await evalExpr(ws, `(() => {
+      const btn = document.querySelector('button[aria-label="排队任务"]');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()`);
+    if (qClicked !== true) throw new Error('未找到图标轨「排队任务」按钮（button[aria-label="排队任务"]）');
+  }
+  await waitFor(`${label}：.queue-bar 排队状态条渲染`, () => evalOk(ws, `!!document.querySelector('.queue-bar')`), 10);
+}
+// 整页刷新完成等待（P24 修复，round-002）：Page.reload 发出后等「本命令引发的
+// Page.loadEventFired」（计数越过发送前基线 = 新文档加载完成）再继续——旧实现 reload 发出即返回，
+// 导航提交前旧页仍存活，connectedExpr 在预刷新旧页瞬时满足，恢复后断言可能整段落旧页
+//（round-001 审查 P24）。导航中 Runtime.evaluate 失败由 waitFor 按未满足继续轮询消化。
+async function waitReloadComplete(ws, label) {
+  const before = pageLoadTicks.count;
+  await cdpSend(ws, 'Page.reload');
+  await waitFor(`${label}：刷新完成（Page.loadEventFired）`, () => pageLoadTicks.count > before, 20, 50);
+}
+// 整页刷新（等刷新完成）+ 桥重连 + chat 路由就绪（B5 同款，提炼复用；hash 路由刷新后保持）。
+async function reloadAndReconnect(ws, label) {
+  await waitReloadComplete(ws, label);
+  await waitFor(`${label}：刷新后桥连接恢复`, () => evalOk(ws, connectedExpr), 30);
+  // 路由就绪判定兼容折叠态：折叠持久化（cl.sidebarCollapsed='1'）时展开态 new-button 被
+  // v-if 卸载，窄轨 .sidebar__rail__new 是等价的「新建会话」入口（W-collapse-persist 的
+  // 折叠保持断言正是走折叠态 reload）。
+  await waitFor(`${label}：chat 路由就绪（新建会话入口在位）`, () => evalOk(ws, `!!document.querySelector('button.new-button') || !!document.querySelector('.sidebar__rail__new')`), 15);
+}
+// 回合收口等待：先等 stream-group 出现（回合真正开跑，≤15s），再等其退场（≤timeoutS），再 500ms 沉降。
+async function waitTurnSettled(ws, label, timeoutS = 150) {
+  // 起点清零：上一回合的 stream-group 残留在场时先等其退场（防第一段「出现」等待被残留短路、
+  // 双段瞬时通过误判终态——run-4 W-turn-footnote 假红根因）。
+  await waitFor(`${label}：前序流式组退场（若在场）`, () => evalOk(ws, `!document.querySelector('.stream-group')`), 15);
+  // 「回合开跑」等待容忍零流式（单 token 回复整回合可能不渲染 stream-group——run-6 实测）：
+  // 15s 内未出现按「无流式回合」继续，终态由退场等待（立即通过）收口。
+  await waitFor(`${label}：回合开跑（stream-group 在场）`, () => evalOk(ws, `!!document.querySelector('.stream-group')`), 15)
+    .catch(() => log(`  ${label}：15s 未见 stream-group（容忍零流式回合），按退场检测收口`));
+  await waitFor(`${label}：回合终态（stream-group 退场）`, () => evalOk(ws, `!document.querySelector('.stream-group')`), timeoutS);
+  await sleep(500);
+}
+// C1-14 夹具注入：interaction store 注入真实 AskUserQuestion payload 形状
+//（镜像 sdk-interactions.buildWizardAskUserQuestionPayload / buildAskUserQuestionInteractionPayload
+// 的字段形态：kind form、q0..qN、option-N + __other__ 尾部、allowOther/otherLabel），
+// 并以页内 stub 接管 window.claudeLink.respondInteraction（记录回包形状、不触主进程——
+// store 注入的请求主进程无对应挂起，真实回包会落 unknown-id 路径）。降级申报见 t1b 点报告。
+let wizardSeq = 0;
+async function injectWizardFixture(ws, { single = false } = {}) {
+  // 注入前等旧 overlay 完全退场（上一夹具 cleanup 后 Vue 卸载是异步 patch；旧 overlay 残留时
+  // 点击命中的是已卸载组件的 DOM → no-op → 场景假红）。
+  await waitFor('注入前旧弹窗退场', () => evalOk(ws, `!document.querySelector('.interaction-overlay')`), 3)
+    .catch(() => { /* 无旧弹窗或退场超时（3s）不阻塞——继续注入 */ });
+  wizardSeq += 1;
+  const rawQ = [
+    { title: `e2e-wizard-q${wizardSeq}-a：部署目标环境是？`, options: [{ label: '开发环境' }, { label: '生产环境' }] },
+    { title: `e2e-wizard-q${wizardSeq}-b：启用哪些模块？（多选）`, options: [{ label: '认证' }, { label: '日志' }, { label: '缓存' }], multiSelect: true },
+    { title: `e2e-wizard-q${wizardSeq}-c：实例名称？`, options: [{ label: '默认实例' }, { label: '自定义实例' }] },
+  ];
+  const id = `e2e-wizard-${wizardSeq}-${Date.now()}`;
+  const payload = single
+    ? {
+        id, sessionId: '', kind: 'single-choice', source: 'E2E', toolName: 'AskUserQuestion', toolUseId: `e2e-tooluse-${wizardSeq}`,
+        title: rawQ[0].title, description: '请选择一个选项，按 Enter 提交。', multiSelect: false, allowOther: true, otherLabel: 'Other', defaultOptionIds: [],
+        input: { questionIndex: 0, question: { question: rawQ[0].title, header: 'E2E', options: rawQ[0].options, multiSelect: false } },
+        options: [...rawQ[0].options.map((o, j) => ({ id: `option-${j}`, label: o.label, description: '' })), { id: '__other__', label: 'Other', description: '输入自定义答案。' }],
+      }
+    : {
+        id, sessionId: '', kind: 'form', source: 'AskUserQuestion', toolName: 'AskUserQuestion', toolUseId: `e2e-tooluse-${wizardSeq}`,
+        title: 'Claude Code 需要你回答 3 个问题', description: '逐题选择，可返回上一步修改答案，最后一次性提交。',
+        input: { questions: rawQ.map((x) => ({ question: x.title, header: 'E2E', options: x.options, multiSelect: !!x.multiSelect })) },
+        questions: rawQ.map((x, i) => ({
+          id: `q${i}`, title: x.title, source: `Q${i + 1}`,
+          options: [...x.options.map((o, j) => ({ id: `option-${j}`, label: o.label, description: '' })), { id: '__other__', label: 'Other', description: '输入自定义答案。' }],
+          multiSelect: !!x.multiSelect, allowOther: true, otherLabel: 'Other', defaultOptionIds: [],
+        })),
+      };
+  const enqueued = await evalExpr(ws, `(() => {
+    const app = document.querySelector('#app');
+    const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+    const ist = pinia && pinia._s ? pinia._s.get('interaction') : null;
+    if (!ist) return 'no-store';
+    window.__e2eRespondLog = [];
+    window.__e2eRespondOrig = window.claudeLink.respondInteraction;
+    window.claudeLink.respondInteraction = async (r) => { window.__e2eRespondLog.push(JSON.parse(JSON.stringify(r || {}))); return true; };
+    return ist.enqueueRemote(${JSON.stringify(payload)}) === true ? 'ok' : 'dup';
+  })()`);
+  if (enqueued !== 'ok') throw new Error(`夹具注入失败（${enqueued}）`);
+  await waitFor('wizard/单题弹窗渲染', () => evalOk(ws, `!!document.querySelector('.interaction-overlay')`), 10);
+  // 300ms 直提守卫消隐（C2）：上一场景/上一轮点击的 lastDirectSubmitAt 窗口内，紧随的选项点击
+  // 会被 wizardToggleOption 吞掉（run-3/4 W-question-guard 假红根因）——注入后统一垫 400ms。
+  await sleep(400);
+  return payload;
+}
+// 夹具善后：移除注入请求 + 还原 respondInteraction（幂等；弹窗未关时强制摘除）。
+async function cleanupWizardFixture(ws, payloadId) {
+  try {
+    await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const ist = pinia && pinia._s ? pinia._s.get('interaction') : null;
+      if (ist) {
+        ist.requests = (ist.requests || []).filter((r) => r.id !== ${JSON.stringify(payloadId)});
+        if (ist.meta && typeof ist.meta.delete === 'function') ist.meta.delete(${JSON.stringify(payloadId)});
+      }
+      if (window.__e2eRespondOrig) { window.claudeLink.respondInteraction = window.__e2eRespondOrig; window.__e2eRespondOrig = null; }
+      window.__e2eRespondLog = [];
+      return true;
+    })()`);
+  } catch { /* 善后尽力而为（页面可能已重载，stub 随之消失） */ }
+}
+
 // ── 实例新鲜度校验（P3-B：防「遗留实例 × 重建后 hash 轮换」缓存投毒假红）──
 // 背景（评审 §4 根因链）：本脚本不自起实例，依赖手工预起 app（8790）+ headless Chrome（9224）。
 // 已复现事故形态：遗留实例（启动时间早于最后一次构建）内存里的 index.html 引用旧 hash 的
@@ -410,8 +650,194 @@ function assertFreshInstances() {
   log(`实例新鲜度校验通过：${startByPid.map((e) => describe(e.pid, e.startMs)).join('、')}；最新构建 ${new Date(buildMs).toISOString()}（${BUILD_DIR} mtime）`);
 }
 
+// ── ISO 自举（裸跑默认；--config 外部备环境模式不走此路径，2026-11-16 T1B 闸门修复）──
+// 背景：闸门命令为裸 `node scripts/cdp-web-access-e2e.mjs`，旧版在此形态下只会校验前置条件（实例未起
+// → exit 2），环境靠人工预先准备——闸门环境无人备环境，必红。修复：裸跑时脚本自举隔离环境，
+// 先例 = scripts/cdp-update-e2e.mjs 的 ISO_DIR 做法（仓库 AGENTS.md 认可）：自建 userData、按 PID 收口、
+// 用后 rmSync。隔离纪律（仓库 AGENTS.md）：真实配置只读不改，一切写入落 ISO 目录。
+const ISO_APP_CDP_PORT = 9223; // 套件不直连应用 CDP（只经 Chrome 9224→web 页面→WS 驱动），按惯例仍传给 electron 便于人工排查
+// CACHE_ROOT：env 覆盖惯例对齐 cdp-update-e2e.mjs；默认优先 D:\software\Cache（用户级临时文件约定，
+// 全局指令：临时文件一律放该目录），目录不存在回落 os.tmpdir()。
+const CACHE_ROOT = process.env.CLAUDE_LINK_CACHE_ROOT
+  ?? (fs.existsSync('D:/software/Cache') ? 'D:/software/Cache/claude-link-cache' : path.join(os.tmpdir(), 'claude-link-cache'));
+const ISO_DIR = path.join(CACHE_ROOT, 'claude-link-web-e2e-iso');
+const ISO_APP_DIR = path.join(ISO_DIR, 'app'); // electron --user-data-dir：electron-store 配置随 userData 隔离（config-manager.ts name='claude-link-config'）
+const ISO_CHROME_DIR = path.join(ISO_DIR, 'chrome');
+const ISO_FIXTURE_DIR = path.join(ISO_DIR, 'fixture'); // seed workingDirectory：E2-06 夹具目录不可知问题的答案（1717 行前置的满足形态）
+const ISO_CONFIG_PATH = path.join(ISO_APP_DIR, 'claude-link-config.json');
+
+let isoElectronProc = null;
+let isoChromeProc = null;
+let isoCleaned = false;
+function isoTeardown() {
+  if (isoCleaned) return;
+  isoCleaned = true;
+  // 按 PID 精确收口（禁按映像名，防误伤用户日常实例——cdp-update-e2e.mjs 同款纪律）。
+  for (const [name, proc] of [['electron', isoElectronProc], ['chrome', isoChromeProc]]) {
+    if (proc?.pid) {
+      try { spawnSync('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { encoding: 'utf8', windowsHide: true, timeout: 20_000 }); log(`  [iso-teardown] ${name} PID ${proc.pid} 已 taskkill /T /F`); } catch { /* 尽力而为 */ }
+    }
+  }
+  try { fs.rmSync(ISO_DIR, { recursive: true, force: true }); log(`  [iso-teardown] 隔离目录已删除：${ISO_DIR}`); } catch (e) { log(`  [iso-teardown] 隔离目录删除失败（申报留人工清理）：${String(e.message).slice(0, 120)}`); }
+  try { flushLog(); } catch { /* 尽力而为 */ }
+}
+if (ISO_MODE) {
+  process.on('exit', isoTeardown);
+  process.on('SIGINT', () => { isoTeardown(); process.exit(130); });
+  process.on('SIGTERM', () => { isoTeardown(); process.exit(143); });
+}
+
+function pickFreePort(start) {
+  for (let p = start; p < start + 20; p++) {
+    const pids = findListenerPids(p);
+    if (pids === null) throw new PreconditionError('netstat 校验手段不可用——ISO 自举端口选择无法进行');
+    if (pids.length === 0) return p;
+  }
+  return null;
+}
+
+function ensureBuildFresh() {
+  let buildMs = 0;
+  try { buildMs = fs.statSync(BUILD_DIR).mtimeMs; } catch { buildMs = 0; }
+  let newestSrc = 0;
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else { try { const m = fs.statSync(p).mtimeMs; if (m > newestSrc) newestSrc = m; } catch { /* 尽力而为 */ } }
+    }
+  };
+  try { walk(path.resolve('src')); } catch { /* src 不可读：交由构建失败路径报错 */ }
+  if (buildMs === 0 || newestSrc > buildMs) {
+    log(`  [iso-build] out/renderer ${buildMs ? new Date(buildMs).toISOString() : '不存在'} 落后于 src 最新 ${new Date(newestSrc).toISOString()} → npm run build`);
+    // shell:true 单命令串形态：Node ≥18.20 对 .cmd 直接 spawnSync 抛 EINVAL（CVE-2024-27980），shell 形态规避。
+    const r = spawnSync('npm run build', { shell: true, stdio: 'inherit', windowsHide: true, timeout: 600_000 });
+    if (r.error || r.status !== 0) throw new PreconditionError(`npm run build 失败（status=${r.status ?? 'N/A'}${r.error ? ` error=${r.error}` : ''}）——ISO 自举中止`);
+  } else {
+    log(`  [iso-build] 产物新鲜（out/renderer ${new Date(buildMs).toISOString()} ≥ src 最新 ${new Date(newestSrc).toISOString()}），跳过重建`);
+  }
+}
+
+function seedIsoConfig(port) {
+  const base = rawConfig;
+  if (!base || typeof base.webAccessToken !== 'string' || base.webAccessToken.length === 0) {
+    throw new PreconditionError(`ISO 自举需真实配置 ${DEFAULT_CONFIG_PATH} 含非空 webAccessToken 作底稿（只读不改）——或改用 --config 外部备环境模式`);
+  }
+  fs.mkdirSync(ISO_APP_DIR, { recursive: true });
+  fs.mkdirSync(ISO_FIXTURE_DIR, { recursive: true });
+  // seed = 真实配置浅拷贝 + 三项覆盖（port=空闲端口防撞真实实例；workingDirectory=ISO 夹具；
+  // permissionMode=bypassPermissions=回合类场景前置，经隔离配置注入 = AGENTS.md 认可的等效注入形态）。
+  const seed = { ...base };
+  seed.webAccess = { ...(base.webAccess ?? {}), enabled: true, port };
+  seed.workingDirectory = ISO_FIXTURE_DIR;
+  seed.permissionMode = 'bypassPermissions';
+  fs.writeFileSync(ISO_CONFIG_PATH, JSON.stringify(seed, null, 2), 'utf8');
+  return seed;
+}
+
+function launchIsoElectron() {
+  const electronBin = createRequire(import.meta.url)('electron');
+  if (typeof electronBin !== 'string' || !fs.existsSync(electronBin)) {
+    throw new PreconditionError(`electron 二进制不可解析（require('electron')=${String(electronBin)}）——node_modules 未安装？`);
+  }
+  return spawn(electronBin, ['.', `--user-data-dir=${ISO_APP_DIR}`, `--remote-debugging-port=${ISO_APP_CDP_PORT}`],
+    { cwd: process.cwd(), stdio: 'ignore', windowsHide: true });
+}
+
+function findChromiumBinary() {
+  const candidates = [
+    process.env.CLAUDE_LINK_E2E_CHROME,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    path.join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe', // Chromium 系回落（CDP 兼容）
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  ].filter(Boolean);
+  for (const c of candidates) { try { if (fs.existsSync(c)) return c; } catch { /* 尽力而为 */ } }
+  return null;
+}
+
+function launchIsoChrome(chromeBin) {
+  // --window-size=1440,900：headless 默认 800x600 会破 W-collapse-persist 的 ≥1100px 视口前提
+  //（该场景另用 Emulation 覆盖双保险，见 1785 行一带）。
+  return spawn(chromeBin, [
+    '--headless=new', `--remote-debugging-port=${CHROME_CDP_PORT}`, `--user-data-dir=${ISO_CHROME_DIR}`,
+    '--no-first-run', '--no-default-browser-check', '--window-size=1440,900', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+}
+
+async function waitForListener(port, timeoutMs, what, proc) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const pids = findListenerPids(port);
+    if (pids && pids.length > 0) return;
+    if (proc && proc.exitCode !== null) {
+      throw new PreconditionError(`${what}：进程已退出（code=${proc.exitCode}）但端口 ${port} 未监听——启动失败`);
+    }
+    if (Date.now() > deadline) {
+      throw new PreconditionError(`${what}：端口 ${port} 在 ${timeoutMs}ms 内未进入 LISTENING——启动超时`);
+    }
+    await sleep(500);
+  }
+}
+
+async function waitForChromeTarget(timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try { const t = await getPageTarget(); if (t) return t; } catch { /* 未就绪，继续轮询 */ }
+    if (Date.now() > deadline) throw new PreconditionError(`Chrome CDP ${CHROME_CDP_PORT} 在 ${timeoutMs}ms 内无 page target——headless Chrome 可能启动失败`);
+    await sleep(500);
+  }
+}
+
+async function ensureIsoEnvironment() {
+  // 自举独立看门狗（构建+拉起上限 15 分钟；超时 exit 2，绝不无声挂死）。
+  const guard = setTimeout(() => {
+    console.error(`[自举超时] ${BOOTSTRAP_TIMEOUT_MS}ms 未完成——exit 2`);
+    isoTeardown();
+    process.exit(2);
+  }, BOOTSTRAP_TIMEOUT_MS);
+  guard.unref();
+  try {
+    log(`ISO 自举开始（裸跑模式：脚本自建隔离环境；真实配置 ${DEFAULT_CONFIG_PATH} 只读，写入全部落 ${ISO_DIR}）`);
+    // 0. Chrome 调试端口占用预检：外部 debug 实例复用 = 跨轮 profile 污染（先例：折叠键/横幅会话记忆
+    //    跨轮残留），拒绝复用、fail-fast 指引释放。
+    const chromePids = findListenerPids(CHROME_CDP_PORT);
+    precondition(chromePids !== null, 'netstat 校验手段不可用——ISO 自举无法进行');
+    precondition(chromePids.length === 0, `端口 ${CHROME_CDP_PORT} 已被占用（PID ${chromePids.join(',')}，疑似外部 headless Chrome）——ISO 模式拒绝复用（防跨轮 profile 污染），请先释放该端口`);
+    // 1. 构建新鲜度（src 比 out/renderer 新才重建；自举实例启动晚于构建 → assertFreshInstances 恒真）。
+    ensureBuildFresh();
+    // 2. 空闲 web access 端口（8791 起，避开真实实例 8790 与单实例锁冲突）。
+    const port = pickFreePort(8791);
+    precondition(port !== null, '8791-8810 无空闲端口——ISO 自举无法选口');
+    // 3. seed 配置 + 模块级配置三元组同轮重派生（CONFIG_PATH/rawConfig/PORT/TOKEN 必须同源，防半新半旧）。
+    const seed = seedIsoConfig(port);
+    CONFIG_PATH = ISO_CONFIG_PATH;
+    rawConfig = seed;
+    PORT = port;
+    TOKEN = seed.webAccessToken;
+    // 4. electron（--user-data-dir 隔离；electron-store 配置随 userData；单实例锁按 userData 不与真实实例冲突）。
+    isoElectronProc = launchIsoElectron();
+    await waitForListener(port, 90_000, 'electron web access', isoElectronProc);
+    // 5. headless Chrome。
+    const chromeBin = findChromiumBinary();
+    precondition(chromeBin, `未发现 Chrome/Edge 可执行文件（搜索过 Program Files/LOCALAPPDATA 标准路径；可用 CLAUDE_LINK_E2E_CHROME 显式指定）`);
+    isoChromeProc = launchIsoChrome(chromeBin);
+    await waitForChromeTarget(30_000);
+    log(`ISO 自举完成：web access 端口=${port}，electron PID=${isoElectronProc?.pid}，chrome PID=${isoChromeProc?.pid}（${chromeBin}），ISO 目录用后删除`);
+  } finally {
+    clearTimeout(guard);
+  }
+}
+
 // ── 主流程 ──
 async function main() {
+  // ISO 自举（裸跑默认）：先拉起隔离实例再校验——自举实例启动晚于构建，新鲜度校验恒真。
+  // 外部备环境跑（--config）不走此路径，保持旧版「只校验+指引」行为。
+  if (ISO_MODE) {
+    await ensureIsoEnvironment();
+    armSuiteWatchdog();
+  }
   // P3-B：连接既有实例之前先做新鲜度校验（遗留实例 × 重建 = 缓存投毒假红根因，见上方注记）。
   assertFreshInstances();
   precondition(TOKEN.length > 0, `配置 ${CONFIG_PATH} 顶层键 webAccessToken 缺失或为空`);
@@ -444,6 +870,8 @@ async function main() {
       frameEvidence.sent.push(msg.params.response?.payloadData ?? '');
     } else if (msg.method === 'Network.webSocketFrameReceived') {
       frameEvidence.received.push(msg.params.response?.payloadData ?? '');
+    } else if (msg.method === 'Page.loadEventFired') {
+      pageLoadTicks.count += 1;
     }
   });
   await cdpSend(ws, 'Runtime.enable');
@@ -456,6 +884,21 @@ async function main() {
     lanBad: `http://${LAN_IP}:${PORT}/#token=e2e-wrong-token-000000000000`,
     ts: `http://${TS_IP}:${PORT}/#token=${TOKEN}`,
   };
+
+  // ── T1B 前置复位（2026-11-16）：上一轮运行可能遗留两类会话级状态污染本轮——
+  // ①折叠持久化键 cl.sidebarCollapsed='1'（折叠态下 button.new-button 被 v-if 卸载，B3 起全部
+  //   场景连锁假红——run-2 事故根因）；②dev 横幅关闭记忆 sessionStorage clWebDevModeWarnDismissed
+  //  （跨轮残留 → W-dev-stale-banner 步骤①假红）。在 LAN origin（B3+ 与全部 W 用例的工作 origin）
+  //  清键 + 整页刷新一次；B1 的 127.0.0.1 origin 无侧栏/横幅断言，无需复位。
+  currentCase = '(t1b-reset)';
+  try {
+    await navigate(ws, urls.lan);
+    await waitFor('T1B 前置复位：桥连接', () => evalOk(ws, connectedExpr), 20);
+    await evalExpr(ws, `localStorage.removeItem('cl.sidebarCollapsed'); localStorage.removeItem('cl.sidebarWidth'); sessionStorage.clear(); true`);
+    await cdpSend(ws, 'Page.reload');
+    await waitFor('T1B 前置复位：刷新后桥连接', () => evalOk(ws, connectedExpr), 20);
+    log('  T1B 前置复位完成（折叠键/横幅会话记忆清零 + 整页刷新）');
+  } catch (e) { log(`T1B 前置复位失败（申报，不阻塞）：${String(e.message).slice(0, 120)}`); }
 
   // ── B1：127.0.0.1（安全上下文）对照 ──
   currentCase = 'B1';
@@ -822,11 +1265,15 @@ async function main() {
       }
       if (probeWritten) {
         // 4) 断言（探针在位）：面板文件行非空（DOM 列表项选择器非空）+ 文件行列表含探针行（见下方加强说明）。
-        //    挂载 onMounted→refresh；若撞 F-5 同源守卫（同 id+wd 刚拉过）或挂载早于切会话的 watch
-        //    收口而列表暂空，经 pinia 触发 changesStore.refresh(true)（面板「重试」同参，invalidateDiffs
-        //    绕过守卫强制重拉）后复验——补拉是用户可达操作，不算放宽断言。
-        const rowExpr = `document.querySelectorAll('.changes__list .changes__row').length >= 1`;
-        const rowsShown = await waitFor('改动面板文件行渲染', () => evalOk(ws, rowExpr), 20, 300).then(() => true).catch(() => false);
+        //    挂载 onMounted→refresh；若撞 F-5 同源守卫（同 id+wd 刚拉过——本轮 run 的前序场景已对
+        //    同 id/wd 拉过，onMounted refresh() 非 force 会被守卫短路出陈旧列表）或挂载早于切会话的
+        //    watch 收口而列表暂空/不含探针行，经 pinia 触发 changesStore.refresh(true)（面板「重试」
+        //    同参，invalidateDiffs 绕过守卫强制重拉）后复验——补拉是用户可达操作，不算放宽断言。
+        //    （2026-11-16 T1B 同步面：补拉条件由「列表空」扩为「列表空或不含探针行」——同源守卫
+        //    短路出的是非空陈旧列表，原条件对第二轮起必假红；见 t1b 点报告申报。）
+        const PROBE_NAME = '.e2e-changes-probe.tmp';
+        const probeRowExpr = `[...document.querySelectorAll('.changes__list .changes__row .changes__path')].some((n) => String(n.innerText).includes('${PROBE_NAME}'))`;
+        const rowsShown = await waitFor('改动面板文件行渲染（含探针行）', () => evalOk(ws, probeRowExpr), 20, 300).then(() => true).catch(() => false);
         if (!rowsShown) {
           const nudged = await evalExpr(ws, `(() => {
             const app = document.querySelector('#app');
@@ -835,13 +1282,12 @@ async function main() {
             if (st) { void st.refresh(true); return true; }
             return false;
           })()`);
-          log(`  面板首拉未出行，changesStore.refresh(true) 补拉（nudged=${nudged}）`);
-          await waitFor('改动面板文件行渲染（补拉后）', () => evalOk(ws, rowExpr), 20, 300);
+          log(`  面板首拉未含探针行，changesStore.refresh(true) 补拉（nudged=${nudged}）`);
+          await waitFor('改动面板文件行渲染（补拉后含探针行）', () => evalOk(ws, probeRowExpr), 20, 300);
         }
         // 断言加强（2026-10-27）：由「首行路径非空」升级为「文件行列表含探针行」——遍历全部
         // .changes__path 的 innerText，至少一条含 .e2e-changes-probe.tmp（面板路径可能按字母序
         // 排列，探针未必在首行，故不能只看首行）。JSON 往返对 Windows 反斜杠路径安全。
-        const PROBE_NAME = '.e2e-changes-probe.tmp';
         const pathTextsRaw = await evalExpr(ws, `JSON.stringify([...document.querySelectorAll('.changes__list .changes__row .changes__path')].map((n) => String(n.innerText)))`);
         let pathTexts = [];
         try { pathTexts = JSON.parse(String(pathTextsRaw)); } catch { pathTexts = []; }
@@ -1260,6 +1706,1125 @@ async function main() {
     await screenshot(ws, 'W-user-timestamp-cleaned');
   } catch (e) { record('W-user-timestamp', 'FAIL', e.message); await screenshot(ws, 'W-user-timestamp-failed'); }
 
+  // ══ 八问题批次 T1B 新增 13 场景（2026-11-16；03b §1/§4/§7/§8/§11/§12/§13 + 03 §5 E2-06）══
+  // 编排：W-dev-stale-banner 最先跑（其步骤②关闭横幅 + 按会话记忆，之后所有场景免受横幅干扰——
+  // 与既有用例共存性证明落在本场景步骤⑤「既有顶部选择器可达」）；随后 config 域三场景
+  //（W-mcp-scan / W-skill-refresh-web / W-mcp-external-change），W-collapse-persist（视口覆盖+恢复），
+  // 队列三场景（各自物化独立会话、互不复用），W-turn-footnote，最后 W-question-* 四场景。
+  // 硬纪律落点：隔离 profile 由编排层保证（electron --user-data-dir + --config）；bypassPermissions
+  // 经隔离配置 permissionMode 注入（等效注入形态，本批回合类场景不触权限面板）。
+
+  // ── W-dev-stale-banner：D2-3 dev 产物新鲜度横幅五步（可见/关闭/刷新不重现/新 page 重现/既有选择器可达）──
+  // 实现锚点（App.vue D2）：.web-rev-warn--dev（静态流内横条，非 fixed 覆盖——与既有用例共存性见步骤⑤
+  // 与 t1b 点报告）；关闭钮 .web-rev-warn__close；按会话记忆 sessionStorage 键 clWebDevModeWarnDismissed
+  //（会话作用域=page 作用域，跨 page 必重现——步骤④）。
+  currentCase = 'W-dev-stale-banner';
+  try {
+    const exceptionsBeforeB = exceptions.length;
+    await ensureLanBridge(ws, 'W-dev-stale-banner');
+    // 0) 强制整页加载（fresh load；本 tab 此前从未点过横幅关闭钮 → 横幅必现）。
+    // 0.5) T1B 前置复位：清折叠持久化键（上一轮 W-collapse-persist 失败路径可能遗留
+    //      cl.sidebarCollapsed='1'——折叠态下 button.new-button 不在位，会连锁误伤后续场景）。
+    await evalExpr(ws, `localStorage.removeItem('cl.sidebarCollapsed'); localStorage.removeItem('cl.sidebarWidth'), true`);
+    await navigate(ws, urls.lan);
+    await waitFor('W-dev-stale-banner：页面渲染+桥连接', () => evalOk(ws, connectedExpr), 30);
+    // ① 横幅可见 + 关键文案（devMode 帧 + 文案含「开发模式」与「npm run dev」）。
+    const banner1 = JSON.parse(String(await evalExpr(ws, `(() => {
+      const el = document.querySelector('.web-rev-warn--dev');
+      return JSON.stringify({
+        present: !!el,
+        text: el ? ((el.querySelector('.web-rev-warn__text')?.textContent) || '').trim() : '',
+        hasClose: !!(el && el.querySelector('.web-rev-warn__close')),
+        sessionStorageMark: sessionStorage.getItem('clWebDevModeWarnDismissed'),
+      });
+    })()`)));
+    if (!banner1.present) throw new Error('dev 横幅未渲染（!isPackaged 实例下应常驻；devMode welcome 帧未生效？）');
+    if (!banner1.text.includes('开发模式')) throw new Error(`横幅文案缺「开发模式」：${banner1.text.slice(0, 60)}`);
+    if (!banner1.text.includes('npm run dev')) throw new Error(`横幅文案缺「npm run dev」：${banner1.text.slice(0, 80)}`);
+    if (banner1.hasClose !== true) throw new Error('横幅缺关闭钮（.web-rev-warn__close）');
+    await screenshot(ws, 'W-dev-stale-banner-visible');
+    // ② 点关闭 → 横幅消失。
+    await evalExpr(ws, `document.querySelector('.web-rev-warn--dev .web-rev-warn__close')?.click(), true`);
+    await waitFor('W-dev-stale-banner：关闭后横幅退场', () => evalOk(ws, `!document.querySelector('.web-rev-warn--dev')`), 5);
+    // ③ 刷新 → 不重现（按会话记忆；sessionStorage '1'）。
+    await reloadAndReconnect(ws, 'W-dev-stale-banner');
+    await sleep(800);
+    const banner3 = await evalExpr(ws, `JSON.stringify({
+      present: !!document.querySelector('.web-rev-warn--dev'),
+      sessionStorageMark: sessionStorage.getItem('clWebDevModeWarnDismissed'),
+    })`);
+    const b3 = JSON.parse(String(banner3));
+    if (b3.present) throw new Error('刷新后横幅重现（按会话记忆失效：sessionStorage 未记关闭态）');
+    if (b3.sessionStorageMark !== '1') throw new Error(`sessionStorage 关闭标记缺失（clWebDevModeWarnDismissed=${b3.sessionStorageMark}）`);
+    // ④ 新开第二 page（新会话作用域）→ 横幅重现；结束后关闭该 page。
+    const created = await fetch(`http://127.0.0.1:${CHROME_CDP_PORT}/json/new?about:blank`, { method: 'PUT' }).then((r) => r.json());
+    precondition(created && created.webSocketDebuggerUrl, `第二 page 创建失败（/json/new）：${JSON.stringify(created).slice(0, 120)}`);
+    const ws2 = await connectWS(created.webSocketDebuggerUrl);
+    ws2.addEventListener('message', (event) => {
+      let msg; try { msg = JSON.parse(event.data); } catch { return; }
+      if (msg.id && pending.has(msg.id)) {
+        const p = pending.get(msg.id); pending.delete(msg.id);
+        clearTimeout(p.timer);
+        if (msg.error) p.reject(new Error('CDP: ' + JSON.stringify(msg.error)));
+        else p.resolve(msg.result);
+      }
+      if (msg.method === 'Runtime.exceptionThrown') {
+        exceptions.push({ case: currentCase, text: msg.params.exceptionDetails?.exception?.description || msg.params.exceptionDetails?.text || '(no desc)' });
+      } else if (msg.method === 'Runtime.consoleAPICalled' && msg.params.type === 'error') {
+        consoleErrors.push({ case: currentCase, text: (msg.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ') });
+      }
+    });
+    try {
+      await cdpSend(ws2, 'Runtime.enable');
+      await cdpSend(ws2, 'Page.enable');
+      await cdpSend(ws2, 'Page.navigate', { url: urls.lan });
+      await waitFor('W-dev-stale-banner：第二 page 桥连接', () => evalOk(ws2, connectedExpr), 30);
+      await sleep(500);
+      const banner4 = await evalExpr(ws2, `!!document.querySelector('.web-rev-warn--dev')`);
+      if (banner4 !== true) throw new Error('第二 page（新会话作用域）横幅未重现（devMode 帧或会话作用域判定失效）');
+      await screenshot(ws2, 'W-dev-stale-banner-second-page');
+    } finally {
+      // 第二 page 收尾：先 window.close（对 CDP /json/new 打开的页通常生效），ws 断开后再以
+      // /json/close 兜底；仍失败则申报遗留——不阻塞主流程，遗留 page 不影响后续断言。
+      try { await evalExpr(ws2, `window.close(), true`); } catch { /* 尽力而为 */ }
+      try { ws2.close(); } catch { /* 尽力而为 */ }
+      await sleep(300);
+      let closed = true;
+      try {
+        const rest = await fetch(`http://127.0.0.1:${CHROME_CDP_PORT}/json`).then((r) => r.json());
+        closed = !rest.some((t) => t.id === created.id);
+        if (!closed) {
+          try { await fetch(`http://127.0.0.1:${CHROME_CDP_PORT}/json/close/${created.id}`); } catch { /* 尽力而为 */ }
+        }
+      } catch { closed = false; }
+      log(`  第二 page 收尾（closed=${closed ? 'yes' : '尽力而为，遗留时申报'}）`);
+    }
+    // ⑤ 关闭横幅后既有顶部选择器可达：新会话按钮在位且可点（共存性证明——横幅为流内横条，
+    //    不遮挡顶栏；此处以「点得动」实证，非仅 DOM 在位）。
+    await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`);
+    await waitFor('W-dev-stale-banner：新会话输入框出现（顶栏可达）', () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 10);
+    await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`); // 复位：回到无输入暂态（no-op 语义）
+    if (exceptions.length > exceptionsBeforeB) throw new Error('W-dev-stale-banner 用例期间出现 exceptionThrown');
+    record('W-dev-stale-banner', 'PASS', `五步全过：①dev 横幅可见含「开发模式/npm run dev」②关闭退场 ③刷新不重现（sessionStorage clWebDevModeWarnDismissed='1'）④第二 page 重现（跨 page 会话作用域）⑤关闭后顶栏新会话按钮可点（共存性：横幅为流内横条不遮挡选择器，B 链零适配申报）`);
+  } catch (e) { record('W-dev-stale-banner', 'FAIL', e.message); await screenshot(ws, 'W-dev-stale-banner-failed'); }
+  await screenshot(ws, 'W-dev-stale-banner');
+
+  // ── W-mcp-scan：E1-5 网页端 MCP 手动扫描（扫描钮在位→loading→反馈→列表正常→配置文件零写入）──
+  // 只读纪律（沿 W-mcp-settings）：不调 saveManaged/writeMcpScoped/setMcpOverride；零写入以
+  // ~/.claude.json mtime+size 前后比对佐证（尽力而为申报：同窗口其他进程写入不归本用例管辖）。
+  // managed 栏无钮有文案（DOM 抽验，E1-1(2)）。
+  currentCase = 'W-mcp-scan';
+  try {
+    const exceptionsBeforeM = exceptions.length;
+    await ensureLanBridge(ws, 'W-mcp-scan');
+    await evalExpr(ws, `(location.hash = '#/config?tab=mcp'), true`);
+    await waitFor('W-mcp-scan：MCP tab 就绪（作用域 rail 在位）', () => evalOk(ws, `!!document.querySelector('.mcp-rail')`), 20);
+    await waitFor('W-mcp-scan：列表加载收口（退出「正在读取」占位）', () => evalOk(ws, `(() => {
+      return ![...document.querySelectorAll('.mcp-empty')].some((el) => (el.textContent || '').includes('正在读取'));
+    })()`), 15);
+    // 1) 切用户级 scope（rail 按名定位 → active 标题行验证）。
+    const userClicked = await evalExpr(ws, `(() => {
+      const item = [...document.querySelectorAll('.mcp-rail-item')].find((el) => (el.querySelector('.mcp-rail-item__name')?.textContent || '').trim() === '用户级');
+      if (!item) return false;
+      item.click();
+      return true;
+    })()`);
+    if (userClicked !== true) throw new Error('未找到「用户级」rail 条目（E1 user 栏扫描入口不可达）');
+    await waitFor('W-mcp-scan：用户级 scope 激活（标题行切换）', () => evalOk(ws, `(document.querySelector('.mcp-title-row__name')?.textContent || '').trim() === '用户级'`), 8);
+    // 2) 扫描钮在位可点。
+    const scanBtn = JSON.parse(String(await evalExpr(ws, `(() => {
+      const btn = document.querySelector('[data-testid="mcp-scan-button"]');
+      return JSON.stringify({ present: !!btn, disabled: btn ? btn.disabled : null, text: btn ? (btn.textContent || '').trim() : '' });
+    })()`)));
+    if (!scanBtn.present) throw new Error('user 栏扫描钮缺失（[data-testid="mcp-scan-button"]）');
+    if (scanBtn.disabled === true) throw new Error('扫描钮初始态即 disabled（非 loading 期）');
+    // 3) 零写入审计基线：~/.claude.json mtime+size。
+    const claudeJson = path.join(os.homedir(), '.claude.json');
+    let beforeStat = null;
+    try { const st = fs.statSync(claudeJson); beforeStat = { mtimeMs: st.mtimeMs, size: st.size }; } catch { beforeStat = null; }
+    // 4) 点击扫描 → 紧轮询抓 loading 态（扫描中…）→ 完成复位 → toast 反馈。
+    await evalExpr(ws, `document.querySelector('[data-testid="mcp-scan-button"]').click(), true`);
+    let caughtLoading = false;
+    const loadDeadline = Date.now() + 3000;
+    while (Date.now() < loadDeadline) {
+      const t = await evalExpr(ws, `(document.querySelector('[data-testid="mcp-scan-button"]')?.textContent || '').trim()`);
+      if (String(t).includes('扫描中…')) { caughtLoading = true; break; }
+      if (String(t) === '扫描') break; // 扫描快到本轮询都没抓到 loading 文案（亚帧级）→ 已复位
+      await sleep(20);
+    }
+    await waitFor('W-mcp-scan：扫描完成复位（按钮回「扫描」）', () => evalOk(ws, `(document.querySelector('[data-testid="mcp-scan-button"]')?.textContent || '').trim() === '扫描'`), 20);
+    await waitFor('W-mcp-scan：扫描完成 toast 反馈（扫描完成…）', () => evalOk(ws, `[...document.querySelectorAll('.mcp-toast')].some((t) => (t.textContent || '').includes('扫描完成'))`), 5, 100);
+    // 5) 列表渲染正常（无加载占位、卡片容器在位、快照仍可取）。
+    await waitFor('W-mcp-scan：列表渲染正常（无「正在读取」占位）', () => evalOk(ws, `(() => {
+      return !!document.querySelector('.mcp-main') && ![...document.querySelectorAll('.mcp-empty')].some((el) => (el.textContent || '').includes('正在读取'));
+    })()`), 10);
+    const snapOk = await evalOk(ws, `window.claudeLink.getMcpSnapshot().then((r) => !!r && Array.isArray(r.userServers) && Array.isArray(r.projectDirs))`);
+    if (snapOk !== true) throw new Error('扫描后 getMcpSnapshot 形状异常');
+    // 6) 零写入比对（~/.claude.json）。
+    let afterStat = null;
+    try { const st = fs.statSync(claudeJson); afterStat = { mtimeMs: st.mtimeMs, size: st.size }; } catch { afterStat = null; }
+    const zeroWrite = beforeStat !== null && afterStat !== null && beforeStat.mtimeMs === afterStat.mtimeMs && beforeStat.size === afterStat.size;
+    // 7) managed 栏无钮有文案（DOM 抽验）。
+    const managedClicked = await evalExpr(ws, `(() => {
+      const item = [...document.querySelectorAll('.mcp-rail-item')].find((el) => (el.querySelector('.mcp-rail-item__name')?.textContent || '').trim() === 'Claude Link 管理');
+      if (!item) return false;
+      item.click();
+      return true;
+    })()`);
+    if (managedClicked !== true) throw new Error('未找到「Claude Link 管理」rail 条目');
+    await waitFor('W-mcp-scan：managed scope 激活', () => evalOk(ws, `(document.querySelector('.mcp-title-row__name')?.textContent || '').trim() === 'Claude Link 管理'`), 8);
+    const managedState = JSON.parse(String(await evalExpr(ws, `(() => {
+      const btn = document.querySelector('[data-testid="mcp-scan-button"]');
+      const note = (document.querySelector('.mcp-title-row__name')?.closest('.mcp-title-row')?.parentElement?.textContent) || document.body.textContent || '';
+      return JSON.stringify({ scanBtnAbsent: !btn, noteHasLinkText: note.includes('link 配置实时生效，无需扫描') });
+    })()`)));
+    if (managedState.scanBtnAbsent !== true) throw new Error('managed 栏出现了扫描钮（契约：managed 不设扫描入口）');
+    if (managedState.noteHasLinkText !== true) throw new Error('managed 栏缺「link 配置实时生效，无需扫描」说明文案');
+    if (exceptions.length > exceptionsBeforeM) throw new Error('W-mcp-scan 用例期间出现 exceptionThrown');
+    record('W-mcp-scan', 'PASS', `user 栏扫描钮在位可点 → loading${caughtLoading ? '态捕获（扫描中…）' : '态未捕获（亚帧级完成，20ms 轮询；按钮 disabled=loading 绑定与复位已断言，申报降级）'} → toast「扫描完成…」反馈 → 列表渲染正常 + 快照形状 OK → ~/.claude.json 零写入（mtime+size 前后一致=${zeroWrite}）→ managed 栏无扫描钮且有「link 配置实时生效，无需扫描」文案`);
+  } catch (e) { record('W-mcp-scan', 'FAIL', e.message); await screenshot(ws, 'W-mcp-scan-failed'); }
+  await screenshot(ws, 'W-mcp-scan');
+
+  // ── W-skill-refresh-web：E5-2 网页端全局「立即刷新」busy→复位 + 项目「重新枚举」在位 ──
+  // 锚点（ConfigPage E5）：[data-testid="skill-refresh-button"]（.skill-sync-bar__now，busy=
+  // .skill-sync-bar__now--busy + 文案「刷新中…」，disabled=globalRefreshing）；[data-testid="skill-project-refresh"]。
+  currentCase = 'W-skill-refresh-web';
+  try {
+    const exceptionsBeforeS = exceptions.length;
+    await ensureLanBridge(ws, 'W-skill-refresh-web');
+    await evalExpr(ws, `(location.hash = '#/config?tab=skill'), true`);
+    await waitFor('W-skill-refresh-web：Skill tab 就绪（全局刷新钮在位）', () => evalOk(ws, `!!document.querySelector('[data-testid="skill-refresh-button"]')`), 20);
+    // 1) 全局作用域「立即刷新」：点击 → busy 态（class + 文案「刷新中…」）→ 完成复位。
+    await evalExpr(ws, `document.querySelector('[data-testid="skill-refresh-button"]').click(), true`);
+    const busy = await waitFor('W-skill-refresh-web：busy 态出现（--busy class / 刷新中…）', () => evalOk(ws, `(() => {
+      const b = document.querySelector('[data-testid="skill-refresh-button"]');
+      return !!b && (b.classList.contains('skill-sync-bar__now--busy') || (b.textContent || '').includes('刷新中…'));
+    })()`), 5, 30).then(() => true).catch(() => false);
+    // 2) 完成态复位（globalRefreshing 收口；全局重探含 CLI 探测，预算 60s）。
+    await waitFor('W-skill-refresh-web：复位（立即刷新 + busy class 退场）', () => evalOk(ws, `(() => {
+      const b = document.querySelector('[data-testid="skill-refresh-button"]');
+      return !!b && !b.classList.contains('skill-sync-bar__now--busy') && (b.textContent || '').includes('立即刷新') && !b.disabled;
+    })()`), 60);
+    // 3) 项目作用域「重新枚举」钮（E5-2 末项）：切项目目录 → v-if（skillScope.kind==='project'）在位可见。
+    const projItemClicked = await evalExpr(ws, `(() => {
+      const item = [...document.querySelectorAll('.skill-md-item--project')].find((el) => (el.querySelector('.skill-md-item__name')?.textContent || '').trim() === 'fixture');
+      if (!item) return false;
+      item.click();
+      return true;
+    })()`);
+    if (projItemClicked !== true) throw new Error('项目目录条目「fixture」未找到（skill-md-item--project）');
+    await waitFor('W-skill-refresh-web：项目作用域激活（条目 --active）', () => evalOk(ws, `(() => {
+      const item = [...document.querySelectorAll('.skill-md-item--project')].find((el) => (el.querySelector('.skill-md-item__name')?.textContent || '').trim() === 'fixture');
+      return !!item && item.classList.contains('skill-md-item--active');
+    })()`), 8);
+    const projBtnPresent = await evalOk(ws, `(() => {
+      const b = document.querySelector('[data-testid="skill-project-refresh"]');
+      return !!b && b.getClientRects().length > 0 && !b.disabled;
+    })()`);
+    if (projBtnPresent !== true) throw new Error('项目作用域下「重新枚举」钮（skill-project-refresh）不在位/不可见');
+    if (exceptions.length > exceptionsBeforeS) throw new Error('W-skill-refresh-web 用例期间出现 exceptionThrown');
+    record('W-skill-refresh-web', 'PASS', `网页端 Skill tab：全局 skill-refresh-button 点击 → busy 态${busy ? '捕获（--busy/刷新中…）' : '未捕获（亚帧级完成，30ms 轮询；复位断言已成立，申报降级）'} → 复位（立即刷新 + 非 disabled）；切项目目录（fixture）后 skill-project-refresh（重新枚举）在位可点`);
+  } catch (e) { record('W-skill-refresh-web', 'FAIL', e.message); await screenshot(ws, 'W-skill-refresh-web-failed'); }
+  await screenshot(ws, 'W-skill-refresh-web');
+
+  // ── W-mcp-external-change：E2-06 外部进程直写 .mcp.json → 网页端 MCP tab 重拉可见 ──
+  // 夹具目录 = 隔离配置 workingDirectory（E2 watcher 默认工作目录目标；编排层 seed 指向临时目录）。
+  // 步骤：①MCP tab 记住基线（fixture 目录 scope 无该 server）→ ②切走（chat 路由，ConfigPage 卸载）
+  // → ③外部进程（本脚本）直写 <fixture>/.mcp.json，等 ≥去抖 1.5s + 广播窗 → ④导航回 MCP tab →
+  // 重拉 → fixture scope 断言新增 server 卡片可见。只读纪律对 ~/.claude.json 维持；.mcp.json 属
+  // 隔离夹具目录（用后删除还原）。
+  currentCase = 'W-mcp-external-change';
+  const FIXTURE_MCPJSON = path.join(String(rawConfig?.workingDirectory ?? ''), '.mcp.json');
+  try {
+    const exceptionsBeforeE = exceptions.length;
+    if (!rawConfig?.workingDirectory || !fs.existsSync(String(rawConfig.workingDirectory))) {
+      throw new PreconditionError('配置缺 workingDirectory（默认 profile 形态）——E2-06 夹具目录不可知，本场景需隔离配置（--config seed workingDirectory=<临时夹具目录>）');
+    }
+    const fixtureDir = String(rawConfig.workingDirectory);
+    const fixtureBasename = path.basename(fixtureDir);
+    await ensureLanBridge(ws, 'W-mcp-external-change');
+    // ① 基线：MCP tab → fixture 目录 scope → 断言 e2e-ext-server 不在。
+    await evalExpr(ws, `(location.hash = '#/config?tab=mcp'), true`);
+    await waitFor('W-mcp-external-change：MCP tab 就绪', () => evalOk(ws, `!!document.querySelector('.mcp-rail')`), 20);
+    await waitFor('W-mcp-external-change：列表加载收口', () => evalOk(ws, `(() => {
+      return ![...document.querySelectorAll('.mcp-empty')].some((el) => (el.textContent || '').includes('正在读取'));
+    })()`), 15);
+    const clickedBase = await evalExpr(ws, `(() => {
+      const item = [...document.querySelectorAll('.mcp-rail-item')].find((el) => (el.querySelector('.mcp-rail-item__name')?.textContent || '').trim() === ${JSON.stringify(fixtureBasename)});
+      if (!item) return false;
+      item.click();
+      return true;
+    })()`);
+    if (clickedBase !== true) throw new Error(`rail 无夹具目录条目「${fixtureBasename}」（watcher/快照目录集未含默认工作目录？）`);
+    await waitFor('W-mcp-external-change：fixture scope 激活', () => evalOk(ws, `(document.querySelector('.mcp-title-row__name')?.textContent || '').trim() === ${JSON.stringify(fixtureBasename)}`), 8);
+    const baseNames = JSON.parse(String(await evalExpr(ws, `JSON.stringify([...document.querySelectorAll('button[aria-label^="测试连接"]')].map((b) => (b.getAttribute('aria-label') || '').replace(/^测试连接\\s*/, '')))`)));
+    if (Array.isArray(baseNames) && baseNames.some((n) => String(n).includes('e2e-ext-server'))) {
+      throw new Error('基线已含 e2e-ext-server（上轮残留 .mcp.json 未清理？）');
+    }
+    // ② 切走（chat 路由；ConfigPage 卸载 → 回来时重挂载重拉）。
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-mcp-external-change：切走（chat 路由就绪）', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+    // ③ 外部进程直写 .mcp.json（本脚本=app 外部进程）+ 等 ≥去抖窗（1.5s）+ 广播余量。
+    const mcpPayload = { mcpServers: { 'e2e-ext-server': { command: 'node', args: ['-e', "process.stdout.write('e2e-ok')"] } } };
+    fs.writeFileSync(FIXTURE_MCPJSON, JSON.stringify(mcpPayload, null, 2));
+    log(`  外部直写 ${FIXTURE_MCPJSON}（等待 1.5s 去抖 + 广播窗）`);
+    await sleep(3500);
+    // ④ 导航回 MCP tab → fixture scope → 断言新增 server 卡片可见（广播 → 重拉链端到端）。
+    await evalExpr(ws, `(location.hash = '#/config?tab=mcp'), true`);
+    await waitFor('W-mcp-external-change：回 MCP tab 就绪', () => evalOk(ws, `!!document.querySelector('.mcp-rail')`), 20);
+    await waitFor('W-mcp-external-change：列表加载收口（重拉后）', () => evalOk(ws, `(() => {
+      return ![...document.querySelectorAll('.mcp-empty')].some((el) => (el.textContent || '').includes('正在读取'));
+    })()`), 20);
+    const clickedBack = await evalExpr(ws, `(() => {
+      const item = [...document.querySelectorAll('.mcp-rail-item')].find((el) => (el.querySelector('.mcp-rail-item__name')?.textContent || '').trim() === ${JSON.stringify(fixtureBasename)});
+      if (!item) return false;
+      item.click();
+      return true;
+    })()`);
+    if (clickedBack !== true) throw new Error(`回 tab 后 rail 无「${fixtureBasename}」条目`);
+    await waitFor('W-mcp-external-change：fixture scope 激活（回）', () => evalOk(ws, `(document.querySelector('.mcp-title-row__name')?.textContent || '').trim() === ${JSON.stringify(fixtureBasename)}`), 8);
+    await waitFor('W-mcp-external-change：e2e-ext-server 卡片可见（重拉链通）', () => evalOk(ws, `[...document.querySelectorAll('button[aria-label^="测试连接"]')].some((b) => (b.getAttribute('aria-label') || '').includes('e2e-ext-server'))`), 20, 300);
+    if (exceptions.length > exceptionsBeforeE) throw new Error('W-mcp-external-change 用例期间出现 exceptionThrown');
+    record('W-mcp-external-change', 'PASS', `外部进程直写 ${fixtureBasename}/.mcp.json（新增 e2e-ext-server）→ 等 3.5s（≥1.5s 去抖）→ 导航回 MCP tab → fixture scope 卡片出现（基线 0 卡 → 新增 1 卡；广播→重拉→网页端可见端到端通；夹具用后删除）`);
+  } catch (e) {
+    if (e instanceof PreconditionError) record('W-mcp-external-change', 'SKIP', e.message);
+    else { record('W-mcp-external-change', 'FAIL', e.message); await screenshot(ws, 'W-mcp-external-change-failed'); }
+  } finally {
+    try { fs.rmSync(FIXTURE_MCPJSON, { force: true }); } catch { /* 尽力而为 */ }
+  }
+  await screenshot(ws, 'W-mcp-external-change');
+
+  // ── W-collapse-persist：D1-4 网页端折叠+宽度持久化三步（≥1100px 视口强制，≤1100px 响应式语义不测）──
+  // 锚点：折叠 button[title="折叠侧栏"]（W-sidebar-collapse 既有）；localStorage 键 cl.sidebarCollapsed /
+  // cl.sidebarWidth（session-store LS_COLLAPSE + AppLayout LS_WIDTH，D1 单一来源）；拖宽手柄
+  // .resize-handle--sidebar（CDP Input.dispatchMouseEvent 先例）；默认展开宽 240px。
+  currentCase = 'W-collapse-persist';
+  try {
+    const exceptionsBeforeC = exceptions.length;
+    await ensureLanBridge(ws, 'W-collapse-persist');
+    // 0) 路由复位到 chat（场景内两次 reload 须落在 '#/'——从 config 路由 reload 会停留 config，
+    //    button.new-button 永不出现）+ 视口强制 ≥1100px（D1-4 断言前提；Emulation 覆盖，场景尾清除）。
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-collapse-persist：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button') || !!document.querySelector('.sidebar__rail__new')`), 15);
+    await cdpSend(ws, 'Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await sleep(300);
+    // ① 折叠左栏 → localStorage 键非空且值正确 → 刷新保持。
+    await evalExpr(ws, `localStorage.removeItem('cl.sidebarCollapsed'); localStorage.removeItem('cl.sidebarWidth'), true`);
+    const collapseClicked = await evalExpr(ws, `(() => {
+      const btn = document.querySelector('button[title="折叠侧栏"]');
+      if (!btn) return false;
+      btn.click();
+      return true;
+    })()`);
+    if (collapseClicked !== true) throw new Error('未找到侧栏折叠钮（button[title="折叠侧栏"]）');
+    await waitFor('W-collapse-persist：折叠态根类在位', () => evalOk(ws, `!!document.querySelector('.sidebar--collapsed')`), 10);
+    const lsCollapsed = await evalExpr(ws, `localStorage.getItem('cl.sidebarCollapsed')`);
+    if (lsCollapsed !== '1') throw new Error(`localStorage cl.sidebarCollapsed=${lsCollapsed}（期望 '1'——折叠态未持久化）`);
+    await reloadAndReconnect(ws, 'W-collapse-persist');
+    await waitFor('W-collapse-persist：刷新后仍折叠', () => evalOk(ws, `!!document.querySelector('.sidebar--collapsed') && !!document.querySelector('.sidebar__rail__expand')`), 15);
+    // ② 展开 → 拖宽手柄至非默认宽 → 刷新保持。
+    await evalExpr(ws, `document.querySelector('.sidebar__rail__expand')?.click(), true`);
+    await waitFor('W-collapse-persist：展开态恢复', () => evalOk(ws, `!document.querySelector('.sidebar--collapsed') && !!document.querySelector('.resize-handle--sidebar')`), 10);
+    const w0 = await evalExpr(ws, `document.querySelector('.sidebar')?.offsetWidth ?? -1`);
+    if (Number(w0) <= 100) throw new Error(`展开态宽度 ${w0}px 异常`);
+    const handleBox = JSON.parse(String(await evalExpr(ws, `(() => {
+      const h = document.querySelector('.resize-handle--sidebar');
+      const r = h.getBoundingClientRect();
+      return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 });
+    })()`)));
+    for (const step of [['mousePressed', handleBox.x, handleBox.y], ['mouseMoved', handleBox.x + 50, handleBox.y], ['mouseMoved', handleBox.x + 100, handleBox.y], ['mouseMoved', handleBox.x + 140, handleBox.y], ['mouseReleased', handleBox.x + 140, handleBox.y]]) {
+      await cdpSend(ws, 'Input.dispatchMouseEvent', {
+        type: step[0], x: Math.round(step[1]), y: Math.round(step[2]),
+        button: 'left', buttons: step[0] === 'mousePressed' ? 1 : (step[0] === 'mouseReleased' ? 0 : 1),
+        clickCount: step[0] === 'mousePressed' ? 1 : 0,
+      });
+      await sleep(60);
+    }
+    await sleep(300);
+    const w1 = await evalExpr(ws, `document.querySelector('.sidebar')?.offsetWidth ?? -1`);
+    const lsWidth = await evalExpr(ws, `localStorage.getItem('cl.sidebarWidth')`);
+    if (!(Number(w1) > Number(w0) + 60)) throw new Error(`拖宽未生效：${w0}px → ${w1}px（期望 +60px 以上）`);
+    if (!lsWidth || Number(lsWidth) !== Number(w1)) throw new Error(`cl.sidebarWidth=${lsWidth} 与实际宽度 ${w1}px 不一致（拖宽未持久化）`);
+    await reloadAndReconnect(ws, 'W-collapse-persist');
+    await waitFor('W-collapse-persist：刷新后宽度保持', () => evalOk(ws, `(() => {
+      const w = document.querySelector('.sidebar')?.offsetWidth ?? -1;
+      return w >= ${Number(w1) - 12} && w <= ${Number(w1) + 12};
+    })()`), 15);
+    // ③ 清 localStorage → 刷新 → 回默认宽不报错。
+    const exceptionsBeforeClear = exceptions.length;
+    await evalExpr(ws, `localStorage.removeItem('cl.sidebarCollapsed'); localStorage.removeItem('cl.sidebarWidth'), true`);
+    await reloadAndReconnect(ws, 'W-collapse-persist');
+    await waitFor('W-collapse-persist：清存储后回默认宽', () => evalOk(ws, `(() => {
+      const w = document.querySelector('.sidebar')?.offsetWidth ?? -1;
+      return w >= 230 && w <= 250;
+    })()`), 15);
+    if (exceptions.length > exceptionsBeforeClear) throw new Error('清存储刷新后出现 exceptionThrown（默认值回退路径异常）');
+    if (exceptions.length > exceptionsBeforeC) throw new Error('W-collapse-persist 用例期间出现 exceptionThrown');
+    record('W-collapse-persist', 'PASS', `三步全过：①折叠→cl.sidebarCollapsed='1'→刷新保持折叠+展开钮在位 ②展开 ${w0}px→CDP 拖宽至 ${w1}px→cl.sidebarWidth='${lsWidth}'→刷新保持 ③清存储→刷新回默认 ${await evalExpr(ws, `document.querySelector('.sidebar')?.offsetWidth ?? -1`)}px 无异常（视口 1440x900 强制 ≥1100px，尾清除）`);
+  } catch (e) { record('W-collapse-persist', 'FAIL', e.message); await screenshot(ws, 'W-collapse-persist-failed'); } finally {
+    // 清 Emulation 视口覆盖 + 复位折叠持久化态（失败路径可能遗留 cl.sidebarCollapsed='1'——
+    // 折叠态下 button.new-button 不在位，会连锁误伤后续场景；成功路径 step ③ 已复位，此处幂等）。
+    try { await cdpSend(ws, 'Emulation.clearDeviceMetricsOverride'); } catch { /* 尽力而为 */ }
+    try {
+      await evalExpr(ws, `localStorage.removeItem('cl.sidebarCollapsed'); localStorage.removeItem('cl.sidebarWidth'), true`);
+      await reloadAndReconnect(ws, 'W-collapse-persist 复位');
+    } catch (e) { log(`  W-collapse-persist 复位异常（申报）：${String(e.message).slice(0, 120)}`); }
+  }
+  await screenshot(ws, 'W-collapse-persist');
+
+  // ── W-queue-restore-countdown：T1R-1 倒计时中刷新 → 恢复门+状态可见 → 发送=入队 ──
+  // 前置：queueEnabled=true（隔离配置 seed 既有 true，设置面开关选择器无需校准——申报）；
+  // taskDelayMinutes=1 → 倒计时窗 60s，全部断言窗内完成。步骤含 A2-3 顺序断言（入队追加尾部）
+  // 与 A3-3 恢复中路由不阻塞（并入步骤 4.5）。恢复门采样降级纪律照 T1R-1 期望 a：
+  // 抢不到禁用态样本 → 附属条目 SKIP-with-reason（结构钉 tdd-queue-restore-gate-verify 兜底；
+  // round-002 P24 修复后 SKIP 理由带首采样直接证据，非推断），「恢复完成后发送可用 + 状态横条
+  // 已呈现 + P35 倒计时秒数两采样递减（期望 b 指示随 QUEUE_EVENT 增量更新的 DOM 直测）」必断言。
+  // 入队证据三件套（T1R-1 期望 c）+ 无直发回合 + 原任务不打断抽样断言（countdown 连续 + 任务卡
+  // 次序；完整执行链由 W-queue-restore-running 承担——t1b 点报告申报范围）。
+  currentCase = 'W-queue-restore-countdown';
+  let wqrcSid = '';
+  try {
+    const exceptionsBeforeQ1 = exceptions.length;
+    await ensureLanBridge(ws, 'W-queue-restore-countdown');
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-queue-restore-countdown：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+    // 1) 物化专用会话（真实回合；queueEnabled=true 下直发路径 standby 不受影响）。
+    await materializeSession(ws, 'W-queue-restore-countdown', W_WAKE_TEXT);
+    wqrcSid = await activeSessionId(ws);
+    if (!wqrcSid) throw new Error('无法取得物化会话 id');
+    // 2) 基线空态 standby（轮询收口——物化回合的 DOM 终态可先于主进程 result 落地，引擎
+    //    status 可短暂滞留 running；30s 轮询等引擎结算回 standby）。
+    const ov0 = await pollOverview(ws, wqrcSid, '基线空态 standby', (o) => o.state?.status === 'standby' && (o.tasks ?? []).length === 0, 30);
+    // 3) addTask#1 → 校准链（首跑校准申报，见 t1b 报告）：v3 引擎语义 TASK_ADD 不自动 arm
+    //    （armFromUserAction/armAfterTurn 两个入口都不含 addTask——tdd-queue-semantics-v3 引擎
+    //    头注释「重启后绝不自动执行」同源），空态直加任务不会进 countdown。以真实用户动作链
+    //    「面板暂停→恢复」（TASK_SET_PAUSED true→false → armFromUserAction → startCountdown）
+    //    产生倒计时窗——与桌面用户「恢复」按钮同语义，不放宽断言。
+    const add1 = JSON.parse(String(await evalExpr(ws, `window.claudeLink.addTask(${JSON.stringify(wqrcSid)}, { text: 'e2e-t1r1-task1', attachmentIds: [], clientMessageId: crypto.randomUUID() }).then((r) => JSON.stringify({ taskId: (r.task && r.task.id) || '' }))`)));
+    if (!add1.taskId) throw new Error('addTask#1 回包无 taskId');
+    await evalExpr(ws, `window.claudeLink.setTaskPaused(${JSON.stringify(add1.taskId)}, true).then(() => true)`);
+    await evalExpr(ws, `window.claudeLink.setTaskPaused(${JSON.stringify(add1.taskId)}, false).then(() => true)`);
+    const ovCount = await pollOverview(ws, wqrcSid, '任务#1 进入 countdown（暂停→恢复 arm）', (o) => o.state?.status === 'countdown', 15);
+    log(`  倒计时窗在位（remaining=${ovCount.state.countdownRemaining}s interval=${ovCount.state.intervalSeconds}s）`);
+    // 4) 立即整页刷新（落在 countdown 窗内；等刷新完成后）+ 桥重连 + 路由就绪 + 50ms 紧轮询抢
+    //    「恢复未完成态」样本（reloadAndReconnect 已含 Page.loadEventFired 完成等待——P24 修复，
+    //    断言不再可能落预刷新旧页）。
+    await reloadAndReconnect(ws, 'W-queue-restore-countdown');
+    let caughtRecovering = null;
+    let firstSample = null;
+    let sampleCount = 0;
+    const sampleDeadline = Date.now() + 6000;
+    while (Date.now() < sampleDeadline) {
+      const gate = await chatInputGate(ws);
+      const strip = await queueStripState(ws);
+      sampleCount += 1;
+      if (!firstSample) firstSample = { gate, strip };
+      if (gate.hasInput && (gate.textareaDisabled === true || strip.text.includes('恢复中'))) {
+        caughtRecovering = { textareaDisabled: gate.textareaDisabled, stripText: strip.text };
+        break;
+      }
+      // 恢复已完成（发送可用且横条已呈 countdown）→ 采样终止。
+      if (gate.textareaDisabled === false && strip.present && strip.text.includes('倒计时')) break;
+      await sleep(50);
+    }
+    // 4.5) A3-3 恢复中路由不阻塞（仅采样捕获时执行；未捕获走 SKIP 降级条目，理由带首采样实测证据）。
+    if (caughtRecovering) {
+      await evalExpr(ws, `(location.hash = '#/config?tab=mcp'), true`);
+      await waitFor('W-queue-restore-countdown：恢复中路由不阻塞（config 页可渲染）', () => evalOk(ws, `!!document.querySelector('.mcp-rail')`), 10);
+      await evalExpr(ws, `(location.hash = '#/'), true`);
+      await waitFor('W-queue-restore-countdown：恢复中路由不阻塞（切回 chat 页）', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 10);
+      record('W-queue-restore-countdown-gate-sample', 'PASS', `恢复门禁用态样本捕获（textareaDisabled=${caughtRecovering.textareaDisabled} strip='${caughtRecovering.stripText.slice(0, 20)}'）+ A3-3 恢复中路由不阻塞（config↔chat 往返可渲染）`);
+    } else {
+      record('W-queue-restore-countdown-gate-sample', 'SKIP', `恢复门禁用态样本未捕获（reload 完成等待修复后实测：首采样即恢复完成——textareaDisabled=${firstSample?.gate.textareaDisabled} strip='${String(firstSample?.strip.text ?? '').slice(0, 24)}'，共采样 ${sampleCount} 次全程未见禁用/恢复中态；loadOverview 先于首采样完成，直接证据非推断）——按 T1R-1 期望 a 降级申报：恢复门禁用绑定由结构钉 A3-1（npx tsx scripts/tdd-queue-restore-gate-verify.ts）兜底；A3-3 路由不阻塞同因未测（依赖恢复中窗口在场）`);
+    }
+    // 5) 恢复完成后（必断言）：状态横条已呈现（倒计时剩余秒数形态；轮询收口防单点读抖动）
+    //    + 发送可用 + P35 期望 b DOM 直测：倒计时秒数两采样递减（指示随 QUEUE_EVENT 增量更新，
+    //    第二采样 < 第一采样；15s 预算远小于 60s 倒计时窗，超时即指示冻结/倒退 → FAIL）。
+    const stripAfter = await waitFor('W-queue-restore-countdown：恢复后倒计时横条呈现', async () => {
+      const s = await queueStripState(ws);
+      // round-002 R3-1：正则随 ChatPage M-C 文案消歧同步（「N 条待执行」→「队列 N 条」，fix-G 已落）
+      return s.present && /队列倒计时 \d+s · 队列 \d+ 条/.test(s.text) ? s : false;
+    }, 15);
+    const m1 = stripAfter.text.match(/队列倒计时 (\d+)s/);
+    if (!m1) throw new Error(`恢复后横条无倒计时秒数（text='${stripAfter.text.slice(0, 40)}'）`);
+    const cdS1 = Number(m1[1]);
+    const sample2 = await waitFor(`W-queue-restore-countdown：倒计时秒数第二采样递减（首采样=${cdS1}s）`, async () => {
+      const s = await queueStripState(ws);
+      const m = s.present ? s.text.match(/队列倒计时 (\d+)s/) : null;
+      return m && Number(m[1]) < cdS1 ? { s2: Number(m[1]), text: s.text } : false;
+    }, 15, 250);
+    const gateAfter = await chatInputGate(ws);
+    // 「发送可用」权威口径=textarea 非 disabled（A3 chatInputDisabled 门）；send 按钮额外叠加
+    // 空草稿条件（!modelValue.trim() && !hasAttachments）——空草稿期恒 disabled，不作判据。
+    if (gateAfter.textareaDisabled !== false) {
+      throw new Error(`恢复完成后发送仍不可用（textareaDisabled=${gateAfter.textareaDisabled}）`);
+    }
+    // 6) ChatInput 发送 → 入队证据三件套 + 无直发回合（T1R-1 期望 c）。
+    const bubblesBeforeSend = await assistantBubbleCount(ws);
+    const frameBaseline1 = frameEvidence.received.length;
+    await setChatInput(ws, 'e2e-t1r1-usermsg');
+    await clickSend(ws);
+    const notice = await waitFor('W-queue-restore-countdown：入队反馈（已加入队列）', async () => {
+      const n = await noticeState(ws);
+      return n.present && n.text.includes('已加入队列') ? n.text : false;
+    }, 5, 50);
+    await openQueuePanelTab(ws, 'W-queue-restore-countdown');
+    await waitFor('W-queue-restore-countdown：任务卡#2 渲染（e2e-t1r1-usermsg）', () => evalOk(ws, `[...document.querySelectorAll('.task-item .task-item__prompt')].some((n) => (n.textContent || '').includes('e2e-t1r1-usermsg'))`), 10);
+    // tasks_changed 帧断言：基线后任一帧含新任务（sessionId 匹配 + prompt + pending）——
+    // 取「任一帧」而非「末帧」（末帧可能是后续广播的中间态；Task 序列化字段=prompt）。
+    const frame1 = await waitFor('W-queue-restore-countdown：tasks_changed 帧到达（含新任务）', () => {
+      const frames = queueChangedFramesSince(frameBaseline1);
+      return frames.some((f) => f.sessionId === wqrcSid
+        && Array.isArray(f.data?.tasks)
+        && f.data.tasks.some((t) => t && t.prompt === 'e2e-t1r1-usermsg' && t.status === 'pending'));
+    }, 10, 100);
+    // A2-3 顺序断言：入队追加尾部（task1 在前、usermsg 在后）；原任务不打断抽样（task1 仍 pending、倒计时继续）。
+    const ovAfterEnqueue = await pollOverview(ws, wqrcSid, '入队后快照（2 任务）', (o) => (o.tasks ?? []).length === 2, 8);
+    const texts = (ovAfterEnqueue.tasks ?? []).map((t) => t.prompt);
+    if (texts[0] !== 'e2e-t1r1-task1' || texts[1] !== 'e2e-t1r1-usermsg') {
+      throw new Error(`入队未追加尾部（tasks=${JSON.stringify(texts)}，期望 [task1, usermsg]——A2-4 违背）`);
+    }
+    if (ovAfterEnqueue.state?.status !== 'countdown') throw new Error(`入队后队列状态被打断（status=${ovAfterEnqueue.state?.status}，期望 countdown 继续）`);
+    if ((ovAfterEnqueue.tasks ?? [])[0]?.status !== 'pending') throw new Error('原任务#1 非 pending（被打断/被执行）');
+    // 无直发回合：assistant 气泡计数不增（入队消息不出现在聊天流）。P24 sleep 清理：固定
+    // sleep(2500) → 有界条件观察窗（预算仍 2.5s 不放宽语义）——窗内任一时刻气泡增长即快速失败，
+    // 窗满无增长=无直发（缺席断言的观察窗语义不可事件化，条件化后等价且失败更快）。
+    let bubblesAfterSend = Number(bubblesBeforeSend);
+    const noDirectDeadline = Date.now() + 2500;
+    while (Date.now() < noDirectDeadline) {
+      bubblesAfterSend = Number(await assistantBubbleCount(ws));
+      if (bubblesAfterSend !== Number(bubblesBeforeSend)) break;
+      await sleep(100);
+    }
+    if (bubblesAfterSend !== Number(bubblesBeforeSend)) {
+      throw new Error(`出现直发回合迹象（assistant 气泡 ${bubblesBeforeSend} → ${bubblesAfterSend}）`);
+    }
+    if (exceptions.length > exceptionsBeforeQ1) throw new Error('W-queue-restore-countdown 用例期间出现 exceptionThrown');
+    record('W-queue-restore-countdown', 'PASS', `倒计时中刷新→恢复→发送=入队全链：基线空态 standby → addTask#1 → countdown(remaining=${ovCount.state.countdownRemaining}s) → 整页刷新（等加载完成）→ 恢复后发送可用+状态横条「${stripAfter.text}」+ P35 两采样递减（${cdS1}s→${sample2.s2}s）→ 发送=入队（notice「${String(notice).slice(0, 24)}」+ 任务卡 e2e-t1r1-usermsg + tasks_changed 帧 sessionId 匹配 + assistant 气泡 ${bubblesBeforeSend}→${bubblesAfterSend} 无直发回合）+ A2-4 尾部追加 [task1, usermsg] + 原任务不打断抽样（countdown 继续/task1 pending）`);
+    await screenshot(ws, 'W-queue-restore-countdown');
+  } catch (e) { record('W-queue-restore-countdown', 'FAIL', e.message); await screenshot(ws, 'W-queue-restore-countdown-failed'); }
+  // 善后：清队列任务（countdown 走完前删除 pending 任务；若已在执行则先中断该回合），删物化会话。
+  try {
+    if (wqrcSid) {
+      const ov = await queueOverview(ws, wqrcSid);
+      for (const t of (ov.tasks ?? []).filter((x) => x.status === 'pending')) {
+        await evalExpr(ws, `window.claudeLink.removeTask(${JSON.stringify(t.id)}).then(() => true)`);
+      }
+      if (ov.state?.status === 'running') {
+        await evalExpr(ws, `window.claudeLink.abortChat(${JSON.stringify(wqrcSid)}).then(() => true)`);
+        await waitTurnSettled(ws, 'W-queue-restore-countdown 善后', 60);
+      }
+    }
+  } catch (e) { log(`  W-queue-restore-countdown 善后异常（申报）：${String(e.message).slice(0, 120)}`); }
+  await deleteActiveSessionViaStore(ws);
+  await screenshot(ws, 'W-queue-restore-countdown-cleaned');
+
+  // ── W-queue-restore-running：T1R-2 running 中刷新 → sending 恢复 → 发送=入队 ──
+  // 长任务措辞（※首跑校准）：指示模型写长文不用工具，保证 running 窗 ≥ 刷新+恢复+发送全程。
+  // 「无直发回合」断言形态：running 期间首轮回合流可能经重连回流渲染（assistant 计数不稳），
+  // 改以「第二条消息不以 user 气泡出现在聊天流」（入队消息出队执行前不可见，B3 反馈注释同源）
+  // + tasks_changed 帧证据 + 快照 2 任务三件套。A2-4 queueEnabled=false 恒直发抽验并入收尾，
+  // 独立记账条目 W-queue-restore-running-a2-4。
+  currentCase = 'W-queue-restore-running';
+  let wqrrSid = '';
+  try {
+    const exceptionsBeforeQ2 = exceptions.length;
+    await ensureLanBridge(ws, 'W-queue-restore-running');
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-queue-restore-running：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+    await materializeSession(ws, 'W-queue-restore-running', W_WAKE_TEXT);
+    wqrrSid = await activeSessionId(ws);
+    if (!wqrrSid) throw new Error('无法取得物化会话 id');
+    // 1) addTask 长任务 → 轮询至 running 且存在执行中回合（currentTaskId 非空；60s 倒计时 + 裕量）。
+    const addLong = JSON.parse(String(await evalExpr(ws, `window.claudeLink.addTask(${JSON.stringify(wqrrSid)}, { text: 'e2e-t1r2-longtask：请写一篇约500字的散文，主题「季节与时间」。不要使用任何工具，不要使用 markdown 标题。', attachmentIds: [], clientMessageId: crypto.randomUUID() }).then((r) => JSON.stringify({ taskId: (r.task && r.task.id) || '' }))`)));
+    if (!addLong.taskId) throw new Error('长任务 addTask 回包无 taskId');
+    // 校准链同 countdown 场景：TASK_ADD 不自动 arm——面板「暂停→恢复」同语义链启动倒计时，
+    // 60s 后引擎自动出队执行 → running。
+    await evalExpr(ws, `window.claudeLink.setTaskPaused(${JSON.stringify(addLong.taskId)}, true).then(() => true)`);
+    await evalExpr(ws, `window.claudeLink.setTaskPaused(${JSON.stringify(addLong.taskId)}, false).then(() => true)`);
+    const ovRun = await pollOverview(ws, wqrrSid, '长任务进入 running', (o) => o.state?.status === 'running' && !!o.state?.currentTaskId, 90);
+    log(`  running 在位（currentTaskId=${String(ovRun.state.currentTaskId).slice(0, 8)}…），条件等待回合真开跑`);
+    // 「回合真开跑」条件等待（P24 sleep 清理：硬 sleep 2000ms → stream-group 在场即开跑；
+    // 零流式回合容忍口径同 waitTurnSettled，权威锚=上方 currentTaskId 轮询）。
+    await waitFor('W-queue-restore-running：执行中回合已开跑（stream-group 在场）', () => evalOk(ws, `!!document.querySelector('.stream-group')`), 15)
+      .catch(() => log('  15s 未见 stream-group（容忍零流式回合），按权威快照 currentTaskId 收口'));
+    // 2) running 中刷新（等刷新完成——P24 修复）→ 恢复。
+    await reloadAndReconnect(ws, 'W-queue-restore-running');
+    // 3) 恢复后断言：队列状态指示 running（「队列任务执行中」，轮询收口替代旧 sleep(500)+单点读）
+    //    + 执行中任务卡可见 + 发送可用。
+    const stripRun = await waitFor('W-queue-restore-running：running 恢复态横条呈现（队列任务执行中）', async () => {
+      const s = await queueStripState(ws);
+      return s.present && s.text.includes('队列任务执行中') ? s : false;
+    }, 15);
+    const ovRunAfter = await queueOverview(ws, wqrrSid);
+    if (ovRunAfter.state?.status !== 'running') throw new Error(`恢复后权威快照非 running（status=${ovRunAfter.state?.status}）`);
+    if (ovRunAfter.state?.currentTaskId !== ovRun.state.currentTaskId) throw new Error('恢复后 currentTaskId 变化（执行中回合丢失/换代）');
+    await openQueuePanelTab(ws, 'W-queue-restore-running');
+    // 「运行中任务卡」证据形态校准：task_started 后任务从 pending 列表移除、进 executed 历史
+    //（executed-fold 区 outcome='running' 行；默认折叠——先点开折钮再查行）。
+    await evalExpr(ws, `(() => {
+      const btn = document.querySelector('.executed-fold .executed-fold__title');
+      if (btn && !btn.querySelector('.executed-fold__arrow--open')) btn.click();
+      return true;
+    })()`);
+    await waitFor('W-queue-restore-running：执行中任务在 executed 区可见', () => evalOk(ws, `[...document.querySelectorAll('.executed-entry')].some((n) => (n.textContent || '').includes('e2e-t1r2-longtask'))`), 10);
+    const gateRun = await chatInputGate(ws);
+    if (gateRun.textareaDisabled !== false) throw new Error(`running 恢复后发送不可用（textareaDisabled=${gateRun.textareaDisabled}）`);
+    await screenshot(ws, 'W-queue-restore-running-restored');
+    // 4) ChatInput 发送第二条 → 入队证据三件套。
+    const frameBaseline2 = frameEvidence.received.length;
+    await setChatInput(ws, 'e2e-t1r2-second：请只回复数字 42,不要使用任何工具');
+    await clickSend(ws);
+    await waitFor('W-queue-restore-running：入队反馈（已加入队列）', async () => {
+      const n = await noticeState(ws);
+      return n.present && n.text.includes('已加入队列') ? n.text : false;
+    }, 5, 50);
+    await waitFor('W-queue-restore-running：任务卡#2 渲染', () => evalOk(ws, `[...document.querySelectorAll('.task-item .task-item__prompt')].some((n) => (n.textContent || '').includes('e2e-t1r2-second'))`), 10);
+    // tasks_changed 帧断言：同 countdown 场景口径——基线后任一帧含新任务（sessionId+prompt+pending）。
+    // 注：长任务已在执行（status=running 不入 pendingTasksOf），帧 tasks 恰为 [task2]。
+    const frame2 = await waitFor('W-queue-restore-running：tasks_changed 帧到达（含新任务）', () => {
+      const frames = queueChangedFramesSince(frameBaseline2);
+      return frames.some((f) => f.sessionId === wqrrSid
+        && Array.isArray(f.data?.tasks)
+        && f.data.tasks.some((t) => t && t.prompt === 'e2e-t1r2-second：请只回复数字 42,不要使用任何工具' && t.status === 'pending'));
+    }, 10, 100);
+    const userTexts = await userBubbleTexts(ws);
+    if (userTexts.some((t) => String(t).includes('e2e-t1r2-second'))) {
+      throw new Error('第二条消息以 user 气泡出现在聊天流（直发插队形态，违背入队语义）');
+    }
+    if (exceptions.length > exceptionsBeforeQ2) throw new Error('W-queue-restore-running 用例期间出现 exceptionThrown');
+    record('W-queue-restore-running', 'PASS', `running 中刷新→sending 恢复→发送=入队：长任务 running(currentTaskId 稳定) → 刷新（等加载完成）→ 横条「队列任务执行中」+ 执行中任务卡可见 + 发送可用 → 第二条=入队（notice 已加入队列 + 任务卡 + tasks_changed 帧 sessionId 匹配 pending）+ 无直发抽验（聊天流无该消息 user 气泡——入队消息出队前不可见）`);
+    await screenshot(ws, 'W-queue-restore-running');
+  } catch (e) { record('W-queue-restore-running', 'FAIL', e.message); await screenshot(ws, 'W-queue-restore-running-failed'); }
+  // 善后：删 pending 任务 → 中断执行中回合 → 删会话。
+  try {
+    if (wqrrSid) {
+      const ov = await queueOverview(ws, wqrrSid);
+      for (const t of (ov.tasks ?? []).filter((x) => x.status === 'pending')) {
+        await evalExpr(ws, `window.claudeLink.removeTask(${JSON.stringify(t.id)}).then(() => true)`);
+      }
+      if (ov.state?.status === 'running') {
+        await evalExpr(ws, `window.claudeLink.abortChat(${JSON.stringify(wqrrSid)}).then(() => true)`);
+        await waitTurnSettled(ws, 'W-queue-restore-running 善后', 60);
+      }
+    }
+  } catch (e) { log(`  W-queue-restore-running 善后异常（申报）：${String(e.message).slice(0, 120)}`); }
+  await deleteActiveSessionViaStore(ws);
+  await screenshot(ws, 'W-queue-restore-running-cleaned');
+
+  // ── W-queue-restore-running-a2-4：A2-4 queueEnabled=false 恒直发（独立记账抽验）──
+  // 经 config store 翻转 queueEnabled=false → 发送 → user 气泡出现（直发）+ 无任务卡/无帧。
+  // 独立场景化：与 running 主场景分离，避免开关翻转污染主链路；收尾恢复 true。
+  currentCase = 'W-queue-restore-running-a2-4';
+  let a24Sid = '';
+  try {
+    const exceptionsBeforeA24 = exceptions.length;
+    await ensureLanBridge(ws, 'W-queue-restore-running-a2-4');
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-queue-restore-running-a2-4：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+    await materializeSession(ws, 'W-queue-restore-running-a2-4', W_WAKE_TEXT);
+    a24Sid = await activeSessionId(ws);
+    if (!a24Sid) throw new Error('无法取得物化会话 id');
+    // 翻转 queueEnabled=false（config store 直设 + saveConfig 持久化；主进程 onQueueEnabledChanged 联动）。
+    await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const cs = pinia && pinia._s ? pinia._s.get('config') : null;
+      if (!cs) return false;
+      cs.config.queueEnabled = false;
+      void cs.saveConfig();
+      return true;
+    })()`);
+    await sleep(600);
+    // 发送 → 直发证据：user 气泡出现该文本；反向：无任务卡、无 tasks_changed 帧。
+    const frameBaselineA24 = frameEvidence.received.length;
+    await setChatInput(ws, 'e2e-a24-direct：请只回复数字 42,不要使用任何工具');
+    await clickSend(ws);
+    await waitFor('W-queue-restore-running-a2-4：直发 user 气泡出现', () => evalOk(ws, `[...document.querySelectorAll('.bubble-wrap--user .bubble')].some((b) => (b.innerText || '').includes('e2e-a24-direct'))`), 10);
+    const frameA24 = queueChangedFramesSince(frameBaselineA24);
+    if (frameA24.length > 0) throw new Error('queueEnabled=false 发送出现 tasks_changed 帧（误入队）');
+    const ovA24 = await queueOverview(ws, a24Sid);
+    if ((ovA24.tasks ?? []).length > 0) throw new Error('queueEnabled=false 发送产生了队列任务（误入队）');
+    await waitTurnSettled(ws, 'W-queue-restore-running-a2-4 直发回合', 90);
+    if (exceptions.length > exceptionsBeforeA24) throw new Error('W-queue-restore-running-a2-4 用例期间出现 exceptionThrown');
+    record('W-queue-restore-running-a2-4', 'PASS', `A2-4 直发抽验：queueEnabled=false 翻转 → 发送 e2e-a24-direct → user 气泡出现（直发）+ tasks_changed 帧零条 + 快照 tasks 空 → 收尾还原 queueEnabled=true`);
+    await screenshot(ws, 'W-queue-restore-running-a2-4');
+  } catch (e) { record('W-queue-restore-running-a2-4', 'FAIL', e.message); await screenshot(ws, 'W-queue-restore-running-a2-4-failed'); } finally {
+    // 恢复 queueEnabled=true 必须无条件执行（try 内失败路径若跳过还原，queueEnabled=false 会
+    // 持久化到隔离配置，污染本轮后续场景与下一轮 B 链——run-2 事故根因，见 t1b 报告）。
+    try {
+      await evalExpr(ws, `(() => {
+        const app = document.querySelector('#app');
+        const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+        const cs = pinia && pinia._s ? pinia._s.get('config') : null;
+        if (!cs) return false;
+        cs.config.queueEnabled = true;
+        void cs.saveConfig();
+        return true;
+      })()`);
+      await sleep(600);
+      log('  a2-4 收尾：queueEnabled 已还原 true');
+    } catch (e) { log(`  a2-4 收尾 queueEnabled 还原失败（申报）：${String(e.message).slice(0, 120)}`); }
+  }
+  try {
+    if (a24Sid) {
+      const ov = await queueOverview(ws, a24Sid);
+      for (const t of (ov.tasks ?? []).filter((x) => x.status === 'pending')) {
+        await evalExpr(ws, `window.claudeLink.removeTask(${JSON.stringify(t.id)}).then(() => true)`);
+      }
+      if (ov.state?.status === 'running') {
+        await evalExpr(ws, `window.claudeLink.abortChat(${JSON.stringify(a24Sid)}).then(() => true)`);
+        await waitTurnSettled(ws, 'W-queue-restore-running-a2-4 善后', 60);
+      }
+    }
+  } catch { /* 善后尽力而为 */ }
+  await deleteActiveSessionViaStore(ws);
+  await screenshot(ws, 'W-queue-restore-running-a2-4-cleaned');
+
+  // ── W-queue-restore-standby：T1R-3 standby 中刷新 → 发送=直发 ──
+  // 空态 standby（queueEnabled=true + 零任务）直发主路径；熔断待命态制造依赖「暂停队列」入口
+  //（※选择器首跑校准未做——以判据行为测试 A2-1 兜底，本场景按 T1R-3 夹注记 SKIP 降级申报）。
+  // standby 轻量指示：实现口径 standby 无暂停/熔断不渲染横条（ChatPage queueStatusLine 注释），
+  // 故恢复后断言=发送可用 + taskStore 权威投影 standby（A3-4 选择器钉意图为准，申报口径）。
+  currentCase = 'W-queue-restore-standby';
+  let wqrsSid = '';
+  try {
+    const exceptionsBeforeQ3 = exceptions.length;
+    await ensureLanBridge(ws, 'W-queue-restore-standby');
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-queue-restore-standby：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+    await materializeSession(ws, 'W-queue-restore-standby', W_WAKE_TEXT);
+    wqrsSid = await activeSessionId(ws);
+    if (!wqrsSid) throw new Error('无法取得物化会话 id');
+    // 基线空态 standby（轮询收口，同 countdown 场景的 DOM-vs-主进程竞态处理）。
+    const ov0 = await pollOverview(ws, wqrsSid, '基线空态 standby', (o) => o.state?.status === 'standby' && (o.tasks ?? []).length === 0, 30);
+    // 刷新 → 恢复完成：发送可用 + taskStore 权威投影 standby。
+    await reloadAndReconnect(ws, 'W-queue-restore-standby');
+    await waitFor('W-queue-restore-standby：恢复完成（发送可用）', () => evalOk(ws, `(() => {
+      const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+      return !!ta && ta.disabled === false;
+    })()`), 15);
+    const tsState = JSON.parse(String(await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const ts = pinia && pinia._s ? pinia._s.get('task') : null;
+      return JSON.stringify({ status: ts?.queueState?.status ?? '', sidMatch: ts?.queueState?.sessionId === ${JSON.stringify(wqrsSid)}, ready: ts?.overviewReadyBySession?.[${JSON.stringify(wqrsSid)}] === true });
+    })()`)));
+    if (tsState.status !== 'standby' || tsState.sidMatch !== true || tsState.ready !== true) {
+      throw new Error(`恢复后 taskStore 投影非 standby 过门（status=${tsState.status} sidMatch=${tsState.sidMatch} ready=${tsState.ready}）`);
+    }
+    // 直发：发送 → user 气泡 + 回合启动；反向：无任务卡新增、无 tasks_changed 帧。
+    const frameBaseline3 = frameEvidence.received.length;
+    // 直发回合容错重发（一次）：上游空流偶发 error（无 text_delta → stream-group 不出现，
+    // run-4 实测 21s 后 outcome=error）——回合 error 不改变「直发路由」语义本身，重发一次
+    // 拿 42 终态（申报：容错重发不放宽直发断言；误入队反证独立成立）。
+    let finalText = '';
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      await setChatInput(ws, '请只回复数字 42,不要使用任何工具');
+      await clickSend(ws);
+      // 终态检测（materializeSession 同款口径，容忍单 token 回复零流式——stream-group 对
+      // 一次性到齐的短回复可能整回合不渲染，run-6 实测 5.6s 回合无流式组）：assistant 末气泡
+      // 含 42 且无 stream-group。回合 error 时末气泡不含 42 → 记一次重发。
+      await waitFor(`W-queue-restore-standby：直发回合终态（第 ${attempt} 次）`, () => evalOk(ws, `(() => {
+        const b = document.querySelectorAll('.bubble--assistant');
+        const last = b[b.length - 1];
+        return !!(last && (last.innerText || '').includes('42')) && !document.querySelector('.stream-group');
+      })()`), 120);
+      finalText = await evalExpr(ws, `(() => {
+        const b = document.querySelectorAll('.bubble--assistant');
+        return b.length ? (b[b.length - 1].innerText || '') : '';
+      })()`);
+      if (String(finalText).includes('42')) break;
+      if (attempt === 1) log('  standby 直发回合终态不含 42（上游偶发 error），重发一次');
+    }
+    if (!String(finalText).includes('42')) throw new Error(`直发回合终态不含 42（含一次重发，text=${String(finalText).slice(0, 60)}）`);
+    const framesQ3 = queueChangedFramesSince(frameBaseline3);
+    if (framesQ3.length > 0) throw new Error('standby 直发出现 tasks_changed 帧（误入队）');
+    const ov3 = await queueOverview(ws, wqrsSid);
+    if ((ov3.tasks ?? []).length > 0) throw new Error('standby 直发产生了队列任务（误入队）');
+    if (exceptions.length > exceptionsBeforeQ3) throw new Error('W-queue-restore-standby 用例期间出现 exceptionThrown');
+    record('W-queue-restore-standby', 'PASS', `空态 standby 刷新→恢复→发送=直发：恢复后发送可用 + taskStore 投影 standby 过门（实现口径 standby 无暂停/熔断不渲染横条，申报）→ 直发回合完成（终态含 42）+ tasks_changed 帧零条 + 快照 tasks 空（A2.2 回归红线；熔断待命态制造依赖暂停入口未做，判据行为测试 A2-1 兜底——SKIP 申报见 t1b 报告）`);
+    await screenshot(ws, 'W-queue-restore-standby');
+  } catch (e) { record('W-queue-restore-standby', 'FAIL', e.message); await screenshot(ws, 'W-queue-restore-standby-failed'); }
+  await deleteActiveSessionViaStore(ws);
+  await screenshot(ws, 'W-queue-restore-standby-cleaned');
+
+  // ── W-turn-footnote：F1-2a 成功正文形态 + F1-2b 工具结尾形态 + F1-3 仅最新回合 ──
+  // 锚点（MessageList F1）：[data-testid="turn-footnote"]（.turn-footnote--success 等），位于
+  // .message-list__inner 内 renderItems 循环后（下一兄弟至多为 stream-group）。工具结尾措辞
+  //（※首跑校准）：指示模型调用 Bash echo 后回复 42；工具块 .tool-row 在末条内容块区。
+  currentCase = 'W-turn-footnote';
+  let wfnSid = '';
+  try {
+    const exceptionsBeforeF = exceptions.length;
+    await ensureLanBridge(ws, 'W-turn-footnote');
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-turn-footnote：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+    // ① F1-2a：成功·正文结尾回合 → 脚注恰 1 个、位于末条内容块之后、含耗时与「结束于」段。
+    // 脚注渲染晚于 materializeSession 的 42 终态（sending 下降沿/turn_ended 后一拍）——轮询等待。
+    await materializeSession(ws, 'W-turn-footnote', W_WAKE_TEXT);
+    wfnSid = await activeSessionId(ws);
+    if (!wfnSid) throw new Error('无法取得物化会话 id');
+    const fnState1 = await waitFor('W-turn-footnote：第一回合脚注渲染（恰 1 个）', () => evalOk(ws, `(() => {
+      const fns = [...document.querySelectorAll('[data-testid="turn-footnote"]')];
+      return fns.length === 1 && (fns[0].className || '').includes('success');
+    })()`), 10, 200).then(async () => JSON.parse(String(await evalExpr(ws, `(() => {
+      const inner = document.querySelector('.message-list__inner');
+      const fns = [...document.querySelectorAll('[data-testid="turn-footnote"]')];
+      const last = fns[fns.length - 1] ?? null;
+      return JSON.stringify({
+        count: fns.length,
+        text: last ? ((last.textContent || '').trim()) : '',
+        kind: last ? (last.className || '') : '',
+        isLastInInner: !!inner && !!last && inner.lastElementChild === last,
+      });
+    })()`))));
+    if (!/本次回复 [\d:.]+s? · 结束于 \d{1,2}:\d{2}:\d{2}/.test(fnState1.text)) {
+      throw new Error(`成功脚注文案形态不符（'${fnState1.text.slice(0, 60)}'，期望「本次回复 <秒/分:秒> · 结束于 HH:MM:SS」（format-duration 秒一档/分秒/时分秒三档 + 当天 HH:mm:ss））`);
+    }
+    if (fnState1.kind.includes('interrupted') || fnState1.kind.includes('error')) throw new Error(`成功回合脚注 kind 异常（${fnState1.kind}）`);
+    if (fnState1.isLastInInner !== true) throw new Error('脚注不在列表尾（未位于末条内容块之后）');
+    await screenshot(ws, 'W-turn-footnote-text-tail');
+    // ② F1-2b：工具+思考结尾回合 → 脚注仍恰 1 个（F1-3）且在工具块之后可见。
+    // 终态检测容忍零流式（单次回复 stream-group 可能整回合不渲染——run-6 实测）+ 容错重发
+    //（一次）：工具回合对上游偶发 error 重发一次拿工具块（申报：重发不放宽 F1-3 断言）。
+    let toolSeen = false;
+    let fnState2 = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      // 每次尝试独立取气泡基线（跨尝试复用全局基线会让第 2 次的终态检测被第 1 次的产出
+      // 瞬时满足——run-7 假红根因）。
+      const beforeThis = Number(await assistantBubbleCount(ws));
+      await setChatInput(ws, '请调用 Bash 工具执行命令：echo e2e-footnote-probe。执行完成后只回复数字 42,不要使用任何其他工具。');
+      await clickSend(ws);
+      await waitFor(`W-turn-footnote：第二回合 user 气泡受理（第 ${attempt} 次）`, () => evalOk(ws, `[...document.querySelectorAll('.bubble-wrap--user .bubble')].filter((b) => (b.innerText || '').includes('e2e-footnote-probe')).length >= ${attempt}`), 10);
+      // 终态：无 stream-group 且 assistant 气泡数增长（新回合产出落 DOM；成功/错误文本均算终态；
+      // 零流式回合 stream-group 可能整回合不渲染——终端条件已不依赖其在场）。
+      await waitFor(`W-turn-footnote：工具回合终态（第 ${attempt} 次）`, () => evalOk(ws, `(() => {
+        const b = document.querySelectorAll('.bubble--assistant').length;
+        return !document.querySelector('.stream-group') && b > ${beforeThis};
+      })()`), 150);
+      await sleep(500);
+      toolSeen = await evalOk(ws, `!!document.querySelector('.tool-row')`);
+      fnState2 = JSON.parse(String(await evalExpr(ws, `(() => {
+        const inner = document.querySelector('.message-list__inner');
+        const fns = [...document.querySelectorAll('[data-testid="turn-footnote"]')];
+        const last = fns[fns.length - 1] ?? null;
+        return JSON.stringify({
+          count: fns.length,
+          text: last ? ((last.textContent || '').trim()) : '',
+          isLastInInner: !!inner && !!last && inner.lastElementChild === last,
+          nextIsStream: !!inner && !!last && !!last.nextElementSibling && last.nextElementSibling.className.includes('stream-group'),
+        });
+      })()`)));
+      if (toolSeen && /本次回复 [\d:.]+s? · 结束于 \d{1,2}:\d{2}:\d{2}/.test(fnState2.text)) break;
+      if (attempt === 1) log(`  footnote 工具回合首试未达工具+成功形态（toolSeen=${toolSeen} footnote='${String(fnState2?.text ?? '').slice(0, 30)}'），重发一次`);
+    }
+    if (!fnState2 || fnState2.count !== 1) throw new Error(`第二回合后脚注载体数 ${fnState2?.count ?? 'n/a'} ≠ 1（F1-3 违背）`);
+    if (!fnState2.isLastInInner && !fnState2.nextIsStream) throw new Error('脚注不在列表尾（第二回合）');
+    const turn2SuccessForm = /本次回复 [\d:.]+s? · 结束于 \d{1,2}:\d{2}:\d{2}/.test(fnState2.text);
+    if (exceptions.length > exceptionsBeforeF) throw new Error('W-turn-footnote 用例期间出现 exceptionThrown');
+    record('W-turn-footnote', 'PASS', `F1-2a+F1-3：成功正文结尾回合脚注恰 1 个（「${fnState1.text.slice(0, 40)}」匹配耗时+结束于两段）且列表尾；F1-3 连续两回合脚注恒 1 且位于列表尾（第二回合脚注='${fnState2.text.slice(0, 40)}'——${turn2SuccessForm ? '成功形态' : 'error/中断形态（诚实不造数）'}；工具块${toolSeen ? '在场' : '未见——降级申报见 tooltail 条目'}）；F1-2b 见附属条目 W-turn-footnote-tooltail`);
+    await screenshot(ws, 'W-turn-footnote');
+    // F1-2b 附属记账：工具块在场且第二回合成功形态 → PASS；否则 SKIP-with-reason（夹具降级
+    // 申报：措辞已按 ※校准窗调整 + 重发一次，模型不配合/上游 error 均非本用例可控行）。
+    if (toolSeen && turn2SuccessForm) {
+      record('W-turn-footnote-tooltail', 'PASS', `F1-2b 工具+思考结尾形态：工具块（.tool-row）在末条内容区 + 脚注恒在其后（列表尾，kind success 文案两段齐备）`);
+    } else {
+      record('W-turn-footnote-tooltail', 'SKIP', `模型未配合调用 Bash 工具或第二回合非成功终态（toolSeen=${toolSeen}，脚注='${String(fnState2.text).slice(0, 40)}'；措辞已校准+重发一次，LLM/上游行为非本用例可控行）——工具结尾形态由结构钉 F1-1（npx tsx scripts/tdd-turn-final-footnote-verify.ts 脚注载体与四形态渲染条件）兜底；正文结尾/仅最新回合两断言已在主条目成立`);
+    }
+  } catch (e) { record('W-turn-footnote', 'FAIL', e.message); await screenshot(ws, 'W-turn-footnote-failed'); }
+  await deleteActiveSessionViaStore(ws);
+  await screenshot(ws, 'W-turn-footnote-cleaned');
+
+  // ── W-question-sidenav：C1-14 场景 1（C1-1 结构 + C1-2 跳题/下一题恒可点 + C1-3 三态+进度 chip）──
+  // 夹具（降级申报）：真实回合触发多题 AskUserQuestion 依赖模型配合（03b C1-14 夹注允许降级），
+  // 本场景以 interaction store 注入真实 payload 形状（镜像 buildWizardAskUserQuestionPayload）+
+  // respondInteraction 页内 stub 驱动变体 2 组件全 DOM 断言——变体 2 结构钉另由
+  // npx tsx scripts/tdd-question-dialog-sidenav-verify.ts 兜底。bypassPermissions 已由隔离配置注入。
+  currentCase = 'W-question-sidenav';
+  let qNavPayload = null;
+  try {
+    const exceptionsBeforeW1 = exceptions.length;
+    await ensureLanBridge(ws, 'W-question-sidenav');
+    await evalExpr(ws, `(location.hash = '#/'), true`);
+    await waitFor('W-question-sidenav：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+    qNavPayload = await injectWizardFixture(ws);
+    // C1-1 结构：左右分栏（nav + content）+ 左栏 3 题导航 + 右栏单题 + 翻页保留。
+    const struct = JSON.parse(String(await evalExpr(ws, `(() => {
+      const nav = document.querySelector('[data-testid="wizard-nav"]');
+      const items = [...document.querySelectorAll('[data-testid="wizard-nav-item"]')];
+      const content = document.querySelector('[data-testid="wizard-content"]');
+      const chip = document.querySelector('[data-testid="wizard-progress-chip"]');
+      const count = (document.querySelector('.wizard-count')?.textContent || '').trim();
+      return JSON.stringify({
+        hasNav: !!nav, itemCount: items.length, hasContent: !!content,
+        chipText: chip ? (chip.textContent || '').trim() : '', count,
+      });
+    })()`)));
+    if (!struct.hasNav || !struct.hasContent) throw new Error('wizard 左右分栏缺失（nav/content 不在位）');
+    if (struct.itemCount !== 3) throw new Error(`左栏题号导航项 ${struct.itemCount} ≠ 3`);
+    if (struct.count !== '第 1 题 / 共 3 题') throw new Error(`右栏翻页计数异常（'${struct.count}'）`);
+    if (!struct.chipText.includes('已答 0/3')) throw new Error(`进度 chip 异常（'${struct.chipText}'）`);
+    // C1-2 跳题自由 + 左栏直达 + 下一题恒可点：q0 未答直接点左栏第 3 题 → 直达；上一题仅第一题禁用。
+    const nextDisabledAtQ0 = await evalExpr(ws, `document.querySelector('[data-testid="wizard-next-btn"]')?.disabled ?? null`);
+    if (nextDisabledAtQ0 !== false) throw new Error(`「下一题」在未答题被禁用（恒可点违背，disabled=${nextDisabledAtQ0}）`);
+    // C1-2 步骤②（R5-4，round-005 回路内补断言）：未答题上点「下一题」→ 右栏切至下一题（R4-1
+    // 跳过语义：不校验作答、不定位跳转）且警示 flag 不触发（wizardFlaggedIndex 仅由末题
+    // submitWizard 置位）。
+    await evalExpr(ws, `document.querySelector('[data-testid="wizard-next-btn"]').click(), true`);
+    await waitFor('W-question-sidenav：未答 q0 点「下一题」前进到第 2 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 2 题 / 共 3 题'`), 5);
+    const flaggedAfterNext = await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')].some((i) => i.classList.contains('wizard-nav__item--flagged'))`);
+    if (flaggedAfterNext !== false) throw new Error('未答点「下一题」不应触发警示描边（wizardFlaggedIndex 被置位）');
+    // R6-3（round-006）：前进非提交——跳过语义前进路径不得弹出丢弃确认层（wizard-discard-confirm 仅由取消/提交门触发）。
+    const discardConfirmAfterNext = await evalExpr(ws, `!!document.querySelector('[data-testid="wizard-discard-confirm"]')`);
+    if (discardConfirmAfterNext !== false) throw new Error('前进路径不得弹出丢弃确认层');
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][2].click(), true`);
+    await waitFor('W-question-sidenav：左栏直达第 3 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 3 题 / 共 3 题'`), 5);
+    const prevDisabledAtQ2 = await evalExpr(ws, `document.querySelector('[data-testid="wizard-prev-btn"]')?.disabled ?? null`);
+    if (prevDisabledAtQ2 !== false) throw new Error('第 3 题「上一题」被禁用（仅第一题禁用违背）');
+    // C1-3 三态标识：q0 作答（单选点击即答+自动前进）→ 左栏 ✓ + 状态行摘要 + current 高亮迁移 + chip 1/3。
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][0].click(), true`);
+    await waitFor('W-question-sidenav：跳回第 1 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 1 题 / 共 3 题'`), 5);
+    await evalExpr(ws, `[...document.querySelectorAll('.wizard-content .interaction-option')].find((b) => (b.textContent || '').includes('开发环境'))?.click(), true`);
+    await waitFor('W-question-sidenav：作答后自动前进到第 2 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 2 题 / 共 3 题'`), 5);
+    const navState = JSON.parse(String(await evalExpr(ws, `(() => {
+      const items = [...document.querySelectorAll('[data-testid="wizard-nav-item"]')];
+      const first = items[0];
+      return JSON.stringify({
+        firstAnswered: first.classList.contains('answered'),
+        firstMark: (first.querySelector('.row1 .n')?.textContent || '').trim(),
+        firstSummary: (first.querySelector('.row2')?.textContent || '').trim(),
+        secondCurrent: items[1].classList.contains('current'),
+        chipText: (document.querySelector('[data-testid="wizard-progress-chip"]')?.textContent || '').trim(),
+      });
+    })()`)));
+    if (navState.firstAnswered !== true || navState.firstMark !== '✓') throw new Error(`左栏已答态缺失（answered=${navState.firstAnswered} mark='${navState.firstMark}'）`);
+    if (!navState.firstSummary.includes('开发环境')) throw new Error(`左栏答案摘要行异常（'${navState.firstSummary}'）`);
+    if (navState.secondCurrent !== true) throw new Error('当前题高亮未迁移到第 2 题');
+    if (!navState.chipText.includes('已答 1/3')) throw new Error(`进度 chip 未增量（'${navState.chipText}'）`);
+    // 未答态「未作答」状态行抽验（第 3 题未答）。
+    const row2Unanswered = await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][2].querySelector('.row2')?.textContent?.trim() ?? ''`);
+    if (row2Unanswered !== '未作答') throw new Error(`未答状态行异常（'${row2Unanswered}'）`);
+    if (exceptions.length > exceptionsBeforeW1) throw new Error('W-question-sidenav 用例期间出现 exceptionThrown');
+    record('W-question-sidenav', 'PASS', `C1-1 分栏结构（nav 3 项+content 单题+计数「第 1 题 / 共 3 题」+chip 已答 0/3）→ C1-2 跳题自由（q0 未答直达第 3 题；下一题恒可点；未答点下一题前进第 2 题+flag 不触发+前进不弹丢弃确认层（R6-3）；上一题仅第一题禁用）→ C1-3 三态（q0 作答 ✓+摘要「开发环境」+current 迁移第 2 题+chip 已答 1/3+未答「未作答」）`);
+    await screenshot(ws, 'W-question-sidenav');
+  } catch (e) { record('W-question-sidenav', 'FAIL', e.message); await screenshot(ws, 'W-question-sidenav-failed'); } finally {
+    if (qNavPayload) await cleanupWizardFixture(ws, qNavPayload.id);
+  }
+  await screenshot(ws, 'W-question-sidenav-cleaned');
+
+  // ── W-question-guard：C1-14 场景 2（C1-6 丢弃确认 + C1-7 Esc 分域 + C1-9 Enter 分域 + C1-10 方向键）──
+  currentCase = 'W-question-guard';
+  let qGuardPayload = null;
+  try {
+    const exceptionsBeforeW2 = exceptions.length;
+    await ensureLanBridge(ws, 'W-question-guard');
+    // C1-6 丢弃二次确认：作答 q0 → 取消 → 确认层「丢弃本次作答？」→ 继续作答（层关弹窗在）
+    // → 再取消 → 丢弃（弹窗关 + stub 记录 cancel）。
+    qGuardPayload = await injectWizardFixture(ws);
+    await evalExpr(ws, `[...document.querySelectorAll('.wizard-content .interaction-option')].find((b) => (b.textContent || '').includes('开发环境'))?.click(), true`);
+    await waitFor('W-question-guard：q0 已答（自动前进）', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 2 题 / 共 3 题'`), 5);
+    await evalExpr(ws, `document.querySelector('[data-testid="wizard-cancel-btn"]')?.click(), true`);
+    await waitFor('W-question-guard：丢弃确认层出现', () => evalOk(ws, `!!document.querySelector('[data-testid="wizard-discard-confirm"]')`), 5);
+    const discardText = await evalExpr(ws, `(document.querySelector('[data-testid="wizard-discard-confirm"] h3')?.textContent || '').trim()`);
+    if (!String(discardText).includes('丢弃本次作答')) throw new Error(`丢弃确认文案异常（'${discardText}'）`);
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-discard-confirm"] button')].find((b) => (b.textContent || '').includes('继续作答'))?.click(), true`);
+    await waitFor('W-question-guard：继续作答（确认层关）', () => evalOk(ws, `!document.querySelector('[data-testid="wizard-discard-confirm"]') && !!document.querySelector('[data-testid="wizard-nav"]')`), 5);
+    await evalExpr(ws, `document.querySelector('[data-testid="wizard-cancel-btn"]')?.click(), true`);
+    await waitFor('W-question-guard：确认层再现', () => evalOk(ws, `!!document.querySelector('[data-testid="wizard-discard-confirm"]')`), 5);
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-discard-confirm"] button')].find((b) => (b.textContent || '').includes('丢弃'))?.click(), true`);
+    await waitFor('W-question-guard：丢弃后弹窗关闭', () => evalOk(ws, `!document.querySelector('[data-testid="wizard-nav"]') && !document.querySelector('.interaction-overlay')`), 5);
+    const logAfterDiscard = JSON.parse(String(await evalExpr(ws, `JSON.stringify(window.__e2eRespondLog ?? [])`)));
+    if (logAfterDiscard.length !== 1 || logAfterDiscard[0].action !== 'cancel') {
+      throw new Error(`丢弃路径未走 respond 链（stub log=${JSON.stringify(logAfterDiscard).slice(0, 80)}）`);
+    }
+    await cleanupWizardFixture(ws, qGuardPayload.id);
+    qGuardPayload = null;
+    // run-10 假红修复（2026-11-16 闸门轮）：C1-6 丢弃确认长链之后偶发「Esc 关整单」假红——
+    // 隔离探针实证 C1-6→重注入→Esc 全链在干净应用 3/3 正确、纯 C1-7 子序列 5/5 正确，假红源
+    // 是本场景之前 15 个场景的累积渲染层状态（跨场景污染，与本脚本 main() 开头 T1B 前置复位
+    // 处置的跨轮污染同族）。处置：C1-6 与 C1-7 之间整页刷新硬隔离——C1-7/9/10 的零作答分域
+    // 语义本就要求独立成立，刷新后逐字等价重放，场景意图不变。
+    await cdpSend(ws, 'Page.reload');
+    await waitFor('W-question-guard：刷新后桥连接（C1-7 硬隔离）', () => evalOk(ws, connectedExpr), 20);
+    // 重新注入（零作答态）做 Esc/Enter/方向键分域。
+    qGuardPayload = await injectWizardFixture(ws);
+    // C1-7 Esc 分域：Other 输入框内 Esc 仅失焦不关整单。
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][2].click(), true`);
+    await waitFor('W-question-guard：跳到第 3 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 3 题 / 共 3 题'`), 5);
+    await evalExpr(ws, `[...document.querySelectorAll('.wizard-content .interaction-option')].find((b) => (b.textContent || '').includes('Other'))?.click(), true`);
+    await waitFor('W-question-guard：Other 输入展开', () => evalOk(ws, `(() => {
+      const i = document.querySelector('.wizard-other input');
+      return !!i && document.activeElement === i;
+    })()`), 5);
+    // Esc 派发带捕获探针（假红诊断留痕：window 实收 Esc 的 target 构造器）。
+    await evalExpr(ws, `(() => {
+      window.__escProbe = [];
+      window.__escProbeFn = (e) => { if (e.key === 'Escape') window.__escProbe.push({ tag: e.target?.tagName ?? null, ctor: e.target?.constructor?.name ?? null, dp: e.defaultPrevented }); };
+      window.addEventListener('keydown', window.__escProbeFn, true);
+      const i = document.querySelector('.wizard-other input');
+      i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return true;
+    })()`);
+    await sleep(300);
+    const escProbe = await evalExpr(ws, `(() => { const p = window.__escProbe ?? []; try { window.removeEventListener('keydown', window.__escProbeFn, true); } catch { /* 尽力而为 */ } window.__escProbeFn = null; return JSON.stringify(p); })()`);
+    const stillOpenEsc = await evalOk(ws, `!!document.querySelector('[data-testid="wizard-nav"]')`);
+    if (!stillOpenEsc) {
+      const escStore = await evalExpr(ws, `JSON.stringify({ kind: (() => { const app = document.querySelector('#app'); const p = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null; const ist = p && p._s ? p._s.get('interaction') : null; return ist?.activeRequest?.kind ?? null; })(), respondLog: (window.__e2eRespondLog ?? []).length, overlay: !!document.querySelector('.interaction-overlay'), discardConfirm: !!document.querySelector('[data-testid="wizard-discard-confirm"]') })`);
+      throw new Error(`Other 输入框内 Esc 关闭了整单（Esc 分域违背）——探针=${escProbe} store=${escStore}`);
+    }
+    // C1-9 Enter 分域：Other 输入内 Enter=确认文本（blur，不提交）；焦点不在输入框时 Enter 无提交。
+    await evalExpr(ws, `(() => {
+      const i = document.querySelector('.wizard-other input');
+      i.focus();
+      i.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await sleep(300);
+    const enterState = JSON.parse(String(await evalExpr(ws, `JSON.stringify({
+      dialogOpen: !!document.querySelector('[data-testid="wizard-nav"]'),
+      respondCount: (window.__e2eRespondLog ?? []).length,
+      blurred: document.activeElement !== document.querySelector('.wizard-other input'),
+    })`)));
+    if (!enterState.dialogOpen || enterState.respondCount !== 0) {
+      throw new Error(`Other 输入内 Enter 产生提交（dialogOpen=${enterState.dialogOpen} respondCount=${enterState.respondCount}）`);
+    }
+    await evalExpr(ws, `document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })), true`);
+    await sleep(300);
+    const enterBody = JSON.parse(String(await evalExpr(ws, `JSON.stringify({
+      dialogOpen: !!document.querySelector('[data-testid="wizard-nav"]'),
+      respondCount: (window.__e2eRespondLog ?? []).length,
+    })`)));
+    if (!enterBody.dialogOpen || enterBody.respondCount !== 0) {
+      throw new Error('焦点不在输入框时 Enter 提交了弹窗（wizard 分流吞 Enter 失效）');
+    }
+    // C1-10 方向键仅移焦/滚动不改选中：ArrowDown 派发前后选中/焦点态不变（wizard 分流整体 return——
+    // 注意 focusedIndex 初始 0 使首选项恒带 --focused，断言口径=前后差分，非绝对零）。
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][1].click(), true`);
+    await waitFor('W-question-guard：跳到第 2 题（多选）', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 2 题 / 共 3 题'`), 5);
+    const beforeArrow = JSON.parse(String(await evalExpr(ws, `JSON.stringify({
+      selected: document.querySelectorAll('.wizard-content .interaction-option--selected').length,
+      focused: document.querySelectorAll('.wizard-content .interaction-option--focused').length,
+    })`)));
+    await evalExpr(ws, `document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })), true`);
+    await sleep(300);
+    const afterArrow = JSON.parse(String(await evalExpr(ws, `JSON.stringify({
+      selected: document.querySelectorAll('.wizard-content .interaction-option--selected').length,
+      focused: document.querySelectorAll('.wizard-content .interaction-option--focused').length,
+      dialogOpen: !!document.querySelector('[data-testid="wizard-nav"]'),
+    })`)));
+    if (afterArrow.selected !== beforeArrow.selected || afterArrow.focused !== beforeArrow.focused || afterArrow.dialogOpen !== true) {
+      throw new Error(`方向键改写了选中/焦点态（selected ${beforeArrow.selected}→${afterArrow.selected} focused ${beforeArrow.focused}→${afterArrow.focused}——契约 8 违背）`);
+    }
+    if (exceptions.length > exceptionsBeforeW2) throw new Error('W-question-guard 用例期间出现 exceptionThrown');
+    record('W-question-guard', 'PASS', `C1-6 丢弃二次确认（作答→取消→「丢弃本次作答」→继续作答弹窗在→再取消→丢弃→弹窗关+respond 链 cancel 记录）→ C1-7 Other 输入内 Esc 仅失焦不关单 → C1-9 Other 内 Enter 仅 blur 零提交 + body 上 Enter 零提交（wizard 吞 Enter）→ C1-10 ArrowDown 前后选中/焦点态零变化（selected=${beforeArrow.selected}→${afterArrow.selected} focused=${beforeArrow.focused}→${afterArrow.focused}）`);
+    await screenshot(ws, 'W-question-guard');
+  } catch (e) { record('W-question-guard', 'FAIL', e.message); await screenshot(ws, 'W-question-guard-failed'); } finally {
+    if (qGuardPayload) await cleanupWizardFixture(ws, qGuardPayload.id);
+  }
+  await screenshot(ws, 'W-question-guard-cleaned');
+
+  // ── W-question-submit：C1-14 场景 3（C1-8 Other 保全 + C1-5 未答齐跳转 + 答齐提交回传）──
+  currentCase = 'W-question-submit';
+  let qSubmitPayload = null;
+  try {
+    const exceptionsBeforeW3 = exceptions.length;
+    await ensureLanBridge(ws, 'W-question-submit');
+    qSubmitPayload = await injectWizardFixture(ws);
+    // C1-8 Other 保全：q2 填 Other 文本 → 跳 q0 → 跳回 q2 → 输入值保留。
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][2].click(), true`);
+    await waitFor('W-question-submit：跳到第 3 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 3 题 / 共 3 题'`), 5);
+    await evalExpr(ws, `[...document.querySelectorAll('.wizard-content .interaction-option')].find((b) => (b.textContent || '').includes('Other'))?.click(), true`);
+    await waitFor('W-question-submit：Other 输入展开', () => evalOk(ws, `!!document.querySelector('.wizard-other input')`), 5);
+    await evalExpr(ws, `(() => {
+      const i = document.querySelector('.wizard-other input');
+      i.value = 'e2e-other-keep-123';
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][0].click(), true`);
+    await waitFor('W-question-submit：跳到第 1 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 1 题 / 共 3 题'`), 5);
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][2].click(), true`);
+    await waitFor('W-question-submit：跳回第 3 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 3 题 / 共 3 题'`), 5);
+    await evalExpr(ws, `[...document.querySelectorAll('.wizard-content .interaction-option')].find((b) => (b.textContent || '').includes('Other'))?.click(), true`);
+    const otherKept = await evalExpr(ws, `document.querySelector('.wizard-other input')?.value ?? ''`);
+    if (otherKept !== 'e2e-other-keep-123') throw new Error(`Other 文本跨跳转丢失（value='${otherKept}'——C1-8 违背）`);
+    // C1-5 未答齐提交 → 自动跳转首个未答题 + 左栏红色警示描边（不弹 toast 不阻断）。
+    await evalExpr(ws, `document.querySelector('[data-testid="wizard-next-btn"]').click(), true`);
+    await waitFor('W-question-submit：未答齐提交跳转首个未答题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 1 题 / 共 3 题'`), 5);
+    const flagged = await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][0].classList.contains('wizard-nav__item--flagged')`);
+    if (flagged !== true) throw new Error('首个未答题左栏红色警示描边缺失（wizard-nav__item--flagged）');
+    // 答齐提交：q0 选「生产环境」（自动前进 q1）→ q1 多选勾两项 → q2 已答（Other）→ 提交。
+    await evalExpr(ws, `[...document.querySelectorAll('.wizard-content .interaction-option')].find((b) => (b.textContent || '').includes('生产环境'))?.click(), true`);
+    await waitFor('W-question-submit：自动前进到第 2 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 2 题 / 共 3 题'`), 5);
+    await evalExpr(ws, `[...document.querySelectorAll('.wizard-content .interaction-option')].find((b) => (b.textContent || '').includes('认证'))?.click(), true`);
+    await sleep(120);
+    await evalExpr(ws, `[...document.querySelectorAll('.wizard-content .interaction-option')].find((b) => (b.textContent || '').includes('缓存'))?.click(), true`);
+    await sleep(120);
+    // 多选不自动前进：跳到最后一题（q2）后主按钮才变「提交」（wizardPrimaryLabel=末题分支）。
+    await evalExpr(ws, `[...document.querySelectorAll('[data-testid="wizard-nav-item"]')][2].click(), true`);
+    await waitFor('W-question-submit：跳到第 3 题', () => evalOk(ws, `(document.querySelector('.wizard-count')?.textContent || '').trim() === '第 3 题 / 共 3 题'`), 5);
+    const submitLabel = await evalExpr(ws, `(document.querySelector('[data-testid="wizard-next-btn"]')?.textContent || '').trim()`);
+    if (!String(submitLabel).includes('提交') || String(submitLabel).includes('（')) {
+      throw new Error(`答齐后主按钮 label 异常（'${submitLabel}'，期望「提交」无括号计数）`);
+    }
+    await evalExpr(ws, `document.querySelector('[data-testid="wizard-next-btn"]').click(), true`);
+    await waitFor('W-question-submit：答齐提交后弹窗关闭', () => evalOk(ws, `!document.querySelector('[data-testid="wizard-nav"]') && !document.querySelector('.interaction-overlay')`), 5);
+    const respondLog = JSON.parse(String(await evalExpr(ws, `JSON.stringify(window.__e2eRespondLog ?? [])`)));
+    if (respondLog.length !== 1) throw new Error(`提交回包数 ${respondLog.length} ≠ 1`);
+    const resp = respondLog[0];
+    if (resp.action !== 'submit') throw new Error(`回包 action=${resp.action}（期望 submit）`);
+    const qa = resp.questionAnswers ?? {};
+    const q0Sel = (qa.q0?.selectedOptionIds ?? []).join(',');
+    const q1Sel = (qa.q1?.selectedOptionIds ?? []).join(',');
+    const q2Other = qa.q2?.otherText ?? '';
+    if (!q0Sel.includes('option-1')) throw new Error(`q0 答案回传异常（'${q0Sel}'，期望 option-1=生产环境）`);
+    if (!q1Sel.includes('option-0') || !q1Sel.includes('option-2')) throw new Error(`q1 多选答案回传异常（'${q1Sel}'，期望 option-0+option-2）`);
+    if (q2Other !== 'e2e-other-keep-123') throw new Error(`q2 Other 文本回传丢失（'${q2Other}'）`);
+    if (exceptions.length > exceptionsBeforeW3) throw new Error('W-question-submit 用例期间出现 exceptionThrown');
+    record('W-question-submit', 'PASS', `C1-8 Other 保全（'e2e-other-keep-123' 跨 q0↔q2 跳转保留且提交回传 otherText 一致）→ C1-5 未答齐提交（跳转首个未答题 + flagged 警示描边）→ 答齐提交（q0 option-1 / q1 多选 option-0+option-2 / q2 Other 全量逐题回传，弹窗关闭）`);
+    await screenshot(ws, 'W-question-submit');
+  } catch (e) { record('W-question-submit', 'FAIL', e.message); await screenshot(ws, 'W-question-submit-failed'); } finally {
+    if (qSubmitPayload) await cleanupWizardFixture(ws, qSubmitPayload.id);
+  }
+  await screenshot(ws, 'W-question-submit-cleaned');
+
+  // ── W-question-single：C1-14 场景 4（C1-11 单题弹窗维持现状直提——回归门）──
+  currentCase = 'W-question-single';
+  let qSinglePayload = null;
+  try {
+    const exceptionsBeforeW4 = exceptions.length;
+    await ensureLanBridge(ws, 'W-question-single');
+    qSinglePayload = await injectWizardFixture(ws, { single: true });
+    // 单题形态维持现状：无 wizard 左栏/进度 chip/footer 上下题钮；选项直提。
+    // footer 取消钮=非 wizard footer 的 ghost 钮（无 wizard-cancel-btn testid——该 testid 仅 wizard footer 有）。
+    const singleState = JSON.parse(String(await evalExpr(ws, `JSON.stringify({
+      hasWizardNav: !!document.querySelector('[data-testid="wizard-nav"]'),
+      hasChip: !!document.querySelector('[data-testid="wizard-progress-chip"]'),
+      hasPrev: !!document.querySelector('[data-testid="wizard-prev-btn"]'),
+      hasNext: !!document.querySelector('[data-testid="wizard-next-btn"]'),
+      optionCount: document.querySelectorAll('.interaction-dialog .interaction-option').length,
+      hasCancel: !!document.querySelector('.interaction-dialog__footer button.interaction-btn--ghost'),
+    })`)));
+    if (singleState.hasWizardNav || singleState.hasChip) throw new Error('单题弹窗渲染出 wizard 结构（左栏/进度 chip——C1-11 回归违背）');
+    if (singleState.hasPrev || singleState.hasNext) throw new Error('单题弹窗 footer 出现上一步/下一题（现状直提形态被改）');
+    if (singleState.optionCount < 3) throw new Error(`单题选项数异常（${singleState.optionCount}，期望 2+Other）`);
+    if (!singleState.hasCancel) throw new Error('单题弹窗缺取消钮（非 wizard footer ghost 钮）');
+    // 直提：点击选项 → 立即回传 submit（无二次确认/无前进钮）+ 弹窗关闭。
+    await evalExpr(ws, `[...document.querySelectorAll('.interaction-dialog .interaction-option')].find((b) => (b.textContent || '').includes('开发环境'))?.click(), true`);
+    await waitFor('W-question-single：直提后弹窗关闭', () => evalOk(ws, `!document.querySelector('.interaction-overlay')`), 5);
+    const respondLog = JSON.parse(String(await evalExpr(ws, `JSON.stringify(window.__e2eRespondLog ?? [])`)));
+    if (respondLog.length !== 1 || respondLog[0].action !== 'submit') throw new Error(`直提未回传 submit（log=${JSON.stringify(respondLog).slice(0, 80)}）`);
+    const sel = (respondLog[0].selectedOptionIds ?? []).join(',');
+    if (!sel.includes('option-0')) throw new Error(`直提选项回传异常（'${sel}'）`);
+    if (exceptions.length > exceptionsBeforeW4) throw new Error('W-question-single 用例期间出现 exceptionThrown');
+    record('W-question-single', 'PASS', `单题（非 form）弹窗维持现状直提：无 wizard 左栏/chip/上下题钮，选项点击即 submit 回传（selectedOptionIds option-0）+ 弹窗关闭`);
+    await screenshot(ws, 'W-question-single');
+  } catch (e) { record('W-question-single', 'FAIL', e.message); await screenshot(ws, 'W-question-single-failed'); } finally {
+    if (qSinglePayload) await cleanupWizardFixture(ws, qSinglePayload.id);
+  }
+  await screenshot(ws, 'W-question-single-cleaned');
+
   // ── 终审前清理块（P12 增）：B3 条件保留的会话（干净 profile 时供 B4-B6/W-changes-panel 消费）
   // 在此按 id 删除收尾——E2E 不留垃圾会话（隔离/真实 profile 同纪律）。保留前提消失（已删/不在
   // 列表）时为 no-op。不 record（非断言用例，仅善后）；清理失败只 log 不影响退出码。
@@ -1306,7 +2871,7 @@ async function main() {
   // ── 汇总 ──
   const failCount = results.filter((r) => r.status === 'FAIL').length;
   const skipCount = results.filter((r) => r.status === 'SKIP').length;
-  log('==== B1-B8 + W-changes-panel + W-mcp-settings + W-queue-panel + W-sidebar-actions + W-sidebar-collapse + W-user-timestamp 汇总 ====');
+  log('==== B1-B8 + 既有 W-* + T1B 新增 13 场景（W-dev-stale-banner / W-mcp-scan / W-skill-refresh-web / W-mcp-external-change / W-collapse-persist / W-queue-restore-{countdown,running,running-a2-4,standby} / W-turn-footnote / W-question-{sidenav,guard,submit,single}）汇总 ====');
   for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
   log(`PASS ${results.filter((r) => r.status === 'PASS').length} / FAIL ${failCount} / SKIP ${skipCount}（证据目录 ${SHOT_DIR}）`);
   flushLog();
