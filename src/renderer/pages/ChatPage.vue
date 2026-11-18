@@ -63,6 +63,49 @@ const activeSessionId = computed(() => store.activeSession?.id ?? '');
 // 队列开关（配置页，默认关）：开启后回复生成中仍可输入发送（消息/附件入队），关闭维持旧行为禁发。
 // config 由 App.vue 启动时 loadConfig，配置页修改后同 store 实例响应式联动。
 const queueEnabled = computed(() => configStore.config.queueEnabled === true);
+// A3 刷新恢复门（00 行为规范 A3-1）：恢复未完成（该会话尚未过 taskStore 恢复门）时禁用发送，
+// 拉取结果（loadOverview 回包/3s 兜底）翻 ready 位后自动放行——禁用是响应式门控，非模态阻塞。
+const queueRecovering = computed(() =>
+  queueEnabled.value && !!store.activeSession?.id
+  && taskStore.overviewReadyBySession[store.activeSession.id] !== true);
+const chatInputDisabled = computed(() => (sending.value && !queueEnabled.value) || queueRecovering.value);
+// A3 队列状态轻量指示（00 行为规范 A3-2）：五态文本派生自 taskStore 权威投影
+//（queueState ← getQueueOverview 回包 + QUEUE_EVENT；tasks ← loadOverview/tasks_changed），
+// 随 QUEUE_EVENT 增量自动更新（App.vue 全局订阅），无本地计时/估算；桌面与网页同组件同源。
+type QueueStripLine =
+  | { kind: 'recovering'; text: string; warn: boolean }
+  | { kind: 'countdown'; text: string; warn: boolean; percent: number }
+  | { kind: 'running'; text: string; warn: boolean }
+  | { kind: 'halt'; text: string; warn: boolean }
+  | { kind: 'paused'; text: string; warn: boolean };
+const queueStatusLine = computed<QueueStripLine | null>(() => {
+  if (queueRecovering.value) return { kind: 'recovering', text: '队列状态恢复中…', warn: false };
+  if (!queueEnabled.value) return null;
+  const sid = store.activeSession?.id;
+  if (!sid || taskStore.queueState.sessionId !== sid) return null;
+  const paused = taskStore.tasks.filter((t) => t.paused).length;
+  const st = taskStore.queueState;
+  if (st.status === 'countdown') {
+    const total = st.intervalSeconds ?? 1;
+    return {
+      kind: 'countdown',
+      // 文案「队列 N 条」消歧（M-C）：tasks.length 含 paused 任务，原「N 条待执行」与暂停态并存时读作歧义。
+      text: `队列倒计时 ${st.countdownRemaining}s · 队列 ${taskStore.tasks.length} 条`,
+      warn: false,
+      percent: Math.max(0, Math.min(100, ((total - st.countdownRemaining) / total) * 100)),
+    };
+  }
+  if (st.status === 'running') return { kind: 'running', text: '队列任务执行中', warn: false };
+  if (st.standbyReason === 'halt_failed') {
+    return { kind: 'halt', text: `队列已熔断（回合失败）${paused ? ` · ${paused} 条已暂停` : ''}`, warn: true };
+  }
+  if (st.standbyReason === 'halt_interrupted') {
+    return { kind: 'halt', text: `队列已熔断（已中断）${paused ? ` · ${paused} 条已暂停` : ''}`, warn: true };
+  }
+  if (paused > 0) return { kind: 'paused', text: `${paused} 条任务已暂停`, warn: true };
+  // standby 无暂停/熔断 → 不渲染（右栏面板已覆盖常规待命态）
+  return null;
+});
 // IM 桥接会话桌面端只读：绑定中的会话由 IM 客户端（微信/飞书）驱动，本地收起
 // 输入区与工具栏、仅展示提示；解绑/退出登录后 SESSION_LIST 重拉即自动恢复。
 const bridgeLocked = computed(() => store.activeSession?.bridgePlatform != null);
@@ -156,6 +199,9 @@ onMounted(async () => {
   store.refreshActiveSession();
   // 加载 Claude 计划快照（独立于手动排队 tasks 表）。
   if (store.activeSession?.id) planStore.loadPlan(store.activeSession.id);
+  // A3 恢复门（00 行为规范 A3-1）：启动/刷新后、用户可输入前完成一次主进程队列概览拉取。
+  // 置于挂载链末尾：不阻塞消息刷新等既有恢复链；输入框禁用由 chatInputDisabled 响应式接管。
+  if (store.activeSession?.id) await taskStore.ensureOverviewReady(store.activeSession.id);
 });
 
 // 切换会话时清掉上一会话残留的错误横幅与提示、复位拖放态与计数（草稿视图由 computed 自动切换）。
@@ -168,6 +214,8 @@ watch(
     dragCounter = 0;
     // 切换会话时加载该会话的 Claude 计划快照。
     if (newId) planStore.loadPlan(newId);
+    // A3 恢复门：切会话对新会话重入门（per-session 键，已过门幂等早退）。
+    if (newId) void taskStore.ensureOverviewReady(newId);
   },
 );
 
@@ -357,12 +405,18 @@ async function handleSend() {
   let queued = false;
 
   try {
-    // v3 两路收敛：
-    //  入队 = 队列开关开 && （本会话回合执行中 ∥ 引擎已出队执行但渲染层 sending 尚未翻真的窗口
-    //  —— queueState 双保险，防该窗口直发被主进程占坑拒绝）；
-    //  直发 = 空闲/倒计时中（插话语义：主进程 beginUserTurn 负责取消倒计时并全量重来）。
-    const engineRunningThis = taskStore.queueState.sessionId === sessionId && taskStore.queueState.status === 'running';
-    if (queueEnabled.value && (sending.value || engineRunningThis)) {
+    // A2 发送路由（2026-11-15 eight-issues）：状态源 = 主进程权威快照/事件
+    //（taskStore.queueState 仅由 getQueueOverview 回包 + QUEUE_EVENT 写入，渲染层不臆断）。
+    //  - countdown / running → 入队（TASK_ADD 全链：附件、暂态物化、tasks_changed 反馈）；
+    //    running 含两类：引擎出队执行中（task_started）与直发回合占坑后主进程 beginUserTurn
+    //    置 running（task-queue-engine.ts:175-183）——后者即「直发回合在飞时第二条消息入队」现状语义。
+    //  - sending（渲染层 runningSessions 派生，同为主进程事件驱动）保留为兜底项：覆盖
+    //    「CHAT_SEND 已受理、beginUserTurn 未及置 running」的窗口，防该窗口直发被主进程占坑拒绝（现状双保险语义平移）。
+    //  - standby / 空闲 → 直发（现状）；queueEnabled=false → 恒直发（现状）。
+    const queueBusy = taskStore.queueState.sessionId === sessionId
+      && (taskStore.queueState.status === 'countdown' || taskStore.queueState.status === 'running');
+    const queueStateUnknown = !taskStore.queueStateKnown(sessionId); // A3 恢复门失败保守侧（§2.2）
+    if (queueEnabled.value && (sending.value || queueBusy || queueStateUnknown)) {
       ok = await taskStore.addTask(sessionId, payload);
       queued = ok;
     } else {
@@ -456,6 +510,13 @@ function handleNewSession() {
         <span>❌ {{ error }}<button v-if="lastFailedCurrent" type="button" class="chat-error__retry" @click="retryLastFailed">重新编辑发送</button></span>
       </div>
 
+      <!-- A3 队列状态轻量指示（桌面/网页一致；数据源=taskStore 权威投影，随 QUEUE_EVENT 增量更新） -->
+      <div v-if="queueStatusLine" class="queue-strip" role="status" data-testid="queue-status-strip">
+        <span v-if="queueStatusLine.kind === 'countdown'" class="queue-strip__bar">
+          <i :style="{ width: queueStatusLine.percent + '%' }"></i>
+        </span>
+        <span :class="['queue-strip__text', { 'queue-strip__text--warn': queueStatusLine.warn }]">{{ queueStatusLine.text }}</span>
+      </div>
       <div class="chat-composer" :class="{ 'chat-composer--drag': dragActive }">
         <!-- 实时计时器（方案 A 状态头条）：浮岛第一行，sending 期间展开显示本回合耗时 + 阶段徽章。 -->
         <TurnTimer />
@@ -470,7 +531,7 @@ function handleNewSession() {
             ref="chatInputRef"
             :model-value="draftText"
             :has-attachments="draftAttachments.length > 0"
-            :disabled="sending && !queueEnabled"
+            :disabled="chatInputDisabled"
             :commands="activeCommandSnapshot?.commands"
             :command-status="activeCommandSnapshot?.status"
             :command-error="activeCommandSnapshot?.error"
@@ -620,5 +681,55 @@ function handleNewSession() {
   border: 1px solid color-mix(in srgb, var(--color-fail) 50%, transparent);
   background: color-mix(in srgb, var(--color-fail) 12%, transparent);
   color: var(--color-fail-strong);
+}
+
+/* A3 队列状态轻量指示条：恢复中/倒计时进度/执行中/熔断/暂停的聊天页唯一可见面
+   （≤1100px 右栏隐藏时本条是网页窄窗唯一队列可见面）。样式全走 var()/color-mix，
+   对齐 .notice span 的 warn 混色先例，浅深双板自动生效。 */
+.queue-strip {
+  max-width: 800px;
+  margin: 0 auto;
+  width: 100%;
+  padding: 0 24px 4px;
+  box-sizing: border-box;
+}
+
+.queue-strip__bar {
+  display: block;
+  height: 3px;
+  margin-bottom: 4px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-panel-soft) 85%, transparent);
+  overflow: hidden;
+}
+
+.queue-strip__bar i {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-sm);
+  background: var(--color-accent);
+  transition: width 0.3s linear;
+}
+
+.queue-strip__text {
+  display: block;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-panel-soft) 85%, transparent);
+}
+
+.queue-strip__text--warn {
+  border-color: color-mix(in srgb, var(--color-warn) 50%, transparent);
+  background: color-mix(in srgb, var(--color-warn) 12%, transparent);
+  color: var(--color-warn-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .queue-strip__bar i {
+    transition: none;
+  }
 }
 </style>

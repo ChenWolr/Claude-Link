@@ -19,19 +19,73 @@ export const useTaskStore = defineStore('task', {
       countdownRemaining: 0,
       currentTaskId: null,
     } as QueueState,
+    // A2/A3 共用恢复门状态位（02-impl-details-renderer §2.2）：loadOverview 成功过门的会话按
+    // id 记 ready；failed 标记（拉取失败/超时）本点仅声明读侧——写入点在 A3 点的
+    // ensureOverviewReady（门全量：3s 超时兜底 + 启动/切会话接线）。queueStateKnown 读侧对
+    // 「failed 已挂」返回 false，与 A3 保守侧语义一致。
+    overviewReadyBySession: {} as Record<string, boolean>,
+    overviewFailedBySession: {} as Record<string, boolean>,
     error: null as string | null,
   }),
   actions: {
+    // A2 发送路由判据输入（00 行为规范 A2.5：状态源=主进程权威快照/事件，渲染层不臆断）：
+    // 该会话队列状态已知 = loadOverview 成功过门 且 失败标记未挂。未知会话在 queueEnabled
+    // 时由 A2 判据保守入队（02 §1.4 边界值表：入队后消息以 pending 任务存在，面板可见可恢复）。
+    queueStateKnown(sessionId: string): boolean {
+      return this.overviewReadyBySession[sessionId] === true && this.overviewFailedBySession[sessionId] !== true;
+    },
     // 会话切换/挂载时拉全量：状态 + pending 任务 + 本次已执行历史（三项整体替换）。
-    async loadOverview(sessionId: string) {
+    // 返回 boolean：成功 true/失败 false（P34 修复：供 ensureOverviewReady 以返回值判过门结果，
+    // 不再依赖共享 error 位——removeTask/reorder/setPaused 失败残留 error 不误标成功拉取；
+    // 既有直调消费面（TaskQueuePanel void / web-bridge realign）返回值可忽略、零改动）。
+    async loadOverview(sessionId: string): Promise<boolean> {
       try {
         const overview: QueueOverview = await window.claudeLink.getQueueOverview(sessionId);
         this.tasks = overview.tasks;
         this.executed = overview.executed;
         this.queueState = overview.state;
+        // A2 恢复门写入（02 §2.2 loadOverview 字面要求）：成功过门标记按会话键控。
+        // 失败路径不写（ready 不置位 → queueStateKnown=false → A2 保守侧入队）；
+        // 直接调用者（TaskQueuePanel watch / web-bridge realign）同过此门，天然复用。
+        this.overviewReadyBySession[sessionId] = true;
+        this.overviewFailedBySession[sessionId] = false;
+        return true;
       } catch (error) {
         this.error = error instanceof Error ? error.message : '加载队列失败';
+        return false;
       }
+    },
+    // A3 刷新恢复门（00 行为规范 A3-1/3；02-impl-details-renderer §2.2 代码形态逐字对照）：
+    // 启动/切会话时确保该会话队列概览已拉取过门。已过门（含失败放行）不重拉；3s 超时兜底
+    // 置 failed+ready（主进程超时/异常不得永久禁言输入框）；loadOverview 失败经返回值区分
+    // failed（P34：共享 error 位受无关操作残留污染，不作判据）。失败/超时放行后
+    // queueStateKnown=false → A2 判据保守侧（queueEnabled 时入队）。
+    async ensureOverviewReady(sessionId: string): Promise<void> {
+      if (this.overviewReadyBySession[sessionId]) return; // 已过门（含失败放行）不重拉
+      let settled = false;
+      // 3s 超时兜底：主进程超时/异常不得永久禁言输入框（契约 A3-3）
+      const timeout = new Promise<void>((r) => setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          this.overviewFailedBySession[sessionId] = true;
+          this.overviewReadyBySession[sessionId] = true;
+        }
+        r();
+      }, 3000));
+      const fetchOverview = (async () => {
+        let loadOk = false;
+        try {
+          loadOk = await this.loadOverview(sessionId); // 失败时 loadOverview 内部置 error 返回 false、不抛
+        } finally {
+          if (!settled) {
+            settled = true;
+            // loadOverview 成功与否以返回值区分（P34）：失败 → failed=true → A2 保守侧；成功 → known
+            this.overviewFailedBySession[sessionId] = !loadOk;
+            this.overviewReadyBySession[sessionId] = true;
+          }
+        }
+      })();
+      await Promise.race([fetchOverview, timeout]);
     },
     // Task 5：addTask 收 ChatSendPayload（附件草稿由 draftStore 提供）。
     // 主进程返回 { task, tasks }，以返回的 tasks 为顺序权威整体替换。

@@ -5,6 +5,11 @@
 // ③haltQueue 幂等闸带 standby 条件；④runTaskNow=cancelTimers→插队→popExecute；⑤settleCurrent 发
 // task_settled；⑥CHAT_SEND 挂 beginUserTurn+exit 兜底、CHAT_ABORT 挂 abortHalt。
 // 纯源码 + 纯函数断言，不依赖 Electron 运行时。
+// [2026-11-15 eight-issues 批次 A3 最小同步] 随 A3 最小同步：恢复门接管禁用（00 规范 A3 契约），
+// 旧字面已强制移除——§11「ChatInput disabled 判据保留」旧钉所钉的 ChatPage 绑定字面即被反转点
+//（全仓唯一出现处，无合法途径保留），改钉新形态：:disabled 换 computed chatInputDisabled，
+// 判据 = (sending && !queueEnabled) || queueRecovering（与 scripts/tdd-queue-restore-gate-verify.ts
+// :87-96 同口径）。升级裁决 dwfq-7c72e36e-1 采纳（2026-11-15）。
 import { readFileSync, existsSync } from 'node:fs';
 import {
   sanitizeTaskDelayMinutes,
@@ -381,7 +386,14 @@ function fnBody(source: string, signature: string): string {
   check('ChatPage: 其余走 sendMessage', chatPage.includes('sendMessage(payload)'));
   check('ChatPage: 删旧队列发送路由', !chatPage.includes(OLD_QUEUE_SEND));
   check('ChatPage: 删 isQueueSession 三路路由', !chatPage.includes('isQueueSession'));
-  check('ChatPage: ChatInput disabled 判据保留', chatPage.includes(':disabled="sending && !queueEnabled"'));
+  // 随 A3 最小同步：恢复门接管禁用（00 规范 A3 契约），旧字面已强制移除（头注留痕）；
+  // 新钉口径 = scripts/tdd-queue-restore-gate-verify.ts:87-96（绑定换 computed + 判据叠加恢复门）。
+  const chatDisabledIdx = chatPage.indexOf('const chatInputDisabled = computed');
+  const chatDisabledBody = chatDisabledIdx > -1 ? chatPage.slice(chatDisabledIdx, chatPage.indexOf(');', chatDisabledIdx)) : '';
+  check('ChatPage: ChatInput disabled 判据（恢复门 computed 接管）',
+    chatPage.includes(':disabled="chatInputDisabled"')
+    && chatDisabledBody.includes('sending.value && !queueEnabled.value')
+    && chatDisabledBody.includes('|| queueRecovering.value'));
 }
 
 // ── 12) MessageBubble.vue：来自队列标 ──
