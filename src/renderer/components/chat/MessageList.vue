@@ -17,6 +17,7 @@ import { mapFinalTextToTurnStart } from '../../utils/turn-diff-attach';
 import { useSessionStore } from '../../stores/session-store';
 import { useTurnDiffStore, type TurnDiffPatchTarget } from '../../stores/turn-diff-store';
 import { shouldHidePersistedForStreaming } from '../../../shared/turn-boundary';
+import { formatDurationMs, formatEndedAt } from '../../../shared/format-duration';
 
 const props = defineProps<{
   messages: Message[];
@@ -183,6 +184,40 @@ const renderItems = computed<RenderItem[]>(() => {
     out.push(item);
   }
   return out;
+});
+
+// F1（2026-11-15 八问题批次）：回合终态脚注——该回合最后内容块之后的独立载体（renderItems
+// 循环后的列表尾，正文结尾/工具+思考结尾/纯工具/纯文本四形态共用同一载体，与尾部消息类型无关）。
+// 数据源：当次回合内存 meta（use-chat turn_ended 两分支经 setTurnFootnote 无条件记账；markRunning
+// 新回合边界清槽 → 恒只显最新回合）；无内存脚注时成功回合回落 DB 持久化值（V12 sessions.last_turn_*，
+// P2-1 中断不落库语义维持——中断/错误回合重开不显示，诚实不造数）。
+// exportMode 不渲染（导出面不新增载体）；sending 期间回合未终，不渲染。
+const turnFootnote = computed<{ text: string; kind: 'success' | 'interrupted' | 'error' } | null>(() => {
+  if (props.exportMode) return null;
+  if (props.sending) return null;
+  const sid = sessionStore.activeSession?.id;
+  if (!sid) return null;
+  const note = sessionStore.turnFootnote[sid];
+  if (note) {
+    const dur = note.durationMs > 0 ? formatDurationMs(note.durationMs) : '';
+    if (note.outcome === 'success') {
+      return { kind: 'success', text: dur ? `本次回复 ${dur} · 结束于 ${formatEndedAt(note.endedAt)}` : `结束于 ${formatEndedAt(note.endedAt)}` };
+    }
+    if (note.outcome === 'interrupted') {
+      return { kind: 'interrupted', text: dur ? `已中断 · 运行 ${dur}` : '已中断' };
+    }
+    return { kind: 'error', text: dur ? `失败 · 运行 ${dur}` : '失败' };
+  }
+  // 重开回落：成功回合读 DB 持久化值（V12 双写链既有；两字段同时非 null 才渲染，半写不显示）。
+  // P2-3（round-002 修复）归属校验：network_interrupted 常红态 = 最近回合以网络中断收场且无
+  // 脚注记账（markNetworkInterrupted 不设脚注），DB lastTurn* 属于更早的成功回合——不得把
+  // 上一成功回合的「本次回复 X · 结束于 Y」挂在刚中断回合内容下，回落让位（不渲染）。
+  if (sessionStore.sessionStatus[sid] === 'network_interrupted') return null;
+  const s = sessionStore.activeSession;
+  if (s?.lastTurnDurationMs != null && s.lastTurnEndedAt != null) {
+    return { kind: 'success', text: `本次回复 ${formatDurationMs(s.lastTurnDurationMs)} · 结束于 ${formatEndedAt(s.lastTurnEndedAt)}` };
+  }
+  return null;
 });
 
 // 焦点跟随：发送中，最后一个 fold 自动展开（active）；用户手动展开过的保留。发送结束按 foldable 规则。
@@ -372,6 +407,14 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
             <button type="button" class="turn-diff-error__retry" title="重新拉取轮末改动摘要" @click="retryTurnDiffSummaries">重试</button>
           </div>
         </template>
+        <!-- F1（2026-11-15 八问题批次）：回合终态脚注独立载体——renderItems 循环后的列表尾
+             （「该回合最后内容块之后」由载体位置结构性保证：turn-diff 卡片/R3 提示行均挂循环内
+             item 后，脚注恒在其后；四形态一致可见）。sending 期间 stream-group 在场但脚注已被
+             computed v-if 排除，无交错。三 kind 色分离：success=muted / interrupted=warn / error=fail。 -->
+        <div v-if="turnFootnote" :class="['turn-footnote', `turn-footnote--${turnFootnote.kind}`]" data-testid="turn-footnote">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></svg>
+          <span>{{ turnFootnote.text }}</span>
+        </div>
         <div v-if="streamingContent || streamingThinking || streamingTool || sessionStore.activeStalledInfo || sessionStore.activeApiRetryInfo || sessionStore.activeApiRetryTerminalFallback" class="stream-group" :class="{ 'msg-transition': isStreamTransition() }">
           <!-- 卡死检测横幅：主进程看门狗判定无响应时显形，提供 继续等待/重试/中断。 -->
           <StalledBanner />
@@ -570,5 +613,38 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
   color: var(--color-text-muted);
   max-height: 160px;
   overflow-y: auto;
+}
+
+/* F1（2026-11-15 八问题批次）：回合终态脚注载体——列表尾独立一行，与尾部消息类型无关。
+   三 kind 色分离：success=muted（与 .bubble__meta 同族）/ interrupted=warn / error=fail；
+   浅深双板全走 var()（零硬编码色值）；时钟 svg 与 bubble__meta-clock 同形（12px）。 */
+.turn-footnote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-footnote--interrupted {
+  color: var(--color-warn-strong);
+}
+
+.turn-footnote--error {
+  color: var(--color-fail-strong);
+}
+
+.turn-footnote svg {
+  width: 0.75rem;
+  height: 0.75rem;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
 }
 </style>

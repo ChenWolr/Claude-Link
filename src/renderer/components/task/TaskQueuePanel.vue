@@ -384,7 +384,9 @@ const isAll = computed(() => sessionStore.rightTab === 'all');
 
 function setFilter(f: RightFilter): void {
   // 折叠态下点 rail 分类图标 → 先展开总览再切筛选，避免"点了没反应"。
-  if (sessionStore.overviewCollapsed) sessionStore.overviewCollapsed = false;
+  // R5-1（round-005）：走 toggleOverviewCollapsed（内含 cl.overviewCollapsed localStorage 写回，
+  // D1 持久化契约）——折叠态下该调用必置 false，语义等价；直写状态绕过持久化已修。
+  if (sessionStore.overviewCollapsed) sessionStore.toggleOverviewCollapsed();
   // 再点当前激活的同类 → 回 all（与预览一致）；点「全部」恒回 all。
   if (f === 'all' || sessionStore.rightTab === f) {
     sessionStore.setRightTab('all');
@@ -948,14 +950,14 @@ function handleDragReorder() {
         </svg>
         <span v-if="changesCount" class="rail__badge">{{ changesCount }}</span>
       </button>
-      <!-- 折叠活动总览（保留 rail 图标轨）：» 向右折叠 / « 向左展开 -->
+      <!-- 折叠活动总览（保留 rail 图标轨）：» 向右收起 / « 向左展开。D1（八问题批次）：
+           折叠钮无激活态分歧（--active 归分类钮独有），title 去方向词与左轨「折叠{对象}」同型。 -->
       <button
         type="button"
         class="rail__btn rail__btn--collapse"
-        :class="{ 'rail__btn--active': sessionStore.overviewCollapsed }"
         :aria-expanded="!sessionStore.overviewCollapsed"
         :aria-label="sessionStore.overviewCollapsed ? '展开活动总览' : '折叠活动总览'"
-        :title="sessionStore.overviewCollapsed ? '展开活动总览' : '向右折叠活动总览'"
+        :title="sessionStore.overviewCollapsed ? '展开活动总览' : '折叠活动总览'"
         @click="sessionStore.toggleOverviewCollapsed()"
       >
         <!-- 展开态：» 双箭头指右 = 把总览向右收起 -->
@@ -1402,17 +1404,17 @@ function handleDragReorder() {
   padding: 0;
 }
 
-/* 图标轨：贴面板最右侧 */
+/* 图标轨：贴面板最右侧。D1（八问题批次）：右轨向左轨对齐——padding/背景与左轨同值，
+   去 border-left（左轨无内分隔；rail__divider 保留作钮组分隔）。 */
 .rail {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 10px 4px;
+  padding: 14px 8px 12px;
   width: 48px;
-  border-left: 1px solid var(--color-border);
-  background: var(--color-panel-soft);
+  background: var(--color-panel);
 }
 
 .rail__divider {
@@ -1426,8 +1428,8 @@ function handleDragReorder() {
   position: relative;
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  width: 26px;
+  height: 26px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -1436,9 +1438,16 @@ function handleDragReorder() {
   transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
 
+/* D1：hover 与左轨同形（panel-soft 底 + text 色；旧 accent 混色移除）。 */
 .rail__btn:hover {
   color: var(--color-text);
-  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+  background: var(--color-panel-soft);
+}
+
+/* D1：:focus-visible 两轨统一（与 AppSidebar 三钮类同值）。 */
+.rail__btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  outline-offset: 1px;
 }
 
 .rail__btn--active {
@@ -1453,8 +1462,8 @@ function handleDragReorder() {
 }
 
 .rail__icon {
-  width: 20px;
-  height: 20px;
+  width: 14px;
+  height: 14px;
 }
 
 .rail__badge {

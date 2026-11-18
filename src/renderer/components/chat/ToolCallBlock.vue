@@ -139,9 +139,12 @@ const renderedMarkdown = computed(() => (resultContent.value ? renderMarkdown(re
 // 实际展示源（仅非 diff 结果的溢出测量用；diff 走弹窗，不内嵌测量）。
 const displayedSource = computed(() => (hasDiffView.value ? '' : resultContent.value));
 
-const costMsg = computed<RenderableMessage | null>(() => {
-  if (props.use && props.use.costUsd != null) return props.use;
-  if (props.result && props.result.costUsd != null) return props.result;
+// F1（2026-11-15 八问题批次）：meta 展示源（旧版仅以 costUsd 单字段选源，工具块 meta 行被
+// costUsd!=null+展开双门压死——纯工具回合看不到终态）。改与 MessageBubble 同口径：
+// use/result 任一 durationMs!=null||endedAt!=null 即取；costUsd 降级为可选伴随项（有则显示）。
+const metaMsg = computed<RenderableMessage | null>(() => {
+  if (props.use && (props.use.durationMs != null || props.use.endedAt != null)) return props.use;
+  if (props.result && (props.result.durationMs != null || props.result.endedAt != null)) return props.result;
   return null;
 });
 
@@ -262,8 +265,8 @@ watch([expanded, jsonText], () => {
         </div>
       </div>
       <div v-else-if="useParsed" class="tool-row__pending">（等待结果…）</div>
-      <div v-if="costMsg && (costMsg.durationMs || costMsg.costUsd != null)" class="tool-row__meta">
-        <span v-if="costMsg.costUsd != null">${{ costMsg.costUsd.toFixed(4) }}</span><span v-if="costMsg.costUsd != null && costMsg.durationMs"> · </span><span v-if="costMsg.durationMs">{{ (costMsg.durationMs / 1000).toFixed(1) }}s</span><span v-if="(exportMode || expanded) && costMsg.endedAt"> · 结束于 {{ new Date(costMsg.endedAt).toLocaleTimeString('zh-CN', { hour12: false }) }}</span>
+      <div v-if="metaMsg && (metaMsg.durationMs != null || metaMsg.endedAt != null)" class="tool-row__meta">
+        <span v-if="metaMsg.costUsd != null">${{ metaMsg.costUsd.toFixed(4) }}</span><span v-if="metaMsg.costUsd != null && metaMsg.durationMs != null"> · </span><span v-if="metaMsg.durationMs != null">{{ (metaMsg.durationMs / 1000).toFixed(1) }}s</span><span v-if="(exportMode || expanded) && metaMsg.endedAt"> · 结束于 {{ new Date(metaMsg.endedAt).toLocaleTimeString('zh-CN', { hour12: false }) }}</span>
       </div>
     </div>
   </div>

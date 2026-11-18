@@ -1174,6 +1174,12 @@ async function confirmDelete(session: { id: string; name: string }) {
   color: var(--color-text);
 }
 
+/* D1（八问题批次）：:focus-visible 两轨统一（与 TaskQueuePanel .rail__btn 同值）。 */
+.sidebar__rail__new:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
 .sidebar__rail__new svg {
   width: 14px;
   height: 14px;
@@ -1205,6 +1211,11 @@ async function confirmDelete(session: { id: string; name: string }) {
   color: var(--color-text);
 }
 
+.sidebar__rail__expand:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  outline-offset: 1px;
+}
+
 .sidebar__rail__expand svg {
   width: 14px;
   height: 14px;
@@ -1233,6 +1244,11 @@ async function confirmDelete(session: { id: string; name: string }) {
 .sidebar__collapse:hover {
   background: var(--color-panel-soft);
   color: var(--color-text);
+}
+
+.sidebar__collapse:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+  outline-offset: 1px;
 }
 
 .sidebar__collapse svg {

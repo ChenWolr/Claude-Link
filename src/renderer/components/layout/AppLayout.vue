@@ -38,9 +38,20 @@ const SIDEBAR_MIN = 180;
 const SIDEBAR_MAX = 460;
 const TASK_MIN = 240;
 const TASK_MAX = 560;
-const sidebarWidth = ref(240);
+// D1（八问题批次 2026-11-15）：宽度持久化四键之二（折叠双键在 session-store LS_COLLAPSE）——
+// 读点=ref 初始化经 readWidth（非有限数/越 min-max 回落默认；min/max 与拖拽钳制同一常量，
+// 拖宽纳入持久化），写点=onMouseUp 拖拽收尾单点写回（try/catch 静默；拖动中不写，省 IO 且
+// 避免中间值入库）。刷新/重启/网页刷新后保留（桌面按 userData partition、网页按 origin 隔离）。
+const LS_WIDTH = { sidebar: 'cl.sidebarWidth', task: 'cl.taskPanelWidth' } as const;
+function readWidth(key: string, fallback: number, min: number, max: number): number {
+  try { const v = Number(localStorage.getItem(key)); return Number.isFinite(v) && v >= min && v <= max ? v : fallback; } catch { return fallback; }
+}
+const sidebarWidth = ref(readWidth(LS_WIDTH.sidebar, 240, SIDEBAR_MIN, SIDEBAR_MAX));
 // 右侧栏新增 ~48px 图标轨，默认宽度 320→340 补偿内容区横向空间。
+// （340 默认为既有契约钉 selftest-settings-mapping/tdd-rightpanel-route-gate；持久化读回紧随
+// 其后单次赋值——无记录时 readWidth 即回 340，行为与直读形态等价。）
 const taskWidth = ref(340);
+taskWidth.value = readWidth(LS_WIDTH.task, 340, TASK_MIN, TASK_MAX);
 
 // 拖拽逻辑：在手柄上 mousedown 记录起点，document 上 mousemove 更新宽度，mouseup 解绑。
 let dragging: 'sidebar' | 'task' | null = null;
@@ -77,6 +88,13 @@ function onMouseMove(e: MouseEvent) {
 }
 function onMouseUp() {
   if (!dragging) return;
+  // D1：拖拽收尾把终值写回 localStorage（仅本次拖拽目标键，单点写回；try/catch 静默——
+  // 隐私模式 setItem 抛错时宽度仍在本会话内存生效）。
+  if (dragging === 'sidebar') {
+    try { localStorage.setItem(LS_WIDTH.sidebar, String(sidebarWidth.value)); } catch { /* 静默 */ }
+  } else if (dragging === 'task') {
+    try { localStorage.setItem(LS_WIDTH.task, String(taskWidth.value)); } catch { /* 静默 */ }
+  }
   dragging = null;
   document.body.style.cursor = '';
   document.body.style.userSelect = '';
@@ -111,7 +129,9 @@ onUnmounted(() => {
     </section>
 
     <template v-if="isChatRoute && (!panelForceHidden || panelRecalled)">
-      <div class="resize-handle resize-handle--task" @mousedown="onTaskResizeStart" title="拖动调整队列宽度" />
+      <!-- D1：折叠态手柄隐藏（v-if 门控）——右栏只剩 48px 图标轨，残条/死手柄（视觉 53px）消除；
+           展开恢复手柄与记忆宽（taskWidth 不被折叠触碰）。 -->
+      <div v-if="!sessionStore.overviewCollapsed" class="resize-handle resize-handle--task" @mousedown="onTaskResizeStart" title="拖动调整队列宽度" />
       <TaskQueuePanel />
     </template>
     <!-- B4：≤1100 断点强制隐藏后的唤回条 pill（裁决 B-C1 内联回唤；K6/D1-07 图标+队列+计数角标；

@@ -13,6 +13,11 @@
 //  CHR-V01     短错误正文豁免折叠（reasoning_replay 失败气泡可见）。
 //  CHR-V04     cost 脚注门控 durationMs || costUsd != null（cost 缺失时耗时仍显示）。
 //
+// [钉面同步 2026-11-17 eight-issues-batch]：ToolCallBlock meta 行已由 costMsg 单象改写为
+// metaMsg computed（F1：use/result 任一 durationMs!=null||endedAt!=null 即取，CHR-07「结束于」
+// 并入同一行）——⑤ 断言与 CHR-07/CHR-V04 要点行随新形态同步；新契约由
+// scripts/tdd-turn-final-footnote-verify.ts F1-5 节钉（04-实施计划.md §4.1）。
+//
 // 运行：npx tsx scripts/tdd-bugfix-hb10-chat-render-p3-verify.ts
 
 import { strict as assert } from 'node:assert';
@@ -111,11 +116,12 @@ check('④ 导出投影：ExportMessageRow/SELECT/toRenderable 补 api_error_kin
   assert.match(msgRepo, /title, is_error, api_error_kind, created_at\s+FROM messages WHERE session_id/, 'SELECT 窄投影缺列');
 });
 
-// ⑤ CHR-07 + V04。
+// ⑤ CHR-07 + V04。[钉面同步 2026-11-17] costMsg 单象 → metaMsg computed（F1 扩展门控，
+// 新契约由 tdd-turn-final-footnote-verify F1-5 钉）。
 check('⑤ ToolCallBlock meta：cost 门控放宽 + 「结束于」补展示（exportMode/展开态）', () => {
-  assert.match(tcb, /v-if="costMsg && \(costMsg\.durationMs \|\| costMsg\.costUsd != null\)"/, 'CHR-V04 门控形态不符');
+  assert.match(tcb, /v-if="metaMsg && \(metaMsg\.durationMs != null \|\| metaMsg\.endedAt != null\)"/, 'CHR-V04 门控形态不符（metaMsg 新形态）');
   assert.match(tcb, /· 结束于/, 'CHR-07 缺「结束于」展示');
-  assert.match(tcb, /\(exportMode \|\| expanded\) && costMsg\.endedAt/, 'endedAt 显示条件不符（仅 exportMode/展开态）');
+  assert.match(tcb, /\(exportMode \|\| expanded\) && metaMsg\.endedAt/, 'endedAt 显示条件不符（仅 exportMode/展开态）');
 });
 
 // ⑥ CHR-08。

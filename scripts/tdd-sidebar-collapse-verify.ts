@@ -5,15 +5,21 @@
 //   T4-B 展开恢复拖拽宽度（结构钉：sidebarWidth ref 不被 toggleSidebarCollapsed 触碰
 //        + 手柄 v-if 与 --sidebar-width 宽度绑定分离 + 折叠轨固定 48px 不动 AppLayout 记忆宽）
 //   T4-C 折叠态拖宽手柄不可用（结构钉：AppLayout 手柄 v-if="!sessionStore.sidebarCollapsed" 门控）
-//   T4-D 折叠态仅存内存（结构钉：session-store 无 localStorage 写入、config.ts（AppConfig）
-//        与 config-manager.ts 无 sidebar 对应字段、折叠 state 仅 pinia 内存态）
+//   T4-D 折叠态+宽度持久化（结构钉；【废卷反向重写留痕，2026-11-15 八问题批次 D1】原 UI13-P4 钉
+//        「折叠态仅存内存/零 localStorage」（旧 T4-D1~D4 前半）与 00-behavior-specs 域 D 契约 #3
+//        「折叠态+展开宽度持久化到 localStorage」相反，按 04-实施计划 §4.1 最小同步纪律废卷反向
+//        重写为「有持久化」钉：两折叠位经 LS_COLLAPSE 双键读写（读点=state factory，写点=toggle
+//        action try/catch）；AppConfig/config-manager 无 sidebar/collapse 字段的后半钉语义不变
+//        保留（持久化载体唯 localStorage，config 通道维持禁入））
 //   T4-E 瞬时切换（结构钉：.sidebar--collapsed 与折叠轨新增样式块无 transition 声明）
 //   T4-F 订阅零影响（04 §3 裁决 R1 后结构钉：全局事件订阅位于 App.vue 不在侧栏组件内
 //        + AppSidebar 折叠仅动容器几何的语义注释；v-if 卸载 DOM 允许，store 持续更新下展开即时正确）
 //   T4-G 网页版可用（结构钉：折叠链路（窄轨块/折叠钮/store action 体）零 window.claudeLink
 //        新增依赖；npm run typecheck:web 兜底由 GREEN 阶段独立命令执行）
-//   T4-H 同步布尔翻转（结构钉：toggleSidebarCollapsed action 体恰为同步单行布尔翻转，无异步中间态；
-//        注：pinia 在 node 契约环境存在 ESM/CJS 双包分歧，行为直测不可靠，按出卷选结构钉形态）
+//   T4-H 同步布尔翻转（结构钉：toggleSidebarCollapsed 体=同步布尔翻转+localStorage 写回（D1 持久化
+//        写点扩展同步改钉留痕：原「恰为单行布尔翻转」钉被持久化写点扩展破坏，按 03b §7 D1-3 预期
+//        同步；无异步中间态语义不变）；注：pinia 在 node 契约环境存在 ESM/CJS 双包分歧，行为直测
+//        不可靠，按出卷选结构钉形态）
 // 运行：npx tsx scripts/tdd-sidebar-collapse-verify.ts（登记 scripts/selftest-static-list.txt）
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
@@ -165,20 +171,32 @@ check('T4-C2 手柄展开态仍可拖（@mousedown="onSidebarResizeStart" 保留
   assert.ok(line.includes('@mousedown="onSidebarResizeStart"'), '手柄拖拽接线丢失');
 });
 
-console.log('\n=== T4-D · 折叠态仅存内存（结构钉） ===');
+console.log('\n=== T4-D · 折叠态持久化（结构钉；废卷反向重写留痕见脚本头注） ===');
 
-check('T4-D1 sidebarCollapsed 为 pinia 内存态：state 默认 false 存在于 session-store', () => {
-  assert.ok(store.includes('sidebarCollapsed: false'), 'session-store 缺 sidebarCollapsed: false 内存态');
+check('T4-D1 折叠态初始化读回 localStorage：state 两折叠位经 readBool(LS_COLLAPSE.*)（旧「内存态 false」钉反向）', () => {
+  assert.ok(store.includes("const LS_COLLAPSE = { sidebar: 'cl.sidebarCollapsed', overview: 'cl.overviewCollapsed' } as const;"),
+    'session-store 缺 LS_COLLAPSE 持久化键常量');
+  assert.ok(store.includes('overviewCollapsed: readBool(LS_COLLAPSE.overview),'), 'overviewCollapsed 缺 readBool 读回初始化');
+  assert.ok(store.includes('sidebarCollapsed: readBool(LS_COLLAPSE.sidebar),'), 'sidebarCollapsed 缺 readBool 读回初始化');
 });
-check('T4-D2 session-store 零 localStorage 写入（折叠态不落 localStorage；扫描写行为字面而非裸词——注释语义说明允许）', () => {
-  for (const op of ['localStorage.setItem', 'localStorage.getItem', 'localStorage.removeItem', 'localStorage.clear', 'window.localStorage']) {
-    assert.equal(countOccurrences(store, op), 0, `session-store 出现 localStorage 写入行为 ${op}（折叠态须不持久化）`);
-  }
+check('T4-D2 折叠双键写回在 toggle action（try/catch 静默；旧「零 localStorage 写入」钉反向）', () => {
+  const ovIdx = store.indexOf('toggleOverviewCollapsed() {');
+  assert.ok(ovIdx > -1, '缺 toggleOverviewCollapsed action');
+  const ovBody = sliceBalanced(store, ovIdx);
+  assert.ok(ovBody.includes("localStorage.setItem(LS_COLLAPSE.overview, this.overviewCollapsed ? '1' : '0')"),
+    'toggleOverviewCollapsed 缺 cl.overviewCollapsed 写回');
+  assert.ok(ovBody.includes('try {') && ovBody.includes('} catch {'), 'toggleOverviewCollapsed 写回缺 try/catch 静默');
+  const sbIdx = store.indexOf('toggleSidebarCollapsed() {');
+  assert.ok(sbIdx > -1, '缺 toggleSidebarCollapsed action');
+  const sbBody = sliceBalanced(store, sbIdx);
+  assert.ok(sbBody.includes("localStorage.setItem(LS_COLLAPSE.sidebar, this.sidebarCollapsed ? '1' : '0')"),
+    'toggleSidebarCollapsed 缺 cl.sidebarCollapsed 写回');
+  assert.ok(sbBody.includes('try {') && sbBody.includes('} catch {'), 'toggleSidebarCollapsed 写回缺 try/catch 静默');
 });
-check('T4-D3 AppConfig（config.ts）无 sidebar/collapse 对应字段', () => {
+check('T4-D3 AppConfig（config.ts）无 sidebar/collapse 对应字段（持久化载体唯 localStorage，config 通道维持禁入）', () => {
   assert.ok(!/sidebar/i.test(configType), 'AppConfig 不得含 sidebar 字段（折叠态不进 config 持久化）');
 });
-check('T4-D4 config-manager.ts 无 sidebar/collapse 对应字段', () => {
+check('T4-D4 config-manager.ts 无 sidebar/collapse 对应字段（持久化载体唯 localStorage，config 通道维持禁入）', () => {
   assert.ok(!/sidebar/i.test(configManager), 'config-manager 不得含 sidebar 字段（折叠态不进 config 持久化）');
 });
 
@@ -242,12 +260,15 @@ check('T4-G2 底缘折叠钮与 store action 体零 window 依赖', () => {
 
 console.log('\n=== T4-H · 同步布尔翻转（结构钉） ===');
 
-check('T4-H1 toggleSidebarCollapsed 体恰为同步单行布尔翻转（无异步中间态）', () => {
+check('T4-H1 toggleSidebarCollapsed 体=同步布尔翻转先行+localStorage 写回（D1 写点扩展同步改钉；仍无异步中间态）', () => {
   const fnIdx = store.indexOf('toggleSidebarCollapsed() {');
   assert.ok(fnIdx > -1, 'session-store 缺 toggleSidebarCollapsed action');
   const body = sliceBalanced(store, fnIdx).replace(/\s+/g, '');
-  assert.equal(body, 'toggleSidebarCollapsed(){this.sidebarCollapsed=!this.sidebarCollapsed;}',
-    'action 体必须恰为同步布尔翻转（防连点竞态中间态）');
+  assert.ok(body.startsWith('toggleSidebarCollapsed(){this.sidebarCollapsed=!this.sidebarCollapsed;'),
+    'action 体必须以同步布尔翻转为首语句（防连点竞态中间态）');
+  assert.ok(body.includes("localStorage.setItem(LS_COLLAPSE.sidebar,this.sidebarCollapsed?'1':'0')"),
+    'action 体缺 cl.sidebarCollapsed 持久化写回（D1 契约 #3）');
+  assert.ok(body.includes('try{') && body.includes('catch{'), '写回缺 try/catch 静默（隐私模式不得抛错）');
 });
 check('T4-H2 action 体零 async/setTimeout/Promise（无异步翻转竞态面）', () => {
   const fnIdx = store.indexOf('toggleSidebarCollapsed() {');
@@ -256,8 +277,8 @@ check('T4-H2 action 体零 async/setTimeout/Promise（无异步翻转竞态面�
   assert.ok(!body.includes('setTimeout'), 'action 体不得 setTimeout');
   assert.ok(!body.includes('Promise'), 'action 体不得 Promise');
 });
-check('T4-H3 this.sidebarCollapsed 写点唯一（仅 action 内两处引用，无他处触碰）', () => {
-  assert.equal(countOccurrences(store, 'this.sidebarCollapsed'), 2, 'this.sidebarCollapsed 应仅出现在 action 翻转行（2 处）');
+check('T4-H3 this.sidebarCollapsed 写点唯一（action 内 3 处引用=翻转 2+持久化三元 1；D1 写点扩展同步改钉，无他处触碰）', () => {
+  assert.equal(countOccurrences(store, 'this.sidebarCollapsed'), 3, 'this.sidebarCollapsed 应仅出现在 action 内（翻转 2 处+写回三元 1 处）');
 });
 
 console.log(`\n=== 结果：${pass} 通过 / ${fail} 失败 ===`);

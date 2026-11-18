@@ -526,6 +526,10 @@ function createChat() {
         // applyRunningOverview 的概览 skip 条件）——被下方守卫忽略的迟到 turn_ended 也要入账，
         // 概览迟到时才能正确对账。
         store.noteTurnEndedServer(sid, event.endedAt);
+        // F1（2026-11-15 八问题批次）：终态脚注记账——无条件区（running 守卫之前，与上方
+        // noteTurnEndedServer 同门同位），迟到终态同样入账；running 门防复活由 setTurnFootnote
+        // 内部承担（新回合已起步时不复活旧脚注）。
+        store.setTurnFootnote(sid, { outcome: event.outcome, durationMs: event.durationMs, endedAt: event.endedAt });
         // SA-3：迟到终态幂等收口。常规时序终态事件先到（主进程 forwardEvent 先推 result/
         // error/aborted、后发 turn_ended 伴生信号），此时 running 已被既有分支摘除 → 直接忽略
         //（迟到终态幂等，不依赖 turn_started 前置）；终态事件丢失（web 断线等）时 running 仍在，
@@ -547,6 +551,11 @@ function createChat() {
         } else {
           store.markStopped(sid);
         }
+        // P2-3（round-002 修复）：running 拒收后的收口段兜底记账——终态事件丢失（web 断线等）
+        // 时本分支在 running 态进入，上方无条件区 setTurnFootnote 被 running 门拒绝；此处收口
+        //（markCompleted/markStopped）已摘除 running，补一次记账（同 event 权威数据）使脚注
+        // 落地。常规时序路径在上方守卫已 break，不走此处（不重复记账）。
+        store.setTurnFootnote(sid, { outcome: event.outcome, durationMs: event.durationMs, endedAt: event.endedAt });
         break;
       }
       case 'result': {
@@ -578,7 +587,8 @@ function createChat() {
           }
           store.markCompleted(sid);
         } else {
-          store.markStopped(sid);
+          // P2-3（round-002）：error 调用面显式 outcome（临时脚注显「失败」）。
+          store.markStopped(sid, { footnoteOutcome: 'error' });
         }
         break;
       }
@@ -586,7 +596,8 @@ function createChat() {
       case 'aborted': {
         // 后台会话错误/中断结束：清该会话中断兜底 + 标记停止 + 清理快照（不亮绿灯）。
         clearAbortTimer(sid);
-        store.markStopped(sid);
+        // P2-3（round-002）：临时脚注 outcome 按事件类型分流（error 显「失败」/aborted 显「已中断」）。
+        store.markStopped(sid, { footnoteOutcome: event.type === 'error' ? 'error' : 'interrupted' });
         break;
       }
       // message: 主进程已落库，切回时 getSessionMessages 重载；init 遗留形态主进程不落库（无发射点），一并跳过
@@ -680,7 +691,8 @@ function createChat() {
           if (isSuccessfulCliResult(event)) {
             store.markCompleted(store.activeSession.id);
           } else {
-            store.markStopped(store.activeSession.id);
+            // P2-3（round-002）：error 调用面显式 outcome——临时脚注显「失败」而非默认「已中断」。
+            store.markStopped(store.activeSession.id, { footnoteOutcome: 'error' });
           }
         }
         // P2（effort 可见性）：回合结束拉取「上回合实际生效思考强度」合并进会话（fire-and-forget）。
@@ -700,7 +712,8 @@ function createChat() {
         captureFailedMessage();
         if (store.activeSession) {
           clearAbortTimer(store.activeSession.id);
-          store.markStopped(store.activeSession.id);
+          // P2-3（round-002）：error 调用面显式 outcome（临时脚注显「失败」）。
+          store.markStopped(store.activeSession.id, { footnoteOutcome: 'error' });
         }
         resetTurnCache();
         break;
@@ -786,6 +799,10 @@ function createChat() {
         // session-store applyRunningOverview 的概览 skip 条件）——被下方守卫忽略的迟到
         // turn_ended 也要入账，概览迟到时才能正确对账。
         store.noteTurnEndedServer(sid, event.endedAt);
+        // F1（2026-11-15 八问题批次）：终态脚注记账——无条件区（running 守卫之前，与上方
+        // noteTurnEndedServer 同门同位），迟到终态同样入账；running 门防复活由 setTurnFootnote
+        // 内部承担（新回合已起步时不复活旧脚注）。
+        store.setTurnFootnote(sid, { outcome: event.outcome, durationMs: event.durationMs, endedAt: event.endedAt });
         if (!store.runningSessions.includes(sid)) break;
         clearAbortTimer(sid);
         finalizeAssistantStream();
@@ -807,6 +824,10 @@ function createChat() {
         } else {
           store.markStopped(sid);
         }
+        // P2-3（round-002 修复）：running 拒收后的收口段兜底记账（同后台分支）——终态事件丢失
+        // 时上方无条件区 setTurnFootnote 被 running 门拒绝，收口摘除 running 后补同 event 权威
+        // 数据入账；常规时序路径在上方守卫已 break，不重复记账。
+        store.setTurnFootnote(sid, { outcome: event.outcome, durationMs: event.durationMs, endedAt: event.endedAt });
         // P2（effort 可见性）：与 result 分支同形，回合结束拉取「上回合实际生效思考强度」。
         void store.refreshActiveSessionEffort();
         resetTurnCache();

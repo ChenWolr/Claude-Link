@@ -156,6 +156,18 @@ let bridgeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 // ——两信号源可能同时到达，各自 500ms 去抖互不吞并）。
 let sessionsChangedTimer: ReturnType<typeof setTimeout> | null = null;
 
+// D1（八问题批次 2026-11-15）：左右折叠态持久化——推翻 UI13-P4「内存态」决定（00 规范域 D
+// D1 契约 #3：折叠态持久化到 localStorage，刷新/重启/网页刷新后保留）。键常量单一来源；
+// 读点=state factory 初始化（readBool 非 '1' 即 false：缺键/非法值/存储异常一律回落展开态），
+// 写点=toggle action（翻转先行+try/catch 静默——隐私模式 setItem 抛错时状态仍在本会话内存生效）。
+// 展开宽度持久化在 AppLayout（LS_WIDTH：cl.sidebarWidth/cl.taskPanelWidth）。
+const LS_COLLAPSE = { sidebar: 'cl.sidebarCollapsed', overview: 'cl.overviewCollapsed' } as const;
+
+/** 折叠布尔读回：非 '1'（含缺键/非法值/存储异常）一律 false。 */
+function readBool(key: string): boolean {
+  try { return localStorage.getItem(key) === '1'; } catch { return false; }
+}
+
 // 「网页访问」P1-5：web 模式 active 会话恢复（渲染层 sessionStorage 方案，主进程常驻不感知）。
 // web 桥安装时置位 window.__claudeLinkWebBridge（web-bridge.ts createWebApi；该文件仅网页端
 // 加载，桌面 Electron 恒无标记 → 以下工具在桌面全 no-op、零存储读写）。暂态会话不落 key
@@ -214,10 +226,13 @@ export const useSessionStore = defineStore('session', {
     // 演进自旧 rightTab 互斥 Tab——保留字段名与 'changes'/'background' 等字面量，仅新增 'all' 默认。
     rightTab: 'all' as 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes',
     // 活动总览折叠态：true=只留 rail 图标轨、隐藏主体内容（rail 底部双箭头按钮切换）。
-    overviewCollapsed: false,
-    // 左侧栏折叠态（UI13-P4）：true=侧栏收为 48px 图标轨。与 overviewCollapsed 同生命周期
-    // ——pinia 内存态、重启复位展开（不进 config 持久化、不写 localStorage）。
-    sidebarCollapsed: false,
+    // D1（八问题批次）：折叠态持久化（localStorage cl.overviewCollapsed，LS_COLLAPSE 单一来源），
+    // 初始读回；非法值/缺键/存储异常回落展开态。
+    overviewCollapsed: readBool(LS_COLLAPSE.overview),
+    // 左侧栏折叠态（UI13-P4）：true=侧栏收为 48px 图标轨。D1（八问题批次）：推翻「内存态」
+    // 旧决定（00 规范域 D D1 契约 #3），折叠态持久化（localStorage cl.sidebarCollapsed），
+    // 初始读回；展开宽度持久化在 AppLayout（cl.sidebarWidth）。
+    sidebarCollapsed: readBool(LS_COLLAPSE.sidebar),
     // 主流程锚点点击后要定位的子 agent（按 parentAgentId），子Agent 面板据此滚动高亮。
     focusedSubAgentId: null as string | null,
     // 力度② turn 边界：当前发送回合在 messages 中的起始索引。MessageList 据此在发送中
@@ -292,6 +307,13 @@ export const useSessionStore = defineStore('session', {
     apiRetryInfo: {} as Record<string, ApiRetryInfo>,
     // 主进程终态消息落库失败时的运行期兜底；新回合、删除会话或显式关闭时清理。
     apiRetryTerminalFallback: {} as Record<string, ApiRetryTerminalFallback>,
+    // F1（2026-11-15 八问题批次）：回合终态脚注（per-session 单槽）——该回合最后内容块之后
+    // 的独立载体数据面（MessageList 列表尾渲染）。use-chat 后台/前台 turn_ended 两分支在
+    // running 守卫之前经 setTurnFootnote 无条件记账（与 noteTurnEndedServer 同门同位，迟到
+    // 终态也入账）；markRunning 新回合边界清槽（契约：同一会话仅最新回合显示，历史回合不堆
+    // 脚注）；deleteSession 随会话清理。重开语义：中断/错误回合 P2-1 不落库（刷新后无内存
+    // 脚注即不显示，诚实不造数），成功回合由 MessageList 回落 DB sessions.last_turn_*。
+    turnFootnote: {} as Record<string, { outcome: 'success' | 'error' | 'interrupted'; durationMs: number; endedAt: number }>,
     // Bug2：per-session 子 agent 实时思考快照（stream_event thinking_delta 按 parentToolUseId 路由）。
     // 外层 key=sessionId，内层 key=parentAgentId → 累积思考文本。子 Agent Tab 据此在思考中显示
     // ThinkingBlock；该子 agent 的 message 到达（完整思考落库）或回合结束时清除，避免与落库重复。
@@ -766,6 +788,8 @@ export const useSessionStore = defineStore('session', {
       delete this.turnGeneration[id];
       // B1：最近回合元数据随会话删除一并清理（DB 行由级联删除处理）。
       delete this.lastTurnMeta[id];
+      // F1：回合终态脚注随会话删除一并清理（防内存泄漏；已删会话不会再收 turn_ended 记账）。
+      delete this.turnFootnote[id];
       // review-v3 High-2：已删会话的 context 代际记录一并清理（防内存泄漏；会话已删，
       // 主进程不会再发该会话的 CONTEXT_UPDATE，无需保留 known generation 拒收旧值）。
       delete this.contextQueryGenerations[id];
@@ -1160,6 +1184,9 @@ export const useSessionStore = defineStore('session', {
         // 「已 running + 传入 startedAt 幂等覆盖」（turn_started 校正 / 快照恢复）不递增，否则
         // abort finally 的代际守卫错位、新回合被误判为「旧中断迟到」而卡 running。
         this.turnGeneration[sessionId] = (this.turnGeneration[sessionId] ?? 0) + 1;
+        // F1（2026-11-15 八问题批次）：新回合起步=上一回合终态脚注退场（契约：同一会话仅最新
+        // 回合显示脚注，历史回合不重复堆脚注）。
+        delete this.turnFootnote[sessionId];
       } else if (typeof startedAt === 'number' && Number.isFinite(startedAt)) {
         // 已在 runningSessions（重复 turn_started / 快照恢复 / 本端乐观置位后校正）：
         // 仍无条件覆盖权威起点（幂等）；同回合同代，generation 不递增（R7，见上分支注）。
@@ -1277,6 +1304,16 @@ export const useSessionStore = defineStore('session', {
       const prev = this.lastTurnEndedServerAt[sessionId];
       this.lastTurnEndedServerAt[sessionId] = Math.max(prev ?? 0, endedAt);
     },
+    // F1（2026-11-15 八问题批次）：写入回合终态脚注（per-session 单槽，末事件胜）。
+    //  - 无效耗时诚实降级（P2-2 无造数纪律同款）：durationMs 非正数/非有限置 0，渲染层只显
+    //    「结束于/已中断/失败」半句，绝不造数补齐耗时；
+    //  - running 门防复活：新回合已起步（runningSessions 含该会话）时迟到 turn_ended 不得
+    //    复活旧脚注（与 use-chat turn_ended 两分支 :533/:789 幂等收口门同谓词；空闲态正常入账）。
+    setTurnFootnote(sessionId: string, note: { outcome: 'success' | 'error' | 'interrupted'; durationMs: number; endedAt: number }): void {
+      const dur = Number.isFinite(note.durationMs) && note.durationMs > 0 ? note.durationMs : 0;
+      if (this.runningSessions.includes(sessionId)) return;
+      this.turnFootnote[sessionId] = { ...note, durationMs: dur };
+    },
     // B1：写入最近回合元数据（内存态 + 就地补 sessions/activeSession 对象字段，保持侧栏数据一致）。
     // P2-2 语义收口：只记「完整有效记录」——耗时无效（null/非正/非有限数）一律早退、保持上一条
     // 有效记录，不再出现内存 map 留旧回合、Session 字段/DB 写 (null, T2) 的半写分叉。
@@ -1328,7 +1365,19 @@ export const useSessionStore = defineStore('session', {
     // 基础状态按规则处理：running 删除回 idle；undefined 保持 idle；
     // completed 保留绿灯；network_interrupted 保留常红——exhausted 后迟到的
     // 失败 result/error/aborted 不得清掉已确认的常红。
-    markStopped(sessionId: string, options: { preserveApiRetry?: boolean } = {}) {
+    // P2-3（round-002）：options.footnoteOutcome——乐观收口临时脚注的 outcome（缺省
+    // 'interrupted' 即 abort/中断兜底/user_stopped 调用面；失败 result/error 调用面显式传
+    // 'error'，详见体内注释）。
+    markStopped(sessionId: string, options: { preserveApiRetry?: boolean; footnoteOutcome?: 'error' | 'interrupted' } = {}) {
+      // P2-3（round-002）：真停止过渡判定（先于 runningSessions 摘除）——仅 running→stopped
+      // 的过渡落临时账，幂等重入（迟到 result/aborted 重停）不重写（endedAt 不漂移）。
+      const wasRunning = this.runningSessions.includes(sessionId);
+      // P2-3（round-002）：临时脚注耗时须先于 turnStartedAt 清除读取（计时协议同 TurnTimer：
+      // 本地钟 + serverClockOffset；缺起点/非正数由 setTurnFootnote 诚实降级置 0，无造数）。
+      const startedAt = this.turnStartedAt[sessionId];
+      const runMs = startedAt != null
+        ? Math.round(Date.now() + (this.serverClockOffset[sessionId] ?? 0) - startedAt)
+        : 0;
       this.runningSessions = this.runningSessions.filter((sid) => sid !== sessionId);
       // 清理该会话的流式快照（执行结束，快照不再需要）
       delete this.sessionStreams[sessionId];
@@ -1343,6 +1392,18 @@ export const useSessionStore = defineStore('session', {
       // 错误/中断/aborted：不保留运行态也不亮绿灯 → 回 idle（无状态点）。
       if (this.sessionStatus[sessionId] === 'running') {
         delete this.sessionStatus[sessionId];
+      }
+      // P2-3（round-002）：乐观收口临时脚注（仅内存不落库——P2-1 中断不落库裁决维持，刷新后
+      // 自然消失）。堵 abort 乐观收口（markStopped）到 turn_ended 到达前的秒级窗：该窗内
+      // MessageList 无内存脚注会命中 DB 回落分支，把上一成功回合的「本次回复 X · 结束于 Y」
+      // 挂在刚中断回合内容下。临时账先落地显「已中断/失败」半句，权威 turn_ended 到达时经
+      // setTurnFootnote 以权威值覆盖。仅在真停止过渡（wasRunning）时记账。
+      if (wasRunning) {
+        this.setTurnFootnote(sessionId, {
+          outcome: options.footnoteOutcome ?? 'interrupted',
+          durationMs: runMs,
+          endedAt: Date.now(),
+        });
       }
     },
     // 问题 1：向非当前会话的流式快照追加内容（后台执行时累积流式，切回时恢复）。
@@ -1633,13 +1694,16 @@ export const useSessionStore = defineStore('session', {
     setRightTab(tab: 'all' | 'plan' | 'queue' | 'subagent' | 'background' | 'changes') {
       this.rightTab = tab;
     },
-    // 折叠/展开活动总览主体（保留 rail 图标轨）。
+    // 折叠/展开活动总览主体（保留 rail 图标轨）。D1：翻转先行+写回 localStorage（try/catch 静默）。
     toggleOverviewCollapsed() {
       this.overviewCollapsed = !this.overviewCollapsed;
+      try { localStorage.setItem(LS_COLLAPSE.overview, this.overviewCollapsed ? '1' : '0'); } catch { /* 静默 */ }
     },
     // 折叠/展开左侧栏（UI13-P4）：同步布尔翻转，无异步中间态（连点最终态=最后一次点击）。
+    // D1：翻转后写回 localStorage（try/catch 静默，无异步中间态不变）。
     toggleSidebarCollapsed() {
       this.sidebarCollapsed = !this.sidebarCollapsed;
+      try { localStorage.setItem(LS_COLLAPSE.sidebar, this.sidebarCollapsed ? '1' : '0'); } catch { /* 静默 */ }
     },
     // 主流程子 Agent 锚点点击：切到子Agent Tab 并标记要定位的 parentAgentId。
     focusSubAgent(parentAgentId: string) {
