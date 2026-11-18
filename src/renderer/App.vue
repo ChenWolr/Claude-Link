@@ -66,6 +66,31 @@ function dismissRevWarn(): void {
   try { localStorage.setItem(REV_WARN_DISMISS_KEY, revPair.value); } catch { /* 隐私模式：仅本次生效 */ }
 }
 
+// D2（八问题批次）：网页产物新鲜度 dev 横幅。主进程 !app.isPackaged 经 welcome 帧 devMode 字段
+// 下发（web-bridge welcomedDevModeRef 捕获）——渲染层无既有通道可读 isPackaged，welcome 帧是
+// 唯一零新通道搭载面。dev 态常驻提示（可关闭、按会话记忆 sessionStorage 不重复弹——与 rev warn
+// 的「按 rev 对 localStorage 记忆」刻意区分：dev 横条每次开发会话都应可见）；生产模式
+// （devMode=false/旧主进程缺省）恒不渲染；与 rev 比对横条可并存（各自 v-if 独立，纵向堆叠）。
+const DEV_WARN_KEY = 'clWebDevModeWarnDismissed';
+const devWarnDismissed = ref(false);
+// holder 形态与 rev warn 同款（shallowRef 包对象避免 Ref 展开；null→动态 import .then 完成，
+// catch 置 null 降级安全——横条不渲染）。
+const devModeHolder = shallowRef<{ dev: Ref<boolean> } | null>(null);
+if (isWebRuntime) {
+  void import('./web/web-bridge')
+    .then((mod) => { devModeHolder.value = { dev: mod.welcomedDevModeRef }; })
+    .catch(() => { devModeHolder.value = null; });
+}
+const devModeActive = computed(() => devModeHolder.value?.dev.value === true);
+function readDevDismissed(): boolean {
+  try { return sessionStorage.getItem(DEV_WARN_KEY) === '1'; } catch { return false; }
+}
+const showDevModeWarn = computed(() => isWebRuntime && devModeActive.value && !devWarnDismissed.value && !readDevDismissed());
+function dismissDevModeWarn(): void {
+  devWarnDismissed.value = true;
+  try { sessionStorage.setItem(DEV_WARN_KEY, '1'); } catch { /* 隐私模式：仅本次生效 */ }
+}
+
 // Electron 经典坑：渲染窗口对 OS 文件拖入的默认动作是导航到 file:///（窗口被替换/白屏）。
 // 仅文件拖放（dataTransfer.types 含 Files）会触发该导航；文本拖放到 textarea 需保留默认行为
 // （让浏览器插入文本），故不再无条件 preventDefault。业务消费由 ChatPage 在 .chat-page 容器上处理。
@@ -235,6 +260,11 @@ onBeforeUnmount(() => {
       <span class="web-rev-warn__text">⚠ 网页版渲染产物（rev {{ welcomedRev }}）与主进程（rev {{ BUILD_REV }}）不一致——开发模式请重新 <code>npm run build</code>；正式使用请更新应用</span>
       <button class="web-rev-warn__close" type="button" aria-label="关闭提示" @click="dismissRevWarn">✕</button>
     </div>
+    <!-- D2：dev 横幅（生产模式/桌面恒不渲染；与 rev 比对横条可并存，纵向堆叠） -->
+    <div v-if="showDevModeWarn" class="web-rev-warn web-rev-warn--dev" role="status">
+      <span class="web-rev-warn__text">开发模式：网页产物可能落后于桌面热更新代码，重启 <code>npm run dev</code> 后再验证网页端</span>
+      <button class="web-rev-warn__close" type="button" aria-label="关闭提示" @click="dismissDevModeWarn">✕</button>
+    </div>
     <router-view />
     <InteractionPrompt />
     <ImageLightbox />
@@ -339,4 +369,10 @@ onBeforeUnmount(() => {
   border-radius: var(--radius-sm);
 }
 .web-rev-warn__close:hover { color: var(--color-text); background: color-mix(in srgb, var(--color-text) 8%, transparent); }
+/* D2：dev 横幅变体——中性描边（border-strong + panel 底），不抢 rev warn 的 warn 色语义；
+   其余形态（布局/字号/关闭钮）复用 .web-rev-warn 全套。 */
+.web-rev-warn--dev {
+  border-color: var(--color-border-strong);
+  background: var(--color-panel);
+}
 </style>

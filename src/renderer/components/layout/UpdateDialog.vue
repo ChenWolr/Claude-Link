@@ -13,6 +13,11 @@ import { useDialogShell } from '../../composables/use-dialog-shell';
 import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import ReleaseNotesView from '../common/ReleaseNotesView.vue';
 
+// D3-2（2026-11-15 eight-issues）：web 运行时判定（与 App.vue 同式——__claudeLinkWebBridge 标记
+// 门控）。网页端隐藏「立即重启更新」钮：install=quitAndInstall 重启的是桌面主机应用（远控语义
+// 越界）；检查/下载/状态区/稍后提醒两端保留，桌面端 isWebRuntime 恒 false 行为不变。
+const isWebRuntime = typeof window !== 'undefined' && (window as any).__claudeLinkWebBridge === true;
+
 const updateStore = useUpdateStore();
 
 // ── 弹窗壳（P6：head 拖动 / 8 向缩放 / 双击复位居中；无 initialSize → 打开时测卡片自然尺寸，
@@ -140,7 +145,10 @@ onUnmounted(() => {
           data-testid="update-dialog-dismiss"
           @click="updateStore.dismissUpdate()"
         >稍后提醒</button>
+        <!-- D3-2（2026-11-15 eight-issues）：立即重启更新=quitAndInstall 远控重启桌面主机，
+             网页端隐藏（v-if）；桌面端 isWebRuntime 恒 false 渲染不变。 -->
         <button
+          v-if="!isWebRuntime"
           type="button"
           class="update-dialog__btn update-dialog__btn--primary"
           data-testid="update-dialog-install"

@@ -105,8 +105,11 @@ async function main(): Promise<void> {
     // 窗口 700→800：A10（D07-F2）homedir→effectiveUserHome 修复带 3 行机理注释（5db45f7 最小同步，断言语义不变）。
     // 窗口 800→1400：UI13-P8 handler 内联 recent ∪ sessionDirs 并集块（~430 字符，listWorkingDirCounts
     // 后移至 ~1208），断言语义不变（仍钉 await collectSkillProjectDirs 三源在位）。
+    // E4（2026-11-15 eight-issues）最小同步：recent 源字面由内联 listRecentWorkspaces() 改指统一
+    // 目录源 listRecentAndSessionProjectDirs(20)（装配收口 project-dir-set.ts），断言语义不变
+    //（三源在位）；统一函数内部行为由 scripts/tdd-mcp-skill-dirset-unify-verify.ts 承担。
     const region = at >= 0 ? ipc.slice(at, at + 1400) : '';
-    check('⑤', 'SKILL_PROJECT_DIRS_GET handler 形态不变（await collectSkillProjectDirs 三源）', /dirs:\s*await\s+collectSkillProjectDirs/.test(region) && region.includes('listRecentWorkspaces()') && region.includes('listWorkingDirCounts()'), at < 0 ? '缺 handler' : '');
+    check('⑤', 'SKILL_PROJECT_DIRS_GET handler 形态不变（await collectSkillProjectDirs 三源）', /dirs:\s*await\s+collectSkillProjectDirs/.test(region) && region.includes('listRecentAndSessionProjectDirs(20)') && region.includes('listWorkingDirCounts()'), at < 0 ? '缺 handler' : '');
   }
 
   console.log(`\n===== tdd-skill-enum-resilience-verify: ${pass} pass / ${fail} fail =====`);

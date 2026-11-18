@@ -30,6 +30,12 @@
 // T8-D 镜像申报：清单收集并集/封顶逻辑位于 ipc-handlers handler 与 index.ts 注入闭包内
 //（均 electron 重导入链，tsx 不可直 import）——按派发词「重命名等效跟随」以镜像纯逻辑直测 +
 // 生产侧结构钉（同形字面）覆盖，如实申报于点报告。
+// E4（2026-11-15 eight-issues）最小同步：生产侧并集/封顶装配迁入 src/main/modules/project-dir-set.ts
+//（listRecentAndSessionProjectDirs，真实 fs/store 链可 tsx 直驱），handler 与 index.ts 注入闭包改为
+// 调用该单一真相源；T8-D-3 结构钉由旧内联字面（listRecentWorkspaces()/listRecentWorkingDirs(20)/
+// slice(0, dirCap|20)/dirCap = 20）改指统一函数调用，断言语义不变（三源∪封顶 20 在位）；统一函数
+// 内部行为由 scripts/tdd-mcp-skill-dirset-unify-verify.ts 行为钉承担；T8-D-1/2 镜像纯逻辑保留
+//（electron 链无关的语义回归面）。
 // RED 预期（未实现树）：T8-B/C/D/E/F/G/H/I 先红；T8-A/J/K/L/M 为回归钉现状即绿。
 // 运行：npx tsx scripts/tdd-skill-per-project-refresh-verify.ts（登记 scripts/selftest-static-list.txt）
 
@@ -184,20 +190,16 @@ console.log('\n=== T8-D 清单三源 ∪ 且 ≤20（镜像纯逻辑直测 + 生
     assert.equal(capped.length, 2, `同键去重后应 2 条，实际 ${capped.length}：${JSON.stringify(capped)}`);
     assert.deepEqual(capped, ['C:\\W\\Same-Dir', 'D:\\other']);
   });
-  check('T8-D-3 生产侧结构钉：handler recentDirs=并集 slice(0, dirCap) + listRecentWorkingDirs(20)；index.ts getProjectSkillDirs 同形', () => {
+  check('T8-D-3 生产侧结构钉：handler recentDirs=统一目录源 listRecentAndSessionProjectDirs(20)（E4 收口）；index.ts getProjectSkillDirs 同源 + 默认目录 concat 尾巴', () => {
     const slice = dirsHandlerSlice();
-    assert.ok(slice.includes('listRecentWorkspaces()'), 'handler 缺 listRecentWorkspaces() 源');
-    assert.ok(slice.includes('listRecentWorkingDirs(20)'), 'handler 缺 listRecentWorkingDirs(20)（会话 distinct 工作目录源——条目 7 主诉）');
-    assert.ok(slice.includes('slice(0, dirCap)'), 'handler 缺总量封顶 slice(0, dirCap)');
-    assert.ok(slice.includes('normalizeDirKey'), 'handler 缺 normalizeDirKey 去重');
-    assert.ok(slice.includes('dirCap = 20'), 'handler 缺 dirCap = 20 封顶常量');
+    // E4 最小同步（头注）：旧内联四字面随装配迁出，本钉改指统一函数调用（断言语义不变）。
+    assert.ok(slice.includes('listRecentAndSessionProjectDirs(20)'), 'handler 缺 listRecentAndSessionProjectDirs(20) 统一目录源（E4 收口）');
     const pipe = pipelineSlice();
     assert.ok(pipe.includes('getProjectSkillDirs'), 'index.ts 缺 getProjectSkillDirs 注入（watcher 项目根清单源）');
     const injAt = pipe.indexOf('getProjectSkillDirs');
     const injRegion = pipe.slice(injAt, injAt + 600);
-    assert.ok(injRegion.includes('listRecentWorkingDirs(20)'), '注入闭包缺 listRecentWorkingDirs(20)');
-    assert.ok(injRegion.includes('slice(0, 20)'), '注入闭包缺 slice(0, 20) 封顶');
-    assert.ok(injRegion.includes('normalizeDirKey'), '注入闭包缺 normalizeDirKey 去重');
+    assert.ok(injRegion.includes('listRecentAndSessionProjectDirs(20)'), '注入闭包缺 listRecentAndSessionProjectDirs(20) 统一目录源（E4 收口）');
+    assert.ok(injRegion.includes('normalizeDirKey'), '注入闭包缺 normalizeDirKey（默认目录 concat 尾巴判重）');
     assert.ok(injRegion.includes('workingDirectory'), '注入闭包缺默认目录并入（getConfig().workingDirectory）');
   });
 }

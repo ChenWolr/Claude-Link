@@ -379,6 +379,11 @@ try {
 // 窗口 700→800：A10（D07-F2）homedir→effectiveUserHome 修复带 3 行机理注释（5db45f7 最小同步，断言语义不变）。
 // 窗口 800→1400：UI13-P8 handler 内联 recent ∪ sessionDirs 并集块（listWorkingDirCounts 后移至
 // ~1225），断言语义不变 + 补 listRecentWorkingDirs 会话目录源断言（01-P8 契约钉冲突表）。
+// 窗口 1400 不变（E4 2026-11-15 eight-issues 最小同步）：三源内联装配收口单一真相源
+// listRecentAndSessionProjectDirs（project-dir-set.ts），旧内联字面（listRecentWorkspaces()/
+// listRecentWorkingDirs(20)/slice(0, dirCap)）随迁移消失——本钉改指统一函数调用，断言语义不变
+//（recent∪会话目录∪默认三源齐 + 封顶 20 在位）；统一函数内部行为由
+// scripts/tdd-mcp-skill-dirset-unify-verify.ts 行为钉承担，此处不重复。
 {
   const src = readRel('src/main/ipc-handlers.ts');
   const at = src.indexOf('regInvokeHandler(IPC_CHANNELS.SKILL_PROJECT_DIRS_GET');
@@ -387,13 +392,11 @@ try {
   if (at < 0) sub.push('缺 SKILL_PROJECT_DIRS_GET handler 注册');
   else {
     if (!/dirs:\s*await\s+collectSkillProjectDirs/.test(region)) sub.push('handler 应 await collectSkillProjectDirs（R-1 async 化）');
-    if (!region.includes('listRecentWorkspaces()')) sub.push('缺 listRecentWorkspaces() 来源');
+    if (!region.includes('listRecentAndSessionProjectDirs(20)')) sub.push('缺 listRecentAndSessionProjectDirs(20) 统一目录源（E4 收口）');
     if (!region.includes('workingDirectory')) sub.push('缺 config.workingDirectory 来源');
     if (!region.includes('listWorkingDirCounts()')) sub.push('缺 listWorkingDirCounts() 来源');
-    if (!region.includes('listRecentWorkingDirs(20)')) sub.push('缺 listRecentWorkingDirs(20) 会话 distinct 工作目录源（UI13-P8 并集）');
-    if (!region.includes('slice(0, dirCap)')) sub.push('缺 slice(0, dirCap) 总量封顶（UI13-P8 ≤20）');
   }
-  check('⑨', 'ipc-handlers.ts：SKILL_PROJECT_DIRS_GET 注册在位，await 三源齐（recent/default/counts）+ 会话目录源并集封顶', sub.length === 0, sub.join('; '));
+  check('⑨', 'ipc-handlers.ts：SKILL_PROJECT_DIRS_GET 注册在位，await 三源齐（统一目录源/default/counts）+ 封顶 20（E4 收口）', sub.length === 0, sub.join('; '));
 }
 
 // ⑩ session-repo.ts：listWorkingDirCounts 只读函数 + GROUP BY 形态

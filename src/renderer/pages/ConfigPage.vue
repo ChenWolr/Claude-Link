@@ -28,7 +28,12 @@ import type { AppUpdateState } from '@shared/types/update';
 import { BUILD_REV, BUILD_TIME } from '@shared/build-info';
 import { aboutCheckButtonLabel, latestVersionText } from '../../shared/update-presentation';
 import { useUpdateStore } from '../stores/update-store';
+import { copyTextToClipboard } from '../utils/clipboard';
 import iconUrl from '../assets/icon.png';
+
+// D3-1（2026-11-15 eight-issues）：web 运行时判定（与 App.vue 同式——__claudeLinkWebBridge 标记门控；
+// 桌面端恒 false，copyWebAccessLink 据此分流剪贴板链路）。
+const isWebRuntime = typeof window !== 'undefined' && (window as any).__claudeLinkWebBridge === true;
 
 const store = useConfigStore();
 const commandStore = useCommandStore();
@@ -317,7 +322,8 @@ watch(activeTab, (tab) => {
   // 批次5.1-5：IM tab 激活重拉（组件 v-show 常挂，onMounted 只跑一次，切 tab 需手动刷新）。
   if (tab === 'im') void bridgeSettingsRef.value?.refresh?.();
   // MCP tab 激活重拉快照（同上：v-show 常挂，磁盘 ~/.claude.json/.mcp.json 可能已被终端改动）。
-  if (tab === 'mcp') void mcpSettingsRef.value?.refresh?.();
+  // E1：进 tab 复位快照失效标记（非活跃期收到的信号只标 stale，此处兜底重拉）。
+  if (tab === 'mcp') { mcpStalePending.value = false; void mcpSettingsRef.value?.refresh?.(); }
   // P5 网页访问 tab 激活重拉状态卡（运行状态/URL/令牌是主进程侧易变数据；保存完成后的
   // 刷新另由 watch(saveStatus) 承担）。
   if (tab === 'web') void refreshWebAccessInfo();
@@ -398,9 +404,25 @@ onMounted(() => {
     if (activeTab.value === 'skill') void ensureProjectDirs();
   });
 });
+
+// E1（2026-11-15 eight-issues）：MCP 快照失效信号订阅（mcp:snapshotChanged，E2 广播面）——与
+// stopSkillDirsChanged 并列同形态：MCP tab 活跃即重拉快照；非活跃仅标 stale（mcpStalePending，
+// 进 tab 时 activeTab watch mcp 分支复位 false，既有 refresh 兜底重拉）。订阅生命周期随页面；
+// 卸载时 stop 句柄 + 通道级 removeMcpSnapshotListener 双重反注册。
+let stopMcpSnapshotChanged: (() => void) | null = null;
+const mcpStalePending = ref(false);
+onMounted(() => {
+  stopMcpSnapshotChanged = window.claudeLink.onMcpSnapshotChanged(() => {
+    if (activeTab.value === 'mcp') void mcpSettingsRef.value?.refresh?.();
+    else mcpStalePending.value = true;
+  });
+});
 onBeforeUnmount(() => {
   stopSkillDirsChanged?.();
   stopSkillDirsChanged = null;
+  stopMcpSnapshotChanged?.();
+  stopMcpSnapshotChanged = null;
+  window.claudeLink.removeMcpSnapshotListener();
 });
 
 // 当前选中的项目目录条目（全局作用域 / 目录已被现查淘汰 → null）；匹配同走归一键（A-2/D-10）。
@@ -669,10 +691,18 @@ async function regenerateWebAccessToken(): Promise<void> {
   await refreshWebAccessInfo();
 }
 
-// 复制链接：交主进程 webAccess:copyLink 落主机剪贴板（通道内做 URL 白名单校验）。
+// 复制链接：桌面端交主进程 webAccess:copyLink 落主机剪贴板（通道内做 URL 白名单校验）；
+// D3-1（2026-11-15 eight-issues）：网页端不再经 IPC 写桌面主机剪贴板（对网页用户不可达且等于
+// 假报成功）——走 utils/clipboard.ts 既有降级链（浏览器 clipboard API → execCommand，
+// 失败返回 false），失败 toast 给「请手动选择地址栏复制」指引。
 async function copyWebAccessLink(): Promise<void> {
   const url = webAccessInfo.value?.urls?.[0];
   if (!url) return;
+  if (isWebRuntime) {
+    const ok = await copyTextToClipboard(url);
+    showToast(ok ? '连接链接已复制到剪贴板' : '复制失败，请手动选择地址栏复制', ok ? undefined : 'error');
+    return;
+  }
   try {
     await window.claudeLink.webAccessCopyLink(url);
     showToast('连接链接已复制到剪贴板');
@@ -1160,7 +1190,11 @@ const updateStageTone = computed(() => {
                     </div>
                   </div>
 
-                  <p class="skill-note">项目目录自动来自最近工作区、会话工作目录与默认工作区（已删除的目录不再显示）；开关按 Skill 名全局生效，同名 Skill 跨作用域联动。禁用仅对 Claude Link 内新建的会话生效；开关即刻保存，新会话即刻生效。</p>
+                  <!-- E5（三级收口文案明示）：link 级语义在共用说明段文末明示——Claude Link 不在 link 层
+                       存放 Skill 文件（全局=~/.claude/skills、项目=<项目>\.claude\skills 原生目录），
+                       本面板只管理启停开关；「清理失效键」是 link 层唯一的维护动作（清掉指向已不存在
+                       Skill 的开关键），不触碰原生目录内容。文案随本段双作用域可见（不分作用域渲染）。 -->
+                  <p class="skill-note">项目目录自动来自最近工作区、会话工作目录与默认工作区（已删除的目录不再显示）；开关按 Skill 名全局生效，同名 Skill 跨作用域联动。禁用仅对 Claude Link 内新建的会话生效；开关即刻保存，新会话即刻生效。Claude Link 不存储 Skill，仅管理启停；『清理失效键』即 link 级维护动作。</p>
 
                   <!-- D-1：死键清理入口（手动确认式，不做自动清理；确认弹窗列出疑似键明细） -->
                   <div v-if="staleSkillKeys.length > 0" class="skill-stale-row">

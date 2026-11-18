@@ -508,7 +508,9 @@ function handleConnection(ws: WebSocket, ip: string, providedToken: string): voi
       /* ignore */
     }
   });
-  safeSend(ws, { v: 1, kind: 'welcome', appVersion: app.getVersion(), buildRev: BUILD_REV });
+  // D2（八问题批次）：devMode 下发——渲染层无既有通道可读 app.isPackaged，welcome 帧是唯一
+  // 零新通道搭载面；网页客户端据其常驻「产物新鲜度」dev 横幅（生产模式 false 恒不渲染）。
+  safeSend(ws, { v: 1, kind: 'welcome', appVersion: app.getVersion(), buildRev: BUILD_REV, devMode: !app.isPackaged });
 }
 
 /** sha256 摘要常量时间比较（输入先归一为定长摘要，避免 timingSafeEqual 长度不等抛错 + 长度泄漏）。 */

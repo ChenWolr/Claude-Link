@@ -11,7 +11,9 @@
 //   - 重连 welcome 后执行状态对齐序列（loadSessions / switchSession 重入 /
 //     interaction reconcile 重水合 / update-store 幂等重拉，见 runRealignSequence 注）；
 //   - welcome 帧 buildRev 捕获（welcomedBuildRevRef）：供 App.vue「渲染产物滞后」诊断横条
-//     比对渲染 bundle 的 BUILD_REV（2026-10-30 计划 §1.B；纯可见化，不改构建管线）。
+//     比对渲染 bundle 的 BUILD_REV（2026-10-30 计划 §1.B；纯可见化，不改构建管线）；
+//   - welcome 帧 devMode 捕获（welcomedDevModeRef）：主进程 !app.isPackaged 下发，供 App.vue
+//     dev 横幅（八问题批次 D2；旧主进程无该字段缺省 false 不误报）。
 // 仅在无 window.claudeLink 的浏览器环境由 main.ts 动态 import 触发（Electron 路径本 chunk 不加载）。
 
 import { ref, type Ref } from 'vue';
@@ -24,7 +26,7 @@ import { encodeWireValue, decodeWireValue } from '../../shared/web-access-protoc
 // 客户端 → 服务端 invoke 帧内联构造于 invokeOverWire：{ v:1, kind:'invoke', id, channel, args }。
 
 type WireServerFrame =
-  | { v: 1; kind: 'welcome'; appVersion: string; buildRev: string }
+  | { v: 1; kind: 'welcome'; appVersion: string; buildRev: string; devMode?: boolean }
   | { v: 1; kind: 'resolve'; id: string; ok: true; result: unknown }
   | { v: 1; kind: 'resolve'; id: string; ok: false; error: string }
   | { v: 1; kind: 'event'; channel: string; args: unknown[] }
@@ -41,11 +43,17 @@ export const INVOKE_TIMEOUT_MS = 60_000;
 
 /** 通道级超时覆盖表（UI13-P2-C）：默认 60s 会腰斩已知合法长操作——testProviderModel 上游
  *  90s 封顶（connection-tester.ts 防误报特意留的余量）、probeMcpServers 合法可配至 120s
- *  （mcp-probe.ts），网页端 60s 先到先斩。键与 WEB_CHANNEL_TABLE 同源取 IPC_CHANNELS 常量，
- *  未列通道回落 INVOKE_TIMEOUT_MS 60s 默认。导出供契约脚本结构钉。 */
+ *  （mcp-probe.ts）、COMMANDS_REFRESH_GLOBAL / COMMANDS_GET 全局与会话级命令重探统一 120s
+ *  预算（D3-3，2026-11-15 eight-issues 批次），网页端 60s 先到先斩。键与 WEB_CHANNEL_TABLE
+ *  同源取 IPC_CHANNELS 常量，未列通道回落 INVOKE_TIMEOUT_MS 60s 默认。导出供契约脚本结构钉。 */
 export const CHANNEL_TIMEOUT_MS: Record<string, number> = {
   [IPC_CHANNELS.PROVIDER_TEST_MODEL]: 100_000,
   [IPC_CHANNELS.MCP_PROBE]: 130_000,
+  // D3-3：全局/会话级命令重探为 spawn CLI query 的长操作（与 probeMcpServers 同量级），
+  // 60s 默认会腰斩合法重探 → 客户端「invoke 超时」误报。统一 120s 预算
+  //（低于 probeMcpServers 的 130s 封顶口径；sdk-command-registry 幂等锁在飞去重，重放无害）。
+  [IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL]: 120_000,
+  [IPC_CHANNELS.COMMANDS_GET]: 120_000,
 };
 
 /** 契约脚本注入用的计时器接口（签名与 globalThis 同形；生产恒用默认 globalThis）。 */
@@ -126,6 +134,13 @@ export function getWelcomedBuildRev(): string {
 /** 供渲染层模板消费的响应式引用（App.vue 产物滞后横条）。 */
 export const welcomedBuildRevRef: Ref<string> = welcomedBuildRev;
 
+/** welcome 帧携带的开发模式标记（D2：主进程 !app.isPackaged 经 welcome 帧下发——渲染层无既有
+ *  通道可读 isPackaged，welcome 帧是唯一零新通道搭载面）。可选字段：旧主进程无该字段时缺省
+ *  false 不误报（捕获严格 === true 门）。ref 化：App.vue dev 横条随重连 welcome 自动更新。 */
+const welcomedDevMode = ref(false);
+/** 供渲染层模板消费的响应式引用（App.vue dev 横幅，对齐 welcomedBuildRevRef 导出形态）。 */
+export const welcomedDevModeRef: Ref<boolean> = welcomedDevMode;
+
 // ── 全量通道表：键集 === ClaudeLinkAPI 成员集（Record<keyof, string> 由 TS 强制完备，
 //    值全部引用 IPC_CHANNELS 常量；键集对等契约由 scripts/tdd-web-access-wiring-verify.ts
 //    §11.2 与 preload/api.ts 双向比对钉死）。通道对应关系逐一对照 preload/api.ts createApi。 ──
@@ -153,6 +168,11 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   // 全量广播自动到达，服务端零改动；Skill tab 活跃时渲染层收到即重拉项目清单）。
   onSkillsProjectDirsChanged: IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED,
   removeSkillsProjectDirsListener: IPC_CHANNELS.SKILL_PROJECT_DIRS_CHANGED,
+  // E2：MCP 快照失效信号（同 WORKSPACES_CHANGED 机制——on* 本地订阅 / remove*Listener
+  // 清订阅由 createWebApi 泛型分派处理；web-access-server 经 push-bus webSink 全量广播
+  // 自动到达，服务端零改动；MCP tab 活跃时渲染层收到即重拉快照）。
+  onMcpSnapshotChanged: IPC_CHANNELS.MCP_SNAPSHOT_CHANGED,
+  removeMcpSnapshotListener: IPC_CHANNELS.MCP_SNAPSHOT_CHANGED,
   listProviders: IPC_CHANNELS.PROVIDER_LIST,
   saveProvider: IPC_CHANNELS.PROVIDER_SAVE,
   deleteProvider: IPC_CHANNELS.PROVIDER_DELETE,
@@ -344,6 +364,8 @@ function openConnection(token: string): BridgeConnection {
       // 产物滞后诊断：捕获主进程 buildRev——重连 welcome 同样更新（与「重连 welcome 后再对齐」
       // 语义一致），故写在 if (!settled) 之外。
       welcomedBuildRev.value = typeof frame.buildRev === 'string' ? frame.buildRev : '';
+      // D2：devMode 捕获同处（重连 welcome 亦更新；旧主进程无该字段 → undefined !== true → false 不误报）。
+      welcomedDevMode.value = frame.devMode === true;
       if (!settled) {
         settled = true;
         resolveWelcome();
@@ -390,7 +412,8 @@ function invokeOverWire(channel: string, args: unknown[]): Promise<unknown> {
   return new Promise<unknown>((resolve, reject) => {
     // UI13-P11/P2-C：pending 条目带超时（armPendingInvoke 包装 resolve/reject——回包/断线
     // 批量 fail 走包装即 clearTimeout；超时身份比较防误删后来者）。超时窗按通道取
-    // CHANNEL_TIMEOUT_MS 覆盖值（testProviderModel 100s / probeMcpServers 130s），未列通道 60s 默认。
+    // CHANNEL_TIMEOUT_MS 覆盖值（testProviderModel 100s / probeMcpServers 130s /
+    // COMMANDS_REFRESH_GLOBAL·COMMANDS_GET 120s，D3-3），未列通道 60s 默认。
     pendingInvokes.set(id, armPendingInvoke(id, pendingInvokes, resolve, reject, CHANNEL_TIMEOUT_MS[channel] ?? INVOKE_TIMEOUT_MS));
     try {
       // encodeWireValue 对数组整体编解码（返回 unknown；此处入参恒为数组，断言回数组形状）

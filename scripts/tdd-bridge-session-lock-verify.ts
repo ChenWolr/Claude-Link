@@ -7,6 +7,12 @@
 //   L. selftest-static-list.txt 登记。
 // RED 预期（未改树）：除 L①（登记后即真）外全 FAIL。
 // 运行：npx tsx scripts/tdd-bridge-session-lock-verify.ts
+//
+// [2026-11-17 round-002 R2-F] S④ 窗口 4000→5000 最小同步（零断言语义变更，头注留痕）：
+// R2-B P32 在 SESSION_UPDATE 落库成功块内追加 MCP 失效双信号（broadcastMcpSnapshotInvalidated
+// + notifyMcpDirsChanged，ipc-handlers.ts :1148-1157），装饰出口距通道字面实测 4431 > 4000；
+// 钉义不变（装饰出口仍须在 SESSION_UPDATE handler 内近邻），窗口放大至 5000 容纳合法增长的
+// handler 体。编排器授权：「只修失败项：测试不过就修到过」（同 round-001 修复3 先例）。
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -45,7 +51,7 @@ function check(group: string, no: string, name: string, cond: boolean, detail = 
   const getIdx = handlersSrc.indexOf('IPC_CHANNELS.SESSION_GET');
   check('S', '④', 'SESSION_UPDATE/SESSION_GET 出口统一装饰（withBridgePlatform，防整体替换丢锁）',
     handlersSrc.includes('function withBridgePlatform')
-      && updIdx >= 0 && handlersSrc.slice(updIdx, updIdx + 4000).includes('withBridgePlatform')
+      && updIdx >= 0 && handlersSrc.slice(updIdx, updIdx + 5000).includes('withBridgePlatform')
       && getIdx >= 0 && handlersSrc.slice(getIdx, getIdx + 500).includes('withBridgePlatform'),
     'SESSION_UPDATE/SESSION_GET 返回未装饰行，改名等整体替换路径会丢 bridgePlatform');
 }
