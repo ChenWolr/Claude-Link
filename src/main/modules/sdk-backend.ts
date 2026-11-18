@@ -50,9 +50,9 @@ import { noteCheckpointEvent, disposeSession } from './turn-diff-checkpoint';
 import { convertResultMessage } from '../../shared/result-converter';
 import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
-import { maybeRetrySessionNaming } from './topic-analyzer';
+import { maybeRetrySessionNaming, cancelSessionTopicAnalysis } from './topic-analyzer';
 import { logger } from '../utils/logger';
-import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState, clearReasoningReplayTurnFlag } from './reasoning-replay-auto-retry';
+import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState, clearReasoningReplayTurnFlag, cancelReasoningReplayRetryForInterrupt } from './reasoning-replay-auto-retry';
 import * as sessionRepo from '../database/repositories/session-repo';
 import * as messageRepo from '../database/repositories/message-repo';
 import { extractContextTokens, detectCompaction, deriveCurrentContextUsed, parseNativeContextReport, reconcileContextUsage, isRuntimeSnapshotForQuery, mapContextReconcileTerminal, postTurnFallbackTerminal, derivePostTurnProbePayloadFields } from '../../shared/context-usage';
@@ -620,6 +620,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionCliIds.delete(sessionId);
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
   clearReasoningReplayState(sessionId); // reasoning_replay 韧性层状态/延时器随会话清理（单一收口）
+  cancelSessionTopicAnalysis(sessionId); // B3：在飞命名 LLM 随会话删除取消（与既有清理族并排；未在飞 no-op）
   sessionProvenanceSeeds.delete(sessionId); // review-v1 §5.1：provenance 种子同生命周期清理
   sessionLastTurnOverride.delete(sessionId); // 连接加固 Task 6：回合快照随会话清理
   sessionLastEffective.delete(sessionId); // 连接加固 Task 6：漂移检测状态随会话清理
@@ -1380,11 +1381,25 @@ function forwardEvent(
   } catch (err) {
     logger.error(`Failed to persist SDK event [${sessionId}]`, err);
   }
+  // A1 迟到事件代际守卫伞（2026-11-15-eight-issues-batch）：事件所属代际 ≠ 该会话当前
+  // entry 代际（或当前已无 entry）→ 该 result 的全部「会话级副作用」丢弃（下方两块）；
+  // 消息透传/落库（上方 pushToMainWindow/persistCliEvent/noteTurnEvent/noteCheckpointEvent）
+  // 不受门影响，维持既有行为。queryInstance 缺省的合成事件（当前无 result 形态发射点，
+  // :654/:724/:4034 均为 system 事件）不设门——门只在「能确证代际」时收窄，防误伤未来合成路径。
+  // 与 emitTurnEnded :1307-1308 既有代际守卫同口径；与 :1357 isSessionActive 既有守卫叠加
+  // 独立、无共享状态（契约第 6 条）。纵深防御注记：runQuery for-await 循环顶已有
+  // isCurrentEntry break（旧流迟到事件通常到不了本函数），本门防后续 await 插入撕开窗口。
+  const currentEntryAtHook = entries.get(sessionId);
+  const resultGenerationStale =
+    event.type === 'result' &&
+    typeof queryInstance === 'number' &&
+    (currentEntryAtHook == null || currentEntryAtHook.queryInstance !== queryInstance);
   // 失焦完成通知：仅真实成功 result 触发（isSuccessfulCliResult 与 renderer 绿灯同一判定）。
   // 放在事件已推送并尝试落库之后，避免通知先于聊天内容出现；同步快速返回、不 await、
   // 不触碰 activeSessions 生命周期。窗口聚焦/已销毁、错误/中断/aborted/API retry 终态均不通知。
   // 已删除会话因上方 isSessionActive 守卫提前 return，不会弹陈旧通知。
-  if (event.type === 'result' && isSuccessfulCliResult(event)) {
+  // A1：旧代际迟到 result 不得弹完成通知（!resultGenerationStale 受门）。
+  if (event.type === 'result' && isSuccessfulCliResult(event) && !resultGenerationStale) {
     notifySessionCompleted(mainWindow, sessionId);
     // P4-A（计划 2026-10-24-web-sync §3.2.2-2）：回复结束自动重试命名——与失焦通知完全同点位、
     // 同「不阻塞业务」原则（同步调用不 await、异常吞噬）。内部自带闸序：仅可升级名源
@@ -1400,7 +1415,12 @@ function forwardEvent(
   // v3 队列调度中央钩子：result 是回合结束的权威信号（到达时进程可能尚未退出，
   // 绝不以进程存在性做守卫）。三态映射后交引擎状态机分派（arm/halt，幂等闸在引擎内）。
   // try 包裹沿周围风格：调度收口异常不得阻塞事件循环。
-  if (event.type === 'result') {
+  // A1：旧代际迟到 result 不得触发队列 noteTurnOutcome/haltQueue 与 knownOutcome 写入
+  //（!resultGenerationStale 受门，契约第 1 条——hookEntry 取到新 entry 时会记入旧回合
+  // outcome → haltQueue 误熔断全部 pending）。emitTurnEnded 位于本门块内（随 result 门
+  // !resultGenerationStale 收窄调用）；其内部自带 endedAt 幂等 + 代际门（:1308-1309）兜底
+  // 迟到终态，行为与契约等价（R4-4 注释如实化——原「留在门外」与代码不符，代码零改动）。
+  if (event.type === 'result' && !resultGenerationStale) {
     const outcome = isSuccessfulCliResult(event) ? 'success' : isAbortedCliResult(event) ? 'interrupted' : 'error';
     // hb12-P2-2：result 权威终态落 entry（exit 兜底据此让位，不按退出码重结算）。
     const hookEntry = entries.get(sessionId);
@@ -3958,6 +3978,14 @@ async function runQuery(
         // api_retry 仅表示 Claude Code 已安排随后的一次真实重试；SDK 的 attempt/max_retries
         // 是当前请求链的权威序号。通知阶段绝不能提前耗尽或中断 Query。
         if (infoSubtype === 'api_retry') {
+          // A1 迟到事件代际守卫伞：旧回合（优雅窗 aborting / 已被接管 / entry 已移除）迟到的
+          // api_retry 不得改写当前回合的 apiRetryStates 状态卡与终态闩——事件整体丢弃
+          //（不写态、不转发状态卡、不快败）。与 for-await 循环顶 isCurrentEntry break 同口径
+          //（纵深防御，防后续 await 插入撕开窗口）。
+          if (!isCurrentEntry(sessionId, entry)) {
+            logger.warn(`[retry-trace] stale_api_retry_dropped session=${sessionId} (non-current entry)`);
+            continue;
+          }
           const current = apiRetryStates.get(sessionId) ?? createApiRetryState(API_RETRY_LIMIT_FALLBACK);
           const retryDelayMs = typeof sdkMsg.retry_delay_ms === 'number' ? sdkMsg.retry_delay_ms : undefined;
           const errorStatus = typeof sdkMsg.error_status === 'number' ? sdkMsg.error_status : null;
@@ -4152,10 +4180,12 @@ async function runQuery(
       }
       if (type === 'assistant') {
         // assistant 带 error 表示最后一次真实尝试失败；正常 assistant 才表示重试恢复。
+        // A1 迟到事件代际守卫伞：旧回合迟到的 assistant error/recovery 不得写当前回合的
+        // apiRetryStates 终态闩（isCurrentEntry 写态门；事件转发/落库行不动，契约第 3 条）。
         if (typeof sdkMsg.error === 'string') {
-          finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
+          if (isCurrentEntry(sessionId, entry)) finishApiRetryExhausted(sessionId, mainWindow, entry.queryInstance);
         } else {
-          finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance);
+          if (isCurrentEntry(sessionId, entry)) finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance);
         }
         const cliEvent = convertAssistantMessage(sdkMsg);
         if (cliEvent) {
@@ -4194,7 +4224,9 @@ async function runQuery(
         continue;
       }
       if (type === 'stream_event') {
-        finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance);
+        // A1 迟到事件代际守卫伞：旧回合迟到的 stream_event 不得写当前回合重试恢复终态
+        //（isCurrentEntry 写态门；事件转发行不动，与 assistant 分支同口径）。
+        if (isCurrentEntry(sessionId, entry)) finishApiRetryRecovery(sessionId, mainWindow, entry.queryInstance);
         forwardEvent(sessionId, mainWindow, convertStreamEvent(sdkMsg), entry.queryInstance);
         continue;
       }
@@ -4351,7 +4383,9 @@ async function runQuery(
           }
         }
         // reasoning_replay 韧性层：回合以 result 终态结束 → 命中即延时自动重发一次。
-        scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);
+        // B1：第三参传「本回合曾中断」闩——中断优雅收尾的迟到 result 不再排程自动重试
+        //（契约 #1/#3；interruptedQueries 由 killProcess 任一理由及 resume 重建写入）。
+        scheduleReasoningReplayRetryForTurn(sessionId, mainWindow, () => interruptedQueries.has(query));
         return;
       }
       // 其它 system 子类型 / hook 等暂不转发（前端不消费）。user 消息已在上方按「结果类 part」转发。
@@ -4397,7 +4431,8 @@ async function runQuery(
       // 快照链必超时，本出口探针是横幅反馈的唯一载体，不得裸调。
       schedulePostTurnProbe(sessionId, mainWindow, probeInstance2, probeCliSid2, { compactedJustNow: entryCompactedJustNow(entry) });
       // reasoning_replay 韧性层：流丢 result 同样是回合终态（第三方端点常见）→ 命中即重发。
-      scheduleReasoningReplayRetryForTurn(sessionId, mainWindow);
+      // B1：同 result 出口——第三参传「本回合曾中断」闩，中断边沿后该出口不再排程。
+      scheduleReasoningReplayRetryForTurn(sessionId, mainWindow, () => interruptedQueries.has(query));
       return;
     }
     emitExit(null);
@@ -4558,10 +4593,17 @@ const pendingFirstPrompt = new Map<
 >();
 
 // reasoning_replay 韧性层：回合终态调度自动重试（回调注入 sdk-backend 能力，模块自身无环导入）。
-function scheduleReasoningReplayRetryForTurn(sessionId: string, mainWindow: BrowserWindow): void {
+// B1：第三参 wasTurnInterrupted 为「本回合曾中断」闩（调用点传 () => interruptedQueries.has(query)），
+// 透传进 ctx——调度点同步段与 2s 定时回调二次守卫各查一次（契约 #3 双保险）。
+function scheduleReasoningReplayRetryForTurn(
+  sessionId: string,
+  mainWindow: BrowserWindow,
+  wasTurnInterrupted?: () => boolean,
+): void {
   maybeScheduleReasoningReplayRetry({
     sessionId,
     mainWindow,
+    wasTurnInterrupted,
     hasRunningQuery: () => {
       const e = entries.get(sessionId);
       return Boolean(e && (e.query || pendingFirstPrompt.has(sessionId)));
@@ -4667,6 +4709,14 @@ export type KillReason =
   | 'queue'
   | 'session_cleanup';
 
+// B2（2026-11-15 eight-issues）：两段式 finally 树杀理由集——user 之外的三类系统中断
+//（watchdog/upstream_fatal/queue）在无接管时与 user 同权树杀收殓孙进程（契约 #2 对称化，
+// 修 watchdog 不树杀反存活的孤儿不对称）；api_retry_exhausted 为枚举死值（无生产调用点，
+// D 报告 §1-S8）不入集、禁发挥；session_cleanup 走 else 直杀路径既有树杀（契约 #3 第二路）。
+// F2 接管守卫（!entries.has(sessionId)）对该集合统一生效；条件求值必须在 finishKill 之后
+// 的 finally 内同步执行（既有顺序不可对调——对调会让 entries.has 恒真、树杀恒被跳过）。
+const TREE_KILL_REASONS: readonly KillReason[] = ['user', 'watchdog', 'upstream_fatal', 'queue'];
+
 export function killProcess(
   sessionId: string,
   reason: KillReason,
@@ -4678,6 +4728,11 @@ export function killProcess(
   if (reason === 'user') {
     const earlyEntry = entries.get(sessionId);
     if (earlyEntry) earlyEntry.watchdogErrorPending = undefined;
+    // B3（2026-11-15 eight-issues）：用户中断边沿取消在飞的会话命名 LLM 请求——abort 在飞
+    // controller → makeHttpRequest reject → analyzeTopic 既有 catch 链走失败 return null
+    //（不写库、不占后续预算）。watchdog 等系统理由不扩（有意收窄：命名独立于回合、30s
+    // deadline 自灭，B 类残余申报见 01 §B3-2）；未在飞 no-op。
+    cancelSessionTopicAnalysis(sessionId);
   }
   if (reason === 'user' && mainWindow) {
     const current = apiRetryStates.get(sessionId);
@@ -4734,6 +4789,11 @@ export function killProcess(
     }
   }
   pendingFirstPrompt.delete(sessionId);
+  // B1：中断边沿与 reasoning_replay 自动重试互斥——任一 kill 理由下，本回合已排程的
+  // 自动重试立即取消、命中标志同步清除（契约 #1/#2）。正常失败回合（result 收尾、不经
+  // killProcess）不经过此处，自动重试一次行为不变（契约 #4）。会话删除另有
+  // markSessionDeleted→clearReasoningReplayState 全清（sdk-backend.ts:622），二者叠加幂等。
+  cancelReasoningReplayRetryForInterrupt(sessionId);
   const entry = entries.get(sessionId);
   if (entry) {
     // P2-1：watchdog 硬杀路径补记账——重试烧满后排期中的 retry 随进程被杀，流不会再走
@@ -4890,12 +4950,17 @@ export function killProcess(
           }
         } finally {
           finishKill(); // 幂等兜底：流已优雅结束时对已退出进程 abort 无害
-          // UI13-P7：树杀兜底——孙进程成孤儿，按 resume UUID 扫进程命令行整杀（含探针）。
+          // UI13-P7：树杀兜底——孙进程成孤儿，按 resume UUID 扫进程命令行整杀（探针形态进程
+          // 经 B2 WMIQL 排除子句豁免不被同链误杀——契约 #1 机制裁定见 win-tree-kill.ts 注）。
+          // B2（2026-11-15 eight-issues）：树杀理由对称化——watchdog/upstream_fatal/queue 与 user
+          // 同权收殓（TREE_KILL_REASONS），api_retry_exhausted 枚举死值不入集。
           // F2（P1-B）接管守卫：优雅窗内重发经 spawnForChat forceKill 接管后，新回合 entry 已
           // 同步在位（entries.has(sessionId)），同会话每回合 resume 同一 UUID——此刻按 UUID 扫
           // 命令行整杀会命中新回合进程树（taskkill /T /F 误杀），新回合在途时跳过；自然收尾
           // 路径 entry 已删（deleteEntry / removeEntryIfCurrent）且无新回合在途 → 照发扫孤儿残留。
-          if (reason === 'user' && !entries.has(sessionId)) scheduleWindowsTreeKill(sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId) ?? null);
+          if (TREE_KILL_REASONS.includes(reason) && !entries.has(sessionId)) {
+            scheduleWindowsTreeKill(sessionCliIds.get(sessionId) ?? resolveCliSessionId(sessionId) ?? null);
+          }
           logger.info(`[two-phase-interrupt] session=${sessionId} reason=${reason} outcome=${how}`);
         }
       })();

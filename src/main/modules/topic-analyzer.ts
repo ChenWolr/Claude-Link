@@ -55,6 +55,12 @@ const topicAttempts = new Map<string, number>();
 const topicInFlight = new Set<string>();
 const TOPIC_MAX_ATTEMPTS = 3;
 
+// B3（2026-11-15 eight-issues）：每会话在飞命名 HTTP 的取消通道——analyzeTopic 入口创建
+// AbortController 登记（在飞互斥之后），signal 透传进 lib.request（Node22 原生支持，abort 即
+// req.destroy → 'error' reject）；用户中断/会话删除边沿经导出的 cancelSessionTopicAnalysis
+// abort。键删除统一由 analyzeTopic finally（abort 不删，避免 cancel 与 finally 竞态双删歧义）。
+const topicAbortControllers = new Map<string, AbortController>();
+
 // hb10-SMG-02/V01（hb12-SMG-07 同函数）：总 Deadline 30s（复用既有 10s×2 语义上界）——
 // 慢滴（持续低速流入使 socket idle 型 10s 超时永不触发）等异常令 promise 长期悬挂（干净断连
 // 已由下方 aborted 监听即时 reject，不再依赖 Deadline），总 Deadline 保证 analyzeTopic 有界返回；
@@ -68,17 +74,26 @@ export async function analyzeTopic(sessionId: string, firstMessage: string): Pro
   // analyzeTopicAttempt（原 analyzeTopic 主体原样迁移，P6-乙 失败 return null 不写库契约不变）。
   if (topicInFlight.has(sessionId)) return null;
   topicInFlight.add(sessionId);
+  // B3：在飞互斥后创建并登记取消通道；短输入直写/预算耗尽等不发 HTTP 的路径登记后未被
+  // 消费即随 finally 清除（行为零变化）。
+  const controller = new AbortController();
+  topicAbortControllers.set(sessionId, controller);
   try {
     const n = (topicAttempts.get(sessionId) ?? 0) + 1;
     topicAttempts.set(sessionId, n);
     if (n > TOPIC_MAX_ATTEMPTS) return null;
-    return await analyzeTopicAttempt(sessionId, firstMessage);
+    return await analyzeTopicAttempt(sessionId, firstMessage, controller);
   } finally {
     topicInFlight.delete(sessionId);
+    topicAbortControllers.delete(sessionId);
   }
 }
 
-async function analyzeTopicAttempt(sessionId: string, firstMessage: string): Promise<string | null> {
+async function analyzeTopicAttempt(
+  sessionId: string,
+  firstMessage: string,
+  controller: AbortController,
+): Promise<string | null> {
   // SA-4/P6-乙（短输入跳过）：首条消息 trim 后 ≤8 字符不值得 LLM 概括——直接以原文为名写库
   // 返回，不发起 LLM 请求。写前门与既有写点一致（F4 惯例：用户已手动改名则让位）；sk- 前缀
   // 形态条件掩码为边界加固（防密钥碎片入标题）。空串（trim 后 0 字）不走本路径（>0 守卫，
@@ -154,7 +169,7 @@ async function analyzeTopicAttempt(sessionId: string, firstMessage: string): Pro
     while (spec) {
       const requestBody = buildTopicRequestBody(model, firstMessage, spec);
       try {
-        const response = await Promise.race([makeHttpRequest(url, requestBody, headers, 10000), overallDeadline]);
+        const response = await Promise.race([makeHttpRequest(url, requestBody, headers, 10000, controller.signal), overallDeadline]);
         const verdict = extractTopicCandidate(JSON.parse(response) as TopicResponseShape);
         if (verdict.ok && verdict.topic) {
           // 出口①（LLM 主题）：F4 写前门保留
@@ -222,6 +237,7 @@ function makeHttpRequest(
   body: string,
   headers: Record<string, string>,
   timeoutMs = 10000,
+  signal?: AbortSignal,
 ): Promise<string> {
   const lib = url.protocol === 'https:' ? https : http;
 
@@ -233,6 +249,10 @@ function makeHttpRequest(
         path: url.pathname,
         method: 'POST',
         headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
+        // B3：Node22 原生支持 request options.signal——abort 触发即 req.destroy →
+        // 'error' 事件 reject，既有 catch 链消化（AbortError 非 HttpStatusError，不进
+        // 4xx 升档分支，直接失败 return null）。
+        signal,
       },
       (res) => {
         let data = '';
@@ -269,4 +289,14 @@ function makeHttpRequest(
     req.write(body);
     req.end();
   });
+}
+
+/** B3（2026-11-15 eight-issues）：会话命名 LLM 在飞取消统一收口——用户中断（killProcess
+ *  reason==='user'）与会话删除（markSessionDeleted）两边沿调用；取该会话在飞 controller
+ *  abort，在飞 HTTP 即时 reject → analyzeTopic 既有 catch 链走失败 return null（不写库、
+ *  不占后续预算）。未在飞（无登记）no-op；不在此删 Map 键——键删除统一由 analyzeTopic
+ *  finally，避免 cancel 与 finally 竞态双删歧义（01 §B3-4 边界表）。 */
+export function cancelSessionTopicAnalysis(sessionId: string): void {
+  const controller = topicAbortControllers.get(sessionId);
+  if (controller) controller.abort();
 }

@@ -9,6 +9,15 @@
 // 新回合在途 → 照发扫孤儿残留（评审 docs/reports/2026-11-14-ui13-batch-review-r1.md P1-B）。
 // 用例映射 docs/plans/2026-11-14-ui13-batch/03-test-cases.md §P7 T7-A~K。
 // 运行：npx tsx scripts/tdd-interrupt-subagent-treekill-verify.ts（退出码非 0 = 失败）。
+// 【随 B2 同步（2026-11-15 eight-issues-batch），最小同步留痕——语义均不变】：
+//   ① T7-B3：win-tree-kill WMIQL 过滤串追加探针排除子句「AND NOT CommandLine LIKE
+//     '%--no-session-persistence%'」（WQL 合法形态；指令原文「AND CommandLine NOT LIKE」在本机
+//     win32 19045 实测无效查询 0x80041017，四形态隔离探针证据见点报告 B2-W1），过滤串收尾双引号
+//     移至排除子句行——正则随形更新，LIKE 主句语义不变；
+//   ② T7-A6/T7-L1：killProcess 两段式 finally 树杀条件由「reason === 'user' && !entries.has(...)」
+//     对称化为「TREE_KILL_REASONS.includes(reason) && !entries.has(...)」（user/watchdog/
+//     upstream_fatal/queue 四理由，F2 接管守卫原样保留），派发体移入守卫块内独立行——正则随形
+//     更新（A6 窗 400→700，B2 注释增厚所致），「守卫先于派发」语义不变；旧单理由单行形态加负向钉。
 
 import { strict as assert } from 'node:assert';
 import { spawnSync } from 'node:child_process';
@@ -87,12 +96,14 @@ check('T7-A5 剩余窗 exited / abort 兜底 race 在位', () => {
   assert.match(backend, /exited\.then\(\(c\) => `exit:\$\{c\}`/);
   assert.match(backend, /abort-fallback/);
 });
-check('T7-A6 finally finishKill 幂等兜底 + user 树杀（F2 接管守卫形）+ outcome 日志', () => {
+check('T7-A6 finally finishKill 幂等兜底 + 树杀（F2 接管守卫形；B2 随源同步：理由集对称化）+ outcome 日志', () => {
   const at = backend.indexOf('const twoPhaseReasons');
   assert.ok(at > -1, 'twoPhaseReasons 缺失');
   const seg = backend.slice(at, at + 3000);
   assert.ok(seg.includes('} finally {'), 'finally 兜底缺失');
-  assert.match(seg, /finishKill\(\);[\s\S]{0,400}if \(reason === 'user' && !entries\.has\(sessionId\)\) scheduleWindowsTreeKill\(sessionCliIds/);
+  // B2 随源同步（语义不变）：树杀条件 reason==='user' → TREE_KILL_REASONS.includes(reason)
+  //（四理由对称化），派发体移入守卫块内独立行；finishKill() 先于树杀条件求值的既有顺序不变。
+  assert.match(seg, /finishKill\(\);[\s\S]{0,700}if \(TREE_KILL_REASONS\.includes\(reason\) && !entries\.has\(sessionId\)\) \{\s*\n\s*scheduleWindowsTreeKill\(sessionCliIds/);
   assert.match(seg, /\[two-phase-interrupt\] session=\$\{sessionId\} reason=\$\{reason\} outcome=\$\{how\}/);
 });
 check('T7-A7 区分锚：session_cleanup 不入两段式族（else 立即硬杀分支）', () => {
@@ -119,8 +130,13 @@ check('T7-B2 taskkill /T /F 整树 + Get-CimInstance Win32_Process 定位', () =
   assert.match(treeKill, /taskkill \/PID \$_\.ProcessId \/T \/F/);
   assert.match(treeKill, /Get-CimInstance Win32_Process/);
 });
-check('T7-B3 resume UUID 按命令行匹配（CommandLine LIKE %--resume <id>%）', () => {
-  assert.match(treeKill, /CommandLine LIKE '%--resume \$\{resumeSessionId\}%'"/);
+check('T7-B3 resume UUID 按命令行匹配（CommandLine LIKE %--resume <id>%；B2 随源同步：追加探针排除子句）', () => {
+  // B2 随源同步（语义不变）：WMIQL 过滤串由单 LIKE 行改为「LIKE 主句 + AND NOT CommandLine
+  // LIKE '%--no-session-persistence%'」两行模板拼接形态（探针进程唯一持有该参数，防同链树杀
+  // 误杀 post-turn 探针——契约 #1 目标集排除机制）。形态为 WQL 合法词序「AND NOT <field> LIKE」
+  //（指令原文「AND CommandLine NOT LIKE」在本机 win32 19045 实测无效查询 0x80041017，证据见
+  // 点报告 B2-W1），过滤串收尾双引号移至排除子句行——正则随形更新，LIKE 主句语义不变。
+  assert.match(treeKill, /CommandLine LIKE '%--resume \$\{resumeSessionId\}%'[\s\S]{0,20}AND NOT CommandLine LIKE '%--no-session-persistence%'\s*"\s*\|/);
 });
 check('T7-B4 PowerShell 无窗后台执行（-NoProfile -NonInteractive + ignore/windowsHide/unref；禁 detached）', () => {
   assert.match(treeKill, /'-NoProfile', '-NonInteractive', '-Command'/);
@@ -246,19 +262,22 @@ check('T7-K3 aborted 补发保持 wasCurrent 门（空回合/迟到不误发终�
 });
 
 console.log('\n--- T7-L F2（P1-B）树杀接管守卫：优雅窗内重发的新回合不被旧回合树杀误杀 ---');
-check('T7-L1 user 树杀调用带接管守卫字面，且守卫判断位于 scheduleWindowsTreeKill 之前', () => {
-  const guard = "reason === 'user' && !entries.has(sessionId)";
-  const call = "if (reason === 'user' && !entries.has(sessionId)) scheduleWindowsTreeKill(";
+check('T7-L1 树杀调用带接管守卫字面，且守卫判断位于 scheduleWindowsTreeKill 之前（B2 随源同步：理由集对称化，守卫形不变）', () => {
+  // B2 随源同步（语义不变）：树杀理由 reason==='user' 扩为 TREE_KILL_REASONS（user/watchdog/
+  // upstream_fatal/queue 四理由同权，F2 接管守卫 !entries.has(sessionId) 原样保留），派发体由
+  // 单行条件表达式移入守卫块内独立行——「守卫判断先于派发求值」语义不变，行内断言改为块内断言。
+  const guard = '!entries.has(sessionId)';
+  const call = 'if (TREE_KILL_REASONS.includes(reason) && !entries.has(sessionId)) {';
   const callIdx = backend.indexOf(call);
-  assert.ok(callIdx > -1, 'user 树杀调用缺接管守卫字面（reason === \'user\' && !entries.has(sessionId)）');
-  // 守卫判断位于调用之前：同一语句内 if 条件（守卫）先于 scheduleWindowsTreeKill 调用求值。
-  const line = backend.slice(callIdx, backend.indexOf('\n', callIdx));
-  const guardPos = line.indexOf(guard);
-  const schedPos = guardPos > -1 ? line.indexOf('scheduleWindowsTreeKill(', guardPos) : -1;
-  assert.ok(guardPos > -1 && schedPos > -1, '调用语句内缺守卫条件');
-  assert.ok(guardPos < schedPos, '守卫判断须位于 scheduleWindowsTreeKill 调用之前');
+  assert.ok(callIdx > -1, '树杀调用缺接管守卫字面（TREE_KILL_REASONS.includes(reason) && !entries.has(sessionId)）');
+  // 守卫判断位于派发之前：同一 if 块内，条件（含守卫）先于块内 scheduleWindowsTreeKill 调用。
+  const blockEnd = backend.indexOf('}', callIdx);
+  const schedIdx = blockEnd > -1 ? backend.indexOf('scheduleWindowsTreeKill(', callIdx) : -1;
+  assert.ok(schedIdx > callIdx && schedIdx < blockEnd, '派发调用须位于守卫块内、守卫判断之后');
   // 负向钉：无守卫的旧形态（P1-B 缺陷形——优雅窗内重发的新回合必被旧回合树杀命中）不得回归。
-  assert.ok(!backend.includes("if (reason === 'user') scheduleWindowsTreeKill("), '存在无接管守卫的 user 树杀调用（P1-B 缺陷形回归）');
+  assert.ok(!backend.includes("if (reason === 'user') scheduleWindowsTreeKill("), '存在无接管守卫的树杀调用（P1-B 缺陷形回归）');
+  // 负向钉：B2 对称化前的单理由单行旧形不得回归（防对称化回退）。
+  assert.ok(!backend.includes("if (reason === 'user' && !entries.has(sessionId)) scheduleWindowsTreeKill("), '单理由单行旧形树杀回归（B2 对称化前形态）');
 });
 check('T7-L2 session_cleanup 分支不动（无后继可能，树杀保持无条件）', () => {
   const at = backend.indexOf("if (reason === 'session_cleanup') scheduleWindowsTreeKill(");

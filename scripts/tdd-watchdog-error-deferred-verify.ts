@@ -39,6 +39,11 @@
 //   error result（is_error=true 且非 error_during_execution）同属「回合被中止后收尾」，挂账
 //   一并消费防随 deleteEntry 消亡丢弃；success result 仍不消费。
 //
+// [钉面同步 2026-11-17 eight-issues-batch]：⑬ 定位锚由首现 'interruptedQueries.has(query)'
+// 改为 catch 门唯一字面 'if (interruptedQueries.has(query))'——B1 两终态调度点升级三参形态
+// （闩字面前移至 sdk-backend :4387/:4434，tdd-rr-autoretry-interrupt-mutex-verify S2 钉）后，
+// 旧首现锚落错段致切片找不到消费门；断言语义（消费门/清账/emitExit 次序）不变。
+//
 // 运行：npx tsx scripts/tdd-watchdog-error-deferred-verify.ts
 
 import { readFileSync } from 'node:fs';
@@ -159,7 +164,10 @@ check('⑫ watchdogInterrupted 标志：SessionEntry 字段声明 + watchdogTick
   assert.match(hardRegion, /entry\.watchdogErrorPending = reason;\s*\n\s*entry\.watchdogInterrupted = true;/, 'watchdogTick 须在挂账同时置位硬杀标记（修法① 迟到兑现的确认判据）');
 });
 check('⑬ catch 中断出口（出口③）：优雅窗在途（forceKill 非空）流抛错时在 finally deleteEntry 前消费挂账', () => {
-  const at = backend.indexOf('interruptedQueries.has(query)');
+  // [钉面同步 2026-11-17 eight-issues-batch]：B1 两终态调度点升级三参形态后，旧首现锚
+  // 'interruptedQueries.has(query)' 落在 scheduleReasoningReplayRetryForTurn 闩字面（sdk-backend
+  // :4387/:4434）而非 catch 出口门——锚改钉 catch 门唯一字面（全文件恰 1 处）。
+  const at = backend.indexOf('if (interruptedQueries.has(query))');
   const end = backend.indexOf('} else {', at);
   assert.ok(at > -1 && end > at, '缺 catch 中断分支定位锚');
   const seg = backend.slice(at, end);

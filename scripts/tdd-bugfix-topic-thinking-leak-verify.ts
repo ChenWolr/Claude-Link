@@ -19,6 +19,11 @@
 //
 // 契约：本脚本 A 节行为断言（import core 纯函数）+ B 节主进程静态钉 + C 节渲染层零改动钉。
 //
+// [钉面同步 2026-11-17 eight-issues-batch]：topic-analyzer LLM HTTP 调用点已升级五参形态
+// （B3 每会话在飞取消：尾参透传 `controller.signal`，analyzeTopic finally 落键），本钉 10s
+// 超时字面随新形态同步；新契约由 scripts/tdd-session-naming-inflight-cancel-verify.ts B3-S2
+// 节钉（04-实施计划.md §4.1）。
+//
 // 运行：npx tsx scripts/tdd-bugfix-topic-thinking-leak-verify.ts
 
 import { strict as assert } from 'node:assert';
@@ -178,7 +183,8 @@ console.log('=== B. topic-analyzer.ts 静态钉（主进程） ===');
   check('源文件不含 reasoning_effort（方言禁令）', !analyzer.includes('reasoning_effort'));
   check('纯逻辑从 shared/topic-analyzer-core 导入（防两处实现分叉）',
     /from '\.\.\/\.\.\/shared\/topic-analyzer-core'/.test(analyzer));
-  check('makeHttpRequest 10s 超时保留', analyzer.includes('makeHttpRequest(url, requestBody, headers, 10000)'));
+  // [钉面同步 2026-11-17] B3 在飞取消：调用点尾参透传 controller.signal（tdd-session-naming-inflight-cancel B3-S2 钉）。
+  check('makeHttpRequest 10s 超时保留（含 B3 在飞取消 signal 透传）', analyzer.includes('makeHttpRequest(url, requestBody, headers, 10000, controller.signal)'));
 }
 
 console.log('=== C. session-store.ts 触发链钉（渲染层） ===');

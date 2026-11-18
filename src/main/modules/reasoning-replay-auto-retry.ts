@@ -10,6 +10,8 @@
 //   · noteReasoningReplayError  ← cli-shared.persistMessageParts（assistant 正文命中共享谓词）
 //   · recordOutgoingUserText    ← sdk-backend.spawnForChat（opts.userCommandText）
 //   · maybeScheduleReasoningReplayRetry ← sdk-backend.runQuery 两个回合终态出口（result / 流丢 result）
+//   · cancelReasoningReplayRetryForInterrupt ← sdk-backend.killProcess（B1：中断边沿互斥——
+//     user/watchdog/upstream_fatal/queue/session_cleanup 任一理由下取消已排程重试 + 清回合标志）
 //   · willAutoRetryReasoningReplay / consumeAutoRetryDispatched ← task-queue-engine
 //     （X10/R09-F1 熔断自愈查询：失败回合是否将被自动重试 / 自动重试回合是否已实际发起——
 //     引擎只读查询本层状态，本层仍不反向依赖引擎，环导入边界不变）
@@ -46,6 +48,15 @@ export function clearReasoningReplayTurnFlag(sessionId: string): void {
   turnHasReasoningReplayError.delete(sessionId);
 }
 
+/** B1（2026-11-15 eight-issues §B1）：中断边沿挂接——取消本会话已排程的自动重试 timer，
+ *  并清本回合命中标志。只动 timer + 回合标志两态；重试载体（lastUserTextBySession）与
+ *  防重入闩（retriedTextBySession）不动——正常失败回合的自动重试语义不受影响。 */
+export function cancelReasoningReplayRetryForInterrupt(sessionId: string): void {
+  const timer = pendingTimers.get(sessionId);
+  if (timer) { clearTimeout(timer); pendingTimers.delete(sessionId); }
+  turnHasReasoningReplayError.delete(sessionId);
+}
+
 /** spawnForChat 发起回合时记录原样用户文本（自动重试载体）。
  *  命令消息不记录（重试层跳过）；带附件回合不记录（N4：重发载体是纯文本，照发会落一条
  *  无附件重复 user 行且模型看不到原图——与模块头「不重试带附件回合」边界对齐）。 */
@@ -67,6 +78,8 @@ export interface ReasoningReplayRetryCtx {
   forwardSystemNotice: (subtype: CliSystemInfoEvent['subtype'], text: string) => void;
   /** 以相同用户文本重发一次（复用 CHAT_SEND 纯文本核心：落库 user 行 + spawn + send）。 */
   resendUserText: (text: string) => void;
+  /** 本回合是否曾被中断（B1 双保险）：调度点与延迟回调内各查一次。 */
+  wasTurnInterrupted?: () => boolean;
 }
 
 /**
@@ -84,6 +97,10 @@ export function maybeScheduleReasoningReplayRetry(ctx: ReasoningReplayRetryCtx):
   if (!text) return;
   if (retriedTextBySession.get(sessionId) === text) return;
   if (ctx.hasRunningQuery()) return;
+  // B1（契约 #3 双保险·调度点）：本回合曾被中断（killProcess 任一边沿写入的中断闩，经 ctx
+  // 注入）→ 不再排程。拦「abort 尾巴内迟到 result / 迟到 assistant 正文重新置标志」的残余窗口
+  //（persistMessageParts 在尾巴里仍可能跑 noteReasoningReplayError）。
+  if (ctx.wasTurnInterrupted?.()) return;
   // hb10-ENG-06：闩从「调度时置位」改为「pending 判重 + 发起时置位」——原实现在调度点置闩，
   // 延迟窗口内放弃（二次守卫 return）后闩已占住，后续同文本回合不再自动重试（放弃的调度白占闩）。
   if (pendingTimers.has(sessionId)) return;
@@ -91,8 +108,10 @@ export function maybeScheduleReasoningReplayRetry(ctx: ReasoningReplayRetryCtx):
   const timer = setTimeout(() => {
     pendingTimers.delete(sessionId);
     try {
-      // 二次守卫：延迟窗口内用户可能已手动重发/切会话/删会话。
-      if (ctx.hasRunningQuery() || !ctx.isSessionAlive()) return;
+      // 二次守卫：延迟窗口内用户可能已手动重发/切会话/删会话；B1（契约 #3 双保险·回调）：
+      // 本回合曾被中断（边沿写入的中断闩，经 ctx 注入）同样拦截——读的是中断闩而非复用
+      // hasRunningQuery/isSessionAlive 既有两项。
+      if (ctx.hasRunningQuery() || !ctx.isSessionAlive() || ctx.wasTurnInterrupted?.()) return;
       // 防重入闩在「实际发起时」置位（同一文本只自动重试一次的语义保持，且放弃的调度不再占闩）。
       retriedTextBySession.set(sessionId, text);
       ctx.forwardSystemNotice(

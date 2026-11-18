@@ -247,7 +247,11 @@ check('A：analyzeTopic 入口在飞互斥 + finally 清理 + 预算超限 retur
   const body = analyzer.slice(idx, analyzer.indexOf('\n}', idx));
   assert.match(body, /if \(topicInFlight\.has\(sessionId\)\) return null;/);
   assert.match(body, /topicInFlight\.add\(sessionId\)/);
-  assert.match(body, /finally\s*\{\s*topicInFlight\.delete\(sessionId\);\s*\}/);
+  // 2026-11-15 eight-issues B3 契约同步：analyzeTopic finally 在 topicInFlight.delete 之外
+  // 追加 topicAbortControllers.delete（在飞命名取消登记随 finally 清理，B3 实现细节 01 §B3-1），
+  // 本钉由「finally 单语句」放宽为「finally 块含 topicInFlight.delete」——钉力（finally 必清
+  // 在飞标记）不变，仅容忍新增清理语句。随 A1/B3 最小同步，升级裁决 dwfq-3116c156-1 采纳。
+  assert.match(body, /finally\s*\{[^{}]*topicInFlight\.delete\(sessionId\);[^{}]*\}/);
   assert.match(body, /if \(n > TOPIC_MAX_ATTEMPTS\) return null;/);
 });
 check('A：maybeRetrySessionNaming 导出（upgradable 才重试 + 预算/在飞双闸 + 首条 user 文本 + slot 先兜底）', () => {
@@ -263,7 +267,10 @@ check('A：maybeRetrySessionNaming 导出（upgradable 才重试 + 预算/在飞
   assert.match(body, /analyzeTopic\(sessionId/);
 });
 check('sdk-backend：成功 result 边沿调用 maybeRetrySessionNaming（与通知同点位 + try 隔离）', () => {
-  const idx = sdkBackend.indexOf('if (event.type === \'result\' && isSuccessfulCliResult(event)) {');
+  // 2026-11-15 eight-issues A1 契约同步：成功 result 边沿条件追加 && !resultGenerationStale
+  //（旧代际迟到 result 不得弹完成通知/触发重试），本钉字面随行最小同步——钉力不变
+  //（通知同点位 + try 隔离断言原样），仅边沿字面更新。随 A1/B3 最小同步，升级裁决 dwfq-3116c156-1 采纳。
+  const idx = sdkBackend.indexOf('if (event.type === \'result\' && isSuccessfulCliResult(event) && !resultGenerationStale) {');
   const body = sdkBackend.slice(idx, idx + 600);
   assert.ok(idx > -1, '未找到成功 result 边沿');
   assert.match(body, /notifySessionCompleted\(mainWindow, sessionId\);/);
