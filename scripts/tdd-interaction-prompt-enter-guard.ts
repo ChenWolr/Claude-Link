@@ -26,6 +26,17 @@
 //  · 方向键仅移焦（契约 8）：非 wizard 箭头分支只 move()（无 toggleOption/submit）；wizard 态箭头
 //    被分流吞掉（交还焦点容器原生滚动）。
 //
+// P3-4 补钉（2026-11-19，验收 r1 发现清单）：Space 分域断言——03b C1-10③ 旧半行「单选不因 Space
+//  改选中」口径偏差已修正。权威口径：00 C1.8 治理的是「Tab/方向键浏览不改选中」；Space 在选项钮
+//  聚焦时是浏览器原生 button 激活=等同点击作答（激活键非浏览键，与方向键限制不冲突），故：
+//  · 单选态：全局 Space 分支以 currentMultiSelect 限定，单选态不进任何 Space 分支 → 无
+//    preventDefault → 原生激活 <button type="button" class="interaction-option"> → click →
+//    toggleOption 单选直提链 = 作答（实现无缺陷，此前卷内未出钉=留痕缺口，本补钉收口）；
+//  · 多选态：Space 分支接管——选项钮聚焦不让位（.interaction-option 被让位判定排除）→
+//    preventDefault + toggleOption(focusedOption) = Set 增删 toggle；焦点不在选项钮时兜底同 toggle；
+//  · wizard 态：分流吞掉 Space 交还原生激活（与 Enter 域同口径，实现注释 748-749 行明令）。
+//  本组补钉均为保留面语义钉（旧实现同形态，不进必红自证集）。
+//
 // 废卷面（随本重写废止并在此留痕——勿再按旧锚补钉）：
 //  旧 check「B5 兜底仍在 submit（空白处 Enter 提交聚焦项的语义保留）」——与新契约 7「移除 wizard
 //  态 Enter 兜底」方向相反，删除；兜底对非 wizard 形态仍存活（initial-focus P2-1 钉管其写回），
@@ -230,6 +241,48 @@ check('方向键仅移焦（契约 8）：非 wizard 箭头分支只 move()（�
   const branch = wizardKeyBranch();
   assert.ok(!branch.includes('ArrowDown') && !branch.includes('ArrowUp'), 'wizard 态箭头须被分流吞掉（交还原生滚动，不 move）');
 }, true);
+
+group('=== P3-4 补钉：Space 分域——激活键非浏览键（C1.8 治理方向键浏览；03b C1-10③ 口径修正 2026-11-19） ===');
+check('Space 分域·单选态零拦截：handleKeydown 内 Space 字面仅 2 处（遮挡让位守卫 + currentMultiSelect 限定分支）——单选态不进任何 Space 分支=无 preventDefault=原生 button 激活（等同点击作答）', () => {
+  const body = handleKeydownBody();
+  const marks: number[] = [];
+  let cursor = 0;
+  for (;;) {
+    const idx = body.indexOf("event.key === ' '", cursor);
+    if (idx === -1) break;
+    marks.push(idx);
+    cursor = idx + 1;
+  }
+  assert.equal(marks.length, 2, `handleKeydown 内 Space 字面应为 2 处（遮挡让位 + 多选分支），实际 ${marks.length}——新增非多选 Space 处理须先过 C1.8 分域口径（激活键≠浏览键）`);
+  const lineStart = body.lastIndexOf('\n', marks[1]) + 1;
+  const branchLine = body.slice(lineStart, body.indexOf('\n', marks[1]));
+  assert.ok(branchLine.includes('currentMultiSelect.value'), 'Space 处理分支必须以 currentMultiSelect 限定（单选态不接管，保留原生激活=作答路径）');
+});
+check('Space 分域·多选态=toggle：分支 preventDefault 后 toggleOption(focusedOption)（选项钮聚焦不让位）；toggleOption 多选分支=Set 增删（toggle 非覆写）', () => {
+  const body = branchBody(SPACE_BRANCH_MARK, null);
+  const preventIdx = body.indexOf('event.preventDefault()');
+  const focusIdx = body.indexOf('focusedOption.value');
+  const toggleIdx = body.indexOf('toggleOption(');
+  assert.ok(preventIdx > -1 && focusIdx > preventIdx && toggleIdx > focusIdx, '多选 Space 须 preventDefault 后取聚焦选项再 toggleOption=toggle 语义');
+  const fnBody = functionBody('toggleOption');
+  const multiIdx = fnBody.indexOf('if (currentMultiSelect.value) {');
+  assert.ok(multiIdx > -1, 'toggleOption 缺多选分支');
+  const multiSlice = fnBody.slice(multiIdx, fnBody.indexOf('return;', multiIdx));
+  assert.ok(multiSlice.includes('next.has(optionId)') && multiSlice.includes('next.add(optionId)'), '多选 toggle 必须是 Set 增删（has→delete / else→add），不得覆写选中集');
+});
+check('Space 分域·激活生效前提：选项钮为原生 <button type="button"> 且 @click=toggle emit、无 @keydown 劫持（Space 原生激活走 click=作答入口）', () => {
+  const tags = [...optionListSrc.matchAll(/<button\b[^>]*>/g)].map((m) => m[0]);
+  assert.ok(tags.length >= 2, `选项 button 开标签应 ≥2（虚拟+非虚拟两形态），实际 ${tags.length}`);
+  for (const tag of tags) {
+    assert.ok(tag.includes('type="button"'), '选项钮必须 type="button"（原生激活语义前提）');
+    assert.ok(tag.includes('@click="emit(\'toggle\''), '选项钮 @click 须绑 toggle emit（Space 激活=click=作答入口）');
+    assert.ok(!tag.includes('@keydown'), '选项钮不得有 @keydown 劫持（吞原生激活=单选 Space 作答失效）');
+  }
+});
+check('Space 分域·wizard 态同口径：Space 被分流吞掉（wizard 分支无 Space 字面）交还原生激活（与 Enter 域一致）', () => {
+  const branch = wizardKeyBranch();
+  assert.ok(!branch.includes("event.key === ' '"), 'wizard 分支不得处理 Space（交还选项钮/左栏项浏览器原生激活，等同点击）');
+});
 
 // ── 「对旧实现必红」自证（C3-3 期望条款；机制见头注）──
 function loadOldSource(): string {
