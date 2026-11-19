@@ -407,7 +407,8 @@ onMounted(() => {
 
 // E1（2026-11-15 eight-issues）：MCP 快照失效信号订阅（mcp:snapshotChanged，E2 广播面）——与
 // stopSkillDirsChanged 并列同形态：MCP tab 活跃即重拉快照；非活跃仅标 stale（mcpStalePending，
-// 进 tab 时 activeTab watch mcp 分支复位 false，既有 refresh 兜底重拉）。订阅生命周期随页面；
+// 消费面=MCP tab `tab--stale` 提示点，P3-5 接线 2026-11-19；进 tab 时 activeTab watch mcp 分支
+// 复位 false+既有 refresh 兜底重拉，点随之消失）。订阅生命周期随页面；
 // 卸载时 stop 句柄 + 通道级 removeMcpSnapshotListener 双重反注册。
 let stopMcpSnapshotChanged: (() => void) | null = null;
 const mcpStalePending = ref(false);
@@ -833,7 +834,7 @@ const updateStageTone = computed(() => {
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'behavior' }]" @click="activeTab = 'behavior'">行为</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'appearance' }]" @click="activeTab = 'appearance'">外观</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'skill' }]" @click="activeTab = 'skill'">Skill</button>
-        <button type="button" :class="['tab', { 'tab--active': activeTab === 'mcp' }]" @click="activeTab = 'mcp'">MCP</button>
+        <button type="button" :class="['tab', { 'tab--active': activeTab === 'mcp', 'tab--stale': mcpStalePending && activeTab !== 'mcp' }]" @click="activeTab = 'mcp'">MCP</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'im' }]" @click="activeTab = 'im'">IM</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'web' }]" @click="activeTab = 'web'">网页访问</button>
         <button type="button" :class="['tab', { 'tab--active': activeTab === 'about' }]" @click="activeTab = 'about'">关于</button>
@@ -1544,6 +1545,19 @@ const updateStageTone = computed(() => {
 .tab--active {
   color: var(--color-accent-strong);
   border-bottom-color: var(--color-accent);
+}
+
+/* E1（P3-5 接线 2026-11-19）：mcpStalePending 消费面——非活跃期收到快照失效信号时 MCP tab
+   显 stale 提示点（warn token 双板可用）；进 tab 即重拉+复位，点随之消失。 */
+.tab--stale::after {
+  content: '';
+  display: inline-block;
+  width: 0.375rem;
+  height: 0.375rem;
+  margin-inline-start: 0.375rem;
+  border-radius: 50%;
+  background: var(--color-warn-strong);
+  vertical-align: 0.125em;
 }
 
 .save-badge {

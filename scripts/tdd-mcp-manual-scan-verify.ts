@@ -32,7 +32,8 @@
 //        双键回归钉（E2 落地面防拆除）；扫描链零 isWebRuntime 平台分支（双端同源渲染）；
 //        ConfigPage stopMcpSnapshotChanged onMounted 订阅（tab 门控：活跃 mcp → refresh 重拉 /
 //        非活跃 → mcpStalePending=true）+ activeTab watch mcp 分支复位 false（进 tab 既有 refresh
-//        兜底）+ onBeforeUnmount 反注册（stop 句柄 + removeMcpSnapshotListener）；
+//        兜底）+ 消费面钉（P3-5 接线 2026-11-19：MCP tab `tab--stale` 提示点条件绑定，防死状态回归）
+//        + onBeforeUnmount 反注册（stop 句柄 + removeMcpSnapshotListener）；
 //        CDP 场景 W-mcp-scan 归 T1B 点（03b §11 E1-5 执行命令形态 npm run test:cdp:web-access），
 //        本卷不写链；
 //   REG  回归门——spawnSync 实跑 scripts/selftest-mcp-settings.ts exit 0（A~Q 组 sanitize/parse/
@@ -375,6 +376,12 @@ check('E1-5f onBeforeUnmount 反注册：stop 句柄 + removeMcpSnapshotListener
   assert.ok(unb, '含 skill 反注册句的 onBeforeUnmount 块定位失败');
   assert.ok(unb.includes('stopMcpSnapshotChanged?.();'), '缺 stopMcpSnapshotChanged 反注册');
   assert.ok(unb.includes('window.claudeLink.removeMcpSnapshotListener();'), '缺通道级 removeMcpSnapshotListener 反注册');
+});
+
+check('E1-5g mcpStalePending 消费面（P3-5 接线 2026-11-19）：MCP tab 按钮绑定 tab--stale（非活跃且 stale 时显提示点，进 tab 复位后消失）', () => {
+  // mcpStalePending 的读消费必须存在——仅有声明+两处写（=true/=false）而无读即死状态（验收 r1 P3-5）。
+  assert.ok(pageSrc.includes(":class=\"['tab', { 'tab--active': activeTab === 'mcp', 'tab--stale': mcpStalePending && activeTab !== 'mcp' }]\""), 'MCP tab 按钮缺 tab--stale 条件绑定（mcpStalePending 死状态回归）');
+  assert.ok(pageSrc.includes('.tab--stale::after {'), '缺 .tab--stale 提示点样式');
 });
 
 // ── REG 回归门：既有 McpSettings 契约不被波及 ────────────────────────────────
