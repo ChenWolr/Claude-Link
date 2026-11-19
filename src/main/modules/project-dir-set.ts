@@ -6,6 +6,7 @@
 // 或 concat 尾巴（保持两处消费点的既有默认目录处理逐字等价）。
 // 行为契约：docs/plans/2026-11-15-eight-issues-batch/00-behavior-specs.md §E4；
 // 契约脚本：scripts/tdd-mcp-skill-dirset-unify-verify.ts（seam 行为测试 + 结构钉）。
+// r2-P3-2（2026-11-19 验收 r2）：sessionDirs 边遍历边归一去重——会话目录相互间的大小写/斜杠变体不再双入集（此前仅对 recent 段去重）。
 import { listRecentWorkspaces } from './workspace-history';
 import { listRecentWorkingDirs } from '../database/repositories/session-repo';
 import { normalizeDirKey } from '../../shared/project-skills';
@@ -13,6 +14,11 @@ import { normalizeDirKey } from '../../shared/project-skills';
 export function listRecentAndSessionProjectDirs(dirCap = 20): string[] {
   const recent = listRecentWorkspaces();
   const seen = new Set(recent.map(normalizeDirKey));
-  const sessionDirs = listRecentWorkingDirs(dirCap).filter((d) => !seen.has(normalizeDirKey(d)));
+  const sessionDirs = listRecentWorkingDirs(dirCap).filter((d) => {
+    const key = normalizeDirKey(d);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   return [...recent, ...sessionDirs].slice(0, dirCap);
 }

@@ -14,6 +14,7 @@
 //        零残留；⑬ index.ts getProjectSkillDirs 换源 + 默认目录 concat 尾巴；⑭ 负向钉无第二处
 //        拼装（listRecentWorkingDirs( 调用点恰 2 文件；listRecentWorkingDirs(20 旧形态零出现）；
 //        ⑮ E4-S1 回填钉（见下方申报）。
+//        ⑯ r2-P3-2 补钉（2026-11-19 验收 r2）：组1 内增补——会话目录相互间变体归一去重（D:\a\Proj vs d:\a\proj\ 仅保首个变体）。
 // E4-S1 回填申报：用例稿「目录集函数为 async 且带超时预算」按实现后签名回填——统一目录源为同步
 // 纯函数（01 §E4-2 伪代码即规范形态：string[] 直返；listRecentWorkingDirs 为同步 better-sqlite3
 // 查询，调用点全在 IPC handler 冷路径/启动异步链）；async + withTimeout 3s 预算链保留在 Skill 侧
@@ -198,6 +199,24 @@ try {
       if (!dupEntry || dupEntry.isDefault !== true) sub.push(`同键默认目录应命中 isDefault=true，实际 ${JSON.stringify(dupEntry)}`);
     }
     check('④', 'E4-02-4 默认目录不入函数输出；消费点 mergeProjectDirs 并入（追加 isDefault / 同键合并单条）', sub.length === 0, sub.join('; '));
+  }
+
+  // ⑯ r2-P3-2（2026-11-19 验收 r2）：会话目录相互间的变体（大小写/斜杠/尾分隔符）归一去重——
+  //    sessionDirs 边遍历边去重后，D:\a\Proj 与 d:\a\proj\ 同归一键仅保首个变体（保序），
+  //    不再双入集双占 dirCap 名额（此前仅对 recent 段去重，组1 只钉过 recent↔session 跨来源）。
+  {
+    const sub: string[] = [];
+    const fn = dirSetMod?.listRecentAndSessionProjectDirs;
+    if (typeof fn !== 'function') {
+      sub.push('listRecentAndSessionProjectDirs 不可用');
+    } else {
+      drainRecent();
+      sessionDirsProvider = (limit) => ['D:\\a\\Proj', 'd:\\a\\proj\\'].slice(0, limit);
+      const out = fn(20);
+      if (out.length !== 1) sub.push(`同键变体仅应含其一，实际 ${out.length}：${JSON.stringify(out)}`);
+      if (out[0] !== 'D:\\a\\Proj') sub.push(`应保序取首个变体 D:\\a\\Proj，实际 ${JSON.stringify(out)}`);
+    }
+    check('⑯', 'E4-02-r2 会话目录相互间变体归一去重（D:\\a\\Proj vs d:\\a\\proj\\ 仅含其一，r2-P3-2）', sub.length === 0, sub.join('; '));
   }
 
   console.log('\n=== 组2 E4-03 空集与退化输入 ===');
