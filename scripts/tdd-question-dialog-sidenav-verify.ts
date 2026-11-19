@@ -35,6 +35,10 @@
 //   改分流=非末题 goNext（跳过语义，不校验已答、不触发 flagged）/末题 submitWizard（未答齐定位
 //   +左栏警示）——C1 契约 2「下一题恒可点（允许跳过未答题）」；⑤5a 主按钮锚字面随分流最小同步，
 //   新增 5e 行为钉（分流+goNext 函数体+恒可点结构保持）。〕
+// 〔r2-P3-1 补钉（2026-11-19 验收 r2）：removeRequest 当前单守卫——摘除非当前头请求（如后台会话
+//   弹窗被主进程 cancel）不得触碰当前单瞬态面（丢弃确认层/警示描边/Other 展开态），store 摘除与
+//   submittingId 复位先于守卫不动——00 契约 9「新请求不顶掉当前单」；新增 8c 结构钉（守卫字面+
+//   位置序：submittingId 复位之后、initSelection 之前）。〕
 //
 // 「对旧实现必红」自证：实施前对重构前代码运行本脚本——①②③④⑤全部 FAIL（结构不存在、
 // 旧符号残留）；⑥⑦部分 FAIL。留痕见 .plan-loop/eight-issues-batch-1115-1714/round-001/c1-impl-report.md。
@@ -388,6 +392,17 @@ check('8a --interaction-wizard-nav-w: 13rem 定义于 interaction-tokens.css', (
 });
 check('8b 组件引用面：wizard-nav 宽度引用该 token（其余复用既有 token）', () => {
   assert.ok(src.includes('width: var(--interaction-wizard-nav-w);'), '组件未引用 --interaction-wizard-nav-w');
+});
+// r2-P3-1（2026-11-19 验收 r2）结构钉：removeRequest 摘除非当前头请求须早退（00 契约 9）——
+// store 摘除与 submittingId 复位先于守卫不动；守卫置 submittingId 复位之后、initSelection 之前。
+check('8c r2-P3-1 摘除非当前头请求早退守卫：removeRequest 体含 activeRequest id 守卫（submittingId 复位后、initSelection 前，00 契约 9）', () => {
+  const body = functionBody('removeRequest');
+  const guardIdx = body.indexOf('if (id !== activeRequest.value?.id) return;');
+  assert.ok(guardIdx > -1, 'removeRequest 缺早退守卫字面（非当前头请求摘除不得触碰当前单瞬态面，00 契约 9）');
+  const submittingIdx = body.indexOf('submittingId.value = null;');
+  assert.ok(submittingIdx > -1 && guardIdx > submittingIdx, '守卫须置于 submittingId 复位之后');
+  const nextIdx = body.indexOf('const next = currentRequests.value[0]');
+  assert.ok(nextIdx > -1 && guardIdx < nextIdx, '守卫须置于 initSelection（取 next）之前');
 });
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);

@@ -813,6 +813,8 @@ function optionPreview(option: InteractionPromptOption | null) {
 function removeRequest(id: string): void {
   interactionStore.removeRequest(id);
   if (submittingId.value === id) submittingId.value = null;
+  // r2-P3-1：摘除非当前头请求不得触碰当前单瞬态面（丢弃确认层/警示描边/Other 展开态），00 契约 9。
+  if (id !== activeRequest.value?.id) return;
   const next = currentRequests.value[0];
   if (next) initSelection(next);
 }
