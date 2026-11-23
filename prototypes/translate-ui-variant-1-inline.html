@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<!-- AI 回复点击翻译 · 变体一「内联跟随式」。
+     治的病 / 目标：英文 AI 回复阅读不通畅，点击翻译后中文译文以「浅底引用块」内联出现在
+     该条回复下方，同宽对齐、随原文流式进度增量追加（batch + 50ms 节流口径），
+     顶部小工具条（收起 / 重译），细进度指示，已译/未译有分界感（shimmer 占位行）。
+     基准（4 项已定论修复，三变体一致）：
+       A. 整体布局 1:1：左栏 240px（会话卡片）+ 主区 800px 居中内容列 + 右侧 48px 图标轨（》折叠钮）。
+       B. 右栏/主区、左栏/主区竖向分隔线与顶栏底缘统一 --color-border-strong（每板给定建议值，切换可见且浅）。
+       C. 会话卡片静止态 1px 描边 = --color-border；active 卡维持 accent 45% 描边。
+       D. 用户气泡与 AI 回复等行宽（统一 85%）；长用户消息不提前折行，短消息仍收缩右对齐。
+       E. 输入框 8 行展开态（>8 行封顶内部滚动，右下滚动条暗示 + 底部提示文字）。
+       F. 翻译主场景：流式中英文天气回复（含 markdown 表格）+ 译文中途态；另一条已完成回复的终态与入口静止态。
+       G. 右上角主题切换器：12 套色板下拉（映射写法对齐 apply-theme.ts；borderStrong 用建议值全表）。
+       H. 纯 JS 定时器双流模拟：原文 300ms/段，译文滞后 2 段、340ms/段，追加经 50ms 节流合帧；
+          译文区预留高度 + 独立滚动，追加不引起原文区滚动跳动；scroller 仅 nearBottom(<80px) 跟底。
+     token 纪律：全 var()/color-mix（默认=constants.ts「墨石」板；暗板=「终端」）。
+     样式镜像源：MessageBubble.vue / MessageList.vue / ChatInput.vue / AppSidebar.vue /
+     TaskQueuePanel.vue(.rail) / variables.css / main.css(.markdown-body table)。 -->
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<title>AI 回复翻译 · 变体一「内联跟随式」</title>
+<style>
+  /* ── 真实 token 镜像（默认=墨石 inkstone；运行时由切换器按 apply-theme.ts 映射覆写）── */
+  :root {
+    --color-bg: #EFF1F4; --color-panel: #F6F7F9; --color-panel-soft: #FFFFFF;
+    --color-border: #E4E7EC; --color-border-strong: #D5DAE1;
+    --color-text: #17181A; --color-text-muted: #667085; --color-text-sub: #5B6779;
+    --color-accent: #EA580C; --color-accent-strong: #C2410C; --color-on-accent: #FFFFFF;
+    --color-btn-ink: #17181A; --color-on-btn-ink: #FFFFFF;
+    --color-danger: #DC2626; --color-success: #2E7D46; --color-warn: #C9A227;
+    --radius-xs: 4px; --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px; --radius-pill: 999px;
+    --ring-light: inset 0 -1px 0 rgba(0, 0, 0, 0.04);
+    --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --duration-fast: 120ms; --duration-base: 200ms;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    overflow: hidden; background: var(--color-bg); color: var(--color-text);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    font-size: 16px; line-height: 1.5;
+  }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 999px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  button { font: inherit; cursor: pointer; }
+  button:focus-visible, select:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+
+  /* ═══ 应用骨架：左栏 240 / 主区 1 / 右轨 48 ═══ */
+  .app { display: flex; height: 100vh; }
+
+  /* ── 左栏（镜像 AppSidebar.vue）── */
+  .sidebar {
+    display: flex; flex-direction: column; width: 240px; min-width: 240px;
+    border-right: 1px solid var(--color-border-strong);   /* 基准 B：左栏右缘 */
+    background: var(--color-panel); padding: 14px 12px 12px;
+  }
+  .sb-brand { display: flex; align-items: center; gap: 9px; padding: 2px 4px 0; margin-bottom: 14px; }
+  .sb-mark {
+    display: grid; place-items: center; width: 20px; height: 20px; flex: none;
+    border-radius: 6px; background: var(--color-accent); color: var(--color-on-accent);
+    font-size: 9.5px; font-weight: 800; letter-spacing: 0.02em;
+  }
+  .sb-brand h1 { font-size: 0.8125rem; font-weight: 650; letter-spacing: -0.01em; }
+  .sb-new {
+    display: flex; align-items: center; gap: 8px; width: 100%; height: 34px; padding: 0 10px;
+    border: 1px solid var(--color-border-strong); border-radius: var(--radius-sm);
+    background: var(--color-panel); color: var(--color-text); font-size: 0.8125rem; font-weight: 600;
+  }
+  .sb-new:hover { background: var(--color-panel-soft); }
+  .sb-new svg { width: 14px; height: 14px; fill: none; stroke: var(--color-text-muted); stroke-width: 2; stroke-linecap: round; }
+  .sb-new kbd {
+    margin-left: auto; font-family: inherit; font-size: 10.5px; color: var(--color-text-muted);
+    border: 1px solid var(--color-border); border-radius: 4px; padding: 1px 5px; background: var(--color-bg);
+  }
+  .sb-search-wrap { position: relative; margin-top: 10px; }
+  .sb-search-wrap svg { position: absolute; left: 9px; top: 50%; transform: translateY(-50%); width: 13px; height: 13px; fill: none; stroke: var(--color-text-muted); stroke-width: 2; stroke-linecap: round; }
+  .sb-search {
+    width: 100%; height: 30px; border: 1px solid transparent; border-radius: var(--radius-sm);
+    background: var(--color-panel-soft); color: var(--color-text); padding: 0 30px 0 28px; font-size: 0.78125rem; outline: none;
+  }
+  .sb-search::placeholder { color: var(--color-text-muted); }
+  .sb-search-slash {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    font-size: 10.5px; color: var(--color-text-muted); border: 1px solid var(--color-border);
+    border-radius: 4px; padding: 0 5px; background: var(--color-panel); pointer-events: none;
+  }
+  .sb-tabs { display: flex; align-items: center; gap: 2px; margin-top: 12px; padding: 0 4px; border-bottom: 1px solid var(--color-border); }
+  .sb-tab { position: relative; border: 0; background: none; padding: 6px 8px 8px; font-size: 0.78125rem; font-weight: 600; color: var(--color-text-muted); }
+  .sb-tab--active { color: var(--color-text); }
+  .sb-tab--active::after { content: ''; position: absolute; left: 8px; right: 8px; bottom: -1px; height: 2px; border-radius: 2px; background: var(--color-accent); }
+  .sb-group { display: flex; align-items: baseline; gap: 6px; padding: 14px 6px 5px; }
+  .sb-group span:first-child { flex: 1; font-size: 0.65625rem; font-weight: 650; letter-spacing: 0.07em; color: var(--color-text-muted); }
+  .sb-group span:last-child { font-size: 0.65625rem; font-weight: 600; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .sb-sessions { flex: 1; min-height: 0; overflow-y: auto; margin-top: 8px; padding: 0 2px 8px; }
+
+  /* 会话卡片（基准 C：静止态 panelSoft 底微浮起 + 1px --color-border 描边；active 维持 accent 描边）
+     底色 = panelSoft（零新 token，先例 SessionsPage/TaskItem 卡片语言；终端板即 #1B2027 微浮起） */
+  .session-card {
+    display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; margin-bottom: 4px;
+    border-radius: var(--radius-md); background: var(--color-panel-soft);
+    box-shadow: var(--ring-light), var(--elevation-1);
+    border: 1px solid var(--color-border);
+    color: var(--color-text); cursor: pointer; font-size: 0.8125rem;
+    transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out);
+  }
+  .session-card:hover { background: color-mix(in srgb, var(--color-text) 4%, var(--color-panel-soft)); }
+  .session-card.active {
+    background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft));
+    border-color: color-mix(in srgb, var(--color-accent) 45%, transparent);
+  }
+  .session-card.active .sc-name { font-weight: 600; }
+  .sc-row1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .sc-status { flex: none; width: 22px; height: 22px; border-radius: 6px; background: var(--sc-status, var(--color-border)); }
+  .sc-status--running { background: var(--color-warn); animation: pulse 1.2s ease-in-out infinite; }
+  .sc-status--completed { background: var(--color-success); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+  .sc-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+  .sc-row2 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .sc-proj {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 0.6875rem; line-height: 1.6; padding: 1px 8px; border-radius: 999px;
+    background: var(--color-panel-soft); border: 1px solid var(--color-border); color: var(--color-text-muted);
+  }
+  .sc-time { margin-left: auto; flex: none; font-size: 0.6875rem; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .sb-footer { display: flex; align-items: center; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--color-border); }
+  .sb-settings { display: flex; align-items: center; gap: 7px; height: 30px; padding: 0 8px; border-radius: var(--radius-sm); color: var(--color-text); font-size: 0.78125rem; }
+  .sb-settings:hover { background: var(--color-panel-soft); }
+  .sb-settings svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+  .sb-collapse {
+    display: grid; place-items: center; width: 26px; height: 26px; margin-left: auto;
+    border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-text-muted);
+  }
+  .sb-collapse:hover { background: var(--color-panel-soft); color: var(--color-text); }
+  .sb-collapse svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ── 主区 ── */
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar {
+    flex: none; height: 46px; display: flex; align-items: center; gap: 10px; padding: 0 16px;
+    border-bottom: 1px solid var(--color-border-strong);   /* 基准 B：顶栏底缘同 token */
+    background: var(--color-panel);
+  }
+  .topbar h2 { font-size: 0.9375rem; font-weight: 650; }
+  .topbar .tb-meta { margin-left: auto; font-size: 0.6875rem; color: var(--color-text-muted); }
+
+  /* 消息滚动区（镜像 MessageList.vue：动态 padding 限宽 ≈800px 居中） */
+  .scroller {
+    flex: 1; min-height: 0; overflow-y: auto;
+    padding: 20px max(24px, calc((100% - 800px) / 2));
+    display: flex; flex-direction: column; gap: 0.25rem;
+  }
+  .scroller::before { content: ''; margin-bottom: auto; }
+  .msg-transition { margin-top: 2.25rem; }
+
+  /* ── 气泡（镜像 MessageBubble.vue；基准 D：user/assistant 统一 max-width 85%）── */
+  .bubble-wrap { display: flex; flex-direction: column; }
+  .bubble-wrap--user { align-self: flex-end; align-items: flex-end; }
+  .bubble-wrap--assistant { align-self: flex-start; align-items: flex-start; }
+  .bubble { position: relative; max-width: 85%; padding: 12px 16px; border-radius: var(--radius-md); }
+  .bubble--user {
+    background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-soft));
+    color: var(--color-text);
+    border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
+    border-right: 3px solid var(--color-accent);
+    box-shadow: var(--ring-light), var(--elevation-1);
+  }
+  .bubble--assistant {
+    padding: 12px 16px; background: var(--color-panel-soft);
+    border: 1px solid var(--color-border); border-left: 3px solid var(--color-accent);
+    border-radius: var(--radius-md); box-shadow: var(--ring-light), var(--elevation-1);
+  }
+  .bubble__role { font-size: 0.6875rem; font-weight: 700; text-transform: uppercase; margin-bottom: 6px; opacity: 0.7; color: var(--color-accent-strong); }
+  .bubble__content { word-break: break-word; line-height: 1.5; }
+  .bubble--assistant .bubble__content { line-height: 1.75; }
+  .bubble--user .bubble__content { white-space: pre-wrap; }
+  .bubble__content p { margin: 0 0 0.25rem; }
+  .bubble__content p:last-child { margin-bottom: 0; }
+  .bubble__content table { display: block; width: max-content; max-width: 100%; margin: 0.625rem 0; border-collapse: collapse; border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: auto; }
+  .bubble__content th, .bubble__content td { padding: 0.4rem 0.75rem; border: 1px solid var(--color-border); text-align: left; overflow-wrap: anywhere; }
+  .bubble__content thead th { font-weight: 600; background: var(--color-panel-soft); border-bottom: 1px solid var(--color-border-strong); }
+  .bubble__content tbody tr:nth-child(even) { background: color-mix(in srgb, var(--color-accent) 5%, transparent); }
+  .bubble-caption { margin-top: 4px; padding-right: 44px; font-size: 0.6875rem; color: var(--color-text-muted); font-variant-numeric: tabular-nums; display: inline-flex; gap: 6px; align-items: center; }
+  .bubble__meta { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--color-border); display: inline-flex; align-items: center; gap: 5px; font-size: 0.6875rem; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .bubble__meta svg { width: 0.75rem; height: 0.75rem; fill: none; stroke: var(--color-accent-strong); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; opacity: 0.85; }
+  .bubble__meta b { color: var(--color-text); font-weight: 600; }
+
+  /* 流式光标（镜像 StreamRenderer.vue：▊ blink 1s step-end） */
+  .cursor { display: inline-block; animation: blink 1s step-end infinite; color: var(--color-accent-strong); }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ── 翻译入口按钮（三态；最小命中 ≥28px 桌面口径）── */
+  .tr-entry {
+    display: inline-flex; align-items: center; gap: 6px; min-height: 28px; min-width: 28px;
+    padding: 3px 10px; border: 1px solid var(--color-border); border-radius: 999px;
+    background: var(--color-panel-soft); color: var(--color-text-muted); font-size: 0.75rem; font-weight: 600;
+    transition: color var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out), background var(--duration-fast) var(--ease-out);
+  }
+  .tr-entry svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .tr-entry:hover { color: var(--color-accent-strong); border-color: color-mix(in srgb, var(--color-accent) 40%, var(--color-border)); background: color-mix(in srgb, var(--color-accent) 10%, var(--color-panel-soft)); }
+  .tr-entry--loading { color: var(--color-accent-strong); border-color: color-mix(in srgb, var(--color-accent) 45%, transparent); background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft)); cursor: default; }
+  .tr-entry--loading svg { animation: spin 0.9s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .tr-entry--error { color: var(--color-danger); border-color: color-mix(in srgb, var(--color-danger) 45%, transparent); background: color-mix(in srgb, var(--color-danger) 8%, transparent); }
+  .stream-tail { margin-top: 6px; padding: 0 2px; }
+
+  /* ═══ 变体一核心：内联译文引用块（同宽对齐，气泡内底部）═══ */
+  .tr-inline {
+    margin-top: 10px;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 20%, transparent);
+    border-left: 3px solid color-mix(in srgb, var(--color-accent) 55%, transparent);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--color-accent) 6%, var(--color-panel-soft));
+    overflow: hidden;
+  }
+  .tr-inline__bar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 10px 5px;
+    border-bottom: 1px solid color-mix(in srgb, var(--color-accent) 14%, transparent);
+  }
+  .tr-inline__label { display: inline-flex; align-items: center; gap: 6px; font-size: 0.6875rem; font-weight: 700; color: var(--color-accent-strong); }
+  .tr-inline__dot { width: 6px; height: 6px; border-radius: 999px; background: var(--color-accent); animation: pulse 1.2s ease-in-out infinite; }
+  .tr-inline__dot--done { background: var(--color-success); animation: none; }
+  .tr-inline__ratio { font-size: 0.6875rem; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .tr-inline__tools { margin-left: auto; display: inline-flex; gap: 2px; }
+  .tr-tool {
+    display: grid; place-items: center; width: 24px; height: 24px;
+    border: 0; border-radius: var(--radius-xs); background: transparent; color: var(--color-text-muted);
+  }
+  .tr-tool:hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); color: var(--color-text); }
+  .tr-tool svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  /* 细进度条：置于工具条上缘（2px，accent，宽度=已译比例） */
+  .tr-inline__progress { position: relative; height: 2px; background: color-mix(in srgb, var(--color-accent) 14%, transparent); }
+  .tr-inline__progress i { position: absolute; inset: 0 auto 0 0; width: 0%; background: var(--color-accent); transition: width 240ms var(--ease-out); }
+  /* 译文滚动视口：预留 min-height + 独立滚动（>240px 内部滚，追加不推挤原文区） */
+  .tr-inline__body {
+    padding: 8px 14px 10px; font-size: 0.875rem; line-height: 1.75;
+    min-height: 72px; max-height: 240px; overflow-y: auto; overscroll-behavior: contain;
+  }
+  .tr-inline__body p { margin: 0 0 0.25rem; }
+  .tr-inline__body table { display: block; width: max-content; max-width: 100%; margin: 0.625rem 0; border-collapse: collapse; border: 1px solid color-mix(in srgb, var(--color-accent) 22%, var(--color-border)); border-radius: var(--radius-sm); overflow: auto; }
+  .tr-inline__body th, .tr-inline__body td { padding: 0.4rem 0.75rem; border: 1px solid color-mix(in srgb, var(--color-accent) 22%, var(--color-border)); text-align: left; }
+  .tr-inline__body thead th { font-weight: 600; background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft)); border-bottom: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent); }
+  /* 已译/未译分界：未译余量为 shimmer 占位行（宽度递减示意剩余量） */
+  .tr-shimmer { height: 0.875rem; border-radius: 4px; margin: 0.5rem 0; background: linear-gradient(90deg, color-mix(in srgb, var(--color-text) 8%, transparent) 25%, color-mix(in srgb, var(--color-text) 14%, transparent) 45%, color-mix(in srgb, var(--color-text) 8%, transparent) 65%); background-size: 240% 100%; animation: shimmer 1.3s linear infinite; }
+  @keyframes shimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+
+  /* 已完成回复的译文块（终态）：同构，进度条满格灰色化、工具条显示「翻译完成」 */
+  .tr-inline--done .tr-inline__progress i { width: 100%; background: color-mix(in srgb, var(--color-success) 55%, transparent); }
+
+  /* ── 输入区（镜像 ChatInput.vue；基准 E：8 行展开态）──
+     8 行高度算式（沿用真实 max-height 公式形态）：0.875rem*1.5*8 + 上下 padding 20px + 边框 2px */
+  .composer { flex: none; padding: 8px max(24px, calc((100% - 800px) / 2)) 12px; }
+  .chat-input { display: flex; gap: 10px; padding: 0; }
+  .chat-input textarea {
+    min-width: 0; flex: 1; border: 1px solid var(--color-border); border-radius: var(--radius-md);
+    background: var(--color-panel-soft); color: var(--color-text); padding: 10px 14px;
+    resize: none; outline: none; font: inherit; font-size: 0.875rem; line-height: 1.5;
+    height: calc(0.875rem * 1.5 * 8 + 22px);
+    overflow-y: auto; overscroll-behavior: contain;
+  }
+  .chat-input textarea::-webkit-scrollbar { width: 8px; }
+  .chat-input textarea::-webkit-scrollbar-thumb { background: var(--color-border-strong); border-radius: 999px; border: 2px solid var(--color-panel-soft); }
+  .send-btn {
+    display: inline-flex; align-items: center; gap: 6px; align-self: flex-end;
+    border: 0; border-radius: var(--radius-md); background: var(--color-btn-ink); color: var(--color-on-btn-ink);
+    padding: 10px 20px; font-weight: 700;
+  }
+  .send-btn:hover { filter: brightness(0.92); }
+  .send-btn svg { width: 0.875rem; height: 0.875rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; opacity: 0.9; }
+  .composer-note { margin-top: 4px; font-size: 0.6875rem; color: var(--color-text-muted); text-align: right; }
+
+  /* ── 右侧 48px 图标轨（镜像 TaskQueuePanel.vue .rail 折叠态）── */
+  .rail {
+    flex: none; display: flex; flex-direction: column; align-items: center; gap: 4px;
+    width: 48px; min-width: 48px; padding: 14px 8px 12px;
+    background: var(--color-panel);
+    border-left: 1px solid var(--color-border-strong);   /* 基准 B：右栏与主区分隔线 */
+  }
+  .rail-btn {
+    position: relative; display: grid; place-items: center; width: 26px; height: 26px;
+    border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--color-text-muted);
+  }
+  .rail-btn:hover { color: var(--color-text); background: var(--color-panel-soft); }
+  .rail-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .rail-badge {
+    position: absolute; top: -2px; right: -2px; display: inline-grid; place-items: center;
+    min-width: 15px; height: 15px; padding: 0 4px; border-radius: 999px;
+    background: var(--color-accent); color: var(--color-on-accent); font-size: 9px; font-weight: 700;
+  }
+  .rail-divider { width: 24px; height: 1px; margin: 2px 0; background: var(--color-border); }
+  .rail-collapse { margin-top: auto; }
+
+  /* ── 主题切换器（基准 G：右上角浮动控件，12 套色板下拉）── */
+  .theme-dock {
+    position: fixed; top: 8px; right: 60px; z-index: 60;
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 8px; border: 1px solid var(--color-border-strong); border-radius: 999px;
+    background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+    box-shadow: var(--elevation-1); backdrop-filter: blur(6px);
+  }
+  .theme-dock label { font-size: 0.6875rem; color: var(--color-text-muted); font-weight: 600; }
+  .theme-dock select {
+    font: inherit; font-size: 0.75rem; color: var(--color-text);
+    border: 1px solid var(--color-border); border-radius: var(--radius-xs);
+    background: var(--color-panel-soft); padding: 2px 6px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sc-status--running, .tr-inline__dot, .tr-entry--loading svg, .tr-shimmer, .cursor { animation: none; }
+  }
+</style>
+</head>
+<body>
+  <!-- 主题切换器（12 套色板，映射对齐 apply-theme.ts） -->
+  <div class="theme-dock" role="group" aria-label="主题切换">
+    <label for="themeSelect">主题</label>
+    <select id="themeSelect" aria-label="选择色板"></select>
+  </div>
+
+  <div class="app">
+    <!-- ══ 左栏 ══ -->
+    <aside class="sidebar">
+      <div class="sb-brand"><div class="sb-mark">CL</div><h1>Claude Link</h1></div>
+      <button class="sb-new" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+        <span>新会话</span><kbd>Ctrl N</kbd>
+      </button>
+      <div class="sb-search-wrap">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input class="sb-search" type="search" placeholder="搜索会话标题">
+        <span class="sb-search-slash" aria-hidden="true">/</span>
+      </div>
+      <div class="sb-tabs">
+        <button class="sb-tab sb-tab--active" type="button">全部</button>
+        <button class="sb-tab" type="button">项目</button>
+      </div>
+      <div class="sb-sessions">
+        <div class="sb-group"><span>今天</span><span>3</span></div>
+        <div class="session-card active" role="button" tabindex="0">
+          <div class="sc-row1">
+            <span class="sc-status sc-status--completed" title="已完成" role="img" aria-label="已完成"></span>
+            <span class="sc-name">东京天气与周末行程</span>
+          </div>
+          <div class="sc-row2"><span class="sc-proj">claude-link</span><span class="sc-time">14:33</span></div>
+        </div>
+        <div class="session-card" role="button" tabindex="0">
+          <div class="sc-row1">
+            <span class="sc-status sc-status--running" title="运行中" role="img" aria-label="运行中"></span>
+            <span class="sc-name">agent2API 部署排错</span>
+          </div>
+          <div class="sc-row2"><span class="sc-proj">agent2API</span><span class="sc-time">14:02</span></div>
+        </div>
+        <div class="session-card" role="button" tabindex="0">
+          <div class="sc-row1">
+            <span class="sc-status" title="空闲" role="img" aria-label="空闲"></span>
+            <span class="sc-name">sub2api 计费探测</span>
+          </div>
+          <div class="sc-row2"><span class="sc-proj">sub2api</span><span class="sc-time">11:47</span></div>
+        </div>
+        <div class="sb-group"><span>昨天</span><span>1</span></div>
+        <div class="session-card" role="button" tabindex="0">
+          <div class="sc-row1">
+            <span class="sc-status sc-status--completed" title="已完成" role="img" aria-label="已完成"></span>
+            <span class="sc-name">Claude Link UI 评审</span>
+          </div>
+          <div class="sc-row2"><span class="sc-proj">claude-link</span><span class="sc-time">昨天 22:10</span></div>
+        </div>
+      </div>
+      <div class="sb-footer">
+        <button class="sb-settings" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>配置</span>
+        </button>
+        <button class="sb-collapse" type="button" title="折叠侧栏" aria-label="折叠侧栏">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 4 7 8l3.5 4M6.5 4 3 8l3.5 4"/></svg>
+        </button>
+      </div>
+    </aside>
+
+    <!-- ══ 主区 ══ -->
+    <div class="main">
+      <div class="topbar">
+        <h2>东京天气与周末行程</h2>
+        <span class="tb-meta">GLM · medium · 自动权限</span>
+      </div>
+
+      <div class="scroller" id="scroller">
+        <!-- 用户消息：长消息 85% 不提前折行（基准 D） -->
+        <div class="bubble-wrap bubble-wrap--user">
+          <div class="bubble bubble--user">
+            <div class="bubble__content">帮我查一下东京这周的天气情况，我在纠结周五的徒步要不要往后改。最好顺便对比一下去年同期气温，再给我一点装备和出发时间的建议，谢啦。</div>
+          </div>
+          <div class="bubble-caption">你 · 发送于 14:32</div>
+        </div>
+
+        <!-- AI 流式回复 + 内联译文（变体一主场景） -->
+        <div class="bubble-wrap bubble-wrap--assistant msg-transition">
+          <div class="bubble bubble--assistant">
+            <div class="bubble__role"><span>Claude</span></div>
+            <div class="bubble__content" id="srcBody"></div>
+            <!-- 内联译文引用块：同宽对齐；工具条（收起/重译）+ 细进度条 + 独立滚动视口 -->
+            <div class="tr-inline" id="trInline">
+              <div class="tr-inline__progress"><i id="trProgress"></i></div>
+              <div class="tr-inline__bar">
+                <span class="tr-inline__label" id="trLabel"><i class="tr-inline__dot" id="trDot"></i><span id="trLabelText">译文 · 翻译中</span></span>
+                <span class="tr-inline__ratio" id="trRatio">0%</span>
+                <span class="tr-inline__tools">
+                  <button class="tr-tool" type="button" title="收起译文" aria-label="收起译文">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                  </button>
+                  <button class="tr-tool" type="button" title="重新翻译" aria-label="重新翻译">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                  </button>
+                </span>
+              </div>
+              <div class="tr-inline__body" id="trBody"></div>
+            </div>
+          </div>
+          <!-- stream-group 尾部：流式中消息的翻译入口（进行态） -->
+          <div class="stream-tail">
+            <button class="tr-entry tr-entry--loading" type="button" id="entryStreaming" aria-live="polite">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+              <span id="entryStreamingText">翻译中…</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- AI 已完成回复：翻译完成终态 + 入口静止态（复制按钮同排） -->
+        <div class="bubble-wrap bubble-wrap--assistant msg-transition">
+          <div class="bubble bubble--assistant">
+            <div class="bubble__role"><span>Claude</span></div>
+            <div class="bubble__content">Sure — I compared the humidity as well. Tokyo averages about 65% humidity this week, versus 78% in the same week last year. Lower humidity makes 17°C feel more comfortable than the raw number suggests.</div>
+            <div class="tr-inline tr-inline--done" id="trDone">
+              <div class="tr-inline__progress"><i></i></div>
+              <div class="tr-inline__bar">
+                <span class="tr-inline__label"><i class="tr-inline__dot tr-inline__dot--done"></i><span>译文 · 翻译完成</span></span>
+                <span class="tr-inline__tools">
+                  <button class="tr-tool" type="button" title="收起译文" aria-label="收起译文">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                  </button>
+                  <button class="tr-tool" type="button" title="重新翻译" aria-label="重新翻译">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+                  </button>
+                </span>
+              </div>
+              <div class="tr-inline__body">当然——湿度也一并对比了：东京本周平均湿度约 65%，去年同期约 78%。湿度更低，17°C 的体感会比数字本身更舒适。</div>
+            </div>
+            <div class="bubble__meta">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+              <b>8.2s</b><span>· 结束于 14:31</span>
+            </div>
+          </div>
+          <!-- 复制按钮同排（气泡右下角外侧）：入口按钮静止态 -->
+          <div class="bubble-caption" style="gap:8px; align-self:flex-end;">
+            <button class="tr-entry" type="button" title="翻译这条回复">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h7M7.5 3v2c0 4-2.5 7-5.5 8"/><path d="M6 10c1.5 2.5 3.5 4.5 6 5.5"/><path d="m12 21 4-9 4 9M13.5 17.5h5"/></svg>
+              <span>翻译</span>
+            </button>
+            <button class="tr-entry" type="button" title="复制消息" style="min-width:28px; padding:3px 6px;">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 1H4a2 2 0 0 0-2 2v12h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 输入区：8 行展开态（基准 E） -->
+      <div class="composer">
+        <div class="chat-input">
+          <textarea aria-label="消息输入框">把上面的结论整理成一张周末行程对照表，周六上午出发的版本也给一列。另外：
+- 徒步路线按「初级 · 3 小时内」筛
+- 交通用电车，不租车
+- 预算控制在每人 8,000 日元以内</textarea>
+          <button class="send-btn" type="button">发送
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 10 4 15l5 5 M20 4v7a4 4 0 0 1-4 4H4"/></svg>
+          </button>
+        </div>
+        <div class="composer-note">8 行封顶后内部滚动</div>
+      </div>
+    </div>
+
+    <!-- ══ 右侧 48px 图标轨 ══ -->
+    <nav class="rail" aria-label="任务面板折叠轨">
+      <button class="rail-btn" type="button" title="任务队列">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 11l3 3 8-8"/><path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9"/></svg>
+      </button>
+      <button class="rail-btn" type="button" title="子 Agent">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="12" r="3"/><path d="M8.5 7.5 15.5 11M8.5 16.5 15.5 13"/></svg>
+        <span class="rail-badge">2</span>
+      </button>
+      <button class="rail-btn" type="button" title="轮末改动">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M5 8V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-3"/><path d="M3 12h6M6 9.5v5"/></svg>
+      </button>
+      <div class="rail-divider" aria-hidden="true"></div>
+      <button class="rail-btn rail-collapse" type="button" title="收起面板" aria-label="收起面板">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.5 4 9 8l-3.5 4M9.5 4 13 8l-3.5 4"/></svg>
+      </button>
+    </nav>
+  </div>
+
+<script>
+'use strict';
+/* ═══ 12 套色板（constants.ts THEME_PALETTES 原值 + borderStrong 建议值全表）═══
+   映射写法对齐 apply-theme.ts：borderStrong/btnInk/onBtnInk/textSub 缺省回退同源。
+   borderStrong 建议值 = 本设计交付物（浅板 ≈13%~18% 黑量、染各板色相；暗板取 border 亮一档）。 */
+const PALETTES = [
+  { id:'inkstone', name:'墨石（默认）', isDark:false,
+    bg:'#EFF1F4', panel:'#F6F7F9', panelSoft:'#FFFFFF', border:'#E4E7EC', borderStrong:'#D5DAE1',
+    text:'#17181A', muted:'#667085', accent:'#EA580C', accentStrong:'#C2410C', onAccent:'#FFFFFF',
+    btnInk:'#17181A', onBtnInk:'#FFFFFF', danger:'#DC2626' },
+  { id:'warm-paper', name:'暖纸', isDark:false,
+    bg:'#F8F4ED', panel:'#F4F0EA', panelSoft:'#FCFAF5', border:'rgba(122,96,88,0.18)', borderStrong:'#D9D0C6',
+    text:'#3B3D3F', muted:'#6A6C70', accent:'#537D96', accentStrong:'#456A80', onAccent:'#FFFFFF',
+    btnInk:null, onBtnInk:null, danger:'#8B3A3A' },
+  { id:'grass-aroma', name:'草香', isDark:false,
+    bg:'#F5F8F3', panel:'#EFF3EC', panelSoft:'#F9FBF7', border:'rgba(91,168,140,0.22)', borderStrong:'#CFDAD1',
+    text:'#2E3832', muted:'#68706D', accent:'#5BA88C', accentStrong:'#4D9179', onAccent:'#1A1A1A',
+    btnInk:null, onBtnInk:null, danger:'#8B4A3A' },
+  { id:'coral', name:'珊瑚', isDark:false,
+    bg:'#FDF6EC', panel:'#FCF1E4', panelSoft:'#FFFBF3', border:'rgba(243,126,99,0.18)', borderStrong:'#E0CFC3',
+    text:'#1A3049', muted:'#646F78', accent:'#1A3049', accentStrong:'#243A55', onAccent:'#FFFFFF',
+    btnInk:null, onBtnInk:null, danger:'#A3483B' },
+  { id:'contemplation', name:'沉思', isDark:false,
+    bg:'#F3F5F7', panel:'#ECEFF2', panelSoft:'#F8F9FB', border:'rgba(126,153,168,0.22)', borderStrong:'#CBD1D8',
+    text:'#2C3238', muted:'#676E75', accent:'#7E99A8', accentStrong:'#6B8594', onAccent:'#1A1A1A',
+    btnInk:null, onBtnInk:null, danger:'#8B4040' },
+  { id:'absolutely', name:'绝对', isDark:false,
+    bg:'#F4F3EE', panel:'#EDEAE2', panelSoft:'#FAF9F5', border:'rgba(177,173,161,0.28)', borderStrong:'#CFCBC2',
+    text:'#2D2B28', muted:'#6E6B68', accent:'#B5846E', accentStrong:'#A27460', onAccent:'#1A1A1A',
+    btnInk:null, onBtnInk:null, danger:'#8B3A3A' },
+  { id:'high-contrast', name:'素白', isDark:false,
+    bg:'#FAF8F7', panel:'#F3F1F0', panelSoft:'#FDFBFA', border:'rgba(92,75,70,0.22)', borderStrong:'#D6D0CD',
+    text:'#1A1C1E', muted:'#6B6F73', accent:'#3A6B85', accentStrong:'#2E5870', onAccent:'#FFFFFF',
+    btnInk:null, onBtnInk:null, danger:'#7A3030' },
+  { id:'deep-think', name:'深思', isDark:false,
+    bg:'#FCFCFD', panel:'#F0F0F2', panelSoft:'#F8F8FA', border:'rgba(0,0,0,0.09)', borderStrong:'#D3D3DB',
+    text:'#1D1D1F', muted:'#717176', accent:'#636AE8', accentStrong:'#5158D4', onAccent:'#FFFFFF',
+    btnInk:null, onBtnInk:null, danger:'#8B3A3A' },
+  { id:'delve', name:'纯白', isDark:false,
+    bg:'#FFFFFF', panel:'#F0F0F0', panelSoft:'#F7F7F8', border:'rgba(0,0,0,0.10)', borderStrong:'#D6D6D6',
+    text:'#1A1A1A', muted:'#727272', accent:'#1A1A1A', accentStrong:'#000000', onAccent:'#FFFFFF',
+    btnInk:null, onBtnInk:null, danger:'#8B3A3A' },
+  { id:'new-warm-paper', name:'新暖纸', isDark:false,
+    bg:'#F5EFE4', panel:'#EFE8DB', panelSoft:'#FBF7EE', border:'#D8CFBE', borderStrong:'#C8C0B2',
+    text:'#2A2622', muted:'#6B6158', accent:'#537D96', accentStrong:'#3F6179', onAccent:'#FFFFFF',
+    btnInk:null, onBtnInk:null, danger:'#8B2C1F' },
+  { id:'quiet-console', name:'静默', isDark:false,
+    bg:'#F6F7F8', panel:'#FFFFFF', panelSoft:'#FAFBFC', border:'rgba(0,0,0,0.09)', borderStrong:'#D7D9DC',
+    text:'#1A1D21', muted:'#6B7280', accent:'#1A1D21', accentStrong:'#000000', onAccent:'#FFFFFF',
+    btnInk:null, onBtnInk:null, danger:'#DC2626' },
+  { id:'terminal-pro', name:'终端（暗色）', isDark:true,
+    bg:'#0F1115', panel:'#14171C', panelSoft:'#1B2027', border:'#30363D', borderStrong:'#3D444D',
+    text:'#D3D8E0', muted:'#9AA3B2', accent:'#4EA1FF', accentStrong:'#7FBAFF', onAccent:'#0B1220',
+    btnInk:null, onBtnInk:null, danger:'#E5484D' },
+];
+
+/* apply-theme.ts 同构映射（14 变量；?? 回退同源） */
+function applyPalette(p) {
+  const r = document.documentElement.style;
+  r.setProperty('--color-bg', p.bg);
+  r.setProperty('--color-panel', p.panel);
+  r.setProperty('--color-panel-soft', p.panelSoft);
+  r.setProperty('--color-border', p.border);
+  r.setProperty('--color-border-strong', p.borderStrong ?? 'rgba(0, 0, 0, 0.12)');
+  r.setProperty('--color-text', p.text);
+  r.setProperty('--color-text-muted', p.muted);
+  r.setProperty('--color-text-sub', p.muted);
+  r.setProperty('--color-accent', p.accent);
+  r.setProperty('--color-accent-strong', p.accentStrong);
+  r.setProperty('--color-on-accent', p.onAccent);
+  r.setProperty('--color-btn-ink', p.btnInk ?? p.accent);
+  r.setProperty('--color-on-btn-ink', p.onBtnInk ?? p.onAccent);
+  r.setProperty('--color-danger', p.danger);
+  document.documentElement.dataset.theme = p.isDark ? 'dark' : 'light';
+  document.documentElement.style.colorScheme = p.isDark ? 'dark' : 'light';
+}
+const sel = document.getElementById('themeSelect');
+for (const p of PALETTES) {
+  const o = document.createElement('option');
+  o.value = p.id; o.textContent = p.name;
+  sel.appendChild(o);
+}
+sel.addEventListener('change', () => applyPalette(PALETTES.find(p => p.id === sel.value)));
+applyPalette(PALETTES[0]);
+
+/* ═══ 双流模拟（基准 H）═══
+   原文流：300ms/段（batch 段级追加，非逐字）；译文流：滞后 2 段、340ms/段。
+   所有 DOM 追加经 50ms 节流合帧（对齐 use-stream 50ms 节流口径）：
+   append 队列 + rAF 循环，每 50ms 至多 flush 一次。
+   滚动纪律：scroller 仅 nearBottom(<80px) 跟底（镜像 MessageList OPT-6）；
+   译文区独立滚动、翻译中钉底，追加不推挤原文区滚动位置。 */
+const SRC = [
+  { t:'p', html:'Here\'s the Tokyo outlook for this week:' },
+  { t:'thead', cells:['Day','Condition','High / Low','Rain'] },
+  { t:'row', cells:['Wed','Sunny','21°C / 14°C','10%'] },
+  { t:'row', cells:['Thu','Cloudy','19°C / 13°C','30%'] },
+  { t:'row', cells:['Fri','Light rain','17°C / 12°C','70%'] },
+  { t:'row', cells:['Sat','Sunny','22°C / 15°C','5%'] },
+  { t:'p', html:'Friday currently shows a 70% chance of light rain with a high of 17°C — noticeably cooler and wetter than the rest of the week.' },
+  { t:'p', html:'If your hike is flexible, Saturday looks like the better window: sunny, 22°C, only a 5% rain probability.' },
+  { t:'p', html:'Compared with last year, this Friday is about 3°C cooler than the same date in 2025, mostly due to a cold front passing through the Kanto region.' },
+];
+const CN = [
+  { t:'p', html:'以下是东京本周的天气展望：' },
+  { t:'thead', cells:['星期','天气','最高 / 最低','降水'] },
+  { t:'row', cells:['周三','晴','21°C / 14°C','10%'] },
+  { t:'row', cells:['周四','多云','19°C / 13°C','30%'] },
+  { t:'row', cells:['周五','小雨','17°C / 12°C','70%'] },
+  { t:'row', cells:['周六','晴','22°C / 15°C','5%'] },
+  { t:'p', html:'周五目前降水概率 70%，最高 17°C——明显比一周其余时间更凉、更湿。' },
+  { t:'p', html:'如果徒步日期灵活，周六是更好的窗口：晴，22°C，降水概率仅 5%。' },
+  { t:'p', html:'与去年相比，本周五比 2025 年同日期低约 3°C，主要是一股冷锋正在穿越关东地区。' },
+];
+
+const scroller = document.getElementById('scroller');
+const srcBody = document.getElementById('srcBody');
+const trBody = document.getElementById('trBody');
+const trProgress = document.getElementById('trProgress');
+const trRatio = document.getElementById('trRatio');
+const trLabelText = document.getElementById('trLabelText');
+const trDot = document.getElementById('trDot');
+const entryText = document.getElementById('entryStreamingText');
+const caret = document.createElement('span');
+caret.className = 'cursor'; caret.textContent = '▊';
+
+let nearBottom = true;
+scroller.addEventListener('scroll', () => {
+  const distance = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  nearBottom = distance < 80;
+});
+function followBottom() { if (nearBottom) scroller.scrollTop = scroller.scrollHeight; }
+
+/* 50ms 节流 flusher（演示口径：高频 append 合帧，一次 rAF 至多一次真实 DOM 写入批） */
+const queue = [];
+let lastFlush = 0;
+function enqueue(fn) { queue.push(fn); }
+(function flushLoop(now) {
+  if (now - lastFlush >= 50) {
+    lastFlush = now;
+    const batch = queue.splice(0, queue.length);
+    batch.forEach(fn => fn());
+    followBottom();
+  }
+  requestAnimationFrame(flushLoop);
+})(0);
+
+/* 段级渲染（table 段并入当前表格或新建表格，镜像 markdown 表格样式） */
+let srcTable = null, trTable = null;
+function appendSeg(root, seg, tableRef) {
+  let table = tableRef.get();
+  if (seg.t === 'thead') {
+    table = document.createElement('table');
+    const thead = document.createElement('thead'); const tr = document.createElement('tr');
+    seg.cells.forEach(c => { const th = document.createElement('th'); th.textContent = c; tr.appendChild(th); });
+    thead.appendChild(tr); table.appendChild(thead);
+    const tbody = document.createElement('tbody'); table.appendChild(tbody);
+    root.appendChild(table); tableRef.set(table);
+    return;
+  }
+  if (seg.t === 'row') {
+    if (!table) { tableRef.set(null); appendSeg(root, { t:'thead', cells:['',''] }, tableRef); table = tableRef.get(); }
+    const tr = document.createElement('tr');
+    seg.cells.forEach(c => { const td = document.createElement('td'); td.textContent = c; tr.appendChild(td); });
+    table.querySelector('tbody').appendChild(tr);
+    return;
+  }
+  const p = document.createElement('p'); p.innerHTML = seg.html;
+  root.appendChild(p); tableRef.set(null);
+}
+const srcTableRef = { get: () => srcTable, set: v => { srcTable = v; } };
+const trTableRef = { get: () => trTable, set: v => { trTable = v; } };
+
+let si = 0, ci = 0, translating = true;
+function updateProgress() {
+  const pct = Math.round((ci / CN.length) * 100);
+  trProgress.style.width = pct + '%';
+  trRatio.textContent = pct + '%';
+  if (translating) entryText.textContent = '翻译中… ' + pct + '%';
+}
+
+/* 原文流：300ms/段 */
+const srcTimer = setInterval(() => {
+  if (si >= SRC.length) {
+    clearInterval(srcTimer);
+    enqueue(() => caret.remove());
+    return;
+  }
+  const seg = SRC[si++];
+  enqueue(() => {
+    appendSeg(srcBody, seg, srcTableRef);
+    srcBody.appendChild(caret); // 光标恒在流尾（appendChild 自动移动已存在子节点）
+  });
+}, 300);
+
+/* 译文流：滞后 2 段起步，340ms/段；翻译中 shimmer 占位示意未译余量 */
+let shimmer = null;
+setTimeout(() => {
+  const trTimer = setInterval(() => {
+    if (ci >= CN.length) {
+      clearInterval(trTimer);
+      enqueue(() => {
+        if (shimmer) { shimmer.remove(); shimmer = null; }
+        translating = false;
+        trDot.classList.add('tr-inline__dot--done');
+        trLabelText.textContent = '译文 · 翻译完成';
+        trRatio.textContent = '100%';
+        entryText.textContent = '翻译完成';
+      });
+      return;
+    }
+    const seg = CN[ci++];
+    enqueue(() => {
+      appendSeg(trBody, seg, trTableRef);
+      updateProgress();
+      // 未译余量 shimmer：随段数递减占位行数（1 行/剩余 2 段以上，0 行收尾）
+      const remain = CN.length - ci;
+      if (!shimmer) { shimmer = document.createElement('div'); shimmer.className = 'tr-shimmer'; }
+      shimmer.style.width = remain > 1 ? '86%' : (remain === 1 ? '52%' : '0%');
+      if (remain > 0 && !shimmer.isConnected) trBody.appendChild(shimmer);
+      else if (remain === 0 && shimmer.isConnected) { shimmer.remove(); shimmer = null; }
+      trBody.scrollTop = trBody.scrollHeight; // 独立视口钉底：不推原文区
+    });
+  }, 340);
+}, 700);
+</script>
+</body>
+</html>
