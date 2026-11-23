@@ -6,7 +6,7 @@
   --color-panel: #F4F0EA;
   --color-panel-soft: #FCFAF5;
   --color-border: rgba(122, 96, 88, 0.18); /* 暖色染边 */
-  --color-border-strong: rgba(0, 0, 0, 0.12); /* 大区分隔（侧栏/表头）用 */
+  --color-border-strong: #D9D0C6; /* 大区分隔（侧栏/表头）用；= constants.ts warm-paper borderStrong（P1 定值），运行时由 apply-theme 覆盖 */
   --color-text: #3B3D3F;
   --color-text-muted: #6A6C70; /* warm-paper 默认：对 bg 约 4.8:1 过 AA（openhanako 原值 #8E9196 仅 2.9:1 已加深） */
   /* 弱注小字（UI 补全 A1）：静态默认=当前暖纸 textMuted 同值（var 单源）；运行时由 apply-theme 按板

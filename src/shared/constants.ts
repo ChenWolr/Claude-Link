@@ -50,6 +50,7 @@ export interface ThemePalette {
 // 全部 9 套为浅色主题，色值原样搬运，映射关系：
 // bg→--color-bg, panel→--color-panel, panelSoft→--color-panel-soft, border→--color-border,
 // accent→--color-accent, accentStrong→--color-accent-strong, onAccent→按 accent 亮度选 #FFFFFF/#1A1A1A.
+// borderStrong 12 板全量显式定值（2026-11-19 P1），缺省回退仅作未来新板的防御。
 export const THEME_PALETTES: ThemePalette[] = [
   {
     // 方案C「墨石 Slate」（UI 补全 A1，2026-11-07 裁决）：第 12 套、应用默认、居数组首位
@@ -84,6 +85,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#F4F0EA',
       panelSoft: '#FCFAF5',
       border: 'rgba(122,96,88,0.18)',
+      borderStrong: '#D9D0C6',
       text: '#3B3D3F',
       textMuted: '#6A6C70',
       accent: '#537D96',
@@ -101,6 +103,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#EFF3EC',
       panelSoft: '#F9FBF7',
       border: 'rgba(91,168,140,0.22)',
+      borderStrong: '#CFDAD1',
       text: '#2E3832',
       textMuted: '#68706D',
       accent: '#5BA88C',
@@ -118,6 +121,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#FCF1E4',
       panelSoft: '#FFFBF3',
       border: 'rgba(243,126,99,0.18)',
+      borderStrong: '#E0CFC3',
       text: '#1A3049',
       textMuted: '#646F78',
       accent: '#1A3049',
@@ -135,6 +139,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#ECEFF2',
       panelSoft: '#F8F9FB',
       border: 'rgba(126,153,168,0.22)',
+      borderStrong: '#CBD1D8',
       text: '#2C3238',
       textMuted: '#676E75',
       accent: '#7E99A8',
@@ -152,6 +157,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#EDEAE2',
       panelSoft: '#FAF9F5',
       border: 'rgba(177,173,161,0.28)',
+      borderStrong: '#CFCBC2',
       text: '#2D2B28',
       textMuted: '#6E6B68',
       accent: '#B5846E',
@@ -169,6 +175,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#F3F1F0',
       panelSoft: '#FDFBFA',
       border: 'rgba(92,75,70,0.22)',
+      borderStrong: '#D6D0CD',
       text: '#1A1C1E',
       textMuted: '#6B6F73',
       accent: '#3A6B85',
@@ -186,6 +193,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#F0F0F2',
       panelSoft: '#F8F8FA',
       border: 'rgba(0,0,0,0.09)',
+      borderStrong: '#D3D3DB',
       text: '#1D1D1F',
       textMuted: '#717176',
       accent: '#636AE8',
@@ -203,6 +211,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#F0F0F0',
       panelSoft: '#F7F7F8',
       border: 'rgba(0,0,0,0.10)',
+      borderStrong: '#D6D6D6',
       text: '#1A1A1A',
       textMuted: '#727272',
       accent: '#1A1A1A',
@@ -220,6 +229,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#EFE8DB',
       panelSoft: '#FBF7EE',
       border: '#D8CFBE',
+      borderStrong: '#C8C0B2',
       text: '#2A2622',
       textMuted: '#6B6158',
       accent: '#537D96',
@@ -239,6 +249,7 @@ export const THEME_PALETTES: ThemePalette[] = [
       panel: '#FFFFFF',
       panelSoft: '#FAFBFC',
       border: 'rgba(0,0,0,0.09)',
+      borderStrong: '#D7D9DC',
       text: '#1A1D21',
       textMuted: '#6B7280', // 对 #FFFFFF 4.8:1 过 AA
       accent: '#1A1D21', // 近黑主色（A 设计：主按钮/活动态为墨色）
@@ -257,7 +268,8 @@ export const THEME_PALETTES: ThemePalette[] = [
       bg: '#0F1115',
       panel: '#14171C',
       panelSoft: '#1B2027',
-      border: '#23272F',
+      border: '#30363D',
+      borderStrong: '#3D444D',
       text: '#D3D8E0',
       textMuted: '#9AA3B2', // 对 #14171C ≈7:1
       accent: '#4EA1FF',

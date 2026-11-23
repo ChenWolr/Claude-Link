@@ -80,6 +80,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -263,9 +264,22 @@ async function readRects(ws) {
 }
 
 async function enterConfig(ws) {
+  // 【p5c 加固申报，2026-11-20】原盲垫 800ms 单次判定在冷启动慢时假红（本轮实测 3 跑 2 中招
+  // 「未进入配置页」exit 2——路由挂载 >800ms 即误判前置失败）。改轮询等待 ≤8s（同文件
+  // enterConfigWait/R2-H plumbing 加固先例），判定语义不变（仍要求 .workbench 在场）。
   await evalExpr(ws, `document.querySelector('.settings-link')?.click(), true`);
-  await sleep(800);
-  return evalExpr(ws, `!!document.querySelector('.workbench')`);
+  const deadline = Date.now() + 8000;
+  for (;;) {
+    const ok = await evalExpr(ws, `!!document.querySelector('.workbench')`);
+    if (ok) return true;
+    if (Date.now() > deadline) {
+      // 点 settings-link 重试一次再等一轮（首点可能落在路由切换窗口内落空）。
+      await evalExpr(ws, `document.querySelector('.settings-link')?.click(), true`);
+      await sleep(800);
+      return evalExpr(ws, `!!document.querySelector('.workbench')`);
+    }
+    await sleep(300);
+  }
 }
 async function enterChat(ws) {
   await evalExpr(ws, `(() => {
@@ -411,6 +425,11 @@ async function main() {
   // ── t1clp 场景组（2026-11-17 增，八问题批次）：D1-5 折叠统一桌面运行时面 / A3-5 冷启动恢复门 /
   //    C1-13 双主题弹窗 token 探针 —— 均复用冷启动 runner 手法（隔离 --user-data-dir 用后即删）──
   await runT1clpScenarios();
+
+  // ── UI5P 场景组（2026-11-20 增，UI 五点批次 p5c 测试转写收尾）：P1 分隔线逐板/边界/探针、
+  //    P2 卡片描边对比度/几何/连切、P3 气泡行宽 parity、P4 输入框 8 行封顶、P5 翻译桌面场景
+  //    （上游一律 env stub，禁真实计费请求）——均复用冷启动 runner（隔离 --user-data-dir 用后即删）──
+  await runUI5pScenarios();
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail > 0 ? 1 : 0);
@@ -638,13 +657,17 @@ async function runA1Scenarios() {
       const v = await cssVar(ws, '--color-bg');
       if (v !== '#F6F7F8') throw new Error(`--color-bg=${v} ≠ #F6F7F8`);
     });
-    await check('A1-8 保持：旧板回退链 --color-btn-ink=accent(#1A1D21) / --color-text-sub=textMuted(#6B7280) / --color-border-strong=rgba(0, 0, 0, 0.12)', async () => {
+    // 【P1 同步申报，2026-11-20 p5c】border-strong 期望由旧回退值 rgba(0,0,0,0.12) 更新为
+    // quiet-console 的 P1 显式定值 #D7D9DC（2026-11-19 UI 五点批次 P1：12 板 borderStrong 全量
+    // 显式化——02 清单 P1-T1/T2 契约，「依赖运行时回退」即 H1 病灶形态；btn-ink/text-sub 两回退
+    // 链不在 P1 范围、期望保持）。测试面同步，非改用例凑绿：新期望 = 02 契约本身。
+    await check('A1-8 保持：旧板回退链 --color-btn-ink=accent(#1A1D21) / --color-text-sub=textMuted(#6B7280) / --color-border-strong=#D7D9DC（P1 显式定值）', async () => {
       const btnInk = await cssVar(ws, '--color-btn-ink');
       const textSub = await cssVar(ws, '--color-text-sub');
       const borderStrong = await cssVar(ws, '--color-border-strong');
       if (btnInk !== '#1A1D21') throw new Error(`--color-btn-ink=${btnInk} ≠ #1A1D21`);
       if (textSub !== '#6B7280') throw new Error(`--color-text-sub=${textSub} ≠ #6B7280`);
-      if (borderStrong !== 'rgba(0, 0, 0, 0.12)') throw new Error(`--color-border-strong=${borderStrong} ≠ rgba(0, 0, 0, 0.12)`);
+      if (borderStrong !== '#D7D9DC') throw new Error(`--color-border-strong=${borderStrong} ≠ #D7D9DC（quiet-console P1 显式定值）`);
     });
   });
 }
@@ -2898,14 +2921,16 @@ async function waitForT1clpCdp() {
 }
 
 /** 冷启动一程：spawn electron（隔离 profile + 可选 seed 配置）→ CDP page → 桥就绪。
- *  opts.themeWait=false 时跳过「侧栏挂载+主题注入」等待（折叠态 boot2 侧栏窄轨无 .settings-link）。 */
+ *  opts.themeWait=false 时跳过「侧栏挂载+主题注入」等待（折叠态 boot2 侧栏窄轨无 .settings-link）。
+ *  opts.extraEnv：UI5P 场景组（p5c）追加注入的进程 env（翻译上游 stub 钩子等）——缺省不传 env
+ *  对象（继承父进程 env，既有场景行为零变化）。 */
 async function bootT1clpInstance(profileDir, seedConfig, label, opts = {}) {
   if (seedConfig) {
     writeFileSync(path.join(profileDir, 'claude-link-config.json'), JSON.stringify(seedConfig), 'utf8');
   }
-  const proc = spawn(ELECTRON_EXE, ['.', `--remote-debugging-port=${T1CLP_CDP_PORT}`, `--user-data-dir=${profileDir}`], {
-    cwd: REPO_ROOT, stdio: 'ignore',
-  });
+  const spawnOpts = { cwd: REPO_ROOT, stdio: 'ignore' };
+  if (opts.extraEnv) spawnOpts.env = { ...process.env, ...opts.extraEnv };
+  const proc = spawn(ELECTRON_EXE, ['.', `--remote-debugging-port=${T1CLP_CDP_PORT}`, `--user-data-dir=${profileDir}`], spawnOpts);
   const page = await waitForT1clpCdp();
   const ws = await connectWS(page.webSocketDebuggerUrl);
   let bridgeReady = false;
@@ -2918,9 +2943,14 @@ async function bootT1clpInstance(profileDir, seedConfig, label, opts = {}) {
     await waitBridgeAndTheme(ws);
   } else {
     // 折叠态 boot：只等主题注入完成（inline --color-bg 非空），不等侧栏展开态挂载。
+    // 【p5c 加固申报】documentElement 守卫：boot 换文档窗口期首次轮询可能落空页（首跑 FATAL 实测
+    // "Cannot read properties of null (reading 'style')"）——守卫式读取，语义不变。
     const deadline = Date.now() + 20_000;
     for (;;) {
-      const ready = await evalExpr(ws, `document.documentElement.style.getPropertyValue('--color-bg').trim().length > 0`);
+      const ready = await evalExpr(ws, `(() => {
+        const root = document.documentElement;
+        return !!root && root.style.getPropertyValue('--color-bg').trim().length > 0;
+      })()`);
       if (ready) break;
       if (Date.now() > deadline) throw new Error('20s 内主题注入未就绪（inline --color-bg 为空）');
       await sleep(400);
@@ -3254,6 +3284,1421 @@ async function runT1clpScenarios() {
   await runT1clpD1Scenario();
   await runT1clpA3Scenario();
   await runT1clpC1Scenario();
+}
+
+// ══ UI5P 场景组（2026-11-20 增，UI 五点批次 p5c 测试转写收尾）══════════════════════════════
+// 覆盖 02-测试用例清单.md 的 CDP 形态组：P1-T5/T6/T7、P2-T2/T4/T5、P3-T2/T3/T5/T6、P4-T2~T7、
+// P5-T1/T9/T15/T17/T21/T22/T24/T27（桌面面）+ P5-T26（P5b 场景）+ P5-T28/T29（P5c 场景）。
+// 手法：冷启动 out/ 产物 + mkdtemp 隔离 --user-data-dir 用后即删（A1/t1clp 同款纪律）；断言风格：
+// 探针元素 getComputedStyle 解析（A2-1 先例）、逐板切换（A2-2/A3 先例）、真实键鼠（G2/I7 先例）、
+// 页内 pinia 注入夹具（B 链 W-question 先例形态）。
+// stub 纪律（02 §0 + 03 R3 延伸，硬约束）：P5 翻译上游一律 stub，零真实外网——
+//  · P5 主组（env stub）：boot 时注入 CLAUDE_LINK_TRANSLATE_STUB=1（translation-service 启动期
+//    自动挂确定性 stub transport，每段 ~80ms 返回「【译】」+源文本）+ CLAUDE_LINK_TRANSLATE_STUB_LOG=
+//    <tmp>/translate-stub.jsonl（逐请求一行 JSON：时间戳/source 长度/engineKind），场景按日志行数
+//    核对请求计数（T27 以「仅明文段数」的计数差分钉代码块段零送翻）；
+//  · P5b/P5c（loopback 端点 stub）：02 清单 stub 纪律明文的「本地 loopback stub 等效手段」——引擎
+//    端点数据化（P5.1c ②）经 seed 配置指向 127.0.0.1 loopback 服务器（本脚本起、用后 close），
+//    路径分流实现 engineKind 差异化应答（绿/红/延迟差分）。引擎选用硬约束：google-gtx 与
+//    custom-template 是纯端点 HTTP（零第一方域名触碰）；youdao 仅可用其**成功路径**（失败路径
+//    extractYoudaoKey 会触真实 fanyi.youdao.com——禁）；bing（https+token 流）/baidu（fetchBaiduToken
+//    恒触真实域名）/tencent（凭据）不进 loopback 场景。**禁任何真实计费/外网请求**。
+// 退出协议不变：断言失败 exit 1 / 前置不满足 exit 2。
+
+const UI5P_PALETTES = [
+  { id: 'inkstone', name: '墨石' },
+  { id: 'warm-paper', name: '暖纸' },
+  { id: 'grass-aroma', name: '草香' },
+  { id: 'coral', name: '珊瑚' },
+  { id: 'contemplation', name: '沉思' },
+  { id: 'absolutely', name: '绝对' },
+  { id: 'high-contrast', name: '素白' },
+  { id: 'deep-think', name: '深思' },
+  { id: 'delve', name: '纯白' },
+  { id: 'new-warm-paper', name: '新暖纸' },
+  { id: 'quiet-console', name: '静默' },
+  { id: 'terminal-pro', name: '终端' },
+];
+// P1-T2 判据窗口（与 tdd-theme-separator-verify 同窗：[1.10, 2.00]「可见但浅」）。
+const UI5P_CONTRAST_MIN = 1.10;
+const UI5P_CONTRAST_MAX = 2.00;
+// P5 桌面场景 seed：凭据必须能被 resolveTranslationContext 解析出来——config 层读的是
+// encryptedApiKey/apiKeyEncoding（顶层 apiKey 旧字段被 StoredConfig 忽略，首跑实测 START
+// fail-fast「未配置 API 密钥」、stub 日志 0 行）——seed 用 plain 编码明文凭据。stub 替换的是
+// HTTP transport 层，凭据解析链照走（stub 日志首行可证请求已到 transport）。
+const UI5P_P5_SEED = {
+  permissionMode: 'bypassPermissions',
+  providerProfiles: [],
+  encryptedApiKey: 'sk-e2e-translate-stub-not-a-real-key',
+  apiKeyEncoding: 'plain',
+  apiBaseUrl: 'https://translation-stub.invalid',
+  webAccess: { enabled: false, port: 8790, allowedHosts: [] },
+};
+
+function ui5pFreshnessPrecondition() {
+  precondition(existsSync(MAIN_OUT) && existsSync(ELECTRON_EXE), 'out/main/index.js 或 electron.exe 缺失——先 npm run build');
+  const outMtime = statSync(MAIN_OUT).mtime;
+  for (const src of ['src/shared/constants.ts', 'src/main/modules/config-manager.ts', 'src/main/modules/translation-service.ts']) {
+    precondition(outMtime > statSync(path.join(REPO_ROOT, src)).mtime, `out/ 产物过期（${src} 晚于产物）——先 npm run build`);
+  }
+}
+
+// computed 颜色 'rgb(r, g, b)' / 'rgba(r, g, b, a)' → {r,g,b,a}；解析失败 null。
+function ui5pParseColor(v) {
+  const m = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)(?:[,\s]+([\d.]+))?\s*\)/.exec(String(v).trim());
+  if (!m) return null;
+  return { r: Number(m[1]), g: Number(m[2]), b: Number(m[3]), a: m[4] === undefined ? 1 : Number(m[4]) };
+}
+function ui5pRelLum({ r, g, b }) {
+  const lin = [r, g, b].map((v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4); });
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+/** WCAG 对比度；fg 带 alpha 时按 bg 合成（运行时解析值形态的 P1-T2/P2-T2 同窗判定）。 */
+function ui5pContrast(fgRaw, bgRaw) {
+  const bg = ui5pParseColor(bgRaw);
+  const fg = ui5pParseColor(fgRaw);
+  precondition(!!bg && !!fg, `颜色解析失败：fg=${JSON.stringify(fgRaw)} bg=${JSON.stringify(bgRaw)}`);
+  const comp = fg.a < 1
+    ? { r: fg.r * fg.a + bg.r * (1 - fg.a), g: fg.g * fg.a + bg.g * (1 - fg.a), b: fg.b * fg.a + bg.b * (1 - fg.a), a: 1 }
+    : fg;
+  const l1 = ui5pRelLum(comp);
+  const l2 = ui5pRelLum(bg);
+  return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+}
+function ui5pNorm(v) {
+  return String(v).replace(/\s+/g, '');
+}
+
+/** pinia store 页内表达式（W-question 夹具同款 pinia 直取形态）。js 内 `st` 即目标 store。 */
+function ui5pPiniaExpr(storeName, js) {
+  return `(() => {
+    const app = document.querySelector('#app');
+    const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+    const st = pinia && pinia._s ? pinia._s.get(${JSON.stringify(storeName)}) : null;
+    if (!st) return null;
+    ${js}
+  })()`;
+}
+
+/** stub 请求日志行数（P5 场景请求计数证据：每行 = 主进程发出的一次段级翻译请求）。 */
+function ui5pStubLogCount(logPath) {
+  try {
+    return readFileSync(logPath, 'utf8').split('\n').filter((l) => l.trim().length > 0).length;
+  } catch {
+    return 0;
+  }
+}
+
+/** 等待 stub 日志计数进入静止窗（连续 quietMs 无新行）后返回当前值——流式 follow 去抖（1.5s）
+ *  的迟到扩展请求不落进后续差分基线（T27 计数差分前置；无静止等待会让 T9 尾段的迟到请求
+ *  混入 T27 基线造成假红）。 */
+async function ui5pWaitStubLogStable(logPath, quietMs = 2200) {
+  let last = ui5pStubLogCount(logPath);
+  let lastChange = Date.now();
+  const deadline = Date.now() + 30_000;
+  for (;;) {
+    await sleep(300);
+    const now = ui5pStubLogCount(logPath);
+    if (now !== last) {
+      last = now;
+      lastChange = Date.now();
+    } else if (Date.now() - lastChange >= quietMs) {
+      return last;
+    }
+    if (Date.now() > deadline) return last;
+  }
+}
+
+/** 渲染层 RenderableMessage 最小契约夹具（shared/types/export-image.ts RenderableMessage 形状）。 */
+function ui5pMsg(sessionId, id, role, content, opts = {}) {
+  return {
+    id, sessionId, role, content,
+    eventType: opts.eventType ?? 'message',
+    costUsd: null, durationMs: null, endedAt: null,
+    processKind: opts.processKind ?? null,
+    parentAgentId: null, toolUseId: null, title: null,
+    isError: false,
+    createdAt: opts.createdAt ?? new Date().toISOString(),
+  };
+}
+
+/** 注入/操作 pinia session store：消息夹具（MessageList 经 store.messages 响应式渲染）。 */
+async function ui5pInjectMessages(ws, messages) {
+  const r = await evalExpr(ws, ui5pPiniaExpr('session', `
+    st.messages = ${JSON.stringify(messages)};
+    st.turnStartIndex = 0;
+    return 'ok';
+  `));
+  precondition(r === 'ok', `P3 消息夹具注入失败：${JSON.stringify(r)}`);
+  await sleep(400);
+}
+
+/** 流式态播种：session store streamingContent/streamingThinking 直设（displayContent 经
+ *  use-stream watch 节流跟随；MessageList stream-group 据 props 渲染）。 */
+async function ui5pSetStreaming(ws, { content, thinking } = {}) {
+  const r = await evalExpr(ws, ui5pPiniaExpr('session', `
+    st.streamingContent = ${JSON.stringify(content ?? '')};
+    st.streamingThinking = ${JSON.stringify(thinking ?? '')};
+    return 'ok';
+  `));
+  precondition(r === 'ok', `流式态播种失败：${JSON.stringify(r)}`);
+  await sleep(400); // use-stream 50ms 节流 + flush 窗口
+}
+
+/** 聊天 textarea 播种（native setter + input 事件——Vue v-model 同一事件路径）。 */
+async function ui5pSetTextarea(ws, text) {
+  const ok = await evalExpr(ws, `(() => {
+    const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+    if (!ta) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+    setter.call(ta, ${JSON.stringify(text)});
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  precondition(ok, '聊天 textarea 不在 DOM');
+  await sleep(150); // watch flush:'post' + autoResize 窗口
+}
+
+async function ui5pTextareaBox(ws) {
+  return evalExpr(ws, `(() => {
+    const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+    if (!ta) return null;
+    return { ch: ta.clientHeight, sh: ta.scrollHeight, len: ta.value.length };
+  })()`);
+}
+
+/** 同页 1px 边框参照探针：合成 `border: 1px solid red` 元素的 computed borderLeftWidth。
+ *  【环境事实申报，2026-11-20 p5c】本机（Windows 125% 缩放，DPR=1.25）Chromium 把 1px 边框吸附到
+ *  1 设备像素，computed 报 0.8px（合成探针实测：dpr=1.25 与 override dpr≈1 下均 0.8px；1px/1px
+ *  同吸附恒等）——「1px 分隔线」断言与同页参照值恒等（环境无关；2px 加宽 → 1.6px ≠ 0.8px 即红，
+ *  钉力不减）。失败三分流「换稳定断言」口径。 */
+async function ui5pBorderProbe(ws, sel, widthProp, styleProp) {
+  return evalExpr(ws, `(() => {
+    const ref = document.createElement('i');
+    ref.style.border = '1px solid red';
+    document.documentElement.appendChild(ref);
+    const refW = getComputedStyle(ref).borderLeftWidth;
+    ref.remove();
+    const el = document.querySelector(${JSON.stringify(sel)});
+    if (!el) return null;
+    const c = getComputedStyle(el);
+    return { raw: c[${JSON.stringify(widthProp)}], style: c[${JSON.stringify(styleProp)}], ref: refW };
+  })()`);
+}
+
+/** CDP /json 全部 page target（导出隐藏窗识别：start 前后 diff）。 */
+async function ui5pListPageTargets(port = T1CLP_CDP_PORT) {
+  const resp = await fetch(`http://127.0.0.1:${port}/json`, { signal: AbortSignal.timeout(15_000) });
+  const targets = await resp.json();
+  return targets.filter((t) => t.type === 'page');
+}
+
+// ── UI5P P1：分隔线逐板切换（P1-T5）+ 三分隔 1px 与几何（P1-T6）+ 三板探针（P1-T7）──
+async function runUI5pP1Scenario() {
+  console.log('\n── UI5P P1：大区分隔线逐板切换/边界几何/三板探针（P1-T5/T6/T7）──');
+  ui5pFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-ui5p');
+  mkdirSync(parent, { recursive: true });
+  const profileDir = mkdtempSync(path.join(parent, 'p1-'));
+  let proc = null;
+  try {
+    const boot = await bootT1clpInstance(profileDir, {
+      permissionMode: 'bypassPermissions', providerProfiles: [], webAccess: { enabled: false, port: 8790, allowedHosts: [] },
+    }, 'UI5P P1（墨石默认）');
+    proc = boot.proc;
+    const ws = boot.ws;
+    await enterChat(ws);
+    await setViewport(ws, 1280, 900);
+
+    // P1-T6① 展开态：三分隔 computed border-*-width === 1px + 几何基线（改动前快照，12 板切换后回比）。
+    // 【DPR 归一申报，2026-11-20 p5c】Windows 125% 显示缩放（devicePixelRatio=1.25）下 Chromium 把
+    // 1px 边框吸附到 1 设备像素，computed 报 0.8px（首跑实测 iw=1186/dpr=1.25/border=0.8px）——
+    // 断言按设备像素归一（round(px × dpr) === 1）：钉力不减（仍恰 1 设备像素、2px 加宽即红），
+    // 消除 DPR≠1 环境的假红（失败三分流「换稳定断言」口径）。
+    let baseline = null;
+    await check('UI5P P1-T6① 展开态三分隔 border-*-width = 1px（同页 1px 参照恒等，DPR 吸附免疫）+ solid + 几何基线', async () => {
+      const pick = async (sel, widthProp, styleProp, label) => {
+        const border = await ui5pBorderProbe(ws, sel, widthProp, styleProp);
+        if (!border) throw new Error(`${label}元素缺失（${sel}）`);
+        if (border.raw !== border.ref) throw new Error(`${label} border-width ${border.raw} ≠ 同页 1px 参照 ${border.ref}（加宽/改形）`);
+        if (border.style !== 'solid') throw new Error(`${label} border-style ${border.style} ≠ solid`);
+        const geo = await evalExpr(ws, `(() => { const el = document.querySelector(${JSON.stringify(sel)}); const b = el.getBoundingClientRect(); return { w: Math.round(b.width), h: Math.round(b.height) }; })()`);
+        return { border, geo };
+      };
+      const taskPanel = await pick('.task-panel', 'borderLeftWidth', 'borderLeftStyle', '右栏左缘');
+      const sidebar = await pick('.sidebar', 'borderRightWidth', 'borderRightStyle', '左栏右缘');
+      const appHeader = await pick('.app-header', 'borderBottomWidth', 'borderBottomStyle', '顶栏底缘');
+      baseline = {
+        taskPanel: { border: taskPanel.border.raw, ...taskPanel.geo },
+        sidebar: { border: sidebar.border.raw, ...sidebar.geo },
+        appHeader: { border: appHeader.border.raw, ...appHeader.geo },
+      };
+      log(`     UI5P P1-T6① 三分隔 computed=${taskPanel.border.raw}/${sidebar.border.raw}/${appHeader.border.raw}（同页 1px 参照=${taskPanel.border.ref}，DPR 吸附恒等）`);
+    });
+
+    // P1-T6② 右栏折叠态：同一容器（.task-panel--collapsed）左缘分隔仍 1px → 展开回位。
+    await check('UI5P P1-T6② 右栏折叠态 border-left-width === 1px + 折叠/展开一轮几何稳定', async () => {
+      const before = await evalExpr(ws, `(() => { const el = document.querySelector('.task-panel'); return el ? Math.round(el.getBoundingClientRect().width) : null; })()`);
+      await evalExpr(ws, `document.querySelector('.rail__btn--collapse')?.click(), true`);
+      await sleep(400);
+      const s = await ui5pBorderProbe(ws, '.task-panel--collapsed', 'borderLeftWidth', 'borderLeftStyle');
+      if (!s) throw new Error('折叠态右栏未渲染（.task-panel--collapsed 缺失）');
+      if (s.raw !== s.ref) throw new Error(`折叠态右栏左缘 border-width ${s.raw} ≠ 同页 1px 参照 ${s.ref}`);
+      if (s.style !== 'solid') throw new Error(`折叠态右栏 border-style ${s.style} ≠ solid`);
+      await evalExpr(ws, `document.querySelector('.rail__btn--collapse')?.click(), true`);
+      await waitFor('UI5P P1-T6② 右栏展开回位', () => evalOk(ws, `!!document.querySelector('.task-panel') && !document.querySelector('.task-panel--collapsed')`), 8);
+      const after = await evalExpr(ws, `(() => { const el = document.querySelector('.task-panel'); return el ? Math.round(el.getBoundingClientRect().width) : null; })()`);
+      if (before === null || after === null || before !== after) throw new Error(`右栏展开/折叠一轮宽度漂移：${before} → ${after}`);
+    });
+
+    // P1-T6③ 左栏折叠态：.sidebar--collapsed 右缘分隔仍 1px → 展开回位。
+    await check('UI5P P1-T6③ 左栏折叠态 border-right-width === 1px + 展开回位', async () => {
+      await evalExpr(ws, `document.querySelector('.sidebar__collapse')?.click(), true`);
+      await sleep(400);
+      const s = await ui5pBorderProbe(ws, '.sidebar--collapsed', 'borderRightWidth', 'borderRightStyle');
+      if (!s) throw new Error('折叠态左栏未渲染（.sidebar--collapsed 缺失）');
+      if (s.raw !== s.ref) throw new Error(`折叠态左栏右缘 border-width ${s.raw} ≠ 同页 1px 参照 ${s.ref}`);
+      if (s.style !== 'solid') throw new Error(`折叠态左栏 border-style ${s.style} ≠ solid`);
+      await evalExpr(ws, `document.querySelector('.sidebar__rail__expand')?.click(), true`);
+      // 展开稳态等待（首跑假红根因：盲垫 400ms 时展开未完成，.settings-link 仍缺席 → 外观 tab 超时）。
+      await waitFor('UI5P P1-T6③ 左栏展开回位', () => evalOk(ws, `!!document.querySelector('.sidebar__collapse') && !document.querySelector('.sidebar--collapsed')`), 8);
+    });
+
+    // P1-T7 默认板（inkstone）探针：解析值 = constants.ts 定义值，且 ≠ panel 底、对比度 ∈ 窗口。
+    await check('UI5P P1-T7 inkstone 探针解析 = #D5DAE1、≠ panel 底、对比度 ∈ [1.10, 2.00]', async () => {
+      const got = await probeDialogFace(ws, 'var(--color-border-strong)', 'color');
+      const expect = hexToRgbNorm(paletteFieldFromConstants('inkstone', 'borderStrong'));
+      if (ui5pNorm(got) !== expect) throw new Error(`inkstone border-strong 解析 ${got} ≠ ${expect}`);
+      if (ui5pNorm(got) === 'rgba(0,0,0,0.12)') throw new Error('解析值 = 静态回退值 rgba(0,0,0,0.12)（应用链未触达）');
+      const panel = await probeDialogFace(ws, 'var(--color-panel)', 'backgroundColor');
+      if (ui5pNorm(got) === ui5pNorm(panel)) throw new Error(`border-strong 与 panel 同色（${got}）`);
+      const cr = ui5pContrast(got, panel);
+      log(`     UI5P P1-T7 inkstone：border-strong=${got} panel=${panel} 对比度=${cr.toFixed(2)}`);
+      if (cr < UI5P_CONTRAST_MIN || cr > UI5P_CONTRAST_MAX) throw new Error(`对比度 ${cr.toFixed(2)} ∉ [${UI5P_CONTRAST_MIN}, ${UI5P_CONTRAST_MAX}]`);
+    });
+
+    // P1-T5 逐板切换 12 板 + 两板快速连切（appearance tab，A2-2 手法；探针断言文档根解析值）。
+    await openAppearanceTab(ws);
+    await check('UI5P P1-T5 12 板逐板切换：--color-border-strong 解析值逐板 = 该板定义值（无旧板/静态残留）', async () => {
+      for (const p of UI5P_PALETTES) {
+        await clickPaletteCard(ws, p.name);
+        const got = await probeDialogFace(ws, 'var(--color-border-strong)', 'color');
+        const expect = hexToRgbNorm(paletteFieldFromConstants(p.id, 'borderStrong'));
+        if (ui5pNorm(got) !== expect) throw new Error(`${p.id}（${p.name}）border-strong 解析 ${got} ≠ ${expect}`);
+        if (ui5pNorm(got) === 'rgba(0,0,0,0.12)') throw new Error(`${p.id} 残留静态回退值（旧板值/静态默认残留）`);
+      }
+    });
+
+    await check('UI5P P1-T5b 两板快速连续切换：终态解析 = 最后选中板（无旧板值残留）', async () => {
+      // 连续两次点击零等待（同帧竞态窗口），停 400ms 后读终态。
+      await evalExpr(ws, `(() => {
+        const cards = [...document.querySelectorAll('.palette-card')];
+        const byName = (n) => cards.find((c) => (c.querySelector('.palette-name')?.childNodes[0]?.textContent ?? '').trim() === n);
+        byName('新暖纸')?.click();
+        byName('终端')?.click();
+        return true;
+      })()`);
+      await sleep(600);
+      const got = await probeDialogFace(ws, 'var(--color-border-strong)', 'color');
+      const expect = hexToRgbNorm(paletteFieldFromConstants('terminal-pro', 'borderStrong'));
+      if (ui5pNorm(got) !== expect) throw new Error(`快速连切后解析 ${got} ≠ 终端板 ${expect}（连切竞态残留）`);
+    });
+
+    // P1-T6④ 回聊天页：分隔几何与基线一致（12 板切换不引起布局跳动）。
+    await enterChat(ws);
+    await check('UI5P P1-T6④ 12 板切换后回聊天页：三分隔仍 1px（参照恒等）+ 面板几何与基线一致', async () => {
+      const s = await evalExpr(ws, `(() => {
+        const pick = (sel, prop) => { const el = document.querySelector(sel); if (!el) return null;
+          const c = getComputedStyle(el); const b = el.getBoundingClientRect();
+          return { border: c[prop], w: Math.round(b.width), h: Math.round(b.height) }; };
+        return {
+          taskPanel: pick('.task-panel', 'borderLeftWidth'),
+          sidebar: pick('.sidebar', 'borderRightWidth'),
+          appHeader: pick('.app-header', 'borderBottomWidth'),
+        };
+      })()`);
+      const ref = await ui5pBorderProbe(ws, '.task-panel', 'borderLeftWidth', 'borderLeftStyle');
+      for (const [k, label] of [['taskPanel', '右栏左缘'], ['sidebar', '左栏右缘'], ['appHeader', '顶栏底缘']]) {
+        if (!s[k]) throw new Error(`${label}元素缺失`);
+        if (s[k].border !== ref.ref) throw new Error(`${label} border-width ${s[k].border} ≠ 同页 1px 参照 ${ref.ref}`);
+        if (s[k].w !== baseline[k].w || s[k].h !== baseline[k].h) {
+          throw new Error(`${label} 几何漂移：基线 ${baseline[k].w}×${baseline[k].h} → 现 ${s[k].w}×${s[k].h}`);
+        }
+      }
+    });
+  } finally {
+    if (proc?.pid) await killT1clpBoot(proc);
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+}
+
+// ── UI5P P2：会话卡片静止描边对比度（P2-T2）+ 几何稳定（P2-T4）+ 连切随板（P2-T5）──
+async function runUI5pP2Scenario() {
+  console.log('\n── UI5P P2：侧栏会话卡片轮廓（P2-T2/T4/T5）──');
+  ui5pFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-ui5p');
+  mkdirSync(parent, { recursive: true });
+  const profileDir = mkdtempSync(path.join(parent, 'p2-'));
+  let proc = null;
+  try {
+    const boot = await bootT1clpInstance(profileDir, {
+      permissionMode: 'bypassPermissions', providerProfiles: [], webAccess: { enabled: false, port: 8790, allowedHosts: [] },
+    }, 'UI5P P2（墨石默认 + 一张静止会话卡）');
+    proc = boot.proc;
+    const ws = boot.ws;
+    // 一张会话卡（不点击 → 非 active 静止态；P2-T2 断言面）。
+    await evalExpr(ws, `window.claudeLink.createSession('UI5P-P2-fixture', { workingDir: null }).then((s) => s.id)`);
+    await waitFor('UI5P P2 静止卡渲染', () => evalOk(ws, `(() => {
+      const card = [...document.querySelectorAll('.session-card')]
+        .find((c) => (c.querySelector('.session-card__name')?.textContent || '').trim() === 'UI5P-P2-fixture');
+      return !!card && !card.classList.contains('active');
+    })()`), 10);
+
+    /** 等卡片描边 transition 收敛（computed borderTopColor === 当前 --color-border 现值）再交还调用方采样。
+     *  【p5c run2 假红申报，flaky→稳定断言分流】.session-card 带 border-color transition
+     *  （AppSidebar.vue:539，duration-fast 档）：切板后立即采样会读到 transition 起点值
+     *  （run2 实测：panel 变量已切新暖纸 rgb(239,232,219)、描边仍墨石起点 rgb(228,231,236)
+     *  → 对比度 1.02 假红；run1 同点全绿——eval 往返时序落点不同）。收敛等待只消时序窗：
+     *  断言面不变（描边=该板 border 现值 + 1px 同页参照恒等 + 几何稳定），超时交还原断言判红
+     *  （真缺陷——如切板链漏写/旧板残留——依然红，不被本等待吞掉）。 */
+    const waitCardStrokeSettled = async (timeoutMs = 3000) => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const s = await evalExpr(ws, `(() => {
+          const card = [...document.querySelectorAll('.session-card')]
+            .find((c) => (c.querySelector('.session-card__name')?.textContent || '').trim() === 'UI5P-P2-fixture');
+          if (!card) return null;
+          const probe = document.createElement('i');
+          probe.style.color = 'var(--color-border)';
+          document.documentElement.appendChild(probe);
+          const cur = getComputedStyle(probe).color;
+          probe.remove();
+          return { stroke: getComputedStyle(card).borderTopColor, cur, active: card.classList.contains('active') };
+        })()`);
+        if (s && ui5pNorm(s.stroke) === ui5pNorm(s.cur)) return s;
+        if (Date.now() > deadline) return s;
+        await sleep(100);
+      }
+    };
+
+    const cardProbe = async () => evalExpr(ws, `(() => {
+      const card = [...document.querySelectorAll('.session-card')]
+        .find((c) => (c.querySelector('.session-card__name')?.textContent || '').trim() === 'UI5P-P2-fixture');
+      if (!card) return null;
+      const c = getComputedStyle(card);
+      const b = card.getBoundingClientRect();
+      const panelProbe = document.createElement('i');
+      panelProbe.style.color = 'var(--color-panel)';
+      document.documentElement.appendChild(panelProbe);
+      const panel = getComputedStyle(panelProbe).color;
+      panelProbe.remove();
+      const borderRef = document.createElement('i');
+      borderRef.style.border = '1px solid red';
+      document.documentElement.appendChild(borderRef);
+      const borderRefW = getComputedStyle(borderRef).borderLeftWidth;
+      borderRef.remove();
+      return { borderColor: c.borderTopColor, borderWidth: c.borderTopWidth, borderRef: borderRefW, w: Math.round(b.width), h: Math.round(b.height), panel, active: card.classList.contains('active') };
+    })()`);
+
+    const samples = {};
+    await check('UI5P P2-T2 三板抽样：静止卡描边解析值对侧栏底对比度 ∈ [1.10, 2.00]', async () => {
+      for (const p of [
+        { id: 'inkstone', name: '墨石' },
+        { id: 'new-warm-paper', name: '新暖纸' },
+        { id: 'terminal-pro', name: '终端' },
+      ]) {
+        await openAppearanceTab(ws);
+        await clickPaletteCard(ws, p.name);
+        await waitCardStrokeSettled(); // border-color transition 收敛后再采样（run2 假红申报见 helper 注）
+        const s = await cardProbe();
+        if (!s) throw new Error(`${p.id}：静止卡缺失`);
+        const cr = ui5pContrast(s.borderColor, s.panel);
+        samples[p.id] = { ...s, contrast: cr };
+        log(`     UI5P P2-T2 ${p.id}：描边=${s.borderColor} 侧栏底=${s.panel} 对比度=${cr.toFixed(2)}`);
+        if (cr < UI5P_CONTRAST_MIN || cr > UI5P_CONTRAST_MAX) {
+          throw new Error(`${p.id} 静止卡描边对侧栏底对比度 ${cr.toFixed(2)} ∉ [${UI5P_CONTRAST_MIN}, ${UI5P_CONTRAST_MAX}]`);
+        }
+        if (s.active) throw new Error(`${p.id} 抽样卡呈 active 态（非静止卡）`);
+      }
+    });
+
+    await check('UI5P P2-T4 描边宽度仍 1px + 卡片几何在描边色切换前后稳定（三板零跳动）', async () => {
+      const geo = Object.entries(samples).map(([id, s]) => `${id}:${s.w}×${s.h}`);
+      const first = samples.inkstone;
+      const last = samples['terminal-pro'];
+      if (first.borderWidth !== first.borderRef || last.borderWidth !== last.borderRef) {
+        throw new Error(`描边宽度漂移：${first.borderWidth}(参照 ${first.borderRef})/${last.borderWidth}(参照 ${last.borderRef})——非 1px（同页参照恒等口径）`);
+      }
+      if (first.w !== last.w || first.h !== last.h) {
+        throw new Error(`卡片几何随描边色切换漂移：inkstone ${first.w}×${first.h} vs terminal-pro ${last.w}×${last.h}`);
+      }
+      log(`     UI5P P2-T4 几何：${geo.join(' → ')}（三板一致）`);
+    });
+
+    await check('UI5P P2-T5 两板快速连切后描边随板（终态 = 终端板 border 定值）', async () => {
+      await evalExpr(ws, `(() => {
+        const cards = [...document.querySelectorAll('.palette-card')];
+        const byName = (n) => cards.find((c) => (c.querySelector('.palette-name')?.childNodes[0]?.textContent ?? '').trim() === n);
+        byName('新暖纸')?.click();
+        byName('终端')?.click();
+        return true;
+      })()`);
+      await sleep(600);
+      await waitCardStrokeSettled(); // 同上：transition 收敛后再采样（终态=终端板断言语义不变）
+      const s = await cardProbe();
+      if (!s) throw new Error('连切后静止卡缺失');
+      const expect = hexToRgbNorm(paletteFieldFromConstants('terminal-pro', 'border'));
+      if (ui5pNorm(s.borderColor) !== expect) throw new Error(`连切后描边 ${s.borderColor} ≠ 终端板 border ${expect}（旧板残留）`);
+    });
+  } finally {
+    if (proc?.pid) await killT1clpBoot(proc);
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+}
+
+// ── UI5P P3：用户/助手气泡行宽 parity（P3-T2/T3/T5/T6；pinia 消息注入夹具）──
+async function runUI5pP3Scenario() {
+  console.log('\n── UI5P P3：气泡行宽 parity（P3-T2/T3/T5/T6）──');
+  ui5pFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-ui5p');
+  mkdirSync(parent, { recursive: true });
+  const profileDir = mkdtempSync(path.join(parent, 'p3-'));
+  let proc = null;
+  try {
+    const boot = await bootT1clpInstance(profileDir, {
+      permissionMode: 'bypassPermissions', providerProfiles: [], webAccess: { enabled: false, port: 8790, allowedHosts: [] },
+    }, 'UI5P P3（墨石默认 + 会话 + 注入消息）');
+    proc = boot.proc;
+    const ws = boot.ws;
+    const sid = await evalExpr(ws, `window.claudeLink.createSession('UI5P-P3-fixture', { workingDir: null }).then((s) => s.id)`);
+    precondition(typeof sid === 'string' && sid.length > 0, 'P3 夹具会话创建失败');
+    await waitFor('UI5P P3 会话卡渲染', () => evalOk(ws, `[...document.querySelectorAll('.session-card')]
+      .some((c) => (c.querySelector('.session-card__name')?.textContent || '').trim() === 'UI5P-P3-fixture')`), 10);
+    await evalExpr(ws, `(() => {
+      const card = [...document.querySelectorAll('.session-card')]
+        .find((c) => (c.querySelector('.session-card__name')?.textContent || '').trim() === 'UI5P-P3-fixture');
+      card?.click();
+      return true;
+    })()`);
+    await waitFor('UI5P P3 聊天页就绪', () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 10);
+    await setViewport(ws, 1280, 900);
+
+    const longText = ('折行点对齐测试。'.repeat(60)); // ~540 字，触发 max-width 触顶
+    const shortText = '短消息';
+    const noSpaceLong = 'x'.repeat(3000); // 超长无空格串（P3-T5 异常向）
+
+    // P3-T2：长 user + 长 assistant 同屏。
+    await ui5pInjectMessages(ws, [
+      ui5pMsg(sid, 'p3-u1', 'user', longText, { createdAt: '2026-11-20T09:00:00.000Z' }),
+      ui5pMsg(sid, 'p3-a1', 'assistant', longText, { createdAt: '2026-11-20T09:00:01.000Z' }),
+    ]);
+    await check('UI5P P3-T2 长消息同屏：user/assistant computed max-width 相等且 clientWidth 相等（触顶）', async () => {
+      const s = await evalExpr(ws, `(() => {
+        const u = document.querySelector('.bubble--user');
+        const a = document.querySelector('.bubble--assistant');
+        if (!u || !a) return null;
+        const cu = getComputedStyle(u); const ca = getComputedStyle(a);
+        return { umw: cu.maxWidth, amw: ca.maxWidth, uw: u.clientWidth, aw: a.clientWidth };
+      })()`);
+      if (!s) throw new Error('气泡缺失（注入未渲染）');
+      if (s.umw !== s.amw) throw new Error(`computed max-width 不一致：user=${s.umw} assistant=${s.amw}`);
+      if (s.uw !== s.aw) throw new Error(`长文本 clientWidth 不一致：user=${s.uw} assistant=${s.aw}（折行点错位）`);
+    });
+
+    // P3-T3：短 user 消息收缩包裹 + 右对齐形态。
+    await ui5pInjectMessages(ws, [
+      ui5pMsg(sid, 'p3-u2', 'user', shortText, { createdAt: '2026-11-20T09:01:00.000Z' }),
+    ]);
+    await check('UI5P P3-T3 短消息：user 气泡 width < max-width（收缩包裹）+ wrap--user flex-end 右对齐', async () => {
+      const s = await evalExpr(ws, `(() => {
+        const wraps = [...document.querySelectorAll('[data-testid="user-bubble-wrap"]')];
+        const wrap = wraps[wraps.length - 1];
+        const bubble = wrap ? wrap.querySelector('.bubble--user') : null;
+        if (!wrap || !bubble) return null;
+        const cb = getComputedStyle(bubble); const cw = getComputedStyle(wrap);
+        return { w: bubble.getBoundingClientRect().width, mw: cb.maxWidth, alignSelf: cw.alignSelf };
+      })()`);
+      if (!s) throw new Error('短消息气泡缺失');
+      const mwPx = parseFloat(s.mw);
+      if (!(s.w < mwPx)) throw new Error(`短消息被撑满（width ${s.w} ≥ max-width ${mwPx}）`);
+      if (s.alignSelf !== 'flex-end') throw new Error(`.bubble-wrap--user 对齐漂移：align-self=${s.alignSelf}`);
+    });
+
+    // P3-T5：超长无空格串不横向溢出。
+    await ui5pInjectMessages(ws, [
+      ui5pMsg(sid, 'p3-u3', 'user', noSpaceLong, { createdAt: '2026-11-20T09:02:00.000Z' }),
+    ]);
+    await check('UI5P P3-T5 超长无空格串：气泡仍受 max-width 约束且 scrollWidth ≤ clientWidth + 1', async () => {
+      const s = await evalExpr(ws, `(() => {
+        const wraps = [...document.querySelectorAll('[data-testid="user-bubble-wrap"]')];
+        const wrap = wraps[wraps.length - 1];
+        const bubble = wrap ? wrap.querySelector('.bubble--user') : null;
+        if (!bubble) return null;
+        const cb = getComputedStyle(bubble);
+        const inner = document.querySelector('.message-list__inner');
+        return { sw: bubble.scrollWidth, cw: bubble.clientWidth, mw: cb.maxWidth, innerW: inner ? inner.clientWidth : null };
+      })()`);
+      if (!s) throw new Error('无空格串气泡缺失');
+      if (s.sw > s.cw + 1) throw new Error(`横向溢出：scrollWidth ${s.sw} > clientWidth ${s.cw} + 1`);
+      // max-width: 85% 为百分比——px 约束对照 = 列容器（.message-list__inner）clientWidth × 0.85。
+      if (!(s.cw <= s.innerW * 0.85 + 1)) throw new Error(`气泡宽 ${s.cw} 超出列容器 85%（${s.innerW}×0.85）约束`);
+    });
+
+    // P3-T6：长短交替连发（混排渲染批次）口径不漂移。
+    const mixed = [];
+    for (let i = 0; i < 6; i++) {
+      mixed.push(ui5pMsg(sid, `p3-m-u${i}`, 'user', i % 2 === 0 ? longText : shortText, { createdAt: `2026-11-20T09:03:0${i}.000Z` }));
+      mixed.push(ui5pMsg(sid, `p3-m-a${i}`, 'assistant', i % 2 === 0 ? longText : shortText, { createdAt: `2026-11-20T09:03:0${i}.500Z` }));
+    }
+    await ui5pInjectMessages(ws, mixed);
+    await check('UI5P P3-T6 长短交替混排：全部 user/assistant 气泡 computed max-width 一致（批次不漂移）', async () => {
+      const s = await evalExpr(ws, `(() => {
+        const us = [...document.querySelectorAll('.bubble--user')].map((el) => getComputedStyle(el).maxWidth);
+        const as = [...document.querySelectorAll('.bubble--assistant')].map((el) => getComputedStyle(el).maxWidth);
+        return { us, as };
+      })()`);
+      if (s.us.length < 3 || s.as.length < 3) throw new Error(`混排气泡数不足：user=${s.us.length} assistant=${s.as.length}`);
+      if (new Set(s.us).size !== 1) throw new Error(`user 气泡 max-width 漂移：${[...new Set(s.us)].join('/')}`);
+      if (new Set(s.as).size !== 1) throw new Error(`assistant 气泡 max-width 漂移：${[...new Set(s.as)].join('/')}`);
+      if (s.us[0] !== s.as[0]) throw new Error(`混排下 user(${s.us[0]}) ≠ assistant(${s.as[0]})`);
+    });
+  } finally {
+    if (proc?.pid) await killT1clpBoot(proc);
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+}
+
+// ── UI5P P4：输入框 8 行封顶行为面（P4-T2~T7；主 boot medium + small/large 两 mini boot）──
+const UI5P_CAP_TOLERANCE_RATIO = 0.03; // 三档封顶高度比 vs 字号基准比的容差（+22px 常数项导致 ~1.5% 偏差）
+
+async function ui5pWaitChatInput(ws, label) {
+  await enterChat(ws);
+  await waitFor(`${label} 聊天页输入框就绪`, () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 12);
+  await setViewport(ws, 1280, 900);
+}
+
+/** P4 单档行为面：8 行内无滚动单调增 + 第 9 行封顶出滚动；返回封顶 clientHeight（T4 比例用）。 */
+async function ui5pP4CapProbe(ws, label) {
+  const caps = {};
+  await check(`UI5P P4-T2 ${label}：逐行输入 1→8 行 clientHeight 单调增且全程无内部滚动`, async () => {
+    let prev = 0;
+    for (let n = 1; n <= 8; n++) {
+      await ui5pSetTextarea(ws, Array.from({ length: n }, (_, i) => `第${i + 1}行高度探针内容`).join('\n'));
+      const box = await ui5pTextareaBox(ws);
+      if (!box) throw new Error('textarea 缺失');
+      if (box.ch <= prev) throw new Error(`${n} 行 clientHeight 未单调增：${prev} → ${box.ch}`);
+      if (box.sh > box.ch + 1) throw new Error(`${n} 行出现内部滚动：scrollHeight ${box.sh} > clientHeight ${box.ch} + 1（边框补偿链破）`);
+      prev = box.ch;
+      caps[`line${n}`] = box.ch;
+    }
+    caps.cap8 = prev;
+  });
+  await check(`UI5P P4-T3 ${label}：第 9/10 行高度钉死（8 整行封顶）且内部滚动出现`, async () => {
+    for (let n = 9; n <= 10; n++) {
+      await ui5pSetTextarea(ws, Array.from({ length: n }, (_, i) => `第${i + 1}行高度探针内容`).join('\n'));
+      const box = await ui5pTextareaBox(ws);
+      if (!box) throw new Error('textarea 缺失');
+      if (box.ch !== caps.cap8) throw new Error(`${n} 行高度 ${box.ch} ≠ 封顶 ${caps.cap8}（封顶失效）`);
+      if (box.sh <= box.ch) throw new Error(`${n} 行未出内部滚动：scrollHeight ${box.sh} ≤ clientHeight ${box.ch}`);
+    }
+  });
+  return caps.cap8;
+}
+
+async function runUI5pP4Scenario() {
+  console.log('\n── UI5P P4：输入框 8 行封顶（P4-T2~T7；medium 主 boot + small/large 档位 boot）──');
+  ui5pFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-ui5p');
+  mkdirSync(parent, { recursive: true });
+  const capsByScale = {};
+
+  // 主 boot（默认 medium）：T2/T3 + T5（删行回缩/resize 重算/发送回单行）+ T6（全选清空）+ T7（抖动输入）。
+  const profileDir = mkdtempSync(path.join(parent, 'p4-medium-'));
+  let proc = null;
+  try {
+    const boot = await bootT1clpInstance(profileDir, {
+      permissionMode: 'bypassPermissions', providerProfiles: [], webAccess: { enabled: false, port: 8790, allowedHosts: [] },
+    }, 'UI5P P4 主 boot（medium）');
+    proc = boot.proc;
+    const ws = boot.ws;
+    await ui5pWaitChatInput(ws, 'UI5P P4');
+    const baseline = await ui5pTextareaBox(ws);
+    if (!baseline) throw new PreconditionError('P4 textarea 缺失');
+
+    capsByScale.medium = await ui5pP4CapProbe(ws, 'medium');
+
+    await check('UI5P P4-T5a 删行回缩：5 行 → 2 行，高度随内容回缩（只增不减回归）', async () => {
+      await ui5pSetTextarea(ws, Array.from({ length: 5 }, (_, i) => `第${i + 1}行`).join('\n'));
+      const five = await ui5pTextareaBox(ws);
+      await ui5pSetTextarea(ws, '第1行\n第2行');
+      const two = await ui5pTextareaBox(ws);
+      if (!(two.ch < five.ch)) throw new Error(`删行未回缩：5 行 ${five.ch} → 2 行 ${two.ch}`);
+      if (two.sh > two.ch + 1) throw new Error('2 行态出现内部滚动（回缩过头）');
+    });
+
+    await check('UI5P P4-T5b 窗口 resize 重算：视口改尺寸后高度与当前内容一致（无陈旧高度）', async () => {
+      await ui5pSetTextarea(ws, Array.from({ length: 6 }, (_, i) => `第${i + 1}行`).join('\n'));
+      const before = await ui5pTextareaBox(ws);
+      await setViewport(ws, 1000, 760); // Emulation 等价 resize（window.resize 监听链）
+      await ui5pSetTextarea(ws, Array.from({ length: 6 }, (_, i) => `第${i + 1}行`).join('\n')); // 触发重算窗口
+      const after = await ui5pTextareaBox(ws);
+      await setViewport(ws, 1280, 900);
+      if (before.ch !== after.ch) throw new Error(`resize 后高度漂移：${before.ch} → ${after.ch}（6 行同内容应等高）`);
+      if (after.sh > after.ch + 1) throw new Error('resize 后出现内部滚动（6 行 ≤ 8 行上限）');
+    });
+
+    await check('UI5P P4-T6 全选清空回初始高度 + 重新输入与首输一致（无残留高度闪跳）', async () => {
+      await ui5pSetTextarea(ws, Array.from({ length: 8 }, (_, i) => `第${i + 1}行`).join('\n'));
+      // 一次清空（全选删除与直接清空共享 modelValue → watch flush post → autoResize 同一内部路径）。
+      await ui5pSetTextarea(ws, '');
+      const cleared = await ui5pTextareaBox(ws);
+      if (cleared.len !== 0) throw new Error(`清空后仍有内容（len=${cleared.len}）`);
+      if (cleared.ch !== baseline.ch) throw new Error(`清空后高度 ${cleared.ch} ≠ 初始 ${baseline.ch}（残留高度）`);
+      // 重新输入多行：与首输同一行数等高。
+      await ui5pSetTextarea(ws, Array.from({ length: 4 }, (_, i) => `第${i + 1}行`).join('\n'));
+      const fourA = await ui5pTextareaBox(ws);
+      await ui5pSetTextarea(ws, '');
+      await ui5pSetTextarea(ws, Array.from({ length: 4 }, (_, i) => `第${i + 1}行`).join('\n'));
+      const fourB = await ui5pTextareaBox(ws);
+      if (fourA.ch !== fourB.ch) throw new Error(`重输入行为漂移：${fourA.ch} vs ${fourB.ch}`);
+    });
+
+    await check('UI5P P4-T7 抖动输入（>8 行快进 → 快删至 1 行）终态正确（无中间态卡死）', async () => {
+      // 快速连续 set（无行间等待——异步竞态窗口）后终态读数。
+      await evalExpr(ws, `(() => {
+        const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        const fire = (t) => { setter.call(ta, t); ta.dispatchEvent(new Event('input', { bubbles: true })); };
+        fire('a\\nb\\nc\\nd\\ne\\nf\\ng\\nh\\ni\\nj\\nk\\nl');
+        fire('a\\nb\\nc');
+        fire('a\\nb\\nc\\nd\\ne\\nf\\ng\\nh\\ni\\nj\\nk\\nl\\nm\\nn\\no\\np');
+        fire('单行终态');
+        return true;
+      })()`);
+      await sleep(400);
+      const final = await ui5pTextareaBox(ws);
+      if (final.len !== '单行终态'.length) throw new Error(`抖动后内容不符（len=${final.len}）`);
+      if (final.ch !== baseline.ch) throw new Error(`抖动后终态高度 ${final.ch} ≠ 单行初始 ${baseline.ch}（中间态卡死）`);
+    });
+
+    await check('UI5P P4-T5c 发送回单行（页内 stub sendMessage——主进程零触碰、零真实回合）', async () => {
+      // 页内 stub：sendMessage resolve true（发送被主进程接受语义），回合事件永不到达——
+      // 发送后仅断言草稿清空 + 高度回单行；sending 态随后经 pinia 复位（不污染后续）。
+      // 工作空间门（ensureWorkspace）：暂态会话 workingDir=null 时发送被拦截（提示而不清草稿，
+      // 首跑实测超时假红）——pinia 直设 workingDir（B 链 materializeSession 兜底同款状态位）。
+      await evalExpr(ws, `(() => {
+        window.__ui5pSendOrig = window.claudeLink.sendMessage;
+        window.claudeLink.sendMessage = async () => true;
+        return true;
+      })()`);
+      await evalExpr(ws, ui5pPiniaExpr('session', `
+        if (st.activeSession && !st.activeSession.workingDir) st.activeSession.workingDir = ${JSON.stringify(REPO_ROOT)};
+        return true;
+      `));
+      await ui5pSetTextarea(ws, Array.from({ length: 8 }, (_, i) => `第${i + 1}行`).join('\n'));
+      const capped = await ui5pTextareaBox(ws);
+      await evalExpr(ws, `document.querySelector('[data-testid="chat-send-button"]').click(), true`);
+      await waitFor('发送后草稿清空', () => evalOk(ws, `(() => { const ta = document.querySelector('[data-testid="chat-input-textarea"]'); return !!ta && ta.value.length === 0; })()`), 8);
+      await sleep(300); // watch flush post + autoResize
+      const after = await ui5pTextareaBox(ws);
+      if (after.ch !== baseline.ch) throw new Error(`发送后高度 ${after.ch} ≠ 单行初始 ${baseline.ch}（8 行高 ${capped.ch} 未回落）`);
+      // 善后：还原桥方法 + 复位 sending（stub send 无回合事件，markRunning 残留）。
+      await evalExpr(ws, ui5pPiniaExpr('session', `
+        if (window.__ui5pSendOrig) window.claudeLink.sendMessage = window.__ui5pSendOrig;
+        const sid = st.activeSession ? st.activeSession.id : null;
+        st.runningSessions = sid ? st.runningSessions.filter((id) => id !== sid) : st.runningSessions;
+        return true;
+      `));
+    });
+  } finally {
+    if (proc?.pid) await killT1clpBoot(proc);
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+
+  // 档位 boot（small / large seed）：每档 T2/T3 mini 面 + 封顶高（T4 比例）。
+  for (const scale of ['small', 'large']) {
+    const dir = mkdtempSync(path.join(parent, `p4-${scale}-`));
+    let p = null;
+    try {
+      const boot = await bootT1clpInstance(dir, {
+        permissionMode: 'bypassPermissions', providerProfiles: [], fontScale: scale,
+        webAccess: { enabled: false, port: 8790, allowedHosts: [] },
+      }, `UI5P P4 ${scale} 档 boot`);
+      p = boot.proc;
+      const ws = boot.ws;
+      await ui5pWaitChatInput(ws, `UI5P P4 ${scale}`);
+      capsByScale[scale] = await ui5pP4CapProbe(ws, scale);
+    } finally {
+      if (p?.pid) await killT1clpBoot(p);
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+    }
+  }
+
+  await check('UI5P P4-T4 三档封顶高度比 ≈ 字号基准比（14/16/18；rem 缩放，行数语义不变）+ 每档 8 行不滚动/9 行滚动', async () => {
+    const { small, medium, large } = capsByScale;
+    for (const k of ['small', 'medium', 'large']) {
+      if (!capsByScale[k]) throw new Error(`${k} 档封顶高缺失`);
+    }
+    const rSM = small / medium;
+    const rLM = large / medium;
+    log(`     UI5P P4-T4 封顶 clientHeight：small=${small} medium=${medium} large=${large}（比 ${rSM.toFixed(3)}/${rLM.toFixed(3)} vs 字号比 ${14 / 16}/${18 / 16}）`);
+    if (Math.abs(rSM - 14 / 16) > UI5P_CAP_TOLERANCE_RATIO * (14 / 16)) throw new Error(`small/medium 封顶比 ${rSM.toFixed(3)} 偏离字号比 ${ (14 / 16).toFixed(3) } 超 3%`);
+    if (Math.abs(rLM - 18 / 16) > UI5P_CAP_TOLERANCE_RATIO * (18 / 16)) throw new Error(`large/medium 封顶比 ${rLM.toFixed(3)} 偏离字号比 ${ (18 / 16).toFixed(3) } 超 3%`);
+  });
+}
+
+// ── UI5P P5：翻译桌面场景（P5-T1/T9/T15/T17/T21/T22；上游一律 env stub，零真实计费请求）──
+// 夹具：boot1 建会话 → kill → better-sqlite3 直插落库消息（user/assistant 正文/thinking）→
+// boot2（stub env）→ 点卡加载 → 逐面断言。导出面（T22）：译文显示态发起 startImageExport →
+// 隐藏导出窗 CDP target → DOM 三类翻译痕迹逐项为零 + 正文原文 → resolveExportTarget 落盘收口。
+async function runUI5pP5Scenario() {
+  console.log('\n── UI5P P5：翻译桌面场景（P5-T1/T9/T15/T17/T21/T22；stub 上游）──');
+  ui5pFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-ui5p');
+  mkdirSync(parent, { recursive: true });
+  const profileDir = mkdtempSync(path.join(parent, 'p5-'));
+  const stubLog = path.join(parent, 'translate-stub.jsonl');
+  const exportOutDir = path.join(parent, 'export-out');
+  mkdirSync(exportOutDir, { recursive: true });
+  const ASSIST_BODY = 'This is the fixture assistant body for translation E2E. '.repeat(30).trim();
+  const THINK_BODY = 'Fixture thinking content for the on-demand translation check. '.repeat(16).trim();
+  const STREAM_SEG1 = 'Streaming paragraph one for incremental translation follow. '.repeat(24).trim(); // ≥1200 → 2 段
+  const STREAM_SEG2 = ' Streaming paragraph two appended while original view is shown. '.repeat(24).trim();
+  let proc1 = null;
+  let proc2 = null;
+  try {
+    // boot1：建会话（建库；app 自持迁移建表）。
+    const boot1 = await bootT1clpInstance(profileDir, UI5P_P5_SEED, 'UI5P P5 boot1（夹具会话）');
+    proc1 = boot1.proc;
+    const sid = await evalExpr(boot1.ws, `window.claudeLink.createSession('UI5P-P5-fixture', { workingDir: null }).then((s) => s.id)`);
+    precondition(typeof sid === 'string' && sid.length > 0, 'P5 夹具会话创建失败');
+    await killT1clpBoot(proc1);
+    proc1 = null;
+
+    // 落库消息（ELECTRON_RUN_AS_NODE + electron 内置 better-sqlite3——仓库 node_modules 的
+    // better-sqlite3 为 Electron ABI 编译，宿主 Node 22 直载崩溃（首跑 FATAL 实测）；app 已 kill
+    // 无锁冲突；created_at 单调保序）。
+    const insertScript = `
+      const Database = require('better-sqlite3');
+      const db = new Database(${JSON.stringify(path.join(profileDir, 'claude-link.db'))});
+      const ins = db.prepare('INSERT INTO messages (id, session_id, role, content, event_type, cost_usd, duration_ms, ended_at, process_kind, parent_agent_id, tool_use_id, title, is_error, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, 0, ?)');
+      ins.run('p5-u1', ${JSON.stringify(sid)}, 'user', 'P5 夹具用户消息', 'message', null, '2026-11-20T10:00:00.000Z');
+      ins.run('p5-a1', ${JSON.stringify(sid)}, 'assistant', ${JSON.stringify(ASSIST_BODY)}, 'message', null, '2026-11-20T10:00:01.000Z');
+      ins.run('p5-t1', ${JSON.stringify(sid)}, 'assistant', ${JSON.stringify(THINK_BODY)}, 'thinking', 'thinking', '2026-11-20T10:00:02.000Z');
+      db.close();
+      console.log('insert-ok');
+    `;
+    const inserted = spawnSync(ELECTRON_EXE, ['-e', insertScript], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      windowsHide: true,
+    });
+    precondition(
+      inserted.status === 0 && String(inserted.stdout).includes('insert-ok'),
+      `P5 落库夹具失败（ELECTRON_RUN_AS_NODE better-sqlite3）：status=${inserted.status} out=${String(inserted.stdout).slice(-200)} err=${String(inserted.stderr).slice(-200)}`,
+    );
+    log(`  P5 落库夹具：sid=${sid.slice(0, 8)}…（user + assistant 正文 + thinking）`);
+
+    // boot2：stub env 注入（翻译上游确定性 stub；请求计数经 stubLog 核对）。
+    // 【p5c 修正申报】stubLog 落在跨运行共享的 parent 目录（历史运行的行会残留，且旧格式行
+    // 无 engineKind 字段）——boot2 前清一次，T24「日志首行 = 出厂首位引擎」的绝对读数才成立；
+    // 组内其余计数断言本就是差分（不受影响），清档后差分语义不变。
+    rmSync(stubLog, { force: true });
+    const boot2 = await bootT1clpInstance(profileDir, UI5P_P5_SEED, 'UI5P P5 boot2（stub env）', {
+      extraEnv: { CLAUDE_LINK_TRANSLATE_STUB: '1', CLAUDE_LINK_TRANSLATE_STUB_LOG: stubLog },
+    });
+    proc2 = boot2.proc;
+    const ws = boot2.ws;
+    await ui5pWaitChatInput(ws, 'UI5P P5');
+    await evalExpr(ws, `(() => {
+      const card = [...document.querySelectorAll('.session-card')]
+        .find((c) => (c.querySelector('.session-card__name')?.textContent || '').trim() === 'UI5P-P5-fixture');
+      card?.click();
+      return true;
+    })()`);
+    await waitFor('UI5P P5 落库消息渲染', () => evalOk(ws, `!!document.querySelector('.bubble--assistant')`), 10);
+
+    // P5-T1①：完成态助手消息翻译入口 + 点击出进行态 + stub 译文呈现。
+    await check('UI5P P5-T1① 完成态助手消息：翻译入口在场 → 点击出进行态 → stub 译文呈现（【译】前缀）', async () => {
+      const has = await evalOk(ws, `!!document.querySelector('.bubble--assistant .tr-entry')`);
+      if (!has) throw new Error('完成态助手消息无翻译入口（.tr-entry 缺失）');
+      await evalExpr(ws, `document.querySelector('.bubble--assistant .tr-entry').click(), true`);
+      await waitFor('翻译进行态出现（.tr-tag--live）', () => evalOk(ws, `!!document.querySelector('.bubble--assistant .tr-tag--live')`), 8);
+      await waitFor('译文视口呈现 stub 译文', () => evalOk(ws, `(() => {
+        const v = document.querySelector('.bubble--assistant [data-testid="translation-viewport"]');
+        return !!v && (v.textContent || '').includes('【译】');
+      })()`), 10);
+      await waitFor('翻译完成徽标（已翻译）', () => evalOk(ws, `!!document.querySelector('.bubble--assistant .tr-tag--done')`), 10);
+    });
+
+    // P5-T24：零配置开箱点击路径（CDP 面）。T1① 即开箱路径：profile seed 无 translation 键
+    // （默认引擎组 = 出厂种子），全程未进配置页直接译出。断言两层：数据级（出厂引擎组 4 条
+    // 在册且 google-gtx 优先序首位）+ 行为级（stub 日志首行 engineKind = google-gtx——组尝试序
+    // 从出厂首位起步的行为级观测，02 清单 T24「引擎尝试序首位 = Google」的 CDP 面）。
+    await check('UI5P P5-T24 零配置开箱点击路径：出厂引擎组在册且 google-gtx 优先序首位（stub 日志首行）+ 不进配置页直接译出（T1① 即开箱路径）', async () => {
+      const cfgRet = await evalExpr(ws, `window.claudeLink.getConfig().then((c) => JSON.stringify({
+        engines: ((c || {}).translation || {}).engines || null,
+      }))`);
+      const engines = JSON.parse(String(cfgRet)).engines;
+      if (!Array.isArray(engines)) throw new Error('getConfig().translation.engines 缺失（出厂种子未进读路径）');
+      if (engines.length !== 4) throw new Error(`出厂引擎组应 4 条（Google→Bing→有道→百度），实际 ${engines.length}`);
+      const sorted = [...engines].sort((a, b) => a.order - b.order);
+      if (sorted.some((e) => !e.enabled)) throw new Error(`出厂种子存在未启用引擎：${JSON.stringify(sorted)}`);
+      if (sorted[0].kind !== 'google-gtx') throw new Error(`出厂优先序首位 = ${sorted[0].kind} ≠ google-gtx（R6 出厂序漂移）`);
+      const lines = readFileSync(stubLog, 'utf8').split('\n').filter((l) => l.trim());
+      if (lines.length < 1) throw new Error('stub 日志为空（T1① 请求未落日志）');
+      const firstLine = JSON.parse(lines[0]);
+      if (firstLine.engineKind !== 'google-gtx') throw new Error(`stub 日志首行 engineKind=${firstLine.engineKind} ≠ google-gtx（首位尝试未落出厂首位引擎）`);
+      log(`     UI5P P5-T24 出厂组=${sorted.map((e) => e.kind).join('→')}；日志首行 engineKind=${firstLine.engineKind}`);
+    });
+
+    // P5-T15：思考块独立入口 + 原位替换（沉浸替换式）。
+    await check('UI5P P5-T15 思考块：独立翻译入口 → 点击后思考文本原位替换为中文译文（无追加译文块）', async () => {
+      const thinkEntrySel = '.think-row__headrow .tr-entry';
+      await evalExpr(ws, `document.querySelector('.think-row__head')?.click(), true`);
+      await waitFor('思考块展开（headrow 操作组在场）', () => evalOk(ws, `!!document.querySelector('${thinkEntrySel}')`), 8);
+      // 独立性：思考入口与正文入口是两个不同元素（互不替代）。
+      const both = await evalExpr(ws, `(() => ({
+        think: !!document.querySelector('${thinkEntrySel}'),
+        body: !!document.querySelector('.bubble--assistant .tr-entry'),
+      }))()`);
+      if (!both.think || !both.body) throw new Error(`双入口缺一：think=${both.think} body=${both.body}`);
+      const originalThink = await evalExpr(ws, `(() => {
+        const b = document.querySelector('.think-row__body');
+        return b ? (b.textContent || '').slice(0, 80) : null;
+      })()`);
+      await evalExpr(ws, `document.querySelector('${thinkEntrySel}').click(), true`);
+      await waitFor('思考译文原位呈现', () => evalOk(ws, `(() => {
+        const b = document.querySelector('.think-row__body');
+        return !!b && (b.textContent || '').includes('【译】');
+      })()`), 10);
+      // 沉浸替换式：译文落在思考文本呈现位（.think-row__body 内），思考块外无独立译文视口追加块。
+      const form = await evalExpr(ws, `(() => {
+        const row = document.querySelector('.think-row');
+        const viewportInRow = row ? !!row.querySelector('[data-testid="translation-viewport"]') : null;
+        const thinkBody = document.querySelector('.think-row__body');
+        return { viewportInRow, bodyIsReplaced: !!thinkBody && (thinkBody.textContent || '').includes('【译】') };
+      })()`);
+      if (form.viewportInRow) throw new Error('思考块出现独立译文视口（追加块形态——R4 沉浸替换式违约）');
+      if (!form.bodyIsReplaced) throw new Error('思考正文位未替换为译文');
+      log(`     UI5P P5-T15 思考原文首 80 字=${JSON.stringify(originalThink)}`);
+    });
+
+    // P5-T17：思考侧 swap pill 反复切换——原文完整恢复/译文完整重现，上游计数不变。
+    const thinkLogBase = ui5pStubLogCount(stubLog);
+    await check('UI5P P5-T17 思考侧切回原文↔切回译文 N 次往返：原文/译文完整 + stub 日志计数不变', async () => {
+      const pillSel = '.think-row__headrow .swap-pill';
+      const bodyText = () => evalExpr(ws, `(() => { const b = document.querySelector('.think-row__body'); return b ? (b.textContent || '') : null; })()`);
+      const doneText = await bodyText(); // 当前 = 译文态（【译】…）
+      for (let round = 1; round <= 2; round++) {
+        await evalExpr(ws, `document.querySelector('${pillSel}').click(), true`);
+        await sleep(500);
+        const back = await bodyText();
+        if (!back || back.includes('【译】')) throw new Error(`第 ${round} 次切回原文失败（仍见译文）：${String(back).slice(0, 60)}`);
+        if (!back.includes('Fixture thinking content')) throw new Error('切回原文后原文丢失（原文被译文覆盖不可恢复）');
+        await evalExpr(ws, `document.querySelector('${pillSel}').click(), true`);
+        await sleep(500);
+        const again = await bodyText();
+        if (!again || !again.includes('【译】')) throw new Error(`第 ${round} 次切回译文失败（译文未完整重现）`);
+        if (again !== doneText) throw new Error('切回译文内容与切走前不一致（陈旧快照/内容漂移）');
+      }
+      const after = ui5pStubLogCount(stubLog);
+      if (after !== thinkLogBase) throw new Error(`显示切换引发上游重请求：日志 ${thinkLogBase} → ${after}（切换即计费）`);
+    });
+
+    // P5-T1② + T21 + T9：流式正文翻译（stream target）。
+    await check('UI5P P5-T1② 流式中正文：翻译入口在场 → 点击出进行态 → stub 译文呈现（stream target）', async () => {
+      await ui5pSetStreaming(ws, { content: STREAM_SEG1 });
+      await waitFor('流式组渲染（.stream-tail 入口在场）', () => evalOk(ws, `!!document.querySelector('.stream-tail .tr-entry')`), 10);
+      await evalExpr(ws, `document.querySelector('.stream-tail .tr-entry').click(), true`);
+      await waitFor('流式翻译进行态（.tr-chrome 徽标）', () => evalOk(ws, `!!document.querySelector('.stream-group .tr-chrome .tr-tag--live')`), 8);
+      await waitFor('流式译文呈现（【译】前缀）', () => evalOk(ws, `(() => {
+        const v = document.querySelector('.stream-group [data-testid="translation-viewport"]');
+        return !!v && (v.textContent || '').includes('【译】');
+      })()`), 10);
+    });
+
+    // P5-T21：swap pill 切回原文（不中止）→ 原文增长 → stub 日志继续增长（后台补齐）→ 切回译文见最新进度。
+    const seg1Log = ui5pStubLogCount(stubLog);
+    await check('UI5P P5-T21 切回原文不中止：显示原文期间原文增长 → stub 日志继续增长 → 切回译文见最新进度', async () => {
+      // 【p5c 修正申报】swap 选择器限定 `.stream-group > .tr-chrome`：ThinkingBlock 在 stream-group
+      // 内且文档序在前，裸 `.swap-pill` 会先命中思考 pill（首跑实测：T21 swap 点到思考条目，
+      // stream 视图不动 → 8s 超时假红）。tr-chrome 是 stream-group 直接子级，思考 pill 在
+      // .think-row 内不被命中。
+      await evalExpr(ws, `document.querySelector('.stream-group > .tr-chrome .swap-pill').click(), true`);
+      // StreamRenderer 根 = .stream > .stream__content（无 .stream-renderer 类——首版条件零命中假红已修正）。
+      await waitFor('切回原文（StreamRenderer 在场、译文视口退场）', () => evalOk(ws, `(() => {
+        const g = document.querySelector('.stream-group');
+        return !!g && !!g.querySelector('.stream__content') && !g.querySelector('[data-testid="translation-viewport"]');
+      })()`), 8);
+      const logAtOriginalShown = ui5pStubLogCount(stubLog);
+      if (logAtOriginalShown < seg1Log) throw new Error('切回原文瞬间日志计数回退（异常）');
+      // 原文增长（显示原文期间）：1.5s 去抖 follow watch → START 幂等扩展 → 新段请求。
+      await ui5pSetStreaming(ws, { content: STREAM_SEG1 + STREAM_SEG2 });
+      await waitFor('显示原文期间后台补齐（stub 日志 +1）', () => ui5pStubLogCount(stubLog) > logAtOriginalShown, 15, 500);
+      const grewTo = ui5pStubLogCount(stubLog);
+      log(`     UI5P P5-T21 日志：切走时=${logAtOriginalShown} → 显示原文期间增至=${grewTo}`);
+      // 切回译文见最新进度：等待译文呈现量超过切走时（SEG1-only 基线）——后台补齐的新段译文可见。
+      await evalExpr(ws, `document.querySelector('.stream-group > .tr-chrome .swap-pill').click(), true`);
+      const seg1Only = '【译】' + STREAM_SEG1;
+      await waitFor('切回译文见最新进度（呈现量 > 切走时基线）', () => evalOk(ws, `(() => {
+        const v = document.querySelector('.stream-group [data-testid="translation-viewport"]');
+        return !!v && (v.textContent || '').includes('【译】') && (v.textContent || '').length > ${seg1Only.length};
+      })()`), 10, 300);
+      const vText = await evalExpr(ws, `(() => { const v = document.querySelector('.stream-group [data-testid="translation-viewport"]'); return v ? (v.textContent || '') : null; })()`);
+      if (!vText || !vText.includes('【译】')) throw new Error('切回译文无译文呈现');
+      log(`     UI5P P5-T21 切回译文长度=${vText.length}（切走时基线 ${seg1Only.length}）`);
+    });
+
+    // P5-T9：译文视口 240px 内部滚动 + 原文区滚动锚稳定。
+    await check('UI5P P5-T9 译文视口 240px 内部滚动（scrollHeight > clientHeight 且 ≤240）+ 原文区滚动锚贴底稳定', async () => {
+      const v = await evalExpr(ws, `(() => {
+        const s = document.querySelector('.stream-group [data-testid="translation-viewport"] .tr-viewport__scroll');
+        if (!s) return null;
+        return { ch: s.clientHeight, sh: s.scrollHeight, st: s.scrollTop };
+      })()`);
+      if (!v) throw new Error('译文视口滚动容器缺失');
+      if (v.ch > 241) throw new Error(`译文视口 clientHeight ${v.ch} 超 240px 约束`);
+      if (v.sh <= v.ch) throw new Error(`译文视口未内部滚动（sh=${v.sh} ≤ ch=${v.ch}）——240px 内滚约束失效`);
+      // 原文区滚动锚：切原文（限定 stream chrome pill）→ 显式贴底（用户视角）→ 原文增长 →
+      // 自动跟随保持贴底（FollowController 链不因译文后台增量扰动）。
+      await evalExpr(ws, `document.querySelector('.stream-group > .tr-chrome .swap-pill').click(), true`);
+      await waitFor('切回原文（锚采样前置）', () => evalOk(ws, `(() => {
+        const g = document.querySelector('.stream-group');
+        return !!g && !!g.querySelector('.stream__content') && !g.querySelector('[data-testid="translation-viewport"]');
+      })()`), 8);
+      // 切回瞬间原文（StreamRenderer 全量重挂）比译文视口高——视口位置不定，先显式贴底再采样。
+      await evalExpr(ws, `(() => { const sc = document.querySelector('.message-list__scroller'); if (sc) sc.scrollTop = sc.scrollHeight; return true; })()`);
+      await sleep(600);
+      await waitFor('原文区贴底（锚基线采样前置）', () => evalOk(ws, `(() => {
+        const sc = document.querySelector('.message-list__scroller');
+        return !!sc && sc.scrollHeight - (sc.scrollTop + sc.clientHeight) <= 120;
+      })()`), 8, 300);
+      await ui5pSetStreaming(ws, { content: STREAM_SEG1 + STREAM_SEG2 + ' Appended tail for anchor stability sampling. '.repeat(8) });
+      await waitFor('原文增长后滚动锚仍贴底（自动跟随保持）', () => evalOk(ws, `(() => {
+        const sc = document.querySelector('.message-list__scroller');
+        return !!sc && sc.scrollHeight - (sc.scrollTop + sc.clientHeight) <= 120;
+      })()`), 12, 400);
+      log(`     UI5P P5-T9 视口 ch=${v.ch} sh=${v.sh}；滚动锚贴底容差内（显式贴底后增长，自动跟随保持）`);
+      // 恢复译文视图（后续 T22 断言面为完成态消息，不依赖 stream 态）。
+      await evalExpr(ws, `document.querySelector('.stream-group > .tr-chrome .swap-pill').click(), true`);
+      await sleep(400);
+    });
+
+    // P5-T27：代码块段零送翻 + 原文逐字保留 + 完成态不悬挂（02 清单 T27 的 CDP 呈现断言面）。
+    // 夹具 = 3 个明文段（各 ≥40 字符防尾部碎段并入）+ 2 个 ``` 围栏代码块段：切段规则下恰 5 段、
+    // 其中仅 3 个明文段发引擎请求 → stub 日志增量恰 3 = 「围栏段零送翻」的载荷级证明（env stub
+    // 日志逐请求一行，代码段若被送翻增量即 >3）。呈现断言：5 个段块、2 个 <pre><code> 逐字等于
+    // 原文、明文段带【译】、完成态无 shimmer/无错误横条（进度不悬挂）。
+    const T27_CODE1 = "const ui5pCodeSeg = 'segment-alpha-keep-verbatim';\nreturn ui5pCodeSeg;";
+    const T27_CODE2 = "def ui5p_code_seg_two():\n    return 'segment-beta-keep-verbatim'";
+    const T27_PARA = (tag) => `T27 plain paragraph ${tag} for the code-fence passthrough check. `.repeat(3).trim(); // ~165 字符 ≥40 且 ≤1200 → 恰 1 段
+    const T27_MSG = [
+      T27_PARA('one'),
+      '```js',
+      T27_CODE1,
+      '```',
+      T27_PARA('two'),
+      '```python',
+      T27_CODE2,
+      '```',
+      T27_PARA('three'),
+    ].join('\n');
+    // 基线取「静止窗」计数：T9 尾段流式扩展的迟到请求（follow 1.5s 去抖）不混入差分基线。
+    const logBeforeT27 = await ui5pWaitStubLogStable(stubLog);
+    await evalExpr(ws, ui5pPiniaExpr('session', `
+      st.messages = [...st.messages, ${JSON.stringify(ui5pMsg(sid, 'p5-a2', 'assistant', T27_MSG, { createdAt: '2026-11-20T10:05:00.000Z' }))}];
+      return 'ok';
+    `));
+    await sleep(400);
+    await check('UI5P P5-T27 代码块段零送翻：stub 日志增量恰 3（=明文段数，围栏段零请求）+ <pre><code> 逐字保留 + 完成态不悬挂', async () => {
+      await waitFor('T27 消息气泡渲染', () => evalOk(ws, `document.querySelectorAll('.bubble--assistant').length >= 2`), 8);
+      const clicked = await evalExpr(ws, `(() => {
+        const bubbles = [...document.querySelectorAll('.bubble--assistant')];
+        const entry = bubbles[bubbles.length - 1]?.querySelector('.tr-entry');
+        if (!entry) return false;
+        entry.click();
+        return true;
+      })()`);
+      if (!clicked) throw new Error('T27 消息无翻译入口（.tr-entry 缺失）');
+      await waitFor('T27 完成徽标（已翻译）', () => evalOk(ws, `(() => {
+        const bubbles = [...document.querySelectorAll('.bubble--assistant')];
+        const last = bubbles[bubbles.length - 1];
+        return !!last && !!last.querySelector('.tr-tag--done');
+      })()`), 20);
+      // 【p5c run1 假红申报，flaky→稳定断言分流】完成徽标由 entry.status 直渲，视口段块经
+      // use-translation-display 50ms 独立节流快照（TranslationViewport.vue:33-36）——徽标可领先
+      // 段块 ≤50ms（run1 实测：徽标在场、segCount=3≠5；run2 同点全绿）。段块收敛等待只消时序窗：
+      // 仍断言恰 5 段块 + 代码逐字 + 无 shimmer，缺段真缺陷依旧红。
+      await waitFor('T27 视口段块收敛（50ms 节流快照追平徽标）', () => evalOk(ws, `(() => {
+        const bubbles = [...document.querySelectorAll('.bubble--assistant')];
+        const v = bubbles[bubbles.length - 1]?.querySelector('[data-testid="translation-viewport"]');
+        return !!v && v.querySelectorAll('.tr-viewport__seg').length === 5;
+      })()`), 6);
+      const after = ui5pStubLogCount(stubLog);
+      if (after - logBeforeT27 !== 3) {
+        throw new Error(`stub 日志增量 ${after - logBeforeT27} ≠ 3（明文段数）——围栏段被送翻或明文分段漂移`);
+      }
+      const probe = await evalExpr(ws, `(() => {
+        const bubbles = [...document.querySelectorAll('.bubble--assistant')];
+        const v = bubbles[bubbles.length - 1]?.querySelector('[data-testid="translation-viewport"]');
+        if (!v) return null;
+        const codes = [...v.querySelectorAll('pre code')];
+        return {
+          segCount: v.querySelectorAll('.tr-viewport__seg').length,
+          codeTexts: codes.map((c) => c.textContent || ''),
+          translated: (v.textContent || '').includes('【译】'),
+          shimmer: !!v.querySelector('.tr-shimmer'),
+          error: !!v.querySelector('[data-testid="translation-error"]'),
+          errorTag: !!v.closest('.bubble')?.querySelector('.tr-tag--error'),
+        };
+      })()`);
+      if (!probe) throw new Error('T27 译文视口缺失');
+      if (probe.segCount !== 5) throw new Error(`视口段块 ${probe.segCount} ≠ 5（3 明文 + 2 代码块段）`);
+      if (probe.codeTexts.length !== 2) throw new Error(`代码块呈现 ${probe.codeTexts.length} ≠ 2（围栏丢失或被译）`);
+      for (const want of [T27_CODE1, T27_CODE2]) {
+        const got = probe.codeTexts.find((t) => t === want || t === `${want}\n`);
+        if (!got) throw new Error(`代码块段未逐字保留：期望 ${JSON.stringify(want.slice(0, 40))}…，实际 ${JSON.stringify(probe.codeTexts.map((t) => t.slice(0, 40)))}`);
+      }
+      if (!probe.translated) throw new Error('明文段译文缺失（【译】前缀不存在）');
+      if (probe.shimmer) throw new Error('完成态仍有 shimmer 占位（进度悬挂形态）');
+      if (probe.error || probe.errorTag) throw new Error('完成态出现错误横条/错误徽标');
+      log(`     UI5P P5-T27 视口 5 段（含 2 代码块逐字保留）；stub 日志 ${logBeforeT27} → ${after}（+3 恰为明文段数）`);
+    });
+
+    // P5-T22：译文显示态 → 导出渲染零翻译痕迹（无译文/无入口/无徽标）+ 导出落盘收口。
+    const baseTargets = await ui5pListPageTargets();
+    const baseIds = new Set(baseTargets.map((t) => t.id));
+    await check('UI5P P5-T22 译文显示态发起导出：导出窗 DOM 零翻译痕迹（无译文/无入口/无徽标）+ 原文呈现 + 导出落盘', async () => {
+      // 前置自证：主窗当前确处译文显示态（done 徽标 + 视口在场）。
+      const showing = await evalExpr(ws, `(() => ({
+        done: !!document.querySelector('.bubble--assistant .tr-tag--done'),
+        viewport: !!document.querySelector('.bubble--assistant [data-testid="translation-viewport"]'),
+        entry: !!document.querySelector('.bubble--assistant .tr-entry'),
+      }))()`);
+      if (!showing.done || !showing.viewport || !showing.entry) {
+        throw new Error(`前置自证失败：译文显示态不成立（${JSON.stringify(showing)}）`);
+      }
+      const startRet = await evalExpr(ws, `window.claudeLink.startImageExport(${JSON.stringify(sid)}, 'png').then((r) => JSON.stringify(r))`);
+      const start = JSON.parse(String(startRet));
+      if (!start.ok) throw new Error(`导出发起失败：${JSON.stringify(start)}`);
+      // 导出隐藏窗 target 出现（/json diff）。
+      let exportWs = null;
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline && !exportWs) {
+        const targets = await ui5pListPageTargets();
+        const fresh = targets.find((t) => !baseIds.has(t.id));
+        if (fresh) exportWs = await connectWS(fresh.webSocketDebuggerUrl);
+        else await sleep(500);
+      }
+      if (!exportWs) throw new Error('20s 内导出隐藏窗 CDP target 未出现');
+      try {
+        await waitFor('导出窗消息渲染', () => evalOk(exportWs, `!!document.querySelector('.bubble')`), 15);
+        const probe = await evalExpr(exportWs, `(() => ({
+          entry: document.querySelectorAll('.tr-entry').length,
+          tag: document.querySelectorAll('.tr-tag').length,
+          pill: document.querySelectorAll('.swap-pill').length,
+          viewport: document.querySelectorAll('[data-testid="translation-viewport"]').length,
+          hasTranslatedMark: (document.body.textContent || '').includes('【译】'),
+          hasOriginalBody: (document.body.textContent || '').includes(${JSON.stringify(ASSIST_BODY.slice(0, 40))}),
+        }))()`);
+        if (probe.entry !== 0 || probe.tag !== 0 || probe.pill !== 0 || probe.viewport !== 0) {
+          throw new Error(`导出窗存在翻译痕迹：入口 ${probe.entry} 徽标 ${probe.tag} pill ${probe.pill} 视口 ${probe.viewport}`);
+        }
+        if (probe.hasTranslatedMark) throw new Error('导出渲染含译文（【译】字面进导出产物）');
+        if (!probe.hasOriginalBody) throw new Error('导出渲染未呈现原文正文');
+        log(`     UI5P P5-T22 导出窗探针：${JSON.stringify(probe)}`);
+      } finally {
+        try { exportWs.close(); } catch { /* 尽力而为 */ }
+      }
+      // 收口：resolveExportTarget 直答（免 FilePickerDialog 协商）→ 导出落盘 done。
+      // ① pending 在 capturing 完成（进入保存阶段）才挂起——start 返回后立即调用必 false
+      //    （首跑实测），轮询直至命中（每秒一次，90s 上限）。
+      // ② 应答形态用 {kind:'save'}（单页）：performSave 单页分支只消费 singleTarget
+      //    （kind:'directory' 在 multi=false 下 singleTarget 缺失 → 写 undefined.png 落 CWD
+      //    失败——二跑实测），kind:'save' 走 join(dir, filename)+补扩展名的正路。
+      let resolvedRet = 'false';
+      const resolveDeadline = Date.now() + 90_000;
+      while (String(resolvedRet) !== 'true' && Date.now() < resolveDeadline) {
+        // eslint-disable-next-line no-await-in-loop
+        resolvedRet = await evalExpr(ws, `window.claudeLink.resolveExportTarget(${JSON.stringify(start.jobId)}, { kind: 'save', dir: ${JSON.stringify(exportOutDir)}, filename: 'e2e-ui5p-export' }).then((r) => JSON.stringify(r))`);
+        if (String(resolvedRet) !== 'true') await sleep(1000);
+      }
+      if (String(resolvedRet) !== 'true') throw new Error(`90s 内 resolveExportTarget 未命中 pending 目标（导出目标协商未到达）：${resolvedRet}`);
+      await waitFor('导出完成（overlay 终态）', () => evalOk(ws, `(() => {
+        const card = document.querySelector('.export-card');
+        return !!card && card.getAttribute('data-tone') === 'ok';
+      })()`), 40, 800).catch(async () => {
+        // overlay 可能已自动消退（终态定时）：以落盘产物为准的降级判据。
+        const files = readdirSync(exportOutDir).filter((f) => f.endsWith('.png'));
+        if (files.length === 0) throw new Error('导出未落盘（overlay 终态未捕获且 export-out 无产物）');
+        log(`     UI5P P5-T22 overlay 已消退，降级以落盘产物判定：${files.join(', ')}`);
+      });
+      const saved = readdirSync(exportOutDir).filter((f) => f.endsWith('.png'));
+      if (saved.length === 0) throw new Error('导出产物缺失（export-out 无 png）');
+      log(`     UI5P P5-T22 导出落盘：${saved.join(', ')}`);
+    });
+
+    // stub 纪律自证：全程零真实上游 HTTP 的结构性证据 = 所有请求都落 stub 日志（每请求一行）。
+    const totalLog = ui5pStubLogCount(stubLog);
+    log(`  UI5P P5 stub 日志总行数=${totalLog}（每行=一次主进程段级请求；全部经 stub，零真实计费请求）`);
+    if (totalLog < 3) throw new Error(`stub 日志行数异常（${totalLog} < 3）：翻译请求链未按预期经过 stub`);
+    const logSample = (() => { try { return readFileSync(stubLog, 'utf8').split('\n').filter((l) => l.trim())[0] ?? ''; } catch { return ''; } })();
+    log(`  UI5P P5 stub 日志首行样本：${logSample.slice(0, 160)}`);
+  } finally {
+    if (proc1?.pid || proc2?.pid) { await killT1clpBoot(proc1 ?? proc2); await killT1clpBoot(proc2 ?? proc1); }
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+}
+
+// ── UI5P P5b：P5-T26 代理缺失无感降级（loopback 端点 stub；全程零真实外网）──
+// 夹具：seed 配置引擎组 = [google-gtx→loopback 500（首位不可达形态，kind=network 非 429 不入冷却）,
+// youdao-web→loopback 成功形态]（youdao 仅走成功路径——失败路径 extractYoudaoKey 会触真实域名，
+// stub 纪律禁；google/custom 是纯端点 HTTP 零第一方触碰）。无 env stub（真实传输路径打 loopback）。
+// 断言：首位引擎尝试确实发生（loopback 首命中 = gtx-fail，非预判跳过）→ 降级国内引擎接管（译文
+// 呈现 = loopback 有道产物）→ 全程零错误弹面（点击→完成期间逐 200ms 采样无错误 UI）。
+async function runUI5pP26Scenario() {
+  console.log('\n── UI5P P5b：T26 首引擎不可达无感降级（loopback 端点 stub，零错误弹面观测）──');
+  ui5pFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-ui5p');
+  mkdirSync(parent, { recursive: true });
+  const profileDir = mkdtempSync(path.join(parent, 'p26-'));
+  const hits = [];
+  const loopback = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      hits.push({ url: String(req.url), body, at: Date.now() });
+      if (String(req.url).startsWith('/g26/gtx-fail')) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end('{"error":"loopback injected first-engine outage"}');
+        return;
+      }
+      if (String(req.url).startsWith('/g26/youdao-ok')) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ errorCode: 0, translateResult: [[{ tgt: '【环回有道】降级译文已到' }]] }));
+        return;
+      }
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('not-found');
+    });
+  });
+  await new Promise((resolve) => loopback.listen(0, '127.0.0.1', resolve));
+  const port = loopback.address().port;
+  let proc = null;
+  try {
+    const seed = {
+      ...UI5P_P5_SEED,
+      translation: {
+        engines: [
+          { id: 'e2e-gtx', kind: 'google-gtx', enabled: true, order: 0, useProxy: false, endpoint: `http://127.0.0.1:${port}/g26/gtx-fail` },
+          { id: 'e2e-youdao', kind: 'youdao-web', enabled: true, order: 1, endpoint: `http://127.0.0.1:${port}/g26/youdao-ok` },
+        ],
+        customTemplates: [],
+      },
+    };
+    const boot = await bootT1clpInstance(profileDir, seed, 'UI5P P5b（loopback 降级）');
+    proc = boot.proc;
+    const ws = boot.ws;
+    await ui5pWaitChatInput(ws, 'UI5P P5b');
+    const sid = await evalExpr(ws, `window.claudeLink.createSession('UI5P-P26-fixture', { workingDir: null }).then((s) => s.id)`);
+    precondition(typeof sid === 'string' && sid.length > 0, 'P5b 夹具会话创建失败');
+    const BODY = 'The first engine is down and the fallback must take over seamlessly. '.repeat(6).trim(); // ~390 字符 → 恰 1 段
+    await ui5pInjectMessages(ws, [
+      ui5pMsg(sid, 'p26-a1', 'assistant', BODY, { createdAt: '2026-11-20T11:00:00.000Z' }),
+    ]);
+    await check('UI5P P5-T26a 首位引擎不可达：gtx-fail 尝试确实发生（loopback 首命中）→ 国内引擎接管译文呈现（【环回有道】产物）', async () => {
+      await waitFor('T26 翻译入口在场', () => evalOk(ws, `!!document.querySelector('.bubble--assistant .tr-entry')`), 8);
+      await evalExpr(ws, `document.querySelector('.bubble--assistant .tr-entry').click(), true`);
+      // 全程零错误弹面采样（点击→完成期间逐 200ms；任一样本出现错误 UI 即红——「无感」破坏）。
+      const done = await (async () => {
+        const deadline = Date.now() + 20_000;
+        for (;;) {
+          const sample = await evalExpr(ws, `(() => ({
+            errTag: !!document.querySelector('.bubble--assistant .tr-tag--error'),
+            errBar: !!document.querySelector('[data-testid="translation-error"]'),
+            done: !!document.querySelector('.bubble--assistant .tr-tag--done'),
+          }))()`);
+          if (sample.errTag || sample.errBar) throw new Error(`降级期间出现错误弹面：${JSON.stringify(sample)}（无感降级破坏）`);
+          if (sample.done) return true;
+          if (Date.now() > deadline) return false;
+          await sleep(200);
+        }
+      })();
+      if (!done) throw new Error('20s 内未到完成态（首位失败后降级链未产出译文）');
+      const vText = await evalExpr(ws, `(() => {
+        const v = document.querySelector('.bubble--assistant [data-testid="translation-viewport"]');
+        return v ? (v.textContent || '') : null;
+      })()`);
+      if (!vText || !vText.includes('【环回有道】降级译文已到')) throw new Error(`译文非降级引擎产物：${String(vText).slice(0, 80)}`);
+      if (hits.length < 2) throw new Error(`loopback 命中 ${hits.length} < 2（首位尝试或降级缺失）`);
+      if (!hits[0].url.startsWith('/g26/gtx-fail')) throw new Error(`loopback 首命中 = ${hits[0].url}（首位 google 未被真实尝试——预判跳过违约）`);
+      if (!hits.slice(1).some((h) => h.url.startsWith('/g26/youdao-ok'))) throw new Error('gtx-fail 后无 youdao-ok 命中（降级链未走下一引擎）');
+      log(`     UI5P P5-T26a loopback 命中序：${hits.map((h) => h.url.split('?')[0]).join(' → ')}`);
+    });
+    await check('UI5P P5-T26b 终态零错误痕迹：完成徽标在场 + 错误横条/错误徽标/toast 零呈现', async () => {
+      const s = await evalExpr(ws, `(() => ({
+        done: !!document.querySelector('.bubble--assistant .tr-tag--done'),
+        errTag: !!document.querySelector('.tr-tag--error'),
+        errBar: !!document.querySelector('[data-testid="translation-error"]'),
+        toast: [...document.querySelectorAll('.toast, [class*="toast"]')].map((t) => t.textContent || '').join('|'),
+      }))()`);
+      if (!s.done) throw new Error('完成徽标缺失');
+      if (s.errTag || s.errBar) throw new Error(`终态错误痕迹：${JSON.stringify(s)}`);
+      if (s.toast && /失败|错误/.test(s.toast)) throw new Error(`toast 呈现失败文案：${s.toast.slice(0, 80)}`);
+    });
+  } finally {
+    loopback.close();
+    if (proc?.pid) await killT1clpBoot(proc);
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+}
+
+// ── UI5P P5c：P5-T28/T29 配置页一键探测与按结果应用（loopback 端点 stub；零真实外网）──
+// 夹具：seed 引擎组 4 条全启用 = [google-gtx→loopback 快绿, custom-a→loopback 300ms 慢绿,
+// custom-b→loopback 503 红（HTTP 错误形态）, custom-c→127.0.0.1:1 拒连红（网络不可达形态）]。
+// 断言：T28 结果表 4 行 = 2 绿（latencyMs 数值，google < tpl-a）2 红（error 摘要在）+ 探测载荷 =
+// TRANSLATION_PROBE_TEXT 固定短文本；T29 按结果应用 → UI 列表即时重排（绿按延迟升序、红殿后）
+// + 配置文件落盘同序（持久化）。T29 契约的「重载/重启复测尝试序」由 node 卷 tdd-message-translate
+// T29（saveConfig 链 + 重载复测）承载——双卷分工申报于点报告。
+async function runUI5pP2829Scenario() {
+  console.log('\n── UI5P P5c：T28/T29 配置页一键探测 + 按结果应用落盘（loopback 端点 stub）──');
+  ui5pFreshnessPrecondition();
+  const parent = path.join(os.tmpdir(), 'claude-link-layout-ui5p');
+  mkdirSync(parent, { recursive: true });
+  const profileDir = mkdtempSync(path.join(parent, 'p2829-'));
+  const probeHits = [];
+  const loopback = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      const url = String(req.url);
+      probeHits.push({ url, body, at: Date.now() });
+      const answer = (code, payload, delayMs = 0) => {
+        setTimeout(() => {
+          res.writeHead(code, { 'Content-Type': 'application/json' });
+          res.end(payload);
+        }, delayMs);
+      };
+      if (url.startsWith('/p28/gtx-ok')) return answer(200, JSON.stringify([[['【G】loopback ok']]]));
+      if (url.startsWith('/p28/tpl-a')) return answer(200, JSON.stringify({ data: { text: '【A】loopback ok (slow)' } }), 300);
+      if (url.startsWith('/p28/tpl-b')) return answer(503, '{"error":"loopback injected http failure"}');
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('not-found');
+    });
+  });
+  await new Promise((resolve) => loopback.listen(0, '127.0.0.1', resolve));
+  const port = loopback.address().port;
+  let proc = null;
+  const PROBE_TEXT = 'Hello, world. This is a connectivity check.'; // = TRANSLATION_PROBE_TEXT（shared/translation-core.ts:140）
+  try {
+    const seed = {
+      ...UI5P_P5_SEED,
+      translation: {
+        // 种子序刻意 ≠ 延迟序（tpl-a 慢绿居首、gtx 快绿次位）——「按结果应用」的可观测重排：
+        // 应用后 gtx（最快绿）必须升到首位、tpl-b/tpl-c 红殿后且保持原相对序（首跑种子序恰等
+        // 于延迟序，重排前后同序、断言退化——二跑修正申报）。
+        engines: [
+          { id: 'e2e-tpl-a', kind: 'custom-template', enabled: true, order: 0, templateName: 'e2e-tpl-a' },
+          { id: 'e2e-gtx', kind: 'google-gtx', enabled: true, order: 1, useProxy: false, endpoint: `http://127.0.0.1:${port}/p28/gtx-ok` },
+          { id: 'e2e-tpl-b', kind: 'custom-template', enabled: true, order: 2, templateName: 'e2e-tpl-b' },
+          { id: 'e2e-tpl-c', kind: 'custom-template', enabled: true, order: 3, templateName: 'e2e-tpl-c' },
+        ],
+        customTemplates: [
+          { name: 'e2e-tpl-a', method: 'GET', urlTemplate: `http://127.0.0.1:${port}/p28/tpl-a?q={text}&to={target}`, responsePath: 'data.text' },
+          { name: 'e2e-tpl-b', method: 'GET', urlTemplate: `http://127.0.0.1:${port}/p28/tpl-b?q={text}`, responsePath: 'data.text' },
+          { name: 'e2e-tpl-c', method: 'GET', urlTemplate: 'http://127.0.0.1:1/p28/tpl-c?q={text}', responsePath: 'data.text' },
+        ],
+      },
+    };
+    const boot = await bootT1clpInstance(profileDir, seed, 'UI5P P5c（loopback 探测）');
+    proc = boot.proc;
+    const ws = boot.ws;
+    precondition(await enterConfig(ws), 'P5c 未进入配置页');
+    await check('UI5P P5-T28 一键探测：结果表 4 行 = 2 绿 2 红 + 绿行 latencyMs 数值 + 红行 error 摘要', async () => {
+      await evalExpr(ws, `[...document.querySelectorAll('.tab')].find((b) => (b.textContent || '').trim() === '行为')?.click(), true`);
+      await waitFor('翻译引擎节渲染（检查连通性按钮在场）', () => evalOk(ws, `(() => {
+        const sec = document.querySelector('.tr-eng-section');
+        return !!sec && sec.offsetParent !== null && [...sec.querySelectorAll('.tr-probe-row .test-btn')].some((b) => (b.textContent || '').includes('检查连通性'));
+      })()`), 8);
+      await evalExpr(ws, `(() => {
+        const sec = document.querySelector('.tr-eng-section');
+        [...sec.querySelectorAll('.tr-probe-row .test-btn')].find((b) => (b.textContent || '').includes('检查连通性'))?.click();
+        return true;
+      })()`);
+      await waitFor('探测结果表渲染（4 行）', () => evalOk(ws, `document.querySelectorAll('[data-testid="translate-probe-result"] .tr-probe-line').length === 4`), 25, 400);
+      const rows = await evalExpr(ws, `(() => {
+        return [...document.querySelectorAll('[data-testid="translate-probe-result"] .tr-probe-line')].map((r) => ({
+          name: (r.querySelector('.tr-probe-name')?.textContent || '').trim(),
+          ok: !!r.querySelector('.tr-probe-dot.ok'),
+          fail: !!r.querySelector('.tr-probe-dot.fail'),
+          latency: (r.querySelector('.tr-probe-latency')?.textContent || '').trim() || null,
+          error: (r.querySelector('.tr-probe-error')?.textContent || '').trim() || null,
+        }));
+      })()`);
+      if (rows.length !== 4) throw new Error(`结果表 ${rows.length} 行 ≠ 4（启用引擎数——未启用引擎零行）`);
+      if (!(rows[0].ok && rows[1].ok && rows[2].fail && rows[3].fail)) {
+        throw new Error(`绿/红与 stub 差异化应答不符：${JSON.stringify(rows)}`);
+      }
+      for (const r of rows.filter((x) => x.ok)) {
+        if (!/^\d+ ms$/.test(r.latency ?? '')) throw new Error(`绿行延迟非「N ms」数值形态：${r.name}=${r.latency}`);
+      }
+      for (const r of rows.filter((x) => x.fail)) {
+        if (!r.error) throw new Error(`红行缺 error 摘要：${r.name}`);
+      }
+      log(`     UI5P P5-T28 结果表：${rows.map((r) => `${r.name}=${r.ok ? r.latency : (r.error || '').slice(0, 24)}`).join(' / ')}`);
+    });
+    await check('UI5P P5-T28b 探测载荷 = 固定短测试文本（TRANSLATION_PROBE_TEXT；非会话消息内容）', () => {
+      if (probeHits.length < 3) throw new Error(`loopback 探测命中 ${probeHits.length} < 3（探测未逐引擎发文本）`);
+      for (const h of probeHits) {
+        const blob = decodeURIComponent(`${h.url} ${h.body}`);
+        if (!blob.includes(PROBE_TEXT)) throw new Error(`探测载荷非固定短测试文本：${blob.slice(0, 100)}`);
+      }
+      log(`     UI5P P5-T28b loopback 探测命中 ${probeHits.length} 次，载荷均含固定探测文本`);
+    });
+    await check('UI5P P5-T29 按结果应用：引擎列表按延迟升序重排（绿前红殿后）+ 配置文件落盘同序（持久化）', async () => {
+      const readRows = () => evalExpr(ws, `(() => [...document.querySelectorAll('.tr-eng-row .tr-eng-name')].map((n) => (n.textContent || '').trim()))()`);
+      const before = await readRows();
+      await evalExpr(ws, `(() => {
+        const sec = document.querySelector('.tr-eng-section');
+        [...sec.querySelectorAll('.tr-probe-row .test-btn')].find((b) => (b.textContent || '').includes('按结果应用'))?.click();
+        return true;
+      })()`);
+      await waitFor('applied 提示行（已按检测结果重排）', () => evalOk(ws, `!!document.querySelector('.tr-probe-applied')`), 25, 400);
+      const after = await readRows();
+      const expect = ['Google（免费）', '自定义模板e2e-tpl-a', '自定义模板e2e-tpl-b', '自定义模板e2e-tpl-c'];
+      if (JSON.stringify(after) !== JSON.stringify(expect)) {
+        throw new Error(`应用后列表序=${JSON.stringify(after)} ≠ 预期 ${JSON.stringify(expect)}（应用前=${JSON.stringify(before)}）`);
+      }
+      if (JSON.stringify(after) === JSON.stringify(before)) {
+        throw new Error('应用前后列表序相同（重排不可观测——种子序设计错误或 apply 未生效）');
+      }
+      await sleep(800); // saveConfig 落盘余量
+      const disk = JSON.parse(readFileSync(path.join(profileDir, 'claude-link-config.json'), 'utf8'));
+      const engines = [...(((disk.translation || {}).engines) ?? [])].sort((a, b) => a.order - b.order);
+      const diskIds = engines.map((e) => e.id);
+      const expectIds = ['e2e-gtx', 'e2e-tpl-a', 'e2e-tpl-b', 'e2e-tpl-c'];
+      if (JSON.stringify(diskIds) !== JSON.stringify(expectIds)) {
+        throw new Error(`落盘引擎序=${JSON.stringify(diskIds)} ≠ 重排结果 ${JSON.stringify(expectIds)}（只改内存不落盘）`);
+      }
+      log(`     UI5P P5-T29 列表序 ${before.join('→')} ⇒ ${after.join('→')}；落盘 order 同步`);
+    });
+  } finally {
+    loopback.close();
+    if (proc?.pid) await killT1clpBoot(proc);
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch { /* 尽力而为 */ }
+  }
+}
+
+async function runUI5pScenarios() {
+  await runUI5pP1Scenario();
+  await runUI5pP2Scenario();
+  await runUI5pP3Scenario();
+  await runUI5pP4Scenario();
+  await runUI5pP5Scenario();
+  await runUI5pP26Scenario();
+  await runUI5pP2829Scenario();
 }
 
 main().catch((e) => {

@@ -538,11 +538,11 @@ textarea {
   font-size: 0.875rem;
   line-height: 1.5;
   min-height: 42px;
-  /* 4 整行封顶（border-box 下 max-height 含边框）：4 行 line-height 1.5 × 0.875rem + 上下
-     padding 20px + 上下边框 2px = 22px 收尾 → calc(0.875rem * 1.5 * 4 + 22px)；medium 106px /
-     small 95.5px / large 116.5px 三档恰容 4 整行（旧 104px 漏算 2px 边框，medium/large 档
-     实际只容 3 整行）。超出由 overflow-y 滚动查看。高度自增由 autoResize() 驱动，max-height 在此兜底封顶。 */
-  max-height: calc(0.875rem * 1.5 * 4 + 22px);
+  /* 8 整行封顶（border-box 下 max-height 含边框）：8 行 line-height 1.5 × 0.875rem + 上下
+     padding 20px + 上下边框 2px = 22px 收尾 → calc(0.875rem * 1.5 * 8 + 22px)；medium 190px /
+     small 169px / large 211px 三档恰容 8 整行。超出由 overflow-y 滚动查看。高度自增由
+     autoResize() 驱动，max-height 在此兜底封顶。 */
+  max-height: calc(0.875rem * 1.5 * 8 + 22px);
   overflow-y: auto;
 }
 

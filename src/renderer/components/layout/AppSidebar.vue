@@ -791,7 +791,10 @@ async function confirmDelete(session: { id: string; name: string }) {
   to { opacity: 1; transform: none; }
 }
 
-/* 会话卡基座：圆角 + panel 底 + ring/elevation 浮起（效果图 A 卡片语言）。 */
+/* 会话卡基座：圆角 + panelSoft 底 + border 描边 + ring/elevation 浮起（效果图 A 卡片语言）。
+   2026-11-19 五点批次 P2（R1 裁决 panelSoft 方案）：静止卡=panelSoft 底+border 描边，与
+   SessionsPage/TaskItem 卡片语言对齐；终端板暗板可见性由 P1 的终端板 border 提亮承接
+   （提亮定值见 constants.ts terminal-pro）。 */
 .session-card {
   position: relative;
   display: flex;
@@ -799,9 +802,9 @@ async function confirmDelete(session: { id: string; name: string }) {
   gap: 5px;
   padding: 8px 10px;
   border-radius: var(--radius-md);
-  background: var(--color-panel);
+  background: var(--color-panel-soft);
   box-shadow: var(--ring-light), var(--elevation-1);
-  border: 1px solid transparent;
+  border: 1px solid var(--color-border);
   color: var(--color-text);
   cursor: pointer;
   font-size: 0.8125rem;
@@ -809,7 +812,7 @@ async function confirmDelete(session: { id: string; name: string }) {
 }
 
 .session-card:hover {
-  background: color-mix(in srgb, var(--color-text) 4%, var(--color-panel));
+  background: color-mix(in srgb, var(--color-text) 4%, var(--color-panel-soft));
 }
 
 /* 活动卡：accent 8% 混色（Quiet Console 配色语言延续）+ accent 45% 描边（效果图 A）。 */

@@ -14,8 +14,8 @@ export function applyThemePalette(palette: ThemePalette, root: HTMLElement = doc
   root.style.setProperty('--color-panel', c.panel);
   root.style.setProperty('--color-panel-soft', c.panelSoft);
   root.style.setProperty('--color-border', c.border);
-  // 回退=variables.css 原静态值（旧板观感不变）；variables.css 静态层服务首绘，两层有意不同、注释互指。
-  root.style.setProperty('--color-border-strong', c.borderStrong ?? 'rgba(0, 0, 0, 0.12)');
+  // 回退=variables.css 原静态值（旧板观感不变）；暗板缺省回退提亮值（黑上叠黑不可见，P1/H1）。
+  root.style.setProperty('--color-border-strong', c.borderStrong ?? (palette.isDark ? '#3D444D' : 'rgba(0, 0, 0, 0.12)'));
   root.style.setProperty('--color-text', c.text);
   root.style.setProperty('--color-text-muted', c.textMuted);
   root.style.setProperty('--color-text-sub', c.textSub ?? c.textMuted);
