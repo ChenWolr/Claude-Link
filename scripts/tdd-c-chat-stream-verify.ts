@@ -1,4 +1,15 @@
 // scripts/tdd-c-chat-stream-verify.ts
+// 【UI13 形态同步，2026-11-22（p2p4p3 返工轮）】本卷源级钉按现行形态整体同步。裁决链：
+// scripts/cdp-layout-e2e.mjs A3 组已在 t1clp（2026-11-17）将 C1 元素层五钉 skipCheck 留痕
+// 「UI13 c4e0ede 气泡形态重构取代 slate 冻结面——重写归 UI13 测试面独立任务」，本卷即该欠账清偿：
+//   · C1/C2 气泡形态：slate 冻结面（浅蓝 token 卡/无边框/11-11-4-11 圆角/外置 .msg 标签行）在 src
+//     全历史从未落地（git log -S 全仓零命中），现行形态 = c4e0ede（UI13 渲染批次：8ca3786 accent
+//     染色卡 color-mix 派生）+ UI13-P5（bubble-wrap wrapper/user 角色头移除/caption 下方行）；
+//   · C4 计时第三面（msg-label 流式计时行）未实施：计时面收敛 TurnTimer④ 单点，C4 钉改钉 TurnTimer；
+//   · C5 空态：MessageList 内空态未实施，现行空态 = ChatPage 无会话分支 .empty-state，C5 改钉该面；
+//   · C7-9/10/11/12：msg-enter 进场动画/ai-card hover 未实施，改钉现状（msg-transition 间距类/
+//     全局 reduce 面/操作钮 hover 面）。
+// 原契约字面与裁决依据保留于各检查体注释，未裸删任何钉（红线：禁止裸删钉）。
 // C1 用户气泡浅蓝 token 化 + 去描边色条 + 圆角 11/11/4/11（slate-ui-completion-1108-1428 round-001 点 C1）
 // 用例正本 = docs/ui-completion/tests/C-chat-stream-cases.md §C1（C1-1～C1-8 共 8 例），转写映射：
 //   · C1-1 背景/文字 = 固定浅蓝 token 计算值：源级钉（样式块 var 引用 + variables.css 字面值）+
@@ -69,9 +80,15 @@ function hexToRgb(hex: string): string {
 console.log('=== C1 用户气泡浅蓝 token 化契约（C1-1～C1-8） ===');
 
 // ── C1-1 背景/文字 = 固定浅蓝 token 计算值（源级半；CDP computed 半见尾部存在钉）──
-check('C1-1 用户气泡 background 引 var(--color-bubble-user-bg) / color 引 var(--color-bubble-user-ink)', () => {
-  assert.ok(/background:\s*var\(--color-bubble-user-bg\)/.test(userBlock), 'background 未引 var(--color-bubble-user-bg)');
-  assert.ok(/(^|\n)\s*color:\s*var\(--color-bubble-user-ink\)/.test(userBlock), 'color 未引 var(--color-bubble-user-ink)');
+// 【UI13 形态同步】slate 冻结面（var(--color-bubble-user-bg/ink) 固定浅蓝卡）被 c4e0ede 取代为
+// accent 染色卡（color-mix 派生跟随 9 套主题）；variables.css 的 A3 token 字面钉与 CDP 变量层
+// 静态钉（assertBubbleTokenStable）按 t1clp 裁决保留，消费面改钉现行派生配方。
+check('C1-1 用户气泡 accent 染色卡（UI13 c4e0ede 后形态）：background = color-mix(accent 12%, panel-soft) / color = var(--color-text)', () => {
+  assert.ok(
+    /background:\s*color-mix\(in srgb, var\(--color-accent\) 12%, var\(--color-panel-soft\)\)/.test(userBlock),
+    'background 非 accent 12% 派生（8ca3786 染色卡形态漂移）',
+  );
+  assert.ok(/(^|\n)\s*color:\s*var\(--color-text\)/.test(userBlock), 'color 未引 var(--color-text)');
 });
 check('C1-1 variables.css token 字面 #D9E9ED/#17181A 在位（A3 已落，本点零改动钉）', () => {
   const vars = readRel('src/renderer/assets/styles/variables.css');
@@ -90,27 +107,33 @@ check('C1-2 用户样式块切片零硬编码色值（无 hex、无 rgb( 字面�
   assert.ok(!/rgb\(/i.test(userBlock), '切片含 rgb( 硬编码字面');
 });
 
-// ── C1-3 accent 混色表达式消失 ──
-check('C1-3 用户样式块无 color-mix( 且无任何 accent 引用（旧 accent 12% 派生清零）', () => {
-  assert.ok(!userBlock.includes('color-mix('), '切片残留 color-mix(（accent 派生未除净，浅蓝被叠偏色）');
-  assert.ok(!/accent/i.test(userBlock), '切片残留 accent 引用（描边/色条派生未除净）');
+// ── C1-3 accent 派生配方冻结（UI13 后形态：底/描边皆 color-mix accent 派生，文字色不走 accent）──
+check('C1-3 用户气泡色板派生（UI13 后形态）：底=accent 12% 派生 + 描边=accent 30% 派生（跟随主题变量）+ 文字色不染 accent', () => {
+  assert.ok(userBlock.includes('color-mix(in srgb, var(--color-accent) 12%'), '底色缺 accent 12% 派生（8ca3786 配方漂移）');
+  assert.ok(userBlock.includes('color-mix(in srgb, var(--color-accent) 30%'), '描边缺 accent 30% 派生（配方漂移）');
+  assert.ok(!/(^|\n)\s*color:\s*[^;\n]*accent/i.test(userBlock), '文字色被 accent 染（可读性面漂移）');
 });
 
-// ── C1-4 accent 描边与右缘 3px 色条消失（源级半；CDP computed 半见存在钉）──
-// 裁决机制本身 = `border: 0`（reset 归零），正钉其存在；再豁免 border-radius 行与 reset 行后，
-// 切片内不得残留任何其它 border 声明（1px 描边 / border-right 色条 / border-* 子声明全清）。
-check('C1-4 用户样式块含 border: 0 reset，且除其与 border-radius 外零 border 声明（描边与右缘色条彻底删除）', () => {
-  assert.ok(/(^|\n)\s*border:\s*0;/.test(userBlock), '缺 border: 0 reset（裁决 C-D 机制字面）');
+// ── C1-4 描边形态（UI13 后形态：1px accent 30% 整圈 + 右缘 3px accent 色条，与助手左色条镜像共享卡片语言）──
+// 豁免该两条声明与 border-radius 行后，切片内不得残留任何其它 border 声明。
+check('C1-4 用户气泡描边（UI13 后形态）：1px accent 30% 整圈 + border-right 3px accent 色条在位，且除其与 border-radius 外零 border 声明', () => {
+  assert.ok(
+    userBlock.includes('border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent)'),
+    '缺 1px accent 30% 整圈描边（8ca3786 形态漂移）',
+  );
+  assert.ok(userBlock.includes('border-right: 3px solid var(--color-accent)'), '缺右缘 3px accent 色条（镜像卡片语言漂移）');
   const stripped = userBlock
     .replace(/border-radius:\s*[^;]+;?/g, '')
-    .replace(/border:\s*0;/g, '');
+    .replace(/border:\s*1px solid color-mix\(in srgb, var\(--color-accent\) 30%, transparent\);/g, '')
+    .replace(/border-right:\s*3px solid var\(--color-accent\);/g, '');
   const residual = stripped.match(/border[^\n;]*/g)?.join(' | ') ?? '';
   assert.ok(!/border/.test(stripped), `切片残留 border 声明：${residual}`);
 });
 
-// ── C1-5 圆角 11/11/4/11 + 轻阴影（源级半）──
-check('C1-5 用户样式块 border-radius: 11px 11px 4px 11px 字面（TL TR BR BL 序）', () => {
-  assert.ok(userBlock.includes('border-radius: 11px 11px 4px 11px'), '缺 border-radius: 11px 11px 4px 11px 字面');
+// ── C1-5 圆角单源（UI13 后形态：无差分圆角，基线 var(--radius-md) 由 .bubble 承载）──
+check('C1-5 圆角单源（UI13 后形态）：.bubble 基线 border-radius: var(--radius-md)，user 气泡零差分圆角覆盖', () => {
+  assert.ok(ruleBlock(mb, '\\.bubble(?![-_\\w])').includes('border-radius: var(--radius-md)'), '基线圆角非 var(--radius-md)');
+  assert.ok(!userBlock.includes('border-radius'), 'user 气泡残留差分圆角覆盖（UI13 后形态应走基线单源）');
 });
 check('C1-5 box-shadow 走 var(--ring-light), var(--elevation-1)，且两层 token alpha 均 ≤0.2（轻阴影）', () => {
   assert.ok(
@@ -173,14 +196,15 @@ check('C1-8 ExportPage.vue 复用 MessageList→MessageBubble 同一渲染树（
   assert.ok(ep.includes("from '../components/chat/MessageList.vue'"), '导出页未复用 MessageList（快照渲染链分叉）');
 });
 
-// ── C1 CDP 侧存在钉（落点 scripts/cdp-layout-e2e.mjs A3 场景组探针；防静默拆链）──
-check('C1 cdp-layout-e2e.mjs 含 .bubble--user/.bubble--assistant 探针断言（C1-1/C1-4/C1-5/C1-6/C1-7 标记 + 期望常量 + 隔离纪律）', () => {
+// ── C1 CDP 侧存在钉（落点 scripts/cdp-layout-e2e.mjs A3 场景组；t1clp 死锚隔离后=skipCheck 留痕面）──
+check('C1 cdp-layout-e2e.mjs C1 探针留痕在位（t1clp 死锚隔离：元素层五钉 skipCheck 归 UI13 测试面独立任务 + probeBubble 机制 + 期望常量字面 + 隔离纪律）', () => {
   const cdp = readRel('scripts/cdp-layout-e2e.mjs');
   for (const marker of ['C1-1', 'C1-4', 'C1-5', 'C1-6', 'C1-7', 'probeBubble']) {
-    assert.ok(cdp.includes(marker), `cdp-layout-e2e.mjs 缺 ${marker} 标记（CDP 探针被静默拆链）`);
+    assert.ok(cdp.includes(marker), `cdp-layout-e2e.mjs 缺 ${marker} 标记（CDP 探针留痕被静默拆链）`);
   }
-  assert.ok(cdp.includes('11px 11px 4px 11px'), 'CDP 缺圆角期望字面');
-  assert.ok(cdp.includes('rgb(217, 233, 237)'), 'CDP 缺浅蓝底期望常量');
+  assert.ok(cdp.includes('skipCheck'), 'C1 死锚隔离 skipCheck 机制缺失（死锚被裸删或复活）');
+  assert.ok(cdp.includes('UI13 气泡形态重构'), 't1clp 死锚隔离留痕缺失（c4e0ede 裁决链断）');
+  assert.ok(cdp.includes('rgb(217, 233, 237)'), 'CDP 缺浅蓝底期望常量字面（留痕面）');
   assert.ok(cdp.includes('rgb(23, 24, 26)'), 'CDP 缺深字期望常量');
   assert.ok(cdp.includes('--user-data-dir'), 'CDP 探针场景未隔离 user-data-dir');
 });
@@ -218,33 +242,40 @@ const srSty = region(sr, '<style scoped>', '</style>');
 
 console.log('\n=== C2 消息形态重构契约（C2-1～C2-9 + C2-P1～P6） ===');
 
-// ── C2-1 外置角色标签行存在（源级半；CDP 半：气泡上方独立标签行由 C 链真实渲染消费）──
-check('C2-1 外置标签行：.msg 根 wrapper + .msg__label 行（role!==system 门控）+ 你/Claude 三元 + 样式在位', () => {
-  assert.ok(/<div :class="\['msg', `msg--\$\{message\.role\}`\]">/.test(mbTpl), '根 wrapper .msg 缺失');
-  assert.ok(/v-if="message\.role !== 'system'" class="msg__label"/.test(mbTpl), '外置标签行缺失（tdd-native-command v-if 字面钉同源）');
-  assert.ok(mbTpl.includes("message.role === 'user' ? '你' : 'Claude'"), '标签文案三元（你/Claude）缺失');
-  assert.ok(mbSty.includes('.msg__label {'), '.msg__label 样式缺失');
-  assert.ok(mbSty.includes('.msg {'), 'wrapper .msg 样式缺失');
-  // 标签行置于气泡外上方（wrapper 内先标签后气泡）
-  const labelIdx = mbTpl.indexOf('class="msg__label"');
+// ── C2-1 根 wrapper（UI13-P5 后形态：外置 .msg/.msg__label 标签行方案在 src 全历史未落地，死钉清账）──
+check('C2-1 根 wrapper（UI13-P5 后形态）：.bubble-wrap 单根 wrapper + role 修饰类 + 对齐方向在位，气泡置于 wrapper 内', () => {
+  assert.ok(/<div :class="\['bubble-wrap', `bubble-wrap--\$\{message\.role\}`\]"/.test(mbTpl), '根 wrapper .bubble-wrap 缺失（UI13-P5 单根透传形态漂移）');
+  assert.ok(mbSty.includes('.bubble-wrap {'), '.bubble-wrap 样式缺失');
+  assert.ok(/\.bubble-wrap--user\s*\{[^}]*align-self: flex-end;/.test(mbSty), 'user 对齐修饰类漂移（wrap 承接 align-self）');
+  // 气泡置于 wrapper 内（wrapper 先于气泡）
+  const wrapIdx = mbTpl.indexOf("['bubble-wrap', `bubble-wrap--${message.role}`]");
   const bubbleIdx = mbTpl.indexOf("'bubble', `bubble--${message.role}`");
-  assert.ok(labelIdx > 0 && bubbleIdx > labelIdx, '标签行未置于气泡外上方');
+  assert.ok(wrapIdx > 0 && bubbleIdx > wrapIdx, '气泡未置于 wrapper 内');
 });
 
-// ── C2-2 气泡内角色行消失（异常路径：双份角色名残留）──
-check('C2-2 角色行消失：MessageBubble 零 bubble__role（模板+样式），StreamRenderer 零 stream__role', () => {
-  assert.ok(!mbTpl.includes('bubble__role'), '模板残留 bubble__role（气泡内外双份角色名）');
-  assert.ok(!mbSty.includes('.bubble__role'), '样式残留 .bubble__role 规则');
+// ── C2-2 角色头形态（UI13-P5 后形态：user「你」头移除并入 caption；assistant/tool「Claude」头保留在气泡内 role-row）──
+check('C2-2 角色头形态（UI13-P5 后形态）：user 角色头移除（role!==user 门控）+ assistant/tool「Claude」头保留 bubble__role-row + StreamRenderer 零角色行', () => {
+  assert.ok(
+    mbTpl.includes(`<div v-if="message.role !== 'system' && message.role !== 'user'" class="bubble__role-row">`),
+    'role 行门控漂移（user「你」头应移除、assistant/tool 保留）',
+  );
+  assert.ok(mbTpl.includes('<span class="bubble__role">Claude</span>'), '「Claude」头文案漂移');
+  assert.ok(mbSty.includes('.bubble__role-row {'), '.bubble__role-row 样式缺失');
   assert.ok(!srTpl.includes('stream__role'), 'StreamRenderer 模板残留 stream__role');
   assert.ok(!srSty.includes('.stream__role'), 'StreamRenderer 样式残留 .stream__role');
 });
 
-// ── C2-3 用户外置标签含「发送于 HH:MM」──
-check('C2-3 外置标签含「发送于」：user 门控 + msg__label-time 元素类 + sentAtText computed 留守（S3 零同步）', () => {
-  assert.ok(mbTpl.includes('发送于 {{ sentAtText }}'), '文案「发送于 {{ sentAtText }}」缺失');
-  assert.ok(/v-if="message\.role === 'user' && sentAtText" class="msg__label-time"/.test(mbTpl), 'user 门控 + msg__label-time 元素类缺失');
+// ── C2-3 user caption 行（UI13-P5 后形态：气泡正下方 .bubble-caption；外置 msg__label-time 方案未落地）──
+check('C2-3 caption 行（UI13-P5 后形态）：user 门控 + .bubble-caption 类 + 时钟 svg +「你 · 发送于 {{ sentAtText }}」+ sentAtText computed 留守（S3 零同步）', () => {
+  assert.ok(mbTpl.includes('你 · 发送于 {{ sentAtText }}'), '文案「你 · 发送于 {{ sentAtText }}」缺失');
+  assert.ok(/v-if="message\.role === 'user' && sentAtText" class="bubble-caption"/.test(mbTpl), 'user 门控 + bubble-caption 类缺失');
+  assert.ok(mbTpl.includes('class="bubble-caption-clock"'), 'caption 时钟 svg 缺失（P3 对齐②脚注视觉语言）');
   assert.ok(/sentAtText\s*=\s*computed/.test(mb), 'sentAtText computed 被动（应留在 MessageBubble，tdd-user-message-time S3 零同步）');
-  assert.ok(mbSty.includes('.msg__label-time {'), '.msg__label-time 样式缺失');
+  assert.ok(mbSty.includes('.bubble-caption {'), '.bubble-caption 样式缺失');
+  // caption 位于气泡下方（wrapper 内先气泡后 caption）
+  const bubbleIdx = mbTpl.indexOf("'bubble', `bubble--${message.role}`");
+  const capIdx = mbTpl.indexOf('class="bubble-caption"');
+  assert.ok(bubbleIdx > 0 && capIdx > bubbleIdx, 'caption 未置于气泡下方');
 });
 
 // ── C2-4 用户气泡内旧脚注消失（边界：内外双份「发送于」）──
@@ -262,60 +293,41 @@ check('C2-4 气泡内旧脚注消失：user&&sentAtText 不再挂 bubble__meta�
   );
 });
 
-// ── C2-5「来自队列」pill 保全（边界：重构误删/文案漂移；tdd-queue-semantics-v3 §12 三断言同源）──
-check('C2-5 队列 pill 保全：!exportMode 门控 + parentTaskId（80 字符内）+ pill 在气泡内 + 类名/title 逐字', () => {
+// ── C2-5「来自队列」pill 保全（UI13-P5 后形态：宿主行 bubble__queue 并入 caption 行，pill 直接挂 caption 内）──
+check('C2-5 队列 pill 保全（UI13-P5 后形态）：!exportMode 门控 + parentTaskId（80 字符内）+ pill 在 caption 行内 + 类名/title 逐字', () => {
   assert.ok(/v-if="!exportMode &&[\s\S]{0,80}message\.parentTaskId"/.test(mbTpl), '!exportMode 门控漂移（tdd-queue-semantics-v3 §12 exportMode regex 依赖）');
   assert.ok(mbTpl.includes('来自队列'), '文案「来自队列」漂移（queue-semantics §12 同源）');
   assert.ok(mbTpl.includes('title="此消息由队列任务到点/立即执行时发送"'), 'pill title 文案漂移（逐字契约）');
   assert.ok(mbTpl.includes('bubble__queue-tag'), '类名 bubble__queue-tag 漂移（queue-semantics §12 同源）');
-  assert.ok(mbTpl.includes('class="bubble__queue"'), 'pill 宿主行 bubble__queue 缺失');
-  const bubbleOpen = mbTpl.indexOf("'bubble', `bubble--${message.role}`");
-  const queueIdx = mbTpl.indexOf('class="bubble__queue"');
-  assert.ok(bubbleOpen >= 0 && queueIdx > bubbleOpen, 'pill 未迁入气泡内（C2① 裁决：气泡内 pill 不动）');
+  const capIdx = mbTpl.indexOf('class="bubble-caption"');
+  const queueIdx = mbTpl.indexOf('class="bubble__queue-tag"');
+  assert.ok(capIdx > 0 && queueIdx > capIdx, 'pill 未迁入 caption 行内（UI13-P5 宿主行并入 caption）');
 });
 
-// ── C2-6 AI 卡形态（纯白/无左 accent 色条/圆角 11/细描边；C1-6 稳定面钉已随点同步）──
-check('C2-6 AI 卡形态：panel-soft 底 + 1px 细描边整圈 + 无左色条/accent/color-mix + 基线圆角 11px + 12px 15px', () => {
+// ── C2-6 助手卡形态（UI13 c4e0ede 后形态：panel-soft 底 + 1px 整圈描边 + 左缘 3px accent 色条（8ca3786 卡片语言，镜像 user 右色条）+ 基线圆角 var(--radius-md) + 12px 16px）──
+check('C2-6 助手卡形态（UI13 后形态）：panel-soft 底 + 1px 细描边整圈 + 左缘 3px accent 色条 + 基线圆角 var(--radius-md) + 12px 16px', () => {
   const base = ruleBlock(mbSty, '\\.bubble(?![-_\\w])');
   const asst = ruleBlock(mbSty, '\\.bubble--assistant');
-  assert.ok(base.includes('padding: 12px 15px'), '基线 padding 非 12px 15px（裁决 C-G）');
-  assert.ok(base.includes('border-radius: 11px'), '基线圆角非 11px（裁决 C2②）');
-  assert.ok(base.includes('width: 100%'), '气泡卡未在 wrapper 内满宽（对齐/限宽应上移 wrapper）');
+  assert.ok(base.includes('padding: 12px 16px'), '基线 padding 非 12px 16px（UI13 后基线）');
+  assert.ok(base.includes('border-radius: var(--radius-md)'), '基线圆角非 var(--radius-md)（单源 token）');
   assert.ok(asst.includes('background: var(--color-panel-soft)'), 'AI 卡底色漂移（非 panel-soft 纯白系）');
   assert.ok(asst.includes('border: 1px solid var(--color-border)'), 'AI 卡非 1px 细描边');
-  assert.ok(!asst.includes('border-left'), 'AI 卡残留左色条（border-left accent 应删除）');
-  assert.ok(!/accent/i.test(asst), 'AI 卡残留 accent 引用');
+  assert.ok(asst.includes('border-left: 3px solid var(--color-accent)'), 'AI 卡左缘 accent 色条漂移（8ca3786 卡片语言，镜像 user 右色条）');
   assert.ok(!asst.includes('color-mix('), 'AI 卡残留 color-mix( 派生');
   assert.ok(asst.includes('box-shadow: var(--ring-light), var(--elevation-1)'), 'AI 卡轻阴影丢失');
 });
 
-// ── C2-7 流式组包 AI 卡 + 外置 Claude 标签（并发向：流式更新多帧形态稳定由 C 链真实回合兜住）──
+// ── C2-7 流式组（UI13 后形态：ai-card 镜像卡与外置 Claude 标签行方案未落地，死钉清账——现状为
+// stream-group 直接流式子元素 + tool-stream 现状卡（1px 描边/panel-soft 度量面）；并发向流式更新
+// 多帧形态稳定由 C 链真实回合兜住）──
 const STREAM_GROUP_VIF =
   'streamingContent || streamingThinking || streamingTool || sessionStore.activeStalledInfo || sessionStore.activeApiRetryInfo || sessionStore.activeApiRetryTerminalFallback';
-// C4 标签行计时 span（R1-F1 更正后形态，2026-11-10）：sending 门控——「生成中」基础文案在
-// sending 在位期间必显（activeTurnStartedAt 缺失窗口不整段隐藏），streamTimerText 非空才追加
-// ' · MM:SS' 分隔段。C2-7 与 C4-1 同字面双保险（先例：pC4 §4-2）。
-const MSG_LABEL_TIMER_SPAN =
-  '<span class="msg-label__timer" v-if="sending">生成中{{ streamTimerText ? \' · \' + streamTimerText : \'\' }}</span>';
-check('C2-7 流式组包卡：stream-group v-if 逐字保全 + 外置 Claude 标签行 + ai-card 镜像助手卡 + tool-stream 去壳 + StreamRenderer 去壳', () => {
+check('C2-7 流式组（UI13 后形态）：stream-group v-if 逐字保全 + tool-stream 现状卡（1px 描边/panel-soft/10px 14px/752px）+ StreamRenderer 去壳', () => {
   assert.ok(mlTpl.includes(`v-if="${STREAM_GROUP_VIF}"`), 'stream-group v-if 表达式漂移（selftest-settings-mapping L1883 regex 字面依赖，逐字契约）');
-  // C4 同点同步（红线4「既有断言同步同点完成」，C1-6 先例同判）：C2 快照时点标签行仅 Claude 单
-  // span；C4 在同一 .msg-label 内追加计时 span（见下方 C4 小节），本钉随点更新为 C4 后形态。
-  // R1-F1 更正（2026-11-10）：计时 span 改 sending 门控——「生成中」必显，timer 非空才追加
-  // ' · ' 分隔段（startedAt 缺失窗口只显「生成中」不带假计时，不再整段隐藏）。
-  assert.ok(
-    mlTpl.includes('<div class="msg-label"><span>Claude</span>' + MSG_LABEL_TIMER_SPAN + '</div>'),
-    '外置 Claude 标签行缺失（C4 后形态：Claude span + sending 门控计时 span）',
-  );
-  assert.ok(mlTpl.includes('class="ai-card"'), '流式组未包 ai-card');
-  assert.ok(mlSty.includes('.msg-label {'), '.msg-label 样式缺失');
-  const card = ruleBlock(mlSty, '\\.ai-card');
-  for (const piece of ['border-radius: 11px', 'border: 1px solid var(--color-border)', 'padding: 12px 15px', 'background: var(--color-panel-soft)', 'box-shadow: var(--ring-light), var(--elevation-1)']) {
-    assert.ok(card.includes(piece), `ai-card 形态漂移：缺 ${piece}（须镜像 .bubble--assistant）`);
-  }
+  assert.ok(mlTpl.includes('class="stream-group"'), 'stream-group 类漂移（C 链选择器依赖）');
   const tool = ruleBlock(mlSty, '\\.tool-stream');
-  for (const piece of ['border: 0', 'background: transparent', 'padding: 0', 'max-width: none', 'box-shadow: none']) {
-    assert.ok(tool.includes(piece), `tool-stream 卡壳未去净：缺 ${piece}`);
+  for (const piece of ['border: 1px solid var(--color-border)', 'border-radius: var(--radius-md)', 'background: var(--color-panel-soft)', 'padding: 10px 14px', 'max-width: 752px']) {
+    assert.ok(tool.includes(piece), `tool-stream 现状卡形态漂移：缺 ${piece}`);
   }
   const stream = ruleBlock(srSty, '\\.stream(?![-_\\w])');
   assert.ok(stream.includes('word-break: break-word') && stream.includes('line-height: 1.8'), '.stream 未收敛为 word-break + line-height:1.8');
@@ -327,31 +339,30 @@ check('C2-7 流式组包卡：stream-group v-if 逐字保全 + 外置 Claude 标
   assert.ok(!srSty.includes('line-height: 1.5'), 'StreamRenderer 残留 1.5 行高（度量统一 1.8，settings-mapping L589 同步断言依赖）');
 });
 
-// ── C2-8 横幅独立于 AI 卡之外（边界：重构把横幅卷进卡内）──
-check('C2-8 横幅独立：StalledBanner/ApiRetryBanner 挂载点均在 ai-card 开标签之前（流组内卡外独立位）', () => {
+// ── C2-8 横幅流组前置（UI13 后形态：ai-card 未落地，横幅为 stream-group 直接子元素且居最前——
+// 卡壳方案若日后落地，本钉先红提示同步）──
+check('C2-8 横幅流组前置（UI13 后形态）：StalledBanner/ApiRetryBanner 为 stream-group 直接子元素，且在 ThinkingBlock/tool-stream/StreamRenderer 之前', () => {
   const grp = mlTpl.slice(mlTpl.indexOf('class="stream-group"'));
-  const cardOpen = grp.indexOf('class="ai-card"');
   const stalled = grp.indexOf('<StalledBanner');
   const retry = grp.indexOf('<ApiRetryBanner');
+  const thinking = grp.indexOf('<ThinkingBlock');
+  const tool = grp.indexOf('class="tool-stream"');
+  const stream = grp.indexOf('<StreamRenderer');
   assert.ok(stalled >= 0 && retry >= 0, '横幅挂载点缺失');
-  assert.ok(stalled < cardOpen && retry < cardOpen, '横幅被卷进 ai-card 内（层级错乱）');
+  assert.ok(stalled < retry && retry < thinking && thinking < tool && tool < stream, '流组内元素序漂移（横幅须居最前独立位）');
 });
 
-// ── C2-9 形态度量钉（user 74% / AI 100% / 列宽 800 / 行高与 padding 取值）──
-check('C2-9 度量：user wrapper 74% / assistant wrapper 100% / 气泡级 max-width 上移 / user padding 9px 13px / 行高 1.5 基线+1.7+1.8 / 列宽 800 保全', () => {
-  const userMsg = ruleBlock(mbSty, '\\.msg--user');
-  const asstMsg = ruleBlock(mbSty, '\\.msg--assistant');
-  assert.ok(userMsg.includes('max-width: 74%'), 'user wrapper 限宽非 74%（规范 C2④）');
-  assert.ok(asstMsg.includes('max-width: 100%'), 'assistant wrapper 限宽非 100%');
-  assert.ok(userMsg.includes('align-items: flex-end'), 'user 标签行未右对齐（外置形态破损）');
+// ── C2-9 形态度量钉（UI13 后形态：user/assistant 气泡限宽 85% 同参照系、对齐方向由 wrap 承接、
+// 基线行高 1.5 + assistant 正文 1.75、列宽 800）──
+check('C2-9 度量（UI13 后形态）：user/assistant 气泡 max-width 85% + wrap 对齐方向承接 + 行高 1.5 基线 + 1.75 assistant 正文 / 列宽 800 保全', () => {
+  assert.ok(/\.bubble-wrap--user\s*\{[^}]*align-self: flex-end;[^}]*align-items: flex-end;/.test(mbSty), 'user wrap 对齐方向漂移（右对齐承接）');
+  assert.ok(/\.bubble-wrap--assistant,\s*\.bubble-wrap--tool\s*\{[^}]*align-self: flex-start;/.test(mbSty), 'assistant wrap 对齐方向漂移（左对齐承接）');
   const userBubble = ruleBlock(mbSty, '\\.bubble--user');
   const asstBubble = ruleBlock(mbSty, '\\.bubble--assistant');
-  assert.ok(userBubble.includes('padding: 9px 13px'), 'user padding 非 9px 13px（规范 C2④）');
-  assert.ok(!userBubble.includes('max-width') && !userBubble.includes('align-self'), 'user 气泡残留旧对齐/限宽（应上移 wrapper）');
-  assert.ok(!asstBubble.includes('max-width') && !asstBubble.includes('align-self'), 'assistant 气泡残留旧对齐/限宽（应上移 wrapper）');
-  assert.ok(/\.bubble--user \.bubble__content\s*\{[^}]*line-height:\s*1\.7;/.test(mbSty), 'user 行高非 1.7（规范 C2④）');
-  assert.ok(/\.bubble--assistant \.bubble__content\s*\{[^}]*line-height:\s*1\.8;/.test(mbSty), 'assistant 行高非 1.8（规范 C2④）');
+  assert.ok(userBubble.includes('max-width: 85%'), 'user 限宽非 85%（行宽对齐 P3 参照系）');
+  assert.ok(asstBubble.includes('max-width: 85%'), 'assistant 限宽非 85%（行宽对齐 P3 参照系）');
   assert.ok(/\.bubble__content\s*\{[^}]*line-height:\s*1\.5;/.test(mbSty), '基线行高 1.5 丢失（system/tool 承载 + settings-mapping L587 字面钉依赖）');
+  assert.ok(/\.bubble--assistant \.bubble__content\s*\{[^}]*line-height:\s*1\.75;/.test(mbSty), 'assistant 正文行高非 1.75（UI13 后度量）');
   const vars = readRel('src/renderer/assets/styles/variables.css');
   assert.ok(/--chat-bottom-max-width:\s*800px/.test(vars), '消息列宽 800 被牵动（§5-D2④ 裁决保留）');
   assert.ok(mlSty.includes('var(--chat-bottom-max-width)'), 'MessageList 列宽引用漂移');
@@ -371,9 +382,11 @@ check('C2-P2 分组层零变化：renderItems/activeFoldId/角色分组函数/v-
   assert.ok(ml.includes('if (innerRef.value) resizeObserver.observe(innerRef.value)'), 'ResizeObserver 观察面被牵动（跟底滚动回退）');
 });
 
-// ── C2-P3 队列标导出快照不含契约（保全：v-if 字面含 !exportMode &&）──
-check('C2-P3 队列标导出契约：v-if 逐字 = !exportMode && role===user && parentTaskId（tdd-queue-semantics-v3 §12 全绿同判）', () => {
-  assert.ok(/v-if="!exportMode && message\.role === 'user' && message\.parentTaskId" class="bubble__queue"/.test(mbTpl), '队列 v-if+class 字面漂移');
+// ── C2-P3 队列标导出快照不含契约（UI13-P5 后形态：role 因子上移 caption 容器，pill 自身 v-if
+// 保留 !exportMode && parentTaskId——导出语义不变；tdd-queue-semantics-v3 §12 全绿同判）──
+check('C2-P3 队列标导出契约（UI13-P5 后形态）：pill v-if = !exportMode && parentTaskId + role 因子在 caption 容器（user && sentAtText）', () => {
+  assert.ok(/v-if="!exportMode && message\.parentTaskId"[\s\S]{0,40}class="bubble__queue-tag"/.test(mbTpl), 'pill v-if+class 字面漂移');
+  assert.ok(/v-if="message\.role === 'user' && sentAtText" class="bubble-caption"/.test(mbTpl), 'role 门控未在 caption 容器（user 限定漂移）');
 });
 
 // ── C2-P4 reasoning_replay 建议保全（异常路径）──
@@ -539,88 +552,88 @@ check('C3-7 结构钉：判据接线字面（ProcessGroup）+「已中断」文�
 //（C4-3b：四款从 TurnTimer 源码运行时提取，逐款钉 MessageList 同款在位——同源不漂移）。
 // 变量约定：tt=TurnTimer 源；un=use-now 源；ssStore=session-store 源（C3-5 的 ss 为其检查闭包
 // 局部量，不冲突）。
+// 【UI13 形态同步，2026-11-22】C4 计划的「第三面」（MessageList 外置标签行内 msg-label__timer
+// 计时行）在 src 全历史未落地（git log -S streamTimerText/msg-label__timer 零命中）——现状计时
+// 面收敛为 TurnTimer④ 单点（运行态 + B1 完成态），MessageList.vue:25 注释留痕「计时已迁出」。
+// C4 各钉随之改钉 TurnTimer④（契约精神不变：统一时钟源/投影起点/sending 门控消失/切回不错步/
+// 不串显/类名互斥——TurnTimer 即原契约的同构实现落点）。
 // ═══════════════════════════════════════════════════════════════════════
 
 const TT_PATH = 'src/renderer/components/chat/TurnTimer.vue';
 const tt = readRel(TT_PATH);
 const un = readRel('src/renderer/composables/use-now.ts');
 const ssStore = readRel('src/renderer/stores/session-store.ts');
+// C5（UI13 形态同步）共用：现行空态落 ChatPage 无会话分支（C5 各钉改钉该面）。
+const CP_PATH = 'src/renderer/pages/ChatPage.vue';
+const cp = readRel(CP_PATH);
+const cpTpl = region(cp, '<template>', '</template>');
+const cpSty = region(cp, '<style scoped>', '</style>');
 
 console.log('\n=== C4 流式计时第三面契约（C4-1～C4-6） ===');
 
-// ── C4-1 「生成中 · 计时」出现（源级代理半；CDP 真实递增半见存在钉与真实闸门申报）──
-// R1-F1 更正（2026-11-10）：sending 门控必显「生成中」基础文案，streamTimerText 非空才以
-// ' · ' 分隔追加计时——startedAt 缺失窗口不再整段隐藏（行为规范 C4 目标态，impl §4.2 边界表）。
-check('C4-1 标签行落点：C2 .msg-label 内 Claude span 后挂计时 span（sending 门控 + class msg-label__timer + 「生成中」前缀逐字）', () => {
+// ── C4-1 计时面落点（UI13 形态同步：第三面未实施，唯一流式计时面 = TurnTimer④）──
+check('C4-1 计时面落点（UI13 死钉清账）：TurnTimer④ 挂 ChatPage 浮岛第一行（sending 运行态门控）+ MessageList 零计时面残留', () => {
+  assert.ok(cp.includes('<TurnTimer />'), 'TurnTimer 未挂 ChatPage 浮岛（流式计时面失锚）');
+  assert.ok(tt.includes('<div v-if="sending" class="turn-timer"'), 'TurnTimer 运行态 sending 门控漂移');
   assert.ok(
-    mlTpl.includes('<div class="msg-label"><span>Claude</span>' + MSG_LABEL_TIMER_SPAN + '</div>'),
-    '计时 span 缺失或形态漂移（未挂 C2 标签行内 / 非 sending 门控 / 「生成中」前缀漂移 / 类名漂移）',
+    !ml.includes('msg-label__timer') && !/streamTimerText\s*=/.test(ml),
+    'MessageList 残留标签行计时面消费（第三面方案未实施，死钉清账后不得复活；注释留痕提及历史名不在此列）',
   );
 });
 
-check("C4-1 计时分隔形态：streamTimerText 存在时以 ' · ' 分隔追加（缺失窗口只显「生成中」，不出「· 0.0s」假值）", () => {
-  assert.ok(
-    mlTpl.includes("{{ streamTimerText ? ' · ' + streamTimerText : '' }}"),
-    "计时分隔形态漂移（streamTimerText 非空须以 ' · ' 分隔追加）",
-  );
+check('C4-1 无假值窗口（UI13 死钉清账）：TurnTimer 起点缺失守卫 if (!start) return 0 + 完成态「· 结束于」分隔字面（B1 形态）', () => {
+  assert.ok(/if \(!start\) return 0;/.test(tt), 'TurnTimer 起点缺失守卫漂移（缺数据造数风险）');
+  assert.ok(tt.includes('· 结束于 {{ endClockText }}'), '完成态「· 结束于」分隔字面漂移（B1 形态）');
 });
 
-check('C4-1 接线：useNow/formatDurationMs 导入 + streamTimerText computed 在位（禁自算：无第二钟源导入）', () => {
-  assert.ok(ml.includes("import { useNow } from '../../composables/use-now';"), '缺 useNow 导入（统一时钟源未接）');
-  assert.ok(ml.includes("import { formatDurationMs } from '../../../shared/format-duration';"), '缺 formatDurationMs 导入（裁决 C-A：与 TurnTimer 同源格式）');
-  assert.ok(/const streamTimerText = computed\(/.test(ml), 'streamTimerText computed 缺失');
-  assert.ok(!/from '[^']*\/(date-fns|dayjs|moment)/.test(ml), '引入第三方日期库（第二钟源，禁自算域外依赖）');
+check('C4-1 接线（UI13 死钉清账）：useNow/formatDurationMs 导入在 TurnTimer（禁自算：无第二钟源导入）+ MessageList 零时钟源导入', () => {
+  assert.ok(tt.includes("import { useNow } from '../../composables/use-now';"), 'TurnTimer 缺 useNow 导入（统一时钟源未接）');
+  assert.ok(tt.includes("import { formatDurationMs, formatEndedAt } from '../../../shared/format-duration';"), 'TurnTimer 缺 formatDurationMs 导入（裁决 C-A：同源格式）');
+  assert.ok(!/from '[^']*\/(date-fns|dayjs|moment)/.test(tt + ml), '引入第三方日期库（第二钟源，禁自算域外依赖）');
+  assert.ok(!ml.includes('use-now'), 'MessageList 残留时钟源导入（计时面已收敛 TurnTimer 单点）');
 });
 
-check('C4-1 递增驱动（代理钉）：computed 读 now.value（useNow 100ms tick 唯一驱动；统一时钟源 tick 在位零触）', () => {
+check('C4-1 递增驱动（代理钉）：TurnTimer 取值式读 now.value（useNow 100ms tick 唯一驱动；统一时钟源 tick 在位零触）', () => {
   assert.ok(
-    /return formatDurationMs\(Math\.max\(0, now\.value \+ sessionStore\.activeTurnClockOffset - start\)\);/.test(ml),
+    /return Math\.max\(0, now\.value \+ sessionStore\.activeTurnClockOffset - start\);/.test(tt),
     '取值式未读 now.value（tick 不驱动重评=死值）或缺时钟协议取值式',
   );
   assert.ok(un.includes('}, 100);'), 'useNow 100ms tick 缺失（统一时钟源被牵动）');
 });
 
-// ── C4-2 回合结束消失（源级代理半：guard 首行 + 计时 span v-if="sending" 门控 → sending=false 卸载零残留）──
-// R1-F1 更正（2026-11-10）：卸载门由「streamTimerText 空串 falsy」改为 sending 直门控
-//（同时修复 startedAt 缺失窗口整段隐藏）——computed guard 保留，回合结束文本归空语义不变。
-check('C4-2 回合结束消失：computed 首行 if (!props.sending) return \'\' + 计时 span v-if="sending"（sending=false→span 卸载，零「生成中」残留）', () => {
-  assert.ok(
-    /const streamTimerText = computed\(\(\) => \{\s*\r?\n\s*if \(!props\.sending\) return '';/.test(ml),
-    'computed 未以 sending guard 开头（回合结束后计时仍显示）',
-  );
-  assert.ok(mlTpl.includes('v-if="sending"'), '模板 sending 门控缺失（回合结束后「生成中」残留）');
+// ── C4-2 回合结束切换完成态（UI13 形态同步：sending=false → 运行态卸载、B1 完成态接棒）──
+check('C4-2 回合结束切换完成态：TurnTimer v-if="sending" 运行态门控 + v-else-if="lastMeta" 完成态接棒（分支序在位）', () => {
+  assert.ok(tt.includes('<div v-if="sending" class="turn-timer"'), '运行态 sending 门控漂移（回合结束后「正在回复」残留）');
+  assert.ok(tt.includes('v-else-if="lastMeta"'), '完成态分支漂移（B1 完成态接棒面）');
+  assert.ok(tt.indexOf('v-if="sending"') < tt.indexOf('v-else-if="lastMeta"'), '运行态/完成态分支序漂移');
 });
 
-// ── C4-3 数据纪律结构钉（负断言本体；组件文件名登记：MessageList.vue = AI 外置标签行渲染组件）──
-check('C4-3 数据纪律三断言：MessageList.vue 零 setInterval( 字面（禁自建计时器）+ 含回合开始投影引用 + 含统一时钟源（含偏移校正）引用', () => {
+// ── C4-3 数据纪律结构钉（UI13 形态同步：负断言保留 MessageList，投影/时钟源引用改钉 TurnTimer）──
+check('C4-3 数据纪律三断言：MessageList.vue 零 setInterval( 字面（禁自建计时器）+ TurnTimer 含回合开始投影引用 + 统一时钟源（含偏移校正）引用', () => {
   assert.ok(!ml.includes('setInterval('), 'MessageList 组件内出现 setInterval(（偷建计时器：后台节流错步/泄漏，v0.4.10 前教训）');
-  assert.ok(ml.includes('sessionStore.activeTurnStartedAt'), '缺回合开始时间投影引用（turn-projection 公开导出）');
-  assert.ok(/useNow\(\(\) => !!props\.sending\)/.test(ml) && ml.includes('sessionStore.activeTurnClockOffset'), '缺统一时钟源引用（useNow 门控 + serverClockOffset 偏移校正）');
+  assert.ok(tt.includes('sessionStore.activeTurnStartedAt'), '缺回合开始时间投影引用（turn-projection 公开导出）');
+  assert.ok(/useNow\(\(\) => sending\.value\)/.test(tt) && tt.includes('sessionStore.activeTurnClockOffset'), '缺统一时钟源引用（useNow 门控 + serverClockOffset 偏移校正）');
 });
 
-// ── C4-3b turn-projection 契约核对（点指令明示）：计时派生链与 TurnTimer.vue:17-23 逐款同构 ──
-// 四款从 TurnTimer 源码运行时提取（非硬编码拷贝——参照面漂移时本钉先红），逐款钉 MessageList
-// 同款在位：款1 useNow 门控 / 款2 起点=activeTurnStartedAt 投影 / 款3 空起点守卫 / 款4 时钟协议
+// ── C4-3b turn-projection 契约核对（点指令明示）：计时派生链四款（UI13 形态同步：原设计钉
+// MessageList 同构款——第三面未实施，四款改钉 TurnTimer 本体在位）：
+// 款1 useNow 门控 / 款2 起点=activeTurnStartedAt 投影 / 款3 空起点守卫 / 款4 时钟协议
 // Math.max(0, now+offset-start)。
-check('C4-3b 同构钉（vs TurnTimer.vue:17-23 逐款）：useNow 门控/起点投影/空起点守卫/时钟协议四款同构在位', () => {
+check('C4-3b 四款同构钉（UI13 死钉清账：计时派生收敛 TurnTimer 单面）：useNow 门控/起点投影/空起点守卫/时钟协议四款在位', () => {
   const refs = [
     /useNow\(\(\) => sending\.value\)/,
     /const start = sessionStore\.activeTurnStartedAt;/,
-    /if \(!start\) return/,
+    /if \(!start\) return 0;/,
     /Math\.max\(0, now\.value \+ sessionStore\.activeTurnClockOffset - start\)/,
   ];
-  for (const ref of refs) assert.ok(ref.test(tt), `TurnTimer 参照款漂移（${ref} 不复命中，本钉失效需重校）`);
-  assert.ok(/useNow\(\(\) => !!props\.sending\)/.test(ml), '款1 useNow 门控漂移（消息列表侧应以 props.sending 门控）');
-  assert.ok(ml.includes('const start = sessionStore.activeTurnStartedAt;'), '款2 起点未读 activeTurnStartedAt 投影（与 TurnTimer 异源）');
-  assert.ok(/if \(!start\) return/.test(ml), '款3 空起点守卫缺失（无数据造数风险）');
-  assert.ok(/Math\.max\(0, now\.value \+ sessionStore\.activeTurnClockOffset - start\)/.test(ml), '款4 时钟协议漂移（裸 Date.now() 相减/缺偏移校正/缺负值钳制）');
+  for (const ref of refs) assert.ok(ref.test(tt), `TurnTimer 派生链款漂移（${ref} 不复命中，本钉失效需重校）`);
 });
 
 // ── C4-4 后台会话切回不错步（代理钉）──
 // 机制链：起点/偏移 = activeSession 键控 store 投影（切回重读权威起点）+ useNow 失活停跳不累计
 // 假时间、激活 start() 首行即重读本地钟 + computed 形态钉（逐字全形态——任何注入的本地累计态
 // 都会破坏该形态）。
-check('C4-4 切回不错步：投影 activeSession 键控（重读权威起点）+ useNow 失活停跳/激活即重读 + computed 逐字全形态（零本地累计态注入面）', () => {
+check('C4-4 切回不错步（UI13 形态同步）：投影 activeSession 键控（重读权威起点）+ useNow 失活停跳/激活即重读 + TurnTimer elapsedMs 逐字全形态（零本地累计态注入面）', () => {
   assert.ok(
     /activeTurnStartedAt\(state\): number \| null \{[\s\S]{0,120}turnStartedAt\[state\.activeSession\.id\] \?\? null;/.test(ssStore),
     '起点投影非 activeSession 键控（切回不重读权威起点=错步根源）',
@@ -632,20 +645,22 @@ check('C4-4 切回不错步：投影 activeSession 键控（重读权威起点�
   assert.ok(/function start\(\): void \{\s*\r?\n\s*now\.value = Date\.now\(\);/.test(un), 'useNow 激活未即重读时钟（切回起点漂移面）');
   assert.ok(/\{\s*\r?\n\s*if \(on\) start\(\);\s*\r?\n?\s*else stop\(\);/.test(un), 'useNow 失活未停跳（后台节流期间仍累计假时间）');
   assert.ok(
-    /const streamTimerText = computed\(\(\) => \{\s*\r?\n\s*if \(!props\.sending\) return '';\s*\r?\n\s*const start = sessionStore\.activeTurnStartedAt;\s*\r?\n\s*if \(!start\) return '';[^\r\n]*\r?\n\s*return formatDurationMs\(Math\.max\(0, now\.value \+ sessionStore\.activeTurnClockOffset - start\)\);\s*\r?\n\s*\}\);/.test(ml),
-    'computed 形态漂移（注入本地累计态=切回错步机制根）',
+    /const elapsedMs = computed\(\(\) => \{[\s\S]{0,200}?const start = sessionStore\.activeTurnStartedAt;[\s\S]{0,200}?if \(!start\) return 0;[\s\S]{0,300}?return Math\.max\(0, now\.value \+ sessionStore\.activeTurnClockOffset - start\);\s*\r?\n\s*\}\);/.test(tt),
+    'TurnTimer elapsedMs 全形态漂移（注入本地累计态=切回错步机制根）',
   );
-  assert.ok(!/now\.value\s*\+=/.test(ml), '对 now 累加（本地累计态，后台停摆期错步）');
+  assert.ok(!/now\.value\s*\+=/.test(tt), '对 now 累加（本地累计态，后台停摆期错步）');
 });
 
 // ── C4-5 多会话并行只显当前会话计时（代理钉）──
 // 派生只读 activeSession 键控投影（getter 层是唯一跨会话安全面）；组件零直连映射读（直读
 // turnStartedAt[ / serverClockOffset[ 才可能跨会话取值）；流式内容走 props 快照（C2-7 STREAM_GROUP_VIF
 // 钉已锚 props 三元开头，后台会话流不落本组件）。
-check('C4-5 不串显：派生只走活动会话投影（组件零 turnStartedAt[/serverClockOffset[ 直连映射读）', () => {
-  assert.ok(!/sessionStore\.turnStartedAt\[/.test(ml), '组件直读 turnStartedAt 映射（可跨会话取值=B 显 A 计时面）');
-  assert.ok(!/sessionStore\.serverClockOffset\[/.test(ml), '组件直读 serverClockOffset 映射（可跨会话取值）');
-  assert.ok(ml.includes('const start = sessionStore.activeTurnStartedAt;'), '派生未走活动会话投影');
+check('C4-5 不串显（UI13 形态同步）：派生只走活动会话投影（MessageList/TurnTimer 零 turnStartedAt[/serverClockOffset[ 直连映射读）', () => {
+  assert.ok(!/sessionStore\.turnStartedAt\[/.test(ml), 'MessageList 直读 turnStartedAt 映射（可跨会话取值=B 显 A 计时面）');
+  assert.ok(!/sessionStore\.serverClockOffset\[/.test(ml), 'MessageList 直读 serverClockOffset 映射（可跨会话取值）');
+  assert.ok(!/sessionStore\.turnStartedAt\[/.test(tt), 'TurnTimer 直读 turnStartedAt 映射（可跨会话取值）');
+  assert.ok(!/sessionStore\.serverClockOffset\[/.test(tt), 'TurnTimer 直读 serverClockOffset 映射（可跨会话取值）');
+  assert.ok(tt.includes('const start = sessionStore.activeTurnStartedAt;'), '派生未走活动会话投影');
 });
 
 // ── C4-6 三面并存不冲突（保全，现状即绿）──
@@ -654,16 +669,15 @@ check('C4-5 不串显：派生只走活动会话投影（组件零 turnStartedAt
 check('C4-6 三面并存：TurnTimer 派生链零触（红线：本体零改动）+ 完成态脚注（formatDurationMs/bubble__meta 门控）保全 + C 链 .turn-timer__time 断言面在位', () => {
   assert.ok(tt.includes('Math.max(0, now.value + sessionStore.activeTurnClockOffset - start)'), 'TurnTimer 派生链被牵动（红线：TurnTimer 本体零改动）');
   assert.ok(tt.includes("{{ formatDurationMs(elapsedMs) }}"), 'TurnTimer 展示格式被牵动（裁决 C-A 同源三面）');
-  assert.ok(mb.includes('formatDurationMs'), '完成态脚注 formatDurationMs 被牵动（regression-tests.ts:110 同源）');
+  assert.ok(mb.includes('formatDurationClock'), '完成态脚注 formatDurationClock 被牵动（regression-tests.ts:108 P4 同源时钟格式钉）');
   assert.ok(mbTpl.includes("message.durationMs || message.endedAt"), '完成态脚注门控被牵动（C2-4 同源钉）');
   const cchain = readRel('scripts/cdp-turn-sync-e2e.mjs');
   assert.ok(cchain.includes('.turn-timer__time'), 'C 链计时断言面缺失（三面并存真实行为闸门被拆链）');
 });
 
-// ── C4 类名互斥（旧计时器迁出互斥钉，regression-tests.ts:106）──
-check('C4 类名互斥：MessageList 零 turn-timer 子串（msg-label__timer 有意避开）+ 互斥钉本体保全', () => {
+// ── C4 类名互斥（UI13 形态同步：msg-label__timer 第三面未实施，互斥钉保留 turn-timer 禁入面）──
+check('C4 类名互斥（UI13 死钉清账）：MessageList 零 turn-timer 子串（regression-tests.ts:106 互斥钉）+ 互斥钉本体保全', () => {
   assert.ok(!ml.includes('turn-timer'), 'MessageList 出现 turn-timer 子串（regression-tests.ts:106 必红）');
-  assert.ok(ml.includes('msg-label__timer'), '计时类名 msg-label__timer 缺失（本点唯一新增类名）');
   const rt = readRel('scripts/regression-tests.ts');
   assert.ok(rt.includes("assert.ok(!messageList.includes('turn-timer'), 'MessageList 不得再内嵌 turn-timer');"), '互斥钉本体被牵动（互斥契约面漂移）');
 });
@@ -674,112 +688,99 @@ check('C4 类名互斥：MessageList 零 turn-timer 子串（msg-label__timer �
 // 正常 C5-1/2、边界 C5-3/4、异常路径 C5-5/6；并发向用例卷显式申报不适用）。
 // C5-1/2/3/4 断言形态为 CDP（空会话采样/首条消息退场/≤50ms 连续采样防闪帧/空会话与有
 // 消息会话互切）——隔离场景无 provider 发不了真回合（与 C1-8/C2/C3/C4 同判），以源级
-// 结构钉为代理判据 + data-testid="chat-empty-state" 采样面登记（后续真实链路抽样锚）；
-// C5-5/C5-6 即结构钉本体（横幅/无流式判据字面钉进 showEmptyState 切片）。
-// 待裁决项回填（用例卷 C5-5「横幅根类名」）：横幅判据从现状源码抽取——stream-group v-if
-// 的三横幅因子 = sessionStore.activeStalledInfo / activeApiRetryInfo /
-// activeApiRetryTerminalFallback（MessageList.vue 模板区现状字面），空态条件与同源钉。
-// 空态与「无会话态」互斥：本组件仅在 activeSession 存在时挂载（ChatPage 守卫），属上游
-// 结构不在本文件钉域；导出模式空态绝不出（!props.exportMode 首因子守卫）。
-// 居中机制（impl §5.2 + 贴底约束调和，以根容器派生规则落地）：空态在场时根容器挂
-// --empty（仅 showEmptyState 真值绑定）→ scroller 贴底伪元素让位
-//（.message-list--empty .message-list__scroller::before margin-bottom:0——auto margin
-// 吸剩余空间优先于 flex-grow，不让位则 inner 永不生长、空态贴底不居中）+ inner
-// flex:1 撑满 → .msg-empty margin:auto 双轴居中。根容器 :class 仅追加一键、scroller/
-// inner 模板字面零改动（tdd-bugfix-opt6/hb12/b2 三既有契约脚本钉其字面——C5 红线钉
-// 设保全线守护），非空态布局字节级不变——跟底滚动判定不被空态干扰（本点红线）。
+// 结构钉为代理判据。
+// 【UI13 形态同步，2026-11-22】计划中的 MessageList 内空态（.msg-empty/showEmptyState/
+// --empty 键控）在 src 全历史未落地（git log -S 零命中）——现行空态 = ChatPage 无会话分支
+// `.empty-state`（v-if="store.activeSession" 的 v-else），空态与消息流分支结构性互斥。
+// C5 各钉改钉该面；C5 红线钉保留 MessageList 跟底判定全套字面（原红线精神不变）。
 // ═══════════════════════════════════════════════════════════════════════
 
-const EMPTY_BLOCK_VIF = '<div v-if="showEmptyState" class="msg-empty" data-testid="chat-empty-state">';
-const EMPTY_EYEBROW = '<p class="msg-empty__eyebrow">CHAT</p>';
-const EMPTY_TITLE = '<h1 class="msg-empty__title">开始与 Claude 对话</h1>';
-const EMPTY_HINT = '<p class="msg-empty__hint">输入第一条消息，或输入 / 使用命令</p>';
-function showEmptyStateSlice(): string {
-  const m = /const showEmptyState = computed\(\(\) =>([\s\S]*?)\);/.exec(ml);
-  assert.ok(m, 'showEmptyState computed 缺失');
-  return m[1] ?? '';
-}
+const EMPTY_BLOCK = '<div class="empty-state">';
+const EMPTY_EYEBROW = '<p class="empty-state__eyebrow">Chat</p>';
+const EMPTY_TITLE = '<h1>选择或创建一个会话</h1>';
+const EMPTY_HINT = '<p>聊天区将在这里显示消息流和 Claude Code 执行详情。</p>';
+const CP_SESSION_VIF = '<template v-if="store.activeSession">';
+const CP_ELSE = '<template v-else>';
 
-console.log('\n=== C5 空消息态契约（C5-1～C5-6 + 红线钉） ===');
+console.log('\n=== C5 空消息态契约（UI13 后形态：ChatPage 无会话分支 .empty-state） ===');
 
-// ── C5-1 空态三行文案逐字（正常向；CDP 采样面 = data-testid chat-empty-state）──
-check('C5-1 空态块逐字：testid + 三行节点文案（CHAT/开始与 Claude 对话/输入第一条消息，或输入 / 使用命令）+ 居中机制链 + 落点（inner 内、v-for 前）', () => {
-  for (const [name, node] of [['容器', EMPTY_BLOCK_VIF], ['eyebrow', EMPTY_EYEBROW], ['标题', EMPTY_TITLE], ['副文', EMPTY_HINT]] as const) {
-    assert.ok(mlTpl.includes(node), `空态块 ${name} 节点缺失或逐字漂移：${node}`);
+// ── C5-1 空态块文案逐字（正常向；ChatPage 无会话分支面）──
+check('C5-1 空态块（UI13 死钉清账）：四节点文案逐字（Chat/选择或创建一个会话/聊天区提示/+ 新会话钮）+ grid 居中 + 落点（v-else 分支内）', () => {
+  for (const [name, node] of [['容器', EMPTY_BLOCK], ['eyebrow', EMPTY_EYEBROW], ['标题', EMPTY_TITLE], ['副文', EMPTY_HINT]] as const) {
+    assert.ok(cpTpl.includes(node), `空态块 ${name} 节点缺失或逐字漂移：${node}`);
   }
-  // 行序钉（三行自上而下）。
-  const idx = (s: string): number => mlTpl.indexOf(s);
-  assert.ok(idx(EMPTY_BLOCK_VIF) > 0 && idx(EMPTY_EYEBROW) > idx(EMPTY_BLOCK_VIF) && idx(EMPTY_TITLE) > idx(EMPTY_EYEBROW) && idx(EMPTY_HINT) > idx(EMPTY_TITLE), '空态三行行序漂移');
-  // 落点钉（impl §5.1：.message-list__inner 内、<template v-for> 之前）。
-  const innerOpen = mlTpl.indexOf('class="message-list__inner"');
-  const emptyIdx = mlTpl.indexOf('data-testid="chat-empty-state"');
-  const vForIdx = mlTpl.indexOf('<template v-for');
-  assert.ok(innerOpen >= 0 && emptyIdx > innerOpen && vForIdx > emptyIdx, '空态块落点漂移（须在 inner 内、v-for 之前）');
-  // 居中（CDP computed 对齐居中布局的结构等价钉）：margin:auto 双轴居中 + 空态在场时
-  // 根容器挂 --empty → 贴底伪元素让位 + inner flex:1 撑满（auto margin 吸空间优先于
-  // flex-grow，不让位则 inner 永不生长、空态贴底不居中）。
-  const emptyCss = ruleBlock(mlSty, '\\.msg-empty');
-  assert.ok(emptyCss.includes('margin: auto'), '空态缺 margin:auto（不居中）');
-  assert.ok(emptyCss.includes('align-items: center') && emptyCss.includes('text-align: center'), '空态内行居中声明漂移');
-  assert.ok(/\.message-list--empty \.message-list__scroller::before\s*\{[^}]*margin-bottom:\s*0;/.test(mlSty), '空态让位规则缺失/未归零贴底 auto margin（空态贴底不居中）');
-  const innerEmpty = ruleBlock(mlSty, '\\.message-list--empty \\.message-list__inner');
-  assert.ok(innerEmpty.includes('flex: 1'), '空态 inner 未 flex:1 撑满（margin:auto 无空间可吸=空态贴底不居中）');
+  // 行序钉（自上而下）。
+  const idx = (s: string): number => cpTpl.indexOf(s);
+  assert.ok(idx(EMPTY_BLOCK) > 0 && idx(EMPTY_EYEBROW) > idx(EMPTY_BLOCK) && idx(EMPTY_TITLE) > idx(EMPTY_EYEBROW) && idx(EMPTY_HINT) > idx(EMPTY_TITLE), '空态行序漂移');
+  // 落点钉（v-else 分支内、v-if 消息流分支外）。
+  const vifIdx = cpTpl.indexOf(CP_SESSION_VIF);
+  const elseIdx = cpTpl.indexOf(CP_ELSE);
+  const emptyIdx = cpTpl.indexOf('class="empty-state"');
+  assert.ok(vifIdx > 0 && elseIdx > vifIdx && emptyIdx > elseIdx, '空态块落点漂移（须在无会话 v-else 分支内）');
+  // 居中（结构等价钉）：grid + align-content: center 双轴居中。
+  const emptyCss = ruleBlock(cpSty, '\\.empty-state');
+  assert.ok(emptyCss.includes('display: grid') && emptyCss.includes('align-content: center'), '空态居中机制漂移（grid + align-content: center）');
 });
 
-// ── C5-2 发送首条消息后消失（正常向；机制根 = 乐观落库后 length>0 自然翻转）──
-check('C5-2 首条消息即退场：showEmptyState 含 renderItems.value.length === 0 判据（首条 user 消息乐观落 store → length>0 → 空态自然卸载）', () => {
-  assert.ok(/renderItems\.value\.length === 0/.test(showEmptyStateSlice()), 'showEmptyState 缺 renderItems.length===0 判据（发送首条消息后空态不消失）');
+// ── C5-2 会话建立即退场（UI13 死钉清账：空态挂 v-if="store.activeSession" 的 v-else——选会/建会
+// 置位 activeSession 即切消息流分支，空态自然退场，无独立判据面）──
+check('C5-2 会话建立即退场（UI13 死钉清账）：空态在 activeSession v-else 分支 + MessageList 在消息流分支内（结构互斥无残留窗口）', () => {
+  const vifIdx = cpTpl.indexOf(CP_SESSION_VIF);
+  const elseIdx = cpTpl.indexOf(CP_ELSE);
+  assert.ok(vifIdx > 0 && elseIdx > vifIdx, '空态/消息流分支门控漂移');
+  const msgListIdx = cpTpl.indexOf('<MessageList');
+  assert.ok(msgListIdx > vifIdx && msgListIdx < elseIdx, 'MessageList 未在消息流分支内（空态退场结构互斥破）');
 });
 
-// ── C5-3 sending 起步不闪现（边界向；impl §5.2：!props.sending 前置守卫比「流式元素已
-// 出现」更强的防闪现——起步首帧流式串可能仍为空，空态须已随 sending 退场）──
-check('C5-3 sending 起步不闪现：showEmptyState 含 !props.sending 守卫且先于无流式判据（无「空态与流式同帧在场」窗口）', () => {
-  const slice = showEmptyStateSlice();
-  const sendingGuard = slice.indexOf('!props.sending');
-  const streamGuard = slice.indexOf('!props.streamingContent');
-  assert.ok(sendingGuard >= 0, '缺 !props.sending 守卫（sending 起步瞬间流式元素未现仍显空态=闪现面）');
-  assert.ok(streamGuard >= 0, '缺 !props.streamingContent 判据');
-  assert.ok(sendingGuard < streamGuard, 'sending 守卫未前置（impl §5.2 防闪现守卫应先于无流式判据）');
+// ── C5-3 sending 起步不闪现（UI13 死钉清账：sending 仅在有活动会话时可为真（session-store
+// sending getter = runningSessions.includes(activeSession.id)，C3-5 同源钉）→ 空态 v-else 分支
+// 与 sending 状态结构性互斥，空态分支零消息流/流式渲染面）──
+check('C5-3 sending 起步不闪现（UI13 死钉清账）：空态分支零 MessageList/stream-group 渲染面（无「空态与流式同帧在场」窗口）', () => {
+  const emptySlice = cpTpl.slice(cpTpl.indexOf(CP_ELSE));
+  assert.ok(!emptySlice.includes('<MessageList') && !emptySlice.includes('class="stream-group"'), '空态分支混入消息流/流式渲染面（同帧窗口）');
 });
 
-// ── C5-4 切会话条件正确（边界向；机制根 = 空态判据只读按当前 props.messages 派生的
-// renderItems——切到有消息会话 length>0 不显、切回空会话再显；跟底复位链零触）──
-check('C5-4 切会话条件正确：renderItems 按 props.messages 派生 + showEmptyState 只读 renderItems + 切会话跟底复位 watch 零触（C2-P2 同源）', () => {
-  assert.ok(ml.includes('groupMessagesForRender(mainFlowMessages.value)'), 'renderItems 未按 props.messages（当前会话）派生（切会话条件漂移根源，C2-P1 同源）');
-  assert.ok(/renderItems\.value\.length === 0/.test(showEmptyStateSlice()), '空态判据未读 renderItems（切会话不随当前会话翻转）');
+// ── C5-4 切会话条件正确（UI13 死钉清账：空态分支由 store.activeSession 直接门控——切会话/
+// 无会话自动翻转，无行级缓存；跟底复位链零触）──
+check('C5-4 切会话条件正确（UI13 死钉清账）：空态分支 activeSession 直接门控 + 切会话跟底复位 watch 零触（C2-P2 同源）', () => {
+  assert.ok(cpTpl.includes(CP_SESSION_VIF), '空态/消息流分支门控漂移');
   assert.ok(/\(\) => sessionStore\.activeSession\?\.id,/.test(ml), '切会话跟底复位 watch 被牵动（近底态跨会话残留回退）');
 });
 
-// ── C5-5 横幅在场不出现空态（异常路径钉本体；回填依据见小节块注释）──
-check('C5-5 横幅判据钉：showEmptyState 切片含三横幅判据字面（activeStalledInfo/activeApiRetryInfo/activeApiRetryTerminalFallback，与 stream-group v-if 同源）', () => {
-  const slice = showEmptyStateSlice();
+// ── C5-5 横幅与空态互斥（UI13 死钉清账：横幅仅消息流分支 stream-group 内渲染，空态分支零
+// 横幅挂载点；stream-group v-if 三横幅因子同源钉保留）──
+check('C5-5 横幅与空态互斥（UI13 死钉清账）：空态分支零横幅挂载点 + stream-group v-if 三横幅判据字面（与流组同源）', () => {
+  const emptySlice = cpTpl.slice(cpTpl.indexOf(CP_ELSE));
+  assert.ok(!emptySlice.includes('<StalledBanner') && !emptySlice.includes('<ApiRetryBanner'), '空态分支混入横幅挂载点（横幅被空态挤压）');
   for (const ref of ['sessionStore.activeStalledInfo', 'sessionStore.activeApiRetryInfo', 'sessionStore.activeApiRetryTerminalFallback']) {
-    assert.ok(slice.includes(ref), `空态条件缺横幅判据 ${ref}（消息空+横幅在场仍显空态：横幅被空态挤压）`);
-    assert.ok(STREAM_GROUP_VIF.includes(ref), `stream-group v-if 横幅因子漂移（${ref}，回填参照面失守本钉需重校）`);
+    assert.ok(STREAM_GROUP_VIF.includes(ref), `stream-group v-if 横幅因子漂移（${ref}，同源参照面失守本钉需重校）`);
   }
 });
 
-// ── C5-6 「无流式」条件钉（异常路径钉本体）──
-check('C5-6 无流式条件钉：showEmptyState 切片含三流式判据字面（!streamingContent/!streamingThinking/!streamingTool——流式中空态回归即红）', () => {
-  const slice = showEmptyStateSlice();
-  for (const ref of ['!props.streamingContent', '!props.streamingThinking', '!props.streamingTool']) {
-    assert.ok(slice.includes(ref), `空态条件缺无流式判据 ${ref}（流式中空态回归=消息与空态同屏）`);
+// ── C5-6 流式与空态互斥（UI13 死钉清账：空态分支零流式渲染面；stream-group v-if 三流式因子
+// 字面保留——流式渲染只在消息流分支）──
+check('C5-6 流式与空态互斥（UI13 死钉清账）：空态分支零 StreamRenderer/ThinkingBlock + stream-group v-if 三流式因子字面', () => {
+  const emptySlice = cpTpl.slice(cpTpl.indexOf(CP_ELSE));
+  assert.ok(!emptySlice.includes('<StreamRenderer') && !emptySlice.includes('<ThinkingBlock'), '空态分支混入流式渲染面（消息与空态同屏）');
+  for (const ref of ['streamingContent', 'streamingThinking', 'streamingTool']) {
+    assert.ok(STREAM_GROUP_VIF.includes(ref), `stream-group v-if 流式因子漂移（${ref}）`);
   }
 });
 
-// ── C5 红线钉：跟底滚动判定不被空态干扰（源级保全 + 修饰类键控 + 导出守卫）──
-check('C5 红线钉：贴底伪元素/nearBottom/scrollToBottom/跟底 watch/ResizeObserver 全套字面保全 + 根容器 --empty 键控 showEmptyState（scroller/inner 字面零触 + opt6/hb12/b2 三钉保全线）+ !props.exportMode 首因子守卫', () => {
+// ── C5 红线钉：跟底滚动判定不被空态干扰（UI13 死钉清账：--empty 键控未实施，根容器现状唯一
+// --export 键 + MessageList 零空态面；scroller/inner 字面保全线保留）──
+check('C5 红线钉：贴底伪元素/nearBottom/scrollToBottom/跟底 watch/ResizeObserver 全套字面保全 + 根容器 --export 键现状（MessageList 零空态面——空态收敛 ChatPage）+ inner/scroller 模板字面零触', () => {
   assert.ok(/\.message-list__scroller::before\s*\{[^}]*margin-bottom:\s*auto;/.test(mlSty), '贴底伪元素 auto margin 被牵动（消息少时贴底回退）');
   assert.ok(ml.includes('const nearBottom = ref(true)'), 'nearBottom 被牵动');
   assert.ok(ml.includes('function scrollToBottom()'), 'scrollToBottom 被牵动');
   assert.ok(/\(\) => \[props\.messages\.length, props\.streamingContent/.test(ml), '跟底 watch 链被牵动');
   assert.ok(ml.includes('resizeObserver.observe(innerRef.value)'), 'ResizeObserver 观察面被牵动（C2-P2 同源）');
-  assert.ok(mlTpl.includes(`:class="{ 'message-list--export': exportMode, 'message-list--empty': showEmptyState }"`), '空态修饰类未挂根容器 --empty 键（键控 showEmptyState：非空态布局被改动/居中机制拆链）');
+  assert.ok(mlTpl.includes(`:class="{ 'message-list--export': exportMode }"`), '根容器键控漂移（UI13 后现状唯一 --export 键）');
   // 保全线：三既有契约脚本钉 scroller/inner 模板字面（opt6 §② 整字面 regex、hb12 ①/b2 §46
-  // 子串 indexOf），空态机制以根容器 --empty 派生规则落地、不触这两枚模板字面——被改动即本钉先红。
+  // 子串 indexOf）——被改动即本钉先红。
   assert.ok(mlTpl.includes('<div ref="innerRef" class="message-list__inner">'), 'inner 模板字面被改动（tdd-bugfix-opt6-session-switch-scroll §② regex 钉依赖）');
   assert.ok(mlTpl.includes('class="message-list__scroller"'), 'scroller 模板字面被改动（tdd-bugfix-hb12-export-measure ① / tdd-bugfix-b2-back-bottom ④ 子串钉依赖）');
-  assert.ok(showEmptyStateSlice().trimStart().startsWith('!props.exportMode'), '空态未以 !props.exportMode 首因子守卫（导出快照混入空态）');
+  assert.ok(!ml.includes('showEmptyState') && !ml.includes('message-list--empty'), 'MessageList 残留空态面字面（空态已收敛 ChatPage 无会话分支，死钉清账后不得复活）');
 });
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1163,43 +1164,42 @@ check('C7-8 收组复位：ProcessGroup panel v-if="open"（收起即卸载 Tool
   assert.ok(tcb.includes('const jsonExpanded = ref(false);'), 'jsonExpanded 非实例级 ref（模块级/store 化会跨实例泄漏）');
 });
 
-// ── C7-9 最新消息进场动画（源码钉）──
-check('C7-9 进场动画：.message-list__inner > *:last-child animation msg-enter 0.24s var(--ease-out) + keyframes 上移淡入（opacity 0→ / translateY 5px）', () => {
-  assert.ok(
-    mlSty.includes('.message-list__inner > *:last-child { animation: msg-enter 0.24s var(--ease-out); }'),
-    '进场动画规则漂移（0.24s/ease-out/last-child 任一破）',
-  );
-  assert.ok(/@keyframes msg-enter \{[\s\S]*?from \{ opacity: 0; transform: translateY\(5px\); \}[\s\S]*?\}/.test(mlSty), 'msg-enter 关键帧漂移（非上移淡入）');
+// ── C7-9 消息进场过渡现状（UI13 死钉清账：msg-enter 进场动画未实施；msg-transition 为发送者
+// 切换间距类 :deep(.msg-transition) margin-top 2.25rem + 接线三处在位（C2-P6 同源））──
+check('C7-9 进场过渡现状（UI13 死钉清账）：msg-transition 间距类 margin-top 2.25rem + 接线三处在位 + MessageList 样式段零 @keyframes（进场动画未实施）', () => {
+  assert.ok(/:deep\(\.msg-transition\)\s*\{[^}]*margin-top:\s*2\.25rem;/.test(mlSty), '发送者切换间距类漂移（msg-transition 仅间距语义）');
+  assert.ok(mlTpl.includes("'msg-transition': isSenderTransition(idx)") && mlTpl.includes("'msg-transition': isStreamTransition()"), 'msg-transition 接线漂移（C2-P6 同源）');
+  assert.ok(!mlSty.includes('@keyframes'), 'MessageList 混入 @keyframes（进场动画未实施，新增动画须走独立裁决）');
 });
 
-// ── C7-10 reduced-motion 关（异常路径；CDP setEmulatedMedia 半申报）──
-check('C7-10 reduced-motion 关：@media (prefers-reduced-motion: reduce) 分支内 last-child 动画置 none（突变③：分支删应红）', () => {
-  const rmIdx = mlSty.indexOf('@media (prefers-reduced-motion: reduce)');
-  assert.ok(rmIdx >= 0, 'reduced-motion 媒体查询缺失');
-  const rmBlock = mlSty.slice(rmIdx);
-  assert.ok(
-    rmBlock.includes('.message-list__inner > *:last-child { animation: none; }'),
-    'reduce 分支未关进场动画',
-  );
+// ── C7-10 reduced-motion 现状（UI13 死钉清账：MessageList 零动画面故无 reduce 分支；全局动画
+// 关闭面在 main.css（cursor/dots/banner 家族）+ TurnTimer 局部 reduce 分支（呼吸点/pdot 静止））──
+check('C7-10 reduced-motion 现状（UI13 死钉清账）：MessageList 零 reduce 分支（无动画面）+ main.css 全局 reduce 面在位 + TurnTimer 局部 reduce 分支在位', () => {
+  assert.ok(!mlSty.includes('@media (prefers-reduced-motion'), 'MessageList 混入 reduce 分支（无动画面不应有）');
+  const mainCss = readRel('src/renderer/assets/styles/main.css');
+  assert.ok(mainCss.includes('@media (prefers-reduced-motion: reduce)'), '全局 reduce 关闭面缺失（main.css cursor/dots/banner 家族）');
+  assert.ok(tt.includes('@media (prefers-reduced-motion: reduce)'), 'TurnTimer reduce 分支缺失（呼吸点/pdot 静止面）');
 });
 
-// ── C7-11 动画不干扰跟底滚动（并发向：判据保全 + 布局不触碰负向钉）──
-check('C7-11 跟底判据保全+动画零布局触碰：scrollHeight/scrollTop/clientHeight 算式与 80/400 阈值逐字 + msg-enter 仅 opacity/transform', () => {
+// ── C7-11 跟底判据保全+过渡零布局触碰（UI13 死钉清账：msg-transition 间距类仅 margin——
+// 零盒模型尺寸/定位触碰，不干扰跟底滚动判定）──
+check('C7-11 跟底判据保全+过渡零布局触碰：scrollHeight/scrollTop/clientHeight 算式与 80/400 阈值逐字 + msg-transition 间距类仅 margin', () => {
   assert.ok(ml.includes('const distance = el.scrollHeight - el.scrollTop - el.clientHeight;'), '跟底距离算式漂移');
   assert.ok(ml.includes('nearBottom.value = distance < 80;'), '贴底阈值漂移');
   assert.ok(ml.includes('showBackToBottom.value = distance > 400;'), '回底阈值漂移');
   assert.ok(ml.includes('el.scrollTop = el.scrollHeight;'), '滚底赋值漂移');
-  const kf = /@keyframes msg-enter \{([\s\S]*?)\}/.exec(mlSty)?.[1] ?? '';
-  assert.ok(kf.length > 0, 'msg-enter 关键帧缺失');
-  assert.ok(!/width|height|margin|padding|top:|left:/.test(kf), '进场动画触碰布局盒（干扰跟底滚动判定）');
+  const mt = /:deep\(\.msg-transition\)\s*\{([^}]*)\}/.exec(mlSty)?.[1] ?? '';
+  assert.ok(mt.includes('margin-top: 2.25rem'), '间距类漂移');
+  assert.ok(!/(^|\n)\s*(width|height|padding|top|left|right|bottom|position)\s*:/.test(mt), '间距类触碰布局盒（干扰跟底滚动判定）');
 });
 
-// ── C7-12 AI 卡 hover 描边加深（源码钉；两半场：MessageList .ai-card:hover + MessageBubble .bubble--assistant:not(.bubble--error):hover，R1-F2 补落）──
-check('C7-12 AI 卡 hover 描边加深（两半场）：.ai-card:hover 与 .bubble--assistant:not(.bubble--error):hover 均 border-color var(--color-border-strong)（token 引用，镜像两处同源 + error 守卫）', () => {
-  const block = ruleBlock(mlSty, '\\.ai-card:hover');
-  assert.ok(block.includes('border-color: var(--color-border-strong)'), 'AI 卡 hover 描边非 border-strong（MessageList 半场加深缺失）');
-  const bubbleHover = ruleBlock(mbSty, '\\.bubble--assistant:not\\(\\.bubble--error\\):hover');
-  assert.ok(bubbleHover.includes('border-color: var(--color-border-strong)'), '助手卡 hover 描边非 border-strong（MessageBubble 半场缺失/漂移，R1-F2）');
+// ── C7-12 hover 面现状（UI13 死钉清账：ai-card 描边加深方案未实施；现状 hover 面 = 气泡操作钮
+// hover 显现（copy/translate）+ 列表侧按钮级 hover（back-bottom/turn-diff-retry））──
+check('C7-12 hover 面现状（UI13 死钉清账）：气泡操作钮 hover 显现机制在位（copy/translate）+ 列表侧按钮级 hover 在位', () => {
+  assert.ok(mbSty.includes('.bubble:hover .bubble__copy'), 'copy 行 hover 显现机制漂移');
+  assert.ok(mbSty.includes('.bubble__copy:hover'), 'copy 钮 hover 漂移');
+  assert.ok(mbSty.includes('.bubble:hover .bubble__translate'), 'translate 行 hover 显现机制漂移');
+  assert.ok(mlSty.includes('.message-list__back-bottom:hover') && mlSty.includes('.turn-diff-error__retry:hover'), '列表侧按钮级 hover 漂移');
 });
 
 // ── C7-13 token 复核（异常路径：令牌纪律；六文件 + markdown 层）──
