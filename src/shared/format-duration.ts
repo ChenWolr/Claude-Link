@@ -40,7 +40,9 @@ export function formatEndedAt(ts: number | null | undefined, now: number = Date.
 /** S3（2026-10-22 六问题计划 P1）：用户消息发送时刻展示（气泡脚注「发送于」单源）。
  *  入参是 ISO 8601 字符串（DB created_at 经 normalizeDbTime 规范为带 Z 的 UTC，或内存乐观消息
  *  的 toISOString 毫秒级），与 formatEndedAt（epoch ms 入参，TurnTimer 在用、签名不动）口径一致
- *  但类型不同，故独立成函数：当天 HH:mm（分钟级，发送时刻秒无参照意义），跨天 M/d HH:mm。
+ *  但类型不同，故独立成函数。
+ *  P3（2026-11-21 批次）：user caption 时刻秒级单源——当天 HH:mm:ss、跨天 M/d HH:mm:ss
+ *  （原分钟级口径 2026-10-22 P1 契约已被本批契约升秒级取代，签名不变原地升级）。
  *  空 / Date.parse 为 NaN 返回空串（诚实不造数，调用处 v-if 不渲染、无空行残留）。 */
 export function formatSentAt(iso: string | null | undefined): string {
   if (!iso) return '';
@@ -50,9 +52,9 @@ export function formatSentAt(iso: string | null | undefined): string {
   const pad = (n: number): string => String(n).padStart(2, '0');
   const sameDay = new Date().toDateString() === d.toDateString();
   if (!sameDay) {
-    return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 /** C6（UI 补全，slate-ui-completion-1108-1428）：中断回合脚注「结束于」分钟级单源
@@ -67,4 +69,17 @@ export function formatEndedAtMinute(ts: number | null | undefined, now: number =
     return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
   }
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** P4（2026-11-21 批次）：②气泡脚注与中断/失败脚注专用时钟格式——恒 m:ss（<60s 补零分档
+ *  0:07）、≥1h H:MM:SS（2:05:03）；秒数向下取整，不再出现小数秒形态。非有限/≤0 兜底 0:00。
+ *  TurnTimer④与工具行耗时维持 formatDurationMs（用户未要求，口径差异已知会保留）。 */
+export function formatDurationClock(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0:00';
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }

@@ -33,8 +33,13 @@
 //      （CC 从进程 env 解析 ~，SDK env 注入无法隔离 HOME——记忆实测，故用快照+恢复。）
 //   8. 中断运行中 query：按钮状态恢复、system:aborted 只持久化一次、重开仍可见。
 //      8-F1-2c（t1clp 扩展）：中断后即时断言「已中断 · 运行 X:XX」脚注可见（内存 meta 实时）。
-//   9. F1-4 重开语义三步（t1clp 扩展，重启口径）：成功回合重开脚注仍在（DB 值=内存流内值）/
-//      中断回合重开无脚注（P2-1 不落库诚实）/ 错误回合重开无脚注（同 P2-1 口径）。
+//   9. F1-4 重开语义三步（t1clp 扩展，重启口径）：成功回合重开无脚注（MOD-P2-3：P2 已删成功
+//      形态渲染与 DB 回落）/ 中断回合重开无脚注（P2-1 不落库诚实）/ 错误回合重开无脚注（同 P2-1 口径）。
+//
+//   MOD-P2-3（flow P2-1，2026-11-22 留痕）：场景9-pre A 与场景9-① 的成功脚注钉已随 P2 翻转——
+//   旧钉 = P2 前成功形态渲染（③成功脚注在场 + 重开 DB 回落），已被本批契约取代（P2 删除
+//   success 渲染：MessageList 让位守卫 + DB 回落块删除；信息无损由②气泡脚注与④TurnTimer 承载）。
+//   场景8-F1-2c 与场景9-②③ 的 interrupted/无脚注钉不受影响，保留不动。
 //
 // 结束只清理自己在 e2e/<run-id>/ 创建的目录与会话；设置备份恢复失败 → 失败并保留备份路径。
 
@@ -287,6 +292,14 @@ async function waitFor(label, fn, timeoutS = 60, intervalMs = 500) {
 
 // ── UI 驱动 ──
 async function newSessionViaUI(ws, name) {
+  // 【F-r1-7 配套·自举就绪等待（2026-11-22 申报：round-001 R2-A·F8 同款手法，非发现清单项）】
+  // ensureIsoEnvironment/restartIsoApp 返回仅保证 preload bridge ready，Vue 挂载（button.new-button
+  // 入 DOM）晚 ~250-600ms——原实现即点为 ?.click() 静默 no-op，场景1-2「聊天输入框出现」15s 等待
+  // 永不满足 → exit 2（本轮 3/3 确定性复现 + 仓外探针实证：bridge @1268ms 立即点 no-op、按钮
+  // @1542ms 入 DOM、补点即通 input @1832ms）。改等待式点击：先轮询新会话钮在位（15s 超时），
+  // 在位再点击；签名与调用面零扩散，点击目标与后续物化链路逐字不变（断言语义零变化——仅前置
+  // 就绪等待）。与 switchSessionViaUI 的 R2-A·F8（round-001）同根同源同修法。
+  await waitFor('新会话按钮在位（Vue 挂载完成，自举就绪等待）', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15, 250);
   await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`);
   await waitFor('聊天输入框出现', () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 15);
   // 2026-09-07 适配（暂态会话，08-28/50e4883 起）：「新会话」= renderer-only 暂态草稿，
@@ -452,6 +465,28 @@ async function waitTurnComplete(ws, sid, baseCount, timeoutS = 180) {
     const msgs = await getMessages(ws, sid);
     return msgs.length > baseCount + 1 ? msgs[msgs.length - 1] : null;
   }, timeoutS, 1000);
+}
+/** 长按中止（带重试，F-r1-7 配套申报项，2026-11-22）：pointerdown → 1.2s → pointerup 后短窗
+ *  观测按钮退场；未退场则重试，最多 3 次。安全性：abort 链为乐观更新（use-chat abort() 在
+ *  hold 满瞬间 markStopped → 按钮 v-if 立即退场，run4 后的仓外探针 v5/v6 实证早龄/流式中段
+ *  中止均即时退场）——按钮仍在场即证明上一次 hold 被取消（useHoldAction 三取消路径：窗口
+ *  失焦/pointermove 出界/pointerleave；本机为用户真实桌面，长按窗内鼠标/焦点扰动无法从脚本
+ *  侧排除，run4 场景8 与 9-pre B 双双 60s 超时即此形态）、abort 从未发出，故重试无重复
+ *  abort/重复 system:aborted 风险（完成瞬间按钮即退场，循环随即终止）。通过条件不变：
+ *  最终仍由调用方既有 waitFor（60s「按钮退场=sending 复位」）兜底收口，重试仅提高抵达手段，
+ *  与仓内 flake-tolerance 惯例同型（materializeSession 上游瞬态重试/spawn 门 ≤2 重试/
+ *  R2-A·F8 等待式点击）。 */
+async function longPressAbort(ws) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
+    await new Promise((r) => setTimeout(r, 1200));
+    await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
+    const gone = await waitFor(`长按中止第 ${attempt} 次后按钮退场`, () => evalOk(ws, `!document.querySelector('button.ctl__btn--abort')`), 5, 300)
+      .then(() => true).catch(() => false);
+    if (gone === true) return;
+    log(`  ℹ 长按中止第 ${attempt} 次未生效（hold 疑被窗口失焦/鼠标扰动取消，abort 未发出）——重试（≤3）`);
+    await new Promise((r) => setTimeout(r, 800));
+  }
 }
 
 async function main() {
@@ -643,9 +678,10 @@ async function main() {
       await waitFor('中断按钮出现（query 运行中）', () => evalOk(ws, `!!document.querySelector('button.ctl__btn--abort')`), 60, 500);
       // 问题⑥ 后中断按钮改长按 1 秒：.click() 走不到 pointerdown/长按路径（永不 abort）。
       // 模拟真实长按：pointerdown → 1.2s → pointerup；须窗口可见（进度由 rAF 驱动，遮挡窗 rAF 停摆会长按不完成）。
-      await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
-      await new Promise((r) => setTimeout(r, 1200));
-      await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
+      // F-r1-7 配套（2026-11-22）：换用 longPressAbort 带重试形态（hold 被窗口失焦/鼠标扰动
+      // 取消时自动重试 ≤3 次，run4 两处 60s 超时的根因；abort 乐观更新保证按钮在场=未发出，
+      // 重试无重复 abort 风险——见 longPressAbort 头注）。
+      await longPressAbort(ws);
       // 按钮状态恢复（abort 按钮消失）。
       await waitFor('中断按钮消失（sending 复位）', async () => !(await evalOk(ws, `!!document.querySelector('button.ctl__btn--abort')`)), 60, 1000);
       // system:aborted 恰好新增一条。
@@ -682,15 +718,15 @@ async function main() {
 
     // ── 场景 9：F1-4 重开语义三步（t1clp，重启口径）──
     // 「重开」= 同 profile 二次冷启动（restartIsoApp）：内存脚注槽（pinia turnFootnote）随进程
-    // 清零，DB 诚实回落——切走再切回（同 run）不清内存槽（仅 markRunning/deleteSession 清），
-    // 无法区分「内存值」与「DB 值」，故取重启为重开正本（02 §12.3「重开仅成功（DB 回落）」）。
-    // 三会话各自独占（首个回合即定语义，防 lastTurn* 交叉污染）：
-    //   A=成功回合（脚注仍在，DB 值=内存流内值）；B=中断回合（无脚注，P2-1 不落库诚实）；
-    //   C=错误回合（无脚注，错误回合不落库同 P2-1 口径——若实现扩展错误回合落库须申报并同步本用例）。
+    // 清零——切走再切回（同 run）不清内存槽（仅 markRunning/deleteSession 清），无法区分
+    // 「内存值」与「DB 值」，故取重启为重开正本。三会话各自独占（首个回合即定语义，
+    // 防 lastTurn* 交叉污染）：
+    //   A=成功回合（重开无脚注——P2 已删成功形态渲染与 DB 回落，MOD-P2-3）；B=中断回合
+    //   （无脚注，P2-1 不落库诚实）；C=错误回合（无脚注，错误回合不落库同 P2-1 口径——若实现
+    //   扩展错误回合落库须申报并同步本用例）。
     let sidF1a = null;
     let sidF1b = null;
     let sidF1c = null;
-    let f1aFootnoteText = null;
     let nameF1a = null;
     let nameF1b = null;
     let nameF1c = null;
@@ -703,25 +739,41 @@ async function main() {
       await sendViaUI(ws, sidF1a, '请只回复数字 42，不要使用任何工具');
       await waitTurnComplete(ws, sidF1a, baseA, 180);
       await waitQueryIdle(ws, 180);
-      await waitFor('A 成功脚注出现（turn-footnote--success）', () => evalOk(ws, `(() => {
-        const el = document.querySelector('[data-testid="turn-footnote"]');
-        return !!el && el.classList.contains('turn-footnote--success');
-      })()`), 10, 300);
-      f1aFootnoteText = (await evalExpr(ws, `(document.querySelector('[data-testid="turn-footnote"]')?.textContent || '').trim()`));
-      if (!/^本次回复\s+\S+\s*·\s*结束于\s+\S+/.test(String(f1aFootnoteText))) {
-        throw new Error(`A 成功脚注文案形态不符（期望「本次回复 X · 结束于 HH:MM:SS」）：「${f1aFootnoteText}」`);
+      // MOD-P2-3（flow P2-1，2026-11-22）：旧钉「A 成功脚注出现（turn-footnote--success）+
+      // /^本次回复…· 结束于/ 文案形态」= P2 前成功形态渲染，已被本批契约取代（P2 删 success
+      // 渲染：MessageList 让位守卫 + DB 回落块删除）。翻转钉：终态后等满旧实现渲染窗（姊妹断言
+      // =W 链 W-turn-footnote 的 sleep(1200) 手法）→ ③载体不存在 + .turn-footnote--success 类名
+      // 零出现 + ②气泡脚注（.bubble__meta-duration）在场（P2 信息无损对照——信息由②④承载）。
+      await new Promise((r) => setTimeout(r, 1200)); // 旧实现脚注渲染窗（turn_ended 后一拍）——等满再判不存在
+      const aFootnoteState = JSON.parse(String(await evalExpr(ws, `(() => {
+        const fns = [...document.querySelectorAll('[data-testid="turn-footnote"]')];
+        const dur = document.querySelector('.bubble-wrap--assistant .bubble__meta-duration');
+        return JSON.stringify({
+          count: fns.length,
+          anySuccess: !!document.querySelector('.turn-footnote--success'),
+          hasBubbleDur: !!dur,
+          durText: dur ? ((dur.textContent || '').trim()) : '',
+        });
+      })()`)));
+      if (aFootnoteState.count > 0) {
+        throw new Error(`A 成功回合出现 turn-footnote 载体（${aFootnoteState.count} 个）——P2 已删 success 渲染（MOD-P2-3）`);
+      }
+      if (aFootnoteState.anySuccess) {
+        throw new Error('A 成功回合出现 .turn-footnote--success 类名——P2 渲染面回归（MOD-P2-3）');
+      }
+      if (!aFootnoteState.hasBubbleDur) {
+        throw new Error('A 成功回合②气泡脚注（.bubble__meta-duration）不在场（P2 信息无损前提——②须承接耗时展示）');
       }
       nameF1a = await sessionNameOf(ws, sidF1a);
-      log(`  ℹ F1-4 A 成功回合脚注（内存流内值）：「${f1aFootnoteText}」`);
+      log(`  ℹ F1-4 A 成功回合：③不存在 + --success 类名零出现 + ②在场「${aFootnoteState.durText}」（P2 信息无损对照，MOD-P2-3）`);
       // B：中断回合（独立会话，首个回合即中断——lastTurn* 保持 null）。
       sidF1b = await newSessionViaUI(ws);
       created.push(sidF1b);
       await setWorkingDir(ws, sidF1b, CWD);
       await sendViaUI(ws, sidF1b, '请极其详尽地解释整个 Rust 生态系统的演进历史，尽量长，不要使用任何工具。');
       await waitFor('B 中断按钮出现（query 运行中）', () => evalOk(ws, `!!document.querySelector('button.ctl__btn--abort')`), 60, 500);
-      await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
-      await new Promise((r) => setTimeout(r, 1200));
-      await evalExpr(ws, `document.querySelector('button.ctl__btn--abort')?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerId: 1, button: 0 })), true`);
+      // F-r1-7 配套（2026-11-22）：同场景8——longPressAbort 带重试形态（见该函数头注）。
+      await longPressAbort(ws);
       await waitFor('B 中断按钮消失（sending 复位）', async () => !(await evalOk(ws, `!!document.querySelector('button.ctl__btn--abort')`)), 60, 1000);
       nameF1b = await sessionNameOf(ws, sidF1b);
       log(`  ℹ F1-4 B 中断回合落位（中断脚注即时态在场，重启后将诚实消失）`);
@@ -746,20 +798,20 @@ async function main() {
     // 重启（内存清零、DB 保留）→ 三步重开断言。
     ws = await restartIsoApp(ws);
 
-    // 【t1clp 用例口径同步申报，2026-11-17】用例原期望「重开脚注与内存流内值一致」不可达：
-    // 双源语义为既有实现（use-chat SA-3 收口序——result 先至写 DB（event.duration_ms=CLI 生成
-    // 耗时，run2 实测 2.2s）并 markCompleted 摘 running；turn_ended 后至，内存脚注槽在 running
-    // 守卫之前无条件记账（墙钟耗时，run2 实测 6.3s），其成功分支因 running 已摘而跳过二次
-    // DB 写）。两值同源不同测（生成耗时 vs 回合墙钟），V12/b1 双写链零触碰面不许拉平。
-    // 本检查同步为「重开脚注在且为 DB 诚实值（成功形态齐全）」，双源拉平归审查岗裁定。
-    await check('场景9-① F1-4 成功回合重开脚注仍在（值来自 DB 持久化——成功形态齐全，见口径同步申报）', async () => {
+    // MOD-P2-3（flow P2-1，2026-11-22）：旧钉=「重开脚注仍在（DB 回落）+ 成功形态齐全」
+    // （含 2026-11-17 双源口径申报——该申报针对的是 P2 前成功形态渲染，已随本批契约一并取代）。
+    // P2 已删 DB 回落块（MessageList 让位守卫 + 回落块删除）→ 翻转为「重开后③不存在（诚实
+    // 不回落）」；等满渲染沉降窗再判（与②③同手法），渲染面回归时在该窗内必现载体。
+    await check('场景9-① F1-4 成功回合重开无脚注（DB 回落已随 P2 移除）', async () => {
       await switchSessionViaUI(ws, nameF1a);
-      await waitFor('① 成功脚注出现（重开后 DB 回落）', () => evalOk(ws, `!!document.querySelector('[data-testid="turn-footnote"]')`), 15, 300);
-      const text = (await evalExpr(ws, `(document.querySelector('[data-testid="turn-footnote"]')?.textContent || '').trim()`));
-      if (!/^本次回复\s+\S+\s*·\s*结束于\s+\S+/.test(String(text))) {
-        throw new Error(`重开后成功脚注形态不符：「${text}」`);
+      await waitFor('① 会话页就绪（输入框在场）', () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 15);
+      await new Promise((r) => setTimeout(r, 1500)); // 消息渲染沉降余量（同②③）
+      const present = await evalOk(ws, `!!document.querySelector('[data-testid="turn-footnote"]')`);
+      if (present) {
+        const t = await evalExpr(ws, `(document.querySelector('[data-testid="turn-footnote"]')?.textContent || '').trim()`);
+        throw new Error(`成功回合重开出现脚注：「${t}」（DB 回落已随 P2 移除——渲染面回归，MOD-P2-3）`);
       }
-      log(`  ℹ F1-4① 重开脚注（DB 值）：「${text}」；内存流内值：「${f1aFootnoteText}」（双源口径见申报）`);
+      log('  ℹ F1-4① 重开后脚注不存在（P2：成功回合③不渲染，信息无损由②④承载）');
     });
     await check('场景9-② F1-4 中断回合重开无脚注（P2-1 中断不落库语义诚实）', async () => {
       await switchSessionViaUI(ws, nameF1b);

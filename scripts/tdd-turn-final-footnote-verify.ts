@@ -1,18 +1,19 @@
 // tdd-turn-final-footnote-verify.ts
 // F1「回合终态脚注独立载体」契约脚本（2026-11-15 八问题批次，用例正本 03b-test-cases-renderer.md §13）。
 //
-//   F1-1  载体结构钉（兼行为规范 T2.6 正本）：MessageList 回合尾（renderItems 循环后、stream-group
-//         之前）存在独立脚注载体 data-testid="turn-footnote"，三 kind 类名 success/interrupted/error；
-//         渲染条件绑定回合终态（exportMode/sending 排除 + note 三分支 + DB 回落）；终态文案三分支
-//         字面：成功「本次回复 X:XX · 结束于 HH:MM」（无效耗时只显「结束于」半句）、中断
-//         「已中断 · 运行 X:XX」（无耗时只「已中断」）、错误「失败 · 运行 X:XX」（无耗时只「失败」）；
-//         无内存 note 时成功回合回落 DB lastTurnDurationMs/lastTurnEndedAt（P2-1 中断不落库语义维持）。
+//   F1-1  载体结构钉（兼行为规范 T2.6 正本；P2 2026-11-21 修订：成功回合脚注③移除——kind 集合
+//         收窄为 interrupted/error，DB lastTurn* 回落块与 network_interrupted 让位判定随之删除，
+//         信息无损由②气泡脚注与④TurnTimer 承载）：MessageList 回合尾（renderItems 循环后、
+//         stream-group 之前）存在独立脚注载体 data-testid="turn-footnote"；渲染条件绑定回合终态
+//         （exportMode/sending 排除 + note 二分支）；终态文案两分支字面：中断
+//         「已中断 · 运行 X:XX」（无耗时只「已中断」）、错误「失败 · 运行 X:XX」（无耗时只「失败」）。
 //   F1-1d 数据面结构钉：session-store turnFootnote state（per-session 单槽）+ setTurnFootnote
 //         action + markRunning 新回合边界清槽 + deleteSession 清理；use-chat 后台/前台 turn_ended
 //         两分支各 +1 行无条件记账（在 running 守卫之前，与 noteTurnEndedServer 同门同位）。
 //   F1-1e 行为直测（pinia 真实 store）：setTurnFootnote 三 outcome 写入 / durationMs 非正数置 0
 //         （无造数纪律）/ running 门防复活（runningSessions 含 sid 时写入被拒）/ markRunning
-//         新回合边界清槽（仅最新回合显示）/ deleteSession 清槽。
+//         新回合边界清槽（仅最新回合显示）/ deleteSession 清槽 / P2-T6 success 记账照常入账
+//         （渲染面不渲染≠数据面不记账，P2 记账链不动红线）。
 //   F1-7  中断/错误收口窗脚注归属钉（round-002 P2-3）：①中断窗临时账——markRunning→markStopped
 //         （abort 乐观收口同形裸调用）后 turnFootnote 落 interrupted 临时账（仅内存不落库，
 //         P2-1 中断不落库裁决维持），审查探针 FALLBACK 判定（note 空 && lastTurn* 双非 null）
@@ -78,19 +79,21 @@ check('F1-1(1) 载体存在：data-testid="turn-footnote" 恰 1 处，位于 ren
   assert.ok(carrierIdx > loopCloseIdx, '载体须在 renderItems 循环闭合之后（回合尾=最后内容块之后）');
   assert.ok(carrierIdx < streamGroupIdx, '载体须在 stream-group 之前（sending 期间脚注已 v-if 排除，无交错）');
 });
-check('F1-1(2a) 三 kind 类名：turn-footnote--success/--interrupted/--error（动态绑定 turn-footnote--${kind} + computed 三 outcome 字面）', () => {
+check('F1-1(2a) kind 集合不含 success（P2 移除成功回合脚注③）+ 模板动态绑定保留（turn-footnote--${kind}）', () => {
   const blockStart = messageListTpl.indexOf('data-testid="turn-footnote"');
   const block = messageListTpl.slice(Math.max(0, blockStart - 220), blockStart + 400);
   assert.ok(block.includes("'turn-footnote'"), '根类名 turn-footnote 缺失');
-  // 计划规定的动态绑定形态：`turn-footnote--${turnFootnote.kind}`（03b F1-1：三 kind 类名，kind
-  // 取值 success/interrupted/error 由 computed outcome 三分支字面保证，见 F1-1(3a) 断言）。
+  // 计划规定的动态绑定形态：`turn-footnote--${turnFootnote.kind}`（03b F1-1：kind 类名，kind
+  // 取值集合 P2 起收窄为 interrupted/error，由 computed 分支字面保证，见 F1-1(3a) 断言）。
   assert.ok(block.includes('turn-footnote--${') && block.includes('.kind'), 'kind 动态类名绑定 turn-footnote--${…} 缺失');
   const computedStart = messageList.indexOf('const turnFootnote');
   const computedEnd = messageList.indexOf('\n});', computedStart);
   const body = messageList.slice(computedStart, computedEnd);
-  for (const kind of ['success', 'interrupted', 'error']) {
-    assert.ok(body.includes(`'${kind}'`), `kind 取值 '${kind}' 在 computed outcome 分支缺失`);
-  }
+  assert.ok(body.includes(`'interrupted'`) && body.includes(`'error'`), 'kind 取值 interrupted/error 在 computed outcome 分支缺失');
+  // P2：无 success 返回形态构造（kind: 'success' 零出现）；success outcome 仅允许以让位守卫形态
+  // 在场（=== 'success' → null，信息无损由②气泡脚注与④TurnTimer 承载）。
+  assert.ok(!/'kind'\s*:\s*'success'/.test(body), "kind: 'success' 返回形态残留（P2：成功回合脚注③已移除）");
+  assert.ok(body.includes("=== 'success'"), "缺 success 让位守卫（note.outcome === 'success' → null）");
 });
 check('F1-1(2b) 渲染条件绑定回合终态：computed turnFootnote 排除 exportMode/sending（导出面不新增、回合未终不渲染）', () => {
   assert.ok(/const turnFootnote = computed</.test(messageList), 'MessageList 缺 turnFootnote computed');
@@ -101,31 +104,39 @@ check('F1-1(2b) 渲染条件绑定回合终态：computed turnFootnote 排除 ex
   assert.ok(body.includes('props.sending'), 'computed 须排除 sending（回合未终不渲染）');
   assert.ok(body.includes('sessionStore.turnFootnote'), 'computed 须读 sessionStore.turnFootnote 内存记账');
 });
-check('F1-1(3a) 成功分支文案字面：「本次回复 {耗时} · 结束于 {时刻}」；durationMs=0 只显「结束于」半句', () => {
+check('F1-1(3a) P2 移除面：success 文案组合（「本次回复」+「· 结束于」）在 computed 零残留 + 无 note 恒不渲染（无 lastTurn*/network_interrupted 残留）', () => {
   const computedStart = messageList.indexOf('const turnFootnote');
   const computedEnd = messageList.indexOf('\n});', computedStart);
   const body = messageList.slice(computedStart, computedEnd);
-  assert.ok(body.includes('本次回复'), '成功句缺「本次回复」段');
-  assert.ok(body.includes('· 结束于'), '成功句缺「· 结束于」段（耗时与时刻两段式）');
-  assert.ok(body.includes("'success'") && body.includes("'interrupted'") && body.includes("'error'"), '三分支 outcome 判定缺失');
-  assert.ok(body.includes("已中断") && body.includes("失败"), '中断/错误分支字面缺失');
+  assert.ok(!body.includes('本次回复'), '成功句「本次回复」段残留（P2 移除面）');
+  assert.ok(!body.includes('· 结束于'), '成功句「· 结束于」段残留（P2 移除面）');
+  assert.ok(!/'kind'\s*:\s*'success'/.test(body), "kind: 'success' 返回形态残留（P2 移除面）");
+  // 无 note ⇒ 恒不渲染：DB lastTurn* 回落分支是 success 形态专用载体（V12 只在成功回合双写）
+  // → P2 一并不渲染、分支整体删除；network_interrupted 让位判定随回落消失死亡代码化，一并删除。
+  assert.ok(!body.includes('lastTurnDurationMs') && !body.includes('lastTurnEndedAt'), 'DB lastTurn* 回落分支残留（success 形态专用载体，P2 一并不渲染）');
+  assert.ok(!body.includes('network_interrupted'), 'network_interrupted 让位判定残留（回落整体消失后死亡代码化，P2 一并删除）');
+  assert.ok(body.includes("已中断") && body.includes("失败"), '中断/错误分支字面缺失（P2 保留面）');
 });
-check('F1-1(3b) 中断/错误分支文案字面：「已中断 · 运行 X:XX」/「失败 · 运行 X:XX」', () => {
+check('F1-1(3b) 中断/错误分支文案字面（P2 保留面）：「已中断 · 运行 X:XX」/「失败 · 运行 X:XX」+ --interrupted/--error 类名绑定保留', () => {
   const computedStart = messageList.indexOf('const turnFootnote');
   const computedEnd = messageList.indexOf('\n});', computedStart);
   const body = messageList.slice(computedStart, computedEnd);
   assert.ok(body.includes('· 运行'), '中断/错误句缺「· 运行」段');
   assert.ok(body.includes("'已中断'"), '无效耗时降级半句「已中断」缺失');
   assert.ok(body.includes("'失败'"), '无效耗时降级半句「失败」缺失');
+  // P2 保留面样式绑定：--interrupted/--error 两块保留；R4 裁决：.turn-footnote--success 死 CSS 块
+  // 不复存在（kind 集合已不含 success，选择器可证死；success 零残留精神）。
+  const styleStart = messageList.lastIndexOf('<style scoped>');
+  const style = messageList.slice(styleStart);
+  assert.ok(style.includes('.turn-footnote--interrupted') && style.includes('.turn-footnote--error'), '--interrupted/--error 类名样式绑定缺失（P2 保留面）');
+  assert.ok(!style.includes('.turn-footnote--success'), '.turn-footnote--success 死 CSS 块残留（R4：kind 集合已不含 success）');
 });
-check('F1-1(4a) 无 note 时成功回落 DB：lastTurnDurationMs/lastTurnEndedAt 两字段同时非 null 才渲染（诚实不造数）', () => {
-  const computedStart = messageList.indexOf('const turnFootnote');
-  const computedEnd = messageList.indexOf('\n});', computedStart);
-  const body = messageList.slice(computedStart, computedEnd);
-  assert.ok(body.includes('lastTurnDurationMs') && body.includes('lastTurnEndedAt'), 'DB 回落字段缺失（V12 sessions.last_turn_*）');
-  assert.ok(body.includes('!= null'), '回落须双字段同时非 null 门控（半写不渲染）');
+check('P2-T7 旧形态零残留：durationMs≤0 成功半句「结束于 Y」组合与「本次回复」在 turn-footnote 载体块内零出现', () => {
+  const carrierStart = messageListTpl.indexOf('data-testid="turn-footnote"');
+  const carrier = messageListTpl.slice(carrierStart, messageListTpl.indexOf('</div>', carrierStart));
+  assert.ok(!carrier.includes('本次回复') && !carrier.includes('结束于'), 'turn-footnote 载体块内残留 success 文案字面（P2 移除面）');
 });
-check('F1-1(4b) 独立于消息类型：格式化走 shared/format-duration 单源（formatDurationMs/formatEndedAt），载体非 MessageBubble 内部分支', () => {
+check('F1-1(4b) 独立于消息类型：格式化走 shared/format-duration 单源（P2/P4 后为 formatDurationMs+formatDurationClock），载体非 MessageBubble 内部分支', () => {
   assert.ok(messageList.includes("from '../../../shared/format-duration'"), 'MessageList 须 import shared/format-duration 单源格式化');
   // MessageBubble 既有气泡脚注保留（b3 回归红线——双呈现申报不修，见 04 §5 零触碰面）。
   assert.ok(messageBubble.includes('class="bubble__meta"'), 'MessageBubble 既有脚注块被误删（b3 红线：逐字保留）');
@@ -290,6 +301,11 @@ check('F1-1e-5 deleteSession 清理 turnFootnote（防内存泄漏）', () => {
     g.window = prevWindow;
   }
 });
+check('P2-T6 success 记账照常入账（渲染面不渲染≠数据面不记账）：setTurnFootnote success 写入成功、get 回 note 数据在', () => {
+  const store = freshStore();
+  store.setTurnFootnote(SID, NOTE_SUCCESS);
+  assert.deepStrictEqual(store.turnFootnote[SID], { ...NOTE_SUCCESS }, 'success 记账被渲染层移除波及（P2 记账链红线：setTurnFootnote/state/清槽全保留，interrupted/error 渲染与 P5 的④数据源依赖它们）');
+});
 
 console.log('\n=== F1-7 中断/错误收口窗脚注归属钉（round-002 P2-3：中断窗临时账 + 迟到终态兜底 + 回落归属校验） ===');
 check('F1-7(1) 行为·中断窗临时脚注：markRunning→markStopped 裸调用（abort 乐观收口同形）落 interrupted 临时账，探针 FALLBACK 判定不再命中', () => {
@@ -349,7 +365,7 @@ check('F1-7(3) 源钉·两 turn_ended 分支 running 守卫之后收口段各有
     );
   }
 });
-check('F1-7(4) 源钉·error 调用面显式 footnoteOutcome:\'error\'（四处）+ MessageList DB 回落归属校验（network_interrupted 不回落）', () => {
+check("F1-7(4) 源钉·error 调用面显式 footnoteOutcome:'error'（四处）（P2 裁决：DB 回落块移除后原归属校验随之死亡代码化，一并删除）", () => {
   // 前台失败 result / 前台 error 两处（activeSession 形态）+ 后台失败 result / 后台 error+aborted 两处（sid 形态）。
   assert.equal(
     useChat.split("store.markStopped(store.activeSession.id, { footnoteOutcome: 'error' })").length - 1, 2,
@@ -363,17 +379,9 @@ check('F1-7(4) 源钉·error 调用面显式 footnoteOutcome:\'error\'（四处�
     useChat.includes("store.markStopped(sid, { footnoteOutcome: event.type === 'error' ? 'error' : 'interrupted' })"),
     '后台 error/aborted 分支缺按事件类型分流 footnoteOutcome',
   );
-  // MessageList DB 回落归属校验：network_interrupted 常红态在回落读取之前拦下（不回落显成功句）。
-  const computedStart = messageList.indexOf('const turnFootnote');
-  const computedEnd = messageList.indexOf('\n});', computedStart);
-  const body = messageList.slice(computedStart, computedEnd);
-  assert.ok(
-    body.includes("sessionStore.sessionStatus[sid] === 'network_interrupted'"),
-    'DB 回落分支缺归属校验（network_interrupted 常红态不得回落显上一成功回合成功句）',
-  );
-  const guardIdx = body.indexOf("sessionStore.sessionStatus[sid] === 'network_interrupted'");
-  const fallbackIdx = body.indexOf('lastTurnDurationMs');
-  assert.ok(guardIdx >= 0 && fallbackIdx > guardIdx, '归属校验须在 DB 回落读取之前（先拦后读）');
+  // P2 移除面备案：原「MessageList DB 回落归属校验（network_interrupted 常红态在回落读取之前拦下，
+  // 不回落显上一成功回合成功句）」随 DB lastTurn* 回落块整体删除而死亡代码化——回落不存在即无
+  // 归属错位面，network_interrupted 让位判定的零残留由 F1-1(3a) 负向断言覆盖。
 });
 
 console.log('\n=== F1-5 ToolCallBlock 门控改 durationMs||endedAt + ThinkingBlock 负向钉（03b §13 F1-5） ===');

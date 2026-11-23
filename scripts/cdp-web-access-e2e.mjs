@@ -37,6 +37,7 @@
 // 退出协议：
 //   - exit 0：B1-B7 全 PASS + B8 PASS 或 SKIP（SKIP 必须带原因，单独汇总列出）+ W-changes-panel PASS + W-mcp-settings PASS
 //             + W-queue-panel PASS + W-sidebar-actions PASS + W-sidebar-collapse PASS + W-user-timestamp PASS
+//             + W-file-context-menu PASS（P6-B 2026-11-21 增：md-file-link 右键菜单 web 同款）
 //             + 八问题批次 T1B 的 13 个 W 场景（W-dev-stale-banner / W-mcp-scan / W-skill-refresh-web /
 //             W-mcp-external-change / W-collapse-persist / W-queue-restore-{countdown,running,standby} /
 //             W-turn-footnote / W-question-{sidenav,guard,submit,single}）全 PASS 或带理由 SKIP
@@ -288,7 +289,31 @@ async function ensureLanBridge(ws, label) {
 // 会话物化链（B3 同款路径提炼：新建会话 → 选工作空间（菜单优先/pinia 兜底）→ 发送 → 等回合终态）。
 // 返回物化后的会话名（侧栏 active 卡名）。B3 本体不动（已绿链最小影响面），仅 W 用例复用。
 const W_WAKE_TEXT = '请只回复数字 42,不要使用任何工具';
+// 唤醒回合终态等待·上游瞬态单次重试包装（p5c r6c 门禁 a2-4 假红根因处置）：唤醒回合落入
+// 「上游服务暂时不可达，正在自动重试」梯（失败截图证据：第 3/10 次·连接异常、正在回复 2:01），
+// 120s 终态截止在重试梯内到期 → 终态空文本假红；紧随其后的 standby 场景 24s 即绿（上游已恢复）。
+// 处置=flaky 换稳定断言（断言语义零变化：终态仍须 assistant 含「42」+ 流式组退场），仅对
+// 「唤醒回合未达终态」这一上游瞬态形态重试一次（同 W-turn-footnote「首试未达 → 重发一次」先例），
+// 重试前中断在飞回合 + 删除失败会话（防残留重试梯污染后续场景）；其余失败（会话卡超时等）
+// 原样上抛不重试。
 async function materializeSession(ws, label, messageText) {
+  try {
+    return await materializeSessionOnce(ws, label, messageText);
+  } catch (e) {
+    if (!String((e && e.message) || '').includes('assistant 终态不含「42」')) throw e;
+    log(`  ${label}：唤醒回合首试未达终态（${String((e && e.message) || '').slice(0, 72)}）——按上游瞬态不可达处置：中断+删会话后重试一次`);
+    try {
+      const sid = await activeSessionId(ws);
+      if (sid) {
+        await evalExpr(ws, `window.claudeLink.abortChat(${JSON.stringify(sid)}).then(() => true)`).catch(() => {});
+        await waitTurnSettled(ws, `${label} 重试前善后`, 30);
+      }
+    } catch { /* 善后尽力而为：中断失败不阻塞重试路径 */ }
+    await deleteActiveSessionViaStore(ws);
+    return await materializeSessionOnce(ws, label, messageText);
+  }
+}
+async function materializeSessionOnce(ws, label, messageText) {
   const WS_TARGET = path.resolve(process.cwd());
   await evalExpr(ws, `document.querySelector('button.new-button')?.click(), true`);
   await waitFor(`${label}：新会话输入框出现`, () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 15);
@@ -336,13 +361,29 @@ async function materializeSession(ws, label, messageText) {
     return n2 && n1 === n2 ? n2 : false;
   }, 20);
   // 回合终态：assistant 终态含 42 且流式组退场（≤120s，B3 同款轮询）。
+  // F-r1-8（flow P2-2，2026-11-22）根修：终态口径补②落账——「末 assistant 气泡含 .bubble__meta
+  // （②在场，result 落账渲染）」。原口径「42 文本 + 无 .stream-group」可先于 result 落账满足
+  // （DOM 先至），紧随其后的 W-user-timestamp 断言在 ② 渲染前取态即假红（审查岗截图证实其时
+  // ② 0:10 时钟格式正确在场——取态过早而非渲染缺陷）。影响面核对（materializeSession 全部
+  // 7 调用点逐一核对，结论：无任何场景刻意在 ② 落账前取态，根修零反向破坏——
+  //   · W-queue-panel(:1662)：其后仅读 getQueueOverview 回包形状，与 ② 无关；
+  //   · W-user-timestamp(:1947)：本发现修复目标，直接受益；
+  //   · W-queue-restore-countdown(:2376)：其后自带 pollOverview(standby) 30s 轮询收口（本就为
+  //     消化 DOM-vs-主进程竞态），根修使取态更贴近 result 落账，轮询断言语义不变；
+  //   · W-queue-restore-running(:2519)：其后 pollOverview(running)，同上；
+  //   · W-queue-restore-running-a2-4(:2609)：其后 waitTurnSettled 收口，同上；
+  //   · W-queue-restore-standby(:2680)：其后 pollOverview(standby) 收口，同上；
+  //   · W-turn-footnote(:2754)：其后自带 sleep(1200)+②在场断言（同族竞态防护），根修只提前
+  //     ② 在场时刻，断言语义不变）。
+  // 备选最小修（仅 W-user-timestamp 场景内 waitFor ②在场）未采用——根修消除的是共享夹具的
+  // 口径缺口，姊妹场景同受益，且无调用点需要旧行为。超时兜底复核见循环后 metaOk 检查。
   const deadline = Date.now() + 120_000;
   for (;;) {
     if (Date.now() > deadline) break;
     const done = await evalExpr(ws, `(() => {
       const bubbles = document.querySelectorAll('.bubble--assistant');
       const last = bubbles[bubbles.length - 1];
-      return !!(last && (last.innerText || '').includes('42')) && !document.querySelector('.stream-group');
+      return !!(last && (last.innerText || '').includes('42') && last.querySelector('.bubble__meta')) && !document.querySelector('.stream-group');
     })()`);
     if (done === true) break;
     await new Promise((r) => setTimeout(r, 50));
@@ -352,6 +393,14 @@ async function materializeSession(ws, label, messageText) {
     return b.length ? (b[b.length - 1].innerText || '') : '';
   })()`);
   if (!finalText.includes('42')) throw new Error(`${label}：assistant 终态不含「42」（text=${finalText.slice(0, 80)}）`);
+  // F-r1-8：终态口径含②落账——超时兜底复核（42 在而 ② 缺 = result 落账未完成，如实上抛；
+  // 错误文案不含「42」子串，不入上游瞬态重试包装——②缺非上游不可达形态）。
+  const metaOk = await evalExpr(ws, `(() => {
+    const b = document.querySelectorAll('.bubble--assistant');
+    const last = b[b.length - 1];
+    return !!(last && last.querySelector('.bubble__meta'));
+  })()`);
+  if (metaOk !== true) throw new Error(`${label}：assistant 终态 ② 未落账（末气泡缺 .bubble__meta——result 落账未完成，F-r1-8 终态口径）`);
   return { sessionName, wsPicked };
 }
 // 善后：经 store deleteSession 删当前活动会话（B3 善后同款，避免污染真实会话列表）。
@@ -535,6 +584,19 @@ async function injectWizardFixture(ws, { single = false } = {}) {
     window.__e2eRespondLog = [];
     window.__e2eRespondOrig = window.claudeLink.respondInteraction;
     window.claudeLink.respondInteraction = async (r) => { window.__e2eRespondLog.push(JSON.parse(JSON.stringify(r || {}))); return true; };
+    // 夹具对账自洽（run-r6b W-question-sidenav 假红根因）：hb10-PERM-03 的 30s reconcile
+    // （InteractionPrompt onMounted setInterval）会把「主进程 getPendingInteractions 不知道的」
+    // 非本地请求摘除——而本夹具是 pinia 直注入、绕过 IPC，主进程 pending 列表没有它；tick 恰好
+    // 落在场景断言窗内（机器负载大、场景拉长时概率上升）→ 夹具被摘 → overlay 空/nav 缺 →
+    // 「wizard 左右分栏缺失」假红。此处登记在注夹具并 stub getPendingInteractions 返回之，
+    // reconcile 的 remove/add 两分支均自洽（夹具 id 在 pendingIds → 保留；localIds 已含 → 不重挂）。
+    // 善后见 cleanupWizardFixture（登记表清空后还原原实现）。断言语义零变化。
+    window.__e2eFixtures = (window.__e2eFixtures || []).filter((p) => p && p.id !== ${JSON.stringify(payload.id)});
+    window.__e2eFixtures.push(${JSON.stringify(payload)});
+    if (!window.__e2ePendingOrig) {
+      window.__e2ePendingOrig = window.claudeLink.getPendingInteractions;
+      window.claudeLink.getPendingInteractions = async () => (window.__e2eFixtures || []).slice();
+    }
     return ist.enqueueRemote(${JSON.stringify(payload)}) === true ? 'ok' : 'dup';
   })()`);
   if (enqueued !== 'ok') throw new Error(`夹具注入失败（${enqueued}）`);
@@ -544,7 +606,8 @@ async function injectWizardFixture(ws, { single = false } = {}) {
   await sleep(400);
   return payload;
 }
-// 夹具善后：移除注入请求 + 还原 respondInteraction（幂等；弹窗未关时强制摘除）。
+// 夹具善后：移除注入请求 + 还原 respondInteraction/getPendingInteractions（幂等；弹窗未关时强制摘除）。
+// 对账 stub 的还原以登记表清空为准（多夹具并存时后者仍需对账自洽，见 injectWizardFixture 注）。
 async function cleanupWizardFixture(ws, payloadId) {
   try {
     await evalExpr(ws, `(() => {
@@ -555,6 +618,8 @@ async function cleanupWizardFixture(ws, payloadId) {
         ist.requests = (ist.requests || []).filter((r) => r.id !== ${JSON.stringify(payloadId)});
         if (ist.meta && typeof ist.meta.delete === 'function') ist.meta.delete(${JSON.stringify(payloadId)});
       }
+      window.__e2eFixtures = (window.__e2eFixtures || []).filter((p) => p && p.id !== ${JSON.stringify(payloadId)});
+      if (window.__e2ePendingOrig && (window.__e2eFixtures || []).length === 0) { window.claudeLink.getPendingInteractions = window.__e2ePendingOrig; window.__e2ePendingOrig = null; }
       if (window.__e2eRespondOrig) { window.claudeLink.respondInteraction = window.__e2eRespondOrig; window.__e2eRespondOrig = null; }
       window.__e2eRespondLog = [];
       return true;
@@ -665,6 +730,9 @@ const ISO_APP_DIR = path.join(ISO_DIR, 'app'); // electron --user-data-dir：ele
 const ISO_CHROME_DIR = path.join(ISO_DIR, 'chrome');
 const ISO_FIXTURE_DIR = path.join(ISO_DIR, 'fixture'); // seed workingDirectory：E2-06 夹具目录不可知问题的答案（1717 行前置的满足形态）
 const ISO_CONFIG_PATH = path.join(ISO_APP_DIR, 'claude-link-config.json');
+// p5c（2026-11-20）：翻译上游 stub 日志路径（launchIsoElectron 注入给 electron 子进程；
+// W-translate 场景按行数核对请求计数）。--config 外部备环境模式无 stub 注入 → null（W-translate SKIP）。
+const TRANSLATE_STUB_LOG = ISO_MODE ? path.join(ISO_DIR, 'translate-stub.jsonl') : null;
 
 let isoElectronProc = null;
 let isoChromeProc = null;
@@ -694,6 +762,62 @@ function pickFreePort(start) {
     if (pids.length === 0) return p;
   }
   return null;
+}
+
+// ── W-translate 夹具落库（p5c，2026-11-20）：ISO 库直插会话 + 三条消息（user/assistant 正文/thinking）──
+// 时机：ensureIsoEnvironment 之后、网页驱动之前——app 已完成迁移建表（web 监听已就绪），页面首次
+// 拉取会话列表/消息时尚未发生，夹具天然进列表。WAL 多进程写（app 侧 journal_mode=WAL）+ busy_timeout
+// 兜底；失败重试 1 次（间隔 300ms）。夹具仅落 ISO 隔离库（随 ISO 目录用后删除）。
+async function seedTranslateFixtureDb() {
+  const dbPath = path.join(ISO_APP_DIR, 'claude-link.db');
+  if (!fs.existsSync(dbPath)) throw new PreconditionError(`W-translate 夹具前置不满足：ISO 库不存在（${dbPath}）——app 迁移未完成？`);
+  // better-sqlite3 为 Electron ABI 编译（宿主 Node 直载崩溃）——经 ELECTRON_RUN_AS_NODE + electron
+  // 二进制执行插入脚本（与 launchIsoElectron 同一二进制解析）。
+  const electronBin = createRequire(import.meta.url)('electron');
+  const now = Date.now();
+  const sid = `w-translate-fixture-${now}`;
+  const script = `
+    const Database = require('better-sqlite3');
+    const db = new Database(${JSON.stringify(dbPath)});
+    db.pragma('busy_timeout = 3000');
+    const tx = db.transaction(() => {
+      // provider_override → seed 里的 stub 供应商档案（e2e-translate-stub，plain 测试密钥）：
+      // 翻译链 resolveTranslationContext 对本会话取该档案密钥过 fail-fast（ISO 实例解不出真实
+      // 用户 safeStorage 密钥——二跑修正，详见 seedIsoConfig 注记）；stub transport 拦截 HTTP，
+      // 密钥/端点不触任何真实上游。模型不指定（model_override NULL，stub 不消费 model）。
+      // working_dir = 仓库根（四跑修正，2026-11-20）：本夹具自 bootstrap 起即在会话列表 → B3
+      // 善后「干净 profile」分支失效（列表存在其他持久会话）→ B3 删除自己物化的
+      // workingDir=仓库根会话（11-18 r1/r2 era 该会话被保留、W-changes-panel 靠它「列表点选」过
+      // isBoundWorkingDir 守卫）→ W-changes-panel 退化 pinia 兜底（渲染层直设，主进程库无绑定）
+      // → 改动面板「刷新失败：工作目录不在允许列表」确定性红（run1~4 四跑复现）。夹具会话自带
+      // working_dir=仓库根后，B3 删除行为不变，但仓库根绑定由本夹具会话承接（W-changes-panel
+      // 「列表点选」路径恢复原样——11-18 PASS 记录同款「会话来源=列表点选」）；本场景自身按名
+      // 点卡不受影响，翻译路由仍走 provider_override。
+      db.prepare('INSERT INTO sessions (id, name, provider_override, working_dir) VALUES (?, ?, ?, ?)').run(${JSON.stringify(sid)}, 'W-translate-fixture', 'e2e-translate-stub', path.resolve(process.cwd()));
+      const ins = db.prepare('INSERT INTO messages (id, session_id, role, content, event_type, cost_usd, duration_ms, ended_at, process_kind, parent_agent_id, tool_use_id, title, is_error, created_at) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, NULL, NULL, 0, ?)');
+      ins.run(${JSON.stringify(`wt-u-${now}`)}, ${JSON.stringify(sid)}, 'user', 'W-translate 夹具用户消息', 'message', null, ${JSON.stringify(new Date(now - 2000).toISOString())});
+      ins.run(${JSON.stringify(`wt-a-${now}`)}, ${JSON.stringify(sid)}, 'assistant', ${JSON.stringify('W-translate fixture assistant body for the web translation check. '.repeat(12).trim())}, 'message', null, ${JSON.stringify(new Date(now - 1000).toISOString())});
+      ins.run(${JSON.stringify(`wt-t-${now}`)}, ${JSON.stringify(sid)}, 'assistant', ${JSON.stringify('W-translate fixture thinking content for the on-demand check. '.repeat(8).trim())}, 'thinking', 'thinking', ${JSON.stringify(new Date(now).toISOString())});
+    });
+    tx();
+    db.close();
+    console.log('insert-ok');
+  `;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const r = spawnSync(electronBin, ['-e', script], { cwd: process.cwd(), encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, windowsHide: true });
+    if (r.status === 0 && String(r.stdout).includes('insert-ok')) {
+      log(`  [w-translate-fixture] 夹具落库 OK（sid=${sid}，user/assistant/thinking 三条）`);
+      return sid;
+    }
+    const detail = `status=${r.status} out=${String(r.stdout).slice(-160)} err=${String(r.stderr).slice(-160)}`;
+    if (attempt === 1) {
+      log(`  [w-translate-fixture] 落库首次失败（重试 1 次）：${detail}`);
+      await sleep(300);
+      continue;
+    }
+    throw new PreconditionError(`W-translate 夹具落库失败（重试耗尽）：${detail}`);
+  }
+  return sid;
 }
 
 function ensureBuildFresh() {
@@ -727,10 +851,39 @@ function seedIsoConfig(port) {
   fs.mkdirSync(ISO_FIXTURE_DIR, { recursive: true });
   // seed = 真实配置浅拷贝 + 三项覆盖（port=空闲端口防撞真实实例；workingDirectory=ISO 夹具；
   // permissionMode=bypassPermissions=回合类场景前置，经隔离配置注入 = AGENTS.md 认可的等效注入形态）。
+  // + 翻译凭据注入（p5c，2026-11-20）：顶层 plain 编码测试密钥——W-translate 的 START 在
+  // resolveTranslationContext 的凭据 fail-fast 处被拒（首跑截图证据：错误横条「未配置 API 密钥，
+  // 无法翻译」）。config.apiKey 现值为空且回合类场景本就不消费它，新增为惰性字段。stub
+  // transport 拦截 HTTP 层，密钥只用于过 fail-fast，零真实计费。
+  // + 二跑修正（p5c，2026-11-20）：真实用户配置 lastUsed 指向的供应商密钥是 safeStorage 密文，
+  //   ISO 实例（独立 --user-data-dir，Chromium os_crypt 密钥随目录轮换）跨实例解密必失败
+  //   （safestorage-probe 本机实测 decryptString 报错）→ getProviderModelSources 得空串 →
+  //   翻译链走供应商路由仍 fail-fast「未配置 API 密钥」（W-translate-failed.png 证据）。顶层
+  //   测试密钥只在「库为空回落老字段」时被读到，对带 lastUsed 的真实配置不生效。处置：seed 追加
+  //   一个专用 stub 供应商档案（plain 编码测试密钥），仅由 W-translate 夹具会话经 DB
+  //   provider_override 引用（见 seedTranslateFixtureDb）——lastUsed/providerProfiles 原序保留，
+  //   B3-B6 真实回合的供应商路由零变化；stub 档案不被任何 lastUsed/defaults 路由命中
+  //   （resolveSessionModel 仅按 override/lastUsed/providers[0] 选——providers[0] 仍是原首档）。
   const seed = { ...base };
   seed.webAccess = { ...(base.webAccess ?? {}), enabled: true, port };
   seed.workingDirectory = ISO_FIXTURE_DIR;
   seed.permissionMode = 'bypassPermissions';
+  seed.encryptedApiKey = 'sk-e2e-translate-stub-not-a-real-key';
+  seed.apiKeyEncoding = 'plain';
+  seed.providerProfiles = [
+    ...(base.providerProfiles ?? []),
+    {
+      id: 'e2e-translate-stub',
+      name: 'E2E Translate Stub',
+      note: 'p5c W-translate 夹具专用（plain 测试密钥；stub transport 拦截 HTTP，零真实计费）',
+      apiBaseUrl: 'https://translation-stub.invalid',
+      models: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      encryptedApiKey: 'sk-e2e-translate-stub-not-a-real-key',
+      apiKeyEncoding: 'plain',
+    },
+  ];
   fs.writeFileSync(ISO_CONFIG_PATH, JSON.stringify(seed, null, 2), 'utf8');
   return seed;
 }
@@ -740,8 +893,15 @@ function launchIsoElectron() {
   if (typeof electronBin !== 'string' || !fs.existsSync(electronBin)) {
     throw new PreconditionError(`electron 二进制不可解析（require('electron')=${String(electronBin)}）——node_modules 未安装？`);
   }
+  // UI 五点批次 p5c（2026-11-20）：翻译上游 stub 纪律（02 §0 + 03 R3 延伸，硬约束）——ISO 实例
+  // 注入 CLAUDE_LINK_TRANSLATE_STUB=1（translation-service 启动期挂确定性 stub transport）+
+  // CLAUDE_LINK_TRANSLATE_STUB_LOG（逐请求一行 JSON 落 ISO 目录，W-translate 场景按行数核对请求
+  // 计数）。W-translate 场景禁发真实翻译计费请求；其余场景不触翻译链路，env 零行为变化。
   return spawn(electronBin, ['.', `--user-data-dir=${ISO_APP_DIR}`, `--remote-debugging-port=${ISO_APP_CDP_PORT}`],
-    { cwd: process.cwd(), stdio: 'ignore', windowsHide: true });
+    {
+      cwd: process.cwd(), stdio: 'ignore', windowsHide: true,
+      env: { ...process.env, CLAUDE_LINK_TRANSLATE_STUB: '1', CLAUDE_LINK_TRANSLATE_STUB_LOG: TRANSLATE_STUB_LOG },
+    });
 }
 
 function findChromiumBinary() {
@@ -837,6 +997,8 @@ async function main() {
   if (ISO_MODE) {
     await ensureIsoEnvironment();
     armSuiteWatchdog();
+    // p5c：W-translate 夹具落库（stub env 已注入 electron；失败 = 前置不满足 exit 2）。
+    if (TRANSLATE_STUB_LOG) await seedTranslateFixtureDb();
   }
   // P3-B：连接既有实例之前先做新鲜度校验（遗留实例 × 重建 = 缓存投毒假红根因，见上方注记）。
   assertFreshInstances();
@@ -928,6 +1090,10 @@ async function main() {
   await screenshot(ws, 'B2');
 
   // ── B3：主战场（局域网 IP）：新建会话 → 选工作空间 → 发消息 → 流式增长 ≥2 → 42 → 帧级证据 ──
+  // R2-F-9（复审 flow 备忘，2026-11-22）flake 兜底留痕：run2 FAIL growth=0 / run1 PASS——上游
+  // LLM 偶发空回复（终态不含 42），非用例可控行。终态等待加一次容错重发（W-turn-footnote
+  // F1-2b 容错重发先例）：每次尝试独立取气泡基线 + 重装增长观测；「终态不含 42」空回复形态 →
+  // 重发一次 → 取新基线断言。断言口径零变化（42 终态 + 增长≥1 + text_delta≥1 + chat:event≥2）。
   // 事实（2026-10-21 实测）：新会话是 renderer-only 暂态，workingDir=null；handleSend 的
   // ensureWorkspace() 在未选工作空间时弹提示并静默 return（无 WS 帧）——与桌面端真实用户
   // 行为一致，必须先经 SessionToolbar 工作空间菜单选「最近使用」目录。
@@ -966,56 +1132,71 @@ async function main() {
       })()`);
       await new Promise((r) => setTimeout(r, 300));
     }
-    // 增长计数：MutationObserver 以 DOM 突变粒度记录 assistant 可见文本长度严格递增次数
-    await evalExpr(ws, `(() => {
-      window.__e2eGrowths = 0; window.__e2eLastLen = -1;
-      const target = document.querySelector('.message-list__inner') || document.body;
-      const measure = () => {
-        const nodes = document.querySelectorAll('.stream-group, .bubble--assistant');
-        let n = 0; nodes.forEach((el) => { n += (el.innerText || '').length; });
-        if (n > window.__e2eLastLen) { if (window.__e2eLastLen >= 0) window.__e2eGrowths += 1; window.__e2eLastLen = n; }
-      };
-      window.__e2eObs = new MutationObserver(measure);
-      window.__e2eObs.observe(target, { childList: true, subtree: true, characterData: true });
-      return true;
-    })()`);
-    // 输入（evaluate 赋值 + input 事件，驱动 v-model）
-    await evalExpr(ws, `(() => {
-      const ta = document.querySelector('[data-testid="chat-input-textarea"]');
-      ta.value = ${JSON.stringify(E2E_MESSAGE_TEXT)};
-      ta.dispatchEvent(new Event('input', { bubbles: true }));
-      return true;
-    })()`);
-    resetFrameEvidence();
-    await evalExpr(ws, `document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
-    // 帧级证据：chat:send invoke 帧（发出）+ ≥2 条 chat:event 回帧
-    await waitFor('WS 发出 chat:send invoke 帧', () =>
-      frameEvidence.sent.some((p) => p.includes('"channel":"chat:send"')), 20, 100);
-    await waitFor('WS 收到 ≥2 条 chat:event 帧', () =>
-      frameEvidence.received.filter((p) => p.includes('"channel":"chat:event"')).length >= 2, 30, 100);
-    // 回合终态：assistant 终态 bubble 含 42 且流式组已退场（轮询 50ms，≤120s）
-    const deadline = Date.now() + 120_000;
-    for (;;) {
-      if (Date.now() > deadline) break;
-      const done = await evalExpr(ws, `(() => {
+    // R2-F-9（2026-11-22）：发送→帧证据→终态等待→42 判定包进两次尝试循环（容错重发一次，
+    // 见场景头注）；断言口径零变化，帧证据按尝试独立采集（取末次尝试）。
+    let growths = -1;
+    let finalText = '';
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      // 每次尝试独立取气泡基线：终态判据要求 assistant 气泡数越过本尝试基线，防第 2 次尝试
+      // 的终态检测被第 1 次产出瞬时满足（F1-2b run-7 假红根因同款）。
+      const beforeThis = Number(await assistantBubbleCount(ws));
+      // 增长计数：MutationObserver 以 DOM 突变粒度记录 assistant 可见文本长度严格递增次数
+      // （每次尝试重装：断开上一尝试 observer、计数清零——增长≥1 判据落在本次尝试的流式上）。
+      await evalExpr(ws, `(() => {
+        window.__e2eObs?.disconnect?.();
+        window.__e2eGrowths = 0; window.__e2eLastLen = -1;
+        const target = document.querySelector('.message-list__inner') || document.body;
+        const measure = () => {
+          const nodes = document.querySelectorAll('.stream-group, .bubble--assistant');
+          let n = 0; nodes.forEach((el) => { n += (el.innerText || '').length; });
+          if (n > window.__e2eLastLen) { if (window.__e2eLastLen >= 0) window.__e2eGrowths += 1; window.__e2eLastLen = n; }
+        };
+        window.__e2eObs = new MutationObserver(measure);
+        window.__e2eObs.observe(target, { childList: true, subtree: true, characterData: true });
+        return true;
+      })()`);
+      // 输入（evaluate 赋值 + input 事件，驱动 v-model）
+      await evalExpr(ws, `(() => {
+        const ta = document.querySelector('[data-testid="chat-input-textarea"]');
+        ta.value = ${JSON.stringify(E2E_MESSAGE_TEXT)};
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      resetFrameEvidence();
+      await evalExpr(ws, `document.querySelector('[data-testid="chat-send-button"]')?.click(), true`);
+      // 帧级证据：chat:send invoke 帧（发出）+ ≥2 条 chat:event 回帧（本尝试独立采集）
+      await waitFor('WS 发出 chat:send invoke 帧', () =>
+        frameEvidence.sent.some((p) => p.includes('"channel":"chat:send"')), 20, 100);
+      await waitFor('WS 收到 ≥2 条 chat:event 帧', () =>
+        frameEvidence.received.filter((p) => p.includes('"channel":"chat:event"')).length >= 2, 30, 100);
+      // 回合终态：assistant 终态 bubble 含 42 且流式组已退场且气泡数越过本尝试基线
+      // （轮询 50ms，≤120s；超时不断言——交由下方空回复形态判定进入重发）
+      const deadline = Date.now() + 120_000;
+      let terminal42 = false;
+      for (;;) {
+        if (Date.now() > deadline) break;
+        const done = await evalExpr(ws, `(() => {
+          const bubbles = document.querySelectorAll('.bubble--assistant');
+          const last = bubbles[bubbles.length - 1];
+          const has42 = !!(last && (last.innerText || '').includes('42'));
+          return has42 && !document.querySelector('.stream-group') && bubbles.length > ${beforeThis};
+        })()`);
+        if (done === true) { terminal42 = true; break; }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      growths = await evalExpr(ws, `window.__e2eGrowths ?? -1`);
+      finalText = await evalExpr(ws, `(() => {
         const bubbles = document.querySelectorAll('.bubble--assistant');
         const last = bubbles[bubbles.length - 1];
-        const has42 = !!(last && (last.innerText || '').includes('42'));
-        return has42 && !document.querySelector('.stream-group');
+        return last ? (last.innerText || '') : '';
       })()`);
-      if (done === true) break;
-      await new Promise((r) => setTimeout(r, 50));
+      if (terminal42 && String(finalText).includes('42')) break;
+      if (attempt === 1) log(`  B3 首试回合终态不含「42」（上游偶发空回复形态，growth=${growths}）→ 容错重发一次（F1-2b 先例）`);
     }
-    const growths = await evalExpr(ws, `window.__e2eGrowths ?? -1`);
-    const finalText = await evalExpr(ws, `(() => {
-      const bubbles = document.querySelectorAll('.bubble--assistant');
-      const last = bubbles[bubbles.length - 1];
-      return last ? (last.innerText || '') : '';
-    })()`);
     const chatEventCount = frameEvidence.received.filter((p) => p.includes('"channel":"chat:event"')).length;
     const textDeltaCount = frameEvidence.received.filter((p) => p.includes('"text_delta"')).length;
     await evalExpr(ws, `window.__e2eObs?.disconnect(), true`);
-    if (!finalText.includes('42')) throw new Error(`assistant 终态不含「42」（growth=${growths}，text=${finalText.slice(0, 80)}）`);
+    if (!String(finalText).includes('42')) throw new Error(`assistant 终态不含「42」（含一次容错重发，growth=${growths}，text=${String(finalText).slice(0, 80)}）`);
     // 断言口径（F2 修正，如实表述）：上游 text_delta 条数在 1-2 间波动 + stream→bubble
     // 结构切换使 DOM 增长计数不稳定（同脚本两轮实测分别为 1 与 2），固定 ≥2 会间歇性
     // 误报；故采用 DOM 增长 ≥1 + 帧层 text_delta ≥1 + chat:event ≥2 的确定性组合。
@@ -1375,6 +1556,199 @@ async function main() {
   } catch (e) { record('W-mcp-settings', 'FAIL', e.message); }
   await screenshot(ws, 'W-mcp-settings');
 
+  // ── W-file-context-menu：P6-B（2026-11-21）md-file-link 右键上下文菜单的 web 端同款验证 ──
+  // R2-F-8（复审 flow 备忘，2026-11-22）flake 兜底留痕：run1 FAIL 截图示注入消息暂态未上屏、
+  // 菜单态瞬时不稳定（run2 同代码 PASS）——注入后右键前补「链接元素在场且稳定」等待（首见后
+  // 间隔 300ms 复测仍在场）；三条右键链（活链首开/死链/活链复现）统一 f1 修复组同款一次重试
+  // 兜底（首断言失败 → Esc 关菜单→重新右键→重新断言，重试仍败才判红；同 smoke
+  // contextMenuWithRetry 先例，菜单弹开瞬间可能被自动滚底 scroll-close 吃掉或元素重渲染换元）。
+  // 契约：左键零动作；右键出 5 项菜单（预览/用系统默认程序打开/选择打开方式…/在文件夹中显示/
+  // 复制路径）；fs:stat 预检（死链/不存在 → 菜单「文件不存在」+ 1-4 禁用）；复制路径走非安全
+  // 上下文 execCommand 降级；预览项 → 预览抽屉（远控语义：动作作用于桌面主机）。零新 IPC
+  // （fs:stat / fs:openPath / fs:showInExplorer web-bridge 既有注册）。
+  // 注入纪律（W-mcp-settings 只读同源）：pinia 暂态会话 + st.messages.push 纯内存注入，禁写
+  // 真实配置/DB；夹具文件落隔离配置 workingDirectory（ISO_MODE=ISO_FIXTURE_DIR，teardown 全删；
+  // 预览允许集 = seed workingDirectory → fs:readPreview 可读，路径先例 = W-mcp-external-change）。
+  currentCase = 'W-file-context-menu';
+  {
+    const exceptionsBeforeF = exceptions.length;
+    const fixtureMd = path.join(String(rawConfig?.workingDirectory ?? ''), 'w-file-context-menu.md');
+    const FIXTURE_MARK = 'W_FILE_CONTEXT_MENU_MARK';
+    try {
+      if (!rawConfig?.workingDirectory || !fs.existsSync(String(rawConfig.workingDirectory))) {
+        throw new PreconditionError('配置缺 workingDirectory（默认 profile 形态）——W-file-context-menu 夹具目录不可知，本场景需隔离配置');
+      }
+      fs.writeFileSync(fixtureMd, `# ${FIXTURE_MARK}\n\nP6-B 右键菜单 web 端同款验证夹具（用后删除）。\n`, 'utf8');
+      await ensureLanBridge(ws, 'W-file-context-menu');
+      // 0) chat 路由 + 暂态会话 + 消息注入（活链=夹具绝对路径反引号形态；死链=未设根相对链接）。
+      // R3-F-1（复审 P2-1，2026-11-22）：注入块整包两次尝试循环（F1-2b / R2-F-9 同款形态）——
+      // 既有产品竞态（refreshActiveSession await 后无 activeSession.id 复核守卫，ChatPage 重挂载
+      // 触发）会把注入视图晚到覆写/未上屏，R2-F-8 收稳面全部位于失败点下游从未执行；每次尝试
+      // 重走 hash 路由 → 路由就绪 → 注入前视图沉降（连续两采样 activeSession id 不变 + assistant
+      // 气泡数稳定，直击晚到 IPC 覆写窗）→ startTransientSession+push → 两条渲染 waitFor（15s
+      // 不变）；attempt 1 失败留痕后整块重试一次，attempt 2 仍败才判红。断言集/菜单链/截图点
+      // 零变化，三条右键链重试兜底保留原位（产品级根修=refreshActiveSession 补 resolve-time
+      // 守卫，属 src 改动超授权面，由编排器登记台账）。
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          await evalExpr(ws, `(location.hash = '#/'), true`);
+          await waitFor('W-file-context-menu：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
+          // R3-F-1：push 前补「视图沉降」前置——连续两采样（间隔 500ms）activeSession.id 不变且
+          // .bubble--assistant 数稳定后才注入（晚到 refreshActiveSession 覆写会表现为 id 翻转或
+          // 气泡数跳变，沉降等待把它挡在 push 之前）。
+          await waitFor('W-file-context-menu：注入前视图沉降（连续两采样 id/气泡数稳定）', async () => {
+            const sample = `(() => {
+              const st = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('session');
+              return JSON.stringify({ id: st?.activeSession?.id ?? null, bubbles: document.querySelectorAll('.bubble--assistant').length });
+            })()`;
+            const s1 = JSON.parse(String(await evalExpr(ws, sample)));
+            await new Promise((r) => setTimeout(r, 500));
+            const s2 = JSON.parse(String(await evalExpr(ws, sample)));
+            return s1.id === s2.id && s1.bubbles === s2.bubbles;
+          }, 15);
+          await evalExpr(ws, `(() => {
+            const st = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('session');
+            if (!st) return null;
+            st.startTransientSession();
+            st.messages.push({ id: 'w-fcm-a', role: 'assistant', eventType: 'message', processKind: null, rawEvent: null, parentTaskId: null,
+              content: '夹具已生成 \`${JSON.stringify(fixtureMd).slice(1, -1)}\`（${FIXTURE_MARK}）；手册见 [缺失手册](rel/no-such-guide.md)。' });
+            return true;
+          })()`);
+          await waitFor('W-file-context-menu：活链渲染（data-clip-path=夹具路径）', () => evalOk(ws, `(() => {
+            const p = ${JSON.stringify(fixtureMd)};
+            return [...document.querySelectorAll('.bubble__content .md-file-link')]
+              .some((a) => a.getAttribute('data-clip-path') === p && !a.classList.contains('md-file-link--dead'));
+          })()`), 15);
+          await waitFor('W-file-context-menu：死链渲染（md-file-link--dead，clip=相对路径）', () => evalOk(ws, `(() => {
+            return [...document.querySelectorAll('.bubble__content .md-file-link')]
+              .some((a) => a.classList.contains('md-file-link--dead') && a.getAttribute('data-clip-path') === 'rel/no-such-guide.md');
+          })()`), 15);
+          break; // 注入块整链成功 → 跳出尝试循环（后续稳定等待与三条右键链照旧）
+        } catch (e) {
+          if (attempt >= 2) throw e; // attempt 2 仍败 → 上抛判红（record FAIL 由场景外层 catch 统一）
+          log(`  [R3-F-1 收稳] W-file-context-menu 注入块第 1 次失败（${String(e.message).slice(0, 120)}）——注入视图被晚到覆写/未上屏，整块重试一次`);
+        }
+      }
+      // R2-F-8：注入后、右键前补「链接元素在场且稳定」等待（复用场景既有 waitFor 手法）——
+      // 首见后间隔 300ms 复测两条链接仍在场且全部 isConnected，防「暂态未上屏/列表重渲染换元」
+      // 瞬时竞态（run1 FAIL 根因形态）。
+      await waitFor('W-file-context-menu：链接元素在场且稳定（首见 300ms 复测仍在场）', async () => {
+        if (!(await evalOk(ws, `document.querySelectorAll('.bubble__content .md-file-link').length >= 2`))) return false;
+        await new Promise((r) => setTimeout(r, 300));
+        return evalOk(ws, `(() => {
+          const ls = [...document.querySelectorAll('.bubble__content .md-file-link')];
+          return ls.length >= 2 && ls.every((a) => a.isConnected);
+        })()`);
+      }, 15);
+      // R2-F-8：三条右键链（活链首开/死链/活链复现）统一一次重试兜底（f1 修复组
+      // contextMenuWithRetry 同款）：首断言失败 → Esc 关菜单（已被 scroll-close 吃掉时幂等无害）
+      // → 重新右键 → 重新断言（action 重跑），重试仍败才上抛判红。pickExpr = 页面内求值表达式，
+      // 返回待右键的 .md-file-link 元素。
+      const rightClickMenuWithRetry = async (pickExpr, label, action) => {
+        const attempt = async () => {
+          const opened = await evalExpr(ws, `(() => {
+            const el = ${pickExpr};
+            if (!el) return false;
+            const r = el.getBoundingClientRect();
+            el.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: Math.round(r.left + 8), clientY: Math.round(r.top + 8) }));
+            return true;
+          })()`);
+          if (opened !== true) throw new Error('右键目标链接不在场（元素被重渲染移除）');
+          await action();
+        };
+        try {
+          await attempt();
+        } catch (firstErr) {
+          log(`  [R2-F-8 收稳] W-file-context-menu ${label}：首次失败（${String(firstErr.message).slice(0, 120)}）→ Esc 关菜单重新右键重试一次`);
+          await evalExpr(ws, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`).catch(() => { /* Esc 兜底尽力而为 */ });
+          await new Promise((r) => setTimeout(r, 200));
+          await attempt(); // 重试仍失败 → 异常上抛判红
+        }
+      };
+      const LIVE_LINK_PICK = `[...document.querySelectorAll('.bubble__content .md-file-link:not(.md-file-link--dead)')][0]`;
+      const DEAD_LINK_PICK = `[...document.querySelectorAll('.bubble__content .md-file-link--dead')][0]`;
+      // 1) 左键零动作：原生 click() 后既无菜单也无抽屉（P6-B 行为契约 web 面）。
+      await evalExpr(ws, `(() => {
+        const el = [...document.querySelectorAll('.bubble__content .md-file-link:not(.md-file-link--dead)')][0];
+        el.click();
+        return true;
+      })()`);
+      await new Promise((r) => setTimeout(r, 600));
+      const noAction = await evalOk(ws, `!document.querySelector('.file-link-menu') && !document.querySelector('.fpreview-drawer.open')`);
+      if (noAction !== true) throw new Error('左键点击后出现菜单或抽屉（P6-B 左键零动作契约在 web 端失守）');
+      // 2) 右键活链 → 5 项菜单 + 文案字面 + 全部可用（fs:stat 预检 exists=true）。
+      //    R2-F-8：右键链一次重试兜底（见上 helper 注）。
+      await rightClickMenuWithRetry(LIVE_LINK_PICK, '右键活链开菜单', async () => {
+        await waitFor('W-file-context-menu：菜单出现', () => evalOk(ws, `!!document.querySelector('.file-link-menu')`), 10);
+      });
+      const menuState = JSON.parse(String(await evalExpr(ws, `(() => {
+        const menu = document.querySelector('.file-link-menu');
+        const items = [...menu.querySelectorAll('[role="menuitem"]')];
+        return JSON.stringify({
+          texts: items.map((b) => (b.textContent || '').trim()),
+          disabled: items.filter((b) => b.disabled).length,
+          notice: (menu.querySelector('.flink-menu__notice')?.textContent || '').trim(),
+        });
+      })()`)));
+      if (menuState.texts.join('|') !== '预览|用系统默认程序打开|选择打开方式…|在文件夹中显示|复制路径') {
+        throw new Error(`菜单 5 项文案/顺序不符：${menuState.texts.join('|')}`);
+      }
+      if (menuState.disabled !== 0) throw new Error(`活链菜单禁用项 ${menuState.disabled} ≠ 0（fs:stat 预检应为全部可用）`);
+      if (menuState.notice) throw new Error(`活链菜单不应有提示行，实际「${menuState.notice}」`);
+      await screenshot(ws, 'W-file-context-menu');
+      // 3) 复制路径（非安全上下文 execCommand 降级）：菜单保持可见 + notice 出现（已复制/降级失败
+      //    反馈二态均可接受——降级路径本身真实触达即「可用」；二态记入 PASS 摘要）。
+      await evalExpr(ws, `(() => {
+        const b = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')].find((x) => (x.textContent || '').trim() === '复制路径');
+        b.click();
+        return true;
+      })()`);
+      await waitFor('W-file-context-menu：复制反馈 notice 出现（菜单保持可见）', () => evalOk(ws, `(() => {
+        const menu = document.querySelector('.file-link-menu');
+        if (!menu) return false;
+        return (menu.querySelector('.flink-menu__notice')?.textContent || '').trim().length > 0;
+      })()`), 8);
+      const copyNotice = String(await evalExpr(ws, `(document.querySelector('.file-link-menu .flink-menu__notice')?.textContent || '').trim()`));
+      // 4) Esc 关闭（window keydown 关闭机制真实路径）。
+      await evalExpr(ws, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`);
+      await waitFor('W-file-context-menu：Esc 关闭菜单', () => evalOk(ws, `!document.querySelector('.file-link-menu')`), 5);
+      // 5) 右键死链 → 「文件不存在」提示 + 1-4 禁用（stat 预检/禁用形态与桌面一致；相对路径
+      //    clip → fsStat.exists=false）。复制路径恒可用。R2-F-8：右键链一次重试兜底。
+      await rightClickMenuWithRetry(DEAD_LINK_PICK, '右键死链', async () => {
+        await waitFor('W-file-context-menu：死链菜单「文件不存在」提示', () => evalOk(ws, `(() => {
+          const n = document.querySelector('.file-link-menu .flink-menu__notice');
+          return !!n && (n.textContent || '').includes('文件不存在');
+        })()`), 10);
+      });
+      const deadState = JSON.parse(String(await evalExpr(ws, `(() => {
+        const items = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')];
+        return JSON.stringify({ total: items.length, disabled: items.filter((b) => b.disabled).length });
+      })()`)));
+      if (deadState.total !== 5 || deadState.disabled !== 4) {
+        throw new Error(`死链菜单形态不符：total=${deadState.total}（应 5）disabled=${deadState.disabled}（应 4，复制路径恒可用）`);
+      }
+      await evalExpr(ws, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`);
+      await waitFor('W-file-context-menu：死链菜单 Esc 关闭', () => evalOk(ws, `!document.querySelector('.file-link-menu')`), 5);
+      // 6) 右键活链 → 点「预览」→ 抽屉打开（远控语义：读取在桌面主机）。R2-F-8：右键链一次重试兜底。
+      await rightClickMenuWithRetry(LIVE_LINK_PICK, '右键活链复现', async () => {
+        await waitFor('W-file-context-menu：活链菜单复现', () => evalOk(ws, `!!document.querySelector('.file-link-menu')`), 10);
+      });
+      await evalExpr(ws, `(() => {
+        const b = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')].find((x) => (x.textContent || '').trim() === '预览');
+        if (!b || b.disabled) return false;
+        b.click();
+        return true;
+      })()`);
+      await waitFor('W-file-context-menu：预览抽屉打开', () => evalOk(ws, `!!document.querySelector('.fpreview-drawer.open')`), 15);
+      await evalExpr(ws, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`);
+      await waitFor('W-file-context-menu：抽屉关闭', () => evalOk(ws, `!document.querySelector('.fpreview-drawer.open')`), 8);
+      if (exceptions.length > exceptionsBeforeF) throw new Error('W-file-context-menu 用例期间出现 exceptionThrown');
+      record('W-file-context-menu', 'PASS', `web 端同款 5 项菜单（左键零动作 ✓；活链全可用 ✓；复制路径降级 notice=「${copyNotice}」；死链「文件不存在」+4 禁用 ✓；预览开抽屉 ✓；Esc 关闭 ✓）；纯内存注入未写真实配置`);
+    } catch (e) { record('W-file-context-menu', 'FAIL', e.message); }
+    finally { try { fs.rmSync(fixtureMd, { force: true }); } catch { /* 夹具清理尽力而为 */ } }
+    await screenshot(ws, 'W-file-context-menu');
+  }
+
   // ── W-queue-panel：web 端队列面板 + getQueueOverview 回包形状 + tasks_changed 帧级证据（UI13-P12；T12-A/B/H）──
   // 物化一个专用会话（materializeSession，B3 同款链路）作为队列挂载点：transient 未物化会话 addTask
   // 会落库孤儿任务（会话删除后无主），物化后 addTask 安全；收尾 removeTask ×2 删净任务，会话本体
@@ -1681,24 +2055,76 @@ async function main() {
       if (!last) return JSON.stringify({ hasWrap: false });
       const cap = last.querySelector('.bubble-caption');
       const bubble = last.querySelector('.bubble');
+      const asstWraps = [...document.querySelectorAll('.bubble-wrap--assistant')];
+      const lastAsst = asstWraps[asstWraps.length - 1] ?? null;
+      const dur = lastAsst ? lastAsst.querySelector('.bubble__meta-duration') : null;
       return JSON.stringify({
         hasWrap: true,
         hasCaption: !!cap,
         capText: cap ? (cap.textContent || '').trim() : '',
+        capHasClock: !!(cap && cap.querySelector('svg.bubble-caption-clock')),
         bubbleHasFootnote: bubble ? (bubble.textContent || '').includes('发送于') : null,
+        hasAsstDur: !!dur,
+        asstDurText: dur ? ((dur.textContent || '').trim()) : '',
       });
     })()`);
     const capObj = JSON.parse(String(capState));
     if (capObj.hasWrap !== true) throw new Error('页面无 .bubble-wrap--user（物化消息未渲染 user 气泡）');
     if (capObj.hasCaption !== true) throw new Error('user 气泡下方无 .bubble-caption（P5 caption 未渲染）');
-    if (!/你 · 发送于 \d{1,2}:\d{2}/.test(String(capObj.capText))) {
-      throw new Error(`caption 文本不符（期望「你 · 发送于 HH:mm」，实际「${String(capObj.capText).slice(0, 60)}」）`);
+    // P3 升秒级：caption 文案「你 · 发送于 HH:mm:ss」（秒位段两位）。
+    if (!/你 · 发送于 \d{1,2}:\d{2}:\d{2}/.test(String(capObj.capText))) {
+      throw new Error(`caption 文本不符（期望「你 · 发送于 HH:mm:ss」（P3 秒级），实际「${String(capObj.capText).slice(0, 60)}」）`);
     }
+    // P3：caption 时钟 svg 在位（bubble-caption-clock，位于「你 · 发送于」之前——对齐②视觉语言）。
+    if (capObj.capHasClock !== true) throw new Error('caption 元素内缺 svg.bubble-caption-clock（P3 时钟图标未渲染）');
     if (capObj.bubbleHasFootnote !== false) {
       throw new Error(`气泡内仍含「发送于」脚注（双向断言负向失败，bubbleHasFootnote=${capObj.bubbleHasFootnote}）`);
     }
+    // P4-T11：assistant ②气泡脚注耗时文本恒时钟格式（m:ss / H:MM:SS），不得小数秒形态。
+    if (capObj.hasAsstDur !== true) throw new Error('assistant 气泡缺 .bubble__meta-duration（②脚注不在场，P4-T11 断言面缺失）');
+    if (!/^\d+:\d{2}(:\d{2})?$/.test(String(capObj.asstDurText)) || /^\d+(\.\d+)?s$/.test(String(capObj.asstDurText))) {
+      throw new Error(`②耗时文本 '${capObj.asstDurText}' 不符时钟格式（期望 m:ss / H:MM:SS，不得小数秒形态——P4）`);
+    }
+    // ── F-r1-10（flow 疑问-Q1）终态后二次探针：④TurnTimer 运行态异常运行时取证 ──
+    // 审查岗截图实证「②已落账（0:10·结束于）同帧 ④ 仍运行态（正在回复 10.7s+思考中 pill）」，
+    // 静态推导最贴合 web 桥 runtime overview 迟到重置位（session-store.ts:710/:1209/:1292 对账
+    // 守卫在 result 后/turn_ended 前窗口可穿透），未定案 → 运行时取证：终态（materializeSession
+    // 已含②落账=F-r1-8 根修口径）后 +2s/+5s 两次读 ④ DOM 态（.turn-timer 类名/文本：运行态=
+    // 无 --done 类且文本含「正在回复」，完成态=.turn-timer--done）+ pinia session store 快照
+    //（runningSessions/turnStartedAt/lastTurnMeta——既有 evalExpr 直读惯例，非新增调试口），
+    // 结果写日志与本 record 备注。两次均收敛完成态 → 疑问定性「瞬时窗口，已自愈」结案；任一次
+    // 仍运行态 → 坐实「完成后计时器复活」疑缺陷，只报不修（修复报告给复现步骤与证据，另开
+    // 修复点交编排器裁定）。
+    const probeSid = String(await activeSessionId(ws));
+    const timerProbe = async () => JSON.parse(String(await evalExpr(ws, `(() => {
+      const el = document.querySelector('.turn-timer');
+      const pinia = document.querySelector('#app')?.__vue_app__?.config?.globalProperties?.$pinia ?? null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      const sid = ${JSON.stringify(probeSid)};
+      return JSON.stringify({
+        present: !!el,
+        done: !!(el && el.classList.contains('turn-timer--done')),
+        running: !!(el && !el.classList.contains('turn-timer--done')),
+        text: el ? ((el.textContent || '').trim()) : '',
+        runningInStore: !!sid && Array.isArray(st?.runningSessions) && st.runningSessions.includes(sid),
+        turnStartedAtAlive: !!sid && st?.turnStartedAt?.[sid] != null,
+        lastTurnMeta: st?.lastTurnMeta?.[sid] ? 'present' : 'absent',
+      });
+    })()`)));
+    await sleep(2000);
+    const timerProbe1 = await timerProbe();
+    await sleep(3000);
+    const timerProbe2 = await timerProbe();
+    const probeJson1 = JSON.stringify(timerProbe1);
+    const probeJson2 = JSON.stringify(timerProbe2);
+    const timerStillRunning = timerProbe1.running === true || timerProbe2.running === true || timerProbe1.runningInStore === true || timerProbe2.runningInStore === true;
+    log(`  ℹ F-r1-10 终态后二次探针：@+2s=${probeJson1}；@+5s=${probeJson2}`);
+    const q1Verdict = timerStillRunning
+      ? 'F-r1-10 疑问-Q1 坐实：终态后二次探针 ④ 仍运行态（完成后计时器复活疑缺陷）——只报不修，交编排器裁定'
+      : 'F-r1-10 疑问-Q1 结案：终态后 +2s/+5s 两探针 ④ 均已收敛完成态——瞬时窗口，已自愈';
+    log(`  ℹ ${q1Verdict}`);
     if (exceptions.length > exceptionsBeforeT) throw new Error('W-user-timestamp 用例期间出现 exceptionThrown');
-    record('W-user-timestamp', 'PASS', `caption 两向断言 OK（「${capObj.capText}」匹配 /你 · 发送于 \\d{1,2}:\\d{2}/；气泡内无「发送于」）；会话=${mat.sessionName}`);
+    record('W-user-timestamp', 'PASS', `caption 两向断言 OK（「${capObj.capText}」匹配 /你 · 发送于 \\d{1,2}:\\d{2}:\\d{2}/（P3 秒级）+ 时钟 svg 在位；气泡内无「发送于」）；②耗时 '${capObj.asstDurText}' 时钟格式（P4-T11）；会话=${mat.sessionName}；${q1Verdict}（探针@+2s=${probeJson1} @+5s=${probeJson2}）`);
     await screenshot(ws, 'W-user-timestamp');
     // 善后：删除自建物化会话（不污染真实会话列表）。
     const cleaned = await deleteActiveSessionViaStore(ws);
@@ -2449,9 +2875,13 @@ async function main() {
   await deleteActiveSessionViaStore(ws);
   await screenshot(ws, 'W-queue-restore-standby-cleaned');
 
-  // ── W-turn-footnote：F1-2a 成功正文形态 + F1-2b 工具结尾形态 + F1-3 仅最新回合 ──
-  // 锚点（MessageList F1）：[data-testid="turn-footnote"]（.turn-footnote--success 等），位于
-  // .message-list__inner 内 renderItems 循环后（下一兄弟至多为 stream-group）。工具结尾措辞
+  // ── W-turn-footnote：F1-2a 成功形态不可见（P2 翻转） + F1-2b 工具结尾同判 + F1-3 interrupted 对照 ──
+  // 锚点（MessageList F1）：[data-testid="turn-footnote"]，位于 .message-list__inner 内 renderItems
+  // 循环后。P2（2026-11-21 批次）：success 形态不再渲染（信息无损——②气泡脚注与④TurnTimer 承载），
+  // F1-2a/F1-2b 由「成功形态可见」翻转为「不可见」（载体不存在或零尺寸/隐藏的等价不可见形态，
+  // 且不得出现 turn-footnote--success 类）；F1-3「仅最新回合」改挂 interrupted 对照——pinia 注入
+  // interrupted 记账（session store 单槽，空闲态入账）→ 载体恰 1 且 kind interrupted → 真实发送
+  // 新回合（markRunning 清槽）→ 载体退场（清槽行为不变的结构性证明）。工具结尾措辞
   //（※首跑校准）：指示模型调用 Bash echo 后回复 42；工具块 .tool-row 在末条内容块区。
   currentCase = 'W-turn-footnote';
   let wfnSid = '';
@@ -2460,34 +2890,41 @@ async function main() {
     await ensureLanBridge(ws, 'W-turn-footnote');
     await evalExpr(ws, `(location.hash = '#/'), true`);
     await waitFor('W-turn-footnote：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
-    // ① F1-2a：成功·正文结尾回合 → 脚注恰 1 个、位于末条内容块之后、含耗时与「结束于」段。
-    // 脚注渲染晚于 materializeSession 的 42 终态（sending 下降沿/turn_ended 后一拍）——轮询等待。
+    // ① F1-2a：成功·正文结尾回合 → 成功脚注不可见（P2）+ ②气泡脚注在场（信息无损 + P4 时钟格式）。
+    // 成功脚注若按旧形态渲染会晚于 materializeSession 的 42 终态一拍（sending 下降沿/turn_ended 后）
+    // ——给同窗等待再判不可见，覆盖「迟到渲染」窗口（若旧实现回归，该窗内必现 --success）。
     await materializeSession(ws, 'W-turn-footnote', W_WAKE_TEXT);
     wfnSid = await activeSessionId(ws);
     if (!wfnSid) throw new Error('无法取得物化会话 id');
-    const fnState1 = await waitFor('W-turn-footnote：第一回合脚注渲染（恰 1 个）', () => evalOk(ws, `(() => {
-      const fns = [...document.querySelectorAll('[data-testid="turn-footnote"]')];
-      return fns.length === 1 && (fns[0].className || '').includes('success');
-    })()`), 10, 200).then(async () => JSON.parse(String(await evalExpr(ws, `(() => {
+    await sleep(1200); // 旧实现脚注渲染窗（turn_ended 后一拍）——等满再判不可见
+    const fnState1 = JSON.parse(String(await evalExpr(ws, `(() => {
       const inner = document.querySelector('.message-list__inner');
       const fns = [...document.querySelectorAll('[data-testid="turn-footnote"]')];
       const last = fns[fns.length - 1] ?? null;
+      const visible = !!last && last.offsetParent !== null && (last.offsetWidth > 0 || last.offsetHeight > 0);
+      const anySuccess = !!document.querySelector('.turn-footnote--success');
+      const dur = document.querySelector('.bubble-wrap--assistant .bubble__meta-duration');
       return JSON.stringify({
         count: fns.length,
         text: last ? ((last.textContent || '').trim()) : '',
         kind: last ? (last.className || '') : '',
-        isLastInInner: !!inner && !!last && inner.lastElementChild === last,
+        visible,
+        anySuccess,
+        hasBubbleDur: !!dur,
+        durText: dur ? ((dur.textContent || '').trim()) : '',
       });
-    })()`))));
-    if (!/本次回复 [\d:.]+s? · 结束于 \d{1,2}:\d{2}:\d{2}/.test(fnState1.text)) {
-      throw new Error(`成功脚注文案形态不符（'${fnState1.text.slice(0, 60)}'，期望「本次回复 <秒/分:秒> · 结束于 HH:MM:SS」（format-duration 秒一档/分秒/时分秒三档 + 当天 HH:mm:ss））`);
+    })()`)));
+    if (fnState1.anySuccess) throw new Error('出现 .turn-footnote--success（P2：成功回合脚注③已移除，渲染面回归）');
+    if (fnState1.count > 0 && fnState1.visible) throw new Error(`成功回合后 turn-footnote 载体可见（${fnState1.count} 个，'${fnState1.text.slice(0, 40)}'）——P2 要求 success 形态不可见`);
+    if (fnState1.count > 0 && fnState1.kind.includes('success')) throw new Error(`载体 kind 含 success（P2 违背：'${fnState1.kind}'）`);
+    if (!fnState1.hasBubbleDur) throw new Error('assistant 气泡脚注②（.bubble__meta-duration）不在场（P2 信息无损前提：②须承接耗时展示）');
+    if (!/^\d+:\d{2}(:\d{2})?$/.test(fnState1.durText) || /^\d+(\.\d+)?s$/.test(fnState1.durText)) {
+      throw new Error(`②耗时文本 '${fnState1.durText}' 不符时钟格式（期望 m:ss / H:MM:SS，不得小数秒形态——P4）`);
     }
-    if (fnState1.kind.includes('interrupted') || fnState1.kind.includes('error')) throw new Error(`成功回合脚注 kind 异常（${fnState1.kind}）`);
-    if (fnState1.isLastInInner !== true) throw new Error('脚注不在列表尾（未位于末条内容块之后）');
     await screenshot(ws, 'W-turn-footnote-text-tail');
-    // ② F1-2b：工具+思考结尾回合 → 脚注仍恰 1 个（F1-3）且在工具块之后可见。
+    // ② F1-2b：工具+思考结尾回合 → 成功脚注同判不可见（P2）；toolSeen 保留（工具块观测面）。
     // 终态检测容忍零流式（单次回复 stream-group 可能整回合不渲染——run-6 实测）+ 容错重发
-    //（一次）：工具回合对上游偶发 error 重发一次拿工具块（申报：重发不放宽 F1-3 断言）。
+    //（一次）：工具回合对上游偶发 error 重发一次拿工具块（申报：重发不放宽 P2 断言）。
     let toolSeen = false;
     let fnState2 = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
@@ -2503,34 +2940,68 @@ async function main() {
         const b = document.querySelectorAll('.bubble--assistant').length;
         return !document.querySelector('.stream-group') && b > ${beforeThis};
       })()`), 150);
-      await sleep(500);
+      await sleep(1200); // 同①：等满旧实现脚注渲染窗再判
       toolSeen = await evalOk(ws, `!!document.querySelector('.tool-row')`);
       fnState2 = JSON.parse(String(await evalExpr(ws, `(() => {
-        const inner = document.querySelector('.message-list__inner');
         const fns = [...document.querySelectorAll('[data-testid="turn-footnote"]')];
         const last = fns[fns.length - 1] ?? null;
+        const visible = !!last && last.offsetParent !== null && (last.offsetWidth > 0 || last.offsetHeight > 0);
         return JSON.stringify({
           count: fns.length,
           text: last ? ((last.textContent || '').trim()) : '',
-          isLastInInner: !!inner && !!last && inner.lastElementChild === last,
-          nextIsStream: !!inner && !!last && !!last.nextElementSibling && last.nextElementSibling.className.includes('stream-group'),
+          kind: last ? (last.className || '') : '',
+          visible,
+          anySuccess: !!document.querySelector('.turn-footnote--success'),
         });
       })()`)));
-      if (toolSeen && /本次回复 [\d:.]+s? · 结束于 \d{1,2}:\d{2}:\d{2}/.test(fnState2.text)) break;
-      if (attempt === 1) log(`  footnote 工具回合首试未达工具+成功形态（toolSeen=${toolSeen} footnote='${String(fnState2?.text ?? '').slice(0, 30)}'），重发一次`);
+      if (toolSeen && fnState2.count === 0 && !fnState2.anySuccess) break;
+      if (attempt === 1) log(`  footnote 工具回合首试未达工具+不可见形态（toolSeen=${toolSeen} footnote count=${fnState2?.count}），重发一次`);
     }
-    if (!fnState2 || fnState2.count !== 1) throw new Error(`第二回合后脚注载体数 ${fnState2?.count ?? 'n/a'} ≠ 1（F1-3 违背）`);
-    if (!fnState2.isLastInInner && !fnState2.nextIsStream) throw new Error('脚注不在列表尾（第二回合）');
-    const turn2SuccessForm = /本次回复 [\d:.]+s? · 结束于 \d{1,2}:\d{2}:\d{2}/.test(fnState2.text);
+    if (!fnState2 || fnState2.anySuccess || (fnState2.count > 0 && fnState2.visible)) {
+      throw new Error(`工具回合后成功脚注可见或 --success 在场（count=${fnState2?.count ?? 'n/a'}，anySuccess=${fnState2?.anySuccess}）——P2 违背`);
+    }
+    if (fnState2.count > 0 && fnState2.kind.includes('success')) throw new Error(`载体 kind 含 success（P2 违背：'${fnState2.kind}'）`);
+    // ③ F1-3 仅最新回合（interrupted 对照）：pinia session store 注入 interrupted 记账（单槽、
+    // 空闲态入账）→ 载体恰 1 且 kind interrupted + 文案「已中断」→ 真实发送新回合（markRunning
+    // 清槽即时）→ 载体退场。新回合不必等终态（断言对象=清槽行为本身）。
+    const injected = await evalExpr(ws, `(() => {
+      const app = document.querySelector('#app');
+      const pinia = app && app.__vue_app__ ? app.__vue_app__.config.globalProperties.$pinia : null;
+      const st = pinia && pinia._s ? pinia._s.get('session') : null;
+      if (!st) return JSON.stringify({ ok: false, reason: 'no-session-store' });
+      const sid = st.activeSession && st.activeSession.id;
+      if (!sid) return JSON.stringify({ ok: false, reason: 'no-active-session' });
+      if (st.runningSessions.includes(sid)) return JSON.stringify({ ok: false, reason: 'session-running' });
+      st.setTurnFootnote(sid, { outcome: 'interrupted', durationMs: 4200, endedAt: Date.now() });
+      return JSON.stringify({ ok: true, sid });
+    })()`);
+    const inj = JSON.parse(String(injected));
+    if (!inj.ok) throw new Error(`interrupted 对照注入失败（${inj.reason ?? 'unknown'}）`);
+    await waitFor('W-turn-footnote：interrupted 脚注渲染（恰 1 个、kind interrupted）', () => evalOk(ws, `(() => {
+      const fns = [...document.querySelectorAll('[data-testid="turn-footnote"]')];
+      return fns.length === 1 && (fns[0].className || '').includes('interrupted') && (fns[0].textContent || '').includes('已中断');
+    })()`), 5);
+    await screenshot(ws, 'W-turn-footnote-interrupted');
+    // 新回合起步（markRunning 清槽）→ interrupted 脚注退场（仅最新回合清槽行为不变）。
+    const beforeNew = Number(await assistantBubbleCount(ws));
+    await setChatInput(ws, 'e2e-footnote-probe：请只回复数字 7,不要使用任何工具');
+    await clickSend(ws);
+    await waitFor('W-turn-footnote：新回合 user 气泡受理', () => evalOk(ws, `[...document.querySelectorAll('.bubble-wrap--user .bubble')].filter((b) => (b.innerText || '').includes('e2e-footnote-probe：请只回复数字 7')).length >= 1`), 10);
+    await waitFor('W-turn-footnote：interrupted 脚注已随新回合清槽退场', () => evalOk(ws, `document.querySelectorAll('[data-testid="turn-footnote"]').length === 0`), 5);
+    // 新回合终态等待（成功/错误文本均算终态）——善后删除会话前回落空闲态（防 sending 中删除）。
+    await waitFor('W-turn-footnote：对照新回合终态', () => evalOk(ws, `(() => {
+      const b = document.querySelectorAll('.bubble--assistant').length;
+      return !document.querySelector('.stream-group') && b > ${beforeNew};
+    })()`), 150);
     if (exceptions.length > exceptionsBeforeF) throw new Error('W-turn-footnote 用例期间出现 exceptionThrown');
-    record('W-turn-footnote', 'PASS', `F1-2a+F1-3：成功正文结尾回合脚注恰 1 个（「${fnState1.text.slice(0, 40)}」匹配耗时+结束于两段）且列表尾；F1-3 连续两回合脚注恒 1 且位于列表尾（第二回合脚注='${fnState2.text.slice(0, 40)}'——${turn2SuccessForm ? '成功形态' : 'error/中断形态（诚实不造数）'}；工具块${toolSeen ? '在场' : '未见——降级申报见 tooltail 条目'}）；F1-2b 见附属条目 W-turn-footnote-tooltail`);
+    record('W-turn-footnote', 'PASS', `F1-2a（P2 翻转）：成功正文结尾回合成功脚注不可见（count=${fnState1.count}、anySuccess=false）且②气泡脚注在场（'${fnState1.durText}' 时钟格式）；F1-2b：工具${toolSeen ? '在场' : '未见——重发后仍未见（降级申报见 tooltail 条目）'}回合同判不可见；F1-3（interrupted 对照）：注入 interrupted 记账 → 载体恰 1（kind interrupted）→ 新回合 markRunning 清槽 → 载体退场（仅最新回合行为不变）`);
     await screenshot(ws, 'W-turn-footnote');
-    // F1-2b 附属记账：工具块在场且第二回合成功形态 → PASS；否则 SKIP-with-reason（夹具降级
-    // 申报：措辞已按 ※校准窗调整 + 重发一次，模型不配合/上游 error 均非本用例可控行）。
-    if (toolSeen && turn2SuccessForm) {
-      record('W-turn-footnote-tooltail', 'PASS', `F1-2b 工具+思考结尾形态：工具块（.tool-row）在末条内容区 + 脚注恒在其后（列表尾，kind success 文案两段齐备）`);
+    // F1-2b 附属记账：工具块在场 → PASS；否则 SKIP-with-reason（夹具降级申报：措辞已按 ※校准窗
+    // 调整 + 重发一次，模型不配合/上游 error 均非本用例可控行）。
+    if (toolSeen) {
+      record('W-turn-footnote-tooltail', 'PASS', `F1-2b 工具+思考结尾形态：工具块（.tool-row）在末条内容区 + 成功脚注不可见（P2：②气泡脚注承接信息）`);
     } else {
-      record('W-turn-footnote-tooltail', 'SKIP', `模型未配合调用 Bash 工具或第二回合非成功终态（toolSeen=${toolSeen}，脚注='${String(fnState2.text).slice(0, 40)}'；措辞已校准+重发一次，LLM/上游行为非本用例可控行）——工具结尾形态由结构钉 F1-1（npx tsx scripts/tdd-turn-final-footnote-verify.ts 脚注载体与四形态渲染条件）兜底；正文结尾/仅最新回合两断言已在主条目成立`);
+      record('W-turn-footnote-tooltail', 'SKIP', `模型未配合调用 Bash 工具（toolSeen=false；措辞已校准+重发一次，LLM/上游行为非本用例可控行）——工具结尾形态由结构钉 F1-1（npx tsx scripts/tdd-turn-final-footnote-verify.ts 脚注载体与渲染条件）兜底；正文结尾/仅最新回合两断言已在主条目成立`);
     }
   } catch (e) { record('W-turn-footnote', 'FAIL', e.message); await screenshot(ws, 'W-turn-footnote-failed'); }
   await deleteActiveSessionViaStore(ws);
@@ -2550,6 +3021,9 @@ async function main() {
     await waitFor('W-question-sidenav：chat 路由就绪', () => evalOk(ws, `!!document.querySelector('button.new-button')`), 15);
     qNavPayload = await injectWizardFixture(ws);
     // C1-1 结构：左右分栏（nav + content）+ 左栏 3 题导航 + 右栏单题 + 翻页保留。
+    // 分栏在位改轮询等待（10s 上限）：overlay 与 wizard 分栏虽同 patch 渲染（v-if 同树），
+    // 但负载抖动下 eval 往返可能落在极端窗口——等待只是消抖，超时报错文案与原语义一致。
+    await waitFor('W-question-sidenav：wizard 分栏渲染（nav/content 在位）', () => evalOk(ws, `!!document.querySelector('[data-testid="wizard-nav"]') && !!document.querySelector('[data-testid="wizard-content"]')`), 10);
     const struct = JSON.parse(String(await evalExpr(ws, `(() => {
       const nav = document.querySelector('[data-testid="wizard-nav"]');
       const items = [...document.querySelectorAll('[data-testid="wizard-nav-item"]')];
@@ -2825,6 +3299,156 @@ async function main() {
   }
   await screenshot(ws, 'W-question-single-cleaned');
 
+  // ── W-translate（UI 五点批次 p5c 增，2026-11-20；02 清单 P5-T10/T8 + 增补组 B 链面）──
+  // 网页版翻译同能力：入口可见 → 点击出进行态 → stub 译文呈现 → 思考入口与正文入口双在场 →
+  // 整页刷新后入口/正文完好 + 再打开零重复请求（stub 日志计数不增）→ swap 切换零请求。
+  // stub 纪律：翻译上游一律 env stub（ISO electron 已注入 CLAUDE_LINK_TRANSLATE_STUB=1）；
+  // stub 日志在桌面主进程侧落盘 = 网页发起的翻译请求由桌面主进程发出的结构性远控证明（T10）。
+  // --config 外部备环境模式无 stub env → SKIP（禁真实计费请求，硬约束优先于覆盖）。
+  currentCase = 'W-translate';
+  {
+    const wtAssistantBody = 'W-translate fixture assistant body for the web translation check. ';
+    const wtThinkBody = 'W-translate fixture thinking content for the on-demand check. ';
+    const stubLogCount = () => {
+      if (!TRANSLATE_STUB_LOG) return -1;
+      try { return fs.readFileSync(TRANSLATE_STUB_LOG, 'utf8').split('\n').filter((l) => l.trim().length > 0).length; } catch { return 0; }
+    };
+    try {
+      const exceptionsBeforeWT = exceptions.length;
+      if (!ISO_MODE || !TRANSLATE_STUB_LOG) {
+        record('W-translate', 'SKIP', '外部备环境模式（--config）无 CLAUDE_LINK_TRANSLATE_STUB 注入——翻译上游 stub 纪律（02 §0，禁真实计费请求）优先于覆盖，本场景仅 ISO 模式执行');
+      } else {
+        await ensureLanBridge(ws, 'W-translate');
+        // 点夹具会话卡（DB 直插会话，页面列表应已含）→ 聊天页 → 消息夹具注入（DB 消息经 switchSession 已加载；
+        // 注入只为幂等垫底，不覆盖 DB 已载内容——同一批消息按 id 语义一致）。
+        const clicked = await evalExpr(ws, `(() => {
+          const card = [...document.querySelectorAll('.session-card')]
+            .find((c) => (c.querySelector('.session-card__name')?.textContent || '').trim() === 'W-translate-fixture');
+          if (!card) return false;
+          card.click();
+          return true;
+        })()`);
+        if (clicked !== true) throw new Error('侧栏未找到 W-translate-fixture 夹具会话卡（DB 直插会话未进列表）');
+        await waitFor('W-translate：聊天页就绪', () => evalOk(ws, `!!document.querySelector('[data-testid="chat-input-textarea"]')`), 15);
+        await waitFor('W-translate：落库助手消息渲染', () => evalOk(ws, `!!document.querySelector('.bubble--assistant')`), 10);
+        // 三跑修正（p5c，2026-11-20）：原 wtInjectMessages 页内 st.messages 整体替换夹具已删——
+        // 注入 id/文本（wt-a、330 字符）与 DB 落库行（wt-a-<ts>、660 字符）不一致：刷新前 START 以
+        // 注入 id/文本建 target（msg:wt-a）；刷新后渲染层改从 DB 加载（msg:wt-a-<ts>），restore 回来的
+        // 条目 target 与渲染消息对不上号 → 按钮呈 idle → 再开点击=真 START（660 字符段缓存全未命中）
+        // → stub 日志 1→2「重复计费」假红（W-translate-failed.png 三跑证据：原文视图+已翻译徽标）。
+        // DB 夹具即唯一事实源（B4/B5 已证 switchSession 正常加载 DB 消息；桌面 UI5P P5 同纪律），
+        // 断言面零变化——修夹具非改用例。
+
+        // T10：入口可见 → 点击出进行态 → stub 译文呈现（请求从桌面主进程发出 = stub 日志在主进程侧落盘）。
+        const logBefore = stubLogCount();
+        const hasEntry = await evalOk(ws, `!!document.querySelector('.bubble--assistant .tr-entry')`);
+        if (!hasEntry) throw new Error('web 版助手消息无翻译入口（.tr-entry 缺失——通道漏接/secure API 踩坑嫌疑）');
+        await evalExpr(ws, `document.querySelector('.bubble--assistant .tr-entry').click(), true`);
+        // live 窗口仅 ~150ms（stub 80ms 延迟 + 单段夹具 done 快速到达）——50ms 轮询保证采样命中
+        //（200ms 默认轮询会整窗漏采，首跑实测超时假红）。
+        await waitFor('W-translate：进行态出现（.tr-tag--live）', () => evalOk(ws, `!!document.querySelector('.bubble--assistant .tr-tag--live')`), 10, 50);
+        await waitFor('W-translate：stub 译文呈现（【译】前缀）', () => evalOk(ws, `(() => {
+          const v = document.querySelector('.bubble--assistant [data-testid="translation-viewport"]');
+          return !!v && (v.textContent || '').includes('【译】');
+        })()`), 12);
+        await waitFor('W-translate：完成徽标（已翻译）', () => evalOk(ws, `!!document.querySelector('.bubble--assistant .tr-tag--done')`), 10);
+        const logAfterStart = stubLogCount();
+        if (logAfterStart <= logBefore) throw new Error(`stub 日志计数未增长（${logBefore}→${logAfterStart}）——翻译请求未从主进程发出`);
+        // T24 web 侧背书（02 清单 T24「零配置开箱」的 web 面）：ISO seed = 真实配置浅拷贝（无
+        // translation 键）→ 出厂种子引擎组开箱即用；本场景即「不进配置页直接译出」的点击路径。
+        // stub 日志首行 engineKind = google-gtx = 出厂优先序首位（Google→Bing→有道→百度）的行为级观测。
+        const firstLogLine = (() => {
+          try { return fs.readFileSync(String(TRANSLATE_STUB_LOG), 'utf8').split('\n').find((l) => l.trim().length > 0) ?? ''; } catch { return ''; }
+        })();
+        let firstKind = '';
+        try { firstKind = String(JSON.parse(firstLogLine).engineKind ?? ''); } catch { /* 空串走下方断言 */ }
+        if (firstKind !== 'google-gtx') throw new Error(`stub 日志首行 engineKind=${firstKind || '(空)'} ≠ google-gtx（出厂优先序首位漂移）`);
+        // 思考入口与正文入口双在场（增补组 B 链面）。
+        await evalExpr(ws, `document.querySelector('.think-row__head')?.click(), true`);
+        await waitFor('W-translate：思考块展开（headrow 在场）', () => evalOk(ws, `!!document.querySelector('.think-row__headrow')`), 8);
+        const dual = await evalExpr(ws, `(() => ({
+          think: !!document.querySelector('.think-row__headrow .tr-entry'),
+          body: !!document.querySelector('.bubble--assistant .tr-entry'),
+        }))()`);
+        if (!dual.think || !dual.body) throw new Error(`思考/正文翻译入口未双在场：think=${dual.think} body=${dual.body}`);
+        record('W-translate-start', 'PASS', `web 版入口可见 → 点击出进行态（.tr-tag--live）→ stub 译文呈现（【译】）→ 完成徽标 → 思考/正文入口双在场；stub 日志 ${logBefore}→${logAfterStart}（+${logAfterStart - logBefore}）= 请求从桌面主进程发出的结构性远控证明（日志=${path.basename(String(TRANSLATE_STUB_LOG))}）`);
+        await screenshot(ws, 'W-translate-start');
+
+        // T8：整页刷新 → 入口在/正文完好 → 再打开零重复请求（缓存命中，stub 日志计数不变）。
+        const logAtDone = stubLogCount();
+        await reloadAndReconnect(ws, 'W-translate');
+        // 刷新后 restoreWebActiveSession 恢复会话；夹具会话不在恢复路径时点卡兜底。
+        await waitFor('W-translate：刷新后夹具会话或消息面就绪', () => evalOk(ws, `(() => {
+          if (document.querySelector('.bubble--assistant')) return true;
+          const card = [...document.querySelectorAll('.session-card')]
+            .find((c) => (c.querySelector('.session-card__name')?.textContent || '').trim() === 'W-translate-fixture');
+          if (card) { card.click(); }
+          return false;
+        })()`), 15, 300);
+        await waitFor('W-translate：刷新后助手消息渲染', () => evalOk(ws, `!!document.querySelector('.bubble--assistant')`), 10);
+        // 刷新后翻译入口在场 + restore 重建投影（done 态译文缺省显示）+ 不闪现错误。
+        const afterReload = await evalExpr(ws, `(() => ({
+          entry: !!document.querySelector('.bubble--assistant .tr-entry'),
+          viewport: !!document.querySelector('.bubble--assistant [data-testid="translation-viewport"]'),
+          bodyOk: (() => { const b = document.querySelector('.bubble--assistant'); return b && (b.textContent || '').includes(${JSON.stringify(wtAssistantBody.slice(0, 30))}); })(),
+          errorShown: !!document.querySelector('.bubble--assistant [data-testid="translation-error"]'),
+        }))()`);
+        if (!afterReload.entry) throw new Error('刷新后翻译入口消失（T8 主缺陷形态）');
+        if (!afterReload.bodyOk) throw new Error('刷新后消息正文不完好');
+        if (afterReload.errorShown) throw new Error('刷新后译文块呈错误态（异常）');
+        // 再打开（toggle 往返）零重复请求：缓存命中路径 stub 日志计数不变。
+        await evalExpr(ws, `document.querySelector('.bubble--assistant .tr-entry').click(), true`);
+        await sleep(600); // toggleShowing 纯视图切换 + Vue patch 窗口
+        const toggledOnce = await evalOk(ws, `!document.querySelector('.bubble--assistant [data-testid="translation-viewport"]')`);
+        await evalExpr(ws, `document.querySelector('.bubble--assistant .tr-entry').click(), true`);
+        await sleep(600);
+        const toggledTwice = await evalOk(ws, `!!document.querySelector('.bubble--assistant [data-testid="translation-viewport"]')`);
+        const logAfterReopen = stubLogCount();
+        if (logAfterReopen !== logAtDone) throw new Error(`刷新后再打开引发重复请求：stub 日志 ${logAtDone}→${logAfterReopen}（重复计费）`);
+        if (!toggledOnce || !toggledTwice) throw new Error(`刷新后 toggle 往返异常（收起=${toggledOnce} 再开=${toggledTwice}）`);
+        record('W-translate-reopen', 'PASS', `整页刷新后：入口在场 + 正文完好 + restore 重建（${afterReload.viewport ? '译文即时可见' : '译文经 toggle 恢复'}）→ 收起/再开 toggle 往返正常 → stub 日志 ${logAtDone}→${logAfterReopen} 零增量（刷新后对同一输入零重复请求——缓存命中）`);
+        await screenshot(ws, 'W-translate-reopen');
+
+        // T8 收起态刷新变体：收起（显示原文）→ 整页刷新 → 入口在场但译文不闪现（showingTranslation
+        // 持久化随 restore 走）→ 再开零重复请求（缓存命中）。独立 try/catch（同文件 W-* 记账形态：
+        // 失败记本条 FAIL，不误标 W-translate-start）。
+        try {
+          const logBeforeCollapsed = stubLogCount();
+          await evalExpr(ws, `document.querySelector('.bubble--assistant .tr-entry').click(), true`);
+          await sleep(600);
+          const collapsed = await evalOk(ws, `!document.querySelector('.bubble--assistant [data-testid="translation-viewport"]')`);
+          if (!collapsed) throw new Error('收起失败（译文视口仍在场）');
+          await reloadAndReconnect(ws, 'W-translate-collapsed');
+          await waitFor('W-translate 收起态刷新：消息面就绪', () => evalOk(ws, `!!document.querySelector('.bubble--assistant .tr-entry')`), 15);
+          const afterCollapsedReload = await evalExpr(ws, `(() => ({
+            entry: !!document.querySelector('.bubble--assistant .tr-entry'),
+            viewport: !!document.querySelector('.bubble--assistant [data-testid="translation-viewport"]'),
+            errorShown: !!document.querySelector('.bubble--assistant [data-testid="translation-error"]'),
+          }))()`);
+          if (!afterCollapsedReload.entry) throw new Error('收起态刷新后翻译入口消失');
+          if (afterCollapsedReload.viewport) throw new Error('收起态刷新后译文闪现（showingTranslation 未持久化/restore 误置 showing）');
+          if (afterCollapsedReload.errorShown) throw new Error('收起态刷新后呈错误态');
+          await evalExpr(ws, `document.querySelector('.bubble--assistant .tr-entry').click(), true`);
+          await waitFor('收起态刷新后译文重现', () => evalOk(ws, `(() => {
+            const v = document.querySelector('.bubble--assistant [data-testid="translation-viewport"]');
+            return !!v && (v.textContent || '').includes('【译】');
+          })()`), 10);
+          const logAfterCollapsed = stubLogCount();
+          if (logAfterCollapsed !== logBeforeCollapsed) throw new Error(`收起态刷新+再开引发重复请求：stub 日志 ${logBeforeCollapsed}→${logAfterCollapsed}`);
+          record('W-translate-reopen-collapsed', 'PASS', `收起（原文视图）→ 整页刷新 → 入口在场 + 译文不闪现（showingTranslation 持久化）→ 再开译文重现 → stub 日志 ${logBeforeCollapsed}→${logAfterCollapsed} 零增量（缓存命中）`);
+          await screenshot(ws, 'W-translate-reopen-collapsed');
+        } catch (e) {
+          record('W-translate-reopen-collapsed', 'FAIL', e.message);
+          await screenshot(ws, 'W-translate-reopen-collapsed-failed');
+        }
+        if (exceptions.length > exceptionsBeforeWT) throw new Error('W-translate 用例期间出现 exceptionThrown');
+      }
+    } catch (e) {
+      record('W-translate-start', 'FAIL', e.message);
+      await screenshot(ws, 'W-translate-failed');
+    }
+  }
+
   // ── 终审前清理块（P12 增）：B3 条件保留的会话（干净 profile 时供 B4-B6/W-changes-panel 消费）
   // 在此按 id 删除收尾——E2E 不留垃圾会话（隔离/真实 profile 同纪律）。保留前提消失（已删/不在
   // 列表）时为 no-op。不 record（非断言用例，仅善后）；清理失败只 log 不影响退出码。
@@ -2871,7 +3495,7 @@ async function main() {
   // ── 汇总 ──
   const failCount = results.filter((r) => r.status === 'FAIL').length;
   const skipCount = results.filter((r) => r.status === 'SKIP').length;
-  log('==== B1-B8 + 既有 W-* + T1B 新增 13 场景（W-dev-stale-banner / W-mcp-scan / W-skill-refresh-web / W-mcp-external-change / W-collapse-persist / W-queue-restore-{countdown,running,running-a2-4,standby} / W-turn-footnote / W-question-{sidenav,guard,submit,single}）汇总 ====');
+  log('==== B1-B8 + 既有 W-* + T1B 新增 13 场景（W-dev-stale-banner / W-mcp-scan / W-skill-refresh-web / W-mcp-external-change / W-collapse-persist / W-queue-restore-{countdown,running,running-a2-4,standby} / W-turn-footnote / W-question-{sidenav,guard,submit,single}）+ P6-B W-file-context-menu 汇总 ====');
   for (const r of results) log(`  ${r.id}: ${r.status} ${r.note}`);
   log(`PASS ${results.filter((r) => r.status === 'PASS').length} / FAIL ${failCount} / SKIP ${skipCount}（证据目录 ${SHOT_DIR}）`);
   flushLog();

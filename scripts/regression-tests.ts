@@ -104,8 +104,8 @@ function testTurnTimingContracts(): void {
   assert.ok(timerIdx > composerIdx && timerIdx < inputIdx, 'TurnTimer 须在浮岛内、ChatInput 之前（紧贴输入框）');
   // MessageList 不再内嵌 turn-timer（旧计时器已迁出，避免重复显示）。
   assert.ok(!messageList.includes('turn-timer'), 'MessageList 不得再内嵌 turn-timer');
-  // MessageBubble：结束耗时用共享 formatDurationMs 口径 + 时钟图标 + tabular-nums。
-  assert.ok(messageBubble.includes('formatDurationMs'), 'MessageBubble 结束耗时须复用 formatDurationMs');
+  // MessageBubble：结束耗时用共享时钟格式口径（P4：formatDurationClock 恒 m:ss/H:MM:SS）+ 时钟图标 + tabular-nums。
+  assert.ok(messageBubble.includes('formatDurationClock'), 'MessageBubble 结束耗时须复用 formatDurationClock（P4 时钟格式单源）');
   assert.ok(messageBubble.includes('bubble__meta-clock'), 'MessageBubble 结束耗时须带时钟图标');
   assert.ok(messageBubble.includes('font-variant-numeric: tabular-nums'), '结束耗时数字须 tabular-nums 防抖动');
 }
@@ -1266,10 +1266,14 @@ function testConnectionSurfaceWhitelistContracts(): void {
     'export-image-store 的 fetch 必须位于 downloadWebFiles（P5 票据下载）内',
   );
 
-  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver, bridge/init, mcp/mcp-probe}。
+  // 断言 B：主进程+shared 的 HTTP 直连文件 ∈ {topic-analyzer, model-resolver, bridge/init, mcp/mcp-probe,
+  // translation-engines}。
   // bridge/init：2026-09-21 IM 机器人计划新增 BRIDGE_FEISHU_TEST 连通测试（POST tenant_access_token/internal）。
   // mcp/mcp-probe：MCP 管理计划（2026-10-12）新增 mcp:probe 探活的 http/sse 直连（POST JSON-RPC 握手）。
-  // （\.request\( 覆盖 topic-analyzer 的 https/http 模块别名 lib.request 形态；该别名全树仅此一处。）
+  // translation-engines（2026-11-20 第三轮 R6 免费引擎组）：AI 回复翻译引擎适配器+组 HTTP 直连面
+  //（bing-web/alibaba-web/qq-transmart/sogou-web/youdao-web 出站）；translation-service 自身已无
+  // 直连（R6 引擎层置换后为编排层，退出本白名单）。
+  // （\.request\( 覆盖 topic-analyzer 与 translation-engines 的 https/http 模块别名 lib.request 形态。）
   // 白名单盲区补记（2026-09-21 review P3f）：bridge 的微信三文件（wechat-ilink/wechat-login/
   // wechat-adapter）经 fetchFn 注入形态发起全部 iLink 出站流量，上面的 \bfetch\s*\( 源码正则
   // 看不见——该面已由下方断言 B2 的 typeof fetch 第二扫描登记收口，新增出站点先过 B2。
@@ -1288,8 +1292,9 @@ function testConnectionSurfaceWhitelistContracts(): void {
       'main/modules/mcp/mcp-probe.ts',
       'main/modules/model-resolver.ts',
       'main/modules/topic-analyzer.ts',
+      'main/modules/translation-engines.ts',
     ],
-    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单/bridge 连通测试/MCP 探活四处外不得新增直连）',
+    '主进程/shared 的 HTTP 直连文件超出白名单（自动命名/模型清单/bridge 连通测试/MCP 探活/translation-engines（2026-11-20 第三轮 R6 免费引擎组）AI 回复翻译引擎直连之外不得新增直连）',
   );
 
   // 断言 B2（review R1 P3f 主体）：DI 形态出站面第二扫描——fetch 经 `typeof fetch` 注入
@@ -2681,6 +2686,10 @@ function assertReducedMotionCoverage(files: Array<{ name: string; text: string }
   const required = new Set<string>();
   const covered = new Set<string>();
   const animationRule = /([^{}]+)\{([^{}]*)\}/g;
+  // /[^{}]+/ 选择器捕获组会把上一条规则 } 之后的独立注释行胶进捕获（正则不识注释）——先剥
+  // CSS 注释再拆分，防止注释前缀致 required/covered 字符串失配误报（契约语义不变，只修探针
+  // 解析失真；先例：ThinkingBlock.vue/TranslationViewport.vue shimmer 注释位误报）。
+  const stripCssComments = (value: string): string => value.replace(/\/\*[\s\S]*?\*\//g, '');
   const collectMediaBodies = (text: string): string[] => {
     const bodies: string[] = [];
     const mediaStart = /@media\s*\(\s*prefers-reduced-motion:\s*reduce\s*\)\s*\{/g;
@@ -2702,14 +2711,14 @@ function assertReducedMotionCoverage(files: Array<{ name: string; text: string }
     for (const match of text.matchAll(animationRule)) {
       const declarations = match[2];
       if (!/(?:animation\s*:|animation-iteration-count\s*:)\s*[^;}]*\binfinite\b/.test(declarations)) continue;
-      for (const selector of match[1].split(',').map((value) => value.trim())) {
+      for (const selector of stripCssComments(match[1]).split(',').map((value) => value.trim())) {
         if (selector && !selector.startsWith('@')) required.add(selector);
       }
     }
     for (const body of collectMediaBodies(text)) {
       for (const match of body.matchAll(animationRule)) {
         if (/(?:animation\s*:|animation-iteration-count\s*:)\s*none\b/.test(match[2])) {
-          for (const selector of match[1].split(',').map((value) => value.trim())) {
+          for (const selector of stripCssComments(match[1]).split(',').map((value) => value.trim())) {
             if (selector && !selector.startsWith('@')) covered.add(selector);
           }
         }

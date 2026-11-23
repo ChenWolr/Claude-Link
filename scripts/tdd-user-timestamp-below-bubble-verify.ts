@@ -4,9 +4,10 @@
 // tdd-user-message-time-verify.ts（T5-C 格式语义回归门）：
 //   T5-A  旧形态清除——user 分支不再渲染「你」角色头行与气泡内「发送于 {{ sentAtText }}」脚注；
 //   T5-B  气泡正下方新行——单根 bubble-wrap wrapper（保 class fallthrough）+ 兄弟 caption 行
-//         「你 · 发送于 {HH:mm}」+ wrap--user 右对齐（承接原 .bubble--user 的 align-self）；
+//         「你 · 发送于 {HH:mm:ss}」（P3 2026-11-21 批次升秒级）+ wrap--user 右对齐（承接原
+//         .bubble--user 的 align-self）；
 //   T5-C  格式语义回归门——spawn tdd-user-message-time-verify.ts 退出码 0（formatSentAt
-//         当天 HH:mm / 跨天 M/d HH:mm 口径不动）；
+//         当天 HH:mm:ss / 跨天 M/d HH:mm:ss 口径不动）；
 //   T5-D  「来自队列」标签随行——bubble__queue-tag（parentTaskId 门控 + 原 title + !exportMode）
 //         从角色头迁至 caption 行内；
 //   T5-E  assistant 逐字节不变——「Claude」角色头、耗时/「· 结束于」脚注字面与门控全保留；
@@ -61,12 +62,17 @@ check('T5-A user 分支不再渲染「你」角色头行与气泡内「发送于
     '旧「v-if=message.role===user && sentAtText + class=bubble__meta」脚注块残留',
   );
   // 「你」角色头行必须排除 user 分支（assistant/tool 的 Claude 头保留）
-  const roleMatch = bubbleTpl.match(/<div v-if="([^"]+)" class="bubble__role">/);
-  assert.ok(roleMatch, '.bubble__role 角色头元素消失（assistant 角色头不得被误删）');
+  // 契约同步（2026-11-19 UI 五点批次 P5 挂载点 A）：.bubble__role 包进 .bubble__role-row flex 行
+  // （role 文本右侧挂 TranslationChrome swap pill，MessageBubble.vue 同名注释申报）——角色头元素
+  // div→div.bubble__role-row+span.bubble__role 形态变化，本钉同步锚 role-row 行；「排除 user」
+  // 语义不变（v-if 原样保留 message.role !== 'user'），另补角色头元素 span 形态在位钉。
+  const roleMatch = bubbleTpl.match(/<div v-if="([^"]+)" class="bubble__role-row">/);
+  assert.ok(roleMatch, '.bubble__role 角色头行消失（assistant 角色头不得被误删）');
   assert.ok(
     roleMatch[1].includes("message.role !== 'user'"),
     `.bubble__role v-if（${roleMatch[1]}）未排除 user——user 气泡内仍会渲染「你」角色头`,
   );
+  assert.ok(bubbleTpl.includes('<span class="bubble__role">'), '.bubble__role 角色头元素（span）应仍在 role-row 行内');
 });
 
 console.log('\n=== T5-B 气泡正下方新行 ===');
@@ -86,7 +92,7 @@ check('T5-B-1 单根 bubble-wrap wrapper（保 class fallthrough）+ user-bubble
     'wrapper 缺 user-bubble-wrap data-testid（E2E/导出冒烟定位锚）',
   );
 });
-check('T5-B-2 caption 行文案形态「你 · 发送于 {HH:mm}」（含连接文本 + sentAtText 插值）', () => {
+check('T5-B-2 caption 行文案形态「你 · 发送于 {HH:mm:ss}」（含连接文本 + sentAtText 插值；P3 升秒级）', () => {
   assert.ok(
     bubbleTpl.includes('你 · 发送于 {{ sentAtText }}'),
     'caption 行缺「你 · 发送于 {{ sentAtText }}」文本（丢了「你 ·」前缀或 sentAtText 插值）',
@@ -252,8 +258,8 @@ check('T5-H caption 门控无流式/导出附加条件；sentAtText 直读 creat
     /sentAtText = computed\(\(\) =>\s*props\.message\.role === 'user' \? formatSentAt\(props\.message\.createdAt\) : ''/,
     'sentAtText 必须单链路直读 createdAt（formatSentAt 单源），不得掺流式态条件',
   );
-  // 乐观消息 createdAt = 内存 toISOString 毫秒级（当天）→ 当场格式化为 HH:mm
-  assert.match(formatSentAt(new Date().toISOString()), /^\d{2}:\d{2}$/, '乐观毫秒级 ISO 当天应格式化为 HH:mm');
+  // 乐观消息 createdAt = 内存 toISOString 毫秒级（当天）→ 当场格式化为 HH:mm:ss（P3 升秒级）
+  assert.match(formatSentAt(new Date().toISOString()), /^\d{2}:\d{2}:\d{2}$/, '乐观毫秒级 ISO 当天应格式化为 HH:mm:ss');
 });
 
 console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
