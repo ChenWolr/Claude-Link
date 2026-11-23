@@ -292,3 +292,14 @@ scripts/tdd-web-parity-gaps-verify.ts
 scripts/tdd-skill-three-level-verify.ts
 scripts/tdd-turn-final-footnote-verify.ts
 scripts/tdd-dialogs-i1-i10-verify.ts
+scripts/tdd-theme-separator-verify.ts
+scripts/tdd-sidebar-card-outline-verify.ts
+scripts/tdd-bubble-width-parity-verify.ts
+scripts/tdd-translation-core-verify.ts
+scripts/tdd-message-translate-verify.ts
+scripts/tdd-ui-five-points-verify.ts
+scripts/tdd-translate-p1-fix-verify.ts
+scripts/tdd-file-link-context-menu-verify.ts
+scripts/tdd-bubble-meta-clock-format-verify.ts
+scripts/tdd-duration-source-flip-verify.ts
+scripts/tdd-engine-expansion-verify.ts
