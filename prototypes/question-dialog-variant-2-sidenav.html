@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<!-- 选择题弹窗重设计·变体 2「左侧题号导航栏」（工作台分栏，多题最稳）。
+     治的病（用户 4 条抱怨的第三种结构解法）：
+       ① 自由跳题 → 左栏题目列表即导航，任意点击直达；题目数再多也不溢出（列表纵向伸缩，
+          治旧圆点行 8+ 题被裁剪）。
+       ② 上下一步可靠 → footer [取消 | 上一题 | 下一题/提交]；下一题恒可点（可跳过）；
+          左栏点选与按钮翻页双通道，无 300ms 吞点击问题（守卫只护作答自动前进）。
+       ③ 已答标识 → 左栏每题常显状态行：✓+答案摘要 / ●当前 / ○未答，扫一眼全清楚。
+       ④ 取消位置 → 取消在 footer 最左；右上角另有 X（同语义，触发丢弃确认）。
+     字段映射（以调研报告 C-question-dialog.md 的 buildWizardAskUserQuestionPayload 现状为准）：
+       题干=question 文本；选项=options[]（尾部 __other__ Other 项含行内输入）；多选=multiSelect。
+     交互裁决（我的决定，计划评审可推翻）：
+       · 面板用宽档 57.5rem（interaction-panel-width-wide），左栏 200px 固定；
+       · 单选点击即作答+自动前进到下一未答题（保留 UI13-P6 直提）；多选显式下一题；
+       · 提交需全部已答，被拒时左栏对应题目红色描边并滚动定位；
+       · Esc：输入框内仅失焦；非输入焦点 → 丢弃确认（有作答时）。
+     token 纪律：全 var()/color-mix（镜像 variables.css 默认 warm-paper + constants.ts「终端」暗板
+     + interaction-tokens.css 宽面板/圆角 1rem/遮罩 z1200）。
+     差异点登记：左右分栏工作台形态 / 左栏即导航+答案摘要 / 宽面板 / 适合 5+ 题。 -->
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<title>选择题弹窗·变体 2「左侧题号导航栏」</title>
+<style>
+  /* ── 真实 token 镜像（亮=variables.css 默认；暗=constants.ts「终端」板）── */
+  :root {
+    --color-bg: #F8F4ED; --color-panel: #F4F0EA; --color-panel-soft: #FCFAF5;
+    --color-border: rgba(122, 96, 88, 0.18); --color-border-strong: rgba(0, 0, 0, 0.12);
+    --color-text: #3B3D3F; --color-text-muted: #6A6C70;
+    --color-accent: #537D96; --color-accent-strong: #456A80; --color-on-accent: #FFFFFF;
+    --color-danger: #8B3A3A; --color-success: #4A9E5E;
+    --radius-sm: 8px; --radius-md: 12px; --radius-lg: 16px;
+    --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.06);
+    --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+    --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+    --duration-fast: 120ms; --duration-base: 200ms;
+    --interaction-overlay-bg: rgba(0, 0, 0, 0.58);
+    --interaction-panel-width-wide: min(57.5rem, 94vw);
+    --interaction-panel-radius: 1rem;
+    --interaction-shadow: 0 18px 60px rgba(0, 0, 0, 0.46);
+    --interaction-option-gap: 0.625rem;
+    --interaction-option-bg: color-mix(in srgb, var(--color-panel-soft) 88%, #000);
+    --interaction-option-selected-bg: color-mix(in srgb, var(--color-accent) 34%, var(--color-panel-soft));
+    --interaction-btn-radius: var(--radius-md);
+    --interaction-btn-pad: 0.5rem 1rem;
+  }
+  [data-theme="dark"] {
+    --color-bg: #0F1115; --color-panel: #14171C; --color-panel-soft: #1B2027;
+    --color-border: #23272F; --color-border-strong: #2E3440;
+    --color-text: #D3D8E0; --color-text-muted: #9AA3B2;
+    --color-accent: #4EA1FF; --color-accent-strong: #7FBAFF; --color-on-accent: #0B1220;
+    --color-danger: #E5484D; --color-success: #57B26B;
+    --interaction-shadow: 0 18px 60px rgba(0, 0, 0, 0.7);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--color-bg); color: var(--color-text); font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; padding: 24px 32px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
+  .toolbar h1 { font-size: 15px; font-weight: 600; margin-right: auto; }
+  .toolbar small { color: var(--color-text-muted); }
+  .toolbar button { border: 1px solid var(--color-border); background: var(--color-panel-soft); color: var(--color-text); border-radius: var(--radius-sm); padding: 4px 10px; font: inherit; cursor: pointer; }
+  .stage { position: relative; min-height: 620px; display: grid; place-items: center; }
+  .overlay { position: absolute; inset: 0; background: var(--interaction-overlay-bg); border-radius: var(--radius-lg); display: grid; place-items: center; z-index: 1200; }
+  .panel { width: var(--interaction-panel-width-wide); background: var(--color-panel); border-radius: var(--interaction-panel-radius); box-shadow: var(--interaction-shadow); display: flex; flex-direction: column; max-height: 82vh; overflow: hidden; animation: pop var(--duration-base) var(--ease-spring); }
+  @keyframes pop { from { transform: scale(0.96); opacity: 0; } }
+
+  /* ── 头部：标题+进度+右上 X ── */
+  .head { display: flex; align-items: center; gap: 10px; padding: 1.125rem 1.375rem 0.875rem; border-bottom: 1px solid var(--color-border); }
+  .head .title { font-size: 15px; font-weight: 600; }
+  .head .sub { font-size: 12px; color: var(--color-text-muted); }
+  .head .chip { margin-left: 8px; font-size: 11px; border: 1px solid var(--color-border); border-radius: 999px; padding: 2px 10px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .xbtn { margin-left: auto; flex: none; width: 28px; height: 28px; border-radius: var(--radius-sm); border: 1px solid transparent; background: transparent; color: var(--color-text-muted); font-size: 15px; cursor: pointer; display: grid; place-items: center; }
+  .xbtn:hover { background: color-mix(in srgb, var(--color-text) 6%, transparent); color: var(--color-text); }
+
+  /* ── 分栏主体：左栏导航（200px）+ 右内容区 ── */
+  .split { display: flex; flex: 1; min-height: 0; }
+  .qnav { flex: none; width: 208px; border-right: 1px solid var(--color-border); background: var(--color-panel-soft); overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+  .qitem { text-align: left; border: 1.5px solid transparent; background: transparent; border-radius: var(--radius-sm); padding: 8px 10px; cursor: pointer; font: inherit; color: var(--color-text-muted); transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out); }
+  .qitem:hover { background: color-mix(in srgb, var(--color-text) 5%, transparent); }
+  .qitem .row1 { display: flex; align-items: center; gap: 7px; }
+  .qitem .n { flex: none; width: 20px; height: 20px; border-radius: 999px; display: grid; place-items: center; font-size: 11px; font-weight: 600; border: 1.5px solid currentColor; }
+  .qitem .t { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .qitem .row2 { margin: 4px 0 0 27px; font-size: 11px; color: var(--color-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .qitem.answered { color: var(--color-text); }
+  .qitem.answered .n { background: var(--color-success); border-color: var(--color-success); color: #fff; }
+  .qitem.answered .row2 { color: var(--color-success); }
+  .qitem.current { border-color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 8%, var(--color-panel)); color: var(--color-text); }
+  .qitem.current .n { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-on-accent); }
+  .qitem.flagged { border-color: var(--color-danger); }
+
+  .content { flex: 1; overflow-y: auto; padding: 1rem 1.25rem; min-height: 0; }
+  .qhead { display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px; }
+  .qhead .count { font-size: 12px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .qhead .qtag { margin-left: auto; font-size: 11px; color: var(--color-text-muted); }
+  .qtext { font-size: 15px; font-weight: 600; margin-bottom: 12px; }
+  .opts { display: flex; flex-direction: column; gap: var(--interaction-option-gap); }
+  .opt { display: flex; align-items: flex-start; gap: 10px; text-align: left; width: 100%; padding: 9px 12px; border-radius: var(--radius-sm); border: 1px solid var(--color-border); background: var(--interaction-option-bg); color: var(--color-text); font: inherit; cursor: pointer; transition: background var(--duration-fast) var(--ease-out), border-color var(--duration-fast) var(--ease-out); }
+  .opt:hover { background: color-mix(in srgb, var(--color-text) 5%, var(--interaction-option-bg)); }
+  .opt .mark { flex: none; margin-top: 2px; width: 15px; height: 15px; border-radius: 999px; border: 1.5px solid var(--color-text-muted); display: grid; place-items: center; font-size: 10px; color: transparent; }
+  .opt.multi .mark { border-radius: 4px; }
+  .opt.checked { background: var(--interaction-option-selected-bg); border-color: var(--color-accent); }
+  .opt.checked .mark { border-color: var(--color-accent); background: var(--color-accent); color: var(--color-on-accent); }
+  .opt .label b { display: block; font-weight: 600; font-size: 13px; }
+  .opt .label small { color: var(--color-text-muted); font-size: 12px; }
+  .other-input { margin-top: 8px; width: 100%; font: inherit; font-size: 13px; color: var(--color-text); background: var(--color-panel); border: 1px solid var(--color-border); border-radius: var(--radius-sm); padding: 7px 10px; }
+  .other-input:focus { outline: 2px solid color-mix(in srgb, var(--color-accent) 45%, transparent); outline-offset: 1px; }
+  .skipnote { margin-top: 10px; font-size: 12px; color: var(--color-text-muted); }
+
+  /* ── footer：[取消 | 上一题 | 下一题/提交]，取消最左 ── */
+  .foot { display: flex; align-items: center; gap: 8px; padding: 0.875rem 1.125rem 1.125rem; border-top: 1px solid var(--color-border); }
+  .foot .progress { margin-right: auto; font-size: 12px; color: var(--color-text-muted); font-variant-numeric: tabular-nums; }
+  .btn { border-radius: var(--interaction-btn-radius); padding: var(--interaction-btn-pad); font: inherit; font-size: 13px; cursor: pointer; transition: background var(--duration-fast) var(--ease-out); }
+  .btn.ghost { background: transparent; border: 1px solid var(--color-border); color: var(--color-text); }
+  .btn.ghost:hover { background: color-mix(in srgb, var(--color-text) 6%, transparent); }
+  .btn.ghost:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn.primary { background: var(--color-accent); border: 1px solid var(--color-accent); color: var(--color-on-accent); font-weight: 600; }
+  .btn.primary:hover { background: var(--color-accent-strong); }
+  .btn.primary.blocked { background: color-mix(in srgb, var(--color-text) 14%, var(--color-panel)); border-color: var(--color-border); color: var(--color-text-muted); }
+
+  .confirm { position: absolute; inset: 0; background: var(--interaction-overlay-bg); display: grid; place-items: center; z-index: 10; border-radius: var(--interaction-panel-radius); }
+  .confirm .box { width: 320px; background: var(--color-panel); border-radius: var(--radius-md); box-shadow: var(--interaction-shadow); padding: 16px; }
+  .confirm h3 { font-size: 14px; margin-bottom: 6px; }
+  .confirm p { font-size: 12px; color: var(--color-text-muted); margin-bottom: 14px; }
+  .confirm .row { display: flex; justify-content: flex-end; gap: 8px; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <div class="toolbar">
+    <h1>变体 2 · 左侧题号导航栏</h1>
+    <small>左栏即导航+答案摘要 · 宽面板分栏 · 多题不溢出 · 取消最左</small>
+    <button onclick="setTheme('light')">浅色</button>
+    <button onclick="setTheme('dark')">深色</button>
+  </div>
+
+  <div class="stage">
+    <div class="overlay">
+      <div class="panel">
+        <div class="head">
+          <div>
+            <div class="title">会话导出设置</div>
+            <div class="sub">左侧题目可直接点选跳转</div>
+          </div>
+          <span class="chip" id="chip"></span>
+          <button class="xbtn" id="xBtn" title="关闭">✕</button>
+        </div>
+
+        <div class="split">
+          <nav class="qnav" id="qnav"></nav>
+          <div class="content" id="content"></div>
+        </div>
+
+        <div class="foot">
+          <button class="btn ghost" id="cancelBtn">取消</button>
+          <span class="progress" id="prog"></span>
+          <button class="btn ghost" id="prevBtn">上一题</button>
+          <button class="btn primary" id="nextBtn">下一题</button>
+        </div>
+
+        <div class="confirm hidden" id="confirmBox">
+          <div class="box">
+            <h3>丢弃本次作答？</h3>
+            <p>已作答的内容将被丢弃，模型不会收到任何回答。</p>
+            <div class="row">
+              <button class="btn ghost" onclick="closeConfirm()">继续作答</button>
+              <button class="btn primary" style="background:var(--color-danger);border-color:var(--color-danger)" onclick="closeConfirm()">丢弃</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+  const $ = (s, el = document) => el.querySelector(s);
+  const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+  function setTheme(t) { document.documentElement.dataset.theme = t; }
+
+  const QUESTIONS = [
+    { title: '导出格式？', multi: false, options: [['JPG', '体积小，适合分享'], ['PNG', '无损画质，支持透明'], ['PDF', '适合打印与归档']], answer: 'PNG' },
+    { title: '导出范围？', multi: false, options: [['当前会话', ''], ['全部会话', ''], ['仅收藏', '']], answer: null },
+    { title: '附带哪些元数据？', multi: true, options: [['时间戳', ''], ['会话名', ''], ['模型信息', ''], ['附件清单', '']], answer: ['时间戳', '会话名'] },
+    { title: '文件名模板？', multi: false, options: [['默认时间戳', 'export-20261115-1430'], ['会话名', ''], ['__other__', '自定义模板']], answer: null, other: true },
+  ];
+  let cur = 1;
+
+  function isAnswered(q) {
+    if (q.multi) return Array.isArray(q.answer) && q.answer.length > 0;
+    return q.answer != null && q.answer !== '';
+  }
+  function answerText(q) {
+    const a = q.answer;
+    if (a == null) return '未作答';
+    return Array.isArray(a) ? (a.length ? '已选 ' + a.length + ' 项' : '未作答') : (a === '__other__' ? 'Other · 自定义' : '已选「' + a + '」');
+  }
+
+  function renderNav() {
+    $('#qnav').innerHTML = QUESTIONS.map((q, i) => {
+      const done = isAnswered(q), isCur = i === cur;
+      return `<button class="qitem ${done ? 'answered' : ''} ${isCur ? 'current' : ''}" data-i="${i}">
+        <span class="row1"><span class="n">${done ? '✓' : i + 1}</span><span class="t">${q.title}</span></span>
+        <span class="row2">${answerText(q)}</span></button>`;
+    }).join('');
+    $$('#qnav .qitem').forEach(el => el.addEventListener('click', () => { cur = +el.dataset.i; render(); }));
+  }
+
+  function renderContent() {
+    const q = QUESTIONS[cur];
+    const opts = q.options.map(([label, desc]) => {
+      const checked = q.multi ? (Array.isArray(q.answer) && q.answer.includes(label)) : q.answer === label;
+      return `<button class="opt ${q.multi ? 'multi' : ''} ${checked ? 'checked' : ''}" data-v="${label}">
+        <span class="mark">${label === '__other__' ? '' : '✓'}</span><span class="label"><b>${label === '__other__' ? 'Other' : label}</b>${desc ? `<small>${desc}</small>` : ''}</span></button>`;
+    }).join('');
+    const other = q.other ? `<input class="other-input ${q.answer === '__other__' ? '' : 'hidden'}" id="otherInput" placeholder="输入自定义模板，如 {会话名}-{日期}" value="${q.otherText || ''}" />` : '';
+    $('#content').innerHTML = `
+      <div class="qhead"><span class="count">第 ${cur + 1} 题 / 共 ${QUESTIONS.length} 题</span><span class="qtag">${q.multi ? '多选' : '单选 · 点击即作答'}</span></div>
+      <div class="qtext">${q.title}</div>
+      <div class="opts">${opts}</div>${other}
+      <div class="skipnote">可跳过本题稍后再答；提交前需答完全部 ${QUESTIONS.length} 题。</div>`;
+    $$('#content .opt').forEach(btn => btn.addEventListener('click', () => {
+      if (btn.dataset.v === '__other__') { $('#otherInput').classList.remove('hidden'); $('#otherInput').focus(); return; }
+      if (q.multi) {
+        q.answer = Array.isArray(q.answer) ? [...q.answer] : [];
+        const k = q.answer.indexOf(btn.dataset.v);
+        k >= 0 ? q.answer.splice(k, 1) : q.answer.push(btn.dataset.v);
+        render();
+      } else {
+        q.answer = btn.dataset.v;
+        const nextUn = QUESTIONS.findIndex((x, i) => i > cur && !isAnswered(x));
+        cur = nextUn >= 0 ? nextUn : cur; // 直提：自动前进到下一未答题
+        render();
+        return;
+      }
+    }));
+    const oi = $('#otherInput');
+    if (oi) oi.addEventListener('input', () => { q.otherText = oi.value; q.answer = oi.value.trim() ? '__other__' : null; render(); });
+  }
+
+  function renderFoot() {
+    const done = QUESTIONS.filter(isAnswered).length;
+    const last = cur === QUESTIONS.length - 1;
+    $('#chip').textContent = `已答 ${done}/${QUESTIONS.length}`;
+    $('#prog').textContent = `已答 ${done}/${QUESTIONS.length}`;
+    $('#prevBtn').disabled = cur === 0;
+    const nb = $('#nextBtn');
+    if (last) {
+      const all = done === QUESTIONS.length;
+      nb.textContent = all ? '提交' : `提交（${done}/${QUESTIONS.length}）`;
+      nb.classList.toggle('blocked', !all);
+    } else { nb.textContent = '下一题'; nb.classList.remove('blocked'); }
+  }
+
+  function render() { renderNav(); renderContent(); renderFoot(); }
+
+  $('#prevBtn').addEventListener('click', () => { if (cur > 0) { cur--; render(); } });
+  $('#nextBtn').addEventListener('click', () => {
+    if (cur < QUESTIONS.length - 1) { cur++; render(); return; }
+    const done = QUESTIONS.filter(isAnswered).length;
+    if (done === QUESTIONS.length) $('#prog').textContent = '提交成功（演示终止）';
+    else {
+      const first = QUESTIONS.findIndex(q => !isAnswered(q));
+      cur = first; render();
+      const item = $(`#qnav .qitem[data-i="${first}"]`);
+      if (item) item.classList.add('flagged');
+    }
+  });
+  const tryCancel = () => { if (QUESTIONS.some(isAnswered)) $('#confirmBox').classList.remove('hidden'); else $('#prog').textContent = '已取消（演示终止）'; };
+  $('#cancelBtn').addEventListener('click', tryCancel);
+  $('#xBtn').addEventListener('click', tryCancel);
+  function closeConfirm() { $('#confirmBox').classList.add('hidden'); }
+
+  render();
+</script>
+</body>
+</html>
