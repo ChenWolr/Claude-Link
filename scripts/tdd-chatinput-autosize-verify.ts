@@ -1,6 +1,8 @@
 // tdd-chatinput-autosize-verify.ts
 // 问题①（2026-09-27 六使用问题）输入框两行即出滚动条 TDD 验证脚本，全部为 ChatInput.vue 源码契约：
 //   C1–C6  autoResize 边框补偿表达式 + max-height 精确封顶字面 + 注释算式同步 + 既有契约保活。
+// 2026-11-19 UI 五点批次 P4 转写：封顶由 4 整行改为 8 整行（C4 字面 + 旧 `* 4` 清零 + C5 注释
+//   叙述同步转写）；2026-09-27「两行即出滚动条」修复链（C1–C3 边框补偿 / C6 保活）不得回退。
 // 根因：全局 border-box（main.css `* { box-sizing: border-box }`）下 scrollHeight 不含上下
 // 边框（各 1px），直接回填则 clientHeight 恒差 2px → 1~2 行即出竖向滚动条；旧 max-height:
 // 104px 又漏算 2px 边框，medium/large 字号档实际只容 3 整行。
@@ -44,15 +46,21 @@ check('C3 回填高度 = scrollHeight + vertBorder + 1（+1 覆盖小数行高 1
   );
 });
 
-check('C4 max-height 按 border-box 精确封顶 4 整行：calc(0.875rem * 1.5 * 4 + 22px)', () => {
-  assert.ok(src.includes('max-height: calc(0.875rem * 1.5 * 4 + 22px)'), 'textarea 规则缺精确 4 行 max-height');
+check('C4 max-height 按 border-box 精确封顶 8 整行：calc(0.875rem * 1.5 * 8 + 22px)（P4：4→8）', () => {
+  assert.ok(src.includes('max-height: calc(0.875rem * 1.5 * 8 + 22px)'), 'textarea 规则缺精确 8 行 max-height');
   assert.ok(!src.includes('max-height: 104px'), '旧 max-height: 104px 残留（漏 2px 边框）');
 });
 
-check('C5 注释算式同步：说明 border-box 含边框与 22px 收尾', () => {
+check('C4b 旧 *4 字面清零（防半改）：全文件不再出现 * 4 + 22px', () => {
+  assert.ok(!src.includes('* 4 + 22px'), '旧 4 行封顶字面 `* 4 + 22px` 残留（算式改一半）');
+});
+
+check('C5 注释算式同步：8 整行封顶叙述 + border-box 含边框 + 22px 收尾 + 算式字面一致', () => {
   assert.ok(textareaRule, '未找到 textarea 样式规则块');
+  assert.ok(textareaRule.includes('8 整行封顶'), 'max-height 注释缺「8 整行封顶」叙述（P4 转写）');
   assert.ok(textareaRule.includes('border-box'), 'max-height 注释未说明 border-box 含边框');
   assert.ok(textareaRule.includes('22px'), 'max-height 注释未写 22px 收尾算式');
+  assert.ok(textareaRule.includes('calc(0.875rem * 1.5 * 8 + 22px)'), 'max-height 注释算式与声明字面不一致（应含 calc(0.875rem * 1.5 * 8 + 22px)）');
 });
 
 check('C6 既有契约保活：min-height: 42px 与 overflow-y: auto 不动', () => {

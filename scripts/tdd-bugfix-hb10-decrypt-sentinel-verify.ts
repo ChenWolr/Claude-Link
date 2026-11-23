@@ -56,7 +56,10 @@ check('③ toProviderView/getConfigForRenderer：损坏态 hasApiKey 仍 true + 
   assert.match(view, /apiKeyBroken/, 'toProviderView 缺 apiKeyBroken 输出');
   assert.match(configTypes, /apiKeyBroken\?: boolean;/, 'ProviderProfileView 缺可选 apiKeyBroken 字段');
   assert.match(configTypes, /apiKeyBroken\?: boolean;/, 'AppConfig 缺可选 apiKeyBroken 字段') ;
-  const gfr = cm.slice(cm.indexOf('export function getConfigForRenderer'), cm.indexOf('export function getConfigForRenderer') + 800);
+  // 2026-11-19 UI 五点批次 p5b 同步：getConfigForRenderer 增 tencent 凭据掩码块（translation 节
+  // 明文 → 掩码透传）致 apiKeyBroken 判定位后移（实测 delta 800→856），取样窗 800→1200
+  // （断言语义不变：全局 Key 损坏标记仍须在渲染层出口可见）。
+  const gfr = cm.slice(cm.indexOf('export function getConfigForRenderer'), cm.indexOf('export function getConfigForRenderer') + 1200);
   assert.match(gfr, /apiKeyBroken/, 'getConfigForRenderer 未透出 apiKeyBroken（全局 Key 损坏不可见）');
 });
 

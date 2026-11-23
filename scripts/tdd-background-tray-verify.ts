@@ -94,7 +94,10 @@ console.log('\n=== 6b) config-manager：保存后回调（托盘随开关实时�
 check('config-manager 导出 onConfigSaved 订阅', configManager.includes('export function onConfigSaved('));
 // OPT-10/P3-6 同步：saveConfig 增加 getConfigForRenderer 说明与「掩码=不改动」注释后函数体变长，窗口 800→1400（断言语义不变）。
 // hb10-CFG-04 同步：saveConfig 尾改为 return { ...getConfig(), projectionOk }（投影失败可见），尾形态钉随之演化（断言语义=emitConfigSaved 仍在末尾触发）。
-check('saveConfig 末尾触发 emitConfigSaved()', /export function saveConfig[\s\S]{0,1600}emitConfigSaved\(\);[\s\S]{0,120}return \{ \.\.\.getConfig\(\), projectionOk \};/.test(configManager));
+// 2026-11-19 UI 五点批次 p5b 同步：saveConfig 增 tencent 凭据拦截块（加密入独立键后剥离）再致函数体
+// 变长（实测锚距 2140 字符），窗口 1600→2600（断言语义不变：emitConfigSaved 仍在末尾触发、
+// projectionOk 仍随保存返回）。
+check('saveConfig 末尾触发 emitConfigSaved()', /export function saveConfig[\s\S]{0,2600}emitConfigSaved\(\);[\s\S]{0,120}return \{ \.\.\.getConfig\(\), projectionOk \};/.test(configManager));
 // hb13-v B4 同步：clearConfig 增补旧目录重投影+快照清理（约 +600 字符），断言窗 1100→1900（必要扩窗）。
 check('clearConfig 末尾触发 emitConfigSaved()', /export function clearConfig[\s\S]{0,1900}emitConfigSaved\(\);[\s\S]{0,60}return getConfig\(\);/.test(configManager));
 check('回调异常不扩散（listener try/catch）', /for \(const listener of configSavedListeners\) \{[\s\S]{0,120}catch/.test(configManager));

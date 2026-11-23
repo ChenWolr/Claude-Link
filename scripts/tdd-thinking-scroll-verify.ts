@@ -207,8 +207,12 @@ check('C9 旧契约保活：字面 line-height: 1.5 仍在 .think-row__body', ()
   assert.ok(/line-height:\s*1\.5/.test(bodyRule), `body 规则块实际为：${bodyRule.trim()}`);
 });
 
-check('C10 props 不变：五项 props 签名字符串原样存在', () => {
-  const sig = '{ content: string; streaming?: boolean; sealed?: boolean; defaultOpen?: boolean; exportMode?: boolean }';
+check('C10 props 不变：五项 props 签名字符串原样存在（+2026-11-19 五点批次增 messageId? 第 6 项）', () => {
+  // 契约同步（2026-11-19 UI 五点批次 P5-T15 思考译文入口）：ThinkingBlock 增第 6 项可选 prop
+  // messageId?，供译文 target { kind:'thinking'; messageId } 接线（01-实现细节.md §5.4、
+  // ThinkingBlock.vue:62 消费）——原五项 props 逐字保留于签名内，本钉升级为六项签名逐字冻结，
+  // 「thinking-scroll 批次 props 不漂移」语义不变（同步申报：A1-8 border-strong 同款先例）。
+  const sig = '{ content: string; streaming?: boolean; sealed?: boolean; defaultOpen?: boolean; exportMode?: boolean; messageId?: string }';
   assert.ok(src.includes(sig), 'props 签名与原契约不一致');
 });
 

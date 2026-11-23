@@ -9,9 +9,10 @@
 //          同拍清防脏键）——33 缓存 + 1 错误 + 1 加载旗标 + 1 在飞 Promise → 切 activeSession
 //          → 四面全空；在飞清空经「同键再拉必发新后端请求」间接观测；
 //   T11-D  invoke 超时表驱动钉（UI13-P2-C 适配）——默认 60s（INVOKE_TIMEOUT_MS 保持）+
-//          CHANNEL_TIMEOUT_MS 四长操作通道覆盖值（testProviderModel 100s / probeMcpServers
+//          CHANNEL_TIMEOUT_MS 五条长操作通道覆盖值（testProviderModel 100s / probeMcpServers
 //          130s；COMMANDS_REFRESH_GLOBAL / COMMANDS_GET 120s 两键系 2026-11-15 eight-issues
-//          批次 D3-3 扩键同步——精确键集断言随实际键集扩展，见 T11-D-1 处留痕），未列通道
+//          批次 D3-3 扩键同步；translate:probe 120s 系 2026-11-19 UI 五点批次 p5b 扩键同步
+//          ——精确键集断言随实际键集扩展，见 T11-D-1 处留痕），未列通道
 //          回落 60s；无回包按时窗 reject「invoke 超时」且条目从 Map 删除
 //          （注入 fake timer 直测 armPendingInvoke + 结构钉 表值/表接线/invokeOverWire 兜底）；
 //   T11-E  回包/断线既有语义回归——回包 resolve 删条目；断线批量 reject「Web 桥未连接」+
@@ -233,7 +234,7 @@ group('=== T11-D invoke 超时（表驱动钉，UI13-P2-C） ===');
 // 「两长操作通道」（testProviderModel/probeMcpServers）扩为四键——新增 COMMANDS_REFRESH_GLOBAL /
 // COMMANDS_GET 两键（全局/会话级命令重探 spawn CLI 长操作，统一 120s 预算；实现细节 02 §8.3，
 // 用例 03b §9 D3-3「T11-D-1 必须同步扩键，否则 selftest 必红」）。原两键断言逐字保留不反转。
-check('T11-D-1 结构钉（表驱动）：INVOKE_TIMEOUT_MS=60_000 默认保持 + CHANNEL_TIMEOUT_MS 导出且四长操作通道覆盖值恰为 testProviderModel 100s / probeMcpServers 130s / COMMANDS_REFRESH_GLOBAL 120s / COMMANDS_GET 120s（D3-3 扩键）+ invokeOverWire 表查询兜底接线', () => {
+check('T11-D-1 结构钉（表驱动）：INVOKE_TIMEOUT_MS=60_000 默认保持 + CHANNEL_TIMEOUT_MS 导出且五条长操作通道覆盖值恰为 testProviderModel 100s / probeMcpServers 130s / COMMANDS_REFRESH_GLOBAL 120s / COMMANDS_GET 120s / translate:probe 120s（D3-3 扩键 + p5b 扩键）+ invokeOverWire 表查询兜底接线', () => {
   const timeoutMs = (bridgeMod as Record<string, unknown>).INVOKE_TIMEOUT_MS;
   assert.ok(timeoutMs !== undefined, 'web-bridge 未导出 INVOKE_TIMEOUT_MS');
   assert.equal(timeoutMs, 60_000, `INVOKE_TIMEOUT_MS=${String(timeoutMs)}，默认应为 60_000`);
@@ -260,10 +261,17 @@ check('T11-D-1 结构钉（表驱动）：INVOKE_TIMEOUT_MS=60_000 默认保持 
     channelTable[IPC_CHANNELS.COMMANDS_GET], 120_000,
     `CHANNEL_TIMEOUT_MS[${IPC_CHANNELS.COMMANDS_GET}]=${channelTable[IPC_CHANNELS.COMMANDS_GET]}，COMMANDS_GET 会话级重探应为 120_000（D3-3 同类长通道）`,
   );
+  // 2026-11-19 UI 五点批次 p5b 扩键同步（与 D3-3 同款惯例）：翻译一键探测 TRANSLATE_PROBE——
+  // 串行逐引擎 8s/引擎最坏 ~50s 超 60s 默认，web-bridge.ts:208 + shared/types/ipc.ts:263 契约
+  // 注释明文 120s 覆盖（照 PROVIDER_TEST_MODEL 先例）。
+  assert.equal(
+    channelTable[IPC_CHANNELS.TRANSLATE_PROBE], 120_000,
+    `CHANNEL_TIMEOUT_MS[${IPC_CHANNELS.TRANSLATE_PROBE}]=${channelTable[IPC_CHANNELS.TRANSLATE_PROBE]}，translate:probe 应为 120_000（p5b 一键探测长操作）`,
+  );
   assert.deepEqual(
     Object.keys(channelTable).sort(),
-    [IPC_CHANNELS.PROVIDER_TEST_MODEL, IPC_CHANNELS.MCP_PROBE, IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL, IPC_CHANNELS.COMMANDS_GET].sort(),
-    `CHANNEL_TIMEOUT_MS 键集=${Object.keys(channelTable).join(',')}，应恰为四条长操作通道（D3-3 扩键；其余通道维持 60s 默认）`,
+    [IPC_CHANNELS.PROVIDER_TEST_MODEL, IPC_CHANNELS.MCP_PROBE, IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL, IPC_CHANNELS.COMMANDS_GET, IPC_CHANNELS.TRANSLATE_PROBE].sort(),
+    `CHANNEL_TIMEOUT_MS 键集=${Object.keys(channelTable).join(',')}，应恰为五条长操作通道（D3-3 扩键 + p5b translate:probe 扩键；其余通道维持 60s 默认）`,
   );
   assert.ok(bridgeSrc.includes("'invoke 超时'"), "web-bridge 缺超时文案「invoke 超时」");
   assert.ok(

@@ -19,8 +19,9 @@
 //        含挂载失败静默——mountRoot 失败走 pending 不打 warn，对齐 command-source-watcher 既有水位）；
 //   ⑩ E2-10 删除 .mcp.json / 写入损坏 JSON 均广播（删与坏=实变硬期望）+ 同损坏内容二次写零广播；
 //   ⑪ E2-05 接线钉：MCP_SNAPSHOT_CHANGED 常量（带 E2 注释原文）/ preload 双成员 + getMcpSnapshot
-//        签名扩展 + 头注 117→119 / web-bridge 双键 / 发射点 pushToMainWindow 空载荷 {} + 发射前
-//        指纹门（isFirstBaseline 基准更新序）/ regInvokeHandler 计数保持 91 / handler bypassCache+dir
+//        签名扩展 + 头注 117→119（2026-11-19 UI 五点批次翻译 IPC 后契约同步为 119→126）/ web-bridge
+//        双键 / 发射点 pushToMainWindow 空载荷 {} + 发射前指纹门（isFirstBaseline 基准更新序）/
+//        regInvokeHandler 计数保持 91（同批次后契约同步为 96——翻译 IPC 增 5 handler）/ handler bypassCache+dir
 //        参数与负缓存清除+clearMcpRawCache 调用锚（E2 卷原钉临时等价面 badDirCacheMark(dir, now-TTL)；
 //        round-002 P21 随 E3 收口最小同步为 badDirCacheClear(opts.dir)，留痕见 ⑪-6 钉注）；
 //        〔round-006 R6-2① 扩钉留痕〕⑪-6 追加白名单门三字面切片钉（if (opts.dir !== undefined) /
@@ -497,8 +498,14 @@ try {
       sub.push('preload 接口 getMcpSnapshot 签名未扩 opts?: { bypassCache?: boolean; dir?: string }');
     if (!preloadApi.includes('getMcpSnapshot: (opts) => ipcRenderer.invoke(IPC_CHANNELS.MCP_SNAPSHOT_GET, opts) as Promise<McpSnapshot>'))
       sub.push('preload 实现 getMcpSnapshot 未透传 opts');
-    if (!preloadApi.includes('119 个方法')) sub.push('preload 头注释方法数应 117→119');
+    // 契约同步（2026-11-19 UI 五点批次翻译 IPC 增 7 成员：translateStart/Stop/Retry + getTranslationStates
+    // + translateProbe + onTranslationEvent/removeTranslationListener 推送对）：头注计数 119→126；
+    // 117/119/125 旧计数残留同钉防回退（125 = p5b 漏计 translateProbe 的过渡错值，动态比对钉
+    // tdd-app-updater-verify [5] 首跑实测暴露）。
+    if (!preloadApi.includes('126 个方法')) sub.push('preload 头注释方法数应 119→126（翻译 IPC 增 7 成员）');
     if (preloadApi.includes('117 个方法')) sub.push('preload 头注释 117 旧计数残留');
+    if (preloadApi.includes('119 个方法')) sub.push('preload 头注释 119 旧计数残留');
+    if (preloadApi.includes('125 个方法')) sub.push('preload 头注释 125 旧计数残留（p5b 漏计 translateProbe）');
     // 3) web-bridge 双键。
     if (!webBridge.includes('onMcpSnapshotChanged: IPC_CHANNELS.MCP_SNAPSHOT_CHANGED')) sub.push('web-bridge 缺 onMcpSnapshotChanged 键');
     if (!webBridge.includes('removeMcpSnapshotListener: IPC_CHANNELS.MCP_SNAPSHOT_CHANGED')) sub.push('web-bridge 缺 removeMcpSnapshotListener 键');
@@ -515,9 +522,10 @@ try {
       if (!(iSet > -1 && iBase > iSet && iEmit > iBase))
         sub.push(`发射序应为 基准更新 → 首拍早退 → 发射（实际 set@${iSet} base@${iBase} emit@${iEmit}）`);
     }
-    // 5) 无新 invoke handler：regInvokeHandler 计数保持 91（信号推送不注册）。
+    // 5) invoke handler 计数：regInvokeHandler 保持 96（E2 批次时 91「信号推送不注册」；2026-11-19
+    //    UI 五点批次翻译 IPC 增 5：TRANSLATE_START/STOP/RETRY/GET_STATE/PROBE——契约同步）。
     const regCount = (handlers.match(/regInvokeHandler\(/g) ?? []).length;
-    if (regCount !== 91) sub.push(`regInvokeHandler( 计数应保持 91（无新 invoke handler），实际 ${regCount}`);
+    if (regCount !== 96) sub.push(`regInvokeHandler( 计数应保持 96（翻译 IPC 契约同步后），实际 ${regCount}`);
     // 6) handler bypass 锚：opts 参数 + collectMcpSnapshotWithAppDeps + 负缓存清除/clearMcpRawCache。
     //    【round-002 P21 留痕】E2 卷原钉临时等价面 badDirCacheMark(dir, Date.now()-BAD_DIR_TTL_MS)
     //    （badDirCacheClear 导出归 E3 点 project-skills.ts，E2 文件圈不含）；E3 已落地，本钉随实现
