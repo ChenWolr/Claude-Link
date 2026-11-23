@@ -51,6 +51,7 @@ import { convertResultMessage } from '../../shared/result-converter';
 import { createInteractionHistory as createInteractionHistoryRecord } from '../database/repositories/interaction-history-repo';
 import { notifySessionCompleted, notifySessionNetworkInterrupted } from './session-completion-notifier';
 import { maybeRetrySessionNaming, cancelSessionTopicAnalysis } from './topic-analyzer';
+import { clearSessionTranslations } from './translation-service';
 import { logger } from '../utils/logger';
 import { maybeScheduleReasoningReplayRetry, recordOutgoingUserText, clearReasoningReplayState, clearReasoningReplayTurnFlag, cancelReasoningReplayRetryForInterrupt } from './reasoning-replay-auto-retry';
 import * as sessionRepo from '../database/repositories/session-repo';
@@ -621,6 +622,7 @@ export function markSessionDeleted(sessionId: string): void {
   sessionCommandCtx.delete(sessionId); // Task 2：命令分类上下文按会话清理（单一收口）
   clearReasoningReplayState(sessionId); // reasoning_replay 韧性层状态/延时器随会话清理（单一收口）
   cancelSessionTopicAnalysis(sessionId); // B3：在飞命名 LLM 随会话删除取消（与既有清理族并排；未在飞 no-op）
+  clearSessionTranslations(sessionId); // P5（2026-11-19）：翻译状态/段缓存随会话删除清理（单一收口，abort 在飞 + 三表清）
   sessionProvenanceSeeds.delete(sessionId); // review-v1 §5.1：provenance 种子同生命周期清理
   sessionLastTurnOverride.delete(sessionId); // 连接加固 Task 6：回合快照随会话清理
   sessionLastEffective.delete(sessionId); // 连接加固 Task 6：漂移检测状态随会话清理

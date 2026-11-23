@@ -3,6 +3,43 @@ export type ModelAlias = 'sonnet' | 'haiku' | 'opus' | 'fable';
 import type { NonAutoThinkingLevel } from './thinking';
 import type { PermissionMode } from '../permission-resolver';
 
+// ── AI 回复翻译引擎组（2026-11-19 UI 五点批次 P5；2026-11-20 第三轮 R6 免费网页 MT 引擎终稿）──
+// 出厂种子常量在 shared/translation-core.ts（DEFAULT_TRANSLATION_ENGINES，单一真相源，config-manager
+// 与渲染层 defaultConfig 共用；先例 WEB_ACCESS_DEFAULT_PORT 于 shared/web-access-protocol.ts）。
+// sanitize 纪律（§5.2.2）：写路径不清洗、读路径 getConfig 恒产出该键（sanitizeTranslationConfig）；
+// 旧配置缺键读出种子不报错、不迁移不升版。
+
+// 2026-11-22 扩容批次 p7/W4 终态五 kind：google-gtx（用户裁决「谷歌先剔除掉」）与 baidu-web
+// （死引擎清理）已移出联合类型——适配器/端点常量/种子同步整链删除，存量条目经
+// sanitizeTranslationConfig 读路径剔除+规范种子补齐归一（见 shared/translation-core.ts）。
+export type TranslationEngineKind = 'bing-web' | 'alibaba-web' | 'qq-transmart' | 'sogou-web'
+                                  | 'youdao-web';
+
+export interface TranslationEngineConfig {
+  // uuid（出厂种子用稳定可读字面 id）
+  id: string;
+  kind: TranslationEngineKind;
+  enabled: boolean;
+  // 优先级，小者先；探测「按结果应用」按延迟升序改写此值
+  order: number;
+  // 端点覆盖（缺省=出厂种子）：仅 bing-web 消费（域名口径 DEFAULT_BING_WEB_DOMAIN）；
+  // alibaba/qq/sogou/youdao 为固定多主机协议不消费 endpoint（评审 P1-5，sanitize 一律剥离，
+  // 含存量 youdao V1 脏值）
+  endpoint?: string;
+  // 出站经代理（出厂种子全直连缺省；字段与 sanitize 透传保留——机械休眠面，评审 P3-7 口径：
+  // 无出厂/UI 入口消费者，将来引擎加回即恢复消费）
+  useProxy?: boolean;
+}
+
+export interface TranslationConfig {
+  // 出厂种子五条（p7/W4 终态序）：bing-web(0)/alibaba-web(1)/qq-transmart(2)/sogou-web(3)/
+  // youdao-web(4)，全 enabled 全直连；存量配置经 sanitize 读路径归一恰五引擎
+  engines: TranslationEngineConfig[];
+  // 翻译专用出站代理地址字段已随 2026-11-22 扩容批次 p8/W4 P1-B 代理面回撤整链删除——它存在的
+  // 唯一理由是 google（已剔除）；存量键经 sanitizeTranslationConfig 读路径剥离，出站代理仅剩
+  // env（HTTPS_PROXY 等）> Electron 系统代理链（useProxy:true 引擎消费）。
+}
+
 // 网页访问（局域网直连）配置（docs/plans/2026-10-20-web-access-plan.md P1）。默认关：
 // enabled=false 时完全不监听任何端口。allowedHosts 是 Host 白名单（防 DNS rebinding）的
 // 隧道/反代域名预留（默认 []，本期局域网直连不内置 tunnel 客户端）；清洗规则见
@@ -100,6 +137,10 @@ export interface AppConfig {
   // 无需重启）；关闭后目录变化需手动「立即刷新」（COMMANDS_REFRESH_GLOBAL 通道）。
   // 启动时初始全局探测与 ensureGlobalCommandProbeFresh 空快照兜底不受此开关影响（保底能力不变）。
   skillAutoSync: boolean;
+  // AI 回复翻译引擎组（R6；形状见上方 TranslationConfig）。可选字段是刻意的：主进程 getConfig
+  // sanitize 恒产出该键（sanitizeTranslationConfig 兜底种子），渲染层 defaultConfig（config-store）
+  // 不携带亦可经类型检查——消费侧一律 `?? DEFAULT_TRANSLATION_ENGINES` 双保险（零配置开箱）。
+  translation?: TranslationConfig;
 }
 
 // Claude Link 管理库内的单台 MCP 服务器（§1.1 数据模型）。只承载定义，不含启停状态

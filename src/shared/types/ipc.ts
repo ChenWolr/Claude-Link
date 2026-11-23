@@ -241,6 +241,31 @@ export const IPC_CHANNELS = {
   WEB_ACCESS_GET_INFO: 'webAccess:getInfo',
   WEB_ACCESS_REGENERATE_TOKEN: 'webAccess:regenerateToken',
   WEB_ACCESS_COPY_LINK: 'webAccess:copyLink',
+  // ── AI 回复翻译（2026-11-19 UI 五点批次 P5；2026-11-20 修订：+思考块对象、变体三呈现）──
+  // START：body = (sessionId, target, sourceText) → TranslationStartResult（立即返回，
+  //   译文增量走 TRANSLATION_EVENT 推送——invoke 不携带长任务，规避 web 桥 60s 超时）。
+  //   target = { kind:'message'; messageId } | { kind:'thinking'; messageId } |
+  //            { kind:'stream' } | { kind:'thinking-stream' }
+  //   （流式中正文=stream、流式中思考=thinking-stream；回合落库后由渲染层以
+  //   message/thinking + messageId 重建——同文段命中缓存零重译零重复计费）。
+  //   幂等扩展语义：同 target 重复 START = 更新源文本续译（流式增长）/缓存全命中即完成（重开）。
+  // STOP：body = (translationId) → boolean。收起译文 + abort 在飞段请求（缓存保留）。
+  // RETRY：body = (translationId) → boolean。仅重译失败段（已完成段走缓存不重复计费）。
+  // GET_STATE：body = (sessionId) → TranslationStateView[]。刷新/重连后重挂载（状态源在主进程）。
+  TRANSLATE_START: 'translate:start',
+  TRANSLATE_STOP: 'translate:stop',
+  TRANSLATE_RETRY: 'translate:retry',
+  TRANSLATE_GET_STATE: 'translate:getState',
+  // PROBE（2026-11-20 第三轮 R6）：body = (apply?: boolean) → TranslationProbeResult。
+  //   一键探测：对启用引擎逐个（串行）发固定短测试文本，返回每引擎 {ok, latencyMs, error}；
+  //   apply=true 时把 ok 引擎按 latencyMs 升序重排 order 落盘（失败引擎保序殿后、不自动禁用），
+  //   返回携带 appliedOrder 供 UI 显示新序（类型在 shared/translation-core.ts）。
+  //   web 桥 120s 超时覆盖（CHANNEL_TIMEOUT_MS，web-bridge.ts）——串行探测 4~6 引擎最坏 ~50s
+  //   超 60s 默认；探测可被测试 stub 拦截（__setTranslationTransportForTest，引擎尝试契约）。
+  TRANSLATE_PROBE: 'translate:probe',
+  // 主→渲染推送：翻译增量/进度/终态（载荷 TranslationEventPayload，携 sessionId 供渲染层过滤；
+  //   经 push-bus 桌面 IPC + 网页 WS 同点广播；delta 类在主进程 80ms 节流合帧）。
+  TRANSLATION_EVENT: 'translation:event',
 } as const;
 
 // ── 文件预览（fs:readPreview）载荷类型：主进程 modules/fs-preview.ts 为实现真相源，桌面/网页渲染层共用。 ──

@@ -54,6 +54,10 @@ export const CHANNEL_TIMEOUT_MS: Record<string, number> = {
   //（低于 probeMcpServers 的 130s 封顶口径；sdk-command-registry 幂等锁在飞去重，重放无害）。
   [IPC_CHANNELS.COMMANDS_REFRESH_GLOBAL]: 120_000,
   [IPC_CHANNELS.COMMANDS_GET]: 120_000,
+  // P5b（2026-11-20 第三轮 R6）：翻译一键探测——串行逐启用引擎发测试文本（8s/引擎 + 页面
+  // token 抓取），4~6 引擎最坏 ~50s，超 60s 默认 → 照 PROVIDER_TEST_MODEL 100s 覆盖先例给
+  // 120s 预算（01 §5.2.4「探测与翻译同网络语义」：网页版配置页同按钮同语义=远控）。
+  [IPC_CHANNELS.TRANSLATE_PROBE]: 120_000,
 };
 
 /** 契约脚本注入用的计时器接口（签名与 globalThis 同形；生产恒用默认 globalThis）。 */
@@ -194,6 +198,18 @@ const WEB_CHANNEL_TABLE: Record<keyof ClaudeLinkAPI, string> = {
   recordTurnMeta: IPC_CHANNELS.SESSION_RECORD_TURN_META,
   searchSessions: IPC_CHANNELS.SESSION_SEARCH,
   analyzeTopic: IPC_CHANNELS.SESSION_ANALYZE_TOPIC,
+  // ── AI 回复翻译（2026-11-19 UI 五点批次 P5）：4 invoke + onTranslationEvent/removeTranslationListener
+  // 推送双键（同 onChatEvent/removeChatListener 形态；网页版与桌面同能力——翻译跑在桌面主机网络与
+  // 凭据上=远控语义；键集完备性契约由 tdd-web-access-wiring-verify §11.2 钉死）。
+  translateStart: IPC_CHANNELS.TRANSLATE_START,
+  translateStop: IPC_CHANNELS.TRANSLATE_STOP,
+  translateRetry: IPC_CHANNELS.TRANSLATE_RETRY,
+  getTranslationStates: IPC_CHANNELS.TRANSLATE_GET_STATE,
+  // PROBE（P5b/R6）：一键探测 invoke（网页版配置页同能力；超时覆盖 120s 见 CHANNEL_TIMEOUT_MS
+  // ——探测跑在桌面主机网络与凭据上，远控语义）。
+  translateProbe: IPC_CHANNELS.TRANSLATE_PROBE,
+  onTranslationEvent: IPC_CHANNELS.TRANSLATION_EVENT,
+  removeTranslationListener: IPC_CHANNELS.TRANSLATION_EVENT,
   sendMessage: IPC_CHANNELS.CHAT_SEND,
   abortChat: IPC_CHANNELS.CHAT_ABORT,
   setRunningPermissionMode: IPC_CHANNELS.CHAT_SET_PERMISSION_MODE,

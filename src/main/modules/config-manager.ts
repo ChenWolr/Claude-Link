@@ -37,6 +37,10 @@ import {
   maskMcpServersForRenderer,
 } from './mcp/mcp-config';
 import { sanitizeWebAccessConfig, WEB_ACCESS_DEFAULT_PORT } from '../../shared/web-access-protocol';
+import {
+  sanitizeTranslationConfig,
+  DEFAULT_TRANSLATION_ENGINES,
+} from '../../shared/translation-core';
 import { clearProviderModelsCache } from './model-resolver';
 import { resetCliDetectionCache } from './cli-detector';
 import * as path from 'path';
@@ -128,6 +132,12 @@ const defaultConfig: StoredConfig = {
   webAccess: { enabled: false, port: WEB_ACCESS_DEFAULT_PORT, allowedHosts: [] },
   // S5：Skill 自动同步默认开（与渲染层 defaultConfig 同值；读路径 ?? true 双保险，老配置零迁移）。
   skillAutoSync: true,
+  // AI 回复翻译引擎组（2026-11-20 第三轮 R6）：出厂种子五条（bing-web/alibaba-web/qq-transmart/
+  // sogou-web/youdao-web，全 enabled 全直连）——零配置零 key 零费用开箱即译。种子常量单一真相源
+  // 在 shared/translation-core.ts（与渲染层共用）；读路径 sanitize（getConfig →
+  // sanitizeTranslationConfig）兜底脏值（越集 kind 条目静默剔除），写路径不清洗
+  //（同 skillOverrides/mcpServers 先例）。
+  translation: { engines: DEFAULT_TRANSLATION_ENGINES.map((e) => ({ ...e })) },
   // ⚠️ providerProfiles / lastUsedProviderId / lastUsedModelId 故意不设默认值：
   // electron-store 的 defaults 会并入 store 视图参与 has() 判定，一旦给了默认值
   // （哪怕是 []），「键是否存在」永远是 true，ensureProviderMigration 的迁移守卫
@@ -276,6 +286,12 @@ export function decryptProviderApiKey(profile: StoredProviderProfile): string {
   return profile.encryptedApiKey;
 }
 
+// ── 腾讯系付费引擎凭据链（2026-11-20 第三轮 R6 p5b）已于 2026-11-22 扩容批次 p6/W5 整链移除 ──
+// 独立键 safeStorage 加密存取/CONFIG_SAVE 拦截/getConfig 附加/掩码族随该付费引擎删除
+//（00 计划 W5 用户裁决：付费的不必要存在）。存量独立键的密文在 getConfig 读路径一次性清除
+//（评审 P2-5：钉在读路径而非 sanitize——sanitize 纯函数无 store 访问；凭据密文销毁不可逆，
+// 用户已知悉留痕），见 getConfig 内清键行。
+
 export function getConfig(): AppConfig {
   const config = getStore().store;
   const advancedJsonRaw = typeof config.advancedJson === 'string' && config.advancedJson ? config.advancedJson : '{}';
@@ -291,6 +307,21 @@ export function getConfig(): AppConfig {
   // apiKeyBroken 是派生标记（非存储字段）：仅损坏态存在该键，未损坏不产出 undefined 键
   //（避免渲染层整份回显把 undefined 送进 conf.set 抛错）。
   const rawApiKey = decryptApiKey(config);
+  // W5 一次性清键（2026-11-22 扩容批次 p6，评审 P2-5）：存量凭据独立键在 getConfig 读路径
+  // 显式删除——清键钉在读路径而非 sanitize（sanitize 纯函数无 store 访问）。凭据密文销毁
+  // 不可逆（用户已知悉留痕）。存在性守卫（round-002 B-1/r2-F-1）：conf@14.0.0 delete 终态
+  // 无条件 this.store=store（_ensureDirectory+_validate+_write+change 事件），键不存在同样
+  // 全量落盘写——无守卫则每次 getConfig 热路径 IO 放大、「一次性」契约偏离；has 为纯读不写盘，
+  // 首读键存在才删、删后不再进入删除分支 = 真一次性。try/catch 守卫无 store 环境（契约卷
+  // vm 装载面），清键失败不阻塞读路径。
+  try {
+    const s = getStore();
+    if (s.has('translationTencentCredentials' as unknown as keyof StoredConfig)) {
+      s.delete('translationTencentCredentials' as unknown as keyof StoredConfig);
+    }
+  } catch {
+    /* 无 store 环境：清键守卫（不阻塞读路径） */
+  }
   return {
     provider: config.provider,
     providerName: config.providerName ?? 'Anthropic',
@@ -343,6 +374,10 @@ export function getConfig(): AppConfig {
     webAccess: sanitizeWebAccessConfig((config as any).webAccess),
     // S5：Skill 自动同步开关——老配置缺键读出默认开（?? true，行为与无开关时一致，零迁移）。
     skillAutoSync: config.skillAutoSync ?? true,
+    // AI 回复翻译引擎组（2026-11-20 第三轮 R6）：脏值清洗（kind 白名单外丢弃/enabled 非 bool→
+    // true/order 非有限整数按序重排；越集 kind 条目静默剔除——p7/W4 起白名单五 kind 终态），
+    // 老配置缺键读出出厂种子不报错、不迁移不升版（同 webAccess 先例）。
+    translation: sanitizeTranslationConfig((config as any).translation),
   };
 }
 

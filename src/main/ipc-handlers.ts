@@ -95,6 +95,9 @@ import {
   cleanupQueue,
 } from './modules/task-queue-engine';
 import { analyzeTopic } from './modules/topic-analyzer';
+// P5 AI 回复翻译（2026-11-19 UI 五点批次）：主进程状态机 + 段缓存 + SSE 直连（连接面白名单成员）。
+import { startTranslation, stopTranslation, retryTranslation, getTranslationStates, probeEngines } from './modules/translation-service';
+import { isValidTranslationTarget } from '../shared/translation-core';
 import { logger } from './utils/logger';
 import * as sessionRepo from './database/repositories/session-repo';
 import * as messageRepo from './database/repositories/message-repo';
@@ -337,10 +340,13 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
   });
   // round-008 R1-F2：恢复出厂（clearConfig 返回 getConfig()，webAccess 复位 enabled=false）
   // 同样驱动 sync——stop 分支踢线停服，不让服务带着已失效配置继续监听（对齐 CONFIG_SAVE 驱动）。
+  // p5b（2026-11-20 第三轮 R6）：回传走渲染层出口掩码视图——clearConfig 复用 getConfig()，其
+  // translation 凭据附加面已随 W5（2026-11-22）移除，apiKey 字段本就
+  // 明文读出；apiKey 不得经 IPC/web 桥下发明文（渲染层无 clearConfig 调用方，仅通道完备性键）。
   regInvokeHandler(IPC_CHANNELS.CONFIG_CLEAR, async () => {
     const cfg = clearConfig();
     syncWebAccessServer(cfg, webAccessHooks);
-    return cfg;
+    return getConfigForRenderer();
   });
   regInvokeHandler(IPC_CHANNELS.CONFIG_STORAGE_INFO, async () => {
     const userData = app.getPath('userData');
@@ -1273,6 +1279,37 @@ export function registerIpcHandlers(mainWindowRef: BrowserWindow): void {
       return result;
     },
   );
+
+  // ── AI 回复翻译（2026-11-19 UI 五点批次 P5）：4 invoke 直转 translation-service。──
+  // 入参健壮性校验对齐 SESSION_ANALYZE_TOPIC 形态；target 形状判别经 shared isValidTranslationTarget
+  // （kind 唯一判别 + 消息类 messageId 非空串）。空正文不在此拦（service 返回 {ok:false,「消息没有
+  // 可翻译的文本」} 双保险，拒绝文案须达渲染层）。START 立即返回——译文增量走 TRANSLATION_EVENT
+  // 推送，invoke 不携带长任务（规避 web 桥 60s 超时）。
+  regInvokeHandler(IPC_CHANNELS.TRANSLATE_START, async (_event, sessionId: unknown, target: unknown, sourceText: unknown) => {
+    if (
+      typeof sessionId !== 'string' || !sessionId.trim() ||
+      !isValidTranslationTarget(target) || typeof sourceText !== 'string'
+    ) {
+      return { ok: false, error: '无效的翻译请求参数' };
+    }
+    return startTranslation(sessionId, target, sourceText);
+  });
+  regInvokeHandler(IPC_CHANNELS.TRANSLATE_STOP, async (_event, translationId: unknown) => {
+    if (typeof translationId !== 'string' || !translationId.trim()) return false;
+    return stopTranslation(translationId);
+  });
+  regInvokeHandler(IPC_CHANNELS.TRANSLATE_RETRY, async (_event, translationId: unknown) => {
+    if (typeof translationId !== 'string' || !translationId.trim()) return false;
+    return retryTranslation(translationId);
+  });
+  regInvokeHandler(IPC_CHANNELS.TRANSLATE_GET_STATE, async (_event, sessionId: unknown) => {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) return [];
+    return getTranslationStates(sessionId);
+  });
+  // PROBE（2026-11-20 第三轮 R6）：一键探测直转 probeEngines——对启用引擎逐个串行发固定短
+  // 文本（§5.2.4；不建 translationId、不写段缓存）。入参宽容：apply 非 boolean 按 false
+  //（只有显式 true 才重排 order 落盘），无其他形状可拒。
+  regInvokeHandler(IPC_CHANNELS.TRANSLATE_PROBE, async (_event, apply: unknown) => probeEngines(apply === true));
 
   // Messages
   regInvokeHandler(IPC_CHANNELS.MESSAGE_GET_BY_SESSION, async (_event, sessionId: string) => {

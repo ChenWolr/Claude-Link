@@ -21,6 +21,19 @@ import { attachUserSkillDirNames, findStaleSkillKeys, isStaleKeyScanReady, loadS
 // 网页访问（局域网）P5：sanitize 与主进程同源（端口夹取/Host 归一）；信息卡视图类型。
 import { sanitizeWebAccessConfig, WEB_ACCESS_DEFAULT_PORT } from '../../shared/web-access-protocol';
 import type { WebAccessConfig } from '../../shared/types/config';
+// 翻译引擎设置块（2026-11-20 第三轮 R6 p5b；2026-11-22 扩容批次 p6/W5 起付费引擎凭据表单与
+// 模板编辑区已随引擎整链移除）：类型与出厂种子单一真相源在 shared（与主进程
+// 共用；种子常量供 endpoint 输入框 placeholder=出厂种子全文）。
+import type {
+  TranslationConfig,
+  TranslationEngineConfig,
+  TranslationEngineKind,
+} from '../../shared/types/config';
+import {
+  DEFAULT_TRANSLATION_ENGINES,
+  DEFAULT_BING_WEB_DOMAIN,
+  type TranslationProbeResult,
+} from '../../shared/translation-core';
 import type { WebAccessInfoView } from '../../shared/types/ipc';
 import { useInteractionStore } from '../stores/interaction-store';
 import type { ProjectDirEntry, SdkCommand } from '../../shared/types/command';
@@ -75,6 +88,9 @@ const PERSISTED_FIELDS = [
   // 结构化克隆兼容），经同一快照比对走既有 700ms 防抖自动保存链；主进程 CONFIG_SAVE 落地前
   // syncWebAccessServer 即时启停（P3 接线），保存完成信号驱动本页状态卡刷新（见下方 watch）。
   'webAccess',
+  // 翻译引擎组（2026-11-20 第三轮 R6 p5b）：引擎列表（启停/端点/order）经同一 700ms
+  // 防抖链落盘。
+  'translation',
 ] as const;
 
 // hb10-CFG-04：'projection-failed' = 保存本身成功但 settings.local.json 投影失败（可见性）。
@@ -255,11 +271,15 @@ function applyTheme(paletteId: string) {
   root.style.setProperty('--color-panel', palette.colors.panel);
   root.style.setProperty('--color-panel-soft', palette.colors.panelSoft);
   root.style.setProperty('--color-border', palette.colors.border);
+  root.style.setProperty('--color-border-strong', palette.colors.borderStrong ?? (palette.isDark ? '#3D444D' : 'rgba(0, 0, 0, 0.12)'));
+  root.style.setProperty('--color-text-sub', palette.colors.textSub ?? palette.colors.textMuted);
   root.style.setProperty('--color-text', palette.colors.text);
   root.style.setProperty('--color-text-muted', palette.colors.textMuted);
   root.style.setProperty('--color-accent', palette.colors.accent);
   root.style.setProperty('--color-accent-strong', palette.colors.accentStrong);
   root.style.setProperty('--color-on-accent', palette.colors.onAccent);
+  root.style.setProperty('--color-btn-ink', palette.colors.btnInk ?? palette.colors.accent);
+  root.style.setProperty('--color-on-btn-ink', palette.colors.onBtnInk ?? palette.colors.onAccent);
   root.style.setProperty('--color-danger', palette.colors.danger);
   root.style.colorScheme = palette.isDark ? 'dark' : 'light';
 }
@@ -298,6 +318,106 @@ function clampTaskDelayMinutes(): void {
 function clampMaxTurns(): void {
   store.config.maxTurns = sanitizeMaxTurns(store.config.maxTurns);
 }
+
+// ── 翻译引擎设置块（2026-11-20 第三轮 R6 p5b，01 §5.6.1）──────────────────────
+// 引擎列表编辑写 store.config.translation → 既有 700ms 防抖自动保存链。一键探测经
+// translateProbe(apply)（PROBE 通道；apply=true 时主进程落盘新序并返回 appliedOrder，本页据它
+// 即时重排引擎列表）。2026-11-22 扩容批次 p6/W5：注册/付费层（付费官方引擎）与模板引擎
+// 整链移除，添加入口随之删除（评审 P1-4 条 3 终态裁决：无任何可添加 kind，保留空
+// select 是负体验）；出厂种子条目可禁不可删（保零配置回退线）。
+
+// p7/W4 终态五 kind（google-gtx/baidu-web 死引擎剔除——名称/端点映射两键同步删除）。
+const TRANSLATION_KIND_NAMES: Record<TranslationEngineKind, string> = {
+  'bing-web': 'Bing（免费）',
+  'alibaba-web': '阿里翻译',
+  'qq-transmart': '腾讯交互翻译',
+  'sogou-web': '搜狗翻译',
+  'youdao-web': '有道（免费）',
+};
+
+/** endpoint 输入框 placeholder = 出厂种子全文（空 = 用种子；仅 bing-web 消费 endpoint——域名口径，
+ *  其余四 kind 固定多主机协议不消费，评审 P1-5）。 */
+const TRANSLATION_ENDPOINT_SEEDS: Record<TranslationEngineKind, string> = {
+  'bing-web': DEFAULT_BING_WEB_DOMAIN,
+  'alibaba-web': '', // 固定多主机协议无单端点语义（评审 P1-5），endpoint 不消费
+  'qq-transmart': '', // 固定多主机协议无单端点语义（评审 P1-5），endpoint 不消费
+  'sogou-web': '', // 固定域协议无单端点语义（评审 P1-5），endpoint 不消费
+  'youdao-web': '', // V2 webtranslate 协议固定多主机无单端点语义（评审 P1-5；W2d V1 端点种子成脏值置空）
+};
+
+function translationKindName(kind: string): string {
+  return TRANSLATION_KIND_NAMES[kind as TranslationEngineKind] ?? kind;
+}
+
+/** translation 节兜底（老配置/渲染层 defaultConfig 无键时建种子——读路径主进程 sanitize 恒产出，
+ *  此兜底只为防御初始化窗口期的空引用）。 */
+function ensureTranslationNode(): TranslationConfig {
+  if (!store.config.translation) {
+    store.config.translation = { engines: DEFAULT_TRANSLATION_ENGINES.map((e) => ({ ...e })) };
+  }
+  return store.config.translation as TranslationConfig;
+}
+
+/** 引擎列表展示序（order 升序；元素引用与 store 共享——行内 v-model 直接落 store）。 */
+const trEnginesSorted = computed<TranslationEngineConfig[]>(() => {
+  const t = store.config.translation;
+  if (!t) return [];
+  return [...t.engines].sort((a, b) => a.order - b.order);
+});
+
+// P1-B 代理面回撤（2026-11-22 扩容批次 p8/W4）：翻译出站代理输入整链拆除——translation 节的
+// 显式出站代理字段已删（存量键经 sanitize 读路径剥离），出站代理仅剩 env > 系统代理链
+//（useProxy:true 引擎消费；休眠机械面评审 P3-7：无出厂/UI 入口消费者）。
+
+function moveTranslationEngine(index: number, delta: -1 | 1): void {
+  const t = ensureTranslationNode();
+  const sorted = [...t.engines].sort((a, b) => a.order - b.order);
+  const target = index + delta;
+  if (target < 0 || target >= sorted.length) return;
+  [sorted[index], sorted[target]] = [sorted[target], sorted[index]];
+  t.engines = sorted.map((e, i) => ({ ...e, order: i }));
+}
+
+// 引擎添加入口与模板表单已随 2026-11-22 扩容批次 p6/W5 引擎整链移除（评审 P1-4 条 3
+// 终态裁决：本批无任何可添加 kind，保留空 select 是负体验；用户添加条目的删除按钮因再无可
+// 添加条目成死路径一并删——出厂种子条目可禁不可删）。
+
+// 一键探测（照 PROVIDER_TEST_MODEL 行内测试先例）：检查连通性 = translateProbe(false)；
+// 按结果应用 = translateProbe(true) → appliedOrder 即时重排本地引擎列表（主进程已落盘同序）。
+const trProbePending = ref(false);
+const trApplyPending = ref(false);
+const trProbeResult = ref<TranslationProbeResult | null>(null);
+
+async function runTranslationProbe(apply: boolean): Promise<void> {
+  if (trProbePending.value || trApplyPending.value) return; // 防重入（在飞禁用）
+  if (apply) trApplyPending.value = true;
+  else trProbePending.value = true;
+  try {
+    const result = await window.claudeLink.translateProbe(apply);
+    trProbeResult.value = result;
+    if (apply && result.appliedOrder) {
+      const t = ensureTranslationNode();
+      const byId = new Map(t.engines.map((e) => [e.id, e]));
+      const reordered: TranslationEngineConfig[] = [];
+      for (const id of result.appliedOrder) {
+        const engine = byId.get(id);
+        if (engine) reordered.push(engine);
+      }
+      // appliedOrder 外残留条目（理论上不会——apply 覆盖全量 id）保序殿后，防御性。
+      for (const engine of t.engines) {
+        if (!result.appliedOrder.includes(engine.id)) reordered.push(engine);
+      }
+      t.engines = reordered.map((e, i) => ({ ...e, order: i }));
+    }
+  } catch (error) {
+    showToast(error instanceof Error ? error.message : '翻译引擎探测失败', 'error');
+  } finally {
+    trProbePending.value = false;
+    trApplyPending.value = false;
+  }
+}
+
+// 付费引擎凭据表单已随 2026-11-22 扩容批次 p6/W5 引擎整链移除（评审 P1-4 条 5）。
 
 // ── Skill 管理（B2 独立设置页）────────────────────────────────────────────
 // 数据源：commandStore.globalSnapshot（引擎全局探测的未过滤快照，App.vue 全局订阅回写）。
@@ -922,6 +1042,72 @@ const updateStageTone = computed(() => {
                 <span class="field-desc">命中 reasoning_replay 等上游错误时自动原样重试一次；关闭后不再自动重发，仅提示错误。</span>
                 <input v-model="store.config.autoRetryReasoningReplay" type="checkbox" />
               </label>
+            </div>
+
+            <!-- 翻译引擎（2026-11-20 第三轮 R6 p5b，01 §5.6.1）：引擎列表编辑 + 一键探测；
+                 编辑走 700ms 防抖自动保存链。 -->
+            <div class="section tr-eng-section">
+              <h3 class="section-title">翻译引擎</h3>
+              <p class="tr-eng-note">
+                AI 回复翻译默认走免费网页翻译引擎组（按优先级依次尝试，失败自动降级下一引擎）；代码块不送翻。
+                2026-11-22 起：仅内置五个免费网页翻译引擎，其余翻译通道已移除。
+              </p>
+
+              <!-- 引擎列表：每行 = 启用开关 + 中文名 + endpoint 覆盖（空=用种子；仅 bing-web 消费，
+                   输入随评审 P1-5/P2-8 收窄到 bing-web 一行——不消费 endpoint 的引擎隐藏输入）
+                   + 上移/下移。2026-11-22 扩容批次 p6/W5：添加入口整块与删除按钮随注册/付费层
+                   （付费官方引擎）与模板引擎整链移除——出厂种子条目可禁不可删（保零配置回退线）。
+                   p7/W4：useProxy 勾选随 google-gtx 剔除删除（kind 收窄后是对已删成员的比较；
+                   useProxy 字段与 sanitize 透传保留——机械休眠面评审 P3-7）。
+                   p8：出站代理输入随 P1-B 代理面回撤整链拆除（出站代理仅剩 env > 系统代理链）。 -->
+              <div class="tr-eng-list">
+                <div v-for="(engine, index) in trEnginesSorted" :key="engine.id" class="tr-eng-row">
+                  <label class="tr-eng-switch" :title="engine.enabled ? '已启用（点击禁用）' : '已禁用（点击启用）'">
+                    <input v-model="engine.enabled" type="checkbox" />
+                    <span>{{ engine.enabled ? '启用' : '禁用' }}</span>
+                  </label>
+                  <span class="tr-eng-name">{{ translationKindName(engine.kind) }}</span>
+                  <span v-if="engine.order === 0" class="tr-eng-first">优先</span>
+                  <input
+                    v-if="engine.kind === 'bing-web'"
+                    v-model="engine.endpoint"
+                    class="tr-eng-endpoint"
+                    type="text"
+                    :placeholder="TRANSLATION_ENDPOINT_SEEDS[engine.kind]"
+                    title="端点覆盖：留空使用出厂种子"
+                  />
+                  <span class="tr-eng-actions">
+                    <button type="button" class="tr-eng-btn" :disabled="index === 0" aria-label="上移" title="上移（提高优先级）" @click="moveTranslationEngine(index, -1)">↑</button>
+                    <button type="button" class="tr-eng-btn" :disabled="index === trEnginesSorted.length - 1" aria-label="下移" title="下移（降低优先级）" @click="moveTranslationEngine(index, 1)">↓</button>
+                  </span>
+                </div>
+              </div>
+
+              <!-- 一键探测：结果表每行 = 绿/红圆点 + 引擎名 + latencyMs + error 摘要（禁用引擎不出行）；
+                   按结果应用 = 可用引擎按延迟升序重排 order 落盘（失败引擎保序殿后、不自动禁用）。 -->
+              <div class="tr-probe-row">
+                <button type="button" class="test-btn" :disabled="trProbePending || trApplyPending" @click="runTranslationProbe(false)">
+                  <span v-if="trProbePending" class="tr-probe-spinner" aria-hidden="true" />
+                  {{ trProbePending ? '检测中…' : '检查连通性' }}
+                </button>
+                <button type="button" class="test-btn" :disabled="trProbePending || trApplyPending || !trProbeResult" @click="runTranslationProbe(true)">
+                  <span v-if="trApplyPending" class="tr-probe-spinner" aria-hidden="true" />
+                  {{ trApplyPending ? '应用中…' : '按结果应用' }}
+                </button>
+                <span class="tr-eng-note">检测失败可能是暂时网络问题；应用只重排顺序，不会自动禁用任何引擎。</span>
+              </div>
+              <div v-if="trProbeResult" class="tr-probe-result" data-testid="translate-probe-result">
+                <div v-for="row in trProbeResult.engines" :key="row.id" class="tr-probe-line">
+                  <span :class="['tr-probe-dot', row.ok ? 'ok' : 'fail']" aria-hidden="true" />
+                  <span class="tr-probe-name">{{ translationKindName(row.kind) }}</span>
+                  <span v-if="row.ok" class="tr-probe-latency">{{ row.latencyMs }} ms</span>
+                  <span v-else class="tr-probe-error" :title="row.error">{{ row.error }}</span>
+                </div>
+                <p v-if="trProbeResult.appliedOrder" class="tr-probe-applied">已按检测结果重排引擎优先级并保存。</p>
+              </div>
+
+              <!-- 2026-11-22 扩容批次 p6/W5：模板编辑区与付费引擎凭据表单已随注册/付费层整链
+                   移除（评审 P1-4 条 3/条 5；出卷清单 EX-P6-3/EX-P6-4 结构钉承载删净面）。 -->
             </div>
           </div>
         </div>
@@ -3086,6 +3272,200 @@ input.skill-search:focus {
 
 .webacc-advanced summary:hover {
   color: var(--color-text);
+}
+
+/* ── 翻译引擎节（2026-11-20 第三轮 R6 p5b）：引擎列表行/探测结果表小件；
+   开关行/输入行复用既有 .field/.field--toggle/.section 体系，尺寸全 rem（随 fontScale 缩放）。 ── */
+.tr-eng-section {
+  border-top: 1px solid var(--color-border);
+}
+
+.tr-eng-note {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  margin: 0.25rem 0 0.75rem;
+}
+
+.tr-eng-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.tr-eng-row {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  flex-wrap: wrap;
+}
+
+.tr-eng-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3125rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tr-eng-switch input[type='checkbox'] {
+  accent-color: var(--color-accent);
+}
+
+.tr-eng-name {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.tr-eng-first {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  color: var(--color-accent-strong);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+  border-radius: var(--radius-pill, 999px);
+  padding: 0.0625rem 0.5rem;
+  white-space: nowrap;
+}
+
+.tr-eng-endpoint {
+  flex: 1;
+  min-width: 12rem;
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  padding: 0.3125rem 0.5rem;
+}
+
+.tr-eng-actions {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-left: auto;
+}
+
+.tr-eng-btn {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-text-muted);
+  min-width: 1.625rem;
+  min-height: 1.625rem;
+  padding: 0 0.3125rem;
+  font-size: 0.75rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tr-eng-btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.tr-eng-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+/* 一键探测行 + 结果表（照 PROVIDER_TEST_MODEL 行内测试形态：发起 spinner、结果行内呈现）。 */
+.tr-probe-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.875rem;
+}
+
+.tr-probe-row .tr-eng-note {
+  margin: 0;
+}
+
+.tr-probe-spinner {
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.625rem;
+  border: 2px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: tr-probe-spin 0.9s linear infinite;
+  vertical-align: -0.1em;
+}
+
+@keyframes tr-probe-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tr-probe-spinner {
+    animation: none;
+  }
+}
+
+.tr-probe-result {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-panel-soft);
+  margin-top: 0.5rem;
+}
+
+.tr-probe-line {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  min-width: 0;
+}
+
+.tr-probe-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  flex: none;
+}
+
+.tr-probe-dot.ok {
+  background: var(--color-success);
+}
+
+.tr-probe-dot.fail {
+  background: var(--color-danger);
+}
+
+.tr-probe-name {
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.tr-probe-latency {
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tr-probe-error {
+  color: var(--color-danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.tr-probe-applied {
+  margin: 0.25rem 0 0;
+  font-size: 0.75rem;
+  color: var(--color-success-strong);
 }
 
 </style>

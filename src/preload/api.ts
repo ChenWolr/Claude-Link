@@ -1,5 +1,5 @@
 // api.ts
-// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（119 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
+// preload 桥：通过 contextBridge 把 IPC 调用暴露为 window.claudeLink（126 个方法，随下方 ClaudeLinkAPI 接口成员增减同步）。
 // 渲染进程 window.claudeLink.xxx() → ipcRenderer.invoke(IPC_CHANNELS.XXX) → ipc-handlers 的对应 handler。
 
 import { ipcRenderer } from 'electron';
@@ -9,6 +9,8 @@ import type { Task, QueueOverview } from '../shared/types/task';
 import type { AttachmentSummary, AttachmentPreviewResponse, ChatSendPayload, SendMessageResult, CloneMessageAttachmentsResult } from '../shared/types/attachment';
 import type { ChatEventPayload, QueueEventPayload, ContextStatsPayload, InteractionPromptCancelPayload, InteractionPromptPayload, InteractionPromptResponsePayload, InteractionHistoryEntry, RecordInteractionHistoryInput, StageAttachmentBytesInput, AttachmentPreviewRequest, PickAttachmentsResult, CommandChangedPayload, CommandGlobalChangedPayload, SessionCommandSnapshot, SessionCreateSpec, WebAccessInfoView, FsPreviewResult } from '../shared/types/ipc';
 import type { CliDetectionResult } from '../shared/types/cli';
+// P5 AI 回复翻译：载荷类型真相源在 shared/translation-core（先例 topic-analyzer-core 纯函数三端共用）。
+import type { TranslationEventPayload, TranslationProbeResult, TranslationStartResult, TranslationStateView, TranslationTarget } from '../shared/translation-core';
 import type { SkillProjectDirsPayload } from '../shared/types/command';
 import type { BridgeConfigGetResult, BridgeConfigSaveInput, BridgeBindingView, BridgePlatformStatusEntry, WechatQrcodeStatusResult, BridgeFeishuTestResult } from '../shared/types/bridge';
 import type { AppUpdateInfo, AppUpdateState } from '../shared/types/update';
@@ -285,6 +287,24 @@ export interface ClaudeLinkAPI {
   ) => Promise<Session | null>;
   searchSessions: (query: string) => Promise<Session[]>;
   analyzeTopic: (sessionId: string, firstMessage: string) => Promise<string | null>;
+  // ── AI 回复翻译（2026-11-19 UI 五点批次 P5）──
+  // START 立即返回（译文增量走 onTranslationEvent 推送——invoke 不携带长任务，规避 web 桥 60s
+  // 超时）；幂等扩展语义：同 target 重复 START = 更新源文本续译（流式增长）/缓存全命中即完成
+  // （重开）。空文本/超长/无凭据由主进程返回 {ok:false}（拒绝文案见 TranslationStartResult）。
+  translateStart: (sessionId: string, target: TranslationTarget, sourceText: string) => Promise<TranslationStartResult>;
+  // STOP：收起译文 + abort 在飞段请求（缓存保留）。false = translationId 不存在。
+  translateStop: (translationId: string) => Promise<boolean>;
+  // RETRY：仅重译失败段（已完成段走缓存不重复计费）。false = 条目不存在 / 非 error 态。
+  translateRetry: (translationId: string) => Promise<boolean>;
+  // GET_STATE：刷新/重连后重挂载（状态源在主进程，渲染层只是投影缓存）。
+  getTranslationStates: (sessionId: string) => Promise<TranslationStateView[]>;
+  // PROBE（2026-11-20 第三轮 R6）：一键探测——对启用引擎逐个串行发固定短文本，返回每引擎
+  // {ok, latencyMs, error}（TranslationProbeResult）；apply=true 时把 ok 引擎按延迟升序重排
+  // order 落盘并返回 appliedOrder（配置页「按结果应用」）。apply 非 true 按 false（不落盘）。
+  translateProbe: (apply?: boolean) => Promise<TranslationProbeResult>;
+  // 主→渲染推送：翻译增量/进度/终态（载荷 TranslationEventPayload，渲染层按 target 过滤渲染）。
+  onTranslationEvent: (callback: (payload: TranslationEventPayload) => void) => () => void;
+  removeTranslationListener: () => void;
   sendMessage: (sessionId: string, payload: ChatSendPayload) => Promise<SendMessageResult>;
   abortChat: (sessionId: string) => Promise<void>;
   /** 批次二 #3：运行中回合中途切权限档（streaming 控制请求）；无运行回合返回 false。 */
@@ -493,6 +513,19 @@ export function createApi(): ClaudeLinkAPI {
     recordTurnMeta: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_RECORD_TURN_META, sessionId, payload),
     searchSessions: (query) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_SEARCH, query),
     analyzeTopic: (sessionId, firstMessage) => ipcRenderer.invoke(IPC_CHANNELS.SESSION_ANALYZE_TOPIC, sessionId, firstMessage),
+    // ── AI 回复翻译（P5）：4 invoke + 1 推送，形态照 analyzeTopic / onChatEvent 相邻先例 ──
+    translateStart: (sessionId, target, sourceText) => ipcRenderer.invoke(IPC_CHANNELS.TRANSLATE_START, sessionId, target, sourceText),
+    translateStop: (translationId) => ipcRenderer.invoke(IPC_CHANNELS.TRANSLATE_STOP, translationId),
+    translateRetry: (translationId) => ipcRenderer.invoke(IPC_CHANNELS.TRANSLATE_RETRY, translationId),
+    getTranslationStates: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.TRANSLATE_GET_STATE, sessionId),
+    // PROBE（P5b/R6）：apply 归一为 boolean 再过桥（主进程 `apply === true` 宽容口径的镜像端）。
+    translateProbe: (apply) => ipcRenderer.invoke(IPC_CHANNELS.TRANSLATE_PROBE, apply === true),
+    onTranslationEvent: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: TranslationEventPayload) => callback(payload);
+      ipcRenderer.on(IPC_CHANNELS.TRANSLATION_EVENT, listener);
+      return () => ipcRenderer.off(IPC_CHANNELS.TRANSLATION_EVENT, listener);
+    },
+    removeTranslationListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.TRANSLATION_EVENT),
     sendMessage: (sessionId, payload) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SEND, sessionId, payload),
     abortChat: (sessionId) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_ABORT, sessionId),
     setRunningPermissionMode: (sessionId, mode) => ipcRenderer.invoke(IPC_CHANNELS.CHAT_SET_PERMISSION_MODE, sessionId, mode),

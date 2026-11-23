@@ -94,10 +94,11 @@ console.log('=== 1) ipc-handlers.ts：ipcMain.handle( → regInvokeHandler( 全�
 // + 轮末文件改动两通道 TURN_DIFF_*（计划 2026-10-26-turn-file-changes §3.4）
 // + FS_OPEN_PATH（2026-10-27 五问题 p3：聊天工具行生成文件打开，绝对路径直达）
 // + FS_READ_PREVIEW（2026-11-04 文件预览面板 p1：只读读取，主进程强制 workspace 边界校验）；
+// + 翻译四通道 TRANSLATE_*（2026-11-19 UI 五点批次 P5）+ 翻译探测通道 TRANSLATE_PROBE（2026-11-20 第三轮 R6）；
 // ipcMain.handle( === 0：注释行无该带括号字面。
 check('ipc-handlers.ts ipcMain.handle( 出现次数 === 0', countOccurrences(handlers, 'ipcMain.handle(') === 0,
   `实际 ${countOccurrences(handlers, 'ipcMain.handle(')}`);
-check('ipc-handlers.ts regInvokeHandler( 出现次数 === 91', countOccurrences(handlers, 'regInvokeHandler(') === 91,
+check('ipc-handlers.ts regInvokeHandler( 出现次数 === 96', countOccurrences(handlers, 'regInvokeHandler(') === 96,
   `实际 ${countOccurrences(handlers, 'regInvokeHandler(')}`);
 check('ipc-handlers.ts 从 ./ipc-registry 导入 regInvokeHandler',
   /import\s*\{[^}]*regInvokeHandler[^}]*\}\s*from\s*'\.\/ipc-registry'/.test(handlers));
@@ -357,9 +358,9 @@ const clearEndP3 = handlers.indexOf('regInvokeHandler(', clearStartP3 + 10);
 const clearSegP3 = clearStartP3 > -1 && clearEndP3 > clearStartP3 ? handlers.slice(clearStartP3, clearEndP3) : '';
 check('CONFIG_CLEAR handler 段内驱动 syncWebAccessServer（round-008 R1-F2）',
   clearSegP3.includes('syncWebAccessServer(cfg, webAccessHooks)'));
-check('CONFIG_CLEAR sync 位于 return cfg 之前（返回前驱动，round-008 R1-F2）',
+check('CONFIG_CLEAR sync 位于 return 之前（返回前驱动，round-008 R1-F2；p5b 返回字面改掩码出口 getConfigForRenderer）',
   clearSegP3.indexOf('syncWebAccessServer(cfg, webAccessHooks)') > -1 &&
-  clearSegP3.indexOf('syncWebAccessServer(cfg, webAccessHooks)') < clearSegP3.indexOf('return cfg;'));
+  clearSegP3.indexOf('syncWebAccessServer(cfg, webAccessHooks)') < clearSegP3.indexOf('return getConfigForRenderer();'));
 check('hooks 从 mainWindowRef 闭包构造', /getMainWindow:\s*\(\)\s*=>\s*mainWindowRef/.test(handlers) || /getMainWindow:\s*\(\)\s*=>\s*mainWindow\b/.test(handlers));
 
 // 10.5 防环：config-manager 不 import web-access-server；sync 驱动点仅 ipc-handlers 与 index 两文件
@@ -420,6 +421,34 @@ check('WEB_CHANNEL_TABLE 含 onMcpSnapshotChanged/removeMcpSnapshotListener 表�
 check('preload 双成员实现（on* 订阅返回注销句柄 + remove*Listener removeAllListeners）',
   preloadApi.includes('onMcpSnapshotChanged: (callback) =>') &&
   preloadApi.includes('removeMcpSnapshotListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.MCP_SNAPSHOT_CHANGED)'));
+// P5（2026-11-19 UI 五点批次）：翻译四 invoke 通道显式三字面钉（照 SESSION_SET_PINNED 先例防漂移）。
+check("IPC_CHANNELS 含 TRANSLATE_START: 'translate:start'", ipcConst.includes("TRANSLATE_START: 'translate:start'"));
+check('WEB_CHANNEL_TABLE 含 translateStart 表项', webBridge.includes('translateStart: IPC_CHANNELS.TRANSLATE_START'));
+check('ipc-handlers 注册 TRANSLATE_START handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.TRANSLATE_START'));
+check("IPC_CHANNELS 含 TRANSLATE_STOP: 'translate:stop'", ipcConst.includes("TRANSLATE_STOP: 'translate:stop'"));
+check('WEB_CHANNEL_TABLE 含 translateStop 表项', webBridge.includes('translateStop: IPC_CHANNELS.TRANSLATE_STOP'));
+check('ipc-handlers 注册 TRANSLATE_STOP handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.TRANSLATE_STOP'));
+check("IPC_CHANNELS 含 TRANSLATE_RETRY: 'translate:retry'", ipcConst.includes("TRANSLATE_RETRY: 'translate:retry'"));
+check('WEB_CHANNEL_TABLE 含 translateRetry 表项', webBridge.includes('translateRetry: IPC_CHANNELS.TRANSLATE_RETRY'));
+check('ipc-handlers 注册 TRANSLATE_RETRY handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.TRANSLATE_RETRY'));
+check("IPC_CHANNELS 含 TRANSLATE_GET_STATE: 'translate:getState'", ipcConst.includes("TRANSLATE_GET_STATE: 'translate:getState'"));
+check('WEB_CHANNEL_TABLE 含 getTranslationStates 表项', webBridge.includes('getTranslationStates: IPC_CHANNELS.TRANSLATE_GET_STATE'));
+check('ipc-handlers 注册 TRANSLATE_GET_STATE handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.TRANSLATE_GET_STATE'));
+// P5b（2026-11-20 第三轮 R6）：TRANSLATE_PROBE 探测通道显式三字面钉（照 SESSION_SET_PINNED 先例防漂移；
+// web 桥 120s 超时覆盖在 web-bridge.ts CHANNEL_TIMEOUT_MS 落地——探测串行 4~6 引擎最坏 ~50s 超 60s 默认，
+// 无独立结构钉（键集对等断言只覆盖表键，超时表为旁路 Record 不入键集）。
+check("IPC_CHANNELS 含 TRANSLATE_PROBE: 'translate:probe'", ipcConst.includes("TRANSLATE_PROBE: 'translate:probe'"));
+check('WEB_CHANNEL_TABLE 含 translateProbe 表项', webBridge.includes('translateProbe: IPC_CHANNELS.TRANSLATE_PROBE'));
+check('ipc-handlers 注册 TRANSLATE_PROBE handler', handlers.includes('regInvokeHandler(IPC_CHANNELS.TRANSLATE_PROBE'));
+// P5（2026-11-19 UI 五点批次）：TRANSLATION_EVENT 推送通道三字面钉（照 MCP_SNAPSHOT_CHANGED 先例——
+// 推送型通道无 invoke handler，第三钉钉 preload 双成员实现；键集对等由 §11.2 双向断言自动覆盖 +2 表键）。
+check("IPC_CHANNELS 含 TRANSLATION_EVENT: 'translation:event'", ipcConst.includes("TRANSLATION_EVENT: 'translation:event'"));
+check('WEB_CHANNEL_TABLE 含 onTranslationEvent/removeTranslationListener 表项',
+  webBridge.includes('onTranslationEvent: IPC_CHANNELS.TRANSLATION_EVENT') &&
+  webBridge.includes('removeTranslationListener: IPC_CHANNELS.TRANSLATION_EVENT'));
+check('preload 双成员实现（onTranslationEvent 订阅返回注销句柄 + removeTranslationListener removeAllListeners）',
+  preloadApi.includes('onTranslationEvent: (callback) =>') &&
+  preloadApi.includes('removeTranslationListener: () => ipcRenderer.removeAllListeners(IPC_CHANNELS.TRANSLATION_EVENT)'));
 const tableStart = webBridge.indexOf('const WEB_CHANNEL_TABLE');
 const tableEnd = webBridge.indexOf('\n};', tableStart);
 check('web-bridge.ts 含 WEB_CHANNEL_TABLE（Record<keyof ClaudeLinkAPI, string>）',
