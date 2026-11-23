@@ -28,7 +28,7 @@ import {
   previewFile,
 } from '../src/main/modules/fs-preview';
 import { previewFormatInfo, extOfPath, base64ToUint8Array } from '../src/renderer/utils/preview-format';
-import { resolveFileLinkHref, isAbsolutePathForm } from '../src/renderer/utils/file-link';
+import { resolveFileLinkHref, resolveCodeInlinePath, isAbsolutePathForm } from '../src/renderer/utils/file-link';
 import { renderMarkdown, setFileLinkWorkspaceRoot } from '../src/renderer/utils/markdown';
 
 let pass = 0;
@@ -445,12 +445,25 @@ void (async (): Promise<void> => {
     assert.ok(src.includes("javascript:void(0)"), 'markdown.ts 未将 href 置 javascript:void(0)');
     assert.ok(src.includes('setFileLinkWorkspaceRoot'), 'markdown.ts 未导出 setFileLinkWorkspaceRoot');
   });
-  check('结构钉：MessageBubble.vue 含 onContentClick / closest?.(.md-file-link) / useFilePreview（点击委托）', () => {
+  // P6-B（2026-11-21 translate-fix-and-ui-points 计划）MOD：左键直开改右键上下文菜单——委托钉由
+  // onContentClick/click 改钉 onContentContextMenu/contextmenu（useFileLinkMenuStore 接线），并钉
+  // FileLinkMenu 组件与 store 全局接线。markdown.ts 结构钉（上方 441-447）与 chip 左键预览钉（下方
+  // ⑧ 节）不动——chip 是独立入口，契约未涉及。
+  check('结构钉：MessageBubble.vue 含 onContentContextMenu / closest?.(.md-file-link) / useFileLinkMenuStore（右键委托）', () => {
     const src = fs.readFileSync(new URL('../src/renderer/components/chat/MessageBubble.vue', import.meta.url), 'utf8');
-    assert.ok(src.includes('onContentClick'), 'MessageBubble.vue 未实现 onContentClick');
+    assert.ok(src.includes('onContentContextMenu'), 'MessageBubble.vue 未实现 onContentContextMenu');
     assert.ok(src.includes("closest?.('.md-file-link')"), "MessageBubble.vue 未用 closest?.('.md-file-link') 委托");
-    assert.ok(src.includes('useFilePreview'), 'MessageBubble.vue 未接 useFilePreview');
+    assert.ok(src.includes('useFileLinkMenuStore'), 'MessageBubble.vue 未接 useFileLinkMenuStore');
+    assert.ok(src.includes('@contextmenu='), 'MessageBubble.vue 缺 @contextmenu 右键绑定');
     assert.ok(src.includes('bubble__content :deep(.md-file-link)'), 'MessageBubble.vue 缺 md-file-link 样式（:deep 穿透）');
+  });
+  check('结构钉：FileLinkMenu 组件与 store 接线在位（右键菜单载体 + useFileLinkMenuStore 全局单例）', () => {
+    const menuSrc = fs.readFileSync(new URL('../src/renderer/components/common/FileLinkMenu.vue', import.meta.url), 'utf8');
+    assert.ok(menuSrc.includes('role="menu"'), 'FileLinkMenu.vue 缺 role="menu"');
+    const storeSrc = fs.readFileSync(new URL('../src/renderer/stores/file-link-menu-store.ts', import.meta.url), 'utf8');
+    assert.ok(storeSrc.includes('defineStore'), 'file-link-menu-store.ts 缺 defineStore');
+    const appSrc = fs.readFileSync(new URL('../src/renderer/App.vue', import.meta.url), 'utf8');
+    assert.ok(appSrc.includes('<FileLinkMenu />'), 'App.vue 未挂载 <FileLinkMenu />');
   });
   check('结构钉：ChatPage.vue 含 setFileLinkWorkspaceRoot（workspaceRoot 接线）', () => {
     const src = fs.readFileSync(new URL('../src/renderer/pages/ChatPage.vue', import.meta.url), 'utf8');
@@ -762,9 +775,10 @@ void (async (): Promise<void> => {
       assert.ok(m, '未匹配到 close 函数体');
       assert.ok(m[0].includes('reqSeq++'), 'close() 未递增 reqSeq（备忘-1）');
     });
-    check("C-F5：.fpreview-md 文件链接委托接线（closest('.md-file-link') + useFilePreview + :deep 两组样式）", () => {
+    check("C-F5：.fpreview-md 文件链接委托接线（closest('.md-file-link') + useFileLinkMenuStore + :deep 两组样式；P6-B MOD：左键零动作改右键菜单委托）", () => {
       assert.ok(drawerSrc.includes("closest('.md-file-link')"), "缺 closest('.md-file-link') 委托字面（C-F5）");
-      assert.ok(drawerSrc.includes('useFilePreview'), '缺 useFilePreview 接线（C-F5）');
+      assert.ok(drawerSrc.includes('useFileLinkMenuStore'), '缺 useFileLinkMenuStore 接线（C-F5，P6-B 右键菜单）');
+      assert.ok(drawerSrc.includes('@contextmenu='), '缺 @contextmenu 右键绑定（C-F5，P6-B）');
       assert.ok(drawerSrc.includes(':deep(.md-file-link)'), '缺 :deep(.md-file-link) 样式（C-F5）');
       assert.ok(drawerSrc.includes(':deep(.md-file-link:hover)'), '缺 :deep(.md-file-link:hover) 样式（C-F5）');
     });
@@ -1059,6 +1073,128 @@ void (async (): Promise<void> => {
   check('首尾空白容错：\' C:\\ws\\a.md \' → true（trim 后判定，同 store.path 消费侧宽松度）', () => {
     assert.strictEqual(isAbsolutePathForm(' C:\\ws\\a.md '), true);
   });
+
+  console.log('\n=== ⑳ P6-A \'...\' 省略段拒绝（2026-11-21 计划 p6a·两源收口，RED 先行） ===');
+  {
+    // P6-A：路径任一段 === '...'（D:\a\...\b.md、/.../x.ts、src/.../foo.vue 等）＝模型转述的
+    // 省略路径，非真实可定位路径 → 两源（href 与 code_inline）一律拒绝链接化（基线渲染）。
+    // '..' 词法拒绝、扩展名白名单、垃圾剥离等其余解析规则零触碰（P6A-T6 抽验既有矩阵不红即回归）。
+    // renderMarkdown 矩阵与纯函数组同卷先例（⑰/⑱）：root 用临时目录形态（词法 join 无需真实
+    // 存在），小节显式 set、收尾归零。
+    const TMP_ROOT_20 = fs.realpathSync(os.tmpdir()).replace(/[\\/]+$/, '');
+    const decodeAttrEntities20 = (html: string): string =>
+      html
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&amp;/g, '&');
+    const clipOf20 = (html: string): string | null => {
+      const m = html.match(/data-clip-path="([^"]*)"/);
+      return m ? decodeAttrEntities20(m[1]) : null;
+    };
+
+    // —— P6A-T1/T2：纯函数组·href 源（root 已设） ——
+    setFileLinkWorkspaceRoot(TMP_ROOT_20);
+    check("P6A-T1 resolveFileLinkHref('D:\\\\a\\\\...\\\\b.md', root) → null（'...' 中段拒绝，不链接化）", () => {
+      assert.strictEqual(resolveFileLinkHref('D:\\a\\...\\b.md', TMP_ROOT_20), null);
+    });
+    check("P6A-T2 resolveFileLinkHref('src/.../foo.vue', root) / ('/.../x.ts', root) → 均为 null（相对 join 后含 '...' 段同判拒绝；/.../x.ts 走相对分支被 join 后同判）", () => {
+      assert.strictEqual(resolveFileLinkHref('src/.../foo.vue', TMP_ROOT_20), null);
+      assert.strictEqual(resolveFileLinkHref('/.../x.ts', TMP_ROOT_20), null);
+    });
+
+    // —— P6A-T3：纯函数组·code_inline 源（S5d 绝对形态 / S5e 相对形态最终都调 resolveFileLinkHref） ——
+    check("P6A-T3 resolveCodeInlinePath('D:\\\\a\\\\...\\\\b.md', root) / ('src/.../foo.vue', root) → 均为 null（回退普通 <code>）", () => {
+      assert.strictEqual(resolveCodeInlinePath('D:\\a\\...\\b.md', TMP_ROOT_20), null);
+      assert.strictEqual(resolveCodeInlinePath('src/.../foo.vue', TMP_ROOT_20), null);
+    });
+    check("P6A-T3 对照：resolveCodeInlinePath('/.../x.ts', root) → null（本源 S5c POSIX 绝对现状即拒，负向对照不变）", () => {
+      assert.strictEqual(resolveCodeInlinePath('/.../x.ts', TMP_ROOT_20), null);
+    });
+
+    // —— P6A-T4：首段/尾段/UNC 无位置豁口 ——
+    check("P6A-T4 'D:\\\\...\\\\b.md'（首段）/'\\\\\\\\srv\\\\share\\\\...\\\\x.md'（UNC）/'D:\\\\x\\\\...'（尾段）→ 均为 null", () => {
+      assert.strictEqual(resolveFileLinkHref('D:\\...\\b.md', TMP_ROOT_20), null);
+      assert.strictEqual(resolveFileLinkHref('\\\\srv\\share\\...\\x.md', TMP_ROOT_20), null);
+      assert.strictEqual(resolveFileLinkHref('D:\\x\\...', TMP_ROOT_20), null);
+    });
+
+    // —— P6A-T5：'...' 在文件名内（非独立段）不拒绝（seg === '...' 全等判定，非子串） ——
+    check("P6A-T5 裸名 'report...final.md' 照常链接化（'...' 在名内非段，md 命中白名单）+ 绝对 'D:\\\\a\\\\report...final.md' 照常解析", () => {
+      const bare = resolveCodeInlinePath('report...final.md', TMP_ROOT_20);
+      assert.ok(bare !== null, "裸名 'report...final.md' 应照常链接化（'...' 在文件名内非独立段）");
+      assert.strictEqual(bare.path, `${TMP_ROOT_20}\\report...final.md`);
+      const abs = resolveFileLinkHref('D:\\a\\report...final.md', TMP_ROOT_20);
+      assert.ok(abs !== null, "绝对 'D:\\a\\report...final.md' 应照常解析（拒绝的是段==='...'，不是子串）");
+      assert.strictEqual(abs.path, 'D:\\a\\report...final.md');
+      const fourDots = resolveFileLinkHref('D:\\x\\....', TMP_ROOT_20);
+      assert.ok(fourDots !== null, "'....' 四点段不应拒绝（seg === '...' 全等判定，非前缀/子串）");
+      const relInName = resolveFileLinkHref('a/b...c.md', TMP_ROOT_20);
+      assert.ok(relInName !== null, "'a/b...c.md' 省略号在文件名内（非独立段）不应拒绝");
+      assert.strictEqual(relInName.path, `${TMP_ROOT_20}\\a\\b...c.md`);
+    });
+
+    // —— P6A-T6：既有解析矩阵抽验（本点零触碰规则不回归） ——
+    check("P6A-T6 既有矩阵抽验：'..\\\\evil.md' → null；'%2e%2e/evil.txt' 编码逃逸 → null；白名单外裸名 → null；\"it's/a.md\" 含分隔符相对 → 链接化；空段（'a//b'）不受影响", () => {
+      assert.strictEqual(resolveFileLinkHref('..\\evil.md', TMP_ROOT_20), null);
+      assert.strictEqual(resolveFileLinkHref('%2e%2e/evil.txt', TMP_ROOT_20), null);
+      assert.strictEqual(resolveCodeInlinePath('data.unknownext', TMP_ROOT_20), null);
+      const rel = resolveCodeInlinePath("it's/a.md", TMP_ROOT_20);
+      assert.ok(rel !== null, "\"it's/a.md\" 含分隔符相对应照常链接化");
+      assert.strictEqual(rel.path, `${TMP_ROOT_20}\\it's\\a.md`);
+      assert.deepStrictEqual(resolveFileLinkHref('a//b', TMP_ROOT_20), { path: `${TMP_ROOT_20}\\a\\\\b`, label: 'b' },
+        "空段（a//b split 产出 ''）不等于 '...'，解析不受本点影响（既有行为钉，期望值=实测现状：空段保留于 join）");
+    });
+
+    // —— P6A-T7：'..' 与 '...' 混排，任一命中即拒 ——
+    check("P6A-T7 resolveFileLinkHref('a\\\\..\\\\...\\\\b.md', root) → null（'..' 检查先中或 '...' 检查中，任一命中即拒）", () => {
+      assert.strictEqual(resolveFileLinkHref('a\\..\\...\\b.md', TMP_ROOT_20), null);
+    });
+
+    // —— P6A-T8/T9/T10：renderMarkdown 矩阵级（两源渲染落点） ——
+    check("P6A-T8 renderMarkdown('见 `D:\\\\a\\\\...\\\\b.md` 详情')（root 已设）→ 含 <code> 且不含 md-file-link 类、不含 data-clip-path、未被 <a> 包裹；对照 `D:\\\\a\\\\b.md` 正常链接化", () => {
+      const html = renderMarkdown('见 `D:\\a\\...\\b.md` 详情');
+      assert.ok(html.includes('<code>D:\\a\\...\\b.md</code>'), `应回退普通 <code> 且内容原样，实际：${html}`);
+      assert.ok(!html.includes('md-file-link'), `'...' 段路径不应链接化，实际：${html}`);
+      assert.ok(!html.includes('data-clip-path'), `'...' 段路径不应产出 data-clip-path，实际：${html}`);
+      assert.ok(!html.includes('<a'), `'...' 段路径不得被 <a> 包裹，实际：${html}`);
+      const ok = renderMarkdown('见 `D:\\a\\b.md` 详情');
+      assert.ok(ok.includes('md-file-link'), '对照（无省略段）应正常链接化，实际：' + ok);
+      assert.strictEqual(clipOf20(ok), 'D:\\a\\b.md');
+    });
+    check("P6A-T9 renderMarkdown('[x](D:/a/.../b.md)')（root 已设）→ 不含 md-file-link（基线 <a>，root 已设不进死链通道）；对照 [y](D:/a/b.md) 正常按钮化", () => {
+      const html = renderMarkdown('[x](D:/a/.../b.md)');
+      assert.ok(!html.includes('md-file-link'), `'...' 段 href 不应按钮化，实际：${html}`);
+      assert.ok(!html.includes('data-clip-path'), `'...' 段 href 不应产出 data-clip-path，实际：${html}`);
+      assert.ok(html.includes('<a href="D:/a/.../b.md"'), `应保留基线 <a>（root 已设解析失败回基线），实际：${html}`);
+      const ok = renderMarkdown('[y](D:/a/b.md)');
+      assert.ok(ok.includes('md-file-link'), '对照（无省略段）应正常按钮化，实际：' + ok);
+      assert.strictEqual(clipOf20(ok), 'D:\\a\\b.md');
+    });
+    check("P6A-T10 同次 render 三路径混排 `D:\\\\...\\\\x.md`（应拒）/`D:\\\\a\\\\b.md`（应链）/`C:\\\\...\\\\y.ts`（应拒）→ 三者各自正确无串扰（恰 1 个 <a>、恰 1 个 data-clip-path）", () => {
+      const html = renderMarkdown('见 `D:\\...\\x.md`、`D:\\a\\b.md`、`C:\\...\\y.ts` 各文件');
+      assert.ok(html.includes('<code>D:\\...\\x.md</code>'), 'D:\\...\\x.md 应保持纯 <code>，实际：' + html);
+      assert.ok(html.includes('<code>C:\\...\\y.ts</code>'), 'C:\\...\\y.ts 应保持纯 <code>，实际：' + html);
+      assert.ok(html.includes('md-file-link'), 'D:\\a\\b.md 应正常链接化，实际：' + html);
+      assert.strictEqual(clipOf20(html), 'D:\\a\\b.md', '唯一按钮化的 clip 应为 D:\\a\\b.md');
+      assert.strictEqual((html.match(/<a\b/g) ?? []).length, 1, '全输出应恰 1 个 <a>（无串扰）');
+      assert.strictEqual((html.match(/data-clip-path=/g) ?? []).length, 1, '全输出应恰 1 个 data-clip-path（无串扰）');
+    });
+
+    // —— P6A 覆盖核对补钉（href 源·未设根死链通道）：未设根时相对省略段经
+    // isPathLikeRelativeHref 同步拒绝 → 不进 md-file-link--dead 标记 → 基线渲染 ——
+    check("P6A 补钉（覆盖核对）：未设根 renderMarkdown('[r](src/.../foo.vue)') → 无 md-file-link--dead/无 data-clip-path（谓词同步拒绝，基线 <a>）", () => {
+      setFileLinkWorkspaceRoot(null);
+      const html = renderMarkdown('[r](src/.../foo.vue)');
+      assert.ok(!html.includes('md-file-link--dead'), `未设根省略段相对 href 不应进死链通道，实际：${html}`);
+      assert.ok(!html.includes('md-file-link'), `未设根省略段相对 href 不应按钮化，实际：${html}`);
+      assert.ok(!html.includes('data-clip-path'), `未设根省略段相对 href 不应产出 data-clip-path，实际：${html}`);
+      assert.ok(html.includes('<a href="src/.../foo.vue"'), `应保留基线 <a>（谓词拒绝后透传基础规则），实际：${html}`);
+    });
+
+    setFileLinkWorkspaceRoot(null); // 收尾归零：不向后续分组遗留根状态
+  }
 
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
   if (fail > 0) process.exit(1);

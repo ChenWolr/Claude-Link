@@ -76,6 +76,9 @@ export function resolveFileLinkHref(
   const segments = full.split(/[\\/]/);
   for (const seg of segments) {
     if (seg === '..') return null;
+    // P6-A：'...' 省略段 = 模型转述路径（D:\a\...\b.md、src/.../foo.vue）——非真实可定位路径，
+    // 整条拒绝链接化（按普通文本渲染）。
+    if (seg === '...') return null;
   }
   const joined = segments.filter((seg) => seg !== '.').join('\\');
 
@@ -203,14 +206,15 @@ export function resolveCodeInlinePath(content: string, workspaceRoot: string | n
 }
 
 // A4（2026-11-06 计划）用：href 是否「路径形相对链接」——无 scheme、非 # 开头锚点、路径段
-// 不含 '..'。命中且未设工作区根时走死链标记分支（本点只落地导出，接线在 A4 点）。
+// 不含 '..'（含 '...' 段拒绝，2026-11-21 P6-A）。命中且未设工作区根时走死链标记分支
+//（本点只落地导出，接线在 A4 点）。
 export function isPathLikeRelativeHref(href: string): boolean {
   const s = href.trim();
   if (!s) return false;
   // scheme 判定 ≥2 字符（+ 而非 *）：单字母盘符 'C:\x' 是路径不是 scheme（同 resolveFileLinkHref 注 c）。
   if (/^[A-Za-z][A-Za-z0-9+.-]+:/.test(s)) return false;
   if (s.startsWith('#')) return false;
-  return !s.split(/[\\/]/).some((seg) => seg === '..');
+  return !s.split(/[\\/]/).some((seg) => seg === '..' || seg === '...');
 }
 
 // A4（2026-11-06 计划）用：路径是否「独立可定位」的绝对形态——盘符（C:\x / C:/x）、UNC

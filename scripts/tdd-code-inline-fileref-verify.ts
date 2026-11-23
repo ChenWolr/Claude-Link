@@ -260,6 +260,31 @@ void (async (): Promise<void> => {
     assert.ok(body.includes('无法定位文件'), 'load() 缺「无法定位文件」预检字面（相对 + 无根静默死链未覆盖——预期 RED）');
   });
 
+  console.log('\n=== P6-A 组：\'...\' 省略段拒绝接线（2026-11-21 计划 p6a·两源收口，RED 先行） ===');
+  // P6-A：路径任一段 === '...'（D:\a\...\b.md、src/.../foo.vue）＝模型转述省略路径，非真实可定位
+  // 路径 → 两源一律拒绝链接化。拒绝规则收口在 resolveFileLinkHref g 步段循环（两源共享），
+  // isPathLikeRelativeHref（markdown.ts 死链标记谓词）同步拒绝——本组钉三处接线字面在位。
+
+  check("P6A 结构钉-1：resolveFileLinkHref 函数体内含 '...' 省略段拒绝（seg === '...' 与 seg === '..' 并列；两源共享 g 步收口）", () => {
+    const body = functionBodyOf(fileLinkSrc, 'export function resolveFileLinkHref(', 'resolveFileLinkHref');
+    assert.ok(body.includes("seg === '..'"), "resolveFileLinkHref 缺 '..' 段拒绝（切片漂移）");
+    assert.ok(body.includes("seg === '...'"), "resolveFileLinkHref 缺 '...' 省略段拒绝（P6-A 未实施——预期 RED）");
+  });
+
+  check("P6A 结构钉-2：isPathLikeRelativeHref 函数体内含 seg === '..' || seg === '...'（markdown.ts 死链标记谓词同步拒绝省略段，未设根时省略段不进死链通道）", () => {
+    const body = functionBodyOf(fileLinkSrc, 'export function isPathLikeRelativeHref(', 'isPathLikeRelativeHref');
+    assert.ok(
+      /seg === '\.\.'\s*\|\|\s*seg === '\.\.\.'/.test(body),
+      "isPathLikeRelativeHref 缺 '..' || '...' 双段拒绝（P6-A 未实施——预期 RED）",
+    );
+  });
+
+  check("P6A 结构钉-3：resolveCodeInlinePath 函数体内至少 3 处调用 resolveFileLinkHref（S5a file:///、S5d 绝对、S5e 相对三出口）——'...' 拒绝经共享 g 步在 code_inline 源在位，null 回退基线 <code>", () => {
+    const body = functionBodyOf(fileLinkSrc, 'export function resolveCodeInlinePath(', 'resolveCodeInlinePath');
+    const hits = body.match(/resolveFileLinkHref\(/g) ?? [];
+    assert.ok(hits.length >= 3, `resolveCodeInlinePath 应至少 3 处调用 resolveFileLinkHref（S5a/S5d/S5e 出口），实际 ${hits.length}`);
+  });
+
   console.log('\n=== selftest 清单登记 ===');
   check('selftest-static-list.txt 已登记本脚本', () => {
     const list = readFileSync(new URL('selftest-static-list.txt', import.meta.url), 'utf8');

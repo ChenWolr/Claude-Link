@@ -179,8 +179,10 @@ md.renderer.rules.image = (tokens, idx, options, env, self) => {
 };
 
 // 文件链接（p3/W2）：markdown 正文中的文件链接（相对/绝对/file:///）经 resolveFileLinkHref
-// 解析出绝对路径后按钮化（.md-file-link + data-clip-path，href 置 javascript:void(0)），点击
-// 委托由 MessageBubble.vue 的 onContentClick 接 useFilePreview().open。
+// 解析出绝对路径后按钮化（.md-file-link + data-clip-path，href 置 javascript:void(0)）；P6-B 起
+// 左键零动作，交互入口唯一化为右键——委托由 MessageBubble.vue 的 onContentContextMenu 接
+// useFileLinkMenuStore 弹右键菜单（2026-11-21 P6-B 契约迁移，同 MOD-P6-1 族；原 onContentClick
+// 直开抽屉链路已废弃）。
 // fileLinkWorkspaceRoot 用模块级单例而非 env 传参：比计划原案的 env 更单点——活动会话唯一
 // 渲染源、renderMarkdown 无需逐调用方传根；未调用 setFileLinkWorkspaceRoot 的窗口实例
 // （导出窗等）保持 null，相对链接解析天然返回 null、不可点。
