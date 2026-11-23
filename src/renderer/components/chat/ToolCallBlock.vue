@@ -13,6 +13,8 @@ import { useSessionStore } from '../../stores/session-store';
 import { openToolDiffDialog } from '../../composables/useToolDiffDialog';
 // p4（2026-11-04）：chip 单击打开文件预览抽屉（与 MessageBubble 文件链接同款薄壳入口）。
 import { useFilePreview } from '../../composables/useFilePreview';
+// P6-B（2026-11-21）：tool_result md 文件链接右键委托入口（左键零动作，右键菜单为唯一交互）。
+import { useFileLinkMenuStore } from '../../stores/file-link-menu-store';
 
 const props = defineProps<{
   use: RenderableMessage | null;
@@ -98,14 +100,17 @@ function focusSubAgent(): void {
   if (props.use?.toolUseId) store.focusSubAgent(props.use.toolUseId);
 }
 
-// p5（2026-11-04）：tool_result md 文件链接点击委托——与 MessageBubble.onContentClick 同款手法
-//（closest('.md-file-link') 命中后取 data-clip-path 开预览抽屉）。挂在 .tool-row__result 容器上，
-// head 折叠/展开按钮与「展开全部」按钮不受影响（closest 不命中即直接返回）。
-function onResultClick(e: MouseEvent): void {
+// P6-B（2026-11-21）：tool_result md 文件链接右键委托——与 MessageBubble.onContentContextMenu
+// 同款手法（closest('.md-file-link') 命中后取 data-clip-path 弹 useFileLinkMenuStore 右键菜单；
+// 左键零动作，右键菜单是唯一交互入口）。挂在 .tool-row__result 容器上，head 折叠/展开按钮与
+// 「展开全部」按钮不受影响（closest 不命中即直接返回，外链系统菜单照旧）；exportMode 不弹。
+// chip（生成文件）的左键预览 + 右键 filemenu 是独立入口，本点零触碰。
+function onResultContextMenu(e: MouseEvent): void {
   const el = (e.target as HTMLElement | null)?.closest?.('.md-file-link') as HTMLElement | null;
   if (!el) return;
+  e.preventDefault();
   const p = el.getAttribute('data-clip-path');
-  if (p) useFilePreview().open(p);
+  if (p) useFileLinkMenuStore().open(p, e.clientX, e.clientY);
 }
 
 const resultContent = computed(() => props.result?.content ?? '');
@@ -254,7 +259,8 @@ watch([expanded, jsonText], () => {
           差异过大（{{ toolDiff.changeCount }} 行变更），弹窗中仅显示前部分
         </div>
       </div>
-      <div v-else-if="resultContent" class="tool-row__result" :class="{ 'tool-row__result--expanded': resultExpanded }" @click="onResultClick">
+      <!-- P6-B：文件链接交互入口唯一化为右键菜单（@contextmenu 委托，exportMode 不弹）；左键零动作。 -->
+      <div v-else-if="resultContent" class="tool-row__result" :class="{ 'tool-row__result--expanded': resultExpanded }" @contextmenu="!exportMode && onResultContextMenu($event)">
         <div ref="resultInnerRef" class="tool-row__result-inner">
           <div class="markdown-body" v-html="renderedMarkdown" />
         </div>

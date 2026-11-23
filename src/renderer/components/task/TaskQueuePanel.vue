@@ -12,8 +12,9 @@ import type { BackgroundTask } from '../../stores/session-store';
 import { aggregateSubAgentGroups, buildTitleByToolUseId, formatDuration, type SubAgentGroup } from '../../utils/subagent-groups';
 import { renderMarkdown } from '../../utils/markdown';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
-// p5（2026-11-04）：子 agent 实时正文 md 文件链接点击委托入口（与 MessageBubble 同款薄壳）。
-import { useFilePreview } from '../../composables/useFilePreview';
+// P6-B（2026-11-21）：子 agent 实时正文 md 文件链接右键委托入口（与 MessageBubble 同款薄壳；
+// 左键零动作，右键菜单为唯一交互入口）。
+import { useFileLinkMenuStore } from '../../stores/file-link-menu-store';
 import { useDialogShell } from '../../composables/use-dialog-shell';
 import DialogResizeHandles from '../common/DialogResizeHandles.vue';
 import { useNow } from '../../composables/use-now';
@@ -475,15 +476,17 @@ function openSummaryFile(path: string, e: Event): void {
   openDiffDialog(path, e.currentTarget instanceof HTMLElement ? e.currentTarget : null);
 }
 
-// p5（2026-11-04）：子 agent 实时正文 md 文件链接点击委托——与 MessageBubble.onContentClick
-// 同款手法（closest('.md-file-link') 命中后取 data-clip-path 开预览抽屉），非文件链接不拦截。
+// P6-B（2026-11-21）：子 agent 实时正文 md 文件链接右键委托——与
+// MessageBubble.onContentContextMenu 同款手法（closest('.md-file-link') 命中后取 data-clip-path
+// 弹 useFileLinkMenuStore 右键菜单；左键零动作），非文件链接不拦截（外链系统菜单照旧）。
 // 面板内其余 md 渲染面（MessageBubble/ThinkingBlock 子组件）自带同款委托，无需在此处理；
 // 无 data-clip-path（异常渲染）时静默忽略，不抛错。
-function onLiveTextClick(e: MouseEvent): void {
+function onLiveTextContextMenu(e: MouseEvent): void {
   const el = (e.target as HTMLElement | null)?.closest?.('.md-file-link') as HTMLElement | null;
   if (!el) return;
+  e.preventDefault();
   const p = el.getAttribute('data-clip-path');
-  if (p) useFilePreview().open(p);
+  if (p) useFileLinkMenuStore().open(p, e.clientX, e.clientY);
 }
 
 onMounted(() => {
@@ -736,7 +739,7 @@ function handleDragReorder() {
                   class="subagent-live-text markdown-body"
                   v-html="renderMarkdown(subAgentLiveText(g.parentAgentId))"
                   v-enrich
-                  @click="onLiveTextClick"
+                  @contextmenu="onLiveTextContextMenu"
                 />
                 <template v-for="item in g.items" :key="item.key">
                   <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />
@@ -788,7 +791,7 @@ function handleDragReorder() {
                         class="subagent-live-text markdown-body"
                         v-html="renderMarkdown(subAgentLiveText(g.parentAgentId))"
                         v-enrich
-                        @click="onLiveTextClick"
+                        @contextmenu="onLiveTextContextMenu"
                       />
                       <template v-for="item in g.items" :key="item.key">
                         <ProcessGroup v-if="item.type === 'fold'" :messages="item.messages" :stats="item.stats" :active="g.running" />

@@ -9,7 +9,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue';
 import hljs from 'highlight.js';
 import { usePreviewStore } from '../../stores/preview-store';
-import { useFilePreview } from '../../composables/useFilePreview';
+// P6-B（2026-11-21）：抽屉内嵌 md 预览的文件链接右键委托入口（左键零动作，右键菜单为唯一交互）。
+import { useFileLinkMenuStore } from '../../stores/file-link-menu-store';
 import { extOfPath, previewFormatInfo, base64ToUint8Array, type PreviewMode } from '../../utils/preview-format';
 import { ESC_LAYER_PRIORITY, pushEscLayer, type EscLayerHandle } from '../../composables/use-esc-stack';
 import { copyTextToClipboard } from '../../utils/clipboard';
@@ -113,14 +114,16 @@ function close(): void {
   revokeAllBlobUrls();
 }
 
-// C-F5：抽屉内 md preview/mmd graph 的文件链接点击委托（与 MessageBubble onContentClick
-// 同实现、文件内自含——markdown.ts link_open 产出的 .md-file-link 携 data-clip-path）。
+// P6-B（2026-11-21）：抽屉内 md preview/mmd graph 的文件链接右键委托（与 MessageBubble
+// onContentContextMenu 同实现、文件内自含——markdown.ts link_open 产出的 .md-file-link 携
+// data-clip-path；左键零动作，右键弹 useFileLinkMenuStore 菜单）。
 // 非文件链接不拦截，外链照旧。
-function onMdLinkClick(e: MouseEvent): void {
+function onMdLinkContextMenu(e: MouseEvent): void {
   const el = (e.target as HTMLElement | null)?.closest('.md-file-link') as HTMLElement | null;
   if (!el) return;
+  e.preventDefault();
   const p = el.getAttribute('data-clip-path');
-  if (p) useFilePreview().open(p);
+  if (p) useFileLinkMenuStore().open(p, e.clientX, e.clientY);
 }
 
 // ── 头部派生 ──
@@ -417,12 +420,12 @@ onBeforeUnmount(() => {
           </div>
           <template v-else>
             <div v-if="textResult.truncated" class="fpreview-banner">文件过大，仅显示前 256 KB</div>
-            <div v-if="textKind === 'md' && store.mode === 'preview'" class="fpreview-md markdown-body" @click="onMdLinkClick" v-html="mdHtml" v-enrich></div>
+            <div v-if="textKind === 'md' && store.mode === 'preview'" class="fpreview-md markdown-body" @contextmenu="onMdLinkContextMenu" v-html="mdHtml" v-enrich></div>
             <iframe v-else-if="frameUrl" :src="frameUrl" sandbox="allow-scripts allow-forms" title="网页预览" class="fpreview-frame"></iframe>
             <div v-else-if="svgImageUrl" class="fpreview-image-wrap">
               <img :src="svgImageUrl" class="fpreview-image" :alt="baseName">
             </div>
-            <div v-else-if="textKind === 'mmd' && store.mode === 'graph'" class="fpreview-md markdown-body" @click="onMdLinkClick" v-html="mermaidHtml" v-enrich></div>
+            <div v-else-if="textKind === 'mmd' && store.mode === 'graph'" class="fpreview-md markdown-body" @contextmenu="onMdLinkContextMenu" v-html="mermaidHtml" v-enrich></div>
             <div v-else class="fpreview-code">
               <div class="fpreview-gutter">{{ gutterText }}</div>
               <div class="fpreview-src" v-html="textHtml"></div>

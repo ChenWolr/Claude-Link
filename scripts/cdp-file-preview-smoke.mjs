@@ -9,12 +9,32 @@
 //     + P3-G（round-001 p11）：Target.setAutoAttach(flatten) 自动附加页面派生的 worker 子会话
 //       （pdfjs worker 等），其 Runtime.exceptionThrown / console.error(level=error) 并入与页面
 //       会话相同的异常池——X 用例终审因此覆盖「最易出错的 PDF 解析面」，不再只看页面会话）。
+//     + P6B-T6/T15 行为面补钉（2026-11-22 round-001 R2-F-7）：T6 左键零动作对照（右键开菜单→
+//       Esc 关→同链接左键 click→1.2s 后菜单/抽屉均未出现）与 T15 外链不劫持（注入 https://
+//       普通 markdown 链接→左键 click→无菜单无抽屉；一次性 capture preventDefault 拦默认导航
+//       守禁真网，事件冒泡照常、断言口径不受影响）——此前两者仅 tdd 卷静态钉，无 CDP 行为断言。
 //     + A3/A4/A5 运行时组（2026-11-06 文件 linkify 计划 p6）：A3 沙箱运行时（脚本执行 frame 级
 //       断言 / 下拉框→确认→内嵌 iframe 交互链 / 同源不授予 / 弹窗·顶层导航·下载禁用）、
-//       A4 死链反馈（不存在/越界/未设根相对链接/目录，操作一律 pinia 注入消息→气泡真实点击）、
-//       A5 真实形态全链（反引号绝对路径消息→链接→点击→抽屉→脚本标志三断言一体 / 已设根相对
-//       路径 / 连点两链接终态一致）。沙箱阻止动作时 Chromium 自身的 console error 反馈按内容
-//       豁免（exemptExpectedSandboxConsole，非应用回归），四类正面判据不依赖豁免。
+//       A4 存在性反馈（不存在/越界/未设根相对链接/目录，操作一律 pinia 注入消息→气泡真实右键——
+//       P6-B MOD 2026-11-21：md 链接左键零动作，交互入口唯一化为右键 5 项菜单；不存在/死链经
+//       菜单「文件不存在」+禁用形态承接，存在文件经 菜单→预览→抽屉 承接）、
+//       A5 真实形态全链（反引号绝对路径消息→链接→右键菜单→预览→抽屉→脚本标志三断言一体 /
+//       已设根相对路径 / 连右键两链接换目标重开终态一致）。沙箱阻止动作时 Chromium 自身的
+//       console error 反馈按内容豁免（exemptExpectedSandboxConsole，非应用回归），四类正面判据
+//       不依赖豁免。
+//     + P6B CDP 场景组（2026-11-22 round-001 F-r1-1/F-r1-2）：T7 通道载荷 CDP 可达面（menu
+//       store.path === data-clip-path 全路径 + 2/3/4 项可用传递性证据；通道 (path,mode) 载荷由
+//       tdd 卷 store 级桩例承接）、T8 剪贴板逐字节（grantPermissions + readText 真实读回，不可用
+//       时降级 writeText 捕获桩并申报）、T12 关闭三触发（scroll(capture)/外点 pointerdown/resize
+//       合成事件）；T11 stat reject 与 T14 stat 在飞+Esc 的 CDP 形态经探针实证不可实施
+//       （window.claudeLink 为 contextBridge 暴露，主世界三层全不可打桩）——分别由 tdd 卷
+//       store 级 T11 桩例（本次新增）与 store 级行为组（close 幂等 + 晚到响应）承接，报告申报；
+//       A4/A5 右键链统一一次重试收稳（contextMenuWithRetry：菜单弹开瞬间被自动滚底
+//       scroll-close 吃掉的间歇竞态，Esc 关菜单→重新右键→重新断言，重试仍败才判红）。
+//     + f4 MOD（2026-11-22 round-001）：FileLinkMenu scroll 关闭路径加打开后 200ms 宽限窗
+//       （用户裁决，FileLinkMenu.vue SCROLL_GRACE_MS=200）——T12-① scroll 派发前 sleep(300)
+//       越过宽限窗（打开后 200ms 内的自动滚底不关菜单，scroll 关闭语义在宽限窗后恢复）；
+//       外点 pointerdown / resize / Esc 关闭路径无宽限、用例零触碰。
 //
 // 关键事实（源码已核，2026-11-04）：
 //   - preview-store id = 'filePreview'（src/renderer/stores/preview-store.ts defineStore 字面）；
@@ -369,18 +389,79 @@ async function waitForFileLink(clipPath, label) {
     return el ? JSON.stringify({ cls: el.className, href: el.getAttribute('href') || '' }) : null;
   })()`, OPEN_TIMEOUT_MS);
 }
-/** 气泡真实点击：对 .md-file-link 元素调原生 click()——事件冒泡到内容容器 onContentClick
- *  委托（MessageBubble.vue），走 useFilePreview().open → store.openPreview 完整用户路径。 */
-async function clickFileLinkReal(clipPath) {
-  const clicked = await evalExpr(`(() => {
+/** 气泡真实右键（P6-B MOD，2026-11-21）：对 .md-file-link 元素派发 contextmenu 事件（带元素中心
+ *  坐标，bubbles+cancelable）——事件冒泡到内容容器 onContentContextMenu 委托（MessageBubble.vue），
+ *  走 useFileLinkMenuStore().open 弹出 5 项右键菜单（P6-B 起左键零动作，右键是唯一交互入口）。 */
+async function contextMenuFileLink(clipPath) {
+  const opened = await evalExpr(`(() => {
     const p = ${JSON.stringify(clipPath)};
     const el = [...document.querySelectorAll('.bubble__content .md-file-link')].find((a) => a.getAttribute('data-clip-path') === p);
     if (!el) return false;
-    el.click();
+    const r = el.getBoundingClientRect();
+    el.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true,
+      clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2),
+    }));
     return true;
   })()`);
-  if (clicked !== true) throw new Error(`未找到可点链接（data-clip-path=${clipPath}）`);
-  await waitFor('抽屉打开（气泡点击委托路径）', `!!document.querySelector('.fpreview-drawer.open')`, OPEN_TIMEOUT_MS);
+  if (opened !== true) throw new Error(`未找到可右键链接（data-clip-path=${clipPath}）`);
+  await waitFor('右键菜单出现（.file-link-menu）', `!!document.querySelector('.file-link-menu')`, OPEN_TIMEOUT_MS);
+}
+/** 关闭右键菜单：Esc（window keydown，菜单打开时挂监听的关闭机制真实路径）。 */
+async function closeFileLinkMenu() {
+  await evalExpr(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })), true`);
+  await waitFor('右键菜单关闭', `!document.querySelector('.file-link-menu')`, 5000);
+}
+/** 断言菜单「文件不存在」提示 + 前 4 项禁用（复制路径恒可用）——A4 存在性预检形态（P6-B）。 */
+async function assertMenuMissingForm(label) {
+  await waitFor(`${label}：菜单「文件不存在」提示出现`, `(() => {
+    const n = document.querySelector('.file-link-menu .flink-menu__notice');
+    return !!n && (n.textContent || '').includes('文件不存在');
+  })()`, OPEN_TIMEOUT_MS);
+  const dis = await evalExpr(`(() => {
+    const items = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')];
+    return JSON.stringify({ total: items.length, disabled: items.filter((b) => b.disabled).length });
+  })()`);
+  const dv = JSON.parse(String(dis));
+  if (dv.total !== 5) throw new Error(`菜单项 ${dv.total} ≠ 5`);
+  if (dv.disabled !== 4) throw new Error(`禁用项 ${dv.disabled} ≠ 4（1-4 应禁用、复制路径恒可用）`);
+}
+/** 气泡真实右键→菜单→点「预览」→抽屉打开（P6-B MOD）：完整用户路径由「左键直开」改为
+ *  「右键→菜单→预览」（MOD-P6-1）；后续抽屉内断言链不变。仅文件存在（预览项可用）场景走此函数；
+ *  不存在/死链场景走 contextMenuFileLink + assertMenuMissingForm（抽屉错误卡不再由 md 链接触达）。
+ *  F-r1-1：整条「右键→点预览→等抽屉」链走 contextMenuWithRetry 一次重试（A4-2/A4-4/A5 组消费面）。 */
+async function clickFileLinkReal(clipPath) {
+  await contextMenuWithRetry(clipPath, async () => {
+    const clicked = await evalExpr(`(() => {
+      const items = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')];
+      const prev = items.find((b) => (b.textContent || '').trim() === '预览');
+      if (!prev || prev.disabled) return false;
+      prev.click();
+      return true;
+    })()`);
+    if (clicked !== true) throw new Error('右键菜单「预览」项不可点（禁用或缺失）');
+    await waitFor('抽屉打开（右键菜单→预览路径）', `!!document.querySelector('.fpreview-drawer.open')`, OPEN_TIMEOUT_MS);
+  }, 'clickFileLinkReal');
+}
+
+/** F-r1-1 flake 收稳（2026-11-22 round-001 P2-1）：「右键菜单→等待」形态统一一次重试。
+ *  机制：FileLinkMenu scroll(capture) close × MessageList 自动滚底（rAF/ResizeObserver 两路径）
+ *  的间歇竞态——菜单弹开瞬间被自动滚动触发的 capture scroll close 吃掉，等待窗口内表现为
+ *  「菜单从未出现/刚出现即消失」（gate 41/1 不可复现 flake：审查岗+编排器各一次整链重跑均绿）。
+ *  收稳动作：首次失败 → closeFileLinkMenu()（Esc 兜底，菜单已被吃掉时幂等无害）→ 重新
+ *  contextMenuFileLink → 重新执行动作；重试仍失败才上抛判红。消费面：assertMenuMissingForm
+ *  （A4-1/A4-3）+ clickFileLinkReal（A4-2/A4-4/A5-1/A5-2）+ A5-3 连右键链 + T7/T8/T11/T12/T14
+ *  菜单链。注：声明位置在其调用者 clickFileLinkReal 之后——function 声明提升，运行时无序。 */
+async function contextMenuWithRetry(clipPath, action, label) {
+  try {
+    await contextMenuFileLink(clipPath);
+    await action();
+  } catch (firstErr) {
+    log(`  [F-r1-1 收稳] ${label}：首次失败（${String(firstErr.message).slice(0, 120)}）→ Esc 关菜单重新右键重试一次`);
+    await closeFileLinkMenu().catch(() => { /* 菜单可能已被 scroll-close 吃掉，Esc 兜底尽力而为 */ });
+    await contextMenuFileLink(clipPath);
+    await action(); // 重试仍失败 → 异常上抛判红
+  }
 }
 
 // ── fixture 生成 ──
@@ -1281,30 +1362,27 @@ async function main() {
   // ── A4 组（4 条；此时 transient 会话 workingDir=null → fileLinkWorkspaceRoot=null，未设根形态）──
   await ensureChatSurface();
 
-  // ── A4-1 点击不存在文件 → 明确错误反馈非静默 ──
+  // ── A4-1 右键不存在文件 → 菜单「文件不存在」+ 1-4 禁用（P6-B MOD：左键零动作，抽屉错误卡
+  //    不再由 md 链接触达——明确反馈收编为菜单内提示行，复制路径恒可用）──
   // round-002 fix-4（F7）：fixture 去 X: 盘依赖——改用隔离目录内「先建后删」的确定不存在路径
   // （<isoDir>\deleted\missing.html：创建 → 立即删除 → 注入反引号消息）。渲染形态已小探针验证
   //（resolveCodeInlinePath 对盘符绝对路径原文态走 S5d → data-clip-path 恒为原样反斜杠形态，
-  // 与旧 X: 形态同分支；mkdtemp 后缀仅字母数字无空格，无转义歧义）。主进程 stat 早于 workspace
-  // 边界检查，stat ENOENT → kind:'missing'（src/main/modules/fs-preview.ts:157）→ 抽屉
-  // 「文件不存在」——与原 X: 盘形态同一错误语义，不再假设机器盘符布局（原形态在恰有 X: 盘
-  // 且路径存在的机器会假失败，失败方向无假绿风险，本轮按指令消除该环境假设）。
-  await check('A4-1 点击不存在绝对路径链接（隔离目录 deleted/missing.html 先建后删）→ 抽屉错误卡「文件不存在」', async () => {
+  // 与旧 X: 形态同分支；mkdtemp 后缀仅字母数字无空格，无转义歧义）。P6-B 起反馈形态变更：
+  // 主进程 statPath 对缺失路径恒回 {exists:false}（src/main/modules/fs-picker.ts:234-242 永不
+  // reject）→ 菜单「文件不存在」提示 + 1-4 禁用（原抽屉「文件不存在」错误卡路径由菜单承接）。
+  await check('A4-1 右键不存在绝对路径链接（隔离目录 deleted/missing.html 先建后删）→ 菜单「文件不存在」+ 1-4 禁用', async () => {
     const deletedPath = path.join(isoDir, 'deleted', 'missing.html');
     mkdirSync(path.join(isoDir, 'deleted'), { recursive: true });
     writeFileSync(deletedPath, 'A4-1 fixture: created then deleted', 'utf8');
     rmSync(deletedPath, { force: true });
     await injectAssistantMd('A4-1', `已创建 \`${deletedPath}\`，请查看。`);
-    await clickFileLinkReal(deletedPath);
-    await waitFor('.fpreview-empty 出现「文件不存在」', `(() => {
-      const e = document.querySelector('.fpreview-empty');
-      return !!e && (e.textContent || '').includes('文件不存在');
-    })()`, OPEN_TIMEOUT_MS);
-    await closeDrawer();
+    // F-r1-1：右键→断言整链一次重试（assertMenuMissingForm 消费面）。
+    await contextMenuWithRetry(deletedPath, () => assertMenuMissingForm('A4-1'), 'A4-1');
+    await closeFileLinkMenu();
   });
 
-  // ── A4-2 越界路径（会话根外）→ 「路径不在工作区内」 ──
-  await check('A4-2 点击工作区外存在文件链接 → 抽屉错误卡「路径不在工作区内」', async () => {
+  // ── A4-2 越界路径（会话根外）→ 「路径不在工作区内」（F-r1-1 备忘-2：用例名正名右键链）──
+  await check('A4-2 右键工作区外存在文件链接（菜单→预览）→ 抽屉错误卡「路径不在工作区内」', async () => {
     const href = F.outsideFile.replaceAll('\\', '/'); // markdown link 形态用正斜杠（CommonMark 无转义歧义）
     await injectAssistantMd('A4-2', `秘密文件 [secret](<${href}>) 在外面。`);
     await clickFileLinkReal(F.outsideFile);
@@ -1315,24 +1393,25 @@ async function main() {
     await closeDrawer();
   });
 
-  // ── A4-3 未设根会话点击相对 markdown 链接 → 死链形态 + 「未设置工作区根」错误卡 ──
-  await check('A4-3 未设根会话点击相对 markdown 链接 → 死链形态渲染 + 「未设置工作区根」错误卡', async () => {
+  // ── A4-3 未设根会话右键相对 markdown 死链 → 死链形态 + 菜单「文件不存在」+ 禁用 ──
+  // P6-B MOD（文案变化申报锚，2026-11-21）：原「左键点击 → 抽屉『未设置工作区根』错误卡」链路
+  // 随左键零动作废弃——死链 clip 为相对路径 → fsStat.exists=false → 菜单显「文件不存在」+ 1-4
+  // 禁用（错误语义收编为菜单内提示行）。死链与活链同走 closest('.md-file-link') 委托（无 --dead
+  // 特判），与「未设置工作区根」错误卡的触达只剩 ToolCallBlock chip 相对路径来源（本点零触碰）。
+  await check('A4-3 未设根会话右键相对 markdown 死链 → 死链形态渲染 + 菜单「文件不存在」+ 1-4 禁用', async () => {
     await injectAssistantMd('A4-3', `配置手册见 [手册](rel/guide.md)。`);
     // 死链形态：class 含 md-file-link--dead + data-clip-path 存原始相对路径 + href=javascript:void(0)。
     const link = await waitForFileLink('rel/guide.md', 'A4-3 死链形态渲染');
     const v = JSON.parse(String(link));
     if (!String(v.cls).includes('md-file-link--dead')) throw new Error(`死链 class 缺失：${v.cls}`);
     if (v.href !== 'javascript:void(0)') throw new Error(`死链 href 异常：${v.href}`);
-    await clickFileLinkReal('rel/guide.md');
-    await waitFor('.fpreview-empty 出现「未设置工作区根」错误文案', `(() => {
-      const e = document.querySelector('.fpreview-empty');
-      return !!e && (e.textContent || '').includes('当前会话未设置工作区根');
-    })()`, OPEN_TIMEOUT_MS);
-    await closeDrawer();
+    // F-r1-1：右键→断言整链一次重试（assertMenuMissingForm 消费面）。
+    await contextMenuWithRetry('rel/guide.md', () => assertMenuMissingForm('A4-3'), 'A4-3');
+    await closeFileLinkMenu();
   });
 
-  // ── A4-4 目录路径 → 明确反馈 ──
-  await check('A4-4 点击目录路径链接 → 抽屉错误卡「目录不支持预览」（明确反馈非静默）', async () => {
+  // ── A4-4 目录路径 → 明确反馈（F-r1-1 备忘-2：用例名正名右键链）──
+  await check('A4-4 右键目录路径链接（菜单→预览）→ 抽屉错误卡「目录不支持预览」（明确反馈非静默）', async () => {
     const href = wsDir.replaceAll('\\', '/');
     await injectAssistantMd('A4-4', `输出目录 [ws](<${href}>) 已生成。`);
     await clickFileLinkReal(wsDir);
@@ -1381,34 +1460,297 @@ async function main() {
     await closeDrawer();
   });
 
-  // ── A5-3 连点两个文件链接，终态抽屉内容与最后点击一致（最终一致判定，不假设点击时序）──
-  await check('A5-3 连点两个文件链接（背靠背真实点击）→ 终态抽屉内容与最后点击一致', async () => {
+  // ── A5-3 连右键两个文件链接，终态抽屉内容与最后目标一致（最终一致判定，不假设操作时序）──
+  // P6-B MOD：操作由「背靠背左键点击」改为「背靠背右键换目标重开（不叠双菜单）→ 点预览」
+  // （P6-B 起左键零动作；菜单 open() 重入重置 seq，旧目标 fsStat 响应作废）。
+  await check('A5-3 连右键两个文件链接（背靠背换目标重开）→ 点预览 → 终态抽屉内容与最后目标一致', async () => {
     await injectAssistantMd('A5-3', `对比 \`${F.hello}\` 与 \`${F.bigTxt}\`。`);
     await waitForFileLink(F.bigTxt, 'A5-3 两个链接渲染（以后者出现为全渲染标志）');
-    // 背靠背连点（同一 eval 内两次原生 click，间隔 < 1ms，模拟连点竞态——B8 store 层先例的
-    // 真实点击路径版）；终态按「最终一致」判定：path 与内容均落最后点击的 big.txt。
-    const clicks = await evalExpr(`(() => {
-      const want = [${JSON.stringify(F.hello)}, ${JSON.stringify(F.bigTxt)}];
-      let n = 0;
-      for (const p of want) {
-        const el = [...document.querySelectorAll('.bubble__content .md-file-link')].find((a) => a.getAttribute('data-clip-path') === p);
-        if (el) { el.click(); n++; }
-      }
-      return n;
-    })()`);
-    if (clicks !== 2) throw new Error(`有效连点次数 ${clicks} ≠ 2`);
-    await waitFor('A5-3 终态源码视图渲染', `!!document.querySelector('.fpreview-drawer.open .fpreview-src')`, OPEN_TIMEOUT_MS);
+    // 背靠背右键（同一 eval 内两次 contextmenu 派发，间隔 < 1ms——菜单 open() 重入重置，旧目标
+    // 作废，终态只落最后一次目标）；随后点「预览」开抽屉。
+    // F-r1-1：「右键→等目标→点预览→等抽屉」整链一次重试（连右键链同属「右键菜单→等待」形态）。
+    const openBothAndPreview = async () => {
+      const opens = await evalExpr(`(() => {
+        const want = [${JSON.stringify(F.hello)}, ${JSON.stringify(F.bigTxt)}];
+        let n = 0;
+        for (const p of want) {
+          const el = [...document.querySelectorAll('.bubble__content .md-file-link')].find((a) => a.getAttribute('data-clip-path') === p);
+          if (el) {
+            const r = el.getBoundingClientRect();
+            el.dispatchEvent(new MouseEvent('contextmenu', {
+              bubbles: true, cancelable: true,
+              clientX: Math.round(r.left + r.width / 2), clientY: Math.round(r.top + r.height / 2),
+            }));
+            n++;
+          }
+        }
+        return n;
+      })()`);
+      if (opens !== 2) throw new Error(`有效右键次数 ${opens} ≠ 2`);
+      await waitFor('A5-3 菜单目标为最后右键的 big.txt', `(() => {
+        const st = ${SESSION_GET}; const pv = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('fileLinkMenu');
+        return pv && pv.visible && pv.path === ${JSON.stringify(F.bigTxt)};
+      })()`, OPEN_TIMEOUT_MS);
+      const clicked = await evalExpr(`(() => {
+        const prev = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')].find((b) => (b.textContent || '').trim() === '预览');
+        if (!prev || prev.disabled) return false;
+        prev.click();
+        return true;
+      })()`);
+      if (clicked !== true) throw new Error('A5-3 右键菜单「预览」项不可点');
+      await waitFor('A5-3 终态源码视图渲染', `!!document.querySelector('.fpreview-drawer.open .fpreview-src')`, OPEN_TIMEOUT_MS);
+    };
+    try {
+      await openBothAndPreview();
+    } catch (firstErr) {
+      log(`  [F-r1-1 收稳] A5-3：首次失败（${String(firstErr.message).slice(0, 120)}）→ Esc 关菜单重新背靠背右键重试一次`);
+      await closeFileLinkMenu().catch(() => { /* 菜单可能已被 scroll-close 吃掉，Esc 兜底尽力而为 */ });
+      await openBothAndPreview(); // 重试仍失败 → 异常上抛判红
+    }
     const path0 = await evalExpr(storeExpr(`return st.path;`));
-    if (!String(path0).endsWith('big.txt')) throw new Error(`终态 path=${path0}（期望最后点击的 big.txt）`);
+    if (!String(path0).endsWith('big.txt')) throw new Error(`终态 path=${path0}（期望最后目标的 big.txt）`);
     const stale = await evalExpr(`(() => JSON.stringify({
       empty: !!document.querySelector('.fpreview-drawer.open .fpreview-empty'),
       len: (document.querySelector('.fpreview-drawer.open .fpreview-src')?.textContent || '').length,
     }))()`);
     const sv = JSON.parse(String(stale));
     if (sv.empty) throw new Error('终态出现错误卡（连点竞态污染）');
-    if (sv.len !== 70 * 1024) throw new Error(`终态内容长度 ${sv.len} ≠ ${70 * 1024}（非最后点击的 big.txt）`);
+    if (sv.len !== 70 * 1024) throw new Error(`终态内容长度 ${sv.len} ≠ ${70 * 1024}（非最后目标的 big.txt）`);
+    await closeFileLinkMenu(); // 菜单在点「预览」后已被 preview 动作关闭，此处幂等兜底
     await closeDrawer();
   });
+
+  // ══ P6B CDP 场景组（round-001 F-r1-2，2026-11-22）：T7 通道载荷（CDP 可达面）/
+  //    T8 剪贴板逐字节 / T12 关闭三触发 / T6 左键零动作对照与 T15 外链不劫持（R2-F-7 行为面
+  //    补钉，2026-11-22——此前仅 tdd 卷静态钉）；T11 stat reject 与 T14 stat 在飞+Esc 的 CDP 形态
+  //    经探针实证不可实施（见 T11 注）——分别由 tdd 卷 store 级桩例与既有 store 行为组承接，
+  //    缘由在 fix-f1-report.md 申报。夹具沿用本链 mkdtemp + 隔离 profile 纪律（新夹具建在
+  //    isoDir 的 wsDir 内，跑后一并删除）。
+  //    关键事实（探针实证，2026-11-22）：window.claudeLink 由 contextBridge.exposeInMainWorld
+  //    暴露（src/preload/index.ts:14），主世界三层全不可打桩——整体属性 {writable:false,
+  //    configurable:false}、成员赋值静默无效、Object.defineProperty 抛 Cannot redefine、
+  //    delete 无效。故「evalExpr 临时替换 window.claudeLink.* 为捕获桩」在本构建上不可行，
+  //    通道级（path,mode）载荷断言改由 tdd 卷 store 级桩例承接（tsx 下 window.claudeLink 为
+  //    测试自建普通对象，可打桩）：openDefault/openChoose deep-equal ['path','default'|'choose']
+  //    + showInExplorer 调用计数（tdd-file-link-context-menu-verify.ts store 行为组既有），
+  //    外加结构钉 fsOpenPath(this.path, mode) 同卷 T4 组。══
+
+  // ── T7 通道载荷（CDP 可达面）：右键链接 → menu store.path === data-clip-path 全路径
+  //    （delegate→store.open 转发的载荷断言）+ 菜单 2/3/4 项在位且可用——exists=true 仅当
+  //    fsStat 收到的路径真实存在，即 fsStat 全路径转发的传递性证据（错误/截断路径 stat 必
+  //    exists:false → 1-4 禁用，A4-1/A4-3 已钉）。通道 (path,mode) 载荷逐字节断言由 store 级
+  //    桩例承接（见组注）。本用例零通道点击：不真实触发 shell.openPath/showItemInFolder
+  //    （真实触发会对测试机产生打开程序/资源管理器副作用，run1 已实证并废弃该形态）。──
+  await check('T7 通道载荷（CDP 可达面）：右键链接 → menu store.path === data-clip-path 全路径 + 菜单 2/3/4 项在位可用（fsStat 全路径转发传递性证据）', async () => {
+    await injectAssistantMd('T7', `通道载荷探针 \`${F.hello}\`。`);
+    await contextMenuWithRetry(F.hello, async () => {
+      // ① menu store 收到的载荷 === data-clip-path 全路径（委托读取 data-clip-path → open(path,x,y)）。
+      await waitFor('T7 menu store.path === data-clip-path 全路径', `(() => {
+        const pv = document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s.get('fileLinkMenu');
+        return pv && pv.visible && pv.path === ${JSON.stringify(F.hello)};
+      })()`, OPEN_TIMEOUT_MS);
+      // ② 2/3/4 项在位且可用（exists=true → fsStat 收到全路径的传递性证据）。
+      const probe = await evalExpr(`(() => {
+        const items = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')];
+        const names = ['用系统默认程序打开', '选择打开方式…', '在文件夹中显示'];
+        return JSON.stringify(names.map((n) => {
+          const b = items.find((x) => (x.textContent || '').trim() === n);
+          return { n, present: !!b, disabled: b ? b.disabled : null };
+        }));
+      })()`);
+      const arr = JSON.parse(String(probe));
+      for (const it of arr) {
+        if (!it.present) throw new Error(`菜单项缺失：${it.n}`);
+        if (it.disabled) throw new Error(`菜单项不应禁用（exists=true 传递 fsStat 全路径转发）：${it.n}`);
+      }
+    }, 'T7');
+    await closeFileLinkMenu();
+  });
+
+  // ── T8 剪贴板逐字节：复制路径 → 载荷 === data-clip-path 全路径（夹具含中文/空格路径）。
+  //    首选真实链：Browser.grantPermissions(clipboardReadWrite) + Page.bringToFront（readText
+  //    需聚焦）+ navigator.clipboard.readText() 读回比对；授予/读回在自动化环境不可用时降级为
+  //    navigator.clipboard.writeText 捕获桩断言载荷逐字节（copyTextToClipboard 主路径即
+  //    navigator.clipboard.writeText——utils/clipboard.ts，file:// 为安全上下文，桩精确拦截；
+  //    降级缘由 log + 报告申报）。 ──
+  await check('T8 剪贴板逐字节：右键→复制路径 → 剪贴板载荷 === data-clip-path 全路径（中文/空格夹具）', async () => {
+    const t8Dir = path.join(wsDir, '中文 目录');
+    mkdirSync(t8Dir, { recursive: true });
+    const t8Path = path.join(t8Dir, 't8 clip file.txt');
+    writeFileSync(t8Path, 'T8 clipboard probe', 'utf8');
+    await injectAssistantMd('T8', `剪贴板探针 \`${t8Path}\`。`);
+    await waitForFileLink(t8Path, 'T8 链接渲染（data-clip-path=中文/空格全路径）');
+    let granted = false;
+    try {
+      await cdpSend('Browser.grantPermissions', { permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] });
+      granted = true;
+    } catch (e) {
+      log(`T8 剪贴板权限授予不可用（${String(e.message).slice(0, 120)}）→ 降级 writeText 捕获桩形态（申报）`);
+    }
+    let verified = false;
+    if (granted) {
+      try {
+        await cdpSend('Page.bringToFront').catch(() => { /* 尽力而为 */ });
+        await contextMenuWithRetry(t8Path, async () => {
+          const clicked = await evalExpr(`(() => {
+            const it = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')].find((b) => (b.textContent || '').trim() === '复制路径');
+            if (!it || it.disabled) return false;
+            it.click();
+            return true;
+          })()`);
+          if (clicked !== true) throw new Error('「复制路径」项不可点（禁用或缺失）');
+          await waitFor('T8 notice「已复制」', `(() => {
+            const n = document.querySelector('.file-link-menu .flink-menu__notice');
+            return !!n && (n.textContent || '').includes('已复制');
+          })()`, OPEN_TIMEOUT_MS);
+        }, 'T8(复制路径·真实链)');
+        let text = null;
+        for (let i = 0; i < 3 && text === null; i++) {
+          const r = await evalExpr(`navigator.clipboard.readText().then((t) => JSON.stringify({ ok: true, t })).catch((e) => JSON.stringify({ ok: false, err: String((e && e.message) || e) }))`);
+          const v = JSON.parse(String(r));
+          if (v.ok) text = v.t;
+          else await sleep(400);
+        }
+        if (text !== null) {
+          if (text !== t8Path) throw new Error(`剪贴板读回不等于 data-clip-path 全路径：${JSON.stringify(String(text).slice(0, 160))}`);
+          verified = true;
+          log('T8 真实链通过：clipboard.readText 读回 === data-clip-path 全路径（未降级）');
+        } else {
+          log('T8 真实读回不可用（readText 反复拒绝：聚焦/权限面受限）→ 降级 writeText 捕获桩形态（申报）');
+        }
+      } catch (e) {
+        log(`T8 真实链失败（${String(e.message).slice(0, 140)}）→ 降级 writeText 捕获桩形态（申报）`);
+      }
+    }
+    if (!verified) {
+      // 降级形态：writeText 捕获桩 → 点「复制路径」→ 桩载荷逐字节 === data-clip-path。
+      // copyPath 不关菜单（notice 行承接反馈）：真实链失败后菜单仍在；若已被收稳链关闭则重新右键。
+      await evalExpr(`(() => {
+        window.__t8Writes = [];
+        window.__t8OrigWrite = navigator.clipboard.writeText;
+        navigator.clipboard.writeText = async (t) => { window.__t8Writes.push(t); return undefined; };
+        return true;
+      })()`);
+      try {
+        const hasMenu = await evalExpr(`!!document.querySelector('.file-link-menu')`);
+        if (hasMenu !== true) await contextMenuWithRetry(t8Path, async () => {}, 'T8(降级·重开菜单)');
+        const clicked2 = await evalExpr(`(() => {
+          const it = [...document.querySelectorAll('.file-link-menu [role="menuitem"]')].find((b) => (b.textContent || '').trim() === '复制路径');
+          if (!it || it.disabled) return false;
+          it.click();
+          return true;
+        })()`);
+        if (clicked2 !== true) throw new Error('降级形态「复制路径」项不可点（禁用或缺失）');
+        await waitFor('T8 降级桩收到 writeText 载荷', `((window.__t8Writes || []).length > 0)`, OPEN_TIMEOUT_MS);
+        const writes = JSON.parse(String(await evalExpr('JSON.stringify(window.__t8Writes || [])')));
+        if (writes.length !== 1) throw new Error(`writeText 桩调用 ${writes.length} ≠ 1`);
+        if (writes[0] !== t8Path) throw new Error(`writeText 载荷不等于 data-clip-path 全路径：${JSON.stringify(String(writes[0]).slice(0, 160))}`);
+        log('T8 降级桩形态通过：writeText 载荷逐字节 === data-clip-path 全路径');
+      } finally {
+        await evalExpr(`(() => {
+          navigator.clipboard.writeText = window.__t8OrigWrite;
+          delete window.__t8Writes; delete window.__t8OrigWrite;
+          return true;
+        })()`);
+      }
+    }
+    await closeFileLinkMenu().catch(() => { /* copyPath 留菜单，兜底关闭 */ });
+  });
+
+  // ── T11 stat reject fail-closed（CDP 形态不可实施，申报见组注）：fsStat reject 桩须打在
+  //    window.claudeLink.fsStat 上——探针实证 contextBridge 三层全不可打桩（组注），「临时替换
+  //    fsStat 为 Promise.reject」无法安装。该 fail-closed 分支的承接面：
+  //    ① store 级桩例（本次新增，tdd-file-link-context-menu-verify.ts「T11 store 级 fail-closed」
+  //      ——fsStat reject → exists=false + notice「文件不存在」，tsx 下 window.claudeLink 可打桩）；
+  //    ② CDP 层 exists=false 菜单形态（真实主进程 statPath 对缺失路径恒回 {exists:false}）由
+  //      A4-1/A4-3 assertMenuMissingForm 全量断言（提示 + 1-4 禁用 + 复制可用）承接。──
+
+  // ── T12 关闭机制三触发（round-001 F-r1-2 实施者定夺：合成事件低成本 CDP 可达，落用例）：
+  //    内层滚动容器 scroll（capture 监听覆盖全部滚动目标）/ 菜单外 pointerdown / window
+  //    resize → 菜单关闭（FileLinkMenu.vue onWinScroll/onDocPointerDown/onWinResize）。 ──
+  await check('T12 关闭机制三触发：内层滚动 scroll（capture）/ 菜单外 pointerdown / resize → 菜单均关闭', async () => {
+    await injectAssistantMd('T12', `关闭机制探针 \`${F.hello}\`。`);
+    const reopen = (label) => contextMenuWithRetry(F.hello, async () => {}, label);
+    // ① scroll：对内层滚动容器派发 scroll（非冒泡事件 capture 相位仍自 window 下行命中监听）。
+    // 宽限窗 200ms（用户裁决 2026-11-22，round-001 f4）：打开后 200ms 内的自动滚底不关菜单，
+    // scroll 关闭语义在宽限窗后恢复——故先 sleep(300) 越过宽限窗再派发（契约微修的测试同步）。
+    await reopen('T12-①开');
+    await sleep(300);
+    await evalExpr(`(() => { const t = document.querySelector('.message-list__scroller') || document.body; t.dispatchEvent(new Event('scroll')); return true; })()`);
+    await waitFor('T12-① scroll 关闭', `!document.querySelector('.file-link-menu')`, 5000);
+    // ② 菜单外 pointerdown：body 上派发（closest('.file-link-menu') 不命中）→ document 监听关闭。
+    await reopen('T12-②开');
+    await evalExpr(`(() => { document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 })); return true; })()`);
+    await waitFor('T12-② 菜单外点关闭', `!document.querySelector('.file-link-menu')`, 5000);
+    // ③ resize：window 级监听（target 相位直接命中）。
+    await reopen('T12-③开');
+    await evalExpr(`(() => { window.dispatchEvent(new Event('resize')); return true; })()`);
+    await waitFor('T12-③ resize 关闭', `!document.querySelector('.file-link-menu')`, 5000);
+  });
+
+  // ── T6 左键零动作对照（round-001 R2-F-7，2026-11-22：P6B-T6「左键同链接对照：抽屉不开」的
+  //    CDP 行为面补钉，此前仅 tdd 卷静态钉）：右键开菜单（同链接右键路径正常性对照）→ Esc 关
+  //    菜单 → 同一 .md-file-link 左键 click（el.click()，href=javascript:void(0) 默认动作 no-op、
+  //    无导航副作用）→ 1.2s 稳定窗后断言菜单与预览抽屉均未出现（左键零动作；抽屉 visible 态 =
+  //    .fpreview-drawer.open，与全卷断言口径一致——指令中 .file-preview-drawer 即该抽屉本类名）。 ──
+  await check('T6 左键零动作对照：右键开菜单→Esc 关→同链接左键 click → 1.2s 后菜单/抽屉均未出现', async () => {
+    await injectAssistantMd('T6', `左键对照探针 \`${F.hello}\`。`);
+    await waitForFileLink(F.hello, 'T6 链接渲染');
+    await contextMenuWithRetry(F.hello, async () => {}, 'T6(右键开菜单对照)');
+    await closeFileLinkMenu();
+    const clicked = await evalExpr(`(() => {
+      const el = [...document.querySelectorAll('.bubble__content .md-file-link')].find((a) => a.getAttribute('data-clip-path') === ${JSON.stringify(F.hello)});
+      if (!el) return false;
+      el.click();
+      return true;
+    })()`);
+    if (clicked !== true) throw new Error('左键对照目标链接不在场（data-clip-path 不匹配）');
+    await sleep(1200);
+    const st = JSON.parse(String(await evalExpr(`(() => JSON.stringify({
+      menu: !!document.querySelector('.file-link-menu'),
+      drawer: !!document.querySelector('.fpreview-drawer.open'),
+    }))()`)));
+    if (st.menu) throw new Error('左键 click 后右键菜单在场（P6-B 左键零动作违背）');
+    if (st.drawer) throw new Error('左键 click 后预览抽屉打开（P6-B 左键零动作违背：.fpreview-drawer.open 在场）');
+  });
+
+  // ── T15 外链不劫持（round-001 R2-F-7，2026-11-22：P6B-T15「http 外链不被劫持」的 CDP 行为面
+  //    补钉，此前仅 tdd 卷 closest 不命中静态钉）：注入一条含 https:// 普通 markdown 链接的消息
+  //   （markdown.ts：外链 scheme 被 resolveFileLinkHref 拒绝 → 基线 <a target=_blank>，无
+  //    .md-file-link 类）→ 左键 click 该外链 → 断言未弹 .file-link-menu 且未开抽屉（七委托
+  //    closest 不命中 = 外链不被文件链接通道劫持）。禁真网纪律：click 前挂一次性 capture
+  //    preventDefault 监听拦掉默认动作（target=_blank 默认行为经 setWindowOpenHandler →
+  //    系统浏览器 = 真网 + 测试机副作用，必须阻断）；阻断的是导航默认行为本身，click 事件冒泡
+  //    与组件委托照常发生，「不弹菜单/不开抽屉」断言不受影响（断言口径与 tdd 卷静态钉对齐）。 ──
+  await check('T15 外链不劫持：注入含 https:// 普通链接的消息 → 左键 click 外链 → 无 .file-link-menu 且未开抽屉（一次性 preventDefault 守禁真网）', async () => {
+    await injectAssistantMd('T15', `外部资料见 [探针外链](https://example.com/claude-link-e2e-probe)。`);
+    await waitFor('T15 外链渲染（基线 <a target=_blank>，无 md-file-link 类）', `(() => {
+      const a = [...document.querySelectorAll('.bubble__content a')].find((x) => String(x.getAttribute('href') || '').startsWith('https://') && x.getAttribute('target') === '_blank' && !x.classList.contains('md-file-link'));
+      return !!a;
+    })()`, OPEN_TIMEOUT_MS);
+    const clicked = await evalExpr(`(() => {
+      const a = [...document.querySelectorAll('.bubble__content a')].find((x) => String(x.getAttribute('href') || '').startsWith('https://') && x.getAttribute('target') === '_blank' && !x.classList.contains('md-file-link'));
+      if (!a) return false;
+      const block = (e) => e.preventDefault();
+      document.addEventListener('click', block, { capture: true, once: true });
+      a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    if (clicked !== true) throw new Error('外链 <a> 未渲染（https:// 普通链接缺失）');
+    await sleep(1200);
+    const st = JSON.parse(String(await evalExpr(`(() => JSON.stringify({
+      menu: !!document.querySelector('.file-link-menu'),
+      drawer: !!document.querySelector('.fpreview-drawer.open'),
+    }))()`)));
+    if (st.menu) throw new Error('外链左键 click 弹出 .file-link-menu（P6B-T15 外链劫持回归）');
+    if (st.drawer) throw new Error('外链左键 click 打开预览抽屉（P6B-T15 外链劫持回归）');
+  });
+
+  // ── T14 stat 在飞 + Esc（round-001 F-r1-2 实施者定夺项 → 申报豁免）：处方形态需 fsStat 挂起桩
+  //    打在 window.claudeLink.fsStat 上——探针实证 contextBridge 不可打桩（组注），CDP 形态不可实施。
+  //    seq 守卫语义（晚到响应不重开不回写、close 幂等）由 tdd 卷 store 级行为组承接：
+  //    「close()：幂等可重复调用；close 后晚到 fsStat 响应不回写不重开」（真实 store 实例 + 受控
+  //    桩 stat，行为级断言，非仅结构钉）+「seq 竞态守卫：旧 open 的 fsStat 响应晚到不回写」。──
 
   // ── 渲染层异常终审（exceptionThrown / console error 即 FAIL，对齐仓库先例）──
   await check('X 渲染层全程无 exceptionThrown / console.error', async () => {

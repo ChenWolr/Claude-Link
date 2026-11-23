@@ -19,6 +19,9 @@
 // 运行：npx tsx scripts/tdd-activity-f1-f5-verify.ts（登记 scripts/selftest-static-list.txt +
 // tsconfig.tdd.json）
 // 红线：readTaskOutput IPC 三处同步（preload api.ts / web-bridge.ts）零触碰，本脚本不断言该链。
+// P6-B 契约迁移 2026-11-21（同 MOD-P6-1 族）：F4-04 实时正文交互钉由 @click="onLiveTextClick"
+// 迁至 @contextmenu="onLiveTextContextMenu"（左键零动作、右键菜单唯一入口；TaskQueuePanel.vue
+// :742/:794 两处绑定，计数钉按全文件口径——后台任务卡 :794 一处在 F4-04 region 截取范围之外）。
 
 import { readFileSync } from 'node:fs';
 import { strict as assert } from 'node:assert';
@@ -819,7 +822,10 @@ check('F4-04 保全：展开体 ThinkingBlock（实时思考）/ subagent-live-t
   assert.ok(region.includes('<ThinkingBlock'), '展开体缺 ThinkingBlock（实时思考）');
   assert.ok(region.includes('class="subagent-live-text markdown-body"'), '展开体缺实时正文容器');
   assert.ok(region.includes('v-enrich'), '实时正文缺 v-enrich 委托（文件链接点击链断）');
-  assert.ok(region.includes('@click="onLiveTextClick"'), '实时正文点击委托丢失');
+  // P6-B 契约迁移 2026-11-21（同 MOD-P6-1 族）：实时正文左键零动作，交互入口唯一化为右键委托。
+  assert.ok(region.includes('@contextmenu="onLiveTextContextMenu"'), '实时正文右键委托丢失');
+  const liveCtxBinds = taskQueue.match(/@contextmenu="onLiveTextContextMenu"/g) ?? [];
+  assert.strictEqual(liveCtxBinds.length, 2, `实时正文 @contextmenu 委托应恰 2 处（TaskQueuePanel.vue:742/:794），实际 ${liveCtxBinds.length} 处`);
   assert.ok(region.includes('ProcessGroup'), '展开体缺 ProcessGroup（落库 fold）');
   assert.ok(region.includes('<MessageBubble'), '展开体缺 MessageBubble（落库消息气泡）');
 });
