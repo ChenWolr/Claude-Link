@@ -8,6 +8,7 @@ import ToolDiffDialog from './components/chat/ToolDiffDialog.vue';
 import UpdateDialog from './components/layout/UpdateDialog.vue';
 import FilePickerDialog from './components/common/FilePickerDialog.vue';
 import FilePreviewDrawer from './components/preview/FilePreviewDrawer.vue';
+import FileLinkMenu from './components/common/FileLinkMenu.vue';
 import { useConfigStore, lastSaveFailed } from './stores/config-store';
 import { useSessionStore } from './stores/session-store';
 import { useProviderStore } from './stores/provider-store';
@@ -16,6 +17,7 @@ import { useUpdateStore } from './stores/update-store';
 import { useChat } from './composables/use-chat';
 import { useCommandStore } from './stores/command-store';
 import { useTaskStore } from './stores/task-store';
+import { useTranslationStore } from './stores/translation-store';
 import { THEME_PALETTES, FONT_SCALE_SIZES } from '../shared/constants';
 import { BUILD_REV } from '../shared/build-info';
 import { applyThemePalette, applyFontScale } from './utils/apply-theme';
@@ -27,6 +29,7 @@ const exportImageStore = useExportImageStore();
 const commandStore = useCommandStore();
 const taskStore = useTaskStore();
 const updateStore = useUpdateStore();
+const translationStore = useTranslationStore();
 const { startListening, stopListening } = useChat();
 let stopExportProgress: (() => void) | null = null;
 let stopExportTargetRequest: (() => void) | null = null;
@@ -36,6 +39,7 @@ let stopQueueEvents: (() => void) | null = null;
 let stopBridgeSessionsUpserted: (() => void) | null = null;
 let stopSessionsChanged: (() => void) | null = null;
 let stopWorkspacesChanged: (() => void) | null = null;
+let stopTranslationEvents: (() => void) | null = null;
 
 // B（2026-10-30）：网页版渲染产物滞后可见化。web-bridge 收到的主进程 welcome buildRev 与渲染
 // bundle 的 BUILD_REV 不一致 ⟺ 网页版在吃上次构建产物（dev 未重建 / 主进程与产物错代）。
@@ -218,6 +222,9 @@ onMounted(async () => {
   // markRunning / markStopped（中断收口）/ user_message_created（队列任务消息入列）等
   // 带副作用的队列事件仍须被处理——后台队列执行不因切页丢事件。
   stopQueueEvents = window.claudeLink.onQueueEvent((payload) => taskStore.handleQueueEvent(payload));
+  // P5（2026-11-19 UI 五点批次）：翻译推送全局订阅（TRANSLATION_EVENT，与 chat:event/queue 同
+  // 模式——ChatPage 卸载/后台会话不丢事件；store.handleEvent 无脑收录，UI 按 target 挂载点过滤）。
+  stopTranslationEvents = window.claudeLink.onTranslationEvent((p) => translationStore.handleEvent(p));
   // A3（D01-F2/D12-F4）：桥接运行期自动建会话信号全局注册——store 内 500ms 去抖重拉列表，
   // 新桥接会话 ≤1s 进侧栏；完成通知点击在列表刷新后可命中会话。
   stopBridgeSessionsUpserted = window.claudeLink.onBridgeSessionsUpserted((payload) => {
@@ -248,6 +255,7 @@ onBeforeUnmount(() => {
   if (stopBridgeSessionsUpserted) stopBridgeSessionsUpserted();
   if (stopSessionsChanged) stopSessionsChanged();
   if (stopWorkspacesChanged) stopWorkspacesChanged();
+  if (stopTranslationEvents) stopTranslationEvents();
   if (saveFailedToastTimer) clearTimeout(saveFailedToastTimer);
   if (sessionErrorToastTimer) clearTimeout(sessionErrorToastTimer);
   if (providerErrorToastTimer) clearTimeout(providerErrorToastTimer);
@@ -273,6 +281,8 @@ onBeforeUnmount(() => {
     <UpdateDialog />
     <FilePickerDialog />
     <FilePreviewDrawer />
+    <!-- P6-B（2026-11-21）：md-file-link 右键上下文菜单全局单例（与预览抽屉并列；七处委托组件弹） -->
+    <FileLinkMenu />
     <div v-if="saveFailedToastVisible" class="global-toast global-toast--error">
       <svg class="global-toast__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
       <span class="global-toast__text">设置保存失败，部分修改可能未保存</span>

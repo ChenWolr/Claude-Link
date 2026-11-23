@@ -17,6 +17,7 @@ import { useSessionStore } from '../stores/session-store';
 import type { BackgroundTask } from '../stores/session-store';
 import { useClaudePlanStore } from '../stores/claude-plan-store';
 import { useChatDraftStore } from '../stores/chat-draft-store';
+import { useTranslationStore } from '../stores/translation-store';
 import type { ChatEventPayload } from '../../shared/types/ipc';
 import type { CliApiRetryTerminalFallbackEvent, CliEvent, CliMessageContentPart, CliResultEvent, CliSystemInitEvent, CliSystemInfoEvent, CliPermissionEvent, CliStalledEvent } from '../../shared/types/cli';
 import { processKindFromPart, extractSubAgentTitle } from '../../shared/process-kind';
@@ -236,6 +237,8 @@ export function applyProgressEvent(store: ReturnType<typeof useSessionStore>, ev
 function createChat() {
   const store = useSessionStore();
   const planStore = useClaudePlanStore();
+  // P5 渲染层（2026-11-19 UI 五点批次）：流式→落库翻译迁移的唯一触发点（result/aborted 边沿）。
+  const translationStore = useTranslationStore();
   // sending 改为从 store getter 派生（computed），不再用 local ref。
   // 这样 ChatPage 卸载/重挂载时，sending 始终从 store.runningSessions 反映，不会丢失。
   const sending = computed(() => store.sending);
@@ -565,13 +568,15 @@ function createChat() {
         clearAbortTimer(sid);
         // B1：后台会话回合也要记耗时（切回/重启后 TurnTimer 完成态可显示）。
         // 后台分支不遍历 messages 挂气泡脚注（与现状一致），只写会话级 meta；
-        // messageId 传 null。clientMs 兜底对齐前台 R1 语义。
+        // messageId 传 null。P5：客户端计时优先、端点值兜底（对齐前台同口径）。
         // 顺序硬要求：meta 计算（含 turnStartedAt 捕获）必须先于 markCompleted——
         // markCompleted 会 delete turnStartedAt[sid]，晚读恒为 null（耗时丢失）。
         const startedAt = store.turnStartedAt[sid] ?? null;
-        const dur = typeof event.duration_ms === 'number' && event.duration_ms > 0
-          ? event.duration_ms
-          : (startedAt ? (Date.now() + (store.serverClockOffset[sid] ?? 0)) - startedAt : null);
+        // P5：客户端计时优先（对齐前台同口径与 turn_ended 权威口径——发送起点→result 时刻的全程
+        // 耗时）；端点回报 duration_ms（模型侧耗时）降为客户端起点缺失时的兜底。
+        const dur = startedAt != null
+          ? (Date.now() + (store.serverClockOffset[sid] ?? 0)) - startedAt
+          : (typeof event.duration_ms === 'number' && event.duration_ms > 0 ? event.duration_ms : null);
         const endedAt = Date.now();
         if (isSuccessfulCliResult(event)) {
           // hb10-TM-01（渲染层守卫）：turnStartedAt 已清（=已结算/已被新回合覆盖）时跳过 meta 写。
@@ -675,6 +680,8 @@ function createChat() {
         // 落库（否则与横幅重复展示 + 把错误文案当成回答污染历史）。主进程 persistCliEvent
         // 的 result 分支用同一 isErrResult 判断同步跳过，DB 与内存保持一致。
         if (!isErrResult) ensureResultMessage(event);
+        // P5：流式→落库翻译迁移（正文 + 思考；fire-and-forget 异常静默）。
+        finalizeTurnTranslations();
         attachResultMetadata(event);
         // hb10-ENG-04：成功 result 到达且横幅为 watchdog 误报（≤6s 优雅窗）→ 清除。
         if (isSuccessfulCliResult(event) && isWatchdogErrorText(error.value) && Date.now() - watchdogErrorAt <= WATCHDOG_ERROR_GRACE_MS) {
@@ -725,6 +732,9 @@ function createChat() {
         store.clearThinking();
         store.clearToolStream();
         store.setThinkingTokens(null);
+        // P5（01 §5.7「原文流中途 abort」行）：中断回合同样迁移翻译——已流出部分迁移翻译完成
+        //（截断内容落库后，译文块迁到截断的落库消息上）。
+        finalizeTurnTranslations();
         if (store.activeSession) {
           clearAbortTimer(store.activeSession.id);
           store.markStopped(store.activeSession.id);
@@ -1036,6 +1046,49 @@ function createChat() {
     }
   }
 
+  // P5（2026-11-19 UI 五点批次）：流式→落库翻译迁移（01 §5.4-B/C、§5.7「流式中 abort」行）。
+  // 回合收尾边沿（result / aborted）调用——正文与思考各自迁移到落库消息：
+  //  - 正文：本回合最后一条主流程 assistant 文本消息（message 事件落库 / finalizeAssistantStream
+  //    兜底落库后的最终形态）+ 其全文 =「捕获的 displayContent 全文」——message 事件 text part
+  //    与流式累加同源同文；P1-5 落库即清后 result 边沿流式累加器已空，消息 content 是该文
+  //    的权威落库形态，段级缓存按段哈希命中（流式已译段零重复计费）。
+  //  - 思考：本回合最后一条主流程 eventType==='thinking' 消息 + 全文（message 事件路径落库
+  //    与 finalizeAssistantStream 兜底两路都覆盖）。
+  // fire-and-forget、异常静默（翻译失败不影响回合业务）；store.finalize* 在无流式 entry 时
+  // no-op（用户未开翻译绝不凭空为落库消息建翻译）；找不到消息 id 静默丢弃迁移（缓存仍保证
+  // 之后手点零计费）。
+  function finalizeTurnTranslations(): void {
+    const sid = store.activeSession?.id;
+    if (!sid) return;
+    const msgs = store.messages;
+    let textId: string | null = null;
+    let textContent: string | null = null;
+    let thinkingId: string | null = null;
+    let thinkingContent: string | null = null;
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      const m = msgs[i];
+      if (m.role === 'user') break; // 回合边界（最新 user 消息之后 = 本回合）
+      if (!textId && m.role === 'assistant' && m.eventType === 'message' && !m.parentAgentId && !m.isError) {
+        textId = m.id;
+        textContent = m.content;
+      }
+      if (!thinkingId && m.role === 'assistant' && m.eventType === 'thinking' && !m.parentAgentId && m.processKind === 'thinking') {
+        thinkingId = m.id;
+        thinkingContent = m.content;
+      }
+    }
+    if (textId && textContent && textContent.trim()) {
+      void translationStore.finalizeStreamTranslation(sid, textId, textContent).catch(() => {
+        /* 翻译失败不影响回合业务 */
+      });
+    }
+    if (thinkingId && thinkingContent && thinkingContent.trim()) {
+      void translationStore.finalizeThinkingStreamTranslation(sid, thinkingId, thinkingContent).catch(() => {
+        /* 翻译失败不影响回合业务 */
+      });
+    }
+  }
+
   // system 子类型事件（非 init）落库为过程消息：permission_denied/permission_request → permission；
   // informational/compact_boundary/plugin_install/interaction_response/init_write_skipped/auto_retry
   // → system:<subtype>（auto_retry 无专用 defaultText，走「系统提示」兜底，但 text 恒非空）。
@@ -1115,7 +1168,7 @@ function createChat() {
   function attachResultMetadata(event: CliResultEvent): void {
     const messages = store.messages;
     // 问题 2：第三方端点（如 glm-5.2）可能不回报 duration_ms，用客户端计时（本回合开始→现在）
-    // 兜底，保证气泡始终能展示「花了多少时间」。result 到达时 turnStartedAt 尚未清除。
+    // 优先承担口径（P5 翻转），保证气泡始终能展示「花了多少时间」。result 到达时 turnStartedAt 尚未清除。
     const sid = store.activeSession?.id;
     const startedAt = sid ? store.turnStartedAt[sid] : null;
     // R6（round-001）：客户端计时兜底按 serverClockOffset 换算到服务器时钟口径——turnStartedAt
@@ -1126,7 +1179,7 @@ function createChat() {
     const endedAt = Date.now();
     // R1（二次修复）：sdk-backend 把缺失的 total_cost_usd/duration_ms 补成 0（非 undefined），
     // `??` 对 0 不生效会屏蔽客户端兜底。改用真值判断：>0 用端点值，否则 cost 置 null（不显示
-    // $0.0000）、duration 回落客户端计时（用户「把最终时间映射到耗时」诉求）。
+    // $0.0000）、duration 降为客户端起点缺失时的兜底（P5 翻转后 clientMs 为主口径）。
     const cost = event.total_cost_usd;
     const duration = event.duration_ms;
     let hitAssistant = false;
@@ -1141,13 +1194,17 @@ function createChat() {
       if (message.role === 'assistant') {
         hitAssistant = true;
         message.costUsd = typeof cost === 'number' && cost > 0 ? cost : null;
-        message.durationMs = typeof duration === 'number' && duration > 0 ? duration : clientMs;
+        // P5：客户端回合计时（发送起点→result 时刻，serverClockOffset 换算）优先——与④turn_ended
+        // 权威口径同源（发送→结束全程）；端点回报 duration_ms（模型侧耗时）降为客户端起点缺失时的兜底。
+        message.durationMs = clientMs != null
+          ? clientMs
+          : (typeof duration === 'number' && duration > 0 ? duration : null);
         // B3：结束时刻随脚注即时可见（门控外——中断/错误回合的内存脚注行为保持不变）。
         message.endedAt = endedAt;
         // B1：耗时/结束时间持久化（气泡脚注 + 会话级最近回合元数据）。
         // P2-1 门控：仅成功 result（isSuccessfulCliResult；error_during_execution 中断第三态为
         // false）才持久化——中断/错误回合不产生记录（对齐后台分支门控与 Session 字段注释），
-        // 气泡内存脚注行为保持不变。durationMs 取刚算好的值（端点值或 clientMs 兜底）；
+        // 气泡内存脚注行为保持不变。durationMs 取刚算好的值（clientMs 优先、端点值兜底）；
         // 无效耗时由 setLastTurnMeta/handler 的 P2-2 半写收口兜住（保持上一条有效记录）。
         // hb10-TM-01（渲染层守卫）：turnStartedAt 已被 markCompleted 删除（=本回合已结算或
         // 已被新回合覆盖）时，迟到旧 result 不再写 meta（防脏写新回合行/半截持久化）。
@@ -1171,7 +1228,7 @@ function createChat() {
       window.claudeLink.recordTurnMeta(sid, {
         messageId: null,
         costUsd: typeof cost === 'number' && cost > 0 ? cost : null,
-        durationMs: clientMs,
+        durationMs: clientMs ?? (typeof duration === 'number' && duration > 0 ? duration : null),
         endedAt,
       }).catch(() => {});
     }

@@ -3,11 +3,15 @@ import { computed, onBeforeUnmount, ref } from 'vue';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { renderMarkdown } from '../../utils/markdown';
 import { copyTextToClipboard } from '../../utils/clipboard';
-import { useFilePreview } from '../../composables/useFilePreview';
+import { useFileLinkMenuStore } from '../../stores/file-link-menu-store';
 import { enrichMarkdown as vEnrich } from '../../directives/enrich-markdown';
-import { formatDurationMs, formatEndedAt, formatEndedAtMinute, formatSentAt } from '../../../shared/format-duration';
+import { formatDurationClock, formatEndedAt, formatEndedAtMinute, formatSentAt } from '../../../shared/format-duration';
 import { isReasoningReplayApiError } from '../../../shared/upstream-errors';
 import MessageAttachments from './MessageAttachments.vue';
+import TranslateButton from './TranslateButton.vue';
+import TranslationChrome from './TranslationChrome.vue';
+import TranslationViewport from './TranslationViewport.vue';
+import { useTranslationStore } from '../../stores/translation-store';
 
 const props = defineProps<{ message: RenderableMessage; exportMode?: boolean; interrupted?: boolean }>();
 
@@ -19,6 +23,63 @@ const renderedContent = computed(() => renderMarkdown(props.message.content, pro
 const hasContent = computed(() => props.message.content.trim().length > 0);
 const attachments = computed(() => props.message.attachments ?? []);
 
+// ── P5 挂载点 A（2026-11-19 UI 五点批次）：assistant 正文位译文/原文二选一（变体三·沉浸替换式）──
+// 译文 entry 按 target {kind:'message', messageId} 从 translation-store 投影查得（状态源在主进程）。
+// exportMode 一律渲染原文：译钮、译文视口、徽标、swap pill 全部排除（entry 在导出模式恒 undefined
+// ——导出快照不受翻译态污染，硬约束）；user 纯文本逐字回显分支不涉翻译；tool/system 不给入口。
+const translationStore = useTranslationStore();
+const translationEntry = computed(() => {
+  if (props.exportMode || props.message.role !== 'assistant' || !hasContent.value) return undefined;
+  return translationStore.forTarget(props.message.sessionId, { kind: 'message', messageId: props.message.id });
+});
+// 替换呈现判定：showingTranslation（变体三视图态）且未中止。stopped=已中止回落原文；
+// error 态仍显示视口（错误横条 + 重试钮，不整块消失）。
+const showTranslation = computed(() => {
+  const e = translationEntry.value;
+  return !!e && e.showingTranslation && e.status !== 'stopped';
+});
+// chrome（徽标 + swap pill）可见性：翻译激活且非 stopped（stopped 回落激活前观感，入口钮仍可重开）。
+const chromeVisible = computed(() => {
+  const e = translationEntry.value;
+  return !!e && e.status !== 'stopped';
+});
+const translationProgress = computed(() => {
+  const e = translationEntry.value;
+  if (!e || e.totalSegments === 0) return 0;
+  return Math.round((e.segments.length / e.totalSegments) * 100);
+});
+const translateState = computed<'idle' | 'translating' | 'done' | 'error'>(() => {
+  const s = translationEntry.value?.status;
+  if (s === 'translating') return 'translating';
+  if (s === 'error') return 'error';
+  if (s === 'done') return 'done';
+  return 'idle'; // 无 entry / stopped
+});
+
+// 入口钮点击路由（状态语义严格分离）：idle/stopped→START（stopped 重开=缓存前缀命中零重复计费）；
+// translating→STOP（唯一「中止」路径：abort 在飞段 + 回落原文）；done→toggleShowing（纯视图切换）；
+// error→RETRY（仅失败段）。swap pill 只切视图（toggleShowing），绝不 STOP。
+function onTranslateEntryClick(): void {
+  const e = translationEntry.value;
+  const sid = props.message.sessionId;
+  if (!sid) return;
+  if (!e || e.status === 'stopped') {
+    void translationStore.start(sid, { kind: 'message', messageId: props.message.id }, props.message.content);
+    return;
+  }
+  if (e.status === 'translating') void translationStore.stop(e.translationId);
+  else if (e.status === 'error') void translationStore.retry(e.translationId);
+  else translationStore.toggleShowing(e.translationId);
+}
+function onTranslationSwap(): void {
+  const e = translationEntry.value;
+  if (e) translationStore.toggleShowing(e.translationId);
+}
+function onTranslationRetry(): void {
+  const e = translationEntry.value;
+  if (e) void translationStore.retry(e.translationId);
+}
+
 // reasoning_replay（DeepSeek thinking 回传 400）错误气泡：附行动建议。
 // 结构化标记优先（落库路径打标）；老消息无标记时用共享谓词兜底，兼容历史数据。
 const reasoningReplayAdviceVisible = computed(() => {
@@ -26,9 +87,11 @@ const reasoningReplayAdviceVisible = computed(() => {
   return props.message.apiErrorKind === 'reasoning_replay' || isReasoningReplayApiError(props.message.content);
 });
 
-// 本次回复耗时文案（结束后气泡脚注）；与运行中 TurnTimer 共用 formatDurationMs 保持口径一致。
+// 本次回复耗时文案（结束后气泡脚注）；P4：恒时钟格式 formatDurationClock（m:ss 补零 0:07 /
+// ≥1h H:MM:SS，floor 截断不进位）——不再出现 6.8s 小数秒形态。TurnTimer④与工具行耗时维持
+// formatDurationMs 口径（口径差异已知会保留）。
 const durationText = computed(() =>
-  props.message.durationMs != null ? formatDurationMs(props.message.durationMs) : '',
+  props.message.durationMs != null ? formatDurationClock(props.message.durationMs) : '',
 );
 
 // B3：回合结束时刻（ended_at 持久化）文案；与 TurnTimer 完成态同口径（zh-CN 24 小时制）。
@@ -46,19 +109,23 @@ const endedAtMinuteText = computed(() =>
 );
 
 // S3：用户消息发送时刻（created_at，DB 带 Z UTC / 内存乐观毫秒级 ISO）文案——UI13-P5 起渲染于
-// 气泡正下方 caption 行「你 · 发送于 {HH:mm}」（原气泡内「发送于」脚注已移除）。
+// 气泡正下方 caption 行「你 · 发送于 {HH:mm:ss}」（原气泡内「发送于」脚注已移除；
+// P3 升秒级 2026-11-21——formatSentAt 单源，当天 HH:mm:ss / 跨天 M/d HH:mm:ss）。
 // 仅 user 气泡显示；缺失/非法返回空串不渲染（诚实不造数，与 endedAt 同原则）。
 const sentAtText = computed(() =>
   props.message.role === 'user' ? formatSentAt(props.message.createdAt) : '',
 );
 
-// p3/W2：markdown 正文文件链接点击委托（事件冒泡到内容容器，.md-file-link 由 markdown.ts
-// link_open 规则产出、data-clip-path 携带解析后的绝对路径）。非文件链接不拦截，外链照旧。
-function onContentClick(e: MouseEvent): void {
+// P6-B（2026-11-21）：markdown 正文文件链接右键委托（事件冒泡到内容容器，.md-file-link 由
+// markdown.ts link_open 规则产出、data-clip-path 携带解析后的绝对路径）。左键零动作——右键
+// 菜单是唯一交互入口（弹 useFileLinkMenuStore 5 项上下文菜单）。非文件链接（含 http 外链）
+// 不拦截（closest 不命中即 return），系统右键菜单照旧；exportMode（导出快照）不弹。
+function onContentContextMenu(e: MouseEvent): void {
   const el = (e.target as HTMLElement | null)?.closest?.('.md-file-link') as HTMLElement | null;
   if (!el) return;
+  e.preventDefault();
   const p = el.getAttribute('data-clip-path');
-  if (p) useFilePreview().open(p);
+  if (p) useFileLinkMenuStore().open(p, e.clientX, e.clientY);
 }
 
 // 复制反馈：点击后「已复制」保持 1.2s 再复位（与 InteractionPreview 一致）。
@@ -118,20 +185,38 @@ async function copyMessage(): Promise<void> {
       <!-- UI13-P5：user 的「你」角色头移除（元信息并入气泡下方 caption 行）；system 本无角色头，
            assistant/tool 的「Claude」头保留（渲染逐字节不变）。v-if 排除 user 后 role 类型收窄，
            原 `role === 'user' ? '你' : 'Claude'` 三元成不可达死代码且 vue-tsc 报 TS2367，
-           故直书 Claude 字面。 -->
-      <div v-if="message.role !== 'system' && message.role !== 'user'" class="bubble__role">
-        <span>Claude</span>
+           故直书 Claude 字面。
+           P5 挂载点 A：role 行包进 .bubble__role-row（flex，原型 role-row :161 形态）——
+           role 文本右侧挂 TranslationChrome（翻译激活且非 stopped 时显示；swap pill 推行尾）。 -->
+      <div v-if="message.role !== 'system' && message.role !== 'user'" class="bubble__role-row">
+        <span class="bubble__role">Claude</span>
+        <TranslationChrome
+          v-if="translationEntry && chromeVisible"
+          :status="translationEntry.status"
+          :progress="translationProgress"
+          :showing-translation="showTranslation"
+          @swap="onTranslationSwap"
+        />
       </div>
       <!-- user 气泡纯文本逐字回显（第五轮方案，2026-09-27）：插值自动 HTML 转义防 XSS，
            white-space: pre-wrap 按原文显示——气泡显示文本 === 实际发送文本 === 落库文本。
            不挂 v-enrich（mermaid/灯箱增强仅适用 markdown HTML）、不挂 markdown-body
            （纯文本无子元素，其语义失效）。 -->
       <div v-if="hasContent && message.role === 'user'" class="bubble__content">{{ message.content }}</div>
-      <!-- assistant/系统/工具仍走 markdown 渲染（v-html + 灯箱/mermaid 增强），行为零变化。 -->
-      <div v-else-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich @click="onContentClick" />
+      <!-- P5 挂载点 A：assistant 正文位原文/译文二选一（变体三·沉浸替换式——译文原位替换正文
+           渲染，非追加块）。showTranslation=false（未翻译/已切原文/已中止/导出模式）回落原文
+           markdown 分支，渲染逐字节不变。 -->
+      <TranslationViewport
+        v-else-if="hasContent && showTranslation && translationEntry"
+        :translation-id="translationEntry.translationId"
+        @retry="onTranslationRetry"
+      />
+      <!-- assistant/系统/工具仍走 markdown 渲染（v-html + 灯箱/mermaid 增强），行为零变化。
+           P6-B：文件链接交互入口唯一化为右键菜单（@contextmenu 委托，exportMode 不弹）；左键零动作。 -->
+      <div v-else-if="hasContent" class="bubble__content markdown-body" v-html="renderedContent" v-enrich @contextmenu="!exportMode && onContentContextMenu($event)" />
       <!-- S3→UI13-P5：user「发送于」时刻不再渲染为气泡内 .bubble__meta 脚注（原块已删除），
-           改为气泡正下方 caption 行「你 · 发送于 {HH:mm}」（见 wrapper 尾部）；caption 门控
-           同口径（缺失/非法 sentAtText 空串整行不渲染、无空行残留）。 -->
+           改为气泡正下方 caption 行「你 · 发送于 {HH:mm:ss}」（见 wrapper 尾部；P3 升秒级
+           2026-11-21）；caption 门控同口径（缺失/非法 sentAtText 空串整行不渲染、无空行残留）。 -->
       <div v-if="reasoningReplayAdviceVisible" class="bubble__advice" data-testid="reasoning-replay-advice">
         <div class="bubble__advice-title">已自动重试一次；若仍失败，可：</div>
         <ul class="bubble__advice-list">
@@ -158,7 +243,10 @@ async function copyMessage(): Promise<void> {
         <span v-if="endedAtText" class="bubble__meta-end">· 结束于 {{ endedAtText }}</span>
       </div>
       <!-- 仅 user / assistant 消息提供复制按钮；tool / system 不需要。
-           流式布局放在内容正下方独立一行，避免与正文重叠。 -->
+           流式布局放在内容正下方独立一行，避免与正文重叠。
+           P5 挂载点 A：copy 行同排追加翻译入口钮（用户裁决「仍在 copy 行」）——绝对定位并排
+           （copy 钮 right:0 不动，译钮 right:44px）；翻译激活（translating/error）时常显以承接
+           「进行中再点=中止 / 失败可重试」，否则随 hover 显现（与 copy 行既有语言一致）。 -->
       <button
         v-if="!exportMode && (message.role === 'user' || message.role === 'assistant')"
         type="button"
@@ -173,11 +261,25 @@ async function copyMessage(): Promise<void> {
           <path d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
         </svg>
       </button>
+      <TranslateButton
+        v-if="!exportMode && message.role === 'assistant' && hasContent"
+        class="bubble__translate"
+        :class="{ 'bubble__translate--active': translateState === 'translating' || translateState === 'error' }"
+        :state="translateState"
+        :progress="translationProgress"
+        :error-text="translationEntry?.error"
+        @click="onTranslateEntryClick"
+      />
     </div>
-    <!-- UI13-P5：user 消息元信息行（气泡正下方、随气泡右对齐）——「你 · 发送于 {HH:mm}」
-         （formatSentAt 单源：当天 HH:mm、跨天 M/d HH:mm；缺失/非法为空串整行不渲染，诚实不造数）
+    <!-- UI13-P5：user 消息元信息行（气泡正下方、随气泡右对齐）——「你 · 发送于 {HH:mm:ss}」
+         （formatSentAt 单源：P3 升秒级——当天 HH:mm:ss、跨天 M/d HH:mm:ss；缺失/非法为空串
+         整行不渲染，诚实不造数）+ 时钟 svg（P3 对齐②脚注视觉语言，同 .bubble__meta-clock 同形）
          +「来自队列」标签（自原角色头迁入，导出快照不含运行态标签）。 -->
     <div v-if="message.role === 'user' && sentAtText" class="bubble-caption">
+      <svg class="bubble-caption-clock" viewBox="0 0 24 24" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M12 7v5l3.5 2" />
+      </svg>
       你 · 发送于 {{ sentAtText }}
       <!-- 队列任务到点/立即执行发出的消息标（导出快照不含运行态标签） -->
       <span
@@ -229,7 +331,8 @@ async function copyMessage(): Promise<void> {
    纯色块在暖纸/草香等柔和主题上突兀廉价。右色条镜像助手气泡左色条，共享卡片语言。 */
 .bubble--user {
   /* UI13-P5：align-self: flex-end 迁移至 .bubble-wrap--user（wrap 承接，气泡经 align-items 同侧） */
-  max-width: 80%;
+  /* 行宽对齐（P3）：与 .bubble--assistant 同 85% 同参照系（.message-list__inner 800px 列），长消息折行点一致 */
+  max-width: 85%;
   background: color-mix(in srgb, var(--color-accent) 12%, var(--color-panel-soft));
   color: var(--color-text);
   border: 1px solid color-mix(in srgb, var(--color-accent) 30%, transparent);
@@ -296,11 +399,19 @@ async function copyMessage(): Promise<void> {
   list-style: disc;
 }
 
+/* P5 挂载点 A：role 行容器（原型 .bubble__role-row :161 形态——flex + gap 8px + margin-bottom
+   6px；原 .bubble__role 的 margin-bottom 迁入此行，role 文本样式不变）。 */
+.bubble__role-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
 .bubble__role {
   font-size: 0.6875rem;
   font-weight: 700;
   text-transform: uppercase;
-  margin-bottom: 6px;
   opacity: 0.7;
   display: flex;
   align-items: center;
@@ -354,8 +465,9 @@ async function copyMessage(): Promise<void> {
 }
 
 /* 文件链接（p3/W2）：markdown 正文中的文件链接按钮化样式（对齐效果图 .file-link）——
-   accent 色 + 点状下划线标示「可点开预览」，与普通网页外链区分；v-html 内容须 :deep
-   穿透。hover 切实线下划线给明确可点反馈。 */
+   accent 色 + 点状下划线标示「可交互」（P6-B 起交互入口为右键菜单，左键零动作；cursor/样式
+   系列保留仍可达），与普通网页外链区分；v-html 内容须 :deep 穿透。hover 切实线下划线给明确
+   可交互反馈。 */
 .bubble__content :deep(.md-file-link) {
   color: var(--color-accent-strong);
   font-weight: 500;
@@ -425,6 +537,21 @@ async function copyMessage(): Promise<void> {
   align-items: center;
 }
 
+/* P3（2026-11-21 批次）：caption 时钟 svg——与 .bubble__meta-clock（②气泡脚注时钟）同款声明
+   （同形逐字：12px / accent-strong 描边 / stroke-width 1.8 / 圆角端点 / opacity 0.85），用户
+   caption① 与 assistant 气泡脚注② 视觉语言一致。 */
+.bubble-caption-clock {
+  width: 0.75rem;
+  height: 0.75rem;
+  fill: none;
+  stroke: var(--color-accent-strong);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0.85;
+  flex: none;
+}
+
 /* 复制按钮：定位到气泡右下角外侧（贴近消息但浮在背景区上）。
    纯图标小尺寸，默认隐藏，hover 气泡才浮现。
    配色全部走主题 token（--color-accent / --color-text-muted / --color-border），
@@ -439,13 +566,15 @@ async function copyMessage(): Promise<void> {
    .bubble:hover 失效 → 按钮在命中前就回退到 opacity:0 / pointer-events:none 而消失（旧 bug）。
    这条全透明 ::after 把命中区从气泡底边连续延伸到按钮下方，鼠标全程都在 .bubble 命中区内，
    按钮稳定可达。无任何视觉影响（全透明、脱离文档流不占布局）。按钮靠 z-index:1 压在桥之上
-   保持可点。若改动按钮位置/尺寸，须同步调整此处覆盖范围。 */
+   保持可点。若改动按钮位置/尺寸，须同步调整此处覆盖范围。
+   P5（2026-11-19 UI 五点批次）：copy 行并排新增翻译入口钮（right:44px）→ 桥宽 40px→88px
+   覆盖两钮（本注释末句要求的同步）。 */
 .bubble::after {
   content: '';
   position: absolute;
   right: 0;
   bottom: -30px;
-  width: 40px;
+  width: 88px;
   height: 30px;
   z-index: 0;
 }
@@ -500,5 +629,30 @@ async function copyMessage(): Promise<void> {
   color: var(--color-accent-strong);
   background: color-mix(in srgb, var(--color-accent) 18%, var(--color-panel-soft));
   border-color: color-mix(in srgb, var(--color-accent) 50%, var(--color-border));
+}
+
+/* P5 翻译入口钮：copy 行并排（用户裁决「仍在 copy 行」）——绝对定位 right:44px（copy 钮
+   right:0 不动）、同 bottom:-26px 槽位。默认随 hover 显现（与 copy 行既有语言一致）；
+   翻译激活（translating=可中止 / error=可重试）时 --active 常显，中止/重试入口不要求悬停。
+   z-index:1 压在 hover 命中桥（::after）之上，可达性同 copy 钮。 */
+.bubble__translate {
+  position: absolute;
+  right: 44px;
+  bottom: -26px;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 1;
+  transition: opacity 0.15s ease;
+}
+
+.bubble:hover .bubble__translate,
+.bubble__translate:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.bubble__translate--active {
+  opacity: 1;
+  pointer-events: auto;
 }
 </style>

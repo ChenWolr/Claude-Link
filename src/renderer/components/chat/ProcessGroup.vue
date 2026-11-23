@@ -147,6 +147,7 @@ const items = computed<GroupItem[]>(() => {
         <ThinkingBlock
           v-if="item.type === 'thinking'"
           :content="item.msg!.content"
+          :message-id="item.msg!.processKind === 'redacted_thinking' ? undefined : item.msg!.id"
           :sealed="thinkingSealed"
           :exportMode="exportMode"
         />

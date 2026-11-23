@@ -10,14 +10,21 @@ import StalledBanner from './StalledBanner.vue';
 import ApiRetryBanner from './ApiRetryBanner.vue';
 import TurnFileChangesCard from './TurnFileChangesCard.vue';
 import TurnDiffDialog from './TurnDiffDialog.vue';
+import TranslateButton from './TranslateButton.vue';
+import TranslationChrome from './TranslationChrome.vue';
+import TranslationViewport from './TranslationViewport.vue';
 import { groupMessagesForRender, computeStats, type RenderItem } from '../../utils/group-messages';
 import type { RenderableMessage } from '../../../shared/types/export-image';
 import { copyTextToClipboard } from '../../utils/clipboard';
 import { mapFinalTextToTurnStart } from '../../utils/turn-diff-attach';
 import { useSessionStore } from '../../stores/session-store';
 import { useTurnDiffStore, type TurnDiffPatchTarget } from '../../stores/turn-diff-store';
+import { useTranslationStore } from '../../stores/translation-store';
 import { shouldHidePersistedForStreaming } from '../../../shared/turn-boundary';
-import { formatDurationMs, formatEndedAt } from '../../../shared/format-duration';
+// P4（2026-11-21 批次）：turnFootnote interrupted/error 分支的耗时数字与②气泡脚注同一时钟格式
+// 入口（formatDurationClock 恒 m:ss/H:MM:SS）。本组件无 formatDurationMs 消费（streamTimerText
+// 已随计时器迁移出 MessageList，历史 C4 钉在 tdd-c-chat-stream 卷基线红面中）。
+import { formatDurationClock } from '../../../shared/format-duration';
 
 const props = defineProps<{
   messages: Message[];
@@ -32,6 +39,7 @@ const props = defineProps<{
 }>();
 
 const sessionStore = useSessionStore();
+const translationStore = useTranslationStore();
 const container = ref<HTMLElement | null>(null);
 // OPT-6：内层内容 wrapper（ResizeObserver 观察面）。
 const innerRef = ref<HTMLElement | null>(null);
@@ -189,33 +197,26 @@ const renderItems = computed<RenderItem[]>(() => {
 // F1（2026-11-15 八问题批次）：回合终态脚注——该回合最后内容块之后的独立载体（renderItems
 // 循环后的列表尾，正文结尾/工具+思考结尾/纯工具/纯文本四形态共用同一载体，与尾部消息类型无关）。
 // 数据源：当次回合内存 meta（use-chat turn_ended 两分支经 setTurnFootnote 无条件记账；markRunning
-// 新回合边界清槽 → 恒只显最新回合）；无内存脚注时成功回合回落 DB 持久化值（V12 sessions.last_turn_*，
-// P2-1 中断不落库语义维持——中断/错误回合重开不显示，诚实不造数）。
+// 新回合边界清槽 → 恒只显最新回合）。
+// P2（2026-11-21 批次）：success 形态不再渲染（信息无损——②气泡脚注与④TurnTimer 完成态在场）；
+// DB lastTurn* 回落是 success 形态专用载体（V12 只在成功回合双写）→ 一并不渲染（原
+// network_interrupted 让位判定随回落整体消失死亡代码化，一并删除）；interrupted/error 保留。
 // exportMode 不渲染（导出面不新增载体）；sending 期间回合未终，不渲染。
-const turnFootnote = computed<{ text: string; kind: 'success' | 'interrupted' | 'error' } | null>(() => {
+const turnFootnote = computed<{ text: string; kind: 'interrupted' | 'error' } | null>(() => {
   if (props.exportMode) return null;
   if (props.sending) return null;
   const sid = sessionStore.activeSession?.id;
   if (!sid) return null;
   const note = sessionStore.turnFootnote[sid];
   if (note) {
-    const dur = note.durationMs > 0 ? formatDurationMs(note.durationMs) : '';
-    if (note.outcome === 'success') {
-      return { kind: 'success', text: dur ? `本次回复 ${dur} · 结束于 ${formatEndedAt(note.endedAt)}` : `结束于 ${formatEndedAt(note.endedAt)}` };
-    }
+    // P2：success 形态不再渲染（信息无损——②气泡脚注与④TurnTimer 完成态在场）。
+    if (note.outcome === 'success') return null;
+    // P4：耗时数字与②气泡脚注同一时钟格式入口（恒 m:ss/H:MM:SS，不再小数秒）。
+    const dur = note.durationMs > 0 ? formatDurationClock(note.durationMs) : '';
     if (note.outcome === 'interrupted') {
       return { kind: 'interrupted', text: dur ? `已中断 · 运行 ${dur}` : '已中断' };
     }
     return { kind: 'error', text: dur ? `失败 · 运行 ${dur}` : '失败' };
-  }
-  // 重开回落：成功回合读 DB 持久化值（V12 双写链既有；两字段同时非 null 才渲染，半写不显示）。
-  // P2-3（round-002 修复）归属校验：network_interrupted 常红态 = 最近回合以网络中断收场且无
-  // 脚注记账（markNetworkInterrupted 不设脚注），DB lastTurn* 属于更早的成功回合——不得把
-  // 上一成功回合的「本次回复 X · 结束于 Y」挂在刚中断回合内容下，回落让位（不渲染）。
-  if (sessionStore.sessionStatus[sid] === 'network_interrupted') return null;
-  const s = sessionStore.activeSession;
-  if (s?.lastTurnDurationMs != null && s.lastTurnEndedAt != null) {
-    return { kind: 'success', text: `本次回复 ${formatDurationMs(s.lastTurnDurationMs)} · 结束于 ${formatEndedAt(s.lastTurnEndedAt)}` };
   }
   return null;
 });
@@ -323,6 +324,60 @@ onBeforeUnmount(() => {
   copyResetTimers.clear();
 });
 
+// ── P5 挂载点 B（2026-11-19 UI 五点批次）：流式中正文位原文/译文二选一（变体三·沉浸替换式）──
+// stream target entry 从 translation-store 投影查得（状态源在主进程）。stream-group 无角色行
+//（StreamRenderer.vue:23 注释提到的 .msg-label 标签行已不存在——stale 注释，不复活），chrome
+// 行为正文视口正上方的独立 .tr-chrome 行。导出模式不接翻译（exportMode 恒 undefined）。
+const streamEntry = computed(() => {
+  if (props.exportMode) return undefined;
+  return translationStore.forTarget(sessionStore.activeSession?.id, { kind: 'stream' });
+});
+const showStreamTranslation = computed(() => {
+  const e = streamEntry.value;
+  return !!e && e.showingTranslation && e.status !== 'stopped';
+});
+const streamChromeVisible = computed(() => {
+  const e = streamEntry.value;
+  return !!e && e.status !== 'stopped';
+});
+const streamProgress = computed(() => {
+  const e = streamEntry.value;
+  if (!e || e.totalSegments === 0) return 0;
+  return Math.round((e.segments.length / e.totalSegments) * 100);
+});
+const streamTranslateState = computed<'idle' | 'translating' | 'done' | 'error'>(() => {
+  const s = streamEntry.value?.status;
+  if (s === 'translating') return 'translating';
+  if (s === 'error') return 'error';
+  if (s === 'done') return 'done';
+  return 'idle';
+});
+
+// 入口钮点击路由（同挂载点 A）：无 entry/stopped→START（target {kind:'stream'}，源=当前流式全文）；
+// translating→STOP（唯一「中止」路径）；done→toggleShowing；error→RETRY。
+// swap pill 只切视图（toggleShowing）——切回原文期间原文照常流入，译文主进程后台继续补齐。
+function onStreamEntryClick(): void {
+  const sid = sessionStore.activeSession?.id;
+  if (!sid) return;
+  const e = streamEntry.value;
+  if (!e || e.status === 'stopped') {
+    if (!props.streamingContent.trim()) return;
+    void translationStore.start(sid, { kind: 'stream' }, props.streamingContent);
+    return;
+  }
+  if (e.status === 'translating') void translationStore.stop(e.translationId);
+  else if (e.status === 'error') void translationStore.retry(e.translationId);
+  else translationStore.toggleShowing(e.translationId);
+}
+function onStreamSwap(): void {
+  const e = streamEntry.value;
+  if (e) translationStore.toggleShowing(e.translationId);
+}
+function onStreamRetry(): void {
+  const e = streamEntry.value;
+  if (e) void translationStore.retry(e.translationId);
+}
+
 // 发送者角色：fold（思考/工具过程）算 assistant 侧，message 按 role 判断。
 // 用于间距分组：同一发送者的连续消息间距收紧，发送者切换时间距加大。
 function getEffectiveRole(item: RenderItem): 'user' | 'assistant' {
@@ -425,7 +480,35 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
             <span class="tool-stream__label">🔧 正在调用工具…</span>
             <pre class="tool-stream__content">{{ streamingTool }}</pre>
           </div>
-          <StreamRenderer v-if="streamingContent" :content="streamingContent" />
+          <!-- P5 挂载点 B：正文视口正上方独立 .tr-chrome 行（徽标 + swap pill；翻译激活且非
+               stopped 时显示）。stream-group 无角色行——StreamRenderer.vue:23 提到的 .msg-label
+               标签行已不存在（stale 注释，不复活）。 -->
+          <div v-if="streamEntry && streamChromeVisible" class="tr-chrome">
+            <TranslationChrome
+              :status="streamEntry.status"
+              :progress="streamProgress"
+              :showing-translation="showStreamTranslation"
+              @swap="onStreamSwap"
+            />
+          </div>
+          <!-- P5 挂载点 B：正文位原文/译文二选一（变体三·沉浸替换式）——译文原位替换正文渲染，
+               showStreamTranslation=false 时回落 StreamRenderer（渲染逐字节不变）。 -->
+          <StreamRenderer v-if="streamingContent && !showStreamTranslation" :content="streamingContent" />
+          <TranslationViewport
+            v-else-if="streamingContent && showStreamTranslation && streamEntry"
+            :translation-id="streamEntry.translationId"
+            @retry="onStreamRetry"
+          />
+          <!-- P5 挂载点 B：.stream-tail 行（原型 :397-402 位置）——流式翻译入口钮（正文非空可见）。
+               点击路由由钮内状态定：进行中再点=中止（P5.1b）、失败再点=重试。 -->
+          <div v-if="!exportMode && streamingContent" class="stream-tail">
+            <TranslateButton
+              :state="streamTranslateState"
+              :progress="streamProgress"
+              :error-text="streamEntry?.error"
+              @click="onStreamEntryClick"
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -513,6 +596,21 @@ async function handleCopyClick(event: MouseEvent): Promise<void> {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+}
+
+/* P5 挂载点 B：stream chrome 行（正文视口正上方——徽标 + swap pill，swap pill 经
+   display:contents 直查行 flex、margin-left:auto 推行尾）。 */
+.tr-chrome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 752px;
+}
+
+/* P5 挂载点 B：.stream-tail 行（原型 :397-402）——流式翻译入口钮行。 */
+.stream-tail {
+  margin-top: 6px;
+  padding: 0 2px;
 }
 
 /* R3：轮末改动摘要加载失败轻提示——token 对齐 ChangesPanel .changes__error 横条

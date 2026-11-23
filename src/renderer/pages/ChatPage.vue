@@ -11,6 +11,7 @@ import { useCommandStore } from '../stores/command-store';
 import { useInteractionStore } from '../stores/interaction-store';
 import { useFsPickerStore } from '../stores/fs-picker-store';
 import { usePreviewStore } from '../stores/preview-store';
+import { useTranslationStore } from '../stores/translation-store';
 import { useDiffDialog } from '../composables/useDiffDialog';
 import { useToolDiffDialog } from '../composables/useToolDiffDialog';
 import { useImageLightbox } from '../composables/useImageLightbox';
@@ -33,6 +34,7 @@ const draftStore = useChatDraftStore();
 const planStore = useClaudePlanStore();
 const commandStore = useCommandStore();
 const fsPickerStore = useFsPickerStore();
+const translationStore = useTranslationStore();
 const { sending, error, lastFailedBySession, sendMessage, abort } = useChat();
 // 当前会话最近一次【失败】的 user 消息（按会话隔离）：error 置位时抓取，重新编辑据此恢复到主草稿。
 const lastFailedCurrent = computed(() => {
@@ -45,6 +47,71 @@ const activeCommandSnapshot = computed(() => {
   return sid ? commandStore.activeSnapshot(sid) : null;
 });
 const { displayContent, displayThinking, displayTool } = useStream();
+
+// ── P5（2026-11-19 UI 五点批次）：流式翻译跟随 / 恢复重挂载 / 回合边界投影清理 ──
+
+// 流式增长跟随（01 §5.4-B/C）：stream / thinking-stream entry 在场（用户流式中开过翻译）且
+// 对应流式文本增长时，1.5s 去抖幂等扩展 START（主进程 running 守卫再去重——本处不判增长方向，
+// 流式累加器只增不减）。切回原文期间翻译继续：swap 只切 showingTranslation（纯视图态），
+// 本 watch 只管源文本扩展，译文由主进程后台补齐（原型 imm-note 语义）。
+let streamFollowTimer: ReturnType<typeof setTimeout> | null = null;
+let thinkingFollowTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  () => {
+    const sid = store.activeSession?.id;
+    return [!!(sid && translationStore.forTarget(sid, { kind: 'stream' })), displayContent.value] as const;
+  },
+  ([entryActive, content]) => {
+    if (streamFollowTimer) {
+      clearTimeout(streamFollowTimer);
+      streamFollowTimer = null;
+    }
+    if (!entryActive || !content.trim()) return;
+    streamFollowTimer = setTimeout(() => {
+      streamFollowTimer = null;
+      const sid = store.activeSession?.id;
+      const text = displayContent.value;
+      if (!sid || !text.trim()) return;
+      if (!translationStore.forTarget(sid, { kind: 'stream' })) return;
+      void translationStore.start(sid, { kind: 'stream' }, text);
+    }, 1500);
+  },
+);
+watch(
+  () => {
+    const sid = store.activeSession?.id;
+    return [!!(sid && translationStore.forTarget(sid, { kind: 'thinking-stream' })), displayThinking.value] as const;
+  },
+  ([entryActive, content]) => {
+    if (thinkingFollowTimer) {
+      clearTimeout(thinkingFollowTimer);
+      thinkingFollowTimer = null;
+    }
+    if (!entryActive || !content.trim()) return;
+    thinkingFollowTimer = setTimeout(() => {
+      thinkingFollowTimer = null;
+      const sid = store.activeSession?.id;
+      const text = displayThinking.value;
+      if (!sid || !text.trim()) return;
+      if (!translationStore.forTarget(sid, { kind: 'thinking-stream' })) return;
+      void translationStore.start(sid, { kind: 'thinking-stream' }, text);
+    }, 1500);
+  },
+);
+
+// 回合边界（sending false→true）：上一回合的 stream/thinking-stream entry 已随迁移/回合结束
+// 失效——STOP 置 stopped（缓存与已译段保留，零计费损失）防旧 entry 的徽标/替换视口盖到新
+// 回合流式正文上（stream target 按会话索引、跨回合复用同一 entry）。申报：01 §5.4-B 未列
+// 此行，为新回合边界防串台的必要接线（详见实施报告申报事项）。
+watch(sending, (running, prev) => {
+  if (!running || prev) return;
+  const sid = store.activeSession?.id;
+  if (!sid) return;
+  const streamEntry = translationStore.forTarget(sid, { kind: 'stream' });
+  if (streamEntry) void translationStore.stop(streamEntry.translationId);
+  const thinkingEntry = translationStore.forTarget(sid, { kind: 'thinking-stream' });
+  if (thinkingEntry) void translationStore.stop(thinkingEntry.translationId);
+});
 
 // 内联提示（如"未选择工作空间"/附件暂存失败），自动消失。
 const notice = ref<string | null>(null);
@@ -195,6 +262,9 @@ onMounted(async () => {
   } catch {
     // 投影恢复失败不致命
   }
+  // P5：刷新/重挂载后翻译投影恢复（GET_STATE；状态源在主进程——translating 态译文块即时
+  // 可见并继续增长；缺省 showingTranslation=true 重挂载即显示译文）。
+  if (store.activeSession?.id) void translationStore.restore(store.activeSession.id);
   // 根因修复：监听已在 App.vue 全局注册，这里只刷新当前会话数据（重拉 messages）。
   store.refreshActiveSession();
   // 加载 Claude 计划快照（独立于手动排队 tasks 表）。
@@ -214,6 +284,8 @@ watch(
     dragCounter = 0;
     // 切换会话时加载该会话的 Claude 计划快照。
     if (newId) planStore.loadPlan(newId);
+    // P5：切会话恢复该会话翻译投影（主进程继续跑的翻译切回即见最新状态）。
+    if (newId) void translationStore.restore(newId);
     // A3 恢复门：切会话对新会话重入门（per-session 键，已过门幂等早退）。
     if (newId) void taskStore.ensureOverviewReady(newId);
   },
@@ -229,6 +301,15 @@ watch(
 onUnmounted(() => {
   if (noticeTimer) clearTimeout(noticeTimer);
   window.removeEventListener('keydown', onGlobalKeydown);
+  // P5：流式跟随去抖计时器清防泄漏。
+  if (streamFollowTimer) {
+    clearTimeout(streamFollowTimer);
+    streamFollowTimer = null;
+  }
+  if (thinkingFollowTimer) {
+    clearTimeout(thinkingFollowTimer);
+    thinkingFollowTimer = null;
+  }
 });
 
 // 工作空间必选：Claude Code 基于某目录运行，未选工作空间禁止发送。
