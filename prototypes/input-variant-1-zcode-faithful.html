@@ -1,0 +1,1123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>变体一 · zcode 忠实复刻 · 聊天输入框改版效果图（v2 返图修订）</title>
+<!--
+  ═══════════════════════════════════════════════════════════════════════
+  变体声明块 · input-variant-1-zcode-faithful（v2 返图修订版）
+  ─────────────────────────────────────────────────────────────────────
+  变体名：变体一 · zcode 忠实复刻
+  三维自述：
+    · 布局结构 = 卡片双行：TurnTimer 状态头条（现状浮岛第一行，ChatPage.vue:603）→
+      textarea 区 → 底部工具栏；工具栏位次与现状 SessionToolbar DOM 序 1:1：
+      上下文环（最左第一项）→ 工作空间 pill → 模型 pill → 思考强度 pill → 权限 pill →
+      + 附件 →（运行态：中断钮）→ 右端圆形发送钮。
+      斜杠菜单从卡片上方弹出（对齐现状 .slash-menu bottom:100%，ChatInput.vue:413），
+      附件 chip 列表在卡内顶部（对齐现状 AttachmentDraftList 于浮岛内部上方，ChatPage.vue:605）。
+    · 视觉语言 = 大圆角（卡片 var(--radius-lg)+4px=20px，卡片感最强）+ pill 化工具栏
+      （--radius-pill，沿用现状 .ctl__btn 边框+panel-soft 底+hover accent 描边语义）
+      + 圆形 ink 发送钮（--color-btn-ink / --color-on-btn-ink，44px 触达目标）。
+    · 信息密度 = 全量外露：权限 pill 完整显示「默认模式（需手动确认危险操作）」
+      （ConfigPage.vue:1190 逐字），模型 pill 完整显示「sub2api / gpt-5.6-sol」+「默认」tag，
+      工作空间/思考强度档名完整。
+  ── v2 返图修订登记（2026-11-22）──────────────────────────────────────
+  缘由：用户选定变体一进入 P7-B 后返图反馈——效果图漏画现状输入区的「上下文环」
+  （圆形进度环控件），并要求把现状 composer 其余被略去的常驻控件一并补入。
+  本次补入五项（均以现状 DOM 1:1 为准，不造假、不新增功能）：
+    1. 上下文环 ContextButton.vue（工具栏最左第一项）：svg 圆环 viewBox 36 / r 15.915 /
+       底圈 stroke=--color-border w3 op.7 / 扇形 stroke=--color-accent w3 round cap
+       dasharray「46 54」rotate(-90deg)，环体 1.375rem；hover popover 三行
+       （已用上下文/全部上下文/占比，mono tabular-nums）；思考中呼吸态（accent 55% 描边+
+       1.6s halo）；长按 1 秒压缩（红色 danger 进度环，注释标注）。
+       申报：按钮容器圆角由现状 radius-md 随变体一 pill 化语言升级为 radius-pill（stadium），
+       环体 svg 1:1 未动。
+    2. 工作空间 pill SessionToolbar.vue:179-228（data-testid="workspace-trigger"）：
+       文件夹图标 + 目录尾段「claude-link」；未选择时 warn 态（省略帧，title 注明）。
+    3. 思考强度 pill ThinkingLevelSelector.vue（data-testid="thinking-trigger"）：
+       灯泡图标 + 档名（「中」=跟随全局默认；自定义态 accent 描边帧以「极限」示意）；
+       下拉展开帧七档逐字（自动/低/中/高/超高/极限/工作流 Beta）+ foot 两行逐字。
+    4. TurnTimer.vue（浮岛第一行状态头条，ChatPage.vue:603）：运行中「呼吸点+正在回复+
+       tabular 计时+阶段徽章 pill」（思考中/调用工具中/工具执行中/生成回复中四阶段，
+       本图示「工具执行中」info 点）；完成态「绿点+本次回复+耗时+· 结束于 HH:mm:ss」。
+    5. 中断钮 SessionToolbar.vue:309-327（仅发送中显示）：danger 实底「■ 中断」+
+       长按 1 秒进度填充（白色 30% 覆盖）+ holding 光环，图⑨ 示意 holding 45%。
+  位次决策：v1 首版按 GOAL 规格把「+ 附件」放工具栏首位；返图要求上下文环按现状位次
+  「最左第一项」画入且其余控件「以现状 DOM 为准」——故 v2 工具栏整体改为现状 DOM 序
+  1:1（+ 附件随现状移至权限右侧），在图注与设计说明中留痕。
+  token 申报：中断钮现状混黑基准 #000000（SessionToolbar.vue:421 color-mix 第二色）非
+  variables.css token，镜像为 --abort-mix-black（注释标现状真源行号），避免组件 CSS 出现
+  裸 hex；其余全部引自 variables.css。
+  ─────────────────────────────────────────────────────────────────────
+  ui-ux-pro-max skill 调用留痕：2026-11-22 经 Skill 工具加载 ui-ux-pro-max（SKILL.md 全文）。
+    应用要点：SVG stroke 图标（禁 emoji 图标）、语义 token（组件 CSS 零硬编码 hex）、
+    正文对比度实测：--color-text-muted 对 bg 4.80 / 对 panel 4.63（均过 AA 正文档）、
+    ink 白字对 accent 4.43（过 3:1 图形/大字号档）、动效走 --duration/--ease token、
+    reduced-motion 由 token 层兜底。申报：skill 附带的 search.py 检索脚本因本机无 Python 3
+    运行时（WindowsApps stub，exit 49）未能执行，设计依据为 SKILL.md 内建规则表（fallback）。
+  与现状对应关系（验收锚点）：
+    · data-testid="chat-input-textarea"（ChatInput.vue:386）、
+      data-testid="chat-send-button"（ChatInput.vue:396）、
+      data-testid="slash-menu"/"slash-menu-item"/"slash-menu-origin"（ChatInput.vue:335/351/362）、
+      data-testid="workspace-trigger"（SessionToolbar.vue:182）、
+      data-testid="thinking-trigger"（ThinkingLevelSelector.vue:103）以真实属性写在对应元素上。
+    · 斜杠命令/来源徽章/provenance 文案逐字对齐 ChatInput.vue ORIGIN_LABELS（74-79）与
+      状态提示（369-379）；权限四档文案逐字对齐 ConfigPage.vue:1190-1193；
+      权限菜单 foot 逐字对齐 SessionToolbar.vue:286；思考强度七档/foot 逐字对齐
+      ThinkingLevelSelector.vue:25-33/140-142；TurnTimer 文案逐字对齐 TurnTimer.vue:57-75；
+      分页 5 项对齐 COMMANDS_PAGE_SIZE（35）。
+    · role=listbox 实际挂内层 .slash-menu__list（现状 ChatInput.vue:338-343，E-C3 结构），
+      本图为简化示意；P7-B 实现以现状 ARIA 分层为准。
+    · token 全部引自 src/renderer/assets/styles/variables.css（:root 镜像块内注释标真源变量名）。
+  ═══════════════════════════════════════════════════════════════════════
+-->
+<style>
+/* ── :root 镜像块：逐值镜像 src/renderer/assets/styles/variables.css（真源变量名见行尾注释）。
+     组件样式一律引用 var(--…) 变量名，不硬编码 hex——主题九板运行时经 apply-theme 覆写即可自动适配。 ── */
+:root {
+  color-scheme: light;
+  --color-bg: #F8F4ED;              /* variables.css --color-bg */
+  --color-panel: #F4F0EA;           /* variables.css --color-panel */
+  --color-panel-soft: #FCFAF5;      /* variables.css --color-panel-soft */
+  --color-border: rgba(122, 96, 88, 0.18);   /* variables.css --color-border */
+  --color-border-strong: #D9D0C6;   /* variables.css --color-border-strong */
+  --color-text: #3B3D3F;            /* variables.css --color-text */
+  --color-text-muted: #6A6C70;      /* variables.css --color-text-muted */
+  --color-text-sub: var(--color-text-muted); /* variables.css --color-text-sub */
+  --color-accent: #537D96;          /* variables.css --color-accent */
+  --color-accent-strong: #456A80;   /* variables.css --color-accent-strong */
+  --color-on-accent: #FFFFFF;       /* variables.css --color-on-accent */
+  --color-btn-ink: var(--color-accent);      /* variables.css --color-btn-ink（墨石板运行时覆写为近黑） */
+  --color-on-btn-ink: var(--color-on-accent); /* variables.css --color-on-btn-ink */
+  --color-danger: #8B3A3A;          /* variables.css --color-danger */
+  --color-warn: #C9A227;            /* variables.css --color-warn */
+  --color-warn-strong: #8A6D2B;     /* variables.css --color-warn-strong */
+  --color-fail: #C05656;            /* variables.css --color-fail */
+  --color-fail-strong: #8B3A3A;     /* variables.css --color-fail-strong */
+  --color-info: #3B7DD8;            /* variables.css --color-info */
+  --color-info-strong: #2563EB;     /* variables.css --color-info-strong */
+  --color-success: #4A9E5E;         /* variables.css --color-success */
+  --color-bubble-user-bg: #D9E9ED;  /* variables.css --color-bubble-user-bg（固定浅蓝，不随色板） */
+  --color-bubble-user-ink: #17181A; /* variables.css --color-bubble-user-ink */
+  --abort-mix-black: #000000;       /* 非 variables.css token：现状 SessionToolbar.vue:421 中断钮混黑基准 #000000，v2 镜像申报（避免组件 CSS 裸 hex） */
+  --radius-xs: 4px;                 /* variables.css --radius-xs */
+  --radius-sm: 8px;                 /* variables.css --radius-sm */
+  --radius-md: 12px;                /* variables.css --radius-md */
+  --radius-lg: 16px;                /* variables.css --radius-lg */
+  --radius-pill: 999px;             /* variables.css --radius-pill */
+  --ring-light: inset 0 -1px 0 rgba(0, 0, 0, 0.04);        /* variables.css --ring-light */
+  --ring-light-accent: inset 0 -1px 0 rgba(0, 0, 0, 0.06); /* variables.css --ring-light-accent */
+  --elevation-1: 0 1px 2px rgba(0, 0, 0, 0.06);            /* variables.css --elevation-1 */
+  --elevation-2: 0 4px 12px rgba(0, 0, 0, 0.08);           /* variables.css --elevation-2 */
+  --elevation-3: 0 12px 32px rgba(0, 0, 0, 0.12);          /* variables.css --elevation-3 */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);               /* variables.css --ease-out */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);        /* variables.css --ease-spring */
+  --duration-fast: 120ms;           /* variables.css --duration-fast */
+  --duration-base: 200ms;           /* variables.css --duration-base */
+  --duration-slow: 320ms;           /* variables.css --duration-slow */
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; /* variables.css --font-sans */
+  --font-mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, "Liberation Mono", monospace;     /* variables.css --font-mono */
+  --font-size-base: 16px;           /* variables.css --font-size-base */
+  --chat-bottom-max-width: 800px;   /* variables.css --chat-bottom-max-width */
+  --chat-bottom-pad-x: 1.5rem;      /* variables.css --chat-bottom-pad-x */
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+}
+
+.page { max-width: 1080px; margin: 0 auto; padding: 28px 32px 48px; }
+
+/* ── 页头：变体名 + 三维自述 + skill 留痕（可读声明，另在文件头注释有完整版） ── */
+.head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.head h1 { margin: 0; font-size: 22px; line-height: 1.3; }
+.tag {
+  font-size: 12px; color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 35%, transparent);
+  border-radius: var(--radius-pill); padding: 2px 10px;
+}
+.decl {
+  margin: 10px 0 26px; color: var(--color-text-muted); font-size: 12px; line-height: 1.7;
+  border: 1px dashed var(--color-border-strong); border-radius: var(--radius-md);
+  padding: 10px 14px; background: var(--color-panel-soft);
+}
+.decl b { color: var(--color-text); font-weight: 600; }
+.decl .skill-trace { display: block; margin-top: 4px; color: var(--color-text-muted); }
+.decl .v2-note { display: block; margin-top: 4px; color: var(--color-warn-strong); }
+
+/* ── 图（状态帧）：标签 + 舞台 ── */
+.figure { margin: 0 0 34px; }
+.fig-label {
+  display: flex; align-items: baseline; gap: 10px; margin: 0 0 8px;
+  font-size: 13px; font-weight: 700; color: var(--color-text);
+}
+.fig-label .no {
+  flex: none; width: 22px; height: 22px; border-radius: var(--radius-pill);
+  background: var(--color-btn-ink); color: var(--color-on-btn-ink);
+  font-size: 11px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
+  align-self: center;
+}
+.fig-label .map { font-weight: 400; font-size: 11px; color: var(--color-text-muted); }
+.stage {
+  position: relative;
+  background: color-mix(in srgb, var(--color-panel) 55%, var(--color-bg));
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  padding: 18px 24px 22px; overflow: hidden;
+}
+/* 弹层帧头部预留（斜杠/权限/模型/加号/上下文 popover/思考强度 弹层向上弹出） */
+.stage.headroom-slash  { padding-top: 316px; }
+.stage.headroom-menu   { padding-top: 286px; }
+.stage.headroom-cascade{ padding-top: 274px; }
+.stage.headroom-plus   { padding-top: 188px; }
+.stage.headroom-tl     { padding-top: 322px; }
+.stage.headroom-ctx    { padding-top: 158px; }
+
+/* ── 消息流底衬：仅用于交代「浮岛悬浮在消息流之上」的现状语境（ChatPage .chat-composer） ── */
+.transcript { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.bubble {
+  max-width: 66%; padding: 9px 13px; font-size: 13px; line-height: 1.55;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-panel-soft); box-shadow: var(--ring-light);
+  color: var(--color-text);
+}
+.bubble.user { align-self: flex-end; background: var(--color-bubble-user-bg); }
+.bubble .who { display: block; font-size: 10px; color: var(--color-text-muted); margin-bottom: 2px; }
+
+/* ══════════════════ 变体一核心：卡片双行浮岛 ══════════════════ */
+.composer {
+  position: relative; width: 100%; max-width: var(--chat-bottom-max-width); margin: 0 auto;
+  background: var(--color-panel);
+  border: 1px solid var(--color-border);
+  border-radius: calc(var(--radius-lg) + 4px); /* 大圆角卡片：--radius-lg 16px 起（+4px=20px，卡片感最强） */
+  box-shadow: var(--elevation-3), var(--ring-light); /* 对齐现状 .chat-composer 浮岛投影（ChatPage.vue:662） */
+}
+
+/* ── TurnTimer（现状 TurnTimer.vue 1:1：浮岛第一行状态头条，ChatPage.vue:603）── */
+.turn-timer { display: flex; align-items: center; gap: 11px; padding: 8px var(--chat-bottom-pad-x); border-bottom: 1px solid var(--color-border); font-size: 0.75rem; }
+.turn-timer__lead { display: inline-flex; align-items: center; gap: 8px; }
+.turn-timer__label { color: var(--color-text); font-weight: 600; }
+.turn-timer__time { color: var(--color-accent-strong); font-weight: 700; font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+.turn-timer__live { position: relative; width: 8px; height: 8px; flex-shrink: 0; }
+.turn-timer__live::before { content: ''; position: absolute; inset: 0; border-radius: 50%; background: var(--color-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-accent) 16%, transparent); }
+.turn-timer__live::after { content: ''; position: absolute; inset: 0; border-radius: 50%; background: var(--color-accent); animation: turn-timer-ping 2.1s cubic-bezier(0, 0, 0.2, 1) infinite; }
+@keyframes turn-timer-ping { 0% { transform: scale(1); opacity: 0.55; } 72%, 100% { transform: scale(2.7); opacity: 0; } }
+.turn-timer__phase { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border: 1px solid var(--color-border); border-radius: var(--radius-pill); background: color-mix(in srgb, var(--color-text) 5%, transparent); color: var(--color-text-muted); font-size: 0.6875rem; white-space: nowrap; }
+.turn-timer__pdot { width: 5px; height: 5px; border-radius: 50%; background: var(--color-accent); flex-shrink: 0; }
+.turn-timer__phase--tool-running .turn-timer__pdot { background: var(--color-info); animation: turn-timer-pdot-pulse 1.2s ease-in-out infinite; }
+@keyframes turn-timer-pdot-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+.turn-timer--done .turn-timer__time { color: var(--color-success); }
+.turn-timer__done-dot { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50%; background: var(--color-success); }
+.turn-timer__end { color: var(--color-text-muted); }
+
+/* 附件 chip 列表：卡内顶部（对齐现状 AttachmentDraftList 位置，ChatPage.vue:605） */
+.att-row { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px var(--chat-bottom-pad-x) 0; }
+.att-card {
+  position: relative; display: flex; align-items: center; gap: 6px;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-panel); padding: 5px 8px; box-shadow: var(--ring-light); max-width: 13rem;
+}
+.att-thumb {
+  width: 2.5rem; height: 2.5rem; border-radius: var(--radius-sm); flex: none;
+  background:
+    radial-gradient(circle at 30% 28%, color-mix(in srgb, var(--color-warn) 38%, var(--color-panel-soft)) 0 18%, transparent 19%),
+    linear-gradient(160deg, color-mix(in srgb, var(--color-accent) 26%, var(--color-panel-soft)), color-mix(in srgb, var(--color-accent) 8%, var(--color-panel-soft)));
+  display: inline-flex; align-items: flex-end; justify-content: center; overflow: hidden;
+}
+.att-thumb svg { width: 20px; height: 20px; fill: none; stroke: color-mix(in srgb, var(--color-text) 55%, transparent); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.att-badge {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 2rem; height: 1.5rem; padding: 0 6px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--color-accent) 16%, var(--color-panel-soft));
+  color: var(--color-accent-strong);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+}
+.att-meta { display: flex; flex-direction: column; min-width: 0; }
+.att-name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 8rem; }
+.att-size { font-size: 10px; color: var(--color-text-muted); }
+.att-remove {
+  flex: none; width: 1.125rem; height: 1.125rem; line-height: 1; border: 0; border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--color-text) 14%, transparent); color: var(--color-text-muted); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 11px;
+}
+.att-remove:hover { background: var(--color-danger); color: var(--color-on-accent); }
+
+/* 双行之行 1：textarea 区（透明输入面，卡片即输入面——zcode 形态；testid 对齐 ChatInput.vue:386） */
+.composer .input-zone { padding: 14px var(--chat-bottom-pad-x) 4px; }
+.composer textarea {
+  display: block; width: 100%; min-height: 42px; max-height: calc(0.875rem * 1.5 * 8 + 22px);
+  border: 0; outline: none; resize: none; overflow-y: auto;
+  background: transparent; color: var(--color-text);
+  font-family: var(--font-sans); font-size: 0.875rem; line-height: 1.5; /* 字号/行高对齐现状 textarea（ChatInput.vue:538-539） */
+  padding: 0;
+}
+.composer textarea::placeholder { color: var(--color-text-muted); }
+.composer textarea:disabled { color: var(--color-text-muted); cursor: not-allowed; } /* 运行态示意（现状 :disabled="chatInputDisabled"） */
+
+/* 双行之行 2：pill 化工具栏（位次=现状 SessionToolbar DOM 序：上下文环→工作空间→模型→思考强度→权限→+ 附件→[中断]→圆形发送） */
+.toolbar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 8px 12px;
+}
+
+/* 运行态右端组：中断+发送成组贴右（margin-left:auto 于组上，组内 gap 相邻） */
+.toolbar__end { display: inline-flex; align-items: center; gap: 8px; margin-left: auto; }
+
+/* 上下文环（现状 ContextButton.vue 1:1：工具栏最左第一项；环 svg 36 viewBox r15.915 未动） */
+.ctx-btn {
+  position: relative; flex: none; display: inline-flex; align-items: center; justify-content: center;
+  padding: 3px; cursor: pointer;
+  border: 1px solid var(--color-border); border-radius: var(--radius-pill); /* v2 申报：现状 radius-md，随变体一 pill 化语言升级；环体 1:1 */
+  background: var(--color-panel-soft); color: var(--color-text-muted);
+  transition: border-color var(--duration-fast) var(--ease-out);
+}
+.ctx-btn:hover { border-color: var(--color-accent); }
+.ctx-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ctx-btn--thinking { border-color: color-mix(in srgb, var(--color-accent) 55%, transparent); animation: ctx-thinking 1.6s ease-in-out infinite; }
+@keyframes ctx-thinking { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 0%, transparent); } 50% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 22%, transparent); } }
+.ctx-ring { width: 1.375rem; height: 1.375rem; display: block; transform: rotate(-90deg); } /* 周长≈100，dasharray 百分比即扇形占用（现状注释口径） */
+.ctx-ring circle { fill: none; stroke-width: 3; }
+.ctx-ring__bg { stroke: var(--color-border); opacity: 0.7; }
+.ctx-ring__fg { stroke: var(--color-accent); stroke-linecap: round; }
+.ctx-ring__progress { stroke: var(--color-danger); stroke-linecap: round; } /* 长按 1 秒压缩：红色进度环 */
+.ctx-popover {
+  position: absolute; left: 0; bottom: calc(100% + 6px); z-index: 100;
+  min-width: 13.75rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-panel); padding: 12px;
+  display: flex; flex-direction: column; gap: 8px;
+  box-shadow: var(--elevation-3), var(--ring-light);
+}
+.ctx-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 0.75rem; color: var(--color-text-muted); }
+.ctx-row code { font-family: var(--font-mono); color: var(--color-text); font-variant-numeric: tabular-nums; }
+.ctx-row--pct { color: var(--color-text); }
+.ctx-row--pct code { color: var(--color-accent-strong); }
+
+/* 「+」附件入口：图标钮（硬约束 3；现状位次在权限右侧）；pill 化语言下给可见 pill 底 */
+.plus-btn {
+  flex: none; width: 32px; height: 32px; padding: 0; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--color-border); border-radius: var(--radius-pill);
+  background: var(--color-panel-soft); color: var(--color-text);
+  transition: border-color var(--duration-fast) var(--ease-out), background-color var(--duration-fast) var(--ease-out);
+}
+.plus-btn:hover { border-color: var(--color-accent); background: var(--color-panel-soft); }
+.plus-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.plus-btn svg, .ctl svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.plus-btn svg { width: 15px; height: 15px; }
+
+/* pill 基础：对齐现状 .ctl__btn（边框 + panel-soft 底 + 12px + hover accent 描边），圆角升级 --radius-pill */
+.ctl {
+  display: inline-flex; align-items: center; gap: 5px;
+  max-width: 300px; padding: 5px 11px; cursor: pointer;
+  border: 1px solid var(--color-border); border-radius: var(--radius-pill);
+  background: var(--color-panel-soft); color: var(--color-text);
+  font-size: 0.75rem; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: border-color var(--duration-fast) var(--ease-out);
+}
+.ctl:hover { border-color: var(--color-accent); }
+.ctl:disabled { opacity: 0.5; cursor: not-allowed; }
+.ctl:disabled:hover { border-color: var(--color-border); }
+.ctl .caret { flex: none; width: 11px !important; height: 11px !important; opacity: 0.6; }
+.ctl .muted { color: var(--color-text-muted); }
+.ctl .sep { color: var(--color-text-muted); margin: 0 1px; }
+.ctl .model-id { font-family: var(--font-mono); font-size: 11px; font-weight: 700; }
+.ctl .default-tag {
+  flex: none; font-size: 10px; font-weight: 600; color: var(--color-accent-strong);
+  background: color-mix(in srgb, var(--color-accent) 14%, transparent);
+  border-radius: var(--radius-xs); padding: 1px 5px;
+}
+/* 思考强度自定义态（现状 tl-btn--custom 1:1：accent 描边 + accent-strong 文字） */
+.ctl--custom { border-color: color-mix(in srgb, var(--color-accent) 55%, transparent); color: var(--color-accent-strong); }
+
+/* 中断钮（现状 SessionToolbar.vue ctl__btn--abort 1:1：danger 实底、长按进度填充、holding 光环） */
+.abort-pill {
+  position: relative; display: inline-flex; align-items: center; gap: 4px;
+  margin-left: auto; /* 现状 ctl--right 推至最右的语义（SessionToolbar.vue:351-353）；换行行内亦贴右 */
+  padding: 5px 12px; cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 80%, var(--abort-mix-black));
+  border-radius: var(--radius-pill); /* v2 申报：现状 radius-md，随变体一 pill 化语言升级 */
+  background: color-mix(in srgb, var(--color-danger) 80%, var(--abort-mix-black));
+  color: var(--color-on-accent); font-size: 0.75rem; font-weight: 700;
+}
+.abort-pill__fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: inherit; background: color-mix(in srgb, var(--color-on-accent) 30%, transparent); pointer-events: none; }
+.abort-pill__label { position: relative; }
+.abort-pill--holding { border-color: var(--color-danger); box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-danger) 35%, transparent); }
+
+/* 圆形 ink 发送钮（硬约束 2；testid 对齐 ChatInput.vue:396；ink 语义对齐 ChatInput.vue:554-566） */
+.send-btn {
+  flex: none; width: 44px; height: 44px; padding: 0; cursor: pointer;
+  margin-left: auto; /* 右端定位：单行时贴卡右缘；极窄换行时亦推至行尾（工艺修复轮，替代 spacer） */
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: var(--radius-pill); /* 999px → 正圆 */
+  background: var(--color-btn-ink); color: var(--color-on-btn-ink);
+  transition: filter var(--duration-fast) var(--ease-out);
+}
+.send-btn:hover:not(:disabled) { filter: brightness(0.92); } /* 对齐现状 button:hover 手法（ChatInput.vue:571） */
+.send-btn:disabled { cursor: not-allowed; opacity: 0.5; }     /* 对齐现状 disabled（ChatInput.vue:575-577） */
+.send-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+
+/* 键位提示：现状交互语义（Enter 发送 / Shift+Enter 换行，ChatInput.vue:168-173）的视觉化注脚 */
+.kbd-hint { margin: 8px auto 0; max-width: var(--chat-bottom-max-width); text-align: right; font-size: 10px; color: var(--color-text-muted); }
+
+/* ══════════════════ 斜杠菜单：卡片上方弹出（bottom:100%，对齐现状 ChatInput.vue:413） ══════════════════ */
+.slash-menu {
+  position: absolute; bottom: 100%; left: 0; right: 0; z-index: 50;
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  background: var(--color-panel);
+  box-shadow: var(--elevation-2), var(--ring-light);
+  padding: 8px 0; display: flex; flex-direction: column; gap: 2px;
+}
+.slash-menu__item { display: flex; flex-direction: column; gap: 2px; padding: 5px 14px; cursor: pointer; }
+.slash-menu__item:hover, .slash-menu__item.active { background: var(--color-panel-soft); }
+.slash-menu__row { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.slash-menu__name { color: var(--color-accent-strong); font-size: 0.8125rem; font-weight: 600; }
+.slash-menu__desc { color: var(--color-text-muted); font-size: 0.6875rem; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.slash-menu__origin { margin-left: auto; padding-left: 8px; color: var(--color-text-muted); font-size: 0.6875rem; white-space: nowrap; }
+.slash-menu__origin[data-origin='builtin'] { color: var(--color-accent-strong); }
+.slash-menu__origin[data-origin='user-skill'] { color: var(--color-text-muted); }
+.slash-menu__hint { padding: 4px 14px; color: var(--color-text-muted); font-size: 0.6875rem; border-top: 1px solid var(--color-border); }
+.slash-menu__provenance { padding: 4px 14px; color: var(--color-text-muted); font-size: 0.6875rem; border-top: 1px solid var(--color-border); display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* ══════════════════ 权限下拉：四档菜单（文案逐字 ConfigPage.vue:1190-1193） ══════════════════ */
+.perm-menu {
+  /* 对齐权限 pill 左缘（浏览器实测 pill left=442；修复审查 F3 同族 +14px 轻症） */
+  position: absolute; bottom: calc(100% + 6px); left: 442px; z-index: 100;
+  min-width: 21rem; max-width: 24rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-panel); padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  box-shadow: var(--elevation-3), var(--ring-light);
+}
+.perm-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-text); text-align: left; cursor: pointer; font-family: var(--font-sans); font-size: 0.8125rem; }
+.perm-item:hover, .perm-item--active { background: var(--color-panel-soft); }
+.perm-item__icon { flex: none; width: 2rem; height: 2rem; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-pill); background: color-mix(in srgb, var(--color-text) 12%, var(--color-panel)); color: var(--color-text); }
+.perm-item__icon svg { width: 1rem; height: 1rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.perm-item__label { font-weight: 600; line-height: 1.2; }
+.perm-item__label .sub { font-weight: 400; color: var(--color-text-muted); }
+.perm-item__check { flex: none; width: 1rem; height: 1rem; margin-left: auto; color: var(--color-accent); fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.perm-foot { height: 2.125rem; margin-top: 2px; border-top: 1px solid var(--color-border); display: flex; align-items: center; padding: 0 11px; color: var(--color-text-muted); font-size: 0.625rem; flex: none; }
+
+/* ══════════════════ 思考强度下拉：向上展开（对齐现状 ThinkingLevelSelector tl-menu） ══════════════════ */
+.tl-menu {
+  /* 右缘对齐思考 pill 右缘（浏览器实测 pill right=434 → right offset=366；现状 tl-menu right:0 相对 wrap 同语义） */
+  position: absolute; bottom: calc(100% + 6px); right: 366px; z-index: 100;
+  min-width: 18.75rem; max-width: 23.75rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-panel); padding: 6px;
+  display: flex; flex-direction: column; gap: 2px;
+  box-shadow: var(--elevation-3), var(--ring-light);
+}
+.tl-item { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--color-text); text-align: left; cursor: pointer; font-family: var(--font-sans); }
+.tl-item:hover, .tl-item--active { background: var(--color-panel-soft); }
+.tl-item__label { font-size: 0.8125rem; font-weight: 600; line-height: 1.2; }
+.tl-item__beta { margin-left: 6px; padding: 1px 5px; border-radius: var(--radius-xs); border: 1px solid color-mix(in srgb, var(--color-fail) 30%, transparent); background: color-mix(in srgb, var(--color-fail) 10%, transparent); color: var(--color-fail-strong); font-size: 0.5625rem; font-weight: 700; line-height: 1; vertical-align: middle; }
+.tl-item__check { flex: none; width: 1rem; height: 1rem; margin-left: auto; color: var(--color-accent); fill: none; stroke: currentColor; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+.tl-foot { padding: 6px 10px 4px; font-size: 0.6875rem; color: var(--color-text-muted); text-align: center; border-top: 1px solid var(--color-border); }
+.tl-foot + .tl-foot { border-top: 0; padding-top: 0; }
+
+/* ══════════════════ 模型下拉：向上双列级联（对齐现状 ProviderModelSelector a2 形态） ══════════════════ */
+/* 对齐模型 pill 左缘（浏览器实测 pill left=154；现状 ProviderModelSelector cascade left:0 相对 pill wrap 同语义。
+   审查 F3 要求对齐 pill 右缘：v2 位次下 pill 右缘=372，级联总宽 426 → 右缘对齐需 left=-54 越出卡缘，
+   故改对齐左缘并在此申报（设计说明与报告已留痕）。） */
+.cascade { position: absolute; bottom: calc(100% + 6px); left: 154px; z-index: 100; display: flex; align-items: flex-end; filter: drop-shadow(var(--elevation-3)); }
+.cascade .menu { background: var(--color-panel); border: 1px solid var(--color-border); display: flex; flex-direction: column; }
+.cascade .providers { width: 190px; border-radius: var(--radius-md) 0 0 var(--radius-md); }
+.cascade .models { width: 236px; border-radius: 0 var(--radius-md) var(--radius-md) 0; background: var(--color-panel-soft); }
+.menu-head { height: 38px; padding: 10px 12px 8px; font-size: 11px; color: var(--color-text-muted); border-bottom: 1px solid var(--color-border); display: flex; align-items: center; justify-content: space-between; letter-spacing: 0.04em; }
+.menu-head b { font-size: 10px; font-weight: 500; color: var(--color-text-muted); }
+.scroll { max-height: calc(42px * 4); overflow-y: auto; }
+.item { height: 42px; width: 100%; border: 0; background: transparent; padding: 0 11px; display: flex; align-items: center; gap: 8px; text-align: left; color: var(--color-text); cursor: pointer; font-family: var(--font-sans); font-size: 12px; }
+.item:hover, .item.active { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.item.active { color: var(--color-accent-strong); font-weight: 650; }
+.item-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.count { margin-left: auto; flex: none; font-size: 10px; color: var(--color-text-muted); background: color-mix(in srgb, var(--color-text) 7%, transparent); padding: 2px 6px; border-radius: var(--radius-pill); }
+.arrow, .check { margin-left: auto; color: var(--color-accent-strong); }
+.model-id2 { font-family: var(--font-mono); font-size: 11px; }
+.model-meta { margin-left: auto; color: var(--color-text-muted); font-size: 10px; white-space: nowrap; }
+.foot { height: 34px; border-top: 1px solid var(--color-border); display: flex; align-items: center; padding: 0 11px; color: var(--color-text-muted); font-size: 10px; }
+
+/* ══════════════════ 「+」附件弹层（硬约束 3：hover/弹层示意附件选择） ══════════════════ */
+.plus-menu {
+  /* 右缘对齐 + 钮右缘（浏览器实测 pill right=721 → right offset=79；v2 位次下 + 钮靠卡缘，左对齐将越出卡缘） */
+  position: absolute; bottom: calc(100% + 6px); right: 79px; z-index: 100;
+  min-width: 15rem; border: 1px solid var(--color-border); border-radius: var(--radius-md);
+  background: var(--color-panel); padding: 6px; display: flex; flex-direction: column; gap: 1px;
+  box-shadow: var(--elevation-3), var(--ring-light);
+}
+.plus-menu .item { height: 34px; font-size: 12px; border-radius: var(--radius-sm); }
+.plus-menu .item svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.plus-menu .hint { padding: 6px 11px 4px; color: var(--color-text-muted); font-size: 10px; border-top: 1px solid var(--color-border); margin-top: 2px; }
+
+/* 发送钮双态对照条（硬约束 2：disabled + active 两态显式并排） */
+.state-strip { display: flex; gap: 28px; align-items: center; justify-content: flex-start; }
+.state-cell { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--color-text-muted); }
+.state-cell .chip {
+  font-size: 10px; color: var(--color-text-muted);
+  border: 1px dashed var(--color-border-strong); border-radius: var(--radius-xs); padding: 1px 6px;
+}
+
+/* 窄窗降级示意（<900px）：显式 560px 定宽帧 + 真实 @media 双保险 */
+.narrow-frame { width: 560px; max-width: 100%; }
+.narrow-frame .toolbar { gap: 6px; }
+.narrow-frame .ctl { max-width: 150px; }
+.narrow-frame .ctl .perm-full { display: none; } /* 窄窗收起括号说明，仅存档名 */
+.narrow-frame .ctl .perm-short { display: inline; }
+.ctl .perm-short { display: none; }
+
+/* 真实媒体查询：浏览器窗宽 <900px 时本页主视角自动降级（附指令要求的窄窗示意） */
+@media (max-width: 899px) {
+  .page { padding: 20px 16px 36px; }
+  .stage { padding: 14px 12px 16px; }
+  .stage.headroom-slash { padding-top: 330px; }
+  .ctl { max-width: 150px; }
+  .ctl .perm-full { display: none; }
+  .ctl .perm-short { display: inline; }
+  .narrow-frame { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { transition-duration: 1ms !important; animation-duration: 1ms !important; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="head">
+    <h1>变体一 · zcode 忠实复刻</h1>
+    <span class="tag">布局：卡片双行 + TurnTimer 头条</span>
+    <span class="tag">视觉：大圆角 + pill 工具栏 + 圆形 ink 发送</span>
+    <span class="tag">密度：全量外露</span>
+    <span class="tag">v2 返图：补上下文环等 5 项现状控件</span>
+  </div>
+  <div class="decl">
+    <b>三维自述</b> ｜ <b>布局结构</b>：TurnTimer 状态头条（现状浮岛第一行）→ textarea 区 → 底部工具栏；
+    工具栏位次与现状 SessionToolbar DOM 序 1:1——上下文环（最左第一项）→ 工作空间 pill → 模型 pill → 思考强度 pill → 权限 pill → + 附件 →（运行态：中断钮）→ 右端圆形发送钮；
+    <b>视觉语言</b>：卡片 var(--radius-lg)+4px 大圆角 + 工具栏 pill 化（--radius-pill）+ 44px 圆形 ink 发送钮；
+    <b>信息密度</b>：权限文案、模型名、工作空间、思考档名全量外露。<br />
+    <b>对齐现状</b>：斜杠菜单自卡片上方弹出（现状 .slash-menu bottom:100%）；附件 chip 在卡内顶部（现状 AttachmentDraftList 于浮岛内部上方）；
+    权限四档文案逐字取自 ConfigPage.vue:1190-1193；思考强度七档/foot 逐字取自 ThinkingLevelSelector.vue:25-33/140-142；
+    TurnTimer 文案逐字取自 TurnTimer.vue:57-75；token 全部引自 variables.css（:root 镜像块）。
+    <span class="v2-note">v2 返图登记（2026-11-22）：用户选型变体一后返图——补画漏掉的「上下文环」（现状工具栏最左第一项）并补入工作空间/思考强度/TurnTimer/中断钮四项常驻控件，工具栏位次改为现状 DOM 序 1:1（+ 附件随现状移至权限右侧）；中断钮混黑基准 #000000（现状 SessionToolbar.vue:421）镜像为 --abort-mix-black 申报。</span>
+    <span class="skill-trace">ui-ux-pro-max skill 调用留痕：2026-11-22 经 Skill 工具加载并应用其规则（SVG stroke 图标 / 语义 token / 对比度实测 muted 对 bg 4.80 · 对 panel 4.63 均过 AA / reduced-motion）；search.py 检索因本机无 Python 3 运行时未执行（fallback 至 SKILL.md 内建规则表，如实申报）。</span>
+  </div>
+
+  <!-- ═══ 图①：默认态（空输入 → 发送 disabled；TurnTimer 完成态行） ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">1</span>默认态 · 空输入<span class="map">发送钮 disabled（对齐 ChatInput.vue:396 disabled 表达式）；TurnTimer 完成态行（现状 v-else-if="lastMeta" 常驻，TurnTimer.vue:68-75）；工具栏位次=现状 DOM 序：上下文环→工作空间→模型→思考强度→权限→+ 附件→发送</span></div>
+    <div class="stage">
+      <div class="transcript">
+        <div class="bubble"><span class="who">Claude Code</span>已读取 ChatInput.vue 全文（590 行）。autoResize 的 border-box 补偿逻辑在 249-260 行。</div>
+        <div class="bubble user"><span class="who">我</span>帮我把这部分整理成注释。</div>
+      </div>
+      <div class="composer">
+        <!-- TurnTimer 完成态（现状 TurnTimer.vue:68-75 逐字：本次回复 + 耗时 + · 结束于） -->
+        <div class="turn-timer turn-timer--done" role="status" title="上次回复的耗时与结束时间（已持久化）">
+          <span class="turn-timer__lead">
+            <span class="turn-timer__done-dot" aria-hidden="true"></span>
+            <span class="turn-timer__label">本次回复</span>
+            <span class="turn-timer__time">2.4s</span>
+            <span class="turn-timer__end">· 结束于 14:32:07</span>
+          </span>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="1" placeholder="输入消息；输入 / 联想命令、@ 引用文件（↑↓ 选择，回车确认）"></textarea>
+        </div>
+        <div class="toolbar">
+          <!-- 上下文环：现状工具栏最左第一项（ContextButton.vue 1:1；环 46%，title 逐字） -->
+          <button type="button" class="ctx-btn" title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <!-- 工作空间 pill（现状 SessionToolbar.vue:179-192，data-testid="workspace-trigger"） -->
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <!-- 模型 pill：供应商 / 模型完整名 + 「默认」tag + 下拉箭头（硬约束 5；形态对齐 ProviderModelSelector a2） -->
+          <button type="button" class="ctl" data-testid="model-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <!-- 思考强度 pill（现状 ThinkingLevelSelector.vue:100-113，data-testid="thinking-trigger"；「中」=跟随全局默认档名） -->
+          <button type="button" class="ctl" data-testid="thinking-trigger" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <!-- 权限 pill：盾牌 + 当前模式完整文案（ConfigPage.vue:1190 逐字）+ 下拉箭头（硬约束 4） -->
+          <button type="button" class="ctl" data-testid="permission-trigger" title="本会话 Claude Code 权限模式（默认模式）；运行中切换即时生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <!-- 「+」附件入口（现状位次：权限右侧，SessionToolbar.vue:293-305） -->
+          <button type="button" class="plus-btn" title="添加文件、图片；也支持粘贴和拖入" aria-label="添加附件">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" disabled title="发送（Enter）" aria-label="发送">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+          </button>
+        </div>
+      </div>
+      <div class="kbd-hint">Enter 发送 · Shift+Enter 换行（对齐 ChatInput.vue:168-173 键位语义）</div>
+    </div>
+  </div>
+
+  <!-- ═══ 图②：激活态（多行 3 行 + 附件 chips → 发送 active） ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">2</span>激活态 · 多行自增（3 行）+ 附件 chips<span class="map">附件 chip 列表在卡内顶部（对齐 AttachmentDraftList，ChatPage.vue:605）；发送钮 active；autoResize 8 行封顶（ChatInput.vue:545）；本帧无 TurnTimer 行（现状 v-if：sending 且无 lastMeta 时不渲染，TurnTimer.vue:56-76）</span></div>
+    <div class="stage">
+      <div class="transcript">
+        <div class="bubble"><span class="who">Claude Code</span>已完成首轮检索，共改动 3 个文件。</div>
+      </div>
+      <div class="composer">
+        <div class="att-row">
+          <div class="att-card">
+            <span class="att-thumb" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="M21 15l-4.5-4.5L9 18" /></svg></span>
+            <span class="att-name">screenshot-1121.png</span>
+            <button type="button" class="att-remove" title="移除 screenshot-1121.png" aria-label="移除附件">×</button>
+          </div>
+          <div class="att-card">
+            <span class="att-badge" aria-hidden="true">TXT</span>
+            <span class="att-meta"><span class="att-name">requirements.txt</span><span class="att-size">2.4 KB</span></span>
+            <button type="button" class="att-remove" title="移除 requirements.txt" aria-label="移除附件">×</button>
+          </div>
+          <div class="att-card">
+            <span class="att-badge" aria-hidden="true">PNG</span>
+            <span class="att-meta"><span class="att-name">架构图.png</span><span class="att-size">312.8 KB</span></span>
+            <button type="button" class="att-remove" title="移除 架构图.png" aria-label="移除附件">×</button>
+          </div>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="3">帮我分析 src/renderer/components/chat/ChatInput.vue 的 autoResize 实现，
+把 8 行封顶的 max-height 计算整理成注释，
+并确认 border-box 补偿在三档字号下都不出竖向滚动条。</textarea>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="ctx-btn" title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl" data-testid="thinking-trigger" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" title="添加文件、图片；也支持粘贴和拖入" aria-label="添加附件">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" title="发送（Enter）" aria-label="发送">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图③：上下文环 hover popover 帧 ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">3</span>上下文环 hover popover 帧<span class="map">现状 ContextButton.vue 1:1：环 46%（dasharray「46 54」，rotate -90deg）；popover 恰三行（已用上下文/全部上下文/占比，mono tabular-nums，ContextButton.vue:179-183 逐字）；长按 1 秒压缩=红色 danger 进度环（本帧未按住故不显示）</span></div>
+    <div class="stage headroom-ctx">
+      <div class="composer">
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="1" placeholder="输入消息；输入 / 联想命令、@ 引用文件（↑↓ 选择，回车确认）"></textarea>
+        </div>
+        <div class="toolbar">
+          <span class="ctx-btn" style="border-color: var(--color-accent);">
+            <!-- popover：现状 ContextButton.vue:179-183 三行逐字 -->
+            <span class="ctx-popover">
+              <span class="ctx-row"><span>已用上下文</span><code>91.0k</code></span>
+              <span class="ctx-row"><span>全部上下文</span><code>200.0k</code></span>
+              <span class="ctx-row ctx-row--pct"><span>占比</span><code>46%</code></span>
+            </span>
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </span>
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl" data-testid="thinking-trigger" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" disabled aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图④：思考强度下拉展开帧 ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">4</span>思考强度 pill 下拉展开态<span class="map">现状 ThinkingLevelSelector.vue 1:1：七档逐字（LEVELS:25-33）；「自动」档菜单显示「默认：中」（:124 逐字）；「工作流」Beta chip（fail 语义族，:254-265）；foot 两行逐字（:140-142「下一条消息起生效」「上回合实际生效：极限」）</span></div>
+    <div class="stage headroom-tl">
+      <div class="composer">
+        <div class="tl-menu">
+          <button type="button" class="tl-item tl-item--active">
+            <span class="tl-item__label">默认：中</span>
+            <svg class="tl-item__check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>
+          </button>
+          <button type="button" class="tl-item"><span class="tl-item__label">低</span></button>
+          <button type="button" class="tl-item"><span class="tl-item__label">中</span></button>
+          <button type="button" class="tl-item"><span class="tl-item__label">高</span></button>
+          <button type="button" class="tl-item"><span class="tl-item__label">超高</span></button>
+          <button type="button" class="tl-item"><span class="tl-item__label">极限</span></button>
+          <button type="button" class="tl-item"><span class="tl-item__label">工作流<span class="tl-item__beta">Beta</span></span></button>
+          <div class="tl-foot">下一条消息起生效</div>
+          <div class="tl-foot">上回合实际生效：极限</div>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="1" placeholder="输入消息；输入 / 联想命令、@ 引用文件（↑↓ 选择，回车确认）"></textarea>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="ctx-btn" title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl" data-testid="thinking-trigger" style="border-color: var(--color-accent);" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" disabled aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图⑤：斜杠菜单弹出态（菜单在卡片上方，对齐现状 bottom:100%） ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">5</span>斜杠菜单弹出态<span class="map">菜单自卡片上方弹出（对齐现状 .slash-menu bottom:100%，ChatInput.vue:413）；每页 5 项（COMMANDS_PAGE_SIZE，ChatInput.vue:35）；origin 徽章/provenance 文案逐字对齐 74-79/375-379</span></div>
+    <div class="stage headroom-slash">
+      <div class="composer">
+        <!-- 斜杠菜单：结构/类名/testid 对齐现状；本图将 role="listbox" 简化挂在外层容器，
+             现状实际挂内层 .slash-menu__list（ChatInput.vue:338-343，E-C3 结构），P7-B 实现以现状 ARIA 分层为准 -->
+        <div class="slash-menu" data-testid="slash-menu" role="listbox" aria-label="斜杠命令联想">
+          <div class="slash-menu__item active" data-testid="slash-menu-item" role="option" aria-selected="true" data-command="compact">
+            <span class="slash-menu__row"><span class="slash-menu__name">/compact</span><span class="slash-menu__origin" data-testid="slash-menu-origin" data-origin="builtin">Claude Code 内置</span></span>
+            <span class="slash-menu__desc">压缩会话历史，释放上下文空间</span>
+          </div>
+          <div class="slash-menu__item" data-testid="slash-menu-item" role="option" aria-selected="false" data-command="init">
+            <span class="slash-menu__row"><span class="slash-menu__name">/init</span><span class="slash-menu__origin" data-testid="slash-menu-origin" data-origin="builtin">Claude Code 内置</span></span>
+            <span class="slash-menu__desc">扫描仓库并生成 AGENTS.md 记忆文件</span>
+          </div>
+          <div class="slash-menu__item" data-testid="slash-menu-item" role="option" aria-selected="false" data-command="review">
+            <span class="slash-menu__row"><span class="slash-menu__name">/review</span><span class="slash-menu__origin" data-testid="slash-menu-origin" data-origin="user-skill">用户 Skill</span></span>
+            <span class="slash-menu__desc">审查当前改动并输出分级评审报告</span>
+          </div>
+          <div class="slash-menu__item" data-testid="slash-menu-item" role="option" aria-selected="false" data-command="plan-loop">
+            <span class="slash-menu__row"><span class="slash-menu__name">/plan-loop</span><span class="slash-menu__origin" data-testid="slash-menu-origin" data-origin="project">项目命令</span></span>
+            <span class="slash-menu__desc">进入计划-实施-验收循环工作流</span>
+          </div>
+          <div class="slash-menu__item" data-testid="slash-menu-item" role="option" aria-selected="false" data-command="mcp">
+            <span class="slash-menu__row"><span class="slash-menu__name">/mcp</span><span class="slash-menu__origin" data-testid="slash-menu-origin" data-origin="plugin">插件命令</span></span>
+            <span class="slash-menu__desc">查看已接入的 MCP 服务器与工具</span>
+          </div>
+          <div class="slash-menu__hint">可能不是最新</div>
+          <div class="slash-menu__provenance"><span>1 个命令来源未知（待分类，未作为内置命令验证）</span><span>·</span><span>2 个隐藏命令（已移除/内部）</span></div>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="1">/</textarea>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="ctx-btn" title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl" data-testid="thinking-trigger" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图⑥：权限下拉展开态（四档文案逐字 ConfigPage.vue:1190-1193） ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">6</span>权限 pill 下拉展开态<span class="map">四档菜单项文案逐字取自 ConfigPage.vue:1190-1193；foot 逐字取自 SessionToolbar.vue:286；向上弹出对齐现状 .perm-menu bottom:calc(100%+0.25rem)（SessionToolbar.vue:583）</span></div>
+    <div class="stage headroom-menu">
+      <div class="composer">
+        <div class="perm-menu">
+          <button type="button" class="perm-item perm-item--active">
+            <span class="perm-item__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg></span>
+            <span class="perm-item__label">默认模式<span class="sub">（需手动确认危险操作）</span></span>
+            <svg class="perm-item__check" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>
+          </button>
+          <button type="button" class="perm-item">
+            <span class="perm-item__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg></span>
+            <span class="perm-item__label">规划模式<span class="sub">（只规划，审批后执行）</span></span>
+          </button>
+          <button type="button" class="perm-item">
+            <span class="perm-item__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" /></svg></span>
+            <span class="perm-item__label">代理模式<span class="sub">（自动提交文件编辑）</span></span>
+          </button>
+          <button type="button" class="perm-item">
+            <span class="perm-item__icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 16.5 5 19l2.5-.5M14.5 4.5 18 8M12 2c3.5 2 6 5.5 6 10 0 2-1 4-1 4H7s-1-2-1-4c0-4.5 2.5-8 6-10z" /></svg></span>
+            <span class="perm-item__label">自动模式<span class="sub">（越过所有权限检查，谨慎使用）</span></span>
+          </button>
+          <div class="perm-foot">对切换后新发起的工具请求即时生效；bypass 需下一条消息生效</div>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="1" placeholder="输入消息；输入 / 联想命令、@ 引用文件（↑↓ 选择，回车确认）"></textarea>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="ctx-btn" title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl" data-testid="thinking-trigger" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger" style="border-color: var(--color-accent);">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" disabled aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图⑦：模型下拉展开态（向上双列级联，对齐 ProviderModelSelector a2 形态） ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">7</span>模型 pill 下拉展开态<span class="map">向上双列级联（供应商列 + 模型列），对齐现状 ProviderModelSelector（prototypes/session-model-selector-a2.html 为 1:1 基准）；模型名 mono 字体对齐现状 .model-trigger__model</span></div>
+    <div class="stage headroom-cascade">
+      <div class="composer">
+        <div class="cascade">
+          <div class="menu providers">
+            <div class="menu-head"><span>供应商</span><b>6 个</b></div>
+            <div class="scroll" role="listbox" aria-label="供应商">
+              <button type="button" class="item"><span class="item-name">BigModel</span><span class="count">3</span><span class="arrow">›</span></button>
+              <button type="button" class="item active"><span class="item-name">sub2api</span><span class="count">7</span><span class="check">✓ ›</span></button>
+              <button type="button" class="item"><span class="item-name">Anthropic 官方</span><span class="count">6</span><span class="arrow">›</span></button>
+              <button type="button" class="item"><span class="item-name">智谱 GLM</span><span class="count">12</span><span class="arrow">›</span></button>
+            </div>
+            <div class="foot">设置中管理供应商</div>
+          </div>
+          <div class="menu models">
+            <div class="menu-head"><span>sub2api</span><b>7 个模型</b></div>
+            <div class="scroll" role="listbox" aria-label="模型">
+              <button type="button" class="item active"><span class="model-id2">gpt-5.6-sol</span><span class="check">✓</span></button>
+              <button type="button" class="item"><span class="model-id2">gpt-5.6-pro</span><span class="model-meta">256k</span></button>
+              <button type="button" class="item"><span class="model-id2">gpt-5.5</span><span class="model-meta">128k</span></button>
+              <button type="button" class="item"><span class="model-id2">claude-sonnet-4-6</span><span class="model-meta">200k</span></button>
+            </div>
+            <div class="foot">下一条消息起生效</div>
+          </div>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="1" placeholder="输入消息；输入 / 联想命令、@ 引用文件（↑↓ 选择，回车确认）"></textarea>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="ctx-btn" title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger" style="border-color: var(--color-accent);">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl" data-testid="thinking-trigger" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" disabled aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图⑧：「+」附件弹层示意 ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">8</span>「+」附件弹层示意<span class="map">「+」视觉为 + 图标钮（硬约束 3；现状位次在权限右侧）；弹层项 title 文案对齐现状 SessionToolbar.vue:298「添加文件、图片；也支持粘贴和拖入」；实际选择经 onPickAttachments（ChatPage.vue:324-346）</span></div>
+    <div class="stage headroom-plus">
+      <div class="composer">
+        <div class="plus-menu">
+          <button type="button" class="item">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6" /></svg>
+            选择文件…
+          </button>
+          <button type="button" class="item">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="8.5" cy="10" r="1.5" /><path d="M21 15l-4.5-4.5L9 18" /></svg>
+            选择图片…
+          </button>
+          <div class="hint">也支持直接粘贴与拖入（由 ChatPage 容器统一处理）</div>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="1" placeholder="输入消息；输入 / 联想命令、@ 引用文件（↑↓ 选择，回车确认）"></textarea>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="ctx-btn" title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl" data-testid="thinking-trigger" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" style="border-color: var(--color-accent);" aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" disabled aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图⑨：运行态（TurnTimer 运行中 + 中断钮） ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">9</span>运行态 · TurnTimer 运行中 + 中断钮<span class="map">TurnTimer 运行中（现状 TurnTimer.vue:57-67 逐字：呼吸点+正在回复+tabular 计时+阶段徽章「工具执行中」info 点）；工具栏全列 disabled（现状 sending 传参）；中断钮 danger 实底「■ 中断」+ 长按 1 秒进度填充（图示 holding 45%，SessionToolbar.vue:309-327 1:1）；上下文环思考呼吸态（ContextButton.vue:214-221）</span></div>
+    <div class="stage">
+      <div class="transcript">
+        <div class="bubble user"><span class="who">我</span>运行测试并修复失败的用例。</div>
+      </div>
+      <div class="composer">
+        <!-- TurnTimer 运行中（现状 TurnTimer.vue:57-67） -->
+        <div class="turn-timer" role="status" aria-live="polite" title="本次回复进行中（主线程计算时间）">
+          <span class="turn-timer__lead">
+            <span class="turn-timer__live" aria-hidden="true"></span>
+            <span class="turn-timer__label">正在回复</span>
+            <span class="turn-timer__time">12.4s</span>
+          </span>
+          <span class="turn-timer__phase turn-timer__phase--tool-running">
+            <span class="turn-timer__pdot" aria-hidden="true"></span>
+            工具执行中
+          </span>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="1" disabled placeholder="输入消息；输入 / 联想命令、@ 引用文件（↑↓ 选择，回车确认）"></textarea>
+        </div>
+        <div class="toolbar">
+          <!-- 上下文环：思考呼吸态（现状 ctx__btn--thinking：accent 55% 描边 + halo）+ sending disabled -->
+          <button type="button" class="ctx-btn ctx-btn--thinking" disabled title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <button type="button" class="ctl" data-testid="workspace-trigger" disabled title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <span class="default-tag">默认</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl ctl--custom" data-testid="thinking-trigger" disabled title="思考强度：极限（最高强度，成本最高）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            极限
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" disabled aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <!-- 运行态右端组：中断（现状 SessionToolbar.vue:309-327：仅发送中显示；图示 holding 45% 进度填充 + holding 光环）+ disabled 发送，成组贴右 -->
+          <span class="toolbar__end">
+            <button type="button" class="abort-pill abort-pill--holding" title="长按 1 秒中断" aria-label="长按 1 秒中断">
+              <span class="abort-pill__fill" style="width: 45%;" aria-hidden="true"></span>
+              <span class="abort-pill__label">■ 中断</span>
+            </button>
+            <button type="button" class="send-btn" data-testid="chat-send-button" disabled title="发送（Enter）" aria-label="发送">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+            </button>
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图⑩：发送钮双态对照（硬约束 2 显式并排） ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">10</span>发送钮双态对照<span class="map">空输入 disabled（opacity .5，对齐 ChatInput.vue:575-577）｜ 有内容/附件 active（ink 实底）；testid 均为 chat-send-button</span></div>
+    <div class="stage">
+      <div class="state-strip">
+        <span class="state-cell">
+          <button type="button" class="send-btn" data-testid="chat-send-button" disabled aria-label="发送（禁用态）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+          空输入 · 无附件 <span class="chip">disabled</span>
+        </span>
+        <span class="state-cell">
+          <button type="button" class="send-btn" data-testid="chat-send-button" aria-label="发送（可用态）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+          有内容 / 有附件 <span class="chip">active</span>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 图⑪：窄窗（<900px）降级示意 ═══ -->
+  <div class="figure">
+    <div class="fig-label"><span class="no">11</span>窄窗降级示意（&lt;900px）<span class="map">工具栏换行（位次保持现状 DOM 序）、权限 pill 收起括号说明仅存档名、模型 pill 截断；真实 @media (max-width: 899px) 规则同步内置于本页</span></div>
+    <div class="stage">
+      <div class="composer narrow-frame">
+        <div class="turn-timer turn-timer--done" role="status" title="上次回复的耗时与结束时间（已持久化）">
+          <span class="turn-timer__lead">
+            <span class="turn-timer__done-dot" aria-hidden="true"></span>
+            <span class="turn-timer__label">本次回复</span>
+            <span class="turn-timer__time">2.4s</span>
+            <span class="turn-timer__end">· 结束于 14:32:07</span>
+          </span>
+        </div>
+        <div class="input-zone">
+          <textarea data-testid="chat-input-textarea" rows="2">窄窗下降级：工具栏 wrap 换行，
+pill 按 min-width 收缩。</textarea>
+        </div>
+        <div class="toolbar">
+          <button type="button" class="ctx-btn" title="上下文已用 46%，长按 1 秒压缩" aria-label="上下文占用环">
+            <svg class="ctx-ring" viewBox="0 0 36 36" aria-hidden="true">
+              <circle class="ctx-ring__bg" cx="18" cy="18" r="15.915" />
+              <circle class="ctx-ring__fg" cx="18" cy="18" r="15.915" stroke-dasharray="46 54" />
+            </svg>
+          </button>
+          <button type="button" class="ctl" data-testid="workspace-trigger" title="claude-link">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6l2-2h5l2 2h9v12H3z" /></svg>
+            claude-link
+          </button>
+          <button type="button" class="ctl" data-testid="model-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l2 5 5 2-5 2-2 5-2-5-5-2 5-2z" /></svg>
+            <span class="muted">sub2api</span><span class="sep">/</span><span class="model-id">gpt-5.6-sol</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="ctl" data-testid="thinking-trigger" title="思考强度：中（跟随全局默认）；下一条消息起生效">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6 M10 22h4 M15.09 14c.18-.98.65-1.74 1.41-2.5A4.65 4.65 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .23 2.23 1.5 3.5.76.76 1.23 1.52 1.41 2.5" /></svg>
+            中
+          </button>
+          <button type="button" class="ctl" data-testid="permission-trigger">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>
+            <span class="perm-full">默认模式<span class="muted">（需手动确认危险操作）</span></span><span class="perm-short">默认模式</span>
+            <svg class="caret" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="plus-btn" aria-label="添加附件"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg></button>
+          <button type="button" class="send-btn" data-testid="chat-send-button" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
